@@ -1741,7 +1741,7 @@ fn make_props_record_type_with_live(arena: &mut ParseArena, name: &str, loc: &Lo
             // Key prop is always optional in type declaration (OCaml: if label = "key" then ~optional:true)
             let is_optional = if nt.label == "key" { true } else { nt.is_optional };
 
-            let label_idx = arena.intern(&nt.label);
+            let label_idx = arena.push_string(nt.label.clone());
             LabelDeclaration {
                 pld_name: Loc { txt: label_idx, loc: nt.loc.clone() },
                 pld_mutable: MutableFlag::Immutable,

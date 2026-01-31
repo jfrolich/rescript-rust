@@ -302,7 +302,7 @@ fn parse_es6_arrow_type(p: &mut Parser<'_>, attrs: Attributes) -> CoreType {
         p.expect(Token::Colon);
 
         let typ = parse_typ_expr_inner(p, false);
-        let name_idx = p.arena_mut().intern_string(&name);
+        let name_idx = p.arena_mut().push_string(name);
         let mut lbl = ArgLabel::Labelled(Located::new(name_idx, name_loc));
 
         // Optional labeled args: `~x: t=?`
@@ -425,7 +425,7 @@ fn parse_attribute_id(p: &mut Parser<'_>) -> StrIdx {
         ));
         id = "error".to_string();
     }
-    p.arena_mut().intern(&id)
+    p.arena_mut().push_string(id.to_string())
 }
 
 /// Parse an attribute payload (in type context).
@@ -455,7 +455,7 @@ fn parse_atomic_typ_expr(p: &mut Parser<'_>, attrs: Attributes, es6_arrow: bool)
                 let name = name.clone();
                 p.next();
                 let var_loc = p.mk_loc_to_prev_end(&var_start);
-                let name_idx = p.arena_mut().intern(&name);
+                let name_idx = p.arena_mut().push_string(name.to_string());
                 vars.push(with_loc(name_idx, var_loc));
             }
 
@@ -490,7 +490,7 @@ fn parse_atomic_typ_expr(p: &mut Parser<'_>, attrs: Attributes, es6_arrow: bool)
                     }
                 };
                 let var_loc = p.mk_loc_to_prev_end(&var_start);
-                let name_idx = p.arena_mut().intern(&name);
+                let name_idx = p.arena_mut().push_string(name.to_string());
                 vars.push(with_loc(name_idx, var_loc));
             }
 
@@ -768,7 +768,7 @@ fn parse_function_type(p: &mut Parser<'_>, start_pos: crate::location::Position)
             let (name, name_loc) = parse_lident(p);
             p.expect(Token::Colon);
             let typ = parse_typ_expr(p);
-            let name_idx = p.arena_mut().intern_string(&name);
+            let name_idx = p.arena_mut().push_string(name);
             (ArgLabel::Labelled(Located::new(name_idx, name_loc)), typ)
         } else {
             let typ = parse_typ_expr(p);
@@ -1681,7 +1681,7 @@ fn parse_extension(p: &mut Parser<'_>) -> Extension {
     } else {
         let id = parts.join(".");
         let loc = p.mk_loc_to_prev_end(&id_start);
-        let idx = p.arena_mut().intern(&id);
+        let idx = p.arena_mut().push_string(id.to_string());
         with_loc(idx, loc)
     };
 

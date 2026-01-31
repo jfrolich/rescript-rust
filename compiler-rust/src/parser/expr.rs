@@ -1007,8 +1007,8 @@ fn parse_parameter(p: &mut Parser<'_>) -> Option<super::core::FundefParameter> {
         let tilde_pos = p.start_pos.clone();
         p.next();
         let (lbl_name, lbl_loc) = parse_lident(p);
-        // Intern the string to get a StrIdx for sharing with identifiers
-        let lbl_str_idx = p.arena_mut().intern_string(&lbl_name);
+        // Push the string (no deduplication) - user identifiers should not be shared
+        let lbl_str_idx = p.arena_mut().push_string(lbl_name.clone());
         // OCaml: label location is just the name, not including ~
         let lbl_located = Located::new(lbl_str_idx, lbl_loc);
         // OCaml: pattern var location includes ~ (from tilde_pos to end of name)
@@ -1017,7 +1017,8 @@ fn parse_parameter(p: &mut Parser<'_>) -> Option<super::core::FundefParameter> {
             Token::Comma | Token::Equal | Token::Rparen | Token::EqualGreater => {
                 // Just ~name
                 let loc = p.mk_loc_to_prev_end(&start_pos);
-                let pat = ast_helper::make_var_pat(p.arena_mut(), &lbl_name, loc);
+                let str_idx = p.arena_mut().push_string(lbl_name.clone());
+                let pat = ast_helper::make_var_pat(str_idx, loc);
                 (ArgLabel::Labelled(lbl_located), pat, None)
             }
             Token::Colon => {
@@ -1034,7 +1035,8 @@ fn parse_parameter(p: &mut Parser<'_>) -> Option<super::core::FundefParameter> {
                 } else {
                     p.mk_loc(&start_pos, &p.loc_end(name_loc_with_tilde))
                 };
-                let var_pat = ast_helper::make_var_pat(p.arena_mut(), &lbl_name, var_loc);
+                let str_idx = p.arena_mut().push_string(lbl_name.clone());
+                let var_pat = ast_helper::make_var_pat(str_idx, var_loc);
                 let pat = Pattern {
                     ppat_desc: PatternDesc::Ppat_constraint(Box::new(var_pat), typ),
                     ppat_loc: loc,
@@ -1050,7 +1052,8 @@ fn parse_parameter(p: &mut Parser<'_>) -> Option<super::core::FundefParameter> {
             }
             _ => {
                 let loc = p.mk_loc_to_prev_end(&start_pos);
-                let pat = ast_helper::make_var_pat(p.arena_mut(), &lbl_name, loc);
+                let str_idx = p.arena_mut().push_string(lbl_name.clone());
+                let pat = ast_helper::make_var_pat(str_idx, loc);
                 (ArgLabel::Labelled(lbl_located), pat, None)
             }
         };
@@ -1140,7 +1143,7 @@ fn parse_lident_list(p: &mut Parser<'_>) -> Vec<StringLoc> {
         let name = name.clone();
         let loc = p.mk_loc_current();
         p.next();
-        let str_idx = p.arena_mut().intern(&name);
+        let str_idx = p.arena_mut().push_string(name);
         lidents.push(with_loc(str_idx, loc));
     }
     lidents
@@ -1265,7 +1268,7 @@ fn parse_attribute_id(p: &mut Parser<'_>, start_pos: Position) -> StringLoc {
 
     let name = parts.join(".");
     let loc = p.mk_loc_to_prev_end(&start_pos);
-    let str_idx = p.arena_mut().intern(&name);
+    let str_idx = p.arena_mut().push_string(name);
     with_loc(str_idx, loc)
 }
 
@@ -1611,7 +1614,7 @@ pub fn parse_atomic_expr(p: &mut Parser<'_>) -> Expression {
             } else {
                 let id = parts.join(".");
                 let loc = p.mk_loc_to_prev_end(&id_start);
-                let str_idx = p.arena_mut().intern(&id);
+                let str_idx = p.arena_mut().push_string(id);
                 with_loc(str_idx, loc)
             };
 
@@ -2205,8 +2208,8 @@ fn parse_argument(p: &mut Parser<'_>) -> (ArgLabel, Expression) {
     if p.token == Token::Tilde {
         p.next();
         let (name, name_loc) = parse_lident(p);
-        // Intern the name to get a StrIdx - this will be shared with Longident::Lident for punning
-        let name_str_idx = p.arena_mut().intern_string(&name);
+        // Push the string (no deduplication) - user identifiers should not be shared
+        let name_str_idx = p.arena_mut().push_string(name.clone());
         let name_located = Located::new(name_str_idx, name_loc.clone());
 
         if p.token == Token::Equal {
@@ -2929,7 +2932,7 @@ fn parse_braced_arrow_ident(p: &mut Parser<'_>, start_pos: Position) -> Expressi
     let var_loc = pat_loc.clone();
 
     // Create the pattern with extended location
-    let str_idx = p.arena_mut().intern(&ident_name);
+    let str_idx = p.arena_mut().push_string(ident_name);
     let pat = Pattern {
         ppat_desc: PatternDesc::Ppat_var(with_loc(str_idx, var_loc)),
         ppat_loc: pat_loc,
@@ -3446,7 +3449,7 @@ fn parse_module_name(p: &mut Parser<'_>) -> Located<StrIdx> {
             let name = name.clone();
             let loc = p.mk_loc_current();
             p.next();
-            let str_idx = p.arena_mut().intern(&name);
+            let str_idx = p.arena_mut().push_string(name);
             with_loc(str_idx, loc)
         }
         _ => {
@@ -4455,7 +4458,7 @@ fn parse_jsx_props(p: &mut Parser<'_>) -> Vec<JsxProp> {
                         // Parse a single operand (not a full binary expression), so we don't consume the tag's `>`/`/>`.
                         parse_operand_expr(p, ExprContext::Ordinary)
                     };
-                    let name_idx = p.arena_mut().intern(&name);
+                    let name_idx = p.arena_mut().push_string(name);
                     props.push(JsxProp::Value {
                         name: with_loc(name_idx, name_loc),
                         optional,
@@ -4464,7 +4467,7 @@ fn parse_jsx_props(p: &mut Parser<'_>) -> Vec<JsxProp> {
                 } else {
                     // Punning
                     let optional = name.starts_with('?');
-                    let name_idx = p.arena_mut().intern(&name);
+                    let name_idx = p.arena_mut().push_string(name);
                     props.push(JsxProp::Punning {
                         optional,
                         name: with_loc(name_idx, name_loc),
@@ -4477,7 +4480,7 @@ fn parse_jsx_props(p: &mut Parser<'_>) -> Vec<JsxProp> {
                     let name = name.clone();
                     let name_loc = p.mk_loc_current();
                     p.next();
-                    let name_idx = p.arena_mut().intern(&name);
+                    let name_idx = p.arena_mut().push_string(name);
                     props.push(JsxProp::Punning {
                         optional: true,
                         name: with_loc(name_idx, name_loc),
@@ -4499,14 +4502,14 @@ fn parse_jsx_props(p: &mut Parser<'_>) -> Vec<JsxProp> {
                     } else {
                         parse_operand_expr(p, ExprContext::Ordinary)
                     };
-                    let name_idx = p.arena_mut().intern(&name);
+                    let name_idx = p.arena_mut().push_string(name.clone());
                     props.push(JsxProp::Value {
                         name: with_loc(name_idx, name_loc),
                         optional,
                         value,
                     });
                 } else {
-                    let name_idx = p.arena_mut().intern(&name);
+                    let name_idx = p.arena_mut().push_string(name);
                     props.push(JsxProp::Punning {
                         optional: false,
                         name: with_loc(name_idx, name_loc),

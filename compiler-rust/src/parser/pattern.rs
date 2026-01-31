@@ -93,7 +93,7 @@ fn parse_attribute_id(p: &mut Parser<'_>, start_pos: Position) -> Located<StrIdx
     }
 
     let loc = p.mk_loc_to_prev_end(&start_pos);
-    let str_idx = p.arena_mut().intern(&parts.join("."));
+    let str_idx = p.arena_mut().push_string(parts.join("."));
     with_loc(str_idx, loc)
 }
 
@@ -277,7 +277,7 @@ fn parse_single_pattern_with_alias(p: &mut Parser<'_>) -> Pattern {
             p.mk_loc_to_prev_end(&alias_start)
         };
         let loc = p.mk_loc_to_prev_end(&start_pos);
-        let name_idx = p.arena_mut().intern(&name);
+        let name_idx = p.arena_mut().push_string(name.to_string());
         pat = Pattern {
             ppat_desc: PatternDesc::Ppat_alias(Box::new(pat), with_loc(name_idx, name_with_attrs_loc)),
             ppat_loc: loc,
@@ -380,7 +380,7 @@ pub fn parse_alias_pattern(
                 let name = name.clone();
                 let loc = p.mk_loc_current();
                 p.next();
-                let str_idx = p.arena_mut().intern(&name);
+                let str_idx = p.arena_mut().push_string(name.to_string());
                 with_loc(str_idx, loc)
             }
             _ => {
@@ -471,8 +471,9 @@ fn parse_atomic_pattern(p: &mut Parser<'_>) -> Pattern {
                 // OCaml: alias name location is just the name, not the whole pattern
                 let alias_name_loc = p.mk_loc_to_prev_end(&alias_start);
                 let overall_loc = p.mk_loc_to_prev_end(&start_pos);
-                let inner = ast_helper::make_var_pat(p.arena_mut(), &name, loc);
-                let alias_idx = p.arena_mut().intern(&alias);
+                let name_idx = p.arena_mut().push_string(name);
+                let inner = ast_helper::make_var_pat(name_idx, loc);
+                let alias_idx = p.arena_mut().push_string(alias);
                 Pattern {
                     ppat_desc: PatternDesc::Ppat_alias(
                         Box::new(inner),
@@ -482,7 +483,8 @@ fn parse_atomic_pattern(p: &mut Parser<'_>) -> Pattern {
                     ppat_attributes: vec![],
                 }
             } else {
-                ast_helper::make_var_pat(p.arena_mut(), &name, loc)
+                let name_idx = p.arena_mut().push_string(name);
+                ast_helper::make_var_pat(name_idx, loc)
             }
         }
         Token::Uident(_) => parse_constructor_pattern(p),
@@ -503,7 +505,7 @@ fn parse_atomic_pattern(p: &mut Parser<'_>) -> Pattern {
             p.next();
             let loc = p.mk_loc_to_prev_end(&start_pos);
             let bool_str = if is_true { "true" } else { "false" };
-            let bool_str_idx = p.arena_mut().intern_string(bool_str);
+            let bool_str_idx = p.arena_mut().push_string(bool_str.to_string());
             let lid = Longident::Lident(bool_str_idx);
             let lid_idx = p.push_longident(lid);
             ast_helper::make_construct_pat(lid_idx, None, loc.clone(), loc)
@@ -561,7 +563,7 @@ fn parse_atomic_pattern(p: &mut Parser<'_>) -> Pattern {
                     let name = name.clone();
                     let loc = p.mk_loc_current();
                     p.next();
-                    let str_idx = p.arena_mut().intern(&name);
+                    let str_idx = p.arena_mut().push_string(name.to_string());
                     with_loc(str_idx, loc)
                 }
                 _ => {
@@ -1036,13 +1038,15 @@ fn parse_record_pattern(p: &mut Parser<'_>) -> Pattern {
             // field? (optional punning after field name - less common)
             p.next();
             let loc = p.mk_loc_to_prev_end(&field_start);
-            let pat = ast_helper::make_var_pat(p.arena_mut(), &pun_name, loc.clone());
+            let pun_name_idx = p.arena_mut().push_string(pun_name.clone());
+            let pat = ast_helper::make_var_pat(pun_name_idx, loc.clone());
             (with_loc(lid_idx, loc), pat, true)
         } else {
             // Punning: field is same as variable (use last identifier in the path)
             // For optional punned fields, the pattern location is just the identifier (using pat_start)
             let loc = p.mk_loc_to_prev_end(&pat_start);
-            let pat = ast_helper::make_var_pat(p.arena_mut(), &pun_name, loc.clone());
+            let pun_name_idx = p.arena_mut().push_string(pun_name);
+            let pat = ast_helper::make_var_pat(pun_name_idx, loc.clone());
             (with_loc(lid_idx, loc), pat, opt_punning)
         };
 
@@ -1151,7 +1155,7 @@ fn parse_extension_pattern(p: &mut Parser<'_>, start_pos: crate::location::Posit
         mknoloc(str_idx)
     } else {
         let joined = parts.join(".");
-        let str_idx = p.arena_mut().intern(&joined);
+        let str_idx = p.arena_mut().push_string(joined);
         with_loc(str_idx, p.mk_loc_to_prev_end(&id_start))
     };
 

@@ -331,7 +331,7 @@ pub fn parse_structure_item(p: &mut Parser<'_>) -> Option<StructureItem> {
                 }
             }
             let id_name = parts.join(".");
-            let str_idx = p.arena_mut().intern(&id_name);
+            let str_idx = p.arena_mut().push_string(id_name.to_string());
             let id = with_loc(str_idx, p.mk_loc_to_prev_end(&id_start));
             // Parse optional payload
             let payload = if p.token == Token::Lparen {
@@ -966,7 +966,7 @@ fn parse_functor_arg(p: &mut Parser<'_>) -> Option<FunctorArg> {
                     p.next();
                     let mod_type = parse_module_type(p);
                     let loc = p.mk_loc(&start_pos, &ident_end_pos);
-                    let str_idx = p.arena_mut().intern(&ident);
+                    let str_idx = p.arena_mut().push_string(ident.to_string());
                     Some(FunctorArg {
                         attrs,
                         name: with_loc(str_idx, loc),
@@ -1363,7 +1363,7 @@ fn parse_paren_functor_module_type(p: &mut Parser<'_>) -> ModuleType {
                                 let n = n.clone();
                                 let loc = p.mk_loc_current();
                                 p.next();
-                                let str_idx = p.arena_mut().intern(&n);
+                                let str_idx = p.arena_mut().push_string(n.to_string());
                                 with_loc(str_idx, loc)
                             }
                             _ => mknoloc(p.arena_mut().intern("_")),
@@ -1635,7 +1635,7 @@ fn parse_with_constraint(p: &mut Parser<'_>) -> Option<WithConstraint> {
                 cstrs.push((var, cstr_typ, p.mk_loc_to_prev_end(&cstr_start)));
             }
 
-            let type_name_idx = p.arena_mut().intern(&type_name);
+            let type_name_idx = p.arena_mut().push_string(type_name.to_string());
             let decl = TypeDeclaration {
                 // OCaml uses the full longident location for the type name location
                 ptype_name: with_loc(type_name_idx, type_loc.clone()),
@@ -2218,7 +2218,7 @@ fn parse_type_declaration_with_context(
             let n = n.clone();
             let loc = p.mk_loc_current();
             p.next();
-            let str_idx = p.arena_mut().intern(&n);
+            let str_idx = p.arena_mut().push_string(n.to_string());
             with_loc(str_idx, loc)
         }
         _ => {
@@ -3087,7 +3087,7 @@ fn parse_constructor_impl(p: &mut Parser<'_>, start_pos: Position) -> Option<Con
             let n = n.clone();
             let loc = p.mk_loc_current();
             p.next();
-            let n_idx = p.arena_mut().intern(&n);
+            let n_idx = p.arena_mut().push_string(n.to_string());
             with_loc(n_idx, loc)
         }
         _ => {
@@ -3318,7 +3318,7 @@ fn parse_label_declaration(
             let n = n.clone();
             let loc = p.mk_loc_current();
             p.next();
-            let n_idx = p.arena_mut().intern(&n);
+            let n_idx = p.arena_mut().push_string(n.to_string());
             with_loc(n_idx, loc)
         }
         _ => {
@@ -3416,7 +3416,7 @@ fn parse_label_declaration(
                 .map(|idx| p.arena().get_string(*idx))
                 .collect::<Vec<_>>()
                 .join(".");
-            let inline_type_idx = p.arena_mut().intern(&inline_type_name);
+            let inline_type_idx = p.arena_mut().push_string(inline_type_name.to_string());
 
             // Register this inline type (insert at front for correct order)
             inline_ctx.borrow_mut().found_inline_types.insert(0, (
@@ -3473,7 +3473,7 @@ fn parse_value_description(
             let n = n.clone();
             let loc = p.mk_loc_current();
             p.next();
-            let n_idx = p.arena_mut().intern(&n);
+            let n_idx = p.arena_mut().push_string(n.to_string());
             with_loc(n_idx, loc)
         }
         Token::String(s) => {
@@ -3481,7 +3481,7 @@ fn parse_value_description(
             let n = format!("\"{}\"", s);
             let loc = p.mk_loc_current();
             p.next();
-            let n_idx = p.arena_mut().intern(&n);
+            let n_idx = p.arena_mut().push_string(n);
             with_loc(n_idx, loc)
         }
         _ => {
@@ -3597,7 +3597,7 @@ fn parse_module_definition(p: &mut Parser<'_>, module_start: Position, attrs: At
                 let n = n.clone();
                 let loc = p.mk_loc_current();
                 p.next();
-                let n_idx = p.arena_mut().intern(&n);
+                let n_idx = p.arena_mut().push_string(n.to_string());
                 with_loc(n_idx, loc)
             }
             _ => {
@@ -3713,7 +3713,7 @@ fn parse_module_declaration(p: &mut Parser<'_>, outer_attrs: Attributes, start_p
     let name = match &p.token {
         Token::Uident(n) => {
             let n_clone = n.clone();
-            let n_idx = p.arena_mut().intern(&n_clone);
+            let n_idx = p.arena_mut().push_string(n_clone);
             let loc = p.mk_loc_current();
             p.next();
             with_loc(n_idx, loc)
@@ -3825,7 +3825,7 @@ fn parse_module_type_declaration(p: &mut Parser<'_>, outer_attrs: Attributes, in
     let name = match &p.token {
         Token::Uident(n) | Token::Lident(n) => {
             let n_clone = n.clone();
-            let n_idx = p.arena_mut().intern(&n_clone);
+            let n_idx = p.arena_mut().push_string(n_clone);
             let loc = p.mk_loc_current();
             p.next();
             with_loc(n_idx, loc)
@@ -3914,7 +3914,7 @@ fn parse_attribute_body(p: &mut Parser<'_>, start_pos: Position) -> Attribute {
     }
 
     let name = parts.join(".");
-    let name_idx = p.arena_mut().intern(&name);
+    let name_idx = p.arena_mut().push_string(name.to_string());
     let name_loc = p.mk_loc_to_prev_end(&start_pos);
 
     // Parse optional payload
@@ -4083,7 +4083,7 @@ fn parse_extension(p: &mut Parser<'_>) -> Extension {
         mknoloc(error_idx)
     } else {
         let id_str = parts.join(".");
-        let id_idx = p.arena_mut().intern(&id_str);
+        let id_idx = p.arena_mut().push_string(id_str.to_string());
         with_loc(id_idx, p.mk_loc_to_prev_end(&id_start))
     };
 

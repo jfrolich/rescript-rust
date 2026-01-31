@@ -4,7 +4,7 @@
 //! stream into an AST. It mirrors `res_core.ml` from the OCaml implementation.
 
 use crate::location::Position;
-use crate::parse_arena::{LocIdx, ParseArena};
+use crate::parse_arena::{LocIdx, ParseArena, StrIdx};
 
 use super::ast::*;
 use super::grammar;
@@ -514,9 +514,13 @@ pub mod ast_helper {
     }
 
     /// Create a variable pattern.
-    pub fn make_var_pat(arena: &mut ParseArena, name: &str, loc: Location) -> Pattern {
-        let str_idx = arena.intern(name);
-        make_pat(PatternDesc::Ppat_var(with_loc(str_idx, loc)), loc)
+    /// The caller should push the string to the arena first using `arena.push_string()`.
+    pub fn make_var_pat(str_idx: StrIdx, loc: LocIdx) -> Pattern {
+        Pattern {
+            ppat_desc: PatternDesc::Ppat_var(with_loc(str_idx, loc)),
+            ppat_loc: loc,
+            ppat_attributes: vec![],
+        }
     }
 
     /// Create a constructor pattern.
@@ -997,8 +1001,10 @@ mod tests {
 
     #[test]
     fn test_ast_helper_make_var_pat() {
+        let mut arena = crate::parse_arena::ParseArena::new();
+        let str_idx = arena.push_string("x".to_string());
         let loc = LocIdx::none();
-        let pat = ast_helper::make_var_pat("x".to_string(), loc);
+        let pat = ast_helper::make_var_pat(str_idx, loc);
         assert!(matches!(pat.ppat_desc, PatternDesc::Ppat_var(_)));
     }
 
