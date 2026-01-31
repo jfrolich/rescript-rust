@@ -25,7 +25,8 @@ use crate::parser::ast::{
 };
 use crate::parser::longident::Longident;
 use crate::types::{
-    ConstructorDescription, LabelDescription, Path, RowDesc, TypeExprRef, ValueDescription,
+    ConstructorDescription, LabelDescription, Path, RowDesc, TypeExprRef,
+    ValueDescription as TypesValueDescription,
 };
 
 /// A located value (convenience alias).
@@ -175,7 +176,7 @@ pub enum ExpExtra {
 #[derive(Debug, Clone)]
 pub enum ExpressionDesc {
     /// Identifier: `x`, `M.x`.
-    Texp_ident(Path, Loc<LidentIdx>, ValueDescription),
+    Texp_ident(Path, Loc<LidentIdx>, TypesValueDescription),
 
     /// Constant: `1`, `'a'`, `"hello"`, `1.0`.
     Texp_constant(Constant),
@@ -502,17 +503,83 @@ pub enum ModuleExprDesc {
     Tmod_unpack(Expression, ModuleType),
 }
 
-/// Module type (placeholder - full definition in decl.rs).
-#[derive(Debug, Clone, Default)]
+/// Module type in the typed tree.
+#[derive(Debug, Clone)]
 pub struct ModuleType {
-    // Placeholder - actual module type comes from decl.rs
-    _placeholder: (),
+    /// Module type descriptor.
+    pub mty_desc: ModuleTypeDesc,
+    /// Location.
+    pub mty_loc: LocIdx,
+    /// Attributes.
+    pub mty_attributes: Attributes,
 }
 
 impl ModuleType {
-    /// Create a new placeholder module type.
+    /// Create a new placeholder module type (for backwards compatibility).
     pub fn placeholder() -> Self {
-        Self { _placeholder: () }
+        Self {
+            mty_desc: ModuleTypeDesc::Tmty_signature(Signature::empty()),
+            mty_loc: LocIdx(0),
+            mty_attributes: vec![],
+        }
+    }
+
+    /// Create a new module type with the given descriptor.
+    pub fn new(desc: ModuleTypeDesc, loc: LocIdx, attrs: Attributes) -> Self {
+        Self {
+            mty_desc: desc,
+            mty_loc: loc,
+            mty_attributes: attrs,
+        }
+    }
+}
+
+/// Module type descriptor.
+#[derive(Debug, Clone)]
+pub enum ModuleTypeDesc {
+    /// Named module type: `module type of M`.
+    Tmty_ident(Path, Loc<LidentIdx>),
+    /// Signature: `sig ... end`.
+    Tmty_signature(Signature),
+    /// Functor: `functor (X: MT1) -> MT2`.
+    Tmty_functor(Ident, Loc<String>, Option<Box<ModuleType>>, Box<ModuleType>),
+    /// With constraint: `MT with ...`.
+    Tmty_with(Box<ModuleType>, Vec<(Path, Loc<LidentIdx>, WithConstraint)>),
+    /// Typeof: `module type of ME`.
+    Tmty_typeof(Box<ModuleExpr>),
+    /// Alias: `module type = P`.
+    Tmty_alias(Path, Loc<LidentIdx>),
+}
+
+/// With constraint for module types.
+#[derive(Debug, Clone)]
+pub enum WithConstraint {
+    /// Type constraint: `with type t = ...`.
+    Twith_type(TypedTypeDeclaration),
+    /// Module constraint: `with module M = ...`.
+    Twith_module(Path, Loc<LidentIdx>),
+    /// Type substitution: `with type t := ...`.
+    Twith_typesubst(TypedTypeDeclaration),
+    /// Module substitution: `with module M := ...`.
+    Twith_modsubst(Path, Loc<LidentIdx>),
+}
+
+/// Signature (module type body).
+#[derive(Debug, Clone)]
+pub struct Signature {
+    /// Signature items.
+    pub sig_items: Vec<SignatureItem>,
+}
+
+impl Signature {
+    /// Create an empty signature.
+    pub fn empty() -> Self {
+        Self { sig_items: vec![] }
+    }
+
+    /// Create a signature with items.
+    pub fn new(items: Vec<SignatureItem>) -> Self {
+        Self { sig_items: items }
     }
 }
 
@@ -586,7 +653,7 @@ pub enum StructureItemDesc {
     /// Value binding: `let P = E`.
     Tstr_value(RecFlag, Vec<ValueBinding>),
     /// Primitive declaration: `external f : t = "..."`.
-    Tstr_primitive(ValueDescription),
+    Tstr_primitive(TypesValueDescription),
     /// Type declaration: `type t = ...`.
     Tstr_type(RecFlag, Vec<TypedTypeDeclaration>),
     /// Type extension: `type t += ...`.
@@ -774,11 +841,96 @@ pub struct IncludeDeclaration {
     pub incl_loc: LocIdx,
 }
 
-/// Signature item (placeholder).
+/// Signature item.
 #[derive(Debug, Clone)]
 pub struct SignatureItem {
-    // Placeholder
-    _placeholder: (),
+    /// Signature item descriptor.
+    pub sig_desc: SignatureItemDesc,
+    /// Location.
+    pub sig_loc: LocIdx,
+}
+
+/// Signature item descriptor.
+#[derive(Debug, Clone)]
+pub enum SignatureItemDesc {
+    /// Value specification: `val x: t`.
+    Tsig_value(TypedValueDescription),
+    /// Type declaration: `type t = ...`.
+    Tsig_type(crate::parser::ast::RecFlag, Vec<TypedTypeDeclaration>),
+    /// Type extension: `type t += ...`.
+    Tsig_typext(TypeExtension),
+    /// Exception declaration.
+    Tsig_exception(ExtensionConstructor),
+    /// Module declaration: `module M: MT`.
+    Tsig_module(TypedModuleDeclaration),
+    /// Recursive module declarations.
+    Tsig_recmodule(Vec<TypedModuleDeclaration>),
+    /// Module type declaration: `module type S = ...`.
+    Tsig_modtype(ModuleTypeDeclaration),
+    /// Open declaration.
+    Tsig_open(TypedOpenDescription),
+    /// Include declaration.
+    Tsig_include(TypedIncludeDescription),
+    /// Attribute.
+    Tsig_attribute(crate::parser::ast::Attribute),
+}
+
+/// Module declaration in a signature (typed tree level).
+#[derive(Debug, Clone)]
+pub struct TypedModuleDeclaration {
+    /// Module identifier.
+    pub md_id: Ident,
+    /// Module name.
+    pub md_name: Loc<String>,
+    /// Module type.
+    pub md_type: ModuleType,
+    /// Attributes.
+    pub md_attributes: Attributes,
+    /// Location.
+    pub md_loc: LocIdx,
+}
+
+/// Open description in a signature (typed tree level).
+#[derive(Debug, Clone)]
+pub struct TypedOpenDescription {
+    /// Opened module path.
+    pub open_path: Path,
+    /// Opened module longident.
+    pub open_txt: Loc<LidentIdx>,
+    /// Override flag.
+    pub open_override: crate::parser::ast::OverrideFlag,
+    /// Attributes.
+    pub open_attributes: Attributes,
+    /// Location.
+    pub open_loc: LocIdx,
+}
+
+/// Include description in a signature (typed tree level).
+#[derive(Debug, Clone)]
+pub struct TypedIncludeDescription {
+    /// Included module type.
+    pub incl_mod: ModuleType,
+    /// Attributes.
+    pub incl_attributes: Attributes,
+    /// Location.
+    pub incl_loc: LocIdx,
+}
+
+/// Value description in a signature (typed tree level).
+#[derive(Debug, Clone)]
+pub struct TypedValueDescription {
+    /// Value identifier.
+    pub val_id: Ident,
+    /// Value name.
+    pub val_name: Loc<String>,
+    /// Value type (core_type).
+    pub val_desc: TypedCoreType,
+    /// Primitive names (for externals).
+    pub val_prim: Vec<String>,
+    /// Attributes.
+    pub val_attributes: Attributes,
+    /// Location.
+    pub val_loc: LocIdx,
 }
 
 /// Extension constructor.
