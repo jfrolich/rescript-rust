@@ -3,7 +3,7 @@
 //! This module provides helper functions for analyzing and inspecting the AST.
 //! It's a port of OCaml's `res_parsetree_viewer.ml`.
 
-use crate::parse_arena::LocIdx;
+use crate::parse_arena::{LocIdx, ParseArena};
 use crate::parser::ast::*;
 use crate::parser::longident::Longident;
 
@@ -24,50 +24,51 @@ pub fn is_block_expr(expr: &Expression) -> bool {
 }
 
 /// Check if an expression has braces attribute.
-pub fn is_braced_expr(expr: &Expression) -> bool {
-    process_braces_attr(expr).is_some()
+pub fn is_braced_expr(arena: &ParseArena, expr: &Expression) -> bool {
+    process_braces_attr(arena, expr).is_some()
 }
 
 /// Check if expression has the "res.braces" attribute and return it.
-pub fn process_braces_attr(expr: &Expression) -> Option<&Attribute> {
-    expr.pexp_attributes.iter().find(|attr| attr.0.txt == "res.braces")
+pub fn process_braces_attr<'a>(arena: &ParseArena, expr: &'a Expression) -> Option<&'a Attribute> {
+    expr.pexp_attributes.iter().find(|attr| arena.get_string(attr.0.txt) == "res.braces")
 }
 
 /// Check if an expression is a template literal.
-pub fn is_template_literal(expr: &Expression) -> bool {
-    has_template_literal_attr(&expr.pexp_attributes)
+pub fn is_template_literal(arena: &ParseArena, expr: &Expression) -> bool {
+    has_template_literal_attr(arena, &expr.pexp_attributes)
 }
 
 /// Check if attributes contain template literal marker.
-pub fn has_template_literal_attr(attrs: &[Attribute]) -> bool {
-    attrs.iter().any(|attr| attr.0.txt == "res.template")
+pub fn has_template_literal_attr(arena: &ParseArena, attrs: &[Attribute]) -> bool {
+    attrs.iter().any(|attr| arena.get_string(attr.0.txt) == "res.template")
 }
 
 /// Check if an expression has the ternary attribute.
-pub fn has_ternary_attribute(attrs: &Attributes) -> bool {
-    attrs.iter().any(|attr| attr.0.txt == "res.ternary")
+pub fn has_ternary_attribute(arena: &ParseArena, attrs: &Attributes) -> bool {
+    attrs.iter().any(|attr| arena.get_string(attr.0.txt) == "res.ternary")
 }
 
 /// Check if an expression is a ternary expression.
 /// This checks for the res.ternary attribute which is added by the parser
 /// for expressions like `cond ? a : b` (as opposed to `if cond { a } else { b }`).
-pub fn is_ternary_expr(expr: &Expression) -> bool {
+pub fn is_ternary_expr(arena: &ParseArena, expr: &Expression) -> bool {
     // Check for res.ternary attribute - this distinguishes ternary from if-then-else
-    has_ternary_attribute(&expr.pexp_attributes)
+    has_ternary_attribute(arena, &expr.pexp_attributes)
 }
 
 /// Collect the parts of a ternary expression chain.
 /// Returns a list of (condition, consequent) pairs and the final alternate expression.
-pub fn collect_ternary_parts(
-    expr: &Expression,
-) -> (Vec<(&Expression, &Expression)>, &Expression) {
+pub fn collect_ternary_parts<'a>(
+    arena: &ParseArena,
+    expr: &'a Expression,
+) -> (Vec<(&'a Expression, &'a Expression)>, &'a Expression) {
     let mut parts = Vec::new();
     let mut current = expr;
 
     loop {
         match &current.pexp_desc {
             ExpressionDesc::Pexp_ifthenelse(condition, consequent, Some(alternate))
-                if has_ternary_attribute(&current.pexp_attributes) =>
+                if has_ternary_attribute(arena, &current.pexp_attributes) =>
             {
                 parts.push((condition.as_ref(), consequent.as_ref()));
                 current = alternate;
@@ -80,10 +81,10 @@ pub fn collect_ternary_parts(
 }
 
 /// Filter out ternary attributes from a list of attributes.
-pub fn filter_ternary_attributes(attrs: &Attributes) -> Vec<&Attribute> {
+pub fn filter_ternary_attributes<'a>(arena: &ParseArena, attrs: &'a Attributes) -> Vec<&'a Attribute> {
     attrs
         .iter()
-        .filter(|attr| attr.0.txt != "res.ternary")
+        .filter(|attr| arena.get_string(attr.0.txt) != "res.ternary")
         .collect()
 }
 
@@ -96,15 +97,15 @@ pub fn is_if_then_else_expr(expr: &Expression) -> bool {
 }
 
 /// Check if attributes contain the "res.iflet" marker.
-pub fn has_if_let_attribute(attrs: &[Attribute]) -> bool {
-    attrs.iter().any(|attr| attr.0.txt == "res.iflet")
+pub fn has_if_let_attribute(arena: &ParseArena, attrs: &[Attribute]) -> bool {
+    attrs.iter().any(|attr| arena.get_string(attr.0.txt) == "res.iflet")
 }
 
 /// Check if an expression is an "if let" expression.
 /// This is a `Pexp_match` with the `res.iflet` attribute.
-pub fn is_if_let_expr(expr: &Expression) -> bool {
+pub fn is_if_let_expr(arena: &ParseArena, expr: &Expression) -> bool {
     matches!(&expr.pexp_desc, ExpressionDesc::Pexp_match(_, _))
-        && has_if_let_attribute(&expr.pexp_attributes)
+        && has_if_let_attribute(arena, &expr.pexp_attributes)
 }
 
 /// Represents the kind of condition in an if-chain.
@@ -140,7 +141,7 @@ pub fn collect_if_expressions<'a>(
             }
             // if let with no else (pattern matches unit constructor in else branch)
             ExpressionDesc::Pexp_match(condition, cases)
-                if is_if_let_expr(current)
+                if is_if_let_expr(arena, current)
                     && cases.len() == 2
                     && cases[0].pc_guard.is_none()
                     && matches!(
@@ -155,7 +156,7 @@ pub fn collect_if_expressions<'a>(
             }
             // if let with else branch
             ExpressionDesc::Pexp_match(condition, cases)
-                if is_if_let_expr(current)
+                if is_if_let_expr(arena, current)
                     && cases.len() == 2
                     && cases[0].pc_guard.is_none() =>
             {
@@ -231,7 +232,7 @@ pub fn expr_is_await(expr: &Expression) -> bool {
 }
 
 /// Check if expression is underscore apply sugar: `(__x) => f(...)`.
-pub fn is_underscore_apply_sugar(expr: &Expression) -> bool {
+pub fn is_underscore_apply_sugar(arena: &ParseArena, expr: &Expression) -> bool {
     match &expr.pexp_desc {
         ExpressionDesc::Pexp_fun {
             arg_label: ArgLabel::Nolabel,
@@ -241,7 +242,7 @@ pub fn is_underscore_apply_sugar(expr: &Expression) -> bool {
             ..
         } => {
             if let PatternDesc::Ppat_var(name) = &lhs.ppat_desc {
-                if name.txt == "__x" {
+                if arena.get_string(name.txt) == "__x" {
                     return matches!(&rhs.pexp_desc, ExpressionDesc::Pexp_apply { .. });
                 }
             }
@@ -279,9 +280,9 @@ pub fn is_huggable_expression(arena: &crate::parse_arena::ParseArena, expr: &Exp
         {
             true
         }
-        ExpressionDesc::Pexp_extension(ext) if ext.0.txt == "obj" => true,
+        ExpressionDesc::Pexp_extension(ext) if arena.get_string(ext.0.txt) == "obj" => true,
         _ if is_block_expr(expr) => true,
-        _ if is_braced_expr(expr) => true,
+        _ if is_braced_expr(arena, expr) => true,
         ExpressionDesc::Pexp_constant(Constant::String(txt, None))
             if is_multiline_text(txt) =>
         {
@@ -496,9 +497,9 @@ pub enum FunParam<'a> {
 
 /// Extract function parameters from a potentially nested function expression.
 /// Returns (is_async, parameters, body).
-pub fn fun_expr(expr: &Expression) -> (bool, Vec<FunParam<'_>>, &Expression) {
+pub fn fun_expr<'a>(arena: &ParseArena, expr: &'a Expression) -> (bool, Vec<FunParam<'a>>, &'a Expression) {
     // Check for async attribute OR is_async field in Pexp_fun
-    let mut is_async = expr.pexp_attributes.iter().any(|attr| attr.0.txt == "res.async");
+    let mut is_async = expr.pexp_attributes.iter().any(|attr| arena.get_string(attr.0.txt) == "res.async");
 
     // Also check is_async field on the first Pexp_fun
     if let ExpressionDesc::Pexp_fun {
@@ -548,30 +549,33 @@ pub fn fun_expr(expr: &Expression) -> (bool, Vec<FunParam<'_>>, &Expression) {
 // ============================================================================
 
 /// Filter out fragile match attributes (used internally).
-pub fn filter_fragile_match_attributes(attrs: &Attributes) -> Vec<&Attribute> {
+pub fn filter_fragile_match_attributes<'a>(arena: &ParseArena, attrs: &'a Attributes) -> Vec<&'a Attribute> {
     attrs
         .iter()
-        .filter(|attr| attr.0.txt != "res.braces" && attr.0.txt != "res.ternary")
+        .filter(|attr| {
+            let name = arena.get_string(attr.0.txt);
+            name != "res.braces" && name != "res.ternary"
+        })
         .collect()
 }
 
 /// Check if expression has spread attribute (...).
-pub fn has_spread_attr(attrs: &Attributes) -> bool {
-    attrs.iter().any(|attr| attr.0.txt == "res.spread")
+pub fn has_spread_attr(arena: &ParseArena, attrs: &Attributes) -> bool {
+    attrs.iter().any(|attr| arena.get_string(attr.0.txt) == "res.spread")
 }
 
 /// Check if pattern has spread attribute (...).
-pub fn pattern_has_spread_attr(attrs: &Attributes) -> bool {
-    has_spread_attr(attrs)
+pub fn pattern_has_spread_attr(arena: &ParseArena, attrs: &Attributes) -> bool {
+    has_spread_attr(arena, attrs)
 }
 
 /// Filter out parsing-only attributes (res.braces, res.ternary, res.await, etc.)
-pub fn filter_parsing_attrs(attrs: &Attributes) -> Vec<&Attribute> {
+pub fn filter_parsing_attrs<'a>(arena: &ParseArena, attrs: &'a Attributes) -> Vec<&'a Attribute> {
     attrs
         .iter()
         .filter(|attr| {
             !matches!(
-                attr.0.txt.as_str(),
+                arena.get_string(attr.0.txt),
                 "res.braces"
                     | "ns.braces"
                     | "res.iflet"
@@ -588,9 +592,9 @@ pub fn filter_parsing_attrs(attrs: &Attributes) -> Vec<&Attribute> {
 }
 
 /// Check if an attribute is printable (not an internal parsing attribute).
-pub fn is_printable_attribute(attr: &Attribute) -> bool {
+pub fn is_printable_attribute(arena: &ParseArena, attr: &Attribute) -> bool {
     !matches!(
-        attr.0.txt.as_str(),
+        arena.get_string(attr.0.txt),
         "res.iflet"
             | "res.braces"
             | "ns.braces"
@@ -604,20 +608,20 @@ pub fn is_printable_attribute(attr: &Attribute) -> bool {
 }
 
 /// Check if attributes contain any printable attributes.
-pub fn has_printable_attributes(attrs: &Attributes) -> bool {
-    attrs.iter().any(is_printable_attribute)
+pub fn has_printable_attributes(arena: &ParseArena, attrs: &Attributes) -> bool {
+    attrs.iter().any(|a| is_printable_attribute(arena, a))
 }
 
 /// Filter to only printable attributes.
-pub fn filter_printable_attributes(attrs: &Attributes) -> Vec<&Attribute> {
-    attrs.iter().filter(|a| is_printable_attribute(a)).collect()
+pub fn filter_printable_attributes<'a>(arena: &ParseArena, attrs: &'a Attributes) -> Vec<&'a Attribute> {
+    attrs.iter().filter(|a| is_printable_attribute(arena, a)).collect()
 }
 
 /// Check if expression has any attributes (excluding internal parsing ones).
-pub fn has_attributes(attrs: &Attributes) -> bool {
+pub fn has_attributes(arena: &ParseArena, attrs: &Attributes) -> bool {
     attrs.iter().any(|attr| {
         !matches!(
-            attr.0.txt.as_str(),
+            arena.get_string(attr.0.txt),
             "res.braces"
                 | "ns.braces"
                 | "res.iflet"
@@ -726,7 +730,7 @@ pub fn not_ghost_operator(op: &str, is_ghost: bool) -> bool {
 
 /// Rewrite underscore apply: `(__x) => f(a, __x, c)` becomes `f(a, _, c)`.
 /// Returns the rewritten expression if applicable, otherwise None.
-pub fn rewrite_underscore_apply(expr: &Expression) -> Option<Expression> {
+pub fn rewrite_underscore_apply(arena: &ParseArena, expr: &Expression) -> Option<Expression> {
     match &expr.pexp_desc {
         ExpressionDesc::Pexp_fun {
             arg_label: ArgLabel::Nolabel,
@@ -737,7 +741,7 @@ pub fn rewrite_underscore_apply(expr: &Expression) -> Option<Expression> {
         } => {
             // Check if pattern is `__x`
             if let PatternDesc::Ppat_var(name) = &lhs.ppat_desc {
-                if name.txt == "__x" {
+                if arena.get_string(name.txt) == "__x" {
                     // Check if rhs is an apply
                     if let ExpressionDesc::Pexp_apply { .. } = &rhs.pexp_desc {
                         // TODO: Actually rewrite the apply to use `_`
@@ -768,8 +772,8 @@ pub struct TypeParameter<'a> {
 }
 
 /// Check if attributes contain the "@as" attribute.
-fn has_as_attr(attrs: &Attributes) -> bool {
-    attrs.iter().any(|attr| attr.0.txt == "as")
+fn has_as_attr(arena: &ParseArena, attrs: &Attributes) -> bool {
+    attrs.iter().any(|attr| arena.get_string(attr.0.txt) == "as")
 }
 
 /// Extract arrow type components: (attrs_before, args, return_type)
@@ -777,12 +781,14 @@ fn has_as_attr(attrs: &Attributes) -> bool {
 /// This decomposes an arrow type like `(a, b) => c` into its argument list
 /// and return type. The `max_arity` parameter limits how many arguments to extract.
 pub fn arrow_type<'a>(
+    arena: &ParseArena,
     typ: &'a CoreType,
     max_arity: Option<usize>,
 ) -> (&'a Attributes, Vec<TypeParameter<'a>>, &'a CoreType) {
     let max_arity = max_arity.unwrap_or(usize::MAX);
 
     fn process<'a>(
+        arena: &ParseArena,
         attrs_before: &'a Attributes,
         acc: Vec<TypeParameter<'a>>,
         typ: &'a CoreType,
@@ -807,7 +813,7 @@ pub fn arrow_type<'a>(
                         lbl: &arg.lbl,
                         typ: &arg.typ,
                     });
-                    return process(attrs_before, new_acc, ret, remaining_arity - 1);
+                    return process(arena, attrs_before, new_acc, ret, remaining_arity - 1);
                 }
 
                 // Unlabeled argument with attrs - return as final type
@@ -820,7 +826,7 @@ pub fn arrow_type<'a>(
                 let adjusted_arity = if matches!(
                     &arg.typ.ptyp_desc,
                     CoreTypeDesc::Ptyp_any
-                ) && has_as_attr(&arg.typ.ptyp_attributes)
+                ) && has_as_attr(arena, &arg.typ.ptyp_attributes)
                 {
                     remaining_arity
                 } else {
@@ -833,7 +839,7 @@ pub fn arrow_type<'a>(
                     lbl: &arg.lbl,
                     typ: &arg.typ,
                 });
-                process(attrs_before, new_acc, ret, adjusted_arity)
+                process(arena, attrs_before, new_acc, ret, adjusted_arity)
             }
 
             _ => (attrs_before, acc, typ),
@@ -844,9 +850,9 @@ pub fn arrow_type<'a>(
         CoreTypeDesc::Ptyp_arrow { .. } => {
             // Start processing with the type's attributes as attrs_before,
             // and process the type without those attributes
-            process(&typ.ptyp_attributes, Vec::new(), typ, max_arity)
+            process(arena, &typ.ptyp_attributes, Vec::new(), typ, max_arity)
         }
-        _ => process(&EMPTY_ATTRS, Vec::new(), typ, max_arity),
+        _ => process(arena, &EMPTY_ATTRS, Vec::new(), typ, max_arity),
     }
 }
 
@@ -908,8 +914,8 @@ pub fn mod_expr_functor(mod_expr: &ModuleExpr) -> (Vec<FunctorParam<'_>>, &Modul
 }
 
 /// Check if attributes contain the await attribute.
-pub fn has_await_attribute(attrs: &Attributes) -> bool {
-    attrs.iter().any(|attr| attr.0.txt == "res.await")
+pub fn has_await_attribute(arena: &ParseArena, attrs: &Attributes) -> bool {
+    attrs.iter().any(|attr| arena.get_string(attr.0.txt) == "res.await")
 }
 
 // ============================================================================
@@ -994,11 +1000,12 @@ pub fn is_rewritten_underscore_apply_sugar(arena: &crate::parse_arena::ParseAren
 }
 
 /// Partition attributes into doc comments and regular attributes.
-pub fn partition_doc_comment_attributes(attrs: &Attributes) -> (Vec<&Attribute>, Vec<&Attribute>) {
+pub fn partition_doc_comment_attributes<'a>(arena: &ParseArena, attrs: &'a Attributes) -> (Vec<&'a Attribute>, Vec<&'a Attribute>) {
     let mut doc_comments = Vec::new();
     let mut others = Vec::new();
     for attr in attrs {
-        if attr.0.txt == "res.doc" || attr.0.txt == "ocaml.doc" {
+        let name = arena.get_string(attr.0.txt);
+        if name == "res.doc" || name == "ocaml.doc" {
             doc_comments.push(attr);
         } else {
             others.push(attr);

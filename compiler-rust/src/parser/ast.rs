@@ -23,7 +23,8 @@ pub type Loc<T> = Located<T>;
 pub type Location = LocIdx;
 
 /// A string with location information.
-pub type StringLoc = Located<String>;
+/// Uses StrIdx for efficient sharing in Marshal output.
+pub type StringLoc = Located<StrIdx>;
 
 /// Arity information for functions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]

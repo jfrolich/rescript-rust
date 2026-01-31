@@ -12,7 +12,7 @@
 use crate::ident::Ident;
 use crate::intern::StrIdx;
 use crate::location::Location;
-use crate::parse_arena::{LocIdx, ParseArena};
+use crate::parse_arena::{LocIdx, Located, ParseArena};
 use crate::parser::ast::RecFlag;
 use crate::parser::ast::{
     ModuleExpr as ParsedModuleExpr, ModuleExprDesc as ParsedModuleExprDesc,
@@ -124,7 +124,7 @@ pub fn type_module_expr<'a>(
 
         ParsedModuleExprDesc::Pmod_functor(name, param_type, body) => {
             // Functor: (X: S) => ME
-            let param_id = Ident::create_local(&name.txt);
+            let param_id = Ident::create_local(arena.get_string(name.txt));
 
             // Type check the functor body
             // In a full implementation, we would extend the environment with the parameter
@@ -138,7 +138,7 @@ pub fn type_module_expr<'a>(
             Ok(ModuleExpr {
                 mod_desc: ModuleExprDesc::Tmod_functor(
                     param_id,
-                    name.clone(),
+                    Located { txt: arena.get_string(name.txt).to_string(), loc: name.loc },
                     typed_param_type,
                     Box::new(typed_body),
                 ),
@@ -315,8 +315,9 @@ fn type_structure_item<'a>(
             let mut typed_tree_decls: Vec<TypedTypeDeclaration> = Vec::new();
 
             for decl in decls {
-                let type_name = &decl.ptype_name.txt;
-                let type_id = Ident::create_persistent(type_name);
+                let type_name = decl.ptype_name.txt;
+                let type_name_str = arena.get_string(type_name);
+                let type_id = Ident::create_persistent(type_name_str);
 
                 // Create the type path for self-reference
                 let type_path = Path::pident(type_id.clone());
@@ -369,7 +370,8 @@ fn type_structure_item<'a>(
                         let mut block_tag = 0i32;
 
                         for cstr in cstrs {
-                            let cstr_id = Ident::create_persistent(&cstr.pcd_name.txt);
+                            let cstr_name_str = arena.get_string(cstr.pcd_name.txt);
+                            let cstr_id = Ident::create_persistent(cstr_name_str);
                             let is_constant = matches!(cstr.pcd_args, crate::parser::ast::ConstructorArguments::Pcstr_tuple(ref args) if args.is_empty());
 
                             // Convert constructor arguments using transl_type
@@ -395,8 +397,9 @@ fn type_structure_item<'a>(
                                         };
                                         // OCaml wraps label types in Tpoly for potential generalization
                                         let poly_type_ref = ctx.new_poly(type_ref, vec![]);
+                                        let lbl_name_str = arena.get_string(lbl.pld_name.txt);
                                         internal_labels.push(crate::types::LabelDeclaration {
-                                            ld_id: Ident::create_persistent(&lbl.pld_name.txt),
+                                            ld_id: Ident::create_persistent(lbl_name_str),
                                             ld_mutable: mutable_flag,
                                             ld_optional: lbl.pld_optional,
                                             ld_type: poly_type_ref,
@@ -412,9 +415,9 @@ fn type_structure_item<'a>(
                                             ctyp_attributes: vec![],
                                         };
                                         typed_labels.push(TypedLabelDeclaration {
-                                            ld_id: Ident::create_persistent(&lbl.pld_name.txt),
+                                            ld_id: Ident::create_persistent(lbl_name_str),
                                             ld_name: crate::parse_arena::Located {
-                                                txt: lbl.pld_name.txt.clone(),
+                                                txt: lbl_name_str.to_string(),
                                                 loc: lbl.pld_name.loc,
                                             },
                                             ld_mutable: lbl.pld_mutable.clone(),
@@ -455,7 +458,7 @@ fn type_structure_item<'a>(
                             typed_tree_cstrs.push(TypedConstructorDeclaration {
                                 cd_id: cstr_id.clone(),
                                 cd_name: crate::parse_arena::Located {
-                                    txt: cstr.pcd_name.txt.clone(),
+                                    txt: cstr_name_str.to_string(),
                                     loc: cstr.pcd_name.loc,
                                 },
                                 cd_args: typed_tree_cd_args,
@@ -467,7 +470,7 @@ fn type_structure_item<'a>(
                             // Create constructor description for the environment
                             let cstr_arity = cstr_args.len() as i32;
                             cstr_descs.push((cstr_id, crate::types::ConstructorDescription {
-                                cstr_name: cstr.pcd_name.txt.clone(),
+                                cstr_name: cstr_name_str.to_string(),
                                 cstr_res: res_ty,
                                 cstr_existentials: vec![],
                                 cstr_args,
@@ -489,6 +492,7 @@ fn type_structure_item<'a>(
                         let mut internal_labels: Vec<crate::types::LabelDeclaration> = Vec::new();
                         let mut typed_tree_labels: Vec<TypedLabelDeclaration> = Vec::new();
                         for lbl in labels {
+                            let lbl_name_str = arena.get_string(lbl.pld_name.txt);
                             let (typed_core_type, type_ref) = transl_type(tctx, env, &lbl.pld_type)?;
                             let mutable_flag = match lbl.pld_mutable {
                                 crate::parser::ast::MutableFlag::Immutable => crate::types::MutableFlag::Immutable,
@@ -497,7 +501,7 @@ fn type_structure_item<'a>(
                             // OCaml wraps label types in Tpoly for potential generalization
                             let poly_type_ref = ctx.new_poly(type_ref, vec![]);
                             internal_labels.push(crate::types::LabelDeclaration {
-                                ld_id: Ident::create_persistent(&lbl.pld_name.txt),
+                                ld_id: Ident::create_persistent(lbl_name_str),
                                 ld_mutable: mutable_flag,
                                 ld_optional: lbl.pld_optional,
                                 ld_type: poly_type_ref,
@@ -513,9 +517,9 @@ fn type_structure_item<'a>(
                                 ctyp_attributes: vec![],
                             };
                             typed_tree_labels.push(TypedLabelDeclaration {
-                                ld_id: Ident::create_persistent(&lbl.pld_name.txt),
+                                ld_id: Ident::create_persistent(lbl_name_str),
                                 ld_name: crate::parse_arena::Located {
-                                    txt: lbl.pld_name.txt.clone(),
+                                    txt: lbl_name_str.to_string(),
                                     loc: lbl.pld_name.loc,
                                 },
                                 ld_mutable: lbl.pld_mutable.clone(),
@@ -566,7 +570,7 @@ fn type_structure_item<'a>(
                 let typed_tree_decl = TypedTypeDeclaration {
                     typ_id: type_id,
                     typ_name: crate::parse_arena::Located {
-                        txt: type_name.clone(),
+                        txt: type_name_str.to_string(),
                         loc: decl.ptype_name.loc,
                     },
                     typ_params,
@@ -654,11 +658,12 @@ fn type_structure_item<'a>(
         ParsedStructureItemDesc::Pstr_module(mb) => {
             // Module binding: module M = ME
             let typed_mod = type_module_expr(tctx, env, arena, &mb.pmb_expr)?;
-            let mod_id = Ident::create_local(&mb.pmb_name.txt);
+            let mod_name_str = arena.get_string(mb.pmb_name.txt);
+            let mod_id = Ident::create_local(mod_name_str);
 
             let desc = StructureItemDesc::Tstr_module(ModuleBinding {
                 mb_id: mod_id,
-                mb_name: mb.pmb_name.clone(),
+                mb_name: Located { txt: mod_name_str.to_string(), loc: mb.pmb_name.loc },
                 mb_expr: typed_mod,
                 mb_attributes: mb.pmb_attributes.clone(),
                 mb_loc: mb.pmb_loc,
@@ -678,10 +683,11 @@ fn type_structure_item<'a>(
             let mut typed_bindings = Vec::new();
             for mb in mbs {
                 let typed_mod = type_module_expr(tctx, env, arena, &mb.pmb_expr)?;
-                let mod_id = Ident::create_local(&mb.pmb_name.txt);
+                let mod_name_str = arena.get_string(mb.pmb_name.txt);
+                let mod_id = Ident::create_local(mod_name_str);
                 typed_bindings.push(ModuleBinding {
                     mb_id: mod_id,
-                    mb_name: mb.pmb_name.clone(),
+                    mb_name: Located { txt: mod_name_str.to_string(), loc: mb.pmb_name.loc },
                     mb_expr: typed_mod,
                     mb_attributes: mb.pmb_attributes.clone(),
                     mb_loc: mb.pmb_loc,
@@ -701,11 +707,12 @@ fn type_structure_item<'a>(
 
         ParsedStructureItemDesc::Pstr_modtype(mtd) => {
             // Module type declaration: module type S = MT
-            let mtd_id = Ident::create_local(&mtd.pmtd_name.txt);
+            let mtd_name_str = arena.get_string(mtd.pmtd_name.txt);
+            let mtd_id = Ident::create_local(mtd_name_str);
 
             let desc = StructureItemDesc::Tstr_modtype(ModuleTypeDeclaration {
                 mtd_id,
-                mtd_name: mtd.pmtd_name.clone(),
+                mtd_name: Located { txt: mtd_name_str.to_string(), loc: mtd.pmtd_name.loc },
                 mtd_type: mtd.pmtd_type.as_ref().map(|_| ModuleType::placeholder()),
                 mtd_attributes: mtd.pmtd_attributes.clone(),
                 mtd_loc: mtd.pmtd_loc,

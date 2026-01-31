@@ -3,12 +3,10 @@
 //! This module contains the main parsing functions that convert a token
 //! stream into an AST. It mirrors `res_core.ml` from the OCaml implementation.
 
-use crate::intern::StrIdx;
 use crate::location::Position;
-use crate::parse_arena::{Located, LocIdx, ParseArena};
+use crate::parse_arena::{LocIdx, ParseArena};
 
 use super::ast::*;
-use super::diagnostics::DiagnosticCategory;
 use super::grammar;
 use super::longident::Longident;
 use super::state::Parser;
@@ -41,8 +39,9 @@ pub mod recover {
     use super::*;
 
     /// Create a default expression for error recovery.
-    pub fn default_expr() -> Expression {
-        let id = mknoloc("rescript.exprhole".to_string());
+    pub fn default_expr(arena: &mut ParseArena) -> Expression {
+        let str_idx = arena.intern("rescript.exprhole");
+        let id = mknoloc(str_idx);
         Expression {
             pexp_desc: ExpressionDesc::Pexp_extension((id, Payload::PStr(vec![]))),
             pexp_loc: LocIdx::none(),
@@ -51,8 +50,9 @@ pub mod recover {
     }
 
     /// Create a default type for error recovery.
-    pub fn default_type() -> CoreType {
-        let id = mknoloc("rescript.typehole".to_string());
+    pub fn default_type(arena: &mut ParseArena) -> CoreType {
+        let str_idx = arena.intern("rescript.typehole");
+        let id = mknoloc(str_idx);
         CoreType {
             ptyp_desc: CoreTypeDesc::Ptyp_extension((id, Payload::PStr(vec![]))),
             ptyp_loc: LocIdx::none(),
@@ -61,8 +61,9 @@ pub mod recover {
     }
 
     /// Create a default pattern for error recovery.
-    pub fn default_pattern() -> Pattern {
-        let id = mknoloc("rescript.patternhole".to_string());
+    pub fn default_pattern(arena: &mut ParseArena) -> Pattern {
+        let str_idx = arena.intern("rescript.patternhole");
+        let id = mknoloc(str_idx);
         Pattern {
             ppat_desc: PatternDesc::Ppat_extension((id, Payload::PStr(vec![]))),
             ppat_loc: LocIdx::none(),
@@ -198,53 +199,61 @@ pub mod error_messages {
 // ============================================================================
 
 /// Create the ternary attribute `@res.ternary`.
-pub fn ternary_attr() -> Attribute {
-    (mknoloc("res.ternary".to_string()), Payload::PStr(vec![]))
+pub fn ternary_attr(arena: &mut ParseArena) -> Attribute {
+    let str_idx = arena.intern("res.ternary");
+    (mknoloc(str_idx), Payload::PStr(vec![]))
 }
 
 /// Create the if-let attribute `@res.iflet`.
-pub fn if_let_attr() -> Attribute {
-    (mknoloc("res.iflet".to_string()), Payload::PStr(vec![]))
+pub fn if_let_attr(arena: &mut ParseArena) -> Attribute {
+    let str_idx = arena.intern("res.iflet");
+    (mknoloc(str_idx), Payload::PStr(vec![]))
 }
 
 /// Create the await attribute `@res.await` with location.
-pub fn make_await_attr(loc: Location) -> Attribute {
+pub fn make_await_attr(arena: &mut ParseArena, loc: Location) -> Attribute {
+    let str_idx = arena.intern("res.await");
     (
-        with_loc("res.await".to_string(), loc),
+        with_loc(str_idx, loc),
         Payload::PStr(vec![]),
     )
 }
 
 /// Create the braces attribute `@res.braces` with location.
-pub fn make_braces_attr(loc: Location) -> Attribute {
+pub fn make_braces_attr(arena: &mut ParseArena, loc: Location) -> Attribute {
+    let str_idx = arena.intern("res.braces");
     (
-        with_loc("res.braces".to_string(), loc),
+        with_loc(str_idx, loc),
         Payload::PStr(vec![]),
     )
 }
 
 /// Create the template literal attribute `@res.template`.
-pub fn template_literal_attr() -> Attribute {
-    (mknoloc("res.template".to_string()), Payload::PStr(vec![]))
+pub fn template_literal_attr(arena: &mut ParseArena) -> Attribute {
+    let str_idx = arena.intern("res.template");
+    (mknoloc(str_idx), Payload::PStr(vec![]))
 }
 
 /// Create the spread attribute `@res.spread`.
-pub fn spread_attr() -> Attribute {
-    (mknoloc("res.spread".to_string()), Payload::PStr(vec![]))
+pub fn spread_attr(arena: &mut ParseArena) -> Attribute {
+    let str_idx = arena.intern("res.spread");
+    (mknoloc(str_idx), Payload::PStr(vec![]))
 }
 
 /// Create the pattern variant spread attribute.
-pub fn make_pat_variant_spread_attr() -> Attribute {
+pub fn make_pat_variant_spread_attr(arena: &mut ParseArena) -> Attribute {
+    let str_idx = arena.intern("res.patVariantSpread");
     (
-        mknoloc("res.patVariantSpread".to_string()),
+        mknoloc(str_idx),
         Payload::PStr(vec![]),
     )
 }
 
 /// Create the tagged template literal attribute.
-pub fn tagged_template_literal_attr() -> Attribute {
+pub fn tagged_template_literal_attr(arena: &mut ParseArena) -> Attribute {
+    let str_idx = arena.intern("res.taggedTemplate");
     (
-        mknoloc("res.taggedTemplate".to_string()),
+        mknoloc(str_idx),
         Payload::PStr(vec![]),
     )
 }
@@ -326,8 +335,9 @@ pub fn skip_doc_comments(p: &mut Parser<'_>) {
 }
 
 /// Convert a doc comment to a res.doc attribute.
-pub fn doc_comment_to_attribute(loc: Location, content: String) -> Attribute {
-    let name = with_loc("res.doc".to_string(), loc.clone());
+pub fn doc_comment_to_attribute(arena: &mut ParseArena, loc: Location, content: String) -> Attribute {
+    let str_idx = arena.intern("res.doc");
+    let name = with_loc(str_idx, loc);
     let payload = Payload::PStr(vec![StructureItem {
         pstr_desc: StructureItemDesc::Pstr_eval(
             Expression {
@@ -335,7 +345,7 @@ pub fn doc_comment_to_attribute(loc: Location, content: String) -> Attribute {
                     content,
                     None,
                 )),
-                pexp_loc: loc.clone(),
+                pexp_loc: loc,
                 pexp_attributes: vec![],
             },
             vec![],
@@ -504,8 +514,9 @@ pub mod ast_helper {
     }
 
     /// Create a variable pattern.
-    pub fn make_var_pat(name: String, loc: Location) -> Pattern {
-        make_pat(PatternDesc::Ppat_var(with_loc(name, loc.clone())), loc)
+    pub fn make_var_pat(arena: &mut ParseArena, name: &str, loc: Location) -> Pattern {
+        let str_idx = arena.intern(name);
+        make_pat(PatternDesc::Ppat_var(with_loc(str_idx, loc)), loc)
     }
 
     /// Create a constructor pattern.
@@ -812,8 +823,8 @@ pub struct FundefTermParam {
 pub struct FundefTypeParam {
     /// Attributes.
     pub attrs: Attributes,
-    /// Located strings for type names.
-    pub locs: Vec<Located<String>>,
+    /// Located StrIdx for type names.
+    pub locs: Vec<StringLoc>,
     /// Start position (usually the `type` keyword).
     pub start_pos: Position,
     /// Position of the opening paren (if parenthesized).

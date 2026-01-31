@@ -271,12 +271,12 @@ fn payload(p: &Payload, arena: &ParseArena) -> Sexp {
 
 fn attribute(attr: &Attribute, arena: &ParseArena) -> Sexp {
     let (name, p) = attr;
-    Sexp::list(vec![Sexp::atom("attribute"), Sexp::atom(&name.txt), location(name.loc, arena), payload(p, arena)])
+    Sexp::list(vec![Sexp::atom("attribute"), Sexp::atom(arena.get_string(name.txt)), location(name.loc, arena), payload(p, arena)])
 }
 
 fn extension(ext: &Extension, arena: &ParseArena) -> Sexp {
     let (name, p) = ext;
-    Sexp::list(vec![Sexp::atom("extension"), Sexp::atom(&name.txt), location(name.loc, arena), payload(p, arena)])
+    Sexp::list(vec![Sexp::atom("extension"), Sexp::atom(arena.get_string(name.txt)), location(name.loc, arena), payload(p, arena)])
 }
 
 fn attributes(attrs: &[Attribute], arena: &ParseArena) -> Sexp {
@@ -358,7 +358,7 @@ fn core_type(typ: &CoreType, arena: &ParseArena) -> Sexp {
                 vec![Sexp::list(vec![])]
             } else {
                 lbls.iter().map(|l| Sexp::list(vec![
-                    Sexp::atom(&quote_string(&l.txt)),
+                    Sexp::atom(&quote_string(arena.get_string(l.txt))),
                     location(l.loc, arena),
                 ])).collect()
             }),
@@ -423,12 +423,12 @@ fn pattern(p: &Pattern, arena: &ParseArena) -> Sexp {
     let descr = match &p.ppat_desc {
         PatternDesc::Ppat_any => Sexp::atom("Ppat_any"),
         PatternDesc::Ppat_var(var) => {
-            Sexp::list(vec![Sexp::atom("Ppat_var"), Sexp::atom(&quote_string(&var.txt)), location(var.loc, arena)])
+            Sexp::list(vec![Sexp::atom("Ppat_var"), Sexp::atom(&quote_string(arena.get_string(var.txt))), location(var.loc, arena)])
         }
         PatternDesc::Ppat_alias(pat, alias) => Sexp::list(vec![
             Sexp::atom("Ppat_alias"),
             pattern(pat, arena),
-            Sexp::atom(&quote_string(&alias.txt)),
+            Sexp::atom(&quote_string(arena.get_string(alias.txt))),
             location(alias.loc, arena),
         ]),
         PatternDesc::Ppat_constant(c) => Sexp::list(vec![Sexp::atom("Ppat_constant"), constant(c)]),
@@ -482,7 +482,7 @@ fn pattern(p: &Pattern, arena: &ParseArena) -> Sexp {
         }
         PatternDesc::Ppat_type(lid) => Sexp::list(vec![Sexp::atom("Ppat_type"), longident_idx(arena, lid.txt), location(lid.loc, arena)]),
         PatternDesc::Ppat_unpack(name) => {
-            Sexp::list(vec![Sexp::atom("Ppat_unpack"), Sexp::atom(&quote_string(&name.txt)), location(name.loc, arena)])
+            Sexp::list(vec![Sexp::atom("Ppat_unpack"), Sexp::atom(&quote_string(arena.get_string(name.txt))), location(name.loc, arena)])
         }
         PatternDesc::Ppat_exception(pat) => Sexp::list(vec![Sexp::atom("Ppat_exception"), pattern(pat, arena)]),
         PatternDesc::Ppat_extension(ext) => Sexp::list(vec![Sexp::atom("Ppat_extension"), extension(ext, arena)]),
@@ -636,7 +636,7 @@ fn expression(expr: &Expression, arena: &ParseArena) -> Sexp {
         ]),
         ExpressionDesc::Pexp_letmodule(name, me, body) => Sexp::list(vec![
             Sexp::atom("Pexp_letmodule"),
-            Sexp::atom(&quote_string(&name.txt)),
+            Sexp::atom(&quote_string(arena.get_string(name.txt))),
             location(name.loc, arena),
             module_expression(me, arena),
             expression(body, arena),
@@ -649,7 +649,7 @@ fn expression(expr: &Expression, arena: &ParseArena) -> Sexp {
         ExpressionDesc::Pexp_assert(e) => Sexp::list(vec![Sexp::atom("Pexp_assert"), expression(e, arena)]),
         ExpressionDesc::Pexp_newtype(name, body) => Sexp::list(vec![
             Sexp::atom("Pexp_newtype"),
-            Sexp::atom(&quote_string(&name.txt)),
+            Sexp::atom(&quote_string(arena.get_string(name.txt))),
             location(name.loc, arena),
             expression(body, arena),
         ]),
@@ -688,9 +688,9 @@ fn jsx_element(jsx: &JsxElement, arena: &ParseArena) -> Sexp {
 
 fn jsx_prop(prop: &JsxProp, arena: &ParseArena) -> Sexp {
     match prop {
-        JsxProp::Punning { name, .. } => Sexp::list(vec![Sexp::atom(&name.txt), location(name.loc, arena)]),
+        JsxProp::Punning { name, .. } => Sexp::list(vec![Sexp::atom(arena.get_string(name.txt)), location(name.loc, arena)]),
         JsxProp::Value { name, value, .. } => {
-            Sexp::list(vec![Sexp::atom(&name.txt), location(name.loc, arena), expression(value, arena)])
+            Sexp::list(vec![Sexp::atom(arena.get_string(name.txt)), location(name.loc, arena), expression(value, arena)])
         }
         JsxProp::Spreading { loc, expr } => Sexp::list(vec![Sexp::atom("..."), location(*loc, arena), expression(expr, arena)]),
     }
@@ -730,7 +730,7 @@ fn type_declaration(td: &TypeDeclaration, arena: &ParseArena) -> Sexp {
     Sexp::list(vec![
         Sexp::atom("type_declaration"),
         location(td.ptype_loc, arena),
-        Sexp::atom(&quote_string(&td.ptype_name.txt)),
+        Sexp::atom(&quote_string(arena.get_string(td.ptype_name.txt))),
         location(td.ptype_name.loc, arena),
         Sexp::list(vec![
             Sexp::atom("ptype_params"),
@@ -784,7 +784,7 @@ fn constructor_declaration(cd: &ConstructorDeclaration, arena: &ParseArena) -> S
     Sexp::list(vec![
         Sexp::atom("constructor_declaration"),
         location(cd.pcd_loc, arena),
-        Sexp::atom(&quote_string(&cd.pcd_name.txt)),
+        Sexp::atom(&quote_string(arena.get_string(cd.pcd_name.txt))),
         location(cd.pcd_name.loc, arena),
         Sexp::list(vec![Sexp::atom("pcd_args"), constructor_arguments(&cd.pcd_args, arena)]),
         Sexp::list(vec![
@@ -813,7 +813,7 @@ fn label_declaration(ld: &LabelDeclaration, arena: &ParseArena) -> Sexp {
     Sexp::list(vec![
         Sexp::atom("label_declaration"),
         location(ld.pld_loc, arena),
-        Sexp::atom(&quote_string(&ld.pld_name.txt)),
+        Sexp::atom(&quote_string(arena.get_string(ld.pld_name.txt))),
         location(ld.pld_name.loc, arena),
         mutable_flag(&ld.pld_mutable),
         Sexp::atom(if ld.pld_optional { "true" } else { "false" }),
@@ -826,7 +826,7 @@ fn extension_constructor(ec: &ExtensionConstructor, arena: &ParseArena) -> Sexp 
     Sexp::list(vec![
         Sexp::atom("extension_constructor"),
         location(ec.pext_loc, arena),
-        Sexp::atom(&quote_string(&ec.pext_name.txt)),
+        Sexp::atom(&quote_string(arena.get_string(ec.pext_name.txt))),
         location(ec.pext_name.loc, arena),
         extension_constructor_kind(&ec.pext_kind, arena),
         attributes(&ec.pext_attributes, arena),
@@ -880,7 +880,7 @@ fn value_description(vd: &ValueDescription, arena: &ParseArena) -> Sexp {
     Sexp::list(vec![
         Sexp::atom("value_description"),
         location(vd.pval_loc, arena),
-        Sexp::atom(&quote_string(&vd.pval_name.txt)),
+        Sexp::atom(&quote_string(arena.get_string(vd.pval_name.txt))),
         location(vd.pval_name.loc, arena),
         core_type(&vd.pval_type, arena),
         Sexp::list(map_empty(&vd.pval_prim, |s| Sexp::atom(&quote_string(s)))),
@@ -900,7 +900,7 @@ fn module_expression(me: &ModuleExpr, arena: &ParseArena) -> Sexp {
         }
         ModuleExprDesc::Pmod_functor(name, opt_mt, body) => Sexp::list(vec![
             Sexp::atom("Pmod_functor"),
-            Sexp::atom(&quote_string(&name.txt)),
+            Sexp::atom(&quote_string(arena.get_string(name.txt))),
             location(name.loc, arena),
             match opt_mt {
                 None => Sexp::atom("None"),
@@ -932,7 +932,7 @@ fn module_type(mt: &ModuleType, arena: &ParseArena) -> Sexp {
         }
         ModuleTypeDesc::Pmty_functor(name, opt_mt, body) => Sexp::list(vec![
             Sexp::atom("Pmty_functor"),
-            Sexp::atom(&quote_string(&name.txt)),
+            Sexp::atom(&quote_string(arena.get_string(name.txt))),
             location(name.loc, arena),
             match opt_mt {
                 None => Sexp::atom("None"),
@@ -983,7 +983,7 @@ fn module_binding(mb: &ModuleBinding, arena: &ParseArena) -> Sexp {
     Sexp::list(vec![
         Sexp::atom("module_binding"),
         location(mb.pmb_loc, arena),
-        Sexp::atom(&quote_string(&mb.pmb_name.txt)),
+        Sexp::atom(&quote_string(arena.get_string(mb.pmb_name.txt))),
         location(mb.pmb_name.loc, arena),
         module_expression(&mb.pmb_expr, arena),
         attributes(&mb.pmb_attributes, arena),
@@ -994,7 +994,7 @@ fn module_declaration(md: &ModuleDeclaration, arena: &ParseArena) -> Sexp {
     Sexp::list(vec![
         Sexp::atom("module_declaration"),
         location(md.pmd_loc, arena),
-        Sexp::atom(&quote_string(&md.pmd_name.txt)),
+        Sexp::atom(&quote_string(arena.get_string(md.pmd_name.txt))),
         location(md.pmd_name.loc, arena),
         module_type(&md.pmd_type, arena),
         attributes(&md.pmd_attributes, arena),
@@ -1005,7 +1005,7 @@ fn module_type_declaration(mtd: &ModuleTypeDeclaration, arena: &ParseArena) -> S
     Sexp::list(vec![
         Sexp::atom("module_type_declaration"),
         location(mtd.pmtd_loc, arena),
-        Sexp::atom(&quote_string(&mtd.pmtd_name.txt)),
+        Sexp::atom(&quote_string(arena.get_string(mtd.pmtd_name.txt))),
         location(mtd.pmtd_name.loc, arena),
         match &mtd.pmtd_type {
             None => Sexp::atom("None"),

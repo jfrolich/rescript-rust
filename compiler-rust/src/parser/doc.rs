@@ -488,7 +488,7 @@ impl Doc {
         for (indent, mode, doc) in line_suffices.into_iter().rev() {
             stack.push((indent, mode, doc));
         }
-        while let Some((indent, mode, doc)) = stack.pop() {
+        while let Some((_indent, _mode, doc)) = stack.pop() {
             // Simplified processing for remaining suffices
             if let Doc::Text(txt) = doc {
                 buffer.push_str(txt);

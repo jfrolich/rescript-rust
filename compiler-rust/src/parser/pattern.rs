@@ -10,7 +10,7 @@ use super::longident::Longident;
 use super::state::Parser;
 use super::token::Token;
 use crate::location::Position;
-use crate::parse_arena::{Located, LocIdx};
+use crate::parse_arena::{Located, LocIdx, StrIdx};
 
 // ============================================================================
 // Attribute Parsing for Patterns
@@ -31,7 +31,7 @@ fn parse_attributes(p: &mut Parser<'_>) -> Attributes {
                 let content = content.clone();
                 p.next();
                 let loc = p.from_location(&loc_cloned);
-                attrs.push(super::core::doc_comment_to_attribute(loc, content));
+                attrs.push(super::core::doc_comment_to_attribute(p.arena_mut(), loc, content));
             }
             _ => break,
         }
@@ -67,7 +67,7 @@ fn parse_attribute(p: &mut Parser<'_>) -> Option<Attribute> {
 
 /// Parse an attribute identifier.
 /// The `start_pos` parameter should be the position BEFORE the `@` was consumed.
-fn parse_attribute_id(p: &mut Parser<'_>, start_pos: Position) -> Located<String> {
+fn parse_attribute_id(p: &mut Parser<'_>, start_pos: Position) -> Located<StrIdx> {
     let mut parts = vec![];
 
     loop {
@@ -93,7 +93,8 @@ fn parse_attribute_id(p: &mut Parser<'_>, start_pos: Position) -> Located<String
     }
 
     let loc = p.mk_loc_to_prev_end(&start_pos);
-    with_loc(parts.join("."), loc)
+    let str_idx = p.arena_mut().intern(&parts.join("."));
+    with_loc(str_idx, loc)
 }
 
 /// Parse an attribute payload.
@@ -276,8 +277,9 @@ fn parse_single_pattern_with_alias(p: &mut Parser<'_>) -> Pattern {
             p.mk_loc_to_prev_end(&alias_start)
         };
         let loc = p.mk_loc_to_prev_end(&start_pos);
+        let name_idx = p.arena_mut().intern(&name);
         pat = Pattern {
-            ppat_desc: PatternDesc::Ppat_alias(Box::new(pat), with_loc(name, name_with_attrs_loc)),
+            ppat_desc: PatternDesc::Ppat_alias(Box::new(pat), with_loc(name_idx, name_with_attrs_loc)),
             ppat_loc: loc,
             ppat_attributes: alias_attrs,
         };
@@ -332,7 +334,7 @@ fn parse_or_pattern(
                 ppat_attributes: vec![],
             }
         })
-        .unwrap_or_else(recover::default_pattern)
+        .unwrap_or_else(|| recover::default_pattern(p.arena_mut()))
 }
 
 /// Parse a constrained pattern (pattern : type).
@@ -378,13 +380,15 @@ pub fn parse_alias_pattern(
                 let name = name.clone();
                 let loc = p.mk_loc_current();
                 p.next();
-                with_loc(name, loc)
+                let str_idx = p.arena_mut().intern(&name);
+                with_loc(str_idx, loc)
             }
             _ => {
                 p.err(DiagnosticCategory::Message(
                     "Expected identifier after 'as'".to_string(),
                 ));
-                with_loc("_".to_string(), p.mk_loc_current())
+                let str_idx = p.arena_mut().intern("_");
+                with_loc(str_idx, p.mk_loc_current())
             }
         };
         let loc = p.mk_loc_to_prev_end(&start_pos);
@@ -467,17 +471,18 @@ fn parse_atomic_pattern(p: &mut Parser<'_>) -> Pattern {
                 // OCaml: alias name location is just the name, not the whole pattern
                 let alias_name_loc = p.mk_loc_to_prev_end(&alias_start);
                 let overall_loc = p.mk_loc_to_prev_end(&start_pos);
-                let inner = ast_helper::make_var_pat(name, loc);
+                let inner = ast_helper::make_var_pat(p.arena_mut(), &name, loc);
+                let alias_idx = p.arena_mut().intern(&alias);
                 Pattern {
                     ppat_desc: PatternDesc::Ppat_alias(
                         Box::new(inner),
-                        with_loc(alias, alias_name_loc),
+                        with_loc(alias_idx, alias_name_loc),
                     ),
                     ppat_loc: overall_loc,
                     ppat_attributes: vec![],
                 }
             } else {
-                ast_helper::make_var_pat(name, loc)
+                ast_helper::make_var_pat(p.arena_mut(), &name, loc)
             }
         }
         Token::Uident(_) => parse_constructor_pattern(p),
@@ -556,13 +561,15 @@ fn parse_atomic_pattern(p: &mut Parser<'_>) -> Pattern {
                     let name = name.clone();
                     let loc = p.mk_loc_current();
                     p.next();
-                    with_loc(name, loc)
+                    let str_idx = p.arena_mut().intern(&name);
+                    with_loc(str_idx, loc)
                 }
                 _ => {
                     p.err(DiagnosticCategory::Message(
                         "Expected module name".to_string(),
                     ));
-                    with_loc("Error".to_string(), p.mk_loc_current())
+                    let str_idx = p.arena_mut().intern("Error");
+                    with_loc(str_idx, p.mk_loc_current())
                 }
             };
 
@@ -614,7 +621,7 @@ fn parse_atomic_pattern(p: &mut Parser<'_>) -> Pattern {
                 p.err(DiagnosticCategory::Message(
                     "Unexpected token in pattern: Colon".to_string(),
                 ));
-                recover::default_pattern()
+                recover::default_pattern(p.arena_mut())
             } else {
                 p.next();
 
@@ -742,7 +749,7 @@ fn parse_atomic_pattern(p: &mut Parser<'_>) -> Pattern {
                     p.err(DiagnosticCategory::Message(
                         "Expected number after sign in pattern".to_string(),
                     ));
-                    recover::default_pattern()
+                    recover::default_pattern(p.arena_mut())
                 }
             }
         }
@@ -753,7 +760,7 @@ fn parse_atomic_pattern(p: &mut Parser<'_>) -> Pattern {
             )));
             // Advance to prevent infinite loops
             p.next();
-            recover::default_pattern()
+            recover::default_pattern(p.arena_mut())
         }
     }
 }
@@ -1029,13 +1036,13 @@ fn parse_record_pattern(p: &mut Parser<'_>) -> Pattern {
             // field? (optional punning after field name - less common)
             p.next();
             let loc = p.mk_loc_to_prev_end(&field_start);
-            let pat = ast_helper::make_var_pat(pun_name, loc.clone());
+            let pat = ast_helper::make_var_pat(p.arena_mut(), &pun_name, loc.clone());
             (with_loc(lid_idx, loc), pat, true)
         } else {
             // Punning: field is same as variable (use last identifier in the path)
             // For optional punned fields, the pattern location is just the identifier (using pat_start)
             let loc = p.mk_loc_to_prev_end(&pat_start);
-            let pat = ast_helper::make_var_pat(pun_name, loc.clone());
+            let pat = ast_helper::make_var_pat(p.arena_mut(), &pun_name, loc.clone());
             (with_loc(lid_idx, loc), pat, opt_punning)
         };
 
@@ -1101,10 +1108,11 @@ fn parse_dict_pattern(p: &mut Parser<'_>, start_pos: crate::location::Position) 
 
     // OCaml: adds (Location.mknoloc "res.dictPattern", PStr []) attribute
     // Dict patterns are parsed as open record patterns with the dictPattern attribute
+    let dict_idx = p.arena_mut().intern("res.dictPattern");
     Pattern {
         ppat_desc: PatternDesc::Ppat_record(fields, ClosedFlag::Open),
         ppat_loc: loc,
-        ppat_attributes: vec![(mknoloc("res.dictPattern".to_string()), Payload::PStr(vec![]))],
+        ppat_attributes: vec![(mknoloc(dict_idx), Payload::PStr(vec![]))],
     }
 }
 
@@ -1139,9 +1147,12 @@ fn parse_extension_pattern(p: &mut Parser<'_>, start_pos: crate::location::Posit
         p.err(DiagnosticCategory::Message(
             "Expected extension identifier".to_string(),
         ));
-        mknoloc("error".to_string())
+        let str_idx = p.arena_mut().intern("error");
+        mknoloc(str_idx)
     } else {
-        with_loc(parts.join("."), p.mk_loc_to_prev_end(&id_start))
+        let joined = parts.join(".");
+        let str_idx = p.arena_mut().intern(&joined);
+        with_loc(str_idx, p.mk_loc_to_prev_end(&id_start))
     };
 
     let payload = if p.token == Token::Lparen {
@@ -1211,7 +1222,7 @@ fn parse_template_literal_pattern(p: &mut Parser<'_>, start_pos: crate::location
     Pattern {
         ppat_desc: PatternDesc::Ppat_constant(Constant::String(text, Some("js".to_string()))),
         ppat_loc: loc,
-        ppat_attributes: vec![template_literal_attr()],
+        ppat_attributes: vec![template_literal_attr(p.arena_mut())],
     }
 }
 

@@ -348,6 +348,12 @@ impl<'src> Parser<'src> {
         self.arena.push_lident_static(name)
     }
 
+    /// Push a simple identifier (Lident) from an existing StrIdx.
+    /// Use when you already have a StrIdx (e.g., from a located string).
+    pub fn push_lident_from_idx(&mut self, str_idx: StrIdx) -> LidentIdx {
+        self.arena.push_lident_from_idx(str_idx)
+    }
+
     /// Push a dotted identifier (Ldot) into the arena.
     /// Takes a Longident for the prefix (will be pushed first).
     pub fn push_ldot(&mut self, prefix: Longident, name: impl Into<String>) -> LidentIdx {

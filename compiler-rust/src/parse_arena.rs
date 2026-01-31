@@ -489,6 +489,13 @@ impl ParseArena {
         self.longidents.push(Longident::Lident(str_idx))
     }
 
+    /// Push a simple identifier (Lident) with a StrIdx that already exists.
+    ///
+    /// Use when you already have a StrIdx (e.g., from a located string).
+    pub fn push_lident_from_idx(&mut self, str_idx: StrIdx) -> LidentIdx {
+        self.longidents.push(Longident::Lident(str_idx))
+    }
+
     /// Push a dotted identifier (Ldot) with a dynamic string.
     pub fn push_ldot(&mut self, prefix: LidentIdx, name: impl Into<String>) -> LidentIdx {
         let str_idx = self.strings.push(name.into());

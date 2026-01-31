@@ -6,7 +6,7 @@
 
 use std::io::Write;
 
-use crate::parse_arena::{LidentIdx, Located, ParseArena};
+use crate::parse_arena::{LidentIdx, Located, ParseArena, StrIdx};
 use super::ast::*;
 use super::formatter::{BoxKind, Formatter};
 use super::longident::Longident;
@@ -24,12 +24,12 @@ fn count_function_arity(expr: &Expression) -> usize {
 }
 
 /// Check if pattern is a simple variable with given name (and no attributes)
-fn pattern_is_simple_var(pat: &Pattern, name: &str) -> bool {
+fn pattern_is_simple_var(arena: &ParseArena, pat: &Pattern, name: &str) -> bool {
     if !pat.ppat_attributes.is_empty() {
         return false;
     }
     match &pat.ppat_desc {
-        PatternDesc::Ppat_var(var) => var.txt == name,
+        PatternDesc::Ppat_var(var) => arena.get_string(var.txt) == name,
         _ => false,
     }
 }
@@ -240,16 +240,16 @@ fn is_internal_attribute(name: &str) -> bool {
 }
 
 /// Filter attributes to only include ones that should be printed
-fn printable_attributes(attrs: &[(Located<String>, Payload)]) -> Vec<&(Located<String>, Payload)> {
+fn printable_attributes<'a>(arena: &ParseArena, attrs: &'a [(Located<StrIdx>, Payload)]) -> Vec<&'a (Located<StrIdx>, Payload)> {
     attrs
         .iter()
-        .filter(|(name, _)| !is_internal_attribute(&name.txt))
+        .filter(|(name, _)| !is_internal_attribute(arena.get_string(name.txt)))
         .collect()
 }
 
 /// Check if attributes contain a specific attribute name
-fn has_attribute(attrs: &[(Located<String>, Payload)], name: &str) -> bool {
-    attrs.iter().any(|(n, _)| n.txt == name)
+fn has_attribute(arena: &ParseArena, attrs: &[(Located<StrIdx>, Payload)], name: &str) -> bool {
+    attrs.iter().any(|(n, _)| arena.get_string(n.txt) == name)
 }
 
 /// Collect list elements from a cons pattern
@@ -380,7 +380,7 @@ fn print_structure_item<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, item
         StructureItemDesc::Pstr_primitive(vd) => {
             f.open_box(BoxKind::HOV, 2);
             f.string("external ");
-            f.string(&vd.pval_name.txt);
+            f.string(arena.get_string(vd.pval_name.txt));
             f.string(" : ");
             print_core_type(f, arena, &vd.pval_type);
             for prim in &vd.pval_prim {
@@ -425,7 +425,7 @@ fn print_structure_item<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, item
         }
         StructureItemDesc::Pstr_module(mb) => {
             f.string("module ");
-            f.string(&mb.pmb_name.txt);
+            f.string(arena.get_string(mb.pmb_name.txt));
             f.string(" = ");
             print_module_expr(f, arena, &mb.pmb_expr);
         }
@@ -436,14 +436,14 @@ fn print_structure_item<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, item
                 } else {
                     f.string(" and ");
                 }
-                f.string(&mb.pmb_name.txt);
+                f.string(arena.get_string(mb.pmb_name.txt));
                 f.string(" = ");
                 print_module_expr(f, arena, &mb.pmb_expr);
             }
         }
         StructureItemDesc::Pstr_modtype(mtd) => {
             f.string("module type ");
-            f.string(&mtd.pmtd_name.txt);
+            f.string(arena.get_string(mtd.pmtd_name.txt));
             if let Some(mt) = &mtd.pmtd_type {
                 // OCaml has trailing space from name + space before =
                 f.string("  = ");
@@ -467,7 +467,7 @@ fn print_structure_item<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, item
         StructureItemDesc::Pstr_attribute((name, payload)) => {
             // Standalone/floating attributes use [@@@...] (3 @)
             f.string("[@@@");
-            f.string(&name.txt);
+            f.string(arena.get_string(name.txt));
             if !payload_is_empty(payload) {
                 f.string(" ");
                 print_payload(f, arena, payload);
@@ -479,7 +479,7 @@ fn print_structure_item<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, item
         StructureItemDesc::Pstr_extension((name, payload), attrs) => {
             f.open_box(BoxKind::H, 2);
             f.string("[%%");
-            f.string(&name.txt);
+            f.string(arena.get_string(name.txt));
             f.space();
             print_payload(f, arena, payload);
             f.string("]");
@@ -578,7 +578,7 @@ fn print_inline_param<W: Write>(
         }
         ArgLabel::Labelled(name) => {
             let name_str = arena.get_string(name.txt);
-            if pattern_is_simple_var(pat, name_str) {
+            if pattern_is_simple_var(arena, pat, name_str) {
                 f.string("~");
                 f.string(name_str);
                 f.string("  ");
@@ -593,7 +593,7 @@ fn print_inline_param<W: Write>(
         ArgLabel::Optional(name) => {
             let name_str = arena.get_string(name.txt);
             if let Some(def) = default {
-                if pattern_is_simple_var(pat, name_str) {
+                if pattern_is_simple_var(arena, pat, name_str) {
                     f.string("?(");
                     f.string(name_str);
                     f.string("= ");
@@ -608,7 +608,7 @@ fn print_inline_param<W: Write>(
                     print_expression(f, arena, def);
                     f.string(")  ");
                 }
-            } else if pattern_is_simple_var(pat, name_str) {
+            } else if pattern_is_simple_var(arena, pat, name_str) {
                 f.string("?");
                 f.string(name_str);
                 f.string("  ");
@@ -652,7 +652,7 @@ fn print_remaining_inline_params<'a, W: Write>(
 // ============================================================================
 
 fn print_expression<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, expr: &Expression) {
-    let attrs = printable_attributes(&expr.pexp_attributes);
+    let attrs = printable_attributes(arena, &expr.pexp_attributes);
     let has_attrs = !attrs.is_empty();
 
     if has_attrs {
@@ -664,7 +664,7 @@ fn print_expression<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, expr: &E
         for (name, payload) in attrs {
             f.cut();
             f.string("[@");
-            f.string(&name.txt);
+            f.string(arena.get_string(name.txt));
             if !payload_is_empty(payload) {
                 f.string(" ");
                 print_payload(f, arena, payload);
@@ -678,7 +678,7 @@ fn print_expression<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, expr: &E
 }
 
 fn print_expression_no_outer_parens<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, expr: &Expression) {
-    let attrs = printable_attributes(&expr.pexp_attributes);
+    let attrs = printable_attributes(arena, &expr.pexp_attributes);
     let has_attrs = !attrs.is_empty();
 
     if has_attrs {
@@ -689,7 +689,7 @@ fn print_expression_no_outer_parens<W: Write>(f: &mut Formatter<W>, arena: &Pars
         for (name, payload) in attrs {
             f.cut(); // Allow break before attribute
             f.string("[@");
-            f.string(&name.txt);
+            f.string(arena.get_string(name.txt));
             if !payload_is_empty(payload) {
                 f.string(" ");
                 print_payload(f, arena, payload);
@@ -706,7 +706,7 @@ fn print_expression_simple<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, e
     // OCaml's simple_expr wraps non-simple expressions in parens
     // BUT: attributed expressions already produce ((expr)[@attr]) structure
     // so we don't add extra parens for them
-    let has_attrs = !printable_attributes(&expr.pexp_attributes).is_empty();
+    let has_attrs = !printable_attributes(arena, &expr.pexp_attributes).is_empty();
 
     if is_simple_expression(expr) {
         print_expression(f, arena, expr);
@@ -721,7 +721,7 @@ fn print_expression_simple<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, e
 }
 
 fn print_expression_semi_context<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, expr: &Expression) {
-    let attrs = printable_attributes(&expr.pexp_attributes);
+    let attrs = printable_attributes(arena, &expr.pexp_attributes);
     let has_attrs = !attrs.is_empty();
     let needs_semi_parens = needs_parens_in_semi_context(expr);
     let is_simple = is_simple_expression(expr);
@@ -733,7 +733,7 @@ fn print_expression_semi_context<W: Write>(f: &mut Formatter<W>, arena: &ParseAr
         for (name, payload) in attrs {
             f.cut(); // Allow break before attribute
             f.string("[@");
-            f.string(&name.txt);
+            f.string(arena.get_string(name.txt));
             if !payload_is_empty(payload) {
                 f.string(" ");
                 print_payload(f, arena, payload);
@@ -755,7 +755,7 @@ fn print_expression_semi_context<W: Write>(f: &mut Formatter<W>, arena: &ParseAr
 }
 
 fn print_expression_list_context<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, expr: &Expression) {
-    let attrs = printable_attributes(&expr.pexp_attributes);
+    let attrs = printable_attributes(arena, &expr.pexp_attributes);
     let has_attrs = !attrs.is_empty();
     let needs_semi_parens = needs_parens_in_semi_context(expr);
 
@@ -765,7 +765,7 @@ fn print_expression_list_context<W: Write>(f: &mut Formatter<W>, arena: &ParseAr
         for (name, payload) in attrs {
             f.cut(); // Allow break before attribute
             f.string("[@");
-            f.string(&name.txt);
+            f.string(arena.get_string(name.txt));
             if !payload_is_empty(payload) {
                 f.string(" ");
                 print_payload(f, arena, payload);
@@ -783,7 +783,7 @@ fn print_expression_list_context<W: Write>(f: &mut Formatter<W>, arena: &ParseAr
 }
 
 fn print_expression_parens_if_complex<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, expr: &Expression) {
-    let attrs = printable_attributes(&expr.pexp_attributes);
+    let attrs = printable_attributes(arena, &expr.pexp_attributes);
     let has_attrs = !attrs.is_empty();
     let needs_parens = needs_parens_as_function_arg(expr, arena);
     let has_own_parens = expression_has_own_parens(expr);
@@ -796,7 +796,7 @@ fn print_expression_parens_if_complex<W: Write>(f: &mut Formatter<W>, arena: &Pa
             for (name, payload) in attrs {
                 f.cut(); // Allow break before attribute
                 f.string("[@");
-                f.string(&name.txt);
+                f.string(arena.get_string(name.txt));
                 if !payload_is_empty(payload) {
                     f.string(" ");
                     print_payload(f, arena, payload);
@@ -811,7 +811,7 @@ fn print_expression_parens_if_complex<W: Write>(f: &mut Formatter<W>, arena: &Pa
             for (name, payload) in attrs {
                 f.cut(); // Allow break before attribute
                 f.string("[@");
-                f.string(&name.txt);
+                f.string(arena.get_string(name.txt));
                 if !payload_is_empty(payload) {
                     f.string(" ");
                     print_payload(f, arena, payload);
@@ -957,7 +957,7 @@ fn print_expression_inner<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, ex
         }
         ExpressionDesc::Pexp_apply { funct, args, partial, .. } => {
             // Array access with @res.array.access
-            if has_attribute(&expr.pexp_attributes, "res.array.access") && args.len() == 2 {
+            if has_attribute(arena, &expr.pexp_attributes, "res.array.access") && args.len() == 2 {
                 let (_, arr) = &args[0];
                 let (_, idx) = &args[1];
                 f.string("(");
@@ -1322,7 +1322,7 @@ fn print_expression_inner<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, ex
             }
             f.open_box(BoxKind::HOV, 2);
             f.string("let module ");
-            f.string(&name.txt);
+            f.string(arena.get_string(name.txt));
             f.string(" = ");
             print_module_expr(f, arena, mexpr);
             f.string(" in");
@@ -1359,7 +1359,7 @@ fn print_expression_inner<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, ex
         }
         ExpressionDesc::Pexp_newtype(name, body) => {
             f.string("(fun (type ");
-            f.string(&name.txt);
+            f.string(arena.get_string(name.txt));
             f.string(") -> ");
             print_expression(f, arena, body);
             f.string(")");
@@ -1387,7 +1387,7 @@ fn print_expression_inner<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, ex
         ExpressionDesc::Pexp_extension((name, payload)) => {
             f.open_box(BoxKind::H, 2);
             f.string("[%");
-            f.string(&name.txt);
+            f.string(arena.get_string(name.txt));
             f.space();
             print_payload(f, arena, payload);
             f.string("]");
@@ -1433,7 +1433,7 @@ fn print_pattern<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, pat: &Patte
         for (name, payload) in &pat.ppat_attributes {
             f.cut(); // Allow break before attribute
             f.string("[@");
-            f.string(&name.txt);
+            f.string(arena.get_string(name.txt));
             if !payload_is_empty(payload) {
                 f.string(" ");
                 print_payload(f, arena, payload);
@@ -1450,13 +1450,13 @@ fn print_pattern_inner<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, pat: 
             f.string("_");
         }
         PatternDesc::Ppat_var(name) => {
-            f.string(&name.txt);
+            f.string(arena.get_string(name.txt));
         }
         PatternDesc::Ppat_alias(p, name) => {
             // OCaml: @[<2>%a@;as@;%a@] - no outer parens
             print_pattern(f, arena, p);
             f.string(" as ");
-            f.string(&name.txt);
+            f.string(arena.get_string(name.txt));
         }
         PatternDesc::Ppat_constant(c) => {
             // Negative numbers need parentheses in patterns
@@ -1577,7 +1577,7 @@ fn print_pattern_inner<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, pat: 
                     _ => None,
                 };
                 let is_punned = if let Some(fname) = field_name {
-                    matches!(&field.pat.ppat_desc, PatternDesc::Ppat_var(var) if var.txt == fname)
+                    matches!(&field.pat.ppat_desc, PatternDesc::Ppat_var(var) if arena.get_string(var.txt) == fname)
                 } else {
                     false
                 };
@@ -1635,7 +1635,7 @@ fn print_pattern_inner<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, pat: 
         }
         PatternDesc::Ppat_unpack(name) => {
             f.string("(module ");
-            f.string(&name.txt);
+            f.string(arena.get_string(name.txt));
             f.string(")");
         }
         PatternDesc::Ppat_exception(p) => {
@@ -1656,7 +1656,7 @@ fn print_pattern_inner<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, pat: 
         PatternDesc::Ppat_extension((name, payload)) => {
             f.open_box(BoxKind::H, 2);
             f.string("[%");
-            f.string(&name.txt);
+            f.string(arena.get_string(name.txt));
             f.space();
             print_payload(f, arena, payload);
             f.string("]");
@@ -1677,7 +1677,7 @@ fn print_pattern_inner<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, pat: 
 
 fn print_core_type<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, typ: &CoreType) {
     // Types with attributes are wrapped: ((type)[@attr ])
-    let has_attrs = printable_attributes(&typ.ptyp_attributes).len() > 0;
+    let has_attrs = printable_attributes(arena, &typ.ptyp_attributes).len() > 0;
     if has_attrs {
         f.string("((");
     }
@@ -1776,7 +1776,7 @@ fn print_core_type_inner<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, typ
                         // After type: @ (break = space)
                         f.string(" ");
                         // Attributes: %a then @ (break)
-                        let printable = printable_attributes(attrs);
+                        let printable = printable_attributes(arena, attrs);
                         if !printable.is_empty() {
                             print_attributes(f, arena, attrs);
                         }
@@ -1885,7 +1885,7 @@ fn print_core_type_inner<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, typ
             if !vars.is_empty() {
                 for var in vars {
                     f.string("'");
-                    f.string(&var.txt);
+                    f.string(arena.get_string(var.txt));
                     f.string(" ");
                 }
                 f.string(". ");
@@ -1906,7 +1906,7 @@ fn print_core_type_inner<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, typ
         CoreTypeDesc::Ptyp_extension((name, payload)) => {
             f.open_box(BoxKind::H, 2);
             f.string("[%");
-            f.string(&name.txt);
+            f.string(arena.get_string(name.txt));
             f.space();
             print_payload(f, arena, payload);
             f.string("]");
@@ -2155,7 +2155,7 @@ fn print_type_declaration<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, de
             f.string(") ");
         }
     }
-    f.string(&decl.ptype_name.txt);
+    f.string(arena.get_string(decl.ptype_name.txt));
 
     if let Some(manifest) = &decl.ptype_manifest {
         f.string(" = ");
@@ -2179,7 +2179,7 @@ fn print_type_declaration<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, de
                 } else {
                     f.string("\n  | ");
                 }
-                f.string(&ctor.pcd_name.txt);
+                f.string(arena.get_string(ctor.pcd_name.txt));
                 match &ctor.pcd_args {
                     ConstructorArguments::Pcstr_tuple(args) if !args.is_empty() => {
                         f.string(" of ");
@@ -2199,7 +2199,7 @@ fn print_type_declaration<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, de
                             if matches!(field.pld_mutable, MutableFlag::Mutable) {
                                 f.string("mutable ");
                             }
-                            f.string(&field.pld_name.txt);
+                            f.string(arena.get_string(field.pld_name.txt));
                             f.string(": ");
                             print_core_type(f, arena, &field.pld_type);
                         }
@@ -2230,7 +2230,7 @@ fn print_type_declaration<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, de
                 if matches!(field.pld_mutable, MutableFlag::Mutable) {
                     f.string("mutable ");
                 }
-                f.string(&field.pld_name.txt);
+                f.string(arena.get_string(field.pld_name.txt));
                 f.string(": ");
                 print_core_type(f, arena, &field.pld_type);
                 if i < fields.len() - 1 {
@@ -2250,7 +2250,7 @@ fn print_type_declaration<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, de
 }
 
 fn print_extension_constructor<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, ext: &ExtensionConstructor) {
-    f.string(&ext.pext_name.txt);
+    f.string(arena.get_string(ext.pext_name.txt));
     match &ext.pext_kind {
         ExtensionConstructorKind::Pext_decl(args, res) => {
             match args {
@@ -2273,7 +2273,7 @@ fn print_extension_constructor<W: Write>(f: &mut Formatter<W>, arena: &ParseAren
                         if matches!(field.pld_mutable, MutableFlag::Mutable) {
                             f.string("mutable ");
                         }
-                        f.string(&field.pld_name.txt);
+                        f.string(arena.get_string(field.pld_name.txt));
                         f.string(": ");
                         print_core_type(f, arena, &field.pld_type);
                     }
@@ -2308,7 +2308,7 @@ fn print_extension_constructor<W: Write>(f: &mut Formatter<W>, arena: &ParseAren
 
 fn print_module_expr<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, mexpr: &ModuleExpr) {
     // Print attributes on module expressions: ((mexpr)[@attr ])
-    let has_attrs = printable_attributes(&mexpr.pmod_attributes).len() > 0;
+    let has_attrs = printable_attributes(arena, &mexpr.pmod_attributes).len() > 0;
     if has_attrs {
         f.string("((");
     }
@@ -2335,7 +2335,7 @@ fn print_module_expr_inner<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, m
         }
         ModuleExprDesc::Pmod_functor(name, mtype, body) => {
             f.string("functor (");
-            f.string(&name.txt);
+            f.string(arena.get_string(name.txt));
             if let Some(mt) = mtype {
                 f.string(" : ");
                 print_module_type(f, arena, mt);
@@ -2364,7 +2364,7 @@ fn print_module_expr_inner<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, m
         ModuleExprDesc::Pmod_extension((name, payload)) => {
             f.open_box(BoxKind::H, 2);
             f.string("[%");
-            f.string(&name.txt);
+            f.string(arena.get_string(name.txt));
             f.space();
             print_payload(f, arena, payload);
             f.string("]");
@@ -2375,7 +2375,7 @@ fn print_module_expr_inner<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, m
 
 fn print_module_type<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, mtype: &ModuleType) {
     // Print attributes on module types: ((mtype)[@attr ])
-    let has_attrs = printable_attributes(&mtype.pmty_attributes).len() > 0;
+    let has_attrs = printable_attributes(arena, &mtype.pmty_attributes).len() > 0;
     if has_attrs {
         f.string("((");
     }
@@ -2411,7 +2411,7 @@ fn print_module_type_inner<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, m
         ModuleTypeDesc::Pmty_functor(name, arg_type, ret_type) => {
             // Anonymous functors (name = "_") are printed as just "ArgType -> RetType"
             // Named functors are printed as "functor (Name : ArgType) -> RetType"
-            if name.txt == "_" {
+            if arena.get_string(name.txt) == "_" {
                 if let Some(mt) = arg_type {
                     print_module_type(f, arena, mt);
                 }
@@ -2419,7 +2419,7 @@ fn print_module_type_inner<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, m
                 print_module_type(f, arena, ret_type);
             } else {
                 f.string("functor (");
-                f.string(&name.txt);
+                f.string(arena.get_string(name.txt));
                 if let Some(mt) = arg_type {
                     f.string(" : ");
                     print_module_type(f, arena, mt);
@@ -2470,7 +2470,7 @@ fn print_module_type_inner<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, m
         ModuleTypeDesc::Pmty_extension((name, payload)) => {
             f.open_box(BoxKind::H, 2);
             f.string("[%");
-            f.string(&name.txt);
+            f.string(arena.get_string(name.txt));
             f.space();
             print_payload(f, arena, payload);
             f.string("]");
@@ -2496,7 +2496,7 @@ fn print_signature_item<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, item
             } else {
                 f.string("external ");
             }
-            f.string(&vd.pval_name.txt);
+            f.string(arena.get_string(vd.pval_name.txt));
             f.string(" : ");
             print_core_type(f, arena, &vd.pval_type);
             for prim in &vd.pval_prim {
@@ -2539,7 +2539,7 @@ fn print_signature_item<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, item
         }
         SignatureItemDesc::Psig_module(md) => {
             f.string("module ");
-            f.string(&md.pmd_name.txt);
+            f.string(arena.get_string(md.pmd_name.txt));
             f.string(" : ");
             print_module_type(f, arena, &md.pmd_type);
         }
@@ -2550,14 +2550,14 @@ fn print_signature_item<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, item
                 } else {
                     f.string(" and ");
                 }
-                f.string(&md.pmd_name.txt);
+                f.string(arena.get_string(md.pmd_name.txt));
                 f.string(" : ");
                 print_module_type(f, arena, &md.pmd_type);
             }
         }
         SignatureItemDesc::Psig_modtype(mtd) => {
             f.string("module type ");
-            f.string(&mtd.pmtd_name.txt);
+            f.string(arena.get_string(mtd.pmtd_name.txt));
             if let Some(mt) = &mtd.pmtd_type {
                 // OCaml has trailing space from name + space before =
                 f.string("  = ");
@@ -2581,7 +2581,7 @@ fn print_signature_item<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, item
         SignatureItemDesc::Psig_attribute((name, payload)) => {
             // Standalone/floating attributes use [@@@...] (3 @)
             f.string("[@@@");
-            f.string(&name.txt);
+            f.string(arena.get_string(name.txt));
             if !payload_is_empty(payload) {
                 f.string(" ");
                 print_payload(f, arena, payload);
@@ -2593,7 +2593,7 @@ fn print_signature_item<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, item
         SignatureItemDesc::Psig_extension((name, payload), attrs) => {
             f.open_box(BoxKind::H, 2);
             f.string("[%%");
-            f.string(&name.txt);
+            f.string(arena.get_string(name.txt));
             f.space();
             print_payload(f, arena, payload);
             f.string("]");
@@ -2603,11 +2603,11 @@ fn print_signature_item<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, item
     }
 }
 
-fn print_item_attributes<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, attrs: &[(Located<String>, Payload)]) {
-    let attrs = printable_attributes(attrs);
+fn print_item_attributes<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, attrs: &[(Located<StrIdx>, Payload)]) {
+    let attrs = printable_attributes(arena, attrs);
     for (name, payload) in attrs {
         f.string("[@@");
-        f.string(&name.txt);
+        f.string(arena.get_string(name.txt));
         if !payload_is_empty(payload) {
             f.string(" ");
             print_payload(f, arena, payload);
@@ -2619,11 +2619,11 @@ fn print_item_attributes<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, att
 }
 
 /// Print attributes with single @ (for expressions, types, patterns)
-fn print_attributes<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, attrs: &[(Located<String>, Payload)]) {
-    let attrs = printable_attributes(attrs);
+fn print_attributes<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, attrs: &[(Located<StrIdx>, Payload)]) {
+    let attrs = printable_attributes(arena, attrs);
     for (name, payload) in attrs {
         f.string("[@");
-        f.string(&name.txt);
+        f.string(arena.get_string(name.txt));
         if !payload_is_empty(payload) {
             f.string(" ");
             print_payload(f, arena, payload);

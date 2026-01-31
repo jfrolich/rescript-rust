@@ -11,8 +11,7 @@
 //! - Key props use `jsxKeyed`/`jsxsKeyed` instead
 //! - `@react.component` transforms functions to accept props record
 
-use crate::location::{Location as FullLocation, Position};
-use crate::parse_arena::{LidentIdx, Located, LocIdx, ParseArena};
+use crate::parse_arena::{LidentIdx, Located, ParseArena, StrIdx};
 use super::ast::*;
 use super::longident::Longident;
 
@@ -158,7 +157,7 @@ pub fn transform_signature(signature: Signature, initial_version: i32, arena: &m
 fn transform_structure_item_multi(item: StructureItem, config: &mut JsxConfig, arena: &mut ParseArena) -> Vec<StructureItem> {
     // Check for @@jsxConfig attribute
     if let StructureItemDesc::Pstr_attribute(attr) = &item.pstr_desc {
-        if attr.0.txt == "jsxConfig" {
+        if arena.get_string(attr.0.txt) == "jsxConfig" {
             update_config_from_attribute(arena, attr, config);
         }
         return vec![item];
@@ -176,7 +175,7 @@ fn transform_structure_item_multi(item: StructureItem, config: &mut JsxConfig, a
 
     // Handle Pstr_primitive (external) with potential @react.component
     if let StructureItemDesc::Pstr_primitive(vd) = &item.pstr_desc {
-        if has_react_component_attr(&vd.pval_attributes) {
+        if has_react_component_attr(arena, &vd.pval_attributes) {
             return transform_react_component_external(vd.clone(), &item.pstr_loc, config, arena);
         }
     }
@@ -199,7 +198,7 @@ fn transform_structure_item_multi(item: StructureItem, config: &mut JsxConfig, a
 
 fn transform_module_binding_with_tracking(mb: ModuleBinding, config: &mut JsxConfig, arena: &mut ParseArena) -> ModuleBinding {
     // Track nested module name
-    let module_name = mb.pmb_name.txt.clone();
+    let module_name = arena.get_string(mb.pmb_name.txt).to_string();
     config.nested_modules.push(module_name);
     config.has_component = false;
 
@@ -224,7 +223,7 @@ fn transform_value_bindings(
     let mut new_bindings = vec![];
 
     for binding in bindings {
-        if has_react_component_attr(&binding.pvb_attributes) {
+        if has_react_component_attr(arena, &binding.pvb_attributes) {
             // Transform @react.component binding
             let (props_type, transformed, new_binding) =
                 transform_react_component_binding(binding, rec_flag, loc, config, arena);
@@ -236,7 +235,7 @@ fn transform_value_bindings(
             if let Some(nb) = new_binding {
                 new_bindings.push(nb);
             }
-        } else if has_react_component_with_props_attr(&binding.pvb_attributes) {
+        } else if has_react_component_with_props_attr(arena, &binding.pvb_attributes) {
             // Transform @react.componentWithProps binding
             let (transformed, new_binding) =
                 transform_react_component_with_props_binding(binding, rec_flag, loc, config, arena);
@@ -317,12 +316,12 @@ fn transform_react_component_binding(
     config.has_component = true;
 
     // Get function name and location from pattern
-    let fn_name = get_fn_name(&binding.pvb_pat);
+    let fn_name = get_fn_name(arena, &binding.pvb_pat);
     let fn_name_loc = get_fn_name_loc(&binding.pvb_pat);
     let original_binding_loc = binding.pvb_loc.clone();
 
     // Check for sharedProps: @react.component(:sharedProps<T>)
-    let core_type_of_attr = core_type_of_attrs(&binding.pvb_attributes);
+    let core_type_of_attr = core_type_of_attrs(arena, &binding.pvb_attributes);
     let typ_vars_of_core_type: Vec<CoreType> = core_type_of_attr.as_ref()
         .map(typ_vars_of_core_type)
         .unwrap_or_default();
@@ -337,7 +336,7 @@ fn transform_react_component_binding(
     // Filter out @react.component attribute
     let filtered_attrs: Attributes = binding.pvb_attributes
         .iter()
-        .filter(|attr| !is_react_component_attr(attr))
+        .filter(|attr| !is_react_component_attr(arena, attr))
         .cloned()
         .collect();
 
@@ -351,9 +350,9 @@ fn transform_react_component_binding(
 
     // Create props type - either record or abstract with manifest (for sharedProps)
     let props_type = if let Some(manifest) = &core_type_of_attr {
-        make_props_abstract_type("props", pstr_loc, manifest, &typ_vars_of_core_type)
+        make_props_abstract_type(arena, "props", pstr_loc, manifest, &typ_vars_of_core_type)
     } else {
-        make_props_record_type("props", pstr_loc, &named_type_list, has_forward_ref)
+        make_props_record_type(arena, "props", pstr_loc, &named_type_list, has_forward_ref)
     };
 
     // Build the internal expression pattern (use inner expression to handle forwardRef)
@@ -450,8 +449,9 @@ fn transform_react_component_binding(
         let ref_loc = ref_arg.map(|a| a.loc.clone()).unwrap_or_else(empty_loc);
 
         // Create ref parameter - use actual alias and location from args
+        let ref_alias_idx = arena.push_string(ref_alias.clone());
         let base_ref_pattern = Pattern {
-            ppat_desc: PatternDesc::Ppat_var(Loc { txt: ref_alias.clone(), loc: ref_loc.clone() }),
+            ppat_desc: PatternDesc::Ppat_var(Loc { txt: ref_alias_idx, loc: ref_loc.clone() }),
             ppat_loc: ref_loc.clone(),
             ppat_attributes: vec![],
         };
@@ -583,9 +583,10 @@ fn transform_react_component_binding(
         // For sharedProps WITH type variables, or non-sharedProps, it should have the constraint
         let has_props_constraint = !named_type_list.is_empty() && (core_type_of_attr.is_none() || !typ_vars_of_core_type.is_empty());
 
+        let binding_name_idx = arena.push_string(binding_name.clone());
         let inner_binding = ValueBinding {
             pvb_pat: Pattern {
-                ppat_desc: PatternDesc::Ppat_var(Loc { txt: binding_name.clone(), loc: empty_loc() }),
+                ppat_desc: PatternDesc::Ppat_var(Loc { txt: binding_name_idx, loc: empty_loc() }),
                 ppat_loc: empty_loc(),
                 ppat_attributes: vec![],
             },
@@ -616,9 +617,10 @@ fn transform_react_component_binding(
     };
 
     // Create transformed binding
+    let fn_name_idx = arena.push_string(fn_name.clone());
     let transformed_binding = ValueBinding {
         pvb_pat: Pattern {
-            ppat_desc: PatternDesc::Ppat_var(Loc { txt: fn_name.clone(), loc: empty_loc() }),
+            ppat_desc: PatternDesc::Ppat_var(Loc { txt: fn_name_idx, loc: empty_loc() }),
             ppat_loc: empty_loc(),
             ppat_attributes: vec![],
         },
@@ -678,9 +680,10 @@ fn transform_react_component_binding(
     // - pvb_loc uses pstr_loc (the entire structure_item location including @react.component)
     // - pattern uses the original fn_name location
     let new_binding = if rec_flag == RecFlag::Nonrecursive && !full_module_name.is_empty() {
+        let fn_name_idx2 = arena.push_string(fn_name);
         Some(ValueBinding {
             pvb_pat: Pattern {
-                ppat_desc: PatternDesc::Ppat_var(Loc { txt: fn_name, loc: fn_name_loc.clone() }),
+                ppat_desc: PatternDesc::Ppat_var(Loc { txt: fn_name_idx2, loc: fn_name_loc.clone() }),
                 ppat_loc: fn_name_loc,
                 ppat_attributes: vec![],
             },
@@ -714,7 +717,7 @@ fn transform_react_component_with_props_binding(
     config.has_component = true;
 
     // Get function name and location from pattern
-    let fn_name = get_fn_name(&binding.pvb_pat);
+    let fn_name = get_fn_name(arena, &binding.pvb_pat);
     let fn_name_loc = get_fn_name_loc(&binding.pvb_pat);
     let internal_fn_name = format!("{}$Internal", fn_name);
     let full_module_name = make_module_name(config, &fn_name);
@@ -733,7 +736,7 @@ fn transform_react_component_with_props_binding(
     // Filter out @react.componentWithProps attribute
     let filtered_attrs: Attributes = binding.pvb_attributes
         .iter()
-        .filter(|attr| !is_react_component_with_props_attr(attr))
+        .filter(|attr| !is_react_component_with_props_attr(arena, attr))
         .cloned()
         .collect();
 
@@ -803,12 +806,14 @@ fn transform_react_component_with_props_binding(
     };
 
     // Create let binding: let full_module_name = wrapper_expr in full_module_name
+    let full_module_name_idx = arena.push_string(full_module_name.clone());
+    let full_module_name_idx2 = arena.push_string(full_module_name);
     let internal_expr = Expression {
         pexp_desc: ExpressionDesc::Pexp_let(
             RecFlag::Nonrecursive,
             vec![ValueBinding {
                 pvb_pat: Pattern {
-                    ppat_desc: PatternDesc::Ppat_var(Loc { txt: full_module_name.clone(), loc: empty_loc() }),
+                    ppat_desc: PatternDesc::Ppat_var(Loc { txt: full_module_name_idx, loc: empty_loc() }),
                     ppat_loc: empty_loc(),
                     ppat_attributes: vec![],
                 },
@@ -818,10 +823,7 @@ fn transform_react_component_with_props_binding(
             }],
             Box::new(Expression {
                 pexp_desc: ExpressionDesc::Pexp_ident(Loc {
-                    txt: {
-                        let str_idx = arena.push_string(full_module_name);
-                        arena.push_longident(Longident::Lident(str_idx))
-                    },
+                    txt: arena.push_longident(Longident::Lident(full_module_name_idx2)),
                     loc: empty_loc(),
                 }),
                 pexp_loc: empty_loc(),
@@ -834,9 +836,10 @@ fn transform_react_component_with_props_binding(
 
     // Create the new binding
     // OCaml's make_new_binding uses empty_loc for both pvb_loc and ppat_loc
+    let fn_name_idx = arena.push_string(fn_name.clone());
     let new_binding = ValueBinding {
         pvb_pat: Pattern {
-            ppat_desc: PatternDesc::Ppat_var(Loc { txt: fn_name.clone(), loc: empty_loc() }),
+            ppat_desc: PatternDesc::Ppat_var(Loc { txt: fn_name_idx, loc: empty_loc() }),
             ppat_loc: empty_loc(),
             ppat_attributes: vec![],
         },
@@ -849,9 +852,10 @@ fn transform_react_component_with_props_binding(
     match rec_flag {
         RecFlag::Recursive => {
             // For recursive: modify original binding to be internal, add new binding
+            let internal_fn_name_idx = arena.push_string(internal_fn_name);
             let modified_binding = ValueBinding {
                 pvb_pat: Pattern {
-                    ppat_desc: PatternDesc::Ppat_var(Loc { txt: internal_fn_name, loc: empty_loc() }),
+                    ppat_desc: PatternDesc::Ppat_var(Loc { txt: internal_fn_name_idx, loc: empty_loc() }),
                     ppat_loc: empty_loc(),
                     ppat_attributes: vec![],
                 },
@@ -916,13 +920,14 @@ fn make_with_props_pattern(arena: &mut ParseArena, expr: &Expression) -> Pattern
                     match &typ.ptyp_desc {
                         CoreTypeDesc::Ptyp_constr(loc, args) if arena.is_lident(loc.txt, "props") => {
                             let props_str_idx = arena.intern_string("props");
+                            let props_str_idx2 = arena.intern_string("props");
                             let props_lid = arena.push_longident(Longident::Lident(props_str_idx));
                             if !args.is_empty() {
                                 // props<_>
                                 Pattern {
                                     ppat_desc: PatternDesc::Ppat_constraint(
                                         Box::new(Pattern {
-                                            ppat_desc: PatternDesc::Ppat_var(Loc { txt: "props".to_string(), loc: empty_loc() }),
+                                            ppat_desc: PatternDesc::Ppat_var(Loc { txt: props_str_idx2, loc: empty_loc() }),
                                             ppat_loc: empty_loc(),
                                             ppat_attributes: vec![],
                                         }),
@@ -944,10 +949,11 @@ fn make_with_props_pattern(arena: &mut ParseArena, expr: &Expression) -> Pattern
                                 }
                             } else {
                                 // props
+                                let props_str_idx3 = arena.intern_string("props");
                                 Pattern {
                                     ppat_desc: PatternDesc::Ppat_constraint(
                                         Box::new(Pattern {
-                                            ppat_desc: PatternDesc::Ppat_var(Loc { txt: "props".to_string(), loc: empty_loc() }),
+                                            ppat_desc: PatternDesc::Ppat_var(Loc { txt: props_str_idx3, loc: empty_loc() }),
                                             ppat_loc: empty_loc(),
                                             ppat_attributes: vec![],
                                         }),
@@ -965,19 +971,20 @@ fn make_with_props_pattern(arena: &mut ParseArena, expr: &Expression) -> Pattern
                                 }
                             }
                         }
-                        _ => simple_props_pattern(),
+                        _ => simple_props_pattern(arena),
                     }
                 }
-                _ => simple_props_pattern(),
+                _ => simple_props_pattern(arena),
             }
         }
-        _ => simple_props_pattern(),
+        _ => simple_props_pattern(arena),
     }
 }
 
-fn simple_props_pattern() -> Pattern {
+fn simple_props_pattern(arena: &mut ParseArena) -> Pattern {
+    let props_str_idx = arena.intern_string("props");
     Pattern {
-        ppat_desc: PatternDesc::Ppat_var(Loc { txt: "props".to_string(), loc: empty_loc() }),
+        ppat_desc: PatternDesc::Ppat_var(Loc { txt: props_str_idx, loc: empty_loc() }),
         ppat_loc: empty_loc(),
         ppat_attributes: vec![],
     }
@@ -1021,8 +1028,9 @@ fn is_async_function(expr: &Expression) -> bool {
 ///// Create wrapper expression: props => fnName(props)
 /// OCaml's make_props_pattern only adds type constraint when there are props
 fn make_props_wrapper_expr(arena: &mut ParseArena, fn_name: &str, _rec_flag: RecFlag, _config: &JsxConfig, has_props: bool) -> Expression {
+    let props_idx = arena.intern("props");
     let props_pattern = Pattern {
-        ppat_desc: PatternDesc::Ppat_var(Loc { txt: "props".to_string(), loc: empty_loc() }),
+        ppat_desc: PatternDesc::Ppat_var(Loc { txt: props_idx, loc: empty_loc() }),
         ppat_loc: empty_loc(),
         ppat_attributes: vec![],
     };
@@ -1099,8 +1107,9 @@ fn make_props_wrapper_expr(arena: &mut ParseArena, fn_name: &str, _rec_flag: Rec
 /// Create wrapper expression with forwardRef support: (props, ref) => fnName(props, ref)
 /// expr_attrs: the original expression's attributes (e.g., @directive) to put on the outer Pexp_fun
 fn make_props_wrapper_expr_with_ref(arena: &mut ParseArena, fn_name: &str, _rec_flag: RecFlag, _config: &JsxConfig, has_props: bool, has_forward_ref: bool, is_async: bool, expr_attrs: Attributes) -> Expression {
+    let props_str_idx_pat = arena.intern_string("props");
     let props_pattern = Pattern {
-        ppat_desc: PatternDesc::Ppat_var(Loc { txt: "props".to_string(), loc: empty_loc() }),
+        ppat_desc: PatternDesc::Ppat_var(Loc { txt: props_str_idx_pat, loc: empty_loc() }),
         ppat_loc: empty_loc(),
         ppat_attributes: vec![],
     };
@@ -1189,8 +1198,9 @@ fn make_props_wrapper_expr_with_ref(arena: &mut ParseArena, fn_name: &str, _rec_
 
     // For forwardRef, wrap with an additional ref parameter
     let inner_expr = if has_forward_ref {
+        let ref_str_idx_pat = arena.intern_string("ref");
         let ref_pattern = Pattern {
-            ppat_desc: PatternDesc::Ppat_var(Loc { txt: "ref".to_string(), loc: empty_loc() }),
+            ppat_desc: PatternDesc::Ppat_var(Loc { txt: ref_str_idx_pat, loc: empty_loc() }),
             ppat_loc: empty_loc(),
             ppat_attributes: vec![],
         };
@@ -1265,7 +1275,7 @@ fn build_props_pattern_and_body(
         // For optional args with default, prefix with __
         let mut pat = if arg.default.is_some() {
             let mut p = base_pat;
-            prefix_pattern_var(&mut p, "__");
+            prefix_pattern_var(arena, &mut p, "__");
             p
         } else {
             base_pat
@@ -1313,6 +1323,7 @@ fn add_default_value_matches(arena: &mut ParseArena, mut expr: Expression, args:
             let some_str_idx = arena.intern_string("Some");
             let none_str_idx = arena.intern_string("None");
             let label_name_str_idx = arena.push_string(label_name.clone());
+            let label_name_str_idx2 = arena.push_string(label_name);
             let match_expr = Expression {
                 pexp_desc: ExpressionDesc::Pexp_match(
                     Box::new(Expression {
@@ -1331,7 +1342,7 @@ fn add_default_value_matches(arena: &mut ParseArena, mut expr: Expression, args:
                                     Loc { txt: arena.push_longident(Longident::Lident(some_str_idx)), loc: empty_loc() },
                                     Some(Box::new(Pattern {
                                         ppat_desc: PatternDesc::Ppat_var(Loc {
-                                            txt: label_name.clone(),
+                                            txt: label_name_str_idx2,
                                             loc: empty_loc(),
                                         }),
                                         ppat_loc: empty_loc(),
@@ -1371,9 +1382,10 @@ fn add_default_value_matches(arena: &mut ParseArena, mut expr: Expression, args:
             };
 
             // OCaml uses the original arg location for the let binding pattern
+            let alias_str_idx = arena.push_string(alias.clone());
             let binding = ValueBinding {
                 pvb_pat: Pattern {
-                    ppat_desc: PatternDesc::Ppat_var(Loc { txt: alias.clone(), loc: arg.loc.clone() }),
+                    ppat_desc: PatternDesc::Ppat_var(Loc { txt: alias_str_idx, loc: arg.loc.clone() }),
                     ppat_loc: empty_loc(),
                     ppat_attributes: vec![],
                 },
@@ -1403,16 +1415,20 @@ fn get_function_body(expr: &Expression) -> Expression {
 }
 
 /// Prefix variable names in a pattern with a string
-fn prefix_pattern_var(pat: &mut Pattern, prefix: &str) {
+fn prefix_pattern_var(arena: &mut ParseArena, pat: &mut Pattern, prefix: &str) {
     match &mut pat.ppat_desc {
         PatternDesc::Ppat_var(loc) => {
-            loc.txt = format!("{}{}", prefix, loc.txt);
+            let old_txt = arena.get_string(loc.txt);
+            let new_txt = format!("{}{}", prefix, old_txt);
+            loc.txt = arena.push_string(new_txt);
         }
         PatternDesc::Ppat_alias(_, loc) => {
-            loc.txt = format!("{}{}", prefix, loc.txt);
+            let old_txt = arena.get_string(loc.txt);
+            let new_txt = format!("{}{}", prefix, old_txt);
+            loc.txt = arena.push_string(new_txt);
         }
         PatternDesc::Ppat_constraint(inner, _) => {
-            prefix_pattern_var(inner, prefix);
+            prefix_pattern_var(arena, inner, prefix);
         }
         _ => {}
     }
@@ -1425,7 +1441,7 @@ fn prefix_pattern_var(pat: &mut Pattern, prefix: &str) {
 fn transform_signature_item_multi(item: SignatureItem, config: &mut JsxConfig, arena: &mut ParseArena) -> Vec<SignatureItem> {
     // Check for @@jsxConfig attribute
     if let SignatureItemDesc::Psig_attribute(attr) = &item.psig_desc {
-        if attr.0.txt == "jsxConfig" {
+        if arena.get_string(attr.0.txt) == "jsxConfig" {
             update_config_from_attribute(arena, attr, config);
         }
         return vec![item];
@@ -1438,7 +1454,7 @@ fn transform_signature_item_multi(item: SignatureItem, config: &mut JsxConfig, a
 
     // Handle Psig_value with potential @react.component
     if let SignatureItemDesc::Psig_value(vd) = &item.psig_desc {
-        if has_react_component_attr(&vd.pval_attributes) {
+        if has_react_component_attr(arena, &vd.pval_attributes) {
             return transform_react_component_sig(vd.clone(), &item.psig_loc, config, arena);
         }
     }
@@ -1465,7 +1481,7 @@ fn transform_react_component_sig(
     config.has_component = true;
 
     // Check for sharedProps: @react.component(:sharedProps<T>)
-    let core_type_of_attr = core_type_of_attrs(&vd.pval_attributes);
+    let core_type_of_attr = core_type_of_attrs(arena, &vd.pval_attributes);
     let typ_vars_of_core_type: Vec<CoreType> = core_type_of_attr.as_ref()
         .map(typ_vars_of_core_type)
         .unwrap_or_default();
@@ -1494,15 +1510,15 @@ fn transform_react_component_sig(
     // For sharedProps signatures, don't add the live/jsxComponentProps attributes
     let props_type = if let Some(manifest) = &core_type_of_attr {
         // sharedProps signature: no extra attributes
-        make_props_abstract_type_sig("props", loc, manifest, &typ_vars_of_core_type)
+        make_props_abstract_type_sig(arena, "props", loc, manifest, &typ_vars_of_core_type)
     } else {
-        make_props_record_type_sig("props", loc, &named_type_list)
+        make_props_record_type_sig(arena, "props", loc, &named_type_list)
     };
 
     // Filter attributes
     let filtered_attrs: Attributes = vd.pval_attributes
         .iter()
-        .filter(|attr| !is_react_component_attr(attr))
+        .filter(|attr| !is_react_component_attr(arena, attr))
         .cloned()
         .collect();
 
@@ -1594,7 +1610,7 @@ fn transform_react_component_external(
     config.has_component = true;
 
     // Check for sharedProps: @react.component(:sharedProps<T>)
-    let core_type_of_attr = core_type_of_attrs(&vd.pval_attributes);
+    let core_type_of_attr = core_type_of_attrs(arena, &vd.pval_attributes);
     let typ_vars_of_core_type: Vec<CoreType> = core_type_of_attr.as_ref()
         .map(typ_vars_of_core_type)
         .unwrap_or_default();
@@ -1623,16 +1639,16 @@ fn transform_react_component_external(
     // For sharedProps externals, don't add the live/jsxComponentProps attributes
     let props_type = if let Some(manifest) = &core_type_of_attr {
         // sharedProps external: no extra attributes
-        make_props_abstract_type("props", loc, manifest, &typ_vars_of_core_type)
+        make_props_abstract_type(arena, "props", loc, manifest, &typ_vars_of_core_type)
     } else {
         // regular external: add live attribute
-        make_props_record_type_with_live("props", loc, &named_type_list)
+        make_props_record_type_with_live(arena, "props", loc, &named_type_list)
     };
 
     // Filter attributes (remove @react.component)
     let filtered_attrs: Attributes = vd.pval_attributes
         .iter()
-        .filter(|attr| !is_react_component_attr(attr))
+        .filter(|attr| !is_react_component_attr(arena, attr))
         .cloned()
         .collect();
 
@@ -1709,7 +1725,7 @@ fn transform_react_component_external(
 }
 
 /// Create props record type with @live attribute (for externals)
-fn make_props_record_type_with_live(name: &str, loc: &Location, named_types: &[NamedType]) -> StructureItem {
+fn make_props_record_type_with_live(arena: &mut ParseArena, name: &str, loc: &Location, named_types: &[NamedType]) -> StructureItem {
     // Check for duplicate labels (OCaml: check_duplicated_label)
     check_duplicated_labels(named_types);
 
@@ -1725,8 +1741,9 @@ fn make_props_record_type_with_live(name: &str, loc: &Location, named_types: &[N
             // Key prop is always optional in type declaration (OCaml: if label = "key" then ~optional:true)
             let is_optional = if nt.label == "key" { true } else { nt.is_optional };
 
+            let label_idx = arena.intern(&nt.label);
             LabelDeclaration {
-                pld_name: Loc { txt: nt.label.clone(), loc: nt.loc.clone() },
+                pld_name: Loc { txt: label_idx, loc: nt.loc.clone() },
                 pld_mutable: MutableFlag::Immutable,
                 pld_type: type_var,
                 pld_loc: nt.loc.clone(),
@@ -1750,21 +1767,24 @@ fn make_props_record_type_with_live(name: &str, loc: &Location, named_types: &[N
         .collect();
 
     // Create @res.jsxComponentProps and @live attributes
+    let jsx_props_idx = arena.intern("res.jsxComponentProps");
+    let live_idx = arena.intern("live");
     let jsx_props_attr = (
-        Loc { txt: "res.jsxComponentProps".to_string(), loc: empty_loc() },
+        Loc { txt: jsx_props_idx, loc: empty_loc() },
         Payload::PStr(vec![]),
     );
     let live_attr = (
-        Loc { txt: "live".to_string(), loc: empty_loc() },
+        Loc { txt: live_idx, loc: empty_loc() },
         Payload::PStr(vec![]),
     );
 
     // OCaml uses ghost location for the generated props type structure_item
+    let name_idx = arena.intern(name);
     StructureItem {
         pstr_desc: StructureItemDesc::Pstr_type(
             RecFlag::Nonrecursive,
             vec![TypeDeclaration {
-                ptype_name: Loc { txt: name.to_string(), loc: loc.clone() },
+                ptype_name: Loc { txt: name_idx, loc: loc.clone() },
                 ptype_params: type_params,
                 ptype_cstrs: vec![],
                 ptype_kind: TypeKind::Ptype_record(label_decls),
@@ -1807,27 +1827,30 @@ fn collect_prop_types_rec(typ: &CoreType, types: &mut Vec<(ArgLabel, Attributes,
 // Helper Functions
 // ============================================================================
 
-fn has_react_component_attr(attrs: &Attributes) -> bool {
-    attrs.iter().any(is_react_component_attr)
+fn has_react_component_attr(arena: &ParseArena, attrs: &Attributes) -> bool {
+    attrs.iter().any(|attr| is_react_component_attr(arena, attr))
 }
 
-fn is_react_component_attr(attr: &Attribute) -> bool {
-    matches!(attr.0.txt.as_str(), "react.component" | "jsx.component")
+fn is_react_component_attr(arena: &ParseArena, attr: &Attribute) -> bool {
+    let name = arena.get_string(attr.0.txt);
+    matches!(name, "react.component" | "jsx.component")
 }
 
-fn has_react_component_with_props_attr(attrs: &Attributes) -> bool {
-    attrs.iter().any(is_react_component_with_props_attr)
+fn has_react_component_with_props_attr(arena: &ParseArena, attrs: &Attributes) -> bool {
+    attrs.iter().any(|attr| is_react_component_with_props_attr(arena, attr))
 }
 
-fn is_react_component_with_props_attr(attr: &Attribute) -> bool {
-    matches!(attr.0.txt.as_str(), "react.componentWithProps" | "jsx.componentWithProps")
+fn is_react_component_with_props_attr(arena: &ParseArena, attr: &Attribute) -> bool {
+    let name = arena.get_string(attr.0.txt);
+    matches!(name, "react.componentWithProps" | "jsx.componentWithProps")
 }
 
 /// Extract core type from @react.component(:sharedProps<T>) attribute
 /// Returns Some(CoreType) if the attribute has a type payload
-fn core_type_of_attrs(attrs: &Attributes) -> Option<CoreType> {
+fn core_type_of_attrs(arena: &ParseArena, attrs: &Attributes) -> Option<CoreType> {
     attrs.iter().find_map(|(loc, payload)| {
-        match (loc.txt.as_str(), payload) {
+        let name = arena.get_string(loc.txt);
+        match (name, payload) {
             ("react.component" | "jsx.component", Payload::PTyp(core_type)) => Some(core_type.as_ref().clone()),
             _ => None,
         }
@@ -1861,10 +1884,10 @@ fn is_forward_ref(arena: &ParseArena, expr: &Expression) -> bool {
     false
 }
 
-fn get_fn_name(pat: &Pattern) -> String {
+fn get_fn_name(arena: &ParseArena, pat: &Pattern) -> String {
     match &pat.ppat_desc {
-        PatternDesc::Ppat_var(loc) => loc.txt.clone(),
-        PatternDesc::Ppat_constraint(inner, _) => get_fn_name(inner),
+        PatternDesc::Ppat_var(loc) => arena.get_string(loc.txt).to_string(),
+        PatternDesc::Ppat_constraint(inner, _) => get_fn_name(arena, inner),
         _ => "make".to_string(),
     }
 }
@@ -2083,7 +2106,7 @@ fn module_access_name(arena: &mut ParseArena, config: &JsxConfig, value: &str) -
 fn try_find_key_prop(arena: &mut ParseArena, props: &[JsxProp]) -> Option<(ArgLabel, Expression)> {
     for prop in props {
         match prop {
-            JsxProp::Punning { optional, name } if name.txt == "key" => {
+            JsxProp::Punning { optional, name } if arena.get_string(name.txt) == "key" => {
                 let key_str_idx = arena.intern_string("key");
                 let label_loc = Located::new(key_str_idx, name.loc.clone());
                 let arg_label = if *optional {
@@ -2102,8 +2125,8 @@ fn try_find_key_prop(arena: &mut ParseArena, props: &[JsxProp]) -> Option<(ArgLa
                 };
                 return Some((arg_label, expr));
             }
-            JsxProp::Value { name, optional, value } if name.txt == "key" => {
-                let key_str_idx = arena.intern_string(&name.txt);
+            JsxProp::Value { name, optional, value } if arena.get_string(name.txt) == "key" => {
+                let key_str_idx = name.txt;
                 let label_loc = Located::new(key_str_idx, name.loc.clone());
                 let arg_label = if *optional {
                     ArgLabel::Optional(label_loc)
@@ -2233,8 +2256,8 @@ fn extract_args_rec(arena: &ParseArena, expr: &Expression, args: &mut Vec<Extrac
 
 fn get_alias_from_pattern(arena: &ParseArena, pat: &Pattern, label: &ArgLabel) -> String {
     match &pat.ppat_desc {
-        PatternDesc::Ppat_var(loc) => loc.txt.clone(),
-        PatternDesc::Ppat_alias(_, loc) => loc.txt.clone(),
+        PatternDesc::Ppat_var(loc) => arena.get_string(loc.txt).to_string(),
+        PatternDesc::Ppat_alias(_, loc) => arena.get_string(loc.txt).to_string(),
         PatternDesc::Ppat_constraint(inner, _) => get_alias_from_pattern(arena, inner, label),
         PatternDesc::Ppat_any => "_".to_string(),
         _ => get_label(arena, label),
@@ -2302,7 +2325,7 @@ fn check_duplicated_labels(named_types: &[NamedType]) {
     }
 }
 
-fn make_props_record_type(name: &str, loc: &Location, named_types: &[NamedType], has_forward_ref: bool) -> StructureItem {
+fn make_props_record_type(arena: &mut ParseArena, name: &str, loc: &Location, named_types: &[NamedType], has_forward_ref: bool) -> StructureItem {
     // Check for duplicate labels (OCaml: check_duplicated_label)
     check_duplicated_labels(named_types);
 
@@ -2319,8 +2342,9 @@ fn make_props_record_type(name: &str, loc: &Location, named_types: &[NamedType],
             // For forwardRef, ref is also always optional
             let is_optional = if nt.label == "key" || (nt.label == "ref" && has_forward_ref) { true } else { nt.is_optional };
 
+            let label_str_idx = arena.push_string(nt.label.clone());
             LabelDeclaration {
-                pld_name: Loc { txt: nt.label.clone(), loc: nt.loc.clone() },
+                pld_name: Loc { txt: label_str_idx, loc: nt.loc.clone() },
                 pld_mutable: MutableFlag::Immutable,
                 pld_type: type_var,
                 pld_loc: nt.loc.clone(),
@@ -2344,15 +2368,17 @@ fn make_props_record_type(name: &str, loc: &Location, named_types: &[NamedType],
         })
         .collect();
 
+    let name_str_idx = arena.push_string(name.to_string());
+    let jsx_props_attr_idx = arena.intern_string("res.jsxComponentProps");
     let type_decl = TypeDeclaration {
-        ptype_name: Loc { txt: name.to_string(), loc: loc.clone() },
+        ptype_name: Loc { txt: name_str_idx, loc: loc.clone() },
         ptype_params: type_params,
         ptype_cstrs: vec![],
         ptype_kind: TypeKind::Ptype_record(label_decls),
         ptype_private: PrivateFlag::Public,
         ptype_manifest: None,
         ptype_attributes: vec![
-            (Loc { txt: "res.jsxComponentProps".to_string(), loc: empty_loc() }, Payload::PStr(vec![])),
+            (Loc { txt: jsx_props_attr_idx, loc: empty_loc() }, Payload::PStr(vec![])),
         ],
         ptype_loc: loc.clone(),
     };
@@ -2365,7 +2391,7 @@ fn make_props_record_type(name: &str, loc: &Location, named_types: &[NamedType],
 }
 
 /// Create props record type declaration for signatures
-fn make_props_record_type_sig(name: &str, loc: &Location, named_types: &[NamedType]) -> SignatureItem {
+fn make_props_record_type_sig(arena: &mut ParseArena, name: &str, loc: &Location, named_types: &[NamedType]) -> SignatureItem {
     // Check for duplicate labels (OCaml: check_duplicated_label)
     check_duplicated_labels(named_types);
 
@@ -2381,8 +2407,9 @@ fn make_props_record_type_sig(name: &str, loc: &Location, named_types: &[NamedTy
             // Key prop is always optional in type declaration (OCaml: if label = "key" then ~optional:true)
             let is_optional = if nt.label == "key" { true } else { nt.is_optional };
 
+            let label_str_idx = arena.push_string(nt.label.clone());
             LabelDeclaration {
-                pld_name: Loc { txt: nt.label.clone(), loc: nt.loc.clone() },
+                pld_name: Loc { txt: label_str_idx, loc: nt.loc.clone() },
                 pld_mutable: MutableFlag::Immutable,
                 pld_type: type_var,
                 pld_loc: nt.loc.clone(),
@@ -2406,15 +2433,17 @@ fn make_props_record_type_sig(name: &str, loc: &Location, named_types: &[NamedTy
         })
         .collect();
 
+    let name_str_idx = arena.push_string(name.to_string());
+    let jsx_props_attr_idx = arena.intern_string("res.jsxComponentProps");
     let type_decl = TypeDeclaration {
-        ptype_name: Loc { txt: name.to_string(), loc: loc.clone() },
+        ptype_name: Loc { txt: name_str_idx, loc: loc.clone() },
         ptype_params: type_params,
         ptype_cstrs: vec![],
         ptype_kind: TypeKind::Ptype_record(label_decls),
         ptype_private: PrivateFlag::Public,
         ptype_manifest: None,
         ptype_attributes: vec![
-            (Loc { txt: "res.jsxComponentProps".to_string(), loc: empty_loc() }, Payload::PStr(vec![])),
+            (Loc { txt: jsx_props_attr_idx, loc: empty_loc() }, Payload::PStr(vec![])),
         ],
         ptype_loc: loc.clone(),
     };
@@ -2428,13 +2457,14 @@ fn make_props_record_type_sig(name: &str, loc: &Location, named_types: &[NamedTy
 
 /// Create abstract props type with manifest (for sharedProps)
 /// type props = sharedProps<T>
-fn make_props_abstract_type(name: &str, loc: &Location, manifest: &CoreType, typ_vars: &[CoreType]) -> StructureItem {
+fn make_props_abstract_type(arena: &mut ParseArena, name: &str, loc: &Location, manifest: &CoreType, typ_vars: &[CoreType]) -> StructureItem {
     let type_params: Vec<(CoreType, Variance)> = typ_vars.iter()
         .map(|v| (v.clone(), Variance::Invariant))
         .collect();
 
+    let name_str_idx = arena.push_string(name.to_string());
     let type_decl = TypeDeclaration {
-        ptype_name: Loc { txt: name.to_string(), loc: loc.clone() },
+        ptype_name: Loc { txt: name_str_idx, loc: loc.clone() },
         ptype_params: type_params,
         ptype_cstrs: vec![],
         ptype_kind: TypeKind::Ptype_abstract,
@@ -2452,13 +2482,14 @@ fn make_props_abstract_type(name: &str, loc: &Location, manifest: &CoreType, typ
 }
 
 /// Create abstract props type with manifest for signatures (for sharedProps)
-fn make_props_abstract_type_sig(name: &str, loc: &Location, manifest: &CoreType, typ_vars: &[CoreType]) -> SignatureItem {
+fn make_props_abstract_type_sig(arena: &mut ParseArena, name: &str, loc: &Location, manifest: &CoreType, typ_vars: &[CoreType]) -> SignatureItem {
     let type_params: Vec<(CoreType, Variance)> = typ_vars.iter()
         .map(|v| (v.clone(), Variance::Invariant))
         .collect();
 
+    let name_str_idx = arena.push_string(name.to_string());
     let type_decl = TypeDeclaration {
-        ptype_name: Loc { txt: name.to_string(), loc: loc.clone() },
+        ptype_name: Loc { txt: name_str_idx, loc: loc.clone() },
         ptype_params: type_params,
         ptype_cstrs: vec![],
         ptype_kind: TypeKind::Ptype_abstract,
@@ -2476,22 +2507,25 @@ fn make_props_abstract_type_sig(name: &str, loc: &Location, manifest: &CoreType,
 }
 
 /// Create abstract props type with manifest and @live attribute (for external sharedProps)
-fn make_props_abstract_type_with_live(name: &str, loc: &Location, manifest: &CoreType, typ_vars: &[CoreType]) -> StructureItem {
+fn make_props_abstract_type_with_live(arena: &mut ParseArena, name: &str, loc: &Location, manifest: &CoreType, typ_vars: &[CoreType]) -> StructureItem {
     let type_params: Vec<(CoreType, Variance)> = typ_vars.iter()
         .map(|v| (v.clone(), Variance::Invariant))
         .collect();
 
+    let jsx_props_attr_idx = arena.intern_string("res.jsxComponentProps");
+    let live_attr_idx = arena.intern_string("live");
     let jsx_props_attr = (
-        Loc { txt: "res.jsxComponentProps".to_string(), loc: empty_loc() },
+        Loc { txt: jsx_props_attr_idx, loc: empty_loc() },
         Payload::PStr(vec![]),
     );
     let live_attr = (
-        Loc { txt: "live".to_string(), loc: empty_loc() },
+        Loc { txt: live_attr_idx, loc: empty_loc() },
         Payload::PStr(vec![]),
     );
 
+    let name_str_idx = arena.push_string(name.to_string());
     let type_decl = TypeDeclaration {
-        ptype_name: Loc { txt: name.to_string(), loc: loc.clone() },
+        ptype_name: Loc { txt: name_str_idx, loc: loc.clone() },
         ptype_params: type_params,
         ptype_cstrs: vec![],
         ptype_kind: TypeKind::Ptype_abstract,
@@ -2509,22 +2543,25 @@ fn make_props_abstract_type_with_live(name: &str, loc: &Location, manifest: &Cor
 }
 
 /// Create abstract props type with manifest and @live for signatures
-fn make_props_abstract_type_sig_with_live(name: &str, loc: &Location, manifest: &CoreType, typ_vars: &[CoreType]) -> SignatureItem {
+fn make_props_abstract_type_sig_with_live(arena: &mut ParseArena, name: &str, loc: &Location, manifest: &CoreType, typ_vars: &[CoreType]) -> SignatureItem {
     let type_params: Vec<(CoreType, Variance)> = typ_vars.iter()
         .map(|v| (v.clone(), Variance::Invariant))
         .collect();
 
+    let jsx_props_attr_idx = arena.intern_string("res.jsxComponentProps");
+    let live_attr_idx = arena.intern_string("live");
     let jsx_props_attr = (
-        Loc { txt: "res.jsxComponentProps".to_string(), loc: empty_loc() },
+        Loc { txt: jsx_props_attr_idx, loc: empty_loc() },
         Payload::PStr(vec![]),
     );
     let live_attr = (
-        Loc { txt: "live".to_string(), loc: empty_loc() },
+        Loc { txt: live_attr_idx, loc: empty_loc() },
         Payload::PStr(vec![]),
     );
 
+    let name_str_idx = arena.push_string(name.to_string());
     let type_decl = TypeDeclaration {
-        ptype_name: Loc { txt: name.to_string(), loc: loc.clone() },
+        ptype_name: Loc { txt: name_str_idx, loc: loc.clone() },
         ptype_params: type_params,
         ptype_cstrs: vec![],
         ptype_kind: TypeKind::Ptype_abstract,
@@ -3099,9 +3136,10 @@ fn append_children_prop(
 
         // Children is optional for lowercase components
         let is_optional = matches!(component_description, ComponentDescription::LowercasedComponent);
+        let children_str_idx = arena.intern_string("children");
 
         props.push(JsxProp::Value {
-            name: Loc { txt: "children".to_string(), loc: child.pexp_loc },
+            name: Loc { txt: children_str_idx, loc: child.pexp_loc },
             optional: is_optional,
             value: expr,
         });
@@ -3147,8 +3185,9 @@ fn append_children_prop(
             pexp_attributes: vec![],
         };
 
+        let children_str_idx = arena.intern_string("children");
         props.push(JsxProp::Value {
-            name: Loc { txt: "children".to_string(), loc },
+            name: Loc { txt: children_str_idx, loc },
             optional: false,
             value: children_expr,
         });
@@ -3193,7 +3232,7 @@ fn mk_record_from_props(
     // Filter out key prop AFTER calculating location
     let props: Vec<&JsxProp> = props.iter()
         .filter(|p| match p {
-            JsxProp::Punning { name, .. } | JsxProp::Value { name, .. } => name.txt != "key",
+            JsxProp::Punning { name, .. } | JsxProp::Value { name, .. } => arena.get_string(name.txt) != "key",
             JsxProp::Spreading { .. } => true,
         })
         .collect();
@@ -3218,8 +3257,8 @@ fn mk_record_from_props(
         .filter_map(|prop| {
             match prop {
                 JsxProp::Punning { optional, name } => {
-                    let name_str_idx = arena.push_string(name.txt.clone());
-                    let name_str_idx2 = arena.push_string(name.txt.clone());
+                    // name.txt is already a StrIdx, use it directly
+                    let name_str_idx = name.txt;
                     Some(ExpressionRecordField {
                         lid: Loc {
                             txt: arena.push_longident(Longident::Lident(name_str_idx)),
@@ -3227,7 +3266,7 @@ fn mk_record_from_props(
                         },
                         expr: Expression {
                             pexp_desc: ExpressionDesc::Pexp_ident(Loc {
-                                txt: arena.push_longident(Longident::Lident(name_str_idx2)),
+                                txt: arena.push_longident(Longident::Lident(name_str_idx)),
                                 loc: name.loc.clone(),
                             }),
                             pexp_loc: name.loc.clone(),
@@ -3237,7 +3276,8 @@ fn mk_record_from_props(
                     })
                 }
                 JsxProp::Value { name, optional, value } => {
-                    let name_str_idx = arena.push_string(name.txt.clone());
+                    // name.txt is already a StrIdx, use it directly
+                    let name_str_idx = name.txt;
                     Some(ExpressionRecordField {
                         lid: Loc {
                             txt: arena.push_longident(Longident::Lident(name_str_idx)),

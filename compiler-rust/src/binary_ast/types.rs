@@ -6,7 +6,7 @@
 use super::marshal::MarshalWriter;
 use super::serialize::Marshal;
 use crate::location::{Located, Location, Position};
-use crate::parse_arena::{self, LidentIdx, LocIdx, PosIdx};
+use crate::parse_arena::{self, LidentIdx, LocIdx, PosIdx, StrIdx};
 use crate::parser::longident::Longident;
 
 // ========== Position (Lexing.position) ==========
@@ -96,6 +96,15 @@ impl Marshal for LocIdx {
     /// Requires that MarshalWriter::set_arena() was called first.
     fn marshal(&self, w: &mut MarshalWriter) {
         w.write_loc_idx(*self);
+    }
+}
+
+impl Marshal for StrIdx {
+    /// Serialize a StrIdx by looking up the string in the arena.
+    /// Requires that MarshalWriter::set_arena() was called first.
+    /// Same StrIdx = same object, will be shared in output via back-references.
+    fn marshal(&self, w: &mut MarshalWriter) {
+        w.write_str_idx(*self);
     }
 }
 

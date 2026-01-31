@@ -478,7 +478,7 @@ fn sexp_pat_extra(
     } else {
         vec![]
     };
-    let attrs_sexp = sexp_attributes(with_locs, attrs);
+    let attrs_sexp = sexp_attributes(arena, with_locs, attrs);
 
     match extra {
         PatExtra::Tpat_constraint(ct) => {
@@ -591,7 +591,7 @@ fn sexp_expression(arena: &ParseArena, ctx: &TypeContext<'_>, with_locs: bool, e
     }).collect();
     let desc = sexp_expression_desc(arena, ctx, with_locs, &e.exp_desc);
     let ty = sexp_type_expr(arena, ctx, e.exp_type);
-    let attrs = sexp_attributes(with_locs, &e.exp_attributes);
+    let attrs = sexp_attributes(arena, with_locs, &e.exp_attributes);
 
     let mut items = vec![Sexp::atom("expression")];
     items.extend(loc_sexp);
@@ -617,7 +617,7 @@ fn sexp_exp_extra(
     } else {
         vec![]
     };
-    let attrs_sexp = sexp_attributes(with_locs, attrs);
+    let attrs_sexp = sexp_attributes(arena, with_locs, attrs);
 
     match extra {
         ExpExtra::Texp_constraint(ct) => {
@@ -896,7 +896,7 @@ fn sexp_value_binding(arena: &ParseArena, ctx: &TypeContext<'_>, with_locs: bool
     items.extend(loc_sexp);
     items.push(sexp_pattern(arena, ctx, with_locs, &vb.vb_pat));
     items.push(sexp_expression(arena, ctx, with_locs, &vb.vb_expr));
-    items.push(sexp_attributes(with_locs, &vb.vb_attributes));
+    items.push(sexp_attributes(arena, with_locs, &vb.vb_attributes));
     Sexp::list(items)
 }
 
@@ -912,7 +912,7 @@ fn sexp_core_type(arena: &ParseArena, ctx: &TypeContext<'_>, with_locs: bool, ct
     };
     let desc = sexp_core_type_desc(arena, ctx, with_locs, &ct.ctyp_desc);
     let ty = sexp_type_expr(arena, ctx, ct.ctyp_type);
-    let attrs = sexp_attributes(with_locs, &ct.ctyp_attributes);
+    let attrs = sexp_attributes(arena, with_locs, &ct.ctyp_attributes);
 
     let mut items = vec![Sexp::atom("core_type")];
     items.extend(loc_sexp);
@@ -934,7 +934,7 @@ fn sexp_core_type_desc(arena: &ParseArena, ctx: &TypeContext<'_>, with_locs: boo
             Sexp::list(vec![
                 Sexp::atom("Ttyp_arrow"),
                 sexp_arg_label(arena, &arg.lbl),
-                sexp_attributes(with_locs, &arg.attrs),
+                sexp_attributes(arena, with_locs, &arg.attrs),
                 sexp_core_type(arena, ctx, with_locs, &*arg.typ),
                 sexp_core_type(arena, ctx, with_locs, ret),
                 opt(|a: &i32| Sexp::atom(&a.to_string()), arity),
@@ -1013,7 +1013,7 @@ fn sexp_object_field(
             Sexp::list(vec![
                 Sexp::atom("OTtag"),
                 string(&name.txt),
-                sexp_attributes(with_locs, &field.of_attributes),
+                sexp_attributes(arena, with_locs, &field.of_attributes),
                 sexp_core_type(arena, ctx, with_locs, ct),
             ])
         }
@@ -1035,7 +1035,7 @@ fn sexp_row_field_type(
             Sexp::list(vec![
                 Sexp::atom("Ttag"),
                 string(&name.txt),
-                sexp_attributes(with_locs, &field.rf_attributes),
+                sexp_attributes(arena, with_locs, &field.rf_attributes),
                 Sexp::atom(if *constant { "const" } else { "non_const" }),
                 Sexp::list(args.iter().map(|ct| sexp_core_type(arena, ctx, with_locs, ct)).collect()),
             ])
@@ -1059,19 +1059,19 @@ fn sexp_payload(payload: &Payload) -> Sexp {
     }
 }
 
-fn sexp_attribute(with_locs: bool, attr: &Attribute) -> Sexp {
+fn sexp_attribute(arena: &ParseArena, with_locs: bool, attr: &Attribute) -> Sexp {
     let _ = with_locs;
     let (name, payload) = attr;
     Sexp::list(vec![
         Sexp::atom("attribute"),
-        string(&name.txt),
+        string(arena.get_string(name.txt)),
         sexp_payload(payload),
     ])
 }
 
-fn sexp_attributes(with_locs: bool, attrs: &[Attribute]) -> Sexp {
+fn sexp_attributes(arena: &ParseArena, with_locs: bool, attrs: &[Attribute]) -> Sexp {
     let mut items = vec![Sexp::atom("attributes")];
-    items.extend(attrs.iter().map(|a| sexp_attribute(with_locs, a)));
+    items.extend(attrs.iter().map(|a| sexp_attribute(arena, with_locs, a)));
     Sexp::list(items)
 }
 
@@ -1086,7 +1086,7 @@ fn sexp_module_expr(arena: &ParseArena, ctx: &TypeContext<'_>, with_locs: bool, 
         vec![]
     };
     let desc = sexp_module_expr_desc(arena, ctx, with_locs, &me.mod_desc);
-    let attrs = sexp_attributes(with_locs, &me.mod_attributes);
+    let attrs = sexp_attributes(arena, with_locs, &me.mod_attributes);
 
     let mut items = vec![Sexp::atom("module_expr")];
     items.extend(loc_sexp);
@@ -1284,7 +1284,7 @@ fn sexp_typed_type_declaration(arena: &ParseArena, ctx: &TypeContext<'_>, with_l
         Sexp::atom("manifest"),
         opt(|ct: &TypedCoreType| sexp_core_type(arena, ctx, with_locs, ct), &td.typ_manifest),
     ]));
-    items.push(sexp_attributes(with_locs, &td.typ_attributes));
+    items.push(sexp_attributes(arena, with_locs, &td.typ_attributes));
     Sexp::list(items)
 }
 
@@ -1319,7 +1319,7 @@ fn sexp_typed_constructor_decl(arena: &ParseArena, ctx: &TypeContext<'_>, with_l
     items.extend(loc_sexp);
     items.push(sexp_typed_constructor_args(arena, ctx, with_locs, &cd.cd_args));
     items.push(opt(|ct: &TypedCoreType| sexp_core_type(arena, ctx, with_locs, ct), &cd.cd_res));
-    items.push(sexp_attributes(with_locs, &cd.cd_attributes));
+    items.push(sexp_attributes(arena, with_locs, &cd.cd_attributes));
     Sexp::list(items)
 }
 
@@ -1353,7 +1353,7 @@ fn sexp_typed_label_decl(arena: &ParseArena, ctx: &TypeContext<'_>, with_locs: b
     items.push(sexp_mutable_flag(&ld.ld_mutable));
     items.push(Sexp::atom(if ld.ld_optional { "optional" } else { "required" }));
     items.push(sexp_core_type(arena, ctx, with_locs, &ld.ld_type));
-    items.push(sexp_attributes(with_locs, &ld.ld_attributes));
+    items.push(sexp_attributes(arena, with_locs, &ld.ld_attributes));
     Sexp::list(items)
 }
 
@@ -1380,7 +1380,7 @@ fn sexp_type_extension(arena: &ParseArena, ctx: &TypeContext<'_>, with_locs: boo
         Sexp::list(te.tyext_constructors.iter().map(|ec| sexp_extension_constructor(arena, ctx, with_locs, ec)).collect()),
     ]));
     items.push(sexp_private_flag(&te.tyext_private));
-    items.push(sexp_attributes(with_locs, &te.tyext_attributes));
+    items.push(sexp_attributes(arena, with_locs, &te.tyext_attributes));
     Sexp::list(items)
 }
 
@@ -1420,7 +1420,7 @@ fn sexp_extension_constructor(arena: &ParseArena, ctx: &TypeContext<'_>, with_lo
     ];
     items.extend(loc_sexp);
     items.push(kind);
-    items.push(sexp_attributes(with_locs, &ec.ext_attributes));
+    items.push(sexp_attributes(arena, with_locs, &ec.ext_attributes));
     Sexp::list(items)
 }
 
@@ -1464,7 +1464,7 @@ fn sexp_label_declaration(
     items.extend(loc_sexp);
     items.push(sexp_mutable_flag(&ld.ld_mutable));
     items.push(sexp_core_type(arena, ctx, with_locs, &ld.ld_type));
-    items.push(sexp_attributes(with_locs, &ld.ld_attributes));
+    items.push(sexp_attributes(arena, with_locs, &ld.ld_attributes));
     Sexp::list(items)
 }
 
@@ -1501,7 +1501,7 @@ fn sexp_structure_item_desc(arena: &ParseArena, ctx: &TypeContext<'_>, with_locs
             Sexp::list(vec![
                 Sexp::atom("Tstr_eval"),
                 sexp_expression(arena, ctx, with_locs, e),
-                sexp_attributes(with_locs, attrs),
+                sexp_attributes(arena, with_locs, attrs),
             ])
         }
         StructureItemDesc::Tstr_value(flag, vbs) => {
@@ -1556,7 +1556,7 @@ fn sexp_structure_item_desc(arena: &ParseArena, ctx: &TypeContext<'_>, with_locs
             Sexp::list(vec![Sexp::atom("Tstr_include"), Sexp::atom("<include_declaration>")])
         }
         StructureItemDesc::Tstr_attribute(attr) => {
-            Sexp::list(vec![Sexp::atom("Tstr_attribute"), sexp_attribute(with_locs, attr)])
+            Sexp::list(vec![Sexp::atom("Tstr_attribute"), sexp_attribute(arena, with_locs, attr)])
         }
     }
 }
@@ -1574,7 +1574,7 @@ fn sexp_module_binding(arena: &ParseArena, ctx: &TypeContext<'_>, with_locs: boo
     ];
     items.extend(loc_sexp);
     items.push(sexp_module_expr(arena, ctx, with_locs, &mb.mb_expr));
-    items.push(sexp_attributes(with_locs, &mb.mb_attributes));
+    items.push(sexp_attributes(arena, with_locs, &mb.mb_attributes));
     Sexp::list(items)
 }
 
@@ -1588,7 +1588,7 @@ fn sexp_open_declaration(arena: &ParseArena, ctx: &TypeContext<'_>, with_locs: b
     items.extend(loc_sexp);
     items.push(sexp_module_expr(arena, ctx, with_locs, &od.open_expr));
     items.push(sexp_override_flag(&od.open_override));
-    items.push(sexp_attributes(with_locs, &od.open_attributes));
+    items.push(sexp_attributes(arena, with_locs, &od.open_attributes));
     Sexp::list(items)
 }
 

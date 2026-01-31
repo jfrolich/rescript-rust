@@ -72,6 +72,14 @@ impl<'a> Mapper<'a> {
         }
     }
 
+    /// Convert a Located<StrIdx> to OldLocated<String> by looking up the string
+    fn map_string_loc(&mut self, located: &Located<StrIdx>) -> OldLocated<String> {
+        OldLocated {
+            txt: self.arena.get_string(located.txt).to_string(),
+            loc: self.loc(located.loc),
+        }
+    }
+
     /// Convert a Located<LidentIdx> to OldLocated<Longident> by looking up in arena
     fn map_longident_loc(&mut self, located: &Located<crate::parse_arena::LidentIdx>) -> OldLocated<crate::parser::longident::Longident> {
         OldLocated {
@@ -208,8 +216,8 @@ impl<'a> Mapper<'a> {
             let item = match prop {
                 current::JsxProp::Punning { optional, name } => {
                     let name_loc = self.loc(name.loc);
-                    // Intern once and reuse for both label and identifier - enables sharing
-                    let name_idx = self.intern(&name.txt);
+                    // Use the StrIdx directly - it's already interned and enables sharing
+                    let name_idx = name.txt;
                     let ident_expr = pt0::Expression {
                         pexp_desc: pt0::ExpressionDesc::Ident(OldLocated::new(
                             Longident::Lident(name_idx),
@@ -226,7 +234,8 @@ impl<'a> Mapper<'a> {
                     (label, ident_expr)
                 }
                 current::JsxProp::Value { name, optional, value } => {
-                    let name_idx = self.intern(&name.txt);
+                    // Use the StrIdx directly
+                    let name_idx = name.txt;
                     let label = if *optional {
                         pt0::ArgLabel::Optional(name_idx)
                     } else {
@@ -375,7 +384,7 @@ impl<'a> Mapper<'a> {
     fn map_attribute(&mut self, attr: &current::Attribute) -> pt0::Attribute {
         let (name, payload) = attr;
         (
-            self.map_loc(name),
+            self.map_string_loc(name),
             self.map_payload(payload),
         )
     }
@@ -505,7 +514,7 @@ impl<'a> Mapper<'a> {
             current::CoreTypeDesc::Ptyp_poly(vars, ty) => {
                 pt0::CoreTypeDesc::Poly(
                     vars.iter()
-                        .map(|v| self.map_loc(v))
+                        .map(|v| self.map_string_loc(v))
                         .collect(),
                     Box::new(self.map_core_type(ty)),
                 )
@@ -560,7 +569,7 @@ impl<'a> Mapper<'a> {
     fn map_extension(&mut self, ext: &current::Extension) -> pt0::Extension {
         let (name, payload) = ext;
         (
-            self.map_loc(name),
+            self.map_string_loc(name),
             self.map_payload(payload),
         )
     }
@@ -579,10 +588,10 @@ impl<'a> Mapper<'a> {
         match desc {
             current::PatternDesc::Ppat_any => pt0::PatternDesc::Any,
             current::PatternDesc::Ppat_var(s) => {
-                pt0::PatternDesc::Var(self.map_loc(s))
+                pt0::PatternDesc::Var(self.map_string_loc(s))
             }
             current::PatternDesc::Ppat_alias(pat, s) => {
-                pt0::PatternDesc::Alias(Box::new(self.map_pattern(pat)), self.map_loc(s))
+                pt0::PatternDesc::Alias(Box::new(self.map_pattern(pat)), self.map_string_loc(s))
             }
             current::PatternDesc::Ppat_constant(c) => pt0::PatternDesc::Constant(self.map_constant(c)),
             current::PatternDesc::Ppat_interval(c1, c2) => {
@@ -627,7 +636,7 @@ impl<'a> Mapper<'a> {
                 pt0::PatternDesc::Type(self.map_longident_loc(lid))
             }
             current::PatternDesc::Ppat_unpack(s) => {
-                pt0::PatternDesc::Unpack(self.map_loc(s))
+                pt0::PatternDesc::Unpack(self.map_string_loc(s))
             }
             current::PatternDesc::Ppat_exception(pat) => {
                 pt0::PatternDesc::Exception(Box::new(self.map_pattern(pat)))
@@ -861,7 +870,7 @@ impl<'a> Mapper<'a> {
             }
             current::ExpressionDesc::Pexp_letmodule(name, me, body) => {
                 pt0::ExpressionDesc::Letmodule(
-                    self.map_loc(name),
+                    self.map_string_loc(name),
                     Box::new(self.map_module_expr(me)),
                     Box::new(self.map_expression(body)),
                 )
@@ -876,7 +885,7 @@ impl<'a> Mapper<'a> {
                 pt0::ExpressionDesc::Assert(Box::new(self.map_expression(e)))
             }
             current::ExpressionDesc::Pexp_newtype(name, body) => {
-                pt0::ExpressionDesc::Newtype(self.map_loc(name), Box::new(self.map_expression(body)))
+                pt0::ExpressionDesc::Newtype(self.map_string_loc(name), Box::new(self.map_expression(body)))
             }
             current::ExpressionDesc::Pexp_pack(me) => {
                 pt0::ExpressionDesc::Pack(Box::new(self.map_module_expr(me)))
@@ -987,7 +996,7 @@ impl<'a> Mapper<'a> {
 
     fn map_type_declaration(&mut self, td: &current::TypeDeclaration) -> pt0::TypeDeclaration {
         pt0::TypeDeclaration {
-            ptype_name: self.map_loc(&td.ptype_name),
+            ptype_name: self.map_string_loc(&td.ptype_name),
             ptype_params: td
                 .ptype_params
                 .iter()
@@ -1021,7 +1030,7 @@ impl<'a> Mapper<'a> {
 
     fn map_label_declaration(&mut self, ld: &current::LabelDeclaration) -> pt0::LabelDeclaration {
         pt0::LabelDeclaration {
-            pld_name: self.map_loc(&ld.pld_name),
+            pld_name: self.map_string_loc(&ld.pld_name),
             pld_mutable: self.map_mutable_flag(ld.pld_mutable),
             pld_type: self.map_core_type(&ld.pld_type),
             pld_loc: self.loc(ld.pld_loc),
@@ -1031,7 +1040,7 @@ impl<'a> Mapper<'a> {
 
     fn map_constructor_declaration(&mut self, cd: &current::ConstructorDeclaration) -> pt0::ConstructorDeclaration {
         pt0::ConstructorDeclaration {
-            pcd_name: self.map_loc(&cd.pcd_name),
+            pcd_name: self.map_string_loc(&cd.pcd_name),
             pcd_args: self.map_constructor_arguments(&cd.pcd_args),
             pcd_res: cd.pcd_res.as_ref().map(|t| self.map_core_type(t)),
             pcd_loc: self.loc(cd.pcd_loc),
@@ -1052,7 +1061,7 @@ impl<'a> Mapper<'a> {
 
     fn map_extension_constructor(&mut self, ec: &current::ExtensionConstructor) -> pt0::ExtensionConstructor {
         pt0::ExtensionConstructor {
-            pext_name: self.map_loc(&ec.pext_name),
+            pext_name: self.map_string_loc(&ec.pext_name),
             pext_kind: self.map_extension_constructor_kind(&ec.pext_kind),
             pext_loc: self.loc(ec.pext_loc),
             pext_attributes: self.map_attributes(&ec.pext_attributes),
@@ -1111,7 +1120,7 @@ impl<'a> Mapper<'a> {
             }
             current::ModuleTypeDesc::Pmty_functor(name, mty, body) => {
                 pt0::ModuleTypeDesc::Functor(
-                    self.map_loc(name),
+                    self.map_string_loc(name),
                     mty.as_ref().map(|m| Box::new(self.map_module_type(m))),
                     Box::new(self.map_module_type(body)),
                 )
@@ -1177,7 +1186,7 @@ impl<'a> Mapper<'a> {
             }
             current::ModuleExprDesc::Pmod_functor(name, mty, body) => {
                 pt0::ModuleExprDesc::Functor(
-                    self.map_loc(name),
+                    self.map_string_loc(name),
                     mty.as_ref().map(|m| Box::new(self.map_module_type(m))),
                     Box::new(self.map_module_expr(body)),
                 )
@@ -1205,7 +1214,7 @@ impl<'a> Mapper<'a> {
 
     fn map_module_binding(&mut self, mb: &current::ModuleBinding) -> pt0::ModuleBinding {
         pt0::ModuleBinding {
-            pmb_name: self.map_loc(&mb.pmb_name),
+            pmb_name: self.map_string_loc(&mb.pmb_name),
             pmb_expr: self.map_module_expr(&mb.pmb_expr),
             pmb_attributes: self.map_attributes(&mb.pmb_attributes),
             pmb_loc: self.loc(mb.pmb_loc),
@@ -1214,7 +1223,7 @@ impl<'a> Mapper<'a> {
 
     fn map_module_declaration(&mut self, md: &current::ModuleDeclaration) -> pt0::ModuleDeclaration {
         pt0::ModuleDeclaration {
-            pmd_name: self.map_loc(&md.pmd_name),
+            pmd_name: self.map_string_loc(&md.pmd_name),
             pmd_type: self.map_module_type(&md.pmd_type),
             pmd_attributes: self.map_attributes(&md.pmd_attributes),
             pmd_loc: self.loc(md.pmd_loc),
@@ -1223,7 +1232,7 @@ impl<'a> Mapper<'a> {
 
     fn map_module_type_declaration(&mut self, mtd: &current::ModuleTypeDeclaration) -> pt0::ModuleTypeDeclaration {
         pt0::ModuleTypeDeclaration {
-            pmtd_name: self.map_loc(&mtd.pmtd_name),
+            pmtd_name: self.map_string_loc(&mtd.pmtd_name),
             pmtd_type: mtd.pmtd_type.as_ref().map(|mt| self.map_module_type(mt)),
             pmtd_attributes: self.map_attributes(&mtd.pmtd_attributes),
             pmtd_loc: self.loc(mtd.pmtd_loc),
@@ -1257,7 +1266,7 @@ impl<'a> Mapper<'a> {
 
     fn map_value_description(&mut self, vd: &current::ValueDescription) -> pt0::ValueDescription {
         pt0::ValueDescription {
-            pval_name: self.map_loc(&vd.pval_name),
+            pval_name: self.map_string_loc(&vd.pval_name),
             pval_type: self.map_core_type(&vd.pval_type),
             pval_prim: vd.pval_prim.clone(),
             pval_attributes: self.map_attributes(&vd.pval_attributes),

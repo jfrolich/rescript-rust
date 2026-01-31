@@ -376,7 +376,8 @@ impl<'a> Node<'a> {
             Node::Expression(e) => {
                 // Check for braces attribute
                 for attr in &e.pexp_attributes {
-                    if attr.0.txt == "res.braces" || attr.0.txt == "ns.braces" {
+                    let attr_name = arena.get_string(attr.0.txt);
+                    if attr_name == "res.braces" || attr_name == "ns.braces" {
                         return attr.0.loc;
                     }
                 }
@@ -1128,7 +1129,7 @@ fn walk_expression(expr: &Expression, t: &mut CommentTable, comments: Vec<Commen
         }
         ExpressionDesc::Pexp_extension(ext) => {
             // Check for %obj extension
-            if ext.0.txt == "obj" {
+            if arena.get_string(ext.0.txt) == "obj" {
                 if let PStr(items) = &ext.1 {
                     if items.len() == 1 {
                         if let StructureItemDesc::Pstr_eval(inner, _) = &items[0].pstr_desc

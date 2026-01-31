@@ -28,7 +28,7 @@
 
 use crate::ident::Ident;
 use crate::location::Location;
-use crate::parse_arena::{LidentIdx, Located, LocIdx, ParseArena};
+use crate::parse_arena::{LidentIdx, Located, LocIdx, ParseArena, StrIdx};
 use crate::parser::ast::{
     ArgLabel, Expression as ParsedExpression, Pattern as ParsedPattern, RecFlag,
 };
@@ -53,6 +53,14 @@ fn convert_located<T: Clone>(loc: &Located<T>, arena: &ParseArena) -> crate::loc
 /// Convert a LocIdx to a Location using the arena.
 fn convert_loc(loc: LocIdx, arena: &ParseArena) -> Location {
     arena.to_location(loc)
+}
+
+/// Convert a Located<StrIdx> to a Located<String> (for typedtree which uses String).
+fn convert_located_stridx(loc: &Located<StrIdx>, arena: &ParseArena) -> Located<String> {
+    Located {
+        txt: arena.get_string(loc.txt).to_string(),
+        loc: loc.loc,
+    }
 }
 
 // ============================================================================
@@ -336,28 +344,32 @@ impl PatternState {
     }
 
     /// Enter a variable into the pattern state.
-    /// Takes parsed Located<String> (with LocIdx) and arena to convert to Location.
+    /// Takes parsed Located<StrIdx> (with LocIdx) and arena to convert to Location.
     pub fn enter_variable(
         &mut self,
         loc: LocIdx,
-        name: &Located<String>,
+        name: &Located<StrIdx>,
         ty: TypeExprRef,
         is_as_variable: bool,
         is_module: bool,
         arena: &ParseArena,
     ) -> TypeCoreResult<Ident> {
+        let name_str = arena.get_string(name.txt);
         // Check for duplicate binding
         if self
             .pattern_variables
             .iter()
-            .any(|pv| pv.id.name() == name.txt)
+            .any(|pv| pv.id.name() == name_str)
         {
-            return Err(TypeCoreError::MultiplyBoundVariable(name.txt.clone()));
+            return Err(TypeCoreError::MultiplyBoundVariable(name_str.to_string()));
         }
 
-        let id = Ident::create_local(&name.txt);
+        let id = Ident::create_local(name_str);
         let full_loc = arena.to_location(loc);
-        let full_name = convert_located(name, arena);
+        let full_name = crate::location::Located {
+            txt: name_str.to_string(),
+            loc: arena.to_location(name.loc),
+        };
         self.pattern_variables.push(PatternVariable {
             id: id.clone(),
             ty,
@@ -682,7 +694,7 @@ fn transl_type_inner(
 
         CTD::Ptyp_poly(vars, body) => {
             // Polymorphic type: 'a 'b. T
-            let var_names: Vec<String> = vars.iter().map(|v| v.txt.clone()).collect();
+            let var_names: Vec<String> = vars.iter().map(|v| tctx.arena.get_string(v.txt).to_string()).collect();
 
             // Create type variables for each bound variable
             for name in &var_names {
@@ -882,7 +894,7 @@ fn type_pattern_inner(
             // Variable pattern
             let id = state.enter_variable(loc, name, expected_ty, false, false, tctx.arena)?;
             Ok(Pattern::new(
-                PatternDesc::Tpat_var(id, name.clone()),
+                PatternDesc::Tpat_var(id, convert_located_stridx(name, tctx.arena)),
                 loc,
                 expected_ty,
                 EnvRef(0),
@@ -946,7 +958,7 @@ fn type_pattern_inner(
             let id = state.enter_variable(loc, name, ty_var, true, false, tctx.arena)?;
 
             Ok(Pattern::new(
-                PatternDesc::Tpat_alias(Box::new(typed_inner), id, name.clone()),
+                PatternDesc::Tpat_alias(Box::new(typed_inner), id, convert_located_stridx(name, tctx.arena)),
                 loc,
                 expected_ty,
                 EnvRef(0),
@@ -2822,16 +2834,17 @@ fn type_newtype(
     tctx: &mut TypeCheckContext<'_>,
     env: &Env,
     loc: LocIdx,
-    name: &Located<String>,
+    name: &Located<StrIdx>,
     body: &ParsedExpression,
     expected_ty: TypeExprRef,
     attributes: &[crate::parser::ast::Attribute],
 ) -> TypeCoreResult<Expression> {
     // Create a new abstract type for the newtype
     let ctx = tctx.type_ctx;
+    let name_str = tctx.arena.get_string(name.txt).to_string();
 
     // Create an abstract type that will be bound to the name
-    let new_type_var = ctx.new_var(Some(name.txt.clone()));
+    let new_type_var = ctx.new_var(Some(name_str.clone()));
 
     // Extend environment with the new type (simplified - full implementation
     // would create a proper type declaration)
@@ -2842,7 +2855,7 @@ fn type_newtype(
 
     // Return expression with newtype in exp_extra
     Ok(typed_body.with_exp_extra(
-        crate::types::typedtree::ExpExtra::Texp_newtype(name.txt.clone()),
+        crate::types::typedtree::ExpExtra::Texp_newtype(name_str),
         loc.clone(),
         attributes.to_vec(),
     ))
@@ -2968,7 +2981,7 @@ fn type_letmodule(
     tctx: &mut TypeCheckContext<'_>,
     env: &Env,
     loc: LocIdx,
-    _name: &Located<String>,
+    _name: &Located<StrIdx>,
     _module_expr: &crate::parser::ast::ModuleExpr,
     body: &ParsedExpression,
     expected_ty: TypeExprRef,
@@ -3078,7 +3091,7 @@ fn type_let_bindings(
         let mut new_env = env.clone();
         for (binding, ty) in bindings.iter().zip(binding_types.iter()) {
             if let crate::parser::ast::PatternDesc::Ppat_var(name) = &binding.pvb_pat.ppat_desc {
-                let id = Ident::create_local(&name.txt);
+                let id = Ident::create_local(tctx.arena.get_string(name.txt));
                 let desc = ValueDescription {
                     val_type: *ty,
                     val_kind: crate::types::ValueKind::ValReg,

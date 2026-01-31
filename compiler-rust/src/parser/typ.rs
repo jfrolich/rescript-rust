@@ -6,7 +6,7 @@
 use std::collections::HashSet;
 
 use crate::location::Position;
-use crate::parse_arena::{Located, LocIdx};
+use crate::parse_arena::{Located, LocIdx, StrIdx};
 use super::ast::*;
 use super::core::{ast_helper, mknoloc, recover, with_loc};
 use super::diagnostics::DiagnosticCategory;
@@ -32,7 +32,7 @@ fn get_string_tag(p: &Parser<'_>) -> Option<String> {
 /// one of the poly type variables into Ptyp_var.
 /// This is needed for locally abstract types: `type a b c. list<a, b, c>` should
 /// have `a`, `b`, `c` as Ptyp_var, not Ptyp_constr.
-pub fn substitute_type_vars(arena: &crate::parse_arena::ParseArena, typ: CoreType, vars: &HashSet<&str>) -> CoreType {
+pub fn substitute_type_vars(arena: &crate::parse_arena::ParseArena, typ: CoreType, vars: &HashSet<String>) -> CoreType {
     let new_desc = match typ.ptyp_desc {
         CoreTypeDesc::Ptyp_constr(lid, args) => {
             // Check if this is a simple Lident that matches a type variable
@@ -384,7 +384,7 @@ fn parse_type_attributes(p: &mut Parser<'_>) -> Attributes {
                 let content = content.clone();
                 p.next();
                 let loc = p.from_location(&loc_cloned);
-                attrs.push(super::core::doc_comment_to_attribute(loc, content));
+                attrs.push(super::core::doc_comment_to_attribute(p.arena_mut(), loc, content));
             }
             _ => break,
         }
@@ -393,7 +393,7 @@ fn parse_type_attributes(p: &mut Parser<'_>) -> Attributes {
 }
 
 /// Parse an attribute id (name with optional path).
-fn parse_attribute_id(p: &mut Parser<'_>) -> String {
+fn parse_attribute_id(p: &mut Parser<'_>) -> StrIdx {
     let mut id = String::new();
     loop {
         let name = match &p.token {
@@ -425,7 +425,7 @@ fn parse_attribute_id(p: &mut Parser<'_>) -> String {
         ));
         id = "error".to_string();
     }
-    id
+    p.arena_mut().intern(&id)
 }
 
 /// Parse an attribute payload (in type context).
@@ -447,7 +447,7 @@ fn parse_atomic_typ_expr(p: &mut Parser<'_>, attrs: Attributes, es6_arrow: bool)
             // NOTE: We don't substitute Ptyp_constr -> Ptyp_var here. That's done
             // in module.rs where we have the full context of how the type is used.
             p.next();
-            let mut vars: Vec<StringLoc> = vec![];
+            let mut vars: Vec<Located<StrIdx>> = vec![];
 
             // Collect all type variable names until we see a dot
             while let Token::Lident(name) = &p.token {
@@ -455,7 +455,8 @@ fn parse_atomic_typ_expr(p: &mut Parser<'_>, attrs: Attributes, es6_arrow: bool)
                 let name = name.clone();
                 p.next();
                 let var_loc = p.mk_loc_to_prev_end(&var_start);
-                vars.push(with_loc(name, var_loc));
+                let name_idx = p.arena_mut().intern(&name);
+                vars.push(with_loc(name_idx, var_loc));
             }
 
             p.expect(Token::Dot);
@@ -470,7 +471,7 @@ fn parse_atomic_typ_expr(p: &mut Parser<'_>, attrs: Attributes, es6_arrow: bool)
         Token::SingleQuote => {
             // Type variable: 'a
             // Polytype: 'a 'b. T
-            let mut vars: Vec<StringLoc> = vec![];
+            let mut vars: Vec<Located<StrIdx>> = vec![];
 
             while p.token == Token::SingleQuote {
                 p.next(); // consume the single quote first
@@ -489,7 +490,8 @@ fn parse_atomic_typ_expr(p: &mut Parser<'_>, attrs: Attributes, es6_arrow: bool)
                     }
                 };
                 let var_loc = p.mk_loc_to_prev_end(&var_start);
-                vars.push(with_loc(name, var_loc));
+                let name_idx = p.arena_mut().intern(&name);
+                vars.push(with_loc(name_idx, var_loc));
             }
 
             if p.token == Token::Dot && !vars.is_empty() {
@@ -503,7 +505,7 @@ fn parse_atomic_typ_expr(p: &mut Parser<'_>, attrs: Attributes, es6_arrow: bool)
                 }
             } else if let Some(first) = vars.first() {
                 CoreType {
-                    ptyp_desc: CoreTypeDesc::Ptyp_var(first.txt.clone()),
+                    ptyp_desc: CoreTypeDesc::Ptyp_var(p.arena().get_string(first.txt).to_string()),
                     ptyp_loc: first.loc.clone(), // Use the variable's location (excludes the ')
                     ptyp_attributes: vec![],
                 }
@@ -511,7 +513,7 @@ fn parse_atomic_typ_expr(p: &mut Parser<'_>, attrs: Attributes, es6_arrow: bool)
                 p.err(DiagnosticCategory::Message(
                     super::core::error_messages::TYPE_VAR.to_string(),
                 ));
-                recover::default_type()
+                recover::default_type(p.arena_mut())
             }
         }
         Token::Underscore => {
@@ -615,7 +617,7 @@ fn parse_atomic_typ_expr(p: &mut Parser<'_>, attrs: Attributes, es6_arrow: bool)
                 "Unexpected token in type: {:?}",
                 p.token
             )));
-            recover::default_type()
+            recover::default_type(p.arena_mut())
         }
     };
 
@@ -733,7 +735,7 @@ fn parse_function_type(p: &mut Parser<'_>, start_pos: crate::location::Position)
             let content = content.clone();
             p.next();
             let loc = p.from_location(&loc);
-            doc_attrs.push(super::core::doc_comment_to_attribute(loc, content));
+            doc_attrs.push(super::core::doc_comment_to_attribute(p.arena_mut(), loc, content));
         }
 
         // Now capture the start position for the arrow - AFTER doc comments but BEFORE @-attrs
@@ -750,7 +752,7 @@ fn parse_function_type(p: &mut Parser<'_>, start_pos: crate::location::Position)
         // But if there's an uncurried marker (.), the arrow should start at the .
         // The uncurried marker takes precedence over @-attributes for the start position
         // Doc comments do NOT affect the arrow start position
-        let has_regular_attrs = param_attrs.iter().any(|(name, _)| name.txt != "res.doc");
+        let has_regular_attrs = param_attrs.iter().any(|(name, _)| p.arena().get_string(name.txt) != "res.doc");
         let param_start = if has_dot {
             // For uncurried parameters, OCaml includes the . in arrow location
             uncurried_start.clone()
@@ -881,7 +883,7 @@ fn parse_function_type(p: &mut Parser<'_>, start_pos: crate::location::Position)
         params.iter().filter(|(param, _)| {
             matches!(param.lbl, ArgLabel::Labelled(_))
                 && matches!(param.typ.ptyp_desc, CoreTypeDesc::Ptyp_any)
-                && param.typ.ptyp_attributes.iter().any(|(attr, _)| attr.txt == "as")
+                && param.typ.ptyp_attributes.iter().any(|(attr, _)| p.arena().get_string(attr.txt) == "as")
         }).count()
     } else {
         0
@@ -968,7 +970,7 @@ fn parse_attributes(p: &mut Parser<'_>) -> Attributes {
                 let content = content.clone();
                 p.next();
                 let loc = p.from_location(&loc_cloned);
-                attrs.push(super::core::doc_comment_to_attribute(loc, content));
+                attrs.push(super::core::doc_comment_to_attribute(p.arena_mut(), loc, content));
             }
             _ => break,
         }
@@ -1101,7 +1103,7 @@ fn parse_record_or_object_type(p: &mut Parser<'_>) -> CoreType {
     p.expect(Token::Lbrace);
 
     // Check for object type: {. ... } or {.. ... }
-    let is_object = p.token == Token::Dot || p.token == Token::DotDot;
+    let _is_object = p.token == Token::Dot || p.token == Token::DotDot;
     let closed = if p.token == Token::DotDot {
         p.next();
         ClosedFlag::Open
@@ -1674,10 +1676,13 @@ fn parse_extension(p: &mut Parser<'_>) -> Extension {
         p.err(DiagnosticCategory::Message(
             "Expected extension identifier".to_string(),
         ));
-        mknoloc("error".to_string())
+        let idx = p.arena_mut().intern("error");
+        mknoloc(idx)
     } else {
         let id = parts.join(".");
-        with_loc(id, p.mk_loc_to_prev_end(&id_start))
+        let loc = p.mk_loc_to_prev_end(&id_start);
+        let idx = p.arena_mut().intern(&id);
+        with_loc(idx, loc)
     };
 
     // Parse optional payload: %ext(payload)
