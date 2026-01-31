@@ -58,6 +58,33 @@ fn copy_tag_attrs_from_decl(decl_attrs: &Attributes, cstr_attrs: &Attributes) ->
     }
 }
 
+/// Check if a structure has duplicate value bindings.
+/// Returns true if the signature was simplified (i.e., duplicates were found).
+fn has_duplicate_values(items: &[StructureItem]) -> bool {
+    use std::collections::HashSet;
+    let mut seen_values = HashSet::new();
+    let mut has_duplicates = false;
+
+    for item in items {
+        match &item.str_desc {
+            StructureItemDesc::Tstr_value(_, bindings) => {
+                for binding in bindings {
+                    if let crate::types::typedtree::PatternDesc::Tpat_var(id, _) = &binding.vb_pat.pat_desc {
+                        let name = id.name();
+                        if seen_values.contains(&name) {
+                            has_duplicates = true;
+                        }
+                        seen_values.insert(name);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    has_duplicates
+}
+
 // ============================================================================
 // Helper Functions for Path Conversion
 // ============================================================================
@@ -136,15 +163,37 @@ pub fn type_module_expr<'a>(
 
         ParsedModuleExprDesc::Pmod_structure(items) => {
             // Module structure: { ... }
-            let (structure, new_env) = type_structure(tctx, env, arena, items)?;
+            let (structure, _new_env) = type_structure(tctx, env, arena, items)?;
 
-            Ok(ModuleExpr {
+            // Check if signature was simplified (duplicate values removed)
+            // If so, wrap in Tmod_constraint with Tmodtype_implicit
+            // This matches OCaml's simplify_signature behavior
+            let needs_constraint = has_duplicate_values(&structure.str_items);
+
+            let base_expr = ModuleExpr {
                 mod_desc: ModuleExprDesc::Tmod_structure(structure),
                 mod_loc: loc,
                 mod_type: ModuleType::placeholder(),
                 mod_env: EnvRef(0),
-                mod_attributes: mod_expr.pmod_attributes.clone(),
-            })
+                mod_attributes: if needs_constraint { vec![] } else { mod_expr.pmod_attributes.clone() },
+            };
+
+            if needs_constraint {
+                Ok(ModuleExpr {
+                    mod_desc: ModuleExprDesc::Tmod_constraint(
+                        Box::new(base_expr),
+                        ModuleType::placeholder(),
+                        crate::types::typedtree::ModuleTypeConstraint::Tmodtype_implicit,
+                        ModuleCoercion::Tcoerce_none,
+                    ),
+                    mod_loc: loc,
+                    mod_type: ModuleType::placeholder(),
+                    mod_env: EnvRef(0),
+                    mod_attributes: mod_expr.pmod_attributes.clone(),
+                })
+            } else {
+                Ok(base_expr)
+            }
         }
 
         ParsedModuleExprDesc::Pmod_functor(name, param_type, body) => {

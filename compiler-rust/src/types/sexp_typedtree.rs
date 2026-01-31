@@ -11,7 +11,7 @@ use crate::types::path::Path;
 use crate::types::type_expr::{FieldKind, RowDesc, RowField, TypeDesc, TypeExprRef};
 use crate::types::typedtree::{
     Case, Constant, Expression, ExpressionDesc, ExtensionConstructor,
-    ExtensionConstructorKind, FunctionParam, FunctionParamPattern, ModuleBinding, ModuleExpr, ModuleExprDesc,
+    ExtensionConstructorKind, FunctionParam, FunctionParamPattern, IncludeDeclaration, ModuleBinding, ModuleExpr, ModuleExprDesc,
     ModuleTypeConstraint, OpenDeclaration, Partial, Pattern, PatternDesc,
     RecordLabelDefinition, Structure, StructureItem, StructureItemDesc,
     TypedCoreType, TypedCoreTypeDesc, ValueBinding, TypeExtension,
@@ -1567,8 +1567,8 @@ fn sexp_structure_item_desc(arena: &ParseArena, ctx: &TypeContext<'_>, with_locs
                 sexp_open_declaration(arena, ctx, with_locs, od),
             ])
         }
-        StructureItemDesc::Tstr_include(_incl) => {
-            Sexp::list(vec![Sexp::atom("Tstr_include"), Sexp::atom("<include_declaration>")])
+        StructureItemDesc::Tstr_include(incl) => {
+            Sexp::list(vec![Sexp::atom("Tstr_include"), sexp_include_declaration(arena, ctx, with_locs, incl)])
         }
         StructureItemDesc::Tstr_attribute(attr) => {
             Sexp::list(vec![Sexp::atom("Tstr_attribute"), sexp_attribute(with_locs, attr)])
@@ -1590,6 +1590,19 @@ fn sexp_module_binding(arena: &ParseArena, ctx: &TypeContext<'_>, with_locs: boo
     items.extend(loc_sexp);
     items.push(sexp_module_expr(arena, ctx, with_locs, &mb.mb_expr));
     items.push(sexp_attributes(with_locs, &mb.mb_attributes));
+    Sexp::list(items)
+}
+
+fn sexp_include_declaration(arena: &ParseArena, ctx: &TypeContext<'_>, with_locs: bool, incl: &IncludeDeclaration) -> Sexp {
+    let loc_sexp = if with_locs {
+        vec![location_idx(arena, with_locs, incl.incl_loc)]
+    } else {
+        vec![]
+    };
+    let mut items = vec![Sexp::atom("include_declaration")];
+    items.extend(loc_sexp);
+    items.push(sexp_module_expr(arena, ctx, with_locs, &incl.incl_mod));
+    items.push(sexp_attributes(with_locs, &incl.incl_attributes));
     Sexp::list(items)
 }
 
