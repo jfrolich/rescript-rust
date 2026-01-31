@@ -32,6 +32,31 @@ use crate::types::typedtree::{
 };
 use crate::types::Variance as TypesVariance;
 use crate::parser::ast::Variance as ParserVariance;
+use crate::parser::ast::{Attribute, Attributes};
+
+// ============================================================================
+// Helper Functions for Attribute Handling
+// ============================================================================
+
+/// Copy `@tag` and `@unboxed` attributes from type declaration to constructor attributes.
+/// This matches OCaml's `copy_tag_attr_from_decl` in typedecl.ml.
+fn copy_tag_attrs_from_decl(decl_attrs: &Attributes, cstr_attrs: &Attributes) -> Attributes {
+    let tag_attrs: Vec<&Attribute> = decl_attrs
+        .iter()
+        .filter(|(name, _)| {
+            let txt = &name.txt;
+            txt == "tag" || txt == "unboxed"
+        })
+        .collect();
+
+    if tag_attrs.is_empty() {
+        cstr_attrs.clone()
+    } else {
+        let mut result: Attributes = tag_attrs.into_iter().cloned().collect();
+        result.extend(cstr_attrs.iter().cloned());
+        result
+    }
+}
 
 // ============================================================================
 // Helper Functions for Path Conversion
@@ -452,6 +477,8 @@ fn type_structure_item<'a>(
                             });
 
                             // Create typed tree constructor declaration
+                            // Copy @tag and @unboxed from type declaration to constructor
+                            let cstr_attrs = copy_tag_attrs_from_decl(&decl.ptype_attributes, &cstr.pcd_attributes);
                             typed_tree_cstrs.push(TypedConstructorDeclaration {
                                 cd_id: cstr_id.clone(),
                                 cd_name: crate::parse_arena::Located {
@@ -461,7 +488,7 @@ fn type_structure_item<'a>(
                                 cd_args: typed_tree_cd_args,
                                 cd_res: None,
                                 cd_loc: cstr.pcd_loc,
-                                cd_attributes: cstr.pcd_attributes.clone(),
+                                cd_attributes: cstr_attrs,
                             });
 
                             // Create constructor description for the environment
