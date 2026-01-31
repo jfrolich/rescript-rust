@@ -406,8 +406,18 @@ Several remaining issues require changes beyond sexp printing - they need modifi
    OCaml: (Tpoly <cycle> ())  // cycle inside Tpoly body
    Rust:  (Tpoly (Tvar None) ()) <cycle>  // cycle after Tpoly
    ```
-   This is caused by different type structures produced during unification, not sexp output.
-   The types are semantically equivalent but structurally different.
+
+   **Root Cause Analysis (investigated):**
+   - Both OCaml and Rust use the same approach: follow Tlink chains (repr), then use the resolved type's identity for cycle detection
+   - The difference is in HOW types are linked during type inference
+   - Example: For `let f = x => x["say_hi"]`, both `Tpoly body` and `Tarrow ret` resolve to the same type variable
+   - In Rust: Tpoly body visited first → outputs content; Tarrow ret visited second → outputs `<cycle>`
+   - In OCaml: Tarrow ret visited first → outputs content; Tpoly body visited second → outputs `<cycle>`
+
+   This is caused by different type linking directions during unification in `typecore.ml` vs `typecore.rs`.
+   The types are semantically equivalent but the internal Tlink structure differs.
+
+   **Potential Fix:** Would require matching OCaml's exact type creation and unification order in type_send and related functions. This is invasive and risks breaking other type checking behavior.
 
 4. **Type Extension** (FIXED) - Extension paths now properly populated.
 
