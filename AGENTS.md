@@ -52,6 +52,8 @@ The Makefile’s targets build on each other in this order:
 
 - **COMMIT YOUR CHANGES** - After completing ANY meaningful work (bug fix, feature, refactor, parity improvement), you MUST commit immediately. Do not leave work uncommitted. Do not move on to the next task without committing first. This is the most important rule.
 
+- **Do NOT reinvent solutions—follow the reference implementation** - This is a 1:1 port from OCaml to Rust. When implementing any feature, ALWAYS look at the corresponding OCaml code first. Do not invent new algorithms, new approaches, or "better" solutions. The goal is identical behavior, which means replicating the OCaml logic as closely as possible in idiomatic Rust. If you're tempted to do something differently, stop and ask yourself: "How does OCaml do this?" Then do that.
+
 - **We are NOT bound by OCaml compatibility** - The ReScript compiler originated as a fork of the OCaml compiler, but we maintain our own AST and can make breaking changes. Focus on what's best for ReScript's JavaScript compilation target.
 
 - **Never modify `parsetree0.ml`** - Existing PPX (parser extensions) rely on this frozen v0 version. When changing `parsetree.ml`, always update the mapping modules `ast_mapper_from0.ml` and `ast_mapper_to0.ml` to maintain PPX compatibility while allowing the main parsetree to evolve
