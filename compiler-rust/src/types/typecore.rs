@@ -2734,9 +2734,9 @@ fn type_record(
                 lbl_attributes: vec![],
             };
 
-            let (lid, definition, is_required) = if let Some((lid, typed_expr, _opt)) = provided_fields.remove(&field_name) {
+            let (lid, definition, final_label_desc) = if let Some((lid, typed_expr, _opt)) = provided_fields.remove(&field_name) {
                 // Field was provided
-                (lid, RecordLabelDefinition::Overridden(lid.clone(), typed_expr), true)
+                (lid, RecordLabelDefinition::Overridden(lid.clone(), typed_expr), label_desc)
             } else if label.ld_optional {
                 // Optional field not provided - add None as default
                 // Create a Texp_construct for None
@@ -2770,20 +2770,24 @@ fn type_record(
                     vec![],
                 );
 
-                // Create a lid for the optional field
+                // Create a lid for the optional field (placeholder - name will be taken from label_desc in sexp output)
                 let opt_lid = crate::parse_arena::Located {
-                    txt: crate::parse_arena::LidentIdx(0), // placeholder - should be the field name
+                    txt: crate::parse_arena::LidentIdx(0),
                     loc: loc,
                 };
 
-                (opt_lid.clone(), RecordLabelDefinition::Overridden(opt_lid, none_expr), false)
+                // Mark the label as non-optional since we're providing a value (OCaml behavior)
+                let mut modified_label_desc = label_desc;
+                modified_label_desc.lbl_optional = false;
+
+                (opt_lid.clone(), RecordLabelDefinition::Overridden(opt_lid, none_expr), modified_label_desc)
             } else {
                 // Required field missing - this is an error, but we'll let it slide for now
                 // In a full implementation, we'd report an error here
                 continue;
             };
 
-            typed_fields.push((lid, label_desc, definition));
+            typed_fields.push((lid, final_label_desc, definition));
         }
     } else {
         // No type information available, use the provided fields as-is

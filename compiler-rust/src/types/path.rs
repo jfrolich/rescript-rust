@@ -60,7 +60,9 @@ impl Path {
     ) -> Self {
         use crate::parser::longident::Longident;
         match lid {
-            Longident::Lident(name) => Path::pident(Ident::create_local(get_str(*name))),
+            // Use create_persistent for type identifiers since types are global names.
+            // This ensures paths match between parsed type annotations and predef types.
+            Longident::Lident(name) => Path::pident(Ident::create_persistent(get_str(*name))),
             Longident::Ldot(prefix, name) => {
                 let prefix_path = Path::from_longident(prefix, get_str);
                 Path::pdot(prefix_path, get_str(*name))

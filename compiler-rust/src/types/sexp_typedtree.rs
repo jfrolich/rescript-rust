@@ -744,10 +744,18 @@ fn sexp_expression_desc(arena: &ParseArena, ctx: &TypeContext<'_>, with_locs: bo
             items.extend(exprs.iter().map(|e| sexp_expression(arena, ctx, with_locs, e)));
             Sexp::list(items)
         }
-        ExpressionDesc::Texp_construct(li, _, args) => {
+        ExpressionDesc::Texp_construct(li, cstr_desc, args) => {
+            // When the longident is a placeholder (from generated code like optional field defaults),
+            // use the constructor name from the description instead
+            let lid_sexp = if li.txt.0 == 0 {
+                // Placeholder longident - use constructor name
+                Sexp::list(vec![Sexp::atom("Lident"), string(&cstr_desc.cstr_name)])
+            } else {
+                sexp_longident_idx(arena, li.txt)
+            };
             Sexp::list(vec![
                 Sexp::atom("Texp_construct"),
-                sexp_longident_idx(arena, li.txt),
+                lid_sexp,
                 Sexp::list(args.iter().map(|e| sexp_expression(arena, ctx, with_locs, e)).collect()),
             ])
         }
@@ -770,9 +778,16 @@ fn sexp_expression_desc(arena: &ParseArena, ctx: &TypeContext<'_>, with_locs: bo
                                     Sexp::list(vec![Sexp::atom("Kept"), sexp_type_expr(arena, ctx, *ty)])
                                 }
                                 RecordLabelDefinition::Overridden(li, e) => {
+                                    // When the longident is a placeholder (from generated default values),
+                                    // use the label name from the description instead
+                                    let lid_sexp = if li.txt.0 == 0 {
+                                        Sexp::list(vec![Sexp::atom("Lident"), string(&ld.lbl_name)])
+                                    } else {
+                                        sexp_longident_idx(arena, li.txt)
+                                    };
                                     Sexp::list(vec![
                                         Sexp::atom("Overridden"),
-                                        sexp_longident_idx(arena, li.txt),
+                                        lid_sexp,
                                         sexp_expression(arena, ctx, with_locs, e),
                                     ])
                                 }
