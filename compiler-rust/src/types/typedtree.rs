@@ -163,9 +163,8 @@ pub struct Expression {
 pub enum ExpExtra {
     /// Type constraint: `E : T`.
     Texp_constraint(TypedCoreType),
-    /// Coercion: `(E : T1 :> T2)` or `(E :> T)`.
-    /// First is optional source type, second is required target type.
-    Texp_coerce(Option<TypedCoreType>, TypedCoreType),
+    /// Coercion: `(E :> T)`.
+    Texp_coerce(TypedCoreType),
     /// Open: `let open M in E`.
     Texp_open(OverrideFlag, Path, Loc<LidentIdx>, EnvRef),
     /// Newtype: `fun (type t) -> E`.

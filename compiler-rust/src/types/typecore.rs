@@ -1404,12 +1404,43 @@ fn type_pattern_constraint(
     // Type check the inner pattern with the constraint type
     let typed_inner = type_pattern_inner(tctx, env, inner_pat, ctype_ty, mode, state, 0)?;
 
-    // Return the inner pattern with constraint in pat_extra
-    Ok(typed_inner.with_pat_extra(
-        crate::types::typedtree::PatExtra::Tpat_constraint(typed_ctype),
-        loc.clone(),
-        pat.ppat_attributes.clone(),
-    ))
+    // Create the constraint extra
+    let extra = crate::types::typedtree::PatExtra::Tpat_constraint(typed_ctype);
+
+    // If the inner pattern is a variable, transform it to an alias pattern
+    // This matches OCaml's behavior for constrained variable patterns
+    let result = match &typed_inner.pat_desc {
+        crate::types::typedtree::PatternDesc::Tpat_var(id, name) => {
+            // Create Tpat_any with the constraint type
+            let any_pattern = Pattern {
+                pat_desc: crate::types::typedtree::PatternDesc::Tpat_any,
+                pat_loc: typed_inner.pat_loc.clone(),
+                pat_extra: Vec::new(),
+                pat_type: ctype_ty,
+                pat_attributes: Vec::new(),
+                pat_env: typed_inner.pat_env.clone(),
+            };
+            // Wrap in Tpat_alias
+            Pattern {
+                pat_desc: crate::types::typedtree::PatternDesc::Tpat_alias(
+                    Box::new(any_pattern),
+                    id.clone(),
+                    name.clone(),
+                ),
+                pat_loc: loc.clone(),
+                pat_extra: vec![(extra, loc.clone(), pat.ppat_attributes.clone())],
+                pat_type: ctype_ty,
+                pat_attributes: typed_inner.pat_attributes.clone(),
+                pat_env: typed_inner.pat_env.clone(),
+            }
+        }
+        _ => {
+            // For non-variable patterns, just add the constraint to pat_extra
+            typed_inner.with_pat_extra(extra, loc.clone(), pat.ppat_attributes.clone())
+        }
+    };
+
+    Ok(result)
 }
 
 /// Type check interval pattern.
@@ -2629,23 +2660,81 @@ fn type_field(
     attributes: &[crate::parser::ast::Attribute],
 ) -> TypeCoreResult<Expression> {
     let ctx = tctx.type_ctx;
+    let field_name = tctx.resolve_lid_last(field_lid.txt);
 
     // Type check the record expression
     let record_ty = ctx.new_var(None);
     let typed_record = type_expect(tctx, env, record_expr, record_ty, None)?;
 
-    // Look up the field - for now just create placeholder
-    let field_ty = ctx.new_var(None);
+    // Try to look up the field type from the record type
+    let (field_ty, mutable_flag, optional_flag, field_pos) = {
+        // Follow links to get the actual type
+        let repr_ty = ctx.repr(record_ty);
+        let desc = ctx.get_desc(repr_ty);
+
+        match &*desc {
+            crate::types::TypeDesc::Tconstr { path, .. } => {
+                // Look up the type declaration
+                match env.lookup_type(path) {
+                    Ok(type_decl) => {
+                        match &type_decl.type_kind {
+                            crate::types::TypeKind::TypeRecord(labels, _repres) => {
+                                // Find the label in the record
+                                let mut found = None;
+                                for (pos, label) in labels.iter().enumerate() {
+                                    if label.ld_id.name() == field_name {
+                                        // Found the label! Extract the type.
+                                        // The label type is wrapped in Tpoly, we need the inner type
+                                        let label_ty = {
+                                            let ty = ctx.repr(label.ld_type);
+                                            let inner_desc = ctx.get_desc(ty);
+                                            match &*inner_desc {
+                                                crate::types::TypeDesc::Tpoly { body, .. } => *body,
+                                                _ => label.ld_type,
+                                            }
+                                        };
+                                        found = Some((label_ty, label.ld_mutable.clone(), label.ld_optional, pos as i32));
+                                        break;
+                                    }
+                                }
+                                match found {
+                                    Some((ty, mflag, opt, pos)) => (ty, mflag, opt, pos),
+                                    None => {
+                                        // Field not found in record - fall back to placeholder
+                                        (ctx.new_var(None), crate::types::MutableFlag::Immutable, false, 0)
+                                    }
+                                }
+                            }
+                            _ => {
+                                // Not a record type - fall back to placeholder
+                                (ctx.new_var(None), crate::types::MutableFlag::Immutable, false, 0)
+                            }
+                        }
+                    }
+                    Err(_) => {
+                        // Type not found in env - fall back to placeholder
+                        (ctx.new_var(None), crate::types::MutableFlag::Immutable, false, 0)
+                    }
+                }
+            }
+            _ => {
+                // Not a Tconstr - fall back to placeholder
+                (ctx.new_var(None), crate::types::MutableFlag::Immutable, false, 0)
+            }
+        }
+    };
+
+    // Unify field type with expected type
     unify_expression_types(tctx, loc, field_ty, expected_ty, None)?;
 
-    // Create placeholder label description
+    // Create label description
     let label_desc = crate::types::LabelDescription {
-        lbl_name: tctx.resolve_lid_last(field_lid.txt),
+        lbl_name: field_name,
         lbl_res: record_ty,
         lbl_arg: field_ty,
-        lbl_mut: crate::types::MutableFlag::Immutable,
-        lbl_optional: false,
-        lbl_pos: 0,
+        lbl_mut: mutable_flag,
+        lbl_optional: optional_flag,
+        lbl_pos: field_pos,
         lbl_all: crate::types::LabelArrayRef(0),
         lbl_repres: crate::types::RecordRepresentation::RecordRegular,
         lbl_private: crate::types::PrivateFlag::Public,
@@ -2775,25 +2864,28 @@ fn type_coerce(
         });
     }
 
-    // If there's a from type, translate and check it
-    let (opt_from_typed, from_ty) = if let Some(from_type) = opt_from_type {
-        let (from_typed_ctype, from_ty) = transl_type(tctx, env, from_type)?;
-        (Some(from_typed_ctype), from_ty)
+    // If there's a from type, translate and check it, otherwise infer from expression
+    let from_ty = if let Some(from_type) = opt_from_type {
+        let (_from_typed_ctype, from_ty) = transl_type(tctx, env, from_type)?;
+        from_ty
     } else {
         // No explicit from type, infer it from the expression
-        let from_ty = tctx.type_ctx.new_var(None);
-        (None, from_ty)
+        tctx.type_ctx.new_var(None)
     };
 
     // Type check the inner expression with the from type
-    let typed_inner = type_expect(tctx, env, inner_expr, from_ty, None)?;
+    let mut typed_inner = type_expect(tctx, env, inner_expr, from_ty, None)?;
 
-    // Return the inner expression with the coercion as exp_extra
-    Ok(typed_inner.with_exp_extra(
-        crate::types::typedtree::ExpExtra::Texp_coerce(opt_from_typed, to_typed_ctype),
+    // The resulting expression has the TARGET type, not the source type
+    // Add coercion info to exp_extra and update exp_type
+    typed_inner.exp_extra.push((
+        crate::types::typedtree::ExpExtra::Texp_coerce(to_typed_ctype),
         loc.clone(),
         attributes.to_vec(),
-    ))
+    ));
+    typed_inner.exp_type = to_ty;
+
+    Ok(typed_inner)
 }
 
 /// Type check open expression.
