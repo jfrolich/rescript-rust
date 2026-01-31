@@ -242,7 +242,10 @@ fn parse_type_alias(p: &mut Parser<'_>, typ: CoreType) -> CoreType {
 
 /// Parse a type expression with optional ES6 arrow support.
 fn parse_typ_expr_inner(p: &mut Parser<'_>, es6_arrow: bool) -> CoreType {
-    let start_pos = p.start_pos.clone(); // Capture before parsing anything (including attributes)
+    // Capture start position as PosIdx to enable sharing with arrow type locations.
+    // For `string => int`, this position is shared between the arrow's location and
+    // potentially the `string` type's location.
+    let start_pos_idx = p.push_start_pos();
     let attrs = parse_type_attributes(p);
 
     if es6_arrow && super::core::is_es6_arrow_type(p) {
@@ -250,7 +253,7 @@ fn parse_typ_expr_inner(p: &mut Parser<'_>, es6_arrow: bool) -> CoreType {
     } else {
         let typ = parse_atomic_typ_expr(p, attrs.clone(), es6_arrow);
         if es6_arrow && p.token == Token::EqualGreater {
-            parse_arrow_type_rest(p, typ, start_pos)
+            parse_arrow_type_rest(p, typ, start_pos_idx)
         } else {
             typ
         }
@@ -258,12 +261,12 @@ fn parse_typ_expr_inner(p: &mut Parser<'_>, es6_arrow: bool) -> CoreType {
 }
 
 /// Parse the rest of an arrow type.
-/// `start_pos` is the position before parsing the first argument.
+/// `start_pos_idx` is the PosIdx before parsing the first argument, for position sharing.
 /// OCaml's parse_arrow_type_rest uses start_pos (before the argument) for location.
 fn parse_arrow_type_rest(
     p: &mut Parser<'_>,
     param_type: CoreType,
-    start_pos: crate::location::Position,
+    start_pos_idx: crate::parse_arena::PosIdx,
 ) -> CoreType {
     p.expect(Token::EqualGreater);
     // Parse return type without alias - `as` binds looser than `=>`
@@ -272,7 +275,8 @@ fn parse_arrow_type_rest(
     // OCaml's parse_arrow_type_rest uses start_pos (before the argument),
     // NOT param_type.ptyp_loc.loc_start. This is different from the special case
     // in parse_poly_type_expr which uses typ.ptyp_loc.loc_start.
-    let loc = p.mk_loc_to_prev_end(&start_pos);
+    // Use mk_loc_idx_to_prev_end to reuse the start_pos_idx for position sharing.
+    let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
 
     let arg = TypeArg {
         attrs: vec![],
@@ -1146,6 +1150,9 @@ fn parse_record_or_object_type(p: &mut Parser<'_>) -> CoreType {
 /// This is used by constructor argument parsing where OCaml captures start_pos AFTER consuming `{`.
 /// The caller should pass the position AFTER consuming `{` as `start_pos`.
 pub fn parse_object_type_body(p: &mut Parser<'_>, start_pos: Position) -> CoreType {
+    // Push start position as PosIdx for potential reuse in arrow type location
+    let start_pos_idx = p.arena_mut().push_position(start_pos);
+
     // Check for open/closed markers: {. ... } or {.. ... }
     let closed = if p.token == Token::DotDot {
         p.next();
@@ -1159,7 +1166,7 @@ pub fn parse_object_type_body(p: &mut Parser<'_>, start_pos: Position) -> CoreTy
 
     let fields = parse_object_fields(p);
     p.expect(Token::Rbrace);
-    let loc = p.mk_loc_to_prev_end(&start_pos);
+    let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
     let typ = CoreType {
         ptyp_desc: CoreTypeDesc::Ptyp_object(fields, closed),
         ptyp_loc: loc,
@@ -1169,7 +1176,7 @@ pub fn parse_object_type_body(p: &mut Parser<'_>, start_pos: Position) -> CoreTy
     let typ = parse_type_alias(p, typ);
     // Handle arrow rest if present
     if p.token == Token::EqualGreater {
-        parse_arrow_type_rest(p, typ, start_pos)
+        parse_arrow_type_rest(p, typ, start_pos_idx)
     } else {
         typ
     }
