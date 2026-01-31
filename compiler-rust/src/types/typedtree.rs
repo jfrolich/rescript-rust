@@ -262,7 +262,8 @@ pub enum ExpressionDesc {
     ),
 
     /// Send: `E#m` (object method call).
-    Texp_send(Box<Expression>, MethKind),
+    /// Third argument is the optional method value (None for methods accessed by name).
+    Texp_send(Box<Expression>, MethKind, Option<Box<Expression>>),
 
     /// Let module: `let module M = ME in E`.
     Texp_letmodule(Ident, Loc<String>, Box<ModuleExpr>, Box<Expression>),

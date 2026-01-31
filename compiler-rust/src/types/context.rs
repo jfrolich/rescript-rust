@@ -22,7 +22,7 @@ use super::asttypes::ArgLabel;
 use super::path::Path;
 use super::type_expr::{
     AbbrevMemo, AbbrevMemoRef, Commutable, CommutableRef, FieldKind, FieldKindRef, GENERIC_LEVEL,
-    RowDesc, RowField, RowFieldRef, TypeArg, TypeDesc, TypeExpr, TypeExprRef,
+    ObjectName, RowDesc, RowField, RowFieldRef, TypeArg, TypeDesc, TypeExpr, TypeExprRef,
 };
 use crate::context::IdGenerator;
 use std::cell::{Cell, RefCell};
@@ -217,6 +217,27 @@ impl<'a> TypeContext<'a> {
     /// Create a variant type.
     pub fn new_variant(&self, row: RowDesc) -> TypeExprRef {
         self.new_type(TypeDesc::Tvariant(row))
+    }
+
+    /// Create an object type.
+    pub fn new_object(&self, fields: TypeExprRef, name: ObjectName) -> TypeExprRef {
+        self.new_type(TypeDesc::Tobject { fields, name })
+    }
+
+    /// Create an object field type.
+    pub fn new_field(
+        &self,
+        name: String,
+        kind: FieldKind,
+        typ: TypeExprRef,
+        rest: TypeExprRef,
+    ) -> TypeExprRef {
+        self.new_type(TypeDesc::Tfield { name, kind, typ, rest })
+    }
+
+    /// Create the nil terminator for object fields.
+    pub fn new_nil(&self) -> TypeExprRef {
+        self.new_type(TypeDesc::Tnil)
     }
 
     // ========================================================================

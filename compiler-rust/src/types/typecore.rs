@@ -3169,21 +3169,42 @@ fn type_send(
     expected_ty: TypeExprRef,
     attributes: &[crate::parser::ast::Attribute],
 ) -> TypeCoreResult<Expression> {
+    use crate::types::type_expr::FieldKind;
+
     let ctx = tctx.type_ctx;
 
-    // The object should have an object type with the method
-    let obj_ty = ctx.new_var(None);
+    // Create the result type (what the method returns)
+    let result_ty = ctx.new_var(None);
+
+    // Create a row variable for the rest of the object fields
+    let row_var = ctx.new_var(None);
+
+    // Wrap the result type in Tpoly (as OCaml does for object field types)
+    let poly_result = ctx.new_poly(result_ty, vec![]);
+
+    // Create the object type: < method: poly_result; row_var >
+    let field_ty = ctx.new_field(
+        method.txt.clone(),
+        FieldKind::Fpresent,
+        poly_result,
+        row_var,
+    );
+    let obj_ty = ctx.new_object(field_ty, None);
+
+    // Type check the object expression with the inferred object type
     let typed_obj = type_expect(tctx, env, obj_expr, obj_ty, None)?;
 
-    // For now, allow any method call and use the expected type as result
-    // Full implementation would look up the method in the object type
+    // Unify the result type with the expected type
+    unify_expression_types(tctx, loc, result_ty, expected_ty, None)?;
+
     Ok(Expression::new(
         ExpressionDesc::Texp_send(
             Box::new(typed_obj),
             crate::types::typedtree::MethKind::Tmeth_name(method.txt.clone()),
+            None, // No method expression for name-based access
         ),
         loc.clone(),
-        expected_ty,
+        result_ty,
         EnvRef(0),
         attributes.to_vec(),
     ))
