@@ -648,41 +648,55 @@ When the Rust printer output differs from OCaml, common issues include:
 - **Parenthesization**: Extra or missing parens around expressions
 - **Exotic identifiers**: `~~~compare` should not become `\"~~~"(compare)`
 
-### AST Parity Test Suite
+### AST Parity Test Suites
 
-**This is the primary test for verifying Rust compiler parity with OCaml.**
+**These are the primary tests for verifying Rust compiler parity with OCaml.**
+
+There are two parity test scripts:
+
+1. **`test_parser_ast_parity.sh`** - Tests AST parity (parser and compiler output)
+2. **`test_parser_ast0_parity.sh`** - Tests AST0/PPX parity (parsetree0 format for PPX tools)
 
 ```bash
 # See detailed usage information
 ./scripts/test_parser_ast_parity.sh --info
+./scripts/test_parser_ast0_parity.sh --info
 ```
 
-**⚠️ Use `--binary-only` for most testing to save resources:**
+#### AST Parity (test_parser_ast_parity.sh)
+
+This tests the core parser and compiler output:
+- **sexp-locs** - Parser AST with locations (readable diffs for debugging)
+- **bsc-ast** - Full `bsc -bs-ast` output (production format with dependency extraction)
 
 ```bash
-# Test only bsc-ast output - USE THIS FOR ITERATION
-./scripts/test_parser_ast_parity.sh --binary-only
+# Run AST parity tests
+./scripts/test_parser_ast_parity.sh
 
-# Test a single file in binary-only mode (fastest)
-./scripts/test_parser_ast_parity.sh -b tests/syntax_tests/data/printer/expr/apply.res
+# Test a single file
+./scripts/test_parser_ast_parity.sh tests/syntax_tests/data/printer/expr/apply.res
 
 # Stop on first failure
-./scripts/test_parser_ast_parity.sh -b --quick
+./scripts/test_parser_ast_parity.sh --quick
 ```
 
-Since AST (sexp) parity is already achieved, you only need to run the full test suite occasionally to verify nothing regressed. The `--binary-only` flag skips sexp tests, binary0, and roundtrip tests—only testing the production `bsc -bs-ast` output:
+#### AST0/PPX Parity (test_parser_ast0_parity.sh)
+
+This tests the parsetree0 format used by PPX tools:
+- **sexp0-locs** - Parsetree0 sexp output
+- **binary0** - Marshalled parsetree0 (byte-identical for PPX tools)
+- **roundtrip** - parsetree → parsetree0 → parsetree conversion (structure and locations)
 
 ```bash
-# Full test suite - run occasionally, not on every change
-./scripts/test_parser_ast_parity.sh
-```
+# Run AST0 parity tests
+./scripts/test_parser_ast0_parity.sh
 
-The test suite compares:
-- **bsc-ast** - Full `bsc -bs-ast` output (production format with dependency extraction)
-- **binary0** - Marshalled parsetree0 (byte-identical for PPX tools)
-- **sexp-locs** - Parser AST with locations (readable diffs for debugging)
-- **sexp0-locs** - Parsetree0 sexp output
-- **roundtrip** - parsetree → parsetree0 → parsetree conversion
+# Test a single file
+./scripts/test_parser_ast0_parity.sh tests/syntax_tests/data/printer/expr/apply.res
+
+# Stop on first failure
+./scripts/test_parser_ast0_parity.sh --quick
+```
 
 **Regression tracking**: Files that pass are added to baselines in `tests/parity_baselines/`. If a passing file starts failing, it's flagged as a regression and the test fails. This ensures parity can only increase.
 
