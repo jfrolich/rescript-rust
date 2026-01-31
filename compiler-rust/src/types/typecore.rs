@@ -452,6 +452,12 @@ impl<'a> TypeCheckContext<'a> {
         self.arena.get_longident(idx)
     }
 
+    /// Resolve a LidentIdx to the last component as a string.
+    pub fn resolve_lid_last(&self, idx: LidentIdx) -> String {
+        let lid = self.arena.get_longident(idx);
+        self.arena.get_string(lid.last_idx()).to_string()
+    }
+
     /// Convert a Located<LidentIdx> to Located<Longident> by cloning the longident.
     pub fn resolve_located_lid(&self, lid: &Located<LidentIdx>) -> Located<Longident> {
         Located {
@@ -647,7 +653,7 @@ fn transl_type_inner(
             // Create path from longident
             // Full implementation would look up the type and use its actual path
             let longident = tctx.arena.get_longident(lid.txt);
-            let path = Path::pident(Ident::create_persistent(longident.to_string()));
+            let path = Path::from_longident(longident, |str_idx| tctx.arena.get_string(str_idx));
 
             let constr_ty = ctx.new_constr(path.clone(), arg_refs);
 
@@ -1215,10 +1221,11 @@ fn type_pattern_construct(
 
     // Look up constructor
     let lid_txt = tctx.arena.get_longident(lid.txt);
-    let (cstr_desc, _cstr_path) = match env.find_constructor(&lid_txt.to_string()) {
+    let lid_name = tctx.arena.get_string(lid_txt.last_idx());
+    let (cstr_desc, _cstr_path) = match env.find_constructor(lid_name) {
         Ok(desc) => (
             desc.clone(),
-            Path::pident(Ident::create_persistent(lid_txt.to_string())),
+            Path::from_longident(lid_txt, |str_idx| tctx.arena.get_string(str_idx)),
         ),
         Err(_) => {
             return Err(TypeCoreError::NotAVariantType(lid_txt.clone()));
@@ -1345,7 +1352,7 @@ fn type_pattern_record(
 
         // Create placeholder label description
         let label_desc = crate::types::LabelDescription {
-            lbl_name: tctx.resolve_lid(field.lid.txt).to_string(),
+            lbl_name: tctx.resolve_lid_last(field.lid.txt),
             lbl_res: expected_ty,
             lbl_arg: field_ty,
             lbl_mut: crate::types::MutableFlag::Immutable,
@@ -1508,7 +1515,7 @@ fn type_pattern_open(
 
     // Create the open pattern
     let mod_lid_txt = tctx.arena.get_longident(mod_lid.txt);
-    let _mod_path = Path::pident(Ident::create_persistent(mod_lid_txt.to_string()));
+    let _mod_path = Path::from_longident(mod_lid_txt, |str_idx| tctx.arena.get_string(str_idx));
 
     Ok(Pattern::new(
         PatternDesc::Tpat_or(Box::new(typed_inner.clone()), Box::new(typed_inner), None),
@@ -1540,7 +1547,7 @@ pub fn type_expect<'a>(
         ED::Pexp_ident(lid) => {
             // Identifier expression
             let longident = tctx.resolve_lid(lid.txt);
-            let (path, desc) = env.lookup_value_by_lid(longident)?;
+            let (path, desc) = env.lookup_value_by_lid(longident, tctx.arena)?;
 
             // Instantiate the type
             let ty = crate::types::instance(ctx, desc.val_type);
@@ -2434,11 +2441,12 @@ fn type_construct(
 ) -> TypeCoreResult<Expression> {
     let ctx = tctx.type_ctx;
     let longident = tctx.resolve_lid(lid.txt);
+    let cstr_name = tctx.arena.get_string(longident.last_idx());
 
     // Look up constructor
-    let (_cstr_path, cstr_desc) = match env.find_constructor(&longident.to_string()) {
+    let (_cstr_path, cstr_desc) = match env.find_constructor(cstr_name) {
         Ok(desc) => (
-            Path::pident(Ident::create_persistent(longident.to_string())),
+            Path::from_longident(longident, |str_idx| tctx.arena.get_string(str_idx)),
             desc.clone(),
         ),
         Err(_) => {
@@ -2578,7 +2586,7 @@ fn type_record(
 
         // Create a placeholder label description
         let label_desc = crate::types::LabelDescription {
-            lbl_name: tctx.resolve_lid(field.lid.txt).to_string(),
+            lbl_name: tctx.resolve_lid_last(field.lid.txt),
             lbl_res: expected_ty,
             lbl_arg: field_ty,
             lbl_mut: crate::types::MutableFlag::Immutable,
@@ -2632,7 +2640,7 @@ fn type_field(
 
     // Create placeholder label description
     let label_desc = crate::types::LabelDescription {
-        lbl_name: tctx.resolve_lid(field_lid.txt).to_string(),
+        lbl_name: tctx.resolve_lid_last(field_lid.txt),
         lbl_res: record_ty,
         lbl_arg: field_ty,
         lbl_mut: crate::types::MutableFlag::Immutable,
@@ -2685,7 +2693,7 @@ fn type_setfield(
 
     // Create placeholder label description
     let label_desc = crate::types::LabelDescription {
-        lbl_name: tctx.resolve_lid(field_lid.txt).to_string(),
+        lbl_name: tctx.resolve_lid_last(field_lid.txt),
         lbl_res: record_ty,
         lbl_arg: field_ty,
         lbl_mut: crate::types::MutableFlag::Mutable,
@@ -3246,8 +3254,29 @@ impl Env {
     }
 
     /// Look up a value by longident.
-    pub fn lookup_value_by_lid(&self, lid: &Longident) -> TypeCoreResult<(Path, ValueDescription)> {
-        match self.find_value_with_id(lid.to_string().as_str()) {
+    pub fn lookup_value_by_lid(
+        &self,
+        lid: &Longident,
+        arena: &crate::parse_arena::ParseArena,
+    ) -> TypeCoreResult<(Path, ValueDescription)> {
+        // Get the actual name from the Longident using the arena
+        let name = match lid {
+            Longident::Lident(str_idx) => arena.get_string(*str_idx).to_string(),
+            Longident::Ldot(_, str_idx) => {
+                // For dotted paths, we need the last component for now
+                // TODO: Handle module paths properly
+                arena.get_string(*str_idx).to_string()
+            }
+            Longident::Lapply(_, _) => {
+                return Err(TypeCoreError::UndefinedMethod {
+                    ty: TypeExprRef(0),
+                    method: format!("{:?}", lid),
+                    alternatives: None,
+                });
+            }
+        };
+
+        match self.find_value_with_id(&name) {
             Ok((id, desc)) => {
                 // Use the stored path if available (e.g., for Pervasives primitives),
                 // otherwise construct from identifier
@@ -3256,7 +3285,7 @@ impl Env {
             }
             Err(_) => Err(TypeCoreError::UndefinedMethod {
                 ty: TypeExprRef(0), // Placeholder
-                method: lid.to_string(),
+                method: name,
                 alternatives: None,
             }),
         }
