@@ -12,7 +12,7 @@ use crate::types::type_expr::{FieldKind, RowDesc, RowField, TypeDesc, TypeExprRe
 use crate::types::typedtree::{
     Case, Constant, Expression, ExpressionDesc, ExtensionConstructor,
     ExtensionConstructorKind, FunctionParam, FunctionParamPattern, IncludeDeclaration, ModuleBinding, ModuleExpr, ModuleExprDesc,
-    ModuleTypeConstraint, OpenDeclaration, Partial, Pattern, PatternDesc,
+    ModuleTypeConstraint, ModuleTypeDeclaration, OpenDeclaration, Partial, Pattern, PatternDesc,
     RecordLabelDefinition, Structure, StructureItem, StructureItemDesc,
     TypedCoreType, TypedCoreTypeDesc, ValueBinding, TypeExtension,
     TypedTypeDeclaration, TypedTypeKind, TypedConstructorDeclaration, TypedConstructorArguments,
@@ -1577,8 +1577,8 @@ fn sexp_structure_item_desc(arena: &ParseArena, ctx: &TypeContext<'_>, with_locs
                 Sexp::list(mbs.iter().map(|mb| sexp_module_binding(arena, ctx, with_locs, mb)).collect()),
             ])
         }
-        StructureItemDesc::Tstr_modtype(_mtd) => {
-            Sexp::list(vec![Sexp::atom("Tstr_modtype"), Sexp::atom("<module_type_declaration>")])
+        StructureItemDesc::Tstr_modtype(mtd) => {
+            Sexp::list(vec![Sexp::atom("Tstr_modtype"), sexp_module_type_declaration(arena, ctx, with_locs, mtd)])
         }
         StructureItemDesc::Tstr_open(od) => {
             Sexp::list(vec![
@@ -1636,6 +1636,30 @@ fn sexp_open_declaration(arena: &ParseArena, ctx: &TypeContext<'_>, with_locs: b
     items.push(sexp_module_expr(arena, ctx, with_locs, &od.open_expr));
     items.push(sexp_override_flag(&od.open_override));
     items.push(sexp_attributes(with_locs, &od.open_attributes));
+    Sexp::list(items)
+}
+
+fn sexp_module_type_declaration(arena: &ParseArena, _ctx: &TypeContext<'_>, with_locs: bool, mtd: &ModuleTypeDeclaration) -> Sexp {
+    let loc_sexp = if with_locs {
+        vec![location_idx(arena, with_locs, mtd.mtd_loc)]
+    } else {
+        vec![]
+    };
+    // Note: mtd_type is Option<ModuleType>, but ModuleType is currently a placeholder.
+    // For now we output the placeholder; proper implementation requires adding
+    // mty_desc, mty_loc, etc. to ModuleType and implementing sexp_module_type.
+    let type_sexp = match &mtd.mtd_type {
+        Some(_mt) => Sexp::list(vec![Sexp::atom("Some"), Sexp::atom("<module_type>")]),
+        None => Sexp::atom("None"),
+    };
+    let mut items = vec![
+        Sexp::atom("module_type_declaration"),
+        sexp_ident(&mtd.mtd_id),
+        string(&mtd.mtd_name.txt),
+    ];
+    items.extend(loc_sexp);
+    items.push(type_sexp);
+    items.push(sexp_attributes(with_locs, &mtd.mtd_attributes));
     Sexp::list(items)
 }
 
