@@ -234,7 +234,7 @@ impl<'src> Parser<'src> {
     /// Get or push the prev_end_pos, using cache for sharing.
     /// When multiple locations end at the same prev_end_pos (before consuming more tokens),
     /// they will share the same PosIdx in the marshal output.
-    fn get_or_push_prev_end_pos(&mut self) -> PosIdx {
+    pub fn get_or_push_prev_end_pos(&mut self) -> PosIdx {
         if let Some(cached_idx) = self.cached_prev_end_pos_idx {
             cached_idx
         } else {

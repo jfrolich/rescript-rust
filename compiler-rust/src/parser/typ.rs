@@ -635,7 +635,10 @@ fn parse_atomic_typ_expr(p: &mut Parser<'_>, attrs: Attributes, es6_arrow: bool)
 
 /// Parse a type constructor (path with optional type arguments).
 fn parse_type_constr(p: &mut Parser<'_>) -> CoreType {
-    let start_pos = p.start_pos.clone();
+    // Push start position ONCE and reuse the PosIdx for both lid_loc and ptyp_loc.
+    // This matches OCaml's position sharing where both locations use the same
+    // start_pos variable reference.
+    let start_pos_idx = p.push_start_pos();
 
     // Parse the path
     let mut path_parts = vec![];
@@ -656,9 +659,11 @@ fn parse_type_constr(p: &mut Parser<'_>) -> CoreType {
 
     let lid = super::core::build_longident(p.arena_mut(), &path_parts);
     let lid_idx = p.push_longident(lid);
-    // Capture location of just the identifier (to match OCaml's lid.loc)
-    let lid_end_pos = p.prev_end_pos.clone();
-    let lid_loc = p.mk_loc(&start_pos, &lid_end_pos);
+
+    // Capture end position for identifier - use caching so it can be shared
+    // with ptyp_loc when there are no type arguments
+    let lid_end_idx = p.get_or_push_prev_end_pos();
+    let lid_loc = p.mk_loc_idx(start_pos_idx, lid_end_idx);
 
     // Parse optional type arguments
     let args = if p.token == Token::LessThan {
@@ -675,7 +680,10 @@ fn parse_type_constr(p: &mut Parser<'_>) -> CoreType {
     // ptyp_loc includes the full extent (identifier + type args)
     // Note: For Ldot types in certain contexts (type manifests, arrow parameters),
     // the location is adjusted later to exclude type args.
-    let ptyp_loc = p.mk_loc_to_prev_end(&start_pos);
+    // Reuse start_pos_idx for position sharing. End position uses caching -
+    // when there are no type args, it shares the same end as lid_loc.
+    let ptyp_end_idx = p.get_or_push_prev_end_pos();
+    let ptyp_loc = p.mk_loc_idx(start_pos_idx, ptyp_end_idx);
     ast_helper::make_type_constr(lid_idx, args, lid_loc, ptyp_loc)
 }
 
@@ -704,8 +712,8 @@ fn parse_function_type(p: &mut Parser<'_>, start_pos: crate::location::Position)
     // Skip uncurried marker
     let first_has_dot = p.optional(&Token::Dot);
 
-    // Track both the TypeArg and its start position (for arrow location)
-    let mut params: Vec<(TypeArg, crate::location::Position)> = vec![];
+    // Track both the TypeArg and its start position as PosIdx (for arrow location sharing)
+    let mut params: Vec<(TypeArg, crate::parse_arena::PosIdx)> = vec![];
     let mut is_first_param = true;
 
     while p.token != Token::Rparen && p.token != Token::Eof {
@@ -752,15 +760,16 @@ fn parse_function_type(p: &mut Parser<'_>, start_pos: crate::location::Position)
         // But if there's an uncurried marker (.), the arrow should start at the .
         // The uncurried marker takes precedence over @-attributes for the start position
         // Doc comments do NOT affect the arrow start position
+        // Push as PosIdx to enable position sharing in arrow locations.
         let has_regular_attrs = param_attrs.iter().any(|(name, _)| p.arena().get_string(name.txt) != "res.doc");
-        let param_start = if has_dot {
+        let param_start_idx = if has_dot {
             // For uncurried parameters, OCaml includes the . in arrow location
-            uncurried_start.clone()
+            p.arena_mut().push_position(uncurried_start)
         } else if has_regular_attrs {
             // If there are @-attributes (but no uncurried marker), start at the attribute
-            post_doc_start.clone()
+            p.arena_mut().push_position(post_doc_start)
         } else {
-            p.start_pos.clone()
+            p.push_start_pos()
         };
 
         let (mut label, mut typ) = if p.token == Token::Tilde {
@@ -846,7 +855,7 @@ fn parse_function_type(p: &mut Parser<'_>, start_pos: crate::location::Position)
             attrs: arrow_attrs,
             lbl: label,
             typ,
-        }, param_start));
+        }, param_start_idx));
 
         if !p.optional(&Token::Comma) {
             break;
@@ -867,13 +876,15 @@ fn parse_function_type(p: &mut Parser<'_>, start_pos: crate::location::Position)
         // OCaml: Ast_helper.Typ.constr unit_constr []
         // No ~loc passed, so ptyp_loc defaults to Location.none (ghost)
         // But lid_loc uses the real location
-        let lid_loc = p.mk_loc(&start_pos, &rparen_end_pos);
+        let start_pos_idx = p.arena_mut().push_position(start_pos.clone());
+        let rparen_end_idx = p.arena_mut().push_position(rparen_end_pos);
+        let lid_loc = p.mk_loc_idx(start_pos_idx, rparen_end_idx);
         let lid_idx = p.push_lident_static("unit");
         params.push((TypeArg {
             attrs: vec![],
             lbl: ArgLabel::Nolabel,
             typ: ast_helper::make_type_constr(lid_idx, vec![], lid_loc, LocIdx::none()),
-        }, start_pos.clone()));
+        }, start_pos_idx));
     }
 
     // The total arity is the number of parameters
@@ -890,14 +901,14 @@ fn parse_function_type(p: &mut Parser<'_>, start_pos: crate::location::Position)
     };
     let total_arity = params.len() - as_underscore_count;
 
-    // Build the arrow type from right to left, tracking the end position
+    // Build the arrow type from right to left, tracking the end position as PosIdx for sharing
     // The first iteration uses arrow_end_pos, subsequent iterations use the arrow's end
     let mut acc = return_type;
-    let mut end_pos = arrow_end_pos;
-    for (param, param_start) in params.into_iter().rev() {
+    let mut end_pos_idx = p.arena_mut().push_position(arrow_end_pos);
+    for (param, param_start_idx) in params.into_iter().rev() {
         // Each arrow's location spans from the label (if any) to the end of return
         // OCaml includes the ~ in the location for labeled arguments
-        let arrow_loc = p.mk_loc_from_positions(&param_start, &end_pos);
+        let arrow_loc = p.mk_loc_idx(param_start_idx, end_pos_idx);
         let arrow = CoreType {
             ptyp_desc: CoreTypeDesc::Ptyp_arrow {
                 arg: Box::new(param),
@@ -908,8 +919,8 @@ fn parse_function_type(p: &mut Parser<'_>, start_pos: crate::location::Position)
             ptyp_loc: arrow_loc,
             ptyp_attributes: vec![],
         };
-        // Next iteration should use this arrow's end position
-        end_pos = p.loc_end(arrow.ptyp_loc).clone();
+        // Next iteration should use this arrow's end position (share via LocIdx lookup)
+        end_pos_idx = p.arena().get_location(arrow.ptyp_loc).loc_end;
         acc = arrow;
     }
     let result = acc;
@@ -929,9 +940,11 @@ fn parse_function_type(p: &mut Parser<'_>, start_pos: crate::location::Position)
     };
 
     // The outermost arrow should start at start_pos (the opening paren) not at first arg
-    let end_pos = p.loc_end(result.ptyp_loc).clone();
+    // Reuse the end position from the result's location for sharing
+    let start_pos_idx = p.arena_mut().push_position(start_pos);
+    let end_pos_idx = p.arena().get_location(result.ptyp_loc).loc_end;
     CoreType {
-        ptyp_loc: p.mk_loc_from_positions(&start_pos, &end_pos),
+        ptyp_loc: p.mk_loc_idx(start_pos_idx, end_pos_idx),
         ..result
     }
 }
