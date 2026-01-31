@@ -354,9 +354,9 @@ fn type_structure_item<'a>(
                 };
 
                 // Convert the type kind - create both internal and typed tree versions
-                let (internal_type_kind, typed_tree_kind, constructors) = match &decl.ptype_kind {
+                let (internal_type_kind, typed_tree_kind, constructors, label_descs) = match &decl.ptype_kind {
                     crate::parser::ast::TypeKind::Ptype_abstract => {
-                        (crate::types::TypeKind::TypeAbstract, TypedTypeKind::Ttype_abstract, vec![])
+                        (crate::types::TypeKind::TypeAbstract, TypedTypeKind::Ttype_abstract, vec![], vec![])
                     }
                     crate::parser::ast::TypeKind::Ptype_variant(cstrs) => {
                         let mut internal_cstrs = Vec::new();
@@ -483,12 +483,17 @@ fn type_structure_item<'a>(
                             }));
                         }
 
-                        (crate::types::TypeKind::TypeVariant(internal_cstrs), TypedTypeKind::Ttype_variant(typed_tree_cstrs), cstr_descs)
+                        (crate::types::TypeKind::TypeVariant(internal_cstrs), TypedTypeKind::Ttype_variant(typed_tree_cstrs), cstr_descs, vec![])
                     }
                     crate::parser::ast::TypeKind::Ptype_record(labels) => {
                         let mut internal_labels: Vec<crate::types::LabelDeclaration> = Vec::new();
                         let mut typed_tree_labels: Vec<TypedLabelDeclaration> = Vec::new();
-                        for lbl in labels {
+                        let mut lbl_descs: Vec<(Ident, crate::types::LabelDescription)> = Vec::new();
+
+                        // Create the record type (Tconstr with type params)
+                        let res_ty = ctx.new_constr(type_path.clone(), internal_type_params.clone());
+
+                        for (idx, lbl) in labels.iter().enumerate() {
                             let (typed_core_type, type_ref) = transl_type(tctx, env, &lbl.pld_type)?;
                             let mutable_flag = match lbl.pld_mutable {
                                 crate::parser::ast::MutableFlag::Immutable => crate::types::MutableFlag::Immutable,
@@ -522,15 +527,32 @@ fn type_structure_item<'a>(
                             };
 
                             // OCaml wraps label types in Tpoly for potential generalization
-                            let poly_type_ref = ctx.new_poly(final_type_ref, vec![]);
+                            let poly_type_ref = ctx.new_poly(final_type_ref.clone(), vec![]);
+                            let lbl_id = Ident::create_persistent(&lbl.pld_name.txt);
                             internal_labels.push(crate::types::LabelDeclaration {
-                                ld_id: Ident::create_persistent(&lbl.pld_name.txt),
-                                ld_mutable: mutable_flag,
+                                ld_id: lbl_id.clone(),
+                                ld_mutable: mutable_flag.clone(),
                                 ld_optional: lbl.pld_optional,
                                 ld_type: poly_type_ref,
                                 ld_loc: arena.to_location(lbl.pld_loc),
                                 ld_attributes: vec![],
                             });
+
+                            // Create LabelDescription for environment lookup
+                            lbl_descs.push((lbl_id.clone(), crate::types::LabelDescription {
+                                lbl_name: lbl.pld_name.txt.clone(),
+                                lbl_res: res_ty,
+                                lbl_arg: final_type_ref,
+                                lbl_mut: mutable_flag.clone(),
+                                lbl_optional: lbl.pld_optional,
+                                lbl_pos: idx as i32,
+                                lbl_all: crate::types::LabelArrayRef(0), // Placeholder - will be filled later if needed
+                                lbl_repres: crate::types::RecordRepresentation::RecordRegular,
+                                lbl_private: crate::types::PrivateFlag::Public,
+                                lbl_loc: arena.to_location(lbl.pld_loc),
+                                lbl_attributes: vec![],
+                            }));
+
                             // OCaml wraps label types in Ttyp_poly for typed tree
                             let poly_typed_core_type = TypedCoreType {
                                 ctyp_desc: TypedCoreTypeDesc::Ttyp_poly(vec![], Box::new(final_typed_core_type)),
@@ -540,7 +562,7 @@ fn type_structure_item<'a>(
                                 ctyp_attributes: vec![],
                             };
                             typed_tree_labels.push(TypedLabelDeclaration {
-                                ld_id: Ident::create_persistent(&lbl.pld_name.txt),
+                                ld_id: lbl_id,
                                 ld_name: crate::parse_arena::Located {
                                     txt: lbl.pld_name.txt.clone(),
                                     loc: lbl.pld_name.loc,
@@ -552,10 +574,10 @@ fn type_structure_item<'a>(
                                 ld_attributes: lbl.pld_attributes.clone(),
                             });
                         }
-                        (crate::types::TypeKind::TypeRecord(internal_labels, crate::types::RecordRepresentation::RecordRegular), TypedTypeKind::Ttype_record(typed_tree_labels), vec![])
+                        (crate::types::TypeKind::TypeRecord(internal_labels, crate::types::RecordRepresentation::RecordRegular), TypedTypeKind::Ttype_record(typed_tree_labels), vec![], lbl_descs)
                     }
                     crate::parser::ast::TypeKind::Ptype_open => {
-                        (crate::types::TypeKind::TypeOpen, TypedTypeKind::Ttype_open, vec![])
+                        (crate::types::TypeKind::TypeOpen, TypedTypeKind::Ttype_open, vec![], vec![])
                     }
                 };
 
@@ -581,6 +603,11 @@ fn type_structure_item<'a>(
                 // Add constructors to environment
                 for (cstr_id, cstr_desc) in constructors {
                     new_env.add_constructor(cstr_id, cstr_desc);
+                }
+
+                // Add labels to environment (for record types)
+                for (lbl_id, lbl_desc) in label_descs {
+                    new_env.add_label(lbl_id, lbl_desc);
                 }
 
                 // Convert private flag
