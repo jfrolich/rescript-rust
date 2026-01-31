@@ -299,11 +299,16 @@ impl Env {
     /// Find a type by path.
     pub fn lookup_type(&self, path: &Path) -> EnvResult<&TypeDeclaration> {
         match path {
-            Path::Pident(id) => self
-                .types
-                .find_by_ident(id)
-                .map(|t| t.as_ref())
-                .ok_or_else(|| EnvError::TypeNotFound(id.name().to_string())),
+            Path::Pident(id) => {
+                // First try by ident, then fall back to by name
+                // This handles cases where the path was created with a different ident
+                // than what was used to register the type
+                self.types
+                    .find_by_ident(id)
+                    .or_else(|| self.types.find_by_name(id.name()))
+                    .map(|t| t.as_ref())
+                    .ok_or_else(|| EnvError::TypeNotFound(id.name().to_string()))
+            }
             Path::Pdot(_, name, _) => self.find_type(name),
             Path::Papply(_, _) => Err(EnvError::TypeNotFound("(functor application)".to_string())),
         }

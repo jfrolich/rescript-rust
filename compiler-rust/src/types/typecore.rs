@@ -651,7 +651,6 @@ fn transl_type_inner(
             }
 
             // Create path from longident
-            // Full implementation would look up the type and use its actual path
             let longident = tctx.arena.get_longident(lid.txt);
             let path = Path::from_longident(longident, |str_idx| tctx.arena.get_string(str_idx));
 
