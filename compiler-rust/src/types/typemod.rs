@@ -723,17 +723,94 @@ fn type_structure_item<'a>(
             ))
         }
 
-        ParsedStructureItemDesc::Pstr_typext(_ext) => {
+        ParsedStructureItemDesc::Pstr_typext(ext) => {
             // Type extension: type t += ...
-            let placeholder_lid = arena.placeholder_located(loc);
+            // Convert the longident to a path
+            let longident = arena.get_longident(ext.ptyext_path.txt);
+            let type_path = path_from_longident(&longident, |idx| arena.get_string(idx));
+            let ctx = tctx.type_ctx;
+
+            // Convert extension constructors
+            let typed_constructors: Vec<crate::types::typedtree::ExtensionConstructor> = ext
+                .ptyext_constructors
+                .iter()
+                .map(|pext| {
+                    let ext_kind = match &pext.pext_kind {
+                        crate::parser::ast::ExtensionConstructorKind::Pext_decl(args, _ret_type) => {
+                            // Convert constructor arguments
+                            let typed_args = match args {
+                                crate::parser::ast::ConstructorArguments::Pcstr_tuple(types) => {
+                                    crate::types::typedtree::ConstructorArgument::Cstr_tuple(
+                                        types.iter().map(|_ct| {
+                                            // Create placeholder typed core type
+                                            crate::types::typedtree::TypedCoreType {
+                                                ctyp_desc: crate::types::typedtree::TypedCoreTypeDesc::Ttyp_var(None),
+                                                ctyp_type: ctx.new_var(None),
+                                                ctyp_env: EnvRef(0),
+                                                ctyp_loc: loc,
+                                                ctyp_attributes: vec![],
+                                            }
+                                        }).collect()
+                                    )
+                                }
+                                crate::parser::ast::ConstructorArguments::Pcstr_record(_) => {
+                                    // Record constructors - use empty tuple for now
+                                    crate::types::typedtree::ConstructorArgument::Cstr_tuple(vec![])
+                                }
+                            };
+                            // For now, don't handle return type - set to None
+                            crate::types::typedtree::ExtensionConstructorKind::Text_decl(
+                                vec![typed_args],
+                                None,
+                            )
+                        }
+                        crate::parser::ast::ExtensionConstructorKind::Pext_rebind(lid) => {
+                            let rebind_longident = arena.get_longident(lid.txt);
+                            let rebind_path = path_from_longident(&rebind_longident, |idx| arena.get_string(idx));
+                            crate::types::typedtree::ExtensionConstructorKind::Text_rebind(
+                                rebind_path,
+                                *lid,
+                            )
+                        }
+                    };
+
+                    // Get the constructor name from the StringLoc (it's already a String)
+                    let ext_name_str = &pext.pext_name.txt;
+
+                    crate::types::typedtree::ExtensionConstructor {
+                        ext_id: Ident::create_local(ext_name_str),
+                        ext_name: crate::parse_arena::Located {
+                            txt: ext_name_str.to_string(),
+                            loc: pext.pext_name.loc,
+                        },
+                        ext_type: crate::types::ExtensionConstructor {
+                            ext_type_path: type_path.clone(),
+                            ext_type_params: vec![],
+                            ext_args: crate::types::decl::ConstructorArguments::CstrTuple(vec![]),
+                            ext_ret_type: None,
+                            ext_private: crate::types::PrivateFlag::Public,
+                            ext_loc: arena.to_location(pext.pext_loc),
+                            ext_attributes: vec![], // TODO: convert attributes
+                            ext_is_exception: false,
+                        },
+                        ext_kind,
+                        ext_loc: pext.pext_name.loc,
+                        ext_attributes: pext.pext_attributes.clone(),
+                    }
+                })
+                .collect();
+
             let desc = StructureItemDesc::Tstr_typext(TypeExtension {
-                tyext_path: Path::pident(Ident::create_local("placeholder")),
-                tyext_txt: placeholder_lid,
-                tyext_params: vec![],
-                tyext_constructors: vec![],
-                tyext_private: crate::parser::ast::PrivateFlag::Public,
+                tyext_path: type_path,
+                tyext_txt: crate::parse_arena::Located {
+                    txt: ext.ptyext_path.txt,
+                    loc: ext.ptyext_path.loc,
+                },
+                tyext_params: vec![], // TODO: Convert type parameters
+                tyext_constructors: typed_constructors,
+                tyext_private: ext.ptyext_private.clone(),
                 tyext_loc: loc,
-                tyext_attributes: vec![],
+                tyext_attributes: ext.ptyext_attributes.clone(),
             });
             Ok((
                 StructureItem {
