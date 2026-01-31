@@ -91,6 +91,16 @@ RESET='\033[0m'
 # Configuration
 TIMEOUT_SECONDS=10
 
+# Find timeout command (gtimeout on macOS with coreutils)
+if command -v timeout &> /dev/null; then
+    TIMEOUT_CMD="timeout"
+elif command -v gtimeout &> /dev/null; then
+    TIMEOUT_CMD="gtimeout"
+else
+    echo -e "${YELLOW}Warning: timeout command not found. Install coreutils: brew install coreutils${RESET}"
+    TIMEOUT_CMD=""
+fi
+
 # Check if compilers exist
 if [[ ! -x "$OCAML_BSC" ]]; then
     echo -e "${RED}Error: OCaml bsc not found at $OCAML_BSC${RESET}"
@@ -180,7 +190,7 @@ mkdir -p "$RESULTS_DIR"
 mkdir -p "$TEMP_DIR/diffs"
 
 # Export variables for parallel execution
-export OCAML_BSC RUST_BSC RESCRIPT_CLI TIMEOUT_SECONDS TEMP_DIR QUICK_MODE VERBOSE RUST_AVAILABLE PROJECT_ROOT RESULTS_DIR TEST_PROJECT
+export OCAML_BSC RUST_BSC RESCRIPT_CLI TIMEOUT_SECONDS TIMEOUT_CMD TEMP_DIR QUICK_MODE VERBOSE RUST_AVAILABLE PROJECT_ROOT RESULTS_DIR TEST_PROJECT
 
 # Function to test a single file - writes results to a file
 test_single_file() {
@@ -214,14 +224,14 @@ test_single_file() {
     if [[ -z "$compiler_args_json" ]]; then
         # If compiler-args fails, try direct compilation
         # Run OCaml compiler directly
-        if timeout "$TIMEOUT_SECONDS" "$OCAML_BSC" -dtyped-sexp "$full_file_path" 2> "$file_temp/ocaml.sexp" 1>/dev/null; then
+        if ${TIMEOUT_CMD:-} ${TIMEOUT_CMD:+$TIMEOUT_SECONDS} "$OCAML_BSC" -dtyped-sexp "$full_file_path" 2> "$file_temp/ocaml.sexp" 1>/dev/null; then
             ocaml_pass=1
         else
             ocaml_fail=1
         fi
 
         if [[ "$RUST_AVAILABLE" == "true" ]]; then
-            if timeout "$TIMEOUT_SECONDS" "$RUST_BSC" -dtyped-sexp "$full_file_path" 2> "$file_temp/rust.sexp" 1>/dev/null; then
+            if ${TIMEOUT_CMD:-} ${TIMEOUT_CMD:+$TIMEOUT_SECONDS} "$RUST_BSC" -dtyped-sexp "$full_file_path" 2> "$file_temp/rust.sexp" 1>/dev/null; then
                 rust_pass=1
             else
                 rust_fail=1
@@ -236,7 +246,7 @@ test_single_file() {
         if [[ -n "$args" ]]; then
             # Run OCaml compiler with the args + -dtyped-sexp
             cd "$TEST_PROJECT/lib/bs"
-            if timeout "$TIMEOUT_SECONDS" "$OCAML_BSC" -dtyped-sexp $args 2> "$file_temp/ocaml.sexp" 1>/dev/null; then
+            if ${TIMEOUT_CMD:-} ${TIMEOUT_CMD:+$TIMEOUT_SECONDS} "$OCAML_BSC" -dtyped-sexp $args 2> "$file_temp/ocaml.sexp" 1>/dev/null; then
                 ocaml_pass=1
             else
                 ocaml_fail=1
@@ -244,7 +254,7 @@ test_single_file() {
 
             # Run Rust compiler if available
             if [[ "$RUST_AVAILABLE" == "true" ]]; then
-                if timeout "$TIMEOUT_SECONDS" "$RUST_BSC" -dtyped-sexp $args 2> "$file_temp/rust.sexp" 1>/dev/null; then
+                if ${TIMEOUT_CMD:-} ${TIMEOUT_CMD:+$TIMEOUT_SECONDS} "$RUST_BSC" -dtyped-sexp $args 2> "$file_temp/rust.sexp" 1>/dev/null; then
                     rust_pass=1
                 else
                     rust_fail=1
