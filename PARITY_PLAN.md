@@ -1,11 +1,15 @@
 # Typedtree Parity: Status and Action Plan
 
 ## Current Status
-- **Parity: 42/102 files (41%)**
-- **Failing: 60 files**
+- **Parity: 43/102 files (42%)**
+- **Failing: 59 files**
 
-### Recent Fix
-- **`*j` delimiter transformation** - Fixed string delimiter transformation from `"js"` to `"*j"` during type checking, matching OCaml's frontend behavior. (+6 files)
+**Note:** Most remaining issues require structural changes to the type checker,
+not just sexp output fixes. See "Issues Requiring Structural Changes" below.
+
+### Recent Fixes
+- **Type extension handling** - Implemented proper type extension handling with actual paths and constructors. (+1 file)
+- **`*j` delimiter transformation** - Fixed string delimiter transformation from `"js"` to `"*j"` during type checking. (+6 files)
 
 ## Issue Categories Summary
 
@@ -370,6 +374,8 @@ diff -a /tmp/o.sexp /tmp/r.sexp
 | Jan 2026 | 33/102 (32%) | +2 from @tag/@unboxed copying |
 | Jan 2026 | 36/102 (35%) | +3 from Tmod_constraint and include_declaration |
 | Jan 2026 | 42/102 (41%) | +6 from `*j` delimiter transformation |
+| Jan 2026 | 43/102 (42%) | +1 from type extension path fix |
+| Jan 2026 | 43/102 (42%) | Added sexp_module_type_declaration (partial) |
 
 ## Analysis Notes
 
@@ -377,12 +383,38 @@ diff -a /tmp/o.sexp /tmp/r.sexp
 
 Several remaining issues require changes beyond sexp printing - they need modifications to the type checker or typedtree data structures:
 
-1. **Module Type sexp** - The Rust `ModuleType` in typedtree.rs is a placeholder struct. Proper implementation requires adding `mty_desc`, `mty_type`, `mty_env`, `mty_loc`, `mty_attributes` fields and implementing module type checking.
+1. **Module Type sexp** (~10 files) - The Rust `ModuleType` in typedtree.rs is a placeholder struct:
+   ```rust
+   pub struct ModuleType {
+       _placeholder: (),
+   }
+   ```
+   Proper implementation requires:
+   - Adding `mty_desc: ModuleTypeDesc` enum with variants `Tmty_ident`, `Tmty_signature`, `Tmty_functor`, etc.
+   - Adding `mty_loc`, `mty_attributes` fields
+   - Updating typemod.rs to populate these instead of `ModuleType::placeholder()`
 
-2. **Value Description sexp** - Rust uses `ValueDescription` from decl.rs (Types level), but OCaml's typed tree has a separate `value_description` with `val_id`, `val_name`, `val_desc` (core_type), `val_prim`, etc.
+2. **Value Description sexp** (~5 files) - Rust uses `ValueDescription` from decl.rs (Types level), but OCaml's typed tree has a separate typed `value_description` with:
+   - `val_id: Ident`
+   - `val_name: Loc<String>`
+   - `val_desc: core_type` (the typed core_type)
+   - `val_prim: Vec<String>` (primitive names)
+   Currently `Tstr_primitive` outputs `<value_description>` placeholder.
 
-3. **Cycle Detection** - The `<cycle>` marker appears at different positions. This isn't a sexp issue - the type structures themselves are different between OCaml and Rust, likely due to differences in type unification/generalization.
+3. **Cycle Detection** (~15 files) - The `<cycle>` marker appears at different positions in type trees. Example:
+   ```
+   OCaml: (Tpoly <cycle> ())  // cycle inside Tpoly body
+   Rust:  (Tpoly (Tvar None) ()) <cycle>  // cycle after Tpoly
+   ```
+   This is caused by different type structures produced during unification, not sexp output.
+   The types are semantically equivalent but structurally different.
 
-4. **Type Extension** - Extension paths show "placeholder" because the type checker isn't populating the extension data structures properly.
+4. **Type Extension** (FIXED) - Extension paths now properly populated.
+
+5. **FFI Extension** (~5 files) - The `%ffi` extension returns placeholder instead of proper `Texp_letmodule` structure with parsed JavaScript.
+
+6. **Pattern Exhaustiveness** (~5 files) - Always outputs `Total` instead of computing `Partial`. Requires implementing the exhaustiveness checking algorithm.
+
+7. **Include/Tmod_constraint** (~5 files) - OCaml wraps includes with config attributes in `Tmod_constraint(Tmod_structure(...))`, Rust outputs them as separate items.
 
 These issues require deeper investigation of the type checking implementation rather than sexp output fixes.
