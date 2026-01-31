@@ -731,15 +731,18 @@ The following files have known location parity differences that require more com
 - **Arena-per-compilation** - Type arenas owned by `TypeContext`, not shared
 - **No `static mut`** - All mutable state in explicit contexts
 
-### Binary AST Parity (Completed for Current Parsetree)
+### Binary AST Parity (In Progress)
 
-**Status:** ✅ Current parsetree format (the active AST format) has 100% binary parity.
+**Status:** 🟡 Parser AST structure is correct (100% sexp-locs parity), but binary marshal position sharing still needs work.
 
 The binary AST format uses OCaml's Marshal serialization, which includes back-references for shared objects. When OCaml creates two references to the same memory object, Marshal writes a shared reference (CODE_SHARED8/16/32) instead of duplicating the data.
 
 **What's working:**
-- Current parsetree binary: 100% parity (1049/1049 files identical)
-- sexp-locs: 100% parity (1049/1049 files identical)
+- sexp-locs: 100% parity (1049/1049 files identical) - AST structure is correct
+- bsc-ast (binary): ~119 files with exact binary parity, ~930 with position sharing differences
+
+**Remaining work:**
+The ~930 files with bsc-ast differences have correct AST structure (sexp-locs match) but different position sharing in the binary marshal output. This affects the size of the output files but not the correctness of the parsed AST.
 
 **parsetree0 / binary0 - NOT A PRIORITY:**
 
