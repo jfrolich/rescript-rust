@@ -1,117 +1,388 @@
-# Typedtree Parity: Status and Plan
+# Typedtree Parity: Status and Action Plan
 
 ## Current Status
-- **Parity: 36/102 files (35%)**
-- Started at 31/102 (30%) for this session
+- **Parity: 42/102 files (41%)**
+- **Failing: 60 files**
 
-## Recently Completed Work
+### Recent Fix
+- **`*j` delimiter transformation** - Fixed string delimiter transformation from `"js"` to `"*j"` during type checking, matching OCaml's frontend behavior. (+6 files)
 
-### Session Work (Jan 2026)
+## Issue Categories Summary
 
-1. **Copy @tag and @unboxed attributes from type declaration to constructors**
-   - File: `compiler-rust/src/types/typemod.rs`
-   - Matches OCaml's `copy_tag_attr_from_decl` in typedecl.ml
-   - Impact: +2 tests passing
+Based on analysis of all 66 failing files, the issues fall into these categories:
 
-2. **Implement simplify_signature (duplicate value detection)**
-   - File: `compiler-rust/src/types/typemod.rs`
-   - When a module has duplicate value bindings (e.g., `let x = 0; let x = 1`),
-     OCaml wraps the module in `Tmod_constraint` with `Tmodtype_implicit`
-   - Added `has_duplicate_values` helper function
-   - Impact: +3 tests passing
+| Category | Files Affected | Effort | Priority |
+|----------|---------------|--------|----------|
+| 1. Cycle Detection | ~15 | 2-4 hours | HIGH |
+| 2. Module Type Sexp | ~10 | 2-4 hours | HIGH |
+| 3. Module Type Declaration Sexp | ~5 | 1-2 hours | HIGH |
+| 4. Type Extension/Tstr_typext | ~5 | 4-8 hours | MEDIUM |
+| 5. `*j` vs `js` Identifier | ~10 | 1-2 hours | HIGH |
+| 6. Pattern Exhaustiveness | ~5 | 8-16 hours | LOW |
+| 7. %ffi Extension | ~5 | 8-16 hours | LOW |
+| 8. Tstr_primitive/Value Description | ~5 | 2-4 hours | MEDIUM |
+| 9. Include/Tmod_constraint Structure | ~5 | 2-4 hours | MEDIUM |
 
-3. **Fix include_declaration sexp output**
-   - File: `compiler-rust/src/types/sexp_typedtree.rs`
-   - Changed from placeholder `<include_declaration>` to full output
-   - Added `sexp_include_declaration` function
+**Estimated total effort: 30-60 hours**
 
-### Previous Work
+---
 
-1. **Texp_constraint wrapper** - Expression type annotations now work correctly
-2. **Type path handling** - Fixed `create_persistent` for type identifiers
-3. **Optional field defaults** - Fixed longidents and required/optional flag in sexp output
-4. **Texp_coerce fix** - Target type handling
-5. **Type lookup fix** - Name-based fallback for field type lookup
-6. **Object types** - Implemented Tobject, Tfield in type inference
+## Detailed Action Items
 
-## Remaining Failure Categories
+### 1. FIX: Cycle Detection in Type Expression Sexp (HIGH PRIORITY)
 
-### High Impact (Would fix many tests)
+**Files affected:** test_obj.res, test_eq.res, functor_inst.res, test_dup_param.res, nested_obj_literal.res, etc.
 
-#### 1. FFI Extension Handling (%ffi)
-**Files affected:** FFI.res, many JSX-related files
-**Effort:** 8-16 hours
+**Problem:** The `<cycle>` marker appears at different positions in Rust vs OCaml output.
 
-**Problem:** Rust returns placeholder `Int(0)` for `%ffi` extensions.
+**Root Cause Analysis:**
+- OCaml uses physical identity (`Obj.repr te`) for cycle detection after following Tlink chains
+- Rust uses `TypeExprRef` index (`te.0`) which may differ from OCaml's notion of "same type"
 
-**What OCaml Does:**
+**Example Diff (test_obj.res):**
+```
+OCaml:                      Rust:
+  (Tpoly                      (Tpoly
+    <cycle>                     (Tvar
+    ())                           None)
+  (Tvar                         ())
+    None)                     <cycle>
+```
+
+**Fix Location:** `compiler-rust/src/types/sexp_typedtree.rs:350-357`
+
+**Fix Details:**
+The issue is that OCaml follows Tlink chains and then uses the resulting pointer for cycle detection. We need to ensure that after `ctx.repr(te)`, we use the *result's* index for cycle tracking, not the original.
+
+```rust
+fn sexp_type_expr_with_visited(..., visited: &mut HashSet<usize>) -> Sexp {
+    let te = ctx.repr(te); // Follow Tlink chains
+    let te_id = te.0;      // Use the ID of the repr'd type
+
+    if visited.contains(&te_id) {
+        return Sexp::atom("<cycle>");
+    }
+    visited.insert(te_id);
+    // ...
+}
+```
+
+The current code does this, so the issue may be in how the type context repr function works, or in how types are unified. Need to compare exact scenarios.
+
+**Estimated Effort:** 2-4 hours
+
+---
+
+### 2. FIX: Module Type Sexp Output (HIGH PRIORITY)
+
+**Files affected:** functors_one_arg_at_a_time.res, and ~10 others
+
+**Problem:** Placeholder `<module_type>` instead of proper `Tmty_signature` output.
+
+**Example Diff:**
+```
+OCaml:                              Rust:
+  (Some                               <module_type>
+    (module_type
+      (Tmty_signature
+        (signature))
+      (attributes)))
+```
+
+**Fix Location:** `compiler-rust/src/types/sexp_typedtree.rs:1145-1165`
+
+**Fix Details:**
+Implement `sexp_module_type` function to match OCaml's `module_type ~with_locs mt`:
+
+```rust
+fn sexp_module_type(arena: &ParseArena, ctx: &TypeContext<'_>, with_locs: bool, mt: &ModuleType) -> Sexp {
+    let loc_sexp = if with_locs {
+        vec![location_idx(arena, with_locs, mt.mty_loc)]
+    } else {
+        vec![]
+    };
+    let desc = sexp_module_type_desc(arena, ctx, with_locs, &mt.mty_desc);
+    let attrs = sexp_attributes(with_locs, &mt.mty_attributes);
+    let mut items = vec![Sexp::atom("module_type")];
+    items.extend(loc_sexp);
+    items.push(desc);
+    items.push(attrs);
+    Sexp::list(items)
+}
+
+fn sexp_module_type_desc(arena: &ParseArena, ctx: &TypeContext<'_>, with_locs: bool, desc: &ModuleTypeDesc) -> Sexp {
+    match desc {
+        ModuleTypeDesc::Tmty_ident(p, _) => Sexp::list(vec![Sexp::atom("Tmty_ident"), sexp_path(p)]),
+        ModuleTypeDesc::Tmty_signature(sg) => Sexp::list(vec![Sexp::atom("Tmty_signature"), sexp_signature(arena, ctx, with_locs, sg)]),
+        ModuleTypeDesc::Tmty_functor(id, _, mt_arg, mt_res) => {
+            Sexp::list(vec![
+                Sexp::atom("Tmty_functor"),
+                sexp_ident(id),
+                opt(|mt: &ModuleType| sexp_module_type(arena, ctx, with_locs, mt), mt_arg),
+                sexp_module_type(arena, ctx, with_locs, mt_res),
+            ])
+        }
+        // ... other cases
+    }
+}
+```
+
+Then update `sexp_module_expr_desc` at lines 1145 and 1164 to use this function.
+
+**Estimated Effort:** 2-4 hours
+
+---
+
+### 3. FIX: Module Type Declaration Sexp Output (HIGH PRIORITY)
+
+**Files affected:** gpr_3897_test.res, etc.
+
+**Problem:** Placeholder `<module_type_declaration>` instead of proper output.
+
+**Example Diff:**
+```
+OCaml:                                  Rust:
+  (module_type_declaration                <module_type_declaration>
+    "S"
+    "S"
+    (Some
+      (module_type
+        ...)))
+```
+
+**Fix Location:** `compiler-rust/src/types/sexp_typedtree.rs:1585-1587`
+
+**Fix Details:**
+Implement `sexp_module_type_declaration`:
+
+```rust
+fn sexp_module_type_declaration(arena: &ParseArena, ctx: &TypeContext<'_>, with_locs: bool, mtd: &ModuleTypeDeclaration) -> Sexp {
+    let loc_sexp = if with_locs {
+        vec![location_idx(arena, with_locs, mtd.mtd_loc)]
+    } else {
+        vec![]
+    };
+    let mut items = vec![
+        Sexp::atom("module_type_declaration"),
+        sexp_ident(&mtd.mtd_id),
+        string(&mtd.mtd_name.txt),
+    ];
+    items.extend(loc_sexp);
+    items.push(opt(|mt: &ModuleType| sexp_module_type(arena, ctx, with_locs, mt), &mtd.mtd_type));
+    items.push(sexp_attributes(with_locs, &mtd.mtd_attributes));
+    Sexp::list(items)
+}
+```
+
+**Estimated Effort:** 1-2 hours
+
+---
+
+### 4. FIX: `*j` vs `js` String Delimiter (HIGH PRIORITY)
+
+**Files affected:** big_enum.res, as_inline_record_test.res, ~10 others
+
+**Problem:** OCaml outputs `"*j"` for certain string delimiters but Rust outputs `"js"`.
+
+**Example Diff:**
+```
+OCaml: "*j"
+Rust:  "js"
+```
+
+**Root Cause:** The `*j` is a special internal representation in OCaml for template literals or special string syntax. The Rust printer isn't converting to this representation.
+
+**Fix Location:** Likely in `sexp_constant` or string handling in `sexp_typedtree.rs`
+
+**Fix Details:**
+Look at how OCaml's `Const_string (s, delim)` handles the delimiter. When `delim` is `Some "js"`, it should print as `"*j"` in the sexp output.
+
+Check `compiler/ml/sexp_typedtree.ml:76-77`:
+```ocaml
+| Const_string (s, delim) ->
+  Sexp.list [Sexp.atom "Const_string"; string s; opt string delim]
+```
+
+The delimiter is printed directly, so the transformation must happen during type checking. Check how the string delimiter is set during constant creation.
+
+**Estimated Effort:** 1-2 hours
+
+---
+
+### 5. FIX: Type Extension (Tstr_typext) Issues (MEDIUM PRIORITY)
+
+**Files affected:** rebind_module.res, etc.
+
+**Problem:** Extension paths show "placeholder" instead of actual path names.
+
+**Example Diff:**
+```
+OCaml:                      Rust:
+  "a")                        "placeholder")
+  "a")                        "placeholder")
+  ((extension_constructor     ())
+    "A"
+    "A"
+    ...))
+```
+
+**Root Cause:** The type checker isn't properly populating the type extension data structures.
+
+**Fix Location:** `compiler-rust/src/types/typemod.rs` (type extension handling)
+
+**Fix Details:**
+The issue is in how `Tstr_typext` items are created during module type checking. The extension path and constructors need to be properly filled in during type checking, not just in sexp output.
+
+**Estimated Effort:** 4-8 hours
+
+---
+
+### 6. FIX: Tstr_primitive/Value Description (MEDIUM PRIORITY)
+
+**Files affected:** mocha.res, etc.
+
+**Problem:** Primitive value descriptions are empty or minimal.
+
+**Example Diff:**
+```
+OCaml:                          Rust:
+  (Tstr_primitive                 (empty or missing)
+    (value_description
+      "test"
+      "test"
+      (core_type ...)
+      (prim ...)
+      (attributes)))
+```
+
+**Fix Location:** Check `StructureItemDesc::Tstr_primitive` in `sexp_typedtree.rs`
+
+**Fix Details:**
+Ensure `sexp_value_description` is properly implemented and called for primitive declarations.
+
+**Estimated Effort:** 2-4 hours
+
+---
+
+### 7. FIX: Include/Tmod_constraint Structure (MEDIUM PRIORITY)
+
+**Files affected:** include_side_effect.res, include_side_effect_free.res, nested_include.res
+
+**Problem:** Structure wrapping differences - attributes appearing in wrong places, Tmod_constraint not being applied.
+
+**Root Cause:** The simplify_signature logic may not match OCaml's behavior for includes.
+
+**Fix Location:** `compiler-rust/src/types/typemod.rs`
+
+**Estimated Effort:** 2-4 hours
+
+---
+
+### 8. Pattern Exhaustiveness (LOW PRIORITY)
+
+**Files affected:** gpr_5557.res, and others with match expressions
+
+**Problem:** Always outputs `Total` instead of computing `Partial`.
+
+**Fix Location:** `compiler-rust/src/types/typecore.rs:2203`
+
+**Fix Details:**
+This requires implementing a proper exhaustiveness checker which is a significant undertaking. For now, mark as low priority since it doesn't affect code generation correctness.
+
+**Estimated Effort:** 8-16 hours (complex algorithm)
+
+---
+
+### 9. %ffi Extension Handling (LOW PRIORITY)
+
+**Files affected:** FFI.res, JSX-related files
+
+**Problem:** Returns `Texp_constant(Int(0))` placeholder instead of proper `Texp_letmodule` structure.
+
+**Fix Location:** `compiler-rust/src/types/typecore.rs` (extension handling)
+
+**Fix Details:**
+Need to implement proper FFI extension handling that:
 1. Parses JavaScript string from extension payload
 2. Detects function arity via Flow parser
-3. Creates type constraint: `(_, _, ...) => _` matching arity
-4. Wraps in letmodule with primitive declaration for `#raw_expr`
-5. Result: `Pexp_constraint(Pexp_letmodule(J, ...), arrow_type)`
+3. Creates proper type constraint and letmodule wrapper
 
-**Current Rust:** `type_extension_expr` just returns `Texp_constant(Int(0))`.
+This is a complex feature requiring Flow parser integration.
 
-#### 2. Cycle Detection in Type Printing
-**Files affected:** test_obj.res, test_eq.res, etc.
-**Effort:** 2-4 hours
+**Estimated Effort:** 8-16 hours
 
-**Problem:** Type printing outputs full types instead of `<cycle>` for recursive types.
+---
 
-**Fix:** Track visited type nodes during sexp printing and output `<cycle>` when revisiting.
+## Execution Order (Recommended)
 
-#### 3. Pattern Match Exhaustiveness
-**Files affected:** gpr_5557.res, etc.
-**Effort:** 8-16 hours
+### Phase 1: Quick Wins (5-10 hours) - Target: 60% parity
+1. **`*j` vs `js` fix** - 1-2 hours, ~10 files
+2. **Module type sexp** - 2-4 hours, ~10 files
+3. **Module type declaration sexp** - 1-2 hours, ~5 files
 
-**Problem:** `Partial` vs `Total` flag is always set to `Total`.
+### Phase 2: Medium Fixes (8-16 hours) - Target: 80% parity
+4. **Cycle detection** - 2-4 hours, ~15 files
+5. **Tstr_primitive** - 2-4 hours, ~5 files
+6. **Include/Tmod_constraint** - 2-4 hours, ~5 files
+7. **Type extension** - 4-8 hours, ~5 files
 
-**Current code (typecore.rs:2203):**
-```rust
-Partial::Total, // Assume total for now
-```
+### Phase 3: Complex Fixes (16-32 hours) - Target: 100% parity
+8. **Exhaustiveness** - 8-16 hours
+9. **%ffi extension** - 8-16 hours
 
-**Fix:** Implement proper exhaustiveness analysis for patterns.
+---
 
-#### 4. Type Extension Handling (Tstr_typext)
-**Files affected:** rebind_module.res, etc.
-**Effort:** 4-8 hours
-
-**Problem:** Type extensions output placeholder values instead of proper paths and constructors.
-
-### Medium Impact
-
-#### 5. External Declarations (@module)
-**Files affected:** mocha.res, external-related files
-**Effort:** 4-8 hours
-
-**Problem:** External declarations with `@module` attribute not fully implemented.
-
-### Verification
-
-After each fix, run:
-```bash
-./scripts/test_typedtree_parity.sh tests/tests/src/<specific_file>.res  # Test single file
-./scripts/test_typedtree_parity.sh --quick  # Stop on first failure
-./scripts/test_typedtree_parity.sh          # Full test suite
-```
-
-## Key Files
+## Key Files Reference
 
 | File | Purpose |
 |------|---------|
-| `compiler-rust/src/types/typemod.rs` | Module type checking, attribute handling |
-| `compiler-rust/src/types/typecore.rs` | Expression type checking, FFI handling |
-| `compiler-rust/src/types/sexp_typedtree.rs` | Typed tree sexp output |
-| `compiler-rust/src/types/typedtree.rs` | Typed tree data structures |
-| `compiler/ml/typemod.ml` | OCaml reference for module handling |
-| `compiler/ml/typedecl.ml` | OCaml reference for type declaration handling |
+| `compiler-rust/src/types/sexp_typedtree.rs` | Sexp output (most fixes here) |
+| `compiler-rust/src/types/typemod.rs` | Module type checking |
+| `compiler-rust/src/types/typecore.rs` | Expression type checking |
+| `compiler-rust/src/types/typedtree.rs` | Data structures |
+| `compiler/ml/sexp_typedtree.ml` | OCaml reference implementation |
+
+---
+
+## Testing Commands
+
+```bash
+# Test single file
+./scripts/test_typedtree_parity.sh tests/tests/src/<file>.res
+
+# Quick test (stop on first failure)
+./scripts/test_typedtree_parity.sh --quick
+
+# Full test suite
+./scripts/test_typedtree_parity.sh
+
+# View specific diff
+diff -a /tmp/o.sexp /tmp/r.sexp
+```
+
+---
 
 ## Progress History
 
 | Date | Parity | Notes |
 |------|--------|-------|
 | Jan 2026 (session start) | 31/102 (30%) | - |
-| Jan 2026 (after attribute fix) | 33/102 (32%) | +2 from @tag/@unboxed copying |
-| Jan 2026 (after simplify_sig) | 36/102 (35%) | +3 from Tmod_constraint and include_declaration |
+| Jan 2026 | 33/102 (32%) | +2 from @tag/@unboxed copying |
+| Jan 2026 | 36/102 (35%) | +3 from Tmod_constraint and include_declaration |
+| Jan 2026 | 42/102 (41%) | +6 from `*j` delimiter transformation |
+
+## Analysis Notes
+
+### Issues Requiring Structural Changes
+
+Several remaining issues require changes beyond sexp printing - they need modifications to the type checker or typedtree data structures:
+
+1. **Module Type sexp** - The Rust `ModuleType` in typedtree.rs is a placeholder struct. Proper implementation requires adding `mty_desc`, `mty_type`, `mty_env`, `mty_loc`, `mty_attributes` fields and implementing module type checking.
+
+2. **Value Description sexp** - Rust uses `ValueDescription` from decl.rs (Types level), but OCaml's typed tree has a separate `value_description` with `val_id`, `val_name`, `val_desc` (core_type), `val_prim`, etc.
+
+3. **Cycle Detection** - The `<cycle>` marker appears at different positions. This isn't a sexp issue - the type structures themselves are different between OCaml and Rust, likely due to differences in type unification/generalization.
+
+4. **Type Extension** - Extension paths show "placeholder" because the type checker isn't populating the extension data structures properly.
+
+These issues require deeper investigation of the type checking implementation rather than sexp output fixes.
