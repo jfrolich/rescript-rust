@@ -760,7 +760,7 @@ fn type_structure_item<'a>(
                             };
                             // For now, don't handle return type - set to None
                             crate::types::typedtree::ExtensionConstructorKind::Text_decl(
-                                vec![typed_args],
+                                typed_args,
                                 None,
                             )
                         }
@@ -842,7 +842,7 @@ fn type_structure_item<'a>(
                         ext_is_exception: true,
                     },
                     ext_kind: crate::types::typedtree::ExtensionConstructorKind::Text_decl(
-                        vec![],
+                        crate::types::typedtree::ConstructorArgument::Cstr_tuple(vec![]),
                         None,
                     ),
                     ext_loc: loc,

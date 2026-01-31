@@ -1435,16 +1435,10 @@ fn sexp_extension_constructor(arena: &ParseArena, ctx: &TypeContext<'_>, with_lo
     };
     let kind = match &ec.ext_kind {
         ExtensionConstructorKind::Text_decl(args, ret) => {
-            // OCaml expects a single constructor_arguments (Cstr_tuple or Cstr_record),
-            // not a list. Output the first argument directly if present, else empty Cstr_tuple.
-            let args_sexp = if let Some(arg) = args.first() {
-                sexp_constructor_argument(arena, ctx, with_locs, arg)
-            } else {
-                Sexp::list(vec![Sexp::atom("Cstr_tuple")])
-            };
+            // OCaml's Text_decl takes a single constructor_arguments (Cstr_tuple or Cstr_record)
             Sexp::list(vec![
                 Sexp::atom("Text_decl"),
-                args_sexp,
+                sexp_constructor_argument(arena, ctx, with_locs, args),
                 opt(|ct: &TypedCoreType| sexp_core_type(arena, ctx, with_locs, ct), ret),
             ])
         }
