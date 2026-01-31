@@ -494,8 +494,35 @@ fn type_structure_item<'a>(
                                 crate::parser::ast::MutableFlag::Immutable => crate::types::MutableFlag::Immutable,
                                 crate::parser::ast::MutableFlag::Mutable => crate::types::MutableFlag::Mutable,
                             };
+
+                            // For optional fields, wrap the type with option
+                            let (final_typed_core_type, final_type_ref) = if lbl.pld_optional {
+                                // Create option<T> type
+                                let option_path = crate::types::Path::pident(Ident::create_persistent("option"));
+                                let option_type_ref = ctx.new_constr(option_path.clone(), vec![type_ref]);
+
+                                // Create typed core type for option<inner_type>
+                                let option_typed_core_type = TypedCoreType {
+                                    ctyp_desc: TypedCoreTypeDesc::Ttyp_constr(
+                                        option_path,
+                                        crate::parse_arena::Located {
+                                            txt: crate::parse_arena::LidentIdx(0), // placeholder
+                                            loc: typed_core_type.ctyp_loc,
+                                        },
+                                        vec![typed_core_type.clone()],
+                                    ),
+                                    ctyp_type: option_type_ref,
+                                    ctyp_env: typed_core_type.ctyp_env,
+                                    ctyp_loc: typed_core_type.ctyp_loc,
+                                    ctyp_attributes: vec![],
+                                };
+                                (option_typed_core_type, option_type_ref)
+                            } else {
+                                (typed_core_type.clone(), type_ref)
+                            };
+
                             // OCaml wraps label types in Tpoly for potential generalization
-                            let poly_type_ref = ctx.new_poly(type_ref, vec![]);
+                            let poly_type_ref = ctx.new_poly(final_type_ref, vec![]);
                             internal_labels.push(crate::types::LabelDeclaration {
                                 ld_id: Ident::create_persistent(&lbl.pld_name.txt),
                                 ld_mutable: mutable_flag,
@@ -506,7 +533,7 @@ fn type_structure_item<'a>(
                             });
                             // OCaml wraps label types in Ttyp_poly for typed tree
                             let poly_typed_core_type = TypedCoreType {
-                                ctyp_desc: TypedCoreTypeDesc::Ttyp_poly(vec![], Box::new(typed_core_type.clone())),
+                                ctyp_desc: TypedCoreTypeDesc::Ttyp_poly(vec![], Box::new(final_typed_core_type)),
                                 ctyp_type: poly_type_ref,
                                 ctyp_env: typed_core_type.ctyp_env,
                                 ctyp_loc: typed_core_type.ctyp_loc,
