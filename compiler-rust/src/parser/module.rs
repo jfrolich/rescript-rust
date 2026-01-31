@@ -177,7 +177,15 @@ pub fn parse_structure_item(p: &mut Parser<'_>) -> Option<StructureItem> {
             Some(StructureItemDesc::Pstr_value(rec_flag, bindings))
         }
         Token::Typ => {
-            let type_start = p.start_pos.clone(); // Capture 'type' keyword position
+            // Get the position for the type declaration start.
+            // If attributes were parsed (including doc comments), we need a fresh PosIdx
+            // at the 'type' keyword position. If no attributes, we reuse item_start_idx
+            // to maintain binary sharing (the positions are the same).
+            let type_start_idx = if attrs.is_empty() {
+                item_start_idx
+            } else {
+                p.push_start_pos()
+            };
             p.next();
             // `type t += ...` (type extension) vs `type t = ...` (type declaration)
             let is_type_extension = p.token != Token::Rec
@@ -224,7 +232,7 @@ pub fn parse_structure_item(p: &mut Parser<'_>) -> Option<StructureItem> {
                 } else {
                     RecFlag::Nonrecursive
                 };
-                let (decls, has_inline_types) = parse_type_declarations(p, attrs.clone(), type_start);
+                let (decls, has_inline_types) = parse_type_declarations(p, attrs.clone(), type_start_idx);
                 // Inline record types require the type to be recursive
                 if has_inline_types {
                     rec_flag = RecFlag::Recursive;
@@ -412,6 +420,7 @@ pub fn parse_signature(p: &mut Parser<'_>) -> Signature {
 /// Parse a single signature item.
 pub fn parse_signature_item(p: &mut Parser<'_>) -> Option<SignatureItem> {
     let start_pos = p.start_pos.clone();
+    let start_pos_idx = p.push_start_pos();
 
     // Parse attributes
     let attrs = parse_attributes(p);
@@ -446,7 +455,15 @@ pub fn parse_signature_item(p: &mut Parser<'_>) -> Option<SignatureItem> {
             Some(SignatureItemDesc::Psig_value(vd))
         }
         Token::Typ => {
-            let type_start = p.start_pos.clone(); // Capture 'type' keyword position
+            // Get the position for the type declaration start.
+            // If attributes were parsed (including doc comments), we need a fresh PosIdx
+            // at the 'type' keyword position. If no attributes, we reuse start_pos_idx
+            // to maintain binary sharing (the positions are the same).
+            let type_start_idx = if attrs.is_empty() {
+                start_pos_idx
+            } else {
+                p.push_start_pos()
+            };
             p.next();
             let is_type_extension = p.token != Token::Rec
                 && p.lookahead(|state| {
@@ -490,7 +507,7 @@ pub fn parse_signature_item(p: &mut Parser<'_>) -> Option<SignatureItem> {
                 } else {
                     RecFlag::Nonrecursive
                 };
-                let (decls, has_inline_types) = parse_type_declarations(p, attrs.clone(), type_start);
+                let (decls, has_inline_types) = parse_type_declarations(p, attrs.clone(), type_start_idx);
                 // Inline record types require the type to be recursive
                 if has_inline_types {
                     rec_flag = RecFlag::Recursive;
@@ -2018,11 +2035,12 @@ fn parse_let_bindings(
 }
 
 /// Parse type declarations. Returns the declarations and a flag indicating if inline types were found.
-/// `type_keyword_start` is the position of the `type` keyword for accurate location tracking.
+/// `type_keyword_start_idx` is the PosIdx of the `type` keyword for accurate location tracking
+/// and position sharing with the structure item.
 fn parse_type_declarations(
     p: &mut Parser<'_>,
     outer_attrs: Attributes,
-    type_keyword_start: Position,
+    type_keyword_start_idx: crate::parse_arena::PosIdx,
 ) -> (Vec<TypeDeclaration>, bool) {
     let mut decls = vec![];
     let mut next_attrs = outer_attrs;
@@ -2033,14 +2051,14 @@ fn parse_type_declarations(
     // The OCaml parser shares the context across `and` chains, but the inline types
     // are processed per-declaration anyway.
 
-    // Track start position for type declarations
-    // First declaration uses type_keyword_start, subsequent `and` declarations use the `and` position
-    let mut decl_start = type_keyword_start;
+    // Track start position (as PosIdx) for type declarations
+    // First declaration uses type_keyword_start_idx, subsequent `and` declarations push a new PosIdx
+    let mut decl_start_idx = type_keyword_start_idx;
 
     loop {
         // Create context for this declaration
         let inline_ctx = RefCell::new(InlineTypesContext::new(vec![], Location::none()));
-        if let Some(decl) = parse_type_declaration_with_context(p, next_attrs, &inline_ctx, decl_start.clone()) {
+        if let Some(decl) = parse_type_declaration_with_context(p, next_attrs, &inline_ctx, decl_start_idx) {
             // Collect inline types from the context
             let ctx = inline_ctx.borrow();
             if !ctx.found_inline_types.is_empty() {
@@ -2074,7 +2092,7 @@ fn parse_type_declarations(
         // Check for `and` to continue with more type declarations.
         // Also handle attributes/doc comments before `and`: `/** doc */ and type t = ...`
         if p.token == Token::And {
-            decl_start = p.start_pos.clone(); // Capture 'and' position
+            decl_start_idx = p.push_start_pos(); // Capture 'and' position as PosIdx
             p.next();
         } else if matches!(p.token, Token::At | Token::AtAt | Token::DocComment { .. }) {
             // Look ahead to see if attributes/doc comments are followed by And
@@ -2096,10 +2114,10 @@ fn parse_type_declarations(
             if !has_and_after {
                 break;
             }
-            // Capture start position BEFORE parsing attributes/doc comments
+            // Capture start position BEFORE parsing attributes/doc comments as PosIdx
             // OCaml does: let start_pos = p.Parser.start_pos in let attrs = parse_attributes_and_binding p in
             // So the location should include the doc comment
-            decl_start = p.start_pos.clone();
+            decl_start_idx = p.push_start_pos();
             // Parse the attributes/doc comments, then consume `and`
             next_attrs = parse_attributes(p);
             if p.token == Token::And {
@@ -2114,12 +2132,12 @@ fn parse_type_declarations(
 }
 
 /// Parse a single type declaration (wrapper for backward compatibility).
-/// Note: This captures start_pos at the current position, which should be the type name.
+/// Note: This captures start_pos at the current position as a PosIdx.
 /// For accurate ptype_loc, use parse_type_declaration_with_context with the correct start position.
 fn parse_type_declaration(p: &mut Parser<'_>, outer_attrs: Attributes) -> Option<TypeDeclaration> {
     let inline_ctx = RefCell::new(InlineTypesContext::new(vec![], Location::none()));
-    let start_pos = p.start_pos.clone();
-    parse_type_declaration_with_context(p, outer_attrs, &inline_ctx, start_pos)
+    let start_pos_idx = p.push_start_pos();
+    parse_type_declaration_with_context(p, outer_attrs, &inline_ctx, start_pos_idx)
 }
 
 /// Parse a type extension: `type t += ...`.
@@ -2200,14 +2218,14 @@ fn parse_type_extension(p: &mut Parser<'_>, attrs: Attributes) -> TypeExtension 
 }
 
 /// Parse a single type declaration with inline record desugaring context.
-/// `decl_start` is the position of the `type` or `and` keyword that starts this declaration.
+/// `decl_start_idx` is the PosIdx of the `type` or `and` keyword that starts this declaration,
+/// enabling position sharing with the structure item.
 fn parse_type_declaration_with_context(
     p: &mut Parser<'_>,
     outer_attrs: Attributes,
     inline_ctx: &RefCell<InlineTypesContext>,
-    decl_start: Position,
+    decl_start_idx: crate::parse_arena::PosIdx,
 ) -> Option<TypeDeclaration> {
-    let start_pos = decl_start; // Use the passed start position (type/and keyword)
     let inner_attrs = parse_attributes(p);
     // Prepend outer attributes to inner ones
     let attrs = [outer_attrs, inner_attrs].concat();
@@ -2589,7 +2607,8 @@ fn parse_type_declaration_with_context(
     // For unqualified (Lident), the CoreType uses full extent.
     let manifest = manifest.map(|t| fix_type_manifest_location(p.arena(), t));
 
-    let loc = p.mk_loc_to_prev_end(&start_pos);
+    // Use decl_start_idx for the start position to enable sharing with structure_item
+    let loc = p.mk_loc_idx_to_prev_end(decl_start_idx);
     Some(TypeDeclaration {
         ptype_name: name,
         ptype_params: params,

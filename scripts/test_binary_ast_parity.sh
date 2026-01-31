@@ -101,8 +101,11 @@ compare_file() {
 if [ $# -gt 0 ]; then
     files=("$@")
 else
-    # Default: test grammar files
-    mapfile -t files < <(find tests/syntax_tests/data/parsing/grammar -name "*.res" 2>/dev/null | head -100)
+    # Default: test grammar files (compatible with bash 3.x)
+    files=()
+    while IFS= read -r line; do
+        files+=("$line")
+    done < <(find tests/syntax_tests/data/parsing/grammar -name "*.res" 2>/dev/null | head -100)
 fi
 
 echo "Testing ${#files[@]} files..."
