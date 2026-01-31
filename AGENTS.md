@@ -796,7 +796,15 @@ This means the Rust parser code must be structured to match OCaml's data flow:
 - If OCaml binds a value to a variable and passes that variable to multiple places, Rust should do the same with an arena index
 - If OCaml constructs a new record/value at each use site, Rust should push a new arena entry each time
 
-**Do NOT use content-based deduplication** (e.g., "if we've seen this string before, reuse the index"). OCaml doesn't do this—it uses pointer identity from the actual code flow. The only way to achieve parity is to replicate the exact same allocation patterns.
+**🚫 NEVER USE CONTENT-BASED DEDUPLICATION 🚫**
+
+Do NOT use `push_position_dedup` or any content-based sharing mechanism to fix binary parity issues. OCaml does NOT do content-based interning—it shares values through explicit reference passing. The ONLY correct approach is:
+
+1. Find the exact place in the OCaml source where a value is captured (e.g., `let end_pos = p.prev_end_pos in`)
+2. In the Rust code, capture the arena index at that same point (e.g., `let end_pos_idx = p.push_prev_end_pos()`)
+3. Pass that same index to all places where OCaml passes the same reference
+
+If you find yourself wanting to use content-based deduplication, STOP. You are taking a shortcut that will not achieve parity. Go back to the OCaml source and trace exactly how values flow through the code.
 
 **⚠️ STRING SHARING: Use StrIdx, NOT content-based interning**
 
