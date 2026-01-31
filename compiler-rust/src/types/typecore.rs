@@ -505,7 +505,16 @@ pub fn convert_constant(cst: &crate::parser::ast::Constant) -> TypeCoreResult<Co
         }
         ParsedConstant::Integer(i, Some(c)) => Err(TypeCoreError::UnknownLiteral(i.clone(), *c)),
         ParsedConstant::Char(c) => Ok(Constant::Char(*c)),
-        ParsedConstant::String(s, d) => Ok(Constant::String(s.clone(), d.clone())),
+        ParsedConstant::String(s, d) => {
+            // Transform delimiter from parser syntax to internal syntax
+            // OCaml transforms "js" -> "*j" during frontend processing
+            // See compiler/frontend/ast_utf8_string_interp.ml:Delim module
+            let transformed_delim = match d {
+                Some(delim) if delim == "js" => Some("*j".to_string()),
+                other => other.clone(),
+            };
+            Ok(Constant::String(s.clone(), transformed_delim))
+        }
         ParsedConstant::Float(f, None) => Ok(Constant::Float(f.clone())),
         ParsedConstant::Float(f, Some(c)) => Err(TypeCoreError::UnknownLiteral(f.clone(), *c)),
     }
