@@ -1,13 +1,14 @@
 # Typedtree Parity: Status and Action Plan
 
 ## Current Status
-- **Parity: 43/102 files (42%)**
-- **Failing: 59 files**
+- **Parity: 44/102 files (43%)**
+- **Failing: 58 files**
 
 **Note:** Most remaining issues require structural changes to the type checker,
 not just sexp output fixes. See "Issues Requiring Structural Changes" below.
 
 ### Recent Fixes
+- **Module type sexp output** - Implemented proper ModuleType, ModuleTypeDesc, Signature, SignatureItem structures and sexp output for functor parameters. (+1 file)
 - **Type extension handling** - Implemented proper type extension handling with actual paths and constructors. (+1 file)
 - **`*j` delimiter transformation** - Fixed string delimiter transformation from `"js"` to `"*j"` during type checking. (+6 files)
 
@@ -376,6 +377,7 @@ diff -a /tmp/o.sexp /tmp/r.sexp
 | Jan 2026 | 42/102 (41%) | +6 from `*j` delimiter transformation |
 | Jan 2026 | 43/102 (42%) | +1 from type extension path fix |
 | Jan 2026 | 43/102 (42%) | Added sexp_module_type_declaration (partial) |
+| Jan 2026 | 44/102 (43%) | +1 from ModuleType structure and sexp output |
 
 ## Analysis Notes
 
@@ -383,16 +385,18 @@ diff -a /tmp/o.sexp /tmp/r.sexp
 
 Several remaining issues require changes beyond sexp printing - they need modifications to the type checker or typedtree data structures:
 
-1. **Module Type sexp** (~10 files) - The Rust `ModuleType` in typedtree.rs is a placeholder struct:
+1. **Module Type sexp** (~10 files) - PARTIALLY FIXED. The Rust `ModuleType` now has proper structure:
    ```rust
    pub struct ModuleType {
-       _placeholder: (),
+       pub mty_desc: ModuleTypeDesc,
+       pub mty_loc: LocIdx,
+       pub mty_attributes: Attributes,
    }
    ```
-   Proper implementation requires:
-   - Adding `mty_desc: ModuleTypeDesc` enum with variants `Tmty_ident`, `Tmty_signature`, `Tmty_functor`, etc.
-   - Adding `mty_loc`, `mty_attributes` fields
-   - Updating typemod.rs to populate these instead of `ModuleType::placeholder()`
+   The sexp output functions are implemented. Remaining issues:
+   - `typemod.rs` still uses `ModuleType::placeholder()` instead of populating actual structures
+   - `Pmod_constraint` uses `Tmodtype_implicit` when it should use `Tmodtype_explicit` with the actual typed module type
+   - Need to implement `transl_modtype` to properly type module type expressions
 
 2. **Value Description sexp** (~5 files) - Rust uses `ValueDescription` from decl.rs (Types level), but OCaml's typed tree has a separate typed `value_description` with:
    - `val_id: Ident`
