@@ -5,9 +5,25 @@ This document describes the binary AST serialization in the Rust compiler.
 ## Status
 
 - **AST structure (sexp-locs)**: 100% parity (1049/1049 files)
-- **Binary output (bsc-ast)**: ~119 files with exact byte parity, ~930 with position sharing differences
+- **Binary output (bsc-ast)**: ~121 files with exact byte parity, ~928 with differences
 
-The AST structure is correct (sexp-locs match), but binary position sharing in the marshal output still needs work for full byte-identical parity.
+The AST structure is correct (sexp-locs match), but there are two categories of remaining differences:
+
+1. **Position sharing differences**: Many files where Rust creates fewer/more shared references than OCaml
+2. **FFI encoding differences**: Files with `external` declarations where OCaml's PPX encodes FFI metadata into `pval_prim`
+
+### Known Issues
+
+#### FFI Metadata Encoding
+When OCaml processes external declarations, the PPX encodes FFI type information as a marshalled blob inside `pval_prim`. This creates strings containing OCaml Marshal data (starting with magic `84 95 a6 be`). The Rust implementation doesn't currently perform this encoding, resulting in smaller binary output for files with externals.
+
+See `compiler/frontend/external_ffi_types.ml`:
+```ocaml
+let to_string (t : t) = Marshal.to_string t []
+```
+
+#### Position Sharing Patterns
+OCaml's position sharing is based on pointer equality - when the same position variable is referenced multiple times in OCaml code, they share the same memory object and get the same marshal reference. The Rust implementation uses arena indices to approximate this, but some patterns still produce different sharing behavior.
 
 ---
 
