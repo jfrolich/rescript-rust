@@ -88,8 +88,8 @@ Read `RALPH_TODO.md` and complete the next unchecked task. After completing a ta
 
 # Compare binary output manually for a simple file
 echo 'let f = x => x' > /tmp/test.res
-./_build/install/default/bin/res_parser -print binary /tmp/test.res > /tmp/ocaml.ast
-./compiler-rust/target/release/res_parser_rust -print binary /tmp/test.res > /tmp/rust.ast
+./packages/@rescript/darwin-arm64/bin/bsc.exe -bs-ast /tmp/test.res -o /tmp/ocaml.ast
+./compiler-rust/target/release/bsc -bs-ast /tmp/test.res -o /tmp/rust.ast
 diff <(xxd /tmp/ocaml.ast) <(xxd /tmp/rust.ast)
 
 # Build after changes

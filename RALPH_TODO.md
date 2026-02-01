@@ -102,10 +102,10 @@ Specifically, when parsing arrow functions, certain positions (like the start/en
 # Test a single file
 ./scripts/test_parser_ast_parity.sh tests/syntax_tests/data/printer/expr/record.res
 
-# Compare binary output for a simple file
+# Compare binary output for a simple file (use bsc, not res_parser)
 echo 'let f = x => x' > /tmp/test.res
-./_build/install/default/bin/res_parser -print binary /tmp/test.res > /tmp/ocaml.ast
-./compiler-rust/target/release/res_parser_rust -print binary /tmp/test.res > /tmp/rust.ast
+./packages/@rescript/darwin-arm64/bin/bsc.exe -bs-ast /tmp/test.res -o /tmp/ocaml.ast
+./compiler-rust/target/release/bsc -bs-ast /tmp/test.res -o /tmp/rust.ast
 diff <(xxd /tmp/ocaml.ast) <(xxd /tmp/rust.ast)
 
 # Build Rust compiler
