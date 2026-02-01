@@ -126,6 +126,21 @@ cargo build --manifest-path compiler-rust/Cargo.toml --release
 
 ---
 
+## Important: Do NOT Modify parsetree0/ast0
+
+**The parsetree0 mapper and types are correct.** The issue is position sharing in the **parser**, not in the parsetree0 conversion.
+
+Focus on these files:
+- ✅ `compiler-rust/src/parser/` - Position creation during parsing
+- ✅ `compiler-rust/src/binary_ast/marshal.rs` - Position sharing during serialization
+
+Do NOT touch these files unless absolutely necessary:
+- ❌ `parsetree0.rs`
+- ❌ `parsetree0_marshal.rs`
+- ❌ `mapper_to0.rs`
+
+---
+
 ## Notes
 
 - The sexp-locs test passes 100%, so the AST structure is correct
