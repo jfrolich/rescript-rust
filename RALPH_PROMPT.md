@@ -38,7 +38,7 @@ Read `RALPH_TODO.md` and complete the next unchecked task. After completing a ta
 
 1. **ALWAYS read the OCaml implementation first** - Don't guess. Study the OCaml source to understand the correct behavior. The goal is a faithful port, not a reimagining.
 
-2. **DO NOT modify parsetree0/ast0 code** - The parsetree0 mapper and types are correct. The issue is **position sharing in the parser** - positions that should have the same `PosIdx` are getting different indices during parsing. Focus on:
+2. **DO NOT modify parsetree0/ast0 code (for now)** - The current focus is **position sharing in the parser** - positions that should have the same `PosIdx` are getting different indices during parsing. parsetree0/ast0 has its own issues but that's a separate task. Focus on:
    - `compiler-rust/src/parser/` - Position creation and reuse during parsing
    - `compiler-rust/src/parse_arena.rs` - Arena management for positions
    - `compiler-rust/src/binary_ast/marshal.rs` - Can modify if needed
