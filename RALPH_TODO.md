@@ -108,9 +108,12 @@ We need to implement the remaining transformations.
   - **Done**: Added to `rewrite_pattern` and `rewrite_expression` in ppx.rs.
     Parity improved from 134 to 135 tests.
 
-- [ ] **Task 2.5**: Implement `Pexp_extension` handling
+- [x] **Task 2.5**: Implement `Pexp_extension` handling (partial)
   - OCaml: `Ast_exp_extension.handle_extension`
-  - Handle various extension points: `%debugger`, `%external`, `%node`, `%obj`, etc.
+  - **Done**: Implemented `%debugger` in handle_debugger() in ppx.rs.
+  - Also fixed letmodule dependency tracking so local modules (like `J`) aren't added as dependencies.
+  - Note: `%debugger` still has minor position sharing differences (Phase 4 issue).
+  - TODO: `%external`, `%obj`, `%re`, `%todo` still need implementation.
 
 - [ ] **Task 2.6**: Implement `@inline` let binding transformation
   - Currently partial in Rust (helpers exist, rewrite has TODO)
