@@ -426,8 +426,20 @@ diff -a /tmp/o.sexp /tmp/r.sexp
 | Jan 2026 | 43/102 (42%) | +1 from type extension path fix |
 | Jan 2026 | 43/102 (42%) | Added sexp_module_type_declaration (partial) |
 | Jan 2026 | 44/102 (43%) | +1 from ModuleType structure and sexp output |
+| Feb 2026 | 49/101 (48%) | Object type fix; investigation findings documented |
 
 ## Analysis Notes
+
+### Newly Discovered Issues (Feb 2026)
+
+4. **Record expressions in recursive bindings** - For files like rec_array_test.res, record expressions
+   in recursive value bindings output empty field lists `()` in Rust instead of the actual fields.
+
+   Example: `let rec vicky = {taughtBy: teacher}` outputs `(Texp_record () None)` in Rust
+   instead of the properly populated fields.
+
+   Root cause: Likely an issue with how the record type lookup interacts with recursive binding
+   type checking. The type may not be fully resolved when the record fields are processed.
 
 ### Issues Requiring Structural Changes
 
