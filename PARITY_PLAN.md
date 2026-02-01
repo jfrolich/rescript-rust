@@ -34,56 +34,64 @@ Based on analysis of all 66 failing files, the issues fall into these categories
 
 ## Detailed Action Items
 
-### 1. FIX: Cycle Detection in Type Expression Sexp (HIGH PRIORITY)
+### 1. FIX: Cycle Detection in Type Expression Sexp (BLOCKED - NEEDS DIFFERENT APPROACH)
 
 **Files affected:** test_obj.res, test_eq.res, functor_inst.res, test_dup_param.res, nested_obj_literal.res, etc.
 
 **Problem:** The `<cycle>` marker appears at different positions in Rust vs OCaml output.
 
-**Root Cause Analysis (Updated 2026-02-01):**
+**Current Status (Updated 2026-02-01):**
 
-The issue is more fundamental than cycle detection in printing. Investigation revealed:
+After investigation, the actual situation is:
+- **OCaml** has cycles (e.g., `<cycle>` markers) for primitive operator types
+- **Rust** does NOT have cycles for the same cases - it shows fully resolved types
 
-1. **OCaml's primitive types are at GENERIC_LEVEL**: In OCaml's `Predef`, types like `type_int` are created with `newgenty` which sets level to `generic_level` (100000000).
-
-2. **OCaml's `copy` function uses mutation for memoization**: When copying a type, OCaml mutates the original type descriptor to `Tsubst t` where `t` is the copy. This enables the memo check `| Tsubst ty -> ty` at the start of copy.
-
-3. **The cycle pattern in OCaml is intentional**: For operator `+` with type `int -> int -> int` where all three `int` positions share the same type object:
-   - When instantiated, all three positions get the SAME copy (via Tsubst memoization)
-   - When printing the operator's type, the shared reference causes `<cycle>` markers
-   - BUT the function `f`'s pattern type is built from DIFFERENT type variables that link to int
-
-4. **Key insight**: After unification, type variables LINK to their unified types but remain distinct objects. When printing `f`'s type:
-   - `param1_ty` -> Tlink -> int_copy_a
-   - `param2_ty` -> Tlink -> int_copy_b  (DIFFERENT copy)
-   - `return_ty` -> Tlink -> int_copy_c  (DIFFERENT copy)
-
-   Since int_copy_a, int_copy_b, int_copy_c are different objects, no cycles appear.
-
-5. **In Rust**: The current implementation creates types at current_level (0), not GENERIC_LEVEL. When `copy_type` is called on non-generic types, it returns them as-is (ReturnSelf), preserving sharing. This causes more cycles than expected.
-
-**Attempted fixes that didn't work:**
-- Making primitive types at GENERIC_LEVEL + adding memo to copy_type: This caused MORE cycle issues because the copied types also share references
-- The fundamental issue is that Rust's type unification and construction needs to create separate type objects in the same places OCaml does
-
-**What needs to happen:**
-The fix requires understanding exactly where OCaml creates fresh type objects vs reuses existing ones during:
-1. Type instantiation (copy function)
-2. Function parameter type construction
-3. Unification (link direction)
-
-This is not a simple fix - it requires careful analysis of the type checking flow.
-
-**Example Diff (test_eq.res):**
+**Example (test_eq.res - `let f = (x, y) => x + y`):**
 ```
-OCaml + operator type: <cycle> -> <cycle> -> Tvar None
-OCaml f pattern type:  int -> int -> int (no cycles!)
-
-Rust + operator type:  int -> <cycle> -> <cycle>
-Rust f pattern type:   int -> <cycle> -> <cycle> (has cycles!)
+OCaml + operator type: (Tarrow ... <cycle> (Tarrow ... <cycle> (Tvar None) ...) ...)
+Rust + operator type:  (Tarrow ... int (Tarrow ... int int ...) ...)
 ```
 
-**Estimated Effort:** 8-16 hours (structural change to type checker)
+The test script filters `<cycle>` lines, but after filtering:
+- OCaml has incomplete structure with `(Tvar None)` for return type
+- Rust has complete `(Tconstr (Pident "int") ())` for all positions
+
+**Why the "fresh types" fix doesn't help:**
+
+A proposed fix was to create fresh TypeExprRefs for each position in primitive operator signatures
+(e.g., `fresh_int(ctx)` instead of reusing `int_ty`). This was based on the assumption that
+Rust was showing false cycles due to shared type references.
+
+However, testing shows that Rust ALREADY doesn't produce cycles for test_eq.res (0 `<cycle>` markers).
+The difference is structural - after OCaml's cycles are filtered, its output has `(Tvar None)`
+while Rust has resolved `(Tconstr int)`. These are semantically equivalent but structurally different.
+
+**Root Cause Analysis:**
+
+1. **OCaml's type sharing causes cycles**: When `+` is typed as `int -> int -> int` with a single
+   shared `int` type object, unification causes cycles when printing.
+
+2. **OCaml's cycle detection outputs `(Tvar None)`**: When a cycle is detected, OCaml outputs
+   `<cycle>` for the repeated occurrence, leaving the return type as unresolved `(Tvar None)`.
+
+3. **Rust creates separate type objects**: The current Rust implementation creates distinct
+   TypeExprRefs during type checking, so no cycles appear.
+
+4. **The outputs are semantically equivalent**: Both represent `int -> int -> int`, just with
+   different internal representations that serialize differently.
+
+**Options for resolution:**
+
+1. **Update test normalization**: Modify `normalize_sexp` to also handle `(Tvar None)` vs
+   `(Tconstr ...)` differences that result from cycle handling. This is a significant change.
+
+2. **Make Rust match OCaml's cycle pattern**: Would require matching OCaml's exact type
+   construction and sharing behavior. This is invasive and may break other type checking.
+
+3. **Accept the difference**: The outputs are semantically equivalent. Consider marking these
+   tests as "known different" or updating expectations.
+
+**Estimated Effort:** 8-16 hours (requires either test infrastructure changes or deep type checker changes)
 
 ---
 
