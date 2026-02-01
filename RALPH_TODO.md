@@ -112,6 +112,9 @@ We need to implement the remaining transformations.
   - Transforms template strings (backticks) to `"bq"` delimiter
   - **Done**: Implemented in `transform_string_exp` and `transform_string_pat` in ppx.rs.
     Handles both expressions and patterns. Parity improved from 128 to 134 tests.
+  - **Additional fix**: Added `rewrite_attribute()`, `rewrite_attributes()`, and `rewrite_payload()`
+    functions to transform strings inside attribute payloads (e.g., `@ocaml.doc("foo")`).
+    This ensures docstrings get the same `"*j"` delimiter transformation as regular strings.
 
 - [ ] **Task 2.3**: Implement `@deriving` transformations (DEFERRED - Complex)
   - OCaml: `Ast_derive_projector.init()`, `Ast_derive_js_mapper.init()`
