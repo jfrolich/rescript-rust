@@ -719,13 +719,28 @@ fn transl_type_inner(
 
         CTD::Ptyp_object(fields, closed) => {
             // Object type: {. name: string, age: int }
-            // Simplified implementation - full version builds proper object type
+            use crate::types::type_expr::FieldKind;
+
             let mut typed_fields = Vec::new();
+            let mut field_type_info: Vec<(String, TypeExprRef)> = Vec::new();
 
             for field in fields.iter() {
                 match field {
                     crate::parser::ast::ObjectField::Otag(label, attrs, field_type) => {
-                        let (field_ctyp, _field_ty) = transl_type_inner(tctx, env, field_type)?;
+                        let (field_ctyp, field_ty) = transl_type_inner(tctx, env, field_type)?;
+
+                        // Wrap the field type in Tpoly (like OCaml does for object methods)
+                        let poly_ty = ctx.new_poly(field_ty, vec![]);
+                        field_type_info.push((label.txt.clone(), poly_ty));
+
+                        // Wrap the core_type in Ttyp_poly (matching OCaml behavior)
+                        let poly_ctyp = TypedCoreType {
+                            ctyp_desc: TypedCoreTypeDesc::Ttyp_poly(vec![], Box::new(field_ctyp)),
+                            ctyp_type: poly_ty,
+                            ctyp_env: EnvRef(0),
+                            ctyp_loc: field_type.ptyp_loc,
+                            ctyp_attributes: vec![],
+                        };
 
                         typed_fields.push(crate::types::typedtree::ObjectField {
                             of_desc: crate::types::typedtree::ObjectFieldDesc::OTtag(
@@ -733,7 +748,7 @@ fn transl_type_inner(
                                     txt: label.txt.clone(),
                                     loc: label.loc.clone(),
                                 },
-                                field_ctyp,
+                                poly_ctyp,
                             ),
                             of_loc: label.loc.clone(),
                             of_attributes: attrs.clone(),
@@ -753,8 +768,14 @@ fn transl_type_inner(
                 }
             }
 
-            // Use a fresh type variable for the object type (simplified)
-            let obj_ty = ctx.new_var(None);
+            // Build the field chain: Tfield -> Tfield -> ... -> Tnil
+            let mut rest = ctx.new_nil();
+            for (name, field_ty) in field_type_info.into_iter().rev() {
+                rest = ctx.new_field(name, FieldKind::Fpresent, field_ty, rest);
+            }
+
+            // Create the object type
+            let obj_ty = ctx.new_object(rest, None);
 
             let ctyp = TypedCoreType {
                 ctyp_desc: TypedCoreTypeDesc::Ttyp_object(typed_fields, *closed),
