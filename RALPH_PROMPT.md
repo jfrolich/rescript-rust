@@ -1,6 +1,6 @@
-# Ralph Loop: Printing Parity
+# Ralph Loop: Binary AST Parity
 
-You are working on achieving **byte-for-byte printing parity** between the Rust ReScript printer and the OCaml reference implementation.
+You are working on achieving **byte-for-byte binary AST parity** between the Rust ReScript compiler and the OCaml reference implementation.
 
 ## Core Principle: 1:1 OCaml Port
 
@@ -14,10 +14,11 @@ You are working on achieving **byte-for-byte printing parity** between the Rust 
 **Reference files to study:**
 | OCaml File | Purpose |
 |------------|---------|
-| `compiler/syntax/src/res_printer.ml` | Main printer (~6100 lines) |
-| `compiler/syntax/src/res_comments_table.ml` | Comment attachment algorithm |
-| `compiler/syntax/src/res_doc.ml` | Document pretty-printing |
-| `compiler/syntax/src/res_parens.ml` | Parenthesization rules |
+| `compiler/depends/binary_ast.ml` | Binary AST writing |
+| `compiler/ml/parsetree0.ml` | Frozen PPX-compatible AST |
+| `compiler/common/ast_mapper_to0.ml` | Current -> parsetree0 mapping |
+| `compiler/syntax/src/res_scanner.ml` | Position allocation |
+| `compiler/syntax/src/res_parser.ml` | Position assignment |
 
 When you encounter a parity issue:
 1. Find the corresponding function in the OCaml code
@@ -39,60 +40,99 @@ Read `RALPH_TODO.md` and complete the next unchecked task. After completing a ta
 
 2. **Run tests frequently** - After each change:
    ```bash
-   PARSER=rust ./scripts/test_syntax.sh 2>&1 | tail -40
+   ./scripts/test_parser_ast_parity.sh 2>&1 | tail -40
    ```
 
 3. **Commit after each fix** - Every time tests improve, commit immediately. Include the new parity in the commit message:
    ```bash
    git add <files> && git commit -m "Fix: <description>
 
-   Printer parity: X/187 (Y%)
+   Binary AST parity: X/1049 bsc-ast matches
 
    Co-Authored-By: Claude <noreply@anthropic.com>"
    ```
 
    Get the current parity by running:
    ```bash
-   PARSER=rust ./scripts/test_syntax.sh 2>&1 | grep "^printer"
+   ./scripts/test_parser_ast_parity.sh 2>&1 | grep -E "bsc-ast"
    ```
 
-4. **Focus on root causes** - Many failures share the same root cause (usually comment handling). Fix the underlying issue rather than individual symptoms.
+4. **Focus on root causes** - Many failures share the same root cause (usually position sharing). Fix the underlying issue rather than individual symptoms.
 
-5. **Never modify expected files** - The `tests/syntax_tests/data/*/expected/` files contain the OCaml reference output. Fix the Rust implementation to match them.
+5. **Never modify expected files** - The OCaml-generated `.ast` files are the reference. Fix the Rust implementation to match them.
 
 ## Key Files
 
 | File | Purpose |
 |------|---------|
-| `compiler-rust/src/parser/printer2.rs` | Main printer implementation |
-| `compiler-rust/src/parser/comment_table.rs` | Comment attachment logic |
-| `compiler/syntax/src/res_printer.ml` | OCaml reference (6100 lines) |
-| `compiler/syntax/src/res_comments_table.ml` | OCaml comment handling |
+| `compiler-rust/src/binary_ast/marshal.rs` | Marshal serialization |
+| `compiler-rust/src/binary_ast/parsetree0.rs` | Parsetree0 types |
+| `compiler-rust/src/binary_ast/parsetree0_mapper.rs` | Parsetree -> parsetree0 mapping |
+| `compiler-rust/src/location.rs` | Position/Location types with arena indices |
+| `compiler-rust/src/parser/scanner.rs` | Position creation |
+| `compiler-rust/src/parser/state.rs` | Parser position tracking |
 
 ## Debugging Workflow
 
 ```bash
-# View diff for a specific failing test
-diff tests/syntax_tests/data/printer/comments/expected/FILE.txt \
-     tests/temp/syntax_tests/data/printer/comments/expected/FILE.txt
+# Run full parity test
+./scripts/test_parser_ast_parity.sh
 
-# Test a single file
-./compiler-rust/target/release/res_parser_rust tests/syntax_tests/data/printer/FILE.res
+# Test a specific file
+./scripts/test_parser_ast_parity.sh tests/syntax_tests/data/printer/expr/record.res
 
-# Compare with OCaml
-./_build/install/default/bin/res_parser tests/syntax_tests/data/printer/FILE.res
+# Compare binary output manually for a simple file
+echo 'let f = x => x' > /tmp/test.res
+./_build/install/default/bin/res_parser -print binary /tmp/test.res > /tmp/ocaml.ast
+./compiler-rust/target/release/res_parser_rust -print binary /tmp/test.res > /tmp/rust.ast
+diff <(xxd /tmp/ocaml.ast) <(xxd /tmp/rust.ast)
 
 # Build after changes
 cargo build --manifest-path compiler-rust/Cargo.toml --release
 ```
 
-## Common Issues to Fix
+## Current Status
 
-1. **Comment placement** - Comments attach to wrong AST nodes or get lost
-2. **Trailing comments** - Comments after expressions not preserved
-3. **Blank line preservation** - Blank lines around comments should be kept
-4. **JSX in expressions** - JSX elements inside switch/match arms
-5. **Functor parameter comments** - Comments on module functor parameters
+- **AST structure (sexp-locs)**: 100% parity (1049/1049 files)
+- **Binary output (bsc-ast)**: ~121 files with exact byte parity, ~928 with differences
+
+## Known Issues to Fix
+
+1. **Position sharing differences** - Rust creates fewer/more shared references than OCaml
+   - OCaml's sharing is based on pointer equality
+   - Rust uses arena indices to approximate this
+   - Some patterns still produce different sharing behavior
+
+2. **FFI encoding differences** - Files with `external` declarations
+   - OCaml's PPX encodes FFI type information as a marshalled blob in `pval_prim`
+   - See `compiler/frontend/external_ffi_types.ml` for the encoding
+
+## OCaml Marshal Format Reference
+
+### Sharing Reference Distance
+When Marshal encounters a previously-seen object, it writes a shared reference:
+
+| Distance  | Code            | Format                    |
+|-----------|-----------------|---------------------------|
+| 1-255     | CODE_SHARED8    | 1 byte offset             |
+| 256-65535 | CODE_SHARED16   | 2 bytes big-endian offset |
+| 65536+    | CODE_SHARED32   | 4 bytes big-endian offset |
+
+### Position Sharing Pattern
+The key sharing pattern occurs in the parser's `next()` function:
+
+```
+Token 1: "let" at positions 0-3
+  Scanner creates: start_pos (id=1), end_pos (id=2)
+  Parser assigns: p.start_pos <- id=1, p.end_pos <- id=2
+
+Token 2: "x" at positions 4-5
+  Scanner creates: start_pos (id=3), end_pos (id=4)
+  Parser assigns:
+    prev_end_pos <- p.end_pos (id=2)  <- SHARING: same ID as token 1's end
+    p.start_pos <- id=3
+    p.end_pos <- id=4
+```
 
 ## OCaml → Rust Translation Patterns
 
@@ -103,42 +143,17 @@ When porting OCaml code, use these Rust equivalents:
 | `option` | `Option<T>` |
 | `list` | `Vec<T>` (or `&[T]` for parameters) |
 | `ref` | `&mut T` parameter or field in context struct |
-| `Hashtbl.t` | `HashMap<K, V>` or field in `CommentTable` |
+| `Hashtbl.t` | `HashMap<K, V>` |
 | `match x with` | `match x { }` |
 | `let rec` | Regular `fn` (Rust has no `rec` keyword) |
 | `fun x -> ...` | `\|x\| ...` or `fn` |
-| `x :: xs` | `if let [x, xs @ ..] = slice` or iterator |
-| `List.iter` | `.iter().for_each()` or `for` loop |
-| `List.map` | `.iter().map().collect()` |
-| `Printf.sprintf` | `format!()` |
-| `^` (string concat) | `format!()` or `.push_str()` |
-
-**Global state elimination example:**
-
-```ocaml
-(* OCaml with global state *)
-let comments_table = Hashtbl.create 100
-let attach_comment loc comment =
-  Hashtbl.add comments_table loc comment
-```
-
-```rust
-// Rust with explicit state
-struct CommentTable {
-    leading: HashMap<PosRange, Vec<Comment>>,
-    trailing: HashMap<PosRange, Vec<Comment>>,
-}
-
-fn attach_comment(table: &mut CommentTable, loc: PosRange, comment: Comment) {
-    table.leading.entry(loc).or_default().push(comment);
-}
-```
+| `Marshal.to_string` | Custom marshal writer |
 
 ## Progress Tracking
 
 The current status is tracked in `RALPH_TODO.md`. Update it as you complete tasks.
 
-When all printer tests pass (187/187), move on to other categories.
+Goal: Achieve byte-identical binary AST output for all 1049 test files.
 
 ## Exit Condition
 
