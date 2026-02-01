@@ -76,11 +76,14 @@ fn is_underscore_placeholder(expr: &Expression, arena: &ParseArena) -> bool {
     }
 }
 
-/// Replace underscore placeholders with a reference to the given variable name
-fn replace_underscores_in_expr(expr: Expression, var_name: &str, arena: &mut ParseArena) -> Expression {
+/// Replace underscore placeholders with a reference to the given variable name.
+/// Uses interning for the variable name to enable sharing between the pattern
+/// and identifier in the final AST (OCaml shares these via pointer equality).
+fn replace_underscores_in_expr(expr: Expression, var_str_idx: StrIdx, arena: &mut ParseArena) -> Expression {
     if is_underscore_placeholder(&expr, arena) {
         let loc = expr.pexp_loc.clone();
-        let lid_idx = arena.push_lident(var_name);
+        // Use the same StrIdx as the pattern variable for proper sharing
+        let lid_idx = arena.push_lident_from_idx(var_str_idx);
         Expression {
             pexp_desc: ExpressionDesc::Pexp_ident(with_loc(lid_idx, loc.clone())),
             pexp_loc: loc,
@@ -131,11 +134,14 @@ fn transform_placeholder_application(
         }
     };
 
-    // Replace all underscores with __x
-    let var_name = "__x";
+    // Intern __x ONCE so both the pattern and all identifier uses share the same StrIdx.
+    // This matches OCaml where the same string binding is used for both.
+    let var_str_idx = arena.intern("__x");
+
+    // Replace all underscores with __x (using the interned StrIdx for sharing)
     let transformed_args: Vec<(ArgLabel, Expression)> = args
         .into_iter()
-        .map(|(label, expr)| (label, replace_underscores_in_expr(expr, var_name, arena)))
+        .map(|(label, expr)| (label, replace_underscores_in_expr(expr, var_str_idx, arena)))
         .collect();
 
     // Create the inner Pexp_apply
@@ -152,7 +158,6 @@ fn transform_placeholder_application(
 
     // Create Pexp_fun wrapping the application
     // OCaml: pattern has ppat_loc: Location.none, but StringLoc uses underscore's location
-    let var_str_idx = arena.intern(var_name);
     let pattern = Pattern {
         ppat_desc: PatternDesc::Ppat_var(with_loc(var_str_idx, underscore_loc.clone())),
         ppat_loc: LocIdx::none(),
