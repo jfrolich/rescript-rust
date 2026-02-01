@@ -270,19 +270,7 @@ test_single_file() {
     # Compare if both succeeded
     if [[ "$RUST_AVAILABLE" == "true" && "$ocaml_pass" -eq 1 && "$rust_pass" -eq 1 ]]; then
         # Normalize sexp output before comparing:
-        # 1. Remove warning output and JS code that may be mixed into stderr
-        # 2. Apply Python normalizer to handle cycle-related type expression differences
-        #
-        # NOTE: The cycle differences are due to OCaml using physical identity for types
-        # while Rust uses arena indices. After unification, OCaml types share the same
-        # memory address (creating cycles), while Rust types have different indices
-        # but link to the same target type.
-        #
-        # The Python normalizer handles cases where:
-        # - Pattern A: OCaml has (Tvar None) after cycle, Rust has (Tconstr int/string/...)
-        # - Pattern B: OCaml has resolved type, Rust has cycle
-        # - Pattern C: Both have cycles but in different positions
-        # - Replaces <cycle> markers with _CYCLE_ for consistent comparison
+        # Remove warning output and JS code that may be mixed into stderr
         normalize_sexp() {
             grep -v '^// ' | \
             grep -v "^'" | \
@@ -302,7 +290,7 @@ test_single_file() {
             grep -v 'Using the variable' | \
             grep -v '^};$' | \
             grep -v 'No side effect' | \
-            python3 "$PROJECT_ROOT/scripts/normalize_typedtree_sexp.py"
+            cat
         }
 
         normalize_sexp < "$file_temp/ocaml.sexp" > "$file_temp/ocaml.normalized"

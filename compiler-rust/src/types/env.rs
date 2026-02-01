@@ -553,18 +553,6 @@ fn add_binary_primitive(
     env.add_value(id, desc);
 }
 
-/// Helper to add a binary primitive where all type positions are the same (e.g., int -> int -> int)
-/// This matches OCaml's behavior where the same type is shared across all positions.
-fn add_binary_primitive_same_type(
-    env: &mut Env,
-    ctx: &TypeContext<'_>,
-    name: &str,
-    prim_name: &str,
-    ty: TypeExprRef,
-) {
-    add_binary_primitive(env, ctx, name, prim_name, ty, ty, ty);
-}
-
 /// Helper to add a unary primitive operator
 fn add_unary_primitive(
     env: &mut Env,
@@ -674,21 +662,20 @@ pub fn initial_env(ctx: &TypeContext<'_>) -> Env {
     env.add_constructor(true_id, true_cstr);
 
     // Add arithmetic operators for int
-    // Each operator gets its own int type, but WITHIN a type expression, all int
-    // positions share the same TypeExprRef. This matches OCaml's behavior for cycle
-    // detection: int -> int -> int has the same int type in all positions.
-    add_binary_primitive_same_type(&mut env, ctx, "+", "%addint", fresh_int(ctx));
-    add_binary_primitive_same_type(&mut env, ctx, "-", "%subint", fresh_int(ctx));
-    add_binary_primitive_same_type(&mut env, ctx, "*", "%mulint", fresh_int(ctx));
-    add_binary_primitive_same_type(&mut env, ctx, "/", "%divint", fresh_int(ctx));
-    add_binary_primitive_same_type(&mut env, ctx, "mod", "%modint", fresh_int(ctx));
+    // Use FRESH type refs for each position. After unification with the usage,
+    // they may point to the same type, but they start as different refs.
+    add_binary_primitive(&mut env, ctx, "+", "%addint", fresh_int(ctx), fresh_int(ctx), fresh_int(ctx));
+    add_binary_primitive(&mut env, ctx, "-", "%subint", fresh_int(ctx), fresh_int(ctx), fresh_int(ctx));
+    add_binary_primitive(&mut env, ctx, "*", "%mulint", fresh_int(ctx), fresh_int(ctx), fresh_int(ctx));
+    add_binary_primitive(&mut env, ctx, "/", "%divint", fresh_int(ctx), fresh_int(ctx), fresh_int(ctx));
+    add_binary_primitive(&mut env, ctx, "mod", "%modint", fresh_int(ctx), fresh_int(ctx), fresh_int(ctx));
 
     // Add arithmetic operators for float
-    add_binary_primitive_same_type(&mut env, ctx, "+.", "%addfloat", fresh_float(ctx));
-    add_binary_primitive_same_type(&mut env, ctx, "-.", "%subfloat", fresh_float(ctx));
-    add_binary_primitive_same_type(&mut env, ctx, "*.", "%mulfloat", fresh_float(ctx));
-    add_binary_primitive_same_type(&mut env, ctx, "/.", "%divfloat", fresh_float(ctx));
-    add_binary_primitive_same_type(&mut env, ctx, "**", "%powfloat", fresh_float(ctx));
+    add_binary_primitive(&mut env, ctx, "+.", "%addfloat", fresh_float(ctx), fresh_float(ctx), fresh_float(ctx));
+    add_binary_primitive(&mut env, ctx, "-.", "%subfloat", fresh_float(ctx), fresh_float(ctx), fresh_float(ctx));
+    add_binary_primitive(&mut env, ctx, "*.", "%mulfloat", fresh_float(ctx), fresh_float(ctx), fresh_float(ctx));
+    add_binary_primitive(&mut env, ctx, "/.", "%divfloat", fresh_float(ctx), fresh_float(ctx), fresh_float(ctx));
+    add_binary_primitive(&mut env, ctx, "**", "%powfloat", fresh_float(ctx), fresh_float(ctx), fresh_float(ctx));
 
     // Add comparison operators (int -> int -> bool, args share same type)
     {
@@ -717,8 +704,8 @@ pub fn initial_env(ctx: &TypeContext<'_>) -> Env {
     }
 
     // Add boolean operators
-    add_binary_primitive_same_type(&mut env, ctx, "&&", "%sequand", fresh_bool(ctx));
-    add_binary_primitive_same_type(&mut env, ctx, "||", "%sequor", fresh_bool(ctx));
+    add_binary_primitive(&mut env, ctx, "&&", "%sequand", fresh_bool(ctx), fresh_bool(ctx), fresh_bool(ctx));
+    add_binary_primitive(&mut env, ctx, "||", "%sequor", fresh_bool(ctx), fresh_bool(ctx), fresh_bool(ctx));
     {
         let bool_ty = fresh_bool(ctx);
         add_unary_primitive(&mut env, ctx, "not", "%boolnot", bool_ty, bool_ty);
@@ -735,7 +722,7 @@ pub fn initial_env(ctx: &TypeContext<'_>) -> Env {
     }
 
     // Add string concatenation
-    add_binary_primitive_same_type(&mut env, ctx, "++", "%string_concat", fresh_string(ctx));
+    add_binary_primitive(&mut env, ctx, "++", "%string_concat", fresh_string(ctx), fresh_string(ctx), fresh_string(ctx));
 
     // Add ignore function
     let alpha = ctx.new_var(None);
