@@ -490,6 +490,32 @@ impl Default for Env {
 // Initial Environment
 // ============================================================================
 
+// Helper functions to create fresh primitive type references.
+// Each call creates a NEW TypeExprRef to avoid false cycle detection.
+// When the same TypeExprRef is used multiple times in a type signature (e.g., int -> int -> int),
+// unification can cause all positions to point to the same arena index, triggering
+// false cycle detection during printing.
+
+fn fresh_int(ctx: &TypeContext<'_>) -> TypeExprRef {
+    ctx.new_constr(Path::pident(Ident::create_persistent("int")), vec![])
+}
+
+fn fresh_float(ctx: &TypeContext<'_>) -> TypeExprRef {
+    ctx.new_constr(Path::pident(Ident::create_persistent("float")), vec![])
+}
+
+fn fresh_bool(ctx: &TypeContext<'_>) -> TypeExprRef {
+    ctx.new_constr(Path::pident(Ident::create_persistent("bool")), vec![])
+}
+
+fn fresh_string(ctx: &TypeContext<'_>) -> TypeExprRef {
+    ctx.new_constr(Path::pident(Ident::create_persistent("string")), vec![])
+}
+
+fn fresh_unit(ctx: &TypeContext<'_>) -> TypeExprRef {
+    ctx.new_constr(Path::pident(Ident::create_persistent("unit")), vec![])
+}
+
 /// Create the initial environment with built-in types.
 pub fn initial_env(ctx: &TypeContext<'_>) -> Env {
     let mut env = Env::empty();
@@ -527,12 +553,8 @@ pub fn initial_env(ctx: &TypeContext<'_>) -> Env {
         env.add_type(id, decl);
     }
 
-    // Create type references for primitives
-    let int_ty = ctx.new_constr(Path::pident(Ident::create_persistent("int")), vec![]);
-    let float_ty = ctx.new_constr(Path::pident(Ident::create_persistent("float")), vec![]);
-    let bool_ty = ctx.new_constr(Path::pident(Ident::create_persistent("bool")), vec![]);
-    let string_ty = ctx.new_constr(Path::pident(Ident::create_persistent("string")), vec![]);
-    let unit_ty = ctx.new_constr(Path::pident(Ident::create_persistent("unit")), vec![]);
+    // Create type reference for boolean constructors (only used once each)
+    let bool_ty = fresh_bool(ctx);
 
     // Add boolean constructors: true and false
     // false has tag 0, true has tag 1
@@ -557,7 +579,7 @@ pub fn initial_env(ctx: &TypeContext<'_>) -> Env {
     let true_id = Ident::create_persistent("true");
     let true_cstr = ConstructorDescription {
         cstr_name: "true".to_string(),
-        cstr_res: bool_ty,
+        cstr_res: fresh_bool(ctx), // Fresh type ref for true constructor
         cstr_existentials: vec![],
         cstr_args: vec![],
         cstr_arity: 0,
@@ -573,44 +595,45 @@ pub fn initial_env(ctx: &TypeContext<'_>) -> Env {
     env.add_constructor(true_id, true_cstr);
 
     // Add arithmetic operators for int
-    // Note: In ReScript, + is polymorphic and specialized by the type checker,
-    // but for simplicity we'll add int versions directly
-    add_binary_primitive(&mut env, ctx, "+", "%addint", int_ty, int_ty, int_ty);
-    add_binary_primitive(&mut env, ctx, "-", "%subint", int_ty, int_ty, int_ty);
-    add_binary_primitive(&mut env, ctx, "*", "%mulint", int_ty, int_ty, int_ty);
-    add_binary_primitive(&mut env, ctx, "/", "%divint", int_ty, int_ty, int_ty);
-    add_binary_primitive(&mut env, ctx, "mod", "%modint", int_ty, int_ty, int_ty);
+    // IMPORTANT: Each position in the type signature uses a fresh TypeExprRef to avoid
+    // false cycle detection. When the same TypeExprRef is reused, unification causes
+    // all positions to share the same arena index, triggering false <cycle> in output.
+    add_binary_primitive(&mut env, ctx, "+", "%addint", fresh_int(ctx), fresh_int(ctx), fresh_int(ctx));
+    add_binary_primitive(&mut env, ctx, "-", "%subint", fresh_int(ctx), fresh_int(ctx), fresh_int(ctx));
+    add_binary_primitive(&mut env, ctx, "*", "%mulint", fresh_int(ctx), fresh_int(ctx), fresh_int(ctx));
+    add_binary_primitive(&mut env, ctx, "/", "%divint", fresh_int(ctx), fresh_int(ctx), fresh_int(ctx));
+    add_binary_primitive(&mut env, ctx, "mod", "%modint", fresh_int(ctx), fresh_int(ctx), fresh_int(ctx));
 
     // Add arithmetic operators for float
-    add_binary_primitive(&mut env, ctx, "+.", "%addfloat", float_ty, float_ty, float_ty);
-    add_binary_primitive(&mut env, ctx, "-.", "%subfloat", float_ty, float_ty, float_ty);
-    add_binary_primitive(&mut env, ctx, "*.", "%mulfloat", float_ty, float_ty, float_ty);
-    add_binary_primitive(&mut env, ctx, "/.", "%divfloat", float_ty, float_ty, float_ty);
-    add_binary_primitive(&mut env, ctx, "**", "%powfloat", float_ty, float_ty, float_ty);
+    add_binary_primitive(&mut env, ctx, "+.", "%addfloat", fresh_float(ctx), fresh_float(ctx), fresh_float(ctx));
+    add_binary_primitive(&mut env, ctx, "-.", "%subfloat", fresh_float(ctx), fresh_float(ctx), fresh_float(ctx));
+    add_binary_primitive(&mut env, ctx, "*.", "%mulfloat", fresh_float(ctx), fresh_float(ctx), fresh_float(ctx));
+    add_binary_primitive(&mut env, ctx, "/.", "%divfloat", fresh_float(ctx), fresh_float(ctx), fresh_float(ctx));
+    add_binary_primitive(&mut env, ctx, "**", "%powfloat", fresh_float(ctx), fresh_float(ctx), fresh_float(ctx));
 
     // Add comparison operators (polymorphic - using int for now)
-    add_binary_primitive(&mut env, ctx, "==", "%eq", int_ty, int_ty, bool_ty);
-    add_binary_primitive(&mut env, ctx, "!=", "%noteq", int_ty, int_ty, bool_ty);
-    add_binary_primitive(&mut env, ctx, "<", "%ltint", int_ty, int_ty, bool_ty);
-    add_binary_primitive(&mut env, ctx, ">", "%gtint", int_ty, int_ty, bool_ty);
-    add_binary_primitive(&mut env, ctx, "<=", "%leint", int_ty, int_ty, bool_ty);
-    add_binary_primitive(&mut env, ctx, ">=", "%geint", int_ty, int_ty, bool_ty);
+    add_binary_primitive(&mut env, ctx, "==", "%eq", fresh_int(ctx), fresh_int(ctx), fresh_bool(ctx));
+    add_binary_primitive(&mut env, ctx, "!=", "%noteq", fresh_int(ctx), fresh_int(ctx), fresh_bool(ctx));
+    add_binary_primitive(&mut env, ctx, "<", "%ltint", fresh_int(ctx), fresh_int(ctx), fresh_bool(ctx));
+    add_binary_primitive(&mut env, ctx, ">", "%gtint", fresh_int(ctx), fresh_int(ctx), fresh_bool(ctx));
+    add_binary_primitive(&mut env, ctx, "<=", "%leint", fresh_int(ctx), fresh_int(ctx), fresh_bool(ctx));
+    add_binary_primitive(&mut env, ctx, ">=", "%geint", fresh_int(ctx), fresh_int(ctx), fresh_bool(ctx));
 
     // Add boolean operators
-    add_binary_primitive(&mut env, ctx, "&&", "%sequand", bool_ty, bool_ty, bool_ty);
-    add_binary_primitive(&mut env, ctx, "||", "%sequor", bool_ty, bool_ty, bool_ty);
-    add_unary_primitive(&mut env, ctx, "not", "%boolnot", bool_ty, bool_ty);
+    add_binary_primitive(&mut env, ctx, "&&", "%sequand", fresh_bool(ctx), fresh_bool(ctx), fresh_bool(ctx));
+    add_binary_primitive(&mut env, ctx, "||", "%sequor", fresh_bool(ctx), fresh_bool(ctx), fresh_bool(ctx));
+    add_unary_primitive(&mut env, ctx, "not", "%boolnot", fresh_bool(ctx), fresh_bool(ctx));
 
     // Add unary minus
-    add_unary_primitive(&mut env, ctx, "~-", "%negint", int_ty, int_ty);
-    add_unary_primitive(&mut env, ctx, "~-.", "%negfloat", float_ty, float_ty);
+    add_unary_primitive(&mut env, ctx, "~-", "%negint", fresh_int(ctx), fresh_int(ctx));
+    add_unary_primitive(&mut env, ctx, "~-.", "%negfloat", fresh_float(ctx), fresh_float(ctx));
 
     // Add string concatenation
-    add_binary_primitive(&mut env, ctx, "++", "%string_concat", string_ty, string_ty, string_ty);
+    add_binary_primitive(&mut env, ctx, "++", "%string_concat", fresh_string(ctx), fresh_string(ctx), fresh_string(ctx));
 
     // Add ignore function
     let alpha = ctx.new_var(None);
-    add_unary_primitive(&mut env, ctx, "ignore", "%ignore", alpha, unit_ty);
+    add_unary_primitive(&mut env, ctx, "ignore", "%ignore", alpha, fresh_unit(ctx));
 
     env
 }
