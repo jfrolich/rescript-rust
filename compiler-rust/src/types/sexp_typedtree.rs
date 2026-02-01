@@ -344,16 +344,32 @@ fn sexp_partial(p: &Partial) -> Sexp {
 // Uses a visited set to prevent infinite recursion on cyclic types
 // ============================================================================
 
-fn sexp_type_expr(arena: &ParseArena, ctx: &TypeContext<'_>, te: TypeExprRef, visited: &mut HashSet<usize>) -> Sexp {
-    // Use the ORIGINAL ref for cycle detection, not repr.
-    // This matches OCaml's physical identity-based cycle detection.
-    let original_ref = te.0;
-    if visited.contains(&original_ref) {
+/// Print a type expression with cycle detection.
+/// Each call creates a FRESH visited set - this matches OCaml exactly.
+/// OCaml's type_expr function (line 127-196 of sexp_typedtree.ml) creates
+/// a new visited hash table for each type expression, not shared across
+/// the structure.
+fn sexp_type_expr(arena: &ParseArena, ctx: &TypeContext<'_>, te: TypeExprRef) -> Sexp {
+    // Create a FRESH visited set for this type expression
+    // This matches OCaml: `let visited = Hashtbl.create 16 in`
+    let mut visited = HashSet::new();
+    sexp_type_expr_aux(arena, ctx, te, &mut visited)
+}
+
+/// Recursive helper for type expression printing with shared visited set.
+/// Uses physical identity (repr index) for cycle detection, matching OCaml's
+/// `Hashtbl.mem visited (Obj.repr te)` after `Btype.repr`.
+fn sexp_type_expr_aux(arena: &ParseArena, ctx: &TypeContext<'_>, te: TypeExprRef, visited: &mut HashSet<usize>) -> Sexp {
+    // Follow Tlink chains first, then use that for cycle detection.
+    // This matches OCaml: `let te = Btype.repr te in` then `Obj.repr te`
+    let te = ctx.repr(te);
+
+    // Check if we've already visited this type (cycle detection)
+    // Uses the repr's index as physical identity
+    if visited.contains(&te.0) {
         return Sexp::atom("<cycle>");
     }
-    visited.insert(original_ref);
-
-    let te = ctx.repr(te); // Follow Tlink chains for printing
+    visited.insert(te.0);
 
     let desc = ctx.get_desc(te);
     match &*desc {
@@ -362,25 +378,25 @@ fn sexp_type_expr(arena: &ParseArena, ctx: &TypeContext<'_>, te: TypeExprRef, vi
             Sexp::list(vec![
                 Sexp::atom("Tarrow"),
                 sexp_type_arg_label(&arg.lbl),
-                sexp_type_expr(arena, ctx, arg.typ, visited),
-                sexp_type_expr(arena, ctx, *ret, visited),
+                sexp_type_expr_aux(arena, ctx, arg.typ, visited),
+                sexp_type_expr_aux(arena, ctx, *ret, visited),
                 opt(|a: &i32| Sexp::atom(&a.to_string()), arity),
             ])
         }
         TypeDesc::Ttuple(types) => {
             let mut items = vec![Sexp::atom("Ttuple")];
-            items.extend(types.iter().map(|t| sexp_type_expr(arena, ctx, *t, visited)));
+            items.extend(types.iter().map(|t| sexp_type_expr_aux(arena, ctx, *t, visited)));
             Sexp::list(items)
         }
         TypeDesc::Tconstr { path, args, .. } => {
             Sexp::list(vec![
                 Sexp::atom("Tconstr"),
                 sexp_path(path),
-                Sexp::list(args.iter().map(|t| sexp_type_expr(arena, ctx, *t, visited)).collect()),
+                Sexp::list(args.iter().map(|t| sexp_type_expr_aux(arena, ctx, *t, visited)).collect()),
             ])
         }
         TypeDesc::Tobject { fields, .. } => {
-            Sexp::list(vec![Sexp::atom("Tobject"), sexp_type_expr(arena, ctx, *fields, visited)])
+            Sexp::list(vec![Sexp::atom("Tobject"), sexp_type_expr_aux(arena, ctx, *fields, visited)])
         }
         TypeDesc::Tfield { name, kind, typ, rest } => {
             let kind_str = match kind {
@@ -392,20 +408,20 @@ fn sexp_type_expr(arena: &ParseArena, ctx: &TypeContext<'_>, te: TypeExprRef, vi
                 Sexp::atom("Tfield"),
                 string(name),
                 Sexp::atom(kind_str),
-                sexp_type_expr(arena, ctx, *typ, visited),
-                sexp_type_expr(arena, ctx, *rest, visited),
+                sexp_type_expr_aux(arena, ctx, *typ, visited),
+                sexp_type_expr_aux(arena, ctx, *rest, visited),
             ])
         }
         TypeDesc::Tnil => Sexp::atom("Tnil"),
         TypeDesc::Tlink(_) => Sexp::atom("Tlink"), // Should not happen after ctx.repr
-        TypeDesc::Tsubst(ty) => Sexp::list(vec![Sexp::atom("Tsubst"), sexp_type_expr(arena, ctx, *ty, visited)]),
+        TypeDesc::Tsubst(ty) => Sexp::list(vec![Sexp::atom("Tsubst"), sexp_type_expr_aux(arena, ctx, *ty, visited)]),
         TypeDesc::Tvariant(row) => sexp_row_desc(arena, ctx, row, visited),
         TypeDesc::Tunivar(name) => Sexp::list(vec![Sexp::atom("Tunivar"), opt_string(name)]),
         TypeDesc::Tpoly { body, vars } => {
             Sexp::list(vec![
                 Sexp::atom("Tpoly"),
-                sexp_type_expr(arena, ctx, *body, visited),
-                Sexp::list(vars.iter().map(|t| sexp_type_expr(arena, ctx, *t, visited)).collect()),
+                sexp_type_expr_aux(arena, ctx, *body, visited),
+                Sexp::list(vars.iter().map(|t| sexp_type_expr_aux(arena, ctx, *t, visited)).collect()),
             ])
         }
         TypeDesc::Tpackage { path, lids, args } => {
@@ -413,7 +429,7 @@ fn sexp_type_expr(arena: &ParseArena, ctx: &TypeContext<'_>, te: TypeExprRef, vi
                 Sexp::atom("Tpackage"),
                 sexp_path(path),
                 Sexp::list(lids.iter().map(|li| sexp_longident(arena, li)).collect()),
-                Sexp::list(args.iter().map(|t| sexp_type_expr(arena, ctx, *t, visited)).collect()),
+                Sexp::list(args.iter().map(|t| sexp_type_expr_aux(arena, ctx, *t, visited)).collect()),
             ])
         }
     }
@@ -439,13 +455,13 @@ fn sexp_row_field(arena: &ParseArena, ctx: &TypeContext<'_>, rf: &RowField, visi
     match rf {
         RowField::Rpresent(None) => Sexp::atom("Rpresent_none"),
         RowField::Rpresent(Some(ty)) => {
-            Sexp::list(vec![Sexp::atom("Rpresent"), sexp_type_expr(arena, ctx, ty, visited)])
+            Sexp::list(vec![Sexp::atom("Rpresent"), sexp_type_expr_aux(arena, ctx, ty, visited)])
         }
         RowField::Reither { constant, types, .. } => {
             Sexp::list(vec![
                 Sexp::atom("Reither"),
                 Sexp::atom(if constant { "const" } else { "non_const" }),
-                Sexp::list(types.iter().map(|t| sexp_type_expr(arena, ctx, *t, visited)).collect()),
+                Sexp::list(types.iter().map(|t| sexp_type_expr_aux(arena, ctx, *t, visited)).collect()),
             ])
         }
         RowField::Rabsent => Sexp::atom("Rabsent"),
@@ -466,8 +482,8 @@ fn sexp_pattern(arena: &ParseArena, ctx: &TypeContext<'_>, with_locs: bool, p: &
         sexp_pat_extra(arena, ctx, with_locs, extra, *loc, attrs, visited)
     }).collect();
     let desc = sexp_pattern_desc(arena, ctx, with_locs, &p.pat_desc, visited);
-    // Share visited set across the entire structure for cycle detection
-    let ty = sexp_type_expr(arena, ctx, p.pat_type, visited);
+    // Each type expression gets its own fresh visited set (matches OCaml exactly)
+    let ty = sexp_type_expr(arena, ctx, p.pat_type);
 
     let mut items = vec![Sexp::atom("pattern")];
     items.extend(loc_sexp);
@@ -615,8 +631,8 @@ fn sexp_expression(arena: &ParseArena, ctx: &TypeContext<'_>, with_locs: bool, e
         extras.push(sexp_exp_extra(arena, ctx, with_locs, extra, *loc, attrs, visited));
     }
     let desc = sexp_expression_desc(arena, ctx, with_locs, &e.exp_desc, visited);
-    // Share visited set across the entire structure for cycle detection
-    let ty = sexp_type_expr(arena, ctx, e.exp_type, visited);
+    // Each type expression gets its own fresh visited set (matches OCaml exactly)
+    let ty = sexp_type_expr(arena, ctx, e.exp_type);
     let attrs = sexp_attributes(with_locs, &e.exp_attributes);
 
     let mut items = vec![Sexp::atom("expression")];
@@ -832,7 +848,7 @@ fn sexp_expression_desc(arena: &ParseArena, ctx: &TypeContext<'_>, with_locs: bo
             for (_li, ld, def) in fields {
                 let def_sexp = match def {
                     RecordLabelDefinition::Kept(ty) => {
-                        Sexp::list(vec![Sexp::atom("Kept"), sexp_type_expr(arena, ctx, *ty, visited)])
+                        Sexp::list(vec![Sexp::atom("Kept"), sexp_type_expr_aux(arena, ctx, *ty, visited)])
                     }
                     RecordLabelDefinition::Overridden(li, e) => {
                         // When the longident is a placeholder (from generated default values),
@@ -999,10 +1015,11 @@ fn sexp_core_type(arena: &ParseArena, ctx: &TypeContext<'_>, with_locs: bool, ct
     };
     let desc = sexp_core_type_desc(arena, ctx, with_locs, &ct.ctyp_desc, visited);
     // If ctyp_type is a placeholder (0), derive type from ctyp_desc instead
+    // Each type expression gets its own fresh visited set (matches OCaml exactly)
     let ty = if ct.ctyp_type.0 == 0 {
         sexp_type_from_core_type_desc(&ct.ctyp_desc)
     } else {
-        sexp_type_expr(arena, ctx, ct.ctyp_type, visited)
+        sexp_type_expr(arena, ctx, ct.ctyp_type)
     };
     let attrs = sexp_attributes(with_locs, &ct.ctyp_attributes);
 
@@ -1289,11 +1306,11 @@ fn sexp_type_declaration(arena: &ParseArena, ctx: &TypeContext<'_>, with_locs: b
     };
     let mut param_items = Vec::new();
     for te in &td.type_params {
-        param_items.push(sexp_type_expr(arena, ctx, *te, visited));
+        param_items.push(sexp_type_expr(arena, ctx, *te));
     }
     let manifest_sexp = match &td.type_manifest {
         None => Sexp::atom("None"),
-        Some(te) => Sexp::list(vec![Sexp::atom("Some"), sexp_type_expr(arena, ctx, *te, visited)]),
+        Some(te) => Sexp::list(vec![Sexp::atom("Some"), sexp_type_expr(arena, ctx, *te)]),
     };
     let mut items = vec![Sexp::atom("type_declaration")];
     items.extend(loc_sexp);
@@ -1346,7 +1363,7 @@ fn sexp_constructor_decl(arena: &ParseArena, ctx: &TypeContext<'_>, with_locs: b
     };
     let res_sexp = match &cd.cd_res {
         None => Sexp::atom("None"),
-        Some(te) => Sexp::list(vec![Sexp::atom("Some"), sexp_type_expr(arena, ctx, *te, visited)]),
+        Some(te) => Sexp::list(vec![Sexp::atom("Some"), sexp_type_expr(arena, ctx, *te)]),
     };
     let mut items = vec![
         Sexp::atom("constructor_declaration"),
@@ -1365,7 +1382,7 @@ fn sexp_constructor_args(arena: &ParseArena, ctx: &TypeContext<'_>, with_locs: b
         ConstructorArguments::CstrTuple(types) => {
             let mut items = vec![Sexp::atom("Cstr_tuple")];
             for te in types {
-                items.push(sexp_type_expr(arena, ctx, *te, visited));
+                items.push(sexp_type_expr(arena, ctx, *te));
             }
             Sexp::list(items)
         }
@@ -1393,7 +1410,7 @@ fn sexp_label_decl(arena: &ParseArena, ctx: &TypeContext<'_>, with_locs: bool, l
     items.extend(loc_sexp);
     items.push(sexp_decl_mutable_flag(&ld.ld_mutable));
     items.push(Sexp::atom(if ld.ld_optional { "optional" } else { "required" }));
-    items.push(sexp_type_expr(arena, ctx, ld.ld_type, visited));
+    items.push(sexp_type_expr(arena, ctx, ld.ld_type));
     items.push(sexp_decl_attributes(with_locs, &ld.ld_attributes));
     Sexp::list(items)
 }
