@@ -118,26 +118,27 @@ cargo build --manifest-path compiler-rust/Cargo.toml --release
 
 | File | Purpose |
 |------|---------|
-| `compiler-rust/src/binary_ast/marshal.rs` | Marshal serialization with position sharing |
-| `compiler-rust/src/parser/expression.rs` | Arrow function parsing |
+| `compiler-rust/src/parser/expression.rs` | Arrow function parsing - where positions are created |
+| `compiler-rust/src/parser/state.rs` | Parser state with prev_end_pos tracking |
 | `compiler-rust/src/parse_arena.rs` | Position/location arena management |
-| `compiler/syntax/src/res_parser.ml` | OCaml parser (reference) |
-| `compiler/ml/ast_mapper_to0.ml` | OCaml parsetree0 mapper |
+| `compiler/syntax/src/res_parser.ml` | OCaml parser (reference) - study position variable reuse |
+| `compiler/syntax/src/res_scanner.ml` | OCaml scanner (reference) - position creation |
 
 ---
 
-## Important: Do NOT Modify parsetree0/ast0
+## Important: Do NOT Modify parsetree0/ast0 or Marshal
 
-**The parsetree0 mapper and types are correct.** The issue is position sharing in the **parser**, not in the parsetree0 conversion.
+**The parsetree0 mapper, types, and marshal serialization are all correct.** The issue is position sharing in the **parser** - positions that should have the same `PosIdx` are getting different indices during parsing.
 
 Focus on these files:
-- ✅ `compiler-rust/src/parser/` - Position creation during parsing
-- ✅ `compiler-rust/src/binary_ast/marshal.rs` - Position sharing during serialization
+- ✅ `compiler-rust/src/parser/` - Position creation and reuse during parsing
+- ✅ `compiler-rust/src/parse_arena.rs` - Arena management for positions
 
 Do NOT touch these files unless absolutely necessary:
 - ❌ `parsetree0.rs`
 - ❌ `parsetree0_marshal.rs`
 - ❌ `mapper_to0.rs`
+- ❌ `marshal.rs` - The marshal code correctly shares positions by PosIdx; the problem is upstream
 
 ---
 

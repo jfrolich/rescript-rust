@@ -38,10 +38,10 @@ Read `RALPH_TODO.md` and complete the next unchecked task. After completing a ta
 
 1. **ALWAYS read the OCaml implementation first** - Don't guess. Study the OCaml source to understand the correct behavior. The goal is a faithful port, not a reimagining.
 
-2. **DO NOT modify parsetree0/ast0 code yet** - The parsetree0 mapper and types are correct. The issue is **position sharing in the parser**, not in the parsetree0 conversion. Focus on:
-   - `compiler-rust/src/parser/` - Position creation during parsing
-   - `compiler-rust/src/binary_ast/marshal.rs` - Position sharing during serialization
-   - Do NOT touch `parsetree0.rs`, `parsetree0_marshal.rs`, or `mapper_to0.rs` unless absolutely necessary
+2. **DO NOT modify parsetree0/ast0 or marshal code** - The parsetree0 mapper, types, and marshal serialization are correct. The issue is **position sharing in the parser** - positions that should have the same `PosIdx` are getting different indices during parsing. Focus on:
+   - `compiler-rust/src/parser/` - Position creation and reuse during parsing
+   - `compiler-rust/src/parse_arena.rs` - Arena management for positions
+   - Do NOT touch `parsetree0.rs`, `parsetree0_marshal.rs`, `mapper_to0.rs`, or `marshal.rs` unless absolutely necessary
 
 3. **Run tests frequently** - After each change:
    ```bash
@@ -70,12 +70,12 @@ Read `RALPH_TODO.md` and complete the next unchecked task. After completing a ta
 
 | File | Purpose |
 |------|---------|
-| `compiler-rust/src/binary_ast/marshal.rs` | Marshal serialization |
-| `compiler-rust/src/binary_ast/parsetree0.rs` | Parsetree0 types |
-| `compiler-rust/src/binary_ast/parsetree0_mapper.rs` | Parsetree -> parsetree0 mapping |
-| `compiler-rust/src/location.rs` | Position/Location types with arena indices |
-| `compiler-rust/src/parser/scanner.rs` | Position creation |
-| `compiler-rust/src/parser/state.rs` | Parser position tracking |
+| `compiler-rust/src/parser/expression.rs` | Expression parsing - where positions are created |
+| `compiler-rust/src/parser/state.rs` | Parser state with prev_end_pos tracking |
+| `compiler-rust/src/parser/scanner.rs` | Scanner position creation |
+| `compiler-rust/src/parse_arena.rs` | Position/location arena management |
+| `compiler/syntax/src/res_parser.ml` | OCaml parser (reference) - study position variable reuse |
+| `compiler/syntax/src/res_scanner.ml` | OCaml scanner (reference) |
 
 ## Debugging Workflow
 
