@@ -257,9 +257,6 @@ impl ParseArena {
     pub fn push_position(&mut self, pos: Position) -> PosIdx {
         let key = PosKey::from_position(&pos);
         let idx = self.positions.push(pos);
-        if std::env::var("DEBUG_POS").is_ok() {
-            eprintln!("[DEBUG] push_position cnum={} -> {:?}", pos.cnum, idx);
-        }
         // Register in dedup table only if not already there (for lookup purposes)
         self.position_dedup.entry(key).or_insert(idx);
         idx
