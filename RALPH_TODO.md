@@ -126,9 +126,9 @@ cargo build --manifest-path compiler-rust/Cargo.toml --release
 
 ---
 
-## Important: Do NOT Modify parsetree0/ast0
+## Important: Do NOT Modify parsetree0/ast0 (For Now)
 
-**The parsetree0 mapper and types are correct.** The issue is position sharing in the **parser** - positions that should have the same `PosIdx` are getting different indices during parsing.
+**The current focus is position sharing in the parser** - positions that should have the same `PosIdx` are getting different indices during parsing. parsetree0/ast0 has its own issues but that's a separate task.
 
 Focus on these files:
 - ✅ `compiler-rust/src/parser/` - Position creation and reuse during parsing
