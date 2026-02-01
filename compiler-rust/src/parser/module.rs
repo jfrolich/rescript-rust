@@ -242,7 +242,8 @@ pub fn parse_structure_item(p: &mut Parser<'_>) -> Option<StructureItem> {
         }
         Token::External => {
             p.next();
-            let vd = parse_value_description(p, attrs.clone(), start_pos.clone());
+            // Use item_start_idx (which equals start_pos_idx) to share position with pstr_loc
+            let vd = parse_value_description(p, attrs.clone(), item_start_idx);
             Some(StructureItemDesc::Pstr_primitive(vd))
         }
         Token::Exception => {
@@ -449,9 +450,9 @@ pub fn parse_signature_item(p: &mut Parser<'_>) -> Option<SignatureItem> {
         Token::Let { .. } => {
             // For signature let declarations, OCaml's value_description location
             // starts at 'let', not at the attributes (different from external in structure)
-            let let_pos = p.start_pos.clone();
+            let let_pos_idx = p.push_start_pos();
             p.next();
-            let vd = parse_value_description(p, attrs.clone(), let_pos);
+            let vd = parse_value_description(p, attrs.clone(), let_pos_idx);
             Some(SignatureItemDesc::Psig_value(vd))
         }
         Token::Typ => {
@@ -517,7 +518,8 @@ pub fn parse_signature_item(p: &mut Parser<'_>) -> Option<SignatureItem> {
         }
         Token::External => {
             p.next();
-            let vd = parse_value_description(p, attrs.clone(), start_pos.clone());
+            // Use start_pos_idx to share position with psig_loc
+            let vd = parse_value_description(p, attrs.clone(), start_pos_idx);
             Some(SignatureItemDesc::Psig_value(vd))
         }
         Token::Exception => {
@@ -3477,11 +3479,12 @@ fn parse_label_declaration(
 }
 
 /// Parse a value description (for external).
-/// `loc_start` should be the position before any outer attributes (to match OCaml's location).
+/// `loc_start_idx` should be a PosIdx for the position before any outer attributes
+/// (to match OCaml's location and enable sharing).
 fn parse_value_description(
     p: &mut Parser<'_>,
     outer_attrs: Attributes,
-    loc_start: crate::location::Position,
+    loc_start_idx: PosIdx,
 ) -> ValueDescription {
     let inner_attrs = parse_attributes(p);
     // Merge outer (structure-level) attrs with inner (name-level) attrs
@@ -3532,7 +3535,8 @@ fn parse_value_description(
         vec![]
     };
 
-    let loc = p.mk_loc_to_prev_end(&loc_start);
+    // Use the PosIdx directly for sharing with structure_item/signature_item location
+    let loc = p.mk_loc_idx_to_prev_end(loc_start_idx);
     ValueDescription {
         pval_name: name,
         pval_type: typ,
