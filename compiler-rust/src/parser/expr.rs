@@ -697,6 +697,9 @@ fn parse_es6_arrow_expression_internal(
 
     p.eat_breadcrumb();
     let end_pos = p.prev_end_pos.clone();
+    // Capture end_pos as PosIdx NOW, before any other positions are created.
+    // This enables sharing with other locations that end at prev_end_pos (like pvb_loc).
+    let end_pos_idx = p.get_or_push_prev_end_pos();
 
     // Build the function expression from parameters
     let (type_params, term_params) = super::core::extract_fundef_params(parameters);
@@ -742,12 +745,19 @@ fn parse_es6_arrow_expression_internal(
     } else {
         // Compute arity for the outermost function
         let total_arity = term_params.len();
+        // Use the end_pos_idx captured earlier - all Pexp_fun locations share it,
+        // and it's the same PosIdx as other locations ending at prev_end_pos (like pvb_loc).
         term_params
             .into_iter()
             .rev()
             .enumerate()
             .fold(body, |acc, (i, param)| {
-                let loc = p.mk_loc(&param.start_pos, &end_pos);
+                // For position sharing parity with OCaml, extract start_pos_idx from the
+                // pattern's location. OCaml uses the same position object for both the
+                // pattern's loc_start and the Pexp_fun's loc_start. By using the existing
+                // PosIdx from ppat_loc, we ensure the marshal output uses back-references.
+                let start_pos_idx = p.arena().loc_start_idx(param.pat.ppat_loc);
+                let loc = p.mk_loc_idx(start_pos_idx, end_pos_idx);
                 // Apply parameter attributes to the pattern's ppat_attributes
                 // This is where attributes like @as("open") on parameters like (@as("open") ~_open)
                 // should end up, so the JSX PPX can access them via pattern.ppat_attributes
@@ -816,9 +826,24 @@ fn parse_es6_arrow_expression_internal(
         },
     };
 
-    // Only update the location, don't touch pexp_attributes
+    // Only update the location, don't touch pexp_attributes.
+    // CRITICAL for parity: If the new location would span from the same start position
+    // as the arrow_expr's pexp_loc, reuse arrow_expr.pexp_loc to preserve position sharing.
+    // Otherwise, create a new location using the existing end PosIdx from arrow_expr.pexp_loc.
+    let final_loc = {
+        let arrow_loc_start_pos = p.arena().get_position(p.arena().loc_start_idx(arrow_expr.pexp_loc));
+        if start_pos == *arrow_loc_start_pos {
+            // Same start position - reuse the existing location with its shared PosIdx
+            arrow_expr.pexp_loc
+        } else {
+            // Different start - create new location but reuse the end PosIdx for sharing
+            let end_pos_idx = p.arena().loc_end_idx(arrow_expr.pexp_loc);
+            let start_pos_idx = p.arena_mut().push_position(start_pos);
+            p.mk_loc_idx(start_pos_idx, end_pos_idx)
+        }
+    };
     Expression {
-        pexp_loc: p.mk_loc(&start_pos, &p.loc_end(arrow_expr.pexp_loc)),
+        pexp_loc: final_loc,
         ..arrow_expr
     }
 }

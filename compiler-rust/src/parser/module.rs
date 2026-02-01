@@ -242,7 +242,9 @@ pub fn parse_structure_item(p: &mut Parser<'_>) -> Option<StructureItem> {
         }
         Token::External => {
             p.next();
-            // Use item_start_idx (which equals start_pos_idx) to share position with pstr_loc
+            // OCaml creates SEPARATE Location objects for pval_loc and pstr_loc.
+            // They may have the same content but are not pointer-identical.
+            // Use item_start_idx for position sharing with pstr_loc (not pval_loc sharing).
             let vd = parse_value_description(p, attrs.clone(), item_start_idx);
             Some(StructureItemDesc::Pstr_primitive(vd))
         }
