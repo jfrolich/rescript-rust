@@ -26,7 +26,7 @@ use super::btype::{iter_type_expr, row_more, row_repr};
 use super::context::TypeContext;
 use super::path::Path;
 use super::type_expr::{GENERIC_LEVEL, RowDesc, RowField, TypeDesc, TypeExprRef};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 // ============================================================================
 // Type Errors
@@ -818,13 +818,48 @@ pub fn generalize_structure(ctx: &TypeContext<'_>, var_level: i32, ty: TypeExprR
 ///
 /// This replaces all generic type variables with fresh ones,
 /// creating a new instance of a polymorphic type.
+///
+/// Uses memoization to ensure that the same source type maps to the same
+/// destination type, creating the physical sharing that leads to correct
+/// cycle detection (matching OCaml's behavior).
 pub fn instance(ctx: &TypeContext<'_>, ty: TypeExprRef) -> TypeExprRef {
-    copy_type(ctx, ty)
+    let mut memo = HashMap::new();
+    copy_type_memo(ctx, ty, &mut memo)
 }
 
 /// Copy a type, creating fresh type variables for generic ones.
+///
+/// This version does not use memoization and may create multiple copies
+/// of the same type. Use `instance` for proper polymorphic instantiation.
 pub fn copy_type(ctx: &TypeContext<'_>, ty: TypeExprRef) -> TypeExprRef {
+    let mut memo = HashMap::new();
+    copy_type_memo(ctx, ty, &mut memo)
+}
+
+/// Copy a type with memoization to match OCaml's type sharing behavior.
+///
+/// This ensures that the same source type maps to the same destination type,
+/// creating the physical sharing that leads to correct cycle detection in
+/// sexp output (matching OCaml's behavior).
+///
+/// The memoization is essential because:
+/// - OCaml uses mutation-based memoization during `copy` function
+/// - When copying a type, OCaml mutates the original type's desc to `Tsubst(new_copy)`
+/// - When the same type is encountered again, it returns the existing copy
+/// - This creates physical sharing in the output types
+/// - Without memoization, Rust creates independent copies (no cycles)
+pub fn copy_type_memo(
+    ctx: &TypeContext<'_>,
+    ty: TypeExprRef,
+    memo: &mut HashMap<TypeExprRef, TypeExprRef>,
+) -> TypeExprRef {
     let ty = ctx.repr(ty);
+
+    // Check if already copied (memoization)
+    if let Some(&copied) = memo.get(&ty) {
+        return copied;
+    }
+
     let level = ctx.get_level(ty);
 
     // Enum to hold what action to take, avoiding borrow issues
@@ -847,6 +882,22 @@ pub fn copy_type(ctx: &TypeContext<'_>, ty: TypeExprRef) -> TypeExprRef {
             vars: Vec<TypeExprRef>,
         },
         Variant(RowDesc),
+        Object {
+            fields: TypeExprRef,
+            name: super::type_expr::ObjectName,
+        },
+        Field {
+            name: String,
+            kind: super::type_expr::FieldKind,
+            typ: TypeExprRef,
+            rest: TypeExprRef,
+        },
+        Nil,
+        Package {
+            path: Path,
+            lids: Vec<crate::parser::longident::Longident>,
+            args: Vec<TypeExprRef>,
+        },
         Link(TypeExprRef),
         ReturnSelf,
     }
@@ -881,10 +932,34 @@ pub fn copy_type(ctx: &TypeContext<'_>, ty: TypeExprRef) -> TypeExprRef {
                             vars: vars.clone(),
                         },
                         TypeDesc::Tvariant(row) => CopyAction::Variant(row.clone()),
+                        TypeDesc::Tobject { fields, name } => CopyAction::Object {
+                            fields: *fields,
+                            name: name.clone(),
+                        },
+                        TypeDesc::Tfield {
+                            name,
+                            kind,
+                            typ,
+                            rest,
+                        } => CopyAction::Field {
+                            name: name.clone(),
+                            kind: kind.clone(),
+                            typ: *typ,
+                            rest: *rest,
+                        },
+                        TypeDesc::Tnil => CopyAction::Nil,
+                        TypeDesc::Tpackage { path, lids, args } => CopyAction::Package {
+                            path: path.clone(),
+                            lids: lids.clone(),
+                            args: args.clone(),
+                        },
                         TypeDesc::Tlink(target) | TypeDesc::Tsubst(target) => {
                             CopyAction::Link(*target)
                         }
-                        _ => CopyAction::ReturnSelf,
+                        // Tvar and Tunivar are already handled in outer match
+                        TypeDesc::Tvar(_) | TypeDesc::Tunivar(_) => {
+                            unreachable!("Tvar/Tunivar should be handled above")
+                        }
                     }
                 }
             }
@@ -910,72 +985,222 @@ pub fn copy_type(ctx: &TypeContext<'_>, ty: TypeExprRef) -> TypeExprRef {
                     vars: vars.clone(),
                 },
                 TypeDesc::Tvariant(row) => CopyAction::Variant(row.clone()),
+                TypeDesc::Tobject { fields, name } => CopyAction::Object {
+                    fields: *fields,
+                    name: name.clone(),
+                },
+                TypeDesc::Tfield {
+                    name,
+                    kind,
+                    typ,
+                    rest,
+                } => CopyAction::Field {
+                    name: name.clone(),
+                    kind: kind.clone(),
+                    typ: *typ,
+                    rest: *rest,
+                },
+                TypeDesc::Tnil => CopyAction::Nil,
+                TypeDesc::Tpackage { path, lids, args } => CopyAction::Package {
+                    path: path.clone(),
+                    lids: lids.clone(),
+                    args: args.clone(),
+                },
                 TypeDesc::Tlink(target) | TypeDesc::Tsubst(target) => CopyAction::Link(*target),
-                _ => CopyAction::ReturnSelf,
             }
         }
     };
 
     // Execute the action without holding the borrow
-    match action {
-        CopyAction::NewVar(name) => ctx.new_var(name),
-        CopyAction::NewUnivar(name) => ctx.new_univar(name),
+    let result = match action {
+        CopyAction::NewVar(name) => {
+            let new_var = ctx.new_var(name);
+            memo.insert(ty, new_var);
+            new_var
+        }
+        CopyAction::NewUnivar(name) => {
+            let new_var = ctx.new_univar(name);
+            memo.insert(ty, new_var);
+            new_var
+        }
         CopyAction::Arrow {
             arg_lbl,
             arg_typ,
             ret,
             arity,
         } => {
-            let arg_copy = copy_type(ctx, arg_typ);
-            let ret_copy = copy_type(ctx, ret);
-            ctx.new_arrow(arg_lbl, arg_copy, ret_copy, arity)
+            // Create a stub first to handle potential cycles
+            let stub = ctx.new_var(None);
+            memo.insert(ty, stub);
+
+            let arg_copy = copy_type_memo(ctx, arg_typ, memo);
+            let ret_copy = copy_type_memo(ctx, ret, memo);
+            let result = ctx.new_arrow(arg_lbl, arg_copy, ret_copy, arity);
+
+            // Link stub to result so anything using stub gets redirected
+            ctx.set_desc(stub, TypeDesc::Tlink(result));
+            result
         }
         CopyAction::Tuple(types) => {
-            let types_copy: Vec<_> = types.iter().map(|t| copy_type(ctx, *t)).collect();
-            ctx.new_tuple(types_copy)
+            // Create a stub first to handle potential cycles
+            let stub = ctx.new_var(None);
+            memo.insert(ty, stub);
+
+            let types_copy: Vec<_> = types
+                .iter()
+                .map(|t| copy_type_memo(ctx, *t, memo))
+                .collect();
+            let result = ctx.new_tuple(types_copy);
+
+            ctx.set_desc(stub, TypeDesc::Tlink(result));
+            result
         }
         CopyAction::Constr { path, args } => {
-            let args_copy: Vec<_> = args.iter().map(|t| copy_type(ctx, *t)).collect();
-            ctx.new_constr(path, args_copy)
+            // Create a stub first to handle potential cycles
+            let stub = ctx.new_var(None);
+            memo.insert(ty, stub);
+
+            let args_copy: Vec<_> = args
+                .iter()
+                .map(|t| copy_type_memo(ctx, *t, memo))
+                .collect();
+            let result = ctx.new_constr(path, args_copy);
+
+            ctx.set_desc(stub, TypeDesc::Tlink(result));
+            result
         }
         CopyAction::Poly { body, vars } => {
-            let body_copy = copy_type(ctx, body);
-            let vars_copy: Vec<_> = vars.iter().map(|v| copy_type(ctx, *v)).collect();
-            ctx.new_poly(body_copy, vars_copy)
+            // Create a stub first to handle potential cycles
+            let stub = ctx.new_var(None);
+            memo.insert(ty, stub);
+
+            let body_copy = copy_type_memo(ctx, body, memo);
+            let vars_copy: Vec<_> = vars
+                .iter()
+                .map(|v| copy_type_memo(ctx, *v, memo))
+                .collect();
+            let result = ctx.new_poly(body_copy, vars_copy);
+
+            ctx.set_desc(stub, TypeDesc::Tlink(result));
+            result
         }
         CopyAction::Variant(row) => {
-            let row_copy = copy_row(ctx, &row);
-            ctx.new_variant(row_copy)
+            // Create a stub first to handle potential cycles
+            let stub = ctx.new_var(None);
+            memo.insert(ty, stub);
+
+            let row_copy = copy_row_memo(ctx, &row, memo);
+            let result = ctx.new_variant(row_copy);
+
+            ctx.set_desc(stub, TypeDesc::Tlink(result));
+            result
         }
-        CopyAction::Link(target) => copy_type(ctx, target),
-        CopyAction::ReturnSelf => ty,
-    }
+        CopyAction::Object { fields, name } => {
+            // Create a stub first to handle potential cycles
+            let stub = ctx.new_var(None);
+            memo.insert(ty, stub);
+
+            let fields_copy = copy_type_memo(ctx, fields, memo);
+            let name_copy = name.map(|(p, types)| {
+                (
+                    p,
+                    types
+                        .iter()
+                        .map(|t| copy_type_memo(ctx, *t, memo))
+                        .collect(),
+                )
+            });
+            let result = ctx.new_object(fields_copy, name_copy);
+
+            ctx.set_desc(stub, TypeDesc::Tlink(result));
+            result
+        }
+        CopyAction::Field {
+            name,
+            kind,
+            typ,
+            rest,
+        } => {
+            // Create a stub first to handle potential cycles
+            let stub = ctx.new_var(None);
+            memo.insert(ty, stub);
+
+            let typ_copy = copy_type_memo(ctx, typ, memo);
+            let rest_copy = copy_type_memo(ctx, rest, memo);
+            let result = ctx.new_field(name, kind, typ_copy, rest_copy);
+
+            ctx.set_desc(stub, TypeDesc::Tlink(result));
+            result
+        }
+        CopyAction::Nil => {
+            let result = ctx.new_nil();
+            memo.insert(ty, result);
+            result
+        }
+        CopyAction::Package { path, lids, args } => {
+            // Create a stub first to handle potential cycles
+            let stub = ctx.new_var(None);
+            memo.insert(ty, stub);
+
+            let args_copy: Vec<_> = args
+                .iter()
+                .map(|t| copy_type_memo(ctx, *t, memo))
+                .collect();
+            let result = ctx.new_type(TypeDesc::Tpackage {
+                path,
+                lids,
+                args: args_copy,
+            });
+
+            ctx.set_desc(stub, TypeDesc::Tlink(result));
+            result
+        }
+        CopyAction::Link(target) => copy_type_memo(ctx, target, memo),
+        CopyAction::ReturnSelf => {
+            // For non-generic types that we're returning as-is, still memoize
+            memo.insert(ty, ty);
+            ty
+        }
+    };
+
+    result
 }
 
-/// Copy a row descriptor.
-fn copy_row(ctx: &TypeContext<'_>, row: &RowDesc) -> RowDesc {
+/// Copy a row descriptor with memoization.
+fn copy_row_memo(
+    ctx: &TypeContext<'_>,
+    row: &RowDesc,
+    memo: &mut HashMap<TypeExprRef, TypeExprRef>,
+) -> RowDesc {
     RowDesc {
         row_fields: row
             .row_fields
             .iter()
-            .map(|(label, field)| (label.clone(), copy_row_field(ctx, field)))
+            .map(|(label, field)| (label.clone(), copy_row_field_memo(ctx, field, memo)))
             .collect(),
-        row_more: copy_type(ctx, row.row_more),
+        row_more: copy_type_memo(ctx, row.row_more, memo),
         row_closed: row.row_closed,
         row_fixed: row.row_fixed,
         row_name: row.row_name.as_ref().map(|(path, types)| {
             (
                 path.clone(),
-                types.iter().map(|t| copy_type(ctx, *t)).collect(),
+                types
+                    .iter()
+                    .map(|t| copy_type_memo(ctx, *t, memo))
+                    .collect(),
             )
         }),
     }
 }
 
-/// Copy a row field.
-fn copy_row_field(ctx: &TypeContext<'_>, field: &RowField) -> RowField {
+/// Copy a row field with memoization.
+fn copy_row_field_memo(
+    ctx: &TypeContext<'_>,
+    field: &RowField,
+    memo: &mut HashMap<TypeExprRef, TypeExprRef>,
+) -> RowField {
     match field {
-        RowField::Rpresent(Some(ty)) => RowField::Rpresent(Some(copy_type(ctx, *ty))),
+        RowField::Rpresent(Some(ty)) => RowField::Rpresent(Some(copy_type_memo(ctx, *ty, memo))),
         RowField::Rpresent(None) => RowField::Rpresent(None),
         RowField::Rabsent => RowField::Rabsent,
         RowField::Reither {
@@ -985,7 +1210,7 @@ fn copy_row_field(ctx: &TypeContext<'_>, field: &RowField) -> RowField {
             link,
         } => RowField::Reither {
             constant: *constant,
-            types: types.iter().map(|t| copy_type(ctx, *t)).collect(),
+            types: types.iter().map(|t| copy_type_memo(ctx, *t, memo)).collect(),
             matched: *matched,
             link: *link,
         },

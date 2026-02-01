@@ -496,6 +496,10 @@ impl Default for Env {
 // unification can cause all positions to point to the same arena index, triggering
 // false cycle detection during printing.
 
+// Create fresh primitive types - each call creates a new TypeExprRef.
+// These are used to create type expressions that don't share across different
+// operators/values, avoiding false cycle detection across unrelated types.
+
 fn fresh_int(ctx: &TypeContext<'_>) -> TypeExprRef {
     ctx.new_constr(Path::pident(Ident::create_persistent("int")), vec![])
 }
@@ -514,6 +518,81 @@ fn fresh_string(ctx: &TypeContext<'_>) -> TypeExprRef {
 
 fn fresh_unit(ctx: &TypeContext<'_>) -> TypeExprRef {
     ctx.new_constr(Path::pident(Ident::create_persistent("unit")), vec![])
+}
+
+/// Helper to add a binary primitive operator with explicit types for each position
+fn add_binary_primitive(
+    env: &mut Env,
+    ctx: &TypeContext<'_>,
+    name: &str,
+    prim_name: &str,
+    arg1_ty: TypeExprRef,
+    arg2_ty: TypeExprRef,
+    ret_ty: TypeExprRef,
+) {
+    // Inner arrow: arg2 -> ret, arity None (partial application gives arity 1)
+    let inner_ty = ctx.new_arrow_simple(arg2_ty, ret_ty);
+    // Outer arrow: arg1 -> (arg2 -> ret), arity 2 (full application)
+    let func_ty = ctx.new_arrow(crate::types::ArgLabel::Nolabel, arg1_ty, inner_ty, Some(2));
+    let id = Ident::create_persistent(name);
+    // Primitives come from Pervasives module
+    let pervasives_id = Ident::create_persistent("Pervasives");
+    let path = Path::pdot(Path::pident(pervasives_id), name.to_string());
+    let desc = ValueDescription {
+        val_type: func_ty,
+        val_kind: ValueKind::ValPrim(PrimitiveDescription {
+            prim_name: prim_name.to_string(),
+            prim_arity: 2,
+            prim_native_name: String::new(),
+            prim_native_float: false,
+        }),
+        val_loc: Location::none(),
+        val_attributes: vec![],
+        val_path: Some(path),
+    };
+    env.add_value(id, desc);
+}
+
+/// Helper to add a binary primitive where all type positions are the same (e.g., int -> int -> int)
+/// This matches OCaml's behavior where the same type is shared across all positions.
+fn add_binary_primitive_same_type(
+    env: &mut Env,
+    ctx: &TypeContext<'_>,
+    name: &str,
+    prim_name: &str,
+    ty: TypeExprRef,
+) {
+    add_binary_primitive(env, ctx, name, prim_name, ty, ty, ty);
+}
+
+/// Helper to add a unary primitive operator
+fn add_unary_primitive(
+    env: &mut Env,
+    ctx: &TypeContext<'_>,
+    name: &str,
+    prim_name: &str,
+    arg_ty: TypeExprRef,
+    ret_ty: TypeExprRef,
+) {
+    // Unary operators have arity 1
+    let func_ty = ctx.new_arrow(crate::types::ArgLabel::Nolabel, arg_ty, ret_ty, Some(1));
+    let id = Ident::create_persistent(name);
+    // Primitives come from Pervasives module
+    let pervasives_id = Ident::create_persistent("Pervasives");
+    let path = Path::pdot(Path::pident(pervasives_id), name.to_string());
+    let desc = ValueDescription {
+        val_type: func_ty,
+        val_kind: ValueKind::ValPrim(PrimitiveDescription {
+            prim_name: prim_name.to_string(),
+            prim_arity: 1,
+            prim_native_name: String::new(),
+            prim_native_float: false,
+        }),
+        val_loc: Location::none(),
+        val_attributes: vec![],
+        val_path: Some(path),
+    };
+    env.add_value(id, desc);
 }
 
 /// Create the initial environment with built-in types.
@@ -595,110 +674,74 @@ pub fn initial_env(ctx: &TypeContext<'_>) -> Env {
     env.add_constructor(true_id, true_cstr);
 
     // Add arithmetic operators for int
-    // IMPORTANT: Each position in the type signature uses a fresh TypeExprRef to avoid
-    // false cycle detection. When the same TypeExprRef is reused, unification causes
-    // all positions to share the same arena index, triggering false <cycle> in output.
-    add_binary_primitive(&mut env, ctx, "+", "%addint", fresh_int(ctx), fresh_int(ctx), fresh_int(ctx));
-    add_binary_primitive(&mut env, ctx, "-", "%subint", fresh_int(ctx), fresh_int(ctx), fresh_int(ctx));
-    add_binary_primitive(&mut env, ctx, "*", "%mulint", fresh_int(ctx), fresh_int(ctx), fresh_int(ctx));
-    add_binary_primitive(&mut env, ctx, "/", "%divint", fresh_int(ctx), fresh_int(ctx), fresh_int(ctx));
-    add_binary_primitive(&mut env, ctx, "mod", "%modint", fresh_int(ctx), fresh_int(ctx), fresh_int(ctx));
+    // Each operator gets its own int type, but WITHIN a type expression, all int
+    // positions share the same TypeExprRef. This matches OCaml's behavior for cycle
+    // detection: int -> int -> int has the same int type in all positions.
+    add_binary_primitive_same_type(&mut env, ctx, "+", "%addint", fresh_int(ctx));
+    add_binary_primitive_same_type(&mut env, ctx, "-", "%subint", fresh_int(ctx));
+    add_binary_primitive_same_type(&mut env, ctx, "*", "%mulint", fresh_int(ctx));
+    add_binary_primitive_same_type(&mut env, ctx, "/", "%divint", fresh_int(ctx));
+    add_binary_primitive_same_type(&mut env, ctx, "mod", "%modint", fresh_int(ctx));
 
     // Add arithmetic operators for float
-    add_binary_primitive(&mut env, ctx, "+.", "%addfloat", fresh_float(ctx), fresh_float(ctx), fresh_float(ctx));
-    add_binary_primitive(&mut env, ctx, "-.", "%subfloat", fresh_float(ctx), fresh_float(ctx), fresh_float(ctx));
-    add_binary_primitive(&mut env, ctx, "*.", "%mulfloat", fresh_float(ctx), fresh_float(ctx), fresh_float(ctx));
-    add_binary_primitive(&mut env, ctx, "/.", "%divfloat", fresh_float(ctx), fresh_float(ctx), fresh_float(ctx));
-    add_binary_primitive(&mut env, ctx, "**", "%powfloat", fresh_float(ctx), fresh_float(ctx), fresh_float(ctx));
+    add_binary_primitive_same_type(&mut env, ctx, "+.", "%addfloat", fresh_float(ctx));
+    add_binary_primitive_same_type(&mut env, ctx, "-.", "%subfloat", fresh_float(ctx));
+    add_binary_primitive_same_type(&mut env, ctx, "*.", "%mulfloat", fresh_float(ctx));
+    add_binary_primitive_same_type(&mut env, ctx, "/.", "%divfloat", fresh_float(ctx));
+    add_binary_primitive_same_type(&mut env, ctx, "**", "%powfloat", fresh_float(ctx));
 
-    // Add comparison operators (polymorphic - using int for now)
-    add_binary_primitive(&mut env, ctx, "==", "%eq", fresh_int(ctx), fresh_int(ctx), fresh_bool(ctx));
-    add_binary_primitive(&mut env, ctx, "!=", "%noteq", fresh_int(ctx), fresh_int(ctx), fresh_bool(ctx));
-    add_binary_primitive(&mut env, ctx, "<", "%ltint", fresh_int(ctx), fresh_int(ctx), fresh_bool(ctx));
-    add_binary_primitive(&mut env, ctx, ">", "%gtint", fresh_int(ctx), fresh_int(ctx), fresh_bool(ctx));
-    add_binary_primitive(&mut env, ctx, "<=", "%leint", fresh_int(ctx), fresh_int(ctx), fresh_bool(ctx));
-    add_binary_primitive(&mut env, ctx, ">=", "%geint", fresh_int(ctx), fresh_int(ctx), fresh_bool(ctx));
+    // Add comparison operators (int -> int -> bool, args share same type)
+    {
+        let int_ty = fresh_int(ctx);
+        add_binary_primitive(&mut env, ctx, "==", "%eq", int_ty, int_ty, fresh_bool(ctx));
+    }
+    {
+        let int_ty = fresh_int(ctx);
+        add_binary_primitive(&mut env, ctx, "!=", "%noteq", int_ty, int_ty, fresh_bool(ctx));
+    }
+    {
+        let int_ty = fresh_int(ctx);
+        add_binary_primitive(&mut env, ctx, "<", "%ltint", int_ty, int_ty, fresh_bool(ctx));
+    }
+    {
+        let int_ty = fresh_int(ctx);
+        add_binary_primitive(&mut env, ctx, ">", "%gtint", int_ty, int_ty, fresh_bool(ctx));
+    }
+    {
+        let int_ty = fresh_int(ctx);
+        add_binary_primitive(&mut env, ctx, "<=", "%leint", int_ty, int_ty, fresh_bool(ctx));
+    }
+    {
+        let int_ty = fresh_int(ctx);
+        add_binary_primitive(&mut env, ctx, ">=", "%geint", int_ty, int_ty, fresh_bool(ctx));
+    }
 
     // Add boolean operators
-    add_binary_primitive(&mut env, ctx, "&&", "%sequand", fresh_bool(ctx), fresh_bool(ctx), fresh_bool(ctx));
-    add_binary_primitive(&mut env, ctx, "||", "%sequor", fresh_bool(ctx), fresh_bool(ctx), fresh_bool(ctx));
-    add_unary_primitive(&mut env, ctx, "not", "%boolnot", fresh_bool(ctx), fresh_bool(ctx));
+    add_binary_primitive_same_type(&mut env, ctx, "&&", "%sequand", fresh_bool(ctx));
+    add_binary_primitive_same_type(&mut env, ctx, "||", "%sequor", fresh_bool(ctx));
+    {
+        let bool_ty = fresh_bool(ctx);
+        add_unary_primitive(&mut env, ctx, "not", "%boolnot", bool_ty, bool_ty);
+    }
 
     // Add unary minus
-    add_unary_primitive(&mut env, ctx, "~-", "%negint", fresh_int(ctx), fresh_int(ctx));
-    add_unary_primitive(&mut env, ctx, "~-.", "%negfloat", fresh_float(ctx), fresh_float(ctx));
+    {
+        let int_ty = fresh_int(ctx);
+        add_unary_primitive(&mut env, ctx, "~-", "%negint", int_ty, int_ty);
+    }
+    {
+        let float_ty = fresh_float(ctx);
+        add_unary_primitive(&mut env, ctx, "~-.", "%negfloat", float_ty, float_ty);
+    }
 
     // Add string concatenation
-    add_binary_primitive(&mut env, ctx, "++", "%string_concat", fresh_string(ctx), fresh_string(ctx), fresh_string(ctx));
+    add_binary_primitive_same_type(&mut env, ctx, "++", "%string_concat", fresh_string(ctx));
 
     // Add ignore function
     let alpha = ctx.new_var(None);
     add_unary_primitive(&mut env, ctx, "ignore", "%ignore", alpha, fresh_unit(ctx));
 
     env
-}
-
-/// Helper to add a binary primitive operator
-fn add_binary_primitive(
-    env: &mut Env,
-    ctx: &TypeContext<'_>,
-    name: &str,
-    prim_name: &str,
-    arg1_ty: TypeExprRef,
-    arg2_ty: TypeExprRef,
-    ret_ty: TypeExprRef,
-) {
-    // Inner arrow: arg2 -> ret, arity None (partial application gives arity 1)
-    let inner_ty = ctx.new_arrow_simple(arg2_ty, ret_ty);
-    // Outer arrow: arg1 -> (arg2 -> ret), arity 2 (full application)
-    let func_ty = ctx.new_arrow(crate::types::ArgLabel::Nolabel, arg1_ty, inner_ty, Some(2));
-    let id = Ident::create_persistent(name);
-    // Primitives come from Pervasives module
-    let pervasives_id = Ident::create_persistent("Pervasives");
-    let path = Path::pdot(Path::pident(pervasives_id), name.to_string());
-    let desc = ValueDescription {
-        val_type: func_ty,
-        val_kind: ValueKind::ValPrim(PrimitiveDescription {
-            prim_name: prim_name.to_string(),
-            prim_arity: 2,
-            prim_native_name: String::new(),
-            prim_native_float: false,
-        }),
-        val_loc: Location::none(),
-        val_attributes: vec![],
-        val_path: Some(path),
-    };
-    env.add_value(id, desc);
-}
-
-/// Helper to add a unary primitive operator
-fn add_unary_primitive(
-    env: &mut Env,
-    ctx: &TypeContext<'_>,
-    name: &str,
-    prim_name: &str,
-    arg_ty: TypeExprRef,
-    ret_ty: TypeExprRef,
-) {
-    // Unary operators have arity 1
-    let func_ty = ctx.new_arrow(crate::types::ArgLabel::Nolabel, arg_ty, ret_ty, Some(1));
-    let id = Ident::create_persistent(name);
-    // Primitives come from Pervasives module
-    let pervasives_id = Ident::create_persistent("Pervasives");
-    let path = Path::pdot(Path::pident(pervasives_id), name.to_string());
-    let desc = ValueDescription {
-        val_type: func_ty,
-        val_kind: ValueKind::ValPrim(PrimitiveDescription {
-            prim_name: prim_name.to_string(),
-            prim_arity: 1,
-            prim_native_name: String::new(),
-            prim_native_float: false,
-        }),
-        val_loc: Location::none(),
-        val_attributes: vec![],
-        val_path: Some(path),
-    };
-    env.add_value(id, desc);
 }
 
 #[cfg(test)]
