@@ -15,11 +15,13 @@
 //! - `compiler/frontend/ast_external.ml`
 
 use crate::intern::StrIdx;
+use crate::location::Location;
 use crate::parse_arena::{LidentIdx, Located, LocIdx, ParseArena};
 use crate::parser::ast::{
-    self as current, ArgLabel, Attribute, Case, CoreType, CoreTypeDesc, Expression,
-    ExpressionDesc, Label, Pattern, RecFlag, SignatureItem, SignatureItemDesc,
-    StructureItem, StructureItemDesc, ValueBinding, ValueDescription,
+    self as current, ArgLabel, Arity, Attribute, Case, Constant, CoreType, CoreTypeDesc,
+    Expression, ExpressionDesc, Label, ModuleExpr, ModuleExprDesc, Pattern, Payload,
+    RecFlag, SignatureItem, SignatureItemDesc, StructureItem, StructureItemDesc,
+    TypeArg, ValueBinding, ValueDescription,
 };
 use crate::parser::longident::Longident;
 
@@ -72,7 +74,7 @@ fn prims_to_be_encoded(pval_prim: &[String]) -> bool {
 }
 
 /// Check if an external declaration has ReScript FFI attributes
-fn has_external_attrs(attrs: &[Attribute], arena: &ParseArena) -> bool {
+fn has_external_attrs(attrs: &[Attribute], arena: &mut ParseArena) -> bool {
     attrs.iter().any(|(attr_name, _payload)| {
         let name = arena.get_string(attr_name.txt);
         EXTERNAL_ATTRS.iter().any(|&ext_attr| name == ext_attr)
@@ -80,7 +82,7 @@ fn has_external_attrs(attrs: &[Attribute], arena: &ParseArena) -> bool {
 }
 
 /// Check if a value description represents a ReScript external
-pub fn is_rs_external(attrs: &[Attribute], pval_prim: &[String], arena: &ParseArena) -> bool {
+pub fn is_rs_external(attrs: &[Attribute], pval_prim: &[String], arena: &mut ParseArena) -> bool {
     if pval_prim.is_empty() {
         return false;
     }
@@ -88,7 +90,7 @@ pub fn is_rs_external(attrs: &[Attribute], pval_prim: &[String], arena: &ParseAr
 }
 
 /// Count the arity of a function type
-fn count_type_arity(typ: &CoreType, arena: &ParseArena) -> usize {
+fn count_type_arity(typ: &CoreType, arena: &mut ParseArena) -> usize {
     match &typ.ptyp_desc {
         CoreTypeDesc::Ptyp_arrow { arg, ret, arity: _ } => {
             // Count this argument plus any more in the return type
@@ -101,7 +103,7 @@ fn count_type_arity(typ: &CoreType, arena: &ParseArena) -> usize {
 }
 
 /// Check if a type is unit
-fn is_unit_type(typ: &CoreType, arena: &ParseArena) -> bool {
+fn is_unit_type(typ: &CoreType, arena: &mut ParseArena) -> bool {
     match &typ.ptyp_desc {
         CoreTypeDesc::Ptyp_constr(lid, args) => {
             args.is_empty() && {
@@ -169,7 +171,7 @@ impl Default for ExternalDesc {
     }
 }
 
-fn parse_external_attrs(attrs: &[Attribute], prim_name: &str, arena: &ParseArena) -> ExternalDesc {
+fn parse_external_attrs(attrs: &[Attribute], prim_name: &str, arena: &mut ParseArena) -> ExternalDesc {
     let mut desc = ExternalDesc::default();
 
     for (attr_name, payload) in attrs {
@@ -247,7 +249,7 @@ fn parse_external_attrs(attrs: &[Attribute], prim_name: &str, arena: &ParseArena
 }
 
 /// Extract string from attribute payload (simplified)
-fn get_payload_string(payload: &current::Payload, arena: &ParseArena) -> Option<String> {
+fn get_payload_string(payload: &current::Payload, arena: &mut ParseArena) -> Option<String> {
     match payload {
         current::Payload::PStr(items) if items.len() == 1 => {
             if let StructureItemDesc::Pstr_eval(expr, _) = &items[0].pstr_desc {
@@ -341,7 +343,7 @@ pub struct EncodedExternal {
 }
 
 /// Filter out ReScript FFI attributes (they're consumed by encoding)
-fn filter_ffi_attributes(attrs: &[Attribute], arena: &ParseArena) -> Vec<Attribute> {
+fn filter_ffi_attributes(attrs: &[Attribute], arena: &mut ParseArena) -> Vec<Attribute> {
     attrs
         .iter()
         .filter(|(attr_name, _payload)| {
@@ -353,7 +355,7 @@ fn filter_ffi_attributes(attrs: &[Attribute], arena: &ParseArena) -> Vec<Attribu
 }
 
 /// Encode external value description with FFI metadata
-pub fn encode_external(vd: &ValueDescription, arena: &ParseArena) -> EncodedExternal {
+pub fn encode_external(vd: &ValueDescription, arena: &mut ParseArena) -> EncodedExternal {
     // Get the primitive name
     let prim_name = match vd.pval_prim.first() {
         Some(name) => name.as_str(),
@@ -451,10 +453,301 @@ pub fn inline_float_primitive(f: &str) -> Vec<String> {
     vec![String::new(), encoded]
 }
 
+// ========== Extension Point Handling ==========
+
+/// Handle an extension point in expression position.
+/// Transforms:
+/// - %raw("...") into the local_external_apply pattern
+/// - %re("...") into %raw with RegExp type constraint (TODO)
+/// - %debugger into debugger call (TODO)
+/// - Other extensions are returned unchanged
+fn handle_extension(
+    expr: &Expression,
+    ext: &current::Extension,
+    arena: &mut ParseArena,
+) -> Expression {
+    let (ext_name, payload) = ext;
+    let name = arena.get_string(ext_name.txt);
+
+    match name {
+        "raw" => handle_raw(expr, payload, arena, "#raw_expr"),
+        _ => expr.clone(),
+    }
+}
+
+/// Handle %raw extension by transforming it into local_external_apply pattern.
+///
+/// OCaml transforms `%raw("code")` into:
+/// ```text
+/// let module J = struct
+///   external unsafe_expr: 'a -> 'a = "#raw_expr"
+/// end in J.unsafe_expr("code")
+/// ```
+fn handle_raw(
+    expr: &Expression,
+    payload: &Payload,
+    arena: &mut ParseArena,
+    pval_prim: &str,
+) -> Expression {
+    // Extract the string expression from the payload
+    let str_exp = match payload {
+        Payload::PStr(items) if items.len() == 1 => {
+            if let StructureItemDesc::Pstr_eval(e, _) = &items[0].pstr_desc {
+                if let ExpressionDesc::Pexp_constant(Constant::String(s, _)) = &e.pexp_desc {
+                    // Create a new string expression with delimiter stripped
+                    // (OCaml strips the delimiter when transforming %raw)
+                    Expression {
+                        pexp_desc: ExpressionDesc::Pexp_constant(Constant::String(
+                            s.clone(),
+                            None, // Strip delimiter
+                        )),
+                        pexp_loc: e.pexp_loc,
+                        pexp_attributes: e.pexp_attributes.clone(),
+                    }
+                } else {
+                    return expr.clone();
+                }
+            } else {
+                return expr.clone();
+            }
+        }
+        _ => return expr.clone(),
+    };
+
+    let loc = expr.pexp_loc;
+
+    // Use none_loc() for types, matching OCaml's Ast_helper.Typ.any()
+    // which uses default_loc (= Location.none = in_file "_none_")
+    // In the AST, Location is an alias for LocIdx
+    let none_loc = arena.none_loc();
+
+    // Create the type: _ -> _
+    let any_type = CoreType {
+        ptyp_desc: CoreTypeDesc::Ptyp_any,
+        ptyp_loc: none_loc,
+        ptyp_attributes: vec![],
+    };
+
+    let pval_type = CoreType {
+        ptyp_desc: CoreTypeDesc::Ptyp_arrow {
+            arg: Box::new(TypeArg {
+                attrs: vec![],
+                lbl: ArgLabel::Nolabel,
+                typ: any_type.clone(),
+            }),
+            ret: Box::new(any_type),
+            arity: Arity::default(),
+        },
+        ptyp_loc: none_loc,
+        ptyp_attributes: vec![],
+    };
+
+    // Create strings for the module/function names
+    let module_name_idx = arena.intern_string("J");
+    let func_name_idx = arena.intern_string("unsafe_expr");
+
+    // Create the value description (external primitive)
+    let vd = ValueDescription {
+        pval_name: Located {
+            txt: func_name_idx,
+            loc,
+        },
+        pval_type,
+        pval_prim: vec![pval_prim.to_string()],
+        pval_attributes: vec![],
+        pval_loc: loc,
+    };
+
+    // Create the module structure: struct external unsafe_expr: _ -> _ = "#raw_expr" end
+    let mod_structure = vec![StructureItem {
+        pstr_desc: StructureItemDesc::Pstr_primitive(vd),
+        pstr_loc: loc,
+    }];
+
+    let mod_expr = ModuleExpr {
+        pmod_desc: ModuleExprDesc::Pmod_structure(mod_structure),
+        pmod_loc: loc,
+        pmod_attributes: vec![],
+    };
+
+    // Create the longident J.unsafe_expr
+    let j_lident = arena.push_lident_static("J");
+    let j_unsafe_expr = arena.push_ldot_static(j_lident, "unsafe_expr");
+
+    // Create the function application: J.unsafe_expr("code")
+    let func_ident = Expression {
+        pexp_desc: ExpressionDesc::Pexp_ident(Located { txt: j_unsafe_expr, loc }),
+        pexp_loc: loc,
+        pexp_attributes: vec![],
+    };
+
+    let apply_expr = Expression {
+        pexp_desc: ExpressionDesc::Pexp_apply {
+            funct: Box::new(func_ident),
+            args: vec![(ArgLabel::Nolabel, str_exp)],
+            partial: false,
+            transformed_jsx: false,
+        },
+        pexp_loc: loc,
+        pexp_attributes: vec![],
+    };
+
+    // Create the final expression: let module J = struct ... end in J.unsafe_expr("code")
+    Expression {
+        pexp_desc: ExpressionDesc::Pexp_letmodule(
+            Located {
+                txt: module_name_idx,
+                loc,
+            },
+            mod_expr,
+            Box::new(apply_expr),
+        ),
+        pexp_loc: loc,
+        pexp_attributes: expr.pexp_attributes.clone(),
+    }
+}
+
+/// Handle %%raw extension at structure level.
+///
+/// OCaml transforms `%%raw("code")` into:
+/// ```text
+/// Pstr_eval(
+///   let module J = struct
+///     external unsafe_expr: 'a -> 'a = "#raw_stmt"
+///   end in J.unsafe_expr("code")
+/// )
+/// ```
+fn handle_raw_structure(
+    item: &StructureItem,
+    payload: &Payload,
+    arena: &mut ParseArena,
+) -> StructureItem {
+    // Extract the string expression from the payload
+    let (str_exp, str_loc) = match payload {
+        Payload::PStr(items) if items.len() == 1 => {
+            if let StructureItemDesc::Pstr_eval(e, _) = &items[0].pstr_desc {
+                if let ExpressionDesc::Pexp_constant(Constant::String(s, _)) = &e.pexp_desc {
+                    // Create a new string expression with delimiter stripped
+                    (
+                        Expression {
+                            pexp_desc: ExpressionDesc::Pexp_constant(Constant::String(
+                                s.clone(),
+                                None, // Strip delimiter
+                            )),
+                            pexp_loc: e.pexp_loc,
+                            pexp_attributes: e.pexp_attributes.clone(),
+                        },
+                        e.pexp_loc,
+                    )
+                } else {
+                    return item.clone();
+                }
+            } else {
+                return item.clone();
+            }
+        }
+        _ => return item.clone(),
+    };
+
+    let loc = item.pstr_loc;
+    let none_loc = arena.none_loc();
+
+    // Create the type: _ -> _
+    let any_type = CoreType {
+        ptyp_desc: CoreTypeDesc::Ptyp_any,
+        ptyp_loc: none_loc,
+        ptyp_attributes: vec![],
+    };
+
+    let pval_type = CoreType {
+        ptyp_desc: CoreTypeDesc::Ptyp_arrow {
+            arg: Box::new(TypeArg {
+                attrs: vec![],
+                lbl: ArgLabel::Nolabel,
+                typ: any_type.clone(),
+            }),
+            ret: Box::new(any_type),
+            arity: Arity::default(),
+        },
+        ptyp_loc: none_loc,
+        ptyp_attributes: vec![],
+    };
+
+    // Create strings for the module/function names
+    let module_name_idx = arena.intern_string("J");
+    let func_name_idx = arena.intern_string("unsafe_expr");
+
+    // Create the value description (external primitive) - uses #raw_stmt for structure level
+    let vd = ValueDescription {
+        pval_name: Located {
+            txt: func_name_idx,
+            loc,
+        },
+        pval_type,
+        pval_prim: vec!["#raw_stmt".to_string()],
+        pval_attributes: vec![],
+        pval_loc: loc,
+    };
+
+    // Create the module structure
+    let mod_structure = vec![StructureItem {
+        pstr_desc: StructureItemDesc::Pstr_primitive(vd),
+        pstr_loc: loc,
+    }];
+
+    let mod_expr = ModuleExpr {
+        pmod_desc: ModuleExprDesc::Pmod_structure(mod_structure),
+        pmod_loc: loc,
+        pmod_attributes: vec![],
+    };
+
+    // Create the longident J.unsafe_expr
+    let j_lident = arena.push_lident_static("J");
+    let j_unsafe_expr = arena.push_ldot_static(j_lident, "unsafe_expr");
+
+    // Create the function application: J.unsafe_expr("code")
+    let func_ident = Expression {
+        pexp_desc: ExpressionDesc::Pexp_ident(Located { txt: j_unsafe_expr, loc }),
+        pexp_loc: loc,
+        pexp_attributes: vec![],
+    };
+
+    let apply_expr = Expression {
+        pexp_desc: ExpressionDesc::Pexp_apply {
+            funct: Box::new(func_ident),
+            args: vec![(ArgLabel::Nolabel, str_exp)],
+            partial: false,
+            transformed_jsx: false,
+        },
+        pexp_loc: loc,
+        pexp_attributes: vec![],
+    };
+
+    // Create the let module expression
+    let letmodule_expr = Expression {
+        pexp_desc: ExpressionDesc::Pexp_letmodule(
+            Located {
+                txt: module_name_idx,
+                loc,
+            },
+            mod_expr,
+            Box::new(apply_expr),
+        ),
+        pexp_loc: str_loc, // Use the string expression's location for outer expr
+        pexp_attributes: vec![],
+    };
+
+    // Wrap in Pstr_eval
+    StructureItem {
+        pstr_desc: StructureItemDesc::Pstr_eval(letmodule_expr, vec![]),
+        pstr_loc: item.pstr_loc,
+    }
+}
+
 // ========== Expression Rewriting ==========
 
 /// Check if an expression is a pipe operator application (a -> b)
-fn is_pipe_application(expr: &Expression, arena: &ParseArena) -> bool {
+fn is_pipe_application(expr: &Expression, arena: &mut ParseArena) -> bool {
     if let ExpressionDesc::Pexp_apply { funct, args, .. } = &expr.pexp_desc {
         if args.len() == 2
             && matches!(&args[0].0, ArgLabel::Nolabel)
@@ -472,7 +765,7 @@ fn is_pipe_application(expr: &Expression, arena: &ParseArena) -> bool {
 }
 
 /// Rewrite an expression, desugaring pipe operators
-fn rewrite_expression(expr: &Expression, arena: &ParseArena) -> Expression {
+fn rewrite_expression(expr: &Expression, arena: &mut ParseArena) -> Expression {
     // First check if this is a pipe application
     if let ExpressionDesc::Pexp_apply {
         funct,
@@ -518,7 +811,7 @@ fn desugar_pipe(
     original: &Expression,
     a: Expression,
     f: Expression,
-    _arena: &ParseArena,
+    _arena: &mut ParseArena,
 ) -> Expression {
     match &f.pexp_desc {
         // a -> `Variant becomes `Variant(a)
@@ -594,7 +887,7 @@ fn desugar_pipe(
 }
 
 /// Generic expression rewriting - recurses into sub-expressions
-fn rewrite_expression_generic(expr: &Expression, arena: &ParseArena) -> Expression {
+fn rewrite_expression_generic(expr: &Expression, arena: &mut ParseArena) -> Expression {
     let new_desc = match &expr.pexp_desc {
         ExpressionDesc::Pexp_ident(_) | ExpressionDesc::Pexp_constant(_) => {
             return expr.clone();
@@ -778,8 +1071,13 @@ fn rewrite_expression_generic(expr: &Expression, arena: &ParseArena) -> Expressi
             Box::new(rewrite_expression(body, arena)),
         ),
 
-        // Extensions and JSX - just clone
-        ExpressionDesc::Pexp_extension(_) | ExpressionDesc::Pexp_jsx_element(_) => {
+        // Extensions - handle %raw, others just clone
+        ExpressionDesc::Pexp_extension(ext) => {
+            return handle_extension(expr, ext, arena);
+        }
+
+        // JSX - just clone
+        ExpressionDesc::Pexp_jsx_element(_) => {
             return expr.clone();
         }
     };
@@ -792,7 +1090,7 @@ fn rewrite_expression_generic(expr: &Expression, arena: &ParseArena) -> Expressi
 }
 
 /// Rewrite cases for match/try expressions
-fn rewrite_cases(cases: &[Case], arena: &ParseArena) -> Vec<Case> {
+fn rewrite_cases(cases: &[Case], arena: &mut ParseArena) -> Vec<Case> {
     cases
         .iter()
         .map(|c| Case {
@@ -807,7 +1105,7 @@ fn rewrite_cases(cases: &[Case], arena: &ParseArena) -> Vec<Case> {
 // ========== PPX Application ==========
 
 /// Apply built-in PPX transformations to a structure
-pub fn rewrite_structure(structure: &[StructureItem], arena: &ParseArena) -> Vec<StructureItem> {
+pub fn rewrite_structure(structure: &[StructureItem], arena: &mut ParseArena) -> Vec<StructureItem> {
     structure
         .iter()
         .map(|item| rewrite_structure_item(item, arena))
@@ -815,14 +1113,14 @@ pub fn rewrite_structure(structure: &[StructureItem], arena: &ParseArena) -> Vec
 }
 
 /// Apply built-in PPX transformations to a signature
-pub fn rewrite_signature(signature: &[SignatureItem], arena: &ParseArena) -> Vec<SignatureItem> {
+pub fn rewrite_signature(signature: &[SignatureItem], arena: &mut ParseArena) -> Vec<SignatureItem> {
     signature
         .iter()
         .map(|item| rewrite_signature_item(item, arena))
         .collect()
 }
 
-fn rewrite_structure_item(item: &StructureItem, arena: &ParseArena) -> StructureItem {
+fn rewrite_structure_item(item: &StructureItem, arena: &mut ParseArena) -> StructureItem {
     match &item.pstr_desc {
         StructureItemDesc::Pstr_primitive(vd) => {
             if is_rs_external(&vd.pval_attributes, &vd.pval_prim, arena) {
@@ -900,6 +1198,17 @@ fn rewrite_structure_item(item: &StructureItem, arena: &ParseArena) -> Structure
             }),
             pstr_loc: item.pstr_loc,
         },
+        // Handle structure-level extensions (%%raw)
+        StructureItemDesc::Pstr_extension(ext, _attrs) => {
+            let (ext_name, payload) = ext;
+            let name = arena.get_string(ext_name.txt);
+            if name == "raw" {
+                // %%raw("...") -> Pstr_eval with local_external_apply using #raw_stmt
+                handle_raw_structure(item, payload, arena)
+            } else {
+                item.clone()
+            }
+        }
         // Other structure items don't contain expressions that need rewriting
         _ => item.clone(),
     }
@@ -908,7 +1217,7 @@ fn rewrite_structure_item(item: &StructureItem, arena: &ParseArena) -> Structure
 /// Rewrite a module expression, recursing into structure
 fn rewrite_module_expr(
     mod_expr: &current::ModuleExpr,
-    arena: &ParseArena,
+    arena: &mut ParseArena,
 ) -> current::ModuleExpr {
     let new_desc = match &mod_expr.pmod_desc {
         current::ModuleExprDesc::Pmod_structure(items) => {
@@ -947,7 +1256,7 @@ fn rewrite_module_expr(
     }
 }
 
-fn rewrite_signature_item(item: &SignatureItem, arena: &ParseArena) -> SignatureItem {
+fn rewrite_signature_item(item: &SignatureItem, arena: &mut ParseArena) -> SignatureItem {
     match &item.psig_desc {
         SignatureItemDesc::Psig_value(vd) => {
             if is_rs_external(&vd.pval_attributes, &vd.pval_prim, arena) {

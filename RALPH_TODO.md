@@ -83,10 +83,12 @@ We need to implement the remaining transformations.
 - OCaml: `compiler/frontend/ppx_entry.ml`
 - Rust: `compiler-rust/src/binary_ast/ppx.rs`
 
-- [ ] **Task 2.1**: Implement `%raw` extension point handling
+- [x] **Task 2.1**: Implement `%raw` extension point handling
   - OCaml: `Ast_exp_handle_external.handle_raw_structure`
   - Transforms `[%raw "..."]` into appropriate AST nodes
   - Also handle `%%raw` at structure level
+  - **Done**: Implemented both `%raw` (expression) and `%%raw` (structure) transformations.
+    Creates `Pexp_letmodule` with local external using `#raw_expr` or `#raw_stmt`.
 
 - [ ] **Task 2.2**: Implement string interpolation (`j"..."` and backtick strings)
   - OCaml: `Ast_utf8_string_interp.transform_exp` / `transform_pat`
