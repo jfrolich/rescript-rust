@@ -978,7 +978,8 @@ fn transform_js_string(s: &str) -> String {
                 i += 1;
             }
             _ => {
-                // UTF-8 multi-byte character - copy all bytes
+                // UTF-8 multi-byte character - copy all bytes as raw bytes
+                // We need to push the raw bytes, not convert to char
                 let start = i;
                 // Determine number of continuation bytes
                 let width = if b & 0b1111_0000 == 0b1111_0000 {
@@ -990,10 +991,17 @@ fn transform_js_string(s: &str) -> String {
                 } else {
                     1 // Invalid UTF-8, just copy the byte
                 };
-                for j in start..std::cmp::min(start + width, bytes.len()) {
-                    buf.push(bytes[j] as char);
+                let end = std::cmp::min(start + width, bytes.len());
+                // Use from_utf8_lossy to properly preserve the UTF-8 bytes
+                if let Ok(utf8_str) = std::str::from_utf8(&bytes[start..end]) {
+                    buf.push_str(utf8_str);
+                } else {
+                    // Invalid UTF-8 - just push bytes as-is (shouldn't happen in valid source)
+                    for j in start..end {
+                        buf.push(bytes[j] as char);
+                    }
                 }
-                i = std::cmp::min(start + width, bytes.len());
+                i = end;
             }
         }
     }
