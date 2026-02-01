@@ -923,11 +923,19 @@ fn transform_string_pat(pat: &Pattern, s: &str, delim: &str) -> Pattern {
     }
 }
 
-/// Rewrite a pattern, transforming string constants
+/// Rewrite a pattern, transforming string and integer constants
 fn rewrite_pattern(pat: &Pattern) -> Pattern {
     match &pat.ppat_desc {
         PatternDesc::Ppat_constant(Constant::String(s, Some(delim))) => {
             transform_string_pat(pat, s, delim)
+        }
+        // Strip 'l' suffix from integer literals
+        PatternDesc::Ppat_constant(Constant::Integer(s, Some('l'))) => {
+            Pattern {
+                ppat_desc: PatternDesc::Ppat_constant(Constant::Integer(s.clone(), None)),
+                ppat_loc: pat.ppat_loc,
+                ppat_attributes: pat.ppat_attributes.clone(),
+            }
         }
         // For other patterns, just clone (no recursive rewriting needed for now)
         _ => pat.clone(),
@@ -939,6 +947,15 @@ fn rewrite_expression(expr: &Expression, arena: &mut ParseArena) -> Expression {
     // Handle string constant transformations first
     if let ExpressionDesc::Pexp_constant(Constant::String(s, Some(delim))) = &expr.pexp_desc {
         return transform_string_exp(expr, s, delim, arena);
+    }
+
+    // Handle integer literal suffix stripping ('l' suffix)
+    if let ExpressionDesc::Pexp_constant(Constant::Integer(s, Some('l'))) = &expr.pexp_desc {
+        return Expression {
+            pexp_desc: ExpressionDesc::Pexp_constant(Constant::Integer(s.clone(), None)),
+            pexp_loc: expr.pexp_loc,
+            pexp_attributes: expr.pexp_attributes.clone(),
+        };
     }
 
     // First check if this is a pipe application

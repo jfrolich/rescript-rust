@@ -1,7 +1,7 @@
 # Ralph TODO: Binary AST Parity
 
 **Last Updated:** 2026-02-01
-**Overall Status:** 134/1049 bsc-ast tests passing (12.8%)
+**Overall Status:** 135/1049 bsc-ast tests passing (12.9%)
 **sexp-locs Status:** 1049/1049 tests passing (100%) ✅
 
 ---
@@ -102,10 +102,11 @@ We need to implement the remaining transformations.
   - `@deriving(accessors)` - generates accessor functions for variants
   - `@deriving(jsConverter)` - generates JS conversion functions
 
-- [ ] **Task 2.4**: Implement integer literal suffix handling
+- [x] **Task 2.4**: Implement integer literal suffix handling
   - OCaml: `pat_mapper` and `expr_mapper` in bs_builtin_ppx.ml
   - Transform `Pconst_integer(s, Some 'l')` → `Pconst_integer(s, None)`
-  - Handle in both patterns and expressions
+  - **Done**: Added to `rewrite_pattern` and `rewrite_expression` in ppx.rs.
+    Parity improved from 134 to 135 tests.
 
 - [ ] **Task 2.5**: Implement `Pexp_extension` handling
   - OCaml: `Ast_exp_extension.handle_extension`
