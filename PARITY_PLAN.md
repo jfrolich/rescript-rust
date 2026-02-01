@@ -42,19 +42,31 @@ Based on analysis of all 66 failing files, the issues fall into these categories
 
 **Current Status (Updated 2026-02-01):**
 
-After investigation, the actual situation is:
-- **OCaml** has cycles (e.g., `<cycle>` markers) for primitive operator types
-- **Rust** does NOT have cycles for the same cases - it shows fully resolved types
+After investigation, the situation is more nuanced than originally thought. There are TWO different cycle patterns:
 
-**Example (test_eq.res - `let f = (x, y) => x + y`):**
+**Pattern A - Primitive operators (e.g., test_eq.res):**
+- **OCaml** has cycles for primitive operator types
+- **Rust** does NOT have cycles - shows fully resolved types
+
+**Pattern B - Match expressions (e.g., switch_string.res, large_integer_pat.res):**
+- **OCaml** shows fully resolved types
+- **Rust** has cycles - shows `<cycle>` instead of the actual type
+
+**Example A (test_eq.res - `let f = (x, y) => x + y`):**
 ```
 OCaml + operator type: (Tarrow ... <cycle> (Tarrow ... <cycle> (Tvar None) ...) ...)
 Rust + operator type:  (Tarrow ... int (Tarrow ... int int ...) ...)
 ```
 
+**Example B (switch_string.res - `let foo = x => switch x { ... }`):**
+```
+OCaml foo type: (Tarrow ... string string ...)
+Rust foo type:  (Tarrow ... string <cycle> ...)
+```
+
 The test script filters `<cycle>` lines, but after filtering:
-- OCaml has incomplete structure with `(Tvar None)` for return type
-- Rust has complete `(Tconstr (Pident "int") ())` for all positions
+- Pattern A: OCaml has `(Tvar None)`, Rust has `(Tconstr int)`
+- Pattern B: OCaml has `(Tconstr string)`, Rust has incomplete structure
 
 **Why the "fresh types" fix doesn't help:**
 
