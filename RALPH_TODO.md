@@ -102,6 +102,48 @@ This is a mapper_to0 issue, not a parser issue. sexp-locs passes 100% for JSX.
 - [ ] **Task 4.4**: Target 1000/1049 bsc-ast parity (95%)
 - [ ] **Task 4.5**: Achieve 1049/1049 bsc-ast parity (100%)
 
+### Phase 5: Built-in PPX Parity (Bs_builtin_ppx in Rust)
+
+Currently `compiler-rust/src/binary_ast/ppx.rs` only implements **FFI external encoding**.
+To achieve full binary parity, we need to implement the remaining `Bs_builtin_ppx` transformations.
+
+**Reference files:**
+- OCaml: `compiler/frontend/bs_builtin_ppx.ml`
+- OCaml: `compiler/frontend/ppx_entry.ml`
+- Rust: `compiler-rust/src/binary_ast/ppx.rs`
+
+- [ ] **Task 5.1**: Implement `%raw` extension point handling
+  - OCaml: `Ast_exp_handle_external.handle_raw_structure`
+  - Transforms `[%raw "..."]` into appropriate AST nodes
+  - Also handle `%%raw` at structure level
+
+- [ ] **Task 5.2**: Implement string interpolation (`j"..."` and backtick strings)
+  - OCaml: `Ast_utf8_string_interp.transform_exp` / `transform_pat`
+  - Transforms `j"hello ${name}"` into concatenation expressions
+  - Handle both expression and pattern contexts
+
+- [ ] **Task 5.3**: Implement `@deriving` transformations
+  - OCaml: `Ast_derive_projector.init()`, `Ast_derive_js_mapper.init()`
+  - `@deriving(accessors)` - generates accessor functions for variants
+  - `@deriving(jsConverter)` - generates JS conversion functions
+
+- [ ] **Task 5.4**: Implement integer literal suffix handling
+  - OCaml: `pat_mapper` and `expr_mapper` in bs_builtin_ppx.ml
+  - Transform `Pconst_integer(s, Some 'l')` → `Pconst_integer(s, None)`
+  - Handle in both patterns and expressions
+
+- [ ] **Task 5.5**: Implement `Pexp_extension` handling
+  - OCaml: `Ast_exp_extension.handle_extension`
+  - Handle various extension points: `%debugger`, `%external`, `%node`, `%obj`, etc.
+
+- [ ] **Task 5.6**: Implement `@inline` let binding transformation
+  - Currently partial in Rust (helpers exist, rewrite has TODO)
+  - Transform `@inline let x = "foo"` into external with FFI inline encoding
+
+- [ ] **Task 5.7**: Implement async context tracking
+  - OCaml: `async_context` ref and `in_function_def` ref in expr_mapper
+  - Track whether we're inside an async function for proper transformation
+
 ---
 
 ## Debugging Commands
