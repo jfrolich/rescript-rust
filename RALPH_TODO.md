@@ -1,7 +1,7 @@
 # Ralph TODO: Binary AST Parity
 
 **Last Updated:** 2026-02-01
-**Overall Status:** 128/1049 bsc-ast tests passing (12.2%)
+**Overall Status:** 134/1049 bsc-ast tests passing (12.8%)
 **sexp-locs Status:** 1049/1049 tests passing (100%) ✅
 
 ---
@@ -90,10 +90,12 @@ We need to implement the remaining transformations.
   - **Done**: Implemented both `%raw` (expression) and `%%raw` (structure) transformations.
     Creates `Pexp_letmodule` with local external using `#raw_expr` or `#raw_stmt`.
 
-- [ ] **Task 2.2**: Implement string interpolation (`j"..."` and backtick strings)
+- [x] **Task 2.2**: Implement string interpolation (`j"..."` and backtick strings)
   - OCaml: `Ast_utf8_string_interp.transform_exp` / `transform_pat`
-  - Transforms `j"hello ${name}"` into concatenation expressions
-  - Handle both expression and pattern contexts
+  - Transforms `"hello"` (js delimiter) to `"*j"` delimiter after transforming escape sequences
+  - Transforms template strings (backticks) to `"bq"` delimiter
+  - **Done**: Implemented in `transform_string_exp` and `transform_string_pat` in ppx.rs.
+    Handles both expressions and patterns. Parity improved from 128 to 134 tests.
 
 - [ ] **Task 2.3**: Implement `@deriving` transformations
   - OCaml: `Ast_derive_projector.init()`, `Ast_derive_js_mapper.init()`

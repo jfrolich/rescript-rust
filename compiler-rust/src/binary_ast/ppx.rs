@@ -19,7 +19,7 @@ use crate::location::Location;
 use crate::parse_arena::{LidentIdx, Located, LocIdx, ParseArena};
 use crate::parser::ast::{
     self as current, ArgLabel, Arity, Attribute, Case, Constant, CoreType, CoreTypeDesc,
-    Expression, ExpressionDesc, Label, ModuleExpr, ModuleExprDesc, Pattern, Payload,
+    Expression, ExpressionDesc, Label, ModuleExpr, ModuleExprDesc, Pattern, PatternDesc, Payload,
     RecFlag, SignatureItem, SignatureItemDesc, StructureItem, StructureItemDesc,
     TypeArg, ValueBinding, ValueDescription,
 };
@@ -764,8 +764,183 @@ fn is_pipe_application(expr: &Expression, arena: &mut ParseArena) -> bool {
     false
 }
 
+/// Check if expression has a template attribute (@res.template or @res.taggedTemplate)
+fn has_template_attr(expr: &Expression, arena: &mut ParseArena) -> bool {
+    expr.pexp_attributes.iter().any(|(attr_name, _)| {
+        let name = arena.get_string(attr_name.txt);
+        name == "res.template" || name == "res.taggedTemplate"
+    })
+}
+
+/// Transform a JavaScript string to escape special characters.
+/// This matches OCaml's Ast_utf8_string.transform function.
+fn transform_js_string(s: &str) -> String {
+    let mut buf = String::with_capacity(s.len() * 2);
+    let bytes = s.as_bytes();
+    let mut i = 0;
+
+    while i < bytes.len() {
+        let b = bytes[i];
+        match b {
+            b'\\' => {
+                // Escape sequence - copy verbatim
+                buf.push('\\');
+                i += 1;
+                if i < bytes.len() {
+                    let next = bytes[i];
+                    buf.push(next as char);
+                    i += 1;
+                    // Handle unicode escapes
+                    match next {
+                        b'u' => {
+                            if i < bytes.len() && bytes[i] == b'{' {
+                                // Unicode codepoint escape \u{...}
+                                while i < bytes.len() {
+                                    let c = bytes[i];
+                                    buf.push(c as char);
+                                    i += 1;
+                                    if c == b'}' {
+                                        break;
+                                    }
+                                }
+                            } else {
+                                // Standard \uXXXX
+                                for _ in 0..4 {
+                                    if i < bytes.len() {
+                                        buf.push(bytes[i] as char);
+                                        i += 1;
+                                    }
+                                }
+                            }
+                        }
+                        b'x' => {
+                            // Hex escape \xXX
+                            for _ in 0..2 {
+                                if i < bytes.len() {
+                                    buf.push(bytes[i] as char);
+                                    i += 1;
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            b'"' => {
+                buf.push_str("\\\"");
+                i += 1;
+            }
+            b'\n' => {
+                buf.push_str("\\n");
+                i += 1;
+            }
+            b'\r' => {
+                buf.push_str("\\r");
+                i += 1;
+            }
+            _ if b < 128 => {
+                // ASCII character
+                buf.push(b as char);
+                i += 1;
+            }
+            _ => {
+                // UTF-8 multi-byte character - copy all bytes
+                let start = i;
+                // Determine number of continuation bytes
+                let width = if b & 0b1111_0000 == 0b1111_0000 {
+                    4
+                } else if b & 0b1110_0000 == 0b1110_0000 {
+                    3
+                } else if b & 0b1100_0000 == 0b1100_0000 {
+                    2
+                } else {
+                    1 // Invalid UTF-8, just copy the byte
+                };
+                for j in start..std::cmp::min(start + width, bytes.len()) {
+                    buf.push(bytes[j] as char);
+                }
+                i = std::cmp::min(start + width, bytes.len());
+            }
+        }
+    }
+
+    buf
+}
+
+/// Transform string constant expression with delimiter.
+/// Implements OCaml's Ast_utf8_string_interp.transform_exp.
+fn transform_string_exp(expr: &Expression, s: &str, delim: &str, arena: &mut ParseArena) -> Expression {
+    // Check if this is a template string (has @res.template or @res.taggedTemplate)
+    let is_template = has_template_attr(expr, arena);
+
+    if delim == "js" {
+        if is_template {
+            // Template string: just change delimiter to "bq" (back quotes)
+            Expression {
+                pexp_desc: ExpressionDesc::Pexp_constant(Constant::String(
+                    s.to_string(),
+                    Some("bq".to_string()),
+                )),
+                pexp_loc: expr.pexp_loc,
+                pexp_attributes: expr.pexp_attributes.clone(),
+            }
+        } else {
+            // JS string: transform the string and change delimiter to "*j"
+            let transformed = transform_js_string(s);
+            Expression {
+                pexp_desc: ExpressionDesc::Pexp_constant(Constant::String(
+                    transformed,
+                    Some("*j".to_string()),
+                )),
+                pexp_loc: expr.pexp_loc,
+                pexp_attributes: expr.pexp_attributes.clone(),
+            }
+        }
+    } else {
+        // Unrecognized delimiter - return unchanged
+        expr.clone()
+    }
+}
+
+/// Transform string constant pattern with delimiter.
+/// Implements OCaml's Ast_utf8_string_interp.transform_pat.
+fn transform_string_pat(pat: &Pattern, s: &str, delim: &str) -> Pattern {
+    // Note: patterns don't have template attribute check, since templates are only for expressions
+    if delim == "js" {
+        // JS string: transform the string and change delimiter to "*j"
+        let transformed = transform_js_string(s);
+        Pattern {
+            ppat_desc: PatternDesc::Ppat_constant(Constant::String(
+                transformed,
+                Some("*j".to_string()),
+            )),
+            ppat_loc: pat.ppat_loc,
+            ppat_attributes: pat.ppat_attributes.clone(),
+        }
+    } else {
+        // Unrecognized delimiter - return unchanged
+        pat.clone()
+    }
+}
+
+/// Rewrite a pattern, transforming string constants
+fn rewrite_pattern(pat: &Pattern) -> Pattern {
+    match &pat.ppat_desc {
+        PatternDesc::Ppat_constant(Constant::String(s, Some(delim))) => {
+            transform_string_pat(pat, s, delim)
+        }
+        // For other patterns, just clone (no recursive rewriting needed for now)
+        _ => pat.clone(),
+    }
+}
+
 /// Rewrite an expression, desugaring pipe operators
 fn rewrite_expression(expr: &Expression, arena: &mut ParseArena) -> Expression {
+    // Handle string constant transformations first
+    if let ExpressionDesc::Pexp_constant(Constant::String(s, Some(delim))) = &expr.pexp_desc {
+        return transform_string_exp(expr, s, delim, arena);
+    }
+
     // First check if this is a pipe application
     if let ExpressionDesc::Pexp_apply {
         funct,
@@ -898,7 +1073,7 @@ fn rewrite_expression_generic(expr: &Expression, arena: &mut ParseArena) -> Expr
                 .iter()
                 .map(|vb| ValueBinding {
                     pvb_expr: rewrite_expression(&vb.pvb_expr, arena),
-                    pvb_pat: vb.pvb_pat.clone(),
+                    pvb_pat: rewrite_pattern(&vb.pvb_pat),
                     pvb_attributes: vb.pvb_attributes.clone(),
                     pvb_loc: vb.pvb_loc,
                 })
@@ -920,7 +1095,7 @@ fn rewrite_expression_generic(expr: &Expression, arena: &mut ParseArena) -> Expr
         } => ExpressionDesc::Pexp_fun {
             arg_label: arg_label.clone(),
             default: default.as_ref().map(|e| Box::new(rewrite_expression(e, arena))),
-            lhs: lhs.clone(),
+            lhs: rewrite_pattern(lhs),
             rhs: Box::new(rewrite_expression(rhs, arena)),
             arity: *arity,
             is_async: *is_async,
@@ -1095,7 +1270,7 @@ fn rewrite_cases(cases: &[Case], arena: &mut ParseArena) -> Vec<Case> {
         .iter()
         .map(|c| Case {
             pc_bar: c.pc_bar,
-            pc_lhs: c.pc_lhs.clone(),
+            pc_lhs: rewrite_pattern(&c.pc_lhs),
             pc_guard: c.pc_guard.as_ref().map(|e| rewrite_expression(e, arena)),
             pc_rhs: rewrite_expression(&c.pc_rhs, arena),
         })
@@ -1139,13 +1314,13 @@ fn rewrite_structure_item(item: &StructureItem, arena: &mut ParseArena) -> Struc
                 item.clone()
             }
         }
-        // Handle value bindings - need to rewrite expressions
+        // Handle value bindings - need to rewrite expressions and patterns
         StructureItemDesc::Pstr_value(rec_flag, bindings) => {
             let new_bindings: Vec<ValueBinding> = bindings
                 .iter()
                 .map(|vb| ValueBinding {
                     pvb_expr: rewrite_expression(&vb.pvb_expr, arena),
-                    pvb_pat: vb.pvb_pat.clone(),
+                    pvb_pat: rewrite_pattern(&vb.pvb_pat),
                     pvb_attributes: vb.pvb_attributes.clone(),
                     pvb_loc: vb.pvb_loc,
                 })
