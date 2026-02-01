@@ -58,16 +58,20 @@ Previously Rust was adding all uppercase identifiers, incorrectly including `Non
   - Simple Lidents (e.g., `None`, `Some`) are no longer added as dependencies
   - Only parent modules of dotted paths are now extracted
 
-### Phase 2: JSX Binary Differences
+### Phase 2: JSX Binary Differences (Deferred - mapper_to0 issue)
 
-- [ ] **Task 2.1**: Investigate JSX container element size difference
-  - `<div> <span/> </div>` produces different sizes (OCaml larger)
-  - OCaml: 229 bytes, Rust: 196 bytes
-  - Need to understand why Rust output is smaller - missing nodes?
+**Note:** Per instructions, mapper_to0.rs should NOT be modified unless absolutely necessary.
+The JSX size differences are caused by list location handling in `map_jsx_children_to_list`:
+- OCaml's `make_list_expression` creates unique locations for each cons cell
+- Rust uses the same location for all cons cells
+- OCaml's nil `[]` uses `loc_ghost = true`, Rust doesn't
 
-- [ ] **Task 2.2**: Investigate JSX with braced children
-  - `<InlineCode> {code->s} </InlineCode>` differs
-  - Compare AST structure and serialization
+This is a mapper_to0 issue, not a parser issue. sexp-locs passes 100% for JSX.
+
+- [x] **Task 2.1**: Investigate JSX container element size difference (ANALYZED)
+  - Root cause: `map_jsx_children_to_list` in mapper_to0.rs uses shared locations
+  - OCaml builds list with unique locations per cons cell
+  - This is a mapper_to0 issue, deferred per instructions
 
 - [x] **Task 2.3**: Fix arrow function expression position sharing (DONE)
   - Simple cases now work: `x => x`, `(x, y) => x + y`
@@ -136,6 +140,10 @@ cargo build --manifest-path compiler-rust/Cargo.toml --release
 ## Important: Do NOT Modify parsetree0/ast0 (For Now)
 
 **The current focus is position sharing in the parser** - positions that should have the same `PosIdx` are getting different indices during parsing. parsetree0/ast0 has its own issues but that's a separate task.
+
+**Note on AST terminology:**
+- **ast** (parsetree) - The current/main parsetree used by the compiler. This is what we're focused on.
+- **parsetree0/ast0** - Only used for PPXs (preprocessor extensions). Not our current focus.
 
 Focus on these files:
 - ✅ `compiler-rust/src/parser/` - Position creation and reuse during parsing
