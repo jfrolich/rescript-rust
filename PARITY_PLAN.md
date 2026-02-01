@@ -1,13 +1,14 @@
 # Typedtree Parity: Status and Action Plan
 
 ## Current Status
-- **Parity: 44/102 files (43%)**
-- **Failing: 58 files**
+- **Parity: 49/101 files (48%)**
+- **Failing: 52 files**
 
 **Note:** Most remaining issues require structural changes to the type checker,
 not just sexp output fixes. See "Issues Requiring Structural Changes" below.
 
 ### Recent Fixes
+- **Object type construction** - Fixed `Ptyp_object` to build proper `Tobject` with `Tfield` chain instead of using a fresh type variable. Also wrap object field core_types in `Ttyp_poly`. (2026-02-01)
 - **Module type sexp output** - Implemented proper ModuleType, ModuleTypeDesc, Signature, SignatureItem structures and sexp output for functor parameters. (+1 file)
 - **Type extension handling** - Implemented proper type extension handling with actual paths and constructors. (+1 file)
 - **`*j` delimiter transformation** - Fixed string delimiter transformation from `"js"` to `"*j"` during type checking. (+6 files)
@@ -280,30 +281,39 @@ The issue is in how `Tstr_typext` items are created during module type checking.
 
 ---
 
-### 6. FIX: Tstr_primitive/Value Description (MEDIUM PRIORITY)
+### 6. FIX: Tstr_primitive/Value Description (LOW PRIORITY - SERIALIZATION DIFFERENCE)
 
-**Files affected:** mocha.res, etc.
+**Files affected:** mocha.res, gpr_658.res, etc.
 
-**Problem:** Primitive value descriptions are empty or minimal.
+**Problem:** OCaml bundles FFI attributes as binary data in the primitive list, while Rust outputs them separately.
 
-**Example Diff:**
+**Example (mocha.res):**
 ```
-OCaml:                          Rust:
-  (Tstr_primitive                 (empty or missing)
-    (value_description
-      "test"
-      "test"
-      (core_type ...)
-      (prim ...)
-      (attributes)))
+OCaml:
+  (prim
+    "describe"
+    "¦¾°BDÔ(describe°%mocha@@@@@")  <- binary marshaled @module attribute
+  (attributes)
+
+Rust:
+  (prim
+    "describe")
+  (attributes
+    (attribute
+      "module"
+      (PStr <structure>)))
 ```
 
-**Fix Location:** Check `StructureItemDesc::Tstr_primitive` in `sexp_typedtree.rs`
+**Root Cause:** OCaml's `val_prim` field contains the marshaled FFI specification including attributes like `@module`. This is an internal binary representation. Rust correctly outputs the attributes separately in a human-readable format.
 
-**Fix Details:**
-Ensure `sexp_value_description` is properly implemented and called for primitive declarations.
+**Current Status:** The `sexp_typed_value_description` function is complete and correct. The difference is in how OCaml serializes FFI metadata - it bundles attributes into the prim field as binary data.
 
-**Estimated Effort:** 2-4 hours
+**Options:**
+1. **Match OCaml's binary format** - Would require marshaling attributes in the same way OCaml does. Complex and not beneficial.
+2. **Update test normalization** - Normalize the prim/attributes sections to handle semantic equivalence.
+3. **Accept the difference** - Both outputs are correct, just serialized differently.
+
+**Estimated Effort:** Low priority - this is a serialization format difference, not a semantic one.
 
 ---
 
@@ -436,12 +446,12 @@ Several remaining issues require changes beyond sexp printing - they need modifi
    - `Pmod_constraint` uses `Tmodtype_implicit` when it should use `Tmodtype_explicit` with the actual typed module type
    - Need to implement `transl_modtype` to properly type module type expressions
 
-2. **Value Description sexp** (~5 files) - Rust uses `ValueDescription` from decl.rs (Types level), but OCaml's typed tree has a separate typed `value_description` with:
-   - `val_id: Ident`
-   - `val_name: Loc<String>`
-   - `val_desc: core_type` (the typed core_type)
-   - `val_prim: Vec<String>` (primitive names)
-   Currently `Tstr_primitive` outputs `<value_description>` placeholder.
+2. **Value Description sexp** (~5 files) - FIXED but with serialization difference.
+   - The `sexp_typed_value_description` is fully implemented
+   - Outputs: val_id, val_name, core_type, prim, attributes
+   - Difference: OCaml bundles FFI attributes (like @module) as binary data in the prim field
+   - Rust outputs attributes separately in human-readable format
+   - This is a serialization format difference, not a semantic one
 
 3. **Cycle Detection** (~15 files) - The `<cycle>` marker appears at different positions in type trees. Example:
    ```
