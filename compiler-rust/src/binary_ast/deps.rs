@@ -62,8 +62,9 @@ impl<'a> DependencyCollector<'a> {
             .collect()
     }
 
-    /// Add a module reference from a Longident.
-    fn add_longident(&mut self, lid: &Longident) {
+    /// Add a module reference from a Longident (full path).
+    /// This is used for module-level references like `open Foo` or `include Bar`.
+    fn add_longident_full(&mut self, lid: &Longident) {
         // Get the root module name
         let parts = lid.flatten_idx();
         if let Some(first) = parts.first() {
@@ -78,15 +79,47 @@ impl<'a> DependencyCollector<'a> {
 
         // Also collect from functor applications
         if let Longident::Lapply(func, arg) = lid {
-            self.add_longident(func);
-            self.add_longident(arg);
+            self.add_longident_full(func);
+            self.add_longident_full(arg);
+        }
+    }
+
+    /// Add a module reference from a Longident, but only the parent module.
+    /// This matches OCaml's `add_parent` function: for `Foo.bar` it adds `Foo`,
+    /// but for `bar` alone it adds nothing.
+    ///
+    /// This is used for value/type/constructor references where a simple Lident
+    /// like `None` or `Some` refers to a local constructor, not a module dependency.
+    fn add_longident_parent(&mut self, lid: &Longident) {
+        match lid {
+            Longident::Ldot(parent, _) => {
+                // For dotted paths like Foo.bar, add the parent path
+                self.add_longident_full(parent);
+            }
+            Longident::Lapply(func, arg) => {
+                // For functor applications, add both parts
+                self.add_longident_full(func);
+                self.add_longident_full(arg);
+            }
+            Longident::Lident(_) => {
+                // For simple identifiers like `None` or `foo`, don't add anything
+                // These are local values/constructors, not module references
+            }
         }
     }
 
     /// Add a module reference from a LidentIdx (arena-allocated longident).
+    /// Uses add_parent semantics - only parent modules, not simple identifiers.
     fn add_lident_idx(&mut self, lid_idx: LidentIdx) {
         let lid = self.arena.get_longident(lid_idx);
-        self.add_longident(lid);
+        self.add_longident_parent(lid);
+    }
+
+    /// Add a full module path reference from a LidentIdx.
+    /// Used for module-level references like `open Foo`, `include Bar`, or module idents.
+    fn add_lident_idx_full(&mut self, lid_idx: LidentIdx) {
+        let lid = self.arena.get_longident(lid_idx);
+        self.add_longident_full(lid);
     }
 
     // ========== Structure ==========
@@ -322,7 +355,8 @@ impl<'a> DependencyCollector<'a> {
                 self.add_module_expr(me);
             }
             ExpressionDesc::Pexp_open(_override, lid, body) => {
-                self.add_lident_idx(lid.txt);
+                // Local open uses full module path
+                self.add_lident_idx_full(lid.txt);
                 self.add_expression(body);
             }
             ExpressionDesc::Pexp_extension((_id, payload)) => {
@@ -348,12 +382,13 @@ impl<'a> DependencyCollector<'a> {
             }
             JsxElement::Unary(elem) => {
                 // Add dependency from tag name if it's a component
+                // JSX components like <Foo /> are module references and use full path
                 match &elem.tag_name.txt {
                     JsxTagName::Upper(lid) => {
-                        self.add_lident_idx(*lid);
+                        self.add_lident_idx_full(*lid);
                     }
                     JsxTagName::QualifiedLower { path, .. } => {
-                        self.add_lident_idx(*path);
+                        self.add_lident_idx_full(*path);
                     }
                     JsxTagName::Lower(_) | JsxTagName::Invalid(_) => {}
                 }
@@ -364,10 +399,10 @@ impl<'a> DependencyCollector<'a> {
             JsxElement::Container(elem) => {
                 match &elem.tag_name_start.txt {
                     JsxTagName::Upper(lid) => {
-                        self.add_lident_idx(*lid);
+                        self.add_lident_idx_full(*lid);
                     }
                     JsxTagName::QualifiedLower { path, .. } => {
-                        self.add_lident_idx(*path);
+                        self.add_lident_idx_full(*path);
                     }
                     JsxTagName::Lower(_) | JsxTagName::Invalid(_) => {}
                 }
@@ -444,7 +479,8 @@ impl<'a> DependencyCollector<'a> {
                 self.add_payload(payload);
             }
             PatternDesc::Ppat_open(lid, pat) => {
-                self.add_lident_idx(lid.txt);
+                // Pattern open uses full module path
+                self.add_lident_idx_full(lid.txt);
                 self.add_pattern(pat);
             }
         }
@@ -520,7 +556,8 @@ impl<'a> DependencyCollector<'a> {
     fn add_module_expr(&mut self, me: &ModuleExpr) {
         match &me.pmod_desc {
             ModuleExprDesc::Pmod_ident(lid) => {
-                self.add_lident_idx(lid.txt);
+                // Module ident uses full path (OCaml: addmodule)
+                self.add_lident_idx_full(lid.txt);
             }
             ModuleExprDesc::Pmod_structure(str) => {
                 self.add_structure(str);
@@ -551,7 +588,8 @@ impl<'a> DependencyCollector<'a> {
     fn add_module_type(&mut self, mt: &ModuleType) {
         match &mt.pmty_desc {
             ModuleTypeDesc::Pmty_ident(lid) | ModuleTypeDesc::Pmty_alias(lid) => {
-                self.add_lident_idx(lid.txt);
+                // Module type ident/alias uses full path (OCaml: addmodule for alias, add for ident)
+                self.add_lident_idx_full(lid.txt);
             }
             ModuleTypeDesc::Pmty_signature(sig) => {
                 self.add_signature(sig);
@@ -580,13 +618,15 @@ impl<'a> DependencyCollector<'a> {
     fn add_with_constraint(&mut self, constraint: &WithConstraint) {
         match constraint {
             WithConstraint::Pwith_type(lid, td) | WithConstraint::Pwith_typesubst(lid, td) => {
+                // Type constraints use add_parent (value-level reference)
                 self.add_lident_idx(lid.txt);
                 self.add_type_declaration(td);
             }
             WithConstraint::Pwith_module(lid1, lid2)
             | WithConstraint::Pwith_modsubst(lid1, lid2) => {
-                self.add_lident_idx(lid1.txt);
-                self.add_lident_idx(lid2.txt);
+                // Module constraints use addmodule (full path)
+                self.add_lident_idx_full(lid1.txt);
+                self.add_lident_idx_full(lid2.txt);
             }
         }
     }
@@ -689,7 +729,8 @@ impl<'a> DependencyCollector<'a> {
     }
 
     fn add_open_description(&mut self, od: &OpenDescription) {
-        self.add_lident_idx(od.popen_lid.txt);
+        // Open uses full module path (like `open Array`)
+        self.add_lident_idx_full(od.popen_lid.txt);
     }
 
     fn add_include_declaration(&mut self, id: &IncludeDeclaration) {
@@ -800,6 +841,21 @@ mod tests {
 
         let deps = extract_structure_deps(&arena, &structure);
         assert!(deps.is_empty());
+    }
+
+    #[test]
+    fn test_uppercase_simple_identifier_ignored() {
+        // Test: Simple uppercase identifiers like `None` or `Some` are NOT module references
+        // OCaml's add_parent only adds the parent of dotted paths, not simple Lidents
+        let mut arena = ParseArena::default();
+        let none_idx = arena.intern_string("None");
+        let lid = Longident::lident(none_idx);
+        let expr = make_ident_expr(&mut arena, lid);
+        let structure = vec![make_eval_item(expr)];
+
+        let deps = extract_structure_deps(&arena, &structure);
+        // None is a simple identifier, not Foo.None, so it's not a module reference
+        assert!(deps.is_empty(), "Simple uppercase identifier 'None' should not be a dependency");
     }
 
     #[test]
