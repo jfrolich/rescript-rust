@@ -124,9 +124,10 @@ We need to implement the remaining transformations.
   - Note: `%debugger` still has minor position sharing differences (Phase 4 issue).
   - TODO: `%external`, `%obj`, `%re`, `%todo` still need implementation.
 
-- [ ] **Task 2.6**: Implement `@inline` let binding transformation
-  - Currently partial in Rust (helpers exist, rewrite has TODO)
-  - Transform `@inline let x = "foo"` into external with FFI inline encoding
+- [x] **Task 2.6**: Implement `@inline` let binding transformation
+  - **Done**: Transform `@inline let x = "foo"` into `Pstr_primitive` with FFI inline encoding
+  - Supports: string, int, float, and bool constants
+  - Implementation in `transform_inline_binding` in ppx.rs
 
 - [ ] **Task 2.7**: Implement async context tracking
   - OCaml: `async_context` ref and `in_function_def` ref in expr_mapper
