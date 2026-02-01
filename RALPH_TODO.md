@@ -58,7 +58,53 @@ Previously Rust was adding all uppercase identifiers, incorrectly including `Non
   - Simple Lidents (e.g., `None`, `Some`) are no longer added as dependencies
   - Only parent modules of dotted paths are now extracted
 
-### Phase 2: JSX Binary Differences (Deferred - mapper_to0 issue)
+### Phase 2: Built-in PPX Parity (Bs_builtin_ppx in Rust) - PREREQUISITE
+
+**This phase is a prerequisite for binary parity.** OCaml runs `Ppx_entry.rewrite_implementation`
+(which calls `Bs_builtin_ppx.mapper`) on the AST before saving to `.ast` files. Without these
+transformations, binary output cannot match.
+
+Currently `compiler-rust/src/binary_ast/ppx.rs` only implements **FFI external encoding**.
+We need to implement the remaining transformations.
+
+**Reference files:**
+- OCaml: `compiler/frontend/bs_builtin_ppx.ml`
+- OCaml: `compiler/frontend/ppx_entry.ml`
+- Rust: `compiler-rust/src/binary_ast/ppx.rs`
+
+- [ ] **Task 2.1**: Implement `%raw` extension point handling
+  - OCaml: `Ast_exp_handle_external.handle_raw_structure`
+  - Transforms `[%raw "..."]` into appropriate AST nodes
+  - Also handle `%%raw` at structure level
+
+- [ ] **Task 2.2**: Implement string interpolation (`j"..."` and backtick strings)
+  - OCaml: `Ast_utf8_string_interp.transform_exp` / `transform_pat`
+  - Transforms `j"hello ${name}"` into concatenation expressions
+  - Handle both expression and pattern contexts
+
+- [ ] **Task 2.3**: Implement `@deriving` transformations
+  - OCaml: `Ast_derive_projector.init()`, `Ast_derive_js_mapper.init()`
+  - `@deriving(accessors)` - generates accessor functions for variants
+  - `@deriving(jsConverter)` - generates JS conversion functions
+
+- [ ] **Task 2.4**: Implement integer literal suffix handling
+  - OCaml: `pat_mapper` and `expr_mapper` in bs_builtin_ppx.ml
+  - Transform `Pconst_integer(s, Some 'l')` → `Pconst_integer(s, None)`
+  - Handle in both patterns and expressions
+
+- [ ] **Task 2.5**: Implement `Pexp_extension` handling
+  - OCaml: `Ast_exp_extension.handle_extension`
+  - Handle various extension points: `%debugger`, `%external`, `%node`, `%obj`, etc.
+
+- [ ] **Task 2.6**: Implement `@inline` let binding transformation
+  - Currently partial in Rust (helpers exist, rewrite has TODO)
+  - Transform `@inline let x = "foo"` into external with FFI inline encoding
+
+- [ ] **Task 2.7**: Implement async context tracking
+  - OCaml: `async_context` ref and `in_function_def` ref in expr_mapper
+  - Track whether we're inside an async function for proper transformation
+
+### Phase 3: JSX Binary Differences (Deferred - mapper_to0 issue)
 
 **Note:** Per instructions, mapper_to0.rs should NOT be modified unless absolutely necessary.
 The JSX size differences are caused by list location handling in `map_jsx_children_to_list`:
@@ -68,81 +114,39 @@ The JSX size differences are caused by list location handling in `map_jsx_childr
 
 This is a mapper_to0 issue, not a parser issue. sexp-locs passes 100% for JSX.
 
-- [x] **Task 2.1**: Investigate JSX container element size difference (ANALYZED)
+- [x] **Task 3.1**: Investigate JSX container element size difference (ANALYZED)
   - Root cause: `map_jsx_children_to_list` in mapper_to0.rs uses shared locations
   - OCaml builds list with unique locations per cons cell
   - This is a mapper_to0 issue, deferred per instructions
 
-- [x] **Task 2.3**: Fix arrow function expression position sharing (DONE)
+- [x] **Task 3.2**: Fix arrow function expression position sharing (DONE)
   - Simple cases now work: `x => x`, `(x, y) => x + y`
   - Multi-parameter and async arrow functions also work
 
-### Phase 3: Systematic Position Sharing Audit
+### Phase 4: Systematic Position Sharing Audit
 
-- [ ] **Task 3.1**: Audit all expression position creation
+- [ ] **Task 4.1**: Audit all expression position creation
   - Binary expressions
   - Application expressions
   - Match/switch expressions
   - Block expressions
 
-- [ ] **Task 3.2**: Audit pattern position creation
+- [ ] **Task 4.2**: Audit pattern position creation
   - Tuple patterns
   - Record patterns
   - Array patterns
 
-- [ ] **Task 3.3**: Audit type position creation
+- [ ] **Task 4.3**: Audit type position creation
   - Arrow types with arity
   - Record type definitions
 
-### Phase 4: Validation
+### Phase 5: Validation
 
-- [ ] **Task 4.1**: Run full test suite, verify no regressions
-- [ ] **Task 4.2**: Target 500/1049 bsc-ast parity (47%)
-- [ ] **Task 4.3**: Target 750/1049 bsc-ast parity (71%)
-- [ ] **Task 4.4**: Target 1000/1049 bsc-ast parity (95%)
-- [ ] **Task 4.5**: Achieve 1049/1049 bsc-ast parity (100%)
-
-### Phase 5: Built-in PPX Parity (Bs_builtin_ppx in Rust)
-
-Currently `compiler-rust/src/binary_ast/ppx.rs` only implements **FFI external encoding**.
-To achieve full binary parity, we need to implement the remaining `Bs_builtin_ppx` transformations.
-
-**Reference files:**
-- OCaml: `compiler/frontend/bs_builtin_ppx.ml`
-- OCaml: `compiler/frontend/ppx_entry.ml`
-- Rust: `compiler-rust/src/binary_ast/ppx.rs`
-
-- [ ] **Task 5.1**: Implement `%raw` extension point handling
-  - OCaml: `Ast_exp_handle_external.handle_raw_structure`
-  - Transforms `[%raw "..."]` into appropriate AST nodes
-  - Also handle `%%raw` at structure level
-
-- [ ] **Task 5.2**: Implement string interpolation (`j"..."` and backtick strings)
-  - OCaml: `Ast_utf8_string_interp.transform_exp` / `transform_pat`
-  - Transforms `j"hello ${name}"` into concatenation expressions
-  - Handle both expression and pattern contexts
-
-- [ ] **Task 5.3**: Implement `@deriving` transformations
-  - OCaml: `Ast_derive_projector.init()`, `Ast_derive_js_mapper.init()`
-  - `@deriving(accessors)` - generates accessor functions for variants
-  - `@deriving(jsConverter)` - generates JS conversion functions
-
-- [ ] **Task 5.4**: Implement integer literal suffix handling
-  - OCaml: `pat_mapper` and `expr_mapper` in bs_builtin_ppx.ml
-  - Transform `Pconst_integer(s, Some 'l')` → `Pconst_integer(s, None)`
-  - Handle in both patterns and expressions
-
-- [ ] **Task 5.5**: Implement `Pexp_extension` handling
-  - OCaml: `Ast_exp_extension.handle_extension`
-  - Handle various extension points: `%debugger`, `%external`, `%node`, `%obj`, etc.
-
-- [ ] **Task 5.6**: Implement `@inline` let binding transformation
-  - Currently partial in Rust (helpers exist, rewrite has TODO)
-  - Transform `@inline let x = "foo"` into external with FFI inline encoding
-
-- [ ] **Task 5.7**: Implement async context tracking
-  - OCaml: `async_context` ref and `in_function_def` ref in expr_mapper
-  - Track whether we're inside an async function for proper transformation
+- [ ] **Task 5.1**: Run full test suite, verify no regressions
+- [ ] **Task 5.2**: Target 500/1049 bsc-ast parity (47%)
+- [ ] **Task 5.3**: Target 750/1049 bsc-ast parity (71%)
+- [ ] **Task 5.4**: Target 1000/1049 bsc-ast parity (95%)
+- [ ] **Task 5.5**: Achieve 1049/1049 bsc-ast parity (100%)
 
 ---
 
