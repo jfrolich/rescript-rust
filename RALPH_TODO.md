@@ -187,6 +187,8 @@ CODE_SHARED8 (single byte) for nearby positions, while Rust sometimes uses CODE_
 - `Foo.bar(x)` style calls - 4 byte difference per call
 - Module-qualified function applications
 - Underscore placeholder patterns
+- **Attribute payload expressions**: Positions in attribute payloads (e.g., `@ocaml.doc("foo")`)
+  don't share correctly with the parent structure item positions
 
 This is a low-level marshal optimization issue, not an AST structure issue.
 
