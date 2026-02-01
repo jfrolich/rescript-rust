@@ -177,9 +177,9 @@ impl<'src> Parser<'src> {
     }
 
     /// Create a location from start_pos to prev_end_pos.
-    /// Uses cached prev_end_pos_idx for the end position to enable sharing.
+    /// Uses cached positions for both start and end to enable sharing.
     pub fn mk_loc_start_to_prev_end(&mut self) -> LocIdx {
-        let start_idx = self.arena.push_position(self.start_pos);
+        let start_idx = self.push_start_pos();
         let end_idx = self.get_or_push_prev_end_pos();
         self.arena.mk_loc(start_idx, end_idx)
     }
