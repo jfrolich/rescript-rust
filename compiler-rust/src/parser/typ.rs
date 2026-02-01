@@ -242,16 +242,34 @@ fn parse_type_alias(p: &mut Parser<'_>, typ: CoreType) -> CoreType {
 
 /// Parse a type expression with optional ES6 arrow support.
 fn parse_typ_expr_inner(p: &mut Parser<'_>, es6_arrow: bool) -> CoreType {
-    // Capture start position as PosIdx to enable sharing with arrow type locations.
-    // For `string => int`, this position is shared between the arrow's location and
-    // potentially the `string` type's location.
-    let start_pos_idx = p.push_start_pos();
+    parse_typ_expr_inner_with_start(p, es6_arrow, None)
+}
+
+/// Parse a type expression with optional ES6 arrow support.
+/// `outer_start_pos_idx` is an optional PosIdx from the caller that can be reused for
+/// position sharing. When provided, it's used instead of pushing a new start position.
+fn parse_typ_expr_inner_with_start(
+    p: &mut Parser<'_>,
+    es6_arrow: bool,
+    outer_start_pos_idx: Option<crate::parse_arena::PosIdx>,
+) -> CoreType {
+    // Use the outer start position if provided, otherwise push our own.
+    // This enables position sharing with the caller's location (e.g., function type params).
+    let start_pos_idx = outer_start_pos_idx.unwrap_or_else(|| p.push_start_pos());
     let attrs = parse_type_attributes(p);
 
     if es6_arrow && super::core::is_es6_arrow_type(p) {
         parse_es6_arrow_type(p, attrs)
     } else {
-        let typ = parse_atomic_typ_expr(p, attrs.clone(), es6_arrow);
+        // Pass start_pos_idx to enable position sharing. If the type is a simple constructor
+        // (like `string` in `string => int`), it will reuse this position for its location,
+        // matching OCaml's position sharing behavior.
+        let outer_start = if attrs.is_empty() {
+            Some(start_pos_idx)
+        } else {
+            None
+        };
+        let typ = parse_atomic_typ_expr_with_start(p, attrs.clone(), es6_arrow, outer_start);
         if es6_arrow && p.token == Token::EqualGreater {
             parse_arrow_type_rest(p, typ, start_pos_idx)
         } else {
@@ -441,7 +459,14 @@ fn parse_payload(p: &mut Parser<'_>) -> Payload {
 }
 
 /// Parse an atomic type expression.
-fn parse_atomic_typ_expr(p: &mut Parser<'_>, attrs: Attributes, es6_arrow: bool) -> CoreType {
+/// `outer_start_pos_idx` is an optional PosIdx from the caller that can be reused
+/// for position sharing with simple type constructors.
+fn parse_atomic_typ_expr_with_start(
+    p: &mut Parser<'_>,
+    attrs: Attributes,
+    es6_arrow: bool,
+    outer_start_pos_idx: Option<crate::parse_arena::PosIdx>,
+) -> CoreType {
     let start_pos = p.start_pos.clone();
 
     let mut typ = match &p.token {
@@ -530,7 +555,7 @@ fn parse_atomic_typ_expr(p: &mut Parser<'_>, attrs: Attributes, es6_arrow: bool)
                 ptyp_attributes: vec![],
             }
         }
-        Token::Lident(_) | Token::Uident(_) => parse_type_constr(p),
+        Token::Lident(_) | Token::Uident(_) => parse_type_constr_with_start(p, outer_start_pos_idx),
         Token::Lparen => {
             p.next();
             // Disambiguate `( ... ) => ...` function types from parenthesized/tuple types.
@@ -591,9 +616,16 @@ fn parse_atomic_typ_expr(p: &mut Parser<'_>, attrs: Attributes, es6_arrow: bool)
                     parse_tuple_type(p, start_pos, typ)
                 } else {
                     p.expect(Token::Rparen);
-                    // OCaml includes the surrounding parentheses in the type's location
+                    // OCaml includes the surrounding parentheses in the type's location.
+                    // When outer_start_pos_idx is provided (from parse_typ_expr_inner_with_start),
+                    // use it for the parenthesized type's location start to enable position sharing
+                    // with the outer arrow type (both use the same start_pos variable in OCaml).
+                    let loc = match outer_start_pos_idx {
+                        Some(idx) => p.mk_loc_idx_to_prev_end(idx),
+                        None => p.mk_loc_to_prev_end(&start_pos),
+                    };
                     CoreType {
-                        ptyp_loc: p.mk_loc_to_prev_end(&start_pos),
+                        ptyp_loc: loc,
                         ..typ
                     }
                 }
@@ -633,16 +665,23 @@ fn parse_atomic_typ_expr(p: &mut Parser<'_>, attrs: Attributes, es6_arrow: bool)
     typ
 }
 
+/// Parse an atomic type expression (wrapper without outer start position).
+fn parse_atomic_typ_expr(p: &mut Parser<'_>, attrs: Attributes, es6_arrow: bool) -> CoreType {
+    parse_atomic_typ_expr_with_start(p, attrs, es6_arrow, None)
+}
+
 // ============================================================================
 // Type Constructor
 // ============================================================================
 
 /// Parse a type constructor (path with optional type arguments).
-fn parse_type_constr(p: &mut Parser<'_>) -> CoreType {
-    // Push start position ONCE and reuse the PosIdx for both lid_loc and ptyp_loc.
-    // This matches OCaml's position sharing where both locations use the same
-    // start_pos variable reference.
-    let start_pos_idx = p.push_start_pos();
+/// `outer_start_pos_idx` is an optional PosIdx from the caller that can be reused
+/// for position sharing (e.g., when the caller has already pushed a start position
+/// at the same coordinate).
+fn parse_type_constr_with_start(p: &mut Parser<'_>, outer_start_pos_idx: Option<crate::parse_arena::PosIdx>) -> CoreType {
+    // Use the outer start position if provided, otherwise push our own.
+    // This enables position sharing with the caller's location (e.g., arrow type location).
+    let start_pos_idx = outer_start_pos_idx.unwrap_or_else(|| p.push_start_pos());
 
     // Parse the path
     let mut path_parts = vec![];
@@ -689,6 +728,11 @@ fn parse_type_constr(p: &mut Parser<'_>) -> CoreType {
     let ptyp_end_idx = p.get_or_push_prev_end_pos();
     let ptyp_loc = p.mk_loc_idx(start_pos_idx, ptyp_end_idx);
     ast_helper::make_type_constr(lid_idx, args, lid_loc, ptyp_loc)
+}
+
+/// Parse a type constructor (path with optional type arguments).
+fn parse_type_constr(p: &mut Parser<'_>) -> CoreType {
+    parse_type_constr_with_start(p, None)
 }
 
 /// Parse type arguments.
@@ -784,7 +828,15 @@ fn parse_function_type(p: &mut Parser<'_>, start_pos: crate::location::Position)
             let name_idx = p.arena_mut().push_string(name);
             (ArgLabel::Labelled(Located::new(name_idx, name_loc)), typ)
         } else {
-            let typ = parse_typ_expr(p);
+            // For unlabeled parameters, share param_start_idx with the type's location.
+            // This matches OCaml's position sharing where both the arrow and the type
+            // use the same start_pos variable reference.
+            // But only when there are no attributes and no uncurried marker - when these
+            // are present, the type should have its natural location, and ptyp_loc
+            // is adjusted later to include attrs/dot.
+            let outer_start = if param_attrs.is_empty() && !has_dot { Some(param_start_idx) } else { None };
+            let typ = parse_typ_expr_inner_with_start(p, true, outer_start);
+            let typ = parse_type_alias(p, typ);
             (ArgLabel::Nolabel, typ)
         };
 

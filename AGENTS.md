@@ -654,6 +654,8 @@ When the Rust printer output differs from OCaml, common issues include:
 
 **These are the primary tests for verifying Rust compiler parity with OCaml.**
 
+**IMPORTANT**: These parity test scripts take a long time to run (several minutes). Do NOT run them multiple times to get different parts of the output - capture all output in a single run. For debugging individual files, use the single-file mode or direct comparison commands instead.
+
 There are two parity test scripts:
 
 1. **`test_parser_ast_parity.sh`** - Tests AST parity (parser and compiler output)
