@@ -952,7 +952,12 @@ fn sexp_core_type(arena: &ParseArena, ctx: &TypeContext<'_>, with_locs: bool, ct
         vec![]
     };
     let desc = sexp_core_type_desc(arena, ctx, with_locs, &ct.ctyp_desc);
-    let ty = sexp_type_expr(arena, ctx, ct.ctyp_type);
+    // If ctyp_type is a placeholder (0), derive type from ctyp_desc instead
+    let ty = if ct.ctyp_type.0 == 0 {
+        sexp_type_from_core_type_desc(&ct.ctyp_desc)
+    } else {
+        sexp_type_expr(arena, ctx, ct.ctyp_type)
+    };
     let attrs = sexp_attributes(with_locs, &ct.ctyp_attributes);
 
     let mut items = vec![Sexp::atom("core_type")];
@@ -961,6 +966,30 @@ fn sexp_core_type(arena: &ParseArena, ctx: &TypeContext<'_>, with_locs: bool, ct
     items.push(Sexp::list(vec![Sexp::atom("type"), ty]));
     items.push(attrs);
     Sexp::list(items)
+}
+
+/// Derive a type sexp from a core type description (for placeholder types in signatures)
+fn sexp_type_from_core_type_desc(desc: &TypedCoreTypeDesc) -> Sexp {
+    match desc {
+        TypedCoreTypeDesc::Ttyp_constr(path, _, _) => {
+            // Output Tconstr with the path from the core type
+            Sexp::list(vec![
+                Sexp::atom("Tconstr"),
+                sexp_path(path),
+                Sexp::list(vec![]), // Empty type arguments for now
+            ])
+        }
+        TypedCoreTypeDesc::Ttyp_var(Some(name)) => {
+            Sexp::list(vec![Sexp::atom("Tvar"), Sexp::list(vec![Sexp::atom("Some"), string(name)])])
+        }
+        TypedCoreTypeDesc::Ttyp_var(None) => {
+            Sexp::list(vec![Sexp::atom("Tvar"), Sexp::atom("None")])
+        }
+        _ => {
+            // Fallback for other types - output a placeholder
+            Sexp::list(vec![Sexp::atom("Tvar"), Sexp::atom("None")])
+        }
+    }
 }
 
 fn sexp_core_type_desc(arena: &ParseArena, ctx: &TypeContext<'_>, with_locs: bool, desc: &TypedCoreTypeDesc) -> Sexp {

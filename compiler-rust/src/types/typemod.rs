@@ -116,9 +116,8 @@ fn transl_modtype(arena: &ParseArena, mty: &crate::parser::ast::ModuleType) -> M
 
     let desc = match &mty.pmty_desc {
         PMty::Pmty_signature(items) => {
-            // For now, create an empty signature - full translation would process items
-            let _ = items; // Acknowledge but don't process yet
-            TMty::Tmty_signature(Signature::empty())
+            let sig_items = items.iter().map(|item| transl_signature_item(arena, item)).collect();
+            TMty::Tmty_signature(Signature::new(sig_items))
         }
         PMty::Pmty_ident(lid) => {
             let path = path_from_longident(
@@ -145,6 +144,201 @@ fn transl_modtype(arena: &ParseArena, mty: &crate::parser::ast::ModuleType) -> M
     };
 
     ModuleType::new(desc, mty.pmty_loc, mty.pmty_attributes.clone())
+}
+
+/// Translate a parsed signature item to a typed signature item.
+fn transl_signature_item(arena: &ParseArena, item: &crate::parser::ast::SignatureItem) -> crate::types::typedtree::SignatureItem {
+    use crate::parser::ast::SignatureItemDesc as Psig;
+    use crate::types::typedtree::{SignatureItem, SignatureItemDesc as Tsig};
+
+    let desc = match &item.psig_desc {
+        Psig::Psig_value(vd) => {
+            // Translate value description
+            let typed_vd = transl_value_description(arena, vd);
+            Tsig::Tsig_value(typed_vd)
+        }
+        Psig::Psig_type(flag, decls) => {
+            // Translate type declarations
+            let typed_decls: Vec<_> = decls.iter().map(|d| transl_type_declaration_for_sig(arena, d)).collect();
+            Tsig::Tsig_type(*flag, typed_decls)
+        }
+        Psig::Psig_modtype(mtd) => {
+            // Translate module type declaration
+            let typed_mtd = transl_module_type_declaration(arena, mtd);
+            Tsig::Tsig_modtype(typed_mtd)
+        }
+        Psig::Psig_module(md) => {
+            // Translate module declaration
+            let typed_md = transl_module_declaration(arena, md);
+            Tsig::Tsig_module(typed_md)
+        }
+        // For now, other items produce placeholder values
+        _ => {
+            // Return a placeholder attribute for unhandled cases
+            Tsig::Tsig_attribute((
+                crate::parse_arena::Located { txt: "todo".to_string(), loc: item.psig_loc },
+                crate::parser::ast::Payload::PStr(vec![]),
+            ))
+        }
+    };
+
+    SignatureItem {
+        sig_desc: desc,
+        sig_loc: item.psig_loc,
+    }
+}
+
+/// Translate a value description from the parse tree to typed tree.
+fn transl_value_description(_arena: &ParseArena, vd: &crate::parser::ast::ValueDescription) -> TypedValueDescription {
+    use crate::types::typedtree::TypedValueDescription;
+
+    // Translate the core type
+    let typed_ctyp = transl_core_type(_arena, &vd.pval_type);
+
+    TypedValueDescription {
+        val_id: Ident::create_local(&vd.pval_name.txt),
+        val_name: crate::parse_arena::Located {
+            txt: vd.pval_name.txt.clone(),
+            loc: vd.pval_name.loc,
+        },
+        val_desc: typed_ctyp,
+        val_prim: vd.pval_prim.clone(),
+        val_attributes: vd.pval_attributes.clone(),
+        val_loc: vd.pval_loc,
+    }
+}
+
+/// Translate a type declaration for a signature.
+fn transl_type_declaration_for_sig(arena: &ParseArena, td: &crate::parser::ast::TypeDeclaration) -> TypedTypeDeclaration {
+    use crate::types::decl::{TypeDeclaration as InternalDecl, TypeKind, UnboxedStatus};
+    use crate::types::asttypes::PrivateFlag as TypesPrivateFlag;
+    use crate::parser::ast::PrivateFlag as ParserPrivateFlag;
+
+    // Convert parser PrivateFlag to types PrivateFlag
+    let private_flag = match td.ptype_private {
+        ParserPrivateFlag::Private => TypesPrivateFlag::Private,
+        ParserPrivateFlag::Public => TypesPrivateFlag::Public,
+    };
+
+    // Create a placeholder internal type declaration
+    let internal_decl = InternalDecl {
+        type_params: vec![],
+        type_arity: 0,
+        type_kind: TypeKind::TypeAbstract,
+        type_private: private_flag,
+        type_manifest: None,
+        type_variance: vec![],
+        type_newtype_level: None,
+        type_loc: Location::none(),
+        type_attributes: vec![],
+        type_immediate: false,
+        type_unboxed: UnboxedStatus { unboxed: false, default: true },
+        type_inlined_types: vec![],
+    };
+
+    TypedTypeDeclaration {
+        typ_id: Ident::create_local(&td.ptype_name.txt),
+        typ_name: crate::parse_arena::Located {
+            txt: td.ptype_name.txt.clone(),
+            loc: td.ptype_name.loc,
+        },
+        typ_params: vec![], // TODO: translate type parameters
+        typ_type: internal_decl,
+        typ_cstrs: vec![],
+        typ_kind: TypedTypeKind::Ttype_abstract,
+        typ_private: td.ptype_private,
+        typ_manifest: td.ptype_manifest.as_ref().map(|ct| transl_core_type(arena, ct)),
+        typ_loc: td.ptype_loc,
+        typ_attributes: td.ptype_attributes.clone(),
+    }
+}
+
+/// Translate a module type declaration.
+fn transl_module_type_declaration(arena: &ParseArena, mtd: &crate::parser::ast::ModuleTypeDeclaration) -> crate::types::typedtree::ModuleTypeDeclaration {
+    use crate::types::typedtree::ModuleTypeDeclaration;
+
+    ModuleTypeDeclaration {
+        mtd_id: Ident::create_local(&mtd.pmtd_name.txt),
+        mtd_name: crate::parse_arena::Located {
+            txt: mtd.pmtd_name.txt.clone(),
+            loc: mtd.pmtd_name.loc,
+        },
+        mtd_type: mtd.pmtd_type.as_ref().map(|mt| transl_modtype(arena, mt)),
+        mtd_attributes: mtd.pmtd_attributes.clone(),
+        mtd_loc: mtd.pmtd_loc,
+    }
+}
+
+/// Translate a module declaration (for signatures).
+fn transl_module_declaration(arena: &ParseArena, md: &crate::parser::ast::ModuleDeclaration) -> crate::types::typedtree::TypedModuleDeclaration {
+    use crate::types::typedtree::TypedModuleDeclaration;
+
+    TypedModuleDeclaration {
+        md_id: Ident::create_local(&md.pmd_name.txt),
+        md_name: crate::parse_arena::Located {
+            txt: md.pmd_name.txt.clone(),
+            loc: md.pmd_name.loc,
+        },
+        md_type: transl_modtype(arena, &md.pmd_type),
+        md_attributes: md.pmd_attributes.clone(),
+        md_loc: md.pmd_loc,
+    }
+}
+
+/// Translate a core type from parse tree to typed tree.
+fn transl_core_type(arena: &ParseArena, ct: &crate::parser::ast::CoreType) -> TypedCoreType {
+    use crate::parser::ast::CoreTypeDesc as PCt;
+    use crate::types::typedtree::{TypedCoreTypeDesc as TCt, ArrowArg, EnvRef};
+    use crate::types::type_expr::TypeExprRef;
+
+    let desc = match &ct.ptyp_desc {
+        PCt::Ptyp_constr(lid, args) => {
+            let path = path_from_longident(
+                arena.get_longident(lid.txt),
+                |s| arena.get_string(s),
+            );
+            let typed_args: Vec<_> = args.iter().map(|a| transl_core_type(arena, a)).collect();
+            TCt::Ttyp_constr(path, *lid, typed_args)
+        }
+        PCt::Ptyp_arrow { arg, ret, arity } => {
+            let typed_arg = transl_core_type(arena, &arg.typ);
+            let typed_ret = Box::new(transl_core_type(arena, ret));
+            let arrow_arg = ArrowArg {
+                attrs: arg.attrs.clone(),
+                lbl: arg.lbl.clone(),
+                typ: Box::new(typed_arg),
+            };
+            // Convert Arity to Option<i32>
+            let arity_opt = match arity {
+                crate::parser::ast::Arity::Full(n) => Some(*n as i32),
+                crate::parser::ast::Arity::Unknown => None,
+            };
+            TCt::Ttyp_arrow(arrow_arg, typed_ret, arity_opt)
+        }
+        PCt::Ptyp_var(name) => {
+            TCt::Ttyp_var(Some(name.clone()))
+        }
+        PCt::Ptyp_any => TCt::Ttyp_var(None),
+        PCt::Ptyp_tuple(types) => {
+            let typed_types: Vec<_> = types.iter().map(|t| transl_core_type(arena, t)).collect();
+            TCt::Ttyp_tuple(typed_types)
+        }
+        PCt::Ptyp_poly(vars, body) => {
+            let typed_body = Box::new(transl_core_type(arena, body));
+            let typed_vars: Vec<_> = vars.iter().map(|v| v.txt.clone()).collect();
+            TCt::Ttyp_poly(typed_vars, typed_body)
+        }
+        // For other cases, use a placeholder
+        _ => TCt::Ttyp_var(None),
+    };
+
+    TypedCoreType {
+        ctyp_desc: desc,
+        ctyp_type: TypeExprRef(0), // Placeholder - no resolved type in this context
+        ctyp_env: EnvRef(0),
+        ctyp_loc: ct.ptyp_loc,
+        ctyp_attributes: ct.ptyp_attributes.clone(),
+    }
 }
 
 // ============================================================================
