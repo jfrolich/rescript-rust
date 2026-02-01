@@ -796,7 +796,13 @@ fn parse_function_type(p: &mut Parser<'_>, start_pos: crate::location::Position)
 
         // Now capture the start position for the arrow - AFTER doc comments but BEFORE @-attrs
         // This matches OCaml: let start_pos = p.Parser.start_pos in
-        let post_doc_start = p.start_pos.clone();
+        //
+        // IMPORTANT: Push to arena BEFORE parsing attributes, so that parse_attribute
+        // can reuse the same PosIdx via the start_pos cache. In OCaml, both the type
+        // parameter's start_pos and the attribute's location start point to the same
+        // position object (pointer equality).
+        let post_doc_start_idx = p.push_start_pos();
+        let post_doc_start = p.start_pos.clone(); // Keep Position for later checks
 
         // Parse regular @-style attributes
         let regular_attrs = parse_regular_attributes(p);
@@ -808,14 +814,14 @@ fn parse_function_type(p: &mut Parser<'_>, start_pos: crate::location::Position)
         // But if there's an uncurried marker (.), the arrow should start at the .
         // The uncurried marker takes precedence over @-attributes for the start position
         // Doc comments do NOT affect the arrow start position
-        // Push as PosIdx to enable position sharing in arrow locations.
         let has_regular_attrs = param_attrs.iter().any(|(name, _)| p.arena().get_string(name.txt) != "res.doc");
         let param_start_idx = if has_dot {
             // For uncurried parameters, OCaml includes the . in arrow location
             p.arena_mut().push_position(uncurried_start)
         } else if has_regular_attrs {
             // If there are @-attributes (but no uncurried marker), start at the attribute
-            p.arena_mut().push_position(post_doc_start)
+            // Use the already-pushed PosIdx for sharing with attribute location
+            post_doc_start_idx
         } else {
             p.push_start_pos()
         };
@@ -957,11 +963,13 @@ fn parse_function_type(p: &mut Parser<'_>, start_pos: crate::location::Position)
     };
     let total_arity = params.len() - as_underscore_count;
 
-    // Build the arrow type from right to left, tracking the end position as PosIdx for sharing
-    // The first iteration uses prev_end_pos (cached to share with return type's loc_end),
-    // subsequent iterations use the arrow's end
+    // Build the arrow type from right to left.
+    // In OCaml (res_core.ml:4735-4740), ALL arrow locations use the SAME end_pos:
+    //   let end_pos = p.prev_end_pos in
+    //   List.fold_right (fun ... -> let loc = mk_loc start_pos end_pos in ...)
+    // So we capture end_pos_idx once and reuse it for all arrows.
     let mut acc = return_type;
-    let mut end_pos_idx = p.get_or_push_prev_end_pos();
+    let end_pos_idx = p.get_or_push_prev_end_pos();
     for (param, param_start_idx) in params.into_iter().rev() {
         // Each arrow's location spans from the label (if any) to the end of return
         // OCaml includes the ~ in the location for labeled arguments
@@ -976,8 +984,6 @@ fn parse_function_type(p: &mut Parser<'_>, start_pos: crate::location::Position)
             ptyp_loc: arrow_loc,
             ptyp_attributes: vec![],
         };
-        // Next iteration should use this arrow's end position (share via LocIdx lookup)
-        end_pos_idx = p.arena().get_location(arrow.ptyp_loc).loc_end;
         acc = arrow;
     }
     let result = acc;
@@ -997,9 +1003,8 @@ fn parse_function_type(p: &mut Parser<'_>, start_pos: crate::location::Position)
     };
 
     // The outermost arrow should start at start_pos (the opening paren) not at first arg
-    // Reuse the end position from the result's location for sharing
+    // Reuse the same end_pos_idx that all inner arrows used (OCaml position sharing)
     let start_pos_idx = p.arena_mut().push_position(start_pos);
-    let end_pos_idx = p.arena().get_location(result.ptyp_loc).loc_end;
     CoreType {
         ptyp_loc: p.mk_loc_idx(start_pos_idx, end_pos_idx),
         ..result
@@ -1065,12 +1070,16 @@ fn parse_attribute(p: &mut Parser<'_>) -> Option<Attribute> {
     if p.token != Token::At {
         return None;
     }
-    // Capture position before @ so attribute location includes it
-    let start_pos = p.start_pos.clone();
+    // Use push_start_pos() to get a cached PosIdx for position sharing.
+    // In OCaml, when parsing type parameters with attributes, both the
+    // parameter's start_pos and the attribute's location start point to the
+    // same position object (pointer equality). Using the cache ensures we
+    // get the same PosIdx if someone else already captured this position.
+    let start_pos_idx = p.push_start_pos();
     p.next();
 
     let attr_id_str = parse_attribute_id(p);
-    let attr_id = with_loc(attr_id_str, p.mk_loc_to_prev_end(&start_pos));
+    let attr_id = with_loc(attr_id_str, p.mk_loc_idx_to_prev_end(start_pos_idx));
 
     // Only parse Lparen as payload if it's immediately adjacent to the attribute ID
     let is_adjacent = p.start_pos.cnum == p.prev_end_pos.cnum;
@@ -1092,11 +1101,15 @@ fn parse_attribute_payload(p: &mut Parser<'_>) -> Payload {
         Token::String(s) => {
             let value = s.clone();
             let tag = get_string_tag(p);
-            // IMPORTANT: Create separate locations for expression and structure_item
-            // to match OCaml's allocation pattern (each gets its own Location object)
-            let pexp_loc = p.mk_loc_current();
-            let pstr_loc = p.mk_loc_current();
+            // Capture start_pos before consuming the token
+            let start_pos = p.start_pos.clone();
             p.next();
+            // IMPORTANT: Create separate locations for expression and structure_item
+            // to match OCaml's allocation pattern (each gets its own Location object).
+            // OCaml uses prev_end_pos after consuming the token, not end_pos before.
+            // Both locations share the same start and end positions via caching.
+            let pexp_loc = p.mk_loc_to_prev_end(&start_pos);
+            let pstr_loc = p.mk_loc_to_prev_end(&start_pos);
             // Create Pstr_eval(Pexp_constant(Pconst_string(s, tag)))
             let expr = Expression {
                 pexp_desc: ExpressionDesc::Pexp_constant(Constant::String(value, tag)),
