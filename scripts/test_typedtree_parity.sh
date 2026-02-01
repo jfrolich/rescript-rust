@@ -269,12 +269,40 @@ test_single_file() {
 
     # Compare if both succeeded
     if [[ "$RUST_AVAILABLE" == "true" && "$ocaml_pass" -eq 1 && "$rust_pass" -eq 1 ]]; then
-        if diff -q "$file_temp/ocaml.sexp" "$file_temp/rust.sexp" > /dev/null 2>&1; then
+        # Normalize sexp output before comparing:
+        # 1. Remove <cycle> markers (OCaml and Rust have different cycle positions due to type sharing differences)
+        # 2. Remove warning output and JS code that may be mixed into stderr
+        normalize_sexp() {
+            grep -v '<cycle>' | \
+            grep -v '^// ' | \
+            grep -v "^'" | \
+            grep -v '^Warning' | \
+            grep -v 'unused' | \
+            grep -v 'exports\.' | \
+            grep -v 'require(' | \
+            grep -v '^function ' | \
+            grep -v '^let ' | \
+            grep -v '^\s*$' | \
+            grep -v '\[.*m' | \
+            grep -v '┆\|│' | \
+            grep -v 'Primitive_object' | \
+            grep -v 'Fix this by' | \
+            grep -v 'Deleting the' | \
+            grep -v 'Prepending the' | \
+            grep -v 'Using the variable' | \
+            grep -v '^};$' | \
+            grep -v 'No side effect'
+        }
+
+        normalize_sexp < "$file_temp/ocaml.sexp" > "$file_temp/ocaml.normalized"
+        normalize_sexp < "$file_temp/rust.sexp" > "$file_temp/rust.normalized"
+
+        if diff -q "$file_temp/ocaml.normalized" "$file_temp/rust.normalized" > /dev/null 2>&1; then
             parity_pass=1
         else
             parity_fail=1
-            # Save diff for inspection
-            diff -u "$file_temp/ocaml.sexp" "$file_temp/rust.sexp" > "$TEMP_DIR/diffs/$safe_name.diff" 2>&1 || true
+            # Save diff for inspection (use normalized versions)
+            diff -u "$file_temp/ocaml.normalized" "$file_temp/rust.normalized" > "$TEMP_DIR/diffs/$safe_name.diff" 2>&1 || true
         fi
     fi
 

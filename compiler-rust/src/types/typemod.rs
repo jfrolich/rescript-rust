@@ -28,7 +28,7 @@ use crate::types::typedtree::{
     ModuleExprDesc, ModuleType, ModuleTypeDeclaration, OpenDeclaration, Structure,
     StructureItem, StructureItemDesc, TypeExtension, ValueBinding,
     TypedTypeDeclaration, TypedTypeKind, TypedConstructorDeclaration, TypedConstructorArguments,
-    TypedLabelDeclaration, TypedCoreType, TypedCoreTypeDesc,
+    TypedLabelDeclaration, TypedCoreType, TypedCoreTypeDesc, TypedValueDescription,
 };
 use crate::types::Variance as TypesVariance;
 use crate::parser::ast::Variance as ParserVariance;
@@ -103,6 +103,48 @@ fn path_from_longident<'a>(lid: &Longident, get_str: impl Fn(StrIdx) -> &'a str 
             Path::papply(functor_path, arg_path)
         }
     }
+}
+
+// ============================================================================
+// Module Type Translation
+// ============================================================================
+
+/// Translate a parsed module type to a typed module type.
+fn transl_modtype(arena: &ParseArena, mty: &crate::parser::ast::ModuleType) -> ModuleType {
+    use crate::parser::ast::ModuleTypeDesc as PMty;
+    use crate::types::typedtree::{ModuleTypeDesc as TMty, Signature};
+
+    let desc = match &mty.pmty_desc {
+        PMty::Pmty_signature(items) => {
+            // For now, create an empty signature - full translation would process items
+            let _ = items; // Acknowledge but don't process yet
+            TMty::Tmty_signature(Signature::empty())
+        }
+        PMty::Pmty_ident(lid) => {
+            let path = path_from_longident(
+                arena.get_longident(lid.txt),
+                |s| arena.get_string(s),
+            );
+            TMty::Tmty_ident(path, *lid)
+        }
+        PMty::Pmty_functor(name, param, result) => {
+            let param_id = Ident::create_local(&name.txt);
+            let typed_param = param.as_ref().map(|p| Box::new(transl_modtype(arena, p)));
+            let typed_result = Box::new(transl_modtype(arena, result));
+            TMty::Tmty_functor(
+                param_id,
+                crate::parse_arena::Located { txt: name.txt.clone(), loc: name.loc },
+                typed_param,
+                typed_result,
+            )
+        }
+        _ => {
+            // For other cases, use a placeholder signature
+            TMty::Tmty_signature(Signature::empty())
+        }
+    };
+
+    ModuleType::new(desc, mty.pmty_loc, mty.pmty_attributes.clone())
 }
 
 // ============================================================================
@@ -245,11 +287,14 @@ pub fn type_module_expr<'a>(
             // Constrained module: (ME: MT)
             let typed_mod = type_module_expr(tctx, env, arena, mod_expr_inner)?;
 
+            // Translate the module type constraint
+            let typed_mty = transl_modtype(arena, mod_type);
+
             Ok(ModuleExpr {
                 mod_desc: ModuleExprDesc::Tmod_constraint(
                     Box::new(typed_mod),
-                    ModuleType::placeholder(),
-                    crate::types::typedtree::ModuleTypeConstraint::Tmodtype_implicit,
+                    typed_mty.clone(),
+                    crate::types::typedtree::ModuleTypeConstraint::Tmodtype_explicit(Box::new(typed_mty)),
                     ModuleCoercion::Tcoerce_none,
                 ),
                 mod_loc: loc,
@@ -362,16 +407,26 @@ fn type_structure_item<'a>(
             ))
         }
 
-        ParsedStructureItemDesc::Pstr_primitive(_vd) => {
+        ParsedStructureItemDesc::Pstr_primitive(vd) => {
             // Primitive declaration: external f : t = "..."
-            // Full implementation would register the primitive
-            let desc = StructureItemDesc::Tstr_primitive(crate::types::ValueDescription {
-                val_type: tctx.type_ctx.new_var(None),
-                val_kind: crate::types::ValueKind::ValReg,
-                val_loc: arena.to_location(loc),
-                val_attributes: vec![],
-                val_path: None,
-            });
+            let val_id = Ident::create_persistent(&vd.pval_name.txt);
+
+            // Translate the core type
+            let (typed_core_type, _type_ref) = transl_type(tctx, env, &vd.pval_type)?;
+
+            let typed_vd = TypedValueDescription {
+                val_id,
+                val_name: crate::parse_arena::Located {
+                    txt: vd.pval_name.txt.clone(),
+                    loc: vd.pval_name.loc,
+                },
+                val_desc: typed_core_type,
+                val_prim: vd.pval_prim.clone(),
+                val_attributes: vd.pval_attributes.clone(),
+                val_loc: loc,
+            };
+
+            let desc = StructureItemDesc::Tstr_primitive(typed_vd);
             Ok((
                 StructureItem {
                     str_desc: desc,

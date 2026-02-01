@@ -19,6 +19,7 @@
 //! one per compilation unit.
 
 use super::asttypes::ArgLabel;
+use crate::ident::Ident;
 use super::path::Path;
 use super::type_expr::{
     AbbrevMemo, AbbrevMemoRef, Commutable, CommutableRef, FieldKind, FieldKindRef, GENERIC_LEVEL,
@@ -101,6 +102,16 @@ pub struct TypeContext<'a> {
 
     /// Field kind storage
     field_kinds: RefCell<Vec<&'a RefCell<Option<FieldKind>>>>,
+
+    /// Cached primitive types for consistent identity
+    /// This ensures that all references to e.g. `int` within a type checking
+    /// session use the same TypeExprRef, matching OCaml's behavior.
+    cached_int: Cell<Option<TypeExprRef>>,
+    cached_string: Cell<Option<TypeExprRef>>,
+    cached_float: Cell<Option<TypeExprRef>>,
+    cached_char: Cell<Option<TypeExprRef>>,
+    cached_bool: Cell<Option<TypeExprRef>>,
+    cached_unit: Cell<Option<TypeExprRef>>,
 }
 
 impl<'a> TypeContext<'a> {
@@ -122,6 +133,12 @@ impl<'a> TypeContext<'a> {
             types: RefCell::new(Vec::new()),
             abbrevs: RefCell::new(Vec::new()),
             row_fields: RefCell::new(Vec::new()),
+            cached_int: Cell::new(None),
+            cached_string: Cell::new(None),
+            cached_float: Cell::new(None),
+            cached_char: Cell::new(None),
+            cached_bool: Cell::new(None),
+            cached_unit: Cell::new(None),
             commutables: RefCell::new(Vec::new()),
             field_kinds: RefCell::new(Vec::new()),
         }
@@ -197,6 +214,95 @@ impl<'a> TypeContext<'a> {
     pub fn new_constr(&self, path: Path, args: Vec<TypeExprRef>) -> TypeExprRef {
         let abbrev = self.alloc_abbrev(AbbrevMemo::Mnil);
         self.new_type(TypeDesc::Tconstr { path, args, abbrev })
+    }
+
+    // ========================================================================
+    // Cached Primitive Types
+    // ========================================================================
+
+    /// Get or create the int type. Returns the same TypeExprRef for all calls
+    /// within this type checking session.
+    pub fn type_int(&self) -> TypeExprRef {
+        if let Some(ty) = self.cached_int.get() {
+            ty
+        } else {
+            let ty = self.new_constr(
+                Path::pident(Ident::create_persistent("int")),
+                vec![],
+            );
+            self.cached_int.set(Some(ty));
+            ty
+        }
+    }
+
+    /// Get or create the string type.
+    pub fn type_string(&self) -> TypeExprRef {
+        if let Some(ty) = self.cached_string.get() {
+            ty
+        } else {
+            let ty = self.new_constr(
+                Path::pident(Ident::create_persistent("string")),
+                vec![],
+            );
+            self.cached_string.set(Some(ty));
+            ty
+        }
+    }
+
+    /// Get or create the float type.
+    pub fn type_float(&self) -> TypeExprRef {
+        if let Some(ty) = self.cached_float.get() {
+            ty
+        } else {
+            let ty = self.new_constr(
+                Path::pident(Ident::create_persistent("float")),
+                vec![],
+            );
+            self.cached_float.set(Some(ty));
+            ty
+        }
+    }
+
+    /// Get or create the char type.
+    pub fn type_char(&self) -> TypeExprRef {
+        if let Some(ty) = self.cached_char.get() {
+            ty
+        } else {
+            let ty = self.new_constr(
+                Path::pident(Ident::create_persistent("char")),
+                vec![],
+            );
+            self.cached_char.set(Some(ty));
+            ty
+        }
+    }
+
+    /// Get or create the bool type.
+    pub fn type_bool(&self) -> TypeExprRef {
+        if let Some(ty) = self.cached_bool.get() {
+            ty
+        } else {
+            let ty = self.new_constr(
+                Path::pident(Ident::create_persistent("bool")),
+                vec![],
+            );
+            self.cached_bool.set(Some(ty));
+            ty
+        }
+    }
+
+    /// Get or create the unit type.
+    pub fn type_unit(&self) -> TypeExprRef {
+        if let Some(ty) = self.cached_unit.get() {
+            ty
+        } else {
+            let ty = self.new_constr(
+                Path::pident(Ident::create_persistent("unit")),
+                vec![],
+            );
+            self.cached_unit.set(Some(ty));
+            ty
+        }
     }
 
     /// Create a link type (for unification).

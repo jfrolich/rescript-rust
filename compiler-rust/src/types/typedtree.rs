@@ -653,7 +653,7 @@ pub enum StructureItemDesc {
     /// Value binding: `let P = E`.
     Tstr_value(RecFlag, Vec<ValueBinding>),
     /// Primitive declaration: `external f : t = "..."`.
-    Tstr_primitive(TypesValueDescription),
+    Tstr_primitive(TypedValueDescription),
     /// Type declaration: `type t = ...`.
     Tstr_type(RecFlag, Vec<TypedTypeDeclaration>),
     /// Type extension: `type t += ...`.

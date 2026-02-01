@@ -3505,38 +3505,38 @@ pub fn type_binding<'a>(
 impl Env {
     /// Get the int type.
     pub fn type_int(&self, ctx: &TypeContext<'_>) -> TypeExprRef {
-        // In a real implementation, this would look up the predef type
-        ctx.new_constr(Path::pident(Ident::create_persistent("int")), vec![])
+        ctx.type_int()
     }
 
     /// Get the char type.
     pub fn type_char(&self, ctx: &TypeContext<'_>) -> TypeExprRef {
-        ctx.new_constr(Path::pident(Ident::create_persistent("char")), vec![])
+        ctx.type_char()
     }
 
     /// Get the string type.
     pub fn type_string(&self, ctx: &TypeContext<'_>) -> TypeExprRef {
-        ctx.new_constr(Path::pident(Ident::create_persistent("string")), vec![])
+        ctx.type_string()
     }
 
     /// Get the float type.
     pub fn type_float(&self, ctx: &TypeContext<'_>) -> TypeExprRef {
-        ctx.new_constr(Path::pident(Ident::create_persistent("float")), vec![])
+        ctx.type_float()
     }
 
     /// Get the bigint type.
     pub fn type_bigint(&self, ctx: &TypeContext<'_>) -> TypeExprRef {
+        // bigint is not cached since it's less common
         ctx.new_constr(Path::pident(Ident::create_persistent("bigint")), vec![])
     }
 
     /// Get the unit type.
     pub fn type_unit(&self, ctx: &TypeContext<'_>) -> TypeExprRef {
-        ctx.new_constr(Path::pident(Ident::create_persistent("unit")), vec![])
+        ctx.type_unit()
     }
 
     /// Get the bool type.
     pub fn type_bool(&self, ctx: &TypeContext<'_>) -> TypeExprRef {
-        ctx.new_constr(Path::pident(Ident::create_persistent("bool")), vec![])
+        ctx.type_bool()
     }
 
     /// Get the array type.

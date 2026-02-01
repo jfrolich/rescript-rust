@@ -1,0 +1,126 @@
+# Typedtree Parity Plan: Achieving 50%+ Parity
+
+## Current Status
+- Parity: **44/102 files (43%)**
+- Target: **52/102 files (51%)**
+- Need: **8+ more files passing**
+
+## Analysis Summary
+
+### Root Causes Identified (by impact)
+
+#### 1. **QUICK WIN: Tstr_primitive not outputting value_description** (~9 files)
+**Affected files:**
+- external_abstract_function_arity.res
+- gentTypeReTest
+- gpr_1539_test
+- gpr_3519_test
+- gpr_658
+- mocha
+- node_assert
+- reactDOMServer
+- reactEvent
+
+**Problem:** Line 1550-1552 in `sexp_typedtree.rs` outputs `<value_description>` placeholder instead of actual content.
+
+**Fix complexity:** MEDIUM - need to create `sexp_types_value_description` function for `TypesValueDescription`, similar to existing `sexp_typed_value_description` for `TypedValueDescription`.
+
+**File:** `compiler-rust/src/types/sexp_typedtree.rs`
+
+---
+
+#### 2. **Cycle ordering in Tarrow types** (~22 files, 2 PURE)
+**PURE cycle ordering (easy wins):**
+- float_record
+- test_dup_param
+
+**Problem:** When outputting `Tarrow` types, the order of `<cycle>` vs the actual type is swapped between OCaml and Rust.
+
+**Example diff:**
+```diff
+-              <cycle>
+               (Tvar
+                 None)
++              <cycle>
+```
+
+**Fix complexity:** LOW - adjust cycle detection/output order in sexp_type_expr.
+
+---
+
+#### 3. **Tvar None vs Tvar (Some "a")** (35 files)
+**Problem:** Type variables are losing their names during translation.
+
+**Fix complexity:** MEDIUM - need to investigate type variable handling.
+
+---
+
+#### 4. **Texp_match vs Texp_let transformation** (5 files)
+**Problem:** Record patterns are being transformed differently.
+
+**Affected files:**
+- b.res
+- others with record pattern matching
+
+**Fix complexity:** HIGH - involves pattern matching compilation.
+
+---
+
+#### 5. **Ttuple handling** (7 files)
+**Problem:** Tuple patterns/types handled differently.
+
+---
+
+#### 6. **Module expressions (Tmod_)** (13 files)
+**Problem:** Module expression handling incomplete.
+
+---
+
+## Prioritized Action Plan
+
+### Phase 1: Quick Wins (Target: +10 files)
+
+#### Fix 1: Implement sexp for Tstr_primitive
+**Impact: 9 files**
+**Effort: ~30 min**
+
+1. Create `sexp_types_value_description` function for `TypesValueDescription`
+2. Update `Tstr_primitive` case to call it
+
+#### Fix 2: Fix cycle ordering in Tarrow
+**Impact: 2-22 files (2 pure cycle issues)**
+**Effort: ~15 min**
+
+1. Find the cycle output logic in sexp_type_expr
+2. Adjust order to match OCaml
+
+### Phase 2: Medium Effort
+
+#### Fix 3: Type variable names (Tvar)
+**Impact: ~35 files**
+**Effort: ~1-2 hrs**
+
+Investigate why type variable names are being lost.
+
+---
+
+## Implementation Order
+
+1. **[NOW]** Fix Tstr_primitive sexp output → +9 files potential
+2. **[NEXT]** Fix cycle ordering → +2-22 files potential
+3. **[LATER]** Type variable names → +X files potential
+
+## Files to Test After Each Fix
+
+After Fix 1 (Tstr_primitive):
+```bash
+./scripts/test_typedtree_parity.sh mocha
+./scripts/test_typedtree_parity.sh gpr_658
+./scripts/test_typedtree_parity.sh node_assert
+```
+
+After Fix 2 (cycle ordering):
+```bash
+./scripts/test_typedtree_parity.sh float_record
+./scripts/test_typedtree_parity.sh test_dup_param
+```

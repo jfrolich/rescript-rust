@@ -1547,9 +1547,11 @@ fn sexp_structure_item_desc(arena: &ParseArena, ctx: &TypeContext<'_>, with_locs
                 Sexp::list(vbs.iter().map(|vb| sexp_value_binding(arena, ctx, with_locs, vb)).collect()),
             ])
         }
-        StructureItemDesc::Tstr_primitive(_vd) => {
-            // Simplified - would need full value_description handling
-            Sexp::list(vec![Sexp::atom("Tstr_primitive"), Sexp::atom("<value_description>")])
+        StructureItemDesc::Tstr_primitive(vd) => {
+            Sexp::list(vec![
+                Sexp::atom("Tstr_primitive"),
+                sexp_typed_value_description(arena, ctx, with_locs, vd),
+            ])
         }
         StructureItemDesc::Tstr_type(flag, tds) => {
             Sexp::list(vec![
