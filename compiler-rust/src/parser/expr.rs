@@ -77,12 +77,15 @@ fn is_underscore_placeholder(expr: &Expression, arena: &ParseArena) -> bool {
 }
 
 /// Replace underscore placeholders with a reference to the given variable name.
-/// Uses interning for the variable name to enable sharing between the pattern
-/// and identifier in the final AST (OCaml shares these via pointer equality).
+/// Creates a new LidentIdx for each replacement, but all share the same StrIdx.
+/// This matches OCaml where each `Longident.Lident hidden_var` is a new block,
+/// but the string inside (`hidden_var`) is the same pointer and gets shared.
 fn replace_underscores_in_expr(expr: Expression, var_str_idx: StrIdx, arena: &mut ParseArena) -> Expression {
     if is_underscore_placeholder(&expr, arena) {
         let loc = expr.pexp_loc.clone();
-        // Use the same StrIdx as the pattern variable for proper sharing
+        // Create a NEW LidentIdx for this use (OCaml creates a new Lident block each time)
+        // but using the SHARED StrIdx (OCaml's hidden_var string is the same pointer).
+        // The marshaller will share the string via StrIdx-based sharing.
         let lid_idx = arena.push_lident_from_idx(var_str_idx);
         Expression {
             pexp_desc: ExpressionDesc::Pexp_ident(with_loc(lid_idx, loc.clone())),
@@ -135,10 +138,11 @@ fn transform_placeholder_application(
     };
 
     // Intern __x ONCE so both the pattern and all identifier uses share the same StrIdx.
-    // This matches OCaml where the same string binding is used for both.
+    // This matches OCaml where `hidden_var` is a single string binding used everywhere.
+    // The marshaller will share the string via StrIdx-based sharing.
     let var_str_idx = arena.intern("__x");
 
-    // Replace all underscores with __x (using the interned StrIdx for sharing)
+    // Replace all underscores with __x (each gets a NEW LidentIdx but same StrIdx)
     let transformed_args: Vec<(ArgLabel, Expression)> = args
         .into_iter()
         .map(|(label, expr)| (label, replace_underscores_in_expr(expr, var_str_idx, arena)))

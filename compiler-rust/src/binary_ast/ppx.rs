@@ -991,6 +991,100 @@ fn handle_raw_structure(
     }
 }
 
+// ========== Async/Await Transformations ==========
+
+/// Transform `await expr` into `Primitive_promise.unsafe_await(expr)`
+/// OCaml: ast_await.ml create_await_expression
+fn transform_await(inner: Expression, loc: LocIdx, arena: &mut ParseArena) -> Expression {
+    // Create ghost location for transformed expressions
+    let ghost_loc = arena.mk_ghost_loc(loc);
+
+    // Create Primitive_promise.unsafe_await identifier
+    let promise_str = arena.intern_string("Primitive_promise");
+    let promise_lident = arena.push_lident_from_idx(promise_str);
+    let unsafe_await_lid = arena.push_ldot(promise_lident, "unsafe_await");
+
+    let func_ident = Expression {
+        pexp_desc: ExpressionDesc::Pexp_ident(Located { txt: unsafe_await_lid, loc: ghost_loc }),
+        pexp_loc: ghost_loc,
+        pexp_attributes: vec![],
+    };
+
+    Expression {
+        pexp_desc: ExpressionDesc::Pexp_apply {
+            funct: Box::new(func_ident),
+            args: vec![(ArgLabel::Nolabel, inner)],
+            partial: false,
+            transformed_jsx: false,
+        },
+        pexp_loc: ghost_loc,
+        pexp_attributes: vec![],
+    }
+}
+
+/// Wrap expression with `Primitive_promise.unsafe_async(expr)`
+/// OCaml: ast_async.ml add_promise_type
+fn wrap_with_unsafe_async(inner: Expression, loc: LocIdx, arena: &mut ParseArena) -> Expression {
+    // Create ghost location for transformed expressions
+    let ghost_loc = arena.mk_ghost_loc(loc);
+
+    // Create Primitive_promise.unsafe_async identifier
+    let promise_str = arena.intern_string("Primitive_promise");
+    let promise_lident = arena.push_lident_from_idx(promise_str);
+    let unsafe_async_lid = arena.push_ldot(promise_lident, "unsafe_async");
+
+    let func_ident = Expression {
+        pexp_desc: ExpressionDesc::Pexp_ident(Located { txt: unsafe_async_lid, loc: ghost_loc }),
+        pexp_loc: ghost_loc,
+        pexp_attributes: vec![],
+    };
+
+    Expression {
+        pexp_desc: ExpressionDesc::Pexp_apply {
+            funct: Box::new(func_ident),
+            args: vec![(ArgLabel::Nolabel, inner)],
+            partial: false,
+            transformed_jsx: false,
+        },
+        pexp_loc: ghost_loc,
+        pexp_attributes: vec![],
+    }
+}
+
+/// Recursively find the innermost body of nested Pexp_fun and wrap it with unsafe_async.
+/// OCaml: ast_async.ml add_promise_to_result
+fn add_promise_to_fun_body(expr: &Expression, loc: LocIdx, arena: &mut ParseArena) -> Expression {
+    match &expr.pexp_desc {
+        ExpressionDesc::Pexp_fun {
+            arg_label,
+            default,
+            lhs,
+            rhs,
+            arity,
+            is_async,
+        } => {
+            // Recurse into rhs to find innermost body
+            let new_rhs = add_promise_to_fun_body(rhs, loc, arena);
+            Expression {
+                pexp_desc: ExpressionDesc::Pexp_fun {
+                    arg_label: arg_label.clone(),
+                    default: default.clone(),
+                    lhs: lhs.clone(),
+                    rhs: Box::new(new_rhs),
+                    arity: *arity,
+                    is_async: *is_async,
+                },
+                pexp_loc: expr.pexp_loc,
+                pexp_attributes: expr.pexp_attributes.clone(),
+            }
+        }
+        _ => {
+            // This is the innermost body - wrap with unsafe_async
+            wrap_with_unsafe_async(expr.clone(), loc, arena)
+        }
+    }
+}
+
 // ========== Expression Rewriting ==========
 
 /// Check if an expression is a pipe operator application (a -> b)
@@ -1124,9 +1218,12 @@ fn transform_js_string(s: &str) -> String {
 
 /// Transform string constant expression with delimiter.
 /// Implements OCaml's Ast_utf8_string_interp.transform_exp.
+/// Note: This is called early in expression rewriting, so we also rewrite attributes here.
 fn transform_string_exp(expr: &Expression, s: &str, delim: &str, arena: &mut ParseArena) -> Expression {
     // Check if this is a template string (has @res.template or @res.taggedTemplate)
     let is_template = has_template_attr(expr, arena);
+    // Rewrite attributes to transform strings inside them
+    let rewritten_attrs = rewrite_attributes(&expr.pexp_attributes, arena);
 
     if delim == "js" {
         if is_template {
@@ -1137,7 +1234,7 @@ fn transform_string_exp(expr: &Expression, s: &str, delim: &str, arena: &mut Par
                     Some("bq".to_string()),
                 )),
                 pexp_loc: expr.pexp_loc,
-                pexp_attributes: expr.pexp_attributes.clone(),
+                pexp_attributes: rewritten_attrs,
             }
         } else {
             // JS string: transform the string and change delimiter to "*j"
@@ -1148,12 +1245,16 @@ fn transform_string_exp(expr: &Expression, s: &str, delim: &str, arena: &mut Par
                     Some("*j".to_string()),
                 )),
                 pexp_loc: expr.pexp_loc,
-                pexp_attributes: expr.pexp_attributes.clone(),
+                pexp_attributes: rewritten_attrs,
             }
         }
     } else {
-        // Unrecognized delimiter - return unchanged
-        expr.clone()
+        // Unrecognized delimiter - return with rewritten attributes
+        Expression {
+            pexp_desc: expr.pexp_desc.clone(),
+            pexp_loc: expr.pexp_loc,
+            pexp_attributes: rewritten_attrs,
+        }
     }
 }
 
@@ -1178,22 +1279,61 @@ fn transform_string_pat(pat: &Pattern, s: &str, delim: &str) -> Pattern {
     }
 }
 
+/// Rewrite a single attribute, transforming strings in its payload
+fn rewrite_attribute(attr: &Attribute, arena: &mut ParseArena) -> Attribute {
+    let (name, payload) = attr;
+    (name.clone(), rewrite_payload(payload, arena))
+}
+
+/// Rewrite a list of attributes
+fn rewrite_attributes(attrs: &[Attribute], arena: &mut ParseArena) -> Vec<Attribute> {
+    attrs.iter().map(|a| rewrite_attribute(a, arena)).collect()
+}
+
+/// Rewrite a payload, transforming strings in expressions and patterns
+fn rewrite_payload(payload: &Payload, arena: &mut ParseArena) -> Payload {
+    match payload {
+        Payload::PStr(items) => {
+            Payload::PStr(items.iter().map(|item| rewrite_structure_item(item, arena)).collect())
+        }
+        Payload::PSig(items) => {
+            Payload::PSig(items.iter().map(|item| rewrite_signature_item(item, arena)).collect())
+        }
+        Payload::PTyp(typ) => Payload::PTyp(typ.clone()),
+        Payload::PPat(pat, guard) => {
+            Payload::PPat(
+                Box::new(rewrite_pattern(pat, arena)),
+                guard.as_ref().map(|e| Box::new(rewrite_expression(e, arena))),
+            )
+        }
+    }
+}
+
 /// Rewrite a pattern, transforming string and integer constants
-fn rewrite_pattern(pat: &Pattern) -> Pattern {
+fn rewrite_pattern(pat: &Pattern, arena: &mut ParseArena) -> Pattern {
     match &pat.ppat_desc {
         PatternDesc::Ppat_constant(Constant::String(s, Some(delim))) => {
-            transform_string_pat(pat, s, delim)
+            let base = transform_string_pat(pat, s, delim);
+            // Also rewrite attributes
+            Pattern {
+                ppat_attributes: rewrite_attributes(&base.ppat_attributes, arena),
+                ..base
+            }
         }
         // Strip 'l' suffix from integer literals
         PatternDesc::Ppat_constant(Constant::Integer(s, Some('l'))) => {
             Pattern {
                 ppat_desc: PatternDesc::Ppat_constant(Constant::Integer(s.clone(), None)),
                 ppat_loc: pat.ppat_loc,
-                ppat_attributes: pat.ppat_attributes.clone(),
+                ppat_attributes: rewrite_attributes(&pat.ppat_attributes, arena),
             }
         }
-        // For other patterns, just clone (no recursive rewriting needed for now)
-        _ => pat.clone(),
+        // For other patterns, rewrite attributes only
+        _ => Pattern {
+            ppat_desc: pat.ppat_desc.clone(),
+            ppat_loc: pat.ppat_loc,
+            ppat_attributes: rewrite_attributes(&pat.ppat_attributes, arena),
+        },
     }
 }
 
@@ -1209,7 +1349,7 @@ fn rewrite_expression(expr: &Expression, arena: &mut ParseArena) -> Expression {
         return Expression {
             pexp_desc: ExpressionDesc::Pexp_constant(Constant::Integer(s.clone(), None)),
             pexp_loc: expr.pexp_loc,
-            pexp_attributes: expr.pexp_attributes.clone(),
+            pexp_attributes: rewrite_attributes(&expr.pexp_attributes, arena),
         };
     }
 
@@ -1345,8 +1485,8 @@ fn rewrite_expression_generic(expr: &Expression, arena: &mut ParseArena) -> Expr
                 .iter()
                 .map(|vb| ValueBinding {
                     pvb_expr: rewrite_expression(&vb.pvb_expr, arena),
-                    pvb_pat: rewrite_pattern(&vb.pvb_pat),
-                    pvb_attributes: vb.pvb_attributes.clone(),
+                    pvb_pat: rewrite_pattern(&vb.pvb_pat, arena),
+                    pvb_attributes: rewrite_attributes(&vb.pvb_attributes, arena),
                     pvb_loc: vb.pvb_loc,
                 })
                 .collect();
@@ -1364,14 +1504,36 @@ fn rewrite_expression_generic(expr: &Expression, arena: &mut ParseArena) -> Expr
             rhs,
             arity,
             is_async,
-        } => ExpressionDesc::Pexp_fun {
-            arg_label: arg_label.clone(),
-            default: default.as_ref().map(|e| Box::new(rewrite_expression(e, arena))),
-            lhs: rewrite_pattern(lhs),
-            rhs: Box::new(rewrite_expression(rhs, arena)),
-            arity: *arity,
-            is_async: *is_async,
-        },
+        } => {
+            // First, recursively rewrite the function components
+            let rewritten_default = default.as_ref().map(|e| Box::new(rewrite_expression(e, arena)));
+            let rewritten_lhs = rewrite_pattern(lhs, arena);
+            let rewritten_rhs = Box::new(rewrite_expression(rhs, arena));
+
+            // Create the rewritten fun expression
+            let mut rewritten_fun = Expression {
+                pexp_desc: ExpressionDesc::Pexp_fun {
+                    arg_label: arg_label.clone(),
+                    default: rewritten_default,
+                    lhs: rewritten_lhs,
+                    rhs: rewritten_rhs,
+                    arity: *arity,
+                    is_async: *is_async,
+                },
+                pexp_loc: expr.pexp_loc,
+                pexp_attributes: rewrite_attributes(&expr.pexp_attributes, arena),
+            };
+
+            // If this is an async function, wrap the innermost body with unsafe_async
+            // OCaml: Ast_async.make_function_async
+            if *is_async {
+                // Get location from the pattern for the ghost location
+                let pattern_loc = lhs.ppat_loc;
+                rewritten_fun = add_promise_to_fun_body(&rewritten_fun, pattern_loc, arena);
+            }
+
+            return rewritten_fun;
+        }
 
         ExpressionDesc::Pexp_apply {
             funct,
@@ -1488,7 +1650,13 @@ fn rewrite_expression_generic(expr: &Expression, arena: &mut ParseArena) -> Expr
         }
 
         ExpressionDesc::Pexp_await(e) => {
-            ExpressionDesc::Pexp_await(Box::new(rewrite_expression(e, arena)))
+            // Transform: await expr -> Primitive_promise.unsafe_await(expr)
+            let rewritten_inner = rewrite_expression(e, arena);
+            let transformed = transform_await(rewritten_inner, expr.pexp_loc, arena);
+            return Expression {
+                pexp_attributes: rewrite_attributes(&expr.pexp_attributes, arena),
+                ..transformed
+            };
         }
 
         ExpressionDesc::Pexp_pack(mod_expr) => {
@@ -1532,7 +1700,7 @@ fn rewrite_expression_generic(expr: &Expression, arena: &mut ParseArena) -> Expr
     Expression {
         pexp_desc: new_desc,
         pexp_loc: expr.pexp_loc,
-        pexp_attributes: expr.pexp_attributes.clone(),
+        pexp_attributes: rewrite_attributes(&expr.pexp_attributes, arena),
     }
 }
 
@@ -1542,7 +1710,7 @@ fn rewrite_cases(cases: &[Case], arena: &mut ParseArena) -> Vec<Case> {
         .iter()
         .map(|c| Case {
             pc_bar: c.pc_bar,
-            pc_lhs: rewrite_pattern(&c.pc_lhs),
+            pc_lhs: rewrite_pattern(&c.pc_lhs, arena),
             pc_guard: c.pc_guard.as_ref().map(|e| rewrite_expression(e, arena)),
             pc_rhs: rewrite_expression(&c.pc_rhs, arena),
         })
@@ -1617,8 +1785,8 @@ fn rewrite_structure_item(item: &StructureItem, arena: &mut ParseArena) -> Struc
                             *rec_flag,
                             vec![ValueBinding {
                                 pvb_expr,
-                                pvb_pat: vb.pvb_pat.clone(),
-                                pvb_attributes: vb.pvb_attributes.clone(),
+                                pvb_pat: rewrite_pattern(&vb.pvb_pat, arena),
+                                pvb_attributes: rewrite_attributes(&vb.pvb_attributes, arena),
                                 pvb_loc: vb.pvb_loc,
                             }],
                         ),
@@ -1632,8 +1800,8 @@ fn rewrite_structure_item(item: &StructureItem, arena: &mut ParseArena) -> Struc
                 .iter()
                 .map(|vb| ValueBinding {
                     pvb_expr: rewrite_expression(&vb.pvb_expr, arena),
-                    pvb_pat: rewrite_pattern(&vb.pvb_pat),
-                    pvb_attributes: vb.pvb_attributes.clone(),
+                    pvb_pat: rewrite_pattern(&vb.pvb_pat, arena),
+                    pvb_attributes: rewrite_attributes(&vb.pvb_attributes, arena),
                     pvb_loc: vb.pvb_loc,
                 })
                 .collect();
@@ -1646,7 +1814,7 @@ fn rewrite_structure_item(item: &StructureItem, arena: &mut ParseArena) -> Struc
         StructureItemDesc::Pstr_eval(expr, attrs) => StructureItem {
             pstr_desc: StructureItemDesc::Pstr_eval(
                 rewrite_expression(expr, arena),
-                attrs.clone(),
+                rewrite_attributes(attrs, arena),
             ),
             pstr_loc: item.pstr_loc,
         },
@@ -1655,7 +1823,7 @@ fn rewrite_structure_item(item: &StructureItem, arena: &mut ParseArena) -> Struc
             pstr_desc: StructureItemDesc::Pstr_module(current::ModuleBinding {
                 pmb_name: mb.pmb_name.clone(),
                 pmb_expr: rewrite_module_expr(&mb.pmb_expr, arena),
-                pmb_attributes: mb.pmb_attributes.clone(),
+                pmb_attributes: rewrite_attributes(&mb.pmb_attributes, arena),
                 pmb_loc: mb.pmb_loc,
             }),
             pstr_loc: item.pstr_loc,
@@ -1667,7 +1835,7 @@ fn rewrite_structure_item(item: &StructureItem, arena: &mut ParseArena) -> Struc
                 .map(|mb| current::ModuleBinding {
                     pmb_name: mb.pmb_name.clone(),
                     pmb_expr: rewrite_module_expr(&mb.pmb_expr, arena),
-                    pmb_attributes: mb.pmb_attributes.clone(),
+                    pmb_attributes: rewrite_attributes(&mb.pmb_attributes, arena),
                     pmb_loc: mb.pmb_loc,
                 })
                 .collect();
@@ -1681,7 +1849,7 @@ fn rewrite_structure_item(item: &StructureItem, arena: &mut ParseArena) -> Struc
             pstr_desc: StructureItemDesc::Pstr_include(current::IncludeDeclaration {
                 pincl_mod: rewrite_module_expr(&incl.pincl_mod, arena),
                 pincl_loc: incl.pincl_loc,
-                pincl_attributes: incl.pincl_attributes.clone(),
+                pincl_attributes: rewrite_attributes(&incl.pincl_attributes, arena),
             }),
             pstr_loc: item.pstr_loc,
         },
@@ -1739,7 +1907,7 @@ fn rewrite_module_expr(
     current::ModuleExpr {
         pmod_desc: new_desc,
         pmod_loc: mod_expr.pmod_loc,
-        pmod_attributes: mod_expr.pmod_attributes.clone(),
+        pmod_attributes: rewrite_attributes(&mod_expr.pmod_attributes, arena),
     }
 }
 
