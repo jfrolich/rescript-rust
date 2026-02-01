@@ -1,189 +1,136 @@
-# Printing Parity TODO
+# Ralph TODO: Binary AST Parity
 
 **Last Updated:** 2026-02-01
-**Overall Status:** 230/506 tests passing (45%)
-**Printer Status:** 114/187 tests passing (60%)
+**Overall Status:** 123/1049 bsc-ast tests passing (11.7%)
+**sexp-locs Status:** 1049/1049 tests passing (100%) ✅
 
 ---
 
-## Phase 1: Comment Handling (Root Cause)
+## Root Cause Analysis
 
-Most printer failures are caused by comment handling issues. Fix these first.
+The binary AST structure (sexp-locs) is 100% correct. The difference is in **position sharing** during marshal serialization.
 
-### Core Comment Infrastructure
-- [ ] **Study OCaml comment attachment** - Read `res_comments_table.ml` thoroughly to understand the algorithm
-- [ ] **Fix trailing comment preservation** - Comments after expressions/statements get lost
-- [ ] **Fix blank line preservation around comments** - Blank lines before/after comments should be kept
-- [ ] **Fix comment placement in function arguments** - `/* c0 */ ~arg=/* c1 */ value /* c2 */` pattern
+### Key Finding: Arrow Function Position Sharing
 
-### Comment Test Files (17 failing)
-- [ ] `printer/comments/namedArgs.res` - Named argument comments
-- [ ] `printer/comments/trailingComments.res` - Trailing comment handling
-- [ ] `printer/comments/modExpr.res` - Module expression comments
-- [ ] `printer/comments/structureItem.res` - Structure item comments
-- [ ] `printer/comments/blockExpr.res` - Block expression comments
-- [ ] `printer/comments/expr.res` - General expression comments
-- [ ] `printer/comments/jsx.res` - JSX element comments
-- [ ] `printer/comments/binaryExpr.res` - Binary expression comments
-- [ ] `printer/comments/case.res` - Match case comments
-- [ ] `printer/comments/array.res` - Array literal comments
-- [ ] `printer/comments/docComments.res` - Doc comment handling
-- [ ] `printer/comments/typexpr.res` - Type expression comments
-- [ ] `printer/comments/modType.res` - Module type comments
-- [ ] `printer/comments/signatureItem.resi` - Signature item comments
-- [ ] `printer/comments/valueBindingSugar.res` - Value binding sugar comments
-- [ ] `printer/comments/typeDefinition.res` - Type definition comments
-- [ ] `printer/comments/extensionConstructor.res` - Extension constructor comments
+Comparing binary output for `let f = x => x`:
+- OCaml: 198 bytes
+- Rust: 206 bytes (8 bytes larger)
+
+The difference: OCaml uses `CODE_SHARED8` references for positions that Rust writes as full position blocks.
+
+```
+# OCaml at offset 0x90 (uses shared reference):
+04 0c 04 03   # CODE_SHARED8 with distance 0x0c, then more data
+
+# Rust at same offset (writes full positions):
+c0 04 16 41 40 48 c0 04 17 41 40 4e  # Full position blocks
+```
+
+### Root Cause
+
+In OCaml's marshal format, positions with pointer equality get shared. OCaml reuses the same position object in multiple places. In Rust, we use `PosIdx` arena indices for sharing, but some positions that should be shared are getting different indices.
+
+Specifically, when parsing arrow functions, certain positions (like the start/end of parameters and body) should share the same `PosIdx` but currently don't.
 
 ---
 
-## Phase 2: Expression Printing (31 failing)
+## Tasks
 
-Many of these may be fixed by Phase 1 comment fixes.
+### Phase 1: Investigate Position Sharing Patterns
 
-### JSX-Related
-- [ ] `printer/expr/jsx.res` - JSX expression printing
-- [ ] `printer/expr/switch.res` - JSX inside switch arms
+- [ ] **Task 1.1**: Analyze OCaml position sharing in arrow functions
+  - Study `compiler/syntax/src/res_parser.ml` for `parseEs6ArrowExpression`
+  - Identify which positions share the same variable/pointer
+  - Document the expected sharing pattern
 
-### Core Expressions
-- [ ] `printer/expr/block.res` - Block expression formatting
-- [ ] `printer/expr/callback.res` - Callback function formatting
-- [ ] `printer/expr/nestedCallbacks.res` - Nested callback formatting
-- [ ] `printer/expr/fun.res` - Function expression formatting
-- [ ] `printer/expr/let.res` - Let expression formatting
-- [ ] `printer/expr/try.res` - Try expression formatting
-- [ ] `printer/expr/ternary.res` - Ternary expression formatting
+- [ ] **Task 1.2**: Compare Rust position creation in arrow functions
+  - Study `compiler-rust/src/parser/expression.rs` for arrow function parsing
+  - Log PosIdx values for positions created during `let f = x => x`
+  - Identify where sharing diverges from OCaml
 
-### Operators & Access
-- [ ] `printer/expr/binary.res` - Binary operator formatting
-- [ ] `printer/expr/unary.res` - Unary operator formatting
-- [ ] `printer/expr/arrayGet.res` - Array access formatting
-- [ ] `printer/expr/arraySet.res` - Array assignment formatting
-- [ ] `printer/expr/jsObjectAccess.res` - JS object access
-- [ ] `printer/expr/jsObjectSet.res` - JS object assignment
-- [ ] `printer/expr/setfield.res` - Record field assignment
+- [ ] **Task 1.3**: Create position sharing test harness
+  - Add debug output to marshal writer showing position indices
+  - Compare OCaml marshal trace vs Rust marshal trace for simple cases
 
-### Data Structures
-- [ ] `printer/expr/record.res` - Record expression formatting
-- [ ] `printer/expr/list.res` - List literal formatting
-- [ ] `printer/expr/dict.res` - Dict literal formatting
-- [ ] `printer/expr/polyvariant.res` - Polyvariant formatting
+### Phase 2: Fix Position Sharing
 
-### Special Cases
-- [ ] `printer/expr/asyncAwait.res` - Async/await formatting
-- [ ] `printer/expr/templateLiteral.res` - Template literal formatting
-- [ ] `printer/expr/smartPipe.res` - Pipe operator formatting
-- [ ] `printer/expr/newtype.res` - Newtype formatting
-- [ ] `printer/expr/exoticIdent.res` - Exotic identifier formatting
-- [ ] `printer/expr/braced.res` - Braced expression formatting
-- [ ] `printer/expr/bsObj.res` - BS object formatting
-- [ ] `printer/expr/underscoreApply.res` - Underscore apply formatting
-- [ ] `printer/expr/Uncurried.res` - Uncurried function formatting
-- [ ] `printer/expr/UncurriedByDefault.res` - Uncurried by default formatting
-- [ ] `printer/expr/DocComments.res` - Doc comments in expressions
+- [ ] **Task 2.1**: Fix arrow function expression position sharing
+  - The body expression's location likely needs to share positions with parameter location
+  - Match OCaml's pattern where `prev_end_pos` becomes the next token's context
 
----
+- [ ] **Task 2.2**: Fix multi-parameter arrow function sharing
+  - `let f = (x, y) => x + y` has 12 bytes difference (vs 8 for single param)
+  - Additional sharing needed for tuple pattern positions
 
-## Phase 3: Module Printing (6 failing)
+- [ ] **Task 2.3**: Fix async arrow function sharing
+  - `let f = async x => x` also has 8 bytes difference
+  - Verify async attribute positions use correct sharing
 
-### Module Expressions (3 failing)
-- [ ] `printer/modExpr/functor.res` - Functor expression printing
-- [ ] `printer/modExpr/include.res` - Include expression printing
-- [ ] `printer/modExpr/structure.res` - Module structure printing
+### Phase 3: Systematic Position Sharing Audit
 
-### Module Types (3 failing)
-- [ ] `printer/modType/functor.res` - Functor type printing
-- [ ] `printer/modType/signature.res` - Signature printing
-- [ ] `printer/modType/withConstraints.res` - With constraints printing
+- [ ] **Task 3.1**: Audit all expression position creation
+  - Binary expressions
+  - Application expressions
+  - Match/switch expressions
+  - Block expressions
+
+- [ ] **Task 3.2**: Audit pattern position creation
+  - Tuple patterns
+  - Record patterns
+  - Array patterns
+
+- [ ] **Task 3.3**: Audit type position creation
+  - Arrow types with arity
+  - Record type definitions
+
+### Phase 4: Validation
+
+- [ ] **Task 4.1**: Run full test suite, verify no regressions
+- [ ] **Task 4.2**: Target 500/1049 bsc-ast parity (47%)
+- [ ] **Task 4.3**: Target 750/1049 bsc-ast parity (71%)
+- [ ] **Task 4.4**: Target 1000/1049 bsc-ast parity (95%)
+- [ ] **Task 4.5**: Achieve 1049/1049 bsc-ast parity (100%)
 
 ---
 
-## Phase 4: Structure Printing (7 failing)
-
-- [ ] `printer/structure/valueBinding.res` - Value binding formatting
-- [ ] `printer/structure/type.res` - Type definition formatting
-- [ ] `printer/structure/moduleBinding.res` - Module binding formatting
-- [ ] `printer/structure/recModules.res` - Recursive modules formatting
-- [ ] `printer/structure/exception.res` - Exception definition formatting
-- [ ] `printer/structure/include.res` - Include statement formatting
-- [ ] `printer/structure/typeExtension.res` - Type extension formatting
-
----
-
-## Phase 5: Other Categories
-
-### Signatures (2 failing)
-- [ ] `printer/signature/type.resi` - Type signature formatting
-- [ ] `printer/signature/recModule.resi` - Recursive module signatures
-
-### Patterns (2 failing)
-- [ ] `printer/pattern/constant.res` - Constant pattern formatting
-- [ ] `printer/pattern/dict.res` - Dict pattern formatting
-
-### Types (2 failing)
-- [ ] `printer/typeDef/variant.res` - Variant type definition
-- [ ] `printer/typexpr/variant.res` - Variant type expression
-
-### Other (6 failing)
-- [ ] `printer/other/attributes.res` - Attribute formatting
-- [ ] `printer/other/nesting.res` - Deep nesting formatting
-- [ ] `printer/other/home.res` - Real-world example
-- [ ] `printer/other/signaturePicker.res` - Real-world example
-- [ ] `printer/other/fatSlider.res` - Real-world example
-- [ ] `printer/other/StaticReactTypes.res` - Real-world example
-
----
-
-## Phase 6: Parser Crashes (Priority!)
-
-Some tests cause the Rust parser to crash (Abort trap: 6). These must be fixed.
-
-- [ ] Investigate and fix parser crashes in infinite loop tests
-- [ ] Add proper error handling for malformed input
-
----
-
-## Phase 7: Non-Printer Tests
-
-After printer parity is achieved, address remaining categories:
-
-### Parsing Tests (~155 failing)
-- [ ] `parsing/errors` - 78 failing (error recovery)
-- [ ] `parsing/grammar` - 77 failing (grammar coverage)
-
-### Other Categories (~30 failing)
-- [ ] `conversion` - 12 failing
-- [ ] `ppx/react` - 11 failing
-- [ ] `parsing/recovery` - 16 failing
-- [ ] `parsing/infiniteLoops` - 5 failing
-
----
-
-## Commands Reference
+## Debugging Commands
 
 ```bash
-# Run all syntax tests
-PARSER=rust ./scripts/test_syntax.sh 2>&1 | tail -50
+# Run full parity test
+./scripts/test_parser_ast_parity.sh 2>&1 | tail -50
 
-# Build after changes
+# Test a single file
+./scripts/test_parser_ast_parity.sh tests/syntax_tests/data/printer/expr/record.res
+
+# Compare binary output for a simple file
+echo 'let f = x => x' > /tmp/test.res
+./_build/install/default/bin/res_parser -print binary /tmp/test.res > /tmp/ocaml.ast
+./compiler-rust/target/release/res_parser_rust -print binary /tmp/test.res > /tmp/rust.ast
+diff <(xxd /tmp/ocaml.ast) <(xxd /tmp/rust.ast)
+
+# Build Rust compiler
 cargo build --manifest-path compiler-rust/Cargo.toml --release
-
-# Test single file
-./compiler-rust/target/release/res_parser_rust FILE.res
-
-# Compare with OCaml
-./_build/install/default/bin/res_parser FILE.res
-
-# View diff for failing test
-diff tests/syntax_tests/data/PATH/expected/FILE.txt \
-     tests/temp/syntax_tests/data/PATH/expected/FILE.txt
 ```
+
+---
+
+## Reference Files
+
+| File | Purpose |
+|------|---------|
+| `compiler-rust/src/binary_ast/marshal.rs` | Marshal serialization with position sharing |
+| `compiler-rust/src/parser/expression.rs` | Arrow function parsing |
+| `compiler-rust/src/parse_arena.rs` | Position/location arena management |
+| `compiler/syntax/src/res_parser.ml` | OCaml parser (reference) |
+| `compiler/ml/ast_mapper_to0.ml` | OCaml parsetree0 mapper |
 
 ---
 
 ## Notes
 
-- Focus on **root causes** not symptoms - many failures share the same underlying issue
-- Comment handling is the biggest blocker - fix Phase 1 first
-- Commit after EVERY improvement, even if just 1 more test passes
-- Study the OCaml code, don't guess!
+- The sexp-locs test passes 100%, so the AST structure is correct
+- The difference is purely in binary serialization sharing patterns
+- OCaml's sharing is based on pointer equality (same variable = same object)
+- Rust's sharing uses arena indices (same PosIdx = same object in output)
+- Most failures are in `.res` files (implementation files have more arrow functions)
+- 71 of 123 passing files are `.resi` files (interfaces have simpler expressions)
