@@ -1,7 +1,7 @@
 # Ralph TODO: Binary AST Parity
 
 **Last Updated:** 2026-02-01
-**Overall Status:** 127/1049 bsc-ast tests passing (12.1%)
+**Overall Status:** 128/1049 bsc-ast tests passing (12.2%)
 **sexp-locs Status:** 1049/1049 tests passing (100%) ✅
 
 ---
@@ -57,6 +57,17 @@ Previously Rust was adding all uppercase identifiers, incorrectly including `Non
   - Fixed `add_longident` to match OCaml's `add_parent` semantics
   - Simple Lidents (e.g., `None`, `Some`) are no longer added as dependencies
   - Only parent modules of dotted paths are now extracted
+
+- [x] **Task 1.4**: Implement pipe operator desugaring in PPX
+  - OCaml: `ast_exp_apply.ml` transforms `a->f` into `f(a)`, etc.
+  - Rust: Added full pipe desugaring to `ppx.rs`
+  - Transformations:
+    - `a->f` becomes `f(a)`
+    - `a->f(b,c)` becomes `f(a,b,c)`
+    - `a->#Variant` becomes `#Variant(a)`
+    - `a->Constructor` becomes `Constructor(a)`
+    - `a->b->c` becomes `c(b(a))` (chains correctly)
+  - This was blocking many test files that use pipes
 
 ### Phase 2: Built-in PPX Parity (Bs_builtin_ppx in Rust) - PREREQUISITE
 

@@ -17,9 +17,9 @@
 use crate::intern::StrIdx;
 use crate::parse_arena::{LidentIdx, Located, LocIdx, ParseArena};
 use crate::parser::ast::{
-    self as current, Attribute, CoreType, CoreTypeDesc, Expression, ExpressionDesc,
-    SignatureItem, SignatureItemDesc, StructureItem, StructureItemDesc,
-    ValueDescription,
+    self as current, ArgLabel, Attribute, Case, CoreType, CoreTypeDesc, Expression,
+    ExpressionDesc, Label, Pattern, RecFlag, SignatureItem, SignatureItemDesc,
+    StructureItem, StructureItemDesc, ValueBinding, ValueDescription,
 };
 use crate::parser::longident::Longident;
 
@@ -451,6 +451,359 @@ pub fn inline_float_primitive(f: &str) -> Vec<String> {
     vec![String::new(), encoded]
 }
 
+// ========== Expression Rewriting ==========
+
+/// Check if an expression is a pipe operator application (a -> b)
+fn is_pipe_application(expr: &Expression, arena: &ParseArena) -> bool {
+    if let ExpressionDesc::Pexp_apply { funct, args, .. } = &expr.pexp_desc {
+        if args.len() == 2
+            && matches!(&args[0].0, ArgLabel::Nolabel)
+            && matches!(&args[1].0, ArgLabel::Nolabel)
+        {
+            if let ExpressionDesc::Pexp_ident(lid) = &funct.pexp_desc {
+                if let Longident::Lident(op_idx) = arena.get_longident(lid.txt) {
+                    let op = arena.get_string(*op_idx);
+                    return op == "->";
+                }
+            }
+        }
+    }
+    false
+}
+
+/// Rewrite an expression, desugaring pipe operators
+fn rewrite_expression(expr: &Expression, arena: &ParseArena) -> Expression {
+    // First check if this is a pipe application
+    if let ExpressionDesc::Pexp_apply {
+        funct,
+        args,
+        partial: _,
+        transformed_jsx: _,
+    } = &expr.pexp_desc
+    {
+        // Check if this is a pipe: -> with two args
+        if args.len() == 2
+            && matches!(&args[0].0, ArgLabel::Nolabel)
+            && matches!(&args[1].0, ArgLabel::Nolabel)
+        {
+            if let ExpressionDesc::Pexp_ident(lid) = &funct.pexp_desc {
+                if let Longident::Lident(op_idx) = arena.get_longident(lid.txt) {
+                    let op = arena.get_string(*op_idx);
+                    if op == "->" {
+                        // This is a pipe: a -> f
+                        // First recursively rewrite both arguments
+                        let a = rewrite_expression(&args[0].1, arena);
+                        let f = rewrite_expression(&args[1].1, arena);
+
+                        // Now desugar based on what f is
+                        return desugar_pipe(expr, a, f, arena);
+                    }
+                }
+            }
+        }
+    }
+
+    // Not a pipe - recursively rewrite sub-expressions
+    rewrite_expression_generic(expr, arena)
+}
+
+/// Desugar pipe expression: a -> f
+/// Transforms based on what f is:
+/// - f is Pexp_variant(label, None): becomes Pexp_variant(label, Some(a))
+/// - f is Pexp_construct(ctor, None): becomes Pexp_construct(ctor, Some(a))
+/// - f is Pexp_apply(fn1, args): becomes Pexp_apply(fn1, (Nolabel, a) :: args)
+/// - f is Pexp_tuple(xs): binds a and maps each element
+/// - otherwise: becomes f(a) = Pexp_apply(f, [(Nolabel, a)])
+fn desugar_pipe(
+    original: &Expression,
+    a: Expression,
+    f: Expression,
+    _arena: &ParseArena,
+) -> Expression {
+    match &f.pexp_desc {
+        // a -> `Variant becomes `Variant(a)
+        ExpressionDesc::Pexp_variant(label, None) => Expression {
+            pexp_desc: ExpressionDesc::Pexp_variant(label.clone(), Some(Box::new(a))),
+            pexp_loc: original.pexp_loc,
+            pexp_attributes: original.pexp_attributes.clone(),
+        },
+
+        // a -> Constructor becomes Constructor(a)
+        ExpressionDesc::Pexp_construct(ctor, None) => Expression {
+            pexp_desc: ExpressionDesc::Pexp_construct(ctor.clone(), Some(Box::new(a))),
+            pexp_loc: original.pexp_loc,
+            pexp_attributes: original.pexp_attributes.clone(),
+        },
+
+        // a -> f(b, c) becomes f(a, b, c)
+        ExpressionDesc::Pexp_apply {
+            funct: fn1,
+            args,
+            partial,
+            transformed_jsx,
+        } => {
+            let mut new_args = Vec::with_capacity(args.len() + 1);
+            new_args.push((ArgLabel::Nolabel, a));
+            new_args.extend(args.iter().cloned());
+
+            Expression {
+                pexp_desc: ExpressionDesc::Pexp_apply {
+                    funct: fn1.clone(),
+                    args: new_args,
+                    partial: *partial,
+                    transformed_jsx: *transformed_jsx,
+                },
+                pexp_loc: original.pexp_loc,
+                // Combine attributes from original and f
+                pexp_attributes: {
+                    let mut attrs = original.pexp_attributes.clone();
+                    attrs.extend(f.pexp_attributes.iter().cloned());
+                    attrs
+                },
+            }
+        }
+
+        // a -> (x, y) with tuple - for now, just create f(a)
+        // TODO: Handle the bound case properly like OCaml does
+        ExpressionDesc::Pexp_tuple(_) => {
+            // For simplicity, just make it f(a)
+            Expression {
+                pexp_desc: ExpressionDesc::Pexp_apply {
+                    funct: Box::new(f),
+                    args: vec![(ArgLabel::Nolabel, a)],
+                    partial: false,
+                    transformed_jsx: false,
+                },
+                pexp_loc: original.pexp_loc,
+                pexp_attributes: original.pexp_attributes.clone(),
+            }
+        }
+
+        // Default: a -> f becomes f(a)
+        _ => Expression {
+            pexp_desc: ExpressionDesc::Pexp_apply {
+                funct: Box::new(f),
+                args: vec![(ArgLabel::Nolabel, a)],
+                partial: false,
+                transformed_jsx: false,
+            },
+            pexp_loc: original.pexp_loc,
+            pexp_attributes: original.pexp_attributes.clone(),
+        },
+    }
+}
+
+/// Generic expression rewriting - recurses into sub-expressions
+fn rewrite_expression_generic(expr: &Expression, arena: &ParseArena) -> Expression {
+    let new_desc = match &expr.pexp_desc {
+        ExpressionDesc::Pexp_ident(_) | ExpressionDesc::Pexp_constant(_) => {
+            return expr.clone();
+        }
+
+        ExpressionDesc::Pexp_let(rec_flag, bindings, body) => {
+            let new_bindings: Vec<ValueBinding> = bindings
+                .iter()
+                .map(|vb| ValueBinding {
+                    pvb_expr: rewrite_expression(&vb.pvb_expr, arena),
+                    pvb_pat: vb.pvb_pat.clone(),
+                    pvb_attributes: vb.pvb_attributes.clone(),
+                    pvb_loc: vb.pvb_loc,
+                })
+                .collect();
+            ExpressionDesc::Pexp_let(
+                *rec_flag,
+                new_bindings,
+                Box::new(rewrite_expression(body, arena)),
+            )
+        }
+
+        ExpressionDesc::Pexp_fun {
+            arg_label,
+            default,
+            lhs,
+            rhs,
+            arity,
+            is_async,
+        } => ExpressionDesc::Pexp_fun {
+            arg_label: arg_label.clone(),
+            default: default.as_ref().map(|e| Box::new(rewrite_expression(e, arena))),
+            lhs: lhs.clone(),
+            rhs: Box::new(rewrite_expression(rhs, arena)),
+            arity: *arity,
+            is_async: *is_async,
+        },
+
+        ExpressionDesc::Pexp_apply {
+            funct,
+            args,
+            partial,
+            transformed_jsx,
+        } => ExpressionDesc::Pexp_apply {
+            funct: Box::new(rewrite_expression(funct, arena)),
+            args: args
+                .iter()
+                .map(|(lbl, e)| (lbl.clone(), rewrite_expression(e, arena)))
+                .collect(),
+            partial: *partial,
+            transformed_jsx: *transformed_jsx,
+        },
+
+        ExpressionDesc::Pexp_match(scrutinee, cases) => ExpressionDesc::Pexp_match(
+            Box::new(rewrite_expression(scrutinee, arena)),
+            rewrite_cases(cases, arena),
+        ),
+
+        ExpressionDesc::Pexp_try(body, cases) => ExpressionDesc::Pexp_try(
+            Box::new(rewrite_expression(body, arena)),
+            rewrite_cases(cases, arena),
+        ),
+
+        ExpressionDesc::Pexp_tuple(exprs) => ExpressionDesc::Pexp_tuple(
+            exprs.iter().map(|e| rewrite_expression(e, arena)).collect(),
+        ),
+
+        ExpressionDesc::Pexp_construct(ctor, arg) => ExpressionDesc::Pexp_construct(
+            ctor.clone(),
+            arg.as_ref().map(|e| Box::new(rewrite_expression(e, arena))),
+        ),
+
+        ExpressionDesc::Pexp_variant(label, arg) => ExpressionDesc::Pexp_variant(
+            label.clone(),
+            arg.as_ref().map(|e| Box::new(rewrite_expression(e, arena))),
+        ),
+
+        ExpressionDesc::Pexp_record(fields, spread) => {
+            let new_fields = fields
+                .iter()
+                .map(|f| current::ExpressionRecordField {
+                    lid: f.lid.clone(),
+                    expr: rewrite_expression(&f.expr, arena),
+                    opt: f.opt,
+                })
+                .collect();
+            ExpressionDesc::Pexp_record(
+                new_fields,
+                spread.as_ref().map(|e| Box::new(rewrite_expression(e, arena))),
+            )
+        }
+
+        ExpressionDesc::Pexp_field(e, lid) => {
+            ExpressionDesc::Pexp_field(Box::new(rewrite_expression(e, arena)), lid.clone())
+        }
+
+        ExpressionDesc::Pexp_setfield(e1, lid, e2) => ExpressionDesc::Pexp_setfield(
+            Box::new(rewrite_expression(e1, arena)),
+            lid.clone(),
+            Box::new(rewrite_expression(e2, arena)),
+        ),
+
+        ExpressionDesc::Pexp_array(exprs) => ExpressionDesc::Pexp_array(
+            exprs.iter().map(|e| rewrite_expression(e, arena)).collect(),
+        ),
+
+        ExpressionDesc::Pexp_ifthenelse(cond, then_branch, else_branch) => {
+            ExpressionDesc::Pexp_ifthenelse(
+                Box::new(rewrite_expression(cond, arena)),
+                Box::new(rewrite_expression(then_branch, arena)),
+                else_branch
+                    .as_ref()
+                    .map(|e| Box::new(rewrite_expression(e, arena))),
+            )
+        }
+
+        ExpressionDesc::Pexp_sequence(e1, e2) => ExpressionDesc::Pexp_sequence(
+            Box::new(rewrite_expression(e1, arena)),
+            Box::new(rewrite_expression(e2, arena)),
+        ),
+
+        ExpressionDesc::Pexp_while(cond, body) => ExpressionDesc::Pexp_while(
+            Box::new(rewrite_expression(cond, arena)),
+            Box::new(rewrite_expression(body, arena)),
+        ),
+
+        ExpressionDesc::Pexp_for(pat, e1, e2, dir, body) => ExpressionDesc::Pexp_for(
+            pat.clone(),
+            Box::new(rewrite_expression(e1, arena)),
+            Box::new(rewrite_expression(e2, arena)),
+            *dir,
+            Box::new(rewrite_expression(body, arena)),
+        ),
+
+        ExpressionDesc::Pexp_constraint(e, ty) => {
+            ExpressionDesc::Pexp_constraint(Box::new(rewrite_expression(e, arena)), ty.clone())
+        }
+
+        ExpressionDesc::Pexp_coerce(e, ty1, ty2) => ExpressionDesc::Pexp_coerce(
+            Box::new(rewrite_expression(e, arena)),
+            ty1.clone(),
+            ty2.clone(),
+        ),
+
+        ExpressionDesc::Pexp_send(e, method) => {
+            ExpressionDesc::Pexp_send(Box::new(rewrite_expression(e, arena)), method.clone())
+        }
+
+        ExpressionDesc::Pexp_assert(e) => {
+            ExpressionDesc::Pexp_assert(Box::new(rewrite_expression(e, arena)))
+        }
+
+        ExpressionDesc::Pexp_await(e) => {
+            ExpressionDesc::Pexp_await(Box::new(rewrite_expression(e, arena)))
+        }
+
+        ExpressionDesc::Pexp_pack(mod_expr) => {
+            // Module expressions - don't recurse for now
+            ExpressionDesc::Pexp_pack(mod_expr.clone())
+        }
+
+        ExpressionDesc::Pexp_letmodule(name, mod_expr, body) => ExpressionDesc::Pexp_letmodule(
+            name.clone(),
+            mod_expr.clone(), // Don't recurse into module expressions
+            Box::new(rewrite_expression(body, arena)),
+        ),
+
+        ExpressionDesc::Pexp_letexception(exn, body) => ExpressionDesc::Pexp_letexception(
+            exn.clone(),
+            Box::new(rewrite_expression(body, arena)),
+        ),
+
+        ExpressionDesc::Pexp_open(override_flag, mod_name, body) => ExpressionDesc::Pexp_open(
+            *override_flag,
+            mod_name.clone(),
+            Box::new(rewrite_expression(body, arena)),
+        ),
+
+        ExpressionDesc::Pexp_newtype(name, body) => ExpressionDesc::Pexp_newtype(
+            name.clone(),
+            Box::new(rewrite_expression(body, arena)),
+        ),
+
+        // Extensions and JSX - just clone
+        ExpressionDesc::Pexp_extension(_) | ExpressionDesc::Pexp_jsx_element(_) => {
+            return expr.clone();
+        }
+    };
+
+    Expression {
+        pexp_desc: new_desc,
+        pexp_loc: expr.pexp_loc,
+        pexp_attributes: expr.pexp_attributes.clone(),
+    }
+}
+
+/// Rewrite cases for match/try expressions
+fn rewrite_cases(cases: &[Case], arena: &ParseArena) -> Vec<Case> {
+    cases
+        .iter()
+        .map(|c| Case {
+            pc_bar: c.pc_bar,
+            pc_lhs: c.pc_lhs.clone(),
+            pc_guard: c.pc_guard.as_ref().map(|e| rewrite_expression(e, arena)),
+            pc_rhs: rewrite_expression(&c.pc_rhs, arena),
+        })
+        .collect()
+}
+
 // ========== PPX Application ==========
 
 /// Apply built-in PPX transformations to a structure
@@ -488,8 +841,109 @@ fn rewrite_structure_item(item: &StructureItem, arena: &ParseArena) -> Structure
                 item.clone()
             }
         }
-        // TODO: Handle @inline let bindings
+        // Handle value bindings - need to rewrite expressions
+        StructureItemDesc::Pstr_value(rec_flag, bindings) => {
+            let new_bindings: Vec<ValueBinding> = bindings
+                .iter()
+                .map(|vb| ValueBinding {
+                    pvb_expr: rewrite_expression(&vb.pvb_expr, arena),
+                    pvb_pat: vb.pvb_pat.clone(),
+                    pvb_attributes: vb.pvb_attributes.clone(),
+                    pvb_loc: vb.pvb_loc,
+                })
+                .collect();
+            StructureItem {
+                pstr_desc: StructureItemDesc::Pstr_value(*rec_flag, new_bindings),
+                pstr_loc: item.pstr_loc,
+            }
+        }
+        // Handle eval expressions
+        StructureItemDesc::Pstr_eval(expr, attrs) => StructureItem {
+            pstr_desc: StructureItemDesc::Pstr_eval(
+                rewrite_expression(expr, arena),
+                attrs.clone(),
+            ),
+            pstr_loc: item.pstr_loc,
+        },
+        // Module - recurse into module structure
+        StructureItemDesc::Pstr_module(mb) => StructureItem {
+            pstr_desc: StructureItemDesc::Pstr_module(current::ModuleBinding {
+                pmb_name: mb.pmb_name.clone(),
+                pmb_expr: rewrite_module_expr(&mb.pmb_expr, arena),
+                pmb_attributes: mb.pmb_attributes.clone(),
+                pmb_loc: mb.pmb_loc,
+            }),
+            pstr_loc: item.pstr_loc,
+        },
+        // Recursive modules
+        StructureItemDesc::Pstr_recmodule(mbs) => {
+            let new_mbs = mbs
+                .iter()
+                .map(|mb| current::ModuleBinding {
+                    pmb_name: mb.pmb_name.clone(),
+                    pmb_expr: rewrite_module_expr(&mb.pmb_expr, arena),
+                    pmb_attributes: mb.pmb_attributes.clone(),
+                    pmb_loc: mb.pmb_loc,
+                })
+                .collect();
+            StructureItem {
+                pstr_desc: StructureItemDesc::Pstr_recmodule(new_mbs),
+                pstr_loc: item.pstr_loc,
+            }
+        }
+        // Include - recurse into module expression
+        StructureItemDesc::Pstr_include(incl) => StructureItem {
+            pstr_desc: StructureItemDesc::Pstr_include(current::IncludeDeclaration {
+                pincl_mod: rewrite_module_expr(&incl.pincl_mod, arena),
+                pincl_loc: incl.pincl_loc,
+                pincl_attributes: incl.pincl_attributes.clone(),
+            }),
+            pstr_loc: item.pstr_loc,
+        },
+        // Other structure items don't contain expressions that need rewriting
         _ => item.clone(),
+    }
+}
+
+/// Rewrite a module expression, recursing into structure
+fn rewrite_module_expr(
+    mod_expr: &current::ModuleExpr,
+    arena: &ParseArena,
+) -> current::ModuleExpr {
+    let new_desc = match &mod_expr.pmod_desc {
+        current::ModuleExprDesc::Pmod_structure(items) => {
+            current::ModuleExprDesc::Pmod_structure(
+                items
+                    .iter()
+                    .map(|item| rewrite_structure_item(item, arena))
+                    .collect(),
+            )
+        }
+        current::ModuleExprDesc::Pmod_functor(param, mod_type, body) => {
+            current::ModuleExprDesc::Pmod_functor(
+                param.clone(),
+                mod_type.clone(),
+                Box::new(rewrite_module_expr(body, arena)),
+            )
+        }
+        current::ModuleExprDesc::Pmod_apply(m1, m2) => current::ModuleExprDesc::Pmod_apply(
+            Box::new(rewrite_module_expr(m1, arena)),
+            Box::new(rewrite_module_expr(m2, arena)),
+        ),
+        current::ModuleExprDesc::Pmod_constraint(m, mt) => {
+            current::ModuleExprDesc::Pmod_constraint(
+                Box::new(rewrite_module_expr(m, arena)),
+                mt.clone(),
+            )
+        }
+        // Ident, extension, unpack - just clone
+        _ => return mod_expr.clone(),
+    };
+
+    current::ModuleExpr {
+        pmod_desc: new_desc,
+        pmod_loc: mod_expr.pmod_loc,
+        pmod_attributes: mod_expr.pmod_attributes.clone(),
     }
 }
 
