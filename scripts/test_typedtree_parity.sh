@@ -272,6 +272,11 @@ test_single_file() {
         # Normalize sexp output before comparing:
         # 1. Remove <cycle> markers (OCaml and Rust have different cycle positions due to type sharing differences)
         # 2. Remove warning output and JS code that may be mixed into stderr
+        #
+        # NOTE: The cycle differences are due to OCaml using physical identity for types
+        # while Rust uses arena indices. After unification, OCaml types share the same
+        # memory address (creating cycles), while Rust types have different indices
+        # but link to the same target type.
         normalize_sexp() {
             grep -v '<cycle>' | \
             grep -v '^// ' | \
