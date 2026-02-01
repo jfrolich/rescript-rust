@@ -170,9 +170,18 @@ This is a mapper_to0 issue, not a parser issue. sexp-locs passes 100% for JSX.
 
 ### Phase 4: Systematic Position Sharing Audit
 
+**Analysis**: The remaining differences are due to marshal sharing distances. OCaml uses
+CODE_SHARED8 (single byte) for nearby positions, while Rust sometimes uses CODE_SHARED16
+(2 bytes). This happens when:
+- `Foo.bar(x)` style calls - 4 byte difference per call
+- Module-qualified function applications
+- Underscore placeholder patterns
+
+This is a low-level marshal optimization issue, not an AST structure issue.
+
 - [ ] **Task 4.1**: Audit all expression position creation
   - Binary expressions
-  - Application expressions
+  - Application expressions ← KEY: Module.func(args) creates extra positions
   - Match/switch expressions
   - Block expressions
 
@@ -184,6 +193,11 @@ This is a mapper_to0 issue, not a parser issue. sexp-locs passes 100% for JSX.
 - [ ] **Task 4.3**: Audit type position creation
   - Arrow types with arity
   - Record type definitions
+
+- [ ] **Task 4.4**: Investigate marshal sharing order
+  - OCaml shares positions at shorter distances
+  - Rust may allocate extra position indices
+  - Need to trace position creation order in parser
 
 ### Phase 5: Validation
 
