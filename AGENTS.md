@@ -482,6 +482,7 @@ The compiler is being rewritten from OCaml to Rust. This is a major undertaking 
 - **[compiler-rust/PLAN.md](compiler-rust/PLAN.md)** - Comprehensive migration plan with phases, technical approach, and success criteria
 - **[compiler-rust/PROGRESS.md](compiler-rust/PROGRESS.md)** - Current progress, completed tasks, and next steps
 - **[compiler-rust/GLOBAL_STATE_AUDIT.md](compiler-rust/GLOBAL_STATE_AUDIT.md)** - Catalog of OCaml global state to eliminate
+- **[compiler-rust/BINARY_AST.md](compiler-rust/BINARY_AST.md)** - Binary AST format specification, OCaml Marshal encoding, and arena-based sharing model
 
 > **Note for AI assistants**: These documents are living documents. Update `PLAN.md` when you discover new insights about architecture, challenges, or better approaches. Update `PROGRESS.md` as you complete tasks or identify new work items. Add to `GLOBAL_STATE_AUDIT.md` when you find additional global state that needs to be eliminated.
 
@@ -738,6 +739,8 @@ The following files have known location parity differences that require more com
 ### Binary AST Parity (In Progress)
 
 **Status:** 🟡 Parser AST structure is correct (100% sexp-locs parity), but binary marshal position sharing still needs work.
+
+> **Detailed documentation**: See [compiler-rust/BINARY_AST.md](compiler-rust/BINARY_AST.md) for the complete specification of the binary AST format, OCaml Marshal encoding rules, and the arena-based identity sharing model.
 
 The binary AST format uses OCaml's Marshal serialization, which includes back-references for shared objects. When OCaml creates two references to the same memory object, Marshal writes a shared reference (CODE_SHARED8/16/32) instead of duplicating the data.
 
