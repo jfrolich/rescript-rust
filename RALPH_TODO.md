@@ -85,6 +85,12 @@ Previously Rust was adding all uppercase identifiers, incorrectly including `Non
   - Fixed: `arena.intern("__x")` once, then pass the StrIdx to create both pattern and identifiers
   - Uses `push_lident_from_idx()` to share the string between Ppat_var and Pexp_ident
 
+- [ ] **Task 1.6**: Fix underscore placeholder location sharing (4-byte difference)
+  - Simple test `let x = doStuff(3, _, 7)` has 4-byte difference (OCaml: 253, Rust: 257)
+  - Difference appears to be in marshal sharing - OCaml shares a location that Rust doesn't
+  - At offset 0xD0-0xE0: OCaml uses SHARED8 (04 1b), Rust writes inline block (c0)
+  - Needs investigation: which LocIdx should be shared but isn't
+
 ### Phase 2: Built-in PPX Parity (Bs_builtin_ppx in Rust) - PREREQUISITE
 
 **This phase is a prerequisite for binary parity.** OCaml runs `Ppx_entry.rewrite_implementation`
