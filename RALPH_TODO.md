@@ -142,8 +142,8 @@ cargo build --manifest-path compiler-rust/Cargo.toml --release
 **The current focus is position sharing in the parser** - positions that should have the same `PosIdx` are getting different indices during parsing. parsetree0/ast0 has its own issues but that's a separate task.
 
 **Note on AST terminology:**
-- **ast** (parsetree) - The current/main parsetree used by the compiler. This is what we're focused on.
-- **parsetree0/ast0** - Only used for PPXs (preprocessor extensions). Not our current focus.
+- **ast** (parsetree) - The current/main parsetree used by the compiler. This is what we're focused on. This is what gets serialized and saved to `.ast` files.
+- **parsetree0/ast0** - Only used for PPXs (preprocessor extensions). NOT what gets saved to `.ast` files. Not our current focus.
 
 Focus on these files:
 - ✅ `compiler-rust/src/parser/` - Position creation and reuse during parsing
