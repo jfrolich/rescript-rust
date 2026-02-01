@@ -52,6 +52,15 @@ After investigation, the situation is more nuanced than originally thought. Ther
 - **OCaml** shows fully resolved types
 - **Rust** has cycles - shows `<cycle>` instead of the actual type
 
+**Pattern C - Type variables (e.g., float_array.res - `let f = x => ([1., 2.], x)`):**
+- **Both** have cycles, but in DIFFERENT positions
+- This is a type traversal order difference - "first occurrence wins" vs "second occurrence wins"
+
+```
+OCaml: (Tarrow <cycle> (Ttuple (array float) (Tvar None)) ...)  // cycle on arg
+Rust:  (Tarrow (Tvar None) (Ttuple (array float) <cycle>) ...)  // cycle in tuple
+```
+
 **Example A (test_eq.res - `let f = (x, y) => x + y`):**
 ```
 OCaml + operator type: (Tarrow ... <cycle> (Tarrow ... <cycle> (Tvar None) ...) ...)
