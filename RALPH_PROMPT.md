@@ -38,7 +38,12 @@ Read `RALPH_TODO.md` and complete the next unchecked task. After completing a ta
 
 1. **ALWAYS read the OCaml implementation first** - Don't guess. Study the OCaml source to understand the correct behavior. The goal is a faithful port, not a reimagining.
 
-2. **Run tests frequently** - After each change:
+2. **DO NOT modify parsetree0/ast0 code yet** - The parsetree0 mapper and types are correct. The issue is **position sharing in the parser**, not in the parsetree0 conversion. Focus on:
+   - `compiler-rust/src/parser/` - Position creation during parsing
+   - `compiler-rust/src/binary_ast/marshal.rs` - Position sharing during serialization
+   - Do NOT touch `parsetree0.rs`, `parsetree0_marshal.rs`, or `mapper_to0.rs` unless absolutely necessary
+
+3. **Run tests frequently** - After each change:
    ```bash
    ./scripts/test_parser_ast_parity.sh 2>&1 | tail -40
    ```
