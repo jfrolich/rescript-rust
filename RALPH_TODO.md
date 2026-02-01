@@ -27,6 +27,16 @@ Simple expressions now match OCaml byte-for-byte:
 JSX with children still differs:
 - `let x = <div> <span/> </div>` ❌ (OCaml: 229 bytes, Rust: 196 bytes - Rust smaller)
 
+### Blocking Issues (mapper_to0.rs)
+
+The remaining ~914 failing tests are mostly blocked by position sharing differences in mapper_to0.rs:
+
+1. **JSX children list locations**: `map_jsx_children_to_list` creates different location patterns
+2. **Chained pipe expressions**: Position sharing differs for complex expression chains
+3. **List cons cell locations**: OCaml creates unique locations per cons cell
+
+These issues are in mapper_to0.rs which should NOT be modified per instructions.
+
 ### Key Finding: Dependency Extraction Fix
 
 OCaml's `Depend.add_parent` only adds the parent module of dotted paths:
