@@ -84,6 +84,8 @@ The Makefile’s targets build on each other in this order:
 
 - **ALWAYS commit before moving on** - Before starting a new task, before investigating a problem, before taking a break: COMMIT. Use `git add <files> && git commit -m "description"`. No exceptions.
 
+- **One task per session** - Only take on ONE task at a time. When you complete a task, STOP. Do not pick up another task from the TODO list. Each new task should start with a fresh context window. This ensures you have full context capacity for each task and prevents context exhaustion from accumulating state across multiple tasks.
+
 ## Compiler Architecture
 
 ### Compilation Pipeline
