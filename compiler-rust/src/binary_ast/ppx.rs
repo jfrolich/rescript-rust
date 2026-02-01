@@ -471,7 +471,141 @@ fn handle_extension(
 
     match name {
         "raw" => handle_raw(expr, payload, arena, "#raw_expr"),
+        "debugger" => handle_debugger(expr, payload, arena),
         _ => expr.clone(),
+    }
+}
+
+/// Handle %debugger extension by transforming it into local_external_apply pattern.
+///
+/// OCaml transforms `%debugger` into:
+/// ```text
+/// let module J = struct
+///   external unsafe_expr: _ -> unit = "%debugger"
+/// end in J.unsafe_expr(())
+/// ```
+fn handle_debugger(
+    expr: &Expression,
+    payload: &Payload,
+    arena: &mut ParseArena,
+) -> Expression {
+    // %debugger doesn't accept arguments
+    if let Payload::PStr(items) = payload {
+        if !items.is_empty() {
+            return expr.clone(); // Error case - return unchanged
+        }
+    } else {
+        return expr.clone();
+    }
+
+    let loc = expr.pexp_loc;
+    let none_loc = arena.none_loc();
+
+    // Create the type: _ -> unit
+    let any_type = CoreType {
+        ptyp_desc: CoreTypeDesc::Ptyp_any,
+        ptyp_loc: none_loc,
+        ptyp_attributes: vec![],
+    };
+
+    // Create "unit" type
+    let unit_ident = arena.push_lident_static("unit");
+    let unit_type = CoreType {
+        ptyp_desc: CoreTypeDesc::Ptyp_constr(
+            Located { txt: unit_ident, loc: none_loc },
+            vec![],
+        ),
+        ptyp_loc: none_loc,
+        ptyp_attributes: vec![],
+    };
+
+    let pval_type = CoreType {
+        ptyp_desc: CoreTypeDesc::Ptyp_arrow {
+            arg: Box::new(TypeArg {
+                attrs: vec![],
+                lbl: ArgLabel::Nolabel,
+                typ: any_type,
+            }),
+            ret: Box::new(unit_type),
+            arity: Arity::default(),
+        },
+        ptyp_loc: none_loc,
+        ptyp_attributes: vec![],
+    };
+
+    // Create strings for the module/function names
+    let module_name_idx = arena.intern_string("J");
+    let func_name_idx = arena.intern_string("unsafe_expr");
+
+    // Create the value description (external primitive) - uses %debugger
+    let vd = ValueDescription {
+        pval_name: Located {
+            txt: func_name_idx,
+            loc,
+        },
+        pval_type,
+        pval_prim: vec!["%debugger".to_string()],
+        pval_attributes: vec![],
+        pval_loc: loc,
+    };
+
+    // Create the module structure
+    let mod_structure = vec![StructureItem {
+        pstr_desc: StructureItemDesc::Pstr_primitive(vd),
+        pstr_loc: loc,
+    }];
+
+    let mod_expr = ModuleExpr {
+        pmod_desc: ModuleExprDesc::Pmod_structure(mod_structure),
+        pmod_loc: loc,
+        pmod_attributes: vec![],
+    };
+
+    // Create the longident J.unsafe_expr
+    let j_lident = arena.push_lident_static("J");
+    let j_unsafe_expr = arena.push_ldot_static(j_lident, "unsafe_expr");
+
+    // Create the unit literal: ()
+    let unit_construct = arena.push_lident_static("()");
+    let unit_expr = Expression {
+        pexp_desc: ExpressionDesc::Pexp_construct(
+            Located { txt: unit_construct, loc },
+            None,
+        ),
+        pexp_loc: loc,
+        pexp_attributes: vec![],
+    };
+
+    // Create the function application: J.unsafe_expr(())
+    let func_ident = Expression {
+        pexp_desc: ExpressionDesc::Pexp_ident(Located { txt: j_unsafe_expr, loc }),
+        pexp_loc: loc,
+        pexp_attributes: vec![],
+    };
+
+    let apply_expr = Expression {
+        pexp_desc: ExpressionDesc::Pexp_apply {
+            funct: Box::new(func_ident),
+            args: vec![(ArgLabel::Nolabel, unit_expr)],
+            partial: false,
+            transformed_jsx: false,
+        },
+        pexp_loc: loc,
+        pexp_attributes: vec![],
+    };
+
+    // Create the final expression: let module J = struct ... end in J.unsafe_expr(())
+    Expression {
+        pexp_desc: ExpressionDesc::Pexp_letmodule(
+            Located {
+                txt: module_name_idx,
+                loc,
+            },
+            mod_expr,
+            Box::new(apply_expr),
+        ),
+        pexp_loc: loc,
+        pexp_attributes: expr.pexp_attributes.clone(),
     }
 }
 

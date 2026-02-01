@@ -7,7 +7,7 @@
 //! from Longidents. Only uppercase module names are collected (lowercase names are
 //! local bindings, not module references).
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashSet};
 
 use crate::parser::ast::{
     Case, ConstructorArguments, CoreType, CoreTypeDesc, Expression, ExpressionDesc,
@@ -41,6 +41,8 @@ pub fn extract_signature_deps(arena: &ParseArena, signature: &[SignatureItem]) -
 struct DependencyCollector<'a> {
     arena: &'a ParseArena,
     deps: BTreeSet<String>,
+    /// Bound module names (from letmodule, module, etc.) that should not be added as dependencies
+    bound_modules: HashSet<String>,
 }
 
 impl<'a> DependencyCollector<'a> {
@@ -48,6 +50,7 @@ impl<'a> DependencyCollector<'a> {
         Self {
             arena,
             deps: BTreeSet::new(),
+            bound_modules: HashSet::new(),
         }
     }
 
@@ -72,7 +75,10 @@ impl<'a> DependencyCollector<'a> {
             let first_str = self.arena.get_string(*first);
             // Only add if it starts with uppercase (module reference)
             // Lowercase identifiers are local bindings
-            if first_str.chars().next().is_some_and(|c| c.is_ascii_uppercase()) {
+            // Also skip if it's a bound module name (from letmodule, etc.)
+            if first_str.chars().next().is_some_and(|c| c.is_ascii_uppercase())
+                && !self.bound_modules.contains(first_str)
+            {
                 self.deps.insert(first_str.to_string());
             }
         }
@@ -337,9 +343,17 @@ impl<'a> DependencyCollector<'a> {
             ExpressionDesc::Pexp_send(expr, _label) => {
                 self.add_expression(expr);
             }
-            ExpressionDesc::Pexp_letmodule(_name, me, body) => {
+            ExpressionDesc::Pexp_letmodule(name, me, body) => {
+                // Bind the module name so it's not added as a dependency
+                let module_name = self.arena.get_string(name.txt).to_string();
+                self.bound_modules.insert(module_name.clone());
                 self.add_module_expr(me);
                 self.add_expression(body);
+                // Note: We don't remove from bound_modules because the scope
+                // only extends to body, and we process sequentially.
+                // In OCaml this is handled by passing bv through the recursion.
+                // Our approach is slightly less precise but should work for typical cases.
+                self.bound_modules.remove(&module_name);
             }
             ExpressionDesc::Pexp_letexception(ext_ctor, body) => {
                 self.add_extension_constructor(ext_ctor);
