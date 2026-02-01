@@ -113,12 +113,13 @@ We need to implement the remaining transformations.
   - **Done**: Implemented in `transform_string_exp` and `transform_string_pat` in ppx.rs.
     Handles both expressions and patterns. Parity improved from 128 to 134 tests.
 
-- [ ] **Task 2.3**: Implement `@deriving` transformations
+- [ ] **Task 2.3**: Implement `@deriving` transformations (DEFERRED - Complex)
   - OCaml: `Ast_derive_projector.init()`, `Ast_derive_js_mapper.init()`
   - `@deriving(accessors)` - generates accessor functions for variants
   - `@deriving(jsConverter)` - generates JS conversion functions
-  - **Blocking issue**: OCaml strips `@deriving` attribute from type declarations after processing.
-    Rust keeps the attribute, causing binary output to include extra bytes.
+  - `@deriving(abstract)` - generates getter/setter functions for records
+  - **This is a significant task**: OCaml not only strips `@deriving`, but generates new code.
+  - **Impact**: Only 14 test files use `@deriving`, so this has limited parity impact.
   - Related files: `ast_tdcls.ml`, `ast_derive.ml`, `ast_attributes.ml`
 
 - [x] **Task 2.4**: Implement integer literal suffix handling
@@ -139,9 +140,11 @@ We need to implement the remaining transformations.
   - Supports: string, int, float, and bool constants
   - Implementation in `transform_inline_binding` in ppx.rs
 
-- [ ] **Task 2.7**: Implement async context tracking
-  - OCaml: `async_context` ref and `in_function_def` ref in expr_mapper
-  - Track whether we're inside an async function for proper transformation
+- [x] **Task 2.7**: Implement async/await transformations
+  - **Done**: Transform `Pexp_await(e)` to `Primitive_promise.unsafe_await(e)`
+  - **Done**: For async functions, wrap innermost body with `Primitive_promise.unsafe_async(body)`
+  - Implementation in `transform_await`, `wrap_with_unsafe_async`, and `add_promise_to_fun_body` in ppx.rs
+  - Note: Async files still have 4-byte differences due to position sharing (Phase 4 issue)
 
 ### Phase 3: JSX Binary Differences (Deferred - mapper_to0 issue)
 
