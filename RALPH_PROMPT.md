@@ -38,17 +38,20 @@ Read `RALPH_TODO.md` and complete the next unchecked task. After completing a ta
 
 1. **ALWAYS read the OCaml implementation first** - Don't guess. Study the OCaml source to understand the correct behavior. The goal is a faithful port, not a reimagining.
 
-2. **DO NOT modify parsetree0/ast0 or marshal code** - The parsetree0 mapper, types, and marshal serialization are correct. The issue is **position sharing in the parser** - positions that should have the same `PosIdx` are getting different indices during parsing. Focus on:
+2. **DO NOT modify parsetree0/ast0 code** - The parsetree0 mapper and types are correct. The issue is **position sharing in the parser** - positions that should have the same `PosIdx` are getting different indices during parsing. Focus on:
    - `compiler-rust/src/parser/` - Position creation and reuse during parsing
    - `compiler-rust/src/parse_arena.rs` - Arena management for positions
-   - Do NOT touch `parsetree0.rs`, `parsetree0_marshal.rs`, `mapper_to0.rs`, or `marshal.rs` unless absolutely necessary
+   - `compiler-rust/src/binary_ast/marshal.rs` - Can modify if needed
+   - Do NOT touch `parsetree0.rs`, `parsetree0_marshal.rs`, or `mapper_to0.rs` unless absolutely necessary
 
-3. **Run tests frequently** - After each change:
+3. **NO content-based sharing tricks** - Do NOT implement deduplication based on position content/values. OCaml's sharing is based on **pointer equality**, not content equality. The fix must match OCaml's pattern of reusing the same position variable during parsing.
+
+4. **Run tests frequently** - After each change:
    ```bash
    ./scripts/test_parser_ast_parity.sh 2>&1 | tail -40
    ```
 
-3. **Commit after each fix** - Every time tests improve, commit immediately. Include the new parity in the commit message:
+5. **Commit after each fix** - Every time tests improve, commit immediately. Include the new parity in the commit message:
    ```bash
    git add <files> && git commit -m "Fix: <description>
 
@@ -62,9 +65,9 @@ Read `RALPH_TODO.md` and complete the next unchecked task. After completing a ta
    ./scripts/test_parser_ast_parity.sh 2>&1 | grep -E "bsc-ast"
    ```
 
-4. **Focus on root causes** - Many failures share the same root cause (usually position sharing). Fix the underlying issue rather than individual symptoms.
+6. **Focus on root causes** - Many failures share the same root cause (usually position sharing). Fix the underlying issue rather than individual symptoms.
 
-5. **Never modify expected files** - The OCaml-generated `.ast` files are the reference. Fix the Rust implementation to match them.
+7. **Never modify expected files** - The OCaml-generated `.ast` files are the reference. Fix the Rust implementation to match them.
 
 ## Key Files
 

@@ -126,19 +126,25 @@ cargo build --manifest-path compiler-rust/Cargo.toml --release
 
 ---
 
-## Important: Do NOT Modify parsetree0/ast0 or Marshal
+## Important: Do NOT Modify parsetree0/ast0
 
-**The parsetree0 mapper, types, and marshal serialization are all correct.** The issue is position sharing in the **parser** - positions that should have the same `PosIdx` are getting different indices during parsing.
+**The parsetree0 mapper and types are correct.** The issue is position sharing in the **parser** - positions that should have the same `PosIdx` are getting different indices during parsing.
 
 Focus on these files:
 - ✅ `compiler-rust/src/parser/` - Position creation and reuse during parsing
 - ✅ `compiler-rust/src/parse_arena.rs` - Arena management for positions
+- ✅ `compiler-rust/src/binary_ast/marshal.rs` - Can modify if needed
 
 Do NOT touch these files unless absolutely necessary:
 - ❌ `parsetree0.rs`
 - ❌ `parsetree0_marshal.rs`
 - ❌ `mapper_to0.rs`
-- ❌ `marshal.rs` - The marshal code correctly shares positions by PosIdx; the problem is upstream
+
+## Important: No Content-Based Sharing Tricks
+
+**Do NOT implement content-based sharing** (e.g., deduplicating positions with identical values). OCaml's sharing is based on **pointer/reference equality**, not content equality. If two positions have the same values but are different objects in OCaml, they should NOT be shared in Rust either.
+
+The fix must be in how positions are created and reused during parsing - matching OCaml's pattern of reusing the same position variable.
 
 ---
 
