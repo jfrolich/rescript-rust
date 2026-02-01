@@ -565,7 +565,10 @@ pub mod ast_helper {
 
         // Build :: chain from the end
         for item in items.into_iter().rev() {
-            let tuple_loc = p.mk_loc(&p.loc_start(item.ppat_loc), &p.loc_end(result.ppat_loc));
+            // Reuse the existing PosIdx from item.ppat_loc and result.ppat_loc to match OCaml's sharing
+            let start_idx = p.loc_start_idx(item.ppat_loc);
+            let end_idx = p.loc_end_idx(result.ppat_loc);
+            let tuple_loc = p.mk_loc_idx_full(start_idx, end_idx);
             let cons_loc = tuple_loc;
             let tuple = make_pat(PatternDesc::Ppat_tuple(vec![item, result]), tuple_loc);
             let cons = with_loc(cons_idx, cons_loc);

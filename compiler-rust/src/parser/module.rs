@@ -942,7 +942,10 @@ fn parse_module_apply(p: &mut Parser<'_>, func: ModuleExpr) -> ModuleExpr {
         //   mod_expr args
         // Each nested apply gets loc from current result start to current arg end
         for arg in args {
-            let loc = p.mk_loc(&p.loc_start(result.pmod_loc), &p.loc_end(arg.pmod_loc));
+            // Reuse the existing PosIdx from result.pmod_loc to match OCaml's sharing
+            let start_idx = p.loc_start_idx(result.pmod_loc);
+            let end_idx = p.loc_end_idx(arg.pmod_loc);
+            let loc = p.mk_loc_idx_full(start_idx, end_idx);
             result = ModuleExpr {
                 pmod_desc: ModuleExprDesc::Pmod_apply(Box::new(result), Box::new(arg)),
                 pmod_loc: loc,
@@ -1153,10 +1156,10 @@ fn parse_functor_module_expr(p: &mut Parser<'_>) -> ModuleExpr {
     // which acts as a ghost location since the body comes after the type constraint
     let rhs_module_expr = match return_type {
         Some(mod_type) => {
-            let loc = p.mk_loc(
-                &p.loc_start(rhs_module_expr.pmod_loc),
-                &p.loc_end(mod_type.pmty_loc),
-            );
+            // Reuse the existing PosIdx from rhs_module_expr.pmod_loc to match OCaml's sharing
+            let start_idx = p.loc_start_idx(rhs_module_expr.pmod_loc);
+            let end_idx = p.loc_end_idx(mod_type.pmty_loc);
+            let loc = p.mk_loc_idx_full(start_idx, end_idx);
             ModuleExpr {
                 pmod_desc: ModuleExprDesc::Pmod_constraint(
                     Box::new(rhs_module_expr),

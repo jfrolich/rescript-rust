@@ -2677,9 +2677,12 @@ fn make_list_expression_simple(
     let mut acc = spread.unwrap_or_else(|| make_empty_list(p, loc));
 
     // Build from right: 3 :: [] -> 2 :: (3 :: []) -> 1 :: (2 :: (3 :: []))
+    // Pre-push list_end to reuse across all cons cells
+    let list_end_idx = p.get_or_push_end_pos(list_end.clone());
     for item in exprs.into_iter().rev() {
-        let item_start = p.loc_start(item.pexp_loc).clone();
-        let cons_loc = p.mk_loc_from_positions(&item_start, &list_end);
+        // Reuse the existing PosIdx from item.pexp_loc to match OCaml's sharing
+        let item_start_idx = p.loc_start_idx(item.pexp_loc);
+        let cons_loc = p.mk_loc_idx_full(item_start_idx, list_end_idx);
         let tuple = Expression {
             pexp_desc: ExpressionDesc::Pexp_tuple(vec![item, acc]),
             pexp_loc: cons_loc,
@@ -2735,9 +2738,12 @@ fn make_list_expression_with_loc(
         }
     });
 
+    // Pre-push list_end to reuse across all cons cells
+    let list_end_idx = p.get_or_push_end_pos(list_end.clone());
     for item in exprs.into_iter().rev() {
-        let item_start = p.loc_start(item.pexp_loc).clone();
-        let cons_loc = p.mk_loc_from_positions(&item_start, &list_end);
+        // Reuse the existing PosIdx from item.pexp_loc to match OCaml's sharing
+        let item_start_idx = p.loc_start_idx(item.pexp_loc);
+        let cons_loc = p.mk_loc_idx_full(item_start_idx, list_end_idx);
         let tuple = Expression {
             pexp_desc: ExpressionDesc::Pexp_tuple(vec![item, acc]),
             pexp_loc: cons_loc,
@@ -2794,7 +2800,10 @@ fn parse_dict_expr(p: &mut Parser<'_>, start_pos: Position) -> Expression {
                     pexp_loc: key_loc,
                     pexp_attributes: vec![],
                 };
-                let tuple_loc = p.mk_loc(&p.loc_start(key_loc), &value_end);
+                // Reuse the existing PosIdx from key_loc to match OCaml's sharing
+                let key_start_idx = p.loc_start_idx(key_loc);
+                let value_end_idx = p.get_or_push_end_pos(value_end);
+                let tuple_loc = p.mk_loc_idx_full(key_start_idx, value_end_idx);
                 let tuple = Expression {
                     pexp_desc: ExpressionDesc::Pexp_tuple(vec![key_expr, value]),
                     pexp_loc: tuple_loc,

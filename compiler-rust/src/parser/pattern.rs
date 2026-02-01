@@ -327,7 +327,10 @@ fn parse_or_pattern(
     patterns
         .into_iter()
         .reduce(|acc, pat| {
-            let loc = p.mk_loc(&p.loc_start(acc.ppat_loc), &p.loc_end(pat.ppat_loc));
+            // Reuse the existing PosIdx from acc.ppat_loc to match OCaml's sharing
+            let start_idx = p.loc_start_idx(acc.ppat_loc);
+            let end_idx = p.loc_end_idx(pat.ppat_loc);
+            let loc = p.mk_loc_idx_full(start_idx, end_idx);
             Pattern {
                 ppat_desc: PatternDesc::Ppat_or(Box::new(acc), Box::new(pat)),
                 ppat_loc: loc,
@@ -346,7 +349,10 @@ pub fn parse_constrained_pattern(p: &mut Parser<'_>) -> Pattern {
         // Use no-arrow parsing so the `=>` token isn't consumed as part of a type
         // when we're in contexts like switch cases: `| pat: t => expr`.
         let typ = super::typ::parse_typ_expr_no_arrow(p);
-        let loc = p.mk_loc(&p.loc_start(pat.ppat_loc), &p.loc_end(typ.ptyp_loc));
+        // Reuse the existing PosIdx from pat.ppat_loc to match OCaml's sharing
+        let start_idx = p.loc_start_idx(pat.ppat_loc);
+        let end_idx = p.loc_end_idx(typ.ptyp_loc);
+        let loc = p.mk_loc_idx_full(start_idx, end_idx);
         Pattern {
             ppat_desc: PatternDesc::Ppat_constraint(Box::new(pat), typ),
             ppat_loc: loc,
@@ -372,7 +378,8 @@ pub fn parse_alias_pattern(
     mut pat: Pattern,
     _attrs: Vec<Attribute>,
 ) -> Pattern {
-    let start_pos = p.loc_start(pat.ppat_loc);
+    // Reuse the existing PosIdx from pat.ppat_loc to match OCaml's sharing
+    let start_pos_idx = p.loc_start_idx(pat.ppat_loc);
     while p.token == Token::As {
         p.next();
         let name = match &p.token {
@@ -391,7 +398,7 @@ pub fn parse_alias_pattern(
                 with_loc(str_idx, p.mk_loc_current())
             }
         };
-        let loc = p.mk_loc_to_prev_end(&start_pos);
+        let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
         pat = Pattern {
             ppat_desc: PatternDesc::Ppat_alias(Box::new(pat), name),
             ppat_loc: loc,
