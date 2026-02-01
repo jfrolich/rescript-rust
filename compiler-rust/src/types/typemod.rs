@@ -443,7 +443,7 @@ pub fn type_module_expr<'a>(
             // Translate parameter type if present
             let typed_param_type = param_type
                 .as_ref()
-                .map(|_| Box::new(ModuleType::placeholder()));
+                .map(|mt| Box::new(transl_modtype(arena, mt)));
 
             Ok(ModuleExpr {
                 mod_desc: ModuleExprDesc::Tmod_functor(
@@ -1162,7 +1162,7 @@ fn type_structure_item<'a>(
             let desc = StructureItemDesc::Tstr_modtype(ModuleTypeDeclaration {
                 mtd_id,
                 mtd_name: mtd.pmtd_name.clone(),
-                mtd_type: mtd.pmtd_type.as_ref().map(|_| ModuleType::placeholder()),
+                mtd_type: mtd.pmtd_type.as_ref().map(|mt| transl_modtype(arena, mt)),
                 mtd_attributes: mtd.pmtd_attributes.clone(),
                 mtd_loc: mtd.pmtd_loc,
             });
