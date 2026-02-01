@@ -40,41 +40,50 @@ Based on analysis of all 66 failing files, the issues fall into these categories
 
 **Problem:** The `<cycle>` marker appears at different positions in Rust vs OCaml output.
 
-**Root Cause Analysis:**
-- OCaml uses physical identity (`Obj.repr te`) for cycle detection after following Tlink chains
-- Rust uses `TypeExprRef` index (`te.0`) which may differ from OCaml's notion of "same type"
+**Root Cause Analysis (Updated 2026-02-01):**
 
-**Example Diff (test_obj.res):**
+The issue is more fundamental than cycle detection in printing. Investigation revealed:
+
+1. **OCaml's primitive types are at GENERIC_LEVEL**: In OCaml's `Predef`, types like `type_int` are created with `newgenty` which sets level to `generic_level` (100000000).
+
+2. **OCaml's `copy` function uses mutation for memoization**: When copying a type, OCaml mutates the original type descriptor to `Tsubst t` where `t` is the copy. This enables the memo check `| Tsubst ty -> ty` at the start of copy.
+
+3. **The cycle pattern in OCaml is intentional**: For operator `+` with type `int -> int -> int` where all three `int` positions share the same type object:
+   - When instantiated, all three positions get the SAME copy (via Tsubst memoization)
+   - When printing the operator's type, the shared reference causes `<cycle>` markers
+   - BUT the function `f`'s pattern type is built from DIFFERENT type variables that link to int
+
+4. **Key insight**: After unification, type variables LINK to their unified types but remain distinct objects. When printing `f`'s type:
+   - `param1_ty` -> Tlink -> int_copy_a
+   - `param2_ty` -> Tlink -> int_copy_b  (DIFFERENT copy)
+   - `return_ty` -> Tlink -> int_copy_c  (DIFFERENT copy)
+
+   Since int_copy_a, int_copy_b, int_copy_c are different objects, no cycles appear.
+
+5. **In Rust**: The current implementation creates types at current_level (0), not GENERIC_LEVEL. When `copy_type` is called on non-generic types, it returns them as-is (ReturnSelf), preserving sharing. This causes more cycles than expected.
+
+**Attempted fixes that didn't work:**
+- Making primitive types at GENERIC_LEVEL + adding memo to copy_type: This caused MORE cycle issues because the copied types also share references
+- The fundamental issue is that Rust's type unification and construction needs to create separate type objects in the same places OCaml does
+
+**What needs to happen:**
+The fix requires understanding exactly where OCaml creates fresh type objects vs reuses existing ones during:
+1. Type instantiation (copy function)
+2. Function parameter type construction
+3. Unification (link direction)
+
+This is not a simple fix - it requires careful analysis of the type checking flow.
+
+**Example Diff (test_eq.res):**
 ```
-OCaml:                      Rust:
-  (Tpoly                      (Tpoly
-    <cycle>                     (Tvar
-    ())                           None)
-  (Tvar                         ())
-    None)                     <cycle>
+OCaml + operator type: <cycle> -> <cycle> -> Tvar None
+OCaml f pattern type:  int -> int -> int (no cycles!)
+
+Rust + operator type:  int -> <cycle> -> <cycle>
+Rust f pattern type:   int -> <cycle> -> <cycle> (has cycles!)
 ```
 
-**Fix Location:** `compiler-rust/src/types/sexp_typedtree.rs:350-357`
-
-**Fix Details:**
-The issue is that OCaml follows Tlink chains and then uses the resulting pointer for cycle detection. We need to ensure that after `ctx.repr(te)`, we use the *result's* index for cycle tracking, not the original.
-
-```rust
-fn sexp_type_expr_with_visited(..., visited: &mut HashSet<usize>) -> Sexp {
-    let te = ctx.repr(te); // Follow Tlink chains
-    let te_id = te.0;      // Use the ID of the repr'd type
-
-    if visited.contains(&te_id) {
-        return Sexp::atom("<cycle>");
-    }
-    visited.insert(te_id);
-    // ...
-}
-```
-
-The current code does this, so the issue may be in how the type context repr function works, or in how types are unified. Need to compare exact scenarios.
-
-**Estimated Effort:** 2-4 hours
+**Estimated Effort:** 8-16 hours (structural change to type checker)
 
 ---
 
