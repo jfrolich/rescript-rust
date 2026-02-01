@@ -28,9 +28,9 @@ size_diff=0
 parse_error_rust=0
 parse_error_ocaml=0
 
-# Temporary files
-RUST_AST=$(mktemp)
-OCAML_AST=$(mktemp)
+# Temporary files (OCaml requires .ast extension)
+RUST_AST=$(mktemp /tmp/rust_ast_XXXXXX.ast)
+OCAML_AST=$(mktemp /tmp/ocaml_ast_XXXXXX.ast)
 trap "rm -f $RUST_AST $OCAML_AST" EXIT
 
 compare_file() {
