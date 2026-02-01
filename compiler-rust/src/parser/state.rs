@@ -335,6 +335,13 @@ impl<'src> Parser<'src> {
         self.arena.mk_loc(start_idx, end_idx)
     }
 
+    /// Create a location from a start Position to an end PosIdx.
+    /// Useful for sharing an end position across multiple locations.
+    pub fn mk_loc_with_end_idx(&mut self, start: &Position, end_idx: PosIdx) -> LocIdx {
+        let start_idx = self.arena.push_position(*start);
+        self.arena.mk_loc(start_idx, end_idx)
+    }
+
     /// Create a location from another location's start to an end Position.
     /// Useful pattern: `p.mk_loc_from_start_of(body.some_loc, &end_pos)`
     /// Reuses the start location's PosIdx for position sharing.

@@ -696,14 +696,18 @@ fn parse_es6_arrow_expression_internal(
     };
 
     p.eat_breadcrumb();
-    let end_pos = p.prev_end_pos.clone();
+    // Use PosIdx for end position to enable sharing with body's loc_end
+    // In OCaml, `end_pos = p.prev_end_pos` is captured once and reused for all
+    // Pexp_fun locations. We mimic this by getting a cached PosIdx.
+    let end_pos_idx = p.get_or_push_prev_end_pos();
 
     // Build the function expression from parameters
     let (type_params, term_params) = super::core::extract_fundef_params(parameters);
 
     // Fold the term parameters into nested functions
     // If there are type params but no term params, add an implicit unit param
-    let arrow_expr = if term_params.is_empty() && type_params.is_some() {
+    // We capture the Pexp_fun location for use in the final wrapper (for position sharing)
+    let (arrow_expr, pexp_fun_loc) = if term_params.is_empty() && type_params.is_some() {
         // Implicit unit parameter for type-only arrow
         // OCaml uses the location of the parenthesized type params group for the implicit unit PATTERN
         // but the Pexp_fun location spans from the paren start to the end of the body
@@ -711,10 +715,10 @@ fn parse_es6_arrow_expression_internal(
         let (unit_pat_loc, pexp_fun_loc) = match (&tp.paren_start_pos, &tp.paren_end_pos) {
             (Some(start), Some(paren_end)) => (
                 p.mk_loc(start, paren_end),  // Pattern: from ( to )
-                p.mk_loc(start, &end_pos),   // Pexp_fun: from ( to end of body
+                p.mk_loc_with_end_idx(start, end_pos_idx),   // Pexp_fun: from ( to end of body
             ),
             _ => {
-                let loc = p.mk_loc(&tp.start_pos, &end_pos);
+                let loc = p.mk_loc_with_end_idx(&tp.start_pos, end_pos_idx);
                 (loc.clone(), loc)
             }
         };
@@ -727,7 +731,7 @@ fn parse_es6_arrow_expression_internal(
             ppat_loc: unit_pat_loc,
             ppat_attributes: vec![],
         };
-        Expression {
+        (Expression {
             pexp_desc: ExpressionDesc::Pexp_fun {
                 arg_label: ArgLabel::Nolabel,
                 default: None,
@@ -736,18 +740,68 @@ fn parse_es6_arrow_expression_internal(
                 arity: Arity::Full(1),  // Implicit unit param has arity 1
                 is_async,
             },
-            pexp_loc: pexp_fun_loc,
+            pexp_loc: pexp_fun_loc.clone(),
             pexp_attributes: vec![],
-        }
+        }, pexp_fun_loc)
+    } else if term_params.is_empty() {
+        // No params at all - use a dummy location (shouldn't happen in practice)
+        let loc = p.mk_loc_idx(end_pos_idx, end_pos_idx);
+        (body, loc)
     } else {
         // Compute arity for the outermost function
         let total_arity = term_params.len();
-        term_params
+        // Build locations for Pexp_funs.
+        // In OCaml (res_core.ml:1792), each Pexp_fun's loc uses parameter.p_pos.
+        // parameter.p_pos is captured at the start of parse_parameter, which is:
+        // - For `x => x`: at `x` (same as pattern's loc_start)
+        // - For `(x, y)`: at `x` and `y` respectively (pattern's loc_start)
+        // - For `~name as pat`: at `~` (different from pattern's loc_start!)
+        //
+        // For the final wrapper (res_core.ml:1807), loc_start is overridden with
+        // start_pos captured at line 1726 (before parsing parameters).
+        //
+        // For position sharing:
+        // - In OCaml, for `x => x`, start_pos and parameter.p_pos are the same object
+        // - The pattern was already parsed and has a PosIdx for its loc_start
+        // - If start_pos matches the first param's start_pos (which for simple cases
+        //   equals pattern.loc_start), we reuse the pattern's existing PosIdx
+        let outermost_param = &term_params[0];
+        // Check if start_pos matches the first param's pattern loc_start
+        // This enables sharing for simple cases like `x => x`
+        let pattern_start_pos = p.loc_start(outermost_param.pat.ppat_loc);
+        let wrapper_start_idx = if start_pos == pattern_start_pos {
+            // Same position - reuse the pattern's existing PosIdx
+            p.loc_start_idx(outermost_param.pat.ppat_loc)
+        } else {
+            // Different - push start_pos as new PosIdx
+            p.push_pos(start_pos.clone())
+        };
+        let wrapper_loc = p.mk_loc_idx(wrapper_start_idx, end_pos_idx);
+        let arrow_expr = term_params
             .into_iter()
             .rev()
             .enumerate()
             .fold(body, |acc, (i, param)| {
-                let loc = p.mk_loc(&param.start_pos, &end_pos);
+                // Use parameter.start_pos for the Pexp_fun loc_start
+                // This matches OCaml's parameter.p_pos
+                //
+                // For position sharing to match OCaml:
+                // - In OCaml, p_pos is captured from p.Parser.start_pos
+                // - For simple patterns, p_pos and pattern.ppat_loc.loc_start are the SAME object
+                // - We need to check if param.start_pos matches the pattern's loc_start
+                //   and if so, reuse the pattern's PosIdx
+                let pattern_start_pos = p.loc_start(param.pat.ppat_loc);
+                let start_idx = if param.start_pos == start_pos {
+                    // First param case: matches the wrapper's start_pos
+                    wrapper_start_idx
+                } else if param.start_pos == pattern_start_pos {
+                    // Same as pattern's loc_start - reuse its PosIdx for sharing
+                    p.loc_start_idx(param.pat.ppat_loc)
+                } else {
+                    // Different (e.g., labeled param ~x as pat) - push new position
+                    p.push_pos(param.start_pos.clone())
+                };
+                let loc = p.mk_loc_idx(start_idx, end_pos_idx);
                 // Apply parameter attributes to the pattern's ppat_attributes
                 // This is where attributes like @as("open") on parameters like (@as("open") ~_open)
                 // should end up, so the JSX PPX can access them via pattern.ppat_attributes
@@ -780,7 +834,9 @@ fn parse_es6_arrow_expression_internal(
                     pexp_loc: loc,
                     pexp_attributes: vec![],
                 }
-            })
+            });
+        // Return wrapper_loc for the final wrapper to use
+        (arrow_expr, wrapper_loc)
     };
 
     // Handle newtype parameters
@@ -792,7 +848,7 @@ fn parse_es6_arrow_expression_internal(
     let arrow_expr = match type_params {
         Some(tp) => {
             let loc_start = if is_async { &newtype_start } else { &tp.start_pos };
-            let loc = p.mk_loc(loc_start, &end_pos);
+            let loc = p.mk_loc_with_end_idx(loc_start, end_pos_idx);
             // OCaml prepends arrow_attrs to tp.attrs
             let mut combined_attrs = arrow_attrs;
             combined_attrs.extend(tp.attrs);
@@ -816,9 +872,23 @@ fn parse_es6_arrow_expression_internal(
         },
     };
 
-    // Only update the location, don't touch pexp_attributes
+    // Update the location, preserving position sharing.
+    // In OCaml (res_core.ml line 1807):
+    //   {arrow_expr with pexp_loc = {arrow_expr.pexp_loc with loc_start = start_pos}}
+    //
+    // For position sharing: we use pexp_fun_loc which has the correct loc_start PosIdx
+    // (from the parameter pattern's location). In OCaml, start_pos at line 1726 and
+    // parameter.p_pos are the SAME object (both captured from p.Parser.start_pos before
+    // any tokens were consumed). So the final record update doesn't create a new position.
+    //
+    // We use pexp_fun_loc (captured before newtype wrapping) to get the correct indices.
+    // This ensures the final wrapper uses the same position indices as the Pexp_fun,
+    // achieving the same sharing as OCaml where start_pos and parameter.p_pos are
+    // the same object.
+    let start_idx = p.loc_start_idx(pexp_fun_loc);
+    let end_idx = p.loc_end_idx(pexp_fun_loc);
     Expression {
-        pexp_loc: p.mk_loc(&start_pos, &p.loc_end(arrow_expr.pexp_loc)),
+        pexp_loc: p.mk_loc_idx(start_idx, end_idx),
         ..arrow_expr
     }
 }
