@@ -1,36 +1,40 @@
 # Ralph TODO: Binary AST Parity
 
 **Last Updated:** 2026-02-01
-**Overall Status:** 126/1049 bsc-ast tests passing (12.0%)
+**Overall Status:** 127/1049 bsc-ast tests passing (12.1%)
 **sexp-locs Status:** 1049/1049 tests passing (100%) ✅
 
 ---
 
 ## Root Cause Analysis
 
-The binary AST structure (sexp-locs) is 100% correct. The difference is in **position sharing** during marshal serialization.
+The binary AST structure (sexp-locs) is 100% correct. The differences are in:
+1. **Position sharing** during marshal serialization (fixed for simple cases)
+2. **Dependency extraction** - fixed to match OCaml's `add_parent` semantics
 
-### Key Finding: Arrow Function Position Sharing
+### Current Status
 
-Comparing binary output for `let f = x => x`:
-- OCaml: 198 bytes
-- Rust: 206 bytes (8 bytes larger)
+Simple expressions now match OCaml byte-for-byte:
+- `let f = x => x` ✅
+- `let f = (x, y) => x + y` ✅
+- `let f = () => id` ✅
+- `let f = x => switch x { | A => 1 | B => 2 }` ✅
+- `let f = x + y` ✅
+- `let x = {a: 1, b: 2}` ✅
+- `let x = if true { 1 } else { 2 }` ✅
+- `let x = <div />` ✅
 
-The difference: OCaml uses `CODE_SHARED8` references for positions that Rust writes as full position blocks.
+JSX with children still differs:
+- `let x = <div> <span/> </div>` ❌ (OCaml: 229 bytes, Rust: 196 bytes - Rust smaller)
 
-```
-# OCaml at offset 0x90 (uses shared reference):
-04 0c 04 03   # CODE_SHARED8 with distance 0x0c, then more data
+### Key Finding: Dependency Extraction Fix
 
-# Rust at same offset (writes full positions):
-c0 04 16 41 40 48 c0 04 17 41 40 4e  # Full position blocks
-```
+OCaml's `Depend.add_parent` only adds the parent module of dotted paths:
+- `Foo.bar` → adds "Foo"
+- `bar` → adds nothing
+- `None` → adds nothing (not `Ldot`, just `Lident`)
 
-### Root Cause
-
-In OCaml's marshal format, positions with pointer equality get shared. OCaml reuses the same position object in multiple places. In Rust, we use `PosIdx` arena indices for sharing, but some positions that should be shared are getting different indices.
-
-Specifically, when parsing arrow functions, certain positions (like the start/end of parameters and body) should share the same `PosIdx` but currently don't.
+Previously Rust was adding all uppercase identifiers, incorrectly including `None` and `Some`.
 
 ---
 
@@ -38,33 +42,36 @@ Specifically, when parsing arrow functions, certain positions (like the start/en
 
 ### Phase 1: Investigate Position Sharing Patterns
 
-- [ ] **Task 1.1**: Analyze OCaml position sharing in arrow functions
-  - Study `compiler/syntax/src/res_parser.ml` for `parseEs6ArrowExpression`
-  - Identify which positions share the same variable/pointer
-  - Document the expected sharing pattern
+- [x] **Task 1.1**: Analyze OCaml position sharing in arrow functions
+  - Studied `compiler/syntax/src/res_parser.ml` and `res_core.ml`
+  - Key insight: OCaml captures `end_pos = p.prev_end_pos` once and reuses it in fold_right
+  - All Pexp_fun locations share the same end position pointer
+  - Position sharing already works via value-based caching in Rust
 
-- [ ] **Task 1.2**: Compare Rust position creation in arrow functions
-  - Study `compiler-rust/src/parser/expression.rs` for arrow function parsing
-  - Log PosIdx values for positions created during `let f = x => x`
-  - Identify where sharing diverges from OCaml
+- [x] **Task 1.2**: Compare Rust position creation in arrow functions
+  - Arrow functions now produce byte-identical output for simple cases
+  - Rust uses `get_or_push_prev_end_pos()` which caches positions by value
+  - Simple arrow functions like `x => x`, `(x, y) => x + y` are working
 
-- [ ] **Task 1.3**: Create position sharing test harness
-  - Add debug output to marshal writer showing position indices
-  - Compare OCaml marshal trace vs Rust marshal trace for simple cases
+- [x] **Task 1.3**: Fix dependency extraction
+  - Fixed `add_longident` to match OCaml's `add_parent` semantics
+  - Simple Lidents (e.g., `None`, `Some`) are no longer added as dependencies
+  - Only parent modules of dotted paths are now extracted
 
-### Phase 2: Fix Position Sharing
+### Phase 2: JSX Binary Differences
 
-- [ ] **Task 2.1**: Fix arrow function expression position sharing
-  - The body expression's location likely needs to share positions with parameter location
-  - Match OCaml's pattern where `prev_end_pos` becomes the next token's context
+- [ ] **Task 2.1**: Investigate JSX container element size difference
+  - `<div> <span/> </div>` produces different sizes (OCaml larger)
+  - OCaml: 229 bytes, Rust: 196 bytes
+  - Need to understand why Rust output is smaller - missing nodes?
 
-- [ ] **Task 2.2**: Fix multi-parameter arrow function sharing
-  - `let f = (x, y) => x + y` has 12 bytes difference (vs 8 for single param)
-  - Additional sharing needed for tuple pattern positions
+- [ ] **Task 2.2**: Investigate JSX with braced children
+  - `<InlineCode> {code->s} </InlineCode>` differs
+  - Compare AST structure and serialization
 
-- [ ] **Task 2.3**: Fix async arrow function sharing
-  - `let f = async x => x` also has 8 bytes difference
-  - Verify async attribute positions use correct sharing
+- [x] **Task 2.3**: Fix arrow function expression position sharing (DONE)
+  - Simple cases now work: `x => x`, `(x, y) => x + y`
+  - Multi-parameter and async arrow functions also work
 
 ### Phase 3: Systematic Position Sharing Audit
 
