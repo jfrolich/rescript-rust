@@ -173,7 +173,7 @@ fn generate_ast(input: &Path, output: Option<PathBuf>) -> Result<()> {
                 parser.diagnostics().len()
             ));
         }
-        write_signature_ast_current(&out_path, &source_path, parser.arena(), &signature)
+        write_signature_ast_current(&out_path, &source_path, parser.arena_mut(), &signature)
             .with_context(|| format!("Failed to write {}", out_path.display()))?;
     } else {
         // Parse structure (implementation file)
@@ -184,7 +184,7 @@ fn generate_ast(input: &Path, output: Option<PathBuf>) -> Result<()> {
                 parser.diagnostics().len()
             ));
         }
-        write_structure_ast_current(&out_path, &source_path, parser.arena(), &structure)
+        write_structure_ast_current(&out_path, &source_path, parser.arena_mut(), &structure)
             .with_context(|| format!("Failed to write {}", out_path.display()))?;
     }
 

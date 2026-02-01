@@ -35,6 +35,7 @@ use std::path::Path;
 use super::deps::{extract_signature_deps, extract_structure_deps};
 use super::mapper_to0::{map_signature, map_structure};
 use super::marshal::MarshalWriter;
+use super::ppx;
 use super::serialize::Marshal;
 use crate::parse_arena::ParseArena;
 use crate::parser::ast::{Signature, Structure};
@@ -102,31 +103,43 @@ pub fn write_signature_ast(
 ///
 /// This is different from `write_structure_ast` which converts to parsetree0.
 /// The current format is what OCaml's `-bs-ast` flag outputs.
+///
+/// This applies built-in PPX transformations (FFI encoding for externals)
+/// before writing, matching OCaml's behavior.
 pub fn write_structure_ast_current(
     output_path: &Path,
     source_path: &str,
-    arena: &crate::parse_arena::ParseArena,
+    arena: &mut crate::parse_arena::ParseArena,
     ast: &Structure,
 ) -> io::Result<()> {
-    // 1. Extract dependencies
-    let deps = extract_structure_deps(arena, ast);
+    // 1. Apply built-in PPX transformations (FFI encoding for externals, etc.)
+    let rewritten_ast = ppx::rewrite_structure(ast, arena);
 
-    // 2. Write the binary AST file directly (no conversion to parsetree0)
-    write_ast_file(output_path, source_path, arena, &deps, ast)
+    // 2. Extract dependencies from the rewritten AST
+    let deps = extract_structure_deps(arena, &rewritten_ast);
+
+    // 3. Write the binary AST file directly (current format, no parsetree0 conversion)
+    write_ast_file(output_path, source_path, arena, &deps, &rewritten_ast)
 }
 
 /// Write a binary AST file for a signature in the CURRENT parsetree format.
+///
+/// This applies built-in PPX transformations (FFI encoding for externals)
+/// before writing, matching OCaml's behavior.
 pub fn write_signature_ast_current(
     output_path: &Path,
     source_path: &str,
-    arena: &crate::parse_arena::ParseArena,
+    arena: &mut crate::parse_arena::ParseArena,
     ast: &Signature,
 ) -> io::Result<()> {
-    // 1. Extract dependencies
-    let deps = extract_signature_deps(arena, ast);
+    // 1. Apply built-in PPX transformations (FFI encoding for externals, etc.)
+    let rewritten_ast = ppx::rewrite_signature(ast, arena);
 
-    // 2. Write the binary AST file directly (no conversion to parsetree0)
-    write_ast_file(output_path, source_path, arena, &deps, ast)
+    // 2. Extract dependencies from the rewritten AST
+    let deps = extract_signature_deps(arena, &rewritten_ast);
+
+    // 3. Write the binary AST file directly (current format, no parsetree0 conversion)
+    write_ast_file(output_path, source_path, arena, &deps, &rewritten_ast)
 }
 
 /// Write a binary AST file with the given dependencies and AST.

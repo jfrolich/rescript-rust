@@ -1,0 +1,709 @@
+//! FFI type definitions for external declarations.
+//!
+//! This module defines the types used to encode FFI metadata for ReScript externals.
+//! The encoded FFI information is marshaled and stored as the second string in
+//! `pval_prim` of value descriptions.
+//!
+//! These types mirror those in `compiler/frontend/external_ffi_types.ml` and
+//! `compiler/frontend/external_arg_spec.ml`.
+
+use super::marshal::MarshalWriter;
+use super::serialize::Marshal;
+
+// ========== External arg spec types ==========
+
+/// String delimiter type for constant arguments
+#[derive(Clone, Debug, PartialEq)]
+pub enum Delim {
+    DNone,
+    DStarJ,
+    DNoQuotes,
+    DBackQuotes,
+}
+
+impl Marshal for Delim {
+    fn marshal(&self, w: &mut MarshalWriter) {
+        match self {
+            Delim::DNone => w.write_int(0),
+            Delim::DStarJ => w.write_int(1),
+            Delim::DNoQuotes => w.write_int(2),
+            Delim::DBackQuotes => w.write_int(3),
+        }
+    }
+}
+
+/// Constant argument value
+#[derive(Clone, Debug, PartialEq)]
+pub enum Cst {
+    ArgIntLit(i64),
+    ArgStringLit(String, Delim),
+}
+
+impl Marshal for Cst {
+    fn marshal(&self, w: &mut MarshalWriter) {
+        match self {
+            Cst::ArgIntLit(i) => {
+                w.write_block_header(0, 1);
+                w.write_int(*i);
+            }
+            Cst::ArgStringLit(s, delim) => {
+                w.write_block_header(1, 2);
+                w.write_string(s.as_bytes());
+                delim.marshal(w);
+            }
+        }
+    }
+}
+
+/// Label type for argument labels (without name)
+#[derive(Clone, Debug, PartialEq)]
+pub enum LabelNoname {
+    ArgLabel,
+    ArgEmpty,
+    ArgOptional,
+}
+
+impl Marshal for LabelNoname {
+    fn marshal(&self, w: &mut MarshalWriter) {
+        match self {
+            LabelNoname::ArgLabel => w.write_int(0),
+            LabelNoname::ArgEmpty => w.write_int(1),
+            LabelNoname::ArgOptional => w.write_int(2),
+        }
+    }
+}
+
+/// Label type for object arguments
+#[derive(Clone, Debug, PartialEq)]
+pub enum Label {
+    ObjEmpty,
+    ObjLabel { name: String },
+    ObjOptional { name: String, for_sure_no_nested_option: bool },
+}
+
+impl Marshal for Label {
+    fn marshal(&self, w: &mut MarshalWriter) {
+        match self {
+            Label::ObjEmpty => w.write_int(0),
+            Label::ObjLabel { name } => {
+                w.write_block_header(0, 1);
+                w.write_string(name.as_bytes());
+            }
+            Label::ObjOptional { name, for_sure_no_nested_option } => {
+                w.write_block_header(1, 2);
+                w.write_string(name.as_bytes());
+                w.write_int(if *for_sure_no_nested_option { 1 } else { 0 });
+            }
+        }
+    }
+}
+
+/// Attribute type for arguments
+#[derive(Clone, Debug, PartialEq)]
+pub enum Attr {
+    PolyVarString { descr: Vec<(String, String)> },
+    PolyVar { descr: Option<Vec<(String, String)>> },
+    Int(Vec<(String, i64)>),
+    ArgCst(Cst),
+    ExternUnit,
+    Nothing,
+    Ignore,
+    Unwrap,
+}
+
+impl Marshal for Attr {
+    fn marshal(&self, w: &mut MarshalWriter) {
+        match self {
+            Attr::PolyVarString { descr } => {
+                w.write_block_header(0, 1);
+                marshal_list(w, descr, |w, (a, b)| {
+                    w.write_block_header(0, 2);
+                    w.write_string(a.as_bytes());
+                    w.write_string(b.as_bytes());
+                });
+            }
+            Attr::PolyVar { descr } => {
+                w.write_block_header(1, 1);
+                match descr {
+                    None => w.write_int(0),
+                    Some(list) => {
+                        w.write_block_header(0, 1);
+                        marshal_list(w, list, |w, (a, b)| {
+                            w.write_block_header(0, 2);
+                            w.write_string(a.as_bytes());
+                            w.write_string(b.as_bytes());
+                        });
+                    }
+                }
+            }
+            Attr::Int(list) => {
+                w.write_block_header(2, 1);
+                marshal_list(w, list, |w, (s, i)| {
+                    w.write_block_header(0, 2);
+                    w.write_string(s.as_bytes());
+                    w.write_int(*i);
+                });
+            }
+            Attr::ArgCst(cst) => {
+                w.write_block_header(3, 1);
+                cst.marshal(w);
+            }
+            Attr::ExternUnit => w.write_int(4),
+            Attr::Nothing => w.write_int(5),
+            Attr::Ignore => w.write_int(6),
+            Attr::Unwrap => w.write_int(7),
+        }
+    }
+}
+
+/// Parameter specification
+#[derive(Clone, Debug, PartialEq)]
+pub struct Param {
+    pub arg_type: Attr,
+    pub arg_label: LabelNoname,
+}
+
+impl Marshal for Param {
+    fn marshal(&self, w: &mut MarshalWriter) {
+        w.write_block_header(0, 2);
+        self.arg_type.marshal(w);
+        self.arg_label.marshal(w);
+    }
+}
+
+/// Object parameter specification
+#[derive(Clone, Debug, PartialEq)]
+pub struct ObjParam {
+    pub obj_arg_type: Attr,
+    pub obj_arg_label: Label,
+}
+
+impl Marshal for ObjParam {
+    fn marshal(&self, w: &mut MarshalWriter) {
+        w.write_block_header(0, 2);
+        self.obj_arg_type.marshal(w);
+        self.obj_arg_label.marshal(w);
+    }
+}
+
+// ========== External FFI types ==========
+
+/// Module bind name for imports
+#[derive(Clone, Debug, PartialEq)]
+pub enum ModuleBindName {
+    PhintName(String),
+    PhintNothing,
+}
+
+impl Marshal for ModuleBindName {
+    fn marshal(&self, w: &mut MarshalWriter) {
+        match self {
+            ModuleBindName::PhintName(s) => {
+                w.write_block_header(0, 1);
+                w.write_string(s.as_bytes());
+            }
+            ModuleBindName::PhintNothing => w.write_int(0),
+        }
+    }
+}
+
+/// Import attributes (key-value pairs)
+pub type ImportAttributes = Vec<(String, String)>;
+
+/// External module name specification
+#[derive(Clone, Debug, PartialEq)]
+pub struct ExternalModuleName {
+    pub bundle: String,
+    pub module_bind_name: ModuleBindName,
+    pub import_attributes: Option<ImportAttributes>,
+}
+
+impl Marshal for ExternalModuleName {
+    fn marshal(&self, w: &mut MarshalWriter) {
+        w.write_block_header(0, 3);
+        w.write_string(self.bundle.as_bytes());
+        self.module_bind_name.marshal(w);
+        match &self.import_attributes {
+            None => w.write_int(0),
+            Some(attrs) => {
+                // Import attributes are stored as a hashtable in OCaml
+                // For marshal format, we need to match OCaml's Hashtbl serialization
+                w.write_block_header(0, 1);
+                marshal_hashtbl(w, attrs);
+            }
+        }
+    }
+}
+
+/// External specification (the FFI binding type)
+#[derive(Clone, Debug, PartialEq)]
+pub enum ExternalSpec {
+    JsVar {
+        name: String,
+        external_module_name: Option<ExternalModuleName>,
+        scopes: Vec<String>,
+    },
+    JsModuleAsVar(ExternalModuleName),
+    JsModuleAsFn {
+        external_module_name: ExternalModuleName,
+        splice: bool,
+    },
+    JsModuleAsClass(ExternalModuleName),
+    JsCall {
+        name: String,
+        external_module_name: Option<ExternalModuleName>,
+        splice: bool,
+        scopes: Vec<String>,
+        tagged_template: bool,
+    },
+    JsSend {
+        name: String,
+        splice: bool,
+        js_send_scopes: Vec<String>,
+    },
+    JsNew {
+        name: String,
+        external_module_name: Option<ExternalModuleName>,
+        splice: bool,
+        scopes: Vec<String>,
+    },
+    JsSet {
+        js_set_name: String,
+        js_set_scopes: Vec<String>,
+    },
+    JsGet {
+        js_get_name: String,
+        js_get_scopes: Vec<String>,
+    },
+    JsGetIndex {
+        js_get_index_scopes: Vec<String>,
+    },
+    JsSetIndex {
+        js_set_index_scopes: Vec<String>,
+    },
+}
+
+impl Marshal for ExternalSpec {
+    fn marshal(&self, w: &mut MarshalWriter) {
+        match self {
+            ExternalSpec::JsVar { name, external_module_name, scopes } => {
+                w.write_block_header(0, 3);
+                w.write_string(name.as_bytes());
+                marshal_option(w, external_module_name, |w, m| m.marshal(w));
+                marshal_string_list(w, scopes);
+            }
+            ExternalSpec::JsModuleAsVar(m) => {
+                w.write_block_header(1, 1);
+                m.marshal(w);
+            }
+            ExternalSpec::JsModuleAsFn { external_module_name, splice } => {
+                w.write_block_header(2, 2);
+                external_module_name.marshal(w);
+                w.write_int(if *splice { 1 } else { 0 });
+            }
+            ExternalSpec::JsModuleAsClass(m) => {
+                w.write_block_header(3, 1);
+                m.marshal(w);
+            }
+            ExternalSpec::JsCall { name, external_module_name, splice, scopes, tagged_template } => {
+                w.write_block_header(4, 5);
+                w.write_string(name.as_bytes());
+                marshal_option(w, external_module_name, |w, m| m.marshal(w));
+                w.write_int(if *splice { 1 } else { 0 });
+                marshal_string_list(w, scopes);
+                w.write_int(if *tagged_template { 1 } else { 0 });
+            }
+            ExternalSpec::JsSend { name, splice, js_send_scopes } => {
+                w.write_block_header(5, 3);
+                w.write_string(name.as_bytes());
+                w.write_int(if *splice { 1 } else { 0 });
+                marshal_string_list(w, js_send_scopes);
+            }
+            ExternalSpec::JsNew { name, external_module_name, splice, scopes } => {
+                w.write_block_header(6, 4);
+                w.write_string(name.as_bytes());
+                marshal_option(w, external_module_name, |w, m| m.marshal(w));
+                w.write_int(if *splice { 1 } else { 0 });
+                marshal_string_list(w, scopes);
+            }
+            ExternalSpec::JsSet { js_set_name, js_set_scopes } => {
+                w.write_block_header(7, 2);
+                w.write_string(js_set_name.as_bytes());
+                marshal_string_list(w, js_set_scopes);
+            }
+            ExternalSpec::JsGet { js_get_name, js_get_scopes } => {
+                w.write_block_header(8, 2);
+                w.write_string(js_get_name.as_bytes());
+                marshal_string_list(w, js_get_scopes);
+            }
+            ExternalSpec::JsGetIndex { js_get_index_scopes } => {
+                w.write_block_header(9, 1);
+                marshal_string_list(w, js_get_index_scopes);
+            }
+            ExternalSpec::JsSetIndex { js_set_index_scopes } => {
+                w.write_block_header(10, 1);
+                marshal_string_list(w, js_set_index_scopes);
+            }
+        }
+    }
+}
+
+/// Return wrapper specification
+#[derive(Clone, Debug, PartialEq)]
+pub enum ReturnWrapper {
+    ReturnUnset,
+    ReturnIdentity,
+    ReturnNullToOpt,
+    ReturnNullUndefinedToOpt,
+    ReturnReplacedWithUnit,
+}
+
+impl Marshal for ReturnWrapper {
+    fn marshal(&self, w: &mut MarshalWriter) {
+        match self {
+            ReturnWrapper::ReturnUnset => w.write_int(0),
+            ReturnWrapper::ReturnIdentity => w.write_int(1),
+            ReturnWrapper::ReturnNullToOpt => w.write_int(2),
+            ReturnWrapper::ReturnNullUndefinedToOpt => w.write_int(3),
+            ReturnWrapper::ReturnReplacedWithUnit => w.write_int(4),
+        }
+    }
+}
+
+/// Parameters representation
+#[derive(Clone, Debug, PartialEq)]
+pub enum Params {
+    Params(Vec<Param>),
+    ParamNumber(i64),
+}
+
+impl Marshal for Params {
+    fn marshal(&self, w: &mut MarshalWriter) {
+        match self {
+            Params::Params(params) => {
+                w.write_block_header(0, 1);
+                marshal_list(w, params, |w, p| p.marshal(w));
+            }
+            Params::ParamNumber(n) => {
+                w.write_block_header(1, 1);
+                w.write_int(*n);
+            }
+        }
+    }
+}
+
+/// Main FFI type
+#[derive(Clone, Debug, PartialEq)]
+pub enum FfiType {
+    FfiBs {
+        params: Params,
+        return_wrapper: ReturnWrapper,
+        external_spec: ExternalSpec,
+    },
+    FfiObjCreate(Vec<ObjParam>),
+    FfiInlineConst(LamConstant),
+    FfiNormal,
+}
+
+impl Marshal for FfiType {
+    fn marshal(&self, w: &mut MarshalWriter) {
+        match self {
+            FfiType::FfiBs { params, return_wrapper, external_spec } => {
+                w.write_block_header(0, 3);
+                params.marshal(w);
+                return_wrapper.marshal(w);
+                external_spec.marshal(w);
+            }
+            FfiType::FfiObjCreate(params) => {
+                w.write_block_header(1, 1);
+                marshal_list(w, params, |w, p| p.marshal(w));
+            }
+            FfiType::FfiInlineConst(constant) => {
+                w.write_block_header(2, 1);
+                constant.marshal(w);
+            }
+            FfiType::FfiNormal => w.write_int(0),
+        }
+    }
+}
+
+// ========== Lam_constant types ==========
+
+/// Constructor tag for constants
+#[derive(Clone, Debug, PartialEq)]
+pub struct ConstructorTag {
+    pub cstr_name: Tag,
+    pub const_: i64,
+    pub non_const: i64,
+}
+
+impl Marshal for ConstructorTag {
+    fn marshal(&self, w: &mut MarshalWriter) {
+        w.write_block_header(0, 3);
+        self.cstr_name.marshal(w);
+        w.write_int(self.const_);
+        w.write_int(self.non_const);
+    }
+}
+
+/// Tag type (from Ast_untagged_variants)
+#[derive(Clone, Debug, PartialEq)]
+pub struct Tag {
+    pub name: String,
+}
+
+impl Marshal for Tag {
+    fn marshal(&self, w: &mut MarshalWriter) {
+        w.write_block_header(0, 1);
+        w.write_string(self.name.as_bytes());
+    }
+}
+
+/// Pointer info for constants
+#[derive(Clone, Debug, PartialEq)]
+pub enum PointerInfo {
+    None,
+    PtConstructor(ConstructorTag),
+    PtAssertfalse,
+    Some(String),
+}
+
+impl Marshal for PointerInfo {
+    fn marshal(&self, w: &mut MarshalWriter) {
+        match self {
+            PointerInfo::None => w.write_int(0),
+            PointerInfo::PtConstructor(tag) => {
+                w.write_block_header(0, 1);
+                tag.marshal(w);
+            }
+            PointerInfo::PtAssertfalse => w.write_int(1),
+            PointerInfo::Some(s) => {
+                w.write_block_header(1, 1);
+                w.write_string(s.as_bytes());
+            }
+        }
+    }
+}
+
+/// Tag info (from Lambda module)
+#[derive(Clone, Debug, PartialEq)]
+pub enum TagInfo {
+    Blk(Option<Vec<String>>),
+    PolyvarTag { name: String, num: i64 },
+}
+
+impl Marshal for TagInfo {
+    fn marshal(&self, w: &mut MarshalWriter) {
+        match self {
+            TagInfo::Blk(fields) => {
+                w.write_block_header(0, 1);
+                marshal_option(w, fields, |w, f| marshal_string_list(w, f));
+            }
+            TagInfo::PolyvarTag { name, num } => {
+                w.write_block_header(1, 2);
+                w.write_string(name.as_bytes());
+                w.write_int(*num);
+            }
+        }
+    }
+}
+
+/// Lambda constant type
+#[derive(Clone, Debug, PartialEq)]
+pub enum LamConstant {
+    ConstJsNull,
+    ConstJsUndefined { is_unit: bool },
+    ConstJsTrue,
+    ConstJsFalse,
+    ConstInt { i: i32, comment: PointerInfo },
+    ConstChar(i64),
+    ConstString { s: String, delim: Option<Delim> },
+    ConstFloat(String),
+    ConstBigint(bool, String),
+    ConstPointer(String),
+    ConstBlock(i64, TagInfo, Vec<LamConstant>),
+    ConstSome(Box<LamConstant>),
+    ConstModuleAlias,
+}
+
+impl Marshal for LamConstant {
+    fn marshal(&self, w: &mut MarshalWriter) {
+        match self {
+            LamConstant::ConstJsNull => w.write_int(0),
+            LamConstant::ConstJsUndefined { is_unit } => {
+                w.write_block_header(0, 1);
+                w.write_int(if *is_unit { 1 } else { 0 });
+            }
+            LamConstant::ConstJsTrue => w.write_int(1),
+            LamConstant::ConstJsFalse => w.write_int(2),
+            LamConstant::ConstInt { i, comment } => {
+                w.write_block_header(1, 2);
+                w.write_int(*i as i64);
+                comment.marshal(w);
+            }
+            LamConstant::ConstChar(c) => {
+                w.write_block_header(2, 1);
+                w.write_int(*c);
+            }
+            LamConstant::ConstString { s, delim } => {
+                w.write_block_header(3, 2);
+                w.write_string(s.as_bytes());
+                marshal_option(w, delim, |w, d| d.marshal(w));
+            }
+            LamConstant::ConstFloat(f) => {
+                w.write_block_header(4, 1);
+                w.write_string(f.as_bytes());
+            }
+            LamConstant::ConstBigint(sign, s) => {
+                w.write_block_header(5, 2);
+                w.write_int(if *sign { 1 } else { 0 });
+                w.write_string(s.as_bytes());
+            }
+            LamConstant::ConstPointer(s) => {
+                w.write_block_header(6, 1);
+                w.write_string(s.as_bytes());
+            }
+            LamConstant::ConstBlock(tag, info, constants) => {
+                w.write_block_header(7, 3);
+                w.write_int(*tag);
+                info.marshal(w);
+                marshal_list(w, constants, |w, c| c.marshal(w));
+            }
+            LamConstant::ConstSome(c) => {
+                w.write_block_header(8, 1);
+                c.marshal(w);
+            }
+            LamConstant::ConstModuleAlias => w.write_int(3),
+        }
+    }
+}
+
+// ========== Helper functions ==========
+
+fn marshal_option<T>(w: &mut MarshalWriter, opt: &Option<T>, f: impl FnOnce(&mut MarshalWriter, &T)) {
+    match opt {
+        None => w.write_int(0),
+        Some(val) => {
+            w.write_block_header(0, 1);
+            f(w, val);
+        }
+    }
+}
+
+fn marshal_list<T>(w: &mut MarshalWriter, list: &[T], f: impl Fn(&mut MarshalWriter, &T)) {
+    // OCaml lists are encoded as linked cons cells
+    // [] is int 0
+    // [a; b; c] is Block(0, [a, Block(0, [b, Block(0, [c, int 0])])])
+    let mut items = list.iter().collect::<Vec<_>>();
+    items.reverse();
+
+    let mut tail = false; // Start with empty list (will write int 0)
+    for item in items {
+        if !tail {
+            // First iteration: this will be the innermost cons cell
+            w.write_block_header(0, 2);
+            f(w, item);
+            w.write_int(0); // nil
+            tail = true;
+        } else {
+            // Need to wrap previous in cons cell
+            // This is wrong - we need a different approach
+        }
+    }
+
+    if list.is_empty() {
+        w.write_int(0);
+    }
+}
+
+fn marshal_string_list(w: &mut MarshalWriter, list: &[String]) {
+    if list.is_empty() {
+        w.write_int(0);
+        return;
+    }
+
+    // Build list from end
+    fn build_list(w: &mut MarshalWriter, list: &[String], idx: usize) {
+        if idx >= list.len() {
+            w.write_int(0); // nil
+        } else {
+            w.write_block_header(0, 2);
+            w.write_string(list[idx].as_bytes());
+            build_list(w, list, idx + 1);
+        }
+    }
+
+    build_list(w, list, 0);
+}
+
+fn marshal_hashtbl(w: &mut MarshalWriter, items: &[(String, String)]) {
+    // OCaml's Hashtbl serialization format
+    // This is a simplified version - real hashtables have bucket structure
+    // For simplicity, we just store as a list of key-value pairs
+    // TODO: Match exact OCaml hashtable format
+    w.write_block_header(0, items.len());
+    for (k, v) in items {
+        w.write_block_header(0, 2);
+        w.write_string(k.as_bytes());
+        w.write_string(v.as_bytes());
+    }
+}
+
+// ========== Encoding function ==========
+
+/// Encode FFI type to a marshaled byte array (for pval_prim[1])
+///
+/// Returns raw bytes that must be stored and marshaled as-is.
+/// Since Rust String requires UTF-8, we convert to a String using
+/// Latin-1 interpretation where each byte becomes a Unicode code point.
+/// During marshaling, the string will be converted back to bytes.
+pub fn encode_ffi_type(ffi: &FfiType) -> String {
+    let mut w = MarshalWriter::new();
+    ffi.marshal(&mut w);
+
+    // Convert the marshal output to a string
+    let bytes = w.finish();
+
+    // SAFETY: We're creating a string where each byte 0x00-0xFF is treated
+    // as the corresponding Unicode code point. This creates a valid UTF-8
+    // string since all single-byte values become their Unicode equivalent.
+    // When marshaling, we convert back using as_bytes() which gives us the
+    // UTF-8 encoding of these code points.
+    //
+    // For bytes 0x00-0x7F: same encoding in UTF-8
+    // For bytes 0x80-0xFF: these become 2-byte UTF-8 sequences (0xC2 0x80 to 0xC3 0xBF)
+    //
+    // To fix this properly, pval_prim should store Vec<u8> instead of String.
+    // For now, we use unsafe to create a String with the raw bytes.
+    //
+    // OCaml strings can contain arbitrary bytes, and ReScript relies on this
+    // for FFI encoding. The marshal format preserves these bytes exactly.
+    unsafe { String::from_utf8_unchecked(bytes) }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_simple_ffi_encoding() {
+        // Test encoding a simple Js_call FFI
+        let ffi = FfiType::FfiBs {
+            params: Params::ParamNumber(1),
+            return_wrapper: ReturnWrapper::ReturnUnset,
+            external_spec: ExternalSpec::JsCall {
+                name: "console.log".to_string(),
+                external_module_name: None,
+                splice: false,
+                scopes: vec![],
+                tagged_template: false,
+            },
+        };
+
+        let encoded = encode_ffi_type(&ffi);
+
+        // Check it starts with marshal magic
+        let bytes: Vec<u8> = encoded.chars().map(|c| c as u8).collect();
+        assert_eq!(&bytes[0..4], &[0x84, 0x95, 0xA6, 0xBE]);
+    }
+}

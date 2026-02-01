@@ -46,11 +46,13 @@
 
 pub mod current_marshal;
 pub mod deps;
+pub mod ffi_types;
 pub mod mapper_from0;
 pub mod mapper_to0;
 pub mod marshal;
 pub mod parsetree0;
 pub mod parsetree0_marshal;
+pub mod ppx;
 pub mod serialize;
 pub mod types;
 pub mod writer;
