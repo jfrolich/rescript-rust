@@ -926,7 +926,7 @@ fn parse_function_type(p: &mut Parser<'_>, start_pos: crate::location::Position)
     // OCaml uses prev_end_pos (actual end after parsing return type) for arrow locations,
     // not return_type's ptyp_loc.loc_end. This matters for Ptyp_variant return types
     // whose ptyp_loc doesn't include the closing ]
-    let arrow_end_pos = p.prev_end_pos.clone();
+    // Note: arrow_end_pos_idx uses cached prev_end_pos to enable sharing with return type's loc_end
 
     if params.is_empty() {
         // OCaml: Ast_helper.Typ.constr unit_constr []
@@ -958,9 +958,10 @@ fn parse_function_type(p: &mut Parser<'_>, start_pos: crate::location::Position)
     let total_arity = params.len() - as_underscore_count;
 
     // Build the arrow type from right to left, tracking the end position as PosIdx for sharing
-    // The first iteration uses arrow_end_pos, subsequent iterations use the arrow's end
+    // The first iteration uses prev_end_pos (cached to share with return type's loc_end),
+    // subsequent iterations use the arrow's end
     let mut acc = return_type;
-    let mut end_pos_idx = p.arena_mut().push_position(arrow_end_pos);
+    let mut end_pos_idx = p.get_or_push_prev_end_pos();
     for (param, param_start_idx) in params.into_iter().rev() {
         // Each arrow's location spans from the label (if any) to the end of return
         // OCaml includes the ~ in the location for labeled arguments

@@ -102,6 +102,10 @@ pub struct Parser<'src> {
     /// When multiple locations end at the same prev_end_pos, they share the same PosIdx.
     /// This is cleared when prev_end_pos changes (on next token consumption).
     cached_prev_end_pos_idx: Option<PosIdx>,
+    /// Cache for start_pos sharing: (position value, arena index).
+    /// When multiple locations start at the same start_pos, they share the same PosIdx.
+    /// This is cleared when start_pos changes (on next token consumption).
+    cached_start_pos_idx: Option<PosIdx>,
 }
 
 impl<'src> Parser<'src> {
@@ -132,6 +136,7 @@ impl<'src> Parser<'src> {
             arena,
             in_external: false,
             cached_prev_end_pos_idx: None,
+            cached_start_pos_idx: None,
         };
         // Scan the first token
         parser.next();
@@ -203,8 +208,18 @@ impl<'src> Parser<'src> {
     }
 
     /// Push the current start position into the arena.
+    /// Uses cache for sharing when multiple locations start at the same point.
+    /// In OCaml, when `p.Parser.start_pos` is referenced multiple times before
+    /// consuming a token, all references point to the same Position object.
+    /// We mimic this by caching the PosIdx for the current start_pos.
     pub fn push_start_pos(&mut self) -> PosIdx {
-        self.arena.push_position(self.start_pos.clone())
+        if let Some(cached_idx) = self.cached_start_pos_idx {
+            cached_idx
+        } else {
+            let idx = self.arena.push_position(self.start_pos);
+            self.cached_start_pos_idx = Some(idx);
+            idx
+        }
     }
 
     /// Push the current end position into the arena.
@@ -452,6 +467,7 @@ impl<'src> Parser<'src> {
                     self.prev_end_pos = prev_end;
                     self.cached_prev_end_pos_idx = None; // Clear cache when prev_end_pos changes
                     self.start_pos = result.start_pos;
+                    self.cached_start_pos_idx = None; // Clear cache when start_pos changes
                     self.end_pos = result.end_pos;
                     return;
                 }
@@ -473,6 +489,7 @@ impl<'src> Parser<'src> {
         self.prev_end_pos = self.end_pos.clone();
         self.cached_prev_end_pos_idx = None; // Clear cache when prev_end_pos changes
         self.start_pos = result.start_pos;
+        self.cached_start_pos_idx = None; // Clear cache when start_pos changes
         self.end_pos = result.end_pos;
     }
 
@@ -556,6 +573,7 @@ impl<'src> Parser<'src> {
         // Restore parser state
         self.token = token;
         self.start_pos = start_pos;
+        self.cached_start_pos_idx = None; // Clear cache when start_pos changes
         self.end_pos = end_pos;
         self.prev_end_pos = prev_end_pos;
         self.cached_prev_end_pos_idx = None; // Clear cache when prev_end_pos changes
@@ -595,6 +613,7 @@ impl<'src> Parser<'src> {
         self.scanner.restore(snapshot.scanner_snapshot);
         self.token = snapshot.token;
         self.start_pos = snapshot.start_pos;
+        self.cached_start_pos_idx = None; // Clear cache when start_pos changes
         self.end_pos = snapshot.end_pos;
         self.prev_end_pos = snapshot.prev_end_pos;
         self.cached_prev_end_pos_idx = None; // Clear cache when prev_end_pos changes
