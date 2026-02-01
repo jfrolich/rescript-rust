@@ -382,12 +382,19 @@ impl MarshalWriter {
         // Check if this position index was already written
         if let Some(&obj_idx) = self.position_idx_table.get(&idx) {
             let d = self.obj_counter - obj_idx;
+            if std::env::var("DEBUG_MARSHAL").is_ok() {
+                let pos = self.get_arena().get_position(idx);
+                eprintln!("[MARSHAL] SHARED {:?} cnum={} back={}", idx, pos.cnum, d);
+            }
             self.write_shared_ref(d);
             return false;
         }
 
         // Look up the position in the arena and copy it to end the borrow
         let pos = *self.get_arena().get_position(idx);
+        if std::env::var("DEBUG_MARSHAL").is_ok() {
+            eprintln!("[MARSHAL] NEW {:?} cnum={} obj_counter={}", idx, pos.cnum, self.obj_counter);
+        }
 
         // Record the object index BEFORE writing
         let obj_idx = self.obj_counter;
@@ -419,12 +426,18 @@ impl MarshalWriter {
         // Check if this location index was already written
         if let Some(&obj_idx) = self.location_idx_table.get(&idx) {
             let d = self.obj_counter - obj_idx;
+            if std::env::var("DEBUG_MARSHAL").is_ok() {
+                eprintln!("[MARSHAL] SHARED LOC {:?} back={}", idx, d);
+            }
             self.write_shared_ref(d);
             return;
         }
 
         // Look up the location in the arena and clone it to end the borrow
         let loc = self.get_arena().get_location(idx).clone();
+        if std::env::var("DEBUG_MARSHAL").is_ok() {
+            eprintln!("[MARSHAL] NEW LOC {:?} start={:?} end={:?} obj_counter={}", idx, loc.loc_start, loc.loc_end, self.obj_counter);
+        }
 
         // Record the object index BEFORE writing
         let obj_idx = self.obj_counter;
