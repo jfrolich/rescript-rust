@@ -85,12 +85,16 @@ Previously Rust was adding all uppercase identifiers, incorrectly including `Non
   - Fixed: `arena.intern("__x")` once, then pass the StrIdx to create both pattern and identifiers
   - Uses `push_lident_from_idx()` to share the string between Ppat_var and Pexp_ident
 
-- [x] **Task 1.6**: Investigate underscore placeholder location sharing (4-byte difference)
-  - Simple test `let x = doStuff(3, _, 7)` has 4-byte difference (OCaml: 253, Rust: 257)
-  - Difference appears to be in marshal sharing - OCaml shares a location that Rust doesn't
-  - At offset 0xD0-0xE0: OCaml uses SHARED8 (04 1b), Rust writes inline block (c0)
-  - **Finding**: Same root cause as Phase 4 - position indices allocated differently
-  - OCaml creates fewer position entries, allowing shorter back-references
+- [ ] **Task 1.6**: Fix Pexp_apply location sharing (4-byte difference on ALL function calls)
+  - **Root cause found**: This affects ALL function calls, not just underscore placeholders
+  - Even `let x = f()` has 4-byte difference (OCaml: 165, Rust: 169)
+  - Even `let x = f(a, b)` has 4-byte difference (OCaml: 193, Rust: 197)
+  - But `let x = a + b` (binary op via Pexp_apply) matches perfectly
+  - At offset ~0xA0: OCaml uses SHARED8 (`04 17`), Rust writes inline block (`c0`)
+  - The difference is that OCaml shares some location that Rust writes fresh
+  - **Not related to underscore** - regular function calls have the same issue
+  - Binary operators work because they use different location patterns
+  - Needs investigation: what location is being shared differently?
 
 ### Phase 2: Built-in PPX Parity (Bs_builtin_ppx in Rust) - PREREQUISITE
 
