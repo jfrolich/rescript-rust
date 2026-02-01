@@ -244,7 +244,7 @@ impl<'src> Parser<'src> {
     /// If the position matches prev_end_pos, uses that cache.
     /// Otherwise pushes without caching (end positions other than prev_end_pos
     /// are typically not shared in OCaml).
-    fn get_or_push_end_pos(&mut self, pos: Position) -> PosIdx {
+    pub fn get_or_push_end_pos(&mut self, pos: Position) -> PosIdx {
         if pos == self.prev_end_pos {
             return self.get_or_push_prev_end_pos();
         }

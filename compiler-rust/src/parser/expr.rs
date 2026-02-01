@@ -1945,8 +1945,11 @@ fn parse_constrained_expr_in_arg(p: &mut Parser<'_>) -> Expression {
 pub fn parse_primary_expr(p: &mut Parser<'_>, operand: Expression, no_call: bool) -> Expression {
     // OCaml: let start_pos = operand.pexp_loc.loc_start in
     // Capture start position from operand BEFORE any transformations (like underscore apply)
-    // This ensures that subsequent operations (field access, etc.) use the original location
-    let start_pos = p.loc_start(operand.pexp_loc);
+    // This ensures that subsequent operations (field access, etc.) use the original location.
+    // IMPORTANT: Reuse the existing PosIdx from operand.pexp_loc to match OCaml's sharing.
+    // In OCaml, `operand.pexp_loc.loc_start` is the same object used for all derived locations.
+    let start_pos_idx = p.loc_start_idx(operand.pexp_loc);
+    let start_pos = p.loc_start(operand.pexp_loc); // For comparisons where we need Position value
     let mut expr = operand;
 
     loop {
@@ -1964,7 +1967,7 @@ pub fn parse_primary_expr(p: &mut Parser<'_>, operand: Expression, no_call: bool
                         if p.token == Token::Equal {
                             p.next();
                             let value = parse_expr(p);
-                            let loc = p.mk_loc_to_prev_end(&start_pos);
+                            let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
                             expr = Expression {
                                 pexp_desc: ExpressionDesc::Pexp_setfield(
                                     Box::new(expr),
@@ -1975,7 +1978,7 @@ pub fn parse_primary_expr(p: &mut Parser<'_>, operand: Expression, no_call: bool
                                 pexp_attributes: vec![],
                             };
                         } else {
-                            let loc = p.mk_loc_to_prev_end(&start_pos);
+                            let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
                             expr = Expression {
                                 pexp_desc: ExpressionDesc::Pexp_field(
                                     Box::new(expr),
@@ -1997,7 +2000,7 @@ pub fn parse_primary_expr(p: &mut Parser<'_>, operand: Expression, no_call: bool
                         if p.token == Token::Equal {
                             p.next();
                             let value = parse_expr(p);
-                            let loc = p.mk_loc_to_prev_end(&start_pos);
+                            let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
                             expr = Expression {
                                 pexp_desc: ExpressionDesc::Pexp_setfield(
                                     Box::new(expr),
@@ -2008,7 +2011,7 @@ pub fn parse_primary_expr(p: &mut Parser<'_>, operand: Expression, no_call: bool
                                 pexp_attributes: vec![],
                             };
                         } else {
-                            let loc = p.mk_loc_to_prev_end(&start_pos);
+                            let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
                             expr = Expression {
                                 pexp_desc: ExpressionDesc::Pexp_field(
                                     Box::new(expr),
@@ -2023,7 +2026,9 @@ pub fn parse_primary_expr(p: &mut Parser<'_>, operand: Expression, no_call: bool
                         // Module-qualified field access: expr.Module.field
                         // Parse the path (e.g., Lexing.pos_fname) and create Pexp_field
                         let field_path = parse_value_path_after_dot(p);
-                        let loc = p.mk_loc(&start_pos, &p.loc_end(field_path.loc));
+                        let end_pos = p.loc_end(field_path.loc);
+                        let end_idx = p.get_or_push_end_pos(end_pos);
+                        let loc = p.mk_loc_idx_full(start_pos_idx, end_idx);
                         expr = Expression {
                             pexp_desc: ExpressionDesc::Pexp_field(Box::new(expr), field_path),
                             pexp_loc: loc,
@@ -2044,8 +2049,10 @@ pub fn parse_primary_expr(p: &mut Parser<'_>, operand: Expression, no_call: bool
                 // For function calls, use expr's current location start, NOT the original operand's start
                 // This is important for chained calls like f(a, _, b)(x, y) where the second call
                 // should start from the Pexp_fun's location (the underscore position)
-                let loc_start_pos = p.loc_start(expr.pexp_loc);
-                let loc = p.mk_loc_to_prev_end(&loc_start_pos);
+                // IMPORTANT: Reuse the existing PosIdx from expr.pexp_loc to match OCaml's sharing.
+                // In OCaml, `{loc with loc_end = p.prev_end_pos}` reuses the same loc_start object.
+                let loc_start_idx = p.loc_start_idx(expr.pexp_loc);
+                let loc = p.mk_loc_idx_to_prev_end(loc_start_idx);
                 // Apply placeholder transformation: f(a, _, b) => fun __x -> f(a, __x, b)
                 expr = transform_placeholder_application(Box::new(expr), args, partial, loc, p.arena_mut());
             }
@@ -2081,9 +2088,11 @@ pub fn parse_primary_expr(p: &mut Parser<'_>, operand: Expression, no_call: bool
                         // String index: obj["prop"] = value -> Pexp_apply("#=", [Pexp_send(obj, "prop"), value])
                         // OCaml: loc = mk_loc start_pos rhs_expr.pexp_loc.loc_end
                         // Use the inner expression's end, not prev_end_pos (which includes braces)
-                        let loc = p.mk_loc(&start_pos, &p.loc_end(value.pexp_loc));
+                        let value_end_idx = p.loc_end_idx(value.pexp_loc);
+                        let loc = p.mk_loc_idx_full(start_pos_idx, value_end_idx);
                         // First create the Pexp_send for property access
                         // Use rbracket_end for location (OCaml includes the ] in the location)
+                        let rbracket_end_idx = p.get_or_push_end_pos(rbracket_end.clone());
                         let send_expr = Expression {
                             pexp_desc: ExpressionDesc::Pexp_send(
                                 Box::new(expr),
@@ -2092,7 +2101,7 @@ pub fn parse_primary_expr(p: &mut Parser<'_>, operand: Expression, no_call: bool
                                     loc: index.pexp_loc.clone(),
                                 },
                             ),
-                            pexp_loc: p.mk_loc(&start_pos, &rbracket_end),
+                            pexp_loc: p.mk_loc_idx_full(start_pos_idx, rbracket_end_idx),
                             pexp_attributes: vec![],
                         };
                         // Create the "#=" operator
@@ -2112,7 +2121,7 @@ pub fn parse_primary_expr(p: &mut Parser<'_>, operand: Expression, no_call: bool
                         // Non-string index: arr[index] = value -> Array.set(arr, index, value)
                         // OCaml: loc = mk_loc start_pos p.prev_end_pos
                         // Uses prev_end_pos (includes braces) for Array.set
-                        let loc = p.mk_loc_to_prev_end(&start_pos);
+                        let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
                         // Use the bracket location [index] for the synthesized Array.set identifier
                         // (matching OCaml's array_loc = mk_loc lbracket rbracket)
                         let array_idx = p.arena_mut().intern_string("Array");
@@ -2137,7 +2146,8 @@ pub fn parse_primary_expr(p: &mut Parser<'_>, operand: Expression, no_call: bool
                     // Check if index is a string constant for Pexp_send (JS object access)
                     // or use Array.get for other index types
                     // Use rbracket_end for the location end (OCaml includes the ] in the location)
-                    let loc = p.mk_loc(&start_pos, &rbracket_end);
+                    let rbracket_end_idx = p.get_or_push_end_pos(rbracket_end.clone());
+                    let loc = p.mk_loc_idx_full(start_pos_idx, rbracket_end_idx);
 
                     if let ExpressionDesc::Pexp_constant(Constant::String(s, _)) =
                         &index.pexp_desc
@@ -4639,8 +4649,9 @@ fn parse_jsx_children(p: &mut Parser<'_>) -> Vec<Expression> {
                         let name_loc = p.mk_loc_current();
                         let lid_idx = p.push_lident(&name);
                         p.next();
-                        let loc_start_pos = p.loc_start(expr.pexp_loc);
-                let loc = p.mk_loc_to_prev_end(&loc_start_pos);
+                        // Reuse the existing PosIdx from expr.pexp_loc to match OCaml's sharing
+                        let loc_start_idx = p.loc_start_idx(expr.pexp_loc);
+                        let loc = p.mk_loc_idx_to_prev_end(loc_start_idx);
                         expr = Expression {
                             pexp_desc: ExpressionDesc::Pexp_field(
                                 Box::new(expr),
@@ -4652,7 +4663,11 @@ fn parse_jsx_children(p: &mut Parser<'_>) -> Vec<Expression> {
                     }
                     Token::Uident(_) => {
                         let field_path = parse_value_path_after_dot(p);
-                        let loc = p.mk_loc(&p.loc_start(expr.pexp_loc), &p.loc_end(field_path.loc));
+                        // Reuse the existing PosIdx from expr.pexp_loc to match OCaml's sharing
+                        let loc_start_idx = p.loc_start_idx(expr.pexp_loc);
+                        let end_pos = p.loc_end(field_path.loc);
+                        let end_idx = p.get_or_push_end_pos(end_pos);
+                        let loc = p.mk_loc_idx_full(loc_start_idx, end_idx);
                         expr = Expression {
                             pexp_desc: ExpressionDesc::Pexp_field(Box::new(expr), field_path),
                             pexp_loc: loc,
