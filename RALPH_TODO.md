@@ -69,6 +69,12 @@ Previously Rust was adding all uppercase identifiers, incorrectly including `Non
     - `a->b->c` becomes `c(b(a))` (chains correctly)
   - This was blocking many test files that use pipes
 
+- [x] **Task 1.5**: Fix placeholder (`_`) string sharing in pipes
+  - OCaml: Uses same `hidden_var = "__x"` string for both pattern and identifier
+  - Rust: Was creating two different StrIdx values
+  - Fixed: `arena.intern("__x")` once, then pass the StrIdx to create both pattern and identifiers
+  - Uses `push_lident_from_idx()` to share the string between Ppat_var and Pexp_ident
+
 ### Phase 2: Built-in PPX Parity (Bs_builtin_ppx in Rust) - PREREQUISITE
 
 **This phase is a prerequisite for binary parity.** OCaml runs `Ppx_entry.rewrite_implementation`
@@ -101,6 +107,9 @@ We need to implement the remaining transformations.
   - OCaml: `Ast_derive_projector.init()`, `Ast_derive_js_mapper.init()`
   - `@deriving(accessors)` - generates accessor functions for variants
   - `@deriving(jsConverter)` - generates JS conversion functions
+  - **Blocking issue**: OCaml strips `@deriving` attribute from type declarations after processing.
+    Rust keeps the attribute, causing binary output to include extra bytes.
+  - Related files: `ast_tdcls.ml`, `ast_derive.ml`, `ast_attributes.ml`
 
 - [x] **Task 2.4**: Implement integer literal suffix handling
   - OCaml: `pat_mapper` and `expr_mapper` in bs_builtin_ppx.ml
