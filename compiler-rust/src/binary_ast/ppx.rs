@@ -453,6 +453,119 @@ pub fn inline_float_primitive(f: &str) -> Vec<String> {
     vec![String::new(), encoded]
 }
 
+// ========== @inline Handling ==========
+
+/// Check if attributes contain @inline
+fn has_inline_attr(attrs: &[Attribute], arena: &ParseArena) -> bool {
+    attrs.iter().any(|(attr_name, _)| {
+        let name = arena.get_string(attr_name.txt);
+        name == "inline"
+    })
+}
+
+/// Create a type for a simple builtin type (string, int, float, bool)
+fn make_simple_type(type_name: &'static str, arena: &mut ParseArena) -> CoreType {
+    let none_loc = arena.none_loc();
+    let lid_idx = arena.push_lident_static(type_name);
+    CoreType {
+        ptyp_desc: CoreTypeDesc::Ptyp_constr(
+            Located { txt: lid_idx, loc: none_loc },
+            vec![],
+        ),
+        ptyp_loc: none_loc,
+        ptyp_attributes: vec![],
+    }
+}
+
+/// Transform an @inline let binding into a primitive
+fn transform_inline_binding(
+    pval_name: &Located<StrIdx>,
+    expr: &Expression,
+    pvb_loc: LocIdx,
+    pstr_loc: LocIdx,
+    arena: &mut ParseArena,
+) -> Option<StructureItem> {
+    match &expr.pexp_desc {
+        // @inline let x = "string"
+        ExpressionDesc::Pexp_constant(Constant::String(s, delim)) => {
+            let prim = inline_string_primitive(s, delim.as_deref());
+            Some(StructureItem {
+                pstr_desc: StructureItemDesc::Pstr_primitive(ValueDescription {
+                    pval_name: Located {
+                        txt: pval_name.txt,
+                        loc: pval_name.loc,
+                    },
+                    pval_type: make_simple_type("string", arena),
+                    pval_prim: prim,
+                    pval_attributes: vec![],
+                    pval_loc: pvb_loc,
+                }),
+                pstr_loc,
+            })
+        }
+        // @inline let x = 42
+        ExpressionDesc::Pexp_constant(Constant::Integer(s, None)) => {
+            let i = s.parse::<i32>().ok()?;
+            let prim = inline_int_primitive(i);
+            Some(StructureItem {
+                pstr_desc: StructureItemDesc::Pstr_primitive(ValueDescription {
+                    pval_name: Located {
+                        txt: pval_name.txt,
+                        loc: pval_name.loc,
+                    },
+                    pval_type: make_simple_type("int", arena),
+                    pval_prim: prim,
+                    pval_attributes: vec![],
+                    pval_loc: pvb_loc,
+                }),
+                pstr_loc,
+            })
+        }
+        // @inline let x = 3.14
+        ExpressionDesc::Pexp_constant(Constant::Float(s, None)) => {
+            let prim = inline_float_primitive(s);
+            Some(StructureItem {
+                pstr_desc: StructureItemDesc::Pstr_primitive(ValueDescription {
+                    pval_name: Located {
+                        txt: pval_name.txt,
+                        loc: pval_name.loc,
+                    },
+                    pval_type: make_simple_type("float", arena),
+                    pval_prim: prim,
+                    pval_attributes: vec![],
+                    pval_loc: pvb_loc,
+                }),
+                pstr_loc,
+            })
+        }
+        // @inline let x = true or @inline let x = false
+        ExpressionDesc::Pexp_construct(lid, None) => {
+            let longident = arena.get_longident(lid.txt);
+            if let Longident::Lident(name_idx) = longident {
+                let name = arena.get_string(*name_idx);
+                if name == "true" || name == "false" {
+                    let prim = inline_bool_primitive(name == "true");
+                    return Some(StructureItem {
+                        pstr_desc: StructureItemDesc::Pstr_primitive(ValueDescription {
+                            pval_name: Located {
+                                txt: pval_name.txt,
+                                loc: pval_name.loc,
+                            },
+                            pval_type: make_simple_type("bool", arena),
+                            pval_prim: prim,
+                            pval_attributes: vec![],
+                            pval_loc: pvb_loc,
+                        }),
+                        pstr_loc,
+                    });
+                }
+            }
+            None
+        }
+        _ => None,
+    }
+}
+
 // ========== Extension Point Handling ==========
 
 /// Handle an extension point in expression position.
@@ -1474,7 +1587,47 @@ fn rewrite_structure_item(item: &StructureItem, arena: &mut ParseArena) -> Struc
             }
         }
         // Handle value bindings - need to rewrite expressions and patterns
+        // Also handle @inline transformation
         StructureItemDesc::Pstr_value(rec_flag, bindings) => {
+            // Check for @inline on a single non-recursive let binding
+            if *rec_flag == RecFlag::Nonrecursive && bindings.len() == 1 {
+                let vb = &bindings[0];
+                // Check if pattern is a simple variable
+                if let PatternDesc::Ppat_var(pval_name) = &vb.pvb_pat.ppat_desc {
+                    // Rewrite expression first to get string transformation
+                    let pvb_expr = rewrite_expression(&vb.pvb_expr, arena);
+
+                    // Check for @inline attribute
+                    if has_inline_attr(&vb.pvb_attributes, arena) {
+                        // Transform based on the expression type
+                        if let Some(prim_item) = transform_inline_binding(
+                            pval_name,
+                            &pvb_expr,
+                            vb.pvb_loc,
+                            item.pstr_loc,
+                            arena,
+                        ) {
+                            return prim_item;
+                        }
+                    }
+
+                    // No @inline or couldn't transform - return rewritten binding
+                    return StructureItem {
+                        pstr_desc: StructureItemDesc::Pstr_value(
+                            *rec_flag,
+                            vec![ValueBinding {
+                                pvb_expr,
+                                pvb_pat: vb.pvb_pat.clone(),
+                                pvb_attributes: vb.pvb_attributes.clone(),
+                                pvb_loc: vb.pvb_loc,
+                            }],
+                        ),
+                        pstr_loc: item.pstr_loc,
+                    };
+                }
+            }
+
+            // Default case: rewrite all bindings
             let new_bindings: Vec<ValueBinding> = bindings
                 .iter()
                 .map(|vb| ValueBinding {
