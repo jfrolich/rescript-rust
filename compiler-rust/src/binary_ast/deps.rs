@@ -660,15 +660,19 @@ impl<'a> DependencyCollector<'a> {
 
     fn add_with_constraint(&mut self, constraint: &WithConstraint) {
         match constraint {
-            WithConstraint::Pwith_type(lid, td) | WithConstraint::Pwith_typesubst(lid, td) => {
-                // Type constraints use add_parent (value-level reference)
-                self.add_lident_idx(lid.txt);
+            WithConstraint::Pwith_type(_lid, td) | WithConstraint::Pwith_typesubst(_lid, td) => {
+                // OCaml: Pwith_type (_, td) -> add_type_declaration bv td
+                // Only add dependencies from the type declaration, not the path being constrained
+                // lid is the type path being constrained (e.g., `t` in `with type t = string`)
+                // which is not an external dependency reference
                 self.add_type_declaration(td);
             }
-            WithConstraint::Pwith_module(lid1, lid2)
-            | WithConstraint::Pwith_modsubst(lid1, lid2) => {
-                // Module constraints use addmodule (full path)
-                self.add_lident_idx_full(lid1.txt);
+            WithConstraint::Pwith_module(_lid1, lid2)
+            | WithConstraint::Pwith_modsubst(_lid1, lid2) => {
+                // OCaml: Pwith_module (_, lid) -> addmodule bv lid
+                // Only add the right-hand side (lid2) as a dependency
+                // lid1 is the path being substituted (e.g., `Bar` in `with module Bar = Array`)
+                // which is not an external dependency reference
                 self.add_lident_idx_full(lid2.txt);
             }
         }
