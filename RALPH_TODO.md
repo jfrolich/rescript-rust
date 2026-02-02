@@ -6,13 +6,16 @@
 
 **Note:** Many remaining failures are due to arity sharing (see Phase 6 below).
 
-**Analysis Complete (2026-02-02):** The remaining 722 failing tests are blocked by multiple issues:
+**Analysis Complete (2026-02-02):** The remaining 720 failing tests are blocked by multiple issues:
 1. **Arity sharing (~700 files)**: OCaml's CSE cannot be replicated (structural limitation)
 2. **parsetree0 Location sharing (~500+ files)**: mapper_to0 converts LocIdx to full Location structs,
    losing sharing information. Would require refactoring parsetree0 to use LocIdx.
 3. **@deriving transformations**: `@deriving(accessors)` DONE; `@deriving(jsConverter)` and
    `@deriving(abstract)` still TODO (~8 files remaining)
 4. **Module-level await (4 files)**: Requires refactoring to multi-item expansion
+
+**Session End Status (2026-02-02):** All unchecked tasks are either BLOCKED or have very low impact.
+Further progress requires addressing structural limitations (arity sharing, location sharing).
 
 **@module FFI fix (2026-02-02):** Fixed @module attribute handling in FFI encoding.
 - `ExternalModuleName` is now correctly created when `@module("...")` is present
