@@ -315,10 +315,21 @@ test_single_file() {
 
         # Test bsc -bs-ast parity (full compiler binary AST output with dependencies)
         # This is the production format used by the build system
+        # Note: Both OCaml and Rust bsc create .iast files for interface (.resi) files,
+        # ignoring the -o extension. We check for both possible output locations.
         local ocaml_ast_file="$file_temp/ocaml.ast"
         local rust_ast_file="$file_temp/rust.ast"
+        local ocaml_iast_file="$file_temp/ocaml.iast"
+        local rust_iast_file="$file_temp/rust.iast"
         if timeout "$TIMEOUT_SECONDS" "$OCAML_BSC" -bs-ast "$file" -o "$ocaml_ast_file" 2>/dev/null && \
            timeout "$TIMEOUT_SECONDS" "$RUST_BSC" -bs-ast "$file" -o "$rust_ast_file" 2>/dev/null; then
+            # Both compilers create .iast for .resi files (regardless of -o), so check for that
+            if [[ -f "$ocaml_iast_file" && ! -f "$ocaml_ast_file" ]]; then
+                ocaml_ast_file="$ocaml_iast_file"
+            fi
+            if [[ -f "$rust_iast_file" && ! -f "$rust_ast_file" ]]; then
+                rust_ast_file="$rust_iast_file"
+            fi
             if [[ -f "$ocaml_ast_file" && -f "$rust_ast_file" ]]; then
                 if ! diff -q "$ocaml_ast_file" "$rust_ast_file" > /dev/null 2>&1; then
                     bsc_ast_diff=1

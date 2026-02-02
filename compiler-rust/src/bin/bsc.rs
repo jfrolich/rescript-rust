@@ -150,13 +150,23 @@ fn generate_ast(input: &Path, output: Option<PathBuf>) -> Result<()> {
         .is_some_and(|ext| ext == "resi" || ext == "mli");
 
     // Determine output path and extension
-    let out_path = output.unwrap_or_else(|| {
-        if is_interface {
-            input.with_extension("iast")
-        } else {
-            input.with_extension("ast")
+    // Note: OCaml ignores the -o extension for interface files, always using .iast
+    let out_path = match output {
+        Some(path) => {
+            if is_interface {
+                path.with_extension("iast")
+            } else {
+                path
+            }
         }
-    });
+        None => {
+            if is_interface {
+                input.with_extension("iast")
+            } else {
+                input.with_extension("ast")
+            }
+        }
+    };
 
     if let Some(parent) = out_path.parent() {
         fs::create_dir_all(parent)?;
