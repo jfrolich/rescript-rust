@@ -4,9 +4,7 @@
 **Overall Status:** 261/1049 bsc-ast tests passing (24.9%) - **AT CEILING** (blocked by arity sharing)
 **sexp-locs Status:** 1049/1049 tests passing (100%) ✅
 
-**Note:** Further progress requires one of:
-1. Implementing content-based sharing (violates "no content-based sharing" constraint)
-2. Using `Rc<Arity>` or similar architecture change for arity values
+**Note:** Further progress requires implementing an **arity arena** (see Phase 6 below).
 
 ---
 
@@ -345,6 +343,92 @@ type annotation arity and function arity should be separate objects.
 - [ ] **Task 5.3**: Target 750/1049 bsc-ast parity (71%) - **BLOCKED** (depends on 5.2)
 - [ ] **Task 5.4**: Target 1000/1049 bsc-ast parity (95%) - **BLOCKED** (depends on 5.2)
 - [ ] **Task 5.5**: Achieve 1049/1049 bsc-ast parity (100%) - **BLOCKED** (depends on 5.2)
+
+### Phase 6: Arity Arena Implementation (UNBLOCKS Phase 5)
+
+**Design Principle:** If an object type is shared in OCaml's output, create an arena for it in Rust
+and pass the index as early as possible. This mirrors OCaml's reference passing - sharing happens
+naturally when the same index is used (just like OCaml shares when same reference is passed).
+
+- [ ] **Task 6.1**: Investigate OCaml's arity sharing pattern empirically
+  - Create test cases to determine exactly what OCaml shares:
+    ```rescript
+    // Test 1: Single function with type annotation
+    let f: int => int = x => x
+
+    // Test 2: Two functions, same arity
+    let f: int => int = x => x
+    let g: int => int = y => y
+
+    // Test 3: Type arity vs body arity (same function)
+    let f: int => int = x => x  // Does type share with body?
+    ```
+  - For each test, analyze marshal output to see which `Some(n)` blocks are shared
+  - Document the sharing pattern
+
+- [ ] **Task 6.2**: Define ArityIdx and ArityArena
+  ```rust
+  // In parse_arena.rs
+  #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+  pub struct ArityIdx(u32);
+
+  pub struct ArityArena {
+      arities: Vec<Option<i32>>,
+  }
+
+  impl ArityArena {
+      pub fn push(&mut self, arity: Option<i32>) -> ArityIdx {
+          let idx = ArityIdx(self.arities.len() as u32);
+          self.arities.push(arity);
+          idx
+      }
+  }
+  ```
+
+- [ ] **Task 6.3**: Update AST types to use ArityIdx
+  - Change `Ptyp_arrow { ..., arity: Arity }` to `arity: ArityIdx`
+  - Change `Pexp_fun { ..., arity: Arity }` to `arity: ArityIdx`
+
+- [ ] **Task 6.4**: Update parser to use arena
+  - Replace `Arity::Full(n)` with `arena.push_arity(Some(n))`
+  - Replace `Arity::Unknown` with `arena.push_arity(None)`
+  - Update: typ.rs, expr.rs, jsx_ppx.rs, ppx.rs
+
+- [ ] **Task 6.5**: Update marshal to share by ArityIdx
+  ```rust
+  // In marshal.rs
+  arity_idx_table: HashMap<ArityIdx, u32>,
+
+  pub fn write_arity_idx(&mut self, idx: ArityIdx, arena: &ParseArena) {
+      if let Some(&obj_idx) = self.arity_idx_table.get(&idx) {
+          self.write_shared_ref(self.obj_counter - obj_idx);
+          return;
+      }
+      // ... write arity, record in table ...
+  }
+  ```
+
+- [ ] **Task 6.6**: Match OCaml's arity creation pattern
+  - Based on Task 6.1 findings, ensure Rust creates/reuses ArityIdx in same pattern
+  - If OCaml shares across functions: reuse same ArityIdx
+  - If OCaml keeps separate within function: create separate ArityIdx
+
+**Generalized principle:** For ANY object type where OCaml shares via pointer equality:
+1. Create an arena for that object type
+2. Define an index type (e.g., `FooIdx`)
+3. Update AST types to use the index
+4. Update parser to push to arena, passing indices through code
+5. Update marshal to share based on index equality
+
+**Files to modify:**
+- `compiler-rust/src/parse_arena.rs` - Add ArityArena
+- `compiler-rust/src/parser/ast.rs` - Change Arity to ArityIdx
+- `compiler-rust/src/parser/typ.rs` - Update type parsing
+- `compiler-rust/src/parser/expr.rs` - Update expression parsing
+- `compiler-rust/src/parser/jsx_ppx.rs` - Update JSX
+- `compiler-rust/src/binary_ast/ppx.rs` - Update built-in PPX
+- `compiler-rust/src/binary_ast/marshal.rs` - Add arity_idx_table
+- `compiler-rust/src/binary_ast/current_marshal.rs` - Update Arity marshaling
 
 ---
 
