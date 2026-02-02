@@ -192,6 +192,9 @@ pub struct ParseArena {
     longidents: Arena<Longident, LidentIdx>,
     /// Position deduplication table - maps position content to its index.
     position_dedup: HashMap<PosKey, PosIdx>,
+    /// Simple Lident deduplication table - maps StrIdx to its LidentIdx.
+    /// This enables sharing of common identifiers like "()", "::", etc.
+    lident_dedup: HashMap<StrIdx, LidentIdx>,
     /// String arena for all identifier strings.
     ///
     /// Strings can be added in two ways:
@@ -209,6 +212,7 @@ impl Default for ParseArena {
             locations: Arena::default(),
             longidents: Arena::default(),
             position_dedup: HashMap::new(),
+            lident_dedup: HashMap::new(),
             strings: Interner::new(),
         }
     }
@@ -479,21 +483,38 @@ impl ParseArena {
 
     /// Push a simple identifier (Lident) with a static string (interned).
     ///
-    /// For static strings (literals in Rust source code), this deduplicates:
-    /// same content = same StrIdx = shared during marshalling.
+    /// For static strings (literals in Rust source code), this deduplicates
+    /// BOTH the string AND the Lident wrapper:
+    /// - same string content = same StrIdx
+    /// - same StrIdx = same LidentIdx = shared during marshalling
     ///
     /// Use for operators from Token::to_string and hardcoded identifiers
     /// in the parser like "not", "::", "()", etc.
     pub fn push_lident_static(&mut self, name: &'static str) -> LidentIdx {
         let str_idx = self.strings.intern(name);
-        self.longidents.push(Longident::Lident(str_idx))
+        // Check if we already have a Lident for this StrIdx
+        if let Some(&lid_idx) = self.lident_dedup.get(&str_idx) {
+            return lid_idx;
+        }
+        // Create new Lident and record for future deduplication
+        let lid_idx = self.longidents.push(Longident::Lident(str_idx));
+        self.lident_dedup.insert(str_idx, lid_idx);
+        lid_idx
     }
 
     /// Push a simple identifier (Lident) with a StrIdx that already exists.
     ///
+    /// This also deduplicates: same StrIdx = same LidentIdx.
     /// Use when you already have a StrIdx (e.g., from a located string).
     pub fn push_lident_from_idx(&mut self, str_idx: StrIdx) -> LidentIdx {
-        self.longidents.push(Longident::Lident(str_idx))
+        // Check if we already have a Lident for this StrIdx
+        if let Some(&lid_idx) = self.lident_dedup.get(&str_idx) {
+            return lid_idx;
+        }
+        // Create new Lident and record for future deduplication
+        let lid_idx = self.longidents.push(Longident::Lident(str_idx));
+        self.lident_dedup.insert(str_idx, lid_idx);
+        lid_idx
     }
 
     /// Push a dotted identifier (Ldot) with a dynamic string.
