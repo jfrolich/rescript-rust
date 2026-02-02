@@ -1400,6 +1400,199 @@ fn add_promise_to_fun_body(expr: &Expression, loc: LocIdx, arena: &mut ParseAren
     }
 }
 
+// ========== Module-Level Await Transformation ==========
+
+/// Check if attributes contain @res.await
+fn has_await_attribute(attrs: &[Attribute], arena: &ParseArena) -> bool {
+    attrs.iter().any(|(attr_name, _)| {
+        let name = arena.get_string(attr_name.txt);
+        name == "res.await"
+    })
+}
+
+/// Generate a local module type name from a Longident.
+/// E.g., `Belt.List` -> `"__Belt_List__"`
+/// OCaml: bs_builtin_ppx.ml local_module_type_name
+fn local_module_type_name(lid: LidentIdx, arena: &ParseArena) -> String {
+    let longident = arena.get_longident(lid);
+    let parts = longident.flatten_idx();
+    let name = parts
+        .iter()
+        .map(|s| arena.get_string(*s))
+        .collect::<Vec<_>>()
+        .join("_");
+    format!("__{}__", name)
+}
+
+/// Remove @res.await attribute from a list of attributes.
+fn remove_await_attribute(attrs: &[Attribute], arena: &ParseArena) -> Vec<Attribute> {
+    attrs
+        .iter()
+        .filter(|(attr_name, _)| {
+            let name = arena.get_string(attr_name.txt);
+            name != "res.await"
+        })
+        .cloned()
+        .collect()
+}
+
+/// Create the module-level await transformation for `module M = @res.await ME`.
+/// Returns (optional module type decl, transformed module binding).
+///
+/// OCaml: bs_builtin_ppx.ml lines 661-702, ast_await.ml create_await_module_expression
+///
+/// Transforms:
+///   `module M = @res.await Belt.List`
+/// Into:
+///   `module type __Belt_List__ = module type of Belt.List`
+///   `module M = unpack(Primitive_promise.unsafe_await(Primitive_module.import(module(Belt.List: __Belt_List__))))`
+fn transform_module_await(
+    mb: &current::ModuleBinding,
+    arena: &mut ParseArena,
+) -> Option<(StructureItem, StructureItem)> {
+    // Check if the module expression is Pmod_ident with @res.await attribute
+    let mod_expr = &mb.pmb_expr;
+    if !has_await_attribute(&mod_expr.pmod_attributes, arena) {
+        return None;
+    }
+
+    // Get the module identifier and its location
+    let (lid, lid_loc) = match &mod_expr.pmod_desc {
+        ModuleExprDesc::Pmod_ident(located_lid) => (located_lid.txt, located_lid.loc),
+        _ => return None, // Only handle Pmod_ident for now
+    };
+
+    // Generate module type name: __Belt_List__
+    let module_type_name = local_module_type_name(lid, arena);
+    let module_type_name_idx = arena.intern_string(&module_type_name);
+
+    // Locations for generated code:
+    // - lid_loc: location of the Longident inside Pmod_ident (used for module type decl)
+    // - pmod_loc: location of the module expression (used for import/await expressions)
+
+    // 1. Create module type declaration: module type __Belt_List__ = module type of Belt.List
+    // OCaml uses lid_loc (the Longident's location) for all parts of this declaration
+    let module_type_decl = StructureItem {
+        pstr_desc: StructureItemDesc::Pstr_modtype(current::ModuleTypeDeclaration {
+            pmtd_name: Located {
+                txt: module_type_name_idx,
+                loc: lid_loc,
+            },
+            pmtd_type: Some(current::ModuleType {
+                pmty_desc: current::ModuleTypeDesc::Pmty_typeof(Box::new(current::ModuleExpr {
+                    pmod_desc: ModuleExprDesc::Pmod_ident(Located {
+                        txt: lid,
+                        loc: lid_loc,
+                    }),
+                    pmod_loc: lid_loc,
+                    pmod_attributes: vec![],
+                })),
+                pmty_loc: lid_loc,
+                pmty_attributes: vec![],
+            }),
+            pmtd_attributes: vec![],
+            pmtd_loc: lid_loc,
+        }),
+        pstr_loc: lid_loc,
+    };
+
+    // 2. Create the transformed module expression:
+    // unpack(Primitive_promise.unsafe_await(Primitive_module.import(module(Belt.List: __Belt_List__))))
+
+    // Create module type lid for constraint: Lident("__Belt_List__")
+    let module_type_lid = arena.push_lident_from_idx(module_type_name_idx);
+
+    // Create pack expression: module(Belt.List)
+    // First, remove @res.await attribute from module expr
+    // OCaml does {e with pmod_attributes = ...} preserving original locations
+    let cleaned_mod_expr = current::ModuleExpr {
+        pmod_desc: ModuleExprDesc::Pmod_ident(Located {
+            txt: lid,
+            loc: lid_loc, // Preserve original Longident location
+        }),
+        pmod_loc: mod_expr.pmod_loc,
+        pmod_attributes: remove_await_attribute(&mod_expr.pmod_attributes, arena),
+    };
+
+    // OCaml uses e.pmod_loc for pack, constraint, and package type locations
+    let pmod_loc = mod_expr.pmod_loc;
+
+    let pack_expr = Expression {
+        pexp_desc: ExpressionDesc::Pexp_pack(cleaned_mod_expr),
+        pexp_loc: pmod_loc,
+        pexp_attributes: vec![],
+    };
+
+    // Create package type: (Lident("__Belt_List__"), [])
+    // module_type_lid location is mb.pmb_expr.pmod_loc in OCaml
+    let package_type = CoreType {
+        ptyp_desc: CoreTypeDesc::Ptyp_package((
+            Located {
+                txt: module_type_lid,
+                loc: pmod_loc,
+            },
+            vec![], // No with constraints
+        )),
+        ptyp_loc: pmod_loc,
+        ptyp_attributes: vec![],
+    };
+
+    // Create constrained expression: (module(Belt.List): __Belt_List__)
+    let constrained_pack = Expression {
+        pexp_desc: ExpressionDesc::Pexp_constraint(Box::new(pack_expr), package_type),
+        pexp_loc: pmod_loc,
+        pexp_attributes: vec![],
+    };
+
+    // Create Primitive_module.import(constrained_pack)
+    let module_str = arena.intern_string("Primitive_module");
+    let module_lident = arena.push_lident_from_idx(module_str);
+    let import_lid = arena.push_ldot(module_lident, "import");
+
+    let import_ident = Expression {
+        pexp_desc: ExpressionDesc::Pexp_ident(Located {
+            txt: import_lid,
+            loc: pmod_loc,
+        }),
+        pexp_loc: pmod_loc,
+        pexp_attributes: vec![],
+    };
+
+    let import_apply = Expression {
+        pexp_desc: ExpressionDesc::Pexp_apply {
+            funct: Box::new(import_ident),
+            args: vec![(ArgLabel::Nolabel, constrained_pack)],
+            partial: false,
+            transformed_jsx: false,
+        },
+        pexp_loc: pmod_loc,
+        pexp_attributes: vec![],
+    };
+
+    // Create Primitive_promise.unsafe_await(import_apply)
+    let await_expr = transform_await(import_apply, mod_expr.pmod_loc, arena);
+
+    // Create unpack(await_expr)
+    let transformed_mod_expr = current::ModuleExpr {
+        pmod_desc: ModuleExprDesc::Pmod_unpack(Box::new(await_expr)),
+        pmod_loc: mod_expr.pmod_loc,
+        pmod_attributes: vec![],
+    };
+
+    // Create the transformed module binding
+    let transformed_mb = StructureItem {
+        pstr_desc: StructureItemDesc::Pstr_module(current::ModuleBinding {
+            pmb_name: mb.pmb_name.clone(),
+            pmb_expr: transformed_mod_expr,
+            pmb_attributes: rewrite_attributes(&mb.pmb_attributes, arena),
+            pmb_loc: mb.pmb_loc,
+        }),
+        pstr_loc: mb.pmb_loc,
+    };
+
+    Some((module_type_decl, transformed_mb))
+}
+
 // ========== Expression Rewriting ==========
 
 /// Check if an expression is a pipe operator application (a -> b)
@@ -3085,16 +3278,24 @@ fn rewrite_structure_item(item: &StructureItem, arena: &mut ParseArena) -> Vec<S
             ),
             pstr_loc: item.pstr_loc,
         }],
-        // Module - recurse into module structure
-        StructureItemDesc::Pstr_module(mb) => vec![StructureItem {
-            pstr_desc: StructureItemDesc::Pstr_module(current::ModuleBinding {
-                pmb_name: mb.pmb_name.clone(),
-                pmb_expr: rewrite_module_expr(&mb.pmb_expr, arena),
-                pmb_attributes: rewrite_attributes(&mb.pmb_attributes, arena),
-                pmb_loc: mb.pmb_loc,
-            }),
-            pstr_loc: item.pstr_loc,
-        }],
+        // Module - check for @res.await transformation first, then recurse
+        StructureItemDesc::Pstr_module(mb) => {
+            // Check for module-level await: module M = @res.await ME
+            if let Some((module_type_decl, transformed_mb)) = transform_module_await(mb, arena) {
+                vec![module_type_decl, transformed_mb]
+            } else {
+                // Normal case - just recurse into module structure
+                vec![StructureItem {
+                    pstr_desc: StructureItemDesc::Pstr_module(current::ModuleBinding {
+                        pmb_name: mb.pmb_name.clone(),
+                        pmb_expr: rewrite_module_expr(&mb.pmb_expr, arena),
+                        pmb_attributes: rewrite_attributes(&mb.pmb_attributes, arena),
+                        pmb_loc: mb.pmb_loc,
+                    }),
+                    pstr_loc: item.pstr_loc,
+                }]
+            }
+        }
         // Recursive modules
         StructureItemDesc::Pstr_recmodule(mbs) => {
             let new_mbs = mbs
