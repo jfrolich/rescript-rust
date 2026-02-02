@@ -115,22 +115,28 @@ passed were "accidentally correct" due to content-based sharing matching OCaml b
 - `parse_typ_expr_inner_with_start` - captures start but then incorrectly passes it to atomic
 - `parse_atomic_typ_expr_with_start` - should capture its own fresh position
 - `parse_type_constr_with_start` - should capture its own fresh position (parse_value_path equivalent)
-- Many more functions throughout the parser
+- Many more functions throughout the parser (~70+ locations total)
 
-**Previous investigation (2026-02-02):**
+**Key finding (2026-02-03):** The distinction between `p.start_pos_idx()` and `p.push_start_pos()`:
+- `p.start_pos_idx()`: Returns the EXISTING index created by `p.next()` for the current token
+- `p.push_start_pos()`: Creates a NEW position entry at the same coordinates
 
-**Previous investigation (2026-02-02):**
-Attempted to fix position sharing by using `push_start_pos()` (fresh position) instead of `start_pos_idx()`
-(cached position) in type parsing functions. This caused 15 regressions because:
-1. Simply making positions "fresh" changes the marshal output in unexpected ways
-2. The sharing pattern depends on BOTH physical identity AND marshal traversal order
-3. OCaml's marshal visits AST nodes in a specific order, and position references are relative to that order
-4. Changing which positions are created/shared affects all subsequent sharing distances
+In OCaml, `let start_pos = p.Parser.start_pos` binds to the SAME record that the scanner created.
+Multiple functions binding to the same record results in sharing during marshal.
 
-The correct fix requires carefully matching OCaml's exact position capture pattern, which involves:
-1. Using FRESH positions where OCaml does `let start_pos = p.Parser.start_pos`
-2. PASSING the same PosIdx where OCaml passes the same variable
-3. Ensuring marshal traversal order matches OCaml's order
+The issue is that `parse_typ_expr_inner_with_start` PASSES `Some(start_pos_idx)` to
+`parse_atomic_typ_expr_with_start` (lines 269-274), but OCaml does NOT pass start_pos between
+these functions - each captures its own.
+
+**Attempted fix result:** Changed `parse_atomic_typ_expr_with_start` to use `p.push_start_pos()`
+when outer is None. Result: 1 regression (extension.res with `@attr %extension`). The attributed
+case failed because creating a fresh position at `%extension` adds an extra object when the
+scanner already created one.
+
+**Why the fix is complex:**
+- For non-attributed types: Should NOT share between parse_typ_expr and parse_atomic_typ_expr
+- For attributed types: Should use the scanner's position (same as current behavior)
+- The correct behavior depends on context, not just which function is calling
 
 **Note:** Most remaining ~795 failures are due to position/arity sharing differences in marshal output.
 The AST structure is 100% correct (sexp-locs matches perfectly).
