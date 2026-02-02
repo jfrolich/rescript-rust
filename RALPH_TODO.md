@@ -247,6 +247,14 @@ type annotation arity and function arity should be separate objects.
 - [x] **Task 5.1**: Run full test suite, verify no regressions
   - Verified: 239/1049 bsc-ast tests passing (22.8%)
   - No regressions detected from baseline
+  - **Analysis of remaining failures (2026-02-02)**:
+    - JSX with children: mapper_to0 issue, cannot fix per instructions
+    - `@as` attributes in externals: Rust FFI encoding differs from OCaml
+      - OCaml strips `@as` attributes and encodes them as `Arg_cst` in FFI
+      - Rust may be leaving attributes in place, causing extra data
+    - Simple expressions, pipes, module-qualified calls: all work correctly
+    - 89% of .resi files pass, only 14% of .res files pass
+      - Interface files are simpler, implementation files have more complex patterns
 - [ ] **Task 5.2**: Target 500/1049 bsc-ast parity (47%)
 - [ ] **Task 5.3**: Target 750/1049 bsc-ast parity (71%)
 - [ ] **Task 5.4**: Target 1000/1049 bsc-ast parity (95%)
