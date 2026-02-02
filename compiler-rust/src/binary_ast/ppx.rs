@@ -3436,7 +3436,15 @@ fn rewrite_module_expr(
                 mt.clone(),
             )
         }
-        // Ident, extension, unpack - just clone
+        // Handle module extension - rewrite payload
+        current::ModuleExprDesc::Pmod_extension(ext) => {
+            let (ext_name, payload) = ext;
+            current::ModuleExprDesc::Pmod_extension((
+                ext_name.clone(),
+                rewrite_payload(payload, arena),
+            ))
+        }
+        // Ident, unpack - just clone
         _ => return mod_expr.clone(),
     };
 
