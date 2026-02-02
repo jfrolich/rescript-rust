@@ -6,12 +6,16 @@
 
 **Note:** Many remaining failures are due to arity sharing (see Phase 6 below).
 
-**Analysis Complete (2026-02-02):** The remaining 724 failing tests are blocked by multiple issues:
+**Analysis Complete (2026-02-02):** The remaining 722 failing tests are blocked by multiple issues:
 1. **Arity sharing (~700 files)**: OCaml's CSE cannot be replicated (structural limitation)
 2. **parsetree0 Location sharing (~500+ files)**: mapper_to0 converts LocIdx to full Location structs,
    losing sharing information. Would require refactoring parsetree0 to use LocIdx.
-3. **@deriving transformations (8 files)**: Requires porting ~880 lines of OCaml code
+3. **@deriving transformations**: `@deriving(accessors)` DONE; `@deriving(jsConverter)` and
+   `@deriving(abstract)` still TODO (~8 files remaining)
 4. **Module-level await (4 files)**: Requires refactoring to multi-item expansion
+
+**@deriving progress (2026-02-02):** 3 of 11 @deriving test files now pass after implementing
+the full OCaml wrapper structure for `@deriving(accessors)`.
 
 Most .resi (interface) files pass; most .res (implementation) files fail due to arity and location sharing.
 
