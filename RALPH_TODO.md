@@ -1,7 +1,7 @@
 # Ralph TODO: Binary AST Parity
 
 **Last Updated:** 2026-02-02
-**Overall Status:** 260/1049 bsc-ast tests passing (24.8%) - **AT CEILING** (blocked by arity sharing)
+**Overall Status:** 261/1049 bsc-ast tests passing (24.9%) - **AT CEILING** (blocked by arity sharing)
 **sexp-locs Status:** 1049/1049 tests passing (100%) ✅
 
 **Note:** Further progress requires one of:
