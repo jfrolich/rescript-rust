@@ -261,11 +261,14 @@ pub fn is_fun_newtype(expr: &Expression) -> bool {
 }
 
 /// Check if expression is an uncurried function (has explicit arity).
-pub fn expr_is_uncurried_fun(expr: &Expression) -> bool {
-    matches!(
-        &expr.pexp_desc,
-        ExpressionDesc::Pexp_fun { arity: Arity::Full(_), .. }
-    )
+/// Requires arena to look up arity value (Arity is now ArityIdx).
+pub fn expr_is_uncurried_fun(arena: &ParseArena, expr: &Expression) -> bool {
+    if let ExpressionDesc::Pexp_fun { arity, .. } = &expr.pexp_desc {
+        // Has explicit arity if arena.get_arity returns Some(_)
+        arena.get_arity(*arity).is_some()
+    } else {
+        false
+    }
 }
 
 /// Check if an expression is "huggable" (can be printed without line breaks).
@@ -801,7 +804,8 @@ pub fn arrow_type<'a>(
         match &typ.ptyp_desc {
             CoreTypeDesc::Ptyp_arrow { arg, ret, arity } => {
                 // Stop at explicitly-aritied arrow if we already have arguments
-                if matches!(arity, Arity::Full(_)) && !acc.is_empty() && arg.attrs.is_empty() {
+                // Arity is now ArityIdx, look up to check if it's Full
+                if arena.get_arity(*arity).is_some() && !acc.is_empty() && arg.attrs.is_empty() {
                     return (attrs_before, acc, typ);
                 }
 

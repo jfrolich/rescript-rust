@@ -430,9 +430,11 @@ impl<'a> Mapper<'a> {
                 ptyp_attributes: arrow_attrs,
             };
 
-            match arity {
-                current::Arity::Unknown => arrow_type,
-                current::Arity::Full(n) => {
+            // Look up arity value from arena (current::Arity is now ArityIdx)
+            let arity_value = self.arena.get_arity(*arity);
+            match arity_value {
+                None => arrow_type,
+                Some(n) => {
                     // Wrap in function$ type constructor with arity variant
                     // Creates: function$<arrow_type, [ `Has_arity{N} ]>
                     let arity_string = format!("Has_arity{}", n);
@@ -688,11 +690,8 @@ impl<'a> Mapper<'a> {
                 is_async,
             } => {
                 // Output current parsetree format with arity and is_async fields
-                // Convert Arity enum to Option<i32>
-                let arity_opt = match arity {
-                    current::Arity::Full(n) => Some(*n as i32),
-                    current::Arity::Unknown => None,
-                };
+                // Look up arity from arena (current::Arity is now ArityIdx)
+                let arity_opt = self.arena.get_arity(*arity);
                 pt0::ExpressionDesc::Fun {
                     arg_label: self.map_arg_label(arg_label),
                     default: default.as_ref().map(|e| Box::new(self.map_expression(e))),

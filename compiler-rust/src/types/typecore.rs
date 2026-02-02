@@ -592,10 +592,8 @@ fn transl_type_inner(
             let (ret_ctyp, ret_ty) = transl_type_inner(tctx, env, ret)?;
 
             // Convert Arity to Option<i32> for typed tree (matches OCaml's arity option)
-            let arity_opt = match arity {
-                crate::parser::ast::Arity::Full(n) => Some(*n as i32),
-                crate::parser::ast::Arity::Unknown => None,
-            };
+            // Arity is now ArityIdx, look up the value from the arena
+            let arity_opt = tctx.arena.get_arity(*arity);
 
             // Convert parser ArgLabel to types ArgLabel for TypeContext
             let ctx_lbl = convert_arg_label_for_ctx(&arg.lbl, tctx.arena);
@@ -2293,10 +2291,8 @@ fn type_function(
     let return_ty = ctx.new_var(None);
 
     // Convert arity to Option<i32> for the arrow type
-    let arity_opt = match arity {
-        crate::parser::ast::Arity::Full(n) => Some(n as i32),
-        crate::parser::ast::Arity::Unknown => None,
-    };
+    // Arity is now ArityIdx, look up from arena
+    let arity_opt = tctx.arena.get_arity(arity);
 
     // Build function type with arity and label
     let ctx_label = convert_arg_label_for_ctx(arg_label, tctx.arena);

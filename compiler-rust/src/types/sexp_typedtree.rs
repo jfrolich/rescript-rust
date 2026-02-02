@@ -247,11 +247,12 @@ fn sexp_decl_mutable_flag(flag: &DeclMutableFlag) -> Sexp {
     }
 }
 
-/// Convert Arity to OCaml-style Option<int> sexp
-fn sexp_arity(arity: &Arity) -> Sexp {
-    match arity {
-        Arity::Full(n) => Sexp::list(vec![Sexp::atom("Some"), Sexp::atom(&n.to_string())]),
-        Arity::Unknown => Sexp::atom("None"),
+/// Convert Arity to OCaml-style Option<int> sexp.
+/// Arity is now ArityIdx, so we need to look up the value from the arena.
+fn sexp_arity(arena: &ParseArena, arity: &Arity) -> Sexp {
+    match arena.get_arity(*arity) {
+        Some(n) => Sexp::list(vec![Sexp::atom("Some"), Sexp::atom(&n.to_string())]),
+        None => Sexp::atom("None"),
     }
 }
 
@@ -681,7 +682,7 @@ fn sexp_expression_desc(arena: &ParseArena, ctx: &TypeContext<'_>, with_locs: bo
                 Sexp::list(vec![
                     Sexp::atom("Texp_function"),
                     sexp_arg_label(arena, &param.label),
-                    sexp_arity(arity),
+                    sexp_arity(arena, arity),
                     sexp_ident(&param_ident),
                     sexp_case(arena, ctx, with_locs, case),
                     sexp_partial(partial),
@@ -700,7 +701,7 @@ fn sexp_expression_desc(arena: &ParseArena, ctx: &TypeContext<'_>, with_locs: bo
                     }).collect()),
                     Sexp::list(body.iter().map(|c| sexp_case(arena, ctx, with_locs, c)).collect()),
                     sexp_partial(partial),
-                    sexp_arity(arity),
+                    sexp_arity(arena, arity),
                     Sexp::atom(if *async_ { "async" } else { "sync" }),
                 ])
             }

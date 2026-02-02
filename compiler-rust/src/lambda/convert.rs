@@ -392,10 +392,10 @@ impl<'a> LambdaConverter<'a> {
         partial: crate::types::typedtree::Partial,
         arity: crate::parser::ast::Arity,
     ) -> (Vec<&'b FunctionParam>, Option<&'b Expression>, crate::types::typedtree::Partial) {
-        use crate::parser::ast::Arity;
-        let target_arity = match arity {
-            Arity::Full(n) => n,
-            Arity::Unknown => params.len(),
+        // Look up arity from arena (Arity is now ArityIdx)
+        let target_arity = match self.arena.get_arity(arity) {
+            Some(n) => n as usize,
+            None => params.len(),
         };
 
         let mut all_params: Vec<&'b FunctionParam> = params.iter().collect();

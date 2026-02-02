@@ -532,8 +532,8 @@ fn print_value_binding<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, pat: 
                 f.string("async ");
             }
 
-            // Print arity annotation
-            if let Arity::Full(n) = arity {
+            // Print arity annotation (Arity is now ArityIdx, look up from arena)
+            if let Some(n) = arena.get_arity(*arity) {
                 f.string(&format!("[arity:{}]", n));
             } else {
                 let computed_arity = count_function_arity(expr);
@@ -922,9 +922,10 @@ fn print_expression_inner<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, ex
             arity,
             is_async,
         } => {
-            let arity_value = match arity {
-                Arity::Full(n) => Some(*n),
-                Arity::Unknown => {
+            // Look up arity from arena (Arity is now ArityIdx)
+            let arity_value = match arena.get_arity(*arity) {
+                Some(n) => Some(n as usize),
+                None => {
                     let computed = count_function_arity(expr);
                     if computed > 0 { Some(computed) } else { None }
                 }
@@ -1712,7 +1713,8 @@ fn print_core_type_inner<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, typ
             }
             f.string(" -> ");
             print_core_type(f, arena, ret);
-            if let Arity::Full(n) = arity {
+            // Look up arity from arena (Arity is now ArityIdx)
+            if let Some(n) = arena.get_arity(*arity) {
                 f.string(&format!(" (a:{})", n));
             }
         }

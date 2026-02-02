@@ -94,7 +94,7 @@ pub fn call_expr(arena: &crate::parse_arena::ParseArena, expr: &Expression) -> P
                 | ExpressionDesc::Pexp_while(_, _)
                 | ExpressionDesc::Pexp_for(_, _, _, _, _)
                 | ExpressionDesc::Pexp_ifthenelse(_, _, _) => ParenKind::Parenthesized,
-                _ if parsetree_viewer::expr_is_uncurried_fun(expr) => ParenKind::Parenthesized,
+                _ if parsetree_viewer::expr_is_uncurried_fun(arena, expr) => ParenKind::Parenthesized,
                 _ if parsetree_viewer::expr_is_await(expr) => ParenKind::Parenthesized,
                 _ => ParenKind::Nothing,
             }
@@ -195,7 +195,7 @@ pub fn binary_expr_operand(arena: &crate::parse_arena::ParseArena, is_lhs: bool,
                 ExpressionDesc::Pexp_constraint(_, _)
                 | ExpressionDesc::Pexp_fun { .. }
                 | ExpressionDesc::Pexp_newtype(_, _) => ParenKind::Parenthesized,
-                _ if parsetree_viewer::expr_is_uncurried_fun(expr) => ParenKind::Parenthesized,
+                _ if parsetree_viewer::expr_is_uncurried_fun(arena, expr) => ParenKind::Parenthesized,
                 _ if parsetree_viewer::is_binary_expression(arena, expr) => ParenKind::Parenthesized,
                 _ if parsetree_viewer::is_ternary_expr(arena, expr) => ParenKind::Parenthesized,
                 ExpressionDesc::Pexp_assert(_) if is_lhs => ParenKind::Parenthesized,

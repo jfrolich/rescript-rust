@@ -642,7 +642,7 @@ fn handle_debugger(
                 typ: any_type,
             }),
             ret: Box::new(unit_type),
-            arity: Arity::Full(1),  // OCaml uses Typ.arrows which sets arity = Some(list length)
+            arity: arena.push_arity(Some(1)),  // OCaml uses Typ.arrows which sets arity = Some(list length)
         },
         ptyp_loc: none_loc,
         ptyp_attributes: vec![],
@@ -841,7 +841,7 @@ fn handle_external_ext(
                 typ: any_type.clone(),
             }),
             ret: Box::new(any_type.clone()),
-            arity: Arity::Full(1),  // OCaml uses Typ.arrows which sets arity = Some(list length)
+            arity: arena.push_arity(Some(1)),  // OCaml uses Typ.arrows which sets arity = Some(list length)
         },
         ptyp_loc: none_loc,
         ptyp_attributes: vec![],
@@ -1085,7 +1085,7 @@ fn handle_raw(
                 typ: any_type.clone(),
             }),
             ret: Box::new(any_type),
-            arity: Arity::Full(1),  // OCaml uses Typ.arrows which sets arity = Some(list length)
+            arity: arena.push_arity(Some(1)),  // OCaml uses Typ.arrows which sets arity = Some(list length)
         },
         ptyp_loc: none_loc,
         ptyp_attributes: vec![],
@@ -1222,7 +1222,7 @@ fn handle_raw_structure(
                 typ: any_type.clone(),
             }),
             ret: Box::new(any_type),
-            arity: Arity::Full(1),  // OCaml uses Typ.arrows which sets arity = Some(list length)
+            arity: arena.push_arity(Some(1)),  // OCaml uses Typ.arrows which sets arity = Some(list length)
         },
         ptyp_loc: none_loc,
         ptyp_attributes: vec![],

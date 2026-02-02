@@ -3175,10 +3175,8 @@ fn print_arrow_type(
     cmt_tbl: &mut CommentTable,
     arena: &ParseArena,
 ) -> Doc {
-    let max_arity = match &arity {
-        Arity::Full(n) => Some(*n),
-        Arity::Unknown => None,
-    };
+    // Look up arity value from arena (Arity is now ArityIdx)
+    let max_arity = arena.get_arity(arity).map(|n| n as usize);
 
     let (attrs_before, args, return_type) = parsetree_viewer::arrow_type(arena, typ, max_arity);
 
