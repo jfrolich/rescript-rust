@@ -4403,16 +4403,26 @@ fn parse_jsx(p: &mut Parser<'_>) -> Expression {
             pexp_attributes: vec![],
         }
     } else {
+        // OCaml captures opening_tag_end = p.start_pos (position of >) BEFORE next()
+        let opening_end = p.start_pos.clone();
         p.expect(Token::GreaterThan);
-        let opening_end = p.prev_end_pos.clone();
 
         // Parse children
         let children = parse_jsx_children(p);
 
-        // Parse closing tag
+        // Parse closing tag </name>
+        // OCaml: closing_tag_start = p.start_pos (position at '<')
+        let closing_tag_start = p.start_pos.clone();
         p.expect(Token::LessThan);
         p.expect(Token::Forwardslash);
-        let _closing_tag_name = parse_jsx_tag_name(p);
+
+        // Parse closing tag name - capture its location
+        let closing_name_start = p.start_pos.clone();
+        let closing_tag_name = parse_jsx_tag_name(p);
+        let closing_name_loc = p.mk_loc_to_prev_end(&closing_name_start);
+
+        // OCaml: closing_tag_end = p.start_pos (position of '>')
+        let closing_tag_end = p.start_pos.clone();
         p.expect(Token::GreaterThan);
 
         let loc = p.mk_loc_to_prev_end(&start_pos);
@@ -4424,7 +4434,11 @@ fn parse_jsx(p: &mut Parser<'_>) -> Expression {
                     opening_end,
                     props,
                     children,
-                    closing_tag: None, // Simplified
+                    closing_tag: Some(JsxClosingTag {
+                        start: closing_tag_start,
+                        name: with_loc(closing_tag_name, closing_name_loc),
+                        end: closing_tag_end,
+                    }),
                 },
             )),
             pexp_loc: loc,
