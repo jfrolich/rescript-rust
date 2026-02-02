@@ -750,6 +750,15 @@ type annotation arity and function arity should be separate objects.
   Until this is done, the current content-based caching is a necessary evil that
   provides partial (but imperfect) parity at 496/1049 tests.
 
+  **Infrastructure added (2026-02-02):**
+  - Added `push_start_pos_fresh()` method that bypasses content-based caching
+  - This can be used where OCaml would create a FRESH position object
+  - Systematic migration of ~70+ code locations is the remaining work
+
+  **Status:** Task 5.3 is BLOCKED - requires significant refactoring effort (~70+ locations).
+  The analysis is complete and the approach is clear, but the implementation work is substantial.
+  Current parity of 496/1049 (47.3%) is a stable baseline until this refactoring is done.
+
 - [ ] **Task 5.4**: Target 1000/1049 bsc-ast parity (95%) - **REQUIRES**: Complete identity-based position sharing
 - [ ] **Task 5.5**: Achieve 1049/1049 bsc-ast parity (100%) - **REQUIRES**: Full OCaml position sharing parity
 
