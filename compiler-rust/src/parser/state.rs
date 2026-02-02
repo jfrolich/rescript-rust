@@ -4,7 +4,6 @@
 //! like advancing tokens, error handling, lookahead, and breadcrumb tracking.
 //! It mirrors `res_parser.ml`.
 
-use std::collections::HashMap;
 use std::sync::atomic::{AtomicU32, Ordering};
 
 use crate::intern::StrIdx;
@@ -50,6 +49,14 @@ pub struct ParserSnapshot {
     start_pos: Position,
     end_pos: Position,
     prev_end_pos: Position,
+    /// Arena index for start position (for identity-based sharing).
+    start_pos_idx: PosIdx,
+    /// Arena index for end position (for identity-based sharing).
+    end_pos_idx: PosIdx,
+    /// Arena index for prev end position (for identity-based sharing).
+    prev_end_pos_idx: PosIdx,
+    /// Cache for prev_end_pos sharing.
+    cached_prev_end_pos: Option<(Position, PosIdx)>,
     breadcrumbs: Vec<(Grammar, Position)>,
     diagnostics_len: usize,
     comments_len: usize,
@@ -75,12 +82,19 @@ pub struct Parser<'src> {
     scanner: Scanner<'src>,
     /// Current token.
     pub token: Token,
-    /// Start position of current token.
+    /// Start position of current token (actual value for error reporting).
     pub start_pos: Position,
-    /// End position of current token.
+    /// End position of current token (actual value for error reporting).
     pub end_pos: Position,
-    /// End position of previous token.
+    /// End position of previous token (actual value for error reporting).
     pub prev_end_pos: Position,
+    /// Arena index for start position of current token.
+    /// Using the index directly enables sharing - same index used everywhere.
+    pub start_pos_idx: PosIdx,
+    /// Arena index for end position of current token.
+    pub end_pos_idx: PosIdx,
+    /// Arena index for end position of previous token.
+    pub prev_end_pos_idx: PosIdx,
     /// Stack of breadcrumbs for error recovery.
     breadcrumbs: Vec<(Grammar, Position)>,
     /// Collected diagnostics.
@@ -105,19 +119,6 @@ pub struct Parser<'src> {
     /// the PREVIOUS prev_end_pos was to enable sharing with positions captured before next().
     /// This is cleared when prev_end_pos changes (on next token consumption).
     cached_prev_end_pos: Option<(Position, PosIdx)>,
-    /// Cache for start position sharing: maps Position -> PosIdx.
-    /// When multiple locations start at the same position, they share the same PosIdx.
-    /// Unlike the prev_end_pos cache, this cache persists across next() calls because
-    /// positions captured before next() should still share with later uses.
-    /// This is essential for matching OCaml's sharing behavior where the same position
-    /// object is reused across the expression and its containing structure item.
-    start_pos_cache: HashMap<Position, PosIdx>,
-    /// Cache for end position sharing: maps Position -> PosIdx.
-    /// When an end position is pushed (e.g., in mk_loc_current), and later the same
-    /// position is used as prev_end_pos (after next()), they should share.
-    /// This matches OCaml's behavior where the token's end position becomes the
-    /// next prev_end_pos and locations created before/after next() share that position.
-    end_pos_cache: HashMap<Position, PosIdx>,
 }
 
 impl<'src> Parser<'src> {
@@ -133,13 +134,19 @@ impl<'src> Parser<'src> {
         // Intern the filename - this StrIdx will be shared by all positions in this file
         let filename_idx = arena.intern_string(&filename.into());
         let scanner = Scanner::new(filename_idx, src);
+        // Push initial default positions to arena
+        let default_pos = Position::default();
+        let default_pos_idx = arena.push_position(default_pos);
         let mut parser = Parser {
             mode,
             scanner,
             token: Token::Semicolon, // Placeholder, will be replaced by first scan
-            start_pos: Position::default(),
-            end_pos: Position::default(),
-            prev_end_pos: Position::default(),
+            start_pos: default_pos,
+            end_pos: default_pos,
+            prev_end_pos: default_pos,
+            start_pos_idx: default_pos_idx,
+            end_pos_idx: default_pos_idx,
+            prev_end_pos_idx: default_pos_idx,
             breadcrumbs: Vec::new(),
             diagnostics: Vec::new(),
             comments: Vec::new(),
@@ -148,8 +155,6 @@ impl<'src> Parser<'src> {
             arena,
             in_external: false,
             cached_prev_end_pos: None,
-            start_pos_cache: HashMap::new(),
-            end_pos_cache: HashMap::new(),
         };
         // Scan the first token
         parser.next();
@@ -280,15 +285,14 @@ impl<'src> Parser<'src> {
     }
 
     /// Push the current start position into the arena.
-    /// Uses cache for sharing when multiple locations start at the same point.
-    /// In OCaml, when `p.Parser.start_pos` is referenced multiple times before
-    /// consuming a token, all references point to the same Position object.
-    /// We mimic this by caching the PosIdx for the current start_pos.
+    /// Return the current start position index.
+    /// This enables sharing - multiple uses of `p.start_pos` before `next()`
+    /// return the same PosIdx, matching OCaml's reference semantics.
     pub fn push_start_pos(&mut self) -> PosIdx {
-        self.get_or_push_start_pos(self.start_pos)
+        self.start_pos_idx
     }
 
-    /// Push the current start position into the arena WITHOUT using the cache.
+    /// Push a FRESH start position into the arena.
     ///
     /// Use this when OCaml would create a FRESH position object, even if another
     /// function has already captured a position at the same coordinates.
@@ -297,32 +301,32 @@ impl<'src> Parser<'src> {
     /// OCaml creates a new object even if the outer function already captured
     /// one at the same position. Using `push_start_pos_fresh()` replicates this.
     ///
-    /// Contrast with `push_start_pos()` which uses content-based caching and
-    /// would return the same PosIdx for positions with identical content.
+    /// Contrast with `push_start_pos()` which returns the stored index for sharing.
     pub fn push_start_pos_fresh(&mut self) -> PosIdx {
         self.arena.push_position(self.start_pos)
     }
 
-    /// Get or push a start position, using HashMap cache for sharing.
-    /// If the position was already cached, returns the cached PosIdx.
-    /// This cache persists across next() calls to enable sharing between
-    /// outer and inner parsing contexts (e.g., structure item and expression).
+    /// Push a start position into the arena.
+    /// If position matches current start_pos, returns the stored index for sharing.
+    /// Otherwise creates a fresh PosIdx.
     pub fn get_or_push_start_pos(&mut self, pos: Position) -> PosIdx {
-        if let Some(&idx) = self.start_pos_cache.get(&pos) {
-            return idx;
+        if pos == self.start_pos {
+            self.start_pos_idx
+        } else {
+            self.arena.push_position(pos)
         }
-        // Not in cache - push and cache
-        let idx = self.arena.push_position(pos);
-        self.start_pos_cache.insert(pos, idx);
-        idx
     }
 
-    /// Get or push an end position, using cache for sharing.
-    /// If the position matches prev_end_pos, uses that cache.
-    /// Otherwise checks the end_pos_cache.
+    /// Push an end position into the arena.
+    /// If the position matches current end_pos, returns the stored index for sharing.
+    /// If the position matches prev_end_pos, returns the prev_end_pos index.
+    /// Otherwise creates a fresh PosIdx.
     pub fn get_or_push_end_pos(&mut self, pos: Position) -> PosIdx {
+        if pos == self.end_pos {
+            return self.end_pos_idx;
+        }
         if pos == self.prev_end_pos {
-            return self.get_or_push_prev_end_pos();
+            return self.prev_end_pos_idx;
         }
         // Check if it matches the cached prev_end_pos value (even if current prev_end_pos changed)
         if let Some((cached_pos, cached_idx)) = self.cached_prev_end_pos {
@@ -330,46 +334,38 @@ impl<'src> Parser<'src> {
                 return cached_idx;
             }
         }
-        // Check the end_pos_cache (for positions created before next() that become prev_end_pos after)
-        if let Some(&idx) = self.end_pos_cache.get(&pos) {
-            return idx;
-        }
-        // Not cached - push without caching
+        // Push fresh
         self.arena.push_position(pos)
     }
 
-    /// Get or push an end position, caching it for later reuse.
-    /// Used by mk_loc_current() to cache the current end_pos so that
-    /// after next() when it becomes prev_end_pos, the same PosIdx is reused.
+    /// Push an end position into the arena.
+    /// If it matches current end_pos, returns the stored index.
+    /// If it matches the cached prev_end_pos, returns that cached idx.
+    /// Otherwise creates a fresh PosIdx.
     fn get_or_push_end_pos_cached(&mut self, pos: Position) -> PosIdx {
-        // First check if already cached
-        if let Some(&idx) = self.end_pos_cache.get(&pos) {
-            return idx;
+        if pos == self.end_pos {
+            return self.end_pos_idx;
         }
-        // Check prev_end_pos cache too
+        // Check prev_end_pos cache
         if let Some((cached_pos, cached_idx)) = self.cached_prev_end_pos {
             if cached_pos == pos {
-                // Also add to end_pos_cache for consistency
-                self.end_pos_cache.insert(pos, cached_idx);
                 return cached_idx;
             }
         }
-        // Push and cache
-        let idx = self.arena.push_position(pos);
-        self.end_pos_cache.insert(pos, idx);
-        idx
+        // Push fresh
+        self.arena.push_position(pos)
     }
 
-    /// Push the current end position into the arena.
-    /// Uses cache for sharing when multiple locations use the same end position.
+    /// Return the current end position index.
+    /// This enables sharing - multiple uses of `p.end_pos` return the same PosIdx.
     pub fn push_end_pos(&mut self) -> PosIdx {
-        self.get_or_push_end_pos_cached(self.end_pos)
+        self.end_pos_idx
     }
 
-    /// Push the previous end position into the arena.
-    /// Uses cache for sharing when multiple locations end at the same point.
+    /// Return the previous end position index.
+    /// This enables sharing - multiple uses of `p.prev_end_pos` return the same PosIdx.
     pub fn push_prev_end_pos(&mut self) -> PosIdx {
-        self.get_or_push_prev_end_pos()
+        self.prev_end_pos_idx
     }
 
     /// Create and push a location from position indices.
@@ -400,30 +396,10 @@ impl<'src> Parser<'src> {
         self.arena.mk_loc(start, end)
     }
 
-    /// Get or push the prev_end_pos, using cache for sharing.
-    /// When multiple locations end at the same prev_end_pos (before consuming more tokens),
-    /// they will share the same PosIdx in the marshal output.
-    /// Also checks end_pos_cache to share with positions created before next().
+    /// Return the prev_end_pos index.
+    /// This enables sharing - multiple uses of `p.prev_end_pos` return the same PosIdx.
     pub fn get_or_push_prev_end_pos(&mut self) -> PosIdx {
-        let pos = self.prev_end_pos;
-        // Check prev_end_pos specific cache
-        if let Some((cached_pos, cached_idx)) = self.cached_prev_end_pos {
-            if cached_pos == pos {
-                return cached_idx;
-            }
-        }
-        // Check end_pos_cache - this position may have been cached before next() was called
-        if let Some(&idx) = self.end_pos_cache.get(&pos) {
-            // Also update the prev_end_pos cache for consistency
-            self.cached_prev_end_pos = Some((pos, idx));
-            return idx;
-        }
-        // Not in cache or different value - push and cache
-        let idx = self.arena.push_position(pos);
-        self.cached_prev_end_pos = Some((pos, idx));
-        // Also add to end_pos_cache
-        self.end_pos_cache.insert(pos, idx);
-        idx
+        self.prev_end_pos_idx
     }
 
     /// Create a location from start and end PosIdx values.
@@ -643,19 +619,22 @@ impl<'src> Parser<'src> {
                     comment.set_prev_tok_end_pos(self.end_pos.clone());
                     self.comments.push(comment);
                     self.prev_end_pos = self.end_pos.clone();
+                    self.prev_end_pos_idx = self.end_pos_idx;
                     self.cached_prev_end_pos = None; // Clear cache when prev_end_pos changes
                     self.end_pos = result.end_pos;
+                    self.end_pos_idx = self.arena.push_position(result.end_pos);
                     // Continue to next token
                 }
                 _ => {
                     self.token = result.token;
                     self.prev_end_pos = prev_end;
+                    // Push prev_end to arena and store index
+                    self.prev_end_pos_idx = self.arena.push_position(prev_end);
                     self.cached_prev_end_pos = None; // Clear cache when prev_end_pos changes
                     self.start_pos = result.start_pos;
-                    // Note: start_pos_cache is NOT cleared here - it's a HashMap that
-                    // accumulates entries throughout parsing to enable sharing between
-                    // outer and inner contexts (e.g., structure item and expression).
+                    self.start_pos_idx = self.arena.push_position(result.start_pos);
                     self.end_pos = result.end_pos;
+                    self.end_pos_idx = self.arena.push_position(result.end_pos);
                     return;
                 }
             }
@@ -674,10 +653,12 @@ impl<'src> Parser<'src> {
         let result = self.scanner.scan_template_literal_token();
         self.token = result.token;
         self.prev_end_pos = self.end_pos.clone();
+        self.prev_end_pos_idx = self.end_pos_idx;
         self.cached_prev_end_pos = None; // Clear cache when prev_end_pos changes
         self.start_pos = result.start_pos;
-        // Note: start_pos_cache is NOT cleared - HashMap accumulates entries
+        self.start_pos_idx = self.arena.push_position(result.start_pos);
         self.end_pos = result.end_pos;
+        self.end_pos_idx = self.arena.push_position(result.end_pos);
     }
 
     /// Check if the current token matches and consume it if so.
@@ -742,11 +723,15 @@ impl<'src> Parser<'src> {
         // Save scanner state
         let scanner_snapshot = self.scanner.snapshot();
 
-        // Save parser state
+        // Save parser state (including position indices for identity-based sharing)
         let token = self.token.clone();
         let start_pos = self.start_pos.clone();
         let end_pos = self.end_pos.clone();
         let prev_end_pos = self.prev_end_pos.clone();
+        let start_pos_idx = self.start_pos_idx;
+        let end_pos_idx = self.end_pos_idx;
+        let prev_end_pos_idx = self.prev_end_pos_idx;
+        let cached_prev_end_pos = self.cached_prev_end_pos;
         let breadcrumbs = self.breadcrumbs.clone();
         let diagnostics_len = self.diagnostics.len();
         let comments_len = self.comments.len();
@@ -757,13 +742,15 @@ impl<'src> Parser<'src> {
         // Restore scanner state
         self.scanner.restore(scanner_snapshot);
 
-        // Restore parser state
+        // Restore parser state (including position indices)
         self.token = token;
         self.start_pos = start_pos;
-        // Note: start_pos_cache is NOT cleared - HashMap accumulates entries
         self.end_pos = end_pos;
         self.prev_end_pos = prev_end_pos;
-        self.cached_prev_end_pos = None; // Clear cache when prev_end_pos changes
+        self.start_pos_idx = start_pos_idx;
+        self.end_pos_idx = end_pos_idx;
+        self.prev_end_pos_idx = prev_end_pos_idx;
+        self.cached_prev_end_pos = cached_prev_end_pos;
         self.breadcrumbs = breadcrumbs;
         self.diagnostics.truncate(diagnostics_len);
         self.comments.truncate(comments_len);
@@ -782,6 +769,10 @@ impl<'src> Parser<'src> {
             start_pos: self.start_pos.clone(),
             end_pos: self.end_pos.clone(),
             prev_end_pos: self.prev_end_pos.clone(),
+            start_pos_idx: self.start_pos_idx,
+            end_pos_idx: self.end_pos_idx,
+            prev_end_pos_idx: self.prev_end_pos_idx,
+            cached_prev_end_pos: self.cached_prev_end_pos,
             breadcrumbs: self.breadcrumbs.clone(),
             diagnostics_len: self.diagnostics.len(),
             comments_len: self.comments.len(),
@@ -800,10 +791,12 @@ impl<'src> Parser<'src> {
         self.scanner.restore(snapshot.scanner_snapshot);
         self.token = snapshot.token;
         self.start_pos = snapshot.start_pos;
-        // Note: start_pos_cache is NOT cleared - HashMap accumulates entries
         self.end_pos = snapshot.end_pos;
         self.prev_end_pos = snapshot.prev_end_pos;
-        self.cached_prev_end_pos = None; // Clear cache when prev_end_pos changes
+        self.start_pos_idx = snapshot.start_pos_idx;
+        self.end_pos_idx = snapshot.end_pos_idx;
+        self.prev_end_pos_idx = snapshot.prev_end_pos_idx;
+        self.cached_prev_end_pos = snapshot.cached_prev_end_pos;
         self.breadcrumbs = snapshot.breadcrumbs;
         self.diagnostics.truncate(snapshot.diagnostics_len);
         self.comments.truncate(snapshot.comments_len);
