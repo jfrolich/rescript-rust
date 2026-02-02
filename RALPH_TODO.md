@@ -62,9 +62,22 @@ Do NOT spend time on small issues (@deriving edge cases, etc.) until the locatio
 
 ---
 
-**Last Updated:** 2026-02-02 (arrow type position sharing analysis)
+**Last Updated:** 2026-02-02 (position sharing deep analysis)
 **Overall Status:** 254/1049 bsc-ast tests passing (24.2%)
 **sexp-locs Status:** 1049/1049 tests passing (100%) ✅
+
+**Latest investigation (2026-02-02):**
+Attempted to fix position sharing by using `push_start_pos()` (fresh position) instead of `start_pos_idx()`
+(cached position) in type parsing functions. This caused 15 regressions because:
+1. Simply making positions "fresh" changes the marshal output in unexpected ways
+2. The sharing pattern depends on BOTH physical identity AND marshal traversal order
+3. OCaml's marshal visits AST nodes in a specific order, and position references are relative to that order
+4. Changing which positions are created/shared affects all subsequent sharing distances
+
+The correct fix requires carefully matching OCaml's exact position capture pattern, which involves:
+1. Using FRESH positions where OCaml does `let start_pos = p.Parser.start_pos`
+2. PASSING the same PosIdx where OCaml passes the same variable
+3. Ensuring marshal traversal order matches OCaml's order
 
 **Note:** Most remaining ~795 failures are due to position/arity sharing differences in marshal output.
 The AST structure is 100% correct (sexp-locs matches perfectly).
