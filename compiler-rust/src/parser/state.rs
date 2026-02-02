@@ -513,13 +513,6 @@ impl<'src> Parser<'src> {
         self.arena.mk_loc(start_idx, end_idx)
     }
 
-    /// Create a location from a PosIdx start to another location's end.
-    /// Identity-based version - does NOT use position caching.
-    pub fn mk_loc_idx_to_end_of(&mut self, start_idx: PosIdx, end_loc: LocIdx) -> LocIdx {
-        let end_idx = self.arena.loc_end_idx(end_loc);
-        self.arena.mk_loc(start_idx, end_idx)
-    }
-
     /// Create a location from a start Position to an end PosIdx.
     /// Uses cache for start position to enable sharing.
     pub fn mk_loc_with_end_idx(&mut self, start: &Position, end_idx: PosIdx) -> LocIdx {
