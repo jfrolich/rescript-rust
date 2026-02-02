@@ -584,6 +584,8 @@ fn handle_extension(
 
     match name {
         "raw" => handle_raw(expr, payload, arena, "#raw_expr"),
+        "re" => handle_re(expr, payload, arena),
+        "external" => handle_external_ext(expr, payload, arena),
         "debugger" => handle_debugger(expr, payload, arena),
         _ => expr.clone(),
     }
@@ -717,6 +719,301 @@ fn handle_debugger(
             mod_expr,
             Box::new(apply_expr),
         ),
+        pexp_loc: loc,
+        pexp_attributes: expr.pexp_attributes.clone(),
+    }
+}
+
+/// Handle %re extension by transforming it into %raw with RegExp type constraint.
+///
+/// OCaml transforms `%re("regex")` into:
+/// ```text
+/// (handle_raw("regex") : Stdlib_RegExp.t)
+/// ```
+/// i.e., the same as %raw but with a type constraint to Stdlib_RegExp.t
+fn handle_re(expr: &Expression, payload: &Payload, arena: &mut ParseArena) -> Expression {
+    let loc = expr.pexp_loc;
+
+    // First, handle it like %raw to get the letmodule expression
+    let raw_expr = handle_raw(expr, payload, arena, "#raw_expr");
+
+    // Create the type: Stdlib_RegExp.t
+    // This is Longident.Ldot(Lident "Stdlib_RegExp", "t")
+    // OCaml uses `loc` for both ptyp_loc and the Located.loc:
+    //   Typ.constr ~loc {txt = regexp_id; loc} []
+    let stdlib_regexp_lident = arena.push_lident_static("Stdlib_RegExp");
+    let regexp_t = arena.push_ldot_static(stdlib_regexp_lident, "t");
+
+    let regexp_type = CoreType {
+        ptyp_desc: CoreTypeDesc::Ptyp_constr(
+            Located {
+                txt: regexp_t,
+                loc,
+            },
+            vec![],
+        ),
+        ptyp_loc: loc,
+        ptyp_attributes: vec![],
+    };
+
+    // Wrap the raw expression in a type constraint
+    Expression {
+        pexp_desc: ExpressionDesc::Pexp_constraint(Box::new(raw_expr), regexp_type),
+        pexp_loc: loc,
+        pexp_attributes: vec![],
+    }
+}
+
+/// Handle %external extension (DEPRECATED).
+///
+/// OCaml transforms `%external(name)` into:
+/// ```text
+/// Js.undefinedToOption(
+///   if (Js.typeof(raw_exp(name)) == "undefined") then
+///     Js.Undefined.empty
+///   else
+///     raw_exp(name)
+/// )
+/// ```
+///
+/// This is deprecated - users should use %raw or regular FFI syntax instead.
+fn handle_external_ext(
+    expr: &Expression,
+    payload: &Payload,
+    arena: &mut ParseArena,
+) -> Expression {
+    use crate::parser::longident::Longident;
+
+    // Extract the identifier from the payload
+    // %external expects a single identifier like %external(__DEV__)
+    let ident_str = match payload {
+        Payload::PStr(items) if items.len() == 1 => {
+            if let StructureItemDesc::Pstr_eval(e, _) = &items[0].pstr_desc {
+                if let ExpressionDesc::Pexp_ident(Located { txt, .. }) = &e.pexp_desc {
+                    // Get the Longident and check if it's an Lident
+                    let lid = arena.get_longident(*txt);
+                    if let Longident::Lident(str_idx) = lid {
+                        Some(arena.get_string(*str_idx).to_string())
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        }
+        _ => None,
+    };
+
+    let ident_str = match ident_str {
+        Some(s) => s,
+        None => return expr.clone(), // Return unchanged on error
+    };
+
+    let loc = expr.pexp_loc;
+    let none_loc = arena.none_loc();
+
+    // Create the raw expression: handle_raw(ident_str)
+    // First, create a string expression for the identifier
+    let str_exp = Expression {
+        pexp_desc: ExpressionDesc::Pexp_constant(Constant::String(
+            ident_str.clone(),
+            None,
+        )),
+        pexp_loc: loc,
+        pexp_attributes: vec![],
+    };
+
+    // Create raw_exp as local_external_apply with "#raw_expr"
+    let any_type = CoreType {
+        ptyp_desc: CoreTypeDesc::Ptyp_any,
+        ptyp_loc: none_loc,
+        ptyp_attributes: vec![],
+    };
+
+    let pval_type = CoreType {
+        ptyp_desc: CoreTypeDesc::Ptyp_arrow {
+            arg: Box::new(TypeArg {
+                attrs: vec![],
+                lbl: ArgLabel::Nolabel,
+                typ: any_type.clone(),
+            }),
+            ret: Box::new(any_type.clone()),
+            arity: Arity::default(),
+        },
+        ptyp_loc: none_loc,
+        ptyp_attributes: vec![],
+    };
+
+    // Module name and function names
+    let module_name_idx = arena.intern_string("J");
+    let func_name_idx = arena.intern_string("unsafe_expr");
+
+    // Create the value description (external primitive)
+    let vd = ValueDescription {
+        pval_name: Located {
+            txt: func_name_idx,
+            loc,
+        },
+        pval_type: pval_type.clone(),
+        pval_prim: vec!["#raw_expr".to_string()],
+        pval_attributes: vec![],
+        pval_loc: loc,
+    };
+
+    // Create the module structure
+    let mod_structure = vec![StructureItem {
+        pstr_desc: StructureItemDesc::Pstr_primitive(vd),
+        pstr_loc: loc,
+    }];
+
+    let mod_expr = ModuleExpr {
+        pmod_desc: ModuleExprDesc::Pmod_structure(mod_structure),
+        pmod_loc: loc,
+        pmod_attributes: vec![],
+    };
+
+    // Create J.unsafe_expr longident
+    let j_lident = arena.push_lident_static("J");
+    let j_unsafe_expr = arena.push_ldot_static(j_lident, "unsafe_expr");
+
+    // Create J.unsafe_expr(ident_str)
+    let func_ident = Expression {
+        pexp_desc: ExpressionDesc::Pexp_ident(Located { txt: j_unsafe_expr, loc }),
+        pexp_loc: loc,
+        pexp_attributes: vec![],
+    };
+
+    let apply_expr = Expression {
+        pexp_desc: ExpressionDesc::Pexp_apply {
+            funct: Box::new(func_ident.clone()),
+            args: vec![(ArgLabel::Nolabel, str_exp.clone())],
+            partial: false,
+            transformed_jsx: false,
+        },
+        pexp_loc: loc,
+        pexp_attributes: vec![],
+    };
+
+    // Create raw_exp = let module J = ... in J.unsafe_expr(str)
+    // This is the full letmodule expression that will be used inside Js.typeof and the else branch
+    let raw_exp = Expression {
+        pexp_desc: ExpressionDesc::Pexp_letmodule(
+            Located {
+                txt: module_name_idx,
+                loc,
+            },
+            mod_expr,
+            Box::new(apply_expr),
+        ),
+        pexp_loc: loc,
+        pexp_attributes: vec![],
+    };
+
+    // Create Js.typeof longident
+    let js_lident = arena.push_lident_static("Js");
+    let js_typeof = arena.push_ldot_static(js_lident, "typeof");
+
+    // Create Js.typeof(raw_exp)
+    let typeof_ident = Expression {
+        pexp_desc: ExpressionDesc::Pexp_ident(Located { txt: js_typeof, loc }),
+        pexp_loc: loc,
+        pexp_attributes: vec![],
+    };
+
+    let typeof_call = Expression {
+        pexp_desc: ExpressionDesc::Pexp_apply {
+            funct: Box::new(typeof_ident),
+            args: vec![(ArgLabel::Nolabel, raw_exp.clone())],
+            partial: false,
+            transformed_jsx: false,
+        },
+        pexp_loc: loc,
+        pexp_attributes: vec![],
+    };
+
+    // Create == operator longident
+    let eq_lident = arena.push_lident_static("==");
+
+    // Create "undefined" string constant
+    let undefined_str = Expression {
+        pexp_desc: ExpressionDesc::Pexp_constant(Constant::String(
+            "undefined".to_string(),
+            None,
+        )),
+        pexp_loc: loc,
+        pexp_attributes: vec![],
+    };
+
+    // Create Js.typeof(raw_exp) == "undefined"
+    let eq_ident = Expression {
+        pexp_desc: ExpressionDesc::Pexp_ident(Located { txt: eq_lident, loc }),
+        pexp_loc: loc,
+        pexp_attributes: vec![],
+    };
+
+    let condition = Expression {
+        pexp_desc: ExpressionDesc::Pexp_apply {
+            funct: Box::new(eq_ident),
+            args: vec![
+                (ArgLabel::Nolabel, typeof_call),
+                (ArgLabel::Nolabel, undefined_str),
+            ],
+            partial: false,
+            transformed_jsx: false,
+        },
+        pexp_loc: loc,
+        pexp_attributes: vec![],
+    };
+
+    // Create Js.Undefined.empty
+    let js_undefined = arena.push_ldot_static(js_lident, "Undefined");
+    let js_undefined_empty = arena.push_ldot_static(js_undefined, "empty");
+
+    let empty_expr = Expression {
+        pexp_desc: ExpressionDesc::Pexp_ident(Located {
+            txt: js_undefined_empty,
+            loc,
+        }),
+        pexp_loc: loc,
+        pexp_attributes: vec![],
+    };
+
+    // Create the if-then-else: if condition then empty else raw_exp
+    let if_expr = Expression {
+        pexp_desc: ExpressionDesc::Pexp_ifthenelse(
+            Box::new(condition),
+            Box::new(empty_expr),
+            Some(Box::new(raw_exp)),
+        ),
+        pexp_loc: loc,
+        pexp_attributes: vec![],
+    };
+
+    // Create Js.undefinedToOption
+    let js_undef_to_opt = arena.push_ldot_static(js_lident, "undefinedToOption");
+
+    let undef_to_opt_ident = Expression {
+        pexp_desc: ExpressionDesc::Pexp_ident(Located {
+            txt: js_undef_to_opt,
+            loc,
+        }),
+        pexp_loc: loc,
+        pexp_attributes: vec![],
+    };
+
+    // Create Js.undefinedToOption(if_expr)
+    // This is the final result - no additional letmodule wrapping needed
+    // because raw_exp already contains the letmodule
+    Expression {
+        pexp_desc: ExpressionDesc::Pexp_apply {
+            funct: Box::new(undef_to_opt_ident),
+            args: vec![(ArgLabel::Nolabel, if_expr)],
+            partial: false,
+            transformed_jsx: false,
+        },
         pexp_loc: loc,
         pexp_attributes: expr.pexp_attributes.clone(),
     }
