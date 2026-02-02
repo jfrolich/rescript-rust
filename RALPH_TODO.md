@@ -74,17 +74,19 @@ The AST structure is 100% correct (sexp-locs matches perfectly).
   - Some tests: Rust shares MORE than OCaml (Rust smaller)
   - Some tests: Rust shares LESS than OCaml (Rust larger)
   - Some tests: Same size but different sharing distances
-- Root cause: Rust uses content-based position caching (`start_pos_cache` HashMap)
+- **ROOT CAUSE IDENTIFIED**: Rust incorrectly uses content-based position caching (`start_pos_cache` HashMap)
   - OCaml uses pointer equality for sharing (same variable = shared)
-  - Rust caches by position VALUES, so positions with same content share
-  - This can cause DIFFERENT sharing patterns than OCaml
-- Example differences:
+  - Rust caches by position VALUES, which is WRONG
+  - This causes BIDIRECTIONAL differences - the hallmark of incorrect implementation
+- Example differences showing the bug:
   - `external foo: int => int = "foo"`: Rust 212 bytes, OCaml 208 bytes (+4, Rust shares less)
   - `letprivate.res`: Rust 285 bytes, OCaml 289 bytes (-4, Rust shares more)
   - `JSXFragments.res`: Both 1943 bytes (same size, different sharing distances)
-- Fix would require tracking position identity during parsing, not just values
-  - This is a significant architectural change
-  - Benefits unclear since AST structure is already 100% correct
+- **FIX REQUIRED**: Remove content-based caching and implement identity-based sharing:
+  1. Remove `start_pos_cache` and `end_pos_cache` HashMaps
+  2. Study OCaml's `res_parser.ml` to see which positions use the same variable
+  3. Reuse the same `PosIdx` when OCaml reuses the same position variable
+  - This is the correct approach, matching OCaml's actual behavior
 
 **Type declaration attribute fix (2026-02-02):**
 - Fixed string transformation in type declaration attributes (constructor/label attributes)
@@ -651,17 +653,17 @@ type annotation arity and function arity should be separate objects.
   - **Remaining blockers for 500+**:
     - Position sharing differences (structural issue, affects ~50+ files with same-size output)
     - The `%%private` files have correct structure but 4-byte sharing differences
-  - **Further analysis (2026-02-02)**:
+  - **Further analysis (2026-02-02)** - **THIS IS THE BUG TO FIX**:
     - Position sharing differences are BIDIRECTIONAL across test files:
       - Some files: Rust shares MORE (smaller output, e.g., `letprivate.res`: Rust 285, OCaml 289)
       - Some files: Rust shares LESS (larger output, e.g., external decls: Rust 212, OCaml 208)
       - Some files: Same size but different sharing distances (e.g., `JSXFragments.res`)
-    - Root cause: Content-based position caching in Rust (`start_pos_cache`)
-    - OCaml shares by pointer identity; Rust shares by position value content
-    - This fundamental difference makes exact byte parity very difficult to achieve
-- [ ] **Task 5.3**: Target 750/1049 bsc-ast parity (71%) - **BLOCKED** (position sharing structural issue)
-- [ ] **Task 5.4**: Target 1000/1049 bsc-ast parity (95%) - **BLOCKED** (position sharing structural issue)
-- [ ] **Task 5.5**: Achieve 1049/1049 bsc-ast parity (100%) - **BLOCKED** (position sharing structural issue)
+    - **CAUSE**: Content-based position caching in Rust (`start_pos_cache`) is WRONG
+    - **SOLUTION**: Remove content-based caching, implement identity-based sharing to match OCaml
+    - **This is NOT a "fundamental difference" - it's an incorrect implementation that must be fixed**
+- [ ] **Task 5.3**: Target 750/1049 bsc-ast parity (71%) - **REQUIRES**: Remove content-based position caching (see section above)
+- [ ] **Task 5.4**: Target 1000/1049 bsc-ast parity (95%) - **REQUIRES**: Complete identity-based position sharing
+- [ ] **Task 5.5**: Achieve 1049/1049 bsc-ast parity (100%) - **REQUIRES**: Full OCaml position sharing parity
 
 ### Phase 6: Arity Arena Implementation (UNBLOCKS Phase 5)
 
@@ -807,11 +809,29 @@ cargo build --manifest-path compiler-rust/Cargo.toml --release
 - ❌ `compiler-rust/src/binary_ast/parsetree0.rs` - NOT used for .ast files
 - ❌ `compiler-rust/src/binary_ast/parsetree0_marshal.rs` - NOT used for .ast files
 
-## Important: No Content-Based Sharing Tricks
+## ⚠️ CRITICAL: Remove Content-Based Caching - This Is The Bug
 
-**Do NOT implement content-based sharing** (e.g., deduplicating positions with identical values). OCaml's sharing is based on **pointer/reference equality**, not content equality. If two positions have the same values but are different objects in OCaml, they should NOT be shared in Rust either.
+**The current `start_pos_cache` HashMap that caches positions by their VALUES is WRONG and must be REMOVED.**
 
-The fix must be in how positions are created and reused during parsing - matching OCaml's pattern of reusing the same position variable.
+OCaml shares positions by **pointer identity** - when the same variable is reused during parsing, the same position object is shared. OCaml does NOT deduplicate positions with identical content.
+
+**The content-based caching causes BIDIRECTIONAL differences:**
+- Sometimes Rust shares MORE than OCaml (wrong - sharing unrelated positions that happen to have same values)
+- Sometimes Rust shares LESS than OCaml (wrong - not sharing positions that OCaml shares via variable reuse)
+
+**This is NOT a "fundamental limitation" or "structural issue" - it's a bug that needs fixing:**
+1. REMOVE `start_pos_cache`, `end_pos_cache`, and any other content-based deduplication
+2. Track position IDENTITY by reusing the same `PosIdx` when OCaml reuses the same position variable
+3. Study OCaml's `res_parser.ml` to see which positions are assigned to variables and reused
+
+**Example of correct approach:**
+```
+// OCaml: let start_pos = p.scanner.start_pos in ... uses start_pos multiple times
+// Rust: let start_pos_idx = arena.push_position(p.scanner.start_pos);
+//       ... reuse start_pos_idx everywhere OCaml reuses start_pos
+```
+
+**DO NOT mark tasks as "BLOCKED by position sharing" - this IS the task to complete.**
 
 ---
 

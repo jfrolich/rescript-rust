@@ -44,7 +44,7 @@ Read `RALPH_TODO.md` and complete the next unchecked task. After completing a ta
    - `compiler-rust/src/binary_ast/marshal.rs` - Can modify if needed
    - Do NOT touch `parsetree0.rs`, `parsetree0_marshal.rs`, or `mapper_to0.rs` unless absolutely necessary
 
-3. **NO content-based sharing tricks** - Do NOT implement deduplication based on position content/values. OCaml's sharing is based on **pointer equality**, not content equality. The fix must match OCaml's pattern of reusing the same position variable during parsing.
+3. **NO content-based sharing - REMOVE IT IF IT EXISTS** - OCaml's sharing is based on **pointer equality**, not content equality. If you find any content-based caching (like `start_pos_cache` HashMap that deduplicates by position VALUES), **this is a BUG that must be REMOVED**. The fix requires tracking position IDENTITY during parsing - reusing the same `PosIdx` when OCaml reuses the same position variable. Content-based caching causes BIDIRECTIONAL differences (sometimes Rust shares more, sometimes less) which is why it's fundamentally wrong. **DO NOT accept content-based caching as "just how it works" - FIX IT.**
 
 4. **Run tests frequently** - After each change:
    ```bash
@@ -71,7 +71,9 @@ Read `RALPH_TODO.md` and complete the next unchecked task. After completing a ta
 
 8. **Do NOT defer large tasks** - Task size is not a reason to defer or block. If a task requires touching 30+ files, that's fine—just do the implementation. Break it into smaller commits if needed, but complete the work. The goal is completion, not avoiding complexity.
 
-9. **Use explicit `Idx` type names** - Do NOT create aliases like `type Arity = ArityIdx` or similar shortcuts. While it might reduce the number of changes needed, it creates confusion. Always use the explicit indexed type name (e.g., `ArityIdx`, `PosIdx`, `LocIdx`). If you encounter such aliases in the code, replace them with the explicit `Idx` names.
+9. **Do NOT accept bugs as "fundamental limitations"** - If you find incorrect behavior (like content-based position caching when OCaml uses pointer identity), this is a BUG to fix, not a "structural limitation" to document and move on. The goal is exact byte parity with OCaml. Any difference is a bug. Do not rationalize differences as acceptable.
+
+10. **Use explicit `Idx` type names** - Do NOT create aliases like `type Arity = ArityIdx` or similar shortcuts. While it might reduce the number of changes needed, it creates confusion. Always use the explicit indexed type name (e.g., `ArityIdx`, `PosIdx`, `LocIdx`). If you encounter such aliases in the code, replace them with the explicit `Idx` names.
 
 ## Key Files
 
