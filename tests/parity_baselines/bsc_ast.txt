@@ -177,6 +177,8 @@ syntax_tests/data/idempotency/wildcards-world-ui/InputHelp.res
 syntax_tests/data/idempotency/wildcards-world-ui/Styles.res
 syntax_tests/data/idempotency/wildcards-world-ui/Util_test.res
 syntax_tests/data/ppx/react/defaultValueProp.res
+syntax_tests/data/ppx/react/firstClassModules.resi
+syntax_tests/data/ppx/react/forwardRef.resi
 syntax_tests/data/ppx/react/interface.res
 syntax_tests/data/ppx/react/interface.resi
 syntax_tests/data/ppx/react/interfaceWithRef.res
@@ -184,6 +186,7 @@ syntax_tests/data/ppx/react/interfaceWithRef.resi
 syntax_tests/data/ppx/react/mangleKeyword.res
 syntax_tests/data/ppx/react/nested.res
 syntax_tests/data/ppx/react/newtype.res
+syntax_tests/data/ppx/react/sharedProps.resi
 syntax_tests/data/ppx/react/topLevel.res
 syntax_tests/data/ppx/react/uncurriedProps.res
 syntax_tests/data/printer/comments/binaryExpr.res
@@ -255,10 +258,13 @@ syntax_tests/data/printer/pattern/list.res
 syntax_tests/data/printer/pattern/or.res
 syntax_tests/data/printer/pattern/tuple.res
 syntax_tests/data/printer/pattern/var.res
+syntax_tests/data/printer/signature/attributes.resi
 syntax_tests/data/printer/signature/exception.resi
+syntax_tests/data/printer/signature/extension.resi
 syntax_tests/data/printer/signature/include.resi
 syntax_tests/data/printer/signature/open.resi
 syntax_tests/data/printer/signature/typext.resi
+syntax_tests/data/printer/structure/attribute.res
 syntax_tests/data/printer/structure/expr.res
 syntax_tests/data/printer/structure/moduleTypeDeclaration.res
 syntax_tests/data/printer/structure/open.res
