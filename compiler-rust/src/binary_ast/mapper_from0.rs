@@ -835,12 +835,12 @@ impl<'a> Mapper<'a> {
                         if name_str == "[]" || name_str == "::" {
                             let jsx_attrs = self.map_attributes(&remove_jsx_attribute(&expr.pexp_attributes));
                             let children = self.extract_jsx_children(expr);
-                            let loc_start = self.arena.loc_start(loc).clone();
-                            let loc_end = self.arena.loc_end(loc).clone();
+                            let loc_start_idx = self.arena.loc_start_idx(loc);
+                            let loc_end_idx = self.arena.loc_end_idx(loc);
                             let jsx_element = current::JsxElement::Fragment(current::JsxFragment {
-                                opening: loc_start,
+                                opening: loc_start_idx,
                                 children,
-                                closing: loc_end,
+                                closing: loc_end_idx,
                             });
                             return current::Expression {
                                 pexp_desc: current::ExpressionDesc::Pexp_jsx_element(jsx_element),

@@ -4447,14 +4447,18 @@ fn parse_jsx(p: &mut Parser<'_>) -> Expression {
 
 /// Parse a JSX fragment.
 fn parse_jsx_fragment(p: &mut Parser<'_>, start_pos: Position) -> Expression {
-    let opening = p.prev_end_pos.clone();
+    // OCaml: children_start_pos = p.Parser.start_pos (before consuming >)
+    // This is the start position of the > token
+    let opening = p.push_start_pos();
     p.expect(Token::GreaterThan);
 
     let children = parse_jsx_children(p);
 
+    // OCaml: children_end_pos = p.Parser.start_pos (after children, before consuming <)
+    // This is the start position of the < in </>
+    let closing = p.push_start_pos();
     p.expect(Token::LessThan);
     p.expect(Token::Forwardslash);
-    let closing = p.start_pos.clone();
     p.expect(Token::GreaterThan);
 
     let loc = p.mk_loc_to_prev_end(&start_pos);

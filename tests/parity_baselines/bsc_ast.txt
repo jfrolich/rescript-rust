@@ -1,5 +1,6 @@
 syntax_tests/data/ast-mapping/FunWithAttribute.res
 syntax_tests/data/ast-mapping/JSXElements.res
+syntax_tests/data/ast-mapping/JSXFragments.res
 syntax_tests/data/conversion/reason/docComments.res
 syntax_tests/data/conversion/reason/fastPipe.res
 syntax_tests/data/conversion/reason/gentype.res

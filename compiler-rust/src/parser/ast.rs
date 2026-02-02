@@ -500,12 +500,12 @@ pub enum JsxTagName {
 /// JSX fragment: `<> children </>`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct JsxFragment {
-    /// Opening `>` position.
-    pub opening: Position,
+    /// Opening `>` position (arena index for sharing with other positions).
+    pub opening: crate::parse_arena::PosIdx,
     /// Children.
     pub children: Vec<Expression>,
-    /// Closing `</` position.
-    pub closing: Position,
+    /// Closing `</` position (arena index for sharing with other positions).
+    pub closing: crate::parse_arena::PosIdx,
 }
 
 /// JSX unary element: `<div ... />`.
