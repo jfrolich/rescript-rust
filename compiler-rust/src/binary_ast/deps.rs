@@ -341,8 +341,9 @@ impl<'a> DependencyCollector<'a> {
                 self.add_expression(cond);
                 self.add_expression(body);
             }
-            ExpressionDesc::Pexp_for(pat, start, end, _dir, body) => {
-                self.add_pattern(pat);
+            ExpressionDesc::Pexp_for(_pat, start, end, _dir, body) => {
+                // OCaml: Pexp_for (_, e1, e2, _, e3) - ignores the pattern
+                // The for-loop pattern doesn't add dependencies
                 self.add_expression(start);
                 self.add_expression(end);
                 self.add_expression(body);
