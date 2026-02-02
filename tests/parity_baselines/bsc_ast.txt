@@ -119,6 +119,7 @@ syntax_tests/data/idempotency/pupilfirst/schools/School__InputGroupError.res
 syntax_tests/data/idempotency/pupilfirst/schools/SchoolAdmin.res
 syntax_tests/data/idempotency/pupilfirst/schools/SchoolCommunities__IndexTypes.res
 syntax_tests/data/idempotency/pupilfirst/schools/SchoolCustomize__Types.res
+syntax_tests/data/idempotency/pupilfirst/schools/SchoolCustomize__UpdateSchoolStringError.res
 syntax_tests/data/idempotency/pupilfirst/schools/StudentsEditor__Coach.res
 syntax_tests/data/idempotency/pupilfirst/schools/StudentsEditor__Filter.res
 syntax_tests/data/idempotency/pupilfirst/schools/StudentsEditor__Level.res

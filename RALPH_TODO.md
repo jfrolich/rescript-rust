@@ -61,36 +61,45 @@ Do NOT spend time on small issues (@deriving edge cases, etc.) until the locatio
 
 ---
 
-**Last Updated:** 2026-02-02 (detailed position sharing analysis added to Task 5.3)
-**Overall Status:** 496/1049 bsc-ast tests passing (47.3%)
+**Last Updated:** 2026-02-02 (arrow type position sharing analysis)
+**Overall Status:** 254/1049 bsc-ast tests passing (24.2%)
 **sexp-locs Status:** 1049/1049 tests passing (100%) ✅
 
-**Note:** Most remaining ~553 failures are due to position/arity sharing differences in marshal output.
+**Note:** Most remaining ~795 failures are due to position/arity sharing differences in marshal output.
 The AST structure is 100% correct (sexp-locs matches perfectly).
 
-**Position sharing investigation (2026-02-02):**
-- Investigated why external declarations have 4-byte size difference
-- Tested removing content-based caching → massive regression (496 → ~81 passing)
-- Content-based caching is necessary for current parity but is fundamentally wrong
-- The correct fix requires refactoring to identity-based position tracking
-- See Task 5.3 for detailed analysis and implementation plan
-- Key finding: The difference is NOT consistent across all failing tests:
-  - Some tests: Rust shares MORE than OCaml (Rust smaller)
-  - Some tests: Rust shares LESS than OCaml (Rust larger)
-  - Some tests: Same size but different sharing distances
-- **ROOT CAUSE IDENTIFIED**: Rust incorrectly uses content-based position caching (`start_pos_cache` HashMap)
-  - OCaml uses pointer equality for sharing (same variable = shared)
-  - Rust caches by position VALUES, which is WRONG
-  - This causes BIDIRECTIONAL differences - the hallmark of incorrect implementation
-- Example differences showing the bug:
-  - `external foo: int => int = "foo"`: Rust 212 bytes, OCaml 208 bytes (+4, Rust shares less)
-  - `letprivate.res`: Rust 285 bytes, OCaml 289 bytes (-4, Rust shares more)
-  - `JSXFragments.res`: Both 1943 bytes (same size, different sharing distances)
-- **FIX REQUIRED**: Remove content-based caching and implement identity-based sharing:
-  1. Remove `start_pos_cache` and `end_pos_cache` HashMaps
-  2. Study OCaml's `res_parser.ml` to see which positions use the same variable
-  3. Reuse the same `PosIdx` when OCaml reuses the same position variable
-  - This is the correct approach, matching OCaml's actual behavior
+**Position sharing progress (2026-02-02):**
+- Simple arrow types now work correctly:
+  - `type t = int => unit` ✅ IDENTICAL
+  - `let f: int => int = x => x` ✅ IDENTICAL
+  - `external foo: int => int = "%apply"` ✅ IDENTICAL (special-prefix externals)
+- External declarations with FFI encoding still differ:
+  - `external foo: int => int = "foo"` - Rust 212 bytes, OCaml 208 bytes (+4)
+  - The issue is position sharing in the arrow type's ptyp_loc when FFI encoding is applied
+  - OCaml shares positions at different distances than Rust
+
+**Detailed external declaration analysis (2026-02-02):**
+- For `external foo: int => int = "foo"`, both OCaml and Rust produce the same AST structure
+- The 4-byte difference is in WHEN positions are shared vs written fresh
+- At binary offset 0x88-0x90:
+  - OCaml: writes SHARED8 reference (c004 1a = share back 26 objects)
+  - Rust: writes FRESH INT8 values (040e 0404 = inline position)
+- The sharing difference is NOT directly caused by FFI encoding
+- It's related to how the arrow type's start position interacts with other positions in the marshal stream
+- External declarations with special prefixes (like "%apply") skip FFI encoding and are IDENTICAL
+
+**Key insight:** The position sharing issue is structural - OCaml's marshal visits objects in a different order
+than Rust, causing different sharing distances. The correct fix requires ensuring position indices
+are passed through the code path consistently.
+
+**What works now:**
+- Type declarations with arrow types
+- Let bindings with arrow type annotations
+- External declarations with special-prefix primitives (%, #, etc.)
+
+**What still needs fixing:**
+- External declarations with normal primitives (FFI-encoded)
+- Other complex patterns with specific position sharing requirements
 
 **Type declaration attribute fix (2026-02-02):**
 - Fixed string transformation in type declaration attributes (constructor/label attributes)
