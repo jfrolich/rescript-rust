@@ -74,6 +74,11 @@ Previously Rust was adding all uppercase identifiers, incorrectly including `Non
 - `add_pattern` in `Pexp_fun` and `add_case` also track unpack bindings
 - Fixes `firstClassModules.res` (now byte-identical to OCaml)
 
+**Status update (2026-02-02):** Dependency extraction is now 100% correct!
+- All 1049 test files have identical dependency sections between Rust and OCaml
+- Remaining 791 files that fail bsc-ast parity differ only in position sharing within the marshalled parsetree
+- These are mapper_to0.rs issues (Phase 3/4), not dependency extraction issues
+
 ---
 
 ## Tasks
