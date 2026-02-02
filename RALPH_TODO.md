@@ -10,11 +10,15 @@
 
 **TOP PRIORITY:** Location sharing should be tackled FIRST because it affects ~500+ files.
 
-1. **Arity sharing** - ✅ **DONE** (Task 6.6) - Implemented static arity indices for literal paths,
-   fresh indices for computed paths. Individual test cases now match OCaml's sharing pattern.
-   However, this alone doesn't improve overall parity because other issues dominate.
+1. **Arity sharing** - ✅ **FIXED** (Task 6.6 + bug fix) - Implemented static arity indices for literal paths,
+   fresh indices for computed paths. Fixed bug in `write_arity_idx()` where distance calculation was wrong.
+   **Improvement: 287 → 309 passing (+22 files, 29.5%)**
 
-2. **Location sharing (~500+ files)** - OCaml's marshal shares identical Location structs. Rust writes each location inline. **This CAN be fixed** - we already have `LocIdx` for interning locations. Ensure the marshal uses these indices to produce shared references in the output.
+2. **Location sharing (~500+ files)** - OCaml's marshal shares identical Location structs. Rust writes each
+   location inline. **Analysis (2026-02-02)**: The issue is that Rust creates new Position objects with
+   identical content but different PosIdx values. OCaml reuses the same position pointer via immutable
+   reference passing. Fixing this requires ensuring the same PosIdx is passed through code paths where
+   OCaml would pass the same pointer - a significant refactor across the parser.
 
 Do NOT spend time on small issues (@deriving edge cases, etc.) until the location sharing issue is resolved.
 
@@ -494,14 +498,14 @@ type annotation arity and function arity should be separate objects.
     - Rust's mapper_to0 creates new Location structs (loses identity, no sharing)
     - Proper fix would require `Rc<Location>` or `LocIdx` in parsetree0 (significant refactor)
     - **Status**: Content-based sharing reverted; architectural limitation documented
-- [ ] **Task 5.2**: Target 500/1049 bsc-ast parity (47%) - **BLOCKED** (multiple issues)
+- [ ] **Task 5.2**: Target 500/1049 bsc-ast parity (47%) - **BLOCKED** (location sharing)
   - **Blockers analyzed (2026-02-02)**:
-    1. **Arity sharing (Task 6.6)**: OCaml's CSE cannot be replicated (~700 files)
+    1. **Arity sharing (Task 6.6)**: ✅ Bug fix improved parity 287→309 (+22 files)
     2. **parsetree0 Location sharing**: mapper_to0 loses LocIdx identity (~500+ files)
-    3. **@deriving (Task 2.3)**: Not implemented (~8 files, ~880 lines to port)
-    4. **Module-level await (Task 2.8)**: Not implemented (~4 files, complex)
-  - **Impact**: Without fixing #1 or #2, cannot reach 500+ parity
-  - Current: 325/1049 (31.0%) - most .resi files pass, most .res files fail
+    3. **@deriving (Task 2.3)**: Partially implemented (~8 files remaining)
+    4. **Module-level await (Task 2.8)**: ✅ DONE
+  - **Impact**: Location sharing (#2) is the main blocker for reaching 500+ parity
+  - Current: 309/1049 (29.5%) - most .resi files pass, most .res files fail
 - [ ] **Task 5.3**: Target 750/1049 bsc-ast parity (71%) - **BLOCKED** (arity limitation)
 - [ ] **Task 5.4**: Target 1000/1049 bsc-ast parity (95%) - **BLOCKED** (arity limitation)
 - [ ] **Task 5.5**: Achieve 1049/1049 bsc-ast parity (100%) - **BLOCKED** (arity limitation)
