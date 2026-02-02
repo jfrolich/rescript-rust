@@ -633,9 +633,9 @@ type annotation arity and function arity should be separate objects.
   - **Remaining blockers for 500+**:
     - Position sharing differences (structural issue, affects ~50+ files with same-size output)
     - The `%%private` files have correct structure but 4-byte sharing differences
-- [ ] **Task 5.3**: Target 750/1049 bsc-ast parity (71%) - **BLOCKED** (arity limitation)
-- [ ] **Task 5.4**: Target 1000/1049 bsc-ast parity (95%) - **BLOCKED** (arity limitation)
-- [ ] **Task 5.5**: Achieve 1049/1049 bsc-ast parity (100%) - **BLOCKED** (arity limitation)
+- [ ] **Task 5.3**: Target 750/1049 bsc-ast parity (71%) - **BLOCKED** (position sharing structural issue)
+- [ ] **Task 5.4**: Target 1000/1049 bsc-ast parity (95%) - **BLOCKED** (position sharing structural issue)
+- [ ] **Task 5.5**: Achieve 1049/1049 bsc-ast parity (100%) - **BLOCKED** (position sharing structural issue)
 
 ### Phase 6: Arity Arena Implementation (UNBLOCKS Phase 5)
 
