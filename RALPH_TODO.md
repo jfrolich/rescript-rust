@@ -1,7 +1,7 @@
 # Ralph TODO: Binary AST Parity
 
 **Last Updated:** 2026-02-02
-**Overall Status:** 254/1049 bsc-ast tests passing (24.2%)
+**Overall Status:** 255/1049 bsc-ast tests passing (24.3%)
 **sexp-locs Status:** 1049/1049 tests passing (100%) ✅
 
 ---
@@ -245,7 +245,7 @@ type annotation arity and function arity should be separate objects.
 ### Phase 5: Validation
 
 - [x] **Task 5.1**: Run full test suite, verify no regressions
-  - Verified: 254/1049 bsc-ast tests passing (24.2%)
+  - Verified: 255/1049 bsc-ast tests passing (24.3%)
   - No regressions detected from baseline
   - **Analysis of remaining failures (2026-02-02)**:
     - JSX with children: mapper_to0 issue, cannot fix per instructions
@@ -255,6 +255,14 @@ type annotation arity and function arity should be separate objects.
     - Simple expressions, pipes, module-qualified calls: all work correctly
     - 89% of .resi files pass, only 14% of .res files pass
       - Interface files are simpler, implementation files have more complex patterns
+  - **Content-based Location sharing analysis (2026-02-02)**:
+    - Investigated adding content-based sharing for `Location` and `Position` in marshal
+    - This would share locations with identical content, approximating OCaml's behavior
+    - **Finding**: Content-based sharing caused regressions in some files
+    - OCaml's mapper_to0 preserves pointer identity (same location object = shared in marshal)
+    - Rust's mapper_to0 creates new Location structs (loses identity, no sharing)
+    - Proper fix would require `Rc<Location>` or `LocIdx` in parsetree0 (significant refactor)
+    - **Status**: Content-based sharing reverted; architectural limitation documented
 - [ ] **Task 5.2**: Target 500/1049 bsc-ast parity (47%)
 - [ ] **Task 5.3**: Target 750/1049 bsc-ast parity (71%)
 - [ ] **Task 5.4**: Target 1000/1049 bsc-ast parity (95%)
