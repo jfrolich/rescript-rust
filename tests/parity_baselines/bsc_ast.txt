@@ -214,6 +214,8 @@ syntax_tests/data/idempotency/wildcards-world-ui/Globals.res
 syntax_tests/data/idempotency/wildcards-world-ui/InputHelp.res
 syntax_tests/data/idempotency/wildcards-world-ui/Styles.res
 syntax_tests/data/idempotency/wildcards-world-ui/Util_test.res
+syntax_tests/data/parsing/grammar/expressions/bigint.res
+syntax_tests/data/parsing/grammar/expressions/binary.res
 syntax_tests/data/ppx/react/defaultValueProp.res
 syntax_tests/data/ppx/react/firstClassModules.resi
 syntax_tests/data/ppx/react/forwardRef.resi

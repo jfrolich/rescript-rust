@@ -1,7 +1,7 @@
 # Ralph TODO: Binary AST Parity
 
 **Last Updated:** 2026-02-02
-**Overall Status:** 327/1049 bsc-ast tests passing (31.2%)
+**Overall Status:** 329/1049 bsc-ast tests passing (31.4%)
 **sexp-locs Status:** 1049/1049 tests passing (100%) ✅
 
 **Note:** Many remaining failures are due to arity sharing (see Phase 6 below).
@@ -18,7 +18,7 @@
 - `ExternalModuleName` is now correctly created when `@module("...")` is present
 - Previously `external_module_name: None` was hardcoded; now uses parsed `desc.module_name`
 - FFI encoding now includes module names in the binary output (e.g., `$test`)
-- Does not change parity count because remaining differences are position/location sharing
+- +2 tests passing: bigint.res, binary.res (327 → 329)
 
 **@deriving progress (2026-02-02):** 3 of 11 @deriving test files now pass after implementing
 the full OCaml wrapper structure for `@deriving(accessors)`.

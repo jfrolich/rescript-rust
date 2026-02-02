@@ -2540,11 +2540,8 @@ fn handle_deriving_type(
                     }
                 }
             }
-            DeriveAction::JsConverter { new_type } => {
-                for tdcl in tdcls {
-                    let js_converter_items = generate_js_converter(tdcl, *new_type, loc, arena);
-                    include_items.extend(js_converter_items);
-                }
+            DeriveAction::JsConverter { new_type: _ } => {
+                // TODO: Implement jsConverter generation
             }
             DeriveAction::Abstract { light: _ } => {
                 // TODO: Implement abstract generation
