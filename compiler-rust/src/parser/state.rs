@@ -179,10 +179,10 @@ impl<'src> Parser<'src> {
 
     /// Create a location from start position to end_pos.
     /// This is a common pattern that avoids borrow conflicts.
-    /// Uses caching for start position to enable sharing.
+    /// Uses caching for both start position and end position to enable sharing.
     pub fn mk_loc_to_end(&mut self, start: &Position) -> LocIdx {
         let start_idx = self.get_or_push_start_pos(*start);
-        let end_idx = self.arena.push_position(self.end_pos);
+        let end_idx = self.get_or_push_end_pos_cached(self.end_pos);
         self.arena.mk_loc(start_idx, end_idx)
     }
 
@@ -346,8 +346,9 @@ impl<'src> Parser<'src> {
     }
 
     /// Push the current end position into the arena.
+    /// Uses cache for sharing when multiple locations use the same end position.
     pub fn push_end_pos(&mut self) -> PosIdx {
-        self.arena.push_position(self.end_pos.clone())
+        self.get_or_push_end_pos_cached(self.end_pos)
     }
 
     /// Push the previous end position into the arena.
@@ -467,26 +468,26 @@ impl<'src> Parser<'src> {
 
     /// Create a location from a start Position to another location's end.
     /// Useful pattern: `p.mk_loc_to_end_of(&start_pos, body.some_loc)`
-    /// Reuses the end location's PosIdx for position sharing.
+    /// Uses cache for start position and reuses the end location's PosIdx for position sharing.
     pub fn mk_loc_to_end_of(&mut self, start: &Position, end_loc: LocIdx) -> LocIdx {
-        let start_idx = self.arena.push_position(*start);
+        let start_idx = self.get_or_push_start_pos(*start);
         let end_idx = self.arena.loc_end_idx(end_loc);
         self.arena.mk_loc(start_idx, end_idx)
     }
 
     /// Create a location from a start Position to an end PosIdx.
-    /// Useful for sharing an end position across multiple locations.
+    /// Uses cache for start position to enable sharing.
     pub fn mk_loc_with_end_idx(&mut self, start: &Position, end_idx: PosIdx) -> LocIdx {
-        let start_idx = self.arena.push_position(*start);
+        let start_idx = self.get_or_push_start_pos(*start);
         self.arena.mk_loc(start_idx, end_idx)
     }
 
     /// Create a location from another location's start to an end Position.
     /// Useful pattern: `p.mk_loc_from_start_of(body.some_loc, &end_pos)`
-    /// Reuses the start location's PosIdx for position sharing.
+    /// Uses cache for end position and reuses the start location's PosIdx for position sharing.
     pub fn mk_loc_from_start_of(&mut self, start_loc: LocIdx, end: &Position) -> LocIdx {
         let start_idx = self.arena.loc_start_idx(start_loc);
-        let end_idx = self.arena.push_position(*end);
+        let end_idx = self.get_or_push_end_pos(*end);
         self.arena.mk_loc(start_idx, end_idx)
     }
 
