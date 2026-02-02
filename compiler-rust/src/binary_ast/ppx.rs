@@ -26,8 +26,8 @@ use crate::parser::ast::{
 use crate::parser::longident::Longident;
 
 use super::ffi_types::{
-    encode_ffi_type, Delim, ExternalSpec, FfiType, LamConstant, Params,
-    PointerInfo, ReturnWrapper,
+    encode_ffi_type, Delim, ExternalModuleName, ExternalSpec, FfiType, LamConstant, ModuleBindName,
+    Params, PointerInfo, ReturnWrapper,
 };
 
 /// The list of attributes that indicate a ReScript external
@@ -275,6 +275,13 @@ fn build_ffi_type(desc: &ExternalDesc, prim_name: &str, arity: usize, result_is_
     // Build params - simple case: just use ParamNumber for arity
     let params = Params::ParamNumber(arity as i64);
 
+    // Build ExternalModuleName from desc.module_name if present
+    let external_module_name = desc.module_name.as_ref().map(|bundle| ExternalModuleName {
+        bundle: bundle.clone(),
+        module_bind_name: ModuleBindName::PhintNothing,
+        import_attributes: None,
+    });
+
     // Determine external spec based on attributes
     let external_spec = if desc.get_index {
         ExternalSpec::JsGetIndex {
@@ -293,7 +300,7 @@ fn build_ffi_type(desc: &ExternalDesc, prim_name: &str, arity: usize, result_is_
     } else if let Some(ref name) = desc.new_name {
         ExternalSpec::JsNew {
             name: name.clone(),
-            external_module_name: None, // TODO: handle module
+            external_module_name: external_module_name.clone(),
             splice: desc.splice,
             scopes: desc.scopes.clone(),
         }
@@ -311,7 +318,7 @@ fn build_ffi_type(desc: &ExternalDesc, prim_name: &str, arity: usize, result_is_
         // No args = Js_var
         ExternalSpec::JsVar {
             name: desc.val_name.as_ref().unwrap_or(&prim_name.to_string()).clone(),
-            external_module_name: None, // TODO: handle module
+            external_module_name: external_module_name.clone(),
             scopes: desc.scopes.clone(),
         }
     } else {
@@ -322,7 +329,7 @@ fn build_ffi_type(desc: &ExternalDesc, prim_name: &str, arity: usize, result_is_
             .unwrap_or_else(|| prim_name.to_string());
         ExternalSpec::JsCall {
             name,
-            external_module_name: None, // TODO: handle module
+            external_module_name,
             splice: desc.splice,
             scopes: desc.scopes.clone(),
             tagged_template: desc.tagged_template,
@@ -2533,8 +2540,11 @@ fn handle_deriving_type(
                     }
                 }
             }
-            DeriveAction::JsConverter { new_type: _ } => {
-                // TODO: Implement jsConverter generation
+            DeriveAction::JsConverter { new_type } => {
+                for tdcl in tdcls {
+                    let js_converter_items = generate_js_converter(tdcl, *new_type, loc, arena);
+                    include_items.extend(js_converter_items);
+                }
             }
             DeriveAction::Abstract { light: _ } => {
                 // TODO: Implement abstract generation

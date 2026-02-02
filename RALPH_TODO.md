@@ -14,6 +14,12 @@
    `@deriving(abstract)` still TODO (~8 files remaining)
 4. **Module-level await (4 files)**: Requires refactoring to multi-item expansion
 
+**@module FFI fix (2026-02-02):** Fixed @module attribute handling in FFI encoding.
+- `ExternalModuleName` is now correctly created when `@module("...")` is present
+- Previously `external_module_name: None` was hardcoded; now uses parsed `desc.module_name`
+- FFI encoding now includes module names in the binary output (e.g., `$test`)
+- Does not change parity count because remaining differences are position/location sharing
+
 **@deriving progress (2026-02-02):** 3 of 11 @deriving test files now pass after implementing
 the full OCaml wrapper structure for `@deriving(accessors)`.
 
