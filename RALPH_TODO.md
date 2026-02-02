@@ -10,9 +10,9 @@
 
 **TOP PRIORITY:** Arity sharing and location sharing should be tackled FIRST because they affect ~700+ files each. These are complex problems but solving them will have the biggest impact on parity numbers.
 
-1. **Arity sharing (~700 files)** - OCaml's marshal uses CSE (Common Subexpression Elimination) to share identical arity values. Rust currently writes each arity inline. **This CAN be emulated** by tracking which arity values have been written and reusing references. Fix this in `current_marshal.rs`.
+1. **Arity sharing (~700 files)** - OCaml's marshal uses CSE (Common Subexpression Elimination) to share identical arity values. Rust currently writes each arity inline. **This CAN be fixed** by interning arity values earlier in the pipeline (like `LocIdx` for locations), so the AST already has shared references before marshalling. Don't wait until marshal time - share earlier!
 
-2. **Location sharing (~500+ files)** - OCaml's marshal shares identical Location structs. Rust writes each location inline. **This CAN be emulated** similarly by tracking written locations and reusing references in `current_marshal.rs`.
+2. **Location sharing (~500+ files)** - OCaml's marshal shares identical Location structs. Rust writes each location inline. **This CAN be fixed** - we already have `LocIdx` for interning locations. Ensure the marshal uses these indices to produce shared references in the output.
 
 Do NOT spend time on small issues (@deriving edge cases, etc.) until the sharing issues are resolved - they only affect a handful of files compared to 700+.
 
@@ -48,7 +48,7 @@ Do NOT spend time on small issues (@deriving edge cases, etc.) until the sharing
 4. **Module-level await (4 files)**: Requires refactoring to multi-item expansion
 
 **Session End Status (2026-02-02):** Most remaining failures are due to arity/location sharing.
-These CAN be fixed by emulating OCaml's CSE behavior in `current_marshal.rs`.
+These CAN be fixed by interning values earlier in the pipeline (like `LocIdx`), not at marshal time.
 
 **@module FFI fix (2026-02-02):** Fixed @module attribute handling in FFI encoding.
 - `ExternalModuleName` is now correctly created when `@module("...")` is present
