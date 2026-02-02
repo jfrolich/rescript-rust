@@ -770,11 +770,11 @@ fn parse_primary_module_expr(p: &mut Parser<'_>) -> ModuleExpr {
 
     match &p.token {
         Token::Uident(_) => {
-            // Module path
+            // Module path - use lid.loc directly (OCaml: Ast_helper.Mod.ident ~loc:longident.loc)
             let lid = parse_module_long_ident(p);
             ModuleExpr {
-                pmod_desc: ModuleExprDesc::Pmod_ident(lid),
-                pmod_loc: p.mk_loc_to_prev_end(&start_pos),
+                pmod_desc: ModuleExprDesc::Pmod_ident(lid.clone()),
+                pmod_loc: lid.loc,
                 pmod_attributes: vec![],
             }
         }
