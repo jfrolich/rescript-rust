@@ -132,12 +132,22 @@ impl Marshal for Arity {
         // None = int 0
         // Some n = block(tag=0, size=1) containing n
         //
-        // Note: OCaml shares arity values via pointer equality when they happen to be
-        // the same object (e.g., two functions with the same arity may share).
-        // We do NOT use content-based sharing here because:
-        // 1. OCaml's sharing is based on pointer identity, not value equality
-        // 2. Content-based sharing causes regressions (shares things OCaml doesn't)
-        // 3. The type annotation arity and function body arity should be separate objects
+        // OCaml sharing behavior (empirically verified):
+        // - Single function: type arity and body arity are NOT shared (both inline)
+        // - Two functions with same arity: type arities ARE shared across functions
+        // - Body arities across functions are NOT shared
+        //
+        // OCaml's sharing appears to be due to compiler optimizations on type annotations
+        // during parsing, NOT content-based deduplication.
+        //
+        // We do NOT use content-based sharing here because it would incorrectly share
+        // type arity and body arity WITHIN the same function, causing regressions in
+        // single-function test cases.
+        //
+        // To properly match OCaml's behavior, we would need to track which arity values
+        // come from type annotations vs function bodies during parsing, and only share
+        // the type annotation ones. This requires changes to the parser to use ArityIdx
+        // indices and is documented as Phase 6 in RALPH_TODO.md.
         match self {
             Arity::Unknown => w.write_int(0),
             Arity::Full(n) => {
