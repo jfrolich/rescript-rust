@@ -759,18 +759,22 @@ impl MarshalWriter {
         }
     }
 
-    /// Write an ArityIdx without sharing.
+    /// Write an ArityIdx with index-based sharing.
     ///
-    /// OCaml shares arity values via CSE (Common Subexpression Elimination),
-    /// but the pattern is complex: sharing happens across top-level bindings
-    /// but not within a single binding. Replicating this exactly would require
-    /// tracking binding boundaries during marshalling.
+    /// OCaml shares arity values via CSE (Common Subexpression Elimination):
+    /// - LITERAL `Some 1` in OCaml source code gets SHARED via constant folding
+    /// - COMPUTED `Some arity` (where arity is a parameter) creates FRESH objects
     ///
-    /// For now, we write fresh arity blocks each time. This causes some files
-    /// with multiple typed functions to have larger output than OCaml.
+    /// We replicate this by using ArityIdx for sharing:
+    /// - Same ArityIdx → write shared reference to previously-written object
+    /// - Different ArityIdx → write fresh object (even if same value)
     ///
-    /// - ArityIdx pointing to None → integer 0
-    /// - ArityIdx pointing to Some(n) → Block(tag=0, [n])
+    /// The key is that the parser uses:
+    /// - `static_arity_1()` for literal paths → same ArityIdx, will be shared
+    /// - `push_arity(Some(n))` for computed paths → different ArityIdx, won't share
+    ///
+    /// - ArityIdx pointing to None → integer 0 (not shared, always fresh)
+    /// - ArityIdx pointing to Some(n) → Block(tag=0, [n]), shared by ArityIdx
     pub fn write_arity_idx(&mut self, idx: ArityIdx) {
         // Get the actual arity value from the arena
         let arity = self
@@ -779,13 +783,25 @@ impl MarshalWriter {
 
         match arity {
             None => {
-                // None is encoded as integer 0
+                // None is encoded as integer 0, no sharing needed
                 self.write_int(0);
             }
             Some(n) => {
-                // Write Some(n) as Block(tag=0, [n]) - no sharing
-                self.write_block_header(0, 1);
-                self.write_int(n as i64);
+                // Check if this ArityIdx was already written
+                if let Some(&obj_idx) = self.arity_idx_table.get(&idx) {
+                    // Write shared reference to previously-written object
+                    self.write_shared_ref(obj_idx);
+                } else {
+                    // Record the object index BEFORE writing the block
+                    let obj_idx = self.obj_counter;
+
+                    // Write Some(n) as Block(tag=0, [n])
+                    self.write_block_header(0, 1);
+                    self.write_int(n as i64);
+
+                    // Record for future sharing (same ArityIdx → same object)
+                    self.arity_idx_table.insert(idx, obj_idx);
+                }
             }
         }
     }

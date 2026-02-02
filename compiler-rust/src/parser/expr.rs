@@ -168,13 +168,15 @@ fn transform_placeholder_application(
         ppat_attributes: vec![],
     };
 
+    // LITERAL path: OCaml line 614 `Exp.fun_ ~arity:(Some 1)` (underscore sugar)
+    // Use static arity to match OCaml's CSE sharing behavior
     Expression {
         pexp_desc: ExpressionDesc::Pexp_fun {
             arg_label: ArgLabel::Nolabel,
             default: None,
             lhs: pattern,
             rhs: Box::new(inner_apply),
-            arity: arena.push_arity(Some(1)),
+            arity: arena.static_arity_1(),
             is_async: false,
         },
         pexp_loc: underscore_loc,

@@ -186,11 +186,13 @@ pub fn parse_poly_type_expr(p: &mut Parser<'_>) -> CoreType {
                 lbl: ArgLabel::Nolabel,
                 typ,
             };
+            // LITERAL path: OCaml line 4367 `Typ.arrow ~arity:(Some 1)`
+            // Use static arity to match OCaml's CSE sharing behavior
             return CoreType {
                 ptyp_desc: CoreTypeDesc::Ptyp_arrow {
                     arg: Box::new(arg),
                     ret: Box::new(return_type),
-                    arity: p.push_arity_full(1),
+                    arity: p.static_arity_1(),
                 },
                 ptyp_loc: loc,
                 ptyp_attributes: vec![],
@@ -302,12 +304,13 @@ fn parse_arrow_type_rest(
         typ: param_type,
     };
 
+    // LITERAL path: OCaml line 4822 `Typ.arrow ~arity:(Some 1)`
+    // Use static arity to match OCaml's CSE sharing behavior
     CoreType {
         ptyp_desc: CoreTypeDesc::Ptyp_arrow {
             arg: Box::new(arg),
             ret: Box::new(return_type),
-            // Simple unlabeled arrow has arity 1
-            arity: p.push_arity_full(1),
+            arity: p.static_arity_1(),
         },
         ptyp_loc: loc,
         ptyp_attributes: vec![],

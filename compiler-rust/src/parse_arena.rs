@@ -133,9 +133,13 @@ impl ArenaIdx for LidentIdx {
 /// cheaply. Two ArityIdx values are equal if and only if they refer to the
 /// same arena slot.
 ///
-/// Arity values are deduplicated by content: two `Some(1)` arities will get
-/// the same index. This matches OCaml's behavior where the compiler performs
-/// constant folding on `Some n` literals, causing them to be physically shared.
+/// Arity sharing matches OCaml's native compiler CSE behavior:
+/// - LITERAL `Some 1` in OCaml source code gets SHARED via constant folding
+/// - COMPUTED `Some arity` (where arity is a parameter) creates FRESH objects
+///
+/// We replicate this with static vs fresh indices:
+/// - Static indices for literal paths (use `static_arity_1()`, etc.)
+/// - Fresh indices for computed paths (use `push_arity()`)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
 pub struct ArityIdx(pub u32);
 
@@ -146,6 +150,27 @@ impl ArenaIdx for ArityIdx {
     fn to_u32(self) -> u32 {
         self.0
     }
+}
+
+/// Pre-allocated static arity indices that match OCaml's CSE behavior.
+///
+/// OCaml's native compiler performs Common Subexpression Elimination on
+/// literal `Some n` values in source code. When the OCaml parser writes
+/// `~arity:(Some 1)` as a literal, all such uses share the same physical object.
+/// When it writes `~arity:(Some n)` where n is a computed parameter, each
+/// creates a fresh object.
+///
+/// These static indices correspond to the LITERAL paths in OCaml:
+/// - res_core.ml:614 - `Exp.fun_ ~arity:(Some 1)` (underscore sugar)
+/// - res_core.ml:4367 - `Typ.arrow ~arity:(Some 1)` (type var arrow)
+/// - res_core.ml:4822 - `Typ.arrow ~arity:(Some 1)` (simple arrow type)
+/// - res_core.ml:5568 - `Typ.arrow ~arity:(Some 1)` (another arrow case)
+#[derive(Debug, Clone, Copy)]
+pub struct StaticArities {
+    /// Static arity for `None` (unknown arity)
+    pub arity_none: ArityIdx,
+    /// Static arity for `Some(1)` - used for literal single-argument arrows
+    pub arity_1: ArityIdx,
 }
 
 // ============================================================================
@@ -212,8 +237,12 @@ pub struct ParseArena {
     /// Arena of longidents (returns LidentIdx).
     longidents: Arena<Longident, LidentIdx>,
     /// Arena of arities (returns ArityIdx).
-    /// Arities are deduplicated by content to match OCaml's constant folding behavior.
+    /// Use `push_arity()` for computed paths (fresh indices).
+    /// Use `static_arities` for literal paths (shared indices).
     arities: Vec<Option<i32>>,
+    /// Pre-allocated static arity indices for literal paths.
+    /// These match OCaml's CSE behavior where literal `Some 1` values are shared.
+    static_arities: StaticArities,
     /// Position deduplication table - maps position content to its index.
     position_dedup: HashMap<PosKey, PosIdx>,
     /// Simple Lident deduplication table - maps StrIdx to its LidentIdx.
@@ -231,11 +260,20 @@ pub struct ParseArena {
 
 impl Default for ParseArena {
     fn default() -> Self {
+        // Pre-allocate static arities at known indices
+        // Index 0: None (unknown arity)
+        // Index 1: Some(1) (literal single-argument)
+        let arities = vec![None, Some(1)];
+        let static_arities = StaticArities {
+            arity_none: ArityIdx(0),
+            arity_1: ArityIdx(1),
+        };
         Self {
             positions: Arena::default(),
             locations: Arena::default(),
             longidents: Arena::default(),
-            arities: Vec::new(),
+            arities,
+            static_arities,
             position_dedup: HashMap::new(),
             lident_dedup: HashMap::new(),
             strings: Interner::new(),
@@ -577,21 +615,42 @@ impl ParseArena {
     // Arity arena
     // ========================================================================
 
-    /// Push an arity value into the arena with deduplication.
+    /// Push an arity value into the arena - creates a FRESH index.
     ///
-    /// This implements the key sharing behavior that matches OCaml:
-    /// - Two `Some(1)` arities will get the same index
-    /// - At marshal time, same index = shared reference in output
+    /// Use this for COMPUTED arity paths in the OCaml parser:
+    /// - `uncurried_type ~arity:n` (ES6 arrow types with multiple params)
+    /// - `uncurried_fun ~arity:n` (function expressions)
     ///
-    /// OCaml achieves this via constant folding: `Some 1` literals become
-    /// physically identical objects. We emulate this with explicit deduplication.
+    /// These paths in OCaml create fresh `Some n` objects because the arity
+    /// is a computed parameter, not a literal.
+    ///
+    /// For LITERAL paths (e.g., `~arity:(Some 1)` hardcoded in source),
+    /// use `static_arity_1()` instead - those get shared via OCaml's CSE.
     pub fn push_arity(&mut self, arity: Option<i32>) -> ArityIdx {
-        // Always create fresh arity - no deduplication at arena level
-        // Sharing will be handled at marshal time based on value equality,
-        // matching OCaml's CSE behavior
         let idx = ArityIdx(self.arities.len() as u32);
         self.arities.push(arity);
         idx
+    }
+
+    /// Get the static arity index for `None` (unknown arity).
+    ///
+    /// Use this for LITERAL `~arity:None` paths where OCaml's CSE shares the value.
+    pub fn static_arity_none(&self) -> ArityIdx {
+        self.static_arities.arity_none
+    }
+
+    /// Get the static arity index for `Some(1)`.
+    ///
+    /// Use this for LITERAL `~arity:(Some 1)` paths in the OCaml parser:
+    /// - res_core.ml:614 - `Exp.fun_ ~arity:(Some 1)` (underscore sugar)
+    /// - res_core.ml:4367 - `Typ.arrow ~arity:(Some 1)` (type var arrow)
+    /// - res_core.ml:4822 - `Typ.arrow ~arity:(Some 1)` (simple arrow type)
+    /// - res_core.ml:5568 - `Typ.arrow ~arity:(Some 1)` (another arrow case)
+    ///
+    /// OCaml's native compiler CSE shares all literal `Some 1` values,
+    /// so we return the same pre-allocated index for all these paths.
+    pub fn static_arity_1(&self) -> ArityIdx {
+        self.static_arities.arity_1
     }
 
     /// Look up an arity by index.

@@ -224,26 +224,54 @@ impl<'src> Parser<'src> {
 
     // ========== Arity arena methods ==========
 
-    /// Push an arity value into the arena with deduplication.
-    /// Two calls with the same arity value will return the same ArityIdx,
-    /// which enables marshal sharing that matches OCaml's constant folding behavior.
+    /// Push an arity value into the arena - creates a FRESH index.
     ///
-    /// - `push_arity(Some(n))` → Known arity (function with n arguments)
-    /// - `push_arity(None)` → Unknown arity
+    /// Use this for COMPUTED arity paths (like `uncurried_type ~arity:n`)
+    /// where OCaml creates fresh `Some n` objects.
+    ///
+    /// For LITERAL `Some 1` paths, use `static_arity_1()` instead.
     pub fn push_arity(&mut self, arity: Option<i32>) -> ArityIdx {
         self.arena.push_arity(arity)
     }
 
-    /// Push a "Full" arity (known argument count) into the arena.
-    /// Convenience method equivalent to `push_arity(Some(n as i32))`.
+    /// Push a "Full" arity (known argument count) into the arena - creates FRESH index.
+    ///
+    /// Use this for COMPUTED arity paths (like `uncurried_fun ~arity:n`)
+    /// where the arity value n is computed at runtime, not a literal.
+    ///
+    /// For literal `Some 1` paths, use `static_arity_1()` instead.
     pub fn push_arity_full(&mut self, n: usize) -> ArityIdx {
         self.arena.push_arity(Some(n as i32))
     }
 
-    /// Push an "Unknown" arity into the arena.
-    /// Convenience method equivalent to `push_arity(None)`.
+    /// Push an "Unknown" arity into the arena - creates FRESH index.
+    ///
+    /// Use this for COMPUTED arity paths where `~arity:None` is used
+    /// in a context that would create fresh objects in OCaml.
     pub fn push_arity_unknown(&mut self) -> ArityIdx {
         self.arena.push_arity(None)
+    }
+
+    /// Get the STATIC arity index for `Some(1)`.
+    ///
+    /// Use this for LITERAL `~arity:(Some 1)` paths in the OCaml parser:
+    /// - res_core.ml:614 - `Exp.fun_ ~arity:(Some 1)` (underscore sugar)
+    /// - res_core.ml:4367 - `Typ.arrow ~arity:(Some 1)` (type var arrow)
+    /// - res_core.ml:4822 - `Typ.arrow ~arity:(Some 1)` (simple arrow type)
+    /// - res_core.ml:5568 - `Typ.arrow ~arity:(Some 1)` (another arrow case)
+    ///
+    /// OCaml's CSE shares all literal `Some 1` values, so we return the same
+    /// pre-allocated index to match that sharing behavior.
+    pub fn static_arity_1(&self) -> ArityIdx {
+        self.arena.static_arity_1()
+    }
+
+    /// Get the STATIC arity index for `None`.
+    ///
+    /// Use this for LITERAL `~arity:None` paths that would be shared via CSE.
+    /// Note: Most `None` usages in OCaml are via parameters, so this is rarely used.
+    pub fn static_arity_none(&self) -> ArityIdx {
+        self.arena.static_arity_none()
     }
 
     /// Push a position into the arena and return its index.
