@@ -14,16 +14,15 @@
    fresh indices for computed paths. Fixed bug in `write_arity_idx()` where distance calculation was wrong.
    **Improvement: 287 → 309 passing (+22 files, 29.5%)**
 
-2. **Location sharing (~500+ files)** - OCaml's marshal shares identical Location structs. Rust writes each
-   location inline. **Analysis (2026-02-02)**: The issue is that Rust creates new Position objects with
-   identical content but different PosIdx values. OCaml reuses the same position pointer via immutable
-   reference passing. Fixing this requires ensuring the same PosIdx is passed through code paths where
-   OCaml would pass the same pointer - a significant refactor across the parser.
-
-   **THIS IS THE TASK**: Changing how `PosIdx` (and other indices like `LocIdx`, `ArityIdx`) are passed
-   through the parser is exactly what needs to be done. The goal is to refactor the parser to pass these
-   indices in the same way OCaml passes position pointers - so that when OCaml reuses a pointer, Rust
-   reuses the same index.
+2. **Location sharing (~500+ files)** - ✅ **MOSTLY FIXED** (2026-02-02)
+   - **Root cause found**: The `mk_loc_*` functions in `state.rs` were calling `arena.push_position()`
+     directly, bypassing the position cache. This created duplicate PosIdx values for identical positions.
+   - **Fix applied**: Changed all `mk_loc_*` functions to use `get_or_push_start_pos()` and
+     `get_or_push_end_pos()` for proper cache lookup and sharing.
+   - **Also fixed**: `typ.rs` was calling `arena_mut().push_position()` directly in several places.
+   - **Improvement: 345 → 464 passing (+119 files, 44.2%)**
+   - **Remaining issue**: External declarations with arrow types still have 1 extra Position object.
+     The cause is under investigation.
 
 Do NOT spend time on small issues (@deriving edge cases, etc.) until the location sharing issue is resolved.
 
@@ -63,10 +62,23 @@ Do NOT spend time on small issues (@deriving edge cases, etc.) until the locatio
 ---
 
 **Last Updated:** 2026-02-02
-**Overall Status:** 345/1049 bsc-ast tests passing (32.9%)
+**Overall Status:** 464/1049 bsc-ast tests passing (44.2%)
 **sexp-locs Status:** 1049/1049 tests passing (100%) ✅
 
 **Note:** Many remaining failures are due to location sharing in the parser (see Phase 5 below).
+
+**Position caching fixes (2026-02-02):**
+- Fixed `mk_loc_*` functions in state.rs to use position cache instead of direct push:
+  - `mk_loc_to_end`: now uses `get_or_push_end_pos_cached()` for end position
+  - `mk_loc_to_end_of`: now uses `get_or_push_start_pos()` for start position
+  - `mk_loc_with_end_idx`: now uses `get_or_push_start_pos()` for start position
+  - `mk_loc_from_start_of`: now uses `get_or_push_end_pos()` for end position
+  - `push_end_pos`: now uses `get_or_push_end_pos_cached()`
+  - Impact: 345 → 463 (+118 files)
+- Fixed typ.rs to use position cache:
+  - `parse_function_type`: uncurried_start, unit type, outermost arrow positions
+  - `parse_object_type_body`: start position
+  - Impact: 463 → 464 (+1 file)
 
 **JSX fixes (2026-02-02):**
 - Fixed `closing_tag: None` bug in JSX container element parsing
@@ -538,22 +550,23 @@ type annotation arity and function arity should be separate objects.
     - OCaml shares locations via pointer identity during parsing and marshalling
     - Rust needs to reuse the same PosIdx/LocIdx during parsing to achieve sharing
     - **Status**: Content-based sharing reverted; fix requires better position reuse during parsing
-- [ ] **Task 5.2**: Target 500/1049 bsc-ast parity (47%) - **BLOCKED** (location sharing)
-  - **Progress (2026-02-02)**: 309 → 345 (+36 files, now 32.9%)
+- [ ] **Task 5.2**: Target 500/1049 bsc-ast parity (47%) - **IN PROGRESS**
+  - **Progress (2026-02-02)**: 309 → 345 → 464 (+119 files total, now 44.2%)
     - JSX closing_tag fix: +12 files
     - JSX PPX recursion fix: +24 files
+    - Position caching fixes: +119 files (mk_loc_* functions and typ.rs)
   - **Blockers analyzed (2026-02-02)**:
     1. **Arity sharing (Task 6.6)**: ✅ Bug fix improved parity 287→309 (+22 files)
-    2. **Location sharing (~500+ files)**: Rust creates new Position objects during parsing where
-       OCaml reuses the same pointer. Fix requires better position reuse in parser code (NOT parsetree0).
-       - External declarations: 4 bytes extra per type parameter
-       - Record type declarations: 4 bytes extra per field
-       - Root cause: Position objects created fresh instead of reusing PosIdx
+    2. **Location sharing**: ✅ **MOSTLY FIXED** - Position caching now works for most cases
+       - Fixed `mk_loc_*` functions to use cache instead of direct `push_position()`
+       - Fixed `typ.rs` function type parsing to use position cache
+       - **Remaining issue**: External declarations with arrow types still have 1 extra object
+       - Record type declarations now match ✅
     3. **@deriving (Task 2.3)**: Partially implemented (~8 files remaining)
     4. **Module-level await (Task 2.8)**: ✅ DONE
     5. **JSX container closing_tag**: ✅ FIXED (was always None)
     6. **JSX PPX string transformation**: ✅ FIXED (wasn't recursing into children/props)
-  - **Impact**: Location sharing (#2) is the main blocker for reaching 500+ parity
+  - **Next step**: Find the remaining location sharing issue in external arrow type parsing
   - Current: 345/1049 (32.9%) - JSX-related files now mostly pass
 - [ ] **Task 5.3**: Target 750/1049 bsc-ast parity (71%) - **BLOCKED** (arity limitation)
 - [ ] **Task 5.4**: Target 1000/1049 bsc-ast parity (95%) - **BLOCKED** (arity limitation)
