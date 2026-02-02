@@ -126,35 +126,14 @@ impl Marshal for ArgLabel {
 
 // ========== Arity ==========
 
+// Arity is now a type alias for ArityIdx (see parser/ast.rs).
+// Marshal implementation uses write_arity_idx which:
+// - Looks up the actual arity value in the arena
+// - Shares arities with the same ArityIdx (matching OCaml's constant folding)
 impl Marshal for Arity {
     fn marshal(&self, w: &mut MarshalWriter) {
-        // arity = int option
-        // None = int 0
-        // Some n = block(tag=0, size=1) containing n
-        //
-        // OCaml sharing behavior (empirically verified):
-        // - Single function: type arity and body arity are NOT shared (both inline)
-        // - Two functions with same arity: type arities ARE shared across functions
-        // - Body arities across functions are NOT shared
-        //
-        // OCaml's sharing appears to be due to compiler optimizations on type annotations
-        // during parsing, NOT content-based deduplication.
-        //
-        // We do NOT use content-based sharing here because it would incorrectly share
-        // type arity and body arity WITHIN the same function, causing regressions in
-        // single-function test cases.
-        //
-        // To properly match OCaml's behavior, we would need to track which arity values
-        // come from type annotations vs function bodies during parsing, and only share
-        // the type annotation ones. This requires changes to the parser to use ArityIdx
-        // indices and is documented as Phase 6 in RALPH_TODO.md.
-        match self {
-            Arity::Unknown => w.write_int(0),
-            Arity::Full(n) => {
-                w.write_block_header(0, 1);
-                w.write_int(*n as i64);
-            }
-        }
+        // Arity is ArityIdx - use the arena-based sharing method
+        w.write_arity_idx(*self);
     }
 }
 

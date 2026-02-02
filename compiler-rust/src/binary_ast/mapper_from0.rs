@@ -45,11 +45,9 @@ fn map_closed_flag(flag: &pt0::ClosedFlag) -> current::ClosedFlag {
     }
 }
 
-fn map_arity(arity: &pt0::Arity) -> current::Arity {
-    match arity {
-        Some(n) => current::Arity::Full(*n as usize),
-        None => current::Arity::Unknown,
-    }
+fn map_arity(arity: &pt0::Arity, arena: &mut ParseArena) -> current::Arity {
+    // pt0::Arity is Option<i32>, current::Arity is ArityIdx
+    arena.push_arity(*arity)
 }
 
 // ========== Attribute helpers ==========
@@ -351,7 +349,7 @@ impl<'a> Mapper<'a> {
                             typ: self.map_core_type(t1),
                         }),
                         ret: Box::new(self.map_core_type(t2)),
-                        arity: current::Arity::Unknown,
+                        arity: self.arena.push_arity(None),
                     },
                     ptyp_loc: loc,
                     ptyp_attributes: vec![],
@@ -375,7 +373,7 @@ impl<'a> Mapper<'a> {
                                                     ptyp_desc: current::CoreTypeDesc::Ptyp_arrow {
                                                         arg,
                                                         ret,
-                                                        arity: current::Arity::Full(arity),
+                                                        arity: self.arena.push_arity(Some(arity as i32)),
                                                     },
                                                     ptyp_loc: loc,
                                                     ptyp_attributes: attrs,
@@ -718,7 +716,7 @@ impl<'a> Mapper<'a> {
                     default: default.as_ref().map(|e| Box::new(self.map_expression(e))),
                     lhs: self.map_pattern(pat),
                     rhs: Box::new(self.map_expression(body)),
-                    arity: map_arity(arity),
+                    arity: map_arity(arity, self.arena),
                     is_async: *is_async,
                 }
             }
@@ -861,10 +859,7 @@ impl<'a> Mapper<'a> {
                             if let current::ExpressionDesc::Pexp_fun { arg_label, default, lhs, rhs, is_async, .. } = mapped.pexp_desc {
                                 // Extract arity from attributes
                                 let arity_opt = get_arity_from_attributes(self.arena, &attrs);
-                                let arity = match arity_opt {
-                                    Some(n) => current::Arity::Full(n as usize),
-                                    None => current::Arity::Unknown,
-                                };
+                                let arity = self.arena.push_arity(arity_opt);
                                 let new_attrs = remove_arity_attribute(self.arena, &attrs);
                                 return current::Expression {
                                     pexp_desc: current::ExpressionDesc::Pexp_fun {
