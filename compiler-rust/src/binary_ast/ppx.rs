@@ -3364,7 +3364,7 @@ fn rewrite_structure_item(item: &StructureItem, arena: &mut ParseArena) -> Vec<S
         StructureItemDesc::Pstr_modtype(mtd) => vec![StructureItem {
             pstr_desc: StructureItemDesc::Pstr_modtype(current::ModuleTypeDeclaration {
                 pmtd_name: mtd.pmtd_name.clone(),
-                pmtd_type: mtd.pmtd_type.clone(),
+                pmtd_type: mtd.pmtd_type.as_ref().map(|mt| rewrite_module_type(mt, arena)),
                 pmtd_attributes: rewrite_attributes(&mtd.pmtd_attributes, arena),
                 pmtd_loc: mtd.pmtd_loc,
             }),
@@ -3422,7 +3422,7 @@ fn rewrite_module_expr(
         current::ModuleExprDesc::Pmod_functor(param, mod_type, body) => {
             current::ModuleExprDesc::Pmod_functor(
                 param.clone(),
-                mod_type.clone(),
+                mod_type.as_ref().map(|mt| Box::new(rewrite_module_type(mt, arena))),
                 Box::new(rewrite_module_expr(body, arena)),
             )
         }
@@ -3433,7 +3433,7 @@ fn rewrite_module_expr(
         current::ModuleExprDesc::Pmod_constraint(m, mt) => {
             current::ModuleExprDesc::Pmod_constraint(
                 Box::new(rewrite_module_expr(m, arena)),
-                mt.clone(),
+                Box::new(rewrite_module_type(mt, arena)),
             )
         }
         // Handle module extension - rewrite payload
@@ -3452,6 +3452,55 @@ fn rewrite_module_expr(
         pmod_desc: new_desc,
         pmod_loc: mod_expr.pmod_loc,
         pmod_attributes: rewrite_attributes(&mod_expr.pmod_attributes, arena),
+    }
+}
+
+/// Rewrite a module type, recursing into signature and nested module types
+fn rewrite_module_type(
+    mod_type: &current::ModuleType,
+    arena: &mut ParseArena,
+) -> current::ModuleType {
+    let new_desc = match &mod_type.pmty_desc {
+        current::ModuleTypeDesc::Pmty_signature(items) => {
+            current::ModuleTypeDesc::Pmty_signature(
+                items.iter().map(|item| rewrite_signature_item(item, arena)).collect(),
+            )
+        }
+        current::ModuleTypeDesc::Pmty_functor(name, param_type, result_type) => {
+            current::ModuleTypeDesc::Pmty_functor(
+                name.clone(),
+                param_type.as_ref().map(|pt| Box::new(rewrite_module_type(pt, arena))),
+                Box::new(rewrite_module_type(result_type, arena)),
+            )
+        }
+        current::ModuleTypeDesc::Pmty_with(mt, constraints) => {
+            current::ModuleTypeDesc::Pmty_with(
+                Box::new(rewrite_module_type(mt, arena)),
+                constraints.clone(),
+            )
+        }
+        current::ModuleTypeDesc::Pmty_typeof(me) => {
+            current::ModuleTypeDesc::Pmty_typeof(Box::new(rewrite_module_expr(me, arena)))
+        }
+        current::ModuleTypeDesc::Pmty_extension(ext) => {
+            let (ext_name, payload) = ext;
+            current::ModuleTypeDesc::Pmty_extension((
+                ext_name.clone(),
+                rewrite_payload(payload, arena),
+            ))
+        }
+        // Ident, Alias - just return as-is (will be wrapped with rewritten attributes)
+        _ => return current::ModuleType {
+            pmty_desc: mod_type.pmty_desc.clone(),
+            pmty_loc: mod_type.pmty_loc,
+            pmty_attributes: rewrite_attributes(&mod_type.pmty_attributes, arena),
+        },
+    };
+
+    current::ModuleType {
+        pmty_desc: new_desc,
+        pmty_loc: mod_type.pmty_loc,
+        pmty_attributes: rewrite_attributes(&mod_type.pmty_attributes, arena),
     }
 }
 
@@ -3500,11 +3549,11 @@ fn rewrite_signature_item(item: &SignatureItem, arena: &mut ParseArena) -> Signa
             }),
             psig_loc: item.psig_loc,
         },
-        // Handle modtype - rewrite attributes
+        // Handle modtype - rewrite attributes and module type
         SignatureItemDesc::Psig_modtype(mtd) => SignatureItem {
             psig_desc: SignatureItemDesc::Psig_modtype(current::ModuleTypeDeclaration {
                 pmtd_name: mtd.pmtd_name.clone(),
-                pmtd_type: mtd.pmtd_type.clone(),
+                pmtd_type: mtd.pmtd_type.as_ref().map(|mt| rewrite_module_type(mt, arena)),
                 pmtd_attributes: rewrite_attributes(&mtd.pmtd_attributes, arena),
                 pmtd_loc: mtd.pmtd_loc,
             }),
