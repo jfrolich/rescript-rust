@@ -623,7 +623,11 @@ type annotation arity and function arity should be separate objects.
       different order, causing the sharing pattern to differ.
   - **Next step**: Consider whether this 4-byte difference affects functionality. The AST structure
     is correct (sexp-locs matches 100%), only the binary sharing differs.
-  - Current: 494/1049 (47.1%) - baseline corrected
+  - Current: 496/1049 (47.3%) - after type declaration attribute fix
+  - **Remaining blockers for 500+**:
+    - `%%private` extension not implemented (2 files) - requires state management in PPX
+    - `#=` operator transformation not implemented (many files) - requires generating externals
+    - Position sharing differences (structural issue, affects ~50+ files with same-size output)
 - [ ] **Task 5.3**: Target 750/1049 bsc-ast parity (71%) - **BLOCKED** (arity limitation)
 - [ ] **Task 5.4**: Target 1000/1049 bsc-ast parity (95%) - **BLOCKED** (arity limitation)
 - [ ] **Task 5.5**: Achieve 1049/1049 bsc-ast parity (100%) - **BLOCKED** (arity limitation)
