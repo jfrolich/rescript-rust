@@ -3482,6 +3482,56 @@ fn rewrite_signature_item(item: &SignatureItem, arena: &mut ParseArena) -> Signa
                 psig_loc: item.psig_loc,
             }
         }
+        // Handle open - rewrite attributes
+        SignatureItemDesc::Psig_open(od) => SignatureItem {
+            psig_desc: SignatureItemDesc::Psig_open(current::OpenDescription {
+                popen_lid: od.popen_lid.clone(),
+                popen_override: od.popen_override,
+                popen_loc: od.popen_loc,
+                popen_attributes: rewrite_attributes(&od.popen_attributes, arena),
+            }),
+            psig_loc: item.psig_loc,
+        },
+        // Handle modtype - rewrite attributes
+        SignatureItemDesc::Psig_modtype(mtd) => SignatureItem {
+            psig_desc: SignatureItemDesc::Psig_modtype(current::ModuleTypeDeclaration {
+                pmtd_name: mtd.pmtd_name.clone(),
+                pmtd_type: mtd.pmtd_type.clone(),
+                pmtd_attributes: rewrite_attributes(&mtd.pmtd_attributes, arena),
+                pmtd_loc: mtd.pmtd_loc,
+            }),
+            psig_loc: item.psig_loc,
+        },
+        // Handle exception - rewrite attributes
+        SignatureItemDesc::Psig_exception(ec) => SignatureItem {
+            psig_desc: SignatureItemDesc::Psig_exception(current::ExtensionConstructor {
+                pext_name: ec.pext_name.clone(),
+                pext_kind: ec.pext_kind.clone(),
+                pext_loc: ec.pext_loc,
+                pext_attributes: rewrite_attributes(&ec.pext_attributes, arena),
+            }),
+            psig_loc: item.psig_loc,
+        },
+        // Handle type extension - rewrite attributes
+        SignatureItemDesc::Psig_typext(te) => SignatureItem {
+            psig_desc: SignatureItemDesc::Psig_typext(current::TypeExtension {
+                ptyext_path: te.ptyext_path.clone(),
+                ptyext_params: te.ptyext_params.clone(),
+                ptyext_constructors: te
+                    .ptyext_constructors
+                    .iter()
+                    .map(|ec| current::ExtensionConstructor {
+                        pext_name: ec.pext_name.clone(),
+                        pext_kind: ec.pext_kind.clone(),
+                        pext_loc: ec.pext_loc,
+                        pext_attributes: rewrite_attributes(&ec.pext_attributes, arena),
+                    })
+                    .collect(),
+                ptyext_private: te.ptyext_private,
+                ptyext_attributes: rewrite_attributes(&te.ptyext_attributes, arena),
+            }),
+            psig_loc: item.psig_loc,
+        },
         // TODO: Handle @inline values
         _ => item.clone(),
     }
