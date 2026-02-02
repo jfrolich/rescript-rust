@@ -22,14 +22,38 @@
 
 Do NOT spend time on small issues (@deriving edge cases, etc.) until the location sharing issue is resolved.
 
-## ⚠️ IMPORTANT: parsetree0 / ast0 does NOT affect .ast files!
+## 🚨 CRITICAL: parsetree0 is NOT involved in .ast file generation!
 
-**DO NOT confuse parsetree0 with .ast file generation!**
+**⚠️ WARNING: If your analysis concludes that parsetree0 causes .ast file differences, YOUR ANALYSIS IS WRONG. Go back and re-analyze.**
 
-- `.ast` files (from `bsc -bs-ast`) use the **CURRENT parsetree format** via `write_structure_ast_current()` / `write_signature_ast_current()` in `binary_ast/writer.rs`
-- `parsetree0` is a SEPARATE older format used for PPX compatibility, NOT for .ast files
-- Changes to `mapper_to0.rs` or parsetree0 types have **NO IMPACT** on bsc-ast parity tests
-- The sharing issues (arity, location) need to be fixed in `current_marshal.rs`, NOT in parsetree0 code
+**This is a common mistake that wastes time. DO NOT make it.**
+
+### How .ast files are generated (the ONLY path that matters):
+
+1. Parser creates AST using **parsetree** (current format) with `LocIdx` arena indices
+2. PPX runs on **parsetree** (NOT parsetree0)
+3. `write_structure_ast_current()` / `write_signature_ast_current()` in `binary_ast/writer.rs` marshal the **parsetree** directly
+4. **parsetree0 is NEVER involved**
+
+### What parsetree0 is for (NOT relevant to .ast files):
+
+- `parsetree0` is a **frozen older AST format** used ONLY for external PPX tool compatibility
+- It is NOT used when generating `.ast` files via `bsc -bs-ast`
+- Changes to `mapper_to0.rs`, `parsetree0.rs`, or `parsetree0_marshal.rs` have **ZERO IMPACT** on bsc-ast parity tests
+
+### If you think parsetree0 is causing .ast differences:
+
+**STOP. You are wrong.** Go back and trace the actual code path:
+- `bsc -bs-ast` → `write_structure_ast_current()` → marshals **parsetree** directly
+- The sharing issues (arity, location) are in `current_marshal.rs`, NOT in any parsetree0 code
+
+### Summary:
+| Component | Used for .ast files? | Used for PPX tools? |
+|-----------|---------------------|---------------------|
+| parsetree (current) | ✅ YES | ❌ NO |
+| parsetree0 (frozen) | ❌ NO | ✅ YES |
+| current_marshal.rs | ✅ YES | ❌ NO |
+| mapper_to0.rs | ❌ NO | ✅ YES |
 
 ---
 
@@ -387,8 +411,8 @@ CODE_SHARED8 (single byte) for nearby positions, while Rust sometimes uses CODE_
 (2 bytes). This happens when:
 - ~~`Foo.bar(x)` style calls - 4 byte difference per call~~ ✅ Fixed
 - ~~Module-qualified function applications~~ ✅ Fixed
-- **Underscore placeholder patterns**: `pt0` types use full `Location`/`Position` instead of indices,
-  losing sharing information when converting from `LocIdx` in `mapper_to0::loc()`
+- **Underscore placeholder patterns**: Rust may allocate extra position indices during parsing,
+  causing different sharing distances in the marshal output
 - **Attribute payload expressions**: Positions in attribute payloads (e.g., `@ocaml.doc("foo")`)
   don't share correctly with the parent structure item positions
 
@@ -483,7 +507,7 @@ type annotation arity and function arity should be separate objects.
     - OCaml ignores the path being constrained (first argument)
     - Only processes the type declaration or right-hand side module path
   - **Analysis of remaining failures (2026-02-02)**:
-    - JSX with children: mapper_to0 issue, cannot fix per instructions
+    - JSX with children: location sharing issue in current_marshal.rs
     - `@as` attributes in externals: Rust FFI encoding differs from OCaml
       - OCaml strips `@as` attributes and encodes them as `Arg_cst` in FFI
       - Rust may be leaving attributes in place, causing extra data
@@ -494,14 +518,14 @@ type annotation arity and function arity should be separate objects.
     - Investigated adding content-based sharing for `Location` and `Position` in marshal
     - This would share locations with identical content, approximating OCaml's behavior
     - **Finding**: Content-based sharing caused regressions in some files
-    - OCaml's mapper_to0 preserves pointer identity (same location object = shared in marshal)
-    - Rust's mapper_to0 creates new Location structs (loses identity, no sharing)
-    - Proper fix would require `Rc<Location>` or `LocIdx` in parsetree0 (significant refactor)
-    - **Status**: Content-based sharing reverted; architectural limitation documented
+    - OCaml shares locations via pointer identity during parsing and marshalling
+    - Rust needs to reuse the same PosIdx/LocIdx during parsing to achieve sharing
+    - **Status**: Content-based sharing reverted; fix requires better position reuse during parsing
 - [ ] **Task 5.2**: Target 500/1049 bsc-ast parity (47%) - **BLOCKED** (location sharing)
   - **Blockers analyzed (2026-02-02)**:
     1. **Arity sharing (Task 6.6)**: ✅ Bug fix improved parity 287→309 (+22 files)
-    2. **parsetree0 Location sharing**: mapper_to0 loses LocIdx identity (~500+ files)
+    2. **Location sharing (~500+ files)**: Rust creates new Position objects during parsing where
+       OCaml reuses the same pointer. Fix requires better position reuse in parser code (NOT parsetree0).
     3. **@deriving (Task 2.3)**: Partially implemented (~8 files remaining)
     4. **Module-level await (Task 2.8)**: ✅ DONE
   - **Impact**: Location sharing (#2) is the main blocker for reaching 500+ parity
@@ -638,33 +662,21 @@ cargo build --manifest-path compiler-rust/Cargo.toml --release
 
 ---
 
-## Note on parsetree0/ast0/mapper_to0
+## Files relevant to binary AST (.ast) parity
 
-**UPDATE (2026-02-02): These files ARE involved in binary AST generation.**
+**These are the ONLY files that affect .ast file generation:**
 
-**AST flow for binary AST output:**
-1. Parser creates AST with `LocIdx` (arena-indexed locations)
-2. `mapper_to0` converts to `parsetree0` which uses full `Location` structs
-3. Marshal serializes the `Location` structs (not LocIdx)
-4. **Problem**: Each conversion creates a NEW `Location` struct, losing sharing information
-
-**This is a major source of parity differences.** When the same LocIdx is converted multiple times
-by mapper_to0, each creates a separate Location struct that cannot be shared by marshal.
-
-**Impact**: ~500+ files have location sharing differences due to this.
-
-**Potential fix** (significant refactoring required):
-- Change parsetree0 to use `LocIdx` instead of `Location`
-- Or use `Rc<Location>` to enable identity-based sharing
-- Both require major changes to parsetree0.rs, parsetree0_marshal.rs, and mapper_to0.rs
-
-**Files relevant to binary AST parity:**
 - ✅ `compiler-rust/src/parser/` - Position creation and reuse during parsing
 - ✅ `compiler-rust/src/parse_arena.rs` - Arena management for positions
-- ✅ `compiler-rust/src/binary_ast/marshal.rs` - Marshal serialization (arity sharing issue is here)
+- ✅ `compiler-rust/src/binary_ast/current_marshal.rs` - Marshal serialization for current parsetree
+- ✅ `compiler-rust/src/binary_ast/writer.rs` - Entry point for writing .ast files
 - ✅ `compiler-rust/src/binary_ast/ppx.rs` - Built-in PPX transformations (string interp, raw, etc.)
-- ⚠️ `compiler-rust/src/binary_ast/mapper_to0.rs` - Converts LocIdx→Location, LOSES sharing
-- ⚠️ `compiler-rust/src/binary_ast/parsetree0.rs` - Uses full Location (not LocIdx)
+
+**These files are NOT involved in .ast file generation (PPX compatibility only):**
+
+- ❌ `compiler-rust/src/binary_ast/mapper_to0.rs` - NOT used for .ast files
+- ❌ `compiler-rust/src/binary_ast/parsetree0.rs` - NOT used for .ast files
+- ❌ `compiler-rust/src/binary_ast/parsetree0_marshal.rs` - NOT used for .ast files
 
 ## Important: No Content-Based Sharing Tricks
 
