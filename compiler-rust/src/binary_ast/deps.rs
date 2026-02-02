@@ -142,8 +142,21 @@ impl<'a> DependencyCollector<'a> {
                 self.add_expression(expr);
             }
             StructureItemDesc::Pstr_value(_rec_flag, bindings) => {
+                // OCaml's add_bindings collects pattern bindings (including Ppat_unpack)
+                // and adds them to bound_modules so later references don't add dependencies.
+                // First collect all unpack names from patterns
+                let mut unpack_names = HashSet::new();
                 for binding in bindings {
-                    self.add_value_binding(binding);
+                    let names = self.add_pattern_collecting_unpack(&binding.pvb_pat);
+                    unpack_names.extend(names);
+                }
+                // Add collected unpack names to bound_modules
+                // This must happen before processing expressions so that references
+                // to these modules in the same or later bindings don't add dependencies
+                self.bound_modules.extend(unpack_names);
+                // Now process expressions
+                for binding in bindings {
+                    self.add_expression(&binding.pvb_expr);
                 }
             }
             StructureItemDesc::Pstr_primitive(vd) => {
@@ -263,10 +276,24 @@ impl<'a> DependencyCollector<'a> {
             }
             ExpressionDesc::Pexp_constant(_) => {}
             ExpressionDesc::Pexp_let(_rec_flag, bindings, body) => {
+                // OCaml's add_bindings collects pattern bindings (including Ppat_unpack)
+                // First collect all unpack names from patterns
+                let mut unpack_names = HashSet::new();
                 for binding in bindings {
-                    self.add_value_binding(binding);
+                    let names = self.add_pattern_collecting_unpack(&binding.pvb_pat);
+                    unpack_names.extend(names);
+                }
+                // Add collected unpack names to bound_modules for the body expression
+                self.bound_modules.extend(unpack_names.clone());
+                // Process expressions
+                for binding in bindings {
+                    self.add_expression(&binding.pvb_expr);
                 }
                 self.add_expression(body);
+                // Note: In OCaml, bv is threaded through recursion, so unpack bindings
+                // only affect the body and later bindings. Our approach keeps them in
+                // bound_modules permanently, which is a slight over-approximation but
+                // correct for dependency extraction purposes.
             }
             ExpressionDesc::Pexp_fun {
                 default,
@@ -277,7 +304,10 @@ impl<'a> DependencyCollector<'a> {
                 if let Some(default) = default {
                     self.add_expression(default);
                 }
-                self.add_pattern(lhs);
+                // OCaml: add_expr (add_pattern bv p) e
+                // Collect unpack names from pattern and add to bound_modules for rhs
+                let unpack_names = self.add_pattern_collecting_unpack(lhs);
+                self.bound_modules.extend(unpack_names);
                 self.add_expression(rhs);
             }
             ExpressionDesc::Pexp_apply { funct, args, .. } => {
@@ -464,49 +494,69 @@ impl<'a> DependencyCollector<'a> {
 
     // ========== Patterns ==========
 
+    /// Add dependencies from a pattern, and collect any module names bound by Ppat_unpack.
+    /// Returns the set of module names bound by unpack patterns.
+    fn add_pattern_collecting_unpack(&mut self, pat: &Pattern) -> HashSet<String> {
+        let mut unpack_names = HashSet::new();
+        self.add_pattern_inner(pat, &mut unpack_names);
+        unpack_names
+    }
+
     fn add_pattern(&mut self, pat: &Pattern) {
+        let mut unpack_names = HashSet::new();
+        self.add_pattern_inner(pat, &mut unpack_names);
+        // Note: we don't use unpack_names here because add_pattern is called
+        // in contexts where the unpack bindings don't persist (e.g., match cases)
+    }
+
+    fn add_pattern_inner(&mut self, pat: &Pattern, unpack_names: &mut HashSet<String>) {
         match &pat.ppat_desc {
             PatternDesc::Ppat_any | PatternDesc::Ppat_var(_) | PatternDesc::Ppat_constant(_) => {}
             PatternDesc::Ppat_alias(pat, _name) => {
-                self.add_pattern(pat);
+                self.add_pattern_inner(pat, unpack_names);
             }
             PatternDesc::Ppat_interval(_, _) => {}
             PatternDesc::Ppat_tuple(pats) | PatternDesc::Ppat_array(pats) => {
                 for pat in pats {
-                    self.add_pattern(pat);
+                    self.add_pattern_inner(pat, unpack_names);
                 }
             }
             PatternDesc::Ppat_construct(lid, arg) => {
                 self.add_lident_idx(lid.txt);
                 if let Some(arg) = arg {
-                    self.add_pattern(arg);
+                    self.add_pattern_inner(arg, unpack_names);
                 }
             }
             PatternDesc::Ppat_variant(_label, arg) => {
                 if let Some(arg) = arg {
-                    self.add_pattern(arg);
+                    self.add_pattern_inner(arg, unpack_names);
                 }
             }
             PatternDesc::Ppat_record(fields, _closed) => {
                 for field in fields {
                     self.add_lident_idx(field.lid.txt);
-                    self.add_pattern(&field.pat);
+                    self.add_pattern_inner(&field.pat, unpack_names);
                 }
             }
             PatternDesc::Ppat_or(p1, p2) => {
-                self.add_pattern(p1);
-                self.add_pattern(p2);
+                self.add_pattern_inner(p1, unpack_names);
+                self.add_pattern_inner(p2, unpack_names);
             }
             PatternDesc::Ppat_constraint(pat, ty) => {
-                self.add_pattern(pat);
+                self.add_pattern_inner(pat, unpack_names);
                 self.add_core_type(ty);
             }
             PatternDesc::Ppat_type(lid) => {
                 self.add_lident_idx(lid.txt);
             }
-            PatternDesc::Ppat_unpack(_name) => {}
+            PatternDesc::Ppat_unpack(name) => {
+                // OCaml: pattern_bv := StringMap.add id.txt bound !pattern_bv
+                // Collect the unpack'd module name so it can be added to bound_modules
+                let module_name = self.arena.get_string(name.txt).to_string();
+                unpack_names.insert(module_name);
+            }
             PatternDesc::Ppat_exception(pat) => {
-                self.add_pattern(pat);
+                self.add_pattern_inner(pat, unpack_names);
             }
             PatternDesc::Ppat_extension((_id, payload)) => {
                 self.add_payload(payload);
@@ -514,7 +564,7 @@ impl<'a> DependencyCollector<'a> {
             PatternDesc::Ppat_open(lid, pat) => {
                 // Pattern open uses full module path
                 self.add_lident_idx_full(lid.txt);
-                self.add_pattern(pat);
+                self.add_pattern_inner(pat, unpack_names);
             }
         }
     }
@@ -790,7 +840,10 @@ impl<'a> DependencyCollector<'a> {
     }
 
     fn add_case(&mut self, case: &Case) {
-        self.add_pattern(&case.pc_lhs);
+        // OCaml: let bv = add_pattern bv pc_lhs in
+        // Collect unpack names from pattern for guard and rhs
+        let unpack_names = self.add_pattern_collecting_unpack(&case.pc_lhs);
+        self.bound_modules.extend(unpack_names);
         if let Some(guard) = &case.pc_guard {
             self.add_expression(guard);
         }

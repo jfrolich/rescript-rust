@@ -1,7 +1,7 @@
 # Ralph TODO: Binary AST Parity
 
 **Last Updated:** 2026-02-02
-**Overall Status:** 257/1049 bsc-ast tests passing (24.5%)
+**Overall Status:** 259/1049 bsc-ast tests passing (24.7%)
 **sexp-locs Status:** 1049/1049 tests passing (100%) ✅
 
 ---
@@ -65,6 +65,14 @@ Previously Rust was adding all uppercase identifiers, incorrectly including `Non
 - `Pwith_module(lid1, lid2)` - only add lid2 as dependency, not lid1
 - Example: `with module Bar = Array` - only `Array` is a dependency, not `Bar`
 - Reduced dependency differences from 78 to 75 files
+
+**Additional fix (2026-02-02):** First-class module pattern binding tracking:
+- OCaml's `add_pattern` collects `Ppat_unpack` names into `pattern_bv` (bound variables)
+- When processing `let module(Set) = z`, `Set` is added to bound modules
+- Later `Set.S` references don't add `Set` as a dependency if it's already bound
+- `add_bindings` (for `Pstr_value`, `Pexp_let`) collects unpack names from all patterns
+- `add_pattern` in `Pexp_fun` and `add_case` also track unpack bindings
+- Fixes `firstClassModules.res` (now byte-identical to OCaml)
 
 ---
 
