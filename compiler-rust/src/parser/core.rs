@@ -659,7 +659,12 @@ pub fn make_unary_expr(
     } else if token_string.starts_with('~') {
         token_string
     } else if matches!(token, Token::Bang) {
-        "not".to_string()
+        // For "not", use push_lident_static to deduplicate the Lident
+        // (OCaml shares the Lident for literal "not" via compiler optimization)
+        let op_lid_idx = p.arena_mut().push_lident_static("not");
+        let op_expr = ast_helper::make_ident_idx(op_lid_idx, token_loc);
+        let loc = p.mk_loc(&start_pos, &p.loc_end(operand.pexp_loc));
+        return ast_helper::make_apply(op_expr, vec![(ArgLabel::Nolabel, operand)], loc);
     } else {
         format!("~{}", token_string)
     };
