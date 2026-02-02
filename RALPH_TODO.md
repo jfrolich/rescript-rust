@@ -185,6 +185,10 @@ We need to implement the remaining transformations.
   - **Done (2026-02-02)**: Implemented `%re` in handle_re() - wraps %raw with Stdlib_RegExp.t type constraint.
   - **Done (2026-02-02)**: Implemented `%external` (deprecated) in handle_external_ext() - creates
     Js.undefinedToOption(if Js.typeof(raw_exp) == "undefined" then Js.Undefined.empty else raw_exp).
+  - **Fixed (2026-02-02)**: PPX arity encoding changed from `Arity::Unknown` to `Arity::Full(1)` to match
+    OCaml's `Typ.arrows` behavior which sets `arity = Some(list_length)`.
+  - **Fixed (2026-02-02)**: handle_raw() now uses payload string's location for final expression's pexp_loc,
+    matching OCaml's `{exp with pexp_desc = ...}` pattern.
   - Also fixed letmodule dependency tracking so local modules (like `J`) aren't added as dependencies.
   - Note: `%debugger` still has minor position sharing differences (Phase 4 issue).
   - TODO: `%obj`, `%todo` still need implementation (low impact - 0 test files use these).
