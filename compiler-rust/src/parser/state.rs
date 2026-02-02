@@ -4,6 +4,7 @@
 //! like advancing tokens, error handling, lookahead, and breadcrumb tracking.
 //! It mirrors `res_parser.ml`.
 
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicU32, Ordering};
 
 use crate::intern::StrIdx;
@@ -104,12 +105,13 @@ pub struct Parser<'src> {
     /// the PREVIOUS prev_end_pos was to enable sharing with positions captured before next().
     /// This is cleared when prev_end_pos changes (on next token consumption).
     cached_prev_end_pos: Option<(Position, PosIdx)>,
-    /// Cache for start_pos sharing: stores (position value, arena index).
-    /// When multiple locations start at start_pos, they share the same PosIdx.
-    /// The position value is stored because after `next()`, the parser state changes
-    /// but previously captured positions should still share with the cached value.
-    /// This is cleared when start_pos changes (on next token consumption).
-    cached_start_pos: Option<(Position, PosIdx)>,
+    /// Cache for start position sharing: maps Position -> PosIdx.
+    /// When multiple locations start at the same position, they share the same PosIdx.
+    /// Unlike the prev_end_pos cache, this cache persists across next() calls because
+    /// positions captured before next() should still share with later uses.
+    /// This is essential for matching OCaml's sharing behavior where the same position
+    /// object is reused across the expression and its containing structure item.
+    start_pos_cache: HashMap<Position, PosIdx>,
 }
 
 impl<'src> Parser<'src> {
@@ -140,7 +142,7 @@ impl<'src> Parser<'src> {
             arena,
             in_external: false,
             cached_prev_end_pos: None,
-            cached_start_pos: None,
+            start_pos_cache: HashMap::new(),
         };
         // Scan the first token
         parser.next();
@@ -225,18 +227,17 @@ impl<'src> Parser<'src> {
         self.get_or_push_start_pos(self.start_pos)
     }
 
-    /// Get or push a start position, using cache for sharing.
-    /// If the position matches a cached start position, returns the cached PosIdx.
-    /// This enables sharing for positions captured from p.start_pos before/during parsing.
+    /// Get or push a start position, using HashMap cache for sharing.
+    /// If the position was already cached, returns the cached PosIdx.
+    /// This cache persists across next() calls to enable sharing between
+    /// outer and inner parsing contexts (e.g., structure item and expression).
     pub fn get_or_push_start_pos(&mut self, pos: Position) -> PosIdx {
-        if let Some((cached_pos, cached_idx)) = self.cached_start_pos {
-            if cached_pos == pos {
-                return cached_idx;
-            }
+        if let Some(&idx) = self.start_pos_cache.get(&pos) {
+            return idx;
         }
-        // Not in cache or different value - push and cache
+        // Not in cache - push and cache
         let idx = self.arena.push_position(pos);
-        self.cached_start_pos = Some((pos, idx));
+        self.start_pos_cache.insert(pos, idx);
         idx
     }
 
@@ -516,7 +517,9 @@ impl<'src> Parser<'src> {
                     self.prev_end_pos = prev_end;
                     self.cached_prev_end_pos = None; // Clear cache when prev_end_pos changes
                     self.start_pos = result.start_pos;
-                    self.cached_start_pos = None; // Clear cache when start_pos changes
+                    // Note: start_pos_cache is NOT cleared here - it's a HashMap that
+                    // accumulates entries throughout parsing to enable sharing between
+                    // outer and inner contexts (e.g., structure item and expression).
                     self.end_pos = result.end_pos;
                     return;
                 }
@@ -538,7 +541,7 @@ impl<'src> Parser<'src> {
         self.prev_end_pos = self.end_pos.clone();
         self.cached_prev_end_pos = None; // Clear cache when prev_end_pos changes
         self.start_pos = result.start_pos;
-        self.cached_start_pos = None; // Clear cache when start_pos changes
+        // Note: start_pos_cache is NOT cleared - HashMap accumulates entries
         self.end_pos = result.end_pos;
     }
 
@@ -622,7 +625,7 @@ impl<'src> Parser<'src> {
         // Restore parser state
         self.token = token;
         self.start_pos = start_pos;
-        self.cached_start_pos = None; // Clear cache when start_pos changes
+        // Note: start_pos_cache is NOT cleared - HashMap accumulates entries
         self.end_pos = end_pos;
         self.prev_end_pos = prev_end_pos;
         self.cached_prev_end_pos = None; // Clear cache when prev_end_pos changes
@@ -662,7 +665,7 @@ impl<'src> Parser<'src> {
         self.scanner.restore(snapshot.scanner_snapshot);
         self.token = snapshot.token;
         self.start_pos = snapshot.start_pos;
-        self.cached_start_pos = None; // Clear cache when start_pos changes
+        // Note: start_pos_cache is NOT cleared - HashMap accumulates entries
         self.end_pos = snapshot.end_pos;
         self.prev_end_pos = snapshot.prev_end_pos;
         self.cached_prev_end_pos = None; // Clear cache when prev_end_pos changes
