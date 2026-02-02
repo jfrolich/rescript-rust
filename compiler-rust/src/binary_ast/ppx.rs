@@ -2601,7 +2601,7 @@ fn generate_accessor_include(
     };
 
     let constrained_mod = ModuleExpr {
-        pmod_desc: ModuleExprDesc::Pmod_constraint(Box::new(inner_mod), sig_mod_type),
+        pmod_desc: ModuleExprDesc::Pmod_constraint(Box::new(inner_mod), Box::new(sig_mod_type)),
         pmod_loc: loc,
         pmod_attributes: vec![],
     };
