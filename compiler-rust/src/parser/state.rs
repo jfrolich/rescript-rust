@@ -385,11 +385,9 @@ impl<'src> Parser<'src> {
     }
 
     /// Create a location from a start PosIdx to current end_pos.
-    /// This is the PosIdx-based equivalent of mk_loc_to_end.
-    /// Pushes a FRESH end position (no caching) to match OCaml's behavior.
+    /// Uses stored end_pos_idx for sharing.
     pub fn mk_loc_idx_to_end(&mut self, start: PosIdx) -> LocIdx {
-        let end = self.arena.push_position(self.end_pos);
-        self.arena.mk_loc(start, end)
+        self.arena.mk_loc(start, self.end_pos_idx)
     }
 
     /// Create a location from a start PosIdx to another location's end.
