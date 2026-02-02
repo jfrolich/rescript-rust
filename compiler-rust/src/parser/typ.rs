@@ -820,7 +820,8 @@ fn parse_function_type(p: &mut Parser<'_>, start_pos: crate::location::Position)
         let has_regular_attrs = param_attrs.iter().any(|(name, _)| p.arena().get_string(name.txt) != "res.doc");
         let param_start_idx = if has_dot {
             // For uncurried parameters, OCaml includes the . in arrow location
-            p.arena_mut().push_position(uncurried_start)
+            // Use cache for position sharing
+            p.get_or_push_start_pos(uncurried_start)
         } else if has_regular_attrs {
             // If there are @-attributes (but no uncurried marker), start at the attribute
             // Use the already-pushed PosIdx for sharing with attribute location
@@ -941,8 +942,9 @@ fn parse_function_type(p: &mut Parser<'_>, start_pos: crate::location::Position)
         // OCaml: Ast_helper.Typ.constr unit_constr []
         // No ~loc passed, so ptyp_loc defaults to Location.none (ghost)
         // But lid_loc uses the real location
-        let start_pos_idx = p.arena_mut().push_position(start_pos.clone());
-        let rparen_end_idx = p.arena_mut().push_position(rparen_end_pos);
+        // Use cache for position sharing
+        let start_pos_idx = p.get_or_push_start_pos(start_pos.clone());
+        let rparen_end_idx = p.get_or_push_end_pos(rparen_end_pos);
         let lid_loc = p.mk_loc_idx(start_pos_idx, rparen_end_idx);
         let lid_idx = p.push_lident_static("unit");
         params.push((TypeArg {
@@ -1009,8 +1011,8 @@ fn parse_function_type(p: &mut Parser<'_>, start_pos: crate::location::Position)
     };
 
     // The outermost arrow should start at start_pos (the opening paren) not at first arg
-    // Reuse the same end_pos_idx that all inner arrows used (OCaml position sharing)
-    let start_pos_idx = p.arena_mut().push_position(start_pos);
+    // Use cache to reuse the same PosIdx if this position was already seen (OCaml sharing)
+    let start_pos_idx = p.get_or_push_start_pos(start_pos);
     CoreType {
         ptyp_loc: p.mk_loc_idx(start_pos_idx, end_pos_idx),
         ..result
@@ -1223,7 +1225,8 @@ fn parse_record_or_object_type(p: &mut Parser<'_>) -> CoreType {
 /// The caller should pass the position AFTER consuming `{` as `start_pos`.
 pub fn parse_object_type_body(p: &mut Parser<'_>, start_pos: Position) -> CoreType {
     // Push start position as PosIdx for potential reuse in arrow type location
-    let start_pos_idx = p.arena_mut().push_position(start_pos);
+    // Use cache for position sharing
+    let start_pos_idx = p.get_or_push_start_pos(start_pos);
 
     // Check for open/closed markers: {. ... } or {.. ... }
     let closed = if p.token == Token::DotDot {
