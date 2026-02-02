@@ -109,17 +109,15 @@ impl Marshal for ArgLabel {
                 w.write_block_header(0, 1);
                 // The string loc is block(tag=0, size=2) with txt and loc
                 w.write_block_header(0, 2);
-                // Look up string from arena via StrIdx
-                let str_val = w.get_arena().get_string(s.txt).to_string();
-                w.write_str(&str_val);
+                // Use write_str_idx for sharing - same StrIdx will be shared via back-reference
+                w.write_str_idx(s.txt);
                 s.loc.marshal(w);
             }
             ArgLabel::Optional(s) => {
                 w.write_block_header(1, 1);
                 w.write_block_header(0, 2);
-                // Look up string from arena via StrIdx
-                let str_val = w.get_arena().get_string(s.txt).to_string();
-                w.write_str(&str_val);
+                // Use write_str_idx for sharing - same StrIdx will be shared via back-reference
+                w.write_str_idx(s.txt);
                 s.loc.marshal(w);
             }
         }

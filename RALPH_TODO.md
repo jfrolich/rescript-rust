@@ -1,8 +1,13 @@
 # Ralph TODO: Binary AST Parity
 
 **Last Updated:** 2026-02-02
-**Overall Status:** 259/1049 bsc-ast tests passing (24.7%)
+**Overall Status:** 260/1049 bsc-ast tests passing (24.8%) - **AT CEILING** (blocked by arity sharing)
 **sexp-locs Status:** 1049/1049 tests passing (100%) ✅
+
+**Note:** Further progress requires one of:
+1. Implementing content-based sharing (violates "no content-based sharing" constraint)
+2. Using `Rc<Arity>` or similar architecture change for arity values
+3. Modifying mapper_to0.rs to preserve position sharing (currently out of scope)
 
 ---
 
@@ -340,7 +345,7 @@ type annotation arity and function arity should be separate objects.
     - Rust creates separate `Some(1)` blocks for each function
     - This affects ~90% of .res files (any file with 2+ typed functions)
   - **Cannot fix without**: Content-based sharing (violates constraint) or `Rc<Arity>` architecture change
-  - **Current**: 259/1049 (24.7%) - most .resi files pass, most .res files fail due to arity
+  - **Current**: 260/1049 (24.8%) - most .resi files pass, most .res files fail due to arity
   - **Verified (2026-02-02)**: Single typed function passes (`let f: int => int = x => x`), but two functions
     with same arity fail. This is the documented arity sharing limitation.
   - **Status**: BLOCKED - requires architectural changes to fix
