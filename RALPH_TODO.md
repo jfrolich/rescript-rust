@@ -62,12 +62,19 @@ Do NOT spend time on small issues (@deriving edge cases, etc.) until the locatio
 ---
 
 **Last Updated:** 2026-02-02
-**Overall Status:** 464/1049 bsc-ast tests passing (44.2%)
+**Overall Status:** 476/1049 bsc-ast tests passing (45.4%)
 **sexp-locs Status:** 1049/1049 tests passing (100%) ✅
 
 **Note:** Many remaining failures are due to position sharing differences between OCaml and Rust.
 The AST structure is 100% correct (sexp-locs matches), but binary marshal format differs in object
 sharing patterns. See Phase 5 Task 5.2 for detailed analysis of external declaration differences.
+
+**Session progress (2026-02-02):**
+- Fixed `Pmod_ident` location sharing (+8 files): OCaml uses `longident.loc` for both the wrapped
+  longident and `pmod_loc`. Now Rust matches by using `lid.loc` directly instead of creating
+  a new location.
+- Fixed with-constraint string sharing (+12 files): Reuse the `StrIdx` from the longident instead
+  of extracting the string and calling `push_string()` (which created a new StrIdx).
 
 **Position caching fixes (2026-02-02):**
 - Fixed `mk_loc_*` functions in state.rs to use position cache instead of direct push:
@@ -552,11 +559,13 @@ type annotation arity and function arity should be separate objects.
     - OCaml shares locations via pointer identity during parsing and marshalling
     - Rust needs to reuse the same PosIdx/LocIdx during parsing to achieve sharing
     - **Status**: Content-based sharing reverted; fix requires better position reuse during parsing
-- [ ] **Task 5.2**: Target 500/1049 bsc-ast parity (47%) - **IN PROGRESS**
-  - **Progress (2026-02-02)**: 309 → 345 → 464 (+119 files total, now 44.2%)
+- [ ] **Task 5.2**: Target 500/1049 bsc-ast parity (47%) - **IN PROGRESS** (currently 476, 45.4%)
+  - **Progress (2026-02-02)**: 309 → 345 → 464 → 476 (+167 files total, now 45.4%)
     - JSX closing_tag fix: +12 files
     - JSX PPX recursion fix: +24 files
     - Position caching fixes: +119 files (mk_loc_* functions and typ.rs)
+    - Pmod_ident location sharing: +8 files
+    - With-constraint string sharing: +4 files
   - **Blockers analyzed (2026-02-02)**:
     1. **Arity sharing (Task 6.6)**: ✅ Bug fix improved parity 287→309 (+22 files)
     2. **Location sharing**: ✅ **MOSTLY FIXED** - Position caching now works for most cases
