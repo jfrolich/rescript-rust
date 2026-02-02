@@ -60,6 +60,12 @@ Previously Rust was adding all uppercase identifiers, incorrectly including `Non
 - `Pmty_alias` still uses `addmodule` (full path)
 - This fixes 3 files: modType/ident.res, moduleTypeDeclaration.res, UrlUtils.res
 
+**Additional fix (2026-02-02):** With-constraint dependency extraction:
+- `Pwith_type(lid, td)` - only process td, not lid (lid is the path being constrained)
+- `Pwith_module(lid1, lid2)` - only add lid2 as dependency, not lid1
+- Example: `with module Bar = Array` - only `Array` is a dependency, not `Bar`
+- Reduced dependency differences from 78 to 75 files
+
 ---
 
 ## Tasks
