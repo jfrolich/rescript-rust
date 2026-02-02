@@ -790,7 +790,9 @@ impl MarshalWriter {
                 // Check if this ArityIdx was already written
                 if let Some(&obj_idx) = self.arity_idx_table.get(&idx) {
                     // Write shared reference to previously-written object
-                    self.write_shared_ref(obj_idx);
+                    // Distance = current counter - recorded index
+                    let d = self.obj_counter - obj_idx;
+                    self.write_shared_ref(d);
                 } else {
                     // Record the object index BEFORE writing the block
                     let obj_idx = self.obj_counter;

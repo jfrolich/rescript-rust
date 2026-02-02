@@ -30,10 +30,16 @@ Do NOT spend time on small issues (@deriving edge cases, etc.) until the locatio
 ---
 
 **Last Updated:** 2026-02-02
-**Overall Status:** 287/1049 bsc-ast tests passing (27.4%)
+**Overall Status:** 309/1049 bsc-ast tests passing (29.5%)
 **sexp-locs Status:** 1049/1049 tests passing (100%) ✅
 
-**Note:** Many remaining failures are due to arity sharing (see Phase 6 below).
+**Note:** Many remaining failures are due to arity/location sharing (see Phase 6 below).
+
+**Arity sharing bug fix (2026-02-02):**
+- Fixed bug in `write_arity_idx()` in marshal.rs
+- Bug: Was passing raw `obj_idx` to `write_shared_ref()` instead of the distance
+- Fix: Changed to `let d = self.obj_counter - obj_idx; self.write_shared_ref(d);`
+- Impact: 287 → 309 passing (+22 files)
 
 **Test infrastructure fix (2026-02-02):** Fixed test script and bsc to correctly handle interface files:
 - OCaml bsc outputs `.iast` for interface files (`.resi`), ignoring `-o` extension
