@@ -7,7 +7,14 @@
 **Note:** Many remaining failures are due to arity sharing (see Phase 6 below).
 
 **Phase 6 Status:** Investigation complete; ArityIdx infrastructure added to parse_arena.rs and marshal.rs.
-Full implementation (updating AST types) touches ~30+ files but should be completed to unblock Phase 5.
+Full implementation (updating AST types) deferred due to extensive codebase impact (~30+ files).
+
+**Content-based arity sharing investigation (2026-02-02):**
+- Tried using `marshal_with_sharing()` method for type annotation arities in `Ptyp_arrow`
+- This worked for the simple case (`let f: int => int = x => x; let g: int => int = y => y`)
+- BUT it caused regressions in files with nested arrow types (e.g., `(bool => bool) => unit`)
+- OCaml's sharing is more nuanced: shares across TOP-LEVEL type annotations, but NOT within nested types
+- Simple content-based sharing is too aggressive - needs AST-level tracking via ArityIdx
 
 ---
 
@@ -355,8 +362,13 @@ type annotation arity and function arity should be separate objects.
     - Rust's mapper_to0 creates new Location structs (loses identity, no sharing)
     - Proper fix would require `Rc<Location>` or `LocIdx` in parsetree0 (significant refactor)
     - **Status**: Content-based sharing reverted; architectural limitation documented
-- [ ] **Task 5.2**: Target 500/1049 bsc-ast parity (47%) (depends on Phase 6)
-  - Requires fixing arity sharing (Phase 6 implementation)
+- [ ] **Task 5.2**: Target 500/1049 bsc-ast parity (47%) - **BLOCKED** (depends on Phase 6)
+  - **Investigation (2026-02-02)**: Attempted content-based arity sharing at marshal time
+    - `marshal_with_sharing()` for type annotation arities in `Ptyp_arrow`
+    - Works for simple case (two functions with same arity)
+    - Fails for nested arrow types (e.g., `(bool => bool) => unit`) - shares too aggressively
+    - OCaml only shares across top-level type annotations, not within nested types
+  - **Cannot fix without Phase 6**: Need ArityIdx in AST to track arity identity properly
   - Arity sharing - two functions with same arity (`int => int`) differ by 1 object
     - Example: `let f: int => int = x => x; let g: int => string = y => "test"` fails
     - OCaml shares `Some(1)` arity value via pointer equality
@@ -397,12 +409,17 @@ naturally when the same index is used (just like OCaml shares when same referenc
   - Added `get_arity()` and `arity_count()` methods
   - Added `arity_idx_table` and `write_arity_idx()` to MarshalWriter
 
-- [ ] **Task 6.3**: Update AST types to use ArityIdx
+- [ ] **Task 6.3**: Update AST types to use ArityIdx - **KEY BLOCKER**
   - Change `Ptyp_arrow { ..., arity: Arity }` to `arity: ArityIdx`
   - Change `Pexp_fun { ..., arity: Arity }` to `arity: ArityIdx`
-  - This change touches 30+ files across parser, printer, viewer, typecore, etc.
+  - **Scope**: ~97 uses of `Arity::` across the codebase in files:
+    - `current_marshal.rs`, `mapper_from0.rs`, `mapper_to0.rs`, `ppx.rs`
+    - `expr.rs`, `typ.rs`, `jsx_ppx.rs`, `state.rs`
+    - `sexp_locs.rs`, `sexp_typedtree.rs`, `parsetree_viewer.rs`
+    - `printer2.rs`, `ml_printer.rs`, `typecore.rs`, `convert.rs`, `typedtree.rs`
   - The `Arity` enum is deeply embedded in the codebase
   - Update all code that reads/writes arity values
+  - **Partial implementation existed** but was incomplete (touched 4 files, needs all 16+)
   - Break into smaller commits if needed, but complete the implementation
 
 - [ ] **Task 6.4**: Update parser to use arena (depends on 6.3)
