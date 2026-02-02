@@ -1,7 +1,7 @@
 # Ralph TODO: Binary AST Parity
 
 **Last Updated:** 2026-02-02
-**Overall Status:** 239/1049 bsc-ast tests passing (22.8%)
+**Overall Status:** 254/1049 bsc-ast tests passing (24.2%)
 **sexp-locs Status:** 1049/1049 tests passing (100%) ✅
 
 ---
@@ -245,7 +245,7 @@ type annotation arity and function arity should be separate objects.
 ### Phase 5: Validation
 
 - [x] **Task 5.1**: Run full test suite, verify no regressions
-  - Verified: 239/1049 bsc-ast tests passing (22.8%)
+  - Verified: 254/1049 bsc-ast tests passing (24.2%)
   - No regressions detected from baseline
   - **Analysis of remaining failures (2026-02-02)**:
     - JSX with children: mapper_to0 issue, cannot fix per instructions
