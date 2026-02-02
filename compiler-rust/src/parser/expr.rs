@@ -1086,7 +1086,9 @@ fn parse_parameter(p: &mut Parser<'_>) -> Option<super::core::FundefParameter> {
         let tilde_pos = p.start_pos.clone();
         p.next();
         let (lbl_name, lbl_loc) = parse_lident(p);
-        // Push the string (no deduplication) - user identifiers should not be shared
+        // Push a unique string (no global deduplication) - user identifiers should not be shared
+        // with other uses of the same name elsewhere. But we DO reuse this same StrIdx for both
+        // the label and the pattern in punned cases (like `~x` which means label=x, pattern=x).
         let lbl_str_idx = p.arena_mut().push_string(lbl_name.clone());
         // OCaml: label location is just the name, not including ~
         let lbl_located = Located::new(lbl_str_idx, lbl_loc);
@@ -1094,10 +1096,10 @@ fn parse_parameter(p: &mut Parser<'_>) -> Option<super::core::FundefParameter> {
         let name_loc_with_tilde = p.mk_loc_to_prev_end(&tilde_pos);
         let lbl = match &p.token {
             Token::Comma | Token::Equal | Token::Rparen | Token::EqualGreater => {
-                // Just ~name
+                // Just ~name (punned: label and pattern use the same string)
                 let loc = p.mk_loc_to_prev_end(&start_pos);
-                let str_idx = p.arena_mut().push_string(lbl_name.clone());
-                let pat = ast_helper::make_var_pat(str_idx, loc);
+                // Reuse the same StrIdx for sharing in marshal output
+                let pat = ast_helper::make_var_pat(lbl_str_idx, loc);
                 (ArgLabel::Labelled(lbl_located), pat, None)
             }
             Token::Colon => {
@@ -1114,8 +1116,8 @@ fn parse_parameter(p: &mut Parser<'_>) -> Option<super::core::FundefParameter> {
                 } else {
                     p.mk_loc(&start_pos, &p.loc_end(name_loc_with_tilde))
                 };
-                let str_idx = p.arena_mut().push_string(lbl_name.clone());
-                let var_pat = ast_helper::make_var_pat(str_idx, var_loc);
+                // Reuse the same StrIdx for sharing in marshal output
+                let var_pat = ast_helper::make_var_pat(lbl_str_idx, var_loc);
                 let pat = Pattern {
                     ppat_desc: PatternDesc::Ppat_constraint(Box::new(var_pat), typ),
                     ppat_loc: loc,
@@ -1131,8 +1133,8 @@ fn parse_parameter(p: &mut Parser<'_>) -> Option<super::core::FundefParameter> {
             }
             _ => {
                 let loc = p.mk_loc_to_prev_end(&start_pos);
-                let str_idx = p.arena_mut().push_string(lbl_name.clone());
-                let pat = ast_helper::make_var_pat(str_idx, loc);
+                // Reuse the same StrIdx for sharing in marshal output
+                let pat = ast_helper::make_var_pat(lbl_str_idx, loc);
                 (ArgLabel::Labelled(lbl_located), pat, None)
             }
         };
@@ -2297,7 +2299,9 @@ fn parse_argument(p: &mut Parser<'_>) -> (ArgLabel, Expression) {
     if p.token == Token::Tilde {
         p.next();
         let (name, name_loc) = parse_lident(p);
-        // Push the string (no deduplication) - user identifiers should not be shared
+        // Push a unique string (no global deduplication) - user identifiers should not be shared
+        // with other uses of the same name elsewhere. The same StrIdx is reused for both label and
+        // expression in punned cases (like `f(~x)` which means `f(~x=x)`).
         let name_str_idx = p.arena_mut().push_string(name.clone());
         let name_located = Located::new(name_str_idx, name_loc.clone());
 

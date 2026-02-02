@@ -112,6 +112,12 @@ pub struct Parser<'src> {
     /// This is essential for matching OCaml's sharing behavior where the same position
     /// object is reused across the expression and its containing structure item.
     start_pos_cache: HashMap<Position, PosIdx>,
+    /// Cache for end position sharing: maps Position -> PosIdx.
+    /// When an end position is pushed (e.g., in mk_loc_current), and later the same
+    /// position is used as prev_end_pos (after next()), they should share.
+    /// This matches OCaml's behavior where the token's end position becomes the
+    /// next prev_end_pos and locations created before/after next() share that position.
+    end_pos_cache: HashMap<Position, PosIdx>,
 }
 
 impl<'src> Parser<'src> {
@@ -143,6 +149,7 @@ impl<'src> Parser<'src> {
             in_external: false,
             cached_prev_end_pos: None,
             start_pos_cache: HashMap::new(),
+            end_pos_cache: HashMap::new(),
         };
         // Scan the first token
         parser.next();
@@ -180,10 +187,12 @@ impl<'src> Parser<'src> {
     }
 
     /// Create a location for the current token (start_pos to end_pos).
-    /// Uses cached start_pos for sharing.
+    /// Uses cached start_pos and end_pos for sharing.
+    /// The end_pos cache enables sharing when the same position is used as
+    /// prev_end_pos after the token is consumed via next().
     pub fn mk_loc_current(&mut self) -> LocIdx {
         let start_idx = self.push_start_pos(); // Uses cache
-        let end_idx = self.arena.push_position(self.end_pos);
+        let end_idx = self.get_or_push_end_pos_cached(self.end_pos);
         self.arena.mk_loc(start_idx, end_idx)
     }
 
@@ -243,8 +252,7 @@ impl<'src> Parser<'src> {
 
     /// Get or push an end position, using cache for sharing.
     /// If the position matches prev_end_pos, uses that cache.
-    /// Otherwise pushes without caching (end positions other than prev_end_pos
-    /// are typically not shared in OCaml).
+    /// Otherwise checks the end_pos_cache.
     pub fn get_or_push_end_pos(&mut self, pos: Position) -> PosIdx {
         if pos == self.prev_end_pos {
             return self.get_or_push_prev_end_pos();
@@ -255,8 +263,34 @@ impl<'src> Parser<'src> {
                 return cached_idx;
             }
         }
+        // Check the end_pos_cache (for positions created before next() that become prev_end_pos after)
+        if let Some(&idx) = self.end_pos_cache.get(&pos) {
+            return idx;
+        }
         // Not cached - push without caching
         self.arena.push_position(pos)
+    }
+
+    /// Get or push an end position, caching it for later reuse.
+    /// Used by mk_loc_current() to cache the current end_pos so that
+    /// after next() when it becomes prev_end_pos, the same PosIdx is reused.
+    fn get_or_push_end_pos_cached(&mut self, pos: Position) -> PosIdx {
+        // First check if already cached
+        if let Some(&idx) = self.end_pos_cache.get(&pos) {
+            return idx;
+        }
+        // Check prev_end_pos cache too
+        if let Some((cached_pos, cached_idx)) = self.cached_prev_end_pos {
+            if cached_pos == pos {
+                // Also add to end_pos_cache for consistency
+                self.end_pos_cache.insert(pos, cached_idx);
+                return cached_idx;
+            }
+        }
+        // Push and cache
+        let idx = self.arena.push_position(pos);
+        self.end_pos_cache.insert(pos, idx);
+        idx
     }
 
     /// Push the current end position into the arena.
@@ -286,16 +320,26 @@ impl<'src> Parser<'src> {
     /// Get or push the prev_end_pos, using cache for sharing.
     /// When multiple locations end at the same prev_end_pos (before consuming more tokens),
     /// they will share the same PosIdx in the marshal output.
+    /// Also checks end_pos_cache to share with positions created before next().
     pub fn get_or_push_prev_end_pos(&mut self) -> PosIdx {
         let pos = self.prev_end_pos;
+        // Check prev_end_pos specific cache
         if let Some((cached_pos, cached_idx)) = self.cached_prev_end_pos {
             if cached_pos == pos {
                 return cached_idx;
             }
         }
+        // Check end_pos_cache - this position may have been cached before next() was called
+        if let Some(&idx) = self.end_pos_cache.get(&pos) {
+            // Also update the prev_end_pos cache for consistency
+            self.cached_prev_end_pos = Some((pos, idx));
+            return idx;
+        }
         // Not in cache or different value - push and cache
         let idx = self.arena.push_position(pos);
         self.cached_prev_end_pos = Some((pos, idx));
+        // Also add to end_pos_cache
+        self.end_pos_cache.insert(pos, idx);
         idx
     }
 

@@ -131,6 +131,13 @@ impl Marshal for Arity {
         // arity = int option
         // None = int 0
         // Some n = block(tag=0, size=1) containing n
+        //
+        // Note: OCaml shares arity values via pointer equality when they happen to be
+        // the same object (e.g., two functions with the same arity may share).
+        // We do NOT use content-based sharing here because:
+        // 1. OCaml's sharing is based on pointer identity, not value equality
+        // 2. Content-based sharing causes regressions (shares things OCaml doesn't)
+        // 3. The type annotation arity and function body arity should be separate objects
         match self {
             Arity::Unknown => w.write_int(0),
             Arity::Full(n) => {
