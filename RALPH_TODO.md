@@ -7,7 +7,7 @@
 **Note:** Many remaining failures are due to arity sharing (see Phase 6 below).
 
 **Phase 6 Status:** Investigation complete; ArityIdx infrastructure added to parse_arena.rs and marshal.rs.
-Full implementation (updating AST types) deferred due to extensive codebase impact (~30+ files).
+Full implementation (updating AST types) touches ~30+ files but should be completed to unblock Phase 5.
 
 ---
 
@@ -164,7 +164,7 @@ We need to implement the remaining transformations.
     functions to transform strings inside attribute payloads (e.g., `@ocaml.doc("foo")`).
     This ensures docstrings get the same `"*j"` delimiter transformation as regular strings.
 
-- [ ] **Task 2.3**: Implement `@deriving` transformations (DEFERRED - Complex)
+- [ ] **Task 2.3**: Implement `@deriving` transformations (Complex)
   - OCaml: `Ast_derive_projector.init()`, `Ast_derive_js_mapper.init()`
   - `@deriving(accessors)` - generates accessor functions for variants
   - `@deriving(jsConverter)` - generates JS conversion functions
@@ -204,7 +204,7 @@ We need to implement the remaining transformations.
   - Implementation in `transform_await`, `wrap_with_unsafe_async`, and `add_promise_to_fun_body` in ppx.rs
   - Note: Async files still have 4-byte differences due to position sharing (Phase 4 issue)
 
-- [ ] **Task 2.8**: Implement module-level await transformation (DEFERRED - Complex multi-item expansion)
+- [ ] **Task 2.8**: Implement module-level await transformation (Complex - multi-item expansion)
   - OCaml: `bs_builtin_ppx.ml` lines 661-702, `ast_await.ml` `create_await_module_expression`
   - Transform `module M = @res.await Belt.List` into:
     1. Module type declaration: `module __Belt_List__ = module type of Belt.List`
@@ -355,21 +355,17 @@ type annotation arity and function arity should be separate objects.
     - Rust's mapper_to0 creates new Location structs (loses identity, no sharing)
     - Proper fix would require `Rc<Location>` or `LocIdx` in parsetree0 (significant refactor)
     - **Status**: Content-based sharing reverted; architectural limitation documented
-- [ ] **Task 5.2**: Target 500/1049 bsc-ast parity (47%) - **BLOCKED**
-  - **Investigation (2026-02-02)**: Identified that reaching 500 requires fixing arity sharing
-  - **Blocking issue**: Arity sharing - two functions with same arity (`int => int`) differ by 1 object
+- [ ] **Task 5.2**: Target 500/1049 bsc-ast parity (47%) (depends on Phase 6)
+  - Requires fixing arity sharing (Phase 6 implementation)
+  - Arity sharing - two functions with same arity (`int => int`) differ by 1 object
     - Example: `let f: int => int = x => x; let g: int => string = y => "test"` fails
     - OCaml shares `Some(1)` arity value via pointer equality
     - Rust creates separate `Some(1)` blocks for each function
     - This affects ~90% of .res files (any file with 2+ typed functions)
-  - **Cannot fix without**: Content-based sharing (violates constraint) or `Rc<Arity>` architecture change
-  - **Current**: 260/1049 (24.8%) - most .resi files pass, most .res files fail due to arity
-  - **Verified (2026-02-02)**: Single typed function passes (`let f: int => int = x => x`), but two functions
-    with same arity fail. This is the documented arity sharing limitation.
-  - **Status**: BLOCKED - requires architectural changes to fix
-- [ ] **Task 5.3**: Target 750/1049 bsc-ast parity (71%) - **BLOCKED** (depends on 5.2)
-- [ ] **Task 5.4**: Target 1000/1049 bsc-ast parity (95%) - **BLOCKED** (depends on 5.2)
-- [ ] **Task 5.5**: Achieve 1049/1049 bsc-ast parity (100%) - **BLOCKED** (depends on 5.2)
+  - Current: 327/1049 (31.2%) - most .resi files pass, most .res files fail due to arity
+- [ ] **Task 5.3**: Target 750/1049 bsc-ast parity (71%) (depends on 5.2)
+- [ ] **Task 5.4**: Target 1000/1049 bsc-ast parity (95%) (depends on 5.3)
+- [ ] **Task 5.5**: Achieve 1049/1049 bsc-ast parity (100%) (depends on 5.4)
 
 ### Phase 6: Arity Arena Implementation (UNBLOCKS Phase 5)
 
@@ -401,15 +397,15 @@ naturally when the same index is used (just like OCaml shares when same referenc
   - Added `get_arity()` and `arity_count()` methods
   - Added `arity_idx_table` and `write_arity_idx()` to MarshalWriter
 
-- [ ] **Task 6.3**: Update AST types to use ArityIdx - **DEFERRED**
+- [ ] **Task 6.3**: Update AST types to use ArityIdx
   - Change `Ptyp_arrow { ..., arity: Arity }` to `arity: ArityIdx`
   - Change `Pexp_fun { ..., arity: Arity }` to `arity: ArityIdx`
-  - **Blocked**: This change touches 30+ files across parser, printer, viewer, typecore, etc.
-  - **Reason**: The `Arity` enum is deeply embedded in the codebase
-  - **Impact**: Would require updating all code that reads/writes arity values
-  - **Recommendation**: Consider as a separate refactor task
+  - This change touches 30+ files across parser, printer, viewer, typecore, etc.
+  - The `Arity` enum is deeply embedded in the codebase
+  - Update all code that reads/writes arity values
+  - Break into smaller commits if needed, but complete the implementation
 
-- [ ] **Task 6.4**: Update parser to use arena - **DEFERRED** (depends on 6.3)
+- [ ] **Task 6.4**: Update parser to use arena (depends on 6.3)
   - Replace `Arity::Full(n)` with `arena.push_arity(Some(n))`
   - Replace `Arity::Unknown` with `arena.push_arity(None)`
   - Update: typ.rs, expr.rs, jsx_ppx.rs, ppx.rs
@@ -422,7 +418,7 @@ naturally when the same index is used (just like OCaml shares when same referenc
     - Otherwise writes arity value and records in table
   - Infrastructure is ready; waiting for AST type change (Task 6.3)
 
-- [ ] **Task 6.6**: Match OCaml's arity creation pattern - **BLOCKED** (depends on 6.3, 6.4)
+- [ ] **Task 6.6**: Match OCaml's arity creation pattern (depends on 6.3, 6.4)
   - Based on Task 6.1 findings, ensure Rust creates/reuses ArityIdx in same pattern
   - If OCaml shares across functions: reuse same ArityIdx
   - If OCaml keeps separate within function: create separate ArityIdx

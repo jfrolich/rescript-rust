@@ -69,6 +69,8 @@ Read `RALPH_TODO.md` and complete the next unchecked task. After completing a ta
 
 7. **Never modify expected files** - The OCaml-generated `.ast` files are the reference. Fix the Rust implementation to match them.
 
+8. **Do NOT defer large tasks** - Task size is not a reason to defer or block. If a task requires touching 30+ files, that's fine—just do the implementation. Break it into smaller commits if needed, but complete the work. The goal is completion, not avoiding complexity.
+
 ## Key Files
 
 | File | Purpose |
