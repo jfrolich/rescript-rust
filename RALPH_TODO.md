@@ -301,23 +301,21 @@ We need to implement the remaining transformations.
   - Implementation in `transform_await`, `wrap_with_unsafe_async`, and `add_promise_to_fun_body` in ppx.rs
   - Note: Async files still have 4-byte differences due to position sharing (Phase 4 issue)
 
-- [ ] **Task 2.8**: Implement module-level await transformation (Complex - multi-item expansion)
+- [x] **Task 2.8**: Implement module-level await transformation (2026-02-02)
   - OCaml: `bs_builtin_ppx.ml` lines 661-702, `ast_await.ml` `create_await_module_expression`
   - Transform `module M = @res.await Belt.List` into:
-    1. Module type declaration: `module __Belt_List__ = module type of Belt.List`
-    2. Module binding using `Primitive_module.import(module(M: __Belt_List__))`
-  - This is a complex transformation involving:
+    1. Module type declaration: `module type __Belt_List__ = module type of Belt.List`
+    2. Module binding: `module M = unpack(Primitive_promise.unsafe_await(
+       Primitive_module.import(module(Belt.List: __Belt_List__))))`
+  - **Done**: Implemented in `transform_module_await()` in ppx.rs
+  - The await.res test still fails due to position/arity sharing issues (same as ~700 other files)
+  - Implementation details:
     - Detecting `@res.await` attribute on module expressions
-    - Creating a synthetic module type name from the module path
+    - Creating a synthetic module type name from the module path (e.g., `__Belt_List__`)
     - Generating module type declaration
     - Transforming to `Pmod_unpack(Primitive_promise.unsafe_await(Primitive_module.import(...)))`
-  - **Investigation (2026-02-02)**: Attempted implementation but requires significant refactoring:
-    - Rust's `rewrite_structure_item` returns single item, OCaml can emit multiple items
-    - Would need to refactor to `flat_map` approach with `Vec<StructureItem>` return type
-    - Complex interaction with `Pexp_letmodule` (expression-level) vs `Pstr_module` (structure-level)
-    - Only ~4 test files use this pattern (`letmodule.res`, `await.res`)
-  - **Impact**: Low (~4 files), high complexity. Deferring to focus on higher-impact issues.
-  - Related files: `tests/syntax_tests/data/printer/expr/letmodule.res`
+  - Note: `rewrite_structure_item` already returned `Vec<StructureItem>`, so multi-item expansion worked
+  - Related files: `tests/syntax_tests/data/printer/modExpr/await.res`
 
 ### Phase 3: JSX Binary Differences (Deferred - needs investigation)
 
