@@ -388,7 +388,7 @@ module E = struct
              jsx_fragment_children = children;
              jsx_fragment_closing = c;
            }) ->
-      jsx_fragment o (map_jsx_children sub children) c
+      jsx_fragment ~loc ~attrs o (map_jsx_children sub children) c
     | Pexp_jsx_element
         (Jsx_unary_element
            {jsx_unary_element_tag_name = name; jsx_unary_element_props = props})
