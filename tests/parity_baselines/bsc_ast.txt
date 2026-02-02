@@ -347,6 +347,7 @@ syntax_tests/data/idempotency/wildcards-world-ui/Accounting.res
 syntax_tests/data/idempotency/wildcards-world-ui/Animal_test.res
 syntax_tests/data/idempotency/wildcards-world-ui/Animal.res
 syntax_tests/data/idempotency/wildcards-world-ui/CONSTANTS.res
+syntax_tests/data/idempotency/wildcards-world-ui/Erc712.res
 syntax_tests/data/idempotency/wildcards-world-ui/Globals.res
 syntax_tests/data/idempotency/wildcards-world-ui/IncreaseIterationPage.res
 syntax_tests/data/idempotency/wildcards-world-ui/InputHelp.res
@@ -477,6 +478,7 @@ syntax_tests/data/printer/structure/typeExtension.res
 syntax_tests/data/printer/typeDef/abstract.res
 syntax_tests/data/printer/typeDef/attributes.res
 syntax_tests/data/printer/typeDef/constraint.res
+syntax_tests/data/printer/typeDef/missingPipeBeforeConstructorAttribute.res
 syntax_tests/data/printer/typeDef/open.res
 syntax_tests/data/printer/typeDef/private.res
 syntax_tests/data/printer/typeDef/record.res

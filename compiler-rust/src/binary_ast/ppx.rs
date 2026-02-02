@@ -18,11 +18,12 @@ use crate::intern::StrIdx;
 use crate::location::Location;
 use crate::parse_arena::{LidentIdx, Located, LocIdx, ParseArena};
 use crate::parser::ast::{
-    self as current, ArgLabel, Arity, Attribute, Case, Constant, ConstructorArguments, CoreType,
-    CoreTypeDesc, Expression, ExpressionDesc, JsxClosingTag, JsxContainerElement, JsxElement,
-    JsxFragment, JsxProp, JsxUnaryElement, Label, ModuleExpr, ModuleExprDesc, Pattern,
-    PatternDesc, Payload, RecFlag, SignatureItem, SignatureItemDesc, StructureItem,
-    StructureItemDesc, TypeArg, TypeDeclaration, TypeKind, ValueBinding, ValueDescription,
+    self as current, ArgLabel, Arity, Attribute, Case, Constant, ConstructorArguments,
+    ConstructorDeclaration, CoreType, CoreTypeDesc, Expression, ExpressionDesc, JsxClosingTag,
+    JsxContainerElement, JsxElement, JsxFragment, JsxProp, JsxUnaryElement, Label, LabelDeclaration,
+    ModuleExpr, ModuleExprDesc, Pattern, PatternDesc, Payload, RecFlag, SignatureItem,
+    SignatureItemDesc, StructureItem, StructureItemDesc, TypeArg, TypeDeclaration, TypeKind,
+    ValueBinding, ValueDescription,
 };
 use crate::parser::longident::Longident;
 
@@ -1818,6 +1819,88 @@ fn rewrite_payload(payload: &Payload, arena: &mut ParseArena) -> Payload {
     }
 }
 
+/// Rewrite a type declaration, transforming strings in all nested attributes
+fn rewrite_type_declaration(tdcl: &TypeDeclaration, arena: &mut ParseArena) -> TypeDeclaration {
+    TypeDeclaration {
+        ptype_name: tdcl.ptype_name.clone(),
+        ptype_params: tdcl.ptype_params.clone(),
+        ptype_cstrs: tdcl.ptype_cstrs.clone(),
+        ptype_kind: rewrite_type_kind(&tdcl.ptype_kind, arena),
+        ptype_private: tdcl.ptype_private,
+        ptype_manifest: tdcl.ptype_manifest.clone(),
+        ptype_attributes: rewrite_attributes(&tdcl.ptype_attributes, arena),
+        ptype_loc: tdcl.ptype_loc,
+    }
+}
+
+/// Rewrite a type kind, transforming strings in constructor/label attributes
+fn rewrite_type_kind(kind: &TypeKind, arena: &mut ParseArena) -> TypeKind {
+    match kind {
+        TypeKind::Ptype_abstract => TypeKind::Ptype_abstract,
+        TypeKind::Ptype_open => TypeKind::Ptype_open,
+        TypeKind::Ptype_variant(constructors) => {
+            TypeKind::Ptype_variant(
+                constructors
+                    .iter()
+                    .map(|ctor| rewrite_constructor_declaration(ctor, arena))
+                    .collect(),
+            )
+        }
+        TypeKind::Ptype_record(labels) => {
+            TypeKind::Ptype_record(
+                labels
+                    .iter()
+                    .map(|label| rewrite_label_declaration(label, arena))
+                    .collect(),
+            )
+        }
+    }
+}
+
+/// Rewrite a constructor declaration, transforming strings in attributes
+fn rewrite_constructor_declaration(
+    ctor: &ConstructorDeclaration,
+    arena: &mut ParseArena,
+) -> ConstructorDeclaration {
+    ConstructorDeclaration {
+        pcd_name: ctor.pcd_name.clone(),
+        pcd_args: rewrite_constructor_arguments(&ctor.pcd_args, arena),
+        pcd_res: ctor.pcd_res.clone(),
+        pcd_loc: ctor.pcd_loc,
+        pcd_attributes: rewrite_attributes(&ctor.pcd_attributes, arena),
+    }
+}
+
+/// Rewrite constructor arguments, transforming strings in nested record labels
+fn rewrite_constructor_arguments(
+    args: &ConstructorArguments,
+    arena: &mut ParseArena,
+) -> ConstructorArguments {
+    match args {
+        ConstructorArguments::Pcstr_tuple(types) => ConstructorArguments::Pcstr_tuple(types.clone()),
+        ConstructorArguments::Pcstr_record(labels) => {
+            ConstructorArguments::Pcstr_record(
+                labels
+                    .iter()
+                    .map(|label| rewrite_label_declaration(label, arena))
+                    .collect(),
+            )
+        }
+    }
+}
+
+/// Rewrite a label declaration (record field), transforming strings in attributes
+fn rewrite_label_declaration(label: &LabelDeclaration, arena: &mut ParseArena) -> LabelDeclaration {
+    LabelDeclaration {
+        pld_name: label.pld_name.clone(),
+        pld_mutable: label.pld_mutable,
+        pld_type: label.pld_type.clone(),
+        pld_loc: label.pld_loc,
+        pld_attributes: rewrite_attributes(&label.pld_attributes, arena),
+        pld_optional: label.pld_optional,
+    }
+}
+
 /// Rewrite a pattern, transforming string and integer constants
 fn rewrite_pattern(pat: &Pattern, arena: &mut ParseArena) -> Pattern {
     match &pat.ppat_desc {
@@ -2749,26 +2832,31 @@ fn handle_deriving_type(
     let (actions, new_attrs) = parse_deriving_actions(&last_tdcl.ptype_attributes, arena);
 
     if actions.is_empty() {
-        // No @deriving, return as-is
-        return vec![item.clone()];
+        // No @deriving, but still rewrite type declarations for string transformations in attributes
+        let rewritten_tdcls: Vec<TypeDeclaration> = tdcls
+            .iter()
+            .map(|tdcl| rewrite_type_declaration(tdcl, arena))
+            .collect();
+        return vec![StructureItem {
+            pstr_desc: StructureItemDesc::Pstr_type(rec_flag, rewritten_tdcls),
+            pstr_loc: item.pstr_loc,
+        }];
     }
 
     let loc = item.pstr_loc;
 
     // Step 1: Create type declaration with @deriving stripped from last tdcl
+    // Also rewrite all type declarations for string transformations in attributes
     let new_tdcls: Vec<TypeDeclaration> = tdcls
         .iter()
         .enumerate()
         .map(|(i, tdcl)| {
+            let mut rewritten = rewrite_type_declaration(tdcl, arena);
             if i == tdcls.len() - 1 {
-                // Last type declaration: replace ptype_attributes with new_attrs
-                TypeDeclaration {
-                    ptype_attributes: new_attrs.clone(),
-                    ..tdcl.clone()
-                }
-            } else {
-                tdcl.clone()
+                // Last type declaration: replace ptype_attributes with new_attrs (without @deriving)
+                rewritten.ptype_attributes = rewrite_attributes(&new_attrs, arena);
             }
+            rewritten
         })
         .collect();
 
@@ -3646,6 +3734,17 @@ fn rewrite_signature_item(item: &SignatureItem, arena: &mut ParseArena) -> Signa
             }),
             psig_loc: item.psig_loc,
         },
+        // Handle type declarations - rewrite attributes (including constructor/label attributes)
+        SignatureItemDesc::Psig_type(rec_flag, tdcls) => {
+            let rewritten_tdcls: Vec<TypeDeclaration> = tdcls
+                .iter()
+                .map(|tdcl| rewrite_type_declaration(tdcl, arena))
+                .collect();
+            SignatureItem {
+                psig_desc: SignatureItemDesc::Psig_type(*rec_flag, rewritten_tdcls),
+                psig_loc: item.psig_loc,
+            }
+        }
         // TODO: Handle @inline values
         _ => item.clone(),
     }

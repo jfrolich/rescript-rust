@@ -62,11 +62,19 @@ Do NOT spend time on small issues (@deriving edge cases, etc.) until the locatio
 ---
 
 **Last Updated:** 2026-02-02
-**Overall Status:** 494/1049 bsc-ast tests passing (47.1%)
+**Overall Status:** 496/1049 bsc-ast tests passing (47.3%)
 **sexp-locs Status:** 1049/1049 tests passing (100%) ✅
 
-**Note:** Most remaining ~555 failures are due to position/arity sharing differences in marshal output.
+**Note:** Most remaining ~553 failures are due to position/arity sharing differences in marshal output.
 The AST structure is 100% correct (sexp-locs matches perfectly).
+
+**Type declaration attribute fix (2026-02-02):**
+- Fixed string transformation in type declaration attributes (constructor/label attributes)
+- `type t = @as("one") One` now correctly transforms "js" delimiter to "*j" in constructor attributes
+- Added `rewrite_type_declaration()`, `rewrite_type_kind()`, `rewrite_constructor_declaration()`,
+  `rewrite_constructor_arguments()`, and `rewrite_label_declaration()` to ppx.rs
+- Also added `Psig_type` handling in `rewrite_signature_item()` for interface files
+- **Improvement: 494 → 496 passing (+2 files, 47.1% → 47.3%)**
 
 **⚠️ Baseline correction (2026-02-02):**
 - The previous baseline incorrectly claimed 949/1049 passing tests - these were never verified
@@ -579,8 +587,10 @@ type annotation arity and function arity should be separate objects.
     - OCaml shares locations via pointer identity during parsing and marshalling
     - Rust needs to reuse the same PosIdx/LocIdx during parsing to achieve sharing
     - **Status**: Content-based sharing reverted; fix requires better position reuse during parsing
-- [ ] **Task 5.2**: Target 500/1049 bsc-ast parity (47%) - **IN PROGRESS** (currently 494, 47.1%)
+- [ ] **Task 5.2**: Target 500/1049 bsc-ast parity (47%) - **IN PROGRESS** (currently 496, 47.3%)
   - **Status (2026-02-02)**: Baseline corrected to 494/1049 (previous claim of 949 was invalid)
+  - **Type declaration attribute fix (2026-02-02)**: +2 files (494 → 496)
+    - Fixed string transformation in constructor/label attributes (@as("...") etc.)
   - **Note**: All previous "+X files" claims were never verified and were incorrect
   - **Blockers analyzed (2026-02-02)**:
     1. **Arity sharing (Task 6.6)**: ✅ Bug fix improved parity 287→309 (+22 files)
