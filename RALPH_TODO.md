@@ -182,9 +182,12 @@ We need to implement the remaining transformations.
 - [x] **Task 2.5**: Implement `Pexp_extension` handling (partial)
   - OCaml: `Ast_exp_extension.handle_extension`
   - **Done**: Implemented `%debugger` in handle_debugger() in ppx.rs.
+  - **Done (2026-02-02)**: Implemented `%re` in handle_re() - wraps %raw with Stdlib_RegExp.t type constraint.
+  - **Done (2026-02-02)**: Implemented `%external` (deprecated) in handle_external_ext() - creates
+    Js.undefinedToOption(if Js.typeof(raw_exp) == "undefined" then Js.Undefined.empty else raw_exp).
   - Also fixed letmodule dependency tracking so local modules (like `J`) aren't added as dependencies.
   - Note: `%debugger` still has minor position sharing differences (Phase 4 issue).
-  - TODO: `%external`, `%obj`, `%re`, `%todo` still need implementation.
+  - TODO: `%obj`, `%todo` still need implementation (low impact - 0 test files use these).
 
 - [x] **Task 2.6**: Implement `@inline` let binding transformation
   - **Done**: Transform `@inline let x = "foo"` into `Pstr_primitive` with FFI inline encoding
