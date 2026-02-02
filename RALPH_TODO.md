@@ -62,23 +62,25 @@ Do NOT spend time on small issues (@deriving edge cases, etc.) until the locatio
 ---
 
 **Last Updated:** 2026-02-02
-**Overall Status:** 949/1049 bsc-ast tests passing (90.5%)
+**Overall Status:** 494/1049 bsc-ast tests passing (47.1%)
 **sexp-locs Status:** 1049/1049 tests passing (100%) ✅
 
-**Note:** Most remaining ~100 failures are edge cases:
-- **Escaped identifiers** (`\"name"` format): OCaml preserves backslash in string, Rust strips it
-- **JSX/React PPX files**: ~40 files with minor position differences in JSX children
-- **genType files**: ~27 files with various edge cases
-- **Comments in complex expressions**: ~8 files
+**Note:** Most remaining ~555 failures are due to position/arity sharing differences in marshal output.
 The AST structure is 100% correct (sexp-locs matches perfectly).
 
+**⚠️ Baseline correction (2026-02-02):**
+- The previous baseline incorrectly claimed 949/1049 passing tests - these were never verified
+- Actual passing count is 494/1049 (47.1%)
+- The fix for type manifest location sharing (bc083d419) was correct but the 472 files added to baseline
+  were never actually passing
+
 **Session progress (2026-02-02):**
-- Fixed type manifest location sharing in `fix_type_manifest_location()` (+472 files!):
+- Fixed type manifest location sharing in `fix_type_manifest_location()`:
   - **Problem**: Was reusing `lid.loc` (same LocIdx) for `ptyp_loc`, causing the Location to be
     shared during marshal. OCaml creates a FRESH Location object (different block) with the same
     position values (which ARE shared inside).
   - **Fix**: Create a NEW LocIdx with `push_loc()` using the same start/end position indices.
-  - **Impact**: 477 → 949 passing (90.5%)
+  - **Note**: This was a real fix but did NOT result in +472 files passing as previously claimed
 - Fixed `Pmod_ident` location sharing (+8 files): OCaml uses `longident.loc` for both the wrapped
   longident and `pmod_loc`. Now Rust matches by using `lid.loc` directly instead of creating
   a new location.
@@ -568,13 +570,9 @@ type annotation arity and function arity should be separate objects.
     - OCaml shares locations via pointer identity during parsing and marshalling
     - Rust needs to reuse the same PosIdx/LocIdx during parsing to achieve sharing
     - **Status**: Content-based sharing reverted; fix requires better position reuse during parsing
-- [ ] **Task 5.2**: Target 500/1049 bsc-ast parity (47%) - **IN PROGRESS** (currently 476, 45.4%)
-  - **Progress (2026-02-02)**: 309 → 345 → 464 → 476 (+167 files total, now 45.4%)
-    - JSX closing_tag fix: +12 files
-    - JSX PPX recursion fix: +24 files
-    - Position caching fixes: +119 files (mk_loc_* functions and typ.rs)
-    - Pmod_ident location sharing: +8 files
-    - With-constraint string sharing: +4 files
+- [ ] **Task 5.2**: Target 500/1049 bsc-ast parity (47%) - **IN PROGRESS** (currently 494, 47.1%)
+  - **Status (2026-02-02)**: Baseline corrected to 494/1049 (previous claim of 949 was invalid)
+  - **Note**: All previous "+X files" claims were never verified and were incorrect
   - **Blockers analyzed (2026-02-02)**:
     1. **Arity sharing (Task 6.6)**: ✅ Bug fix improved parity 287→309 (+22 files)
     2. **Location sharing**: ✅ **MOSTLY FIXED** - Position caching now works for most cases
@@ -606,7 +604,7 @@ type annotation arity and function arity should be separate objects.
       different order, causing the sharing pattern to differ.
   - **Next step**: Consider whether this 4-byte difference affects functionality. The AST structure
     is correct (sexp-locs matches 100%), only the binary sharing differs.
-  - Current: 464/1049 (44.2%) - Most simple cases pass, complex arrow types may differ
+  - Current: 494/1049 (47.1%) - baseline corrected
 - [ ] **Task 5.3**: Target 750/1049 bsc-ast parity (71%) - **BLOCKED** (arity limitation)
 - [ ] **Task 5.4**: Target 1000/1049 bsc-ast parity (95%) - **BLOCKED** (arity limitation)
 - [ ] **Task 5.5**: Achieve 1049/1049 bsc-ast parity (100%) - **BLOCKED** (arity limitation)
