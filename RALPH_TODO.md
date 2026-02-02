@@ -214,11 +214,12 @@ JSX elements and containers match:
 - `let x = <div>text</div>` ✅
 - `let x = <div> <span/> </div>` ✅
 
-JSX fragments differ:
-- `let x = <></>` ❌ (OCaml: 140 bytes, Rust: 134 bytes - Rust smaller by 6 bytes)
-  - OCaml writes `_none_` string fresh, Rust shares it via StrIdx
-  - The `_none_` comes from some generated position inside the fragment
-  - Needs further investigation to find the exact source
+JSX fragments now have same size but differ in sharing distances:
+- `let x = <></>` ⚠️ (OCaml: 134 bytes, Rust: 134 bytes - same size now)
+  - **Fixed**: OCaml's `bs_ast_mapper.ml` was not passing `~loc ~attrs` to `jsx_fragment`
+  - This caused `pexp_loc = Location.none` instead of preserving the original location
+  - Fix: Added `~loc ~attrs` to `jsx_fragment` call in E.map (commit 3da3cd334)
+  - Remaining diff: 2-byte sharing distance differences (object indices differ by 2)
 
 ### Blocking Issues
 
