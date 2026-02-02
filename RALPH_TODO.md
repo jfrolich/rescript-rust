@@ -183,7 +183,8 @@ CODE_SHARED8 (single byte) for nearby positions, while Rust sometimes uses CODE_
 (2 bytes). This happens when:
 - ~~`Foo.bar(x)` style calls - 4 byte difference per call~~ ✅ Fixed
 - ~~Module-qualified function applications~~ ✅ Fixed
-- Underscore placeholder patterns (still differs for complex cases)
+- **Underscore placeholder patterns**: `pt0` types use full `Location`/`Position` instead of indices,
+  losing sharing information when converting from `LocIdx` in `mapper_to0::loc()`
 - **Attribute payload expressions**: Positions in attribute payloads (e.g., `@ocaml.doc("foo")`)
   don't share correctly with the parent structure item positions
 
@@ -213,6 +214,15 @@ type annotation arity and function arity should be separate objects.
   - ✅ Fixed: Module constraint - reuse rhs_module_expr.pmod_loc.loc_start
 
 - [x] **Task 4.4**: Investigate marshal sharing order (ANALYZED - structural limitation)
+
+- [x] **Task 4.5**: Investigate underscore placeholder position sharing (ANALYZED - architectural limitation)
+  - **Root cause**: `mapper_to0::loc()` calls `arena.to_location(idx)` which converts `LocIdx` to full `Location`
+  - This loses the `PosIdx` identity - each `Position` in the `pt0` type is a fresh struct copy
+  - When marshalling `pt0::Location`, each `Position` writes a new block instead of sharing
+  - **Test case**: `5->doStuff(3, _, 7)` - Rust creates 1 extra Position block (4 bytes)
+  - **Impact**: ~199 test files use underscore placeholders, though not all are affected
+  - **Potential fix**: Change `pt0` types to use `LocIdx`/`PosIdx` instead of full structs (significant refactor)
+  - **Status**: Documented as architectural limitation, not pursuing fix due to scope
   - OCaml shares positions at shorter distances
   - Rust may allocate extra position indices
   - **Key finding**: OCaml uses pointer equality for sharing, not content equality
