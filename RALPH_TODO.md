@@ -759,6 +759,47 @@ type annotation arity and function arity should be separate objects.
   The analysis is complete and the approach is clear, but the implementation work is substantial.
   Current parity of 496/1049 (47.3%) is a stable baseline until this refactoring is done.
 
+  **Additional investigation (2026-02-02):**
+  Analyzed the `external foo: int => int = "foo"` case in detail:
+
+  1. **What works:**
+     - `type t = int => int` - IDENTICAL ✅
+     - `let foo: int => int` - IDENTICAL ✅
+     - `external foo: int = "foo"` (no arrow) - IDENTICAL ✅
+
+  2. **What fails:**
+     - `external foo: int => int = "foo"` - Rust 212, OCaml 208 (4 bytes difference)
+
+  3. **Root cause traced:**
+     - OCaml: `parse_typ_expr` captures `start_pos_T` at column 14
+     - OCaml: `parse_atomic_typ_expr` captures `start_pos_A` at column 14 (DIFFERENT object!)
+     - OCaml: First `int`'s location uses `start_pos_A`
+     - OCaml: Arrow type's location uses `start_pos_T`
+     - These are DIFFERENT heap objects → NOT shared in Marshal
+
+     - Rust: `parse_typ_expr_inner_with_start` pushes `start_pos_idx` at column 14
+     - Rust: Passes `Some(start_pos_idx)` to `parse_atomic_typ_expr_with_start`
+     - Rust: Both first `int` AND arrow type use the SAME `PosIdx`
+     - This causes INCORRECT sharing
+
+  4. **Attempted fix:**
+     - Changed to NOT pass `outer_start` to `parse_atomic_typ_expr_with_start`
+     - Also changed `parse_type_constr_with_start` to use `push_start_pos_fresh()`
+     - Result: Size went from 212 to 216 bytes (WORSE!)
+     - Problem: Multiple places create fresh positions where only ONE should be fresh
+
+  5. **Correct approach (not yet implemented):**
+     - `parse_typ_expr_inner_with_start` should use `push_start_pos_fresh()` (creates `start_pos_T`)
+     - `parse_atomic_typ_expr_with_start` should ALSO use `push_start_pos_fresh()` (creates `start_pos_A`)
+     - DO NOT pass `outer_start` between these functions
+     - But the atomic type's internal uses should share within themselves
+
+  6. **Implementation complexity:**
+     - Need to carefully trace through ALL type parsing paths
+     - Each function that captures `let start_pos = ...` in OCaml needs a corresponding `push_start_pos_fresh()` in Rust
+     - Functions that receive a passed `start_pos` should NOT create their own
+     - This requires surgical changes across typ.rs, expr.rs, pattern.rs, module.rs
+
 - [ ] **Task 5.4**: Target 1000/1049 bsc-ast parity (95%) - **REQUIRES**: Complete identity-based position sharing
 - [ ] **Task 5.5**: Achieve 1049/1049 bsc-ast parity (100%) - **REQUIRES**: Full OCaml position sharing parity
 
