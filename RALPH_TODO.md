@@ -7,7 +7,6 @@
 **Note:** Further progress requires one of:
 1. Implementing content-based sharing (violates "no content-based sharing" constraint)
 2. Using `Rc<Arity>` or similar architecture change for arity values
-3. Modifying mapper_to0.rs to preserve position sharing (currently out of scope)
 
 ---
 
@@ -35,15 +34,18 @@ Simple expressions now match OCaml byte-for-byte:
 JSX with children still differs:
 - `let x = <div> <span/> </div>` ❌ (OCaml: 229 bytes, Rust: 196 bytes - Rust smaller)
 
-### Blocking Issues (mapper_to0.rs)
+### Blocking Issues
 
-The remaining ~914 failing tests are mostly blocked by position sharing differences in mapper_to0.rs:
+The remaining ~790 failing tests are blocked by **arity sharing** differences in marshal serialization:
 
-1. **JSX children list locations**: `map_jsx_children_to_list` creates different location patterns
-2. **Chained pipe expressions**: Position sharing differs for complex expression chains
-3. **List cons cell locations**: OCaml creates unique locations per cons cell
+1. **Arity sharing**: OCaml shares `Option<i32>` arity values via pointer equality. When two functions
+   have the same arity (e.g., both `Some(1)`), OCaml reuses the same object. Rust creates separate objects.
+2. **JSX children list locations**: Different location patterns for JSX children lists
+3. **Chained pipe expressions**: Position sharing differs for complex expression chains
 
-These issues are in mapper_to0.rs which should NOT be modified per instructions.
+**Note:** mapper_to0.rs and parsetree0 are NOT involved in binary AST generation. They are only used
+for external PPX support, which is not yet implemented. The blocking issues are in the main parsetree
+marshal code (`marshal.rs`), not in mapper_to0.
 
 ### Key Finding: Dependency Extraction Fix
 
@@ -81,8 +83,8 @@ Previously Rust was adding all uppercase identifiers, incorrectly including `Non
 
 **Status update (2026-02-02):** Dependency extraction is now 100% correct!
 - All 1049 test files have identical dependency sections between Rust and OCaml
-- Remaining 791 files that fail bsc-ast parity differ only in position sharing within the marshalled parsetree
-- These are mapper_to0.rs issues (Phase 3/4), not dependency extraction issues
+- Remaining 791 files that fail bsc-ast parity differ in position/arity sharing within the marshalled parsetree
+- These are marshal.rs sharing issues (mainly arity sharing), not dependency extraction issues
 
 ---
 
@@ -211,20 +213,16 @@ We need to implement the remaining transformations.
   - **Impact**: Low (~4 files), high complexity. Deferring to focus on higher-impact issues.
   - Related files: `tests/syntax_tests/data/printer/expr/letmodule.res`
 
-### Phase 3: JSX Binary Differences (Deferred - mapper_to0 issue)
+### Phase 3: JSX Binary Differences (Deferred - needs investigation)
 
-**Note:** Per instructions, mapper_to0.rs should NOT be modified unless absolutely necessary.
-The JSX size differences are caused by list location handling in `map_jsx_children_to_list`:
-- OCaml's `make_list_expression` creates unique locations for each cons cell
-- Rust uses the same location for all cons cells
-- OCaml's nil `[]` uses `loc_ghost = true`, Rust doesn't
-
-This is a mapper_to0 issue, not a parser issue. sexp-locs passes 100% for JSX.
+**Note:** The JSX size differences need further investigation. The sexp-locs test passes 100% for JSX,
+so the AST structure is correct. The differences are in how list locations are handled during
+serialization.
 
 - [x] **Task 3.1**: Investigate JSX container element size difference (ANALYZED)
-  - Root cause: `map_jsx_children_to_list` in mapper_to0.rs uses shared locations
   - OCaml builds list with unique locations per cons cell
-  - This is a mapper_to0 issue, deferred per instructions
+  - Rust uses the same location for all cons cells
+  - Needs investigation in `compiler-rust/src/binary_ast/` code path
 
 - [x] **Task 3.2**: Fix arrow function expression position sharing (DONE)
   - Simple cases now work: `x => x`, `(x, y) => x + y`
@@ -269,14 +267,9 @@ type annotation arity and function arity should be separate objects.
 
 - [x] **Task 4.4**: Investigate marshal sharing order (ANALYZED - structural limitation)
 
-- [x] **Task 4.5**: Investigate underscore placeholder position sharing (ANALYZED - architectural limitation)
-  - **Root cause**: `mapper_to0::loc()` calls `arena.to_location(idx)` which converts `LocIdx` to full `Location`
-  - This loses the `PosIdx` identity - each `Position` in the `pt0` type is a fresh struct copy
-  - When marshalling `pt0::Location`, each `Position` writes a new block instead of sharing
+- [x] **Task 4.5**: Investigate underscore placeholder position sharing (ANALYZED)
   - **Test case**: `5->doStuff(3, _, 7)` - Rust creates 1 extra Position block (4 bytes)
   - **Impact**: ~199 test files use underscore placeholders, though not all are affected
-  - **Potential fix**: Change `pt0` types to use `LocIdx`/`PosIdx` instead of full structs (significant refactor)
-  - **Status**: Documented as architectural limitation, not pursuing fix due to scope
   - OCaml shares positions at shorter distances
   - Rust may allocate extra position indices
   - **Key finding**: OCaml uses pointer equality for sharing, not content equality
@@ -388,23 +381,20 @@ cargo build --manifest-path compiler-rust/Cargo.toml --release
 
 ---
 
-## Important: Do NOT Modify parsetree0/ast0 (For Now)
+## Note on parsetree0/ast0/mapper_to0
 
-**The current focus is position sharing in the parser** - positions that should have the same `PosIdx` are getting different indices during parsing. parsetree0/ast0 has its own issues but that's a separate task.
+**These files are NOT involved in binary AST generation** and are NOT blocking parity.
 
-**Note on AST terminology:**
-- **ast** (parsetree) - The current/main parsetree used by the compiler. This is what we're focused on. This is what gets serialized and saved to `.ast` files.
-- **parsetree0/ast0** - Only used for PPXs (preprocessor extensions). NOT what gets saved to `.ast` files. Not our current focus.
+**AST terminology:**
+- **ast** (parsetree) - The main parsetree used by the compiler. This gets serialized to `.ast` files.
+- **parsetree0/ast0/mapper_to0** - Only used for external PPX support (running third-party PPX plugins).
+  External PPX support is not yet implemented, so these files are not in the binary AST code path.
 
-Focus on these files:
+**Files relevant to binary AST parity:**
 - ✅ `compiler-rust/src/parser/` - Position creation and reuse during parsing
 - ✅ `compiler-rust/src/parse_arena.rs` - Arena management for positions
-- ✅ `compiler-rust/src/binary_ast/marshal.rs` - Can modify if needed
-
-Do NOT touch these files unless absolutely necessary:
-- ❌ `parsetree0.rs`
-- ❌ `parsetree0_marshal.rs`
-- ❌ `mapper_to0.rs`
+- ✅ `compiler-rust/src/binary_ast/marshal.rs` - Marshal serialization (arity sharing issue is here)
+- ✅ `compiler-rust/src/binary_ast/ppx.rs` - Built-in PPX transformations (string interp, raw, etc.)
 
 ## Important: No Content-Based Sharing Tricks
 
