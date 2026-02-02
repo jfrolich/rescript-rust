@@ -16,7 +16,14 @@
 
 Do NOT spend time on small issues (@deriving edge cases, etc.) until the sharing issues are resolved - they only affect a handful of files compared to 700+.
 
-**Update (2026-02-02):** Module-level await transformation implemented (Task 2.8), but it doesn't improve parity due to the same sharing issues affecting other files.
+## ⚠️ IMPORTANT: parsetree0 / ast0 does NOT affect .ast files!
+
+**DO NOT confuse parsetree0 with .ast file generation!**
+
+- `.ast` files (from `bsc -bs-ast`) use the **CURRENT parsetree format** via `write_structure_ast_current()` / `write_signature_ast_current()` in `binary_ast/writer.rs`
+- `parsetree0` is a SEPARATE older format used for PPX compatibility, NOT for .ast files
+- Changes to `mapper_to0.rs` or parsetree0 types have **NO IMPACT** on bsc-ast parity tests
+- The sharing issues (arity, location) need to be fixed in `current_marshal.rs`, NOT in parsetree0 code
 
 ---
 
@@ -34,9 +41,8 @@ Do NOT spend time on small issues (@deriving edge cases, etc.) until the sharing
 - **True parity status**: 278/1049 (26.5%) - interface files now properly tested and mostly fail due to arity/location sharing
 
 **Analysis Complete (2026-02-02):** The remaining 724 failing tests are blocked by multiple issues:
-1. **Arity sharing (~700 files)**: OCaml's CSE cannot be replicated (structural limitation)
-2. **parsetree0 Location sharing (~500+ files)**: mapper_to0 converts LocIdx to full Location structs,
-   losing sharing information. Would require refactoring parsetree0 to use LocIdx.
+1. **Arity sharing (~700 files)**: OCaml's marshal uses CSE to share identical arity values
+2. **Location sharing (~500+ files)**: OCaml's marshal shares identical Location structs; Rust writes each inline
 3. **@deriving transformations**: `@deriving(accessors)` DONE; `@deriving(jsConverter)` and
    `@deriving(abstract)` still TODO (~8 files remaining)
 4. **Module-level await (4 files)**: Requires refactoring to multi-item expansion
