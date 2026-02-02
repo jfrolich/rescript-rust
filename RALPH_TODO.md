@@ -20,6 +20,11 @@
    reference passing. Fixing this requires ensuring the same PosIdx is passed through code paths where
    OCaml would pass the same pointer - a significant refactor across the parser.
 
+   **THIS IS THE TASK**: Changing how `PosIdx` (and other indices like `LocIdx`, `ArityIdx`) are passed
+   through the parser is exactly what needs to be done. The goal is to refactor the parser to pass these
+   indices in the same way OCaml passes position pointers - so that when OCaml reuses a pointer, Rust
+   reuses the same index.
+
 Do NOT spend time on small issues (@deriving edge cases, etc.) until the location sharing issue is resolved.
 
 ## 🚨 CRITICAL: parsetree0 is NOT involved in .ast file generation!
@@ -58,10 +63,22 @@ Do NOT spend time on small issues (@deriving edge cases, etc.) until the locatio
 ---
 
 **Last Updated:** 2026-02-02
-**Overall Status:** 309/1049 bsc-ast tests passing (29.5%)
+**Overall Status:** 345/1049 bsc-ast tests passing (32.9%)
 **sexp-locs Status:** 1049/1049 tests passing (100%) ✅
 
-**Note:** Many remaining failures are due to arity/location sharing (see Phase 6 below).
+**Note:** Many remaining failures are due to location sharing in the parser (see Phase 5 below).
+
+**JSX fixes (2026-02-02):**
+- Fixed `closing_tag: None` bug in JSX container element parsing
+  - Rust was always setting `closing_tag` to `None` for `<div>...</div>` elements
+  - Now properly captures: start position (`</`), tag name with location, end position (`>`)
+  - Also fixed `opening_end` to use `start_pos` (position OF '>') not `prev_end_pos`
+  - Impact: 309 → 321 (+12 files)
+- Added PPX recursion into JSX children and props
+  - Previously `Pexp_jsx_element` was cloned without transformation
+  - Now `rewrite_jsx_element()` traverses fragment/unary/container elements
+  - Strings inside JSX props and children now get `"js"` → `"*j"` transformation
+  - Impact: 321 → 345 (+24 files)
 
 **Arity sharing bug fix (2026-02-02):**
 - Fixed bug in `write_arity_idx()` in marshal.rs
@@ -522,14 +539,22 @@ type annotation arity and function arity should be separate objects.
     - Rust needs to reuse the same PosIdx/LocIdx during parsing to achieve sharing
     - **Status**: Content-based sharing reverted; fix requires better position reuse during parsing
 - [ ] **Task 5.2**: Target 500/1049 bsc-ast parity (47%) - **BLOCKED** (location sharing)
+  - **Progress (2026-02-02)**: 309 → 345 (+36 files, now 32.9%)
+    - JSX closing_tag fix: +12 files
+    - JSX PPX recursion fix: +24 files
   - **Blockers analyzed (2026-02-02)**:
     1. **Arity sharing (Task 6.6)**: ✅ Bug fix improved parity 287→309 (+22 files)
     2. **Location sharing (~500+ files)**: Rust creates new Position objects during parsing where
        OCaml reuses the same pointer. Fix requires better position reuse in parser code (NOT parsetree0).
+       - External declarations: 4 bytes extra per type parameter
+       - Record type declarations: 4 bytes extra per field
+       - Root cause: Position objects created fresh instead of reusing PosIdx
     3. **@deriving (Task 2.3)**: Partially implemented (~8 files remaining)
     4. **Module-level await (Task 2.8)**: ✅ DONE
+    5. **JSX container closing_tag**: ✅ FIXED (was always None)
+    6. **JSX PPX string transformation**: ✅ FIXED (wasn't recursing into children/props)
   - **Impact**: Location sharing (#2) is the main blocker for reaching 500+ parity
-  - Current: 309/1049 (29.5%) - most .resi files pass, most .res files fail
+  - Current: 345/1049 (32.9%) - JSX-related files now mostly pass
 - [ ] **Task 5.3**: Target 750/1049 bsc-ast parity (71%) - **BLOCKED** (arity limitation)
 - [ ] **Task 5.4**: Target 1000/1049 bsc-ast parity (95%) - **BLOCKED** (arity limitation)
 - [ ] **Task 5.5**: Achieve 1049/1049 bsc-ast parity (100%) - **BLOCKED** (arity limitation)
