@@ -4231,13 +4231,13 @@ fn parse_for_expr(p: &mut Parser<'_>) -> Expression {
     p.begin_region();
 
     let (pat, has_opening_paren) = if p.token == Token::Lparen {
-        let lparen_pos = p.start_pos.clone();
+        let lparen_pos_idx = p.push_start_pos_fresh();
         p.next();
 
         if p.token == Token::Rparen {
             // for () - unit pattern, then check for alias
             p.next();
-            let loc = p.mk_loc_to_prev_end(&lparen_pos);
+            let loc = p.mk_loc_idx_to_prev_end(lparen_pos_idx);
             let unit_pat = super::pattern::make_unit_construct_pattern(p, loc);
             let pat = super::pattern::parse_alias_pattern(p, unit_pat, vec![]);
             (pat, false)
@@ -4253,7 +4253,7 @@ fn parse_for_expr(p: &mut Parser<'_>) -> Expression {
                 // Tuple pattern: for (a, b, ...) in ...
                 p.next();
                 let tuple_pat =
-                    super::pattern::parse_tuple_pattern(p, lparen_pos, pat, vec![]);
+                    super::pattern::parse_tuple_pattern(p, lparen_pos_idx, pat, vec![]);
                 let aliased = super::pattern::parse_alias_pattern(p, tuple_pat, vec![]);
                 (aliased, false)
             } else {
