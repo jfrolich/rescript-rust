@@ -512,7 +512,8 @@ fn parse_atomic_pattern(p: &mut Parser<'_>) -> Pattern {
             p.next();
             let loc = p.mk_loc_to_prev_end(&start_pos);
             let bool_str = if is_true { "true" } else { "false" };
-            let bool_str_idx = p.arena_mut().push_string(bool_str.to_string());
+            // Intern the string to enable sharing, but create new Lident each time
+            let bool_str_idx = p.arena_mut().intern_string(bool_str);
             let lid = Longident::Lident(bool_str_idx);
             let lid_idx = p.push_longident(lid);
             ast_helper::make_construct_pat(lid_idx, None, loc.clone(), loc)
