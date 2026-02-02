@@ -373,22 +373,17 @@ type annotation arity and function arity should be separate objects.
     - Rust's mapper_to0 creates new Location structs (loses identity, no sharing)
     - Proper fix would require `Rc<Location>` or `LocIdx` in parsetree0 (significant refactor)
     - **Status**: Content-based sharing reverted; architectural limitation documented
-- [ ] **Task 5.2**: Target 500/1049 bsc-ast parity (47%) - **BLOCKED** (depends on Phase 6)
-  - **Investigation (2026-02-02)**: Attempted content-based arity sharing at marshal time
-    - `marshal_with_sharing()` for type annotation arities in `Ptyp_arrow`
-    - Works for simple case (two functions with same arity)
-    - Fails for nested arrow types (e.g., `(bool => bool) => unit`) - shares too aggressively
-    - OCaml only shares across top-level type annotations, not within nested types
-  - **Cannot fix without Phase 6**: Need ArityIdx in AST to track arity identity properly
-  - Arity sharing - two functions with same arity (`int => int`) differ by 1 object
-    - Example: `let f: int => int = x => x; let g: int => string = y => "test"` fails
-    - OCaml shares `Some(1)` arity value via pointer equality
-    - Rust creates separate `Some(1)` blocks for each function
-    - This affects ~90% of .res files (any file with 2+ typed functions)
+- [ ] **Task 5.2**: Target 500/1049 bsc-ast parity (47%) - **PARTIALLY BLOCKED**
+  - **Arity sharing limitation (Task 6.6)**: OCaml's CSE cannot be replicated
+    - Files with 2+ typed functions having the same arity will differ by ~1 object
+    - This is a structural limitation, not a bug
+  - **Other potential improvements**:
+    - Implement remaining PPX transformations (@deriving, module-level await)
+    - Fix any position/location sharing issues that don't involve arity
   - Current: 327/1049 (31.2%) - most .resi files pass, most .res files fail due to arity
-- [ ] **Task 5.3**: Target 750/1049 bsc-ast parity (71%) (depends on 5.2)
-- [ ] **Task 5.4**: Target 1000/1049 bsc-ast parity (95%) (depends on 5.3)
-- [ ] **Task 5.5**: Achieve 1049/1049 bsc-ast parity (100%) (depends on 5.4)
+- [ ] **Task 5.3**: Target 750/1049 bsc-ast parity (71%) - **BLOCKED** (arity limitation)
+- [ ] **Task 5.4**: Target 1000/1049 bsc-ast parity (95%) - **BLOCKED** (arity limitation)
+- [ ] **Task 5.5**: Achieve 1049/1049 bsc-ast parity (100%) - **BLOCKED** (arity limitation)
 
 ### Phase 6: Arity Arena Implementation (UNBLOCKS Phase 5)
 
