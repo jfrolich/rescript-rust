@@ -65,7 +65,9 @@ Do NOT spend time on small issues (@deriving edge cases, etc.) until the locatio
 **Overall Status:** 464/1049 bsc-ast tests passing (44.2%)
 **sexp-locs Status:** 1049/1049 tests passing (100%) ✅
 
-**Note:** Many remaining failures are due to location sharing in the parser (see Phase 5 below).
+**Note:** Many remaining failures are due to position sharing differences between OCaml and Rust.
+The AST structure is 100% correct (sexp-locs matches), but binary marshal format differs in object
+sharing patterns. See Phase 5 Task 5.2 for detailed analysis of external declaration differences.
 
 **Position caching fixes (2026-02-02):**
 - Fixed `mk_loc_*` functions in state.rs to use position cache instead of direct push:
@@ -560,14 +562,33 @@ type annotation arity and function arity should be separate objects.
     2. **Location sharing**: ✅ **MOSTLY FIXED** - Position caching now works for most cases
        - Fixed `mk_loc_*` functions to use cache instead of direct `push_position()`
        - Fixed `typ.rs` function type parsing to use position cache
-       - **Remaining issue**: External declarations with arrow types still have 1 extra object
+       - **Remaining issue**: External declarations with arrow types still have 1 extra object (see analysis below)
        - Record type declarations now match ✅
     3. **@deriving (Task 2.3)**: Partially implemented (~8 files remaining)
     4. **Module-level await (Task 2.8)**: ✅ DONE
     5. **JSX container closing_tag**: ✅ FIXED (was always None)
     6. **JSX PPX string transformation**: ✅ FIXED (wasn't recursing into children/props)
-  - **Next step**: Find the remaining location sharing issue in external arrow type parsing
-  - Current: 345/1049 (32.9%) - JSX-related files now mostly pass
+  - **External declaration analysis (2026-02-02)**:
+    - Test case: `external foo: int => int = "foo"` (OCaml: 208 bytes, Rust: 212 bytes)
+    - OCaml has 34 objects, Rust has 35 objects (1 extra object = 4 bytes)
+    - At marshal offset 0x8e (arrow type's ptyp_loc):
+      - OCaml: writes FRESH Position blocks for (0,0) and (0,32) [pval_loc positions]
+      - Rust: writes SHARED8 references to earlier positions (14) and (24)
+    - At marshal offset 0xc0 (pval_loc positions):
+      - OCaml: writes SHARED8 references back to the positions written at 0x8e
+      - Rust: writes FRESH Position blocks for (0,0) and (0,32)
+    - **Root cause**: Structural difference in how OCaml and Rust marshal the arrow type
+      - In OCaml, the arrow type's ptyp_loc appears to be inlined within the Ptyp_arrow structure
+      - In Rust, positions are written in a different order due to caching
+      - Rust's position caching causes sharing WHERE OCaml writes fresh, and fresh WHERE OCaml shares
+    - **Impact**: 1 extra object in Rust output, causing 4-byte size difference
+    - **Note**: This is a complex structural issue. The arrow type's ptyp_loc uses the same
+      `start_pos` variable as the first `int` type in OCaml (line 4676 and 4821 in res_core.ml),
+      which SHOULD cause sharing. But the marshal output shows positions are written in a
+      different order, causing the sharing pattern to differ.
+  - **Next step**: Consider whether this 4-byte difference affects functionality. The AST structure
+    is correct (sexp-locs matches 100%), only the binary sharing differs.
+  - Current: 464/1049 (44.2%) - Most simple cases pass, complex arrow types may differ
 - [ ] **Task 5.3**: Target 750/1049 bsc-ast parity (71%) - **BLOCKED** (arity limitation)
 - [ ] **Task 5.4**: Target 1000/1049 bsc-ast parity (95%) - **BLOCKED** (arity limitation)
 - [ ] **Task 5.5**: Achieve 1049/1049 bsc-ast parity (100%) - **BLOCKED** (arity limitation)
