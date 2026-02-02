@@ -750,10 +750,84 @@ The binary AST format uses OCaml's Marshal serialization, which includes back-re
 
 **What's working:**
 - sexp-locs: 100% parity (1049/1049 files identical) - AST structure is correct
-- bsc-ast (binary): ~119 files with exact binary parity, ~930 with position sharing differences
+- bsc-ast (binary): 253 files with exact binary parity, 796 with position sharing differences
 
 **Remaining work:**
-The ~930 files with bsc-ast differences have correct AST structure (sexp-locs match) but different position sharing in the binary marshal output. This affects the size of the output files but not the correctness of the parsed AST.
+The 796 files with bsc-ast differences have correct AST structure (sexp-locs match) but different position sharing in the binary marshal output. This affects the size of the output files but not the correctness of the parsed AST.
+
+#### Improving Binary Parity - Step by Step Guide
+
+**Current approach - reference-based sharing by default:**
+
+The parser state (`compiler-rust/src/parser/state.rs`) tracks position indices:
+- `start_pos_idx` - index of current token's start position
+- `end_pos_idx` - index of current token's end position
+- `prev_end_pos_idx` - index of previous token's end position
+
+These indices are updated in `next()` when tokens are consumed. The key methods are:
+
+| Method | Behavior | When to use |
+|--------|----------|-------------|
+| `start_pos_idx()` | Returns stored index (sharing) | **Default** - most position captures |
+| `end_pos_idx()` | Returns stored index (sharing) | **Default** - most end position captures |
+| `prev_end_pos_idx()` | Returns stored index (sharing) | **Default** - most prev_end captures |
+| `push_start_pos()` | Allocates fresh position | Only when OCaml explicitly creates new |
+
+**Why this works:** In OCaml, `p.Parser.start_pos` is a mutable field. Multiple captures at the same parsing point reference the same object. By returning the stored index, Rust replicates this sharing.
+
+**Workflow for improving parity:**
+
+1. **Run the parity test to find failing files:**
+   ```bash
+   ./scripts/test_parser_ast_parity.sh 2>&1 | head -100
+   ```
+
+2. **Pick a failing file and compare binary output:**
+   ```bash
+   FILE=tests/syntax_tests/data/parsing/grammar/expressions/binary.res
+   ./_build/install/default/bin/res_parser -print binary $FILE > /tmp/ocaml.bin
+   ./compiler-rust/target/release/res_parser_rust -print binary $FILE > /tmp/rust.bin
+   diff <(xxd /tmp/ocaml.bin) <(xxd /tmp/rust.bin) | head -50
+   ```
+
+3. **Analyze the difference:**
+   - If Rust output is LARGER: Rust is allocating fresh where OCaml shares
+   - If Rust output is SMALLER: Rust is sharing where OCaml allocates fresh
+   - Look for `04 XX` (CODE_SHARED8) or `05 XX XX` (CODE_SHARED16) patterns
+
+4. **Find the corresponding OCaml code:**
+   - Parser: `compiler/syntax/src/res_core.ml`
+   - Look for `let start_pos = p.Parser.start_pos` patterns
+   - Trace how positions flow through the parsing functions
+
+5. **Fix the Rust code to match:**
+   - If OCaml captures a position once and reuses it: use `start_pos_idx()`
+   - If OCaml creates fresh positions: use `push_start_pos()`
+   - Key files: `compiler-rust/src/parser/expr.rs`, `pattern.rs`, `typ.rs`, `module.rs`
+
+6. **Test and commit:**
+   ```bash
+   cargo build --manifest-path compiler-rust/Cargo.toml --release
+   ./scripts/test_parser_ast_parity.sh 2>&1 | grep "FAILED\|passing"
+   # If improved, commit immediately!
+   ```
+
+**Common patterns to look for:**
+
+```rust
+// SHARING (default) - use stored index
+let start_pos_idx = p.start_pos_idx();
+// ... later ...
+let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
+
+// FRESH ALLOCATION - only when OCaml creates new
+let fresh_pos_idx = p.push_start_pos();
+```
+
+**Debugging tips:**
+- Add `eprintln!` in `marshal.rs` to trace object counter values
+- Compare specific AST nodes by adding sexp output
+- Focus on one construct at a time (e.g., all record patterns, all function applications)
 
 **parsetree0 / binary0 - NOT A PRIORITY:**
 
@@ -798,27 +872,26 @@ diff <(xxd /tmp/ocaml.bin) <(xxd /tmp/rust.bin)
 
 OCaml's Marshal format uses **pointer identity** for sharing. When two AST nodes reference the same memory object (same pointer), Marshal writes a shared reference instead of duplicating the data. This is NOT about string interning or content equality—it's about whether the OCaml code constructs a NEW value or passes an EXISTING value by reference.
 
-**⚠️ CRITICAL: Explicit sharing, NOT automatic interning**
+**Reference-based sharing via parser state**
 
-The Rust implementation must **explicitly mirror OCaml's allocation patterns**. Do NOT try to automatically intern or deduplicate values based on content. Instead:
+The Rust parser state tracks position indices that are updated when tokens are consumed:
+- `start_pos_idx`, `end_pos_idx`, `prev_end_pos_idx` in `Parser` struct
+- These are set in `next()` and related token-advancing methods
 
-1. **Study the OCaml code** to understand when it passes a reference vs. constructs a new value
-2. **Explicitly share** in Rust when OCaml passes the same reference (use the same arena index)
-3. **Explicitly allocate new** in Rust when OCaml constructs a new value (push a new arena entry)
+This mirrors OCaml where `p.Parser.start_pos`, `p.Parser.end_pos`, `p.Parser.prev_end_pos` are mutable fields. Multiple captures at the same parsing point reference the same object, and Marshal shares them.
 
-This means the Rust parser code must be structured to match OCaml's data flow:
-- If OCaml binds a value to a variable and passes that variable to multiple places, Rust should do the same with an arena index
-- If OCaml constructs a new record/value at each use site, Rust should push a new arena entry each time
+**Key principle:** Use `start_pos_idx()` (returns stored index) by default. Only use `push_start_pos()` (allocates fresh) when OCaml explicitly creates a new position object.
 
-**🚫 NEVER USE CONTENT-BASED DEDUPLICATION 🚫**
+**Reference-based sharing (not content-based)**
 
-Do NOT use `push_position_dedup` or any content-based sharing mechanism to fix binary parity issues. OCaml does NOT do content-based interning—it shares values through explicit reference passing. The ONLY correct approach is:
+The correct approach is **reference-based sharing**: pass the same arena index through the code where OCaml passes the same reference. This is NOT content-based deduplication (hash lookups).
 
-1. Find the exact place in the OCaml source where a value is captured (e.g., `let end_pos = p.prev_end_pos in`)
-2. In the Rust code, capture the arena index at that same point (e.g., `let end_pos_idx = p.push_prev_end_pos()`)
-3. Pass that same index to all places where OCaml passes the same reference
+The parser state stores indices (`start_pos_idx`, `end_pos_idx`, `prev_end_pos_idx`) that get updated when tokens are consumed. Calling `start_pos_idx()` returns the stored index - multiple calls at the same parsing point return the same index, matching OCaml's behavior where multiple captures of `p.Parser.start_pos` return the same object.
 
-If you find yourself wanting to use content-based deduplication, STOP. You are taking a shortcut that will not achieve parity. Go back to the OCaml source and trace exactly how values flow through the code.
+**The approach:**
+1. **Default to sharing**: Use `start_pos_idx()`, `end_pos_idx()`, `prev_end_pos_idx()` - these return stored indices
+2. **Only allocate fresh when OCaml does**: Use `push_start_pos()` when OCaml explicitly creates a new position object
+3. **Trace the OCaml code**: Look at how positions flow through parsing functions to determine sharing vs fresh allocation
 
 **⚠️ STRING SHARING: Use StrIdx, NOT content-based interning**
 
