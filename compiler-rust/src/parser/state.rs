@@ -119,6 +119,9 @@ pub struct Parser<'src> {
     /// the PREVIOUS prev_end_pos was to enable sharing with positions captured before next().
     /// This is cleared when prev_end_pos changes (on next token consumption).
     cached_prev_end_pos: Option<(Position, PosIdx)>,
+    /// Depth of lookahead nesting. When > 0, next() skips arena position allocations.
+    /// This prevents lookahead from affecting position indices for subsequent allocations.
+    lookahead_depth: u32,
 }
 
 impl<'src> Parser<'src> {
@@ -155,6 +158,7 @@ impl<'src> Parser<'src> {
             arena,
             in_external: false,
             cached_prev_end_pos: None,
+            lookahead_depth: 0,
         };
         // Scan the first token
         parser.next();
@@ -608,7 +612,18 @@ impl<'src> Parser<'src> {
             return;
         }
 
-        let prev_end = prev_end_pos.unwrap_or_else(|| self.end_pos.clone());
+        // Determine prev_end and whether to reuse the current end_pos_idx.
+        // When prev_end_pos is None, prev_end = current end_pos. In OCaml, this means
+        // the prev_end position is the SAME object as the current token's end position.
+        // We replicate this by reusing the end_pos_idx.
+        let (prev_end, reuse_end_pos_idx) = match prev_end_pos {
+            Some(pos) => (pos, false),
+            None => (self.end_pos.clone(), true),
+        };
+        let old_end_pos_idx = self.end_pos_idx;
+
+        // In lookahead mode, skip arena allocations to prevent affecting position indices
+        let in_lookahead = self.lookahead_depth > 0;
 
         loop {
             let result = self.scanner.scan();
@@ -622,19 +637,29 @@ impl<'src> Parser<'src> {
                     self.prev_end_pos_idx = self.end_pos_idx;
                     self.cached_prev_end_pos = None; // Clear cache when prev_end_pos changes
                     self.end_pos = result.end_pos;
-                    self.end_pos_idx = self.arena.push_position(result.end_pos);
+                    if !in_lookahead {
+                        self.end_pos_idx = self.arena.push_position(result.end_pos);
+                    }
                     // Continue to next token
                 }
                 _ => {
                     self.token = result.token;
                     self.prev_end_pos = prev_end;
-                    // Push prev_end to arena and store index
-                    self.prev_end_pos_idx = self.arena.push_position(prev_end);
                     self.cached_prev_end_pos = None; // Clear cache when prev_end_pos changes
                     self.start_pos = result.start_pos;
-                    self.start_pos_idx = self.arena.push_position(result.start_pos);
                     self.end_pos = result.end_pos;
-                    self.end_pos_idx = self.arena.push_position(result.end_pos);
+                    // Only push positions to arena when not in lookahead mode
+                    if !in_lookahead {
+                        // Reuse end_pos_idx for prev_end when appropriate.
+                        // In OCaml, when prev_end equals the old end_pos, they share the same record.
+                        if reuse_end_pos_idx {
+                            self.prev_end_pos_idx = old_end_pos_idx;
+                        } else {
+                            self.prev_end_pos_idx = self.arena.push_position(prev_end);
+                        }
+                        self.start_pos_idx = self.arena.push_position(result.start_pos);
+                        self.end_pos_idx = self.arena.push_position(result.end_pos);
+                    }
                     return;
                 }
             }
@@ -656,9 +681,12 @@ impl<'src> Parser<'src> {
         self.prev_end_pos_idx = self.end_pos_idx;
         self.cached_prev_end_pos = None; // Clear cache when prev_end_pos changes
         self.start_pos = result.start_pos;
-        self.start_pos_idx = self.arena.push_position(result.start_pos);
         self.end_pos = result.end_pos;
-        self.end_pos_idx = self.arena.push_position(result.end_pos);
+        // Only push positions to arena when not in lookahead mode
+        if self.lookahead_depth == 0 {
+            self.start_pos_idx = self.arena.push_position(result.start_pos);
+            self.end_pos_idx = self.arena.push_position(result.end_pos);
+        }
     }
 
     /// Check if the current token matches and consume it if so.
@@ -716,6 +744,8 @@ impl<'src> Parser<'src> {
     /// Execute a callback with lookahead, then restore parser state.
     ///
     /// This allows speculative parsing without affecting the parser state.
+    /// During lookahead, next() skips arena position allocations to prevent
+    /// lookahead from affecting position indices in the final AST.
     pub fn lookahead<T, F>(&mut self, callback: F) -> T
     where
         F: FnOnce(&mut Self) -> T,
@@ -736,8 +766,14 @@ impl<'src> Parser<'src> {
         let diagnostics_len = self.diagnostics.len();
         let comments_len = self.comments.len();
 
+        // Enter lookahead mode - next() will skip arena position allocations
+        self.lookahead_depth += 1;
+
         // Execute callback
         let result = callback(self);
+
+        // Exit lookahead mode
+        self.lookahead_depth -= 1;
 
         // Restore scanner state
         self.scanner.restore(scanner_snapshot);
