@@ -288,6 +288,21 @@ impl<'src> Parser<'src> {
         self.get_or_push_start_pos(self.start_pos)
     }
 
+    /// Push the current start position into the arena WITHOUT using the cache.
+    ///
+    /// Use this when OCaml would create a FRESH position object, even if another
+    /// function has already captured a position at the same coordinates.
+    ///
+    /// Example: When a nested function captures `let start_pos = p.start_pos`,
+    /// OCaml creates a new object even if the outer function already captured
+    /// one at the same position. Using `push_start_pos_fresh()` replicates this.
+    ///
+    /// Contrast with `push_start_pos()` which uses content-based caching and
+    /// would return the same PosIdx for positions with identical content.
+    pub fn push_start_pos_fresh(&mut self) -> PosIdx {
+        self.arena.push_position(self.start_pos)
+    }
+
     /// Get or push a start position, using HashMap cache for sharing.
     /// If the position was already cached, returns the cached PosIdx.
     /// This cache persists across next() calls to enable sharing between
