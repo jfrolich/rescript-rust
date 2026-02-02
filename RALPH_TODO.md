@@ -1,7 +1,7 @@
 # Ralph TODO: Binary AST Parity
 
 **Last Updated:** 2026-02-02
-**Overall Status:** 145/1049 bsc-ast tests passing (13.8%)
+**Overall Status:** 239/1049 bsc-ast tests passing (22.8%)
 **sexp-locs Status:** 1049/1049 tests passing (100%) ✅
 
 ---
@@ -47,6 +47,11 @@ OCaml's `Depend.add_parent` only adds the parent module of dotted paths:
 - `None` → adds nothing (not `Ldot`, just `Lident`)
 
 Previously Rust was adding all uppercase identifiers, incorrectly including `None` and `Some`.
+
+**Additional fix (2026-02-02):** Module bindings and functor parameters now tracked:
+- `module Types = Foo` binds `Types` so references to `Types.X` don't add `Types` as a dependency
+- `module Make = (Impl: Intf) => ...` binds `Impl` in the functor body
+- This matches OCaml's `bv` (bound variables) tracking in `depend.ml`
 
 ---
 
@@ -239,7 +244,9 @@ type annotation arity and function arity should be separate objects.
 
 ### Phase 5: Validation
 
-- [ ] **Task 5.1**: Run full test suite, verify no regressions
+- [x] **Task 5.1**: Run full test suite, verify no regressions
+  - Verified: 239/1049 bsc-ast tests passing (22.8%)
+  - No regressions detected from baseline
 - [ ] **Task 5.2**: Target 500/1049 bsc-ast parity (47%)
 - [ ] **Task 5.3**: Target 750/1049 bsc-ast parity (71%)
 - [ ] **Task 5.4**: Target 1000/1049 bsc-ast parity (95%)
