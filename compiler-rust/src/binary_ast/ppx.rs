@@ -18,10 +18,10 @@ use crate::intern::StrIdx;
 use crate::location::Location;
 use crate::parse_arena::{LidentIdx, Located, LocIdx, ParseArena};
 use crate::parser::ast::{
-    self as current, ArgLabel, Arity, Attribute, Case, Constant, CoreType, CoreTypeDesc,
-    Expression, ExpressionDesc, Label, ModuleExpr, ModuleExprDesc, Pattern, PatternDesc, Payload,
-    RecFlag, SignatureItem, SignatureItemDesc, StructureItem, StructureItemDesc,
-    TypeArg, ValueBinding, ValueDescription,
+    self as current, ArgLabel, Arity, Attribute, Case, Constant, ConstructorArguments, CoreType,
+    CoreTypeDesc, Expression, ExpressionDesc, Label, ModuleExpr, ModuleExprDesc, Pattern,
+    PatternDesc, Payload, RecFlag, SignatureItem, SignatureItemDesc, StructureItem,
+    StructureItemDesc, TypeArg, TypeDeclaration, TypeKind, ValueBinding, ValueDescription,
 };
 use crate::parser::longident::Longident;
 
@@ -2025,6 +2025,491 @@ fn rewrite_cases(cases: &[Case], arena: &mut ParseArena) -> Vec<Case> {
         .collect()
 }
 
+// ========== @deriving PPX Transformation ==========
+
+/// Actions that can be derived from @deriving attribute
+#[derive(Debug, Clone, PartialEq)]
+enum DeriveAction {
+    Accessors,
+    JsConverter { new_type: bool },
+    Abstract { light: bool },
+}
+
+/// Parse @deriving attribute to extract derive actions
+fn parse_deriving_actions(attrs: &[Attribute], arena: &mut ParseArena) -> (Vec<DeriveAction>, Vec<Attribute>) {
+    let mut actions = vec![];
+    let mut remaining_attrs = vec![];
+
+    for attr in attrs {
+        let (name_loc, payload) = attr;
+        let name = arena.get_string(name_loc.txt);
+
+        if name == "deriving" {
+            // Parse the payload to extract actions
+            if let Payload::PStr(items) = payload {
+                // @deriving(accessors) or @deriving({jsConverter: newType})
+                for item in items {
+                    if let StructureItemDesc::Pstr_eval(expr, _) = &item.pstr_desc {
+                        parse_deriving_expr(&expr.pexp_desc, &mut actions, arena);
+                    }
+                }
+            }
+        } else {
+            remaining_attrs.push(attr.clone());
+        }
+    }
+
+    (actions, remaining_attrs)
+}
+
+/// Parse a deriving expression to extract actions
+fn parse_deriving_expr(expr_desc: &ExpressionDesc, actions: &mut Vec<DeriveAction>, arena: &mut ParseArena) {
+    match expr_desc {
+        // Simple identifier: @deriving(accessors)
+        ExpressionDesc::Pexp_ident(lid_loc) => {
+            let lid = arena.get_longident(lid_loc.txt);
+            if let Longident::Lident(s) = lid {
+                let name = arena.get_string(*s);
+                match name {
+                    "accessors" => actions.push(DeriveAction::Accessors),
+                    "jsConverter" => actions.push(DeriveAction::JsConverter { new_type: false }),
+                    "abstract" => actions.push(DeriveAction::Abstract { light: false }),
+                    _ => {}
+                }
+            }
+        }
+        // Tuple of identifiers: @deriving(accessors, jsConverter)
+        ExpressionDesc::Pexp_tuple(exprs) => {
+            for expr in exprs {
+                parse_deriving_expr(&expr.pexp_desc, actions, arena);
+            }
+        }
+        // Record: @deriving({jsConverter: newType})
+        ExpressionDesc::Pexp_record(fields, None) => {
+            for field in fields {
+                let lid = arena.get_longident(field.lid.txt);
+                if let Longident::Lident(s) = lid {
+                    let field_name = arena.get_string(*s);
+                    match field_name {
+                        "jsConverter" => {
+                            // Check if value is `newType` or `{newType: true/false}`
+                            let new_type = check_new_type_config(&field.expr, arena);
+                            actions.push(DeriveAction::JsConverter { new_type });
+                        }
+                        "abstract" => {
+                            actions.push(DeriveAction::Abstract { light: false });
+                        }
+                        "accessors" => {
+                            actions.push(DeriveAction::Accessors);
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+        // Constructor application for polymorphic variants like @deriving(jsConverter)
+        ExpressionDesc::Pexp_apply { funct, args, .. } => {
+            // Check if it's a simple ident being applied
+            if let ExpressionDesc::Pexp_ident(lid_loc) = &funct.pexp_desc {
+                let lid = arena.get_longident(lid_loc.txt);
+                if let Longident::Lident(s) = lid {
+                    let name = arena.get_string(*s);
+                    if name == "jsConverter" && !args.is_empty() {
+                        // @deriving(jsConverter({newType: true}))
+                        let (_, arg_expr) = &args[0];
+                        let new_type = check_new_type_config(arg_expr, arena);
+                        actions.push(DeriveAction::JsConverter { new_type });
+                    }
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Check if an expression configures newType to true
+fn check_new_type_config(expr: &Expression, arena: &mut ParseArena) -> bool {
+    match &expr.pexp_desc {
+        // {newType: true} or just `newType`
+        ExpressionDesc::Pexp_ident(lid_loc) => {
+            let lid = arena.get_longident(lid_loc.txt);
+            if let Longident::Lident(s) = lid {
+                let name = arena.get_string(*s);
+                return name == "newType";
+            }
+            false
+        }
+        ExpressionDesc::Pexp_record(fields, _) => {
+            for field in fields {
+                let lid = arena.get_longident(field.lid.txt);
+                if let Longident::Lident(s) = lid {
+                    let field_name = arena.get_string(*s);
+                    if field_name == "newType" {
+                        // Check if value is `true`
+                        if let ExpressionDesc::Pexp_construct(ctor_lid, None) = &field.expr.pexp_desc {
+                            let ctor = arena.get_longident(ctor_lid.txt);
+                            if let Longident::Lident(s) = ctor {
+                                return arena.get_string(*s) == "true";
+                            }
+                        }
+                    }
+                }
+            }
+            false
+        }
+        _ => false,
+    }
+}
+
+/// Generate accessor functions for @deriving(accessors)
+fn generate_accessors(
+    tdcl: &TypeDeclaration,
+    loc: LocIdx,
+    arena: &mut ParseArena,
+) -> Vec<StructureItem> {
+    match &tdcl.ptype_kind {
+        TypeKind::Ptype_record(labels) => {
+            // Generate accessor function for each field
+            labels.iter().map(|label| {
+                let core_type = core_type_of_type_declaration(tdcl, arena);
+
+                // Create: let fieldName = param => param.fieldName
+                let param_str = arena.intern_string("param");
+                let param_pat = Pattern {
+                    ppat_desc: PatternDesc::Ppat_constraint(
+                        Box::new(Pattern {
+                            ppat_desc: PatternDesc::Ppat_var(Located { txt: param_str, loc }),
+                            ppat_loc: loc,
+                            ppat_attributes: vec![],
+                        }),
+                        core_type.clone(),
+                    ),
+                    ppat_loc: loc,
+                    ppat_attributes: vec![],
+                };
+
+                // param.fieldName
+                let field_access = Expression {
+                    pexp_desc: ExpressionDesc::Pexp_field(
+                        Box::new(Expression {
+                            pexp_desc: ExpressionDesc::Pexp_ident(Located {
+                                txt: arena.push_longident(Longident::Lident(param_str)),
+                                loc,
+                            }),
+                            pexp_loc: loc,
+                            pexp_attributes: vec![],
+                        }),
+                        Located {
+                            txt: arena.push_longident(Longident::Lident(label.pld_name.txt)),
+                            loc,
+                        },
+                    ),
+                    pexp_loc: loc,
+                    pexp_attributes: vec![],
+                };
+
+                let fun_expr = Expression {
+                    pexp_desc: ExpressionDesc::Pexp_fun {
+                        arg_label: ArgLabel::Nolabel,
+                        default: None,
+                        lhs: param_pat,
+                        rhs: Box::new(field_access),
+                        is_async: false,
+                        arity: arena.push_arity(Some(1)),
+                    },
+                    pexp_loc: loc,
+                    pexp_attributes: vec![],
+                };
+
+                let binding = ValueBinding {
+                    pvb_pat: Pattern {
+                        ppat_desc: PatternDesc::Ppat_var(Located {
+                            txt: label.pld_name.txt,
+                            loc: label.pld_name.loc,
+                        }),
+                        ppat_loc: loc,
+                        ppat_attributes: vec![],
+                    },
+                    pvb_expr: fun_expr,
+                    pvb_attributes: vec![],
+                    pvb_loc: loc,
+                };
+
+                StructureItem {
+                    pstr_desc: StructureItemDesc::Pstr_value(RecFlag::Nonrecursive, vec![binding]),
+                    pstr_loc: loc,
+                }
+            }).collect()
+        }
+        TypeKind::Ptype_variant(constructors) => {
+            // Generate accessor function for each constructor
+            constructors.iter().map(|ctor| {
+                let ctor_name = arena.get_string(ctor.pcd_name.txt);
+                let fn_name = uncapitalize_first(ctor_name);
+                let fn_name_idx = arena.intern_string(&fn_name);
+                let core_type = core_type_of_type_declaration(tdcl, arena);
+
+                let arity = match &ctor.pcd_args {
+                    ConstructorArguments::Pcstr_tuple(args) => args.len(),
+                    ConstructorArguments::Pcstr_record(_) => {
+                        // Record constructors not supported, skip
+                        let unit_str = arena.intern_string("()");
+                        let unit_lid = arena.push_longident(Longident::Lident(unit_str));
+                        return StructureItem {
+                            pstr_desc: StructureItemDesc::Pstr_eval(
+                                Expression {
+                                    pexp_desc: ExpressionDesc::Pexp_construct(
+                                        Located { txt: unit_lid, loc },
+                                        None,
+                                    ),
+                                    pexp_loc: loc,
+                                    pexp_attributes: vec![],
+                                },
+                                vec![],
+                            ),
+                            pstr_loc: loc,
+                        };
+                    }
+                };
+
+                if arity == 0 {
+                    // No args: let ctorName = CtorName
+                    let ctor_expr = Expression {
+                        pexp_desc: ExpressionDesc::Pexp_constraint(
+                            Box::new(Expression {
+                                pexp_desc: ExpressionDesc::Pexp_construct(
+                                    Located {
+                                        txt: arena.push_longident(Longident::Lident(ctor.pcd_name.txt)),
+                                        loc,
+                                    },
+                                    None,
+                                ),
+                                pexp_loc: loc,
+                                pexp_attributes: vec![],
+                            }),
+                            core_type,
+                        ),
+                        pexp_loc: loc,
+                        pexp_attributes: vec![],
+                    };
+
+                    let binding = ValueBinding {
+                        pvb_pat: Pattern {
+                            ppat_desc: PatternDesc::Ppat_var(Located { txt: fn_name_idx, loc }),
+                            ppat_loc: loc,
+                            ppat_attributes: vec![],
+                        },
+                        pvb_expr: ctor_expr,
+                        pvb_attributes: vec![],
+                        pvb_loc: loc,
+                    };
+
+                    StructureItem {
+                        pstr_desc: StructureItemDesc::Pstr_value(RecFlag::Nonrecursive, vec![binding]),
+                        pstr_loc: loc,
+                    }
+                } else {
+                    // Has args: let ctorName = (p0, p1, ...) => CtorName(p0, p1, ...)
+                    let params: Vec<StrIdx> = (0..arity)
+                        .map(|i| arena.intern_string(&format!("param_{}", i)))
+                        .collect();
+
+                    // Build the constructor argument tuple
+                    let ctor_arg = if arity == 1 {
+                        Expression {
+                            pexp_desc: ExpressionDesc::Pexp_ident(Located {
+                                txt: arena.push_longident(Longident::Lident(params[0])),
+                                loc,
+                            }),
+                            pexp_loc: loc,
+                            pexp_attributes: vec![],
+                        }
+                    } else {
+                        Expression {
+                            pexp_desc: ExpressionDesc::Pexp_tuple(
+                                params.iter().map(|&p| Expression {
+                                    pexp_desc: ExpressionDesc::Pexp_ident(Located {
+                                        txt: arena.push_longident(Longident::Lident(p)),
+                                        loc,
+                                    }),
+                                    pexp_loc: loc,
+                                    pexp_attributes: vec![],
+                                }).collect()
+                            ),
+                            pexp_loc: loc,
+                            pexp_attributes: vec![],
+                        }
+                    };
+
+                    let ctor_expr = Expression {
+                        pexp_desc: ExpressionDesc::Pexp_constraint(
+                            Box::new(Expression {
+                                pexp_desc: ExpressionDesc::Pexp_construct(
+                                    Located {
+                                        txt: arena.push_longident(Longident::Lident(ctor.pcd_name.txt)),
+                                        loc,
+                                    },
+                                    Some(Box::new(ctor_arg)),
+                                ),
+                                pexp_loc: loc,
+                                pexp_attributes: vec![],
+                            }),
+                            core_type,
+                        ),
+                        pexp_loc: loc,
+                        pexp_attributes: vec![],
+                    };
+
+                    // Wrap with function parameters (fold right)
+                    let body = params.iter().rev().fold(ctor_expr, |acc, &param| {
+                        Expression {
+                            pexp_desc: ExpressionDesc::Pexp_fun {
+                                arg_label: ArgLabel::Nolabel,
+                                default: None,
+                                lhs: Pattern {
+                                    ppat_desc: PatternDesc::Ppat_var(Located { txt: param, loc }),
+                                    ppat_loc: loc,
+                                    ppat_attributes: vec![],
+                                },
+                                rhs: Box::new(acc),
+                                is_async: false,
+                                arity: arena.push_arity(None), // Inner functions have no arity annotation
+                            },
+                            pexp_loc: loc,
+                            pexp_attributes: vec![],
+                        }
+                    });
+
+                    // The outermost function should have the arity
+                    let final_expr = set_outermost_arity(body, arity as i32, arena);
+
+                    let binding = ValueBinding {
+                        pvb_pat: Pattern {
+                            ppat_desc: PatternDesc::Ppat_var(Located { txt: fn_name_idx, loc }),
+                            ppat_loc: loc,
+                            ppat_attributes: vec![],
+                        },
+                        pvb_expr: final_expr,
+                        pvb_attributes: vec![],
+                        pvb_loc: loc,
+                    };
+
+                    StructureItem {
+                        pstr_desc: StructureItemDesc::Pstr_value(RecFlag::Nonrecursive, vec![binding]),
+                        pstr_loc: loc,
+                    }
+                }
+            }).collect()
+        }
+        _ => vec![], // Abstract or open types not supported
+    }
+}
+
+/// Set the arity of the outermost Pexp_fun
+fn set_outermost_arity(expr: Expression, arity: i32, arena: &mut ParseArena) -> Expression {
+    if let ExpressionDesc::Pexp_fun { arg_label, default, lhs, rhs, is_async, arity: _ } = expr.pexp_desc {
+        Expression {
+            pexp_desc: ExpressionDesc::Pexp_fun {
+                arg_label,
+                default,
+                lhs,
+                rhs,
+                is_async,
+                arity: arena.push_arity(Some(arity)),
+            },
+            pexp_loc: expr.pexp_loc,
+            pexp_attributes: expr.pexp_attributes,
+        }
+    } else {
+        expr
+    }
+}
+
+/// Generate a core type representing the type declaration
+fn core_type_of_type_declaration(tdcl: &TypeDeclaration, arena: &mut ParseArena) -> CoreType {
+    let loc = tdcl.ptype_loc;
+    let name_lid = arena.push_longident(Longident::Lident(tdcl.ptype_name.txt));
+
+    if tdcl.ptype_params.is_empty() {
+        CoreType {
+            ptyp_desc: CoreTypeDesc::Ptyp_constr(
+                Located { txt: name_lid, loc },
+                vec![],
+            ),
+            ptyp_loc: loc,
+            ptyp_attributes: vec![],
+        }
+    } else {
+        // Type has parameters: 'a t -> t<'a>
+        let type_args: Vec<CoreType> = tdcl.ptype_params.iter().map(|(core_type, _)| {
+            core_type.clone()
+        }).collect();
+        CoreType {
+            ptyp_desc: CoreTypeDesc::Ptyp_constr(
+                Located { txt: name_lid, loc },
+                type_args,
+            ),
+            ptyp_loc: loc,
+            ptyp_attributes: vec![],
+        }
+    }
+}
+
+/// Uncapitalize the first character of a string
+fn uncapitalize_first(s: &str) -> String {
+    let mut chars = s.chars();
+    match chars.next() {
+        None => String::new(),
+        Some(c) => c.to_lowercase().chain(chars).collect(),
+    }
+}
+
+/// Handle @deriving for type declarations
+fn handle_deriving_type(
+    item: &StructureItem,
+    rec_flag: RecFlag,
+    tdcls: &[TypeDeclaration],
+    arena: &mut ParseArena,
+) -> Vec<StructureItem> {
+    if tdcls.is_empty() {
+        return vec![item.clone()];
+    }
+
+    // Get the last type declaration's attributes (where @deriving should be)
+    let last_tdcl = tdcls.last().unwrap();
+    let (actions, _new_attrs) = parse_deriving_actions(&last_tdcl.ptype_attributes, arena);
+
+    if actions.is_empty() {
+        // No @deriving, return as-is
+        return vec![item.clone()];
+    }
+
+    // Keep the original type declaration (OCaml doesn't strip @deriving)
+    // and append generated accessor functions
+    let mut result = vec![item.clone()];
+
+    for action in &actions {
+        match action {
+            DeriveAction::Accessors => {
+                for tdcl in tdcls {
+                    let accessors = generate_accessors(tdcl, item.pstr_loc, arena);
+                    result.extend(accessors);
+                }
+            }
+            DeriveAction::JsConverter { new_type: _ } => {
+                // TODO: Implement jsConverter generation
+                // For now, we at least strip the @deriving attribute
+            }
+            DeriveAction::Abstract { light: _ } => {
+                // TODO: Implement abstract generation
+                // For now, we at least strip the @deriving attribute
+            }
+        }
+    }
+
+    result
+}
+
 // ========== PPX Application ==========
 
 /// Apply built-in PPX transformations to a structure
@@ -2172,6 +2657,10 @@ fn rewrite_structure_item(item: &StructureItem, arena: &mut ParseArena) -> Vec<S
             } else {
                 vec![item.clone()]
             }
+        }
+        // Handle type declarations with @deriving
+        StructureItemDesc::Pstr_type(rec_flag, tdcls) => {
+            handle_deriving_type(item, *rec_flag, tdcls, arena)
         }
         // Other structure items don't contain expressions that need rewriting
         _ => vec![item.clone()],
