@@ -1,27 +1,28 @@
 # Ralph TODO: Binary AST Parity
 
 **Last Updated:** 2026-02-02
-**Overall Status:** 281/1049 bsc-ast tests passing (26.8%) [regression from Task 6.3]
+**Overall Status:** 325/1049 bsc-ast tests passing (31.0%)
 **sexp-locs Status:** 1049/1049 tests passing (100%) ✅
 
 **Note:** Many remaining failures are due to arity sharing (see Phase 6 below).
 
-**Phase 6 Status:** Tasks 6.3-6.5 complete. Task 6.6 blocked due to architectural complexity.
+**Phase 6 Status:** Tasks 6.3-6.5 complete. ArityIdx sharing DISABLED (causes regressions).
 - ArityIdx infrastructure added to parse_arena.rs and marshal.rs
 - AST types updated to use ArityIdx (Arity = ArityIdx type alias)
-- Content-based dedup causes ~45 regressions vs pre-6.3 (shares too aggressively within single functions)
-- Need selective sharing: type annotations shared, function bodies not shared
-- This requires categorizing ALL arity creation call sites which is complex
+- Marshal write_arity_idx() now writes inline values (no sharing) to match pre-6.3 behavior
+- Sharing code exists but is disabled - see marshal.rs comments
 
 **ArityIdx findings (2026-02-02):**
+- Content-based dedup caused ~45 regressions vs pre-6.3 (shared too aggressively)
 - Single typed function `let f: int => int = x => x`:
   - OCaml: type arity `Some(1)` ≠ function arity `Some(1)` (separate objects)
-  - Rust with dedup: both share same ArityIdx → incorrect sharing
+  - Rust with dedup: both shared same ArityIdx → incorrect sharing
 - Two functions with same arity: OCaml DOES share across functions (constant folding)
 - The difference: OCaml's constant folding applies to LITERALS in compiler source code
   - `~arity:(Some 1)` literal → shared
   - `Some arity` where arity is computed → not shared
 - Rust cannot replicate this without knowing which arity values are "literals"
+- **Resolution:** Disabled sharing in write_arity_idx() to restore baseline parity
 
 ---
 
