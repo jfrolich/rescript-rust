@@ -62,20 +62,19 @@ Do NOT spend time on small issues (@deriving edge cases, etc.) until the locatio
 ---
 
 **Last Updated:** 2026-02-02
-**Overall Status:** 477/1049 bsc-ast tests passing (45.5%)
+**Overall Status:** 949/1049 bsc-ast tests passing (90.5%)
 **sexp-locs Status:** 1049/1049 tests passing (100%) ✅
 
-**Note:** Many remaining failures are due to position sharing differences between OCaml and Rust.
-The AST structure is 100% correct (sexp-locs matches), but binary marshal format differs in object
-sharing patterns. See Phase 5 Task 5.2 for detailed analysis of external declaration differences.
+**Note:** Most remaining failures are edge cases - JSX, extensions, etc.
+The AST structure is 100% correct (sexp-locs matches).
 
 **Session progress (2026-02-02):**
-- Fixed type manifest location sharing in `fix_type_manifest_location()` (+1 file):
+- Fixed type manifest location sharing in `fix_type_manifest_location()` (+472 files!):
   - **Problem**: Was reusing `lid.loc` (same LocIdx) for `ptyp_loc`, causing the Location to be
     shared during marshal. OCaml creates a FRESH Location object (different block) with the same
     position values (which ARE shared inside).
   - **Fix**: Create a NEW LocIdx with `push_loc()` using the same start/end position indices.
-  - **Impact**: modType.res now passes (476 → 477)
+  - **Impact**: 477 → 949 passing (90.5%)
 - Fixed `Pmod_ident` location sharing (+8 files): OCaml uses `longident.loc` for both the wrapped
   longident and `pmod_loc`. Now Rust matches by using `lid.loc` directly instead of creating
   a new location.
