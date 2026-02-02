@@ -824,6 +824,46 @@ let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
 let fresh_pos_idx = p.push_start_pos();
 ```
 
+**When to use `push_start_pos()` (fresh allocation):**
+
+Use `push_start_pos()` when OCaml code captures a position in a **nested scope** that should NOT share with outer captures. Look for patterns in OCaml like:
+
+```ocaml
+(* In res_core.ml - outer function captures start_pos *)
+let parseOuter p =
+  let start_pos = p.Parser.start_pos in  (* capture 1 *)
+  ...
+  let inner = parseInner p in  (* parseInner also captures start_pos *)
+  ...
+
+(* Inner function captures its OWN start_pos - different object! *)
+let parseInner p =
+  let start_pos = p.Parser.start_pos in  (* capture 2 - DIFFERENT from capture 1 *)
+  ...
+```
+
+In this case, even if both captures happen at the same token position, OCaml creates TWO different position objects. The Rust equivalent:
+
+```rust
+fn parse_outer(p: &mut Parser) {
+    let start_pos_idx = p.start_pos_idx();  // Returns stored index
+    ...
+    let inner = parse_inner(p);
+    ...
+}
+
+fn parse_inner(p: &mut Parser) {
+    // If OCaml creates a fresh capture here, use push_start_pos()
+    let start_pos_idx = p.push_start_pos();  // Allocates NEW index
+    ...
+}
+```
+
+**How to determine if OCaml creates fresh:**
+1. If the position is captured in a **different function** that's called during parsing, it's usually fresh
+2. If the same function captures the position **multiple times at different parsing points**, each is fresh
+3. If a position is captured **once** and passed to multiple places, it's shared
+
 **Debugging tips:**
 - Add `eprintln!` in `marshal.rs` to trace object counter values
 - Compare specific AST nodes by adding sexp output
