@@ -14,7 +14,9 @@
 
 2. **Location sharing (~500+ files)** - Similar issue with Location structs. The mapper_to0 converts LocIdx to full Location structs, losing sharing. May require refactoring parsetree0 to use LocIdx or implementing location deduplication in marshal.
 
-Do NOT spend time on small issues (@deriving edge cases, module-level await) until the sharing issues are resolved - they only affect a handful of files compared to 700+.
+Do NOT spend time on small issues (@deriving edge cases, etc.) until the sharing issues are resolved - they only affect a handful of files compared to 700+.
+
+**Update (2026-02-02):** Module-level await transformation implemented (Task 2.8), but it doesn't improve parity due to the same sharing issues affecting other files.
 
 ---
 
