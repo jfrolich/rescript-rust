@@ -61,7 +61,7 @@ Do NOT spend time on small issues (@deriving edge cases, etc.) until the locatio
 
 ---
 
-**Last Updated:** 2026-02-02 (position sharing bidirectional analysis added)
+**Last Updated:** 2026-02-02 (detailed position sharing analysis added to Task 5.3)
 **Overall Status:** 496/1049 bsc-ast tests passing (47.3%)
 **sexp-locs Status:** 1049/1049 tests passing (100%) ✅
 
@@ -70,6 +70,10 @@ The AST structure is 100% correct (sexp-locs matches perfectly).
 
 **Position sharing investigation (2026-02-02):**
 - Investigated why external declarations have 4-byte size difference
+- Tested removing content-based caching → massive regression (496 → ~81 passing)
+- Content-based caching is necessary for current parity but is fundamentally wrong
+- The correct fix requires refactoring to identity-based position tracking
+- See Task 5.3 for detailed analysis and implementation plan
 - Key finding: The difference is NOT consistent across all failing tests:
   - Some tests: Rust shares MORE than OCaml (Rust smaller)
   - Some tests: Rust shares LESS than OCaml (Rust larger)
@@ -661,7 +665,59 @@ type annotation arity and function arity should be separate objects.
     - **CAUSE**: Content-based position caching in Rust (`start_pos_cache`) is WRONG
     - **SOLUTION**: Remove content-based caching, implement identity-based sharing to match OCaml
     - **This is NOT a "fundamental difference" - it's an incorrect implementation that must be fixed**
-- [ ] **Task 5.3**: Target 750/1049 bsc-ast parity (71%) - **REQUIRES**: Remove content-based position caching (see section above)
+- [ ] **Task 5.3**: Target 750/1049 bsc-ast parity (71%) - **REQUIRES**: Implement identity-based position sharing
+
+  **Detailed analysis (2026-02-02):**
+
+  Tested removing content-based caching (`start_pos_cache`, `end_pos_cache`) from state.rs.
+  Result: Massive regression from 496 to ~81 passing tests.
+
+  **Why simply removing caching doesn't work:**
+  - Content-based caching was providing SOME correct sharing (when positions happen to match)
+  - But it also causes INCORRECT sharing (positions with same values that shouldn't be shared)
+  - The bidirectional difference (sometimes Rust shares more, sometimes less) is evidence of this
+
+  **Example: `external foo: int => int = "foo"`**
+  - OCaml: 208 bytes, Rust: 212 bytes (4-byte difference = 1 extra Position object)
+  - Binary diff analysis at offset 0x80-0x90:
+    - OCaml: `c004 1a` (CODE_SHARED8, back-ref 26 objects) - shares position
+    - Rust: `04 0e 04 04` (inline INT8 values) - writes position fresh
+  - At offset 0xc0-0xd0:
+    - OCaml: writes fresh position
+    - Rust: `c004 1f` (CODE_SHARED8) - shares back to earlier position
+  - **The sharing is happening at DIFFERENT locations in the marshal stream**
+
+  **Root cause understanding:**
+  OCaml's sharing is determined by:
+  1. Parse order: which positions are created first
+  2. Marshal order: which positions are visited first during serialization
+  3. Physical identity: same variable = same object = shared
+
+  Rust's content-based caching shares by VALUE, not by IDENTITY:
+  - Two positions at (line=1, col=14) created at different parse points → same PosIdx (WRONG)
+  - Same position captured once, used in multiple places → may or may not share depending on timing
+
+  **The correct fix requires:**
+  1. Study OCaml's `res_core.ml` to identify which positions are captured once and reused
+  2. Refactor Rust parser to capture `PosIdx` early and pass it through code paths
+  3. Remove content-based deduplication - only share when explicitly passing the same `PosIdx`
+
+  **Example of correct pattern (already done for some cases):**
+  ```rust
+  // Current (partially implemented):
+  let start_pos_idx = p.push_start_pos();  // Capture PosIdx once
+  let vd = parse_value_description(p, attrs, start_pos_idx);  // Pass to inner function
+  let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);  // Reuse same PosIdx
+  ```
+
+  **What needs to change:**
+  - Change from `let start_pos = p.start_pos.clone()` (Position value)
+  - To `let start_pos_idx = p.push_start_pos()` (PosIdx index)
+  - Then use `mk_loc_idx_*` methods instead of `mk_loc_*` methods
+  - This is ~70+ code locations across expr.rs, typ.rs, pattern.rs, module.rs
+
+  **This is a significant refactoring effort but is the ONLY correct approach.**
+
 - [ ] **Task 5.4**: Target 1000/1049 bsc-ast parity (95%) - **REQUIRES**: Complete identity-based position sharing
 - [ ] **Task 5.5**: Achieve 1049/1049 bsc-ast parity (100%) - **REQUIRES**: Full OCaml position sharing parity
 
