@@ -642,7 +642,7 @@ fn handle_debugger(
                 typ: any_type,
             }),
             ret: Box::new(unit_type),
-            arity: Arity::default(),
+            arity: Arity::Full(1),  // OCaml uses Typ.arrows which sets arity = Some(list length)
         },
         ptyp_loc: none_loc,
         ptyp_attributes: vec![],
@@ -841,7 +841,7 @@ fn handle_external_ext(
                 typ: any_type.clone(),
             }),
             ret: Box::new(any_type.clone()),
-            arity: Arity::default(),
+            arity: Arity::Full(1),  // OCaml uses Typ.arrows which sets arity = Some(list length)
         },
         ptyp_loc: none_loc,
         ptyp_attributes: vec![],
@@ -1034,20 +1034,24 @@ fn handle_raw(
     pval_prim: &str,
 ) -> Expression {
     // Extract the string expression from the payload
-    let str_exp = match payload {
+    // OCaml's raw_as_string_exp_exn returns {e with pexp_desc = Pexp_constant ...}
+    // where e is the original expression from the payload.
+    // The returned expression uses e.pexp_loc (the payload string's location).
+    let (str_exp, payload_loc) = match payload {
         Payload::PStr(items) if items.len() == 1 => {
             if let StructureItemDesc::Pstr_eval(e, _) = &items[0].pstr_desc {
                 if let ExpressionDesc::Pexp_constant(Constant::String(s, _)) = &e.pexp_desc {
                     // Create a new string expression with delimiter stripped
                     // (OCaml strips the delimiter when transforming %raw)
-                    Expression {
+                    let exp = Expression {
                         pexp_desc: ExpressionDesc::Pexp_constant(Constant::String(
                             s.clone(),
                             None, // Strip delimiter
                         )),
                         pexp_loc: e.pexp_loc,
                         pexp_attributes: e.pexp_attributes.clone(),
-                    }
+                    };
+                    (exp, e.pexp_loc)
                 } else {
                     return expr.clone();
                 }
@@ -1058,6 +1062,7 @@ fn handle_raw(
         _ => return expr.clone(),
     };
 
+    // OCaml's local_external_apply uses `loc` (the extension's pexp_loc) for internal structures
     let loc = expr.pexp_loc;
 
     // Use none_loc() for types, matching OCaml's Ast_helper.Typ.any()
@@ -1080,7 +1085,7 @@ fn handle_raw(
                 typ: any_type.clone(),
             }),
             ret: Box::new(any_type),
-            arity: Arity::default(),
+            arity: Arity::Full(1),  // OCaml uses Typ.arrows which sets arity = Some(list length)
         },
         ptyp_loc: none_loc,
         ptyp_attributes: vec![],
@@ -1118,6 +1123,9 @@ fn handle_raw(
     let j_lident = arena.push_lident_static("J");
     let j_unsafe_expr = arena.push_ldot_static(j_lident, "unsafe_expr");
 
+    // Save attributes before moving str_exp
+    let payload_attributes = str_exp.pexp_attributes.clone();
+
     // Create the function application: J.unsafe_expr("code")
     let func_ident = Expression {
         pexp_desc: ExpressionDesc::Pexp_ident(Located { txt: j_unsafe_expr, loc }),
@@ -1137,6 +1145,9 @@ fn handle_raw(
     };
 
     // Create the final expression: let module J = struct ... end in J.unsafe_expr("code")
+    // OCaml's handle_raw returns {exp with pexp_desc = ...} so:
+    // - pexp_loc = exp.pexp_loc = payload string's location (payload_loc)
+    // - pexp_attributes = exp.pexp_attributes (or with internal_expansive added for functions)
     Expression {
         pexp_desc: ExpressionDesc::Pexp_letmodule(
             Located {
@@ -1146,8 +1157,8 @@ fn handle_raw(
             mod_expr,
             Box::new(apply_expr),
         ),
-        pexp_loc: loc,
-        pexp_attributes: expr.pexp_attributes.clone(),
+        pexp_loc: payload_loc,
+        pexp_attributes: payload_attributes,
     }
 }
 
@@ -1211,7 +1222,7 @@ fn handle_raw_structure(
                 typ: any_type.clone(),
             }),
             ret: Box::new(any_type),
-            arity: Arity::default(),
+            arity: Arity::Full(1),  // OCaml uses Typ.arrows which sets arity = Some(list length)
         },
         ptyp_loc: none_loc,
         ptyp_attributes: vec![],
