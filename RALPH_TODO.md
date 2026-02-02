@@ -62,11 +62,29 @@ Do NOT spend time on small issues (@deriving edge cases, etc.) until the locatio
 
 ---
 
-**Last Updated:** 2026-02-02 (position sharing deep analysis)
+**Last Updated:** 2026-02-03 (corrected byte analysis)
 **Overall Status:** 254/1049 bsc-ast tests passing (24.2%)
 **sexp-locs Status:** 1049/1049 tests passing (100%) ✅
 
-**Latest investigation (2026-02-02):**
+**Latest investigation (2026-02-03):**
+Deep-dived into `external foo: int => int = "foo"` binary difference (OCaml 208 bytes, Rust 212 bytes).
+
+**Critical correction of previous analysis:**
+Previous analysis incorrectly interpreted bytes at offset 0x8e:
+- Misread `c0 04 1a` as "CODE_SHARED8 back-ref" (c0 = shared8, 04 = distance 4...)
+- Actually: `c0` = small block header (tag=0, size=4 → Position), `04 1a` = internal fields
+
+**Correct interpretation at file offset 0x8e:**
+- OCaml: `c0` = small block header → writes FRESH Position block
+- Rust: `04 0e` = CODE_SHARED8 (0x04) with distance 14 (0x0e) → SHARES position
+
+**This means Rust shares MORE than OCaml at this point!**
+But Rust is 4 bytes LARGER overall, so somewhere else Rust writes fresh where OCaml shares.
+
+**Root cause:** Marshal traversal order differences between OCaml and Rust cause positions to be
+encountered at different points in the serialization, leading to different sharing patterns.
+
+**Previous investigation (2026-02-02):**
 Attempted to fix position sharing by using `push_start_pos()` (fresh position) instead of `start_pos_idx()`
 (cached position) in type parsing functions. This caused 15 regressions because:
 1. Simply making positions "fresh" changes the marshal output in unexpected ways
