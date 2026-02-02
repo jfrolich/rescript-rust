@@ -280,10 +280,14 @@ type annotation arity and function arity should be separate objects.
 ### Phase 5: Validation
 
 - [x] **Task 5.1**: Run full test suite, verify no regressions
-  - Verified: 258/1049 bsc-ast tests passing (24.6%)
+  - Verified: 257/1049 bsc-ast tests passing (24.5%)
   - No regressions detected from baseline
   - **Pmty_ident fix (2026-02-02)**: Fixed dependency extraction for module type identifiers
-    - Added 3 files: modType/ident.res, moduleTypeDeclaration.res, UrlUtils.res
+    - Pmty_ident uses add_parent semantics (simple Lidents add nothing)
+    - Pmty_alias uses addmodule semantics (full path)
+  - **with_constraint fix (2026-02-02)**: Fixed dependency extraction for Pmty_with constraints
+    - OCaml ignores the path being constrained (first argument)
+    - Only processes the type declaration or right-hand side module path
   - **Analysis of remaining failures (2026-02-02)**:
     - JSX with children: mapper_to0 issue, cannot fix per instructions
     - `@as` attributes in externals: Rust FFI encoding differs from OCaml
