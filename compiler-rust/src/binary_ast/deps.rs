@@ -622,8 +622,13 @@ impl<'a> DependencyCollector<'a> {
 
     fn add_module_type(&mut self, mt: &ModuleType) {
         match &mt.pmty_desc {
-            ModuleTypeDesc::Pmty_ident(lid) | ModuleTypeDesc::Pmty_alias(lid) => {
-                // Module type ident/alias uses full path (OCaml: addmodule for alias, add for ident)
+            ModuleTypeDesc::Pmty_ident(lid) => {
+                // Pmty_ident uses add = add_parent (OCaml: add bv l)
+                // For simple Lidents like `Tree` or `Intf`, this adds nothing (correct)
+                self.add_lident_idx(lid.txt);
+            }
+            ModuleTypeDesc::Pmty_alias(lid) => {
+                // Pmty_alias uses addmodule (full path)
                 self.add_lident_idx_full(lid.txt);
             }
             ModuleTypeDesc::Pmty_signature(sig) => {

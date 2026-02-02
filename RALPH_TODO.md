@@ -1,10 +1,8 @@
 # Ralph TODO: Binary AST Parity
 
 **Last Updated:** 2026-02-02
-**Overall Status:** 254/1049 bsc-ast tests passing (24.2%)
+**Overall Status:** 258/1049 bsc-ast tests passing (24.6%)
 **sexp-locs Status:** 1049/1049 tests passing (100%) ✅
-
-**Note**: Baseline file needs regeneration - some entries reference non-existent files.
 
 ---
 
@@ -55,6 +53,12 @@ Previously Rust was adding all uppercase identifiers, incorrectly including `Non
 - `module Types = Foo` binds `Types` so references to `Types.X` don't add `Types` as a dependency
 - `module Make = (Impl: Intf) => ...` binds `Impl` in the functor body
 - This matches OCaml's `bv` (bound variables) tracking in `depend.ml`
+
+**Additional fix (2026-02-02):** Pmty_ident dependency extraction:
+- `Pmty_ident` (e.g., `module type T = Tree`) uses `add_parent`, not `addmodule`
+- For simple Lidents like `Tree` or `Intf`, this adds nothing to dependencies
+- `Pmty_alias` still uses `addmodule` (full path)
+- This fixes 3 files: modType/ident.res, moduleTypeDeclaration.res, UrlUtils.res
 
 ---
 
