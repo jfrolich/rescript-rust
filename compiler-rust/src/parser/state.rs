@@ -385,6 +385,21 @@ impl<'src> Parser<'src> {
         self.arena.mk_loc(start, end)
     }
 
+    /// Create a location from a start PosIdx to current end_pos.
+    /// This is the PosIdx-based equivalent of mk_loc_to_end.
+    /// Pushes a FRESH end position (no caching) to match OCaml's behavior.
+    pub fn mk_loc_idx_to_end(&mut self, start: PosIdx) -> LocIdx {
+        let end = self.arena.push_position(self.end_pos);
+        self.arena.mk_loc(start, end)
+    }
+
+    /// Create a location from a start PosIdx to another location's end.
+    /// Reuses the end position from end_loc.
+    pub fn mk_loc_idx_to_end_of(&mut self, start: PosIdx, end_loc: LocIdx) -> LocIdx {
+        let end = self.arena.loc_end_idx(end_loc);
+        self.arena.mk_loc(start, end)
+    }
+
     /// Get or push the prev_end_pos, using cache for sharing.
     /// When multiple locations end at the same prev_end_pos (before consuming more tokens),
     /// they will share the same PosIdx in the marshal output.

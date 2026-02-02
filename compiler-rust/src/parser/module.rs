@@ -261,7 +261,7 @@ pub fn parse_structure_item(p: &mut Parser<'_>) -> Option<StructureItem> {
             if p.token == Token::Lparen {
                 // Parse the first-class module, then continue with primary/binary parsing
                 let pack_expr =
-                    super::expr::parse_first_class_module_expr_from_paren(p, start_pos.clone());
+                    super::expr::parse_first_class_module_expr_from_paren(p, start_pos_idx);
                 // Continue parsing the expression (handles ->, [], etc.)
                 let expr = super::expr::parse_expr_with_operand(p, pack_expr);
                 Some(StructureItemDesc::Pstr_eval(expr, attrs.clone()))

@@ -4,7 +4,7 @@
 //! into expression AST nodes.
 
 use crate::location::Position;
-use crate::parse_arena::{LidentIdx, Located, LocIdx, ParseArena, StrIdx};
+use crate::parse_arena::{LidentIdx, Located, LocIdx, ParseArena, PosIdx, StrIdx};
 
 use super::ast::*;
 use super::core::{ExprContext, ast_helper, make_braces_attr, mknoloc, recover, with_loc};
@@ -191,7 +191,7 @@ fn transform_placeholder_application(
 /// Parse a value path after a dot (for field access).
 /// This parses things like `Lexing.pos_fname` into a Longident.
 fn parse_value_path_after_dot(p: &mut Parser<'_>) -> Located<LidentIdx> {
-    let start_pos = p.start_pos.clone();
+    let start_pos_idx = p.push_start_pos_fresh();
 
     match &p.token {
         Token::Uident(name) => {
@@ -229,28 +229,28 @@ fn parse_value_path_after_dot(p: &mut Parser<'_>) -> Located<LidentIdx> {
                 }
             }
 
-            let loc = p.mk_loc_to_prev_end(&start_pos);
+            let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
             let lid_idx = p.push_longident(path);
             with_loc(lid_idx, loc)
         }
         Token::Lident(name) => {
             let lid_idx = p.push_lident(name.clone());
             p.next();
-            let loc = p.mk_loc_to_prev_end(&start_pos);
+            let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
             with_loc(lid_idx, loc)
         }
         Token::String(name) => {
             // Quoted field: ."switch"
             let lid_idx = p.push_lident(name.clone());
             p.next();
-            let loc = p.mk_loc_to_prev_end(&start_pos);
+            let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
             with_loc(lid_idx, loc)
         }
         _ => {
             p.err(DiagnosticCategory::Message(
                 "Expected identifier after dot".to_string(),
             ));
-            let loc = p.mk_loc_to_prev_end(&start_pos);
+            let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
             let lid_idx = p.push_lident_static("_");
             with_loc(lid_idx, loc)
         }
@@ -259,7 +259,7 @@ fn parse_value_path_after_dot(p: &mut Parser<'_>) -> Located<LidentIdx> {
 
 /// Parse a value or constructor expression.
 pub fn parse_value_or_constructor(p: &mut Parser<'_>) -> Expression {
-    let start_pos = p.start_pos.clone();
+    let start_pos_idx = p.push_start_pos_fresh();
 
     match &p.token {
         Token::Uident(name) => {
@@ -292,7 +292,7 @@ pub fn parse_value_or_constructor(p: &mut Parser<'_>) -> Expression {
 
             let lid = super::core::build_longident(p.arena_mut(), &path_parts);
             let lid_idx = p.push_longident(lid);
-            let loc = p.mk_loc_to_prev_end(&start_pos);
+            let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
 
             // Check if it's a constructor (all uppercase components)
             if path_parts
@@ -309,7 +309,7 @@ pub fn parse_value_or_constructor(p: &mut Parser<'_>) -> Expression {
                         arg.map(Box::new),
                     ),
                     pexp_loc: if has_arg {
-                        p.mk_loc_to_prev_end(&start_pos)
+                        p.mk_loc_idx_to_prev_end(start_pos_idx)
                     } else {
                         loc
                     },
@@ -323,7 +323,7 @@ pub fn parse_value_or_constructor(p: &mut Parser<'_>) -> Expression {
         Token::Lident(name) => {
             let name = name.clone();
             p.next();
-            let loc = p.mk_loc_to_prev_end(&start_pos);
+            let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
             let lid_idx = p.push_lident(&name);
             ast_helper::make_ident_idx(lid_idx, loc)
         }
@@ -342,12 +342,12 @@ fn parse_constructor_arg(p: &mut Parser<'_>) -> Option<Expression> {
         // If there's a newline before the `(`, it's not a constructor argument
         // but the start of a new statement
         Token::Lparen if !p.has_newline_before() => {
-            let start_pos = p.start_pos.clone();
+            let start_pos_idx = p.push_start_pos_fresh();
             p.next();
             if p.token == Token::Rparen {
                 // Empty constructor args: Rgb()
                 p.next();
-                let loc = p.mk_loc_to_prev_end(&start_pos);
+                let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
                 let lid_idx = p.push_lident_static("()");
                 Some(Expression {
                     pexp_desc: ExpressionDesc::Pexp_construct(with_loc(lid_idx, loc.clone()), None),
@@ -358,8 +358,7 @@ fn parse_constructor_arg(p: &mut Parser<'_>) -> Option<Expression> {
                 let first_expr = parse_constrained_or_coerced_expr(p);
                 if p.token == Token::Comma {
                     // Multiple arguments: Rgb(r, g, b) -> tuple
-                    // OCaml includes the ( in the tuple location
-                    let tuple_start = start_pos.clone();
+                    // OCaml includes the ( in the tuple location - reuse start_pos_idx
                     let mut exprs = vec![first_expr];
                     while p.token == Token::Comma {
                         p.next();
@@ -374,7 +373,7 @@ fn parse_constructor_arg(p: &mut Parser<'_>) -> Option<Expression> {
                     if exprs.len() == 1 {
                         Some(exprs.into_iter().next().unwrap())
                     } else {
-                        let loc = p.mk_loc_to_prev_end(&tuple_start);
+                        let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
                         Some(Expression {
                             pexp_desc: ExpressionDesc::Pexp_tuple(exprs),
                             pexp_loc: loc,
@@ -388,7 +387,7 @@ fn parse_constructor_arg(p: &mut Parser<'_>) -> Option<Expression> {
                     // C((1,2)) = single tuple argument = Pexp_tuple([Pexp_tuple([1,2])])
                     // C(1,2) = multiple arguments = Pexp_tuple([1, 2])
                     if matches!(first_expr.pexp_desc, ExpressionDesc::Pexp_tuple(_)) {
-                        let loc = p.mk_loc_to_prev_end(&start_pos);
+                        let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
                         Some(Expression {
                             pexp_desc: ExpressionDesc::Pexp_tuple(vec![first_expr]),
                             pexp_loc: loc,
@@ -486,7 +485,8 @@ pub fn parse_ternary_expr(p: &mut Parser<'_>, left_operand: Expression) -> Expre
 
 /// Parse an operand expression (handles unary operators and primary expressions).
 pub fn parse_operand_expr(p: &mut Parser<'_>, context: ExprContext) -> Expression {
-    let start_pos = p.start_pos.clone();
+    let start_pos_idx = p.push_start_pos_fresh();
+    let start_pos = p.start_pos.clone(); // Keep for make_unary_expr which needs Position
 
     // Parse leading attributes first (e.g., @attr expr)
     let attrs = parse_attributes(p);
@@ -531,7 +531,7 @@ pub fn parse_operand_expr(p: &mut Parser<'_>, context: ExprContext) -> Expressio
             } else {
                 // Just a regular "async" identifier - continue with primary expr parsing
                 // to handle function calls like async(x)
-                let loc = p.mk_loc_to_prev_end(&start_pos);
+                let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
                 let lid_idx = p.push_lident_static("async");
                 let ident = ast_helper::make_ident_idx(lid_idx, loc);
                 (parse_primary_expr(p, ident, false), false)
@@ -542,7 +542,7 @@ pub fn parse_operand_expr(p: &mut Parser<'_>, context: ExprContext) -> Expressio
             // Handle assert directly to preserve attribute location in expr location
             p.next();
             let arg = parse_expr(p);
-            let loc = p.mk_loc_to_prev_end(&start_pos);
+            let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
             (
                 Expression {
                     pexp_desc: ExpressionDesc::Pexp_assert(Box::new(arg)),
@@ -586,7 +586,7 @@ pub fn parse_operand_expr(p: &mut Parser<'_>, context: ExprContext) -> Expressio
 
 /// Parse a unary expression.
 pub fn parse_unary_expr(p: &mut Parser<'_>) -> Expression {
-    let start_pos = p.start_pos.clone();
+    let start_pos = p.start_pos.clone(); // Keep for make_unary_expr which needs Position
 
     // Parse any leading attributes: @attr expr
     let attrs = parse_attributes(p);
@@ -621,14 +621,14 @@ pub fn parse_unary_expr(p: &mut Parser<'_>) -> Expression {
 
 /// Parse an await expression.
 pub fn parse_await_expression(p: &mut Parser<'_>) -> Expression {
-    let start_pos = p.start_pos.clone();
+    let start_pos_idx = p.push_start_pos_fresh();
     p.expect(Token::Await);
     // Parse with -> precedence to match OCaml behavior
     // This allows: await x->Promise.resolve to parse as await (x->Promise.resolve)
     let token_prec = Token::MinusGreater.precedence();
     let operand = parse_unary_expr(p);
     let expr = parse_binary_expr(p, operand, token_prec, ExprContext::Ordinary);
-    let loc = p.mk_loc(&start_pos, &p.loc_end(expr.pexp_loc));
+    let loc = p.mk_loc_idx_to_end_of(start_pos_idx, expr.pexp_loc);
 
     Expression {
         pexp_desc: ExpressionDesc::Pexp_await(Box::new(expr)),
@@ -1285,10 +1285,10 @@ fn parse_attribute(p: &mut Parser<'_>) -> Option<Attribute> {
         return None;
     }
     // Capture position before @ so attribute location includes it
-    let start_pos = p.start_pos.clone();
+    let start_pos_idx = p.push_start_pos_fresh();
     p.next();
 
-    let attr_id = parse_attribute_id(p, start_pos);
+    let attr_id = parse_attribute_id(p, start_pos_idx);
 
     // Only parse Lparen as payload if it's immediately adjacent to the attribute ID
     // (no whitespace between them). e.g., @attr(payload) vs @attr (expression)
@@ -1307,8 +1307,8 @@ fn parse_attribute(p: &mut Parser<'_>) -> Option<Attribute> {
 
 /// Parse an attribute identifier.
 /// Attribute identifiers can be regular identifiers or certain keywords like `as`, `type`, etc.
-/// The `start_pos` parameter should be the position BEFORE the `@` was consumed.
-fn parse_attribute_id(p: &mut Parser<'_>, start_pos: Position) -> StringLoc {
+/// The `start_pos_idx` parameter should be the PosIdx from BEFORE the `@` was consumed.
+fn parse_attribute_id(p: &mut Parser<'_>, start_pos_idx: PosIdx) -> StringLoc {
     let mut parts = vec![];
 
     loop {
@@ -1356,7 +1356,7 @@ fn parse_attribute_id(p: &mut Parser<'_>, start_pos: Position) -> StringLoc {
     }
 
     let name = parts.join(".");
-    let loc = p.mk_loc_to_prev_end(&start_pos);
+    let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
     let str_idx = p.arena_mut().push_string(name);
     with_loc(str_idx, loc)
 }
@@ -1368,12 +1368,12 @@ fn parse_payload(p: &mut Parser<'_>) -> Payload {
     if let Token::String(s) = &p.token {
         let s = s.clone();
         let tag = get_string_tag(p);
-        let start_pos = p.start_pos.clone();
+        let start_pos_idx = p.push_start_pos_fresh();
         p.next();
         // Create a structure item with the string expression
-        // IMPORTANT: Each location must be created separately to match OCaml's allocation pattern
-        let pexp_loc = p.mk_loc_to_prev_end(&start_pos);
-        let pstr_loc = p.mk_loc_to_prev_end(&start_pos);
+        // In OCaml, both locations share the same start_pos variable, so we reuse the same PosIdx
+        let pexp_loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
+        let pstr_loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
         let str_expr = Expression {
             pexp_desc: ExpressionDesc::Pexp_constant(Constant::String(s, tag)),
             pexp_loc,
@@ -1565,13 +1565,13 @@ fn is_right_associative(token: &Token) -> bool {
 /// Parse an atomic expression.
 pub fn parse_atomic_expr(p: &mut Parser<'_>) -> Expression {
     p.leave_breadcrumb(Grammar::ExprOperand);
-    let start_pos = p.start_pos.clone();
+    let start_pos_idx = p.push_start_pos_fresh();
 
     let expr = match &p.token {
         Token::True | Token::False => {
             let is_true = p.token == Token::True;
             p.next();
-            let loc = p.mk_loc_to_prev_end(&start_pos);
+            let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
             let lid = super::core::make_lident_static(p.arena_mut(), if is_true { "true" } else { "false" });
             let lid_idx = p.push_longident(lid);
             Expression {
@@ -1582,14 +1582,14 @@ pub fn parse_atomic_expr(p: &mut Parser<'_>) -> Expression {
         }
         Token::Int { .. } | Token::String(_) | Token::Float { .. } | Token::Codepoint { .. } => {
             let c = parse_constant(p);
-            let loc = p.mk_loc_to_prev_end(&start_pos);
+            let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
             ast_helper::make_constant(c, loc)
         }
         Token::Regex { pattern, flags } => {
             let pattern = pattern.clone();
             let flags = flags.clone();
             p.next();
-            let loc = p.mk_loc_to_prev_end(&start_pos);
+            let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
 
             // OCaml format: single string with slashes: "/" + pattern + "/" + flags
             let regex_str = format!("/{}/{}", pattern, flags);
@@ -1621,7 +1621,7 @@ pub fn parse_atomic_expr(p: &mut Parser<'_>) -> Expression {
             if p.token == Token::Rparen {
                 // Unit: ()
                 p.next();
-                let loc = p.mk_loc_to_prev_end(&start_pos);
+                let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
                 let lid_idx = p.push_lident_static("()");
                 Expression {
                     pexp_desc: ExpressionDesc::Pexp_construct(with_loc(lid_idx, loc.clone()), None),
@@ -1634,7 +1634,7 @@ pub fn parse_atomic_expr(p: &mut Parser<'_>) -> Expression {
                 if p.token == Token::Comma {
                     // Tuple
                     p.next();
-                    parse_tuple_expr(p, start_pos, expr)
+                    parse_tuple_expr(p, start_pos_idx, expr)
                 } else {
                     p.expect(Token::Rparen);
                     expr
@@ -1645,11 +1645,11 @@ pub fn parse_atomic_expr(p: &mut Parser<'_>) -> Expression {
         Token::Lbrace => parse_braced_or_record_expr(p),
         Token::List => {
             p.next();
-            parse_list_expr(p, start_pos)
+            parse_list_expr(p, start_pos_idx)
         }
         Token::Dict => {
             p.next();
-            parse_dict_expr(p, start_pos)
+            parse_dict_expr(p, start_pos_idx)
         }
         Token::If => parse_if_expr(p),
         Token::Switch => parse_switch_expr(p),
@@ -1660,7 +1660,7 @@ pub fn parse_atomic_expr(p: &mut Parser<'_>) -> Expression {
             p.next();
             // Assert takes a full expression, not just an operand
             let arg = parse_expr(p);
-            let loc = p.mk_loc_to_prev_end(&start_pos);
+            let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
             Expression {
                 pexp_desc: ExpressionDesc::Pexp_assert(Box::new(arg)),
                 pexp_loc: loc,
@@ -1716,7 +1716,7 @@ pub fn parse_atomic_expr(p: &mut Parser<'_>) -> Expression {
                 Payload::PStr(vec![])
             };
 
-            let loc = p.mk_loc_to_prev_end(&start_pos);
+            let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
             Expression {
                 pexp_desc: ExpressionDesc::Pexp_extension((name, payload)),
                 pexp_loc: loc,
@@ -1728,7 +1728,7 @@ pub fn parse_atomic_expr(p: &mut Parser<'_>) -> Expression {
             // OCaml: after parse_template_expr, overrides location to [start_pos, p.prev_end_pos)
             // This ensures the outer expression location spans from opening to closing backtick
             let mut expr = parse_template_literal(p);
-            expr.pexp_loc = p.mk_loc_to_prev_end(&start_pos);
+            expr.pexp_loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
             expr
         }
         Token::Hash => {
@@ -1852,7 +1852,7 @@ pub fn parse_atomic_expr(p: &mut Parser<'_>) -> Expression {
                 None
             };
 
-            let loc = p.mk_loc_to_prev_end(&start_pos);
+            let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
             Expression {
                 pexp_desc: ExpressionDesc::Pexp_variant(tag, arg),
                 pexp_loc: loc,
@@ -1862,11 +1862,11 @@ pub fn parse_atomic_expr(p: &mut Parser<'_>) -> Expression {
         Token::Module => {
             // First-class module: module(Expr) or module(Expr: Type)
             p.next();
-            parse_first_class_module_expr(p, start_pos)
+            parse_first_class_module_expr(p, start_pos_idx)
         }
         Token::Underscore => {
             p.next();
-            let loc = p.mk_loc_to_prev_end(&start_pos);
+            let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
             let lid = super::core::make_lident_static(p.arena_mut(), "_");
             ast_helper::make_ident(p, lid, loc)
         }
@@ -2364,7 +2364,7 @@ fn parse_argument(p: &mut Parser<'_>) -> (ArgLabel, Expression) {
 // ============================================================================
 
 /// Parse a tuple expression.
-fn parse_tuple_expr(p: &mut Parser<'_>, start_pos: Position, first: Expression) -> Expression {
+fn parse_tuple_expr(p: &mut Parser<'_>, start_pos_idx: PosIdx, first: Expression) -> Expression {
     let mut elements = vec![first];
 
     while p.token != Token::Rparen && p.token != Token::Eof {
@@ -2375,7 +2375,7 @@ fn parse_tuple_expr(p: &mut Parser<'_>, start_pos: Position, first: Expression) 
     }
 
     p.expect(Token::Rparen);
-    let loc = p.mk_loc_to_prev_end(&start_pos);
+    let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
 
     if elements.len() < 2 {
         p.err(DiagnosticCategory::Message(
@@ -2398,7 +2398,7 @@ fn parse_tuple_expr(p: &mut Parser<'_>, start_pos: Position, first: Expression) 
 /// - `[a, b, c]` becomes `Pexp_array([a, b, c])`
 /// - `[...xs, a, b]` becomes `Belt.Array.concatMany([xs, [a, b]])`
 fn parse_array_expr(p: &mut Parser<'_>) -> Expression {
-    let start_pos = p.start_pos.clone();
+    let start_pos_idx = p.push_start_pos_fresh();
     p.expect(Token::Lbracket);
 
     // Track items with spread marker: (is_spread, expr)
@@ -2416,7 +2416,7 @@ fn parse_array_expr(p: &mut Parser<'_>) -> Expression {
     }
 
     p.expect(Token::Rbracket);
-    let loc = p.mk_loc_to_prev_end(&start_pos);
+    let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
 
     // Check if there are any spreads
     let has_spread = items.iter().any(|(is_spread, _)| *is_spread);
@@ -2505,7 +2505,7 @@ fn parse_array_expr(p: &mut Parser<'_>) -> Expression {
 /// - `list{1, 2, ...rest}` becomes `1 :: (2 :: rest)`
 /// - `list{...xs, ...ys}` becomes `Belt.List.concatMany([xs, ys])`
 /// - `list{...xs, 1, ...ys}` becomes `Belt.List.concatMany([xs, 1 :: ys])`
-fn parse_list_expr(p: &mut Parser<'_>, start_pos: Position) -> Expression {
+fn parse_list_expr(p: &mut Parser<'_>, start_pos_idx: PosIdx) -> Expression {
     // Token::List already consumed the opening '{'
     // Each item is (is_spread, expr, spread_start_pos)
     // For spread items, spread_start_pos is before `...`; for non-spread, it's at the expr start
@@ -2527,7 +2527,7 @@ fn parse_list_expr(p: &mut Parser<'_>, start_pos: Position) -> Expression {
     }
 
     p.expect(Token::Rbrace);
-    let loc = p.mk_loc_to_prev_end(&start_pos);
+    let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
 
     // Split items into segments by spread boundaries
     // Each segment is (non_spread_items, optional_spread)
@@ -2785,7 +2785,7 @@ fn make_list_expression_with_loc(
 /// Note: The Token::Dict already includes the '{', so we don't expect Lbrace.
 ///
 /// Desugars to: Primitive_dict.make([("key1", val1), ("key2", val2), ...])
-fn parse_dict_expr(p: &mut Parser<'_>, start_pos: Position) -> Expression {
+fn parse_dict_expr(p: &mut Parser<'_>, start_pos_idx: PosIdx) -> Expression {
     // Token::Dict already consumed the opening '{'
 
     let mut key_value_pairs: Vec<Expression> = vec![];
@@ -2796,10 +2796,9 @@ fn parse_dict_expr(p: &mut Parser<'_>, start_pos: Position) -> Expression {
                 let key = s.clone();
                 // Dict keys are always None (printed as "key"), not Some("js")
                 // This matches OCaml's behavior where dict keys stay as object property names
-                let key_start = p.start_pos.clone();
+                let key_start_idx = p.push_start_pos_fresh();
                 p.next();
-                let key_end = p.prev_end_pos.clone();
-                let key_loc = p.mk_loc(&key_start, &key_end);
+                let key_loc = p.mk_loc_idx_to_prev_end(key_start_idx);
 
                 p.expect(Token::Colon);
                 let value = parse_expr(p);
@@ -2812,8 +2811,7 @@ fn parse_dict_expr(p: &mut Parser<'_>, start_pos: Position) -> Expression {
                     pexp_loc: key_loc,
                     pexp_attributes: vec![],
                 };
-                // Reuse the existing PosIdx from key_loc to match OCaml's sharing
-                let key_start_idx = p.loc_start_idx(key_loc);
+                // Reuse the existing PosIdx from key_start_idx to match OCaml's sharing
                 let value_end_idx = p.get_or_push_end_pos(value_end);
                 let tuple_loc = p.mk_loc_idx_full(key_start_idx, value_end_idx);
                 let tuple = Expression {
@@ -2836,7 +2834,7 @@ fn parse_dict_expr(p: &mut Parser<'_>, start_pos: Position) -> Expression {
     }
 
     p.expect(Token::Rbrace);
-    let loc = p.mk_loc_to_prev_end(&start_pos);
+    let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
 
     // Create array of key-value pairs
     let array_expr = Expression {
@@ -2877,13 +2875,13 @@ fn parse_dict_expr(p: &mut Parser<'_>, start_pos: Position) -> Expression {
 
 /// Parse a braced expression or record.
 fn parse_braced_or_record_expr(p: &mut Parser<'_>) -> Expression {
-    let start_pos = p.start_pos.clone();
+    let start_pos_idx = p.push_start_pos_fresh();
     p.expect(Token::Lbrace);
 
     // Check for empty braces
     if p.token == Token::Rbrace {
         p.next();
-        let loc = p.mk_loc_to_prev_end(&start_pos);
+        let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
         return Expression {
             pexp_desc: ExpressionDesc::Pexp_record(vec![], None),
             pexp_loc: loc,
@@ -2894,7 +2892,7 @@ fn parse_braced_or_record_expr(p: &mut Parser<'_>) -> Expression {
     // Check for spread - definitely a record
     if p.token == Token::DotDotDot {
         p.next();
-        let spread_start = p.start_pos.clone();
+        let spread_start_idx = p.push_start_pos_fresh();
         // Parse the spread expression including binary operators like ->
         // We need to handle expressions like: {...states->sequence, valuesOpt: None}
         let operand = parse_unary_expr(p);
@@ -2903,7 +2901,7 @@ fn parse_braced_or_record_expr(p: &mut Parser<'_>) -> Expression {
         if p.token == Token::Colon {
             p.next();
             let typ = super::typ::parse_typ_expr(p);
-            let loc = p.mk_loc_to_prev_end(&spread_start);
+            let loc = p.mk_loc_idx_to_prev_end(spread_start_idx);
             spread = Expression {
                 pexp_desc: ExpressionDesc::Pexp_constraint(Box::new(spread), typ),
                 pexp_loc: loc,
@@ -2913,7 +2911,7 @@ fn parse_braced_or_record_expr(p: &mut Parser<'_>) -> Expression {
         p.optional(&Token::Comma);
         let fields = parse_record_fields(p);
         p.expect(Token::Rbrace);
-        let loc = p.mk_loc_to_prev_end(&start_pos);
+        let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
         return Expression {
             pexp_desc: ExpressionDesc::Pexp_record(fields, Some(Box::new(spread))),
             pexp_loc: loc,
@@ -2923,7 +2921,7 @@ fn parse_braced_or_record_expr(p: &mut Parser<'_>) -> Expression {
 
     // Check if this looks like a block expression (module-level constructs or let/expressions)
     if is_block_expression_start(&p.token) {
-        return parse_block_expr(p, start_pos);
+        return parse_block_expr(p, start_pos_idx);
     }
 
     // Check if this looks like a record (name followed by : or ,)
@@ -2976,7 +2974,7 @@ fn parse_braced_or_record_expr(p: &mut Parser<'_>) -> Expression {
     if is_record {
         let fields = parse_record_fields(p);
         p.expect(Token::Rbrace);
-        let loc = p.mk_loc_to_prev_end(&start_pos);
+        let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
         return Expression {
             pexp_desc: ExpressionDesc::Pexp_record(fields, None),
             pexp_loc: loc,
@@ -2985,7 +2983,7 @@ fn parse_braced_or_record_expr(p: &mut Parser<'_>) -> Expression {
     }
 
     if is_js_object {
-        return parse_js_object_expr(p, start_pos);
+        return parse_js_object_expr(p, start_pos_idx);
     }
 
     // Check for braced arrow function: {ident =>} (like OCaml's special case)
@@ -3000,11 +2998,11 @@ fn parse_braced_or_record_expr(p: &mut Parser<'_>) -> Expression {
     });
 
     if is_braced_arrow_ident {
-        return parse_braced_arrow_ident(p, start_pos);
+        return parse_braced_arrow_ident(p, start_pos_idx);
     }
 
     // Fall back to block expression
-    parse_block_expr(p, start_pos)
+    parse_block_expr(p, start_pos_idx)
 }
 
 /// Check if a token starts a block expression (vs record).
@@ -3027,7 +3025,7 @@ fn is_block_expression_start(token: &Token) -> bool {
 
 /// Parse the special `{ident => body}` braced arrow function.
 /// OCaml extends the pattern location to include `{` for this case.
-fn parse_braced_arrow_ident(p: &mut Parser<'_>, start_pos: Position) -> Expression {
+fn parse_braced_arrow_ident(p: &mut Parser<'_>, start_pos_idx: PosIdx) -> Expression {
     // Get the identifier
     let ident_name = match &p.token {
         Token::Lident(name) => name.clone(),
@@ -3035,10 +3033,10 @@ fn parse_braced_arrow_ident(p: &mut Parser<'_>, start_pos: Position) -> Expressi
     };
     let _ident_start = p.start_pos.clone();
     p.next();
-    let ident_end = p.prev_end_pos.clone();
+    let ident_end_idx = p.get_or_push_prev_end_pos();
 
     // The pattern location is from `{` to end of ident (like OCaml)
-    let pat_loc = p.mk_loc(&start_pos, &ident_end);
+    let pat_loc = p.mk_loc_idx(start_pos_idx, ident_end_idx);
     let var_loc = pat_loc.clone();
 
     // Create the pattern with extended location
@@ -3053,12 +3051,14 @@ fn parse_braced_arrow_ident(p: &mut Parser<'_>, start_pos: Position) -> Expressi
     p.expect(Token::EqualGreater);
 
     // The parameter's start_pos is the `{` position (for OCaml compatibility)
+    // Convert PosIdx to Position for struct field
+    let start_pos = p.arena().get_position(start_pos_idx).clone();
     let term_param = super::core::FundefTermParam {
         attrs: vec![],
         label: ArgLabel::Nolabel,
         expr: None,
         pat,
-        start_pos: start_pos.clone(),
+        start_pos,
     };
 
     // Parse as an arrow expression with the pre-built parameter
@@ -3089,7 +3089,7 @@ fn parse_braced_arrow_ident(p: &mut Parser<'_>, start_pos: Position) -> Expressi
     };
 
     p.expect(Token::Rbrace);
-    let loc = p.mk_loc_to_prev_end(&start_pos);
+    let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
 
     // Add res.braces attribute
     let braces_attr = make_braces_attr(p.arena_mut(), loc);
@@ -3121,12 +3121,12 @@ fn parse_expr_block(p: &mut Parser<'_>) -> Expression {
 /// Parse a block expression { stmt1; stmt2; expr } WITH res.braces attribute.
 /// This is used for standalone braced expressions where res.braces is needed
 /// to preserve the bracing information.
-fn parse_block_expr(p: &mut Parser<'_>, start_pos: Position) -> Expression {
+fn parse_block_expr(p: &mut Parser<'_>, start_pos_idx: PosIdx) -> Expression {
     // Parse the block body - this handles building the proper nesting for let/module/open/exception
     let body = parse_block_body(p);
 
     p.expect(Token::Rbrace);
-    let loc = p.mk_loc_to_prev_end(&start_pos);
+    let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
 
     let mut expr = match body {
         Some(e) => e,
@@ -3200,12 +3200,12 @@ fn parse_block_body(p: &mut Parser<'_>) -> Option<Expression> {
             return Some(parse_let_in_block_with_continuation_and_attrs(p, attrs));
         }
         Token::Module => {
-            let expr_start = p.start_pos.clone();
+            let expr_start_idx = p.push_start_pos_fresh();
             p.next();
             // Check for first-class module: module(Expr) or module(Expr: Type)
             if p.token == Token::Lparen {
                 // Parse the first-class module and continue with full expression
-                let pack_expr = parse_first_class_module_expr(p, expr_start);
+                let pack_expr = parse_first_class_module_expr(p, expr_start_idx);
                 let expr = parse_expr_with_operand(p, pack_expr);
 
                 // Consume optional semicolon
@@ -3264,7 +3264,7 @@ fn parse_block_body(p: &mut Parser<'_>) -> Option<Expression> {
                 });
 
                 // OCaml uses p.prev_end_pos for Pexp_letmodule location
-                let loc = p.mk_loc_to_prev_end(&expr_start);
+                let loc = p.mk_loc_idx_to_prev_end(expr_start_idx);
                 Expression {
                     pexp_desc: ExpressionDesc::Pexp_letmodule(
                         module_name,
@@ -3278,7 +3278,8 @@ fn parse_block_body(p: &mut Parser<'_>) -> Option<Expression> {
         }
         Token::Exception => {
             // Capture start position BEFORE consuming 'exception' for accurate location
-            let expr_start = p.start_pos.clone();
+            let expr_start_idx = p.push_start_pos_fresh();
+            let expr_start = p.start_pos.clone(); // Keep for parse_extension_constructor
             p.next();
             let ext =
                 super::module::parse_extension_constructor(p, vec![], Some(expr_start.clone()));
@@ -3295,7 +3296,7 @@ fn parse_block_body(p: &mut Parser<'_>) -> Option<Expression> {
             });
 
             // OCaml uses p.prev_end_pos for Pexp_letexception location
-            let loc = p.mk_loc_to_prev_end(&expr_start);
+            let loc = p.mk_loc_idx_to_prev_end(expr_start_idx);
             Expression {
                 pexp_desc: ExpressionDesc::Pexp_letexception(ext, Box::new(body)),
                 pexp_loc: loc,
@@ -3689,18 +3690,17 @@ fn parse_record_fields(p: &mut Parser<'_>) -> Vec<ExpressionRecordField> {
 
 /// Parse a JS object expression: { "key": value, ... }.
 /// Returns a %obj extension wrapping a record.
-fn parse_js_object_expr(p: &mut Parser<'_>, start_pos: Position) -> Expression {
+fn parse_js_object_expr(p: &mut Parser<'_>, start_pos_idx: PosIdx) -> Expression {
     let mut fields = vec![];
 
     while p.token != Token::Rbrace && p.token != Token::Eof {
         if let Token::String(key) = &p.token {
             let key = key.clone();
-            let field_start = p.start_pos.clone();
-            let key_end = p.end_pos.clone();
+            let field_start_idx = p.push_start_pos_fresh();
             p.next();
 
             // The lid location should be just the key, not including the value
-            let key_loc = p.mk_loc(&field_start, &key_end);
+            let key_loc = p.mk_loc_idx_to_prev_end(field_start_idx);
             let lid_idx = p.push_lident(&key);
 
             if p.token == Token::Colon {
@@ -3730,7 +3730,7 @@ fn parse_js_object_expr(p: &mut Parser<'_>, start_pos: Position) -> Expression {
     }
 
     p.expect(Token::Rbrace);
-    let loc = p.mk_loc_to_prev_end(&start_pos);
+    let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
 
     // Create the inner record expression
     let record_expr = Expression {
@@ -3844,12 +3844,12 @@ fn parse_switch_case_body(p: &mut Parser<'_>) -> Option<Expression> {
         }
         Token::Let { .. } => parse_let_in_switch_case(p),
         Token::Module => {
-            let expr_start = p.start_pos.clone();
+            let expr_start_idx = p.push_start_pos_fresh();
             p.next();
             // Check for first-class module: module(Expr) or module(Expr: Type)
             if p.token == Token::Lparen {
                 // Parse first-class module and continue with expression parsing
-                let pack_expr = parse_first_class_module_expr(p, expr_start);
+                let pack_expr = parse_first_class_module_expr(p, expr_start_idx);
                 let expr = parse_primary_expr(p, pack_expr, false);
                 let expr = parse_binary_expr(p, expr, 1, ExprContext::SwitchCaseRhs);
                 let expr = parse_ternary_expr(p, expr);
@@ -3886,7 +3886,7 @@ fn parse_switch_case_body(p: &mut Parser<'_>) -> Option<Expression> {
                 });
 
                 // OCaml uses p.prev_end_pos for Pexp_letmodule location
-                let loc = p.mk_loc_to_prev_end(&expr_start);
+                let loc = p.mk_loc_idx_to_prev_end(expr_start_idx);
                 Expression {
                     pexp_desc: ExpressionDesc::Pexp_letmodule(
                         module_name,
@@ -3900,7 +3900,8 @@ fn parse_switch_case_body(p: &mut Parser<'_>) -> Option<Expression> {
         }
         Token::Exception => {
             // Capture start position BEFORE consuming 'exception' for accurate location
-            let expr_start = p.start_pos.clone();
+            let expr_start_idx = p.push_start_pos_fresh();
+            let expr_start = p.start_pos.clone(); // Keep for parse_extension_constructor
             p.next();
             let ext =
                 super::module::parse_extension_constructor(p, vec![], Some(expr_start.clone()));
@@ -4066,9 +4067,9 @@ fn parse_let_in_switch_case(p: &mut Parser<'_>) -> Expression {
 
 /// Parse a first-class module expression: module(Expr) or module(Expr: ModType)
 /// `module` keyword already consumed, expects `(` next
-fn parse_first_class_module_expr(p: &mut Parser<'_>, start_pos: Position) -> Expression {
+fn parse_first_class_module_expr(p: &mut Parser<'_>, start_pos_idx: PosIdx) -> Expression {
     p.expect(Token::Lparen);
-    parse_first_class_module_expr_inner(p, start_pos)
+    parse_first_class_module_expr_inner(p, start_pos_idx)
 }
 
 /// Parse a first-class module expression after `module(` has been matched.
@@ -4076,37 +4077,36 @@ fn parse_first_class_module_expr(p: &mut Parser<'_>, start_pos: Position) -> Exp
 /// Public for use from module.rs when parsing structure items.
 pub fn parse_first_class_module_expr_from_paren(
     p: &mut Parser<'_>,
-    start_pos: Position,
+    start_pos_idx: PosIdx,
 ) -> Expression {
     p.expect(Token::Lparen);
-    parse_first_class_module_expr_inner(p, start_pos)
+    parse_first_class_module_expr_inner(p, start_pos_idx)
 }
 
 /// Inner implementation for first-class module expression parsing.
 /// Expects the `(` to already be consumed.
-fn parse_first_class_module_expr_inner(p: &mut Parser<'_>, start_pos: Position) -> Expression {
+fn parse_first_class_module_expr_inner(p: &mut Parser<'_>, start_pos_idx: PosIdx) -> Expression {
     // Use parse_module_expr_without_constraint so the `:` is available for package type.
     // For `module(Foo: Bar)`, we want Pexp_constraint(Pexp_pack(Foo), Ptyp_package(Bar)),
     // not Pexp_pack(Pmod_constraint(Foo, Bar)).
     let mod_expr = super::module::parse_module_expr_without_constraint(p);
     // Capture position after module expr for pack_expr location (before parsing type)
-    let mod_expr_end = p.prev_end_pos.clone();
+    let mod_expr_end_idx = p.get_or_push_prev_end_pos();
 
     // Check for type annotation: module(Expr: ModType)
     // This becomes Pexp_constraint(Pexp_pack(ME), Ptyp_package(...))
     let package_type = if p.token == Token::Colon {
         // OCaml captures colon_start BEFORE consuming colon, then parses attributes,
         // then passes colon_start to parse_package_type
-        let colon_pos = p.start_pos.clone();
+        let colon_pos_idx = p.push_start_pos_fresh();
         p.next();
         // Parse any attributes between : and the module identifier
         let attrs = parse_attributes(p);
         let mut pkg_type = super::typ::parse_package_type(p);
         // Update location to start at colon position
         // Reuse the existing end PosIdx from pkg_type.ptyp_loc to match OCaml's sharing
-        let start_idx = p.get_or_push_start_pos(colon_pos);
         let end_idx = p.loc_end_idx(pkg_type.ptyp_loc);
-        pkg_type.ptyp_loc = p.mk_loc_idx_full(start_idx, end_idx);
+        pkg_type.ptyp_loc = p.mk_loc_idx_full(colon_pos_idx, end_idx);
         // Attach any attributes parsed
         if !attrs.is_empty() {
             pkg_type.ptyp_attributes.extend(attrs);
@@ -4117,11 +4117,11 @@ fn parse_first_class_module_expr_inner(p: &mut Parser<'_>, start_pos: Position) 
     };
 
     p.expect(Token::Rparen);
-    let full_loc = p.mk_loc_to_prev_end(&start_pos);
+    let full_loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
 
     if let Some(pkg_type) = package_type {
         // OCaml: when constrained, pack_expr location spans only start to end of module expr (not including type)
-        let pack_loc = p.mk_loc(&start_pos, &mod_expr_end);
+        let pack_loc = p.mk_loc_idx(start_pos_idx, mod_expr_end_idx);
         let pack_expr = Expression {
             pexp_desc: ExpressionDesc::Pexp_pack(mod_expr),
             pexp_loc: pack_loc,
@@ -4729,9 +4729,9 @@ fn parse_jsx_children(p: &mut Parser<'_>) -> Vec<Expression> {
             ));
         } else if p.token == Token::List {
             // Handle list{...} expressions in JSX children
-            let start_pos = p.start_pos.clone();
+            let start_pos_idx = p.push_start_pos_fresh();
             p.next(); // consume 'list'
-            let expr = parse_list_expr(p, start_pos);
+            let expr = parse_list_expr(p, start_pos_idx);
             children.push(expr);
         } else if p.token == Token::Lbracket {
             // Handle array literals [a, b, c] in JSX children
