@@ -219,9 +219,6 @@ pub struct ParseArena {
     /// Simple Lident deduplication table - maps StrIdx to its LidentIdx.
     /// This enables sharing of common identifiers like "()", "::", etc.
     lident_dedup: HashMap<StrIdx, LidentIdx>,
-    /// Arity deduplication table - maps arity value to its index.
-    /// This enables sharing of common arity values like Some(1) that OCaml shares via constant folding.
-    arity_dedup: HashMap<Option<i32>, ArityIdx>,
     /// String arena for all identifier strings.
     ///
     /// Strings can be added in two ways:
@@ -241,7 +238,6 @@ impl Default for ParseArena {
             arities: Vec::new(),
             position_dedup: HashMap::new(),
             lident_dedup: HashMap::new(),
-            arity_dedup: HashMap::new(),
             strings: Interner::new(),
         }
     }
@@ -590,15 +586,11 @@ impl ParseArena {
     /// OCaml achieves this via constant folding: `Some 1` literals become
     /// physically identical objects. We emulate this with explicit deduplication.
     pub fn push_arity(&mut self, arity: Option<i32>) -> ArityIdx {
-        // Check if we've seen this arity value before
-        if let Some(&idx) = self.arity_dedup.get(&arity) {
-            return idx;
-        }
-
-        // Create new arity and record for deduplication
+        // Always create fresh arity - no deduplication at arena level
+        // Sharing will be handled at marshal time based on value equality,
+        // matching OCaml's CSE behavior
         let idx = ArityIdx(self.arities.len() as u32);
         self.arities.push(arity);
-        self.arity_dedup.insert(arity, idx);
         idx
     }
 

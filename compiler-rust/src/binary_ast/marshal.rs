@@ -759,20 +759,19 @@ impl MarshalWriter {
         }
     }
 
-    /// Write an ArityIdx with index-based sharing.
+    /// Write an ArityIdx without sharing.
     ///
-    /// This is the key method for arity sharing: same ArityIdx = same arity value
-    /// in the arena = shared reference in output. This matches OCaml's behavior
-    /// where the compiler performs constant folding on `Some n` literals, causing
-    /// them to be physically shared.
+    /// OCaml shares arity values via CSE (Common Subexpression Elimination),
+    /// but the pattern is complex: sharing happens across top-level bindings
+    /// but not within a single binding. Replicating this exactly would require
+    /// tracking binding boundaries during marshalling.
+    ///
+    /// For now, we write fresh arity blocks each time. This causes some files
+    /// with multiple typed functions to have larger output than OCaml.
     ///
     /// - ArityIdx pointing to None → integer 0
-    /// - ArityIdx pointing to Some(n) → Block(tag=0, [n]) with index-based sharing
+    /// - ArityIdx pointing to Some(n) → Block(tag=0, [n])
     pub fn write_arity_idx(&mut self, idx: ArityIdx) {
-        // NOTE: Sharing is DISABLED to match pre-ArityIdx behavior.
-        // OCaml only shares arities in specific compiler-level scenarios
-        // that we don't yet replicate. Enabling sharing here causes regressions.
-
         // Get the actual arity value from the arena
         let arity = self
             .arena
