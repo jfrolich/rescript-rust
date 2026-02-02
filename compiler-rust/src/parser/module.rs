@@ -248,9 +248,9 @@ pub fn parse_structure_item(p: &mut Parser<'_>) -> Option<StructureItem> {
         }
         Token::Exception => {
             // Capture start position BEFORE consuming 'exception' for accurate location
-            let exception_start = p.start_pos.clone();
+            let exception_start_idx = p.push_start_pos_fresh();
             p.next();
-            let ext = parse_extension_constructor(p, attrs.clone(), Some(exception_start));
+            let ext = parse_extension_constructor(p, attrs.clone(), Some(exception_start_idx));
             Some(StructureItemDesc::Pstr_exception(ext))
         }
         Token::Module => {
@@ -271,12 +271,12 @@ pub fn parse_structure_item(p: &mut Parser<'_>) -> Option<StructureItem> {
         }
         Token::Include => {
             // OCaml: parse_include_statement captures start_pos before consuming Include
-            let include_start = p.start_pos.clone();
+            let include_start_idx = p.push_start_pos_fresh();
             p.next();
             let mod_expr = parse_module_expr(p);
             Some(StructureItemDesc::Pstr_include(IncludeDeclaration {
                 pincl_mod: mod_expr,
-                pincl_loc: p.mk_loc_to_prev_end(&include_start),
+                pincl_loc: p.mk_loc_idx_to_prev_end(include_start_idx),
                 pincl_attributes: attrs.clone(),
             }))
         }
@@ -524,9 +524,9 @@ pub fn parse_signature_item(p: &mut Parser<'_>) -> Option<SignatureItem> {
         }
         Token::Exception => {
             // Capture start position BEFORE consuming 'exception' for accurate location
-            let exception_start = p.start_pos.clone();
+            let exception_start_idx = p.push_start_pos_fresh();
             p.next();
-            let ext = parse_extension_constructor(p, attrs.clone(), Some(exception_start));
+            let ext = parse_extension_constructor(p, attrs.clone(), Some(exception_start_idx));
             Some(SignatureItemDesc::Psig_exception(ext))
         }
         Token::Module => {
@@ -2194,19 +2194,19 @@ fn parse_type_extension(p: &mut Parser<'_>, attrs: Attributes) -> TypeExtension 
 
     // Constructors (with optional leading `|`).
     // OCaml includes the `|` in the constructor location
-    let mut bar_start = if p.token == Token::Bar {
-        let pos = p.start_pos.clone();
+    let mut bar_start_idx = if p.token == Token::Bar {
+        let pos_idx = p.push_start_pos_fresh();
         p.next();
-        Some(pos)
+        Some(pos_idx)
     } else {
         None
     };
 
     let mut constructors = vec![];
     while p.token != Token::Eof {
-        constructors.push(parse_extension_constructor(p, vec![], bar_start.clone()));
+        constructors.push(parse_extension_constructor(p, vec![], bar_start_idx));
         if p.token == Token::Bar {
-            bar_start = Some(p.start_pos.clone());
+            bar_start_idx = Some(p.push_start_pos_fresh());
             p.next();
             continue;
         }
@@ -3563,16 +3563,16 @@ fn parse_value_description(
 pub fn parse_extension_constructor(
     p: &mut Parser<'_>,
     attrs: Attributes,
-    exception_start: Option<Position>,
+    exception_start: Option<PosIdx>,
 ) -> ExtensionConstructor {
     // Use provided start position (before 'exception') or current position
-    let start_pos = exception_start.unwrap_or_else(|| p.start_pos.clone());
+    let start_pos_idx = exception_start.unwrap_or_else(|| p.push_start_pos_fresh());
     let error_idx = p.arena_mut().intern("Error");
     let constructor = parse_constructor(p).unwrap_or_else(|| ConstructorDeclaration {
         pcd_name: mknoloc(error_idx),
         pcd_args: ConstructorArguments::Pcstr_tuple(vec![]),
         pcd_res: None,
-        pcd_loc: p.mk_loc_to_prev_end(&start_pos),
+        pcd_loc: p.mk_loc_idx_to_prev_end(start_pos_idx),
         pcd_attributes: vec![],
     });
 
@@ -3592,7 +3592,7 @@ pub fn parse_extension_constructor(
     ExtensionConstructor {
         pext_name: constructor.pcd_name,
         pext_kind: kind,
-        pext_loc: p.mk_loc_to_prev_end(&start_pos),
+        pext_loc: p.mk_loc_idx_to_prev_end(start_pos_idx),
         pext_attributes: all_attrs,
     }
 }

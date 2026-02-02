@@ -3279,10 +3279,9 @@ fn parse_block_body(p: &mut Parser<'_>) -> Option<Expression> {
         Token::Exception => {
             // Capture start position BEFORE consuming 'exception' for accurate location
             let expr_start_idx = p.push_start_pos_fresh();
-            let expr_start = p.start_pos.clone(); // Keep for parse_extension_constructor
             p.next();
             let ext =
-                super::module::parse_extension_constructor(p, vec![], Some(expr_start.clone()));
+                super::module::parse_extension_constructor(p, vec![], Some(expr_start_idx));
 
             // Consume optional semicolon/newline
             p.optional(&Token::Semicolon);
@@ -3901,10 +3900,9 @@ fn parse_switch_case_body(p: &mut Parser<'_>) -> Option<Expression> {
         Token::Exception => {
             // Capture start position BEFORE consuming 'exception' for accurate location
             let expr_start_idx = p.push_start_pos_fresh();
-            let expr_start = p.start_pos.clone(); // Keep for parse_extension_constructor
             p.next();
             let ext =
-                super::module::parse_extension_constructor(p, vec![], Some(expr_start.clone()));
+                super::module::parse_extension_constructor(p, vec![], Some(expr_start_idx));
 
             // Consume optional semicolon/newline
             p.optional(&Token::Semicolon);
@@ -3918,7 +3916,7 @@ fn parse_switch_case_body(p: &mut Parser<'_>) -> Option<Expression> {
             });
 
             // OCaml uses p.prev_end_pos for Pexp_letexception location
-            let loc = p.mk_loc_to_prev_end(&expr_start);
+            let loc = p.mk_loc_idx_to_prev_end(expr_start_idx);
             Expression {
                 pexp_desc: ExpressionDesc::Pexp_letexception(ext, Box::new(body)),
                 pexp_loc: loc,
