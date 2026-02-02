@@ -6,6 +6,7 @@ syntax_tests/data/conversion/reason/gentype.res
 syntax_tests/data/conversion/reason/gentype.resi
 syntax_tests/data/conversion/reason/jsxProps.res
 syntax_tests/data/conversion/reason/letBinding.res
+syntax_tests/data/conversion/reason/moduleLanguage.res
 syntax_tests/data/conversion/reason/namedArgs.res
 syntax_tests/data/conversion/reason/openPattern.res
 syntax_tests/data/conversion/reason/refSugarReason.res
@@ -18,6 +19,8 @@ syntax_tests/data/idempotency/bs-css/Css_AtomicTypes.res
 syntax_tests/data/idempotency/bs-css/Css_Colors.res
 syntax_tests/data/idempotency/bs-css/Css_Core.res
 syntax_tests/data/idempotency/bs-css/Css_Js_Core.resi
+syntax_tests/data/idempotency/bs-css/Css.res
+syntax_tests/data/idempotency/bs-css/CssJs.res
 syntax_tests/data/idempotency/bs-webapi/src/Webapi.res
 syntax_tests/data/idempotency/bs-webapi/src/Webapi/Webapi__Base64.res
 syntax_tests/data/idempotency/bs-webapi/src/Webapi/Webapi__Canvas/Webapi__Canvas__Canvas2d.res
@@ -86,6 +89,7 @@ syntax_tests/data/idempotency/genType/src/Dependencies.res
 syntax_tests/data/idempotency/genType/src/Emitters.res
 syntax_tests/data/idempotency/genType/src/Emitters.resi
 syntax_tests/data/idempotency/genType/src/GeneratedFiles.res
+syntax_tests/data/idempotency/genType/src/GenIdent.res
 syntax_tests/data/idempotency/genType/src/ImportPath.res
 syntax_tests/data/idempotency/genType/src/ImportPath.resi
 syntax_tests/data/idempotency/genType/src/Indent.res
@@ -369,6 +373,7 @@ syntax_tests/data/printer/comments/ifLet.res
 syntax_tests/data/printer/comments/ifThenElse.res
 syntax_tests/data/printer/comments/interfaceWithOneSingleComment.resi
 syntax_tests/data/printer/comments/interfaceWithOnlyComments.resi
+syntax_tests/data/printer/comments/modExpr.res
 syntax_tests/data/printer/comments/multiline.res
 syntax_tests/data/printer/comments/namedArgs.res
 syntax_tests/data/printer/comments/openDescription.res
@@ -407,8 +412,12 @@ syntax_tests/data/printer/expr/tuple.res
 syntax_tests/data/printer/expr/Uncurried.res
 syntax_tests/data/printer/expr/while.res
 syntax_tests/data/printer/expr/whitespace.res
+syntax_tests/data/printer/modExpr/apply.res
 syntax_tests/data/printer/modExpr/extension.res
+syntax_tests/data/printer/modExpr/include.res
+syntax_tests/data/printer/modExpr/structure.res
 syntax_tests/data/printer/modExpr/unpack.res
+syntax_tests/data/printer/modType/exoticIdent.res
 syntax_tests/data/printer/modType/extension.res
 syntax_tests/data/printer/modType/ident.res
 syntax_tests/data/printer/modType/moduleTypeOf.res
@@ -437,7 +446,10 @@ syntax_tests/data/printer/signature/attributes.resi
 syntax_tests/data/printer/signature/exception.resi
 syntax_tests/data/printer/signature/extension.resi
 syntax_tests/data/printer/signature/include.resi
+syntax_tests/data/printer/signature/modtype.resi
+syntax_tests/data/printer/signature/module.resi
 syntax_tests/data/printer/signature/open.resi
+syntax_tests/data/printer/signature/recModule.resi
 syntax_tests/data/printer/signature/type.resi
 syntax_tests/data/printer/signature/typext.resi
 syntax_tests/data/printer/structure/attribute.res

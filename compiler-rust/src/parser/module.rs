@@ -1607,7 +1607,8 @@ fn parse_with_constraint(p: &mut Parser<'_>) -> Option<WithConstraint> {
         Token::Typ => {
             p.next();
             let lid = parse_type_long_ident(p);
-            let type_name = p.arena().lident_last(lid.txt).to_string();
+            // Use the StrIdx directly from the longident to enable sharing
+            let type_name_idx = p.arena().get_longident(lid.txt).last_idx();
             let type_loc = lid.loc.clone();
 
             // Parse type parameters if present (angle bracket syntax: <'a, 'b>)
@@ -1657,7 +1658,6 @@ fn parse_with_constraint(p: &mut Parser<'_>) -> Option<WithConstraint> {
                 cstrs.push((var, cstr_typ, p.mk_loc_to_prev_end(&cstr_start)));
             }
 
-            let type_name_idx = p.arena_mut().push_string(type_name.to_string());
             let decl = TypeDeclaration {
                 // OCaml uses the full longident location for the type name location
                 ptype_name: with_loc(type_name_idx, type_loc.clone()),
