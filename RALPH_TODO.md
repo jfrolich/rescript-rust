@@ -204,12 +204,12 @@ We need to implement the remaining transformations.
     functions to transform strings inside attribute payloads (e.g., `@ocaml.doc("foo")`).
     This ensures docstrings get the same `"*j"` delimiter transformation as regular strings.
 
-- [x] **Task 2.3**: Implement `@deriving` transformations (PARTIALLY DONE - accessors complete)
+- [x] **Task 2.3**: Implement `@deriving` transformations (accessors complete, jsConverter analyzed)
   - OCaml: `Ast_derive_projector.init()`, `Ast_derive_js_mapper.init()`
   - `@deriving(accessors)` - generates accessor functions for records/variants ✅
-  - `@deriving(jsConverter)` - generates JS conversion functions (TODO)
+  - `@deriving(jsConverter)` - generates JS conversion functions (ANALYZED, NOT IMPLEMENTED)
   - `@deriving(abstract)` - generates getter/setter functions for records (TODO)
-  - **Impact**: 11 test files use `@deriving`, 3 now pass (Mdx.res, subscription.res, typeDefinition.res)
+  - **Impact**: 11 test files use `@deriving`, some may pass after full implementation
   - Related files: `ast_tdcls.ml`, `ast_derive.ml`, `ast_attributes.ml`
   - **Implementation (2026-02-02)**:
     - Implemented full OCaml wrapper structure in ppx.rs:
@@ -229,9 +229,21 @@ We need to implement the remaining transformations.
     - `generate_variant_accessors_and_sigs()` - accessor functions + val signatures for variants
     - `core_type_of_type_declaration_with_attrs()` - preserves @deriving attribute on core type
     - `make_arrows()` - helper for arrow type construction
+  - **@deriving(jsConverter) Analysis (2026-02-02)**:
+    - jsConverter is significantly more complex than accessors (~350 lines in OCaml)
+    - For **records**: generates `<name>ToJs` using `%obj` extension, `<name>FromJs` using `##` operator
+    - For **polymorphic variants**: generates `%raw` maps, `_eraseType` external, `_index` external
+    - Requires: `_eraseType: 'a => 'a = "%identity"`, `_index` with `@get_index`, `%raw("{...}")`
+    - Has `newType` option that creates abstract wrapper type `abs_<name>`
+    - Impact: Only 5 test files use `@deriving(jsConverter)` in idempotency tests
+      - 3 files (`Mdx.res`, `subscription.res`, `ColorTheme.res`) have OCaml parse errors (@@config not supported)
+      - Remaining files also have other parse issues
+    - **Decision**: Low-impact, high-complexity. NOT IMPLEMENTED.
   - **Remaining issues**:
+    - 11-byte `Location.none` difference in @deriving(accessors) - OCaml uses `_none_` location
     - Some files still fail due to position/arity sharing differences unrelated to @deriving
-    - `@deriving(jsConverter)` and `@deriving(abstract)` still need implementation
+    - `@deriving(jsConverter)` NOT IMPLEMENTED (complex, low impact)
+    - `@deriving(abstract)` still needs implementation (3 test files)
 
 - [x] **Task 2.4**: Implement integer literal suffix handling
   - OCaml: `pat_mapper` and `expr_mapper` in bs_builtin_ppx.ml
