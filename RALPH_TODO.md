@@ -1,12 +1,19 @@
 # Ralph TODO: Binary AST Parity
 
 **Last Updated:** 2026-02-02
-**Overall Status:** 329/1049 bsc-ast tests passing (31.4%)
+**Overall Status:** 325/1049 bsc-ast tests passing (31.0%)
 **sexp-locs Status:** 1049/1049 tests passing (100%) ✅
 
 **Note:** Many remaining failures are due to arity sharing (see Phase 6 below).
 
-**Analysis Complete (2026-02-02):** The remaining 720 failing tests are blocked by multiple issues:
+**Test infrastructure fix (2026-02-02):** Fixed test script and bsc to correctly handle interface files:
+- OCaml bsc outputs `.iast` for interface files (`.resi`), ignoring `-o` extension
+- Rust bsc now matches this behavior - outputs `.iast` for interface files
+- Test script updated to handle `.iast` files from OCaml
+- Baseline corrected: removed 81 false positives, then +47 new passes with .iast fix
+- **True parity status**: 325/1049 (31.0%), down from incorrect 329 (which had false positives)
+
+**Analysis Complete (2026-02-02):** The remaining 724 failing tests are blocked by multiple issues:
 1. **Arity sharing (~700 files)**: OCaml's CSE cannot be replicated (structural limitation)
 2. **parsetree0 Location sharing (~500+ files)**: mapper_to0 converts LocIdx to full Location structs,
    losing sharing information. Would require refactoring parsetree0 to use LocIdx.
