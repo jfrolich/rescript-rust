@@ -336,7 +336,9 @@ type annotation arity and function arity should be separate objects.
     - Rust creates separate `Some(1)` blocks for each function
     - This affects ~90% of .res files (any file with 2+ typed functions)
   - **Cannot fix without**: Content-based sharing (violates constraint) or `Rc<Arity>` architecture change
-  - **Current**: 257/1049 (24.5%) - most .resi files pass, most .res files fail due to arity
+  - **Current**: 259/1049 (24.7%) - most .resi files pass, most .res files fail due to arity
+  - **Verified (2026-02-02)**: Single typed function passes (`let f: int => int = x => x`), but two functions
+    with same arity fail. This is the documented arity sharing limitation.
 - [ ] **Task 5.3**: Target 750/1049 bsc-ast parity (71%)
 - [ ] **Task 5.4**: Target 1000/1049 bsc-ast parity (95%)
 - [ ] **Task 5.5**: Achieve 1049/1049 bsc-ast parity (100%)
