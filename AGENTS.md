@@ -78,6 +78,8 @@ The Makefile’s targets build on each other in this order:
 
 - **Handle concurrent agent work gracefully** - If compilation fails due to errors in code you didn't touch, another agent may be actively working on that part of the codebase. Do NOT modify their files and NEVER use `git stash`. Simply wait 30 seconds and retry the build. Repeat this until compilation succeeds—the other agent will fix their changes shortly.
 
+- **There is NO linter that reverts your changes** - If you're having trouble editing files, the issue is with your edit commands (e.g., wrong `old_string`, file not found, etc.), NOT a linter reverting changes. There are no pre-commit hooks, no auto-formatters, and no tools that automatically modify or revert your edits. Debug your actual edit failures instead of assuming external interference.
+
 - **Do NOT revert large changes** - If a task impacts a large amount of code, do NOT revert and give up. Complete the large task as requested. The user is aware it's a big change and expects you to follow through.
 
 - **Do NOT switch tasks when things get hard** - If you're working on a difficult task, do NOT abandon it to work on something easier. Complete the current task FIRST, then move on to the next one. Switching tasks loses valuable context and leaves work incomplete.
