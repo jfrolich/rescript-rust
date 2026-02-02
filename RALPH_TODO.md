@@ -1,7 +1,7 @@
 # Ralph TODO: Binary AST Parity
 
 **Last Updated:** 2026-02-02
-**Overall Status:** 258/1049 bsc-ast tests passing (24.6%)
+**Overall Status:** 257/1049 bsc-ast tests passing (24.5%)
 **sexp-locs Status:** 1049/1049 tests passing (100%) ✅
 
 ---
@@ -168,6 +168,19 @@ We need to implement the remaining transformations.
   - **Done**: For async functions, wrap innermost body with `Primitive_promise.unsafe_async(body)`
   - Implementation in `transform_await`, `wrap_with_unsafe_async`, and `add_promise_to_fun_body` in ppx.rs
   - Note: Async files still have 4-byte differences due to position sharing (Phase 4 issue)
+
+- [ ] **Task 2.8**: Implement module-level await transformation (MISSING)
+  - OCaml: `bs_builtin_ppx.ml` lines 661-702, `ast_await.ml` `create_await_module_expression`
+  - Transform `module M = @res.await Belt.List` into:
+    1. Module type declaration: `module __Belt_List__ = module type of Belt.List`
+    2. Module binding using `Primitive_module.import(module(M: __Belt_List__))`
+  - This is a complex transformation involving:
+    - Detecting `@res.await` attribute on module expressions
+    - Creating a synthetic module type name from the module path
+    - Generating module type declaration
+    - Transforming to `Pmod_unpack(Primitive_promise.unsafe_await(Primitive_module.import(...)))`
+  - **Impact**: 78 test files have dependency differences due to missing `Primitive_module` references
+  - Related files: `tests/syntax_tests/data/printer/expr/letmodule.res`
 
 ### Phase 3: JSX Binary Differences (Deferred - mapper_to0 issue)
 
