@@ -4091,7 +4091,10 @@ fn parse_first_class_module_expr_inner(p: &mut Parser<'_>, start_pos: Position) 
         let attrs = parse_attributes(p);
         let mut pkg_type = super::typ::parse_package_type(p);
         // Update location to start at colon position
-        pkg_type.ptyp_loc = p.mk_loc(&colon_pos, &p.loc_end(pkg_type.ptyp_loc));
+        // Reuse the existing end PosIdx from pkg_type.ptyp_loc to match OCaml's sharing
+        let start_idx = p.get_or_push_start_pos(colon_pos);
+        let end_idx = p.loc_end_idx(pkg_type.ptyp_loc);
+        pkg_type.ptyp_loc = p.mk_loc_idx_full(start_idx, end_idx);
         // Attach any attributes parsed
         if !attrs.is_empty() {
             pkg_type.ptyp_attributes.extend(attrs);
@@ -4920,7 +4923,10 @@ fn parse_template_literal_with_prefix(
                 str_expr.pexp_loc = p.mk_loc_to_prev_end(&start_pos);
             } else {
                 // Prefixed (like json`...`): keep string part's location but adjust start to backtick
-                str_expr.pexp_loc = p.mk_loc(&start_pos, &p.loc_end(str_expr.pexp_loc));
+                // Reuse the existing end PosIdx from str_expr.pexp_loc to match OCaml's sharing
+                let start_idx = p.get_or_push_start_pos(start_pos.clone());
+                let end_idx = p.loc_end_idx(str_expr.pexp_loc);
+                str_expr.pexp_loc = p.mk_loc_idx_full(start_idx, end_idx);
             }
             return str_expr;
         }

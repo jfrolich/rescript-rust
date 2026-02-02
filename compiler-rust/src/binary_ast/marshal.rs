@@ -99,6 +99,11 @@ pub struct MarshalWriter {
     /// This enables sharing of common delimiter values like Some("js")
     option_string_table: HashMap<Option<String>, u32>,
 
+    /// Maps Option<i32> values to object counter (for content-based sharing)
+    /// This enables sharing of common arity values like Some(1)
+    /// OCaml shares these because they're often the same pointer (static values)
+    option_i32_table: HashMap<Option<i32>, u32>,
+
     /// Optional reference to ParseArena for LocIdx marshalling.
     /// Set via `set_arena()` before marshalling AST with LocIdx fields.
     /// Uses raw pointer to avoid lifetime constraints.
@@ -131,6 +136,7 @@ impl MarshalWriter {
             location_idx_table: HashMap::new(),
             lident_idx_table: HashMap::new(),
             option_string_table: HashMap::new(),
+            option_i32_table: HashMap::new(),
             arena: None,
             obj_counter: 0,
             size_32: 0,
@@ -148,6 +154,7 @@ impl MarshalWriter {
             location_idx_table: HashMap::new(),
             lident_idx_table: HashMap::new(),
             option_string_table: HashMap::new(),
+            option_i32_table: HashMap::new(),
             arena: None,
             obj_counter: 0,
             size_32: 0,
@@ -706,6 +713,41 @@ impl MarshalWriter {
 
                 // Record for future sharing
                 self.option_string_table.insert(opt.clone(), obj_idx);
+            }
+        }
+    }
+
+    /// Write an Option<i32> with content-based sharing.
+    ///
+    /// This enables sharing of common arity values like Some(1) that appear
+    /// multiple times in the AST. OCaml shares these because they're often the same
+    /// pointer (static values or reused constants).
+    ///
+    /// - None → integer 0
+    /// - Some(n) → Block(tag=0, [n]) with content-based sharing
+    pub fn write_option_i32(&mut self, opt: &Option<i32>) {
+        // Check if we've written this exact Option<i32> before
+        if let Some(&obj_idx) = self.option_i32_table.get(opt) {
+            let d = self.obj_counter - obj_idx;
+            self.write_shared_ref(d);
+            return;
+        }
+
+        match opt {
+            None => {
+                // None is encoded as integer 0, not a block, so no sharing needed
+                self.write_int(0);
+            }
+            Some(n) => {
+                // Record the object index BEFORE writing the block
+                let obj_idx = self.obj_counter;
+
+                // Write Some(n) as Block(tag=0, [n])
+                self.write_block_header(0, 1);
+                self.write_int(*n as i64);
+
+                // Record for future sharing
+                self.option_i32_table.insert(*opt, obj_idx);
             }
         }
     }
