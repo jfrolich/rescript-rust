@@ -209,12 +209,20 @@ Simple expressions now match OCaml byte-for-byte:
 - `let x = !a; let y = !b` ✅ (unary ! operator Lident deduplication - 2026-02-02)
 - `let f = (~x) => x` ✅ (labeled arguments - end position caching fix 2026-02-02)
 
-JSX with children still differs:
-- `let x = <div> <span/> </div>` ❌ (OCaml: 229 bytes, Rust: 196 bytes - Rust smaller)
+JSX elements and containers match:
+- `let x = <div />` ✅
+- `let x = <div>text</div>` ✅
+- `let x = <div> <span/> </div>` ✅
+
+JSX fragments differ:
+- `let x = <></>` ❌ (OCaml: 140 bytes, Rust: 134 bytes - Rust smaller by 6 bytes)
+  - OCaml writes `_none_` string fresh, Rust shares it via StrIdx
+  - The `_none_` comes from some generated position inside the fragment
+  - Needs further investigation to find the exact source
 
 ### Blocking Issues
 
-The remaining ~724 failing tests are affected by several issues:
+The remaining ~555 failing tests are affected by several issues:
 
 1. **Arity sharing**: OCaml shares `Option<i32>` arity values via pointer equality. When two functions
    have the same arity (e.g., both `Some(1)`), OCaml reuses the same object. Rust creates separate objects.
