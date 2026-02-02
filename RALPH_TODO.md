@@ -1,10 +1,19 @@
 # Ralph TODO: Binary AST Parity
 
 **Last Updated:** 2026-02-02
-**Overall Status:** 327/1049 bsc-ast tests passing (31.2%)
+**Overall Status:** 325/1049 bsc-ast tests passing (31.0%)
 **sexp-locs Status:** 1049/1049 tests passing (100%) ✅
 
 **Note:** Many remaining failures are due to arity sharing (see Phase 6 below).
+
+**Analysis Complete (2026-02-02):** The remaining 724 failing tests are blocked by multiple issues:
+1. **Arity sharing (~700 files)**: OCaml's CSE cannot be replicated (structural limitation)
+2. **parsetree0 Location sharing (~500+ files)**: mapper_to0 converts LocIdx to full Location structs,
+   losing sharing information. Would require refactoring parsetree0 to use LocIdx.
+3. **@deriving transformations (8 files)**: Requires porting ~880 lines of OCaml code
+4. **Module-level await (4 files)**: Requires refactoring to multi-item expansion
+
+Most .resi (interface) files pass; most .res (implementation) files fail due to arity and location sharing.
 
 **Phase 6 Status:** Tasks 6.3-6.5 complete. ArityIdx sharing DISABLED (causes regressions).
 - ArityIdx infrastructure added to parse_arena.rs and marshal.rs
@@ -373,14 +382,14 @@ type annotation arity and function arity should be separate objects.
     - Rust's mapper_to0 creates new Location structs (loses identity, no sharing)
     - Proper fix would require `Rc<Location>` or `LocIdx` in parsetree0 (significant refactor)
     - **Status**: Content-based sharing reverted; architectural limitation documented
-- [ ] **Task 5.2**: Target 500/1049 bsc-ast parity (47%) - **PARTIALLY BLOCKED**
-  - **Arity sharing limitation (Task 6.6)**: OCaml's CSE cannot be replicated
-    - Files with 2+ typed functions having the same arity will differ by ~1 object
-    - This is a structural limitation, not a bug
-  - **Other potential improvements**:
-    - Implement remaining PPX transformations (@deriving, module-level await)
-    - Fix any position/location sharing issues that don't involve arity
-  - Current: 327/1049 (31.2%) - most .resi files pass, most .res files fail due to arity
+- [ ] **Task 5.2**: Target 500/1049 bsc-ast parity (47%) - **BLOCKED** (multiple issues)
+  - **Blockers analyzed (2026-02-02)**:
+    1. **Arity sharing (Task 6.6)**: OCaml's CSE cannot be replicated (~700 files)
+    2. **parsetree0 Location sharing**: mapper_to0 loses LocIdx identity (~500+ files)
+    3. **@deriving (Task 2.3)**: Not implemented (~8 files, ~880 lines to port)
+    4. **Module-level await (Task 2.8)**: Not implemented (~4 files, complex)
+  - **Impact**: Without fixing #1 or #2, cannot reach 500+ parity
+  - Current: 325/1049 (31.0%) - most .resi files pass, most .res files fail
 - [ ] **Task 5.3**: Target 750/1049 bsc-ast parity (71%) - **BLOCKED** (arity limitation)
 - [ ] **Task 5.4**: Target 1000/1049 bsc-ast parity (95%) - **BLOCKED** (arity limitation)
 - [ ] **Task 5.5**: Achieve 1049/1049 bsc-ast parity (100%) - **BLOCKED** (arity limitation)
@@ -562,18 +571,31 @@ cargo build --manifest-path compiler-rust/Cargo.toml --release
 
 ## Note on parsetree0/ast0/mapper_to0
 
-**These files are NOT involved in binary AST generation** and are NOT blocking parity.
+**UPDATE (2026-02-02): These files ARE involved in binary AST generation.**
 
-**AST terminology:**
-- **ast** (parsetree) - The main parsetree used by the compiler. This gets serialized to `.ast` files.
-- **parsetree0/ast0/mapper_to0** - Only used for external PPX support (running third-party PPX plugins).
-  External PPX support is not yet implemented, so these files are not in the binary AST code path.
+**AST flow for binary AST output:**
+1. Parser creates AST with `LocIdx` (arena-indexed locations)
+2. `mapper_to0` converts to `parsetree0` which uses full `Location` structs
+3. Marshal serializes the `Location` structs (not LocIdx)
+4. **Problem**: Each conversion creates a NEW `Location` struct, losing sharing information
+
+**This is a major source of parity differences.** When the same LocIdx is converted multiple times
+by mapper_to0, each creates a separate Location struct that cannot be shared by marshal.
+
+**Impact**: ~500+ files have location sharing differences due to this.
+
+**Potential fix** (significant refactoring required):
+- Change parsetree0 to use `LocIdx` instead of `Location`
+- Or use `Rc<Location>` to enable identity-based sharing
+- Both require major changes to parsetree0.rs, parsetree0_marshal.rs, and mapper_to0.rs
 
 **Files relevant to binary AST parity:**
 - ✅ `compiler-rust/src/parser/` - Position creation and reuse during parsing
 - ✅ `compiler-rust/src/parse_arena.rs` - Arena management for positions
 - ✅ `compiler-rust/src/binary_ast/marshal.rs` - Marshal serialization (arity sharing issue is here)
 - ✅ `compiler-rust/src/binary_ast/ppx.rs` - Built-in PPX transformations (string interp, raw, etc.)
+- ⚠️ `compiler-rust/src/binary_ast/mapper_to0.rs` - Converts LocIdx→Location, LOSES sharing
+- ⚠️ `compiler-rust/src/binary_ast/parsetree0.rs` - Uses full Location (not LocIdx)
 
 ## Important: No Content-Based Sharing Tricks
 
