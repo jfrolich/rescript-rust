@@ -267,8 +267,10 @@ type annotation arity and function arity should be separate objects.
 ### Phase 5: Validation
 
 - [x] **Task 5.1**: Run full test suite, verify no regressions
-  - Verified: 254/1049 bsc-ast tests passing (24.2%)
+  - Verified: 258/1049 bsc-ast tests passing (24.6%)
   - No regressions detected from baseline
+  - **Pmty_ident fix (2026-02-02)**: Fixed dependency extraction for module type identifiers
+    - Added 3 files: modType/ident.res, moduleTypeDeclaration.res, UrlUtils.res
   - **Analysis of remaining failures (2026-02-02)**:
     - JSX with children: mapper_to0 issue, cannot fix per instructions
     - `@as` attributes in externals: Rust FFI encoding differs from OCaml
