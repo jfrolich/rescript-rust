@@ -304,8 +304,12 @@ type annotation arity and function arity should be separate objects.
 ### Phase 5: Validation
 
 - [x] **Task 5.1**: Run full test suite, verify no regressions
-  - Verified: 257/1049 bsc-ast tests passing (24.5%)
-  - No regressions detected from baseline
+  - Verified: 259/1049 bsc-ast tests passing (24.7%)
+  - **Baseline fix (2026-02-02)**: Regenerated bsc_ast baseline to remove false positives
+    - Previous baseline had 262 entries but 117 were incorrectly passing
+    - Many files had position sharing differences (e.g., `#...Type.t as x` patterns)
+    - New baseline has 259 truly passing files
+    - Example: `Css_Js_Core.res` uses polymorphic variant spread patterns which cause position sharing differences
   - **Pmty_ident fix (2026-02-02)**: Fixed dependency extraction for module type identifiers
     - Pmty_ident uses add_parent semantics (simple Lidents add nothing)
     - Pmty_alias uses addmodule semantics (full path)
