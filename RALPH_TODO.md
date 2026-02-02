@@ -191,14 +191,23 @@ We need to implement the remaining transformations.
     functions to transform strings inside attribute payloads (e.g., `@ocaml.doc("foo")`).
     This ensures docstrings get the same `"*j"` delimiter transformation as regular strings.
 
-- [ ] **Task 2.3**: Implement `@deriving` transformations (Complex)
+- [ ] **Task 2.3**: Implement `@deriving` transformations (Complex) - PARTIALLY DONE
   - OCaml: `Ast_derive_projector.init()`, `Ast_derive_js_mapper.init()`
-  - `@deriving(accessors)` - generates accessor functions for variants
+  - `@deriving(accessors)` - generates accessor functions for records/variants
   - `@deriving(jsConverter)` - generates JS conversion functions
   - `@deriving(abstract)` - generates getter/setter functions for records
   - **This is a significant task**: OCaml not only strips `@deriving`, but generates new code.
   - **Impact**: Only 14 test files use `@deriving`, so this has limited parity impact.
   - Related files: `ast_tdcls.ml`, `ast_derive.ml`, `ast_attributes.ml`
+  - **Progress (2026-02-02)**:
+    - Implemented `@deriving(accessors)` in ppx.rs (generate_accessors function)
+    - Generates accessor functions for record fields: `let fieldName = (param: t) => param.fieldName`
+    - Generates accessor functions for variants: `let ctorName = (p0, ...) => CtorName(p0, ...)`
+    - **Outstanding issue**: OCaml uses `Location.none` for generated function expressions
+      (`Ast_compatible.fun_` defaults to `Location.none`), which produces `_none_` filename
+      in the binary AST. Rust uses field/constructor locations instead, causing ~124 byte
+      difference per accessor function.
+  - **TODO**: `@deriving(jsConverter)` and `@deriving(abstract)` still need implementation
 
 - [x] **Task 2.4**: Implement integer literal suffix handling
   - OCaml: `pat_mapper` and `expr_mapper` in bs_builtin_ppx.ml
