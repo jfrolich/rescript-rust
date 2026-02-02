@@ -62,27 +62,62 @@ Do NOT spend time on small issues (@deriving edge cases, etc.) until the locatio
 
 ---
 
-**Last Updated:** 2026-02-03 (corrected byte analysis)
+**Last Updated:** 2026-02-03 (position sharing root cause identified)
 **Overall Status:** 254/1049 bsc-ast tests passing (24.2%)
 **sexp-locs Status:** 1049/1049 tests passing (100%) ✅
 
 **Latest investigation (2026-02-03):**
-Deep-dived into `external foo: int => int = "foo"` binary difference (OCaml 208 bytes, Rust 212 bytes).
+Deep-dived into `external foo: int => int = "foo"` binary difference (OCaml 216 bytes, Rust 220 bytes).
 
-**Critical correction of previous analysis:**
-Previous analysis incorrectly interpreted bytes at offset 0x8e:
-- Misread `c0 04 1a` as "CODE_SHARED8 back-ref" (c0 = shared8, 04 = distance 4...)
-- Actually: `c0` = small block header (tag=0, size=4 → Position), `04 1a` = internal fields
+**Root cause identified:** Position sharing in Rust is fundamentally different from OCaml.
 
-**Correct interpretation at file offset 0x8e:**
-- OCaml: `c0` = small block header → writes FRESH Position block
-- Rust: `04 0e` = CODE_SHARED8 (0x04) with distance 14 (0x0e) → SHARES position
+In OCaml, when multiple functions EACH capture `let start_pos = p.Parser.start_pos`:
+```ocaml
+parse_typ_expr captures:     let start_pos = p.start_pos    (* object A *)
+parse_atomic_typ_expr:       let start_pos = p.start_pos    (* object B *)
+parse_value_path:            let start_pos = p.start_pos    (* object C *)
+```
+Objects A, B, C have the SAME VALUES but are DIFFERENT heap objects (different memory addresses).
+OCaml's Marshal does NOT share them because physical identity differs.
 
-**This means Rust shares MORE than OCaml at this point!**
-But Rust is 4 bytes LARGER overall, so somewhere else Rust writes fresh where OCaml shares.
+In Rust, all three functions call `p.start_pos_idx()` which returns the SAME cached index:
+- This causes positions to be SHARED when they shouldn't be (positions A, B, C get same PosIdx)
+- But also causes positions to NOT be shared when they should (explicit passing via function params)
 
-**Root cause:** Marshal traversal order differences between OCaml and Rust cause positions to be
-encountered at different points in the serialization, leading to different sharing patterns.
+**The bidirectional difference explained:**
+- At some offsets: OCaml writes FRESH, Rust writes SHARED (incorrect sharing via cached index)
+- At other offsets: OCaml writes SHARED, Rust writes FRESH (missing explicit position passing)
+- Net result: ~1 extra Position object in Rust output
+
+**Attempted fix:** Changed `parse_typ_expr_inner_with_start`, `parse_atomic_typ_expr_with_start`,
+and `parse_type_constr_with_start` to not pass `outer_start_pos_idx` and create fresh positions.
+Result: 15 regressions (254 → 254 passing, but 811 vs 796 failures). The files that previously
+passed were "accidentally correct" due to content-based sharing matching OCaml by chance.
+
+**Why simply removing caching doesn't work:**
+- Current content-based caching provides SOME correct sharing for cases where:
+  - The same position variable IS explicitly passed in OCaml (like `parse_arrow_type_rest ~start_pos`)
+  - The position happens to match what OCaml shares
+- Removing caching breaks these "accidentally correct" cases
+- The fix requires SURGICAL changes that match EXACTLY which positions OCaml shares
+
+**Correct approach (as documented in Task 5.3):**
+1. Study each function in OCaml that captures `let start_pos = p.start_pos`
+2. In Rust, those functions should call `p.push_start_pos()` (fresh) instead of `p.start_pos_idx()` (cached)
+3. Functions that RECEIVE positions as parameters should use the parameter (explicit sharing)
+4. This is ~70+ code locations across typ.rs, expr.rs, pattern.rs, module.rs
+
+**Files with correct sharing already:**
+- Functions that pass `start_pos_idx` via parameter (like `parse_arrow_type_rest`)
+- These correctly share when the caller reuses the same PosIdx
+
+**Files needing fix:**
+- `parse_typ_expr_inner_with_start` - captures start but then incorrectly passes it to atomic
+- `parse_atomic_typ_expr_with_start` - should capture its own fresh position
+- `parse_type_constr_with_start` - should capture its own fresh position (parse_value_path equivalent)
+- Many more functions throughout the parser
+
+**Previous investigation (2026-02-02):**
 
 **Previous investigation (2026-02-02):**
 Attempted to fix position sharing by using `push_start_pos()` (fresh position) instead of `start_pos_idx()`
