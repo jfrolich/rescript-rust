@@ -26,7 +26,7 @@
 
 use std::collections::HashMap;
 
-use crate::parse_arena::{LidentIdx, LocIdx, ParseArena, PosIdx, StrIdx};
+use crate::parse_arena::{ArityIdx, LidentIdx, LocIdx, ParseArena, PosIdx, StrIdx};
 use crate::parser::longident::Longident;
 
 /// Magic number for small Marshal format
@@ -104,6 +104,11 @@ pub struct MarshalWriter {
     /// OCaml shares these because they're often the same pointer (static values)
     option_i32_table: HashMap<Option<i32>, u32>,
 
+    /// Maps ArityIdx values to object counter (for index-based sharing)
+    /// Same ArityIdx = same arity value in the arena = shared in output
+    /// This matches OCaml's constant folding where `Some 1` literals are physically shared
+    arity_idx_table: HashMap<ArityIdx, u32>,
+
     /// Optional reference to ParseArena for LocIdx marshalling.
     /// Set via `set_arena()` before marshalling AST with LocIdx fields.
     /// Uses raw pointer to avoid lifetime constraints.
@@ -137,6 +142,7 @@ impl MarshalWriter {
             lident_idx_table: HashMap::new(),
             option_string_table: HashMap::new(),
             option_i32_table: HashMap::new(),
+            arity_idx_table: HashMap::new(),
             arena: None,
             obj_counter: 0,
             size_32: 0,
@@ -155,6 +161,7 @@ impl MarshalWriter {
             lident_idx_table: HashMap::new(),
             option_string_table: HashMap::new(),
             option_i32_table: HashMap::new(),
+            arity_idx_table: HashMap::new(),
             arena: None,
             obj_counter: 0,
             size_32: 0,
@@ -748,6 +755,47 @@ impl MarshalWriter {
 
                 // Record for future sharing
                 self.option_i32_table.insert(*opt, obj_idx);
+            }
+        }
+    }
+
+    /// Write an ArityIdx with index-based sharing.
+    ///
+    /// This is the key method for arity sharing: same ArityIdx = same arity value
+    /// in the arena = shared reference in output. This matches OCaml's behavior
+    /// where the compiler performs constant folding on `Some n` literals, causing
+    /// them to be physically shared.
+    ///
+    /// - ArityIdx pointing to None → integer 0
+    /// - ArityIdx pointing to Some(n) → Block(tag=0, [n]) with index-based sharing
+    pub fn write_arity_idx(&mut self, idx: ArityIdx) {
+        // Check if we've written this ArityIdx before
+        if let Some(&obj_idx) = self.arity_idx_table.get(&idx) {
+            let d = self.obj_counter - obj_idx;
+            self.write_shared_ref(d);
+            return;
+        }
+
+        // Get the actual arity value from the arena
+        let arity = self
+            .arena
+            .and_then(|ptr| unsafe { (*ptr).get_arity(idx) });
+
+        match arity {
+            None => {
+                // None is encoded as integer 0, not a block, so no sharing needed
+                self.write_int(0);
+            }
+            Some(n) => {
+                // Record the object index BEFORE writing the block
+                let obj_idx = self.obj_counter;
+
+                // Write Some(n) as Block(tag=0, [n])
+                self.write_block_header(0, 1);
+                self.write_int(n as i64);
+
+                // Record for future sharing by ArityIdx
+                self.arity_idx_table.insert(idx, obj_idx);
             }
         }
     }

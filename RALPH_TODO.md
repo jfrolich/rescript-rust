@@ -1,10 +1,13 @@
 # Ralph TODO: Binary AST Parity
 
 **Last Updated:** 2026-02-02
-**Overall Status:** 325/1049 bsc-ast tests passing (31.0%)
+**Overall Status:** 326/1049 bsc-ast tests passing (31.1%)
 **sexp-locs Status:** 1049/1049 tests passing (100%) ✅
 
 **Note:** Many remaining failures are due to arity sharing (see Phase 6 below).
+
+**Phase 6 Status:** Investigation complete; ArityIdx infrastructure added to parse_arena.rs and marshal.rs.
+Full implementation (updating AST types) deferred due to extensive codebase impact (~30+ files).
 
 ---
 
@@ -367,65 +370,52 @@ type annotation arity and function arity should be separate objects.
 and pass the index as early as possible. This mirrors OCaml's reference passing - sharing happens
 naturally when the same index is used (just like OCaml shares when same reference is passed).
 
-- [ ] **Task 6.1**: Investigate OCaml's arity sharing pattern empirically
-  - Create test cases to determine exactly what OCaml shares:
-    ```rescript
-    // Test 1: Single function with type annotation
-    let f: int => int = x => x
+- [x] **Task 6.1**: Investigate OCaml's arity sharing pattern empirically (2026-02-02)
+  - **Key finding**: OCaml's compiler performs constant folding for `Some n` values
+  - All `Some 1` literals in the parser become the SAME physical object
+  - When Marshal serializes, it detects physical identity and creates shared references
+  - **Test results**:
+    - Single typed function (`let f: int => int = x => x`): byte-identical ✅
+    - Two typed functions, same arity: 464 bytes (same size) but different sharing
+      - OCaml: at offset 0x170, `04 3c` = CODE_SHARED8 (shares back 60 objects to first `Some(1)`)
+      - Rust: at offset 0x170, `90 41` = fresh `Some(1)` block (no sharing)
+  - **OCaml Marshal behavior verified**:
+    - Different pointers with same content: NOT shared (27 bytes for `[Some 1; Some 1]`)
+    - Same pointer (same physical object): shared (27 bytes but smaller payload)
+  - **Conclusion**: Need arena-based approach where `Arity::Full(1)` values get the same ArityIdx,
+    enabling Marshal to recognize them as the same object and create shared references
 
-    // Test 2: Two functions, same arity
-    let f: int => int = x => x
-    let g: int => int = y => y
+- [x] **Task 6.2**: Define ArityIdx and ArityArena (2026-02-02)
+  - Added `ArityIdx` index type to `parse_arena.rs`
+  - Added `arities: Vec<Option<i32>>` and `arity_dedup: HashMap<Option<i32>, ArityIdx>` to `ParseArena`
+  - Added `push_arity()` method with deduplication:
+    - Same arity value → same index (matches OCaml's constant folding)
+    - At marshal time, same ArityIdx → shared reference in output
+  - Added `get_arity()` and `arity_count()` methods
+  - Added `arity_idx_table` and `write_arity_idx()` to MarshalWriter
 
-    // Test 3: Type arity vs body arity (same function)
-    let f: int => int = x => x  // Does type share with body?
-    ```
-  - For each test, analyze marshal output to see which `Some(n)` blocks are shared
-  - Document the sharing pattern
-
-- [ ] **Task 6.2**: Define ArityIdx and ArityArena
-  ```rust
-  // In parse_arena.rs
-  #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-  pub struct ArityIdx(u32);
-
-  pub struct ArityArena {
-      arities: Vec<Option<i32>>,
-  }
-
-  impl ArityArena {
-      pub fn push(&mut self, arity: Option<i32>) -> ArityIdx {
-          let idx = ArityIdx(self.arities.len() as u32);
-          self.arities.push(arity);
-          idx
-      }
-  }
-  ```
-
-- [ ] **Task 6.3**: Update AST types to use ArityIdx
+- [ ] **Task 6.3**: Update AST types to use ArityIdx - **DEFERRED**
   - Change `Ptyp_arrow { ..., arity: Arity }` to `arity: ArityIdx`
   - Change `Pexp_fun { ..., arity: Arity }` to `arity: ArityIdx`
+  - **Blocked**: This change touches 30+ files across parser, printer, viewer, typecore, etc.
+  - **Reason**: The `Arity` enum is deeply embedded in the codebase
+  - **Impact**: Would require updating all code that reads/writes arity values
+  - **Recommendation**: Consider as a separate refactor task
 
-- [ ] **Task 6.4**: Update parser to use arena
+- [ ] **Task 6.4**: Update parser to use arena - **DEFERRED** (depends on 6.3)
   - Replace `Arity::Full(n)` with `arena.push_arity(Some(n))`
   - Replace `Arity::Unknown` with `arena.push_arity(None)`
   - Update: typ.rs, expr.rs, jsx_ppx.rs, ppx.rs
 
-- [ ] **Task 6.5**: Update marshal to share by ArityIdx
-  ```rust
-  // In marshal.rs
-  arity_idx_table: HashMap<ArityIdx, u32>,
+- [x] **Task 6.5**: Add write_arity_idx to marshal - **DONE** (2026-02-02)
+  - Added `arity_idx_table: HashMap<ArityIdx, u32>` to MarshalWriter
+  - Added `write_arity_idx()` method that:
+    - Checks `arity_idx_table` for previously-written ArityIdx
+    - Writes shared reference if found
+    - Otherwise writes arity value and records in table
+  - Infrastructure is ready; waiting for AST type change (Task 6.3)
 
-  pub fn write_arity_idx(&mut self, idx: ArityIdx, arena: &ParseArena) {
-      if let Some(&obj_idx) = self.arity_idx_table.get(&idx) {
-          self.write_shared_ref(self.obj_counter - obj_idx);
-          return;
-      }
-      // ... write arity, record in table ...
-  }
-  ```
-
-- [ ] **Task 6.6**: Match OCaml's arity creation pattern
+- [ ] **Task 6.6**: Match OCaml's arity creation pattern - **BLOCKED** (depends on 6.3, 6.4)
   - Based on Task 6.1 findings, ensure Rust creates/reuses ArityIdx in same pattern
   - If OCaml shares across functions: reuse same ArityIdx
   - If OCaml keeps separate within function: create separate ArityIdx

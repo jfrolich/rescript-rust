@@ -127,6 +127,27 @@ impl ArenaIdx for LidentIdx {
     }
 }
 
+/// Index into the arity arena.
+///
+/// This is a lightweight handle (4 bytes) that can be copied and compared
+/// cheaply. Two ArityIdx values are equal if and only if they refer to the
+/// same arena slot.
+///
+/// Arity values are deduplicated by content: two `Some(1)` arities will get
+/// the same index. This matches OCaml's behavior where the compiler performs
+/// constant folding on `Some n` literals, causing them to be physically shared.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+pub struct ArityIdx(pub u32);
+
+impl ArenaIdx for ArityIdx {
+    fn from_u32(idx: u32) -> Self {
+        ArityIdx(idx)
+    }
+    fn to_u32(self) -> u32 {
+        self.0
+    }
+}
+
 // ============================================================================
 // InternedLocation (stored in arena)
 // ============================================================================
@@ -190,11 +211,17 @@ pub struct ParseArena {
     locations: Arena<InternedLocation, LocIdx>,
     /// Arena of longidents (returns LidentIdx).
     longidents: Arena<Longident, LidentIdx>,
+    /// Arena of arities (returns ArityIdx).
+    /// Arities are deduplicated by content to match OCaml's constant folding behavior.
+    arities: Vec<Option<i32>>,
     /// Position deduplication table - maps position content to its index.
     position_dedup: HashMap<PosKey, PosIdx>,
     /// Simple Lident deduplication table - maps StrIdx to its LidentIdx.
     /// This enables sharing of common identifiers like "()", "::", etc.
     lident_dedup: HashMap<StrIdx, LidentIdx>,
+    /// Arity deduplication table - maps arity value to its index.
+    /// This enables sharing of common arity values like Some(1) that OCaml shares via constant folding.
+    arity_dedup: HashMap<Option<i32>, ArityIdx>,
     /// String arena for all identifier strings.
     ///
     /// Strings can be added in two ways:
@@ -211,8 +238,10 @@ impl Default for ParseArena {
             positions: Arena::default(),
             locations: Arena::default(),
             longidents: Arena::default(),
+            arities: Vec::new(),
             position_dedup: HashMap::new(),
             lident_dedup: HashMap::new(),
+            arity_dedup: HashMap::new(),
             strings: Interner::new(),
         }
     }
@@ -546,6 +575,41 @@ impl ParseArena {
     /// Get total number of longidents.
     pub fn longident_count(&self) -> usize {
         self.longidents.len()
+    }
+
+    // ========================================================================
+    // Arity arena
+    // ========================================================================
+
+    /// Push an arity value into the arena with deduplication.
+    ///
+    /// This implements the key sharing behavior that matches OCaml:
+    /// - Two `Some(1)` arities will get the same index
+    /// - At marshal time, same index = shared reference in output
+    ///
+    /// OCaml achieves this via constant folding: `Some 1` literals become
+    /// physically identical objects. We emulate this with explicit deduplication.
+    pub fn push_arity(&mut self, arity: Option<i32>) -> ArityIdx {
+        // Check if we've seen this arity value before
+        if let Some(&idx) = self.arity_dedup.get(&arity) {
+            return idx;
+        }
+
+        // Create new arity and record for deduplication
+        let idx = ArityIdx(self.arities.len() as u32);
+        self.arities.push(arity);
+        self.arity_dedup.insert(arity, idx);
+        idx
+    }
+
+    /// Look up an arity by index.
+    pub fn get_arity(&self, idx: ArityIdx) -> Option<i32> {
+        self.arities[idx.0 as usize]
+    }
+
+    /// Get total number of arities.
+    pub fn arity_count(&self) -> usize {
+        self.arities.len()
     }
 
     /// Get the string content for a StrIdx.
