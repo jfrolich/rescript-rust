@@ -189,6 +189,11 @@ CODE_SHARED8 (single byte) for nearby positions, while Rust sometimes uses CODE_
 
 This is a low-level marshal optimization issue, not an AST structure issue.
 
+**Arity Sharing Limitation**: OCaml shares `Option<i32>` arity values between structures via pointer
+equality. When two functions have the same arity (e.g., both `Some(1)`), OCaml reuses the same object.
+Rust cannot replicate this without content-based sharing, which breaks single-function cases where
+type annotation arity and function arity should be separate objects.
+
 - [x] **Task 4.1**: Audit all expression position creation (partial - 135→144)
   - ✅ Fixed: Pexp_apply - use loc_start_idx() to reuse existing PosIdx
   - ✅ Fixed: Pexp_field - reuse start position from expression location
@@ -207,10 +212,20 @@ This is a low-level marshal optimization issue, not an AST structure issue.
   - ✅ Fixed: Module apply chain - reuse result.pmod_loc.loc_start
   - ✅ Fixed: Module constraint - reuse rhs_module_expr.pmod_loc.loc_start
 
-- [ ] **Task 4.4**: Investigate marshal sharing order
+- [x] **Task 4.4**: Investigate marshal sharing order (ANALYZED - structural limitation)
   - OCaml shares positions at shorter distances
   - Rust may allocate extra position indices
-  - Need to trace position creation order in parser
+  - **Key finding**: OCaml uses pointer equality for sharing, not content equality
+  - **Arity sharing case study**:
+    - When two functions have the SAME arity (e.g., both `Some(1)`), OCaml shares them
+    - Single function: `let a: t => u = x => x` → matches perfectly (type arity and function arity are separate)
+    - Two functions with different arities → matches perfectly
+    - Two functions with SAME arity → OCaml shares 1 object, Rust doesn't (1 object difference)
+  - **Attempted fix**: Content-based sharing for `Option<i32>` arity values
+    - This BROKE single-function cases (Rust incorrectly shared type arity with function arity)
+    - Reverted because it violated the "no content-based sharing" constraint
+  - **Conclusion**: Some sharing differences are structural and cannot be fixed without violating design constraints
+  - **Impact**: ~1 object difference per pair of functions with identical arities
 
 ### Phase 5: Validation
 
