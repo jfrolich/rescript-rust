@@ -2465,6 +2465,18 @@ fn uncapitalize_first(s: &str) -> String {
 }
 
 /// Handle @deriving for type declarations
+///
+/// OCaml transforms `@deriving(accessors) type t = { x: int }` into:
+/// ```
+/// include (struct
+///   type t = { x: int }   // @deriving stripped
+///   include (struct
+///     let x = (param: t[@deriving(accessors)]) => param.x
+///   end : sig
+///     val x: t[@deriving(accessors)] -> int
+///   end)
+/// end)
+/// ```
 fn handle_deriving_type(
     item: &StructureItem,
     rec_flag: RecFlag,
@@ -2477,37 +2489,491 @@ fn handle_deriving_type(
 
     // Get the last type declaration's attributes (where @deriving should be)
     let last_tdcl = tdcls.last().unwrap();
-    let (actions, _new_attrs) = parse_deriving_actions(&last_tdcl.ptype_attributes, arena);
+    let (actions, new_attrs) = parse_deriving_actions(&last_tdcl.ptype_attributes, arena);
 
     if actions.is_empty() {
         // No @deriving, return as-is
         return vec![item.clone()];
     }
 
-    // Keep the original type declaration (OCaml doesn't strip @deriving)
-    // and append generated accessor functions
-    let mut result = vec![item.clone()];
+    let loc = item.pstr_loc;
+
+    // Step 1: Create type declaration with @deriving stripped from last tdcl
+    let new_tdcls: Vec<TypeDeclaration> = tdcls
+        .iter()
+        .enumerate()
+        .map(|(i, tdcl)| {
+            if i == tdcls.len() - 1 {
+                // Last type declaration: replace ptype_attributes with new_attrs
+                TypeDeclaration {
+                    ptype_attributes: new_attrs.clone(),
+                    ..tdcl.clone()
+                }
+            } else {
+                tdcl.clone()
+            }
+        })
+        .collect();
+
+    let type_str_item = StructureItem {
+        pstr_desc: StructureItemDesc::Pstr_type(rec_flag, new_tdcls),
+        pstr_loc: loc,
+    };
+
+    // Step 2: Generate accessor includes for each action
+    let mut include_items: Vec<StructureItem> = vec![];
 
     for action in &actions {
         match action {
             DeriveAction::Accessors => {
                 for tdcl in tdcls {
-                    let accessors = generate_accessors(tdcl, item.pstr_loc, arena);
-                    result.extend(accessors);
+                    // Generate `include (struct <accessors> end : sig <sigs> end)`
+                    if let Some(include_item) = generate_accessor_include(tdcl, loc, arena) {
+                        include_items.push(include_item);
+                    }
                 }
             }
             DeriveAction::JsConverter { new_type: _ } => {
                 // TODO: Implement jsConverter generation
-                // For now, we at least strip the @deriving attribute
             }
             DeriveAction::Abstract { light: _ } => {
                 // TODO: Implement abstract generation
-                // For now, we at least strip the @deriving attribute
             }
         }
     }
 
+    // Step 3: Wrap everything in `include (struct <type_decl> <includes> end)`
+    let mut inner_structure = vec![type_str_item];
+    inner_structure.extend(include_items);
+
+    let mod_expr = ModuleExpr {
+        pmod_desc: ModuleExprDesc::Pmod_structure(inner_structure),
+        pmod_loc: loc,
+        pmod_attributes: vec![],
+    };
+
+    let include_decl = current::IncludeDeclaration {
+        pincl_mod: mod_expr,
+        pincl_loc: loc,
+        pincl_attributes: vec![],
+    };
+
+    vec![StructureItem {
+        pstr_desc: StructureItemDesc::Pstr_include(include_decl),
+        pstr_loc: loc,
+    }]
+}
+
+/// Generate `include (struct <accessor_bindings> end : sig <accessor_sigs> end)`
+fn generate_accessor_include(
+    tdcl: &TypeDeclaration,
+    loc: LocIdx,
+    arena: &mut ParseArena,
+) -> Option<StructureItem> {
+    // Get core type with @deriving attributes (OCaml preserves these in the generated code)
+    let core_type_with_attrs = core_type_of_type_declaration_with_attrs(tdcl, arena);
+
+    let (structure_items, signature_items) = match &tdcl.ptype_kind {
+        TypeKind::Ptype_record(labels) => {
+            generate_record_accessors_and_sigs(labels, &core_type_with_attrs, loc, arena)
+        }
+        TypeKind::Ptype_variant(constructors) => {
+            generate_variant_accessors_and_sigs(constructors, tdcl, &core_type_with_attrs, loc, arena)
+        }
+        _ => return None, // Abstract or open types not supported
+    };
+
+    if structure_items.is_empty() {
+        return None;
+    }
+
+    // Create: include (struct <structure_items> end : sig <signature_items> end)
+    let inner_mod = ModuleExpr {
+        pmod_desc: ModuleExprDesc::Pmod_structure(structure_items),
+        pmod_loc: loc,
+        pmod_attributes: vec![],
+    };
+
+    let sig_mod_type = current::ModuleType {
+        pmty_desc: current::ModuleTypeDesc::Pmty_signature(signature_items),
+        pmty_loc: loc,
+        pmty_attributes: vec![],
+    };
+
+    let constrained_mod = ModuleExpr {
+        pmod_desc: ModuleExprDesc::Pmod_constraint(Box::new(inner_mod), sig_mod_type),
+        pmod_loc: loc,
+        pmod_attributes: vec![],
+    };
+
+    let include_decl = current::IncludeDeclaration {
+        pincl_mod: constrained_mod,
+        pincl_loc: loc,
+        pincl_attributes: vec![],
+    };
+
+    Some(StructureItem {
+        pstr_desc: StructureItemDesc::Pstr_include(include_decl),
+        pstr_loc: loc,
+    })
+}
+
+/// Generate accessor structure items and signature items for record fields
+fn generate_record_accessors_and_sigs(
+    labels: &[current::LabelDeclaration],
+    core_type: &CoreType,
+    loc: LocIdx,
+    arena: &mut ParseArena,
+) -> (Vec<StructureItem>, Vec<SignatureItem>) {
+    let mut structure_items = Vec::new();
+    let mut signature_items = Vec::new();
+
+    for label in labels {
+        // Structure item: let fieldName = (param: t) => param.fieldName
+        let param_str = arena.intern_string("param");
+        let param_pat = Pattern {
+            ppat_desc: PatternDesc::Ppat_constraint(
+                Box::new(Pattern {
+                    ppat_desc: PatternDesc::Ppat_var(Located { txt: param_str, loc }),
+                    ppat_loc: loc,
+                    ppat_attributes: vec![],
+                }),
+                core_type.clone(),
+            ),
+            ppat_loc: loc,
+            ppat_attributes: vec![],
+        };
+
+        let field_access = Expression {
+            pexp_desc: ExpressionDesc::Pexp_field(
+                Box::new(Expression {
+                    pexp_desc: ExpressionDesc::Pexp_ident(Located {
+                        txt: arena.push_longident(Longident::Lident(param_str)),
+                        loc,
+                    }),
+                    pexp_loc: loc,
+                    pexp_attributes: vec![],
+                }),
+                Located {
+                    txt: arena.push_longident(Longident::Lident(label.pld_name.txt)),
+                    loc,
+                },
+            ),
+            pexp_loc: loc,
+            pexp_attributes: vec![],
+        };
+
+        let fun_expr = Expression {
+            pexp_desc: ExpressionDesc::Pexp_fun {
+                arg_label: ArgLabel::Nolabel,
+                default: None,
+                lhs: param_pat,
+                rhs: Box::new(field_access),
+                is_async: false,
+                arity: arena.push_arity(Some(1)),
+            },
+            pexp_loc: loc,
+            pexp_attributes: vec![],
+        };
+
+        let binding = ValueBinding {
+            pvb_pat: Pattern {
+                ppat_desc: PatternDesc::Ppat_var(Located {
+                    txt: label.pld_name.txt,
+                    loc: label.pld_name.loc,
+                }),
+                ppat_loc: loc,
+                ppat_attributes: vec![],
+            },
+            pvb_expr: fun_expr,
+            pvb_attributes: vec![],
+            pvb_loc: loc,
+        };
+
+        structure_items.push(StructureItem {
+            pstr_desc: StructureItemDesc::Pstr_value(RecFlag::Nonrecursive, vec![binding]),
+            pstr_loc: loc,
+        });
+
+        // Signature item: val fieldName: t -> fieldType
+        let arrow_type = CoreType {
+            ptyp_desc: CoreTypeDesc::Ptyp_arrow {
+                arg: Box::new(TypeArg {
+                    attrs: vec![],
+                    lbl: ArgLabel::Nolabel,
+                    typ: core_type.clone(),
+                }),
+                ret: Box::new(label.pld_type.clone()),
+                arity: arena.push_arity(Some(1)),
+            },
+            ptyp_loc: loc,
+            ptyp_attributes: vec![],
+        };
+
+        let val_desc = ValueDescription {
+            pval_name: Located {
+                txt: label.pld_name.txt,
+                loc: label.pld_name.loc,
+            },
+            pval_type: arrow_type,
+            pval_prim: vec![],
+            pval_attributes: vec![],
+            pval_loc: loc,
+        };
+
+        signature_items.push(SignatureItem {
+            psig_desc: SignatureItemDesc::Psig_value(val_desc),
+            psig_loc: loc,
+        });
+    }
+
+    (structure_items, signature_items)
+}
+
+/// Generate accessor structure items and signature items for variant constructors
+fn generate_variant_accessors_and_sigs(
+    constructors: &[current::ConstructorDeclaration],
+    _tdcl: &TypeDeclaration,
+    core_type: &CoreType,
+    loc: LocIdx,
+    arena: &mut ParseArena,
+) -> (Vec<StructureItem>, Vec<SignatureItem>) {
+    let mut structure_items = Vec::new();
+    let mut signature_items = Vec::new();
+
+    for ctor in constructors {
+        let ctor_name = arena.get_string(ctor.pcd_name.txt);
+        let fn_name = uncapitalize_first(ctor_name);
+        let fn_name_idx = arena.intern_string(&fn_name);
+
+        let arity = match &ctor.pcd_args {
+            ConstructorArguments::Pcstr_tuple(args) => args.len(),
+            ConstructorArguments::Pcstr_record(_) => {
+                // Record constructors not supported, skip
+                continue;
+            }
+        };
+
+        let annotate_type = match &ctor.pcd_res {
+            Some(t) => t.clone(),
+            None => core_type.clone(),
+        };
+
+        if arity == 0 {
+            // No args: let ctorName = CtorName : t
+            let ctor_expr = Expression {
+                pexp_desc: ExpressionDesc::Pexp_constraint(
+                    Box::new(Expression {
+                        pexp_desc: ExpressionDesc::Pexp_construct(
+                            Located {
+                                txt: arena.push_longident(Longident::Lident(ctor.pcd_name.txt)),
+                                loc,
+                            },
+                            None,
+                        ),
+                        pexp_loc: loc,
+                        pexp_attributes: vec![],
+                    }),
+                    annotate_type.clone(),
+                ),
+                pexp_loc: loc,
+                pexp_attributes: vec![],
+            };
+
+            let binding = ValueBinding {
+                pvb_pat: Pattern {
+                    ppat_desc: PatternDesc::Ppat_var(Located { txt: fn_name_idx, loc }),
+                    ppat_loc: loc,
+                    ppat_attributes: vec![],
+                },
+                pvb_expr: ctor_expr,
+                pvb_attributes: vec![],
+                pvb_loc: loc,
+            };
+
+            structure_items.push(StructureItem {
+                pstr_desc: StructureItemDesc::Pstr_value(RecFlag::Nonrecursive, vec![binding]),
+                pstr_loc: loc,
+            });
+
+            // val ctorName: t
+            let val_desc = ValueDescription {
+                pval_name: Located { txt: fn_name_idx, loc },
+                pval_type: annotate_type,
+                pval_prim: vec![],
+                pval_attributes: vec![],
+                pval_loc: loc,
+            };
+
+            signature_items.push(SignatureItem {
+                psig_desc: SignatureItemDesc::Psig_value(val_desc),
+                psig_loc: loc,
+            });
+        } else {
+            // Has args: let ctorName = (p0, p1, ...) => CtorName(p0, p1, ...)
+            let params: Vec<StrIdx> = (0..arity)
+                .map(|i| arena.intern_string(&format!("param_{}", i)))
+                .collect();
+
+            // Build constructor argument (single or tuple)
+            let ctor_arg = if arity == 1 {
+                Expression {
+                    pexp_desc: ExpressionDesc::Pexp_ident(Located {
+                        txt: arena.push_longident(Longident::Lident(params[0])),
+                        loc,
+                    }),
+                    pexp_loc: loc,
+                    pexp_attributes: vec![],
+                }
+            } else {
+                Expression {
+                    pexp_desc: ExpressionDesc::Pexp_tuple(
+                        params.iter().map(|&p| Expression {
+                            pexp_desc: ExpressionDesc::Pexp_ident(Located {
+                                txt: arena.push_longident(Longident::Lident(p)),
+                                loc,
+                            }),
+                            pexp_loc: loc,
+                            pexp_attributes: vec![],
+                        }).collect()
+                    ),
+                    pexp_loc: loc,
+                    pexp_attributes: vec![],
+                }
+            };
+
+            let ctor_expr = Expression {
+                pexp_desc: ExpressionDesc::Pexp_constraint(
+                    Box::new(Expression {
+                        pexp_desc: ExpressionDesc::Pexp_construct(
+                            Located {
+                                txt: arena.push_longident(Longident::Lident(ctor.pcd_name.txt)),
+                                loc,
+                            },
+                            Some(Box::new(ctor_arg)),
+                        ),
+                        pexp_loc: loc,
+                        pexp_attributes: vec![],
+                    }),
+                    annotate_type.clone(),
+                ),
+                pexp_loc: loc,
+                pexp_attributes: vec![],
+            };
+
+            // Wrap with function parameters (fold right)
+            let body = params.iter().rev().fold(ctor_expr, |acc, &param| {
+                Expression {
+                    pexp_desc: ExpressionDesc::Pexp_fun {
+                        arg_label: ArgLabel::Nolabel,
+                        default: None,
+                        lhs: Pattern {
+                            ppat_desc: PatternDesc::Ppat_var(Located { txt: param, loc }),
+                            ppat_loc: loc,
+                            ppat_attributes: vec![],
+                        },
+                        rhs: Box::new(acc),
+                        is_async: false,
+                        arity: arena.push_arity(None),
+                    },
+                    pexp_loc: loc,
+                    pexp_attributes: vec![],
+                }
+            });
+
+            // Set outermost arity
+            let final_expr = set_outermost_arity(body, arity as i32, arena);
+
+            let binding = ValueBinding {
+                pvb_pat: Pattern {
+                    ppat_desc: PatternDesc::Ppat_var(Located { txt: fn_name_idx, loc }),
+                    ppat_loc: loc,
+                    ppat_attributes: vec![],
+                },
+                pvb_expr: final_expr,
+                pvb_attributes: vec![],
+                pvb_loc: loc,
+            };
+
+            structure_items.push(StructureItem {
+                pstr_desc: StructureItemDesc::Pstr_value(RecFlag::Nonrecursive, vec![binding]),
+                pstr_loc: loc,
+            });
+
+            // Signature: val ctorName: arg0 -> arg1 -> ... -> t
+            let pcd_args = match &ctor.pcd_args {
+                ConstructorArguments::Pcstr_tuple(args) => args.clone(),
+                _ => vec![],
+            };
+            let args: Vec<TypeArg> = pcd_args.iter().map(|arg_type| TypeArg {
+                attrs: vec![],
+                lbl: ArgLabel::Nolabel,
+                typ: arg_type.clone(),
+            }).collect();
+            let arrow_type = make_arrows(args, annotate_type, loc, arena);
+
+            let val_desc = ValueDescription {
+                pval_name: Located { txt: fn_name_idx, loc },
+                pval_type: arrow_type,
+                pval_prim: vec![],
+                pval_attributes: vec![],
+                pval_loc: loc,
+            };
+
+            signature_items.push(SignatureItem {
+                psig_desc: SignatureItemDesc::Psig_value(val_desc),
+                psig_loc: loc,
+            });
+        }
+    }
+
+    (structure_items, signature_items)
+}
+
+/// Create an arrow type from a list of arguments and return type
+fn make_arrows(args: Vec<TypeArg>, ret: CoreType, loc: LocIdx, arena: &mut ParseArena) -> CoreType {
+    if args.is_empty() {
+        return ret;
+    }
+
+    // OCaml's Typ.arrows creates arity = Some(list_length)
+    let arity = arena.push_arity(Some(args.len() as i32));
+
+    // Build right-to-left (fold_right pattern)
+    let mut result = ret;
+    for arg in args.into_iter().rev() {
+        result = CoreType {
+            ptyp_desc: CoreTypeDesc::Ptyp_arrow {
+                arg: Box::new(arg),
+                ret: Box::new(result),
+                arity,
+            },
+            ptyp_loc: loc,
+            ptyp_attributes: vec![],
+        };
+    }
     result
+}
+
+/// Generate a core type with attributes (including @deriving)
+/// This matches OCaml's Ast_derive_util.core_type_of_type_declaration
+fn core_type_of_type_declaration_with_attrs(tdcl: &TypeDeclaration, arena: &mut ParseArena) -> CoreType {
+    let loc = tdcl.ptype_loc;
+    let name_lid = arena.push_longident(Longident::Lident(tdcl.ptype_name.txt));
+
+    let type_args: Vec<CoreType> = tdcl.ptype_params.iter().map(|(core_type, _)| {
+        core_type.clone()
+    }).collect();
+
+    CoreType {
+        ptyp_desc: CoreTypeDesc::Ptyp_constr(
+            Located { txt: name_lid, loc },
+            type_args,
+        ),
+        ptyp_loc: loc,
+        // Include the type declaration's attributes (which has @deriving)
+        ptyp_attributes: tdcl.ptype_attributes.clone(),
+    }
 }
 
 // ========== PPX Application ==========
