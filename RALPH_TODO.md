@@ -91,6 +91,11 @@ Most .resi (interface) files pass; most .res (implementation) files fail due to 
 - Two functions with same arity: OCaml has 3 `Some(1)` blocks (one shared), Rust has 4
 - **Resolution:** Disabled sharing in write_arity_idx() to restore baseline parity (327/1049)
 
+**Arity sharing bug fix (2026-02-02):**
+- Found bug in `write_arity_idx()`: was passing raw `obj_idx` to `write_shared_ref()` instead of distance
+- Fix: `let d = self.obj_counter - obj_idx; self.write_shared_ref(d);`
+- Parity improved: 287 → 309 (+22 files, now 29.5%)
+
 **ArityIdx ROOT CAUSE IDENTIFIED (2026-02-02):** ✨
 - OCaml's native compiler CSE shares **literal** `Some 1` but NOT **computed** `Some arity`
 - Empirically verified:
