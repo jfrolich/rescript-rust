@@ -6,6 +6,16 @@
 2. **Commit your changes frequently** - Follow the instructions in CLAUDE.md about committing.
 3. **Update baselines carefully** - Only add files to baselines when they truly pass; verify the test infrastructure is working correctly first.
 
+## 🎯 PRIORITY: Focus on High-Impact Issues First
+
+**TOP PRIORITY:** Arity sharing and location sharing should be tackled FIRST because they affect ~700+ files each. These are complex problems but solving them will have the biggest impact on parity numbers.
+
+1. **Arity sharing (~700 files)** - OCaml's marshal uses CSE (Common Subexpression Elimination) to share identical arity values. Rust currently writes each arity inline. Need to replicate OCaml's sharing behavior.
+
+2. **Location sharing (~500+ files)** - Similar issue with Location structs. The mapper_to0 converts LocIdx to full Location structs, losing sharing. May require refactoring parsetree0 to use LocIdx or implementing location deduplication in marshal.
+
+Do NOT spend time on small issues (@deriving edge cases, module-level await) until the sharing issues are resolved - they only affect a handful of files compared to 700+.
+
 ---
 
 **Last Updated:** 2026-02-02
