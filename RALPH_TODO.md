@@ -61,12 +61,30 @@ Do NOT spend time on small issues (@deriving edge cases, etc.) until the locatio
 
 ---
 
-**Last Updated:** 2026-02-02
+**Last Updated:** 2026-02-02 (position sharing bidirectional analysis added)
 **Overall Status:** 496/1049 bsc-ast tests passing (47.3%)
 **sexp-locs Status:** 1049/1049 tests passing (100%) ✅
 
 **Note:** Most remaining ~553 failures are due to position/arity sharing differences in marshal output.
 The AST structure is 100% correct (sexp-locs matches perfectly).
+
+**Position sharing investigation (2026-02-02):**
+- Investigated why external declarations have 4-byte size difference
+- Key finding: The difference is NOT consistent across all failing tests:
+  - Some tests: Rust shares MORE than OCaml (Rust smaller)
+  - Some tests: Rust shares LESS than OCaml (Rust larger)
+  - Some tests: Same size but different sharing distances
+- Root cause: Rust uses content-based position caching (`start_pos_cache` HashMap)
+  - OCaml uses pointer equality for sharing (same variable = shared)
+  - Rust caches by position VALUES, so positions with same content share
+  - This can cause DIFFERENT sharing patterns than OCaml
+- Example differences:
+  - `external foo: int => int = "foo"`: Rust 212 bytes, OCaml 208 bytes (+4, Rust shares less)
+  - `letprivate.res`: Rust 285 bytes, OCaml 289 bytes (-4, Rust shares more)
+  - `JSXFragments.res`: Both 1943 bytes (same size, different sharing distances)
+- Fix would require tracking position identity during parsing, not just values
+  - This is a significant architectural change
+  - Benefits unclear since AST structure is already 100% correct
 
 **Type declaration attribute fix (2026-02-02):**
 - Fixed string transformation in type declaration attributes (constructor/label attributes)
@@ -633,6 +651,14 @@ type annotation arity and function arity should be separate objects.
   - **Remaining blockers for 500+**:
     - Position sharing differences (structural issue, affects ~50+ files with same-size output)
     - The `%%private` files have correct structure but 4-byte sharing differences
+  - **Further analysis (2026-02-02)**:
+    - Position sharing differences are BIDIRECTIONAL across test files:
+      - Some files: Rust shares MORE (smaller output, e.g., `letprivate.res`: Rust 285, OCaml 289)
+      - Some files: Rust shares LESS (larger output, e.g., external decls: Rust 212, OCaml 208)
+      - Some files: Same size but different sharing distances (e.g., `JSXFragments.res`)
+    - Root cause: Content-based position caching in Rust (`start_pos_cache`)
+    - OCaml shares by pointer identity; Rust shares by position value content
+    - This fundamental difference makes exact byte parity very difficult to achieve
 - [ ] **Task 5.3**: Target 750/1049 bsc-ast parity (71%) - **BLOCKED** (position sharing structural issue)
 - [ ] **Task 5.4**: Target 1000/1049 bsc-ast parity (95%) - **BLOCKED** (position sharing structural issue)
 - [ ] **Task 5.5**: Achieve 1049/1049 bsc-ast parity (100%) - **BLOCKED** (position sharing structural issue)
