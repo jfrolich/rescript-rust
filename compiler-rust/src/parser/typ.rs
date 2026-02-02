@@ -1219,11 +1219,9 @@ fn parse_record_or_object_type(p: &mut Parser<'_>) -> CoreType {
 
 /// Parse object type body after `{` has been consumed.
 /// This is used by constructor argument parsing where OCaml captures start_pos AFTER consuming `{`.
-/// The caller should pass the position AFTER consuming `{` as `start_pos`.
-pub fn parse_object_type_body(p: &mut Parser<'_>, start_pos: Position) -> CoreType {
-    // Push start position as PosIdx for potential reuse in arrow type location
-    // Use cache for position sharing
-    let start_pos_idx = p.get_or_push_start_pos(start_pos);
+/// The caller should pass the position AFTER consuming `{` as `start_pos_idx`.
+pub fn parse_object_type_body(p: &mut Parser<'_>, start_pos_idx: PosIdx) -> CoreType {
+    // The caller provides the PosIdx directly for identity-based position sharing.
 
     // Check for open/closed markers: {. ... } or {.. ... }
     let closed = if p.token == Token::DotDot {
