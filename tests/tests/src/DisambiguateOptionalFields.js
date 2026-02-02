@@ -2,6 +2,6 @@ let f1 = _arg0 => v.x;
 
 let f2 = _arg0 => v.x;
 
-let v = {x: 3, y: 4};
+let v = {x: 3, y: 4, z: "None"};
 
 let res = f2(v);
