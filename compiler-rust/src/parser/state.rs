@@ -228,7 +228,7 @@ impl<'src> Parser<'src> {
     /// Get or push a start position, using cache for sharing.
     /// If the position matches a cached start position, returns the cached PosIdx.
     /// This enables sharing for positions captured from p.start_pos before/during parsing.
-    fn get_or_push_start_pos(&mut self, pos: Position) -> PosIdx {
+    pub fn get_or_push_start_pos(&mut self, pos: Position) -> PosIdx {
         if let Some((cached_pos, cached_idx)) = self.cached_start_pos {
             if cached_pos == pos {
                 return cached_idx;
