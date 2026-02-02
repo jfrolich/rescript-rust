@@ -19,7 +19,8 @@ use crate::location::Location;
 use crate::parse_arena::{LidentIdx, Located, LocIdx, ParseArena};
 use crate::parser::ast::{
     self as current, ArgLabel, Arity, Attribute, Case, Constant, ConstructorArguments, CoreType,
-    CoreTypeDesc, Expression, ExpressionDesc, Label, ModuleExpr, ModuleExprDesc, Pattern,
+    CoreTypeDesc, Expression, ExpressionDesc, JsxClosingTag, JsxContainerElement, JsxElement,
+    JsxFragment, JsxProp, JsxUnaryElement, Label, ModuleExpr, ModuleExprDesc, Pattern,
     PatternDesc, Payload, RecFlag, SignatureItem, SignatureItemDesc, StructureItem,
     StructureItemDesc, TypeArg, TypeDeclaration, TypeKind, ValueBinding, ValueDescription,
 };
@@ -2199,9 +2200,9 @@ fn rewrite_expression_generic(expr: &Expression, arena: &mut ParseArena) -> Expr
             return handle_extension(expr, ext, arena);
         }
 
-        // JSX - just clone
-        ExpressionDesc::Pexp_jsx_element(_) => {
-            return expr.clone();
+        // JSX - recurse into children and props
+        ExpressionDesc::Pexp_jsx_element(jsx) => {
+            ExpressionDesc::Pexp_jsx_element(rewrite_jsx_element(jsx, arena))
         }
     };
 
@@ -2221,6 +2222,62 @@ fn rewrite_cases(cases: &[Case], arena: &mut ParseArena) -> Vec<Case> {
             pc_lhs: rewrite_pattern(&c.pc_lhs, arena),
             pc_guard: c.pc_guard.as_ref().map(|e| rewrite_expression(e, arena)),
             pc_rhs: rewrite_expression(&c.pc_rhs, arena),
+        })
+        .collect()
+}
+
+/// Rewrite a JSX element, recursing into children and props
+fn rewrite_jsx_element(jsx: &JsxElement, arena: &mut ParseArena) -> JsxElement {
+    match jsx {
+        JsxElement::Fragment(frag) => JsxElement::Fragment(JsxFragment {
+            opening: frag.opening,
+            children: rewrite_jsx_children(&frag.children, arena),
+            closing: frag.closing,
+        }),
+        JsxElement::Unary(elem) => JsxElement::Unary(JsxUnaryElement {
+            tag_name: elem.tag_name.clone(),
+            props: rewrite_jsx_props(&elem.props, arena),
+        }),
+        JsxElement::Container(elem) => JsxElement::Container(JsxContainerElement {
+            tag_name_start: elem.tag_name_start.clone(),
+            opening_end: elem.opening_end,
+            props: rewrite_jsx_props(&elem.props, arena),
+            children: rewrite_jsx_children(&elem.children, arena),
+            closing_tag: elem.closing_tag.clone(),
+        }),
+    }
+}
+
+/// Rewrite JSX children (list of expressions)
+fn rewrite_jsx_children(children: &[Expression], arena: &mut ParseArena) -> Vec<Expression> {
+    children
+        .iter()
+        .map(|e| rewrite_expression(e, arena))
+        .collect()
+}
+
+/// Rewrite JSX props
+fn rewrite_jsx_props(props: &[JsxProp], arena: &mut ParseArena) -> Vec<JsxProp> {
+    props
+        .iter()
+        .map(|prop| match prop {
+            JsxProp::Punning { optional, name } => JsxProp::Punning {
+                optional: *optional,
+                name: name.clone(),
+            },
+            JsxProp::Value {
+                name,
+                optional,
+                value,
+            } => JsxProp::Value {
+                name: name.clone(),
+                optional: *optional,
+                value: rewrite_expression(value, arena),
+            },
+            JsxProp::Spreading { loc, expr } => JsxProp::Spreading {
+                loc: *loc,
+                expr: rewrite_expression(expr, arena),
+            },
         })
         .collect()
 }
