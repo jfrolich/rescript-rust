@@ -332,7 +332,7 @@ type annotation arity and function arity should be separate objects.
     - Rust's mapper_to0 creates new Location structs (loses identity, no sharing)
     - Proper fix would require `Rc<Location>` or `LocIdx` in parsetree0 (significant refactor)
     - **Status**: Content-based sharing reverted; architectural limitation documented
-- [ ] **Task 5.2**: Target 500/1049 bsc-ast parity (47%)
+- [ ] **Task 5.2**: Target 500/1049 bsc-ast parity (47%) - **BLOCKED**
   - **Investigation (2026-02-02)**: Identified that reaching 500 requires fixing arity sharing
   - **Blocking issue**: Arity sharing - two functions with same arity (`int => int`) differ by 1 object
     - Example: `let f: int => int = x => x; let g: int => string = y => "test"` fails
@@ -343,9 +343,10 @@ type annotation arity and function arity should be separate objects.
   - **Current**: 259/1049 (24.7%) - most .resi files pass, most .res files fail due to arity
   - **Verified (2026-02-02)**: Single typed function passes (`let f: int => int = x => x`), but two functions
     with same arity fail. This is the documented arity sharing limitation.
-- [ ] **Task 5.3**: Target 750/1049 bsc-ast parity (71%)
-- [ ] **Task 5.4**: Target 1000/1049 bsc-ast parity (95%)
-- [ ] **Task 5.5**: Achieve 1049/1049 bsc-ast parity (100%)
+  - **Status**: BLOCKED - requires architectural changes to fix
+- [ ] **Task 5.3**: Target 750/1049 bsc-ast parity (71%) - **BLOCKED** (depends on 5.2)
+- [ ] **Task 5.4**: Target 1000/1049 bsc-ast parity (95%) - **BLOCKED** (depends on 5.2)
+- [ ] **Task 5.5**: Achieve 1049/1049 bsc-ast parity (100%) - **BLOCKED** (depends on 5.2)
 
 ---
 
