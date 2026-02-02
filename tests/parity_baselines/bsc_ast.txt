@@ -119,6 +119,7 @@ syntax_tests/data/idempotency/pupilfirst/schools/CourseCoaches__Types.res
 syntax_tests/data/idempotency/pupilfirst/schools/CourseEditor__Types.res
 syntax_tests/data/idempotency/pupilfirst/schools/CourseExports__Types.res
 syntax_tests/data/idempotency/pupilfirst/schools/CurriculumEditor__MarkdownBlockEditor.res
+syntax_tests/data/idempotency/pupilfirst/schools/CurriculumEditor__SortResourcesMutation.res
 syntax_tests/data/idempotency/pupilfirst/schools/CurriculumEditor__TargetChecklistItemEditor.res
 syntax_tests/data/idempotency/pupilfirst/schools/CurriculumEditor__Types.res
 syntax_tests/data/idempotency/pupilfirst/schools/InactiveStudentsPanel__Types.res
@@ -235,7 +236,9 @@ syntax_tests/data/printer/expr/tuple.res
 syntax_tests/data/printer/expr/Uncurried.res
 syntax_tests/data/printer/expr/while.res
 syntax_tests/data/printer/expr/whitespace.res
+syntax_tests/data/printer/modExpr/extension.res
 syntax_tests/data/printer/modExpr/unpack.res
+syntax_tests/data/printer/modType/extension.res
 syntax_tests/data/printer/modType/ident.res
 syntax_tests/data/printer/modType/moduleTypeOf.res
 syntax_tests/data/printer/modType/signature.res

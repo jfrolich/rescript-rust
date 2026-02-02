@@ -28,7 +28,7 @@ Do NOT spend time on small issues (@deriving edge cases, etc.) until the sharing
 ---
 
 **Last Updated:** 2026-02-02
-**Overall Status:** 284/1049 bsc-ast tests passing (27.1%)
+**Overall Status:** 287/1049 bsc-ast tests passing (27.4%)
 **sexp-locs Status:** 1049/1049 tests passing (100%) ✅
 
 **Note:** Many remaining failures are due to arity sharing (see Phase 6 below).
@@ -55,7 +55,8 @@ These CAN be fixed by interning values earlier in the pipeline (like `LocIdx`), 
 - `Pstr_extension` (%%ext) and `Psig_extension` now transform strings in their payloads
 - Also added attribute rewriting for Pstr_open, Pstr_modtype, Pstr_exception, Pstr_typext,
   and their signature equivalents
-- Binary AST parity: 278 → 284 (+6 files)
+- Binary AST parity: 278 → 287 (+9 files)
+- Also added rewrite_module_type() for module type extensions and nested structures
 
 **@module FFI fix (2026-02-02):** Fixed @module attribute handling in FFI encoding.
 - `ExternalModuleName` is now correctly created when `@module("...")` is present
