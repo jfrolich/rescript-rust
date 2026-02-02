@@ -1,7 +1,7 @@
 # Ralph TODO: Binary AST Parity
 
 **Last Updated:** 2026-02-02
-**Overall Status:** 325/1049 bsc-ast tests passing (31.0%)
+**Overall Status:** 327/1049 bsc-ast tests passing (31.2%)
 **sexp-locs Status:** 1049/1049 tests passing (100%) ✅
 
 **Note:** Many remaining failures are due to arity sharing (see Phase 6 below).
@@ -255,10 +255,20 @@ We need to implement the remaining transformations.
 so the AST structure is correct. The differences are in how list locations are handled during
 serialization.
 
+**Important finding (2026-02-02): JSX PPX is NOT applied by default**
+- OCaml's bsc only applies JSX PPX when `jsx_version` is explicitly set (via `-bs-jsx` flag)
+- When not set, JSX elements remain as `Pexp_jsx_element` (not transformed to `Pexp_apply(ReactDOM.jsx, ...)`)
+- The test script (`-bs-ast` without jsx flags) keeps JSX elements in their original form
+- Attempting to unconditionally apply JSX PPX in Rust caused 20 regressions
+- The object count difference for JSX files (OCaml > Rust) is expected when jsx_version is None
+  because `Pexp_jsx_element` has different structure than the transformed `Pexp_apply`
+
 - [x] **Task 3.1**: Investigate JSX container element size difference (ANALYZED)
   - OCaml builds list with unique locations per cons cell
   - Rust uses the same location for all cons cells
   - Needs investigation in `compiler-rust/src/binary_ast/` code path
+  - **Update (2026-02-02)**: Without JSX PPX transformation, both OCaml and Rust keep JSX elements
+    as `Pexp_jsx_element`. The binary differences are in location/position sharing, not JSX structure.
 
 - [x] **Task 3.2**: Fix arrow function expression position sharing (DONE)
   - Simple cases now work: `x => x`, `(x, y) => x + y`
