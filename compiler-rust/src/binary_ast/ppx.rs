@@ -1602,7 +1602,7 @@ fn rewrite_attributes(attrs: &[Attribute], arena: &mut ParseArena) -> Vec<Attrib
 fn rewrite_payload(payload: &Payload, arena: &mut ParseArena) -> Payload {
     match payload {
         Payload::PStr(items) => {
-            Payload::PStr(items.iter().map(|item| rewrite_structure_item(item, arena)).collect())
+            Payload::PStr(items.iter().flat_map(|item| rewrite_structure_item(item, arena)).collect())
         }
         Payload::PSig(items) => {
             Payload::PSig(items.iter().map(|item| rewrite_signature_item(item, arena)).collect())
@@ -2031,7 +2031,7 @@ fn rewrite_cases(cases: &[Case], arena: &mut ParseArena) -> Vec<Case> {
 pub fn rewrite_structure(structure: &[StructureItem], arena: &mut ParseArena) -> Vec<StructureItem> {
     structure
         .iter()
-        .map(|item| rewrite_structure_item(item, arena))
+        .flat_map(|item| rewrite_structure_item(item, arena))
         .collect()
 }
 
@@ -2043,12 +2043,13 @@ pub fn rewrite_signature(signature: &[SignatureItem], arena: &mut ParseArena) ->
         .collect()
 }
 
-fn rewrite_structure_item(item: &StructureItem, arena: &mut ParseArena) -> StructureItem {
+/// Rewrite a structure item, potentially returning multiple items for @deriving.
+fn rewrite_structure_item(item: &StructureItem, arena: &mut ParseArena) -> Vec<StructureItem> {
     match &item.pstr_desc {
         StructureItemDesc::Pstr_primitive(vd) => {
             if is_rs_external(&vd.pval_attributes, &vd.pval_prim, arena) {
                 let encoded = encode_external(vd, arena);
-                StructureItem {
+                vec![StructureItem {
                     pstr_desc: StructureItemDesc::Pstr_primitive(ValueDescription {
                         pval_prim: encoded.pval_prim,
                         pval_attributes: encoded.pval_attributes,
@@ -2057,9 +2058,9 @@ fn rewrite_structure_item(item: &StructureItem, arena: &mut ParseArena) -> Struc
                         pval_loc: vd.pval_loc,
                     }),
                     pstr_loc: item.pstr_loc,
-                }
+                }]
             } else {
-                item.clone()
+                vec![item.clone()]
             }
         }
         // Handle value bindings - need to rewrite expressions and patterns
@@ -2083,12 +2084,12 @@ fn rewrite_structure_item(item: &StructureItem, arena: &mut ParseArena) -> Struc
                             item.pstr_loc,
                             arena,
                         ) {
-                            return prim_item;
+                            return vec![prim_item];
                         }
                     }
 
                     // No @inline or couldn't transform - return rewritten binding
-                    return StructureItem {
+                    return vec![StructureItem {
                         pstr_desc: StructureItemDesc::Pstr_value(
                             *rec_flag,
                             vec![ValueBinding {
@@ -2099,7 +2100,7 @@ fn rewrite_structure_item(item: &StructureItem, arena: &mut ParseArena) -> Struc
                             }],
                         ),
                         pstr_loc: item.pstr_loc,
-                    };
+                    }];
                 }
             }
 
@@ -2113,21 +2114,21 @@ fn rewrite_structure_item(item: &StructureItem, arena: &mut ParseArena) -> Struc
                     pvb_loc: vb.pvb_loc,
                 })
                 .collect();
-            StructureItem {
+            vec![StructureItem {
                 pstr_desc: StructureItemDesc::Pstr_value(*rec_flag, new_bindings),
                 pstr_loc: item.pstr_loc,
-            }
+            }]
         }
         // Handle eval expressions
-        StructureItemDesc::Pstr_eval(expr, attrs) => StructureItem {
+        StructureItemDesc::Pstr_eval(expr, attrs) => vec![StructureItem {
             pstr_desc: StructureItemDesc::Pstr_eval(
                 rewrite_expression(expr, arena),
                 rewrite_attributes(attrs, arena),
             ),
             pstr_loc: item.pstr_loc,
-        },
+        }],
         // Module - recurse into module structure
-        StructureItemDesc::Pstr_module(mb) => StructureItem {
+        StructureItemDesc::Pstr_module(mb) => vec![StructureItem {
             pstr_desc: StructureItemDesc::Pstr_module(current::ModuleBinding {
                 pmb_name: mb.pmb_name.clone(),
                 pmb_expr: rewrite_module_expr(&mb.pmb_expr, arena),
@@ -2135,7 +2136,7 @@ fn rewrite_structure_item(item: &StructureItem, arena: &mut ParseArena) -> Struc
                 pmb_loc: mb.pmb_loc,
             }),
             pstr_loc: item.pstr_loc,
-        },
+        }],
         // Recursive modules
         StructureItemDesc::Pstr_recmodule(mbs) => {
             let new_mbs = mbs
@@ -2147,33 +2148,33 @@ fn rewrite_structure_item(item: &StructureItem, arena: &mut ParseArena) -> Struc
                     pmb_loc: mb.pmb_loc,
                 })
                 .collect();
-            StructureItem {
+            vec![StructureItem {
                 pstr_desc: StructureItemDesc::Pstr_recmodule(new_mbs),
                 pstr_loc: item.pstr_loc,
-            }
+            }]
         }
         // Include - recurse into module expression
-        StructureItemDesc::Pstr_include(incl) => StructureItem {
+        StructureItemDesc::Pstr_include(incl) => vec![StructureItem {
             pstr_desc: StructureItemDesc::Pstr_include(current::IncludeDeclaration {
                 pincl_mod: rewrite_module_expr(&incl.pincl_mod, arena),
                 pincl_loc: incl.pincl_loc,
                 pincl_attributes: rewrite_attributes(&incl.pincl_attributes, arena),
             }),
             pstr_loc: item.pstr_loc,
-        },
+        }],
         // Handle structure-level extensions (%%raw)
         StructureItemDesc::Pstr_extension(ext, _attrs) => {
             let (ext_name, payload) = ext;
             let name = arena.get_string(ext_name.txt);
             if name == "raw" {
                 // %%raw("...") -> Pstr_eval with local_external_apply using #raw_stmt
-                handle_raw_structure(item, payload, arena)
+                vec![handle_raw_structure(item, payload, arena)]
             } else {
-                item.clone()
+                vec![item.clone()]
             }
         }
         // Other structure items don't contain expressions that need rewriting
-        _ => item.clone(),
+        _ => vec![item.clone()],
     }
 }
 
@@ -2187,7 +2188,7 @@ fn rewrite_module_expr(
             current::ModuleExprDesc::Pmod_structure(
                 items
                     .iter()
-                    .map(|item| rewrite_structure_item(item, arena))
+                    .flat_map(|item| rewrite_structure_item(item, arena))
                     .collect(),
             )
         }
