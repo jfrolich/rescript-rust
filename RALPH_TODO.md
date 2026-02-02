@@ -1,7 +1,15 @@
 # Ralph TODO: Binary AST Parity
 
+## ⚠️ CRITICAL INSTRUCTIONS FOR AGENTS
+
+1. **NEVER revert commits made by other agents or humans** - If you think a commit is wrong, document your concerns but DO NOT revert it.
+2. **Commit your changes frequently** - Follow the instructions in CLAUDE.md about committing.
+3. **Update baselines carefully** - Only add files to baselines when they truly pass; verify the test infrastructure is working correctly first.
+
+---
+
 **Last Updated:** 2026-02-02
-**Overall Status:** 325/1049 bsc-ast tests passing (31.0%)
+**Overall Status:** 278/1049 bsc-ast tests passing (26.5%)
 **sexp-locs Status:** 1049/1049 tests passing (100%) ✅
 
 **Note:** Many remaining failures are due to arity sharing (see Phase 6 below).
@@ -9,9 +17,9 @@
 **Test infrastructure fix (2026-02-02):** Fixed test script and bsc to correctly handle interface files:
 - OCaml bsc outputs `.iast` for interface files (`.resi`), ignoring `-o` extension
 - Rust bsc now matches this behavior - outputs `.iast` for interface files
-- Test script updated to handle `.iast` files from OCaml
-- Baseline corrected: removed 81 false positives, then +47 new passes with .iast fix
-- **True parity status**: 325/1049 (31.0%), down from incorrect 329 (which had false positives)
+- Test script updated to handle `.iast` files from BOTH compilers
+- Baseline corrected: removed false positives from .resi files that were never properly compared
+- **True parity status**: 278/1049 (26.5%) - interface files now properly tested and mostly fail due to arity/location sharing
 
 **Analysis Complete (2026-02-02):** The remaining 724 failing tests are blocked by multiple issues:
 1. **Arity sharing (~700 files)**: OCaml's CSE cannot be replicated (structural limitation)
