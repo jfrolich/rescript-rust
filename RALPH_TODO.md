@@ -10,7 +10,7 @@
 
 **TOP PRIORITY:** Arity sharing and location sharing should be tackled FIRST because they affect ~700+ files each. These are complex problems but solving them will have the biggest impact on parity numbers.
 
-1. **Arity sharing (~700 files)** - OCaml's marshal uses CSE (Common Subexpression Elimination) to share identical arity values. Rust currently writes each arity inline. **This CAN be fixed** by interning arity values earlier in the pipeline (like `LocIdx` for locations), so the AST already has shared references before marshalling. Don't wait until marshal time - share earlier!
+1. **Arity sharing (~700 files)** - OCaml's native compiler CSE shares **literal** `Some 1` values but NOT **computed** `Some arity`. **This CAN be fixed** by pre-interning arity values for literal code paths (lines 614, 4367, 4822, 5568 in res_core.ml) while keeping computed paths fresh. See Task 6.6 for details.
 
 2. **Location sharing (~500+ files)** - OCaml's marshal shares identical Location structs. Rust writes each location inline. **This CAN be fixed** - we already have `LocIdx` for interning locations. Ensure the marshal uses these indices to produce shared references in the output.
 
@@ -41,7 +41,7 @@ Do NOT spend time on small issues (@deriving edge cases, etc.) until the sharing
 - **True parity status**: 278/1049 (26.5%) - interface files now properly tested and mostly fail due to arity/location sharing
 
 **Analysis Complete (2026-02-02):** The remaining 724 failing tests are blocked by multiple issues:
-1. **Arity sharing (~700 files)**: OCaml's marshal uses CSE to share identical arity values
+1. **Arity sharing (~700 files)**: ✅ ROOT CAUSE FOUND - literal vs computed `Some n` (see Task 6.6)
 2. **Location sharing (~500+ files)**: OCaml's marshal shares identical Location structs; Rust writes each inline
 3. **@deriving transformations**: `@deriving(accessors)` DONE; `@deriving(jsConverter)` and
    `@deriving(abstract)` still TODO (~8 files remaining)
@@ -81,14 +81,19 @@ Most .resi (interface) files pass; most .res (implementation) files fail due to 
   - OCaml: type arity `Some(1)` ≠ function arity `Some(1)` (2 separate `Some(1)` blocks)
   - Rust with dedup: both shared same ArityIdx → incorrect sharing (only 1 block)
 - Two functions with same arity: OCaml has 3 `Some(1)` blocks (one shared), Rust has 4
-- **OCaml's CSE (Common Subexpression Elimination) behavior discovered:**
-  - OCaml's native compiler performs CSE at compile time
-  - `Some 1` and `Some 1` in different parts of OCaml code become the SAME physical object
-  - This applies ACROSS top-level bindings but NOT within a single binding
-  - Within `let f: int => int = x => x`: type arity and function arity are SEPARATE
-  - Across `let f = ... let g = ...`: one arity in g shares with one arity in f
-- **Cannot replicate exactly:** OCaml's CSE operates at OCaml compilation level, not at ReScript parsing level
 - **Resolution:** Disabled sharing in write_arity_idx() to restore baseline parity (327/1049)
+
+**ArityIdx ROOT CAUSE IDENTIFIED (2026-02-02):** ✨
+- OCaml's native compiler CSE shares **literal** `Some 1` but NOT **computed** `Some arity`
+- Empirically verified:
+  ```ocaml
+  let make_with_literal arr = {arr with arity = Some 1}   (* SHARED *)
+  let make_with_param ~arity arr = {arr with arity = Some arity}  (* FRESH *)
+  ```
+- For `int => int`: goes through `parse_arrow_type_rest` line 4822 → **LITERAL** `~arity:(Some 1)`
+- For `(int, int) => int`: goes through `parse_es6_arrow_type` → **COMPUTED** `uncurried_type ~arity:n`
+- For `x => x`: goes through `uncurried_fun ~arity:n` → **COMPUTED**
+- **FIX:** Pre-intern arity values for literal paths, fresh for computed paths (see Task 6.6)
 
 ---
 
@@ -541,69 +546,72 @@ naturally when the same index is used (just like OCaml shares when same referenc
     - Otherwise writes arity value and records in table
   - Infrastructure is ready; waiting for AST type change (Task 6.3)
 
-- [x] **Task 6.6**: Match OCaml's arity creation pattern - **STRUCTURAL LIMITATION**
+- [ ] **Task 6.6**: Match OCaml's arity creation pattern - **FIXABLE** ✨
 
-  **STATUS**: ANALYZED. OCaml's arity sharing is due to CSE (Common Subexpression Elimination)
-  at the OCaml native compiler level, which cannot be replicated in Rust.
+  **STATUS**: ROOT CAUSE IDENTIFIED. The sharing pattern is predictable and CAN be fixed.
 
-  **Key empirical findings (verified 2026-02-02)**:
+  **Key discovery (2026-02-02)**: OCaml's native compiler CSE shares **literal** `Some 1` values
+  in source code, but **computed** `Some arity` (where arity is a parameter) creates fresh objects.
 
-  1. **Single typed function** `let f: int => int = x => x` ✅ PASSES (byte-identical)
-     - OCaml: 2 `Some(1)` blocks (type arity + function arity are SEPARATE)
-     - Rust: 2 `Some(1)` blocks (same as OCaml)
-
-  2. **Two typed functions with same arity** ❌ FAILS
-     ```rescript
-     let f: int => int = x => x
-     let g: int => int = y => y
-     ```
-     - OCaml: 3 `Some(1)` blocks (one shared across bindings)
-     - Rust: 4 `Some(1)` blocks (all separate)
-     - OCaml at offset ~0x14e: `04 3c` (CODE_SHARED8), Rust: `90 41` (fresh block)
-
-  3. **Two functions with different arities** ✅ PASSES (byte-identical)
-     ```rescript
-     let f: int => int = x => x
-     let g: (int, int) => int = (x, y) => x + y
-     ```
-     - No sharing possible, both create fresh objects
-
-  **OCaml's CSE behavior (verified empirically)**:
   ```ocaml
-  (* OCaml test: *)
-  let make_some n = Some n
-  let a = make_some 1
-  let b = make_some 1
-  (* Bytecode: a == b is false *)
-  (* Native:   a == b is TRUE! *)
+  (* LITERAL - these SHARE in native compilation *)
+  let make_with_literal arr = {arr with arity = Some 1}
+
+  (* COMPUTED - these do NOT share *)
+  let make_with_param ~arity arr = {arr with arity = Some arity}
   ```
-  - OCaml's native compiler performs CSE at compile time
-  - `Some 1` expressions become the SAME physical object in the compiled binary
-  - This applies ACROSS top-level definitions (different `let` bindings)
-  - But NOT within a single expression (each `Some arity` in the parser creates fresh)
 
-  **Why the type annotation/function arity approach doesn't work**:
-  - Both type annotations (`uncurried_type ~arity`) and function expressions (`uncurried_fun ~arity`)
-    use COMPUTED arities: `Some (List.length params)` or `Some arity` where arity is a variable
-  - Computed values create fresh objects at runtime, not shared
-  - Within a single binding, type and function arities are SEPARATE (2 objects)
-  - Across bindings, OCaml's CSE shares because the compiled code evaluates to the same value
+  **Empirical verification:**
+  ```
+  literal Some 1: a.arity == b.arity: true   (* SHARED *)
+  param Some n:   c.arity == d.arity: false  (* FRESH *)
+  ```
 
-  **Approaches attempted**:
-  1. ✗ Index-based sharing in marshal: Shares within binding (breaks single-function case)
-  2. ✗ Content-based sharing in marshal: Shares within binding (breaks single-function case)
-  3. ✓ No sharing in marshal: Works for single function, but Rust has extra object for multi-function
+  **Code paths in OCaml parser:**
 
-  **Conclusion**: OCaml's sharing is a compiler-level optimization that operates on the compiled
-  ReScript parser binary. Rust cannot replicate this without implementing similar CSE at the
-  Rust compiler level (which is impractical and out of scope).
+  | Code Path | OCaml Source | Sharing |
+  |-----------|--------------|---------|
+  | `int => int` (simple arrow) | `~arity:(Some 1)` line 4822 | **LITERAL → SHARED** |
+  | `(int, int) => int` (ES6 arrow) | `uncurried_type ~arity:n` | **COMPUTED → FRESH** |
+  | `x => x` (function expr) | `uncurried_fun ~arity:n` | **COMPUTED → FRESH** |
 
-  **Impact**: Files with 2+ typed functions having the same arity will have ~1 extra arity object
-  per shared arity value in OCaml. This affects ~724 test files.
+  **For `let f: int => int = x => x; let g: int => int = y => y`:**
+  - f's type: LITERAL `Some 1` (via line 4822) → shared
+  - f's func: COMPUTED (via `uncurried_fun`) → fresh
+  - g's type: LITERAL `Some 1` (via line 4822) → **SHARES with f's type!**
+  - g's func: COMPUTED (via `uncurried_fun`) → fresh
+  - **Result: 3 unique objects in OCaml, 4 in Rust**
 
-  **Resolution**: Accept this structural limitation. Focus on other issues that CAN be fixed.
+  **Literal `~arity:(Some 1)` locations to intern:**
+  - `res_core.ml:614` - `Exp.fun_ ~arity:(Some 1)` (underscore sugar)
+  - `res_core.ml:4367` - `Typ.arrow ~arity:(Some 1)` (type var arrow)
+  - `res_core.ml:4822` - `Typ.arrow ~arity:(Some 1)` (simple arrow type)
+  - `res_core.ml:5568` - `Typ.arrow ~arity:(Some 1)` (another arrow case)
+  - `jsx_v4.ml:884` - `Exp.fun_ ~arity:(Some 1)` (JSX props)
+  - PPX files: `ast_derive_js_mapper.ml:177,229,271`, `ast_derive_projector.ml:50`
 
-  **Debugging tips**:
+  **The fix:**
+  1. Pre-allocate static `ArityIdx` values in the arena: `ARITY_1`, `ARITY_2`, etc.
+  2. At code paths corresponding to OCaml's literal usages, use the static index
+  3. At computed paths (`uncurried_type`, `uncurried_fun`), create fresh indices
+
+  **Implementation plan:**
+  ```rust
+  // In ParseArena or similar
+  pub struct StaticArities {
+      pub arity_1: ArityIdx,
+      pub arity_2: ArityIdx,
+      // etc.
+  }
+
+  // In parser, for literal paths:
+  arena.static_arities.arity_1  // Use shared index
+
+  // In uncurried_type/uncurried_fun, for computed paths:
+  arena.push_arity(Some(n))     // Create fresh index
+  ```
+
+  **Debugging tips:**
   - Object count is at offset 0x2a (4 bytes after marshal magic at 0x1a)
   - `90 41` = Block(tag=0, size=1) containing int 1 = Some(1)
   - `04 xx` = CODE_SHARED8, shares object at distance xx
