@@ -161,9 +161,18 @@ impl<'a> DependencyCollector<'a> {
                 self.add_extension_constructor(ext_ctor);
             }
             StructureItemDesc::Pstr_module(mb) => {
+                // Bind the module name so it's not added as a dependency when referenced
+                let module_name = self.arena.get_string(mb.pmb_name.txt).to_string();
+                self.bound_modules.insert(module_name);
                 self.add_module_binding(mb);
             }
             StructureItemDesc::Pstr_recmodule(mbs) => {
+                // First bind all module names so they're not added as dependencies
+                for mb in mbs {
+                    let module_name = self.arena.get_string(mb.pmb_name.txt).to_string();
+                    self.bound_modules.insert(module_name);
+                }
+                // Then process all module expressions
                 for mb in mbs {
                     self.add_module_binding(mb);
                 }
@@ -211,9 +220,18 @@ impl<'a> DependencyCollector<'a> {
                 self.add_extension_constructor(ext_ctor);
             }
             SignatureItemDesc::Psig_module(md) => {
+                // Bind the module name so it's not added as a dependency when referenced
+                let module_name = self.arena.get_string(md.pmd_name.txt).to_string();
+                self.bound_modules.insert(module_name);
                 self.add_module_declaration(md);
             }
             SignatureItemDesc::Psig_recmodule(mds) => {
+                // First bind all module names
+                for md in mds {
+                    let module_name = self.arena.get_string(md.pmd_name.txt).to_string();
+                    self.bound_modules.insert(module_name);
+                }
+                // Then process all module declarations
                 for md in mds {
                     self.add_module_declaration(md);
                 }
@@ -576,10 +594,13 @@ impl<'a> DependencyCollector<'a> {
             ModuleExprDesc::Pmod_structure(str) => {
                 self.add_structure(str);
             }
-            ModuleExprDesc::Pmod_functor(_name, mt, body) => {
+            ModuleExprDesc::Pmod_functor(name, mt, body) => {
                 if let Some(mt) = mt {
                     self.add_module_type(mt);
                 }
+                // Bind the functor parameter name so it's not added as a dependency in the body
+                let param_name = self.arena.get_string(name.txt).to_string();
+                self.bound_modules.insert(param_name);
                 self.add_module_expr(body);
             }
             ModuleExprDesc::Pmod_apply(me1, me2) => {
@@ -608,10 +629,13 @@ impl<'a> DependencyCollector<'a> {
             ModuleTypeDesc::Pmty_signature(sig) => {
                 self.add_signature(sig);
             }
-            ModuleTypeDesc::Pmty_functor(_name, mt1, mt2) => {
+            ModuleTypeDesc::Pmty_functor(name, mt1, mt2) => {
                 if let Some(mt1) = mt1 {
                     self.add_module_type(mt1);
                 }
+                // Bind the functor parameter name so it's not added as a dependency in the body
+                let param_name = self.arena.get_string(name.txt).to_string();
+                self.bound_modules.insert(param_name);
                 self.add_module_type(mt2);
             }
             ModuleTypeDesc::Pmty_with(mt, constraints) => {
