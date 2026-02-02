@@ -9,7 +9,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 
 use crate::intern::StrIdx;
 use crate::location::{Location, Position};
-use crate::parse_arena::{LidentIdx, LocIdx, ParseArena, PosIdx};
+use crate::parse_arena::{ArityIdx, LidentIdx, LocIdx, ParseArena, PosIdx};
 
 use super::longident::Longident;
 
@@ -220,6 +220,30 @@ impl<'src> Parser<'src> {
     /// Get a mutable reference to the parse arena.
     pub fn arena_mut(&mut self) -> &mut ParseArena {
         &mut self.arena
+    }
+
+    // ========== Arity arena methods ==========
+
+    /// Push an arity value into the arena with deduplication.
+    /// Two calls with the same arity value will return the same ArityIdx,
+    /// which enables marshal sharing that matches OCaml's constant folding behavior.
+    ///
+    /// - `push_arity(Some(n))` → Known arity (function with n arguments)
+    /// - `push_arity(None)` → Unknown arity
+    pub fn push_arity(&mut self, arity: Option<i32>) -> ArityIdx {
+        self.arena.push_arity(arity)
+    }
+
+    /// Push a "Full" arity (known argument count) into the arena.
+    /// Convenience method equivalent to `push_arity(Some(n as i32))`.
+    pub fn push_arity_full(&mut self, n: usize) -> ArityIdx {
+        self.arena.push_arity(Some(n as i32))
+    }
+
+    /// Push an "Unknown" arity into the arena.
+    /// Convenience method equivalent to `push_arity(None)`.
+    pub fn push_arity_unknown(&mut self) -> ArityIdx {
+        self.arena.push_arity(None)
     }
 
     /// Push a position into the arena and return its index.

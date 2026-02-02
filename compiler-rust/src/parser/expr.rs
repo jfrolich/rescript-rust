@@ -174,7 +174,7 @@ fn transform_placeholder_application(
             default: None,
             lhs: pattern,
             rhs: Box::new(inner_apply),
-            arity: Arity::Full(1),
+            arity: arena.push_arity(Some(1)),
             is_async: false,
         },
         pexp_loc: underscore_loc,
@@ -746,7 +746,7 @@ fn parse_es6_arrow_expression_internal(
                 default: None,
                 lhs: unit_pat,
                 rhs: Box::new(body),
-                arity: Arity::Full(1),  // Implicit unit param has arity 1
+                arity: p.push_arity_full(1),  // Implicit unit param has arity 1
                 is_async,
             },
             pexp_loc: pexp_fun_loc.clone(),
@@ -759,6 +759,9 @@ fn parse_es6_arrow_expression_internal(
     } else {
         // Compute arity for the outermost function
         let total_arity = term_params.len();
+        // Pre-create arity indices before the fold (arena access needs mutable borrow)
+        let full_arity_idx = p.push_arity_full(total_arity);
+        let unknown_arity_idx = p.push_arity_unknown();
         // Build locations for Pexp_funs.
         // In OCaml (res_core.ml:1792), each Pexp_fun's loc uses parameter.p_pos.
         // parameter.p_pos is captured at the start of parse_parameter, which is:
@@ -825,9 +828,9 @@ fn parse_es6_arrow_expression_internal(
                 // The last iteration (i == total_arity - 1) is the outermost function
                 let is_outermost = i == total_arity - 1;
                 let arity = if is_outermost {
-                    Arity::Full(total_arity)
+                    full_arity_idx
                 } else {
-                    Arity::Unknown
+                    unknown_arity_idx
                 };
                 // Only the outermost function gets is_async: true (OCaml behavior)
                 let fn_is_async = is_outermost && is_async;
@@ -922,6 +925,9 @@ fn parse_es6_arrow_expression_with_params(
 
     // Compute arity for the outermost function
     let total_arity = term_params.len();
+    // Pre-create arity indices before the fold (arena access needs mutable borrow)
+    let full_arity_idx = p.push_arity_full(total_arity);
+    let unknown_arity_idx = p.push_arity_unknown();
     term_params
         .into_iter()
         .rev()
@@ -942,9 +948,9 @@ fn parse_es6_arrow_expression_with_params(
             }
             let is_outermost = i == total_arity - 1;
             let arity = if is_outermost {
-                Arity::Full(total_arity)
+                full_arity_idx
             } else {
-                Arity::Unknown
+                unknown_arity_idx
             };
             let fn_is_async = is_outermost && is_async;
             Expression {

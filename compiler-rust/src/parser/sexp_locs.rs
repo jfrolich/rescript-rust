@@ -159,10 +159,10 @@ fn variance(v: &Variance) -> Sexp {
     })
 }
 
-fn arity(a: &Arity) -> Sexp {
-    match a {
-        Arity::Full(n) => Sexp::list(vec![Sexp::atom("Some"), Sexp::atom(&n.to_string())]),
-        Arity::Unknown => Sexp::atom("None"),
+fn arity(a: &Arity, arena: &ParseArena) -> Sexp {
+    match arena.get_arity(*a) {
+        Some(n) => Sexp::list(vec![Sexp::atom("Some"), Sexp::atom(&n.to_string())]),
+        None => Sexp::atom("None"),
     }
 }
 
@@ -320,7 +320,7 @@ fn core_type(typ: &CoreType, arena: &ParseArena) -> Sexp {
                 arrow_attrs,
                 arg_typ_sexp,
                 core_type(ret, arena),
-                arity(ar),
+                arity(ar, arena),
             ])
         }
         CoreTypeDesc::Ptyp_tuple(types) => {
@@ -523,7 +523,7 @@ fn expression(expr: &Expression, arena: &ParseArena) -> Sexp {
             },
             pattern(pat, arena),
             expression(body, arena),
-            arity(ar),
+            arity(ar, arena),
             Sexp::atom(if *is_async { "true" } else { "false" }),
         ]),
         ExpressionDesc::Pexp_apply { funct, args, partial: is_partial, transformed_jsx } => Sexp::list(vec![

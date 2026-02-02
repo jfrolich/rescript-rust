@@ -10,7 +10,7 @@
 #![allow(missing_docs)]
 
 use crate::location::Position;
-use crate::parse_arena::{LidentIdx, Located, LocIdx, StrIdx};
+use crate::parse_arena::{ArityIdx, LidentIdx, Located, LocIdx, StrIdx};
 use serde::{Deserialize, Serialize};
 
 use super::longident::Longident;
@@ -27,14 +27,15 @@ pub type Location = LocIdx;
 pub type StringLoc = Located<StrIdx>;
 
 /// Arity information for functions.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
-pub enum Arity {
-    /// Full arity (all arguments known).
-    Full(usize),
-    /// Unknown arity.
-    #[default]
-    Unknown,
-}
+///
+/// This is now an arena index instead of an enum. Arity values are stored in
+/// the ParseArena and deduplicated by content:
+/// - `arena.push_arity(None)` → ArityIdx pointing to "Unknown" arity
+/// - `arena.push_arity(Some(n))` → ArityIdx pointing to "Full(n)" arity
+///
+/// Two arities with the same value get the same index, enabling marshal sharing
+/// that matches OCaml's constant folding behavior.
+pub type Arity = ArityIdx;
 
 /// Recursive flag for let bindings.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

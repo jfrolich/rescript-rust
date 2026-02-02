@@ -190,7 +190,7 @@ pub fn parse_poly_type_expr(p: &mut Parser<'_>) -> CoreType {
                 ptyp_desc: CoreTypeDesc::Ptyp_arrow {
                     arg: Box::new(arg),
                     ret: Box::new(return_type),
-                    arity: Arity::Full(1),
+                    arity: p.push_arity_full(1),
                 },
                 ptyp_loc: loc,
                 ptyp_attributes: vec![],
@@ -307,7 +307,7 @@ fn parse_arrow_type_rest(
             arg: Box::new(arg),
             ret: Box::new(return_type),
             // Simple unlabeled arrow has arity 1
-            arity: Arity::Full(1),
+            arity: p.push_arity_full(1),
         },
         ptyp_loc: loc,
         ptyp_attributes: vec![],
@@ -359,7 +359,7 @@ fn parse_es6_arrow_type(p: &mut Parser<'_>, attrs: Attributes) -> CoreType {
                 arg: Box::new(arg),
                 ret: Box::new(return_type),
                 // OCaml uses ~arity:None for parsed type expressions
-                arity: Arity::Unknown,
+                arity: p.push_arity_unknown(),
             },
             ptyp_loc: loc,
             ptyp_attributes: vec![],
@@ -970,6 +970,9 @@ fn parse_function_type(p: &mut Parser<'_>, start_pos: crate::location::Position)
     // So we capture end_pos_idx once and reuse it for all arrows.
     let mut acc = return_type;
     let end_pos_idx = p.get_or_push_prev_end_pos();
+    // Pre-allocate arity indices for the inner arrows and outermost arrow
+    let unknown_arity = p.push_arity_unknown();
+    let full_arity = p.push_arity_full(total_arity);
     for (param, param_start_idx) in params.into_iter().rev() {
         // Each arrow's location spans from the label (if any) to the end of return
         // OCaml includes the ~ in the location for labeled arguments
@@ -979,7 +982,7 @@ fn parse_function_type(p: &mut Parser<'_>, start_pos: crate::location::Position)
                 arg: Box::new(param),
                 ret: Box::new(acc),
                 // Inner arrows don't have arity annotation
-                arity: Arity::Unknown,
+                arity: unknown_arity,
             },
             ptyp_loc: arrow_loc,
             ptyp_attributes: vec![],
@@ -994,7 +997,7 @@ fn parse_function_type(p: &mut Parser<'_>, start_pos: crate::location::Position)
             ptyp_desc: CoreTypeDesc::Ptyp_arrow {
                 arg,
                 ret,
-                arity: Arity::Full(total_arity),
+                arity: full_arity,
             },
             ptyp_loc: result.ptyp_loc,
             ptyp_attributes: result.ptyp_attributes,
