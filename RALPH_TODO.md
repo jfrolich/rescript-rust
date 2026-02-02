@@ -65,8 +65,12 @@ Do NOT spend time on small issues (@deriving edge cases, etc.) until the locatio
 **Overall Status:** 949/1049 bsc-ast tests passing (90.5%)
 **sexp-locs Status:** 1049/1049 tests passing (100%) ✅
 
-**Note:** Most remaining failures are edge cases - JSX, extensions, etc.
-The AST structure is 100% correct (sexp-locs matches).
+**Note:** Most remaining ~100 failures are edge cases:
+- **Escaped identifiers** (`\"name"` format): OCaml preserves backslash in string, Rust strips it
+- **JSX/React PPX files**: ~40 files with minor position differences in JSX children
+- **genType files**: ~27 files with various edge cases
+- **Comments in complex expressions**: ~8 files
+The AST structure is 100% correct (sexp-locs matches perfectly).
 
 **Session progress (2026-02-02):**
 - Fixed type manifest location sharing in `fix_type_manifest_location()` (+472 files!):
