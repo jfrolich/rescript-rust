@@ -255,7 +255,7 @@ pub fn parse_structure_item(p: &mut Parser<'_>) -> Option<StructureItem> {
         }
         Token::Module => {
             // Capture module_start BEFORE consuming 'module' for accurate locations
-            let module_start = p.start_pos.clone();
+            let module_start_idx = p.push_start_pos_fresh();
             p.next();
             // Check for first-class module expression: module(...)
             if p.token == Token::Lparen {
@@ -266,7 +266,7 @@ pub fn parse_structure_item(p: &mut Parser<'_>) -> Option<StructureItem> {
                 let expr = super::expr::parse_expr_with_operand(p, pack_expr);
                 Some(StructureItemDesc::Pstr_eval(expr, attrs.clone()))
             } else {
-                parse_module_definition(p, module_start, attrs.clone())
+                parse_module_definition(p, module_start_idx, attrs.clone())
             }
         }
         Token::Include => {
@@ -283,15 +283,15 @@ pub fn parse_structure_item(p: &mut Parser<'_>) -> Option<StructureItem> {
         Token::At | Token::AtAt => {
             // Floating attribute or extension
             // Capture start_pos before consuming @ or @@ so attribute location includes it
-            let attr_start = p.start_pos.clone();
+            let attr_start_idx = p.push_start_pos_fresh();
             if p.token == Token::AtAt {
                 p.next();
-                let attr = parse_attribute_body(p, attr_start);
+                let attr = parse_attribute_body(p, attr_start_idx);
                 Some(StructureItemDesc::Pstr_attribute(attr))
             } else {
                 // @ might be a doc comment or similar
                 p.next();
-                let attr = parse_attribute_body(p, attr_start);
+                let attr = parse_attribute_body(p, attr_start_idx);
                 Some(StructureItemDesc::Pstr_attribute(attr))
             }
         }
@@ -559,14 +559,14 @@ pub fn parse_signature_item(p: &mut Parser<'_>) -> Option<SignatureItem> {
         }
         Token::At | Token::AtAt => {
             // Capture start_pos before consuming @ or @@ so attribute location includes it
-            let attr_start = p.start_pos.clone();
+            let attr_start_idx = p.push_start_pos_fresh();
             if p.token == Token::AtAt {
                 p.next();
-                let attr = parse_attribute_body(p, attr_start);
+                let attr = parse_attribute_body(p, attr_start_idx);
                 Some(SignatureItemDesc::Psig_attribute(attr))
             } else {
                 p.next();
-                let attr = parse_attribute_body(p, attr_start);
+                let attr = parse_attribute_body(p, attr_start_idx);
                 Some(SignatureItemDesc::Psig_attribute(attr))
             }
         }
@@ -3598,8 +3598,8 @@ pub fn parse_extension_constructor(
 }
 
 /// Parse a module definition.
-/// `module_start` should be the position BEFORE 'module' was consumed.
-fn parse_module_definition(p: &mut Parser<'_>, module_start: Position, attrs: Attributes) -> Option<StructureItemDesc> {
+/// `module_start_idx` should be the position BEFORE 'module' was consumed.
+fn parse_module_definition(p: &mut Parser<'_>, module_start_idx: PosIdx, attrs: Attributes) -> Option<StructureItemDesc> {
     // Check for module type
     if p.token == Token::Typ {
         p.next();
@@ -3618,15 +3618,15 @@ fn parse_module_definition(p: &mut Parser<'_>, module_start: Position, attrs: At
     // For recursive modules (module rec X = ...), use position before 'module'.
     // For non-recursive modules (module X = ...), use current position (after 'module').
     // This matches OCaml's parse_maybe_rec_module_binding behavior.
-    let start_pos = if rec_flag == RecFlag::Recursive {
-        module_start
+    let start_pos_idx = if rec_flag == RecFlag::Recursive {
+        module_start_idx
     } else {
-        p.start_pos.clone()
+        p.push_start_pos_fresh()
     };
 
     let mut bindings = vec![];
 
-    let parse_binding = |p: &mut Parser<'_>, binding_start: Position, attrs: Attributes| -> Option<ModuleBinding> {
+    let parse_binding = |p: &mut Parser<'_>, binding_start_idx: PosIdx, attrs: Attributes| -> Option<ModuleBinding> {
         let name = match &p.token {
             Token::Uident(n) => {
                 let n = n.clone();
@@ -3671,11 +3671,11 @@ fn parse_module_definition(p: &mut Parser<'_>, module_start: Position, attrs: At
             pmb_name: name,
             pmb_expr: mod_expr,
             pmb_attributes: attrs,
-            pmb_loc: p.mk_loc_to_prev_end(&binding_start),
+            pmb_loc: p.mk_loc_idx_to_prev_end(binding_start_idx),
         })
     };
 
-    if let Some(binding) = parse_binding(p, start_pos.clone(), attrs) {
+    if let Some(binding) = parse_binding(p, start_pos_idx, attrs) {
         bindings.push(binding);
     } else {
         return None;
@@ -3686,10 +3686,10 @@ fn parse_module_definition(p: &mut Parser<'_>, module_start: Position, attrs: At
     loop {
         if p.token == Token::And {
             // Capture start position BEFORE consuming `and`
-            let binding_start = p.start_pos.clone();
+            let binding_start_idx = p.push_start_pos_fresh();
             p.next();
             let binding_attrs = parse_attributes(p);
-            if let Some(binding) = parse_binding(p, binding_start, binding_attrs) {
+            if let Some(binding) = parse_binding(p, binding_start_idx, binding_attrs) {
                 bindings.push(binding);
             }
         } else if matches!(p.token, Token::At | Token::AtAt | Token::DocComment { .. }) {
@@ -3713,12 +3713,12 @@ fn parse_module_definition(p: &mut Parser<'_>, module_start: Position, attrs: At
                 break;
             }
             // Parse the attributes, then the `and` keyword
-            let binding_start = p.start_pos.clone();
+            let binding_start_idx = p.push_start_pos_fresh();
             let binding_attrs = parse_attributes(p);
             if p.token == Token::And {
                 p.next();
             }
-            if let Some(binding) = parse_binding(p, binding_start, binding_attrs) {
+            if let Some(binding) = parse_binding(p, binding_start_idx, binding_attrs) {
                 bindings.push(binding);
             }
         } else {
@@ -3904,9 +3904,9 @@ fn parse_attributes(p: &mut Parser<'_>) -> Attributes {
         match &p.token {
             Token::At => {
                 // Capture start_pos before consuming @ so attribute location includes it
-                let attr_start = p.start_pos.clone();
+                let attr_start_idx = p.push_start_pos_fresh();
                 p.next();
-                attrs.push(parse_attribute_body(p, attr_start));
+                attrs.push(parse_attribute_body(p, attr_start_idx));
             }
             Token::DocComment { loc, content } => {
                 let loc_cloned = loc.clone();
@@ -3922,8 +3922,8 @@ fn parse_attributes(p: &mut Parser<'_>) -> Attributes {
 }
 
 /// Parse an attribute body.
-/// `start_pos` should be the position BEFORE the `@` or `@@` token was consumed.
-fn parse_attribute_body(p: &mut Parser<'_>, start_pos: Position) -> Attribute {
+/// `start_pos_idx` should be the position BEFORE the `@` or `@@` token was consumed.
+fn parse_attribute_body(p: &mut Parser<'_>, start_pos_idx: PosIdx) -> Attribute {
     let mut parts = vec![];
 
     // Parse attribute identifier
@@ -3950,7 +3950,7 @@ fn parse_attribute_body(p: &mut Parser<'_>, start_pos: Position) -> Attribute {
 
     let name = parts.join(".");
     let name_idx = p.arena_mut().push_string(name.to_string());
-    let name_loc = p.mk_loc_to_prev_end(&start_pos);
+    let name_loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
 
     // Parse optional payload
     let is_adjacent = p.start_pos.cnum == p.prev_end_pos.cnum;
