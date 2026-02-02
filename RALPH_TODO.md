@@ -771,7 +771,7 @@ type annotation arity and function arity should be separate objects.
   The fix requires systematically updating ALL position captures to use `PosIdx` passing,
   then removing content-based caching. This is estimated at ~70+ code locations.
   Until this is done, the current content-based caching is a necessary evil that
-  provides partial (but imperfect) parity at 496/1049 tests.
+  provides partial (but imperfect) parity at 254/1049 tests (24.2%).
 
   **Infrastructure added (2026-02-02):**
   - Added `push_start_pos_fresh()` method that bypasses content-based caching
@@ -780,7 +780,12 @@ type annotation arity and function arity should be separate objects.
 
   **Status:** Task 5.3 is BLOCKED - requires significant refactoring effort (~70+ locations).
   The analysis is complete and the approach is clear, but the implementation work is substantial.
-  Current parity of 496/1049 (47.3%) is a stable baseline until this refactoring is done.
+  Current parity of 254/1049 (24.2%) is a stable baseline until this refactoring is done.
+
+  **2026-02-02 Update:** Attempted fix using `push_start_pos()` everywhere caused 15 regressions
+  (811 failures vs baseline 796). The issue is that simply making positions fresh changes the
+  marshal output in ways that don't match OCaml's traversal order. A more careful approach is
+  needed that matches EXACTLY which positions OCaml creates fresh vs reuses.
 
   **Additional investigation (2026-02-02):**
   Analyzed the `external foo: int => int = "foo"` case in detail:
