@@ -3350,6 +3350,56 @@ fn rewrite_structure_item(item: &StructureItem, arena: &mut ParseArena) -> Vec<S
         StructureItemDesc::Pstr_type(rec_flag, tdcls) => {
             handle_deriving_type(item, *rec_flag, tdcls, arena)
         }
+        // Handle open - rewrite attributes
+        StructureItemDesc::Pstr_open(od) => vec![StructureItem {
+            pstr_desc: StructureItemDesc::Pstr_open(current::OpenDescription {
+                popen_lid: od.popen_lid.clone(),
+                popen_override: od.popen_override,
+                popen_loc: od.popen_loc,
+                popen_attributes: rewrite_attributes(&od.popen_attributes, arena),
+            }),
+            pstr_loc: item.pstr_loc,
+        }],
+        // Handle modtype - rewrite attributes
+        StructureItemDesc::Pstr_modtype(mtd) => vec![StructureItem {
+            pstr_desc: StructureItemDesc::Pstr_modtype(current::ModuleTypeDeclaration {
+                pmtd_name: mtd.pmtd_name.clone(),
+                pmtd_type: mtd.pmtd_type.clone(),
+                pmtd_attributes: rewrite_attributes(&mtd.pmtd_attributes, arena),
+                pmtd_loc: mtd.pmtd_loc,
+            }),
+            pstr_loc: item.pstr_loc,
+        }],
+        // Handle exception - rewrite attributes
+        StructureItemDesc::Pstr_exception(ec) => vec![StructureItem {
+            pstr_desc: StructureItemDesc::Pstr_exception(current::ExtensionConstructor {
+                pext_name: ec.pext_name.clone(),
+                pext_kind: ec.pext_kind.clone(),
+                pext_loc: ec.pext_loc,
+                pext_attributes: rewrite_attributes(&ec.pext_attributes, arena),
+            }),
+            pstr_loc: item.pstr_loc,
+        }],
+        // Handle type extension - rewrite attributes
+        StructureItemDesc::Pstr_typext(te) => vec![StructureItem {
+            pstr_desc: StructureItemDesc::Pstr_typext(current::TypeExtension {
+                ptyext_path: te.ptyext_path.clone(),
+                ptyext_params: te.ptyext_params.clone(),
+                ptyext_constructors: te
+                    .ptyext_constructors
+                    .iter()
+                    .map(|ec| current::ExtensionConstructor {
+                        pext_name: ec.pext_name.clone(),
+                        pext_kind: ec.pext_kind.clone(),
+                        pext_loc: ec.pext_loc,
+                        pext_attributes: rewrite_attributes(&ec.pext_attributes, arena),
+                    })
+                    .collect(),
+                ptyext_private: te.ptyext_private,
+                ptyext_attributes: rewrite_attributes(&te.ptyext_attributes, arena),
+            }),
+            pstr_loc: item.pstr_loc,
+        }],
         // Other structure items don't contain expressions that need rewriting
         _ => vec![item.clone()],
     }
