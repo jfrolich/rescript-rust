@@ -449,6 +449,14 @@ impl<'src> Parser<'src> {
         self.arena.mk_loc(start_idx, end_idx)
     }
 
+    /// Create a location from a PosIdx start and a Position end.
+    /// This is useful when you have an identity-based start position (PosIdx)
+    /// and need to extend it to an end Position.
+    pub fn mk_loc_idx_to_pos(&mut self, start: PosIdx, end: &Position) -> LocIdx {
+        let end_idx = self.arena.push_position(*end);
+        self.arena.mk_loc(start, end_idx)
+    }
+
     /// Get the "none" location index.
     pub fn none_loc(&self) -> LocIdx {
         self.arena.none_loc()
