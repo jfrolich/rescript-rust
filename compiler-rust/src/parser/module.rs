@@ -2607,10 +2607,11 @@ fn parse_type_declaration_with_context(
     }
 
     // In type declarations with qualified type constructors (Ldot),
-    // OCaml uses the same location for both the CoreType and the longident
-    // (just the constructor name, not including type arguments).
+    // OCaml creates a NEW location with the same positions as the longident.
+    // IMPORTANT: We must create a fresh LocIdx, NOT reuse lid.loc, because OCaml
+    // creates fresh Location objects (though positions inside may be shared).
     // For unqualified (Lident), the CoreType uses full extent.
-    let manifest = manifest.map(|t| fix_type_manifest_location(p.arena(), t));
+    let manifest = manifest.map(|t| fix_type_manifest_location(p, t));
 
     // Use decl_start_idx for the start position to enable sharing with structure_item
     let loc = p.mk_loc_idx_to_prev_end(decl_start_idx);
@@ -2691,18 +2692,26 @@ fn fix_spread_first_object_manifest(p: &mut Parser<'_>, typ: CoreType, is_spread
 }
 
 /// Fix the location of a Ptyp_constr in a type manifest context.
-/// For qualified identifiers (Ldot), OCaml uses the same location for both
-/// the CoreType and the longident. For unqualified (Lident), it uses full extent.
+/// For qualified identifiers (Ldot), OCaml creates a NEW location with the same
+/// position values as the longident (but a separate Location object).
+/// IMPORTANT: We must NOT reuse lid.loc (same LocIdx) because that would cause
+/// sharing during marshal - OCaml writes a fresh Location block with shared
+/// positions INSIDE, but the Location itself is not shared.
+/// For unqualified (Lident), it uses full extent.
 /// EXCEPTION: When the type has attributes, OCaml keeps the full extent including
 /// type arguments (this allows the location to cover the entire attributed type).
-fn fix_type_manifest_location(arena: &crate::parse_arena::ParseArena, typ: CoreType) -> CoreType {
+fn fix_type_manifest_location(p: &mut Parser<'_>, typ: CoreType) -> CoreType {
     match &typ.ptyp_desc {
         CoreTypeDesc::Ptyp_constr(lid, _) => {
             // Only adjust for qualified identifiers (Ldot) WITHOUT attributes
             // When there are attributes, OCaml keeps the full extent including type args
-            if arena.is_ldot(lid.txt) && typ.ptyp_attributes.is_empty() {
+            if p.arena().is_ldot(lid.txt) && typ.ptyp_attributes.is_empty() {
+                // Create a NEW LocIdx with the same positions as lid.loc
+                // This matches OCaml's behavior: fresh Location object, shared positions
+                let lid_loc = p.arena().get_location(lid.loc).clone();
+                let new_loc = p.arena_mut().push_loc(lid_loc.loc_start, lid_loc.loc_end, lid_loc.loc_ghost);
                 CoreType {
-                    ptyp_loc: lid.loc.clone(),
+                    ptyp_loc: new_loc,
                     ..typ
                 }
             } else {
@@ -2713,7 +2722,7 @@ fn fix_type_manifest_location(arena: &crate::parse_arena::ParseArena, typ: CoreT
             // Also adjust Ldot types in arrow parameter positions
             // But NOT in return types - OCaml keeps type args in return type ptyp_loc
             let fixed_arg = TypeArg {
-                typ: fix_type_manifest_location(arena, arg.typ.clone()),
+                typ: fix_type_manifest_location(p, arg.typ.clone()),
                 ..*arg.clone()
             };
             // Return type is NOT fixed - OCaml includes type args for return types

@@ -6,6 +6,7 @@ syntax_tests/data/conversion/reason/gentype.res
 syntax_tests/data/conversion/reason/gentype.resi
 syntax_tests/data/conversion/reason/jsxProps.res
 syntax_tests/data/conversion/reason/letBinding.res
+syntax_tests/data/conversion/reason/modType.res
 syntax_tests/data/conversion/reason/moduleLanguage.res
 syntax_tests/data/conversion/reason/namedArgs.res
 syntax_tests/data/conversion/reason/openPattern.res
