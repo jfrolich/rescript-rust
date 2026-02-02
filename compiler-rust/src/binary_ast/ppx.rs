@@ -3322,15 +3322,29 @@ fn rewrite_structure_item(item: &StructureItem, arena: &mut ParseArena) -> Vec<S
             pstr_loc: item.pstr_loc,
         }],
         // Handle structure-level extensions (%%raw)
-        StructureItemDesc::Pstr_extension(ext, _attrs) => {
+        StructureItemDesc::Pstr_extension(ext, attrs) => {
             let (ext_name, payload) = ext;
             let name = arena.get_string(ext_name.txt);
             if name == "raw" {
                 // %%raw("...") -> Pstr_eval with local_external_apply using #raw_stmt
                 vec![handle_raw_structure(item, payload, arena)]
             } else {
-                vec![item.clone()]
+                // Rewrite payload for string transformation
+                vec![StructureItem {
+                    pstr_desc: StructureItemDesc::Pstr_extension(
+                        (ext_name.clone(), rewrite_payload(payload, arena)),
+                        rewrite_attributes(attrs, arena),
+                    ),
+                    pstr_loc: item.pstr_loc,
+                }]
             }
+        }
+        // Handle floating attributes (@@attr) - need to transform strings in payload
+        StructureItemDesc::Pstr_attribute(attr) => {
+            vec![StructureItem {
+                pstr_desc: StructureItemDesc::Pstr_attribute(rewrite_attribute(attr, arena)),
+                pstr_loc: item.pstr_loc,
+            }]
         }
         // Handle type declarations with @deriving
         StructureItemDesc::Pstr_type(rec_flag, tdcls) => {
