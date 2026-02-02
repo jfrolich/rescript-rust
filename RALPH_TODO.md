@@ -1,10 +1,10 @@
 # Ralph TODO: Binary AST Parity
 
 **Last Updated:** 2026-02-02
-**Overall Status:** 261/1049 bsc-ast tests passing (24.9%) - **AT CEILING** (blocked by arity sharing)
+**Overall Status:** 325/1049 bsc-ast tests passing (31.0%)
 **sexp-locs Status:** 1049/1049 tests passing (100%) ✅
 
-**Note:** Further progress requires implementing an **arity arena** (see Phase 6 below).
+**Note:** Many remaining failures are due to arity sharing (see Phase 6 below).
 
 ---
 
@@ -28,13 +28,14 @@ Simple expressions now match OCaml byte-for-byte:
 - `let x = f(1)` ✅ (function calls now share positions correctly)
 - `let x = Foo.bar(1)` ✅ (module-qualified calls work)
 - `let x = !a; let y = !b` ✅ (unary ! operator Lident deduplication - 2026-02-02)
+- `let f = (~x) => x` ✅ (labeled arguments - end position caching fix 2026-02-02)
 
 JSX with children still differs:
 - `let x = <div> <span/> </div>` ❌ (OCaml: 229 bytes, Rust: 196 bytes - Rust smaller)
 
 ### Blocking Issues
 
-The remaining ~790 failing tests are blocked by **arity sharing** differences in marshal serialization:
+The remaining ~724 failing tests are affected by several issues:
 
 1. **Arity sharing**: OCaml shares `Option<i32>` arity values via pointer equality. When two functions
    have the same arity (e.g., both `Some(1)`), OCaml reuses the same object. Rust creates separate objects.
@@ -297,10 +298,26 @@ type annotation arity and function arity should be separate objects.
   - **Note**: Other unary operators still use the old approach - they are structurally
     different (Rust smaller due to string interning vs OCaml's fresh strings)
 
+- [x] **Task 4.7**: Fix end position caching for labeled functions (2026-02-02)
+  - **Investigation**: Labeled functions like `(~x) => x` had 1-object (4-byte) difference
+  - **Root cause**: `mk_loc_current()` was creating end positions without caching, so the
+    position used for the label location's end was different from the pattern location's end
+    (even though they had the same value)
+  - **Sequence issue**:
+    1. `mk_loc_current()` pushes uncached end position for label location
+    2. `p.next()` sets `prev_end_pos = end_pos`
+    3. `mk_loc_to_prev_end()` uses cached prev_end_pos → different PosIdx
+  - **Fix**: Added `end_pos_cache` HashMap to Parser state, updated:
+    - `mk_loc_current()` to use `get_or_push_end_pos_cached()`
+    - `get_or_push_prev_end_pos()` to check `end_pos_cache`
+  - **Commit**: 25f14bc56 "Fix labeled argument position sharing"
+  - **Result**: +65 tests passing (261 → 325, 24.9% → 31.0%)
+  - **Also**: Reuse StrIdx for label and pattern in punned cases (`~x`)
+
 ### Phase 5: Validation
 
 - [x] **Task 5.1**: Run full test suite, verify no regressions
-  - Verified: 259/1049 bsc-ast tests passing (24.7%)
+  - Current: 325/1049 bsc-ast tests passing (31.0%)
   - **Baseline fix (2026-02-02)**: Regenerated bsc_ast baseline to remove false positives
     - Previous baseline had 262 entries but 117 were incorrectly passing
     - Many files had position sharing differences (e.g., `#...Type.t as x` patterns)
