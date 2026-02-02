@@ -3416,6 +3416,22 @@ fn rewrite_signature_item(item: &SignatureItem, arena: &mut ParseArena) -> Signa
                 item.clone()
             }
         }
+        // Handle floating attributes (@@attr) - need to transform strings in payload
+        SignatureItemDesc::Psig_attribute(attr) => SignatureItem {
+            psig_desc: SignatureItemDesc::Psig_attribute(rewrite_attribute(attr, arena)),
+            psig_loc: item.psig_loc,
+        },
+        // Handle extensions - need to transform strings in payload
+        SignatureItemDesc::Psig_extension(ext, attrs) => {
+            let (ext_name, payload) = ext;
+            SignatureItem {
+                psig_desc: SignatureItemDesc::Psig_extension(
+                    (ext_name.clone(), rewrite_payload(payload, arena)),
+                    rewrite_attributes(attrs, arena),
+                ),
+                psig_loc: item.psig_loc,
+            }
+        }
         // TODO: Handle @inline values
         _ => item.clone(),
     }
