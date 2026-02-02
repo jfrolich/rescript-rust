@@ -6,11 +6,12 @@
 
 **Note:** Many remaining failures are due to arity sharing (see Phase 6 below).
 
-**Phase 6 Status:** Tasks 6.3-6.5 complete. ArityIdx sharing DISABLED (causes regressions).
+**Phase 6 Status:** Tasks 6.3-6.5 complete. Task 6.6 IN PROGRESS - enabling ArityIdx sharing.
 - ArityIdx infrastructure added to parse_arena.rs and marshal.rs
 - AST types updated to use ArityIdx (Arity = ArityIdx type alias)
-- Marshal write_arity_idx() now writes inline values (no sharing) to match pre-6.3 behavior
-- Sharing code exists but is disabled - see marshal.rs comments
+- `push_arity_fresh()` method exists for non-deduplicated arities
+- Marshal write_arity_idx() has sharing DISABLED - needs to be enabled
+- **Next steps**: See Task 6.6 for detailed implementation steps
 
 **ArityIdx findings (2026-02-02):**
 - Content-based dedup caused ~45 regressions vs pre-6.3 (shared too aggressively)
@@ -440,28 +441,103 @@ naturally when the same index is used (just like OCaml shares when same referenc
     - Otherwise writes arity value and records in table
   - Infrastructure is ready; waiting for AST type change (Task 6.3)
 
-- [ ] **Task 6.6**: Match OCaml's arity creation pattern - **BLOCKED** (needs architectural change)
-  - **Problem discovered (2026-02-02)**: Content-based dedup is too aggressive
-    - Current approach: `push_arity(Some(1))` deduplicates all calls with same value
-    - This makes type annotation arity and function body arity share the same ArityIdx
-    - But OCaml keeps these SEPARATE (type uses literal `Some 1`, function uses computed `Some arity`)
-  - **Test case**: `let f: int => int = x => x`
-    - OCaml: type arity `Some(1)` and function arity `Some(1)` are DIFFERENT objects
-    - Rust with dedup: both get SAME ArityIdx → shared incorrectly → 1 object fewer
-    - This causes ~45 regressions from the pre-6.3 baseline
-  - **Attempted fix**: Selective sharing (push_arity vs push_arity_shared)
-    - Type annotations use `push_arity_shared()` (with dedup)
-    - Function bodies use `push_arity()` (no dedup)
-    - This fixed single-function case but broke other cases (JSX, externals)
-  - **Root cause**: OCaml's sharing comes from constant folding at COMPILE TIME of the compiler
-    - Literal `Some 1` in OCaml source → folded to single object
-    - Computed `Some arity` at runtime → fresh object
-    - Rust cannot replicate this without knowing which calls use literals vs computed
-  - **Blocked because**: Would need to trace through ALL arity creation call sites and categorize them
-  - **Impact**: ~45 additional failing tests vs pre-6.3 baseline
-  - Based on Task 6.1 findings, ensure Rust creates/reuses ArityIdx in same pattern
-  - If OCaml shares across functions: reuse same ArityIdx
-  - If OCaml keeps separate within function: create separate ArityIdx
+- [ ] **Task 6.6**: Match OCaml's arity creation pattern - **IN PROGRESS**
+
+  **STATUS**: ArityIdx infrastructure is in place but sharing is DISABLED in marshal.rs.
+  This task is to enable sharing and fix all regressions.
+
+  **Current state (as of 2026-02-02)**:
+  - Sharing is disabled in `marshal.rs` `write_arity_idx()` (writes inline values, no sharing)
+  - This gives 325/1049 bsc-ast tests passing (31.0%)
+  - `push_arity_fresh()` method exists but is not used
+  - All arity creation uses `push_arity()` which deduplicates
+
+  **Key empirical findings**:
+
+  1. **Single typed function** `let f: int => int = x => x` ✅ PASSES
+     - OCaml: type arity and function arity are SEPARATE objects
+     - Rust: currently writes inline (no sharing), so also separate ✓
+
+  2. **Two typed functions with same arity** ❌ FAILS (OCaml has 1 fewer object)
+     ```rescript
+     let f: int => int = x => x
+     let g: int => string = y => "test"
+     ```
+     - OCaml: SHARES type annotation arities across bindings (constant folding)
+     - Rust: writes inline → creates 2 separate objects
+     - OCaml byte at ~0x164: `04 3c` (CODE_SHARED8), Rust: `90 41` (fresh block)
+
+  3. **Nested arrows** `let f: (bool => bool) => unit = _ => ()` ✅ PASSES
+     - OCaml: does NOT share inner and outer arrow arities (computed values)
+     - Rust: writes inline → creates 2 separate objects ✓
+
+  **OCaml's sharing behavior analysis**:
+  - OCaml uses POINTER EQUALITY for marshal sharing (same memory address = shared)
+  - OCaml's compiler constant-folds `Some 1` LITERALS in the parser source code
+  - When `uncurried_type ~arity:(Some 1)` appears multiple times, the `Some 1` is the same object
+  - When `Some arity` is computed (where `arity` is a variable), it creates fresh objects
+  - Cross-binding type annotations share because `Some n` literals are constant-folded
+  - Nested arrows don't share because each `uncurried_type` call computes `Some arity` fresh
+
+  **Solution strategy**:
+  1. Enable sharing in marshal.rs `write_arity_idx()`
+  2. For type annotations: use `push_arity()` (deduplicated) - will share across bindings
+  3. For function expressions: use `push_arity_fresh()` - will NOT share
+  4. Test and fix regressions case by case
+
+  **Implementation steps**:
+
+  - [ ] **Step 6.6.1**: Enable sharing in marshal.rs
+    - Uncomment the `arity_idx_table` lookup code
+    - Test: `let f: int => int = x => x; let g: int => string = y => "test"` should pass
+
+  - [ ] **Step 6.6.2**: Update function expressions to use fresh arities
+    - In `expr.rs`: change `push_arity_full()` to `push_arity_full_fresh()` at lines 763, 929
+    - In `expr.rs`: change `push_arity_unknown()` to `push_arity_unknown_fresh()` at lines 764, 930
+    - Test: single typed function should still pass
+
+  - [ ] **Step 6.6.3**: Update JSX to use fresh arities
+    - In `jsx_ppx.rs`: change `push_arity()` to `push_arity_fresh()` for computed arities
+    - Lines: 524, 541, 1232 (computed total_arity)
+    - Keep 507, 801, 1099, 1213 as `push_arity()` (literal values)
+
+  - [ ] **Step 6.6.4**: Update PPX to use fresh arities
+    - In `ppx.rs`: check each `push_arity()` call
+    - If it's inside a generated expression (like `handle_raw`), use `push_arity_fresh()`
+
+  - [ ] **Step 6.6.5**: Fix remaining regressions
+    - Run `./scripts/test_parser_ast_parity.sh 2>&1 | grep REGRESSION`
+    - For each regression, analyze the OCaml vs Rust object counts
+    - Determine if Rust is over-sharing or under-sharing
+    - Adjust the arity creation at the appropriate call site
+
+  **Test commands**:
+  ```bash
+  # Build
+  cargo build --manifest-path compiler-rust/Cargo.toml --release
+
+  # Test single function
+  echo 'let f: int => int = x => x' > /tmp/test.res
+  ./packages/@rescript/darwin-arm64/bin/bsc.exe -bs-ast /tmp/test.res -o /tmp/ocaml.ast
+  ./compiler-rust/target/release/bsc -bs-ast /tmp/test.res -o /tmp/rust.ast
+  diff <(xxd /tmp/ocaml.ast) <(xxd /tmp/rust.ast)
+
+  # Test two functions
+  echo 'let f: int => int = x => x
+  let g: int => string = y => "test"' > /tmp/test.res
+  # Same commands as above
+
+  # Full test suite
+  ./scripts/test_parser_ast_parity.sh 2>&1 | tail -30
+  ```
+
+  **Debugging tips**:
+  - Object count is at offset 0x2a (4 bytes after marshal magic at 0x1a)
+  - `90 41` = Block(tag=0, size=1) containing int 1 = Some(1)
+  - `04 xx` = CODE_SHARED8, shares object at distance xx
+  - `05 xx yy` = CODE_SHARED16, shares object at distance xxyy
+  - If Rust has MORE objects than OCaml: Rust is not sharing something OCaml shares
+  - If Rust has FEWER objects than OCaml: Rust is sharing something OCaml doesn't
 
 **Generalized principle:** For ANY object type where OCaml shares via pointer equality:
 1. Create an arena for that object type
