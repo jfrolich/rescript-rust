@@ -1308,6 +1308,110 @@ fn handle_raw_structure(
     }
 }
 
+/// Handle %%private(let x = ...) extension.
+///
+/// Transforms:
+/// ```rescript
+/// %%private(let x = 34)
+/// ```
+/// Into:
+/// ```rescript
+/// module local_1 = { let x = 34 }  // with @internal.local attribute
+/// open! local_1
+/// ```
+///
+/// This matches OCaml's expand_reverse in bs_builtin_ppx.ml.
+fn handle_private_extension(
+    payload: &Payload,
+    loc: LocIdx,
+    arena: &mut ParseArena,
+) -> Vec<StructureItem> {
+    // Extract structure items from payload
+    let items = match payload {
+        Payload::PStr(items) if !items.is_empty() => items,
+        _ => {
+            // Invalid payload - just return empty (OCaml would error)
+            return vec![];
+        }
+    };
+
+    // Rewrite the items first (for string transformations etc.)
+    let rewritten_items: Vec<StructureItem> = items
+        .iter()
+        .flat_map(|item| rewrite_structure_item(item, arena))
+        .collect();
+
+    // Generate unique local module name
+    let local_name_idx = arena.next_local_module_name();
+
+    // Get the location from the rewritten items
+    let first_loc = rewritten_items.first().map(|i| i.pstr_loc).unwrap_or(loc);
+    let last_loc = rewritten_items.last().map(|i| i.pstr_loc).unwrap_or(loc);
+
+    // Create a combined location spanning first to last item
+    let combined_loc = if first_loc == last_loc {
+        first_loc
+    } else {
+        // Create a new location from first start to last end
+        let first_location = arena.get_location(first_loc);
+        let last_location = arena.get_location(last_loc);
+        arena.push_loc(first_location.loc_start, last_location.loc_end, false)
+    };
+
+    // Get none location for the @internal.local attribute
+    let none_loc = arena.none_loc();
+
+    // Create @internal.local attribute
+    let internal_local_attr: Attribute = (
+        Located {
+            txt: arena.intern_string("internal.local"),
+            loc: none_loc,
+        },
+        Payload::PStr(vec![]),
+    );
+
+    // Create the module binding:
+    // module local_N = { ... } with @internal.local attribute
+    let module_binding = current::ModuleBinding {
+        pmb_name: Located {
+            txt: local_name_idx,
+            loc: combined_loc,
+        },
+        pmb_expr: ModuleExpr {
+            pmod_desc: ModuleExprDesc::Pmod_structure(rewritten_items),
+            pmod_loc: combined_loc,
+            pmod_attributes: vec![],
+        },
+        pmb_attributes: vec![internal_local_attr],
+        pmb_loc: combined_loc,
+    };
+
+    let module_item = StructureItem {
+        pstr_desc: StructureItemDesc::Pstr_module(module_binding),
+        pstr_loc: combined_loc,
+    };
+
+    // Create the open statement:
+    // open! local_N
+    let local_lident = arena.push_lident_from_idx(local_name_idx);
+    let open_desc = current::OpenDescription {
+        popen_lid: Located {
+            txt: local_lident,
+            loc: combined_loc,
+        },
+        popen_override: current::OverrideFlag::Override,
+        popen_loc: combined_loc,
+        popen_attributes: vec![],
+    };
+
+    let open_item = StructureItem {
+        pstr_desc: StructureItemDesc::Pstr_open(open_desc),
+        pstr_loc: combined_loc,
+    };
+
+    vec![module_item, open_item]
+}
+
 // ========== Async/Await Transformations ==========
 
 /// Transform `await expr` into `Primitive_promise.unsafe_await(expr)`
@@ -3466,13 +3570,16 @@ fn rewrite_structure_item(item: &StructureItem, arena: &mut ParseArena) -> Vec<S
             }),
             pstr_loc: item.pstr_loc,
         }],
-        // Handle structure-level extensions (%%raw)
+        // Handle structure-level extensions (%%raw, %%private)
         StructureItemDesc::Pstr_extension(ext, attrs) => {
             let (ext_name, payload) = ext;
             let name = arena.get_string(ext_name.txt);
             if name == "raw" {
                 // %%raw("...") -> Pstr_eval with local_external_apply using #raw_stmt
                 vec![handle_raw_structure(item, payload, arena)]
+            } else if name == "private" {
+                // %%private(let x = ...) -> module local_N = { let x = ... } ; open! local_N
+                handle_private_extension(payload, item.pstr_loc, arena)
             } else {
                 // Rewrite payload for string transformation
                 vec![StructureItem {

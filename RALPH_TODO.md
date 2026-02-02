@@ -624,10 +624,15 @@ type annotation arity and function arity should be separate objects.
   - **Next step**: Consider whether this 4-byte difference affects functionality. The AST structure
     is correct (sexp-locs matches 100%), only the binary sharing differs.
   - Current: 496/1049 (47.3%) - after type declaration attribute fix
+  - **%%private extension (2026-02-02)**: ✅ IMPLEMENTED
+    - Transforms `%%private(let x = 34)` into `module local_N = { let x = 34 }; open! local_N`
+    - Added `local_module_counter` to ParseArena for generating unique names (`local_1`, `local_2`, etc.)
+    - Added `@internal.local` attribute on the generated module binding
+    - File `letprivate.res`: OCaml 277 bytes, Rust 273 bytes (4-byte position sharing diff)
+    - Does NOT improve parity count directly (position sharing differences still cause failure)
   - **Remaining blockers for 500+**:
-    - `%%private` extension not implemented (2 files) - requires state management in PPX
-    - `#=` operator transformation not implemented (many files) - requires generating externals
     - Position sharing differences (structural issue, affects ~50+ files with same-size output)
+    - The `%%private` files have correct structure but 4-byte sharing differences
 - [ ] **Task 5.3**: Target 750/1049 bsc-ast parity (71%) - **BLOCKED** (arity limitation)
 - [ ] **Task 5.4**: Target 1000/1049 bsc-ast parity (95%) - **BLOCKED** (arity limitation)
 - [ ] **Task 5.5**: Achieve 1049/1049 bsc-ast parity (100%) - **BLOCKED** (arity limitation)

@@ -256,6 +256,9 @@ pub struct ParseArena {
     ///
     /// At marshal time, same StrIdx = same object = shared via back-references.
     strings: Interner,
+    /// Counter for generating unique local module names (for %%private).
+    /// OCaml uses a global ref counter, so this matches that behavior.
+    local_module_counter: u32,
 }
 
 impl Default for ParseArena {
@@ -277,6 +280,7 @@ impl Default for ParseArena {
             position_dedup: HashMap::new(),
             lident_dedup: HashMap::new(),
             strings: Interner::new(),
+            local_module_counter: 0,
         }
     }
 }
@@ -676,6 +680,13 @@ impl ParseArena {
     /// Push a string without deduplication (for dynamic user-input strings).
     pub fn push_string(&mut self, s: String) -> StrIdx {
         self.strings.push(s)
+    }
+
+    /// Generate the next local module name for %%private expansion.
+    /// Returns "local_1", "local_2", etc. matching OCaml's behavior.
+    pub fn next_local_module_name(&mut self) -> StrIdx {
+        self.local_module_counter += 1;
+        self.push_string(format!("local_{}", self.local_module_counter))
     }
 
     /// Check if a longident is a simple Lident with the given name.
