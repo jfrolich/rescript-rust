@@ -5,6 +5,7 @@
 1. **NEVER revert commits made by other agents or humans** - If you think a commit is wrong, document your concerns but DO NOT revert it.
 2. **Commit your changes frequently** - Follow the instructions in CLAUDE.md about committing.
 3. **Update baselines carefully** - Only add files to baselines when they truly pass; verify the test infrastructure is working correctly first.
+4. **GET TO THE ROOT CAUSE - DO NOT GIVE UP** - When investigating an issue, go VERY DEEP. Do not stop at surface-level symptoms or give up when things get difficult. If you abandon an investigation halfway, the next agent (or you later) will have to start from scratch. The cost of incomplete debugging is enormous - you lose all context and have to rebuild understanding. Push through until you find the actual root cause, not just a workaround or hypothesis.
 
 ## 🎯 PRIORITY: Focus on High-Impact Issues First
 
