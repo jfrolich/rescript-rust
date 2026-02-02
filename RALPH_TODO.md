@@ -311,6 +311,14 @@ type annotation arity and function arity should be separate objects.
     - Proper fix would require `Rc<Location>` or `LocIdx` in parsetree0 (significant refactor)
     - **Status**: Content-based sharing reverted; architectural limitation documented
 - [ ] **Task 5.2**: Target 500/1049 bsc-ast parity (47%)
+  - **Investigation (2026-02-02)**: Identified that reaching 500 requires fixing arity sharing
+  - **Blocking issue**: Arity sharing - two functions with same arity (`int => int`) differ by 1 object
+    - Example: `let f: int => int = x => x; let g: int => string = y => "test"` fails
+    - OCaml shares `Some(1)` arity value via pointer equality
+    - Rust creates separate `Some(1)` blocks for each function
+    - This affects ~90% of .res files (any file with 2+ typed functions)
+  - **Cannot fix without**: Content-based sharing (violates constraint) or `Rc<Arity>` architecture change
+  - **Current**: 257/1049 (24.5%) - most .resi files pass, most .res files fail due to arity
 - [ ] **Task 5.3**: Target 750/1049 bsc-ast parity (71%)
 - [ ] **Task 5.4**: Target 1000/1049 bsc-ast parity (95%)
 - [ ] **Task 5.5**: Achieve 1049/1049 bsc-ast parity (100%)
