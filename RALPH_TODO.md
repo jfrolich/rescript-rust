@@ -718,6 +718,38 @@ type annotation arity and function arity should be separate objects.
 
   **This is a significant refactoring effort but is the ONLY correct approach.**
 
+  **Additional experiment (2026-02-02):**
+  Tested removing content-based caching entirely (both start_pos_cache and end_pos_cache).
+  Result: 415 regressions (496 → ~81 passing) - WORSE than before!
+
+  **Key insight: Why OCaml doesn't share positions with same content:**
+  In OCaml, when two nested functions BOTH capture `let start_pos = p.start_pos`:
+  ```ocaml
+  let parse_typ_expr p =
+    let start_pos = p.Parser.start_pos in   (* Captures position 14 as start_pos_A *)
+    let typ = parse_atomic_typ_expr p in    (* Inner function captures position 14 as start_pos_B *)
+    (* start_pos_A and start_pos_B are DIFFERENT heap objects, even with same value! *)
+  ```
+
+  OCaml's Marshal does NOT share `start_pos_A` and `start_pos_B` because they are
+  physically different objects (different memory addresses).
+
+  Rust's content-based caching DOES share them because they have the same content,
+  which is INCORRECT behavior.
+
+  **The paradox:**
+  - Removing content-based caching causes WORSE results (415 regressions)
+  - But content-based caching is WRONG (causes bidirectional differences)
+  - The current caching HAPPENS to provide some correct sharing for cases where
+    the same PosIdx IS reused through explicit passing (like structure_item → value_description)
+  - But it also provides INCORRECT sharing for nested function captures
+
+  **Conclusion:**
+  The fix requires systematically updating ALL position captures to use `PosIdx` passing,
+  then removing content-based caching. This is estimated at ~70+ code locations.
+  Until this is done, the current content-based caching is a necessary evil that
+  provides partial (but imperfect) parity at 496/1049 tests.
+
 - [ ] **Task 5.4**: Target 1000/1049 bsc-ast parity (95%) - **REQUIRES**: Complete identity-based position sharing
 - [ ] **Task 5.5**: Achieve 1049/1049 bsc-ast parity (100%) - **REQUIRES**: Full OCaml position sharing parity
 
