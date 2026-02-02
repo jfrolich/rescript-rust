@@ -182,7 +182,7 @@ impl<'src> Parser<'src> {
     /// use the same position values (matching OCaml's pointer-based sharing).
     pub fn mk_loc_to_prev_end(&mut self, start: &Position) -> LocIdx {
         let start_idx = self.get_or_push_start_pos(*start);
-        let end_idx = self.get_or_push_prev_end_pos();
+        let end_idx = self.prev_end_pos_idx();
         self.arena.mk_loc(start_idx, end_idx)
     }
 
@@ -200,7 +200,7 @@ impl<'src> Parser<'src> {
     /// The end_pos cache enables sharing when the same position is used as
     /// prev_end_pos after the token is consumed via next().
     pub fn mk_loc_current(&mut self) -> LocIdx {
-        let start_idx = self.push_start_pos(); // Uses cache
+        let start_idx = self.start_pos_idx(); // Uses cache
         let end_idx = self.get_or_push_end_pos_cached(self.end_pos);
         self.arena.mk_loc(start_idx, end_idx)
     }
@@ -208,8 +208,8 @@ impl<'src> Parser<'src> {
     /// Create a location from start_pos to prev_end_pos.
     /// Uses cached positions for both start and end to enable sharing.
     pub fn mk_loc_start_to_prev_end(&mut self) -> LocIdx {
-        let start_idx = self.push_start_pos();
-        let end_idx = self.get_or_push_prev_end_pos();
+        let start_idx = self.start_pos_idx();
+        let end_idx = self.prev_end_pos_idx();
         self.arena.mk_loc(start_idx, end_idx)
     }
 
@@ -288,25 +288,24 @@ impl<'src> Parser<'src> {
         self.arena.push_position(pos)
     }
 
-    /// Push the current start position into the arena.
-    /// Return the current start position index.
-    /// This enables sharing - multiple uses of `p.start_pos` before `next()`
-    /// return the same PosIdx, matching OCaml's reference semantics.
-    pub fn push_start_pos(&mut self) -> PosIdx {
+    /// Return the current start position index (no allocation).
+    /// This enables sharing - multiple uses before `next()` return the same PosIdx,
+    /// matching OCaml's reference semantics where `p.Parser.start_pos` is the same object.
+    pub fn start_pos_idx(&mut self) -> PosIdx {
         self.start_pos_idx
     }
 
-    /// Push a FRESH start position into the arena.
+    /// Push a fresh start position into the arena.
     ///
     /// Use this when OCaml would create a FRESH position object, even if another
     /// function has already captured a position at the same coordinates.
     ///
     /// Example: When a nested function captures `let start_pos = p.start_pos`,
     /// OCaml creates a new object even if the outer function already captured
-    /// one at the same position. Using `push_start_pos_fresh()` replicates this.
+    /// one at the same position. Using `push_start_pos()` replicates this.
     ///
-    /// Contrast with `push_start_pos()` which returns the stored index for sharing.
-    pub fn push_start_pos_fresh(&mut self) -> PosIdx {
+    /// Contrast with `start_pos_idx()` which returns the stored index for sharing.
+    pub fn push_start_pos(&mut self) -> PosIdx {
         self.arena.push_position(self.start_pos)
     }
 
@@ -360,15 +359,15 @@ impl<'src> Parser<'src> {
         self.arena.push_position(pos)
     }
 
-    /// Return the current end position index.
+    /// Return the current end position index (no allocation).
     /// This enables sharing - multiple uses of `p.end_pos` return the same PosIdx.
-    pub fn push_end_pos(&mut self) -> PosIdx {
+    pub fn end_pos_idx(&mut self) -> PosIdx {
         self.end_pos_idx
     }
 
-    /// Return the previous end position index.
+    /// Return the previous end position index (no allocation).
     /// This enables sharing - multiple uses of `p.prev_end_pos` return the same PosIdx.
-    pub fn push_prev_end_pos(&mut self) -> PosIdx {
+    pub fn prev_end_pos_idx(&mut self) -> PosIdx {
         self.prev_end_pos_idx
     }
 
@@ -381,7 +380,7 @@ impl<'src> Parser<'src> {
     /// This is the PosIdx-based equivalent of mk_loc_to_prev_end.
     /// Uses cached prev_end_pos PosIdx if available, otherwise pushes and caches.
     pub fn mk_loc_idx_to_prev_end(&mut self, start: PosIdx) -> LocIdx {
-        let end = self.get_or_push_prev_end_pos();
+        let end = self.prev_end_pos_idx();
         self.arena.mk_loc(start, end)
     }
 
@@ -400,12 +399,6 @@ impl<'src> Parser<'src> {
         self.arena.mk_loc(start, end)
     }
 
-    /// Return the prev_end_pos index.
-    /// This enables sharing - multiple uses of `p.prev_end_pos` return the same PosIdx.
-    pub fn get_or_push_prev_end_pos(&mut self) -> PosIdx {
-        self.prev_end_pos_idx
-    }
-
     /// Create a location from start and end PosIdx values.
     /// Both positions are reused, enabling full position sharing.
     pub fn mk_loc_idx_full(&mut self, start: PosIdx, end: PosIdx) -> LocIdx {
@@ -416,7 +409,7 @@ impl<'src> Parser<'src> {
     /// Useful when the end position needs to be reused by multiple locations.
     /// Uses cache for sharing.
     pub fn mk_loc_idx_to_prev_end_with_end(&mut self, start: PosIdx) -> (LocIdx, PosIdx) {
-        let end = self.get_or_push_prev_end_pos();
+        let end = self.prev_end_pos_idx();
         let loc = self.arena.mk_loc(start, end);
         (loc, end)
     }

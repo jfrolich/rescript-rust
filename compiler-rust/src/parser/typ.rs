@@ -161,7 +161,7 @@ pub fn parse_poly_type_expr(p: &mut Parser<'_>) -> CoreType {
         if result {
             // It's a single type var followed by =>
             p.next(); // consume '
-            let var_start_idx = p.push_start_pos_fresh();
+            let var_start_idx = p.start_pos_idx();
             let name = match &p.token {
                 Token::Lident(n) | Token::Uident(n) => {
                     let n = n.clone();
@@ -257,7 +257,7 @@ fn parse_typ_expr_inner_with_start(
 ) -> CoreType {
     // Use the outer start position if provided, otherwise push our own.
     // This enables position sharing with the caller's location (e.g., function type params).
-    let start_pos_idx = outer_start_pos_idx.unwrap_or_else(|| p.push_start_pos());
+    let start_pos_idx = outer_start_pos_idx.unwrap_or_else(|| p.start_pos_idx());
     let attrs = parse_type_attributes(p);
 
     if es6_arrow && super::core::is_es6_arrow_type(p) {
@@ -319,7 +319,7 @@ fn parse_arrow_type_rest(
 
 /// Parse an ES6 arrow type starting at either `~` or a parenthesized parameter list.
 fn parse_es6_arrow_type(p: &mut Parser<'_>, attrs: Attributes) -> CoreType {
-    let start_pos_idx = p.push_start_pos_fresh();
+    let start_pos_idx = p.start_pos_idx();
 
     if p.token == Token::Tilde {
         p.next();
@@ -388,13 +388,13 @@ fn parse_type_attributes(p: &mut Parser<'_>) -> Attributes {
         match &p.token {
             Token::At => {
                 // Capture start_pos BEFORE consuming @ so attribute location includes the @
-                let start_pos_idx = p.push_start_pos_fresh();
+                let start_pos_idx = p.start_pos_idx();
                 p.next();
                 // Parse attribute id (possibly with path)
                 let id = parse_attribute_id(p);
                 // Capture end position for attribute id BEFORE parsing payload
                 // OCaml: Location.mkloc id (mk_loc start_pos end_pos) before parse_payload
-                let id_end_pos_idx = p.get_or_push_prev_end_pos();
+                let id_end_pos_idx = p.prev_end_pos_idx();
                 // Parse optional payload
                 let payload = if p.token == Token::Lparen && p.start_pos.cnum == p.prev_end_pos.cnum {
                     parse_payload(p)
@@ -470,7 +470,7 @@ fn parse_atomic_typ_expr_with_start(
     es6_arrow: bool,
     outer_start_pos_idx: Option<crate::parse_arena::PosIdx>,
 ) -> CoreType {
-    let start_pos_idx = p.push_start_pos_fresh();
+    let start_pos_idx = p.start_pos_idx();
 
     let mut typ = match &p.token {
         Token::Typ => {
@@ -487,7 +487,7 @@ fn parse_atomic_typ_expr_with_start(
                     Token::Lident(name) => name.clone(),
                     _ => break,
                 };
-                let var_start_idx = p.push_start_pos_fresh();
+                let var_start_idx = p.start_pos_idx();
                 p.next();
                 let var_loc = p.mk_loc_idx_to_prev_end(var_start_idx);
                 let name_idx = p.arena_mut().push_string(name.to_string());
@@ -510,7 +510,7 @@ fn parse_atomic_typ_expr_with_start(
 
             while p.token == Token::SingleQuote {
                 p.next(); // consume the single quote first
-                let var_start_idx = p.push_start_pos_fresh(); // capture start position AFTER the quote
+                let var_start_idx = p.start_pos_idx(); // capture start position AFTER the quote
                 let name = match &p.token {
                     Token::Lident(name) | Token::Uident(name) => {
                         let name = name.clone();
@@ -687,7 +687,7 @@ fn parse_atomic_typ_expr(p: &mut Parser<'_>, attrs: Attributes, es6_arrow: bool)
 fn parse_type_constr_with_start(p: &mut Parser<'_>, outer_start_pos_idx: Option<crate::parse_arena::PosIdx>) -> CoreType {
     // Use the outer start position if provided, otherwise push our own.
     // This enables position sharing with the caller's location (e.g., arrow type location).
-    let start_pos_idx = outer_start_pos_idx.unwrap_or_else(|| p.push_start_pos());
+    let start_pos_idx = outer_start_pos_idx.unwrap_or_else(|| p.start_pos_idx());
 
     // Parse the path
     let mut path_parts = vec![];
@@ -711,7 +711,7 @@ fn parse_type_constr_with_start(p: &mut Parser<'_>, outer_start_pos_idx: Option<
 
     // Capture end position for identifier - use caching so it can be shared
     // with ptyp_loc when there are no type arguments
-    let lid_end_idx = p.get_or_push_prev_end_pos();
+    let lid_end_idx = p.prev_end_pos_idx();
     let lid_loc = p.mk_loc_idx(start_pos_idx, lid_end_idx);
 
     // Parse optional type arguments
@@ -731,7 +731,7 @@ fn parse_type_constr_with_start(p: &mut Parser<'_>, outer_start_pos_idx: Option<
     // the location is adjusted later to exclude type args.
     // Reuse start_pos_idx for position sharing. End position uses caching -
     // when there are no type args, it shares the same end as lid_loc.
-    let ptyp_end_idx = p.get_or_push_prev_end_pos();
+    let ptyp_end_idx = p.prev_end_pos_idx();
     let ptyp_loc = p.mk_loc_idx(start_pos_idx, ptyp_end_idx);
     ast_helper::make_type_constr(lid_idx, args, lid_loc, ptyp_loc)
 }
@@ -762,9 +762,9 @@ fn parse_type_args(p: &mut Parser<'_>) -> Vec<CoreType> {
 /// Parse a function type with labeled arguments.
 fn parse_function_type(p: &mut Parser<'_>, start_pos_idx: PosIdx) -> CoreType {
     // Capture position before the first uncurried marker - OCaml includes . in argument type location
-    // Use identity-based position (push_start_pos_fresh) to match OCaml's behavior where
+    // Use identity-based position (push_start_pos) to match OCaml's behavior where
     // nested function captures create different heap objects even at the same coordinate.
-    let first_uncurried_start_idx = p.push_start_pos_fresh();
+    let first_uncurried_start_idx = p.start_pos_idx();
     // Skip uncurried marker
     let first_has_dot = p.optional(&Token::Dot);
 
@@ -778,7 +778,7 @@ fn parse_function_type(p: &mut Parser<'_>, start_pos_idx: PosIdx) -> CoreType {
         let uncurried_start_idx = if is_first_param {
             first_uncurried_start_idx
         } else {
-            p.push_start_pos_fresh()
+            p.start_pos_idx()
         };
         // Allow dotted parameters for uncurried segments (ignored for now).
         let has_dot = if is_first_param {
@@ -806,7 +806,7 @@ fn parse_function_type(p: &mut Parser<'_>, start_pos_idx: PosIdx) -> CoreType {
         // Now capture the start position for the arrow - AFTER doc comments but BEFORE @-attrs
         // This matches OCaml: let start_pos = p.Parser.start_pos in
         // Use identity-based position to match OCaml's heap object creation behavior.
-        let post_doc_start_idx = p.push_start_pos_fresh();
+        let post_doc_start_idx = p.start_pos_idx();
 
         // Parse regular @-style attributes
         let regular_attrs = parse_regular_attributes(p);
@@ -827,7 +827,7 @@ fn parse_function_type(p: &mut Parser<'_>, start_pos_idx: PosIdx) -> CoreType {
             // If there are @-attributes (but no uncurried marker), start at the attribute
             post_doc_start_idx
         } else {
-            p.push_start_pos_fresh()
+            p.start_pos_idx()
         };
 
         let (mut label, mut typ) = if p.token == Token::Tilde {
@@ -973,7 +973,7 @@ fn parse_function_type(p: &mut Parser<'_>, start_pos_idx: PosIdx) -> CoreType {
     //   List.fold_right (fun ... -> let loc = mk_loc start_pos end_pos in ...)
     // So we capture end_pos_idx once and reuse it for all arrows.
     let mut acc = return_type;
-    let end_pos_idx = p.get_or_push_prev_end_pos();
+    let end_pos_idx = p.prev_end_pos_idx();
     // Pre-allocate arity indices for the inner arrows and outermost arrow
     let unknown_arity = p.push_arity_unknown();
     let full_arity = p.push_arity_full(total_arity);
@@ -1018,7 +1018,7 @@ fn parse_function_type(p: &mut Parser<'_>, start_pos_idx: PosIdx) -> CoreType {
 
 /// Parse a lowercase identifier.
 fn parse_lident(p: &mut Parser<'_>) -> (String, Location) {
-    let start_pos_idx = p.push_start_pos_fresh();
+    let start_pos_idx = p.start_pos_idx();
     match &p.token {
         Token::Lident(name) => {
             let name = name.clone();
@@ -1080,7 +1080,7 @@ fn parse_attribute(p: &mut Parser<'_>) -> Option<Attribute> {
     // parameter's start_pos and the attribute's location start point to the
     // same position object (pointer equality). Using the cache ensures we
     // get the same PosIdx if someone else already captured this position.
-    let start_pos_idx = p.push_start_pos();
+    let start_pos_idx = p.start_pos_idx();
     p.next();
 
     let attr_id_str = parse_attribute_id(p);
@@ -1107,7 +1107,7 @@ fn parse_attribute_payload(p: &mut Parser<'_>) -> Payload {
             let value = s.clone();
             let tag = get_string_tag(p);
             // Capture start_pos before consuming the token
-            let start_pos_idx = p.push_start_pos_fresh();
+            let start_pos_idx = p.start_pos_idx();
             p.next();
             // IMPORTANT: Create separate locations for expression and structure_item
             // to match OCaml's allocation pattern (each gets its own Location object).
@@ -1134,7 +1134,7 @@ fn parse_attribute_payload(p: &mut Parser<'_>) -> Payload {
         _ => {
             // Try to parse as an expression
             // Capture start_pos BEFORE parsing, like OCaml does in parse_payload
-            let start_pos_idx = p.push_start_pos_fresh();
+            let start_pos_idx = p.start_pos_idx();
             let expr = super::expr::parse_expr(p);
             // OCaml structure_item location spans from before expression to after
             let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
@@ -1187,7 +1187,7 @@ fn parse_tuple_type(
 
 /// Parse a record or object type.
 fn parse_record_or_object_type(p: &mut Parser<'_>) -> CoreType {
-    let start_pos_idx = p.push_start_pos_fresh();
+    let start_pos_idx = p.start_pos_idx();
     p.expect(Token::Lbrace);
 
     // Check for object type: {. ... } or {.. ... }
@@ -1279,7 +1279,7 @@ fn parse_object_fields(p: &mut Parser<'_>) -> Vec<ObjectField> {
         };
         match name {
             Some(name) => {
-                let field_start_idx = p.push_start_pos_fresh();
+                let field_start_idx = p.start_pos_idx();
                 p.next();
                 // OCaml's Otag location only includes the field name, not the type
                 let name_loc = p.mk_loc_idx_to_prev_end(field_start_idx);
@@ -1315,7 +1315,7 @@ fn parse_object_fields(p: &mut Parser<'_>) -> Vec<ObjectField> {
 /// - For a single non-tuple type, returns it without updating location (no parens in loc)
 /// - For multiple types or a single tuple, creates a Ptyp_tuple with full parenthesis location
 fn parse_polymorphic_variant_type_args(p: &mut Parser<'_>) -> CoreType {
-    let start_pos_idx = p.push_start_pos_fresh();
+    let start_pos_idx = p.start_pos_idx();
     p.expect(Token::Lparen);
 
     let mut args = vec![];
@@ -1352,7 +1352,7 @@ fn parse_polymorphic_variant_type_args(p: &mut Parser<'_>) -> CoreType {
 
 /// Parse a polymorphic variant type.
 fn parse_poly_variant_type(p: &mut Parser<'_>) -> CoreType {
-    let start_pos_idx = p.push_start_pos_fresh();
+    let start_pos_idx = p.start_pos_idx();
     p.expect(Token::Lbracket);
 
     // Check for closed/open markers
@@ -1383,7 +1383,7 @@ fn parse_poly_variant_type(p: &mut Parser<'_>) -> CoreType {
 
 /// Parse a simple polymorphic variant type starting with #.
 fn parse_poly_variant_type_simple(p: &mut Parser<'_>) -> CoreType {
-    let start_pos_idx = p.push_start_pos_fresh();
+    let start_pos_idx = p.start_pos_idx();
     p.expect(Token::Hash);
 
     let tag = match &p.token {
@@ -1461,7 +1461,7 @@ fn parse_row_fields(p: &mut Parser<'_>) -> Vec<RowField> {
         if p.token == Token::Hash {
             // Tagged row field: #tag or #tag(args)
             // Capture the # position for location - OCaml includes # in the tag location
-            let hash_start_idx = p.push_start_pos_fresh();
+            let hash_start_idx = p.start_pos_idx();
             p.next();
             let tag = match &p.token {
                 Token::Lident(name) | Token::Uident(name) => {
@@ -1503,7 +1503,7 @@ fn parse_row_fields(p: &mut Parser<'_>) -> Vec<RowField> {
             // Parse arguments inside parentheses
             // Track if they're comma-separated (tuple wrap) vs ampersand-separated (no wrap)
             let (args, comma_separated, had_parens, lparen_pos_idx, rparen_end_pos_idx) = if p.token == Token::Lparen {
-                let lparen_pos_idx = p.push_start_pos_fresh();
+                let lparen_pos_idx = p.start_pos_idx();
                 p.next();
                 let mut args = vec![];
                 let mut has_comma = false;
@@ -1517,7 +1517,7 @@ fn parse_row_fields(p: &mut Parser<'_>) -> Vec<RowField> {
                     }
                 }
                 p.expect(Token::Rparen);
-                let rparen_end_pos_idx = p.get_or_push_prev_end_pos();
+                let rparen_end_pos_idx = p.prev_end_pos_idx();
                 (args, has_comma, true, Some(lparen_pos_idx), Some(rparen_end_pos_idx))
             } else {
                 (vec![], false, false, None, None)
@@ -1592,7 +1592,7 @@ fn parse_row_fields(p: &mut Parser<'_>) -> Vec<RowField> {
 /// Parse a package type without leading paren: S [with type constraints].
 /// Used for first-class module constraints: module(Expr: S)
 pub fn parse_package_type(p: &mut Parser<'_>) -> CoreType {
-    let start_pos_idx = p.push_start_pos_fresh();
+    let start_pos_idx = p.start_pos_idx();
     let lid = parse_module_long_ident(p);
 
     // Parse optional constraints ("with" is not a keyword)
@@ -1641,7 +1641,7 @@ fn parse_package_type_with_parens(
 
 /// Parse a module long identifier.
 fn parse_module_long_ident(p: &mut Parser<'_>) -> super::ast::Loc<crate::parse_arena::LidentIdx> {
-    let start_pos_idx = p.push_start_pos_fresh();
+    let start_pos_idx = p.start_pos_idx();
     let mut path_parts = vec![];
 
     while let Token::Uident(name) = &p.token {
@@ -1675,7 +1675,7 @@ fn parse_module_long_ident(p: &mut Parser<'_>) -> super::ast::Loc<crate::parse_a
 
 /// Parse a type long identifier (module path ending in a type name).
 fn parse_type_long_ident(p: &mut Parser<'_>) -> super::ast::Loc<crate::parse_arena::LidentIdx> {
-    let start_pos_idx = p.push_start_pos_fresh();
+    let start_pos_idx = p.start_pos_idx();
     let mut path_parts = vec![];
 
     loop {
@@ -1738,7 +1738,7 @@ fn parse_package_constraints(p: &mut Parser<'_>) -> Vec<(super::ast::Loc<crate::
 /// Parse an extension.
 fn parse_extension(p: &mut Parser<'_>) -> Extension {
     // OCaml includes the % in the extension name location
-    let id_start_idx = p.push_start_pos_fresh();
+    let id_start_idx = p.start_pos_idx();
     p.expect(Token::Percent);
     let mut parts: Vec<String> = vec![];
 
