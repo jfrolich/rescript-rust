@@ -1135,43 +1135,16 @@ let start_pos_idx = p.push_start_pos();  // fresh, like OCaml's let start_pos = 
 let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
 ```
 
-- [ ] **Task 7.1**: Convert Position-based `mk_loc_*` calls in expr.rs (~40 locations)
-
-  **`mk_loc_to_prev_end(&pos)` → `mk_loc_idx_to_prev_end(pos_idx)` conversions:**
-  - `parse_arrow_parameter_with_label`: lines 1104 (tilde_pos), 1108, 1119, 1143 (start_pos)
-  - `parse_atomic_expr_with_context`: lines 1769 (lparen_pos), 2343 (constraint_start)
-  - `parse_record_expr`: line 3674 (expr_start)
-  - `parse_let_binding`: lines 3427 (binding_start_pos), 3521 (binding_start)
-  - `parse_module_longident_path`: line 3609 (start_pos)
-  - `parse_list_expr`: line 3788 (start_pos)
-  - `parse_while_expr`: line 4190 (start_pos)
-  - `parse_for_expr`: line 4210 (start_pos)
-  - `parse_try_expr`: line 4301 (start_pos)
-  - `parse_if_expr`: line 4358 (start_pos)
-  - JSX: lines 4384, 4393, 4420, 4426, 4464 (tag_name_start, start_pos, closing_name_start)
-  - JSX props/children: lines 4566 (spread_start), 4727 (start_pos), 4776 (lbrace_start)
-  - Template: lines 4884, 4951 (start_pos)
-  - Tagged template: line 5099 (tag_start)
-  - `parse_let_star_expr`: lines 3992, 4036, 4057 (start_pos, binding_start)
-  - `parse_expr_with_context`: lines 3190, 3837 (expr_start)
-
-  **`mk_loc(&pos1, &pos2)` → `mk_loc_idx(idx1, idx2)` conversions:**
-  - `parse_es6_arrow_expression_internal`: line 728 (paren positions), 943 (fun_start, end_pos)
-  - `parse_parameters`: line 989 (lparen_pos, end_pos)
-  - `parse_arrow_parameter_with_label`: line 1125 (start_pos, name_loc end)
-  - `parse_record_expr`: line 3663 (field_start, lid_end)
-
-  **`mk_loc_from_positions(&pos1, &pos2)` → `mk_loc_idx(idx1, idx2)` conversions:**
-  - `parse_binary_expr`: line 1494 (op_start, op_end)
-  - `make_list_expression_with_loc`: line 2729 (seg_start, seg_end)
-  - `parse_template_expr`: lines 4823, 4844 (text_start_pos, pos)
-  - `parse_js_template_expr`: lines 5026, 5042 (text_start_pos, pos)
+- [x] **Task 7.1**: Convert Position-based `mk_loc_*` calls in expr.rs (~40 locations)
+  ✅ DONE (2026-02-03): All Position-based `mk_loc_*` calls in expr.rs have already been converted
+  to PosIdx-based methods. Remaining `push_pos()` calls are for template literal embedded positions
+  (from token data) and fun_start computation — these are legitimate uses, not the Position-based
+  mk_loc calls this task targeted.
 
   **`mk_loc_current()` calls (33 in expr.rs) — updated via Task 7.6 (no caller changes needed)**
 
-- [ ] **Task 7.2**: Convert Position-based `mk_loc_*` calls in pattern.rs (~3 locations)
-
-  - `parse_record_pattern` line 1043: `mk_loc(&field_start, &lid_end_pos)` → extract PosIdx
+- [x] **Task 7.2**: Convert Position-based `mk_loc_*` calls in pattern.rs (~3 locations)
+  ✅ DONE (2026-02-03): All Position-based mk_loc calls in pattern.rs have already been converted.
   - `mk_loc_current()` calls (7 total) — updated via Task 7.6
 
 - [x] **Task 7.3**: Convert Position-based `mk_loc_*` calls in module.rs (~3 locations)
@@ -1183,44 +1156,20 @@ let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
   - Error recovery line 2838: `mk_loc(&keyword_start, &keyword_end)` → push both
   - `mk_loc_current()` calls (16 total) — updated via Task 7.6
 
-- [ ] **Task 7.4**: Convert Position-based `mk_loc_*` calls in core.rs (~4 locations)
+- [x] **Task 7.4**: Convert Position-based `mk_loc_*` calls in core.rs (~4 locations)
+  ✅ DONE (2026-02-03): Both `make_prefix_operator` and `make_infix_operator` already use `PosIdx`
+  parameters and `mk_loc_idx`. The only remaining Position-based `mk_loc` call in core.rs is in a
+  test function, not production code.
 
-  - `make_prefix_operator` lines 655, 666, 674: `mk_loc(&start_pos, ...)` → push positions
-  - `make_infix_operator` line 688: `mk_loc(&start_pos, &end_pos)` → push both
+- [x] **Task 7.5**: Fix type parsing position chain in typ.rs
+  ✅ DONE (2026-02-03): `parse_typ_expr_inner_with_start` already passes `None` to
+  `parse_atomic_typ_expr_with_start` (line 275). The `outer_start_pos_idx` passing from
+  `parse_atomic_typ_expr_with_start` to `parse_type_constr_with_start` is correct — it mirrors
+  OCaml where `parse_value_path` captures the same `p.start_pos` pointer (no `p.next()` between).
 
-- [ ] **Task 7.5**: Fix type parsing position chain in typ.rs
-
-  **Critical change:** Stop passing `outer_start_pos_idx` from `parse_typ_expr_inner_with_start` to
-  `parse_atomic_typ_expr_with_start`. In OCaml, these functions each independently capture
-  `let start_pos = p.start_pos`, creating different heap objects. Rust currently passes the
-  parent's position to the child, causing incorrect sharing.
-
-  ```rust
-  // BEFORE (typ.rs ~line 274):
-  let typ = parse_atomic_typ_expr_with_start(p, attrs, es6_arrow, Some(start_pos_idx));
-
-  // AFTER:
-  let typ = parse_atomic_typ_expr_with_start(p, attrs, es6_arrow, None);
-  ```
-
-  In `parse_atomic_typ_expr_with_start`, capture fresh when `outer_start` is `None`:
-  ```rust
-  let start_pos_idx = outer_start_pos_idx.unwrap_or_else(|| p.push_start_pos());
-  ```
-
-  Also convert remaining Position-based calls (lines 183, 234: `mk_loc_from_start_of`).
-
-- [ ] **Task 7.6**: Update `mk_loc_current()` to use direct index access
-
-  Change `mk_loc_current()` implementation in state.rs to avoid content-based caching:
-  ```rust
-  pub fn mk_loc_current(&mut self) -> LocIdx {
-      let start_idx = self.start_pos_idx;
-      let end_idx = self.end_pos_idx;  // Direct index, no content-based cache
-      self.arena.mk_loc(start_idx, end_idx)
-  }
-  ```
-  This affects 41+ call sites but requires NO caller changes.
+- [x] **Task 7.6**: Update `mk_loc_current()` to use direct index access
+  ✅ DONE (2026-02-03): `mk_loc_current()` already uses `self.start_pos_idx` and `self.end_pos_idx`
+  directly. No caller changes needed.
 
 - [ ] **Task 7.7**: Remove content-based caching from state.rs
 
