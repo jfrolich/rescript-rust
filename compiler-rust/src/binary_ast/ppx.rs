@@ -1972,8 +1972,11 @@ fn handle_private_extension(
 
 /// Transform `await expr` into `Primitive_promise.unsafe_await(expr)`
 /// OCaml: ast_await.ml create_await_expression
+///
+/// The `loc` parameter should be the inner expression's pexp_loc (not the
+/// Pexp_await node's loc), matching OCaml: `let loc = {e.pexp_loc with loc_ghost = true}`
 fn transform_await(inner: Expression, loc: LocIdx, arena: &mut ParseArena) -> Expression {
-    // Create ghost location for transformed expressions
+    // Create ghost location from the inner expression's location
     let ghost_loc = arena.mk_ghost_loc(loc);
 
     // Create Primitive_promise.unsafe_await identifier
@@ -3009,8 +3012,10 @@ fn rewrite_expression_generic(expr: &Expression, arena: &mut ParseArena) -> Expr
 
         ExpressionDesc::Pexp_await(e) => {
             // Transform: await expr -> Primitive_promise.unsafe_await(expr)
+            // OCaml's create_await_expression uses the inner expression's pexp_loc
+            // (not the Pexp_await node's loc) for the ghost location
             let rewritten_inner = rewrite_expression(e, arena);
-            let transformed = transform_await(rewritten_inner, expr.pexp_loc, arena);
+            let transformed = transform_await(rewritten_inner, e.pexp_loc, arena);
             return Expression {
                 pexp_attributes: rewrite_attributes(&expr.pexp_attributes, arena),
                 ..transformed
