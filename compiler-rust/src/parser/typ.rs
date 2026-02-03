@@ -256,9 +256,11 @@ fn parse_typ_expr_inner_with_start(
     es6_arrow: bool,
     outer_start_pos_idx: Option<crate::parse_arena::PosIdx>,
 ) -> CoreType {
-    // Use the outer start position if provided, otherwise push a fresh one.
-    // Each call to parse_typ_expr_inner gets its own fresh PosIdx, matching OCaml's
-    // `let start_pos = p.start_pos` which creates a new heap object each time.
+    // Use the outer start position if provided, otherwise use the stored index.
+    // In OCaml, `let start_pos = p.Parser.start_pos` binds to the SAME pointer
+    // that p.start_pos currently holds. If p.start_pos hasn't changed (no p.next()
+    // between captures), multiple functions share the SAME heap object.
+    // Using start_pos_idx() matches this — it returns the stored index.
     let start_pos_idx = outer_start_pos_idx.unwrap_or_else(|| p.start_pos_idx());
     let attrs = parse_type_attributes(p);
 
@@ -318,6 +320,8 @@ fn parse_arrow_type_rest(
 
 /// Parse an ES6 arrow type starting at either `~` or a parenthesized parameter list.
 fn parse_es6_arrow_type(p: &mut Parser<'_>, attrs: Attributes) -> CoreType {
+    // OCaml line 4711: `let start_pos = p.Parser.start_pos in` — binds to
+    // the same pointer as p.start_pos. Use stored index for sharing.
     let start_pos_idx = p.start_pos_idx();
 
     if p.token == Token::Tilde {
@@ -469,8 +473,9 @@ fn parse_atomic_typ_expr_with_start(
     es6_arrow: bool,
     outer_start_pos_idx: Option<crate::parse_arena::PosIdx>,
 ) -> CoreType {
-    // Use outer start if provided, otherwise push a fresh position.
-    // Each independent call creates its own PosIdx, matching OCaml's heap object creation.
+    // Use outer start if provided, otherwise use stored index.
+    // In OCaml, `let start_pos = p.Parser.start_pos` binds to the same pointer.
+    // Use start_pos_idx() for sharing when no attributes have been parsed.
     let start_pos_idx = outer_start_pos_idx.unwrap_or_else(|| p.start_pos_idx());
 
     let mut typ = match &p.token {
@@ -562,6 +567,9 @@ fn parse_atomic_typ_expr_with_start(
                 ptyp_attributes: vec![],
             }
         }
+        // In OCaml, parse_value_path captures `let start_pos = p.Parser.start_pos` (line 714).
+        // Since p.start_pos hasn't changed, this is the SAME pointer as parse_atomic_typ_expr's
+        // start_pos. Pass outer_start_pos_idx to share the same PosIdx.
         Token::Lident(_) | Token::Uident(_) => parse_type_constr_with_start(p, outer_start_pos_idx),
         Token::Lparen => {
             p.next();
@@ -686,8 +694,8 @@ fn parse_atomic_typ_expr(p: &mut Parser<'_>, attrs: Attributes, es6_arrow: bool)
 /// for position sharing (e.g., when the caller has already pushed a start position
 /// at the same coordinate).
 fn parse_type_constr_with_start(p: &mut Parser<'_>, outer_start_pos_idx: Option<crate::parse_arena::PosIdx>) -> CoreType {
-    // Use the outer start position if provided, otherwise push a fresh one.
-    // Each independent call creates its own PosIdx, matching OCaml's heap object creation.
+    // Use the outer start position if provided, otherwise use stored index.
+    // In OCaml, `let start_pos = p.Parser.start_pos` binds to same pointer.
     let start_pos_idx = outer_start_pos_idx.unwrap_or_else(|| p.start_pos_idx());
 
     // Parse the path
@@ -861,9 +869,9 @@ fn parse_function_type(p: &mut Parser<'_>, start_pos_idx: PosIdx) -> CoreType {
                 CoreTypeDesc::Ptyp_constr(lid, _) if p.arena().is_simple_lident(lid.txt)
             );
             if is_simple_constr {
-                let end_pos = p.loc_end(typ.ptyp_loc).clone();
+                let end_pos_idx = p.loc_end_idx(typ.ptyp_loc);
                 typ = CoreType {
-                    ptyp_loc: p.mk_loc_idx_to_pos(uncurried_start_idx, &end_pos),
+                    ptyp_loc: p.mk_loc_idx(uncurried_start_idx, end_pos_idx),
                     ..typ
                 };
             }
@@ -899,11 +907,11 @@ fn parse_function_type(p: &mut Parser<'_>, start_pos_idx: PosIdx) -> CoreType {
                 // and attrs passed directly to Ast_helper.Typ.constr
                 // If there's an uncurried marker (.), the location should start at the .
                 // Doc comments don't affect type location, only @-attributes do
-                let end_pos = p.loc_end(typ.ptyp_loc).clone();
+                let end_pos_idx = p.loc_end_idx(typ.ptyp_loc);
                 typ.ptyp_loc = if has_dot {
-                    p.mk_loc_idx_to_pos(uncurried_start_idx, &end_pos)
+                    p.mk_loc_idx(uncurried_start_idx, end_pos_idx)
                 } else if has_regular_attrs {
-                    p.mk_loc_idx_to_pos(post_doc_start_idx, &end_pos)
+                    p.mk_loc_idx(post_doc_start_idx, end_pos_idx)
                 } else {
                     typ.ptyp_loc
                 };
