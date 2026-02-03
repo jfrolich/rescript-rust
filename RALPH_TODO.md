@@ -62,16 +62,33 @@ Do NOT spend time on small issues (@deriving edge cases, etc.) until the locatio
 
 ---
 
-**Last Updated:** 2026-02-03 (baseline fix, investigation continues)
+**Last Updated:** 2026-02-03 (investigation continues)
 **Overall Status:** 253/1049 bsc-ast tests passing (24.1%)
 **sexp-locs Status:** 1049/1049 tests passing (100%) ✅
+
+**Investigation (2026-02-03):**
+Attempted surgical fix for type constructor positions in `parse_type_constr_with_start` and
+`parse_atomic_typ_expr_with_start`. The change to use `push_start_pos()` instead of `start_pos_idx()`
+caused 16 regressions (238 → 253 passing). The issue is that:
+
+1. OCaml creates THREE different position objects for `external foo: int => int = "foo"`:
+   - `parse_typ_expr` captures `start_pos_T` at col 14
+   - `parse_atomic_typ_expr` captures `start_pos_A` at col 14 (DIFFERENT heap object)
+   - `parse_value_path` captures `start_pos_V` at col 14 (DIFFERENT heap object again)
+
+2. Rust's `start_pos_idx()` returns a STORED index, so all three functions get the SAME PosIdx
+
+3. Changing to `push_start_pos()` creates fresh positions but breaks other cases that were
+   "accidentally correct" due to content-based caching matching OCaml by chance
+
+4. The fix requires ~70+ code location changes to EXACTLY match OCaml's position capture/pass patterns
 
 **Baseline fix (2026-02-03):**
 Removed `typexpr/extension.res` from baseline - it was a false positive that was never passing.
 This file has position sharing differences unrelated to the main investigation.
 
-**Latest investigation (2026-02-03):**
-Verified that the position sharing issue is specific to external declarations with arrow types:
+**Verified external declaration behavior (2026-02-03):**
+The position sharing issue is specific to external declarations with arrow types:
 - `type t = int => int` ✅ IDENTICAL
 - `let f: int => int = x => x` ✅ IDENTICAL
 - `external foo: int = "foo"` ✅ IDENTICAL (no arrow)
