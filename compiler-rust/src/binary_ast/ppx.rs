@@ -418,8 +418,18 @@ fn get_payload_string(payload: &current::Payload, arena: &mut ParseArena) -> Opt
     match payload {
         current::Payload::PStr(items) if items.len() == 1 => {
             if let StructureItemDesc::Pstr_eval(expr, _) = &items[0].pstr_desc {
-                if let ExpressionDesc::Pexp_constant(current::Constant::String(s, _)) = &expr.pexp_desc {
-                    return Some(s.clone());
+                match &expr.pexp_desc {
+                    ExpressionDesc::Pexp_constant(current::Constant::String(s, _)) => {
+                        return Some(s.clone());
+                    }
+                    // Handle @attr(ident) where ident is a simple identifier like nullable
+                    ExpressionDesc::Pexp_ident(lid) => {
+                        let longident = arena.get_longident(lid.txt);
+                        if let Longident::Lident(s) = longident {
+                            return Some(arena.get_string(*s).to_string());
+                        }
+                    }
+                    _ => {}
                 }
             }
             None
