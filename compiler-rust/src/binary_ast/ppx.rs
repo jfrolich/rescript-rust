@@ -300,7 +300,8 @@ fn reconstruct_arrow_type_with_loc(
 #[derive(Debug)]
 struct ExternalDesc {
     val_name: Option<String>,
-    module_name: Option<String>,
+    module_as_val: bool,           // @module with no payload
+    external_module_name: Option<String>,  // @module("name") with string payload
     call_name: Option<String>,
     send_name: Option<String>,
     new_name: Option<String>,
@@ -319,7 +320,8 @@ impl Default for ExternalDesc {
     fn default() -> Self {
         Self {
             val_name: None,
-            module_name: None,
+            module_as_val: false,
+            external_module_name: None,
             call_name: None,
             send_name: None,
             new_name: None,
@@ -336,17 +338,31 @@ impl Default for ExternalDesc {
     }
 }
 
-fn parse_external_attrs(attrs: &[Attribute], prim_name: &str, arena: &mut ParseArena) -> ExternalDesc {
+fn parse_external_attrs(attrs: &[Attribute], prim_name: &str, no_arguments: bool, arena: &mut ParseArena) -> ExternalDesc {
     let mut desc = ExternalDesc::default();
 
     for (attr_name, payload) in attrs {
         let name = arena.get_string(attr_name.txt);
         match name {
             "val" => {
-                desc.val_name = Some(get_payload_string(payload, arena).unwrap_or_else(|| prim_name.to_string()));
+                let name = get_payload_string(payload, arena).unwrap_or_else(|| prim_name.to_string());
+                if no_arguments {
+                    desc.val_name = Some(name);
+                } else {
+                    desc.call_name = Some(name);
+                }
             }
             "module" => {
-                desc.module_name = get_payload_string(payload, arena);
+                match get_payload_string(payload, arena) {
+                    Some(name) => {
+                        // @module("name") - sets external_module_name
+                        desc.external_module_name = Some(name);
+                    }
+                    None => {
+                        // @module with no payload - module_as_val, bundle = prim_name
+                        desc.module_as_val = true;
+                    }
+                }
             }
             "send" => {
                 desc.send_name = Some(get_payload_string(payload, arena).unwrap_or_else(|| prim_name.to_string()));
@@ -397,13 +413,15 @@ fn parse_external_attrs(attrs: &[Attribute], prim_name: &str, arena: &mut ParseA
 
     // Default: if no specific attr, treat as @val for a call
     if desc.val_name.is_none()
+        && desc.call_name.is_none()
         && desc.send_name.is_none()
         && desc.new_name.is_none()
         && desc.get_name.is_none()
         && desc.set_name.is_none()
         && !desc.get_index
         && !desc.set_index
-        && desc.module_name.is_none()
+        && !desc.module_as_val
+        && desc.external_module_name.is_none()
         && !desc.mk_obj
     {
         // Default to Js_call with the prim name
@@ -447,14 +465,16 @@ fn build_ffi_type(desc: &ExternalDesc, prim_name: &str, arity: usize, result_is_
         desc.return_wrapper.clone()
     };
 
-    // Build ExternalModuleName from desc.module_name if present
-    let external_module_name = desc.module_name.as_ref().map(|bundle| ExternalModuleName {
+    // Build ExternalModuleName from desc.external_module_name if present
+    // (this is @module("name") with a string payload)
+    let external_module_name = desc.external_module_name.as_ref().map(|bundle| ExternalModuleName {
         bundle: bundle.clone(),
         module_bind_name: ModuleBindName::PhintNothing,
         import_attributes: None,
     });
 
     // Determine external spec based on attributes
+    // Priority follows OCaml's external_desc_of_non_obj pattern matching
     let external_spec = if desc.get_index {
         ExternalSpec::JsGetIndex {
             js_get_index_scopes: desc.scopes.clone(),
@@ -462,6 +482,27 @@ fn build_ffi_type(desc: &ExternalDesc, prim_name: &str, arity: usize, result_is_
     } else if desc.set_index {
         ExternalSpec::JsSetIndex {
             js_set_index_scopes: desc.scopes.clone(),
+        }
+    } else if desc.module_as_val {
+        // @module with no payload: module_as_val
+        // OCaml: module_as_val = Some external_module_name
+        let emn = ExternalModuleName {
+            bundle: prim_name.to_string(),
+            module_bind_name: ModuleBindName::PhintNothing,
+            import_attributes: None,
+        };
+        if arity == 0 {
+            // No args → Js_module_as_var
+            ExternalSpec::JsModuleAsVar(emn)
+        } else if let Some(ref _new_name) = desc.new_name {
+            // @new + @module → Js_module_as_class
+            ExternalSpec::JsModuleAsClass(emn)
+        } else {
+            // Has args, no @new → Js_module_as_fn
+            ExternalSpec::JsModuleAsFn {
+                external_module_name: emn,
+                splice: desc.splice,
+            }
         }
     } else if let Some(ref name) = desc.send_name {
         ExternalSpec::JsSend {
@@ -486,22 +527,60 @@ fn build_ffi_type(desc: &ExternalDesc, prim_name: &str, arity: usize, result_is_
             js_set_name: name.clone(),
             js_set_scopes: desc.scopes.clone(),
         }
+    } else if let Some(ref name) = desc.val_name {
+        // @val - always Js_var
+        ExternalSpec::JsVar {
+            name: name.clone(),
+            external_module_name: external_module_name.clone(),
+            scopes: desc.scopes.clone(),
+        }
+    } else if let Some(ref name) = desc.call_name {
+        // Explicit call_name (set as default when no specific attr)
+        if arity == 0 {
+            ExternalSpec::JsVar {
+                name: name.clone(),
+                external_module_name: external_module_name.clone(),
+                scopes: desc.scopes.clone(),
+            }
+        } else {
+            ExternalSpec::JsCall {
+                name: name.clone(),
+                external_module_name,
+                splice: desc.splice,
+                scopes: desc.scopes.clone(),
+                tagged_template: desc.tagged_template,
+            }
+        }
+    } else if external_module_name.is_some() {
+        // @module("name") with payload but no other specific attr
+        let name = prim_name.to_string();
+        if arity == 0 {
+            ExternalSpec::JsVar {
+                name,
+                external_module_name,
+                scopes: desc.scopes.clone(),
+            }
+        } else {
+            ExternalSpec::JsCall {
+                name,
+                external_module_name,
+                splice: desc.splice,
+                scopes: desc.scopes.clone(),
+                tagged_template: desc.tagged_template,
+            }
+        }
     } else if arity == 0 {
         // No args = Js_var
         ExternalSpec::JsVar {
-            name: desc.val_name.as_ref().unwrap_or(&prim_name.to_string()).clone(),
-            external_module_name: external_module_name.clone(),
+            name: prim_name.to_string(),
+            external_module_name: None,
             scopes: desc.scopes.clone(),
         }
     } else {
         // Default: Js_call
-        let name = desc.call_name.as_ref()
-            .or(desc.val_name.as_ref())
-            .cloned()
-            .unwrap_or_else(|| prim_name.to_string());
         ExternalSpec::JsCall {
-            name,
-            external_module_name,
+            name: prim_name.to_string(),
+            external_module_name: None,
             splice: desc.splice,
             scopes: desc.scopes.clone(),
             tagged_template: desc.tagged_template,
@@ -552,11 +631,16 @@ pub fn encode_external(vd: &ValueDescription, arena: &mut ParseArena) -> Encoded
         };
     }
 
-    // Parse attributes
-    let desc = parse_external_attrs(&vd.pval_attributes, prim_name, arena);
-
     // Build arg type specs (mirrors OCaml's fold_right in handle_attributes)
+    // Must compute before parse_external_attrs because @val behavior depends on no_arguments
     let (params, arity) = build_arg_type_specs(&vd.pval_type, arena);
+    // no_arguments = arg_types_ty = [] in OCaml: checks if there are ANY arrow args,
+    // regardless of ignored. Use list_of_arrow directly.
+    let (args, _) = list_of_arrow(&vd.pval_type, arena);
+    let no_arguments = args.is_empty();
+
+    // Parse attributes
+    let desc = parse_external_attrs(&vd.pval_attributes, prim_name, no_arguments, arena);
 
     // Check if result is unit
     let result_is_unit = is_unit_type(get_final_result_type(&vd.pval_type), arena);
