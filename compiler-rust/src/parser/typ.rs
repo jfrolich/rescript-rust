@@ -938,7 +938,7 @@ fn parse_function_type(p: &mut Parser<'_>, start_pos_idx: PosIdx) -> CoreType {
     }
 
     p.expect(Token::Rparen);
-    let rparen_end_pos = p.prev_end_pos.clone();
+    let rparen_end_idx = p.prev_end_pos_idx();
     p.expect(Token::EqualGreater);
     // Parse return type without alias - `as` binds looser than `=>`
     let return_type = parse_typ_expr_inner(p, true);
@@ -951,8 +951,7 @@ fn parse_function_type(p: &mut Parser<'_>, start_pos_idx: PosIdx) -> CoreType {
         // OCaml: Ast_helper.Typ.constr unit_constr []
         // No ~loc passed, so ptyp_loc defaults to Location.none (ghost)
         // But lid_loc uses the real location
-        // Push the rparen end position to get a fresh PosIdx
-        let rparen_end_idx = p.push_pos(rparen_end_pos);
+        // Use stored PosIdx for sharing instead of pushing fresh position
         let lid_loc = p.mk_loc_idx(start_pos_idx, rparen_end_idx);
         let lid_idx = p.push_lident_static("unit");
         params.push((TypeArg {

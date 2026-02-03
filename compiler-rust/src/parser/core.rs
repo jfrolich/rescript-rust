@@ -828,8 +828,8 @@ pub struct FundefTermParam {
     pub expr: Option<Expression>,
     /// Pattern.
     pub pat: Pattern,
-    /// Start position.
-    pub start_pos: Position,
+    /// Start position index (enables sharing with OCaml's pointer identity).
+    pub start_pos_idx: PosIdx,
 }
 
 /// A type parameter in a function definition (for newtypes).
@@ -839,14 +839,14 @@ pub struct FundefTypeParam {
     pub attrs: Attributes,
     /// Located StrIdx for type names.
     pub locs: Vec<StringLoc>,
-    /// Start position (usually the `type` keyword).
-    pub start_pos: Position,
-    /// Position of the opening paren (if parenthesized).
+    /// Start position index (usually the `type` keyword).
+    pub start_pos_idx: PosIdx,
+    /// PosIdx of the opening paren (if parenthesized).
     /// Used for the implicit unit pattern location in type-only arrows.
-    pub paren_start_pos: Option<Position>,
-    /// Position after the closing paren (if parenthesized).
+    pub paren_start_pos_idx: Option<PosIdx>,
+    /// PosIdx after the closing paren (if parenthesized).
     /// Used for the implicit unit pattern location in type-only arrows.
-    pub paren_end_pos: Option<Position>,
+    pub paren_end_pos_idx: Option<PosIdx>,
 }
 
 /// A function definition parameter.
