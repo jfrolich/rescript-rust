@@ -678,10 +678,11 @@ pub fn print_poly_var_ident(txt: &str) -> Doc {
 
     match classify_ident_content(txt, true, false) {
         IdentifierStyle::UppercaseExoticIdent => {
-            // UppercaseExoticIdent follows the \"..." format
-            // but the first char is \ which we need to skip
+            // UppercaseExoticIdent follows the \"..." format.
+            // Strip the leading \ to get "Name" which is already the poly-variant form.
+            // OCaml: Doc.text (String.sub txt 1 (len - 1))
             if txt.starts_with('\\') && txt.len() > 1 {
-                Doc::concat(vec![Doc::text("\""), Doc::text(&txt[1..]), Doc::text("\"")])
+                Doc::text(&txt[1..])
             } else {
                 Doc::concat(vec![Doc::text("\""), Doc::text(txt), Doc::text("\"")])
             }

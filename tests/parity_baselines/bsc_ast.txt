@@ -58,6 +58,7 @@ syntax_tests/data/idempotency/bs-webapi/src/Webapi/Webapi__Dom/Webapi__Dom__Even
 syntax_tests/data/idempotency/bs-webapi/src/Webapi/Webapi__Dom/Webapi__Dom__FocusEvent.res
 syntax_tests/data/idempotency/bs-webapi/src/Webapi/Webapi__Dom/Webapi__Dom__GlobalEventHandlers.res
 syntax_tests/data/idempotency/bs-webapi/src/Webapi/Webapi__Dom/Webapi__Dom__History.res
+syntax_tests/data/idempotency/bs-webapi/src/Webapi/Webapi__Dom/Webapi__Dom__HtmlCollection.res
 syntax_tests/data/idempotency/bs-webapi/src/Webapi/Webapi__Dom/Webapi__Dom__HtmlDocument.res
 syntax_tests/data/idempotency/bs-webapi/src/Webapi/Webapi__Dom/Webapi__Dom__HtmlFormElement.res
 syntax_tests/data/idempotency/bs-webapi/src/Webapi/Webapi__Dom/Webapi__Dom__HtmlImageElement.res
@@ -70,6 +71,7 @@ syntax_tests/data/idempotency/bs-webapi/src/Webapi/Webapi__Dom/Webapi__Dom__Loca
 syntax_tests/data/idempotency/bs-webapi/src/Webapi/Webapi__Dom/Webapi__Dom__MouseEvent.res
 syntax_tests/data/idempotency/bs-webapi/src/Webapi/Webapi__Dom/Webapi__Dom__MutationObserver.res
 syntax_tests/data/idempotency/bs-webapi/src/Webapi/Webapi__Dom/Webapi__Dom__MutationRecord.res
+syntax_tests/data/idempotency/bs-webapi/src/Webapi/Webapi__Dom/Webapi__Dom__NamedNodeMap.res
 syntax_tests/data/idempotency/bs-webapi/src/Webapi/Webapi__Dom/Webapi__Dom__Node.res
 syntax_tests/data/idempotency/bs-webapi/src/Webapi/Webapi__Dom/Webapi__Dom__NodeFilter.res
 syntax_tests/data/idempotency/bs-webapi/src/Webapi/Webapi__Dom/Webapi__Dom__NodeIterator.res
@@ -152,6 +154,7 @@ syntax_tests/data/idempotency/bs-webapi/tests/Webapi/Webapi__Performace__test.re
 syntax_tests/data/idempotency/bs-webapi/tests/Webapi/Webapi__ResizeObserver__test.res
 syntax_tests/data/idempotency/bs-webapi/tests/Webapi/Webapi__Url__test.res
 syntax_tests/data/idempotency/covid-19charts.com/src/ColorStack.resi
+syntax_tests/data/idempotency/covid-19charts.com/src/CopyToClipboard.res
 syntax_tests/data/idempotency/covid-19charts.com/src/DatePicker.res
 syntax_tests/data/idempotency/covid-19charts.com/src/Location.res
 syntax_tests/data/idempotency/covid-19charts.com/src/ReactSelect.res
@@ -198,6 +201,7 @@ syntax_tests/data/idempotency/nook-exchange/BodyCard.res
 syntax_tests/data/idempotency/nook-exchange/Button.res
 syntax_tests/data/idempotency/nook-exchange/Colors.res
 syntax_tests/data/idempotency/nook-exchange/ConfirmDialog.res
+syntax_tests/data/idempotency/nook-exchange/Constants.res
 syntax_tests/data/idempotency/nook-exchange/Error.res
 syntax_tests/data/idempotency/nook-exchange/Footer.res
 syntax_tests/data/idempotency/nook-exchange/Link.res
@@ -355,6 +359,7 @@ syntax_tests/data/idempotency/pupilfirst/shared/Loading.res
 syntax_tests/data/idempotency/pupilfirst/shared/OptionUtils.res
 syntax_tests/data/idempotency/pupilfirst/shared/Rollbar.res
 syntax_tests/data/idempotency/pupilfirst/shared/ScrollLock.res
+syntax_tests/data/idempotency/pupilfirst/shared/TextareaAutosize.res
 syntax_tests/data/idempotency/pupilfirst/shared/UrlUtils.res
 syntax_tests/data/idempotency/pupilfirst/shared/User.res
 syntax_tests/data/idempotency/pupilfirst/shared/UserProxy.res
@@ -574,6 +579,7 @@ syntax_tests/data/printer/signature/typext.resi
 syntax_tests/data/printer/signature/value.resi
 syntax_tests/data/printer/structure/attribute.res
 syntax_tests/data/printer/structure/expr.res
+syntax_tests/data/printer/structure/external.res
 syntax_tests/data/printer/structure/include.res
 syntax_tests/data/printer/structure/moduleTypeDeclaration.res
 syntax_tests/data/printer/structure/open.res

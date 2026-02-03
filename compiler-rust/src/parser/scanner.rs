@@ -1460,7 +1460,11 @@ impl<'src> Scanner<'src> {
     }
 
     /// Scan an exotic identifier (e.g., \"foo").
-    /// Returns the identifier without surrounding quotes.
+    /// OCaml behavior:
+    /// - Uppercase exotic identifiers (\"Foo") keep the encoding: Token::Lident("\"Foo\"")
+    /// - Lowercase exotic identifiers (\"type") are stripped: Token::Lident("type")
+    /// This is because uppercase Lidents in the OCaml parsetree would be confused with
+    /// module names/constructors, so the \"...\" encoding is preserved as a marker.
     fn scan_exotic_identifier(&mut self) -> Token {
         let start_pos = self.position();
 
@@ -1472,9 +1476,25 @@ impl<'src> Scanner<'src> {
                 '"' => {
                     let content_end = self.offset; // end of content (before closing quote)
                     self.next(); // consume closing quote
-                    // Return identifier without quotes
-                    let ident = self.substring(content_start, content_end).to_string();
-                    return Token::Lident(ident);
+                    let name = self.substring(content_start, content_end).to_string();
+                    if name.is_empty() {
+                        let end_pos = self.position();
+                        self.error(
+                            start_pos.clone(),
+                            end_pos,
+                            DiagnosticCategory::message(
+                                "A quoted identifier can't be empty string.",
+                            ),
+                        );
+                        // Return the raw form for empty string
+                        return Token::Lident(format!("\\\"\\\""));
+                    }
+                    // OCaml: if name starts with uppercase, keep the \"...\" encoding
+                    // to avoid confusion with module names/constructors in OCaml parsetree
+                    if name.starts_with(|c: char| c.is_ascii_uppercase()) {
+                        return Token::Lident(format!("\\\"{}\"", name));
+                    }
+                    return Token::Lident(name);
                 }
                 '\n' | '\r' => {
                     let end_pos = self.position();
