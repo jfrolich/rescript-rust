@@ -302,6 +302,7 @@ struct ExternalDesc {
     val_name: Option<String>,
     module_as_val: bool,           // @module with no payload
     external_module_name: Option<String>,  // @module("name") with string payload
+    module_bind_name: Option<String>,      // @module("name", "bind") second string
     call_name: Option<String>,
     send_name: Option<String>,
     new_name: Option<String>,
@@ -322,6 +323,7 @@ impl Default for ExternalDesc {
             val_name: None,
             module_as_val: false,
             external_module_name: None,
+            module_bind_name: None,
             call_name: None,
             send_name: None,
             new_name: None,
@@ -353,15 +355,22 @@ fn parse_external_attrs(attrs: &[Attribute], prim_name: &str, no_arguments: bool
                 }
             }
             "module" => {
-                match get_payload_string(payload, arena) {
-                    Some(name) => {
-                        // @module("name") - sets external_module_name
-                        desc.external_module_name = Some(name);
-                    }
-                    None => {
+                let strings = get_payload_strings(payload, arena);
+                match strings.len() {
+                    0 => {
                         // @module with no payload - module_as_val, bundle = prim_name
                         desc.module_as_val = true;
                     }
+                    1 => {
+                        // @module("name") - sets external_module_name
+                        desc.external_module_name = Some(strings[0].clone());
+                    }
+                    2 => {
+                        // @module("bundle", "bind_name") - sets external_module_name with bind name
+                        desc.external_module_name = Some(strings[0].clone());
+                        desc.module_bind_name = Some(strings[1].clone());
+                    }
+                    _ => {}
                 }
             }
             "send" => {
@@ -390,8 +399,9 @@ fn parse_external_attrs(attrs: &[Attribute], prim_name: &str, no_arguments: bool
                 desc.tagged_template = true;
             }
             "scope" => {
-                if let Some(scope_str) = get_payload_string(payload, arena) {
-                    desc.scopes.push(scope_str);
+                let scopes = get_payload_strings(payload, arena);
+                if !scopes.is_empty() {
+                    desc.scopes = scopes;
                 }
             }
             "return" => {
@@ -456,6 +466,43 @@ fn get_payload_string(payload: &current::Payload, arena: &mut ParseArena) -> Opt
     }
 }
 
+/// Extract multiple strings from attribute payload (mirrors OCaml's Ast_payload.assert_strings)
+/// Handles: @attr("str"), @attr(("str1", "str2", ...)), @attr (empty → [])
+fn get_payload_strings(payload: &current::Payload, arena: &mut ParseArena) -> Vec<String> {
+    match payload {
+        current::Payload::PStr(items) if items.is_empty() => vec![],
+        current::Payload::PStr(items) if items.len() == 1 => {
+            if let StructureItemDesc::Pstr_eval(expr, _) = &items[0].pstr_desc {
+                match &expr.pexp_desc {
+                    ExpressionDesc::Pexp_constant(current::Constant::String(s, _)) => {
+                        return vec![s.clone()];
+                    }
+                    ExpressionDesc::Pexp_tuple(exprs) => {
+                        let mut result = Vec::new();
+                        for e in exprs {
+                            if let ExpressionDesc::Pexp_constant(current::Constant::String(s, _)) = &e.pexp_desc {
+                                result.push(s.clone());
+                            }
+                        }
+                        if result.len() == exprs.len() {
+                            return result;
+                        }
+                    }
+                    ExpressionDesc::Pexp_ident(lid) => {
+                        let longident = arena.get_longident(lid.txt);
+                        if let Longident::Lident(s) = longident {
+                            return vec![arena.get_string(*s).to_string()];
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            vec![]
+        }
+        _ => vec![],
+    }
+}
+
 /// Build FFI type from external description and type info
 fn build_ffi_type(desc: &ExternalDesc, prim_name: &str, arity: usize, result_is_unit: bool, params: Params) -> FfiType {
     // Determine return wrapper
@@ -466,10 +513,13 @@ fn build_ffi_type(desc: &ExternalDesc, prim_name: &str, arity: usize, result_is_
     };
 
     // Build ExternalModuleName from desc.external_module_name if present
-    // (this is @module("name") with a string payload)
+    // (this is @module("name") or @module("name", "bind") with string payload)
     let external_module_name = desc.external_module_name.as_ref().map(|bundle| ExternalModuleName {
         bundle: bundle.clone(),
-        module_bind_name: ModuleBindName::PhintNothing,
+        module_bind_name: match &desc.module_bind_name {
+            Some(name) => ModuleBindName::PhintName(name.clone()),
+            None => ModuleBindName::PhintNothing,
+        },
         import_attributes: None,
     });
 
