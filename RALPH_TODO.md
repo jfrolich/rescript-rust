@@ -1291,6 +1291,34 @@ diff <(xxd /tmp/ocaml.ast) <(xxd /tmp/rust.ast)
 cargo build --manifest-path compiler-rust/Cargo.toml --release
 ```
 
+### Binary AST Inspector (`scripts/inspect_binary_ast.py`)
+
+Pure Python 3 tool (no dependencies) for decoding, comparing, and analyzing `bsc -bs-ast` output files.
+Much more useful than raw `xxd` diffs — shows decoded AST trees with object indices, type annotations,
+and pinpoints the exact node where OCaml and Rust diverge.
+
+```bash
+# End-to-end parity check: runs both compilers, compares, shows decoded diff at first divergence
+python3 scripts/inspect_binary_ast.py test <source.res>
+
+# Compare two .ast files: header diffs, first byte difference, parallel tree walk (up to 10 diffs)
+python3 scripts/inspect_binary_ast.py compare <ocaml.ast> <rust.ast>
+
+# Quick overview: file size, deps, marshal header, object type histogram, top shared targets
+python3 scripts/inspect_binary_ast.py summary <file.ast>
+
+# Sharing analysis: groups shared references by target, annotates Position/Location details
+python3 scripts/inspect_binary_ast.py sharing <file.ast>
+
+# Full tree dump with object indices [N], type annotations, SHARED references
+python3 scripts/inspect_binary_ast.py decode <file.ast> [--max-depth N]
+```
+
+**Why this matters for parity debugging:**
+- Shows the classic sharing mismatch: "OCaml has `SHARED -> [N]`, Rust writes a fresh block"
+- Reports structural differences with full tree paths (e.g., `root/[0]BLOCK(tag=0,sz=2)/1/...`)
+- The `test` subcommand is the fastest way to check if a specific file has parity
+
 ---
 
 ## Reference Files
