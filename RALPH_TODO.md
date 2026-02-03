@@ -63,8 +63,28 @@ Do NOT spend time on small issues (@deriving edge cases, etc.) until the locatio
 ---
 
 **Last Updated:** 2026-02-03
-**Overall Status:** 601/1049 bsc-ast tests passing (57.3%)
+**Overall Status:** 602/1049 bsc-ast tests passing (57.4%)
 **sexp-locs Status:** 1049/1049 tests passing (100%) ✅
+
+**Session progress (2026-02-03, @module and @val FFI encoding fix):**
+- **@module external encoding**: OCaml distinguishes `@module` (no payload, sets `module_as_val`)
+  from `@module("name")` (with payload, sets `external_module_name`). The Rust code conflated
+  these into a single `module_name` field. Fixed by:
+  - Splitting into `module_as_val: bool` and `external_module_name: Option<String>`
+  - Adding `JsModuleAsFn`/`JsModuleAsVar`/`JsModuleAsClass` handling in `build_ffi_type()`
+- **@val context-sensitive parsing**: OCaml's `@val` sets `val_name` when `no_arguments=true`
+  but `call_name` when `no_arguments=false`. This determines whether `Js_var` or `Js_call`
+  is produced. Fixed by passing `no_arguments` (computed from `list_of_arrow`) to `parse_external_attrs`.
+- **Improvement: 601 → 602 passing (+1 file, 0 regressions)**
+- **Remaining 447 failures categorized:**
+  - ~45 files: 0-byte diff (same size, position values differ — deep position/sharing issues)
+  - ~22 files: -3 bytes (likely position sharing over-count)
+  - ~20 files: -2 bytes (position sharing)
+  - ~19 files: -1 bytes (position sharing)
+  - ~15 files: -4 bytes (%%private PPX creates new loc in OCaml, Rust shares existing loc)
+  - ~13 files: +4 bytes (Rust creates extra positions — under-sharing)
+  - ~11 files: +367 bytes (error recovery parser differences)
+  - Rest: mix of PPX issues (%raw, %re, %debugger, @deriving, JS objects) and position cascades
 
 **Session progress (2026-02-03, mk_loc_idx_to_pos elimination):**
 - **Root cause identified**: `mk_loc_idx_to_pos()` calls `arena.push_position()` for the end position,
