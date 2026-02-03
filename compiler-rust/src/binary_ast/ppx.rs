@@ -1904,15 +1904,13 @@ fn handle_private_extension(
     let first_loc = rewritten_items.first().map(|i| i.pstr_loc).unwrap_or(loc);
     let last_loc = rewritten_items.last().map(|i| i.pstr_loc).unwrap_or(loc);
 
-    // Create a combined location spanning first to last item
-    let combined_loc = if first_loc == last_loc {
-        first_loc
-    } else {
-        // Create a new location from first start to last end
-        let first_location = arena.get_location(first_loc);
-        let last_location = arena.get_location(last_loc);
-        arena.push_loc(first_location.loc_start, last_location.loc_end, false)
-    };
+    // Create a combined location spanning first to last item.
+    // OCaml always creates a NEW record via {first_loc with loc_end = last_loc.loc_end},
+    // even when first_loc == last_loc. We must always push_loc to avoid sharing with
+    // the original parsed item's location.
+    let first_location = arena.get_location(first_loc);
+    let last_location = arena.get_location(last_loc);
+    let combined_loc = arena.push_loc(first_location.loc_start, last_location.loc_end, false);
 
     // Get none location for the @internal.local attribute
     let none_loc = arena.none_loc();
