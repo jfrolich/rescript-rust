@@ -4727,8 +4727,8 @@ fn parse_jsx_children(p: &mut Parser<'_>) -> Vec<Expression> {
             children.push(expr);
         } else if let Token::String(s) = &p.token {
             // Handle string literals in JSX content
-            let start_pos_idx = p.push_start_pos();
             let s = s.clone();
+            let start_pos_idx = p.push_start_pos();
             let tag = get_string_tag(p);
             p.next();
             let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
