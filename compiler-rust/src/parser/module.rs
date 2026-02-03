@@ -275,8 +275,8 @@ pub fn parse_structure_item(p: &mut Parser<'_>) -> Option<StructureItem> {
                 OverrideFlag::Fresh
             };
             let lid = parse_module_long_ident(p);
-            parse_newline_or_semicolon_structure(p);
             let loc = p.mk_loc_idx_to_prev_end(open_start_idx);
+            parse_newline_or_semicolon_structure(p);
             Some(StructureItemDesc::Pstr_open(OpenDescription {
                 popen_lid: lid,
                 popen_override: override_flag,

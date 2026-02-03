@@ -5638,7 +5638,7 @@ fn parse_jsx(p: &mut Parser<'_>) -> Expression {
             pexp_attributes: vec![],
         }
     } else {
-        // OCaml captures opening_tag_end after consuming '>': p.prev_end_pos
+        // OCaml captures opening_tag_end = p.start_pos BEFORE consuming '>'
         let opening_end_idx = p.start_pos_idx();
         p.expect(Token::GreaterThan);
         let opening_end = p.prev_end_pos.clone();
@@ -5651,6 +5651,8 @@ fn parse_jsx(p: &mut Parser<'_>) -> Expression {
         // 1. LessThan when peekSlash -> proper closing tag
         // 2. token when is_structure_item_start -> None (missing closing tag)
         // 3. _ -> "Did you forget a `</` here?"
+        // OCaml: closing_tag_start = p.start_pos (position at '<')
+        let closing_tag_start_idx = p.start_pos_idx();
         let has_closing_tag = if p.token == Token::LessThan && p.lookahead(|state| {
             state.next();
             state.token == Token::Forwardslash
@@ -5722,7 +5724,6 @@ fn parse_jsx(p: &mut Parser<'_>) -> Expression {
         }
 
         let closing_tag = if has_closing_tag {
-            let closing_tag_start_idx = p.prev_end_pos_idx(); // approximate
             Some(JsxClosingTag {
                 start: closing_tag_start_idx,
                 name: with_loc(closing_tag_name, closing_tag_name_loc),
