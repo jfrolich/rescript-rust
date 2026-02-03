@@ -2005,6 +2005,118 @@ fn rewrite_label_declaration(label: &LabelDeclaration, arena: &mut ParseArena) -
     }
 }
 
+// ============================================================================
+// Tuple pattern flattening
+// ============================================================================
+//
+// Desugars tuple let-bindings into individual bindings:
+//   let (a, b) = (1, 2)        →  let a = 1 and b = 2
+//   let (a, b) = M.N.(c, d)    →  let a = M.N.c and b = M.N.d
+//
+// This mirrors compiler/frontend/ast_tuple_pattern_flatten.ml and
+// compiler/frontend/ast_open_cxt.ml from the OCaml codebase.
+
+/// Context for an open expression wrapping a tuple
+struct OpenCtx {
+    flag: current::OverrideFlag,
+    lid: Located<LidentIdx>,
+    loc: LocIdx,
+    attrs: Vec<Attribute>,
+}
+
+/// Check if a pattern is "simple" enough for tuple flattening
+fn is_simple_pattern(p: &Pattern) -> bool {
+    match &p.ppat_desc {
+        PatternDesc::Ppat_any => true,
+        PatternDesc::Ppat_var(_) => true,
+        PatternDesc::Ppat_constraint(inner, _) => is_simple_pattern(inner),
+        _ => false,
+    }
+}
+
+/// Destructure an expression through Pexp_open chains to find a tuple.
+/// Returns (open_contexts, tuple_elements) if the expression is a
+/// (possibly open-wrapped) tuple.
+///
+/// The open contexts are accumulated in reverse order (innermost first),
+/// matching the OCaml implementation.
+fn destruct_open_tuple(e: &Expression) -> Option<(Vec<OpenCtx>, &Vec<Expression>)> {
+    destruct_open_tuple_inner(e, Vec::new())
+}
+
+fn destruct_open_tuple_inner<'a>(
+    e: &'a Expression,
+    mut acc: Vec<OpenCtx>,
+) -> Option<(Vec<OpenCtx>, &'a Vec<Expression>)> {
+    match &e.pexp_desc {
+        ExpressionDesc::Pexp_open(flag, lid, cont) => {
+            acc.push(OpenCtx {
+                flag: *flag,
+                lid: *lid,
+                loc: e.pexp_loc,
+                attrs: e.pexp_attributes.clone(),
+            });
+            destruct_open_tuple_inner(cont, acc)
+        }
+        ExpressionDesc::Pexp_tuple(es) => Some((acc, es)),
+        _ => None,
+    }
+}
+
+/// Restore open expression wrappers around an expression.
+/// The opens list is in reverse order (innermost first), so we fold left
+/// to rebuild the nesting correctly.
+fn restore_exp(expr: Expression, opens: &[OpenCtx]) -> Expression {
+    opens.iter().fold(expr, |inner, open| Expression {
+        pexp_desc: ExpressionDesc::Pexp_open(open.flag, open.lid, Box::new(inner)),
+        pexp_loc: open.loc,
+        pexp_attributes: open.attrs.clone(),
+    })
+}
+
+/// Flatten a single value binding into one or more bindings.
+/// If the binding is a tuple pattern matched against a tuple expression
+/// (possibly wrapped in open expressions), desugar into individual bindings.
+fn flatten_value_binding(vb: &ValueBinding, arena: &mut ParseArena) -> Vec<ValueBinding> {
+    let pvb_pat = rewrite_pattern(&vb.pvb_pat, arena);
+    let pvb_expr = rewrite_expression(&vb.pvb_expr, arena);
+    let pvb_attributes = rewrite_attributes(&vb.pvb_attributes, arena);
+
+    if let PatternDesc::Ppat_tuple(ref pats) = pvb_pat.ppat_desc {
+        if pats.iter().all(is_simple_pattern) {
+            if let Some((opens, exprs)) = destruct_open_tuple(&pvb_expr) {
+                if exprs.len() == pats.len() {
+                    return pats
+                        .iter()
+                        .zip(exprs.iter())
+                        .map(|(pat, expr)| ValueBinding {
+                            pvb_pat: pat.clone(),
+                            pvb_expr: restore_exp(expr.clone(), &opens),
+                            pvb_attributes: pvb_attributes.clone(),
+                            pvb_loc: vb.pvb_loc,
+                        })
+                        .collect();
+                }
+            }
+        }
+    }
+
+    vec![ValueBinding {
+        pvb_pat,
+        pvb_expr,
+        pvb_attributes,
+        pvb_loc: vb.pvb_loc,
+    }]
+}
+
+/// Flatten a list of value bindings, expanding tuple patterns.
+fn flatten_value_bindings(bindings: &[ValueBinding], arena: &mut ParseArena) -> Vec<ValueBinding> {
+    bindings
+        .iter()
+        .flat_map(|vb| flatten_value_binding(vb, arena))
+        .collect()
+}
+
 /// Rewrite a pattern, transforming string and integer constants
 fn rewrite_pattern(pat: &Pattern, arena: &mut ParseArena) -> Pattern {
     match &pat.ppat_desc {
@@ -2177,15 +2289,7 @@ fn rewrite_expression_generic(expr: &Expression, arena: &mut ParseArena) -> Expr
         }
 
         ExpressionDesc::Pexp_let(rec_flag, bindings, body) => {
-            let new_bindings: Vec<ValueBinding> = bindings
-                .iter()
-                .map(|vb| ValueBinding {
-                    pvb_expr: rewrite_expression(&vb.pvb_expr, arena),
-                    pvb_pat: rewrite_pattern(&vb.pvb_pat, arena),
-                    pvb_attributes: rewrite_attributes(&vb.pvb_attributes, arena),
-                    pvb_loc: vb.pvb_loc,
-                })
-                .collect();
+            let new_bindings = flatten_value_bindings(bindings, arena);
             ExpressionDesc::Pexp_let(
                 *rec_flag,
                 new_bindings,
@@ -3504,16 +3608,8 @@ fn rewrite_structure_item(item: &StructureItem, arena: &mut ParseArena) -> Vec<S
                 }
             }
 
-            // Default case: rewrite all bindings
-            let new_bindings: Vec<ValueBinding> = bindings
-                .iter()
-                .map(|vb| ValueBinding {
-                    pvb_expr: rewrite_expression(&vb.pvb_expr, arena),
-                    pvb_pat: rewrite_pattern(&vb.pvb_pat, arena),
-                    pvb_attributes: rewrite_attributes(&vb.pvb_attributes, arena),
-                    pvb_loc: vb.pvb_loc,
-                })
-                .collect();
+            // Default case: rewrite all bindings (with tuple flattening)
+            let new_bindings = flatten_value_bindings(bindings, arena);
             vec![StructureItem {
                 pstr_desc: StructureItemDesc::Pstr_value(*rec_flag, new_bindings),
                 pstr_loc: item.pstr_loc,

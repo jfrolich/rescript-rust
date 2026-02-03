@@ -100,6 +100,7 @@ syntax_tests/data/idempotency/ludum-dare-46/sound.res
 syntax_tests/data/idempotency/mareo/Actors.res
 syntax_tests/data/idempotency/mareo/Dom_html.res
 syntax_tests/data/idempotency/mareo/Particle.res
+syntax_tests/data/idempotency/mareo/Viewport.res
 syntax_tests/data/idempotency/nook-exchange/BodyCard.res
 syntax_tests/data/idempotency/nook-exchange/Button.res
 syntax_tests/data/idempotency/nook-exchange/Colors.res
