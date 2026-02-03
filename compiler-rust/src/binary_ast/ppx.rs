@@ -1207,7 +1207,7 @@ fn handle_debugger(
                 typ: any_type,
             }),
             ret: Box::new(unit_type),
-            arity: arena.push_arity(Some(1)),  // OCaml uses Typ.arrows which sets arity = Some(list length)
+            arity: arena.static_arity_1(),  // OCaml's CSE shares all literal Some(1) values
         },
         ptyp_loc: none_loc,
         ptyp_attributes: vec![],
@@ -1406,7 +1406,7 @@ fn handle_external_ext(
                 typ: any_type.clone(),
             }),
             ret: Box::new(any_type.clone()),
-            arity: arena.push_arity(Some(1)),  // OCaml uses Typ.arrows which sets arity = Some(list length)
+            arity: arena.static_arity_1(),  // OCaml's CSE shares all literal Some(1) values
         },
         ptyp_loc: none_loc,
         ptyp_attributes: vec![],
@@ -1650,7 +1650,7 @@ fn handle_raw(
                 typ: any_type.clone(),
             }),
             ret: Box::new(any_type),
-            arity: arena.push_arity(Some(1)),  // OCaml uses Typ.arrows which sets arity = Some(list length)
+            arity: arena.static_arity_1(),  // OCaml's CSE shares all literal Some(1) values
         },
         ptyp_loc: none_loc,
         ptyp_attributes: vec![],
@@ -1787,7 +1787,7 @@ fn handle_raw_structure(
                 typ: any_type.clone(),
             }),
             ret: Box::new(any_type),
-            arity: arena.push_arity(Some(1)),  // OCaml uses Typ.arrows which sets arity = Some(list length)
+            arity: arena.static_arity_1(),  // OCaml's CSE shares all literal Some(1) values
         },
         ptyp_loc: none_loc,
         ptyp_attributes: vec![],
@@ -3324,7 +3324,7 @@ fn generate_accessors(
                         lhs: param_pat,
                         rhs: Box::new(field_access),
                         is_async: false,
-                        arity: arena.push_arity(Some(1)),
+                        arity: arena.static_arity_1(),
                     },
                     pexp_loc: loc,
                     pexp_attributes: vec![],
@@ -3784,7 +3784,7 @@ fn generate_record_accessors_and_sigs(
                 lhs: param_pat,
                 rhs: Box::new(field_access),
                 is_async: false,
-                arity: arena.push_arity(Some(1)),
+                arity: arena.static_arity_1(),
             },
             pexp_loc: loc,
             pexp_attributes: vec![],
@@ -3818,7 +3818,7 @@ fn generate_record_accessors_and_sigs(
                     typ: core_type.clone(),
                 }),
                 ret: Box::new(label.pld_type.clone()),
-                arity: arena.push_arity(Some(1)),
+                arity: arena.static_arity_1(),
             },
             ptyp_loc: loc,
             ptyp_attributes: vec![],
