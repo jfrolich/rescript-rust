@@ -62,11 +62,26 @@ Do NOT spend time on small issues (@deriving edge cases, etc.) until the locatio
 
 ---
 
-**Last Updated:** 2026-02-03 (position sharing root cause identified)
-**Overall Status:** 254/1049 bsc-ast tests passing (24.2%)
+**Last Updated:** 2026-02-03 (baseline fix, investigation continues)
+**Overall Status:** 253/1049 bsc-ast tests passing (24.1%)
 **sexp-locs Status:** 1049/1049 tests passing (100%) ✅
 
+**Baseline fix (2026-02-03):**
+Removed `typexpr/extension.res` from baseline - it was a false positive that was never passing.
+This file has position sharing differences unrelated to the main investigation.
+
 **Latest investigation (2026-02-03):**
+Verified that the position sharing issue is specific to external declarations with arrow types:
+- `type t = int => int` ✅ IDENTICAL
+- `let f: int => int = x => x` ✅ IDENTICAL
+- `external foo: int = "foo"` ✅ IDENTICAL (no arrow)
+- `external foo: int => int = "%identity"` ✅ IDENTICAL (special prefix)
+- `external foo: int => int = "foo"` ❌ Rust 222 bytes, OCaml 218 bytes (+4 bytes)
+
+The issue is NOT in type parsing (arrow types work in other contexts), but specifically in how
+FFI-encoded external declarations with arrow types get marshalled. Investigation continues.
+
+**Original investigation (2026-02-03):**
 Deep-dived into `external foo: int => int = "foo"` binary difference (OCaml 216 bytes, Rust 220 bytes).
 
 **Root cause identified:** Position sharing in Rust is fundamentally different from OCaml.
