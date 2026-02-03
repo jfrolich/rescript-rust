@@ -1,4 +1,3 @@
-
 syntax_tests/data/ast-mapping/FunWithAttribute.res
 syntax_tests/data/ast-mapping/JSXElements.res
 syntax_tests/data/ast-mapping/JSXFragments.res
