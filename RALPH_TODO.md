@@ -63,7 +63,7 @@ Do NOT spend time on small issues (@deriving edge cases, etc.) until the locatio
 ---
 
 **Last Updated:** 2026-02-03
-**Overall Status:** 503/1049 bsc-ast tests passing (47.9%)
+**Overall Status:** 584/1049 bsc-ast tests passing (55.7%)
 **sexp-locs Status:** 1049/1049 tests passing (100%) ✅
 
 **Session progress (2026-02-03, mk_loc_idx_to_pos elimination):**
@@ -105,16 +105,32 @@ caused 16 regressions (238 → 253 passing). The issue is that:
 Removed `typexpr/extension.res` from baseline - it was a false positive that was never passing.
 This file has position sharing differences unrelated to the main investigation.
 
-**Verified external declaration behavior (2026-02-03):**
-The position sharing issue is specific to external declarations with arrow types:
-- `type t = int => int` ✅ IDENTICAL
-- `let f: int => int = x => x` ✅ IDENTICAL
-- `external foo: int = "foo"` ✅ IDENTICAL (no arrow)
-- `external foo: int => int = "%identity"` ✅ IDENTICAL (special prefix)
-- `external foo: int => int = "foo"` ❌ Rust 222 bytes, OCaml 218 bytes (+4 bytes)
+**FFI external encoding FIXED (2026-02-03):**
+Four fixes improved bsc-ast parity from 504/1049 to 584/1049 (+80 files, 55.7%):
 
-The issue is NOT in type parsing (arrow types work in other contexts), but specifically in how
-FFI-encoded external declarations with arrow types get marshalled. Investigation continues.
+1. **External type reconstruction**: OCaml's FFI processing (ast_external_process.ml)
+   deconstructs arrow types via `list_of_arrow` and reconstructs with `ptyp_loc = pval_loc`.
+   Implemented `list_of_arrow` and `reconstruct_arrow_type_with_loc` in ppx.rs.
+
+2. **FFI arity counting**: `count_type_arity` walked ALL nested arrows, but OCaml uses
+   `list_of_arrow` (which respects arity field) to determine arg count. Replaced with
+   `build_arg_type_specs` that properly handles labeled/optional/simple args.
+
+3. **marshal_list bug**: List serialization only wrote the first element — the else branch
+   for subsequent elements was empty. Fixed to write proper cons cell chains.
+
+4. **Attr constant constructor tags**: Were using absolute numbering (4,5,6,7) instead of
+   OCaml's separate numbering for constant vs block constructors (0,1,2,3).
+
+All external test cases now pass:
+- `external f: int => int = "f"` ✅
+- `external f: int => int => int = "f"` ✅
+- `external f: (~x: int) => int = "f"` ✅
+- `external f: (~x: int, ~y: string) => int = "f"` ✅
+- `external f: (~x: int, ~y: string, ~z: bool) => int = "f"` ✅
+- `external f: (int, int) => int = "f"` ✅
+- `external f: @as(1) int => int = "f"` ✅
+- `external f: unit => int = "f"` ✅
 
 **Original investigation (2026-02-03):**
 Deep-dived into `external foo: int => int = "foo"` binary difference (OCaml 216 bytes, Rust 220 bytes).
