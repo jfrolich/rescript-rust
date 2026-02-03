@@ -62,9 +62,27 @@ Do NOT spend time on small issues (@deriving edge cases, etc.) until the locatio
 
 ---
 
-**Last Updated:** 2026-02-03 (investigation continues)
-**Overall Status:** 253/1049 bsc-ast tests passing (24.1%)
+**Last Updated:** 2026-02-03
+**Overall Status:** 503/1049 bsc-ast tests passing (47.9%)
 **sexp-locs Status:** 1049/1049 tests passing (100%) ✅
+
+**Session progress (2026-02-03, mk_loc_idx_to_pos elimination):**
+- **Root cause identified**: `mk_loc_idx_to_pos()` calls `arena.push_position()` for the end position,
+  creating a NEW PosIdx even when a stored one (prev_end_pos_idx, end_pos_idx, etc.) already exists.
+  In OCaml, `p.prev_end_pos` is always the SAME pointer, so all uses share during marshal.
+- **Fix applied**: Replaced all 14 `mk_loc_idx_to_pos` call sites across module.rs and typ.rs with
+  `mk_loc_idx`, `mk_loc_idx_to_end`, `mk_loc_idx_to_end_of`, etc. that reuse stored PosIdx values.
+- **Also converted**: `parse_let_bindings` signature from `let_end_pos: Position` to `let_end_pos_idx: PosIdx`.
+- **Also converted**: `FundefTermParam.start_pos` and `FundefTypeParam.start_pos/paren_start_pos/paren_end_pos`
+  from `Position` to `PosIdx`. This eliminates `push_pos()` calls in arrow expression parsing.
+- **Also fixed**: typ.rs `rparen_end_pos` clone + push_pos → direct `prev_end_pos_idx()`.
+- **Improvement: 427 → 503 passing (+76 files, 40.7% → 47.9%), 0 regressions**
+- **Remaining 546 failures**: Mix of under-sharing (279 files, Rust larger) and over-sharing (233 files,
+  Rust smaller), plus 34 same-size different-content files. Root causes include:
+  - String escaping differences (e.g., `\"Uident\"` vs `Uident` in external declarations)
+  - Remaining push_pos calls in template literal parsing (expr.rs 4800-5060)
+  - OCaml creates separate heap objects for each `let start_pos = p.start_pos` capture per function,
+    while Rust's `start_pos_idx()` returns the same stored index (over-sharing)
 
 **Investigation (2026-02-03):**
 Attempted surgical fix for type constructor positions in `parse_type_constr_with_start` and
@@ -779,7 +797,7 @@ type annotation arity and function arity should be separate objects.
     - **CAUSE**: Content-based position caching in Rust (`start_pos_cache`) is WRONG
     - **SOLUTION**: Remove content-based caching, implement identity-based sharing to match OCaml
     - **This is NOT a "fundamental difference" - it's an incorrect implementation that must be fixed**
-- [ ] **Task 5.3**: Target 750/1049 bsc-ast parity (71%) - **REQUIRES**: Implement identity-based position sharing
+- [ ] **Task 5.3**: Target 750/1049 bsc-ast parity (71%) - **REQUIRES**: Phase 7 (identity-based position sharing)
 
   **Detailed analysis (2026-02-02):**
 
@@ -1014,6 +1032,179 @@ naturally when the same index is used (just like OCaml shares when same referenc
   - `compiler-rust/src/parser/typ.rs` - Literal paths now use static_arity_1()
   - `compiler-rust/src/parser/expr.rs` - Underscore sugar uses static_arity_1()
   - `compiler-rust/src/binary_ast/marshal.rs` - write_arity_idx() with index-based sharing
+
+### Phase 7: Identity-Based Position Sharing (Remove Content-Based Caching)
+
+**Goal:** Convert all Position-based `mk_loc_*` callers to PosIdx-based equivalents, ensuring each
+function captures positions fresh (`push_start_pos()`) or shared (`start_pos_idx()`) matching OCaml's
+behavior. Then remove content-based caching. This is the systematic fix for Task 5.3.
+
+**Decision rule for each position capture:**
+
+⚠️ **CORRECTED (2026-02-03)**: The `push_start_pos()` rule below was WRONG. In OCaml,
+`let start_pos = p.Parser.start_pos` binds to the SAME pointer — it does NOT create a
+fresh heap copy. Multiple `let` bindings between `p.next()` calls all share the same pointer.
+Use `start_pos_idx()` (not `push_start_pos()`) for local captures from the same token.
+The `push_start_pos()` is only needed when OCaml would create genuinely distinct objects
+(e.g., from different `p.next()` calls).
+
+| OCaml Pattern | Rust Method |
+|---|---|
+| `let start_pos = p.Parser.start_pos` (local capture, same token) | `p.start_pos_idx()` (shared — same pointer in OCaml) |
+| `let start_pos = p.Parser.start_pos` (captured, then p.next() called, then used) | Store `p.start_pos_idx()` BEFORE `p.next()` |
+| Position received as `~start_pos` parameter from parent | Use the passed `PosIdx` |
+| `let end_pos = p.Parser.prev_end_pos` | `p.prev_end_pos_idx()` |
+| `let end_pos = p.Parser.end_pos` | `p.end_pos_idx()` |
+| Position from existing AST node's location | `p.loc_start_idx(node.loc)` / `p.loc_end_idx(node.loc)` |
+| End position passed to mk_loc via `prev_end_pos.clone()` | `p.prev_end_pos_idx()` + `mk_loc_idx()` |
+
+**Conversion pattern:**
+```rust
+// BEFORE (content-based caching via get_or_push_start_pos):
+let start_pos = p.start_pos;
+// ... parsing ...
+let loc = p.mk_loc_to_prev_end(&start_pos);
+
+// AFTER (identity-based via PosIdx):
+let start_pos_idx = p.push_start_pos();  // fresh, like OCaml's let start_pos = p.start_pos
+// ... parsing ...
+let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
+```
+
+- [ ] **Task 7.1**: Convert Position-based `mk_loc_*` calls in expr.rs (~40 locations)
+
+  **`mk_loc_to_prev_end(&pos)` → `mk_loc_idx_to_prev_end(pos_idx)` conversions:**
+  - `parse_arrow_parameter_with_label`: lines 1104 (tilde_pos), 1108, 1119, 1143 (start_pos)
+  - `parse_atomic_expr_with_context`: lines 1769 (lparen_pos), 2343 (constraint_start)
+  - `parse_record_expr`: line 3674 (expr_start)
+  - `parse_let_binding`: lines 3427 (binding_start_pos), 3521 (binding_start)
+  - `parse_module_longident_path`: line 3609 (start_pos)
+  - `parse_list_expr`: line 3788 (start_pos)
+  - `parse_while_expr`: line 4190 (start_pos)
+  - `parse_for_expr`: line 4210 (start_pos)
+  - `parse_try_expr`: line 4301 (start_pos)
+  - `parse_if_expr`: line 4358 (start_pos)
+  - JSX: lines 4384, 4393, 4420, 4426, 4464 (tag_name_start, start_pos, closing_name_start)
+  - JSX props/children: lines 4566 (spread_start), 4727 (start_pos), 4776 (lbrace_start)
+  - Template: lines 4884, 4951 (start_pos)
+  - Tagged template: line 5099 (tag_start)
+  - `parse_let_star_expr`: lines 3992, 4036, 4057 (start_pos, binding_start)
+  - `parse_expr_with_context`: lines 3190, 3837 (expr_start)
+
+  **`mk_loc(&pos1, &pos2)` → `mk_loc_idx(idx1, idx2)` conversions:**
+  - `parse_es6_arrow_expression_internal`: line 728 (paren positions), 943 (fun_start, end_pos)
+  - `parse_parameters`: line 989 (lparen_pos, end_pos)
+  - `parse_arrow_parameter_with_label`: line 1125 (start_pos, name_loc end)
+  - `parse_record_expr`: line 3663 (field_start, lid_end)
+
+  **`mk_loc_from_positions(&pos1, &pos2)` → `mk_loc_idx(idx1, idx2)` conversions:**
+  - `parse_binary_expr`: line 1494 (op_start, op_end)
+  - `make_list_expression_with_loc`: line 2729 (seg_start, seg_end)
+  - `parse_template_expr`: lines 4823, 4844 (text_start_pos, pos)
+  - `parse_js_template_expr`: lines 5026, 5042 (text_start_pos, pos)
+
+  **`mk_loc_current()` calls (33 in expr.rs) — updated via Task 7.6 (no caller changes needed)**
+
+- [ ] **Task 7.2**: Convert Position-based `mk_loc_*` calls in pattern.rs (~3 locations)
+
+  - `parse_record_pattern` line 1043: `mk_loc(&field_start, &lid_end_pos)` → extract PosIdx
+  - `mk_loc_current()` calls (7 total) — updated via Task 7.6
+
+- [x] **Task 7.3**: Convert Position-based `mk_loc_*` calls in module.rs (~3 locations)
+  ✅ DONE (2026-02-03): Eliminated all 14 `mk_loc_idx_to_pos` calls. Converted signature item,
+  await loc, package type, functor args, let bindings unwrap attr, constraint type var, and spread
+  field locations to use stored PosIdx values (prev_end_pos_idx, end_pos_idx, loc_end_idx).
+  Also converted parse_let_bindings signature from `let_end_pos: Position` to `let_end_pos_idx: PosIdx`.
+  - `parse_open` line 153: `mk_loc_to_prev_end(&open_start)` → `push_start_pos()` + `mk_loc_idx_to_prev_end()`
+  - Error recovery line 2838: `mk_loc(&keyword_start, &keyword_end)` → push both
+  - `mk_loc_current()` calls (16 total) — updated via Task 7.6
+
+- [ ] **Task 7.4**: Convert Position-based `mk_loc_*` calls in core.rs (~4 locations)
+
+  - `make_prefix_operator` lines 655, 666, 674: `mk_loc(&start_pos, ...)` → push positions
+  - `make_infix_operator` line 688: `mk_loc(&start_pos, &end_pos)` → push both
+
+- [ ] **Task 7.5**: Fix type parsing position chain in typ.rs
+
+  **Critical change:** Stop passing `outer_start_pos_idx` from `parse_typ_expr_inner_with_start` to
+  `parse_atomic_typ_expr_with_start`. In OCaml, these functions each independently capture
+  `let start_pos = p.start_pos`, creating different heap objects. Rust currently passes the
+  parent's position to the child, causing incorrect sharing.
+
+  ```rust
+  // BEFORE (typ.rs ~line 274):
+  let typ = parse_atomic_typ_expr_with_start(p, attrs, es6_arrow, Some(start_pos_idx));
+
+  // AFTER:
+  let typ = parse_atomic_typ_expr_with_start(p, attrs, es6_arrow, None);
+  ```
+
+  In `parse_atomic_typ_expr_with_start`, capture fresh when `outer_start` is `None`:
+  ```rust
+  let start_pos_idx = outer_start_pos_idx.unwrap_or_else(|| p.push_start_pos());
+  ```
+
+  Also convert remaining Position-based calls (lines 183, 234: `mk_loc_from_start_of`).
+
+- [ ] **Task 7.6**: Update `mk_loc_current()` to use direct index access
+
+  Change `mk_loc_current()` implementation in state.rs to avoid content-based caching:
+  ```rust
+  pub fn mk_loc_current(&mut self) -> LocIdx {
+      let start_idx = self.start_pos_idx;
+      let end_idx = self.end_pos_idx;  // Direct index, no content-based cache
+      self.arena.mk_loc(start_idx, end_idx)
+  }
+  ```
+  This affects 41+ call sites but requires NO caller changes.
+
+- [ ] **Task 7.7**: Remove content-based caching from state.rs
+
+  After all callers are converted:
+  1. Remove `get_or_push_start_pos()` method
+  2. Remove Position-based methods:
+     - `mk_loc_to_prev_end(&Position)`
+     - `mk_loc(&Position, &Position)`
+     - `mk_loc_to_end(&Position)`
+     - `mk_loc_from_positions()`
+     - `mk_loc_to_end_of(&Position, ..)`
+     - `mk_loc_with_end_idx(&Position, ..)`
+     - `mk_loc_from_start_of(..)`
+  3. Keep PosIdx-based methods: all `mk_loc_idx_*`, `mk_loc_spanning()`, `mk_loc_start_to_prev_end()`
+  4. Keep `mk_loc_current()` (updated in Task 7.6)
+
+- [ ] **Task 7.8**: Build, test, and verify
+
+  ```bash
+  cargo build --manifest-path compiler-rust/Cargo.toml --release
+  ./scripts/test_parser_ast_parity.sh 2>&1 | tail -50
+
+  # Verify known-failing case now passes:
+  echo 'external foo: int => int = "foo"' > /tmp/test.res
+  ./packages/@rescript/darwin-arm64/bin/bsc.exe -bs-ast /tmp/test.res -o /tmp/ocaml.ast
+  ./compiler-rust/target/release/bsc -bs-ast /tmp/test.res -o /tmp/rust.ast
+  diff <(xxd /tmp/ocaml.ast) <(xxd /tmp/rust.ast)
+  ```
+
+  **Expected outcome:** Significant improvement in parity count (target: 750+/1049).
+
+**Execution strategy:**
+- Work file by file: expr.rs → typ.rs → pattern.rs → module.rs → core.rs → state.rs cleanup
+- Build after each file to catch compilation errors
+- Run parity tests after all files are done (individual changes may cause temporary regressions)
+- Commit after each file is converted and compiles
+- Final commit after state.rs cleanup and test verification
+
+**Files to modify:**
+
+| File | Estimated Changes |
+|------|-------------------|
+| `compiler-rust/src/parser/expr.rs` | ~40 call site conversions |
+| `compiler-rust/src/parser/typ.rs` | ~5 conversions + stop passing outer_start |
+| `compiler-rust/src/parser/pattern.rs` | ~3 conversions |
+| `compiler-rust/src/parser/module.rs` | ~3 conversions |
+| `compiler-rust/src/parser/core.rs` | ~4 conversions |
+| `compiler-rust/src/parser/state.rs` | Update mk_loc_current(), remove ~7 Position-based methods |
 
 ---
 
