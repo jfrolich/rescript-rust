@@ -4,7 +4,7 @@
 //! stream into an AST. It mirrors `res_core.ml` from the OCaml implementation.
 
 use crate::location::Position;
-use crate::parse_arena::{LocIdx, ParseArena, StrIdx};
+use crate::parse_arena::{LocIdx, ParseArena, PosIdx, StrIdx};
 
 use super::ast::*;
 use super::grammar;
@@ -680,12 +680,12 @@ pub fn make_unary_expr(
 pub fn make_infix_operator(
     p: &mut Parser<'_>,
     token: Token,
-    start_pos: Position,
-    end_pos: Position,
+    start_pos: PosIdx,
+    end_pos: PosIdx,
 ) -> Expression {
     let stringified_token = token.to_string();
 
-    let loc = p.mk_loc(&start_pos, &end_pos);
+    let loc = p.mk_loc_idx(start_pos, end_pos);
     let op_lid = make_lident_static(p.arena_mut(), &stringified_token);
     ast_helper::make_ident(p, op_lid, loc)
 }
