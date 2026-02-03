@@ -2128,9 +2128,7 @@ pub fn parse_atomic_expr(p: &mut Parser<'_>) -> Expression {
             // This matches OCaml's parse_atomic_expr which uses Diagnostics.lident
             p.err(DiagnosticCategory::Lident(Token::Underscore));
             p.next();
-            let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
-            let lid = super::core::make_lident_static(p.arena_mut(), "_");
-            ast_helper::make_ident(p, lid, loc)
+            recover::default_expr(p.arena_mut())
         }
         Token::Eof => {
             p.err(DiagnosticCategory::Message(
@@ -5640,10 +5638,10 @@ fn parse_jsx(p: &mut Parser<'_>) -> Expression {
             pexp_attributes: vec![],
         }
     } else {
-        // OCaml captures opening_tag_end = p.start_pos (position of >) BEFORE next()
+        // OCaml captures opening_tag_end after consuming '>': p.prev_end_pos
         let opening_end_idx = p.start_pos_idx();
-        let opening_end = p.start_pos.clone();
         p.expect(Token::GreaterThan);
+        let opening_end = p.prev_end_pos.clone();
 
         // Parse children
         let children = parse_jsx_children(p);
