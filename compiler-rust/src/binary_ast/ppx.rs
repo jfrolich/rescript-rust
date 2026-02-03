@@ -4113,7 +4113,17 @@ fn rewrite_structure_item(item: &StructureItem, arena: &mut ParseArena) -> Vec<S
     match &item.pstr_desc {
         StructureItemDesc::Pstr_primitive(vd) => {
             if is_rs_external(&vd.pval_attributes, &vd.pval_prim, arena) {
-                let encoded = encode_external(vd, arena);
+                // OCaml rewrites attributes (e.g. "js" -> "*j" in strings) before
+                // encoding the external (ast_external.ml line 59).
+                let rewritten_attrs = rewrite_attributes(&vd.pval_attributes, arena);
+                let rewritten_vd = ValueDescription {
+                    pval_name: vd.pval_name.clone(),
+                    pval_type: vd.pval_type.clone(),
+                    pval_prim: vd.pval_prim.clone(),
+                    pval_attributes: rewritten_attrs,
+                    pval_loc: vd.pval_loc,
+                };
+                let encoded = encode_external(&rewritten_vd, arena);
                 // OCaml's FFI processing (ast_external_process.ml handle_attributes)
                 // reconstructs the arrow type with ptyp_loc = pval_loc.
                 // This changes sharing patterns in the binary output.
@@ -4129,7 +4139,18 @@ fn rewrite_structure_item(item: &StructureItem, arena: &mut ParseArena) -> Vec<S
                     pstr_loc: item.pstr_loc,
                 }]
             } else {
-                vec![item.clone()]
+                // Non-ReScript externals still need attribute rewriting
+                // (e.g. "js" -> "*j" in @ocaml.doc string delimiters)
+                vec![StructureItem {
+                    pstr_desc: StructureItemDesc::Pstr_primitive(ValueDescription {
+                        pval_name: vd.pval_name.clone(),
+                        pval_type: vd.pval_type.clone(),
+                        pval_prim: vd.pval_prim.clone(),
+                        pval_attributes: rewrite_attributes(&vd.pval_attributes, arena),
+                        pval_loc: vd.pval_loc,
+                    }),
+                    pstr_loc: item.pstr_loc,
+                }]
             }
         }
         // Handle value bindings - need to rewrite expressions and patterns
@@ -4420,8 +4441,19 @@ fn rewrite_module_type(
 fn rewrite_signature_item(item: &SignatureItem, arena: &mut ParseArena) -> SignatureItem {
     match &item.psig_desc {
         SignatureItemDesc::Psig_value(vd) => {
+            // OCaml rewrites attributes (e.g. "js" -> "*j" in strings) before
+            // encoding the external (ast_external.ml handle_external_in_sig,
+            // bs_builtin_ppx.ml line 409).
+            let rewritten_attrs = rewrite_attributes(&vd.pval_attributes, arena);
             if is_rs_external(&vd.pval_attributes, &vd.pval_prim, arena) {
-                let encoded = encode_external(vd, arena);
+                let rewritten_vd = ValueDescription {
+                    pval_name: vd.pval_name.clone(),
+                    pval_type: vd.pval_type.clone(),
+                    pval_prim: vd.pval_prim.clone(),
+                    pval_attributes: rewritten_attrs,
+                    pval_loc: vd.pval_loc,
+                };
+                let encoded = encode_external(&rewritten_vd, arena);
                 // OCaml's FFI processing reconstructs the arrow type with ptyp_loc = pval_loc
                 let pval_type = reconstruct_arrow_type_with_loc(&vd.pval_type, vd.pval_loc, arena);
                 SignatureItem {
@@ -4435,7 +4467,16 @@ fn rewrite_signature_item(item: &SignatureItem, arena: &mut ParseArena) -> Signa
                     psig_loc: item.psig_loc,
                 }
             } else {
-                item.clone()
+                SignatureItem {
+                    psig_desc: SignatureItemDesc::Psig_value(ValueDescription {
+                        pval_name: vd.pval_name.clone(),
+                        pval_type: vd.pval_type.clone(),
+                        pval_prim: vd.pval_prim.clone(),
+                        pval_attributes: rewritten_attrs,
+                        pval_loc: vd.pval_loc,
+                    }),
+                    psig_loc: item.psig_loc,
+                }
             }
         }
         // Handle floating attributes (@@attr) - need to transform strings in payload
