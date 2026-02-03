@@ -1772,7 +1772,7 @@ fn print_core_type_inner<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, typ
                         // OCaml format: @[<hov2>%s: %a@ %a@ @]
                         // = name: type (break) attrs (break) close_box
                         // On single line: name: type<space>attrs<space>
-                        f.string(&name.txt);
+                        f.string(arena.get_string(name.txt));
                         f.string(": ");
                         print_core_type(f, arena, typ);
                         // After type: @ (break = space)

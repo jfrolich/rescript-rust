@@ -3378,7 +3378,7 @@ fn print_object_field(
     match field {
         ObjectField::Otag(label, attrs, typ) => {
             let attrs_doc = print_attributes(state, attrs, cmt_tbl, arena);
-            let label_doc = Doc::text(format!("\"{}\"", label.txt));
+            let label_doc = Doc::text(format!("\"{}\"", arena.get_string(label.txt)));
             let typ_doc = print_typ_expr(state, typ, cmt_tbl, arena);
             Doc::concat(vec![attrs_doc, label_doc, Doc::text(": "), typ_doc])
         }

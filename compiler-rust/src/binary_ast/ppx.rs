@@ -900,8 +900,260 @@ fn handle_extension(
         "re" => handle_re(expr, payload, arena),
         "external" => handle_external_ext(expr, payload, arena),
         "debugger" => handle_debugger(expr, payload, arena),
+        "obj" => handle_obj(expr, payload, arena),
         _ => expr.clone(),
     }
+}
+
+/// Handle %obj extension: transforms `%obj({"a": e1, "b": e2})` into a letmodule
+/// with an external FFI declaration.
+///
+/// OCaml transforms `%obj({"key": value, ...})` into:
+/// ```text
+/// let module J = struct
+///   external unsafe_expr: (~a: 'a0, ~b: 'a1) => {"a": 'a0, "b": 'a1} = ""
+/// end in J.unsafe_expr(~a=e1, ~b=e2)
+/// ```
+///
+/// This mirrors:
+/// - `ast_exp_extension.ml` line 73-86: pattern matching %obj payload
+/// - `ast_util.ml:record_as_js_object`: extracts labels and args from record
+/// - `ast_external_mk.ml:local_external_obj`: creates the letmodule wrapper
+/// - `ast_core_type.ml:from_labels`: builds the arrow type with object return
+/// - `ast_external_process.ml:pval_prim_of_labels`: creates FFI encoding
+/// - `ast_compatible.ml:apply_labels`: creates labeled function application
+fn handle_obj(
+    expr: &Expression,
+    payload: &Payload,
+    arena: &mut ParseArena,
+) -> Expression {
+    // Extract the record expression from the payload: PStr [{ Pstr_eval(Pexp_record(...), _) }]
+    let (record_expr, label_exprs) = match payload {
+        Payload::PStr(items) if items.len() == 1 => {
+            if let StructureItemDesc::Pstr_eval(e, _) = &items[0].pstr_desc {
+                if let ExpressionDesc::Pexp_record(fields, None) = &e.pexp_desc {
+                    (e, fields)
+                } else {
+                    return expr.clone();
+                }
+            } else {
+                return expr.clone();
+            }
+        }
+        _ => return expr.clone(),
+    };
+
+    // The loc used for internal structures is the record expression's pexp_loc
+    // (OCaml: `e.pexp_loc` passed to `record_as_js_object`)
+    let loc = record_expr.pexp_loc;
+    let none_loc = arena.none_loc();
+
+    // Extract labels and rewritten expressions from the record fields.
+    // OCaml: Ext_list.fold_right label_exprs ([], [], 0) (fun {lid={txt;loc}; x=e} ...)
+    // Only Lident fields are valid.
+    let mut labels: Vec<(StrIdx, LocIdx)> = Vec::with_capacity(label_exprs.len());
+    let mut args: Vec<(StrIdx, Expression)> = Vec::with_capacity(label_exprs.len());
+    let arity = label_exprs.len();
+
+    for field in label_exprs {
+        let lid = arena.get_longident(field.lid.txt);
+        match lid {
+            Longident::Lident(s) => {
+                let str_idx = *s;
+                let field_loc = field.lid.loc;
+                labels.push((str_idx, field_loc));
+                // Recursively rewrite the field expression (OCaml: self.expr self e)
+                let rewritten_expr = rewrite_expression(&field.expr, arena);
+                args.push((str_idx, rewritten_expr));
+            }
+            _ => return expr.clone(), // Invalid label
+        }
+    }
+
+    // === Build pval_prim: [""; encode(Ffi_obj_create(obj_params))] ===
+    // OCaml: pval_prim_of_labels creates ObjLabel for each field
+    let obj_params: Vec<super::ffi_types::ObjParam> = labels
+        .iter()
+        .map(|(str_idx, _)| {
+            let name = arena.get_string(*str_idx).to_owned();
+            super::ffi_types::ObjParam {
+                obj_arg_type: Attr::Nothing,
+                obj_arg_label: super::ffi_types::Label::ObjLabel { name },
+            }
+        })
+        .collect();
+
+    let ffi = FfiType::FfiObjCreate(obj_params);
+    let encoded = encode_ffi_type(&ffi);
+    let pval_prim = vec!["".to_string(), encoded];
+
+    // === Build pval_type: (~a: 'a0, ~b: 'a1) => {"a": 'a0, "b": 'a1} ===
+    // OCaml: from_labels ~loc arity labels
+
+    // Create type variables 'a0, 'a1, ...
+    let tyvars: Vec<CoreType> = (0..arity)
+        .map(|i| CoreType {
+            ptyp_desc: CoreTypeDesc::Ptyp_var(format!("a{}", i)),
+            ptyp_loc: loc,
+            ptyp_attributes: vec![],
+        })
+        .collect();
+
+    // Create object type: {"a": 'a0, "b": 'a1}
+    let obj_fields: Vec<current::ObjectField> = labels
+        .iter()
+        .zip(tyvars.iter())
+        .map(|((str_idx, label_loc), tyvar)| {
+            current::ObjectField::Otag(
+                Located { txt: *str_idx, loc: *label_loc },
+                vec![],
+                tyvar.clone(),
+            )
+        })
+        .collect();
+
+    let result_type = CoreType {
+        ptyp_desc: CoreTypeDesc::Ptyp_object(obj_fields, current::ClosedFlag::Closed),
+        ptyp_loc: loc,
+        ptyp_attributes: vec![],
+    };
+
+    // Create arrow type args: [~a: 'a0, ~b: 'a1]
+    // OCaml: Ext_list.map2 labels tyvars (fun label tyvar -> {attrs=[]; lbl=Labelled label; typ=tyvar})
+    let type_args: Vec<TypeArg> = labels
+        .iter()
+        .zip(tyvars.iter())
+        .map(|((str_idx, label_loc), tyvar)| TypeArg {
+            attrs: vec![],
+            lbl: ArgLabel::Labelled(Located {
+                txt: *str_idx,
+                loc: *label_loc,
+            }),
+            typ: tyvar.clone(),
+        })
+        .collect();
+
+    // Build the arrow chain using Typ.arrows logic:
+    // arity = Some(list_length) for outermost, None for inner arrows
+    let pval_type = build_arrows(type_args, result_type, loc, arena);
+
+    // === Create the letmodule structure ===
+    let module_name_idx = arena.intern_string("J");
+    let func_name_idx = arena.intern_string("unsafe_expr");
+
+    let vd = ValueDescription {
+        pval_name: Located {
+            txt: func_name_idx,
+            loc,
+        },
+        pval_type,
+        pval_prim,
+        pval_attributes: vec![],
+        pval_loc: loc,
+    };
+
+    let mod_structure = vec![StructureItem {
+        pstr_desc: StructureItemDesc::Pstr_primitive(vd),
+        pstr_loc: loc,
+    }];
+
+    let mod_expr = ModuleExpr {
+        pmod_desc: ModuleExprDesc::Pmod_structure(mod_structure),
+        pmod_loc: loc,
+        pmod_attributes: vec![],
+    };
+
+    // === Create the function application: J.unsafe_expr(~a=e1, ~b=e2) ===
+    let j_lident = arena.push_lident_static("J");
+    let j_unsafe_expr = arena.push_ldot_static(j_lident, "unsafe_expr");
+
+    let func_ident = Expression {
+        pexp_desc: ExpressionDesc::Pexp_ident(Located { txt: j_unsafe_expr, loc }),
+        pexp_loc: loc,
+        pexp_attributes: vec![],
+    };
+
+    // OCaml: apply_labels fn args ~loc
+    // Labels use Location.none for their loc.
+    // Use the original StrIdx from the field name, NOT a fresh intern, so that
+    // the string is shared with the same StrIdx used in the type's Labelled arg.
+    let apply_args: Vec<(ArgLabel, Expression)> = args
+        .into_iter()
+        .map(|(str_idx, e)| {
+            (
+                ArgLabel::Labelled(Located {
+                    txt: str_idx,
+                    loc: none_loc,
+                }),
+                e,
+            )
+        })
+        .collect();
+
+    let apply_expr = Expression {
+        pexp_desc: ExpressionDesc::Pexp_apply {
+            funct: Box::new(func_ident),
+            args: apply_args,
+            partial: false,
+            transformed_jsx: false,
+        },
+        pexp_loc: loc,
+        pexp_attributes: vec![],
+    };
+
+    // The final result: {e with pexp_desc = Pexp_letmodule(...)}
+    // where e is the record expression, so pexp_loc = record's loc and pexp_attributes = record's attrs
+    Expression {
+        pexp_desc: ExpressionDesc::Pexp_letmodule(
+            Located {
+                txt: module_name_idx,
+                loc,
+            },
+            mod_expr,
+            Box::new(apply_expr),
+        ),
+        pexp_loc: record_expr.pexp_loc,
+        pexp_attributes: record_expr.pexp_attributes.clone(),
+    }
+}
+
+/// Build a chain of arrow types from a list of type arguments and a result type.
+/// Mirrors OCaml's `Typ.arrows`:
+/// - First arrow gets arity = Some(list_length)
+/// - Inner arrows get arity = None
+fn build_arrows(
+    args: Vec<TypeArg>,
+    result: CoreType,
+    loc: LocIdx,
+    arena: &mut ParseArena,
+) -> CoreType {
+    if args.is_empty() {
+        return result;
+    }
+
+    let total_arity = args.len() as i32;
+
+    // Build right-to-left: last arg wraps result first
+    let mut current = result;
+    for (i, arg) in args.into_iter().enumerate().collect::<Vec<_>>().into_iter().rev() {
+        let arity = if i == 0 {
+            // Outermost arrow gets Some(total_arity)
+            arena.push_arity(Some(total_arity))
+        } else {
+            // Inner arrows get None
+            arena.push_arity(None)
+        };
+        current = CoreType {
+            ptyp_desc: CoreTypeDesc::Ptyp_arrow {
+                arg: Box::new(arg),
+                ret: Box::new(current),
+                arity,
+            },
+            ptyp_loc: loc,
+            ptyp_attributes: vec![],
+        };
+    }
+    current
 }
 
 /// Handle %debugger extension by transforming it into local_external_apply pattern.

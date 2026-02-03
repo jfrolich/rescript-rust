@@ -726,7 +726,7 @@ fn transl_type_inner(
                         typed_fields.push(crate::types::typedtree::ObjectField {
                             of_desc: crate::types::typedtree::ObjectFieldDesc::OTtag(
                                 Located {
-                                    txt: label.txt.clone(),
+                                    txt: tctx.arena.get_string(label.txt).to_string(),
                                     loc: label.loc.clone(),
                                 },
                                 field_ctyp,

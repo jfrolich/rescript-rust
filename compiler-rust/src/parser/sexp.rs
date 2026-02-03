@@ -508,7 +508,7 @@ fn object_field(arena: &ParseArena, field: &ObjectField) -> Sexp {
     match field {
         ObjectField::Otag(lbl, attrs, t) => Sexp::list(vec![
             Sexp::atom("Otag"),
-            Sexp::atom(&quote_string(&lbl.txt)),
+            Sexp::atom(&quote_string(arena.get_string(lbl.txt))),
             attributes(arena, attrs),
             core_type(arena, t),
         ]),

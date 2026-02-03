@@ -107,18 +107,14 @@ impl Marshal for ArgLabel {
             ArgLabel::Labelled(s) => {
                 // Labelled has a string loc, which is a record {txt; loc}
                 w.write_block_header(0, 1);
-                // The string loc is block(tag=0, size=2) with txt and loc
-                w.write_block_header(0, 2);
-                // Use write_str_idx for sharing - same StrIdx will be shared via back-reference
-                w.write_str_idx(s.txt);
-                s.loc.marshal(w);
+                // Check-only sharing: only share if an Otag already registered
+                // this (txt, loc) pair (happens in %obj PPX output).
+                // Don't register to avoid false sharing in non-PPX code.
+                w.write_string_loc_shared(s.txt, s.loc, false);
             }
             ArgLabel::Optional(s) => {
                 w.write_block_header(1, 1);
-                w.write_block_header(0, 2);
-                // Use write_str_idx for sharing - same StrIdx will be shared via back-reference
-                w.write_str_idx(s.txt);
-                s.loc.marshal(w);
+                w.write_string_loc_shared(s.txt, s.loc, false);
             }
         }
     }
@@ -288,7 +284,10 @@ impl Marshal for ObjectField {
         match self {
             ObjectField::Otag(label, attrs, ty) => {
                 w.write_block_header(0, 3);
-                label.marshal(w);
+                // Write the label's {txt; loc} record with sharing support.
+                // In PPX-generated code (e.g., %obj), the same {txt; loc} record
+                // may be shared with an ArgLabel::Labelled label.
+                w.write_string_loc_shared(label.txt, label.loc, true);
                 attrs.marshal(w);
                 ty.marshal(w);
             }

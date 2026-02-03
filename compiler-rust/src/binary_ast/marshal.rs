@@ -109,6 +109,12 @@ pub struct MarshalWriter {
     /// This matches OCaml's constant folding where `Some 1` literals are physically shared
     arity_idx_table: HashMap<ArityIdx, u32>,
 
+    /// Maps (StrIdx, LocIdx) pairs to object counter (for string_loc record sharing).
+    /// This enables sharing of `{txt; loc}` records in PPX-generated code where the
+    /// same label record is used in multiple places (e.g., Otag label and Labelled arg label
+    /// in %obj transformations). Uses arena indices for identity-based sharing.
+    string_loc_table: HashMap<(StrIdx, LocIdx), u32>,
+
     /// Optional reference to ParseArena for LocIdx marshalling.
     /// Set via `set_arena()` before marshalling AST with LocIdx fields.
     /// Uses raw pointer to avoid lifetime constraints.
@@ -143,6 +149,7 @@ impl MarshalWriter {
             option_string_table: HashMap::new(),
             option_i32_table: HashMap::new(),
             arity_idx_table: HashMap::new(),
+            string_loc_table: HashMap::new(),
             arena: None,
             obj_counter: 0,
             size_32: 0,
@@ -162,6 +169,7 @@ impl MarshalWriter {
             option_string_table: HashMap::new(),
             option_i32_table: HashMap::new(),
             arity_idx_table: HashMap::new(),
+            string_loc_table: HashMap::new(),
             arena: None,
             obj_counter: 0,
             size_32: 0,
@@ -204,6 +212,7 @@ impl MarshalWriter {
         self.location_idx_table.clear();
         self.lident_idx_table.clear();
         self.option_string_table.clear();
+        self.string_loc_table.clear();
         self.obj_counter = 0;
         self.size_32 = 0;
         self.size_64 = 0;
@@ -470,6 +479,45 @@ impl MarshalWriter {
 
         // Record for future sharing
         self.location_idx_table.insert(idx, obj_idx);
+    }
+
+    /// Write a `{txt; loc}` string_loc record with identity-based sharing.
+    ///
+    /// This writes a `block(0,2) -> [string, loc]` record and tracks it by
+    /// `(StrIdx, LocIdx)` for sharing. If the same pair has been written
+    /// before, writes a CODE_SHARED reference instead.
+    ///
+    /// This matches OCaml's pointer-identity sharing where the same `{txt; loc}`
+    /// record object is used in multiple places (e.g., in %obj PPX where the
+    /// same label record appears in both Otag and Labelled).
+    ///
+    /// When `register` is true, registers the record in the sharing table
+    /// so future writes with the same indices can share it.
+    /// When `register` is false, only checks the table for an existing entry
+    /// (used by ArgLabel::Labelled/Optional which should only share with
+    /// previously-registered Otag labels, not create new sharing entries).
+    pub fn write_string_loc_shared(&mut self, txt: StrIdx, loc: LocIdx, register: bool) {
+        let key = (txt, loc);
+
+        // Check if this string_loc pair was already written
+        if let Some(&obj_idx) = self.string_loc_table.get(&key) {
+            let d = self.obj_counter - obj_idx;
+            self.write_shared_ref(d);
+            return;
+        }
+
+        // Record the object index BEFORE writing
+        let obj_idx = self.obj_counter;
+
+        // Write the {txt; loc} block
+        self.write_block_header(0, 2);
+        self.write_str_idx(txt);
+        self.write_loc_idx(loc);
+
+        // Record for future sharing only if registering
+        if register {
+            self.string_loc_table.insert(key, obj_idx);
+        }
     }
 
     /// Write a Longident by arena index with sharing.

@@ -1296,7 +1296,8 @@ fn parse_object_fields(p: &mut Parser<'_>) -> Vec<ObjectField> {
                 p.expect(Token::Colon);
                 // OCaml uses parse_poly_type_expr for object field types
                 let typ = parse_poly_type_expr(p);
-                fields.push(ObjectField::Otag(with_loc(name, name_loc), field_attrs, typ));
+                let name_idx = p.arena_mut().push_string(name);
+                fields.push(ObjectField::Otag(with_loc(name_idx, name_loc), field_attrs, typ));
             }
             None => {
                 p.err(DiagnosticCategory::Message(

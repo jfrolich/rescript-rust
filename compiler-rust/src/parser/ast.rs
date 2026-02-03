@@ -263,7 +263,7 @@ pub enum RowField {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum ObjectField {
     /// Named field: `name: T`.
-    Otag(Loc<Label>, Attributes, CoreType),
+    Otag(StringLoc, Attributes, CoreType),
     /// Inherited type.
     Oinherit(CoreType),
 }

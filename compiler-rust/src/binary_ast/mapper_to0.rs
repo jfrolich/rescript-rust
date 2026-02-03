@@ -559,7 +559,7 @@ impl<'a> Mapper<'a> {
         match field {
             current::ObjectField::Otag(label, attrs, ty) => {
                 pt0::ObjectField::Otag(
-                    self.map_loc(label),
+                    self.map_string_loc(label),
                     self.map_attributes(attrs),
                     self.map_core_type(ty),
                 )

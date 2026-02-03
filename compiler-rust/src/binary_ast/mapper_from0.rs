@@ -444,7 +444,7 @@ impl<'a> Mapper<'a> {
     fn map_object_field(&mut self, of: &pt0::ObjectField) -> current::ObjectField {
         match of {
             pt0::ObjectField::Otag(label, attrs, t) => {
-                current::ObjectField::Otag(self.map_loc(label), self.map_attributes(attrs), self.map_core_type(t))
+                current::ObjectField::Otag(self.map_string_loc(label), self.map_attributes(attrs), self.map_core_type(t))
             }
             pt0::ObjectField::Oinherit(t) => current::ObjectField::Oinherit(self.map_core_type(t)),
         }
