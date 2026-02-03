@@ -9,6 +9,8 @@ use crate::parse_arena::{Located, LocIdx, PosIdx, StrIdx};
 use super::ast::*;
 use super::core::{ast_helper, mknoloc, recover, with_loc};
 use super::diagnostics::DiagnosticCategory;
+use super::grammar;
+use super::grammar::Grammar;
 use super::longident::Longident;
 use super::state::{Parser, ParserMode};
 use super::token::Token;
@@ -131,8 +133,20 @@ pub fn substitute_type_vars(arena: &crate::parse_arena::ParseArena, typ: CoreTyp
 
 /// Parse a type expression.
 pub fn parse_typ_expr(p: &mut Parser<'_>) -> CoreType {
+    // Check for excessive parse depth to prevent stack overflow
+    if p.exceeded_parse_depth() {
+        p.err(DiagnosticCategory::Message(
+            "Maximum parse depth exceeded".to_string(),
+        ));
+        return recover::default_type(p.arena_mut());
+    }
+    p.inc_parse_depth();
+
     let typ = parse_typ_expr_inner(p, true);
-    parse_type_alias(p, typ)
+    let result = parse_type_alias(p, typ);
+
+    p.dec_parse_depth();
+    result
 }
 
 /// Parse a polymorphic type expression.
@@ -205,10 +219,50 @@ pub fn parse_poly_type_expr(p: &mut Parser<'_>) -> CoreType {
     parse_type_alias(p, typ)
 }
 
+/// Parse a locally abstract type: `type a b c. SomeType`
+/// This is called from let-binding sites when `Token::Typ` is encountered after `:`.
+/// Returns a `Ptyp_poly(vars, body)` where body has `Ptyp_constr` for the type vars
+/// (the caller is responsible for substituting to `Ptyp_var`).
+pub fn parse_locally_abstract_type(p: &mut Parser<'_>) -> CoreType {
+    let start_pos = p.start_pos.clone();
+    p.expect(Token::Typ);
+    let mut vars: Vec<StringLoc> = vec![];
+
+    // Collect all type variable names until we see a dot
+    while let Token::Lident(_) = &p.token {
+        let name = if let Token::Lident(n) = &p.token { n.clone() } else { unreachable!() };
+        let var_start_idx = p.start_pos_idx();
+        p.next();
+        let var_loc = p.mk_loc_idx_to_prev_end(var_start_idx);
+        let name_idx = p.arena_mut().push_string(name);
+        vars.push(with_loc(name_idx, var_loc));
+    }
+
+    p.expect(Token::Dot);
+    let body = parse_typ_expr(p);
+    let loc = p.mk_loc_to_end_of(&start_pos, body.ptyp_loc);
+    CoreType {
+        ptyp_desc: CoreTypeDesc::Ptyp_poly(vars, Box::new(body)),
+        ptyp_loc: loc,
+        ptyp_attributes: vec![],
+    }
+}
+
 /// Parse a type expression without allowing arrow types at the top level.
 /// Used for return type annotations like `(x): int => body`.
 pub fn parse_typ_expr_no_arrow(p: &mut Parser<'_>) -> CoreType {
     let typ = parse_typ_expr_inner(p, false);
+    parse_type_alias(p, typ)
+}
+
+/// Parse a type expression with pre-parsed attributes.
+fn parse_typ_expr_with_attrs(p: &mut Parser<'_>, attrs: Attributes) -> CoreType {
+    let start_pos_idx = p.start_pos_idx();
+    let mut typ = parse_atomic_typ_expr(p, attrs, true);
+    // Match OCaml: handle both EqualGreater and MinusGreater (error recovery)
+    if matches!(p.token, Token::EqualGreater | Token::MinusGreater) {
+        typ = parse_arrow_type_rest(p, typ, start_pos_idx);
+    }
     parse_type_alias(p, typ)
 }
 
@@ -273,7 +327,9 @@ fn parse_typ_expr_inner_with_start(
         // they point to the same position. With identity-based PosIdx, each function
         // must push its own fresh position to avoid incorrect sharing.
         let typ = parse_atomic_typ_expr_with_start(p, attrs.clone(), es6_arrow, None);
-        if es6_arrow && p.token == Token::EqualGreater {
+        // Match OCaml: handle both EqualGreater and MinusGreater (error recovery)
+        // When MinusGreater is found where EqualGreater is expected, generate error and continue
+        if es6_arrow && matches!(p.token, Token::EqualGreater | Token::MinusGreater) {
             parse_arrow_type_rest(p, typ, start_pos_idx)
         } else {
             typ
@@ -289,7 +345,12 @@ fn parse_arrow_type_rest(
     param_type: CoreType,
     start_pos_idx: crate::parse_arena::PosIdx,
 ) -> CoreType {
-    p.expect(Token::EqualGreater);
+    // Error recovery: if user wrote -> instead of =>, report error but continue
+    // This matches OCaml's: if token = MinusGreater then Parser.expect EqualGreater p;
+    if p.token == Token::MinusGreater {
+        p.expect(Token::EqualGreater); // generates "Did you forget a `=>` here?"
+    }
+    p.next(); // consume => or ->
     // Parse return type without alias - `as` binds looser than `=>`
     // So `int => unit as 'a` is `(int => unit) as 'a`, not `int => (unit as 'a)`
     let return_type = parse_typ_expr_inner(p, true);
@@ -327,7 +388,8 @@ fn parse_es6_arrow_type(p: &mut Parser<'_>, attrs: Attributes) -> CoreType {
     if p.token == Token::Tilde {
         p.next();
         let (name, name_loc) = parse_lident(p);
-        p.expect(Token::Colon);
+        // Pass grammar context for error message: "Did you forget a `:` here? It signals the start of a type"
+        p.expect_with_grammar(Token::Colon, Some(Grammar::TypeExpression));
 
         let typ = parse_typ_expr_inner(p, false);
         let name_idx = p.arena_mut().push_string(name);
@@ -473,42 +535,13 @@ fn parse_atomic_typ_expr_with_start(
     es6_arrow: bool,
     outer_start_pos_idx: Option<crate::parse_arena::PosIdx>,
 ) -> CoreType {
+    p.leave_breadcrumb(Grammar::AtomicTypExpr);
     // Use outer start if provided, otherwise use stored index.
     // In OCaml, `let start_pos = p.Parser.start_pos` binds to the same pointer.
     // Use start_pos_idx() for sharing when no attributes have been parsed.
     let start_pos_idx = outer_start_pos_idx.unwrap_or_else(|| p.start_pos_idx());
 
     let mut typ = match &p.token {
-        Token::Typ => {
-            // Locally abstract types: type a b c. SomeType
-            // This creates a Ptyp_poly with the type names as string variables
-            // NOTE: We don't substitute Ptyp_constr -> Ptyp_var here. That's done
-            // in module.rs where we have the full context of how the type is used.
-            p.next();
-            let mut vars: Vec<Located<StrIdx>> = vec![];
-
-            // Collect all type variable names until we see a dot
-            loop {
-                let name = match &p.token {
-                    Token::Lident(name) => name.clone(),
-                    _ => break,
-                };
-                let var_start_idx = p.start_pos_idx();
-                p.next();
-                let var_loc = p.mk_loc_idx_to_prev_end(var_start_idx);
-                let name_idx = p.arena_mut().push_string(name.to_string());
-                vars.push(with_loc(name_idx, var_loc));
-            }
-
-            p.expect(Token::Dot);
-            let body = parse_typ_expr(p);
-            let loc = p.mk_loc_idx_to_end_of(start_pos_idx, body.ptyp_loc);
-            CoreType {
-                ptyp_desc: CoreTypeDesc::Ptyp_poly(vars, Box::new(body)),
-                ptyp_loc: loc,
-                ptyp_attributes: vec![],
-            }
-        }
         Token::SingleQuote => {
             // Type variable: 'a
             // Polytype: 'a 'b. T
@@ -517,21 +550,18 @@ fn parse_atomic_typ_expr_with_start(
             while p.token == Token::SingleQuote {
                 p.next(); // consume the single quote first
                 let var_start_idx = p.start_pos_idx(); // capture start position AFTER the quote
-                let name = match &p.token {
-                    Token::Lident(name) | Token::Uident(name) => {
-                        let name = name.clone();
-                        p.next();
-                        name
-                    }
-                    _ => {
-                        p.err(DiagnosticCategory::Message(
-                            super::core::error_messages::TYPE_VAR.to_string(),
-                        ));
-                        "a".to_string()
-                    }
+                // OCaml: special case for EOF - emit unexpected token error
+                let (name, var_loc) = if p.token == Token::Eof {
+                    p.err(DiagnosticCategory::Unexpected {
+                        token: p.token.clone(),
+                        context: vec![],
+                    });
+                    (String::new(), p.mk_loc_idx_to_prev_end(var_start_idx))
+                } else {
+                    // OCaml: parse_ident checks for keywords first
+                    super::core::parse_ident(p, super::core::error_messages::TYPE_VAR, var_start_idx)
                 };
-                let var_loc = p.mk_loc_idx_to_prev_end(var_start_idx);
-                let name_idx = p.arena_mut().push_string(name.to_string());
+                let name_idx = p.arena_mut().push_string(name);
                 vars.push(with_loc(name_idx, var_loc));
             }
 
@@ -664,10 +694,15 @@ fn parse_atomic_typ_expr_with_start(
             }
         }
         _ => {
-            p.err(DiagnosticCategory::Message(format!(
-                "Unexpected token in type: {:?}",
-                p.token
-            )));
+            p.err_unexpected();
+            // Try to skip tokens and retry parsing if we find a valid start token
+            // This matches OCaml's skip_tokens_and_maybe_retry behavior
+            if recover::skip_tokens_and_maybe_retry(p, grammar::is_atomic_typ_expr_start) {
+                // Eat our breadcrumb first, then recurse
+                // OCaml returns from match, then eat_breadcrumb runs
+                p.eat_breadcrumb();
+                return parse_atomic_typ_expr(p, attrs, es6_arrow);
+            }
             recover::default_type(p.arena_mut())
         }
     };
@@ -677,6 +712,7 @@ fn parse_atomic_typ_expr_with_start(
         typ.ptyp_attributes.extend(attrs);
     }
 
+    p.eat_breadcrumb();
     typ
 }
 
@@ -724,16 +760,62 @@ fn parse_type_constr_with_start(p: &mut Parser<'_>, outer_start_pos_idx: Option<
     let lid_loc = p.mk_loc_idx(start_pos_idx, lid_end_idx);
 
     // Parse optional type arguments
-    let args = if p.token == Token::LessThan {
+    // OCaml: parse_type_constructor_args handles both < and ( as opening tokens
+    let args = if p.token == Token::LessThan || p.token == Token::Lparen {
+        let opening = p.token.clone();
+        let opening_start_pos = p.start_pos.clone();
         p.set_diamond_mode();
         p.next();
         let args = parse_type_args(p);
-        p.expect(Token::GreaterThan);
+        if p.token == Token::Rparen && opening == Token::Lparen {
+            // User wrote parens instead of angle brackets - emit helpful error
+            let path_str = path_parts.join(".");
+            let args_str: Vec<String> = args.iter().map(|t| match &t.ptyp_desc {
+                CoreTypeDesc::Ptyp_var(v) => format!("'{}", v),
+                _ => "_".to_string(),
+            }).collect();
+            let type_str = if args_str.is_empty() {
+                path_str
+            } else {
+                format!("{}<{}>", path_str, args_str.join(", "))
+            };
+            let msg = format!("Type parameters require angle brackets:\n  {}", type_str);
+            p.err_at(
+                opening_start_pos,
+                p.end_pos.clone(),
+                DiagnosticCategory::message(&msg),
+            );
+            p.next(); // consume )
+        } else {
+            p.expect(Token::GreaterThan);
+        }
         p.pop_diamond_mode();
         args
     } else {
         vec![]
     };
+
+    // Check for multiple inline records in type constructor args (OCaml line 4462)
+    if let Some(ref inline_types) = p.inline_types_found {
+        // Collect inline type names first to avoid borrow conflict
+        let inline_names: Vec<String> = inline_types.iter().map(|(n, _, _)| n.clone()).collect();
+        let count = args.iter().filter(|arg| {
+            if let CoreTypeDesc::Ptyp_constr(lid, _) = &arg.ptyp_desc {
+                inline_names.iter().any(|iname| p.arena().is_lident(lid.txt, iname))
+            } else {
+                false
+            }
+        }).count();
+        if count > 1 {
+            p.err_at(
+                p.arena().get_position(start_pos_idx).clone(),
+                p.prev_end_pos.clone(),
+                DiagnosticCategory::Message(
+                    "Only one inline record definition is allowed per record field. This defines more than one inline record.".to_string(),
+                ),
+            );
+        }
+    }
 
     // ptyp_loc includes the full extent (identifier + type args)
     // Note: For Ldot types in certain contexts (type manifests, arrow parameters),
@@ -751,15 +833,67 @@ fn parse_type_constr(p: &mut Parser<'_>) -> CoreType {
 }
 
 /// Parse type arguments.
+/// Parse a single type constructor argument, matching OCaml's parse_type_constructor_arg_region.
+/// Handles the special case where `<` tokens are silently skipped (e.g., `option(<node<int>>)`).
+fn parse_type_constructor_arg_region(p: &mut Parser<'_>) -> Option<CoreType> {
+    if super::grammar::is_typ_expr_start(&p.token) {
+        Some(parse_typ_expr(p))
+    } else if p.token == Token::LessThan {
+        // OCaml: skip the < and retry
+        p.next();
+        parse_type_constructor_arg_region(p)
+    } else {
+        None
+    }
+}
+
 fn parse_type_args(p: &mut Parser<'_>) -> Vec<CoreType> {
+    // OCaml: parse_comma_delimited_region ~grammar:TypExprList ~closing:GreaterThan
+    //        ~f:parse_type_constructor_arg_region
     let mut args = vec![];
 
-    while p.token != Token::GreaterThan && p.token != Token::Eof {
-        args.push(parse_typ_expr(p));
-        if !p.optional(&Token::Comma) {
-            break;
+    p.leave_breadcrumb(Grammar::TypExprList);
+    loop {
+        match parse_type_constructor_arg_region(p) {
+            Some(typ) => {
+                if p.token == Token::Comma {
+                    p.next();
+                    args.push(typ);
+                } else if p.token == Token::GreaterThan || p.token == Token::Eof {
+                    args.push(typ);
+                    break;
+                } else if super::grammar::is_typ_expr_start(&p.token) || p.token == Token::LessThan {
+                    // Missing comma - report and continue
+                    p.expect(Token::Comma);
+                    args.push(typ);
+                } else {
+                    args.push(typ);
+                    if !(p.token == Token::Eof || p.token == Token::GreaterThan
+                        || super::core::recover::should_abort_list_parse(p))
+                    {
+                        p.expect(Token::Comma);
+                    }
+                    if p.token == Token::Semicolon {
+                        p.next();
+                    }
+                }
+            }
+            None => {
+                if p.token == Token::Eof || p.token == Token::GreaterThan
+                    || super::core::recover::should_abort_list_parse(p)
+                {
+                    break;
+                } else {
+                    p.err(DiagnosticCategory::unexpected(
+                        p.token.clone(),
+                        p.breadcrumbs().to_vec(),
+                    ));
+                    p.next();
+                }
+            }
         }
     }
+    p.eat_breadcrumb();
 
     args
 }
@@ -842,10 +976,51 @@ fn parse_function_type(p: &mut Parser<'_>, start_pos_idx: PosIdx) -> CoreType {
         let (mut label, mut typ) = if p.token == Token::Tilde {
             p.next();
             let (name, name_loc) = parse_lident(p);
-            p.expect(Token::Colon);
+            // Pass grammar context for error message: "Did you forget a `:` here? It signals the start of a type"
+            p.expect_with_grammar(Token::Colon, Some(Grammar::TypeExpression));
             let typ = parse_typ_expr(p);
             let name_idx = p.arena_mut().push_string(name);
             (ArgLabel::Labelled(Located::new(name_idx, name_loc)), typ)
+        } else if matches!(p.token, Token::Lident(_)) {
+            // Check if this is `name: type` (missing tilde)
+            // OCaml: parse Lident first, then check for Colon
+            let lookahead_is_labeled = p.lookahead(|state| {
+                if matches!(state.token, Token::Lident(_)) {
+                    state.next();
+                    state.token == Token::Colon
+                } else {
+                    false
+                }
+            });
+            if lookahead_is_labeled {
+                // This is `name: type` but missing the tilde
+                let (name, name_loc) = parse_lident(p);
+                // Emit "missing tilde" error at the identifier location
+                let error_msg = super::core::error_messages::missing_tilde_labeled_parameter(&name);
+                let start_pos = p.loc_start(name_loc);
+                let end_pos = p.loc_end(name_loc);
+                p.err_at(
+                    start_pos,
+                    end_pos,
+                    DiagnosticCategory::Message(error_msg),
+                );
+                // Consume the colon
+                p.next();
+                let typ = parse_typ_expr(p);
+                let name_idx = p.arena_mut().intern_string(&name);
+                // Check for `=?` (optional without default)
+                if p.token == Token::Equal {
+                    p.next();
+                    p.expect(Token::Question);
+                    (ArgLabel::Optional(Located::new(name_idx, name_loc)), typ)
+                } else {
+                    (ArgLabel::Labelled(Located::new(name_idx, name_loc)), typ)
+                }
+            } else {
+                // Regular type expression
+                let typ = parse_typ_expr(p);
+                (ArgLabel::Nolabel, typ)
+            }
         } else {
             // For unlabeled parameters, share param_start_idx with the type's location.
             // This matches OCaml's position sharing where both the arrow and the type
@@ -863,17 +1038,79 @@ fn parse_function_type(p: &mut Parser<'_>, start_pos_idx: PosIdx) -> CoreType {
         // but only for UNLABELED simple Ptyp_constr types (Lident), not for labeled arguments
         // or qualified types (Ldot) or other types like Ptyp_var.
         // Also, don't modify ghost locations (synthesized unit types from empty parens)
+        // Don't modify parenthesized types with inner attributes - if param_attrs is empty
+        // but typ already has attributes, the attrs came from inside parens like (@attr float)
         if has_dot && matches!(label, ArgLabel::Nolabel) && !typ.ptyp_loc.is_none() {
             let is_simple_constr = matches!(
                 &typ.ptyp_desc,
                 CoreTypeDesc::Ptyp_constr(lid, _) if p.arena().is_simple_lident(lid.txt)
             );
-            if is_simple_constr {
+            // If param_attrs is empty but the type already has attributes, it was parsed as
+            // a parenthesized expression with inner attributes like `(@attr float)`.
+            // In that case, OCaml doesn't extend the type location to include the `.`
+            let was_not_parenthesized_with_inner_attrs =
+                !param_attrs.is_empty() || typ.ptyp_attributes.is_empty();
+            if is_simple_constr && was_not_parenthesized_with_inner_attrs {
                 let end_pos_idx = p.loc_end_idx(typ.ptyp_loc);
                 typ = CoreType {
                     ptyp_loc: p.mk_loc_idx(uncurried_start_idx, end_pos_idx),
                     ..typ
                 };
+            }
+
+            // For direct arrow types like `. unit => unit`, OCaml includes the `.` in both
+            // the arrow's location AND the first argument's location.
+            // But for nested/parenthesized arrows like `. (. string) => unit`, don't extend
+            // because the inner arrow has its own `.` handling.
+            // We detect direct arrows by checking if the arrow's first arg starts exactly
+            // at post_doc_start. For nested arrows, the inner `.` extension moves the
+            // first arg location before post_doc_start.
+            if let CoreTypeDesc::Ptyp_arrow { arg, ret, arity } = typ.ptyp_desc {
+                let first_arg_start = p.loc_start(arg.typ.ptyp_loc);
+                // If first arg location starts exactly at post_doc_start, it's a direct arrow
+                // If it starts elsewhere (before due to inner `.` or after due to parens), don't extend
+                let post_doc_start = p.arena().get_position(post_doc_start_idx).clone();
+                let is_direct_arrow = first_arg_start.cnum == post_doc_start.cnum;
+                if is_direct_arrow {
+                    // Extend arrow location to include `.`
+                    let end_pos = p.loc_end(typ.ptyp_loc).clone();
+                    let uncurried_start = p.arena().get_position(uncurried_start_idx).clone();
+                    let new_arrow_loc = p.mk_loc_from_positions(&uncurried_start, &end_pos);
+
+                    // Also extend first argument's location if it's a simple Lident
+                    let new_arg = if matches!(
+                        &arg.typ.ptyp_desc,
+                        CoreTypeDesc::Ptyp_constr(lid, _) if p.arena().is_simple_lident(lid.txt)
+                    ) && !arg.typ.ptyp_loc.is_none() {
+                        let arg_end = p.loc_end(arg.typ.ptyp_loc).clone();
+                        let new_arg_loc = p.mk_loc_from_positions(&uncurried_start, &arg_end);
+                        TypeArg {
+                            typ: CoreType {
+                                ptyp_loc: new_arg_loc,
+                                ..arg.typ
+                            },
+                            ..(*arg)
+                        }
+                    } else {
+                        *arg
+                    };
+
+                    typ = CoreType {
+                        ptyp_desc: CoreTypeDesc::Ptyp_arrow {
+                            arg: Box::new(new_arg),
+                            ret,
+                            arity,
+                        },
+                        ptyp_loc: new_arrow_loc,
+                        ptyp_attributes: typ.ptyp_attributes,
+                    };
+                } else {
+                    // Restore the type without modification
+                    typ = CoreType {
+                        ptyp_desc: CoreTypeDesc::Ptyp_arrow { arg, ret, arity },
+                        ..typ
+                    };
+                }
             }
         }
 
@@ -933,7 +1170,18 @@ fn parse_function_type(p: &mut Parser<'_>, start_pos_idx: PosIdx) -> CoreType {
         }, param_start_idx));
 
         if !p.optional(&Token::Comma) {
-            break;
+            if super::grammar::is_list_element(&super::grammar::Grammar::TypeParameters, &p.token) {
+                // Missing comma but next token looks like another type parameter.
+                // Emit "Did you forget a `,` here?" and continue parsing.
+                p.expect(Token::Comma);
+            } else if p.token != Token::Eof && p.token != Token::Rparen
+                && !super::core::recover::should_abort_list_parse(p)
+            {
+                p.expect(Token::Comma);
+                if p.token == Token::Semicolon { p.next(); }
+            } else {
+                break;
+            }
         }
     }
 
@@ -1035,10 +1283,11 @@ fn parse_lident(p: &mut Parser<'_>) -> (String, Location) {
             (name, loc)
         }
         _ => {
-            p.err(DiagnosticCategory::Message(
-                "Expected lowercase identifier".to_string(),
-            ));
-            ("_".to_string(), LocIdx::none())
+            // OCaml uses Lident diagnostic here which produces context-sensitive error
+            p.err(DiagnosticCategory::Lident(p.token.clone()));
+            p.next(); // Consume the invalid token
+            let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
+            ("_".to_string(), loc)
         }
     }
 }
@@ -1180,6 +1429,16 @@ fn parse_tuple_type(
     }
 
     p.expect(Token::Rparen);
+
+    // OCaml: A tuple needs at least two elements
+    if types.len() == 1 {
+        p.err_at(
+            p.arena().get_position(start_pos_idx).clone(),
+            p.prev_end_pos.clone(),
+            DiagnosticCategory::Message("A tuple needs at least two elements".to_string()),
+        );
+    }
+
     let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
 
     CoreType {
@@ -1210,19 +1469,64 @@ fn parse_record_or_object_type(p: &mut Parser<'_>) -> CoreType {
         ClosedFlag::Closed
     };
 
-    let fields = parse_object_fields(p);
-    p.expect(Token::Rbrace);
-    let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
-    let typ = CoreType {
-        ptyp_desc: CoreTypeDesc::Ptyp_object(fields, closed),
-        ptyp_loc: loc,
-        ptyp_attributes: vec![],
-    };
-    // Handle type alias: {...} as 'name
-    let typ = parse_type_alias(p, typ);
-    // Note: Don't parse arrow rest here - let the caller (parse_typ_expr_inner) handle it.
-    // This is important for correct precedence of arrows in function return types.
-    typ
+    // Check if we should extract this as an inline record type
+    let has_inline_context = p.inline_types_found.is_some() && p.current_type_name_path.is_some();
+    let is_record_start = matches!(p.token, Token::Lident(_) | Token::Mutable | Token::At | Token::DotDotDot);
+
+    if has_inline_context && is_record_start {
+        // Extract as inline record type - mimics OCaml's parse_record_or_object_type
+        // when inline_types_context is present
+        let current_path = p.current_type_name_path.clone().unwrap();
+        let params = p.inline_types_params.clone();
+        let labels = super::module::parse_label_declarations_for_inline(p, Some(start_pos_idx));
+        p.expect(Token::Rbrace);
+        let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
+
+        let inline_type_name = current_path.join(".");
+
+        // Register this inline type (insert at front to match OCaml's prepend order)
+        if let Some(ref mut found) = p.inline_types_found {
+            found.insert(0, (
+                inline_type_name.clone(),
+                loc.clone(),
+                TypeKind::Ptype_record(labels),
+            ));
+        }
+
+        // Return a Ptyp_constr pointing to the inline type
+        let type_args: Vec<CoreType> = params.into_iter().map(|(t, _)| t).collect();
+        let lid_idx = p.push_lident(&inline_type_name);
+        CoreType {
+            ptyp_desc: CoreTypeDesc::Ptyp_constr(
+                with_loc(lid_idx, loc.clone()),
+                type_args,
+            ),
+            ptyp_loc: loc,
+            ptyp_attributes: vec![],
+        }
+    } else {
+        // Check for inline record syntax in wrong position: { name: ... } where object type expected
+        // OCaml: when inline_types_context is None and token is Lident, emit error
+        if !has_inline_context && matches!(p.token, Token::Lident(_)) {
+            p.err(DiagnosticCategory::Message(
+                "An inline record type declaration is only allowed in a variant constructor's declaration or nested inside of a record type declaration".to_string(),
+            ));
+        }
+
+        let fields = parse_object_fields(p);
+        p.expect(Token::Rbrace);
+        let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
+        let typ = CoreType {
+            ptyp_desc: CoreTypeDesc::Ptyp_object(fields, closed),
+            ptyp_loc: loc,
+            ptyp_attributes: vec![],
+        };
+        // Handle type alias: {...} as 'name
+        let typ = parse_type_alias(p, typ);
+        // Note: Don't parse arrow rest here - let the caller (parse_typ_expr_inner) handle it.
+        // This is important for correct precedence of arrows in function return types.
+        typ
+    }
 }
 
 /// Parse object type body after `{` has been consumed.
@@ -1253,7 +1557,8 @@ pub fn parse_object_type_body(p: &mut Parser<'_>, start_pos_idx: PosIdx) -> Core
     // Handle type alias: {...} as 'name
     let typ = parse_type_alias(p, typ);
     // Handle arrow rest if present
-    if p.token == Token::EqualGreater {
+    // Match OCaml: handle both EqualGreater and MinusGreater (error recovery)
+    if matches!(p.token, Token::EqualGreater | Token::MinusGreater) {
         parse_arrow_type_rest(p, typ, start_pos_idx)
     } else {
         typ
@@ -1262,6 +1567,8 @@ pub fn parse_object_type_body(p: &mut Parser<'_>, start_pos_idx: PosIdx) -> Core
 
 /// Parse object fields.
 fn parse_object_fields(p: &mut Parser<'_>) -> Vec<ObjectField> {
+    // Leave breadcrumb matching OCaml's parse_comma_delimited_region ~grammar:StringFieldDeclarations
+    p.leave_breadcrumb(Grammar::StringFieldDeclarations);
     let mut fields = vec![];
 
     while p.token != Token::Rbrace && p.token != Token::Eof {
@@ -1293,7 +1600,8 @@ fn parse_object_fields(p: &mut Parser<'_>) -> Vec<ObjectField> {
                 let name_loc = p.mk_loc_idx_to_prev_end(field_start_idx);
                 // Check for optional field marker
                 let _is_optional = p.optional(&Token::Question);
-                p.expect(Token::Colon);
+                // Pass grammar context for error message: "Did you forget a `:` here? It signals the start of a type"
+                p.expect_with_grammar(Token::Colon, Some(Grammar::TypeExpression));
                 // OCaml uses parse_poly_type_expr for object field types
                 let typ = parse_poly_type_expr(p);
                 let name_idx = p.arena_mut().push_string(name);
@@ -1308,10 +1616,20 @@ fn parse_object_fields(p: &mut Parser<'_>) -> Vec<ObjectField> {
         }
 
         if !p.optional(&Token::Comma) {
-            break;
+            if super::grammar::is_list_element(&Grammar::StringFieldDeclarations, &p.token) {
+                p.expect(Token::Comma);
+            } else if p.token != Token::Eof && p.token != Token::Rbrace
+                && !super::core::recover::should_abort_list_parse(p)
+            {
+                p.expect(Token::Comma);
+                if p.token == Token::Semicolon { p.next(); }
+            } else {
+                break;
+            }
         }
     }
 
+    p.eat_breadcrumb();
     fields
 }
 
@@ -1365,7 +1683,7 @@ fn parse_poly_variant_type(p: &mut Parser<'_>) -> CoreType {
     p.expect(Token::Lbracket);
 
     // Check for closed/open markers
-    let (closed, low_tags) = match &p.token {
+    let (closed, mut low_tags) = match &p.token {
         Token::GreaterThan => {
             p.next();
             (ClosedFlag::Open, None)
@@ -1377,7 +1695,38 @@ fn parse_poly_variant_type(p: &mut Parser<'_>) -> CoreType {
         _ => (ClosedFlag::Closed, None),
     };
 
-    let fields = parse_row_fields(p);
+    // Parsing logic depends on the variant type:
+    // - [> ...] (Open): can be empty, uses parse_row_fields which allows empty
+    // - [< ...] (Closed with low_tags): requires at least one tag_spec_full
+    // - [...] (Closed without marker): requires tag_spec_first then more tag_specs
+    // Only [> ...] can be empty. For the other two, we need at least one row field.
+    let fields = if closed == ClosedFlag::Open {
+        // [> ...] can be empty
+        parse_row_fields(p)
+    } else if low_tags.is_some() {
+        // [< ...] requires at least one tag_spec_full after optional Bar
+        p.optional(&Token::Bar);
+        parse_row_fields_with_required_first(p)
+    } else {
+        // [...] requires tag_spec_first | { | tag_spec }+
+        // OCaml grammar: '[ tag_spec ]' where tag_spec_first is first | then more | tag_spec
+        // When empty [], OCaml generates TWO type holes to indicate invalid variant
+        parse_row_fields_no_marker(p)
+    };
+
+    // For [< ... > #X #Y ], parse the lower bound tag names
+    if low_tags.is_some() && p.token == Token::GreaterThan {
+        p.next();
+        let mut tags = vec![];
+        while p.token == Token::Hash {
+            p.next();
+            if let Token::Lident(name) | Token::Uident(name) = &p.token {
+                tags.push(name.clone());
+                p.next();
+            }
+        }
+        low_tags = Some(tags);
+    }
 
     // OCaml's Ptyp_variant location ends at prev_end_pos (end of last row field), BEFORE the closing ]
     let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
@@ -1401,8 +1750,17 @@ fn parse_poly_variant_type_simple(p: &mut Parser<'_>) -> CoreType {
             p.next();
             name
         }
-        Token::Int { i, .. } => {
+        Token::Int { i, suffix } => {
+            // Clone values before borrowing p mutably
             let tag = i.clone();
+            let has_suffix = suffix.is_some();
+            // OCaml: emit error if numeric poly variant has a suffix
+            if has_suffix {
+                p.err(DiagnosticCategory::Message(format!(
+                    "A numeric polymorphic variant cannot be followed by a letter. Did you mean `#{}`?",
+                    tag
+                )));
+            }
             p.next();
             tag
         }
@@ -1453,6 +1811,319 @@ fn parse_poly_variant_type_simple(p: &mut Parser<'_>) -> CoreType {
     }
 }
 
+/// Check if the current token is `|` or is a doc comment followed by `|`.
+/// This matches OCaml's is_bar_or_doc_comment_then_bar function.
+fn is_bar_or_doc_comment_then_bar(p: &mut Parser<'_>) -> bool {
+    match &p.token {
+        Token::Bar => true,
+        Token::DocComment { .. } => {
+            // Look ahead to see if there's a Bar after the doc comment
+            p.lookahead(|state| {
+                state.next(); // skip doc comment
+                matches!(state.token, Token::Bar)
+            })
+        }
+        _ => false,
+    }
+}
+
+/// Parse row fields for `[...]` syntax (no `<` or `>` marker).
+/// OCaml grammar: '[ tag_spec ]' where tag_spec_first must be first, then | tag_spec...
+/// When empty [], OCaml generates TWO type holes (not one) to represent an invalid variant.
+fn parse_row_fields_no_marker(p: &mut Parser<'_>) -> Vec<RowField> {
+    let mut fields = vec![];
+
+    // Handle optional leading `|` with possible doc comment (e.g., [| #A] or [/** doc */ | #A])
+    if is_bar_or_doc_comment_then_bar(p) {
+        // Consume doc comment if present (it belongs to the tag after |)
+        let doc_attrs = if let Token::DocComment { loc, content } = &p.token {
+            let loc = loc.clone();
+            let content = content.clone();
+            p.next();
+            let loc = p.from_location(&loc);
+            vec![super::core::doc_comment_to_attribute(p.arena_mut(), loc, content)]
+        } else {
+            vec![]
+        };
+        // Now consume the |
+        p.expect(Token::Bar);
+        // Parse the first tag spec with doc attrs
+        // OCaml's parse_tag_spec: if token is Hash, parse poly variant; otherwise parse_typ_expr.
+        // parse_typ_expr will produce a typehole via error recovery for unknown tokens like backtick.
+        let mut attrs = doc_attrs;
+        attrs.extend(parse_attributes(p));
+        if let Some(field) = parse_single_row_field_with_attrs(p, attrs.clone()) {
+            fields.push(field);
+        } else {
+            // Match OCaml's parse_tag_spec: call parse_typ_expr unconditionally for non-Hash tokens
+            let typ = parse_typ_expr_with_attrs(p, attrs);
+            fields.push(RowField::Rinherit(typ));
+        }
+        // Parse remaining fields
+        while p.token != Token::Rbracket && p.token != Token::GreaterThan && p.token != Token::Eof {
+            if !is_bar_or_doc_comment_then_bar(p) {
+                break;
+            }
+            // Consume doc comment if present
+            let doc_attrs = if let Token::DocComment { loc, content } = &p.token {
+                let loc = loc.clone();
+                let content = content.clone();
+                p.next();
+                let loc = p.from_location(&loc);
+                vec![super::core::doc_comment_to_attribute(p.arena_mut(), loc, content)]
+            } else {
+                vec![]
+            };
+            p.optional(&Token::Bar);
+            let mut attrs = doc_attrs;
+            attrs.extend(parse_attributes(p));
+            if let Some(field) = parse_single_row_field_with_attrs(p, attrs) {
+                fields.push(field);
+            }
+        }
+        return fields;
+    }
+
+    // First field is required - must be either #tag, doc comment, @attr, or a type expression
+    let attrs = parse_attributes(p);
+    if p.token == Token::Hash {
+        // Parse tagged row field
+        if let Some(field) = parse_single_row_field_with_attrs(p, attrs) {
+            fields.push(field);
+        }
+    } else if super::grammar::is_typ_expr_start(&p.token) {
+        // Parse inherited type (Rinherit)
+        let typ = parse_typ_expr_with_attrs(p, attrs);
+        fields.push(RowField::Rinherit(typ));
+    } else {
+        // Not a valid start - generate error and recover
+        // For [...] syntax, OCaml generates TWO type holes (variant needs at least 2 options)
+        p.err(DiagnosticCategory::Unexpected {
+            token: p.token.clone(),
+            context: vec![],
+        });
+        // Create two typeholes as recovery
+        fields.push(RowField::Rinherit(recover::default_type(p.arena_mut())));
+        fields.push(RowField::Rinherit(recover::default_type(p.arena_mut())));
+        return fields;
+    }
+
+    // Parse remaining fields (same logic as parse_row_fields)
+    while p.token != Token::Rbracket && p.token != Token::GreaterThan && p.token != Token::Eof {
+        if !p.optional(&Token::Bar) {
+            break;
+        }
+        let attrs = parse_attributes(p);
+        if let Some(field) = parse_single_row_field_with_attrs(p, attrs) {
+            fields.push(field);
+        }
+    }
+
+    fields
+}
+
+/// Parse row fields with a required first field.
+/// This matches OCaml's behavior for [< ... ] where at least one tag_spec_full is expected.
+/// If the token is not a valid start of a row field, an error is generated.
+fn parse_row_fields_with_required_first(p: &mut Parser<'_>) -> Vec<RowField> {
+    let mut fields = vec![];
+
+    // Handle optional leading `|` with possible doc comment (e.g., [| #A] or [/** doc */ | #A])
+    // OCaml's parse_tag_spec_first handles this: (Bar | DocComment _) when is_bar_or_doc_comment_then_bar p
+    if is_bar_or_doc_comment_then_bar(p) {
+        // Consume doc comment if present (it belongs to the tag after |)
+        let doc_attrs = if let Token::DocComment { loc, content } = &p.token {
+            let loc = loc.clone();
+            let content = content.clone();
+            p.next();
+            let loc = p.from_location(&loc);
+            vec![super::core::doc_comment_to_attribute(p.arena_mut(), loc, content)]
+        } else {
+            vec![]
+        };
+        // Now consume the |
+        p.expect(Token::Bar);
+        // Parse the first tag spec with doc attrs
+        let mut attrs = doc_attrs;
+        attrs.extend(parse_attributes(p));
+        if let Some(field) = parse_single_row_field_with_attrs(p, attrs) {
+            fields.push(field);
+        }
+        // Parse remaining fields
+        while p.token != Token::Rbracket && p.token != Token::GreaterThan && p.token != Token::Eof {
+            if !is_bar_or_doc_comment_then_bar(p) {
+                break;
+            }
+            // Consume doc comment if present
+            let doc_attrs = if let Token::DocComment { loc, content } = &p.token {
+                let loc = loc.clone();
+                let content = content.clone();
+                p.next();
+                let loc = p.from_location(&loc);
+                vec![super::core::doc_comment_to_attribute(p.arena_mut(), loc, content)]
+            } else {
+                vec![]
+            };
+            p.optional(&Token::Bar);
+            let mut attrs = doc_attrs;
+            attrs.extend(parse_attributes(p));
+            if let Some(field) = parse_single_row_field_with_attrs(p, attrs) {
+                fields.push(field);
+            }
+        }
+        return fields;
+    }
+
+    // First field is required - must be either #tag, doc comment, @attr, or a type expression
+    let attrs = parse_attributes(p);
+    if p.token == Token::Hash {
+        // Parse tagged row field
+        if let Some(field) = parse_single_row_field_with_attrs(p, attrs) {
+            fields.push(field);
+        }
+    } else if super::grammar::is_typ_expr_start(&p.token) {
+        // Parse inherited type (Rinherit)
+        let typ = parse_typ_expr_with_attrs(p, attrs);
+        fields.push(RowField::Rinherit(typ));
+    } else {
+        // Not a valid start - generate error and recover
+        // This includes the case where token is ] (empty [< ] is invalid)
+        p.err(DiagnosticCategory::Unexpected {
+            token: p.token.clone(),
+            context: vec![],
+        });
+        // Create a typehole as recovery
+        fields.push(RowField::Rinherit(recover::default_type(p.arena_mut())));
+    }
+
+    // Parse remaining fields (same logic as parse_row_fields)
+    while p.token != Token::Rbracket && p.token != Token::GreaterThan && p.token != Token::Eof {
+        if !p.optional(&Token::Bar) {
+            break;
+        }
+        let attrs = parse_attributes(p);
+        if let Some(field) = parse_single_row_field_with_attrs(p, attrs) {
+            fields.push(field);
+        }
+    }
+
+    fields
+}
+
+/// Parse a single row field with pre-parsed attributes.
+fn parse_single_row_field_with_attrs(p: &mut Parser<'_>, attrs: Attributes) -> Option<RowField> {
+    if p.token == Token::Hash {
+        // Tagged row field: #tag or #tag(args)
+        let hash_start_idx = p.start_pos_idx();
+        p.next();
+        let tag = match &p.token {
+            Token::Lident(name) | Token::Uident(name) => {
+                let name = name.clone();
+                let loc = p.mk_loc_idx_to_end(hash_start_idx);
+                p.next();
+                with_loc(name, loc)
+            }
+            Token::Int { i, suffix } => {
+                // Clone values before borrowing p mutably
+                let tag = i.clone();
+                let has_suffix = suffix.is_some();
+                let loc = p.mk_loc_idx_to_end(hash_start_idx);
+                // OCaml: emit error if numeric poly variant has a suffix
+                if has_suffix {
+                    p.err(DiagnosticCategory::Message(format!(
+                        "A numeric polymorphic variant cannot be followed by a letter. Did you mean `#{}`?",
+                        tag
+                    )));
+                }
+                p.next();
+                with_loc(tag, loc)
+            }
+            Token::String(s) => {
+                let tag = s.clone();
+                let loc = p.mk_loc_idx_to_end(hash_start_idx);
+                p.next();
+                with_loc(tag, loc)
+            }
+            Token::True => {
+                let loc = p.mk_loc_idx_to_end(hash_start_idx);
+                p.next();
+                with_loc("true".to_string(), loc)
+            }
+            Token::False => {
+                let loc = p.mk_loc_idx_to_end(hash_start_idx);
+                p.next();
+                with_loc("false".to_string(), loc)
+            }
+            _ => {
+                p.err(DiagnosticCategory::Message(
+                    "Expected variant tag after #".to_string(),
+                ));
+                mknoloc("error".to_string())
+            }
+        };
+
+        // Parse arguments inside parentheses
+        let (args, comma_separated, had_parens, lparen_pos_idx, rparen_end_pos_idx) = if p.token == Token::Lparen {
+            let lparen_pos_idx = p.start_pos_idx();
+            p.next();
+            let mut args = vec![];
+            let mut has_comma = false;
+            while p.token != Token::Rparen && p.token != Token::Eof {
+                args.push(parse_typ_expr_inner(p, true));
+                if p.optional(&Token::Comma) {
+                    has_comma = true;
+                } else if !p.optional(&Token::Ampersand) {
+                    break;
+                }
+            }
+            p.expect(Token::Rparen);
+            let rparen_end_pos_idx = p.prev_end_pos_idx();
+            (args, has_comma, true, Some(lparen_pos_idx), Some(rparen_end_pos_idx))
+        } else {
+            (vec![], false, false, None, None)
+        };
+
+        let is_constant = !had_parens || args.is_empty();
+
+        // Handle tuple wrapping for comma-separated args
+        let first_type = if comma_separated && args.len() >= 2 {
+            let loc = p.mk_loc_idx(
+                lparen_pos_idx.unwrap(),
+                rparen_end_pos_idx.unwrap(),
+            );
+            Some(CoreType {
+                ptyp_desc: CoreTypeDesc::Ptyp_tuple(args),
+                ptyp_loc: loc,
+                ptyp_attributes: vec![],
+            })
+        } else if args.len() == 1 {
+            Some(args.into_iter().next().unwrap())
+        } else {
+            None
+        };
+
+        // Parse additional & constraints
+        // OCaml expects parentheses after & and uses parse_polymorphic_variant_type_args
+        // which returns the inner type without paren location for single types
+        let mut all_types = first_type.into_iter().collect::<Vec<_>>();
+        while p.optional(&Token::Ampersand) {
+            if p.token == Token::Lparen {
+                all_types.push(parse_polymorphic_variant_type_args(p));
+            } else {
+                all_types.push(parse_typ_expr_inner(p, true));
+            }
+        }
+
+        Some(RowField::Rtag(tag, attrs, is_constant, all_types))
+    } else if super::grammar::is_typ_expr_start(&p.token) {
+        // Inherited type (Rinherit)
+        let typ = parse_typ_expr_with_attrs(p, attrs);
+        Some(RowField::Rinherit(typ))
+    } else {
+        None
+    }
+}
+
 /// Parse row fields.
 fn parse_row_fields(p: &mut Parser<'_>) -> Vec<RowField> {
     let mut fields = vec![];
@@ -1479,9 +2150,18 @@ fn parse_row_fields(p: &mut Parser<'_>) -> Vec<RowField> {
                     p.next();
                     with_loc(name, loc)
                 }
-                Token::Int { i, .. } => {
+                Token::Int { i, suffix } => {
+                    // Clone values before borrowing p mutably
                     let tag = i.clone();
+                    let has_suffix = suffix.is_some();
                     let loc = p.mk_loc_idx_to_end(hash_start_idx);
+                    // OCaml: emit error if numeric poly variant has a suffix
+                    if has_suffix {
+                        p.err(DiagnosticCategory::Message(format!(
+                            "A numeric polymorphic variant cannot be followed by a letter. Did you mean `#{}`?",
+                            tag
+                        )));
+                    }
                     p.next();
                     with_loc(tag, loc)
                 }
@@ -1536,10 +2216,29 @@ fn parse_row_fields(p: &mut Parser<'_>) -> Vec<RowField> {
             // #A is constant, #A(int) is not, #A&(...) is constant (& are constraints, not args)
             let is_constant = !had_parens || args.is_empty();
 
+            // First, handle the initial arguments - wrap in tuple if comma-separated
+            // For #E(int, int) & (...), we first need to make (int, int) a tuple type
+            let first_type = if comma_separated && args.len() >= 2 {
+                // OCaml includes the parentheses in the tuple location
+                let loc = p.mk_loc_idx(
+                    lparen_pos_idx.unwrap(),
+                    rparen_end_pos_idx.unwrap(),
+                );
+                Some(CoreType {
+                    ptyp_desc: CoreTypeDesc::Ptyp_tuple(args),
+                    ptyp_loc: loc,
+                    ptyp_attributes: vec![],
+                })
+            } else if args.len() == 1 {
+                Some(args.into_iter().next().unwrap())
+            } else {
+                None
+            };
+
             // Parse intersection constraints: #tag & typ1 & typ2
             // OCaml calls parse_polymorphic_variant_type_args after &, which expects parens
             // and handles single types specially (no paren location in the type)
-            let mut constraints = args;
+            let mut constraints: Vec<CoreType> = first_type.into_iter().collect();
             while p.token == Token::Ampersand {
                 p.next();
                 // OCaml expects parentheses after & and uses parse_polymorphic_variant_type_args
@@ -1549,23 +2248,6 @@ fn parse_row_fields(p: &mut Parser<'_>) -> Vec<RowField> {
                     constraints.push(parse_typ_expr_inner(p, false));
                 }
             }
-
-            // Only wrap in Ptyp_tuple for comma-separated args inside parens (e.g., #A(int, string))
-            // Don't wrap ampersand-separated constraints (e.g., #T([<u2]) & ([<u1]))
-            let constraints = if comma_separated && constraints.len() >= 2 {
-                // OCaml includes the parentheses in the tuple location
-                let loc = p.mk_loc_idx(
-                    lparen_pos_idx.unwrap(),
-                    rparen_end_pos_idx.unwrap(),
-                );
-                vec![CoreType {
-                    ptyp_desc: CoreTypeDesc::Ptyp_tuple(constraints),
-                    ptyp_loc: loc,
-                    ptyp_attributes: vec![],
-                }]
-            } else {
-                constraints
-            };
 
             fields.push(RowField::Rtag(tag, attrs, is_constant, constraints));
         } else if matches!(p.token, Token::Lident(_) | Token::Uident(_)) {

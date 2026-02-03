@@ -137,7 +137,11 @@ fn main() {
 
     // Read file as raw bytes, converting each byte to a char (Latin-1 encoding).
     // This preserves the original byte sequence through the compilation pipeline,
-    // matching OCaml's behavior where strings are byte sequences, not Unicode.
+    // allowing the final output to convert back to bytes with `c as u8`.
+    // This approach handles both ASCII and UTF-8 files correctly because:
+    // - Each byte becomes a char with code point 0-255
+    // - The ML printer's escape_string function properly escapes bytes > 127
+    // - The output conversion `c as u8` recovers the original bytes
     let source = match fs::read(&args.file) {
         Ok(bytes) => bytes.iter().map(|&b| b as char).collect::<String>(),
         Err(e) => {
@@ -356,12 +360,13 @@ fn main() {
 /// Print parser diagnostics in OCaml-compatible format
 fn print_diagnostics(parser: &Parser, source: &str, filename: &str, out: &mut impl Write) {
     for diag in parser.diagnostics() {
+        // OCaml uses explain_with_source to detect old syntax like |> and [|...|]
         let error_msg = code_frame::format_error(
             filename,
             source,
             &diag.start_pos,
             &diag.end_pos,
-            &diag.explain(),
+            &diag.explain_with_source(Some(source)),
         );
         let _ = out.write_all(error_msg.as_bytes());
     }

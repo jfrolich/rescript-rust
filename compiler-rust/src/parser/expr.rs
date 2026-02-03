@@ -3,11 +3,10 @@
 //! This module contains the expression parsing logic, converting tokens
 //! into expression AST nodes.
 
-use crate::location::Position;
 use crate::parse_arena::{LidentIdx, Located, LocIdx, ParseArena, PosIdx, StrIdx};
 
 use super::ast::*;
-use super::core::{ExprContext, ast_helper, make_braces_attr, mknoloc, recover, with_loc};
+use super::core::{ExprContext, ast_helper, if_let_attr, make_braces_attr, mknoloc, recover, with_loc};
 use super::diagnostics::DiagnosticCategory;
 use super::grammar;
 use super::grammar::Grammar;
@@ -53,9 +52,15 @@ pub fn parse_constant(p: &mut Parser<'_>) -> Constant {
         }
         Token::Codepoint { c, original } => {
             let value = *c;
-            let _orig = original.clone();
+            let orig = original.clone();
             p.next();
-            Constant::Char(value)
+            // When parsing for the printer (not type checker), preserve the original escape format
+            // by encoding it as a string with a special prefix, like OCaml does.
+            if p.mode == ParserMode::ParseForTypeChecker {
+                Constant::Char(value)
+            } else {
+                Constant::String(orig, Some("INTERNAL_RES_CHAR_CONTENTS".to_string()))
+            }
         }
         _ => {
             p.err(DiagnosticCategory::Message("Expected constant".to_string()));
@@ -67,6 +72,35 @@ pub fn parse_constant(p: &mut Parser<'_>) -> Constant {
 // ============================================================================
 // Placeholder Transformation
 // ============================================================================
+
+/// Check and emit "consecutive expressions" error if expressions on same line without semicolon.
+///
+/// Matches OCaml's `parse_newline_or_semicolon_expr_block`:
+/// - If token is Semicolon, consume it
+/// - If token can start a block expression AND on same line as previous, emit error
+/// - Otherwise, do nothing
+pub fn parse_newline_or_semicolon_expr_block(p: &mut Parser<'_>) {
+    if p.token == Token::Semicolon {
+        p.next();
+        return;
+    }
+
+    if grammar::is_block_expr_start(&p.token) {
+        // Check if we're on the same line as the previous token
+        // OCaml: if p.prev_end_pos.pos_lnum < p.start_pos.pos_lnum then () else err
+        if p.prev_end_pos.line >= p.start_pos.line {
+            // Same line: emit error
+            // Use err_at which respects regions (like OCaml's Parser.err)
+            p.err_at(
+                p.prev_end_pos.clone(),
+                p.end_pos.clone(),
+                DiagnosticCategory::message(
+                    "consecutive expressions on a line must be separated by ';' or a newline",
+                ),
+            );
+        }
+    }
+}
 
 /// Check if an expression is the underscore placeholder `_`
 fn is_underscore_placeholder(expr: &Expression, arena: &ParseArena) -> bool {
@@ -225,7 +259,13 @@ fn parse_value_path_after_dot(p: &mut Parser<'_>) -> Located<LidentIdx> {
                         p.next();
                         break;
                     }
-                    _ => break,
+                    _ => {
+                        // OCaml: parse_value_path_tail emits error and adds "_" for missing ident
+                        p.err_unexpected();
+                        let underscore_idx = p.arena_mut().push_string("_".to_string());
+                        path = Longident::Ldot(Box::new(path), underscore_idx);
+                        break;
+                    }
                 }
             }
 
@@ -437,11 +477,20 @@ pub fn parse_expr_with_operand(p: &mut Parser<'_>, operand: Expression) -> Expre
 
 /// Parse an expression with a specific context.
 pub fn parse_expr_with_context(p: &mut Parser<'_>, context: ExprContext) -> Expression {
+    // Check for excessive parse depth to prevent stack overflow
+    if p.exceeded_parse_depth() {
+        p.err(super::diagnostics::DiagnosticCategory::Message(
+            "Maximum parse depth exceeded".to_string(),
+        ));
+        return recover::default_expr(p.arena_mut());
+    }
+    p.inc_parse_depth();
+
     let expr = parse_operand_expr(p, context);
     let expr = parse_binary_expr(p, expr, 1, context);
     let expr = parse_ternary_expr(p, expr);
     // Handle coercion: expr :> type
-    if p.token == Token::ColonGreaterThan {
+    let result = if p.token == Token::ColonGreaterThan {
         p.next();
         let typ = super::typ::parse_typ_expr(p);
         let loc = p.mk_loc_spanning(expr.pexp_loc, typ.ptyp_loc);
@@ -452,7 +501,10 @@ pub fn parse_expr_with_context(p: &mut Parser<'_>, context: ExprContext) -> Expr
         }
     } else {
         expr
-    }
+    };
+
+    p.dec_parse_depth();
+    result
 }
 
 /// Parse a ternary expression (condition ? true_branch : false_branch).
@@ -1009,27 +1061,79 @@ fn parse_parameters(p: &mut Parser<'_>) -> Vec<super::core::FundefParameter> {
                 ));
             } else if had_dot {
                 // We had a dot but there are more tokens - parse parameters
+                p.leave_breadcrumb(Grammar::ParameterList);
                 while p.token != Token::Rparen && p.token != Token::Eof {
                     if let Some(param) = parse_parameter(p) {
                         params.push(param);
+                    } else {
+                        // No param parsed - check if we should continue or stop
+                        if recover::should_abort_list_parse(p) {
+                            break;
+                        }
+                        // Unexpected token - report error and skip
+                        p.err_unexpected();
+                        p.next();
+                        continue;
                     }
-                    if !p.optional(&Token::Comma) {
+
+                    // Check for comma or handle missing comma like OCaml
+                    if p.token == Token::Comma {
+                        p.next();
+                    } else if p.token == Token::Rparen || p.token == Token::Eof {
+                        break;
+                    } else if grammar::is_parameter_start(&p.token) {
+                        // Token looks like another param but no comma - missing comma case
+                        p.expect(Token::Comma);
+                    } else if !recover::should_abort_list_parse(p) {
+                        // Unexpected token, not closing/EOF/abort - expect comma
+                        p.expect(Token::Comma);
+                        if p.token == Token::Semicolon {
+                            p.next();
+                        }
+                    } else {
                         break;
                     }
                 }
+                p.eat_breadcrumb();
                 p.expect(Token::Rparen);
                 let rparen_end_pos_idx = p.prev_end_pos_idx();
                 // Set paren positions on the first type param (if any)
                 set_first_type_param_paren_pos_idx(&mut params, lparen_pos_idx, rparen_end_pos_idx);
             } else {
+                p.leave_breadcrumb(Grammar::ParameterList);
                 while p.token != Token::Rparen && p.token != Token::Eof {
                     if let Some(param) = parse_parameter(p) {
                         params.push(param);
+                    } else {
+                        // No param parsed - check if we should continue or stop
+                        if recover::should_abort_list_parse(p) {
+                            break;
+                        }
+                        // Unexpected token - report error and skip
+                        p.err_unexpected();
+                        p.next();
+                        continue;
                     }
-                    if !p.optional(&Token::Comma) {
+
+                    // Check for comma or handle missing comma like OCaml
+                    if p.token == Token::Comma {
+                        p.next();
+                    } else if p.token == Token::Rparen || p.token == Token::Eof {
+                        break;
+                    } else if grammar::is_parameter_start(&p.token) {
+                        // Token looks like another param but no comma - missing comma case
+                        p.expect(Token::Comma);
+                    } else if !recover::should_abort_list_parse(p) {
+                        // Unexpected token, not closing/EOF/abort - expect comma
+                        p.expect(Token::Comma);
+                        if p.token == Token::Semicolon {
+                            p.next();
+                        }
+                    } else {
                         break;
                     }
                 }
+                p.eat_breadcrumb();
                 p.expect(Token::Rparen);
                 let rparen_end_pos_idx = p.prev_end_pos_idx();
                 // Set paren positions on the first type param (if any)
@@ -1106,10 +1210,12 @@ fn parse_parameter(p: &mut Parser<'_>) -> Option<super::core::FundefParameter> {
         let name_loc_with_tilde = p.mk_loc_idx_to_prev_end(tilde_pos_idx);
         let lbl = match &p.token {
             Token::Comma | Token::Equal | Token::Rparen | Token::EqualGreater => {
-                // Just ~name (punned: label and pattern use the same string)
+                // Just ~name
+                // OCaml (line 1855): Ast_helper.Pat.var ~attrs ~loc
                 let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
                 // Reuse the same StrIdx for sharing in marshal output
-                let pat = ast_helper::make_var_pat(lbl_str_idx, loc);
+                let mut pat = ast_helper::make_var_pat(lbl_str_idx, loc);
+                pat.ppat_attributes = attrs.clone();
                 (ArgLabel::Labelled(lbl_located), pat, None)
             }
             Token::Colon => {
@@ -1129,23 +1235,31 @@ fn parse_parameter(p: &mut Parser<'_>) -> Option<super::core::FundefParameter> {
                 };
                 // Reuse the same StrIdx for sharing in marshal output
                 let var_pat = ast_helper::make_var_pat(lbl_str_idx, var_loc);
+                // OCaml (lines 1863-1864): Ast_helper.Pat.constraint_ ~attrs ~loc pat typ
+                // The attrs go on the OUTER constraint pattern
                 let pat = Pattern {
                     ppat_desc: PatternDesc::Ppat_constraint(Box::new(var_pat), typ),
                     ppat_loc: loc,
-                    ppat_attributes: vec![],
+                    ppat_attributes: attrs.clone(),
                 };
                 (ArgLabel::Labelled(lbl_located), pat, None)
             }
             Token::As => {
                 // ~name as pattern
+                // OCaml (line 1871): {pat with ppat_attributes = attrs @ pat.ppat_attributes}
                 p.next();
-                let pat = super::pattern::parse_constrained_pattern(p);
+                let mut pat = super::pattern::parse_constrained_pattern(p);
+                // Prepend attrs to pattern's existing attributes
+                let mut new_attrs = attrs.clone();
+                new_attrs.extend(pat.ppat_attributes);
+                pat.ppat_attributes = new_attrs;
                 (ArgLabel::Labelled(lbl_located), pat, None)
             }
             _ => {
                 let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
                 // Reuse the same StrIdx for sharing in marshal output
-                let pat = ast_helper::make_var_pat(lbl_str_idx, loc);
+                let mut pat = ast_helper::make_var_pat(lbl_str_idx, loc);
+                pat.ppat_attributes = attrs.clone();
                 (ArgLabel::Labelled(lbl_located), pat, None)
             }
         };
@@ -1184,9 +1298,11 @@ fn parse_parameter(p: &mut Parser<'_>) -> Option<super::core::FundefParameter> {
             (label, pat, default)
         };
 
+        // OCaml puts labeled arg attrs directly on the pattern (not on the returned parameter)
+        // So FundefTermParam.attrs should be empty for labeled args with attrs on the pattern
         return Some(super::core::FundefParameter::Term(
             super::core::FundefTermParam {
-                attrs,
+                attrs: vec![],  // attrs are already on pat.ppat_attributes
                 label,
                 expr: default,
                 pat,
@@ -1214,6 +1330,50 @@ fn parse_parameter(p: &mut Parser<'_>) -> Option<super::core::FundefParameter> {
         } else {
             pat
         };
+
+        // Check for default value (= expr) - this means it's a labeled param missing the ~
+        if p.token == Token::Equal {
+            // Get the name from the pattern for the error message
+            let lbl_name_str = match &pat.ppat_desc {
+                PatternDesc::Ppat_var(var) => p.arena().get_string(var.txt).to_string(),
+                _ => String::new(),
+            };
+
+            p.next(); // consume = (OCaml does this first, so prev_end_pos includes =)
+
+            // OCaml: emit "missing tilde" error
+            let msg = if lbl_name_str.is_empty() {
+                "A labeled parameter starts with a `~`.".to_string()
+            } else {
+                format!("A labeled parameter starts with a `~`. Did you mean: `~{}`?", lbl_name_str)
+            };
+            let start_pos_for_err = p.arena().get_position(start_pos_idx).clone();
+            p.err_at(start_pos_for_err, p.prev_end_pos.clone(), DiagnosticCategory::Message(msg));
+
+            // Create label as Optional
+            let lbl_str_idx = p.arena_mut().intern_string(&lbl_name_str);
+            let lbl_loc = pat.ppat_loc;
+            let label = ArgLabel::Optional(Located::new(lbl_str_idx, lbl_loc));
+
+            // Check for =? (optional with no default)
+            let default = if p.token == Token::Question {
+                p.next();
+                None
+            } else {
+                Some(parse_constrained_or_coerced_expr(p))
+            };
+
+            return Some(super::core::FundefParameter::Term(
+                super::core::FundefTermParam {
+                    attrs,
+                    label,
+                    expr: default,
+                    pat,
+                    start_pos_idx,
+                },
+            ));
+        }
+
         return Some(super::core::FundefParameter::Term(
             super::core::FundefTermParam {
                 attrs,
@@ -1250,11 +1410,27 @@ fn parse_lident(p: &mut Parser<'_>) -> (String, Location) {
             p.next();
             (name, loc)
         }
+        Token::Eof => {
+            p.err_unexpected();
+            ("_".to_string(), p.mk_loc_current())
+        }
         _ => {
-            p.err(DiagnosticCategory::Message(
-                "Expected lowercase identifier".to_string(),
-            ));
-            ("_".to_string(), LocIdx::none())
+            // OCaml: parse_lident recovery - if keyword on same line, skip it.
+            // Otherwise skip tokens until we find an Lident or should abort.
+            p.err(DiagnosticCategory::Lident(p.token.clone()));
+            if p.token.is_keyword() && p.prev_end_pos.line == p.start_pos.line {
+                p.next();
+            } else {
+                p.next(); // skip the bad token
+                // Skip tokens until we find an Lident or should abort list parse
+                while !super::core::recover::should_abort_list_parse(p) && p.token != Token::Eof {
+                    p.next();
+                }
+                if matches!(p.token, Token::Lident(_)) {
+                    return parse_lident(p);
+                }
+            }
+            ("_".to_string(), p.mk_loc_current())
         }
     }
 }
@@ -1422,13 +1598,6 @@ pub fn parse_binary_expr(
             break;
         }
 
-        // Disambiguate `<` between binary operator and JSX start.
-        // If `<` is immediately followed by JSX tokens (`<div`, `</div`, `<>`),
-        // treat it as the start of a new JSX expression, not as a binary operator.
-        if p.token == Token::LessThan && is_jsx_start_after_less_than(p) {
-            break;
-        }
-
         // Disambiguate `-`, `-.`, `<`, and `%` between binary and unary/new expression.
         // When on a new line AND not surrounded by whitespace on both sides,
         // these tokens start a new expression rather than being binary operators.
@@ -1494,11 +1663,10 @@ pub fn parse_binary_expr(
         let right = parse_binary_expr(p, right, next_prec, context);
 
         let loc = p.mk_loc_spanning(left.pexp_loc, right.pexp_loc);
-        let op_loc = p.mk_loc_idx(op_start_idx, op_end_idx);
 
         // Build application expression
-        let op_lid = super::core::make_lident_static(p.arena_mut(), &token.to_string());
-        let op_expr = ast_helper::make_ident(p, op_lid, op_loc);
+        // Use make_infix_operator to handle special cases like `=` (should be `==`)
+        let op_expr = super::core::make_infix_operator(p, token.clone(), op_start_idx, op_end_idx);
         left = ast_helper::make_apply(
             op_expr,
             vec![(ArgLabel::Nolabel, left), (ArgLabel::Nolabel, right)],
@@ -1616,6 +1784,85 @@ pub fn parse_atomic_expr(p: &mut Parser<'_>) -> Expression {
                 )),
                 pexp_loc: LocIdx::none(),
                 pexp_attributes: vec![],
+            }
+        }
+        // OCaml: when parser sees `/` in expression position, it rescans as regex
+        Token::Forwardslash => {
+            p.next_regex_token();
+            if let Token::Regex { ref pattern, ref flags } = p.token {
+                let pattern = pattern.clone();
+                let flags = flags.clone();
+                p.next();
+                let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
+                let regex_str = format!("/{}/{}", pattern, flags);
+                let tag = get_string_tag(p);
+                let str_expr = Expression {
+                    pexp_desc: ExpressionDesc::Pexp_constant(Constant::String(regex_str, tag)),
+                    pexp_loc: loc.clone(),
+                    pexp_attributes: vec![],
+                };
+                let str_item = StructureItem {
+                    pstr_desc: StructureItemDesc::Pstr_eval(str_expr, vec![]),
+                    pstr_loc: loc.clone(),
+                };
+                let re_str_idx = p.arena_mut().intern("re");
+                Expression {
+                    pexp_desc: ExpressionDesc::Pexp_extension((
+                        with_loc(re_str_idx, loc),
+                        Payload::PStr(vec![str_item]),
+                    )),
+                    pexp_loc: LocIdx::none(),
+                    pexp_attributes: vec![],
+                }
+            } else {
+                let re_str_idx = p.arena_mut().intern("re");
+                Expression {
+                    pexp_desc: ExpressionDesc::Pexp_extension((
+                        with_loc(re_str_idx, LocIdx::none()),
+                        Payload::PStr(vec![]),
+                    )),
+                    pexp_loc: LocIdx::none(),
+                    pexp_attributes: vec![],
+                }
+            }
+        }
+        Token::ForwardslashDot => {
+            p.next_regex_token();
+            if let Token::Regex { ref pattern, ref flags } = p.token {
+                let pattern = format!(".{}", pattern);
+                let flags = flags.clone();
+                p.next();
+                let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
+                let regex_str = format!("/{}/{}", pattern, flags);
+                let tag = get_string_tag(p);
+                let str_expr = Expression {
+                    pexp_desc: ExpressionDesc::Pexp_constant(Constant::String(regex_str, tag)),
+                    pexp_loc: loc.clone(),
+                    pexp_attributes: vec![],
+                };
+                let str_item = StructureItem {
+                    pstr_desc: StructureItemDesc::Pstr_eval(str_expr, vec![]),
+                    pstr_loc: loc.clone(),
+                };
+                let re_str_idx = p.arena_mut().intern("re");
+                Expression {
+                    pexp_desc: ExpressionDesc::Pexp_extension((
+                        with_loc(re_str_idx, loc),
+                        Payload::PStr(vec![str_item]),
+                    )),
+                    pexp_loc: LocIdx::none(),
+                    pexp_attributes: vec![],
+                }
+            } else {
+                let re_str_idx = p.arena_mut().intern("re");
+                Expression {
+                    pexp_desc: ExpressionDesc::Pexp_extension((
+                        with_loc(re_str_idx, LocIdx::none()),
+                        Payload::PStr(vec![]),
+                    )),
+                    pexp_loc: LocIdx::none(),
+                    pexp_attributes: vec![],
+                }
             }
         }
         Token::Uident(_) | Token::Lident(_) => parse_value_or_constructor(p),
@@ -1743,8 +1990,17 @@ pub fn parse_atomic_expr(p: &mut Parser<'_>) -> Expression {
                     p.next();
                     name
                 }
-                Token::Int { i, .. } => {
+                Token::Int { i, suffix } => {
+                    // Clone values before borrowing p mutably
                     let tag = i.clone();
+                    let has_suffix = suffix.is_some();
+                    // OCaml: emit error if numeric poly variant has a suffix
+                    if has_suffix {
+                        p.err(DiagnosticCategory::Message(format!(
+                            "A numeric polymorphic variant cannot be followed by a letter. Did you mean `#{}`?",
+                            tag
+                        )));
+                    }
                     p.next();
                     tag
                 }
@@ -1868,6 +2124,9 @@ pub fn parse_atomic_expr(p: &mut Parser<'_>) -> Expression {
             parse_first_class_module_expr(p, start_pos_idx)
         }
         Token::Underscore => {
+            // OCaml: Underscore is not a valid expression operand, emit an error
+            // This matches OCaml's parse_atomic_expr which uses Diagnostics.lident
+            p.err(DiagnosticCategory::Lident(Token::Underscore));
             p.next();
             let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
             let lid = super::core::make_lident_static(p.arena_mut(), "_");
@@ -1880,12 +2139,25 @@ pub fn parse_atomic_expr(p: &mut Parser<'_>) -> Expression {
             recover::default_expr(p.arena_mut())
         }
         _ => {
-            p.err(DiagnosticCategory::Message(format!(
-                "Unexpected token: {:?}",
-                p.token
-            )));
-            // Advance past the unexpected token to prevent infinite loops
-            p.next();
+            // Use err_unexpected which creates a proper Unexpected diagnostic
+            // with breadcrumbs, matching OCaml's parse_region behavior
+            // OCaml uses prev_end_pos as start, but p.end_pos as end
+            let err_start = p.prev_end_pos.clone();
+            let err_end = p.end_pos.clone();
+            p.err_at(
+                err_start,
+                err_end,
+                DiagnosticCategory::unexpected(p.token.clone(), p.breadcrumbs().to_vec()),
+            );
+
+            // Try to skip tokens and retry parsing if we find a valid start token
+            // This matches OCaml's skip_tokens_and_maybe_retry behavior
+            if recover::skip_tokens_and_maybe_retry(p, grammar::is_atomic_expr_start) {
+                // Eat our breadcrumb first, then recurse
+                // OCaml returns from match, then eat_breadcrumb runs
+                p.eat_breadcrumb();
+                return parse_atomic_expr(p);
+            }
             recover::default_expr(p.arena_mut())
         }
     };
@@ -1944,9 +2216,208 @@ pub fn parse_constrained_or_coerced_expr(p: &mut Parser<'_>) -> Expression {
     }
 }
 
+/// OCaml's over_parse_constrained_or_coerced_or_arrow_expression.
+/// After parsing a block expression or let binding value, check if `:` follows
+/// and handle the constraint/coercion/arrow overparse with appropriate error messages.
+pub fn over_parse_constrained_or_coerced_or_arrow_expression(
+    p: &mut Parser<'_>,
+    expr: Expression,
+) -> Expression {
+    match &p.token {
+        Token::ColonGreaterThan => {
+            // Coercion: expr :> type
+            p.next();
+            let typ = super::typ::parse_typ_expr(p);
+            let loc = p.mk_loc_spanning(expr.pexp_loc, typ.ptyp_loc);
+            Expression {
+                pexp_desc: ExpressionDesc::Pexp_coerce(Box::new(expr), None, typ),
+                pexp_loc: loc,
+                pexp_attributes: vec![],
+            }
+        }
+        Token::Colon => {
+            p.next();
+            let typ = super::typ::parse_typ_expr_no_arrow(p);
+            match &p.token {
+                Token::EqualGreater => {
+                    // Ambiguous arrow: expr: type => body
+                    p.next();
+                    let body = parse_expr(p);
+
+                    // Convert expression to pattern
+                    let (pat, expr_is_unit) = match &expr.pexp_desc {
+                        ExpressionDesc::Pexp_ident(longident) => {
+                            // Longident.flatten |> String.concat "."
+                            let lid = p.arena().get_longident(longident.txt);
+                            let parts: Vec<&str> = lid.flatten_idx().iter()
+                                .map(|idx| p.arena().get_string(*idx))
+                                .collect();
+                            let name = parts.join(".");
+                            let name_str_idx = p.arena_mut().intern_string(&name);
+                            let name_loc = with_loc(name_str_idx, longident.loc);
+                            (Pattern {
+                                ppat_desc: PatternDesc::Ppat_var(name_loc),
+                                ppat_loc: expr.pexp_loc,
+                                ppat_attributes: vec![],
+                            }, false)
+                        }
+                        ExpressionDesc::Pexp_construct(lid, None) => {
+                            let longident = p.arena().get_longident(lid.txt);
+                            let is_unit = matches!(longident, Longident::Lident(s) if p.arena().get_string(*s) == "()");
+                            if is_unit {
+                                (Pattern {
+                                    ppat_desc: PatternDesc::Ppat_construct(lid.clone(), None),
+                                    ppat_loc: expr.pexp_loc,
+                                    ppat_attributes: vec![],
+                                }, true)
+                            } else {
+                                let pattern_str_idx = p.arena_mut().intern("pattern");
+                                let name_loc = with_loc(pattern_str_idx, expr.pexp_loc);
+                                (Pattern {
+                                    ppat_desc: PatternDesc::Ppat_var(name_loc),
+                                    ppat_loc: expr.pexp_loc,
+                                    ppat_attributes: vec![],
+                                }, false)
+                            }
+                        }
+                        _ => {
+                            let pattern_str_idx = p.arena_mut().intern("pattern");
+                            let name_loc = with_loc(pattern_str_idx, expr.pexp_loc);
+                            (Pattern {
+                                ppat_desc: PatternDesc::Ppat_var(name_loc),
+                                ppat_loc: expr.pexp_loc,
+                                ppat_attributes: vec![],
+                            }, false)
+                        }
+                    };
+
+                    let arrow_loc = p.mk_loc_spanning(expr.pexp_loc, body.pexp_loc);
+
+                    // Interpretation 1: (param) => (body : type)
+                    let unknown_arity = p.arena_mut().push_arity(None);
+                    let arrow1 = Expression {
+                        pexp_desc: ExpressionDesc::Pexp_fun {
+                            arity: unknown_arity,
+                            arg_label: ArgLabel::Nolabel,
+                            default: None,
+                            lhs: pat.clone(),
+                            rhs: Box::new(Expression {
+                                pexp_desc: ExpressionDesc::Pexp_constraint(Box::new(body.clone()), typ.clone()),
+                                pexp_loc: p.mk_loc_spanning(body.pexp_loc, typ.ptyp_loc),
+                                pexp_attributes: vec![],
+                            }),
+                            is_async: false,
+                        },
+                        pexp_loc: arrow_loc,
+                        pexp_attributes: vec![],
+                    };
+
+                    if expr_is_unit {
+                        arrow1
+                    } else {
+                        // Interpretation 2: (param: type) => body
+                        let unknown_arity2 = p.arena_mut().push_arity(None);
+                        let arrow2 = Expression {
+                            pexp_desc: ExpressionDesc::Pexp_fun {
+                                arity: unknown_arity2,
+                                arg_label: ArgLabel::Nolabel,
+                                default: None,
+                                lhs: Pattern {
+                                    ppat_desc: PatternDesc::Ppat_constraint(Box::new(pat), typ.clone()),
+                                    ppat_loc: p.mk_loc_spanning(expr.pexp_loc, typ.ptyp_loc),
+                                    ppat_attributes: vec![],
+                                },
+                                rhs: Box::new(body.clone()),
+                                is_async: false,
+                            },
+                            pexp_loc: arrow_loc,
+                            pexp_attributes: vec![],
+                        };
+
+                        // Use ResPrinter to render both interpretations
+                        use super::doc::Doc;
+                        use super::printer2;
+                        use super::comment_table::CommentTable;
+                        let state = printer2::PrinterState::init();
+                        let mut cmt_tbl = CommentTable::new();
+                        let msg = Doc::breakable_group(
+                            Doc::concat(vec![
+                                Doc::text("Did you mean to annotate the parameter type or the return type?"),
+                                Doc::indent(Doc::concat(vec![
+                                    Doc::line(),
+                                    Doc::text("1) "),
+                                    printer2::print_expression(&state, &arrow1, &mut cmt_tbl, p.arena()),
+                                    Doc::line(),
+                                    Doc::text("2) "),
+                                    printer2::print_expression(&state, &arrow2, &mut cmt_tbl, p.arena()),
+                                ])),
+                            ]),
+                            true,
+                        ).to_string(80);
+
+                        p.err_at(
+                            p.loc_start(expr.pexp_loc),
+                            p.loc_end(body.pexp_loc),
+                            DiagnosticCategory::message(&msg),
+                        );
+                        arrow1
+                    }
+                }
+                _ => {
+                    // Simple constraint: expr : type
+                    let loc = p.mk_loc_spanning(expr.pexp_loc, typ.ptyp_loc);
+                    let constrained = Expression {
+                        pexp_desc: ExpressionDesc::Pexp_constraint(Box::new(expr), typ.clone()),
+                        pexp_loc: loc,
+                        pexp_attributes: vec![],
+                    };
+
+                    // Use ResPrinter to render the constrained expression in parens
+                    use super::doc::Doc;
+                    use super::printer2;
+                    use super::comment_table::CommentTable;
+                    let state = printer2::PrinterState::init();
+                    let mut cmt_tbl = CommentTable::new();
+                    let printed = printer2::add_parens(
+                        printer2::print_expression(&state, &constrained, &mut cmt_tbl, p.arena()),
+                    );
+                    let msg = Doc::breakable_group(
+                        Doc::concat(vec![
+                            Doc::text("Expressions with type constraints need to be wrapped in parens:"),
+                            Doc::indent(Doc::concat(vec![
+                                Doc::line(),
+                                printed,
+                            ])),
+                        ]),
+                        true,
+                    ).to_string(80);
+
+                    p.err_at(
+                        p.loc_start(constrained.pexp_loc),
+                        p.loc_end(typ.ptyp_loc),
+                        DiagnosticCategory::message(&msg),
+                    );
+                    constrained
+                }
+            }
+        }
+        _ => expr,
+    }
+}
+
 /// Parse an expression with optional type constraint for function arguments.
 /// Used in labeled argument contexts like `~compare=?intCompare: (int, int) => int`.
 fn parse_constrained_expr_in_arg(p: &mut Parser<'_>) -> Expression {
+    // OCaml: _ is valid in labeled argument position (~label=_)
+    // BUT NOT if it's the start of an arrow function: (~onClick=_ => ...)
+    // This must be checked before parse_constrained_or_coerced_expr
+    if p.token == Token::Underscore && !super::core::is_es6_arrow_expression(p, false) {
+        let start_pos_idx = p.start_pos_idx();
+        p.next();
+        let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
+        let lid = super::core::make_lident_static(p.arena_mut(), "_");
+        return ast_helper::make_ident(p, lid, loc);
+    }
     parse_constrained_or_coerced_expr(p)
 }
 
@@ -1962,7 +2433,7 @@ pub fn parse_primary_expr(p: &mut Parser<'_>, operand: Expression, no_call: bool
     // IMPORTANT: Reuse the existing PosIdx from operand.pexp_loc to match OCaml's sharing.
     // In OCaml, `operand.pexp_loc.loc_start` is the same object used for all derived locations.
     let start_pos_idx = p.loc_start_idx(operand.pexp_loc);
-    let start_pos = p.loc_start(operand.pexp_loc); // For comparisons where we need Position value
+    let _start_pos = p.loc_start(operand.pexp_loc); // For comparisons where we need Position value
     let mut expr = operand;
 
     loop {
@@ -1978,8 +2449,11 @@ pub fn parse_primary_expr(p: &mut Parser<'_>, operand: Expression, no_call: bool
 
                         // Check for field assignment: expr.field = value
                         if p.token == Token::Equal {
+                            // OCaml: leave_breadcrumb ExprSetField
+                            p.leave_breadcrumb(Grammar::ExprSetField);
                             p.next();
                             let value = parse_expr(p);
+                            p.eat_breadcrumb();
                             let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
                             expr = Expression {
                                 pexp_desc: ExpressionDesc::Pexp_setfield(
@@ -2011,8 +2485,11 @@ pub fn parse_primary_expr(p: &mut Parser<'_>, operand: Expression, no_call: bool
 
                         // Check for field assignment: expr."field" = value
                         if p.token == Token::Equal {
+                            // OCaml: leave_breadcrumb ExprSetField
+                            p.leave_breadcrumb(Grammar::ExprSetField);
                             p.next();
                             let value = parse_expr(p);
+                            p.eat_breadcrumb();
                             let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
                             expr = Expression {
                                 pexp_desc: ExpressionDesc::Pexp_setfield(
@@ -2207,14 +2684,22 @@ pub fn parse_primary_expr(p: &mut Parser<'_>, operand: Expression, no_call: bool
                 if p.prev_end_pos.line < p.start_pos.line {
                     break;
                 }
-                // Tagged templates can be any expression: (foo ? bar : baz)`...`
                 match &expr.pexp_desc {
                     ExpressionDesc::Pexp_ident(lid) => {
                         let prefix = (lid.txt.clone(), lid.loc.clone());
                         expr = parse_template_literal_with_prefix(p, Some(prefix));
                     }
                     _ => {
-                        expr = parse_tagged_template_literal_with_tag_expr(p, expr);
+                        // OCaml: only bare names are valid as tagged template tags
+                        p.err_at(
+                            p.loc_start(expr.pexp_loc).clone(),
+                            p.loc_end(expr.pexp_loc).clone(),
+                            DiagnosticCategory::message(
+                                "Tagged template literals are currently restricted to names like: \
+                                 myTagFunction`foo ${bar}`.",
+                            ),
+                        );
+                        expr = parse_template_literal_with_prefix(p, None);
                     }
                 }
             }
@@ -2235,30 +2720,11 @@ fn parse_call_args(p: &mut Parser<'_>) -> (Vec<(ArgLabel, Expression)>, bool) {
     // OCaml's start_pos for empty args is the position after '(' is consumed
     let start_pos_idx = p.start_pos_idx();
 
-    // Check for uncurried call syntax: f(. x, y)
-    // The dot indicates an uncurried function call (deprecated in newer ReScript)
-    let uncurried = p.token == Token::Dot;
-    if uncurried {
-        p.next();
-        // Check for apply(.) - uncurried unit call
-        // This produces a single unit argument, not an empty list
-        // OCaml uses Location.mknoloc here, so no location
-        if p.token == Token::Rparen {
-            let lid_idx = p.push_lident_static("()");
-            let unit_expr = Expression {
-                pexp_desc: ExpressionDesc::Pexp_construct(
-                    Loc {
-                        txt: lid_idx,
-                        loc: LocIdx::none(),
-                    },
-                    None,
-                ),
-                pexp_loc: LocIdx::none(),
-                pexp_attributes: vec![],
-            };
-            args.push((ArgLabel::Nolabel, unit_expr));
-        }
-    }
+    // Leave breadcrumb for ArgumentList (matching OCaml's parse_comma_delimited_region)
+    p.leave_breadcrumb(Grammar::ArgumentList);
+
+    // Uncurried call syntax: f(. x, y) or f(. x, y, . z)
+    // The dots are handled by parse_argument which consumes them
 
     while p.token != Token::Rparen && p.token != Token::Eof {
         // Check for partial application marker: f(a, ...)
@@ -2268,14 +2734,48 @@ fn parse_call_args(p: &mut Parser<'_>) -> (Vec<(ArgLabel, Expression)>, bool) {
             break;
         }
 
+        // OCaml: parse_comma_delimited_region calls f() which returns None
+        // when the token can't start an argument. Check before parsing.
+        if !grammar::is_argument_start(&p.token) {
+            if recover::should_abort_list_parse(p) {
+                break;
+            }
+            p.err(DiagnosticCategory::unexpected(p.token.clone(), p.breadcrumbs().to_vec()));
+            p.next();
+            continue;
+        }
+
         let (label, expr) = parse_argument(p);
         args.push((label, expr));
 
-        if !p.optional(&Token::Comma) {
+        if p.token == Token::Comma {
+            // Consume the comma and continue
+            p.next();
+        } else if p.token == Token::Rparen || p.token == Token::Eof {
+            // At closing token, done
+            break;
+        } else if grammar::is_argument_start(&p.token) {
+            // Token looks like another argument but no comma - missing comma case
+            // This matches OCaml: "is_list_element grammar p.token" check
+            p.expect(Token::Comma);
+            // Continue parsing (don't break)
+        } else if !recover::should_abort_list_parse(p) {
+            // Token is not argument start, not closing, not EOF,
+            // and should_abort_list_parse is false - expect comma
+            // This matches OCaml's behavior for unexpected tokens like ']' in arg list
+            p.expect(Token::Comma);
+            // Skip semicolons if present (OCaml does this)
+            if p.token == Token::Semicolon {
+                p.next();
+            }
+            // Continue parsing (don't break)
+        } else {
+            // should_abort_list_parse returned true - stop parsing
             break;
         }
     }
 
+    p.eat_breadcrumb();
     p.expect(Token::Rparen);
     // Get prev_end_pos AFTER consuming ')' to match OCaml behavior
     let rparen_end_idx = p.prev_end_pos_idx();
@@ -2303,7 +2803,32 @@ fn parse_call_args(p: &mut Parser<'_>) -> (Vec<(ArgLabel, Expression)>, bool) {
 }
 
 /// Parse a single argument (possibly labeled).
+/// Handles uncurried dot prefix: f(. x, y, . z) - the dot is consumed but
+/// doesn't change the argument structure (it's just part of uncurried syntax).
 fn parse_argument(p: &mut Parser<'_>) -> (ArgLabel, Expression) {
+    // Handle uncurried dot marker before argument
+    // In f(. a, b, . c), each dot is consumed before the argument
+    if p.token == Token::Dot {
+        p.next();
+        // Check for apply(.) - uncurried unit call
+        if p.token == Token::Rparen {
+            let lid_idx = p.push_lident_static("()");
+            let unit_expr = Expression {
+                pexp_desc: ExpressionDesc::Pexp_construct(
+                    Loc {
+                        txt: lid_idx,
+                        loc: LocIdx::none(),
+                    },
+                    None,
+                ),
+                pexp_loc: LocIdx::none(),
+                pexp_attributes: vec![],
+            };
+            return (ArgLabel::Nolabel, unit_expr);
+        }
+        // Fall through to parse the actual argument
+    }
+
     if p.token == Token::Tilde {
         p.next();
         let (name, name_loc) = parse_lident(p);
@@ -2333,26 +2858,74 @@ fn parse_argument(p: &mut Parser<'_>) -> (ArgLabel, Expression) {
             let expr = ast_helper::make_ident(p, Longident::Lident(name_str_idx), name_loc.clone());
             (ArgLabel::Optional(name_located), expr)
         } else if p.token == Token::Colon {
-            // ~label: type (labeled with type annotation - punning with constraint)
+            // ~label: ... could be type constraint or wrong separator
+            // OCaml checks is_typ_expr_start to decide
+            let colon_start = p.start_pos.clone();
             p.next();
-            let typ = super::typ::parse_typ_expr(p);
-            // Use the same interned StrIdx for the identifier - this enables sharing
-            let ident_expr = ast_helper::make_ident(p, Longident::Lident(name_str_idx), name_loc.clone());
-            // Constraint location spans from label name to end of type
-            let constraint_start_idx = p.loc_start_idx(name_loc);
-            let constraint_loc = p.mk_loc_idx_to_prev_end(constraint_start_idx);
-            let expr = Expression {
-                pexp_desc: ExpressionDesc::Pexp_constraint(Box::new(ident_expr), typ),
-                pexp_loc: constraint_loc,
-                pexp_attributes: vec![],
-            };
-            (ArgLabel::Labelled(name_located), expr)
+            let colon_end = p.prev_end_pos.clone();
+            if super::grammar::is_typ_expr_start(&p.token) {
+                // ~label: type (labeled with type annotation - punning with constraint)
+                let typ = super::typ::parse_typ_expr(p);
+                // Use the same interned StrIdx for the identifier - this enables sharing
+                let ident_expr = ast_helper::make_ident(p, Longident::Lident(name_str_idx), name_loc.clone());
+                // Constraint location spans from label name to end of type
+                let constraint_start_idx = p.loc_start_idx(name_loc);
+                let constraint_loc = p.mk_loc_idx_to_prev_end(constraint_start_idx);
+                let expr = Expression {
+                    pexp_desc: ExpressionDesc::Pexp_constraint(Box::new(ident_expr), typ),
+                    pexp_loc: constraint_loc,
+                    pexp_attributes: vec![],
+                };
+                (ArgLabel::Labelled(name_located), expr)
+            } else if p.token == Token::Question {
+                // ~label:?value -> should be ~label=?value
+                p.err_at(
+                    colon_start,
+                    colon_end,
+                    DiagnosticCategory::message(
+                        "Optional labelled arguments use `=?`. Example: `~label=?value`",
+                    ),
+                );
+                p.next();
+                let expr = parse_constrained_or_coerced_expr(p);
+                (ArgLabel::Optional(name_located), expr)
+            } else {
+                // ~label:value -> should be ~label=value
+                p.err_at(
+                    colon_start,
+                    colon_end,
+                    DiagnosticCategory::message(
+                        "Use `=` to pass a labelled argument. Example: `~label=value`",
+                    ),
+                );
+                let expr = if p.token == Token::Underscore && !super::core::is_es6_arrow_expression(p, false) {
+                    let start_idx = p.start_pos_idx();
+                    p.next();
+                    let loc = p.mk_loc_idx_to_prev_end(start_idx);
+                    let lid = super::core::make_lident_static(p.arena_mut(), "_");
+                    ast_helper::make_ident(p, lid, loc)
+                } else {
+                    parse_constrained_or_coerced_expr(p)
+                };
+                (ArgLabel::Labelled(name_located), expr)
+            }
         } else {
             // ~label (punning)
             // Use the same interned StrIdx for the identifier - this enables sharing
             let expr = ast_helper::make_ident(p, Longident::Lident(name_str_idx), name_loc.clone());
             (ArgLabel::Labelled(name_located), expr)
         }
+    } else if p.token == Token::Underscore && !super::core::is_es6_arrow_expression(p, false) {
+        // OCaml: _ as argument is valid (placeholder for partial application)
+        // BUT NOT if it's the start of an arrow function: f(_ => ...)
+        // This must be checked before parse_constrained_or_coerced_expr which
+        // would now treat _ as an error in parse_atomic_expr
+        let start_pos_idx = p.start_pos_idx();
+        p.next();
+        let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
+        let lid = super::core::make_lident_static(p.arena_mut(), "_");
+        let expr = ast_helper::make_ident(p, lid, loc);
+        (ArgLabel::Nolabel, expr)
     } else {
         // Unlabeled argument - may have type constraint like f({}:t)
         (ArgLabel::Nolabel, parse_constrained_or_coerced_expr(p))
@@ -2377,10 +2950,13 @@ fn parse_tuple_expr(p: &mut Parser<'_>, start_pos_idx: PosIdx, first: Expression
     p.expect(Token::Rparen);
     let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
 
+    // OCaml: A tuple needs at least two elements
     if elements.len() < 2 {
-        p.err(DiagnosticCategory::Message(
-            super::core::error_messages::TUPLE_SINGLE_ELEMENT.to_string(),
-        ));
+        p.err_at(
+            p.arena().get_position(start_pos_idx).clone(),
+            p.prev_end_pos.clone(),
+            DiagnosticCategory::Message("A tuple needs at least two elements".to_string()),
+        );
     }
 
     Expression {
@@ -2415,6 +2991,11 @@ fn parse_array_expr(p: &mut Parser<'_>) -> Expression {
         }
     }
 
+    // OCaml: the old Reason syntax [|...|] leaves a trailing | before ].
+    // Skip it so we can properly close the array.
+    if p.token == Token::Bar {
+        p.next();
+    }
     p.expect(Token::Rbracket);
     let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
 
@@ -2786,6 +3367,19 @@ fn parse_dict_expr(p: &mut Parser<'_>, start_pos_idx: PosIdx) -> Expression {
 
     let mut key_value_pairs: Vec<Expression> = vec![];
     while p.token != Token::Rbrace && p.token != Token::Eof {
+        // Check for spread syntax (not supported in dicts)
+        if p.token == Token::DotDotDot {
+            p.err(DiagnosticCategory::Message(
+                super::core::error_messages::DICT_EXPR_SPREAD.to_string(),
+            ));
+            p.next(); // consume the ...
+            // Skip the spread expression
+            let _ = parse_unary_expr(p);
+            if !p.optional(&Token::Comma) {
+                break;
+            }
+            continue;
+        }
         // Parse key (string)
         match &p.token {
             Token::String(s) => {
@@ -2914,6 +3508,40 @@ fn parse_braced_or_record_expr(p: &mut Parser<'_>) -> Expression {
         };
     }
 
+    // OCaml: Token.is_keyword token case in parse_braced_or_record_expr
+    // Check for keyword as first token (before block expression check)
+    if p.token.is_keyword() {
+        if let Some((recovered_name, loc)) = super::core::recover_keyword_field_name_if_probably_field(
+            p,
+            super::core::error_messages::keyword_field_in_expr,
+        ) {
+            // OCaml: Parser.expect Colon p
+            p.expect(Token::Colon);
+            // Check for optional marker
+            let opt = p.token == Token::Question;
+            if opt {
+                p.next();
+            }
+            let field_expr = parse_expr(p);
+            let lid_idx = p.push_lident(&recovered_name);
+            let lid = with_loc(lid_idx, loc);
+            let first_field = ExpressionRecordField { lid, expr: field_expr, opt };
+            p.optional(&Token::Comma);
+            let mut fields = parse_record_fields(p);
+            fields.insert(0, first_field);
+            p.expect(Token::Rbrace);
+            let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
+            return Expression {
+                pexp_desc: ExpressionDesc::Pexp_record(fields, None),
+                pexp_loc: loc,
+                pexp_attributes: vec![],
+            };
+        } else {
+            // Not followed by colon - parse as block expression
+            return parse_block_expr(p, start_pos_idx);
+        }
+    }
+
     // Check if this looks like a block expression (module-level constructs or let/expressions)
     if is_block_expression_start(&p.token) {
         return parse_block_expr(p, start_pos_idx);
@@ -2922,6 +3550,9 @@ fn parse_braced_or_record_expr(p: &mut Parser<'_>) -> Expression {
     // Check if this looks like a record (name followed by : or ,)
     // or a JS object (string key followed by :)
     // Also check for optional field syntax: { ? name, ... }
+    // Also check for error case: {ident1 ident2:...} where we have two identifiers
+    // and the second one is followed by colon (this is a record field error case).
+    // OCaml res_core.ml line 3229-3247 handles this case specially.
     let is_record = p.lookahead(|state| {
         // Optional field punning: { ? name, ... }
         if state.token == Token::Question {
@@ -2952,7 +3583,21 @@ fn parse_braced_or_record_expr(p: &mut Parser<'_>) -> Expression {
         if started_with_uident || parts > 1 {
             matches!(state.token, Token::Colon | Token::Comma)
         } else {
-            matches!(state.token, Token::Colon | Token::Comma)
+            // Also check for error case: {ident1 ident2:...}
+            // This is when first identifier is followed by another identifier (on a different line)
+            // or followed by another identifier and then a colon (on same line)
+            // OCaml handles this specially to give good error messages for record fields
+            if matches!(state.token, Token::Lident(_)) {
+                // Skip the second identifier
+                state.next();
+                // If colon follows, this is likely {ident1 ident2: value} - missing comma
+                // If another identifier follows or something else, might be a record error case
+                // We'll return true to let the record field parsing handle the error
+                return matches!(state.token, Token::Colon | Token::Lident(_));
+            }
+            // Include Token::Equal to detect {foo = value} as a record with wrong separator
+            // OCaml res_core.ml line 3206 handles this case
+            matches!(state.token, Token::Colon | Token::Comma | Token::Equal)
         }
     });
 
@@ -2996,8 +3641,82 @@ fn parse_braced_or_record_expr(p: &mut Parser<'_>) -> Expression {
         return parse_braced_arrow_ident(p, start_pos_idx);
     }
 
+    // Special handling for identifier followed by semicolon: {a;} or {a; b()}
+    // OCaml creates the ident expression WITHOUT ~loc when followed by semicolon,
+    // which defaults to Location.none (ghost location).
+    // This matches res_core.ml line 3248-3250.
+    let is_ident_semicolon = p.lookahead(|state| {
+        if let Token::Lident(_) | Token::Uident(_) = &state.token {
+            // Check for simple ident or dotted path (Foo.bar)
+            loop {
+                state.next();
+                if state.token == Token::Dot {
+                    state.next();
+                    if !matches!(state.token, Token::Lident(_) | Token::Uident(_)) {
+                        return false;
+                    }
+                } else {
+                    break;
+                }
+            }
+            matches!(state.token, Token::Semicolon)
+        } else {
+            false
+        }
+    });
+
+    if is_ident_semicolon {
+        return parse_braced_ident_semicolon(p, start_pos_idx);
+    }
+
     // Fall back to block expression
     parse_block_expr(p, start_pos_idx)
+}
+
+/// Parse braced expression starting with identifier followed by semicolon: {a;} or {a; b()}
+/// OCaml creates the ident expression WITHOUT ~loc when followed by semicolon,
+/// which defaults to Location.none (ghost location).
+fn parse_braced_ident_semicolon(p: &mut Parser<'_>, start_pos_idx: PosIdx) -> Expression {
+    // Parse the value/constructor expression
+    let mut ident_expr = parse_value_or_constructor(p);
+
+    // Set the expression location to ghost (matching OCaml's behavior)
+    // OCaml: Ast_helper.Exp.ident path_ident  <- no ~loc, defaults to Location.none
+    ident_expr.pexp_loc = LocIdx::none();
+
+    // Consume the semicolon
+    p.expect(Token::Semicolon);
+
+    // Parse the rest of the block (if any)
+    let rest = parse_block_body(p);
+
+    p.expect(Token::Rbrace);
+    let braces_loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
+
+    // Build the final expression
+    let mut expr = if let Some(rest_expr) = rest {
+        // Create sequence: a; b()
+        // OCaml: loc = {e1.pexp_loc with loc_end = e2.pexp_loc.loc_end}
+        // Since e1 has ghost loc, the sequence loc should also be ghost
+        let seq_loc = p.mk_loc_spanning_preserve_ghost(ident_expr.pexp_loc, rest_expr.pexp_loc);
+        Expression {
+            pexp_desc: ExpressionDesc::Pexp_sequence(
+                Box::new(ident_expr),
+                Box::new(rest_expr),
+            ),
+            pexp_loc: seq_loc,
+            pexp_attributes: vec![],
+        }
+    } else {
+        // Just the identifier with trailing semicolon: {a;}
+        ident_expr
+    };
+
+    // Add res.braces attribute
+    let braces_attr = make_braces_attr(p.arena_mut(), braces_loc);
+    expr.pexp_attributes.insert(0, braces_attr);
+
+    expr
 }
 
 /// Check if a token starts a block expression (vs record).
@@ -3063,7 +3782,7 @@ fn parse_braced_arrow_ident(p: &mut Parser<'_>, start_pos_idx: PosIdx) -> Expres
     let arrow_expr = parse_ternary_expr(p, arrow_expr);
 
     // Handle semicolon and continuation (block expression semantics)
-    p.optional(&Token::Semicolon);
+    parse_newline_or_semicolon_expr_block(p);
 
     let expr = if p.token != Token::Rbrace && p.token != Token::Eof {
         // There's more content - parse as sequence
@@ -3096,28 +3815,34 @@ fn parse_braced_arrow_ident(p: &mut Parser<'_>, start_pos_idx: PosIdx) -> Expres
 /// where the block is structurally required and res.braces is not needed.
 /// Note: This does NOT consume the closing Rbrace - the caller must do that.
 fn parse_expr_block(p: &mut Parser<'_>) -> Expression {
-    let start_pos_idx = p.start_pos_idx();
+    let _start_pos_idx = p.start_pos_idx();
+    // OCaml: leave_breadcrumb ExprBlock - critical for error recovery
+    // This allows should_abort_list_parse to detect } as a block terminator
+    p.leave_breadcrumb(Grammar::ExprBlock);
     // Parse the block body - this handles building the proper nesting for let/module/open/exception
     let body = parse_block_body(p);
 
+    p.eat_breadcrumb();
     // Don't expect Rbrace here - caller will do that
     // Use current position for empty block, or body's end position
-    let end_pos_idx = body
-        .as_ref()
-        .map(|e| p.loc_end_idx(e.pexp_loc))
-        .unwrap_or_else(|| p.prev_end_pos_idx());
-    let loc = p.mk_loc_idx(start_pos_idx, end_pos_idx);
-
-    body.unwrap_or_else(|| ast_helper::make_unit(p, loc))
+    // OCaml: when the block is empty, use exprhole (not unit) so that
+    // error recovery produces [%rescript.exprhole] instead of ()
+    match body {
+        Some(expr) => expr,
+        None => recover::default_expr(p.arena_mut()),
+    }
 }
 
 /// Parse a block expression { stmt1; stmt2; expr } WITH res.braces attribute.
 /// This is used for standalone braced expressions where res.braces is needed
 /// to preserve the bracing information.
 fn parse_block_expr(p: &mut Parser<'_>, start_pos_idx: PosIdx) -> Expression {
+    // OCaml: leave_breadcrumb ExprBlock - critical for error recovery
+    p.leave_breadcrumb(Grammar::ExprBlock);
     // Parse the block body - this handles building the proper nesting for let/module/open/exception
     let body = parse_block_body(p);
 
+    p.eat_breadcrumb();
     p.expect(Token::Rbrace);
     let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
 
@@ -3147,7 +3872,11 @@ fn parse_block_body(p: &mut Parser<'_>) -> Option<Expression> {
         p.next();
     }
 
-    if p.token == Token::Rbrace || p.token == Token::Eof {
+    // Check if we can parse more expressions.
+    // OCaml uses `is_block_expr_start` here to determine if the block continues.
+    // This is important for error recovery - when `else` appears after an if's then-branch,
+    // we should NOT try to parse it as a block expression.
+    if p.token == Token::Rbrace || p.token == Token::Eof || !grammar::is_block_expr_start(&p.token) {
         return None;
     }
 
@@ -3168,8 +3897,8 @@ fn parse_block_body(p: &mut Parser<'_>) -> Option<Expression> {
             };
             let lid = parse_module_longident(p);
 
-            // Consume optional semicolon/newline
-            p.optional(&Token::Semicolon);
+            // Check consecutive expressions
+            parse_newline_or_semicolon_expr_block(p);
 
             // Parse the rest of the block as the body
             let rest = parse_block_body(p);
@@ -3201,8 +3930,8 @@ fn parse_block_body(p: &mut Parser<'_>) -> Option<Expression> {
                 let pack_expr = parse_first_class_module_expr(p, expr_start_idx);
                 let expr = parse_expr_with_operand(p, pack_expr);
 
-                // Consume optional semicolon
-                p.optional(&Token::Semicolon);
+                // Check consecutive expressions
+                parse_newline_or_semicolon_expr_block(p);
 
                 // Check for continuation
                 if let Some(rest) = parse_block_body(p) {
@@ -3245,8 +3974,8 @@ fn parse_block_body(p: &mut Parser<'_>) -> Option<Expression> {
                     };
                 }
 
-                // Consume optional semicolon/newline
-                p.optional(&Token::Semicolon);
+                // Check consecutive expressions
+                parse_newline_or_semicolon_expr_block(p);
 
                 // Parse the rest of the block as the body
                 let rest = parse_block_body(p);
@@ -3276,8 +4005,8 @@ fn parse_block_body(p: &mut Parser<'_>) -> Option<Expression> {
             let ext =
                 super::module::parse_extension_constructor(p, vec![], Some(expr_start_idx));
 
-            // Consume optional semicolon/newline
-            p.optional(&Token::Semicolon);
+            // Check consecutive expressions
+            parse_newline_or_semicolon_expr_block(p);
 
             // Parse the rest of the block as the body
             let rest = parse_block_body(p);
@@ -3295,6 +4024,85 @@ fn parse_block_body(p: &mut Parser<'_>) -> Option<Expression> {
                 pexp_attributes: vec![],
             }
         }
+        Token::Typ => {
+            // Type definitions are not allowed inside blocks/functions in ReScript
+            // OCaml: parse the type definition first to get the correct error location,
+            // then emit the error and continue parsing
+            let type_start = p.start_pos.clone();
+            p.begin_region();
+            p.next(); // consume 'type'
+
+            // Skip the entire type definition to get its end position
+            // Type definition format: type [rec] name [<params>] = body [and ...]
+            // Skip 'rec' if present
+            if p.token == Token::Rec {
+                p.next();
+            }
+            // Skip type name (identifier)
+            if matches!(p.token, Token::Lident(_)) {
+                p.next();
+            }
+            // Skip type parameters <'a, 'b> if present
+            if p.token == Token::LessThan {
+                let mut depth = 1;
+                p.next();
+                while depth > 0 && p.token != Token::Eof {
+                    match p.token {
+                        Token::LessThan => depth += 1,
+                        Token::GreaterThan => depth -= 1,
+                        _ => {}
+                    }
+                    p.next();
+                }
+            }
+            // Skip = and the type body
+            if p.token == Token::Equal {
+                p.next();
+                // Skip until we hit a newline, semicolon, closing brace, or a new statement keyword
+                // The type body can contain identifiers, dots, angle brackets, etc.
+                let mut brace_depth = 0;
+                let mut paren_depth = 0;
+                let mut angle_depth = 0;
+                while p.token != Token::Eof {
+                    // Track nesting
+                    match &p.token {
+                        Token::Lbrace => brace_depth += 1,
+                        Token::Rbrace if brace_depth > 0 => brace_depth -= 1,
+                        Token::Rbrace => break, // End of enclosing block
+                        Token::Lparen => paren_depth += 1,
+                        Token::Rparen if paren_depth > 0 => paren_depth -= 1,
+                        Token::LessThan => angle_depth += 1,
+                        Token::GreaterThan if angle_depth > 0 => angle_depth -= 1,
+                        _ => {}
+                    }
+                    // Stop at statement boundaries (outside of nested structures)
+                    if brace_depth == 0 && paren_depth == 0 && angle_depth == 0 {
+                        match &p.token {
+                            Token::Let { .. } | Token::Module | Token::Open | Token::External | Token::Exception => break,
+                            _ => {}
+                        }
+                        // Stop at line break (implicit statement separator)
+                        // prev_end_pos.line < start_pos.line means there was a newline
+                        if p.prev_end_pos.line < p.start_pos.line {
+                            break;
+                        }
+                    }
+                    p.next();
+                }
+            }
+            p.end_region();
+            // Emit error at the type definition location
+            p.err_at(
+                type_start,
+                p.prev_end_pos.clone(),
+                super::diagnostics::DiagnosticCategory::Message(
+                    super::core::error_messages::TYPE_DEFINITION_IN_FUNCTION.to_string(),
+                ),
+            );
+            // Parse the next semicolon/newline if present, then continue
+            parse_newline_or_semicolon_expr_block(p);
+            return parse_block_body(p);
+        }
         _ => {
             let mut expr = parse_expr(p);
 
@@ -3303,8 +4111,8 @@ fn parse_block_body(p: &mut Parser<'_>) -> Option<Expression> {
                 expr.pexp_attributes.extend(attrs.clone());
             }
 
-            // Consume optional semicolon
-            p.optional(&Token::Semicolon);
+            // Check consecutive expressions
+            parse_newline_or_semicolon_expr_block(p);
 
             // Check for continuation
             if let Some(rest) = parse_block_body(p) {
@@ -3315,6 +4123,7 @@ fn parse_block_body(p: &mut Parser<'_>) -> Option<Expression> {
                     pexp_attributes: vec![],
                 });
             } else {
+                let expr = over_parse_constrained_or_coerced_or_arrow_expression(p, expr);
                 return Some(expr);
             }
         }
@@ -3374,7 +4183,11 @@ fn parse_let_in_block_with_continuation_and_attrs(
         // Check if this is `type a.` syntax (locally abstract types)
         let is_locally_abstract = p.token == Token::Typ;
 
-        let typ = super::typ::parse_typ_expr(p);
+        let typ = if is_locally_abstract {
+            super::typ::parse_locally_abstract_type(p)
+        } else {
+            super::typ::parse_typ_expr(p)
+        };
 
         // Extract type variables and inner type if this is a Ptyp_poly from `type a.` syntax
         let (final_typ, newtype_info) = match typ.ptyp_desc {
@@ -3520,8 +4333,8 @@ fn parse_let_in_block_with_continuation_and_attrs(
         });
     }
 
-    // Consume optional semicolon/newline
-    p.optional(&Token::Semicolon);
+    // Check consecutive expressions
+    parse_newline_or_semicolon_expr_block(p);
 
     // Parse the rest of the block as the body
     let rest = parse_block_body(p);
@@ -3603,12 +4416,47 @@ fn parse_module_longident(p: &mut Parser<'_>) -> Located<LidentIdx> {
     with_loc(lid_idx, loc)
 }
 
+/// Handle comma after parsing a record field, matching OCaml's parse_comma_delimited_region.
+/// Returns true if parsing should continue, false if it should stop.
+fn handle_record_field_comma(p: &mut Parser<'_>) -> bool {
+    if p.token == Token::Comma {
+        p.next();
+        true
+    } else if p.token == Token::Rbrace || p.token == Token::Eof {
+        false
+    } else if grammar::is_record_row_start(&p.token) {
+        // Token looks like another field but no comma - missing comma case
+        p.expect(Token::Comma);
+        true
+    } else if !recover::should_abort_list_parse(p) {
+        // Unexpected token, not closing/EOF/abort - expect comma
+        p.expect(Token::Comma);
+        if p.token == Token::Semicolon {
+            p.next();
+        }
+        true
+    } else {
+        false
+    }
+}
+
 /// Parse record fields.
 fn parse_record_fields(p: &mut Parser<'_>) -> Vec<ExpressionRecordField> {
     let mut fields = vec![];
 
+    p.leave_breadcrumb(Grammar::RecordRows);
+
     while p.token != Token::Rbrace && p.token != Token::Eof {
         let field_start_idx = p.start_pos_idx();
+
+        // Check for additional spread (second spread is an error)
+        // OCaml: parse_record_expr_row checks for DotDotDot and emits error
+        if p.token == Token::DotDotDot {
+            p.err(DiagnosticCategory::Message(
+                super::core::error_messages::RECORD_EXPR_SPREAD.to_string(),
+            ));
+            p.next();
+        }
 
         // Check for optional field punning: { ? name, ... }
         let opt_punning = p.token == Token::Question;
@@ -3620,15 +4468,12 @@ fn parse_record_fields(p: &mut Parser<'_>) -> Vec<ExpressionRecordField> {
         let expr_start_idx = if opt_punning { p.start_pos_idx() } else { field_start_idx };
 
         // Support qualified record labels: {Module.label: value}
+        // OCaml: Lident/Uident case in parse_record_expr_row
         let mut parts: Vec<String> = vec![];
         loop {
             match &p.token {
                 Token::Lident(name) | Token::Uident(name) => {
                     parts.push(name.clone());
-                    p.next();
-                }
-                _ if p.token.is_keyword() => {
-                    parts.push(p.token.to_string());
                     p.next();
                 }
                 _ => break,
@@ -3640,8 +4485,44 @@ fn parse_record_fields(p: &mut Parser<'_>) -> Vec<ExpressionRecordField> {
             }
         }
 
+        // If parts is empty, check for keyword field
+        // OCaml: Token.is_keyword p.token case in parse_record_expr_row
         if parts.is_empty() {
-            break;
+            if p.token.is_keyword() {
+                // Try to recover keyword as field name if followed by colon
+                if let Some((recovered_name, loc)) = super::core::recover_keyword_field_name_if_probably_field(
+                    p,
+                    super::core::error_messages::keyword_field_in_expr,
+                ) {
+                    // OCaml: Parser.expect Colon p
+                    p.expect(Token::Colon);
+                    // Check for optional marker after colon: name: ? value
+                    let opt = p.token == Token::Question;
+                    if opt {
+                        p.next();
+                    }
+                    let expr = parse_expr(p);
+                    let lid_idx = p.push_lident(&recovered_name);
+                    let lid = with_loc(lid_idx, loc);
+                    fields.push(ExpressionRecordField { lid, expr, opt });
+                    if !handle_record_field_comma(p) {
+                        break;
+                    }
+                    continue;
+                } else {
+                    // Just emit the error and break
+                    super::core::emit_keyword_field_error(p, super::core::error_messages::keyword_field_in_expr);
+                    break;
+                }
+            }
+            // Token is not a valid field start - check if we should continue or stop
+            if p.token == Token::Rbrace || p.token == Token::Eof || recover::should_abort_list_parse(p) {
+                break;
+            }
+            // Unexpected token - report error and skip
+            p.err_unexpected();
+            p.next();
+            continue;
         }
 
         let lid_unloc = super::core::build_longident(p.arena_mut(), &parts);
@@ -3661,6 +4542,49 @@ fn parse_record_fields(p: &mut Parser<'_>) -> Vec<ExpressionRecordField> {
             }
             let expr = parse_expr(p);
             (with_loc(lid_idx, lid_loc), expr, opt)
+        } else if p.token == Token::Equal {
+            // OCaml: Token.Equal case in parse_record_expr_row
+            // {field=value} instead of {field: value}
+            let lid_end_idx = p.prev_end_pos_idx();
+            p.err_at(
+                p.start_pos.clone(),
+                p.end_pos.clone(),
+                DiagnosticCategory::message(
+                    "Records use `:` when assigning fields. Example: `{field: value}`",
+                ),
+            );
+            p.next(); // consume =
+            let lid_loc = p.mk_loc_idx(field_start_idx, lid_end_idx);
+            let opt = p.token == Token::Question;
+            if opt {
+                p.next();
+            }
+            let expr = parse_expr(p);
+            (with_loc(lid_idx, lid_loc), expr, opt)
+        } else if matches!(p.token, Token::Lident(_)) {
+            // OCaml res_core.ml line 3229-3247: Error case where ident is followed by another ident
+            // Example: {updateF value:...} where updateF and value are separate identifiers
+            // If they are on different lines, emit "Did you forget a `,`?"
+            // If they are on the same line, emit "Did you forget a `:`?"
+            let prev_line = p.prev_end_pos.line;
+            let curr_line = p.start_pos.line;
+
+            // Punning: this field is punned (value is same as name)
+            let loc = p.mk_loc_idx_to_prev_end(expr_start_idx);
+            let pun_idx = p.arena_mut().push_string(pun_name);
+            let punned_expr = ast_helper::make_ident(p, Longident::Lident(pun_idx), loc.clone());
+            let lid = with_loc(lid_idx, loc);
+
+            // Emit appropriate error and expect comma or colon
+            if prev_line < curr_line {
+                // Different lines - expect comma
+                p.expect(Token::Comma);
+            } else {
+                // Same line - expect colon
+                p.expect(Token::Colon);
+            }
+
+            (lid, punned_expr, opt_punning)
         } else {
             // Punning: field is same as variable
             // For optional punned fields, the expression location is just the identifier (using expr_start)
@@ -3672,11 +4596,12 @@ fn parse_record_fields(p: &mut Parser<'_>) -> Vec<ExpressionRecordField> {
 
         fields.push(ExpressionRecordField { lid, expr, opt });
 
-        if !p.optional(&Token::Comma) {
+        if !handle_record_field_comma(p) {
             break;
         }
     }
 
+    p.eat_breadcrumb();
     fields
 }
 
@@ -3752,29 +4677,69 @@ fn parse_js_object_expr(p: &mut Parser<'_>, start_pos_idx: PosIdx) -> Expression
 // Control Flow Expressions
 // ============================================================================
 
-/// Parse an if expression.
-fn parse_if_expr(p: &mut Parser<'_>) -> Expression {
-    let start_pos_idx = p.start_pos_idx();
-    p.expect(Token::If);
-
+/// Parse the condition of an if expression.
+/// OCaml: parse_if_condition
+fn parse_if_condition(p: &mut Parser<'_>) -> Expression {
+    p.leave_breadcrumb(Grammar::IfCondition);
     let condition = parse_expr_with_context(p, ExprContext::When);
+    p.eat_breadcrumb();
+    condition
+}
+
+/// Parse the then-branch of an if expression.
+/// OCaml: parse_then_branch
+fn parse_then_branch(p: &mut Parser<'_>) -> Expression {
+    p.leave_breadcrumb(Grammar::IfBranch);
     p.expect(Token::Lbrace);
-    // Use parse_expr_block (no res.braces) for if branches, matching OCaml behavior
-    let then_branch = parse_expr_block(p);
+    let then_expr = parse_expr_block(p);
     p.expect(Token::Rbrace);
+    p.eat_breadcrumb();
+    then_expr
+}
+
+/// Parse the else-branch of an if expression (body only, after `else` is consumed).
+/// OCaml: parse_else_branch
+fn parse_else_branch(p: &mut Parser<'_>) -> Expression {
+    p.expect(Token::Lbrace);
+    let block_expr = parse_expr_block(p);
+    p.expect(Token::Rbrace);
+    block_expr
+}
+
+/// Parse the body of an if expression (after `if` is consumed).
+/// OCaml: parse_if_expr
+///
+/// This function handles the region management for error suppression:
+/// - The calling function (parse_if_or_if_let_expression) has already called begin_region
+/// - When we see `else`, we end_region (to allow else branch to report its own errors)
+///   then begin_region for the else branch
+/// - We end_region at the end in both cases
+fn parse_if_expr_body(p: &mut Parser<'_>, start_pos_idx: PosIdx) -> Expression {
+    let condition = parse_if_condition(p);
+    let then_branch = parse_then_branch(p);
 
     let else_branch = if p.token == Token::Else {
-        p.next();
-        if p.token == Token::If {
-            Some(Box::new(parse_if_expr(p)))
+        // End the region for the then-branch (allows else branch to report errors)
+        p.end_region();
+        p.leave_breadcrumb(Grammar::ElseBranch);
+        p.next(); // consume `else`
+        // Begin a new region for the else-branch
+        p.begin_region();
+
+        let else_expr = if p.token == Token::If {
+            // `else if` - recursively parse another if expression
+            // Note: parse_if_or_if_let_expression will do its own begin_region
+            parse_if_or_if_let_expression(p)
         } else {
-            p.expect(Token::Lbrace);
-            // Use parse_expr_block (no res.braces) for else branches, matching OCaml behavior
-            let expr = parse_expr_block(p);
-            p.expect(Token::Rbrace);
-            Some(Box::new(expr))
-        }
+            parse_else_branch(p)
+        };
+
+        p.eat_breadcrumb();
+        p.end_region();
+        Some(Box::new(else_expr))
     } else {
+        // No else branch - end the region here
+        p.end_region();
         None
     };
 
@@ -3789,6 +4754,160 @@ fn parse_if_expr(p: &mut Parser<'_>) -> Expression {
         pexp_loc: loc,
         pexp_attributes: vec![],
     }
+}
+
+/// Parse an if expression (or if-let expression).
+/// OCaml: parse_if_or_if_let_expression
+///
+/// This is the main entry point for parsing if expressions.
+/// It sets up the region and breadcrumb, then delegates to parse_if_expr_body.
+fn parse_if_or_if_let_expression(p: &mut Parser<'_>) -> Expression {
+    p.begin_region();
+    p.leave_breadcrumb(Grammar::ExprIf);
+    let start_pos_idx = p.start_pos_idx();
+    p.expect(Token::If);
+
+    let expr = match &p.token {
+        Token::Let { .. } => {
+            // if-let expression: parse as match with @res.iflet attribute
+            p.next(); // consume `let`
+            parse_if_let_expr(p, start_pos_idx)
+        }
+        _ => parse_if_expr_body(p, start_pos_idx),
+    };
+
+    p.eat_breadcrumb();
+    expr
+}
+
+/// Parse an if-let expression (after `if` and `let` are consumed).
+/// OCaml: parse_if_let_expr
+///
+/// Produces a Pexp_match with @res.iflet and @warning "-4" attributes,
+/// and emits an experimental if-let error message.
+fn parse_if_let_expr(p: &mut Parser<'_>, start_pos_idx: PosIdx) -> Expression {
+    let pattern = super::pattern::parse_pattern(p);
+    p.expect(Token::Equal);
+    let condition_expr = parse_if_condition(p);
+    let then_expr = parse_then_branch(p);
+
+    let else_expr = match &p.token {
+        Token::Else => {
+            p.end_region();
+            p.leave_breadcrumb(Grammar::ElseBranch);
+            p.next(); // consume `else`
+            p.begin_region();
+            let else_expr = match &p.token {
+                Token::If => parse_if_or_if_let_expression(p),
+                _ => parse_else_branch(p),
+            };
+            p.eat_breadcrumb();
+            p.end_region();
+            else_expr
+        }
+        _ => {
+            p.end_region();
+            // No else: use () as the else expression
+            let cur_start = p.start_pos_idx();
+            let unit_loc = p.mk_loc_idx_to_prev_end(cur_start);
+            ast_helper::make_unit(p, unit_loc)
+        }
+    };
+
+    let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
+
+    // Build the match expression: match condition { | pattern => then | _ => else }
+    let if_let_expr = Expression {
+        pexp_desc: ExpressionDesc::Pexp_match(
+            Box::new(condition_expr),
+            vec![
+                Case {
+                    pc_bar: None,
+                    pc_lhs: pattern,
+                    pc_guard: None,
+                    pc_rhs: then_expr,
+                },
+                Case {
+                    pc_bar: None,
+                    pc_lhs: Pattern {
+                        ppat_desc: PatternDesc::Ppat_any,
+                        ppat_loc: loc,
+                        ppat_attributes: vec![],
+                    },
+                    pc_guard: None,
+                    pc_rhs: else_expr,
+                },
+            ],
+        ),
+        pexp_loc: loc,
+        pexp_attributes: vec![
+            if_let_attr(p.arena_mut()),
+            suppress_fragile_match_warning_attr(p),
+        ],
+    };
+
+    // Emit the experimental if-let error message using ResPrinter
+    {
+        use super::doc::Doc;
+        use super::printer2;
+        use super::comment_table::CommentTable;
+
+        // Create a copy without attributes for printing
+        let switch_expr = Expression {
+            pexp_attributes: vec![],
+            ..if_let_expr.clone()
+        };
+
+        let state = printer2::PrinterState::init();
+        let mut cmt_tbl = CommentTable::new();
+        let msg = Doc::concat(vec![
+            Doc::text("If-let is currently highly experimental."),
+            Doc::line(),
+            Doc::text("Use a regular `switch` with pattern matching instead:"),
+            Doc::concat(vec![
+                Doc::hard_line(),
+                Doc::hard_line(),
+                printer2::print_expression(&state, &switch_expr, &mut cmt_tbl, p.arena()),
+            ]),
+        ]).to_string(80);
+
+        p.err_at(
+            p.loc_start(if_let_expr.pexp_loc),
+            p.loc_end(if_let_expr.pexp_loc),
+            DiagnosticCategory::message(&msg),
+        );
+    }
+
+    if_let_expr
+}
+
+/// Create the @warning "-4" attribute to suppress fragile match warnings.
+fn suppress_fragile_match_warning_attr(p: &mut Parser<'_>) -> Attribute {
+    use super::ast::*;
+    let cur_start = p.start_pos_idx();
+    let loc = p.mk_loc_idx_to_prev_end(cur_start);
+    let warning_str_idx = p.arena_mut().intern("warning");
+    (
+        mknoloc(warning_str_idx),
+        Payload::PStr(vec![
+            StructureItem {
+                pstr_desc: StructureItemDesc::Pstr_eval(
+                    Expression {
+                        pexp_desc: ExpressionDesc::Pexp_constant(Constant::String("-4".to_string(), None)),
+                        pexp_loc: loc,
+                        pexp_attributes: vec![],
+                    },
+                    vec![],
+                ),
+                pstr_loc: loc,
+            },
+        ]),
+    )
+}
+
+/// Legacy entry point for if expressions - wraps parse_if_or_if_let_expression.
+fn parse_if_expr(p: &mut Parser<'_>) -> Expression {
+    parse_if_or_if_let_expression(p)
 }
 
 /// Parse a block body for switch case RHS (no braces).
@@ -4137,12 +5256,31 @@ fn parse_first_class_module_expr_inner(p: &mut Parser<'_>, start_pos_idx: PosIdx
 /// Parses one or more expressions separated by newlines/semicolons,
 /// stopping at `|` (next case) or `}` (end of switch).
 fn parse_switch_case_block(p: &mut Parser<'_>) -> Expression {
-    // Use the new recursive parser that properly nests let/module/open/exception
-    parse_switch_case_body(p).unwrap_or_else(|| {
-        // OCaml uses mk_loc p.start_pos p.end_pos for synthesized unit
-        let loc = p.mk_loc_current();
-        ast_helper::make_unit(p, loc)
-    })
+    // OCaml uses parse_expr_block which pushes ExprBlock breadcrumb.
+    // This is critical for error messages: ExprBlock + Bar → "Looks like there might be
+    // an expression missing here" (for empty switch case bodies like | Empty => | Next => ...)
+    p.leave_breadcrumb(Grammar::ExprBlock);
+    // Use the recursive parser that properly nests let/module/open/exception
+    let result = parse_switch_case_body(p).unwrap_or_else(|| {
+        // OCaml: parse_expr_block -> parse_expr_block_item -> parse_expr ->
+        // parse_atomic_expr encounters | or } and emits an error through the
+        // breadcrumb-aware diagnostic system before returning exprhole.
+        // Match OCaml's error position: prev_end_pos..end_pos (like parse_atomic_expr default)
+        // Push ExprOperand so breadcrumb-aware diagnostics see [.., ExprBlock, ExprOperand]
+        // which triggers "Looks like there might be an expression missing here" for Bar.
+        if p.token != Token::Rbrace && p.token != Token::Eof {
+            p.leave_breadcrumb(Grammar::ExprOperand);
+            p.err_at(
+                p.prev_end_pos.clone(),
+                p.end_pos.clone(),
+                DiagnosticCategory::unexpected(p.token.clone(), p.breadcrumbs().to_vec()),
+            );
+            p.eat_breadcrumb();
+        }
+        recover::default_expr(p.arena_mut())
+    });
+    p.eat_breadcrumb();
+    result
 }
 
 /// Parse a switch expression.
@@ -4155,10 +5293,21 @@ fn parse_switch_expr(p: &mut Parser<'_>) -> Expression {
 
     let mut cases = vec![];
     while p.token != Token::Rbrace && p.token != Token::Eof {
+        // OCaml uses begin_region/end_region around each case
+        // This allows errors from different cases to all be reported
+        p.begin_region();
+        // OCaml: Parser.leave_breadcrumb p Grammar.PatternMatchCase
+        p.leave_breadcrumb(Grammar::PatternMatchCase);
+
         if p.token == Token::Bar {
             let bar_pos = Some(p.start_pos_idx());
             p.next();
-            let lhs = super::pattern::parse_constrained_pattern(p);
+            // OCaml: Parser.leave_breadcrumb p Grammar.Pattern
+            // OCaml uses parse_pattern (not parse_constrained_pattern) for switch case patterns.
+            // Constraints are only handled inside parenthesized/delimited patterns.
+            p.leave_breadcrumb(Grammar::Pattern);
+            let lhs = super::pattern::parse_pattern(p);
+            p.eat_breadcrumb();
             let guard = if p.token == Token::When || (p.token == Token::If) {
                 p.next();
                 Some(parse_expr_with_context(p, ExprContext::When))
@@ -4174,9 +5323,23 @@ fn parse_switch_expr(p: &mut Parser<'_>) -> Expression {
                 pc_guard: guard,
                 pc_rhs: rhs,
             });
+            p.end_region();
+            p.eat_breadcrumb();
         } else {
+            p.end_region();
+            p.eat_breadcrumb();
             break;
         }
+    }
+
+    // OCaml: emit error if switch has no cases
+    // OCaml uses end_pos (end of current token) as the error end, not start_pos
+    if cases.is_empty() {
+        p.err_at(
+            p.prev_end_pos.clone(),
+            p.end_pos.clone(),
+            DiagnosticCategory::Message("Pattern matching needs at least one case".to_string()),
+        );
     }
 
     p.expect(Token::Rbrace);
@@ -4312,20 +5475,25 @@ fn parse_try_expr(p: &mut Parser<'_>) -> Expression {
     p.expect(Token::Try);
 
     let body = parse_expr_with_context(p, ExprContext::When);
-    // "catch" is not a keyword, so we check for Lident("catch")
-    if !matches!(&p.token, Token::Lident(s) if s == "catch") {
-        p.err(DiagnosticCategory::Message("Expected 'catch'".to_string()));
-    } else {
-        p.next();
-    }
+    // "catch" is not a keyword, but OCaml uses `Parser.expect Res_token.catch p`
+    // where `Res_token.catch = Lident "catch"`. This produces "Did you forget a `catch` here?"
+    p.expect(Token::Lident("catch".to_string()));
     p.expect(Token::Lbrace);
 
     let mut cases = vec![];
     while p.token != Token::Rbrace && p.token != Token::Eof {
+        // OCaml uses begin_region/end_region around each case
+        p.begin_region();
+        // OCaml: Parser.leave_breadcrumb p Grammar.PatternMatchCase
+        p.leave_breadcrumb(Grammar::PatternMatchCase);
+
         if p.token == Token::Bar {
             let bar_pos = Some(p.start_pos_idx());
             p.next();
+            // OCaml: Parser.leave_breadcrumb p Grammar.Pattern
+            p.leave_breadcrumb(Grammar::Pattern);
             let lhs = super::pattern::parse_constrained_pattern(p);
+            p.eat_breadcrumb();
             let guard = if p.token == Token::When {
                 p.next();
                 Some(parse_expr_with_context(p, ExprContext::When))
@@ -4342,7 +5510,11 @@ fn parse_try_expr(p: &mut Parser<'_>) -> Expression {
                 pc_guard: guard,
                 pc_rhs: rhs,
             });
+            p.end_region();
+            p.eat_breadcrumb();
         } else {
+            p.end_region();
+            p.eat_breadcrumb();
             break;
         }
     }
@@ -4361,14 +5533,69 @@ fn parse_try_expr(p: &mut Parser<'_>) -> Expression {
 // JSX Parsing
 // ============================================================================
 
+/// Maximum JSX nesting depth to prevent stack overflow.
+/// This is a safety limit for malformed input with deeply nested JSX-like syntax.
+const MAX_JSX_DEPTH: usize = 20;
+
+/// Convert a Longident to a string.
+fn longident_to_string(lid: &super::longident::Longident, arena: &ParseArena) -> String {
+    match lid {
+        super::longident::Longident::Lident(idx) => arena.get_string(*idx).to_string(),
+        super::longident::Longident::Ldot(prefix, idx) => {
+            format!("{}.{}", longident_to_string(prefix, arena), arena.get_string(*idx))
+        }
+        super::longident::Longident::Lapply(a, b) => {
+            format!("{}({})", longident_to_string(a, arena), longident_to_string(b, arena))
+        }
+    }
+}
+
+/// Convert a JSX tag name to a string for error messages.
+fn jsx_tag_name_to_string_for_error(tag_name: &JsxTagName, p: &Parser<'_>) -> String {
+    match tag_name {
+        JsxTagName::Lower(name) => name.clone(),
+        JsxTagName::Upper(lid_idx) => {
+            let lid = p.arena().get_longident(*lid_idx);
+            longident_to_string(lid, p.arena())
+        }
+        JsxTagName::QualifiedLower { path, name } => {
+            let lid = p.arena().get_longident(*path);
+            format!("{}.{}", longident_to_string(lid, p.arena()), name)
+        }
+        JsxTagName::Invalid(name) => name.clone(),
+    }
+}
+
+/// Check if two JSX tag names match.
+fn jsx_tag_names_match(opening: &JsxTagName, closing: &JsxTagName, p: &Parser<'_>) -> bool {
+    jsx_tag_name_to_string_for_error(opening, p) == jsx_tag_name_to_string_for_error(closing, p)
+}
+
 /// Parse a JSX element.
 fn parse_jsx(p: &mut Parser<'_>) -> Expression {
+    p.leave_breadcrumb(Grammar::Jsx);
     let start_pos_idx = p.start_pos_idx();
+    let start_pos = p.start_pos.clone();
+
+    // Check for excessive nesting depth to prevent stack overflow
+    if p.jsx_depth >= MAX_JSX_DEPTH {
+        p.err(super::diagnostics::DiagnosticCategory::Message(
+            "Maximum JSX nesting depth exceeded".to_string(),
+        ));
+        // Return a placeholder expression instead of continuing
+        p.next(); // consume <
+        return recover::default_expr(p.arena_mut());
+    }
+
+    p.jsx_depth += 1;
     p.expect(Token::LessThan);
 
     // Check for fragment <>
     if p.token == Token::GreaterThan {
-        return parse_jsx_fragment(p, start_pos_idx);
+        let result = parse_jsx_fragment(p, start_pos_idx);
+        p.eat_breadcrumb();
+        p.jsx_depth -= 1;
+        return result;
     }
 
     // Parse tag name - the location starts at the identifier, not the '<'
@@ -4379,12 +5606,31 @@ fn parse_jsx(p: &mut Parser<'_>) -> Expression {
     // Parse props
     let props = parse_jsx_props(p);
 
-    // Self-closing or container?
+    // Self-closing, container, or error recovery?
+    // OCaml has three cases: Forwardslash, GreaterThan, or token (unexpected)
     if p.token == Token::Forwardslash {
         p.next();
         p.expect(Token::GreaterThan);
         let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
 
+        p.eat_breadcrumb();
+        p.jsx_depth -= 1;
+        Expression {
+            pexp_desc: ExpressionDesc::Pexp_jsx_element(JsxElement::Unary(JsxUnaryElement {
+                tag_name: with_loc(tag_name, tag_name_loc),
+                props,
+            })),
+            pexp_loc: loc,
+            pexp_attributes: vec![],
+        }
+    } else if p.token != Token::GreaterThan {
+        // OCaml: | token -> Parser.err p (Diagnostics.unexpected token p.breadcrumbs);
+        //        Ast_helper.Exp.jsx_unary_element ~loc name jsx_props
+        p.err(DiagnosticCategory::unexpected(p.token.clone(), p.breadcrumbs().to_vec()));
+        let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
+
+        p.eat_breadcrumb();
+        p.jsx_depth -= 1;
         Expression {
             pexp_desc: ExpressionDesc::Pexp_jsx_element(JsxElement::Unary(JsxUnaryElement {
                 tag_name: with_loc(tag_name, tag_name_loc),
@@ -4396,28 +5642,103 @@ fn parse_jsx(p: &mut Parser<'_>) -> Expression {
     } else {
         // OCaml captures opening_tag_end = p.start_pos (position of >) BEFORE next()
         let opening_end_idx = p.start_pos_idx();
+        let opening_end = p.start_pos.clone();
         p.expect(Token::GreaterThan);
 
         // Parse children
         let children = parse_jsx_children(p);
 
-        // Parse closing tag </name>
-        // OCaml: closing_tag_start = p.start_pos (position at '<')
-        let closing_tag_start_idx = p.start_pos_idx();
-        p.expect(Token::LessThan);
-        p.expect(Token::Forwardslash);
+        // Parse closing tag
+        // OCaml has three cases:
+        // 1. LessThan when peekSlash -> proper closing tag
+        // 2. token when is_structure_item_start -> None (missing closing tag)
+        // 3. _ -> "Did you forget a `</` here?"
+        let has_closing_tag = if p.token == Token::LessThan && p.lookahead(|state| {
+            state.next();
+            state.token == Token::Forwardslash
+        }) {
+            // Case 1: proper closing tag `</`
+            p.next(); // consume <
+            p.next(); // consume /
+            true
+        } else if super::grammar::is_structure_item_start(&p.token) {
+            // Case 2: structure item start - no closing tag found
+            // OCaml: emits "Missing </TagName>" at the opening tag position
+            let opening_name = jsx_tag_name_to_string_for_error(&tag_name, p);
+            p.err_at(
+                start_pos.clone(),
+                opening_end.clone(),
+                DiagnosticCategory::Message(
+                    format!("Missing </{}>", opening_name),
+                ),
+            );
+            false
+        } else {
+            // Case 3: unexpected token
+            p.err(DiagnosticCategory::Message(
+                "Did you forget a `</` here?".to_string(),
+            ));
+            false
+        };
 
-        // Parse closing tag name - capture its location
-        let closing_name_start_idx = p.start_pos_idx();
-        let closing_tag_name = parse_jsx_tag_name(p);
-        let closing_name_loc = p.mk_loc_idx_to_prev_end(closing_name_start_idx);
+        let closing_tag_end_idx;
+        let closing_tag_name_loc;
+        let closing_tag_name;
+        if has_closing_tag {
+            let closing_name_start_idx = p.start_pos_idx();
+            closing_tag_name = parse_jsx_tag_name(p);
+            closing_tag_name_loc = p.mk_loc_idx_to_prev_end(closing_name_start_idx);
+            // Check for tag name mismatch (OCaml: "Missing </Foo.Bar>")
+            if !jsx_tag_names_match(&tag_name, &closing_tag_name, p) {
+                let opening_name = jsx_tag_name_to_string_for_error(&tag_name, p);
+                // OCaml checks: if structure_item_start -> "Missing </Tag>"
+                //               else -> "Closing jsx name should be the same..."
+                if super::grammar::is_structure_item_start(&p.token) {
+                    p.err_at(
+                        start_pos.clone(),
+                        p.prev_end_pos.clone(),
+                        DiagnosticCategory::Message(
+                            format!("Missing </{}>", opening_name),
+                        ),
+                    );
+                    // OCaml: expect GreaterThan in this branch
+                    p.expect(Token::GreaterThan);
+                } else {
+                    p.err_at(
+                        start_pos.clone(),
+                        p.prev_end_pos.clone(),
+                        DiagnosticCategory::Message(
+                            format!("Missing </{}>", opening_name),
+                        ),
+                    );
+                }
+            }
+            // OCaml: closing_tag_end = p.start_pos (position of '>')
+            closing_tag_end_idx = p.start_pos_idx();
+            p.expect(Token::GreaterThan);
+        } else {
+            // No closing tag - create a synthetic one
+            closing_tag_name = JsxTagName::Invalid("error".to_string());
+            closing_tag_name_loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
+            closing_tag_end_idx = p.prev_end_pos_idx();
+        }
 
-        // OCaml: closing_tag_end = p.start_pos (position of '>')
-        let closing_tag_end_idx = p.start_pos_idx();
-        p.expect(Token::GreaterThan);
+        let closing_tag = if has_closing_tag {
+            let closing_tag_start_idx = p.prev_end_pos_idx(); // approximate
+            Some(JsxClosingTag {
+                start: closing_tag_start_idx,
+                name: with_loc(closing_tag_name, closing_tag_name_loc),
+                end: closing_tag_end_idx,
+            })
+        } else {
+            // OCaml: closing_tag_start is None when no proper closing tag was found
+            None
+        };
 
         let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
 
+        p.eat_breadcrumb();
+        p.jsx_depth -= 1;
         Expression {
             pexp_desc: ExpressionDesc::Pexp_jsx_element(JsxElement::Container(
                 JsxContainerElement {
@@ -4425,11 +5746,7 @@ fn parse_jsx(p: &mut Parser<'_>) -> Expression {
                     opening_end: opening_end_idx,
                     props,
                     children,
-                    closing_tag: Some(JsxClosingTag {
-                        start: closing_tag_start_idx,
-                        name: with_loc(closing_tag_name, closing_name_loc),
-                        end: closing_tag_end_idx,
-                    }),
+                    closing_tag,
                 },
             )),
             pexp_loc: loc,
@@ -4478,6 +5795,11 @@ fn read_hyphen_chain(p: &mut Parser<'_>, initial: String) -> String {
             matches!(&state.token, Token::Lident(_) | Token::Uident(_))
         });
         if !has_ident_after {
+            // OCaml: advances past '-' THEN emits error at the next token position
+            p.next(); // consume '-'
+            p.err(DiagnosticCategory::Message(
+                "JSX identifier cannot end with a hyphen".to_string(),
+            ));
             break;
         }
         p.next(); // consume -
@@ -4523,7 +5845,15 @@ fn parse_jsx_tag_name(p: &mut Parser<'_>) -> JsxTagName {
                         let path_idx = p.push_longident(path);
                         return JsxTagName::QualifiedLower { path: path_idx, name: full_name };
                     }
-                    _ => break,
+                    _ => {
+                        // OCaml: "expected identifier after '.' in JSX tag name"
+                        // OCaml returns Error "Foo." which becomes JsxTagInvalid "Foo."
+                        p.err(DiagnosticCategory::Message(
+                            "expected identifier after '.' in JSX tag name".to_string(),
+                        ));
+                        let name_with_dot = parts.join(".") + ".";
+                        return JsxTagName::Invalid(name_with_dot);
+                    }
                 }
             }
             let lid = super::core::build_longident(p.arena_mut(), &parts);
@@ -4540,7 +5870,9 @@ fn parse_jsx_tag_name(p: &mut Parser<'_>) -> JsxTagName {
 }
 
 /// Parse JSX props.
+/// Matches OCaml: parse_region ~grammar:Grammar.JsxAttribute ~f:parse_jsx_prop p
 fn parse_jsx_props(p: &mut Parser<'_>) -> Vec<JsxProp> {
+    p.leave_breadcrumb(Grammar::JsxAttribute);
     let mut props = vec![];
 
     loop {
@@ -4638,16 +5970,27 @@ fn parse_jsx_props(p: &mut Parser<'_>) -> Vec<JsxProp> {
                     });
                 }
             }
-            _ => break,
+            _ => {
+                // OCaml parse_region recovery: if token is EOF or should_abort_list_parse, stop.
+                // Otherwise, emit error, skip token, and continue.
+                if p.token == Token::Eof || recover::should_abort_list_parse(p) {
+                    break;
+                }
+                p.err(DiagnosticCategory::unexpected(p.token.clone(), p.breadcrumbs().to_vec()));
+                p.next();
+            }
         }
     }
 
+    p.eat_breadcrumb();
     props
 }
 
 /// Parse JSX children.
 fn parse_jsx_children(p: &mut Parser<'_>) -> Vec<Expression> {
     let mut children = vec![];
+    let mut skip_count = 0;
+    const MAX_SKIP_COUNT: usize = 100;
 
     loop {
         // Check for closing tag
@@ -4664,6 +6007,15 @@ fn parse_jsx_children(p: &mut Parser<'_>) -> Vec<Expression> {
         } else if p.token == Token::Lbrace {
             let atomic = parse_atomic_expr(p);
             let expr = parse_primary_expr(p, atomic, true);
+            children.push(expr);
+        } else if p.token == Token::DotDotDot {
+            // OCaml: "Spreading JSX children is no longer supported."
+            p.err(DiagnosticCategory::Message(
+                "Spreading JSX children is no longer supported.".to_string(),
+            ));
+            p.next(); // consume ...
+            // Parse the expression after ... to not lose it
+            let expr = parse_atomic_expr(p);
             children.push(expr);
         } else if p.token == Token::Eof {
             break;
@@ -4751,7 +6103,30 @@ fn parse_jsx_children(p: &mut Parser<'_>) -> Vec<Expression> {
             let expr = parse_atomic_expr(p);
             children.push(expr);
         } else {
-            // Skip whitespace and other tokens
+            // Break on tokens that clearly indicate we're outside JSX context
+            // These are structural tokens that should never appear inside JSX children
+            if matches!(
+                p.token,
+                Token::Typ
+                    | Token::Let { .. }
+                    | Token::Module
+                    | Token::External
+                    | Token::Open
+                    | Token::Include
+                    | Token::Exception
+                    | Token::Rbrace  // End of enclosing block
+                    | Token::Rparen  // End of enclosing parens
+                    | Token::Rbracket  // End of enclosing array
+                    | Token::Equal  // Assignment, likely type definition
+                    | Token::Semicolon  // Statement separator
+            ) {
+                break;
+            }
+            // Skip whitespace and other tokens (with limit to prevent infinite loop)
+            skip_count += 1;
+            if skip_count > MAX_SKIP_COUNT {
+                break;
+            }
             p.next();
         }
     }
@@ -4868,10 +6243,7 @@ fn parse_template_literal_with_prefix(
             }
             _ => {
                 // This shouldn't happen in well-formed template literals
-                p.err(DiagnosticCategory::Message(format!(
-                    "Unexpected token in template literal: {:?}",
-                    p.token
-                )));
+                p.err_unexpected();
                 p.next();
                 break;
             }
@@ -5065,10 +6437,7 @@ fn parse_tagged_template_literal_with_tag_expr(p: &mut Parser<'_>, tag_expr: Exp
                 break;
             }
             _ => {
-                p.err(DiagnosticCategory::Message(format!(
-                    "Unexpected token in template literal: {:?}",
-                    p.token
-                )));
+                p.err_unexpected();
                 p.next();
                 break;
             }

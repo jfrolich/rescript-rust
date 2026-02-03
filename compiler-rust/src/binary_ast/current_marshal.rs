@@ -12,7 +12,6 @@
 
 use super::marshal::MarshalWriter;
 use super::serialize::Marshal;
-use crate::location::{Located, Location, Position};
 use crate::parser::ast::{
     Arity, ArgLabel, Case, ClosedFlag, Constant, CoreType, CoreTypeDesc,
     DirectionFlag, Expression, ExpressionDesc, ExpressionRecordField, ExtensionConstructor,
@@ -24,8 +23,6 @@ use crate::parser::ast::{
     TypeDeclaration, TypeExtension, TypeKind, ValueBinding, ValueDescription, Variance,
     WithConstraint, ConstructorArguments, ConstructorDeclaration,
 };
-use crate::parser::longident::Longident;
-
 // ========== Flag implementations ==========
 
 impl Marshal for RecFlag {

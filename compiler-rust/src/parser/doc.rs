@@ -315,13 +315,27 @@ impl Doc {
         }
     }
 
-    /// Check if the document fits within the given width
-    fn fits(width: i32, stack: &[(i32, Mode, &Doc)]) -> bool {
+    /// Check if the document fits within the given width.
+    /// Takes the current item and the rest of the stack as a slice to avoid cloning.
+    fn fits(width: i32, first: (i32, Mode, &Doc), rest: &[(i32, Mode, &Doc)]) -> bool {
         let mut width = width;
-        let mut stack: Vec<(i32, Mode, &Doc)> = stack.to_vec();
+        // Create a stack: first the rest items (same order - they'll be processed later),
+        // then the first item (which will be popped and processed first)
+        let mut stack: Vec<(i32, Mode, &Doc)> = Vec::with_capacity(rest.len() + 1);
+        // Push rest items in order (they'll be processed after first)
+        for item in rest.iter() {
+            stack.push(*item);
+        }
+        // Push the first item last so it gets processed first (popped first)
+        stack.push(first);
+
+        // Limit iterations to prevent exponential blowup with deeply nested custom layouts
+        let mut iterations = 0;
+        const MAX_ITERATIONS: i32 = 10000;
 
         while let Some((indent, mode, doc)) = stack.pop() {
-            if width < 0 {
+            iterations += 1;
+            if iterations > MAX_ITERATIONS || width < 0 {
                 return false;
             }
 
@@ -460,8 +474,10 @@ impl Doc {
                     }
                 }
                 Doc::Group { should_break, doc } => {
+                    // Include remaining stack in fits check (like OCaml)
+                    // Pass stack as slice reference to avoid cloning
                     if should_break.get()
-                        || !Self::fits(width - pos, &[(indent, Mode::Flat, doc)])
+                        || !Self::fits(width - pos, (indent, Mode::Flat, doc), &stack)
                     {
                         stack.push((indent, Mode::Break, doc));
                     } else {
@@ -470,9 +486,11 @@ impl Doc {
                 }
                 Doc::CustomLayout(docs) => {
                     // Find the first layout that fits, or use the last one
+                    // Include remaining stack in fits check (like OCaml)
+                    // Pass stack as slice reference to avoid cloning
                     let mut chosen = docs.last();
                     for doc in docs.iter() {
-                        if Self::fits(width - pos, &[(indent, Mode::Flat, doc)]) {
+                        if Self::fits(width - pos, (indent, Mode::Flat, doc), &stack) {
                             chosen = Some(doc);
                             break;
                         }
@@ -488,10 +506,73 @@ impl Doc {
         for (indent, mode, doc) in line_suffices.into_iter().rev() {
             stack.push((indent, mode, doc));
         }
-        while let Some((_indent, _mode, doc)) = stack.pop() {
-            // Simplified processing for remaining suffices
-            if let Doc::Text(txt) = doc {
-                buffer.push_str(txt);
+        while let Some((indent, mode, doc)) = stack.pop() {
+            match doc {
+                Doc::Nil | Doc::BreakParent | Doc::LineSuffix(_) => {}
+                Doc::Text(txt) => {
+                    buffer.push_str(txt);
+                    pos += txt.len() as i32;
+                }
+                Doc::Concat(docs) => {
+                    for doc in docs.iter().rev() {
+                        stack.push((indent, mode, doc));
+                    }
+                }
+                Doc::Indent(doc) => {
+                    stack.push((indent + 2, mode, doc));
+                }
+                Doc::LineBreak(style) => {
+                    if mode == Mode::Break {
+                        if *style == LineStyle::Literal {
+                            buffer.push('\n');
+                            pos = 0;
+                        } else {
+                            let trimmed_len = buffer.trim_end_matches(' ').len();
+                            buffer.truncate(trimmed_len);
+                            buffer.push('\n');
+                            if indent > 0 {
+                                buffer.push_str(&" ".repeat(indent as usize));
+                            }
+                            pos = indent;
+                        }
+                    } else {
+                        // Flat mode
+                        match style {
+                            LineStyle::Classic => {
+                                buffer.push(' ');
+                                pos += 1;
+                            }
+                            LineStyle::Hard => {
+                                let trimmed_len = buffer.trim_end_matches(' ').len();
+                                buffer.truncate(trimmed_len);
+                                buffer.push('\n');
+                                pos = 0;
+                            }
+                            LineStyle::Literal => {
+                                buffer.push('\n');
+                                pos = 0;
+                            }
+                            LineStyle::Soft => {}
+                        }
+                    }
+                }
+                Doc::Group { doc: contents, should_break } => {
+                    let mode = if should_break.get() { Mode::Break } else { Mode::Flat };
+                    stack.push((indent, mode, contents));
+                }
+                Doc::IfBreaks { yes, no, .. } => {
+                    if mode == Mode::Break {
+                        stack.push((indent, mode, yes));
+                    } else {
+                        stack.push((indent, mode, no));
+                    }
+                }
+                Doc::CustomLayout(docs) => {
+                    // Use the first option
+                    if let Some(first) = docs.first() {
+                        stack.push((indent, mode, first));
+                    }
+                }
             }
         }
 

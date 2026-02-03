@@ -300,6 +300,53 @@ pub fn flatten_operand_rhs(arena: &crate::parse_arena::ParseArena, parent_operat
     }
 }
 
+/// Check if flatten operand RHS needs parentheses, ignoring the attribute check.
+/// This is used when we've already partitioned printable attrs and will handle them separately.
+pub fn flatten_operand_rhs_without_attrs(arena: &crate::parse_arena::ParseArena, parent_operator: &str, rhs: &Expression) -> bool {
+    match &rhs.pexp_desc {
+        ExpressionDesc::Pexp_apply { funct, args, .. } => {
+            if args.len() != 2 {
+                return false;
+            }
+            match &funct.pexp_desc {
+                ExpressionDesc::Pexp_ident(ident) => {
+                    if let Longident::Lident(op_idx) = arena.get_longident(ident.txt) {
+                        let operator = arena.get_string(*op_idx);
+                        if parsetree_viewer::not_ghost_operator(operator, ident.loc.is_none()) {
+                            let prec_parent =
+                                parsetree_viewer::operator_precedence(parent_operator);
+                            let prec_child = parsetree_viewer::operator_precedence(operator);
+                            // NOTE: Unlike flatten_operand_rhs, we don't check rhs.pexp_attributes here
+                            return prec_parent >= prec_child;
+                        }
+                    }
+                    false
+                }
+                _ => false,
+            }
+        }
+        ExpressionDesc::Pexp_constraint(inner, typ)
+            if matches!(&inner.pexp_desc, ExpressionDesc::Pexp_pack(_))
+                && matches!(&typ.ptyp_desc, CoreTypeDesc::Ptyp_package(_)) =>
+        {
+            false
+        }
+        ExpressionDesc::Pexp_fun { lhs, .. } => {
+            if let PatternDesc::Ppat_var(name) = &lhs.ppat_desc {
+                if arena.get_string(name.txt) == "__x" {
+                    return false;
+                }
+            }
+            true
+        }
+        ExpressionDesc::Pexp_newtype(_, _)
+        | ExpressionDesc::Pexp_setfield(_, _, _)
+        | ExpressionDesc::Pexp_constraint(_, _) => true,
+        _ if parsetree_viewer::is_ternary_expr(arena, rhs) => true,
+        _ => false,
+    }
+}
+
 /// Check if binary operator inside await needs parentheses.
 pub fn binary_operator_inside_await_needs_parens(operator: &str) -> bool {
     parsetree_viewer::operator_precedence(operator) < parsetree_viewer::operator_precedence("->")
@@ -310,54 +357,63 @@ pub fn assert_or_await_expr_rhs(arena: &crate::parse_arena::ParseArena, in_await
     let opt_braces = parsetree_viewer::process_braces_attr(arena, expr);
     match opt_braces {
         Some(attr) => ParenKind::Braced(attr.0.loc.clone()),
-        None => {
-            let filtered = parsetree_viewer::filter_parsing_attrs(arena, &expr.pexp_attributes);
-            if !filtered.is_empty() {
-                return ParenKind::Parenthesized;
-            }
+        None => assert_or_await_expr_rhs_inner(arena, in_await, expr),
+    }
+}
 
-            match &expr.pexp_desc {
-                ExpressionDesc::Pexp_apply { funct, .. }
-                    if parsetree_viewer::is_binary_expression(arena, expr) =>
-                {
-                    if let ExpressionDesc::Pexp_ident(ident) = &funct.pexp_desc {
-                        if let Longident::Lident(op_idx) = arena.get_longident(ident.txt) {
-                            let operator = arena.get_string(*op_idx);
-                            if in_await && !binary_operator_inside_await_needs_parens(operator) {
-                                return ParenKind::Nothing;
-                            }
-                        }
+/// Check if await expression RHS needs parens, but IGNORE the res.braces attribute.
+/// OCaml's await printing filters out @res.braces before checking, so `await {x}` prints as `await x`.
+pub fn assert_or_await_expr_rhs_ignore_braces(arena: &crate::parse_arena::ParseArena, in_await: bool, expr: &Expression) -> ParenKind {
+    // Ignore the braces attribute - just check the expression structure
+    assert_or_await_expr_rhs_inner(arena, in_await, expr)
+}
+
+fn assert_or_await_expr_rhs_inner(arena: &crate::parse_arena::ParseArena, in_await: bool, expr: &Expression) -> ParenKind {
+    let filtered = parsetree_viewer::filter_parsing_attrs(arena, &expr.pexp_attributes);
+    if !filtered.is_empty() {
+        return ParenKind::Parenthesized;
+    }
+
+    match &expr.pexp_desc {
+        ExpressionDesc::Pexp_apply { funct, .. }
+            if parsetree_viewer::is_binary_expression(arena, expr) =>
+        {
+            if let ExpressionDesc::Pexp_ident(ident) = &funct.pexp_desc {
+                if let Longident::Lident(op_idx) = arena.get_longident(ident.txt) {
+                    let operator = arena.get_string(*op_idx);
+                    if in_await && !binary_operator_inside_await_needs_parens(operator) {
+                        return ParenKind::Nothing;
                     }
-                    ParenKind::Parenthesized
                 }
-                // module(M: S) doesn't need parens
-                ExpressionDesc::Pexp_constraint(inner, typ)
-                    if matches!(&inner.pexp_desc, ExpressionDesc::Pexp_pack(_))
-                        && matches!(&typ.ptyp_desc, CoreTypeDesc::Ptyp_package(_)) =>
-                {
-                    ParenKind::Nothing
-                }
-                ExpressionDesc::Pexp_fun { .. }
-                    if parsetree_viewer::is_underscore_apply_sugar(arena, expr) =>
-                {
-                    ParenKind::Nothing
-                }
-                ExpressionDesc::Pexp_assert(_)
-                | ExpressionDesc::Pexp_fun { .. }
-                | ExpressionDesc::Pexp_newtype(_, _)
-                | ExpressionDesc::Pexp_constraint(_, _)
-                | ExpressionDesc::Pexp_setfield(_, _, _)
-                | ExpressionDesc::Pexp_match(_, _)
-                | ExpressionDesc::Pexp_try(_, _)
-                | ExpressionDesc::Pexp_while(_, _)
-                | ExpressionDesc::Pexp_for(_, _, _, _, _)
-                | ExpressionDesc::Pexp_ifthenelse(_, _, _) => ParenKind::Parenthesized,
-                _ if !in_await && parsetree_viewer::expr_is_await(expr) => {
-                    ParenKind::Parenthesized
-                }
-                _ => ParenKind::Nothing,
             }
+            ParenKind::Parenthesized
         }
+        // module(M: S) doesn't need parens
+        ExpressionDesc::Pexp_constraint(inner, typ)
+            if matches!(&inner.pexp_desc, ExpressionDesc::Pexp_pack(_))
+                && matches!(&typ.ptyp_desc, CoreTypeDesc::Ptyp_package(_)) =>
+        {
+            ParenKind::Nothing
+        }
+        ExpressionDesc::Pexp_fun { .. }
+            if parsetree_viewer::is_underscore_apply_sugar(arena, expr) =>
+        {
+            ParenKind::Nothing
+        }
+        ExpressionDesc::Pexp_assert(_)
+        | ExpressionDesc::Pexp_fun { .. }
+        | ExpressionDesc::Pexp_newtype(_, _)
+        | ExpressionDesc::Pexp_constraint(_, _)
+        | ExpressionDesc::Pexp_setfield(_, _, _)
+        | ExpressionDesc::Pexp_match(_, _)
+        | ExpressionDesc::Pexp_try(_, _)
+        | ExpressionDesc::Pexp_while(_, _)
+        | ExpressionDesc::Pexp_for(_, _, _, _, _)
+        | ExpressionDesc::Pexp_ifthenelse(_, _, _) => ParenKind::Parenthesized,
+        _ if !in_await && parsetree_viewer::expr_is_await(expr) => {
+            ParenKind::Parenthesized
+        }
+        _ => ParenKind::Nothing,
     }
 }
 
@@ -640,29 +696,24 @@ pub fn include_mod_expr(mod_expr: &ModuleExpr) -> bool {
 }
 
 /// Check if module expression needs parentheses.
+/// OCaml logic:
+/// - Pmod_constraint(Pmod_structure, Pmty_signature([Psig_module])) -> false
+/// - Pmod_constraint(_, Pmty_signature([Psig_module])) -> true
+/// - Otherwise -> false
 pub fn mod_expr_parens(mod_expr: &ModuleExpr) -> bool {
     match &mod_expr.pmod_desc {
         ModuleExprDesc::Pmod_constraint(inner, typ) => {
-            // Check if inner is Pmod_structure and typ is Pmty_signature with single Psig_module
-            match (&inner.pmod_desc, &typ.pmty_desc) {
-                (ModuleExprDesc::Pmod_structure(_), ModuleTypeDesc::Pmty_signature(items)) => {
-                    if items.len() == 1 {
-                        if let SignatureItemDesc::Psig_module(_) = &items[0].psig_desc {
-                            return false;
-                        }
+            // Check if typ is Pmty_signature with single Psig_module
+            if let ModuleTypeDesc::Pmty_signature(items) = &typ.pmty_desc {
+                if items.len() == 1 {
+                    if let SignatureItemDesc::Psig_module(_) = &items[0].psig_desc {
+                        // Sig is [Psig_module] - return false if inner is Pmod_structure, true otherwise
+                        return !matches!(&inner.pmod_desc, ModuleExprDesc::Pmod_structure(_));
                     }
-                    true
                 }
-                (_, ModuleTypeDesc::Pmty_signature(items)) => {
-                    if items.len() == 1 {
-                        if let SignatureItemDesc::Psig_module(_) = &items[0].psig_desc {
-                            return true;
-                        }
-                    }
-                    false
-                }
-                _ => false,
             }
+            // Not the special [Psig_module] case -> false
+            false
         }
         _ => false,
     }

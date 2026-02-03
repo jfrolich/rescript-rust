@@ -111,10 +111,23 @@ pub struct Parser<'src> {
     /// Whether we're currently parsing an external definition.
     /// Used for arity calculation of @as(_) labeled parameters.
     pub in_external: bool,
-    /// Cache for prev_end_pos sharing: stores (position value, arena index).
     /// Depth of lookahead nesting. When > 0, next() skips arena position allocations.
     /// This prevents lookahead from affecting position indices for subsequent allocations.
     lookahead_depth: u32,
+    /// Current recursion depth for JSX parsing.
+    /// Used to prevent stack overflow from deeply nested JSX elements.
+    pub jsx_depth: usize,
+    /// General parse depth counter to prevent stack overflow from deeply nested parsing.
+    /// Incremented at major parsing entry points like parse_expr, parse_typ_expr, etc.
+    pub parse_depth: usize,
+    /// Current type name path for inline record extraction (e.g., ["options", "extra"]).
+    /// Set during type equation parsing to enable nested inline record extraction.
+    pub current_type_name_path: Option<Vec<String>>,
+    /// Collected inline types during type parsing.
+    /// When Some, `{...}` in type positions will be extracted as inline record types.
+    pub inline_types_found: Option<Vec<(String, LocIdx, super::ast::TypeKind)>>,
+    /// Type parameters from the outer type declaration for inline types.
+    pub inline_types_params: Vec<(super::ast::CoreType, super::ast::Variance)>,
 }
 
 impl<'src> Parser<'src> {
@@ -151,6 +164,11 @@ impl<'src> Parser<'src> {
             arena,
             in_external: false,
             lookahead_depth: 0,
+            jsx_depth: 0,
+            parse_depth: 0,
+            current_type_name_path: None,
+            inline_types_found: None,
+            inline_types_params: vec![],
         };
         // Scan the first token
         parser.next();
@@ -330,6 +348,22 @@ impl<'src> Parser<'src> {
         self.arena.mk_loc(start, end_idx)
     }
 
+    /// Create a location with the start and ghost flag from an existing location,
+    /// but with end set to prev_end_pos. This is equivalent to OCaml's
+    /// `{loc with loc_end = p.prev_end_pos}`.
+    pub fn mk_loc_extend_to_prev_end(&mut self, loc: LocIdx) -> LocIdx {
+        let loc_info = self.arena.get_location(loc);
+        let start_idx = loc_info.loc_start;
+        let is_ghost = loc_info.loc_ghost;
+        let end_idx = self.prev_end_pos_idx();
+        self.arena.push_loc(start_idx, end_idx, is_ghost)
+    }
+
+    /// Create and push a location from raw positions.
+    pub fn mk_loc_from_positions(&mut self, start: &Position, end: &Position) -> LocIdx {
+        self.arena.mk_loc_from_positions(start, end)
+    }
+
     /// Get the "none" location index.
     pub fn none_loc(&self) -> LocIdx {
         self.arena.none_loc()
@@ -375,6 +409,29 @@ impl<'src> Parser<'src> {
     /// Create a location spanning from one location's start to another's end.
     pub fn mk_loc_spanning(&mut self, start_loc: LocIdx, end_loc: LocIdx) -> LocIdx {
         self.arena.mk_loc_spanning(start_loc, end_loc)
+    }
+
+    /// Like mk_loc_spanning, but preserves the ghost flag from the start location.
+    pub fn mk_loc_spanning_preserve_ghost(&mut self, start_loc: LocIdx, end_loc: LocIdx) -> LocIdx {
+        self.arena.mk_loc_spanning_preserve_ghost(start_loc, end_loc)
+    }
+
+    /// Create a location from a start Position to another location's end.
+    /// Useful pattern: `p.mk_loc_to_end_of(&start_pos, body.some_loc)`
+    /// Reuses the end location's PosIdx for position sharing.
+    pub fn mk_loc_to_end_of(&mut self, start: &Position, end_loc: LocIdx) -> LocIdx {
+        let start_idx = self.arena.push_position(*start);
+        let end_idx = self.arena.loc_end_idx(end_loc);
+        self.arena.mk_loc(start_idx, end_idx)
+    }
+
+    /// Create a location from another location's start to an end Position.
+    /// Useful pattern: `p.mk_loc_from_start_of(body.some_loc, &end_pos)`
+    /// Reuses the start location's PosIdx for position sharing.
+    pub fn mk_loc_from_start_of(&mut self, start_loc: LocIdx, end: &Position) -> LocIdx {
+        let start_idx = self.arena.loc_start_idx(start_loc);
+        let end_idx = self.arena.push_position(*end);
+        self.arena.mk_loc(start_idx, end_idx)
     }
 
     // ========== Longident arena methods ==========
@@ -454,6 +511,29 @@ impl<'src> Parser<'src> {
         self.diagnostics.push(diagnostic);
     }
 
+    /// Record an unexpected token error using the current breadcrumbs.
+    /// This emits an error with context-aware messaging based on the parsing context.
+    pub fn err_unexpected(&mut self) {
+        let context: Vec<(Grammar, Position)> = self.breadcrumbs.clone();
+        self.err(DiagnosticCategory::Unexpected {
+            token: self.token.clone(),
+            context,
+        });
+    }
+
+    /// Record an unexpected token error at specific positions using the current breadcrumbs.
+    pub fn err_unexpected_at(&mut self, start_pos: Position) {
+        let context: Vec<(Grammar, Position)> = self.breadcrumbs.clone();
+        self.err_at(
+            start_pos,
+            self.end_pos.clone(),
+            DiagnosticCategory::Unexpected {
+                token: self.token.clone(),
+                context,
+            },
+        );
+    }
+
     /// Begin a new error reporting region.
     pub fn begin_region(&mut self) {
         self.regions.push(RegionStatus::Report);
@@ -464,6 +544,29 @@ impl<'src> Parser<'src> {
         if !self.regions.is_empty() {
             self.regions.pop();
         }
+    }
+
+    /// Maximum parse depth to prevent stack overflow from deeply nested constructs.
+    pub const MAX_PARSE_DEPTH: usize = 50;
+
+    /// Check if we've exceeded the maximum parse depth.
+    /// Returns true if we're at or beyond the limit.
+    #[inline]
+    pub fn exceeded_parse_depth(&self) -> bool {
+        self.parse_depth >= Self::MAX_PARSE_DEPTH
+    }
+
+    /// Increment parse depth before a potentially recursive parse.
+    /// Call `dec_parse_depth` when done.
+    #[inline]
+    pub fn inc_parse_depth(&mut self) {
+        self.parse_depth += 1;
+    }
+
+    /// Decrement parse depth after a recursive parse.
+    #[inline]
+    pub fn dec_parse_depth(&mut self) {
+        self.parse_depth = self.parse_depth.saturating_sub(1);
     }
 
     /// Advance to the next non-comment token.
@@ -495,6 +598,11 @@ impl<'src> Parser<'src> {
 
         loop {
             let result = self.scanner.scan();
+
+            // Propagate scanner diagnostics to parser
+            let scanner_diagnostics = self.scanner.take_diagnostics();
+            self.diagnostics.extend(scanner_diagnostics);
+
             match result.token {
                 Token::Comment(ref c) => {
                     // Collect comment and continue scanning.
@@ -542,6 +650,34 @@ impl<'src> Parser<'src> {
     /// Scan the next template literal token.
     pub fn next_template_literal_token(&mut self) {
         let result = self.scanner.scan_template_literal_token();
+
+        // Propagate scanner diagnostics to parser
+        let scanner_diagnostics = self.scanner.take_diagnostics();
+        self.diagnostics.extend(scanner_diagnostics);
+
+        self.token = result.token;
+        self.prev_end_pos = self.end_pos.clone();
+        self.prev_end_pos_idx = self.end_pos_idx;
+        self.start_pos = result.start_pos;
+        self.end_pos = result.end_pos;
+        // Only push positions to arena when not in lookahead mode
+        if self.lookahead_depth == 0 {
+            self.start_pos_idx = self.arena.push_position(result.start_pos);
+            self.end_pos_idx = self.arena.push_position(result.end_pos);
+        }
+    }
+
+    /// Rescan the current position as a regex literal.
+    /// Matches OCaml's `next_regex_token` which is called when the parser sees `/` in
+    /// expression position and needs to interpret it as a regex start.
+    /// The scanner's current position should be just after the `/` that was already consumed.
+    pub fn next_regex_token(&mut self) {
+        let result = self.scanner.scan_regex();
+
+        // Propagate scanner diagnostics to parser
+        let scanner_diagnostics = self.scanner.take_diagnostics();
+        self.diagnostics.extend(scanner_diagnostics);
+
         self.token = result.token;
         self.prev_end_pos = self.end_pos.clone();
         self.prev_end_pos_idx = self.end_pos_idx;
@@ -574,7 +710,12 @@ impl<'src> Parser<'src> {
     }
 
     /// Expect a specific token with grammar context for error messages.
-    pub fn expect_with_grammar(&mut self, token: Token, grammar: Option<String>) {
+    ///
+    /// When the expected token is not found, an error is generated spanning from
+    /// the previous token's end position to the current token's end position.
+    /// This matches OCaml's `expect` which uses `~start_pos:p.prev_end_pos` with
+    /// default `~end_pos:p.end_pos`.
+    pub fn expect_with_grammar(&mut self, token: Token, grammar: Option<Grammar>) {
         if self.token == token {
             self.next();
         } else {
@@ -583,9 +724,11 @@ impl<'src> Parser<'src> {
                 pos: self.prev_end_pos.clone(),
                 token,
             };
+            // OCaml uses prev_end_pos for start and end_pos (current token's end) for end.
+            // This creates a span from where we expected the token to the current position.
             self.err_at(
                 self.prev_end_pos.clone(),
-                self.prev_end_pos.clone(),
+                self.end_pos.clone(),
                 category,
             );
         }

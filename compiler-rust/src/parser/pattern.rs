@@ -6,10 +6,22 @@
 use super::ast::*;
 use super::core::{ast_helper, mknoloc, recover, template_literal_attr, with_loc};
 use super::diagnostics::DiagnosticCategory;
+use super::grammar::{self, Grammar};
 use super::longident::Longident;
 use super::state::Parser;
 use super::token::Token;
 use crate::parse_arena::{Located, LocIdx, PosIdx, StrIdx};
+
+/// Check if a constant is valid for an interval pattern.
+/// This includes integers, floats, characters (Constant::Char), and
+/// characters encoded as strings with INTERNAL_RES_CHAR_CONTENTS tag.
+fn is_interval_constant(c: &Constant) -> bool {
+    match c {
+        Constant::Integer(..) | Constant::Char(..) | Constant::Float(..) => true,
+        Constant::String(_, Some(tag)) if tag == "INTERNAL_RES_CHAR_CONTENTS" => true,
+        _ => false,
+    }
+}
 
 // ============================================================================
 // Attribute Parsing for Patterns
@@ -169,53 +181,50 @@ fn parse_single_pattern(p: &mut Parser<'_>) -> Pattern {
     // Handle interval patterns: 1 .. 2, 'a' .. 'z', -1 .. -1., etc.
     if p.token == Token::DotDot {
         if let PatternDesc::Ppat_constant(from) = &pat.ppat_desc {
-            match from {
-                Constant::Integer(..) | Constant::Char(..) | Constant::Float(..) => {
-                    let from = from.clone();
-                    p.next();
-                    let to = match &p.token {
-                        Token::Int { .. } | Token::Codepoint { .. } | Token::Float { .. } => {
-                            super::expr::parse_constant(p)
-                        }
-                        Token::Minus => {
-                            // Handle negative numbers: -1, -1.0
-                            p.next();
-                            match &p.token {
-                                Token::Int { i, suffix } => {
-                                    let value = format!("-{}", i);
-                                    let suffix = suffix.clone();
-                                    p.next();
-                                    Constant::Integer(value, suffix)
-                                }
-                                Token::Float { f, suffix } => {
-                                    let value = format!("-{}", f);
-                                    let suffix = suffix.clone();
-                                    p.next();
-                                    Constant::Float(value, suffix)
-                                }
-                                _ => {
-                                    p.err(DiagnosticCategory::Message(
-                                        "Expected number after '-' in interval pattern".to_string(),
-                                    ));
-                                    Constant::Integer("0".to_string(), None)
-                                }
+            if is_interval_constant(from) {
+                let from = from.clone();
+                p.next();
+                let to = match &p.token {
+                    Token::Int { .. } | Token::Codepoint { .. } | Token::Float { .. } => {
+                        super::expr::parse_constant(p)
+                    }
+                    Token::Minus => {
+                        // Handle negative numbers: -1, -1.0
+                        p.next();
+                        match &p.token {
+                            Token::Int { i, suffix } => {
+                                let value = format!("-{}", i);
+                                let suffix = suffix.clone();
+                                p.next();
+                                Constant::Integer(value, suffix)
+                            }
+                            Token::Float { f, suffix } => {
+                                let value = format!("-{}", f);
+                                let suffix = suffix.clone();
+                                p.next();
+                                Constant::Float(value, suffix)
+                            }
+                            _ => {
+                                p.err(DiagnosticCategory::Message(
+                                    "Expected number after '-' in interval pattern".to_string(),
+                                ));
+                                Constant::Integer("0".to_string(), None)
                             }
                         }
-                        _ => {
-                            p.err(DiagnosticCategory::Message(
-                                "Expected constant after '..' in pattern".to_string(),
-                            ));
-                            Constant::Integer("0".to_string(), None)
-                        }
-                    };
-                    let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
-                    pat = Pattern {
-                        ppat_desc: PatternDesc::Ppat_interval(from, to),
-                        ppat_loc: loc,
-                        ppat_attributes: vec![],
-                    };
-                }
-                _ => {}
+                    }
+                    _ => {
+                        p.err(DiagnosticCategory::Message(
+                            "Expected constant after '..' in pattern".to_string(),
+                        ));
+                        Constant::Integer("0".to_string(), None)
+                    }
+                };
+                let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
+                pat = Pattern {
+                    ppat_desc: PatternDesc::Ppat_interval(from, to),
+                    ppat_loc: loc,
+                    ppat_attributes: vec![],
+                };
             }
         }
     }
@@ -345,9 +354,9 @@ pub fn parse_constrained_pattern(p: &mut Parser<'_>) -> Pattern {
 
     if p.token == Token::Colon {
         p.next();
-        // Use no-arrow parsing so the `=>` token isn't consumed as part of a type
-        // when we're in contexts like switch cases: `| pat: t => expr`.
-        let typ = super::typ::parse_typ_expr_no_arrow(p);
+        // OCaml uses parse_typ_expr (with es6_arrow=true) here, not no-arrow.
+        // Switch cases use parse_pattern (not constrained), so => is safe here.
+        let typ = super::typ::parse_typ_expr(p);
         // Reuse the existing PosIdx from pat.ppat_loc to match OCaml's sharing
         let start_idx = p.loc_start_idx(pat.ppat_loc);
         let end_idx = p.loc_end_idx(typ.ptyp_loc);
@@ -363,9 +372,12 @@ pub fn parse_constrained_pattern(p: &mut Parser<'_>) -> Pattern {
 }
 
 /// Create a unit construct pattern `()`.
-pub fn make_unit_construct_pattern(p: &mut super::state::Parser<'_>, loc: Location) -> Pattern {
+/// OCaml's Ast_helper.Pat.construct uses Location.none for the pattern location
+/// when called without ~loc, so we use a ghost location here.
+pub fn make_unit_construct_pattern(p: &mut super::state::Parser<'_>, lid_loc: Location) -> Pattern {
     let lid_idx = p.push_lident_static("()");
-    ast_helper::make_construct_pat(lid_idx, None, loc, loc)
+    // Use ghost location for the pattern, but real location for the longident
+    ast_helper::make_construct_pat(lid_idx, None, lid_loc, LocIdx::none())
 }
 
 /// Parse an optional alias `as name` after a pattern.
@@ -377,8 +389,6 @@ pub fn parse_alias_pattern(
     mut pat: Pattern,
     _attrs: Vec<Attribute>,
 ) -> Pattern {
-    // Reuse the existing PosIdx from pat.ppat_loc to match OCaml's sharing
-    let start_pos_idx = p.loc_start_idx(pat.ppat_loc);
     while p.token == Token::As {
         p.next();
         let name = match &p.token {
@@ -397,7 +407,9 @@ pub fn parse_alias_pattern(
                 with_loc(str_idx, p.mk_loc_current())
             }
         };
-        let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
+        // OCaml: {pattern.ppat_loc with loc_end = p.prev_end_pos}
+        // This preserves loc_start and loc_ghost from the pattern's location
+        let loc = p.mk_loc_extend_to_prev_end(pat.ppat_loc);
         pat = Pattern {
             ppat_desc: PatternDesc::Ppat_alias(Box::new(pat), name),
             ppat_loc: loc,
@@ -436,6 +448,16 @@ pub fn parse_tuple_pattern(
     }
 
     p.expect(Token::Rparen);
+
+    // OCaml: A tuple needs at least two elements
+    if patterns.len() == 1 {
+        p.err_at(
+            p.arena().get_position(start_pos_idx).clone(),
+            p.prev_end_pos.clone(),
+            DiagnosticCategory::Message("A tuple needs at least two elements".to_string()),
+        );
+    }
+
     let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
 
     Pattern {
@@ -619,6 +641,26 @@ fn parse_atomic_pattern(p: &mut Parser<'_>) -> Pattern {
             }
         }
         Token::Hash => parse_poly_variant_pattern(p),
+        Token::DotDotDot => {
+            // Variant spread pattern: ...a or ...Foo.zz
+            // Creates Ppat_type with res.patVariantSpread attribute
+            p.next();
+            let type_start_idx = p.start_pos_idx();
+            let lid = parse_type_longident(p);
+            let lid_loc = p.mk_loc_idx_to_prev_end(type_start_idx);
+            let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
+            // Add res.patVariantSpread attribute with ghost location
+            let spread_attr_name_idx = p.arena_mut().intern("res.patVariantSpread");
+            let spread_attr: Attribute = (
+                with_loc(spread_attr_name_idx, LocIdx::none()),
+                Payload::PStr(vec![]),
+            );
+            Pattern {
+                ppat_desc: PatternDesc::Ppat_type(with_loc(lid, lid_loc)),
+                ppat_loc: loc,
+                ppat_attributes: vec![spread_attr],
+            }
+        }
         Token::Percent => parse_extension_pattern(p, start_pos_idx),
         Token::Backtick | Token::TemplateTail { .. } | Token::TemplatePart { .. } => {
             parse_template_literal_pattern(p, start_pos_idx)
@@ -627,9 +669,8 @@ fn parse_atomic_pattern(p: &mut Parser<'_>) -> Pattern {
             // List cons constructor: :: (printed by the current list pattern printer)
             p.next();
             if p.token != Token::Colon {
-                p.err(DiagnosticCategory::Message(
-                    "Unexpected token in pattern: Colon".to_string(),
-                ));
+                // Use err_unexpected for proper error message
+                p.err_unexpected();
                 recover::default_pattern(p.arena_mut())
             } else {
                 p.next();
@@ -761,14 +802,22 @@ fn parse_atomic_pattern(p: &mut Parser<'_>) -> Pattern {
                 }
             }
         }
-        _ => {
-            p.err(DiagnosticCategory::Message(format!(
-                "Unexpected token in pattern: {:?}",
-                p.token
-            )));
-            // Advance to prevent infinite loops
-            p.next();
+        Token::Eof => {
+            // EOF: just report error and return default (no skip_tokens_and_maybe_retry)
+            // OCaml: | Eof -> Parser.err ~start_pos:p.prev_end_pos p ...; Recover.default_pattern ()
+            p.err_unexpected_at(p.prev_end_pos.clone());
             recover::default_pattern(p.arena_mut())
+        }
+        _ => {
+            // Other unexpected tokens: report error and try to skip/retry
+            // OCaml: | token -> Parser.err p ...; match skip_tokens_and_maybe_retry ...
+            p.err_unexpected();
+            if recover::skip_tokens_and_maybe_retry(p, grammar::is_atomic_pattern_start) {
+                // Found a valid pattern start after skipping, retry parsing
+                parse_atomic_pattern(p)
+            } else {
+                recover::default_pattern(p.arena_mut())
+            }
         }
     }
 }
@@ -782,9 +831,20 @@ fn parse_lident(p: &mut Parser<'_>) -> String {
             name
         }
         _ => {
-            p.err(DiagnosticCategory::Message(
-                "Expected lowercase identifier".to_string(),
-            ));
+            // OCaml: parse_lident recovery - emit error, skip tokens, try to find an Lident
+            p.err(DiagnosticCategory::Lident(p.token.clone()));
+            if p.token.is_keyword() && p.prev_end_pos.line == p.start_pos.line {
+                p.next();
+            } else {
+                p.next(); // skip the bad token
+                // Skip tokens until we find an Lident or should abort list parse
+                while !super::core::recover::should_abort_list_parse(p) && p.token != Token::Eof {
+                    p.next();
+                }
+                if matches!(p.token, Token::Lident(_)) {
+                    return parse_lident(p);
+                }
+            }
             "_".to_string()
         }
     }
@@ -913,15 +973,52 @@ fn parse_constructor_pattern(p: &mut Parser<'_>) -> Pattern {
 // ============================================================================
 
 /// Parse an array pattern [p1, p2, ...].
+/// Parse a pattern that does NOT allow spread (`...`).
+/// If spread is encountered, emit the provided error message and skip over it,
+/// then continue parsing the pattern normally.
+/// This matches OCaml's `parse_non_spread_pattern`.
+fn parse_non_spread_pattern(p: &mut Parser<'_>, error_msg: &str) -> Option<Pattern> {
+    // Check for spread and emit error if found
+    if p.token == Token::DotDotDot {
+        p.err(DiagnosticCategory::Message(error_msg.to_string()));
+        p.next(); // Skip past the ...
+    }
+
+    // Now parse the pattern if we can
+    if super::grammar::is_pattern_start(&p.token) {
+        let pat = parse_pattern(p);
+        // Check for type constraint: pat : typ
+        if p.token == Token::Colon {
+            p.next();
+            let typ = super::typ::parse_typ_expr(p);
+            let loc = p.mk_loc_spanning(pat.ppat_loc, typ.ptyp_loc);
+            Some(Pattern {
+                ppat_desc: PatternDesc::Ppat_constraint(Box::new(pat), typ),
+                ppat_loc: loc,
+                ppat_attributes: vec![],
+            })
+        } else {
+            Some(pat)
+        }
+    } else {
+        None
+    }
+}
+
 fn parse_array_pattern(p: &mut Parser<'_>) -> Pattern {
     let start_pos_idx = p.start_pos_idx();
     p.expect(Token::Lbracket);
 
     let mut patterns = vec![];
     while p.token != Token::Rbracket && p.token != Token::Eof {
-        // Use parse_constrained_pattern to support [1 : int, 2 : int] syntax
-        patterns.push(parse_constrained_pattern(p));
-        if !p.optional(&Token::Comma) {
+        // Use parse_non_spread_pattern to disallow spread in array patterns
+        // and emit appropriate error message
+        if let Some(pat) = parse_non_spread_pattern(p, super::core::error_messages::ARRAY_PATTERN_SPREAD) {
+            patterns.push(pat);
+            if !p.optional(&Token::Comma) {
+                break;
+            }
+        } else {
             break;
         }
     }
@@ -939,31 +1036,113 @@ fn parse_array_pattern(p: &mut Parser<'_>) -> Pattern {
 /// Parse a list pattern list{p1, p2, ...spread}.
 fn parse_list_pattern(p: &mut Parser<'_>, start_pos_idx: PosIdx) -> Pattern {
     // Token::List already includes the opening '{'
+    // OCaml: uses parse_comma_delimited_reversed_list with parse_pattern_region
+    // which collects (has_spread, pattern) tuples, then validates spreads after.
 
-    let mut patterns = vec![];
-    let mut spread = None;
+    // Collect items using OCaml's parse_pattern_region approach
+    let mut items: Vec<(bool, Pattern)> = vec![];
 
-    while p.token != Token::Rbrace && p.token != Token::Eof {
-        if p.token == Token::DotDotDot {
-            // OCaml does NOT include ... in the spread pattern location
+    p.leave_breadcrumb(Grammar::PatternOcamlList);
+    loop {
+        // parse_pattern_region: check what token we have
+        let item = if p.token == Token::DotDotDot {
             p.next();
-            let spread_pat = parse_constrained_pattern(p);
-            spread = Some(spread_pat);
-            // Allow trailing comma after spread: list{a, ...rest,}
-            p.optional(&Token::Comma);
-            break;
-        }
-        // Use parse_constrained_pattern to support (pat: type) inside list patterns
-        patterns.push(parse_constrained_pattern(p));
-        if !p.optional(&Token::Comma) {
-            break;
+            Some((true, parse_constrained_pattern(p)))
+        } else if super::grammar::is_pattern_start(&p.token) {
+            Some((false, parse_constrained_pattern(p)))
+        } else {
+            None
+        };
+
+        match item {
+            Some(node) => {
+                if p.token == Token::Comma {
+                    p.next();
+                    items.push(node);
+                } else if p.token == Token::Rbrace || p.token == Token::Eof {
+                    items.push(node);
+                    break;
+                } else if super::grammar::is_pattern_start(&p.token) || p.token == Token::DotDotDot {
+                    // Missing comma - report and continue
+                    p.expect(Token::Comma);
+                    items.push(node);
+                } else {
+                    items.push(node);
+                    if !(p.token == Token::Eof || p.token == Token::Rbrace
+                        || super::core::recover::should_abort_list_parse(p))
+                    {
+                        p.expect(Token::Comma);
+                        p.next();
+                    }
+                    break;
+                }
+            }
+            None => {
+                if p.token == Token::Eof || p.token == Token::Rbrace
+                    || super::core::recover::should_abort_list_parse(p)
+                {
+                    break;
+                } else {
+                    p.err(DiagnosticCategory::unexpected(
+                        p.token.clone(),
+                        p.breadcrumbs().to_vec(),
+                    ));
+                    p.next();
+                }
+            }
         }
     }
+    p.eat_breadcrumb();
 
     p.expect(Token::Rbrace);
     let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
 
-    ast_helper::make_list_pattern(p, loc, patterns, spread)
+    // OCaml: items collected in reverse order, first reversed item with spread = tail.
+    // We collected in forward order. Reverse to match OCaml's processing.
+    items.reverse();
+
+    match items.as_slice() {
+        [(true, _), ..] => {
+            let (_, spread_pat) = items.remove(0);
+            // Remaining items: report any that also have spread
+            let patterns: Vec<Pattern> = items
+                .into_iter()
+                .map(|(has_spread, pat)| {
+                    if has_spread {
+                        p.err_at(
+                            p.loc_start(pat.ppat_loc),
+                            p.end_pos.clone(),
+                            DiagnosticCategory::Message(
+                                super::core::error_messages::LIST_PATTERN_SPREAD.to_string(),
+                            ),
+                        );
+                    }
+                    pat
+                })
+                .rev()
+                .collect();
+            ast_helper::make_list_pattern(p, loc, patterns, Some(spread_pat))
+        }
+        _ => {
+            let patterns: Vec<Pattern> = items
+                .into_iter()
+                .map(|(has_spread, pat)| {
+                    if has_spread {
+                        p.err_at(
+                            p.loc_start(pat.ppat_loc),
+                            p.end_pos.clone(),
+                            DiagnosticCategory::Message(
+                                super::core::error_messages::LIST_PATTERN_SPREAD.to_string(),
+                            ),
+                        );
+                    }
+                    pat
+                })
+                .rev()
+                .collect();
+            ast_helper::make_list_pattern(p, loc, patterns, None)
+        }
+    }
 }
 
 /// Parse a record pattern {field: pat, ...}.
@@ -971,17 +1150,28 @@ fn parse_record_pattern(p: &mut Parser<'_>) -> Pattern {
     let start_pos_idx = p.start_pos_idx();
     p.expect(Token::Lbrace);
 
-    let mut fields = vec![];
+    // OCaml: collects (has_spread, PatField|PatUnderscore) tuples via
+    // parse_comma_delimited_reversed_list, then validates spreads after parsing.
+    let mut raw_fields: Vec<(bool, Option<PatternRecordField>)> = vec![];
     let mut closed = ClosedFlag::Closed;
 
     while p.token != Token::Rbrace && p.token != Token::Eof {
         if p.token == Token::Underscore {
             p.next();
-            closed = ClosedFlag::Open;
+            raw_fields.push((false, None)); // PatUnderscore
             // Allow trailing comma after underscore: {a, _,}
             p.optional(&Token::Comma);
-            break;
+            continue;
         }
+
+        // Check for spread pattern - OCaml: DotDotDot case in parse_record_pattern_row
+        // Parse as a regular field with has_spread=true, validate after
+        let has_spread = if p.token == Token::DotDotDot {
+            p.next();
+            true
+        } else {
+            false
+        };
 
         let field_start_idx = p.start_pos_idx();
 
@@ -996,15 +1186,12 @@ fn parse_record_pattern(p: &mut Parser<'_>) -> Pattern {
 
         // Support qualified record labels in patterns: {Module.label: pat}
         // (also needed for ambiguity disambiguation, mirroring OCaml syntax).
+        // OCaml: Lident/Uident case in parse_record_pattern_row
         let mut parts: Vec<String> = vec![];
         loop {
             match &p.token {
                 Token::Lident(name) | Token::Uident(name) => {
                     parts.push(name.clone());
-                    p.next();
-                }
-                _ if p.token.is_keyword() => {
-                    parts.push(p.token.to_string());
                     p.next();
                 }
                 _ => break,
@@ -1016,7 +1203,36 @@ fn parse_record_pattern(p: &mut Parser<'_>) -> Pattern {
             }
         }
 
+        // If parts is empty, check for keyword field
+        // OCaml: Token.is_keyword p.token case in parse_record_pattern_row
         if parts.is_empty() {
+            if p.token.is_keyword() {
+                // Try to recover keyword as field name if followed by colon
+                if let Some((recovered_name, loc)) = super::core::recover_keyword_field_name_if_probably_field(
+                    p,
+                    super::core::error_messages::keyword_field_in_pattern,
+                ) {
+                    // OCaml: Parser.expect Colon p
+                    p.expect(Token::Colon);
+                    // Check for optional marker after colon: name: ? pat
+                    let opt = p.token == Token::Question;
+                    if opt {
+                        p.next();
+                    }
+                    let pat = parse_pattern(p);
+                    let lid_idx = p.push_lident(&recovered_name);
+                    let lid = with_loc(lid_idx, loc);
+                    raw_fields.push((false, Some(PatternRecordField { lid, pat, opt })));
+                    if !p.optional(&Token::Comma) {
+                        break;
+                    }
+                    continue;
+                } else {
+                    // Just emit the error and break
+                    super::core::emit_keyword_field_error(p, super::core::error_messages::keyword_field_in_pattern);
+                    break;
+                }
+            }
             break;
         }
 
@@ -1039,6 +1255,24 @@ fn parse_record_pattern(p: &mut Parser<'_>) -> Pattern {
             // Longident location only covers the field name, not the pattern
             let lid_loc = p.mk_loc_idx(field_start_idx, lid_end_pos_idx);
             (with_loc(lid_idx, lid_loc), pat, opt)
+        } else if p.token == Token::Equal {
+            // OCaml: Token.Equal case in parse_record_pattern_row
+            // {field=value} instead of {field: value}
+            p.err_at(
+                p.start_pos.clone(),
+                p.end_pos.clone(),
+                DiagnosticCategory::message(
+                    "Record patterns use `:` when matching fields. Example: `{field: value}`",
+                ),
+            );
+            p.next(); // consume =
+            let opt = p.token == Token::Question;
+            if opt {
+                p.next();
+            }
+            let pat = parse_pattern(p);
+            let lid_loc = p.mk_loc_idx(field_start_idx, lid_end_pos_idx);
+            (with_loc(lid_idx, lid_loc), pat, opt)
         } else if p.token == Token::Question {
             // field? (optional punning after field name - less common)
             p.next();
@@ -1055,7 +1289,7 @@ fn parse_record_pattern(p: &mut Parser<'_>) -> Pattern {
             (with_loc(lid_idx, loc), pat, opt_punning)
         };
 
-        fields.push(PatternRecordField { lid, pat, opt });
+        raw_fields.push((has_spread, Some(PatternRecordField { lid, pat, opt })));
 
         if !p.optional(&Token::Comma) {
             break;
@@ -1064,6 +1298,44 @@ fn parse_record_pattern(p: &mut Parser<'_>) -> Pattern {
 
     p.expect(Token::Rbrace);
     let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
+
+    // OCaml: process raw_fields in reverse order.
+    // Last PatUnderscore becomes Open flag, spread fields emit errors.
+    // Reverse to match OCaml's reversed list processing.
+    raw_fields.reverse();
+
+    // Check if first (last parsed) item is Underscore
+    if let Some((false, None)) = raw_fields.first() {
+        closed = ClosedFlag::Open;
+        raw_fields.remove(0);
+    }
+
+    // Process fields in reversed order (matching OCaml's fold_left on reversed list).
+    // Prepend each field to build the correct forward order.
+    // This ensures the LAST spread field's error is emitted first (region silencing).
+    let mut fields = vec![];
+    for (has_spread, field_opt) in raw_fields.into_iter() {
+        match field_opt {
+            Some(field) => {
+                if has_spread {
+                    // OCaml: Parser.err ~start_pos:pattern.ppat_loc.loc_start p
+                    // end_pos defaults to p.end_pos (current token end)
+                    p.err_at(
+                        p.loc_start(field.pat.ppat_loc),
+                        p.end_pos.clone(),
+                        DiagnosticCategory::Message(
+                            super::core::error_messages::RECORD_PATTERN_SPREAD.to_string(),
+                        ),
+                    );
+                }
+                // OCaml: field :: fields (prepend to maintain correct order)
+                fields.insert(0, field);
+            }
+            None => {
+                // PatUnderscore in middle - just skip (OCaml: (fields, flag))
+            }
+        }
+    }
 
     Pattern {
         ppat_desc: PatternDesc::Ppat_record(fields, closed),
@@ -1190,46 +1462,40 @@ fn parse_template_literal_pattern(p: &mut Parser<'_>, start_pos_idx: PosIdx) -> 
         p.next_template_literal_token();
     }
 
-    loop {
-        match &p.token {
-            Token::TemplatePart { text: chunk, .. } => {
-                text.push_str(chunk);
+    // Check if this is a simple template (no interpolation)
+    let delimiter = if let Token::TemplateTail { text: chunk, .. } = &p.token {
+        text.push_str(chunk);
+        p.next();
+        Some("js".to_string())
+    } else {
+        // Has interpolation - skip all tokens and report error at original start_pos
+        // OCaml: Parser.err ~start_pos ~end_pos:p.prev_end_pos p (message ...)
+        fn skip_tokens(p: &mut Parser<'_>) {
+            if p.token != Token::Eof {
                 p.next();
-                // Consume interpolation expression.
-                let _ = super::expr::parse_expr(p);
-                p.next_template_literal_token();
-            }
-            Token::TemplateTail { text: chunk, .. } => {
-                text.push_str(chunk);
-                p.next();
-                break;
-            }
-            Token::Backtick => {
-                // Empty template string
-                p.next();
-                break;
-            }
-            Token::Eof => {
-                p.err(DiagnosticCategory::Message(
-                    "Unterminated template literal".to_string(),
-                ));
-                break;
-            }
-            _ => {
-                p.err(DiagnosticCategory::Message(format!(
-                    "Unexpected token in template literal pattern: {:?}",
-                    p.token
-                )));
-                p.next();
-                break;
+                if p.token == Token::Backtick {
+                    p.next();
+                } else {
+                    skip_tokens(p);
+                }
             }
         }
-    }
+        skip_tokens(p);
+        p.err_at(
+            p.arena().get_position(start_pos_idx).clone(),
+            p.prev_end_pos.clone(),
+            DiagnosticCategory::Message(
+                super::core::error_messages::STRING_INTERPOLATION_IN_PATTERN.to_string(),
+            ),
+        );
+        // OCaml returns Pconst_string ("", None) in error case
+        None
+    };
 
     let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
 
     Pattern {
-        ppat_desc: PatternDesc::Ppat_constant(Constant::String(text, Some("js".to_string()))),
+        ppat_desc: PatternDesc::Ppat_constant(Constant::String(text, delimiter)),
         ppat_loc: loc,
         ppat_attributes: vec![template_literal_attr(p.arena_mut())],
     }
@@ -1266,8 +1532,17 @@ fn parse_poly_variant_pattern(p: &mut Parser<'_>) -> Pattern {
             p.next();
             name
         }
-        Token::Int { i, .. } => {
+        Token::Int { i, suffix } => {
+            // Clone values before borrowing p mutably
             let tag = i.clone();
+            let has_suffix = suffix.is_some();
+            // OCaml: emit error if numeric poly variant has a suffix
+            if has_suffix {
+                p.err(DiagnosticCategory::Message(format!(
+                    "A numeric polymorphic variant cannot be followed by a letter. Did you mean `#{}`?",
+                    tag
+                )));
+            }
             p.next();
             tag
         }
@@ -1314,12 +1589,17 @@ fn parse_poly_variant_pattern(p: &mut Parser<'_>) -> Pattern {
                     patterns.push(parse_constrained_pattern(p));
                 }
                 p.expect(Token::Rparen);
-                let tuple_loc = p.mk_loc_idx_to_prev_end(tuple_start_idx);
-                Some(Box::new(Pattern {
-                    ppat_desc: PatternDesc::Ppat_tuple(patterns),
-                    ppat_loc: tuple_loc,
-                    ppat_attributes: vec![],
-                }))
+                // Trailing comma with single element: #tag(a,) -> just the pattern, not a tuple
+                if patterns.len() == 1 {
+                    Some(Box::new(patterns.into_iter().next().unwrap()))
+                } else {
+                    let tuple_loc = p.mk_loc_idx_to_prev_end(tuple_start_idx);
+                    Some(Box::new(Pattern {
+                        ppat_desc: PatternDesc::Ppat_tuple(patterns),
+                        ppat_loc: tuple_loc,
+                        ppat_attributes: vec![],
+                    }))
+                }
             } else {
                 p.expect(Token::Rparen);
                 Some(Box::new(first))

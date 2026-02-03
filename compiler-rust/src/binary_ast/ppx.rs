@@ -15,12 +15,11 @@
 //! - `compiler/frontend/ast_external.ml`
 
 use crate::intern::StrIdx;
-use crate::location::Location;
 use crate::parse_arena::{LidentIdx, Located, LocIdx, ParseArena};
 use crate::parser::ast::{
-    self as current, ArgLabel, Arity, Attribute, Case, Constant, ConstructorArguments,
-    ConstructorDeclaration, CoreType, CoreTypeDesc, Expression, ExpressionDesc, JsxClosingTag,
-    JsxContainerElement, JsxElement, JsxFragment, JsxProp, JsxUnaryElement, Label, LabelDeclaration,
+    self as current, ArgLabel, Attribute, Case, Constant, ConstructorArguments,
+    ConstructorDeclaration, CoreType, CoreTypeDesc, Expression, ExpressionDesc,
+    JsxContainerElement, JsxElement, JsxFragment, JsxProp, JsxUnaryElement, LabelDeclaration,
     ModuleExpr, ModuleExprDesc, Pattern, PatternDesc, Payload, RecFlag, SignatureItem,
     SignatureItemDesc, StructureItem, StructureItemDesc, TypeArg, TypeDeclaration, TypeKind,
     ValueBinding, ValueDescription,
@@ -4334,8 +4333,6 @@ fn rewrite_structure_item(item: &StructureItem, arena: &mut ParseArena) -> Vec<S
             }),
             pstr_loc: item.pstr_loc,
         }],
-        // Other structure items don't contain expressions that need rewriting
-        _ => vec![item.clone()],
     }
 }
 

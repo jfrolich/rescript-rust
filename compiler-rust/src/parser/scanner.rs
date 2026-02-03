@@ -55,7 +55,8 @@ pub struct Scanner<'src> {
     src_char_count: usize,
     /// Current character.
     ch: char,
-    /// Current character offset in source (= byte offset in original Latin-1 file).
+    /// Current character offset in source (char index, not byte offset).
+    /// In Latin-1 mode, this equals the original byte offset since each byte is one char.
     offset: usize,
     /// UTF-16 code units since line start (for OCaml-compatible column counting).
     offset16: usize,
@@ -849,7 +850,9 @@ impl<'src> Scanner<'src> {
                         end_pos.clone(),
                         DiagnosticCategory::unclosed_template(),
                     );
-                    let contents = self.substring(start_off, self.offset).to_string();
+                    // OCaml uses (max (scanner.offset - 1 - start_off) 0) to exclude the last char
+                    let end_off = if self.offset > start_off { self.offset - 1 } else { start_off };
+                    let contents = self.substring(start_off, end_off).to_string();
                     return ScanResult {
                         start_pos,
                         end_pos,
@@ -1216,9 +1219,11 @@ impl<'src> Scanner<'src> {
 
             '\\' => {
                 // Exotic identifier
+                // Capture position of backslash for error reporting
+                let backslash_pos = self.position();
                 self.next();
                 if self.ch == '"' {
-                    self.scan_exotic_identifier()
+                    self.scan_exotic_identifier(backslash_pos)
                 } else {
                     Token::Backslash
                 }
@@ -1238,8 +1243,15 @@ impl<'src> Scanner<'src> {
                     end_pos,
                     DiagnosticCategory::unknown_uchar(ch),
                 );
-                // Continue scanning
-                return self.scan();
+                // Continue scanning - but preserve the original start_pos
+                // OCaml: let _, _, token = scan scanner in token
+                // (start_pos, end_pos, token) - uses outer start_pos, not recursive one
+                let scan_result = self.scan();
+                return ScanResult {
+                    start_pos,  // Use the outer start_pos (before the bad character)
+                    end_pos: scan_result.end_pos,
+                    token: scan_result.token,
+                };
             }
         };
 
@@ -1255,7 +1267,7 @@ impl<'src> Scanner<'src> {
     }
 
     fn is_jsx_close_slash(&self) -> bool {
-        self.offset > 0 && self.src_bytes.get(self.offset - 1) == Some(&b'<')
+        self.offset > 0 && self.src.chars().nth(self.offset - 1) == Some('<')
     }
 
     fn can_start_regex_literal(&self) -> bool {
@@ -1335,7 +1347,7 @@ impl<'src> Scanner<'src> {
                     in_char_class = true;
                     self.next();
                 }
-                ']' if !escaped => {
+                ']' if !escaped && in_char_class => {
                     in_char_class = false;
                     self.next();
                 }
@@ -1371,6 +1383,78 @@ impl<'src> Scanner<'src> {
         }
 
         Some(Token::Regex { pattern, flags })
+    }
+
+    /// Scan a regex literal from the current position (after the opening `/` has been consumed).
+    /// This matches OCaml's `scan_regex` which is called by the parser when it encounters a `/`
+    /// token in expression position and needs to rescan it as a regex.
+    /// Unlike `try_scan_regex_literal`, this does not restore on failure - it emits an error
+    /// and returns a Regex token with empty pattern on unterminated regex.
+    pub fn scan_regex(&mut self) -> ScanResult {
+        let start_pos = self.position();
+        let pattern_start = self.offset;
+
+        let mut escaped = false;
+        let mut in_char_class = false;
+
+        let (pattern, flags) = loop {
+            match self.ch {
+                '\n' | '\r' => {
+                    let end_pos = self.position();
+                    self.error(
+                        start_pos.clone(),
+                        end_pos,
+                        DiagnosticCategory::message("unterminated regex".to_string()),
+                    );
+                    break (String::new(), String::new());
+                }
+                c if c == EOF_CHAR => {
+                    let end_pos = self.position();
+                    self.error(
+                        start_pos.clone(),
+                        end_pos,
+                        DiagnosticCategory::message("unterminated regex".to_string()),
+                    );
+                    break (String::new(), String::new());
+                }
+                '\\' if !escaped => {
+                    escaped = true;
+                    self.next();
+                }
+                '[' if !escaped => {
+                    in_char_class = true;
+                    escaped = false;
+                    self.next();
+                }
+                ']' if !escaped && in_char_class => {
+                    in_char_class = false;
+                    self.next();
+                }
+                '/' if !escaped && !in_char_class => {
+                    // Closing /
+                    let pattern = self.substring(pattern_start, self.offset).to_string();
+                    self.next(); // consume closing '/'
+
+                    let flags_start = self.offset;
+                    while self.ch.is_ascii_alphabetic() {
+                        self.next();
+                    }
+                    let flags = self.substring(flags_start, self.offset).to_string();
+                    break (pattern, flags);
+                }
+                _ => {
+                    escaped = false;
+                    self.next();
+                }
+            }
+        };
+
+        let end_pos = self.position();
+        ScanResult {
+            start_pos,
+            end_pos,
+            token: Token::Regex { pattern, flags },
+        }
     }
 
     /// Scan an escape sequence in a character literal.
@@ -1430,12 +1514,14 @@ impl<'src> Scanner<'src> {
             }
         };
 
+        // Capture the escape sequence contents BEFORE consuming the closing quote
+        let contents = self.substring(offset, self.offset).to_string();
+
         // Consume closing quote
         if self.ch == '\'' {
             self.next();
         }
 
-        let contents = self.substring(offset, self.offset).to_string();
         Token::Codepoint {
             c: codepoint,
             original: contents,
@@ -1460,13 +1546,10 @@ impl<'src> Scanner<'src> {
     }
 
     /// Scan an exotic identifier (e.g., \"foo").
-    /// OCaml behavior:
-    /// - Uppercase exotic identifiers (\"Foo") keep the encoding: Token::Lident("\"Foo\"")
-    /// - Lowercase exotic identifiers (\"type") are stripped: Token::Lident("type")
-    /// This is because uppercase Lidents in the OCaml parsetree would be confused with
-    /// module names/constructors, so the \"...\" encoding is preserved as a marker.
-    fn scan_exotic_identifier(&mut self) -> Token {
-        let start_pos = self.position();
+    /// Returns the identifier without surrounding quotes.
+    /// `backslash_pos` is the position of the backslash for error reporting.
+    fn scan_exotic_identifier(&mut self, backslash_pos: Position) -> Token {
+        let start_pos = backslash_pos;
 
         self.next(); // consume opening quote
         let content_start = self.offset; // start of identifier content (after opening quote)
@@ -1476,8 +1559,12 @@ impl<'src> Scanner<'src> {
                 '"' => {
                     let content_end = self.offset; // end of content (before closing quote)
                     self.next(); // consume closing quote
-                    let name = self.substring(content_start, content_end).to_string();
-                    if name.is_empty() {
+                    // Return identifier without quotes
+                    let ident = self.substring(content_start, content_end).to_string();
+
+                    // Check for empty identifier - OCaml preserves the full exotic form (\"")
+                    // when the content is empty, for error recovery purposes
+                    if ident.is_empty() {
                         let end_pos = self.position();
                         self.error(
                             start_pos.clone(),
@@ -1486,15 +1573,18 @@ impl<'src> Scanner<'src> {
                                 "A quoted identifier can't be empty string.",
                             ),
                         );
-                        // Return the raw form for empty string
-                        return Token::Lident(format!("\\\"\\\""));
+                        // Return the full exotic form like OCaml does: \""
+                        // (backslash was consumed by caller, so we prepend it)
+                        return Token::Lident("\\\"\"".to_string());
                     }
-                    // OCaml: if name starts with uppercase, keep the \"...\" encoding
-                    // to avoid confusion with module names/constructors in OCaml parsetree
-                    if name.starts_with(|c: char| c.is_ascii_uppercase()) {
-                        return Token::Lident(format!("\\\"{}\"", name));
+
+                    // OCaml preserves exotic form for uppercase identifiers
+                    // (to avoid confusion in OCaml parsetree where uppercase = module)
+                    if ident.chars().next().map_or(false, |c| c.is_ascii_uppercase()) {
+                        return Token::Lident(format!("\\\"{}\"", ident));
                     }
-                    return Token::Lident(name);
+
+                    return Token::Lident(ident);
                 }
                 '\n' | '\r' => {
                     let end_pos = self.position();
@@ -1505,8 +1595,12 @@ impl<'src> Scanner<'src> {
                             "A quoted identifier can't contain line breaks.",
                         ),
                     );
-                    let ident = self.substring(content_start, self.offset).to_string();
-                    self.next();
+                    // OCaml includes the \" prefix plus the linebreak in the identifier
+                    // e.g. \"a followed by newline becomes \"a\n in the AST
+                    let content = self.substring(content_start, self.offset);
+                    self.next(); // consume the linebreak
+                    // Build full exotic form: \" + content + actual newline
+                    let ident = format!("\\\"{}\n", content);
                     return Token::Lident(ident);
                 }
                 c if c == EOF_CHAR => {
@@ -1516,7 +1610,9 @@ impl<'src> Scanner<'src> {
                         end_pos,
                         DiagnosticCategory::message("Did you forget a \" here?"),
                     );
-                    let ident = self.substring(content_start, self.offset).to_string();
+                    // OCaml includes the \" prefix in the identifier for error recovery
+                    let content = self.substring(content_start, self.offset);
+                    let ident = format!("\\\"{}\"", content);
                     return Token::Lident(ident);
                 }
                 _ => self.next(),
@@ -1525,17 +1621,22 @@ impl<'src> Scanner<'src> {
     }
 
     /// Check if an operator has whitespace on both sides (making it binary).
+    ///
+    /// Uses char-based indexing since `cnum` values are char indices (which equal
+    /// original byte offsets in Latin-1 mode). We cannot use `src.as_bytes()` because
+    /// the Rust string's UTF-8 representation has different byte offsets for non-ASCII
+    /// Latin-1 chars (each Latin-1 char 128-255 becomes 2 UTF-8 bytes).
     pub fn is_binary_op(src: &str, start_cnum: usize, end_cnum: usize) -> bool {
         if start_cnum == 0 {
             return false;
         }
 
-        let bytes = src.as_bytes();
+        let src_chars: Vec<char> = src.chars().collect();
         let left_ok = start_cnum > 0
-            && start_cnum <= bytes.len()
-            && Self::is_whitespace(bytes[start_cnum - 1] as char);
+            && start_cnum <= src_chars.len()
+            && Self::is_whitespace(src_chars[start_cnum - 1]);
 
-        let right_ok = end_cnum >= bytes.len() || Self::is_whitespace(bytes[end_cnum] as char);
+        let right_ok = end_cnum >= src_chars.len() || Self::is_whitespace(src_chars[end_cnum]);
 
         left_ok && right_ok
     }

@@ -5,6 +5,7 @@
 
 use crate::location::Position;
 use crate::parse_arena::{LocIdx, ParseArena, PosIdx, StrIdx};
+use crate::parser::DiagnosticCategory;
 
 use super::ast::*;
 use super::grammar;
@@ -89,6 +90,17 @@ pub mod recover {
         }
     }
 
+    /// Create a default signature item for error recovery.
+    /// Used when an attribute is found without an item to attach it to.
+    pub fn default_signature_item(arena: &mut ParseArena) -> SignatureItem {
+        let str_idx = arena.intern("rescript.sigitemhole");
+        let id = mknoloc(str_idx);
+        SignatureItem {
+            psig_desc: SignatureItemDesc::Psig_extension((id, Payload::PStr(vec![])), vec![]),
+            psig_loc: LocIdx::none(),
+        }
+    }
+
     /// Recover from missing `=>` by also accepting `->`.
     pub fn recover_equal_greater(p: &mut Parser<'_>) {
         p.expect(Token::EqualGreater);
@@ -105,6 +117,49 @@ pub mod recover {
             }
         }
         false
+    }
+
+    /// Skip tokens and maybe retry parsing.
+    ///
+    /// This matches OCaml's `skip_tokens_and_maybe_retry` which is used in error recovery.
+    /// It skips over unexpected tokens and returns true if parsing should be retried
+    /// (i.e., we found a token that can start the grammar we're looking for).
+    ///
+    /// Logic:
+    /// 1. If current token is a keyword AND on same line as previous, skip and don't retry
+    /// 2. If we should abort list parse:
+    ///    - If current token can start our grammar, DON'T advance, return true (retry)
+    ///    - Else return false (don't retry)
+    /// 3. Else:
+    ///    - Skip tokens until we should abort list parse
+    ///    - If we end up at a valid start token, return true (retry)
+    ///    - Else return false (don't retry)
+    pub fn skip_tokens_and_maybe_retry<F>(p: &mut Parser<'_>, is_start_of_grammar: F) -> bool
+    where
+        F: Fn(&Token) -> bool,
+    {
+        // Case 1: keyword on same line - skip it and don't retry
+        if p.token.is_keyword() && p.prev_end_pos.line == p.start_pos.line {
+            p.next();
+            return false;
+        }
+
+        // Case 2: should abort list parse
+        if should_abort_list_parse(p) {
+            // If current token can start our grammar, retry without advancing
+            if is_start_of_grammar(&p.token) {
+                return true;
+            }
+            return false;
+        }
+
+        // Case 3: normal recovery - skip until we should abort or find start
+        p.next();
+        while !should_abort_list_parse(p) {
+            p.next();
+        }
+
+        is_start_of_grammar(&p.token)
     }
 }
 
@@ -153,8 +208,7 @@ pub mod error_messages {
         "String interpolation is not supported in pattern matching.";
 
     /// Error message for type definition in function.
-    pub const TYPE_DEFINITION_IN_FUNCTION: &str = "Type definitions are not allowed inside functions.\n\
-         Move this `type` declaration to the top level or into a module.";
+    pub const TYPE_DEFINITION_IN_FUNCTION: &str = "Type definitions are not allowed inside functions.\n  Move this `type` declaration to the top level or into a module.";
 
     /// Error message for type param.
     pub const TYPE_PARAM: &str =
@@ -191,6 +245,124 @@ pub mod error_messages {
              Standalone attributes start with `@@` like: `@@{}`",
             attr_name, attr_name
         )
+    }
+
+    /// Generate error message for keyword used as record field name in expressions.
+    pub fn keyword_field_in_expr(keyword_txt: &str) -> String {
+        format!(
+            "Cannot use keyword `{}` as a record field name. Suggestion: rename it (e.g. `{}_`)",
+            keyword_txt, keyword_txt
+        )
+    }
+
+    /// Generate error message for keyword used as record field name in patterns.
+    pub fn keyword_field_in_pattern(keyword_txt: &str) -> String {
+        format!(
+            "Cannot use keyword `{}` here. Keywords are not allowed as record field names.",
+            keyword_txt
+        )
+    }
+
+    /// Generate error message for keyword used as record field name in type declarations.
+    pub fn keyword_field_in_type(keyword_txt: &str) -> String {
+        format!(
+            "Cannot use keyword `{}` as a record field name. Suggestion: rename it (e.g. `{}_`)\n  \
+             If you need the field to be \"{}\" at runtime, annotate the field: `@as(\"{}\") {}_ : ...`",
+            keyword_txt, keyword_txt, keyword_txt, keyword_txt, keyword_txt
+        )
+    }
+}
+
+// ============================================================================
+// Keyword Field Error Handling
+// ============================================================================
+
+/// Emit an error for keyword used as record field name.
+/// OCaml: emit_keyword_field_error
+pub fn emit_keyword_field_error<F>(p: &mut Parser<'_>, mk_message: F)
+where
+    F: Fn(&str) -> String,
+{
+    let keyword_txt = format!("{}", p.token);
+    let keyword_start = p.start_pos.clone();
+    let keyword_end = p.end_pos.clone();
+    p.err_at(
+        keyword_start,
+        keyword_end,
+        DiagnosticCategory::Message(mk_message(&keyword_txt)),
+    );
+}
+
+/// Recover a keyword used as field name if it's probably a full field name (not punning).
+/// Checks if there's a colon after it, in which case we recover by appending "_" to the name.
+/// OCaml: recover_keyword_field_name_if_probably_field
+pub fn recover_keyword_field_name_if_probably_field<F>(
+    p: &mut Parser<'_>,
+    mk_message: F,
+) -> Option<(String, LocIdx)>
+where
+    F: Fn(&str) -> String,
+{
+    if p.token.is_keyword()
+        && p.lookahead(|st| {
+            st.next();
+            st.token == Token::Colon
+        })
+    {
+        emit_keyword_field_error(p, mk_message);
+        let loc = p.mk_loc_current();
+        let recovered_field_name = format!("{}_", p.token);
+        p.next();
+        Some((recovered_field_name, loc))
+    } else {
+        None
+    }
+}
+
+// ============================================================================
+// Identifier Parsing
+// ============================================================================
+
+/// Parse an identifier (lident or uident) with custom error message.
+/// OCaml: parse_ident ~msg ~start_pos p
+///
+/// Logic:
+/// 1. If token is Lident/Uident: return it
+/// 2. If token is a keyword on the same line: emit "keyword reserved" error, return keyword
+/// 3. Otherwise: emit the custom msg, advance and return empty string
+pub fn parse_ident(p: &mut Parser<'_>, msg: &str, start_pos_idx: PosIdx) -> (String, LocIdx) {
+    match &p.token {
+        Token::Lident(ident) | Token::Uident(ident) => {
+            let ident = ident.clone();
+            p.next();
+            let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
+            (ident, loc)
+        }
+        token if token.is_keyword() && p.prev_end_pos.line == p.start_pos.line => {
+            let token_txt = format!("{}", p.token);
+            let err_msg = format!(
+                "`{}` is a reserved keyword. Keywords need to be escaped: \\\"{}\"",
+                token_txt, token_txt
+            );
+            p.err_at(
+                p.arena().get_position(start_pos_idx).clone(),
+                p.end_pos.clone(),
+                DiagnosticCategory::Message(err_msg),
+            );
+            p.next();
+            let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
+            (token_txt, loc)
+        }
+        _ => {
+            p.err_at(
+                p.arena().get_position(start_pos_idx).clone(),
+                p.end_pos.clone(),
+                DiagnosticCategory::Message(msg.to_string()),
+            );
+            p.next();
+            let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
+            (String::new(), loc)
+        }
     }
 }
 
@@ -679,13 +851,29 @@ pub fn make_unary_expr(
 }
 
 /// Create an infix operator expression.
+/// When `=` is used as a binary operator (which is likely a mistake - should be `==`),
+/// emit a helpful error message.
 pub fn make_infix_operator(
     p: &mut Parser<'_>,
     token: Token,
     start_pos: PosIdx,
     end_pos: PosIdx,
 ) -> Expression {
-    let stringified_token = token.to_string();
+    // Special handling for = used as binary operator
+    // This is likely a mistake - user probably meant ==
+    let stringified_token = if token == Token::Equal {
+        // TODO: could have a totally different meaning like x->fooSet(y)
+        p.err_at(
+            p.arena().get_position(start_pos).clone(),
+            p.arena().get_position(end_pos).clone(),
+            DiagnosticCategory::Message(
+                "Did you mean `==` here?".to_string(),
+            ),
+        );
+        "=".to_string()
+    } else {
+        token.to_string()
+    };
 
     let loc = p.mk_loc_idx(start_pos, end_pos);
     let op_lid = make_lident_static(p.arena_mut(), &stringified_token);

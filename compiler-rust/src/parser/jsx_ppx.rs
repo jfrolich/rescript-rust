@@ -11,7 +11,7 @@
 //! - Key props use `jsxKeyed`/`jsxsKeyed` instead
 //! - `@react.component` transforms functions to accept props record
 
-use crate::parse_arena::{LidentIdx, Located, ParseArena, StrIdx};
+use crate::parse_arena::{LidentIdx, Located, ParseArena};
 use super::ast::*;
 use super::longident::Longident;
 
@@ -456,10 +456,55 @@ fn transform_react_component_binding(
             ppat_attributes: vec![],
         };
 
-        // Only add type constraint if alias doesn't start with "_" (underscore means unused)
-        let ref_pattern = if !ref_alias.starts_with('_') {
-            // Type is Js.Nullable.t<'ref>
-            // OCaml calls ref_type Location.none, so inner Ptyp_var uses ghost location
+        // OCaml (line 749-751): only add Js.Nullable.t<'ref> constraint when the pattern is just
+        // Ppat_var {txt} (i.e., no existing constraint). If the original pattern already has a
+        // type constraint, preserve it.
+        let ref_pattern = if let Some(arg) = ref_arg {
+            // Check if the original pattern already has a type constraint
+            if matches!(arg.pattern.ppat_desc, PatternDesc::Ppat_constraint(_, _)) {
+                // Preserve the original pattern with its type annotation
+                arg.pattern.clone()
+            } else if !ref_alias.starts_with('_') {
+                // No existing constraint, and not unused - add Js.Nullable.t<'ref>
+                // OCaml calls ref_type Location.none, so inner Ptyp_var uses ghost location
+                let ref_type_var = CoreType {
+                    ptyp_desc: CoreTypeDesc::Ptyp_var("ref".to_string()),
+                    ptyp_loc: empty_loc(),
+                    ptyp_attributes: vec![],
+                };
+                let js_idx = arena.intern_string("Js");
+                let nullable_idx = arena.intern_string("Nullable");
+                let t_idx = arena.intern_string("t");
+                let js_nullable_t_lid = arena.push_longident(Longident::Ldot(
+                    Box::new(Longident::Ldot(
+                        Box::new(Longident::Lident(js_idx)),
+                        nullable_idx,
+                    )),
+                    t_idx,
+                ));
+                let js_nullable_t = CoreType {
+                    ptyp_desc: CoreTypeDesc::Ptyp_constr(
+                        Loc {
+                            txt: js_nullable_t_lid,
+                            loc: empty_loc(),
+                        },
+                        vec![ref_type_var],
+                    ),
+                    ptyp_loc: empty_loc(),
+                    ptyp_attributes: vec![],
+                };
+
+                // OCaml uses ghost location for the outer Ppat_constraint
+                Pattern {
+                    ppat_desc: PatternDesc::Ppat_constraint(Box::new(base_ref_pattern), js_nullable_t),
+                    ppat_loc: empty_loc(),
+                    ppat_attributes: vec![],
+                }
+            } else {
+                base_ref_pattern
+            }
+        } else if !ref_alias.starts_with('_') {
+            // No ref_arg found but alias doesn't start with "_" - add Js.Nullable.t<'ref>
             let ref_type_var = CoreType {
                 ptyp_desc: CoreTypeDesc::Ptyp_var("ref".to_string()),
                 ptyp_loc: empty_loc(),
@@ -486,8 +531,6 @@ fn transform_react_component_binding(
                 ptyp_loc: empty_loc(),
                 ptyp_attributes: vec![],
             };
-
-            // OCaml uses ghost location for the outer Ppat_constraint
             Pattern {
                 ppat_desc: PatternDesc::Ppat_constraint(Box::new(base_ref_pattern), js_nullable_t),
                 ppat_loc: empty_loc(),
@@ -616,19 +659,6 @@ fn transform_react_component_binding(
         }
     };
 
-    // Create transformed binding
-    let fn_name_idx = arena.push_string(fn_name.clone());
-    let transformed_binding = ValueBinding {
-        pvb_pat: Pattern {
-            ppat_desc: PatternDesc::Ppat_var(Loc { txt: fn_name_idx, loc: empty_loc() }),
-            ppat_loc: empty_loc(),
-            ppat_attributes: vec![],
-        },
-        pvb_expr: func_expr,
-        pvb_attributes: filtered_attrs,
-        pvb_loc: empty_loc(),
-    };
-
     // For forwardRef, wrap full_expression with React.forwardRef(...)
     // Use the original wrapper_expr to preserve source locations
     let final_full_expression = if has_forward_ref {
@@ -675,24 +705,125 @@ fn transform_react_component_binding(
         full_expression
     };
 
-    // For nonrecursive, create a new binding with the wrapper
-    // OCaml uses real locations for the public make binding:
-    // - pvb_loc uses pstr_loc (the entire structure_item location including @react.component)
-    // - pattern uses the original fn_name location
-    let new_binding = if rec_flag == RecFlag::Nonrecursive && !full_module_name.is_empty() {
-        let fn_name_idx2 = arena.push_string(fn_name);
-        Some(ValueBinding {
-            pvb_pat: Pattern {
-                ppat_desc: PatternDesc::Ppat_var(Loc { txt: fn_name_idx2, loc: fn_name_loc.clone() }),
-                ppat_loc: fn_name_loc,
-                ppat_attributes: vec![],
-            },
-            pvb_expr: final_full_expression,
-            pvb_attributes: vec![],
-            pvb_loc: pstr_loc.clone(),
-        })
-    } else {
-        None
+    // Handle recursive vs nonrecursive differently
+    // OCaml's jsx_v4.ml lines 788-806
+    let (transformed_binding, new_binding) = match rec_flag {
+        RecFlag::Recursive => {
+            // For recursive: create a nested let structure
+            // let rec make = {
+            //   let "make$Internal" = func_expr in
+            //   let make = full_expression in
+            //   make
+            // }
+            let internal_fn_name = format!("{}$Internal", fn_name);
+            let internal_fn_name_idx = arena.push_string(internal_fn_name);
+
+            // Inner let: let "make$Internal" = func_expr
+            let internal_binding = ValueBinding {
+                pvb_pat: Pattern {
+                    ppat_desc: PatternDesc::Ppat_var(Loc { txt: internal_fn_name_idx, loc: empty_loc() }),
+                    ppat_loc: empty_loc(),
+                    ppat_attributes: vec![],
+                },
+                pvb_expr: func_expr,
+                pvb_attributes: vec![],
+                pvb_loc: empty_loc(),
+            };
+
+            // Middle let: let make = full_expression
+            let fn_name_idx_wrapper = arena.push_string(fn_name.clone());
+            let wrapper_binding = ValueBinding {
+                pvb_pat: Pattern {
+                    ppat_desc: PatternDesc::Ppat_var(Loc { txt: fn_name_idx_wrapper, loc: empty_loc() }),
+                    ppat_loc: empty_loc(),
+                    ppat_attributes: vec![],
+                },
+                pvb_expr: final_full_expression,
+                pvb_attributes: vec![],
+                pvb_loc: empty_loc(),
+            };
+
+            // Final identifier: make
+            let fn_str_idx = arena.push_string(fn_name.clone());
+            let fn_lid_idx = arena.push_longident(Longident::Lident(fn_str_idx));
+            let final_ident = Expression {
+                pexp_desc: ExpressionDesc::Pexp_ident(Loc {
+                    txt: fn_lid_idx,
+                    loc: empty_loc(),
+                }),
+                pexp_loc: empty_loc(),
+                pexp_attributes: vec![],
+            };
+
+            // Build nested let: let "make$Internal" = ... in (let make = ... in make)
+            let inner_let = Expression {
+                pexp_desc: ExpressionDesc::Pexp_let(
+                    RecFlag::Nonrecursive,
+                    vec![wrapper_binding],
+                    Box::new(final_ident),
+                ),
+                pexp_loc: empty_loc(),
+                pexp_attributes: vec![],
+            };
+
+            let outer_let = Expression {
+                pexp_desc: ExpressionDesc::Pexp_let(
+                    RecFlag::Nonrecursive,
+                    vec![internal_binding],
+                    Box::new(inner_let),
+                ),
+                pexp_loc: empty_loc(),
+                pexp_attributes: vec![],
+            };
+
+            // Create the transformed binding with nested let as expression
+            let fn_name_idx_binding = arena.push_string(fn_name);
+            let binding = ValueBinding {
+                pvb_pat: Pattern {
+                    ppat_desc: PatternDesc::Ppat_var(Loc { txt: fn_name_idx_binding, loc: original_binding_loc.clone() }),
+                    ppat_loc: original_binding_loc,
+                    ppat_attributes: vec![],
+                },
+                pvb_expr: outer_let,
+                pvb_attributes: filtered_attrs,
+                pvb_loc: pstr_loc.clone(),
+            };
+
+            (binding, None)
+        }
+        RecFlag::Nonrecursive => {
+            // For nonrecursive: create two separate bindings
+            let fn_name_idx_nonrec = arena.push_string(fn_name.clone());
+            let transformed_binding = ValueBinding {
+                pvb_pat: Pattern {
+                    ppat_desc: PatternDesc::Ppat_var(Loc { txt: fn_name_idx_nonrec, loc: empty_loc() }),
+                    ppat_loc: empty_loc(),
+                    ppat_attributes: vec![],
+                },
+                pvb_expr: func_expr,
+                pvb_attributes: filtered_attrs,
+                pvb_loc: empty_loc(),
+            };
+
+            // Create new binding with wrapper if module name is non-empty
+            let new_binding = if !full_module_name.is_empty() {
+                let fn_name_idx_new = arena.push_string(fn_name);
+                Some(ValueBinding {
+                    pvb_pat: Pattern {
+                        ppat_desc: PatternDesc::Ppat_var(Loc { txt: fn_name_idx_new, loc: fn_name_loc.clone() }),
+                        ppat_loc: fn_name_loc,
+                        ppat_attributes: vec![],
+                    },
+                    pvb_expr: final_full_expression,
+                    pvb_attributes: vec![],
+                    pvb_loc: pstr_loc.clone(),
+                })
+            } else {
+                None
+            };
+
+            (transformed_binding, new_binding)
+        }
     };
 
     (Some(props_type), transformed_binding, new_binding)
@@ -704,7 +835,7 @@ fn transform_react_component_binding(
 fn transform_react_component_with_props_binding(
     binding: ValueBinding,
     rec_flag: RecFlag,
-    pstr_loc: &Location,
+    _pstr_loc: &Location,
     config: &mut JsxConfig,
     arena: &mut ParseArena,
 ) -> (ValueBinding, Option<ValueBinding>) {
@@ -718,7 +849,7 @@ fn transform_react_component_with_props_binding(
 
     // Get function name and location from pattern
     let fn_name = get_fn_name(arena, &binding.pvb_pat);
-    let fn_name_loc = get_fn_name_loc(&binding.pvb_pat);
+    let _fn_name_loc = get_fn_name_loc(&binding.pvb_pat);
     let internal_fn_name = format!("{}$Internal", fn_name);
     let full_module_name = make_module_name(config, &fn_name);
 
@@ -1106,7 +1237,8 @@ fn make_props_wrapper_expr(arena: &mut ParseArena, fn_name: &str, _rec_flag: Rec
 
 /// Create wrapper expression with forwardRef support: (props, ref) => fnName(props, ref)
 /// expr_attrs: the original expression's attributes (e.g., @directive) to put on the outer Pexp_fun
-fn make_props_wrapper_expr_with_ref(arena: &mut ParseArena, fn_name: &str, _rec_flag: RecFlag, _config: &JsxConfig, has_props: bool, has_forward_ref: bool, is_async: bool, expr_attrs: Attributes) -> Expression {
+/// For recursive components, calls fn_name$Internal instead of fn_name
+fn make_props_wrapper_expr_with_ref(arena: &mut ParseArena, fn_name: &str, rec_flag: RecFlag, _config: &JsxConfig, has_props: bool, has_forward_ref: bool, is_async: bool, expr_attrs: Attributes) -> Expression {
     let props_str_idx_pat = arena.intern_string("props");
     let props_pattern = Pattern {
         ppat_desc: PatternDesc::Ppat_var(Loc { txt: props_str_idx_pat, loc: empty_loc() }),
@@ -1168,7 +1300,12 @@ fn make_props_wrapper_expr_with_ref(arena: &mut ParseArena, fn_name: &str, _rec_
         ));
     }
 
-    let fn_str_idx2 = arena.push_string(fn_name.to_string());
+    // For recursive components, call fn_name$Internal; otherwise call fn_name
+    let called_fn_name = match rec_flag {
+        RecFlag::Recursive => format!("{}$Internal", fn_name),
+        RecFlag::Nonrecursive => fn_name.to_string(),
+    };
+    let fn_str_idx2 = arena.push_string(called_fn_name);
     let apply_expr = Expression {
         pexp_desc: ExpressionDesc::Pexp_apply {
             funct: Box::new(Expression {
@@ -2683,12 +2820,17 @@ fn transform_module_type(mty: ModuleType, config: &mut JsxConfig, arena: &mut Pa
     ModuleType {
         pmty_desc: match mty.pmty_desc {
             ModuleTypeDesc::Pmty_signature(sig_items) => {
+                // Save and reset has_component (OCaml: config.has_component <- false)
+                let old_has_component = config.has_component;
+                config.has_component = false;
                 // Transform signature items
                 let mut result = vec![];
                 for item in sig_items {
                     let items = transform_signature_item_multi(item, config, arena);
                     result.extend(items);
                 }
+                // Restore has_component
+                config.has_component = old_has_component;
                 ModuleTypeDesc::Pmty_signature(result)
             }
             ModuleTypeDesc::Pmty_functor(name, param, body) => {
@@ -2751,11 +2893,18 @@ fn transform_module_binding(mb: ModuleBinding, config: &mut JsxConfig, arena: &m
 
 /// Transform a structure with an existing config (preserves file_name and nested_modules)
 fn transform_structure_with_config(structure: Structure, config: &mut JsxConfig, arena: &mut ParseArena) -> Structure {
+    // Save and reset has_component (OCaml: config.has_component <- false)
+    let old_has_component = config.has_component;
+    config.has_component = false;
+
     let mut result = vec![];
     for item in structure {
         let items = transform_structure_item_multi(item, config, arena);
         result.extend(items);
     }
+
+    // Restore has_component
+    config.has_component = old_has_component;
     result
 }
 

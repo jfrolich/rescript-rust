@@ -3,13 +3,15 @@
 //! This module defines grammar rules that specify what tokens can start
 //! and terminate various syntactic constructs. It mirrors `res_grammar.ml`.
 
+use serde::{Deserialize, Serialize};
+
 use super::token::Token;
 
 /// Grammar rules representing different parsing contexts.
 ///
 /// These are used by the parser to determine what tokens are valid
 /// in a given context, enabling error recovery and better diagnostics.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Grammar {
     /// Open description: `open Belt`
     OpenDescription,
@@ -261,6 +263,7 @@ pub fn is_atomic_expr_start(token: &Token) -> bool {
             | Token::Percent
             | Token::Forwardslash
             | Token::ForwardslashDot
+            | Token::Regex { .. }
             | Token::Dict
     )
 }
@@ -320,6 +323,7 @@ pub fn is_expr_start(token: &Token) -> bool {
             | Token::While
             | Token::Forwardslash
             | Token::ForwardslashDot
+            | Token::Regex { .. }
             | Token::Dict
     )
 }
@@ -362,9 +366,11 @@ pub fn is_block_expr_start(token: &Token) -> bool {
             | Token::Switch
             | Token::True
             | Token::Try
+            | Token::Typ
             | Token::Uident(_)
             | Token::Underscore
             | Token::While
+            | Token::Regex { .. }
             | Token::Dict
     )
 }

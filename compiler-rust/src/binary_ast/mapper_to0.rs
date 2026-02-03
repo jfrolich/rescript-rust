@@ -907,7 +907,7 @@ impl<'a> Mapper<'a> {
             }
             current::ExpressionDesc::Pexp_jsx_element(jsx) => {
                 // Convert JSX element to old-style function application with [@JSX] attribute
-                let full_loc = self.loc(loc);
+                let _full_loc = self.loc(loc);
                 match jsx {
                     current::JsxElement::Fragment(fragment) => {
                         // Fragment becomes a list with JSX attribute

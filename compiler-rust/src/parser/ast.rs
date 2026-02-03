@@ -12,8 +12,6 @@
 use crate::parse_arena::{ArityIdx, LidentIdx, Located, LocIdx, PosIdx, StrIdx};
 use serde::{Deserialize, Serialize};
 
-use super::longident::Longident;
-
 /// Re-export Located for convenience.
 /// Note: Located<T> uses LocIdx for efficient arena-based storage.
 pub type Loc<T> = Located<T>;

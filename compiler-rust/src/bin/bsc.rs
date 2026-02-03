@@ -132,9 +132,11 @@ fn run() -> Result<()> {
 }
 
 fn generate_ast(input: &Path, output: Option<PathBuf>) -> Result<()> {
-    // Use Latin-1 (byte → char) conversion matching OCaml's byte-level string handling.
-    // This ensures the scanner processes bytes individually, giving correct UTF-16 offset
-    // calculations for multi-byte UTF-8 sequences (e.g., emoji characters).
+    // Read file as raw bytes, converting each byte to a char (Latin-1 encoding).
+    // This matches OCaml's byte-level string handling where each byte is a character.
+    // In Latin-1 mode, char offset == original byte offset, which is critical for
+    // correct position tracking in the scanner and correct UTF-16 offset calculations
+    // for multi-byte UTF-8 sequences (e.g., emoji characters).
     let bytes =
         fs::read(input).with_context(|| format!("Failed to read {}", input.display()))?;
     let source: String = bytes.iter().map(|&b| b as char).collect();

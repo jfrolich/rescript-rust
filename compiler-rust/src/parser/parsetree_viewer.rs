@@ -48,6 +48,11 @@ pub fn has_ternary_attribute(arena: &ParseArena, attrs: &Attributes) -> bool {
     attrs.iter().any(|attr| arena.get_string(attr.0.txt) == "res.ternary")
 }
 
+/// Check if an expression has the tagged template attribute.
+pub fn has_tagged_template_attr(arena: &ParseArena, attrs: &Attributes) -> bool {
+    attrs.iter().any(|attr| arena.get_string(attr.0.txt) == "res.taggedTemplate")
+}
+
 /// Check if an expression is a ternary expression.
 /// This checks for the res.ternary attribute which is added by the parser
 /// for expressions like `cond ? a : b` (as opposed to `if cond { a } else { b }`).
@@ -226,6 +231,49 @@ pub fn get_binary_operator(arena: &crate::parse_arena::ParseArena, expr: &Expres
     }
 }
 
+/// Check if an expression is a single pipe expression.
+/// Returns true for `x->f(g)` but not for `x->f->g` (multiple pipes).
+/// Used for value binding layout optimization.
+pub fn is_single_pipe_expr(arena: &crate::parse_arena::ParseArena, expr: &Expression) -> bool {
+    // Helper to check if expr is a pipe expression
+    fn is_pipe(arena: &crate::parse_arena::ParseArena, expr: &Expression) -> bool {
+        match &expr.pexp_desc {
+            ExpressionDesc::Pexp_apply { funct, args, .. } => {
+                if args.len() != 2 {
+                    return false;
+                }
+                if let ExpressionDesc::Pexp_ident(ident) = &funct.pexp_desc {
+                    if let Longident::Lident(op_idx) = arena.get_longident(ident.txt) {
+                        return arena.get_string(*op_idx) == "->";
+                    }
+                }
+                false
+            }
+            _ => false,
+        }
+    }
+
+    // Check if this is a pipe where the LHS is NOT also a pipe
+    match &expr.pexp_desc {
+        ExpressionDesc::Pexp_apply { funct, args, .. } => {
+            if args.len() != 2 {
+                return false;
+            }
+            if let ExpressionDesc::Pexp_ident(ident) = &funct.pexp_desc {
+                if let Longident::Lident(op_idx) = arena.get_longident(ident.txt) {
+                    if arena.get_string(*op_idx) == "->" {
+                        // It's a pipe - check that LHS is not also a pipe
+                        let operand1 = &args[0].1;
+                        return !is_pipe(arena, operand1);
+                    }
+                }
+            }
+            false
+        }
+        _ => false,
+    }
+}
+
 /// Check if expression is an await expression.
 pub fn expr_is_await(expr: &Expression) -> bool {
     matches!(&expr.pexp_desc, ExpressionDesc::Pexp_await(_))
@@ -271,6 +319,49 @@ pub fn expr_is_uncurried_fun(arena: &ParseArena, expr: &Expression) -> bool {
     }
 }
 
+/// Check if the last argument is a callback that needs special printing.
+/// This returns true if the last argument is a function/newtype and
+/// all other arguments are NOT functions/newtypes.
+/// Note: underscore apply sugar is NOT considered a callback here because
+/// OCaml rewrites it before this check, and after rewriting it becomes Pexp_apply.
+pub fn requires_special_callback_printing_last_arg(arena: &ParseArena, args: &[(ArgLabel, Expression)]) -> bool {
+    let mut iter = args.iter().peekable();
+    while let Some((_, expr)) = iter.next() {
+        // Skip underscore apply sugar - it gets rewritten to Pexp_apply
+        if is_underscore_apply_sugar(arena, expr) {
+            continue;
+        }
+        if is_fun_newtype(expr) {
+            // If this is the last element, return true
+            // Otherwise (function in non-last position), return false
+            return iter.peek().is_none();
+        }
+    }
+    false
+}
+
+/// Check if the first argument is a callback that needs special printing.
+/// This returns true if:
+/// - The first argument is a function/newtype (but NOT underscore apply sugar)
+/// - AND there is at least one more argument after it
+/// - AND all remaining arguments are NOT functions/newtypes
+pub fn requires_special_callback_printing_first_arg(arena: &ParseArena, args: &[(ArgLabel, Expression)]) -> bool {
+    // Helper: is it a real callback (not underscore apply sugar)
+    let is_real_callback = |expr: &Expression| -> bool {
+        is_fun_newtype(expr) && !is_underscore_apply_sugar(arena, expr)
+    };
+    match args {
+        // Single argument callback - use normal printing
+        [(_, expr)] if is_real_callback(expr) => false,
+        // First is callback, need to check rest
+        [(_, expr), rest @ ..] if is_real_callback(expr) => {
+            // All remaining args must NOT be callbacks
+            rest.iter().all(|(_, e)| !is_real_callback(e))
+        }
+        _ => false,
+    }
+}
+
 /// Check if an expression is "huggable" (can be printed without line breaks).
 pub fn is_huggable_expression(arena: &crate::parse_arena::ParseArena, expr: &Expression) -> bool {
     match &expr.pexp_desc {
@@ -313,6 +404,18 @@ fn is_multiline_text(txt: &str) -> bool {
         }
     }
     false
+}
+
+/// Check if an expression is "huggable" as a RHS (simpler than is_huggable_expression).
+pub fn is_huggable_rhs(arena: &ParseArena, expr: &Expression) -> bool {
+    match &expr.pexp_desc {
+        ExpressionDesc::Pexp_array(_)
+        | ExpressionDesc::Pexp_tuple(_)
+        | ExpressionDesc::Pexp_record(_, _) => true,
+        ExpressionDesc::Pexp_extension(ext) if arena.get_string(ext.0.txt) == "obj" => true,
+        _ if is_braced_expr(arena, expr) => true,
+        _ => false,
+    }
 }
 
 /// Check if a longident represents a binary operator.
@@ -398,9 +501,64 @@ pub fn is_unary_operator(arena: &crate::parse_arena::ParseArena, lid: &Longident
     }
 }
 
+/// Check if the RHS of a binary expression should be inlined (not put on a new line).
+/// This matches OCaml's should_inline_rhs_binary_expr from res_parsetree_viewer.ml:
+/// - Pexp_constant: inline
+/// - Pexp_let, Pexp_letmodule, Pexp_letexception: inline
+/// - Pexp_sequence, Pexp_open, Pexp_ifthenelse: inline
+/// - Pexp_for, Pexp_while, Pexp_try: inline
+/// - Pexp_array, Pexp_record: inline
+/// Note: Pexp_match (switch) is NOT in this list, so it will NOT inline
+pub fn should_inline_rhs_binary_expr(expr: &Expression) -> bool {
+    matches!(
+        &expr.pexp_desc,
+        ExpressionDesc::Pexp_constant(_)
+            | ExpressionDesc::Pexp_let(_, _, _)
+            | ExpressionDesc::Pexp_letmodule(_, _, _)
+            | ExpressionDesc::Pexp_letexception(_, _)
+            | ExpressionDesc::Pexp_sequence(_, _)
+            | ExpressionDesc::Pexp_open(_, _, _)
+            | ExpressionDesc::Pexp_ifthenelse(_, _, _)
+            | ExpressionDesc::Pexp_for(_, _, _, _, _)
+            | ExpressionDesc::Pexp_while(_, _)
+            | ExpressionDesc::Pexp_try(_, _)
+            | ExpressionDesc::Pexp_array(_)
+            | ExpressionDesc::Pexp_record(_, _)
+    )
+}
+
 // ============================================================================
-// List Collection
+// Dict and List Utilities
 // ============================================================================
+
+/// Check if an expression is an array of tuples (for dict detection).
+/// Used to detect dict{} syntax which desugars to Primitive_dict.make([("key", value), ...])
+pub fn is_tuple_array(expr: &Expression) -> bool {
+    if let ExpressionDesc::Pexp_array(items) = &expr.pexp_desc {
+        items.iter().all(|e| matches!(&e.pexp_desc, ExpressionDesc::Pexp_tuple(_)))
+    } else {
+        false
+    }
+}
+
+/// Check if a pattern has the res.dictPattern attribute.
+/// Used to detect dict{} pattern syntax which desugars to @res.dictPattern {...}
+pub fn has_dict_pattern_attribute(arena: &ParseArena, attrs: &[Attribute]) -> bool {
+    attrs.iter().any(|attr| arena.get_string(attr.0.txt) == "res.dictPattern")
+}
+
+/// Check if a pattern is "huggable" (can be printed without line breaks).
+/// Used for dict pattern rows to determine if the pattern should be on the same line as the key.
+pub fn is_huggable_pattern(pat: &Pattern) -> bool {
+    matches!(
+        &pat.ppat_desc,
+        PatternDesc::Ppat_array(_)
+            | PatternDesc::Ppat_tuple(_)
+            | PatternDesc::Ppat_record(_, _)
+            | PatternDesc::Ppat_variant(_, _)
+            | PatternDesc::Ppat_construct(_, _)
+    )
+}
 
 /// Collect expressions from a list constructor (::).
 /// Returns (list of expressions, optional spread expression).
@@ -486,35 +644,59 @@ pub fn collect_array_expressions(expr: &Expression) -> (Vec<&Expression>, Option
 pub enum FunParam<'a> {
     /// Regular parameter with pattern
     Parameter {
-        attrs: &'a Attributes,
+        attrs: &'a [Attribute],
         label: &'a ArgLabel,
         default_expr: Option<&'a Expression>,
         pat: &'a Pattern,
     },
-    /// Newtype parameter: (type t)
-    NewType {
-        attrs: &'a Attributes,
-        name: &'a StringLoc,
+    /// Newtype parameter(s): (type t) or (type t u v)
+    /// Multiple consecutive newtypes are combined into a single NewTypes variant.
+    NewTypes {
+        attrs: &'a [Attribute],
+        names: Vec<&'a StringLoc>,
     },
 }
 
 /// Extract function parameters from a potentially nested function expression.
 /// Returns (is_async, parameters, body).
+///
+/// This matches OCaml's fun_expr which uses the `arity` field to determine
+/// when to stop collecting parameters. For curried functions like
+/// `(a, b, c) => (d, e, f) => 4`, the first function has an arity marker
+/// that signals the end of its parameter list.
+///
+/// The rule from OCaml: collect params when `arity = None || n_fun = 0`
+/// - Always collect from the first function (n_fun = 0)
+/// - For nested functions, only collect if arity is Unknown (no marker)
+///
+/// IMPORTANT: OCaml's fun_expr only collects Pexp_newtype at the BEGINNING,
+/// not during the collect_params loop. After encountering any Pexp_fun,
+/// the loop stops at non-Pexp_fun nodes (including Pexp_newtype).
 pub fn fun_expr<'a>(arena: &ParseArena, expr: &'a Expression) -> (bool, Vec<FunParam<'a>>, &'a Expression) {
-    // Check for async attribute OR is_async field in Pexp_fun
+    // Check for async attribute on the outermost expression
     let mut is_async = expr.pexp_attributes.iter().any(|attr| arena.get_string(attr.0.txt) == "res.async");
-
-    // Also check is_async field on the first Pexp_fun
-    if let ExpressionDesc::Pexp_fun {
-        is_async: expr_is_async,
-        ..
-    } = &expr.pexp_desc
-    {
-        is_async = is_async || *expr_is_async;
-    }
 
     let mut params = Vec::new();
     let mut current = expr;
+
+    // First, collect leading Pexp_newtype (like OCaml's top-level match)
+    // This combines consecutive newtypes like "type t, type u" into "type t u"
+    if let ExpressionDesc::Pexp_newtype(name, body) = &current.pexp_desc {
+        let mut names = vec![name];
+        current = body;
+
+        // Collect any additional consecutive newtypes
+        while let ExpressionDesc::Pexp_newtype(next_name, next_body) = &current.pexp_desc {
+            names.push(next_name);
+            current = next_body;
+        }
+
+        params.push(FunParam::NewTypes { attrs: &[], names });
+    }
+
+    // Now collect_params: only handle Pexp_fun, stop at anything else
+    let mut n_fun = 0;
+    let mut found_first_pexp_fun = false;
 
     loop {
         match &current.pexp_desc {
@@ -523,23 +705,44 @@ pub fn fun_expr<'a>(arena: &ParseArena, expr: &'a Expression) -> (bool, Vec<FunP
                 default,
                 lhs,
                 rhs,
-                ..
+                arity,
+                is_async: expr_is_async,
             } => {
-                params.push(FunParam::Parameter {
-                    attrs: &current.pexp_attributes,
-                    label: arg_label,
-                    default_expr: default.as_ref().map(|e| e.as_ref()),
-                    pat: lhs,
-                });
-                current = rhs;
+                // Check is_async on the FIRST Pexp_fun we encounter
+                // (it may be nested inside Pexp_newtype)
+                if !found_first_pexp_fun {
+                    is_async = is_async || *expr_is_async;
+                    found_first_pexp_fun = true;
+                }
+
+                // OCaml's condition: arity = None || n_fun = 0
+                // ArityIdx: arena.get_arity() returns None for unknown, Some(_) for known
+                // Only collect if this is the first function OR there's no arity marker
+                if n_fun == 0 || arena.get_arity(*arity).is_none() {
+                    // OCaml's fun_expr passes {expr_ with pexp_attributes = []} to collect_params,
+                    // which means the FIRST parameter always gets empty attrs. For nested functions,
+                    // the inner expression keeps its attributes. We emulate this by using empty
+                    // slice for n_fun == 0.
+                    let attrs: &[Attribute] = if n_fun == 0 {
+                        &[] // First parameter: OCaml strips top-level attrs
+                    } else {
+                        &current.pexp_attributes // Nested: preserve attrs
+                    };
+                    params.push(FunParam::Parameter {
+                        attrs,
+                        label: arg_label,
+                        default_expr: default.as_ref().map(|e| e.as_ref()),
+                        pat: lhs,
+                    });
+                    n_fun += 1;
+                    current = rhs;
+                } else {
+                    // Stop collecting - arity marker indicates end of this function's params
+                    break;
+                }
             }
-            ExpressionDesc::Pexp_newtype(name, body) => {
-                params.push(FunParam::NewType {
-                    attrs: &current.pexp_attributes,
-                    name,
-                });
-                current = body;
-            }
+            // IMPORTANT: Don't collect Pexp_newtype here - OCaml's collect_params doesn't
+            // This ensures `(type a, ()) => (type b c, x) => 3` keeps the two functions separate
             _ => break,
         }
     }
@@ -572,6 +775,56 @@ pub fn pattern_has_spread_attr(arena: &ParseArena, attrs: &Attributes) -> bool {
     has_spread_attr(arena, attrs)
 }
 
+/// Check if expression is Belt.Array.concatMany with @res.spread attribute.
+/// This is the desugared form of `[...xs, a, b]`.
+pub fn is_spread_belt_array_concat(arena: &ParseArena, expr: &Expression) -> bool {
+    match &expr.pexp_desc {
+        ExpressionDesc::Pexp_ident(loc_idx) => {
+            // Belt.Array.concatMany: Ldot(Ldot(Lident("Belt"), "Array"), "concatMany")
+            if let Longident::Ldot(parent, name_idx) = arena.get_longident(loc_idx.txt) {
+                if arena.get_string(*name_idx) == "concatMany" {
+                    if let Longident::Ldot(grandparent, parent_name_idx) = parent.as_ref() {
+                        if arena.get_string(*parent_name_idx) == "Array" {
+                            if let Longident::Lident(base_idx) = grandparent.as_ref() {
+                                if arena.get_string(*base_idx) == "Belt" {
+                                    return has_spread_attr(arena, &expr.pexp_attributes);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            false
+        }
+        _ => false,
+    }
+}
+
+/// Check if expression is Belt.List.concatMany with @res.spread attribute.
+/// This is the desugared form of `list{...xs, a, b}`.
+pub fn is_spread_belt_list_concat(arena: &ParseArena, expr: &Expression) -> bool {
+    match &expr.pexp_desc {
+        ExpressionDesc::Pexp_ident(loc_idx) => {
+            // Belt.List.concatMany: Ldot(Ldot(Lident("Belt"), "List"), "concatMany")
+            if let Longident::Ldot(parent, name_idx) = arena.get_longident(loc_idx.txt) {
+                if arena.get_string(*name_idx) == "concatMany" {
+                    if let Longident::Ldot(grandparent, parent_name_idx) = parent.as_ref() {
+                        if arena.get_string(*parent_name_idx) == "List" {
+                            if let Longident::Lident(base_idx) = grandparent.as_ref() {
+                                if arena.get_string(*base_idx) == "Belt" {
+                                    return has_spread_attr(arena, &expr.pexp_attributes);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            false
+        }
+        _ => false,
+    }
+}
+
 /// Filter out parsing-only attributes (res.braces, res.ternary, res.await, etc.)
 pub fn filter_parsing_attrs<'a>(arena: &ParseArena, attrs: &'a Attributes) -> Vec<&'a Attribute> {
     attrs
@@ -601,12 +854,12 @@ pub fn is_printable_attribute(arena: &ParseArena, attr: &Attribute) -> bool {
         "res.iflet"
             | "res.braces"
             | "ns.braces"
-            | "JSX"
             | "res.await"
             | "res.template"
             | "res.taggedTemplate"
             | "res.ternary"
             | "res.inlineRecordDefinition"
+            | "res.dictPattern"
     )
 }
 
@@ -618,6 +871,21 @@ pub fn has_printable_attributes(arena: &ParseArena, attrs: &Attributes) -> bool 
 /// Filter to only printable attributes.
 pub fn filter_printable_attributes<'a>(arena: &ParseArena, attrs: &'a Attributes) -> Vec<&'a Attribute> {
     attrs.iter().filter(|a| is_printable_attribute(arena, a)).collect()
+}
+
+/// Partition attributes into printable and internal (non-printable).
+/// Returns (printable_attrs, internal_attrs).
+pub fn partition_printable_attributes<'a>(arena: &ParseArena, attrs: &'a Attributes) -> (Vec<&'a Attribute>, Vec<&'a Attribute>) {
+    let mut printable = Vec::new();
+    let mut internal = Vec::new();
+    for attr in attrs.iter() {
+        if is_printable_attribute(arena, attr) {
+            printable.push(attr);
+        } else {
+            internal.push(attr);
+        }
+    }
+    (printable, internal)
 }
 
 /// Check if expression has any attributes (excluding internal parsing ones).
@@ -634,6 +902,13 @@ pub fn has_attributes(arena: &ParseArena, attrs: &Attributes) -> bool {
                 | "res.inlineRecordDefinition"
         )
     })
+}
+
+/// Check if an attribute is the inline record definition marker.
+pub fn has_inline_record_definition_attribute(arena: &ParseArena, attrs: &Attributes) -> bool {
+    attrs
+        .iter()
+        .any(|attr| arena.get_string(attr.0.txt) == "res.inlineRecordDefinition")
 }
 
 // ============================================================================
@@ -678,6 +953,80 @@ pub fn is_right_associative(op: &str) -> bool {
 /// Check if operator is an equality operator.
 pub fn is_equality_operator(op: &str) -> bool {
     matches!(op, "==" | "===" | "!=" | "!==")
+}
+
+/// Check if the operator is right-associative.
+/// Currently only exponentiation (**) is right-associative.
+pub fn is_rhs_binary_operator(op: &str) -> bool {
+    op == "**"
+}
+
+/// Check if parent and child operators can be flattened (same precedence, not both equality).
+pub fn flattenable_operators(parent_op: &str, child_op: &str) -> bool {
+    let prec_parent = operator_precedence(parent_op);
+    let prec_child = operator_precedence(child_op);
+    if prec_parent == prec_child {
+        !(is_equality_operator(parent_op) && is_equality_operator(child_op))
+    } else {
+        false
+    }
+}
+
+/// Check if a binary expression should have its RHS indented.
+/// Returns true if:
+/// - The operator is an equality operator (==, ===, !=, !==), OR
+/// - The LHS is NOT a same-precedence sub-expression, OR
+/// - The operator is `:=`
+pub fn should_indent_binary_expr(arena: &crate::parse_arena::ParseArena, expr: &Expression) -> bool {
+    use crate::parser::longident::Longident;
+
+    match &expr.pexp_desc {
+        ExpressionDesc::Pexp_apply { funct, args, .. } if args.len() == 2 => {
+            if let ExpressionDesc::Pexp_ident(ident) = &funct.pexp_desc {
+                if let Longident::Lident(op_idx) = arena.get_longident(ident.txt) {
+                    let op = arena.get_string(*op_idx);
+                    if is_binary_operator_str(op) {
+                        // Check the three conditions
+                        if is_equality_operator(op) {
+                            return true;
+                        }
+                        if op == ":=" {
+                            return true;
+                        }
+                        // Check if LHS is NOT a same-precedence sub-expression
+                        let (_, lhs) = &args[0];
+                        if !same_precedence_sub_expression(arena, op, lhs) {
+                            return true;
+                        }
+                    }
+                }
+            }
+            false
+        }
+        _ => false,
+    }
+}
+
+/// Check if sub_expression is a binary expression with same precedence as parent operator.
+fn same_precedence_sub_expression(arena: &crate::parse_arena::ParseArena, parent_op: &str, sub_expr: &Expression) -> bool {
+    use crate::parser::longident::Longident;
+
+    match &sub_expr.pexp_desc {
+        ExpressionDesc::Pexp_apply { funct, args, .. } if args.len() == 2 => {
+            if let ExpressionDesc::Pexp_ident(ident) = &funct.pexp_desc {
+                if let Longident::Lident(op_idx) = arena.get_longident(ident.txt) {
+                    let sub_op = arena.get_string(*op_idx);
+                    if is_binary_operator_str(sub_op) {
+                        return flattenable_operators(parent_op, sub_op);
+                    }
+                }
+            }
+            // Not a binary expression, so not same precedence
+            true
+        }
+        // Not a binary expression
+        _ => true,
+    }
 }
 
 /// Check if string is a binary operator.
@@ -731,9 +1080,9 @@ pub fn not_ghost_operator(op: &str, is_ghost: bool) -> bool {
 // Expression Rewriting
 // ============================================================================
 
-/// Rewrite underscore apply: `(__x) => f(a, __x, c)` becomes `f(a, _, c)`.
-/// Returns the rewritten expression if applicable, otherwise None.
-pub fn rewrite_underscore_apply(arena: &ParseArena, expr: &Expression) -> Option<Expression> {
+/// Check if an expression is the underscore apply sugar pattern: `(__x) => f(a, __x, c)`.
+/// Returns a reference to the inner apply expression if it matches.
+pub fn get_underscore_apply_inner<'a>(arena: &ParseArena, expr: &'a Expression) -> Option<&'a Expression> {
     match &expr.pexp_desc {
         ExpressionDesc::Pexp_fun {
             arg_label: ArgLabel::Nolabel,
@@ -746,16 +1095,23 @@ pub fn rewrite_underscore_apply(arena: &ParseArena, expr: &Expression) -> Option
             if let PatternDesc::Ppat_var(name) = &lhs.ppat_desc {
                 if arena.get_string(name.txt) == "__x" {
                     // Check if rhs is an apply
-                    if let ExpressionDesc::Pexp_apply { .. } = &rhs.pexp_desc {
-                        // TODO: Actually rewrite the apply to use `_`
-                        // For now, just return None to use the original printing
-                        return None;
+                    if matches!(&rhs.pexp_desc, ExpressionDesc::Pexp_apply { .. }) {
+                        return Some(rhs);
                     }
                 }
             }
             None
         }
         _ => None,
+    }
+}
+
+/// Check if an expression is a `__x` identifier that should be printed as `_`.
+/// Used when printing inside underscore apply sugar.
+pub fn is_underscore_ident(expr: &Expression, arena: &ParseArena) -> bool {
+    match &expr.pexp_desc {
+        ExpressionDesc::Pexp_ident(lid) => arena.is_lident(lid.txt, "__x"),
+        _ => false,
     }
 }
 
@@ -788,16 +1144,20 @@ pub fn arrow_type<'a>(
     typ: &'a CoreType,
     max_arity: Option<usize>,
 ) -> (&'a Attributes, Vec<TypeParameter<'a>>, &'a CoreType) {
-    let max_arity = max_arity.unwrap_or(usize::MAX);
+    // Use isize to match OCaml's behavior where we stop when arity goes negative
+    let max_arity: isize = max_arity.map(|n| n as isize).unwrap_or(isize::MAX);
 
     fn process<'a>(
         arena: &ParseArena,
         attrs_before: &'a Attributes,
         acc: Vec<TypeParameter<'a>>,
         typ: &'a CoreType,
-        remaining_arity: usize,
+        remaining_arity: isize,
     ) -> (&'a Attributes, Vec<TypeParameter<'a>>, &'a CoreType) {
-        if remaining_arity == 0 {
+        // OCaml: | _ when max_arity < 0 -> (attrs_before, List.rev acc, typ)
+        // Stop when we've exhausted our arity budget (gone negative means we
+        // tried to consume one more than allowed)
+        if remaining_arity < 0 {
             return (attrs_before, acc, typ);
         }
 
@@ -827,6 +1187,7 @@ pub fn arrow_type<'a>(
 
                 // Labeled argument - continue processing
                 // Calculate adjusted arity for @as workaround
+                // OCaml: When arg is Ptyp_any with @as attr, don't decrement arity
                 let adjusted_arity = if matches!(
                     &arg.typ.ptyp_desc,
                     CoreTypeDesc::Ptyp_any
@@ -1050,18 +1411,28 @@ mod tests {
 
     #[test]
     fn test_is_binary_operator() {
-        assert!(is_binary_operator(&Longident::Lident("+".to_string())));
-        assert!(is_binary_operator(&Longident::Lident("==".to_string())));
-        assert!(is_binary_operator(&Longident::Lident("|>".to_string())));
-        assert!(!is_binary_operator(&Longident::Lident("foo".to_string())));
+        let mut arena = ParseArena::new();
+        let plus = Longident::Lident(arena.intern_string("+"));
+        let eq = Longident::Lident(arena.intern_string("=="));
+        let pipe = Longident::Lident(arena.intern_string("|>"));
+        let foo = Longident::Lident(arena.intern_string("foo"));
+        assert!(is_binary_operator(&arena, &plus));
+        assert!(is_binary_operator(&arena, &eq));
+        assert!(is_binary_operator(&arena, &pipe));
+        assert!(!is_binary_operator(&arena, &foo));
     }
 
     #[test]
     fn test_is_unary_operator() {
-        assert!(is_unary_operator(&Longident::Lident("!".to_string())));
-        assert!(is_unary_operator(&Longident::Lident("not".to_string())));
-        assert!(is_unary_operator(&Longident::Lident("~-".to_string())));
-        assert!(!is_unary_operator(&Longident::Lident("+".to_string())));
+        let mut arena = ParseArena::new();
+        let bang = Longident::Lident(arena.intern_string("!"));
+        let not = Longident::Lident(arena.intern_string("not"));
+        let neg = Longident::Lident(arena.intern_string("~-"));
+        let plus = Longident::Lident(arena.intern_string("+"));
+        assert!(is_unary_operator(&arena, &bang));
+        assert!(is_unary_operator(&arena, &not));
+        assert!(is_unary_operator(&arena, &neg));
+        assert!(!is_unary_operator(&arena, &plus));
     }
 
     #[test]

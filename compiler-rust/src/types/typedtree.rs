@@ -23,7 +23,6 @@ use crate::parser::ast::{
     ArgLabel, Arity, Attributes, ClosedFlag, DirectionFlag, MutableFlag, OverrideFlag, PrivateFlag,
     RecFlag,
 };
-use crate::parser::longident::Longident;
 use crate::types::{
     ConstructorDescription, LabelDescription, Path, RowDesc, TypeExprRef, ValueDescription,
 };
