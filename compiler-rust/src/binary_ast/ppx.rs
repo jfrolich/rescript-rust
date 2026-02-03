@@ -28,8 +28,8 @@ use crate::parser::ast::{
 use crate::parser::longident::Longident;
 
 use super::ffi_types::{
-    encode_ffi_type, Delim, ExternalModuleName, ExternalSpec, FfiType, LamConstant, ModuleBindName,
-    Params, PointerInfo, ReturnWrapper,
+    encode_ffi_type, Attr, Delim, ExternalModuleName, ExternalSpec, FfiType, LabelNoname,
+    LamConstant, ModuleBindName, Param, Params, PointerInfo, ReturnWrapper,
 };
 
 /// The list of attributes that indicate a ReScript external
@@ -91,16 +91,101 @@ pub fn is_rs_external(attrs: &[Attribute], pval_prim: &[String], arena: &mut Par
     has_external_attrs(attrs, arena) || prims_to_be_encoded(pval_prim)
 }
 
-/// Count the arity of a function type
-fn count_type_arity(typ: &CoreType, arena: &mut ParseArena) -> usize {
-    match &typ.ptyp_desc {
-        CoreTypeDesc::Ptyp_arrow { arg, ret, arity: _ } => {
-            // Count this argument plus any more in the return type
-            let is_unit = is_unit_type(&arg.typ, arena);
-            let base = if is_unit { 0 } else { 1 };
-            base + count_type_arity(ret, arena)
+/// Process args from list_of_arrow into FFI Param specs and compute arity.
+/// This mirrors OCaml's fold_right in handle_attributes which builds
+/// arg_type_specs and arg_type_specs_length.
+///
+/// Returns (params, arity, args_for_type_reconstruction) where:
+/// - params: The Params encoding for the FFI blob
+/// - arity: The number of non-ignored args (for determining JsVar vs JsCall)
+/// - args_for_type_reconstruction: Args to use for type reconstruction (filtered)
+fn build_arg_type_specs(typ: &CoreType, arena: &ParseArena) -> (Params, usize) {
+    let (args, _result) = list_of_arrow(typ, arena);
+
+    let mut param_specs: Vec<Param> = Vec::new();
+    let mut arity = 0;
+    let mut all_simple = true; // true if all args are {Nothing, Arg_empty}
+
+    for arg in &args {
+        let (label_noname, arg_type) = match &arg.lbl {
+            ArgLabel::Optional(_) => {
+                // Optional args: get_opt_arg_type
+                // For now, simplified: mark as Arg_optional, Nothing
+                all_simple = false;
+                (LabelNoname::ArgOptional, Attr::Nothing)
+            }
+            ArgLabel::Labelled(_) => {
+                // Labeled args
+                let arg_type = refine_arg_type(false, &arg.typ, arena);
+                all_simple = false;
+                (LabelNoname::ArgLabel, arg_type)
+            }
+            ArgLabel::Nolabel => {
+                let arg_type = refine_arg_type(true, &arg.typ, arena);
+                if !matches!(arg_type, Attr::Nothing) || false {
+                    // Non-trivial arg type
+                }
+                (LabelNoname::ArgEmpty, arg_type)
+            }
+        };
+
+        let is_ignored = matches!(arg_type, Attr::Ignore);
+        if !is_ignored {
+            arity += 1;
         }
-        _ => 0,
+
+        if !matches!((&label_noname, &arg_type), (LabelNoname::ArgEmpty, Attr::Nothing)) {
+            all_simple = false;
+        }
+
+        param_specs.push(Param {
+            arg_type,
+            arg_label: label_noname,
+        });
+    }
+
+    // OCaml's ffi_bs_aux: if all args are {Nothing, Arg_empty}, use ParamNumber(n)
+    // Otherwise use Params(list)
+    let params = if all_simple {
+        Params::ParamNumber(arity as i64)
+    } else {
+        Params::Params(param_specs)
+    };
+
+    (params, arity)
+}
+
+/// Determine the arg type for a non-labeled argument type.
+/// Mirrors OCaml's refine_arg_type / spec_of_ptyp.
+fn refine_arg_type(nolabel: bool, typ: &CoreType, arena: &ParseArena) -> Attr {
+    // For Ptyp_any with @as attribute, handle constant args
+    if matches!(&typ.ptyp_desc, CoreTypeDesc::Ptyp_any) {
+        // Check for @as attribute on the type
+        // TODO: Handle @as(const) for Ptyp_any → Arg_cst
+        // For now, fall through to spec_of_ptyp
+    }
+    spec_of_ptyp(nolabel, typ, arena)
+}
+
+/// Determine the arg type for a type expression.
+/// Mirrors OCaml's spec_of_ptyp.
+fn spec_of_ptyp(nolabel: bool, typ: &CoreType, arena: &ParseArena) -> Attr {
+    // Check for special attributes on the type (@string, @int, @unwrap, @ignore)
+    // For now, handle the common cases
+    // TODO: Handle @string, @int, @unwrap, @ignore attributes on the type
+
+    // Default case: check if unit
+    match &typ.ptyp_desc {
+        CoreTypeDesc::Ptyp_constr(lid, args) if args.is_empty() => {
+            let longident = arena.get_longident(lid.txt);
+            if matches!(longident, Longident::Lident(s) if arena.get_string(*s) == "unit") {
+                if nolabel {
+                    return Attr::ExternUnit;
+                }
+            }
+            Attr::Nothing
+        }
+        _ => Attr::Nothing,
     }
 }
 
@@ -131,6 +216,84 @@ fn get_final_result_type(typ: &CoreType) -> &CoreType {
         CoreTypeDesc::Ptyp_arrow { ret, .. } => get_final_result_type(ret),
         _ => typ,
     }
+}
+
+/// Deconstruct an arrow type into a list of args and the result type.
+/// This mirrors OCaml's `Ast_core_type.list_of_arrow`:
+/// ```ocaml
+/// let rec aux (ty : t) acc =
+///   match ty.ptyp_desc with
+///   | Ptyp_arrow {arg; ret; arity} when arity = None || acc = [] ->
+///     aux ret (arg :: acc)
+///   | _ -> (ty, List.rev acc)
+/// ```
+/// The guard `arity = None || acc = []` means:
+/// - Always descend for the first arrow (acc is empty)
+/// - For subsequent arrows, only descend if arity is None
+fn list_of_arrow<'a>(typ: &'a CoreType, arena: &ParseArena) -> (Vec<&'a TypeArg>, &'a CoreType) {
+    let mut args = Vec::new();
+    let mut current = typ;
+    loop {
+        match &current.ptyp_desc {
+            CoreTypeDesc::Ptyp_arrow { arg, ret, arity } => {
+                let arity_val = arena.get_arity(*arity);
+                // OCaml: arity = None || acc = []
+                if arity_val.is_none() || args.is_empty() {
+                    args.push(arg.as_ref());
+                    current = ret.as_ref();
+                } else {
+                    // Has arity (Some n) and not the first arg → stop
+                    break;
+                }
+            }
+            _ => break,
+        }
+    }
+    (args, current)
+}
+
+/// Reconstruct an arrow type with a new location, matching OCaml's `Ast_helper.Typ.arrows ~loc`.
+///
+/// OCaml's FFI processing deconstructs the parsed arrow type and reconstructs it
+/// with `ptyp_loc = pval_loc`. This changes the location of the outermost arrow chain
+/// from the original type span to the full value description span.
+///
+/// The individual argument types and result type are preserved unchanged.
+fn reconstruct_arrow_type_with_loc(
+    typ: &CoreType,
+    loc: LocIdx,
+    arena: &mut ParseArena,
+) -> CoreType {
+    let (args, result) = list_of_arrow(typ, arena);
+    if args.is_empty() {
+        // Not an arrow type, return as-is
+        return typ.clone();
+    }
+
+    // Rebuild the arrow chain from right to left, like OCaml's Typ.arrows
+    let arity_count = args.len();
+    let outermost_arity = arena.push_arity(Some(arity_count as i32));
+
+    // Build from the last arg backwards
+    let mut current = result.clone();
+    for (i, arg) in args.iter().enumerate().rev() {
+        let arity = if i == 0 {
+            outermost_arity
+        } else {
+            // Inner arrows get arity = None (fresh push like OCaml)
+            arena.push_arity(None)
+        };
+        current = CoreType {
+            ptyp_desc: CoreTypeDesc::Ptyp_arrow {
+                arg: Box::new((*arg).clone()),
+                ret: Box::new(current),
+                arity,
+            },
+            ptyp_loc: loc,
+            ptyp_attributes: vec![],
+        };
+    }
+    current
 }
 
 /// Parse external attributes to determine FFI encoding details
@@ -266,16 +429,13 @@ fn get_payload_string(payload: &current::Payload, arena: &mut ParseArena) -> Opt
 }
 
 /// Build FFI type from external description and type info
-fn build_ffi_type(desc: &ExternalDesc, prim_name: &str, arity: usize, result_is_unit: bool) -> FfiType {
+fn build_ffi_type(desc: &ExternalDesc, prim_name: &str, arity: usize, result_is_unit: bool, params: Params) -> FfiType {
     // Determine return wrapper
     let return_wrapper = if result_is_unit && matches!(desc.return_wrapper, ReturnWrapper::ReturnUnset) {
         ReturnWrapper::ReturnReplacedWithUnit
     } else {
         desc.return_wrapper.clone()
     };
-
-    // Build params - simple case: just use ParamNumber for arity
-    let params = Params::ParamNumber(arity as i64);
 
     // Build ExternalModuleName from desc.module_name if present
     let external_module_name = desc.module_name.as_ref().map(|bundle| ExternalModuleName {
@@ -385,14 +545,14 @@ pub fn encode_external(vd: &ValueDescription, arena: &mut ParseArena) -> Encoded
     // Parse attributes
     let desc = parse_external_attrs(&vd.pval_attributes, prim_name, arena);
 
-    // Calculate arity from type
-    let arity = count_type_arity(&vd.pval_type, arena);
+    // Build arg type specs (mirrors OCaml's fold_right in handle_attributes)
+    let (params, arity) = build_arg_type_specs(&vd.pval_type, arena);
 
     // Check if result is unit
     let result_is_unit = is_unit_type(get_final_result_type(&vd.pval_type), arena);
 
     // Build FFI type
-    let ffi = build_ffi_type(&desc, prim_name, arity, result_is_unit);
+    let ffi = build_ffi_type(&desc, prim_name, arity, result_is_unit, params);
 
     // Encode FFI type
     let encoded = encode_ffi_type(&ffi);
@@ -3553,12 +3713,16 @@ fn rewrite_structure_item(item: &StructureItem, arena: &mut ParseArena) -> Vec<S
         StructureItemDesc::Pstr_primitive(vd) => {
             if is_rs_external(&vd.pval_attributes, &vd.pval_prim, arena) {
                 let encoded = encode_external(vd, arena);
+                // OCaml's FFI processing (ast_external_process.ml handle_attributes)
+                // reconstructs the arrow type with ptyp_loc = pval_loc.
+                // This changes sharing patterns in the binary output.
+                let pval_type = reconstruct_arrow_type_with_loc(&vd.pval_type, vd.pval_loc, arena);
                 vec![StructureItem {
                     pstr_desc: StructureItemDesc::Pstr_primitive(ValueDescription {
                         pval_prim: encoded.pval_prim,
                         pval_attributes: encoded.pval_attributes,
                         pval_name: vd.pval_name.clone(),
-                        pval_type: vd.pval_type.clone(),
+                        pval_type,
                         pval_loc: vd.pval_loc,
                     }),
                     pstr_loc: item.pstr_loc,
@@ -3857,12 +4021,14 @@ fn rewrite_signature_item(item: &SignatureItem, arena: &mut ParseArena) -> Signa
         SignatureItemDesc::Psig_value(vd) => {
             if is_rs_external(&vd.pval_attributes, &vd.pval_prim, arena) {
                 let encoded = encode_external(vd, arena);
+                // OCaml's FFI processing reconstructs the arrow type with ptyp_loc = pval_loc
+                let pval_type = reconstruct_arrow_type_with_loc(&vd.pval_type, vd.pval_loc, arena);
                 SignatureItem {
                     psig_desc: SignatureItemDesc::Psig_value(ValueDescription {
                         pval_prim: encoded.pval_prim,
                         pval_attributes: encoded.pval_attributes,
                         pval_name: vd.pval_name.clone(),
-                        pval_type: vd.pval_type.clone(),
+                        pval_type,
                         pval_loc: vd.pval_loc,
                     }),
                     psig_loc: item.psig_loc,

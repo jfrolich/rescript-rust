@@ -148,10 +148,12 @@ impl Marshal for Attr {
                 w.write_block_header(3, 1);
                 cst.marshal(w);
             }
-            Attr::ExternUnit => w.write_int(4),
-            Attr::Nothing => w.write_int(5),
-            Attr::Ignore => w.write_int(6),
-            Attr::Unwrap => w.write_int(7),
+            // OCaml constant constructors are numbered separately from block constructors.
+            // Extern_unit is constant #0, Nothing is #1, Ignore is #2, Unwrap is #3.
+            Attr::ExternUnit => w.write_int(0),
+            Attr::Nothing => w.write_int(1),
+            Attr::Ignore => w.write_int(2),
+            Attr::Unwrap => w.write_int(3),
         }
     }
 }
@@ -594,25 +596,26 @@ fn marshal_list<T>(w: &mut MarshalWriter, list: &[T], f: impl Fn(&mut MarshalWri
     // OCaml lists are encoded as linked cons cells
     // [] is int 0
     // [a; b; c] is Block(0, [a, Block(0, [b, Block(0, [c, int 0])])])
-    let mut items = list.iter().collect::<Vec<_>>();
-    items.reverse();
-
-    let mut tail = false; // Start with empty list (will write int 0)
-    for item in items {
-        if !tail {
-            // First iteration: this will be the innermost cons cell
-            w.write_block_header(0, 2);
-            f(w, item);
-            w.write_int(0); // nil
-            tail = true;
-        } else {
-            // Need to wrap previous in cons cell
-            // This is wrong - we need a different approach
-        }
-    }
-
+    //
+    // Since marshal is a streaming format, we write head-to-tail:
+    // 1. Write BLOCK(0,2) header for first cons cell
+    // 2. Write element a
+    // 3. Write BLOCK(0,2) header for second cons cell (this IS the tail of first)
+    // 4. Write element b
+    // 5. ... and so on
+    // 6. Write INT(0) for nil at the end
     if list.is_empty() {
         w.write_int(0);
+        return;
+    }
+
+    for (i, item) in list.iter().enumerate() {
+        w.write_block_header(0, 2); // cons cell
+        f(w, item);
+        if i == list.len() - 1 {
+            w.write_int(0); // nil tail
+        }
+        // Otherwise the next iteration's block_header IS the tail
     }
 }
 
