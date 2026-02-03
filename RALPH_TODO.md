@@ -66,6 +66,26 @@ Do NOT spend time on small issues (@deriving edge cases, etc.) until the locatio
 **Overall Status:** 605/1049 bsc-ast tests passing (57.7%)
 **sexp-locs Status:** 1049/1049 tests passing (100%) ✅
 
+**Session progress (2026-02-03, %obj PPX + Otag content-based sharing fix):**
+- Implemented `%obj` extension handling in ppx.rs (`handle_obj()`):
+  - Transforms `%obj({"a": e1, "b": e2})` into a letmodule with external FFI declaration
+  - Mirrors OCaml's `ast_exp_extension.ml`, `ast_util.ml:record_as_js_object`,
+    `ast_external_mk.ml:local_external_obj`, `ast_core_type.ml:from_labels`
+  - Includes `build_arrows()` helper for arrow type chain construction
+- **Fixed content-based sharing anti-pattern in ObjectField::Otag:**
+  - **Problem**: `ObjectField::Otag` stored `Located<String>` (a raw String for the label).
+    To share the `{txt; loc}` record between Otag and ArgLabel::Labelled in `%obj` PPX output,
+    Ralph introduced `string_loc_table: HashMap<(String, u32), u32>` — content-based sharing.
+  - **Fix**: Changed Otag to use `Located<StrIdx>` (arena reference). Sharing table now uses
+    `HashMap<(StrIdx, LocIdx), u32>` — proper identity-based sharing via arena indices.
+  - **Key detail**: Parser uses `push_string` (not `intern_string`) to avoid false sharing
+    between unrelated Otag labels with the same name in different object types.
+  - **Lesson**: When OCaml shares via pointer identity, the Rust equivalent is arena index identity.
+    Never use string content or position values as sharing keys — use the arena indices directly.
+  - Files changed: ast.rs, typ.rs, ppx.rs, marshal.rs, current_marshal.rs, mapper_to0.rs,
+    mapper_from0.rs, sexp.rs, sexp_locs.rs, printer2.rs, ml_printer.rs, typecore.rs
+  - No regressions, 0-1 files gained parity
+
 **Session progress (2026-02-03, FFI encoding fixes: @module, @val, @scope):**
 Three fixes improved bsc-ast parity from 601 to 605 (+4 files, 0 regressions):
 
@@ -614,7 +634,9 @@ We need to implement the remaining transformations.
     matching OCaml's `{exp with pexp_desc = ...}` pattern.
   - Also fixed letmodule dependency tracking so local modules (like `J`) aren't added as dependencies.
   - Note: `%debugger` still has minor position sharing differences (Phase 4 issue).
-  - TODO: `%obj`, `%todo` still need implementation (low impact - 0 test files use these).
+  - **Done (2026-02-03)**: Implemented `%obj` in handle_obj() - transforms `%obj({"a": e1})` into
+    letmodule with external FFI declaration, matching OCaml's local_external_obj pattern.
+  - TODO: `%todo` still needs implementation (low impact - 0 test files use this).
 
 - [x] **Task 2.6**: Implement `@inline` let binding transformation
   - **Done**: Transform `@inline let x = "foo"` into `Pstr_primitive` with FFI inline encoding

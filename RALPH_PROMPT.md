@@ -44,7 +44,9 @@ Read `RALPH_TODO.md` and complete the next unchecked task. After completing a ta
    - `compiler-rust/src/binary_ast/marshal.rs` - Can modify if needed
    - Do NOT touch `parsetree0.rs`, `parsetree0_marshal.rs`, or `mapper_to0.rs` unless absolutely necessary
 
-3. **NO content-based sharing - REMOVE IT IF IT EXISTS** - OCaml's sharing is based on **pointer equality**, not content equality. If you find any content-based caching (like `start_pos_cache` HashMap that deduplicates by position VALUES), **this is a BUG that must be REMOVED**. The fix requires tracking position IDENTITY during parsing - reusing the same `PosIdx` when OCaml reuses the same position variable. Content-based caching causes BIDIRECTIONAL differences (sometimes Rust shares more, sometimes less) which is why it's fundamentally wrong. **DO NOT accept content-based caching as "just how it works" - FIX IT.**
+3. **NO content-based sharing - REMOVE IT IF IT EXISTS** - OCaml's sharing is based on **pointer equality**, not content equality. If you find any content-based caching (like `start_pos_cache` HashMap that deduplicates by position VALUES, or `HashMap<(String, u32)>` that matches by string content), **this is a BUG that must be REMOVED**. The fix requires tracking IDENTITY during parsing - reusing the same index (`PosIdx`, `StrIdx`, `LocIdx`, etc.) when OCaml reuses the same pointer. Content-based caching causes BIDIRECTIONAL differences (sometimes Rust shares more, sometimes less) which is why it's fundamentally wrong. **DO NOT accept content-based caching as "just how it works" - FIX IT.**
+
+   **Example of this anti-pattern (already fixed):** `ObjectField::Otag` used `Located<String>` instead of `Located<StrIdx>`. To share the `{txt; loc}` record between Otag and ArgLabel::Labelled in `%obj` PPX output, a `HashMap<(String, u32), u32>` was used for content-based sharing. The fix was to change Otag to use `StrIdx` (arena reference) and key the sharing table on `(StrIdx, LocIdx)` — proper identity-based sharing. **When you need sharing, use arena indices as keys, not content.**
 
 4. **Run tests frequently** - After each change:
    ```bash
