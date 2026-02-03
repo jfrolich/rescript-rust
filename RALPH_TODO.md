@@ -6,6 +6,7 @@
 2. **Commit your changes frequently** - Follow the instructions in CLAUDE.md about committing.
 3. **Update baselines carefully** - Only add files to baselines when they truly pass; verify the test infrastructure is working correctly first.
 4. **GET TO THE ROOT CAUSE - DO NOT GIVE UP** - When investigating an issue, go VERY DEEP. Do not stop at surface-level symptoms or give up when things get difficult. If you abandon an investigation halfway, the next agent (or you later) will have to start from scratch. The cost of incomplete debugging is enormous - you lose all context and have to rebuild understanding. Push through until you find the actual root cause, not just a workaround or hypothesis.
+5. **Update this TODO when you discover work is already done** - Before starting a task, verify its current state. If you find that a task (or part of it) has already been completed by a previous agent, immediately mark it as done in this file with a brief note of what you found. This prevents future agents from wasting time re-investigating completed work.
 
 ## 🎯 PRIORITY: Focus on High-Impact Issues First
 
@@ -1171,20 +1172,13 @@ let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
   ✅ DONE (2026-02-03): `mk_loc_current()` already uses `self.start_pos_idx` and `self.end_pos_idx`
   directly. No caller changes needed.
 
-- [ ] **Task 7.7**: Remove content-based caching from state.rs
+- [ ] **Task 7.7**: Remove dead Position-based code from state.rs
 
-  After all callers are converted:
-  1. Remove `get_or_push_start_pos()` method
-  2. Remove Position-based methods:
-     - `mk_loc_to_prev_end(&Position)`
-     - `mk_loc(&Position, &Position)`
-     - `mk_loc_to_end(&Position)`
-     - `mk_loc_from_positions()`
-     - `mk_loc_to_end_of(&Position, ..)`
-     - `mk_loc_with_end_idx(&Position, ..)`
-     - `mk_loc_from_start_of(..)`
+  Most content-based caching methods are already gone. Remaining cleanup:
+  1. Remove `mk_loc_idx_to_pos` (line 328) — defined but never called, dead code
+  2. Remove `mk_loc_from_positions` if only used in test code
   3. Keep PosIdx-based methods: all `mk_loc_idx_*`, `mk_loc_spanning()`, `mk_loc_start_to_prev_end()`
-  4. Keep `mk_loc_current()` (updated in Task 7.6)
+  4. Keep `mk_loc_current()` (already updated in Task 7.6)
 
 - [ ] **Task 7.8**: Build, test, and verify
 
