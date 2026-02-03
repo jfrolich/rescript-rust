@@ -4,7 +4,7 @@
 //! matching OCaml res_ast_debugger.ml SexpAstWithLocs output exactly.
 //! Used for debugging position parity between the Rust and OCaml parsers.
 
-use crate::parse_arena::{LidentIdx, Located, LocIdx, ParseArena};
+use crate::parse_arena::{LidentIdx, Located, LocIdx, ParseArena, PosIdx};
 use crate::parser::ast::*;
 use crate::parser::longident::Longident;
 use crate::parser::sexp::{Sexp, string_to_latin1_bytes};
@@ -170,6 +170,24 @@ fn position_opt(pos: &Option<crate::location::Position>) -> Sexp {
     match pos {
         None => Sexp::atom("None"),
         Some(p) => {
+            let col = p.cnum - p.bol;
+            Sexp::list(vec![
+                Sexp::atom("Some"),
+                Sexp::list(vec![
+                    Sexp::atom("pos"),
+                    Sexp::atom(&p.line.to_string()),
+                    Sexp::atom(&col.to_string()),
+                ]),
+            ])
+        }
+    }
+}
+
+fn position_opt_idx(pos: &Option<PosIdx>, arena: &ParseArena) -> Sexp {
+    match pos {
+        None => Sexp::atom("None"),
+        Some(idx) => {
+            let p = arena.get_position(*idx);
             let col = p.cnum - p.bol;
             Sexp::list(vec![
                 Sexp::atom("Some"),
@@ -699,7 +717,7 @@ fn jsx_prop(prop: &JsxProp, arena: &ParseArena) -> Sexp {
 fn case(c: &Case, arena: &ParseArena) -> Sexp {
     Sexp::list(vec![
         Sexp::atom("case"),
-        Sexp::list(vec![Sexp::atom("pc_bar"), position_opt(&c.pc_bar)]),
+        Sexp::list(vec![Sexp::atom("pc_bar"), position_opt_idx(&c.pc_bar, arena)]),
         Sexp::list(vec![Sexp::atom("pc_lhs"), pattern(&c.pc_lhs, arena)]),
         Sexp::list(vec![
             Sexp::atom("pc_guard"),

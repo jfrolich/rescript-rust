@@ -9,8 +9,7 @@
 #![allow(non_camel_case_types)]
 #![allow(missing_docs)]
 
-use crate::location::Position;
-use crate::parse_arena::{ArityIdx, LidentIdx, Located, LocIdx, StrIdx};
+use crate::parse_arena::{ArityIdx, LidentIdx, Located, LocIdx, PosIdx, StrIdx};
 use serde::{Deserialize, Serialize};
 
 use super::longident::Longident;
@@ -446,7 +445,7 @@ pub struct ExpressionRecordField {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Case {
     /// Position of the `|` bar.
-    pub pc_bar: Option<Position>,
+    pub pc_bar: Option<PosIdx>,
     /// Left-hand side pattern.
     pub pc_lhs: Pattern,
     /// Optional guard expression.
@@ -523,7 +522,7 @@ pub struct JsxContainerElement {
     /// Opening tag name.
     pub tag_name_start: Loc<JsxTagName>,
     /// Opening `>` position.
-    pub opening_end: Position,
+    pub opening_end: PosIdx,
     /// Props.
     pub props: Vec<JsxProp>,
     /// Children.
@@ -536,11 +535,11 @@ pub struct JsxContainerElement {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct JsxClosingTag {
     /// `</` position.
-    pub start: Position,
+    pub start: PosIdx,
     /// Tag name.
     pub name: Loc<JsxTagName>,
     /// `>` position.
-    pub end: Position,
+    pub end: PosIdx,
 }
 
 /// JSX prop.

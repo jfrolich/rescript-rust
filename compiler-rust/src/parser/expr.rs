@@ -512,7 +512,7 @@ pub fn parse_operand_expr(p: &mut Parser<'_>, context: ExprContext) -> Expressio
         Token::Lident(s) if s == "async" => {
             // async arrow function
             // Capture the async keyword position for Pexp_newtype locations
-            let async_pos = p.start_pos.clone();
+            let async_pos_idx = p.start_pos_idx();
             p.next();
             if super::core::is_es6_arrow_expression(p, context == ExprContext::TernaryTrueBranch) {
                 // Pass attrs to arrow expression - they're consumed
@@ -521,7 +521,7 @@ pub fn parse_operand_expr(p: &mut Parser<'_>, context: ExprContext) -> Expressio
                 (
                     parse_es6_arrow_expression_async(
                         p,
-                        Some(async_pos), // for Pexp_newtype
+                        Some(async_pos_idx), // for Pexp_newtype
                         attrs.clone(),
                         context,
                     ),
@@ -640,45 +640,39 @@ pub fn parse_await_expression(p: &mut Parser<'_>) -> Expression {
 /// The `async_pos` is used for Pexp_newtype locations (which include 'async').
 fn parse_es6_arrow_expression_async(
     p: &mut Parser<'_>,
-    async_pos: Option<Position>,
+    async_pos_idx: Option<PosIdx>,
     arrow_attrs: Attributes,
     context: ExprContext,
 ) -> Expression {
     // For async functions:
     // - Pexp_fun location starts AFTER async (the default p.start_pos)
     // - Pexp_newtype location includes async (async_pos)
-    parse_es6_arrow_expression_internal(p, true, None, async_pos, arrow_attrs, context)
+    parse_es6_arrow_expression_internal(p, true, None, async_pos_idx, arrow_attrs, context)
 }
 
 /// Parse an ES6 arrow function expression.
 pub fn parse_es6_arrow_expression(
     p: &mut Parser<'_>,
     is_async: bool,
-    arrow_start_pos: Option<Position>,
+    arrow_start_pos_idx: Option<PosIdx>,
     arrow_attrs: Attributes,
     context: ExprContext,
 ) -> Expression {
-    parse_es6_arrow_expression_internal(p, is_async, arrow_start_pos, None, arrow_attrs, context)
+    parse_es6_arrow_expression_internal(p, is_async, arrow_start_pos_idx, None, arrow_attrs, context)
 }
 
 /// Internal implementation of ES6 arrow expression parsing.
 fn parse_es6_arrow_expression_internal(
     p: &mut Parser<'_>,
     is_async: bool,
-    arrow_start_pos: Option<Position>,
-    newtype_start_pos: Option<Position>, // For async, the position including 'async'
+    arrow_start_pos_idx: Option<PosIdx>,
+    newtype_start_pos_idx: Option<PosIdx>, // For async, the position including 'async'
     arrow_attrs: Attributes,
     context: ExprContext,
 ) -> Expression {
-    let start_pos_idx = match arrow_start_pos {
-        Some(pos) => p.push_pos(pos),
-        None => p.start_pos_idx(),
-    };
+    let start_pos_idx = arrow_start_pos_idx.unwrap_or_else(|| p.start_pos_idx());
     // For async functions, newtype_start_pos is set to the 'async' position
-    let newtype_start_idx = match newtype_start_pos {
-        Some(pos) => p.push_pos(pos),
-        None => start_pos_idx,
-    };
+    let newtype_start_idx = newtype_start_pos_idx.unwrap_or(start_pos_idx);
     p.leave_breadcrumb(Grammar::Es6ArrowExpr);
 
     // Parse parameters
@@ -1770,7 +1764,6 @@ pub fn parse_atomic_expr(p: &mut Parser<'_>) -> Expression {
             // Check for argument
             let arg = if p.token == Token::Lparen && !p.has_newline_before() {
                 let lparen_pos_idx = p.start_pos_idx();
-                let lparen_pos = p.start_pos.clone();
                 p.next();
                 // Handle empty parens: #tag() is a variant with unit argument
                 if p.token == Token::Rparen {
@@ -3033,7 +3026,7 @@ fn parse_braced_arrow_ident(p: &mut Parser<'_>, start_pos_idx: PosIdx) -> Expres
         Token::Lident(name) => name.clone(),
         _ => panic!("Expected Lident in parse_braced_arrow_ident"),
     };
-    let _ident_start = p.start_pos.clone();
+    let _ident_start_idx = p.start_pos_idx();
     p.next();
     let ident_end_idx = p.prev_end_pos_idx();
 
@@ -4163,7 +4156,7 @@ fn parse_switch_expr(p: &mut Parser<'_>) -> Expression {
     let mut cases = vec![];
     while p.token != Token::Rbrace && p.token != Token::Eof {
         if p.token == Token::Bar {
-            let bar_pos = Some(p.start_pos.clone());
+            let bar_pos = Some(p.start_pos_idx());
             p.next();
             let lhs = super::pattern::parse_constrained_pattern(p);
             let guard = if p.token == Token::When || (p.token == Token::If) {
@@ -4330,7 +4323,7 @@ fn parse_try_expr(p: &mut Parser<'_>) -> Expression {
     let mut cases = vec![];
     while p.token != Token::Rbrace && p.token != Token::Eof {
         if p.token == Token::Bar {
-            let bar_pos = Some(p.start_pos.clone());
+            let bar_pos = Some(p.start_pos_idx());
             p.next();
             let lhs = super::pattern::parse_constrained_pattern(p);
             let guard = if p.token == Token::When {
@@ -4402,7 +4395,7 @@ fn parse_jsx(p: &mut Parser<'_>) -> Expression {
         }
     } else {
         // OCaml captures opening_tag_end = p.start_pos (position of >) BEFORE next()
-        let opening_end = p.start_pos.clone();
+        let opening_end_idx = p.start_pos_idx();
         p.expect(Token::GreaterThan);
 
         // Parse children
@@ -4410,7 +4403,7 @@ fn parse_jsx(p: &mut Parser<'_>) -> Expression {
 
         // Parse closing tag </name>
         // OCaml: closing_tag_start = p.start_pos (position at '<')
-        let closing_tag_start = p.start_pos.clone();
+        let closing_tag_start_idx = p.start_pos_idx();
         p.expect(Token::LessThan);
         p.expect(Token::Forwardslash);
 
@@ -4420,7 +4413,7 @@ fn parse_jsx(p: &mut Parser<'_>) -> Expression {
         let closing_name_loc = p.mk_loc_idx_to_prev_end(closing_name_start_idx);
 
         // OCaml: closing_tag_end = p.start_pos (position of '>')
-        let closing_tag_end = p.start_pos.clone();
+        let closing_tag_end_idx = p.start_pos_idx();
         p.expect(Token::GreaterThan);
 
         let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
@@ -4429,13 +4422,13 @@ fn parse_jsx(p: &mut Parser<'_>) -> Expression {
             pexp_desc: ExpressionDesc::Pexp_jsx_element(JsxElement::Container(
                 JsxContainerElement {
                     tag_name_start: with_loc(tag_name, tag_name_loc),
-                    opening_end,
+                    opening_end: opening_end_idx,
                     props,
                     children,
                     closing_tag: Some(JsxClosingTag {
-                        start: closing_tag_start,
+                        start: closing_tag_start_idx,
                         name: with_loc(closing_tag_name, closing_name_loc),
-                        end: closing_tag_end,
+                        end: closing_tag_end_idx,
                     }),
                 },
             )),

@@ -729,9 +729,9 @@ impl<'a> Mapper<'a> {
                         let tag_name = self.longident_to_jsx_tag(&tag_lid.txt);
                         let tag_loc = Located::new(tag_name, self.loc(&tag_lid.loc));
 
-                        // Get positions for JSX element structure
-                        let loc_start = self.arena.loc_start(loc).clone();
-                        let loc_end = self.arena.loc_end(loc).clone();
+                        // Get position indices for JSX element structure
+                        let loc_start_idx = self.arena.loc_start_idx(loc);
+                        let loc_end_idx = self.arena.loc_end_idx(loc);
 
                         let jsx_element = if children.is_empty() {
                             current::JsxElement::Unary(current::JsxUnaryElement {
@@ -741,13 +741,13 @@ impl<'a> Mapper<'a> {
                         } else {
                             current::JsxElement::Container(current::JsxContainerElement {
                                 tag_name_start: tag_loc.clone(),
-                                opening_end: loc_start.clone(),
+                                opening_end: loc_start_idx,
                                 props,
                                 children,
                                 closing_tag: Some(current::JsxClosingTag {
-                                    start: loc_end.clone(),
+                                    start: loc_end_idx,
                                     name: tag_loc,
-                                    end: loc_end,
+                                    end: loc_end_idx,
                                 }),
                             })
                         };
