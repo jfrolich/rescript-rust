@@ -615,8 +615,8 @@ fn negate_string(s: &str) -> String {
 /// Create a unary expression from an operator token and operand.
 pub fn make_unary_expr(
     p: &mut Parser<'_>,
-    start_pos: Position,
-    token_end: Position,
+    start_pos: PosIdx,
+    token_end: PosIdx,
     token: Token,
     operand: Expression,
 ) -> Expression {
@@ -652,7 +652,7 @@ pub fn make_unary_expr(
     }
 
     // General unary operator application
-    let token_loc = p.mk_loc(&start_pos, &token_end);
+    let token_loc = p.mk_loc_idx(start_pos, token_end);
     let token_string = token.to_string();
     let operator = if matches!(token, Token::Question) {
         "?".to_string()
@@ -663,7 +663,8 @@ pub fn make_unary_expr(
         // (OCaml shares the Lident for literal "not" via compiler optimization)
         let op_lid_idx = p.arena_mut().push_lident_static("not");
         let op_expr = ast_helper::make_ident_idx(op_lid_idx, token_loc);
-        let loc = p.mk_loc(&start_pos, &p.loc_end(operand.pexp_loc));
+        let operand_end_idx = p.loc_end_idx(operand.pexp_loc);
+        let loc = p.mk_loc_idx(start_pos, operand_end_idx);
         return ast_helper::make_apply(op_expr, vec![(ArgLabel::Nolabel, operand)], loc);
     } else {
         format!("~{}", token_string)
@@ -671,7 +672,8 @@ pub fn make_unary_expr(
 
     let op_lid = make_lident_static(p.arena_mut(), &operator);
     let op_expr = ast_helper::make_ident(p, op_lid, token_loc);
-    let loc = p.mk_loc(&start_pos, &p.loc_end(operand.pexp_loc));
+    let operand_end_idx = p.loc_end_idx(operand.pexp_loc);
+    let loc = p.mk_loc_idx(start_pos, operand_end_idx);
 
     ast_helper::make_apply(op_expr, vec![(ArgLabel::Nolabel, operand)], loc)
 }

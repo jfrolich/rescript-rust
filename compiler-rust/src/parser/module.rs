@@ -125,7 +125,7 @@ pub fn parse_structure(p: &mut Parser<'_>) -> Structure {
 /// Parse a single structure item.
 pub fn parse_structure_item(p: &mut Parser<'_>) -> Option<StructureItem> {
     // Save start position as PosIdx to enable sharing with inner locations
-    let start_pos_idx = p.start_pos_idx();
+    let start_pos_idx = p.push_start_pos();
     let start_pos = p.start_pos;
 
     // Parse attributes
@@ -140,7 +140,7 @@ pub fn parse_structure_item(p: &mut Parser<'_>) -> Option<StructureItem> {
     let desc = match &p.token {
         Token::Open => {
             // OCaml's popen_loc starts at 'open', not at outer attributes
-            let open_start = p.start_pos;
+            let open_start_idx = p.push_start_pos();
             p.next();
             // Check for open! override flag
             let override_flag = if p.token == Token::Bang {
@@ -150,7 +150,7 @@ pub fn parse_structure_item(p: &mut Parser<'_>) -> Option<StructureItem> {
                 OverrideFlag::Fresh
             };
             let lid = parse_module_long_ident(p);
-            let loc = p.mk_loc_to_prev_end(&open_start);
+            let loc = p.mk_loc_idx_to_prev_end(open_start_idx);
             Some(StructureItemDesc::Pstr_open(OpenDescription {
                 popen_lid: lid,
                 popen_override: override_flag,
@@ -184,7 +184,7 @@ pub fn parse_structure_item(p: &mut Parser<'_>) -> Option<StructureItem> {
             let type_start_idx = if attrs.is_empty() {
                 item_start_idx
             } else {
-                p.start_pos_idx()
+                p.push_start_pos()
             };
             p.next();
             // `type t += ...` (type extension) vs `type t = ...` (type declaration)
@@ -248,14 +248,14 @@ pub fn parse_structure_item(p: &mut Parser<'_>) -> Option<StructureItem> {
         }
         Token::Exception => {
             // Capture start position BEFORE consuming 'exception' for accurate location
-            let exception_start_idx = p.start_pos_idx();
+            let exception_start_idx = p.push_start_pos();
             p.next();
             let ext = parse_extension_constructor(p, attrs.clone(), Some(exception_start_idx));
             Some(StructureItemDesc::Pstr_exception(ext))
         }
         Token::Module => {
             // Capture module_start BEFORE consuming 'module' for accurate locations
-            let module_start_idx = p.start_pos_idx();
+            let module_start_idx = p.push_start_pos();
             p.next();
             // Check for first-class module expression: module(...)
             if p.token == Token::Lparen {
@@ -271,7 +271,7 @@ pub fn parse_structure_item(p: &mut Parser<'_>) -> Option<StructureItem> {
         }
         Token::Include => {
             // OCaml: parse_include_statement captures start_pos before consuming Include
-            let include_start_idx = p.start_pos_idx();
+            let include_start_idx = p.push_start_pos();
             p.next();
             let mod_expr = parse_module_expr(p);
             Some(StructureItemDesc::Pstr_include(IncludeDeclaration {
@@ -283,7 +283,7 @@ pub fn parse_structure_item(p: &mut Parser<'_>) -> Option<StructureItem> {
         Token::At | Token::AtAt => {
             // Floating attribute or extension
             // Capture start_pos before consuming @ or @@ so attribute location includes it
-            let attr_start_idx = p.start_pos_idx();
+            let attr_start_idx = p.push_start_pos();
             if p.token == Token::AtAt {
                 p.next();
                 let attr = parse_attribute_body(p, attr_start_idx);
@@ -307,7 +307,7 @@ pub fn parse_structure_item(p: &mut Parser<'_>) -> Option<StructureItem> {
         Token::PercentPercent => {
             // Structure-level extension (%%raw(...), %%private(...), etc.)
             // Capture start position BEFORE consuming %% so extension location includes it
-            let ext_start_idx = p.start_pos_idx();
+            let ext_start_idx = p.push_start_pos();
             p.next();
             // Parse extension name - can be dotted like %%item.extension
             // id_start shares the same position as ext_start
@@ -421,7 +421,7 @@ pub fn parse_signature(p: &mut Parser<'_>) -> Signature {
 
 /// Parse a single signature item.
 pub fn parse_signature_item(p: &mut Parser<'_>) -> Option<SignatureItem> {
-    let start_pos_idx = p.start_pos_idx();
+    let start_pos_idx = p.push_start_pos();
 
     // Parse attributes
     let attrs = parse_attributes(p);
@@ -429,7 +429,7 @@ pub fn parse_signature_item(p: &mut Parser<'_>) -> Option<SignatureItem> {
     let desc = match &p.token {
         Token::Open => {
             // OCaml's popen_loc starts at 'open', not at outer attributes
-            let open_start_idx = p.start_pos_idx();
+            let open_start_idx = p.push_start_pos();
             p.next();
             // Check for override flag: open! M
             let override_flag = if p.token == Token::Bang {
@@ -450,7 +450,7 @@ pub fn parse_signature_item(p: &mut Parser<'_>) -> Option<SignatureItem> {
         Token::Let { .. } => {
             // For signature let declarations, OCaml's value_description location
             // starts at 'let', not at the attributes (different from external in structure)
-            let let_pos_idx = p.start_pos_idx();
+            let let_pos_idx = p.push_start_pos();
             p.next();
             let vd = parse_value_description(p, attrs.clone(), let_pos_idx);
             Some(SignatureItemDesc::Psig_value(vd))
@@ -463,7 +463,7 @@ pub fn parse_signature_item(p: &mut Parser<'_>) -> Option<SignatureItem> {
             let type_start_idx = if attrs.is_empty() {
                 start_pos_idx
             } else {
-                p.start_pos_idx()
+                p.push_start_pos()
             };
             p.next();
             let is_type_extension = p.token != Token::Rec
@@ -524,13 +524,13 @@ pub fn parse_signature_item(p: &mut Parser<'_>) -> Option<SignatureItem> {
         }
         Token::Exception => {
             // Capture start position BEFORE consuming 'exception' for accurate location
-            let exception_start_idx = p.start_pos_idx();
+            let exception_start_idx = p.push_start_pos();
             p.next();
             let ext = parse_extension_constructor(p, attrs.clone(), Some(exception_start_idx));
             Some(SignatureItemDesc::Psig_exception(ext))
         }
         Token::Module => {
-            let _module_start_idx = p.start_pos_idx();
+            let _module_start_idx = p.push_start_pos();
             p.next();
             if p.token == Token::Typ {
                 p.next();
@@ -559,7 +559,7 @@ pub fn parse_signature_item(p: &mut Parser<'_>) -> Option<SignatureItem> {
         }
         Token::At | Token::AtAt => {
             // Capture start_pos before consuming @ or @@ so attribute location includes it
-            let attr_start_idx = p.start_pos_idx();
+            let attr_start_idx = p.push_start_pos();
             if p.token == Token::AtAt {
                 p.next();
                 let attr = parse_attribute_body(p, attr_start_idx);
@@ -615,13 +615,13 @@ pub fn parse_signature_item(p: &mut Parser<'_>) -> Option<SignatureItem> {
 
 /// Parse a module expression.
 pub fn parse_module_expr(p: &mut Parser<'_>) -> ModuleExpr {
-    let start_pos_idx = p.start_pos_idx();
+    let start_pos_idx = p.push_start_pos();
 
     // Handle await keyword
     // OCaml lines 6622-6629: capture await start_pos BEFORE consuming, end_pos AFTER consuming
     // NOTE: OCaml uses p.end_pos after consuming await, which is the end of the NEXT token
     let await_loc = if p.token == Token::Await {
-        let await_start_idx = p.start_pos_idx();
+        let await_start_idx = p.push_start_pos();
         p.next();
         // OCaml: let end_pos = p.end_pos in - this is the end of the token AFTER await
         let await_end = p.end_pos.clone();
@@ -654,7 +654,7 @@ pub fn parse_module_expr(p: &mut Parser<'_>) -> ModuleExpr {
     let (expr, primary_start_pos_idx) = if is_es6_arrow_functor(p) {
         (parse_functor_module_expr(p), None)
     } else {
-        let primary_start_idx = p.start_pos_idx();
+        let primary_start_idx = p.push_start_pos();
         (parse_primary_module_expr(p), Some(primary_start_idx))
     };
 
@@ -697,13 +697,13 @@ pub fn parse_module_expr(p: &mut Parser<'_>) -> ModuleExpr {
 /// Parse a module expression without consuming a trailing `: type` constraint.
 /// Used for first-class modules where the constraint becomes Pexp_constraint + Ptyp_package.
 pub fn parse_module_expr_without_constraint(p: &mut Parser<'_>) -> ModuleExpr {
-    let _start_pos_idx = p.start_pos_idx();
+    let _start_pos_idx = p.push_start_pos();
 
     // Handle await keyword
     // OCaml lines 6622-6629: capture await start_pos BEFORE consuming, end_pos AFTER consuming
     // NOTE: OCaml uses p.end_pos after consuming await, which is the end of the NEXT token
     let await_loc = if p.token == Token::Await {
-        let await_start_idx = p.start_pos_idx();
+        let await_start_idx = p.push_start_pos();
         p.next();
         // OCaml: let end_pos = p.end_pos in - this is the end of the token AFTER await
         let await_end = p.end_pos.clone();
@@ -736,7 +736,7 @@ pub fn parse_module_expr_without_constraint(p: &mut Parser<'_>) -> ModuleExpr {
     let (expr, primary_start_pos_idx) = if is_es6_arrow_functor(p) {
         (parse_functor_module_expr(p), None)
     } else {
-        let primary_start_idx = p.start_pos_idx();
+        let primary_start_idx = p.push_start_pos();
         (parse_primary_module_expr(p), Some(primary_start_idx))
     };
 
@@ -766,7 +766,7 @@ pub fn parse_module_expr_without_constraint(p: &mut Parser<'_>) -> ModuleExpr {
 
 /// Parse a primary module expression.
 fn parse_primary_module_expr(p: &mut Parser<'_>) -> ModuleExpr {
-    let start_pos_idx = p.start_pos_idx();
+    let start_pos_idx = p.push_start_pos();
 
     match &p.token {
         Token::Uident(_) => {
@@ -849,7 +849,7 @@ fn parse_primary_module_expr(p: &mut Parser<'_>) -> ModuleExpr {
                 let expr = expr::parse_expr(p);
                 let final_expr = if p.token == Token::Colon {
                     // OCaml captures colon position for package type location start
-                    let colon_pos_idx = p.start_pos_idx();
+                    let colon_pos_idx = p.push_start_pos();
                     p.next();
                     // Parse module type and convert to Ptyp_package
                     let mod_type = parse_module_type(p);
@@ -903,7 +903,7 @@ fn parse_module_apply(p: &mut Parser<'_>, func: ModuleExpr) -> ModuleExpr {
     while p.token == Token::Lparen && p.prev_end_pos.line >= p.start_pos.line {
         // OCaml: let start_pos = p.Parser.start_pos in
         // Capture lparen position before consuming it
-        let lparen_pos_idx = p.start_pos_idx();
+        let lparen_pos_idx = p.push_start_pos();
         p.next();
 
         let args = if p.token == Token::Rparen {
@@ -973,7 +973,7 @@ struct FunctorArg {
 /// Parse a single functor argument.
 /// functor-arg ::= Uident : modtype | _ : modtype | modtype (punning for _ : modtype)
 fn parse_functor_arg(p: &mut Parser<'_>) -> Option<FunctorArg> {
-    let start_pos_idx = p.start_pos_idx();
+    let start_pos_idx = p.push_start_pos();
     let attrs = parse_attributes(p);
 
     match &p.token {
@@ -1090,7 +1090,7 @@ fn parse_functor_arg(p: &mut Parser<'_>) -> Option<FunctorArg> {
 /// Parse functor arguments: ( arg1, arg2, ... )
 fn parse_functor_args(p: &mut Parser<'_>) -> Vec<FunctorArg> {
     // Capture position before ( - OCaml includes ( in the first arg's location
-    let paren_start_pos_idx = p.start_pos_idx();
+    let paren_start_pos_idx = p.push_start_pos();
     p.expect(Token::Lparen);
 
     let mut args = vec![];
@@ -1232,7 +1232,7 @@ fn parse_module_type_no_with(p: &mut Parser<'_>) -> ModuleType {
 }
 
 fn parse_module_type_impl(p: &mut Parser<'_>, es6_arrow: bool, parse_with: bool) -> ModuleType {
-    let start_pos_idx = p.start_pos_idx();
+    let start_pos_idx = p.push_start_pos();
 
     // Parse attributes (e.g. `@attr module type of M`)
     let attrs = parse_attributes(p);
@@ -1275,7 +1275,7 @@ fn parse_functor_module_type(p: &mut Parser<'_>) -> ModuleType {
     }
 
     // Sugar: `S => MT` (unnamed parameter)
-    let start_pos_idx = p.start_pos_idx();
+    let start_pos_idx = p.push_start_pos();
     let param_type = parse_primary_module_type(p);
     if p.token == Token::EqualGreater {
         p.next();
@@ -1319,7 +1319,7 @@ fn is_paren_functor_module_type(p: &mut Parser<'_>) -> bool {
 }
 
 fn parse_paren_functor_module_type(p: &mut Parser<'_>) -> ModuleType {
-    let functor_start_idx = p.start_pos_idx();
+    let functor_start_idx = p.push_start_pos();
     p.expect(Token::Lparen);
 
     #[derive(Debug)]
@@ -1347,7 +1347,7 @@ fn parse_paren_functor_module_type(p: &mut Parser<'_>) -> ModuleType {
         });
     } else {
         while p.token != Token::Rparen && p.token != Token::Eof {
-            let start_pos_idx = p.start_pos_idx();
+            let start_pos_idx = p.push_start_pos();
             // Parse parameter attributes like `@attr _: S` - attach to the functor type, not param
             let param_attrs = parse_attributes(p);
 
@@ -1485,7 +1485,7 @@ fn parse_paren_functor_module_type(p: &mut Parser<'_>) -> ModuleType {
 
 /// Parse a primary module type.
 fn parse_primary_module_type(p: &mut Parser<'_>) -> ModuleType {
-    let start_pos_idx = p.start_pos_idx();
+    let start_pos_idx = p.push_start_pos();
 
     match &p.token {
         Token::Uident(_) | Token::Lident(_) => {
@@ -1636,7 +1636,7 @@ fn parse_with_constraint(p: &mut Parser<'_>) -> Option<WithConstraint> {
             // Parse type constraints: constraint 'a = int constraint 'b = string
             let mut cstrs = vec![];
             while p.token == Token::Constraint {
-                let cstr_start_idx = p.start_pos_idx();
+                let cstr_start_idx = p.push_start_pos();
                 p.next();
                 p.expect(Token::SingleQuote);
                 let var = if let Token::Lident(name) = &p.token {
@@ -1739,7 +1739,7 @@ fn is_expr_start(token: &Token) -> bool {
 /// Handles both module paths (Foo.Bar.Baz) and module type paths (Foo.Bar.t).
 /// Module type names are typically lowercase (e.g., RGLEvents.t).
 fn parse_module_long_ident(p: &mut Parser<'_>) -> Loc<LidentIdx> {
-    let start_pos_idx = p.start_pos_idx();
+    let start_pos_idx = p.push_start_pos();
     let mut path_parts = vec![];
 
     loop {
@@ -1778,7 +1778,7 @@ fn parse_module_long_ident(p: &mut Parser<'_>) -> Loc<LidentIdx> {
 
 /// Parse a type long identifier.
 fn parse_type_long_ident(p: &mut Parser<'_>) -> Loc<LidentIdx> {
-    let start_pos_idx = p.start_pos_idx();
+    let start_pos_idx = p.push_start_pos();
     let mut path_parts = vec![];
 
     loop {
@@ -1846,7 +1846,7 @@ fn parse_let_bindings(
         // We need to check for And here and capture its location for let.unwrap
         if p.token == Token::And {
             // Capture `and` keyword location for let.unwrap attribute
-            unwrap_attr_start_idx = p.start_pos_idx();
+            unwrap_attr_start_idx = p.push_start_pos();
             unwrap_attr_end = p.end_pos.clone();
             p.next(); // consume `and`
         }
@@ -1993,11 +1993,11 @@ fn parse_let_bindings(
         if p.token == Token::And {
             // Capture `and` keyword location for let.unwrap attribute in next binding
             // OCaml uses p.Parser.start_pos and p.Parser.end_pos (before consuming 'and')
-            unwrap_attr_start_idx = p.start_pos_idx();
+            unwrap_attr_start_idx = p.push_start_pos();
             unwrap_attr_end = p.end_pos;
             // Capture start position BEFORE consuming `and` for next binding
             // For `and` bindings, we push a fresh position (no sharing needed with structure_item)
-            binding_start_idx = p.start_pos_idx();
+            binding_start_idx = p.push_start_pos();
             p.next();
         } else if matches!(p.token, Token::At | Token::AtAt | Token::DocComment { .. }) {
             // Look ahead to see if attributes/doc comments are followed by And
@@ -2020,7 +2020,7 @@ fn parse_let_bindings(
                 break;
             }
             // Capture start position BEFORE the attributes for next binding
-            binding_start_idx = p.start_pos_idx();
+            binding_start_idx = p.push_start_pos();
             // Continue - attributes will be parsed in the next iteration, and `and` will be consumed there
         } else {
             break;
@@ -2095,7 +2095,7 @@ fn parse_type_declarations(
         // Check for `and` to continue with more type declarations.
         // Also handle attributes/doc comments before `and`: `/** doc */ and type t = ...`
         if p.token == Token::And {
-            decl_start_idx = p.start_pos_idx(); // Capture 'and' position as PosIdx
+            decl_start_idx = p.push_start_pos(); // Capture 'and' position as PosIdx
             p.next();
         } else if matches!(p.token, Token::At | Token::AtAt | Token::DocComment { .. }) {
             // Look ahead to see if attributes/doc comments are followed by And
@@ -2120,7 +2120,7 @@ fn parse_type_declarations(
             // Capture start position BEFORE parsing attributes/doc comments as PosIdx
             // OCaml does: let start_pos = p.Parser.start_pos in let attrs = parse_attributes_and_binding p in
             // So the location should include the doc comment
-            decl_start_idx = p.start_pos_idx();
+            decl_start_idx = p.push_start_pos();
             // Parse the attributes/doc comments, then consume `and`
             next_attrs = parse_attributes(p);
             if p.token == Token::And {
@@ -2139,13 +2139,13 @@ fn parse_type_declarations(
 /// For accurate ptype_loc, use parse_type_declaration_with_context with the correct start position.
 fn parse_type_declaration(p: &mut Parser<'_>, outer_attrs: Attributes) -> Option<TypeDeclaration> {
     let inline_ctx = RefCell::new(InlineTypesContext::new(vec![], Location::none()));
-    let start_pos_idx = p.start_pos_idx();
+    let start_pos_idx = p.push_start_pos();
     parse_type_declaration_with_context(p, outer_attrs, &inline_ctx, start_pos_idx)
 }
 
 /// Parse a type extension: `type t += ...`.
 fn parse_type_extension(p: &mut Parser<'_>, attrs: Attributes) -> TypeExtension {
-    let start_pos_idx = p.start_pos_idx();
+    let start_pos_idx = p.push_start_pos();
 
     // Parse the extended type path (e.g. t or M.t).
     let mut parts: Vec<String> = vec![];
@@ -2193,7 +2193,7 @@ fn parse_type_extension(p: &mut Parser<'_>, attrs: Attributes) -> TypeExtension 
     // Constructors (with optional leading `|`).
     // OCaml includes the `|` in the constructor location
     let mut bar_start_idx = if p.token == Token::Bar {
-        let pos_idx = p.start_pos_idx();
+        let pos_idx = p.push_start_pos();
         p.next();
         Some(pos_idx)
     } else {
@@ -2204,7 +2204,7 @@ fn parse_type_extension(p: &mut Parser<'_>, attrs: Attributes) -> TypeExtension 
     while p.token != Token::Eof {
         constructors.push(parse_extension_constructor(p, vec![], bar_start_idx));
         if p.token == Token::Bar {
-            bar_start_idx = Some(p.start_pos_idx());
+            bar_start_idx = Some(p.push_start_pos());
             p.next();
             continue;
         }
@@ -2578,7 +2578,7 @@ fn parse_type_declaration_with_context(
     let mut cstrs = vec![];
     while p.token == Token::Constraint {
         // OCaml includes "constraint" keyword in the type variable and constraint locations
-        let cstr_start_idx = p.start_pos_idx();
+        let cstr_start_idx = p.push_start_pos();
         p.next();
         // Parse the type variable
         p.expect(Token::SingleQuote);
@@ -2800,7 +2800,7 @@ fn parse_type_params_angle(p: &mut Parser<'_>) -> Vec<(CoreType, Variance)> {
     p.next(); // consume <
 
     while p.token != Token::GreaterThan && p.token != Token::Eof {
-        let param_start_idx = p.start_pos_idx();
+        let param_start_idx = p.push_start_pos();
 
         // Parse optional variance: +, -, or nothing
         let variance = match &p.token {
@@ -2833,9 +2833,11 @@ fn parse_type_params_angle(p: &mut Parser<'_>) -> Vec<(CoreType, Variance)> {
                 t if t.is_keyword() => {
                     // Reserved keyword after singlequote: 'for, 'let, etc.
                     let keyword = format!("{}", t);
-                    let keyword_start = p.start_pos.clone();
-                    let keyword_end = p.end_pos.clone();
-                    let loc = p.mk_loc(&keyword_start, &keyword_end);
+                    let keyword_start = p.start_pos;
+                    let keyword_end = p.end_pos;
+                    let keyword_start_idx = p.push_pos(keyword_start);
+                    let keyword_end_idx = p.push_pos(keyword_end);
+                    let loc = p.mk_loc_idx(keyword_start_idx, keyword_end_idx);
                     p.err_multiple(
                         keyword_start,
                         keyword_end,
@@ -3028,7 +3030,7 @@ fn parse_type_kind(
         }
         Token::Lbrace => {
             // Record type - capture { position for first field's location (OCaml extends first spread field's loc to {)
-            let lbrace_pos_idx = p.start_pos_idx();
+            let lbrace_pos_idx = p.push_start_pos();
             p.next();
             let labels = parse_label_declarations(p, inline_ctx, current_type_name_path, Some(lbrace_pos_idx));
             p.expect(Token::Rbrace);
@@ -3044,7 +3046,7 @@ fn parse_constructors(p: &mut Parser<'_>) -> Vec<ConstructorDeclaration> {
 
     while p.token == Token::Bar {
         // Capture start position BEFORE consuming the bar (like OCaml)
-        let bar_start_idx = p.start_pos_idx();
+        let bar_start_idx = p.push_start_pos();
         p.next();
         if let Some(c) = parse_constructor_with_start(p, bar_start_idx) {
             constructors.push(c);
@@ -3066,7 +3068,7 @@ fn parse_constructors_without_leading_bar(p: &mut Parser<'_>) -> Vec<Constructor
     // Parse remaining constructors (with leading |)
     while p.token == Token::Bar {
         // Capture start position BEFORE consuming the bar (like OCaml)
-        let bar_start_idx = p.start_pos_idx();
+        let bar_start_idx = p.push_start_pos();
         p.next();
         if let Some(c) = parse_constructor_with_start(p, bar_start_idx) {
             constructors.push(c);
@@ -3086,7 +3088,7 @@ fn parse_constructor_with_start(
 
 /// Parse a single constructor.
 fn parse_constructor(p: &mut Parser<'_>) -> Option<ConstructorDeclaration> {
-    let start_pos_idx = p.start_pos_idx();
+    let start_pos_idx = p.push_start_pos();
     parse_constructor_impl(p, start_pos_idx)
 }
 
@@ -3171,7 +3173,7 @@ fn parse_constructor_impl(p: &mut Parser<'_>, start_pos_idx: PosIdx) -> Option<C
                 )
             });
         if is_inline_record {
-            let lbrace_pos_idx = p.start_pos_idx();
+            let lbrace_pos_idx = p.push_start_pos();
             p.next(); // consume {
             let labels = parse_label_declarations(p, None, None, Some(lbrace_pos_idx));
             p.expect(Token::Rbrace);
@@ -3218,7 +3220,7 @@ fn parse_constructor_impl(p: &mut Parser<'_>, start_pos_idx: PosIdx) -> Option<C
                     if is_object {
                         // Consume `{` and capture start_pos AFTER (like OCaml)
                         p.next();
-                        let start_pos_idx = p.start_pos_idx();
+                        let start_pos_idx = p.push_start_pos();
                         typ::parse_object_type_body(p, start_pos_idx)
                     } else {
                         typ::parse_typ_expr(p)
@@ -3236,7 +3238,7 @@ fn parse_constructor_impl(p: &mut Parser<'_>, start_pos_idx: PosIdx) -> Option<C
             ConstructorArguments::Pcstr_tuple(args)
         }
     } else if p.token == Token::Lbrace {
-        let lbrace_pos_idx = p.start_pos_idx();
+        let lbrace_pos_idx = p.push_start_pos();
         p.next();
         let labels = parse_label_declarations(p, None, None, Some(lbrace_pos_idx));
         p.expect(Token::Rbrace);
@@ -3279,7 +3281,7 @@ fn parse_label_declarations(
     while p.token != Token::Rbrace && p.token != Token::Eof {
         // Handle spread: ...typ - represented as a label with name "..."
         if p.token == Token::DotDotDot {
-            let start_pos_idx = p.start_pos_idx();
+            let start_pos_idx = p.push_start_pos();
             p.next();
             // Name location is just the "..." part
             let name_loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
@@ -3332,7 +3334,7 @@ fn parse_label_declaration(
     inline_ctx: Option<&RefCell<InlineTypesContext>>,
     current_type_name_path: Option<&Vec<StrIdx>>,
 ) -> Option<LabelDeclaration> {
-    let start_pos_idx = p.start_pos_idx();
+    let start_pos_idx = p.push_start_pos();
     let attrs = parse_attributes(p);
 
     let mutable = if p.token == Token::Mutable {
@@ -3431,7 +3433,7 @@ fn parse_label_declaration(
 
         if looks_like_record {
             // Parse as inline record and register it
-            let type_start_pos_idx = p.start_pos_idx();
+            let type_start_pos_idx = p.push_start_pos();
             p.next(); // consume {
             let inline_ctx = inline_ctx.unwrap();
             let extended_path = extended_path.as_ref().unwrap();
@@ -3562,7 +3564,7 @@ pub fn parse_extension_constructor(
     exception_start: Option<PosIdx>,
 ) -> ExtensionConstructor {
     // Use provided start position (before 'exception') or current position
-    let start_pos_idx = exception_start.unwrap_or_else(|| p.start_pos_idx());
+    let start_pos_idx = exception_start.unwrap_or_else(|| p.push_start_pos());
     let error_idx = p.arena_mut().intern("Error");
     let constructor = parse_constructor(p).unwrap_or_else(|| ConstructorDeclaration {
         pcd_name: mknoloc(error_idx),
@@ -3617,7 +3619,7 @@ fn parse_module_definition(p: &mut Parser<'_>, module_start_idx: PosIdx, attrs: 
     let start_pos_idx = if rec_flag == RecFlag::Recursive {
         module_start_idx
     } else {
-        p.start_pos_idx()
+        p.push_start_pos()
     };
 
     let mut bindings = vec![];
@@ -3682,7 +3684,7 @@ fn parse_module_definition(p: &mut Parser<'_>, module_start_idx: PosIdx, attrs: 
     loop {
         if p.token == Token::And {
             // Capture start position BEFORE consuming `and`
-            let binding_start_idx = p.start_pos_idx();
+            let binding_start_idx = p.push_start_pos();
             p.next();
             let binding_attrs = parse_attributes(p);
             if let Some(binding) = parse_binding(p, binding_start_idx, binding_attrs) {
@@ -3709,7 +3711,7 @@ fn parse_module_definition(p: &mut Parser<'_>, module_start_idx: PosIdx, attrs: 
                 break;
             }
             // Parse the attributes, then the `and` keyword
-            let binding_start_idx = p.start_pos_idx();
+            let binding_start_idx = p.push_start_pos();
             let binding_attrs = parse_attributes(p);
             if p.token == Token::And {
                 p.next();
@@ -3736,7 +3738,7 @@ fn parse_module_definition(p: &mut Parser<'_>, module_start_idx: PosIdx, attrs: 
 /// If `start_pos_idx` is Some, use it for the location (for recursive modules where it includes 'module rec' or 'and').
 /// If `start_pos_idx` is None, capture it at the current position (for non-recursive modules where loc starts at name).
 fn parse_module_declaration(p: &mut Parser<'_>, outer_attrs: Attributes, start_pos_idx: Option<PosIdx>) -> ModuleDeclaration {
-    let start_pos_idx = start_pos_idx.unwrap_or_else(|| p.start_pos_idx());
+    let start_pos_idx = start_pos_idx.unwrap_or_else(|| p.push_start_pos());
     let inner_attrs = parse_attributes(p);
     // Merge outer (signature item level) attrs with inner (name level) attrs
     let attrs = [outer_attrs, inner_attrs].concat();
@@ -3830,7 +3832,7 @@ fn parse_rec_module_declarations(p: &mut Parser<'_>, outer_attrs: Attributes, st
     // Uses parse_attributes_and_binding which backtracks if attrs aren't followed by `and`
     loop {
         // Capture start_pos BEFORE consuming `and` (like OCaml)
-        let and_start_pos_idx = p.start_pos_idx();
+        let and_start_pos_idx = p.push_start_pos();
         let attrs = parse_attributes_and_binding(p);
         if p.token == Token::And {
             p.next();
@@ -3848,7 +3850,7 @@ fn parse_rec_module_declarations(p: &mut Parser<'_>, outer_attrs: Attributes, st
 /// `in_structure` indicates whether this is in a structure (.res) or signature (.resi).
 /// In structure context, OCaml passes ~loc, in signature context it doesn't (uses Location.none).
 fn parse_module_type_declaration(p: &mut Parser<'_>, outer_attrs: Attributes, in_structure: bool) -> ModuleTypeDeclaration {
-    let name_start_idx = p.start_pos_idx();
+    let name_start_idx = p.push_start_pos();
     let inner_attrs = parse_attributes(p);
     // Merge outer (signature item level) attrs with inner (name level) attrs
     let attrs = [outer_attrs, inner_attrs].concat();
@@ -3900,7 +3902,7 @@ fn parse_attributes(p: &mut Parser<'_>) -> Attributes {
         match &p.token {
             Token::At => {
                 // Capture start_pos before consuming @ so attribute location includes it
-                let attr_start_idx = p.start_pos_idx();
+                let attr_start_idx = p.push_start_pos();
                 p.next();
                 attrs.push(parse_attribute_body(p, attr_start_idx));
             }
@@ -4022,7 +4024,7 @@ pub fn parse_payload(p: &mut Parser<'_>) -> Payload {
 
     // Parse structure items
     loop {
-        let start_pos_idx = p.start_pos_idx();
+        let start_pos_idx = p.push_start_pos();
 
         // Check if this looks like a structure item (let, type, module, etc.)
         let is_structure_item = matches!(
@@ -4076,7 +4078,7 @@ pub fn parse_payload(p: &mut Parser<'_>) -> Payload {
 /// Parse an extension.
 fn parse_extension(p: &mut Parser<'_>) -> Extension {
     // Capture start position BEFORE consuming % or %% so extension location includes it
-    let id_start_idx = p.start_pos_idx();
+    let id_start_idx = p.push_start_pos();
 
     // Handle both %ext and %%ext (single and double percent)
     if p.token == Token::PercentPercent {

@@ -9,7 +9,6 @@ use super::diagnostics::DiagnosticCategory;
 use super::longident::Longident;
 use super::state::Parser;
 use super::token::Token;
-use crate::location::Position;
 use crate::parse_arena::{Located, LocIdx, PosIdx, StrIdx};
 
 // ============================================================================
@@ -45,7 +44,7 @@ fn parse_attribute(p: &mut Parser<'_>) -> Option<Attribute> {
         return None;
     }
     // Capture position before @ so attribute location includes it
-    let start_pos_idx = p.start_pos_idx();
+    let start_pos_idx = p.push_start_pos();
     p.next();
 
     let attr_id = parse_attribute_id(p, start_pos_idx);
@@ -160,7 +159,7 @@ fn parse_type_longident(p: &mut Parser<'_>) -> crate::parse_arena::LidentIdx {
 /// Parse a single pattern (atomic + interval), used by or-pattern parsing.
 /// This parses one "branch" of an or-pattern without consuming further `|`.
 fn parse_single_pattern(p: &mut Parser<'_>) -> Pattern {
-    let start_pos_idx = p.start_pos_idx();
+    let start_pos_idx = p.push_start_pos();
 
     // Parse leading attributes
     let attrs = parse_attributes(p);
@@ -245,7 +244,7 @@ fn parse_single_pattern(p: &mut Parser<'_>) -> Pattern {
 /// Parse a single pattern with optional alias (atomic + interval + as name).
 /// Used by or-pattern parsing so each branch can have its own alias.
 fn parse_single_pattern_with_alias(p: &mut Parser<'_>) -> Pattern {
-    let start_pos_idx = p.start_pos_idx();
+    let start_pos_idx = p.push_start_pos();
     let mut pat = parse_single_pattern(p);
 
     // Handle pattern aliases (pat as name) for this single branch
@@ -253,7 +252,7 @@ fn parse_single_pattern_with_alias(p: &mut Parser<'_>) -> Pattern {
     while p.token == Token::As {
         p.next();
         // Parse any attributes before the alias name (e.g., @zz in `as @zz z`)
-        let alias_start_idx = p.start_pos_idx();
+        let alias_start_idx = p.push_start_pos();
         let alias_attrs = parse_attributes(p);
         let (name, name_loc) = match &p.token {
             Token::Lident(name) => {
@@ -290,7 +289,7 @@ fn parse_single_pattern_with_alias(p: &mut Parser<'_>) -> Pattern {
 
 /// Parse a pattern.
 pub fn parse_pattern(p: &mut Parser<'_>) -> Pattern {
-    let start_pos_idx = p.start_pos_idx();
+    let start_pos_idx = p.push_start_pos();
 
     // Parse first pattern with its alias (if any)
     let mut pat = parse_single_pattern_with_alias(p);
@@ -452,7 +451,7 @@ pub fn parse_tuple_pattern(
 
 /// Parse an atomic pattern.
 fn parse_atomic_pattern(p: &mut Parser<'_>) -> Pattern {
-    let start_pos_idx = p.start_pos_idx();
+    let start_pos_idx = p.push_start_pos();
 
     match &p.token {
         Token::Underscore => {
@@ -473,7 +472,7 @@ fn parse_atomic_pattern(p: &mut Parser<'_>) -> Pattern {
             if p.token == Token::As {
                 p.next();
                 // Capture alias name position BEFORE parsing it
-                let alias_start_idx = p.start_pos_idx();
+                let alias_start_idx = p.push_start_pos();
                 let alias = parse_lident(p);
                 // OCaml: alias name location is just the name, not the whole pattern
                 let alias_name_loc = p.mk_loc_idx_to_prev_end(alias_start_idx);
@@ -585,7 +584,7 @@ fn parse_atomic_pattern(p: &mut Parser<'_>) -> Pattern {
 
             let pkg_type = if p.token == Token::Colon {
                 // OCaml: core_type location starts from after the colon
-                let colon_pos_idx = p.start_pos_idx();
+                let colon_pos_idx = p.push_start_pos();
                 p.next();
                 let mut typ = super::typ::parse_package_type(p);
                 // Recreate location starting from colon position
@@ -641,7 +640,7 @@ fn parse_atomic_pattern(p: &mut Parser<'_>) -> Pattern {
 
                 let arg = if p.token == Token::Lparen {
                     // Capture position of ( for tuple location (OCaml includes parens)
-                    let lparen_pos_idx = p.start_pos_idx();
+                    let lparen_pos_idx = p.push_start_pos();
                     p.next();
                     if p.token == Token::Rparen {
                         p.next();
@@ -797,7 +796,7 @@ fn parse_lident(p: &mut Parser<'_>) -> String {
 
 /// Parse a constructor pattern (Foo or Foo(pat)).
 fn parse_constructor_pattern(p: &mut Parser<'_>) -> Pattern {
-    let start_pos_idx = p.start_pos_idx();
+    let start_pos_idx = p.push_start_pos();
 
     // Parse the constructor path
     let mut path_parts = vec![];
@@ -824,7 +823,7 @@ fn parse_constructor_pattern(p: &mut Parser<'_>) -> Pattern {
     // Check for constructor argument
     let arg = if p.token == Token::Lparen {
         // Capture position of ( for tuple location (OCaml includes parens)
-        let lparen_pos_idx = p.start_pos_idx();
+        let lparen_pos_idx = p.push_start_pos();
         p.next();
         if p.token == Token::Rparen {
             p.next();
@@ -915,7 +914,7 @@ fn parse_constructor_pattern(p: &mut Parser<'_>) -> Pattern {
 
 /// Parse an array pattern [p1, p2, ...].
 fn parse_array_pattern(p: &mut Parser<'_>) -> Pattern {
-    let start_pos_idx = p.start_pos_idx();
+    let start_pos_idx = p.push_start_pos();
     p.expect(Token::Lbracket);
 
     let mut patterns = vec![];
@@ -969,7 +968,7 @@ fn parse_list_pattern(p: &mut Parser<'_>, start_pos_idx: PosIdx) -> Pattern {
 
 /// Parse a record pattern {field: pat, ...}.
 fn parse_record_pattern(p: &mut Parser<'_>) -> Pattern {
-    let start_pos_idx = p.start_pos_idx();
+    let start_pos_idx = p.push_start_pos();
     p.expect(Token::Lbrace);
 
     let mut fields = vec![];
@@ -984,7 +983,7 @@ fn parse_record_pattern(p: &mut Parser<'_>) -> Pattern {
             break;
         }
 
-        let field_start_idx = p.start_pos_idx();
+        let field_start_idx = p.push_start_pos();
 
         // Check for optional field punning: { ? name, ... }
         let opt_punning = p.token == Token::Question;
@@ -993,7 +992,7 @@ fn parse_record_pattern(p: &mut Parser<'_>) -> Pattern {
         }
         // For optional punned fields, the pattern location starts after the '?'
         // OCaml: the pattern location is just the identifier, not including '? '
-        let pat_start_idx = if opt_punning { p.start_pos_idx() } else { field_start_idx };
+        let pat_start_idx = if opt_punning { p.push_start_pos() } else { field_start_idx };
 
         // Support qualified record labels in patterns: {Module.label: pat}
         // (also needed for ambiguity disambiguation, mirroring OCaml syntax).
@@ -1022,7 +1021,7 @@ fn parse_record_pattern(p: &mut Parser<'_>) -> Pattern {
         }
 
         // Capture the end of the longident before parsing colon and pattern
-        let lid_end_pos = p.prev_end_pos.clone();
+        let lid_end_pos_idx = p.push_pos(p.prev_end_pos);
 
         let lid_unloc = super::core::build_longident(p.arena_mut(), &parts);
         let lid_idx = p.push_longident(lid_unloc);
@@ -1038,9 +1037,7 @@ fn parse_record_pattern(p: &mut Parser<'_>) -> Pattern {
             }
             let pat = parse_pattern(p);
             // Longident location only covers the field name, not the pattern
-            // Need to use Position here since we have field_start_idx and lid_end_pos (Position)
-            let field_start = p.arena().get_position(field_start_idx).clone();
-            let lid_loc = p.mk_loc(&field_start, &lid_end_pos);
+            let lid_loc = p.mk_loc_idx(field_start_idx, lid_end_pos_idx);
             (with_loc(lid_idx, lid_loc), pat, opt)
         } else if p.token == Token::Question {
             // field? (optional punning after field name - less common)
@@ -1244,7 +1241,7 @@ fn parse_template_literal_pattern(p: &mut Parser<'_>, start_pos_idx: PosIdx) -> 
 
 /// Parse a polymorphic variant pattern (#Tag or #Tag(pat) or #...type).
 fn parse_poly_variant_pattern(p: &mut Parser<'_>) -> Pattern {
-    let start_pos_idx = p.start_pos_idx();
+    let start_pos_idx = p.push_start_pos();
     p.expect(Token::Hash);
 
     // Handle #...type - type constraint pattern
@@ -1252,7 +1249,7 @@ fn parse_poly_variant_pattern(p: &mut Parser<'_>) -> Pattern {
         p.next();
         // Parse a type identifier - can be lident or Uident.Uident.lident
         // Track start position of the type path for location
-        let type_start_idx = p.start_pos_idx();
+        let type_start_idx = p.push_start_pos();
         let lid = parse_type_longident(p);
         let lid_loc = p.mk_loc_idx_to_prev_end(type_start_idx);
         let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
@@ -1289,7 +1286,7 @@ fn parse_poly_variant_pattern(p: &mut Parser<'_>) -> Pattern {
 
     // Check for argument
     let arg = if p.token == Token::Lparen {
-        let tuple_start_idx = p.start_pos_idx();
+        let tuple_start_idx = p.push_start_pos();
         p.next();
         if p.token == Token::Rparen {
             // Empty: #tag()
