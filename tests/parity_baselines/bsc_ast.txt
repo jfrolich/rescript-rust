@@ -9,6 +9,7 @@ syntax_tests/data/conversion/reason/gentype.resi
 syntax_tests/data/conversion/reason/jsObject.resi
 syntax_tests/data/conversion/reason/jsxProps.res
 syntax_tests/data/conversion/reason/letBinding.res
+syntax_tests/data/conversion/reason/letprivate.res
 syntax_tests/data/conversion/reason/modType.res
 syntax_tests/data/conversion/reason/moduleLanguage.res
 syntax_tests/data/conversion/reason/namedArgs.res
@@ -404,6 +405,8 @@ syntax_tests/data/idempotency/reprocessing/Reprocessing_Env.res
 syntax_tests/data/idempotency/reprocessing/Reprocessing_Env.resi
 syntax_tests/data/idempotency/reprocessing/Reprocessing_Events.res
 syntax_tests/data/idempotency/reprocessing/Reprocessing_Types.res
+syntax_tests/data/idempotency/reprocessing/Reprocessing_Utils.resi
+syntax_tests/data/idempotency/reprocessing/Reprocessing.res
 syntax_tests/data/idempotency/warp/Warp_Client.res
 syntax_tests/data/idempotency/warp/Warp_Client.resi
 syntax_tests/data/idempotency/warp/Warp_Event.resi
@@ -436,6 +439,7 @@ syntax_tests/data/idempotency/wildcards-world-ui/CONSTANTS.res
 syntax_tests/data/idempotency/wildcards-world-ui/ContractUtil.res
 syntax_tests/data/idempotency/wildcards-world-ui/CountDown.res
 syntax_tests/data/idempotency/wildcards-world-ui/Erc712.res
+syntax_tests/data/idempotency/wildcards-world-ui/Ethers.res
 syntax_tests/data/idempotency/wildcards-world-ui/Globals.res
 syntax_tests/data/idempotency/wildcards-world-ui/IncreaseIterationPage.res
 syntax_tests/data/idempotency/wildcards-world-ui/InputHelp.res
