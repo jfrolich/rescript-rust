@@ -4804,7 +4804,10 @@ fn parse_template_literal_with_prefix(
     let mut parts: Vec<(Expression, Option<Expression>)> = vec![];
 
     // First part: position starts at the opening backtick
-    let mut text_start_pos = p.start_pos.clone();
+    // OCaml captures `let start_pos = p.Parser.start_pos` which references the same
+    // position object as p.start_pos at that moment. We store the PosIdx to get the
+    // same sharing behavior.
+    let mut text_start_pos_idx = p.start_pos_idx();
 
     // Handle the case where we start with a backtick
     if p.token == Token::Backtick {
@@ -4819,9 +4822,8 @@ fn parse_template_literal_with_prefix(
                 let text = text.clone();
                 let pos = pos.clone();
                 // OCaml uses the embedded last_pos from the token, not p.end_pos
-                let text_start_idx = p.push_pos(text_start_pos.clone());
                 let text_end_idx = p.push_pos(pos);
-                let text_loc = p.mk_loc_idx(text_start_idx, text_end_idx);
+                let text_loc = p.mk_loc_idx(text_start_pos_idx, text_end_idx);
                 let mut str_expr = ast_helper::make_constant(
                     Constant::String(text, part_prefix.clone()),
                     text_loc,
@@ -4833,7 +4835,7 @@ fn parse_template_literal_with_prefix(
                 parts.push((str_expr, Some(expr)));
                 // OCaml captures start_pos BEFORE next_template_literal_token
                 // At this point, p.start_pos is at the closing }
-                text_start_pos = p.start_pos.clone();
+                text_start_pos_idx = p.start_pos_idx();
                 // After the interpolation, switch back to template literal scanning
                 p.next_template_literal_token();
             }
@@ -4842,9 +4844,8 @@ fn parse_template_literal_with_prefix(
                 let text = text.clone();
                 let pos = pos.clone();
                 // OCaml uses the embedded last_pos from the token, not p.end_pos
-                let text_start_idx = p.push_pos(text_start_pos.clone());
                 let text_end_idx = p.push_pos(pos);
-                let text_loc = p.mk_loc_idx(text_start_idx, text_end_idx);
+                let text_loc = p.mk_loc_idx(text_start_pos_idx, text_end_idx);
                 let mut str_expr = ast_helper::make_constant(
                     Constant::String(text, part_prefix.clone()),
                     text_loc,
@@ -4856,8 +4857,7 @@ fn parse_template_literal_with_prefix(
             }
             Token::Backtick => {
                 // Empty template string
-                let text_start_idx = p.push_pos(text_start_pos.clone());
-                let text_loc = p.mk_loc_idx_to_end(text_start_idx);
+                let text_loc = p.mk_loc_idx_to_end(text_start_pos_idx);
                 let mut str_expr = ast_helper::make_constant(
                     Constant::String("".to_string(), part_prefix.clone()),
                     text_loc,
@@ -5014,7 +5014,8 @@ fn parse_tagged_template_literal_with_tag_expr(p: &mut Parser<'_>, tag_expr: Exp
     let mut parts: Vec<(Expression, Option<Expression>)> = vec![];
 
     // First part: position starts at the opening backtick
-    let mut text_start_pos = p.start_pos.clone();
+    // Store PosIdx instead of Position clone for correct sharing behavior
+    let mut text_start_pos_idx = p.start_pos_idx();
 
     if p.token == Token::Backtick {
         p.next_template_literal_token();
@@ -5026,9 +5027,8 @@ fn parse_tagged_template_literal_with_tag_expr(p: &mut Parser<'_>, tag_expr: Exp
                 let text = text.clone();
                 let pos = pos.clone();
                 // OCaml uses the embedded last_pos from the token, not p.end_pos
-                let text_start_idx = p.push_pos(text_start_pos.clone());
                 let text_end_idx = p.push_pos(pos);
-                let text_loc = p.mk_loc_idx(text_start_idx, text_end_idx);
+                let text_loc = p.mk_loc_idx(text_start_pos_idx, text_end_idx);
                 let mut str_expr =
                     ast_helper::make_constant(Constant::String(text, Some("js".to_string())), text_loc);
                 str_expr.pexp_attributes.push(template_literal_attr.clone());
@@ -5037,16 +5037,15 @@ fn parse_tagged_template_literal_with_tag_expr(p: &mut Parser<'_>, tag_expr: Exp
                 parts.push((str_expr, Some(expr)));
                 // OCaml captures start_pos BEFORE next_template_literal_token
                 // At this point, p.start_pos is at the closing }
-                text_start_pos = p.start_pos.clone();
+                text_start_pos_idx = p.start_pos_idx();
                 p.next_template_literal_token();
             }
             Token::TemplateTail { text, pos } => {
                 let text = text.clone();
                 let pos = pos.clone();
                 // OCaml uses the embedded last_pos from the token, not p.end_pos
-                let text_start_idx = p.push_pos(text_start_pos.clone());
                 let text_end_idx = p.push_pos(pos);
-                let text_loc = p.mk_loc_idx(text_start_idx, text_end_idx);
+                let text_loc = p.mk_loc_idx(text_start_pos_idx, text_end_idx);
                 let mut str_expr =
                     ast_helper::make_constant(Constant::String(text, Some("js".to_string())), text_loc);
                 str_expr.pexp_attributes.push(template_literal_attr.clone());
@@ -5056,8 +5055,7 @@ fn parse_tagged_template_literal_with_tag_expr(p: &mut Parser<'_>, tag_expr: Exp
             }
             Token::Backtick => {
                 // Empty template string
-                let text_start_idx = p.push_pos(text_start_pos.clone());
-                let text_loc = p.mk_loc_idx_to_end(text_start_idx);
+                let text_loc = p.mk_loc_idx_to_end(text_start_pos_idx);
                 let mut str_expr = ast_helper::make_constant(
                     Constant::String("".to_string(), Some("js".to_string())),
                     text_loc,
