@@ -902,6 +902,15 @@ diff <(xxd /tmp/ocaml.bin) <(xxd /tmp/rust.bin)
 
 **Debugging tips:**
 
+- **Use `scripts/inspect_binary_ast.py`** for structured debugging of `bsc -bs-ast` output:
+  ```bash
+  # Quick end-to-end parity check with decoded diff
+  python3 scripts/inspect_binary_ast.py test path/to/file.res
+  # Compare two .ast files with structural tree walk
+  python3 scripts/inspect_binary_ast.py compare /tmp/ocaml.ast /tmp/rust.ast
+  # Analyze sharing patterns
+  python3 scripts/inspect_binary_ast.py sharing path/to/file.ast
+  ```
 - When binary differs, look at the hex dump: shared references show up as `04 XX` (CODE_SHARED8), `05 XX XX` (CODE_SHARED16)
 - The offset after the opcode is the "distance back" in object counter terms
 - If Rust has more bytes, it's likely not sharing something OCaml shares
