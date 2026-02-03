@@ -63,7 +63,7 @@ Do NOT spend time on small issues (@deriving edge cases, etc.) until the locatio
 ---
 
 **Last Updated:** 2026-02-03
-**Overall Status:** 584/1049 bsc-ast tests passing (55.7%)
+**Overall Status:** 601/1049 bsc-ast tests passing (57.3%)
 **sexp-locs Status:** 1049/1049 tests passing (100%) ✅
 
 **Session progress (2026-02-03, mk_loc_idx_to_pos elimination):**
