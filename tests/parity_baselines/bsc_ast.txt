@@ -455,6 +455,7 @@ syntax_tests/data/ppx/react/newtype.res
 syntax_tests/data/ppx/react/noPropsWithKey.res
 syntax_tests/data/ppx/react/optimizeAutomaticMode.res
 syntax_tests/data/ppx/react/optionalKeyType.res
+syntax_tests/data/ppx/react/returnConstraint.res
 syntax_tests/data/ppx/react/sharedProps.res
 syntax_tests/data/ppx/react/sharedProps.resi
 syntax_tests/data/ppx/react/spreadProps.res

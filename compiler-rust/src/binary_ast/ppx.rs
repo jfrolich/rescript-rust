@@ -1605,18 +1605,20 @@ fn transform_await(inner: Expression, loc: LocIdx, arena: &mut ParseArena) -> Ex
 
 /// Wrap expression with `Primitive_promise.unsafe_async(expr)`
 /// OCaml: ast_async.ml add_promise_type
+///
+/// OCaml uses the loc directly (not ghosted): `Ast_helper.Exp.ident ~loc` and
+/// `Ast_helper.Exp.apply ~loc`. All three uses of loc (pexp_ident.loc, ident.pexp_loc,
+/// apply.pexp_loc) share the same ppat_loc object for pointer-identity-based sharing.
 fn wrap_with_unsafe_async(inner: Expression, loc: LocIdx, arena: &mut ParseArena) -> Expression {
-    // Create ghost location for transformed expressions
-    let ghost_loc = arena.mk_ghost_loc(loc);
-
     // Create Primitive_promise.unsafe_async identifier
     let promise_str = arena.intern_string("Primitive_promise");
     let promise_lident = arena.push_lident_from_idx(promise_str);
     let unsafe_async_lid = arena.push_ldot(promise_lident, "unsafe_async");
 
+    // OCaml uses the same loc object for all three positions
     let func_ident = Expression {
-        pexp_desc: ExpressionDesc::Pexp_ident(Located { txt: unsafe_async_lid, loc: ghost_loc }),
-        pexp_loc: ghost_loc,
+        pexp_desc: ExpressionDesc::Pexp_ident(Located { txt: unsafe_async_lid, loc }),
+        pexp_loc: loc,
         pexp_attributes: vec![],
     };
 
@@ -1627,7 +1629,7 @@ fn wrap_with_unsafe_async(inner: Expression, loc: LocIdx, arena: &mut ParseArena
             partial: false,
             transformed_jsx: false,
         },
-        pexp_loc: ghost_loc,
+        pexp_loc: loc,
         pexp_attributes: vec![],
     }
 }
