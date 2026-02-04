@@ -707,6 +707,7 @@ syntax_tests/data/printer/expr/if.res
 syntax_tests/data/printer/expr/jsObjectAccess.res
 syntax_tests/data/printer/expr/let.res
 syntax_tests/data/printer/expr/letexception.res
+syntax_tests/data/printer/expr/letmodule.res
 syntax_tests/data/printer/expr/letUnwrap.res
 syntax_tests/data/printer/expr/nestedCallbacks.res
 syntax_tests/data/printer/expr/open.res

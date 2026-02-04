@@ -2577,6 +2577,235 @@ fn remove_await_attribute(attrs: &[Attribute], arena: &ParseArena) -> Vec<Attrib
         .collect()
 }
 
+/// Create the await module expression transformation for expression-level await.
+///
+/// Transforms `@res.await ME` into:
+///   `unpack(Primitive_promise.unsafe_await(Primitive_module.import(module(ME: __ME__))))`
+///
+/// OCaml: ast_await.ml create_await_module_expression
+///
+/// This is used for expression-level `Pexp_letmodule`:
+///   `{ module M = @res.await ME; ... }` -> `{ module M = unpack(...); ... }`
+///
+/// The `module_type_lid` is the longident for the module type constraint.
+fn create_await_module_expression(
+    mod_expr: &current::ModuleExpr,
+    module_type_lid: LidentIdx,
+    arena: &mut ParseArena,
+) -> current::ModuleExpr {
+    // Get the original module identifier
+    let (lid, lid_loc) = match &mod_expr.pmod_desc {
+        ModuleExprDesc::Pmod_ident(located_lid) => (located_lid.txt, located_lid.loc),
+        _ => panic!("create_await_module_expression called with non-Pmod_ident"),
+    };
+
+    // OCaml uses e.pmod_loc for all generated locations
+    let pmod_loc = mod_expr.pmod_loc;
+
+    // Create pack expression: module(ME)
+    // OCaml: {e with pmod_attributes = remove_await_attribute ...}
+    // NOTE: OCaml's remove_await_attribute uses `!=` (physical inequality) which doesn't
+    // actually remove the attribute because strings are different objects. So the inner
+    // pack expression KEEPS @res.await in the actual output.
+    let cleaned_mod_expr = current::ModuleExpr {
+        pmod_desc: ModuleExprDesc::Pmod_ident(Located {
+            txt: lid,
+            loc: lid_loc, // Preserve original Longident location
+        }),
+        pmod_loc,
+        // Keep attributes as-is to match OCaml's actual behavior
+        pmod_attributes: mod_expr.pmod_attributes.clone(),
+    };
+
+    let pack_expr = Expression {
+        pexp_desc: ExpressionDesc::Pexp_pack(cleaned_mod_expr),
+        pexp_loc: pmod_loc,
+        pexp_attributes: vec![],
+    };
+
+    // Create package type: (__ME__, [])
+    let package_type = CoreType {
+        ptyp_desc: CoreTypeDesc::Ptyp_package((
+            Located {
+                txt: module_type_lid,
+                loc: pmod_loc,
+            },
+            vec![], // No with constraints
+        )),
+        ptyp_loc: pmod_loc,
+        ptyp_attributes: vec![],
+    };
+
+    // Create constrained expression: (module(ME): __ME__)
+    let constrained_pack = Expression {
+        pexp_desc: ExpressionDesc::Pexp_constraint(Box::new(pack_expr), package_type),
+        pexp_loc: pmod_loc,
+        pexp_attributes: vec![],
+    };
+
+    // Create Primitive_module.import(constrained_pack)
+    let module_str = arena.intern_string("Primitive_module");
+    let module_lident = arena.push_lident_from_idx(module_str);
+    let import_lid = arena.push_ldot(module_lident, "import");
+
+    let import_ident = Expression {
+        pexp_desc: ExpressionDesc::Pexp_ident(Located {
+            txt: import_lid,
+            loc: pmod_loc,
+        }),
+        pexp_loc: pmod_loc,
+        pexp_attributes: vec![],
+    };
+
+    let import_apply = Expression {
+        pexp_desc: ExpressionDesc::Pexp_apply {
+            funct: Box::new(import_ident),
+            args: vec![(ArgLabel::Nolabel, constrained_pack)],
+            partial: false,
+            transformed_jsx: false,
+        },
+        pexp_loc: pmod_loc,
+        pexp_attributes: vec![],
+    };
+
+    // Create Primitive_promise.unsafe_await(import_apply)
+    let await_expr = transform_await(import_apply, mod_expr.pmod_loc, arena);
+
+    // Create unpack(await_expr)
+    // OCaml: {e with pmod_desc = Pmod_unpack ...} - keeps original pmod_attributes (with @res.await)
+    current::ModuleExpr {
+        pmod_desc: ModuleExprDesc::Pmod_unpack(Box::new(await_expr)),
+        pmod_loc: mod_expr.pmod_loc,
+        // OCaml's {e with pmod_desc = ...} keeps the original attributes including @res.await
+        pmod_attributes: mod_expr.pmod_attributes.clone(),
+    }
+}
+
+/// Spelunk through an expression to find Pexp_letmodule with @res.await attributes.
+///
+/// For each found, creates a module type declaration to hoist to structure level.
+/// Uses a context HashSet to track already-created module type names to avoid duplicates.
+///
+/// OCaml: bs_builtin_ppx.ml lines 706-752 (spelunk_vbs and aux)
+fn spelunk_expression_for_await_module_types(
+    expr: &Expression,
+    context: &mut std::collections::HashSet<String>,
+    arena: &mut ParseArena,
+) -> Vec<StructureItem> {
+    match &expr.pexp_desc {
+        // Main case: Pexp_letmodule with Pmod_ident and @res.await
+        ExpressionDesc::Pexp_letmodule(_, mod_expr, body) => {
+            let mut results = Vec::new();
+
+            // Check for Pmod_ident with @res.await
+            if let ModuleExprDesc::Pmod_ident(located_lid) = &mod_expr.pmod_desc {
+                if has_await_attribute(&mod_expr.pmod_attributes, arena) {
+                    let module_type_name = local_module_type_name(located_lid.txt, arena);
+
+                    // Only create if not already in context
+                    if !context.contains(&module_type_name) {
+                        context.insert(module_type_name.clone());
+
+                        // Create module type declaration:
+                        // module type __ME__ = module type of ME
+                        let module_type_name_idx = arena.intern_string(&module_type_name);
+                        let lid_loc = located_lid.loc;
+
+                        let module_type_decl = StructureItem {
+                            pstr_desc: StructureItemDesc::Pstr_modtype(current::ModuleTypeDeclaration {
+                                pmtd_name: Located {
+                                    txt: module_type_name_idx,
+                                    loc: lid_loc,
+                                },
+                                pmtd_type: Some(current::ModuleType {
+                                    pmty_desc: ModuleTypeDesc::Pmty_typeof(Box::new(current::ModuleExpr {
+                                        pmod_desc: ModuleExprDesc::Pmod_ident(Located {
+                                            txt: located_lid.txt,
+                                            loc: lid_loc,
+                                        }),
+                                        pmod_loc: lid_loc,
+                                        // OCaml: Mty.typeof_ ~loc me - uses original `me` which has @res.await
+                                        pmod_attributes: mod_expr.pmod_attributes.clone(),
+                                    })),
+                                    pmty_loc: lid_loc,
+                                    pmty_attributes: vec![],
+                                }),
+                                pmtd_attributes: vec![],
+                                pmtd_loc: lid_loc,
+                            }),
+                            pstr_loc: lid_loc,
+                        };
+
+                        results.push(module_type_decl);
+                    }
+                }
+            }
+
+            // Continue spelunking into body
+            results.extend(spelunk_expression_for_await_module_types(body, context, arena));
+            results
+        }
+
+        // Recursively traverse other expression forms (matching OCaml's aux function)
+        ExpressionDesc::Pexp_let(_, bindings, body) => {
+            let mut results = spelunk_expression_for_await_module_types(body, context, arena);
+            for vb in bindings {
+                results.extend(spelunk_expression_for_await_module_types(&vb.pvb_expr, context, arena));
+            }
+            results
+        }
+
+        ExpressionDesc::Pexp_ifthenelse(_, then_expr, else_expr) => {
+            let mut results = spelunk_expression_for_await_module_types(then_expr, context, arena);
+            if let Some(else_e) = else_expr {
+                results.extend(spelunk_expression_for_await_module_types(else_e, context, arena));
+            }
+            results
+        }
+
+        ExpressionDesc::Pexp_construct(_, Some(e)) => {
+            spelunk_expression_for_await_module_types(e, context, arena)
+        }
+
+        ExpressionDesc::Pexp_fun { rhs: body, .. } => {
+            spelunk_expression_for_await_module_types(body, context, arena)
+        }
+
+        ExpressionDesc::Pexp_newtype(_, body) => {
+            spelunk_expression_for_await_module_types(body, context, arena)
+        }
+
+        ExpressionDesc::Pexp_constraint(e, _) => {
+            spelunk_expression_for_await_module_types(e, context, arena)
+        }
+
+        ExpressionDesc::Pexp_match(scrut, cases) => {
+            let mut results = spelunk_expression_for_await_module_types(scrut, context, arena);
+            for case in cases {
+                results.extend(spelunk_expression_for_await_module_types(&case.pc_rhs, context, arena));
+            }
+            results
+        }
+
+        _ => vec![],
+    }
+}
+
+/// Spelunk through value bindings to collect module type declarations for hoisting.
+///
+/// OCaml: bs_builtin_ppx.ml spelunk_vbs
+fn spelunk_value_bindings_for_await_module_types(
+    bindings: &[ValueBinding],
+    context: &mut std::collections::HashSet<String>,
+    arena: &mut ParseArena,
+) -> Vec<StructureItem> {
+    let mut results = Vec::new();
+    for vb in bindings {
+        results.extend(spelunk_expression_for_await_module_types(&vb.pvb_expr, context, arena));
+    }
+    results
+}
+
 /// Create the module-level await transformation for `module M = @res.await ME`.
 /// Returns (optional module type decl, transformed module binding).
 ///
@@ -3860,11 +4089,73 @@ fn rewrite_expression_generic(expr: &Expression, arena: &mut ParseArena) -> Expr
             ExpressionDesc::Pexp_pack(mod_expr.clone())
         }
 
-        ExpressionDesc::Pexp_letmodule(name, mod_expr, body) => ExpressionDesc::Pexp_letmodule(
-            name.clone(),
-            mod_expr.clone(), // Don't recurse into module expressions
-            Box::new(rewrite_expression(body, arena)),
-        ),
+        ExpressionDesc::Pexp_letmodule(name, mod_expr, body) => {
+            // Check for expression-level await: module M = @res.await ME
+            // OCaml: bs_builtin_ppx.ml lines 327-363
+            //
+            // Case 1: Pmod_ident with @res.await
+            //   module M = @res.await Belt.List
+            //   -> module M = unpack(...) using __Belt_List__
+            //
+            // Case 2: Pmod_constraint(Pmod_ident, Pmty_ident mtyp_lid) with @res.await
+            //   module M = @res.await (Belt.List: BeltList)
+            //   -> module M = unpack(...) using BeltList
+
+            // Check Case 1: Pmod_ident with await
+            if let ModuleExprDesc::Pmod_ident(located_lid) = &mod_expr.pmod_desc {
+                if has_await_attribute(&mod_expr.pmod_attributes, arena) {
+                    // Generate module type name: __Belt_List__
+                    let module_type_name = local_module_type_name(located_lid.txt, arena);
+                    let module_type_name_idx = arena.intern_string(&module_type_name);
+                    let module_type_lid = arena.push_lident_from_idx(module_type_name_idx);
+
+                    let transformed_mod_expr = create_await_module_expression(mod_expr, module_type_lid, arena);
+
+                    // OCaml: {e with pexp_desc = Pexp_letmodule(lid, transformed, self.expr self expr)}
+                    return Expression {
+                        pexp_desc: ExpressionDesc::Pexp_letmodule(
+                            name.clone(),
+                            transformed_mod_expr,
+                            Box::new(rewrite_expression(body, arena)),
+                        ),
+                        pexp_loc: expr.pexp_loc,
+                        pexp_attributes: expr.pexp_attributes.clone(),
+                    };
+                }
+            }
+
+            // Check Case 2: Pmod_constraint(Pmod_ident, Pmty_ident mtyp_lid) with await
+            if let ModuleExprDesc::Pmod_constraint(inner_mod, mty) = &mod_expr.pmod_desc {
+                if let ModuleExprDesc::Pmod_ident(_) = &inner_mod.pmod_desc {
+                    if let ModuleTypeDesc::Pmty_ident(mtyp_lid) = &mty.pmty_desc {
+                        // Check for @res.await on either the inner module or the constraint
+                        if has_await_attribute(&inner_mod.pmod_attributes, arena)
+                            || has_await_attribute(&mod_expr.pmod_attributes, arena)
+                        {
+                            // Use the existing module type identifier
+                            let transformed_mod_expr = create_await_module_expression(mod_expr, mtyp_lid.txt, arena);
+
+                            return Expression {
+                                pexp_desc: ExpressionDesc::Pexp_letmodule(
+                                    name.clone(),
+                                    transformed_mod_expr,
+                                    Box::new(rewrite_expression(body, arena)),
+                                ),
+                                pexp_loc: expr.pexp_loc,
+                                pexp_attributes: expr.pexp_attributes.clone(),
+                            };
+                        }
+                    }
+                }
+            }
+
+            // Default: no await transformation needed
+            ExpressionDesc::Pexp_letmodule(
+                name.clone(),
+                mod_expr.clone(), // Don't recurse into module expressions
+                Box::new(rewrite_expression(body, arena)),
+            )
+        }
 
         ExpressionDesc::Pexp_letexception(exn, body) => ExpressionDesc::Pexp_letexception(
             exn.clone(),
@@ -4936,12 +5227,41 @@ fn core_type_of_type_declaration_with_attrs(tdcl: &TypeDeclaration, arena: &mut 
 
 // ========== PPX Application ==========
 
-/// Apply built-in PPX transformations to a structure
+/// Apply built-in PPX transformations to a structure.
+///
+/// This implements OCaml's `structure_mapper` which:
+/// 1. Processes each structure item with rewrite_structure_item
+/// 2. For Pstr_value items, "spelunks" through expressions to find Pexp_letmodule
+///    with @res.await and hoists module type declarations before the Pstr_value
+///
+/// OCaml: bs_builtin_ppx.ml lines 656-755 (structure_mapper)
 pub fn rewrite_structure(structure: &[StructureItem], arena: &mut ParseArena) -> Vec<StructureItem> {
-    structure
-        .iter()
-        .flat_map(|item| rewrite_structure_item(item, arena))
-        .collect()
+    // Context for tracking already-created module type names (per-structure scope)
+    let mut await_context = std::collections::HashSet::new();
+    let mut result = Vec::new();
+
+    for item in structure {
+        match &item.pstr_desc {
+            StructureItemDesc::Pstr_value(_rec_flag, bindings) => {
+                // Spelunk through the ORIGINAL bindings to find await module types
+                // (before expression rewriting transforms them)
+                let module_type_decls =
+                    spelunk_value_bindings_for_await_module_types(bindings, &mut await_context, arena);
+
+                // Add hoisted module type declarations first
+                result.extend(module_type_decls);
+
+                // Then process the structure item normally
+                result.extend(rewrite_structure_item(item, arena));
+            }
+            _ => {
+                // Non-Pstr_value items: just process normally
+                result.extend(rewrite_structure_item(item, arena));
+            }
+        }
+    }
+
+    result
 }
 
 /// Apply built-in PPX transformations to a signature
