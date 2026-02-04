@@ -20,9 +20,9 @@ use crate::parser::ast::{
     self as current, ArgLabel, Attribute, Case, Constant, ConstructorArguments,
     ConstructorDeclaration, CoreType, CoreTypeDesc, Expression, ExpressionDesc,
     JsxContainerElement, JsxElement, JsxFragment, JsxProp, JsxUnaryElement, LabelDeclaration,
-    ModuleExpr, ModuleExprDesc, Pattern, PatternDesc, Payload, RecFlag, SignatureItem,
-    SignatureItemDesc, StructureItem, StructureItemDesc, TypeArg, TypeDeclaration, TypeKind,
-    ValueBinding, ValueDescription,
+    ModuleExpr, ModuleExprDesc, ObjectField, Pattern, PatternDesc, Payload, RecFlag, RowField,
+    SignatureItem, SignatureItemDesc, StructureItem, StructureItemDesc, TypeArg, TypeDeclaration,
+    TypeKind, ValueBinding, ValueDescription,
 };
 use crate::parser::longident::Longident;
 
@@ -2495,15 +2495,104 @@ fn rewrite_payload(payload: &Payload, arena: &mut ParseArena) -> Payload {
     }
 }
 
-/// Rewrite a type declaration, transforming strings in all nested attributes
+/// Rewrite a core type, recursing into nested types and extension payloads.
+/// This matches OCaml's default_mapper.typ behavior, ensuring that expressions
+/// inside Ptyp_extension payloads get the "js" -> "*j" delimiter transformation.
+fn rewrite_core_type(typ: &CoreType, arena: &mut ParseArena) -> CoreType {
+    let new_desc = match &typ.ptyp_desc {
+        CoreTypeDesc::Ptyp_extension(ext) => {
+            let (name, payload) = ext;
+            CoreTypeDesc::Ptyp_extension((name.clone(), rewrite_payload(payload, arena)))
+        }
+        CoreTypeDesc::Ptyp_arrow { arg, ret, arity } => {
+            // Note: OCaml's default_mapper.typ for Ptyp_arrow does NOT process arg.attrs
+            // through self.attributes - it only maps arg.typ. So we clone arg.attrs as-is.
+            CoreTypeDesc::Ptyp_arrow {
+                arg: Box::new(TypeArg {
+                    attrs: arg.attrs.clone(),
+                    lbl: arg.lbl.clone(),
+                    typ: rewrite_core_type(&arg.typ, arena),
+                }),
+                ret: Box::new(rewrite_core_type(ret, arena)),
+                arity: *arity,
+            }
+        }
+        CoreTypeDesc::Ptyp_tuple(types) => {
+            CoreTypeDesc::Ptyp_tuple(types.iter().map(|t| rewrite_core_type(t, arena)).collect())
+        }
+        CoreTypeDesc::Ptyp_constr(lid, args) => {
+            CoreTypeDesc::Ptyp_constr(
+                lid.clone(),
+                args.iter().map(|t| rewrite_core_type(t, arena)).collect(),
+            )
+        }
+        CoreTypeDesc::Ptyp_alias(inner, name) => {
+            CoreTypeDesc::Ptyp_alias(Box::new(rewrite_core_type(inner, arena)), name.clone())
+        }
+        CoreTypeDesc::Ptyp_poly(vars, inner) => {
+            CoreTypeDesc::Ptyp_poly(vars.clone(), Box::new(rewrite_core_type(inner, arena)))
+        }
+        CoreTypeDesc::Ptyp_object(fields, closed) => {
+            CoreTypeDesc::Ptyp_object(
+                fields.iter().map(|f| match f {
+                    ObjectField::Otag(name, attrs, typ) => {
+                        ObjectField::Otag(name.clone(), rewrite_attributes(attrs, arena), rewrite_core_type(typ, arena))
+                    }
+                    ObjectField::Oinherit(typ) => {
+                        ObjectField::Oinherit(rewrite_core_type(typ, arena))
+                    }
+                }).collect(),
+                *closed,
+            )
+        }
+        CoreTypeDesc::Ptyp_variant(rows, closed, labels) => {
+            CoreTypeDesc::Ptyp_variant(
+                rows.iter().map(|r| match r {
+                    RowField::Rtag(label, attrs, empty, types) => {
+                        RowField::Rtag(
+                            label.clone(),
+                            rewrite_attributes(attrs, arena),
+                            *empty,
+                            types.iter().map(|t| rewrite_core_type(t, arena)).collect(),
+                        )
+                    }
+                    RowField::Rinherit(typ) => {
+                        RowField::Rinherit(rewrite_core_type(typ, arena))
+                    }
+                }).collect(),
+                *closed,
+                labels.clone(),
+            )
+        }
+        CoreTypeDesc::Ptyp_package((lid, constraints)) => {
+            CoreTypeDesc::Ptyp_package((
+                lid.clone(),
+                constraints.iter().map(|(l, t)| (l.clone(), rewrite_core_type(t, arena))).collect(),
+            ))
+        }
+        // Ptyp_any, Ptyp_var - no nested types to rewrite
+        _ => return CoreType {
+            ptyp_desc: typ.ptyp_desc.clone(),
+            ptyp_loc: typ.ptyp_loc,
+            ptyp_attributes: rewrite_attributes(&typ.ptyp_attributes, arena),
+        },
+    };
+    CoreType {
+        ptyp_desc: new_desc,
+        ptyp_loc: typ.ptyp_loc,
+        ptyp_attributes: rewrite_attributes(&typ.ptyp_attributes, arena),
+    }
+}
+
+/// Rewrite a type declaration, transforming strings in all nested attributes and types
 fn rewrite_type_declaration(tdcl: &TypeDeclaration, arena: &mut ParseArena) -> TypeDeclaration {
     TypeDeclaration {
         ptype_name: tdcl.ptype_name.clone(),
-        ptype_params: tdcl.ptype_params.clone(),
+        ptype_params: tdcl.ptype_params.iter().map(|(t, v)| (rewrite_core_type(t, arena), *v)).collect(),
         ptype_cstrs: tdcl.ptype_cstrs.clone(),
         ptype_kind: rewrite_type_kind(&tdcl.ptype_kind, arena),
         ptype_private: tdcl.ptype_private,
-        ptype_manifest: tdcl.ptype_manifest.clone(),
+        ptype_manifest: tdcl.ptype_manifest.as_ref().map(|t| rewrite_core_type(t, arena)),
         ptype_attributes: rewrite_attributes(&tdcl.ptype_attributes, arena),
         ptype_loc: tdcl.ptype_loc,
     }
@@ -2541,7 +2630,7 @@ fn rewrite_constructor_declaration(
     ConstructorDeclaration {
         pcd_name: ctor.pcd_name.clone(),
         pcd_args: rewrite_constructor_arguments(&ctor.pcd_args, arena),
-        pcd_res: ctor.pcd_res.clone(),
+        pcd_res: ctor.pcd_res.as_ref().map(|t| rewrite_core_type(t, arena)),
         pcd_loc: ctor.pcd_loc,
         pcd_attributes: rewrite_attributes(&ctor.pcd_attributes, arena),
     }
@@ -2553,7 +2642,7 @@ fn rewrite_constructor_arguments(
     arena: &mut ParseArena,
 ) -> ConstructorArguments {
     match args {
-        ConstructorArguments::Pcstr_tuple(types) => ConstructorArguments::Pcstr_tuple(types.clone()),
+        ConstructorArguments::Pcstr_tuple(types) => ConstructorArguments::Pcstr_tuple(types.iter().map(|t| rewrite_core_type(t, arena)).collect()),
         ConstructorArguments::Pcstr_record(labels) => {
             ConstructorArguments::Pcstr_record(
                 labels
@@ -2565,12 +2654,12 @@ fn rewrite_constructor_arguments(
     }
 }
 
-/// Rewrite a label declaration (record field), transforming strings in attributes
+/// Rewrite a label declaration (record field), transforming strings in attributes and types
 fn rewrite_label_declaration(label: &LabelDeclaration, arena: &mut ParseArena) -> LabelDeclaration {
     LabelDeclaration {
         pld_name: label.pld_name.clone(),
         pld_mutable: label.pld_mutable,
-        pld_type: label.pld_type.clone(),
+        pld_type: rewrite_core_type(&label.pld_type, arena),
         pld_loc: label.pld_loc,
         pld_attributes: rewrite_attributes(&label.pld_attributes, arena),
         pld_optional: label.pld_optional,
@@ -2704,6 +2793,17 @@ fn rewrite_pattern(pat: &Pattern, arena: &mut ParseArena) -> Pattern {
         PatternDesc::Ppat_constant(Constant::Integer(s, Some('l'))) => {
             Pattern {
                 ppat_desc: PatternDesc::Ppat_constant(Constant::Integer(s.clone(), None)),
+                ppat_loc: pat.ppat_loc,
+                ppat_attributes: rewrite_attributes(&pat.ppat_attributes, arena),
+            }
+        }
+        // Pattern with type constraint: recurse into both pattern and type
+        PatternDesc::Ppat_constraint(inner_pat, core_type) => {
+            Pattern {
+                ppat_desc: PatternDesc::Ppat_constraint(
+                    Box::new(rewrite_pattern(inner_pat, arena)),
+                    rewrite_core_type(core_type, arena),
+                ),
                 ppat_loc: pat.ppat_loc,
                 ppat_attributes: rewrite_attributes(&pat.ppat_attributes, arena),
             }
@@ -3004,13 +3104,16 @@ fn rewrite_expression_generic(expr: &Expression, arena: &mut ParseArena) -> Expr
         ),
 
         ExpressionDesc::Pexp_constraint(e, ty) => {
-            ExpressionDesc::Pexp_constraint(Box::new(rewrite_expression(e, arena)), ty.clone())
+            ExpressionDesc::Pexp_constraint(
+                Box::new(rewrite_expression(e, arena)),
+                rewrite_core_type(ty, arena),
+            )
         }
 
         ExpressionDesc::Pexp_coerce(e, ty1, ty2) => ExpressionDesc::Pexp_coerce(
             Box::new(rewrite_expression(e, arena)),
-            ty1.clone(),
-            ty2.clone(),
+            ty1.as_ref().map(|t| rewrite_core_type(t, arena)),
+            rewrite_core_type(ty2, arena),
         ),
 
         ExpressionDesc::Pexp_send(e, method) => {

@@ -551,6 +551,7 @@ syntax_tests/data/parsing/grammar/typedefinition/constructorDeclaration.res
 syntax_tests/data/parsing/grammar/typedefinition/diamond.res
 syntax_tests/data/parsing/grammar/typedefinition/missingPipeBeforeConstructorAttribute.res
 syntax_tests/data/parsing/grammar/typedefinition/polyvariant.res
+syntax_tests/data/parsing/grammar/typedefinition/privateTypeEquation.res
 syntax_tests/data/parsing/grammar/typedefinition/recordDeclaration.res
 syntax_tests/data/parsing/grammar/typedefinition/typeConstraint.res
 syntax_tests/data/parsing/grammar/typedefinition/typedef.res
@@ -560,7 +561,9 @@ syntax_tests/data/parsing/grammar/typedefinition/typeNonrec.res
 syntax_tests/data/parsing/grammar/typedefinition/typeparams.res
 syntax_tests/data/parsing/grammar/typedefinition/typeRepresentation.res
 syntax_tests/data/parsing/grammar/typedefinition/typext.res
+syntax_tests/data/parsing/grammar/typexpr/alias.res
 syntax_tests/data/parsing/grammar/typexpr/any.res
+syntax_tests/data/parsing/grammar/typexpr/extension.res
 syntax_tests/data/parsing/grammar/typexpr/firstClassModules.res
 syntax_tests/data/parsing/grammar/typexpr/parenthesized.res
 syntax_tests/data/parsing/grammar/typexpr/poly.res
@@ -627,6 +630,7 @@ syntax_tests/data/printer/comments/structure4.res
 syntax_tests/data/printer/comments/structureItem.res
 syntax_tests/data/printer/comments/trailingComments.res
 syntax_tests/data/printer/comments/typeDefinition.res
+syntax_tests/data/printer/comments/typexpr.res
 syntax_tests/data/printer/comments/whitespaceCase1.res
 syntax_tests/data/printer/comments/whitespaceCase2.res
 syntax_tests/data/printer/comments/whitespaceLeadingComment.res
@@ -636,6 +640,7 @@ syntax_tests/data/printer/expr/coerce.res
 syntax_tests/data/printer/expr/constant.res
 syntax_tests/data/printer/expr/constraint.res
 syntax_tests/data/printer/expr/dict.res
+syntax_tests/data/printer/expr/DocComments.res
 syntax_tests/data/printer/expr/extension.res
 syntax_tests/data/printer/expr/field.res
 syntax_tests/data/printer/expr/for.res
