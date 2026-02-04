@@ -656,32 +656,21 @@ fn marshal_hashtbl(w: &mut MarshalWriter, items: &[(String, String)]) {
 
 /// Encode FFI type to a marshaled byte array (for pval_prim[1])
 ///
-/// Returns raw bytes that must be stored and marshaled as-is.
-/// Since Rust String requires UTF-8, we convert to a String using
-/// Latin-1 interpretation where each byte becomes a Unicode code point.
-/// During marshaling, the string will be converted back to bytes.
+/// Returns the marshaled data as a String using Latin-1 encoding, where each
+/// byte (0x00-0xFF) becomes the corresponding Unicode code point (U+0000-U+00FF).
+/// This matches how source files are read (Latin-1) and ensures the bytes survive
+/// the `chars().map(|c| c as u8)` conversion used for output.
 pub fn encode_ffi_type(ffi: &FfiType) -> String {
     let mut w = MarshalWriter::new();
     ffi.marshal(&mut w);
 
-    // Convert the marshal output to a string
-    let bytes = w.finish();
-
-    // SAFETY: We're creating a string where each byte 0x00-0xFF is treated
-    // as the corresponding Unicode code point. This creates a valid UTF-8
-    // string since all single-byte values become their Unicode equivalent.
-    // When marshaling, we convert back using as_bytes() which gives us the
-    // UTF-8 encoding of these code points.
-    //
-    // For bytes 0x00-0x7F: same encoding in UTF-8
-    // For bytes 0x80-0xFF: these become 2-byte UTF-8 sequences (0xC2 0x80 to 0xC3 0xBF)
-    //
-    // To fix this properly, pval_prim should store Vec<u8> instead of String.
-    // For now, we use unsafe to create a String with the raw bytes.
-    //
-    // OCaml strings can contain arbitrary bytes, and ReScript relies on this
-    // for FFI encoding. The marshal format preserves these bytes exactly.
-    unsafe { String::from_utf8_unchecked(bytes) }
+    // Convert each byte to its corresponding Latin-1 character (Unicode U+0000 to U+00FF)
+    // This creates valid UTF-8 where:
+    // - Bytes 0x00-0x7F: single-byte UTF-8 (same as ASCII)
+    // - Bytes 0x80-0xFF: two-byte UTF-8 (0xC2 0x80 to 0xC3 0xBF)
+    // When `chars().map(|c| c as u8)` is called later, each char is truncated back
+    // to the original byte value.
+    w.finish().iter().map(|&b| char::from(b)).collect()
 }
 
 #[cfg(test)]

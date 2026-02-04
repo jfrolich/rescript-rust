@@ -1015,12 +1015,24 @@ pub fn encode_external(vd: &ValueDescription, arena: &mut ParseArena) -> Encoded
 }
 
 /// Encode inline string constant
+/// Matches OCaml's Delim.parse_processed:
+///   None -> Some(DNone)
+///   Some "json" -> Some(DNoQuotes)
+///   Some "*j" -> Some(DStarJ)
+///   Some "bq" -> Some(DBackQuotes)
+///   _ -> None
+///
+/// NOTE: In OCaml, the PPX transforms attribute payloads BEFORE extracting @inline,
+/// so "js" -> "*j" transformation happens first. In Rust, we get the original delimiter,
+/// so we need to handle "js" as if it were already transformed to "*j".
 pub fn inline_string_primitive(s: &str, delim: Option<&str>) -> Vec<String> {
-    let delim = delim.map(|d| match d {
-        "j" => Delim::DStarJ,
-        "" => Delim::DNone,
-        _ => Delim::DNone, // TODO: handle other delimiters
-    });
+    let delim = match delim {
+        None => Some(Delim::DNone), // Key difference: OCaml wraps None in Some(DNone)
+        Some("json") => Some(Delim::DNoQuotes),
+        Some("*j") | Some("js") => Some(Delim::DStarJ), // "js" is transformed to "*j" by PPX, both map to DStarJ
+        Some("bq") => Some(Delim::DBackQuotes),
+        _ => None,
+    };
 
     let constant = LamConstant::ConstString {
         s: s.to_string(),

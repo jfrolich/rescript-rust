@@ -1034,15 +1034,18 @@ impl Marshal for ValueDescription {
     }
 }
 
-/// Write a list of pval_prim strings using raw bytes (not Latin-1 conversion).
-/// These strings contain embedded marshal blobs from FFI encoding.
+/// Write a list of pval_prim strings, converting from Latin-1 encoding back to raw bytes.
+/// FFI binary data is stored using Latin-1 encoding (each byte 0-255 becomes Unicode U+0000-U+00FF),
+/// so we need to convert back using chars().map(|c| c as u8) to get the original bytes.
 fn marshal_prim_list(prims: &[String], w: &mut MarshalWriter) {
     if prims.is_empty() {
         w.write_int(0);
     } else {
         for (i, prim) in prims.iter().enumerate() {
             w.write_block_header(0, 2);
-            w.write_string(prim.as_bytes());
+            // Convert Latin-1 encoded string back to raw bytes
+            let bytes: Vec<u8> = prim.chars().map(|c| c as u8).collect();
+            w.write_string(&bytes);
             if i == prims.len() - 1 {
                 w.write_int(0);
             }
