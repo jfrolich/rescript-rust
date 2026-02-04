@@ -19,6 +19,11 @@ import subprocess
 import collections
 import platform as platform_mod
 
+# Large AST files produce deeply nested cons lists that exceed Python's
+# default recursion limit of 1000.  Bump it as a safety net; the critical
+# functions below are also converted to iterative algorithms.
+sys.setrecursionlimit(50_000)
+
 # ── Marshal format opcodes ──────────────────────────────────────────────
 
 CODE_INT8 = 0x00
