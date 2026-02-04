@@ -12,8 +12,9 @@
 ## 🎯 PRIORITY: Focus on High-Impact Issues First
 
 **TOP PRIORITY:** Fix sexp-locs-ppx differences FIRST. These are post-PPX AST structural/location
-differences between Rust and OCaml. Currently **896/1196** sexp-locs-ppx tests pass, meaning **300
-files have PPX-level AST differences**. Fixing these is the highest leverage work because:
+differences between Rust and OCaml. Currently **~936/1196** sexp-locs-ppx tests pass (78%), meaning
+**~260 files have PPX-level AST differences**. Most remaining failures (256) are FFI_SIZE (display-only
+binary string rendering differences, not actual parity issues). Fixing these is the highest leverage work because:
 - They represent real AST structural differences (not just marshal sharing artifacts)
 - Each fix here likely also fixes corresponding bsc-ast failures
 - sexp-locs-ppx diffs are easier to debug (human-readable sexp output) than binary bsc-ast diffs
@@ -43,6 +44,18 @@ files have PPX-level AST differences**. Fixing these is the highest leverage wor
    - **Improvement: 345 → 464 passing (+119 files, 44.2%)**
    - **Remaining issue**: External declarations with arrow types still have 1 extra Position object.
      The cause is under investigation.
+
+3. **PPX pattern and type rewriting** - ✅ **FIXED** (2026-02-04)
+   - **Fixed `rewrite_pattern`**: Now recursively handles all pattern types (alias, tuple, construct,
+     variant, record, array, or, exception, open, extension), not just constants and constraints.
+   - **Fixed `Ppat_extension`**: Now rewrites payload for `%raw("...")` inside patterns.
+   - **Fixed `pval_type` in externals**: Now rewritten to transform string delimiters in `@as` attrs.
+   - **Fixed `res.template` propagation**: Attribute now propagates to outer `Pexp_letmodule` in `%%raw`.
+   - **Improvement: 300 → 260 sexp-locs-ppx failures (-40 files)**
+   - **Remaining 260 failures**:
+     - 256 FFI_SIZE: Display-only binary string rendering differences (NOT actual parity issues)
+     - 3 TEMPLATE: Missing `internal.expansive` attribute (requires JS string parsing)
+     - 1 DELIM: Misclassified FFI binary difference
 
 Do NOT spend time on bsc-ast marshal sharing issues until sexp-locs-ppx is at or near 100%.
 
