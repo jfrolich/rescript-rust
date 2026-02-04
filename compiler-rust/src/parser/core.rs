@@ -826,11 +826,16 @@ pub fn make_unary_expr(
     // General unary operator application
     let token_loc = p.mk_loc_idx(start_pos, token_end);
     let token_string = token.to_string();
-    let operator = if matches!(token, Token::Question) {
-        "?".to_string()
-    } else if token_string.starts_with('~') {
-        token_string
-    } else if matches!(token, Token::Bang) {
+    if matches!(token, Token::Question) {
+        // "?" used as unary operator - use interned string
+        let lid = make_lident_static(p.arena_mut(), "?");
+        let op_expr = ast_helper::make_ident(p, lid, token_loc);
+        let operand_end_idx = p.loc_end_idx(operand.pexp_loc);
+        let loc = p.mk_loc_idx(start_pos, operand_end_idx);
+        return ast_helper::make_apply(op_expr, vec![(ArgLabel::Nolabel, operand)], loc);
+    }
+
+    if matches!(token, Token::Bang) {
         // For "not", use push_lident_static to deduplicate the Lident
         // (OCaml shares the Lident for literal "not" via compiler optimization)
         let op_lid_idx = p.arena_mut().push_lident_static("not");
@@ -838,12 +843,24 @@ pub fn make_unary_expr(
         let operand_end_idx = p.loc_end_idx(operand.pexp_loc);
         let loc = p.mk_loc_idx(start_pos, operand_end_idx);
         return ast_helper::make_apply(op_expr, vec![(ArgLabel::Nolabel, operand)], loc);
+    }
+
+    let op_expr = if token_string.starts_with('~') {
+        // Token already starts with '~' (e.g., "~~~" for Bnot).
+        // OCaml returns the Token.to_string literal directly, which is CSE-shared.
+        // Use interned string to match OCaml's sharing behavior.
+        let lid = make_lident_static(p.arena_mut(), &token_string);
+        ast_helper::make_ident(p, lid, token_loc)
     } else {
-        format!("~{}", token_string)
+        // Prefix with "~" (e.g., "~+", "~-", "~+.", "~-.").
+        // OCaml creates a FRESH string via "~" ^ token_string each time,
+        // so these are NOT shared. Use push_string for fresh string identity.
+        let operator = format!("~{}", token_string);
+        let str_idx = p.arena_mut().push_string(operator);
+        let lid = Longident::Lident(str_idx);
+        ast_helper::make_ident(p, lid, token_loc)
     };
 
-    let op_lid = make_lident_static(p.arena_mut(), &operator);
-    let op_expr = ast_helper::make_ident(p, op_lid, token_loc);
     let operand_end_idx = p.loc_end_idx(operand.pexp_loc);
     let loc = p.mk_loc_idx(start_pos, operand_end_idx);
 

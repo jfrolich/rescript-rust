@@ -491,6 +491,8 @@ syntax_tests/data/parsing/grammar/expressions/sideEffects.res
 syntax_tests/data/parsing/grammar/expressions/try.res
 syntax_tests/data/parsing/grammar/expressions/tuple.res
 syntax_tests/data/parsing/grammar/expressions/tupleVsDivision.res
+syntax_tests/data/parsing/grammar/expressions/unary.res
+syntax_tests/data/parsing/grammar/expressions/unaryOrBinary.res
 syntax_tests/data/parsing/grammar/expressions/uncurried.res
 syntax_tests/data/parsing/grammar/expressions/UncurriedAlways.res
 syntax_tests/data/parsing/grammar/expressions/underscoreApply.res
