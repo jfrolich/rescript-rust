@@ -149,7 +149,11 @@ impl Marshal for Constant {
             }
             Constant::String(s, delim) => {
                 w.write_block_header(2, 2);
-                w.write_str(s);
+                // Use Latin-1 conversion for source strings: the parser reads
+                // source files as Latin-1 (each byte → char), so non-ASCII bytes
+                // are stored as 2-byte UTF-8. Convert back to match OCaml's
+                // byte-level string representation.
+                w.write_str_latin1(s);
                 // Use content-based sharing for string delimiters like Some("js")
                 w.write_option_string(delim);
             }

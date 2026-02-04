@@ -362,9 +362,20 @@ impl MarshalWriter {
         self.obj_counter += 1;
     }
 
-    /// Write a string from a Rust &str (convenience method)
+    /// Write a string from a Rust &str (convenience method).
     pub fn write_str(&mut self, s: &str) {
         self.write_string(s.as_bytes());
+    }
+
+    /// Write a string from a Rust &str, converting from UTF-8 to Latin-1.
+    ///
+    /// The parser reads source files as Latin-1 (each byte → char), so string
+    /// content from source uses chars in the 0-255 range stored as UTF-8.
+    /// This method converts back to Latin-1 (each char → byte) to match OCaml's
+    /// byte-level string representation.
+    pub fn write_str_latin1(&mut self, s: &str) {
+        let latin1_bytes: Vec<u8> = s.chars().map(|c| c as u8).collect();
+        self.write_string(&latin1_bytes);
     }
 
     /// Write a string by StrIdx with arena-based sharing.
@@ -385,7 +396,6 @@ impl MarshalWriter {
         // Record the object index BEFORE writing
         let obj_idx = self.obj_counter;
 
-        // Look up the string in the arena and write it
         let s = self.get_arena().get_string(idx).to_string();
         self.write_string(s.as_bytes());
 

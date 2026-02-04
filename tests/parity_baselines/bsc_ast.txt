@@ -18,6 +18,7 @@ syntax_tests/data/conversion/reason/singleLineComments.res
 syntax_tests/data/conversion/reason/ternary.res
 syntax_tests/data/conversion/reason/uncurrried.res
 syntax_tests/data/conversion/reason/underscoreSugar.res
+syntax_tests/data/conversion/reason/unicode.res
 syntax_tests/data/conversion/reason/variant.res
 syntax_tests/data/idempotency/bs-css/Css_AtomicTypes.res
 syntax_tests/data/idempotency/bs-css/Css_Colors.res
@@ -199,6 +200,7 @@ syntax_tests/data/idempotency/mareo/Procedural_generator.resi
 syntax_tests/data/idempotency/mareo/Sprite.resi
 syntax_tests/data/idempotency/mareo/Viewport.res
 syntax_tests/data/idempotency/mareo/Viewport.resi
+syntax_tests/data/idempotency/napkinscript/docComments.res
 syntax_tests/data/idempotency/nook-exchange/Analytics.res
 syntax_tests/data/idempotency/nook-exchange/BodyCard.res
 syntax_tests/data/idempotency/nook-exchange/Button.res
@@ -476,6 +478,7 @@ syntax_tests/data/parsing/grammar/expressions/await.res
 syntax_tests/data/parsing/grammar/expressions/bigint.res
 syntax_tests/data/parsing/grammar/expressions/binary.res
 syntax_tests/data/parsing/grammar/expressions/coerce.res
+syntax_tests/data/parsing/grammar/expressions/constants.res
 syntax_tests/data/parsing/grammar/expressions/constructor.res
 syntax_tests/data/parsing/grammar/expressions/dict.res
 syntax_tests/data/parsing/grammar/expressions/float.res
