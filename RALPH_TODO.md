@@ -25,12 +25,12 @@
 | Syntax tests | 506/506 (100%) ✅ |
 | sexp-locs | 1196/1196 (100%) ✅ |
 | sexp-locs-ppx | 1176/1196 (98.3%) ✅ |
-| bsc-ast | 808/1196 (67.6%) |
+| bsc-ast | 807/1196 (67.5%) |
 
 **Note:** The remaining 20 sexp-locs-ppx failures are structural differences in PPX transformations. Key issues:
-- `@deriving(jsConverter)` - 5 files (generates include with helpers)
-- `@deriving(abstract)` - 3 files (generates include with module constraint)
-- FFI encoding differences (externals with @val, @module, etc.) - ~12 files
+- `@deriving(jsConverter)` - 5 files (generates include with helpers) - NOT IMPLEMENTED
+- `@deriving(abstract)` - 3 files (generates include with module constraint) - NOT IMPLEMENTED
+- FFI encoding differences (externals with @val, @module, etc.) - ~8 files
 - Test script quirk: Some files (e.g., arrow.res) show sexp-locs-ppx diff but OCaml bsc fails
 
 **Session progress (2026-02-05) - latest:**
@@ -38,8 +38,10 @@
   - Added `create_await_module_expression` for Pexp_letmodule transformation
   - Added `spelunk_expression_for_await_module_types` to traverse expressions
   - Updated `rewrite_structure` to hoist module type declarations before Pstr_value
-  - Fixed letmodule.res which used expression-level await
-- Result: sexp-locs-ppx improved from 1175/1196 (98.2%) to 1176/1196 (98.3%)
+  - Fixed Pmod_constraint case (e.g., `module M = await (ME: MT)`)
+  - Fixed package type location to use module_type_lid's location
+  - letmodule.res now passes sexp-locs-ppx (bsc-ast has sharing diffs)
+- Result: sexp-locs-ppx 1176/1196 (98.3%)
 
 **Session progress (2026-02-05) - continued:**
 - Fixed module-level `@res.await` transformation (Pstr_module):
