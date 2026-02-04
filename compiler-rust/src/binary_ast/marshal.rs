@@ -364,18 +364,15 @@ impl MarshalWriter {
         self.obj_counter += 1;
     }
 
-    /// Write a string from a Rust &str (convenience method).
-    pub fn write_str(&mut self, s: &str) {
-        self.write_string(s.as_bytes());
-    }
-
     /// Write a string from a Rust &str, converting from UTF-8 to Latin-1.
     ///
     /// The parser reads source files as Latin-1 (each byte → char), so string
     /// content from source uses chars in the 0-255 range stored as UTF-8.
     /// This method converts back to Latin-1 (each char → byte) to match OCaml's
     /// byte-level string representation.
-    pub fn write_str_latin1(&mut self, s: &str) {
+    ///
+    /// For raw binary data (e.g. pval_prim), use write_string() directly instead.
+    pub fn write_str(&mut self, s: &str) {
         let latin1_bytes: Vec<u8> = s.chars().map(|c| c as u8).collect();
         self.write_string(&latin1_bytes);
     }
@@ -399,7 +396,11 @@ impl MarshalWriter {
         let obj_idx = self.obj_counter;
 
         let s = self.get_arena().get_string(idx).to_string();
-        self.write_string(s.as_bytes());
+        // Use Latin-1 conversion: source strings are read as Latin-1 (each byte → char),
+        // so non-ASCII chars (0x80-0xFF) are stored as 2-byte UTF-8 in Rust Strings.
+        // Convert back to Latin-1 (each char → byte) to match OCaml's byte-level output.
+        let latin1_bytes: Vec<u8> = s.chars().map(|c| c as u8).collect();
+        self.write_string(&latin1_bytes);
 
         // Record for future sharing
         self.str_idx_table.insert(idx, obj_idx);

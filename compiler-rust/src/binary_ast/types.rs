@@ -81,6 +81,7 @@ impl<T: Marshal> Marshal for Located<T> {
     }
 }
 
+
 // ========== Arena-based types ==========
 
 impl Marshal for PosIdx {

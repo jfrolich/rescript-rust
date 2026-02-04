@@ -45,16 +45,17 @@ impl Marshal for f64 {
 }
 
 impl Marshal for String {
-    /// Strings are NOT shared by content because OCaml doesn't share
-    /// most string objects - each parse creates a new string.
-    /// Filenames in positions use separate sharing logic.
+    /// Strings from source identifiers are Latin-1 encoded (each byte → char),
+    /// so we convert back to Latin-1 to match OCaml's byte-level representation.
+    /// This is safe for ASCII strings (the common case) as Latin-1 = UTF-8 for ASCII.
     fn marshal(&self, w: &mut MarshalWriter) {
         w.write_str(self);
     }
 }
 
 impl Marshal for str {
-    /// Strings are NOT shared by content.
+    /// Strings from source identifiers are Latin-1 encoded (each byte → char),
+    /// so we convert back to Latin-1 to match OCaml's byte-level representation.
     fn marshal(&self, w: &mut MarshalWriter) {
         w.write_str(self);
     }

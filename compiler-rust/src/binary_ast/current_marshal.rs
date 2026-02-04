@@ -149,11 +149,7 @@ impl Marshal for Constant {
             }
             Constant::String(s, delim) => {
                 w.write_block_header(2, 2);
-                // Use Latin-1 conversion for source strings: the parser reads
-                // source files as Latin-1 (each byte → char), so non-ASCII bytes
-                // are stored as 2-byte UTF-8. Convert back to match OCaml's
-                // byte-level string representation.
-                w.write_str_latin1(s);
+                w.write_str(s);
                 // Use content-based sharing for string delimiters like Some("js")
                 w.write_option_string(delim);
             }
@@ -951,9 +947,27 @@ impl Marshal for ValueDescription {
         w.write_block_header(0, 5);
         self.pval_name.marshal(w);
         self.pval_type.marshal(w);
-        self.pval_prim.marshal(w);
+        // pval_prim contains raw binary data (FFI encoding blobs) that must be
+        // written as raw bytes, not Latin-1 converted. Use write_string directly.
+        marshal_prim_list(&self.pval_prim, w);
         self.pval_attributes.marshal(w);
         self.pval_loc.marshal(w);
+    }
+}
+
+/// Write a list of pval_prim strings using raw bytes (not Latin-1 conversion).
+/// These strings contain embedded marshal blobs from FFI encoding.
+fn marshal_prim_list(prims: &[String], w: &mut MarshalWriter) {
+    if prims.is_empty() {
+        w.write_int(0);
+    } else {
+        for (i, prim) in prims.iter().enumerate() {
+            w.write_block_header(0, 2);
+            w.write_string(prim.as_bytes());
+            if i == prims.len() - 1 {
+                w.write_int(0);
+            }
+        }
     }
 }
 

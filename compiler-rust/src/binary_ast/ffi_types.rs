@@ -549,7 +549,7 @@ impl Marshal for LamConstant {
             }
             LamConstant::ConstString { s, delim } => {
                 w.write_block_header(3, 2);
-                w.write_string(s.as_bytes());
+                w.write_str(s);
                 marshal_option(w, delim, |w, d| d.marshal(w));
             }
             LamConstant::ConstFloat(f) => {

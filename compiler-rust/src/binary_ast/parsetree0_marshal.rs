@@ -639,7 +639,19 @@ impl Marshal for ValueDescription {
         w.write_block_header(0, 5);
         self.pval_name.marshal(w);
         self.pval_type.marshal(w);
-        self.pval_prim.marshal(w);
+        // pval_prim contains raw binary data (FFI encoding blobs) that must be
+        // written as raw bytes, not Latin-1 converted.
+        if self.pval_prim.is_empty() {
+            w.write_int(0);
+        } else {
+            for (i, prim) in self.pval_prim.iter().enumerate() {
+                w.write_block_header(0, 2);
+                w.write_string(prim.as_bytes());
+                if i == self.pval_prim.len() - 1 {
+                    w.write_int(0);
+                }
+            }
+        }
         self.pval_attributes.marshal(w);
         self.pval_loc.marshal(w);
     }
