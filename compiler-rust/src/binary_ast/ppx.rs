@@ -3199,10 +3199,55 @@ fn rewrite_expression_generic(expr: &Expression, arena: &mut ParseArena) -> Expr
             transformed_jsx: *transformed_jsx,
         },
 
-        ExpressionDesc::Pexp_match(scrutinee, cases) => ExpressionDesc::Pexp_match(
-            Box::new(rewrite_expression(scrutinee, arena)),
-            rewrite_cases(cases, arena),
-        ),
+        ExpressionDesc::Pexp_match(scrutinee, cases) => {
+            // Boolean match → if-then-else conversion
+            // OCaml's bs_builtin_ppx.ml (lines 138-167) converts:
+            //   switch b { | true => t | false => f }
+            // to:
+            //   if b { t } else { f }
+            if cases.len() == 2
+                && cases[0].pc_guard.is_none()
+                && cases[1].pc_guard.is_none()
+            {
+                let is_true = |pat: &Pattern| -> bool {
+                    if let PatternDesc::Ppat_construct(lid, None) = &pat.ppat_desc {
+                        matches!(arena.get_longident(lid.txt), Longident::Lident(s) if arena.get_string(*s) == "true")
+                    } else {
+                        false
+                    }
+                };
+                let is_false = |pat: &Pattern| -> bool {
+                    if let PatternDesc::Ppat_construct(lid, None) = &pat.ppat_desc {
+                        matches!(arena.get_longident(lid.txt), Longident::Lident(s) if arena.get_string(*s) == "false")
+                    } else {
+                        false
+                    }
+                };
+                let (t_exp, f_exp) = if is_true(&cases[0].pc_lhs) && is_false(&cases[1].pc_lhs) {
+                    (Some(&cases[0].pc_rhs), Some(&cases[1].pc_rhs))
+                } else if is_false(&cases[0].pc_lhs) && is_true(&cases[1].pc_lhs) {
+                    (Some(&cases[1].pc_rhs), Some(&cases[0].pc_rhs))
+                } else {
+                    (None, None)
+                };
+                if let (Some(t_exp), Some(f_exp)) = (t_exp, f_exp) {
+                    return Expression {
+                        pexp_desc: ExpressionDesc::Pexp_ifthenelse(
+                            Box::new(rewrite_expression(scrutinee, arena)),
+                            Box::new(rewrite_expression(t_exp, arena)),
+                            Some(Box::new(rewrite_expression(f_exp, arena))),
+                        ),
+                        pexp_loc: expr.pexp_loc,
+                        pexp_attributes: rewrite_attributes(&expr.pexp_attributes, arena),
+                    };
+                }
+            }
+
+            ExpressionDesc::Pexp_match(
+                Box::new(rewrite_expression(scrutinee, arena)),
+                rewrite_cases(cases, arena),
+            )
+        }
 
         ExpressionDesc::Pexp_try(body, cases) => ExpressionDesc::Pexp_try(
             Box::new(rewrite_expression(body, arena)),

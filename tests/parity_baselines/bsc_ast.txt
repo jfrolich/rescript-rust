@@ -542,6 +542,7 @@ syntax_tests/data/parsing/grammar/modtype/with.res
 syntax_tests/data/parsing/grammar/pattern/any.res
 syntax_tests/data/parsing/grammar/pattern/array.res
 syntax_tests/data/parsing/grammar/pattern/constraint.res
+syntax_tests/data/parsing/grammar/pattern/constructor.res
 syntax_tests/data/parsing/grammar/pattern/exception.res
 syntax_tests/data/parsing/grammar/pattern/list.res
 syntax_tests/data/parsing/grammar/pattern/or.res
