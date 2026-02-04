@@ -3098,6 +3098,46 @@ fn rewrite_expression_generic(expr: &Expression, arena: &mut ParseArena) -> Expr
         }
 
         ExpressionDesc::Pexp_let(rec_flag, bindings, body) => {
+            // Check for record pattern destructuring: convert to match expression
+            // OCaml's bs_builtin_ppx.ml (lines 295-319) converts:
+            //   let {field1, field2} = expr in body
+            // to:
+            //   match expr with {field1, field2} -> body
+            if *rec_flag == RecFlag::Nonrecursive && bindings.len() == 1 {
+                let vb = &bindings[0];
+                let is_record_pat = match &vb.pvb_pat.ppat_desc {
+                    PatternDesc::Ppat_record(..) => true,
+                    PatternDesc::Ppat_alias(inner, _) => {
+                        matches!(&inner.ppat_desc, PatternDesc::Ppat_record(..))
+                    }
+                    _ => false,
+                };
+                // Don't convert if the expression is Pexp_pack (module unpacking)
+                let is_pack = matches!(&vb.pvb_expr.pexp_desc, ExpressionDesc::Pexp_pack(_));
+                if is_record_pat && !is_pack {
+                    let rewritten_expr = rewrite_expression(&vb.pvb_expr, arena);
+                    let rewritten_pat = rewrite_pattern(&vb.pvb_pat, arena);
+                    let rewritten_body = rewrite_expression(body, arena);
+                    // Merge attributes: expression attrs + binding attrs
+                    let mut attrs = expr.pexp_attributes.clone();
+                    attrs.extend(vb.pvb_attributes.iter().cloned());
+                    let attrs = rewrite_attributes(&attrs, arena);
+                    return Expression {
+                        pexp_desc: ExpressionDesc::Pexp_match(
+                            Box::new(rewritten_expr),
+                            vec![Case {
+                                pc_bar: None,
+                                pc_lhs: rewritten_pat,
+                                pc_guard: None,
+                                pc_rhs: rewritten_body,
+                            }],
+                        ),
+                        pexp_loc: expr.pexp_loc,
+                        pexp_attributes: attrs,
+                    };
+                }
+            }
+
             let new_bindings = flatten_value_bindings(bindings, arena);
             ExpressionDesc::Pexp_let(
                 *rec_flag,

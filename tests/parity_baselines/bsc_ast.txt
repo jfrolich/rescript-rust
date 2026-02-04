@@ -168,9 +168,11 @@ syntax_tests/data/idempotency/covid-19charts.com/src/Location.res
 syntax_tests/data/idempotency/covid-19charts.com/src/ReactSelect.res
 syntax_tests/data/idempotency/covid-19charts.com/src/Recharts.res
 syntax_tests/data/idempotency/covid-19charts.com/src/SerializeQueryParam.res
+syntax_tests/data/idempotency/covid-19charts.com/src/UseQueryParam.res
 syntax_tests/data/idempotency/covid-19charts.com/src/Victory.res
 syntax_tests/data/idempotency/covid-19charts.com/src/Window.res
 syntax_tests/data/idempotency/genType/src/CodeItem.res
+syntax_tests/data/idempotency/genType/src/DeadCode.res
 syntax_tests/data/idempotency/genType/src/DeadType.res
 syntax_tests/data/idempotency/genType/src/Debug.res
 syntax_tests/data/idempotency/genType/src/Dependencies.res
@@ -180,6 +182,7 @@ syntax_tests/data/idempotency/genType/src/EmitText.res
 syntax_tests/data/idempotency/genType/src/EmitType.resi
 syntax_tests/data/idempotency/genType/src/GeneratedFiles.res
 syntax_tests/data/idempotency/genType/src/GenIdent.res
+syntax_tests/data/idempotency/genType/src/GenTypeMain.res
 syntax_tests/data/idempotency/genType/src/ImportPath.res
 syntax_tests/data/idempotency/genType/src/ImportPath.resi
 syntax_tests/data/idempotency/genType/src/Indent.res
@@ -418,6 +421,9 @@ syntax_tests/data/idempotency/reasonml.org/components/Text.res
 syntax_tests/data/idempotency/reasonml.org/layouts/CommunityLayout.res
 syntax_tests/data/idempotency/reasonml.org/layouts/JavaScriptApiLayout.res
 syntax_tests/data/idempotency/reasonml.org/layouts/MainLayout.res
+syntax_tests/data/idempotency/reasonml.org/layouts/ManualDocsLayout.res
+syntax_tests/data/idempotency/reasonml.org/layouts/ReasonCompilerDocsLayout.res
+syntax_tests/data/idempotency/reasonml.org/layouts/ReasonReactDocsLayout.res
 syntax_tests/data/idempotency/reductive/reductive.res
 syntax_tests/data/idempotency/reductive/reductiveContext.res
 syntax_tests/data/idempotency/reductive/reductiveContext.resi
@@ -461,6 +467,7 @@ syntax_tests/data/idempotency/wildcards-world-ui/Animal.res
 syntax_tests/data/idempotency/wildcards-world-ui/BadWords.res
 syntax_tests/data/idempotency/wildcards-world-ui/BN.res
 syntax_tests/data/idempotency/wildcards-world-ui/Carousel.res
+syntax_tests/data/idempotency/wildcards-world-ui/Client.res
 syntax_tests/data/idempotency/wildcards-world-ui/CONSTANTS.res
 syntax_tests/data/idempotency/wildcards-world-ui/ContractUtil.res
 syntax_tests/data/idempotency/wildcards-world-ui/CountDown.res
