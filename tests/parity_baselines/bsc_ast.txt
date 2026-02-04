@@ -568,6 +568,7 @@ syntax_tests/data/parsing/grammar/pattern/constraint.res
 syntax_tests/data/parsing/grammar/pattern/constructor.res
 syntax_tests/data/parsing/grammar/pattern/dict.res
 syntax_tests/data/parsing/grammar/pattern/exception.res
+syntax_tests/data/parsing/grammar/pattern/extension.res
 syntax_tests/data/parsing/grammar/pattern/firstClassModules.res
 syntax_tests/data/parsing/grammar/pattern/list.res
 syntax_tests/data/parsing/grammar/pattern/or.res
@@ -758,6 +759,7 @@ syntax_tests/data/printer/pattern/firstClassModules.res
 syntax_tests/data/printer/pattern/interval.res
 syntax_tests/data/printer/pattern/list.res
 syntax_tests/data/printer/pattern/or.res
+syntax_tests/data/printer/pattern/record.res
 syntax_tests/data/printer/pattern/tuple.res
 syntax_tests/data/printer/pattern/type.res
 syntax_tests/data/printer/pattern/var.res

@@ -1070,6 +1070,23 @@ pub fn inline_float_primitive(f: &str) -> Vec<String> {
     vec![String::new(), encoded]
 }
 
+/// Encode inline bigint constant
+pub fn inline_bigint_primitive(s: &str) -> Vec<String> {
+    // Parse bigint: handle optional - sign
+    let (negative, digits) = if let Some(stripped) = s.strip_prefix('-') {
+        (true, stripped.to_string())
+    } else {
+        (false, s.to_string())
+    };
+
+    let constant = LamConstant::ConstBigint(negative, digits);
+
+    let ffi = FfiType::FfiInlineConst(constant);
+    let encoded = encode_ffi_type(&ffi);
+
+    vec![String::new(), encoded]
+}
+
 // ========== @inline Handling ==========
 
 /// Check if attributes contain @inline
@@ -1078,6 +1095,104 @@ fn has_inline_attr(attrs: &[Attribute], arena: &ParseArena) -> bool {
         let name = arena.get_string(attr_name.txt);
         name == "inline"
     })
+}
+
+/// Find @inline attribute with a payload containing an expression.
+/// Returns the expression from @inline(expr) if found.
+/// This is used for signature items like: @inline("value") let x: t
+fn find_inline_payload_expr<'a>(
+    attrs: &'a [Attribute],
+    arena: &ParseArena,
+) -> Option<&'a Expression> {
+    for (attr_name, payload) in attrs {
+        let name = arena.get_string(attr_name.txt);
+        if name == "inline" {
+            // @inline(expr) has PStr with a single Pstr_eval
+            if let Payload::PStr(items) = payload {
+                if items.len() == 1 {
+                    if let StructureItemDesc::Pstr_eval(expr, _) = &items[0].pstr_desc {
+                        return Some(expr);
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Transform @inline("value") let x: t in a signature to a primitive
+fn transform_inline_sig_value(
+    vd: &ValueDescription,
+    arena: &mut ParseArena,
+) -> Option<ValueDescription> {
+    let expr = find_inline_payload_expr(&vd.pval_attributes, arena)?;
+
+    match &expr.pexp_desc {
+        // @inline("string") let x: t
+        ExpressionDesc::Pexp_constant(Constant::String(s, delim)) => {
+            let prim = inline_string_primitive(s, delim.as_deref());
+            Some(ValueDescription {
+                pval_name: vd.pval_name.clone(),
+                pval_type: vd.pval_type.clone(),
+                pval_prim: prim,
+                pval_attributes: vec![], // Clear attributes
+                pval_loc: vd.pval_loc,
+            })
+        }
+        // @inline(42) let x: t
+        ExpressionDesc::Pexp_constant(Constant::Integer(s, None)) => {
+            let i = s.parse::<i32>().ok()?;
+            let prim = inline_int_primitive(i);
+            Some(ValueDescription {
+                pval_name: vd.pval_name.clone(),
+                pval_type: vd.pval_type.clone(),
+                pval_prim: prim,
+                pval_attributes: vec![], // Clear attributes
+                pval_loc: vd.pval_loc,
+            })
+        }
+        // @inline(42n) let x: t (bigint)
+        ExpressionDesc::Pexp_constant(Constant::Integer(s, Some('n'))) => {
+            let prim = inline_bigint_primitive(s);
+            Some(ValueDescription {
+                pval_name: vd.pval_name.clone(),
+                pval_type: vd.pval_type.clone(),
+                pval_prim: prim,
+                pval_attributes: vec![], // Clear attributes
+                pval_loc: vd.pval_loc,
+            })
+        }
+        // @inline(3.14) let x: t
+        ExpressionDesc::Pexp_constant(Constant::Float(s, None)) => {
+            let prim = inline_float_primitive(s);
+            Some(ValueDescription {
+                pval_name: vd.pval_name.clone(),
+                pval_type: vd.pval_type.clone(),
+                pval_prim: prim,
+                pval_attributes: vec![], // Clear attributes
+                pval_loc: vd.pval_loc,
+            })
+        }
+        // @inline(true) or @inline(false) let x: t
+        ExpressionDesc::Pexp_construct(lid, None) => {
+            let longident = arena.get_longident(lid.txt);
+            if let Longident::Lident(name_idx) = longident {
+                let name = arena.get_string(*name_idx);
+                if name == "true" || name == "false" {
+                    let prim = inline_bool_primitive(name == "true");
+                    return Some(ValueDescription {
+                        pval_name: vd.pval_name.clone(),
+                        pval_type: vd.pval_type.clone(),
+                        pval_prim: prim,
+                        pval_attributes: vec![], // Clear attributes
+                        pval_loc: vd.pval_loc,
+                    });
+                }
+            }
+            None
+        }
+        _ => None,
+    }
 }
 
 /// Create a type for a simple builtin type (string, int, float, bool)
@@ -5212,6 +5327,13 @@ fn rewrite_signature_item(item: &SignatureItem, arena: &mut ParseArena) -> Signa
                         pval_type,
                         pval_loc: vd.pval_loc,
                     }),
+                    psig_loc: item.psig_loc,
+                }
+            } else if let Some(inline_vd) = transform_inline_sig_value(vd, arena) {
+                // Handle @inline("value") let x: t in signature
+                // (bs_builtin_ppx.ml line 413-478)
+                SignatureItem {
+                    psig_desc: SignatureItemDesc::Psig_value(inline_vd),
                     psig_loc: item.psig_loc,
                 }
             } else {
