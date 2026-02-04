@@ -149,6 +149,7 @@ impl MarshalWriter {
             option_string_table: HashMap::new(),
             option_i32_table: HashMap::new(),
             arity_idx_table: HashMap::new(),
+
             string_loc_table: HashMap::new(),
             arena: None,
             obj_counter: 0,
@@ -169,6 +170,7 @@ impl MarshalWriter {
             option_string_table: HashMap::new(),
             option_i32_table: HashMap::new(),
             arity_idx_table: HashMap::new(),
+
             string_loc_table: HashMap::new(),
             arena: None,
             obj_counter: 0,
