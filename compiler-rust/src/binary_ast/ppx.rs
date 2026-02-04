@@ -3570,7 +3570,14 @@ fn desugar_pipe(
 fn rewrite_expression_generic(expr: &Expression, arena: &mut ParseArena) -> Expression {
     let new_desc = match &expr.pexp_desc {
         ExpressionDesc::Pexp_ident(_) | ExpressionDesc::Pexp_constant(_) => {
-            return expr.clone();
+            // Even for simple expressions, we need to rewrite attributes
+            // to transform strings (e.g., "js" -> "*j" in @warning("-3"))
+            // This matches OCaml's default_mapper which always maps attrs.
+            return Expression {
+                pexp_desc: expr.pexp_desc.clone(),
+                pexp_loc: expr.pexp_loc,
+                pexp_attributes: rewrite_attributes(&expr.pexp_attributes, arena),
+            };
         }
 
         ExpressionDesc::Pexp_let(rec_flag, bindings, body) => {
