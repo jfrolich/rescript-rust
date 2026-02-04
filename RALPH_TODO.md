@@ -894,70 +894,19 @@ We need to implement the remaining transformations.
   - Note: `rewrite_structure_item` already returned `Vec<StructureItem>`, so multi-item expansion worked
   - Related files: `tests/syntax_tests/data/printer/modExpr/await.res`
 
-- [ ] **Task 2.9**: Implement `internal.expansive` attribute for template literals (HIGH PRIORITY)
-  - **Impact**: 3 sexp-locs-ppx TEMPLATE failures — fixing this gets us closer to 100% PPX parity
-  - **Problem**: OCaml's `classify_exp` function (in `compiler/frontend/ast_exp_handle_external.ml`)
-    parses the JavaScript string inside template literals to detect if it's a function expression.
-    If it's a function, it's marked as "expansive" with `@internal.expansive` attribute.
-  - **OCaml behavior**: `classify_exp` uses the Flow parser to detect:
-    - `Js_function {arity; arrow}` — function expression or arrow function (returns arity)
-    - `Js_literal {is_null_undefined; comment; delim}` — literal value
-    - Uses this to decide whether to add `@internal.expansive` attribute
-  - **Solution**: Use OXC (Oxidation Compiler) — a fast Rust JavaScript parser
-  - **OXC crates to add to Cargo.toml**:
-    ```toml
-    oxc_allocator = "0.x"
-    oxc_parser = "0.x"
-    oxc_ast = "0.x"
-    oxc_span = "0.x"
-    ```
-  - **Implementation approach**:
-    ```rust
-    use oxc_allocator::Allocator;
-    use oxc_ast::ast::Expression;
-    use oxc_parser::Parser;
-    use oxc_span::SourceType;
-
-    enum JsClassification {
-        JsFunction { arity: usize, arrow: bool },
-        JsLiteral { is_null_undefined: bool },
-    }
-
-    fn classify_js_exp(src: &str) -> Option<JsClassification> {
-        let allocator = Allocator::new();
-        let expr = Parser::new(&allocator, src, SourceType::default())
-            .parse_expression()
-            .ok()?;
-
-        match expr {
-            Expression::ArrowFunctionExpression(arrow) => {
-                Some(JsClassification::JsFunction {
-                    arity: arrow.params.parameters_count(),
-                    arrow: true,
-                })
-            }
-            Expression::FunctionExpression(func) => {
-                Some(JsClassification::JsFunction {
-                    arity: func.params.parameters_count(),
-                    arrow: false,
-                })
-            }
-            Expression::NullLiteral(_) | Expression::Identifier(id)
-                if id.name == "undefined" => {
-                Some(JsClassification::JsLiteral { is_null_undefined: true })
-            }
-            _ => Some(JsClassification::JsLiteral { is_null_undefined: false }),
-        }
-    }
-    ```
-  - **Where to integrate**: In `ppx.rs`, when processing template literals (`res.template` attribute),
-    parse the JS string and add `@internal.expansive` if `classify_js_exp` returns `JsFunction`.
-  - **Reference files**:
-    - OCaml: `compiler/frontend/ast_exp_handle_external.ml` (classify_exp function)
-    - OCaml: `compiler/ext/flow_ast_utils.ml` (Flow parser integration)
-    - Rust: `compiler-rust/src/binary_ast/ppx.rs` (where to add the integration)
-  - **Why OXC**: 3x faster than SWC, production-ready, has dedicated `parse_expression()` method,
-    clean enum matching for `ArrowFunctionExpression` vs `FunctionExpression`
+- [x] **Task 2.9**: Implement `internal.expansive` attribute for template literals (DONE 2026-02-04)
+  - **Impact**: Fixes TEMPLATE failures where `internal.expansive` attribute was missing
+  - **Solution**: Used OXC (Oxidation Compiler) — a fast Rust JavaScript parser
+  - **Implementation**: Added `classify_js_exp()` function in `ppx.rs` that:
+    - Uses OXC's `Parser::parse_expression()` to parse JS strings
+    - Detects `FunctionExpression` and `ArrowFunctionExpression`
+    - Returns `JsExpClassification::JsFunction { arity, arrow }` for functions
+    - Returns `JsExpClassification::JsLiteral` for literals (including object/array literals)
+    - Returns `JsExpClassification::JsExpUnknown` for other expressions
+  - **Crates added**: `oxc_allocator`, `oxc_parser`, `oxc_ast`, `oxc_span` (v0.49)
+  - **Integration**: In `handle_raw()`, when the JS string is detected as a function,
+    the `@internal.expansive` attribute is prepended to the expression's attributes
+  - **Verified**: All test cases pass (arrow functions, regular functions, literals, backticks)
 
 ### Phase 3: JSX Binary Differences (Deferred - needs investigation)
 
