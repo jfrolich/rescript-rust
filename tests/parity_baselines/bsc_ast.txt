@@ -35,6 +35,7 @@ syntax_tests/data/idempotency/bs-css/CssEmotionJs.res
 syntax_tests/data/idempotency/bs-css/CssJs.res
 syntax_tests/data/idempotency/bs-webapi/src/Webapi.res
 syntax_tests/data/idempotency/bs-webapi/src/Webapi/Webapi__Base64.res
+syntax_tests/data/idempotency/bs-webapi/src/Webapi/Webapi__Canvas.res
 syntax_tests/data/idempotency/bs-webapi/src/Webapi/Webapi__Canvas/Webapi__Canvas__Canvas2d.res
 syntax_tests/data/idempotency/bs-webapi/src/Webapi/Webapi__Canvas/Webapi__Canvas__WebGl.res
 syntax_tests/data/idempotency/bs-webapi/src/Webapi/Webapi__Dom.res

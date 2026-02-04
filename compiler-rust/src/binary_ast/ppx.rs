@@ -27,7 +27,7 @@ use crate::parser::ast::{
 use crate::parser::longident::Longident;
 
 use super::ffi_types::{
-    encode_ffi_type, Attr, Delim, ExternalModuleName, ExternalSpec, FfiType, LabelNoname,
+    encode_ffi_type, Attr, Cst, Delim, ExternalModuleName, ExternalSpec, FfiType, LabelNoname,
     LamConstant, ModuleBindName, Param, Params, PointerInfo, ReturnWrapper,
 };
 
@@ -98,7 +98,7 @@ pub fn is_rs_external(attrs: &[Attribute], pval_prim: &[String], arena: &mut Par
 /// - params: The Params encoding for the FFI blob
 /// - arity: The number of non-ignored args (for determining JsVar vs JsCall)
 /// - args_for_type_reconstruction: Args to use for type reconstruction (filtered)
-fn build_arg_type_specs(typ: &CoreType, arena: &ParseArena) -> (Params, usize) {
+fn build_arg_type_specs(typ: &CoreType, arena: &mut ParseArena) -> (Params, usize) {
     let (args, _result) = list_of_arrow(typ, arena);
 
     let mut param_specs: Vec<Param> = Vec::new();
@@ -156,19 +156,30 @@ fn build_arg_type_specs(typ: &CoreType, arena: &ParseArena) -> (Params, usize) {
 
 /// Determine the arg type for a non-labeled argument type.
 /// Mirrors OCaml's refine_arg_type / spec_of_ptyp.
-fn refine_arg_type(nolabel: bool, typ: &CoreType, arena: &ParseArena) -> Attr {
+fn refine_arg_type(nolabel: bool, typ: &CoreType, arena: &mut ParseArena) -> Attr {
     // For Ptyp_any with @as attribute, handle constant args
     if matches!(&typ.ptyp_desc, CoreTypeDesc::Ptyp_any) {
         // Check for @as attribute on the type
-        // TODO: Handle @as(const) for Ptyp_any → Arg_cst
-        // For now, fall through to spec_of_ptyp
+        for (attr_name, payload) in &typ.ptyp_attributes {
+            let name = arena.get_string(attr_name.txt).to_string();
+            if name == "as" {
+                // Try int first (mirrors OCaml's is_single_int check first)
+                if let Some(i) = get_payload_int(payload, arena) {
+                    return Attr::ArgCst(Cst::ArgIntLit(i as i64));
+                }
+                // Then try string with proper delimiter handling
+                if let Some((s, delim)) = get_payload_string_with_delim(payload, arena) {
+                    return Attr::ArgCst(Cst::ArgStringLit(s, delim));
+                }
+            }
+        }
     }
     spec_of_ptyp(nolabel, typ, arena)
 }
 
 /// Determine the arg type for a type expression.
 /// Mirrors OCaml's spec_of_ptyp.
-fn spec_of_ptyp(nolabel: bool, typ: &CoreType, arena: &ParseArena) -> Attr {
+fn spec_of_ptyp(nolabel: bool, typ: &CoreType, arena: &mut ParseArena) -> Attr {
     // Check for special attributes on the type (@string, @int, @unwrap, @ignore)
     // For now, handle the common cases
     // TODO: Handle @string, @int, @unwrap, @ignore attributes on the type
@@ -269,13 +280,57 @@ fn reconstruct_arrow_type_with_loc(
         return typ.clone();
     }
 
+    // Filter out @as(_) constant params (OCaml: Arg_cst _ -> arg_types, skips param)
+    let mut filtered_args: Vec<&TypeArg> = Vec::new();
+    let mut had_args = false;
+    for arg in &args {
+        had_args = true;
+        let nolabel = matches!(arg.lbl, ArgLabel::Nolabel);
+        let is_labelled = matches!(arg.lbl, ArgLabel::Labelled(_));
+        let arg_type = refine_arg_type(nolabel, &arg.typ, arena);
+        if matches!(arg_type, Attr::ArgCst(_)) && (nolabel || is_labelled) {
+            // Skip this param - it's an @as(_) constant arg
+            continue;
+        }
+        filtered_args.push(arg);
+    }
+
+    // If all args were erased but we had some originally, add a unit param
+    // (OCaml: match (args, arg_type_specs_length) with | [], n when n > 0 -> ...)
+    if filtered_args.is_empty() && had_args {
+        let unit_lid = arena.push_lident_static("unit");
+        let unit_type = CoreType {
+            ptyp_desc: CoreTypeDesc::Ptyp_constr(
+                Located { txt: unit_lid, loc: loc },
+                vec![],
+            ),
+            ptyp_loc: loc,
+            ptyp_attributes: vec![],
+        };
+        let arity = arena.push_arity(Some(1));
+        let unit_arg = TypeArg {
+            attrs: vec![],
+            lbl: ArgLabel::Nolabel,
+            typ: unit_type,
+        };
+        return CoreType {
+            ptyp_desc: CoreTypeDesc::Ptyp_arrow {
+                arg: Box::new(unit_arg),
+                ret: Box::new(result.clone()),
+                arity,
+            },
+            ptyp_loc: loc,
+            ptyp_attributes: vec![],
+        };
+    }
+
     // Rebuild the arrow chain from right to left, like OCaml's Typ.arrows
-    let arity_count = args.len();
+    let arity_count = filtered_args.len();
     let outermost_arity = arena.push_arity(Some(arity_count as i32));
 
     // Build from the last arg backwards
     let mut current = result.clone();
-    for (i, arg) in args.iter().enumerate().rev() {
+    for (i, arg) in filtered_args.iter().enumerate().rev() {
         let arity = if i == 0 {
             outermost_arity
         } else {
@@ -457,6 +512,59 @@ fn get_payload_string(payload: &current::Payload, arena: &mut ParseArena) -> Opt
                         }
                     }
                     _ => {}
+                }
+            }
+            None
+        }
+        _ => None,
+    }
+}
+
+/// Extract integer from attribute payload (mirrors OCaml's Ast_payload.is_single_int)
+fn get_payload_int(payload: &current::Payload, arena: &mut ParseArena) -> Option<i32> {
+    match payload {
+        current::Payload::PStr(items) if items.len() == 1 => {
+            if let StructureItemDesc::Pstr_eval(expr, _) = &items[0].pstr_desc {
+                if let ExpressionDesc::Pexp_constant(current::Constant::Integer(name, suffix)) = &expr.pexp_desc {
+                    // OCaml's is_single_int rejects 'n' suffix (bigint)
+                    if matches!(suffix, Some('n')) {
+                        return None;
+                    }
+                    return name.parse::<i32>().ok();
+                }
+            }
+            None
+        }
+        _ => None,
+    }
+}
+
+/// Extract string with delimiter from attribute payload.
+/// Mirrors OCaml's string extraction in iter_process_bs_string_or_int_as,
+/// including the parse_processed_delim logic that converts raw string delimiters
+/// to FFI Delim values.
+///
+/// The OCaml PPX pipeline rewrites all plain string delimiters (None → Some "*j")
+/// before external processing, so we need to apply the same transformation here.
+fn get_payload_string_with_delim(payload: &current::Payload, arena: &mut ParseArena) -> Option<(String, Delim)> {
+    match payload {
+        current::Payload::PStr(items) if items.len() == 1 => {
+            if let StructureItemDesc::Pstr_eval(expr, _) = &items[0].pstr_desc {
+                if let ExpressionDesc::Pexp_constant(current::Constant::String(s, raw_delim)) = &expr.pexp_desc {
+                    // Apply parse_processed_delim logic:
+                    // In OCaml, strings get rewritten: None → "*j", then
+                    // parse_processed_delim maps: None→DNone, "*j"→DStarJ, "json"→DNoQuotes, "bq"→DBackQuotes
+                    // Rust parser uses "js" for plain strings (equivalent to OCaml's None → "*j" rewrite)
+                    let delim = match raw_delim.as_deref() {
+                        None => Delim::DStarJ,        // None → rewritten to "*j" → DStarJ
+                        Some("js") => Delim::DStarJ,  // Rust parser's plain string delimiter
+                        Some("*j") => Delim::DStarJ,  // Already rewritten (OCaml format)
+                        Some("json") => Delim::DNoQuotes,
+                        Some("bq") => Delim::DBackQuotes,
+                        Some("j") => Delim::DStarJ,   // "j" delimiter → DStarJ
+                        _ => return None,              // Unrecognized delimiter
+                    };
+                    return Some((s.clone(), delim));
                 }
             }
             None
