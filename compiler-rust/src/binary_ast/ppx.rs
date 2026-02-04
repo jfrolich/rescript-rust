@@ -4672,7 +4672,42 @@ fn rewrite_signature_item(item: &SignatureItem, arena: &mut ParseArena) -> Signa
                 psig_loc: item.psig_loc,
             }
         }
-        // TODO: Handle @inline values
+        // Handle include - recurse into module type
+        SignatureItemDesc::Psig_include(incl) => SignatureItem {
+            psig_desc: SignatureItemDesc::Psig_include(current::IncludeDescription {
+                pincl_mod: rewrite_module_type(&incl.pincl_mod, arena),
+                pincl_loc: incl.pincl_loc,
+                pincl_attributes: rewrite_attributes(&incl.pincl_attributes, arena),
+            }),
+            psig_loc: item.psig_loc,
+        },
+        // Handle module - recurse into module type
+        SignatureItemDesc::Psig_module(md) => SignatureItem {
+            psig_desc: SignatureItemDesc::Psig_module(current::ModuleDeclaration {
+                pmd_name: md.pmd_name.clone(),
+                pmd_type: rewrite_module_type(&md.pmd_type, arena),
+                pmd_attributes: rewrite_attributes(&md.pmd_attributes, arena),
+                pmd_loc: md.pmd_loc,
+            }),
+            psig_loc: item.psig_loc,
+        },
+        // Handle recursive modules - recurse into module types
+        SignatureItemDesc::Psig_recmodule(mds) => {
+            let new_mds = mds
+                .iter()
+                .map(|md| current::ModuleDeclaration {
+                    pmd_name: md.pmd_name.clone(),
+                    pmd_type: rewrite_module_type(&md.pmd_type, arena),
+                    pmd_attributes: rewrite_attributes(&md.pmd_attributes, arena),
+                    pmd_loc: md.pmd_loc,
+                })
+                .collect();
+            SignatureItem {
+                psig_desc: SignatureItemDesc::Psig_recmodule(new_mds),
+                psig_loc: item.psig_loc,
+            }
+        }
+        // Any remaining cases - just clone (no string constants to transform)
         _ => item.clone(),
     }
 }
