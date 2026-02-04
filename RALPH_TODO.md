@@ -65,10 +65,36 @@ Do NOT spend time on small issues (@deriving edge cases, etc.) until the locatio
 ---
 
 **Last Updated:** 2026-02-04
-**Overall Status:** 775/1196 bsc-ast tests passing (64.8%)
+**Overall Status:** 787/1196 bsc-ast tests passing (65.8%)
 **Syntax tests:** 506/506 (100%) ✅
 **sexp-locs Status:** 1196/1196 tests passing (100%) ✅
 **Note:** Total test count increased from 1049 to 1196 due to test infrastructure changes.
+
+**Session progress (2026-02-04, reason arity + dependency extraction fixes):**
+Two fixes improved bsc-ast parity from 775 to 787 (+12 files, 0 regressions):
+
+1. **Reason arity / constructor tuple wrapping** (+7 files, 775 → 782): OCaml's parser in
+   `ParseForTypeChecker` mode (the default for compilation) does NOT wrap single tuple arguments
+   in constructors with an extra tuple layer. The Rust parser was always wrapping (printer mode
+   behavior). Fixed in three files:
+   - `expr.rs`: `parse_constructor_arg` — added `p.mode != ParserMode::ParseForTypeChecker` check
+   - `pattern.rs`: `parse_constructor_pattern` — same fix in two places (trailing comma + single arg)
+   - `typ.rs`: `parse_polymorphic_variant_type_args` — corrected wrong comment and added mode check
+   - New passing files: comments.res, TranslateSignature.res, Object.res, Avatar.res,
+     TopStoriesPage.res, reasonArity.res, construct.res
+
+2. **Dependency extraction fixes** (+5 files, 782 → 787): Two issues in `deps.rs`:
+   - Module binding order: Rust was adding module name to `bound_modules` BEFORE processing body,
+     causing `module List = { include List }` to not extract `List` as a dependency. OCaml processes
+     body first, then binds name. Fixed by swapping order.
+   - Unpack name scoping: `bound_modules` HashSet was permanent, but OCaml scopes `bv` functionally.
+     `Ppat_unpack("Set")` in one function permanently blocked "Set" references elsewhere. Fixed by
+     removing unpack names after processing function body, let body, and match case body.
+   - New passing files: common.res, LanguageSelector.res, StudentsEditor__Search.res, Config.res,
+     firstClassModules.res
+
+**Remaining 409 failures** are predominantly sharing/dedup differences (~389 files) with a small
+number of structural issues (embedded binary strings, module await handling).
 
 **Session progress (2026-02-04, fix-parse-failures merge + JSX/open_description fixes):**
 Merged the `fix-parse-failures` branch which included printer fixes and error recovery improvements
@@ -159,10 +185,12 @@ Five PPX fixes improved bsc-ast parity from 766 to 775 (+9 files, 0 regressions)
    - Modified `reconstruct_arrow_type_with_loc()` to filter out ArgCst parameters
    - Edge case: when all params are erased, adds unit parameter (matching OCaml)
 
-**Remaining 421 failures** are predominantly sharing/dedup differences:
-- ~346 files (82%): OCaml CSE sharing patterns (module-level attribute bindings like
+**Remaining 421 failures** (now 409 after reason arity + dep extraction fixes) are predominantly
+sharing/dedup differences:
+- ~389 files (95%): OCaml CSE sharing patterns (module-level attribute bindings like
   `internal_expansive`, `ternary_attr`, `spread_attr` etc. are physically shared in OCaml)
-- ~72 files (17%): Remaining structural differences (PPX transformations not yet implemented)
+- ~12 files: Remaining block_tag differences (also have sharing issues)
+- ~8 files: Embedded binary string differences (@inline constant encoding)
 - Arity over-sharing: Rust's `static_arity_1()` shares across all parser call sites,
   but OCaml only shares within specific contexts. Disabling arity sharing entirely
   causes 55 regressions, indicating some arity sharing IS needed.
