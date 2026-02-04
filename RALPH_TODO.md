@@ -24,15 +24,24 @@
 |------------|--------|
 | Syntax tests | 506/506 (100%) ✅ |
 | sexp-locs | 1196/1196 (100%) ✅ |
-| sexp-locs-ppx | 1173/1196 (98.1%) ✅ |
-| bsc-ast | 807/1196 (67.5%) |
+| sexp-locs-ppx | 1175/1196 (98.2%) ✅ |
+| bsc-ast | 806/1196 (67.4%) |
 
-**Note:** The remaining 23 sexp-locs-ppx failures are structural differences in PPX transformations (not string delimiters). Key issues:
-- Module-level await (`@res.await`) transformation - Rust doesn't produce the full transformation OCaml does
-- FFI encoding minor differences
+**Note:** The remaining 21 sexp-locs-ppx failures are structural differences in PPX transformations. Key issues:
+- Expression-level await (`Pexp_letmodule` with `@res.await`) - needs module type decl hoisting
+- FFI encoding differences (externals with @val, @module, etc.)
 - Other PPX structural transformations
 
-**Session progress (2026-02-05):**
+**Session progress (2026-02-05) - continued:**
+- Fixed module-level `@res.await` transformation (Pstr_module):
+  - Keep @res.await attribute on Pmty_typeof's inner module expr (matches OCaml's Mty.typeof_ ~loc me)
+  - Keep @res.await on the inner pack expression (OCaml's remove_await_attribute uses != which doesn't work)
+  - Keep @res.await on the transformed module expr attributes (OCaml's {e with pmod_desc = ...})
+  - Preserve original pstr_loc from the structure item (not mb.pmb_loc)
+- Fixed Pexp_await transformation to not copy attributes from the Pexp_await node to the transformed Pexp_apply (OCaml creates NEW expression with empty attributes)
+- Result: sexp-locs-ppx improved from 1173/1196 (98.1%) to 1175/1196 (98.2%)
+
+**Previous session progress (2026-02-05):**
 - Fixed `inline_string_primitive` delimiter handling: OCaml's `parse_processed_delim` wraps `None` in `Some(DNone)`, and the input strings have "js" delimiter (not "*j") because Rust doesn't transform attribute payloads before extracting @inline. Added handling for `Some("js")` → `Some(DStarJ)`.
 - Fixed FFI binary string encoding: Changed `encode_ffi_type` to use proper Latin-1 encoding and `marshal_prim_list` to convert back using `chars().map(|c| c as u8)`. This ensures FFI binary data survives the Latin-1 round-trip used by the sexp printer.
 - Fixed attribute string transformation for Pexp_ident/Pexp_constant: OCaml's default_mapper always rewrites attributes even for simple expressions. Added `rewrite_attributes` call for these cases.
