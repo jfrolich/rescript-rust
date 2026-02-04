@@ -167,8 +167,28 @@ class DoubleNode(MarshalNode):
 
 # ── Marshal decoder ─────────────────────────────────────────────────────
 
+class _PendingBlock:
+    """Temporary object used during iterative decoding to represent
+    a block whose children have not all been decoded yet."""
+    __slots__ = ("tag", "size", "depth", "encoding", "idx", "type_hint", "children")
+
+    def __init__(self, tag, size, depth, encoding, idx, type_hint):
+        self.tag = tag
+        self.size = size
+        self.depth = depth
+        self.encoding = encoding
+        self.idx = idx
+        self.type_hint = type_hint
+        self.children = []
+
+
 class MarshalDecoder:
-    """Decode an OCaml marshal payload into a tree of MarshalNodes."""
+    """Decode an OCaml marshal payload into a tree of MarshalNodes.
+
+    Uses an iterative algorithm with an explicit stack so that deeply
+    nested structures (e.g. long cons-lists) do not blow Python's call
+    stack.
+    """
 
     def __init__(self, data):
         self.reader = BinaryReader(data)
@@ -177,10 +197,44 @@ class MarshalDecoder:
 
     def decode(self):
         """Decode the marshal payload (after the 20-byte header)."""
-        node = self._decode_value(depth=0, parent_type=None)
-        return node
+        value = self._read_atom(depth=0)
 
-    def _decode_value(self, depth, parent_type):
+        # Fast path: root is a leaf node
+        if not isinstance(value, _PendingBlock):
+            return value
+
+        # Iterative decoding using an explicit stack.  Each entry is a
+        # _PendingBlock that still needs children decoded.
+        stack = [value]
+
+        while stack:
+            top = stack[-1]
+            if len(top.children) < top.size:
+                child = self._read_atom(depth=top.depth + 1)
+                if isinstance(child, _PendingBlock):
+                    # Descend into the child block before continuing
+                    stack.append(child)
+                else:
+                    top.children.append(child)
+            else:
+                # All children collected – finalize this block
+                stack.pop()
+                node = self._finalize_block(top)
+                if stack:
+                    stack[-1].children.append(node)
+                else:
+                    return node
+
+        # Should not be reached
+        raise ValueError("Unexpected end of decode loop")
+
+    # ------------------------------------------------------------------
+    # _read_atom: read the next opcode and return either a leaf
+    # MarshalNode or a _PendingBlock (for blocks whose children still
+    # need to be decoded).
+    # ------------------------------------------------------------------
+
+    def _read_atom(self, depth):
         byte = self.reader.read_u8()
 
         # Small positive integer: 0x40-0x7F -> 0..63
@@ -192,7 +246,7 @@ class MarshalDecoder:
             code = byte - 0x80
             tag = code & 0x0F
             size = (code >> 4) & 0x07
-            return self._decode_block(tag, size, depth, "small")
+            return self._start_block(tag, size, depth, "small")
 
         # Small string: 0x20-0x3F
         if 0x20 <= byte <= 0x3F:
@@ -239,13 +293,13 @@ class MarshalDecoder:
             header = self.reader.read_u32()
             tag = header & 0xFF
             size = header >> 10
-            return self._decode_block(tag, size, depth, "BLOCK32")
+            return self._start_block(tag, size, depth, "BLOCK32")
 
         if byte == CODE_BLOCK64:
             header = self.reader.read_i64()
             tag = header & 0xFF
             size = header >> 10
-            return self._decode_block(tag, size, depth, "BLOCK64")
+            return self._start_block(tag, size, depth, "BLOCK64")
 
         if byte == CODE_STRING8:
             length = self.reader.read_u8()
@@ -273,32 +327,42 @@ class MarshalDecoder:
 
         raise ValueError(f"Unknown marshal opcode 0x{byte:02X} at offset {self.reader.pos - 1}")
 
-    def _decode_block(self, tag, size, depth, encoding):
+    def _start_block(self, tag, size, depth, encoding):
+        """Begin decoding a block.  Returns a _PendingBlock if size > 0,
+        otherwise returns the finalised BlockNode immediately."""
         idx = self.obj_counter
         self.obj_counter += 1
         type_hint = infer_block_type(tag, size, depth, None)
 
-        children = []
-        for _ in range(size):
-            child = self._decode_value(depth + 1, type_hint)
-            children.append(child)
+        if size == 0:
+            node = BlockNode(tag, [], idx, encoding, type_hint)
+            self.objects[idx] = node
+            return node
+
+        return _PendingBlock(tag, size, depth, encoding, idx, type_hint)
+
+    def _finalize_block(self, pending):
+        """Convert a fully-populated _PendingBlock into a BlockNode."""
+        type_hint = pending.type_hint
+        children = pending.children
 
         # Refine Location? hint: check if first two children are Position blocks
         if type_hint == "Location?" and len(children) >= 2:
             c0, c1 = children[0], children[1]
-            is_pos_or_shared_pos = lambda c: (
-                (isinstance(c, BlockNode) and c.type_hint == "Position") or
-                (isinstance(c, SharedNode) and c.target_idx in self.objects and
-                 isinstance(self.objects[c.target_idx], BlockNode) and
-                 self.objects[c.target_idx].type_hint == "Position")
-            )
+            def is_pos_or_shared_pos(c):
+                return (
+                    (isinstance(c, BlockNode) and c.type_hint == "Position") or
+                    (isinstance(c, SharedNode) and c.target_idx in self.objects and
+                     isinstance(self.objects[c.target_idx], BlockNode) and
+                     self.objects[c.target_idx].type_hint == "Position")
+                )
             if is_pos_or_shared_pos(c0) and is_pos_or_shared_pos(c1):
                 type_hint = "Location"
             else:
                 type_hint = None  # Not a location after all
 
-        node = BlockNode(tag, children, idx, encoding, type_hint)
-        self.objects[idx] = node
+        node = BlockNode(pending.tag, children, pending.idx, pending.encoding, type_hint)
+        self.objects[pending.idx] = node
         return node
 
     def _decode_string(self, length, encoding):
@@ -386,57 +450,82 @@ class BinaryAstFile:
 
 # ── Tree printing ────────────────────────────────────────────────────────
 
+_CLOSE_BRACE = object()  # sentinel for deferred closing braces
+
+
 def print_tree(node, indent=0, max_depth=None, file=sys.stdout):
-    """Print a MarshalNode tree in a human-readable format."""
-    prefix = "  " * indent
+    """Print a MarshalNode tree in a human-readable format (iterative)."""
+    # Stack items are either (node, indent) or (_CLOSE_BRACE, indent)
+    stack = [(node, indent)]
 
-    if max_depth is not None and indent > max_depth:
-        print(f"{prefix}...", file=file)
-        return
+    while stack:
+        item, ind = stack.pop()
+        prefix = "  " * ind
 
-    if isinstance(node, IntNode):
-        print(f"{prefix}    {node}", file=file)
-    elif isinstance(node, StringNode):
-        print(f"{prefix}{node}", file=file)
-    elif isinstance(node, SharedNode):
-        print(f"{prefix}    {node}", file=file)
-    elif isinstance(node, DoubleNode):
-        print(f"{prefix}{node}", file=file)
-    elif isinstance(node, BlockNode):
-        hint = f" ({node.type_hint})" if node.type_hint else ""
-        enc = f" {node.encoding}" if node.encoding not in ("small",) else ""
-        print(f"{prefix}[{node.obj_idx}] BLOCK{enc} tag={node.tag} size={len(node.children)}{hint} {{", file=file)
-        for child in node.children:
-            print_tree(child, indent + 1, max_depth, file)
-        print(f"{prefix}}}", file=file)
-    else:
-        print(f"{prefix}??? {node!r}", file=file)
+        if item is _CLOSE_BRACE:
+            print(f"{prefix}}}", file=file)
+            continue
+
+        if max_depth is not None and ind > max_depth:
+            print(f"{prefix}...", file=file)
+            continue
+
+        if isinstance(item, IntNode):
+            print(f"{prefix}    {item}", file=file)
+        elif isinstance(item, StringNode):
+            print(f"{prefix}{item}", file=file)
+        elif isinstance(item, SharedNode):
+            print(f"{prefix}    {item}", file=file)
+        elif isinstance(item, DoubleNode):
+            print(f"{prefix}{item}", file=file)
+        elif isinstance(item, BlockNode):
+            hint = f" ({item.type_hint})" if item.type_hint else ""
+            enc = f" {item.encoding}" if item.encoding not in ("small",) else ""
+            print(f"{prefix}[{item.obj_idx}] BLOCK{enc} tag={item.tag} size={len(item.children)}{hint} {{", file=file)
+            # Push closing brace first (processed last)
+            stack.append((_CLOSE_BRACE, ind))
+            # Push children in reverse so first child is on top
+            for child in reversed(item.children):
+                stack.append((child, ind + 1))
+        else:
+            print(f"{prefix}??? {item!r}", file=file)
 
 
 def node_to_lines(node, indent=0):
-    """Convert a node tree to a list of (indent, line_str, node) tuples for diffing."""
+    """Convert a node tree to a list of (indent, line_str, node) tuples for diffing (iterative)."""
     lines = []
-    if isinstance(node, IntNode):
-        lines.append((indent, f"INT {node.value}", node))
-    elif isinstance(node, StringNode):
-        lines.append((indent, f"[{node.obj_idx}] STRING {node.value!r}", node))
-    elif isinstance(node, SharedNode):
-        lines.append((indent, f"SHARED -> [{node.target_idx}]", node))
-    elif isinstance(node, DoubleNode):
-        lines.append((indent, f"[{node.obj_idx}] DOUBLE {node.value}", node))
-    elif isinstance(node, BlockNode):
-        hint = f" ({node.type_hint})" if node.type_hint else ""
-        lines.append((indent, f"[{node.obj_idx}] BLOCK tag={node.tag} size={len(node.children)}{hint} {{", node))
-        for child in node.children:
-            lines.extend(node_to_lines(child, indent + 1))
-        lines.append((indent, "}", None))
+    # Stack items: (node, indent) or (_CLOSE_BRACE, indent)
+    stack = [(node, indent)]
+
+    while stack:
+        item, ind = stack.pop()
+
+        if item is _CLOSE_BRACE:
+            lines.append((ind, "}", None))
+            continue
+
+        if isinstance(item, IntNode):
+            lines.append((ind, f"INT {item.value}", item))
+        elif isinstance(item, StringNode):
+            lines.append((ind, f"[{item.obj_idx}] STRING {item.value!r}", item))
+        elif isinstance(item, SharedNode):
+            lines.append((ind, f"SHARED -> [{item.target_idx}]", item))
+        elif isinstance(item, DoubleNode):
+            lines.append((ind, f"[{item.obj_idx}] DOUBLE {item.value}", item))
+        elif isinstance(item, BlockNode):
+            hint = f" ({item.type_hint})" if item.type_hint else ""
+            lines.append((ind, f"[{item.obj_idx}] BLOCK tag={item.tag} size={len(item.children)}{hint} {{", item))
+            stack.append((_CLOSE_BRACE, ind))
+            for child in reversed(item.children):
+                stack.append((child, ind + 1))
+
     return lines
 
 
 # ── Gather statistics ────────────────────────────────────────────────────
 
 def gather_stats(node, stats=None):
-    """Walk the tree and gather statistics."""
+    """Walk the tree and gather statistics (iterative)."""
     if stats is None:
         stats = {
             "blocks": 0,
@@ -450,24 +539,27 @@ def gather_stats(node, stats=None):
             "type_hints": collections.Counter(),
         }
 
-    if isinstance(node, IntNode):
-        stats["ints"] += 1
-    elif isinstance(node, StringNode):
-        stats["strings"] += 1
-        stats["string_values"][node.value] += 1
-    elif isinstance(node, SharedNode):
-        stats["shared_refs"] += 1
-        stats["shared_targets"][node.target_idx] += 1
-    elif isinstance(node, DoubleNode):
-        stats["doubles"] += 1
-    elif isinstance(node, BlockNode):
-        stats["blocks"] += 1
-        key = f"tag={node.tag} size={len(node.children)}"
-        stats["block_types"][key] += 1
-        if node.type_hint:
-            stats["type_hints"][node.type_hint] += 1
-        for child in node.children:
-            gather_stats(child, stats)
+    stack = [node]
+    while stack:
+        node = stack.pop()
+        if isinstance(node, IntNode):
+            stats["ints"] += 1
+        elif isinstance(node, StringNode):
+            stats["strings"] += 1
+            stats["string_values"][node.value] += 1
+        elif isinstance(node, SharedNode):
+            stats["shared_refs"] += 1
+            stats["shared_targets"][node.target_idx] += 1
+        elif isinstance(node, DoubleNode):
+            stats["doubles"] += 1
+        elif isinstance(node, BlockNode):
+            stats["blocks"] += 1
+            key = f"tag={node.tag} size={len(node.children)}"
+            stats["block_types"][key] += 1
+            if node.type_hint:
+                stats["type_hints"][node.type_hint] += 1
+            for child in reversed(node.children):
+                stack.append(child)
 
     return stats
 
@@ -486,86 +578,90 @@ def compare_trees(node_a, node_b, path="root", context_before=5):
 
 
 def _compare_recursive(a, b, path, diffs, max_diffs):
-    if len(diffs) >= max_diffs:
-        return
+    """Iterative tree comparison using an explicit stack."""
+    stack = [(a, b, path)]
 
-    type_a = type(a).__name__
-    type_b = type(b).__name__
-
-    if type_a != type_b:
-        diffs.append({
-            "path": path,
-            "kind": "type_mismatch",
-            "a": repr(a),
-            "b": repr(b),
-        })
-        return
-
-    if isinstance(a, IntNode):
-        if a.value != b.value:
-            diffs.append({
-                "path": path,
-                "kind": "int_value",
-                "a": f"INT {a.value}",
-                "b": f"INT {b.value}",
-            })
-    elif isinstance(a, StringNode):
-        if a.value != b.value:
-            diffs.append({
-                "path": path,
-                "kind": "string_value",
-                "a": f"STRING {a.value!r}",
-                "b": f"STRING {b.value!r}",
-            })
-        if a.obj_idx != b.obj_idx:
-            diffs.append({
-                "path": path,
-                "kind": "obj_idx",
-                "a": f"obj_idx={a.obj_idx}",
-                "b": f"obj_idx={b.obj_idx}",
-            })
-    elif isinstance(a, SharedNode):
-        if a.target_idx != b.target_idx:
-            diffs.append({
-                "path": path,
-                "kind": "shared_target",
-                "a": f"SHARED -> [{a.target_idx}]",
-                "b": f"SHARED -> [{b.target_idx}]",
-            })
-    elif isinstance(a, DoubleNode):
-        if a.value != b.value:
-            diffs.append({
-                "path": path,
-                "kind": "double_value",
-                "a": f"DOUBLE {a.value}",
-                "b": f"DOUBLE {b.value}",
-            })
-    elif isinstance(a, BlockNode):
-        if a.tag != b.tag:
-            diffs.append({
-                "path": path,
-                "kind": "block_tag",
-                "a": f"tag={a.tag}",
-                "b": f"tag={b.tag}",
-            })
-            return  # Children won't be comparable
-
-        if len(a.children) != len(b.children):
-            diffs.append({
-                "path": path,
-                "kind": "block_size",
-                "a": f"size={len(a.children)}",
-                "b": f"size={len(b.children)}",
-            })
+    while stack:
+        if len(diffs) >= max_diffs:
             return
 
-        # One is shared, the other is inline — this is the classic parity issue
-        # Handle at caller level since types already differ
+        a, b, path = stack.pop()
 
-        hint = f" ({a.type_hint})" if a.type_hint else ""
-        for i, (ca, cb) in enumerate(zip(a.children, b.children)):
-            child_path = f"{path}/[{a.obj_idx}]BLOCK(tag={a.tag},sz={len(a.children)}){hint}/{i}"
-            _compare_recursive(ca, cb, child_path, diffs, max_diffs)
+        type_a = type(a).__name__
+        type_b = type(b).__name__
+
+        if type_a != type_b:
+            diffs.append({
+                "path": path,
+                "kind": "type_mismatch",
+                "a": repr(a),
+                "b": repr(b),
+            })
+            continue
+
+        if isinstance(a, IntNode):
+            if a.value != b.value:
+                diffs.append({
+                    "path": path,
+                    "kind": "int_value",
+                    "a": f"INT {a.value}",
+                    "b": f"INT {b.value}",
+                })
+        elif isinstance(a, StringNode):
+            if a.value != b.value:
+                diffs.append({
+                    "path": path,
+                    "kind": "string_value",
+                    "a": f"STRING {a.value!r}",
+                    "b": f"STRING {b.value!r}",
+                })
+            if a.obj_idx != b.obj_idx:
+                diffs.append({
+                    "path": path,
+                    "kind": "obj_idx",
+                    "a": f"obj_idx={a.obj_idx}",
+                    "b": f"obj_idx={b.obj_idx}",
+                })
+        elif isinstance(a, SharedNode):
+            if a.target_idx != b.target_idx:
+                diffs.append({
+                    "path": path,
+                    "kind": "shared_target",
+                    "a": f"SHARED -> [{a.target_idx}]",
+                    "b": f"SHARED -> [{b.target_idx}]",
+                })
+        elif isinstance(a, DoubleNode):
+            if a.value != b.value:
+                diffs.append({
+                    "path": path,
+                    "kind": "double_value",
+                    "a": f"DOUBLE {a.value}",
+                    "b": f"DOUBLE {b.value}",
+                })
+        elif isinstance(a, BlockNode):
+            if a.tag != b.tag:
+                diffs.append({
+                    "path": path,
+                    "kind": "block_tag",
+                    "a": f"tag={a.tag}",
+                    "b": f"tag={b.tag}",
+                })
+                continue  # Children won't be comparable
+
+            if len(a.children) != len(b.children):
+                diffs.append({
+                    "path": path,
+                    "kind": "block_size",
+                    "a": f"size={len(a.children)}",
+                    "b": f"size={len(b.children)}",
+                })
+                continue
+
+            hint = f" ({a.type_hint})" if a.type_hint else ""
+            # Push children in reverse so index 0 is processed first
+            for i in range(len(a.children) - 1, -1, -1):
+                child_path = f"{path}/[{a.obj_idx}]BLOCK(tag={a.tag},sz={len(a.children)}){hint}/{i}"
+                stack.append((a.children[i], b.children[i], child_path))
 
 
 # ── Subcommand: decode ──────────────────────────────────────────────────
@@ -843,12 +939,15 @@ def cmd_sharing(args):
 
 
 def _collect_shared_refs(node, refs):
-    """Recursively collect all SharedNode references."""
-    if isinstance(node, SharedNode):
-        refs.append(node)
-    elif isinstance(node, BlockNode):
-        for child in node.children:
-            _collect_shared_refs(child, refs)
+    """Iteratively collect all SharedNode references."""
+    stack = [node]
+    while stack:
+        node = stack.pop()
+        if isinstance(node, SharedNode):
+            refs.append(node)
+        elif isinstance(node, BlockNode):
+            for child in reversed(node.children):
+                stack.append(child)
 
 
 def _print_position_detail(pos_node):
