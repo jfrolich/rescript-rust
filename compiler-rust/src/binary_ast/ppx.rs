@@ -2834,7 +2834,7 @@ fn rewrite_expression(expr: &Expression, arena: &mut ParseArena) -> Expression {
         };
     }
 
-    // First check if this is a pipe application
+    // First check if this is a pipe or #= application
     if let ExpressionDesc::Pexp_apply {
         funct,
         args,
@@ -2842,7 +2842,7 @@ fn rewrite_expression(expr: &Expression, arena: &mut ParseArena) -> Expression {
         transformed_jsx: _,
     } = &expr.pexp_desc
     {
-        // Check if this is a pipe: -> with two args
+        // Check if this is a binary op: -> or #= with two args
         if args.len() == 2
             && matches!(&args[0].0, ArgLabel::Nolabel)
             && matches!(&args[1].0, ArgLabel::Nolabel)
@@ -2859,13 +2859,87 @@ fn rewrite_expression(expr: &Expression, arena: &mut ParseArena) -> Expression {
                         // Now desugar based on what f is
                         return desugar_pipe(expr, a, f, arena);
                     }
+                    if op == "#=" {
+                        // This is a setter: obj["prop"] = value
+                        // OCaml transforms: Pexp_apply("#=", [Pexp_send(obj, name), value])
+                        // Into: Pexp_constraint(Pexp_apply(Pexp_send(obj, name^"#="), [value]), unit)
+                        return desugar_hash_set(expr, &args[0].1, &args[1].1, arena);
+                    }
                 }
             }
         }
     }
 
-    // Not a pipe - recursively rewrite sub-expressions
+    // Not a pipe or #= - recursively rewrite sub-expressions
     rewrite_expression_generic(expr, arena)
+}
+
+/// Desugar #= setter: obj["prop"] = value
+///
+/// Transforms `Pexp_apply("#=", [obj_expr, value])` where obj_expr is:
+/// - `Pexp_send(obj, {txt=name})`: becomes
+///   `Pexp_constraint(Pexp_apply(Pexp_send(obj, name^"#="), [value]), unit)`
+///
+/// This matches OCaml's `ast_exp_apply.ml` gen_assignment.
+fn desugar_hash_set(
+    expr: &Expression,
+    obj_expr: &Expression,
+    value_expr: &Expression,
+    arena: &mut ParseArena,
+) -> Expression {
+    let loc = expr.pexp_loc;
+
+    match &obj_expr.pexp_desc {
+        ExpressionDesc::Pexp_send(obj, method_loc) => {
+            let obj = rewrite_expression(obj, arena);
+            let value = rewrite_expression(value_expr, arena);
+
+            // Concatenate name with "#=" suffix
+            let setter_name = format!("{}#=", method_loc.txt);
+
+            // Create Pexp_send(obj, "name#=") with the outer loc
+            let send_expr = Expression {
+                pexp_desc: ExpressionDesc::Pexp_send(
+                    Box::new(obj),
+                    Located::new(setter_name, loc),
+                ),
+                pexp_loc: loc,
+                pexp_attributes: vec![],
+            };
+
+            // Create Pexp_apply(send_expr, [(Nolabel, value)]) with the outer loc
+            let apply_expr = Expression {
+                pexp_desc: ExpressionDesc::Pexp_apply {
+                    funct: Box::new(send_expr),
+                    args: vec![(ArgLabel::Nolabel, value)],
+                    partial: false,
+                    transformed_jsx: false,
+                },
+                pexp_loc: loc,
+                pexp_attributes: vec![],
+            };
+
+            // Create type "unit" = Ptyp_constr(Lident "unit", [])
+            let unit_lid = Longident::Lident(arena.intern_string("unit"));
+            let unit_lid_idx = arena.push_longident(unit_lid);
+            let unit_type = CoreType {
+                ptyp_desc: CoreTypeDesc::Ptyp_constr(Located::new(unit_lid_idx, loc), vec![]),
+                ptyp_loc: loc,
+                ptyp_attributes: vec![],
+            };
+
+            // Wrap in Pexp_constraint
+            Expression {
+                pexp_desc: ExpressionDesc::Pexp_constraint(Box::new(apply_expr), unit_type),
+                pexp_loc: loc,
+                pexp_attributes: vec![],
+            }
+        }
+        _ => {
+            // Fallback: just rewrite sub-expressions generically
+            rewrite_expression_generic(expr, arena)
+        }
+    }
 }
 
 /// Desugar pipe expression: a -> f

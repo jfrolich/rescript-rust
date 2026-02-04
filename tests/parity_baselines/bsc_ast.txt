@@ -660,6 +660,7 @@ syntax_tests/data/printer/expr/nestedCallbacks.res
 syntax_tests/data/printer/expr/open.res
 syntax_tests/data/printer/expr/RecordOrObject.res
 syntax_tests/data/printer/expr/sequence.res
+syntax_tests/data/printer/expr/setfield.res
 syntax_tests/data/printer/expr/sideEffects.res
 syntax_tests/data/printer/expr/smartPipe.res
 syntax_tests/data/printer/expr/switch.res
