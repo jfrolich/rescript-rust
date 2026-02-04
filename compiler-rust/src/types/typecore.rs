@@ -3112,7 +3112,7 @@ pub(crate) fn transl_exception(
                 .as_ref()
                 .map(|ty| transl_type(tctx, env, ty).map(|(typed, _)| typed))
                 .transpose()?;
-            TypedExtensionConstructorKind::Text_decl(vec![typed_args], typed_ret)
+            TypedExtensionConstructorKind::Text_decl(typed_args, typed_ret)
         }
         ExtensionConstructorKind::Pext_rebind(lid) => {
             let path = Path::pident(Ident::create_persistent(

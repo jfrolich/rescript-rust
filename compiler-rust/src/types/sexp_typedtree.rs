@@ -1780,12 +1780,8 @@ fn sexp_extension_constructor(
     };
     let kind = match &ec.ext_kind {
         ExtensionConstructorKind::Text_decl(args, ret) => {
-            // args is Vec<ConstructorArgument> - print each argument
-            let args_sexp = Sexp::list(
-                args.iter()
-                    .map(|arg| sexp_constructor_argument(arena, ctx, with_locs, arg))
-                    .collect(),
-            );
+            // args is a single ConstructorArgument - print it directly
+            let args_sexp = sexp_constructor_argument(arena, ctx, with_locs, args);
             Sexp::list(vec![
                 Sexp::atom("Text_decl"),
                 args_sexp,
