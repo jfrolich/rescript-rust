@@ -4569,8 +4569,14 @@ fn parse_record_fields(p: &mut Parser<'_>) -> Vec<ExpressionRecordField> {
 
             // Punning: this field is punned (value is same as name)
             let loc = p.mk_loc_idx_to_prev_end(expr_start_idx);
-            let pun_idx = p.arena_mut().push_string(pun_name);
-            let punned_expr = ast_helper::make_ident(p, Longident::Lident(pun_idx), loc.clone());
+            // For simple identifiers, reuse lid_idx for sharing
+            let is_simple = matches!(p.arena().get_longident(lid_idx), Longident::Lident(_));
+            let punned_expr = if is_simple {
+                ast_helper::make_ident_idx(lid_idx, loc)
+            } else {
+                let pun_idx = p.arena().get_longident(lid_idx).last_idx();
+                ast_helper::make_ident(p, Longident::Lident(pun_idx), loc)
+            };
             let lid = with_loc(lid_idx, loc);
 
             // Emit appropriate error and expect comma or colon
@@ -4587,8 +4593,17 @@ fn parse_record_fields(p: &mut Parser<'_>) -> Vec<ExpressionRecordField> {
             // Punning: field is same as variable
             // For optional punned fields, the expression location is just the identifier (using expr_start)
             let loc = p.mk_loc_idx_to_prev_end(expr_start_idx);
-            let pun_idx = p.arena_mut().push_string(pun_name);
-            let expr = ast_helper::make_ident(p, Longident::Lident(pun_idx), loc.clone());
+            // For simple identifiers (Lident), reuse the same lid_idx for both the
+            // field label and the expression to match OCaml's sharing behavior.
+            // For qualified paths (Ldot), OCaml uses remove_module_name_from_punned_field_value
+            // which creates a new Lident with just the last component.
+            let is_simple = matches!(p.arena().get_longident(lid_idx), Longident::Lident(_));
+            let expr = if is_simple {
+                ast_helper::make_ident_idx(lid_idx, loc)
+            } else {
+                let pun_idx = p.arena().get_longident(lid_idx).last_idx();
+                ast_helper::make_ident(p, Longident::Lident(pun_idx), loc)
+            };
             (with_loc(lid_idx, loc), expr, opt_punning)
         };
 

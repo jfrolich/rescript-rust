@@ -1277,15 +1277,17 @@ fn parse_record_pattern(p: &mut Parser<'_>) -> Pattern {
             // field? (optional punning after field name - less common)
             p.next();
             let loc = p.mk_loc_idx_to_prev_end(field_start_idx);
-            let pun_name_idx = p.arena_mut().push_string(pun_name.clone());
-            let pat = ast_helper::make_var_pat(pun_name_idx, loc.clone());
+            // Reuse StrIdx from the longident's last component for sharing
+            let pun_name_idx = p.arena().get_longident(lid_idx).last_idx();
+            let pat = ast_helper::make_var_pat(pun_name_idx, loc);
             (with_loc(lid_idx, loc), pat, true)
         } else {
             // Punning: field is same as variable (use last identifier in the path)
             // For optional punned fields, the pattern location is just the identifier (using pat_start)
             let loc = p.mk_loc_idx_to_prev_end(pat_start_idx);
-            let pun_name_idx = p.arena_mut().push_string(pun_name);
-            let pat = ast_helper::make_var_pat(pun_name_idx, loc.clone());
+            // Reuse StrIdx from the longident's last component for sharing
+            let pun_name_idx = p.arena().get_longident(lid_idx).last_idx();
+            let pat = ast_helper::make_var_pat(pun_name_idx, loc);
             (with_loc(lid_idx, loc), pat, opt_punning)
         };
 
