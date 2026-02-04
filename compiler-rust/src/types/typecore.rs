@@ -28,7 +28,7 @@
 
 use crate::ident::Ident;
 use crate::location::Location;
-use crate::parse_arena::{LidentIdx, Located, LocIdx, ParseArena, StrIdx};
+use crate::parse_arena::{LidentIdx, LocIdx, Located, ParseArena, StrIdx};
 use crate::parser::ast::{
     ArgLabel, Expression as ParsedExpression, Pattern as ParsedPattern, RecFlag,
 };
@@ -36,7 +36,9 @@ use crate::parser::longident::Longident;
 use crate::types::typedtree::{
     ArrowArg, Constant, EnvRef, Expression, ExpressionDesc, Pattern, PatternDesc, ValueBinding,
 };
-use crate::types::{Env, Path, TypeContext, TypeError, TypeExprRef, UnifyState, ValueDescription};
+use crate::types::{
+    Env, ModuleDeclaration, Path, TypeContext, TypeError, TypeExprRef, UnifyState, ValueDescription,
+};
 
 // ============================================================================
 // Location Conversion Helpers
@@ -245,6 +247,15 @@ pub enum TypeCoreError {
 
     /// JSX not enabled.
     JsxNotEnabled,
+}
+
+impl From<crate::types::typemod::TypeModError> for TypeCoreError {
+    fn from(err: crate::types::typemod::TypeModError) -> Self {
+        match err {
+            crate::types::typemod::TypeModError::CoreError(core) => core,
+            _ => TypeCoreError::CannotInferSignature,
+        }
+    }
 }
 
 /// Context for type clash errors.
@@ -522,15 +533,20 @@ pub fn convert_constant(cst: &crate::parser::ast::Constant) -> TypeCoreResult<Co
 // ============================================================================
 
 /// Convert a parser ArgLabel to a types ArgLabel (for TypeContext methods).
-fn convert_arg_label_for_ctx(lbl: &crate::parser::ast::ArgLabel, arena: &ParseArena) -> crate::types::ArgLabel {
+fn convert_arg_label_for_ctx(
+    lbl: &crate::parser::ast::ArgLabel,
+    arena: &ParseArena,
+) -> crate::types::ArgLabel {
     match lbl {
         crate::parser::ast::ArgLabel::Nolabel => crate::types::ArgLabel::Nolabel,
-        crate::parser::ast::ArgLabel::Labelled(s) => {
-            crate::types::ArgLabel::labelled(arena.get_string(s.txt).to_string(), arena.to_location(s.loc))
-        }
-        crate::parser::ast::ArgLabel::Optional(s) => {
-            crate::types::ArgLabel::optional(arena.get_string(s.txt).to_string(), arena.to_location(s.loc))
-        }
+        crate::parser::ast::ArgLabel::Labelled(s) => crate::types::ArgLabel::labelled(
+            arena.get_string(s.txt).to_string(),
+            arena.to_location(s.loc),
+        ),
+        crate::parser::ast::ArgLabel::Optional(s) => crate::types::ArgLabel::optional(
+            arena.get_string(s.txt).to_string(),
+            arena.to_location(s.loc),
+        ),
     }
 }
 
@@ -609,11 +625,7 @@ fn transl_type_inner(
             };
 
             let ctyp = TypedCoreType {
-                ctyp_desc: TypedCoreTypeDesc::Ttyp_arrow(
-                    arrow_arg,
-                    Box::new(ret_ctyp),
-                    arity_opt,
-                ),
+                ctyp_desc: TypedCoreTypeDesc::Ttyp_arrow(arrow_arg, Box::new(ret_ctyp), arity_opt),
                 ctyp_type: arrow_ty,
                 ctyp_env: EnvRef(0),
                 ctyp_loc: loc,
@@ -658,8 +670,8 @@ fn transl_type_inner(
 
             // Create path from longident
             // Full implementation would look up the type and use its actual path
-            let longident = tctx.arena.get_longident(lid.txt);
-            let path = Path::pident(Ident::create_persistent(longident.to_string()));
+            let longident_str = tctx.arena.longident_idx_to_string(lid.txt);
+            let path = Path::pident(Ident::create_persistent(longident_str));
 
             let constr_ty = ctx.new_constr(path.clone(), arg_refs);
 
@@ -694,7 +706,10 @@ fn transl_type_inner(
 
         CTD::Ptyp_poly(vars, body) => {
             // Polymorphic type: 'a 'b. T
-            let var_names: Vec<String> = vars.iter().map(|v| tctx.arena.get_string(v.txt).to_string()).collect();
+            let var_names: Vec<String> = vars
+                .iter()
+                .map(|v| tctx.arena.get_string(v.txt).to_string())
+                .collect();
 
             // Create type variables for each bound variable
             for name in &var_names {
@@ -958,7 +973,11 @@ fn type_pattern_inner(
             let id = state.enter_variable(loc, name, ty_var, true, false, tctx.arena)?;
 
             Ok(Pattern::new(
-                PatternDesc::Tpat_alias(Box::new(typed_inner), id, convert_located_stridx(name, tctx.arena)),
+                PatternDesc::Tpat_alias(
+                    Box::new(typed_inner),
+                    id,
+                    convert_located_stridx(name, tctx.arena),
+                ),
                 loc,
                 expected_ty,
                 EnvRef(0),
@@ -1227,10 +1246,11 @@ fn type_pattern_construct(
 
     // Look up constructor
     let lid_txt = tctx.arena.get_longident(lid.txt);
-    let (cstr_desc, _cstr_path) = match env.find_constructor(&lid_txt.to_string()) {
+    let lid_str = tctx.arena.longident_to_string(lid_txt);
+    let (cstr_desc, _cstr_path) = match env.find_constructor(&lid_str) {
         Ok(desc) => (
             desc.clone(),
-            Path::pident(Ident::create_persistent(lid_txt.to_string())),
+            Path::pident(Ident::create_persistent(&lid_str)),
         ),
         Err(_) => {
             return Err(TypeCoreError::NotAVariantType(lid_txt.clone()));
@@ -1352,23 +1372,32 @@ fn type_pattern_record(
     // Type check each field pattern
     let mut typed_fields = Vec::new();
     for (idx, field) in fields.iter().enumerate() {
-        let field_ty = ctx.new_var(None);
-        let typed_pat = type_pattern_inner(tctx, env, &field.pat, field_ty, mode, state, 0)?;
-
-        // Create placeholder label description
-        let label_desc = crate::types::LabelDescription {
-            lbl_name: tctx.resolve_lid(field.lid.txt).to_string(),
-            lbl_res: expected_ty,
-            lbl_arg: field_ty,
-            lbl_mut: crate::types::MutableFlag::Immutable,
-            lbl_optional: field.opt,
-            lbl_pos: idx as i32,
-            lbl_all: crate::types::LabelArrayRef(0),
-            lbl_repres: crate::types::RecordRepresentation::RecordRegular,
-            lbl_private: crate::types::PrivateFlag::Public,
-            lbl_loc: tctx.arena.to_location(field.lid.loc),
-            lbl_attributes: vec![],
+        let label_name = tctx.resolve_lid(field.lid.txt).to_string();
+        let (field_ty, label_desc) = match env.find_label(&label_name) {
+            Ok(desc) => {
+                let desc = desc.clone();
+                unify_pattern_types(tctx, field.lid.loc, desc.lbl_res, expected_ty)?;
+                (desc.lbl_arg, desc)
+            }
+            Err(_) => {
+                let field_ty = ctx.new_var(None);
+                let label_desc = crate::types::LabelDescription {
+                    lbl_name: label_name,
+                    lbl_res: expected_ty,
+                    lbl_arg: field_ty,
+                    lbl_mut: crate::types::MutableFlag::Immutable,
+                    lbl_optional: field.opt,
+                    lbl_pos: idx as i32,
+                    lbl_all: crate::types::LabelArrayRef(0),
+                    lbl_repres: crate::types::RecordRepresentation::RecordRegular,
+                    lbl_private: crate::types::PrivateFlag::Public,
+                    lbl_loc: tctx.arena.to_location(field.lid.loc),
+                    lbl_attributes: vec![],
+                };
+                (field_ty, label_desc)
+            }
         };
+        let typed_pat = type_pattern_inner(tctx, env, &field.pat, field_ty, mode, state, 0)?;
 
         typed_fields.push((field.lid.clone(), label_desc, typed_pat, field.opt));
     }
@@ -1519,8 +1548,8 @@ fn type_pattern_open(
     let typed_inner = type_pattern_inner(tctx, env, inner_pat, expected_ty, mode, state, 0)?;
 
     // Create the open pattern
-    let mod_lid_txt = tctx.arena.get_longident(mod_lid.txt);
-    let _mod_path = Path::pident(Ident::create_persistent(mod_lid_txt.to_string()));
+    let mod_lid_str = tctx.arena.longident_idx_to_string(mod_lid.txt);
+    let _mod_path = Path::pident(Ident::create_persistent(mod_lid_str));
 
     Ok(Pattern::new(
         PatternDesc::Tpat_or(Box::new(typed_inner.clone()), Box::new(typed_inner), None),
@@ -1552,7 +1581,7 @@ pub fn type_expect<'a>(
         ED::Pexp_ident(lid) => {
             // Identifier expression
             let longident = tctx.resolve_lid(lid.txt);
-            let (path, desc) = env.lookup_value_by_lid(longident)?;
+            let (path, desc) = env.lookup_value_by_lid(tctx.arena, longident)?;
 
             // Instantiate the type
             let ty = crate::types::instance(ctx, desc.val_type);
@@ -2446,11 +2475,12 @@ fn type_construct(
 ) -> TypeCoreResult<Expression> {
     let ctx = tctx.type_ctx;
     let longident = tctx.resolve_lid(lid.txt);
+    let longident_str = tctx.arena.longident_to_string(longident);
 
     // Look up constructor
-    let (_cstr_path, cstr_desc) = match env.find_constructor(&longident.to_string()) {
+    let (_cstr_path, cstr_desc) = match env.find_constructor(&longident_str) {
         Ok(desc) => (
-            Path::pident(Ident::create_persistent(longident.to_string())),
+            Path::pident(Ident::create_persistent(&longident_str)),
             desc.clone(),
         ),
         Err(_) => {
@@ -2588,19 +2618,27 @@ fn type_record(
         let field_ty = ctx.new_var(None);
         let typed_expr = type_expect(tctx, env, &field.expr, field_ty, None)?;
 
-        // Create a placeholder label description
-        let label_desc = crate::types::LabelDescription {
-            lbl_name: tctx.resolve_lid(field.lid.txt).to_string(),
-            lbl_res: expected_ty,
-            lbl_arg: field_ty,
-            lbl_mut: crate::types::MutableFlag::Immutable,
-            lbl_optional: field.opt,
-            lbl_pos: idx as i32,
-            lbl_all: crate::types::LabelArrayRef(0), // Placeholder
-            lbl_repres: crate::types::RecordRepresentation::RecordRegular,
-            lbl_private: crate::types::PrivateFlag::Public,
-            lbl_loc: tctx.arena.to_location(field.lid.loc),
-            lbl_attributes: vec![],
+        let label_name = tctx.resolve_lid(field.lid.txt).to_string();
+        let label_desc = match env.find_label(&label_name) {
+            Ok(desc) => {
+                let desc = desc.clone();
+                unify_expression_types(tctx, field.lid.loc, desc.lbl_res, expected_ty, None)?;
+                unify_expression_types(tctx, field.lid.loc, desc.lbl_arg, field_ty, None)?;
+                desc
+            }
+            Err(_) => crate::types::LabelDescription {
+                lbl_name: label_name,
+                lbl_res: expected_ty,
+                lbl_arg: field_ty,
+                lbl_mut: crate::types::MutableFlag::Immutable,
+                lbl_optional: field.opt,
+                lbl_pos: idx as i32,
+                lbl_all: crate::types::LabelArrayRef(0),
+                lbl_repres: crate::types::RecordRepresentation::RecordRegular,
+                lbl_private: crate::types::PrivateFlag::Public,
+                lbl_loc: tctx.arena.to_location(field.lid.loc),
+                lbl_attributes: vec![],
+            },
         };
 
         typed_fields.push((
@@ -2638,23 +2676,32 @@ fn type_field(
     let record_ty = ctx.new_var(None);
     let typed_record = type_expect(tctx, env, record_expr, record_ty, None)?;
 
-    // Look up the field - for now just create placeholder
-    let field_ty = ctx.new_var(None);
-    unify_expression_types(tctx, loc, field_ty, expected_ty, None)?;
-
-    // Create placeholder label description
-    let label_desc = crate::types::LabelDescription {
-        lbl_name: tctx.resolve_lid(field_lid.txt).to_string(),
-        lbl_res: record_ty,
-        lbl_arg: field_ty,
-        lbl_mut: crate::types::MutableFlag::Immutable,
-        lbl_optional: false,
-        lbl_pos: 0,
-        lbl_all: crate::types::LabelArrayRef(0),
-        lbl_repres: crate::types::RecordRepresentation::RecordRegular,
-        lbl_private: crate::types::PrivateFlag::Public,
-        lbl_loc: tctx.arena.to_location(field_lid.loc),
-        lbl_attributes: vec![],
+    let field_name = tctx.resolve_lid(field_lid.txt).to_string();
+    let (field_ty, label_desc) = match env.find_label(&field_name) {
+        Ok(desc) => {
+            let desc = desc.clone();
+            unify_expression_types(tctx, field_lid.loc, desc.lbl_res, record_ty, None)?;
+            unify_expression_types(tctx, field_lid.loc, desc.lbl_arg, expected_ty, None)?;
+            (desc.lbl_arg, desc)
+        }
+        Err(_) => {
+            let field_ty = ctx.new_var(None);
+            unify_expression_types(tctx, loc, field_ty, expected_ty, None)?;
+            let label_desc = crate::types::LabelDescription {
+                lbl_name: field_name,
+                lbl_res: record_ty,
+                lbl_arg: field_ty,
+                lbl_mut: crate::types::MutableFlag::Immutable,
+                lbl_optional: false,
+                lbl_pos: 0,
+                lbl_all: crate::types::LabelArrayRef(0),
+                lbl_repres: crate::types::RecordRepresentation::RecordRegular,
+                lbl_private: crate::types::PrivateFlag::Public,
+                lbl_loc: tctx.arena.to_location(field_lid.loc),
+                lbl_attributes: vec![],
+            };
+            (field_ty, label_desc)
+        }
     };
 
     Ok(Expression::new(
@@ -2686,29 +2733,37 @@ fn type_setfield(
     let record_ty = ctx.new_var(None);
     let typed_record = type_expect(tctx, env, record_expr, record_ty, None)?;
 
-    // Get field type
-    let field_ty = ctx.new_var(None);
+    let field_name = tctx.resolve_lid(field_lid.txt).to_string();
+    let (field_ty, label_desc) = match env.find_label(&field_name) {
+        Ok(desc) => {
+            let desc = desc.clone();
+            unify_expression_types(tctx, field_lid.loc, desc.lbl_res, record_ty, None)?;
+            (desc.lbl_arg, desc)
+        }
+        Err(_) => {
+            let field_ty = ctx.new_var(None);
+            let label_desc = crate::types::LabelDescription {
+                lbl_name: field_name,
+                lbl_res: record_ty,
+                lbl_arg: field_ty,
+                lbl_mut: crate::types::MutableFlag::Mutable,
+                lbl_optional: false,
+                lbl_pos: 0,
+                lbl_all: crate::types::LabelArrayRef(0),
+                lbl_repres: crate::types::RecordRepresentation::RecordRegular,
+                lbl_private: crate::types::PrivateFlag::Public,
+                lbl_loc: tctx.arena.to_location(field_lid.loc),
+                lbl_attributes: vec![],
+            };
+            (field_ty, label_desc)
+        }
+    };
 
     // Type check the new value
     let typed_value = type_expect(tctx, env, new_value, field_ty, None)?;
 
     // setfield has type unit
     unify_expression_types(tctx, loc, expected_ty, unit_ty, context)?;
-
-    // Create placeholder label description
-    let label_desc = crate::types::LabelDescription {
-        lbl_name: tctx.resolve_lid(field_lid.txt).to_string(),
-        lbl_res: record_ty,
-        lbl_arg: field_ty,
-        lbl_mut: crate::types::MutableFlag::Mutable,
-        lbl_optional: false,
-        lbl_pos: 0,
-        lbl_all: crate::types::LabelArrayRef(0),
-        lbl_repres: crate::types::RecordRepresentation::RecordRegular,
-        lbl_private: crate::types::PrivateFlag::Public,
-        lbl_loc: tctx.arena.to_location(field_lid.loc),
-        lbl_attributes: vec![],
-    };
 
     Ok(Expression::new(
         ExpressionDesc::Texp_setfield(
@@ -2810,21 +2865,28 @@ fn type_open(
     expected_ty: TypeExprRef,
     attributes: &[crate::parser::ast::Attribute],
 ) -> TypeCoreResult<Expression> {
-    // Look up the module and extend the environment with its exports
-    // For now, we just type check the body in the current environment
-    // Full implementation would open the module's bindings into scope
-    let _ = lid; // TODO: Open the module's bindings (use tctx.resolve_lid(lid.txt) when needed)
+    let path = Path::from_longident(tctx.resolve_lid(lid.txt), |idx| tctx.arena.get_string(idx));
+    let opened_env = env
+        .lookup_module(&path)
+        .ok()
+        .and_then(|decl| match &decl.md_type {
+            crate::types::ModuleType::MtySignature(sig) => {
+                Some(crate::types::typemod::extend_env_with_signature(env, sig))
+            }
+            _ => None,
+        })
+        .unwrap_or_else(|| env.clone());
 
-    // Type check the body expression
-    let typed_body = type_expect(tctx, env, body, expected_ty, None)?;
+    let typed_body = type_expect(tctx, &opened_env, body, expected_ty, None)?;
 
-    // Return expression with open in exp_extra
-    // For now, return the body directly since we don't have full module support
-    Ok(Expression::new(
-        typed_body.exp_desc,
+    Ok(typed_body.with_exp_extra(
+        crate::types::typedtree::ExpExtra::Texp_open(
+            crate::parser::ast::OverrideFlag::Fresh,
+            path,
+            lid.clone(),
+            EnvRef(0),
+        ),
         loc.clone(),
-        expected_ty,
-        EnvRef(0),
         attributes.to_vec(),
     ))
 }
@@ -2931,21 +2993,16 @@ fn type_letexception(
     tctx: &mut TypeCheckContext<'_>,
     env: &Env,
     loc: LocIdx,
-    _ext_constr: &crate::parser::ast::ExtensionConstructor,
+    ext_constr: &crate::parser::ast::ExtensionConstructor,
     body: &ParsedExpression,
     expected_ty: TypeExprRef,
     attributes: &[crate::parser::ast::Attribute],
 ) -> TypeCoreResult<Expression> {
-    // Register the exception constructor in the environment
-    // For now, just type check the body
-    // Full implementation would add the exception to the environment
+    let (typed_ext, new_env) = transl_exception(tctx, env, ext_constr)?;
+    let typed_body = type_expect(tctx, &new_env, body, expected_ty, None)?;
 
-    let typed_body = type_expect(tctx, env, body, expected_ty, None)?;
-
-    // Return the body expression
-    // Full implementation would wrap in Texp_letexception
     Ok(Expression::new(
-        typed_body.exp_desc,
+        ExpressionDesc::Texp_letexception(typed_ext, Box::new(typed_body)),
         loc.clone(),
         expected_ty,
         EnvRef(0),
@@ -2953,26 +3010,214 @@ fn type_letexception(
     ))
 }
 
+pub(crate) fn transl_exception(
+    tctx: &mut TypeCheckContext<'_>,
+    env: &Env,
+    ext_constr: &crate::parser::ast::ExtensionConstructor,
+) -> TypeCoreResult<(crate::types::typedtree::ExtensionConstructor, Env)> {
+    use crate::parser::ast::{ConstructorArguments, ExtensionConstructorKind};
+    use crate::types::decl::LabelDeclaration as DeclLabelDeclaration;
+    use crate::types::typedtree::{
+        ConstructorArgument as TypedConstructorArgument,
+        ExtensionConstructorKind as TypedExtensionConstructorKind, LabelDeclaration,
+    };
+
+    let name_str = tctx.arena.get_string(ext_constr.pext_name.txt).to_string();
+    let ext_id = Ident::create_local(name_str.as_str());
+
+    let mut ret_type_expr: Option<TypeExprRef> = None;
+    let (typed_args, type_args) = match &ext_constr.pext_kind {
+        ExtensionConstructorKind::Pext_decl(args, ret) => {
+            if let Some(ret_ty) = ret {
+                let (_, ret_ty_ref) = transl_type(tctx, env, ret_ty)?;
+                ret_type_expr = Some(ret_ty_ref);
+            }
+            match args {
+                ConstructorArguments::Pcstr_tuple(types) => {
+                    let mut typed = Vec::new();
+                    let mut tys = Vec::new();
+                    for ty in types {
+                        let (typed_ct, ty_ref) = transl_type(tctx, env, ty)?;
+                        typed.push(typed_ct);
+                        tys.push(ty_ref);
+                    }
+                    (
+                        TypedConstructorArgument::Cstr_tuple(typed),
+                        crate::types::ConstructorArguments::CstrTuple(tys),
+                    )
+                }
+                ConstructorArguments::Pcstr_record(labels) => {
+                    let mut typed_labels = Vec::new();
+                    let mut decl_labels = Vec::new();
+                    for label in labels {
+                        let (typed_ct, ty_ref) = transl_type(tctx, env, &label.pld_type)?;
+                        let label_name = tctx.arena.get_string(label.pld_name.txt).to_string();
+                        let label_id = Ident::create_local(label_name.as_str());
+                        let decl_mutable = match label.pld_mutable {
+                            crate::parser::ast::MutableFlag::Immutable => {
+                                crate::types::MutableFlag::Immutable
+                            }
+                            crate::parser::ast::MutableFlag::Mutable => {
+                                crate::types::MutableFlag::Mutable
+                            }
+                        };
+
+                        typed_labels.push(LabelDeclaration {
+                            ld_id: label_id.clone(),
+                            ld_name: Located {
+                                txt: label_name.clone(),
+                                loc: LocIdx::none(),
+                            },
+                            ld_mutable: label.pld_mutable,
+                            ld_type: typed_ct,
+                            ld_loc: LocIdx::none(),
+                            ld_attributes: label.pld_attributes.clone(),
+                        });
+
+                        decl_labels.push(DeclLabelDeclaration {
+                            ld_id: label_id,
+                            ld_mutable: decl_mutable,
+                            ld_optional: label.pld_optional,
+                            ld_type: ty_ref,
+                            ld_loc: tctx.arena.to_location(label.pld_loc),
+                            ld_attributes: vec![],
+                        });
+                    }
+                    (
+                        TypedConstructorArgument::Cstr_record(typed_labels),
+                        crate::types::ConstructorArguments::CstrRecord(decl_labels),
+                    )
+                }
+            }
+        }
+        ExtensionConstructorKind::Pext_rebind(_) => {
+            return Err(TypeCoreError::NotAnExtensionConstructor);
+        }
+    };
+
+    let ext_type = crate::types::ExtensionConstructor {
+        ext_type_path: Path::pident(Ident::create_persistent("exn")),
+        ext_type_params: vec![],
+        ext_args: type_args,
+        ext_ret_type: ret_type_expr,
+        ext_private: crate::types::PrivateFlag::Public,
+        ext_loc: tctx.arena.to_location(ext_constr.pext_loc),
+        ext_attributes: vec![],
+        ext_is_exception: true,
+    };
+
+    let typed_ext_kind = match &ext_constr.pext_kind {
+        ExtensionConstructorKind::Pext_decl(_, ret) => {
+            let typed_ret = ret
+                .as_ref()
+                .map(|ty| transl_type(tctx, env, ty).map(|(typed, _)| typed))
+                .transpose()?;
+            TypedExtensionConstructorKind::Text_decl(vec![typed_args], typed_ret)
+        }
+        ExtensionConstructorKind::Pext_rebind(lid) => {
+            let path = Path::pident(Ident::create_persistent(
+                tctx.resolve_lid(lid.txt).to_string(),
+            ));
+            TypedExtensionConstructorKind::Text_rebind(path, lid.clone())
+        }
+    };
+
+    let typed_ext = crate::types::typedtree::ExtensionConstructor {
+        ext_id: ext_id.clone(),
+        ext_name: Located {
+            txt: name_str.clone(),
+            loc: ext_constr.pext_name.loc,
+        },
+        ext_type: ext_type.clone(),
+        ext_kind: typed_ext_kind,
+        ext_loc: LocIdx::none(),
+        ext_attributes: ext_constr.pext_attributes.clone(),
+    };
+
+    let mut new_env = env.clone();
+    let cstr_desc = crate::types::ConstructorDescription {
+        cstr_name: name_str,
+        cstr_res: env.type_exn(tctx.type_ctx),
+        cstr_existentials: vec![],
+        cstr_args: match &ext_type.ext_args {
+            crate::types::ConstructorArguments::CstrTuple(types) => types.clone(),
+            crate::types::ConstructorArguments::CstrRecord(_) => vec![],
+        },
+        cstr_arity: match &ext_type.ext_args {
+            crate::types::ConstructorArguments::CstrTuple(types) => types.len() as i32,
+            crate::types::ConstructorArguments::CstrRecord(labels) => labels.len() as i32,
+        },
+        cstr_tag: crate::types::ConstructorTag::CstrExtension(Path::pident(ext_id.clone())),
+        cstr_consts: 0,
+        cstr_nonconsts: 1,
+        cstr_generalized: false,
+        cstr_private: crate::types::PrivateFlag::Public,
+        cstr_loc: tctx.arena.to_location(ext_constr.pext_loc),
+        cstr_attributes: vec![],
+        cstr_inlined: None,
+    };
+    new_env.add_constructor(ext_id, cstr_desc);
+
+    Ok((typed_ext, new_env))
+}
+
 /// Type check extension expression.
 fn type_extension_expr(
     tctx: &mut TypeCheckContext<'_>,
-    _env: &Env,
+    env: &Env,
     loc: LocIdx,
-    _extension: &crate::parser::ast::Extension,
+    extension: &crate::parser::ast::Extension,
     expected_ty: TypeExprRef,
     attributes: &[crate::parser::ast::Attribute],
 ) -> TypeCoreResult<Expression> {
-    // Extensions are handled by the preprocessor or raise an error
-    // For type checking, treat as an opaque value of the expected type
-    let _ = tctx; // May be used for error reporting in full implementation
+    use crate::parser::ast::{ExpressionDesc as ED, Payload, StructureItemDesc as SD};
 
-    Ok(Expression::new(
-        ExpressionDesc::Texp_constant(Constant::Int(0)), // Placeholder
-        loc.clone(),
-        expected_ty,
-        EnvRef(0),
-        attributes.to_vec(),
-    ))
+    let (name, payload) = extension;
+    let name_str = tctx.arena.get_string(name.txt);
+    if name_str == "ocaml.extension_constructor" || name_str == "extension_constructor" {
+        match payload {
+            Payload::PStr(items) if items.len() == 1 => {
+                match &items[0].pstr_desc {
+                    SD::Pstr_eval(expr, _) => {
+                        if let ED::Pexp_construct(lid, None) = &expr.pexp_desc {
+                            let longident = tctx.resolve_lid(lid.txt);
+                            let longident_str = tctx.arena.longident_to_string(longident);
+                            let (cstr_desc, _) = env
+                                .find_constructor(&longident_str)
+                                .map(|desc| {
+                                    (
+                                        desc.clone(),
+                                        Path::pident(Ident::create_persistent(&longident_str)),
+                                    )
+                                })
+                                .map_err(|_| TypeCoreError::NotAnExtensionConstructor)?;
+
+                            let ext_path = match &cstr_desc.cstr_tag {
+                                crate::types::ConstructorTag::CstrExtension(path) => path.clone(),
+                                _ => return Err(TypeCoreError::NotAnExtensionConstructor),
+                            };
+
+                            let ext_ty = env.type_extension_constructor(tctx.type_ctx);
+                            unify_expression_types(tctx, loc, ext_ty, expected_ty, None)?;
+
+                            return Ok(Expression::new(
+                                ExpressionDesc::Texp_extension_constructor(lid.clone(), ext_path),
+                                loc.clone(),
+                                ext_ty,
+                                EnvRef(0),
+                                attributes.to_vec(),
+                            ));
+                        }
+                    }
+                    _ => {}
+                }
+                Err(TypeCoreError::InvalidExtensionConstructorPayload)
+            }
+            _ => Err(TypeCoreError::InvalidExtensionConstructorPayload),
+        }
+    } else {
+        Err(TypeCoreError::InvalidExtensionConstructorPayload)
+    }
 }
 
 /// Type check let module expression.
@@ -2981,23 +3226,34 @@ fn type_letmodule(
     tctx: &mut TypeCheckContext<'_>,
     env: &Env,
     loc: LocIdx,
-    _name: &Located<StrIdx>,
-    _module_expr: &crate::parser::ast::ModuleExpr,
+    name: &Located<StrIdx>,
+    module_expr: &crate::parser::ast::ModuleExpr,
     body: &ParsedExpression,
     expected_ty: TypeExprRef,
     attributes: &[crate::parser::ast::Attribute],
 ) -> TypeCoreResult<Expression> {
-    // Let module introduces a local module binding
-    // Full implementation would:
-    // 1. Type check the module expression
-    // 2. Add the module to the environment
-    // 3. Type check the body in the extended environment
-
-    // For now, just type check the body
-    let typed_body = type_expect(tctx, env, body, expected_ty, None)?;
+    let typed_mod = crate::types::typemod::type_module_expr(tctx, env, tctx.arena, module_expr)
+        .map_err(TypeCoreError::from)?;
+    let mod_name = tctx.arena.get_string(name.txt).to_string();
+    let mod_id = Ident::create_local(mod_name.as_str());
+    let mod_decl = ModuleDeclaration {
+        md_type: typed_mod.mod_type.clone(),
+        md_attributes: vec![],
+        md_loc: tctx.arena.to_location(module_expr.pmod_loc),
+    };
+    let new_env = env.with_module(mod_id.clone(), mod_decl);
+    let typed_body = type_expect(tctx, &new_env, body, expected_ty, None)?;
 
     Ok(Expression::new(
-        typed_body.exp_desc,
+        ExpressionDesc::Texp_letmodule(
+            mod_id,
+            Located {
+                txt: mod_name,
+                loc: name.loc,
+            },
+            Box::new(typed_mod),
+            Box::new(typed_body),
+        ),
         loc.clone(),
         expected_ty,
         EnvRef(0),
@@ -3008,31 +3264,16 @@ fn type_letmodule(
 /// Type check pack expression (first-class module).
 fn type_pack(
     tctx: &mut TypeCheckContext<'_>,
-    _env: &Env,
+    env: &Env,
     loc: LocIdx,
-    _module_expr: &crate::parser::ast::ModuleExpr,
+    module_expr: &crate::parser::ast::ModuleExpr,
     expected_ty: TypeExprRef,
     attributes: &[crate::parser::ast::Attribute],
 ) -> TypeCoreResult<Expression> {
-    // Pack creates a first-class module value
-    // Full implementation would:
-    // 1. Type check the module expression
-    // 2. Create a package type from the module type
-
-    // For now, return a placeholder with the expected type
-    let placeholder_lid = tctx.arena.placeholder_located(loc);
-
+    let typed_mod = crate::types::typemod::type_module_expr(tctx, env, tctx.arena, module_expr)
+        .map_err(TypeCoreError::from)?;
     Ok(Expression::new(
-        ExpressionDesc::Texp_pack(Box::new(crate::types::typedtree::ModuleExpr {
-            mod_desc: crate::types::typedtree::ModuleExprDesc::Tmod_ident(
-                crate::types::Path::pident(Ident::create_local("placeholder")),
-                placeholder_lid,
-            ),
-            mod_loc: loc,
-            mod_type: crate::types::typedtree::ModuleType::placeholder(),
-            mod_env: EnvRef(0),
-            mod_attributes: vec![],
-        })),
+        ExpressionDesc::Texp_pack(Box::new(typed_mod)),
         loc,
         expected_ty,
         EnvRef(0),
@@ -3049,26 +3290,8 @@ fn type_jsx_element(
     expected_ty: TypeExprRef,
     attributes: &[crate::parser::ast::Attribute],
 ) -> TypeCoreResult<Expression> {
-    // JSX elements are typically transformed to function calls before type checking
-    // by the JSX PPX. If we encounter one here, we create a placeholder.
-    //
-    // In a full implementation, this would:
-    // 1. Look up the component (lowercase = intrinsic, uppercase = component)
-    // 2. Type check props
-    // 3. Type check children
-    // 4. Return appropriate React element type
-
-    let _ = tctx; // May be used for JSX type checking
-
-    // For now, return a placeholder with the expected type
-    // Real JSX handling would create Texp_apply calls
-    Ok(Expression::new(
-        ExpressionDesc::Texp_constant(Constant::Int(0)), // Placeholder
-        loc.clone(),
-        expected_ty,
-        EnvRef(0),
-        attributes.to_vec(),
-    ))
+    let _ = (tctx, expected_ty, attributes);
+    Err(TypeCoreError::JsxNotEnabled)
 }
 
 /// Type check let bindings.
@@ -3258,18 +3481,51 @@ impl Env {
         )
     }
 
+    /// Get the extension constructor type.
+    pub fn type_extension_constructor(&self, ctx: &TypeContext<'_>) -> TypeExprRef {
+        ctx.new_constr(
+            Path::pident(Ident::create_persistent("extension_constructor")),
+            vec![],
+        )
+    }
+
+    /// Get the exception type.
+    pub fn type_exn(&self, ctx: &TypeContext<'_>) -> TypeExprRef {
+        ctx.new_constr(Path::pident(Ident::create_persistent("exn")), vec![])
+    }
+
     /// Look up a value by longident.
-    pub fn lookup_value_by_lid(&self, lid: &Longident) -> TypeCoreResult<(Path, ValueDescription)> {
-        match self.find_value_with_id(lid.to_string().as_str()) {
+    pub fn lookup_value_by_lid(
+        &self,
+        arena: &ParseArena,
+        lid: &Longident,
+    ) -> TypeCoreResult<(Path, ValueDescription)> {
+        let name = match lid {
+            Longident::Lident(idx) => arena.get_string(*idx).to_string(),
+            Longident::Ldot(prefix, idx) => {
+                let mut parts: Vec<String> = prefix
+                    .flatten_idx()
+                    .into_iter()
+                    .map(|p| arena.get_string(p).to_string())
+                    .collect();
+                parts.push(arena.get_string(*idx).to_string());
+                parts.join(".")
+            }
+            Longident::Lapply(_, _) => lid.to_string(),
+        };
+        match self.find_value_with_id(name.as_str()) {
             Ok((id, desc)) => {
                 // Use the stored path if available (e.g., for Pervasives primitives),
                 // otherwise construct from identifier
-                let path = desc.val_path.clone().unwrap_or_else(|| Path::pident(id.clone()));
+                let path = desc
+                    .val_path
+                    .clone()
+                    .unwrap_or_else(|| Path::pident(id.clone()));
                 Ok((path, desc.clone()))
             }
             Err(_) => Err(TypeCoreError::UndefinedMethod {
                 ty: TypeExprRef(0), // Placeholder
-                method: lid.to_string(),
+                method: name,
                 alternatives: None,
             }),
         }
@@ -3329,13 +3585,11 @@ mod tests {
         let _env = crate::types::initial_env(&ctx);
         let mut state = PatternState::new();
 
-        let arena = ParseArena::new();
+        let mut arena = ParseArena::new();
         let loc = LocIdx::none();
         let ty = ctx.new_var(None);
-        let name = Located {
-            txt: "x".to_string(),
-            loc,
-        };
+        let name_idx: StrIdx = arena.intern_string("x");
+        let name: Located<StrIdx> = Located { txt: name_idx, loc };
 
         let id = state.enter_variable(loc, &name, ty, false, false, &arena);
         assert!(id.is_ok());

@@ -18,14 +18,15 @@
 #![allow(non_camel_case_types)]
 
 use crate::ident::Ident;
-use crate::parse_arena::{LidentIdx, Located, LocIdx};
+use crate::parse_arena::{LidentIdx, LocIdx, Located};
 use crate::parser::ast::{
-    ArgLabel, Arity, Attributes, ClosedFlag, DirectionFlag, MutableFlag, OverrideFlag, PrivateFlag,
-    RecFlag,
+    ArgLabel, Arity, Attribute, Attributes, ClosedFlag, DirectionFlag, MutableFlag, OverrideFlag,
+    PrivateFlag, RecFlag,
 };
 use crate::parser::longident::Longident;
 use crate::types::{
-    ConstructorDescription, LabelDescription, Path, RowDesc, TypeExprRef, ValueDescription,
+    ConstructorDescription, LabelDescription, Path, RowDesc, TypeExprRef,
+    ValueDescription as TypeValueDescription,
 };
 
 /// A located value (convenience alias).
@@ -176,7 +177,7 @@ pub enum ExpExtra {
 #[derive(Debug, Clone)]
 pub enum ExpressionDesc {
     /// Identifier: `x`, `M.x`.
-    Texp_ident(Path, Loc<LidentIdx>, ValueDescription),
+    Texp_ident(Path, Loc<LidentIdx>, TypeValueDescription),
 
     /// Constant: `1`, `'a'`, `"hello"`, `1.0`.
     Texp_constant(Constant),
@@ -276,6 +277,9 @@ pub enum ExpressionDesc {
 
     /// Pack: `(module M : MT)`.
     Texp_pack(Box<ModuleExpr>),
+
+    /// Extension constructor expression.
+    Texp_extension_constructor(Loc<LidentIdx>, Path),
 }
 
 // DirectionFlag and Arity are re-exported from parser::ast
@@ -502,25 +506,158 @@ pub enum ModuleExprDesc {
     Tmod_unpack(Expression, ModuleType),
 }
 
-/// Module type (placeholder - full definition in decl.rs).
-#[derive(Debug, Clone, Default)]
-pub struct ModuleType {
-    // Placeholder - actual module type comes from decl.rs
-    _placeholder: (),
+/// Module type (internal representation).
+pub type ModuleType = crate::types::ModuleType;
+
+/// Typed module type (typed tree representation).
+/// Corresponds to OCaml's Typedtree.module_type.
+#[derive(Debug, Clone)]
+pub struct TypedModuleType {
+    /// Module type description.
+    pub mty_desc: TypedModuleTypeDesc,
+    /// Internal module type.
+    pub mty_type: ModuleType,
+    /// Environment reference.
+    pub mty_env: EnvRef,
+    /// Location.
+    pub mty_loc: LocIdx,
+    /// Attributes.
+    pub mty_attributes: Attributes,
 }
 
-impl ModuleType {
-    /// Create a new placeholder module type.
-    pub fn placeholder() -> Self {
-        Self { _placeholder: () }
-    }
+/// Typed module type description.
+#[derive(Debug, Clone)]
+pub enum TypedModuleTypeDesc {
+    /// Module type identifier: `S`
+    Tmty_ident(Path, Loc<LidentIdx>),
+    /// Signature: `{ ... }`
+    Tmty_signature(TypedSignature),
+    /// Functor: `(X: S1) => S2`
+    Tmty_functor(
+        Ident,
+        Loc<String>,
+        Option<Box<TypedModuleType>>,
+        Box<TypedModuleType>,
+    ),
+    /// With constraint: `S with ...`
+    Tmty_with(
+        Box<TypedModuleType>,
+        Vec<(Path, Loc<LidentIdx>, WithConstraint)>,
+    ),
+    /// Typeof: `module type of M`
+    Tmty_typeof(ModuleExpr),
+    /// Alias: `module M = N`
+    Tmty_alias(Path, Loc<LidentIdx>),
+}
+
+/// With constraint for module types.
+#[derive(Debug, Clone)]
+pub enum WithConstraint {
+    /// Type constraint: `with type t = ...`
+    Twith_type(Box<TypedTypeDeclaration>),
+    /// Module constraint: `with module M = N`
+    Twith_module(Path, Loc<LidentIdx>),
+    /// Type substitution: `with type t := ...`
+    Twith_typesubst(Box<TypedTypeDeclaration>),
+    /// Module substitution: `with module M := N`
+    Twith_modsubst(Path, Loc<LidentIdx>),
+}
+
+/// Typed signature.
+#[derive(Debug, Clone)]
+pub struct TypedSignature {
+    /// Signature items.
+    pub sig_items: Vec<TypedSignatureItem>,
+    /// Internal signature type.
+    pub sig_type: crate::types::Signature,
+    /// Final environment.
+    pub sig_final_env: EnvRef,
+}
+
+/// Typed signature item.
+#[derive(Debug, Clone)]
+pub struct TypedSignatureItem {
+    /// Signature item description.
+    pub sig_desc: TypedSignatureItemDesc,
+    /// Environment reference.
+    pub sig_env: EnvRef,
+    /// Location.
+    pub sig_loc: LocIdx,
+}
+
+/// Typed signature item description.
+#[derive(Debug, Clone)]
+pub enum TypedSignatureItemDesc {
+    /// Value declaration.
+    Tsig_value(TypedValueDescription),
+    /// Type declaration.
+    Tsig_type(RecFlag, Vec<TypedTypeDeclaration>),
+    /// Type extension.
+    Tsig_typext(TypeExtension),
+    /// Exception declaration.
+    Tsig_exception(ExtensionConstructor),
+    /// Module declaration.
+    Tsig_module(TypedModuleDeclaration),
+    /// Recursive module declarations.
+    Tsig_recmodule(Vec<TypedModuleDeclaration>),
+    /// Module type declaration.
+    Tsig_modtype(ModuleTypeDeclaration),
+    /// Open declaration.
+    Tsig_open(OpenDescription),
+    /// Include declaration.
+    Tsig_include(IncludeDescription),
+    /// Attribute.
+    Tsig_attribute(Attribute),
+}
+
+/// Typed module declaration (for signatures).
+#[derive(Debug, Clone)]
+pub struct TypedModuleDeclaration {
+    /// Module identifier.
+    pub md_id: Ident,
+    /// Module name with location.
+    pub md_name: Loc<String>,
+    /// Module type.
+    pub md_type: TypedModuleType,
+    /// Attributes.
+    pub md_attributes: Attributes,
+    /// Location.
+    pub md_loc: LocIdx,
+}
+
+/// Open description (for signatures).
+#[derive(Debug, Clone)]
+pub struct OpenDescription {
+    /// Opened module path.
+    pub open_path: Path,
+    /// Opened module longident.
+    pub open_txt: Loc<LidentIdx>,
+    /// Override flag.
+    pub open_override: OverrideFlag,
+    /// Location.
+    pub open_loc: LocIdx,
+    /// Attributes.
+    pub open_attributes: Attributes,
+}
+
+/// Include description (for signatures).
+#[derive(Debug, Clone)]
+pub struct IncludeDescription {
+    /// Included module type.
+    pub incl_mod: TypedModuleType,
+    /// Included signature.
+    pub incl_type: crate::types::Signature,
+    /// Location.
+    pub incl_loc: LocIdx,
+    /// Attributes.
+    pub incl_attributes: Attributes,
 }
 
 /// Module type constraint.
 #[derive(Debug, Clone)]
 pub enum ModuleTypeConstraint {
     /// Explicit signature.
-    Tmodtype_explicit(Box<ModuleType>),
+    Tmodtype_explicit(Box<TypedModuleType>),
     /// Implicit (no constraint).
     Tmodtype_implicit,
 }
@@ -586,7 +723,7 @@ pub enum StructureItemDesc {
     /// Value binding: `let P = E`.
     Tstr_value(RecFlag, Vec<ValueBinding>),
     /// Primitive declaration: `external f : t = "..."`.
-    Tstr_primitive(ValueDescription),
+    Tstr_primitive(TypedValueDescription),
     /// Type declaration: `type t = ...`.
     Tstr_type(RecFlag, Vec<TypedTypeDeclaration>),
     /// Type extension: `type t += ...`.
@@ -605,6 +742,25 @@ pub enum StructureItemDesc {
     Tstr_include(IncludeDeclaration),
     /// Attribute: `@@attr`.
     Tstr_attribute(crate::parser::ast::Attribute),
+}
+
+/// Value description for typedtree.
+#[derive(Debug, Clone)]
+pub struct TypedValueDescription {
+    /// Identifier.
+    pub val_id: Ident,
+    /// Name.
+    pub val_name: Loc<String>,
+    /// Type description.
+    pub val_desc: TypedCoreType,
+    /// Internal value description.
+    pub val_val: crate::types::ValueDescription,
+    /// Primitive names.
+    pub val_prim: Vec<String>,
+    /// Location.
+    pub val_loc: LocIdx,
+    /// Attributes.
+    pub val_attributes: Attributes,
 }
 
 // Re-export TypeDeclaration from decl for convenience (internal representation)
@@ -774,12 +930,8 @@ pub struct IncludeDeclaration {
     pub incl_loc: LocIdx,
 }
 
-/// Signature item (placeholder).
-#[derive(Debug, Clone)]
-pub struct SignatureItem {
-    // Placeholder
-    _placeholder: (),
-}
+/// Signature item.
+pub type SignatureItem = crate::types::SignatureItem;
 
 /// Extension constructor.
 #[derive(Debug, Clone)]

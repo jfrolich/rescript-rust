@@ -287,7 +287,8 @@ impl ParseArena {
     /// This matches OCaml's behavior where each position is a separate object.
     /// file_name should be an interned StrIdx (from arena.intern_string).
     pub fn push_pos(&mut self, file_name: StrIdx, line: i32, bol: i32, cnum: i32) -> PosIdx {
-        self.positions.push(Position::new(file_name, line, bol, cnum))
+        self.positions
+            .push(Position::new(file_name, line, bol, cnum))
     }
 
     /// Get the "none" position index (for _none_ file).
@@ -500,21 +501,24 @@ impl ParseArena {
     pub fn push_ldot(&mut self, prefix: LidentIdx, name: impl Into<String>) -> LidentIdx {
         let str_idx = self.strings.push(name.into());
         let prefix_lid = self.get_longident(prefix).clone();
-        self.longidents.push(Longident::Ldot(Box::new(prefix_lid), str_idx))
+        self.longidents
+            .push(Longident::Ldot(Box::new(prefix_lid), str_idx))
     }
 
     /// Push a dotted identifier (Ldot) with a static string.
     pub fn push_ldot_static(&mut self, prefix: LidentIdx, name: &'static str) -> LidentIdx {
         let str_idx = self.strings.intern(name);
         let prefix_lid = self.get_longident(prefix).clone();
-        self.longidents.push(Longident::Ldot(Box::new(prefix_lid), str_idx))
+        self.longidents
+            .push(Longident::Ldot(Box::new(prefix_lid), str_idx))
     }
 
     /// Push a functor application (Lapply) into the arena.
     pub fn push_lapply(&mut self, functor: LidentIdx, arg: LidentIdx) -> LidentIdx {
         let func_lid = self.get_longident(functor).clone();
         let arg_lid = self.get_longident(arg).clone();
-        self.longidents.push(Longident::Lapply(Box::new(func_lid), Box::new(arg_lid)))
+        self.longidents
+            .push(Longident::Lapply(Box::new(func_lid), Box::new(arg_lid)))
     }
 
     /// Look up a longident by index.
@@ -566,9 +570,34 @@ impl ParseArena {
         self.strings.get(str_idx)
     }
 
+    /// Convert a Longident to its full dotted string representation using the arena.
+    pub fn longident_to_string(&self, lid: &Longident) -> String {
+        match lid {
+            Longident::Lident(name_idx) => self.strings.get(*name_idx).to_string(),
+            Longident::Ldot(prefix, name_idx) => {
+                let prefix_str = self.longident_to_string(prefix);
+                let name = self.strings.get(*name_idx);
+                format!("{}.{}", prefix_str, name)
+            }
+            Longident::Lapply(m1, m2) => {
+                let m1_str = self.longident_to_string(m1);
+                let m2_str = self.longident_to_string(m2);
+                format!("{}({})", m1_str, m2_str)
+            }
+        }
+    }
+
+    /// Convert a longident index to its full dotted string representation.
+    pub fn longident_idx_to_string(&self, idx: LidentIdx) -> String {
+        self.longident_to_string(self.get_longident(idx))
+    }
+
     /// Convert a Located<LidentIdx> to Located<Longident>.
     /// Useful when you need to match on the Longident structure.
-    pub fn to_longident_loc(&self, loc: &Located<LidentIdx>) -> crate::location::Located<Longident> {
+    pub fn to_longident_loc(
+        &self,
+        loc: &Located<LidentIdx>,
+    ) -> crate::location::Located<Longident> {
         crate::location::Located {
             txt: self.get_longident(loc.txt).clone(),
             loc: self.to_location(loc.loc),
