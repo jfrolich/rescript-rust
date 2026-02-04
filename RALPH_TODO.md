@@ -91,7 +91,44 @@ regressions were identified and fixed:
 - bsc-ast: 823/1049 passing (78.5%) — 103 NEW files now passing vs pre-merge baseline of 720
 - All changes pushed to the private fork
 
-**Remaining 461 failures** are primarily sharing/dedup differences (Some/Wrapper CSE) and position value diffs.
+**Remaining 461 failures** are ALL sharing/dedup differences — ZERO structural AST issues remain.
+
+**Sharing analysis (2026-02-04):**
+Thorough investigation confirmed ALL 461 remaining failures are purely marshal sharing differences.
+No structural AST mismatches (wrong tags, missing fields, etc.) remain.
+
+**Root cause:** OCaml's CSE (Common Subexpression Elimination) merges heap-allocated blocks with
+identical content into shared physical pointers during compilation. OCaml's `Marshal` module uses
+pointer identity for sharing — when two values are the same physical pointer, only one is written
+and subsequent references become SHARED refs.
+
+**Key patterns:**
+1. **PStr([]) payloads (most common):** Empty attribute payloads `PStr []` produce `Block(tag=0, [INT 0])`.
+   OCaml CSE shares these WITHIN the same parsing function call, but NOT across different parsing
+   contexts (e.g., field-level attrs share with each other, but not with type-level attrs).
+   Content-based sharing is too aggressive — causes over-sharing at cross-context boundaries.
+
+2. **Some(int) wrappers:** `Some(Closed)`, `Some(Open)`, `Some(false)` etc. produce `Block(tag=0, [INT n])`.
+   OCaml CSE may or may not share these depending on code path.
+
+3. **String sharing:** Type variable names like "t" may be shared by OCaml CSE within the same function.
+   Rust uses `push_string` (unique StrIdx), causing under-sharing.
+
+4. **Location over-sharing:** Rust's arena-based Location dedup sometimes shares Locations that OCaml
+   keeps separate (because the PPX creates new Location records via `{loc with ...}`).
+
+**Why this is hard to fix:** OCaml's sharing depends on compile-time CSE optimizations within the
+OCaml compiler that built the parser. Matching this exactly requires understanding which OCaml
+functions create which blocks and how CSE merges them — essentially reverse-engineering OCaml's
+compiler optimization passes. Content-based sharing is too coarse (shares across contexts that
+OCaml keeps separate). Identity-based sharing requires matching the Rust parser's allocation
+patterns to OCaml's.
+
+**Potential approaches (not yet implemented):**
+- Arena-based payload indices: Add `PayloadIdx` to the arena, similar to LocIdx. Use `intern` for
+  payloads within the same parsing context and `push` for different contexts.
+- Track sharing at Attribute level: Share the (name, PStr([])) attribute pair by (StrIdx, LocIdx, PayloadKind).
+- Profile OCaml's actual sharing: Run OCaml under a modified marshal that logs sharing decisions.
 
 **Session progress (2026-02-04, encoding + PPX type rewriting fixes):**
 Five fixes improved bsc-ast parity from 730 to 735 (+5 files, 0 regressions):
