@@ -211,9 +211,35 @@ The binary AST structure (sexp-locs) is 100% correct. The differences are in:
 ### Phase 7: Position Sharing ✅ Complete
 - [x] Tasks 7.1-7.8: All implemented
 
+### Remaining sexp-locs-ppx Issues (21 files failing)
+
+Categorized by root cause:
+
+1. **@deriving(jsConverter)** - 5 files
+   - User.res, SettingsStore.res, ImportPage.res, ColorTheme.res, Eth.res
+   - OCaml generates include with empty module even for unsupported types
+   - Low priority (generates warnings)
+
+2. **@deriving(abstract)** - 3 files
+   - typeDefinition.res, HighlightJs.res, ReactDOMRe.res
+   - Complex transformation to include with module constraint
+   - Medium priority
+
+3. **Expression-level await (Pexp_letmodule with @res.await)** - 1 file
+   - letmodule.res
+   - Requires hoisting module type declarations to structure level
+   - OCaml: bs_builtin_ppx.ml lines 703-752 (spelunk_vbs)
+
+4. **FFI encoding differences** - ~12 files with externals
+   - Warp_XHR.res, subscription.res, etc.
+   - OCaml encodes @val, @module, etc. into pval_prim binary data
+   - Rust keeps attributes but doesn't encode FFI info
+   - See compiler/frontend/ast_external.ml for encoding logic
+
+5. **Other** - Requires individual investigation
+   - UsdPriceProvider.res (no clear pattern)
+
 ### Not Yet Implemented
-- **@deriving(abstract)** - 3 test files
-- **@deriving(jsConverter)** - Complex, low impact (5 files, most have parse errors)
 - **%todo extension** - 0 test files use this
 
 ---
