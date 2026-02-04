@@ -18,16 +18,25 @@
 
 ## Current Status
 
-**Last Updated:** 2026-02-04
+**Last Updated:** 2026-02-05
 
 | Test Suite | Status |
 |------------|--------|
 | Syntax tests | 506/506 (100%) ✅ |
 | sexp-locs | 1196/1196 (100%) ✅ |
-| sexp-locs-ppx | 936/1196 (78.3%) ⚠️ |
-| bsc-ast | 806/1196 (67.4%) |
+| sexp-locs-ppx | 1173/1196 (98.1%) ✅ |
+| bsc-ast | 807/1196 (67.5%) |
 
-**Note:** sexp-locs-ppx remaining 260 failures are primarily FFI_SIZE differences - display-only issues in how FFI binary strings are printed, NOT actual AST differences.
+**Note:** The remaining 23 sexp-locs-ppx failures are structural differences in PPX transformations (not string delimiters). Key issues:
+- Module-level await (`@res.await`) transformation - Rust doesn't produce the full transformation OCaml does
+- FFI encoding minor differences
+- Other PPX structural transformations
+
+**Session progress (2026-02-05):**
+- Fixed `inline_string_primitive` delimiter handling: OCaml's `parse_processed_delim` wraps `None` in `Some(DNone)`, and the input strings have "js" delimiter (not "*j") because Rust doesn't transform attribute payloads before extracting @inline. Added handling for `Some("js")` → `Some(DStarJ)`.
+- Fixed FFI binary string encoding: Changed `encode_ffi_type` to use proper Latin-1 encoding and `marshal_prim_list` to convert back using `chars().map(|c| c as u8)`. This ensures FFI binary data survives the Latin-1 round-trip used by the sexp printer.
+- Fixed attribute string transformation for Pexp_ident/Pexp_constant: OCaml's default_mapper always rewrites attributes even for simple expressions. Added `rewrite_attributes` call for these cases.
+- Result: sexp-locs-ppx improved from 1172/1196 (98.0%) to 1173/1196 (98.1%)
 
 ---
 
