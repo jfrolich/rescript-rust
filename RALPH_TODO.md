@@ -11,7 +11,24 @@
 
 ## 🎯 PRIORITY: Focus on High-Impact Issues First
 
-**TOP PRIORITY:** Location sharing should be tackled FIRST because it affects ~500+ files.
+**TOP PRIORITY:** Fix sexp-locs-ppx differences FIRST. These are post-PPX AST structural/location
+differences between Rust and OCaml. Currently **896/1196** sexp-locs-ppx tests pass, meaning **300
+files have PPX-level AST differences**. Fixing these is the highest leverage work because:
+- They represent real AST structural differences (not just marshal sharing artifacts)
+- Each fix here likely also fixes corresponding bsc-ast failures
+- sexp-locs-ppx diffs are easier to debug (human-readable sexp output) than binary bsc-ast diffs
+- Use `scripts/test_parser_ast_parity.sh` to run tests and look at diffs in the `sexp_locs_ppx_diffs/` directory
+
+**How to investigate sexp-locs-ppx failures:**
+1. Run the test script to generate diffs
+2. Look at `$TEMP_DIR/sexp_locs_ppx_diffs/*.diff` for specific file differences
+3. Compare OCaml vs Rust sexp output: `res_parser -print sexp-locs-ppx <file>` (both OCaml and Rust)
+4. Categorize failures (missing PPX transform, wrong location, wrong structure, etc.)
+5. Fix the Rust PPX code in `compiler-rust/src/binary_ast/ppx.rs`
+
+**SECOND PRIORITY:** Once sexp-locs-ppx is at 100%, tackle remaining bsc-ast marshal sharing differences.
+
+### Previously completed (kept for reference):
 
 1. **Arity sharing** - ✅ **FIXED** (Task 6.6 + bug fix) - Implemented static arity indices for literal paths,
    fresh indices for computed paths. Fixed bug in `write_arity_idx()` where distance calculation was wrong.
@@ -27,7 +44,7 @@
    - **Remaining issue**: External declarations with arrow types still have 1 extra Position object.
      The cause is under investigation.
 
-Do NOT spend time on small issues (@deriving edge cases, etc.) until the location sharing issue is resolved.
+Do NOT spend time on bsc-ast marshal sharing issues until sexp-locs-ppx is at or near 100%.
 
 ## 🚨 CRITICAL: parsetree0 is NOT involved in .ast file generation!
 
@@ -68,6 +85,7 @@ Do NOT spend time on small issues (@deriving edge cases, etc.) until the locatio
 **Overall Status:** 787/1196 bsc-ast tests passing (65.8%)
 **Syntax tests:** 506/506 (100%) ✅
 **sexp-locs Status:** 1196/1196 tests passing (100%) ✅
+**sexp-locs-ppx Status:** 896/1196 tests passing (74.9%) ⚠️ **← TOP PRIORITY**
 **Note:** Total test count increased from 1049 to 1196 due to test infrastructure changes.
 
 **Session progress (2026-02-04, reason arity + dependency extraction fixes):**
