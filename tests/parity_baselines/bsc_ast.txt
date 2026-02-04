@@ -28,6 +28,7 @@ syntax_tests/data/idempotency/bs-css/Css_AtomicTypes.res
 syntax_tests/data/idempotency/bs-css/Css_AtomicTypes.resi
 syntax_tests/data/idempotency/bs-css/Css_Colors.res
 syntax_tests/data/idempotency/bs-css/Css_Core.res
+syntax_tests/data/idempotency/bs-css/Css_Js_Core.res
 syntax_tests/data/idempotency/bs-css/Css_Js_Core.resi
 syntax_tests/data/idempotency/bs-css/Css_Legacy_Core.resi
 syntax_tests/data/idempotency/bs-css/Css.res
@@ -233,8 +234,10 @@ syntax_tests/data/idempotency/nook-exchange/Link.res
 syntax_tests/data/idempotency/nook-exchange/PageTitle.res
 syntax_tests/data/idempotency/nook-exchange/Repromise.res
 syntax_tests/data/idempotency/nook-exchange/TemporaryState.res
+syntax_tests/data/idempotency/nook-exchange/TextPages.res
 syntax_tests/data/idempotency/nook-exchange/UserItemNote.res
 syntax_tests/data/idempotency/nook-exchange/UserPage.res
+syntax_tests/data/idempotency/nook-exchange/ViewingList.res
 syntax_tests/data/idempotency/pupilfirst/courses/CoursesCurriculum__ChecklistItem.res
 syntax_tests/data/idempotency/pupilfirst/courses/CoursesCurriculum__Coach.res
 syntax_tests/data/idempotency/pupilfirst/courses/CoursesCurriculum__Community.res
@@ -332,6 +335,7 @@ syntax_tests/data/idempotency/pupilfirst/schools/CourseExports__Course.res
 syntax_tests/data/idempotency/pupilfirst/schools/CourseExports__CourseExport.res
 syntax_tests/data/idempotency/pupilfirst/schools/CourseExports__Tag.res
 syntax_tests/data/idempotency/pupilfirst/schools/CourseExports__Types.res
+syntax_tests/data/idempotency/pupilfirst/schools/CurriculumEditor__ContentBlockEditor.res
 syntax_tests/data/idempotency/pupilfirst/schools/CurriculumEditor__Course.res
 syntax_tests/data/idempotency/pupilfirst/schools/CurriculumEditor__EvaluationCriteria.res
 syntax_tests/data/idempotency/pupilfirst/schools/CurriculumEditor__Level.res
@@ -372,6 +376,7 @@ syntax_tests/data/idempotency/pupilfirst/schools/StudentsEditor__Types.res
 syntax_tests/data/idempotency/pupilfirst/schools/TargetChecklistItem.res
 syntax_tests/data/idempotency/pupilfirst/shared/AuthenticityToken.res
 syntax_tests/data/idempotency/pupilfirst/shared/Avatar.res
+syntax_tests/data/idempotency/pupilfirst/shared/ContentBlock.res
 syntax_tests/data/idempotency/pupilfirst/shared/Date.res
 syntax_tests/data/idempotency/pupilfirst/shared/DateTime.res
 syntax_tests/data/idempotency/pupilfirst/shared/DateTime.resi
@@ -402,6 +407,7 @@ syntax_tests/data/idempotency/reason-react-hackernews/CommentsPage.res
 syntax_tests/data/idempotency/reason-react-hackernews/index.res
 syntax_tests/data/idempotency/reason-react-hackernews/link.res
 syntax_tests/data/idempotency/reason-react-hackernews/NotFound.res
+syntax_tests/data/idempotency/reason-react-hackernews/StoryData.res
 syntax_tests/data/idempotency/reason-react-hackernews/StoryListItem.res
 syntax_tests/data/idempotency/reason-react-hackernews/TopStoriesPage.res
 syntax_tests/data/idempotency/reason-react/src/ReactDOMServerRe.res
@@ -434,6 +440,7 @@ syntax_tests/data/idempotency/reasonml.org/layouts/ManualDocsLayout.res
 syntax_tests/data/idempotency/reasonml.org/layouts/ReasonCompilerDocsLayout.res
 syntax_tests/data/idempotency/reasonml.org/layouts/ReasonReactDocsLayout.res
 syntax_tests/data/idempotency/reductive/reductive.res
+syntax_tests/data/idempotency/reductive/reductive.resi
 syntax_tests/data/idempotency/reductive/reductiveContext.res
 syntax_tests/data/idempotency/reductive/reductiveContext.resi
 syntax_tests/data/idempotency/reductive/subscription.res
@@ -444,6 +451,7 @@ syntax_tests/data/idempotency/reprocessing/Reprocessing_Draw.resi
 syntax_tests/data/idempotency/reprocessing/Reprocessing_Env.res
 syntax_tests/data/idempotency/reprocessing/Reprocessing_Env.resi
 syntax_tests/data/idempotency/reprocessing/Reprocessing_Events.res
+syntax_tests/data/idempotency/reprocessing/Reprocessing_Shaders.res
 syntax_tests/data/idempotency/reprocessing/Reprocessing_Types.res
 syntax_tests/data/idempotency/reprocessing/Reprocessing_Utils.resi
 syntax_tests/data/idempotency/reprocessing/Reprocessing.res
@@ -488,6 +496,7 @@ syntax_tests/data/idempotency/wildcards-world-ui/Helper.res
 syntax_tests/data/idempotency/wildcards-world-ui/IncreaseIterationPage.res
 syntax_tests/data/idempotency/wildcards-world-ui/InputHelp.res
 syntax_tests/data/idempotency/wildcards-world-ui/PhotoGallery.res
+syntax_tests/data/idempotency/wildcards-world-ui/QlHooks.res
 syntax_tests/data/idempotency/wildcards-world-ui/ReactSwitch.res
 syntax_tests/data/idempotency/wildcards-world-ui/ReactTabs.res
 syntax_tests/data/idempotency/wildcards-world-ui/ResponsiveCarousel.res
@@ -514,6 +523,7 @@ syntax_tests/data/parsing/grammar/expressions/coerce.res
 syntax_tests/data/parsing/grammar/expressions/constants.res
 syntax_tests/data/parsing/grammar/expressions/constructor.res
 syntax_tests/data/parsing/grammar/expressions/dict.res
+syntax_tests/data/parsing/grammar/expressions/es6template.res
 syntax_tests/data/parsing/grammar/expressions/float.res
 syntax_tests/data/parsing/grammar/expressions/for.res
 syntax_tests/data/parsing/grammar/expressions/ident.res
@@ -522,6 +532,7 @@ syntax_tests/data/parsing/grammar/expressions/infix.res
 syntax_tests/data/parsing/grammar/expressions/jsx.res
 syntax_tests/data/parsing/grammar/expressions/letUnwrap.res
 syntax_tests/data/parsing/grammar/expressions/list.res
+syntax_tests/data/parsing/grammar/expressions/parenthesized.res
 syntax_tests/data/parsing/grammar/expressions/polyvariant.res
 syntax_tests/data/parsing/grammar/expressions/record.res
 syntax_tests/data/parsing/grammar/expressions/sideEffects.res
@@ -728,7 +739,9 @@ syntax_tests/data/printer/other/number.res
 syntax_tests/data/printer/other/reasonArity.res
 syntax_tests/data/printer/other/reasonFile.res
 syntax_tests/data/printer/other/reasonInterfaceFile.resi
+syntax_tests/data/printer/other/reasonString.res
 syntax_tests/data/printer/other/StaticReactTypes.res
+syntax_tests/data/printer/other/string.res
 syntax_tests/data/printer/pattern/alias.res
 syntax_tests/data/printer/pattern/any.res
 syntax_tests/data/printer/pattern/array.res

@@ -12,8 +12,9 @@
 
 use super::marshal::MarshalWriter;
 use super::serialize::Marshal;
+use crate::parse_arena::LocIdx;
 use crate::parser::ast::{
-    Arity, ArgLabel, Case, ClosedFlag, Constant, CoreType, CoreTypeDesc,
+    Arity, ArgLabel, Attributes, Case, ClosedFlag, Constant, CoreType, CoreTypeDesc,
     DirectionFlag, Expression, ExpressionDesc, ExpressionRecordField, ExtensionConstructor,
     ExtensionConstructorKind, IncludeDeclaration, IncludeDescription, LabelDeclaration,
     ModuleBinding, ModuleDeclaration, ModuleExpr, ModuleExprDesc, ModuleType,
@@ -23,6 +24,66 @@ use crate::parser::ast::{
     TypeDeclaration, TypeExtension, TypeKind, ValueBinding, ValueDescription, Variance,
     WithConstraint, ConstructorArguments, ConstructorDeclaration,
 };
+
+// ========== Attribute list sharing ==========
+
+/// Marshal an attribute list, optionally sharing singleton `[(name, PStr [])]` tuples.
+///
+/// In OCaml, certain parser attributes (`template_literal_attr`, etc.) are module-level
+/// `let` bindings that create a single physical tuple object. When the PPX preserves
+/// these attributes (early-return cases like `Pexp_constant(Pconst_string(_, Some _))`),
+/// the marshal sees the same physical pointer and writes SHARED references.
+///
+/// For expressions that go through OCaml's default mapper, `sub.attributes sub attrs`
+/// creates NEW attribute tuples, breaking physical sharing. We match this by only
+/// enabling sharing when `share_singleton` is true (for early-return expression types).
+///
+/// When sharing is enabled and attrs match `[(name, PStr [])]` where name uses
+/// `Location.none` (LocIdx::default()), the attribute tuple is shared via
+/// `singleton_attr_list_table`.
+fn marshal_attributes(attrs: &Attributes, w: &mut MarshalWriter, share_singleton: bool) {
+    let attrs_slice = attrs.as_slice();
+
+    if share_singleton {
+        if let [(name, payload)] = attrs_slice {
+            if matches!(payload, Payload::PStr(items) if items.is_empty())
+                && name.loc == LocIdx::default()
+            {
+                let key = (name.txt, name.loc);
+
+                // Write the cons cell (list with one element): Block(tag=0, size=2) [tuple, nil]
+                // OCaml cons cells use tag=0. The cons cell is always fresh.
+                w.write_block_header(0, 2);
+
+                // Check if we've seen this attribute tuple before
+                if let Some(&obj_idx) = w.singleton_attr_list_table_get(&key) {
+                    let d = w.obj_counter() - obj_idx;
+                    w.write_shared_ref(d);
+                } else {
+                    // Record the object index for the tuple
+                    let obj_idx = w.obj_counter();
+
+                    // Write the attribute tuple: Block(tag=0, size=2) [name, payload]
+                    w.write_block_header(0, 2);
+                    name.marshal(w);
+                    // PStr([]) is Block(tag=0, size=1) [INT(0)]
+                    w.write_block_header(0, 1);
+                    w.write_int(0); // empty list
+
+                    w.singleton_attr_list_table_insert(key, obj_idx);
+                }
+
+                // Write nil (end of list)
+                w.write_int(0);
+                return;
+            }
+        }
+    }
+
+    // Default: marshal normally without sharing
+    attrs_slice.marshal(w);
+}
+
 // ========== Flag implementations ==========
 
 impl Marshal for RecFlag {
@@ -184,7 +245,7 @@ impl Marshal for CoreType {
         w.write_block_header(0, 3);
         self.ptyp_desc.marshal(w);
         self.ptyp_loc.marshal(w);
-        self.ptyp_attributes.marshal(w);
+        marshal_attributes(&self.ptyp_attributes, w, false);
     }
 }
 
@@ -303,7 +364,7 @@ impl Marshal for Pattern {
         w.write_block_header(0, 3);
         self.ppat_desc.marshal(w);
         self.ppat_loc.marshal(w);
-        self.ppat_attributes.marshal(w);
+        marshal_attributes(&self.ppat_attributes, w, false);
     }
 }
 
@@ -434,7 +495,25 @@ impl Marshal for Expression {
         w.write_block_header(0, 3);
         self.pexp_desc.marshal(w);
         self.pexp_loc.marshal(w);
-        self.pexp_attributes.marshal(w);
+
+        // In OCaml's PPX, certain expression types return early from expr_mapper
+        // without going through the default mapper's attribute remapping. These
+        // expressions preserve their original attribute pointers, enabling marshal
+        // sharing. We match this by enabling attribute tuple sharing only for
+        // these specific expression types.
+        //
+        // Only Pexp_constant(Pconst_string(_, Some _)) is matched here because:
+        // - String constants with delimiters (template literals) are the main case
+        //   where res.template/res.taggedTemplate attrs survive the PPX unchanged
+        // - Integer suffix stripping (Some 'l' -> None) also preserves attrs but
+        //   integer constants rarely have mknoloc singleton attrs, so excluding
+        //   them avoids potential over-sharing
+        // - Pexp_newtype preserves attrs but doesn't have mknoloc singleton attrs
+        let share_attrs = matches!(
+            &self.pexp_desc,
+            ExpressionDesc::Pexp_constant(Constant::String(_, Some(_)))
+        );
+        marshal_attributes(&self.pexp_attributes, w, share_attrs);
     }
 }
 
@@ -671,7 +750,7 @@ impl Marshal for ValueBinding {
         w.write_block_header(0, 4);
         self.pvb_pat.marshal(w);
         self.pvb_expr.marshal(w);
-        self.pvb_attributes.marshal(w);
+        marshal_attributes(&self.pvb_attributes, w, false);
         self.pvb_loc.marshal(w);
     }
 }
@@ -709,7 +788,7 @@ impl Marshal for ModuleType {
         w.write_block_header(0, 3);
         self.pmty_desc.marshal(w);
         self.pmty_loc.marshal(w);
-        self.pmty_attributes.marshal(w);
+        marshal_attributes(&self.pmty_attributes, w, false);
     }
 }
 
@@ -785,7 +864,7 @@ impl Marshal for ModuleExpr {
         w.write_block_header(0, 3);
         self.pmod_desc.marshal(w);
         self.pmod_loc.marshal(w);
-        self.pmod_attributes.marshal(w);
+        marshal_attributes(&self.pmod_attributes, w, false);
     }
 }
 
@@ -840,7 +919,7 @@ impl Marshal for TypeDeclaration {
         self.ptype_kind.marshal(w);
         self.ptype_private.marshal(w);
         self.ptype_manifest.marshal(w);
-        self.ptype_attributes.marshal(w);
+        marshal_attributes(&self.ptype_attributes, w, false);
         self.ptype_loc.marshal(w);
     }
 }
@@ -869,7 +948,7 @@ impl Marshal for ConstructorDeclaration {
         self.pcd_args.marshal(w);
         self.pcd_res.marshal(w);
         self.pcd_loc.marshal(w);
-        self.pcd_attributes.marshal(w);
+        marshal_attributes(&self.pcd_attributes, w, false);
     }
 }
 
@@ -897,7 +976,7 @@ impl Marshal for LabelDeclaration {
         w.write_int(if self.pld_optional { 1 } else { 0 });
         self.pld_type.marshal(w);
         self.pld_loc.marshal(w);
-        self.pld_attributes.marshal(w);
+        marshal_attributes(&self.pld_attributes, w, false);
     }
 }
 
@@ -910,7 +989,7 @@ impl Marshal for TypeExtension {
         self.ptyext_params.marshal(w);
         self.ptyext_constructors.marshal(w);
         self.ptyext_private.marshal(w);
-        self.ptyext_attributes.marshal(w);
+        marshal_attributes(&self.ptyext_attributes, w, false);
     }
 }
 
@@ -920,7 +999,7 @@ impl Marshal for ExtensionConstructor {
         self.pext_name.marshal(w);
         self.pext_kind.marshal(w);
         self.pext_loc.marshal(w);
-        self.pext_attributes.marshal(w);
+        marshal_attributes(&self.pext_attributes, w, false);
     }
 }
 
@@ -950,7 +1029,7 @@ impl Marshal for ValueDescription {
         // pval_prim contains raw binary data (FFI encoding blobs) that must be
         // written as raw bytes, not Latin-1 converted. Use write_string directly.
         marshal_prim_list(&self.pval_prim, w);
-        self.pval_attributes.marshal(w);
+        marshal_attributes(&self.pval_attributes, w, false);
         self.pval_loc.marshal(w);
     }
 }
@@ -978,7 +1057,7 @@ impl Marshal for ModuleDeclaration {
         w.write_block_header(0, 4);
         self.pmd_name.marshal(w);
         self.pmd_type.marshal(w);
-        self.pmd_attributes.marshal(w);
+        marshal_attributes(&self.pmd_attributes, w, false);
         self.pmd_loc.marshal(w);
     }
 }
@@ -988,7 +1067,7 @@ impl Marshal for ModuleTypeDeclaration {
         w.write_block_header(0, 4);
         self.pmtd_name.marshal(w);
         self.pmtd_type.marshal(w);
-        self.pmtd_attributes.marshal(w);
+        marshal_attributes(&self.pmtd_attributes, w, false);
         self.pmtd_loc.marshal(w);
     }
 }
@@ -998,7 +1077,7 @@ impl Marshal for ModuleBinding {
         w.write_block_header(0, 4);
         self.pmb_name.marshal(w);
         self.pmb_expr.marshal(w);
-        self.pmb_attributes.marshal(w);
+        marshal_attributes(&self.pmb_attributes, w, false);
         self.pmb_loc.marshal(w);
     }
 }
@@ -1009,7 +1088,7 @@ impl Marshal for OpenDescription {
         self.popen_lid.marshal(w);
         self.popen_override.marshal(w);
         self.popen_loc.marshal(w);
-        self.popen_attributes.marshal(w);
+        marshal_attributes(&self.popen_attributes, w, false);
     }
 }
 
@@ -1018,7 +1097,7 @@ impl Marshal for IncludeDescription {
         w.write_block_header(0, 3);
         self.pincl_mod.marshal(w);
         self.pincl_loc.marshal(w);
-        self.pincl_attributes.marshal(w);
+        marshal_attributes(&self.pincl_attributes, w, false);
     }
 }
 
@@ -1027,7 +1106,7 @@ impl Marshal for IncludeDeclaration {
         w.write_block_header(0, 3);
         self.pincl_mod.marshal(w);
         self.pincl_loc.marshal(w);
-        self.pincl_attributes.marshal(w);
+        marshal_attributes(&self.pincl_attributes, w, false);
     }
 }
 

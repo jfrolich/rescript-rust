@@ -115,6 +115,13 @@ pub struct MarshalWriter {
     /// in %obj transformations). Uses arena indices for identity-based sharing.
     string_loc_table: HashMap<(StrIdx, LocIdx), u32>,
 
+    /// Maps (StrIdx, LocIdx) to object counter for sharing entire attribute lists
+    /// of the form `[(name_with_loc, PStr [])]`. OCaml shares these because
+    /// module-level `let` bindings like `let ternary_attr = (...)` create a single
+    /// physical object that is reused everywhere. The list `[attr]` is also shared
+    /// because OCaml's CSE merges identical heap allocations.
+    singleton_attr_list_table: HashMap<(StrIdx, LocIdx), u32>,
+
     /// Optional reference to ParseArena for LocIdx marshalling.
     /// Set via `set_arena()` before marshalling AST with LocIdx fields.
     /// Uses raw pointer to avoid lifetime constraints.
@@ -151,7 +158,7 @@ impl MarshalWriter {
             arity_idx_table: HashMap::new(),
 
             string_loc_table: HashMap::new(),
-
+            singleton_attr_list_table: HashMap::new(),
 
             arena: None,
             obj_counter: 0,
@@ -174,7 +181,7 @@ impl MarshalWriter {
             arity_idx_table: HashMap::new(),
 
             string_loc_table: HashMap::new(),
-
+            singleton_attr_list_table: HashMap::new(),
 
             arena: None,
             obj_counter: 0,
@@ -535,6 +542,16 @@ impl MarshalWriter {
         if register {
             self.string_loc_table.insert(key, obj_idx);
         }
+    }
+
+    /// Look up an entry in the singleton attribute list sharing table.
+    pub fn singleton_attr_list_table_get(&self, key: &(StrIdx, LocIdx)) -> Option<&u32> {
+        self.singleton_attr_list_table.get(key)
+    }
+
+    /// Insert an entry into the singleton attribute list sharing table.
+    pub fn singleton_attr_list_table_insert(&mut self, key: (StrIdx, LocIdx), obj_idx: u32) {
+        self.singleton_attr_list_table.insert(key, obj_idx);
     }
 
     /// Write a Longident by arena index with sharing.

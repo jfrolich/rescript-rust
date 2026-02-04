@@ -2575,12 +2575,14 @@ fn transform_js_string(s: &str) -> String {
 
 /// Transform string constant expression with delimiter.
 /// Implements OCaml's Ast_utf8_string_interp.transform_exp.
-/// Note: This is called early in expression rewriting, so we also rewrite attributes here.
+/// Note: In OCaml, this is an early-return case in expr_mapper that uses
+/// `{ e with pexp_desc = ... }`, preserving the original expression's attributes
+/// without running them through the default mapper's attribute remapping.
+/// We match this behavior by cloning attributes directly instead of calling
+/// rewrite_attributes.
 fn transform_string_exp(expr: &Expression, s: &str, delim: &str, arena: &mut ParseArena) -> Expression {
     // Check if this is a template string (has @res.template or @res.taggedTemplate)
     let is_template = has_template_attr(expr, arena);
-    // Rewrite attributes to transform strings inside them
-    let rewritten_attrs = rewrite_attributes(&expr.pexp_attributes, arena);
 
     if delim == "js" {
         if is_template {
@@ -2591,7 +2593,7 @@ fn transform_string_exp(expr: &Expression, s: &str, delim: &str, arena: &mut Par
                     Some("bq".to_string()),
                 )),
                 pexp_loc: expr.pexp_loc,
-                pexp_attributes: rewritten_attrs,
+                pexp_attributes: expr.pexp_attributes.clone(),
             }
         } else {
             // JS string: transform the string and change delimiter to "*j"
@@ -2602,15 +2604,15 @@ fn transform_string_exp(expr: &Expression, s: &str, delim: &str, arena: &mut Par
                     Some("*j".to_string()),
                 )),
                 pexp_loc: expr.pexp_loc,
-                pexp_attributes: rewritten_attrs,
+                pexp_attributes: expr.pexp_attributes.clone(),
             }
         }
     } else {
-        // Unrecognized delimiter - return with rewritten attributes
+        // Unrecognized delimiter - preserve attributes (matching OCaml's { e with ... })
         Expression {
             pexp_desc: expr.pexp_desc.clone(),
             pexp_loc: expr.pexp_loc,
-            pexp_attributes: rewritten_attrs,
+            pexp_attributes: expr.pexp_attributes.clone(),
         }
     }
 }
@@ -2996,11 +2998,13 @@ fn rewrite_expression(expr: &Expression, arena: &mut ParseArena) -> Expression {
     }
 
     // Handle integer literal suffix stripping ('l' suffix)
+    // OCaml: {e with pexp_desc = Pexp_constant (Pconst_integer (s, None))}
+    // This is an early-return case that preserves attributes without remapping.
     if let ExpressionDesc::Pexp_constant(Constant::Integer(s, Some('l'))) = &expr.pexp_desc {
         return Expression {
             pexp_desc: ExpressionDesc::Pexp_constant(Constant::Integer(s.clone(), None)),
             pexp_loc: expr.pexp_loc,
-            pexp_attributes: rewrite_attributes(&expr.pexp_attributes, arena),
+            pexp_attributes: expr.pexp_attributes.clone(),
         };
     }
 
@@ -3488,10 +3492,19 @@ fn rewrite_expression_generic(expr: &Expression, arena: &mut ParseArena) -> Expr
             Box::new(rewrite_expression(body, arena)),
         ),
 
-        ExpressionDesc::Pexp_newtype(name, body) => ExpressionDesc::Pexp_newtype(
-            name.clone(),
-            Box::new(rewrite_expression(body, arena)),
-        ),
+        // Pexp_newtype is an early-return case in OCaml's expr_mapper:
+        // {e with pexp_desc = Pexp_newtype (s, self.expr self body)}
+        // It preserves the original expression's attributes without remapping.
+        ExpressionDesc::Pexp_newtype(name, body) => {
+            return Expression {
+                pexp_desc: ExpressionDesc::Pexp_newtype(
+                    name.clone(),
+                    Box::new(rewrite_expression(body, arena)),
+                ),
+                pexp_loc: expr.pexp_loc,
+                pexp_attributes: expr.pexp_attributes.clone(),
+            };
+        }
 
         // Extensions - handle %raw, others just clone
         ExpressionDesc::Pexp_extension(ext) => {
