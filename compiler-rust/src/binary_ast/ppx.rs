@@ -1870,10 +1870,11 @@ fn handle_raw_structure(
         pexp_attributes: vec![],
     };
 
-    // Wrap in Pstr_eval
+    // Wrap in Pstr_eval - OCaml's Ast_helper.Str.eval uses default_loc (= Location.none)
+    // when no ~loc is passed, so we use none_loc here
     StructureItem {
         pstr_desc: StructureItemDesc::Pstr_eval(letmodule_expr, vec![]),
-        pstr_loc: item.pstr_loc,
+        pstr_loc: none_loc,
     }
 }
 
