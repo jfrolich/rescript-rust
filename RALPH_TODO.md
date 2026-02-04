@@ -54,7 +54,7 @@ binary string rendering differences, not actual parity issues). Fixing these is 
    - **Improvement: 300 → 260 sexp-locs-ppx failures (-40 files)**
    - **Remaining 260 failures**:
      - 256 FFI_SIZE: Display-only binary string rendering differences (NOT actual parity issues)
-     - 3 TEMPLATE: Missing `internal.expansive` attribute (requires JS string parsing)
+     - 3 TEMPLATE: Missing `internal.expansive` attribute (requires JS string parsing) — **see Task 2.9**
      - 1 DELIM: Misclassified FFI binary difference
 
 Do NOT spend time on bsc-ast marshal sharing issues until sexp-locs-ppx is at or near 100%.
@@ -893,6 +893,71 @@ We need to implement the remaining transformations.
     - Transforming to `Pmod_unpack(Primitive_promise.unsafe_await(Primitive_module.import(...)))`
   - Note: `rewrite_structure_item` already returned `Vec<StructureItem>`, so multi-item expansion worked
   - Related files: `tests/syntax_tests/data/printer/modExpr/await.res`
+
+- [ ] **Task 2.9**: Implement `internal.expansive` attribute for template literals (HIGH PRIORITY)
+  - **Impact**: 3 sexp-locs-ppx TEMPLATE failures — fixing this gets us closer to 100% PPX parity
+  - **Problem**: OCaml's `classify_exp` function (in `compiler/frontend/ast_exp_handle_external.ml`)
+    parses the JavaScript string inside template literals to detect if it's a function expression.
+    If it's a function, it's marked as "expansive" with `@internal.expansive` attribute.
+  - **OCaml behavior**: `classify_exp` uses the Flow parser to detect:
+    - `Js_function {arity; arrow}` — function expression or arrow function (returns arity)
+    - `Js_literal {is_null_undefined; comment; delim}` — literal value
+    - Uses this to decide whether to add `@internal.expansive` attribute
+  - **Solution**: Use OXC (Oxidation Compiler) — a fast Rust JavaScript parser
+  - **OXC crates to add to Cargo.toml**:
+    ```toml
+    oxc_allocator = "0.x"
+    oxc_parser = "0.x"
+    oxc_ast = "0.x"
+    oxc_span = "0.x"
+    ```
+  - **Implementation approach**:
+    ```rust
+    use oxc_allocator::Allocator;
+    use oxc_ast::ast::Expression;
+    use oxc_parser::Parser;
+    use oxc_span::SourceType;
+
+    enum JsClassification {
+        JsFunction { arity: usize, arrow: bool },
+        JsLiteral { is_null_undefined: bool },
+    }
+
+    fn classify_js_exp(src: &str) -> Option<JsClassification> {
+        let allocator = Allocator::new();
+        let expr = Parser::new(&allocator, src, SourceType::default())
+            .parse_expression()
+            .ok()?;
+
+        match expr {
+            Expression::ArrowFunctionExpression(arrow) => {
+                Some(JsClassification::JsFunction {
+                    arity: arrow.params.parameters_count(),
+                    arrow: true,
+                })
+            }
+            Expression::FunctionExpression(func) => {
+                Some(JsClassification::JsFunction {
+                    arity: func.params.parameters_count(),
+                    arrow: false,
+                })
+            }
+            Expression::NullLiteral(_) | Expression::Identifier(id)
+                if id.name == "undefined" => {
+                Some(JsClassification::JsLiteral { is_null_undefined: true })
+            }
+            _ => Some(JsClassification::JsLiteral { is_null_undefined: false }),
+        }
+    }
+    ```
+  - **Where to integrate**: In `ppx.rs`, when processing template literals (`res.template` attribute),
+    parse the JS string and add `@internal.expansive` if `classify_js_exp` returns `JsFunction`.
+  - **Reference files**:
+    - OCaml: `compiler/frontend/ast_exp_handle_external.ml` (classify_exp function)
+    - OCaml: `compiler/ext/flow_ast_utils.ml` (Flow parser integration)
+    - Rust: `compiler-rust/src/binary_ast/ppx.rs` (where to add the integration)
+  - **Why OXC**: 3x faster than SWC, production-ready, has dedicated `parse_expression()` method,
+    clean enum matching for `ArrowFunctionExpression` vs `FunctionExpression`
 
 ### Phase 3: JSX Binary Differences (Deferred - needs investigation)
 
