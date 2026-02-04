@@ -422,11 +422,13 @@ fn parse_constructor_arg(p: &mut Parser<'_>) -> Option<Expression> {
                     }
                 } else {
                     p.expect(Token::Rparen);
-                    // If the single argument is already a tuple, wrap it in another
-                    // single-element tuple. This distinguishes C((1,2)) from C(1,2).
-                    // C((1,2)) = single tuple argument = Pexp_tuple([Pexp_tuple([1,2])])
-                    // C(1,2) = multiple arguments = Pexp_tuple([1, 2])
-                    if matches!(first_expr.pexp_desc, ExpressionDesc::Pexp_tuple(_)) {
+                    // In type-checker mode, a single tuple arg is passed through directly:
+                    // C((1,2)) = Pexp_construct(C, Some(Pexp_tuple([1,2])))
+                    // In printer mode, wrap it in another tuple to distinguish from multi-arg:
+                    // C((1,2)) = Pexp_construct(C, Some(Pexp_tuple([Pexp_tuple([1,2])])))
+                    if matches!(first_expr.pexp_desc, ExpressionDesc::Pexp_tuple(_))
+                        && p.mode != ParserMode::ParseForTypeChecker
+                    {
                         let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
                         Some(Expression {
                             pexp_desc: ExpressionDesc::Pexp_tuple(vec![first_expr]),

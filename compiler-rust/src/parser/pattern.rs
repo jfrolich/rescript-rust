@@ -8,7 +8,7 @@ use super::core::{ast_helper, mknoloc, recover, template_literal_attr, with_loc}
 use super::diagnostics::DiagnosticCategory;
 use super::grammar::{self, Grammar};
 use super::longident::Longident;
-use super::state::Parser;
+use super::state::{Parser, ParserMode};
 use super::token::Token;
 use crate::parse_arena::{Located, LocIdx, PosIdx, StrIdx};
 
@@ -916,8 +916,11 @@ fn parse_constructor_pattern(p: &mut Parser<'_>) -> Pattern {
                 // If we only have one pattern (trailing comma case), treat as single argument
                 if patterns.len() == 1 {
                     let single = patterns.into_iter().next().unwrap();
-                    // If the single argument is itself a tuple, wrap it
-                    if matches!(single.ppat_desc, PatternDesc::Ppat_tuple(_)) {
+                    // In printer mode, wrap single tuple arg to distinguish C((a,b)) from C(a,b)
+                    // In type-checker mode, pass through directly
+                    if matches!(single.ppat_desc, PatternDesc::Ppat_tuple(_))
+                        && p.mode != ParserMode::ParseForTypeChecker
+                    {
                         // OCaml: wrapper tuple location extends to end of next token
                         let wrap_loc = p.mk_loc_idx_to_end(lparen_pos_idx);
                         Some(Pattern {
@@ -939,9 +942,11 @@ fn parse_constructor_pattern(p: &mut Parser<'_>) -> Pattern {
                 }
             } else {
                 p.expect(Token::Rparen);
-                // If the single argument is itself a tuple, wrap it in another
-                // single-element tuple. This distinguishes C((a,b)) from C(a,b).
-                if matches!(first.ppat_desc, PatternDesc::Ppat_tuple(_)) {
+                // In printer mode, wrap single tuple arg to distinguish C((a,b)) from C(a,b)
+                // In type-checker mode, pass through directly
+                if matches!(first.ppat_desc, PatternDesc::Ppat_tuple(_))
+                    && p.mode != ParserMode::ParseForTypeChecker
+                {
                     // OCaml: wrapper tuple location starts at outer ( and extends to end of next token
                     // This means in `Some((a,b)) =>`, the wrapper tuple includes the ` =>`
                     let wrap_loc = p.mk_loc_idx_to_end(lparen_pos_idx);

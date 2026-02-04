@@ -3,6 +3,7 @@ syntax_tests/data/ast-mapping/FunWithAttribute.res
 syntax_tests/data/ast-mapping/JSXElements.res
 syntax_tests/data/ast-mapping/JSXFragments.res
 syntax_tests/data/conversion/reason/braces.res
+syntax_tests/data/conversion/reason/comments.res
 syntax_tests/data/conversion/reason/docComments.res
 syntax_tests/data/conversion/reason/fastPipe.res
 syntax_tests/data/conversion/reason/gentype.res
@@ -192,6 +193,7 @@ syntax_tests/data/idempotency/genType/src/ModuleName.resi
 syntax_tests/data/idempotency/genType/src/ResolvedName.resi
 syntax_tests/data/idempotency/genType/src/Runtime.res
 syntax_tests/data/idempotency/genType/src/Runtime.resi
+syntax_tests/data/idempotency/genType/src/TranslateSignature.res
 syntax_tests/data/idempotency/genType/src/TranslateSignatureFromTypes.res
 syntax_tests/data/idempotency/genType/src/TypeEnv.resi
 syntax_tests/data/idempotency/genType/src/Version.res
@@ -208,6 +210,7 @@ syntax_tests/data/idempotency/mareo/Actors.resi
 syntax_tests/data/idempotency/mareo/Director.resi
 syntax_tests/data/idempotency/mareo/Dom_html.res
 syntax_tests/data/idempotency/mareo/Draw.resi
+syntax_tests/data/idempotency/mareo/Object.res
 syntax_tests/data/idempotency/mareo/Object.resi
 syntax_tests/data/idempotency/mareo/Particle.res
 syntax_tests/data/idempotency/mareo/Particle.resi
@@ -365,6 +368,7 @@ syntax_tests/data/idempotency/pupilfirst/schools/StudentsEditor__Team.res
 syntax_tests/data/idempotency/pupilfirst/schools/StudentsEditor__Types.res
 syntax_tests/data/idempotency/pupilfirst/schools/TargetChecklistItem.res
 syntax_tests/data/idempotency/pupilfirst/shared/AuthenticityToken.res
+syntax_tests/data/idempotency/pupilfirst/shared/Avatar.res
 syntax_tests/data/idempotency/pupilfirst/shared/Date.res
 syntax_tests/data/idempotency/pupilfirst/shared/DateTime.res
 syntax_tests/data/idempotency/pupilfirst/shared/DateTime.resi
@@ -396,6 +400,7 @@ syntax_tests/data/idempotency/reason-react-hackernews/index.res
 syntax_tests/data/idempotency/reason-react-hackernews/link.res
 syntax_tests/data/idempotency/reason-react-hackernews/NotFound.res
 syntax_tests/data/idempotency/reason-react-hackernews/StoryListItem.res
+syntax_tests/data/idempotency/reason-react-hackernews/TopStoriesPage.res
 syntax_tests/data/idempotency/reason-react/src/ReactDOMServerRe.res
 syntax_tests/data/idempotency/reason-react/src/ReactEvent.res
 syntax_tests/data/idempotency/reason-react/src/ReactEvent.resi
@@ -715,6 +720,7 @@ syntax_tests/data/printer/other/lor.res
 syntax_tests/data/printer/other/moduleData.res
 syntax_tests/data/printer/other/nesting.res
 syntax_tests/data/printer/other/number.res
+syntax_tests/data/printer/other/reasonArity.res
 syntax_tests/data/printer/other/reasonFile.res
 syntax_tests/data/printer/other/reasonInterfaceFile.resi
 syntax_tests/data/printer/other/StaticReactTypes.res
@@ -722,6 +728,7 @@ syntax_tests/data/printer/pattern/alias.res
 syntax_tests/data/printer/pattern/any.res
 syntax_tests/data/printer/pattern/array.res
 syntax_tests/data/printer/pattern/constraint.res
+syntax_tests/data/printer/pattern/construct.res
 syntax_tests/data/printer/pattern/exception.res
 syntax_tests/data/printer/pattern/exoticIdent.res
 syntax_tests/data/printer/pattern/extension.res

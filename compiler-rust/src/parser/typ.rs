@@ -1656,14 +1656,18 @@ fn parse_polymorphic_variant_type_args(p: &mut Parser<'_>) -> CoreType {
     let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
 
     match args.as_slice() {
-        // Single tuple type - wrap it in another tuple (OCaml's type checker mode)
-        // Actually OCaml does: `if p.mode = ParseForTypeChecker then typ else Ast_helper.Typ.tuple`
-        // For parity, we follow the else branch (default mode)
+        // Single tuple type:
+        // In type-checker mode: pass through directly (no extra wrapping)
+        // In printer mode: wrap in another tuple to distinguish (a, b) from ((a, b))
         [typ] if matches!(typ.ptyp_desc, CoreTypeDesc::Ptyp_tuple(_)) => {
-            CoreType {
-                ptyp_desc: CoreTypeDesc::Ptyp_tuple(args),
-                ptyp_loc: loc,
-                ptyp_attributes: vec![],
+            if p.mode == ParserMode::ParseForTypeChecker {
+                args.into_iter().next().unwrap()
+            } else {
+                CoreType {
+                    ptyp_desc: CoreTypeDesc::Ptyp_tuple(args),
+                    ptyp_loc: loc,
+                    ptyp_attributes: vec![],
+                }
             }
         }
         // Single non-tuple type - return as-is (without parenthesis location!)
