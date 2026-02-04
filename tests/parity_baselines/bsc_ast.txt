@@ -189,6 +189,7 @@ syntax_tests/data/idempotency/genType/src/GenTypeMain.res
 syntax_tests/data/idempotency/genType/src/ImportPath.res
 syntax_tests/data/idempotency/genType/src/ImportPath.resi
 syntax_tests/data/idempotency/genType/src/Indent.res
+syntax_tests/data/idempotency/genType/src/Log_.res
 syntax_tests/data/idempotency/genType/src/ModuleName.res
 syntax_tests/data/idempotency/genType/src/ModuleName.resi
 syntax_tests/data/idempotency/genType/src/ResolvedName.resi
@@ -402,6 +403,7 @@ syntax_tests/data/idempotency/pupilfirst/shared/WindowUtils.res
 syntax_tests/data/idempotency/pupilfirst/users/UsersHome__Community.res
 syntax_tests/data/idempotency/pupilfirst/users/UsersHome__Course.res
 syntax_tests/data/idempotency/pupilfirst/users/UsersHome__Types.res
+syntax_tests/data/idempotency/reason-react-hackernews/app.res
 syntax_tests/data/idempotency/reason-react-hackernews/CommentList.res
 syntax_tests/data/idempotency/reason-react-hackernews/CommentsPage.res
 syntax_tests/data/idempotency/reason-react-hackernews/index.res
@@ -564,6 +566,7 @@ syntax_tests/data/parsing/grammar/pattern/any.res
 syntax_tests/data/parsing/grammar/pattern/array.res
 syntax_tests/data/parsing/grammar/pattern/constraint.res
 syntax_tests/data/parsing/grammar/pattern/constructor.res
+syntax_tests/data/parsing/grammar/pattern/dict.res
 syntax_tests/data/parsing/grammar/pattern/exception.res
 syntax_tests/data/parsing/grammar/pattern/firstClassModules.res
 syntax_tests/data/parsing/grammar/pattern/list.res
@@ -747,6 +750,7 @@ syntax_tests/data/printer/pattern/any.res
 syntax_tests/data/printer/pattern/array.res
 syntax_tests/data/printer/pattern/constraint.res
 syntax_tests/data/printer/pattern/construct.res
+syntax_tests/data/printer/pattern/dict.res
 syntax_tests/data/printer/pattern/exception.res
 syntax_tests/data/printer/pattern/exoticIdent.res
 syntax_tests/data/printer/pattern/extension.res

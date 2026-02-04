@@ -21,8 +21,9 @@ use crate::parser::ast::{
     ConstructorDeclaration, CoreType, CoreTypeDesc, Expression, ExpressionDesc,
     IncludeDeclaration, JsxContainerElement, JsxElement, JsxFragment, JsxProp, JsxUnaryElement,
     LabelDeclaration, ModuleExpr, ModuleExprDesc, ModuleType, ModuleTypeDesc, ObjectField, Pattern,
-    PatternDesc, Payload, RecFlag, RowField, SignatureItem, SignatureItemDesc, StructureItem,
-    StructureItemDesc, TypeArg, TypeDeclaration, TypeKind, ValueBinding, ValueDescription,
+    PatternDesc, PatternRecordField, Payload, RecFlag, RowField, SignatureItem, SignatureItemDesc,
+    StructureItem, StructureItemDesc, TypeArg, TypeDeclaration, TypeKind, ValueBinding,
+    ValueDescription,
 };
 use crate::parser::longident::Longident;
 
@@ -2009,6 +2010,9 @@ fn handle_raw_structure(
     let j_unsafe_expr = arena.push_ldot_static(j_lident, "unsafe_expr");
 
     // Create the function application: J.unsafe_expr("code")
+    // Save attributes before moving str_exp (for template attribute propagation)
+    let payload_attributes = str_exp.pexp_attributes.clone();
+
     let func_ident = Expression {
         pexp_desc: ExpressionDesc::Pexp_ident(Located { txt: j_unsafe_expr, loc }),
         pexp_loc: loc,
@@ -2027,6 +2031,7 @@ fn handle_raw_structure(
     };
 
     // Create the let module expression
+    // Inherit the template attribute from the string expression (res.template)
     let letmodule_expr = Expression {
         pexp_desc: ExpressionDesc::Pexp_letmodule(
             Located {
@@ -2037,7 +2042,7 @@ fn handle_raw_structure(
             Box::new(apply_expr),
         ),
         pexp_loc: str_loc, // Use the string expression's location for outer expr
-        pexp_attributes: vec![],
+        pexp_attributes: payload_attributes,
     };
 
     // Wrap in Pstr_eval - OCaml's Ast_helper.Str.eval uses default_loc (= Location.none)
@@ -2951,42 +2956,114 @@ fn flatten_value_bindings(bindings: &[ValueBinding], arena: &mut ParseArena) -> 
         .collect()
 }
 
-/// Rewrite a pattern, transforming string and integer constants
+/// Rewrite a pattern, transforming string and integer constants.
+/// This recursively processes all nested patterns, matching OCaml's default_mapper.pat behavior.
 fn rewrite_pattern(pat: &Pattern, arena: &mut ParseArena) -> Pattern {
-    match &pat.ppat_desc {
+    let attrs = rewrite_attributes(&pat.ppat_attributes, arena);
+
+    let desc = match &pat.ppat_desc {
+        // String constant with delimiter: transform js -> *j
         PatternDesc::Ppat_constant(Constant::String(s, Some(delim))) => {
             let base = transform_string_pat(pat, s, delim);
-            // Also rewrite attributes
-            Pattern {
-                ppat_attributes: rewrite_attributes(&base.ppat_attributes, arena),
+            return Pattern {
+                ppat_attributes: attrs,
                 ..base
-            }
+            };
         }
         // Strip 'l' suffix from integer literals
         PatternDesc::Ppat_constant(Constant::Integer(s, Some('l'))) => {
-            Pattern {
-                ppat_desc: PatternDesc::Ppat_constant(Constant::Integer(s.clone(), None)),
-                ppat_loc: pat.ppat_loc,
-                ppat_attributes: rewrite_attributes(&pat.ppat_attributes, arena),
-            }
+            PatternDesc::Ppat_constant(Constant::Integer(s.clone(), None))
         }
-        // Pattern with type constraint: recurse into both pattern and type
+        // Other constants: no transformation needed
+        PatternDesc::Ppat_constant(c) => PatternDesc::Ppat_constant(c.clone()),
+
+        // Alias pattern: recurse into the aliased pattern
+        PatternDesc::Ppat_alias(inner, name) => {
+            PatternDesc::Ppat_alias(Box::new(rewrite_pattern(inner, arena)), name.clone())
+        }
+
+        // Tuple pattern: recurse into all elements
+        PatternDesc::Ppat_tuple(pats) => {
+            PatternDesc::Ppat_tuple(pats.iter().map(|p| rewrite_pattern(p, arena)).collect())
+        }
+
+        // Constructor pattern: recurse into optional payload
+        PatternDesc::Ppat_construct(lid, opt_p) => {
+            PatternDesc::Ppat_construct(
+                lid.clone(),
+                opt_p.as_ref().map(|p| Box::new(rewrite_pattern(p, arena))),
+            )
+        }
+
+        // Variant pattern: recurse into optional payload
+        PatternDesc::Ppat_variant(label, opt_p) => {
+            PatternDesc::Ppat_variant(
+                label.clone(),
+                opt_p.as_ref().map(|p| Box::new(rewrite_pattern(p, arena))),
+            )
+        }
+
+        // Record pattern: recurse into all field patterns
+        PatternDesc::Ppat_record(fields, flag) => {
+            PatternDesc::Ppat_record(
+                fields
+                    .iter()
+                    .map(|f| PatternRecordField {
+                        lid: f.lid.clone(),
+                        pat: rewrite_pattern(&f.pat, arena),
+                        opt: f.opt,
+                    })
+                    .collect(),
+                *flag,
+            )
+        }
+
+        // Array pattern: recurse into all elements
+        PatternDesc::Ppat_array(pats) => {
+            PatternDesc::Ppat_array(pats.iter().map(|p| rewrite_pattern(p, arena)).collect())
+        }
+
+        // Or pattern: recurse into both alternatives
+        PatternDesc::Ppat_or(p1, p2) => {
+            PatternDesc::Ppat_or(
+                Box::new(rewrite_pattern(p1, arena)),
+                Box::new(rewrite_pattern(p2, arena)),
+            )
+        }
+
+        // Constraint pattern: recurse into pattern and type
         PatternDesc::Ppat_constraint(inner_pat, core_type) => {
-            Pattern {
-                ppat_desc: PatternDesc::Ppat_constraint(
-                    Box::new(rewrite_pattern(inner_pat, arena)),
-                    rewrite_core_type(core_type, arena),
-                ),
-                ppat_loc: pat.ppat_loc,
-                ppat_attributes: rewrite_attributes(&pat.ppat_attributes, arena),
-            }
+            PatternDesc::Ppat_constraint(
+                Box::new(rewrite_pattern(inner_pat, arena)),
+                rewrite_core_type(core_type, arena),
+            )
         }
-        // For other patterns, rewrite attributes only
-        _ => Pattern {
-            ppat_desc: pat.ppat_desc.clone(),
-            ppat_loc: pat.ppat_loc,
-            ppat_attributes: rewrite_attributes(&pat.ppat_attributes, arena),
-        },
+
+        // Exception pattern: recurse into inner pattern
+        PatternDesc::Ppat_exception(inner) => {
+            PatternDesc::Ppat_exception(Box::new(rewrite_pattern(inner, arena)))
+        }
+
+        // Open pattern: recurse into inner pattern
+        PatternDesc::Ppat_open(lid, inner) => {
+            PatternDesc::Ppat_open(lid.clone(), Box::new(rewrite_pattern(inner, arena)))
+        }
+
+        // Patterns without nested patterns: clone as-is
+        PatternDesc::Ppat_any => PatternDesc::Ppat_any,
+        PatternDesc::Ppat_var(name) => PatternDesc::Ppat_var(name.clone()),
+        PatternDesc::Ppat_interval(c1, c2) => PatternDesc::Ppat_interval(c1.clone(), c2.clone()),
+        PatternDesc::Ppat_type(lid) => PatternDesc::Ppat_type(lid.clone()),
+        PatternDesc::Ppat_unpack(name) => PatternDesc::Ppat_unpack(name.clone()),
+        PatternDesc::Ppat_extension((name, payload)) => {
+            PatternDesc::Ppat_extension((name.clone(), rewrite_payload(payload, arena)))
+        }
+    };
+
+    Pattern {
+        ppat_desc: desc,
+        ppat_loc: pat.ppat_loc,
+        ppat_attributes: attrs,
     }
 }
 
@@ -3430,7 +3507,7 @@ fn rewrite_expression_generic(expr: &Expression, arena: &mut ParseArena) -> Expr
         ),
 
         ExpressionDesc::Pexp_for(pat, e1, e2, dir, body) => ExpressionDesc::Pexp_for(
-            pat.clone(),
+            rewrite_pattern(pat, arena),
             Box::new(rewrite_expression(e1, arena)),
             Box::new(rewrite_expression(e2, arena)),
             *dir,
@@ -4575,9 +4652,11 @@ fn rewrite_structure_item(item: &StructureItem, arena: &mut ParseArena) -> Vec<S
                 // OCaml rewrites attributes (e.g. "js" -> "*j" in strings) before
                 // encoding the external (ast_external.ml line 59).
                 let rewritten_attrs = rewrite_attributes(&vd.pval_attributes, arena);
+                // Rewrite the type to transform string delimiters in @as attributes
+                let rewritten_type = rewrite_core_type(&vd.pval_type, arena);
                 let rewritten_vd = ValueDescription {
                     pval_name: vd.pval_name.clone(),
-                    pval_type: vd.pval_type.clone(),
+                    pval_type: rewritten_type.clone(),
                     pval_prim: vd.pval_prim.clone(),
                     pval_attributes: rewritten_attrs,
                     pval_loc: vd.pval_loc,
@@ -4591,7 +4670,7 @@ fn rewrite_structure_item(item: &StructureItem, arena: &mut ParseArena) -> Vec<S
                 // OCaml's FFI processing (ast_external_process.ml handle_attributes)
                 // reconstructs the arrow type with ptyp_loc = pval_loc.
                 // This changes sharing patterns in the binary output.
-                let pval_type = reconstruct_arrow_type_with_loc(&vd.pval_type, vd.pval_loc, arena);
+                let pval_type = reconstruct_arrow_type_with_loc(&rewritten_type, vd.pval_loc, arena);
                 let external_result = StructureItem {
                     pstr_desc: StructureItemDesc::Pstr_primitive(ValueDescription {
                         pval_prim: encoded.pval_prim,
@@ -4649,12 +4728,12 @@ fn rewrite_structure_item(item: &StructureItem, arena: &mut ParseArena) -> Vec<S
                     vec![external_result]
                 }
             } else {
-                // Non-ReScript externals still need attribute rewriting
-                // (e.g. "js" -> "*j" in @ocaml.doc string delimiters)
+                // Non-ReScript externals still need attribute and type rewriting
+                // (e.g. "js" -> "*j" in @ocaml.doc string delimiters and @as attributes in types)
                 vec![StructureItem {
                     pstr_desc: StructureItemDesc::Pstr_primitive(ValueDescription {
                         pval_name: vd.pval_name.clone(),
-                        pval_type: vd.pval_type.clone(),
+                        pval_type: rewrite_core_type(&vd.pval_type, arena),
                         pval_prim: vd.pval_prim.clone(),
                         pval_attributes: rewrite_attributes(&vd.pval_attributes, arena),
                         pval_loc: vd.pval_loc,
