@@ -9,7 +9,7 @@
 //!   res_parser_rust [options] <file>
 //!
 //! Options:
-//!   -print <format>         Output format: ml, res, sexp, sexp-locs, sexp0-locs, binary, binary0, ast, comments, tokens
+//!   -print <format>         Output format: ml, res, sexp, sexp-locs, sexp-locs-ppx, sexp0-locs, binary, binary0, ast, comments, tokens
 //!   -recover                Enable error recovery mode
 //!   -interface              Parse as interface file
 //!   -width <n>              Line width for printer (default: 100)
@@ -19,7 +19,7 @@
 //!   -typechecker            Parse for typechecker (not printer)
 
 use clap::Parser as ClapParser;
-use rescript_compiler::binary_ast::{mapper_from0, mapper_to0, Marshal, MarshalWriter};
+use rescript_compiler::binary_ast::{mapper_from0, mapper_to0, ppx, Marshal, MarshalWriter};
 use rescript_compiler::parse_arena::ParseArena;
 use rescript_compiler::parser::{
     code_frame, jsx_ppx, ml_printer, module, printer2, sexp, sexp_locs, sexp_locs0, Comment, Parser,
@@ -204,6 +204,10 @@ fn main() {
             "res" => print_signature_res(&signature, parser.comments().to_vec(), parser.arena_mut(), &mut io::stdout()),
             "sexp" => sexp::print_signature(parser.arena(), &signature, &mut io::stdout()),
             "sexp-locs" => sexp_locs::print_signature(&signature, parser.arena(), &mut io::stdout()),
+            "sexp-locs-ppx" => {
+                let rewritten = ppx::rewrite_signature(&signature, parser.arena_mut());
+                sexp_locs::print_signature(&rewritten, parser.arena(), &mut io::stdout());
+            }
             "sexp0-locs" => {
                 let sig0 = mapper_to0::map_signature(parser.arena_mut(), &signature);
                 sexp_locs0::print_signature(parser.arena(), &sig0, &mut io::stdout());
@@ -301,6 +305,10 @@ fn main() {
             }
             "sexp" => sexp::print_structure(parser.arena(), &structure, &mut io::stdout()),
             "sexp-locs" => sexp_locs::print_structure(&structure, parser.arena(), &mut io::stdout()),
+            "sexp-locs-ppx" => {
+                let rewritten = ppx::rewrite_structure(&structure, parser.arena_mut());
+                sexp_locs::print_structure(&rewritten, parser.arena(), &mut io::stdout());
+            }
             "sexp0-locs" => {
                 let str0 = mapper_to0::map_structure(parser.arena_mut(), &structure);
                 sexp_locs0::print_structure(parser.arena(), &str0, &mut io::stdout());

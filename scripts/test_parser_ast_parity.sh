@@ -6,9 +6,10 @@
 #
 # Parser parity (using res_parser for readable diffs):
 # 1. sexp-locs parity - AST structure + locations + attributes match
+# 2. sexp-locs-ppx parity - Post-PPX AST structure + locations match
 #
 # Compiler binary output parity (using bsc -bs-ast):
-# 2. bsc-ast parity - Full compiler binary AST output is byte-identical
+# 3. bsc-ast parity - Full compiler binary AST output is byte-identical
 #    (includes dependency extraction + marshalled parsetree)
 #
 # REGRESSION TRACKING:
@@ -89,7 +90,8 @@ This is the comprehensive test for verifying Rust compiler parity with OCaml.
 WHAT IT TESTS:
 
   1. sexp-locs     Parser AST with locations (readable diffs for debugging)
-  2. bsc-ast       Full `bsc -bs-ast` output (production format with deps)
+  2. sexp-locs-ppx Post-PPX parser AST with locations
+  3. bsc-ast       Full `bsc -bs-ast` output (production format with deps)
 
 For Parsetree0/PPX parity tests, see test_parser_ast0_parity.sh
 
@@ -177,6 +179,7 @@ TIMEOUT_SECONDS=5
 BASELINE_DIR="$PROJECT_ROOT/tests/parity_baselines"
 BASELINE_SEXP_LOCS="$BASELINE_DIR/sexp_locs.txt"
 BASELINE_BSC_AST="$BASELINE_DIR/bsc_ast.txt"
+BASELINE_SEXP_LOCS_PPX="$BASELINE_DIR/sexp_locs_ppx.txt"
 
 # Check if executables exist
 if [[ ! -x "$OCAML_PARSER" ]]; then
@@ -264,6 +267,7 @@ echo ""
 RESULTS_DIR="$TEMP_DIR/results"
 mkdir -p "$RESULTS_DIR"
 mkdir -p "$TEMP_DIR/locs_diffs"
+mkdir -p "$TEMP_DIR/sexp_locs_ppx_diffs"
 mkdir -p "$TEMP_DIR/bsc_ast_parity_diffs"
 
 # Export variables for parallel execution
@@ -277,6 +281,7 @@ test_single_file() {
 
     # Initialize result
     local locs_pass=0 locs_diff=0
+    local sexp_locs_ppx_diff=0
     local bsc_ast_diff=0
     local ocaml_fail=0 rust_fail=0
 
@@ -317,6 +322,15 @@ test_single_file() {
             diff -u "$file_temp/ocaml.sexp-locs" "$file_temp/rust.sexp-locs" > "$TEMP_DIR/locs_diffs/$safe_name.diff" 2>&1 || true
         fi
 
+        # Test sexp-locs-ppx parity (post-PPX sexp with locations)
+        if timeout "$TIMEOUT_SECONDS" "$OCAML_PARSER" $intf_flag -print sexp-locs-ppx "$file" > "$file_temp/ocaml.sexp-locs-ppx" 2>/dev/null && \
+           timeout "$TIMEOUT_SECONDS" "$RUST_PARSER" $intf_flag -print sexp-locs-ppx "$file" > "$file_temp/rust.sexp-locs-ppx" 2>/dev/null; then
+            if ! diff -q "$file_temp/ocaml.sexp-locs-ppx" "$file_temp/rust.sexp-locs-ppx" > /dev/null 2>&1; then
+                sexp_locs_ppx_diff=1
+                diff -u --text "$file_temp/ocaml.sexp-locs-ppx" "$file_temp/rust.sexp-locs-ppx" > "$TEMP_DIR/sexp_locs_ppx_diffs/$safe_name.diff" 2>&1 || true
+            fi
+        fi
+
         # Test bsc -bs-ast parity (full compiler binary AST output with dependencies)
         # This is the production format used by the build system
         # Note: Both OCaml and Rust bsc create .iast files for interface (.resi) files,
@@ -350,7 +364,7 @@ test_single_file() {
     fi
 
     # Write results
-    echo "$file:$locs_pass:$locs_diff:$bsc_ast_diff:$ocaml_fail:$rust_fail" > "$result_file"
+    echo "$file:$locs_pass:$locs_diff:$sexp_locs_ppx_diff:$bsc_ast_diff:$ocaml_fail:$rust_fail" > "$result_file"
 
     # Clean up per-file temp
     rm -rf "$file_temp"
@@ -384,7 +398,7 @@ if $QUICK_MODE; then
         # Check result
         safe_name=$(echo "$file" | tr '/' '_')
         result=$(cat "$RESULTS_DIR/$safe_name.result")
-        IFS=':' read -r _ locs_pass locs_diff bsc_ast_diff ocaml_fail rust_fail <<< "$result"
+        IFS=':' read -r _ locs_pass locs_diff sexp_locs_ppx_diff bsc_ast_diff ocaml_fail rust_fail <<< "$result"
 
         if [[ "$locs_diff" -eq 1 ]]; then
             echo -e "${RED}FAIL:${RESET} $file (sexp-locs differs)"
@@ -421,11 +435,13 @@ fi
 # Aggregate results
 locs_pass_count=0
 locs_diff_count=0
+sexp_locs_ppx_diff_count=0
 bsc_ast_parity_diff_count=0
 ocaml_fail_count=0
 rust_fail_count=0
 
 locs_diff_files=""
+sexp_locs_ppx_diff_files=""
 bsc_ast_parity_diff_files=""
 ocaml_fail_files=""
 rust_fail_files=""
@@ -433,15 +449,17 @@ rust_fail_files=""
 for result_file in "$RESULTS_DIR"/*.result; do
     [[ -f "$result_file" ]] || continue
     result=$(cat "$result_file")
-    IFS=':' read -r file locs_pass locs_diff bsc_ast_diff ocaml_fail rust_fail <<< "$result"
+    IFS=':' read -r file locs_pass locs_diff sexp_locs_ppx_diff bsc_ast_diff ocaml_fail rust_fail <<< "$result"
 
     locs_pass_count=$((locs_pass_count + locs_pass))
     locs_diff_count=$((locs_diff_count + locs_diff))
+    sexp_locs_ppx_diff_count=$((sexp_locs_ppx_diff_count + sexp_locs_ppx_diff))
     bsc_ast_parity_diff_count=$((bsc_ast_parity_diff_count + bsc_ast_diff))
     ocaml_fail_count=$((ocaml_fail_count + ocaml_fail))
     rust_fail_count=$((rust_fail_count + rust_fail))
 
     [[ "$locs_diff" -eq 1 ]] && locs_diff_files="$locs_diff_files$file\n"
+    [[ "$sexp_locs_ppx_diff" -eq 1 ]] && sexp_locs_ppx_diff_files="$sexp_locs_ppx_diff_files$file\n"
     [[ "$bsc_ast_diff" -eq 1 ]] && bsc_ast_parity_diff_files="$bsc_ast_parity_diff_files$file\n"
     [[ "$ocaml_fail" -eq 1 ]] && ocaml_fail_files="$ocaml_fail_files$file\n"
     [[ "$rust_fail" -eq 1 ]] && rust_fail_files="$rust_fail_files$file\n"
@@ -450,12 +468,13 @@ done
 # Build lists of tested and passing files for each test type
 all_tested_files=""
 sexp_locs_pass_files=""
+sexp_locs_ppx_pass_files=""
 bsc_ast_pass_files=""
 
 for result_file in "$RESULTS_DIR"/*.result; do
     [[ -f "$result_file" ]] || continue
     result=$(cat "$result_file")
-    IFS=':' read -r file locs_pass locs_diff bsc_ast_diff ocaml_fail rust_fail <<< "$result"
+    IFS=':' read -r file locs_pass locs_diff sexp_locs_ppx_diff bsc_ast_diff ocaml_fail rust_fail <<< "$result"
 
     # Track all tested files
     all_tested_files="$all_tested_files$file\n"
@@ -463,6 +482,9 @@ for result_file in "$RESULTS_DIR"/*.result; do
     # A file passes if it didn't fail and didn't have a diff
     if [[ "$locs_pass" -eq 1 && "$locs_diff" -eq 0 ]]; then
         sexp_locs_pass_files="$sexp_locs_pass_files$file\n"
+    fi
+    if [[ "$locs_pass" -eq 1 && "$sexp_locs_ppx_diff" -eq 0 ]]; then
+        sexp_locs_ppx_pass_files="$sexp_locs_ppx_pass_files$file\n"
     fi
     if [[ "$locs_pass" -eq 1 && "$bsc_ast_diff" -eq 0 ]]; then
         bsc_ast_pass_files="$bsc_ast_pass_files$file\n"
@@ -538,6 +560,7 @@ echo ""
 
 # Detect regressions for each test type
 detect_regressions_and_update "$BASELINE_SEXP_LOCS" "$sexp_locs_pass_files" "sexp-locs" "$tested_files_sorted"
+detect_regressions_and_update "$BASELINE_SEXP_LOCS_PPX" "$sexp_locs_ppx_pass_files" "sexp-locs-ppx" "$tested_files_sorted"
 detect_regressions_and_update "$BASELINE_BSC_AST" "$bsc_ast_pass_files" "bsc-ast" "$tested_files_sorted"
 
 # Count total regressions
@@ -555,9 +578,11 @@ echo ""
 
 # Show baseline statistics
 baseline_sexp_locs_count=0
+baseline_sexp_locs_ppx_count=0
 baseline_bsc_ast_count=0
 
 [[ -f "$BASELINE_SEXP_LOCS" ]] && baseline_sexp_locs_count=$(wc -l < "$BASELINE_SEXP_LOCS" | tr -d ' ')
+[[ -f "$BASELINE_SEXP_LOCS_PPX" ]] && baseline_sexp_locs_ppx_count=$(wc -l < "$BASELINE_SEXP_LOCS_PPX" | tr -d ' ')
 [[ -f "$BASELINE_BSC_AST" ]] && baseline_bsc_ast_count=$(wc -l < "$BASELINE_BSC_AST" | tr -d ' ')
 
 echo -e "${BOLD}Summary:${RESET}"
@@ -565,11 +590,13 @@ echo "  Total files tested:         $TOTAL_FILES"
 echo ""
 echo "  ${BOLD}Baseline (files that must not regress):${RESET}"
 echo "    sexp-locs:                $baseline_sexp_locs_count"
+echo "    sexp-locs-ppx:            $baseline_sexp_locs_ppx_count"
 echo "    bsc-ast:                  $baseline_bsc_ast_count"
 echo ""
 echo "  ${BOLD}Parser parity (sexp output for debugging):${RESET}"
 echo "    sexp-locs matches:        $locs_pass_count"
 echo "    sexp-locs differences:    $locs_diff_count"
+echo "    sexp-locs-ppx differences: $sexp_locs_ppx_diff_count"
 echo ""
 echo "  ${BOLD}Compiler parity (bsc -bs-ast output):${RESET}"
 echo "    bsc-ast differences:      $bsc_ast_parity_diff_count"
@@ -597,6 +624,31 @@ if [[ $locs_diff_count -gt 0 ]]; then
     if [[ -n "$first_locs_diff" ]]; then
         head -50 "$first_locs_diff"
         lines=$(wc -l < "$first_locs_diff")
+        if [[ $lines -gt 50 ]]; then
+            echo "  ... (diff truncated, $lines total lines)"
+        fi
+    fi
+    echo ""
+fi
+
+# Show sexp-locs-ppx mismatches
+if [[ $sexp_locs_ppx_diff_count -gt 0 ]]; then
+    echo -e "${BOLD}${YELLOW}Files with sexp-locs-ppx differences ($sexp_locs_ppx_diff_count):${RESET}"
+    echo -e "$sexp_locs_ppx_diff_files" | grep -v "^$" | head -30 | while read file; do
+        echo "  $file"
+    done
+    if [[ $sexp_locs_ppx_diff_count -gt 30 ]]; then
+        remaining=$((sexp_locs_ppx_diff_count - 30))
+        echo "  ... and $remaining more"
+    fi
+    echo ""
+
+    # Show first sexp-locs-ppx diff as example
+    echo -e "${BOLD}Example sexp-locs-ppx diff (first file):${RESET}"
+    first_ppx_diff=$(ls "$TEMP_DIR/sexp_locs_ppx_diffs/"*.diff 2>/dev/null | head -1)
+    if [[ -n "$first_ppx_diff" ]]; then
+        head -50 "$first_ppx_diff"
+        lines=$(wc -l < "$first_ppx_diff")
         if [[ $lines -gt 50 ]]; then
             echo "  ... (diff truncated, $lines total lines)"
         fi
@@ -672,6 +724,12 @@ fi
 if [[ $locs_diff_count -gt 0 ]]; then
     pct_match=$(python3 -c "print(f'{100 * $locs_pass_count / ($locs_pass_count + $locs_diff_count):.1f}')")
     echo -e "${RED}${BOLD}FAILED: $locs_diff_count files have sexp-locs differences ($pct_match% match)${RESET}"
+    all_pass=false
+    exit_code=1
+fi
+
+if [[ $sexp_locs_ppx_diff_count -gt 0 ]]; then
+    echo -e "${RED}${BOLD}FAILED: $sexp_locs_ppx_diff_count files have sexp-locs-ppx differences${RESET}"
     all_pass=false
     exit_code=1
 fi

@@ -194,7 +194,7 @@ end = struct
       ("-recover", Arg.Unit (fun () -> recover := true), "Emit partial ast");
       ( "-print",
         Arg.String (fun txt -> print := txt),
-        "Print either binary, binary0, ml, ast, sexp, sexp-locs, sexp0-locs, comments, tokens or res. Default: \
+        "Print either binary, binary0, ml, ast, sexp, sexp-locs, sexp-locs-ppx, sexp0-locs, comments, tokens or res. Default: \
          res" );
       ( "-width",
         Arg.Int (fun w -> width := w),
@@ -240,14 +240,14 @@ module CliArgProcessor = struct
       | "ml" -> Res_driver_ml_printer.print_engine
       | "ast" -> Res_ast_debugger.print_engine
       | "sexp" -> Res_ast_debugger.sexp_print_engine
-      | "sexp-locs" -> Res_ast_debugger.sexp_locs_print_engine
+      | "sexp-locs" | "sexp-locs-ppx" -> Res_ast_debugger.sexp_locs_print_engine
       | "sexp0-locs" -> Res_ast_debugger.sexp0_locs_print_engine
       | "comments" -> Res_ast_debugger.comments_print_engine
       | "tokens" -> Res_token_debugger.token_print_engine
       | "res" -> Res_driver.print_engine
       | target ->
         print_endline
-          ("-print needs to be either binary, binary0, ml, ast, sexp, sexp-locs, sexp0-locs, comments, tokens \
+          ("-print needs to be either binary, binary0, ml, ast, sexp, sexp-locs, sexp-locs-ppx, sexp0-locs, comments, tokens \
             or res. You provided " ^ target);
         exit 1
     in
@@ -288,6 +288,11 @@ module CliArgProcessor = struct
         let parsetree =
           Jsx_ppx.rewrite_signature ~jsx_version ~jsx_module parsetree
         in
+        let parsetree =
+          if target = "sexp-locs-ppx" then
+            Bs_builtin_ppx.mapper.signature Bs_builtin_ppx.mapper parsetree
+          else parsetree
+        in
         print_engine.print_interface ~width ~filename
           ~comments:parse_result.comments parsetree
     else
@@ -312,6 +317,11 @@ module CliArgProcessor = struct
         in
         let parsetree =
           Jsx_ppx.rewrite_implementation ~jsx_version ~jsx_module parsetree
+        in
+        let parsetree =
+          if target = "sexp-locs-ppx" then
+            Bs_builtin_ppx.mapper.structure Bs_builtin_ppx.mapper parsetree
+          else parsetree
         in
         print_engine.print_implementation ~width ~filename
           ~comments:parse_result.comments parsetree
