@@ -2587,8 +2587,15 @@ fn remove_await_attribute(attrs: &[Attribute], arena: &ParseArena) -> Vec<Attrib
 /// Into:
 ///   `module type __Belt_List__ = module type of Belt.List`
 ///   `module M = unpack(Primitive_promise.unsafe_await(Primitive_module.import(module(Belt.List: __Belt_List__))))`
+///
+/// Key details from OCaml:
+/// - The Pmty_typeof uses the ORIGINAL module expression `me` (with @res.await attribute)
+/// - The transformed Pstr_module keeps the ORIGINAL pstr_loc from `item`
+/// - The transformed module expr keeps @res.await in pmod_attributes (via {e with pmod_desc = ...})
+/// - Only the inner pack expression removes @res.await
 fn transform_module_await(
     mb: &current::ModuleBinding,
+    original_pstr_loc: LocIdx, // The original structure item location
     arena: &mut ParseArena,
 ) -> Option<(StructureItem, StructureItem)> {
     // Check if the module expression is Pmod_ident with @res.await attribute
@@ -2612,7 +2619,8 @@ fn transform_module_await(
     // - pmod_loc: location of the module expression (used for import/await expressions)
 
     // 1. Create module type declaration: module type __Belt_List__ = module type of Belt.List
-    // OCaml uses lid_loc (the Longident's location) for all parts of this declaration
+    // OCaml uses (Mty.typeof_ ~loc me) where `me` is the ORIGINAL module expression
+    // This means the Pmty_typeof's inner module expr has the @res.await attribute
     let module_type_decl = StructureItem {
         pstr_desc: StructureItemDesc::Pstr_modtype(current::ModuleTypeDeclaration {
             pmtd_name: Located {
@@ -2626,7 +2634,8 @@ fn transform_module_await(
                         loc: lid_loc,
                     }),
                     pmod_loc: lid_loc,
-                    pmod_attributes: vec![],
+                    // OCaml: Mty.typeof_ ~loc me - uses original `me` which has @res.await
+                    pmod_attributes: mod_expr.pmod_attributes.clone(),
                 })),
                 pmty_loc: lid_loc,
                 pmty_attributes: vec![],
@@ -2644,15 +2653,18 @@ fn transform_module_await(
     let module_type_lid = arena.push_lident_from_idx(module_type_name_idx);
 
     // Create pack expression: module(Belt.List)
-    // First, remove @res.await attribute from module expr
-    // OCaml does {e with pmod_attributes = ...} preserving original locations
+    // OCaml: Exp.pack ~loc:e.pmod_loc {e with pmod_attributes = remove_await_attribute ...}
+    // NOTE: OCaml's remove_await_attribute uses `!=` (physical inequality) which doesn't
+    // actually remove the attribute because strings are different objects. So the inner
+    // pack expression KEEPS @res.await in the actual output.
     let cleaned_mod_expr = current::ModuleExpr {
         pmod_desc: ModuleExprDesc::Pmod_ident(Located {
             txt: lid,
             loc: lid_loc, // Preserve original Longident location
         }),
         pmod_loc: mod_expr.pmod_loc,
-        pmod_attributes: remove_await_attribute(&mod_expr.pmod_attributes, arena),
+        // Keep attributes as-is to match OCaml's actual behavior (not its intended behavior)
+        pmod_attributes: mod_expr.pmod_attributes.clone(),
     };
 
     // OCaml uses e.pmod_loc for pack, constraint, and package type locations
@@ -2714,13 +2726,17 @@ fn transform_module_await(
     let await_expr = transform_await(import_apply, mod_expr.pmod_loc, arena);
 
     // Create unpack(await_expr)
+    // OCaml: {e with pmod_desc = Pmod_unpack ...} - keeps original pmod_attributes (with @res.await)
     let transformed_mod_expr = current::ModuleExpr {
         pmod_desc: ModuleExprDesc::Pmod_unpack(Box::new(await_expr)),
         pmod_loc: mod_expr.pmod_loc,
-        pmod_attributes: vec![],
+        // OCaml's {e with pmod_desc = ...} keeps the original attributes including @res.await
+        pmod_attributes: mod_expr.pmod_attributes.clone(),
     };
 
     // Create the transformed module binding
+    // OCaml: {item with pstr_desc = Pstr_module {mb with pmb_expr = ...}}
+    // This preserves original_pstr_loc (from item), not mb.pmb_loc
     let transformed_mb = StructureItem {
         pstr_desc: StructureItemDesc::Pstr_module(current::ModuleBinding {
             pmb_name: mb.pmb_name.clone(),
@@ -2728,7 +2744,7 @@ fn transform_module_await(
             pmb_attributes: rewrite_attributes(&mb.pmb_attributes, arena),
             pmb_loc: mb.pmb_loc,
         }),
-        pstr_loc: mb.pmb_loc,
+        pstr_loc: original_pstr_loc, // Use original structure item location
     };
 
     Some((module_type_decl, transformed_mb))
@@ -3833,12 +3849,10 @@ fn rewrite_expression_generic(expr: &Expression, arena: &mut ParseArena) -> Expr
             // Transform: await expr -> Primitive_promise.unsafe_await(expr)
             // OCaml's create_await_expression uses the inner expression's pexp_loc
             // (not the Pexp_await node's loc) for the ghost location
+            // OCaml creates a NEW expression with empty attributes, discarding any
+            // attributes on the Pexp_await node (like @res.braces)
             let rewritten_inner = rewrite_expression(e, arena);
-            let transformed = transform_await(rewritten_inner, e.pexp_loc, arena);
-            return Expression {
-                pexp_attributes: rewrite_attributes(&expr.pexp_attributes, arena),
-                ..transformed
-            };
+            return transform_await(rewritten_inner, e.pexp_loc, arena);
         }
 
         ExpressionDesc::Pexp_pack(mod_expr) => {
@@ -5095,7 +5109,7 @@ fn rewrite_structure_item(item: &StructureItem, arena: &mut ParseArena) -> Vec<S
         // Module - check for @res.await transformation first, then recurse
         StructureItemDesc::Pstr_module(mb) => {
             // Check for module-level await: module M = @res.await ME
-            if let Some((module_type_decl, transformed_mb)) = transform_module_await(mb, arena) {
+            if let Some((module_type_decl, transformed_mb)) = transform_module_await(mb, item.pstr_loc, arena) {
                 vec![module_type_decl, transformed_mb]
             } else {
                 // Normal case - just recurse into module structure
