@@ -91,6 +91,140 @@ pub fn is_rs_external(attrs: &[Attribute], pval_prim: &[String], arena: &mut Par
     has_external_attrs(attrs, arena) || prims_to_be_encoded(pval_prim)
 }
 
+/// Result of classifying a JavaScript expression.
+/// This mirrors OCaml's `Js_raw_info.exp` type.
+#[derive(Debug, Clone, PartialEq)]
+pub enum JsExpClassification {
+    /// A function expression (regular or arrow)
+    JsFunction {
+        arity: usize,
+        arrow: bool,
+    },
+    /// A literal value (string, number, bool, null, undefined, object literal, array literal)
+    JsLiteral,
+    /// Unknown expression type
+    JsExpUnknown,
+}
+
+/// Check if an OXC expression is an object literal (recursively).
+/// This matches OCaml's `is_obj_literal` function.
+fn is_obj_literal(expr: &oxc_ast::ast::Expression) -> bool {
+    use oxc_ast::ast::Expression;
+    match expr {
+        Expression::Identifier(id) if id.name == "undefined" => true,
+        Expression::StringLiteral(_)
+        | Expression::BooleanLiteral(_)
+        | Expression::NullLiteral(_)
+        | Expression::NumericLiteral(_)
+        | Expression::BigIntLiteral(_)
+        | Expression::RegExpLiteral(_) => true,
+        Expression::UnaryExpression(unary) => {
+            use oxc_ast::ast::UnaryOperator;
+            matches!(unary.operator, UnaryOperator::UnaryNegation)
+                && is_obj_literal(&unary.argument)
+        }
+        Expression::ObjectExpression(obj) => obj.properties.iter().all(|prop| {
+            use oxc_ast::ast::ObjectPropertyKind;
+            match prop {
+                ObjectPropertyKind::ObjectProperty(p) => is_obj_literal(&p.value),
+                _ => false,
+            }
+        }),
+        Expression::ArrayExpression(arr) => arr.elements.iter().all(|elem| {
+            use oxc_ast::ast::ArrayExpressionElement;
+            match elem {
+                ArrayExpressionElement::SpreadElement(_) => false,
+                ArrayExpressionElement::Elision(_) => true,
+                _ => {
+                    // Try to get the expression from the element
+                    if let Some(expr) = elem.as_expression() {
+                        is_obj_literal(expr)
+                    } else {
+                        false
+                    }
+                }
+            }
+        }),
+        _ => false,
+    }
+}
+
+/// Classify a JavaScript expression string.
+/// This mirrors OCaml's `classify_exp` function which uses the Flow parser.
+/// We use OXC (Oxidation Compiler) for parsing.
+///
+/// Returns the classification of the expression.
+pub fn classify_js_exp(s: &str) -> JsExpClassification {
+    use oxc_allocator::Allocator;
+    use oxc_ast::ast::Expression;
+    use oxc_parser::Parser;
+    use oxc_span::SourceType;
+
+    // Create allocator in its own scope to ensure proper cleanup
+    let allocator = Allocator::default();
+    let source_type = SourceType::default();
+
+    // Try to parse the string as a JavaScript expression
+    let parser_result = Parser::new(&allocator, s, source_type).parse_expression();
+
+    let result = match parser_result {
+        Ok(expr) => {
+            match &expr {
+                // Function expression: function(...) { ... }
+                // OCaml only matches non-async, non-generator functions
+                Expression::FunctionExpression(func) => {
+                    if !func.r#async && !func.generator {
+                        JsExpClassification::JsFunction {
+                            arity: func.params.parameters_count(),
+                            arrow: false,
+                        }
+                    } else {
+                        JsExpClassification::JsExpUnknown
+                    }
+                }
+                // Arrow function expression: (...) => ...
+                // OCaml only matches non-async, non-generator arrow functions with no id
+                Expression::ArrowFunctionExpression(arrow) => {
+                    if !arrow.r#async {
+                        JsExpClassification::JsFunction {
+                            arity: arrow.params.parameters_count(),
+                            arrow: true,
+                        }
+                    } else {
+                        JsExpClassification::JsExpUnknown
+                    }
+                }
+                // Literals
+                Expression::StringLiteral(_)
+                | Expression::BooleanLiteral(_)
+                | Expression::NullLiteral(_)
+                | Expression::NumericLiteral(_)
+                | Expression::BigIntLiteral(_)
+                | Expression::RegExpLiteral(_) => JsExpClassification::JsLiteral,
+                // undefined identifier
+                Expression::Identifier(id) if id.name == "undefined" => {
+                    JsExpClassification::JsLiteral
+                }
+                // Object/array literals (checked recursively)
+                _ if is_obj_literal(&expr) => JsExpClassification::JsLiteral,
+                // Unknown
+                _ => JsExpClassification::JsExpUnknown,
+            }
+        }
+        Err(_) => JsExpClassification::JsExpUnknown,
+    };
+
+    // Explicitly drop allocator before returning (though this should happen anyway)
+    drop(allocator);
+    result
+}
+
+/// Detect if a JavaScript string contains a function expression.
+/// This is a convenience wrapper around `classify_js_exp`.
+fn is_js_function(s: &str) -> bool {
+    matches!(classify_js_exp(s), JsExpClassification::JsFunction { .. })
+}
+
 /// Process args from list_of_arrow into FFI Param specs and compute arity.
 /// This mirrors OCaml's fold_right in handle_attributes which builds
 /// arg_type_specs and arg_type_specs_length.
@@ -1783,10 +1917,14 @@ fn handle_raw(
     // OCaml's raw_as_string_exp_exn returns {e with pexp_desc = Pexp_constant ...}
     // where e is the original expression from the payload.
     // The returned expression uses e.pexp_loc (the payload string's location).
-    let (str_exp, payload_loc) = match payload {
+    // Also detect if the JS string contains a function (for internal.expansive attribute).
+    let (str_exp, payload_loc, is_function) = match payload {
         Payload::PStr(items) if items.len() == 1 => {
             if let StructureItemDesc::Pstr_eval(e, _) = &items[0].pstr_desc {
                 if let ExpressionDesc::Pexp_constant(Constant::String(s, _)) = &e.pexp_desc {
+                    // Check if the JS string contains a function
+                    let is_func = is_js_function(s);
+
                     // Create a new string expression with delimiter stripped
                     // (OCaml strips the delimiter when transforming %raw)
                     let exp = Expression {
@@ -1797,7 +1935,7 @@ fn handle_raw(
                         pexp_loc: e.pexp_loc,
                         pexp_attributes: e.pexp_attributes.clone(),
                     };
-                    (exp, e.pexp_loc)
+                    (exp, e.pexp_loc, is_func)
                 } else {
                     return expr.clone();
                 }
@@ -1895,6 +2033,28 @@ fn handle_raw(
     // OCaml's handle_raw returns {exp with pexp_desc = ...} so:
     // - pexp_loc = exp.pexp_loc = payload string's location (payload_loc)
     // - pexp_attributes = exp.pexp_attributes (or with internal_expansive added for functions)
+    //
+    // If the JS string contains a function, prepend the internal.expansive attribute.
+    // This matches OCaml's behavior in ast_exp_handle_external.ml:handle_raw
+    let final_attributes = if is_function {
+        // Create internal.expansive attribute
+        // OCaml uses: Ast_attributes.internal_expansive = ({txt="internal.expansive"; loc=locg}, Ast_payload.empty)
+        // where locg = Location.none
+        let attr_name_idx = arena.intern_string("internal.expansive");
+        let internal_expansive: Attribute = (
+            Located {
+                txt: attr_name_idx,
+                loc: none_loc, // OCaml uses Location.none for this attribute
+            },
+            Payload::PStr(vec![]),
+        );
+        let mut attrs = vec![internal_expansive];
+        attrs.extend(payload_attributes);
+        attrs
+    } else {
+        payload_attributes
+    };
+
     Expression {
         pexp_desc: ExpressionDesc::Pexp_letmodule(
             Located {
@@ -1905,7 +2065,7 @@ fn handle_raw(
             Box::new(apply_expr),
         ),
         pexp_loc: payload_loc,
-        pexp_attributes: payload_attributes,
+        pexp_attributes: final_attributes,
     }
 }
 
