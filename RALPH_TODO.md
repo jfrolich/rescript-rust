@@ -65,7 +65,7 @@ Do NOT spend time on small issues (@deriving edge cases, etc.) until the locatio
 ---
 
 **Last Updated:** 2026-02-04
-**Overall Status:** 735/1196 bsc-ast tests passing (61.5%)
+**Overall Status:** 775/1196 bsc-ast tests passing (64.8%)
 **Syntax tests:** 506/506 (100%) ✅
 **sexp-locs Status:** 1196/1196 tests passing (100%) ✅
 **Note:** Total test count increased from 1049 to 1196 due to test infrastructure changes.
@@ -129,6 +129,53 @@ patterns to OCaml's.
   payloads within the same parsing context and `push` for different contexts.
 - Track sharing at Attribute level: Share the (name, PStr([])) attribute pair by (StrIdx, LocIdx, PayloadKind).
 - Profile OCaml's actual sharing: Run OCaml under a modified marshal that logs sharing decisions.
+
+**Session progress (2026-02-04, PPX structural fixes + @as param stripping):**
+Five PPX fixes improved bsc-ast parity from 766 to 775 (+9 files, 0 regressions):
+
+1. **Fix baseline: remove 2 false regressions** (766 → 766): locallyAbstractTypes.res and
+   typeconstr.res were listed in baseline as passing but had pre-existing sharing differences.
+
+2. **@module relative path externals wrapping** (+0 structural files, ~41 files affected):
+   OCaml wraps external declarations with `@module("./...")` relative paths in
+   `Pstr_include(Pmod_constraint(Pmod_structure, Pmty_signature))` to prevent cross-module
+   inlining. Implemented `check_external_relative()`, `is_package_relative_path()`,
+   `check_ffi_relative()` functions and wrapped Pstr_primitive case accordingly.
+
+3. **Record let destructuring → Pexp_match** (+7 files, 766 → 773): OCaml's bs_builtin_ppx
+   converts `let {field} = expr in body` to `match expr with {field} -> body` for record
+   pattern bindings. Added detection in Pexp_let case for Ppat_record and Ppat_alias(Ppat_record)
+   patterns with single non-recursive bindings, skipping Pexp_pack expressions.
+
+4. **Boolean match → if-then-else** (+1 file, 773 → 774): OCaml converts
+   `switch b { | true => t | false => f }` to `if b { t } else { f }`. Added boolean pattern
+   detection in Pexp_match for exactly 2 cases with Ppat_construct(Lident("true"/"false")).
+
+5. **@as(_) parameter stripping** (+1 file, 774 → 775): OCaml strips `@as("...")` placeholder
+   parameters from external type arrows, reducing arity. Implemented:
+   - `get_payload_int()` for integer constant extraction from attribute payloads
+   - `get_payload_string_with_delim()` for string extraction with proper delimiter mapping
+     (Rust "js" delimiter → OCaml DStarJ, matching the PPX string rewriting pipeline)
+   - Modified `reconstruct_arrow_type_with_loc()` to filter out ArgCst parameters
+   - Edge case: when all params are erased, adds unit parameter (matching OCaml)
+
+**Remaining 421 failures** are predominantly sharing/dedup differences:
+- ~346 files (82%): OCaml CSE sharing patterns (module-level attribute bindings like
+  `internal_expansive`, `ternary_attr`, `spread_attr` etc. are physically shared in OCaml)
+- ~72 files (17%): Remaining structural differences (PPX transformations not yet implemented)
+- Arity over-sharing: Rust's `static_arity_1()` shares across all parser call sites,
+  but OCaml only shares within specific contexts. Disabling arity sharing entirely
+  causes 55 regressions, indicating some arity sharing IS needed.
+
+**Key discovery: attribute sharing root cause:**
+OCaml's parser and PPX define attributes as module-level `let` bindings (e.g.,
+`let internal_expansive = ({txt="internal.expansive"; loc=locg}, Ast_payload.empty)` in
+`ast_attributes.ml`, `let ternary_attr = (Location.mknoloc "res.ternary", PStr [])` in
+`res_core.ml`). These are physically shared across all usages. The Rust PPX creates fresh
+copies each time. Matching this requires either:
+1. Pre-allocated shared attribute records in the PPX
+2. Content-based attribute sharing in the marshal writer
+3. Arena-based attribute indices (like LocIdx for locations)
 
 **Session progress (2026-02-04, encoding + PPX type rewriting fixes):**
 Five fixes improved bsc-ast parity from 730 to 735 (+5 files, 0 regressions):
