@@ -174,10 +174,13 @@ impl<'a> DependencyCollector<'a> {
                 self.add_extension_constructor(ext_ctor);
             }
             StructureItemDesc::Pstr_module(mb) => {
-                // Bind the module name so it's not added as a dependency when referenced
+                // Process the module body FIRST (before binding the name), so that
+                // references inside the body to a module with the same name are
+                // treated as external dependencies. E.g., `module List = { include List }`
+                // should add "List" as a dep from the `include List`.
                 let module_name = self.arena.get_string(mb.pmb_name.txt).to_string();
-                self.bound_modules.insert(module_name);
                 self.add_module_binding(mb);
+                self.bound_modules.insert(module_name);
             }
             StructureItemDesc::Pstr_recmodule(mbs) => {
                 // First bind all module names so they're not added as dependencies
@@ -283,17 +286,17 @@ impl<'a> DependencyCollector<'a> {
                     let names = self.add_pattern_collecting_unpack(&binding.pvb_pat);
                     unpack_names.extend(names);
                 }
-                // Add collected unpack names to bound_modules for the body expression
-                self.bound_modules.extend(unpack_names.clone());
+                // Add collected unpack names to bound_modules for the body expression,
+                // then remove them after processing (OCaml scopes bv functionally)
+                self.bound_modules.extend(unpack_names.iter().cloned());
                 // Process expressions
                 for binding in bindings {
                     self.add_expression(&binding.pvb_expr);
                 }
                 self.add_expression(body);
-                // Note: In OCaml, bv is threaded through recursion, so unpack bindings
-                // only affect the body and later bindings. Our approach keeps them in
-                // bound_modules permanently, which is a slight over-approximation but
-                // correct for dependency extraction purposes.
+                for name in &unpack_names {
+                    self.bound_modules.remove(name);
+                }
             }
             ExpressionDesc::Pexp_fun {
                 default,
@@ -305,10 +308,14 @@ impl<'a> DependencyCollector<'a> {
                     self.add_expression(default);
                 }
                 // OCaml: add_expr (add_pattern bv p) e
-                // Collect unpack names from pattern and add to bound_modules for rhs
+                // Collect unpack names from pattern and add to bound_modules for rhs,
+                // then remove them after processing (OCaml scopes bv functionally)
                 let unpack_names = self.add_pattern_collecting_unpack(lhs);
-                self.bound_modules.extend(unpack_names);
+                self.bound_modules.extend(unpack_names.iter().cloned());
                 self.add_expression(rhs);
+                for name in &unpack_names {
+                    self.bound_modules.remove(name);
+                }
             }
             ExpressionDesc::Pexp_apply { funct, args, .. } => {
                 self.add_expression(funct);
@@ -841,13 +848,17 @@ impl<'a> DependencyCollector<'a> {
 
     fn add_case(&mut self, case: &Case) {
         // OCaml: let bv = add_pattern bv pc_lhs in
-        // Collect unpack names from pattern for guard and rhs
+        // Collect unpack names from pattern for guard and rhs,
+        // then remove them after processing (OCaml scopes bv functionally)
         let unpack_names = self.add_pattern_collecting_unpack(&case.pc_lhs);
-        self.bound_modules.extend(unpack_names);
+        self.bound_modules.extend(unpack_names.iter().cloned());
         if let Some(guard) = &case.pc_guard {
             self.add_expression(guard);
         }
         self.add_expression(&case.pc_rhs);
+        for name in &unpack_names {
+            self.bound_modules.remove(name);
+        }
     }
 
     fn add_payload(&mut self, payload: &Payload) {

@@ -198,6 +198,7 @@ syntax_tests/data/idempotency/genType/src/TranslateSignatureFromTypes.res
 syntax_tests/data/idempotency/genType/src/TypeEnv.resi
 syntax_tests/data/idempotency/genType/src/Version.res
 syntax_tests/data/idempotency/ludum-dare-46/assets.res
+syntax_tests/data/idempotency/ludum-dare-46/common.res
 syntax_tests/data/idempotency/ludum-dare-46/FlappyBird.res
 syntax_tests/data/idempotency/ludum-dare-46/hooks.res
 syntax_tests/data/idempotency/ludum-dare-46/IndexHot.res
@@ -227,6 +228,7 @@ syntax_tests/data/idempotency/nook-exchange/ConfirmDialog.res
 syntax_tests/data/idempotency/nook-exchange/Constants.res
 syntax_tests/data/idempotency/nook-exchange/Error.res
 syntax_tests/data/idempotency/nook-exchange/Footer.res
+syntax_tests/data/idempotency/nook-exchange/LanguageSelector.res
 syntax_tests/data/idempotency/nook-exchange/Link.res
 syntax_tests/data/idempotency/nook-exchange/PageTitle.res
 syntax_tests/data/idempotency/nook-exchange/Repromise.res
@@ -360,6 +362,7 @@ syntax_tests/data/idempotency/pupilfirst/schools/StudentsEditor__Filter.res
 syntax_tests/data/idempotency/pupilfirst/schools/StudentsEditor__Level.res
 syntax_tests/data/idempotency/pupilfirst/schools/StudentsEditor__Level.resi
 syntax_tests/data/idempotency/pupilfirst/schools/StudentsEditor__Page.res
+syntax_tests/data/idempotency/pupilfirst/schools/StudentsEditor__Search.res
 syntax_tests/data/idempotency/pupilfirst/schools/studentsEditor__SelectedStudent.res
 syntax_tests/data/idempotency/pupilfirst/schools/StudentsEditor__Student.res
 syntax_tests/data/idempotency/pupilfirst/schools/StudentsEditor__StudentInfo.res
@@ -474,6 +477,7 @@ syntax_tests/data/idempotency/wildcards-world-ui/BadWords.res
 syntax_tests/data/idempotency/wildcards-world-ui/BN.res
 syntax_tests/data/idempotency/wildcards-world-ui/Carousel.res
 syntax_tests/data/idempotency/wildcards-world-ui/Client.res
+syntax_tests/data/idempotency/wildcards-world-ui/Config.res
 syntax_tests/data/idempotency/wildcards-world-ui/CONSTANTS.res
 syntax_tests/data/idempotency/wildcards-world-ui/ContractUtil.res
 syntax_tests/data/idempotency/wildcards-world-ui/CountDown.res
@@ -550,6 +554,7 @@ syntax_tests/data/parsing/grammar/pattern/array.res
 syntax_tests/data/parsing/grammar/pattern/constraint.res
 syntax_tests/data/parsing/grammar/pattern/constructor.res
 syntax_tests/data/parsing/grammar/pattern/exception.res
+syntax_tests/data/parsing/grammar/pattern/firstClassModules.res
 syntax_tests/data/parsing/grammar/pattern/list.res
 syntax_tests/data/parsing/grammar/pattern/or.res
 syntax_tests/data/parsing/grammar/pattern/polyvariants.res
