@@ -2587,31 +2587,24 @@ fn remove_await_attribute(attrs: &[Attribute], arena: &ParseArena) -> Vec<Attrib
 /// This is used for expression-level `Pexp_letmodule`:
 ///   `{ module M = @res.await ME; ... }` -> `{ module M = unpack(...); ... }`
 ///
-/// The `module_type_lid` is the longident for the module type constraint.
+/// The `module_type_lid` is the located longident for the module type constraint.
+/// The `mod_expr` can be either Pmod_ident or Pmod_constraint - OCaml handles both.
 fn create_await_module_expression(
     mod_expr: &current::ModuleExpr,
-    module_type_lid: LidentIdx,
+    module_type_lid: Located<LidentIdx>, // Now includes location!
     arena: &mut ParseArena,
 ) -> current::ModuleExpr {
-    // Get the original module identifier
-    let (lid, lid_loc) = match &mod_expr.pmod_desc {
-        ModuleExprDesc::Pmod_ident(located_lid) => (located_lid.txt, located_lid.loc),
-        _ => panic!("create_await_module_expression called with non-Pmod_ident"),
-    };
-
     // OCaml uses e.pmod_loc for all generated locations
     let pmod_loc = mod_expr.pmod_loc;
 
     // Create pack expression: module(ME)
-    // OCaml: {e with pmod_attributes = remove_await_attribute ...}
+    // OCaml: Exp.pack ~loc:e.pmod_loc {e with pmod_attributes = remove_await_attribute ...}
+    // OCaml packs the ENTIRE module expression (could be Pmod_ident OR Pmod_constraint)
     // NOTE: OCaml's remove_await_attribute uses `!=` (physical inequality) which doesn't
     // actually remove the attribute because strings are different objects. So the inner
     // pack expression KEEPS @res.await in the actual output.
     let cleaned_mod_expr = current::ModuleExpr {
-        pmod_desc: ModuleExprDesc::Pmod_ident(Located {
-            txt: lid,
-            loc: lid_loc, // Preserve original Longident location
-        }),
+        pmod_desc: mod_expr.pmod_desc.clone(), // Keep original desc (Pmod_ident or Pmod_constraint)
         pmod_loc,
         // Keep attributes as-is to match OCaml's actual behavior
         pmod_attributes: mod_expr.pmod_attributes.clone(),
@@ -2624,12 +2617,10 @@ fn create_await_module_expression(
     };
 
     // Create package type: (__ME__, [])
+    // The module_type_lid has its own location from the original source
     let package_type = CoreType {
         ptyp_desc: CoreTypeDesc::Ptyp_package((
-            Located {
-                txt: module_type_lid,
-                loc: pmod_loc,
-            },
+            module_type_lid, // Use the Located<LidentIdx> directly with its location
             vec![], // No with constraints
         )),
         ptyp_loc: pmod_loc,
@@ -4107,7 +4098,12 @@ fn rewrite_expression_generic(expr: &Expression, arena: &mut ParseArena) -> Expr
                     // Generate module type name: __Belt_List__
                     let module_type_name = local_module_type_name(located_lid.txt, arena);
                     let module_type_name_idx = arena.intern_string(&module_type_name);
-                    let module_type_lid = arena.push_lident_from_idx(module_type_name_idx);
+                    let module_type_lid_idx = arena.push_lident_from_idx(module_type_name_idx);
+                    // Use the original module ident's location for the generated type
+                    let module_type_lid = Located {
+                        txt: module_type_lid_idx,
+                        loc: located_lid.loc,
+                    };
 
                     let transformed_mod_expr = create_await_module_expression(mod_expr, module_type_lid, arena);
 
@@ -4132,8 +4128,8 @@ fn rewrite_expression_generic(expr: &Expression, arena: &mut ParseArena) -> Expr
                         if has_await_attribute(&inner_mod.pmod_attributes, arena)
                             || has_await_attribute(&mod_expr.pmod_attributes, arena)
                         {
-                            // Use the existing module type identifier
-                            let transformed_mod_expr = create_await_module_expression(mod_expr, mtyp_lid.txt, arena);
+                            // Use the existing module type identifier with its location
+                            let transformed_mod_expr = create_await_module_expression(mod_expr, mtyp_lid.clone(), arena);
 
                             return Expression {
                                 pexp_desc: ExpressionDesc::Pexp_letmodule(
