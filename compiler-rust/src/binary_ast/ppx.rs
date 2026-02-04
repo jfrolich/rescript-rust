@@ -894,11 +894,16 @@ fn handle_extension(
     let (ext_name, payload) = ext;
     let name = arena.get_string(ext_name.txt);
 
+    // OCaml's handle_extension deconstructs the extension as ({txt; loc}, payload)
+    // where loc is the extension IDENTIFIER's location (e.g., just "%raw", not "%raw(...)").
+    // This loc is passed to local_external_apply and used for internal structures.
+    let ext_loc = ext_name.loc;
+
     match name {
-        "raw" => handle_raw(expr, payload, arena, "#raw_expr"),
-        "re" => handle_re(expr, payload, arena),
-        "external" => handle_external_ext(expr, payload, arena),
-        "debugger" => handle_debugger(expr, payload, arena),
+        "raw" => handle_raw(expr, payload, arena, "#raw_expr", ext_loc),
+        "re" => handle_re(expr, payload, arena, ext_loc),
+        "external" => handle_external_ext(expr, payload, arena, ext_loc),
+        "debugger" => handle_debugger(expr, payload, arena, ext_loc),
         "obj" => handle_obj(expr, payload, arena),
         _ => expr.clone(),
     }
@@ -1167,6 +1172,7 @@ fn handle_debugger(
     expr: &Expression,
     payload: &Payload,
     arena: &mut ParseArena,
+    ext_loc: LocIdx,
 ) -> Expression {
     // %debugger doesn't accept arguments
     if let Payload::PStr(items) = payload {
@@ -1177,7 +1183,8 @@ fn handle_debugger(
         return expr.clone();
     }
 
-    let loc = expr.pexp_loc;
+    // OCaml: loc comes from the extension identifier's location ({txt; loc} pattern)
+    let loc = ext_loc;
     let none_loc = arena.none_loc();
 
     // Create the type: _ -> unit
@@ -1295,11 +1302,12 @@ fn handle_debugger(
 /// (handle_raw("regex") : Stdlib_RegExp.t)
 /// ```
 /// i.e., the same as %raw but with a type constraint to Stdlib_RegExp.t
-fn handle_re(expr: &Expression, payload: &Payload, arena: &mut ParseArena) -> Expression {
-    let loc = expr.pexp_loc;
+fn handle_re(expr: &Expression, payload: &Payload, arena: &mut ParseArena, ext_loc: LocIdx) -> Expression {
+    // OCaml: loc comes from the extension identifier's location ({txt; loc} pattern)
+    let loc = ext_loc;
 
     // First, handle it like %raw to get the letmodule expression
-    let raw_expr = handle_raw(expr, payload, arena, "#raw_expr");
+    let raw_expr = handle_raw(expr, payload, arena, "#raw_expr", ext_loc);
 
     // Create the type: Stdlib_RegExp.t
     // This is Longident.Ldot(Lident "Stdlib_RegExp", "t")
@@ -1345,6 +1353,7 @@ fn handle_external_ext(
     expr: &Expression,
     payload: &Payload,
     arena: &mut ParseArena,
+    ext_loc: LocIdx,
 ) -> Expression {
     use crate::parser::longident::Longident;
 
@@ -1376,7 +1385,8 @@ fn handle_external_ext(
         None => return expr.clone(), // Return unchanged on error
     };
 
-    let loc = expr.pexp_loc;
+    // OCaml: loc comes from the extension identifier's location ({txt; loc} pattern)
+    let loc = ext_loc;
     let none_loc = arena.none_loc();
 
     // Create the raw expression: handle_raw(ident_str)
@@ -1596,6 +1606,7 @@ fn handle_raw(
     payload: &Payload,
     arena: &mut ParseArena,
     pval_prim: &str,
+    ext_loc: LocIdx,
 ) -> Expression {
     // Extract the string expression from the payload
     // OCaml's raw_as_string_exp_exn returns {e with pexp_desc = Pexp_constant ...}
@@ -1626,8 +1637,9 @@ fn handle_raw(
         _ => return expr.clone(),
     };
 
-    // OCaml's local_external_apply uses `loc` (the extension's pexp_loc) for internal structures
-    let loc = expr.pexp_loc;
+    // OCaml's local_external_apply uses `loc` from the extension identifier's location
+    // ({txt; loc} pattern in handle_extension), NOT the full expression's pexp_loc
+    let loc = ext_loc;
 
     // Use none_loc() for types, matching OCaml's Ast_helper.Typ.any()
     // which uses default_loc (= Location.none = in_file "_none_")
@@ -1740,6 +1752,7 @@ fn handle_raw_structure(
     item: &StructureItem,
     payload: &Payload,
     arena: &mut ParseArena,
+    ext_loc: LocIdx,
 ) -> StructureItem {
     // Extract the string expression from the payload
     let (str_exp, str_loc) = match payload {
@@ -1768,7 +1781,8 @@ fn handle_raw_structure(
         _ => return item.clone(),
     };
 
-    let loc = item.pstr_loc;
+    // OCaml: loc comes from the extension identifier's location ({txt = "raw"; loc})
+    let loc = ext_loc;
     let none_loc = arena.none_loc();
 
     // Create the type: _ -> _
@@ -4257,7 +4271,8 @@ fn rewrite_structure_item(item: &StructureItem, arena: &mut ParseArena) -> Vec<S
             let name = arena.get_string(ext_name.txt);
             if name == "raw" {
                 // %%raw("...") -> Pstr_eval with local_external_apply using #raw_stmt
-                vec![handle_raw_structure(item, payload, arena)]
+                // OCaml: loc comes from {txt = "raw"; loc} - extension identifier location
+                vec![handle_raw_structure(item, payload, arena, ext_name.loc)]
             } else if name == "private" {
                 // %%private(let x = ...) -> module local_N = { let x = ... } ; open! local_N
                 handle_private_extension(payload, item.pstr_loc, arena)

@@ -125,6 +125,7 @@ syntax_tests/data/idempotency/bs-webapi/tests/Webapi/Webapi__Dom/Webapi__Dom__Ev
 syntax_tests/data/idempotency/bs-webapi/tests/Webapi/Webapi__Dom/Webapi__Dom__FocusEvent__test.res
 syntax_tests/data/idempotency/bs-webapi/tests/Webapi/Webapi__Dom/Webapi__Dom__History__test.res
 syntax_tests/data/idempotency/bs-webapi/tests/Webapi/Webapi__Dom/Webapi__Dom__HtmlDocument__test.res
+syntax_tests/data/idempotency/bs-webapi/tests/Webapi/Webapi__Dom/Webapi__Dom__HtmlElement__test.res
 syntax_tests/data/idempotency/bs-webapi/tests/Webapi/Webapi__Dom/Webapi__Dom__IdbVersionChangeEvent__test.res
 syntax_tests/data/idempotency/bs-webapi/tests/Webapi/Webapi__Dom/Webapi__Dom__Image__test.res
 syntax_tests/data/idempotency/bs-webapi/tests/Webapi/Webapi__Dom/Webapi__Dom__InputEvent__test.res
@@ -350,6 +351,7 @@ syntax_tests/data/idempotency/pupilfirst/shared/DateTime.res
 syntax_tests/data/idempotency/pupilfirst/shared/DateTime.resi
 syntax_tests/data/idempotency/pupilfirst/shared/DomUtils.res
 syntax_tests/data/idempotency/pupilfirst/shared/Dropdown.res
+syntax_tests/data/idempotency/pupilfirst/shared/EmailUtils.res
 syntax_tests/data/idempotency/pupilfirst/shared/EvaluationCriterion.res
 syntax_tests/data/idempotency/pupilfirst/shared/FaIcon.res
 syntax_tests/data/idempotency/pupilfirst/shared/GraphqlErrorHandler.res
@@ -386,6 +388,7 @@ syntax_tests/data/idempotency/reasongl/ReasonglInterface.res
 syntax_tests/data/idempotency/reasongl/RGLConstants.res
 syntax_tests/data/idempotency/reasongl/RGLEvents.res
 syntax_tests/data/idempotency/reasongl/RGLInterface.res
+syntax_tests/data/idempotency/reasonml.org/common/BeltData.res
 syntax_tests/data/idempotency/reasonml.org/common/Mdx.res
 syntax_tests/data/idempotency/reasonml.org/common/Util.res
 syntax_tests/data/idempotency/reasonml.org/components/ApiIntro.res
@@ -396,6 +399,7 @@ syntax_tests/data/idempotency/reasonml.org/components/Meta.res
 syntax_tests/data/idempotency/reasonml.org/components/Navigation.res
 syntax_tests/data/idempotency/reasonml.org/components/Tag.res
 syntax_tests/data/idempotency/reasonml.org/components/Text.res
+syntax_tests/data/idempotency/reasonml.org/layouts/CommunityLayout.res
 syntax_tests/data/idempotency/reasonml.org/layouts/JavaScriptApiLayout.res
 syntax_tests/data/idempotency/reasonml.org/layouts/MainLayout.res
 syntax_tests/data/idempotency/reductive/reductiveContext.res
@@ -446,6 +450,7 @@ syntax_tests/data/idempotency/wildcards-world-ui/CountDown.res
 syntax_tests/data/idempotency/wildcards-world-ui/Erc712.res
 syntax_tests/data/idempotency/wildcards-world-ui/Ethers.res
 syntax_tests/data/idempotency/wildcards-world-ui/Globals.res
+syntax_tests/data/idempotency/wildcards-world-ui/Helper.res
 syntax_tests/data/idempotency/wildcards-world-ui/IncreaseIterationPage.res
 syntax_tests/data/idempotency/wildcards-world-ui/InputHelp.res
 syntax_tests/data/idempotency/wildcards-world-ui/PhotoGallery.res
