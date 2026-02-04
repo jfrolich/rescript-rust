@@ -24,13 +24,22 @@
 |------------|--------|
 | Syntax tests | 506/506 (100%) ✅ |
 | sexp-locs | 1196/1196 (100%) ✅ |
-| sexp-locs-ppx | 1175/1196 (98.2%) ✅ |
-| bsc-ast | 806/1196 (67.4%) |
+| sexp-locs-ppx | 1176/1196 (98.3%) ✅ |
+| bsc-ast | 808/1196 (67.6%) |
 
-**Note:** The remaining 21 sexp-locs-ppx failures are structural differences in PPX transformations. Key issues:
-- Expression-level await (`Pexp_letmodule` with `@res.await`) - needs module type decl hoisting
-- FFI encoding differences (externals with @val, @module, etc.)
-- Other PPX structural transformations
+**Note:** The remaining 20 sexp-locs-ppx failures are structural differences in PPX transformations. Key issues:
+- `@deriving(jsConverter)` - 5 files (generates include with helpers)
+- `@deriving(abstract)` - 3 files (generates include with module constraint)
+- FFI encoding differences (externals with @val, @module, etc.) - ~12 files
+- Test script quirk: Some files (e.g., arrow.res) show sexp-locs-ppx diff but OCaml bsc fails
+
+**Session progress (2026-02-05) - latest:**
+- Fixed expression-level await (`{ module M = @res.await ME; ... }`):
+  - Added `create_await_module_expression` for Pexp_letmodule transformation
+  - Added `spelunk_expression_for_await_module_types` to traverse expressions
+  - Updated `rewrite_structure` to hoist module type declarations before Pstr_value
+  - Fixed letmodule.res which used expression-level await
+- Result: sexp-locs-ppx improved from 1175/1196 (98.2%) to 1176/1196 (98.3%)
 
 **Session progress (2026-02-05) - continued:**
 - Fixed module-level `@res.await` transformation (Pstr_module):
@@ -211,33 +220,40 @@ The binary AST structure (sexp-locs) is 100% correct. The differences are in:
 ### Phase 7: Position Sharing ✅ Complete
 - [x] Tasks 7.1-7.8: All implemented
 
-### Remaining sexp-locs-ppx Issues (21 files failing)
+### Remaining sexp-locs-ppx Issues (20 files failing)
 
 Categorized by root cause:
 
-1. **@deriving(jsConverter)** - 5 files
+1. **@deriving(jsConverter)** - 5 files ⚠️ NOT IMPLEMENTED
    - User.res, SettingsStore.res, ImportPage.res, ColorTheme.res, Eth.res
-   - OCaml generates include with empty module even for unsupported types
-   - Low priority (generates warnings)
+   - OCaml: `ast_derive_js_mapper.ml` (358 lines)
+   - Generates: `_eraseType`, `_index`, `_map`, and conversion functions
+   - Implementation complexity: HIGH (~300+ lines of Rust)
+   - Impact: Affects polyvariant/variant-to-JS conversion patterns
 
-2. **@deriving(abstract)** - 3 files
+2. **@deriving(abstract)** - 3 files ⚠️ NOT IMPLEMENTED
    - typeDefinition.res, HighlightJs.res, ReactDOMRe.res
-   - Complex transformation to include with module constraint
-   - Medium priority
+   - OCaml: `ast_derive_abstract.ml`
+   - Generates getter/setter functions with module constraint wrapper
+   - Implementation complexity: HIGH
 
-3. **Expression-level await (Pexp_letmodule with @res.await)** - 1 file
-   - letmodule.res
-   - Requires hoisting module type declarations to structure level
-   - OCaml: bs_builtin_ppx.ml lines 703-752 (spelunk_vbs)
+3. **Expression-level await (Pexp_letmodule with @res.await)** - ✅ FIXED
+   - letmodule.res - NOW PASSES
 
-4. **FFI encoding differences** - ~12 files with externals
-   - Warp_XHR.res, subscription.res, etc.
-   - OCaml encodes @val, @module, etc. into pval_prim binary data
-   - Rust keeps attributes but doesn't encode FFI info
-   - See compiler/frontend/ast_external.ml for encoding logic
+4. **FFI encoding differences** - ~8 files with externals
+   - React.res, ReactEventRe.resi, ReasonReactRouter.res, Next.res
+   - Warp_XHR.res, subscription.res (also has jsConverter)
+   - polyvariant.res, block.res (has @val externals)
+   - Symptoms: Small byte differences in pval_prim encoding (e.g., `BA` vs `@A`)
+   - These appear to be minor encoding differences in parameter attributes
+   - Implementation complexity: MEDIUM (need to trace exact OCaml encoding)
 
-5. **Other** - Requires individual investigation
-   - UsdPriceProvider.res (no clear pattern)
+5. **Test script quirks** - 4 files ⚠️ FALSE POSITIVES
+   - arrow.res, attributes.res - OCaml bsc.exe fails on these (invalid %identity arity)
+   - parsing/grammar/expressions/block.res - Has %raw differences
+   - UsdPriceProvider.res - Mixed issues
+
+**Note:** Some files appear in multiple categories (e.g., subscription.res has both jsConverter AND FFI issues).
 
 ### Not Yet Implemented
 - **%todo extension** - 0 test files use this
