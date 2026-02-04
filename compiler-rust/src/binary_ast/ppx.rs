@@ -19,10 +19,10 @@ use crate::parse_arena::{LidentIdx, Located, LocIdx, ParseArena};
 use crate::parser::ast::{
     self as current, ArgLabel, Attribute, Case, Constant, ConstructorArguments,
     ConstructorDeclaration, CoreType, CoreTypeDesc, Expression, ExpressionDesc,
-    JsxContainerElement, JsxElement, JsxFragment, JsxProp, JsxUnaryElement, LabelDeclaration,
-    ModuleExpr, ModuleExprDesc, ObjectField, Pattern, PatternDesc, Payload, RecFlag, RowField,
-    SignatureItem, SignatureItemDesc, StructureItem, StructureItemDesc, TypeArg, TypeDeclaration,
-    TypeKind, ValueBinding, ValueDescription,
+    IncludeDeclaration, JsxContainerElement, JsxElement, JsxFragment, JsxProp, JsxUnaryElement,
+    LabelDeclaration, ModuleExpr, ModuleExprDesc, ModuleType, ModuleTypeDesc, ObjectField, Pattern,
+    PatternDesc, Payload, RecFlag, RowField, SignatureItem, SignatureItemDesc, StructureItem,
+    StructureItemDesc, TypeArg, TypeDeclaration, TypeKind, ValueBinding, ValueDescription,
 };
 use crate::parser::longident::Longident;
 
@@ -640,6 +640,68 @@ fn build_ffi_type(desc: &ExternalDesc, prim_name: &str, arity: usize, result_is_
         params,
         return_wrapper,
         external_spec,
+    }
+}
+
+/// Check if an external value description has relative paths that require
+/// wrapping in Pstr_include to prevent cross-module inlining.
+fn check_external_relative(vd: &ValueDescription, arena: &mut ParseArena) -> bool {
+    let prim_name = match vd.pval_prim.first() {
+        Some(name) => name.as_str(),
+        None => return false,
+    };
+    if !is_rs_external(&vd.pval_attributes, &vd.pval_prim, arena) {
+        return false;
+    }
+    let (params, arity) = build_arg_type_specs(&vd.pval_type, arena);
+    let (args, _) = list_of_arrow(&vd.pval_type, arena);
+    let no_arguments = args.is_empty();
+    let desc = parse_external_attrs(&vd.pval_attributes, prim_name, no_arguments, arena);
+    let result_is_unit = is_unit_type(get_final_result_type(&vd.pval_type), arena);
+    let ffi = build_ffi_type(&desc, prim_name, arity, result_is_unit, params);
+    check_ffi_relative(&ffi)
+}
+
+/// Check if a path string is a package-relative path (starts with "./" or "../").
+fn is_package_relative_path(s: &str) -> bool {
+    s.starts_with("./") || s.starts_with("../")
+}
+
+/// Check if an FFI external spec contains relative paths.
+/// When true, the external must be wrapped in Pstr_include to prevent cross-module inlining.
+/// Mirrors OCaml's check_ffi in external_ffi_types.ml.
+fn check_ffi_relative(ffi: &FfiType) -> bool {
+    match ffi {
+        FfiType::FfiBs { external_spec, .. } => match external_spec {
+            ExternalSpec::JsVar {
+                name,
+                external_module_name,
+                ..
+            } => {
+                is_package_relative_path(name)
+                    || external_module_name
+                        .as_ref()
+                        .map_or(false, |m| is_package_relative_path(&m.bundle))
+            }
+            ExternalSpec::JsModuleAsVar(emn)
+            | ExternalSpec::JsModuleAsFn {
+                external_module_name: emn,
+                ..
+            }
+            | ExternalSpec::JsModuleAsClass(emn) => is_package_relative_path(&emn.bundle),
+            ExternalSpec::JsNew {
+                external_module_name,
+                ..
+            }
+            | ExternalSpec::JsCall {
+                external_module_name,
+                ..
+            } => external_module_name
+                .as_ref()
+                .map_or(false, |m| is_package_relative_path(&m.bundle)),
+            _ => false,
+        },
+        _ => false,
     }
 }
 
@@ -4314,21 +4376,72 @@ fn rewrite_structure_item(item: &StructureItem, arena: &mut ParseArena) -> Vec<S
                     pval_attributes: rewritten_attrs,
                     pval_loc: vd.pval_loc,
                 };
+
+                // Check if FFI has relative paths before encoding
+                // (need to build FFI type to check, same as encode_external does)
+                let no_inline = check_external_relative(&rewritten_vd, arena);
+
                 let encoded = encode_external(&rewritten_vd, arena);
                 // OCaml's FFI processing (ast_external_process.ml handle_attributes)
                 // reconstructs the arrow type with ptyp_loc = pval_loc.
                 // This changes sharing patterns in the binary output.
                 let pval_type = reconstruct_arrow_type_with_loc(&vd.pval_type, vd.pval_loc, arena);
-                vec![StructureItem {
+                let external_result = StructureItem {
                     pstr_desc: StructureItemDesc::Pstr_primitive(ValueDescription {
                         pval_prim: encoded.pval_prim,
-                        pval_attributes: encoded.pval_attributes,
+                        pval_attributes: encoded.pval_attributes.clone(),
                         pval_name: vd.pval_name.clone(),
-                        pval_type,
+                        pval_type: pval_type.clone(),
                         pval_loc: vd.pval_loc,
                     }),
                     pstr_loc: item.pstr_loc,
-                }]
+                };
+
+                if no_inline {
+                    // Wrap in Pstr_include to prevent cross-module inlining
+                    // of relative path externals (ast_external.ml lines 78-98)
+                    let loc = vd.pval_loc;
+                    vec![StructureItem {
+                        pstr_desc: StructureItemDesc::Pstr_include(IncludeDeclaration {
+                            pincl_mod: ModuleExpr {
+                                pmod_desc: ModuleExprDesc::Pmod_constraint(
+                                    Box::new(ModuleExpr {
+                                        pmod_desc: ModuleExprDesc::Pmod_structure(vec![
+                                            external_result,
+                                        ]),
+                                        pmod_loc: loc,
+                                        pmod_attributes: vec![],
+                                    }),
+                                    Box::new(ModuleType {
+                                        pmty_desc: ModuleTypeDesc::Pmty_signature(vec![
+                                            SignatureItem {
+                                                psig_desc: SignatureItemDesc::Psig_value(
+                                                    ValueDescription {
+                                                        pval_name: vd.pval_name.clone(),
+                                                        pval_type,
+                                                        pval_prim: vec![],
+                                                        pval_attributes: encoded.pval_attributes,
+                                                        pval_loc: vd.pval_loc,
+                                                    },
+                                                ),
+                                                psig_loc: loc,
+                                            },
+                                        ]),
+                                        pmty_loc: loc,
+                                        pmty_attributes: vec![],
+                                    }),
+                                ),
+                                pmod_loc: loc,
+                                pmod_attributes: vec![],
+                            },
+                            pincl_loc: loc,
+                            pincl_attributes: vec![],
+                        }),
+                        pstr_loc: item.pstr_loc,
+                    }]
+                } else {
+                    vec![external_result]
+                }
             } else {
                 // Non-ReScript externals still need attribute rewriting
                 // (e.g. "js" -> "*j" in @ocaml.doc string delimiters)
