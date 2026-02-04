@@ -64,9 +64,33 @@ Do NOT spend time on small issues (@deriving edge cases, etc.) until the locatio
 
 ---
 
-**Last Updated:** 2026-02-03
-**Overall Status:** 617/1049 bsc-ast tests passing (58.8%)
-**sexp-locs Status:** 1049/1049 tests passing (100%) ✅
+**Last Updated:** 2026-02-04
+**Overall Status:** 823/1049 bsc-ast tests passing (78.5%)
+**Syntax tests:** 506/506 (100%) ✅
+**sexp-locs Status:** 1196/1196 tests passing (100%) ✅
+
+**Session progress (2026-02-04, fix-parse-failures merge + JSX/open_description fixes):**
+Merged the `fix-parse-failures` branch which included printer fixes and error recovery improvements
+for 100% syntax test parity (506/506). After the merge, 48 bsc-ast regressions and 3 sexp-locs
+regressions were identified and fixed:
+
+1. **JSX closing tag position fix** (48 bsc-ast regressions): The merge introduced a 3-case
+   closing tag handler for JSX container elements (proper close, missing close, unexpected token).
+   The `closing_tag.start` position was captured as `p.prev_end_pos_idx()` AFTER consuming the
+   closing `>`, giving a position at the END of `</tag>`. The correct behavior (matching OCaml)
+   is to capture it at `p.start_pos_idx()` BEFORE consuming the `<` of `</tag>`.
+
+2. **open_description location fix** (3 sexp-locs regressions): The `open_description` location
+   was computed AFTER `parse_newline_or_semicolon_structure()`, which could consume a semicolon
+   and extend the location span. Moving loc computation before that call fixed it.
+
+**Results after merge + fixes:**
+- Syntax tests: 506/506 (100%) ✅
+- sexp-locs: 1196/1196 (100%, 0 regressions) ✅
+- bsc-ast: 823/1049 passing (78.5%) — 103 NEW files now passing vs pre-merge baseline of 720
+- All changes pushed to the private fork
+
+**Remaining 226 failures** are primarily sharing/dedup differences and position value diffs.
 
 **Session progress (2026-02-03, encoding + attribute rewriting fixes):**
 Four fixes improved bsc-ast parity from 607 to 617 (+10 files, 0 regressions):
@@ -90,14 +114,10 @@ Four fixes improved bsc-ast parity from 607 to 617 (+10 files, 0 regressions):
    of `arena.push_arity(Some(1))`. OCaml's CSE shares all literal Some(1) values; each `push_arity`
    created a new ArityIdx preventing sharing.
 
-**Remaining 432 failures categorized (sample analysis of first 100):**
-- ~62% (263 files): Sharing differences (SHARED ref mismatches)
-- ~17% (71 files): Position int value diffs (pos_cnum off)
-- ~15% (66 files): Block tag differences
-- ~6% (26 files): String value diffs (unicode, *j vs js in types)
-- Key insight: sharing differences are the dominant remaining issue; many are caused by
-  OCaml CSE sharing `Some(false)`, `Some(0)` etc. across expressions, while Rust creates
-  fresh blocks. The PPX also creates fresh positions/locations where OCaml reuses existing ones.
+**Remaining 226 failures (as of 2026-02-04, down from 432):**
+Previous categorization (from 432 failures) showed ~62% sharing diffs, ~17% position value diffs,
+~15% block tag diffs, ~6% string diffs. The fix-parse-failures merge resolved 103 additional files.
+Dominant remaining issues are sharing/dedup differences (OCaml CSE) and position value mismatches.
 
 **Session progress (2026-02-03, %obj PPX + Otag content-based sharing fix):**
 - Implemented `%obj` extension handling in ppx.rs (`handle_obj()`):
@@ -894,7 +914,7 @@ type annotation arity and function arity should be separate objects.
     - **CAUSE**: Content-based position caching in Rust (`start_pos_cache`) is WRONG
     - **SOLUTION**: Remove content-based caching, implement identity-based sharing to match OCaml
     - **This is NOT a "fundamental difference" - it's an incorrect implementation that must be fixed**
-- [ ] **Task 5.3**: Target 750/1049 bsc-ast parity (71%) - **REQUIRES**: Phase 7 (identity-based position sharing)
+- [x] **Task 5.3**: Target 750/1049 bsc-ast parity (71%) - ✅ **EXCEEDED** (823/1049, 78.5% as of 2026-02-04)
 
   **Detailed analysis (2026-02-02):**
 
@@ -984,10 +1004,10 @@ type annotation arity and function arity should be separate objects.
   - This can be used where OCaml would create a FRESH position object
   - Systematic migration of ~70+ code locations is the remaining work
 
-  **Status (2026-02-03):** Phase 7 position sharing tasks (7.1-7.8) are now COMPLETE. Current parity
-  is 617/1049 (58.8%). The 750/1049 target requires fixing remaining sharing differences (62% of
-  432 remaining failures) and position value diffs (17%). Key remaining issues:
-  - OCaml CSE shares `Some(0)`, `Some(false)` etc. across expressions; Rust creates fresh blocks
+  **Status (2026-02-04):** Phase 7 position sharing tasks (7.1-7.8) are COMPLETE. After the
+  fix-parse-failures merge + regression fixes, parity is now 823/1049 (78.5%), exceeding the
+  750/1049 target. Remaining 226 failures are primarily:
+  - Sharing/dedup differences (OCaml CSE shares `Some(0)`, `Some(false)` etc.)
   - PPX creates fresh positions/locations where OCaml reuses existing ones
   - Some position values differ due to `%%raw` and string template PPX handling
 
@@ -1216,8 +1236,9 @@ let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
   ✅ DONE (2026-02-03): Build succeeds, 617/1049 bsc-ast passing (58.8%), 1049/1049 sexp-locs.
   Note: original target of 750+ was based on optimistic estimate of position sharing impact.
   Actual improvement from Phase 7 was more modest since most position sharing was already done.
-  Remaining 432 failures are primarily sharing/dedup differences (62%), position value diffs (17%),
-  block tag diffs (15%), and string diffs (6%).
+  **Updated (2026-02-04):** After fix-parse-failures merge + regression fixes, now at
+  823/1049 bsc-ast (78.5%), 1196/1196 sexp-locs, 506/506 syntax tests.
+  Remaining 226 failures are primarily sharing/dedup differences and position value diffs.
 
 **Execution strategy:**
 - Work file by file: expr.rs → typ.rs → pattern.rs → module.rs → core.rs → state.rs cleanup
