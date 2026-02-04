@@ -151,6 +151,8 @@ impl MarshalWriter {
             arity_idx_table: HashMap::new(),
 
             string_loc_table: HashMap::new(),
+
+
             arena: None,
             obj_counter: 0,
             size_32: 0,
@@ -172,6 +174,8 @@ impl MarshalWriter {
             arity_idx_table: HashMap::new(),
 
             string_loc_table: HashMap::new(),
+
+
             arena: None,
             obj_counter: 0,
             size_32: 0,
@@ -886,6 +890,7 @@ impl MarshalWriter {
             }
         }
     }
+
 }
 
 #[cfg(test)]
