@@ -50,7 +50,7 @@ pub fn compile_source_to_js_with_options(
     }
 
     // Apply built-in PPX transformations
-    builtin_ppx::transform_structure(&mut structure);
+    builtin_ppx::transform_structure(parser.arena(), &mut structure);
 
     // Type check
     let id_gen = IdGenerator::new();
