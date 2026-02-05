@@ -994,10 +994,15 @@ fn type_structure_item<'a>(
             let mtd_name_str = arena.get_string(mtd.pmtd_name.txt);
             let mtd_id = Ident::create_local(mtd_name_str);
 
+            let typed_mty = match &mtd.pmtd_type {
+                Some(mt) => Some(transl_modtype(tctx, env, arena, mt)?),
+                None => None,
+            };
+
             let desc = StructureItemDesc::Tstr_modtype(ModuleTypeDeclaration {
                 mtd_id,
                 mtd_name: Located { txt: mtd_name_str.to_string(), loc: mtd.pmtd_name.loc },
-                mtd_type: mtd.pmtd_type.as_ref().map(|_| ModuleType::placeholder()),
+                mtd_type: typed_mty,
                 mtd_attributes: mtd.pmtd_attributes.clone(),
                 mtd_loc: mtd.pmtd_loc,
             });
