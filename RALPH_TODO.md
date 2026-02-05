@@ -24,14 +24,32 @@
 |------------|--------|
 | Syntax tests | 506/506 (100%) ✅ |
 | sexp-locs | 1196/1196 (100%) ✅ |
-| sexp-locs-ppx | 1187/1196 (99.2%) |
-| bsc-ast | 810/1196 (67.7%) |
+| sexp-locs-ppx | 1193/1196 (99.7%) |
+| bsc-ast | 811/1196 (67.8%) |
 
-**Note:** The remaining 9 sexp-locs-ppx failures are structural differences in PPX transformations. Key issues:
-- `@deriving(jsConverter)` - 6 files (generates include with helpers) - NOT IMPLEMENTED
-- `@deriving(abstract)` - 3 files (generates include with module constraint) - NOT IMPLEMENTED
+**Note:** The remaining 3 sexp-locs-ppx failures are `@deriving(abstract)` issues:
+- `@deriving(abstract)` - 3 files: typeDefinition.res, HighlightJs.res, ReactDOMRe.res
+  - WIP implementation exists, but needs:
+  - Proper FFI binary marshaling for primitives
+  - Correct location handling
+  - Arity encoding to match OCaml
 
 **Session progress (2026-02-05) - newest:**
+- Fixed `@deriving({jsConverter: newType})` for record types:
+  - Implemented `generate_js_converter_record` for record-to-JS conversion
+  - Added `create_record_to_js_function` and `create_record_from_js_function`
+  - Fixed location handling: field labels use pld_name.loc, expressions use ghost
+  - Fixed signature function names to use tdcl.ptype_loc
+  - subscription.res and Eth.res now pass sexp-locs-ppx
+- Fixed `_revMap` location for polyvariant jsConverter (pattern var should use tdcl.ptype_loc)
+- Started WIP implementation of `@deriving(abstract)`:
+  - Basic structure generation working
+  - Maker function with labeled/optional args
+  - Accessor/setter generation
+  - Remaining: FFI encoding, locations, arity
+- Result: sexp-locs-ppx improved from 1187/1196 to 1193/1196 (99.7%)
+
+**Session progress (2026-02-05) - previous:**
 - Fixed @deriving(accessors) ghost location issues:
   - `core_type_of_type_declaration_with_attrs()`: Use ghost for ptyp_loc, use ptype_name.loc for longident
   - `generate_record_accessors_and_sigs()`: Use ghost for pvb_loc, pstr_loc, pval_loc, psig_loc
@@ -272,18 +290,19 @@ The binary AST structure (sexp-locs) is 100% correct. The differences are in:
 
 Categorized by root cause:
 
-1. **@deriving(jsConverter)** - 6 files ⚠️ NOT IMPLEMENTED
-   - User.res, SettingsStore.res, ImportPage.res, ColorTheme.res, Eth.res, subscription.res
-   - OCaml: `ast_derive_js_mapper.ml` (358 lines)
-   - Generates: `_eraseType`, `_index`, `_map`, and conversion functions
-   - Implementation complexity: HIGH (~300+ lines of Rust)
-   - Impact: Affects polyvariant/variant-to-JS conversion patterns
+1. **@deriving(jsConverter)** - ✅ IMPLEMENTED
+   - All files now pass: subscription.res, Eth.res
+   - Implemented `generate_js_converter_record` for record types with newType option
+   - Implemented polyvariant encoding with _map/_revMap
 
-2. **@deriving(abstract)** - 3 files ⚠️ NOT IMPLEMENTED
+2. **@deriving(abstract)** - 3 files ⚠️ WIP IMPLEMENTATION
    - typeDefinition.res, HighlightJs.res, ReactDOMRe.res
    - OCaml: `ast_derive_abstract.ml`
-   - Generates getter/setter functions with module constraint wrapper
-   - Implementation complexity: HIGH
+   - Basic structure implemented in Rust ppx.rs
+   - Remaining issues:
+     - FFI binary encoding for maker/accessor primitives
+     - Location handling for generated code
+     - Arity encoding differences
 
 3. **Expression-level await (Pexp_letmodule with @res.await)** - ✅ FIXED
    - letmodule.res - NOW PASSES
