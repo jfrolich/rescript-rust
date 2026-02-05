@@ -1800,8 +1800,17 @@ fn parse_paren_functor_module_type(p: &mut Parser<'_>) -> ModuleType {
                             start_pos_idx,
                         });
                     } else {
-                        // Shorthand: `(S, T) => U` (unnamed parameter types)
-                        let param_ty = parse_module_type(p);
+                        // Shorthand: `(S, T) => U` (unnamed parameter types).
+                        // Match OCaml parse_functor_arg's Uident/no-colon path:
+                        // build Pmty_ident directly so longident.loc and pmty_loc
+                        // are the same location record.
+                        let lid = parse_module_long_ident(p);
+                        let loc = lid.loc;
+                        let param_ty = ModuleType {
+                            pmty_desc: ModuleTypeDesc::Pmty_ident(lid),
+                            pmty_loc: loc,
+                            pmty_attributes: vec![],
+                        };
                         params.push(FunctorParam {
                             name: mknoloc(p.arena_mut().intern("_")),
                             param: Some(param_ty),
