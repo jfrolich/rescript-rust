@@ -12,7 +12,7 @@ use crate::parser::longident::Longident;
 // ========== Position (Lexing.position) ==========
 
 impl Marshal for Position {
-    /// Serialize a Position to Marshal format.
+    /// Serialize a Position to Marshal format with content-based sharing.
     ///
     /// OCaml type:
     /// ```ocaml
@@ -24,23 +24,18 @@ impl Marshal for Position {
     /// }
     /// ```
     ///
-    /// Encoded as a block with tag 0 and 4 fields.
-    ///
-    /// Uses StrIdx-based sharing for file names: the same StrIdx will be shared
-    /// in the marshal output via back-references.
+    /// Uses content-based sharing: identical Position values are shared in the
+    /// marshal output. This matches OCaml's behavior where the same Position
+    /// pointer (e.g., loc_start == loc_end) produces shared references.
     fn marshal(&self, w: &mut MarshalWriter) {
-        w.write_block_header(0, 4);
-        w.write_str_idx(self.file_name);
-        w.write_int(self.line as i64);
-        w.write_int(self.bol as i64);
-        w.write_int(self.cnum as i64);
+        w.write_position_shared(self);
     }
 }
 
 // ========== Location (Location.t) ==========
 
 impl Marshal for Location {
-    /// Serialize a Location to Marshal format.
+    /// Serialize a Location to Marshal format with content-based sharing.
     ///
     /// OCaml type:
     /// ```ocaml
@@ -51,15 +46,12 @@ impl Marshal for Location {
     /// }
     /// ```
     ///
-    /// Encoded as a block with tag 0 and 3 fields.
-    ///
-    /// NOTE: This impl is for the standalone Location struct which has no identity.
-    /// For proper sharing, use arena-based LocIdx instead.
+    /// Uses content-based sharing: identical Location values (especially
+    /// Location.none) are shared in the marshal output. This matches OCaml's
+    /// behavior where Location.none is a module-level let binding and all
+    /// references share the same physical pointer.
     fn marshal(&self, w: &mut MarshalWriter) {
-        w.write_block_header(0, 3);
-        self.loc_start.marshal(w);
-        self.loc_end.marshal(w);
-        w.write_int(if self.loc_ghost { 1 } else { 0 });
+        w.write_location_shared(self);
     }
 }
 

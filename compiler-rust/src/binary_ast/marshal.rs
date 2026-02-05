@@ -26,6 +26,7 @@
 
 use std::collections::HashMap;
 
+use crate::location::{Location, Position};
 use crate::parse_arena::{ArityIdx, LidentIdx, LocIdx, ParseArena, PosIdx, StrIdx};
 use crate::parser::longident::Longident;
 
@@ -128,6 +129,19 @@ pub struct MarshalWriter {
     /// with Ptyp_var desc, empty attributes, and matching (name, loc) pairs.
     tyvar_core_type_table: HashMap<(String, LocIdx), u32>,
 
+    /// Maps Location values to object counter for content-based sharing.
+    /// In OCaml, Location.none is a module-level let binding, so all references
+    /// to it share the same physical pointer. Other locations that happen to be
+    /// identical (e.g., from parser reuse) also share. We replicate this by
+    /// sharing Location values with identical content.
+    location_value_table: HashMap<Location, u32>,
+
+    /// Maps Position values to object counter for content-based sharing.
+    /// In OCaml, when loc_start == loc_end (same pointer), the marshal format
+    /// emits a shared reference for the second occurrence. We replicate this
+    /// by sharing Position values with identical content.
+    position_value_table: HashMap<Position, u32>,
+
     /// Optional reference to ParseArena for LocIdx marshalling.
     /// Set via `set_arena()` before marshalling AST with LocIdx fields.
     /// Uses raw pointer to avoid lifetime constraints.
@@ -167,6 +181,9 @@ impl MarshalWriter {
             singleton_attr_list_table: HashMap::new(),
             tyvar_core_type_table: HashMap::new(),
 
+            location_value_table: HashMap::new(),
+            position_value_table: HashMap::new(),
+
             arena: None,
             obj_counter: 0,
             size_32: 0,
@@ -190,6 +207,9 @@ impl MarshalWriter {
             string_loc_table: HashMap::new(),
             singleton_attr_list_table: HashMap::new(),
             tyvar_core_type_table: HashMap::new(),
+
+            location_value_table: HashMap::new(),
+            position_value_table: HashMap::new(),
 
             arena: None,
             obj_counter: 0,
@@ -511,6 +531,60 @@ impl MarshalWriter {
 
         // Record for future sharing
         self.location_idx_table.insert(idx, obj_idx);
+    }
+
+    /// Write a Position value with content-based sharing.
+    ///
+    /// If a Position with the same content (file_name, line, bol, cnum) has been
+    /// written before, writes a shared reference. Otherwise writes it fresh and
+    /// records it for future sharing.
+    ///
+    /// This matches OCaml's behavior where identical Position values (e.g.,
+    /// loc_start == loc_end for the same location) are the same physical pointer
+    /// and get shared in marshal output.
+    pub fn write_position_shared(&mut self, pos: &Position) {
+        if let Some(&obj_idx) = self.position_value_table.get(pos) {
+            let d = self.obj_counter - obj_idx;
+            self.write_shared_ref(d);
+            return;
+        }
+
+        let obj_idx = self.obj_counter;
+        self.write_block_header(0, 4);
+        self.write_str_idx(pos.file_name);
+        self.write_int(pos.line as i64);
+        self.write_int(pos.bol as i64);
+        self.write_int(pos.cnum as i64);
+
+        self.position_value_table.insert(*pos, obj_idx);
+    }
+
+    /// Write a Location value with content-based sharing.
+    ///
+    /// If a Location with the same content has been written before, writes a
+    /// shared reference. Otherwise writes it fresh and records it for future sharing.
+    ///
+    /// This matches OCaml's behavior where Location.none is a module-level let
+    /// binding and all references share the same physical pointer. Other identical
+    /// locations (e.g., from parser reuse) also share.
+    ///
+    /// Positions within the Location are also shared via content-based sharing,
+    /// matching OCaml's behavior where loc_start and loc_end can be the same
+    /// physical pointer.
+    pub fn write_location_shared(&mut self, loc: &Location) {
+        if let Some(&obj_idx) = self.location_value_table.get(loc) {
+            let d = self.obj_counter - obj_idx;
+            self.write_shared_ref(d);
+            return;
+        }
+
+        let obj_idx = self.obj_counter;
+        self.write_block_header(0, 3);
+        self.write_position_shared(&loc.loc_start);
+        self.write_position_shared(&loc.loc_end);
+        self.write_int(if loc.loc_ghost { 1 } else { 0 });
+
+        self.location_value_table.insert(*loc, obj_idx);
     }
 
     /// Write a `{txt; loc}` string_loc record with identity-based sharing.

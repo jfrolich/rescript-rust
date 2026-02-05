@@ -33,6 +33,7 @@ syntax_tests/data/idempotency/bs-css/Css_AtomicTypes.resi
 syntax_tests/data/idempotency/bs-css/Css_Colors.res
 syntax_tests/data/idempotency/bs-css/Css_Core.res
 syntax_tests/data/idempotency/bs-css/Css_Js_Core.res
+syntax_tests/data/idempotency/bs-css/Css_Legacy_Core.res
 syntax_tests/data/idempotency/bs-css/Css_Legacy_Core.resi
 syntax_tests/data/idempotency/bs-css/Css.res
 syntax_tests/data/idempotency/bs-css/CssEmotion.res
@@ -183,6 +184,7 @@ syntax_tests/data/idempotency/genType/src/EmitJs.res
 syntax_tests/data/idempotency/genType/src/Emitters.res
 syntax_tests/data/idempotency/genType/src/Emitters.resi
 syntax_tests/data/idempotency/genType/src/EmitText.res
+syntax_tests/data/idempotency/genType/src/EmitType.res
 syntax_tests/data/idempotency/genType/src/EmitType.resi
 syntax_tests/data/idempotency/genType/src/ExportModule.res
 syntax_tests/data/idempotency/genType/src/GeneratedFiles.res
@@ -199,6 +201,7 @@ syntax_tests/data/idempotency/genType/src/ModuleName.resi
 syntax_tests/data/idempotency/genType/src/ModuleResolver.res
 syntax_tests/data/idempotency/genType/src/NamedArgs.res
 syntax_tests/data/idempotency/genType/src/Paths.res
+syntax_tests/data/idempotency/genType/src/ResolvedName.res
 syntax_tests/data/idempotency/genType/src/ResolvedName.resi
 syntax_tests/data/idempotency/genType/src/Runtime.res
 syntax_tests/data/idempotency/genType/src/Runtime.resi
@@ -209,6 +212,7 @@ syntax_tests/data/idempotency/genType/src/TranslateStructure.res
 syntax_tests/data/idempotency/genType/src/TranslateTypeDeclarations.res
 syntax_tests/data/idempotency/genType/src/TranslateTypeExprFromTypes.res
 syntax_tests/data/idempotency/genType/src/Translation.res
+syntax_tests/data/idempotency/genType/src/TypeEnv.res
 syntax_tests/data/idempotency/genType/src/TypeEnv.resi
 syntax_tests/data/idempotency/genType/src/TypeVars.res
 syntax_tests/data/idempotency/genType/src/Version.res
@@ -224,12 +228,14 @@ syntax_tests/data/idempotency/ludum-dare-46/serialize.res
 syntax_tests/data/idempotency/ludum-dare-46/sound.res
 syntax_tests/data/idempotency/mareo/Actors.res
 syntax_tests/data/idempotency/mareo/Actors.resi
+syntax_tests/data/idempotency/mareo/Director.res
 syntax_tests/data/idempotency/mareo/Director.resi
 syntax_tests/data/idempotency/mareo/Draw.resi
 syntax_tests/data/idempotency/mareo/Object.res
 syntax_tests/data/idempotency/mareo/Object.resi
 syntax_tests/data/idempotency/mareo/Particle.res
 syntax_tests/data/idempotency/mareo/Particle.resi
+syntax_tests/data/idempotency/mareo/Procedural_generator.res
 syntax_tests/data/idempotency/mareo/Procedural_generator.resi
 syntax_tests/data/idempotency/mareo/Sprite.resi
 syntax_tests/data/idempotency/mareo/Viewport.res
@@ -467,6 +473,7 @@ syntax_tests/data/idempotency/reductive/reductiveContext.resi
 syntax_tests/data/idempotency/reprocessing/Reprocessing_Common.res
 syntax_tests/data/idempotency/reprocessing/Reprocessing_Constants.res
 syntax_tests/data/idempotency/reprocessing/Reprocessing_Constants.resi
+syntax_tests/data/idempotency/reprocessing/Reprocessing_Draw.res
 syntax_tests/data/idempotency/reprocessing/Reprocessing_Draw.resi
 syntax_tests/data/idempotency/reprocessing/Reprocessing_Env.res
 syntax_tests/data/idempotency/reprocessing/Reprocessing_Env.resi
