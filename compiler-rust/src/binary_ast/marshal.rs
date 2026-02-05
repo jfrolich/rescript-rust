@@ -192,6 +192,9 @@ pub struct MarshalWriter {
     /// Shared object indices for `pval_prim` single-element lists by sharing group.
     prim_list_table: [Option<u32>; PrimListShareKind::COUNT],
 
+    /// Depth counter for JSX context while marshalling.
+    jsx_depth: u32,
+
 
     /// Optional reference to ParseArena for LocIdx marshalling.
     /// Set via `set_arena()` before marshalling AST with LocIdx fields.
@@ -237,6 +240,7 @@ impl MarshalWriter {
 
             pstr_empty_table: [None; EmptyPayloadShareKind::COUNT],
             prim_list_table: [None; PrimListShareKind::COUNT],
+            jsx_depth: 0,
 
             arena: None,
             obj_counter: 0,
@@ -267,6 +271,7 @@ impl MarshalWriter {
 
             pstr_empty_table: [None; EmptyPayloadShareKind::COUNT],
             prim_list_table: [None; PrimListShareKind::COUNT],
+            jsx_depth: 0,
 
             arena: None,
             obj_counter: 0,
@@ -296,6 +301,22 @@ impl MarshalWriter {
         }
     }
 
+    #[inline]
+    pub fn enter_jsx(&mut self) {
+        self.jsx_depth += 1;
+    }
+
+    #[inline]
+    pub fn exit_jsx(&mut self) {
+        self.jsx_depth = self.jsx_depth.saturating_sub(1);
+    }
+
+    #[inline]
+    pub fn in_jsx(&self) -> bool {
+        self.jsx_depth > 0
+    }
+
+
     /// Get the current object counter value
     pub fn obj_counter(&self) -> u32 {
         self.obj_counter
@@ -315,6 +336,7 @@ impl MarshalWriter {
         self.tyvar_core_type_table.clear();
         self.pstr_empty_table = [None; EmptyPayloadShareKind::COUNT];
         self.prim_list_table = [None; PrimListShareKind::COUNT];
+        self.jsx_depth = 0;
         self.obj_counter = 0;
         self.size_32 = 0;
         self.size_64 = 0;

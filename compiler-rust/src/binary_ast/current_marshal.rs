@@ -23,7 +23,7 @@ use crate::parser::ast::{
     OverrideFlag, Pattern, PatternDesc, PatternRecordField, Payload, PrivateFlag, RecFlag,
     RowField, SignatureItem, SignatureItemDesc, StructureItem, StructureItemDesc, TypeArg,
     TypeDeclaration, TypeExtension, TypeKind, ValueBinding, ValueDescription, Variance,
-    WithConstraint, ConstructorArguments, ConstructorDeclaration,
+    WithConstraint, ConstructorArguments, ConstructorDeclaration, StringLoc,
 };
 
 // ========== Attribute list sharing ==========
@@ -42,6 +42,11 @@ fn is_pipe_application(expr: &Expression, w: &MarshalWriter) -> bool {
     }
 
     let arena = w.get_arena();
+    if expr.pexp_attributes.iter().any(|(name, _)| {
+        arena.get_string(name.txt) == "res.taggedTemplate"
+    }) {
+        return false;
+    }
     let funct_loc = arena.get_location(funct.pexp_loc);
     let arg_loc = arena.get_location(args[0].1.pexp_loc);
     let funct_start = arena.get_position(funct_loc.loc_start).cnum;
@@ -62,13 +67,36 @@ fn is_pipe_application(expr: &Expression, w: &MarshalWriter) -> bool {
     !is_symbolic_operator(name)
 }
 
+fn should_share_empty_pstr(
+    kind: EmptyPayloadShareKind,
+    name: &StringLoc,
+    w: &MarshalWriter,
+) -> bool {
+    if kind != EmptyPayloadShareKind::ParserAttr {
+        return true;
+    }
+
+    let arena = w.get_arena();
+    let name_str = arena.get_string(name.txt);
+    if name_str == "res.braces" {
+        w.in_jsx()
+    } else if name_str == "res.taggedTemplate" {
+        false
+    } else {
+        true
+    }
+}
+
 fn marshal_attribute_payload(
+    name: &StringLoc,
     payload: &Payload,
     w: &mut MarshalWriter,
     share_empty_pstr: Option<EmptyPayloadShareKind>,
 ) {
     if let Some(kind) = share_empty_pstr {
-        if matches!(payload, Payload::PStr(items) if items.is_empty()) {
+        if matches!(payload, Payload::PStr(items) if items.is_empty())
+            && should_share_empty_pstr(kind, name, w)
+        {
             w.write_pstr_empty_shared(kind);
             return;
         }
@@ -88,7 +116,7 @@ fn marshal_attribute_list(
         // Attribute tuple
         w.write_block_header(0, 2);
         name.marshal(w);
-        marshal_attribute_payload(payload, w, share_empty_pstr);
+        marshal_attribute_payload(name, payload, w, share_empty_pstr);
         marshal_attribute_list(tail, w, share_empty_pstr);
     } else {
         // []
@@ -153,7 +181,7 @@ fn marshal_attributes(
                     // Write the attribute tuple: Block(tag=0, size=2) [name, payload]
                     w.write_block_header(0, 2);
                     name.marshal(w);
-                    marshal_attribute_payload(payload, w, share_empty_pstr);
+                    marshal_attribute_payload(name, payload, w, share_empty_pstr);
 
                     w.singleton_attr_list_table_insert(key, obj_idx);
                 }
@@ -1396,6 +1424,7 @@ use crate::parser::ast::{JsxClosingTag, JsxContainerElement, JsxElement, JsxFrag
 
 impl Marshal for JsxElement {
     fn marshal(&self, w: &mut MarshalWriter) {
+        w.enter_jsx();
         match self {
             JsxElement::Fragment(frag) => {
                 w.write_block_header(0, 1);
@@ -1410,6 +1439,7 @@ impl Marshal for JsxElement {
                 elem.marshal(w);
             }
         }
+        w.exit_jsx();
     }
 }
 
