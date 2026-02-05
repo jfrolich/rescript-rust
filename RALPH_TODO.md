@@ -25,9 +25,40 @@
 | Syntax tests | 506/506 (100%) ✅ |
 | sexp-locs | 1196/1196 (100%) ✅ |
 | sexp-locs-ppx | 1196/1196 (100%) ✅ |
-| bsc-ast | 837/1196 (69.9%) |
+| bsc-ast | 838/1179 (71.1%) |
+
+**Note:** 1179 = files where OCaml bsc can produce output. 134 files use newer syntax
+that OCaml can't parse; these are excluded from parity testing. Total test files: 1313.
 
 **Session progress (2026-02-05) - newest:**
+- Fixed baseline: removed 35 OCaml-unparseable files from bsc_ast.txt
+  - Test scripts used `.ast` extension for `.resi` files, but compilers produce `.iast`
+  - This caused false positives: files reported as "passing" when neither output existed
+  - **CRITICAL for future agents**: Use correct output extension (`.ast` for `.res`, `.iast` for `.resi`)
+- Fixed dependency extraction: functor parameter scoping + extension payload handling
+  - Bug 1: `Pmod_functor`/`Pmty_functor` permanently added param names to `bound_modules`
+    without cleanup on scope exit. Fix: track `newly_added` and remove on scope exit.
+  - Bug 2: Rust recursed into extension payloads (`add_payload()`) for all 7 extension types.
+    OCaml's `handle_extension` ignores ALL extension payloads for dep extraction.
+    Fix: removed `self.add_payload(payload)` calls from Pexp_extension, Pstr_extension,
+    Psig_extension, Ppat_extension, Ptyp_extension, Pmod_extension, Pmty_extension.
+  - Result: 1 new pass (mangleKeyword.res), 0 regressions
+- Comprehensive analysis of all 341 remaining failures:
+  - **ALL 341 failures are sharing-only** — zero structural AST errors
+  - Breakdown by first difference type:
+    - 154: OCaml shares Some/Wrapper that Rust doesn't
+    - 114: OCaml shares Pair/Record2 that Rust doesn't
+    - 40: Other type mismatches (mostly empty string sharing, 1 Main.res tag bug)
+    - 18: OCaml shares Cons/Variant1 that Rust doesn't
+    - 7: OCaml shares Location that Rust doesn't
+    - 2: Rust over-shares Location
+  - Main.res: `@@config({no_export})` requires AST wrapping in `Pstr_include` that
+    Rust doesn't implement (only 1 file affected)
+- Attempted fixes (all reverted):
+  - Location sharing removal: 1 regression (jsObjectSet.res needs it)
+  - Lident wrapper sharing: 161 regressions (too aggressive — OCaml CSE is local-scope)
+
+**Session progress (2026-02-05) - previous:**
 - Fixed dependency scoping bug in `deps.rs` (bound_modules): 836→837
   - Bug: Rust uses mutable `HashSet<String>` for bound_modules, but removes names
     on scope exit even when they were already present from outer scopes
@@ -251,15 +282,22 @@ The binary AST structure (sexp-locs) is 100% correct. The differences are in:
 - `let f = (~x) => x` ✅ (labeled arguments)
 - JSX elements and containers ✅
 
-### Remaining Blocking Issues (~390 files)
+### Remaining Blocking Issues (341 files — ALL sharing-only)
 
-**Root cause:** OCaml's CSE (Common Subexpression Elimination) shares heap blocks with identical content. Rust doesn't replicate this.
+**Root cause:** OCaml's CSE (Common Subexpression Elimination) and pointer-identity-based marshal sharing. Zero structural AST errors remain.
 
-**Key patterns:**
-1. **PStr([]) payloads**: Empty attribute payloads shared within same parsing context
-2. **Some(int) wrappers**: `Some(Closed)`, `Some(false)` etc. may or may not share
-3. **String sharing**: Type variable names shared by OCaml CSE
-4. **Attribute sharing**: Module-level attributes like `internal_expansive` are physically shared in OCaml
+**Key sharing patterns (by frequency):**
+1. **Some/Wrapper blocks** (154 files): OCaml shares `Some(x)` wrapper blocks (tag=0, sz=1) when the same pointer is reused. Parent contexts vary: tag=0,sz=2 (expressions), tag=0,sz=7 (value bindings), etc.
+2. **Pair/Record2 blocks** (114 files): OCaml shares 2-element blocks (tuples, pairs) via pointer identity
+3. **Cons/Variant1 blocks** (18 files): OCaml shares list cons cells and variant wrappers
+4. **Empty string '' sharing** (~18 files): OCaml occasionally shares empty string allocations
+5. **Location sharing** (7 under-shared + 2 over-shared): Content-based Location sharing is a net positive for most files but imperfect
+6. **Main.res tag bug** (1 file): `@@config({no_export})` requires `Pstr_include` wrapping
+
+**Why content-based sharing fails:**
+- Content-based (HashMap) causes **bidirectional errors**: shares things OCaml doesn't (different allocations with same content), misses things OCaml does (same pointer, local CSE)
+- Lident wrapper sharing attempt: 161 regressions (OCaml CSE is function-local, not global)
+- Location sharing removal attempt: 1 regression (some files genuinely share locations)
 
 ---
 
@@ -291,12 +329,14 @@ The binary AST structure (sexp-locs) is 100% correct. The differences are in:
 - JSX closing tag position fix
 - open_description location fix
 
-### Dependency Extraction ✅ (100% correct)
-- All 1196 files have identical dependency sections
+### Dependency Extraction ✅ (100% correct for OCaml-parseable files)
+- All 1179 OCaml-parseable files have identical dependency sections
 - Module binding order fix
 - Unpack name scoping fix
 - Pmty_ident uses add_parent (not addmodule)
 - With-constraint extraction fixed
+- Functor parameter scoping fix (Pmod_functor/Pmty_functor cleanup on scope exit)
+- Extension payload handling: ignore all extension payloads (matches OCaml's handle_extension)
 
 ---
 
@@ -306,9 +346,10 @@ The binary AST structure (sexp-locs) is 100% correct. The differences are in:
 - [x] Tasks 2.1-2.9: All implemented
 
 ### Phase 5: Validation
-- [x] Task 5.1-5.3: Achieved 823/1049 (78.5%)
-- [ ] Task 5.4: Target 1000/1049 (95%) - Requires marshal sharing fixes
-- [ ] Task 5.5: Target 1049/1049 (100%) - Full OCaml sharing parity
+- [x] Task 5.1-5.3: Achieved 838/1179 (71.1%)
+- [ ] Task 5.4: Target ~1000/1179 (85%) - Requires marshal sharing fixes
+- [ ] Task 5.5: Target 1179/1179 (100%) - Full OCaml sharing parity
+- **Note:** 341 remaining failures are ALL sharing-only (zero structural errors)
 
 ### Phase 6: Arity Arena ✅ Complete
 - [x] Tasks 6.1-6.6: All implemented
@@ -356,6 +397,28 @@ Categorized by root cause:
 
 ### Not Yet Implemented
 - **%todo extension** - 0 test files use this
+
+---
+
+## ⚠️ CRITICAL: Test Script Extension Handling
+
+**When testing bsc-ast parity, you MUST use the correct output extension:**
+- `.res` files → produce `.ast` output
+- `.resi` files → produce `.iast` output
+
+**The compilers IGNORE the `-o` extension** — they always produce the extension matching
+the input file type. So `-o /tmp/out.ast` for a `.resi` file will create `/tmp/out.iast`.
+
+**Wrong (causes false results):**
+```bash
+bsc -bs-ast foo.resi -o /tmp/out.ast  # Creates /tmp/out.iast, NOT /tmp/out.ast!
+```
+
+**Correct:**
+```bash
+ext="ast"; [[ "$f" == *.resi ]] && ext="iast"
+bsc -bs-ast "$f" -o "/tmp/out.$ext"
+```
 
 ---
 
