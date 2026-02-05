@@ -1554,7 +1554,7 @@ fn sexp_structure_item_desc(arena: &ParseArena, ctx: &TypeContext<'_>, with_locs
         StructureItemDesc::Tstr_open(od) => {
             Sexp::list(vec![
                 Sexp::atom("Tstr_open"),
-                sexp_open_declaration(arena, ctx, with_locs, od),
+                sexp_open_description(arena, ctx, with_locs, od),
             ])
         }
         StructureItemDesc::Tstr_include(incl) => {
@@ -1617,15 +1617,18 @@ fn sexp_module_binding(arena: &ParseArena, ctx: &TypeContext<'_>, with_locs: boo
     Sexp::list(items)
 }
 
-fn sexp_open_declaration(arena: &ParseArena, ctx: &TypeContext<'_>, with_locs: bool, od: &OpenDeclaration) -> Sexp {
+fn sexp_open_description(arena: &ParseArena, _ctx: &TypeContext<'_>, with_locs: bool, od: &OpenDeclaration) -> Sexp {
     let loc_sexp = if with_locs {
         vec![location_idx(arena, with_locs, od.open_loc)]
     } else {
         vec![]
     };
-    let mut items = vec![Sexp::atom("open_declaration")];
+    let mut items = vec![
+        Sexp::atom("open_description"),
+        sexp_path(&od.open_path),
+        sexp_longident_idx(arena, od.open_txt.txt),
+    ];
     items.extend(loc_sexp);
-    items.push(sexp_module_expr(arena, ctx, with_locs, &od.open_expr));
     items.push(sexp_override_flag(&od.open_override));
     items.push(sexp_attributes(arena, with_locs, &od.open_attributes));
     Sexp::list(items)

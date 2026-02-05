@@ -732,17 +732,11 @@ fn type_structure_item<'a>(
             let path = path_from_longident(tctx.resolve_lid(open_desc.popen_lid.txt), |idx| arena.get_string(idx));
 
             let desc = StructureItemDesc::Tstr_open(OpenDeclaration {
-                open_expr: ModuleExpr {
-                    mod_desc: ModuleExprDesc::Tmod_ident(path, open_desc.popen_lid.clone()),
-                    mod_loc: loc,
-                    mod_type: ModuleType::placeholder(),
-                    mod_env: EnvRef(0),
-                    mod_attributes: vec![],
-                },
+                open_path: path,
+                open_txt: open_desc.popen_lid.clone(),
                 open_override: open_desc.popen_override,
-                open_env: EnvRef(0),
-                open_attributes: open_desc.popen_attributes.clone(),
                 open_loc: loc,
+                open_attributes: open_desc.popen_attributes.clone(),
             });
             Ok((
                 StructureItem {

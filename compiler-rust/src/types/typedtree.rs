@@ -745,19 +745,19 @@ pub struct ModuleTypeDeclaration {
     pub mtd_loc: LocIdx,
 }
 
-/// An open declaration.
+/// An open description (matches OCaml's `open_description`).
 #[derive(Debug, Clone)]
 pub struct OpenDeclaration {
-    /// Opened module expression.
-    pub open_expr: ModuleExpr,
+    /// Resolved module path.
+    pub open_path: Path,
+    /// Original longident as written.
+    pub open_txt: Located<LidentIdx>,
     /// Open override flag.
     pub open_override: OverrideFlag,
-    /// Environment after open.
-    pub open_env: EnvRef,
-    /// Attributes.
-    pub open_attributes: Attributes,
     /// Location.
     pub open_loc: LocIdx,
+    /// Attributes.
+    pub open_attributes: Attributes,
 }
 
 /// An include declaration.
