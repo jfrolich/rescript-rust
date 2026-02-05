@@ -6112,8 +6112,8 @@ fn generate_js_converter_record(
     structure_items.push(from_js_fn);
 
     // Signature items
-    signature_items.push(create_record_to_js_sig(&type_name, labels, &core_type, create_type, loc, arena));
-    signature_items.push(create_record_from_js_sig(&type_name, labels, &core_type, create_type, loc, arena));
+    signature_items.push(create_record_to_js_sig(tdcl, &type_name, labels, &core_type, create_type, loc, arena));
+    signature_items.push(create_record_from_js_sig(tdcl, &type_name, labels, &core_type, create_type, loc, arena));
 
     // If create_type, prepend the new type to signature as well
     if create_type {
@@ -6535,6 +6535,7 @@ fn create_new_type_ref(
 
 /// Create signature for record toJs function
 fn create_record_to_js_sig(
+    tdcl: &TypeDeclaration,
     type_name: &str,
     labels: &[LabelDeclaration],
     core_type: &CoreType,
@@ -6542,19 +6543,14 @@ fn create_record_to_js_sig(
     _loc: LocIdx,
     arena: &mut ParseArena,
 ) -> SignatureItem {
-    // Placeholder - will implement properly based on OCaml output
     let none_loc = arena.none_loc();
     let to_js_name = format!("{}ToJs", type_name);
     let fn_name_idx = arena.intern_string(&to_js_name);
 
     // Return type: abs_<name> if create_type, else object type
     let ret_type = if create_type {
-        // For now, simplified - should match OCaml
-        CoreType {
-            ptyp_desc: CoreTypeDesc::Ptyp_any,
-            ptyp_loc: none_loc,
-            ptyp_attributes: vec![],
-        }
+        // Use the new abstract type: abs_<name><params>
+        create_new_type_ref(tdcl, type_name, arena)
     } else {
         // Object type from labels
         let fields: Vec<ObjectField> = labels
@@ -6602,6 +6598,7 @@ fn create_record_to_js_sig(
 
 /// Create signature for record fromJs function
 fn create_record_from_js_sig(
+    tdcl: &TypeDeclaration,
     type_name: &str,
     labels: &[LabelDeclaration],
     core_type: &CoreType,
@@ -6615,11 +6612,8 @@ fn create_record_from_js_sig(
 
     // Arg type: abs_<name> if create_type, else open object type
     let arg_type = if create_type {
-        CoreType {
-            ptyp_desc: CoreTypeDesc::Ptyp_any,
-            ptyp_loc: none_loc,
-            ptyp_attributes: vec![],
-        }
+        // Use the new abstract type: abs_<name><params>
+        create_new_type_ref(tdcl, type_name, arena)
     } else {
         let fields: Vec<ObjectField> = labels
             .iter()
