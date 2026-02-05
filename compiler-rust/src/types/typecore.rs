@@ -2798,7 +2798,7 @@ fn type_coerce(
     }
 
     // If there's a from type, translate and check it
-    let (opt_from_typed, from_ty) = if let Some(from_type) = opt_from_type {
+    let (_opt_from_typed, from_ty) = if let Some(from_type) = opt_from_type {
         let (from_typed_ctype, from_ty) = transl_type(tctx, env, from_type)?;
         (Some(from_typed_ctype), from_ty)
     } else {
@@ -2812,7 +2812,7 @@ fn type_coerce(
 
     // Return the inner expression with the coercion as exp_extra
     Ok(typed_inner.with_exp_extra(
-        crate::types::typedtree::ExpExtra::Texp_coerce(opt_from_typed, to_typed_ctype),
+        crate::types::typedtree::ExpExtra::Texp_coerce(to_typed_ctype),
         loc.clone(),
         attributes.to_vec(),
     ))
