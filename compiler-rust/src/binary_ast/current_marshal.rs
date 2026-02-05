@@ -34,17 +34,20 @@ fn is_symbolic_operator(name: &str) -> bool {
 }
 
 fn is_pipe_application(expr: &Expression, w: &MarshalWriter) -> bool {
+    let arena = w.get_arena();
+
     let ExpressionDesc::Pexp_apply { funct, args, .. } = &expr.pexp_desc else {
         return false;
     };
-    if args.is_empty() || !args.iter().all(|(lbl, _)| matches!(lbl, ArgLabel::Nolabel)) {
+    if args.is_empty() || !matches!(args[0].0, ArgLabel::Nolabel) {
         return false;
     }
 
-    let arena = w.get_arena();
-    if expr.pexp_attributes.iter().any(|(name, _)| {
-        arena.get_string(name.txt) == "res.taggedTemplate"
-    }) {
+    if expr
+        .pexp_attributes
+        .iter()
+        .any(|(name, _)| arena.get_string(name.txt) == "res.taggedTemplate")
+    {
         return false;
     }
     let funct_loc = arena.get_location(funct.pexp_loc);
@@ -65,6 +68,13 @@ fn is_pipe_application(expr: &Expression, w: &MarshalWriter) -> bool {
     };
 
     !is_symbolic_operator(name)
+}
+
+fn has_template_literal_attr(attrs: &Attributes, w: &MarshalWriter) -> bool {
+    let arena = w.get_arena();
+    attrs
+        .iter()
+        .any(|(name, _)| arena.get_string(name.txt) == "res.template")
 }
 
 fn should_share_empty_pstr(
@@ -193,12 +203,8 @@ fn marshal_attributes(
         }
     }
 
-    // Default: marshal normally without sharing
-    if share_empty_pstr.is_some() {
-        marshal_attribute_list(attrs_slice, w, share_empty_pstr);
-    } else {
-        attrs_slice.marshal(w);
-    }
+    // Default: marshal normally (with optional payload sharing)
+    marshal_attribute_list(attrs_slice, w, share_empty_pstr);
 }
 
 // ========== Flag implementations ==========
@@ -713,8 +719,13 @@ impl Marshal for Expression {
                 | ExpressionDesc::Pexp_extension(_)
                 | ExpressionDesc::Pexp_newtype(_, _)
         );
-        let share_empty_pstr =
-            is_pipe_application(self, w).then_some(EmptyPayloadShareKind::ParserAttr);
+        let share_empty_pstr = if is_pipe_application(self, w)
+            || (share_attrs && has_template_literal_attr(&self.pexp_attributes, w))
+        {
+            Some(EmptyPayloadShareKind::ParserAttr)
+        } else {
+            None
+        };
         marshal_attributes(
             &self.pexp_attributes,
             w,
