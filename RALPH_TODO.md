@@ -25,12 +25,24 @@
 | Syntax tests | 506/506 (100%) ✅ |
 | sexp-locs | 1196/1196 (100%) ✅ |
 | sexp-locs-ppx | 1196/1196 (100%) ✅ |
-| bsc-ast | 894/1179 (75.8%) |
+| bsc-ast | 901/1179 (76.4%) |
 
 **Note:** 1179 = files where OCaml bsc can produce output. 134 files use newer syntax
 that OCaml can't parse; these are excluded from parity testing. Total test files: 1313.
 
 **Session progress (2026-02-05) - newest:**
+- Fixed raw-template attribute tail sharing in marshal recursion:
+  - OCaml shares the tail list `[res.template]` when marshalling
+    `[internal.expansive; res.template]` during `%raw` expansion.
+  - Rust only shared top-level singleton `[res.template]`, but rebuilt the same
+    tail list in recursive `marshal_attribute_list`, causing fresh Pair/Record2 blocks.
+  - Added raw-expansion singleton-template sharing in `marshal_attribute_list`.
+  - Result: `inspect_binary_ast.py test ...Webapi__Dom__Document.res` is byte-identical.
+  - Full parity run: bsc-ast differences `142 -> 135` (1061/1196), 0 regressions.
+  - New passes: `Webapi__Dom__Document.res`, `Webapi__Dom__Element.res`,
+    `Webapi__Dom__HtmlElement.res`, `ReasonReactOptimizedCreateClass.res`,
+    `ThreeBoxUpdate.res`, `parsing/grammar/expressions/block.res`,
+    `printer/expr/block.res`.
 - Fixed `Lident("unit")` sharing in `#=` setter desugaring and PPX unit helper:
   - Rust used `push_longident(Longident::Lident(...))`, creating fresh wrappers each time.
   - OCaml (`ast_exp_apply.ml` + `Ast_literal.Lid.type_unit`) reuses a static longident.

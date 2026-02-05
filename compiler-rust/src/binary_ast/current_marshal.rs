@@ -185,6 +185,28 @@ fn marshal_attribute_list(
     w: &mut MarshalWriter,
     share_empty_pstr: Option<EmptyPayloadShareKind>,
 ) {
+    // In raw expansion contexts, OCaml may build attribute lists by consing onto
+    // a shared tail [res.template]. Our recursive marshalling must preserve that
+    // tail sharing, not just singleton top-level lists.
+    if w.in_raw_expansion() {
+        if let [(name, payload)] = attrs {
+            let arena = w.get_arena();
+            if matches!(payload, Payload::PStr(items) if items.is_empty())
+                && name.loc == LocIdx::default()
+                && arena.get_string(name.txt) == "res.template"
+            {
+                if let Some(obj_idx) = w.raw_template_attr_list() {
+                    let d = w.obj_counter() - obj_idx;
+                    w.write_shared_ref(d);
+                    return;
+                }
+
+                let obj_idx = w.obj_counter();
+                w.set_raw_template_attr_list(obj_idx);
+            }
+        }
+    }
+
     if let Some((head, tail)) = attrs.split_first() {
         let (name, payload) = head;
         // List cons cell

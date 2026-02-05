@@ -69,6 +69,7 @@ syntax_tests/data/idempotency/bs-webapi/src/Webapi/Webapi__Dom/Webapi__Dom__Comm
 syntax_tests/data/idempotency/bs-webapi/src/Webapi/Webapi__Dom/Webapi__Dom__CompositionEvent.res
 syntax_tests/data/idempotency/bs-webapi/src/Webapi/Webapi__Dom/Webapi__Dom__CssStyleDeclaration.res
 syntax_tests/data/idempotency/bs-webapi/src/Webapi/Webapi__Dom/Webapi__Dom__CustomEvent.res
+syntax_tests/data/idempotency/bs-webapi/src/Webapi/Webapi__Dom/Webapi__Dom__Document.res
 syntax_tests/data/idempotency/bs-webapi/src/Webapi/Webapi__Dom/Webapi__Dom__DocumentFragment.res
 syntax_tests/data/idempotency/bs-webapi/src/Webapi/Webapi__Dom/Webapi__Dom__DocumentOrShadowRoot.res
 syntax_tests/data/idempotency/bs-webapi/src/Webapi/Webapi__Dom/Webapi__Dom__DocumentType.res
@@ -77,6 +78,7 @@ syntax_tests/data/idempotency/bs-webapi/src/Webapi/Webapi__Dom/Webapi__Dom__DomR
 syntax_tests/data/idempotency/bs-webapi/src/Webapi/Webapi__Dom/Webapi__Dom__DomStringMap.res
 syntax_tests/data/idempotency/bs-webapi/src/Webapi/Webapi__Dom/Webapi__Dom__DomTokenList.res
 syntax_tests/data/idempotency/bs-webapi/src/Webapi/Webapi__Dom/Webapi__Dom__DragEvent.res
+syntax_tests/data/idempotency/bs-webapi/src/Webapi/Webapi__Dom/Webapi__Dom__Element.res
 syntax_tests/data/idempotency/bs-webapi/src/Webapi/Webapi__Dom/Webapi__Dom__ErrorEvent.res
 syntax_tests/data/idempotency/bs-webapi/src/Webapi/Webapi__Dom/Webapi__Dom__Event.res
 syntax_tests/data/idempotency/bs-webapi/src/Webapi/Webapi__Dom/Webapi__Dom__EventTarget.res
@@ -85,6 +87,7 @@ syntax_tests/data/idempotency/bs-webapi/src/Webapi/Webapi__Dom/Webapi__Dom__Glob
 syntax_tests/data/idempotency/bs-webapi/src/Webapi/Webapi__Dom/Webapi__Dom__History.res
 syntax_tests/data/idempotency/bs-webapi/src/Webapi/Webapi__Dom/Webapi__Dom__HtmlCollection.res
 syntax_tests/data/idempotency/bs-webapi/src/Webapi/Webapi__Dom/Webapi__Dom__HtmlDocument.res
+syntax_tests/data/idempotency/bs-webapi/src/Webapi/Webapi__Dom/Webapi__Dom__HtmlElement.res
 syntax_tests/data/idempotency/bs-webapi/src/Webapi/Webapi__Dom/Webapi__Dom__HtmlFormElement.res
 syntax_tests/data/idempotency/bs-webapi/src/Webapi/Webapi__Dom/Webapi__Dom__HtmlImageElement.res
 syntax_tests/data/idempotency/bs-webapi/src/Webapi/Webapi__Dom/Webapi__Dom__HtmlInputElement.res
@@ -574,6 +577,7 @@ syntax_tests/data/idempotency/reason-react/src/ReactEventRe.resi
 syntax_tests/data/idempotency/reason-react/src/ReasonReact.resi
 syntax_tests/data/idempotency/reason-react/src/ReasonReactCompat.res
 syntax_tests/data/idempotency/reason-react/src/ReasonReactCompat.resi
+syntax_tests/data/idempotency/reason-react/src/ReasonReactOptimizedCreateClass.res
 syntax_tests/data/idempotency/reason-react/src/ReasonReactRouter.resi
 syntax_tests/data/idempotency/reasongl/RGLConstants.res
 syntax_tests/data/idempotency/reasongl/RGLEvents.res
@@ -711,6 +715,7 @@ syntax_tests/data/idempotency/wildcards-world-ui/SocialButtons.res
 syntax_tests/data/idempotency/wildcards-world-ui/SsrEntryPoint.res
 syntax_tests/data/idempotency/wildcards-world-ui/Styles.res
 syntax_tests/data/idempotency/wildcards-world-ui/Team.res
+syntax_tests/data/idempotency/wildcards-world-ui/ThreeBoxUpdate.res
 syntax_tests/data/idempotency/wildcards-world-ui/TokenId.res
 syntax_tests/data/idempotency/wildcards-world-ui/TotalContribution.res
 syntax_tests/data/idempotency/wildcards-world-ui/TotalDaysHeld.res
@@ -743,6 +748,7 @@ syntax_tests/data/parsing/grammar/expressions/await.res
 syntax_tests/data/parsing/grammar/expressions/bigint.res
 syntax_tests/data/parsing/grammar/expressions/binary.res
 syntax_tests/data/parsing/grammar/expressions/binaryNoEs6Arrow.res
+syntax_tests/data/parsing/grammar/expressions/block.res
 syntax_tests/data/parsing/grammar/expressions/coerce.res
 syntax_tests/data/parsing/grammar/expressions/constants.res
 syntax_tests/data/parsing/grammar/expressions/constructor.res
@@ -939,6 +945,7 @@ syntax_tests/data/printer/expr/arrayGet.res
 syntax_tests/data/printer/expr/arraySet.res
 syntax_tests/data/printer/expr/assert.res
 syntax_tests/data/printer/expr/binary.res
+syntax_tests/data/printer/expr/block.res
 syntax_tests/data/printer/expr/bsObj.res
 syntax_tests/data/printer/expr/callback.res
 syntax_tests/data/printer/expr/coerce.res
