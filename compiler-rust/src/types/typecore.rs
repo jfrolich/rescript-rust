@@ -26,6 +26,7 @@
 #![allow(non_camel_case_types)]
 #![allow(dead_code)]
 
+use std::collections::HashMap;
 use crate::ident::Ident;
 use crate::location::Location;
 use crate::parse_arena::{LidentIdx, Located, LocIdx, ParseArena, StrIdx};
@@ -425,6 +426,9 @@ pub struct TypeCheckContext<'a> {
     pub newtype_level: Option<i32>,
     /// Collected diagnostics.
     pub diagnostics: Vec<TypeCoreDiagnostic>,
+    /// Used type variables within the current type expression (for sharing).
+    /// Maps type variable names to their TypeExprRef, matching OCaml's used_variables.
+    pub used_variables: HashMap<String, TypeExprRef>,
 }
 
 /// A diagnostic from type checking.
@@ -445,6 +449,7 @@ impl<'a> TypeCheckContext<'a> {
             unify_state: UnifyState::new(),
             newtype_level: None,
             diagnostics: Vec::new(),
+            used_variables: HashMap::new(),
         }
     }
 
@@ -570,6 +575,8 @@ pub fn transl_type(
     env: &Env,
     styp: &crate::parser::ast::CoreType,
 ) -> TypeCoreResult<(crate::types::typedtree::TypedCoreType, TypeExprRef)> {
+    // Reset used_variables for each top-level type translation (matches OCaml's transl_simple_type)
+    tctx.used_variables.clear();
     transl_type_inner(tctx, env, styp)
 }
 
@@ -601,8 +608,15 @@ fn transl_type_inner(
 
         CTD::Ptyp_var(name) => {
             // Type variable: 'a
-            // Look up or create a type variable with this name
-            let ty = ctx.new_var(Some(name.clone()));
+            // Look up existing or create a new type variable with this name.
+            // Matches OCaml's used_variables table to ensure sharing within a type expression.
+            let ty = if let Some(&existing) = tctx.used_variables.get(name) {
+                existing
+            } else {
+                let v = ctx.new_var(Some(name.clone()));
+                tctx.used_variables.insert(name.clone(), v);
+                v
+            };
             let ctyp = TypedCoreType {
                 ctyp_desc: TypedCoreTypeDesc::Ttyp_var(Some(name.clone())),
                 ctyp_type: ty,
@@ -621,6 +635,16 @@ fn transl_type_inner(
             // Convert Arity to Option<i32> for typed tree (matches OCaml's arity option)
             // Arity is now ArityIdx, look up the value from the arena
             let arity_opt = tctx.arena.get_arity(*arity);
+
+            // Like OCaml: wrap optional argument types in option
+            let arg_ty = if arg.lbl.is_optional() {
+                ctx.new_constr(
+                    crate::types::Path::pident(crate::ident::Ident::create_persistent("option")),
+                    vec![arg_ty],
+                )
+            } else {
+                arg_ty
+            };
 
             // Convert parser ArgLabel to types ArgLabel for TypeContext
             let ctx_lbl = convert_arg_label_for_ctx(&arg.lbl, tctx.arena);
