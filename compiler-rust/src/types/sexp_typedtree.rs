@@ -1553,13 +1553,26 @@ fn sexp_structure_item_desc(arena: &ParseArena, ctx: &TypeContext<'_>, with_locs
                 sexp_open_declaration(arena, ctx, with_locs, od),
             ])
         }
-        StructureItemDesc::Tstr_include(_incl) => {
-            Sexp::list(vec![Sexp::atom("Tstr_include"), Sexp::atom("<include_declaration>")])
+        StructureItemDesc::Tstr_include(incl) => {
+            Sexp::list(vec![Sexp::atom("Tstr_include"), sexp_include_declaration(arena, ctx, with_locs, incl)])
         }
         StructureItemDesc::Tstr_attribute(attr) => {
             Sexp::list(vec![Sexp::atom("Tstr_attribute"), sexp_attribute(arena, with_locs, attr)])
         }
     }
+}
+
+fn sexp_include_declaration(arena: &ParseArena, ctx: &TypeContext<'_>, with_locs: bool, incl: &crate::types::typedtree::IncludeDeclaration) -> Sexp {
+    let loc_sexp = if with_locs {
+        vec![location_idx(arena, with_locs, incl.incl_loc)]
+    } else {
+        vec![]
+    };
+    let mut items = vec![Sexp::atom("include_declaration")];
+    items.extend(loc_sexp);
+    items.push(sexp_module_expr(arena, ctx, with_locs, &incl.incl_mod));
+    items.push(sexp_attributes(arena, with_locs, &incl.incl_attributes));
+    Sexp::list(items)
 }
 
 fn sexp_module_binding(arena: &ParseArena, ctx: &TypeContext<'_>, with_locs: bool, mb: &ModuleBinding) -> Sexp {
