@@ -1438,6 +1438,28 @@ fn type_pattern_constraint(
     // Type check the inner pattern with the constraint type
     let typed_inner = type_pattern_inner(tctx, env, inner_pat, ctype_ty, mode, state, 0)?;
 
+    // OCaml wraps Tpat_var in Tpat_alias(Tpat_any, id, name) when there's a constraint.
+    // This matches the behavior in compiler/ml/typecore.ml lines 1651-1658.
+    let typed_inner = match typed_inner.pat_desc {
+        PatternDesc::Tpat_var(ref id, ref name) => {
+            let any_pat = Pattern::new(
+                PatternDesc::Tpat_any,
+                typed_inner.pat_loc,
+                typed_inner.pat_type,
+                typed_inner.pat_env,
+                vec![],
+            );
+            Pattern::new(
+                PatternDesc::Tpat_alias(Box::new(any_pat), id.clone(), name.clone()),
+                typed_inner.pat_loc,
+                ctype_ty,
+                typed_inner.pat_env,
+                vec![],
+            )
+        }
+        _ => typed_inner,
+    };
+
     // Return the inner pattern with constraint in pat_extra
     Ok(typed_inner.with_pat_extra(
         crate::types::typedtree::PatExtra::Tpat_constraint(typed_ctype),
