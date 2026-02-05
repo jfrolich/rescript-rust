@@ -1,0 +1,44 @@
+# Typed Tree Parity Baseline
+# Generated: 2026-02-05
+# Test: ./scripts/test_typedtree_parity.sh (without locations, -dtyped-sexp)
+#
+# Baseline:
+#   OCaml compiles: 657/657
+#   Rust compiles:  52/657 (605 fail)
+#   Parity match:   18/52 (34% of compilable files)
+#
+# Rust compile error categories (sampled 100 files):
+#   ~78% UndefinedMethod (module path resolution failures)
+#   ~16% NotAVariantType (variant/constructor resolution failures)
+#   ~1%  Parse errors
+#
+# Parity diff categories (34 failing files):
+#   - Ident/Path printing: Prints "Lident(#N)" instead of actual name ("int", "unit", etc.)
+#   - ModuleType placeholder: Prints "<module_type>" instead of full module type tree
+#   - include_declaration placeholder: Prints "<include_declaration>" placeholder
+#   - value_description placeholder: Prints "<value_description>" placeholder
+#   - type_extension: Prints "placeholder" instead of actual path/ident names
+#   - extension_constructor: Missing constructor data
+#   - Label declaration: Prints "..." instead of field names
+#   - Structural differences in Tstr_include (flattened vs nested)
+#   - Binary diff (encoding issues) in some files
+#
+# Files with parity match (18):
+tests/tests/src/acyc/a0_a1.res
+tests/tests/src/conditional/cond_b.res
+tests/tests/src/conditional/cond_c.res
+tests/tests/src/debug_tmp.res
+tests/tests/src/es6_export.res
+tests/tests/src/export_keyword.res
+tests/tests/src/glob_u.res
+tests/tests/src/glob_x.res
+tests/tests/src/gpr_1759_test.res
+tests/tests/src/gpr_2474.res
+tests/tests/src/gpr_3852_alias.res
+tests/tests/src/gpr_3852_alias_reify.res
+tests/tests/src/gpr_3865_foo.res
+tests/tests/src/gpr_441.res
+tests/tests/src/gpr_4494_test.res
+tests/tests/src/ModuleWithAlias.res
+tests/tests/src/runtime_encoding_test.res
+tests/tests/src/side_effect_free.res
