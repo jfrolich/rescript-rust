@@ -364,10 +364,27 @@ fn sexp_partial(p: &Partial) -> Sexp {
 
 // ============================================================================
 // Type Expression Printer - follows Tlink chains via ctx.repr
+// Uses a visited set for cycle detection, matching OCaml's behavior.
 // ============================================================================
 
 fn sexp_type_expr(arena: &ParseArena, ctx: &TypeContext<'_>, te: TypeExprRef) -> Sexp {
+    let mut visited = std::collections::HashSet::new();
+    sexp_type_expr_inner(arena, ctx, te, &mut visited)
+}
+
+fn sexp_type_expr_inner(
+    arena: &ParseArena,
+    ctx: &TypeContext<'_>,
+    te: TypeExprRef,
+    visited: &mut std::collections::HashSet<TypeExprRef>,
+) -> Sexp {
     let te = ctx.repr(te); // Follow Tlink chains
+
+    // Cycle detection: if we've already visited this type, print <cycle>
+    if !visited.insert(te) {
+        return Sexp::atom("<cycle>");
+    }
+
     let desc = ctx.get_desc(te);
     match &*desc {
         TypeDesc::Tvar(name) => Sexp::list(vec![Sexp::atom("Tvar"), opt_string(name)]),
@@ -376,13 +393,17 @@ fn sexp_type_expr(arena: &ParseArena, ctx: &TypeContext<'_>, te: TypeExprRef) ->
         } => Sexp::list(vec![
             Sexp::atom("Tarrow"),
             sexp_type_arg_label(&arg.lbl),
-            sexp_type_expr(arena, ctx, arg.typ),
-            sexp_type_expr(arena, ctx, *ret),
+            sexp_type_expr_inner(arena, ctx, arg.typ, visited),
+            sexp_type_expr_inner(arena, ctx, *ret, visited),
             opt(|a: &i32| Sexp::atom(&a.to_string()), arity),
         ]),
         TypeDesc::Ttuple(types) => {
             let mut items = vec![Sexp::atom("Ttuple")];
-            items.extend(types.iter().map(|t| sexp_type_expr(arena, ctx, *t)));
+            items.extend(
+                types
+                    .iter()
+                    .map(|t| sexp_type_expr_inner(arena, ctx, *t, visited)),
+            );
             Sexp::list(items)
         }
         TypeDesc::Tconstr { path, args, .. } => Sexp::list(vec![
@@ -390,13 +411,13 @@ fn sexp_type_expr(arena: &ParseArena, ctx: &TypeContext<'_>, te: TypeExprRef) ->
             sexp_path(path),
             Sexp::list(
                 args.iter()
-                    .map(|t| sexp_type_expr(arena, ctx, *t))
+                    .map(|t| sexp_type_expr_inner(arena, ctx, *t, visited))
                     .collect(),
             ),
         ]),
         TypeDesc::Tobject { fields, .. } => Sexp::list(vec![
             Sexp::atom("Tobject"),
-            sexp_type_expr(arena, ctx, *fields),
+            sexp_type_expr_inner(arena, ctx, *fields, visited),
         ]),
         TypeDesc::Tfield {
             name,
@@ -413,23 +434,24 @@ fn sexp_type_expr(arena: &ParseArena, ctx: &TypeContext<'_>, te: TypeExprRef) ->
                 Sexp::atom("Tfield"),
                 string(name),
                 Sexp::atom(kind_str),
-                sexp_type_expr(arena, ctx, *typ),
-                sexp_type_expr(arena, ctx, *rest),
+                sexp_type_expr_inner(arena, ctx, *typ, visited),
+                sexp_type_expr_inner(arena, ctx, *rest, visited),
             ])
         }
         TypeDesc::Tnil => Sexp::atom("Tnil"),
         TypeDesc::Tlink(_) => Sexp::atom("Tlink"), // Should not happen after ctx.repr
-        TypeDesc::Tsubst(ty) => {
-            Sexp::list(vec![Sexp::atom("Tsubst"), sexp_type_expr(arena, ctx, *ty)])
-        }
-        TypeDesc::Tvariant(row) => sexp_row_desc(arena, ctx, row),
+        TypeDesc::Tsubst(ty) => Sexp::list(vec![
+            Sexp::atom("Tsubst"),
+            sexp_type_expr_inner(arena, ctx, *ty, visited),
+        ]),
+        TypeDesc::Tvariant(row) => sexp_row_desc_inner(arena, ctx, row, visited),
         TypeDesc::Tunivar(name) => Sexp::list(vec![Sexp::atom("Tunivar"), opt_string(name)]),
         TypeDesc::Tpoly { body, vars } => Sexp::list(vec![
             Sexp::atom("Tpoly"),
-            sexp_type_expr(arena, ctx, *body),
+            sexp_type_expr_inner(arena, ctx, *body, visited),
             Sexp::list(
                 vars.iter()
-                    .map(|t| sexp_type_expr(arena, ctx, *t))
+                    .map(|t| sexp_type_expr_inner(arena, ctx, *t, visited))
                     .collect(),
             ),
         ]),
@@ -439,7 +461,7 @@ fn sexp_type_expr(arena: &ParseArena, ctx: &TypeContext<'_>, te: TypeExprRef) ->
             Sexp::list(lids.iter().map(|li| sexp_longident(arena, li)).collect()),
             Sexp::list(
                 args.iter()
-                    .map(|t| sexp_type_expr(arena, ctx, *t))
+                    .map(|t| sexp_type_expr_inner(arena, ctx, *t, visited))
                     .collect(),
             ),
         ]),
@@ -447,13 +469,28 @@ fn sexp_type_expr(arena: &ParseArena, ctx: &TypeContext<'_>, te: TypeExprRef) ->
 }
 
 fn sexp_row_desc(arena: &ParseArena, ctx: &TypeContext<'_>, row: &RowDesc) -> Sexp {
+    let mut visited = std::collections::HashSet::new();
+    sexp_row_desc_inner(arena, ctx, row, &mut visited)
+}
+
+fn sexp_row_desc_inner(
+    arena: &ParseArena,
+    ctx: &TypeContext<'_>,
+    row: &RowDesc,
+    visited: &mut std::collections::HashSet<TypeExprRef>,
+) -> Sexp {
     let row = btype::row_repr(ctx, row);
     Sexp::list(vec![
         Sexp::atom("Tvariant"),
         Sexp::list(
             row.row_fields
                 .iter()
-                .map(|(l, rf)| Sexp::list(vec![string(l), sexp_row_field(arena, ctx, rf)]))
+                .map(|(l, rf)| {
+                    Sexp::list(vec![
+                        string(l),
+                        sexp_row_field_inner(arena, ctx, rf, visited),
+                    ])
+                })
                 .collect(),
         ),
         Sexp::atom(if row.row_closed { "closed" } else { "open" }),
@@ -462,12 +499,23 @@ fn sexp_row_desc(arena: &ParseArena, ctx: &TypeContext<'_>, row: &RowDesc) -> Se
 }
 
 fn sexp_row_field(arena: &ParseArena, ctx: &TypeContext<'_>, rf: &RowField) -> Sexp {
+    let mut visited = std::collections::HashSet::new();
+    sexp_row_field_inner(arena, ctx, rf, &mut visited)
+}
+
+fn sexp_row_field_inner(
+    arena: &ParseArena,
+    ctx: &TypeContext<'_>,
+    rf: &RowField,
+    visited: &mut std::collections::HashSet<TypeExprRef>,
+) -> Sexp {
     let rf = btype::row_field_repr(rf);
     match rf {
         RowField::Rpresent(None) => Sexp::atom("Rpresent_none"),
-        RowField::Rpresent(Some(ty)) => {
-            Sexp::list(vec![Sexp::atom("Rpresent"), sexp_type_expr(arena, ctx, ty)])
-        }
+        RowField::Rpresent(Some(ty)) => Sexp::list(vec![
+            Sexp::atom("Rpresent"),
+            sexp_type_expr_inner(arena, ctx, ty, visited),
+        ]),
         RowField::Reither {
             constant, types, ..
         } => Sexp::list(vec![
@@ -476,7 +524,7 @@ fn sexp_row_field(arena: &ParseArena, ctx: &TypeContext<'_>, rf: &RowField) -> S
             Sexp::list(
                 types
                     .iter()
-                    .map(|t| sexp_type_expr(arena, ctx, *t))
+                    .map(|t| sexp_type_expr_inner(arena, ctx, *t, visited))
                     .collect(),
             ),
         ]),

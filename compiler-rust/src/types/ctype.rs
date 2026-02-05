@@ -25,7 +25,7 @@
 use super::btype::{iter_type_expr, row_more, row_repr};
 use super::context::TypeContext;
 use super::path::Path;
-use super::type_expr::{GENERIC_LEVEL, RowDesc, RowField, TypeDesc, TypeExprRef};
+use super::type_expr::{RowDesc, RowField, TypeDesc, TypeExprRef, GENERIC_LEVEL};
 use std::collections::HashSet;
 
 // ============================================================================
@@ -824,7 +824,27 @@ pub fn instance(ctx: &TypeContext<'_>, ty: TypeExprRef) -> TypeExprRef {
 
 /// Copy a type, creating fresh type variables for generic ones.
 pub fn copy_type(ctx: &TypeContext<'_>, ty: TypeExprRef) -> TypeExprRef {
+    let mut sharing = std::collections::HashMap::new();
+    copy_type_shared(ctx, ty, &mut sharing)
+}
+
+/// Copy a type with sharing preservation.
+///
+/// The `sharing` map tracks old TypeExprRef → new TypeExprRef mappings.
+/// When the same original type is encountered again, the same copy is returned,
+/// preserving the physical identity that OCaml's type system relies on.
+fn copy_type_shared(
+    ctx: &TypeContext<'_>,
+    ty: TypeExprRef,
+    sharing: &mut std::collections::HashMap<TypeExprRef, TypeExprRef>,
+) -> TypeExprRef {
     let ty = ctx.repr(ty);
+
+    // Check if we've already copied this type (sharing preservation)
+    if let Some(&copy) = sharing.get(&ty) {
+        return copy;
+    }
+
     let level = ctx.get_level(ty);
 
     // Enum to hold what action to take, avoiding borrow issues
@@ -917,7 +937,7 @@ pub fn copy_type(ctx: &TypeContext<'_>, ty: TypeExprRef) -> TypeExprRef {
     };
 
     // Execute the action without holding the borrow
-    match action {
+    let result = match action {
         CopyAction::NewVar(name) => ctx.new_var(name),
         CopyAction::NewUnivar(name) => ctx.new_univar(name),
         CopyAction::Arrow {
@@ -926,47 +946,73 @@ pub fn copy_type(ctx: &TypeContext<'_>, ty: TypeExprRef) -> TypeExprRef {
             ret,
             arity,
         } => {
-            let arg_copy = copy_type(ctx, arg_typ);
-            let ret_copy = copy_type(ctx, ret);
+            let arg_copy = copy_type_shared(ctx, arg_typ, sharing);
+            let ret_copy = copy_type_shared(ctx, ret, sharing);
             ctx.new_arrow(arg_lbl, arg_copy, ret_copy, arity)
         }
         CopyAction::Tuple(types) => {
-            let types_copy: Vec<_> = types.iter().map(|t| copy_type(ctx, *t)).collect();
+            let types_copy: Vec<_> = types
+                .iter()
+                .map(|t| copy_type_shared(ctx, *t, sharing))
+                .collect();
             ctx.new_tuple(types_copy)
         }
         CopyAction::Constr { path, args } => {
-            let args_copy: Vec<_> = args.iter().map(|t| copy_type(ctx, *t)).collect();
+            let args_copy: Vec<_> = args
+                .iter()
+                .map(|t| copy_type_shared(ctx, *t, sharing))
+                .collect();
             ctx.new_constr(path, args_copy)
         }
         CopyAction::Poly { body, vars } => {
-            let body_copy = copy_type(ctx, body);
-            let vars_copy: Vec<_> = vars.iter().map(|v| copy_type(ctx, *v)).collect();
+            let body_copy = copy_type_shared(ctx, body, sharing);
+            let vars_copy: Vec<_> = vars
+                .iter()
+                .map(|v| copy_type_shared(ctx, *v, sharing))
+                .collect();
             ctx.new_poly(body_copy, vars_copy)
         }
         CopyAction::Variant(row) => {
-            let row_copy = copy_row(ctx, &row);
+            let row_copy = copy_row_shared(ctx, &row, sharing);
             ctx.new_variant(row_copy)
         }
-        CopyAction::Link(target) => copy_type(ctx, target),
+        CopyAction::Link(target) => copy_type_shared(ctx, target, sharing),
         CopyAction::ReturnSelf => ty,
-    }
+    };
+
+    // Record the mapping for sharing preservation
+    sharing.insert(ty, result);
+    result
 }
 
 /// Copy a row descriptor.
 fn copy_row(ctx: &TypeContext<'_>, row: &RowDesc) -> RowDesc {
+    let mut sharing = std::collections::HashMap::new();
+    copy_row_shared(ctx, row, &mut sharing)
+}
+
+/// Copy a row descriptor with sharing preservation.
+fn copy_row_shared(
+    ctx: &TypeContext<'_>,
+    row: &RowDesc,
+    sharing: &mut std::collections::HashMap<TypeExprRef, TypeExprRef>,
+) -> RowDesc {
     RowDesc {
         row_fields: row
             .row_fields
             .iter()
-            .map(|(label, field)| (label.clone(), copy_row_field(ctx, field)))
+            .map(|(label, field)| (label.clone(), copy_row_field_shared(ctx, field, sharing)))
             .collect(),
-        row_more: copy_type(ctx, row.row_more),
+        row_more: copy_type_shared(ctx, row.row_more, sharing),
         row_closed: row.row_closed,
         row_fixed: row.row_fixed,
         row_name: row.row_name.as_ref().map(|(path, types)| {
             (
                 path.clone(),
-                types.iter().map(|t| copy_type(ctx, *t)).collect(),
+                types
+                    .iter()
+                    .map(|t| copy_type_shared(ctx, *t, sharing))
+                    .collect(),
             )
         }),
     }
@@ -974,8 +1020,20 @@ fn copy_row(ctx: &TypeContext<'_>, row: &RowDesc) -> RowDesc {
 
 /// Copy a row field.
 fn copy_row_field(ctx: &TypeContext<'_>, field: &RowField) -> RowField {
+    let mut sharing = std::collections::HashMap::new();
+    copy_row_field_shared(ctx, field, &mut sharing)
+}
+
+/// Copy a row field with sharing preservation.
+fn copy_row_field_shared(
+    ctx: &TypeContext<'_>,
+    field: &RowField,
+    sharing: &mut std::collections::HashMap<TypeExprRef, TypeExprRef>,
+) -> RowField {
     match field {
-        RowField::Rpresent(Some(ty)) => RowField::Rpresent(Some(copy_type(ctx, *ty))),
+        RowField::Rpresent(Some(ty)) => {
+            RowField::Rpresent(Some(copy_type_shared(ctx, *ty, sharing)))
+        }
         RowField::Rpresent(None) => RowField::Rpresent(None),
         RowField::Rabsent => RowField::Rabsent,
         RowField::Reither {
@@ -985,7 +1043,10 @@ fn copy_row_field(ctx: &TypeContext<'_>, field: &RowField) -> RowField {
             link,
         } => RowField::Reither {
             constant: *constant,
-            types: types.iter().map(|t| copy_type(ctx, *t)).collect(),
+            types: types
+                .iter()
+                .map(|t| copy_type_shared(ctx, *t, sharing))
+                .collect(),
             matched: *matched,
             link: *link,
         },
