@@ -28,6 +28,14 @@ pub enum ParserMode {
     Default,
 }
 
+/// Origin of type attributes for empty payload sharing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TypeAttrKind {
+    TopLevel,
+    Annotation,
+    FieldType,
+}
+
 /// Region status for error reporting.
 ///
 /// Used to avoid reporting duplicate errors in the same region.
@@ -128,6 +136,8 @@ pub struct Parser<'src> {
     pub inline_types_found: Option<Vec<(String, LocIdx, super::ast::TypeKind)>>,
     /// Type parameters from the outer type declaration for inline types.
     pub inline_types_params: Vec<(super::ast::CoreType, super::ast::Variance)>,
+    /// Current sharing origin for type attributes with empty payloads.
+    pub type_attr_kind: TypeAttrKind,
 }
 
 impl<'src> Parser<'src> {
@@ -169,6 +179,7 @@ impl<'src> Parser<'src> {
             current_type_name_path: None,
             inline_types_found: None,
             inline_types_params: vec![],
+            type_attr_kind: TypeAttrKind::TopLevel,
         };
         // Scan the first token
         parser.next();
@@ -189,6 +200,15 @@ impl<'src> Parser<'src> {
         let start_idx = self.start_pos_idx;
         let end_idx = self.prev_end_pos_idx;
         self.arena.mk_loc(start_idx, end_idx)
+    }
+
+    /// Temporarily set the type attribute sharing origin for a nested parse.
+    pub fn with_type_attr_kind<T>(&mut self, kind: TypeAttrKind, f: impl FnOnce(&mut Self) -> T) -> T {
+        let prev = self.type_attr_kind;
+        self.type_attr_kind = kind;
+        let res = f(self);
+        self.type_attr_kind = prev;
+        res
     }
 
     // ========== Arena-based location methods ==========

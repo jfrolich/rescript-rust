@@ -18,7 +18,7 @@ use super::grammar;
 use super::grammar::Grammar;
 use super::longident::Longident;
 use super::pattern;
-use super::state::Parser;
+use super::state::{Parser, TypeAttrKind};
 use super::token::Token;
 use super::typ;
 
@@ -3129,10 +3129,13 @@ fn parse_type_declaration_with_context(
                     }
                     "record_or_object" => {
                         // Parse attributes then check if record or object
-                        let attrs = parse_attributes(p);
+                        let mut attrs = parse_attributes(p);
                         if p.token == Token::Lbrace {
                             if looks_like_object_type_after_lbrace(p) {
                                 let mut typ = typ::parse_typ_expr(p);
+                                if matches!(typ.ptyp_desc, CoreTypeDesc::Ptyp_object(_, _)) {
+                                    share_empty_payloads(&mut attrs, EmptyPayloadKind::FieldAttribute);
+                                }
                                 typ.ptyp_attributes = attrs;
                                 manifest = Some(typ);
                             } else {
@@ -3951,7 +3954,7 @@ fn parse_label_declarations(
             p.next();
             // Name location is just the "..." part
             let name_loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
-            let spread_type = typ::parse_typ_expr(p);
+            let spread_type = p.with_type_attr_kind(TypeAttrKind::FieldType, |p| typ::parse_typ_expr(p));
             // OCaml extends the first spread field's location back to the { position
             let loc_start_idx = if is_first {
                 lbrace_pos_idx.unwrap_or(start_pos_idx)
@@ -4210,11 +4213,17 @@ fn parse_label_declaration(
         } else {
             // Not a record - parse as regular type (object type)
             // But still thread inline context through parser fields for nested extraction
-            parse_poly_type_with_inline_context(p, inline_ctx, extended_path.as_ref())
+            p.with_type_attr_kind(
+                TypeAttrKind::FieldType,
+                |p| parse_poly_type_with_inline_context(p, inline_ctx, extended_path.as_ref()),
+            )
         }
     } else {
         // Thread inline context through parser fields if available
-        parse_poly_type_with_inline_context(p, inline_ctx, extended_path.as_ref())
+        p.with_type_attr_kind(
+            TypeAttrKind::FieldType,
+            |p| parse_poly_type_with_inline_context(p, inline_ctx, extended_path.as_ref()),
+        )
     };
 
     // OCaml uses typ.ptyp_loc.loc_end for label declaration's end, not p.prev_end_pos
@@ -4694,6 +4703,14 @@ fn parse_module_type_declaration(p: &mut Parser<'_>, outer_attrs: Attributes, in
         pmtd_type: typ,
         pmtd_attributes: attrs,
         pmtd_loc: loc,
+    }
+}
+
+fn share_empty_payloads(attrs: &mut Attributes, kind: EmptyPayloadKind) {
+    for (_, payload) in attrs.iter_mut() {
+        if matches!(payload, Payload::PStr(items) if items.is_empty()) {
+            *payload = Payload::PStrEmptyShared(kind);
+        }
     }
 }
 

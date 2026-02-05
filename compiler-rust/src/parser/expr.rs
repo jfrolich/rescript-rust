@@ -11,7 +11,7 @@ use super::diagnostics::DiagnosticCategory;
 use super::grammar;
 use super::grammar::Grammar;
 use super::longident::Longident;
-use super::state::{Parser, ParserMode};
+use super::state::{Parser, ParserMode, TypeAttrKind};
 use super::token::Token;
 
 // ============================================================================
@@ -465,7 +465,7 @@ pub fn parse_expr_with_operand(p: &mut Parser<'_>, operand: Expression) -> Expre
     // Handle coercion
     if p.token == Token::ColonGreaterThan {
         p.next();
-        let typ = super::typ::parse_typ_expr(p);
+        let typ = p.with_type_attr_kind(TypeAttrKind::Annotation, |p| super::typ::parse_typ_expr(p));
         let loc = p.mk_loc_spanning(expr.pexp_loc, typ.ptyp_loc);
         Expression {
             pexp_desc: ExpressionDesc::Pexp_coerce(Box::new(expr), None, typ),
@@ -494,7 +494,7 @@ pub fn parse_expr_with_context(p: &mut Parser<'_>, context: ExprContext) -> Expr
     // Handle coercion: expr :> type
     let result = if p.token == Token::ColonGreaterThan {
         p.next();
-        let typ = super::typ::parse_typ_expr(p);
+        let typ = p.with_type_attr_kind(TypeAttrKind::Annotation, |p| super::typ::parse_typ_expr(p));
         let loc = p.mk_loc_spanning(expr.pexp_loc, typ.ptyp_loc);
         Expression {
             pexp_desc: ExpressionDesc::Pexp_coerce(Box::new(expr), None, typ),
@@ -1225,7 +1225,7 @@ fn parse_parameter(p: &mut Parser<'_>) -> Option<super::core::FundefParameter> {
                 // OCaml: var_pat location includes ~ (from tilde to end of name)
                 // But if there are attributes, it includes those too (from start_pos)
                 p.next();
-                let typ = super::typ::parse_typ_expr(p);
+                let typ = p.with_type_attr_kind(TypeAttrKind::Annotation, |p| super::typ::parse_typ_expr(p));
                 let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
                 // Use start_pos if there are attributes, otherwise use tilde_pos
                 // OCaml includes @as() attributes in the inner Ppat_var location
@@ -1284,7 +1284,7 @@ fn parse_parameter(p: &mut Parser<'_>) -> Option<super::core::FundefParameter> {
                 // The type constraint goes on the expression, not the pattern
                 let expr = if p.token == Token::Colon {
                     p.next();
-                    let typ = super::typ::parse_typ_expr(p);
+                    let typ = p.with_type_attr_kind(TypeAttrKind::Annotation, |p| super::typ::parse_typ_expr(p));
                     let loc = p.mk_loc_spanning(expr.pexp_loc, typ.ptyp_loc);
                     Expression {
                         pexp_desc: ExpressionDesc::Pexp_constraint(Box::new(expr), typ),
@@ -1322,7 +1322,7 @@ fn parse_parameter(p: &mut Parser<'_>) -> Option<super::core::FundefParameter> {
         // `parse_typ_expr_no_arrow` which is correct for switch cases but not here.
         let pat = if p.token == Token::Colon {
             p.next();
-            let typ = super::typ::parse_typ_expr(p);
+            let typ = p.with_type_attr_kind(TypeAttrKind::Annotation, |p| super::typ::parse_typ_expr(p));
             let loc = p.mk_loc_spanning(pat.ppat_loc, typ.ptyp_loc);
             Pattern {
                 ppat_desc: PatternDesc::Ppat_constraint(Box::new(pat), typ),
@@ -2172,14 +2172,14 @@ pub fn parse_constrained_or_coerced_expr(p: &mut Parser<'_>) -> Expression {
 
     if p.token == Token::Colon {
         p.next();
-        let typ = super::typ::parse_typ_expr(p);
+        let typ = p.with_type_attr_kind(TypeAttrKind::Annotation, |p| super::typ::parse_typ_expr(p));
         // Check for coercion: (expr : type :> type)
         if p.token == Token::ColonGreaterThan {
             // OCaml: The inner Pexp_constraint has a location that ends at the constraint type,
             // not extending to the outer coercion target type
             let constraint_loc = p.mk_loc_spanning(expr.pexp_loc, typ.ptyp_loc);
             p.next();
-            let target_typ = super::typ::parse_typ_expr(p);
+            let target_typ = p.with_type_attr_kind(TypeAttrKind::Annotation, |p| super::typ::parse_typ_expr(p));
             let coerce_loc = p.mk_loc_spanning(expr.pexp_loc, target_typ.ptyp_loc);
             // OCaml represents (x : t :> int) as Pexp_coerce(Pexp_constraint(x, t), int)
             // The constraint is nested inside the expression, not as the optional middle type
@@ -2204,7 +2204,7 @@ pub fn parse_constrained_or_coerced_expr(p: &mut Parser<'_>) -> Expression {
     } else if p.token == Token::ColonGreaterThan {
         // Direct coercion: expr :> type
         p.next();
-        let typ = super::typ::parse_typ_expr(p);
+        let typ = p.with_type_attr_kind(TypeAttrKind::Annotation, |p| super::typ::parse_typ_expr(p));
         let loc = p.mk_loc_spanning(expr.pexp_loc, typ.ptyp_loc);
         Expression {
             pexp_desc: ExpressionDesc::Pexp_coerce(Box::new(expr), None, typ),
@@ -2227,7 +2227,7 @@ pub fn over_parse_constrained_or_coerced_or_arrow_expression(
         Token::ColonGreaterThan => {
             // Coercion: expr :> type
             p.next();
-            let typ = super::typ::parse_typ_expr(p);
+            let typ = p.with_type_attr_kind(TypeAttrKind::Annotation, |p| super::typ::parse_typ_expr(p));
             let loc = p.mk_loc_spanning(expr.pexp_loc, typ.ptyp_loc);
             Expression {
                 pexp_desc: ExpressionDesc::Pexp_coerce(Box::new(expr), None, typ),
@@ -2852,7 +2852,7 @@ fn parse_argument(p: &mut Parser<'_>) -> (ArgLabel, Expression) {
             let colon_end = p.prev_end_pos.clone();
             if super::grammar::is_typ_expr_start(&p.token) {
                 // ~label: type (labeled with type annotation - punning with constraint)
-                let typ = super::typ::parse_typ_expr(p);
+                let typ = p.with_type_attr_kind(TypeAttrKind::Annotation, |p| super::typ::parse_typ_expr(p));
                 // Use the same interned StrIdx for the identifier - this enables sharing
                 let ident_expr = ast_helper::make_ident(p, Longident::Lident(name_str_idx), name_loc.clone());
                 // Constraint location spans from label name to end of type
@@ -3457,7 +3457,7 @@ fn parse_braced_or_record_expr(p: &mut Parser<'_>) -> Expression {
         // Check for type constraint on spread: {...make() : myRecord, foo: bar}
         if p.token == Token::Colon {
             p.next();
-            let typ = super::typ::parse_typ_expr(p);
+            let typ = p.with_type_attr_kind(TypeAttrKind::Annotation, |p| super::typ::parse_typ_expr(p));
             let loc = p.mk_loc_idx_to_prev_end(spread_start_idx);
             spread = Expression {
                 pexp_desc: ExpressionDesc::Pexp_constraint(Box::new(spread), typ),
@@ -4152,9 +4152,9 @@ fn parse_let_in_block_with_continuation_and_attrs(
         let is_locally_abstract = p.token == Token::Typ;
 
         let typ = if is_locally_abstract {
-            super::typ::parse_locally_abstract_type(p)
+            p.with_type_attr_kind(TypeAttrKind::Annotation, |p| super::typ::parse_locally_abstract_type(p))
         } else {
-            super::typ::parse_typ_expr(p)
+            p.with_type_attr_kind(TypeAttrKind::Annotation, |p| super::typ::parse_typ_expr(p))
         };
 
         // Extract type variables and inner type if this is a Ptyp_poly from `type a.` syntax
@@ -4279,7 +4279,7 @@ fn parse_let_in_block_with_continuation_and_attrs(
         // Handle optional type annotation
         let pat = if p.token == Token::Colon {
             p.next();
-            let typ = super::typ::parse_typ_expr(p);
+            let typ = p.with_type_attr_kind(TypeAttrKind::Annotation, |p| super::typ::parse_typ_expr(p));
             let loc = p.mk_loc_spanning(pat.ppat_loc, typ.ptyp_loc);
             Pattern {
                 ppat_desc: PatternDesc::Ppat_constraint(Box::new(pat), typ),
@@ -5070,7 +5070,7 @@ fn parse_let_in_switch_case(p: &mut Parser<'_>) -> Expression {
     // Handle optional type annotation: let x: int = ...
     let first_pat = if p.token == Token::Colon {
         p.next();
-        let typ = super::typ::parse_typ_expr(p);
+        let typ = p.with_type_attr_kind(TypeAttrKind::Annotation, |p| super::typ::parse_typ_expr(p));
         // Create a constraint pattern
         let loc = p.mk_loc_spanning(first_pat.ppat_loc, typ.ptyp_loc);
         Pattern {
@@ -5115,7 +5115,7 @@ fn parse_let_in_switch_case(p: &mut Parser<'_>) -> Expression {
         // Handle optional type annotation
         let pat = if p.token == Token::Colon {
             p.next();
-            let typ = super::typ::parse_typ_expr(p);
+            let typ = p.with_type_attr_kind(TypeAttrKind::Annotation, |p| super::typ::parse_typ_expr(p));
             let loc = p.mk_loc_spanning(pat.ppat_loc, typ.ptyp_loc);
             Pattern {
                 ppat_desc: PatternDesc::Ppat_constraint(Box::new(pat), typ),
