@@ -246,6 +246,9 @@ pub enum TypeCoreError {
 
     /// JSX not enabled.
     JsxNotEnabled,
+
+    /// Other error (catch-all for module type checking errors propagated from typemod).
+    Other(String),
 }
 
 /// Context for type clash errors.
@@ -1601,7 +1604,7 @@ pub fn type_expect<'a>(
         ED::Pexp_ident(lid) => {
             // Identifier expression
             let longident = tctx.resolve_lid(lid.txt);
-            let (path, desc) = env.lookup_value_by_lid(longident)?;
+            let (path, desc) = env.lookup_value_by_lid(longident, tctx.arena)?;
 
             // Instantiate the type
             let ty = crate::types::instance(ctx, desc.val_type);
@@ -3038,28 +3041,109 @@ fn type_letmodule(
     tctx: &mut TypeCheckContext<'_>,
     env: &Env,
     loc: LocIdx,
-    _name: &Located<StrIdx>,
-    _module_expr: &crate::parser::ast::ModuleExpr,
+    name: &Located<StrIdx>,
+    module_expr: &crate::parser::ast::ModuleExpr,
     body: &ParsedExpression,
     expected_ty: TypeExprRef,
     attributes: &[crate::parser::ast::Attribute],
 ) -> TypeCoreResult<Expression> {
-    // Let module introduces a local module binding
-    // Full implementation would:
-    // 1. Type check the module expression
-    // 2. Add the module to the environment
-    // 3. Type check the body in the extended environment
+    let arena = tctx.arena;
+    let mod_name_str = arena.get_string(name.txt).to_string();
+    let mod_id = Ident::create_local(&mod_name_str);
 
-    // For now, just type check the body
-    let typed_body = type_expect(tctx, env, body, expected_ty, None)?;
+    // Type check the module expression and build its signature for the env
+    let (typed_mod, mod_sig) = match &module_expr.pmod_desc {
+        crate::parser::ast::ModuleExprDesc::Pmod_structure(items) => {
+            let (structure, _inner_env) = crate::types::typemod::type_structure(tctx, env, arena, items)
+                .map_err(|e| TypeCoreError::Other(format!("letmodule: {e:?}")))?;
+
+            // Build a signature from the typed structure items
+            let sig_items = build_signature_from_structure(&structure);
+
+            let md = crate::types::typedtree::ModuleExpr {
+                mod_desc: crate::types::typedtree::ModuleExprDesc::Tmod_structure(structure),
+                mod_loc: module_expr.pmod_loc,
+                mod_type: crate::types::typedtree::ModuleType::placeholder(),
+                mod_env: EnvRef(0),
+                mod_attributes: vec![],
+            };
+            (md, crate::types::decl::ModuleType::MtySignature(sig_items))
+        }
+        _ => {
+            let md = crate::types::typemod::type_module_expr(tctx, env, arena, module_expr)
+                .map_err(|e| TypeCoreError::Other(format!("letmodule: {e:?}")))?;
+            (md, crate::types::decl::ModuleType::MtySignature(vec![]))
+        }
+    };
+
+    // Add the module to the environment so the body can access M.value
+    let mut body_env = env.clone();
+    let md_decl = crate::types::decl::ModuleDeclaration {
+        md_type: mod_sig,
+        md_attributes: vec![],
+        md_loc: crate::location::Location::none(),
+    };
+    body_env.add_module(mod_id.clone(), md_decl);
+
+    // Type check the body in the extended environment
+    let typed_body = type_expect(tctx, &body_env, body, expected_ty, None)?;
 
     Ok(Expression::new(
-        typed_body.exp_desc,
-        loc.clone(),
+        crate::types::typedtree::ExpressionDesc::Texp_letmodule(
+            mod_id,
+            Located { txt: mod_name_str.clone(), loc: name.loc },
+            Box::new(typed_mod),
+            Box::new(typed_body),
+        ),
+        loc,
         expected_ty,
         EnvRef(0),
         attributes.to_vec(),
     ))
+}
+
+/// Build a signature from typed structure items.
+fn build_signature_from_structure(structure: &crate::types::typedtree::Structure) -> Vec<crate::types::decl::SignatureItem> {
+    use crate::types::typedtree::StructureItemDesc;
+    let mut sig = Vec::new();
+    for item in &structure.str_items {
+        match &item.str_desc {
+            StructureItemDesc::Tstr_primitive(tvd) => {
+                let vd = crate::types::decl::ValueDescription {
+                    val_type: tvd.val_desc.ctyp_type,
+                    val_kind: crate::types::decl::ValueKind::ValPrim(
+                        crate::types::decl::PrimitiveDescription {
+                            prim_name: tvd.val_prim.first().cloned().unwrap_or_default(),
+                            prim_arity: 1,
+                            prim_native_name: String::new(),
+                            prim_native_float: false,
+                        }
+                    ),
+                    val_loc: crate::location::Location::none(),
+                    val_attributes: vec![],
+                    val_path: None,
+                };
+                sig.push(crate::types::decl::SignatureItem::SigValue(tvd.val_id.clone(), vd));
+            }
+            StructureItemDesc::Tstr_value(_rec, bindings) => {
+                for binding in bindings {
+                    let vd = crate::types::decl::ValueDescription {
+                        val_type: binding.vb_expr.exp_type,
+                        val_kind: crate::types::decl::ValueKind::ValReg,
+                        val_loc: crate::location::Location::none(),
+                        val_attributes: vec![],
+                        val_path: None,
+                    };
+                    sig.push(crate::types::decl::SignatureItem::SigValue(
+                        Ident::create_local("_"),
+                        vd,
+                    ));
+                }
+            }
+            _ => {} // Skip other structure items for now
+        }
+    }
+    sig
 }
 
 /// Type check pack expression (first-class module).
@@ -3316,19 +3400,83 @@ impl Env {
     }
 
     /// Look up a value by longident.
-    pub fn lookup_value_by_lid(&self, lid: &Longident) -> TypeCoreResult<(Path, ValueDescription)> {
-        match self.find_value_with_id(lid.to_string().as_str()) {
-            Ok((id, desc)) => {
-                // Use the stored path if available (e.g., for Pervasives primitives),
-                // otherwise construct from identifier
-                let path = desc.val_path.clone().unwrap_or_else(|| Path::pident(id.clone()));
-                Ok((path, desc.clone()))
+    pub fn lookup_value_by_lid(&self, lid: &Longident, arena: &crate::parse_arena::ParseArena) -> TypeCoreResult<(Path, ValueDescription)> {
+        match lid {
+            Longident::Lident(idx) => {
+                let name = arena.get_string(*idx);
+                match self.find_value_with_id(name) {
+                    Ok((id, desc)) => {
+                        let path = desc.val_path.clone().unwrap_or_else(|| Path::pident(id.clone()));
+                        Ok((path, desc.clone()))
+                    }
+                    Err(_) => Err(TypeCoreError::UndefinedMethod {
+                        ty: TypeExprRef(0),
+                        method: name.to_string(),
+                        alternatives: None,
+                    }),
+                }
             }
-            Err(_) => Err(TypeCoreError::UndefinedMethod {
-                ty: TypeExprRef(0), // Placeholder
-                method: lid.to_string(),
-                alternatives: None,
-            }),
+            Longident::Ldot(prefix, idx) => {
+                let value_name = arena.get_string(*idx);
+                // Look up the module by prefix, then find the value within it
+                let mod_name = match prefix.as_ref() {
+                    Longident::Lident(mod_idx) => arena.get_string(*mod_idx).to_string(),
+                    _ => {
+                        // Nested module paths not yet supported
+                        return Err(TypeCoreError::UndefinedMethod {
+                            ty: TypeExprRef(0),
+                            method: format!("<nested module path>.{}", value_name),
+                            alternatives: None,
+                        });
+                    }
+                };
+                // Find the module in the env
+                match self.find_module(&mod_name) {
+                    Ok(md) => {
+                        // Search the module's signature for the value
+                        if let crate::types::decl::ModuleType::MtySignature(ref sig) = md.md_type {
+                            for sig_item in sig {
+                                if let crate::types::decl::SignatureItem::SigValue(id, vd) = sig_item {
+                                    if id.name() == value_name {
+                                        let path = Path::pdot(
+                                            Path::pident(Ident::create_local(&mod_name)),
+                                            value_name.to_string(),
+                                        );
+                                        return Ok((path, vd.clone()));
+                                    }
+                                }
+                            }
+                        }
+                        Err(TypeCoreError::UndefinedMethod {
+                            ty: TypeExprRef(0),
+                            method: format!("{}.{}", mod_name, value_name),
+                            alternatives: None,
+                        })
+                    }
+                    Err(_) => {
+                        // Module not found - try looking up as a flattened value
+                        // (some modules are opened into the env)
+                        match self.find_value_with_id(value_name) {
+                            Ok((id, desc)) => {
+                                let path = desc.val_path.clone().unwrap_or_else(|| Path::pident(id.clone()));
+                                Ok((path, desc.clone()))
+                            }
+                            Err(_) => Err(TypeCoreError::UndefinedMethod {
+                                ty: TypeExprRef(0),
+                                method: format!("{}.{}", mod_name, value_name),
+                                alternatives: None,
+                            }),
+                        }
+                    }
+                }
+            }
+            Longident::Lapply(_, _) => {
+                Err(TypeCoreError::UndefinedMethod {
+                    ty: TypeExprRef(0),
+                    method: "(functor application)".to_string(),
+                    alternatives: None,
+                })
+            }
         }
     }
 }

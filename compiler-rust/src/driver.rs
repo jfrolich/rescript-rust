@@ -5,6 +5,7 @@
 
 use anyhow::{anyhow, Context, Result};
 
+use crate::binary_ast::ppx;
 use crate::context::IdGenerator;
 use crate::binary_ast::spice_ppx;
 use crate::js_ir::printer::print_program;
@@ -47,6 +48,9 @@ pub fn compile_source_to_js_with_options(
         return Err(anyhow!("Parse failed with {} error(s)", parser.diagnostics().len()));
     }
     let structure = spice_ppx::expand_structure(&structure, parser.arena_mut());
+
+    // Expand extension points (%%raw, %raw, %re, %%private) without touching externals
+    let structure = ppx::expand_extensions(&structure, parser.arena_mut());
 
     // Type check
     let id_gen = IdGenerator::new();

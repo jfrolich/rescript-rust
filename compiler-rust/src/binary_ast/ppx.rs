@@ -8011,6 +8011,121 @@ pub fn rewrite_structure(structure: &[StructureItem], arena: &mut ParseArena) ->
     result
 }
 
+/// Lightweight extension expansion: only expands %%raw, %raw, %re, %%private.
+/// Does NOT touch externals, @deriving, or other transformations.
+/// This is safe to call before type checking without breaking existing code.
+pub fn expand_extensions(structure: &[StructureItem], arena: &mut ParseArena) -> Vec<StructureItem> {
+    structure
+        .iter()
+        .flat_map(|item| expand_extensions_item(item, arena))
+        .collect()
+}
+
+fn expand_extensions_item(item: &StructureItem, arena: &mut ParseArena) -> Vec<StructureItem> {
+    match &item.pstr_desc {
+        StructureItemDesc::Pstr_extension(ext, _attrs) => {
+            let (ext_name, payload) = ext;
+            let name = arena.get_string(ext_name.txt).to_string();
+            if name == "raw" {
+                vec![handle_raw_structure(item, payload, arena)]
+            } else if name == "private" {
+                handle_private_extension(payload, item.pstr_loc, arena)
+            } else {
+                vec![item.clone()]
+            }
+        }
+        // Recurse into expressions to expand %raw, %re
+        StructureItemDesc::Pstr_eval(expr, attrs) => {
+            let new_expr = expand_extensions_expr(expr, arena);
+            vec![StructureItem {
+                pstr_desc: StructureItemDesc::Pstr_eval(new_expr, attrs.clone()),
+                pstr_loc: item.pstr_loc,
+            }]
+        }
+        StructureItemDesc::Pstr_value(rec, bindings) => {
+            let new_bindings: Vec<_> = bindings
+                .iter()
+                .map(|vb| {
+                    let new_expr = expand_extensions_expr(&vb.pvb_expr, arena);
+                    crate::parser::ast::ValueBinding {
+                        pvb_pat: vb.pvb_pat.clone(),
+                        pvb_expr: new_expr,
+                        pvb_attributes: vb.pvb_attributes.clone(),
+                        pvb_loc: vb.pvb_loc,
+                    }
+                })
+                .collect();
+            vec![StructureItem {
+                pstr_desc: StructureItemDesc::Pstr_value(*rec, new_bindings),
+                pstr_loc: item.pstr_loc,
+            }]
+        }
+        StructureItemDesc::Pstr_module(mb) => {
+            if let ModuleExprDesc::Pmod_structure(items) = &mb.pmb_expr.pmod_desc {
+                let new_items = expand_extensions(items, arena);
+                vec![StructureItem {
+                    pstr_desc: StructureItemDesc::Pstr_module(crate::parser::ast::ModuleBinding {
+                        pmb_name: mb.pmb_name.clone(),
+                        pmb_expr: ModuleExpr {
+                            pmod_desc: ModuleExprDesc::Pmod_structure(new_items),
+                            pmod_loc: mb.pmb_expr.pmod_loc,
+                            pmod_attributes: mb.pmb_expr.pmod_attributes.clone(),
+                        },
+                        pmb_attributes: mb.pmb_attributes.clone(),
+                        pmb_loc: mb.pmb_loc,
+                    }),
+                    pstr_loc: item.pstr_loc,
+                }]
+            } else {
+                vec![item.clone()]
+            }
+        }
+        _ => vec![item.clone()],
+    }
+}
+
+fn expand_extensions_expr(expr: &Expression, arena: &mut ParseArena) -> Expression {
+    match &expr.pexp_desc {
+        ExpressionDesc::Pexp_extension(ext) => {
+            let (ext_name, payload) = ext;
+            let name = arena.get_string(ext_name.txt).to_string();
+            match name.as_str() {
+                "raw" => handle_raw(expr, payload, arena, "#raw_expr"),
+                "re" => handle_re(expr, payload, arena),
+                "external" => handle_external_ext(expr, payload, arena),
+                _ => expr.clone(),
+            }
+        }
+        ExpressionDesc::Pexp_let(rec_flag, bindings, body) => {
+            let new_bindings: Vec<_> = bindings
+                .iter()
+                .map(|vb| crate::parser::ast::ValueBinding {
+                    pvb_pat: vb.pvb_pat.clone(),
+                    pvb_expr: expand_extensions_expr(&vb.pvb_expr, arena),
+                    pvb_attributes: vb.pvb_attributes.clone(),
+                    pvb_loc: vb.pvb_loc,
+                })
+                .collect();
+            let new_body = expand_extensions_expr(body, arena);
+            Expression {
+                pexp_desc: ExpressionDesc::Pexp_let(*rec_flag, new_bindings, Box::new(new_body)),
+                pexp_loc: expr.pexp_loc,
+                pexp_attributes: expr.pexp_attributes.clone(),
+            }
+        }
+        ExpressionDesc::Pexp_sequence(e1, e2) => {
+            let new_e1 = expand_extensions_expr(e1, arena);
+            let new_e2 = expand_extensions_expr(e2, arena);
+            Expression {
+                pexp_desc: ExpressionDesc::Pexp_sequence(Box::new(new_e1), Box::new(new_e2)),
+                pexp_loc: expr.pexp_loc,
+                pexp_attributes: expr.pexp_attributes.clone(),
+            }
+        }
+        _ => expr.clone(),
+    }
+}
+
 /// Apply built-in PPX transformations to a signature
 pub fn rewrite_signature(signature: &[SignatureItem], arena: &mut ParseArena) -> Vec<SignatureItem> {
     rewrite_signature_items(signature, arena)

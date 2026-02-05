@@ -1268,8 +1268,8 @@ fn type_structure_item<'a>(
 
         ParsedStructureItemDesc::Pstr_extension(_ext, _attrs) => {
             // Extension: [%%id]
-            // Extensions are typically handled by preprocessors
-            // Return a placeholder eval item
+            // Extensions like %%raw are expanded by the PPX pass before type checking.
+            // If we get here, the extension wasn't expanded. Return a placeholder.
             let ctx = tctx.type_ctx;
             let unit_ty = ctx.new_tuple(vec![]);
             let desc = StructureItemDesc::Tstr_eval(
