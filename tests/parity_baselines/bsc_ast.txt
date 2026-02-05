@@ -11,6 +11,7 @@ syntax_tests/data/conversion/reason/bracedJsx.res
 syntax_tests/data/conversion/reason/braces.res
 syntax_tests/data/conversion/reason/comments.res
 syntax_tests/data/conversion/reason/docComments.res
+syntax_tests/data/conversion/reason/extension.res
 syntax_tests/data/conversion/reason/fastPipe.res
 syntax_tests/data/conversion/reason/gentype.res
 syntax_tests/data/conversion/reason/gentype.resi
@@ -25,6 +26,7 @@ syntax_tests/data/conversion/reason/openPattern.res
 syntax_tests/data/conversion/reason/ppx.res
 syntax_tests/data/conversion/reason/refSugarReason.res
 syntax_tests/data/conversion/reason/singleLineComments.res
+syntax_tests/data/conversion/reason/string.res
 syntax_tests/data/conversion/reason/ternary.res
 syntax_tests/data/conversion/reason/uncurrried.res
 syntax_tests/data/conversion/reason/underscoreSugar.res
@@ -535,11 +537,13 @@ syntax_tests/data/idempotency/pupilfirst/shared/Icon.res
 syntax_tests/data/idempotency/pupilfirst/shared/Link.res
 syntax_tests/data/idempotency/pupilfirst/shared/ListUtils.res
 syntax_tests/data/idempotency/pupilfirst/shared/Loading.res
+syntax_tests/data/idempotency/pupilfirst/shared/MarkdownBlock.res
 syntax_tests/data/idempotency/pupilfirst/shared/OptionUtils.res
 syntax_tests/data/idempotency/pupilfirst/shared/Rollbar.res
 syntax_tests/data/idempotency/pupilfirst/shared/ScrollLock.res
 syntax_tests/data/idempotency/pupilfirst/shared/Sorter.res
 syntax_tests/data/idempotency/pupilfirst/shared/TextareaAutosize.res
+syntax_tests/data/idempotency/pupilfirst/shared/Tooltip.res
 syntax_tests/data/idempotency/pupilfirst/shared/UrlUtils.res
 syntax_tests/data/idempotency/pupilfirst/shared/User.res
 syntax_tests/data/idempotency/pupilfirst/shared/UserProxy.res
@@ -572,6 +576,7 @@ syntax_tests/data/idempotency/reasongl/RGLEvents.res
 syntax_tests/data/idempotency/reasongl/RGLInterface.res
 syntax_tests/data/idempotency/reasongl/ReasonglInterface.res
 syntax_tests/data/idempotency/reasonml.org/bindings/Next.res
+syntax_tests/data/idempotency/reasonml.org/common/App.res
 syntax_tests/data/idempotency/reasonml.org/common/BeltData.res
 syntax_tests/data/idempotency/reasonml.org/common/Mdx.res
 syntax_tests/data/idempotency/reasonml.org/common/Util.res
@@ -589,6 +594,7 @@ syntax_tests/data/idempotency/reasonml.org/layouts/ApiLayout.res
 syntax_tests/data/idempotency/reasonml.org/layouts/BeltDocsLayout.res
 syntax_tests/data/idempotency/reasonml.org/layouts/CommunityLayout.res
 syntax_tests/data/idempotency/reasonml.org/layouts/DocsLayout.res
+syntax_tests/data/idempotency/reasonml.org/layouts/GenTypeDocsLayout.res
 syntax_tests/data/idempotency/reasonml.org/layouts/JavaScriptApiLayout.res
 syntax_tests/data/idempotency/reasonml.org/layouts/JsDocsLayout.res
 syntax_tests/data/idempotency/reasonml.org/layouts/MainLayout.res
@@ -648,6 +654,7 @@ syntax_tests/data/idempotency/wildcards-world-ui/AnimalAnnouncement.res
 syntax_tests/data/idempotency/wildcards-world-ui/Animal_test.res
 syntax_tests/data/idempotency/wildcards-world-ui/Announcement.res
 syntax_tests/data/idempotency/wildcards-world-ui/ArtistProfiles.res
+syntax_tests/data/idempotency/wildcards-world-ui/Async.res
 syntax_tests/data/idempotency/wildcards-world-ui/BN.res
 syntax_tests/data/idempotency/wildcards-world-ui/BadWords.res
 syntax_tests/data/idempotency/wildcards-world-ui/Buy.res
@@ -675,9 +682,11 @@ syntax_tests/data/idempotency/wildcards-world-ui/Header.res
 syntax_tests/data/idempotency/wildcards-world-ui/Helper.res
 syntax_tests/data/idempotency/wildcards-world-ui/HomepageLeaderBoard.res
 syntax_tests/data/idempotency/wildcards-world-ui/IncreaseIterationPage.res
+syntax_tests/data/idempotency/wildcards-world-ui/Index.res
 syntax_tests/data/idempotency/wildcards-world-ui/Info.res
 syntax_tests/data/idempotency/wildcards-world-ui/InputHelp.res
 syntax_tests/data/idempotency/wildcards-world-ui/Layout.res
+syntax_tests/data/idempotency/wildcards-world-ui/LazyThreeBoxUpdate.res
 syntax_tests/data/idempotency/wildcards-world-ui/LeaderBoards.res
 syntax_tests/data/idempotency/wildcards-world-ui/MonthlyContribution.res
 syntax_tests/data/idempotency/wildcards-world-ui/Partners.res
@@ -688,6 +697,7 @@ syntax_tests/data/idempotency/wildcards-world-ui/QVSelect.res
 syntax_tests/data/idempotency/wildcards-world-ui/QlHooks.res
 syntax_tests/data/idempotency/wildcards-world-ui/ReactSwitch.res
 syntax_tests/data/idempotency/wildcards-world-ui/ReactTabs.res
+syntax_tests/data/idempotency/wildcards-world-ui/ReactTranslate.res
 syntax_tests/data/idempotency/wildcards-world-ui/ResponsiveCarousel.res
 syntax_tests/data/idempotency/wildcards-world-ui/Rimble.res
 syntax_tests/data/idempotency/wildcards-world-ui/RootProvider.res
@@ -772,6 +782,7 @@ syntax_tests/data/parsing/grammar/modtype/typeof.res
 syntax_tests/data/parsing/grammar/modtype/with.res
 syntax_tests/data/parsing/grammar/pattern/any.res
 syntax_tests/data/parsing/grammar/pattern/array.res
+syntax_tests/data/parsing/grammar/pattern/constant.res
 syntax_tests/data/parsing/grammar/pattern/constraint.res
 syntax_tests/data/parsing/grammar/pattern/constructor.res
 syntax_tests/data/parsing/grammar/pattern/dict.res
@@ -851,6 +862,7 @@ syntax_tests/data/parsing/other/onlySinglelineComment.res
 syntax_tests/data/parsing/other/onlySinglinelineComment.resi
 syntax_tests/data/parsing/other/semi.res
 syntax_tests/data/parsing/other/singleLineCommentWithoutNewline.res
+syntax_tests/data/parsing/other/stringLiterals.res
 syntax_tests/data/parsing/recovery/expression/emptyBlock.res
 syntax_tests/data/parsing/recovery/expression/infinite.res
 syntax_tests/data/parsing/recovery/string/unclosed.res
@@ -989,6 +1001,7 @@ syntax_tests/data/printer/other/string.res
 syntax_tests/data/printer/pattern/alias.res
 syntax_tests/data/printer/pattern/any.res
 syntax_tests/data/printer/pattern/array.res
+syntax_tests/data/printer/pattern/constant.res
 syntax_tests/data/printer/pattern/constraint.res
 syntax_tests/data/printer/pattern/construct.res
 syntax_tests/data/printer/pattern/dict.res

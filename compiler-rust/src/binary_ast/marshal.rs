@@ -89,15 +89,17 @@ impl EmptyPayloadShareKind {
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub(crate) enum PrimListShareKind {
     RawExpr,
+    RawStmt,
 }
 
 impl PrimListShareKind {
-    const COUNT: usize = 1;
+    const COUNT: usize = 2;
 
     #[inline]
     const fn as_index(self) -> usize {
         match self {
             Self::RawExpr => 0,
+            Self::RawStmt => 1,
         }
     }
 }
@@ -199,6 +201,12 @@ pub struct MarshalWriter {
     /// These are `Ptyp_constr` with no args, Location.none, and empty attributes.
     simple_core_type_table: HashMap<LidentIdx, u32>,
 
+    /// Stack of shared list object indices for `[@res.template]` attribute lists
+    /// inside %raw expansions. OCaml reuses the same list object when the
+    /// payload expression is reused, so we mirror that by sharing the list
+    /// within the raw expansion scope.
+    raw_template_attr_list_stack: Vec<Option<u32>>,
+
 
     /// Optional reference to ParseArena for LocIdx marshalling.
     /// Set via `set_arena()` before marshalling AST with LocIdx fields.
@@ -246,6 +254,7 @@ impl MarshalWriter {
             prim_list_table: [None; PrimListShareKind::COUNT],
             jsx_depth: 0,
             simple_core_type_table: HashMap::new(),
+            raw_template_attr_list_stack: Vec::new(),
 
             arena: None,
             obj_counter: 0,
@@ -278,6 +287,7 @@ impl MarshalWriter {
             prim_list_table: [None; PrimListShareKind::COUNT],
             jsx_depth: 0,
             simple_core_type_table: HashMap::new(),
+            raw_template_attr_list_stack: Vec::new(),
 
             arena: None,
             obj_counter: 0,
@@ -320,6 +330,38 @@ impl MarshalWriter {
     #[inline]
     pub fn in_jsx(&self) -> bool {
         self.jsx_depth > 0
+    }
+
+    #[inline]
+    pub fn enter_raw_expansion(&mut self) {
+        self.raw_template_attr_list_stack.push(None);
+    }
+
+    #[inline]
+    pub fn exit_raw_expansion(&mut self) {
+        self.raw_template_attr_list_stack.pop();
+    }
+
+    #[inline]
+    pub fn in_raw_expansion(&self) -> bool {
+        !self.raw_template_attr_list_stack.is_empty()
+    }
+
+    #[inline]
+    pub fn raw_template_attr_list(&self) -> Option<u32> {
+        self.raw_template_attr_list_stack
+            .last()
+            .copied()
+            .flatten()
+    }
+
+    #[inline]
+    pub fn set_raw_template_attr_list(&mut self, obj_idx: u32) {
+        if let Some(slot) = self.raw_template_attr_list_stack.last_mut() {
+            if slot.is_none() {
+                *slot = Some(obj_idx);
+            }
+        }
     }
 
     #[inline]

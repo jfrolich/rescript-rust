@@ -321,6 +321,9 @@ pub struct ParseArena {
     /// Pre-allocated "#raw_expr" string for raw expression primitives.
     /// OCaml shares this literal across all uses in ast_exp_handle_external.ml.
     prim_raw_expr: StrIdx,
+    /// Pre-allocated "#raw_stmt" string for raw statement primitives.
+    /// OCaml shares this literal across all uses in ast_exp_handle_external.ml.
+    prim_raw_stmt: StrIdx,
     /// Counter for generating unique local module names (for %%private).
     /// OCaml uses a global ref counter, so this matches that behavior.
     local_module_counter: u32,
@@ -345,6 +348,7 @@ impl Default for ParseArena {
         let prim_empty_external_ffi = strings.push(String::new());
         let prim_empty_js_mapper = strings.push(String::new());
         let prim_raw_expr = strings.push("#raw_expr".to_string());
+        let prim_raw_stmt = strings.push("#raw_stmt".to_string());
 
         // Pre-allocate static list lidents.
         // We need TWO sets: one for pattern contexts (res_core.ml) and one for
@@ -447,6 +451,7 @@ impl Default for ParseArena {
             prim_empty_external_ffi,
             prim_empty_js_mapper,
             prim_raw_expr,
+            prim_raw_stmt,
             local_module_counter: 0,
         }
     }
@@ -937,6 +942,10 @@ impl ParseArena {
 
     pub fn prim_raw_expr(&self) -> StrIdx {
         self.prim_raw_expr
+    }
+
+    pub fn prim_raw_stmt(&self) -> StrIdx {
+        self.prim_raw_stmt
     }
 
     /// Get the string content for a StrIdx.

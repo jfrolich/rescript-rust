@@ -77,6 +77,72 @@ fn has_template_literal_attr(attrs: &Attributes, w: &MarshalWriter) -> bool {
         .any(|(name, _)| arena.get_string(name.txt) == "res.template")
 }
 
+fn is_singleton_template_attr(attrs: &Attributes, w: &MarshalWriter) -> bool {
+    let arena = w.get_arena();
+    match attrs.as_slice() {
+        [(name, payload)]
+            if arena.get_string(name.txt) == "res.template"
+                && name.loc == LocIdx::default()
+                && matches!(payload, Payload::PStr(items) if items.is_empty()) =>
+        {
+            true
+        }
+        _ => false,
+    }
+}
+
+fn is_raw_expansion_expr(expr: &Expression, w: &MarshalWriter) -> bool {
+    let ExpressionDesc::Pexp_letmodule(module_name, mod_expr, body) = &expr.pexp_desc else {
+        return false;
+    };
+
+    let arena = w.get_arena();
+    if arena.get_string(module_name.txt) != "J" {
+        return false;
+    }
+
+    let ModuleExprDesc::Pmod_structure(items) = &mod_expr.pmod_desc else {
+        return false;
+    };
+    if items.len() != 1 {
+        return false;
+    }
+
+    let StructureItemDesc::Pstr_primitive(vd) = &items[0].pstr_desc else {
+        return false;
+    };
+    if arena.get_string(vd.pval_name.txt) != "unsafe_expr" {
+        return false;
+    }
+    if vd.pval_prim.len() != 1 {
+        return false;
+    }
+    let prim = arena.get_string(vd.pval_prim[0]);
+    if prim != "#raw_expr" && prim != "#raw_stmt" {
+        return false;
+    }
+
+    let ExpressionDesc::Pexp_apply { funct, args, .. } = &body.pexp_desc else {
+        return false;
+    };
+    if args.len() != 1 || !matches!(args[0].0, ArgLabel::Nolabel) {
+        return false;
+    }
+
+    let ExpressionDesc::Pexp_ident(lid) = &funct.pexp_desc else {
+        return false;
+    };
+    match arena.get_longident(lid.txt) {
+        Longident::Ldot(prefix, idx) => {
+            if arena.get_string(*idx) != "unsafe_expr" {
+                return false;
+            }
+            matches!(&**prefix, Longident::Lident(p) if arena.get_string(*p) == "J")
+        }
+        _ => false,
+    }
+}
+
 fn should_share_empty_pstr(
     kind: EmptyPayloadShareKind,
     name: &StringLoc,
@@ -156,8 +222,31 @@ fn marshal_attributes(
 ) {
     let attrs_slice = attrs.as_slice();
 
+    let arena = w.get_arena();
     let payload_is_empty_str =
         |payload: &Payload| matches!(payload, Payload::PStr(items) if items.is_empty());
+
+    let mut raw_template_list = false;
+    if w.in_raw_expansion() {
+        if let [(name, payload)] = attrs_slice {
+            if payload_is_empty_str(payload)
+                && name.loc == LocIdx::default()
+                && arena.get_string(name.txt) == "res.template"
+            {
+                raw_template_list = true;
+                if let Some(obj_idx) = w.raw_template_attr_list() {
+                    let d = w.obj_counter() - obj_idx;
+                    w.write_shared_ref(d);
+                    return;
+                }
+
+                let obj_idx = w.obj_counter();
+                w.set_raw_template_attr_list(obj_idx);
+            }
+        }
+    }
+
+    let share_singleton = share_singleton || raw_template_list;
 
     // Share singleton attribute TUPLES: [(name, PStr [])] with Location.none
     //
@@ -566,7 +655,8 @@ impl Marshal for Pattern {
         w.write_block_header(0, 3);
         self.ppat_desc.marshal(w);
         self.ppat_loc.marshal(w);
-        marshal_attributes(&self.ppat_attributes, w, false, None);
+        let share_singleton = is_singleton_template_attr(&self.ppat_attributes, w);
+        marshal_attributes(&self.ppat_attributes, w, share_singleton, None);
     }
 }
 
@@ -695,6 +785,10 @@ impl Marshal for ExpressionRecordField {
 impl Marshal for Expression {
     fn marshal(&self, w: &mut MarshalWriter) {
         w.write_block_header(0, 3);
+        let is_raw_expansion = is_raw_expansion_expr(self, w);
+        if is_raw_expansion {
+            w.enter_raw_expansion();
+        }
         self.pexp_desc.marshal(w);
         self.pexp_loc.marshal(w);
 
@@ -732,6 +826,9 @@ impl Marshal for Expression {
             share_attrs,
             share_empty_pstr,
         );
+        if is_raw_expansion {
+            w.exit_raw_expansion();
+        }
     }
 }
 
@@ -1263,6 +1360,10 @@ fn marshal_prim_list(prims: &[StrIdx], w: &mut MarshalWriter) {
             let prim = prims[0];
             if prim == w.get_arena().prim_raw_expr() {
                 w.write_prim_list_shared(PrimListShareKind::RawExpr, prim);
+                return;
+            }
+            if prim == w.get_arena().prim_raw_stmt() {
+                w.write_prim_list_shared(PrimListShareKind::RawStmt, prim);
                 return;
             }
         }

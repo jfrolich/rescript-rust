@@ -2901,7 +2901,7 @@ fn handle_raw_structure(
             loc,
         },
         pval_type,
-        pval_prim: vec![prim_str(arena, "#raw_stmt")],
+        pval_prim: vec![arena.prim_raw_stmt()],
         pval_attributes: vec![],
         pval_loc: loc,
     };
