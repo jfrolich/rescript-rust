@@ -888,7 +888,6 @@ impl<'a> DependencyCollector<'a> {
 
     fn add_payload(&mut self, payload: &Payload) {
         match payload {
-            Payload::PStrEmptyShared(_) => {}
             Payload::PStr(str) => {
                 self.add_structure(str);
             }

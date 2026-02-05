@@ -1053,7 +1053,6 @@ fn sexp_row_field_type(
 
 fn sexp_payload(payload: &Payload) -> Sexp {
     match payload {
-        Payload::PStrEmptyShared(_) => Sexp::list(vec![Sexp::atom("PStr"), Sexp::atom("<structure>")]),
         Payload::PStr(_) => Sexp::list(vec![Sexp::atom("PStr"), Sexp::atom("<structure>")]),
         Payload::PSig(_) => Sexp::list(vec![Sexp::atom("PSig"), Sexp::atom("<signature>")]),
         Payload::PTyp(_) => Sexp::list(vec![Sexp::atom("PTyp"), Sexp::atom("<core_type>")]),

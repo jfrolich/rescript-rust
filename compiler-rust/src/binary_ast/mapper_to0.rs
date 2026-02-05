@@ -398,7 +398,6 @@ impl<'a> Mapper<'a> {
             current::Payload::PStr(items) => {
                 pt0::Payload::PStr(items.iter().map(|i| self.map_structure_item(i)).collect())
             }
-            current::Payload::PStrEmptyShared(_) => pt0::Payload::PStr(vec![]),
             current::Payload::PSig(items) => {
                 pt0::Payload::PSig(items.iter().map(|i| self.map_signature_item(i)).collect())
             }

@@ -10,11 +10,11 @@
 //! - Pexp_apply uses inline record with 4 fields
 //! - record_element is polymorphic {lid; x; opt}
 
-use super::marshal::MarshalWriter;
+use super::marshal::{EmptyPayloadShareKind, MarshalWriter};
 use super::serialize::Marshal;
 use crate::parse_arena::LocIdx;
 use crate::parser::ast::{
-    Arity, ArgLabel, Attributes, Case, ClosedFlag, Constant, CoreType, CoreTypeDesc,
+    Arity, ArgLabel, Attribute, Attributes, Case, ClosedFlag, Constant, CoreType, CoreTypeDesc,
     DirectionFlag, Expression, ExpressionDesc, ExpressionRecordField, ExtensionConstructor,
     ExtensionConstructorKind, IncludeDeclaration, IncludeDescription, LabelDeclaration,
     ModuleBinding, ModuleDeclaration, ModuleExpr, ModuleExprDesc, ModuleType,
@@ -26,6 +26,40 @@ use crate::parser::ast::{
 };
 
 // ========== Attribute list sharing ==========
+
+fn marshal_attribute_payload(
+    payload: &Payload,
+    w: &mut MarshalWriter,
+    share_empty_pstr: Option<EmptyPayloadShareKind>,
+) {
+    if let Some(kind) = share_empty_pstr {
+        if matches!(payload, Payload::PStr(items) if items.is_empty()) {
+            w.write_pstr_empty_shared(kind);
+            return;
+        }
+    }
+    payload.marshal(w);
+}
+
+fn marshal_attribute_list(
+    attrs: &[Attribute],
+    w: &mut MarshalWriter,
+    share_empty_pstr: Option<EmptyPayloadShareKind>,
+) {
+    if let Some((head, tail)) = attrs.split_first() {
+        let (name, payload) = head;
+        // List cons cell
+        w.write_block_header(0, 2);
+        // Attribute tuple
+        w.write_block_header(0, 2);
+        name.marshal(w);
+        marshal_attribute_payload(payload, w, share_empty_pstr);
+        marshal_attribute_list(tail, w, share_empty_pstr);
+    } else {
+        // []
+        w.write_int(0);
+    }
+}
 
 /// Marshal an attribute list, optionally sharing singleton `[(name, PStr [])]` tuples.
 ///
@@ -41,13 +75,16 @@ use crate::parser::ast::{
 /// When sharing is enabled and attrs match `[(name, PStr [])]` where name uses
 /// `Location.none` (LocIdx::default()), the attribute tuple is shared via
 /// `singleton_attr_list_table`.
-fn marshal_attributes(attrs: &Attributes, w: &mut MarshalWriter, share_singleton: bool) {
+fn marshal_attributes(
+    attrs: &Attributes,
+    w: &mut MarshalWriter,
+    share_singleton: bool,
+    share_empty_pstr: Option<EmptyPayloadShareKind>,
+) {
     let attrs_slice = attrs.as_slice();
 
-    let payload_is_empty_str = |payload: &Payload| {
-        matches!(payload, Payload::PStr(items) if items.is_empty())
-            || matches!(payload, Payload::PStrEmptyShared(_))
-    };
+    let payload_is_empty_str =
+        |payload: &Payload| matches!(payload, Payload::PStr(items) if items.is_empty());
 
     // Share singleton attribute TUPLES: [(name, PStr [])] with Location.none
     //
@@ -81,7 +118,7 @@ fn marshal_attributes(attrs: &Attributes, w: &mut MarshalWriter, share_singleton
                     // Write the attribute tuple: Block(tag=0, size=2) [name, payload]
                     w.write_block_header(0, 2);
                     name.marshal(w);
-                    payload.marshal(w);
+                    marshal_attribute_payload(payload, w, share_empty_pstr);
 
                     w.singleton_attr_list_table_insert(key, obj_idx);
                 }
@@ -94,7 +131,11 @@ fn marshal_attributes(attrs: &Attributes, w: &mut MarshalWriter, share_singleton
     }
 
     // Default: marshal normally without sharing
-    attrs_slice.marshal(w);
+    if share_empty_pstr.is_some() {
+        marshal_attribute_list(attrs_slice, w, share_empty_pstr);
+    } else {
+        attrs_slice.marshal(w);
+    }
 }
 
 // ========== Flag implementations ==========
@@ -256,6 +297,11 @@ impl Marshal for TypeArg {
 
 impl Marshal for CoreType {
     fn marshal(&self, w: &mut MarshalWriter) {
+        let share_empty_pstr = match &self.ptyp_desc {
+            CoreTypeDesc::Ptyp_object(_, _) => Some(EmptyPayloadShareKind::ObjectTypeAttr),
+            _ => None,
+        };
+
         // Share Ptyp_var core_types with empty attributes and matching (name, loc).
         // In OCaml's from_labels (handle_obj), the same tyvar CoreType is physically
         // shared between Otag fields and Labelled args. The first write creates the
@@ -274,7 +320,7 @@ impl Marshal for CoreType {
                 w.write_block_header(0, 3);
                 self.ptyp_desc.marshal(w);
                 self.ptyp_loc.marshal(w);
-                marshal_attributes(&self.ptyp_attributes, w, false);
+                marshal_attributes(&self.ptyp_attributes, w, false, share_empty_pstr);
                 w.tyvar_core_type_table_insert(key, obj_idx);
                 return;
             }
@@ -284,7 +330,7 @@ impl Marshal for CoreType {
         w.write_block_header(0, 3);
         self.ptyp_desc.marshal(w);
         self.ptyp_loc.marshal(w);
-        marshal_attributes(&self.ptyp_attributes, w, false);
+        marshal_attributes(&self.ptyp_attributes, w, false, share_empty_pstr);
     }
 }
 
@@ -385,7 +431,12 @@ impl Marshal for ObjectField {
                 // In PPX-generated code (e.g., %obj), the same {txt; loc} record
                 // may be shared with an ArgLabel::Labelled label.
                 w.write_string_loc_shared(label.txt, label.loc, true);
-                attrs.marshal(w);
+                marshal_attributes(
+                    attrs,
+                    w,
+                    false,
+                    Some(EmptyPayloadShareKind::ObjectFieldAttr),
+                );
                 ty.marshal(w);
             }
             ObjectField::Oinherit(ty) => {
@@ -403,7 +454,7 @@ impl Marshal for Pattern {
         w.write_block_header(0, 3);
         self.ppat_desc.marshal(w);
         self.ppat_loc.marshal(w);
-        marshal_attributes(&self.ppat_attributes, w, false);
+        marshal_attributes(&self.ppat_attributes, w, false, None);
     }
 }
 
@@ -556,7 +607,7 @@ impl Marshal for Expression {
                 | ExpressionDesc::Pexp_extension(_)
                 | ExpressionDesc::Pexp_newtype(_, _)
         );
-        marshal_attributes(&self.pexp_attributes, w, share_attrs);
+        marshal_attributes(&self.pexp_attributes, w, share_attrs, None);
     }
 }
 
@@ -793,7 +844,7 @@ impl Marshal for ValueBinding {
         w.write_block_header(0, 4);
         self.pvb_pat.marshal(w);
         self.pvb_expr.marshal(w);
-        marshal_attributes(&self.pvb_attributes, w, false);
+        marshal_attributes(&self.pvb_attributes, w, false, None);
         self.pvb_loc.marshal(w);
     }
 }
@@ -806,9 +857,6 @@ impl Marshal for Payload {
             Payload::PStr(structure) => {
                 w.write_block_header(0, 1);
                 structure.marshal(w);
-            }
-            Payload::PStrEmptyShared(kind) => {
-                w.write_pstr_empty_shared(*kind);
             }
             Payload::PSig(signature) => {
                 w.write_block_header(1, 1);
@@ -834,7 +882,7 @@ impl Marshal for ModuleType {
         w.write_block_header(0, 3);
         self.pmty_desc.marshal(w);
         self.pmty_loc.marshal(w);
-        marshal_attributes(&self.pmty_attributes, w, false);
+        marshal_attributes(&self.pmty_attributes, w, false, None);
     }
 }
 
@@ -910,7 +958,7 @@ impl Marshal for ModuleExpr {
         w.write_block_header(0, 3);
         self.pmod_desc.marshal(w);
         self.pmod_loc.marshal(w);
-        marshal_attributes(&self.pmod_attributes, w, false);
+        marshal_attributes(&self.pmod_attributes, w, false, None);
     }
 }
 
@@ -965,7 +1013,7 @@ impl Marshal for TypeDeclaration {
         self.ptype_kind.marshal(w);
         self.ptype_private.marshal(w);
         self.ptype_manifest.marshal(w);
-        marshal_attributes(&self.ptype_attributes, w, false);
+        marshal_attributes(&self.ptype_attributes, w, false, None);
         self.ptype_loc.marshal(w);
     }
 }
@@ -994,7 +1042,7 @@ impl Marshal for ConstructorDeclaration {
         self.pcd_args.marshal(w);
         self.pcd_res.marshal(w);
         self.pcd_loc.marshal(w);
-        marshal_attributes(&self.pcd_attributes, w, false);
+        marshal_attributes(&self.pcd_attributes, w, false, None);
     }
 }
 
@@ -1022,7 +1070,7 @@ impl Marshal for LabelDeclaration {
         w.write_int(if self.pld_optional { 1 } else { 0 });
         self.pld_type.marshal(w);
         self.pld_loc.marshal(w);
-        marshal_attributes(&self.pld_attributes, w, false);
+        marshal_attributes(&self.pld_attributes, w, false, None);
     }
 }
 
@@ -1035,7 +1083,7 @@ impl Marshal for TypeExtension {
         self.ptyext_params.marshal(w);
         self.ptyext_constructors.marshal(w);
         self.ptyext_private.marshal(w);
-        marshal_attributes(&self.ptyext_attributes, w, false);
+        marshal_attributes(&self.ptyext_attributes, w, false, None);
     }
 }
 
@@ -1045,7 +1093,7 @@ impl Marshal for ExtensionConstructor {
         self.pext_name.marshal(w);
         self.pext_kind.marshal(w);
         self.pext_loc.marshal(w);
-        marshal_attributes(&self.pext_attributes, w, false);
+        marshal_attributes(&self.pext_attributes, w, false, None);
     }
 }
 
@@ -1075,7 +1123,7 @@ impl Marshal for ValueDescription {
         // pval_prim contains raw binary data (FFI encoding blobs) that must be
         // written as raw bytes, not Latin-1 converted. Use write_string directly.
         marshal_prim_list(&self.pval_prim, w);
-        marshal_attributes(&self.pval_attributes, w, false);
+        marshal_attributes(&self.pval_attributes, w, false, None);
         self.pval_loc.marshal(w);
     }
 }
@@ -1106,7 +1154,7 @@ impl Marshal for ModuleDeclaration {
         w.write_block_header(0, 4);
         self.pmd_name.marshal(w);
         self.pmd_type.marshal(w);
-        marshal_attributes(&self.pmd_attributes, w, false);
+        marshal_attributes(&self.pmd_attributes, w, false, None);
         self.pmd_loc.marshal(w);
     }
 }
@@ -1116,7 +1164,7 @@ impl Marshal for ModuleTypeDeclaration {
         w.write_block_header(0, 4);
         self.pmtd_name.marshal(w);
         self.pmtd_type.marshal(w);
-        marshal_attributes(&self.pmtd_attributes, w, false);
+        marshal_attributes(&self.pmtd_attributes, w, false, None);
         self.pmtd_loc.marshal(w);
     }
 }
@@ -1126,7 +1174,7 @@ impl Marshal for ModuleBinding {
         w.write_block_header(0, 4);
         self.pmb_name.marshal(w);
         self.pmb_expr.marshal(w);
-        marshal_attributes(&self.pmb_attributes, w, false);
+        marshal_attributes(&self.pmb_attributes, w, false, None);
         self.pmb_loc.marshal(w);
     }
 }
@@ -1137,7 +1185,7 @@ impl Marshal for OpenDescription {
         self.popen_lid.marshal(w);
         self.popen_override.marshal(w);
         self.popen_loc.marshal(w);
-        marshal_attributes(&self.popen_attributes, w, false);
+        marshal_attributes(&self.popen_attributes, w, false, None);
     }
 }
 
@@ -1146,7 +1194,7 @@ impl Marshal for IncludeDescription {
         w.write_block_header(0, 3);
         self.pincl_mod.marshal(w);
         self.pincl_loc.marshal(w);
-        marshal_attributes(&self.pincl_attributes, w, false);
+        marshal_attributes(&self.pincl_attributes, w, false, None);
     }
 }
 
@@ -1155,7 +1203,7 @@ impl Marshal for IncludeDeclaration {
         w.write_block_header(0, 3);
         self.pincl_mod.marshal(w);
         self.pincl_loc.marshal(w);
-        marshal_attributes(&self.pincl_attributes, w, false);
+        marshal_attributes(&self.pincl_attributes, w, false, None);
     }
 }
 

@@ -2722,7 +2722,7 @@ fn make_props_abstract_type_sig_with_live(arena: &mut ParseArena, name: &str, lo
 fn update_config_from_attribute(arena: &ParseArena, attr: &Attribute, config: &mut JsxConfig) {
     // Parse @@jsxConfig({version: 4, module_: "React"})
     // Matches OCaml's update_config behavior
-    if let Some(items) = attr.1.str_items() {
+    if let Payload::PStr(items) = &attr.1 {
         for item in items {
             if let StructureItemDesc::Pstr_eval(expr, _) = &item.pstr_desc {
                 if let ExpressionDesc::Pexp_record(fields, _) = &expr.pexp_desc {

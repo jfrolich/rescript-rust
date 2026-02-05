@@ -175,55 +175,16 @@ pub type Attributes = Vec<Attribute>;
 pub type Extension = (StringLoc, Payload);
 
 /// Payload of an attribute or extension.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum EmptyPayloadKind {
-    TypeTopLevel,
-    TypeAnnotation,
-    TypeField,
-    FieldAttribute,
-}
-
-impl EmptyPayloadKind {
-    pub const COUNT: usize = 4;
-
-    pub fn as_index(self) -> usize {
-        match self {
-            EmptyPayloadKind::TypeTopLevel => 0,
-            EmptyPayloadKind::TypeAnnotation => 1,
-            EmptyPayloadKind::TypeField => 2,
-            EmptyPayloadKind::FieldAttribute => 3,
-        }
-    }
-}
-
-/// Payload of an attribute or extension.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Payload {
     /// Structure payload: `[@@attr structure]`.
     PStr(Vec<StructureItem>),
-    /// Shared empty structure payload (`PStr []`) with a sharing group.
-    PStrEmptyShared(EmptyPayloadKind),
     /// Signature payload: `[@@attr: signature]`.
     PSig(Vec<SignatureItem>),
     /// Type payload: `[@@attr: type]`.
     PTyp(Box<CoreType>),
     /// Pattern payload with optional guard: `[@@attr? pattern when guard]`.
     PPat(Box<Pattern>, Option<Box<Expression>>),
-}
-
-impl Payload {
-    pub fn str_items(&self) -> Option<&[StructureItem]> {
-        match self {
-            Payload::PStr(items) => Some(items),
-            Payload::PStrEmptyShared(_) => Some(&[]),
-            _ => None,
-        }
-    }
-
-    pub fn is_empty_str(&self) -> bool {
-        matches!(self, Payload::PStr(items) if items.is_empty())
-            || matches!(self, Payload::PStrEmptyShared(_))
-    }
 }
 
 // ============================================================================

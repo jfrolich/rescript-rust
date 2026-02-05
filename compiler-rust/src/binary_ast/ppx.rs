@@ -337,6 +337,17 @@ fn check_type_ffi_attrs(typ: &CoreType, arena: &ParseArena) -> Option<&'static s
     None
 }
 
+fn payload_str_items(payload: &Payload) -> Option<&[StructureItem]> {
+    match payload {
+        Payload::PStr(items) => Some(items),
+        _ => None,
+    }
+}
+
+fn payload_is_empty_str(payload: &Payload) -> bool {
+    matches!(payload, Payload::PStr(items) if items.is_empty())
+}
+
 /// Extract @as("string") from attributes.
 /// Mirrors OCaml's iter_process_bs_string_as.
 fn get_as_string_attr(attrs: &[Attribute], arena: &ParseArena) -> Option<String> {
@@ -344,7 +355,7 @@ fn get_as_string_attr(attrs: &[Attribute], arena: &ParseArena) -> Option<String>
         let name = arena.get_string(attr_name.txt);
         if name == "as" {
             // Try to get string payload
-            if let Some(items) = payload.str_items() {
+            if let Some(items) = payload_str_items(payload) {
                 if items.len() == 1 {
                     if let StructureItemDesc::Pstr_eval(expr, _) = &items[0].pstr_desc {
                         if let ExpressionDesc::Pexp_constant(Constant::String(s, _)) = &expr.pexp_desc {
@@ -365,7 +376,7 @@ fn get_as_int_attr(attrs: &[Attribute], arena: &ParseArena) -> Option<i64> {
         let name = arena.get_string(attr_name.txt);
         if name == "as" {
             // Try to get int payload
-            if let Some(items) = payload.str_items() {
+            if let Some(items) = payload_str_items(payload) {
                 if items.len() == 1 {
                     if let StructureItemDesc::Pstr_eval(expr, _) = &items[0].pstr_desc {
                         if let ExpressionDesc::Pexp_constant(Constant::Integer(s, suffix)) = &expr.pexp_desc {
@@ -1205,7 +1216,6 @@ fn get_payload_string_with_delim(payload: &current::Payload, arena: &mut ParseAr
 /// Handles: @attr("str"), @attr(("str1", "str2", ...)), @attr (empty → [])
 fn get_payload_strings(payload: &current::Payload, arena: &mut ParseArena) -> Vec<String> {
     match payload {
-        current::Payload::PStrEmptyShared(_) => vec![],
         current::Payload::PStr(items) if items.is_empty() => vec![],
         current::Payload::PStr(items) if items.len() == 1 => {
             if let StructureItemDesc::Pstr_eval(expr, _) = &items[0].pstr_desc {
@@ -1732,7 +1742,7 @@ fn find_inline_payload_expr<'a>(
         let name = arena.get_string(attr_name.txt);
         if name == "inline" {
             // @inline(expr) has PStr with a single Pstr_eval
-            if let Some(items) = payload.str_items() {
+            if let Some(items) = payload_str_items(payload) {
                 if items.len() == 1 {
                     if let StructureItemDesc::Pstr_eval(expr, _) = &items[0].pstr_desc {
                         return Some(expr);
@@ -2219,7 +2229,7 @@ fn handle_debugger(
     ext_loc: LocIdx,
 ) -> Expression {
     // %debugger doesn't accept arguments
-    if !payload.is_empty_str() {
+    if !payload_is_empty_str(payload) {
         return expr.clone(); // Error case - return unchanged
     }
 
@@ -3794,7 +3804,6 @@ fn rewrite_attributes(attrs: &[Attribute], arena: &mut ParseArena) -> Vec<Attrib
 /// Rewrite a payload, transforming strings in expressions and patterns
 fn rewrite_payload(payload: &Payload, arena: &mut ParseArena) -> Payload {
     match payload {
-        Payload::PStrEmptyShared(kind) => Payload::PStrEmptyShared(*kind),
         Payload::PStr(items) => {
             Payload::PStr(items.iter().flat_map(|item| rewrite_structure_item(item, arena)).collect())
         }
@@ -4902,7 +4911,7 @@ fn parse_deriving_actions(attrs: &[Attribute], arena: &mut ParseArena) -> (Vec<D
 
         if name == "deriving" {
             // Parse the payload to extract actions
-            if let Some(items) = payload.str_items() {
+            if let Some(items) = payload_str_items(payload) {
                 // @deriving(accessors) or @deriving({jsConverter: newType})
                 for item in items {
                     if let StructureItemDesc::Pstr_eval(expr, _) = &item.pstr_desc {
@@ -5362,7 +5371,7 @@ fn get_as_string_value(attrs: &[Attribute], arena: &ParseArena) -> Option<String
     for (attr_name, payload) in attrs {
         let name = arena.get_string(attr_name.txt);
         if name == "as" {
-            if let Some(items) = payload.str_items() {
+            if let Some(items) = payload_str_items(payload) {
                 if let Some(item) = items.first() {
                     if let StructureItemDesc::Pstr_eval(expr, _) = &item.pstr_desc {
                         // Constant::String(txt_str, delim)
@@ -7369,7 +7378,7 @@ fn get_bs_as_string(attrs: &[Attribute], arena: &ParseArena) -> Option<String> {
     for (attr_name, payload) in attrs {
         let name = arena.get_string(attr_name.txt);
         if name == "as" {
-            if let Some(items) = payload.str_items() {
+            if let Some(items) = payload_str_items(payload) {
                 if let Some(item) = items.first() {
                     if let StructureItemDesc::Pstr_eval(expr, _) = &item.pstr_desc {
                         if let ExpressionDesc::Pexp_constant(Constant::String(txt, _)) = &expr.pexp_desc {

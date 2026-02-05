@@ -95,7 +95,7 @@ fn remove_optional_attribute(arena: &ParseArena, attrs: &[current::Attribute]) -
 fn get_arity_from_attributes(arena: &ParseArena, attrs: &[current::Attribute]) -> Option<i32> {
     for (name, payload) in attrs {
         if arena.get_string(name.txt) == "res.arity" {
-            if let Some(items) = payload.str_items() {
+            if let current::Payload::PStr(items) = payload {
                 if let Some(item) = items.first() {
                     if let current::StructureItemDesc::Pstr_eval(expr, _) = &item.pstr_desc {
                         if let current::ExpressionDesc::Pexp_constant(current::Constant::Integer(

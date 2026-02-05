@@ -8,7 +8,7 @@ use super::core::{ast_helper, mknoloc, recover, template_literal_attr, with_loc}
 use super::diagnostics::DiagnosticCategory;
 use super::grammar::{self, Grammar};
 use super::longident::Longident;
-use super::state::{Parser, ParserMode, TypeAttrKind};
+use super::state::{Parser, ParserMode};
 use super::token::Token;
 use crate::parse_arena::{Located, LocIdx, PosIdx, StrIdx};
 
@@ -356,7 +356,7 @@ pub fn parse_constrained_pattern(p: &mut Parser<'_>) -> Pattern {
         p.next();
         // OCaml uses parse_typ_expr (with es6_arrow=true) here, not no-arrow.
         // Switch cases use parse_pattern (not constrained), so => is safe here.
-        let typ = p.with_type_attr_kind(TypeAttrKind::Annotation, |p| super::typ::parse_typ_expr(p));
+        let typ = super::typ::parse_typ_expr(p);
         // Reuse the existing PosIdx from pat.ppat_loc to match OCaml's sharing
         let start_idx = p.loc_start_idx(pat.ppat_loc);
         let end_idx = p.loc_end_idx(typ.ptyp_loc);
@@ -995,7 +995,7 @@ fn parse_non_spread_pattern(p: &mut Parser<'_>, error_msg: &str) -> Option<Patte
         // Check for type constraint: pat : typ
         if p.token == Token::Colon {
             p.next();
-            let typ = p.with_type_attr_kind(TypeAttrKind::Annotation, |p| super::typ::parse_typ_expr(p));
+            let typ = super::typ::parse_typ_expr(p);
             let loc = p.mk_loc_spanning(pat.ppat_loc, typ.ptyp_loc);
             Some(Pattern {
                 ppat_desc: PatternDesc::Ppat_constraint(Box::new(pat), typ),

@@ -28,7 +28,6 @@ use std::collections::HashMap;
 
 use crate::location::{Location, Position};
 use crate::parse_arena::{ArityIdx, LidentIdx, LocIdx, ParseArena, PosIdx, StrIdx};
-use crate::parser::ast::EmptyPayloadKind;
 use crate::parser::longident::Longident;
 
 /// Magic number for small Marshal format
@@ -58,6 +57,28 @@ const CODE_BLOCK64: u8 = 0x13;
 const CODE_SHARED64: u8 = 0x14;
 #[allow(dead_code)]
 const CODE_STRING64: u8 = 0x15;
+
+/// Sharing groups for empty `PStr []` payloads.
+///
+/// OCaml shares empty payloads in specific contexts due to CSE and
+/// module-level constants. We mirror that by sharing within these groups.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub(crate) enum EmptyPayloadShareKind {
+    ObjectTypeAttr,
+    ObjectFieldAttr,
+}
+
+impl EmptyPayloadShareKind {
+    const COUNT: usize = 2;
+
+    #[inline]
+    const fn as_index(self) -> usize {
+        match self {
+            Self::ObjectTypeAttr => 0,
+            Self::ObjectFieldAttr => 1,
+        }
+    }
+}
 
 /// Writer for OCaml Marshal binary format
 ///
@@ -144,7 +165,7 @@ pub struct MarshalWriter {
     position_value_table: HashMap<Position, u32>,
 
     /// Shared object indices for empty PStr payloads (`PStr []`) by sharing group.
-    pstr_empty_table: [Option<u32>; EmptyPayloadKind::COUNT],
+    pstr_empty_table: [Option<u32>; EmptyPayloadShareKind::COUNT],
 
     /// Optional reference to ParseArena for LocIdx marshalling.
     /// Set via `set_arena()` before marshalling AST with LocIdx fields.
@@ -188,7 +209,7 @@ impl MarshalWriter {
             location_value_table: HashMap::new(),
             position_value_table: HashMap::new(),
 
-            pstr_empty_table: [None; EmptyPayloadKind::COUNT],
+            pstr_empty_table: [None; EmptyPayloadShareKind::COUNT],
 
             arena: None,
             obj_counter: 0,
@@ -217,7 +238,7 @@ impl MarshalWriter {
             location_value_table: HashMap::new(),
             position_value_table: HashMap::new(),
 
-            pstr_empty_table: [None; EmptyPayloadKind::COUNT],
+            pstr_empty_table: [None; EmptyPayloadShareKind::COUNT],
 
             arena: None,
             obj_counter: 0,
@@ -262,7 +283,7 @@ impl MarshalWriter {
         self.lident_idx_table.clear();
         self.option_string_table.clear();
         self.string_loc_table.clear();
-        self.pstr_empty_table = [None; EmptyPayloadKind::COUNT];
+        self.pstr_empty_table = [None; EmptyPayloadShareKind::COUNT];
         self.obj_counter = 0;
         self.size_32 = 0;
         self.size_64 = 0;
@@ -966,7 +987,7 @@ impl MarshalWriter {
     /// `PStr []` may be shared in OCaml depending on its origin. We mirror that by
     /// sharing empty payloads within a group:
     /// - PStr [] → Block(tag=0, [int 0]) with sharing
-    pub fn write_pstr_empty_shared(&mut self, kind: EmptyPayloadKind) {
+    pub(crate) fn write_pstr_empty_shared(&mut self, kind: EmptyPayloadShareKind) {
         let idx = kind.as_index();
         if let Some(obj_idx) = self.pstr_empty_table[idx] {
             let d = self.obj_counter - obj_idx;

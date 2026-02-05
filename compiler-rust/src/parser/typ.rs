@@ -12,7 +12,7 @@ use super::diagnostics::DiagnosticCategory;
 use super::grammar;
 use super::grammar::Grammar;
 use super::longident::Longident;
-use super::state::{Parser, ParserMode, TypeAttrKind};
+use super::state::{Parser, ParserMode};
 use super::token::Token;
 
 /// Get the string tag based on parser mode.
@@ -448,7 +448,7 @@ fn parse_es6_arrow_type(p: &mut Parser<'_>, attrs: Attributes) -> CoreType {
 
 /// Parse attributes that can appear before a type (including doc comments).
 fn parse_type_attributes(p: &mut Parser<'_>) -> Attributes {
-    parse_attributes_with_kind(p, type_empty_payload_kind(p))
+    parse_attributes(p)
 }
 
 /// Parse an attribute id (name with optional path).
@@ -678,9 +678,6 @@ fn parse_atomic_typ_expr_with_start(
 
     // Attach any leading attributes to the type
     if !attrs.is_empty() {
-        if matches!(typ.ptyp_desc, CoreTypeDesc::Ptyp_object(_, _)) {
-            share_empty_payloads(&mut attrs, EmptyPayloadKind::FieldAttribute);
-        }
         typ.ptyp_attributes.extend(attrs);
     }
 
@@ -1264,25 +1261,13 @@ fn parse_lident(p: &mut Parser<'_>) -> (String, Location) {
     }
 }
 
-fn type_empty_payload_kind(p: &Parser<'_>) -> Option<EmptyPayloadKind> {
-    match p.type_attr_kind {
-        TypeAttrKind::TopLevel => None,
-        TypeAttrKind::Annotation => None,
-        TypeAttrKind::FieldType => None,
-    }
-}
-
-/// Parse attributes for field declarations (attributes before field name).
-fn parse_field_attributes(p: &mut Parser<'_>) -> Attributes {
-    parse_attributes_with_kind(p, Some(EmptyPayloadKind::FieldAttribute))
-}
-
-fn parse_attributes_with_kind(p: &mut Parser<'_>, empty_kind: Option<EmptyPayloadKind>) -> Attributes {
+/// Parse attributes (including doc comments which become res.doc attributes).
+fn parse_attributes(p: &mut Parser<'_>) -> Attributes {
     let mut attrs = vec![];
     loop {
         match &p.token {
             Token::At => {
-                if let Some(attr) = parse_attribute_with_kind(p, empty_kind) {
+                if let Some(attr) = parse_attribute(p) {
                     attrs.push(attr);
                 }
             }
@@ -1299,13 +1284,17 @@ fn parse_attributes_with_kind(p: &mut Parser<'_>, empty_kind: Option<EmptyPayloa
     attrs
 }
 
+/// Parse attributes for field declarations (attributes before field name).
+fn parse_field_attributes(p: &mut Parser<'_>) -> Attributes {
+    parse_attributes(p)
+}
+
 /// Parse only @-style attributes (NOT doc comments).
 /// Used when doc comments need to be handled separately for location purposes.
 fn parse_regular_attributes(p: &mut Parser<'_>) -> Attributes {
     let mut attrs = vec![];
-    let empty_kind = type_empty_payload_kind(p);
     while p.token == Token::At {
-        if let Some(attr) = parse_attribute_with_kind(p, empty_kind) {
+        if let Some(attr) = parse_attribute(p) {
             attrs.push(attr);
         }
     }
@@ -1313,10 +1302,7 @@ fn parse_regular_attributes(p: &mut Parser<'_>) -> Attributes {
 }
 
 /// Parse a single attribute.
-fn parse_attribute_with_kind(
-    p: &mut Parser<'_>,
-    empty_kind: Option<EmptyPayloadKind>,
-) -> Option<Attribute> {
+fn parse_attribute(p: &mut Parser<'_>) -> Option<Attribute> {
     if p.token != Token::At {
         return None;
     }
@@ -1339,21 +1325,10 @@ fn parse_attribute_with_kind(
         p.expect(Token::Rparen);
         payload
     } else {
-        match empty_kind {
-            Some(kind) => Payload::PStrEmptyShared(kind),
-            None => Payload::PStr(vec![]),
-        }
+        Payload::PStr(vec![])
     };
 
     Some((attr_id, payload))
-}
-
-fn share_empty_payloads(attrs: &mut Attributes, kind: EmptyPayloadKind) {
-    for (_, payload) in attrs.iter_mut() {
-        if matches!(payload, Payload::PStr(items) if items.is_empty()) {
-            *payload = Payload::PStrEmptyShared(kind);
-        }
-    }
 }
 
 /// Parse an attribute payload.
@@ -1577,7 +1552,7 @@ fn parse_object_fields(p: &mut Parser<'_>) -> Vec<ObjectField> {
         // Handle spread: ...typ
         if p.token == Token::DotDotDot {
             p.next();
-            let typ = p.with_type_attr_kind(TypeAttrKind::FieldType, |p| parse_typ_expr(p));
+            let typ = parse_typ_expr(p);
             fields.push(ObjectField::Oinherit(typ));
             if !p.optional(&Token::Comma) {
                 break;
@@ -1602,7 +1577,7 @@ fn parse_object_fields(p: &mut Parser<'_>) -> Vec<ObjectField> {
                 // Pass grammar context for error message: "Did you forget a `:` here? It signals the start of a type"
                 p.expect_with_grammar(Token::Colon, Some(Grammar::TypeExpression));
                 // OCaml uses parse_poly_type_expr for object field types
-                let typ = p.with_type_attr_kind(TypeAttrKind::FieldType, |p| parse_poly_type_expr(p));
+                let typ = parse_poly_type_expr(p);
                 let name_idx = p.arena_mut().push_string(name);
                 fields.push(ObjectField::Otag(with_loc(name_idx, name_loc), field_attrs, typ));
             }
