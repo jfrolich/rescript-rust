@@ -15,6 +15,7 @@
 #   -j, --parallel N  Run N tests in parallel (default: 16)
 #   -v, --verbose     Show progress for each file
 #   --no-build        Skip the initial rewatch build (assume already built)
+#   --with-locs       Use -dtyped-sexp-locs (with locations) instead of -dtyped-sexp
 #   -h, --help        Show this help message
 #
 # EXAMPLES:
@@ -38,6 +39,7 @@ PARALLEL_JOBS=16
 VERBOSE=false
 FILE_ARG=""
 SKIP_BUILD=false
+WITH_LOCS=false
 
 while [[ $# -gt 0 ]]; do
     case $1 in
@@ -60,6 +62,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --no-build)
             SKIP_BUILD=true
+            shift
+            ;;
+        --with-locs)
+            WITH_LOCS=true
             shift
             ;;
         -h|--help)
@@ -90,6 +96,11 @@ RESET='\033[0m'
 
 # Configuration
 TIMEOUT_SECONDS=10
+if [[ "$WITH_LOCS" == "true" ]]; then
+    SEXP_FLAG="-dtyped-sexp-locs"
+else
+    SEXP_FLAG="-dtyped-sexp"
+fi
 
 # Check if compilers exist
 if [[ ! -x "$OCAML_BSC" ]]; then
@@ -125,6 +136,7 @@ if [[ "$RUST_AVAILABLE" == "true" ]]; then
 else
     echo "Rust bsc:  (not available)"
 fi
+echo "Sexp flag: $SEXP_FLAG"
 echo "Timeout: ${TIMEOUT_SECONDS}s"
 echo "Parallel jobs: $PARALLEL_JOBS"
 echo ""
@@ -180,7 +192,7 @@ mkdir -p "$RESULTS_DIR"
 mkdir -p "$TEMP_DIR/diffs"
 
 # Export variables for parallel execution
-export OCAML_BSC RUST_BSC RESCRIPT_CLI TIMEOUT_SECONDS TEMP_DIR QUICK_MODE VERBOSE RUST_AVAILABLE PROJECT_ROOT RESULTS_DIR TEST_PROJECT
+export OCAML_BSC RUST_BSC RESCRIPT_CLI TIMEOUT_SECONDS TEMP_DIR QUICK_MODE VERBOSE RUST_AVAILABLE PROJECT_ROOT RESULTS_DIR TEST_PROJECT SEXP_FLAG
 
 # Function to test a single file - writes results to a file
 test_single_file() {
@@ -214,14 +226,14 @@ test_single_file() {
     if [[ -z "$compiler_args_json" ]]; then
         # If compiler-args fails, try direct compilation
         # Run OCaml compiler directly
-        if timeout "$TIMEOUT_SECONDS" "$OCAML_BSC" -dtyped-sexp "$full_file_path" 2> "$file_temp/ocaml.sexp" 1>/dev/null; then
+        if timeout "$TIMEOUT_SECONDS" "$OCAML_BSC" $SEXP_FLAG "$full_file_path" 2> "$file_temp/ocaml.sexp" 1>/dev/null; then
             ocaml_pass=1
         else
             ocaml_fail=1
         fi
 
         if [[ "$RUST_AVAILABLE" == "true" ]]; then
-            if timeout "$TIMEOUT_SECONDS" "$RUST_BSC" -dtyped-sexp "$full_file_path" 2> "$file_temp/rust.sexp" 1>/dev/null; then
+            if timeout "$TIMEOUT_SECONDS" "$RUST_BSC" $SEXP_FLAG "$full_file_path" 2> "$file_temp/rust.sexp" 1>/dev/null; then
                 rust_pass=1
             else
                 rust_fail=1
@@ -234,9 +246,9 @@ test_single_file() {
         args=$(echo "$compiler_args_json" | python3 -c "import sys, json; d=json.load(sys.stdin); print(' '.join(d.get('compiler_args', [])))" 2>/dev/null) || args=""
 
         if [[ -n "$args" ]]; then
-            # Run OCaml compiler with the args + -dtyped-sexp
+            # Run OCaml compiler with the args + $SEXP_FLAG
             cd "$TEST_PROJECT/lib/bs"
-            if timeout "$TIMEOUT_SECONDS" "$OCAML_BSC" -dtyped-sexp $args 2> "$file_temp/ocaml.sexp" 1>/dev/null; then
+            if timeout "$TIMEOUT_SECONDS" "$OCAML_BSC" $SEXP_FLAG $args 2> "$file_temp/ocaml.sexp" 1>/dev/null; then
                 ocaml_pass=1
             else
                 ocaml_fail=1
@@ -244,7 +256,7 @@ test_single_file() {
 
             # Run Rust compiler if available
             if [[ "$RUST_AVAILABLE" == "true" ]]; then
-                if timeout "$TIMEOUT_SECONDS" "$RUST_BSC" -dtyped-sexp $args 2> "$file_temp/rust.sexp" 1>/dev/null; then
+                if timeout "$TIMEOUT_SECONDS" "$RUST_BSC" $SEXP_FLAG $args 2> "$file_temp/rust.sexp" 1>/dev/null; then
                     rust_pass=1
                 else
                     rust_fail=1
