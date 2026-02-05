@@ -44,6 +44,20 @@ use crate::parser::ast::{
 fn marshal_attributes(attrs: &Attributes, w: &mut MarshalWriter, share_singleton: bool) {
     let attrs_slice = attrs.as_slice();
 
+    // Share singleton attribute tuples: [(name, PStr [])] with Location.none
+    //
+    // In OCaml, module-level constants like `template_literal_attr`, `ternary_attr` etc.
+    // are single physical tuples `(Location.mknoloc "res.template", Parsetree.PStr [])`.
+    // When used as `~attrs:[template_literal_attr]`, a FRESH cons cell wraps the tuple,
+    // but the TUPLE INSIDE is the same physical pointer across all uses.
+    //
+    // The PPX preserves these original tuples for early-return expression types
+    // (Pexp_constant(Pconst_string(_, Some _)), Pexp_extension, etc.).
+    // Expressions going through the default mapper get FRESH tuples.
+    //
+    // We share at the TUPLE level (not cons cell level):
+    // - The cons cell is always written fresh (each [attr] creates a new cons cell)
+    // - The tuple inside is shared when share_singleton=true and a matching entry exists
     if share_singleton {
         if let [(name, payload)] = attrs_slice {
             if matches!(payload, Payload::PStr(items) if items.is_empty())
@@ -507,9 +521,10 @@ impl Marshal for Expression {
         // Only Pexp_constant(Pconst_string(_, Some _)) is matched here because:
         // - String constants with delimiters (template literals) are the main case
         //   where res.template/res.taggedTemplate attrs survive the PPX unchanged
+        // - String(_, None) is NOT included: tagged template fragments have None
+        //   delimiter with res.template attrs but go through the default mapper
         // - Integer suffix stripping (Some 'l' -> None) also preserves attrs but
-        //   integer constants rarely have mknoloc singleton attrs, so excluding
-        //   them avoids potential over-sharing
+        //   integer constants rarely have mknoloc singleton attrs
         // - Pexp_newtype preserves attrs but doesn't have mknoloc singleton attrs
         let share_attrs = matches!(
             &self.pexp_desc,
