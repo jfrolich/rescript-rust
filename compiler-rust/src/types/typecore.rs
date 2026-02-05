@@ -1732,17 +1732,25 @@ pub fn type_expect<'a>(
         ED::Pexp_assert(e) => {
             // Assert expression
             let bool_ty = env.type_bool(ctx);
-            let unit_ty = env.type_unit(ctx);
 
             let typed_e = type_expect(tctx, env, e, bool_ty, None)?;
 
-            // Assert has type unit
-            unify_expression_types(tctx, loc, expected_ty, unit_ty, context)?;
+            // assert(false) has the expected type (polymorphic), others have type unit
+            let exp_type = match &typed_e.exp_desc {
+                ExpressionDesc::Texp_construct(_, cd, _) if cd.cstr_name == "false" => {
+                    expected_ty
+                }
+                _ => {
+                    let unit_ty = env.type_unit(ctx);
+                    unify_expression_types(tctx, loc, expected_ty, unit_ty, context)?;
+                    unit_ty
+                }
+            };
 
             Ok(Expression::new(
                 ExpressionDesc::Texp_assert(Box::new(typed_e)),
                 loc,
-                unit_ty,
+                exp_type,
                 EnvRef(0),
                 expr.pexp_attributes.clone(),
             ))
