@@ -1390,10 +1390,10 @@ fn check_external_relative(vd: &ValueDescription, arena: &mut ParseArena) -> boo
         return false;
     }
     let (params, arity) = build_arg_type_specs(&vd.pval_type, arena);
-    let (args, _) = list_of_arrow(&vd.pval_type, arena);
+    let (args, result_type) = list_of_arrow(&vd.pval_type, arena);
     let no_arguments = args.is_empty();
     let desc = parse_external_attrs(&vd.pval_attributes, prim_name, no_arguments, arena);
-    let result_is_unit = is_unit_type(get_final_result_type(&vd.pval_type), arena);
+    let result_is_unit = is_unit_type(result_type, arena);
     let ffi = build_ffi_type(&desc, prim_name, arity, result_is_unit, params);
     check_ffi_relative(&ffi)
 }
@@ -1483,14 +1483,16 @@ pub fn encode_external(vd: &ValueDescription, arena: &mut ParseArena) -> Encoded
     let (params, arity) = build_arg_type_specs(&vd.pval_type, arena);
     // no_arguments = arg_types_ty = [] in OCaml: checks if there are ANY arrow args,
     // regardless of ignored. Use list_of_arrow directly.
-    let (args, _) = list_of_arrow(&vd.pval_type, arena);
+    let (args, result_type) = list_of_arrow(&vd.pval_type, arena);
     let no_arguments = args.is_empty();
 
     // Parse attributes
     let desc = parse_external_attrs(&vd.pval_attributes, prim_name, no_arguments, arena);
 
-    // Check if result is unit
-    let result_is_unit = is_unit_type(get_final_result_type(&vd.pval_type), arena);
+    // Check if result is unit - use the result from list_of_arrow, not get_final_result_type
+    // OCaml's handle_attributes uses result_type from list_of_arrow, which respects arity boundaries.
+    // For `int => (unit => unit)`, result_type is `(unit => unit)`, NOT `unit`.
+    let result_is_unit = is_unit_type(result_type, arena);
 
     // Build FFI type
     let ffi = if desc.mk_obj {
