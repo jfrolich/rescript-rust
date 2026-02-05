@@ -19,11 +19,11 @@ use crate::parse_arena::{LidentIdx, Located, LocIdx, ParseArena};
 use crate::parser::ast::{
     self as current, ArgLabel, Attribute, Case, Constant, ConstructorArguments,
     ConstructorDeclaration, CoreType, CoreTypeDesc, Expression, ExpressionDesc,
-    IncludeDeclaration, JsxContainerElement, JsxElement, JsxFragment, JsxProp, JsxUnaryElement,
-    LabelDeclaration, ModuleExpr, ModuleExprDesc, ModuleType, ModuleTypeDesc, ObjectField, Pattern,
-    PatternDesc, PatternRecordField, Payload, RecFlag, RowField, SignatureItem, SignatureItemDesc,
-    StructureItem, StructureItemDesc, TypeArg, TypeDeclaration, TypeKind, ValueBinding,
-    ValueDescription,
+    ExpressionRecordField, IncludeDeclaration, JsxContainerElement, JsxElement, JsxFragment,
+    JsxProp, JsxUnaryElement, LabelDeclaration, ModuleExpr, ModuleExprDesc, ModuleType,
+    ModuleTypeDesc, ObjectField, Pattern, PatternDesc, PatternRecordField, Payload, PrivateFlag,
+    RecFlag, RowField, SignatureItem, SignatureItemDesc, StructureItem, StructureItemDesc,
+    TypeArg, TypeDeclaration, TypeKind, ValueBinding, ValueDescription,
 };
 use crate::parser::longident::Longident;
 
@@ -5506,9 +5506,10 @@ fn create_unsafe_index_get_str(arena: &mut ParseArena) -> StructureItem {
 
     // Encode the FFI with @get_index
     // OCaml uses Param_number when all params are (Nothing, Arg_empty)
+    // The return_wrapper is Return_unset (not Return_identity) for @get_index externals
     let ffi = FfiType::FfiBs {
         params: Params::ParamNumber(2),
-        return_wrapper: ReturnWrapper::ReturnIdentity,
+        return_wrapper: ReturnWrapper::ReturnUnset,
         external_spec: ExternalSpec::JsGetIndex { js_get_index_scopes: vec![] },
     };
     let encoded = encode_ffi_type(&ffi);
@@ -5791,7 +5792,8 @@ fn create_to_js_function(
 
     let binding = ValueBinding {
         pvb_pat: Pattern {
-            ppat_desc: PatternDesc::Ppat_var(Located { txt: fn_name_idx, loc: none_loc }),
+            // OCaml uses tdcl.ptype_loc for function name pattern variable
+            ppat_desc: PatternDesc::Ppat_var(Located { txt: fn_name_idx, loc }),
             ppat_loc: none_loc,
             ppat_attributes: vec![],
         },
@@ -5880,7 +5882,8 @@ fn create_from_js_function(
 
     let binding = ValueBinding {
         pvb_pat: Pattern {
-            ppat_desc: PatternDesc::Ppat_var(Located { txt: fn_name_idx, loc: none_loc }),
+            // OCaml uses tdcl.ptype_loc for function name pattern variable
+            ppat_desc: PatternDesc::Ppat_var(Located { txt: fn_name_idx, loc }),
             ppat_loc: none_loc,
             ppat_attributes: vec![],
         },
@@ -6017,14 +6020,658 @@ fn create_from_js_sig(
     }
 }
 
+/// Generate jsConverter structure/signature for polyvariant types
+fn generate_js_converter_polyvar(
+    tdcl: &TypeDeclaration,
+    row_fields: &[RowField],
+    create_type: bool,
+    inner_loc: LocIdx,
+    arena: &mut ParseArena,
+) -> (Vec<StructureItem>, Vec<SignatureItem>) {
+    // Clone type_name to avoid borrow issues
+    let type_name = arena.get_string(tdcl.ptype_name.txt).to_string();
+    let (map_json, rev_map_json, has_bs_as) = build_js_converter_map(row_fields, arena);
+
+    // Get core type with @deriving attributes
+    let core_type = core_type_of_type_declaration_with_attrs(tdcl, arena);
+
+    // Build structure items
+    let mut structure_items = vec![];
+
+    // _eraseType
+    structure_items.push(create_erase_type_str(arena));
+
+    // _index
+    structure_items.push(create_unsafe_index_get_str(arena));
+
+    // _map
+    structure_items.push(create_map_binding("_map", &map_json, inner_loc, arena));
+
+    // _revMap (either same as _map or new %raw)
+    if has_bs_as {
+        structure_items.push(create_map_binding("_revMap", &rev_map_json, inner_loc, arena));
+    } else {
+        structure_items.push(create_rev_map_ref_binding(inner_loc, arena));
+    }
+
+    // colorToJs
+    structure_items.push(create_to_js_function(&type_name, &core_type, has_bs_as, inner_loc, arena));
+
+    // colorFromJs
+    structure_items.push(create_from_js_function(&type_name, inner_loc, arena));
+
+    // If create_type is true, prepend the new abstract type
+    if create_type {
+        let new_type_str = create_new_type_declaration(tdcl, &type_name, arena);
+        structure_items.insert(0, new_type_str);
+    }
+
+    // Build signature items
+    let mut signature_items = vec![];
+    signature_items.push(create_to_js_sig(&type_name, &core_type, inner_loc, arena));
+    signature_items.push(create_from_js_sig(&type_name, &core_type, inner_loc, arena));
+
+    (structure_items, signature_items)
+}
+
+/// Generate jsConverter structure/signature for record types
+fn generate_js_converter_record(
+    tdcl: &TypeDeclaration,
+    labels: &[LabelDeclaration],
+    create_type: bool,
+    loc: LocIdx,
+    arena: &mut ParseArena,
+) -> (Vec<StructureItem>, Vec<SignatureItem>) {
+    let type_name = arena.get_string(tdcl.ptype_name.txt).to_string();
+    let core_type = core_type_of_type_declaration_with_attrs(tdcl, arena);
+    let none_loc = arena.none_loc();
+
+    // For records, we generate:
+    // - _eraseType (if create_type)
+    // - abs_<name> type (if create_type)
+    // - <name>ToJs: converts record to JS object using %obj extension
+    // - <name>FromJs: converts JS object back to record
+
+    let mut structure_items = vec![];
+    let mut signature_items = vec![];
+
+    if create_type {
+        // _eraseType
+        structure_items.push(create_erase_type_str(arena));
+
+        // Abstract type: type abs_<name><params> = abstract
+        structure_items.push(create_new_type_declaration(tdcl, &type_name, arena));
+    }
+
+    // <name>ToJs function
+    let to_js_fn = create_record_to_js_function(tdcl, labels, &core_type, create_type, loc, arena);
+    structure_items.push(to_js_fn);
+
+    // <name>FromJs function
+    let from_js_fn = create_record_from_js_function(tdcl, labels, &core_type, create_type, loc, arena);
+    structure_items.push(from_js_fn);
+
+    // Signature items
+    signature_items.push(create_record_to_js_sig(&type_name, labels, &core_type, create_type, loc, arena));
+    signature_items.push(create_record_from_js_sig(&type_name, labels, &core_type, create_type, loc, arena));
+
+    // If create_type, prepend the new type to signature as well
+    if create_type {
+        let sig_new_type = create_new_type_sig_declaration(tdcl, &type_name, arena);
+        signature_items.insert(0, sig_new_type);
+    }
+
+    (structure_items, signature_items)
+}
+
+/// Create a new abstract type declaration for jsConverter newType
+/// type abs_<name><params>
+fn create_new_type_declaration(
+    tdcl: &TypeDeclaration,
+    type_name: &str,
+    arena: &mut ParseArena,
+) -> StructureItem {
+    let none_loc = arena.none_loc();
+    let new_name = format!("abs_{}", type_name);
+    let new_name_idx = arena.intern_string(&new_name);
+
+    // Create new type declaration matching OCaml's new_type_of_type_declaration
+    let new_tdcl = TypeDeclaration {
+        ptype_name: Located { txt: new_name_idx, loc: tdcl.ptype_name.loc },
+        ptype_params: tdcl.ptype_params.clone(),
+        ptype_cstrs: vec![],
+        ptype_kind: TypeKind::Ptype_abstract,
+        ptype_private: PrivateFlag::Public,
+        ptype_manifest: None,
+        ptype_attributes: vec![],
+        ptype_loc: tdcl.ptype_loc,
+    };
+
+    StructureItem {
+        pstr_desc: StructureItemDesc::Pstr_type(RecFlag::Nonrecursive, vec![new_tdcl]),
+        pstr_loc: none_loc,
+    }
+}
+
+/// Create a new abstract type signature declaration for jsConverter newType
+fn create_new_type_sig_declaration(
+    tdcl: &TypeDeclaration,
+    type_name: &str,
+    arena: &mut ParseArena,
+) -> SignatureItem {
+    let none_loc = arena.none_loc();
+    let new_name = format!("abs_{}", type_name);
+    let new_name_idx = arena.intern_string(&new_name);
+
+    let new_tdcl = TypeDeclaration {
+        ptype_name: Located { txt: new_name_idx, loc: tdcl.ptype_name.loc },
+        ptype_params: tdcl.ptype_params.clone(),
+        ptype_cstrs: vec![],
+        ptype_kind: TypeKind::Ptype_abstract,
+        ptype_private: PrivateFlag::Public,
+        ptype_manifest: None,
+        ptype_attributes: vec![],
+        ptype_loc: tdcl.ptype_loc,
+    };
+
+    SignatureItem {
+        psig_desc: SignatureItemDesc::Psig_type(RecFlag::Nonrecursive, vec![new_tdcl]),
+        psig_loc: none_loc,
+    }
+}
+
+/// Create the <name>ToJs function for records
+/// let sourceToJs = (param: source[@deriving...]) => %obj({...})
+fn create_record_to_js_function(
+    tdcl: &TypeDeclaration,
+    labels: &[LabelDeclaration],
+    core_type: &CoreType,
+    create_type: bool,
+    loc: LocIdx,
+    arena: &mut ParseArena,
+) -> StructureItem {
+    let none_loc = arena.none_loc();
+    let type_name = arena.get_string(tdcl.ptype_name.txt).to_string();
+    let to_js_name = format!("{}ToJs", type_name);
+    let to_js_name_idx = arena.intern_string(&to_js_name);
+    let param_str = arena.intern_string("param");
+
+    // Pattern: (param: <core_type>)
+    let param_pat = Pattern {
+        ppat_desc: PatternDesc::Ppat_constraint(
+            Box::new(Pattern {
+                ppat_desc: PatternDesc::Ppat_var(Located { txt: param_str, loc }),
+                ppat_loc: none_loc,
+                ppat_attributes: vec![],
+            }),
+            core_type.clone(),
+        ),
+        ppat_loc: none_loc,
+        ppat_attributes: vec![],
+    };
+
+    // Build record expression for %obj extension: { field: param.field, ... }
+    let record_fields: Vec<ExpressionRecordField> = labels
+        .iter()
+        .map(|label| {
+            let field_name = label.pld_name.txt;
+            let field_loc = label.pld_name.loc;
+            let lid = Located {
+                txt: arena.push_longident(Longident::Lident(field_name)),
+                loc: field_loc,
+            };
+
+            // param.field
+            let field_access = Expression {
+                pexp_desc: ExpressionDesc::Pexp_field(
+                    Box::new(Expression {
+                        pexp_desc: ExpressionDesc::Pexp_ident(Located {
+                            txt: arena.push_longident(Longident::Lident(param_str)),
+                            loc: field_loc,
+                        }),
+                        pexp_loc: none_loc,
+                        pexp_attributes: vec![],
+                    }),
+                    lid.clone(),
+                ),
+                pexp_loc: none_loc,
+                pexp_attributes: vec![],
+            };
+
+            ExpressionRecordField {
+                lid,
+                expr: field_access,
+                opt: false,
+            }
+        })
+        .collect();
+
+    let record_expr = Expression {
+        pexp_desc: ExpressionDesc::Pexp_record(record_fields, None),
+        pexp_loc: none_loc,
+        pexp_attributes: vec![],
+    };
+
+    // Transform %obj extension using handle_obj
+    // This creates a Pexp_letmodule with the proper FFI structure
+    let obj_ext_name = Located { txt: arena.intern_string("obj"), loc };
+    let obj_payload = Payload::PStr(vec![StructureItem {
+        pstr_desc: StructureItemDesc::Pstr_eval(record_expr.clone(), vec![]),
+        pstr_loc: none_loc,
+    }]);
+
+    // Create a dummy expression with the extension
+    let dummy_ext_expr = Expression {
+        pexp_desc: ExpressionDesc::Pexp_extension((obj_ext_name.clone(), obj_payload.clone())),
+        pexp_loc: none_loc,
+        pexp_attributes: vec![],
+    };
+
+    // Transform via handle_obj to get the Pexp_letmodule structure
+    let obj_extension = handle_obj(&dummy_ext_expr, &obj_payload, arena);
+
+    // If create_type, wrap with constraint and erase_type
+    let body = if create_type {
+        // Create new type reference: abs_<name><params>
+        let new_type = create_new_type_ref(tdcl, &type_name, arena);
+
+        // erase_type(obj_extension) :> new_type
+        let erase_type_ident = arena.intern_string("_eraseType");
+        let erase_app = Expression {
+            pexp_desc: ExpressionDesc::Pexp_apply {
+                funct: Box::new(Expression {
+                    pexp_desc: ExpressionDesc::Pexp_ident(Located {
+                        txt: arena.push_longident(Longident::Lident(erase_type_ident)),
+                        loc: none_loc,
+                    }),
+                    pexp_loc: none_loc,
+                    pexp_attributes: vec![],
+                }),
+                args: vec![(ArgLabel::Nolabel, obj_extension)],
+                partial: false,
+                transformed_jsx: false,
+            },
+            pexp_loc: none_loc,
+            pexp_attributes: vec![],
+        };
+
+        // Constraint to new type
+        Expression {
+            pexp_desc: ExpressionDesc::Pexp_constraint(Box::new(erase_app), new_type),
+            pexp_loc: none_loc,
+            pexp_attributes: vec![],
+        }
+    } else {
+        obj_extension
+    };
+
+    // Function: fun param => body
+    let fun_expr = Expression {
+        pexp_desc: ExpressionDesc::Pexp_fun {
+            arg_label: ArgLabel::Nolabel,
+            default: None,
+            lhs: param_pat,
+            rhs: Box::new(body),
+            is_async: false,
+            arity: arena.static_arity_1(),
+        },
+        pexp_loc: none_loc,
+        pexp_attributes: vec![],
+    };
+
+    // Value binding: let <name>ToJs = fun param => body
+    let binding = ValueBinding {
+        pvb_pat: Pattern {
+            ppat_desc: PatternDesc::Ppat_var(Located { txt: to_js_name_idx, loc }),
+            ppat_loc: none_loc,
+            ppat_attributes: vec![],
+        },
+        pvb_expr: fun_expr,
+        pvb_attributes: vec![],
+        pvb_loc: none_loc,
+    };
+
+    StructureItem {
+        pstr_desc: StructureItemDesc::Pstr_value(RecFlag::Nonrecursive, vec![binding]),
+        pstr_loc: none_loc,
+    }
+}
+
+/// Create the <name>FromJs function for records
+fn create_record_from_js_function(
+    tdcl: &TypeDeclaration,
+    labels: &[LabelDeclaration],
+    core_type: &CoreType,
+    create_type: bool,
+    loc: LocIdx,
+    arena: &mut ParseArena,
+) -> StructureItem {
+    let none_loc = arena.none_loc();
+    let type_name = arena.get_string(tdcl.ptype_name.txt).to_string();
+    let from_js_name = format!("{}FromJs", type_name);
+    let from_js_name_idx = arena.intern_string(&from_js_name);
+    let param_str = arena.intern_string("param");
+
+    // Pattern: param (no constraint for fromJs)
+    let param_pat = Pattern {
+        ppat_desc: PatternDesc::Ppat_var(Located { txt: param_str, loc }),
+        ppat_loc: none_loc,
+        ppat_attributes: vec![],
+    };
+
+    // Build record expression: { field: ##param.field, ... }
+    let record_fields: Vec<ExpressionRecordField> = labels
+        .iter()
+        .map(|label| {
+            let field_name = label.pld_name.txt;
+            let field_loc = label.pld_name.loc;
+            let lid = Located {
+                txt: arena.push_longident(Longident::Lident(field_name)),
+                loc: field_loc,
+            };
+
+            // ##param.field (Pexp_send)
+            let field_name_str = arena.get_string(field_name).to_string();
+            let js_field = Expression {
+                pexp_desc: ExpressionDesc::Pexp_send(
+                    Box::new(Expression {
+                        pexp_desc: ExpressionDesc::Pexp_ident(Located {
+                            txt: arena.push_longident(Longident::Lident(param_str)),
+                            loc: field_loc,
+                        }),
+                        pexp_loc: none_loc,
+                        pexp_attributes: vec![],
+                    }),
+                    Located { txt: field_name_str, loc: field_loc },
+                ),
+                pexp_loc: none_loc,
+                pexp_attributes: vec![],
+            };
+
+            ExpressionRecordField {
+                lid,
+                expr: js_field,
+                opt: false,
+            }
+        })
+        .collect();
+
+    let record_expr = Expression {
+        pexp_desc: ExpressionDesc::Pexp_record(record_fields, None),
+        pexp_loc: none_loc,
+        pexp_attributes: vec![],
+    };
+
+    // Constrain to core_type
+    let constrained_record = Expression {
+        pexp_desc: ExpressionDesc::Pexp_constraint(Box::new(record_expr), core_type.clone()),
+        pexp_loc: none_loc,
+        pexp_attributes: vec![],
+    };
+
+    // If create_type, wrap param with let binding
+    let body = if create_type {
+        let new_type = create_new_type_ref(tdcl, &type_name, arena);
+        let erase_type_ident = arena.intern_string("_eraseType");
+
+        // erase_type (param :> new_type)
+        let constrained_param = Expression {
+            pexp_desc: ExpressionDesc::Pexp_constraint(
+                Box::new(Expression {
+                    pexp_desc: ExpressionDesc::Pexp_ident(Located {
+                        txt: arena.push_longident(Longident::Lident(param_str)),
+                        loc,
+                    }),
+                    pexp_loc: none_loc,
+                    pexp_attributes: vec![],
+                }),
+                new_type,
+            ),
+            pexp_loc: none_loc,
+            pexp_attributes: vec![],
+        };
+
+        let erase_app = Expression {
+            pexp_desc: ExpressionDesc::Pexp_apply {
+                funct: Box::new(Expression {
+                    pexp_desc: ExpressionDesc::Pexp_ident(Located {
+                        txt: arena.push_longident(Longident::Lident(erase_type_ident)),
+                        loc: none_loc,
+                    }),
+                    pexp_loc: none_loc,
+                    pexp_attributes: vec![],
+                }),
+                args: vec![(ArgLabel::Nolabel, constrained_param)],
+                partial: false,
+                transformed_jsx: false,
+            },
+            pexp_loc: none_loc,
+            pexp_attributes: vec![],
+        };
+
+        // let param = erase_type(...) in constrained_record
+        Expression {
+            pexp_desc: ExpressionDesc::Pexp_let(
+                RecFlag::Nonrecursive,
+                vec![ValueBinding {
+                    pvb_pat: Pattern {
+                        ppat_desc: PatternDesc::Ppat_var(Located { txt: param_str, loc }),
+                        ppat_loc: none_loc,
+                        ppat_attributes: vec![],
+                    },
+                    pvb_expr: erase_app,
+                    pvb_attributes: vec![],
+                    pvb_loc: none_loc,
+                }],
+                Box::new(constrained_record),
+            ),
+            pexp_loc: none_loc,
+            pexp_attributes: vec![],
+        }
+    } else {
+        constrained_record
+    };
+
+    // Function: fun param => body
+    let fun_expr = Expression {
+        pexp_desc: ExpressionDesc::Pexp_fun {
+            arg_label: ArgLabel::Nolabel,
+            default: None,
+            lhs: param_pat,
+            rhs: Box::new(body),
+            is_async: false,
+            arity: arena.static_arity_1(),
+        },
+        pexp_loc: none_loc,
+        pexp_attributes: vec![],
+    };
+
+    // Value binding
+    let binding = ValueBinding {
+        pvb_pat: Pattern {
+            ppat_desc: PatternDesc::Ppat_var(Located { txt: from_js_name_idx, loc }),
+            ppat_loc: none_loc,
+            ppat_attributes: vec![],
+        },
+        pvb_expr: fun_expr,
+        pvb_attributes: vec![],
+        pvb_loc: none_loc,
+    };
+
+    StructureItem {
+        pstr_desc: StructureItemDesc::Pstr_value(RecFlag::Nonrecursive, vec![binding]),
+        pstr_loc: none_loc,
+    }
+}
+
+/// Create a core type reference for the new abstract type: abs_<name><params>
+fn create_new_type_ref(
+    tdcl: &TypeDeclaration,
+    type_name: &str,
+    arena: &mut ParseArena,
+) -> CoreType {
+    let none_loc = arena.none_loc();
+    let new_name = format!("abs_{}", type_name);
+    let new_name_idx = arena.intern_string(&new_name);
+
+    // Create type arguments from params
+    let type_args: Vec<CoreType> = tdcl.ptype_params
+        .iter()
+        .map(|(ct, _)| ct.clone())
+        .collect();
+
+    CoreType {
+        ptyp_desc: CoreTypeDesc::Ptyp_constr(
+            Located {
+                txt: arena.push_longident(Longident::Lident(new_name_idx)),
+                loc: tdcl.ptype_name.loc,
+            },
+            type_args,
+        ),
+        ptyp_loc: none_loc,
+        ptyp_attributes: vec![],
+    }
+}
+
+/// Create signature for record toJs function
+fn create_record_to_js_sig(
+    type_name: &str,
+    labels: &[LabelDeclaration],
+    core_type: &CoreType,
+    create_type: bool,
+    _loc: LocIdx,
+    arena: &mut ParseArena,
+) -> SignatureItem {
+    // Placeholder - will implement properly based on OCaml output
+    let none_loc = arena.none_loc();
+    let to_js_name = format!("{}ToJs", type_name);
+    let fn_name_idx = arena.intern_string(&to_js_name);
+
+    // Return type: abs_<name> if create_type, else object type
+    let ret_type = if create_type {
+        // For now, simplified - should match OCaml
+        CoreType {
+            ptyp_desc: CoreTypeDesc::Ptyp_any,
+            ptyp_loc: none_loc,
+            ptyp_attributes: vec![],
+        }
+    } else {
+        // Object type from labels
+        let fields: Vec<ObjectField> = labels
+            .iter()
+            .map(|label| ObjectField::Otag(
+                label.pld_name.clone(),
+                vec![],
+                label.pld_type.clone(),
+            ))
+            .collect();
+        CoreType {
+            ptyp_desc: CoreTypeDesc::Ptyp_object(fields, current::ClosedFlag::Closed),
+            ptyp_loc: none_loc,
+            ptyp_attributes: vec![],
+        }
+    };
+
+    let arrow_type = CoreType {
+        ptyp_desc: CoreTypeDesc::Ptyp_arrow {
+            arg: Box::new(TypeArg {
+                attrs: vec![],
+                lbl: ArgLabel::Nolabel,
+                typ: core_type.clone(),
+            }),
+            ret: Box::new(ret_type),
+            arity: arena.static_arity_1(),
+        },
+        ptyp_loc: none_loc,
+        ptyp_attributes: vec![],
+    };
+
+    let val_desc = ValueDescription {
+        pval_name: Located { txt: fn_name_idx, loc: none_loc },
+        pval_type: arrow_type,
+        pval_prim: vec![],
+        pval_attributes: vec![],
+        pval_loc: none_loc,
+    };
+
+    SignatureItem {
+        psig_desc: SignatureItemDesc::Psig_value(val_desc),
+        psig_loc: none_loc,
+    }
+}
+
+/// Create signature for record fromJs function
+fn create_record_from_js_sig(
+    type_name: &str,
+    labels: &[LabelDeclaration],
+    core_type: &CoreType,
+    create_type: bool,
+    _loc: LocIdx,
+    arena: &mut ParseArena,
+) -> SignatureItem {
+    let none_loc = arena.none_loc();
+    let from_js_name = format!("{}FromJs", type_name);
+    let fn_name_idx = arena.intern_string(&from_js_name);
+
+    // Arg type: abs_<name> if create_type, else open object type
+    let arg_type = if create_type {
+        CoreType {
+            ptyp_desc: CoreTypeDesc::Ptyp_any,
+            ptyp_loc: none_loc,
+            ptyp_attributes: vec![],
+        }
+    } else {
+        let fields: Vec<ObjectField> = labels
+            .iter()
+            .map(|label| ObjectField::Otag(
+                label.pld_name.clone(),
+                vec![],
+                label.pld_type.clone(),
+            ))
+            .collect();
+        CoreType {
+            ptyp_desc: CoreTypeDesc::Ptyp_object(fields, current::ClosedFlag::Open),
+            ptyp_loc: none_loc,
+            ptyp_attributes: vec![],
+        }
+    };
+
+    let arrow_type = CoreType {
+        ptyp_desc: CoreTypeDesc::Ptyp_arrow {
+            arg: Box::new(TypeArg {
+                attrs: vec![],
+                lbl: ArgLabel::Nolabel,
+                typ: arg_type,
+            }),
+            ret: Box::new(core_type.clone()),
+            arity: arena.static_arity_1(),
+        },
+        ptyp_loc: none_loc,
+        ptyp_attributes: vec![],
+    };
+
+    let val_desc = ValueDescription {
+        pval_name: Located { txt: fn_name_idx, loc: none_loc },
+        pval_type: arrow_type,
+        pval_prim: vec![],
+        pval_attributes: vec![],
+        pval_loc: none_loc,
+    };
+
+    SignatureItem {
+        psig_desc: SignatureItemDesc::Psig_value(val_desc),
+        psig_loc: none_loc,
+    }
+}
+
 /// Generate jsConverter include for a type declaration
 ///
 /// OCaml always generates `include (struct ... end : sig ... end)` even when
 /// jsConverter is "not applicable" (for variants, records, open types).
-/// Only enum polyvariants get actual content; others get empty structure/signature.
+/// Polyvariants and records (with newType) get actual content; others get empty.
 fn generate_js_converter_include(
     tdcl: &TypeDeclaration,
-    _new_type: bool,
+    create_type: bool,
     pstr_loc: LocIdx,
     arena: &mut ParseArena,
 ) -> StructureItem {
@@ -6034,50 +6681,25 @@ fn generate_js_converter_include(
     let outer_loc = pstr_loc;
     let inner_loc = tdcl.ptype_loc;
 
-    // Check if this is an enum polyvariant - only those get full implementation
-    let (structure_items, signature_items) = if let Some(row_fields) = is_enum_polyvar(tdcl) {
-        // Clone type_name to avoid borrow issues
-        let type_name = arena.get_string(tdcl.ptype_name.txt).to_string();
-        let (map_json, rev_map_json, has_bs_as) = build_js_converter_map(row_fields, arena);
-
-        // Get core type with @deriving attributes
-        let core_type = core_type_of_type_declaration_with_attrs(tdcl, arena);
-
-        // Build structure items - use inner_loc (tdcl.ptype_loc) like OCaml does
-        let mut structure_items = vec![];
-
-        // _eraseType
-        structure_items.push(create_erase_type_str(arena));
-
-        // _index
-        structure_items.push(create_unsafe_index_get_str(arena));
-
-        // _map
-        structure_items.push(create_map_binding("_map", &map_json, inner_loc, arena));
-
-        // _revMap (either same as _map or new %raw)
-        if has_bs_as {
-            structure_items.push(create_map_binding("_revMap", &rev_map_json, inner_loc, arena));
-        } else {
-            structure_items.push(create_rev_map_ref_binding(inner_loc, arena));
+    // Check the type kind to determine what to generate
+    let (structure_items, signature_items) = match &tdcl.ptype_kind {
+        // Record types: generate toJs/fromJs with object conversion
+        TypeKind::Ptype_record(label_declarations) => {
+            generate_js_converter_record(tdcl, label_declarations, create_type, inner_loc, arena)
         }
-
-        // colorToJs
-        structure_items.push(create_to_js_function(&type_name, &core_type, has_bs_as, inner_loc, arena));
-
-        // colorFromJs
-        structure_items.push(create_from_js_function(&type_name, inner_loc, arena));
-
-        // Build signature items
-        let mut signature_items = vec![];
-        signature_items.push(create_to_js_sig(&type_name, &core_type, inner_loc, arena));
-        signature_items.push(create_from_js_sig(&type_name, &core_type, inner_loc, arena));
-
-        (structure_items, signature_items)
-    } else {
-        // For non-polyvariant types (variants, records, open, abstract without polyvariant manifest),
-        // OCaml emits a warning and generates empty include (struct end : sig end)
-        (vec![], vec![])
+        // Abstract types: check if it's an enum polyvariant
+        TypeKind::Ptype_abstract => {
+            if let Some(row_fields) = is_enum_polyvar(tdcl) {
+                generate_js_converter_polyvar(tdcl, row_fields, create_type, inner_loc, arena)
+            } else {
+                // Abstract without polyvariant manifest: empty
+                (vec![], vec![])
+            }
+        }
+        // Variant and open types: not applicable, generate empty
+        TypeKind::Ptype_variant(_) | TypeKind::Ptype_open => {
+            (vec![], vec![])
+        }
     };
 
     // Create include (struct ... end : sig ... end) - use outer_loc (pstr_loc) for wrapper
