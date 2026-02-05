@@ -694,19 +694,80 @@ impl MarshalWriter {
             return false;
         }
 
-        // Look up the longident in the arena and clone it to end the borrow
-        let lid = self.get_arena().get_longident(idx).clone();
-
         // Record the object index BEFORE writing
         let obj_idx = self.obj_counter;
 
-        // Write the Longident
-        self.write_longident(&lid);
+        // Special-case static longidents that share prefix nodes in OCaml.
+        let array_set = self.get_arena().array_set_lid();
+        let array_get = self.get_arena().array_get_lid();
+        let belt_array_concat = self.get_arena().belt_array_concat_many_lid();
+        let belt_list_concat = self.get_arena().belt_list_concat_many_lid();
+        let belt_array_lident = self.get_arena().belt_array_lident();
+        let belt_list_lident = self.get_arena().belt_list_lident();
+
+        if idx == array_set || idx == array_get {
+            let name = match self.get_arena().get_longident(idx) {
+                Longident::Ldot(_, name) => *name,
+                other => {
+                    let lid = other.clone();
+                    self.write_longident(&lid);
+                    self.lident_idx_table.insert(idx, obj_idx);
+                    return true;
+                }
+            };
+            let array_lident = self.get_arena().array_lident();
+            self.write_ldot_with_prefix_idx(array_lident, name);
+        } else if idx == belt_array_concat {
+            let name = match self.get_arena().get_longident(idx) {
+                Longident::Ldot(_, name) => *name,
+                other => {
+                    let lid = other.clone();
+                    self.write_longident(&lid);
+                    self.lident_idx_table.insert(idx, obj_idx);
+                    return true;
+                }
+            };
+            self.write_ldot_with_prefix_idx(belt_array_lident, name);
+        } else if idx == belt_list_concat {
+            let name = match self.get_arena().get_longident(idx) {
+                Longident::Ldot(_, name) => *name,
+                other => {
+                    let lid = other.clone();
+                    self.write_longident(&lid);
+                    self.lident_idx_table.insert(idx, obj_idx);
+                    return true;
+                }
+            };
+            self.write_ldot_with_prefix_idx(belt_list_lident, name);
+        } else if idx == belt_array_lident || idx == belt_list_lident {
+            let name = match self.get_arena().get_longident(idx) {
+                Longident::Ldot(_, name) => *name,
+                other => {
+                    let lid = other.clone();
+                    self.write_longident(&lid);
+                    self.lident_idx_table.insert(idx, obj_idx);
+                    return true;
+                }
+            };
+            let belt_lident = self.get_arena().belt_lident();
+            self.write_ldot_with_prefix_idx(belt_lident, name);
+        } else {
+            // Look up the longident in the arena and clone it to end the borrow
+            let lid = self.get_arena().get_longident(idx).clone();
+            self.write_longident(&lid);
+        }
 
         // Record for future sharing
         self.lident_idx_table.insert(idx, obj_idx);
 
         true
+    }
+
+    /// Write `Ldot(prefix, name)` where `prefix` is referenced by LidentIdx.
+    fn write_ldot_with_prefix_idx(&mut self, prefix: LidentIdx, name: StrIdx) {
+        self.write_block_header(1, 2);
+        self.write_lident_idx(prefix);
+        self.write_str_idx(name);
     }
 
     /// Write a Longident value directly (internal helper).

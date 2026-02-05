@@ -246,6 +246,14 @@ impl Default for InternedLocation {
 /// We replicate this by pre-allocating them in the arena.
 #[derive(Debug, Clone, Copy)]
 pub struct StaticArrayLidents {
+    /// `Lident "Array"` prefix shared by Array.get/set.
+    pub array_lident: LidentIdx,
+    /// `Lident "Belt"` prefix shared by Belt.Array/List.
+    pub belt_lident: LidentIdx,
+    /// `Ldot(Lident "Belt", "Array")` prefix for Belt.Array.concatMany.
+    pub belt_array: LidentIdx,
+    /// `Ldot(Lident "Belt", "List")` prefix for Belt.List.concatMany.
+    pub belt_list: LidentIdx,
     /// `Ldot(Lident "Array", "set")` for array assignment desugaring
     pub array_set: LidentIdx,
     /// `Ldot(Lident "Array", "get")` for array access desugaring
@@ -398,7 +406,7 @@ impl Default for ParseArena {
         ));
         // Pre-allocate Belt.List.concatMany for list spread desugaring
         let list_str = strings.intern("List");
-        let lident_list = longidents.push(Longident::Lident(list_str));
+        let _lident_list = longidents.push(Longident::Lident(list_str));
         let belt_list = longidents.push(Longident::Ldot(
             Box::new(Longident::Lident(belt_str)),
             list_str,
@@ -410,9 +418,11 @@ impl Default for ParseArena {
             )),
             concat_many_str,
         ));
-        // Suppress unused variable warnings
-        let _ = (lident_array, lident_belt, belt_array, lident_list, belt_list);
         let static_array_lidents = StaticArrayLidents {
+            array_lident: lident_array,
+            belt_lident: lident_belt,
+            belt_array,
+            belt_list,
             array_set,
             array_get,
             belt_array_concat_many,
@@ -872,6 +882,26 @@ impl ParseArena {
     /// Use in array access desugaring: `arr[i]` → `Array.get(arr, i)`.
     pub fn array_get_lid(&self) -> LidentIdx {
         self.static_array_lidents.array_get
+    }
+
+    /// Get the pre-allocated `Lident "Array"` prefix.
+    pub fn array_lident(&self) -> LidentIdx {
+        self.static_array_lidents.array_lident
+    }
+
+    /// Get the pre-allocated `Lident "Belt"` prefix.
+    pub fn belt_lident(&self) -> LidentIdx {
+        self.static_array_lidents.belt_lident
+    }
+
+    /// Get the pre-allocated `Ldot(Lident "Belt", "Array")` prefix.
+    pub fn belt_array_lident(&self) -> LidentIdx {
+        self.static_array_lidents.belt_array
+    }
+
+    /// Get the pre-allocated `Ldot(Lident "Belt", "List")` prefix.
+    pub fn belt_list_lident(&self) -> LidentIdx {
+        self.static_array_lidents.belt_list
     }
 
     /// Get the pre-allocated `Ldot(Ldot(Lident "Belt", "Array"), "concatMany")`.

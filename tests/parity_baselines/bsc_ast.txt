@@ -433,6 +433,7 @@ syntax_tests/data/idempotency/pupilfirst/schools/StudentsEditor__Types.res
 syntax_tests/data/idempotency/pupilfirst/schools/TargetChecklistItem.res
 syntax_tests/data/idempotency/pupilfirst/schools/studentsEditor__SelectedStudent.res
 syntax_tests/data/idempotency/pupilfirst/shared/Api.res
+syntax_tests/data/idempotency/pupilfirst/shared/ArrayUtils.res
 syntax_tests/data/idempotency/pupilfirst/shared/AuthenticityToken.res
 syntax_tests/data/idempotency/pupilfirst/shared/Avatar.res
 syntax_tests/data/idempotency/pupilfirst/shared/ContentBlock.res
@@ -522,8 +523,10 @@ syntax_tests/data/idempotency/reprocessing/Reprocessing_Env.res
 syntax_tests/data/idempotency/reprocessing/Reprocessing_Env.resi
 syntax_tests/data/idempotency/reprocessing/Reprocessing_Events.res
 syntax_tests/data/idempotency/reprocessing/Reprocessing_Font.res
+syntax_tests/data/idempotency/reprocessing/Reprocessing_Matrix.res
 syntax_tests/data/idempotency/reprocessing/Reprocessing_Shaders.res
 syntax_tests/data/idempotency/reprocessing/Reprocessing_Types.res
+syntax_tests/data/idempotency/reprocessing/Reprocessing_Utils.res
 syntax_tests/data/idempotency/reprocessing/Reprocessing_Utils.resi
 syntax_tests/data/idempotency/warp/Warp.resi
 syntax_tests/data/idempotency/warp/Warp_Client.res
@@ -755,6 +758,7 @@ syntax_tests/data/ppx/react/spreadProps.res
 syntax_tests/data/ppx/react/topLevel.res
 syntax_tests/data/ppx/react/uncurriedProps.res
 syntax_tests/data/ppx/react/v4.res
+syntax_tests/data/printer/comments/array.res
 syntax_tests/data/printer/comments/binaryExpr.res
 syntax_tests/data/printer/comments/blockExpr.res
 syntax_tests/data/printer/comments/expr.res
@@ -823,6 +827,8 @@ syntax_tests/data/printer/expr/switch.res
 syntax_tests/data/printer/expr/ternary.res
 syntax_tests/data/printer/expr/try.res
 syntax_tests/data/printer/expr/tuple.res
+syntax_tests/data/printer/expr/unary.res
+syntax_tests/data/printer/expr/underscoreApply.res
 syntax_tests/data/printer/expr/while.res
 syntax_tests/data/printer/expr/whitespace.res
 syntax_tests/data/printer/modExpr/apply.res

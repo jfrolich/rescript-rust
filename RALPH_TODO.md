@@ -25,12 +25,16 @@
 | Syntax tests | 506/506 (100%) ✅ |
 | sexp-locs | 1196/1196 (100%) ✅ |
 | sexp-locs-ppx | 1196/1196 (100%) ✅ |
-| bsc-ast | 882/1179 (74.8%) |
+| bsc-ast | 888/1179 (75.3%) |
 
 **Note:** 1179 = files where OCaml bsc can produce output. 134 files use newer syntax
 that OCaml can't parse; these are excluded from parity testing. Total test files: 1313.
 
 **Session progress (2026-02-05) - newest:**
+- Shared static Longident prefixes for array/belt desugarings
+  - Added static prefix indices (Array/Belt/Belt.Array/Belt.List) to ParseArena
+  - Marshal now reuses prefix Longident indices when writing Array.get/set and Belt.*.concatMany
+  - Result: no regressions; bsc-ast differences now 291 (888/1179)
 - Pre-allocated empty-string StrIdxs per OCaml compilation unit for FFI primitives
   - `external_ffi_types` and `ast_derive_js_mapper` use distinct cached empty strings
   - All pval_prim lists now reuse the correct literal identity per unit
