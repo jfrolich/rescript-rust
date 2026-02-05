@@ -3996,6 +3996,10 @@ fn parse_label_declarations(
         }
         is_first = false;
         if !p.optional(&Token::Comma) {
+            let implicit_comma = matches!(p.token, Token::At | Token::DocComment { .. });
+            if implicit_comma {
+                continue;
+            }
             if grammar::is_list_element(&grammar::Grammar::FieldDeclarations, &p.token) {
                 // Missing comma but next token looks like another field declaration.
                 // Emit "Did you forget a `,` here?" and continue parsing.
