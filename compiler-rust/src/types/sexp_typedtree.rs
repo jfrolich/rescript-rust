@@ -876,6 +876,9 @@ fn sexp_expression_desc(arena: &ParseArena, ctx: &TypeContext<'_>, with_locs: bo
         ExpressionDesc::Texp_pack(me) => {
             Sexp::list(vec![Sexp::atom("Texp_pack"), sexp_module_expr(arena, ctx, with_locs, me)])
         }
+        ExpressionDesc::Texp_extension_constructor(li, p) => {
+            Sexp::list(vec![Sexp::atom("Texp_extension_constructor"), sexp_longident_idx(arena, li.txt), sexp_path(p)])
+        }
     }
 }
 

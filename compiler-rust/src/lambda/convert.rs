@@ -202,6 +202,7 @@ impl<'a> LambdaConverter<'a> {
                 Lambda::if_(cond, Lambda::unit(), failure)
             }
             ExpressionDesc::Texp_pack(_) => Lambda::unit(),
+            ExpressionDesc::Texp_extension_constructor(_, _) => Lambda::unit(),
         }
     }
 
