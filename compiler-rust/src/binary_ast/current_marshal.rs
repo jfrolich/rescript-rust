@@ -24,6 +24,7 @@ use crate::parser::ast::{
     RowField, SignatureItem, SignatureItemDesc, StructureItem, StructureItemDesc, TypeArg,
     TypeDeclaration, TypeExtension, TypeKind, ValueBinding, ValueDescription, Variance,
     WithConstraint, ConstructorArguments, ConstructorDeclaration, StringLoc,
+    Extension,
 };
 
 // ========== Attribute list sharing ==========
@@ -82,6 +83,23 @@ fn has_braces_attr(attrs: &Attributes, w: &MarshalWriter) -> bool {
     attrs
         .iter()
         .any(|(name, _)| arena.get_string(name.txt) == "res.braces")
+}
+
+fn has_ternary_attr(attrs: &Attributes, w: &MarshalWriter) -> bool {
+    let arena = w.get_arena();
+    attrs
+        .iter()
+        .any(|(name, _)| arena.get_string(name.txt) == "res.ternary")
+}
+
+fn should_share_singleton_attr_list(name: &str) -> bool {
+    matches!(
+        name,
+        "react.component"
+            | "jsx.component"
+            | "react.componentWithProps"
+            | "jsx.componentWithProps"
+    )
 }
 
 fn is_singleton_template_attr(attrs: &Attributes, w: &MarshalWriter) -> bool {
@@ -251,7 +269,6 @@ fn marshal_attributes(
 ) {
     let attrs_slice = attrs.as_slice();
 
-    let arena = w.get_arena();
     let payload_is_empty_str =
         |payload: &Payload| matches!(payload, Payload::PStr(items) if items.is_empty());
 
@@ -260,7 +277,7 @@ fn marshal_attributes(
         if let [(name, payload)] = attrs_slice {
             if payload_is_empty_str(payload)
                 && name.loc == LocIdx::default()
-                && arena.get_string(name.txt) == "res.template"
+                && w.get_arena().get_string(name.txt) == "res.template"
             {
                 raw_template_list = true;
                 if let Some(obj_idx) = w.raw_template_attr_list() {
@@ -276,6 +293,42 @@ fn marshal_attributes(
     }
 
     let share_singleton = share_singleton || raw_template_list;
+    // In OCaml raw-expression rewrites, `res.template` attributes come from a
+    // shared module-level payload (`PStr []`). Keep parser-level empty payload
+    // sharing enabled in this scope even when the expression-level caller did
+    // not request it explicitly.
+    let share_empty_pstr = if raw_template_list && share_empty_pstr.is_none() {
+        Some(EmptyPayloadShareKind::ParserAttr)
+    } else {
+        share_empty_pstr
+    };
+
+    // Some JSX transforms keep reusing the exact singleton attribute list object
+    // (not just the tuple inside), notably for `@react.component` annotations.
+    // Mirror that by sharing the whole `[attr]` list cell for those names.
+    if let [(name, payload)] = attrs_slice {
+        if payload_is_empty_str(payload) {
+            let name_str = w.get_arena().get_string(name.txt);
+            if should_share_singleton_attr_list(name_str) {
+                let key = (name.txt, name.loc);
+                if let Some(&obj_idx) = w.singleton_attr_list_table_get(&key) {
+                    let d = w.obj_counter() - obj_idx;
+                    w.write_shared_ref(d);
+                    return;
+                }
+
+                let obj_idx = w.obj_counter();
+                w.singleton_attr_list_table_insert(key, obj_idx);
+
+                w.write_block_header(0, 2); // cons
+                w.write_block_header(0, 2); // attribute tuple
+                name.marshal(w);
+                marshal_attribute_payload(name, payload, w, share_empty_pstr);
+                w.write_int(0); // []
+                return;
+            }
+        }
+    }
 
     // Share singleton attribute TUPLES: [(name, PStr [])] with Location.none
     //
@@ -323,6 +376,17 @@ fn marshal_attributes(
 
     // Default: marshal normally (with optional payload sharing)
     marshal_attribute_list(attrs_slice, w, share_empty_pstr);
+}
+
+fn marshal_extension(
+    ext: &Extension,
+    w: &mut MarshalWriter,
+    share_empty_pstr: Option<EmptyPayloadShareKind>,
+) {
+    let (name, payload) = ext;
+    w.write_block_header(0, 2);
+    name.marshal(w);
+    marshal_attribute_payload(name, payload, w, share_empty_pstr);
 }
 
 // ========== Flag implementations ==========
@@ -474,7 +538,26 @@ impl Marshal for TypeArg {
     fn marshal(&self, w: &mut MarshalWriter) {
         // arg = { attrs: attributes; lbl: arg_label; typ: core_type }
         w.write_block_header(0, 3);
-        self.attrs.marshal(w);
+        // In parser-generated ES6 arrow type args, empty attribute payloads
+        // (`[@attr]` -> `PStr []`) reuse a shared payload object in OCaml.
+        // Restrict sharing to parser-shaped attrs (real, non-ghost locations)
+        // to avoid over-sharing in PPX-generated paths.
+        let share_parser_attr_payloads = !self.attrs.is_empty()
+            && self.attrs.iter().all(|(name, payload)| {
+                matches!(payload, Payload::PStr(items) if items.is_empty())
+                    && name.loc != LocIdx::default()
+                    && !w.get_arena().get_location(name.loc).loc_ghost
+            });
+        if share_parser_attr_payloads {
+            marshal_attributes(
+                &self.attrs,
+                w,
+                false,
+                Some(EmptyPayloadShareKind::ParserAttr),
+            );
+        } else {
+            self.attrs.marshal(w);
+        }
         self.lbl.marshal(w);
         self.typ.marshal(w);
     }
@@ -847,8 +930,10 @@ impl Marshal for Expression {
                 | ExpressionDesc::Pexp_newtype(_, _)
         );
         let share_empty_pstr = if is_pipe_application(self, w)
-            || (share_attrs && has_template_literal_attr(&self.pexp_attributes, w))
-            || (w.in_extension() && has_braces_attr(&self.pexp_attributes, w))
+            || share_attrs
+            || (w.in_extension()
+                && (has_braces_attr(&self.pexp_attributes, w)
+                    || has_ternary_attr(&self.pexp_attributes, w)))
         {
             Some(EmptyPayloadShareKind::ParserAttr)
         } else {
@@ -1067,7 +1152,7 @@ impl Marshal for ExpressionDesc {
             }
             ExpressionDesc::Pexp_extension(ext) => {
                 w.write_block_header(27, 1);
-                ext.marshal(w);
+                marshal_extension(ext, w, Some(EmptyPayloadShareKind::ParserAttr));
             }
             ExpressionDesc::Pexp_await(e) => {
                 w.write_block_header(28, 1);
@@ -1516,7 +1601,12 @@ impl Marshal for StructureItemDesc {
             StructureItemDesc::Pstr_eval(e, attrs) => {
                 w.write_block_header(0, 2);
                 e.marshal(w);
-                attrs.marshal(w);
+                let share_empty_pstr = if w.in_extension() {
+                    Some(EmptyPayloadShareKind::ParserAttr)
+                } else {
+                    None
+                };
+                marshal_attributes(attrs, w, false, share_empty_pstr);
             }
             StructureItemDesc::Pstr_value(flag, bindings) => {
                 w.write_block_header(1, 2);
@@ -1567,7 +1657,12 @@ impl Marshal for StructureItemDesc {
             StructureItemDesc::Pstr_extension(ext, attrs) => {
                 w.write_block_header(12, 2);
                 ext.marshal(w);
-                attrs.marshal(w);
+                let share_empty_pstr = if w.in_extension() {
+                    Some(EmptyPayloadShareKind::ParserAttr)
+                } else {
+                    None
+                };
+                marshal_attributes(attrs, w, false, share_empty_pstr);
             }
         }
     }
@@ -1630,7 +1725,12 @@ impl Marshal for SignatureItemDesc {
             SignatureItemDesc::Psig_extension(ext, attrs) => {
                 w.write_block_header(10, 2);
                 ext.marshal(w);
-                attrs.marshal(w);
+                let share_empty_pstr = if w.in_extension() {
+                    Some(EmptyPayloadShareKind::ParserAttr)
+                } else {
+                    None
+                };
+                marshal_attributes(attrs, w, false, share_empty_pstr);
             }
         }
     }
