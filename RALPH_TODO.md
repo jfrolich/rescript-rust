@@ -25,12 +25,21 @@
 | Syntax tests | 506/506 (100%) ✅ |
 | sexp-locs | 1196/1196 (100%) ✅ |
 | sexp-locs-ppx | 1196/1196 (100%) ✅ |
-| bsc-ast | 888/1179 (75.3%) |
+| bsc-ast | 894/1179 (75.8%) |
 
 **Note:** 1179 = files where OCaml bsc can produce output. 134 files use newer syntax
 that OCaml can't parse; these are excluded from parity testing. Total test files: 1313.
 
 **Session progress (2026-02-05) - newest:**
+- Fixed `Lident("unit")` sharing in `#=` setter desugaring and PPX unit helper:
+  - Rust used `push_longident(Longident::Lident(...))`, creating fresh wrappers each time.
+  - OCaml (`ast_exp_apply.ml` + `Ast_literal.Lid.type_unit`) reuses a static longident.
+  - Changed Rust to `arena.push_lident_static("unit")` in `desugar_hash_set` and `make_unit_type`.
+  - Result: `inspect_binary_ast.py test tests/syntax_tests/data/conversion/reason/jsObject.res` is byte-identical.
+  - Full parity run: bsc-ast differences `148 -> 142` (1054/1196), 0 regressions.
+  - New passes: `conversion/reason/jsObject.res`, `idempotency/mareo/Draw.res`,
+    `idempotency/mareo/Main.res`, `idempotency/mareo/Sprite.res`,
+    `parsing/grammar/expressions/primary.res`, `printer/expr/jsObjectSet.res`.
 - Ran full parity test: bsc-ast differences 148 (1048/1196). No regressions.
 - Investigated `tests/syntax_tests/data/conversion/reason/jsObject.res` mismatch:
   - `inspect_binary_ast.py` shows OCaml shares a `Some("unit")` block (obj 629) while Rust emits a fresh one.

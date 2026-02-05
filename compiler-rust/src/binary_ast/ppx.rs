@@ -4321,9 +4321,8 @@ fn desugar_hash_set(
                 pexp_attributes: vec![],
             };
 
-            // Create type "unit" = Ptyp_constr(Lident "unit", [])
-            let unit_lid = Longident::Lident(arena.intern_string("unit"));
-            let unit_lid_idx = arena.push_longident(unit_lid);
+            // Reuse static Lident("unit") to mirror OCaml's Ast_literal.Lid.type_unit sharing.
+            let unit_lid_idx = arena.push_lident_static("unit");
             let unit_type = CoreType {
                 ptyp_desc: CoreTypeDesc::Ptyp_constr(Located::new(unit_lid_idx, loc), vec![]),
                 ptyp_loc: loc,
@@ -7310,8 +7309,7 @@ fn make_setter_type_with_loc(record_type: &CoreType, field_type: &CoreType, loc:
 /// Create unit type
 fn make_unit_type(arena: &mut ParseArena) -> CoreType {
     let none_loc = arena.none_loc();
-    let unit_str = arena.intern_string("unit");
-    let unit_ident = arena.push_longident(Longident::Lident(unit_str));
+    let unit_ident = arena.push_lident_static("unit");
     CoreType {
         ptyp_desc: CoreTypeDesc::Ptyp_constr(
             Located { txt: unit_ident, loc: none_loc },

@@ -15,6 +15,7 @@ syntax_tests/data/conversion/reason/extension.res
 syntax_tests/data/conversion/reason/fastPipe.res
 syntax_tests/data/conversion/reason/gentype.res
 syntax_tests/data/conversion/reason/gentype.resi
+syntax_tests/data/conversion/reason/jsObject.res
 syntax_tests/data/conversion/reason/jsObject.resi
 syntax_tests/data/conversion/reason/jsxProps.res
 syntax_tests/data/conversion/reason/letBinding.res
@@ -262,13 +263,16 @@ syntax_tests/data/idempotency/mareo/Actors.resi
 syntax_tests/data/idempotency/mareo/Director.res
 syntax_tests/data/idempotency/mareo/Director.resi
 syntax_tests/data/idempotency/mareo/Dom_html.res
+syntax_tests/data/idempotency/mareo/Draw.res
 syntax_tests/data/idempotency/mareo/Draw.resi
+syntax_tests/data/idempotency/mareo/Main.res
 syntax_tests/data/idempotency/mareo/Object.res
 syntax_tests/data/idempotency/mareo/Object.resi
 syntax_tests/data/idempotency/mareo/Particle.res
 syntax_tests/data/idempotency/mareo/Particle.resi
 syntax_tests/data/idempotency/mareo/Procedural_generator.res
 syntax_tests/data/idempotency/mareo/Procedural_generator.resi
+syntax_tests/data/idempotency/mareo/Sprite.res
 syntax_tests/data/idempotency/mareo/Sprite.resi
 syntax_tests/data/idempotency/mareo/Viewport.res
 syntax_tests/data/idempotency/mareo/Viewport.resi
@@ -755,6 +759,7 @@ syntax_tests/data/parsing/grammar/expressions/letUnwrap.res
 syntax_tests/data/parsing/grammar/expressions/list.res
 syntax_tests/data/parsing/grammar/expressions/parenthesized.res
 syntax_tests/data/parsing/grammar/expressions/polyvariant.res
+syntax_tests/data/parsing/grammar/expressions/primary.res
 syntax_tests/data/parsing/grammar/expressions/record.res
 syntax_tests/data/parsing/grammar/expressions/sideEffects.res
 syntax_tests/data/parsing/grammar/expressions/switch.res
@@ -949,6 +954,7 @@ syntax_tests/data/printer/expr/fun.res
 syntax_tests/data/printer/expr/ident.res
 syntax_tests/data/printer/expr/if.res
 syntax_tests/data/printer/expr/jsObjectAccess.res
+syntax_tests/data/printer/expr/jsObjectSet.res
 syntax_tests/data/printer/expr/let.res
 syntax_tests/data/printer/expr/letUnwrap.res
 syntax_tests/data/printer/expr/letexception.res
