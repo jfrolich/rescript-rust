@@ -5661,7 +5661,7 @@ fn create_rev_map_ref_binding(loc: LocIdx, arena: &mut ParseArena) -> StructureI
 
     let binding = ValueBinding {
         pvb_pat: Pattern {
-            ppat_desc: PatternDesc::Ppat_var(Located { txt: rev_map_name, loc: none_loc }),
+            ppat_desc: PatternDesc::Ppat_var(Located { txt: rev_map_name, loc }), // OCaml: {loc; txt = rev_map}
             ppat_loc: none_loc,
             ppat_attributes: vec![],
         },
@@ -6211,30 +6211,32 @@ fn create_record_to_js_function(
     };
 
     // Build record expression for %obj extension: { field: param.field, ... }
+    // OCaml: label uses pld_name.loc, param ident uses tdcl.ptype_loc, expressions use default_loc (ghost)
+    let type_loc = loc; // loc is already tdcl.ptype_loc from the caller
     let record_fields: Vec<ExpressionRecordField> = labels
         .iter()
         .map(|label| {
             let field_name = label.pld_name.txt;
-            let field_loc = label.pld_name.loc;
+            let field_loc = label.pld_name.loc; // OCaml: {pld_name = {loc; txt}}
             let lid = Located {
                 txt: arena.push_longident(Longident::Lident(field_name)),
-                loc: field_loc,
+                loc: field_loc, // OCaml: {Asttypes.loc; txt = Lident txt} where loc = pld_name.loc
             };
 
-            // param.field
+            // param.field (Pexp_field uses field_loc for the label, none_loc for expressions)
             let field_access = Expression {
                 pexp_desc: ExpressionDesc::Pexp_field(
                     Box::new(Expression {
                         pexp_desc: ExpressionDesc::Pexp_ident(Located {
                             txt: arena.push_longident(Longident::Lident(param_str)),
-                            loc: field_loc,
+                            loc: type_loc, // OCaml: {Asttypes.txt = Lident param; loc} (tdcl.ptype_loc)
                         }),
-                        pexp_loc: none_loc,
+                        pexp_loc: none_loc, // Exp.ident uses !default_loc (ghost)
                         pexp_attributes: vec![],
                     }),
                     lid.clone(),
                 ),
-                pexp_loc: none_loc,
+                pexp_loc: none_loc, // Exp.field uses !default_loc (ghost)
                 pexp_attributes: vec![],
             };
 
@@ -6360,31 +6362,34 @@ fn create_record_from_js_function(
     };
 
     // Build record expression: { field: ##param.field, ... }
+    // OCaml: label uses pld_name.loc, param ident uses tdcl.ptype_loc, expressions use default_loc (ghost)
+    let type_loc = loc; // loc is already tdcl.ptype_loc from the caller
     let record_fields: Vec<ExpressionRecordField> = labels
         .iter()
         .map(|label| {
             let field_name = label.pld_name.txt;
-            let field_loc = label.pld_name.loc;
+            let field_loc = label.pld_name.loc; // OCaml: {pld_name = {loc; txt}}
             let lid = Located {
                 txt: arena.push_longident(Longident::Lident(field_name)),
-                loc: field_loc,
+                loc: field_loc, // OCaml: {Asttypes.loc; txt = Lident txt} where loc = pld_name.loc
             };
 
-            // ##param.field (Pexp_send)
+            // ##param.field (Pexp_send) - js_field function
+            // OCaml: js_field uses o.pexp_loc for ## ident, and label loc comes from the label parameter
             let field_name_str = arena.get_string(field_name).to_string();
             let js_field = Expression {
                 pexp_desc: ExpressionDesc::Pexp_send(
                     Box::new(Expression {
                         pexp_desc: ExpressionDesc::Pexp_ident(Located {
                             txt: arena.push_longident(Longident::Lident(param_str)),
-                            loc: field_loc,
+                            loc: type_loc, // OCaml: Exp.ident ident_param where ident_param has tdcl.ptype_loc
                         }),
-                        pexp_loc: none_loc,
+                        pexp_loc: none_loc, // Exp.ident uses !default_loc (ghost)
                         pexp_attributes: vec![],
                     }),
-                    Located { txt: field_name_str, loc: field_loc },
+                    Located { txt: field_name_str, loc: none_loc }, // Exp.ident m uses !default_loc
                 ),
-                pexp_loc: none_loc,
+                pexp_loc: none_loc, // js_field result uses !default_loc (ghost)
                 pexp_attributes: vec![],
             };
 
@@ -6540,7 +6545,7 @@ fn create_record_to_js_sig(
     labels: &[LabelDeclaration],
     core_type: &CoreType,
     create_type: bool,
-    _loc: LocIdx,
+    loc: LocIdx,
     arena: &mut ParseArena,
 ) -> SignatureItem {
     let none_loc = arena.none_loc();
@@ -6583,7 +6588,7 @@ fn create_record_to_js_sig(
     };
 
     let val_desc = ValueDescription {
-        pval_name: Located { txt: fn_name_idx, loc: none_loc },
+        pval_name: Located { txt: fn_name_idx, loc }, // OCaml: pat_to_js uses tdcl.ptype_loc
         pval_type: arrow_type,
         pval_prim: vec![],
         pval_attributes: vec![],
@@ -6603,7 +6608,7 @@ fn create_record_from_js_sig(
     labels: &[LabelDeclaration],
     core_type: &CoreType,
     create_type: bool,
-    _loc: LocIdx,
+    loc: LocIdx,
     arena: &mut ParseArena,
 ) -> SignatureItem {
     let none_loc = arena.none_loc();
@@ -6645,7 +6650,7 @@ fn create_record_from_js_sig(
     };
 
     let val_desc = ValueDescription {
-        pval_name: Located { txt: fn_name_idx, loc: none_loc },
+        pval_name: Located { txt: fn_name_idx, loc }, // OCaml: pat_from_js uses tdcl.ptype_loc
         pval_type: arrow_type,
         pval_prim: vec![],
         pval_attributes: vec![],
