@@ -66,16 +66,38 @@ const CODE_STRING64: u8 = 0x15;
 pub(crate) enum EmptyPayloadShareKind {
     ObjectTypeAttr,
     ObjectFieldAttr,
+    ParserAttr,
 }
 
 impl EmptyPayloadShareKind {
-    const COUNT: usize = 2;
+    const COUNT: usize = 3;
 
     #[inline]
     const fn as_index(self) -> usize {
         match self {
             Self::ObjectTypeAttr => 0,
             Self::ObjectFieldAttr => 1,
+            Self::ParserAttr => 2,
+        }
+    }
+}
+
+/// Sharing groups for single-element primitive lists in `pval_prim`.
+///
+/// OCaml shares some primitive lists because they are compiled as module-level
+/// constants (e.g. ["#raw_expr"]). We mirror that by sharing those lists here.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub(crate) enum PrimListShareKind {
+    RawExpr,
+}
+
+impl PrimListShareKind {
+    const COUNT: usize = 1;
+
+    #[inline]
+    const fn as_index(self) -> usize {
+        match self {
+            Self::RawExpr => 0,
         }
     }
 }
@@ -167,6 +189,9 @@ pub struct MarshalWriter {
     /// Shared object indices for empty PStr payloads (`PStr []`) by sharing group.
     pstr_empty_table: [Option<u32>; EmptyPayloadShareKind::COUNT],
 
+    /// Shared object indices for `pval_prim` single-element lists by sharing group.
+    prim_list_table: [Option<u32>; PrimListShareKind::COUNT],
+
 
     /// Optional reference to ParseArena for LocIdx marshalling.
     /// Set via `set_arena()` before marshalling AST with LocIdx fields.
@@ -211,6 +236,7 @@ impl MarshalWriter {
             position_value_table: HashMap::new(),
 
             pstr_empty_table: [None; EmptyPayloadShareKind::COUNT],
+            prim_list_table: [None; PrimListShareKind::COUNT],
 
             arena: None,
             obj_counter: 0,
@@ -240,6 +266,7 @@ impl MarshalWriter {
             position_value_table: HashMap::new(),
 
             pstr_empty_table: [None; EmptyPayloadShareKind::COUNT],
+            prim_list_table: [None; PrimListShareKind::COUNT],
 
             arena: None,
             obj_counter: 0,
@@ -287,6 +314,7 @@ impl MarshalWriter {
         self.singleton_attr_list_table.clear();
         self.tyvar_core_type_table.clear();
         self.pstr_empty_table = [None; EmptyPayloadShareKind::COUNT];
+        self.prim_list_table = [None; PrimListShareKind::COUNT];
         self.obj_counter = 0;
         self.size_32 = 0;
         self.size_64 = 0;
@@ -1063,6 +1091,22 @@ impl MarshalWriter {
         self.write_block_header(0, 1);
         self.write_int(0); // empty list
         self.pstr_empty_table[idx] = Some(obj_idx);
+    }
+
+    /// Write a shared single-element `pval_prim` list like ["#raw_expr"].
+    pub(crate) fn write_prim_list_shared(&mut self, kind: PrimListShareKind, prim: StrIdx) {
+        let idx = kind.as_index();
+        if let Some(obj_idx) = self.prim_list_table[idx] {
+            let d = self.obj_counter - obj_idx;
+            self.write_shared_ref(d);
+            return;
+        }
+
+        let obj_idx = self.obj_counter;
+        self.write_block_header(0, 2);
+        self.write_str_idx(prim);
+        self.write_int(0); // []
+        self.prim_list_table[idx] = Some(obj_idx);
     }
 
     /// Write an ArityIdx with index-based sharing.

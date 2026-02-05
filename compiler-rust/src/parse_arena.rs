@@ -318,6 +318,9 @@ pub struct ParseArena {
     /// Pre-allocated empty string for ast_derive_js_mapper primitives.
     /// This is a separate compilation unit, so it must not share with external_ffi_types.
     prim_empty_js_mapper: StrIdx,
+    /// Pre-allocated "#raw_expr" string for raw expression primitives.
+    /// OCaml shares this literal across all uses in ast_exp_handle_external.ml.
+    prim_raw_expr: StrIdx,
     /// Counter for generating unique local module names (for %%private).
     /// OCaml uses a global ref counter, so this matches that behavior.
     local_module_counter: u32,
@@ -341,6 +344,7 @@ impl Default for ParseArena {
         // These model literal "" values coming from distinct OCaml compilation units.
         let prim_empty_external_ffi = strings.push(String::new());
         let prim_empty_js_mapper = strings.push(String::new());
+        let prim_raw_expr = strings.push("#raw_expr".to_string());
 
         // Pre-allocate static list lidents.
         // We need TWO sets: one for pattern contexts (res_core.ml) and one for
@@ -442,6 +446,7 @@ impl Default for ParseArena {
             strings,
             prim_empty_external_ffi,
             prim_empty_js_mapper,
+            prim_raw_expr,
             local_module_counter: 0,
         }
     }
@@ -928,6 +933,10 @@ impl ParseArena {
     /// Empty string literal from `ast_derive_js_mapper.ml` (separate unit).
     pub fn prim_empty_js_mapper(&self) -> StrIdx {
         self.prim_empty_js_mapper
+    }
+
+    pub fn prim_raw_expr(&self) -> StrIdx {
+        self.prim_raw_expr
     }
 
     /// Get the string content for a StrIdx.

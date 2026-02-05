@@ -31,6 +31,10 @@
 that OCaml can't parse; these are excluded from parity testing. Total test files: 1313.
 
 **Session progress (2026-02-05) - newest:**
+- Shared `#raw_expr` primitive list for `%raw` transformations
+  - Added `prim_raw_expr` StrIdx to ParseArena and reused it in ppx raw helpers
+  - Marshal now shares single-element `pval_prim` lists when they use the cached `#raw_expr`
+  - Result: `tests/syntax_tests/data/printer/expr/binary.res` is byte-identical
 - Shared static Longident prefixes for array/belt desugarings
   - Added static prefix indices (Array/Belt/Belt.Array/Belt.List) to ParseArena
   - Marshal now reuses prefix Longident indices when writing Array.get/set and Belt.*.concatMany

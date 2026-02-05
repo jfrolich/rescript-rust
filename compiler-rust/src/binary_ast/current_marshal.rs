@@ -10,9 +10,10 @@
 //! - Pexp_apply uses inline record with 4 fields
 //! - record_element is polymorphic {lid; x; opt}
 
-use super::marshal::{EmptyPayloadShareKind, MarshalWriter};
+use super::marshal::{EmptyPayloadShareKind, MarshalWriter, PrimListShareKind};
 use super::serialize::Marshal;
 use crate::parse_arena::{LocIdx, StrIdx};
+use crate::parser::longident::Longident;
 use crate::parser::ast::{
     Arity, ArgLabel, Attribute, Attributes, Case, ClosedFlag, Constant, CoreType, CoreTypeDesc,
     DirectionFlag, Expression, ExpressionDesc, ExpressionRecordField, ExtensionConstructor,
@@ -26,6 +27,40 @@ use crate::parser::ast::{
 };
 
 // ========== Attribute list sharing ==========
+
+fn is_symbolic_operator(name: &str) -> bool {
+    name.chars()
+        .all(|c| !c.is_ascii_alphanumeric() && c != '_' && c != '.')
+}
+
+fn is_pipe_application(expr: &Expression, w: &MarshalWriter) -> bool {
+    let ExpressionDesc::Pexp_apply { funct, args, .. } = &expr.pexp_desc else {
+        return false;
+    };
+    if args.is_empty() || !args.iter().all(|(lbl, _)| matches!(lbl, ArgLabel::Nolabel)) {
+        return false;
+    }
+
+    let arena = w.get_arena();
+    let funct_loc = arena.get_location(funct.pexp_loc);
+    let arg_loc = arena.get_location(args[0].1.pexp_loc);
+    let funct_start = arena.get_position(funct_loc.loc_start).cnum;
+    let arg_start = arena.get_position(arg_loc.loc_start).cnum;
+    if funct_start <= arg_start {
+        return false;
+    }
+
+    let ExpressionDesc::Pexp_ident(lid) = &funct.pexp_desc else {
+        return false;
+    };
+    let name = match arena.get_longident(lid.txt) {
+        Longident::Lident(idx) => arena.get_string(*idx),
+        Longident::Ldot(_, idx) => arena.get_string(*idx),
+        Longident::Lapply(_, arg) => arena.get_string(arg.last_idx()),
+    };
+
+    !is_symbolic_operator(name)
+}
 
 fn marshal_attribute_payload(
     payload: &Payload,
@@ -607,7 +642,14 @@ impl Marshal for Expression {
                 | ExpressionDesc::Pexp_extension(_)
                 | ExpressionDesc::Pexp_newtype(_, _)
         );
-        marshal_attributes(&self.pexp_attributes, w, share_attrs, None);
+        let share_empty_pstr =
+            is_pipe_application(self, w).then_some(EmptyPayloadShareKind::ParserAttr);
+        marshal_attributes(
+            &self.pexp_attributes,
+            w,
+            share_attrs,
+            share_empty_pstr,
+        );
     }
 }
 
@@ -1135,6 +1177,13 @@ fn marshal_prim_list(prims: &[StrIdx], w: &mut MarshalWriter) {
     if prims.is_empty() {
         w.write_int(0);
     } else {
+        if prims.len() == 1 {
+            let prim = prims[0];
+            if prim == w.get_arena().prim_raw_expr() {
+                w.write_prim_list_shared(PrimListShareKind::RawExpr, prim);
+                return;
+            }
+        }
         for (i, prim) in prims.iter().enumerate() {
             w.write_block_header(0, 2);
             w.write_str_idx(*prim);

@@ -1958,7 +1958,7 @@ fn handle_extension(
     let ext_loc = ext_name.loc;
 
     match name {
-        "raw" => handle_raw(expr, payload, arena, "#raw_expr", ext_loc),
+        "raw" => handle_raw(expr, payload, arena, arena.prim_raw_expr(), ext_loc),
         "re" => handle_re(expr, payload, arena, ext_loc),
         "external" => handle_external_ext(expr, payload, arena, ext_loc),
         "debugger" => handle_debugger(expr, payload, arena, ext_loc),
@@ -2361,7 +2361,7 @@ fn handle_re(expr: &Expression, payload: &Payload, arena: &mut ParseArena, ext_l
     let loc = ext_loc;
 
     // First, handle it like %raw to get the letmodule expression
-    let raw_expr = handle_raw(expr, payload, arena, "#raw_expr", ext_loc);
+    let raw_expr = handle_raw(expr, payload, arena, arena.prim_raw_expr(), ext_loc);
 
     // Create the type: Stdlib_RegExp.t
     // This is Longident.Ldot(Lident "Stdlib_RegExp", "t")
@@ -2488,7 +2488,7 @@ fn handle_external_ext(
             loc,
         },
         pval_type: pval_type.clone(),
-        pval_prim: vec![prim_str(arena, "#raw_expr")],
+        pval_prim: vec![arena.prim_raw_expr()],
         pval_attributes: vec![],
         pval_loc: loc,
     };
@@ -2663,7 +2663,7 @@ fn handle_raw(
     expr: &Expression,
     payload: &Payload,
     arena: &mut ParseArena,
-    pval_prim: &str,
+    pval_prim: StrIdx,
     ext_loc: LocIdx,
 ) -> Expression {
     // Extract the string expression from the payload
@@ -2740,7 +2740,7 @@ fn handle_raw(
             loc,
         },
         pval_type,
-        pval_prim: vec![prim_str(arena, pval_prim)],
+        pval_prim: vec![pval_prim],
         pval_attributes: vec![],
         pval_loc: loc,
     };
@@ -5586,7 +5586,7 @@ fn create_map_binding(
     let unsafe_expr_prim = ValueDescription {
         pval_name: Located { txt: unsafe_expr_idx, loc },
         pval_type: arrow_type,
-        pval_prim: vec![prim_str(arena, "#raw_expr")],
+        pval_prim: vec![arena.prim_raw_expr()],
         pval_attributes: vec![],
         pval_loc: loc,
     };
