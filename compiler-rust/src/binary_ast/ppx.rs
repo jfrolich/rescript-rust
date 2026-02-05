@@ -28,8 +28,8 @@ use crate::parser::ast::{
 use crate::parser::longident::Longident;
 
 use super::ffi_types::{
-    encode_ffi_type, Attr, Cst, Delim, ExternalModuleName, ExternalSpec, FfiType, LabelNoname,
-    LamConstant, ModuleBindName, Param, Params, PointerInfo, ReturnWrapper,
+    encode_ffi_type, Attr, Cst, Delim, ExternalModuleName, ExternalSpec, FfiType, Label, LabelNoname,
+    LamConstant, ModuleBindName, ObjParam, Param, Params, PointerInfo, ReturnWrapper,
 };
 
 /// The list of attributes that indicate a ReScript external
@@ -89,6 +89,14 @@ pub fn is_rs_external(attrs: &[Attribute], pval_prim: &[String], arena: &mut Par
         return false;
     }
     has_external_attrs(attrs, arena) || prims_to_be_encoded(pval_prim)
+}
+
+/// Check if attributes contain @obj
+fn has_obj_attr(attrs: &[Attribute], arena: &ParseArena) -> bool {
+    attrs.iter().any(|(attr_name, _)| {
+        let name = arena.get_string(attr_name.txt);
+        name == "obj"
+    })
 }
 
 /// Result of classifying a JavaScript expression.
@@ -691,6 +699,285 @@ fn reconstruct_arrow_type_with_loc(
     current
 }
 
+/// Process an @obj external declaration, transforming the type.
+///
+/// When @obj is present and the return type is Ptyp_any, this function
+/// builds a Ptyp_object from the labeled arguments.
+///
+/// Mirrors OCaml's `process_obj` in ast_external_process.ml.
+fn process_obj_type(
+    typ: &CoreType,
+    loc: LocIdx,
+    attrs: &[Attribute],
+    arena: &mut ParseArena,
+) -> CoreType {
+    // Only process if @obj attribute is present
+    if !has_obj_attr(attrs, arena) {
+        return reconstruct_arrow_type_with_loc(typ, loc, arena);
+    }
+
+    let (args, result) = list_of_arrow(typ, arena);
+    if args.is_empty() {
+        return typ.clone();
+    }
+
+    // Check if result type is Ptyp_any
+    let result_is_any = matches!(&result.ptyp_desc, CoreTypeDesc::Ptyp_any);
+
+    // Build result_types (object fields) from labeled arguments
+    // Mirrors OCaml's fold_right in process_obj
+    let mut filtered_args: Vec<&TypeArg> = Vec::new();
+    let mut result_types: Vec<ObjectField> = Vec::new();
+
+    for arg in &args {
+        let nolabel = matches!(arg.lbl, ArgLabel::Nolabel);
+
+        match &arg.lbl {
+            ArgLabel::Nolabel => {
+                // Nolabel args in @obj: only unit is allowed, doesn't contribute to result_types
+                filtered_args.push(arg);
+            }
+            ArgLabel::Labelled(label_loc) => {
+                // Labeled args: check for @as("alias") and arg type
+                let label_name = arena.get_string(label_loc.txt).to_string();
+                let field_name = get_as_string_attr(&arg.attrs, arena)
+                    .unwrap_or_else(|| label_name.clone());
+
+                let arg_type = refine_arg_type(false, &arg.typ, arena);
+
+                match arg_type {
+                    Attr::Ignore => {
+                        // @ignore: skip from result_types
+                        filtered_args.push(arg);
+                    }
+                    Attr::ArgCst(_) => {
+                        // @as(_) constant: skip from arg_types, skip from result_types
+                        // (doesn't appear in function signature)
+                    }
+                    Attr::Nothing => {
+                        // Regular arg: add to result_types with original type
+                        filtered_args.push(arg);
+                        result_types.push(ObjectField::Otag(
+                            Located { txt: arena.push_string(field_name.clone()), loc: loc },
+                            vec![],
+                            arg.typ.clone(),
+                        ));
+                    }
+                    Attr::Int(_) => {
+                        // @int polyvariant: add to result_types with int type
+                        filtered_args.push(arg);
+                        let int_lid = arena.push_lident_static("int");
+                        let int_type = CoreType {
+                            ptyp_desc: CoreTypeDesc::Ptyp_constr(
+                                Located { txt: int_lid, loc },
+                                vec![],
+                            ),
+                            ptyp_loc: loc,
+                            ptyp_attributes: vec![],
+                        };
+                        result_types.push(ObjectField::Otag(
+                            Located { txt: arena.push_string(field_name.clone()), loc: loc },
+                            vec![],
+                            int_type,
+                        ));
+                    }
+                    Attr::PolyVarString { .. } => {
+                        // @string polyvariant: add to result_types with string type
+                        filtered_args.push(arg);
+                        let string_lid = arena.push_lident_static("string");
+                        let string_type = CoreType {
+                            ptyp_desc: CoreTypeDesc::Ptyp_constr(
+                                Located { txt: string_lid, loc },
+                                vec![],
+                            ),
+                            ptyp_loc: loc,
+                            ptyp_attributes: vec![],
+                        };
+                        result_types.push(ObjectField::Otag(
+                            Located { txt: arena.push_string(field_name.clone()), loc: loc },
+                            vec![],
+                            string_type,
+                        ));
+                    }
+                    Attr::PolyVar { .. } | Attr::Unwrap | Attr::ExternUnit => {
+                        // These are errors in OCaml but we'll just add the original type
+                        filtered_args.push(arg);
+                        result_types.push(ObjectField::Otag(
+                            Located { txt: arena.push_string(field_name.clone()), loc: loc },
+                            vec![],
+                            arg.typ.clone(),
+                        ));
+                    }
+                }
+            }
+            ArgLabel::Optional(label_loc) => {
+                // Optional args: add to result_types with Js.undefined wrapper
+                let label_name = arena.get_string(label_loc.txt).to_string();
+                let field_name = get_as_string_attr(&arg.attrs, arena)
+                    .unwrap_or_else(|| label_name.clone());
+
+                let arg_type = get_opt_arg_type(false, &arg.typ, arena);
+
+                match arg_type {
+                    Attr::Ignore => {
+                        // @ignore: skip from result_types
+                        filtered_args.push(arg);
+                    }
+                    Attr::ArgCst(_) => {
+                        // OCaml raises error for @as with optional in @obj
+                        // We'll skip for now
+                        filtered_args.push(arg);
+                    }
+                    Attr::Nothing => {
+                        // Regular optional: wrap type in Js.undefined
+                        filtered_args.push(arg);
+                        let wrapped_type = to_undefined_type(&arg.typ, loc, arena);
+                        result_types.push(ObjectField::Otag(
+                            Located { txt: arena.push_string(field_name.clone()), loc: loc },
+                            vec![],
+                            wrapped_type,
+                        ));
+                    }
+                    Attr::Int(_) => {
+                        // @int optional: wrap int in Js.undefined
+                        filtered_args.push(arg);
+                        let int_lid = arena.push_lident_static("int");
+                        let int_type = CoreType {
+                            ptyp_desc: CoreTypeDesc::Ptyp_constr(
+                                Located { txt: int_lid, loc },
+                                vec![],
+                            ),
+                            ptyp_loc: loc,
+                            ptyp_attributes: vec![],
+                        };
+                        let wrapped_type = to_undefined_type(&int_type, loc, arena);
+                        result_types.push(ObjectField::Otag(
+                            Located { txt: arena.push_string(field_name.clone()), loc: loc },
+                            vec![],
+                            wrapped_type,
+                        ));
+                    }
+                    Attr::PolyVarString { .. } => {
+                        // @string optional: wrap string in Js.undefined
+                        filtered_args.push(arg);
+                        let string_lid = arena.push_lident_static("string");
+                        let string_type = CoreType {
+                            ptyp_desc: CoreTypeDesc::Ptyp_constr(
+                                Located { txt: string_lid, loc },
+                                vec![],
+                            ),
+                            ptyp_loc: loc,
+                            ptyp_attributes: vec![],
+                        };
+                        let wrapped_type = to_undefined_type(&string_type, loc, arena);
+                        result_types.push(ObjectField::Otag(
+                            Located { txt: arena.push_string(field_name.clone()), loc: loc },
+                            vec![],
+                            wrapped_type,
+                        ));
+                    }
+                    _ => {
+                        // Other types: add with undefined wrapper
+                        filtered_args.push(arg);
+                        let wrapped_type = to_undefined_type(&arg.typ, loc, arena);
+                        result_types.push(ObjectField::Otag(
+                            Located { txt: arena.push_string(field_name.clone()), loc: loc },
+                            vec![],
+                            wrapped_type,
+                        ));
+                    }
+                }
+            }
+        }
+    }
+
+    // If result type is Ptyp_any, build Ptyp_object from result_types
+    let final_result = if result_is_any && !result_types.is_empty() {
+        CoreType {
+            ptyp_desc: CoreTypeDesc::Ptyp_object(result_types, current::ClosedFlag::Closed),
+            ptyp_loc: loc,
+            ptyp_attributes: vec![],
+        }
+    } else {
+        result.clone()
+    };
+
+    // Rebuild the arrow chain
+    if filtered_args.is_empty() {
+        return final_result;
+    }
+
+    let arity_count = filtered_args.len();
+    let outermost_arity = arena.push_arity(Some(arity_count as i32));
+
+    let mut current = final_result;
+    for (i, arg) in filtered_args.iter().enumerate().rev() {
+        let arity = if i == 0 {
+            outermost_arity
+        } else {
+            arena.push_arity(None)
+        };
+        current = CoreType {
+            ptyp_desc: CoreTypeDesc::Ptyp_arrow {
+                arg: Box::new((*arg).clone()),
+                ret: Box::new(current),
+                arity,
+            },
+            ptyp_loc: loc,
+            ptyp_attributes: vec![],
+        };
+    }
+    current
+}
+
+/// Get optional arg type (for Optional labels).
+/// Mirrors OCaml's get_opt_arg_type.
+fn get_opt_arg_type(_nolabel: bool, typ: &CoreType, arena: &ParseArena) -> Attr {
+    // Check for special attributes
+    let attr_type = check_type_ffi_attrs(typ, arena);
+    match attr_type {
+        Some("ignore") => Attr::Ignore,
+        Some("int") => {
+            if let CoreTypeDesc::Ptyp_variant(row_fields, current::ClosedFlag::Closed, None) = &typ.ptyp_desc {
+                let int_list = map_row_fields_into_ints(row_fields, arena);
+                return Attr::Int(int_list);
+            }
+            Attr::Nothing
+        }
+        Some("string") => {
+            if let CoreTypeDesc::Ptyp_variant(row_fields, current::ClosedFlag::Closed, None) = &typ.ptyp_desc {
+                let (has_as, descr) = map_row_fields_into_strings(row_fields, arena);
+                if has_as {
+                    return Attr::PolyVarString { descr };
+                }
+            }
+            Attr::Nothing
+        }
+        _ => Attr::Nothing,
+    }
+}
+
+/// Wrap a type in Js.undefined<T>.
+/// Mirrors OCaml's Ast_comb.to_undefined_type.
+fn to_undefined_type(typ: &CoreType, loc: LocIdx, arena: &mut ParseArena) -> CoreType {
+    // Build Js.undefined<typ>
+    let js_str = arena.push_string("Js".to_string());
+    let undefined_str = arena.push_string("undefined".to_string());
+    let longident = arena.push_longident(Longident::Ldot(
+        Box::new(Longident::Lident(js_str)),
+        undefined_str,
+    ));
+
+    CoreType {
+        ptyp_desc: CoreTypeDesc::Ptyp_constr(
+            Located { txt: longident, loc },
+            vec![typ.clone()],
+        ),
+        ptyp_loc: loc,
+        ptyp_attributes: vec![],
+    }
+}
+
 /// Parse external attributes to determine FFI encoding details
 #[derive(Debug)]
 struct ExternalDesc {
@@ -1206,7 +1493,12 @@ pub fn encode_external(vd: &ValueDescription, arena: &mut ParseArena) -> Encoded
     let result_is_unit = is_unit_type(get_final_result_type(&vd.pval_type), arena);
 
     // Build FFI type
-    let ffi = build_ffi_type(&desc, prim_name, arity, result_is_unit, params);
+    let ffi = if desc.mk_obj {
+        // @obj external: build FfiObjCreate with field names
+        build_obj_ffi_type(&vd.pval_type, arena)
+    } else {
+        build_ffi_type(&desc, prim_name, arity, result_is_unit, params)
+    };
 
     // Encode FFI type
     let encoded = encode_ffi_type(&ffi);
@@ -1218,6 +1510,108 @@ pub fn encode_external(vd: &ValueDescription, arena: &mut ParseArena) -> Encoded
         pval_prim: vec![prim_name.to_string(), encoded],
         pval_attributes: filtered_attrs,
     }
+}
+
+/// Build FfiObjCreate from the type's labeled arguments.
+/// Mirrors OCaml's process_obj which builds arg_kinds from arg_types_ty.
+fn build_obj_ffi_type(typ: &CoreType, arena: &mut ParseArena) -> FfiType {
+    let (args, _result) = list_of_arrow(typ, arena);
+
+    let mut obj_params: Vec<ObjParam> = Vec::new();
+
+    for arg in &args {
+        match &arg.lbl {
+            ArgLabel::Nolabel => {
+                // Nolabel in @obj: only unit allowed, mark as empty kind
+                // Skip from obj_params (unit args don't contribute to object)
+            }
+            ArgLabel::Labelled(label_loc) => {
+                let label_name = arena.get_string(label_loc.txt).to_string();
+                let field_name = get_as_string_attr(&arg.attrs, arena)
+                    .unwrap_or_else(|| label_name.clone());
+
+                let arg_type = refine_arg_type(false, &arg.typ, arena);
+
+                match arg_type {
+                    Attr::Ignore => {
+                        // @ignore: empty_kind, skip from result
+                    }
+                    Attr::ArgCst(_) => {
+                        // @as(_) constant: add obj_label but not to arg_types
+                        obj_params.push(ObjParam {
+                            obj_arg_type: arg_type,
+                            obj_arg_label: Label::ObjLabel { name: field_name },
+                        });
+                    }
+                    _ => {
+                        // Regular arg
+                        obj_params.push(ObjParam {
+                            obj_arg_type: arg_type,
+                            obj_arg_label: Label::ObjLabel { name: field_name },
+                        });
+                    }
+                }
+            }
+            ArgLabel::Optional(label_loc) => {
+                let label_name = arena.get_string(label_loc.txt).to_string();
+                let field_name = get_as_string_attr(&arg.attrs, arena)
+                    .unwrap_or_else(|| label_name.clone());
+
+                let arg_type = get_opt_arg_type(false, &arg.typ, arena);
+
+                match arg_type {
+                    Attr::Ignore => {
+                        // @ignore: empty_kind, skip from result
+                    }
+                    Attr::Nothing => {
+                        // Check if for_sure_no_nested_option
+                        let for_sure_not_nested = match &arg.typ.ptyp_desc {
+                            CoreTypeDesc::Ptyp_constr(lid, args) if args.is_empty() => {
+                                let longident = arena.get_longident(lid.txt);
+                                if let Longident::Lident(s) = longident {
+                                    let name = arena.get_string(*s);
+                                    // is_builtin_rank0_type
+                                    matches!(name, "int" | "float" | "string" | "bool" | "unit" | "exn")
+                                } else {
+                                    false
+                                }
+                            }
+                            _ => false,
+                        };
+                        obj_params.push(ObjParam {
+                            obj_arg_type: arg_type,
+                            obj_arg_label: Label::ObjOptional {
+                                name: field_name,
+                                for_sure_no_nested_option: for_sure_not_nested,
+                            },
+                        });
+                    }
+                    Attr::Int(_) | Attr::PolyVarString { .. } => {
+                        // @int or @string optional: for_sure_no_nested = true
+                        obj_params.push(ObjParam {
+                            obj_arg_type: arg_type,
+                            obj_arg_label: Label::ObjOptional {
+                                name: field_name,
+                                for_sure_no_nested_option: true,
+                            },
+                        });
+                    }
+                    _ => {
+                        // Other optional types
+                        obj_params.push(ObjParam {
+                            obj_arg_type: arg_type,
+                            obj_arg_label: Label::ObjOptional {
+                                name: field_name,
+                                for_sure_no_nested_option: false,
+                            },
+                        });
+                    }
+                }
+            }
+        }
+    }
+
+    FfiType::FfiObjCreate(obj_params)
 }
 
 /// Encode inline string constant
@@ -5500,8 +5894,8 @@ fn rewrite_structure_item(item: &StructureItem, arena: &mut ParseArena) -> Vec<S
                 let encoded = encode_external(&rewritten_vd, arena);
                 // OCaml's FFI processing (ast_external_process.ml handle_attributes)
                 // reconstructs the arrow type with ptyp_loc = pval_loc.
-                // This changes sharing patterns in the binary output.
-                let pval_type = reconstruct_arrow_type_with_loc(&rewritten_type, vd.pval_loc, arena);
+                // For @obj externals, also reconstructs Ptyp_any -> Ptyp_object.
+                let pval_type = process_obj_type(&rewritten_type, vd.pval_loc, &vd.pval_attributes, arena);
                 let external_result = StructureItem {
                     pstr_desc: StructureItemDesc::Pstr_primitive(ValueDescription {
                         pval_prim: encoded.pval_prim,
@@ -5874,7 +6268,8 @@ fn rewrite_signature_item(item: &SignatureItem, arena: &mut ParseArena) -> Signa
                 };
                 let encoded = encode_external(&rewritten_vd, arena);
                 // OCaml's FFI processing reconstructs the arrow type with ptyp_loc = pval_loc
-                let pval_type = reconstruct_arrow_type_with_loc(&vd.pval_type, vd.pval_loc, arena);
+                // For @obj externals, also reconstructs Ptyp_any -> Ptyp_object.
+                let pval_type = process_obj_type(&vd.pval_type, vd.pval_loc, &vd.pval_attributes, arena);
                 SignatureItem {
                     psig_desc: SignatureItemDesc::Psig_value(ValueDescription {
                         pval_prim: encoded.pval_prim,
