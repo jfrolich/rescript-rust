@@ -38,7 +38,10 @@ use super::marshal::MarshalWriter;
 use super::ppx;
 use super::serialize::Marshal;
 use crate::parse_arena::ParseArena;
-use crate::parser::ast::{Signature, Structure};
+use crate::parser::ast::{
+    IncludeDeclaration, ModuleExpr, ModuleExprDesc, ModuleType, ModuleTypeDesc, Payload, Signature,
+    Structure, StructureItem, StructureItemDesc,
+};
 
 /// The separator character used in the binary AST format.
 const MAGIC_SEP_CHAR: u8 = b'\n';
@@ -115,10 +118,17 @@ pub fn write_structure_ast_current(
     // 1. Apply built-in PPX transformations (FFI encoding for externals, etc.)
     let rewritten_ast = ppx::rewrite_structure(ast, arena);
 
-    // 2. Extract dependencies from the rewritten AST
+    // 2. Process @@config attributes (e.g., no_export wrapping)
+    let rewritten_ast = if has_no_export_config(&rewritten_ast, arena) {
+        wrap_no_export(rewritten_ast)
+    } else {
+        rewritten_ast
+    };
+
+    // 3. Extract dependencies from the rewritten AST
     let deps = extract_structure_deps(arena, &rewritten_ast);
 
-    // 3. Write the binary AST file directly (current format, no parsetree0 conversion)
+    // 4. Write the binary AST file directly (current format, no parsetree0 conversion)
     write_ast_file(output_path, source_path, arena, &deps, &rewritten_ast)
 }
 
@@ -236,6 +246,122 @@ fn write_ast_to_vec<A: Marshal>(
     result.extend_from_slice(&marshal_data);
 
     result
+}
+
+/// Check if the structure has a `@@config({no_export: ...})` attribute that
+/// evaluates to true. Mirrors OCaml's `Ast_config.iter_on_bs_config_str` +
+/// `Js_config.no_export` logic.
+fn has_no_export_config(structure: &[StructureItem], arena: &ParseArena) -> bool {
+    use crate::parser::ast::ExpressionDesc;
+    use crate::parser::longident::Longident;
+
+    for item in structure {
+        match &item.pstr_desc {
+            StructureItemDesc::Pstr_attribute(attr) => {
+                let attr_name = arena.get_string(attr.0.txt);
+                if attr_name == "config" {
+                    // Found @@config(...) - check if payload contains no_export
+                    if let Payload::PStr(items) = &attr.1 {
+                        if let Some(eval_item) = items.first() {
+                            if let StructureItemDesc::Pstr_eval(expr, _) = &eval_item.pstr_desc {
+                                match &expr.pexp_desc {
+                                    // @@config({no_export: ...}) - record form
+                                    ExpressionDesc::Pexp_record(fields, _) => {
+                                        for field in fields {
+                                            let lid = arena.get_longident(field.lid.txt);
+                                            if let Longident::Lident(s) = lid {
+                                                if arena.get_string(*s) == "no_export" {
+                                                    // Check value: if it's an ident with same name,
+                                                    // or `true`, it's true. Only explicit `false` is false.
+                                                    if is_false_literal(&field.expr, arena) {
+                                                        return false;
+                                                    }
+                                                    return true;
+                                                }
+                                            }
+                                        }
+                                    }
+                                    // @@config(no_export) - bare ident form
+                                    ExpressionDesc::Pexp_ident(lid_loc) => {
+                                        let lid = arena.get_longident(lid_loc.txt);
+                                        if let Longident::Lident(s) = lid {
+                                            if arena.get_string(*s) == "no_export" {
+                                                return true;
+                                            }
+                                        }
+                                    }
+                                    _ => {}
+                                }
+                            }
+                        }
+                    }
+                    // @@config found but no no_export
+                    return false;
+                }
+                // Other floating attribute, continue scanning
+            }
+            _ => {
+                // Non-attribute item, stop scanning (matches OCaml behavior)
+                return false;
+            }
+        }
+    }
+    false
+}
+
+/// Check if an expression is the literal `false`.
+fn is_false_literal(expr: &crate::parser::ast::Expression, arena: &ParseArena) -> bool {
+    use crate::parser::ast::ExpressionDesc;
+    use crate::parser::longident::Longident;
+
+    if let ExpressionDesc::Pexp_construct(lid_loc, None) = &expr.pexp_desc {
+        let lid = arena.get_longident(lid_loc.txt);
+        if let Longident::Lident(s) = lid {
+            return arena.get_string(*s) == "false";
+        }
+    }
+    false
+}
+
+/// Wrap a structure with `include (struct ... end : sig end)` for no_export.
+/// This matches OCaml's `js_implementation.ml no_export` function.
+fn wrap_no_export(structure: Vec<StructureItem>) -> Vec<StructureItem> {
+    if structure.is_empty() {
+        return structure;
+    }
+
+    // Use the location of the first item for all generated nodes
+    let loc = structure[0].pstr_loc;
+
+    // Build: include ((struct <items> end) : (sig end))
+    let inner_mod = ModuleExpr {
+        pmod_desc: ModuleExprDesc::Pmod_structure(structure),
+        pmod_loc: loc,
+        pmod_attributes: vec![],
+    };
+
+    let empty_sig = ModuleType {
+        pmty_desc: ModuleTypeDesc::Pmty_signature(vec![]),
+        pmty_loc: loc,
+        pmty_attributes: vec![],
+    };
+
+    let constrained_mod = ModuleExpr {
+        pmod_desc: ModuleExprDesc::Pmod_constraint(Box::new(inner_mod), Box::new(empty_sig)),
+        pmod_loc: loc,
+        pmod_attributes: vec![],
+    };
+
+    let include_decl = IncludeDeclaration {
+        pincl_mod: constrained_mod,
+        pincl_loc: loc,
+        pincl_attributes: vec![],
+    };
+
+    vec![StructureItem {
+        pstr_desc: StructureItemDesc::Pstr_include(include_decl),
+        pstr_loc: loc,
+    }]
 }
 
 #[cfg(test)]
