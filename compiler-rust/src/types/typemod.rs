@@ -131,9 +131,10 @@ pub fn type_module_expr<'a>(
             let typed_body = type_module_expr(tctx, env, arena, body)?;
 
             // Translate parameter type if present
-            let typed_param_type = param_type
-                .as_ref()
-                .map(|_| Box::new(ModuleType::placeholder()));
+            let typed_param_type = match param_type {
+                Some(pt) => Some(Box::new(transl_modtype(tctx, env, arena, pt)?)),
+                None => None,
+            };
 
             Ok(ModuleExpr {
                 mod_desc: ModuleExprDesc::Tmod_functor(
@@ -170,12 +171,13 @@ pub fn type_module_expr<'a>(
         ParsedModuleExprDesc::Pmod_constraint(mod_expr_inner, mod_type) => {
             // Constrained module: (ME: MT)
             let typed_mod = type_module_expr(tctx, env, arena, mod_expr_inner)?;
+            let typed_mty = transl_modtype(tctx, env, arena, mod_type)?;
 
             Ok(ModuleExpr {
                 mod_desc: ModuleExprDesc::Tmod_constraint(
                     Box::new(typed_mod),
                     ModuleType::placeholder(),
-                    crate::types::typedtree::ModuleTypeConstraint::Tmodtype_implicit,
+                    crate::types::typedtree::ModuleTypeConstraint::Tmodtype_explicit(Box::new(typed_mty)),
                     ModuleCoercion::Tcoerce_none,
                 ),
                 mod_loc: loc,
@@ -214,6 +216,172 @@ pub fn type_module_expr<'a>(
             })
         }
     }
+}
+
+// ============================================================================
+// Module Type Translation
+// ============================================================================
+
+/// Translate a parsed module type to a typed module type.
+/// This creates the structural tree needed for sexp output.
+fn transl_modtype<'a>(
+    tctx: &mut TypeCheckContext<'a>,
+    env: &Env,
+    arena: &'a ParseArena,
+    smty: &crate::parser::ast::ModuleType,
+) -> TypeModResult<crate::types::typedtree::ModuleType> {
+    use crate::parser::ast::ModuleTypeDesc as PMtyDesc;
+    use crate::types::typedtree::{ModuleType as TMty, ModuleTypeDesc as TMtyDesc};
+
+    let loc = smty.pmty_loc;
+    let attrs = smty.pmty_attributes.clone();
+
+    let desc = match &smty.pmty_desc {
+        PMtyDesc::Pmty_ident(lid) => {
+            let longident = tctx.resolve_lid(lid.txt);
+            let path = path_from_longident(longident, |idx| arena.get_string(idx));
+            TMtyDesc::Tmty_ident(path, lid.clone())
+        }
+        PMtyDesc::Pmty_signature(sig_items) => {
+            let typed_sig = transl_signature(tctx, env, arena, sig_items)?;
+            TMtyDesc::Tmty_signature(typed_sig)
+        }
+        PMtyDesc::Pmty_functor(name, param_type, result_type) => {
+            let param_id = Ident::create_local(arena.get_string(name.txt));
+            let typed_param = match param_type {
+                Some(pt) => Some(Box::new(transl_modtype(tctx, env, arena, pt)?)),
+                None => None,
+            };
+            let typed_result = transl_modtype(tctx, env, arena, result_type)?;
+            TMtyDesc::Tmty_functor(
+                param_id,
+                Located { txt: arena.get_string(name.txt).to_string(), loc: name.loc },
+                typed_param,
+                Box::new(typed_result),
+            )
+        }
+        PMtyDesc::Pmty_with(body, _constraints) => {
+            let typed_body = transl_modtype(tctx, env, arena, body)?;
+            // TODO: translate with constraints
+            TMtyDesc::Tmty_with(Box::new(typed_body), vec![])
+        }
+        PMtyDesc::Pmty_typeof(me) => {
+            let typed_me = type_module_expr(tctx, env, arena, me)?;
+            TMtyDesc::Tmty_typeof(Box::new(typed_me))
+        }
+        PMtyDesc::Pmty_alias(lid) => {
+            let longident = tctx.resolve_lid(lid.txt);
+            let path = path_from_longident(longident, |idx| arena.get_string(idx));
+            TMtyDesc::Tmty_alias(path, lid.clone())
+        }
+        PMtyDesc::Pmty_extension(_) => {
+            TMtyDesc::Tmty_placeholder
+        }
+    };
+
+    Ok(TMty {
+        mty_desc: desc,
+        mty_loc: loc,
+        mty_attributes: attrs,
+    })
+}
+
+/// Translate a parsed signature into a typed signature.
+fn transl_signature<'a>(
+    tctx: &mut TypeCheckContext<'a>,
+    env: &Env,
+    arena: &'a ParseArena,
+    items: &[crate::parser::ast::SignatureItem],
+) -> TypeModResult<crate::types::typedtree::TypedSignature> {
+    use crate::parser::ast::SignatureItemDesc as PSigDesc;
+    use crate::types::typedtree::{
+        TypedSignatureItem, TypedSignatureItemDesc as TSigDesc,
+        TypedModuleDeclaration, EnvRef,
+    };
+
+    let mut typed_items = Vec::new();
+
+    for item in items {
+        let loc = item.psig_loc;
+        let desc = match &item.psig_desc {
+            PSigDesc::Psig_value(vd) => {
+                let name_str = arena.get_string(vd.pval_name.txt).to_string();
+                let id = Ident::create_local(&name_str);
+                let (typed_ctype, _) = transl_type(tctx, env, &vd.pval_type)?;
+                let encoded = crate::binary_ast::ppx::encode_external(vd, arena);
+                TSigDesc::Tsig_value(crate::types::typedtree::TypedValueDescription {
+                    val_id: id,
+                    val_name: Located { txt: name_str, loc: vd.pval_name.loc },
+                    val_desc: typed_ctype,
+                    val_prim: encoded.pval_prim,
+                    val_loc: loc,
+                    val_attributes: encoded.pval_attributes,
+                })
+            }
+            PSigDesc::Psig_type(rec_flag, decls) => {
+                let typed_decls = transl_sig_type_declarations(tctx, env, arena, decls)?;
+                TSigDesc::Tsig_type(*rec_flag, typed_decls)
+            }
+            PSigDesc::Psig_module(md) => {
+                let name_str = arena.get_string(md.pmd_name.txt).to_string();
+                let id = Ident::create_local(&name_str);
+                let typed_mty = transl_modtype(tctx, env, arena, &md.pmd_type)?;
+                TSigDesc::Tsig_module(TypedModuleDeclaration {
+                    md_id: id,
+                    md_name: Located { txt: name_str, loc: md.pmd_name.loc },
+                    md_type: typed_mty,
+                    md_attributes: md.pmd_attributes.clone(),
+                    md_loc: md.pmd_loc,
+                })
+            }
+            PSigDesc::Psig_modtype(mtd) => {
+                let name_str = arena.get_string(mtd.pmtd_name.txt).to_string();
+                let id = Ident::create_local(&name_str);
+                let typed_mty = match &mtd.pmtd_type {
+                    Some(mt) => Some(transl_modtype(tctx, env, arena, mt)?),
+                    None => None,
+                };
+                TSigDesc::Tsig_modtype(crate::types::typedtree::ModuleTypeDeclaration {
+                    mtd_id: id,
+                    mtd_name: Located { txt: name_str, loc: mtd.pmtd_name.loc },
+                    mtd_type: typed_mty,
+                    mtd_attributes: mtd.pmtd_attributes.clone(),
+                    mtd_loc: mtd.pmtd_loc,
+                })
+            }
+            PSigDesc::Psig_open(od) => {
+                let longident = tctx.resolve_lid(od.popen_lid.txt);
+                let path = path_from_longident(longident, |idx| arena.get_string(idx));
+                TSigDesc::Tsig_open(crate::types::typedtree::OpenDeclaration {
+                    open_path: path,
+                    open_txt: od.popen_lid.clone(),
+                    open_override: od.popen_override,
+                    open_attributes: od.popen_attributes.clone(),
+                    open_loc: od.popen_loc,
+                })
+            }
+            PSigDesc::Psig_attribute(attr) => {
+                TSigDesc::Tsig_attribute(attr.clone())
+            }
+            // For unsupported signature items, use Tsig_attribute as placeholder
+            _ => {
+                TSigDesc::Tsig_attribute((
+                    Located { txt: crate::intern::StrIdx(0), loc: LocIdx(0) },
+                    crate::parser::ast::Payload::PStr(vec![]),
+                ))
+            }
+        };
+
+        typed_items.push(TypedSignatureItem {
+            sig_desc: desc,
+            sig_env: EnvRef(0),
+            sig_loc: loc,
+        });
+    }
+
+    Ok(crate::types::typedtree::TypedSignature {
+        sig_items: typed_items,
+    })
 }
 
 // ============================================================================
@@ -964,6 +1132,94 @@ fn extend_env_with_bindings(env: &Env, arena: &ParseArena, bindings: &[ValueBind
     }
 
     new_env
+}
+
+// ============================================================================
+// Signature Type Declaration Translation
+// ============================================================================
+
+/// Translate type declarations in a signature.
+/// Simplified version of the Pstr_type handler for use in signature items.
+fn transl_sig_type_declarations<'a>(
+    tctx: &mut TypeCheckContext<'a>,
+    env: &Env,
+    arena: &'a ParseArena,
+    decls: &[crate::parser::ast::TypeDeclaration],
+) -> TypeModResult<Vec<TypedTypeDeclaration>> {
+    let ctx = tctx.type_ctx;
+    let mut typed_tree_decls = Vec::new();
+
+    for decl in decls {
+        let type_name = decl.ptype_name.txt;
+        let type_name_str = arena.get_string(type_name);
+        let type_id = Ident::create_persistent(type_name_str);
+        let type_path = Path::pident(type_id.clone());
+
+        // Convert type parameters
+        let mut typ_params: Vec<(TypedCoreType, TypesVariance)> = Vec::new();
+        let mut internal_type_params: Vec<TypeExprRef> = Vec::new();
+        for (core_type, parser_var) in &decl.ptype_params {
+            let (typed_core_type, type_ref) = transl_type(tctx, env, core_type)?;
+            internal_type_params.push(type_ref);
+            let types_var = match parser_var {
+                ParserVariance::Covariant => TypesVariance::covariant(),
+                ParserVariance::Contravariant => TypesVariance::contravariant(),
+                ParserVariance::Invariant => TypesVariance::invariant(),
+            };
+            typ_params.push((typed_core_type, types_var));
+        }
+
+        // Convert manifest type (type alias)
+        let typ_manifest = match &decl.ptype_manifest {
+            Some(manifest) => {
+                let (typed_manifest, _) = transl_type(tctx, env, manifest)?;
+                Some(typed_manifest)
+            }
+            None => None,
+        };
+
+        // For signatures, keep type kind simple (abstract or basic)
+        let typed_tree_kind = TypedTypeKind::Ttype_abstract;
+
+        let typ_private = decl.ptype_private;
+
+        // Create minimal internal type declaration
+        let internal_decl = crate::types::TypeDeclaration {
+            type_params: internal_type_params,
+            type_arity: decl.ptype_params.len() as i32,
+            type_kind: crate::types::TypeKind::TypeAbstract,
+            type_private: match typ_private {
+                crate::parser::ast::PrivateFlag::Public => crate::types::PrivateFlag::Public,
+                crate::parser::ast::PrivateFlag::Private => crate::types::PrivateFlag::Private,
+            },
+            type_manifest: None,
+            type_variance: vec![],
+            type_newtype_level: None,
+            type_loc: arena.to_location(decl.ptype_loc),
+            type_attributes: vec![],
+            type_immediate: false,
+            type_unboxed: crate::types::UnboxedStatus { unboxed: false, default: false },
+            type_inlined_types: vec![],
+        };
+
+        typed_tree_decls.push(TypedTypeDeclaration {
+            typ_id: type_id,
+            typ_name: crate::parse_arena::Located {
+                txt: type_name_str.to_string(),
+                loc: decl.ptype_name.loc,
+            },
+            typ_params,
+            typ_type: internal_decl,
+            typ_cstrs: vec![],
+            typ_kind: typed_tree_kind,
+            typ_private: typ_private,
+            typ_manifest,
+            typ_loc: decl.ptype_loc,
+            typ_attributes: decl.ptype_attributes.clone(),
+        });
+    }
+
+    Ok(typed_tree_decls)
 }
 
 // ============================================================================

@@ -503,18 +503,102 @@ pub enum ModuleExprDesc {
     Tmod_unpack(Expression, ModuleType),
 }
 
-/// Module type (placeholder - full definition in decl.rs).
-#[derive(Debug, Clone, Default)]
+/// Module type (matches OCaml's `Typedtree.module_type`).
+#[derive(Debug, Clone)]
 pub struct ModuleType {
-    // Placeholder - actual module type comes from decl.rs
-    _placeholder: (),
+    /// Module type description.
+    pub mty_desc: ModuleTypeDesc,
+    /// Location.
+    pub mty_loc: LocIdx,
+    /// Attributes.
+    pub mty_attributes: Attributes,
 }
 
 impl ModuleType {
-    /// Create a new placeholder module type.
+    /// Create a new placeholder module type (for backwards compat during incremental implementation).
     pub fn placeholder() -> Self {
-        Self { _placeholder: () }
+        Self {
+            mty_desc: ModuleTypeDesc::Tmty_placeholder,
+            mty_loc: LocIdx(0),
+            mty_attributes: vec![],
+        }
     }
+}
+
+/// Module type description (matches OCaml's `Typedtree.module_type_desc`).
+#[derive(Debug, Clone)]
+pub enum ModuleTypeDesc {
+    /// Named module type: `S` or `M.S`.
+    Tmty_ident(Path, Loc<LidentIdx>),
+    /// Signature: `sig ... end` / `{ ... }`.
+    Tmty_signature(TypedSignature),
+    /// Functor type: `functor (X : MT1) -> MT2`.
+    Tmty_functor(Ident, Loc<String>, Option<Box<ModuleType>>, Box<ModuleType>),
+    /// With constraint: `MT with ...`.
+    Tmty_with(Box<ModuleType>, Vec<(Path, Loc<LidentIdx>, WithConstraint)>),
+    /// Typeof: `module type of ME`.
+    Tmty_typeof(Box<ModuleExpr>),
+    /// Alias: `(module M)`.
+    Tmty_alias(Path, Loc<LidentIdx>),
+    /// Placeholder for incremental implementation.
+    Tmty_placeholder,
+}
+
+/// With constraint (matches OCaml's `Typedtree.with_constraint`).
+#[derive(Debug, Clone)]
+pub enum WithConstraint {
+    Twith_type(TypedTypeDeclaration),
+    Twith_module(Path, Loc<LidentIdx>),
+    Twith_typesubst(TypedTypeDeclaration),
+    Twith_modsubst(Path, Loc<LidentIdx>),
+}
+
+/// Typed signature (matches OCaml's `Typedtree.signature`).
+#[derive(Debug, Clone)]
+pub struct TypedSignature {
+    pub sig_items: Vec<TypedSignatureItem>,
+}
+
+/// Typed signature item (matches OCaml's `Typedtree.signature_item`).
+#[derive(Debug, Clone)]
+pub struct TypedSignatureItem {
+    pub sig_desc: TypedSignatureItemDesc,
+    pub sig_env: EnvRef,
+    pub sig_loc: LocIdx,
+}
+
+/// Typed signature item description (matches OCaml's `Typedtree.signature_item_desc`).
+#[derive(Debug, Clone)]
+pub enum TypedSignatureItemDesc {
+    Tsig_value(TypedValueDescription),
+    Tsig_type(RecFlag, Vec<TypedTypeDeclaration>),
+    Tsig_typext(TypeExtension),
+    Tsig_exception(ExtensionConstructor),
+    Tsig_module(TypedModuleDeclaration),
+    Tsig_recmodule(Vec<TypedModuleDeclaration>),
+    Tsig_modtype(ModuleTypeDeclaration),
+    Tsig_open(OpenDeclaration),
+    Tsig_include(IncludeDescription),
+    Tsig_attribute(crate::parser::ast::Attribute),
+}
+
+/// Typed module declaration (matches OCaml's `Typedtree.module_declaration`).
+#[derive(Debug, Clone)]
+pub struct TypedModuleDeclaration {
+    pub md_id: Ident,
+    pub md_name: Loc<String>,
+    pub md_type: ModuleType,
+    pub md_attributes: Attributes,
+    pub md_loc: LocIdx,
+}
+
+/// Include description (for signatures, matches OCaml's `Typedtree.include_description`).
+#[derive(Debug, Clone)]
+pub struct IncludeDescription {
+    pub incl_mod: ModuleType,
+    pub incl_type: Vec<SignatureItem>,
+    pub incl_attributes: Attributes,
+    pub incl_loc: LocIdx,
 }
 
 /// Module type constraint.

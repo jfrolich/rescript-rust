@@ -1111,7 +1111,7 @@ fn sexp_module_expr_desc(arena: &ParseArena, ctx: &TypeContext<'_>, with_locs: b
         ModuleExprDesc::Tmod_functor(id, _, mt_arg, me) => {
             let mt_sexp = match mt_arg {
                 None => Sexp::atom("None"),
-                Some(_mt) => Sexp::list(vec![Sexp::atom("Some"), Sexp::atom("<module_type>")]),
+                Some(mt) => Sexp::list(vec![Sexp::atom("Some"), sexp_module_type(arena, ctx, with_locs, mt)]),
             };
             Sexp::list(vec![
                 Sexp::atom("Tmod_functor"),
@@ -1130,8 +1130,8 @@ fn sexp_module_expr_desc(arena: &ParseArena, ctx: &TypeContext<'_>, with_locs: b
         ModuleExprDesc::Tmod_constraint(me, _, constraint_, _) => {
             let constraint_sexp = match constraint_ {
                 ModuleTypeConstraint::Tmodtype_implicit => Sexp::atom("implicit"),
-                ModuleTypeConstraint::Tmodtype_explicit(_) => {
-                    Sexp::list(vec![Sexp::atom("explicit"), Sexp::atom("<module_type>")])
+                ModuleTypeConstraint::Tmodtype_explicit(mt) => {
+                    Sexp::list(vec![Sexp::atom("explicit"), sexp_module_type(arena, ctx, with_locs, mt)])
                 }
             };
             Sexp::list(vec![
@@ -1144,6 +1144,184 @@ fn sexp_module_expr_desc(arena: &ParseArena, ctx: &TypeContext<'_>, with_locs: b
             Sexp::list(vec![Sexp::atom("Tmod_unpack"), sexp_expression(arena, ctx, with_locs, e)])
         }
     }
+}
+
+// ============================================================================
+// Module Types
+// ============================================================================
+
+fn sexp_module_type(arena: &ParseArena, ctx: &TypeContext<'_>, with_locs: bool, mt: &crate::types::typedtree::ModuleType) -> Sexp {
+    let loc_sexp = if with_locs {
+        vec![location_idx(arena, with_locs, mt.mty_loc)]
+    } else {
+        vec![]
+    };
+    let desc = sexp_module_type_desc(arena, ctx, with_locs, &mt.mty_desc);
+    let attrs = sexp_attributes(arena, with_locs, &mt.mty_attributes);
+    let mut items = vec![Sexp::atom("module_type")];
+    items.extend(loc_sexp);
+    items.push(desc);
+    items.push(attrs);
+    Sexp::list(items)
+}
+
+fn sexp_module_type_desc(arena: &ParseArena, ctx: &TypeContext<'_>, with_locs: bool, desc: &crate::types::typedtree::ModuleTypeDesc) -> Sexp {
+    use crate::types::typedtree::ModuleTypeDesc;
+    match desc {
+        ModuleTypeDesc::Tmty_ident(p, _) => {
+            Sexp::list(vec![Sexp::atom("Tmty_ident"), sexp_path(p)])
+        }
+        ModuleTypeDesc::Tmty_signature(sig) => {
+            Sexp::list(vec![Sexp::atom("Tmty_signature"), sexp_typed_signature(arena, ctx, with_locs, sig)])
+        }
+        ModuleTypeDesc::Tmty_functor(id, _, mt_arg, mt_res) => {
+            let mt_arg_sexp = match mt_arg {
+                None => Sexp::atom("None"),
+                Some(mt) => Sexp::list(vec![Sexp::atom("Some"), sexp_module_type(arena, ctx, with_locs, mt)]),
+            };
+            Sexp::list(vec![
+                Sexp::atom("Tmty_functor"),
+                sexp_ident(id),
+                mt_arg_sexp,
+                sexp_module_type(arena, ctx, with_locs, mt_res),
+            ])
+        }
+        ModuleTypeDesc::Tmty_with(mt, constraints) => {
+            let constraints_sexp = Sexp::list(
+                constraints.iter().map(|(p, _, wc)| {
+                    Sexp::list(vec![sexp_path(p), sexp_with_constraint(arena, ctx, with_locs, wc)])
+                }).collect()
+            );
+            Sexp::list(vec![
+                Sexp::atom("Tmty_with"),
+                sexp_module_type(arena, ctx, with_locs, mt),
+                constraints_sexp,
+            ])
+        }
+        ModuleTypeDesc::Tmty_typeof(me) => {
+            Sexp::list(vec![Sexp::atom("Tmty_typeof"), sexp_module_expr(arena, ctx, with_locs, me)])
+        }
+        ModuleTypeDesc::Tmty_alias(p, _) => {
+            Sexp::list(vec![Sexp::atom("Tmty_alias"), sexp_path(p)])
+        }
+        ModuleTypeDesc::Tmty_placeholder => {
+            Sexp::atom("<module_type>")
+        }
+    }
+}
+
+fn sexp_with_constraint(arena: &ParseArena, ctx: &TypeContext<'_>, with_locs: bool, wc: &crate::types::typedtree::WithConstraint) -> Sexp {
+    use crate::types::typedtree::WithConstraint;
+    match wc {
+        WithConstraint::Twith_type(td) => {
+            Sexp::list(vec![Sexp::atom("Twith_type"), sexp_typed_type_declaration(arena, ctx, with_locs, td)])
+        }
+        WithConstraint::Twith_module(p, _) => {
+            Sexp::list(vec![Sexp::atom("Twith_module"), sexp_path(p)])
+        }
+        WithConstraint::Twith_typesubst(td) => {
+            Sexp::list(vec![Sexp::atom("Twith_typesubst"), sexp_typed_type_declaration(arena, ctx, with_locs, td)])
+        }
+        WithConstraint::Twith_modsubst(p, _) => {
+            Sexp::list(vec![Sexp::atom("Twith_modsubst"), sexp_path(p)])
+        }
+    }
+}
+
+// ============================================================================
+// Typed Signatures
+// ============================================================================
+
+fn sexp_typed_signature(arena: &ParseArena, ctx: &TypeContext<'_>, with_locs: bool, sig: &crate::types::typedtree::TypedSignature) -> Sexp {
+    let mut items = vec![Sexp::atom("signature")];
+    items.extend(sig.sig_items.iter().map(|si| sexp_typed_signature_item(arena, ctx, with_locs, si)));
+    Sexp::list(items)
+}
+
+fn sexp_typed_signature_item(arena: &ParseArena, ctx: &TypeContext<'_>, with_locs: bool, si: &crate::types::typedtree::TypedSignatureItem) -> Sexp {
+    let loc_sexp = if with_locs {
+        vec![location_idx(arena, with_locs, si.sig_loc)]
+    } else {
+        vec![]
+    };
+    let desc = sexp_typed_signature_item_desc(arena, ctx, with_locs, &si.sig_desc);
+    let mut items = vec![Sexp::atom("signature_item")];
+    items.extend(loc_sexp);
+    items.push(desc);
+    Sexp::list(items)
+}
+
+fn sexp_typed_signature_item_desc(arena: &ParseArena, ctx: &TypeContext<'_>, with_locs: bool, desc: &crate::types::typedtree::TypedSignatureItemDesc) -> Sexp {
+    use crate::types::typedtree::TypedSignatureItemDesc;
+    match desc {
+        TypedSignatureItemDesc::Tsig_value(vd) => {
+            Sexp::list(vec![Sexp::atom("Tsig_value"), sexp_value_description(arena, ctx, with_locs, vd)])
+        }
+        TypedSignatureItemDesc::Tsig_type(flag, tds) => {
+            Sexp::list(vec![
+                Sexp::atom("Tsig_type"),
+                sexp_rec_flag(flag),
+                Sexp::list(tds.iter().map(|td| sexp_typed_type_declaration(arena, ctx, with_locs, td)).collect()),
+            ])
+        }
+        TypedSignatureItemDesc::Tsig_typext(te) => {
+            Sexp::list(vec![Sexp::atom("Tsig_typext"), sexp_type_extension(arena, ctx, with_locs, te)])
+        }
+        TypedSignatureItemDesc::Tsig_exception(ec) => {
+            Sexp::list(vec![Sexp::atom("Tsig_exception"), sexp_extension_constructor(arena, ctx, with_locs, ec)])
+        }
+        TypedSignatureItemDesc::Tsig_module(md) => {
+            Sexp::list(vec![Sexp::atom("Tsig_module"), sexp_typed_module_declaration(arena, ctx, with_locs, md)])
+        }
+        TypedSignatureItemDesc::Tsig_recmodule(mds) => {
+            Sexp::list(vec![
+                Sexp::atom("Tsig_recmodule"),
+                Sexp::list(mds.iter().map(|md| sexp_typed_module_declaration(arena, ctx, with_locs, md)).collect()),
+            ])
+        }
+        TypedSignatureItemDesc::Tsig_modtype(mtd) => {
+            Sexp::list(vec![Sexp::atom("Tsig_modtype"), sexp_module_type_declaration(arena, ctx, with_locs, mtd)])
+        }
+        TypedSignatureItemDesc::Tsig_open(od) => {
+            Sexp::list(vec![Sexp::atom("Tsig_open"), sexp_open_description(arena, ctx, with_locs, od)])
+        }
+        TypedSignatureItemDesc::Tsig_include(incl) => {
+            Sexp::list(vec![Sexp::atom("Tsig_include"), sexp_include_description(arena, ctx, with_locs, incl)])
+        }
+        TypedSignatureItemDesc::Tsig_attribute(attr) => {
+            Sexp::list(vec![Sexp::atom("Tsig_attribute"), sexp_attribute(arena, with_locs, attr)])
+        }
+    }
+}
+
+fn sexp_typed_module_declaration(arena: &ParseArena, ctx: &TypeContext<'_>, with_locs: bool, md: &crate::types::typedtree::TypedModuleDeclaration) -> Sexp {
+    let loc_sexp = if with_locs {
+        vec![location_idx(arena, with_locs, md.md_loc)]
+    } else {
+        vec![]
+    };
+    let mut items = vec![
+        Sexp::atom("module_declaration"),
+        sexp_ident(&md.md_id),
+        string(&md.md_name.txt),
+    ];
+    items.extend(loc_sexp);
+    items.push(sexp_module_type(arena, ctx, with_locs, &md.md_type));
+    items.push(sexp_attributes(arena, with_locs, &md.md_attributes));
+    Sexp::list(items)
+}
+
+fn sexp_include_description(arena: &ParseArena, ctx: &TypeContext<'_>, with_locs: bool, incl: &crate::types::typedtree::IncludeDescription) -> Sexp {
+    let loc_sexp = if with_locs {
+        vec![location_idx(arena, with_locs, incl.incl_loc)]
+    } else {
+        vec![]
+    };
+    let mut items = vec![Sexp::atom("include_description")];
+    items.extend(loc_sexp);
+    items.push(sexp_module_type(arena, ctx, with_locs, &incl.incl_mod));
+    items.push(sexp_attributes(arena, with_locs, &incl.incl_attributes));
+    Sexp::list(items)
 }
 
 // ============================================================================
@@ -1558,16 +1736,13 @@ fn sexp_structure_item_desc(arena: &ParseArena, ctx: &TypeContext<'_>, with_locs
     }
 }
 
-fn sexp_module_type_declaration(arena: &ParseArena, _ctx: &TypeContext<'_>, with_locs: bool, mtd: &crate::types::typedtree::ModuleTypeDeclaration) -> Sexp {
+fn sexp_module_type_declaration(arena: &ParseArena, ctx: &TypeContext<'_>, with_locs: bool, mtd: &crate::types::typedtree::ModuleTypeDeclaration) -> Sexp {
     let loc_sexp = if with_locs {
         vec![location_idx(arena, with_locs, mtd.mtd_loc)]
     } else {
         vec![]
     };
-    let mt_sexp = match &mtd.mtd_type {
-        None => Sexp::atom("None"),
-        Some(_mt) => Sexp::list(vec![Sexp::atom("Some"), Sexp::atom("<module_type>")]),
-    };
+    let mt_sexp = opt(|mt| sexp_module_type(arena, ctx, with_locs, mt), &mtd.mtd_type);
     let mut items = vec![
         Sexp::atom("module_type_declaration"),
         sexp_ident(&mtd.mtd_id),
