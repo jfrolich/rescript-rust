@@ -5699,19 +5699,18 @@ fn create_rev_map_ref_binding(loc: LocIdx, arena: &mut ParseArena) -> StructureI
 
 /// Create typeToJs function: let colorToJs = (param: color) => _index(_map, param)
 fn create_to_js_function(
-    type_name: &str,
+    fn_name_idx: StrIdx,
     core_type: &CoreType,
     has_bs_as: bool,
     loc: LocIdx,
+    param_name: StrIdx,
+    param_lid: LidentIdx,
+    map_lid: LidentIdx,
+    index_lid: LidentIdx,
+    erase_type_lid: LidentIdx,
     arena: &mut ParseArena,
 ) -> StructureItem {
     let none_loc = arena.none_loc();
-    let fn_name = format!("{}ToJs", type_name);
-    let fn_name_idx = arena.intern_string(&fn_name);
-    let param_name = arena.intern_string("param");
-    let map_name = arena.intern_string("_map");
-    let index_name = arena.intern_string("_index");
-    let erase_type_name = arena.intern_string("_eraseType");
 
     // If has_bs_as, body is: _index(_map, param)
     // Otherwise, body is: _eraseType(param)
@@ -5719,7 +5718,7 @@ fn create_to_js_function(
         // _index(_map, param)
         let index_ident = Expression {
             pexp_desc: ExpressionDesc::Pexp_ident(Located {
-                txt: arena.push_longident(Longident::Lident(index_name)),
+                txt: index_lid,
                 loc: none_loc,
             }),
             pexp_loc: none_loc,
@@ -5727,7 +5726,7 @@ fn create_to_js_function(
         };
         let map_ident = Expression {
             pexp_desc: ExpressionDesc::Pexp_ident(Located {
-                txt: arena.push_longident(Longident::Lident(map_name)),
+                txt: map_lid,
                 loc,
             }),
             pexp_loc: none_loc,
@@ -5735,7 +5734,7 @@ fn create_to_js_function(
         };
         let param_ident = Expression {
             pexp_desc: ExpressionDesc::Pexp_ident(Located {
-                txt: arena.push_longident(Longident::Lident(param_name)),
+                txt: param_lid,
                 loc,
             }),
             pexp_loc: none_loc,
@@ -5758,7 +5757,7 @@ fn create_to_js_function(
         // _eraseType(param)
         let erase_ident = Expression {
             pexp_desc: ExpressionDesc::Pexp_ident(Located {
-                txt: arena.push_longident(Longident::Lident(erase_type_name)),
+                txt: erase_type_lid,
                 loc: none_loc,
             }),
             pexp_loc: none_loc,
@@ -5766,7 +5765,7 @@ fn create_to_js_function(
         };
         let param_ident = Expression {
             pexp_desc: ExpressionDesc::Pexp_ident(Located {
-                txt: arena.push_longident(Longident::Lident(param_name)),
+                txt: param_lid,
                 loc,
             }),
             pexp_loc: none_loc,
@@ -5831,21 +5830,20 @@ fn create_to_js_function(
 
 /// Create typeFromJs function: let colorFromJs = param => _index(_revMap, param)
 fn create_from_js_function(
-    type_name: &str,
+    fn_name_idx: StrIdx,
     loc: LocIdx,
+    param_name: StrIdx,
+    param_lid: LidentIdx,
+    rev_map_lid: LidentIdx,
+    index_lid: LidentIdx,
     arena: &mut ParseArena,
 ) -> StructureItem {
     let none_loc = arena.none_loc();
-    let fn_name = format!("{}FromJs", type_name);
-    let fn_name_idx = arena.intern_string(&fn_name);
-    let param_name = arena.intern_string("param");
-    let rev_map_name = arena.intern_string("_revMap");
-    let index_name = arena.intern_string("_index");
 
     // _index(_revMap, param)
     let index_ident = Expression {
         pexp_desc: ExpressionDesc::Pexp_ident(Located {
-            txt: arena.push_longident(Longident::Lident(index_name)),
+            txt: index_lid,
             loc: none_loc,
         }),
         pexp_loc: none_loc,
@@ -5853,7 +5851,7 @@ fn create_from_js_function(
     };
     let rev_map_ident = Expression {
         pexp_desc: ExpressionDesc::Pexp_ident(Located {
-            txt: arena.push_longident(Longident::Lident(rev_map_name)),
+            txt: rev_map_lid,
             loc,
         }),
         pexp_loc: none_loc,
@@ -5861,7 +5859,7 @@ fn create_from_js_function(
     };
     let param_ident = Expression {
         pexp_desc: ExpressionDesc::Pexp_ident(Located {
-            txt: arena.push_longident(Longident::Lident(param_name)),
+            txt: param_lid,
             loc,
         }),
         pexp_loc: none_loc,
@@ -5921,20 +5919,18 @@ fn create_from_js_function(
 
 /// Create toJs signature: val colorToJs: color => string
 fn create_to_js_sig(
-    type_name: &str,
+    fn_name_idx: StrIdx,
     core_type: &CoreType,
     loc: LocIdx,
+    string_lid: LidentIdx,
     arena: &mut ParseArena,
 ) -> SignatureItem {
     let none_loc = arena.none_loc();
-    let fn_name = format!("{}ToJs", type_name);
-    let fn_name_idx = arena.intern_string(&fn_name);
-    let string_name = arena.intern_string("string");
 
     let string_type = CoreType {
         ptyp_desc: CoreTypeDesc::Ptyp_constr(
             Located {
-                txt: arena.push_longident(Longident::Lident(string_name)),
+                txt: string_lid,
                 loc: none_loc,
             },
             vec![],
@@ -5973,22 +5969,20 @@ fn create_to_js_sig(
 
 /// Create fromJs signature: val colorFromJs: string => option<color>
 fn create_from_js_sig(
-    type_name: &str,
+    fn_name_idx: StrIdx,
     core_type: &CoreType,
     loc: LocIdx,
+    string_lid: LidentIdx,
     arena: &mut ParseArena,
 ) -> SignatureItem {
     let none_loc = arena.none_loc();
-    let fn_name = format!("{}FromJs", type_name);
-    let fn_name_idx = arena.intern_string(&fn_name);
-    let string_name = arena.intern_string("string");
     let option_name = arena.intern_string("option");
     let predef_name = arena.intern_string("*predef*");
 
     let string_type = CoreType {
         ptyp_desc: CoreTypeDesc::Ptyp_constr(
             Located {
-                txt: arena.push_longident(Longident::Lident(string_name)),
+                txt: string_lid,
                 loc: none_loc,
             },
             vec![],
@@ -6053,8 +6047,25 @@ fn generate_js_converter_polyvar(
     let type_name = arena.get_string(tdcl.ptype_name.txt).to_string();
     let (map_json, rev_map_json, has_bs_as) = build_js_converter_map(row_fields, arena);
 
-    // Get core type with @deriving attributes
-    let core_type = core_type_of_type_declaration_with_attrs(tdcl, arena);
+    // OCaml builds fresh `core_type` values independently in structure_gen and
+    // signature_gen. Recreate that split so marshal sharing matches pointer identity.
+    let core_type_structure = core_type_of_type_declaration_with_attrs(tdcl, arena);
+    let core_type_signature = core_type_of_type_declaration_with_attrs(tdcl, arena);
+
+    // Shared structure-level identifiers (OCaml reuses these bindings across generated
+    // toJs/fromJs expressions inside one type declaration).
+    let to_js_name_structure = arena.push_string(format!("{}ToJs", type_name));
+    let from_js_name_structure = arena.push_string(format!("{}FromJs", type_name));
+    let param_name = arena.push_string("param".to_string());
+    let param_lid = arena.push_longident(Longident::Lident(param_name));
+    let map_name = arena.intern_string("_map");
+    let rev_map_name = arena.intern_string("_revMap");
+    let index_name = arena.intern_string("_index");
+    let erase_type_name = arena.intern_string("_eraseType");
+    let map_lid = arena.push_longident(Longident::Lident(map_name));
+    let rev_map_lid = arena.push_longident(Longident::Lident(rev_map_name));
+    let index_lid = arena.push_longident(Longident::Lident(index_name));
+    let erase_type_lid = arena.push_longident(Longident::Lident(erase_type_name));
 
     // Build structure items
     let mut structure_items = vec![];
@@ -6076,10 +6087,29 @@ fn generate_js_converter_polyvar(
     }
 
     // colorToJs
-    structure_items.push(create_to_js_function(&type_name, &core_type, has_bs_as, inner_loc, arena));
+    structure_items.push(create_to_js_function(
+        to_js_name_structure,
+        &core_type_structure,
+        has_bs_as,
+        inner_loc,
+        param_name,
+        param_lid,
+        map_lid,
+        index_lid,
+        erase_type_lid,
+        arena,
+    ));
 
     // colorFromJs
-    structure_items.push(create_from_js_function(&type_name, inner_loc, arena));
+    structure_items.push(create_from_js_function(
+        from_js_name_structure,
+        inner_loc,
+        param_name,
+        param_lid,
+        rev_map_lid,
+        index_lid,
+        arena,
+    ));
 
     // If create_type is true, prepend the new abstract type
     if create_type {
@@ -6089,8 +6119,25 @@ fn generate_js_converter_polyvar(
 
     // Build signature items
     let mut signature_items = vec![];
-    signature_items.push(create_to_js_sig(&type_name, &core_type, inner_loc, arena));
-    signature_items.push(create_from_js_sig(&type_name, &core_type, inner_loc, arena));
+    let to_js_name_signature = arena.push_string(format!("{}ToJs", type_name));
+    let from_js_name_signature = arena.push_string(format!("{}FromJs", type_name));
+    let string_name = arena.push_string("string".to_string());
+    let to_js_string_lid = arena.push_longident(Longident::Lident(string_name));
+    let from_js_string_lid = arena.push_longident(Longident::Lident(string_name));
+    signature_items.push(create_to_js_sig(
+        to_js_name_signature,
+        &core_type_signature,
+        inner_loc,
+        to_js_string_lid,
+        arena,
+    ));
+    signature_items.push(create_from_js_sig(
+        from_js_name_signature,
+        &core_type_signature,
+        inner_loc,
+        from_js_string_lid,
+        arena,
+    ));
 
     (structure_items, signature_items)
 }

@@ -25,12 +25,29 @@
 | Syntax tests | 506/506 (100%) ✅ |
 | sexp-locs | 1196/1196 (100%) ✅ |
 | sexp-locs-ppx | 1196/1196 (100%) ✅ |
-| bsc-ast | 933/1179 (79.1%) |
+| bsc-ast | 936/1179 (79.4%) |
 
 **Note:** 1179 = files where OCaml bsc can produce output. 134 files use newer syntax
 that OCaml can't parse; these are excluded from parity testing. Total test files: 1313.
 
 **Session progress (2026-02-05) - newest:**
+- Fixed `@deriving(jsConverter)` polyvariant marshal-sharing parity for structure/signature generation:
+  - `inspect_binary_ast.py test ...ImportPage.res` showed mixed under/over-sharing around
+    `itemDestinationToJs`/`itemDestinationFromJs` and nested `Lident "string"` wrappers.
+  - Mirrored OCaml `ast_derive_js_mapper.ml` allocation pattern by splitting structure/signature
+    `core_type` creation and reusing only structure-local identifiers (`_index`, `_map`, `_revMap`,
+    `param`) across generated `toJs`/`fromJs` functions.
+  - Kept signature function names as fresh allocations and used distinct longident indices for
+    repeated `string` types in jsConverter signatures to avoid incorrect full-core-type sharing.
+  - Added a targeted marshal sharing table for `Longident::Lident("string")` wrappers across
+    distinct `LidentIdx` values, so wrapper sharing matches OCaml without forcing outer core-type
+    sharing.
+  - Result: `inspect_binary_ast.py test` is byte-identical for:
+    `idempotency/nook-exchange/ImportPage.res`,
+    `conversion/reason/attributes.res`.
+  - Full parity run: bsc-ast differences `103 -> 100`, 0 regressions.
+  - New passes: `nook-exchange/ImportPage.res`, `nook-exchange/SettingsStore.res`,
+    `reasonml.org/common/ColorTheme.res`.
 - Fixed no-inline external wrapper sharing for `ValueDescription` fields and include location:
   - `inspect_binary_ast.py` on `nook-exchange/Emoji.res` showed OCaml sharing
     `pval_name` + `pval_type` between the rewritten primitive and generated signature value,

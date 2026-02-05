@@ -297,6 +297,7 @@ syntax_tests/data/idempotency/nook-exchange/Experiment.res
 syntax_tests/data/idempotency/nook-exchange/Footer.res
 syntax_tests/data/idempotency/nook-exchange/FriendsPage.res
 syntax_tests/data/idempotency/nook-exchange/HeaderBar.res
+syntax_tests/data/idempotency/nook-exchange/ImportPage.res
 syntax_tests/data/idempotency/nook-exchange/Index.res
 syntax_tests/data/idempotency/nook-exchange/ItemBrowser.res
 syntax_tests/data/idempotency/nook-exchange/ItemCard.res
@@ -315,6 +316,7 @@ syntax_tests/data/idempotency/nook-exchange/QuicklistOverlay.res
 syntax_tests/data/idempotency/nook-exchange/QuicklistStore.res
 syntax_tests/data/idempotency/nook-exchange/RemoveButton.res
 syntax_tests/data/idempotency/nook-exchange/Repromise.res
+syntax_tests/data/idempotency/nook-exchange/SettingsStore.res
 syntax_tests/data/idempotency/nook-exchange/TemporaryState.res
 syntax_tests/data/idempotency/nook-exchange/TextPages.res
 syntax_tests/data/idempotency/nook-exchange/User.res
@@ -613,6 +615,7 @@ syntax_tests/data/idempotency/reasongl/ReasonglInterface.res
 syntax_tests/data/idempotency/reasonml.org/bindings/Next.res
 syntax_tests/data/idempotency/reasonml.org/common/App.res
 syntax_tests/data/idempotency/reasonml.org/common/BeltData.res
+syntax_tests/data/idempotency/reasonml.org/common/ColorTheme.res
 syntax_tests/data/idempotency/reasonml.org/common/Mdx.res
 syntax_tests/data/idempotency/reasonml.org/common/Util.res
 syntax_tests/data/idempotency/reasonml.org/components/ApiIntro.res

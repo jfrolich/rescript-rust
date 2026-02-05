@@ -142,6 +142,13 @@ pub struct MarshalWriter {
     /// Same index = same object, will be shared in output
     lident_idx_table: HashMap<LidentIdx, u32>,
 
+    /// Shares selected `Longident::Lident` wrapper blocks across distinct LidentIdx.
+    ///
+    /// OCaml sometimes reuses the same `Lident "string"` wrapper object while still
+    /// rebuilding enclosing core_type records. We track these by StrIdx so wrapper
+    /// sharing can match without forcing outer core_type sharing.
+    string_lident_table: HashMap<StrIdx, u32>,
+
     /// Maps Option<String> values to object counter (for content-based sharing)
     /// This enables sharing of common delimiter values like Some("js")
     option_string_table: HashMap<Option<String>, u32>,
@@ -247,6 +254,7 @@ impl MarshalWriter {
             position_idx_table: HashMap::new(),
             location_idx_table: HashMap::new(),
             lident_idx_table: HashMap::new(),
+            string_lident_table: HashMap::new(),
             option_string_table: HashMap::new(),
             option_i32_table: HashMap::new(),
             arity_idx_table: HashMap::new(),
@@ -282,6 +290,7 @@ impl MarshalWriter {
             position_idx_table: HashMap::new(),
             location_idx_table: HashMap::new(),
             lident_idx_table: HashMap::new(),
+            string_lident_table: HashMap::new(),
             option_string_table: HashMap::new(),
             option_i32_table: HashMap::new(),
             arity_idx_table: HashMap::new(),
@@ -415,6 +424,7 @@ impl MarshalWriter {
         self.position_idx_table.clear();
         self.location_idx_table.clear();
         self.lident_idx_table.clear();
+        self.string_lident_table.clear();
         self.option_string_table.clear();
         self.string_loc_table.clear();
         self.vd_name_type_table.clear();
@@ -849,6 +859,23 @@ impl MarshalWriter {
             return false;
         }
 
+        // Share selected `Lident` wrappers by StrIdx even when they come from
+        // distinct LidentIdx allocations.
+        let string_lident_key = match self.get_arena().get_longident(idx) {
+            Longident::Lident(name_idx) if self.get_arena().get_string(*name_idx) == "string" => {
+                Some(*name_idx)
+            }
+            _ => None,
+        };
+        if let Some(name_idx) = string_lident_key {
+            if let Some(&obj_idx) = self.string_lident_table.get(&name_idx) {
+                let d = self.obj_counter - obj_idx;
+                self.write_shared_ref(d);
+                self.lident_idx_table.insert(idx, obj_idx);
+                return false;
+            }
+        }
+
         // Record the object index BEFORE writing
         let obj_idx = self.obj_counter;
 
@@ -914,6 +941,9 @@ impl MarshalWriter {
 
         // Record for future sharing
         self.lident_idx_table.insert(idx, obj_idx);
+        if let Some(name_idx) = string_lident_key {
+            self.string_lident_table.entry(name_idx).or_insert(obj_idx);
+        }
 
         true
     }
