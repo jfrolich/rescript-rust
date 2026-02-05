@@ -1104,11 +1104,15 @@ fn sexp_module_expr_desc(arena: &ParseArena, ctx: &TypeContext<'_>, with_locs: b
         ModuleExprDesc::Tmod_structure(str) => {
             Sexp::list(vec![Sexp::atom("Tmod_structure"), sexp_structure(arena, ctx, with_locs, str)])
         }
-        ModuleExprDesc::Tmod_functor(id, _, _mt_arg, me) => {
+        ModuleExprDesc::Tmod_functor(id, _, mt_arg, me) => {
+            let mt_sexp = match mt_arg {
+                None => Sexp::atom("None"),
+                Some(_mt) => Sexp::list(vec![Sexp::atom("Some"), Sexp::atom("<module_type>")]),
+            };
             Sexp::list(vec![
                 Sexp::atom("Tmod_functor"),
                 sexp_ident(id),
-                Sexp::atom("<module_type>"), // Simplified
+                mt_sexp,
                 sexp_module_expr(arena, ctx, with_locs, me),
             ])
         }
