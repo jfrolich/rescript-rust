@@ -819,12 +819,25 @@ pub fn generalize_structure(ctx: &TypeContext<'_>, var_level: i32, ty: TypeExprR
 /// This replaces all generic type variables with fresh ones,
 /// creating a new instance of a polymorphic type.
 pub fn instance(ctx: &TypeContext<'_>, ty: TypeExprRef) -> TypeExprRef {
-    copy_type(ctx, ty)
+    let mut cache = std::collections::HashMap::new();
+    copy_type_cached(ctx, ty, &mut cache)
 }
 
 /// Copy a type, creating fresh type variables for generic ones.
 pub fn copy_type(ctx: &TypeContext<'_>, ty: TypeExprRef) -> TypeExprRef {
+    let mut cache = std::collections::HashMap::new();
+    copy_type_cached(ctx, ty, &mut cache)
+}
+
+/// Copy a type with a cache to preserve sharing.
+/// If the same TypeExprRef is encountered multiple times, the same copy is returned.
+fn copy_type_cached(ctx: &TypeContext<'_>, ty: TypeExprRef, cache: &mut std::collections::HashMap<TypeExprRef, TypeExprRef>) -> TypeExprRef {
     let ty = ctx.repr(ty);
+
+    // Check cache first to preserve sharing
+    if let Some(&cached) = cache.get(&ty) {
+        return cached;
+    }
     let level = ctx.get_level(ty);
 
     // Enum to hold what action to take, avoiding borrow issues
@@ -917,7 +930,7 @@ pub fn copy_type(ctx: &TypeContext<'_>, ty: TypeExprRef) -> TypeExprRef {
     };
 
     // Execute the action without holding the borrow
-    match action {
+    let result = match action {
         CopyAction::NewVar(name) => ctx.new_var(name),
         CopyAction::NewUnivar(name) => ctx.new_univar(name),
         CopyAction::Arrow {
@@ -926,56 +939,60 @@ pub fn copy_type(ctx: &TypeContext<'_>, ty: TypeExprRef) -> TypeExprRef {
             ret,
             arity,
         } => {
-            let arg_copy = copy_type(ctx, arg_typ);
-            let ret_copy = copy_type(ctx, ret);
+            let arg_copy = copy_type_cached(ctx, arg_typ, cache);
+            let ret_copy = copy_type_cached(ctx, ret, cache);
             ctx.new_arrow(arg_lbl, arg_copy, ret_copy, arity)
         }
         CopyAction::Tuple(types) => {
-            let types_copy: Vec<_> = types.iter().map(|t| copy_type(ctx, *t)).collect();
+            let types_copy: Vec<_> = types.iter().map(|t| copy_type_cached(ctx, *t, cache)).collect();
             ctx.new_tuple(types_copy)
         }
         CopyAction::Constr { path, args } => {
-            let args_copy: Vec<_> = args.iter().map(|t| copy_type(ctx, *t)).collect();
+            let args_copy: Vec<_> = args.iter().map(|t| copy_type_cached(ctx, *t, cache)).collect();
             ctx.new_constr(path, args_copy)
         }
         CopyAction::Poly { body, vars } => {
-            let body_copy = copy_type(ctx, body);
-            let vars_copy: Vec<_> = vars.iter().map(|v| copy_type(ctx, *v)).collect();
+            let body_copy = copy_type_cached(ctx, body, cache);
+            let vars_copy: Vec<_> = vars.iter().map(|v| copy_type_cached(ctx, *v, cache)).collect();
             ctx.new_poly(body_copy, vars_copy)
         }
         CopyAction::Variant(row) => {
-            let row_copy = copy_row(ctx, &row);
+            let row_copy = copy_row_cached(ctx, &row, cache);
             ctx.new_variant(row_copy)
         }
-        CopyAction::Link(target) => copy_type(ctx, target),
+        CopyAction::Link(target) => copy_type_cached(ctx, target, cache),
         CopyAction::ReturnSelf => ty,
-    }
+    };
+
+    // Cache the result to preserve sharing
+    cache.insert(ty, result);
+    result
 }
 
 /// Copy a row descriptor.
-fn copy_row(ctx: &TypeContext<'_>, row: &RowDesc) -> RowDesc {
+fn copy_row_cached(ctx: &TypeContext<'_>, row: &RowDesc, cache: &mut std::collections::HashMap<TypeExprRef, TypeExprRef>) -> RowDesc {
     RowDesc {
         row_fields: row
             .row_fields
             .iter()
-            .map(|(label, field)| (label.clone(), copy_row_field(ctx, field)))
+            .map(|(label, field)| (label.clone(), copy_row_field_cached(ctx, field, cache)))
             .collect(),
-        row_more: copy_type(ctx, row.row_more),
+        row_more: copy_type_cached(ctx, row.row_more, cache),
         row_closed: row.row_closed,
         row_fixed: row.row_fixed,
         row_name: row.row_name.as_ref().map(|(path, types)| {
             (
                 path.clone(),
-                types.iter().map(|t| copy_type(ctx, *t)).collect(),
+                types.iter().map(|t| copy_type_cached(ctx, *t, cache)).collect(),
             )
         }),
     }
 }
 
 /// Copy a row field.
-fn copy_row_field(ctx: &TypeContext<'_>, field: &RowField) -> RowField {
+fn copy_row_field_cached(ctx: &TypeContext<'_>, field: &RowField, cache: &mut std::collections::HashMap<TypeExprRef, TypeExprRef>) -> RowField {
     match field {
-        RowField::Rpresent(Some(ty)) => RowField::Rpresent(Some(copy_type(ctx, *ty))),
+        RowField::Rpresent(Some(ty)) => RowField::Rpresent(Some(copy_type_cached(ctx, *ty, cache))),
         RowField::Rpresent(None) => RowField::Rpresent(None),
         RowField::Rabsent => RowField::Rabsent,
         RowField::Reither {
@@ -985,7 +1002,7 @@ fn copy_row_field(ctx: &TypeContext<'_>, field: &RowField) -> RowField {
             link,
         } => RowField::Reither {
             constant: *constant,
-            types: types.iter().map(|t| copy_type(ctx, *t)).collect(),
+            types: types.iter().map(|t| copy_type_cached(ctx, *t, cache)).collect(),
             matched: *matched,
             link: *link,
         },
