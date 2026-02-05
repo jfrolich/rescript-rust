@@ -295,7 +295,7 @@ fn constant(c: &Constant) -> Sexp {
 fn payload(p: &Payload, arena: &ParseArena) -> Sexp {
     match p {
         Payload::PStrEmptyShared(_) => {
-            Sexp::list(vec![Sexp::atom("PStr")])
+            Sexp::list(vec![Sexp::atom("PStr"), Sexp::list(vec![])])
         }
         Payload::PStr(items) => {
             let mut parts = vec![Sexp::atom("PStr")];
