@@ -17,6 +17,9 @@ RUST_BSC="$RUST_DIR/target/$RUST_TARGET/bsc"
 RUST_PARSER="$RUST_DIR/target/$RUST_TARGET/res_parser_rust"
 OCAML_BSC="$PROJECT_ROOT/packages/@rescript/$(./scripts/platform.sh)/bin/bsc.exe"
 OCAML_PARSER="$DUNE_BIN_DIR/res_parser"
+SPICE_PPX="${SPICE_PPX:-/Users/jaapf/conductor/repos/ppx_spice/ppx}"
+SPICE_TEST_DIR="$PROJECT_ROOT/tests/ppx_spice/src"
+INSPECT_SCRIPT="$PROJECT_ROOT/scripts/inspect_binary_ast.py"
 
 # Output directories
 TEMP_DIR="$PROJECT_ROOT/temp/rust-parity"
@@ -43,6 +46,7 @@ total_failed=0
 SKIP_PARSER_AST=false
 SKIP_SYNTAX=false
 SKIP_JS=false
+SKIP_SPICE_PPX=false
 VERBOSE=false
 
 while [[ $# -gt 0 ]]; do
@@ -59,6 +63,10 @@ while [[ $# -gt 0 ]]; do
             SKIP_JS=true
             shift
             ;;
+        --skip-spice-ppx)
+            SKIP_SPICE_PPX=true
+            shift
+            ;;
         --verbose|-v)
             VERBOSE=true
             shift
@@ -70,6 +78,7 @@ while [[ $# -gt 0 ]]; do
             echo "  --skip-parser-ast  Skip parser AST parity tests"
             echo "  --skip-syntax      Skip syntax tests"
             echo "  --skip-js          Skip JS compilation snapshot tests"
+            echo "  --skip-spice-ppx   Skip spice PPX parity tests"
             echo "  --verbose, -v      Show more detailed output"
             echo "  --help, -h         Show this help message"
             exit 0
@@ -433,7 +442,159 @@ run_syntax_tests() {
 }
 
 # =============================================================================
-# TEST 3: JS Compilation Snapshots
+# TEST 3: Spice PPX Parity
+# =============================================================================
+run_spice_ppx_tests() {
+    if $SKIP_SPICE_PPX; then
+        echo -e "${DIM}Skipping spice PPX parity tests${RESET}"
+        return
+    fi
+
+    print_header "SPICE PPX PARITY"
+
+    if [[ ! -x "$SPICE_PPX" ]]; then
+        echo -e "${YELLOW}Skipping: spice ppx not found at $SPICE_PPX${RESET}"
+        echo -e "${DIM}Set SPICE_PPX to override the ppx path.${RESET}"
+        return
+    fi
+
+    if [[ ! -d "$SPICE_TEST_DIR" ]]; then
+        echo -e "${YELLOW}Skipping: spice tests not found at $SPICE_TEST_DIR${RESET}"
+        return
+    fi
+
+    local pass_count=0
+    local diff_count=0
+    local ocaml_error_count=0
+    local rust_error_count=0
+    local failed_files=""
+
+    local files=()
+    while IFS= read -r line; do
+        files+=("$line")
+    done < <(find "$SPICE_TEST_DIR" -name "*.res" -o -name "*.resi" 2>/dev/null | sort)
+
+    local file_count=${#files[@]}
+    if [[ $file_count -eq 0 ]]; then
+        echo -e "${YELLOW}No spice tests found${RESET}"
+        return
+    fi
+
+    local file_index=0
+    for file in "${files[@]}"; do
+        file_index=$((file_index + 1))
+
+        if [[ $((file_index % 20)) -eq 0 ]] && $VERBOSE; then
+            echo "  Progress: $file_index / $file_count files..."
+        fi
+
+        local safe_name
+        safe_name=$(echo "$file" | tr '/' '_')
+        local ocaml_out="$TEMP_DIR/spice_ocaml_${safe_name}.ast"
+        local rust_out="$TEMP_DIR/spice_rust_${safe_name}.ast"
+
+        local ocaml_exit=0
+        timeout "$TIMEOUT_SECONDS" "$OCAML_BSC" -ppx "$SPICE_PPX" -bs-ast "$file" -o "$ocaml_out" > /dev/null 2>&1 || ocaml_exit=$?
+        if [[ $ocaml_exit -ne 0 ]]; then
+            ocaml_error_count=$((ocaml_error_count + 1))
+            failed_files="$failed_files$file (OCaml compile error)\n"
+            continue
+        fi
+
+        if [[ ! -s "$ocaml_out" ]]; then
+            local alt="${ocaml_out%.ast}.iast"
+            if [[ -s "$alt" ]]; then
+                ocaml_out="$alt"
+            else
+                ocaml_error_count=$((ocaml_error_count + 1))
+                failed_files="$failed_files$file (OCaml output missing)\n"
+                continue
+            fi
+        fi
+
+        local rust_exit=0
+        timeout "$TIMEOUT_SECONDS" "$RUST_BSC" -bs-ast "$file" -o "$rust_out" > /dev/null 2>&1 || rust_exit=$?
+        if [[ $rust_exit -ne 0 ]]; then
+            rust_error_count=$((rust_error_count + 1))
+            failed_files="$failed_files$file (Rust compile error)\n"
+            continue
+        fi
+
+        if [[ ! -s "$rust_out" ]]; then
+            local alt="${rust_out%.ast}.iast"
+            if [[ -s "$alt" ]]; then
+                rust_out="$alt"
+            else
+                rust_error_count=$((rust_error_count + 1))
+                failed_files="$failed_files$file (Rust output missing)\n"
+                continue
+            fi
+        fi
+
+        if python3 - "$INSPECT_SCRIPT" "$ocaml_out" "$rust_out" <<'PY' > /dev/null 2>&1
+import importlib.util
+import sys
+
+script_path, a_path, b_path = sys.argv[1], sys.argv[2], sys.argv[3]
+spec = importlib.util.spec_from_file_location("inspect_binary_ast", script_path)
+mod = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(mod)
+
+ast_a = mod.BinaryAstFile(a_path)
+ast_b = mod.BinaryAstFile(b_path)
+root_a, _ = ast_a.decode_ast()
+root_b, _ = ast_b.decode_ast()
+diffs = mod.compare_trees(root_a, root_b)
+sys.exit(1 if diffs else 0)
+PY
+        then
+            pass_count=$((pass_count + 1))
+        else
+            diff_count=$((diff_count + 1))
+            failed_files="$failed_files$file (AST differs)\n"
+            python3 "$INSPECT_SCRIPT" compare "$ocaml_out" "$rust_out" > "$DIFF_DIR/spice_${safe_name}.diff" 2>&1 || true
+        fi
+    done
+
+    local total=$((pass_count + diff_count + ocaml_error_count + rust_error_count))
+    if [[ $total -gt 0 ]]; then
+        local pct=$(python3 -c "print(f'{100 * $pass_count / $total:.1f}')")
+        echo -e "Passed: ${GREEN}$pass_count${RESET}/$total (${pct}%)"
+    else
+        echo -e "Passed: ${YELLOW}0/0${RESET} (no files)"
+    fi
+
+    if [[ $ocaml_error_count -gt 0 ]]; then
+        echo -e "OCaml errors: ${RED}$ocaml_error_count${RESET}"
+    fi
+
+    if [[ $rust_error_count -gt 0 ]]; then
+        echo -e "Rust errors: ${RED}$rust_error_count${RESET}"
+    fi
+
+    if [[ $diff_count -gt 0 ]]; then
+        echo -e "Output differs: ${YELLOW}$diff_count${RESET}"
+    fi
+
+    if [[ -n "$failed_files" ]]; then
+        echo ""
+        echo -e "${BOLD}Failed (first $SHOW_MAX_FAILURES):${RESET}"
+        echo -e "$failed_files" | grep -v "^$" | head -$SHOW_MAX_FAILURES | while read -r line; do
+            echo "  - $line"
+        done
+        local total_failures=$(echo -e "$failed_files" | grep -v "^$" | wc -l | tr -d ' ')
+        if [[ $total_failures -gt $SHOW_MAX_FAILURES ]]; then
+            echo "  ... and $((total_failures - SHOW_MAX_FAILURES)) more"
+        fi
+    fi
+
+    total_tests=$((total_tests + total))
+    total_passed=$((total_passed + pass_count))
+    total_failed=$((total_failed + ocaml_error_count + rust_error_count + diff_count))
+}
+
+# =============================================================================
+# TEST 4: JS Compilation Snapshots
 # =============================================================================
 run_js_compilation_tests() {
     if $SKIP_JS; then
@@ -563,6 +724,7 @@ setup_temp_dir
 
 run_parser_ast_tests
 run_syntax_tests
+run_spice_ppx_tests
 run_js_compilation_tests
 
 # Final summary
