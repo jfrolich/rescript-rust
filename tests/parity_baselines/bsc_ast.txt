@@ -1,4 +1,8 @@
 syntax_tests/data/api/reasonSyntax.res
+syntax_tests/data/api/reiSyntax.resi
+syntax_tests/data/api/resiSyntax.resi
+syntax_tests/data/api/resReactJsx.res
+syntax_tests/data/api/resSyntax.res
 syntax_tests/data/ast-mapping/FunWithAttribute.res
 syntax_tests/data/ast-mapping/JSXElements.res
 syntax_tests/data/ast-mapping/JSXFragments.res
@@ -244,6 +248,7 @@ syntax_tests/data/idempotency/nook-exchange/TextPages.res
 syntax_tests/data/idempotency/nook-exchange/User.res
 syntax_tests/data/idempotency/nook-exchange/UserItemNote.res
 syntax_tests/data/idempotency/nook-exchange/UserPage.res
+syntax_tests/data/idempotency/nook-exchange/Utils.res
 syntax_tests/data/idempotency/nook-exchange/ViewingList.res
 syntax_tests/data/idempotency/pupilfirst/courses/CoursesCurriculum__ChecklistItem.res
 syntax_tests/data/idempotency/pupilfirst/courses/CoursesCurriculum__Coach.res
@@ -518,6 +523,7 @@ syntax_tests/data/idempotency/wildcards-world-ui/ReactSwitch.res
 syntax_tests/data/idempotency/wildcards-world-ui/ReactTabs.res
 syntax_tests/data/idempotency/wildcards-world-ui/ResponsiveCarousel.res
 syntax_tests/data/idempotency/wildcards-world-ui/Rimble.res
+syntax_tests/data/idempotency/wildcards-world-ui/RootProvider.res
 syntax_tests/data/idempotency/wildcards-world-ui/RootProviderTypes.res
 syntax_tests/data/idempotency/wildcards-world-ui/SocialButtons.res
 syntax_tests/data/idempotency/wildcards-world-ui/SsrEntryPoint.res
@@ -530,6 +536,13 @@ syntax_tests/data/idempotency/wildcards-world-ui/Validate.res
 syntax_tests/data/idempotency/wildcards-world-ui/Web3Utils.res
 syntax_tests/data/idempotency/wildcards-world-ui/WildcardsLogo.res
 syntax_tests/data/idempotency/wildcards-world-ui/WildcardsProvider.res
+syntax_tests/data/parsing/errors/expressions/emptyBlock.res
+syntax_tests/data/parsing/errors/expressions/object.res
+syntax_tests/data/parsing/errors/expressions/stringLiteral.res
+syntax_tests/data/parsing/errors/scanner/bigint.res
+syntax_tests/data/parsing/errors/scanner/escapeSequence.res
+syntax_tests/data/parsing/errors/typeDef/emptyInlineRecord.res
+syntax_tests/data/parsing/errors/typeDef/emptyRecord.res
 syntax_tests/data/parsing/grammar/expressions/apply.res
 syntax_tests/data/parsing/grammar/expressions/argument.res
 syntax_tests/data/parsing/grammar/expressions/await.res
@@ -654,6 +667,9 @@ syntax_tests/data/parsing/other/onlySinglelineComment.res
 syntax_tests/data/parsing/other/onlySinglinelineComment.resi
 syntax_tests/data/parsing/other/semi.res
 syntax_tests/data/parsing/other/singleLineCommentWithoutNewline.res
+syntax_tests/data/parsing/recovery/expression/emptyBlock.res
+syntax_tests/data/parsing/recovery/expression/infinite.res
+syntax_tests/data/parsing/recovery/string/unclosed.res
 syntax_tests/data/ppx/react/aliasProps.res
 syntax_tests/data/ppx/react/commentAtTop.res
 syntax_tests/data/ppx/react/defaultValueProp.res

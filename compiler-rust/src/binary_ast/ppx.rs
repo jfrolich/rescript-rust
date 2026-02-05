@@ -2256,7 +2256,7 @@ fn handle_debugger(
                 typ: any_type,
             }),
             ret: Box::new(unit_type),
-            arity: arena.static_arity_1(),  // OCaml's CSE shares all literal Some(1) values
+            arity: arena.push_arity(Some(1)),  // OCaml's Typ.arrows computes Some(List.length args) - fresh each call
         },
         ptyp_loc: none_loc,
         ptyp_attributes: vec![],
@@ -2460,7 +2460,7 @@ fn handle_external_ext(
                 typ: any_type.clone(),
             }),
             ret: Box::new(any_type.clone()),
-            arity: arena.static_arity_1(),  // OCaml's CSE shares all literal Some(1) values
+            arity: arena.push_arity(Some(1)),  // OCaml's Typ.arrows computes Some(List.length args) - fresh each call
         },
         ptyp_loc: none_loc,
         ptyp_attributes: vec![],
@@ -2712,7 +2712,7 @@ fn handle_raw(
                 typ: any_type.clone(),
             }),
             ret: Box::new(any_type),
-            arity: arena.static_arity_1(),  // OCaml's CSE shares all literal Some(1) values
+            arity: arena.push_arity(Some(1)),  // OCaml's Typ.arrows computes Some(List.length args) - fresh each call
         },
         ptyp_loc: none_loc,
         ptyp_attributes: vec![],
@@ -2873,7 +2873,7 @@ fn handle_raw_structure(
                 typ: any_type.clone(),
             }),
             ret: Box::new(any_type),
-            arity: arena.static_arity_1(),  // OCaml's CSE shares all literal Some(1) values
+            arity: arena.push_arity(Some(1)),  // OCaml's Typ.arrows computes Some(List.length args) - fresh each call
         },
         ptyp_loc: none_loc,
         ptyp_attributes: vec![],
@@ -5451,7 +5451,7 @@ fn create_erase_type_str(arena: &mut ParseArena) -> StructureItem {
                 typ: any_type.clone(),
             }),
             ret: Box::new(any_type),
-            arity: arena.static_arity_1(),
+            arity: arena.push_arity(Some(1)),  // OCaml's Typ.arrows computes Some(List.length args) - fresh each call
         },
         ptyp_loc: none_loc,
         ptyp_attributes: vec![],
@@ -5564,7 +5564,7 @@ fn create_map_binding(
                 typ: any_type.clone(),
             }),
             ret: Box::new(any_type),
-            arity: arena.static_arity_1(),
+            arity: arena.push_arity(Some(1)),  // OCaml's Typ.arrows computes Some(List.length args) - fresh each call
         },
         ptyp_loc: none_loc,
         ptyp_attributes: vec![],
@@ -5939,7 +5939,7 @@ fn create_to_js_sig(
                 typ: core_type.clone(),
             }),
             ret: Box::new(string_type),
-            arity: arena.static_arity_1(),
+            arity: arena.push_arity(Some(1)),  // OCaml's Typ.arrows computes fresh arity
         },
         ptyp_loc: none_loc,
         ptyp_attributes: vec![],
@@ -6009,7 +6009,7 @@ fn create_from_js_sig(
                 typ: string_type,
             }),
             ret: Box::new(option_type),
-            arity: arena.static_arity_1(),
+            arity: arena.push_arity(Some(1)),  // OCaml's Typ.arrows computes fresh arity
         },
         ptyp_loc: none_loc,
         ptyp_attributes: vec![],
@@ -6590,7 +6590,7 @@ fn create_record_to_js_sig(
                 typ: core_type.clone(),
             }),
             ret: Box::new(ret_type),
-            arity: arena.static_arity_1(),
+            arity: arena.push_arity(Some(1)),  // OCaml's Typ.arrows computes fresh arity
         },
         ptyp_loc: none_loc,
         ptyp_attributes: vec![],
@@ -6652,7 +6652,7 @@ fn create_record_from_js_sig(
                 typ: arg_type,
             }),
             ret: Box::new(core_type.clone()),
-            arity: arena.static_arity_1(),
+            arity: arena.push_arity(Some(1)),  // OCaml's Typ.arrows computes fresh arity
         },
         ptyp_loc: none_loc,
         ptyp_attributes: vec![],
@@ -7240,7 +7240,7 @@ fn make_arrow_type_with_loc(arg: &CoreType, ret: &CoreType, loc: Option<LocIdx>,
                 typ: arg.clone(),
             }),
             ret: Box::new(ret.clone()),
-            arity: arena.static_arity_1(),
+            arity: arena.push_arity(Some(1)),  // OCaml's Typ.arrows computes fresh arity
         },
         ptyp_loc,
         ptyp_attributes: vec![],
@@ -7260,6 +7260,7 @@ fn make_setter_type_with_loc(record_type: &CoreType, field_type: &CoreType, loc:
     let unit_type = make_unit_type(arena);
 
     // Inner arrow: field_type -> unit (uses ghost location)
+    // OCaml's Typ.arrows passes None for inner arrow arities
     let inner = CoreType {
         ptyp_desc: CoreTypeDesc::Ptyp_arrow {
             arg: Box::new(TypeArg {
@@ -7268,7 +7269,7 @@ fn make_setter_type_with_loc(record_type: &CoreType, field_type: &CoreType, loc:
                 typ: field_type.clone(),
             }),
             ret: Box::new(unit_type),
-            arity: arena.static_arity_1(),
+            arity: arena.push_arity(None),  // Inner arrow: OCaml's build_arrows passes None
         },
         ptyp_loc: none_loc,
         ptyp_attributes: vec![],
@@ -7589,7 +7590,7 @@ fn generate_record_accessors_and_sigs(
                     typ: core_type.clone(),
                 }),
                 ret: Box::new(label.pld_type.clone()),
-                arity: arena.static_arity_1(),
+                arity: arena.push_arity(Some(1)),  // OCaml's Typ.arrows computes fresh arity
             },
             ptyp_loc: none_loc,
             ptyp_attributes: vec![],
