@@ -625,14 +625,48 @@ fn type_structure_item<'a>(
             ))
         }
 
-        ParsedStructureItemDesc::Pstr_exception(_ext_constr) => {
+        ParsedStructureItemDesc::Pstr_exception(ext_constr) => {
             // Exception declaration: exception C
+            let name_str = arena.get_string(ext_constr.pext_name.txt).to_string();
+            let id = Ident::create_local(&name_str);
+
+            // Translate constructor arguments
+            let (typed_args, _ext_ret) = match &ext_constr.pext_kind {
+                crate::parser::ast::ExtensionConstructorKind::Pext_decl(args, ret) => {
+                    let typed_args = match args {
+                        crate::parser::ast::ConstructorArguments::Pcstr_tuple(types) => {
+                            let mut typed = Vec::new();
+                            for ty in types {
+                                let (typed_ct, _ty_ref) = transl_type(tctx, env, ty)?;
+                                typed.push(typed_ct);
+                            }
+                            crate::types::typedtree::ConstructorArgument::Cstr_tuple(typed)
+                        }
+                        crate::parser::ast::ConstructorArguments::Pcstr_record(_lds) => {
+                            // TODO: translate record constructor arguments
+                            crate::types::typedtree::ConstructorArgument::Cstr_tuple(vec![])
+                        }
+                    };
+                    let typed_ret = match ret {
+                        Some(ct) => {
+                            let (typed_ct, _) = transl_type(tctx, env, ct)?;
+                            Some(typed_ct)
+                        }
+                        None => None,
+                    };
+                    (typed_args, typed_ret)
+                }
+                crate::parser::ast::ExtensionConstructorKind::Pext_rebind(_lid) => {
+                    (crate::types::typedtree::ConstructorArgument::Cstr_tuple(vec![]), None)
+                }
+            };
+
             let desc =
                 StructureItemDesc::Tstr_exception(crate::types::typedtree::ExtensionConstructor {
-                    ext_id: Ident::create_local("Exception"),
+                    ext_id: id,
                     ext_name: crate::parse_arena::Located {
-                        txt: "Exception".to_string(),
-                        loc,
+                        txt: name_str,
+                        loc: ext_constr.pext_name.loc,
                     },
                     ext_type: crate::types::ExtensionConstructor {
                         ext_type_path: Path::pident(Ident::create_local("exn")),
@@ -645,11 +679,11 @@ fn type_structure_item<'a>(
                         ext_is_exception: true,
                     },
                     ext_kind: crate::types::typedtree::ExtensionConstructorKind::Text_decl(
-                        crate::types::typedtree::ConstructorArgument::Cstr_tuple(vec![]),
-                        None,
+                        typed_args,
+                        _ext_ret,
                     ),
                     ext_loc: loc,
-                    ext_attributes: vec![],
+                    ext_attributes: ext_constr.pext_attributes.clone(),
                 });
             Ok((
                 StructureItem {
