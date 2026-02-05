@@ -6,6 +6,7 @@
 use anyhow::{anyhow, Context, Result};
 
 use crate::context::IdGenerator;
+use crate::binary_ast::spice_ppx;
 use crate::js_ir::printer::print_program;
 use crate::lambda::compile::LambdaCompiler;
 use crate::lambda::convert::LambdaConverter;
@@ -45,6 +46,7 @@ pub fn compile_source_to_js_with_options(
     if parser.has_errors() {
         return Err(anyhow!("Parse failed with {} error(s)", parser.diagnostics().len()));
     }
+    let structure = spice_ppx::expand_structure(&structure, parser.arena_mut());
 
     // Type check
     let id_gen = IdGenerator::new();

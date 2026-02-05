@@ -53,6 +53,7 @@ pub mod marshal;
 pub mod parsetree0;
 pub mod parsetree0_marshal;
 pub mod ppx;
+pub mod spice_ppx;
 pub mod serialize;
 pub mod types;
 pub mod writer;
