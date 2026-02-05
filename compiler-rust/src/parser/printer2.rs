@@ -8362,7 +8362,13 @@ fn print_value_description(
         let prims: Vec<Doc> = val_desc
             .pval_prim
             .iter()
-            .map(|s| Doc::concat(vec![Doc::text("\""), Doc::text(s.clone()), Doc::text("\"")]))
+            .map(|s| {
+                Doc::concat(vec![
+                    Doc::text("\""),
+                    Doc::text(arena.get_string(*s)),
+                    Doc::text("\""),
+                ])
+            })
             .collect();
         Doc::group(Doc::concat(vec![
             Doc::text(" ="),

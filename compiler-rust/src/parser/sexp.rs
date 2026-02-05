@@ -948,7 +948,9 @@ fn value_description(arena: &ParseArena, vd: &ValueDescription) -> Sexp {
         Sexp::atom("value_description"),
         Sexp::atom(&quote_string(arena.get_string(vd.pval_name.txt))),
         core_type(arena, &vd.pval_type),
-        Sexp::list(map_empty(&vd.pval_prim, |s| Sexp::atom(&quote_string(s)))),
+        Sexp::list(map_empty(&vd.pval_prim, |s| {
+            Sexp::atom(&quote_string(arena.get_string(*s)))
+        })),
         attributes(arena, &vd.pval_attributes),
     ])
 }

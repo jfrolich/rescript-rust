@@ -1271,7 +1271,11 @@ impl<'a> Mapper<'a> {
         pt0::ValueDescription {
             pval_name: self.map_string_loc(&vd.pval_name),
             pval_type: self.map_core_type(&vd.pval_type),
-            pval_prim: vd.pval_prim.clone(),
+            pval_prim: vd
+                .pval_prim
+                .iter()
+                .map(|idx| self.get_str(*idx).to_string())
+                .collect(),
             pval_attributes: self.map_attributes(&vd.pval_attributes),
             pval_loc: self.loc(vd.pval_loc),
         }

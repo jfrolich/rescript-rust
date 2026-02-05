@@ -31,6 +31,11 @@
 that OCaml can't parse; these are excluded from parity testing. Total test files: 1313.
 
 **Session progress (2026-02-05) - newest:**
+- Switched `pval_prim` to arena `StrIdx` for identity-based sharing (no content-based empty string hacks)
+  - `ValueDescription.pval_prim` is now `Vec<StrIdx>`; mapper_to0/from0 convert to/from strings
+  - Marshal uses `write_str_idx` for pval_prim lists (Latin-1 safe)
+  - Removed content-based core_type literal sharing (was regressing due to interning)
+  - Result: no regressions; bsc-ast differences now 320
 - Fixed baseline: removed 35 OCaml-unparseable files from bsc_ast.txt
   - Test scripts used `.ast` extension for `.resi` files, but compilers produce `.iast`
   - This caused false positives: files reported as "passing" when neither output existed

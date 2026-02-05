@@ -12,7 +12,7 @@
 
 use super::marshal::{EmptyPayloadShareKind, MarshalWriter};
 use super::serialize::Marshal;
-use crate::parse_arena::LocIdx;
+use crate::parse_arena::{LocIdx, StrIdx};
 use crate::parser::ast::{
     Arity, ArgLabel, Attribute, Attributes, Case, ClosedFlag, Constant, CoreType, CoreTypeDesc,
     DirectionFlag, Expression, ExpressionDesc, ExpressionRecordField, ExtensionConstructor,
@@ -1131,15 +1131,13 @@ impl Marshal for ValueDescription {
 /// Write a list of pval_prim strings, converting from Latin-1 encoding back to raw bytes.
 /// FFI binary data is stored using Latin-1 encoding (each byte 0-255 becomes Unicode U+0000-U+00FF),
 /// so we need to convert back using chars().map(|c| c as u8) to get the original bytes.
-fn marshal_prim_list(prims: &[String], w: &mut MarshalWriter) {
+fn marshal_prim_list(prims: &[StrIdx], w: &mut MarshalWriter) {
     if prims.is_empty() {
         w.write_int(0);
     } else {
         for (i, prim) in prims.iter().enumerate() {
             w.write_block_header(0, 2);
-            // Convert Latin-1 encoded string back to raw bytes
-            let bytes: Vec<u8> = prim.chars().map(|c| c as u8).collect();
-            w.write_string(&bytes);
+            w.write_str_idx(*prim);
             if i == prims.len() - 1 {
                 w.write_int(0);
             }

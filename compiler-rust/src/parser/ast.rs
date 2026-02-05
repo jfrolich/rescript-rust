@@ -724,7 +724,7 @@ pub struct ValueDescription {
     /// Type.
     pub pval_type: CoreType,
     /// Primitive names (for externals).
-    pub pval_prim: Vec<String>,
+    pub pval_prim: Vec<StrIdx>,
     /// Attributes.
     pub pval_attributes: Attributes,
     /// Location.

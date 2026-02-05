@@ -584,7 +584,7 @@ fn print_structure_item<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, item
                         f.space();
                     }
                     f.string("\"");
-                    f.string(prim);
+                    f.string(arena.get_string(*prim));
                     f.string("\"");
                 }
             }
@@ -4050,7 +4050,7 @@ fn print_signature_item<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, item
                         f.space();
                     }
                     f.string("\"");
-                    f.string(prim);
+                    f.string(arena.get_string(*prim));
                     f.string("\"");
                 }
             }

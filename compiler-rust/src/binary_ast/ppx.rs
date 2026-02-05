@@ -60,15 +60,19 @@ fn starts_with_marshal_magic(s: &str) -> bool {
     bytes.len() >= 4 && bytes[0] == 0x84 && bytes[1] == 0x95 && bytes[2] == 0xA6 && bytes[3] == 0xBE
 }
 
+fn prim_str(arena: &mut ParseArena, s: impl Into<String>) -> StrIdx {
+    arena.push_string(s.into())
+}
+
 /// Check if primitives need to be encoded as ReScript FFI
-fn prims_to_be_encoded(pval_prim: &[String]) -> bool {
+fn prims_to_be_encoded(pval_prim: &[StrIdx], arena: &ParseArena) -> bool {
     match pval_prim.first() {
         None => false, // shouldn't happen for externals
-        Some(first) if first_char_special(first) => false,
+        Some(first) if first_char_special(arena.get_string(*first)) => false,
         Some(_) => {
             // Check if second string already has marshal magic
             match pval_prim.get(1) {
-                Some(second) if starts_with_marshal_magic(second) => false,
+                Some(second) if starts_with_marshal_magic(arena.get_string(*second)) => false,
                 _ => true,
             }
         }
@@ -84,11 +88,11 @@ fn has_external_attrs(attrs: &[Attribute], arena: &mut ParseArena) -> bool {
 }
 
 /// Check if a value description represents a ReScript external
-pub fn is_rs_external(attrs: &[Attribute], pval_prim: &[String], arena: &mut ParseArena) -> bool {
+pub fn is_rs_external(attrs: &[Attribute], pval_prim: &[StrIdx], arena: &mut ParseArena) -> bool {
     if pval_prim.is_empty() {
         return false;
     }
-    has_external_attrs(attrs, arena) || prims_to_be_encoded(pval_prim)
+    has_external_attrs(attrs, arena) || prims_to_be_encoded(pval_prim, arena)
 }
 
 /// Check if attributes contain @obj
@@ -1394,7 +1398,7 @@ fn build_ffi_type(desc: &ExternalDesc, prim_name: &str, arity: usize, result_is_
 /// wrapping in Pstr_include to prevent cross-module inlining.
 fn check_external_relative(vd: &ValueDescription, arena: &mut ParseArena) -> bool {
     let prim_name = match vd.pval_prim.first() {
-        Some(name) => name.as_str(),
+        Some(name) => arena.get_string(*name).to_string(),
         None => return false,
     };
     if !is_rs_external(&vd.pval_attributes, &vd.pval_prim, arena) {
@@ -1403,9 +1407,9 @@ fn check_external_relative(vd: &ValueDescription, arena: &mut ParseArena) -> boo
     let (params, arity) = build_arg_type_specs(&vd.pval_type, arena);
     let (args, result_type) = list_of_arrow(&vd.pval_type, arena);
     let no_arguments = args.is_empty();
-    let desc = parse_external_attrs(&vd.pval_attributes, prim_name, no_arguments, arena);
+    let desc = parse_external_attrs(&vd.pval_attributes, prim_name.as_str(), no_arguments, arena);
     let result_is_unit = is_unit_type(result_type, arena);
-    let ffi = build_ffi_type(&desc, prim_name, arity, result_is_unit, params);
+    let ffi = build_ffi_type(&desc, prim_name.as_str(), arity, result_is_unit, params);
     check_ffi_relative(&ffi)
 }
 
@@ -1454,7 +1458,7 @@ fn check_ffi_relative(ffi: &FfiType) -> bool {
 
 /// Result of encoding an external: new pval_prim and filtered attributes
 pub struct EncodedExternal {
-    pub pval_prim: Vec<String>,
+    pub pval_prim: Vec<StrIdx>,
     pub pval_attributes: Vec<Attribute>,
 }
 
@@ -1479,7 +1483,7 @@ fn filter_ffi_attributes(attrs: &[Attribute], arena: &mut ParseArena) -> Vec<Att
 pub fn encode_external(vd: &ValueDescription, arena: &mut ParseArena) -> EncodedExternal {
     // Get the primitive name
     let prim_name = match vd.pval_prim.first() {
-        Some(name) => name.as_str(),
+        Some(name) => arena.get_string(*name).to_string(),
         None => return EncodedExternal {
             pval_prim: vd.pval_prim.clone(),
             pval_attributes: vd.pval_attributes.clone(),
@@ -1503,7 +1507,7 @@ pub fn encode_external(vd: &ValueDescription, arena: &mut ParseArena) -> Encoded
     let no_arguments = args.is_empty();
 
     // Parse attributes
-    let desc = parse_external_attrs(&vd.pval_attributes, prim_name, no_arguments, arena);
+    let desc = parse_external_attrs(&vd.pval_attributes, prim_name.as_str(), no_arguments, arena);
 
     // Check if result is unit - use the result from list_of_arrow, not get_final_result_type
     // OCaml's handle_attributes uses result_type from list_of_arrow, which respects arity boundaries.
@@ -1515,7 +1519,7 @@ pub fn encode_external(vd: &ValueDescription, arena: &mut ParseArena) -> Encoded
         // @obj external: build FfiObjCreate with field names
         build_obj_ffi_type(&vd.pval_type, arena)
     } else {
-        build_ffi_type(&desc, prim_name, arity, result_is_unit, params)
+        build_ffi_type(&desc, prim_name.as_str(), arity, result_is_unit, params)
     };
 
     // Encode FFI type
@@ -1525,7 +1529,7 @@ pub fn encode_external(vd: &ValueDescription, arena: &mut ParseArena) -> Encoded
     let filtered_attrs = filter_ffi_attributes(&vd.pval_attributes, arena);
 
     EncodedExternal {
-        pval_prim: vec![prim_name.to_string(), encoded],
+        pval_prim: vec![prim_str(arena, prim_name), prim_str(arena, encoded)],
         pval_attributes: filtered_attrs,
     }
 }
@@ -1647,7 +1651,7 @@ fn build_obj_ffi_type(typ: &CoreType, arena: &mut ParseArena) -> FfiType {
 /// NOTE: In OCaml, the PPX transforms attribute payloads BEFORE extracting @inline,
 /// so "js" -> "*j" transformation happens first. In Rust, we get the original delimiter,
 /// so we need to handle "js" as if it were already transformed to "*j".
-pub fn inline_string_primitive(s: &str, delim: Option<&str>) -> Vec<String> {
+pub fn inline_string_primitive(s: &str, delim: Option<&str>, arena: &mut ParseArena) -> Vec<StrIdx> {
     let delim = match delim {
         None => Some(Delim::DNone), // Key difference: OCaml wraps None in Some(DNone)
         Some("json") => Some(Delim::DNoQuotes),
@@ -1664,11 +1668,11 @@ pub fn inline_string_primitive(s: &str, delim: Option<&str>) -> Vec<String> {
     let ffi = FfiType::FfiInlineConst(constant);
     let encoded = encode_ffi_type(&ffi);
 
-    vec![String::new(), encoded]
+    vec![prim_str(arena, ""), prim_str(arena, encoded)]
 }
 
 /// Encode inline bool constant
-pub fn inline_bool_primitive(b: bool) -> Vec<String> {
+pub fn inline_bool_primitive(b: bool, arena: &mut ParseArena) -> Vec<StrIdx> {
     let constant = if b {
         LamConstant::ConstJsTrue
     } else {
@@ -1678,11 +1682,11 @@ pub fn inline_bool_primitive(b: bool) -> Vec<String> {
     let ffi = FfiType::FfiInlineConst(constant);
     let encoded = encode_ffi_type(&ffi);
 
-    vec![String::new(), encoded]
+    vec![prim_str(arena, ""), prim_str(arena, encoded)]
 }
 
 /// Encode inline int constant
-pub fn inline_int_primitive(i: i32) -> Vec<String> {
+pub fn inline_int_primitive(i: i32, arena: &mut ParseArena) -> Vec<StrIdx> {
     let constant = LamConstant::ConstInt {
         i,
         comment: PointerInfo::None,
@@ -1691,21 +1695,21 @@ pub fn inline_int_primitive(i: i32) -> Vec<String> {
     let ffi = FfiType::FfiInlineConst(constant);
     let encoded = encode_ffi_type(&ffi);
 
-    vec![String::new(), encoded]
+    vec![prim_str(arena, ""), prim_str(arena, encoded)]
 }
 
 /// Encode inline float constant
-pub fn inline_float_primitive(f: &str) -> Vec<String> {
+pub fn inline_float_primitive(f: &str, arena: &mut ParseArena) -> Vec<StrIdx> {
     let constant = LamConstant::ConstFloat(f.to_string());
 
     let ffi = FfiType::FfiInlineConst(constant);
     let encoded = encode_ffi_type(&ffi);
 
-    vec![String::new(), encoded]
+    vec![prim_str(arena, ""), prim_str(arena, encoded)]
 }
 
 /// Encode inline bigint constant
-pub fn inline_bigint_primitive(s: &str) -> Vec<String> {
+pub fn inline_bigint_primitive(s: &str, arena: &mut ParseArena) -> Vec<StrIdx> {
     // Parse bigint: handle optional - sign
     let (negative, digits) = if let Some(stripped) = s.strip_prefix('-') {
         (true, stripped.to_string())
@@ -1718,7 +1722,7 @@ pub fn inline_bigint_primitive(s: &str) -> Vec<String> {
     let ffi = FfiType::FfiInlineConst(constant);
     let encoded = encode_ffi_type(&ffi);
 
-    vec![String::new(), encoded]
+    vec![prim_str(arena, ""), prim_str(arena, encoded)]
 }
 
 // ========== @inline Handling ==========
@@ -1764,7 +1768,7 @@ fn transform_inline_sig_value(
     match &expr.pexp_desc {
         // @inline("string") let x: t
         ExpressionDesc::Pexp_constant(Constant::String(s, delim)) => {
-            let prim = inline_string_primitive(s, delim.as_deref());
+            let prim = inline_string_primitive(s, delim.as_deref(), arena);
             Some(ValueDescription {
                 pval_name: vd.pval_name.clone(),
                 pval_type: vd.pval_type.clone(),
@@ -1776,7 +1780,7 @@ fn transform_inline_sig_value(
         // @inline(42) let x: t
         ExpressionDesc::Pexp_constant(Constant::Integer(s, None)) => {
             let i = s.parse::<i32>().ok()?;
-            let prim = inline_int_primitive(i);
+            let prim = inline_int_primitive(i, arena);
             Some(ValueDescription {
                 pval_name: vd.pval_name.clone(),
                 pval_type: vd.pval_type.clone(),
@@ -1787,7 +1791,7 @@ fn transform_inline_sig_value(
         }
         // @inline(42n) let x: t (bigint)
         ExpressionDesc::Pexp_constant(Constant::Integer(s, Some('n'))) => {
-            let prim = inline_bigint_primitive(s);
+            let prim = inline_bigint_primitive(s, arena);
             Some(ValueDescription {
                 pval_name: vd.pval_name.clone(),
                 pval_type: vd.pval_type.clone(),
@@ -1798,7 +1802,7 @@ fn transform_inline_sig_value(
         }
         // @inline(3.14) let x: t
         ExpressionDesc::Pexp_constant(Constant::Float(s, None)) => {
-            let prim = inline_float_primitive(s);
+            let prim = inline_float_primitive(s, arena);
             Some(ValueDescription {
                 pval_name: vd.pval_name.clone(),
                 pval_type: vd.pval_type.clone(),
@@ -1813,7 +1817,7 @@ fn transform_inline_sig_value(
             if let Longident::Lident(name_idx) = longident {
                 let name = arena.get_string(*name_idx);
                 if name == "true" || name == "false" {
-                    let prim = inline_bool_primitive(name == "true");
+                    let prim = inline_bool_primitive(name == "true", arena);
                     return Some(ValueDescription {
                         pval_name: vd.pval_name.clone(),
                         pval_type: vd.pval_type.clone(),
@@ -1854,7 +1858,7 @@ fn transform_inline_binding(
     match &expr.pexp_desc {
         // @inline let x = "string"
         ExpressionDesc::Pexp_constant(Constant::String(s, delim)) => {
-            let prim = inline_string_primitive(s, delim.as_deref());
+            let prim = inline_string_primitive(s, delim.as_deref(), arena);
             Some(StructureItem {
                 pstr_desc: StructureItemDesc::Pstr_primitive(ValueDescription {
                     pval_name: Located {
@@ -1872,7 +1876,7 @@ fn transform_inline_binding(
         // @inline let x = 42
         ExpressionDesc::Pexp_constant(Constant::Integer(s, None)) => {
             let i = s.parse::<i32>().ok()?;
-            let prim = inline_int_primitive(i);
+            let prim = inline_int_primitive(i, arena);
             Some(StructureItem {
                 pstr_desc: StructureItemDesc::Pstr_primitive(ValueDescription {
                     pval_name: Located {
@@ -1889,7 +1893,7 @@ fn transform_inline_binding(
         }
         // @inline let x = 3.14
         ExpressionDesc::Pexp_constant(Constant::Float(s, None)) => {
-            let prim = inline_float_primitive(s);
+            let prim = inline_float_primitive(s, arena);
             Some(StructureItem {
                 pstr_desc: StructureItemDesc::Pstr_primitive(ValueDescription {
                     pval_name: Located {
@@ -1910,7 +1914,7 @@ fn transform_inline_binding(
             if let Longident::Lident(name_idx) = longident {
                 let name = arena.get_string(*name_idx);
                 if name == "true" || name == "false" {
-                    let prim = inline_bool_primitive(name == "true");
+                    let prim = inline_bool_primitive(name == "true", arena);
                     return Some(StructureItem {
                         pstr_desc: StructureItemDesc::Pstr_primitive(ValueDescription {
                             pval_name: Located {
@@ -2043,7 +2047,7 @@ fn handle_obj(
 
     let ffi = FfiType::FfiObjCreate(obj_params);
     let encoded = encode_ffi_type(&ffi);
-    let pval_prim = vec!["".to_string(), encoded];
+    let pval_prim = vec![prim_str(arena, ""), prim_str(arena, encoded)];
 
     // === Build pval_type: (~a: 'a0, ~b: 'a1) => {"a": 'a0, "b": 'a1} ===
     // OCaml: from_labels ~loc arity labels
@@ -2280,7 +2284,7 @@ fn handle_debugger(
             loc,
         },
         pval_type,
-        pval_prim: vec!["%debugger".to_string()],
+        pval_prim: vec![prim_str(arena, "%debugger")],
         pval_attributes: vec![],
         pval_loc: loc,
     };
@@ -2484,7 +2488,7 @@ fn handle_external_ext(
             loc,
         },
         pval_type: pval_type.clone(),
-        pval_prim: vec!["#raw_expr".to_string()],
+        pval_prim: vec![prim_str(arena, "#raw_expr")],
         pval_attributes: vec![],
         pval_loc: loc,
     };
@@ -2736,7 +2740,7 @@ fn handle_raw(
             loc,
         },
         pval_type,
-        pval_prim: vec![pval_prim.to_string()],
+        pval_prim: vec![prim_str(arena, pval_prim)],
         pval_attributes: vec![],
         pval_loc: loc,
     };
@@ -2897,7 +2901,7 @@ fn handle_raw_structure(
             loc,
         },
         pval_type,
-        pval_prim: vec!["#raw_stmt".to_string()],
+        pval_prim: vec![prim_str(arena, "#raw_stmt")],
         pval_attributes: vec![],
         pval_loc: loc,
     };
@@ -5469,7 +5473,7 @@ fn create_erase_type_str(arena: &mut ParseArena) -> StructureItem {
     let val_desc = ValueDescription {
         pval_name: Located { txt: erase_type_name, loc: none_loc },
         pval_type: arrow_type,
-        pval_prim: vec!["%identity".to_string()],
+        pval_prim: vec![prim_str(arena, "%identity")],
         pval_attributes: vec![],
         pval_loc: none_loc,
     };
@@ -5535,7 +5539,7 @@ fn create_unsafe_index_get_str(arena: &mut ParseArena) -> StructureItem {
     let val_desc = ValueDescription {
         pval_name: Located { txt: index_name, loc: none_loc },
         pval_type: arrow_type,
-        pval_prim: vec!["".to_string(), encoded],
+        pval_prim: vec![prim_str(arena, ""), prim_str(arena, encoded)],
         pval_attributes: vec![],
         pval_loc: none_loc,
     };
@@ -5582,7 +5586,7 @@ fn create_map_binding(
     let unsafe_expr_prim = ValueDescription {
         pval_name: Located { txt: unsafe_expr_idx, loc },
         pval_type: arrow_type,
-        pval_prim: vec!["#raw_expr".to_string()],
+        pval_prim: vec![prim_str(arena, "#raw_expr")],
         pval_attributes: vec![],
         pval_loc: loc,
     };
@@ -7107,7 +7111,10 @@ fn handle_abstract_tdcl(
                             js_get_scopes: vec![],
                         },
                     };
-                    vec![prim_as_name.clone(), encode_ffi_type(&ffi)]
+                    vec![
+                        prim_str(arena, prim_as_name.clone()),
+                        prim_str(arena, encode_ffi_type(&ffi)),
+                    ]
                 } else {
                     // OCaml: ffi_bs_as_prims [dummy] Return_identity (Js_get {...})
                     // This explicitly passes Return_identity
@@ -7119,7 +7126,7 @@ fn handle_abstract_tdcl(
                             js_get_scopes: vec![],
                         },
                     };
-                    vec!["".to_string(), encode_ffi_type(&ffi)]
+                    vec![prim_str(arena, ""), prim_str(arena, encode_ffi_type(&ffi))]
                 };
 
                 // Accessor attributes: empty for both (FFI attrs like @get are consumed during encoding)
@@ -7153,7 +7160,7 @@ fn handle_abstract_tdcl(
                             loc: label_loc,
                         },
                         pval_type: setter_type,
-                        pval_prim: vec![prim_as_name.clone()],
+                        pval_prim: vec![prim_str(arena, prim_as_name.clone())],
                         pval_attributes: vec![make_set_attr(loc, arena)],
                         pval_loc: label.pld_loc,
                     };
@@ -7401,7 +7408,11 @@ fn get_bs_as_string(attrs: &[Attribute], arena: &ParseArena) -> Option<String> {
 /// - For optional labels: ObjOptional { name, for_sure_no_nested_option: false }
 /// - For non-optional labels: ObjLabel { name }
 /// - If ends_with_unit: [empty_kind Extern_unit] at the end
-fn compute_maker_prims(labels_info: &[(bool, Located<StrIdx>)], has_optional: bool, arena: &ParseArena) -> Vec<String> {
+fn compute_maker_prims(
+    labels_info: &[(bool, Located<StrIdx>)],
+    has_optional: bool,
+    arena: &mut ParseArena,
+) -> Vec<StrIdx> {
     // Build arg_kinds list matching OCaml's pval_prim_of_option_labels
     let mut arg_kinds: Vec<ObjParam> = Vec::new();
 
@@ -7435,7 +7446,7 @@ fn compute_maker_prims(labels_info: &[(bool, Located<StrIdx>)], has_optional: bo
 
     // OCaml: ffi_obj_as_prims arg_kinds = [""; to_string (Ffi_obj_create arg_kinds)]
     let ffi = FfiType::FfiObjCreate(arg_kinds);
-    vec!["".to_string(), encode_ffi_type(&ffi)]
+    vec![prim_str(arena, ""), prim_str(arena, encode_ffi_type(&ffi))]
 }
 
 /// Generate `include (struct <accessor_bindings> end : sig <accessor_sigs> end)`

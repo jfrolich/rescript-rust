@@ -167,6 +167,7 @@ pub struct MarshalWriter {
     /// Shared object indices for empty PStr payloads (`PStr []`) by sharing group.
     pstr_empty_table: [Option<u32>; EmptyPayloadShareKind::COUNT],
 
+
     /// Optional reference to ParseArena for LocIdx marshalling.
     /// Set via `set_arena()` before marshalling AST with LocIdx fields.
     /// Uses raw pointer to avoid lifetime constraints.
@@ -283,6 +284,8 @@ impl MarshalWriter {
         self.lident_idx_table.clear();
         self.option_string_table.clear();
         self.string_loc_table.clear();
+        self.singleton_attr_list_table.clear();
+        self.tyvar_core_type_table.clear();
         self.pstr_empty_table = [None; EmptyPayloadShareKind::COUNT];
         self.obj_counter = 0;
         self.size_32 = 0;

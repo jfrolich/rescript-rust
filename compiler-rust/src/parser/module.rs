@@ -4330,7 +4330,7 @@ fn parse_value_description(
                 let s = s.clone();
                 p.next();
                 // OCaml only parses a single string here
-                vec![s]
+                vec![p.arena_mut().push_string(s)]
             }
             _ => {
                 // OCaml: emit error when = is not followed by a string
