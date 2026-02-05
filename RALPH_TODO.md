@@ -24,16 +24,18 @@
 |------------|--------|
 | Syntax tests | 506/506 (100%) ✅ |
 | sexp-locs | 1196/1196 (100%) ✅ |
-| sexp-locs-ppx | 1183/1196 (98.9%) |
-| bsc-ast | 808/1196 (67.6%) |
+| sexp-locs-ppx | 1184/1196 (99.0%) |
+| bsc-ast | 809/1196 (67.6%) |
 
-**Note:** The remaining 13 sexp-locs-ppx failures are structural differences in PPX transformations. Key issues:
+**Note:** The remaining 12 sexp-locs-ppx failures are structural differences in PPX transformations. Key issues:
 - `@deriving(jsConverter)` - 6 files (generates include with helpers) - NOT IMPLEMENTED
 - `@deriving(abstract)` - 3 files (generates include with module constraint) - NOT IMPLEMENTED
-- FFI encoding differences - ~4 files (ReactEventRe.resi, ReactDOMRe.res, etc.)
-- Test script quirk: Some files (e.g., arrow.res) show sexp-locs-ppx diff but OCaml bsc fails
+- FFI encoding differences - ~3 files (ReactDOMRe.res, ReasonReactRouter.res, etc.)
 
 **Session progress (2026-02-05) - newest:**
+- Reversed filtered FFI attributes to match OCaml ordering:
+  - OCaml's parse_external_attributes uses fold_left with cons, naturally reversing order
+  - Fixed: ReactEventRe.resi now passes
 - Fixed result_is_unit calculation for nested arrow types:
   - Use result from list_of_arrow() instead of get_final_result_type()
   - For `int => (unit => unit)`, result should be `(unit => unit)`, not `unit`
@@ -44,7 +46,7 @@
   - Added `build_obj_ffi_type()` to generate FfiObjCreate with field names
   - Added `get_opt_arg_type()` and `to_undefined_type()` for optional handling
   - Fixed: attributes.res now passes
-- Result: sexp-locs-ppx improved from 1181/1196 (98.7%) to 1183/1196 (98.9%)
+- Result: sexp-locs-ppx improved from 1181/1196 (98.7%) to 1184/1196 (99.0%)
 
 **Session progress (2026-02-05) - previous:**
 - Fixed @string/@int/@unwrap/@ignore polyvariant FFI encoding in `spec_of_ptyp`:
