@@ -3468,8 +3468,10 @@ fn transform_module_await(
                         txt: lid,
                         loc: lid_loc,
                     }),
-                    pmod_loc: lid_loc,
-                    // OCaml: Mty.typeof_ ~loc me - uses original `me` which has @res.await
+                    // OCaml: Mty.typeof_ ~loc me - uses the ORIGINAL `me`, whose pmod_loc
+                    // was overridden by parse_primary_mod_expr (a fresh allocation, not lid.loc)
+                    pmod_loc: mod_expr.pmod_loc,
+                    // OCaml: uses original `me` which has @res.await
                     pmod_attributes: mod_expr.pmod_attributes.clone(),
                 })),
                 pmty_loc: lid_loc,
