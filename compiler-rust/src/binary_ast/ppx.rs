@@ -2367,8 +2367,7 @@ fn handle_re(expr: &Expression, payload: &Payload, arena: &mut ParseArena, ext_l
     // This is Longident.Ldot(Lident "Stdlib_RegExp", "t")
     // OCaml uses `loc` for both ptyp_loc and the Located.loc:
     //   Typ.constr ~loc {txt = regexp_id; loc} []
-    let stdlib_regexp_lident = arena.push_lident_static("Stdlib_RegExp");
-    let regexp_t = arena.push_ldot_static(stdlib_regexp_lident, "t");
+    let regexp_t = arena.regexp_t_lident();
 
     let regexp_type = CoreType {
         ptyp_desc: CoreTypeDesc::Ptyp_constr(
@@ -3082,7 +3081,7 @@ fn transform_await(inner: Expression, loc: LocIdx, arena: &mut ParseArena) -> Ex
     // Create Primitive_promise.unsafe_await identifier
     let promise_str = arena.intern_string("Primitive_promise");
     let promise_lident = arena.push_lident_from_idx(promise_str);
-    let unsafe_await_lid = arena.push_ldot(promise_lident, "unsafe_await");
+    let unsafe_await_lid = arena.push_ldot_static(promise_lident, "unsafe_await");
 
     let func_ident = Expression {
         pexp_desc: ExpressionDesc::Pexp_ident(Located { txt: unsafe_await_lid, loc: ghost_loc }),
@@ -3112,7 +3111,7 @@ fn wrap_with_unsafe_async(inner: Expression, loc: LocIdx, arena: &mut ParseArena
     // Create Primitive_promise.unsafe_async identifier
     let promise_str = arena.intern_string("Primitive_promise");
     let promise_lident = arena.push_lident_from_idx(promise_str);
-    let unsafe_async_lid = arena.push_ldot(promise_lident, "unsafe_async");
+    let unsafe_async_lid = arena.push_ldot_static(promise_lident, "unsafe_async");
 
     // OCaml uses the same loc object for all three positions
     let func_ident = Expression {
@@ -4431,6 +4430,8 @@ fn desugar_pipe(
 
 /// Generic expression rewriting - recurses into sub-expressions
 fn rewrite_expression_generic(expr: &Expression, arena: &mut ParseArena) -> Expression {
+    arena.mark_rewritten_expr_loc(expr.pexp_loc);
+
     let new_desc = match &expr.pexp_desc {
         ExpressionDesc::Pexp_ident(_) | ExpressionDesc::Pexp_constant(_) => {
             // Even for simple expressions, we need to rewrite attributes

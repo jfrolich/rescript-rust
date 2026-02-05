@@ -26,7 +26,7 @@
 //! assert_eq!(located.txt, "hello");
 //! ```
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use serde::{Deserialize, Serialize};
 
@@ -299,6 +299,9 @@ pub struct ParseArena {
     static_list_lidents: StaticListLidents,
     /// Pre-allocated static Longident indices for Array.set/get/Belt.Array.concatMany.
     static_array_lidents: StaticArrayLidents,
+    /// Pre-allocated `Ldot(Lident "Stdlib_RegExp", "t")` for `%re` lowering.
+    /// OCaml uses `Ast_literal.Lid.regexp_id` as a module-level constant.
+    static_regexp_t_lident: LidentIdx,
     /// Position deduplication table - maps position content to its index.
     position_dedup: HashMap<PosKey, PosIdx>,
     /// Simple Lident deduplication table - maps StrIdx to its LidentIdx.
@@ -327,6 +330,11 @@ pub struct ParseArena {
     /// Counter for generating unique local module names (for %%private).
     /// OCaml uses a global ref counter, so this matches that behavior.
     local_module_counter: u32,
+    /// Expression locations rewritten via the default/generic PPX mapper path.
+    ///
+    /// This lets marshal distinguish mapper-rebuilt expression attributes
+    /// (fresh payload wrappers) from parser-preserved ones.
+    rewritten_expr_locs: HashSet<LocIdx>,
 }
 
 impl Default for ParseArena {
@@ -437,6 +445,14 @@ impl Default for ParseArena {
             belt_list_concat_many,
         };
 
+        // Pre-allocate Ast_literal.Lid.regexp_id = Ldot(Lident "Stdlib_RegExp", "t").
+        let stdlib_regexp_str = strings.intern("Stdlib_RegExp");
+        let regexp_t_str = strings.intern("t");
+        let static_regexp_t_lident = longidents.push(Longident::Ldot(
+            Box::new(Longident::Lident(stdlib_regexp_str)),
+            regexp_t_str,
+        ));
+
         Self {
             positions: Arena::default(),
             locations: Arena::default(),
@@ -445,6 +461,7 @@ impl Default for ParseArena {
             static_arities,
             static_list_lidents,
             static_array_lidents,
+            static_regexp_t_lident,
             position_dedup: HashMap::new(),
             lident_dedup,
             strings,
@@ -453,6 +470,7 @@ impl Default for ParseArena {
             prim_raw_expr,
             prim_raw_stmt,
             local_module_counter: 0,
+            rewritten_expr_locs: HashSet::new(),
         }
     }
 }
@@ -926,6 +944,11 @@ impl ParseArena {
         self.static_array_lidents.belt_list_concat_many
     }
 
+    /// Get the static `Stdlib_RegExp.t` longident index used for `%re`.
+    pub fn regexp_t_lident(&self) -> LidentIdx {
+        self.static_regexp_t_lident
+    }
+
     // ========================================================================
     // Primitive empty strings
     // ========================================================================
@@ -968,6 +991,16 @@ impl ParseArena {
     pub fn next_local_module_name(&mut self) -> StrIdx {
         self.local_module_counter += 1;
         self.push_string(format!("local_{}", self.local_module_counter))
+    }
+
+    /// Mark an expression location as rewritten by the generic PPX mapper path.
+    pub fn mark_rewritten_expr_loc(&mut self, loc: LocIdx) {
+        self.rewritten_expr_locs.insert(loc);
+    }
+
+    /// Returns true when this expression location was rewritten generically.
+    pub fn is_rewritten_expr_loc(&self, loc: LocIdx) -> bool {
+        self.rewritten_expr_locs.contains(&loc)
     }
 
     /// Check if a longident is a simple Lident with the given name.

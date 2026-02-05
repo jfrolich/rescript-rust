@@ -929,11 +929,14 @@ impl Marshal for Expression {
                 | ExpressionDesc::Pexp_extension(_)
                 | ExpressionDesc::Pexp_newtype(_, _)
         );
-        let share_empty_pstr = if is_pipe_application(self, w)
-            || share_attrs
-            || (w.in_extension()
-                && (has_braces_attr(&self.pexp_attributes, w)
-                    || has_ternary_attr(&self.pexp_attributes, w)))
+        let has_braces_or_ternary =
+            has_braces_attr(&self.pexp_attributes, w) || has_ternary_attr(&self.pexp_attributes, w);
+        let rewritten_expr = w.get_arena().is_rewritten_expr_loc(self.pexp_loc);
+        let suppress_rewritten_braces = rewritten_expr && has_braces_or_ternary && !w.in_extension();
+        let share_empty_pstr = if !suppress_rewritten_braces
+            && (is_pipe_application(self, w)
+                || share_attrs
+                || (w.in_extension() && has_braces_or_ternary))
         {
             Some(EmptyPayloadShareKind::ParserAttr)
         } else {
