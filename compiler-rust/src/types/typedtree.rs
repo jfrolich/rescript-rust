@@ -818,7 +818,7 @@ pub struct ExtensionConstructor {
 #[derive(Debug, Clone)]
 pub enum ExtensionConstructorKind {
     /// Declaration with argument types and optional result type.
-    Text_decl(Vec<ConstructorArgument>, Option<TypedCoreType>),
+    Text_decl(ConstructorArgument, Option<TypedCoreType>),
     /// Rebind to another constructor.
     Text_rebind(Path, Loc<LidentIdx>),
 }

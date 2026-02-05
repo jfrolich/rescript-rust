@@ -1364,17 +1364,12 @@ fn sexp_typed_label_decl(arena: &ParseArena, ctx: &TypeContext<'_>, with_locs: b
 }
 
 fn sexp_type_extension(arena: &ParseArena, ctx: &TypeContext<'_>, with_locs: bool, te: &TypeExtension) -> Sexp {
-    let loc_sexp = if with_locs {
-        vec![location_idx(arena, with_locs, te.tyext_loc)]
-    } else {
-        vec![]
-    };
+    // Note: OCaml does NOT include location in type_extension (only in parent structure_item)
     let mut items = vec![
         Sexp::atom("type_extension"),
         sexp_path(&te.tyext_path),
         sexp_longident_idx(arena, te.tyext_txt.txt),
     ];
-    items.extend(loc_sexp);
     items.push(Sexp::list(vec![
         Sexp::atom("params"),
         Sexp::list(te.tyext_params.iter().map(|(ct, v)| {
@@ -1402,15 +1397,9 @@ fn sexp_extension_constructor(arena: &ParseArena, ctx: &TypeContext<'_>, with_lo
     };
     let kind = match &ec.ext_kind {
         ExtensionConstructorKind::Text_decl(args, ret) => {
-            // args is Vec<ConstructorArgument> - print each argument
-            let args_sexp = Sexp::list(
-                args.iter()
-                    .map(|arg| sexp_constructor_argument(arena, ctx, with_locs, arg))
-                    .collect(),
-            );
             Sexp::list(vec![
                 Sexp::atom("Text_decl"),
-                args_sexp,
+                sexp_constructor_argument(arena, ctx, with_locs, args),
                 opt(|ct: &TypedCoreType| sexp_core_type(arena, ctx, with_locs, ct), ret),
             ])
         }

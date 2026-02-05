@@ -645,7 +645,7 @@ fn type_structure_item<'a>(
                         ext_is_exception: true,
                     },
                     ext_kind: crate::types::typedtree::ExtensionConstructorKind::Text_decl(
-                        vec![],
+                        crate::types::typedtree::ConstructorArgument::Cstr_tuple(vec![]),
                         None,
                     ),
                     ext_loc: loc,
