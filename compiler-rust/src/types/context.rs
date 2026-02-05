@@ -21,8 +21,8 @@
 use super::asttypes::ArgLabel;
 use super::path::Path;
 use super::type_expr::{
-    AbbrevMemo, AbbrevMemoRef, Commutable, CommutableRef, FieldKind, FieldKindRef, GENERIC_LEVEL,
-    RowDesc, RowField, RowFieldRef, TypeArg, TypeDesc, TypeExpr, TypeExprRef,
+    AbbrevMemo, AbbrevMemoRef, Commutable, CommutableRef, FieldKind, FieldKindRef, RowDesc,
+    RowField, RowFieldRef, TypeArg, TypeDesc, TypeExpr, TypeExprRef, GENERIC_LEVEL,
 };
 use crate::context::IdGenerator;
 use std::cell::{Cell, RefCell};
@@ -188,6 +188,28 @@ impl<'a> TypeContext<'a> {
         self.new_arrow(ArgLabel::Nolabel, arg, ret, None)
     }
 
+    /// Create an arrow (function) type at the generic level.
+    pub fn new_generic_arrow(
+        &self,
+        arg_label: ArgLabel,
+        arg_type: TypeExprRef,
+        ret_type: TypeExprRef,
+        arity: Option<i32>,
+    ) -> TypeExprRef {
+        let commutable = self.alloc_commutable(Commutable::Cok);
+        self.new_generic_type(TypeDesc::Tarrow {
+            arg: TypeArg::new(arg_label, arg_type),
+            ret: ret_type,
+            commutable: Commutable::Clink(commutable),
+            arity,
+        })
+    }
+
+    /// Create a generic unlabeled arrow type.
+    pub fn new_generic_arrow_simple(&self, arg: TypeExprRef, ret: TypeExprRef) -> TypeExprRef {
+        self.new_generic_arrow(ArgLabel::Nolabel, arg, ret, None)
+    }
+
     /// Create a tuple type.
     pub fn new_tuple(&self, types: Vec<TypeExprRef>) -> TypeExprRef {
         self.new_type(TypeDesc::Ttuple(types))
@@ -197,6 +219,12 @@ impl<'a> TypeContext<'a> {
     pub fn new_constr(&self, path: Path, args: Vec<TypeExprRef>) -> TypeExprRef {
         let abbrev = self.alloc_abbrev(AbbrevMemo::Mnil);
         self.new_type(TypeDesc::Tconstr { path, args, abbrev })
+    }
+
+    /// Create a type constructor application at the generic level.
+    pub fn new_generic_constr(&self, path: Path, args: Vec<TypeExprRef>) -> TypeExprRef {
+        let abbrev = self.alloc_abbrev(AbbrevMemo::Mnil);
+        self.new_generic_type(TypeDesc::Tconstr { path, args, abbrev })
     }
 
     /// Create a link type (for unification).

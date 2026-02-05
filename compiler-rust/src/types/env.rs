@@ -16,8 +16,8 @@
 //! - `EnvSummary` - A summary of bindings for debugging
 //! - Lookup functions for values, types, and modules
 
-use super::context::TypeContext;
 use super::asttypes::PrivateFlag;
+use super::context::TypeContext;
 use super::decl::{
     ConstructorDescription, ConstructorTag, LabelDescription, ModtypeDeclaration,
     ModuleDeclaration, PrimitiveDescription, TypeDeclaration, ValueDescription, ValueKind,
@@ -492,22 +492,28 @@ pub fn initial_env(ctx: &TypeContext<'_>) -> Env {
     // Add built-in types
     // These are the primitive types that exist in ReScript
     let builtins = [
-        ("int", true),     // immediate
+        ("int", true), // immediate
         ("float", false),
-        ("bool", true),    // immediate
+        ("bool", true), // immediate
         ("string", false),
-        ("unit", true),    // immediate
+        ("unit", true), // immediate
         ("array", false),
         ("list", false),
         ("option", false),
-        ("char", true),    // immediate
+        ("char", true), // immediate
+        ("exn", false),
+        ("extension_constructor", false),
     ];
 
     for (name, immediate) in builtins {
         let id = Ident::create_persistent(name);
         let decl = TypeDeclaration {
             type_params: vec![],
-            type_arity: if name == "array" || name == "list" || name == "option" { 1 } else { 0 },
+            type_arity: if name == "array" || name == "list" || name == "option" {
+                1
+            } else {
+                0
+            },
             type_kind: super::decl::TypeKind::TypeAbstract,
             type_private: super::asttypes::PrivateFlag::Public,
             type_manifest: None,
@@ -567,50 +573,206 @@ pub fn initial_env(ctx: &TypeContext<'_>) -> Env {
     };
     env.add_constructor(true_id, true_cstr);
 
-    // Add arithmetic operators for int
-    // Note: In ReScript, + is polymorphic and specialized by the type checker,
-    // but for simplicity we'll add int versions directly
-    add_binary_primitive(&mut env, ctx, "+", "%addint", int_ty, int_ty, int_ty);
-    add_binary_primitive(&mut env, ctx, "-", "%subint", int_ty, int_ty, int_ty);
-    add_binary_primitive(&mut env, ctx, "*", "%mulint", int_ty, int_ty, int_ty);
-    add_binary_primitive(&mut env, ctx, "/", "%divint", int_ty, int_ty, int_ty);
-    add_binary_primitive(&mut env, ctx, "mod", "%modint", int_ty, int_ty, int_ty);
+    // Add unit constructor: ()
+    let unit_id = Ident::create_persistent("()");
+    let unit_cstr = ConstructorDescription {
+        cstr_name: "()".to_string(),
+        cstr_res: unit_ty,
+        cstr_existentials: vec![],
+        cstr_args: vec![],
+        cstr_arity: 0,
+        cstr_tag: ConstructorTag::CstrConstant(0),
+        cstr_consts: 1,
+        cstr_nonconsts: 0,
+        cstr_generalized: false,
+        cstr_private: PrivateFlag::Public,
+        cstr_loc: Location::none(),
+        cstr_attributes: vec![],
+        cstr_inlined: None,
+    };
+    env.add_constructor(unit_id, unit_cstr);
 
-    // Add arithmetic operators for float
-    add_binary_primitive(&mut env, ctx, "+.", "%addfloat", float_ty, float_ty, float_ty);
-    add_binary_primitive(&mut env, ctx, "-.", "%subfloat", float_ty, float_ty, float_ty);
-    add_binary_primitive(&mut env, ctx, "*.", "%mulfloat", float_ty, float_ty, float_ty);
-    add_binary_primitive(&mut env, ctx, "/.", "%divfloat", float_ty, float_ty, float_ty);
-    add_binary_primitive(&mut env, ctx, "**", "%powfloat", float_ty, float_ty, float_ty);
+    // =====================================================================
+    // Polymorphic operators (matching Pervasives.res)
+    // These use generic type variables so that instance() creates fresh
+    // copies for each use site.
+    // =====================================================================
 
-    // Add comparison operators (polymorphic - using int for now)
-    add_binary_primitive(&mut env, ctx, "==", "%eq", int_ty, int_ty, bool_ty);
-    add_binary_primitive(&mut env, ctx, "!=", "%noteq", int_ty, int_ty, bool_ty);
-    add_binary_primitive(&mut env, ctx, "<", "%ltint", int_ty, int_ty, bool_ty);
-    add_binary_primitive(&mut env, ctx, ">", "%gtint", int_ty, int_ty, bool_ty);
-    add_binary_primitive(&mut env, ctx, "<=", "%leint", int_ty, int_ty, bool_ty);
-    add_binary_primitive(&mut env, ctx, ">=", "%geint", int_ty, int_ty, bool_ty);
+    // Polymorphic binary: ('a, 'a) => 'a
+    // Note: each operator gets its OWN fresh alpha so they don't share
+    let poly_binary_aa_a = [
+        ("+", "%add"),
+        ("-", "%sub"),
+        ("*", "%mul"),
+        ("/", "%div"),
+        ("%", "%mod"),
+        ("mod", "%mod"),
+        ("**", "%pow"),
+        ("<<<", "%lsl"), // Note: ReScript uses <<, but might be <<<
+        ("<<<", "%lsl"),
+        ("|||", "%bitor"),
+        ("^^^", "%bitxor"),
+        ("&&&", "%bitand"),
+        (">>", "%asr"),
+        (">>>", "%lsr"),
+        ("min", "%min"),
+        ("max", "%max"),
+    ];
+    for (name, prim) in &poly_binary_aa_a {
+        let alpha = ctx.new_generic_var(None);
+        add_generic_binary_primitive(&mut env, ctx, name, prim, alpha, alpha, alpha);
+    }
 
-    // Add boolean operators
+    // Polymorphic binary: ('a, 'a) => bool
+    let poly_binary_aa_bool = [
+        ("==", "%equal"),
+        ("!=", "%notequal"),
+        ("<", "%lessthan"),
+        (">", "%greaterthan"),
+        ("<=", "%lessequal"),
+        (">=", "%greaterequal"),
+        ("===", "%eq"),
+        ("!==", "%noteq"),
+    ];
+    for (name, prim) in &poly_binary_aa_bool {
+        let alpha = ctx.new_generic_var(None);
+        let bool_gen =
+            ctx.new_generic_constr(Path::pident(Ident::create_persistent("bool")), vec![]);
+        add_generic_binary_primitive(&mut env, ctx, name, prim, alpha, alpha, bool_gen);
+    }
+
+    // Polymorphic binary: ('a, 'a) => int (compare)
+    {
+        let alpha = ctx.new_generic_var(None);
+        let int_gen = ctx.new_generic_constr(Path::pident(Ident::create_persistent("int")), vec![]);
+        add_generic_binary_primitive(&mut env, ctx, "compare", "%compare", alpha, alpha, int_gen);
+    }
+
+    // Polymorphic unary: 'a => 'a
+    let poly_unary_a_a = [("~+", "%plus"), ("~-", "%neg"), ("~~~", "%bitnot")];
+    for (name, prim) in &poly_unary_a_a {
+        let alpha = ctx.new_generic_var(None);
+        add_generic_unary_primitive(&mut env, ctx, name, prim, alpha, alpha);
+    }
+
+    // =====================================================================
+    // Monomorphic operators
+    // =====================================================================
+
+    // Float arithmetic (monomorphic)
+    add_binary_primitive(
+        &mut env,
+        ctx,
+        "+.",
+        "%addfloat",
+        float_ty,
+        float_ty,
+        float_ty,
+    );
+    add_binary_primitive(
+        &mut env,
+        ctx,
+        "-.",
+        "%subfloat",
+        float_ty,
+        float_ty,
+        float_ty,
+    );
+    add_binary_primitive(
+        &mut env,
+        ctx,
+        "*.",
+        "%mulfloat",
+        float_ty,
+        float_ty,
+        float_ty,
+    );
+    add_binary_primitive(
+        &mut env,
+        ctx,
+        "/.",
+        "%divfloat",
+        float_ty,
+        float_ty,
+        float_ty,
+    );
+    add_unary_primitive(&mut env, ctx, "~-.", "%negfloat", float_ty, float_ty);
+    add_unary_primitive(&mut env, ctx, "~+.", "%identity", float_ty, float_ty);
+
+    // Boolean operators (monomorphic)
     add_binary_primitive(&mut env, ctx, "&&", "%sequand", bool_ty, bool_ty, bool_ty);
     add_binary_primitive(&mut env, ctx, "||", "%sequor", bool_ty, bool_ty, bool_ty);
     add_unary_primitive(&mut env, ctx, "not", "%boolnot", bool_ty, bool_ty);
 
-    // Add unary minus
-    add_unary_primitive(&mut env, ctx, "~-", "%negint", int_ty, int_ty);
-    add_unary_primitive(&mut env, ctx, "~-.", "%negfloat", float_ty, float_ty);
+    // String concatenation (monomorphic)
+    add_binary_primitive(
+        &mut env,
+        ctx,
+        "++",
+        "%string_concat",
+        string_ty,
+        string_ty,
+        string_ty,
+    );
 
-    // Add string concatenation
-    add_binary_primitive(&mut env, ctx, "++", "%string_concat", string_ty, string_ty, string_ty);
+    // Integer-specific operations (monomorphic)
+    add_unary_primitive(&mut env, ctx, "succ", "%succint", int_ty, int_ty);
+    add_unary_primitive(&mut env, ctx, "pred", "%predint", int_ty, int_ty);
+    add_binary_primitive(&mut env, ctx, "land", "%andint", int_ty, int_ty, int_ty);
+    add_binary_primitive(&mut env, ctx, "lor", "%orint", int_ty, int_ty, int_ty);
+    add_binary_primitive(&mut env, ctx, "lxor", "%xorint", int_ty, int_ty, int_ty);
+    add_unary_primitive(&mut env, ctx, "lnot", "%bitnot_int", int_ty, int_ty);
+    add_binary_primitive(&mut env, ctx, "lsl", "%lslint", int_ty, int_ty, int_ty);
+    add_binary_primitive(&mut env, ctx, "lsr", "%lsrint", int_ty, int_ty, int_ty);
+    add_binary_primitive(&mut env, ctx, "asr", "%asrint", int_ty, int_ty, int_ty);
 
-    // Add ignore function
-    let alpha = ctx.new_var(None);
-    add_unary_primitive(&mut env, ctx, "ignore", "%ignore", alpha, unit_ty);
+    // Ignore function (polymorphic: 'a => unit)
+    {
+        let alpha = ctx.new_generic_var(None);
+        let unit_gen =
+            ctx.new_generic_constr(Path::pident(Ident::create_persistent("unit")), vec![]);
+        add_generic_unary_primitive(&mut env, ctx, "ignore", "%ignore", alpha, unit_gen);
+    }
+
+    // Pipe operators (polymorphic)
+    {
+        // |> : ('a, 'a => 'b) => 'b
+        let alpha = ctx.new_generic_var(None);
+        let beta = ctx.new_generic_var(None);
+        let func_ty = ctx.new_generic_arrow(crate::types::ArgLabel::Nolabel, alpha, beta, Some(1));
+        let inner = ctx.new_generic_arrow_simple(func_ty, beta);
+        let pipe_ty = ctx.new_generic_arrow(crate::types::ArgLabel::Nolabel, alpha, inner, Some(2));
+        let id = Ident::create_persistent("|>");
+        let pervasives_id = Ident::create_persistent("Pervasives");
+        let path = Path::pdot(Path::pident(pervasives_id), "|>".to_string());
+        let desc = ValueDescription {
+            val_type: pipe_ty,
+            val_kind: ValueKind::ValPrim(PrimitiveDescription {
+                prim_name: "%revapply".to_string(),
+                prim_arity: 2,
+                prim_native_name: String::new(),
+                prim_native_float: false,
+            }),
+            val_loc: Location::none(),
+            val_attributes: vec![],
+            val_path: Some(path),
+        };
+        env.add_value(id, desc);
+    }
+
+    // Raise/throw (polymorphic: exn => 'a)
+    {
+        let exn_ty = ctx.new_generic_constr(Path::pident(Ident::create_persistent("exn")), vec![]);
+        let alpha = ctx.new_generic_var(None);
+        add_generic_unary_primitive(&mut env, ctx, "raise", "%raise", exn_ty, alpha);
+        // "throw" is an alias for raise
+        add_generic_unary_primitive(&mut env, ctx, "throw", "%raise", exn_ty, alpha);
+    }
 
     env
 }
 
-/// Helper to add a binary primitive operator
+/// Helper to add a binary primitive operator (at current level, monomorphic)
 fn add_binary_primitive(
     env: &mut Env,
     ctx: &TypeContext<'_>,
@@ -633,6 +795,67 @@ fn add_binary_primitive(
         val_kind: ValueKind::ValPrim(PrimitiveDescription {
             prim_name: prim_name.to_string(),
             prim_arity: 2,
+            prim_native_name: String::new(),
+            prim_native_float: false,
+        }),
+        val_loc: Location::none(),
+        val_attributes: vec![],
+        val_path: Some(path),
+    };
+    env.add_value(id, desc);
+}
+
+/// Helper to add a generic (polymorphic) binary primitive operator at GENERIC_LEVEL
+fn add_generic_binary_primitive(
+    env: &mut Env,
+    ctx: &TypeContext<'_>,
+    name: &str,
+    prim_name: &str,
+    arg1_ty: TypeExprRef,
+    arg2_ty: TypeExprRef,
+    ret_ty: TypeExprRef,
+) {
+    // Inner arrow: arg2 -> ret, arity None
+    let inner_ty = ctx.new_generic_arrow_simple(arg2_ty, ret_ty);
+    // Outer arrow: arg1 -> (arg2 -> ret), arity 2
+    let func_ty =
+        ctx.new_generic_arrow(crate::types::ArgLabel::Nolabel, arg1_ty, inner_ty, Some(2));
+    let id = Ident::create_persistent(name);
+    let pervasives_id = Ident::create_persistent("Pervasives");
+    let path = Path::pdot(Path::pident(pervasives_id), name.to_string());
+    let desc = ValueDescription {
+        val_type: func_ty,
+        val_kind: ValueKind::ValPrim(PrimitiveDescription {
+            prim_name: prim_name.to_string(),
+            prim_arity: 2,
+            prim_native_name: String::new(),
+            prim_native_float: false,
+        }),
+        val_loc: Location::none(),
+        val_attributes: vec![],
+        val_path: Some(path),
+    };
+    env.add_value(id, desc);
+}
+
+/// Helper to add a generic (polymorphic) unary primitive operator at GENERIC_LEVEL
+fn add_generic_unary_primitive(
+    env: &mut Env,
+    ctx: &TypeContext<'_>,
+    name: &str,
+    prim_name: &str,
+    arg_ty: TypeExprRef,
+    ret_ty: TypeExprRef,
+) {
+    let func_ty = ctx.new_generic_arrow(crate::types::ArgLabel::Nolabel, arg_ty, ret_ty, Some(1));
+    let id = Ident::create_persistent(name);
+    let pervasives_id = Ident::create_persistent("Pervasives");
+    let path = Path::pdot(Path::pident(pervasives_id), name.to_string());
+    let desc = ValueDescription {
+        val_type: func_ty,
+        val_kind: ValueKind::ValPrim(PrimitiveDescription {
+            prim_name: prim_name.to_string(),
+            prim_arity: 1,
             prim_native_name: String::new(),
             prim_native_float: false,
         }),
