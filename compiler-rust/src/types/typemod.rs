@@ -444,6 +444,60 @@ fn transl_signature<'a>(
 }
 
 // ============================================================================
+// Config Processing
+// ============================================================================
+
+/// Check if a structure starts with @@config(no_export) or @@config({no_export: ...}).
+/// Returns true if the no_export config is detected.
+fn has_no_export_config(arena: &ParseArena, items: &[ParsedStructureItem]) -> bool {
+    use crate::parser::ast::{ExpressionDesc, Payload};
+
+    for item in items {
+        match &item.pstr_desc {
+            ParsedStructureItemDesc::Pstr_attribute((name, payload)) => {
+                let attr_name = arena.get_string(name.txt);
+                if attr_name == "config" {
+                    // Check if payload contains no_export
+                    if let Payload::PStr(str_items) = payload {
+                        for si in str_items {
+                            match &si.pstr_desc {
+                                ParsedStructureItemDesc::Pstr_eval(expr, _) => {
+                                    match &expr.pexp_desc {
+                                        // @@config(no_export)
+                                        ExpressionDesc::Pexp_ident(lid) => {
+                                            let longident = arena.get_longident(lid.txt);
+                                            let lid_name = arena.get_string(longident.last_idx());
+                                            if lid_name == "no_export" {
+                                                return true;
+                                            }
+                                        }
+                                        // @@config({no_export: ...})
+                                        ExpressionDesc::Pexp_record(fields, _) => {
+                                            for field in fields {
+                                                let longident = arena.get_longident(field.lid.txt);
+                                                let field_name = arena.get_string(longident.last_idx());
+                                                if field_name == "no_export" {
+                                                    return true;
+                                                }
+                                            }
+                                        }
+                                        _ => {}
+                                    }
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+                }
+                // Continue checking (@@config might not be the first attribute)
+            }
+            _ => break, // Stop at first non-attribute item
+        }
+    }
+    false
+}
+
+// ============================================================================
 // Structure Type Checking
 // ============================================================================
 
@@ -454,6 +508,12 @@ pub fn type_structure<'a>(
     arena: &'a ParseArena,
     items: &[ParsedStructureItem],
 ) -> TypeModResult<(Structure, Env)> {
+    // Check for @@config(no_export) and apply the no_export transformation
+    // like OCaml's js_implementation.ml no_export function.
+    if has_no_export_config(arena, items) && !items.is_empty() {
+        return type_structure_no_export(tctx, env, arena, items);
+    }
+
     let mut typed_items = Vec::new();
     let mut current_env = env.clone();
 
@@ -466,6 +526,83 @@ pub fn type_structure<'a>(
     let structure = Structure {
         str_items: typed_items,
         str_type: vec![], // Signature would be computed here
+        str_final_env: EnvRef(0),
+    };
+
+    Ok((structure, current_env))
+}
+
+/// Apply no_export wrapping: wraps entire structure in
+/// Tstr_include(Tmod_constraint(Tmod_structure(items), explicit(Tmty_signature([]))))
+fn type_structure_no_export<'a>(
+    tctx: &mut TypeCheckContext<'a>,
+    env: &Env,
+    arena: &'a ParseArena,
+    items: &[ParsedStructureItem],
+) -> TypeModResult<(Structure, Env)> {
+    let loc = items[0].pstr_loc;
+
+    // Type check all items normally first
+    let mut typed_items = Vec::new();
+    let mut current_env = env.clone();
+
+    for item in items {
+        let (typed_item, new_env) = type_structure_item(tctx, &current_env, arena, item)?;
+        typed_items.push(typed_item);
+        current_env = new_env;
+    }
+
+    let inner_structure = Structure {
+        str_items: typed_items,
+        str_type: vec![],
+        str_final_env: EnvRef(0),
+    };
+
+    // Build: Tmod_structure(inner_structure)
+    let mod_structure = ModuleExpr {
+        mod_desc: ModuleExprDesc::Tmod_structure(inner_structure),
+        mod_loc: loc,
+        mod_type: ModuleType::placeholder(),
+        mod_env: EnvRef(0),
+        mod_attributes: vec![],
+    };
+
+    // Build: Tmod_constraint(Tmod_structure(...), explicit(Tmty_signature([])))
+    let empty_sig = crate::types::typedtree::ModuleType {
+        mty_desc: crate::types::typedtree::ModuleTypeDesc::Tmty_signature(
+            crate::types::typedtree::TypedSignature { sig_items: vec![] }
+        ),
+        mty_loc: loc,
+        mty_attributes: vec![],
+    };
+    let mod_constraint = ModuleExpr {
+        mod_desc: ModuleExprDesc::Tmod_constraint(
+            Box::new(mod_structure),
+            ModuleType::placeholder(),
+            crate::types::typedtree::ModuleTypeConstraint::Tmodtype_explicit(Box::new(empty_sig)),
+            ModuleCoercion::Tcoerce_none,
+        ),
+        mod_loc: loc,
+        mod_type: ModuleType::placeholder(),
+        mod_env: EnvRef(0),
+        mod_attributes: vec![],
+    };
+
+    // Build: Tstr_include(include_declaration(...))
+    let include_item = StructureItem {
+        str_desc: StructureItemDesc::Tstr_include(IncludeDeclaration {
+            incl_mod: mod_constraint,
+            incl_type: vec![],
+            incl_attributes: vec![],
+            incl_loc: loc,
+        }),
+        str_loc: loc,
+        str_env: EnvRef(0),
+    };
+
+    let structure = Structure {
+        str_items: vec![include_item],
+        str_type: vec![],
         str_final_env: EnvRef(0),
     };
 
