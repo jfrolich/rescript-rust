@@ -31,6 +31,13 @@
 that OCaml can't parse; these are excluded from parity testing. Total test files: 1313.
 
 **Session progress (2026-02-05) - newest:**
+- Ran full parity test: bsc-ast differences 148 (1048/1196). No regressions.
+- Investigated `tests/syntax_tests/data/conversion/reason/jsObject.res` mismatch:
+  - `inspect_binary_ast.py` shows OCaml shares a `Some("unit")` block (obj 629) while Rust emits a fresh one.
+  - The shared object is a `Some/Wrapper` containing string `"unit"`; shared twice inside a nested Pair/Record2 chain.
+  - `-dparsetree` shows three `Pexp_constraint` nodes forcing setters to `Ptyp_constr "unit"`.
+  - Likely OCaml reuses a module-level `core_type` for unit in the transformation that builds these constraints.
+  - Next steps: locate the OCaml source that builds the setter constraint (likely in frontend object/setter transform or Ast_literal usage), confirm it reuses the same `core_type` value, and mirror that in Rust by reusing the same arena index (no AST shape changes; use arena allocation, not Rc).
 - Shared Ast_literal.No_loc simple core_types (string/int/float/bool/unit/bigint/exn) in marshal
   - Marshal now shares `Ptyp_constr` with no args, Location.none, empty attrs, and static Lident
   - Fixes inline primitive transformations that reuse OCaml's module-level constants
