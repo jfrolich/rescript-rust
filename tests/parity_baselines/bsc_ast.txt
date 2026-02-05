@@ -236,6 +236,7 @@ syntax_tests/data/idempotency/nook-exchange/PageTitle.res
 syntax_tests/data/idempotency/nook-exchange/Repromise.res
 syntax_tests/data/idempotency/nook-exchange/TemporaryState.res
 syntax_tests/data/idempotency/nook-exchange/TextPages.res
+syntax_tests/data/idempotency/nook-exchange/User.res
 syntax_tests/data/idempotency/nook-exchange/UserItemNote.res
 syntax_tests/data/idempotency/nook-exchange/UserPage.res
 syntax_tests/data/idempotency/nook-exchange/ViewingList.res

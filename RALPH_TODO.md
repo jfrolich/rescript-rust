@@ -24,17 +24,17 @@
 |------------|--------|
 | Syntax tests | 506/506 (100%) ✅ |
 | sexp-locs | 1196/1196 (100%) ✅ |
-| sexp-locs-ppx | 1193/1196 (99.7%) |
-| bsc-ast | 811/1196 (67.8%) |
-
-**Note:** The remaining 3 sexp-locs-ppx failures are `@deriving(abstract)` issues:
-- `@deriving(abstract)` - 3 files: typeDefinition.res, HighlightJs.res, ReactDOMRe.res
-  - WIP implementation exists, but needs:
-  - Proper FFI binary marshaling for primitives
-  - Correct location handling
-  - Arity encoding to match OCaml
+| sexp-locs-ppx | 1196/1196 (100%) ✅ |
+| bsc-ast | 812/1196 (67.9%) |
 
 **Session progress (2026-02-05) - newest:**
+- Fixed @obj external unit arg FFI encoding - ReactDOMRe.res Style.make now passes
+  - When an @obj external has a unit argument (Nolabel), the FFI encoding must
+    include `empty_kind Extern_unit` (ObjEmpty + ExternUnit) in the Ffi_obj_create list
+  - Previously code was skipping unit args entirely, missing 2 objects in FFI encoding
+- **sexp-locs-ppx reached 100% parity (1196/1196 files)**
+
+**Session progress (2026-02-05) - previous:**
 - Fixed `@deriving({jsConverter: newType})` for record types:
   - Implemented `generate_js_converter_record` for record-to-JS conversion
   - Added `create_record_to_js_function` and `create_record_from_js_function`
