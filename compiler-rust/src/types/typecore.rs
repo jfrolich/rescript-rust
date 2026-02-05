@@ -681,10 +681,9 @@ fn transl_type_inner(
                 arg_refs.push(ty);
             }
 
-            // Create path from longident
-            // Full implementation would look up the type and use its actual path
+            // Create path from longident, preserving module qualification
             let longident = tctx.arena.get_longident(lid.txt);
-            let path = Path::pident(Ident::create_persistent(tctx.longident_last_name(longident)));
+            let path = Path::from_longident(longident, |idx| tctx.arena.get_string(idx));
 
             let constr_ty = ctx.new_constr(path.clone(), arg_refs);
 
