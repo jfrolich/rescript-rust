@@ -80,8 +80,17 @@ impl Sexp {
 // Helper Functions
 // ============================================================================
 
+/// Convert a Latin-1 encoded Rust string back to proper UTF-8.
+/// The source is read as bytes where each byte becomes a char (Latin-1 encoding),
+/// so chars with codepoints > 127 are actually individual bytes of multi-byte UTF-8
+/// sequences. This function recovers the original UTF-8 bytes.
+fn latin1_to_utf8(s: &str) -> String {
+    let bytes: Vec<u8> = s.chars().map(|c| c as u8).collect();
+    String::from_utf8(bytes).unwrap_or_else(|_| s.to_string())
+}
+
 fn string(txt: &str) -> Sexp {
-    Sexp::atom(&format!("\"{}\"", txt))
+    Sexp::atom(&format!("\"{}\"", latin1_to_utf8(txt)))
 }
 
 fn opt_string(opt: &Option<String>) -> Sexp {

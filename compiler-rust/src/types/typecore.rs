@@ -1409,7 +1409,7 @@ fn type_pattern_record(
 
         // Create placeholder label description
         let label_desc = crate::types::LabelDescription {
-            lbl_name: tctx.resolve_lid(field.lid.txt).to_string(),
+            lbl_name: tctx.longident_last_name(tctx.resolve_lid(field.lid.txt)),
             lbl_res: expected_ty,
             lbl_arg: field_ty,
             lbl_mut: crate::types::MutableFlag::Immutable,
@@ -2649,7 +2649,7 @@ fn type_record(
 
         // Create a placeholder label description
         let label_desc = crate::types::LabelDescription {
-            lbl_name: tctx.resolve_lid(field.lid.txt).to_string(),
+            lbl_name: tctx.longident_last_name(tctx.resolve_lid(field.lid.txt)),
             lbl_res: expected_ty,
             lbl_arg: field_ty,
             lbl_mut: crate::types::MutableFlag::Immutable,
@@ -2703,7 +2703,7 @@ fn type_field(
 
     // Create placeholder label description
     let label_desc = crate::types::LabelDescription {
-        lbl_name: tctx.resolve_lid(field_lid.txt).to_string(),
+        lbl_name: tctx.longident_last_name(tctx.resolve_lid(field_lid.txt)),
         lbl_res: record_ty,
         lbl_arg: field_ty,
         lbl_mut: crate::types::MutableFlag::Immutable,
@@ -2756,7 +2756,7 @@ fn type_setfield(
 
     // Create placeholder label description
     let label_desc = crate::types::LabelDescription {
-        lbl_name: tctx.resolve_lid(field_lid.txt).to_string(),
+        lbl_name: tctx.longident_last_name(tctx.resolve_lid(field_lid.txt)),
         lbl_res: record_ty,
         lbl_arg: field_ty,
         lbl_mut: crate::types::MutableFlag::Mutable,
