@@ -205,8 +205,8 @@ impl<'a> DependencyCollector<'a> {
             StructureItemDesc::Pstr_attribute(_attr) => {
                 // Attributes don't contribute dependencies
             }
-            StructureItemDesc::Pstr_extension((_id, payload), _attrs) => {
-                self.add_payload(payload);
+            StructureItemDesc::Pstr_extension((_id, _payload), _attrs) => {
+                // OCaml's handle_extension ignores extension payloads for dependency extraction
             }
         }
     }
@@ -264,8 +264,8 @@ impl<'a> DependencyCollector<'a> {
             SignatureItemDesc::Psig_attribute(_attr) => {
                 // Attributes don't contribute dependencies
             }
-            SignatureItemDesc::Psig_extension((_id, payload), _attrs) => {
-                self.add_payload(payload);
+            SignatureItemDesc::Psig_extension((_id, _payload), _attrs) => {
+                // OCaml's handle_extension ignores extension payloads for dependency extraction
             }
         }
     }
@@ -439,8 +439,8 @@ impl<'a> DependencyCollector<'a> {
                 self.add_lident_idx_full(lid.txt);
                 self.add_expression(body);
             }
-            ExpressionDesc::Pexp_extension((_id, payload)) => {
-                self.add_payload(payload);
+            ExpressionDesc::Pexp_extension((_id, _payload)) => {
+                // OCaml's handle_extension ignores extension payloads for dependency extraction
             }
             ExpressionDesc::Pexp_await(expr) => {
                 self.add_expression(expr);
@@ -575,8 +575,8 @@ impl<'a> DependencyCollector<'a> {
             PatternDesc::Ppat_exception(pat) => {
                 self.add_pattern_inner(pat, unpack_names);
             }
-            PatternDesc::Ppat_extension((_id, payload)) => {
-                self.add_payload(payload);
+            PatternDesc::Ppat_extension((_id, _payload)) => {
+                // OCaml's handle_extension ignores extension payloads for dependency extraction
             }
             PatternDesc::Ppat_open(lid, pat) => {
                 // Pattern open uses full module path
@@ -645,8 +645,8 @@ impl<'a> DependencyCollector<'a> {
                     self.add_core_type(ty);
                 }
             }
-            CoreTypeDesc::Ptyp_extension((_id, payload)) => {
-                self.add_payload(payload);
+            CoreTypeDesc::Ptyp_extension((_id, _payload)) => {
+                // OCaml's handle_extension ignores extension payloads for dependency extraction
             }
         }
     }
@@ -666,10 +666,15 @@ impl<'a> DependencyCollector<'a> {
                 if let Some(mt) = mt {
                     self.add_module_type(mt);
                 }
-                // Bind the functor parameter name so it's not added as a dependency in the body
+                // Bind the functor parameter name so it's not added as a dependency in the body.
+                // Only track as newly added if not already bound, to avoid
+                // removing outer bindings when the scope exits.
                 let param_name = self.arena.get_string(name.txt).to_string();
-                self.bound_modules.insert(param_name);
+                let newly_added = self.bound_modules.insert(param_name.clone());
                 self.add_module_expr(body);
+                if newly_added {
+                    self.bound_modules.remove(&param_name);
+                }
             }
             ModuleExprDesc::Pmod_apply(me1, me2) => {
                 self.add_module_expr(me1);
@@ -682,8 +687,8 @@ impl<'a> DependencyCollector<'a> {
             ModuleExprDesc::Pmod_unpack(expr) => {
                 self.add_expression(expr);
             }
-            ModuleExprDesc::Pmod_extension((_id, payload)) => {
-                self.add_payload(payload);
+            ModuleExprDesc::Pmod_extension((_id, _payload)) => {
+                // OCaml's handle_extension ignores extension payloads for dependency extraction
             }
         }
     }
@@ -706,10 +711,15 @@ impl<'a> DependencyCollector<'a> {
                 if let Some(mt1) = mt1 {
                     self.add_module_type(mt1);
                 }
-                // Bind the functor parameter name so it's not added as a dependency in the body
+                // Bind the functor parameter name so it's not added as a dependency in the body.
+                // Only track as newly added if not already bound, to avoid
+                // removing outer bindings when the scope exits.
                 let param_name = self.arena.get_string(name.txt).to_string();
-                self.bound_modules.insert(param_name);
+                let newly_added = self.bound_modules.insert(param_name.clone());
                 self.add_module_type(mt2);
+                if newly_added {
+                    self.bound_modules.remove(&param_name);
+                }
             }
             ModuleTypeDesc::Pmty_with(mt, constraints) => {
                 self.add_module_type(mt);
@@ -720,8 +730,8 @@ impl<'a> DependencyCollector<'a> {
             ModuleTypeDesc::Pmty_typeof(me) => {
                 self.add_module_expr(me);
             }
-            ModuleTypeDesc::Pmty_extension((_id, payload)) => {
-                self.add_payload(payload);
+            ModuleTypeDesc::Pmty_extension((_id, _payload)) => {
+                // OCaml's handle_extension ignores extension payloads for dependency extraction
             }
         }
     }
