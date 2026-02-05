@@ -6773,6 +6773,15 @@ fn handle_deriving_type(
 
     let loc = item.pstr_loc;
 
+    // Check if this is @deriving(abstract) - it requires completely different handling
+    let abstract_action = actions.iter().find_map(|a| {
+        if let DeriveAction::Abstract { light } = a {
+            Some(*light)
+        } else {
+            None
+        }
+    });
+
     // Step 1: Create type declaration with @deriving stripped from last tdcl
     // Also rewrite all type declarations for string transformations in attributes
     let new_tdcls: Vec<TypeDeclaration> = tdcls
@@ -6787,6 +6796,18 @@ fn handle_deriving_type(
             rewritten
         })
         .collect();
+
+    if let Some(light) = abstract_action {
+        // @deriving(abstract) has special structure:
+        // include (struct
+        //   include (struct <type_decl> end : sig end)
+        //   type t  -- abstract
+        //   external t: ... -- maker
+        //   external fieldGet: ... -- getters
+        //   ...
+        // end)
+        return handle_deriving_abstract(tdcls, rec_flag, &new_tdcls, light, loc, arena);
+    }
 
     let type_str_item = StructureItem {
         pstr_desc: StructureItemDesc::Pstr_type(rec_flag, new_tdcls),
@@ -6813,7 +6834,7 @@ fn handle_deriving_type(
                 }
             }
             DeriveAction::Abstract { light: _ } => {
-                // TODO: Implement abstract generation
+                // Handled above
             }
         }
     }
@@ -6838,6 +6859,465 @@ fn handle_deriving_type(
         pstr_desc: StructureItemDesc::Pstr_include(include_decl),
         pstr_loc: loc,
     }]
+}
+
+/// Handle @deriving(abstract) which transforms record types into abstract types with accessors
+///
+/// For a type like:
+/// ```
+/// @deriving(abstract)
+/// type t = { @optional cite: React.component<...>, info: props }
+/// ```
+///
+/// Generates:
+/// ```
+/// include (struct
+///   include (struct type t = { ... } end : sig end)  // Original type hidden
+///   type t                                           // Abstract type
+///   external t: (~cite: ..., ~info: ...) => t        // Maker function
+///   external citeGet: t => option<...>               // Getter for optional
+///   external infoGet: t => props                     // Getter
+/// end)
+/// ```
+fn handle_deriving_abstract(
+    original_tdcls: &[TypeDeclaration],
+    rec_flag: RecFlag,
+    new_tdcls: &[TypeDeclaration],
+    light: bool,
+    loc: LocIdx,
+    arena: &mut ParseArena,
+) -> Vec<StructureItem> {
+    let none_loc = arena.none_loc();
+
+    // Generate the code for each type declaration
+    let mut abstract_tdcls: Vec<TypeDeclaration> = vec![];
+    let mut primitives: Vec<StructureItem> = vec![];
+
+    for tdcl in original_tdcls {
+        let (abstract_tdcl, value_descriptions) = handle_abstract_tdcl(tdcl, light, arena);
+        abstract_tdcls.push(abstract_tdcl);
+        for vd in value_descriptions {
+            primitives.push(StructureItem {
+                pstr_desc: StructureItemDesc::Pstr_primitive(vd),
+                pstr_loc: none_loc,
+            });
+        }
+    }
+
+    // Create the inner include: include (struct <original type with record> end : sig end)
+    let type_str_item = StructureItem {
+        pstr_desc: StructureItemDesc::Pstr_type(rec_flag, new_tdcls.to_vec()),
+        pstr_loc: loc,
+    };
+
+    let inner_mod = ModuleExpr {
+        pmod_desc: ModuleExprDesc::Pmod_structure(vec![type_str_item]),
+        pmod_loc: loc,
+        pmod_attributes: vec![],
+    };
+
+    let empty_sig = current::ModuleType {
+        pmty_desc: current::ModuleTypeDesc::Pmty_signature(vec![]),
+        pmty_loc: loc,
+        pmty_attributes: vec![],
+    };
+
+    let constrained_mod = ModuleExpr {
+        pmod_desc: ModuleExprDesc::Pmod_constraint(Box::new(inner_mod), Box::new(empty_sig)),
+        pmod_loc: loc,
+        pmod_attributes: vec![],
+    };
+
+    let inner_include = StructureItem {
+        pstr_desc: StructureItemDesc::Pstr_include(current::IncludeDeclaration {
+            pincl_mod: constrained_mod,
+            pincl_loc: loc,
+            pincl_attributes: vec![],
+        }),
+        pstr_loc: loc,
+    };
+
+    // Create the abstract type declaration
+    let abstract_type_str = StructureItem {
+        pstr_desc: StructureItemDesc::Pstr_type(rec_flag, abstract_tdcls),
+        pstr_loc: none_loc,
+    };
+
+    // Build the outer structure: inner_include, abstract_type, primitives
+    let mut outer_structure = vec![inner_include, abstract_type_str];
+    outer_structure.extend(primitives);
+
+    let outer_mod = ModuleExpr {
+        pmod_desc: ModuleExprDesc::Pmod_structure(outer_structure),
+        pmod_loc: loc,
+        pmod_attributes: vec![],
+    };
+
+    let outer_include = current::IncludeDeclaration {
+        pincl_mod: outer_mod,
+        pincl_loc: loc,
+        pincl_attributes: vec![],
+    };
+
+    vec![StructureItem {
+        pstr_desc: StructureItemDesc::Pstr_include(outer_include),
+        pstr_loc: loc,
+    }]
+}
+
+/// Handle a single type declaration for @deriving(abstract)
+/// Returns the abstract type declaration and the list of value descriptions (primitives)
+fn handle_abstract_tdcl(
+    tdcl: &TypeDeclaration,
+    light: bool,
+    arena: &mut ParseArena,
+) -> (TypeDeclaration, Vec<ValueDescription>) {
+    let loc = tdcl.ptype_loc;
+    let type_name = arena.get_string(tdcl.ptype_name.txt).to_string();
+    let core_type = core_type_of_type_declaration(tdcl, arena);
+
+    // Create abstract type declaration (same name, but Ptype_abstract)
+    let abstract_tdcl = TypeDeclaration {
+        ptype_name: tdcl.ptype_name.clone(),
+        ptype_params: tdcl.ptype_params.clone(),
+        ptype_cstrs: tdcl.ptype_cstrs.clone(),
+        ptype_kind: TypeKind::Ptype_abstract,
+        ptype_private: tdcl.ptype_private.clone(),
+        ptype_manifest: None,
+        ptype_attributes: vec![],
+        ptype_loc: tdcl.ptype_loc,
+    };
+
+    let is_private = matches!(tdcl.ptype_private, PrivateFlag::Private);
+
+    match &tdcl.ptype_kind {
+        TypeKind::Ptype_record(labels) => {
+            let mut value_descs: Vec<ValueDescription> = vec![];
+
+            // Check if any field has @optional
+            let has_optional_field = labels.iter().any(|label| {
+                label.pld_attributes.iter().any(|(attr_name, _)| {
+                    let name = arena.get_string(attr_name.txt);
+                    name == "optional"
+                })
+            });
+
+            // Build maker args and accessor/setter value descriptions
+            // Start with unit if has_optional_field (OCaml: fold_right starts with [unit] accumulator)
+            let mut maker_args: Vec<TypeArg> = if has_optional_field {
+                vec![TypeArg {
+                    attrs: vec![],
+                    lbl: ArgLabel::Nolabel,
+                    typ: make_unit_type(arena),
+                }]
+            } else {
+                vec![]
+            };
+            let mut labels_info: Vec<(bool, Located<StrIdx>)> = vec![];
+
+            // Process in reverse order (like fold_right) and insert at front (like ::)
+            for label in labels.iter().rev() {
+                let label_name = arena.get_string(label.pld_name.txt).to_string();
+                let label_loc = label.pld_name.loc;
+                let pld_type = &label.pld_type;
+
+                // Check for @as attribute
+                let prim_as_name = get_bs_as_string(&label.pld_attributes, arena)
+                    .unwrap_or_else(|| label_name.clone());
+                let new_label = if prim_as_name != label_name {
+                    Located { txt: arena.intern_string(&prim_as_name), loc: label.pld_name.loc }
+                } else {
+                    label.pld_name.clone()
+                };
+
+                let is_optional = label.pld_attributes.iter().any(|(attr_name, _)| {
+                    let name = arena.get_string(attr_name.txt);
+                    name == "optional"
+                });
+
+                // Build the argument for maker function
+                let arg_label = if is_optional {
+                    ArgLabel::Optional(label.pld_name.clone())
+                } else {
+                    ArgLabel::Labelled(label.pld_name.clone())
+                };
+
+                // Insert at front (like OCaml :: prepending)
+                maker_args.insert(0, TypeArg {
+                    attrs: vec![],
+                    lbl: arg_label,
+                    typ: pld_type.clone(),
+                });
+
+                labels_info.insert(0, (is_optional, new_label.clone()));
+
+                // Build accessor type
+                let accessor_type = if is_optional {
+                    // Returns option<pld_type>
+                    let option_type = lift_option_type(pld_type, arena);
+                    make_arrow_type(&core_type, &option_type, arena)
+                } else {
+                    make_arrow_type(&core_type, pld_type, arena)
+                };
+
+                // Accessor primitive
+                let accessor_prim = if is_optional {
+                    vec![prim_as_name.clone()]
+                } else {
+                    // Use FFI encoding for non-optional getters
+                    // For now, just use the label name as prim
+                    vec![prim_as_name.clone()]
+                };
+
+                // Accessor attributes: @get for optional, empty for non-optional (FFI encoded)
+                let accessor_attrs = if is_optional {
+                    vec![make_get_attr(loc, arena)]
+                } else {
+                    vec![]
+                };
+
+                let accessor_name = if light {
+                    label.pld_name.clone()
+                } else {
+                    Located {
+                        txt: arena.intern_string(&format!("{}Get", label_name)),
+                        loc: label.pld_name.loc,
+                    }
+                };
+
+                let accessor_vd = ValueDescription {
+                    pval_name: accessor_name,
+                    pval_type: accessor_type,
+                    pval_prim: accessor_prim,
+                    pval_attributes: accessor_attrs,
+                    pval_loc: label.pld_loc,
+                };
+                value_descs.push(accessor_vd);
+
+                // Setter for mutable fields
+                if matches!(label.pld_mutable, current::MutableFlag::Mutable) {
+                    let setter_type = make_setter_type(&core_type, pld_type, arena);
+                    let setter_vd = ValueDescription {
+                        pval_name: Located {
+                            txt: arena.intern_string(&format!("{}Set", label_name)),
+                            loc: label_loc,
+                        },
+                        pval_type: setter_type,
+                        pval_prim: vec![prim_as_name.clone()],
+                        pval_attributes: vec![make_set_attr(loc, arena)],
+                        pval_loc: label.pld_loc,
+                    };
+                    value_descs.push(setter_vd);
+                }
+            }
+
+            // Add the maker function (if not private)
+            if !is_private {
+                // maker_args already has correct order from insert(0, ...) logic
+                // and unit arg was added at start if has_optional_field
+
+                let make_type = if maker_args.is_empty() {
+                    core_type.clone()
+                } else {
+                    make_arrows_type(&maker_args, &core_type, arena)
+                };
+
+                // Compute prim for maker based on optional labels
+                let my_prims = compute_maker_prims(&labels_info, has_optional_field, arena);
+
+                let maker_vd = ValueDescription {
+                    pval_name: Located { txt: arena.intern_string(&type_name), loc },
+                    pval_type: make_type,
+                    pval_prim: my_prims,
+                    pval_attributes: vec![],
+                    pval_loc: loc,
+                };
+                value_descs.insert(0, maker_vd);
+            }
+
+            (abstract_tdcl, value_descs)
+        }
+        _ => {
+            // For non-record types, just return abstract with no primitives
+            (abstract_tdcl, vec![])
+        }
+    }
+}
+
+/// Lift a type to option<type>
+fn lift_option_type(typ: &CoreType, arena: &mut ParseArena) -> CoreType {
+    let none_loc = arena.none_loc();
+    let option_str = arena.intern_string("option");
+    let option_ident = arena.push_longident(Longident::Lident(option_str));
+    CoreType {
+        ptyp_desc: CoreTypeDesc::Ptyp_constr(
+            Located { txt: option_ident, loc: none_loc },
+            vec![typ.clone()],
+        ),
+        ptyp_loc: none_loc,
+        ptyp_attributes: vec![],
+    }
+}
+
+/// Create an arrow type: arg -> ret
+fn make_arrow_type(arg: &CoreType, ret: &CoreType, arena: &mut ParseArena) -> CoreType {
+    let none_loc = arena.none_loc();
+    CoreType {
+        ptyp_desc: CoreTypeDesc::Ptyp_arrow {
+            arg: Box::new(TypeArg {
+                attrs: vec![],
+                lbl: ArgLabel::Nolabel,
+                typ: arg.clone(),
+            }),
+            ret: Box::new(ret.clone()),
+            arity: arena.static_arity_1(),
+        },
+        ptyp_loc: none_loc,
+        ptyp_attributes: vec![],
+    }
+}
+
+/// Create setter type: t -> field_type -> unit
+fn make_setter_type(record_type: &CoreType, field_type: &CoreType, arena: &mut ParseArena) -> CoreType {
+    let none_loc = arena.none_loc();
+    let unit_type = make_unit_type(arena);
+
+    // First arrow: t -> (field_type -> unit)
+    let inner = CoreType {
+        ptyp_desc: CoreTypeDesc::Ptyp_arrow {
+            arg: Box::new(TypeArg {
+                attrs: vec![],
+                lbl: ArgLabel::Nolabel,
+                typ: field_type.clone(),
+            }),
+            ret: Box::new(unit_type),
+            arity: arena.static_arity_1(),
+        },
+        ptyp_loc: none_loc,
+        ptyp_attributes: vec![],
+    };
+
+    CoreType {
+        ptyp_desc: CoreTypeDesc::Ptyp_arrow {
+            arg: Box::new(TypeArg {
+                attrs: vec![],
+                lbl: ArgLabel::Nolabel,
+                typ: record_type.clone(),
+            }),
+            ret: Box::new(inner),
+            arity: arena.push_arity(Some(2)),
+        },
+        ptyp_loc: none_loc,
+        ptyp_attributes: vec![],
+    }
+}
+
+/// Create unit type
+fn make_unit_type(arena: &mut ParseArena) -> CoreType {
+    let none_loc = arena.none_loc();
+    let unit_str = arena.intern_string("unit");
+    let unit_ident = arena.push_longident(Longident::Lident(unit_str));
+    CoreType {
+        ptyp_desc: CoreTypeDesc::Ptyp_constr(
+            Located { txt: unit_ident, loc: none_loc },
+            vec![],
+        ),
+        ptyp_loc: none_loc,
+        ptyp_attributes: vec![],
+    }
+}
+
+/// Create arrow type with multiple arguments
+fn make_arrows_type(args: &[TypeArg], ret: &CoreType, arena: &mut ParseArena) -> CoreType {
+    let none_loc = arena.none_loc();
+    if args.is_empty() {
+        return ret.clone();
+    }
+
+    let arity = args.len();
+    // Build from right to left
+    let mut result = ret.clone();
+    for (i, arg) in args.iter().enumerate().rev() {
+        let current_arity = if i == 0 {
+            arena.push_arity(Some(arity as i32))
+        } else {
+            arena.static_arity_1()
+        };
+
+        result = CoreType {
+            ptyp_desc: CoreTypeDesc::Ptyp_arrow {
+                arg: Box::new(arg.clone()),
+                ret: Box::new(result),
+                arity: current_arity,
+            },
+            ptyp_loc: none_loc,
+            ptyp_attributes: vec![],
+        };
+    }
+    result
+}
+
+/// Make @get attribute
+fn make_get_attr(loc: LocIdx, arena: &mut ParseArena) -> Attribute {
+    (
+        Located { txt: arena.intern_string("get"), loc },
+        Payload::PStr(vec![]),
+    )
+}
+
+/// Make @set attribute
+fn make_set_attr(loc: LocIdx, arena: &mut ParseArena) -> Attribute {
+    (
+        Located { txt: arena.intern_string("set"), loc },
+        Payload::PStr(vec![]),
+    )
+}
+
+/// Get the @as("...") attribute value
+fn get_bs_as_string(attrs: &[Attribute], arena: &ParseArena) -> Option<String> {
+    for (attr_name, payload) in attrs {
+        let name = arena.get_string(attr_name.txt);
+        if name == "as" {
+            if let Payload::PStr(items) = payload {
+                if let Some(item) = items.first() {
+                    if let StructureItemDesc::Pstr_eval(expr, _) = &item.pstr_desc {
+                        if let ExpressionDesc::Pexp_constant(Constant::String(txt, _)) = &expr.pexp_desc {
+                            return Some(txt.clone());
+                        }
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Compute prims for maker function based on optional labels
+fn compute_maker_prims(labels_info: &[(bool, Located<StrIdx>)], has_optional: bool, arena: &ParseArena) -> Vec<String> {
+    // This is a simplified version - the actual OCaml code uses
+    // Ast_external_process.pval_prim_of_option_labels which encodes
+    // information about optional labels into the primitive string
+    // For now, we use a simple encoding
+    if labels_info.is_empty() {
+        return vec![];
+    }
+
+    // Build a string like "I" (no optionals) or with option encoding
+    let mut result = String::new();
+    for (is_optional, label) in labels_info {
+        let label_name = arena.get_string(label.txt);
+        if *is_optional {
+            result.push_str(&format!("?{}", label_name));
+        } else {
+            result.push_str(label_name);
+        }
+        result.push(',');
+    }
+    if has_optional {
+        result.push_str("()");
+    }
+
+    vec![result]
 }
 
 /// Generate `include (struct <accessor_bindings> end : sig <accessor_sigs> end)`
