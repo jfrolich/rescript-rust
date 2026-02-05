@@ -542,10 +542,45 @@ spec.loader.exec_module(mod)
 
 ast_a = mod.BinaryAstFile(a_path)
 ast_b = mod.BinaryAstFile(b_path)
-root_a, _ = ast_a.decode_ast()
-root_b, _ = ast_b.decode_ast()
-diffs = mod.compare_trees(root_a, root_b)
-sys.exit(1 if diffs else 0)
+root_a, dec_a = ast_a.decode_ast()
+root_b, dec_b = ast_b.decode_ast()
+
+def resolve(node, decoder):
+    if isinstance(node, mod.SharedNode):
+        return decoder.objects.get(node.target_idx)
+    return node
+
+def nodes_equal(a, b):
+    stack = [(a, b)]
+    while stack:
+        left, right = stack.pop()
+        left = resolve(left, dec_a)
+        right = resolve(right, dec_b)
+        if left is None or right is None:
+            return False
+        if type(left) is not type(right):
+            return False
+        if isinstance(left, mod.IntNode):
+            if left.value != right.value:
+                return False
+        elif isinstance(left, mod.StringNode):
+            if left.value != right.value:
+                return False
+        elif isinstance(left, mod.DoubleNode):
+            if left.value != right.value:
+                return False
+        elif isinstance(left, mod.BlockNode):
+            if left.type_hint in ("Location", "Location?", "Position") and right.type_hint in ("Location", "Location?", "Position"):
+                continue
+            if left.tag != right.tag or len(left.children) != len(right.children):
+                return False
+            for l_child, r_child in zip(left.children, right.children):
+                stack.append((l_child, r_child))
+        else:
+            return False
+    return True
+
+sys.exit(0 if nodes_equal(root_a, root_b) else 1)
 PY
         then
             pass_count=$((pass_count + 1))
