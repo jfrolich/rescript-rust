@@ -772,6 +772,13 @@ pub fn initial_env(ctx: &TypeContext<'_>) -> Env {
     env
 }
 
+/// Create a fresh instance of a type for use in operator definitions.
+/// This ensures each position in an operator type is a separate allocation,
+/// matching OCaml's behavior where each type in a parsed signature is independent.
+fn fresh_ty(ctx: &TypeContext<'_>, ty: TypeExprRef) -> TypeExprRef {
+    crate::types::ctype::copy_type(ctx, ty)
+}
+
 /// Helper to add a binary primitive operator (at current level, monomorphic)
 fn add_binary_primitive(
     env: &mut Env,
@@ -782,10 +789,14 @@ fn add_binary_primitive(
     arg2_ty: TypeExprRef,
     ret_ty: TypeExprRef,
 ) {
+    // Create fresh copies to avoid sharing - each position must be independent
+    let arg1 = fresh_ty(ctx, arg1_ty);
+    let arg2 = fresh_ty(ctx, arg2_ty);
+    let ret = fresh_ty(ctx, ret_ty);
     // Inner arrow: arg2 -> ret, arity None (partial application gives arity 1)
-    let inner_ty = ctx.new_arrow_simple(arg2_ty, ret_ty);
+    let inner_ty = ctx.new_arrow_simple(arg2, ret);
     // Outer arrow: arg1 -> (arg2 -> ret), arity 2 (full application)
-    let func_ty = ctx.new_arrow(crate::types::ArgLabel::Nolabel, arg1_ty, inner_ty, Some(2));
+    let func_ty = ctx.new_arrow(crate::types::ArgLabel::Nolabel, arg1, inner_ty, Some(2));
     let id = Ident::create_persistent(name);
     // Primitives come from Pervasives module
     let pervasives_id = Ident::create_persistent("Pervasives");
@@ -875,8 +886,11 @@ fn add_unary_primitive(
     arg_ty: TypeExprRef,
     ret_ty: TypeExprRef,
 ) {
+    // Create fresh copies to avoid sharing
+    let arg = fresh_ty(ctx, arg_ty);
+    let ret = fresh_ty(ctx, ret_ty);
     // Unary operators have arity 1
-    let func_ty = ctx.new_arrow(crate::types::ArgLabel::Nolabel, arg_ty, ret_ty, Some(1));
+    let func_ty = ctx.new_arrow(crate::types::ArgLabel::Nolabel, arg, ret, Some(1));
     let id = Ident::create_persistent(name);
     // Primitives come from Pervasives module
     let pervasives_id = Ident::create_persistent("Pervasives");
