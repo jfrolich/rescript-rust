@@ -1529,8 +1529,12 @@ fn build_obj_ffi_type(typ: &CoreType, arena: &mut ParseArena) -> FfiType {
     for arg in &args {
         match &arg.lbl {
             ArgLabel::Nolabel => {
-                // Nolabel in @obj: only unit allowed, mark as empty kind
-                // Skip from obj_params (unit args don't contribute to object)
+                // Nolabel in @obj: only unit allowed, mark as empty_kind Extern_unit
+                // OCaml process_obj line 449: External_arg_spec.empty_kind Extern_unit
+                obj_params.push(ObjParam {
+                    obj_arg_type: Attr::ExternUnit,
+                    obj_arg_label: Label::ObjEmpty,
+                });
             }
             ArgLabel::Labelled(label_loc) => {
                 let label_name = arena.get_string(label_loc.txt).to_string();
@@ -5279,16 +5283,21 @@ fn set_outermost_arity(expr: Expression, arity: i32, arena: &mut ParseArena) -> 
 
 /// Generate a core type representing the type declaration
 fn core_type_of_type_declaration(tdcl: &TypeDeclaration, arena: &mut ParseArena) -> CoreType {
-    let loc = tdcl.ptype_loc;
+    // OCaml: Typ.constr ~attrs {txt = Lident txt; loc} (Ext_list.map ptype_params fst)
+    // - ptype_name = {txt; loc} -- so longident uses ptype_name.loc
+    // - Typ.constr has optional ~loc (defaults to !default_loc = ghost)
+    // - ptype_attributes = attrs -- but we don't include attrs here (see core_type_of_type_declaration_with_attrs)
+    let name_loc = tdcl.ptype_name.loc;  // Longident uses the type name's location
+    let ptyp_loc = arena.none_loc();      // ptyp_loc defaults to ghost
     let name_lid = arena.push_longident(Longident::Lident(tdcl.ptype_name.txt));
 
     if tdcl.ptype_params.is_empty() {
         CoreType {
             ptyp_desc: CoreTypeDesc::Ptyp_constr(
-                Located { txt: name_lid, loc },
+                Located { txt: name_lid, loc: name_loc },
                 vec![],
             ),
-            ptyp_loc: loc,
+            ptyp_loc,
             ptyp_attributes: vec![],
         }
     } else {
@@ -5298,10 +5307,10 @@ fn core_type_of_type_declaration(tdcl: &TypeDeclaration, arena: &mut ParseArena)
         }).collect();
         CoreType {
             ptyp_desc: CoreTypeDesc::Ptyp_constr(
-                Located { txt: name_lid, loc },
+                Located { txt: name_lid, loc: name_loc },
                 type_args,
             ),
-            ptyp_loc: loc,
+            ptyp_loc,
             ptyp_attributes: vec![],
         }
     }
@@ -6992,7 +7001,10 @@ fn handle_abstract_tdcl(
 
     match &tdcl.ptype_kind {
         TypeKind::Ptype_record(labels) => {
-            let mut value_descs: Vec<ValueDescription> = vec![];
+            // OCaml uses Ext_list.fold_right which processes right-to-left and prepends (::)
+            // This results in accessors in the same order as the original labels.
+            // We collect into vectors and then reverse to get the same effect.
+            let mut setter_accessor: Vec<ValueDescription> = vec![];
 
             // Check if any field has @optional
             let has_optional_field = labels.iter().any(|label| {
@@ -7002,20 +7014,12 @@ fn handle_abstract_tdcl(
                 })
             });
 
-            // Build maker args and accessor/setter value descriptions
-            // Start with unit if has_optional_field (OCaml: fold_right starts with [unit] accumulator)
-            let mut maker_args: Vec<TypeArg> = if has_optional_field {
-                vec![TypeArg {
-                    attrs: vec![],
-                    lbl: ArgLabel::Nolabel,
-                    typ: make_unit_type(arena),
-                }]
-            } else {
-                vec![]
-            };
+            // Build maker args and labels_info
+            // OCaml: fold_right starts with [unit] or [] accumulator, and prepends each arg
+            let mut maker_args: Vec<TypeArg> = vec![];
             let mut labels_info: Vec<(bool, Located<StrIdx>)> = vec![];
 
-            // Process in reverse order (like fold_right) and insert at front (like ::)
+            // Process in reverse order (like fold_right) and prepend (like ::)
             for label in labels.iter().rev() {
                 let label_name = arena.get_string(label.pld_name.txt).to_string();
                 let label_loc = label.pld_name.loc;
@@ -7052,29 +7056,65 @@ fn handle_abstract_tdcl(
                 labels_info.insert(0, (is_optional, new_label.clone()));
 
                 // Build accessor type
+                // OCaml behavior varies based on whether encode_attributes_as_string processes it:
+                // - Non-optional: pval_prim already has FFI encoding, rs_externals returns false,
+                //   arrow is NOT re-processed. Arrow uses tdcl.ptype_loc (from Typ.arrows ~loc).
+                // - Optional: pval_prim = [name] with @get attr, rs_externals returns true,
+                //   encode_attributes_as_string rebuilds arrow with pval_loc = pld_loc.
                 let accessor_type = if is_optional {
                     // Returns option<pld_type>
+                    // After encode_attributes_as_string, arrow uses pld_loc
                     let option_type = lift_option_type(pld_type, arena);
-                    make_arrow_type(&core_type, &option_type, arena)
+                    make_arrow_type_with_loc(&core_type, &option_type, Some(label.pld_loc), arena)
                 } else {
-                    make_arrow_type(&core_type, pld_type, arena)
+                    // Not re-processed, arrow uses tdcl.ptype_loc
+                    make_arrow_type_with_loc(&core_type, pld_type, Some(loc), arena)
                 };
 
-                // Accessor primitive
+                // Accessor primitive:
+                // Both optional and non-optional go through encode_attributes_as_string,
+                // which produces [prim_name, ffi_data].
+                //
+                // For optional: originally has [prim_as_name] with @get attr
+                //   -> encode_attributes_as_string processes @get -> [prim_as_name, ffi_bs Js_get]
+                // For non-optional: has ffi_bs_as_prims [dummy] -> ["", ffi_bs Js_get]
+                //
+                // The difference is:
+                // - Optional: prim_name = prim_as_name, first string is the name
+                // - Non-optional: prim_name = "", first string is empty
+                //
+                // Note: OCaml's ffi_bs uses Param_number(1) for [dummy] because
+                // ffi_bs_aux counts consecutive dummy params.
                 let accessor_prim = if is_optional {
-                    vec![prim_as_name.clone()]
+                    // OCaml: encode_attributes_as_string processes @get attr
+                    // The default external_desc.return_wrapper is Return_unset
+                    // check_return_wrapper keeps Return_unset for non-unit result types
+                    // ffi_bs([dummy]) returns Param_number(1)
+                    let ffi = FfiType::FfiBs {
+                        params: Params::ParamNumber(1),
+                        return_wrapper: ReturnWrapper::ReturnUnset, // Default for encode_attributes_as_string
+                        external_spec: ExternalSpec::JsGet {
+                            js_get_name: prim_as_name.clone(),
+                            js_get_scopes: vec![],
+                        },
+                    };
+                    vec![prim_as_name.clone(), encode_ffi_type(&ffi)]
                 } else {
-                    // Use FFI encoding for non-optional getters
-                    // For now, just use the label name as prim
-                    vec![prim_as_name.clone()]
+                    // OCaml: ffi_bs_as_prims [dummy] Return_identity (Js_get {...})
+                    // This explicitly passes Return_identity
+                    let ffi = FfiType::FfiBs {
+                        params: Params::ParamNumber(1),
+                        return_wrapper: ReturnWrapper::ReturnIdentity,
+                        external_spec: ExternalSpec::JsGet {
+                            js_get_name: prim_as_name.clone(),
+                            js_get_scopes: vec![],
+                        },
+                    };
+                    vec!["".to_string(), encode_ffi_type(&ffi)]
                 };
 
-                // Accessor attributes: @get for optional, empty for non-optional (FFI encoded)
-                let accessor_attrs = if is_optional {
-                    vec![make_get_attr(loc, arena)]
-                } else {
-                    vec![]
-                };
+                // Accessor attributes: empty for both (FFI attrs like @get are consumed during encoding)
+                let accessor_attrs: Vec<Attribute> = vec![];
 
                 let accessor_name = if light {
                     label.pld_name.clone()
@@ -7092,11 +7132,12 @@ fn handle_abstract_tdcl(
                     pval_attributes: accessor_attrs,
                     pval_loc: label.pld_loc,
                 };
-                value_descs.push(accessor_vd);
+                // Insert at front (like OCaml :: prepending)
+                setter_accessor.insert(0, accessor_vd);
 
-                // Setter for mutable fields
+                // Setter for mutable fields - also insert at front
                 if matches!(label.pld_mutable, current::MutableFlag::Mutable) {
-                    let setter_type = make_setter_type(&core_type, pld_type, arena);
+                    let setter_type = make_setter_type_with_loc(&core_type, pld_type, Some(label.pld_loc), arena);
                     let setter_vd = ValueDescription {
                         pval_name: Located {
                             txt: arena.intern_string(&format!("{}Set", label_name)),
@@ -7107,22 +7148,32 @@ fn handle_abstract_tdcl(
                         pval_attributes: vec![make_set_attr(loc, arena)],
                         pval_loc: label.pld_loc,
                     };
-                    value_descs.push(setter_vd);
+                    // Setter comes before accessor in OCaml's prepend order
+                    setter_accessor.insert(0, setter_vd);
                 }
             }
 
-            // Add the maker function (if not private)
-            if !is_private {
-                // maker_args already has correct order from insert(0, ...) logic
-                // and unit arg was added at start if has_optional_field
+            // Add unit arg at the end if has_optional_field (OCaml starts fold_right with [unit])
+            if has_optional_field {
+                maker_args.push(TypeArg {
+                    attrs: vec![],
+                    lbl: ArgLabel::Nolabel,
+                    typ: make_unit_type(arena),
+                });
+            }
 
+            // Build the final value descriptions
+            let value_descs = if is_private {
+                setter_accessor
+            } else {
+                // Build maker type - use type decl location for outer arrow
                 let make_type = if maker_args.is_empty() {
                     core_type.clone()
                 } else {
-                    make_arrows_type(&maker_args, &core_type, arena)
+                    make_arrows_type_with_loc(&maker_args, &core_type, Some(loc), arena)
                 };
 
-                // Compute prim for maker based on optional labels
+                // Compute prim for maker: ffi_obj_as_prims
                 let my_prims = compute_maker_prims(&labels_info, has_optional_field, arena);
 
                 let maker_vd = ValueDescription {
@@ -7132,8 +7183,12 @@ fn handle_abstract_tdcl(
                     pval_attributes: vec![],
                     pval_loc: loc,
                 };
-                value_descs.insert(0, maker_vd);
-            }
+
+                // OCaml: my_maker :: setter_accessor
+                let mut result = vec![maker_vd];
+                result.extend(setter_accessor);
+                result
+            };
 
             (abstract_tdcl, value_descs)
         }
@@ -7146,22 +7201,37 @@ fn handle_abstract_tdcl(
 
 /// Lift a type to option<type>
 fn lift_option_type(typ: &CoreType, arena: &mut ParseArena) -> CoreType {
-    let none_loc = arena.none_loc();
+    // OCaml's lift_option_type:
+    //   { ptyp_desc = Ptyp_constr ({txt = Ast_literal.predef_option; loc = ptyp_loc}, [ty]);
+    //     ptyp_loc;
+    //     ptyp_attributes = [] }
+    // predef_option = Ldot(Lident "*predef*", "option")
+    let ptyp_loc = typ.ptyp_loc;
+    let predef_str = arena.intern_string("*predef*");
     let option_str = arena.intern_string("option");
-    let option_ident = arena.push_longident(Longident::Lident(option_str));
+    let predef_option = arena.push_longident(Longident::Ldot(
+        Box::new(Longident::Lident(predef_str)),
+        option_str,
+    ));
     CoreType {
         ptyp_desc: CoreTypeDesc::Ptyp_constr(
-            Located { txt: option_ident, loc: none_loc },
+            Located { txt: predef_option, loc: ptyp_loc },
             vec![typ.clone()],
         ),
-        ptyp_loc: none_loc,
+        ptyp_loc,
         ptyp_attributes: vec![],
     }
 }
 
-/// Create an arrow type: arg -> ret
+/// Create an arrow type: arg -> ret (uses ghost location)
 fn make_arrow_type(arg: &CoreType, ret: &CoreType, arena: &mut ParseArena) -> CoreType {
-    let none_loc = arena.none_loc();
+    make_arrow_type_with_loc(arg, ret, None, arena)
+}
+
+/// Create an arrow type: arg -> ret with explicit location
+/// If loc is Some, uses that location; otherwise uses ghost
+fn make_arrow_type_with_loc(arg: &CoreType, ret: &CoreType, loc: Option<LocIdx>, arena: &mut ParseArena) -> CoreType {
+    let ptyp_loc = loc.unwrap_or_else(|| arena.none_loc());
     CoreType {
         ptyp_desc: CoreTypeDesc::Ptyp_arrow {
             arg: Box::new(TypeArg {
@@ -7172,17 +7242,24 @@ fn make_arrow_type(arg: &CoreType, ret: &CoreType, arena: &mut ParseArena) -> Co
             ret: Box::new(ret.clone()),
             arity: arena.static_arity_1(),
         },
-        ptyp_loc: none_loc,
+        ptyp_loc,
         ptyp_attributes: vec![],
     }
 }
 
-/// Create setter type: t -> field_type -> unit
+/// Create setter type: t -> field_type -> unit (uses ghost location)
 fn make_setter_type(record_type: &CoreType, field_type: &CoreType, arena: &mut ParseArena) -> CoreType {
+    make_setter_type_with_loc(record_type, field_type, None, arena)
+}
+
+/// Create setter type: t -> field_type -> unit with explicit location
+/// If loc is Some, uses that for the outermost arrow; inner arrow uses ghost
+fn make_setter_type_with_loc(record_type: &CoreType, field_type: &CoreType, loc: Option<LocIdx>, arena: &mut ParseArena) -> CoreType {
     let none_loc = arena.none_loc();
+    let outer_loc = loc.unwrap_or(none_loc);
     let unit_type = make_unit_type(arena);
 
-    // First arrow: t -> (field_type -> unit)
+    // Inner arrow: field_type -> unit (uses ghost location)
     let inner = CoreType {
         ptyp_desc: CoreTypeDesc::Ptyp_arrow {
             arg: Box::new(TypeArg {
@@ -7197,6 +7274,7 @@ fn make_setter_type(record_type: &CoreType, field_type: &CoreType, arena: &mut P
         ptyp_attributes: vec![],
     };
 
+    // Outer arrow: t -> (field_type -> unit) (uses provided location)
     CoreType {
         ptyp_desc: CoreTypeDesc::Ptyp_arrow {
             arg: Box::new(TypeArg {
@@ -7207,7 +7285,7 @@ fn make_setter_type(record_type: &CoreType, field_type: &CoreType, arena: &mut P
             ret: Box::new(inner),
             arity: arena.push_arity(Some(2)),
         },
-        ptyp_loc: none_loc,
+        ptyp_loc: outer_loc,
         ptyp_attributes: vec![],
     }
 }
@@ -7227,21 +7305,33 @@ fn make_unit_type(arena: &mut ParseArena) -> CoreType {
     }
 }
 
-/// Create arrow type with multiple arguments
+/// Create arrow type with multiple arguments (uses ghost location)
 fn make_arrows_type(args: &[TypeArg], ret: &CoreType, arena: &mut ParseArena) -> CoreType {
+    make_arrows_type_with_loc(args, ret, None, arena)
+}
+
+/// Create arrow type with multiple arguments
+/// OCaml's Typ.arrows:
+/// - Uses the provided loc for ALL arrows (loc is a closure variable)
+/// - Outermost arrow has `arity = Some(len(args))`
+/// - Inner arrows have `arity = None`
+fn make_arrows_type_with_loc(args: &[TypeArg], ret: &CoreType, loc: Option<LocIdx>, arena: &mut ParseArena) -> CoreType {
     let none_loc = arena.none_loc();
+    let ptyp_loc = loc.unwrap_or(none_loc);
     if args.is_empty() {
         return ret.clone();
     }
 
-    let arity = args.len();
+    let total_arity = args.len();
     // Build from right to left
     let mut result = ret.clone();
     for (i, arg) in args.iter().enumerate().rev() {
+        // OCaml: outermost (i == 0) has arity = Some(total_arity), inner has arity = None
         let current_arity = if i == 0 {
-            arena.push_arity(Some(arity as i32))
+            arena.push_arity(Some(total_arity as i32))
         } else {
-            arena.static_arity_1()
+            // OCaml passes None for inner arrows in build_arrows
+            arena.static_arity_none()
         };
 
         result = CoreType {
@@ -7250,7 +7340,7 @@ fn make_arrows_type(args: &[TypeArg], ret: &CoreType, arena: &mut ParseArena) ->
                 ret: Box::new(result),
                 arity: current_arity,
             },
-            ptyp_loc: none_loc,
+            ptyp_loc,  // OCaml uses same loc for all arrows
             ptyp_attributes: vec![],
         };
     }
@@ -7293,31 +7383,49 @@ fn get_bs_as_string(attrs: &[Attribute], arena: &ParseArena) -> Option<String> {
 }
 
 /// Compute prims for maker function based on optional labels
+///
+/// OCaml's pval_prim_of_option_labels produces:
+///   [""; encode(Ffi_obj_create(arg_kinds))]
+///
+/// where arg_kinds is built from labels_info:
+/// - For optional labels: ObjOptional { name, for_sure_no_nested_option: false }
+/// - For non-optional labels: ObjLabel { name }
+/// - If ends_with_unit: [empty_kind Extern_unit] at the end
 fn compute_maker_prims(labels_info: &[(bool, Located<StrIdx>)], has_optional: bool, arena: &ParseArena) -> Vec<String> {
-    // This is a simplified version - the actual OCaml code uses
-    // Ast_external_process.pval_prim_of_option_labels which encodes
-    // information about optional labels into the primitive string
-    // For now, we use a simple encoding
-    if labels_info.is_empty() {
-        return vec![];
-    }
+    // Build arg_kinds list matching OCaml's pval_prim_of_option_labels
+    let mut arg_kinds: Vec<ObjParam> = Vec::new();
 
-    // Build a string like "I" (no optionals) or with option encoding
-    let mut result = String::new();
     for (is_optional, label) in labels_info {
-        let label_name = arena.get_string(label.txt);
-        if *is_optional {
-            result.push_str(&format!("?{}", label_name));
+        let label_name = arena.get_string(label.txt).to_string();
+        let obj_arg_label = if *is_optional {
+            // OCaml: External_arg_spec.optional false label_name
+            // for_sure_no_nested_option = false
+            Label::ObjOptional {
+                name: label_name,
+                for_sure_no_nested_option: false,
+            }
         } else {
-            result.push_str(label_name);
-        }
-        result.push(',');
-    }
-    if has_optional {
-        result.push_str("()");
+            // OCaml: External_arg_spec.obj_label label_name
+            Label::ObjLabel { name: label_name }
+        };
+
+        arg_kinds.push(ObjParam {
+            obj_arg_type: Attr::Nothing,
+            obj_arg_label,
+        });
     }
 
-    vec![result]
+    // If ends_with_unit (has_optional), add empty_kind Extern_unit at the end
+    if has_optional {
+        arg_kinds.push(ObjParam {
+            obj_arg_type: Attr::ExternUnit,
+            obj_arg_label: Label::ObjEmpty,
+        });
+    }
+
+    // OCaml: ffi_obj_as_prims arg_kinds = [""; to_string (Ffi_obj_create arg_kinds)]
+    let ffi = FfiType::FfiObjCreate(arg_kinds);
+    vec!["".to_string(), encode_ffi_type(&ffi)]
 }
 
 /// Generate `include (struct <accessor_bindings> end : sig <accessor_sigs> end)`
