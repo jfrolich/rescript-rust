@@ -180,7 +180,7 @@ fn should_share_empty_pstr(
     let arena = w.get_arena();
     let name_str = arena.get_string(name.txt);
     if name_str == "res.braces" {
-        w.in_jsx() || w.in_extension()
+        true
     } else if name_str == "res.taggedTemplate" {
         false
     } else {
