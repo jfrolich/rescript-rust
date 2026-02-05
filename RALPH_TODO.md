@@ -259,12 +259,16 @@ Categorized by root cause:
    - Fixed `spec_of_ptyp` to handle @string, @int, @unwrap, @ignore attributes
    - Fixed `Pexp_letmodule` to recurse into module expression for nested externals
 
-5. **FFI encoding differences** - ~4 remaining files with externals
+5. **@obj result type reconstruction** - 1 file ⚠️ NOT IMPLEMENTED
+   - attributes.res - Has `@obj external` declarations
+   - When result type is `Ptyp_any` (`_`), OCaml builds `Ptyp_object` from labeled args
+   - Requires implementing `process_obj` logic from `ast_external_process.ml`
+   - Implementation complexity: MEDIUM-HIGH (~100 lines of Rust)
+
+6. **FFI encoding differences** - ~5 remaining files with externals
+   - arrow.res - Single byte difference in FFI encoding (0x40 vs 0x44)
    - ReactEventRe.resi, ReasonReactRouter.res, Warp_XHR.res, UsdPriceProvider.res
    - Need further investigation of exact encoding differences
-
-6. **Test script quirks** - 2 files ⚠️ FALSE POSITIVES
-   - arrow.res, attributes.res - OCaml bsc.exe fails on these (invalid %identity arity)
 
 **Note:** Some files appear in multiple categories (e.g., subscription.res has jsConverter).
 
