@@ -44,16 +44,12 @@ use crate::parser::ast::{
 fn marshal_attributes(attrs: &Attributes, w: &mut MarshalWriter, share_singleton: bool) {
     let attrs_slice = attrs.as_slice();
 
-    // Share singleton attribute tuples: [(name, PStr [])] with Location.none
+    // Share singleton attribute TUPLES: [(name, PStr [])] with Location.none
     //
     // In OCaml, module-level constants like `template_literal_attr`, `ternary_attr` etc.
     // are single physical tuples `(Location.mknoloc "res.template", Parsetree.PStr [])`.
     // When used as `~attrs:[template_literal_attr]`, a FRESH cons cell wraps the tuple,
     // but the TUPLE INSIDE is the same physical pointer across all uses.
-    //
-    // The PPX preserves these original tuples for early-return expression types
-    // (Pexp_constant(Pconst_string(_, Some _)), Pexp_extension, etc.).
-    // Expressions going through the default mapper get FRESH tuples.
     //
     // We share at the TUPLE level (not cons cell level):
     // - The cons cell is always written fresh (each [attr] creates a new cons cell)
@@ -538,21 +534,24 @@ impl Marshal for Expression {
 
         // In OCaml's PPX, certain expression types return early from expr_mapper
         // without going through the default mapper's attribute remapping. These
-        // expressions preserve their original attribute pointers, enabling marshal
-        // sharing. We match this by enabling attribute tuple sharing only for
-        // these specific expression types.
+        // expressions preserve their original attribute tuples, enabling marshal
+        // sharing of singleton `(mknoloc name, PStr [])` module-level constants.
         //
-        // Only Pexp_constant(Pconst_string(_, Some _)) is matched here because:
-        // - String constants with delimiters (template literals) are the main case
-        //   where res.template/res.taggedTemplate attrs survive the PPX unchanged
-        // - String(_, None) is NOT included: tagged template fragments have None
-        //   delimiter with res.template attrs but go through the default mapper
-        // - Integer suffix stripping (Some 'l' -> None) also preserves attrs but
-        //   integer constants rarely have mknoloc singleton attrs
-        // - Pexp_newtype preserves attrs but doesn't have mknoloc singleton attrs
+        // Early-return expression types (preserve attribute tuple pointers):
+        // - Pexp_constant(Pconst_string(_, Some _)): template literals
+        // - Pexp_constant(Pconst_integer(_, Some _)): int suffix stripping
+        // - Pexp_extension: unknown extensions return unchanged
+        // - Pexp_newtype: preserves attrs in record-with update
+        //
+        // Note: Pexp_constant(String(_, None)) and Pexp_letmodule are NOT included.
+        // While PPX-created instances preserve attrs, user code instances go through
+        // the default mapper which creates fresh tuples.
         let share_attrs = matches!(
             &self.pexp_desc,
             ExpressionDesc::Pexp_constant(Constant::String(_, Some(_)))
+                | ExpressionDesc::Pexp_constant(Constant::Integer(_, Some(_)))
+                | ExpressionDesc::Pexp_extension(_)
+                | ExpressionDesc::Pexp_newtype(_, _)
         );
         marshal_attributes(&self.pexp_attributes, w, share_attrs);
     }
