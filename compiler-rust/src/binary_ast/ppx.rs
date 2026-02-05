@@ -1448,15 +1448,20 @@ pub struct EncodedExternal {
 }
 
 /// Filter out ReScript FFI attributes (they're consumed by encoding)
+///
+/// Note: OCaml's parse_external_attributes uses fold_left with cons, which
+/// reverses the attribute order. We match this behavior by reversing the result.
 fn filter_ffi_attributes(attrs: &[Attribute], arena: &mut ParseArena) -> Vec<Attribute> {
-    attrs
+    let mut result: Vec<Attribute> = attrs
         .iter()
         .filter(|(attr_name, _payload)| {
             let name = arena.get_string(attr_name.txt);
             !EXTERNAL_ATTRS.iter().any(|&ext_attr| name == ext_attr)
         })
         .cloned()
-        .collect()
+        .collect();
+    result.reverse();
+    result
 }
 
 /// Encode external value description with FFI metadata
