@@ -24,15 +24,34 @@
 |------------|--------|
 | Syntax tests | 506/506 (100%) ✅ |
 | sexp-locs | 1196/1196 (100%) ✅ |
-| sexp-locs-ppx | 1184/1196 (99.0%) |
-| bsc-ast | 809/1196 (67.6%) |
+| sexp-locs-ppx | 1187/1196 (99.2%) |
+| bsc-ast | 810/1196 (67.7%) |
 
-**Note:** The remaining 12 sexp-locs-ppx failures are structural differences in PPX transformations. Key issues:
+**Note:** The remaining 9 sexp-locs-ppx failures are structural differences in PPX transformations. Key issues:
 - `@deriving(jsConverter)` - 6 files (generates include with helpers) - NOT IMPLEMENTED
 - `@deriving(abstract)` - 3 files (generates include with module constraint) - NOT IMPLEMENTED
-- FFI encoding differences - ~3 files (ReactDOMRe.res, ReasonReactRouter.res, etc.)
 
 **Session progress (2026-02-05) - newest:**
+- Fixed @deriving(accessors) ghost location issues:
+  - `core_type_of_type_declaration_with_attrs()`: Use ghost for ptyp_loc, use ptype_name.loc for longident
+  - `generate_record_accessors_and_sigs()`: Use ghost for pvb_loc, pstr_loc, pval_loc, psig_loc
+  - The outer include structure uses real locations (OCaml's gen_structure_signature passes ~loc explicitly)
+- Fixed: UsdPriceProvider.res now passes sexp-locs-ppx
+- Result: sexp-locs-ppx improved from 1186/1196 to 1187/1196 (99.2%)
+
+**Session progress (2026-02-05) - previous:**
+- Fixed FFI polyvariant string sharing: When encoding @string polyvariants,
+  share the second string in (tag, name) pairs when tag == name.
+  OCaml shares these because when there's no @as attribute, the same
+  string pointer is used for both fields.
+- Fixed %external transformation:
+  - Use ghost locations for generated Pexp_ident expressions of Js.typeof
+    and Js.undefinedToOption (OCaml's Ast_helper.Exp.ident uses default_loc)
+  - Use Some("") delimiter for the identifier string constant
+- Fixed: Warp_XHR.res, ReasonReactRouter.res now pass sexp-locs-ppx
+- Result: sexp-locs-ppx improved from 1184/1196 (99.0%) to 1186/1196 (99.2%)
+
+**Session progress (2026-02-05) - previous:**
 - Reversed filtered FFI attributes to match OCaml ordering:
   - OCaml's parse_external_attributes uses fold_left with cons, naturally reversing order
   - Fixed: ReactEventRe.resi now passes

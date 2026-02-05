@@ -5445,6 +5445,9 @@ fn generate_accessor_include(
     }
 
     // Create: include (struct <structure_items> end : sig <signature_items> end)
+    // OCaml: gen_structure_signature in ast_derive.ml passes ~loc explicitly:
+    //   Str.include_ ~loc (Incl.mk ~loc (Mod.constraint_ ~loc (Mod.structure ~loc a) (Mty.signature ~loc b)))
+    // So the OUTER include structure uses the real location (type declaration location)
     let inner_mod = ModuleExpr {
         pmod_desc: ModuleExprDesc::Pmod_structure(structure_items),
         pmod_loc: loc,
@@ -5485,41 +5488,54 @@ fn generate_record_accessors_and_sigs(
     let mut structure_items = Vec::new();
     let mut signature_items = Vec::new();
 
+    // OCaml uses Location.none (ghost) for generated expression/pattern locations
+    // because Exp.field, Exp.ident, Pat.var, Pat.constraint_, Ast_compatible.fun_
+    // don't receive ~loc argument. But longident locations use the actual label location.
+    let none_loc = arena.none_loc();
+
     for label in labels {
+        // Get the label's location for longident locations
+        let label_loc = label.pld_name.loc;
+
         // Structure item: let fieldName = (param: t) => param.fieldName
         let param_str = arena.intern_string("param");
+        // OCaml: Pat.constraint_ (Pat.var {txt; loc}) core_type
+        // Pat.var and Pat.constraint_ have no ~loc, use default_loc (ghost)
         let param_pat = Pattern {
             ppat_desc: PatternDesc::Ppat_constraint(
                 Box::new(Pattern {
-                    ppat_desc: PatternDesc::Ppat_var(Located { txt: param_str, loc }),
-                    ppat_loc: loc,
+                    ppat_desc: PatternDesc::Ppat_var(Located { txt: param_str, loc: label_loc }),
+                    ppat_loc: none_loc,
                     ppat_attributes: vec![],
                 }),
                 core_type.clone(),
             ),
-            ppat_loc: loc,
+            ppat_loc: none_loc,
             ppat_attributes: vec![],
         };
 
+        // OCaml: Exp.field (Exp.ident {txt = Lident txt; loc}) {txt = Longident.Lident pld_label; loc}
+        // Exp.field and Exp.ident have no ~loc, use default_loc (ghost)
         let field_access = Expression {
             pexp_desc: ExpressionDesc::Pexp_field(
                 Box::new(Expression {
                     pexp_desc: ExpressionDesc::Pexp_ident(Located {
                         txt: arena.push_longident(Longident::Lident(param_str)),
-                        loc,
+                        loc: label_loc,
                     }),
-                    pexp_loc: loc,
+                    pexp_loc: none_loc,
                     pexp_attributes: vec![],
                 }),
                 Located {
                     txt: arena.push_longident(Longident::Lident(label.pld_name.txt)),
-                    loc,
+                    loc: label_loc,
                 },
             ),
-            pexp_loc: loc,
+            pexp_loc: none_loc,
             pexp_attributes: vec![],
         };
 
+        // OCaml: Ast_compatible.fun_ ~arity:(Some 1) pat exp - no ~loc
         let fun_expr = Expression {
             pexp_desc: ExpressionDesc::Pexp_fun {
                 arg_label: ArgLabel::Nolabel,
@@ -5529,30 +5545,35 @@ fn generate_record_accessors_and_sigs(
                 is_async: false,
                 arity: arena.static_arity_1(),
             },
-            pexp_loc: loc,
+            pexp_loc: none_loc,
             pexp_attributes: vec![],
         };
 
+        // OCaml: Ast_comb.single_non_rec_value pld_name ...
+        // single_non_rec_value = Str.value Nonrecursive [Vb.mk (Pat.var name) exp]
+        // - Vb.mk has no ~loc, so pvb_loc = ghost
+        // - Str.value has no ~loc, so pstr_loc = ghost
         let binding = ValueBinding {
             pvb_pat: Pattern {
                 ppat_desc: PatternDesc::Ppat_var(Located {
                     txt: label.pld_name.txt,
-                    loc: label.pld_name.loc,
+                    loc: label_loc,
                 }),
-                ppat_loc: loc,
+                ppat_loc: none_loc,
                 ppat_attributes: vec![],
             },
             pvb_expr: fun_expr,
             pvb_attributes: vec![],
-            pvb_loc: loc,
+            pvb_loc: none_loc,
         };
 
         structure_items.push(StructureItem {
             pstr_desc: StructureItemDesc::Pstr_value(RecFlag::Nonrecursive, vec![binding]),
-            pstr_loc: loc,
+            pstr_loc: none_loc,
         });
 
         // Signature item: val fieldName: t -> fieldType
+        // OCaml: Ast_helper.Typ.arrows [{attrs; lbl; typ}] pld_type - no ~loc
         let arrow_type = CoreType {
             ptyp_desc: CoreTypeDesc::Ptyp_arrow {
                 arg: Box::new(TypeArg {
@@ -5563,24 +5584,28 @@ fn generate_record_accessors_and_sigs(
                 ret: Box::new(label.pld_type.clone()),
                 arity: arena.static_arity_1(),
             },
-            ptyp_loc: loc,
+            ptyp_loc: none_loc,
             ptyp_attributes: vec![],
         };
 
+        // OCaml: Ast_comb.single_non_rec_val pld_name arrow_type
+        // single_non_rec_val = Sig.value (Val.mk name ty)
+        // - Val.mk has no ~loc, so pval_loc = ghost
+        // - Sig.value has no ~loc, so psig_loc = ghost
         let val_desc = ValueDescription {
             pval_name: Located {
                 txt: label.pld_name.txt,
-                loc: label.pld_name.loc,
+                loc: label_loc,
             },
             pval_type: arrow_type,
             pval_prim: vec![],
             pval_attributes: vec![],
-            pval_loc: loc,
+            pval_loc: none_loc,
         };
 
         signature_items.push(SignatureItem {
             psig_desc: SignatureItemDesc::Psig_value(val_desc),
-            psig_loc: loc,
+            psig_loc: none_loc,
         });
     }
 
@@ -5815,7 +5840,11 @@ fn make_arrows(args: Vec<TypeArg>, ret: CoreType, loc: LocIdx, arena: &mut Parse
 /// Generate a core type with attributes (including @deriving)
 /// This matches OCaml's Ast_derive_util.core_type_of_type_declaration
 fn core_type_of_type_declaration_with_attrs(tdcl: &TypeDeclaration, arena: &mut ParseArena) -> CoreType {
-    let loc = tdcl.ptype_loc;
+    // OCaml: Typ.constr ~attrs {txt = Lident txt; loc} (Ext_list.map ptype_params fst)
+    // - loc in longident is ptype_name.loc (the name's location)
+    // - Typ.constr has no ~loc argument, so ptyp_loc = !default_loc = ghost
+    let name_loc = tdcl.ptype_name.loc;
+    let none_loc = arena.none_loc();
     let name_lid = arena.push_longident(Longident::Lident(tdcl.ptype_name.txt));
 
     let type_args: Vec<CoreType> = tdcl.ptype_params.iter().map(|(core_type, _)| {
@@ -5824,10 +5853,10 @@ fn core_type_of_type_declaration_with_attrs(tdcl: &TypeDeclaration, arena: &mut 
 
     CoreType {
         ptyp_desc: CoreTypeDesc::Ptyp_constr(
-            Located { txt: name_lid, loc },
+            Located { txt: name_lid, loc: name_loc },
             type_args,
         ),
-        ptyp_loc: loc,
+        ptyp_loc: none_loc,
         // Include the type declaration's attributes (which has @deriving)
         ptyp_attributes: tdcl.ptype_attributes.clone(),
     }

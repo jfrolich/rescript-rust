@@ -417,6 +417,7 @@ syntax_tests/data/idempotency/reason-react/src/ReactDOMServerRe.res
 syntax_tests/data/idempotency/reason-react/src/ReactEvent.res
 syntax_tests/data/idempotency/reason-react/src/ReactEvent.resi
 syntax_tests/data/idempotency/reason-react/src/ReactEventRe.res
+syntax_tests/data/idempotency/reason-react/src/ReactEventRe.resi
 syntax_tests/data/idempotency/reason-react/src/ReasonReact.resi
 syntax_tests/data/idempotency/reason-react/src/ReasonReactCompat.res
 syntax_tests/data/idempotency/reason-react/src/ReasonReactCompat.resi
@@ -480,6 +481,7 @@ syntax_tests/data/idempotency/warp/Warp_Types_Method.res
 syntax_tests/data/idempotency/warp/Warp_Types_ResponseType.res
 syntax_tests/data/idempotency/warp/Warp_Types.res
 syntax_tests/data/idempotency/warp/Warp_Types.resi
+syntax_tests/data/idempotency/warp/Warp_XHR.res
 syntax_tests/data/idempotency/warp/Warp.resi
 syntax_tests/data/idempotency/wildcards-world-ui/Accounting_test.res
 syntax_tests/data/idempotency/wildcards-world-ui/Accounting.res
