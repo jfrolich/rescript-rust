@@ -116,11 +116,7 @@ impl Marshal for Attr {
         match self {
             Attr::PolyVarString { descr } => {
                 w.write_block_header(0, 1);
-                marshal_list(w, descr, |w, (a, b)| {
-                    w.write_block_header(0, 2);
-                    w.write_string(a.as_bytes());
-                    w.write_string(b.as_bytes());
-                });
+                marshal_string_pair_list(w, descr);
             }
             Attr::PolyVar { descr } => {
                 w.write_block_header(1, 1);
@@ -128,11 +124,7 @@ impl Marshal for Attr {
                     None => w.write_int(0),
                     Some(list) => {
                         w.write_block_header(0, 1);
-                        marshal_list(w, list, |w, (a, b)| {
-                            w.write_block_header(0, 2);
-                            w.write_string(a.as_bytes());
-                            w.write_string(b.as_bytes());
-                        });
+                        marshal_string_pair_list(w, list);
                     }
                 }
             }
@@ -588,6 +580,43 @@ fn marshal_option<T>(w: &mut MarshalWriter, opt: &Option<T>, f: impl FnOnce(&mut
         Some(val) => {
             w.write_block_header(0, 1);
             f(w, val);
+        }
+    }
+}
+
+/// Marshal a list of (string, string) pairs with intra-tuple sharing.
+///
+/// When the two strings in a pair are equal (tag == name, i.e., no @as attribute),
+/// OCaml shares them because the same string pointer is used for both fields.
+/// We replicate this by writing the first string, recording its object index,
+/// then writing a shared reference if the second string is equal.
+fn marshal_string_pair_list(w: &mut MarshalWriter, list: &[(String, String)]) {
+    if list.is_empty() {
+        w.write_int(0);
+        return;
+    }
+
+    for (i, (a, b)) in list.iter().enumerate() {
+        w.write_block_header(0, 2); // cons cell
+
+        // Write the pair block
+        w.write_block_header(0, 2);
+
+        // Record object index before writing first string
+        let first_obj_idx = w.obj_counter();
+        w.write_string(a.as_bytes());
+
+        // If b == a, write shared reference; otherwise write the string
+        if b == a {
+            // Distance = current_counter - first_obj_idx
+            let d = w.obj_counter() - first_obj_idx;
+            w.write_shared_ref(d);
+        } else {
+            w.write_string(b.as_bytes());
+        }
+
+        if i == list.len() - 1 {
+            w.write_int(0); // nil tail
         }
     }
 }

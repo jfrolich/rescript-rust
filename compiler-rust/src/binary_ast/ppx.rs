@@ -2430,10 +2430,12 @@ fn handle_external_ext(
 
     // Create the raw expression: handle_raw(ident_str)
     // First, create a string expression for the identifier
+    // OCaml: Ast_compatible.const_exp_string ~loc x ~delimiter:Ext_string.empty
+    // The empty delimiter becomes Some("") in the AST
     let str_exp = Expression {
         pexp_desc: ExpressionDesc::Pexp_constant(Constant::String(
             ident_str.clone(),
-            None,
+            Some("".to_string()),
         )),
         pexp_loc: loc,
         pexp_attributes: vec![],
@@ -2530,9 +2532,10 @@ fn handle_external_ext(
     let js_typeof = arena.push_ldot_static(js_lident, "typeof");
 
     // Create Js.typeof(raw_exp)
+    // OCaml: Ast_helper.Exp.ident {loc; txt = ...} - no ~loc argument, so uses default_loc (ghost)
     let typeof_ident = Expression {
         pexp_desc: ExpressionDesc::Pexp_ident(Located { txt: js_typeof, loc }),
-        pexp_loc: loc,
+        pexp_loc: none_loc,
         pexp_attributes: vec![],
     };
 
@@ -2606,6 +2609,7 @@ fn handle_external_ext(
     };
 
     // Create Js.undefinedToOption
+    // OCaml: Ast_helper.Exp.ident {loc; txt = ...} - no ~loc argument, so uses default_loc (ghost)
     let js_undef_to_opt = arena.push_ldot_static(js_lident, "undefinedToOption");
 
     let undef_to_opt_ident = Expression {
@@ -2613,7 +2617,7 @@ fn handle_external_ext(
             txt: js_undef_to_opt,
             loc,
         }),
-        pexp_loc: loc,
+        pexp_loc: none_loc,
         pexp_attributes: vec![],
     };
 
