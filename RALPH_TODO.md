@@ -24,16 +24,25 @@
 |------------|--------|
 | Syntax tests | 506/506 (100%) ✅ |
 | sexp-locs | 1196/1196 (100%) ✅ |
-| sexp-locs-ppx | 1181/1196 (98.7%) |
+| sexp-locs-ppx | 1182/1196 (98.8%) |
 | bsc-ast | 808/1196 (67.6%) |
 
-**Note:** The remaining 15 sexp-locs-ppx failures are structural differences in PPX transformations. Key issues:
+**Note:** The remaining 14 sexp-locs-ppx failures are structural differences in PPX transformations. Key issues:
 - `@deriving(jsConverter)` - 6 files (generates include with helpers) - NOT IMPLEMENTED
 - `@deriving(abstract)` - 3 files (generates include with module constraint) - NOT IMPLEMENTED
 - FFI encoding differences - ~4 files (ReactEventRe.resi, ReactDOMRe.res, etc.)
 - Test script quirk: Some files (e.g., arrow.res) show sexp-locs-ppx diff but OCaml bsc fails
 
 **Session progress (2026-02-05) - newest:**
+- Fixed @obj external type reconstruction (Ptyp_any -> Ptyp_object):
+  - Added `has_obj_attr()` to detect @obj attribute
+  - Added `process_obj_type()` to transform type for @obj externals
+  - Added `build_obj_ffi_type()` to generate FfiObjCreate with field names
+  - Added `get_opt_arg_type()` and `to_undefined_type()` for optional handling
+  - Fixed: attributes.res now passes
+- Result: sexp-locs-ppx improved from 1181/1196 (98.7%) to 1182/1196 (98.8%)
+
+**Session progress (2026-02-05) - previous:**
 - Fixed @string/@int/@unwrap/@ignore polyvariant FFI encoding in `spec_of_ptyp`:
   - Added `check_type_ffi_attrs` to detect FFI attributes on types
   - Added `map_row_fields_into_strings` for @string polyvariant encoding
@@ -259,14 +268,13 @@ Categorized by root cause:
    - Fixed `spec_of_ptyp` to handle @string, @int, @unwrap, @ignore attributes
    - Fixed `Pexp_letmodule` to recurse into module expression for nested externals
 
-5. **@obj result type reconstruction** - 1 file ⚠️ NOT IMPLEMENTED
-   - attributes.res - Has `@obj external` declarations
-   - When result type is `Ptyp_any` (`_`), OCaml builds `Ptyp_object` from labeled args
-   - Requires implementing `process_obj` logic from `ast_external_process.ml`
-   - Implementation complexity: MEDIUM-HIGH (~100 lines of Rust)
+5. **@obj result type reconstruction** - ✅ FIXED
+   - attributes.res - NOW PASSES
+   - Implemented `process_obj_type()` for type transformation
+   - Implemented `build_obj_ffi_type()` for FfiObjCreate with field names
 
-6. **FFI encoding differences** - ~5 remaining files with externals
-   - arrow.res - Single byte difference in FFI encoding (0x40 vs 0x44)
+6. **FFI encoding differences** - ~4 remaining files with externals
+   - arrow.res - OCaml bsc fails to parse this file (not a real failure)
    - ReactEventRe.resi, ReasonReactRouter.res, Warp_XHR.res, UsdPriceProvider.res
    - Need further investigation of exact encoding differences
 
