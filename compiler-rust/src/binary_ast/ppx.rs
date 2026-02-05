@@ -1668,7 +1668,7 @@ pub fn inline_string_primitive(s: &str, delim: Option<&str>, arena: &mut ParseAr
     let ffi = FfiType::FfiInlineConst(constant);
     let encoded = encode_ffi_type(&ffi);
 
-    vec![prim_str(arena, ""), prim_str(arena, encoded)]
+    vec![arena.prim_empty_external_ffi(), prim_str(arena, encoded)]
 }
 
 /// Encode inline bool constant
@@ -1682,7 +1682,7 @@ pub fn inline_bool_primitive(b: bool, arena: &mut ParseArena) -> Vec<StrIdx> {
     let ffi = FfiType::FfiInlineConst(constant);
     let encoded = encode_ffi_type(&ffi);
 
-    vec![prim_str(arena, ""), prim_str(arena, encoded)]
+    vec![arena.prim_empty_external_ffi(), prim_str(arena, encoded)]
 }
 
 /// Encode inline int constant
@@ -1695,7 +1695,7 @@ pub fn inline_int_primitive(i: i32, arena: &mut ParseArena) -> Vec<StrIdx> {
     let ffi = FfiType::FfiInlineConst(constant);
     let encoded = encode_ffi_type(&ffi);
 
-    vec![prim_str(arena, ""), prim_str(arena, encoded)]
+    vec![arena.prim_empty_external_ffi(), prim_str(arena, encoded)]
 }
 
 /// Encode inline float constant
@@ -1705,7 +1705,7 @@ pub fn inline_float_primitive(f: &str, arena: &mut ParseArena) -> Vec<StrIdx> {
     let ffi = FfiType::FfiInlineConst(constant);
     let encoded = encode_ffi_type(&ffi);
 
-    vec![prim_str(arena, ""), prim_str(arena, encoded)]
+    vec![arena.prim_empty_external_ffi(), prim_str(arena, encoded)]
 }
 
 /// Encode inline bigint constant
@@ -1722,7 +1722,7 @@ pub fn inline_bigint_primitive(s: &str, arena: &mut ParseArena) -> Vec<StrIdx> {
     let ffi = FfiType::FfiInlineConst(constant);
     let encoded = encode_ffi_type(&ffi);
 
-    vec![prim_str(arena, ""), prim_str(arena, encoded)]
+    vec![arena.prim_empty_external_ffi(), prim_str(arena, encoded)]
 }
 
 // ========== @inline Handling ==========
@@ -2047,7 +2047,7 @@ fn handle_obj(
 
     let ffi = FfiType::FfiObjCreate(obj_params);
     let encoded = encode_ffi_type(&ffi);
-    let pval_prim = vec![prim_str(arena, ""), prim_str(arena, encoded)];
+    let pval_prim = vec![arena.prim_empty_external_ffi(), prim_str(arena, encoded)];
 
     // === Build pval_type: (~a: 'a0, ~b: 'a1) => {"a": 'a0, "b": 'a1} ===
     // OCaml: from_labels ~loc arity labels
@@ -5539,7 +5539,7 @@ fn create_unsafe_index_get_str(arena: &mut ParseArena) -> StructureItem {
     let val_desc = ValueDescription {
         pval_name: Located { txt: index_name, loc: none_loc },
         pval_type: arrow_type,
-        pval_prim: vec![prim_str(arena, ""), prim_str(arena, encoded)],
+        pval_prim: vec![arena.prim_empty_js_mapper(), prim_str(arena, encoded)],
         pval_attributes: vec![],
         pval_loc: none_loc,
     };
@@ -7126,7 +7126,7 @@ fn handle_abstract_tdcl(
                             js_get_scopes: vec![],
                         },
                     };
-                    vec![prim_str(arena, ""), prim_str(arena, encode_ffi_type(&ffi))]
+                    vec![arena.prim_empty_external_ffi(), prim_str(arena, encode_ffi_type(&ffi))]
                 };
 
                 // Accessor attributes: empty for both (FFI attrs like @get are consumed during encoding)
@@ -7446,7 +7446,7 @@ fn compute_maker_prims(
 
     // OCaml: ffi_obj_as_prims arg_kinds = [""; to_string (Ffi_obj_create arg_kinds)]
     let ffi = FfiType::FfiObjCreate(arg_kinds);
-    vec![prim_str(arena, ""), prim_str(arena, encode_ffi_type(&ffi))]
+    vec![arena.prim_empty_external_ffi(), prim_str(arena, encode_ffi_type(&ffi))]
 }
 
 /// Generate `include (struct <accessor_bindings> end : sig <accessor_sigs> end)`

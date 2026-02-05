@@ -304,6 +304,12 @@ pub struct ParseArena {
     ///
     /// At marshal time, same StrIdx = same object = shared via back-references.
     strings: Interner,
+    /// Pre-allocated empty string for External_ffi_types primitives.
+    /// OCaml shares this literal across all uses in external_ffi_types.ml.
+    prim_empty_external_ffi: StrIdx,
+    /// Pre-allocated empty string for ast_derive_js_mapper primitives.
+    /// This is a separate compilation unit, so it must not share with external_ffi_types.
+    prim_empty_js_mapper: StrIdx,
     /// Counter for generating unique local module names (for %%private).
     /// OCaml uses a global ref counter, so this matches that behavior.
     local_module_counter: u32,
@@ -320,13 +326,19 @@ impl Default for ParseArena {
             arity_1: ArityIdx(1),
         };
 
+        let mut strings = Interner::new();
+        let mut longidents: Arena<Longident, LidentIdx> = Arena::default();
+
+        // Pre-allocate external primitive empty strings.
+        // These model literal "" values coming from distinct OCaml compilation units.
+        let prim_empty_external_ffi = strings.push(String::new());
+        let prim_empty_js_mapper = strings.push(String::new());
+
         // Pre-allocate static list lidents.
         // We need TWO sets: one for pattern contexts (res_core.ml) and one for
         // expression contexts (ast_helper.ml). Each compilation unit in OCaml has
         // its own CSE-promoted statics, so both the Lident blocks AND the inner
         // strings must be distinct objects in the marshal output.
-        let mut strings = Interner::new();
-        let mut longidents: Arena<Longident, LidentIdx> = Arena::default();
         // Pattern context: use fresh (non-interned) strings so they marshal as
         // separate objects from the expression context strings.
         let pat_nil_str = strings.push("[]".to_string());
@@ -418,6 +430,8 @@ impl Default for ParseArena {
             position_dedup: HashMap::new(),
             lident_dedup,
             strings,
+            prim_empty_external_ffi,
+            prim_empty_js_mapper,
             local_module_counter: 0,
         }
     }
@@ -870,6 +884,20 @@ impl ParseArena {
     /// Use in spread list desugaring: `list{...a, ...b}` → `Belt.List.concatMany(...)`.
     pub fn belt_list_concat_many_lid(&self) -> LidentIdx {
         self.static_array_lidents.belt_list_concat_many
+    }
+
+    // ========================================================================
+    // Primitive empty strings
+    // ========================================================================
+
+    /// Empty string literal from `external_ffi_types.ml` (shared across all its uses).
+    pub fn prim_empty_external_ffi(&self) -> StrIdx {
+        self.prim_empty_external_ffi
+    }
+
+    /// Empty string literal from `ast_derive_js_mapper.ml` (separate unit).
+    pub fn prim_empty_js_mapper(&self) -> StrIdx {
+        self.prim_empty_js_mapper
     }
 
     /// Get the string content for a StrIdx.

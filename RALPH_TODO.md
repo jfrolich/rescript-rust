@@ -25,12 +25,16 @@
 | Syntax tests | 506/506 (100%) ✅ |
 | sexp-locs | 1196/1196 (100%) ✅ |
 | sexp-locs-ppx | 1196/1196 (100%) ✅ |
-| bsc-ast | 838/1179 (71.1%) |
+| bsc-ast | 882/1179 (74.8%) |
 
 **Note:** 1179 = files where OCaml bsc can produce output. 134 files use newer syntax
 that OCaml can't parse; these are excluded from parity testing. Total test files: 1313.
 
 **Session progress (2026-02-05) - newest:**
+- Pre-allocated empty-string StrIdxs per OCaml compilation unit for FFI primitives
+  - `external_ffi_types` and `ast_derive_js_mapper` use distinct cached empty strings
+  - All pval_prim lists now reuse the correct literal identity per unit
+  - Result: no regressions; bsc-ast differences now 297 (882/1179)
 - Switched `pval_prim` to arena `StrIdx` for identity-based sharing (no content-based empty string hacks)
   - `ValueDescription.pval_prim` is now `Vec<StrIdx>`; mapper_to0/from0 convert to/from strings
   - Marshal uses `write_str_idx` for pval_prim lists (Latin-1 safe)
