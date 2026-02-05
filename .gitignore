@@ -107,3 +107,6 @@ package.tgz
 
 # Parser parity test baselines (machine-generated, local tracking)
 tests/parity_baselines/*.txt
+
+# Python
+__pycache__/
