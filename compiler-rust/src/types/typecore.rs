@@ -464,6 +464,26 @@ impl<'a> TypeCheckContext<'a> {
         self.arena.get_longident(idx)
     }
 
+    /// Get the last component name of a Longident as a string.
+    /// For `Lident("int")` returns `"int"`, for `Ldot(_, "bar")` returns `"bar"`.
+    pub fn longident_last_name(&self, lid: &Longident) -> String {
+        self.arena.get_string(lid.last_idx()).to_string()
+    }
+
+    /// Get the full dotted name of a Longident as a string.
+    /// For `Lident("int")` returns `"int"`, for `Ldot(Lident("Foo"), "bar")` returns `"Foo.bar"`.
+    pub fn longident_to_string(&self, lid: &Longident) -> String {
+        match lid {
+            Longident::Lident(idx) => self.arena.get_string(*idx).to_string(),
+            Longident::Ldot(prefix, idx) => {
+                format!("{}.{}", self.longident_to_string(prefix), self.arena.get_string(*idx))
+            }
+            Longident::Lapply(a, b) => {
+                format!("{}({})", self.longident_to_string(a), self.longident_to_string(b))
+            }
+        }
+    }
+
     /// Convert a Located<LidentIdx> to Located<Longident> by cloning the longident.
     pub fn resolve_located_lid(&self, lid: &Located<LidentIdx>) -> Located<Longident> {
         Located {
@@ -657,7 +677,7 @@ fn transl_type_inner(
             // Create path from longident
             // Full implementation would look up the type and use its actual path
             let longident = tctx.arena.get_longident(lid.txt);
-            let path = Path::pident(Ident::create_persistent(longident.to_string()));
+            let path = Path::pident(Ident::create_persistent(tctx.longident_last_name(longident)));
 
             let constr_ty = ctx.new_constr(path.clone(), arg_refs);
 
@@ -1225,10 +1245,11 @@ fn type_pattern_construct(
 
     // Look up constructor
     let lid_txt = tctx.arena.get_longident(lid.txt);
-    let (cstr_desc, _cstr_path) = match env.find_constructor(&lid_txt.to_string()) {
+    let lid_name = tctx.longident_last_name(lid_txt);
+    let (cstr_desc, _cstr_path) = match env.find_constructor(&lid_name) {
         Ok(desc) => (
             desc.clone(),
-            Path::pident(Ident::create_persistent(lid_txt.to_string())),
+            Path::pident(Ident::create_persistent(lid_name)),
         ),
         Err(_) => {
             return Err(TypeCoreError::NotAVariantType(lid_txt.clone()));
@@ -1518,7 +1539,7 @@ fn type_pattern_open(
 
     // Create the open pattern
     let mod_lid_txt = tctx.arena.get_longident(mod_lid.txt);
-    let _mod_path = Path::pident(Ident::create_persistent(mod_lid_txt.to_string()));
+    let _mod_path = Path::pident(Ident::create_persistent(tctx.longident_last_name(mod_lid_txt)));
 
     Ok(Pattern::new(
         PatternDesc::Tpat_or(Box::new(typed_inner.clone()), Box::new(typed_inner), None),
@@ -2444,9 +2465,10 @@ fn type_construct(
     let longident = tctx.resolve_lid(lid.txt);
 
     // Look up constructor
-    let (_cstr_path, cstr_desc) = match env.find_constructor(&longident.to_string()) {
+    let lid_name = tctx.longident_last_name(longident);
+    let (_cstr_path, cstr_desc) = match env.find_constructor(&lid_name) {
         Ok(desc) => (
-            Path::pident(Ident::create_persistent(longident.to_string())),
+            Path::pident(Ident::create_persistent(lid_name)),
             desc.clone(),
         ),
         Err(_) => {
