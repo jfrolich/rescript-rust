@@ -162,6 +162,11 @@ pub struct MarshalWriter {
     /// in %obj transformations). Uses arena indices for identity-based sharing.
     string_loc_table: HashMap<(StrIdx, LocIdx), u32>,
 
+    /// Maps value-description identity to marshaled object indices for `(pval_name, pval_type)`.
+    /// In no-inline external wrappers, OCaml record updates preserve physical sharing of these
+    /// fields between the structure primitive and the generated signature value description.
+    vd_name_type_table: HashMap<(StrIdx, LocIdx, LocIdx), (u32, u32)>,
+
     /// Maps (StrIdx, LocIdx) to object counter for sharing entire attribute lists
     /// of the form `[(name_with_loc, PStr [])]`. OCaml shares these because
     /// module-level `let` bindings like `let ternary_attr = (...)` create a single
@@ -247,6 +252,7 @@ impl MarshalWriter {
             arity_idx_table: HashMap::new(),
 
             string_loc_table: HashMap::new(),
+            vd_name_type_table: HashMap::new(),
             singleton_attr_list_table: HashMap::new(),
             tyvar_core_type_table: HashMap::new(),
 
@@ -281,6 +287,7 @@ impl MarshalWriter {
             arity_idx_table: HashMap::new(),
 
             string_loc_table: HashMap::new(),
+            vd_name_type_table: HashMap::new(),
             singleton_attr_list_table: HashMap::new(),
             tyvar_core_type_table: HashMap::new(),
 
@@ -410,6 +417,7 @@ impl MarshalWriter {
         self.lident_idx_table.clear();
         self.option_string_table.clear();
         self.string_loc_table.clear();
+        self.vd_name_type_table.clear();
         self.singleton_attr_list_table.clear();
         self.tyvar_core_type_table.clear();
         self.pstr_empty_table = [None; EmptyPayloadShareKind::COUNT];
@@ -797,6 +805,23 @@ impl MarshalWriter {
     /// Insert an entry into the singleton attribute list sharing table.
     pub fn singleton_attr_list_table_insert(&mut self, key: (StrIdx, LocIdx), obj_idx: u32) {
         self.singleton_attr_list_table.insert(key, obj_idx);
+    }
+
+    /// Look up cached value-description `(pval_name, pval_type)` object indices.
+    pub fn vd_name_type_table_get(
+        &self,
+        key: &(StrIdx, LocIdx, LocIdx),
+    ) -> Option<&(u32, u32)> {
+        self.vd_name_type_table.get(key)
+    }
+
+    /// Insert value-description `(pval_name, pval_type)` object indices.
+    pub fn vd_name_type_table_insert(
+        &mut self,
+        key: (StrIdx, LocIdx, LocIdx),
+        value: (u32, u32),
+    ) {
+        self.vd_name_type_table.insert(key, value);
     }
 
     /// Look up a tyvar core_type in the sharing table.

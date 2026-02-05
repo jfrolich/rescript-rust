@@ -8013,7 +8013,7 @@ fn rewrite_structure_item(item: &StructureItem, arena: &mut ParseArena) -> Vec<S
                             pincl_loc: loc,
                             pincl_attributes: vec![],
                         }),
-                        pstr_loc: item.pstr_loc,
+                        pstr_loc: loc,
                     }]
                 } else {
                     vec![external_result]

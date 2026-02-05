@@ -25,12 +25,32 @@
 | Syntax tests | 506/506 (100%) ✅ |
 | sexp-locs | 1196/1196 (100%) ✅ |
 | sexp-locs-ppx | 1196/1196 (100%) ✅ |
-| bsc-ast | 907/1179 (76.9%) |
+| bsc-ast | 933/1179 (79.1%) |
 
 **Note:** 1179 = files where OCaml bsc can produce output. 134 files use newer syntax
 that OCaml can't parse; these are excluded from parity testing. Total test files: 1313.
 
 **Session progress (2026-02-05) - newest:**
+- Fixed no-inline external wrapper sharing for `ValueDescription` fields and include location:
+  - `inspect_binary_ast.py` on `nook-exchange/Emoji.res` showed OCaml sharing
+    `pval_name` + `pval_type` between the rewritten primitive and generated signature value,
+    while Rust rebuilt fresh blocks in the no-inline (`Pstr_include`) path.
+  - Added a marshal cache in `MarshalWriter` for value-description `(name, type)` object indices,
+    keyed by `(pval_name.txt, pval_name.loc, pval_loc)`.
+  - Updated `ValueDescription::marshal` to reuse cached name/type objects for matching
+    empty-prim signature values, while preserving first-write object order.
+  - For no-inline externals, aligned wrapper structure-item location with OCaml by using
+    `pstr_loc = vd.pval_loc` on the generated `Pstr_include`.
+  - Result: `inspect_binary_ast.py test` is byte-identical for:
+    `idempotency/nook-exchange/Emoji.res`,
+    `idempotency/nook-exchange/API.res`,
+    `parsing/grammar/expressions/firstClassModule.res`.
+  - Full parity run: bsc-ast differences `129 -> 103` (1093/1196), 0 regressions.
+  - New passes: 26 files, including
+    `nook-exchange/Emoji.res`, `nook-exchange/HeaderBar.res`,
+    `nook-exchange/LoginOverlay.res`, `nook-exchange/Modal.res`,
+    `pupilfirst/shared/Markdown.res`, `wildcards-world-ui/Web3.res`,
+    `printer/structure/extension.res`.
 - Fixed `res.braces` empty-payload sharing in extension-preserving contexts:
   - `inspect_binary_ast.py` on `nook-exchange/API.res` showed OCaml reusing one
     shared `Some(0)` payload object for `res.braces` attrs, while Rust emitted fresh payload blocks.

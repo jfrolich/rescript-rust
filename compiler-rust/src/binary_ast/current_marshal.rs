@@ -1375,9 +1375,35 @@ impl Marshal for ExtensionConstructorKind {
 
 impl Marshal for ValueDescription {
     fn marshal(&self, w: &mut MarshalWriter) {
+        let key = (self.pval_name.txt, self.pval_name.loc, self.pval_loc);
+        let shared_name_type = if self.pval_prim.is_empty() {
+            w.vd_name_type_table_get(&key).copied()
+        } else {
+            None
+        };
+
         w.write_block_header(0, 5);
-        self.pval_name.marshal(w);
-        self.pval_type.marshal(w);
+
+        let name_obj_idx = w.obj_counter();
+        if let Some((obj_idx, _)) = shared_name_type {
+            let d = w.obj_counter() - obj_idx;
+            w.write_shared_ref(d);
+        } else {
+            self.pval_name.marshal(w);
+        }
+
+        let type_obj_idx = w.obj_counter();
+        if let Some((_, obj_idx)) = shared_name_type {
+            let d = w.obj_counter() - obj_idx;
+            w.write_shared_ref(d);
+        } else {
+            self.pval_type.marshal(w);
+        }
+
+        if !self.pval_prim.is_empty() {
+            w.vd_name_type_table_insert(key, (name_obj_idx, type_obj_idx));
+        }
+
         // pval_prim contains raw binary data (FFI encoding blobs) that must be
         // written as raw bytes, not Latin-1 converted. Use write_string directly.
         marshal_prim_list(&self.pval_prim, w);
