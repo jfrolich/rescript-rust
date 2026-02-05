@@ -584,7 +584,7 @@ pub enum StructureItemDesc {
     /// Value binding: `let P = E`.
     Tstr_value(RecFlag, Vec<ValueBinding>),
     /// Primitive declaration: `external f : t = "..."`.
-    Tstr_primitive(ValueDescription),
+    Tstr_primitive(TypedValueDescription),
     /// Type declaration: `type t = ...`.
     Tstr_type(RecFlag, Vec<TypedTypeDeclaration>),
     /// Type extension: `type t += ...`.
@@ -770,6 +770,24 @@ pub struct IncludeDeclaration {
     pub incl_attributes: Attributes,
     /// Location.
     pub incl_loc: LocIdx,
+}
+
+/// Typed value description (for `external` declarations).
+/// Matches OCaml's `Typedtree.value_description`.
+#[derive(Debug, Clone)]
+pub struct TypedValueDescription {
+    /// Identifier.
+    pub val_id: Ident,
+    /// Name with location.
+    pub val_name: Loc<String>,
+    /// Typed core type (the annotated type).
+    pub val_desc: TypedCoreType,
+    /// Primitive names.
+    pub val_prim: Vec<String>,
+    /// Location.
+    pub val_loc: LocIdx,
+    /// Attributes.
+    pub val_attributes: Attributes,
 }
 
 /// Signature item (placeholder).

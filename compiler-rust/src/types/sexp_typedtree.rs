@@ -1517,9 +1517,8 @@ fn sexp_structure_item_desc(arena: &ParseArena, ctx: &TypeContext<'_>, with_locs
                 Sexp::list(vbs.iter().map(|vb| sexp_value_binding(arena, ctx, with_locs, vb)).collect()),
             ])
         }
-        StructureItemDesc::Tstr_primitive(_vd) => {
-            // Simplified - would need full value_description handling
-            Sexp::list(vec![Sexp::atom("Tstr_primitive"), Sexp::atom("<value_description>")])
+        StructureItemDesc::Tstr_primitive(vd) => {
+            Sexp::list(vec![Sexp::atom("Tstr_primitive"), sexp_value_description(arena, ctx, with_locs, vd)])
         }
         StructureItemDesc::Tstr_type(flag, tds) => {
             Sexp::list(vec![
@@ -1585,6 +1584,28 @@ fn sexp_module_type_declaration(arena: &ParseArena, _ctx: &TypeContext<'_>, with
     items.extend(loc_sexp);
     items.push(mt_sexp);
     items.push(sexp_attributes(arena, with_locs, &mtd.mtd_attributes));
+    Sexp::list(items)
+}
+
+fn sexp_value_description(arena: &ParseArena, ctx: &TypeContext<'_>, with_locs: bool, vd: &crate::types::typedtree::TypedValueDescription) -> Sexp {
+    let loc_sexp = if with_locs {
+        vec![location_idx(arena, with_locs, vd.val_loc)]
+    } else {
+        vec![]
+    };
+    let mut items = vec![
+        Sexp::atom("value_description"),
+        sexp_ident(&vd.val_id),
+        string(&vd.val_name.txt),
+    ];
+    items.extend(loc_sexp);
+    items.push(sexp_core_type(arena, ctx, with_locs, &vd.val_desc));
+    items.push(Sexp::list(
+        std::iter::once(Sexp::atom("prim"))
+            .chain(vd.val_prim.iter().map(|s| string(s)))
+            .collect(),
+    ));
+    items.push(sexp_attributes(arena, with_locs, &vd.val_attributes));
     Sexp::list(items)
 }
 

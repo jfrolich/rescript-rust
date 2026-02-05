@@ -288,15 +288,21 @@ fn type_structure_item<'a>(
             ))
         }
 
-        ParsedStructureItemDesc::Pstr_primitive(_vd) => {
+        ParsedStructureItemDesc::Pstr_primitive(vd) => {
             // Primitive declaration: external f : t = "..."
-            // Full implementation would register the primitive
-            let desc = StructureItemDesc::Tstr_primitive(crate::types::ValueDescription {
-                val_type: tctx.type_ctx.new_var(None),
-                val_kind: crate::types::ValueKind::ValReg,
-                val_loc: arena.to_location(loc),
-                val_attributes: vec![],
-                val_path: None,
+            let name_str = arena.get_string(vd.pval_name.txt).to_string();
+            let id = Ident::create_local(&name_str);
+
+            // Translate the type annotation
+            let (typed_ctype, _val_ty) = transl_type(tctx, env, &vd.pval_type)?;
+
+            let desc = StructureItemDesc::Tstr_primitive(crate::types::typedtree::TypedValueDescription {
+                val_id: id,
+                val_name: Located { txt: name_str, loc: vd.pval_name.loc },
+                val_desc: typed_ctype,
+                val_prim: vd.pval_prim.clone(),
+                val_loc: loc,
+                val_attributes: vd.pval_attributes.clone(),
             });
             Ok((
                 StructureItem {
