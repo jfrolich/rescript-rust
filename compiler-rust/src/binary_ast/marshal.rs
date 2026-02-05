@@ -195,6 +195,10 @@ pub struct MarshalWriter {
     /// Depth counter for JSX context while marshalling.
     jsx_depth: u32,
 
+    /// Shared object indices for simple builtin core_types created via Ast_literal.No_loc.
+    /// These are `Ptyp_constr` with no args, Location.none, and empty attributes.
+    simple_core_type_table: HashMap<LidentIdx, u32>,
+
 
     /// Optional reference to ParseArena for LocIdx marshalling.
     /// Set via `set_arena()` before marshalling AST with LocIdx fields.
@@ -241,6 +245,7 @@ impl MarshalWriter {
             pstr_empty_table: [None; EmptyPayloadShareKind::COUNT],
             prim_list_table: [None; PrimListShareKind::COUNT],
             jsx_depth: 0,
+            simple_core_type_table: HashMap::new(),
 
             arena: None,
             obj_counter: 0,
@@ -272,6 +277,7 @@ impl MarshalWriter {
             pstr_empty_table: [None; EmptyPayloadShareKind::COUNT],
             prim_list_table: [None; PrimListShareKind::COUNT],
             jsx_depth: 0,
+            simple_core_type_table: HashMap::new(),
 
             arena: None,
             obj_counter: 0,
@@ -316,6 +322,16 @@ impl MarshalWriter {
         self.jsx_depth > 0
     }
 
+    #[inline]
+    pub(crate) fn simple_core_type_table_get(&self, key: &LidentIdx) -> Option<&u32> {
+        self.simple_core_type_table.get(key)
+    }
+
+    #[inline]
+    pub(crate) fn simple_core_type_table_insert(&mut self, key: LidentIdx, obj_idx: u32) {
+        self.simple_core_type_table.insert(key, obj_idx);
+    }
+
 
     /// Get the current object counter value
     pub fn obj_counter(&self) -> u32 {
@@ -337,6 +353,7 @@ impl MarshalWriter {
         self.pstr_empty_table = [None; EmptyPayloadShareKind::COUNT];
         self.prim_list_table = [None; PrimListShareKind::COUNT];
         self.jsx_depth = 0;
+        self.simple_core_type_table.clear();
         self.obj_counter = 0;
         self.size_32 = 0;
         self.size_64 = 0;

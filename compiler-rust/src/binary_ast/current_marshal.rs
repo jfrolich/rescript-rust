@@ -365,6 +365,49 @@ impl Marshal for CoreType {
             _ => None,
         };
 
+        // Share simple builtin core_types created via Ast_literal.No_loc (and type_float).
+        // These are Ptyp_constr with:
+        // - Lident (static)
+        // - no args
+        // - Location.none for both core_type and longident loc
+        // - empty attributes
+        //
+        // OCaml uses module-level constants for these, so they are physically shared.
+        if let CoreTypeDesc::Ptyp_constr(lid, args) = &self.ptyp_desc {
+            if args.is_empty()
+                && self.ptyp_attributes.is_empty()
+                && self.ptyp_loc.is_none()
+                && lid.loc.is_none()
+            {
+                let arena = w.get_arena();
+                if let Longident::Lident(_) = arena.get_longident(lid.txt) {
+                    let name = match arena.get_longident(lid.txt) {
+                        Longident::Lident(idx) => arena.get_string(*idx),
+                        _ => "",
+                    };
+                    if matches!(
+                        name,
+                        "string" | "int" | "float" | "bool" | "unit" | "bigint" | "exn"
+                    ) {
+                        if let Some(&obj_idx) = w.simple_core_type_table_get(&lid.txt) {
+                            let d = w.obj_counter() - obj_idx;
+                            w.write_shared_ref(d);
+                            return;
+                        }
+
+                        let obj_idx = w.obj_counter();
+                        // core_type = { ptyp_desc; ptyp_loc; ptyp_attributes }
+                        w.write_block_header(0, 3);
+                        self.ptyp_desc.marshal(w);
+                        self.ptyp_loc.marshal(w);
+                        marshal_attributes(&self.ptyp_attributes, w, false, share_empty_pstr);
+                        w.simple_core_type_table_insert(lid.txt, obj_idx);
+                        return;
+                    }
+                }
+            }
+        }
+
         // Share Ptyp_var core_types with empty attributes and matching (name, loc).
         // In OCaml's from_labels (handle_obj), the same tyvar CoreType is physically
         // shared between Otag fields and Labelled args. The first write creates the

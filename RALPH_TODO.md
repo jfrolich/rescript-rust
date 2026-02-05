@@ -31,6 +31,10 @@
 that OCaml can't parse; these are excluded from parity testing. Total test files: 1313.
 
 **Session progress (2026-02-05) - newest:**
+- Shared Ast_literal.No_loc simple core_types (string/int/float/bool/unit/bigint/exn) in marshal
+  - Marshal now shares `Ptyp_constr` with no args, Location.none, empty attrs, and static Lident
+  - Fixes inline primitive transformations that reuse OCaml's module-level constants
+  - Result: attributes.res now passes; bsc-ast differences 209
 - Shared `#raw_expr` primitive list for `%raw` transformations
   - Added `prim_raw_expr` StrIdx to ParseArena and reused it in ppx raw helpers
   - Marshal now shares single-element `pval_prim` lists when they use the cached `#raw_expr`
