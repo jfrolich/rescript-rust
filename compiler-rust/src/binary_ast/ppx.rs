@@ -31,6 +31,7 @@ use super::ffi_types::{
     encode_ffi_type, Attr, Cst, Delim, ExternalModuleName, ExternalSpec, FfiType, Label, LabelNoname,
     LamConstant, ModuleBindName, ObjParam, Param, Params, PointerInfo, ReturnWrapper,
 };
+use super::spice_ppx;
 
 /// The list of attributes that indicate a ReScript external
 const EXTERNAL_ATTRS: &[&str] = &[
@@ -3811,7 +3812,7 @@ fn rewrite_payload(payload: &Payload, arena: &mut ParseArena) -> Payload {
             Payload::PStr(items.iter().flat_map(|item| rewrite_structure_item(item, arena)).collect())
         }
         Payload::PSig(items) => {
-            Payload::PSig(items.iter().map(|item| rewrite_signature_item(item, arena)).collect())
+            Payload::PSig(rewrite_signature_items(items, arena))
         }
         Payload::PTyp(typ) => Payload::PTyp(typ.clone()),
         Payload::PPat(pat, guard) => {
@@ -7985,14 +7986,31 @@ pub fn rewrite_structure(structure: &[StructureItem], arena: &mut ParseArena) ->
 
 /// Apply built-in PPX transformations to a signature
 pub fn rewrite_signature(signature: &[SignatureItem], arena: &mut ParseArena) -> Vec<SignatureItem> {
-    signature
+    rewrite_signature_items(signature, arena)
+}
+
+fn rewrite_signature_items(items: &[SignatureItem], arena: &mut ParseArena) -> Vec<SignatureItem> {
+    items
         .iter()
-        .map(|item| rewrite_signature_item(item, arena))
+        .flat_map(|item| {
+            spice_ppx::expand_signature_item(item, arena)
+                .into_iter()
+                .map(|expanded| rewrite_signature_item_no_spice(&expanded, arena))
+                .collect::<Vec<_>>()
+        })
         .collect()
 }
 
 /// Rewrite a structure item, potentially returning multiple items for @deriving.
 fn rewrite_structure_item(item: &StructureItem, arena: &mut ParseArena) -> Vec<StructureItem> {
+    let mut result = Vec::new();
+    for expanded in spice_ppx::expand_structure_item(item, arena) {
+        result.extend(rewrite_structure_item_no_spice(&expanded, arena));
+    }
+    result
+}
+
+fn rewrite_structure_item_no_spice(item: &StructureItem, arena: &mut ParseArena) -> Vec<StructureItem> {
     match &item.pstr_desc {
         StructureItemDesc::Pstr_primitive(vd) => {
             if is_rs_external(&vd.pval_attributes, &vd.pval_prim, arena) {
@@ -8331,9 +8349,7 @@ fn rewrite_module_type(
 ) -> current::ModuleType {
     let new_desc = match &mod_type.pmty_desc {
         current::ModuleTypeDesc::Pmty_signature(items) => {
-            current::ModuleTypeDesc::Pmty_signature(
-                items.iter().map(|item| rewrite_signature_item(item, arena)).collect(),
-            )
+            current::ModuleTypeDesc::Pmty_signature(rewrite_signature_items(items, arena))
         }
         current::ModuleTypeDesc::Pmty_functor(name, param_type, result_type) => {
             current::ModuleTypeDesc::Pmty_functor(
@@ -8373,7 +8389,7 @@ fn rewrite_module_type(
     }
 }
 
-fn rewrite_signature_item(item: &SignatureItem, arena: &mut ParseArena) -> SignatureItem {
+fn rewrite_signature_item_no_spice(item: &SignatureItem, arena: &mut ParseArena) -> SignatureItem {
     match &item.psig_desc {
         SignatureItemDesc::Psig_value(vd) => {
             // OCaml rewrites attributes (e.g. "js" -> "*j" in strings) before
