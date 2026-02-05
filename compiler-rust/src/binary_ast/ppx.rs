@@ -312,25 +312,231 @@ fn refine_arg_type(nolabel: bool, typ: &CoreType, arena: &mut ParseArena) -> Att
     spec_of_ptyp(nolabel, typ, arena)
 }
 
+/// Check for @string, @int, @unwrap, @ignore attributes on a type.
+/// Returns `Some(attr_type)` if found, `None` otherwise.
+/// Mirrors OCaml's iter_process_bs_string_int_unwrap_uncurry.
+fn check_type_ffi_attrs(typ: &CoreType, arena: &ParseArena) -> Option<&'static str> {
+    for (attr_name, _) in &typ.ptyp_attributes {
+        let name = arena.get_string(attr_name.txt);
+        match name {
+            "string" => return Some("string"),
+            "int" => return Some("int"),
+            "ignore" => return Some("ignore"),
+            "unwrap" => return Some("unwrap"),
+            _ => {}
+        }
+    }
+    None
+}
+
+/// Extract @as("string") from attributes.
+/// Mirrors OCaml's iter_process_bs_string_as.
+fn get_as_string_attr(attrs: &[Attribute], arena: &ParseArena) -> Option<String> {
+    for (attr_name, payload) in attrs {
+        let name = arena.get_string(attr_name.txt);
+        if name == "as" {
+            // Try to get string payload
+            if let Payload::PStr(items) = payload {
+                if items.len() == 1 {
+                    if let StructureItemDesc::Pstr_eval(expr, _) = &items[0].pstr_desc {
+                        if let ExpressionDesc::Pexp_constant(Constant::String(s, _)) = &expr.pexp_desc {
+                            return Some(s.clone());
+                        }
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Extract @as(int) from attributes.
+/// Mirrors OCaml's iter_process_bs_int_as.
+fn get_as_int_attr(attrs: &[Attribute], arena: &ParseArena) -> Option<i64> {
+    for (attr_name, payload) in attrs {
+        let name = arena.get_string(attr_name.txt);
+        if name == "as" {
+            // Try to get int payload
+            if let Payload::PStr(items) = payload {
+                if items.len() == 1 {
+                    if let StructureItemDesc::Pstr_eval(expr, _) = &items[0].pstr_desc {
+                        if let ExpressionDesc::Pexp_constant(Constant::Integer(s, suffix)) = &expr.pexp_desc {
+                            // Reject bigint suffix
+                            if matches!(suffix, Some('n')) {
+                                return None;
+                            }
+                            return s.parse::<i64>().ok();
+                        }
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Map polyvariant row fields to (tag_name, string_value) pairs for @string.
+/// Mirrors OCaml's Ast_polyvar.map_row_fields_into_strings.
+///
+/// Returns (has_as, result) where has_as indicates if any @as was found.
+fn map_row_fields_into_strings(
+    row_fields: &[RowField],
+    arena: &ParseArena,
+) -> (bool, Vec<(String, String)>) {
+    let mut has_as = false;
+    let mut result = Vec::new();
+
+    for rf in row_fields {
+        match rf {
+            RowField::Rtag(tag_loc, attrs, _nullary, _types) => {
+                // Get the tag name (Label = String)
+                let tag = &tag_loc.txt;
+
+                // Check for @as("value") attribute
+                let value = match get_as_string_attr(attrs, arena) {
+                    Some(v) => {
+                        has_as = true;
+                        v
+                    }
+                    None => tag.clone(),
+                };
+
+                result.push((tag.clone(), value));
+            }
+            RowField::Rinherit(_) => {
+                // Inherited types not supported for @string
+            }
+        }
+    }
+
+    (has_as, result)
+}
+
+/// Map polyvariant row fields to (tag_name, int_value) pairs for @int.
+/// Mirrors OCaml's Ast_polyvar.map_row_fields_into_ints.
+fn map_row_fields_into_ints(
+    row_fields: &[RowField],
+    arena: &ParseArena,
+) -> Vec<(String, i64)> {
+    let mut result = Vec::new();
+    let mut counter: i64 = 0;
+
+    for rf in row_fields {
+        match rf {
+            RowField::Rtag(tag_loc, attrs, _nullary, _types) => {
+                // Get the tag name (Label = String)
+                let tag = &tag_loc.txt;
+
+                // Check for @as(int) attribute
+                let value = match get_as_int_attr(attrs, arena) {
+                    Some(v) => {
+                        counter = v + 1; // Next default value is one more
+                        v
+                    }
+                    None => {
+                        let v = counter;
+                        counter += 1;
+                        v
+                    }
+                };
+
+                result.push((tag.clone(), value));
+            }
+            RowField::Rinherit(_) => {
+                // Inherited types not supported for @int
+            }
+        }
+    }
+
+    result
+}
+
+/// Check if variant row fields can be unwrapped (each has exactly one payload type).
+/// Mirrors OCaml's variant_can_unwrap_aux.
+fn variant_can_unwrap(row_fields: &[RowField]) -> bool {
+    for rf in row_fields {
+        match rf {
+            RowField::Rtag(_tag_loc, _attrs, false, types) if types.len() == 1 => {
+                // OK: non-nullary with exactly one type
+            }
+            _ => return false,
+        }
+    }
+    !row_fields.is_empty()
+}
+
 /// Determine the arg type for a type expression.
 /// Mirrors OCaml's spec_of_ptyp.
 fn spec_of_ptyp(nolabel: bool, typ: &CoreType, arena: &mut ParseArena) -> Attr {
     // Check for special attributes on the type (@string, @int, @unwrap, @ignore)
-    // For now, handle the common cases
-    // TODO: Handle @string, @int, @unwrap, @ignore attributes on the type
+    let attr_type = check_type_ffi_attrs(typ, arena);
 
-    // Default case: check if unit
-    match &typ.ptyp_desc {
-        CoreTypeDesc::Ptyp_constr(lid, args) if args.is_empty() => {
-            let longident = arena.get_longident(lid.txt);
-            if matches!(longident, Longident::Lident(s) if arena.get_string(*s) == "unit") {
-                if nolabel {
-                    return Attr::ExternUnit;
+    match attr_type {
+        Some("string") => {
+            // @string: must be applied to a closed polyvariant
+            if let CoreTypeDesc::Ptyp_variant(row_fields, current::ClosedFlag::Closed, None) = &typ.ptyp_desc {
+                let (has_as, descr) = map_row_fields_into_strings(row_fields, arena);
+
+                // Check if any tags are non-nullary (have payloads)
+                let has_payload = row_fields.iter().any(|rf| {
+                    matches!(rf, RowField::Rtag(_, _, false, types) if !types.is_empty())
+                });
+
+                if has_payload {
+                    // Non-nullary: use Poly_var
+                    return Attr::PolyVar {
+                        descr: if has_as { Some(descr) } else { None },
+                    };
+                } else {
+                    // All nullary: use Poly_var_string if @as was used
+                    if has_as {
+                        return Attr::PolyVarString { descr };
+                    } else {
+                        // @string without @as on nullary polyvars is redundant
+                        return Attr::Nothing;
+                    }
                 }
             }
+            // Invalid @string usage - not on closed polyvariant
+            // In OCaml this raises an error, but we'll return Nothing for now
             Attr::Nothing
         }
-        _ => Attr::Nothing,
+        Some("int") => {
+            // @int: must be applied to a closed polyvariant
+            if let CoreTypeDesc::Ptyp_variant(row_fields, current::ClosedFlag::Closed, None) = &typ.ptyp_desc {
+                let int_list = map_row_fields_into_ints(row_fields, arena);
+                return Attr::Int(int_list);
+            }
+            // Invalid @int usage
+            Attr::Nothing
+        }
+        Some("ignore") => Attr::Ignore,
+        Some("unwrap") => {
+            // @unwrap: must be applied to a closed polyvariant where each tag has exactly one payload
+            if let CoreTypeDesc::Ptyp_variant(row_fields, current::ClosedFlag::Closed, _) = &typ.ptyp_desc {
+                if variant_can_unwrap(row_fields) {
+                    return Attr::Unwrap;
+                }
+            }
+            // Invalid @unwrap usage
+            Attr::Nothing
+        }
+        _ => {
+            // No special attribute - default behavior
+            // Check if unit type
+            match &typ.ptyp_desc {
+                CoreTypeDesc::Ptyp_constr(lid, args) if args.is_empty() => {
+                    let longident = arena.get_longident(lid.txt);
+                    if matches!(longident, Longident::Lident(s) if arena.get_string(*s) == "unit") {
+                        if nolabel {
+                            return Attr::ExternUnit;
+                        }
+                    }
+                    Attr::Nothing
+                }
+                _ => Attr::Nothing,
+            }
+        }
     }
 }
 
@@ -4145,10 +4351,11 @@ fn rewrite_expression_generic(expr: &Expression, arena: &mut ParseArena) -> Expr
                 }
             }
 
-            // Default: no await transformation needed
+            // Default: no await transformation needed, but DO recurse into module structure
+            // to handle externals inside the module
             ExpressionDesc::Pexp_letmodule(
                 name.clone(),
-                mod_expr.clone(), // Don't recurse into module expressions
+                rewrite_module_expr(mod_expr, arena),
                 Box::new(rewrite_expression(body, arena)),
             )
         }
