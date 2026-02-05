@@ -5316,6 +5316,801 @@ fn uncapitalize_first(s: &str) -> String {
     }
 }
 
+// ========== @deriving(jsConverter) Implementation ==========
+// This implements the OCaml `ast_derive_js_mapper.ml` transformation.
+// For polyvariant types, it generates:
+// - _eraseType: %identity primitive
+// - _index: @get_index primitive
+// - _map: %raw JSON object mapping variant tags to string values
+// - _revMap: %raw JSON object mapping string values to variant tags
+// - <type>ToJs: function using _index(_map, param)
+// - <type>FromJs: function using _index(_revMap, param)
+
+/// Check if a type declaration is an enum polyvariant (all nullary tags)
+fn is_enum_polyvar(tdcl: &TypeDeclaration) -> Option<&[RowField]> {
+    if let Some(manifest) = &tdcl.ptype_manifest {
+        if let CoreTypeDesc::Ptyp_variant(row_fields, closed_flag, None) = &manifest.ptyp_desc {
+            if *closed_flag == current::ClosedFlag::Closed {
+                // Check all tags are nullary (empty type list)
+                // RowField::Rtag(name_loc, attrs, is_constant, types)
+                let all_nullary = row_fields.iter().all(|rf| {
+                    match rf {
+                        RowField::Rtag(_name_loc, _attrs, is_constant, types) => *is_constant && types.is_empty(),
+                        _ => false,
+                    }
+                });
+                if all_nullary {
+                    return Some(row_fields);
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Get @as value from attributes (used for polyvariant tag string mapping)
+fn get_as_string_value(attrs: &[Attribute], arena: &ParseArena) -> Option<String> {
+    for (attr_name, payload) in attrs {
+        let name = arena.get_string(attr_name.txt);
+        if name == "as" {
+            if let Payload::PStr(items) = payload {
+                if let Some(item) = items.first() {
+                    if let StructureItemDesc::Pstr_eval(expr, _) = &item.pstr_desc {
+                        // Constant::String(txt_str, delim)
+                        if let ExpressionDesc::Pexp_constant(Constant::String(txt_str, _delim)) = &expr.pexp_desc {
+                            return Some(txt_str.clone());
+                        }
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Build the JSON map string like `{"Red":"Red","Green":"Green","Blue":"Blue"}`
+fn build_js_converter_map(row_fields: &[RowField], arena: &ParseArena) -> (String, String, bool) {
+    let mut map_buf = String::from("{");
+    let mut rev_map_buf = String::from("{");
+    let mut has_bs_as = false;
+
+    let entries: Vec<(String, String)> = row_fields.iter().filter_map(|rf| {
+        match rf {
+            // RowField::Rtag(name_loc, attrs, is_constant, types)
+            // name_loc.txt is a String (Label = String)
+            RowField::Rtag(name_loc, attrs, _, _) => {
+                let tag_name = name_loc.txt.clone();
+                let js_name = match get_as_string_value(attrs, arena) {
+                    Some(name) => {
+                        has_bs_as = true;
+                        name
+                    }
+                    None => tag_name.clone(),
+                };
+                Some((tag_name, js_name))
+            }
+            _ => None,
+        }
+    }).collect();
+
+    for (i, (tag_name, js_name)) in entries.iter().enumerate() {
+        let last = i == entries.len() - 1;
+        // map: {"Red":"Red", ...}
+        map_buf.push('"');
+        map_buf.push_str(tag_name);
+        map_buf.push_str("\":\"");
+        map_buf.push_str(js_name);
+        map_buf.push('"');
+        if !last {
+            map_buf.push(',');
+        }
+
+        // rev_map: {"Red":"Red", ...}
+        rev_map_buf.push('"');
+        rev_map_buf.push_str(js_name);
+        rev_map_buf.push_str("\":\"");
+        rev_map_buf.push_str(tag_name);
+        rev_map_buf.push('"');
+        if !last {
+            rev_map_buf.push(',');
+        }
+    }
+
+    map_buf.push('}');
+    rev_map_buf.push('}');
+
+    (map_buf, rev_map_buf, has_bs_as)
+}
+
+/// Create the _eraseType primitive: external _eraseType: 'a => 'a = "%identity"
+fn create_erase_type_str(arena: &mut ParseArena) -> StructureItem {
+    let none_loc = arena.none_loc();
+    let erase_type_name = arena.intern_string("_eraseType");
+
+    // Type: 'a => 'a (Ptyp_any => Ptyp_any)
+    let any_type = CoreType {
+        ptyp_desc: CoreTypeDesc::Ptyp_any,
+        ptyp_loc: none_loc,
+        ptyp_attributes: vec![],
+    };
+
+    let arrow_type = CoreType {
+        ptyp_desc: CoreTypeDesc::Ptyp_arrow {
+            arg: Box::new(TypeArg {
+                attrs: vec![],
+                lbl: ArgLabel::Nolabel,
+                typ: any_type.clone(),
+            }),
+            ret: Box::new(any_type),
+            arity: arena.static_arity_1(),
+        },
+        ptyp_loc: none_loc,
+        ptyp_attributes: vec![],
+    };
+
+    let val_desc = ValueDescription {
+        pval_name: Located { txt: erase_type_name, loc: none_loc },
+        pval_type: arrow_type,
+        pval_prim: vec!["%identity".to_string()],
+        pval_attributes: vec![],
+        pval_loc: none_loc,
+    };
+
+    StructureItem {
+        pstr_desc: StructureItemDesc::Pstr_primitive(val_desc),
+        pstr_loc: none_loc,
+    }
+}
+
+/// Create the _index primitive: external _index: 'a => 'b => 'c = "" (with @get_index attr)
+fn create_unsafe_index_get_str(arena: &mut ParseArena) -> StructureItem {
+    let none_loc = arena.none_loc();
+    let index_name = arena.intern_string("_index");
+
+    // Type: 'a => 'b => 'c
+    let any_type = CoreType {
+        ptyp_desc: CoreTypeDesc::Ptyp_any,
+        ptyp_loc: none_loc,
+        ptyp_attributes: vec![],
+    };
+
+    // Inner arrow: 'b => 'c
+    let inner_arrow = CoreType {
+        ptyp_desc: CoreTypeDesc::Ptyp_arrow {
+            arg: Box::new(TypeArg {
+                attrs: vec![],
+                lbl: ArgLabel::Nolabel,
+                typ: any_type.clone(),
+            }),
+            ret: Box::new(any_type.clone()),
+            arity: arena.push_arity(None), // None for inner arrows
+        },
+        ptyp_loc: none_loc,
+        ptyp_attributes: vec![],
+    };
+
+    // Outer arrow: 'a => ('b => 'c)
+    let arrow_type = CoreType {
+        ptyp_desc: CoreTypeDesc::Ptyp_arrow {
+            arg: Box::new(TypeArg {
+                attrs: vec![],
+                lbl: ArgLabel::Nolabel,
+                typ: any_type,
+            }),
+            ret: Box::new(inner_arrow),
+            arity: arena.push_arity(Some(2)),
+        },
+        ptyp_loc: none_loc,
+        ptyp_attributes: vec![],
+    };
+
+    // Encode the FFI with @get_index
+    // OCaml uses Param_number when all params are (Nothing, Arg_empty)
+    let ffi = FfiType::FfiBs {
+        params: Params::ParamNumber(2),
+        return_wrapper: ReturnWrapper::ReturnIdentity,
+        external_spec: ExternalSpec::JsGetIndex { js_get_index_scopes: vec![] },
+    };
+    let encoded = encode_ffi_type(&ffi);
+
+    let val_desc = ValueDescription {
+        pval_name: Located { txt: index_name, loc: none_loc },
+        pval_type: arrow_type,
+        pval_prim: vec!["".to_string(), encoded],
+        pval_attributes: vec![],
+        pval_loc: none_loc,
+    };
+
+    StructureItem {
+        pstr_desc: StructureItemDesc::Pstr_primitive(val_desc),
+        pstr_loc: none_loc,
+    }
+}
+
+/// Create _map or _revMap binding using %raw extension
+/// let _map = %raw(`{"Red":"Red","Green":"Green"}`)
+fn create_map_binding(
+    var_name: &str,
+    json_str: &str,
+    loc: LocIdx,
+    arena: &mut ParseArena,
+) -> StructureItem {
+    let none_loc = arena.none_loc();
+    let var_name_idx = arena.intern_string(var_name);
+    let module_name_idx = arena.intern_string("J");
+    let unsafe_expr_idx = arena.intern_string("unsafe_expr");
+
+    // Create the module structure with external unsafe_expr: 'a => 'a = "#raw_expr"
+    let any_type = CoreType {
+        ptyp_desc: CoreTypeDesc::Ptyp_any,
+        ptyp_loc: none_loc,
+        ptyp_attributes: vec![],
+    };
+    let arrow_type = CoreType {
+        ptyp_desc: CoreTypeDesc::Ptyp_arrow {
+            arg: Box::new(TypeArg {
+                attrs: vec![],
+                lbl: ArgLabel::Nolabel,
+                typ: any_type.clone(),
+            }),
+            ret: Box::new(any_type),
+            arity: arena.static_arity_1(),
+        },
+        ptyp_loc: none_loc,
+        ptyp_attributes: vec![],
+    };
+
+    let unsafe_expr_prim = ValueDescription {
+        pval_name: Located { txt: unsafe_expr_idx, loc },
+        pval_type: arrow_type,
+        pval_prim: vec!["#raw_expr".to_string()],
+        pval_attributes: vec![],
+        pval_loc: loc,
+    };
+
+    let module_structure = vec![StructureItem {
+        pstr_desc: StructureItemDesc::Pstr_primitive(unsafe_expr_prim),
+        pstr_loc: loc,
+    }];
+
+    let module_expr = ModuleExpr {
+        pmod_desc: ModuleExprDesc::Pmod_structure(module_structure),
+        pmod_loc: loc,
+        pmod_attributes: vec![],
+    };
+
+    // Create J.unsafe_expr(json_str) application
+    let j_unsafe_expr = Expression {
+        pexp_desc: ExpressionDesc::Pexp_ident(Located {
+            txt: arena.push_longident(Longident::Ldot(
+                Box::new(Longident::Lident(module_name_idx)),
+                unsafe_expr_idx,
+            )),
+            loc,
+        }),
+        pexp_loc: loc,
+        pexp_attributes: vec![],
+    };
+
+    // Constant::String(txt_string, delim_option)
+    let json_const = Expression {
+        pexp_desc: ExpressionDesc::Pexp_constant(Constant::String(json_str.to_string(), None)),
+        pexp_loc: none_loc,
+        pexp_attributes: vec![],
+    };
+
+    let apply_expr = Expression {
+        pexp_desc: ExpressionDesc::Pexp_apply {
+            funct: Box::new(j_unsafe_expr),
+            args: vec![(ArgLabel::Nolabel, json_const)],
+            partial: false,
+            transformed_jsx: false,
+        },
+        pexp_loc: loc,
+        pexp_attributes: vec![],
+    };
+
+    // Create let module J = struct ... end in J.unsafe_expr(json_str)
+    // Pexp_letmodule(StringLoc, ModuleExpr, Box<Expression>)
+    // StringLoc is Located<StrIdx>
+    let letmodule_expr = Expression {
+        pexp_desc: ExpressionDesc::Pexp_letmodule(
+            Located { txt: module_name_idx, loc },
+            module_expr,
+            Box::new(apply_expr),
+        ),
+        pexp_loc: none_loc,
+        pexp_attributes: vec![],
+    };
+
+    // Create let _map = ...
+    // OCaml: Pat.var {loc; txt = map} - the variable name location is the type decl loc
+    // But pattern wrapper location is ghost (Pat.var has no ~loc parameter)
+    let binding = ValueBinding {
+        pvb_pat: Pattern {
+            ppat_desc: PatternDesc::Ppat_var(Located { txt: var_name_idx, loc }),
+            ppat_loc: none_loc,
+            ppat_attributes: vec![],
+        },
+        pvb_expr: letmodule_expr,
+        pvb_attributes: vec![],
+        pvb_loc: none_loc,
+    };
+
+    StructureItem {
+        pstr_desc: StructureItemDesc::Pstr_value(RecFlag::Nonrecursive, vec![binding]),
+        pstr_loc: none_loc,
+    }
+}
+
+/// Create _revMap that references _map (when no @as attributes)
+fn create_rev_map_ref_binding(loc: LocIdx, arena: &mut ParseArena) -> StructureItem {
+    let none_loc = arena.none_loc();
+    let rev_map_name = arena.intern_string("_revMap");
+    let map_name = arena.intern_string("_map");
+
+    let map_ref = Expression {
+        pexp_desc: ExpressionDesc::Pexp_ident(Located {
+            txt: arena.push_longident(Longident::Lident(map_name)),
+            loc,
+        }),
+        pexp_loc: none_loc,
+        pexp_attributes: vec![],
+    };
+
+    let binding = ValueBinding {
+        pvb_pat: Pattern {
+            ppat_desc: PatternDesc::Ppat_var(Located { txt: rev_map_name, loc: none_loc }),
+            ppat_loc: none_loc,
+            ppat_attributes: vec![],
+        },
+        pvb_expr: map_ref,
+        pvb_attributes: vec![],
+        pvb_loc: none_loc,
+    };
+
+    StructureItem {
+        pstr_desc: StructureItemDesc::Pstr_value(RecFlag::Nonrecursive, vec![binding]),
+        pstr_loc: none_loc,
+    }
+}
+
+/// Create typeToJs function: let colorToJs = (param: color) => _index(_map, param)
+fn create_to_js_function(
+    type_name: &str,
+    core_type: &CoreType,
+    has_bs_as: bool,
+    loc: LocIdx,
+    arena: &mut ParseArena,
+) -> StructureItem {
+    let none_loc = arena.none_loc();
+    let fn_name = format!("{}ToJs", type_name);
+    let fn_name_idx = arena.intern_string(&fn_name);
+    let param_name = arena.intern_string("param");
+    let map_name = arena.intern_string("_map");
+    let index_name = arena.intern_string("_index");
+    let erase_type_name = arena.intern_string("_eraseType");
+
+    // If has_bs_as, body is: _index(_map, param)
+    // Otherwise, body is: _eraseType(param)
+    let body_expr = if has_bs_as {
+        // _index(_map, param)
+        let index_ident = Expression {
+            pexp_desc: ExpressionDesc::Pexp_ident(Located {
+                txt: arena.push_longident(Longident::Lident(index_name)),
+                loc: none_loc,
+            }),
+            pexp_loc: none_loc,
+            pexp_attributes: vec![],
+        };
+        let map_ident = Expression {
+            pexp_desc: ExpressionDesc::Pexp_ident(Located {
+                txt: arena.push_longident(Longident::Lident(map_name)),
+                loc,
+            }),
+            pexp_loc: none_loc,
+            pexp_attributes: vec![],
+        };
+        let param_ident = Expression {
+            pexp_desc: ExpressionDesc::Pexp_ident(Located {
+                txt: arena.push_longident(Longident::Lident(param_name)),
+                loc,
+            }),
+            pexp_loc: none_loc,
+            pexp_attributes: vec![],
+        };
+        Expression {
+            pexp_desc: ExpressionDesc::Pexp_apply {
+                funct: Box::new(index_ident),
+                args: vec![
+                    (ArgLabel::Nolabel, map_ident),
+                    (ArgLabel::Nolabel, param_ident),
+                ],
+                partial: false,
+                transformed_jsx: false,
+            },
+            pexp_loc: none_loc,
+            pexp_attributes: vec![],
+        }
+    } else {
+        // _eraseType(param)
+        let erase_ident = Expression {
+            pexp_desc: ExpressionDesc::Pexp_ident(Located {
+                txt: arena.push_longident(Longident::Lident(erase_type_name)),
+                loc: none_loc,
+            }),
+            pexp_loc: none_loc,
+            pexp_attributes: vec![],
+        };
+        let param_ident = Expression {
+            pexp_desc: ExpressionDesc::Pexp_ident(Located {
+                txt: arena.push_longident(Longident::Lident(param_name)),
+                loc,
+            }),
+            pexp_loc: none_loc,
+            pexp_attributes: vec![],
+        };
+        Expression {
+            pexp_desc: ExpressionDesc::Pexp_apply {
+                funct: Box::new(erase_ident),
+                args: vec![(ArgLabel::Nolabel, param_ident)],
+                partial: false,
+                transformed_jsx: false,
+            },
+            pexp_loc: none_loc,
+            pexp_attributes: vec![],
+        }
+    };
+
+    // Pattern: (param: color)
+    let param_pat = Pattern {
+        ppat_desc: PatternDesc::Ppat_constraint(
+            Box::new(Pattern {
+                ppat_desc: PatternDesc::Ppat_var(Located { txt: param_name, loc }),
+                ppat_loc: none_loc,
+                ppat_attributes: vec![],
+            }),
+            core_type.clone(),
+        ),
+        ppat_loc: none_loc,
+        ppat_attributes: vec![],
+    };
+
+    let fun_expr = Expression {
+        pexp_desc: ExpressionDesc::Pexp_fun {
+            arg_label: ArgLabel::Nolabel,
+            default: None,
+            lhs: param_pat,
+            rhs: Box::new(body_expr),
+            is_async: false,
+            arity: arena.static_arity_1(),
+        },
+        pexp_loc: none_loc,
+        pexp_attributes: vec![],
+    };
+
+    let binding = ValueBinding {
+        pvb_pat: Pattern {
+            ppat_desc: PatternDesc::Ppat_var(Located { txt: fn_name_idx, loc: none_loc }),
+            ppat_loc: none_loc,
+            ppat_attributes: vec![],
+        },
+        pvb_expr: fun_expr,
+        pvb_attributes: vec![],
+        pvb_loc: none_loc,
+    };
+
+    StructureItem {
+        pstr_desc: StructureItemDesc::Pstr_value(RecFlag::Nonrecursive, vec![binding]),
+        pstr_loc: none_loc,
+    }
+}
+
+/// Create typeFromJs function: let colorFromJs = param => _index(_revMap, param)
+fn create_from_js_function(
+    type_name: &str,
+    loc: LocIdx,
+    arena: &mut ParseArena,
+) -> StructureItem {
+    let none_loc = arena.none_loc();
+    let fn_name = format!("{}FromJs", type_name);
+    let fn_name_idx = arena.intern_string(&fn_name);
+    let param_name = arena.intern_string("param");
+    let rev_map_name = arena.intern_string("_revMap");
+    let index_name = arena.intern_string("_index");
+
+    // _index(_revMap, param)
+    let index_ident = Expression {
+        pexp_desc: ExpressionDesc::Pexp_ident(Located {
+            txt: arena.push_longident(Longident::Lident(index_name)),
+            loc: none_loc,
+        }),
+        pexp_loc: none_loc,
+        pexp_attributes: vec![],
+    };
+    let rev_map_ident = Expression {
+        pexp_desc: ExpressionDesc::Pexp_ident(Located {
+            txt: arena.push_longident(Longident::Lident(rev_map_name)),
+            loc,
+        }),
+        pexp_loc: none_loc,
+        pexp_attributes: vec![],
+    };
+    let param_ident = Expression {
+        pexp_desc: ExpressionDesc::Pexp_ident(Located {
+            txt: arena.push_longident(Longident::Lident(param_name)),
+            loc,
+        }),
+        pexp_loc: none_loc,
+        pexp_attributes: vec![],
+    };
+
+    let body_expr = Expression {
+        pexp_desc: ExpressionDesc::Pexp_apply {
+            funct: Box::new(index_ident),
+            args: vec![
+                (ArgLabel::Nolabel, rev_map_ident),
+                (ArgLabel::Nolabel, param_ident),
+            ],
+            partial: false,
+            transformed_jsx: false,
+        },
+        pexp_loc: none_loc,
+        pexp_attributes: vec![],
+    };
+
+    let param_pat = Pattern {
+        ppat_desc: PatternDesc::Ppat_var(Located { txt: param_name, loc }),
+        ppat_loc: none_loc,
+        ppat_attributes: vec![],
+    };
+
+    let fun_expr = Expression {
+        pexp_desc: ExpressionDesc::Pexp_fun {
+            arg_label: ArgLabel::Nolabel,
+            default: None,
+            lhs: param_pat,
+            rhs: Box::new(body_expr),
+            is_async: false,
+            arity: arena.static_arity_1(),
+        },
+        pexp_loc: none_loc,
+        pexp_attributes: vec![],
+    };
+
+    let binding = ValueBinding {
+        pvb_pat: Pattern {
+            ppat_desc: PatternDesc::Ppat_var(Located { txt: fn_name_idx, loc: none_loc }),
+            ppat_loc: none_loc,
+            ppat_attributes: vec![],
+        },
+        pvb_expr: fun_expr,
+        pvb_attributes: vec![],
+        pvb_loc: none_loc,
+    };
+
+    StructureItem {
+        pstr_desc: StructureItemDesc::Pstr_value(RecFlag::Nonrecursive, vec![binding]),
+        pstr_loc: none_loc,
+    }
+}
+
+/// Create toJs signature: val colorToJs: color => string
+fn create_to_js_sig(
+    type_name: &str,
+    core_type: &CoreType,
+    loc: LocIdx,
+    arena: &mut ParseArena,
+) -> SignatureItem {
+    let none_loc = arena.none_loc();
+    let fn_name = format!("{}ToJs", type_name);
+    let fn_name_idx = arena.intern_string(&fn_name);
+    let string_name = arena.intern_string("string");
+
+    let string_type = CoreType {
+        ptyp_desc: CoreTypeDesc::Ptyp_constr(
+            Located {
+                txt: arena.push_longident(Longident::Lident(string_name)),
+                loc: none_loc,
+            },
+            vec![],
+        ),
+        ptyp_loc: none_loc,
+        ptyp_attributes: vec![],
+    };
+
+    let arrow_type = CoreType {
+        ptyp_desc: CoreTypeDesc::Ptyp_arrow {
+            arg: Box::new(TypeArg {
+                attrs: vec![],
+                lbl: ArgLabel::Nolabel,
+                typ: core_type.clone(),
+            }),
+            ret: Box::new(string_type),
+            arity: arena.static_arity_1(),
+        },
+        ptyp_loc: none_loc,
+        ptyp_attributes: vec![],
+    };
+
+    let val_desc = ValueDescription {
+        pval_name: Located { txt: fn_name_idx, loc },
+        pval_type: arrow_type,
+        pval_prim: vec![],
+        pval_attributes: vec![],
+        pval_loc: none_loc,
+    };
+
+    SignatureItem {
+        psig_desc: SignatureItemDesc::Psig_value(val_desc),
+        psig_loc: none_loc,
+    }
+}
+
+/// Create fromJs signature: val colorFromJs: string => option<color>
+fn create_from_js_sig(
+    type_name: &str,
+    core_type: &CoreType,
+    loc: LocIdx,
+    arena: &mut ParseArena,
+) -> SignatureItem {
+    let none_loc = arena.none_loc();
+    let fn_name = format!("{}FromJs", type_name);
+    let fn_name_idx = arena.intern_string(&fn_name);
+    let string_name = arena.intern_string("string");
+    let option_name = arena.intern_string("option");
+    let predef_name = arena.intern_string("*predef*");
+
+    let string_type = CoreType {
+        ptyp_desc: CoreTypeDesc::Ptyp_constr(
+            Located {
+                txt: arena.push_longident(Longident::Lident(string_name)),
+                loc: none_loc,
+            },
+            vec![],
+        ),
+        ptyp_loc: none_loc,
+        ptyp_attributes: vec![],
+    };
+
+    // option<color> = *predef*.option<color>
+    let option_type = CoreType {
+        ptyp_desc: CoreTypeDesc::Ptyp_constr(
+            Located {
+                txt: arena.push_longident(Longident::Ldot(
+                    Box::new(Longident::Lident(predef_name)),
+                    option_name,
+                )),
+                loc: none_loc,
+            },
+            vec![core_type.clone()],
+        ),
+        ptyp_loc: none_loc,
+        ptyp_attributes: vec![],
+    };
+
+    let arrow_type = CoreType {
+        ptyp_desc: CoreTypeDesc::Ptyp_arrow {
+            arg: Box::new(TypeArg {
+                attrs: vec![],
+                lbl: ArgLabel::Nolabel,
+                typ: string_type,
+            }),
+            ret: Box::new(option_type),
+            arity: arena.static_arity_1(),
+        },
+        ptyp_loc: none_loc,
+        ptyp_attributes: vec![],
+    };
+
+    let val_desc = ValueDescription {
+        pval_name: Located { txt: fn_name_idx, loc },
+        pval_type: arrow_type,
+        pval_prim: vec![],
+        pval_attributes: vec![],
+        pval_loc: none_loc,
+    };
+
+    SignatureItem {
+        psig_desc: SignatureItemDesc::Psig_value(val_desc),
+        psig_loc: none_loc,
+    }
+}
+
+/// Generate jsConverter include for a type declaration
+///
+/// OCaml always generates `include (struct ... end : sig ... end)` even when
+/// jsConverter is "not applicable" (for variants, records, open types).
+/// Only enum polyvariants get actual content; others get empty structure/signature.
+fn generate_js_converter_include(
+    tdcl: &TypeDeclaration,
+    _new_type: bool,
+    pstr_loc: LocIdx,
+    arena: &mut ParseArena,
+) -> StructureItem {
+    // OCaml uses:
+    // - pstr_loc (from gen_structure_signature ~loc) for the outer include wrapper
+    // - tdcl.ptype_loc for the inner generated code (bindings, functions)
+    let outer_loc = pstr_loc;
+    let inner_loc = tdcl.ptype_loc;
+
+    // Check if this is an enum polyvariant - only those get full implementation
+    let (structure_items, signature_items) = if let Some(row_fields) = is_enum_polyvar(tdcl) {
+        // Clone type_name to avoid borrow issues
+        let type_name = arena.get_string(tdcl.ptype_name.txt).to_string();
+        let (map_json, rev_map_json, has_bs_as) = build_js_converter_map(row_fields, arena);
+
+        // Get core type with @deriving attributes
+        let core_type = core_type_of_type_declaration_with_attrs(tdcl, arena);
+
+        // Build structure items - use inner_loc (tdcl.ptype_loc) like OCaml does
+        let mut structure_items = vec![];
+
+        // _eraseType
+        structure_items.push(create_erase_type_str(arena));
+
+        // _index
+        structure_items.push(create_unsafe_index_get_str(arena));
+
+        // _map
+        structure_items.push(create_map_binding("_map", &map_json, inner_loc, arena));
+
+        // _revMap (either same as _map or new %raw)
+        if has_bs_as {
+            structure_items.push(create_map_binding("_revMap", &rev_map_json, inner_loc, arena));
+        } else {
+            structure_items.push(create_rev_map_ref_binding(inner_loc, arena));
+        }
+
+        // colorToJs
+        structure_items.push(create_to_js_function(&type_name, &core_type, has_bs_as, inner_loc, arena));
+
+        // colorFromJs
+        structure_items.push(create_from_js_function(&type_name, inner_loc, arena));
+
+        // Build signature items
+        let mut signature_items = vec![];
+        signature_items.push(create_to_js_sig(&type_name, &core_type, inner_loc, arena));
+        signature_items.push(create_from_js_sig(&type_name, &core_type, inner_loc, arena));
+
+        (structure_items, signature_items)
+    } else {
+        // For non-polyvariant types (variants, records, open, abstract without polyvariant manifest),
+        // OCaml emits a warning and generates empty include (struct end : sig end)
+        (vec![], vec![])
+    };
+
+    // Create include (struct ... end : sig ... end) - use outer_loc (pstr_loc) for wrapper
+    let inner_mod = ModuleExpr {
+        pmod_desc: ModuleExprDesc::Pmod_structure(structure_items),
+        pmod_loc: outer_loc,
+        pmod_attributes: vec![],
+    };
+
+    let sig_mod_type = ModuleType {
+        pmty_desc: ModuleTypeDesc::Pmty_signature(signature_items),
+        pmty_loc: outer_loc,
+        pmty_attributes: vec![],
+    };
+
+    let constrained_mod = ModuleExpr {
+        pmod_desc: ModuleExprDesc::Pmod_constraint(Box::new(inner_mod), Box::new(sig_mod_type)),
+        pmod_loc: outer_loc,
+        pmod_attributes: vec![],
+    };
+
+    let include_decl = IncludeDeclaration {
+        pincl_mod: constrained_mod,
+        pincl_loc: outer_loc,
+        pincl_attributes: vec![],
+    };
+
+    StructureItem {
+        pstr_desc: StructureItemDesc::Pstr_include(include_decl),
+        pstr_loc: outer_loc,
+    }
+}
+
 /// Handle @deriving for type declarations
 ///
 /// OCaml transforms `@deriving(accessors) type t = { x: int }` into:
@@ -5390,8 +6185,11 @@ fn handle_deriving_type(
                     }
                 }
             }
-            DeriveAction::JsConverter { new_type: _ } => {
-                // TODO: Implement jsConverter generation
+            DeriveAction::JsConverter { new_type } => {
+                for tdcl in tdcls {
+                    let include_item = generate_js_converter_include(tdcl, *new_type, loc, arena);
+                    include_items.push(include_item);
+                }
             }
             DeriveAction::Abstract { light: _ } => {
                 // TODO: Implement abstract generation
