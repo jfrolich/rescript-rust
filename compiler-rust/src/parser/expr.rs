@@ -3237,7 +3237,7 @@ fn split_list_by_spread(
 fn make_empty_list(p: &mut Parser<'_>, loc: Location) -> Expression {
     // OCaml: let loc = {loc with Location.loc_ghost = true}
     let ghost_loc = p.arena_mut().mk_ghost_loc(loc);
-    let lid_idx = p.push_lident_static("[]");
+    let lid_idx = p.expr_nil();
     Expression {
         pexp_desc: ExpressionDesc::Pexp_construct(
             Loc {
@@ -3279,7 +3279,7 @@ fn make_list_expression_simple(
             pexp_loc: cons_loc,
             pexp_attributes: vec![],
         };
-        let lid_idx = p.push_lident_static("::");
+        let lid_idx = p.expr_cons();
         acc = Expression {
             pexp_desc: ExpressionDesc::Pexp_construct(
                 Loc {
@@ -3307,9 +3307,9 @@ fn make_list_expression_with_loc(
 ) -> Expression {
     let seg_loc = p.mk_loc_idx(seg_start, seg_end);
 
-    // Pre-allocate the list constructor longidents
-    let nil_idx = p.push_lident_static("[]");
-    let cons_idx = p.push_lident_static("::");
+    // Use expression-context list constructor lidents (from ast_helper.ml)
+    let nil_idx = p.expr_nil();
+    let cons_idx = p.expr_cons();
 
     // Build the list using cons cells
     let list_end_idx = seg_end;

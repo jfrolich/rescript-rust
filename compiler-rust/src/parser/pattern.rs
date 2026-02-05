@@ -676,7 +676,7 @@ fn parse_atomic_pattern(p: &mut Parser<'_>) -> Pattern {
                 p.next();
 
                 let lid_loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
-                let lid_idx = p.push_lident_static("::");
+                let lid_idx = p.pat_cons();
                 let lid = mknoloc(lid_idx);
 
                 let arg = if p.token == Token::Lparen {

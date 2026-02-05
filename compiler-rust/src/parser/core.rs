@@ -719,9 +719,9 @@ pub mod ast_helper {
         items: Vec<Pattern>,
         spread: Option<Pattern>,
     ) -> Pattern {
-        // Pre-allocate list constructor longidents
-        let nil_idx = p.push_lident_static("[]");
-        let cons_idx = p.push_lident_static("::");
+        // Use pattern-context list constructor lidents (from res_core.ml)
+        let nil_idx = p.pat_nil();
+        let cons_idx = p.pat_cons();
 
         // Build from the end: start with spread or []
         let mut result = match spread {

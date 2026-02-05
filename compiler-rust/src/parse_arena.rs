@@ -173,6 +173,28 @@ pub struct StaticArities {
     pub arity_1: ArityIdx,
 }
 
+/// Pre-allocated `Lident "[]"` and `Lident "::"` for list construction.
+///
+/// OCaml has TWO distinct sets of these because they come from two different
+/// compilation units, each with their own CSE-promoted static allocations:
+/// - **Pattern context** (`res_core.ml`): `make_list_pattern` creates `Lident "[]"` and `Lident "::"`
+/// - **Expression context** (`ast_helper.ml`): `make_list_expression` creates `Lident "[]"` and `Lident "::"`
+///
+/// Files with both list patterns AND list expressions will have TWO distinct
+/// `Lident "[]"` and TWO distinct `Lident "::"` in the binary AST.
+/// Files with only one kind will have just ONE of each (all sharing within that context).
+#[derive(Debug, Clone, Copy)]
+pub struct StaticListLidents {
+    /// `Lident "[]"` for pattern contexts (from res_core.ml)
+    pub pat_nil: LidentIdx,
+    /// `Lident "::"` for pattern contexts (from res_core.ml)
+    pub pat_cons: LidentIdx,
+    /// `Lident "[]"` for expression contexts (from ast_helper.ml)
+    pub expr_nil: LidentIdx,
+    /// `Lident "::"` for expression contexts (from ast_helper.ml)
+    pub expr_cons: LidentIdx,
+}
+
 // ============================================================================
 // InternedLocation (stored in arena)
 // ============================================================================
@@ -243,6 +265,10 @@ pub struct ParseArena {
     /// Pre-allocated static arity indices for literal paths.
     /// These match OCaml's CSE behavior where literal `Some 1` values are shared.
     static_arities: StaticArities,
+    /// Pre-allocated static Lident indices for list constructors.
+    /// Pattern and expression contexts get separate Lidents to match OCaml's
+    /// per-compilation-unit CSE behavior.
+    static_list_lidents: StaticListLidents,
     /// Position deduplication table - maps position content to its index.
     position_dedup: HashMap<PosKey, PosIdx>,
     /// Simple Lident deduplication table - maps StrIdx to its LidentIdx.
@@ -271,15 +297,51 @@ impl Default for ParseArena {
             arity_none: ArityIdx(0),
             arity_1: ArityIdx(1),
         };
+
+        // Pre-allocate static list lidents.
+        // We need TWO sets: one for pattern contexts (res_core.ml) and one for
+        // expression contexts (ast_helper.ml). Each compilation unit in OCaml has
+        // its own CSE-promoted statics, so both the Lident blocks AND the inner
+        // strings must be distinct objects in the marshal output.
+        let mut strings = Interner::new();
+        let mut longidents: Arena<Longident, LidentIdx> = Arena::default();
+        // Pattern context: use fresh (non-interned) strings so they marshal as
+        // separate objects from the expression context strings.
+        let pat_nil_str = strings.push("[]".to_string());
+        let pat_cons_str = strings.push("::".to_string());
+        let pat_nil = longidents.push(Longident::Lident(pat_nil_str));
+        let pat_cons = longidents.push(Longident::Lident(pat_cons_str));
+        // Expression context: use interned strings (these will also be found by
+        // push_lident_static for any other "[]"/"::").
+        let expr_nil_str = strings.intern("[]");
+        let expr_cons_str = strings.intern("::");
+        let expr_nil = longidents.push(Longident::Lident(expr_nil_str));
+        let expr_cons = longidents.push(Longident::Lident(expr_cons_str));
+        let static_list_lidents = StaticListLidents {
+            pat_nil,
+            pat_cons,
+            expr_nil,
+            expr_cons,
+        };
+
+        // Seed the lident_dedup table with the expression context lidents.
+        // This ensures that push_lident_static("[]") and push_lident_static("::")
+        // return the expression-context lidents, which is correct for all non-list
+        // pattern uses (e.g., "()").
+        let mut lident_dedup = HashMap::new();
+        lident_dedup.insert(expr_nil_str, expr_nil);
+        lident_dedup.insert(expr_cons_str, expr_cons);
+
         Self {
             positions: Arena::default(),
             locations: Arena::default(),
-            longidents: Arena::default(),
+            longidents,
             arities,
             static_arities,
+            static_list_lidents,
             position_dedup: HashMap::new(),
-            lident_dedup: HashMap::new(),
-            strings: Interner::new(),
+            lident_dedup,
+            strings,
             local_module_counter: 0,
         }
     }
@@ -676,6 +738,34 @@ impl ParseArena {
     /// Get total number of arities.
     pub fn arity_count(&self) -> usize {
         self.arities.len()
+    }
+
+    // ========================================================================
+    // Static list lidents
+    // ========================================================================
+
+    /// Get the pre-allocated `Lident "[]"` for pattern contexts.
+    /// Use in `make_list_pattern` (corresponds to OCaml's res_core.ml).
+    pub fn pat_nil(&self) -> LidentIdx {
+        self.static_list_lidents.pat_nil
+    }
+
+    /// Get the pre-allocated `Lident "::"` for pattern contexts.
+    /// Use in `make_list_pattern` and `::` pattern parsing (corresponds to OCaml's res_core.ml).
+    pub fn pat_cons(&self) -> LidentIdx {
+        self.static_list_lidents.pat_cons
+    }
+
+    /// Get the pre-allocated `Lident "[]"` for expression contexts.
+    /// Use in `make_list_expression` variants (corresponds to OCaml's ast_helper.ml).
+    pub fn expr_nil(&self) -> LidentIdx {
+        self.static_list_lidents.expr_nil
+    }
+
+    /// Get the pre-allocated `Lident "::"` for expression contexts.
+    /// Use in `make_list_expression` variants (corresponds to OCaml's ast_helper.ml).
+    pub fn expr_cons(&self) -> LidentIdx {
+        self.static_list_lidents.expr_cons
     }
 
     /// Get the string content for a StrIdx.

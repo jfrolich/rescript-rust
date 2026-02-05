@@ -261,6 +261,26 @@ impl<'src> Parser<'src> {
         self.arena.static_arity_none()
     }
 
+    /// Get the pre-allocated `Lident "[]"` for pattern contexts (res_core.ml).
+    pub fn pat_nil(&self) -> LidentIdx {
+        self.arena.pat_nil()
+    }
+
+    /// Get the pre-allocated `Lident "::"` for pattern contexts (res_core.ml).
+    pub fn pat_cons(&self) -> LidentIdx {
+        self.arena.pat_cons()
+    }
+
+    /// Get the pre-allocated `Lident "[]"` for expression contexts (ast_helper.ml).
+    pub fn expr_nil(&self) -> LidentIdx {
+        self.arena.expr_nil()
+    }
+
+    /// Get the pre-allocated `Lident "::"` for expression contexts (ast_helper.ml).
+    pub fn expr_cons(&self) -> LidentIdx {
+        self.arena.expr_cons()
+    }
+
     /// Push a position into the arena and return its index.
     pub fn push_pos(&mut self, pos: Position) -> PosIdx {
         self.arena.push_position(pos)
