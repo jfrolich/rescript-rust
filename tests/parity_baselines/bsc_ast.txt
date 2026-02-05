@@ -33,6 +33,7 @@ syntax_tests/data/idempotency/bs-css/Css_AtomicTypes.resi
 syntax_tests/data/idempotency/bs-css/Css_Colors.res
 syntax_tests/data/idempotency/bs-css/Css_Core.res
 syntax_tests/data/idempotency/bs-css/Css_Js_Core.res
+syntax_tests/data/idempotency/bs-css/Css_Js_Core.resi
 syntax_tests/data/idempotency/bs-css/Css_Legacy_Core.res
 syntax_tests/data/idempotency/bs-css/Css_Legacy_Core.resi
 syntax_tests/data/idempotency/bs-css/Css.res
@@ -40,7 +41,10 @@ syntax_tests/data/idempotency/bs-css/CssEmotion.res
 syntax_tests/data/idempotency/bs-css/CssEmotionJs.res
 syntax_tests/data/idempotency/bs-css/CssJs.res
 syntax_tests/data/idempotency/bs-fetch/reason_examples.res
+syntax_tests/data/idempotency/bs-webapi/src/Webapi.res
+syntax_tests/data/idempotency/bs-webapi/src/Webapi/Webapi__Base64.res
 syntax_tests/data/idempotency/bs-webapi/src/Webapi/Webapi__Canvas.res
+syntax_tests/data/idempotency/bs-webapi/src/Webapi/Webapi__Canvas/Webapi__Canvas__Canvas2d.res
 syntax_tests/data/idempotency/bs-webapi/src/Webapi/Webapi__Canvas/Webapi__Canvas__WebGl.res
 syntax_tests/data/idempotency/bs-webapi/src/Webapi/Webapi__Dom.res
 syntax_tests/data/idempotency/bs-webapi/src/Webapi/Webapi__Dom/Webapi__Dom__AnimationEvent.res
@@ -48,6 +52,7 @@ syntax_tests/data/idempotency/bs-webapi/src/Webapi/Webapi__Dom/Webapi__Dom__Attr
 syntax_tests/data/idempotency/bs-webapi/src/Webapi/Webapi__Dom/Webapi__Dom__BeforeUnloadEvent.res
 syntax_tests/data/idempotency/bs-webapi/src/Webapi/Webapi__Dom/Webapi__Dom__CdataSection.res
 syntax_tests/data/idempotency/bs-webapi/src/Webapi/Webapi__Dom/Webapi__Dom__CharacterData.res
+syntax_tests/data/idempotency/bs-webapi/src/Webapi/Webapi__Dom/Webapi__Dom__ChildNode.res
 syntax_tests/data/idempotency/bs-webapi/src/Webapi/Webapi__Dom/Webapi__Dom__ClipboardEvent.res
 syntax_tests/data/idempotency/bs-webapi/src/Webapi/Webapi__Dom/Webapi__Dom__CloseEvent.res
 syntax_tests/data/idempotency/bs-webapi/src/Webapi/Webapi__Dom/Webapi__Dom__Comment.res
@@ -57,7 +62,9 @@ syntax_tests/data/idempotency/bs-webapi/src/Webapi/Webapi__Dom/Webapi__Dom__Cust
 syntax_tests/data/idempotency/bs-webapi/src/Webapi/Webapi__Dom/Webapi__Dom__DocumentFragment.res
 syntax_tests/data/idempotency/bs-webapi/src/Webapi/Webapi__Dom/Webapi__Dom__DocumentOrShadowRoot.res
 syntax_tests/data/idempotency/bs-webapi/src/Webapi/Webapi__Dom/Webapi__Dom__DocumentType.res
+syntax_tests/data/idempotency/bs-webapi/src/Webapi/Webapi__Dom/Webapi__Dom__DomImplementation.res
 syntax_tests/data/idempotency/bs-webapi/src/Webapi/Webapi__Dom/Webapi__Dom__DomRect.res
+syntax_tests/data/idempotency/bs-webapi/src/Webapi/Webapi__Dom/Webapi__Dom__DomStringMap.res
 syntax_tests/data/idempotency/bs-webapi/src/Webapi/Webapi__Dom/Webapi__Dom__DomTokenList.res
 syntax_tests/data/idempotency/bs-webapi/src/Webapi/Webapi__Dom/Webapi__Dom__DragEvent.res
 syntax_tests/data/idempotency/bs-webapi/src/Webapi/Webapi__Dom/Webapi__Dom__ErrorEvent.res
@@ -115,6 +122,7 @@ syntax_tests/data/idempotency/bs-webapi/src/Webapi/Webapi__File.res
 syntax_tests/data/idempotency/bs-webapi/src/Webapi/Webapi__Performance.res
 syntax_tests/data/idempotency/bs-webapi/src/Webapi/Webapi__ResizeObserver.res
 syntax_tests/data/idempotency/bs-webapi/src/Webapi/Webapi__ResizeObserver/Webapi__ResizeObserver__ResizeObserverEntry.res
+syntax_tests/data/idempotency/bs-webapi/src/Webapi/Webapi__Url.res
 syntax_tests/data/idempotency/bs-webapi/tests/testHelpers.res
 syntax_tests/data/idempotency/bs-webapi/tests/Webapi/Webapi__Base64__test.res
 syntax_tests/data/idempotency/bs-webapi/tests/Webapi/Webapi__Canvas/Webapi__Canvas__Canvas2d__test.res
@@ -168,8 +176,11 @@ syntax_tests/data/idempotency/covid-19charts.com/src/ColorStack.resi
 syntax_tests/data/idempotency/covid-19charts.com/src/CopyToClipboard.res
 syntax_tests/data/idempotency/covid-19charts.com/src/DatePicker.res
 syntax_tests/data/idempotency/covid-19charts.com/src/Location.res
+syntax_tests/data/idempotency/covid-19charts.com/src/ReactSelect.res
+syntax_tests/data/idempotency/covid-19charts.com/src/Recharts.res
 syntax_tests/data/idempotency/covid-19charts.com/src/SerializeQueryParam.res
 syntax_tests/data/idempotency/covid-19charts.com/src/UseQueryParam.res
+syntax_tests/data/idempotency/covid-19charts.com/src/Victory.res
 syntax_tests/data/idempotency/covid-19charts.com/src/Window.res
 syntax_tests/data/idempotency/genType/src/Annotation.res
 syntax_tests/data/idempotency/genType/src/CodeItem.res
@@ -230,6 +241,7 @@ syntax_tests/data/idempotency/mareo/Actors.res
 syntax_tests/data/idempotency/mareo/Actors.resi
 syntax_tests/data/idempotency/mareo/Director.res
 syntax_tests/data/idempotency/mareo/Director.resi
+syntax_tests/data/idempotency/mareo/Dom_html.res
 syntax_tests/data/idempotency/mareo/Draw.resi
 syntax_tests/data/idempotency/mareo/Object.res
 syntax_tests/data/idempotency/mareo/Object.resi
@@ -275,6 +287,7 @@ syntax_tests/data/idempotency/pupilfirst/courses/CoursesCurriculum__Learn.res
 syntax_tests/data/idempotency/pupilfirst/courses/CoursesCurriculum__Level.res
 syntax_tests/data/idempotency/pupilfirst/courses/CoursesCurriculum__QuizQuestion.res
 syntax_tests/data/idempotency/pupilfirst/courses/CoursesCurriculum__Submission.res
+syntax_tests/data/idempotency/pupilfirst/courses/CoursesCurriculum__SubmissionBuilder.res
 syntax_tests/data/idempotency/pupilfirst/courses/CoursesCurriculum__Target.res
 syntax_tests/data/idempotency/pupilfirst/courses/CoursesCurriculum__TargetDetails.res
 syntax_tests/data/idempotency/pupilfirst/courses/CoursesCurriculum__TargetGroup.res
@@ -304,6 +317,7 @@ syntax_tests/data/idempotency/pupilfirst/courses/CoursesStudents__TeamInfo.res
 syntax_tests/data/idempotency/pupilfirst/courses/CoursesStudents__Teams.res
 syntax_tests/data/idempotency/pupilfirst/courses/CoursesStudents__Types.res
 syntax_tests/data/idempotency/pupilfirst/courses/SubmissionChecklistItem.res
+syntax_tests/data/idempotency/pupilfirst/courses/SubmissionChecklistItemShow.res
 syntax_tests/data/idempotency/pupilfirst/layouts/SchoolAdminNavbar__Course.res
 syntax_tests/data/idempotency/pupilfirst/layouts/SchoolAdminNavbar__Types.res
 syntax_tests/data/idempotency/pupilfirst/layouts/StudentCourse__Course.res
@@ -368,6 +382,7 @@ syntax_tests/data/idempotency/pupilfirst/schools/CurriculumEditor__MarkdownBlock
 syntax_tests/data/idempotency/pupilfirst/schools/CurriculumEditor__QuizQuestion.res
 syntax_tests/data/idempotency/pupilfirst/schools/CurriculumEditor__SortResourcesMutation.res
 syntax_tests/data/idempotency/pupilfirst/schools/CurriculumEditor__Target.res
+syntax_tests/data/idempotency/pupilfirst/schools/CurriculumEditor__TargetChecklistItemEditor.res
 syntax_tests/data/idempotency/pupilfirst/schools/CurriculumEditor__TargetDetails.res
 syntax_tests/data/idempotency/pupilfirst/schools/CurriculumEditor__TargetGroup.res
 syntax_tests/data/idempotency/pupilfirst/schools/CurriculumEditor__TargetQuizAnswer.res
@@ -455,10 +470,14 @@ syntax_tests/data/idempotency/reasongl/RGLEvents.res
 syntax_tests/data/idempotency/reasongl/RGLInterface.res
 syntax_tests/data/idempotency/reasonml.org/bindings/Next.res
 syntax_tests/data/idempotency/reasonml.org/common/BeltData.res
+syntax_tests/data/idempotency/reasonml.org/common/Mdx.res
+syntax_tests/data/idempotency/reasonml.org/common/Util.res
 syntax_tests/data/idempotency/reasonml.org/components/ApiIntro.res
 syntax_tests/data/idempotency/reasonml.org/components/ApiMarkdown.res
 syntax_tests/data/idempotency/reasonml.org/components/Icon.res
+syntax_tests/data/idempotency/reasonml.org/components/Markdown.res
 syntax_tests/data/idempotency/reasonml.org/components/Meta.res
+syntax_tests/data/idempotency/reasonml.org/components/Navigation.res
 syntax_tests/data/idempotency/reasonml.org/components/Tag.res
 syntax_tests/data/idempotency/reasonml.org/components/Text.res
 syntax_tests/data/idempotency/reasonml.org/layouts/CommunityLayout.res
@@ -469,7 +488,9 @@ syntax_tests/data/idempotency/reasonml.org/layouts/ReasonCompilerDocsLayout.res
 syntax_tests/data/idempotency/reasonml.org/layouts/ReasonReactDocsLayout.res
 syntax_tests/data/idempotency/reductive/reductive.res
 syntax_tests/data/idempotency/reductive/reductive.resi
+syntax_tests/data/idempotency/reductive/reductiveContext.res
 syntax_tests/data/idempotency/reductive/reductiveContext.resi
+syntax_tests/data/idempotency/reductive/subscription.res
 syntax_tests/data/idempotency/reprocessing/Reprocessing_Common.res
 syntax_tests/data/idempotency/reprocessing/Reprocessing_Constants.res
 syntax_tests/data/idempotency/reprocessing/Reprocessing_Constants.resi
@@ -554,6 +575,7 @@ syntax_tests/data/parsing/errors/typeDef/emptyRecord.res
 syntax_tests/data/parsing/grammar/expressions/apply.res
 syntax_tests/data/parsing/grammar/expressions/argument.res
 syntax_tests/data/parsing/grammar/expressions/arrow.res
+syntax_tests/data/parsing/grammar/expressions/await.res
 syntax_tests/data/parsing/grammar/expressions/bigint.res
 syntax_tests/data/parsing/grammar/expressions/binary.res
 syntax_tests/data/parsing/grammar/expressions/binaryNoEs6Arrow.res
@@ -567,6 +589,8 @@ syntax_tests/data/parsing/grammar/expressions/for.res
 syntax_tests/data/parsing/grammar/expressions/ident.res
 syntax_tests/data/parsing/grammar/expressions/if.res
 syntax_tests/data/parsing/grammar/expressions/infix.res
+syntax_tests/data/parsing/grammar/expressions/jsx.res
+syntax_tests/data/parsing/grammar/expressions/letUnwrap.res
 syntax_tests/data/parsing/grammar/expressions/list.res
 syntax_tests/data/parsing/grammar/expressions/parenthesized.res
 syntax_tests/data/parsing/grammar/expressions/polyvariant.res
@@ -638,10 +662,12 @@ syntax_tests/data/parsing/grammar/structure/recursiveModules.res
 syntax_tests/data/parsing/grammar/structure/standaloneAttribute.res
 syntax_tests/data/parsing/grammar/structure/typeDefinition.res
 syntax_tests/data/parsing/grammar/typedefinition/bsObject.res
+syntax_tests/data/parsing/grammar/typedefinition/constructorDeclaration.res
 syntax_tests/data/parsing/grammar/typedefinition/diamond.res
 syntax_tests/data/parsing/grammar/typedefinition/missingPipeBeforeConstructorAttribute.res
 syntax_tests/data/parsing/grammar/typedefinition/polyvariant.res
 syntax_tests/data/parsing/grammar/typedefinition/privateTypeEquation.res
+syntax_tests/data/parsing/grammar/typedefinition/recordDeclaration.res
 syntax_tests/data/parsing/grammar/typedefinition/typeConstraint.res
 syntax_tests/data/parsing/grammar/typedefinition/typedef.res
 syntax_tests/data/parsing/grammar/typedefinition/typeDefinition.res
@@ -655,6 +681,7 @@ syntax_tests/data/parsing/grammar/typexpr/any.res
 syntax_tests/data/parsing/grammar/typexpr/extension.res
 syntax_tests/data/parsing/grammar/typexpr/firstClassModules.res
 syntax_tests/data/parsing/grammar/typexpr/parenthesized.res
+syntax_tests/data/parsing/grammar/typexpr/poly.res
 syntax_tests/data/parsing/grammar/typexpr/polyVariant.res
 syntax_tests/data/parsing/grammar/typexpr/tuple.res
 syntax_tests/data/parsing/grammar/typexpr/unit.res
@@ -687,6 +714,7 @@ syntax_tests/data/ppx/react/interface.res
 syntax_tests/data/ppx/react/interface.resi
 syntax_tests/data/ppx/react/interfaceWithRef.res
 syntax_tests/data/ppx/react/interfaceWithRef.resi
+syntax_tests/data/ppx/react/mangleKeyword.res
 syntax_tests/data/ppx/react/nested.res
 syntax_tests/data/ppx/react/newtype.res
 syntax_tests/data/ppx/react/noPropsWithKey.res
@@ -722,6 +750,7 @@ syntax_tests/data/printer/comments/structure3.res
 syntax_tests/data/printer/comments/structure4.res
 syntax_tests/data/printer/comments/structureItem.res
 syntax_tests/data/printer/comments/trailingComments.res
+syntax_tests/data/printer/comments/typeDefinition.res
 syntax_tests/data/printer/comments/typexpr.res
 syntax_tests/data/printer/comments/valueBindings.res
 syntax_tests/data/printer/comments/whitespaceCase1.res
@@ -734,6 +763,7 @@ syntax_tests/data/printer/expr/constant.res
 syntax_tests/data/printer/expr/constraint.res
 syntax_tests/data/printer/expr/dict.res
 syntax_tests/data/printer/expr/DocComments.res
+syntax_tests/data/printer/expr/extension.res
 syntax_tests/data/printer/expr/field.res
 syntax_tests/data/printer/expr/for.res
 syntax_tests/data/printer/expr/fun.res
@@ -742,6 +772,7 @@ syntax_tests/data/printer/expr/if.res
 syntax_tests/data/printer/expr/jsObjectAccess.res
 syntax_tests/data/printer/expr/let.res
 syntax_tests/data/printer/expr/letexception.res
+syntax_tests/data/printer/expr/letUnwrap.res
 syntax_tests/data/printer/expr/nestedCallbacks.res
 syntax_tests/data/printer/expr/open.res
 syntax_tests/data/printer/expr/record.res
@@ -767,6 +798,7 @@ syntax_tests/data/printer/modType/ident.res
 syntax_tests/data/printer/modType/moduleTypeOf.res
 syntax_tests/data/printer/modType/signature.res
 syntax_tests/data/printer/modType/withConstraints.res
+syntax_tests/data/printer/other/attributes.res
 syntax_tests/data/printer/other/case.res
 syntax_tests/data/printer/other/char.res
 syntax_tests/data/printer/other/comments.res
@@ -828,10 +860,14 @@ syntax_tests/data/printer/typeDef/open.res
 syntax_tests/data/printer/typeDef/private.res
 syntax_tests/data/printer/typeDef/record.res
 syntax_tests/data/printer/typeDef/typeParams.res
+syntax_tests/data/printer/typeDef/variant.res
 syntax_tests/data/printer/typexpr/alias.res
 syntax_tests/data/printer/typexpr/any.res
+syntax_tests/data/printer/typexpr/arrow.res
 syntax_tests/data/printer/typexpr/exoticIdent.res
 syntax_tests/data/printer/typexpr/extension.res
 syntax_tests/data/printer/typexpr/firstClassModule.res
+syntax_tests/data/printer/typexpr/polyTyp.res
 syntax_tests/data/printer/typexpr/tuple.res
 syntax_tests/data/printer/typexpr/var.res
+syntax_tests/data/printer/typexpr/variant.res
