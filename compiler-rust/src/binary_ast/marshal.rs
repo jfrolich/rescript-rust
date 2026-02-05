@@ -28,6 +28,7 @@ use std::collections::HashMap;
 
 use crate::location::{Location, Position};
 use crate::parse_arena::{ArityIdx, LidentIdx, LocIdx, ParseArena, PosIdx, StrIdx};
+use crate::parser::ast::EmptyPayloadKind;
 use crate::parser::longident::Longident;
 
 /// Magic number for small Marshal format
@@ -142,6 +143,9 @@ pub struct MarshalWriter {
     /// by sharing Position values with identical content.
     position_value_table: HashMap<Position, u32>,
 
+    /// Shared object indices for empty PStr payloads (`PStr []`) by sharing group.
+    pstr_empty_table: [Option<u32>; EmptyPayloadKind::COUNT],
+
     /// Optional reference to ParseArena for LocIdx marshalling.
     /// Set via `set_arena()` before marshalling AST with LocIdx fields.
     /// Uses raw pointer to avoid lifetime constraints.
@@ -184,6 +188,8 @@ impl MarshalWriter {
             location_value_table: HashMap::new(),
             position_value_table: HashMap::new(),
 
+            pstr_empty_table: [None; EmptyPayloadKind::COUNT],
+
             arena: None,
             obj_counter: 0,
             size_32: 0,
@@ -210,6 +216,8 @@ impl MarshalWriter {
 
             location_value_table: HashMap::new(),
             position_value_table: HashMap::new(),
+
+            pstr_empty_table: [None; EmptyPayloadKind::COUNT],
 
             arena: None,
             obj_counter: 0,
@@ -254,6 +262,7 @@ impl MarshalWriter {
         self.lident_idx_table.clear();
         self.option_string_table.clear();
         self.string_loc_table.clear();
+        self.pstr_empty_table = [None; EmptyPayloadKind::COUNT];
         self.obj_counter = 0;
         self.size_32 = 0;
         self.size_64 = 0;
@@ -950,6 +959,25 @@ impl MarshalWriter {
                 self.option_i32_table.insert(*opt, obj_idx);
             }
         }
+    }
+
+    /// Write a shared `PStr []` payload for a specific sharing group.
+    ///
+    /// `PStr []` may be shared in OCaml depending on its origin. We mirror that by
+    /// sharing empty payloads within a group:
+    /// - PStr [] → Block(tag=0, [int 0]) with sharing
+    pub fn write_pstr_empty_shared(&mut self, kind: EmptyPayloadKind) {
+        let idx = kind.as_index();
+        if let Some(obj_idx) = self.pstr_empty_table[idx] {
+            let d = self.obj_counter - obj_idx;
+            self.write_shared_ref(d);
+            return;
+        }
+
+        let obj_idx = self.obj_counter;
+        self.write_block_header(0, 1);
+        self.write_int(0); // empty list
+        self.pstr_empty_table[idx] = Some(obj_idx);
     }
 
     /// Write an ArityIdx with index-based sharing.

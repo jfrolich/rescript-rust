@@ -18,7 +18,7 @@ use crate::parser::ast::{
     SignatureItemDesc, StructureItem, StructureItemDesc, TypeDeclaration,
     TypeExtension, TypeKind, ValueBinding, ValueDescription, WithConstraint,
 };
-use crate::parser::ast::Payload::{PPat, PSig, PStr, PTyp};
+use crate::parser::ast::Payload::{PPat, PSig, PStr, PTyp, PStrEmptyShared};
 use crate::parser::comment::Comment;
 use crate::parser::longident::Longident;
 use crate::parser::parsetree_viewer;
@@ -2938,6 +2938,7 @@ fn walk_attribute(attr: &Attribute, t: &mut CommentTable, comments: Vec<Comment>
 
     // Walk the payload
     match payload {
+        PStrEmptyShared(_) => {}
         PStr(items) => {
             walk_structure(items, t, rest, arena);
         }
@@ -2962,6 +2963,9 @@ fn walk_extension(ext: &Extension, t: &mut CommentTable, comments: Vec<Comment>,
     t.attach_leading(name.loc, leading, arena);
 
     match payload {
+        PStrEmptyShared(_) => {
+            t.attach_trailing(name.loc, trailing, arena);
+        }
         PStr(items) => {
             if !items.is_empty() {
                 let (after_name, rest) = partition_adjacent_trailing(name.loc, trailing, arena);

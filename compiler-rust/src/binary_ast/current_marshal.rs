@@ -44,6 +44,11 @@ use crate::parser::ast::{
 fn marshal_attributes(attrs: &Attributes, w: &mut MarshalWriter, share_singleton: bool) {
     let attrs_slice = attrs.as_slice();
 
+    let payload_is_empty_str = |payload: &Payload| {
+        matches!(payload, Payload::PStr(items) if items.is_empty())
+            || matches!(payload, Payload::PStrEmptyShared(_))
+    };
+
     // Share singleton attribute TUPLES: [(name, PStr [])] with Location.none
     //
     // In OCaml, module-level constants like `template_literal_attr`, `ternary_attr` etc.
@@ -56,7 +61,7 @@ fn marshal_attributes(attrs: &Attributes, w: &mut MarshalWriter, share_singleton
     // - The tuple inside is shared when share_singleton=true and a matching entry exists
     if share_singleton {
         if let [(name, payload)] = attrs_slice {
-            if matches!(payload, Payload::PStr(items) if items.is_empty())
+            if payload_is_empty_str(payload)
                 && name.loc == LocIdx::default()
             {
                 let key = (name.txt, name.loc);
@@ -76,9 +81,7 @@ fn marshal_attributes(attrs: &Attributes, w: &mut MarshalWriter, share_singleton
                     // Write the attribute tuple: Block(tag=0, size=2) [name, payload]
                     w.write_block_header(0, 2);
                     name.marshal(w);
-                    // PStr([]) is Block(tag=0, size=1) [INT(0)]
-                    w.write_block_header(0, 1);
-                    w.write_int(0); // empty list
+                    payload.marshal(w);
 
                     w.singleton_attr_list_table_insert(key, obj_idx);
                 }
@@ -803,6 +806,9 @@ impl Marshal for Payload {
             Payload::PStr(structure) => {
                 w.write_block_header(0, 1);
                 structure.marshal(w);
+            }
+            Payload::PStrEmptyShared(kind) => {
+                w.write_pstr_empty_shared(*kind);
             }
             Payload::PSig(signature) => {
                 w.write_block_header(1, 1);

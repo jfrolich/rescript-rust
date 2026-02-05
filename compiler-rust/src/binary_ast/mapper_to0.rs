@@ -395,8 +395,13 @@ impl<'a> Mapper<'a> {
 
     fn map_payload(&mut self, payload: &current::Payload) -> pt0::Payload {
         match payload {
-            current::Payload::PStr(items) => pt0::Payload::PStr(items.iter().map(|i| self.map_structure_item(i)).collect()),
-            current::Payload::PSig(items) => pt0::Payload::PSig(items.iter().map(|i| self.map_signature_item(i)).collect()),
+            current::Payload::PStr(items) => {
+                pt0::Payload::PStr(items.iter().map(|i| self.map_structure_item(i)).collect())
+            }
+            current::Payload::PStrEmptyShared(_) => pt0::Payload::PStr(vec![]),
+            current::Payload::PSig(items) => {
+                pt0::Payload::PSig(items.iter().map(|i| self.map_signature_item(i)).collect())
+            }
             current::Payload::PTyp(ty) => pt0::Payload::PTyp(Box::new(self.map_core_type(ty))),
             current::Payload::PPat(pat, guard) => {
                 pt0::Payload::PPat(

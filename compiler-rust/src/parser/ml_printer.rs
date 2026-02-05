@@ -133,7 +133,7 @@ fn pattern_is_simple(pat: &Pattern, arena: &ParseArena) -> bool {
 
 /// Check if a payload is empty (empty PStr)
 fn payload_is_empty(payload: &Payload) -> bool {
-    matches!(payload, Payload::PStr(items) if items.is_empty())
+    payload.is_empty_str()
 }
 
 /// Check if a constant is negative (starts with -)
@@ -3376,6 +3376,7 @@ fn print_longident_idx<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, lid_i
 
 fn print_payload<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, payload: &Payload) {
     match payload {
+        Payload::PStrEmptyShared(_) => {}
         Payload::PStr(items) => {
             // Special case: single Pstr_eval prints just the expression
             // OCaml: pp f "@[<2>%a@]%a" (expression ctxt) e (item_attributes ctxt) attrs

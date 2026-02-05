@@ -2191,7 +2191,7 @@ fn try_print_obj_extension(
     }
 
     // Match the pattern: %obj with PStr containing a single Pstr_eval of a Pexp_record
-    if let Payload::PStr(items) = payload {
+    if let Some(items) = payload.str_items() {
         if let [single] = &items[..] {
             if let StructureItemDesc::Pstr_eval(expr, attrs) = &single.pstr_desc {
                 if attrs.is_empty() {
@@ -2266,7 +2266,7 @@ fn try_print_re_extension(ext: &Extension, arena: &ParseArena) -> Option<Doc> {
     }
 
     // Match the pattern: %re with PStr containing a single Pstr_eval of a Pexp_constant string
-    if let Payload::PStr(items) = payload {
+    if let Some(items) = payload.str_items() {
         if let [single] = &items[..] {
             if let StructureItemDesc::Pstr_eval(expr, attrs) = &single.pstr_desc {
                 if attrs.is_empty() {
@@ -5977,7 +5977,7 @@ fn print_doc_comments_with_sep(
         .filter_map(|attr| {
             // Doc comments are stored as Payload::PStr containing a Pstr_eval
             // with a Pexp_constant(Constant::String(...))
-            if let Payload::PStr(items) = &attr.1 {
+            if let Some(items) = attr.1.str_items() {
                 if let Some(item) = items.first() {
                     if let StructureItemDesc::Pstr_eval(expr, _) = &item.pstr_desc {
                         if let ExpressionDesc::Pexp_constant(Constant::String(content, _)) =
@@ -7318,7 +7318,7 @@ fn print_attribute(
 
     // Handle doc comments specially
     if arena.get_string(name.txt) == "res.doc" {
-        if let Payload::PStr(items) = payload {
+        if let Some(items) = payload.str_items() {
             if let [single] = &items[..] {
                 if let StructureItemDesc::Pstr_eval(expr, _) = &single.pstr_desc {
                     if let ExpressionDesc::Pexp_constant(Constant::String(txt, _)) = &expr.pexp_desc {
@@ -7374,6 +7374,7 @@ fn print_extension(
 /// Print a payload of an attribute or extension.
 fn print_payload(state: &PrinterState, payload: &Payload, cmt_tbl: &mut CommentTable, arena: &ParseArena) -> Doc {
     match payload {
+        Payload::PStrEmptyShared(_) => Doc::nil(),
         Payload::PStr(items) if items.is_empty() => Doc::nil(),
         Payload::PStr(items) => {
             if let [single] = &items[..] {

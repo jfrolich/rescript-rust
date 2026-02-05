@@ -39,7 +39,7 @@ use super::ppx;
 use super::serialize::Marshal;
 use crate::parse_arena::ParseArena;
 use crate::parser::ast::{
-    IncludeDeclaration, ModuleExpr, ModuleExprDesc, ModuleType, ModuleTypeDesc, Payload, Signature,
+    IncludeDeclaration, ModuleExpr, ModuleExprDesc, ModuleType, ModuleTypeDesc, Signature,
     Structure, StructureItem, StructureItemDesc,
 };
 
@@ -261,7 +261,7 @@ fn has_no_export_config(structure: &[StructureItem], arena: &ParseArena) -> bool
                 let attr_name = arena.get_string(attr.0.txt);
                 if attr_name == "config" {
                     // Found @@config(...) - check if payload contains no_export
-                    if let Payload::PStr(items) = &attr.1 {
+                    if let Some(items) = attr.1.str_items() {
                         if let Some(eval_item) = items.first() {
                             if let StructureItemDesc::Pstr_eval(expr, _) = &eval_item.pstr_desc {
                                 match &expr.pexp_desc {
