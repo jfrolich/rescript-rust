@@ -287,14 +287,19 @@ impl<'a> DependencyCollector<'a> {
                     unpack_names.extend(names);
                 }
                 // Add collected unpack names to bound_modules for the body expression,
-                // then remove them after processing (OCaml scopes bv functionally)
-                self.bound_modules.extend(unpack_names.iter().cloned());
+                // then remove them after processing (OCaml scopes bv functionally).
+                // Only track names that are NEWLY added (not already bound) to avoid
+                // removing outer bindings when the scope exits.
+                let newly_added: HashSet<String> = unpack_names
+                    .into_iter()
+                    .filter(|name| self.bound_modules.insert(name.clone()))
+                    .collect();
                 // Process expressions
                 for binding in bindings {
                     self.add_expression(&binding.pvb_expr);
                 }
                 self.add_expression(body);
-                for name in &unpack_names {
+                for name in &newly_added {
                     self.bound_modules.remove(name);
                 }
             }
@@ -311,9 +316,14 @@ impl<'a> DependencyCollector<'a> {
                 // Collect unpack names from pattern and add to bound_modules for rhs,
                 // then remove them after processing (OCaml scopes bv functionally)
                 let unpack_names = self.add_pattern_collecting_unpack(lhs);
-                self.bound_modules.extend(unpack_names.iter().cloned());
+                // Only track names that are NEWLY added (not already bound) to avoid
+                // removing outer bindings when the scope exits.
+                let newly_added: Vec<String> = unpack_names
+                    .into_iter()
+                    .filter(|name| self.bound_modules.insert(name.clone()))
+                    .collect();
                 self.add_expression(rhs);
-                for name in &unpack_names {
+                for name in &newly_added {
                     self.bound_modules.remove(name);
                 }
             }
@@ -402,14 +412,14 @@ impl<'a> DependencyCollector<'a> {
             ExpressionDesc::Pexp_letmodule(name, me, body) => {
                 // Bind the module name so it's not added as a dependency
                 let module_name = self.arena.get_string(name.txt).to_string();
-                self.bound_modules.insert(module_name.clone());
+                // Only track as newly added if not already bound, to avoid
+                // removing outer bindings when the scope exits.
+                let newly_added = self.bound_modules.insert(module_name.clone());
                 self.add_module_expr(me);
                 self.add_expression(body);
-                // Note: We don't remove from bound_modules because the scope
-                // only extends to body, and we process sequentially.
-                // In OCaml this is handled by passing bv through the recursion.
-                // Our approach is slightly less precise but should work for typical cases.
-                self.bound_modules.remove(&module_name);
+                if newly_added {
+                    self.bound_modules.remove(&module_name);
+                }
             }
             ExpressionDesc::Pexp_letexception(ext_ctor, body) => {
                 self.add_extension_constructor(ext_ctor);
@@ -851,12 +861,17 @@ impl<'a> DependencyCollector<'a> {
         // Collect unpack names from pattern for guard and rhs,
         // then remove them after processing (OCaml scopes bv functionally)
         let unpack_names = self.add_pattern_collecting_unpack(&case.pc_lhs);
-        self.bound_modules.extend(unpack_names.iter().cloned());
+        // Only track names that are NEWLY added (not already bound) to avoid
+        // removing outer bindings when the scope exits.
+        let newly_added: Vec<String> = unpack_names
+            .into_iter()
+            .filter(|name| self.bound_modules.insert(name.clone()))
+            .collect();
         if let Some(guard) = &case.pc_guard {
             self.add_expression(guard);
         }
         self.add_expression(&case.pc_rhs);
-        for name in &unpack_names {
+        for name in &newly_added {
             self.bound_modules.remove(name);
         }
     }

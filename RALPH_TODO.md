@@ -25,11 +25,26 @@
 | Syntax tests | 506/506 (100%) ✅ |
 | sexp-locs | 1196/1196 (100%) ✅ |
 | sexp-locs-ppx | 1196/1196 (100%) ✅ |
-| bsc-ast | 812/1196 (67.9%) |
+| bsc-ast | 837/1196 (69.9%) |
 
 **Session progress (2026-02-05) - newest:**
+- Fixed dependency scoping bug in `deps.rs` (bound_modules): 836→837
+  - Bug: Rust uses mutable `HashSet<String>` for bound_modules, but removes names
+    on scope exit even when they were already present from outer scopes
+  - OCaml uses functional (immutable) scoping — inner scopes can't remove outer bindings
+  - Example: `module Set = { ... }` adds "Set" to bound, then
+    `let sort = (..., module(Set: Set.S ...), ...) => ...` temporarily re-adds "Set",
+    and on scope exit REMOVES it — making later `Set.Make(...)` incorrectly add "Set" as dep
+  - Fix: Track which names are NEWLY added (not already bound) via `HashSet::insert()`
+    return value, and only remove those on scope exit
+  - Applied to: Pexp_let, Pexp_fun, Pexp_letmodule, add_case
+  - Result: oprint.res now passes (was header-only diff due to spurious "Set" dependency)
+
+**Session progress (2026-02-05) - previous:**
 - Investigated bsc-ast marshal sharing differences (385 files failing)
 - Attempted fixes for pval_prim list sharing and arity sharing, both caused regressions
+- Attempted empty string `""` sharing — caused 91 regressions (OCaml doesn't always share empty strings)
+- Investigated zero-arg block sharing — NOT viable (OCaml shares 1 of 39 identical blocks)
 - Root cause analysis:
   - OCaml's Marshal shares objects by POINTER IDENTITY, not content
   - For `%%raw` expressions: OCaml shares pval_prim lists like `["#raw_stmt"]` because they're

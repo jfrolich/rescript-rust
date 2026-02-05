@@ -543,6 +543,7 @@ syntax_tests/data/idempotency/wildcards-world-ui/Validate.res
 syntax_tests/data/idempotency/wildcards-world-ui/Web3Utils.res
 syntax_tests/data/idempotency/wildcards-world-ui/WildcardsLogo.res
 syntax_tests/data/idempotency/wildcards-world-ui/WildcardsProvider.res
+syntax_tests/data/oprint/oprint.res
 syntax_tests/data/parsing/errors/expressions/emptyBlock.res
 syntax_tests/data/parsing/errors/expressions/object.res
 syntax_tests/data/parsing/errors/expressions/stringLiteral.res
