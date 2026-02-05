@@ -28,6 +28,21 @@
 | bsc-ast | 812/1196 (67.9%) |
 
 **Session progress (2026-02-05) - newest:**
+- Investigated bsc-ast marshal sharing differences (385 files failing)
+- Attempted fixes for pval_prim list sharing and arity sharing, both caused regressions
+- Root cause analysis:
+  - OCaml's Marshal shares objects by POINTER IDENTITY, not content
+  - For `%%raw` expressions: OCaml shares pval_prim lists like `["#raw_stmt"]` because they're
+    the same string literal in the PPX code (OCaml interns string literals)
+  - For arity: OCaml shares `Some(1)` via CSE in the parser, but NOT in PPX-generated code
+  - Content-based sharing (HashMap<String, u32>) causes bidirectional errors:
+    - Shares things OCaml doesn't share (different allocations with same content)
+    - May miss things OCaml shares (same pointer in OCaml, different in Rust)
+- **Conclusion:** The bsc-ast differences are difficult to fix without tracking pointer identity,
+  which requires architectural changes to the parser. sexp-locs-ppx parity proves the AST
+  structure is correct; the remaining differences are marshal serialization artifacts.
+
+**Session progress (2026-02-05) - previous:**
 - Fixed @obj external unit arg FFI encoding - ReactDOMRe.res Style.make now passes
   - When an @obj external has a unit argument (Nolabel), the FFI encoding must
     include `empty_kind Extern_unit` (ObjEmpty + ExternUnit) in the Ffi_obj_create list
