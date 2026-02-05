@@ -734,13 +734,10 @@ fn sexp_exp_extra(
             items.push(attrs_sexp);
             Sexp::list(items)
         }
-        ExpExtra::Texp_coerce(ct1, ct2) => {
+        ExpExtra::Texp_coerce(_ct1, ct2) => {
+            // OCaml's Texp_coerce only takes the target core type
             let mut items = vec![
                 Sexp::atom("Texp_coerce"),
-                opt(
-                    |c: &TypedCoreType| sexp_core_type(arena, ctx, with_locs, c),
-                    ct1,
-                ),
                 sexp_core_type(arena, ctx, with_locs, ct2),
             ];
             items.extend(loc_sexp);
