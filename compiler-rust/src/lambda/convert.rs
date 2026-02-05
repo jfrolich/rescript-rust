@@ -193,7 +193,7 @@ impl<'a> LambdaConverter<'a> {
                 };
                 Lambda::for_(var.clone(), start_lam, end_lam, dir, body_lam)
             }
-            ExpressionDesc::Texp_send(_, _) => Lambda::unit(),
+            ExpressionDesc::Texp_send(_, _, _) => Lambda::unit(),
             ExpressionDesc::Texp_letmodule(_, _, _, body) => self.convert_expr(body),
             ExpressionDesc::Texp_letexception(_, body) => self.convert_expr(body),
             ExpressionDesc::Texp_assert(inner_expr) => {

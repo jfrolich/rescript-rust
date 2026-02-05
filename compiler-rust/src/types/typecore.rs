@@ -2936,6 +2936,7 @@ fn type_send(
         ExpressionDesc::Texp_send(
             Box::new(typed_obj),
             crate::types::typedtree::MethKind::Tmeth_name(method.txt.clone()),
+            None,
         ),
         loc.clone(),
         expected_ty,

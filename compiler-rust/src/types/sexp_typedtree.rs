@@ -842,13 +842,18 @@ fn sexp_expression_desc(arena: &ParseArena, ctx: &TypeContext<'_>, with_locs: bo
                 sexp_expression(arena, ctx, with_locs, e3),
             ])
         }
-        ExpressionDesc::Texp_send(e, meth) => {
+        ExpressionDesc::Texp_send(e, meth, opt_arg) => {
             use crate::types::typedtree::MethKind;
             let meth_sexp = match meth {
                 MethKind::Tmeth_name(name) => string(name),
                 MethKind::Tmeth_val(id) => sexp_ident(id),
             };
-            Sexp::list(vec![Sexp::atom("Texp_send"), sexp_expression(arena, ctx, with_locs, e), meth_sexp])
+            Sexp::list(vec![
+                Sexp::atom("Texp_send"),
+                sexp_expression(arena, ctx, with_locs, e),
+                meth_sexp,
+                opt(|e: &Box<Expression>| sexp_expression(arena, ctx, with_locs, e), opt_arg),
+            ])
         }
         ExpressionDesc::Texp_letmodule(id, _, me, e) => {
             Sexp::list(vec![
