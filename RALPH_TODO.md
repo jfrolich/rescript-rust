@@ -24,23 +24,27 @@
 |------------|--------|
 | Syntax tests | 506/506 (100%) ✅ |
 | sexp-locs | 1196/1196 (100%) ✅ |
-| sexp-locs-ppx | 1182/1196 (98.8%) |
+| sexp-locs-ppx | 1183/1196 (98.9%) |
 | bsc-ast | 808/1196 (67.6%) |
 
-**Note:** The remaining 14 sexp-locs-ppx failures are structural differences in PPX transformations. Key issues:
+**Note:** The remaining 13 sexp-locs-ppx failures are structural differences in PPX transformations. Key issues:
 - `@deriving(jsConverter)` - 6 files (generates include with helpers) - NOT IMPLEMENTED
 - `@deriving(abstract)` - 3 files (generates include with module constraint) - NOT IMPLEMENTED
 - FFI encoding differences - ~4 files (ReactEventRe.resi, ReactDOMRe.res, etc.)
 - Test script quirk: Some files (e.g., arrow.res) show sexp-locs-ppx diff but OCaml bsc fails
 
 **Session progress (2026-02-05) - newest:**
+- Fixed result_is_unit calculation for nested arrow types:
+  - Use result from list_of_arrow() instead of get_final_result_type()
+  - For `int => (unit => unit)`, result should be `(unit => unit)`, not `unit`
+  - Fixed: arrow.res now passes
 - Fixed @obj external type reconstruction (Ptyp_any -> Ptyp_object):
   - Added `has_obj_attr()` to detect @obj attribute
   - Added `process_obj_type()` to transform type for @obj externals
   - Added `build_obj_ffi_type()` to generate FfiObjCreate with field names
   - Added `get_opt_arg_type()` and `to_undefined_type()` for optional handling
   - Fixed: attributes.res now passes
-- Result: sexp-locs-ppx improved from 1181/1196 (98.7%) to 1182/1196 (98.8%)
+- Result: sexp-locs-ppx improved from 1181/1196 (98.7%) to 1183/1196 (98.9%)
 
 **Session progress (2026-02-05) - previous:**
 - Fixed @string/@int/@unwrap/@ignore polyvariant FFI encoding in `spec_of_ptyp`:
@@ -273,10 +277,10 @@ Categorized by root cause:
    - Implemented `process_obj_type()` for type transformation
    - Implemented `build_obj_ffi_type()` for FfiObjCreate with field names
 
-6. **FFI encoding differences** - ~4 remaining files with externals
-   - arrow.res - OCaml bsc fails to parse this file (not a real failure)
-   - ReactEventRe.resi, ReasonReactRouter.res, Warp_XHR.res, UsdPriceProvider.res
-   - Need further investigation of exact encoding differences
+6. **FFI encoding differences** - ✅ arrow.res FIXED
+   - Fixed `result_is_unit` calculation for nested arrow types
+   - Remaining FFI issues: ReactEventRe.resi, ReasonReactRouter.res, Warp_XHR.res, UsdPriceProvider.res
+   - These need further investigation of exact encoding differences
 
 **Note:** Some files appear in multiple categories (e.g., subscription.res has jsConverter).
 
