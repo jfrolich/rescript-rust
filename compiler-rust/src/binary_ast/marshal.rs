@@ -197,6 +197,9 @@ pub struct MarshalWriter {
     /// Depth counter for JSX context while marshalling.
     jsx_depth: u32,
 
+    /// Depth counter for extension expression context while marshalling.
+    extension_depth: u32,
+
     /// Shared object indices for simple builtin core_types created via Ast_literal.No_loc.
     /// These are `Ptyp_constr` with no args, Location.none, and empty attributes.
     simple_core_type_table: HashMap<LidentIdx, u32>,
@@ -253,6 +256,7 @@ impl MarshalWriter {
             pstr_empty_table: [None; EmptyPayloadShareKind::COUNT],
             prim_list_table: [None; PrimListShareKind::COUNT],
             jsx_depth: 0,
+            extension_depth: 0,
             simple_core_type_table: HashMap::new(),
             raw_template_attr_list_stack: Vec::new(),
 
@@ -286,6 +290,7 @@ impl MarshalWriter {
             pstr_empty_table: [None; EmptyPayloadShareKind::COUNT],
             prim_list_table: [None; PrimListShareKind::COUNT],
             jsx_depth: 0,
+            extension_depth: 0,
             simple_core_type_table: HashMap::new(),
             raw_template_attr_list_stack: Vec::new(),
 
@@ -330,6 +335,21 @@ impl MarshalWriter {
     #[inline]
     pub fn in_jsx(&self) -> bool {
         self.jsx_depth > 0
+    }
+
+    #[inline]
+    pub fn enter_extension(&mut self) {
+        self.extension_depth += 1;
+    }
+
+    #[inline]
+    pub fn exit_extension(&mut self) {
+        self.extension_depth = self.extension_depth.saturating_sub(1);
+    }
+
+    #[inline]
+    pub fn in_extension(&self) -> bool {
+        self.extension_depth > 0
     }
 
     #[inline]
@@ -395,6 +415,7 @@ impl MarshalWriter {
         self.pstr_empty_table = [None; EmptyPayloadShareKind::COUNT];
         self.prim_list_table = [None; PrimListShareKind::COUNT];
         self.jsx_depth = 0;
+        self.extension_depth = 0;
         self.simple_core_type_table.clear();
         self.obj_counter = 0;
         self.size_32 = 0;

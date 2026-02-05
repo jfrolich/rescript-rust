@@ -77,6 +77,13 @@ fn has_template_literal_attr(attrs: &Attributes, w: &MarshalWriter) -> bool {
         .any(|(name, _)| arena.get_string(name.txt) == "res.template")
 }
 
+fn has_braces_attr(attrs: &Attributes, w: &MarshalWriter) -> bool {
+    let arena = w.get_arena();
+    attrs
+        .iter()
+        .any(|(name, _)| arena.get_string(name.txt) == "res.braces")
+}
+
 fn is_singleton_template_attr(attrs: &Attributes, w: &MarshalWriter) -> bool {
     let arena = w.get_arena();
     match attrs.as_slice() {
@@ -155,7 +162,7 @@ fn should_share_empty_pstr(
     let arena = w.get_arena();
     let name_str = arena.get_string(name.txt);
     if name_str == "res.braces" {
-        w.in_jsx()
+        w.in_jsx() || w.in_extension()
     } else if name_str == "res.taggedTemplate" {
         false
     } else {
@@ -808,6 +815,10 @@ impl Marshal for Expression {
     fn marshal(&self, w: &mut MarshalWriter) {
         w.write_block_header(0, 3);
         let is_raw_expansion = is_raw_expansion_expr(self, w);
+        let is_extension = matches!(self.pexp_desc, ExpressionDesc::Pexp_extension(_));
+        if is_extension {
+            w.enter_extension();
+        }
         if is_raw_expansion {
             w.enter_raw_expansion();
         }
@@ -837,6 +848,7 @@ impl Marshal for Expression {
         );
         let share_empty_pstr = if is_pipe_application(self, w)
             || (share_attrs && has_template_literal_attr(&self.pexp_attributes, w))
+            || (w.in_extension() && has_braces_attr(&self.pexp_attributes, w))
         {
             Some(EmptyPayloadShareKind::ParserAttr)
         } else {
@@ -850,6 +862,9 @@ impl Marshal for Expression {
         );
         if is_raw_expansion {
             w.exit_raw_expansion();
+        }
+        if is_extension {
+            w.exit_extension();
         }
     }
 }

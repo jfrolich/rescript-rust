@@ -25,12 +25,28 @@
 | Syntax tests | 506/506 (100%) ✅ |
 | sexp-locs | 1196/1196 (100%) ✅ |
 | sexp-locs-ppx | 1196/1196 (100%) ✅ |
-| bsc-ast | 901/1179 (76.4%) |
+| bsc-ast | 907/1179 (76.9%) |
 
 **Note:** 1179 = files where OCaml bsc can produce output. 134 files use newer syntax
 that OCaml can't parse; these are excluded from parity testing. Total test files: 1313.
 
 **Session progress (2026-02-05) - newest:**
+- Fixed `res.braces` empty-payload sharing in extension-preserving contexts:
+  - `inspect_binary_ast.py` on `nook-exchange/API.res` showed OCaml reusing one
+    shared `Some(0)` payload object for `res.braces` attrs, while Rust emitted fresh payload blocks.
+  - Naive/global `res.braces` sharing regressed `firstClassModule.res` (over-sharing),
+    so the fix is scoped to extension context only.
+  - Added extension-depth context in `MarshalWriter` (`enter_extension` / `exit_extension` / `in_extension`).
+  - In `Expression::marshal`, enter extension context for `Pexp_extension` and
+    allow parser-attr empty-payload sharing for `res.braces` only when in extension/JSX context.
+  - Result: `inspect_binary_ast.py test` is byte-identical for:
+    `idempotency/nook-exchange/API.res`,
+    `parsing/grammar/expressions/firstClassModule.res`,
+    `printer/expr/firstClassModule.res`.
+  - Full parity run: bsc-ast differences `135 -> 129` (1067/1196), 0 regressions.
+  - New passes: `nook-exchange/API.res`, `nook-exchange/DiscordOauth.res`,
+    `nook-exchange/FriendsPage.res`, `nook-exchange/PasswordResetPage.res`,
+    `nook-exchange/QuicklistStore.res`, `nook-exchange/UserViewingPage.res`.
 - Fixed raw-template attribute tail sharing in marshal recursion:
   - OCaml shares the tail list `[res.template]` when marshalling
     `[internal.expansive; res.template]` during `%raw` expansion.

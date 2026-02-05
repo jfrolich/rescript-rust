@@ -280,6 +280,7 @@ syntax_tests/data/idempotency/mareo/Sprite.resi
 syntax_tests/data/idempotency/mareo/Viewport.res
 syntax_tests/data/idempotency/mareo/Viewport.resi
 syntax_tests/data/idempotency/napkinscript/docComments.res
+syntax_tests/data/idempotency/nook-exchange/API.res
 syntax_tests/data/idempotency/nook-exchange/Analytics.res
 syntax_tests/data/idempotency/nook-exchange/App.res
 syntax_tests/data/idempotency/nook-exchange/BodyCard.res
@@ -289,9 +290,11 @@ syntax_tests/data/idempotency/nook-exchange/ConfirmDialog.res
 syntax_tests/data/idempotency/nook-exchange/Constants.res
 syntax_tests/data/idempotency/nook-exchange/DeleteFromCatalog.res
 syntax_tests/data/idempotency/nook-exchange/DiscordBotUpsell.res
+syntax_tests/data/idempotency/nook-exchange/DiscordOauth.res
 syntax_tests/data/idempotency/nook-exchange/Error.res
 syntax_tests/data/idempotency/nook-exchange/Experiment.res
 syntax_tests/data/idempotency/nook-exchange/Footer.res
+syntax_tests/data/idempotency/nook-exchange/FriendsPage.res
 syntax_tests/data/idempotency/nook-exchange/Index.res
 syntax_tests/data/idempotency/nook-exchange/ItemBrowser.res
 syntax_tests/data/idempotency/nook-exchange/LanguageSelector.res
@@ -299,6 +302,8 @@ syntax_tests/data/idempotency/nook-exchange/Link.res
 syntax_tests/data/idempotency/nook-exchange/MatchFeatureUpsell.res
 syntax_tests/data/idempotency/nook-exchange/MyPage.res
 syntax_tests/data/idempotency/nook-exchange/PageTitle.res
+syntax_tests/data/idempotency/nook-exchange/PasswordResetPage.res
+syntax_tests/data/idempotency/nook-exchange/QuicklistStore.res
 syntax_tests/data/idempotency/nook-exchange/Repromise.res
 syntax_tests/data/idempotency/nook-exchange/TemporaryState.res
 syntax_tests/data/idempotency/nook-exchange/TextPages.res
@@ -307,6 +312,7 @@ syntax_tests/data/idempotency/nook-exchange/UserItemCard.res
 syntax_tests/data/idempotency/nook-exchange/UserItemNote.res
 syntax_tests/data/idempotency/nook-exchange/UserListBrowser.res
 syntax_tests/data/idempotency/nook-exchange/UserPage.res
+syntax_tests/data/idempotency/nook-exchange/UserViewingPage.res
 syntax_tests/data/idempotency/nook-exchange/Utils.res
 syntax_tests/data/idempotency/nook-exchange/ViewingList.res
 syntax_tests/data/idempotency/nook-exchange/WishlistToCatalog.res
