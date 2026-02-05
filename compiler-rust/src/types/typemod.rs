@@ -32,6 +32,7 @@ use crate::types::typedtree::{
 };
 use crate::types::Variance as TypesVariance;
 use crate::parser::ast::Variance as ParserVariance;
+use std::collections::HashSet;
 
 // ============================================================================
 // Helper Functions for Path Conversion
@@ -82,6 +83,37 @@ impl From<TypeCoreError> for TypeModError {
 }
 
 // ============================================================================
+// Signature Simplification
+// ============================================================================
+
+/// Check if a structure has duplicate value names (like OCaml's simplify_signature).
+/// Returns true if there are duplicates, meaning the structure should be wrapped
+/// in Tmod_constraint with Tmodtype_implicit.
+fn structure_has_duplicate_value_names(structure: &Structure) -> bool {
+    let mut seen = HashSet::new();
+    for item in structure.str_items.iter().rev() {
+        match &item.str_desc {
+            StructureItemDesc::Tstr_value(_, bindings) => {
+                for vb in bindings {
+                    if let crate::types::typedtree::PatternDesc::Tpat_var(id, _) = &vb.vb_pat.pat_desc {
+                        if !seen.insert(id.name().to_string()) {
+                            return true;
+                        }
+                    }
+                }
+            }
+            StructureItemDesc::Tstr_primitive(vd) => {
+                if !seen.insert(vd.val_name.txt.clone()) {
+                    return true;
+                }
+            }
+            _ => {}
+        }
+    }
+    false
+}
+
+// ============================================================================
 // Module Expression Type Checking
 // ============================================================================
 
@@ -113,13 +145,40 @@ pub fn type_module_expr<'a>(
             // Module structure: { ... }
             let (structure, new_env) = type_structure(tctx, env, arena, items)?;
 
-            Ok(ModuleExpr {
+            // Like OCaml: if simplify_signature would shrink the signature
+            // (duplicate value names), wrap in Tmod_constraint implicit
+            let needs_constraint = structure_has_duplicate_value_names(&structure);
+
+            let md = ModuleExpr {
                 mod_desc: ModuleExprDesc::Tmod_structure(structure),
                 mod_loc: loc,
                 mod_type: ModuleType::placeholder(),
                 mod_env: EnvRef(0),
-                mod_attributes: mod_expr.pmod_attributes.clone(),
-            })
+                mod_attributes: vec![],
+            };
+
+            if needs_constraint {
+                Ok(ModuleExpr {
+                    mod_desc: ModuleExprDesc::Tmod_constraint(
+                        Box::new(md),
+                        ModuleType::placeholder(),
+                        crate::types::typedtree::ModuleTypeConstraint::Tmodtype_implicit,
+                        ModuleCoercion::Tcoerce_none,
+                    ),
+                    mod_loc: loc,
+                    mod_type: ModuleType::placeholder(),
+                    mod_env: EnvRef(0),
+                    mod_attributes: mod_expr.pmod_attributes.clone(),
+                })
+            } else {
+                Ok(ModuleExpr {
+                    mod_desc: md.mod_desc,
+                    mod_loc: loc,
+                    mod_type: ModuleType::placeholder(),
+                    mod_env: EnvRef(0),
+                    mod_attributes: mod_expr.pmod_attributes.clone(),
+                })
+            }
         }
 
         ParsedModuleExprDesc::Pmod_functor(name, param_type, body) => {
