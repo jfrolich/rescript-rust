@@ -35,6 +35,7 @@ syntax_tests/data/idempotency/bs-css/Css.res
 syntax_tests/data/idempotency/bs-css/CssEmotion.res
 syntax_tests/data/idempotency/bs-css/CssEmotionJs.res
 syntax_tests/data/idempotency/bs-css/CssJs.res
+syntax_tests/data/idempotency/bs-fetch/reason_examples.res
 syntax_tests/data/idempotency/bs-webapi/src/Webapi.res
 syntax_tests/data/idempotency/bs-webapi/src/Webapi/Webapi__Base64.res
 syntax_tests/data/idempotency/bs-webapi/src/Webapi/Webapi__Canvas.res
@@ -160,9 +161,11 @@ syntax_tests/data/idempotency/bs-webapi/tests/Webapi/Webapi__Dom/Webapi__Dom__Tr
 syntax_tests/data/idempotency/bs-webapi/tests/Webapi/Webapi__Dom/Webapi__Dom__UiEvent__test.res
 syntax_tests/data/idempotency/bs-webapi/tests/Webapi/Webapi__Dom/Webapi__Dom__WebGlContextEvent__test.res
 syntax_tests/data/idempotency/bs-webapi/tests/Webapi/Webapi__Dom/Webapi__Dom__WheelEvent__test.res
+syntax_tests/data/idempotency/bs-webapi/tests/Webapi/Webapi__Dom/Webapi__Dom__Window__test.res
 syntax_tests/data/idempotency/bs-webapi/tests/Webapi/Webapi__Performace__test.res
 syntax_tests/data/idempotency/bs-webapi/tests/Webapi/Webapi__ResizeObserver__test.res
 syntax_tests/data/idempotency/bs-webapi/tests/Webapi/Webapi__Url__test.res
+syntax_tests/data/idempotency/covid-19charts.com/src/Colors.res
 syntax_tests/data/idempotency/covid-19charts.com/src/ColorStack.res
 syntax_tests/data/idempotency/covid-19charts.com/src/ColorStack.resi
 syntax_tests/data/idempotency/covid-19charts.com/src/CopyToClipboard.res
@@ -229,7 +232,9 @@ syntax_tests/data/idempotency/nook-exchange/Colors.res
 syntax_tests/data/idempotency/nook-exchange/ConfirmDialog.res
 syntax_tests/data/idempotency/nook-exchange/Constants.res
 syntax_tests/data/idempotency/nook-exchange/Error.res
+syntax_tests/data/idempotency/nook-exchange/Experiment.res
 syntax_tests/data/idempotency/nook-exchange/Footer.res
+syntax_tests/data/idempotency/nook-exchange/ItemBrowser.res
 syntax_tests/data/idempotency/nook-exchange/LanguageSelector.res
 syntax_tests/data/idempotency/nook-exchange/Link.res
 syntax_tests/data/idempotency/nook-exchange/PageTitle.res
@@ -261,6 +266,7 @@ syntax_tests/data/idempotency/pupilfirst/courses/CoursesCurriculum__Team.res
 syntax_tests/data/idempotency/pupilfirst/courses/CoursesCurriculum__Types.res
 syntax_tests/data/idempotency/pupilfirst/courses/CoursesCurriculum__User.res
 syntax_tests/data/idempotency/pupilfirst/courses/CoursesReview__Feedback.res
+syntax_tests/data/idempotency/pupilfirst/courses/CoursesReview__Grade.res
 syntax_tests/data/idempotency/pupilfirst/courses/CoursesReview__IndexSubmission.res
 syntax_tests/data/idempotency/pupilfirst/courses/CoursesReview__Level.res
 syntax_tests/data/idempotency/pupilfirst/courses/CoursesReview__OverlaySubmission.res
@@ -337,11 +343,13 @@ syntax_tests/data/idempotency/pupilfirst/schools/CourseExports__Course.res
 syntax_tests/data/idempotency/pupilfirst/schools/CourseExports__CourseExport.res
 syntax_tests/data/idempotency/pupilfirst/schools/CourseExports__Tag.res
 syntax_tests/data/idempotency/pupilfirst/schools/CourseExports__Types.res
+syntax_tests/data/idempotency/pupilfirst/schools/CurriculumEditor__AnswerOption.res
 syntax_tests/data/idempotency/pupilfirst/schools/CurriculumEditor__ContentBlockEditor.res
 syntax_tests/data/idempotency/pupilfirst/schools/CurriculumEditor__Course.res
 syntax_tests/data/idempotency/pupilfirst/schools/CurriculumEditor__EvaluationCriteria.res
 syntax_tests/data/idempotency/pupilfirst/schools/CurriculumEditor__Level.res
 syntax_tests/data/idempotency/pupilfirst/schools/CurriculumEditor__MarkdownBlockEditor.res
+syntax_tests/data/idempotency/pupilfirst/schools/CurriculumEditor__QuizQuestion.res
 syntax_tests/data/idempotency/pupilfirst/schools/CurriculumEditor__SortResourcesMutation.res
 syntax_tests/data/idempotency/pupilfirst/schools/CurriculumEditor__Target.res
 syntax_tests/data/idempotency/pupilfirst/schools/CurriculumEditor__TargetChecklistItemEditor.res
@@ -376,6 +384,7 @@ syntax_tests/data/idempotency/pupilfirst/schools/StudentsEditor__StudentInfo.res
 syntax_tests/data/idempotency/pupilfirst/schools/StudentsEditor__Team.res
 syntax_tests/data/idempotency/pupilfirst/schools/StudentsEditor__Types.res
 syntax_tests/data/idempotency/pupilfirst/schools/TargetChecklistItem.res
+syntax_tests/data/idempotency/pupilfirst/shared/Api.res
 syntax_tests/data/idempotency/pupilfirst/shared/AuthenticityToken.res
 syntax_tests/data/idempotency/pupilfirst/shared/Avatar.res
 syntax_tests/data/idempotency/pupilfirst/shared/ContentBlock.res
@@ -387,6 +396,7 @@ syntax_tests/data/idempotency/pupilfirst/shared/Dropdown.res
 syntax_tests/data/idempotency/pupilfirst/shared/EmailUtils.res
 syntax_tests/data/idempotency/pupilfirst/shared/EvaluationCriterion.res
 syntax_tests/data/idempotency/pupilfirst/shared/FaIcon.res
+syntax_tests/data/idempotency/pupilfirst/shared/GradeLabel.res
 syntax_tests/data/idempotency/pupilfirst/shared/GraphqlErrorHandler.res
 syntax_tests/data/idempotency/pupilfirst/shared/GraphqlQuery.res
 syntax_tests/data/idempotency/pupilfirst/shared/GraphqlQuery.resi
@@ -673,6 +683,7 @@ syntax_tests/data/ppx/react/uncurriedProps.res
 syntax_tests/data/ppx/react/v4.res
 syntax_tests/data/printer/comments/binaryExpr.res
 syntax_tests/data/printer/comments/blockExpr.res
+syntax_tests/data/printer/comments/expr.res
 syntax_tests/data/printer/comments/extensionConstructor.res
 syntax_tests/data/printer/comments/fileWithOneSingleLineComment.res
 syntax_tests/data/printer/comments/fileWithOnlyComments.res
@@ -707,6 +718,7 @@ syntax_tests/data/printer/expr/DocComments.res
 syntax_tests/data/printer/expr/extension.res
 syntax_tests/data/printer/expr/field.res
 syntax_tests/data/printer/expr/for.res
+syntax_tests/data/printer/expr/fun.res
 syntax_tests/data/printer/expr/ident.res
 syntax_tests/data/printer/expr/if.res
 syntax_tests/data/printer/expr/jsObjectAccess.res

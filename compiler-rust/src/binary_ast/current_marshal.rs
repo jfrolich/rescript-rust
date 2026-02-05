@@ -257,6 +257,30 @@ impl Marshal for TypeArg {
 
 impl Marshal for CoreType {
     fn marshal(&self, w: &mut MarshalWriter) {
+        // Share Ptyp_var core_types with empty attributes and matching (name, loc).
+        // In OCaml's from_labels (handle_obj), the same tyvar CoreType is physically
+        // shared between Otag fields and Labelled args. The first write creates the
+        // object, subsequent writes with the same (name, loc) emit shared references.
+        if let CoreTypeDesc::Ptyp_var(name) = &self.ptyp_desc {
+            if self.ptyp_attributes.is_empty() {
+                let key = (name.clone(), self.ptyp_loc);
+                if let Some(&obj_idx) = w.tyvar_core_type_table_get(&key) {
+                    let d = w.obj_counter() - obj_idx;
+                    w.write_shared_ref(d);
+                    return;
+                }
+                // First occurrence: record the object index, then write normally
+                let obj_idx = w.obj_counter();
+                // core_type = { ptyp_desc; ptyp_loc; ptyp_attributes }
+                w.write_block_header(0, 3);
+                self.ptyp_desc.marshal(w);
+                self.ptyp_loc.marshal(w);
+                marshal_attributes(&self.ptyp_attributes, w, false);
+                w.tyvar_core_type_table_insert(key, obj_idx);
+                return;
+            }
+        }
+
         // core_type = { ptyp_desc; ptyp_loc; ptyp_attributes }
         w.write_block_header(0, 3);
         self.ptyp_desc.marshal(w);

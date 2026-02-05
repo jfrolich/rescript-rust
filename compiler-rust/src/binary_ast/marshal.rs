@@ -122,6 +122,12 @@ pub struct MarshalWriter {
     /// because OCaml's CSE merges identical heap allocations.
     singleton_attr_list_table: HashMap<(StrIdx, LocIdx), u32>,
 
+    /// Maps (tyvar_name, LocIdx) to object counter for sharing Ptyp_var core_types.
+    /// In OCaml's `from_labels`, the same tyvar CoreType object is physically shared
+    /// between Otag fields and Labelled args. We replicate this by sharing CoreTypes
+    /// with Ptyp_var desc, empty attributes, and matching (name, loc) pairs.
+    tyvar_core_type_table: HashMap<(String, LocIdx), u32>,
+
     /// Optional reference to ParseArena for LocIdx marshalling.
     /// Set via `set_arena()` before marshalling AST with LocIdx fields.
     /// Uses raw pointer to avoid lifetime constraints.
@@ -159,6 +165,7 @@ impl MarshalWriter {
 
             string_loc_table: HashMap::new(),
             singleton_attr_list_table: HashMap::new(),
+            tyvar_core_type_table: HashMap::new(),
 
             arena: None,
             obj_counter: 0,
@@ -182,6 +189,7 @@ impl MarshalWriter {
 
             string_loc_table: HashMap::new(),
             singleton_attr_list_table: HashMap::new(),
+            tyvar_core_type_table: HashMap::new(),
 
             arena: None,
             obj_counter: 0,
@@ -552,6 +560,17 @@ impl MarshalWriter {
     /// Insert an entry into the singleton attribute list sharing table.
     pub fn singleton_attr_list_table_insert(&mut self, key: (StrIdx, LocIdx), obj_idx: u32) {
         self.singleton_attr_list_table.insert(key, obj_idx);
+    }
+
+    /// Look up a tyvar core_type in the sharing table.
+    /// Used to share Ptyp_var core_types from from_labels (handle_obj).
+    pub fn tyvar_core_type_table_get(&self, key: &(String, LocIdx)) -> Option<&u32> {
+        self.tyvar_core_type_table.get(key)
+    }
+
+    /// Insert a tyvar core_type into the sharing table.
+    pub fn tyvar_core_type_table_insert(&mut self, key: (String, LocIdx), obj_idx: u32) {
+        self.tyvar_core_type_table.insert(key, obj_idx);
     }
 
     /// Write a Longident by arena index with sharing.
