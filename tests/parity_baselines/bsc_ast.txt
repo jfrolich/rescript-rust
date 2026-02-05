@@ -755,6 +755,7 @@ syntax_tests/data/printer/expr/if.res
 syntax_tests/data/printer/expr/jsObjectAccess.res
 syntax_tests/data/printer/expr/let.res
 syntax_tests/data/printer/expr/letexception.res
+syntax_tests/data/printer/expr/list.res
 syntax_tests/data/printer/expr/nestedCallbacks.res
 syntax_tests/data/printer/expr/open.res
 syntax_tests/data/printer/expr/record.res

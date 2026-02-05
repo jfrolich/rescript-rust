@@ -252,6 +252,8 @@ pub struct StaticArrayLidents {
     pub array_get: LidentIdx,
     /// `Ldot(Ldot(Lident "Belt", "Array"), "concatMany")` for spread array desugaring
     pub belt_array_concat_many: LidentIdx,
+    /// `Ldot(Ldot(Lident "Belt", "List"), "concatMany")` for spread list desugaring
+    pub belt_list_concat_many: LidentIdx,
 }
 
 // ============================================================================
@@ -382,12 +384,27 @@ impl Default for ParseArena {
             )),
             concat_many_str,
         ));
+        // Pre-allocate Belt.List.concatMany for list spread desugaring
+        let list_str = strings.intern("List");
+        let lident_list = longidents.push(Longident::Lident(list_str));
+        let belt_list = longidents.push(Longident::Ldot(
+            Box::new(Longident::Lident(belt_str)),
+            list_str,
+        ));
+        let belt_list_concat_many = longidents.push(Longident::Ldot(
+            Box::new(Longident::Ldot(
+                Box::new(Longident::Lident(belt_str)),
+                list_str,
+            )),
+            concat_many_str,
+        ));
         // Suppress unused variable warnings
-        let _ = (lident_array, lident_belt, belt_array);
+        let _ = (lident_array, lident_belt, belt_array, lident_list, belt_list);
         let static_array_lidents = StaticArrayLidents {
             array_set,
             array_get,
             belt_array_concat_many,
+            belt_list_concat_many,
         };
 
         Self {
@@ -847,6 +864,12 @@ impl ParseArena {
     /// Use in spread array desugaring: `[...a, ...b]` → `Belt.Array.concatMany(...)`.
     pub fn belt_array_concat_many_lid(&self) -> LidentIdx {
         self.static_array_lidents.belt_array_concat_many
+    }
+
+    /// Get the pre-allocated `Ldot(Ldot(Lident "Belt", "List"), "concatMany")`.
+    /// Use in spread list desugaring: `list{...a, ...b}` → `Belt.List.concatMany(...)`.
+    pub fn belt_list_concat_many_lid(&self) -> LidentIdx {
+        self.static_array_lidents.belt_list_concat_many
     }
 
     /// Get the string content for a StrIdx.

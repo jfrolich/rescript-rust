@@ -3125,18 +3125,8 @@ fn parse_list_expr(p: &mut Parser<'_>, start_pos_idx: PosIdx) -> Expression {
                 pexp_attributes: vec![],
             };
 
-            // Build Belt.List.concatMany
-            let belt_idx = p.arena_mut().intern_string("Belt");
-            let list_idx = p.arena_mut().intern_string("List");
-            let concat_many_idx = p.arena_mut().intern_string("concatMany");
-            let lid = Longident::Ldot(
-                Box::new(Longident::Ldot(
-                    Box::new(Longident::Lident(belt_idx)),
-                    list_idx,
-                )),
-                concat_many_idx,
-            );
-            let lid_idx = p.push_longident(lid);
+            // Use static pre-allocated Belt.List.concatMany lident for sharing parity with OCaml
+            let lid_idx = p.arena().belt_list_concat_many_lid();
             let spread_idx = p.arena_mut().intern("res.spread");
             let concat_many_ident = Expression {
                 pexp_desc: ExpressionDesc::Pexp_ident(Loc {
