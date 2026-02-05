@@ -236,6 +236,24 @@ impl Default for InternedLocation {
     }
 }
 
+/// Pre-allocated static Longident indices for array operations.
+///
+/// OCaml's `res_core.ml` creates `Ldot(Lident "Array", "set")` and
+/// `Ldot(Lident "Array", "get")` inline during parsing. OCaml's native code
+/// compiler lifts these constant expressions to static allocations, so all
+/// Array.set/get calls in a file share the same Longident pointer.
+///
+/// We replicate this by pre-allocating them in the arena.
+#[derive(Debug, Clone, Copy)]
+pub struct StaticArrayLidents {
+    /// `Ldot(Lident "Array", "set")` for array assignment desugaring
+    pub array_set: LidentIdx,
+    /// `Ldot(Lident "Array", "get")` for array access desugaring
+    pub array_get: LidentIdx,
+    /// `Ldot(Ldot(Lident "Belt", "Array"), "concatMany")` for spread array desugaring
+    pub belt_array_concat_many: LidentIdx,
+}
+
 // ============================================================================
 // ParseArena
 // ============================================================================
@@ -269,6 +287,8 @@ pub struct ParseArena {
     /// Pattern and expression contexts get separate Lidents to match OCaml's
     /// per-compilation-unit CSE behavior.
     static_list_lidents: StaticListLidents,
+    /// Pre-allocated static Longident indices for Array.set/get/Belt.Array.concatMany.
+    static_array_lidents: StaticArrayLidents,
     /// Position deduplication table - maps position content to its index.
     position_dedup: HashMap<PosKey, PosIdx>,
     /// Simple Lident deduplication table - maps StrIdx to its LidentIdx.
@@ -332,6 +352,44 @@ impl Default for ParseArena {
         lident_dedup.insert(expr_nil_str, expr_nil);
         lident_dedup.insert(expr_cons_str, expr_cons);
 
+        // Pre-allocate static array operation lidents.
+        // OCaml's native code compiler promotes these constant expressions to
+        // static allocations, sharing them across all array operations in a file.
+        let array_str = strings.intern("Array");
+        let set_str = strings.intern("set");
+        let get_str = strings.intern("get");
+        let belt_str = strings.intern("Belt");
+        let concat_many_str = strings.intern("concatMany");
+
+        let lident_array = longidents.push(Longident::Lident(array_str));
+        let array_set = longidents.push(Longident::Ldot(
+            Box::new(Longident::Lident(array_str)),
+            set_str,
+        ));
+        let array_get = longidents.push(Longident::Ldot(
+            Box::new(Longident::Lident(array_str)),
+            get_str,
+        ));
+        let lident_belt = longidents.push(Longident::Lident(belt_str));
+        let belt_array = longidents.push(Longident::Ldot(
+            Box::new(Longident::Lident(belt_str)),
+            array_str,
+        ));
+        let belt_array_concat_many = longidents.push(Longident::Ldot(
+            Box::new(Longident::Ldot(
+                Box::new(Longident::Lident(belt_str)),
+                array_str,
+            )),
+            concat_many_str,
+        ));
+        // Suppress unused variable warnings
+        let _ = (lident_array, lident_belt, belt_array);
+        let static_array_lidents = StaticArrayLidents {
+            array_set,
+            array_get,
+            belt_array_concat_many,
+        };
+
         Self {
             positions: Arena::default(),
             locations: Arena::default(),
@@ -339,6 +397,7 @@ impl Default for ParseArena {
             arities,
             static_arities,
             static_list_lidents,
+            static_array_lidents,
             position_dedup: HashMap::new(),
             lident_dedup,
             strings,
@@ -766,6 +825,28 @@ impl ParseArena {
     /// Use in `make_list_expression` variants (corresponds to OCaml's ast_helper.ml).
     pub fn expr_cons(&self) -> LidentIdx {
         self.static_list_lidents.expr_cons
+    }
+
+    // ========================================================================
+    // Static array lidents
+    // ========================================================================
+
+    /// Get the pre-allocated `Ldot(Lident "Array", "set")`.
+    /// Use in array assignment desugaring: `arr[i] = v` → `Array.set(arr, i, v)`.
+    pub fn array_set_lid(&self) -> LidentIdx {
+        self.static_array_lidents.array_set
+    }
+
+    /// Get the pre-allocated `Ldot(Lident "Array", "get")`.
+    /// Use in array access desugaring: `arr[i]` → `Array.get(arr, i)`.
+    pub fn array_get_lid(&self) -> LidentIdx {
+        self.static_array_lidents.array_get
+    }
+
+    /// Get the pre-allocated `Ldot(Ldot(Lident "Belt", "Array"), "concatMany")`.
+    /// Use in spread array desugaring: `[...a, ...b]` → `Belt.Array.concatMany(...)`.
+    pub fn belt_array_concat_many_lid(&self) -> LidentIdx {
+        self.static_array_lidents.belt_array_concat_many
     }
 
     /// Get the string content for a StrIdx.

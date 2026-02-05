@@ -2610,15 +2610,9 @@ pub fn parse_primary_expr(p: &mut Parser<'_>, operand: Expression, no_call: bool
                         // OCaml: loc = mk_loc start_pos p.prev_end_pos
                         // Uses prev_end_pos (includes braces) for Array.set
                         let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
-                        // Use the bracket location [index] for the synthesized Array.set identifier
-                        // (matching OCaml's array_loc = mk_loc lbracket rbracket)
-                        let array_idx = p.arena_mut().intern_string("Array");
-                        let set_idx = p.arena_mut().intern_string("set");
-                        let array_set_lid = Longident::Ldot(
-                            Box::new(Longident::Lident(array_idx)),
-                            set_idx,
-                        );
-                        let array_set = ast_helper::make_ident(p, array_set_lid, bracket_loc.clone());
+                        // Use static pre-allocated Array.set lident for sharing parity with OCaml
+                        let array_set_lid_idx = p.arena().array_set_lid();
+                        let array_set = ast_helper::make_ident_idx(array_set_lid_idx, bracket_loc.clone());
                         let apply_expr = ast_helper::make_apply(
                             array_set,
                             vec![
@@ -2653,17 +2647,10 @@ pub fn parse_primary_expr(p: &mut Parser<'_>, operand: Expression, no_call: bool
                         };
                     } else {
                         // Non-string index: arr[index] -> Array.get(arr, index)
-                        // Use the bracket location [index] for the synthesized Array.get identifier
-                        // (matching OCaml's array_loc = mk_loc lbracket rbracket)
-                        let array_idx = p.arena_mut().intern_string("Array");
-                        let get_idx = p.arena_mut().intern_string("get");
-                        let array_get_lid = Longident::Ldot(
-                            Box::new(Longident::Lident(array_idx)),
-                            get_idx,
-                        );
-                        let array_get = ast_helper::make_ident(
-                            p,
-                            array_get_lid,
+                        // Use static pre-allocated Array.get lident for sharing parity with OCaml
+                        let array_get_lid_idx = p.arena().array_get_lid();
+                        let array_get = ast_helper::make_ident_idx(
+                            array_get_lid_idx,
                             bracket_loc,
                         );
                         // OCaml doesn't add res.array.access attribute in the parser
@@ -3051,17 +3038,8 @@ fn parse_array_expr(p: &mut Parser<'_>) -> Expression {
         pexp_attributes: vec![],
     };
 
-    let belt_idx = p.arena_mut().intern_string("Belt");
-    let array_idx = p.arena_mut().intern_string("Array");
-    let concat_many_idx = p.arena_mut().intern_string("concatMany");
-    let lid = Longident::Ldot(
-        Box::new(Longident::Ldot(
-            Box::new(Longident::Lident(belt_idx)),
-            array_idx,
-        )),
-        concat_many_idx,
-    );
-    let lid_idx = p.push_longident(lid);
+    // Use static pre-allocated Belt.Array.concatMany lident for sharing parity with OCaml
+    let lid_idx = p.arena().belt_array_concat_many_lid();
     let spread_idx = p.arena_mut().intern("res.spread");
     let concat_many = Expression {
         pexp_desc: ExpressionDesc::Pexp_ident(with_loc(lid_idx, loc.clone())),
