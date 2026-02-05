@@ -412,6 +412,7 @@ syntax_tests/data/idempotency/reason-react-hackernews/NotFound.res
 syntax_tests/data/idempotency/reason-react-hackernews/StoryData.res
 syntax_tests/data/idempotency/reason-react-hackernews/StoryListItem.res
 syntax_tests/data/idempotency/reason-react-hackernews/TopStoriesPage.res
+syntax_tests/data/idempotency/reason-react/src/React.res
 syntax_tests/data/idempotency/reason-react/src/ReactDOMServerRe.res
 syntax_tests/data/idempotency/reason-react/src/ReactEvent.res
 syntax_tests/data/idempotency/reason-react/src/ReactEvent.resi
@@ -424,6 +425,7 @@ syntax_tests/data/idempotency/reasongl/ReasonglInterface.res
 syntax_tests/data/idempotency/reasongl/RGLConstants.res
 syntax_tests/data/idempotency/reasongl/RGLEvents.res
 syntax_tests/data/idempotency/reasongl/RGLInterface.res
+syntax_tests/data/idempotency/reasonml.org/bindings/Next.res
 syntax_tests/data/idempotency/reasonml.org/common/BeltData.res
 syntax_tests/data/idempotency/reasonml.org/common/Mdx.res
 syntax_tests/data/idempotency/reasonml.org/common/Util.res
