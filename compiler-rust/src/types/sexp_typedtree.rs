@@ -1548,8 +1548,8 @@ fn sexp_structure_item_desc(arena: &ParseArena, ctx: &TypeContext<'_>, with_locs
                 Sexp::list(mbs.iter().map(|mb| sexp_module_binding(arena, ctx, with_locs, mb)).collect()),
             ])
         }
-        StructureItemDesc::Tstr_modtype(_mtd) => {
-            Sexp::list(vec![Sexp::atom("Tstr_modtype"), Sexp::atom("<module_type_declaration>")])
+        StructureItemDesc::Tstr_modtype(mtd) => {
+            Sexp::list(vec![Sexp::atom("Tstr_modtype"), sexp_module_type_declaration(arena, ctx, with_locs, mtd)])
         }
         StructureItemDesc::Tstr_open(od) => {
             Sexp::list(vec![
@@ -1564,6 +1564,27 @@ fn sexp_structure_item_desc(arena: &ParseArena, ctx: &TypeContext<'_>, with_locs
             Sexp::list(vec![Sexp::atom("Tstr_attribute"), sexp_attribute(arena, with_locs, attr)])
         }
     }
+}
+
+fn sexp_module_type_declaration(arena: &ParseArena, _ctx: &TypeContext<'_>, with_locs: bool, mtd: &crate::types::typedtree::ModuleTypeDeclaration) -> Sexp {
+    let loc_sexp = if with_locs {
+        vec![location_idx(arena, with_locs, mtd.mtd_loc)]
+    } else {
+        vec![]
+    };
+    let mt_sexp = match &mtd.mtd_type {
+        None => Sexp::atom("None"),
+        Some(_mt) => Sexp::list(vec![Sexp::atom("Some"), Sexp::atom("<module_type>")]),
+    };
+    let mut items = vec![
+        Sexp::atom("module_type_declaration"),
+        sexp_ident(&mtd.mtd_id),
+        string(&mtd.mtd_name.txt),
+    ];
+    items.extend(loc_sexp);
+    items.push(mt_sexp);
+    items.push(sexp_attributes(arena, with_locs, &mtd.mtd_attributes));
+    Sexp::list(items)
 }
 
 fn sexp_include_declaration(arena: &ParseArena, ctx: &TypeContext<'_>, with_locs: bool, incl: &crate::types::typedtree::IncludeDeclaration) -> Sexp {
