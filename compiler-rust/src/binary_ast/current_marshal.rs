@@ -165,14 +165,16 @@ impl Marshal for ArgLabel {
             ArgLabel::Labelled(s) => {
                 // Labelled has a string loc, which is a record {txt; loc}
                 w.write_block_header(0, 1);
-                // Check-only sharing: only share if an Otag already registered
-                // this (txt, loc) pair (happens in %obj PPX output).
-                // Don't register to avoid false sharing in non-PPX code.
-                w.write_string_loc_shared(s.txt, s.loc, false);
+                // Register for sharing: in OCaml's %obj PPX, the same {txt; loc}
+                // record is shared between Labelled args and Otag labels. Since
+                // Labelled is serialized before Otag in the arrow type, it must
+                // register so Otag can share it. This is safe because different
+                // parameters always have different (StrIdx, LocIdx) keys.
+                w.write_string_loc_shared(s.txt, s.loc, true);
             }
             ArgLabel::Optional(s) => {
                 w.write_block_header(1, 1);
-                w.write_string_loc_shared(s.txt, s.loc, false);
+                w.write_string_loc_shared(s.txt, s.loc, true);
             }
         }
     }
