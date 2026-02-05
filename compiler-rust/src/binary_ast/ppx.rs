@@ -81,7 +81,7 @@ fn prims_to_be_encoded(pval_prim: &[StrIdx], arena: &ParseArena) -> bool {
 }
 
 /// Check if an external declaration has ReScript FFI attributes
-fn has_external_attrs(attrs: &[Attribute], arena: &mut ParseArena) -> bool {
+fn has_external_attrs(attrs: &[Attribute], arena: &ParseArena) -> bool {
     attrs.iter().any(|(attr_name, _payload)| {
         let name = arena.get_string(attr_name.txt);
         EXTERNAL_ATTRS.iter().any(|&ext_attr| name == ext_attr)
@@ -565,7 +565,7 @@ fn spec_of_ptyp(nolabel: bool, typ: &CoreType, arena: &mut ParseArena) -> Attr {
 }
 
 /// Check if a type is unit
-fn is_unit_type(typ: &CoreType, arena: &mut ParseArena) -> bool {
+fn is_unit_type(typ: &CoreType, arena: &ParseArena) -> bool {
     match &typ.ptyp_desc {
         CoreTypeDesc::Ptyp_constr(lid, args) => {
             args.is_empty() && {
@@ -1038,7 +1038,7 @@ impl Default for ExternalDesc {
     }
 }
 
-fn parse_external_attrs(attrs: &[Attribute], prim_name: &str, no_arguments: bool, arena: &mut ParseArena) -> ExternalDesc {
+fn parse_external_attrs(attrs: &[Attribute], prim_name: &str, no_arguments: bool, arena: &ParseArena) -> ExternalDesc {
     let mut desc = ExternalDesc::default();
 
     for (attr_name, payload) in attrs {
@@ -1140,7 +1140,7 @@ fn parse_external_attrs(attrs: &[Attribute], prim_name: &str, no_arguments: bool
 }
 
 /// Extract string from attribute payload (simplified)
-fn get_payload_string(payload: &current::Payload, arena: &mut ParseArena) -> Option<String> {
+fn get_payload_string(payload: &current::Payload, arena: &ParseArena) -> Option<String> {
     match payload {
         current::Payload::PStr(items) if items.len() == 1 => {
             if let StructureItemDesc::Pstr_eval(expr, _) = &items[0].pstr_desc {
@@ -1219,7 +1219,7 @@ fn get_payload_string_with_delim(payload: &current::Payload, arena: &mut ParseAr
 
 /// Extract multiple strings from attribute payload (mirrors OCaml's Ast_payload.assert_strings)
 /// Handles: @attr("str"), @attr(("str1", "str2", ...)), @attr (empty → [])
-fn get_payload_strings(payload: &current::Payload, arena: &mut ParseArena) -> Vec<String> {
+fn get_payload_strings(payload: &current::Payload, arena: &ParseArena) -> Vec<String> {
     match payload {
         current::Payload::PStr(items) if items.is_empty() => vec![],
         current::Payload::PStr(items) if items.len() == 1 => {
@@ -1481,7 +1481,7 @@ fn filter_ffi_attributes(attrs: &[Attribute], arena: &mut ParseArena) -> Vec<Att
 }
 
 /// Encode external value description with FFI metadata
-pub fn encode_external(vd: &ValueDescription, arena: &mut ParseArena) -> EncodedExternal {
+pub fn encode_external(vd: &ValueDescription, arena: &ParseArena) -> EncodedExternal {
     // Get the primitive name
     let prim_name = match vd.pval_prim.first() {
         Some(name) => arena.get_string(*name).to_string(),
