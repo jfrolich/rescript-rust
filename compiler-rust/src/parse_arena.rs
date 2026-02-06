@@ -307,6 +307,9 @@ pub struct ParseArena {
     /// Simple Lident deduplication table - maps StrIdx to its LidentIdx.
     /// This enables sharing of common identifiers like "()", "::", etc.
     lident_dedup: HashMap<StrIdx, LidentIdx>,
+    /// StrIdx values whose Lident wrappers should be shared by value during marshalling.
+    /// This is used for internal PPX nodes that reuse a common prefix (e.g. `Spice`).
+    longident_shareable_strs: HashSet<StrIdx>,
     /// String arena for all identifier strings.
     ///
     /// Strings can be added in two ways:
@@ -344,6 +347,42 @@ pub struct ParseArena {
     /// This lets marshal distinguish mapper-rebuilt expression attributes
     /// (fresh payload wrappers) from parser-preserved ones.
     rewritten_expr_locs: HashSet<LocIdx>,
+    /// Pre-allocated dummy location (line 0, _none_) used by internal PPX.
+    dummy_loc: LocIdx,
+    /// Spice PPX shared none location (line 1, _none_).
+    spice_none_loc: Option<LocIdx>,
+    /// Spice PPX shared "Spice" prefix for codecs module (non-interned).
+    spice_codecs_str: Option<StrIdx>,
+    /// Spice PPX shared "Spice" prefix for records module (non-interned).
+    spice_records_str: Option<StrIdx>,
+    /// Spice PPX shared "Spice" prefix for variants module (non-interned).
+    spice_variants_str: Option<StrIdx>,
+    /// Spice PPX shared "Spice" prefix for polyvariants module (non-interned).
+    spice_polyvars_str: Option<StrIdx>,
+    /// Spice PPX shared "Spice" prefix for tuple module (non-interned).
+    spice_tuple_str: Option<StrIdx>,
+    /// Spice PPX shared "JSON" prefix (non-interned).
+    spice_json_str: Option<StrIdx>,
+    /// Spice PPX shared "t" suffix for metaquoted JSON.t (non-interned).
+    spice_json_t_str: Option<StrIdx>,
+    /// Spice PPX shared Lident for Utils.ctyp_json_t (non-interned JSON).
+    spice_json_ctyp_lident: Option<LidentIdx>,
+    /// Spice PPX shared "Option" prefix (non-interned).
+    spice_option_str: Option<StrIdx>,
+    /// Spice PPX shared "Dict" prefix (non-interned).
+    spice_dict_str: Option<StrIdx>,
+    /// Spice PPX shared "Result" prefix (non-interned).
+    spice_result_str: Option<StrIdx>,
+    /// Spice PPX shared "Array" prefix (non-interned).
+    spice_array_str: Option<StrIdx>,
+    /// Spice PPX shared dynamic "v" identifier (non-interned).
+    spice_runtime_v: Option<StrIdx>,
+    /// Spice PPX shared "v" identifier for pattern variables.
+    spice_pat_v: Option<StrIdx>,
+    /// Spice PPX shared "v" identifier for record field access expressions.
+    spice_field_v: Option<StrIdx>,
+    /// Literal strings that should be value-shared during marshalling.
+    shareable_literal_strs: HashSet<String>,
 }
 
 impl Default for ParseArena {
@@ -476,6 +515,7 @@ impl Default for ParseArena {
             static_regexp_t_lident,
             position_dedup: HashMap::new(),
             lident_dedup,
+            longident_shareable_strs: HashSet::new(),
             strings,
             prim_empty_external_ffi,
             prim_empty_js_mapper,
@@ -486,6 +526,24 @@ impl Default for ParseArena {
             template_concat_str,
             local_module_counter: 0,
             rewritten_expr_locs: HashSet::new(),
+            dummy_loc: LocIdx::default(),
+            spice_none_loc: None,
+            spice_codecs_str: None,
+            spice_records_str: None,
+            spice_variants_str: None,
+            spice_polyvars_str: None,
+            spice_tuple_str: None,
+            spice_json_str: None,
+            spice_json_t_str: None,
+            spice_json_ctyp_lident: None,
+            spice_option_str: None,
+            spice_dict_str: None,
+            spice_result_str: None,
+            spice_array_str: None,
+            spice_runtime_v: None,
+            spice_pat_v: None,
+            spice_field_v: None,
+            shareable_literal_strs: HashSet::new(),
         }
     }
 }
@@ -504,6 +562,12 @@ impl ParseArena {
         let pos_idx = arena.positions.push(none_pos);
         let none_loc = InternedLocation::new(pos_idx, pos_idx, true);
         arena.locations.push(none_loc);
+        // Pre-allocate dummy location with line 0 for internal PPX nodes
+        let dummy_file_idx = arena.strings.push("_none_".to_string());
+        let dummy_pos = Position::new(dummy_file_idx, 0, 0, -1);
+        let dummy_pos_idx = arena.positions.push(dummy_pos);
+        let dummy_loc = InternedLocation::new(dummy_pos_idx, dummy_pos_idx, true);
+        arena.dummy_loc = arena.locations.push(dummy_loc);
         // Pre-allocate placeholder longident at index 0
         // This way LidentIdx(0) is always a valid "placeholder" identifier
         let placeholder_idx = arena.strings.intern("placeholder");
@@ -563,7 +627,8 @@ impl ParseArena {
     /// This matches OCaml's behavior where each position is a separate object.
     /// file_name should be an interned StrIdx (from arena.intern_string).
     pub fn push_pos(&mut self, file_name: StrIdx, line: i32, bol: i32, cnum: i32) -> PosIdx {
-        self.positions.push(Position::new(file_name, line, bol, cnum))
+        self.positions
+            .push(Position::new(file_name, line, bol, cnum))
     }
 
     /// Get the "none" position index (for _none_ file).
@@ -635,6 +700,226 @@ impl ParseArena {
     /// Returns the pre-allocated index 0.
     pub fn none_loc(&self) -> LocIdx {
         LocIdx(0)
+    }
+
+    /// Get the dummy location index (line 0, _none_ file).
+    pub fn dummy_loc(&self) -> LocIdx {
+        self.dummy_loc
+    }
+
+    /// Clone a location, creating fresh position objects with the same values.
+    pub fn clone_loc(&mut self, loc: LocIdx) -> LocIdx {
+        let info = self.get_location(loc).clone();
+        let start = *self.get_position(info.loc_start);
+        let end = *self.get_position(info.loc_end);
+        let start_idx = self.push_position(start);
+        let end_idx = self.push_position(end);
+        self.push_loc(start_idx, end_idx, info.loc_ghost)
+    }
+
+    /// Clone a location but keep start/end sharing the same position.
+    pub fn clone_loc_shared(&mut self, loc: LocIdx) -> LocIdx {
+        let info = self.get_location(loc).clone();
+        let start = *self.get_position(info.loc_start);
+        let start_idx = self.push_position(start);
+        self.push_loc(start_idx, start_idx, info.loc_ghost)
+    }
+
+    /// Shared line-1 none location for spice PPX nodes.
+    pub fn spice_none_loc(&mut self) -> LocIdx {
+        if let Some(loc) = self.spice_none_loc {
+            return loc;
+        }
+        let file_idx = self.push_string("_none_".to_string());
+        let pos = Position::new(file_idx, 1, 0, -1);
+        let pos_idx = self.push_position(pos);
+        let loc = self.push_loc(pos_idx, pos_idx, true);
+        self.spice_none_loc = Some(loc);
+        loc
+    }
+
+    /// Shared non-interned "Spice" prefix for the codecs module.
+    pub fn spice_codecs_str(&mut self) -> StrIdx {
+        if let Some(idx) = self.spice_codecs_str {
+            return idx;
+        }
+        let idx = self.push_string("Spice".to_string());
+        self.longident_shareable_strs.insert(idx);
+        self.spice_codecs_str = Some(idx);
+        idx
+    }
+
+    /// Shared non-interned "Spice" prefix for the records module.
+    pub fn spice_records_str(&mut self) -> StrIdx {
+        if let Some(idx) = self.spice_records_str {
+            return idx;
+        }
+        let idx = self.push_string("Spice".to_string());
+        self.longident_shareable_strs.insert(idx);
+        self.spice_records_str = Some(idx);
+        idx
+    }
+
+    /// Shared non-interned "Spice" prefix for the variants module.
+    pub fn spice_variants_str(&mut self) -> StrIdx {
+        if let Some(idx) = self.spice_variants_str {
+            return idx;
+        }
+        let idx = self.push_string("Spice".to_string());
+        self.longident_shareable_strs.insert(idx);
+        self.spice_variants_str = Some(idx);
+        idx
+    }
+
+    /// Shared non-interned "Spice" prefix for the polyvariants module.
+    pub fn spice_polyvars_str(&mut self) -> StrIdx {
+        if let Some(idx) = self.spice_polyvars_str {
+            return idx;
+        }
+        let idx = self.push_string("Spice".to_string());
+        self.longident_shareable_strs.insert(idx);
+        self.spice_polyvars_str = Some(idx);
+        idx
+    }
+
+    /// Shared non-interned "Spice" prefix for the tuple module.
+    pub fn spice_tuple_str(&mut self) -> StrIdx {
+        if let Some(idx) = self.spice_tuple_str {
+            return idx;
+        }
+        let idx = self.push_string("Spice".to_string());
+        self.longident_shareable_strs.insert(idx);
+        self.spice_tuple_str = Some(idx);
+        idx
+    }
+
+    /// Register a literal string to be value-shared during marshalling.
+    pub fn register_shareable_literal(&mut self, s: &str) {
+        self.shareable_literal_strs.insert(s.to_string());
+    }
+
+    /// Check if a literal string should be value-shared during marshalling.
+    pub fn is_shareable_literal(&self, s: &str) -> bool {
+        self.shareable_literal_strs.contains(s)
+    }
+
+    /// Shared non-interned "JSON" prefix for spice PPX.
+    pub fn spice_json_str(&mut self) -> StrIdx {
+        if let Some(idx) = self.spice_json_str {
+            return idx;
+        }
+        let idx = self.push_string("JSON".to_string());
+        self.longident_shareable_strs.insert(idx);
+        self.spice_json_str = Some(idx);
+        idx
+    }
+
+    /// Shared non-interned "t" suffix for metaquoted JSON.t.
+    pub fn spice_json_t_str(&mut self) -> StrIdx {
+        if let Some(idx) = self.spice_json_t_str {
+            return idx;
+        }
+        let idx = self.push_string("t".to_string());
+        self.spice_json_t_str = Some(idx);
+        idx
+    }
+
+    /// Shared Lident for Utils.ctyp_json_t (uses a distinct non-interned "JSON").
+    pub fn spice_json_ctyp_lident(&mut self) -> LidentIdx {
+        if let Some(idx) = self.spice_json_ctyp_lident {
+            return idx;
+        }
+        let json_idx = self.push_string("JSON".to_string());
+        let t_idx = self.strings.intern("t");
+        let lid = Longident::Ldot(Box::new(Longident::Lident(json_idx)), t_idx);
+        let lid_idx = self.longidents.push(lid);
+        self.spice_json_ctyp_lident = Some(lid_idx);
+        lid_idx
+    }
+
+    /// Shared non-interned "Option" prefix for spice PPX.
+    pub fn spice_option_str(&mut self) -> StrIdx {
+        if let Some(idx) = self.spice_option_str {
+            return idx;
+        }
+        let idx = self.push_string("Option".to_string());
+        self.longident_shareable_strs.insert(idx);
+        self.spice_option_str = Some(idx);
+        idx
+    }
+
+    /// Shared non-interned "Dict" prefix for spice PPX.
+    pub fn spice_dict_str(&mut self) -> StrIdx {
+        if let Some(idx) = self.spice_dict_str {
+            return idx;
+        }
+        let idx = self.push_string("Dict".to_string());
+        self.longident_shareable_strs.insert(idx);
+        self.spice_dict_str = Some(idx);
+        idx
+    }
+
+    /// Shared non-interned "Result" prefix for spice PPX.
+    pub fn spice_result_str(&mut self) -> StrIdx {
+        if let Some(idx) = self.spice_result_str {
+            return idx;
+        }
+        let idx = self.push_string("Result".to_string());
+        self.longident_shareable_strs.insert(idx);
+        self.spice_result_str = Some(idx);
+        idx
+    }
+
+    /// Shared non-interned "Array" prefix for spice PPX.
+    pub fn spice_array_str(&mut self) -> StrIdx {
+        if let Some(idx) = self.spice_array_str {
+            return idx;
+        }
+        let idx = self.push_string("Array".to_string());
+        self.longident_shareable_strs.insert(idx);
+        self.spice_array_str = Some(idx);
+        idx
+    }
+
+    /// Shared non-interned "v" identifier for dynamic PPX-generated functions.
+    pub fn spice_runtime_v(&mut self) -> StrIdx {
+        if let Some(idx) = self.spice_runtime_v {
+            return idx;
+        }
+        let idx = self.push_string("v".to_string());
+        self.longident_shareable_strs.insert(idx);
+        self.spice_runtime_v = Some(idx);
+        idx
+    }
+
+    /// Shared non-interned "v" identifier for pattern variables.
+    pub fn spice_pat_v(&mut self) -> StrIdx {
+        if let Some(idx) = self.spice_pat_v {
+            return idx;
+        }
+        let idx = self.push_string("v".to_string());
+        self.spice_pat_v = Some(idx);
+        idx
+    }
+
+    /// Shared non-interned "v" identifier for record field access expressions.
+    pub fn spice_field_v(&mut self) -> StrIdx {
+        if let Some(idx) = self.spice_field_v {
+            return idx;
+        }
+        let idx = self.push_string("v".to_string());
+        self.spice_field_v = Some(idx);
+        idx
+    }
+
+    /// Mark a StrIdx as shareable when wrapped in a Longident::Lident.
+    pub fn mark_longident_shareable_str(&mut self, idx: StrIdx) {
+        self.longident_shareable_strs.insert(idx);
+    }
+
+    /// Check if a StrIdx is shareable when wrapped in a Longident::Lident.
+    pub fn is_longident_shareable_str(&self, idx: StrIdx) -> bool {
+        self.longident_shareable_strs.contains(&idx)
     }
 
     /// Look up a location by index.
@@ -804,21 +1089,24 @@ impl ParseArena {
     pub fn push_ldot(&mut self, prefix: LidentIdx, name: impl Into<String>) -> LidentIdx {
         let str_idx = self.strings.push(name.into());
         let prefix_lid = self.get_longident(prefix).clone();
-        self.longidents.push(Longident::Ldot(Box::new(prefix_lid), str_idx))
+        self.longidents
+            .push(Longident::Ldot(Box::new(prefix_lid), str_idx))
     }
 
     /// Push a dotted identifier (Ldot) with a static string.
     pub fn push_ldot_static(&mut self, prefix: LidentIdx, name: &'static str) -> LidentIdx {
         let str_idx = self.strings.intern(name);
         let prefix_lid = self.get_longident(prefix).clone();
-        self.longidents.push(Longident::Ldot(Box::new(prefix_lid), str_idx))
+        self.longidents
+            .push(Longident::Ldot(Box::new(prefix_lid), str_idx))
     }
 
     /// Push a functor application (Lapply) into the arena.
     pub fn push_lapply(&mut self, functor: LidentIdx, arg: LidentIdx) -> LidentIdx {
         let func_lid = self.get_longident(functor).clone();
         let arg_lid = self.get_longident(arg).clone();
-        self.longidents.push(Longident::Lapply(Box::new(func_lid), Box::new(arg_lid)))
+        self.longidents
+            .push(Longident::Lapply(Box::new(func_lid), Box::new(arg_lid)))
     }
 
     /// Look up a longident by index.
@@ -1056,7 +1344,10 @@ impl ParseArena {
 
     /// Convert a Located<LidentIdx> to Located<Longident>.
     /// Useful when you need to match on the Longident structure.
-    pub fn to_longident_loc(&self, loc: &Located<LidentIdx>) -> crate::location::Located<Longident> {
+    pub fn to_longident_loc(
+        &self,
+        loc: &Located<LidentIdx>,
+    ) -> crate::location::Located<Longident> {
         crate::location::Located {
             txt: self.get_longident(loc.txt).clone(),
             loc: self.to_location(loc.loc),

@@ -536,7 +536,11 @@ impl Marshal for Constant {
             }
             Constant::String(s, delim) => {
                 w.write_block_header(2, 2);
-                w.write_str(s);
+                if w.get_arena().is_shareable_literal(s) {
+                    w.write_str_value_shared(s);
+                } else {
+                    w.write_str(s);
+                }
                 // Use content-based sharing for string delimiters like Some("js")
                 w.write_option_string(delim);
             }
