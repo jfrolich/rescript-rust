@@ -2393,6 +2393,20 @@ fn type_application(
     // Normal application: get the function's type after any unification
     let mut current_ty = tctx.type_ctx.repr(typed_funct.exp_type);
 
+    // Check if function type is a Tvar (force_tvar case in OCaml).
+    // In ReScript, all applications are total/uncurried, so when the function's type
+    // is a type variable, we set the arity to the number of arguments.
+    let force_tvar = matches!(&*tctx.type_ctx.get_desc(current_ty), TypeDesc::Tvar(_));
+    let top_arity: Option<i32> = if force_tvar {
+        Some(args.len() as i32)
+    } else {
+        // Check existing arity from function type
+        match &*tctx.type_ctx.get_desc(current_ty) {
+            TypeDesc::Tarrow { arity, .. } => *arity,
+            _ => None,
+        }
+    };
+
     // Type check arguments, extracting/building arrow types as we go
     let mut typed_args = Vec::new();
     for (label, arg_expr) in args.iter() {
@@ -2400,10 +2414,10 @@ fn type_application(
         let (arg_ty, ret_ty) = match crate::types::split_arrow(ctx, current_ty) {
             Some((arg, ret)) => (arg, ret),
             None => {
-                // Not a function type yet - create arrow type
+                // Not a function type yet - create arrow type with arity
                 let arg_ty = ctx.new_var(None);
                 let ret_ty = ctx.new_var(None);
-                let arrow_ty = ctx.new_arrow_simple(arg_ty, ret_ty);
+                let arrow_ty = ctx.new_arrow(crate::types::ArgLabel::Nolabel, arg_ty, ret_ty, top_arity);
                 unify_expression_types(tctx, loc, current_ty, arrow_ty, None)?;
                 (arg_ty, ret_ty)
             }

@@ -269,6 +269,17 @@ test_single_file() {
         fi
     fi
 
+    # Strip warning messages from sexp output (OCaml emits warnings to stderr mixed with sexp)
+    # Warnings start before the "(structure" line, so we strip everything before it
+    if [[ -f "$file_temp/ocaml.sexp" ]]; then
+        sed -n '/^(structure/,$p' "$file_temp/ocaml.sexp" > "$file_temp/ocaml_clean.sexp"
+        mv "$file_temp/ocaml_clean.sexp" "$file_temp/ocaml.sexp"
+    fi
+    if [[ -f "$file_temp/rust.sexp" ]]; then
+        sed -n '/^(structure/,$p' "$file_temp/rust.sexp" > "$file_temp/rust_clean.sexp"
+        mv "$file_temp/rust_clean.sexp" "$file_temp/rust.sexp"
+    fi
+
     # Compare if both succeeded
     if [[ "$RUST_AVAILABLE" == "true" && "$ocaml_pass" -eq 1 && "$rust_pass" -eq 1 ]]; then
         if diff -q "$file_temp/ocaml.sexp" "$file_temp/rust.sexp" > /dev/null 2>&1; then
