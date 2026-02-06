@@ -26,7 +26,7 @@ type t2 = {
 
 @spice
 type t3 = {
-  @spice.default(0) value: int
+  @spice.default(0) value: int,
   @spice.default(Some(1)) value2?: int
 }
 
