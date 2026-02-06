@@ -656,6 +656,15 @@ impl ParseArena {
         // This way LidentIdx(0) is always a valid "placeholder" identifier
         let placeholder_idx = arena.strings.intern("placeholder");
         arena.longidents.push(Longident::Lident(placeholder_idx));
+        // Pre-allocate "None" longident at index 1 (for optional field desugaring)
+        let none_str = arena.strings.intern("None");
+        arena.longidents.push(Longident::Lident(none_str));
+        // Pre-allocate "*predef*" longident at index 2
+        let predef_str = arena.strings.intern("*predef*");
+        arena.longidents.push(Longident::Lident(predef_str));
+        // Pre-allocate Ldot(*predef*, "Some") longident at index 3
+        let some_str = arena.strings.intern("Some");
+        arena.longidents.push(Longident::Ldot(Box::new(Longident::Lident(predef_str)), some_str));
         arena
     }
 
@@ -663,6 +672,18 @@ impl ParseArena {
     /// This is useful for creating placeholder AST nodes without mutating the arena.
     pub fn placeholder_lid(&self) -> LidentIdx {
         LidentIdx(0)
+    }
+
+    /// Get the pre-allocated "None" longident index (index 1).
+    /// Used for optional field desugaring (synthesizing None for missing optional fields).
+    pub fn none_lid(&self) -> LidentIdx {
+        LidentIdx(1)
+    }
+
+    /// Get the pre-allocated Ldot(*predef*, "Some") longident index (index 3).
+    /// Used for optional field desugaring (wrapping provided optional fields in Some).
+    pub fn some_lid(&self) -> LidentIdx {
+        LidentIdx(3)
     }
 
     /// Create a Located<LidentIdx> with the placeholder longident and given location.

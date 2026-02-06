@@ -808,9 +808,16 @@ fn sexp_expression_desc(arena: &ParseArena, ctx: &TypeContext<'_>, with_locs: bo
                                     Sexp::list(vec![Sexp::atom("Kept"), sexp_type_expr(arena, ctx, *ty)])
                                 }
                                 RecordLabelDefinition::Overridden(li, e) => {
+                                    // For synthesized fields (e.g., missing optional fields),
+                                    // the lid may be a placeholder. Use lbl_name as Lident instead.
+                                    let lid_sexp = if li.txt == arena.placeholder_lid() {
+                                        Sexp::list(vec![Sexp::atom("Lident"), string(&ld.lbl_name)])
+                                    } else {
+                                        sexp_longident_idx(arena, li.txt)
+                                    };
                                     Sexp::list(vec![
                                         Sexp::atom("Overridden"),
-                                        sexp_longident_idx(arena, li.txt),
+                                        lid_sexp,
                                         sexp_expression(arena, ctx, with_locs, e),
                                     ])
                                 }

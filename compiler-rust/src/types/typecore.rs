@@ -2956,14 +2956,32 @@ fn type_record(
         None
     };
 
+    // Track which field positions we've seen (for missing optional field detection)
+    let mut seen_positions = std::collections::HashSet::new();
+    let mut has_optional = false;
+
     // Type check each field
     let mut typed_fields = Vec::new();
     for (idx, field) in fields.iter().enumerate() {
         let field_name = tctx.longident_last_name(tctx.resolve_lid(field.lid.txt));
 
+        // Check if this field is optional (from env or parser)
+        let is_optional = if let Ok(env_label) = env.find_label(&field_name) {
+            env_label.lbl_optional
+        } else {
+            field.opt
+        };
+
         // Type check the field expression with a fresh type variable
         let field_ty = ctx.new_var(None);
         let typed_expr = type_expect(tctx, env, &field.expr, field_ty, None)?;
+
+        // For optional fields, create the option type for unification with lbl_arg
+        let lbl_arg_ty = if is_optional {
+            env.type_option(ctx, field_ty)
+        } else {
+            field_ty
+        };
 
         // Build label description - use env info if available, otherwise placeholder
         let label_desc = if let Ok(env_label) = env.find_label(&field_name) {
@@ -2971,11 +2989,17 @@ fn type_record(
             let (ty_arg, ty_res) = crate::types::ctype::instance_label(ctx, env_label);
             // Best-effort unification to propagate type info
             let _ = crate::types::unify(ctx, &mut tctx.unify_state, ty_res, expected_ty);
-            let _ = crate::types::unify(ctx, &mut tctx.unify_state, field_ty, ty_arg);
+            // For optional fields, unify option<field_ty> with ty_arg (which is option<T>)
+            // For non-optional fields, unify field_ty with ty_arg (which is T)
+            let _ = crate::types::unify(ctx, &mut tctx.unify_state, lbl_arg_ty, ty_arg);
+            if env_label.lbl_optional {
+                has_optional = true;
+            }
+            seen_positions.insert(env_label.lbl_pos);
             crate::types::LabelDescription {
                 lbl_name: env_label.lbl_name.clone(),
-                lbl_res: expected_ty,  // Use expected_ty (now unified with ty_res)
-                lbl_arg: field_ty,     // Use field_ty (now unified with ty_arg)
+                lbl_res: expected_ty,
+                lbl_arg: lbl_arg_ty,
                 lbl_mut: env_label.lbl_mut.clone(),
                 lbl_optional: env_label.lbl_optional,
                 lbl_pos: env_label.lbl_pos,
@@ -2986,10 +3010,13 @@ fn type_record(
                 lbl_attributes: env_label.lbl_attributes.clone(),
             }
         } else {
+            if field.opt {
+                has_optional = true;
+            }
             crate::types::LabelDescription {
                 lbl_name: field_name,
                 lbl_res: expected_ty,
-                lbl_arg: field_ty,
+                lbl_arg: lbl_arg_ty,
                 lbl_mut: crate::types::MutableFlag::Immutable,
                 lbl_optional: field.opt,
                 lbl_pos: idx as i32,
@@ -3001,11 +3028,87 @@ fn type_record(
             }
         };
 
+        // If field is optional, wrap the typed expression in Some(...)
+        // Matching OCaml's process_optional_label behavior
+        let (final_expr, final_desc) = if label_desc.lbl_optional {
+            let option_ty = lbl_arg_ty; // Already option<T>
+            let some_cstr = make_some_constructor(ctx, option_ty);
+            let some_lid = Located { txt: tctx.arena.some_lid(), loc };
+            let wrapped = Expression::new(
+                ExpressionDesc::Texp_construct(some_lid.clone(), some_cstr, vec![typed_expr]),
+                loc,
+                option_ty,
+                EnvRef(0),
+                vec![],
+            );
+            let mut desc = label_desc;
+            desc.lbl_optional = false; // Mark as required after wrapping
+            (wrapped, desc)
+        } else {
+            (typed_expr, label_desc)
+        };
+
         typed_fields.push((
             field.lid.clone(),
-            label_desc,
-            RecordLabelDefinition::Overridden(field.lid.clone(), typed_expr),
+            final_desc,
+            RecordLabelDefinition::Overridden(field.lid.clone(), final_expr),
         ));
+    }
+
+    // Add missing optional fields as None
+    // Matching OCaml's label_definitions logic (typecore.ml line 2663-2679)
+    if has_optional && typed_base.is_none() {
+        if let Some(all_labels) = get_record_labels(ctx, env, expected_ty) {
+            for (lbl_idx, label_decl) in all_labels.iter().enumerate() {
+                let lbl_pos = lbl_idx as i32;
+                if label_decl.ld_optional && !seen_positions.contains(&lbl_pos) {
+                    // This optional field was not provided - synthesize None
+                    // lbl_arg/ld_type for optional fields is already option<T>
+                    // (typemod.rs wraps optional label types during type declaration)
+                    let lbl_name = label_decl.ld_id.name().to_string();
+                    let option_ty = if let Ok(env_label) = env.find_label(&lbl_name) {
+                        let (ta, tr) = crate::types::ctype::instance_label(ctx, env_label);
+                        let _ = crate::types::unify(ctx, &mut tctx.unify_state, tr, expected_ty);
+                        ta // Already option<T>
+                    } else {
+                        crate::types::instance(ctx, label_decl.ld_type) // Already option<T>
+                    };
+                    let none_cstr = make_none_constructor(ctx, option_ty);
+                    let none_lid = Located { txt: tctx.arena.none_lid(), loc };
+                    let none_expr = Expression::new(
+                        ExpressionDesc::Texp_construct(none_lid.clone(), none_cstr, vec![]),
+                        loc,
+                        option_ty,
+                        EnvRef(0),
+                        vec![],
+                    );
+
+                    let label_desc = crate::types::LabelDescription {
+                        lbl_name: lbl_name.clone(),
+                        lbl_res: expected_ty,
+                        lbl_arg: option_ty,
+                        lbl_mut: crate::types::MutableFlag::Immutable,
+                        lbl_optional: false, // Required after desugaring
+                        lbl_pos,
+                        lbl_all: crate::types::LabelArrayRef(0),
+                        lbl_repres: crate::types::RecordRepresentation::RecordRegular,
+                        lbl_private: crate::types::PrivateFlag::Public,
+                        lbl_loc: crate::location::Location::none(),
+                        lbl_attributes: vec![],
+                    };
+
+                    let field_lid = Located { txt: tctx.arena.placeholder_lid(), loc };
+                    typed_fields.push((
+                        field_lid.clone(),
+                        label_desc,
+                        RecordLabelDefinition::Overridden(
+                            Located { txt: tctx.arena.placeholder_lid(), loc },
+                            none_expr,
+                        ),
+                    ));
+                }
+            }
+        }
     }
 
     Ok(Expression::new(
@@ -3018,6 +3121,62 @@ fn type_record(
         EnvRef(0),
         attributes.to_vec(),
     ))
+}
+
+/// Create a ConstructorDescription for the `Some` constructor.
+fn make_some_constructor(ctx: &TypeContext<'_>, option_ty: TypeExprRef) -> crate::types::ConstructorDescription {
+    crate::types::ConstructorDescription {
+        cstr_name: "Some".to_string(),
+        cstr_res: option_ty,
+        cstr_existentials: vec![],
+        cstr_args: vec![ctx.new_var(None)], // The inner type
+        cstr_arity: 1,
+        cstr_tag: crate::types::ConstructorTag::CstrBlock(0),
+        cstr_consts: 1,
+        cstr_nonconsts: 1,
+        cstr_generalized: false,
+        cstr_private: crate::types::PrivateFlag::Public,
+        cstr_loc: crate::location::Location::none(),
+        cstr_attributes: vec![],
+        cstr_inlined: None,
+    }
+}
+
+/// Create a ConstructorDescription for the `None` constructor.
+fn make_none_constructor(_ctx: &TypeContext<'_>, option_ty: TypeExprRef) -> crate::types::ConstructorDescription {
+    crate::types::ConstructorDescription {
+        cstr_name: "None".to_string(),
+        cstr_res: option_ty,
+        cstr_existentials: vec![],
+        cstr_args: vec![],
+        cstr_arity: 0,
+        cstr_tag: crate::types::ConstructorTag::CstrConstant(0),
+        cstr_consts: 1,
+        cstr_nonconsts: 1,
+        cstr_generalized: false,
+        cstr_private: crate::types::PrivateFlag::Public,
+        cstr_loc: crate::location::Location::none(),
+        cstr_attributes: vec![],
+        cstr_inlined: None,
+    }
+}
+
+/// Get all label declarations for a record type from the environment.
+fn get_record_labels(
+    ctx: &TypeContext<'_>,
+    env: &Env,
+    ty: TypeExprRef,
+) -> Option<Vec<crate::types::decl::LabelDeclaration>> {
+    let repr = ctx.repr(ty);
+    let desc = ctx.get_desc(repr);
+    if let crate::types::TypeDesc::Tconstr { ref path, .. } = *desc {
+        if let Ok(type_decl) = env.lookup_type(path) {
+            if let crate::types::TypeKind::TypeRecord(ref labels, _) = type_decl.type_kind {
+                return Some(labels.clone());
+            }
+        }
+    }
+    None
 }
 
 /// Type check field access.
