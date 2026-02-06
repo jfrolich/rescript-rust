@@ -68,8 +68,8 @@ impl ParserDiagnostic {
     /// Create a diagnostic from a location.
     pub fn from_location(loc: &Location, category: DiagnosticCategory) -> Self {
         Self {
-            start_pos: loc.loc_start.clone(),
-            end_pos: loc.loc_end.clone(),
+            start_pos: loc.loc_start,
+            end_pos: loc.loc_end,
             category,
         }
     }
@@ -86,7 +86,7 @@ impl ParserDiagnostic {
 
     /// Get the location as a Location struct.
     pub fn location(&self) -> Location {
-        Location::from_positions(self.start_pos.clone(), self.end_pos.clone())
+        Location::from_positions(self.start_pos, self.end_pos)
     }
 
     /// Explain the diagnostic as a human-readable message.

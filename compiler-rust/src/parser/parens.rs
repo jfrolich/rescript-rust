@@ -23,7 +23,7 @@ pub enum ParenKind {
 pub fn expr(arena: &crate::parse_arena::ParseArena, expr: &Expression) -> ParenKind {
     let opt_braces = parsetree_viewer::process_braces_attr(arena, expr);
     match opt_braces {
-        Some(attr) => ParenKind::Braced(attr.0.loc.clone()),
+        Some(attr) => ParenKind::Braced(attr.0.loc),
         None => match &expr.pexp_desc {
             // module(M: S) doesn't need parens
             ExpressionDesc::Pexp_constraint(inner, typ)
@@ -57,7 +57,7 @@ pub fn expr_record_row_rhs(arena: &crate::parse_arena::ParseArena, optional: boo
 pub fn call_expr(arena: &crate::parse_arena::ParseArena, expr: &Expression) -> ParenKind {
     let opt_braces = parsetree_viewer::process_braces_attr(arena, expr);
     match opt_braces {
-        Some(attr) => ParenKind::Braced(attr.0.loc.clone()),
+        Some(attr) => ParenKind::Braced(attr.0.loc),
         None => {
             // Check for parsing attrs
             let filtered = parsetree_viewer::filter_parsing_attrs(arena, &expr.pexp_attributes);
@@ -106,7 +106,7 @@ pub fn call_expr(arena: &crate::parse_arena::ParseArena, expr: &Expression) -> P
 pub fn structure_expr(arena: &crate::parse_arena::ParseArena, expr: &Expression) -> ParenKind {
     let opt_braces = parsetree_viewer::process_braces_attr(arena, expr);
     match opt_braces {
-        Some(attr) => ParenKind::Braced(attr.0.loc.clone()),
+        Some(attr) => ParenKind::Braced(attr.0.loc),
         None => match &expr.pexp_desc {
             ExpressionDesc::Pexp_jsx_element(_) => ParenKind::Nothing,
             _ if parsetree_viewer::has_attributes(arena, &expr.pexp_attributes) => {
@@ -129,7 +129,7 @@ pub fn structure_expr(arena: &crate::parse_arena::ParseArena, expr: &Expression)
 pub fn unary_expr_operand(arena: &crate::parse_arena::ParseArena, expr: &Expression) -> ParenKind {
     let opt_braces = parsetree_viewer::process_braces_attr(arena, expr);
     match opt_braces {
-        Some(attr) => ParenKind::Braced(attr.0.loc.clone()),
+        Some(attr) => ParenKind::Braced(attr.0.loc),
         None => {
             let filtered = parsetree_viewer::filter_parsing_attrs(arena, &expr.pexp_attributes);
             if !filtered.is_empty() {
@@ -177,7 +177,7 @@ pub fn unary_expr_operand(arena: &crate::parse_arena::ParseArena, expr: &Express
 pub fn binary_expr_operand(arena: &crate::parse_arena::ParseArena, is_lhs: bool, expr: &Expression) -> ParenKind {
     let opt_braces = parsetree_viewer::process_braces_attr(arena, expr);
     match opt_braces {
-        Some(attr) => ParenKind::Braced(attr.0.loc.clone()),
+        Some(attr) => ParenKind::Braced(attr.0.loc),
         None => {
             match &expr.pexp_desc {
                 // module(M: S) doesn't need parens
@@ -356,7 +356,7 @@ pub fn binary_operator_inside_await_needs_parens(operator: &str) -> bool {
 pub fn assert_or_await_expr_rhs(arena: &crate::parse_arena::ParseArena, in_await: bool, expr: &Expression) -> ParenKind {
     let opt_braces = parsetree_viewer::process_braces_attr(arena, expr);
     match opt_braces {
-        Some(attr) => ParenKind::Braced(attr.0.loc.clone()),
+        Some(attr) => ParenKind::Braced(attr.0.loc),
         None => assert_or_await_expr_rhs_inner(arena, in_await, expr),
     }
 }
@@ -432,7 +432,7 @@ pub fn is_negative_constant(constant: &Constant) -> bool {
 pub fn field_expr(arena: &crate::parse_arena::ParseArena, expr: &Expression) -> ParenKind {
     let opt_braces = parsetree_viewer::process_braces_attr(arena, expr);
     match opt_braces {
-        Some(attr) => ParenKind::Braced(attr.0.loc.clone()),
+        Some(attr) => ParenKind::Braced(attr.0.loc),
         None => {
             let filtered = parsetree_viewer::filter_parsing_attrs(arena, &expr.pexp_attributes);
             if !filtered.is_empty() {
@@ -483,7 +483,7 @@ pub fn field_expr(arena: &crate::parse_arena::ParseArena, expr: &Expression) -> 
 pub fn set_field_expr_rhs(arena: &crate::parse_arena::ParseArena, expr: &Expression) -> ParenKind {
     let opt_braces = parsetree_viewer::process_braces_attr(arena, expr);
     match opt_braces {
-        Some(attr) => ParenKind::Braced(attr.0.loc.clone()),
+        Some(attr) => ParenKind::Braced(attr.0.loc),
         None => match &expr.pexp_desc {
             // module(M: S) doesn't need parens
             ExpressionDesc::Pexp_constraint(inner, typ)
@@ -502,7 +502,7 @@ pub fn set_field_expr_rhs(arena: &crate::parse_arena::ParseArena, expr: &Express
 pub fn ternary_operand(arena: &crate::parse_arena::ParseArena, expr: &Expression) -> ParenKind {
     let opt_braces = parsetree_viewer::process_braces_attr(arena, expr);
     match opt_braces {
-        Some(attr) => ParenKind::Braced(attr.0.loc.clone()),
+        Some(attr) => ParenKind::Braced(attr.0.loc),
         None => match &expr.pexp_desc {
             // module(M: S) doesn't need parens
             ExpressionDesc::Pexp_constraint(inner, typ)
@@ -540,7 +540,7 @@ pub fn jsx_prop_expr(arena: &crate::parse_arena::ParseArena, expr: &Expression) 
         _ => {
             let opt_braces = parsetree_viewer::process_braces_attr(arena, expr);
             match opt_braces {
-                Some(attr) => ParenKind::Braced(attr.0.loc.clone()),
+                Some(attr) => ParenKind::Braced(attr.0.loc),
                 None => {
                     match &expr.pexp_desc {
                         ExpressionDesc::Pexp_constant(
@@ -595,7 +595,7 @@ pub fn jsx_child_expr(arena: &crate::parse_arena::ParseArena, expr: &Expression)
         _ => {
             let opt_braces = parsetree_viewer::process_braces_attr(arena, expr);
             match opt_braces {
-                Some(attr) => ParenKind::Braced(attr.0.loc.clone()),
+                Some(attr) => ParenKind::Braced(attr.0.loc),
                 None => {
                     match &expr.pexp_desc {
                         ExpressionDesc::Pexp_constant(
@@ -644,7 +644,7 @@ pub fn jsx_child_expr(arena: &crate::parse_arena::ParseArena, expr: &Expression)
 pub fn binary_expr(arena: &crate::parse_arena::ParseArena, expr: &Expression) -> ParenKind {
     let opt_braces = parsetree_viewer::process_braces_attr(arena, expr);
     match opt_braces {
-        Some(attr) => ParenKind::Braced(attr.0.loc.clone()),
+        Some(attr) => ParenKind::Braced(attr.0.loc),
         None => {
             if !expr.pexp_attributes.is_empty() && parsetree_viewer::is_binary_expression(arena, expr) {
                 ParenKind::Parenthesized

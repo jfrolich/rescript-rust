@@ -262,7 +262,7 @@ fn parse_value_path_after_dot(p: &mut Parser<'_>) -> Located<LidentIdx> {
                     _ => {
                         // OCaml: parse_value_path_tail emits error and adds "_" for missing ident
                         p.err_unexpected();
-                        let underscore_idx = p.arena_mut().push_string("_".to_string());
+                        let underscore_idx = p.arena_mut().intern_string("_");
                         path = Longident::Ldot(Box::new(path), underscore_idx);
                         break;
                     }
@@ -3704,7 +3704,7 @@ fn parse_braced_arrow_ident(p: &mut Parser<'_>, start_pos_idx: PosIdx) -> Expres
 
     // The pattern location is from `{` to end of ident (like OCaml)
     let pat_loc = p.mk_loc_idx(start_pos_idx, ident_end_idx);
-    let var_loc = pat_loc.clone();
+    let var_loc = pat_loc;
 
     // Create the pattern with extended location
     let str_idx = p.arena_mut().push_string(ident_name);
@@ -6322,7 +6322,7 @@ fn parse_template_literal_with_prefix(
 
         let mut iter = subparts.into_iter();
         let first = iter.next().unwrap_or_else(|| {
-            ast_helper::make_constant(Constant::String("".to_string(), part_prefix), loc.clone())
+            ast_helper::make_constant(Constant::String("".to_string(), part_prefix), loc)
         });
 
         iter.fold(first, concat)
@@ -6341,65 +6341,15 @@ fn parse_template_literal(p: &mut Parser<'_>) -> Expression {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::mpsc;
-    use std::thread;
-    use std::time::Duration;
-
-    /// Default timeout for parsing operations (5 seconds - very generous for ms-scale ops)
-    const PARSE_TIMEOUT: Duration = Duration::from_secs(5);
 
     /// Parse source code into an expression with a timeout.
-    /// Panics if parsing takes longer than PARSE_TIMEOUT.
     fn parse_expr_with_timeout(source: &str) -> Expression {
-        let source_owned = source.to_string();
-        let source_for_error = source_owned.clone();
-        let (tx, rx) = mpsc::channel();
-
-        thread::spawn(move || {
-            let mut parser = Parser::new("test.res", &source_owned);
-            let expr = parse_expr(&mut parser);
-            let _ = tx.send(expr);
-        });
-
-        match rx.recv_timeout(PARSE_TIMEOUT) {
-            Ok(result) => result,
-            Err(mpsc::RecvTimeoutError::Timeout) => {
-                panic!(
-                    "Parser timed out after {:?} for input: {}",
-                    PARSE_TIMEOUT, source_for_error
-                )
-            }
-            Err(mpsc::RecvTimeoutError::Disconnected) => {
-                panic!("Parser thread panicked for input: {}", source_for_error)
-            }
-        }
+        crate::parser::test_utils::parse_with_timeout(source, parse_expr)
     }
 
     /// Parse source code into a constant with a timeout.
-    /// Panics if parsing takes longer than PARSE_TIMEOUT.
     fn parse_constant_with_timeout(source: &str) -> Constant {
-        let source_owned = source.to_string();
-        let source_for_error = source_owned.clone();
-        let (tx, rx) = mpsc::channel();
-
-        thread::spawn(move || {
-            let mut parser = Parser::new("test.res", &source_owned);
-            let c = parse_constant(&mut parser);
-            let _ = tx.send(c);
-        });
-
-        match rx.recv_timeout(PARSE_TIMEOUT) {
-            Ok(result) => result,
-            Err(mpsc::RecvTimeoutError::Timeout) => {
-                panic!(
-                    "Parser timed out after {:?} for input: {}",
-                    PARSE_TIMEOUT, source_for_error
-                )
-            }
-            Err(mpsc::RecvTimeoutError::Disconnected) => {
-                panic!("Parser thread panicked for input: {}", source_for_error)
-            }
-        }
+        crate::parser::test_utils::parse_with_timeout(source, parse_constant)
     }
 
     #[test]

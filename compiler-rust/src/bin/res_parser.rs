@@ -161,7 +161,7 @@ fn main() {
     // This matches OCaml's for_printer flag behavior
     let mode = match args.print.as_str() {
         "sexp" | "sexp-locs" | "sexp0-locs" | "res" | "ast" => ParserMode::Default,
-        "ml" | _ => ParserMode::ParseForTypeChecker,
+        _ => ParserMode::ParseForTypeChecker,
     };
 
     // Parse the file

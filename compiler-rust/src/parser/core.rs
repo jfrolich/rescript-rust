@@ -284,8 +284,8 @@ where
     F: Fn(&str) -> String,
 {
     let keyword_txt = format!("{}", p.token);
-    let keyword_start = p.start_pos.clone();
-    let keyword_end = p.end_pos.clone();
+    let keyword_start = p.start_pos;
+    let keyword_end = p.end_pos;
     p.err_at(
         keyword_start,
         keyword_end,
@@ -345,8 +345,8 @@ pub fn parse_ident(p: &mut Parser<'_>, msg: &str, start_pos_idx: PosIdx) -> (Str
                 token_txt, token_txt
             );
             p.err_at(
-                p.arena().get_position(start_pos_idx).clone(),
-                p.end_pos.clone(),
+                *p.arena().get_position(start_pos_idx),
+                p.end_pos,
                 DiagnosticCategory::Message(err_msg),
             );
             p.next();
@@ -355,8 +355,8 @@ pub fn parse_ident(p: &mut Parser<'_>, msg: &str, start_pos_idx: PosIdx) -> (Str
         }
         _ => {
             p.err_at(
-                p.arena().get_position(start_pos_idx).clone(),
-                p.end_pos.clone(),
+                *p.arena().get_position(start_pos_idx),
+                p.end_pos,
                 DiagnosticCategory::Message(msg.to_string()),
             );
             p.next();
@@ -461,7 +461,7 @@ pub fn get_closing_token(token: &Token) -> Token {
         Token::List => Token::Rbrace,
         Token::Dict => Token::Rbrace,
         Token::LessThan => Token::GreaterThan,
-        _ => panic!("get_closing_token: unexpected token {:?}", token),
+        _ => unreachable!("get_closing_token called with non-opening token: {:?}", token),
     }
 }
 
@@ -611,13 +611,13 @@ pub mod ast_helper {
 
     /// Create an identifier expression with arena-allocated longident.
     pub fn make_ident_idx(lid_idx: crate::parse_arena::LidentIdx, loc: Location) -> Expression {
-        make_expr(ExpressionDesc::Pexp_ident(with_loc(lid_idx, loc.clone())), loc)
+        make_expr(ExpressionDesc::Pexp_ident(with_loc(lid_idx, loc)), loc)
     }
 
     /// Create an identifier expression (allocates in arena).
     pub fn make_ident(p: &mut Parser<'_>, lid: Longident, loc: Location) -> Expression {
         let lid_idx = p.push_longident(lid);
-        make_expr(ExpressionDesc::Pexp_ident(with_loc(lid_idx, loc.clone())), loc)
+        make_expr(ExpressionDesc::Pexp_ident(with_loc(lid_idx, loc)), loc)
     }
 
     /// Create a constant expression.
@@ -630,7 +630,7 @@ pub mod ast_helper {
         let lid_idx = p.push_lident_static("()");
         make_expr(
             ExpressionDesc::Pexp_construct(
-                with_loc(lid_idx, loc.clone()),
+                with_loc(lid_idx, loc),
                 None,
             ),
             loc,
@@ -881,8 +881,8 @@ pub fn make_infix_operator(
     let stringified_token = if token == Token::Equal {
         // TODO: could have a totally different meaning like x->fooSet(y)
         p.err_at(
-            p.arena().get_position(start_pos).clone(),
-            p.arena().get_position(end_pos).clone(),
+            *p.arena().get_position(start_pos),
+            *p.arena().get_position(end_pos),
             DiagnosticCategory::Message(
                 "Did you mean `==` here?".to_string(),
             ),
@@ -917,7 +917,7 @@ pub fn is_es6_arrow_expression(p: &mut Parser<'_>, in_ternary: bool) -> bool {
                 matches!(state.token, Token::EqualGreater)
             }
             Token::Lparen => {
-                let prev_end_pos = state.prev_end_pos.clone();
+                let prev_end_pos = state.prev_end_pos;
                 state.next();
                 match &state.token {
                     Token::Rparen => {
@@ -1104,8 +1104,9 @@ mod tests {
     fn test_mk_loc() {
         use crate::parse_arena::ParseArena;
         let mut arena = ParseArena::new();
-        let start = Position::new("test.res", 1, 0, 0);
-        let end = Position::new("test.res", 1, 0, 10);
+        let test_file = arena.intern("test.res");
+        let start = Position::new(test_file, 1, 0, 0);
+        let end = Position::new(test_file, 1, 0, 10);
         let loc_idx = arena.mk_loc_from_positions(&start, &end);
         // Verify the location can be retrieved from the arena
         let full_loc = arena.to_location(loc_idx);
@@ -1115,8 +1116,10 @@ mod tests {
 
     #[test]
     fn test_build_longident() {
+        use crate::parse_arena::ParseArena;
+        let mut arena = ParseArena::new();
         let words = vec!["Foo".to_string(), "Bar".to_string(), "baz".to_string()];
-        let lid = build_longident(&words);
+        let lid = build_longident(&mut arena, &words);
         assert_eq!(lid.to_string(), "Foo.Bar.baz");
     }
 
@@ -1137,19 +1140,25 @@ mod tests {
 
     #[test]
     fn test_recover_default_expr() {
-        let expr = recover::default_expr();
+        use crate::parse_arena::ParseArena;
+        let mut arena = ParseArena::new();
+        let expr = recover::default_expr(&mut arena);
         assert!(matches!(expr.pexp_desc, ExpressionDesc::Pexp_extension(_)));
     }
 
     #[test]
     fn test_recover_default_pattern() {
-        let pat = recover::default_pattern();
+        use crate::parse_arena::ParseArena;
+        let mut arena = ParseArena::new();
+        let pat = recover::default_pattern(&mut arena);
         assert!(matches!(pat.ppat_desc, PatternDesc::Ppat_extension(_)));
     }
 
     #[test]
     fn test_recover_default_type() {
-        let typ = recover::default_type();
+        use crate::parse_arena::ParseArena;
+        let mut arena = ParseArena::new();
+        let typ = recover::default_type(&mut arena);
         assert!(matches!(typ.ptyp_desc, CoreTypeDesc::Ptyp_extension(_)));
     }
 
@@ -1161,14 +1170,18 @@ mod tests {
 
     #[test]
     fn test_ternary_attr() {
-        let attr = ternary_attr();
-        assert_eq!(attr.0.txt, "res.ternary");
+        use crate::parse_arena::ParseArena;
+        let mut arena = ParseArena::new();
+        let attr = ternary_attr(&mut arena);
+        assert_eq!(arena.get_string(attr.0.txt), "res.ternary");
     }
 
     #[test]
     fn test_template_literal_attr() {
-        let attr = template_literal_attr();
-        assert_eq!(attr.0.txt, "res.template");
+        use crate::parse_arena::ParseArena;
+        let mut arena = ParseArena::new();
+        let attr = template_literal_attr(&mut arena);
+        assert_eq!(arena.get_string(attr.0.txt), "res.template");
     }
 
     #[test]
@@ -1206,7 +1219,7 @@ mod tests {
         let loc = LocIdx::none();
         let expr = ast_helper::make_expr(
             ExpressionDesc::Pexp_constant(Constant::Integer("42".to_string(), None)),
-            loc.clone(),
+            loc,
         );
         assert!(matches!(
             expr.pexp_desc,

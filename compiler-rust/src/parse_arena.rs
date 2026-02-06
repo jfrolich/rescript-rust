@@ -1501,12 +1501,13 @@ mod tests {
     #[test]
     fn test_position_push() {
         let mut arena = ParseArena::new();
+        let test_file = arena.intern("test.res");
         let base_count = arena.position_count();
         assert_eq!(base_count, 1); // Pre-allocated none position
 
-        let idx1 = arena.push_pos("test.res", 1, 0, 5);
-        let idx2 = arena.push_pos("test.res", 1, 0, 5);
-        let idx3 = arena.push_pos("test.res", 1, 0, 10);
+        let idx1 = arena.push_pos(test_file, 1, 0, 5);
+        let idx2 = arena.push_pos(test_file, 1, 0, 5);
+        let idx3 = arena.push_pos(test_file, 1, 0, 10);
 
         // Each push creates a new entry (no deduplication)
         assert_ne!(idx1, idx2);
@@ -1519,11 +1520,12 @@ mod tests {
     #[test]
     fn test_location_push() {
         let mut arena = ParseArena::new();
+        let test_file = arena.intern("test.res");
         let base_count = arena.location_count();
         assert_eq!(base_count, 1); // Pre-allocated none location
 
-        let start = arena.push_pos("test.res", 1, 0, 0);
-        let end = arena.push_pos("test.res", 1, 0, 10);
+        let start = arena.push_pos(test_file, 1, 0, 0);
+        let end = arena.push_pos(test_file, 1, 0, 10);
 
         let loc1 = arena.mk_loc(start, end);
         let loc2 = arena.mk_loc(start, end);
@@ -1546,7 +1548,7 @@ mod tests {
         assert_eq!(LocIdx::default(), none_loc);
 
         let pos = arena.get_position(none_pos);
-        assert_eq!(pos.file_name, "_none_");
+        assert_eq!(arena.get_string(pos.file_name), "_none_");
         assert!(arena.loc_ghost(none_loc));
     }
 
@@ -1563,9 +1565,10 @@ mod tests {
     #[test]
     fn test_mk_loc_from_positions() {
         let mut arena = ParseArena::new();
+        let test_file = arena.intern("test.res");
 
-        let start = Position::new("test.res", 1, 0, 0);
-        let end = Position::new("test.res", 1, 0, 10);
+        let start = Position::new(test_file, 1, 0, 0);
+        let end = Position::new(test_file, 1, 0, 10);
 
         let loc = arena.mk_loc_from_positions(&start, &end);
 
@@ -1576,9 +1579,10 @@ mod tests {
     #[test]
     fn test_to_location() {
         let mut arena = ParseArena::new();
+        let test_file = arena.intern("test.res");
 
-        let start = Position::new("test.res", 1, 0, 0);
-        let end = Position::new("test.res", 1, 0, 10);
+        let start = Position::new(test_file, 1, 0, 0);
+        let end = Position::new(test_file, 1, 0, 10);
 
         let loc_idx = arena.mk_loc_from_positions(&start, &end);
         let loc = arena.to_location(loc_idx);
@@ -1591,11 +1595,12 @@ mod tests {
     #[test]
     fn test_mk_loc_spanning() {
         let mut arena = ParseArena::new();
+        let test_file = arena.intern("test.res");
 
-        let pos1 = arena.push_pos("test.res", 1, 0, 0);
-        let pos2 = arena.push_pos("test.res", 1, 0, 5);
-        let pos3 = arena.push_pos("test.res", 2, 20, 25);
-        let pos4 = arena.push_pos("test.res", 2, 20, 30);
+        let pos1 = arena.push_pos(test_file, 1, 0, 0);
+        let pos2 = arena.push_pos(test_file, 1, 0, 5);
+        let pos3 = arena.push_pos(test_file, 2, 20, 25);
+        let pos4 = arena.push_pos(test_file, 2, 20, 30);
 
         let loc1 = arena.mk_loc(pos1, pos2);
         let loc2 = arena.mk_loc(pos3, pos4);

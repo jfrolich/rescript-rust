@@ -38,6 +38,8 @@
 pub mod ast;
 #[cfg(test)]
 pub mod benchmark;
+#[cfg(test)]
+pub(crate) mod test_utils;
 pub mod code_frame;
 pub mod comment;
 pub mod comment_table;

@@ -2463,38 +2463,10 @@ fn parse_extension(p: &mut Parser<'_>) -> Extension {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::mpsc;
-    use std::thread;
-    use std::time::Duration;
-
-    /// Default timeout for parsing operations (5 seconds - very generous for ms-scale ops)
-    const PARSE_TIMEOUT: Duration = Duration::from_secs(5);
 
     /// Parse source code into a type expression with a timeout.
-    /// Panics if parsing takes longer than PARSE_TIMEOUT.
     fn parse_type_with_timeout(source: &str) -> CoreType {
-        let source_owned = source.to_string();
-        let source_for_error = source_owned.clone();
-        let (tx, rx) = mpsc::channel();
-
-        thread::spawn(move || {
-            let mut parser = Parser::new("test.res", &source_owned);
-            let typ = parse_typ_expr(&mut parser);
-            let _ = tx.send(typ);
-        });
-
-        match rx.recv_timeout(PARSE_TIMEOUT) {
-            Ok(result) => result,
-            Err(mpsc::RecvTimeoutError::Timeout) => {
-                panic!(
-                    "Parser timed out after {:?} for input: {}",
-                    PARSE_TIMEOUT, source_for_error
-                )
-            }
-            Err(mpsc::RecvTimeoutError::Disconnected) => {
-                panic!("Parser thread panicked for input: {}", source_for_error)
-            }
-        }
+        crate::parser::test_utils::parse_with_timeout(source, parse_typ_expr)
     }
 
     #[test]
