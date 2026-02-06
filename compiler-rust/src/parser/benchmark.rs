@@ -1,452 +1,363 @@
-//! Parser performance benchmarks comparing Rust vs OCaml parser.
+//! Parser performance benchmarks: Rust bsc vs OCaml bsc (exe-vs-exe).
 //!
-//! These tests ensure the Rust parser is at least as fast as the OCaml parser.
-//! Each test parses real ReScript source files and compares execution times.
-
-use std::path::Path;
-use std::process::Command;
-use std::time::{Duration, Instant};
-
-use super::{module, Parser};
-
-/// Number of iterations for each benchmark
-const BENCHMARK_ITERATIONS: u32 = 100;
-
-/// Maximum allowed slowdown factor (Rust time / OCaml time)
-/// A value of 1.0 means Rust must be at least as fast as OCaml
-/// A value of 1.5 means Rust can be up to 50% slower
-const MAX_SLOWDOWN_FACTOR: f64 = 1.5;
-
-/// Path to the OCaml parser binary (relative to project root)
-const OCAML_PARSER_PATH: &str = "../_build/install/default/bin/res_parser";
-
-/// Benchmark result for a single test
-#[derive(Debug, Clone)]
-pub struct BenchmarkResult {
-    /// Name of the test
-    pub name: String,
-    /// Path to the test file
-    pub file_path: String,
-    /// Size of the source in bytes
-    pub source_size: usize,
-    /// Average time for Rust parser (nanoseconds)
-    pub rust_avg_ns: u64,
-    /// Average time for OCaml parser (nanoseconds)
-    pub ocaml_avg_ns: u64,
-    /// Slowdown factor (Rust / OCaml), <1.0 means Rust is faster
-    pub slowdown_factor: f64,
-    /// Whether Rust is faster than OCaml
-    pub rust_is_faster: bool,
-}
-
-impl BenchmarkResult {
-    /// Check if the benchmark passes (Rust is not too slow)
-    pub fn passes(&self) -> bool {
-        self.slowdown_factor <= MAX_SLOWDOWN_FACTOR
-    }
-}
-
-/// Benchmark the Rust parser on source code
-fn benchmark_rust_parser(source: &str, iterations: u32) -> Duration {
-    let mut total = Duration::ZERO;
-
-    for _ in 0..iterations {
-        let start = Instant::now();
-        let mut parser = Parser::new("benchmark.res", source);
-        let _ = module::parse_structure(&mut parser);
-        total += start.elapsed();
-    }
-
-    total / iterations
-}
-
-/// Benchmark the OCaml parser on a file
-fn benchmark_ocaml_parser(file_path: &str, iterations: u32) -> Option<Duration> {
-    let ocaml_parser = Path::new(OCAML_PARSER_PATH);
-    if !ocaml_parser.exists() {
-        return None;
-    }
-
-    let mut total = Duration::ZERO;
-
-    for _ in 0..iterations {
-        let start = Instant::now();
-        let output = Command::new(ocaml_parser)
-            .arg("-print")
-            .arg("binary") // Fastest output mode
-            .arg(file_path)
-            .output();
-
-        if output.is_err() {
-            return None;
-        }
-
-        total += start.elapsed();
-    }
-
-    Some(total / iterations)
-}
-
-/// Run a benchmark comparing Rust and OCaml parsers
-pub fn run_benchmark(name: &str, file_path: &str) -> Option<BenchmarkResult> {
-    // Read file as raw bytes, converting each byte to a char (Latin-1 encoding).
-    // This matches OCaml's byte-level string handling where each byte is a character.
-    let bytes = std::fs::read(file_path).ok()?;
-    let source: String = bytes.iter().map(|&b| b as char).collect();
-    let source_size = source.len();
-
-    // Warm up
-    let mut parser = Parser::new("warmup.res", &source);
-    let _ = module::parse_structure(&mut parser);
-
-    // Benchmark Rust
-    let rust_duration = benchmark_rust_parser(&source, BENCHMARK_ITERATIONS);
-
-    // Benchmark OCaml
-    let ocaml_duration = benchmark_ocaml_parser(file_path, BENCHMARK_ITERATIONS)?;
-
-    let rust_avg_ns = rust_duration.as_nanos() as u64;
-    let ocaml_avg_ns = ocaml_duration.as_nanos() as u64;
-    let slowdown_factor = rust_avg_ns as f64 / ocaml_avg_ns as f64;
-
-    Some(BenchmarkResult {
-        name: name.to_string(),
-        file_path: file_path.to_string(),
-        source_size,
-        rust_avg_ns,
-        ocaml_avg_ns,
-        slowdown_factor,
-        rust_is_faster: slowdown_factor < 1.0,
-    })
-}
-
-/// Print benchmark results in a table format
-pub fn print_benchmark_results(results: &[BenchmarkResult]) {
-    println!("\n{:-<80}", "");
-    println!(
-        "{:<30} {:>10} {:>12} {:>12} {:>10}",
-        "Test", "Size", "Rust (µs)", "OCaml (µs)", "Factor"
-    );
-    println!("{:-<80}", "");
-
-    for result in results {
-        let status = if result.rust_is_faster {
-            "✓"
-        } else if result.passes() {
-            "○"
-        } else {
-            "✗"
-        };
-
-        println!(
-            "{:<30} {:>10} {:>12.2} {:>12.2} {:>9.2}x {}",
-            result.name,
-            result.source_size,
-            result.rust_avg_ns as f64 / 1000.0,
-            result.ocaml_avg_ns as f64 / 1000.0,
-            result.slowdown_factor,
-            status
-        );
-    }
-
-    println!("{:-<80}", "");
-
-    let passing = results.iter().filter(|r| r.passes()).count();
-    let total = results.len();
-    let faster = results.iter().filter(|r| r.rust_is_faster).count();
-
-    println!(
-        "Results: {}/{} passing, {}/{} faster than OCaml",
-        passing, total, faster, total
-    );
-}
-
-// ============================================================================
-// Tests
-// ============================================================================
+//! Both compilers run as subprocesses with `bsc -bs-ast -o <tmpfile> <input.res>`.
+//! This measures the full parse-to-binary-AST pipeline as seen by the build system.
+//!
+//! Paths are relative to the `compiler-rust/` directory (where Cargo.toml lives),
+//! since `cargo test` sets the working directory to the package root.
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use std::sync::mpsc;
-    use std::thread;
-    use std::time::Duration as StdDuration;
+    use std::path::{Path, PathBuf};
+    use std::process::Command;
+    use std::time::{Duration, Instant};
 
-    /// Timeout for benchmark tests (60 seconds)
-    const BENCHMARK_TIMEOUT: StdDuration = StdDuration::from_secs(60);
+    /// Path to the Rust bsc binary (release build), relative to compiler-rust/
+    const RUST_BSC: &str = "target/release/bsc";
 
-    /// Run a benchmark with timeout protection
-    fn run_benchmark_with_timeout(name: &str, file_path: &str) -> Option<BenchmarkResult> {
-        let name_owned = name.to_string();
-        let name_for_error = name_owned.clone();
-        let file_path = file_path.to_string();
-        let (tx, rx) = mpsc::channel();
+    /// Path to the OCaml bsc binary, relative to compiler-rust/
+    const OCAML_BSC: &str = "../_build/install/default/bin/bsc";
 
-        thread::spawn(move || {
-            let result = run_benchmark(&name_owned, &file_path);
-            let _ = tx.send(result);
-        });
+    /// Number of iterations per benchmark
+    const ITERATIONS: u32 = 50;
 
-        match rx.recv_timeout(BENCHMARK_TIMEOUT) {
-            Ok(result) => result,
-            Err(_) => {
-                eprintln!("Benchmark timed out for: {}", name_for_error);
+    /// Maximum allowed slowdown factor (Rust time / OCaml time).
+    /// 1.0 means Rust must be at least as fast as OCaml.
+    const MAX_SLOWDOWN_FACTOR: f64 = 1.0;
+
+    /// Base path for test files, relative to compiler-rust/
+    const TEST_BASE: &str = "../tests/syntax_tests/data";
+
+    /// Check if both bsc binaries are available and we're running in release mode.
+    /// Benchmarks are only meaningful in release mode to avoid subprocess timing noise.
+    fn binaries_available() -> bool {
+        if cfg!(debug_assertions) {
+            return false;
+        }
+        Path::new(RUST_BSC).exists() && Path::new(OCAML_BSC).exists()
+    }
+
+    /// Resolve a test file path relative to the test base
+    fn test_path(relative: &str) -> PathBuf {
+        Path::new(TEST_BASE).join(relative)
+    }
+
+    /// Run a bsc binary on a source file, writing output to a temp file.
+    /// Returns the elapsed wall-clock time, or None on failure.
+    fn run_bsc(bsc_path: &str, source_file: &Path, output_file: &Path) -> Option<Duration> {
+        let start = Instant::now();
+        let result = Command::new(bsc_path)
+            .arg("-bs-ast")
+            .arg("-o")
+            .arg(output_file)
+            .arg(source_file)
+            .output();
+        let elapsed = start.elapsed();
+
+        match result {
+            Ok(output) if output.status.success() => Some(elapsed),
+            Ok(output) => {
+                eprintln!(
+                    "bsc failed ({}): {}",
+                    bsc_path,
+                    String::from_utf8_lossy(&output.stderr)
+                );
+                None
+            }
+            Err(e) => {
+                eprintln!("Failed to run {}: {}", bsc_path, e);
                 None
             }
         }
     }
 
-    /// Check if OCaml parser is available
-    fn ocaml_parser_available() -> bool {
-        Path::new(OCAML_PARSER_PATH).exists()
+    /// Benchmark a single source file: run both bsc binaries ITERATIONS times,
+    /// return (rust_avg, ocaml_avg) durations.
+    fn benchmark_file(source_file: &Path) -> Option<(Duration, Duration)> {
+        let tmp_dir = tempfile::tempdir().ok()?;
+        let rust_out = tmp_dir.path().join("rust.ast");
+        let ocaml_out = tmp_dir.path().join("ocaml.ast");
+
+        // Warm up (1 run each)
+        run_bsc(RUST_BSC, source_file, &rust_out)?;
+        run_bsc(OCAML_BSC, source_file, &ocaml_out)?;
+
+        // Benchmark Rust bsc
+        let mut rust_total = Duration::ZERO;
+        for _ in 0..ITERATIONS {
+            rust_total += run_bsc(RUST_BSC, source_file, &rust_out)?;
+        }
+
+        // Benchmark OCaml bsc
+        let mut ocaml_total = Duration::ZERO;
+        for _ in 0..ITERATIONS {
+            ocaml_total += run_bsc(OCAML_BSC, source_file, &ocaml_out)?;
+        }
+
+        Some((rust_total / ITERATIONS, ocaml_total / ITERATIONS))
     }
 
-    /// Base path for test files (relative to project root)
-    fn test_file_base() -> &'static str {
-        "../tests/syntax_tests/data/parsing/grammar"
+    /// Print a benchmark result line
+    fn print_result(name: &str, size: u64, rust_us: f64, ocaml_us: f64, factor: f64) {
+        let status = if factor <= 1.0 {
+            "FASTER"
+        } else if factor <= MAX_SLOWDOWN_FACTOR {
+            "OK"
+        } else {
+            "SLOW"
+        };
+        println!(
+            "  {:<40} {:>8} {:>10.0}us {:>10.0}us {:>7.2}x  {}",
+            name, size, rust_us, ocaml_us, factor, status
+        );
     }
 
-    // Individual benchmark tests - each must be at least as fast as OCaml
+    /// Macro to generate individual benchmark tests, reducing boilerplate.
+    macro_rules! benchmark_test {
+        ($test_name:ident, $display_name:expr, $relative_path:expr) => {
+            #[test]
+            fn $test_name() {
+                if !binaries_available() {
+                    eprintln!(
+                        "Skipping benchmark: one or both bsc binaries not found\n  Rust:  {}\n  OCaml: {}",
+                        RUST_BSC, OCAML_BSC
+                    );
+                    return;
+                }
 
-    #[test]
-    fn benchmark_expressions_array() {
-        if !ocaml_parser_available() {
-            eprintln!("Skipping benchmark: OCaml parser not found");
-            return;
-        }
+                let source_file = test_path($relative_path);
+                if !source_file.exists() {
+                    eprintln!("Skipping benchmark: test file not found: {}", source_file.display());
+                    return;
+                }
 
-        let path = format!("{}/expressions/array.res", test_file_base());
-        if let Some(result) = run_benchmark_with_timeout("expressions/array", &path) {
-            println!(
-                "array.res: Rust={:.2}µs OCaml={:.2}µs factor={:.2}x",
-                result.rust_avg_ns as f64 / 1000.0,
-                result.ocaml_avg_ns as f64 / 1000.0,
-                result.slowdown_factor
-            );
-            assert!(
-                result.passes(),
-                "Rust parser is too slow: {:.2}x slower than OCaml (max allowed: {:.2}x)",
-                result.slowdown_factor,
-                MAX_SLOWDOWN_FACTOR
-            );
-        }
-    }
+                let size = std::fs::metadata(&source_file).map(|m| m.len()).unwrap_or(0);
 
-    #[test]
-    fn benchmark_expressions_arrow() {
-        if !ocaml_parser_available() {
-            eprintln!("Skipping benchmark: OCaml parser not found");
-            return;
-        }
+                let (rust_avg, ocaml_avg) = benchmark_file(&source_file)
+                    .expect(&format!("Benchmark failed for {}", $display_name));
 
-        let path = format!("{}/expressions/arrow.res", test_file_base());
-        if let Some(result) = run_benchmark_with_timeout("expressions/arrow", &path) {
-            println!(
-                "arrow.res: Rust={:.2}µs OCaml={:.2}µs factor={:.2}x",
-                result.rust_avg_ns as f64 / 1000.0,
-                result.ocaml_avg_ns as f64 / 1000.0,
-                result.slowdown_factor
-            );
-            assert!(
-                result.passes(),
-                "Rust parser is too slow: {:.2}x slower than OCaml (max allowed: {:.2}x)",
-                result.slowdown_factor,
-                MAX_SLOWDOWN_FACTOR
-            );
-        }
-    }
+                let rust_us = rust_avg.as_nanos() as f64 / 1000.0;
+                let ocaml_us = ocaml_avg.as_nanos() as f64 / 1000.0;
+                let factor = rust_us / ocaml_us;
 
-    #[test]
-    fn benchmark_expressions_binary() {
-        if !ocaml_parser_available() {
-            eprintln!("Skipping benchmark: OCaml parser not found");
-            return;
-        }
+                print_result($display_name, size, rust_us, ocaml_us, factor);
 
-        let path = format!("{}/expressions/binary.res", test_file_base());
-        if let Some(result) = run_benchmark_with_timeout("expressions/binary", &path) {
-            println!(
-                "binary.res: Rust={:.2}µs OCaml={:.2}µs factor={:.2}x",
-                result.rust_avg_ns as f64 / 1000.0,
-                result.ocaml_avg_ns as f64 / 1000.0,
-                result.slowdown_factor
-            );
-            assert!(
-                result.passes(),
-                "Rust parser is too slow: {:.2}x slower than OCaml (max allowed: {:.2}x)",
-                result.slowdown_factor,
-                MAX_SLOWDOWN_FACTOR
-            );
-        }
-    }
-
-    #[test]
-    fn benchmark_expressions_record() {
-        if !ocaml_parser_available() {
-            eprintln!("Skipping benchmark: OCaml parser not found");
-            return;
-        }
-
-        let path = format!("{}/expressions/record.res", test_file_base());
-        if let Some(result) = run_benchmark_with_timeout("expressions/record", &path) {
-            println!(
-                "record.res: Rust={:.2}µs OCaml={:.2}µs factor={:.2}x",
-                result.rust_avg_ns as f64 / 1000.0,
-                result.ocaml_avg_ns as f64 / 1000.0,
-                result.slowdown_factor
-            );
-            assert!(
-                result.passes(),
-                "Rust parser is too slow: {:.2}x slower than OCaml (max allowed: {:.2}x)",
-                result.slowdown_factor,
-                MAX_SLOWDOWN_FACTOR
-            );
-        }
-    }
-
-    #[test]
-    fn benchmark_expressions_switch() {
-        if !ocaml_parser_available() {
-            eprintln!("Skipping benchmark: OCaml parser not found");
-            return;
-        }
-
-        let path = format!("{}/expressions/switch.res", test_file_base());
-        if let Some(result) = run_benchmark_with_timeout("expressions/switch", &path) {
-            println!(
-                "switch.res: Rust={:.2}µs OCaml={:.2}µs factor={:.2}x",
-                result.rust_avg_ns as f64 / 1000.0,
-                result.ocaml_avg_ns as f64 / 1000.0,
-                result.slowdown_factor
-            );
-            assert!(
-                result.passes(),
-                "Rust parser is too slow: {:.2}x slower than OCaml (max allowed: {:.2}x)",
-                result.slowdown_factor,
-                MAX_SLOWDOWN_FACTOR
-            );
-        }
-    }
-
-    #[test]
-    fn benchmark_expressions_jsx() {
-        if !ocaml_parser_available() {
-            eprintln!("Skipping benchmark: OCaml parser not found");
-            return;
-        }
-
-        let path = format!("{}/expressions/jsx.res", test_file_base());
-        if let Some(result) = run_benchmark_with_timeout("expressions/jsx", &path) {
-            println!(
-                "jsx.res: Rust={:.2}µs OCaml={:.2}µs factor={:.2}x",
-                result.rust_avg_ns as f64 / 1000.0,
-                result.ocaml_avg_ns as f64 / 1000.0,
-                result.slowdown_factor
-            );
-            assert!(
-                result.passes(),
-                "Rust parser is too slow: {:.2}x slower than OCaml (max allowed: {:.2}x)",
-                result.slowdown_factor,
-                MAX_SLOWDOWN_FACTOR
-            );
-        }
-    }
-
-    #[test]
-    fn benchmark_expressions_if() {
-        if !ocaml_parser_available() {
-            eprintln!("Skipping benchmark: OCaml parser not found");
-            return;
-        }
-
-        let path = format!("{}/expressions/if.res", test_file_base());
-        if let Some(result) = run_benchmark_with_timeout("expressions/if", &path) {
-            println!(
-                "if.res: Rust={:.2}µs OCaml={:.2}µs factor={:.2}x",
-                result.rust_avg_ns as f64 / 1000.0,
-                result.ocaml_avg_ns as f64 / 1000.0,
-                result.slowdown_factor
-            );
-            assert!(
-                result.passes(),
-                "Rust parser is too slow: {:.2}x slower than OCaml (max allowed: {:.2}x)",
-                result.slowdown_factor,
-                MAX_SLOWDOWN_FACTOR
-            );
-        }
-    }
-
-    #[test]
-    fn benchmark_expressions_apply() {
-        if !ocaml_parser_available() {
-            eprintln!("Skipping benchmark: OCaml parser not found");
-            return;
-        }
-
-        let path = format!("{}/expressions/apply.res", test_file_base());
-        if let Some(result) = run_benchmark_with_timeout("expressions/apply", &path) {
-            println!(
-                "apply.res: Rust={:.2}µs OCaml={:.2}µs factor={:.2}x",
-                result.rust_avg_ns as f64 / 1000.0,
-                result.ocaml_avg_ns as f64 / 1000.0,
-                result.slowdown_factor
-            );
-            assert!(
-                result.passes(),
-                "Rust parser is too slow: {:.2}x slower than OCaml (max allowed: {:.2}x)",
-                result.slowdown_factor,
-                MAX_SLOWDOWN_FACTOR
-            );
-        }
-    }
-
-    /// Comprehensive benchmark test that runs all benchmarks and prints a summary
-    #[test]
-    #[ignore] // Run with `cargo test benchmark_all -- --ignored --nocapture`
-    fn benchmark_all() {
-        if !ocaml_parser_available() {
-            eprintln!("Skipping benchmarks: OCaml parser not found at {}", OCAML_PARSER_PATH);
-            return;
-        }
-
-        let test_files = [
-            ("expressions/array", "expressions/array.res"),
-            ("expressions/arrow", "expressions/arrow.res"),
-            ("expressions/binary", "expressions/binary.res"),
-            ("expressions/block", "expressions/block.res"),
-            ("expressions/constants", "expressions/constants.res"),
-            ("expressions/for", "expressions/for.res"),
-            ("expressions/if", "expressions/if.res"),
-            ("expressions/jsx", "expressions/jsx.res"),
-            ("expressions/record", "expressions/record.res"),
-            ("expressions/switch", "expressions/switch.res"),
-            ("expressions/tuple", "expressions/tuple.res"),
-            ("expressions/while", "expressions/while.res"),
-        ];
-
-        let mut results = Vec::new();
-
-        for (name, file) in &test_files {
-            let path = format!("{}/{}", test_file_base(), file);
-            if let Some(result) = run_benchmark_with_timeout(name, &path) {
-                results.push(result);
-            }
-        }
-
-        print_benchmark_results(&results);
-
-        // Assert all benchmarks pass
-        let failures: Vec<_> = results.iter().filter(|r| !r.passes()).collect();
-        if !failures.is_empty() {
-            for failure in &failures {
-                eprintln!(
-                    "FAIL: {} is {:.2}x slower than OCaml",
-                    failure.name, failure.slowdown_factor
+                assert!(
+                    factor <= MAX_SLOWDOWN_FACTOR,
+                    "Rust bsc is {:.2}x slower than OCaml bsc for {} (max allowed: {:.2}x)",
+                    factor,
+                    $display_name,
+                    MAX_SLOWDOWN_FACTOR
                 );
             }
+        };
+    }
+
+    // ========================================================================
+    // Grammar expression benchmarks (small-medium files)
+    // ========================================================================
+
+    benchmark_test!(
+        benchmark_regex,
+        "grammar/regex",
+        "parsing/grammar/expressions/regex.res"
+    );
+
+    benchmark_test!(
+        benchmark_arrow,
+        "grammar/arrow",
+        "parsing/grammar/expressions/arrow.res"
+    );
+
+    benchmark_test!(
+        benchmark_if,
+        "grammar/if",
+        "parsing/grammar/expressions/if.res"
+    );
+
+    benchmark_test!(
+        benchmark_uncurried_by_default,
+        "grammar/UncurriedByDefault",
+        "parsing/grammar/expressions/UncurriedByDefault.res"
+    );
+
+    benchmark_test!(
+        benchmark_block,
+        "grammar/block",
+        "parsing/grammar/expressions/block.res"
+    );
+
+    benchmark_test!(
+        benchmark_constants,
+        "grammar/constants",
+        "parsing/grammar/expressions/constants.res"
+    );
+
+    benchmark_test!(
+        benchmark_record,
+        "grammar/record",
+        "parsing/grammar/expressions/record.res"
+    );
+
+    benchmark_test!(
+        benchmark_binary,
+        "grammar/binary",
+        "parsing/grammar/expressions/binary.res"
+    );
+
+    benchmark_test!(
+        benchmark_array,
+        "grammar/array",
+        "parsing/grammar/expressions/array.res"
+    );
+
+    benchmark_test!(
+        benchmark_switch,
+        "grammar/switch",
+        "parsing/grammar/expressions/switch.res"
+    );
+
+    benchmark_test!(
+        benchmark_async,
+        "grammar/async",
+        "parsing/grammar/expressions/async.res"
+    );
+
+    benchmark_test!(
+        benchmark_first_class_module,
+        "grammar/firstClassModule",
+        "parsing/grammar/expressions/firstClassModule.res"
+    );
+
+    // ========================================================================
+    // Real-world idempotency benchmarks (large files, 20-60KB)
+    // ========================================================================
+
+    benchmark_test!(
+        benchmark_react_dom_re,
+        "idempotency/ReactDOMRe",
+        "idempotency/reason-react/src/ReactDOMRe.res"
+    );
+
+    benchmark_test!(
+        benchmark_css_legacy_core,
+        "idempotency/Css_Legacy_Core",
+        "idempotency/bs-css/Css_Legacy_Core.res"
+    );
+
+    benchmark_test!(
+        benchmark_arnold,
+        "idempotency/Arnold",
+        "idempotency/genType/src/Arnold.res"
+    );
+
+    benchmark_test!(
+        benchmark_index,
+        "idempotency/index",
+        "idempotency/ludum-dare-46/index.res"
+    );
+
+    benchmark_test!(
+        benchmark_emit_js,
+        "idempotency/EmitJs",
+        "idempotency/genType/src/EmitJs.res"
+    );
+
+    // ========================================================================
+    // Comprehensive benchmark (all files, ignored by default)
+    // ========================================================================
+
+    #[test]
+    #[ignore] // Run with: cargo test --release --lib -- benchmark_all --ignored --nocapture
+    fn benchmark_all() {
+        if !binaries_available() {
+            eprintln!(
+                "Skipping benchmarks: one or both bsc binaries not found\n  Rust:  {}\n  OCaml: {}",
+                RUST_BSC, OCAML_BSC
+            );
+            return;
+        }
+
+        let files: &[(&str, &str)] = &[
+            // Grammar expressions
+            ("grammar/regex", "parsing/grammar/expressions/regex.res"),
+            ("grammar/arrow", "parsing/grammar/expressions/arrow.res"),
+            ("grammar/if", "parsing/grammar/expressions/if.res"),
+            ("grammar/UncurriedByDefault", "parsing/grammar/expressions/UncurriedByDefault.res"),
+            ("grammar/block", "parsing/grammar/expressions/block.res"),
+            ("grammar/constants", "parsing/grammar/expressions/constants.res"),
+            ("grammar/record", "parsing/grammar/expressions/record.res"),
+            ("grammar/binary", "parsing/grammar/expressions/binary.res"),
+            ("grammar/array", "parsing/grammar/expressions/array.res"),
+            ("grammar/switch", "parsing/grammar/expressions/switch.res"),
+            ("grammar/async", "parsing/grammar/expressions/async.res"),
+            ("grammar/firstClassModule", "parsing/grammar/expressions/firstClassModule.res"),
+            // Real-world idempotency files
+            ("idempotency/ReactDOMRe", "idempotency/reason-react/src/ReactDOMRe.res"),
+            ("idempotency/Css_Legacy_Core", "idempotency/bs-css/Css_Legacy_Core.res"),
+            ("idempotency/Arnold", "idempotency/genType/src/Arnold.res"),
+            ("idempotency/index", "idempotency/ludum-dare-46/index.res"),
+            ("idempotency/EmitJs", "idempotency/genType/src/EmitJs.res"),
+        ];
+
+        println!("\n{:-<90}", "");
+        println!(
+            "  {:<40} {:>8} {:>10} {:>10} {:>7}",
+            "Test", "Size", "Rust", "OCaml", "Factor"
+        );
+        println!("{:-<90}", "");
+
+        let mut results: Vec<(&str, f64)> = Vec::new();
+        let mut failures: Vec<(&str, f64)> = Vec::new();
+
+        for &(name, relative_path) in files {
+            let source_file = test_path(relative_path);
+            if !source_file.exists() {
+                eprintln!("  {:<40} SKIPPED (file not found)", name);
+                continue;
+            }
+
+            let size = std::fs::metadata(&source_file).map(|m| m.len()).unwrap_or(0);
+
+            match benchmark_file(&source_file) {
+                Some((rust_avg, ocaml_avg)) => {
+                    let rust_us = rust_avg.as_nanos() as f64 / 1000.0;
+                    let ocaml_us = ocaml_avg.as_nanos() as f64 / 1000.0;
+                    let factor = rust_us / ocaml_us;
+
+                    print_result(name, size, rust_us, ocaml_us, factor);
+                    results.push((name, factor));
+
+                    if factor > MAX_SLOWDOWN_FACTOR {
+                        failures.push((name, factor));
+                    }
+                }
+                None => {
+                    eprintln!("  {:<40} FAILED (benchmark error)", name);
+                }
+            }
+        }
+
+        println!("{:-<90}", "");
+
+        let passing = results.iter().filter(|(_, f)| *f <= MAX_SLOWDOWN_FACTOR).count();
+        let faster = results.iter().filter(|(_, f)| *f < 1.0).count();
+        let total = results.len();
+
+        println!(
+            "  Results: {}/{} passing, {}/{} faster than OCaml",
+            passing, total, faster, total
+        );
+
+        if !failures.is_empty() {
+            println!("\n  Failures:");
+            for (name, factor) in &failures {
+                println!("    {} is {:.2}x slower than OCaml", name, factor);
+            }
             panic!(
-                "{} benchmark(s) failed - Rust parser is too slow",
-                failures.len()
+                "{} benchmark(s) failed - Rust bsc is too slow (max allowed: {:.2}x)",
+                failures.len(),
+                MAX_SLOWDOWN_FACTOR
             );
         }
     }
