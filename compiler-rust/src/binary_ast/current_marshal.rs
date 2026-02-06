@@ -188,6 +188,12 @@ fn should_share_empty_pstr(
     }
 }
 
+fn is_internal_expansive_attr(name: &StringLoc, payload: &Payload, w: &MarshalWriter) -> bool {
+    matches!(payload, Payload::PStr(items) if items.is_empty())
+        && name.loc == LocIdx::default()
+        && w.get_arena().get_string(name.txt) == "internal.expansive"
+}
+
 fn marshal_attribute_payload(
     name: &StringLoc,
     payload: &Payload,
@@ -236,10 +242,23 @@ fn marshal_attribute_list(
         let (name, payload) = head;
         // List cons cell
         w.write_block_header(0, 2);
-        // Attribute tuple
-        w.write_block_header(0, 2);
-        name.marshal(w);
-        marshal_attribute_payload(name, payload, w, share_empty_pstr);
+        if is_internal_expansive_attr(name, payload, w) {
+            if let Some(obj_idx) = w.internal_expansive_attr_tuple() {
+                let d = w.obj_counter() - obj_idx;
+                w.write_shared_ref(d);
+            } else {
+                let obj_idx = w.obj_counter();
+                w.write_block_header(0, 2);
+                name.marshal(w);
+                marshal_attribute_payload(name, payload, w, share_empty_pstr);
+                w.set_internal_expansive_attr_tuple(obj_idx);
+            }
+        } else {
+            // Attribute tuple
+            w.write_block_header(0, 2);
+            name.marshal(w);
+            marshal_attribute_payload(name, payload, w, share_empty_pstr);
+        }
         marshal_attribute_list(tail, w, share_empty_pstr);
     } else {
         // []

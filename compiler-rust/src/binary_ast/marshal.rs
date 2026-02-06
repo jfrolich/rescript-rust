@@ -222,6 +222,10 @@ pub struct MarshalWriter {
     /// within the raw expansion scope.
     raw_template_attr_list_stack: Vec<Option<u32>>,
 
+    /// Shared object index for the canonical `internal.expansive` attribute tuple.
+    /// OCaml prepends `Ast_attributes.internal_expansive` in raw/ffi rewrites,
+    /// and that tuple object is reused across occurrences.
+    internal_expansive_attr_tuple: Option<u32>,
 
     /// Optional reference to ParseArena for LocIdx marshalling.
     /// Set via `set_arena()` before marshalling AST with LocIdx fields.
@@ -273,6 +277,7 @@ impl MarshalWriter {
             extension_depth: 0,
             simple_core_type_table: HashMap::new(),
             raw_template_attr_list_stack: Vec::new(),
+            internal_expansive_attr_tuple: None,
 
             arena: None,
             obj_counter: 0,
@@ -309,6 +314,7 @@ impl MarshalWriter {
             extension_depth: 0,
             simple_core_type_table: HashMap::new(),
             raw_template_attr_list_stack: Vec::new(),
+            internal_expansive_attr_tuple: None,
 
             arena: None,
             obj_counter: 0,
@@ -401,6 +407,18 @@ impl MarshalWriter {
     }
 
     #[inline]
+    pub fn internal_expansive_attr_tuple(&self) -> Option<u32> {
+        self.internal_expansive_attr_tuple
+    }
+
+    #[inline]
+    pub fn set_internal_expansive_attr_tuple(&mut self, obj_idx: u32) {
+        if self.internal_expansive_attr_tuple.is_none() {
+            self.internal_expansive_attr_tuple = Some(obj_idx);
+        }
+    }
+
+    #[inline]
     pub(crate) fn simple_core_type_table_get(&self, key: &LidentIdx) -> Option<&u32> {
         self.simple_core_type_table.get(key)
     }
@@ -435,6 +453,7 @@ impl MarshalWriter {
         self.jsx_depth = 0;
         self.extension_depth = 0;
         self.simple_core_type_table.clear();
+        self.internal_expansive_attr_tuple = None;
         self.obj_counter = 0;
         self.size_32 = 0;
         self.size_64 = 0;

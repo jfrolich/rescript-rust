@@ -585,7 +585,7 @@ pub fn parse_operand_expr(p: &mut Parser<'_>, context: ExprContext) -> Expressio
                 // Just a regular "async" identifier - continue with primary expr parsing
                 // to handle function calls like async(x)
                 let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
-                let lid_idx = p.push_lident_static("async");
+                let lid_idx = p.push_lident("async");
                 let ident = ast_helper::make_ident_idx(lid_idx, loc);
                 (parse_primary_expr(p, ident, false), false)
             }
