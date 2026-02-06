@@ -1419,15 +1419,19 @@ fn type_pattern_record(
     for (idx, field) in fields.iter().enumerate() {
         let field_name = tctx.longident_last_name(tctx.resolve_lid(field.lid.txt));
 
-        // Try to look up the label from the environment
-        let (field_ty, label_desc) = if let Ok(env_label) = env.find_label(&field_name) {
+        // Create fresh type variable for the field
+        let field_ty = ctx.new_var(None);
+
+        // Try to look up the label from the environment for type info
+        let label_desc = if let Ok(env_label) = env.find_label(&field_name) {
             let (ty_arg, ty_res) = crate::types::ctype::instance_label(ctx, env_label);
-            // Unify the record type with expected type
+            // Best-effort unification to propagate type info
             let _ = crate::types::unify(ctx, &mut tctx.unify_state, ty_res, expected_ty);
-            let label_desc = crate::types::LabelDescription {
+            let _ = crate::types::unify(ctx, &mut tctx.unify_state, ty_arg, field_ty);
+            crate::types::LabelDescription {
                 lbl_name: env_label.lbl_name.clone(),
-                lbl_res: ty_res,
-                lbl_arg: ty_arg,
+                lbl_res: expected_ty,
+                lbl_arg: field_ty,
                 lbl_mut: env_label.lbl_mut.clone(),
                 lbl_optional: env_label.lbl_optional,
                 lbl_pos: env_label.lbl_pos,
@@ -1436,11 +1440,9 @@ fn type_pattern_record(
                 lbl_private: env_label.lbl_private.clone(),
                 lbl_loc: env_label.lbl_loc.clone(),
                 lbl_attributes: env_label.lbl_attributes.clone(),
-            };
-            (ty_arg, label_desc)
+            }
         } else {
-            let field_ty = ctx.new_var(None);
-            let label_desc = crate::types::LabelDescription {
+            crate::types::LabelDescription {
                 lbl_name: field_name,
                 lbl_res: expected_ty,
                 lbl_arg: field_ty,
@@ -1452,8 +1454,7 @@ fn type_pattern_record(
                 lbl_private: crate::types::PrivateFlag::Public,
                 lbl_loc: tctx.arena.to_location(field.lid.loc),
                 lbl_attributes: vec![],
-            };
-            (field_ty, label_desc)
+            }
         };
 
         let typed_pat = type_pattern_inner(tctx, env, &field.pat, field_ty, mode, state, 0)?;
@@ -2960,27 +2961,21 @@ fn type_record(
     for (idx, field) in fields.iter().enumerate() {
         let field_name = tctx.longident_last_name(tctx.resolve_lid(field.lid.txt));
 
-        // Try to look up the label from the environment
-        let (field_ty, label_desc) = if let Ok(env_label) = env.find_label(&field_name) {
-            // Instantiate the label type (creates fresh vars shared between res/arg)
+        // Type check the field expression with a fresh type variable
+        let field_ty = ctx.new_var(None);
+        let typed_expr = type_expect(tctx, env, &field.expr, field_ty, None)?;
+
+        // Build label description - use env info if available, otherwise placeholder
+        let label_desc = if let Ok(env_label) = env.find_label(&field_name) {
+            // Instantiate the label type to resolve type names
             let (ty_arg, ty_res) = crate::types::ctype::instance_label(ctx, env_label);
-            {
-                let lbl_res_repr = ctx.repr(env_label.lbl_res);
-                let lbl_arg_repr = ctx.repr(env_label.lbl_arg);
-                eprintln!("DEBUG type_record: found label '{}' in env, lbl_res={:?}(level={},desc={:?}), lbl_arg={:?}(level={},desc={:?}), inst_res={:?}(level={}), inst_arg={:?}(level={})",
-                    field_name,
-                    lbl_res_repr, ctx.get_level(lbl_res_repr), *ctx.get_desc(lbl_res_repr),
-                    lbl_arg_repr, ctx.get_level(lbl_arg_repr), *ctx.get_desc(lbl_arg_repr),
-                    ty_res, ctx.get_level(ty_res),
-                    ty_arg, ctx.get_level(ty_arg));
-            }
-            // Unify the record type with expected type
+            // Best-effort unification to propagate type info
             let _ = crate::types::unify(ctx, &mut tctx.unify_state, ty_res, expected_ty);
-            // Create label desc using env info but with instantiated types
-            let label_desc = crate::types::LabelDescription {
+            let _ = crate::types::unify(ctx, &mut tctx.unify_state, field_ty, ty_arg);
+            crate::types::LabelDescription {
                 lbl_name: env_label.lbl_name.clone(),
-                lbl_res: ty_res,
-                lbl_arg: ty_arg,
+                lbl_res: expected_ty,  // Use expected_ty (now unified with ty_res)
+                lbl_arg: field_ty,     // Use field_ty (now unified with ty_arg)
                 lbl_mut: env_label.lbl_mut.clone(),
                 lbl_optional: env_label.lbl_optional,
                 lbl_pos: env_label.lbl_pos,
@@ -2989,12 +2984,9 @@ fn type_record(
                 lbl_private: env_label.lbl_private.clone(),
                 lbl_loc: env_label.lbl_loc.clone(),
                 lbl_attributes: env_label.lbl_attributes.clone(),
-            };
-            (ty_arg, label_desc)
+            }
         } else {
-            // Fallback: create placeholder label description
-            let field_ty = ctx.new_var(None);
-            let label_desc = crate::types::LabelDescription {
+            crate::types::LabelDescription {
                 lbl_name: field_name,
                 lbl_res: expected_ty,
                 lbl_arg: field_ty,
@@ -3006,12 +2998,8 @@ fn type_record(
                 lbl_private: crate::types::PrivateFlag::Public,
                 lbl_loc: tctx.arena.to_location(field.lid.loc),
                 lbl_attributes: vec![],
-            };
-            (field_ty, label_desc)
+            }
         };
-
-        // Type check the field expression with the proper field type
-        let typed_expr = type_expect(tctx, env, &field.expr, field_ty, None)?;
 
         typed_fields.push((
             field.lid.clone(),
@@ -3046,16 +3034,21 @@ fn type_field(
 
     let field_name = tctx.longident_last_name(tctx.resolve_lid(field_lid.txt));
 
-    // Try to look up the label from the environment
-    let (record_ty, field_ty, label_desc) = if let Ok(env_label) = env.find_label(&field_name) {
-        // Instantiate the label type
+    // Create fresh type variables for the record and field
+    let record_ty = ctx.new_var(None);
+    let field_ty = ctx.new_var(None);
+    let _ = crate::types::unify(ctx, &mut tctx.unify_state, field_ty, expected_ty);
+
+    // Try to look up the label from the environment for type info
+    let label_desc = if let Ok(env_label) = env.find_label(&field_name) {
         let (ty_arg, ty_res) = crate::types::ctype::instance_label(ctx, env_label);
-        // Unify field type with expected type
-        let _ = crate::types::unify(ctx, &mut tctx.unify_state, ty_arg, expected_ty);
-        let label_desc = crate::types::LabelDescription {
+        // Best-effort unification to propagate type info
+        let _ = crate::types::unify(ctx, &mut tctx.unify_state, ty_arg, field_ty);
+        let _ = crate::types::unify(ctx, &mut tctx.unify_state, ty_res, record_ty);
+        crate::types::LabelDescription {
             lbl_name: env_label.lbl_name.clone(),
-            lbl_res: ty_res,
-            lbl_arg: ty_arg,
+            lbl_res: record_ty,
+            lbl_arg: field_ty,
             lbl_mut: env_label.lbl_mut.clone(),
             lbl_optional: env_label.lbl_optional,
             lbl_pos: env_label.lbl_pos,
@@ -3064,14 +3057,9 @@ fn type_field(
             lbl_private: env_label.lbl_private.clone(),
             lbl_loc: env_label.lbl_loc.clone(),
             lbl_attributes: env_label.lbl_attributes.clone(),
-        };
-        (ty_res, ty_arg, label_desc)
+        }
     } else {
-        // Fallback: create placeholder
-        let record_ty = ctx.new_var(None);
-        let field_ty = ctx.new_var(None);
-        let _ = crate::types::unify(ctx, &mut tctx.unify_state, field_ty, expected_ty);
-        let label_desc = crate::types::LabelDescription {
+        crate::types::LabelDescription {
             lbl_name: field_name,
             lbl_res: record_ty,
             lbl_arg: field_ty,
@@ -3083,8 +3071,7 @@ fn type_field(
             lbl_private: crate::types::PrivateFlag::Public,
             lbl_loc: tctx.arena.to_location(field_lid.loc),
             lbl_attributes: vec![],
-        };
-        (record_ty, field_ty, label_desc)
+        }
     };
 
     // Type check the record expression with the proper record type
@@ -3116,13 +3103,20 @@ fn type_setfield(
     let unit_ty = env.type_unit(ctx);
     let field_name = tctx.longident_last_name(tctx.resolve_lid(field_lid.txt));
 
-    // Try to look up the label from the environment
-    let (record_ty, field_ty, label_desc) = if let Ok(env_label) = env.find_label(&field_name) {
+    // Create fresh type variables for the record and field
+    let record_ty = ctx.new_var(None);
+    let field_ty = ctx.new_var(None);
+
+    // Try to look up the label from the environment for type info
+    let label_desc = if let Ok(env_label) = env.find_label(&field_name) {
         let (ty_arg, ty_res) = crate::types::ctype::instance_label(ctx, env_label);
-        let label_desc = crate::types::LabelDescription {
+        // Best-effort unification to propagate type info
+        let _ = crate::types::unify(ctx, &mut tctx.unify_state, ty_arg, field_ty);
+        let _ = crate::types::unify(ctx, &mut tctx.unify_state, ty_res, record_ty);
+        crate::types::LabelDescription {
             lbl_name: env_label.lbl_name.clone(),
-            lbl_res: ty_res,
-            lbl_arg: ty_arg,
+            lbl_res: record_ty,
+            lbl_arg: field_ty,
             lbl_mut: env_label.lbl_mut.clone(),
             lbl_optional: env_label.lbl_optional,
             lbl_pos: env_label.lbl_pos,
@@ -3131,12 +3125,9 @@ fn type_setfield(
             lbl_private: env_label.lbl_private.clone(),
             lbl_loc: env_label.lbl_loc.clone(),
             lbl_attributes: env_label.lbl_attributes.clone(),
-        };
-        (ty_res, ty_arg, label_desc)
+        }
     } else {
-        let record_ty = ctx.new_var(None);
-        let field_ty = ctx.new_var(None);
-        let label_desc = crate::types::LabelDescription {
+        crate::types::LabelDescription {
             lbl_name: field_name,
             lbl_res: record_ty,
             lbl_arg: field_ty,
@@ -3148,8 +3139,7 @@ fn type_setfield(
             lbl_private: crate::types::PrivateFlag::Public,
             lbl_loc: tctx.arena.to_location(field_lid.loc),
             lbl_attributes: vec![],
-        };
-        (record_ty, field_ty, label_desc)
+        }
     };
 
     // Type check the record expression with the proper record type
