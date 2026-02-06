@@ -852,8 +852,8 @@ fn type_structure_item<'a>(
                                 crate::types::ConstructorTag::CstrBlock(t)
                             };
 
-                            // Create the result type
-                            let res_ty = ctx.new_constr(type_path.clone(), vec![]);
+                            // Create the result type: Tconstr(type_path, type_params)
+                            let res_ty = ctx.new_constr(type_path.clone(), internal_type_params.clone());
 
                             // For inline records, create a synthetic type declaration and
                             // set cstr_args to [Tconstr(path, type_params)] matching OCaml's datarepr.ml
