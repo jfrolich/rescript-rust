@@ -149,9 +149,21 @@ pub struct MarshalWriter {
     /// sharing can match without forcing outer core_type sharing.
     string_lident_table: HashMap<StrIdx, u32>,
 
+    /// Maps shareable Lident StrIdx to object counter (for value-based sharing).
+    /// Used to share common prefixes like `Spice` that are reused by internal PPX.
+    longident_lident_table: HashMap<StrIdx, u32>,
+
+    /// Maps shareable Longident values to object counter (for value-based sharing).
+    /// Used to share repeated `Spice.*` longidents constructed as constants.
+    longident_value_table: HashMap<Longident, u32>,
+
     /// Maps Option<String> values to object counter (for content-based sharing)
     /// This enables sharing of common delimiter values like Some("js")
     option_string_table: HashMap<Option<String>, u32>,
+
+    /// Maps string values to object counter (for content-based sharing)
+    /// Used for shared constant strings in PPX output (e.g. spice keys, delimiters).
+    string_value_table: HashMap<String, u32>,
 
     /// Maps Option<i32> values to object counter (for content-based sharing)
     /// This enables sharing of common arity values like Some(1)
@@ -275,7 +287,10 @@ impl MarshalWriter {
             location_idx_table: HashMap::new(),
             lident_idx_table: HashMap::new(),
             string_lident_table: HashMap::new(),
+            longident_lident_table: HashMap::new(),
+            longident_value_table: HashMap::new(),
             option_string_table: HashMap::new(),
+            string_value_table: HashMap::new(),
             option_i32_table: HashMap::new(),
             arity_idx_table: HashMap::new(),
 
@@ -316,7 +331,10 @@ impl MarshalWriter {
             location_idx_table: HashMap::new(),
             lident_idx_table: HashMap::new(),
             string_lident_table: HashMap::new(),
+            longident_lident_table: HashMap::new(),
+            longident_value_table: HashMap::new(),
             option_string_table: HashMap::new(),
+            string_value_table: HashMap::new(),
             option_i32_table: HashMap::new(),
             arity_idx_table: HashMap::new(),
 
@@ -415,10 +433,7 @@ impl MarshalWriter {
 
     #[inline]
     pub fn raw_template_attr_list(&self) -> Option<u32> {
-        self.raw_template_attr_list_stack
-            .last()
-            .copied()
-            .flatten()
+        self.raw_template_attr_list_stack.last().copied().flatten()
     }
 
     #[inline]
@@ -452,7 +467,6 @@ impl MarshalWriter {
         self.simple_core_type_table.insert(key, obj_idx);
     }
 
-
     /// Get the current object counter value
     pub fn obj_counter(&self) -> u32 {
         self.obj_counter
@@ -467,7 +481,10 @@ impl MarshalWriter {
         self.location_idx_table.clear();
         self.lident_idx_table.clear();
         self.string_lident_table.clear();
+        self.longident_lident_table.clear();
+        self.longident_value_table.clear();
         self.option_string_table.clear();
+        self.string_value_table.clear();
         self.string_loc_table.clear();
         self.lident_loc_table.clear();
         self.arg_label_table.clear();
@@ -644,6 +661,24 @@ impl MarshalWriter {
         self.write_string(&latin1_bytes);
     }
 
+    /// Write a string with content-based sharing.
+    ///
+    /// This is used for PPX-generated constant strings that are physically shared
+    /// in OCaml (e.g. spice key literals, string delimiters). Sharing by value
+    /// here matches OCaml's pointer-based sharing of those literals.
+    pub fn write_str_value_shared(&mut self, s: &str) {
+        if let Some(&obj_idx) = self.string_value_table.get(s) {
+            let d = self.obj_counter - obj_idx;
+            self.write_shared_ref(d);
+            return;
+        }
+
+        // Record the object index BEFORE writing
+        let obj_idx = self.obj_counter;
+        self.write_str(s);
+        self.string_value_table.insert(s.to_string(), obj_idx);
+    }
+
     /// Write a string by StrIdx with arena-based sharing.
     ///
     /// If a string with the same StrIdx has been written before, writes a shared
@@ -663,6 +698,9 @@ impl MarshalWriter {
         let obj_idx = self.obj_counter;
 
         let s = self.get_arena().get_string(idx).to_string();
+        if self.get_arena().is_shareable_literal(&s) && !self.string_value_table.contains_key(&s) {
+            self.string_value_table.insert(s.clone(), obj_idx);
+        }
         // Use Latin-1 conversion: source strings are read as Latin-1 (each byte → char),
         // so non-ASCII chars (0x80-0xFF) are stored as 2-byte UTF-8 in Rust Strings.
         // Convert back to Latin-1 (each char → byte) to match OCaml's byte-level output.
@@ -688,8 +726,10 @@ impl MarshalWriter {
             // DEBUG
             if std::env::var("DEBUG_MARSHAL").is_ok() {
                 let pos = self.get_arena().get_position(idx);
-                eprintln!("SHARE PosIdx({}) at obj_counter={}, obj_idx={}, dist={}, pos=({},{},{})",
-                    idx.0, self.obj_counter, obj_idx, d, pos.line, pos.bol, pos.cnum);
+                eprintln!(
+                    "SHARE PosIdx({}) at obj_counter={}, obj_idx={}, dist={}, pos=({},{},{})",
+                    idx.0, self.obj_counter, obj_idx, d, pos.line, pos.bol, pos.cnum
+                );
             }
             self.write_shared_ref(d);
             return false;
@@ -712,8 +752,10 @@ impl MarshalWriter {
         // Record for future sharing
         // DEBUG
         if std::env::var("DEBUG_MARSHAL").is_ok() {
-            eprintln!("WRITE PosIdx({}) at obj_idx={}, pos=({},{},{})",
-                idx.0, obj_idx, pos.line, pos.bol, pos.cnum);
+            eprintln!(
+                "WRITE PosIdx({}) at obj_idx={}, pos=({},{},{})",
+                idx.0, obj_idx, pos.line, pos.bol, pos.cnum
+            );
         }
         self.position_idx_table.insert(idx, obj_idx);
 
@@ -749,8 +791,10 @@ impl MarshalWriter {
         if std::env::var("DEBUG_MARSHAL").is_ok() {
             let start = self.get_arena().get_position(loc.loc_start);
             let end = self.get_arena().get_position(loc.loc_end);
-            eprintln!("WRITE LocIdx({}) at obj_idx={}, start_pos=({},{},{}), end_pos=({},{},{})",
-                idx.0, obj_idx, start.line, start.bol, start.cnum, end.line, end.bol, end.cnum);
+            eprintln!(
+                "WRITE LocIdx({}) at obj_idx={}, start_pos=({},{},{}), end_pos=({},{},{})",
+                idx.0, obj_idx, start.line, start.bol, start.cnum, end.line, end.bol, end.cnum
+            );
         }
         // Write start and end positions (with sharing by their indices)
         self.write_pos_idx(loc.loc_start);
@@ -831,6 +875,17 @@ impl MarshalWriter {
     /// (used by ArgLabel::Labelled/Optional which should only share with
     /// previously-registered Otag labels, not create new sharing entries).
     pub fn write_string_loc_shared(&mut self, txt: StrIdx, loc: LocIdx, register: bool) {
+        if self
+            .get_arena()
+            .is_shareable_literal(self.get_arena().get_string(txt))
+        {
+            // For shareable literals (spice), avoid sharing the wrapper.
+            self.write_block_header(0, 2);
+            self.write_str_idx(txt);
+            self.write_loc_idx(loc);
+            return;
+        }
+
         let key = (txt, loc);
 
         // Check if this string_loc pair was already written
@@ -913,19 +968,12 @@ impl MarshalWriter {
     }
 
     /// Look up cached value-description `(pval_name, pval_type)` object indices.
-    pub fn vd_name_type_table_get(
-        &self,
-        key: &(StrIdx, LocIdx, LocIdx),
-    ) -> Option<&(u32, u32)> {
+    pub fn vd_name_type_table_get(&self, key: &(StrIdx, LocIdx, LocIdx)) -> Option<&(u32, u32)> {
         self.vd_name_type_table.get(key)
     }
 
     /// Insert value-description `(pval_name, pval_type)` object indices.
-    pub fn vd_name_type_table_insert(
-        &mut self,
-        key: (StrIdx, LocIdx, LocIdx),
-        value: (u32, u32),
-    ) {
+    pub fn vd_name_type_table_insert(&mut self, key: (StrIdx, LocIdx, LocIdx), value: (u32, u32)) {
         self.vd_name_type_table.insert(key, value);
     }
 
@@ -977,8 +1025,9 @@ impl MarshalWriter {
             }
         }
 
-        // Record the object index BEFORE writing
-        let obj_idx = self.obj_counter;
+        // Record the object index BEFORE writing. This remains the object index for
+        // manually-special-cased Ldot constructions below.
+        let mut obj_idx = self.obj_counter;
 
         // Special-case static longidents that share prefix nodes in OCaml.
         let array_set = self.get_arena().array_set_lid();
@@ -993,8 +1042,11 @@ impl MarshalWriter {
                 Longident::Ldot(_, name) => *name,
                 other => {
                     let lid = other.clone();
-                    self.write_longident(&lid);
+                    obj_idx = self.write_longident(&lid);
                     self.lident_idx_table.insert(idx, obj_idx);
+                    if let Some(name_idx) = string_lident_key {
+                        self.string_lident_table.entry(name_idx).or_insert(obj_idx);
+                    }
                     return true;
                 }
             };
@@ -1005,8 +1057,11 @@ impl MarshalWriter {
                 Longident::Ldot(_, name) => *name,
                 other => {
                     let lid = other.clone();
-                    self.write_longident(&lid);
+                    obj_idx = self.write_longident(&lid);
                     self.lident_idx_table.insert(idx, obj_idx);
+                    if let Some(name_idx) = string_lident_key {
+                        self.string_lident_table.entry(name_idx).or_insert(obj_idx);
+                    }
                     return true;
                 }
             };
@@ -1016,8 +1071,11 @@ impl MarshalWriter {
                 Longident::Ldot(_, name) => *name,
                 other => {
                     let lid = other.clone();
-                    self.write_longident(&lid);
+                    obj_idx = self.write_longident(&lid);
                     self.lident_idx_table.insert(idx, obj_idx);
+                    if let Some(name_idx) = string_lident_key {
+                        self.string_lident_table.entry(name_idx).or_insert(obj_idx);
+                    }
                     return true;
                 }
             };
@@ -1027,20 +1085,23 @@ impl MarshalWriter {
                 Longident::Ldot(_, name) => *name,
                 other => {
                     let lid = other.clone();
-                    self.write_longident(&lid);
+                    obj_idx = self.write_longident(&lid);
                     self.lident_idx_table.insert(idx, obj_idx);
+                    if let Some(name_idx) = string_lident_key {
+                        self.string_lident_table.entry(name_idx).or_insert(obj_idx);
+                    }
                     return true;
                 }
             };
             let belt_lident = self.get_arena().belt_lident();
             self.write_ldot_with_prefix_idx(belt_lident, name);
         } else {
-            // Look up the longident in the arena and clone it to end the borrow
+            // Look up the longident in the arena and clone it to end the borrow.
+            // `write_longident` may return a shared object index for value-shared roots.
             let lid = self.get_arena().get_longident(idx).clone();
-            self.write_longident(&lid);
+            obj_idx = self.write_longident(&lid);
         }
 
-        // Record for future sharing
         self.lident_idx_table.insert(idx, obj_idx);
         if let Some(name_idx) = string_lident_key {
             self.string_lident_table.entry(name_idx).or_insert(obj_idx);
@@ -1059,37 +1120,66 @@ impl MarshalWriter {
     /// Write a Longident value directly (internal helper).
     /// This writes the structure without any index-based sharing.
     /// Uses StrIdx-based sharing for the string components.
-    fn write_longident(&mut self, lid: &Longident) {
+    fn write_longident(&mut self, lid: &Longident) -> u32 {
+        let obj_idx = self.obj_counter;
         match lid {
             Longident::Lident(s) => {
-                let should_share = {
+                let should_share_string_lident = {
                     let arena = self.get_arena();
                     *s == arena.ppx_js_str() || arena.get_string(*s) == "string"
                 };
-                if should_share {
-                    if let Some(&obj_idx) = self.string_lident_table.get(s) {
-                        let d = self.obj_counter - obj_idx;
+                if should_share_string_lident {
+                    if let Some(&shared_idx) = self.string_lident_table.get(s) {
+                        let d = self.obj_counter - shared_idx;
                         self.write_shared_ref(d);
-                        return;
+                        return shared_idx;
                     }
                 }
-                let obj_idx = self.obj_counter;
+                if self.get_arena().is_longident_shareable_str(*s) {
+                    if let Some(&shared_idx) = self.longident_lident_table.get(s) {
+                        let d = self.obj_counter - shared_idx;
+                        self.write_shared_ref(d);
+                        return shared_idx;
+                    }
+                }
                 self.write_block_header(0, 1);
                 self.write_str_idx(*s);
-                if should_share {
+                if should_share_string_lident {
                     self.string_lident_table.entry(*s).or_insert(obj_idx);
+                }
+                if self.get_arena().is_longident_shareable_str(*s) {
+                    self.longident_lident_table.insert(*s, obj_idx);
                 }
             }
             Longident::Ldot(prefix, name) => {
+                if self.longident_is_shareable_root(prefix) {
+                    if let Some(&shared_idx) = self.longident_value_table.get(lid) {
+                        let d = self.obj_counter - shared_idx;
+                        self.write_shared_ref(d);
+                        return shared_idx;
+                    }
+                }
                 self.write_block_header(1, 2);
                 self.write_longident(prefix);
                 self.write_str_idx(*name);
+                if self.longident_is_shareable_root(prefix) {
+                    self.longident_value_table.insert(lid.clone(), obj_idx);
+                }
             }
             Longident::Lapply(func, arg) => {
                 self.write_block_header(2, 2);
                 self.write_longident(func);
                 self.write_longident(arg);
             }
+        }
+        obj_idx
+    }
+
+    fn longident_is_shareable_root(&self, lid: &Longident) -> bool {
+        match lid {
+            Longident::Lident(s) => self.get_arena().is_longident_shareable_str(*s),
+            Longident::Ldot(prefix, _) => self.longident_is_shareable_root(prefix),
+            Longident::Lapply(_, _) => false,
         }
     }
 
@@ -1295,18 +1385,26 @@ impl MarshalWriter {
         }
 
         // Check if we've written this exact Option<String> before
-        if let Some(&obj_idx) = self.option_string_table.get(opt) {
-            let d = self.obj_counter - obj_idx;
-            self.write_shared_ref(d);
-            return;
-        }
-
         match opt {
             None => {
                 // None is encoded as integer 0, not a block, so no sharing needed
                 self.write_int(0);
             }
             Some(s) => {
+                if self.get_arena().is_shareable_literal(s) {
+                    // For shareable literals (spice), share the string itself but
+                    // avoid sharing the wrapper to match OCaml's pointer behavior.
+                    self.write_block_header(0, 1);
+                    self.write_str_value_shared(s);
+                    return;
+                }
+
+                if let Some(&obj_idx) = self.option_string_table.get(opt) {
+                    let d = self.obj_counter - obj_idx;
+                    self.write_shared_ref(d);
+                    return;
+                }
+
                 // Record the object index BEFORE writing the block
                 let obj_idx = self.obj_counter;
 
@@ -1320,37 +1418,20 @@ impl MarshalWriter {
         }
     }
 
-    /// Write an Option<i32> with content-based sharing.
-    ///
-    /// This enables sharing of common arity values like Some(1) that appear
-    /// multiple times in the AST. OCaml shares these because they're often the same
-    /// pointer (static values or reused constants).
+    /// Write an Option<i32>.
     ///
     /// - None → integer 0
-    /// - Some(n) → Block(tag=0, [n]) with content-based sharing
+    /// - Some(n) → Block(tag=0, [n])
     pub fn write_option_i32(&mut self, opt: &Option<i32>) {
-        // Check if we've written this exact Option<i32> before
-        if let Some(&obj_idx) = self.option_i32_table.get(opt) {
-            let d = self.obj_counter - obj_idx;
-            self.write_shared_ref(d);
-            return;
-        }
-
         match opt {
             None => {
                 // None is encoded as integer 0, not a block, so no sharing needed
                 self.write_int(0);
             }
             Some(n) => {
-                // Record the object index BEFORE writing the block
-                let obj_idx = self.obj_counter;
-
                 // Write Some(n) as Block(tag=0, [n])
                 self.write_block_header(0, 1);
                 self.write_int(*n as i64);
-
-                // Record for future sharing
-                self.option_i32_table.insert(*opt, obj_idx);
             }
         }
     }
@@ -1408,9 +1489,7 @@ impl MarshalWriter {
     /// - ArityIdx pointing to Some(n) → Block(tag=0, [n]), shared by ArityIdx
     pub fn write_arity_idx(&mut self, idx: ArityIdx) {
         // Get the actual arity value from the arena
-        let arity = self
-            .arena
-            .and_then(|ptr| unsafe { (*ptr).get_arity(idx) });
+        let arity = self.arena.and_then(|ptr| unsafe { (*ptr).get_arity(idx) });
 
         match arity {
             None => {
@@ -1438,7 +1517,6 @@ impl MarshalWriter {
             }
         }
     }
-
 }
 
 #[cfg(test)]
@@ -1532,10 +1610,7 @@ mod tests {
         let mut w = MarshalWriter::new();
         w.write_string(b"hello");
         // PREFIX_SMALL_STRING | 5, then "hello"
-        assert_eq!(
-            w.payload(),
-            &[0x25, b'h', b'e', b'l', b'l', b'o']
-        );
+        assert_eq!(w.payload(), &[0x25, b'h', b'e', b'l', b'l', b'o']);
     }
 
     #[test]
