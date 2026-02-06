@@ -825,7 +825,11 @@ fn transl_type_inner(
                 crate::parser::ast::ClosedFlag::Closed => ctx.new_type(TypeDesc::Tnil),
                 crate::parser::ast::ClosedFlag::Open => ctx.new_var(None),
             };
-            // Fold fields into Tfield chain (OCaml uses fold_left on hash-collected fields)
+            // Sort fields alphabetically to match OCaml's Hashtbl.fold order
+            // (OCaml collects fields into a hash table then folds, producing
+            // hash-bucket order which for small tables with short keys is alphabetical)
+            field_entries.sort_by(|a, b| a.0.cmp(&b.0));
+            // Fold fields into Tfield chain
             let fields_ty = field_entries.iter().fold(ty_init, |rest, (name, field_ty)| {
                 ctx.new_type(TypeDesc::Tfield {
                     name: name.clone(),
