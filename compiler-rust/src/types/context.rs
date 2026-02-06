@@ -199,6 +199,29 @@ impl<'a> TypeContext<'a> {
         self.new_type(TypeDesc::Tconstr { path, args, abbrev })
     }
 
+    /// Create a type constructor at generic level (for type schemes).
+    pub fn new_generic_constr(&self, path: Path, args: Vec<TypeExprRef>) -> TypeExprRef {
+        let abbrev = self.alloc_abbrev(AbbrevMemo::Mnil);
+        self.new_generic_type(TypeDesc::Tconstr { path, args, abbrev })
+    }
+
+    /// Create an arrow type at generic level (for type schemes).
+    pub fn new_generic_arrow(
+        &self,
+        arg_label: ArgLabel,
+        arg_type: TypeExprRef,
+        ret_type: TypeExprRef,
+        arity: Option<i32>,
+    ) -> TypeExprRef {
+        let commutable = self.alloc_commutable(Commutable::Cok);
+        self.new_generic_type(TypeDesc::Tarrow {
+            arg: TypeArg::new(arg_label, arg_type),
+            ret: ret_type,
+            commutable: Commutable::Clink(commutable),
+            arity,
+        })
+    }
+
     /// Create a link type (for unification).
     pub fn new_link(&self, target: TypeExprRef) -> TypeExprRef {
         self.new_type(TypeDesc::Tlink(target))

@@ -829,12 +829,15 @@ pub fn copy_type(ctx: &TypeContext<'_>, ty: TypeExprRef) -> TypeExprRef {
     copy_type_cached(ctx, ty, &mut cache)
 }
 
-/// Copy a type with a cache to preserve sharing.
-/// If the same TypeExprRef is encountered multiple times, the same copy is returned.
+/// Copy a type with a cache to preserve sharing for type variables.
+/// Only Tvar nodes are cached (to preserve sharing for polymorphic types like 'a -> 'a -> 'a).
+/// Tconstr and other structural nodes are NOT cached, creating fresh copies each time.
+/// This matches OCaml's behavior where Tsubst markers preserve sharing for Tvars
+/// but the resulting type structure after unification has distinct Tconstr nodes.
 fn copy_type_cached(ctx: &TypeContext<'_>, ty: TypeExprRef, cache: &mut std::collections::HashMap<TypeExprRef, TypeExprRef>) -> TypeExprRef {
     let ty = ctx.repr(ty);
 
-    // Check cache first to preserve sharing
+    // Check cache first — but only for Tvar (to preserve polymorphic sharing)
     if let Some(&cached) = cache.get(&ty) {
         return cached;
     }
@@ -929,6 +932,9 @@ fn copy_type_cached(ctx: &TypeContext<'_>, ty: TypeExprRef, cache: &mut std::col
         }
     };
 
+    // Track if this is a Tvar copy (for caching)
+    let is_var_copy = matches!(action, CopyAction::NewVar(_));
+
     // Execute the action without holding the borrow
     let result = match action {
         CopyAction::NewVar(name) => ctx.new_var(name),
@@ -964,8 +970,12 @@ fn copy_type_cached(ctx: &TypeContext<'_>, ty: TypeExprRef, cache: &mut std::col
         CopyAction::ReturnSelf => ty,
     };
 
-    // Cache the result to preserve sharing
-    cache.insert(ty, result);
+    // Only cache Tvar copies to preserve sharing for polymorphic types.
+    // We DON'T cache Tconstr/Tarrow/etc so each copy is fresh, avoiding
+    // artificial sharing that would cause incorrect cycle detection.
+    if is_var_copy {
+        cache.insert(ty, result);
+    }
     result
 }
 

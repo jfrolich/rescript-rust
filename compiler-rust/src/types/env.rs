@@ -522,12 +522,15 @@ pub fn initial_env(ctx: &TypeContext<'_>) -> Env {
         env.add_type(id, decl);
     }
 
-    // Create type references for primitives
-    let int_ty = ctx.new_constr(Path::pident(Ident::create_persistent("int")), vec![]);
-    let float_ty = ctx.new_constr(Path::pident(Ident::create_persistent("float")), vec![]);
-    let bool_ty = ctx.new_constr(Path::pident(Ident::create_persistent("bool")), vec![]);
-    let string_ty = ctx.new_constr(Path::pident(Ident::create_persistent("string")), vec![]);
-    let unit_ty = ctx.new_constr(Path::pident(Ident::create_persistent("unit")), vec![]);
+    // Create type references for primitives at generic level.
+    // Using generic level ensures that instance() creates fresh copies
+    // for each use site, matching OCaml's behavior where type schemes
+    // from CMI files are at generic level.
+    let int_ty = ctx.new_generic_constr(Path::pident(Ident::create_persistent("int")), vec![]);
+    let float_ty = ctx.new_generic_constr(Path::pident(Ident::create_persistent("float")), vec![]);
+    let bool_ty = ctx.new_generic_constr(Path::pident(Ident::create_persistent("bool")), vec![]);
+    let string_ty = ctx.new_generic_constr(Path::pident(Ident::create_persistent("string")), vec![]);
+    let unit_ty = ctx.new_generic_constr(Path::pident(Ident::create_persistent("unit")), vec![]);
 
     // Add boolean constructors: true and false
     // false has tag 0, true has tag 1
@@ -603,8 +606,8 @@ pub fn initial_env(ctx: &TypeContext<'_>) -> Env {
     // Add string concatenation
     add_binary_primitive(&mut env, ctx, "++", "%string_concat", string_ty, string_ty, string_ty);
 
-    // Add ignore function
-    let alpha = ctx.new_var(None);
+    // Add ignore function (polymorphic)
+    let alpha = ctx.new_generic_var(None);
     add_unary_primitive(&mut env, ctx, "ignore", "%ignore", alpha, unit_ty);
 
     env
@@ -620,10 +623,9 @@ fn add_binary_primitive(
     arg2_ty: TypeExprRef,
     ret_ty: TypeExprRef,
 ) {
-    // Inner arrow: arg2 -> ret, arity None (partial application gives arity 1)
-    let inner_ty = ctx.new_arrow_simple(arg2_ty, ret_ty);
-    // Outer arrow: arg1 -> (arg2 -> ret), arity 2 (full application)
-    let func_ty = ctx.new_arrow(crate::types::ArgLabel::Nolabel, arg1_ty, inner_ty, Some(2));
+    // Build at generic level so instance() creates fresh copies per use site
+    let inner_ty = ctx.new_generic_arrow(crate::types::ArgLabel::Nolabel, arg2_ty, ret_ty, None);
+    let func_ty = ctx.new_generic_arrow(crate::types::ArgLabel::Nolabel, arg1_ty, inner_ty, Some(2));
     let id = Ident::create_persistent(name);
     // Primitives come from Pervasives module
     let pervasives_id = Ident::create_persistent("Pervasives");
@@ -652,8 +654,8 @@ fn add_unary_primitive(
     arg_ty: TypeExprRef,
     ret_ty: TypeExprRef,
 ) {
-    // Unary operators have arity 1
-    let func_ty = ctx.new_arrow(crate::types::ArgLabel::Nolabel, arg_ty, ret_ty, Some(1));
+    // Build at generic level so instance() creates fresh copies per use site
+    let func_ty = ctx.new_generic_arrow(crate::types::ArgLabel::Nolabel, arg_ty, ret_ty, Some(1));
     let id = Ident::create_persistent(name);
     // Primitives come from Pervasives module
     let pervasives_id = Ident::create_persistent("Pervasives");
