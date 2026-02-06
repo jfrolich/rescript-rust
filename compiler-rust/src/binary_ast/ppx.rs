@@ -2820,6 +2820,147 @@ fn handle_raw(
     }
 }
 
+/// Detect JS function arity from source code.
+/// Matches OCaml's Classify_function.classify_exp behavior.
+fn detect_js_function_arity(code: &str) -> Option<usize> {
+    let trimmed = code.trim();
+    // Arrow function: (x, y) => ... or x => ...
+    if let Some(arrow_pos) = trimmed.find("=>") {
+        let before_arrow = trimmed[..arrow_pos].trim();
+        if before_arrow.starts_with('(') {
+            // (params) => ...
+            if let Some(close) = before_arrow.rfind(')') {
+                let params_str = &before_arrow[1..close].trim();
+                if params_str.is_empty() {
+                    return Some(0);
+                }
+                return Some(params_str.split(',').count());
+            }
+        } else {
+            // single param: x => ...
+            return Some(1);
+        }
+    }
+    // Function declaration: function name(...) { ... }
+    if trimmed.starts_with("function") {
+        if let Some(open) = trimmed.find('(') {
+            if let Some(close) = trimmed[open..].find(')') {
+                let params_str = trimmed[open + 1..open + close].trim();
+                if params_str.is_empty() {
+                    return Some(0);
+                }
+                return Some(params_str.split(',').count());
+            }
+        }
+    }
+    None
+}
+
+/// Handle %ffi extension.
+///
+/// OCaml transforms `%ffi(\`code\`)` into:
+/// ```text
+/// Pexp_constraint(
+///   (_ -> _) for arity 1, or ((_, _) -> _) for arity 2, etc.,
+///   let module J = struct
+///     external unsafe_expr: 'a -> 'a = "#raw_expr"
+///   end in J.unsafe_expr("code")
+/// )
+/// ```
+fn handle_ffi(
+    expr: &Expression,
+    payload: &Payload,
+    arena: &mut ParseArena,
+) -> Expression {
+    // Extract the string from the payload to detect arity
+    let code_str = match payload {
+        Payload::PStr(items) if items.len() == 1 => {
+            if let StructureItemDesc::Pstr_eval(e, _) = &items[0].pstr_desc {
+                if let ExpressionDesc::Pexp_constant(Constant::String(s, _)) = &e.pexp_desc {
+                    Some(s.clone())
+                } else { None }
+            } else { None }
+        }
+        _ => None,
+    };
+
+    let arity = code_str.as_ref().and_then(|s| detect_js_function_arity(s));
+
+    // Create the raw expression (same as %raw with #raw_expr)
+    // For %ffi, expr.pexp_loc is the real location since it's parsed as a regular extension
+    let raw_expr = handle_raw(expr, payload, arena, "#raw_expr", expr.pexp_loc);
+
+    // Wrap in type constraint based on arity
+    if let Some(arity) = arity {
+        let loc = expr.pexp_loc;
+        let none_loc = arena.none_loc();
+
+        let any_type = CoreType {
+            ptyp_desc: CoreTypeDesc::Ptyp_any,
+            ptyp_loc: none_loc,
+            ptyp_attributes: vec![],
+        };
+
+        // Build arrow type: (_, _, ...) -> _ with effective_arity args
+        let effective_arity = if arity == 0 { 1 } else { arity };
+        let args: Vec<_> = (0..effective_arity)
+            .map(|_| TypeArg {
+                attrs: vec![],
+                lbl: ArgLabel::Nolabel,
+                typ: any_type.clone(),
+            })
+            .collect();
+
+        // Build arrow type matching OCaml's Ast_helper.Typ.arrows:
+        // arrows [arg1; arg2] ret => arrow ~arity:(Some n) arg1 (arrow ~arity:None arg2 ret)
+        let total_arity = arena.push_arity(Some(effective_arity as i32));
+        let none_arity = arena.static_arity_none();
+        let arrow_type = {
+            // Build from right to left
+            let mut result = any_type.clone(); // return type
+            for i in (0..args.len()).rev() {
+                let arity = if i == 0 { total_arity } else { none_arity };
+                result = CoreType {
+                    ptyp_desc: CoreTypeDesc::Ptyp_arrow {
+                        arg: Box::new(args[i].clone()),
+                        ret: Box::new(result),
+                        arity,
+                    },
+                    ptyp_loc: loc,
+                    ptyp_attributes: vec![],
+                };
+            }
+            result
+        };
+
+        // Add internal_expansive attribute
+        let internal_expansive_attr: Attribute = (
+            Located {
+                txt: arena.intern_string("internal.expansive"),
+                loc: arena.none_loc(),
+            },
+            Payload::PStr(vec![]),
+        );
+
+        let mut attrs = raw_expr.pexp_attributes.clone();
+        attrs.insert(0, internal_expansive_attr);
+
+        Expression {
+            pexp_desc: ExpressionDesc::Pexp_constraint(
+                Box::new(Expression {
+                    pexp_attributes: attrs,
+                    ..raw_expr
+                }),
+                arrow_type,
+            ),
+            pexp_loc: loc,
+            pexp_attributes: vec![],
+        }
+    } else {
+        raw_expr
+    }
+}
+
 /// Handle %%raw extension at structure level.
 ///
 /// OCaml transforms `%%raw("code")` into:
@@ -8028,7 +8169,7 @@ fn expand_extensions_item(item: &StructureItem, arena: &mut ParseArena) -> Vec<S
             let (ext_name, payload) = ext;
             let name = arena.get_string(ext_name.txt).to_string();
             if name == "raw" {
-                vec![handle_raw_structure(item, payload, arena)]
+                vec![handle_raw_structure(item, payload, arena, ext_name.loc)]
             } else if name == "private" {
                 handle_private_extension(payload, item.pstr_loc, arena)
             } else {
@@ -8081,6 +8222,22 @@ fn expand_extensions_item(item: &StructureItem, arena: &mut ParseArena) -> Vec<S
                 vec![item.clone()]
             }
         }
+        // Reconstruct arrow type locations for external/primitive declarations
+        // OCaml's FFI processing reconstructs the arrow type with ptyp_loc = pval_loc
+        // before type checking, so the typed tree has pval_loc-based locations.
+        StructureItemDesc::Pstr_primitive(vd) => {
+            let pval_type = reconstruct_arrow_type_with_loc(&vd.pval_type, vd.pval_loc, arena);
+            vec![StructureItem {
+                pstr_desc: StructureItemDesc::Pstr_primitive(ValueDescription {
+                    pval_name: vd.pval_name.clone(),
+                    pval_type,
+                    pval_prim: vd.pval_prim.clone(),
+                    pval_attributes: vd.pval_attributes.clone(),
+                    pval_loc: vd.pval_loc,
+                }),
+                pstr_loc: item.pstr_loc,
+            }]
+        }
         _ => vec![item.clone()],
     }
 }
@@ -8091,8 +8248,8 @@ fn expand_extensions_expr(expr: &Expression, arena: &mut ParseArena) -> Expressi
             let (ext_name, payload) = ext;
             let name = arena.get_string(ext_name.txt).to_string();
             match name.as_str() {
-                "raw" => handle_raw(expr, payload, arena, "#raw_expr"),
-                "re" => handle_re(expr, payload, arena),
+                "raw" => handle_raw(expr, payload, arena, "#raw_expr", ext_name.loc),
+                "re" => handle_re(expr, payload, arena, ext_name.loc),
                 "external" => handle_external_ext(expr, payload, arena),
                 _ => expr.clone(),
             }
