@@ -320,6 +320,7 @@ syntax_tests/data/idempotency/nook-exchange/QuicklistOverlay.res
 syntax_tests/data/idempotency/nook-exchange/QuicklistStore.res
 syntax_tests/data/idempotency/nook-exchange/RemoveButton.res
 syntax_tests/data/idempotency/nook-exchange/Repromise.res
+syntax_tests/data/idempotency/nook-exchange/SettingsPage.res
 syntax_tests/data/idempotency/nook-exchange/SettingsStore.res
 syntax_tests/data/idempotency/nook-exchange/TemporaryState.res
 syntax_tests/data/idempotency/nook-exchange/TextPages.res
@@ -647,6 +648,7 @@ syntax_tests/data/idempotency/reason-react-hackernews/app.res
 syntax_tests/data/idempotency/reason-react-hackernews/index.res
 syntax_tests/data/idempotency/reason-react-hackernews/link.res
 syntax_tests/data/idempotency/reason-react/src/React.res
+syntax_tests/data/idempotency/reason-react/src/ReactDOMRe.res
 syntax_tests/data/idempotency/reason-react/src/ReactDOMServerRe.res
 syntax_tests/data/idempotency/reason-react/src/ReactEvent.res
 syntax_tests/data/idempotency/reason-react/src/ReactEvent.resi

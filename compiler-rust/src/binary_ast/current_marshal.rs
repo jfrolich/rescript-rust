@@ -320,9 +320,21 @@ fn is_internal_expansive_attr(name: &StringLoc, payload: &Payload, w: &MarshalWr
         && w.get_arena().get_string(name.txt) == "internal.expansive"
 }
 
-fn should_share_attr_tuple(name: &StringLoc, payload: &Payload, w: &MarshalWriter) -> bool {
-    matches!(payload, Payload::PStr(items) if items.is_empty())
-        && w.get_arena().get_string(name.txt) == "res.await"
+fn should_share_attr_tuple(
+    name: &StringLoc,
+    payload: &Payload,
+    share_empty_pstr: Option<EmptyPayloadShareKind>,
+    w: &MarshalWriter,
+) -> bool {
+    if !matches!(payload, Payload::PStr(items) if items.is_empty()) {
+        return false;
+    }
+
+    match w.get_arena().get_string(name.txt) {
+        "res.await" => true,
+        "res.ternary" => matches!(share_empty_pstr, Some(EmptyPayloadShareKind::ParserAttr)),
+        _ => false,
+    }
 }
 
 fn marshal_attribute_payload(
@@ -401,7 +413,7 @@ fn marshal_attribute_list(
             }
         } else {
             let key = (name.txt, name.loc);
-            if should_share_attr_tuple(name, payload, w) {
+            if should_share_attr_tuple(name, payload, share_empty_pstr, w) {
                 if let Some(&obj_idx) = w.attr_tuple_table_get(&key) {
                     let d = w.obj_counter() - obj_idx;
                     w.write_shared_ref(d);
@@ -555,6 +567,7 @@ fn marshal_attributes(
                 w.write_block_header(0, 2);
 
                 // Check if we've seen this attribute tuple before
+                let share_attr_tuple = should_share_attr_tuple(name, payload, share_empty_pstr, w);
                 if let Some(&obj_idx) = w.singleton_attr_list_table_get(&key) {
                     let d = w.obj_counter() - obj_idx;
                     w.write_shared_ref(d);
@@ -568,6 +581,9 @@ fn marshal_attributes(
                     marshal_attribute_payload(name, payload, w, share_empty_pstr);
 
                     w.singleton_attr_list_table_insert(key, obj_idx);
+                    if share_attr_tuple {
+                        w.attr_tuple_table_insert(key, obj_idx);
+                    }
                 }
 
                 // Write nil (end of list)
@@ -799,46 +815,33 @@ impl Marshal for CoreType {
             _ => None,
         };
 
-        // Share simple builtin core_types created via Ast_literal.No_loc (and type_float).
-        // These are Ptyp_constr with:
-        // - Lident (static)
-        // - no args
-        // - Location.none for both core_type and longident loc
-        // - empty attributes
-        //
-        // OCaml uses module-level constants for these, so they are physically shared.
-        if let CoreTypeDesc::Ptyp_constr(lid, args) = &self.ptyp_desc {
-            if args.is_empty()
-                && self.ptyp_attributes.is_empty()
-                && self.ptyp_loc.is_none()
-                && lid.loc.is_none()
-            {
-                let arena = w.get_arena();
-                if let Longident::Lident(_) = arena.get_longident(lid.txt) {
-                    let name = match arena.get_longident(lid.txt) {
-                        Longident::Lident(idx) => arena.get_string(*idx),
-                        _ => "",
-                    };
-                    if matches!(
-                        name,
-                        "string" | "int" | "float" | "bool" | "unit" | "bigint" | "exn"
-                    ) {
-                        if let Some(&obj_idx) = w.simple_core_type_table_get(&lid.txt) {
-                            let d = w.obj_counter() - obj_idx;
-                            w.write_shared_ref(d);
-                            return;
-                        }
+        // OCaml shares simple builtin `string` core_types (no args, no attrs, no loc)
+        // across repeated generated externals (e.g. inline red/black conversion tests).
+        // Keep this narrow to avoid reintroducing broader core_type over-sharing.
+        if let CoreTypeDesc::Ptyp_constr(lid, types) = &self.ptyp_desc {
+            let should_share_simple_string = self.ptyp_attributes.is_empty()
+                && types.is_empty()
+                && is_none_loc_idx(self.ptyp_loc, w)
+                && is_none_loc_idx(lid.loc, w)
+                && matches!(
+                    w.get_arena().get_longident(lid.txt),
+                    Longident::Lident(name) if w.get_arena().get_string(*name) == "string"
+                );
 
-                        let obj_idx = w.obj_counter();
-                        // core_type = { ptyp_desc; ptyp_loc; ptyp_attributes }
-                        w.write_block_header(0, 3);
-                        self.ptyp_desc.marshal(w);
-                        self.ptyp_loc.marshal(w);
-                        marshal_attributes(&self.ptyp_attributes, w, false, false, share_empty_pstr);
-                        w.simple_core_type_table_insert(lid.txt, obj_idx);
-                        return;
-                    }
+            if should_share_simple_string {
+                if let Some(&obj_idx) = w.simple_core_type_table_get(&lid.txt) {
+                    let d = w.obj_counter() - obj_idx;
+                    w.write_shared_ref(d);
+                    return;
                 }
+
+                let obj_idx = w.obj_counter();
+                w.write_block_header(0, 3);
+                self.ptyp_desc.marshal(w);
+                self.ptyp_loc.marshal(w);
+                marshal_attributes(&self.ptyp_attributes, w, false, false, share_empty_pstr);
+                w.simple_core_type_table_insert(lid.txt, obj_idx);
+                return;
             }
         }
 
@@ -1213,11 +1216,7 @@ impl Marshal for Expression {
             ExpressionDesc::Pexp_letmodule(_, mod_expr, _) if has_await_attr(&mod_expr.pmod_attributes, w)
         );
         let rewritten_expr = w.get_arena().is_rewritten_expr_loc(self.pexp_loc);
-        let share_singleton_attr_tuple = if has_braces_or_ternary {
-            rewritten_expr
-        } else {
-            share_attrs
-        };
+        let share_singleton_attr_tuple = share_attrs;
         let suppress_rewritten_braces =
             rewritten_expr && has_braces_or_ternary && !w.in_extension() && !rewritten_await_letmodule;
         let share_empty_pstr = if !suppress_rewritten_braces
@@ -1837,7 +1836,27 @@ fn marshal_prim_list(prims: &[StrIdx], w: &mut MarshalWriter) {
         }
         for (i, prim) in prims.iter().enumerate() {
             w.write_block_header(0, 2);
-            w.write_str_idx(*prim);
+            // OCaml keeps hyphenated JS prim names (e.g. "aria-details") fresh,
+            // while many other prim strings are physically shared.
+            let share_by_idx = {
+                let prim_str = w.get_arena().get_string(*prim);
+                !prim_str.contains('-')
+                    && !matches!(
+                        prim_str,
+                        "open" | "type" | "begin" | "end" | "in" | "to"
+                    )
+            };
+            if share_by_idx {
+                w.write_str_idx(*prim);
+            } else {
+                let prim_bytes: Vec<u8> = w
+                    .get_arena()
+                    .get_string(*prim)
+                    .chars()
+                    .map(|c| c as u8)
+                    .collect();
+                w.write_string(&prim_bytes);
+            }
             if i == prims.len() - 1 {
                 w.write_int(0);
             }
