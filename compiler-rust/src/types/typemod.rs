@@ -774,6 +774,29 @@ fn type_structure_item<'a>(
                                     let mut internal_labels: Vec<crate::types::LabelDeclaration> = Vec::new();
                                     for lbl in labels {
                                         let (typed_core_type, type_ref) = transl_type(tctx, env, &lbl.pld_type)?;
+                                        // OCaml wraps optional label types in option
+                                        let (typed_core_type, type_ref) = if lbl.pld_optional {
+                                            let option_path = Path::pident(Ident::create_persistent("option"));
+                                            let option_type_ref = ctx.new_constr(option_path.clone(), vec![type_ref]);
+                                            let option_lid = crate::parse_arena::Located {
+                                                txt: arena.placeholder_lid(),
+                                                loc: lbl.pld_type.ptyp_loc,
+                                            };
+                                            let option_typed = TypedCoreType {
+                                                ctyp_desc: TypedCoreTypeDesc::Ttyp_constr(
+                                                    option_path,
+                                                    option_lid,
+                                                    vec![typed_core_type],
+                                                ),
+                                                ctyp_type: option_type_ref,
+                                                ctyp_env: EnvRef(0),
+                                                ctyp_loc: lbl.pld_type.ptyp_loc,
+                                                ctyp_attributes: vec![],
+                                            };
+                                            (option_typed, option_type_ref)
+                                        } else {
+                                            (typed_core_type, type_ref)
+                                        };
                                         let mutable_flag = match lbl.pld_mutable {
                                             crate::parser::ast::MutableFlag::Immutable => crate::types::MutableFlag::Immutable,
                                             crate::parser::ast::MutableFlag::Mutable => crate::types::MutableFlag::Mutable,
@@ -881,6 +904,29 @@ fn type_structure_item<'a>(
                         for lbl in labels {
                             let lbl_name_str = arena.get_string(lbl.pld_name.txt);
                             let (typed_core_type, type_ref) = transl_type(tctx, env, &lbl.pld_type)?;
+                            // OCaml wraps optional label types in option (typedecl.ml lines 616-628)
+                            let (typed_core_type, type_ref) = if lbl.pld_optional {
+                                let option_path = Path::pident(Ident::create_persistent("option"));
+                                let option_type_ref = ctx.new_constr(option_path.clone(), vec![type_ref]);
+                                let option_lid = crate::parse_arena::Located {
+                                    txt: arena.placeholder_lid(),
+                                    loc: lbl.pld_type.ptyp_loc,
+                                };
+                                let option_typed = TypedCoreType {
+                                    ctyp_desc: TypedCoreTypeDesc::Ttyp_constr(
+                                        option_path,
+                                        option_lid,
+                                        vec![typed_core_type],
+                                    ),
+                                    ctyp_type: option_type_ref,
+                                    ctyp_env: EnvRef(0),
+                                    ctyp_loc: lbl.pld_type.ptyp_loc,
+                                    ctyp_attributes: vec![],
+                                };
+                                (option_typed, option_type_ref)
+                            } else {
+                                (typed_core_type, type_ref)
+                            };
                             let mutable_flag = match lbl.pld_mutable {
                                 crate::parser::ast::MutableFlag::Immutable => crate::types::MutableFlag::Immutable,
                                 crate::parser::ast::MutableFlag::Mutable => crate::types::MutableFlag::Mutable,
