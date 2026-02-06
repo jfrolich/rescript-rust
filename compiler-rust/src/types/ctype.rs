@@ -823,6 +823,80 @@ pub fn instance(ctx: &TypeContext<'_>, ty: TypeExprRef) -> TypeExprRef {
     copy_type_cached(ctx, ty, &mut cache)
 }
 
+/// Instantiate a label description, creating fresh type variables for its
+/// result type (record type) and argument type (field type) while sharing
+/// the same variable substitutions between them.
+/// Handles Tpoly unwrapping like OCaml's instance_label in ctype.ml.
+pub fn instance_label(ctx: &TypeContext<'_>, lbl: &super::LabelDescription) -> (TypeExprRef, TypeExprRef) {
+    let mut cache = std::collections::HashMap::new();
+    let ty_res = copy_type_deep(ctx, lbl.lbl_res, &mut cache);
+    // OCaml's instance_label unwraps Tpoly before copying the field type
+    let arg_repr = ctx.repr(lbl.lbl_arg);
+    let ty_arg = {
+        let desc = ctx.get_desc(arg_repr);
+        match &*desc {
+            super::TypeDesc::Tpoly { body, .. } => {
+                copy_type_deep(ctx, *body, &mut cache)
+            }
+            _ => copy_type_deep(ctx, lbl.lbl_arg, &mut cache),
+        }
+    };
+    (ty_arg, ty_res)
+}
+
+/// Deep copy a type, creating fresh type variables regardless of level.
+/// Used for label instantiation where types may not be at GENERIC_LEVEL
+/// but still need fresh copies to avoid sharing across different uses.
+fn copy_type_deep(
+    ctx: &TypeContext<'_>,
+    ty: TypeExprRef,
+    cache: &mut std::collections::HashMap<TypeExprRef, TypeExprRef>,
+) -> TypeExprRef {
+    let ty = ctx.repr(ty);
+
+    if let Some(&cached) = cache.get(&ty) {
+        return cached;
+    }
+
+    let desc = ctx.get_desc(ty);
+    match &*desc {
+        TypeDesc::Tvar(name) => {
+            let fresh = ctx.new_var(name.clone());
+            cache.insert(ty, fresh);
+            fresh
+        }
+        TypeDesc::Tarrow { arg, ret, arity, .. } => {
+            // Create placeholder first to handle cycles
+            let placeholder = ctx.new_var(None);
+            cache.insert(ty, placeholder);
+            let arg_lbl = arg.lbl.clone();
+            let new_arg_typ = copy_type_deep(ctx, arg.typ, cache);
+            let new_ret = copy_type_deep(ctx, *ret, cache);
+            let new_ty = ctx.new_arrow(arg_lbl, new_arg_typ, new_ret, *arity);
+            // Update placeholder to point to the real type
+            ctx.set_desc(placeholder, TypeDesc::Tlink(new_ty));
+            cache.insert(ty, new_ty);
+            new_ty
+        }
+        TypeDesc::Ttuple(types) => {
+            let new_types: Vec<_> = types.iter().map(|t| copy_type_deep(ctx, *t, cache)).collect();
+            ctx.new_tuple(new_types)
+        }
+        TypeDesc::Tconstr { path, args, .. } => {
+            let new_args: Vec<_> = args.iter().map(|t| copy_type_deep(ctx, *t, cache)).collect();
+            ctx.new_constr(path.clone(), new_args)
+        }
+        TypeDesc::Tpoly { body, vars } => {
+            let new_vars: Vec<_> = vars.iter().map(|t| copy_type_deep(ctx, *t, cache)).collect();
+            let new_body = copy_type_deep(ctx, *body, cache);
+            ctx.new_poly(new_body, new_vars)
+        }
+        TypeDesc::Tlink(target) => copy_type_deep(ctx, *target, cache),
+        TypeDesc::Tnil | TypeDesc::Tunivar(_) => ty, // Return as-is
+        _ => ty, // For other types, return as-is for now
+    }
+}
+
 /// Copy a type, creating fresh type variables for generic ones.
 pub fn copy_type(ctx: &TypeContext<'_>, ty: TypeExprRef) -> TypeExprRef {
     let mut cache = std::collections::HashMap::new();

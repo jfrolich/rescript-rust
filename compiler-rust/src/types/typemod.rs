@@ -993,6 +993,28 @@ fn type_structure_item<'a>(
                     new_env.add_constructor(cstr_id, cstr_desc);
                 }
 
+                // Add record labels to environment
+                if let crate::types::TypeKind::TypeRecord(ref labels, ref repres) = internal_decl.type_kind {
+                    // Create the record type reference: Tconstr(type_path, type_params)
+                    let ty_res = ctx.new_constr(type_path.clone(), internal_decl.type_params.clone());
+                    for (pos, ld) in labels.iter().enumerate() {
+                        let lbl_desc = crate::types::LabelDescription {
+                            lbl_name: ld.ld_id.name().to_string(),
+                            lbl_res: ty_res,
+                            lbl_arg: ld.ld_type,
+                            lbl_mut: ld.ld_mutable.clone(),
+                            lbl_optional: ld.ld_optional,
+                            lbl_pos: pos as i32,
+                            lbl_all: crate::types::LabelArrayRef(0), // Placeholder for now
+                            lbl_repres: repres.clone(),
+                            lbl_private: crate::types::PrivateFlag::Public,
+                            lbl_loc: ld.ld_loc.clone(),
+                            lbl_attributes: ld.ld_attributes.clone(),
+                        };
+                        new_env.add_label(ld.ld_id.clone(), lbl_desc);
+                    }
+                }
+
                 // Convert private flag
                 let typ_private = match decl.ptype_private {
                     crate::parser::ast::PrivateFlag::Public => crate::parser::ast::PrivateFlag::Public,
