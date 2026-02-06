@@ -240,6 +240,18 @@ pub struct MarshalWriter {
     /// Depth counter for extension expression context while marshalling.
     extension_depth: u32,
 
+    /// Depth counter for `%external` expression rewrite context.
+    external_ext_depth: u32,
+
+    /// Depth counter for expression pack context (`Pexp_pack`).
+    pack_depth: u32,
+
+    /// Depth counter for expression-level `Pexp_letmodule` context.
+    letmodule_expr_depth: u32,
+
+    /// Depth counter for `Pmty_typeof` module-type context.
+    module_typeof_depth: u32,
+
     /// Shared object indices for simple builtin core_types created via Ast_literal.No_loc.
     /// These are `Ptyp_constr` with no args, Location.none, and empty attributes.
     simple_core_type_table: HashMap<LidentIdx, u32>,
@@ -249,6 +261,12 @@ pub struct MarshalWriter {
     /// payload expression is reused, so we mirror that by sharing the list
     /// within the raw expansion scope.
     raw_template_attr_list_stack: Vec<Option<u32>>,
+
+    /// Shared object indices for `%external` raw letmodule expressions by location.
+    /// OCaml's `%external` rewrite reuses one `raw_exp` node in both `typeof(raw_exp)`
+    /// and the `else raw_exp` branch; Rust clones that node, so we restore sharing
+    /// here using the extension location as identity.
+    raw_expansion_expr_table: HashMap<LocIdx, u32>,
 
     /// Shared object index for the canonical `internal.expansive` attribute tuple.
     /// OCaml prepends `Ast_attributes.internal_expansive` in raw/ffi rewrites,
@@ -310,8 +328,13 @@ impl MarshalWriter {
             prim_list_table: [None; PrimListShareKind::COUNT],
             jsx_depth: 0,
             extension_depth: 0,
+            external_ext_depth: 0,
+            pack_depth: 0,
+            letmodule_expr_depth: 0,
+            module_typeof_depth: 0,
             simple_core_type_table: HashMap::new(),
             raw_template_attr_list_stack: Vec::new(),
+            raw_expansion_expr_table: HashMap::new(),
             internal_expansive_attr_tuple: None,
 
             arena: None,
@@ -354,8 +377,13 @@ impl MarshalWriter {
             prim_list_table: [None; PrimListShareKind::COUNT],
             jsx_depth: 0,
             extension_depth: 0,
+            external_ext_depth: 0,
+            pack_depth: 0,
+            letmodule_expr_depth: 0,
+            module_typeof_depth: 0,
             simple_core_type_table: HashMap::new(),
             raw_template_attr_list_stack: Vec::new(),
+            raw_expansion_expr_table: HashMap::new(),
             internal_expansive_attr_tuple: None,
 
             arena: None,
@@ -417,6 +445,66 @@ impl MarshalWriter {
     }
 
     #[inline]
+    pub fn enter_external_ext(&mut self) {
+        self.external_ext_depth += 1;
+    }
+
+    #[inline]
+    pub fn exit_external_ext(&mut self) {
+        self.external_ext_depth = self.external_ext_depth.saturating_sub(1);
+    }
+
+    #[inline]
+    pub fn in_external_ext(&self) -> bool {
+        self.external_ext_depth > 0
+    }
+
+    #[inline]
+    pub fn enter_pack(&mut self) {
+        self.pack_depth += 1;
+    }
+
+    #[inline]
+    pub fn exit_pack(&mut self) {
+        self.pack_depth = self.pack_depth.saturating_sub(1);
+    }
+
+    #[inline]
+    pub fn in_pack(&self) -> bool {
+        self.pack_depth > 0
+    }
+
+    #[inline]
+    pub fn enter_letmodule_expr(&mut self) {
+        self.letmodule_expr_depth += 1;
+    }
+
+    #[inline]
+    pub fn exit_letmodule_expr(&mut self) {
+        self.letmodule_expr_depth = self.letmodule_expr_depth.saturating_sub(1);
+    }
+
+    #[inline]
+    pub fn in_letmodule_expr(&self) -> bool {
+        self.letmodule_expr_depth > 0
+    }
+
+    #[inline]
+    pub fn enter_module_typeof(&mut self) {
+        self.module_typeof_depth += 1;
+    }
+
+    #[inline]
+    pub fn exit_module_typeof(&mut self) {
+        self.module_typeof_depth = self.module_typeof_depth.saturating_sub(1);
+    }
+
+    #[inline]
+    pub fn in_module_typeof(&self) -> bool {
+        self.module_typeof_depth > 0
+    }
+
+    #[inline]
     pub fn enter_raw_expansion(&mut self) {
         self.raw_template_attr_list_stack.push(None);
     }
@@ -443,6 +531,16 @@ impl MarshalWriter {
                 *slot = Some(obj_idx);
             }
         }
+    }
+
+    #[inline]
+    pub fn raw_expansion_expr(&self, loc: LocIdx) -> Option<u32> {
+        self.raw_expansion_expr_table.get(&loc).copied()
+    }
+
+    #[inline]
+    pub fn set_raw_expansion_expr(&mut self, loc: LocIdx, obj_idx: u32) {
+        self.raw_expansion_expr_table.entry(loc).or_insert(obj_idx);
     }
 
     #[inline]
@@ -497,7 +595,12 @@ impl MarshalWriter {
         self.prim_list_table = [None; PrimListShareKind::COUNT];
         self.jsx_depth = 0;
         self.extension_depth = 0;
+        self.external_ext_depth = 0;
+        self.pack_depth = 0;
+        self.letmodule_expr_depth = 0;
+        self.module_typeof_depth = 0;
         self.simple_core_type_table.clear();
+        self.raw_expansion_expr_table.clear();
         self.internal_expansive_attr_tuple = None;
         self.obj_counter = 0;
         self.size_32 = 0;
@@ -977,6 +1080,11 @@ impl MarshalWriter {
         self.vd_name_type_table.insert(key, value);
     }
 
+    /// Look up a `LocIdx` object index in the location sharing table.
+    pub fn location_idx_table_get(&self, key: &LocIdx) -> Option<&u32> {
+        self.location_idx_table.get(key)
+    }
+
     /// Look up a tyvar core_type in the sharing table.
     /// Used to share Ptyp_var core_types from from_labels (handle_obj).
     pub fn tyvar_core_type_table_get(&self, key: &(String, LocIdx)) -> Option<&u32> {
@@ -1380,7 +1488,23 @@ impl MarshalWriter {
         // Avoid global content-based sharing for this delimiter.
         if matches!(opt, Some(s) if s == "json") {
             self.write_block_header(0, 1);
-            self.write_str("json");
+            match opt {
+                Some(s) => self.write_str(s),
+                None => self.write_int(0),
+            }
+            return;
+        }
+
+        // `%external` rewrites use Some("") delimiters with a shared inner string
+        // but fresh wrapper allocation.
+        if matches!(opt, Some(s) if s.is_empty()) && self.in_external_ext() {
+            self.write_block_header(0, 1);
+            if self.arena.is_some() {
+                let empty_idx = self.get_arena().ppx_empty_str();
+                self.write_str_idx(empty_idx);
+            } else {
+                self.write_str("");
+            }
             return;
         }
 

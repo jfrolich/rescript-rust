@@ -78,6 +78,15 @@ fn has_template_literal_attr(attrs: &Attributes, w: &MarshalWriter) -> bool {
         .any(|(name, _)| arena.get_string(name.txt) == "res.template")
 }
 
+fn marshal_ptyp_var_desc(name: &str, loc: LocIdx, w: &mut MarshalWriter) {
+    w.write_block_header(0, 1);
+    if let Some(source_idx) = w.get_arena().tyvar_source_str(loc) {
+        w.write_str_idx(source_idx);
+    } else {
+        w.write_str(name);
+    }
+}
+
 fn has_braces_attr(attrs: &Attributes, w: &MarshalWriter) -> bool {
     let arena = w.get_arena();
     attrs
@@ -90,6 +99,13 @@ fn has_ternary_attr(attrs: &Attributes, w: &MarshalWriter) -> bool {
     attrs
         .iter()
         .any(|(name, _)| arena.get_string(name.txt) == "res.ternary")
+}
+
+fn has_await_attr(attrs: &Attributes, w: &MarshalWriter) -> bool {
+    let arena = w.get_arena();
+    attrs
+        .iter()
+        .any(|(name, _)| arena.get_string(name.txt) == "res.await")
 }
 
 fn should_share_singleton_attr_list(name: &str) -> bool {
@@ -114,6 +130,14 @@ fn is_singleton_template_attr(attrs: &Attributes, w: &MarshalWriter) -> bool {
         }
         _ => false,
     }
+}
+
+fn is_none_loc_idx(loc: LocIdx, w: &MarshalWriter) -> bool {
+    if loc.is_none() {
+        return true;
+    }
+    let interned = w.get_arena().get_location(loc);
+    interned.loc_ghost && interned.loc_start.0 == 0 && interned.loc_end.0 == 0
 }
 
 fn is_raw_expansion_expr(expr: &Expression, w: &MarshalWriter) -> bool {
@@ -168,6 +192,108 @@ fn is_raw_expansion_expr(expr: &Expression, w: &MarshalWriter) -> bool {
     }
 }
 
+fn is_external_ext_expr(expr: &Expression, w: &MarshalWriter) -> bool {
+    let arena = w.get_arena();
+
+    let ExpressionDesc::Pexp_apply {
+        funct: outer_funct,
+        args: outer_args,
+        ..
+    } = &expr.pexp_desc
+    else {
+        return false;
+    };
+    if outer_args.len() != 1 || !matches!(outer_args[0].0, ArgLabel::Nolabel) {
+        return false;
+    }
+    let ExpressionDesc::Pexp_ident(outer_lid) = &outer_funct.pexp_desc else {
+        return false;
+    };
+    if outer_lid.txt != arena.ppx_js_undefined_to_option_lid() {
+        return false;
+    }
+
+    let ExpressionDesc::Pexp_ifthenelse(cond, then_expr, Some(else_expr)) = &outer_args[0].1.pexp_desc else {
+        return false;
+    };
+    if !is_external_raw_expansion_expr(else_expr, w) {
+        return false;
+    }
+    if !matches!(
+        &then_expr.pexp_desc,
+        ExpressionDesc::Pexp_ident(then_lid) if then_lid.txt == arena.ppx_js_undefined_empty_lid()
+    ) {
+        return false;
+    }
+
+    let ExpressionDesc::Pexp_apply {
+        funct: eq_funct,
+        args: eq_args,
+        ..
+    } = &cond.pexp_desc
+    else {
+        return false;
+    };
+    if eq_args.len() != 2
+        || !matches!(eq_args[0].0, ArgLabel::Nolabel)
+        || !matches!(eq_args[1].0, ArgLabel::Nolabel)
+    {
+        return false;
+    }
+    if !matches!(
+        &eq_funct.pexp_desc,
+        ExpressionDesc::Pexp_ident(eq_lid)
+            if matches!(arena.get_longident(eq_lid.txt), Longident::Lident(s) if *s == arena.ppx_eq_str())
+    ) {
+        return false;
+    }
+
+    let ExpressionDesc::Pexp_apply {
+        funct: typeof_funct,
+        args: typeof_args,
+        ..
+    } = &eq_args[0].1.pexp_desc
+    else {
+        return false;
+    };
+    if typeof_args.len() != 1 || !matches!(typeof_args[0].0, ArgLabel::Nolabel) {
+        return false;
+    }
+    if !matches!(
+        &typeof_funct.pexp_desc,
+        ExpressionDesc::Pexp_ident(typeof_lid) if typeof_lid.txt == arena.ppx_js_typeof_lid()
+    ) {
+        return false;
+    }
+    if !is_external_raw_expansion_expr(&typeof_args[0].1, w) {
+        return false;
+    }
+
+    matches!(
+        &eq_args[1].1.pexp_desc,
+        ExpressionDesc::Pexp_constant(Constant::String(s, None)) if s == "undefined"
+    )
+}
+
+fn is_external_raw_expansion_expr(expr: &Expression, w: &MarshalWriter) -> bool {
+    if !is_raw_expansion_expr(expr, w) {
+        return false;
+    }
+    let ExpressionDesc::Pexp_letmodule(_, _, body) = &expr.pexp_desc else {
+        return false;
+    };
+    let ExpressionDesc::Pexp_apply { args, .. } = &body.pexp_desc else {
+        return false;
+    };
+    if args.len() != 1 || !matches!(args[0].0, ArgLabel::Nolabel) {
+        return false;
+    }
+    matches!(
+        &args[0].1.pexp_desc,
+        ExpressionDesc::Pexp_constant(Constant::String(_, Some(delim))) if delim.is_empty()
+    )
+}
+
 fn should_share_empty_pstr(
     kind: EmptyPayloadShareKind,
     name: &StringLoc,
@@ -192,6 +318,11 @@ fn is_internal_expansive_attr(name: &StringLoc, payload: &Payload, w: &MarshalWr
     matches!(payload, Payload::PStr(items) if items.is_empty())
         && name.loc == LocIdx::default()
         && w.get_arena().get_string(name.txt) == "internal.expansive"
+}
+
+fn should_share_attr_tuple(name: &StringLoc, payload: &Payload, w: &MarshalWriter) -> bool {
+    matches!(payload, Payload::PStr(items) if items.is_empty())
+        && w.get_arena().get_string(name.txt) == "res.await"
 }
 
 fn marshal_attribute_payload(
@@ -240,6 +371,21 @@ fn marshal_attribute_list(
 
     if let Some((head, tail)) = attrs.split_first() {
         let (name, payload) = head;
+        let payload_is_empty = matches!(payload, Payload::PStr(items) if items.is_empty());
+        let is_singleton_res_await =
+            tail.is_empty() && payload_is_empty && w.get_arena().get_string(name.txt) == "res.await";
+
+        // Even when we must serialize a fresh list cell (e.g. inside Pexp_pack),
+        // remember the first singleton @res.await list so later non-pack sites can
+        // share that exact list object when OCaml does.
+        if is_singleton_res_await && !w.in_pack() {
+            let key = (name.txt, name.loc);
+            if w.singleton_attr_list_table_get(&key).is_none() {
+                let list_obj_idx = w.obj_counter();
+                w.singleton_attr_list_table_insert(key, list_obj_idx);
+            }
+        }
+
         // List cons cell
         w.write_block_header(0, 2);
         if is_internal_expansive_attr(name, payload, w) {
@@ -254,10 +400,24 @@ fn marshal_attribute_list(
                 w.set_internal_expansive_attr_tuple(obj_idx);
             }
         } else {
-            // Attribute tuple
-            w.write_block_header(0, 2);
-            name.marshal(w);
-            marshal_attribute_payload(name, payload, w, share_empty_pstr);
+            let key = (name.txt, name.loc);
+            if should_share_attr_tuple(name, payload, w) {
+                if let Some(&obj_idx) = w.attr_tuple_table_get(&key) {
+                    let d = w.obj_counter() - obj_idx;
+                    w.write_shared_ref(d);
+                } else {
+                    let obj_idx = w.obj_counter();
+                    w.write_block_header(0, 2);
+                    name.marshal(w);
+                    marshal_attribute_payload(name, payload, w, share_empty_pstr);
+                    w.attr_tuple_table_insert(key, obj_idx);
+                }
+            } else {
+                // Attribute tuple
+                w.write_block_header(0, 2);
+                name.marshal(w);
+                marshal_attribute_payload(name, payload, w, share_empty_pstr);
+            }
         }
         marshal_attribute_list(tail, w, share_empty_pstr);
     } else {
@@ -284,6 +444,7 @@ fn marshal_attributes(
     attrs: &Attributes,
     w: &mut MarshalWriter,
     share_singleton: bool,
+    share_parser_singleton_attr: bool,
     share_empty_pstr: Option<EmptyPayloadShareKind>,
 ) {
     let attrs_slice = attrs.as_slice();
@@ -328,7 +489,15 @@ fn marshal_attributes(
     if let [(name, payload)] = attrs_slice {
         if payload_is_empty_str(payload) {
             let name_str = w.get_arena().get_string(name.txt);
-            if should_share_singleton_attr_list(name_str) {
+            // In await rewrites, OCaml shares singleton [@res.await] lists across
+            // record-update/module-typeof paths, but keeps fresh lists inside
+            // `Pexp_pack` (List.filter creates new cons cells there).
+            let share_res_await_list = name_str == "res.await" && !w.in_pack();
+            if should_share_singleton_attr_list(name_str)
+                || share_res_await_list
+                || (share_parser_singleton_attr
+                    && matches!(name_str, "res.braces" | "res.ternary"))
+            {
                 let key = (name.txt, name.loc);
                 if let Some(&obj_idx) = w.singleton_attr_list_table_get(&key) {
                     let d = w.obj_counter() - obj_idx;
@@ -340,9 +509,24 @@ fn marshal_attributes(
                 w.singleton_attr_list_table_insert(key, obj_idx);
 
                 w.write_block_header(0, 2); // cons
-                w.write_block_header(0, 2); // attribute tuple
-                name.marshal(w);
-                marshal_attribute_payload(name, payload, w, share_empty_pstr);
+                if share_res_await_list {
+                    // OCaml can keep list cells fresh while reusing the inner
+                    // tuple object between pack-filtered and outer attrs.
+                    if let Some(&tuple_obj_idx) = w.attr_tuple_table_get(&key) {
+                        let d = w.obj_counter() - tuple_obj_idx;
+                        w.write_shared_ref(d);
+                    } else {
+                        let tuple_obj_idx = w.obj_counter();
+                        w.write_block_header(0, 2); // attribute tuple
+                        name.marshal(w);
+                        marshal_attribute_payload(name, payload, w, share_empty_pstr);
+                        w.attr_tuple_table_insert(key, tuple_obj_idx);
+                    }
+                } else {
+                    w.write_block_header(0, 2); // attribute tuple
+                    name.marshal(w);
+                    marshal_attribute_payload(name, payload, w, share_empty_pstr);
+                }
                 w.write_int(0); // []
                 return;
             }
@@ -362,7 +546,7 @@ fn marshal_attributes(
     if share_singleton {
         if let [(name, payload)] = attrs_slice {
             if payload_is_empty_str(payload)
-                && name.loc == LocIdx::default()
+                && is_none_loc_idx(name.loc, w)
             {
                 let key = (name.txt, name.loc);
 
@@ -487,6 +671,13 @@ impl Marshal for ArgLabel {
         match self {
             ArgLabel::Nolabel => w.write_int(0),
             ArgLabel::Labelled(s) => {
+                let key = (0u8, s.txt, s.loc);
+                if let Some(&obj_idx) = w.arg_label_table_get(&key) {
+                    let d = w.obj_counter() - obj_idx;
+                    w.write_shared_ref(d);
+                    return;
+                }
+                let obj_idx = w.obj_counter();
                 // Labelled has a string loc, which is a record {txt; loc}
                 w.write_block_header(0, 1);
                 // Register for sharing: in OCaml's %obj PPX, the same {txt; loc}
@@ -495,10 +686,19 @@ impl Marshal for ArgLabel {
                 // register so Otag can share it. This is safe because different
                 // parameters always have different (StrIdx, LocIdx) keys.
                 w.write_string_loc_shared(s.txt, s.loc, true);
+                w.arg_label_table_insert(key, obj_idx);
             }
             ArgLabel::Optional(s) => {
+                let key = (1u8, s.txt, s.loc);
+                if let Some(&obj_idx) = w.arg_label_table_get(&key) {
+                    let d = w.obj_counter() - obj_idx;
+                    w.write_shared_ref(d);
+                    return;
+                }
+                let obj_idx = w.obj_counter();
                 w.write_block_header(1, 1);
                 w.write_string_loc_shared(s.txt, s.loc, true);
+                w.arg_label_table_insert(key, obj_idx);
             }
         }
     }
@@ -536,7 +736,10 @@ impl Marshal for Constant {
             }
             Constant::String(s, delim) => {
                 w.write_block_header(2, 2);
-                if w.get_arena().is_shareable_literal(s) {
+                if delim.is_none() && s == "undefined" && w.in_external_ext() {
+                    let undefined_idx = w.get_arena().ppx_undefined_str();
+                    w.write_str_idx(undefined_idx);
+                } else if w.get_arena().is_shareable_literal(s) {
                     w.write_str_value_shared(s);
                 } else {
                     w.write_str(s);
@@ -575,6 +778,7 @@ impl Marshal for TypeArg {
             marshal_attributes(
                 &self.attrs,
                 w,
+                false,
                 false,
                 Some(EmptyPayloadShareKind::ParserAttr),
             );
@@ -630,7 +834,7 @@ impl Marshal for CoreType {
                         w.write_block_header(0, 3);
                         self.ptyp_desc.marshal(w);
                         self.ptyp_loc.marshal(w);
-                        marshal_attributes(&self.ptyp_attributes, w, false, share_empty_pstr);
+                        marshal_attributes(&self.ptyp_attributes, w, false, false, share_empty_pstr);
                         w.simple_core_type_table_insert(lid.txt, obj_idx);
                         return;
                     }
@@ -654,19 +858,27 @@ impl Marshal for CoreType {
                 let obj_idx = w.obj_counter();
                 // core_type = { ptyp_desc; ptyp_loc; ptyp_attributes }
                 w.write_block_header(0, 3);
-                self.ptyp_desc.marshal(w);
+                marshal_ptyp_var_desc(name, self.ptyp_loc, w);
                 self.ptyp_loc.marshal(w);
-                marshal_attributes(&self.ptyp_attributes, w, false, share_empty_pstr);
+                marshal_attributes(&self.ptyp_attributes, w, false, false, share_empty_pstr);
                 w.tyvar_core_type_table_insert(key, obj_idx);
                 return;
             }
+        }
+
+        if let CoreTypeDesc::Ptyp_var(name) = &self.ptyp_desc {
+            w.write_block_header(0, 3);
+            marshal_ptyp_var_desc(name, self.ptyp_loc, w);
+            self.ptyp_loc.marshal(w);
+            marshal_attributes(&self.ptyp_attributes, w, false, false, share_empty_pstr);
+            return;
         }
 
         // core_type = { ptyp_desc; ptyp_loc; ptyp_attributes }
         w.write_block_header(0, 3);
         self.ptyp_desc.marshal(w);
         self.ptyp_loc.marshal(w);
-        marshal_attributes(&self.ptyp_attributes, w, false, share_empty_pstr);
+        marshal_attributes(&self.ptyp_attributes, w, false, false, share_empty_pstr);
     }
 }
 
@@ -730,7 +942,17 @@ impl Marshal for CoreTypeDesc {
             }
             CoreTypeDesc::Ptyp_package(pkg) => {
                 w.write_block_header(8, 1);
-                pkg.marshal(w);
+                // In await-letmodule rewrites, OCaml reuses the same `Longident.t loc`
+                // node between `Pmty_ident` and the generated package constraint.
+                // Keep this narrowly scoped to the pack-inside-letmodule path.
+                let (lid, constraints) = pkg;
+                w.write_block_header(0, 2);
+                if w.in_letmodule_expr() {
+                    w.write_lident_loc_shared(lid.txt, lid.loc);
+                } else {
+                    lid.marshal(w);
+                }
+                constraints.marshal(w);
             }
             CoreTypeDesc::Ptyp_extension(ext) => {
                 w.write_block_header(9, 1);
@@ -771,6 +993,7 @@ impl Marshal for ObjectField {
                     attrs,
                     w,
                     false,
+                    false,
                     Some(EmptyPayloadShareKind::ObjectFieldAttr),
                 );
                 ty.marshal(w);
@@ -789,9 +1012,24 @@ impl Marshal for Pattern {
     fn marshal(&self, w: &mut MarshalWriter) {
         w.write_block_header(0, 3);
         self.ppat_desc.marshal(w);
-        self.ppat_loc.marshal(w);
+        let mut wrote_shared_ppat_loc = false;
+        if let PatternDesc::Ppat_var(name) = &self.ppat_desc {
+            if name.loc != self.ppat_loc {
+                let arena = w.get_arena();
+                if arena.get_location(name.loc) == arena.get_location(self.ppat_loc) {
+                    if let Some(&obj_idx) = w.location_idx_table_get(&name.loc) {
+                        let d = w.obj_counter() - obj_idx;
+                        w.write_shared_ref(d);
+                        wrote_shared_ppat_loc = true;
+                    }
+                }
+            }
+        }
+        if !wrote_shared_ppat_loc {
+            self.ppat_loc.marshal(w);
+        }
         let share_singleton = is_singleton_template_attr(&self.ppat_attributes, w);
-        marshal_attributes(&self.ppat_attributes, w, share_singleton, None);
+        marshal_attributes(&self.ppat_attributes, w, share_singleton, false, None);
     }
 }
 
@@ -919,11 +1157,27 @@ impl Marshal for ExpressionRecordField {
 
 impl Marshal for Expression {
     fn marshal(&self, w: &mut MarshalWriter) {
-        w.write_block_header(0, 3);
         let is_raw_expansion = is_raw_expansion_expr(self, w);
+        let is_external_raw_expansion = is_external_raw_expansion_expr(self, w);
+        let is_external_ext = is_external_ext_expr(self, w);
+        if is_external_raw_expansion {
+            if let Some(obj_idx) = w.raw_expansion_expr(self.pexp_loc) {
+                let d = w.obj_counter() - obj_idx;
+                w.write_shared_ref(d);
+                return;
+            }
+        }
+
+        w.write_block_header(0, 3);
+        if is_external_raw_expansion {
+            w.set_raw_expansion_expr(self.pexp_loc, w.obj_counter() - 1);
+        }
         let is_extension = matches!(self.pexp_desc, ExpressionDesc::Pexp_extension(_));
         if is_extension {
             w.enter_extension();
+        }
+        if is_external_ext {
+            w.enter_external_ext();
         }
         if is_raw_expansion {
             w.enter_raw_expansion();
@@ -954,12 +1208,23 @@ impl Marshal for Expression {
         );
         let has_braces_or_ternary =
             has_braces_attr(&self.pexp_attributes, w) || has_ternary_attr(&self.pexp_attributes, w);
+        let rewritten_await_letmodule = matches!(
+            &self.pexp_desc,
+            ExpressionDesc::Pexp_letmodule(_, mod_expr, _) if has_await_attr(&mod_expr.pmod_attributes, w)
+        );
         let rewritten_expr = w.get_arena().is_rewritten_expr_loc(self.pexp_loc);
-        let suppress_rewritten_braces = rewritten_expr && has_braces_or_ternary && !w.in_extension();
+        let share_singleton_attr_tuple = if has_braces_or_ternary {
+            rewritten_expr
+        } else {
+            share_attrs
+        };
+        let suppress_rewritten_braces =
+            rewritten_expr && has_braces_or_ternary && !w.in_extension() && !rewritten_await_letmodule;
         let share_empty_pstr = if !suppress_rewritten_braces
             && (is_pipe_application(self, w)
                 || share_attrs
-                || (w.in_extension() && has_braces_or_ternary))
+                || (w.in_extension() && has_braces_or_ternary)
+                || (rewritten_await_letmodule && has_braces_or_ternary))
         {
             Some(EmptyPayloadShareKind::ParserAttr)
         } else {
@@ -968,11 +1233,15 @@ impl Marshal for Expression {
         marshal_attributes(
             &self.pexp_attributes,
             w,
-            share_attrs,
+            share_singleton_attr_tuple,
+            matches!(&self.pexp_desc, ExpressionDesc::Pexp_open(_, _, _)),
             share_empty_pstr,
         );
         if is_raw_expansion {
             w.exit_raw_expansion();
+        }
+        if is_external_ext {
+            w.exit_external_ext();
         }
         if is_extension {
             w.exit_extension();
@@ -1149,7 +1418,9 @@ impl Marshal for ExpressionDesc {
             ExpressionDesc::Pexp_letmodule(name, me, body) => {
                 w.write_block_header(21, 3);
                 name.marshal(w);
+                w.enter_letmodule_expr();
                 me.marshal(w);
+                w.exit_letmodule_expr();
                 body.marshal(w);
             }
             ExpressionDesc::Pexp_letexception(ec, body) => {
@@ -1168,12 +1439,14 @@ impl Marshal for ExpressionDesc {
             }
             ExpressionDesc::Pexp_pack(me) => {
                 w.write_block_header(25, 1);
+                w.enter_pack();
                 me.marshal(w);
+                w.exit_pack();
             }
             ExpressionDesc::Pexp_open(flag, lid, e) => {
                 w.write_block_header(26, 3);
                 flag.marshal(w);
-                lid.marshal(w);
+                w.write_lident_loc_shared(lid.txt, lid.loc);
                 e.marshal(w);
             }
             ExpressionDesc::Pexp_extension(ext) => {
@@ -1213,7 +1486,7 @@ impl Marshal for ValueBinding {
         w.write_block_header(0, 4);
         self.pvb_pat.marshal(w);
         self.pvb_expr.marshal(w);
-        marshal_attributes(&self.pvb_attributes, w, false, None);
+        marshal_attributes(&self.pvb_attributes, w, false, false, None);
         self.pvb_loc.marshal(w);
     }
 }
@@ -1251,7 +1524,7 @@ impl Marshal for ModuleType {
         w.write_block_header(0, 3);
         self.pmty_desc.marshal(w);
         self.pmty_loc.marshal(w);
-        marshal_attributes(&self.pmty_attributes, w, false, None);
+        marshal_attributes(&self.pmty_attributes, w, false, false, None);
     }
 }
 
@@ -1260,7 +1533,11 @@ impl Marshal for ModuleTypeDesc {
         match self {
             ModuleTypeDesc::Pmty_ident(lid) => {
                 w.write_block_header(0, 1);
-                lid.marshal(w);
+                if w.in_pack() && w.in_letmodule_expr() {
+                    w.write_lident_loc_shared(lid.txt, lid.loc);
+                } else {
+                    lid.marshal(w);
+                }
             }
             ModuleTypeDesc::Pmty_signature(sig) => {
                 w.write_block_header(1, 1);
@@ -1279,7 +1556,9 @@ impl Marshal for ModuleTypeDesc {
             }
             ModuleTypeDesc::Pmty_typeof(me) => {
                 w.write_block_header(4, 1);
+                w.enter_module_typeof();
                 me.marshal(w);
+                w.exit_module_typeof();
             }
             ModuleTypeDesc::Pmty_extension(ext) => {
                 w.write_block_header(5, 1);
@@ -1327,7 +1606,14 @@ impl Marshal for ModuleExpr {
         w.write_block_header(0, 3);
         self.pmod_desc.marshal(w);
         self.pmod_loc.marshal(w);
-        marshal_attributes(&self.pmod_attributes, w, false, None);
+        let share_empty_pstr = if has_await_attr(&self.pmod_attributes, w)
+            && (w.in_letmodule_expr() || w.in_module_typeof())
+        {
+            Some(EmptyPayloadShareKind::ParserAttr)
+        } else {
+            None
+        };
+        marshal_attributes(&self.pmod_attributes, w, false, false, share_empty_pstr);
     }
 }
 
@@ -1335,8 +1621,16 @@ impl Marshal for ModuleExprDesc {
     fn marshal(&self, w: &mut MarshalWriter) {
         match self {
             ModuleExprDesc::Pmod_ident(lid) => {
+                let key = (lid.txt, lid.loc);
+                if let Some(&obj_idx) = w.pmod_ident_table_get(&key) {
+                    let d = w.obj_counter() - obj_idx;
+                    w.write_shared_ref(d);
+                    return;
+                }
+                let obj_idx = w.obj_counter();
                 w.write_block_header(0, 1);
-                lid.marshal(w);
+                w.write_lident_loc_shared(lid.txt, lid.loc);
+                w.pmod_ident_table_insert(key, obj_idx);
             }
             ModuleExprDesc::Pmod_structure(str) => {
                 w.write_block_header(1, 1);
@@ -1382,7 +1676,7 @@ impl Marshal for TypeDeclaration {
         self.ptype_kind.marshal(w);
         self.ptype_private.marshal(w);
         self.ptype_manifest.marshal(w);
-        marshal_attributes(&self.ptype_attributes, w, false, None);
+        marshal_attributes(&self.ptype_attributes, w, false, false, None);
         self.ptype_loc.marshal(w);
     }
 }
@@ -1411,7 +1705,7 @@ impl Marshal for ConstructorDeclaration {
         self.pcd_args.marshal(w);
         self.pcd_res.marshal(w);
         self.pcd_loc.marshal(w);
-        marshal_attributes(&self.pcd_attributes, w, false, None);
+        marshal_attributes(&self.pcd_attributes, w, false, false, None);
     }
 }
 
@@ -1439,7 +1733,7 @@ impl Marshal for LabelDeclaration {
         w.write_int(if self.pld_optional { 1 } else { 0 });
         self.pld_type.marshal(w);
         self.pld_loc.marshal(w);
-        marshal_attributes(&self.pld_attributes, w, false, None);
+        marshal_attributes(&self.pld_attributes, w, false, false, None);
     }
 }
 
@@ -1452,7 +1746,7 @@ impl Marshal for TypeExtension {
         self.ptyext_params.marshal(w);
         self.ptyext_constructors.marshal(w);
         self.ptyext_private.marshal(w);
-        marshal_attributes(&self.ptyext_attributes, w, false, None);
+        marshal_attributes(&self.ptyext_attributes, w, false, false, None);
     }
 }
 
@@ -1462,7 +1756,7 @@ impl Marshal for ExtensionConstructor {
         self.pext_name.marshal(w);
         self.pext_kind.marshal(w);
         self.pext_loc.marshal(w);
-        marshal_attributes(&self.pext_attributes, w, false, None);
+        marshal_attributes(&self.pext_attributes, w, false, false, None);
     }
 }
 
@@ -1518,7 +1812,7 @@ impl Marshal for ValueDescription {
         // pval_prim contains raw binary data (FFI encoding blobs) that must be
         // written as raw bytes, not Latin-1 converted. Use write_string directly.
         marshal_prim_list(&self.pval_prim, w);
-        marshal_attributes(&self.pval_attributes, w, false, None);
+        marshal_attributes(&self.pval_attributes, w, false, false, None);
         self.pval_loc.marshal(w);
     }
 }
@@ -1558,7 +1852,7 @@ impl Marshal for ModuleDeclaration {
         w.write_block_header(0, 4);
         self.pmd_name.marshal(w);
         self.pmd_type.marshal(w);
-        marshal_attributes(&self.pmd_attributes, w, false, None);
+        marshal_attributes(&self.pmd_attributes, w, false, false, None);
         self.pmd_loc.marshal(w);
     }
 }
@@ -1568,7 +1862,7 @@ impl Marshal for ModuleTypeDeclaration {
         w.write_block_header(0, 4);
         self.pmtd_name.marshal(w);
         self.pmtd_type.marshal(w);
-        marshal_attributes(&self.pmtd_attributes, w, false, None);
+        marshal_attributes(&self.pmtd_attributes, w, false, false, None);
         self.pmtd_loc.marshal(w);
     }
 }
@@ -1578,7 +1872,7 @@ impl Marshal for ModuleBinding {
         w.write_block_header(0, 4);
         self.pmb_name.marshal(w);
         self.pmb_expr.marshal(w);
-        marshal_attributes(&self.pmb_attributes, w, false, None);
+        marshal_attributes(&self.pmb_attributes, w, false, false, None);
         self.pmb_loc.marshal(w);
     }
 }
@@ -1589,7 +1883,7 @@ impl Marshal for OpenDescription {
         self.popen_lid.marshal(w);
         self.popen_override.marshal(w);
         self.popen_loc.marshal(w);
-        marshal_attributes(&self.popen_attributes, w, false, None);
+        marshal_attributes(&self.popen_attributes, w, false, false, None);
     }
 }
 
@@ -1598,7 +1892,7 @@ impl Marshal for IncludeDescription {
         w.write_block_header(0, 3);
         self.pincl_mod.marshal(w);
         self.pincl_loc.marshal(w);
-        marshal_attributes(&self.pincl_attributes, w, false, None);
+        marshal_attributes(&self.pincl_attributes, w, false, false, None);
     }
 }
 
@@ -1607,7 +1901,7 @@ impl Marshal for IncludeDeclaration {
         w.write_block_header(0, 3);
         self.pincl_mod.marshal(w);
         self.pincl_loc.marshal(w);
-        marshal_attributes(&self.pincl_attributes, w, false, None);
+        marshal_attributes(&self.pincl_attributes, w, false, false, None);
     }
 }
 
@@ -1632,7 +1926,7 @@ impl Marshal for StructureItemDesc {
                 } else {
                     None
                 };
-                marshal_attributes(attrs, w, false, share_empty_pstr);
+                marshal_attributes(attrs, w, false, false, share_empty_pstr);
             }
             StructureItemDesc::Pstr_value(flag, bindings) => {
                 w.write_block_header(1, 2);
@@ -1688,7 +1982,7 @@ impl Marshal for StructureItemDesc {
                 } else {
                     None
                 };
-                marshal_attributes(attrs, w, false, share_empty_pstr);
+                marshal_attributes(attrs, w, false, false, share_empty_pstr);
             }
         }
     }
@@ -1756,7 +2050,7 @@ impl Marshal for SignatureItemDesc {
                 } else {
                     None
                 };
-                marshal_attributes(attrs, w, false, share_empty_pstr);
+                marshal_attributes(attrs, w, false, false, share_empty_pstr);
             }
         }
     }

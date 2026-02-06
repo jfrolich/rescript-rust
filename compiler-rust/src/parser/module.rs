@@ -615,12 +615,13 @@ pub fn parse_structure_item(p: &mut Parser<'_>) -> Option<StructureItem> {
                 Some(StructureItemDesc::Pstr_attribute(attr))
             }
         }
-        Token::ModuleComment { loc, content } => {
+        Token::ModuleComment { content, .. } => {
             // Module-level doc comment (triple star /*** ... */) becomes a standalone res.doc attribute
-            let loc_cloned = loc.clone();
             let content = content.clone();
+            let doc_start_idx = p.start_pos_idx();
             p.next();
-            let loc = p.from_location(&loc_cloned);
+            let loc = p.mk_loc_idx_to_prev_end(doc_start_idx);
+            item_loc_idx = Some(loc);
             let attr = super::core::doc_comment_to_attribute(p.arena_mut(), loc, content);
             Some(StructureItemDesc::Pstr_attribute(attr))
         }
@@ -960,13 +961,13 @@ pub fn parse_signature_item(p: &mut Parser<'_>) -> Option<SignatureItem> {
                 Some(SignatureItemDesc::Psig_attribute(attr))
             }
         }
-        Token::ModuleComment { loc, content } => {
+        Token::ModuleComment { content, .. } => {
             // Module-level doc comment (triple star /*** ... */) becomes a standalone res.doc attribute
             // Note: OCaml does NOT call parse_newline_or_semicolon_signature for ModuleComment
-            let loc_cloned = loc.clone();
             let content = content.clone();
+            let doc_start_idx = p.start_pos_idx();
             p.next();
-            let loc = p.from_location(&loc_cloned);
+            let loc = p.mk_loc_idx_to_prev_end(doc_start_idx);
             let attr = super::core::doc_comment_to_attribute(p.arena_mut(), loc, content);
             Some(SignatureItemDesc::Psig_attribute(attr))
         }
@@ -2415,7 +2416,8 @@ fn parse_let_bindings(
                     let inner_for_constraint = (*inner).clone();
 
                     // Substitute Ptyp_constr -> Ptyp_var for the Ptyp_poly body
-                    let substituted_inner = typ::substitute_type_vars(p.arena(), (*inner).clone(), &var_set);
+                    let substituted_inner =
+                        typ::substitute_type_vars(p.arena_mut(), (*inner).clone(), &var_set);
 
                     // Rebuild the Ptyp_poly with the substituted body
                     let substituted_typ = CoreType {
@@ -2446,30 +2448,35 @@ fn parse_let_bindings(
         // OCaml: over_parse_constrained_or_coerced_or_arrow_expression on the let binding value
         expr = expr::over_parse_constrained_or_coerced_or_arrow_expression(p, expr);
 
-        // Compute binding location BEFORE wrapping (OCaml uses this for locally abstract type locations)
-        // Use PosIdx-based location to enable sharing with structure_item
-        let binding_loc = p.mk_loc_idx_to_prev_end(binding_start_idx);
-        // Track the first binding's LocIdx for sharing with structure_item
+        // OCaml allocates a wrapper location and then allocates a fresh Vb.mk
+        // location with the same span. Keep those allocations distinct.
+        let wrapper_loc = if is_locally_abstract {
+            Some(p.mk_loc_idx_to_prev_end(binding_start_idx))
+        } else {
+            None
+        };
+        let vb_loc = p.mk_loc_idx_to_prev_end(binding_start_idx);
         if first_binding_loc.is_none() {
-            first_binding_loc = Some(binding_loc);
+            first_binding_loc = Some(vb_loc);
         }
 
         // For locally abstract types, OCaml uses the binding location for the pattern constraint and Ptyp_poly
         let pat = if is_locally_abstract {
+            let wrapper_loc = wrapper_loc.expect("locally abstract let-binding should have wrapper loc");
             // Update Ppat_constraint and inner Ptyp_poly locations to use the binding location
             if let PatternDesc::Ppat_constraint(inner_pat, typ) = pat.ppat_desc {
                 // Update the Ptyp_poly location to use binding location
                 let updated_typ = match typ.ptyp_desc {
                     CoreTypeDesc::Ptyp_poly(vars, inner) => CoreType {
                         ptyp_desc: CoreTypeDesc::Ptyp_poly(vars, inner),
-                        ptyp_loc: binding_loc.clone(),
+                        ptyp_loc: wrapper_loc,
                         ptyp_attributes: typ.ptyp_attributes,
                     },
                     _ => typ,
                 };
                 Pattern {
                     ppat_desc: PatternDesc::Ppat_constraint(inner_pat, updated_typ),
-                    ppat_loc: binding_loc.clone(),
+                    ppat_loc: wrapper_loc,
                     ppat_attributes: pat.ppat_attributes,
                 }
             } else {
@@ -2483,11 +2490,12 @@ fn parse_let_bindings(
         // Also add Pexp_constraint with the inner type (from Ptyp_poly)
         // OCaml uses the binding location for all these wrappers
         if let Some((newtype_vars, inner_type)) = newtype_info {
+            let wrapper_loc = wrapper_loc.expect("locally abstract wrappers should have wrapper loc");
             // First wrap the expression in Pexp_constraint with the inner type
             // OCaml uses the binding location for this Pexp_constraint
             expr = Expression {
                 pexp_desc: ExpressionDesc::Pexp_constraint(Box::new(expr), inner_type),
-                pexp_loc: binding_loc.clone(),
+                pexp_loc: wrapper_loc,
                 pexp_attributes: vec![],
             };
 
@@ -2497,18 +2505,17 @@ fn parse_let_bindings(
             for var in newtype_vars.into_iter().rev() {
                 expr = Expression {
                     pexp_desc: ExpressionDesc::Pexp_newtype(var, Box::new(expr)),
-                    pexp_loc: binding_loc.clone(),
+                    pexp_loc: wrapper_loc,
                     pexp_attributes: vec![],
                 };
             }
         }
 
-        let loc = binding_loc;
         bindings.push(ValueBinding {
             pvb_pat: pat,
             pvb_expr: expr,
             pvb_attributes: attrs,
-            pvb_loc: loc,
+            pvb_loc: vb_loc,
         });
 
         // End the region and breadcrumb for this binding

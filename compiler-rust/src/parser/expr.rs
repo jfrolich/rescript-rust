@@ -4168,7 +4168,8 @@ fn parse_let_in_block_with_continuation_and_attrs(
                 let inner_for_constraint = (**inner).clone();
 
                 // Substitute Ptyp_constr -> Ptyp_var for the Ptyp_poly body
-                let substituted_inner = super::typ::substitute_type_vars(p.arena(), (**inner).clone(), &var_set);
+                let substituted_inner =
+                    super::typ::substitute_type_vars(p.arena_mut(), (**inner).clone(), &var_set);
 
                 // Rebuild the Ptyp_poly with the substituted body
                 let substituted_typ = CoreType {
@@ -4197,25 +4198,32 @@ fn parse_let_in_block_with_continuation_and_attrs(
     p.expect(Token::Equal);
     let mut first_value = parse_expr(p);
 
-    // Compute binding location BEFORE wrapping (OCaml uses this for locally abstract type locations)
+    // OCaml allocates a wrapper location and then allocates a fresh Vb.mk
+    // location with the same span. Keep those allocations distinct.
+    let wrapper_loc = if is_locally_abstract {
+        Some(p.mk_loc_idx_to_prev_end(binding_start_pos_idx))
+    } else {
+        None
+    };
     let first_loc = p.mk_loc_idx_to_prev_end(binding_start_pos_idx);
 
     // For locally abstract types, OCaml uses the binding location for the pattern constraint and Ptyp_poly
     let first_pat = if is_locally_abstract {
+        let wrapper_loc = wrapper_loc.expect("locally abstract let-binding should have wrapper loc");
         // Update Ppat_constraint and inner Ptyp_poly locations to use the binding location
         if let PatternDesc::Ppat_constraint(inner_pat, typ) = first_pat.ppat_desc {
             // Update the Ptyp_poly location to use binding location
             let updated_typ = match typ.ptyp_desc {
                 CoreTypeDesc::Ptyp_poly(vars, inner) => CoreType {
                     ptyp_desc: CoreTypeDesc::Ptyp_poly(vars, inner),
-                    ptyp_loc: first_loc.clone(),
+                    ptyp_loc: wrapper_loc,
                     ptyp_attributes: typ.ptyp_attributes,
                 },
                 _ => typ,
             };
             Pattern {
                 ppat_desc: PatternDesc::Ppat_constraint(inner_pat, updated_typ),
-                ppat_loc: first_loc.clone(),
+                ppat_loc: wrapper_loc,
                 ppat_attributes: first_pat.ppat_attributes,
             }
         } else {
@@ -4228,11 +4236,12 @@ fn parse_let_in_block_with_continuation_and_attrs(
     // Wrap expression in Pexp_newtype for locally abstract types
     // OCaml uses the full binding location for all these wrappers
     if let Some((newtype_vars, inner_type)) = newtype_info {
+        let wrapper_loc = wrapper_loc.expect("locally abstract wrappers should have wrapper loc");
         // First wrap the expression in Pexp_constraint with the inner type
         // OCaml uses the binding location for this Pexp_constraint
         first_value = Expression {
             pexp_desc: ExpressionDesc::Pexp_constraint(Box::new(first_value), inner_type),
-            pexp_loc: first_loc.clone(),
+            pexp_loc: wrapper_loc,
             pexp_attributes: vec![],
         };
 
@@ -4242,7 +4251,7 @@ fn parse_let_in_block_with_continuation_and_attrs(
         for var in newtype_vars.into_iter().rev() {
             first_value = Expression {
                 pexp_desc: ExpressionDesc::Pexp_newtype(var, Box::new(first_value)),
-                pexp_loc: first_loc.clone(),
+                pexp_loc: wrapper_loc,
                 pexp_attributes: vec![],
             };
         }

@@ -3,7 +3,7 @@
 //! This module contains the type expression parsing logic, converting tokens
 //! into type AST nodes.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use crate::parse_arena::{Located, LocIdx, PosIdx, StrIdx};
 use super::ast::*;
@@ -29,11 +29,123 @@ fn get_string_tag(p: &Parser<'_>) -> Option<String> {
 // Type Variable Substitution
 // ============================================================================
 
+/// Rebind zero-arg `Ptyp_constr` occurrences that match locally abstract
+/// type variable names to use the variable binder `StrIdx`.
+///
+/// OCaml's `varify_constructors` keeps sharing between the original constructor
+/// identifiers and the generated `Ptyp_var` names by reusing the same string
+/// values. Rust needs this explicit rebinding so constructor-side `StrIdx`
+/// identity aligns with the `type a b c.` binder identities.
+pub fn align_locally_abstract_constructors(
+    arena: &mut crate::parse_arena::ParseArena,
+    typ: CoreType,
+    vars: &HashMap<String, StrIdx>,
+) -> CoreType {
+    let new_desc = match typ.ptyp_desc {
+        CoreTypeDesc::Ptyp_constr(lid, args) => {
+            let rebound_lid = if args.is_empty() {
+                if let Longident::Lident(name_idx) = arena.get_longident(lid.txt) {
+                    let name = arena.get_string(*name_idx);
+                    if let Some(var_idx) = vars.get(name) {
+                        with_loc(arena.push_lident_from_idx(*var_idx), lid.loc)
+                    } else {
+                        lid
+                    }
+                } else {
+                    lid
+                }
+            } else {
+                lid
+            };
+            let new_args = args
+                .into_iter()
+                .map(|arg| align_locally_abstract_constructors(arena, arg, vars))
+                .collect();
+            CoreTypeDesc::Ptyp_constr(rebound_lid, new_args)
+        }
+        CoreTypeDesc::Ptyp_arrow { arg, ret, arity } => CoreTypeDesc::Ptyp_arrow {
+            arg: Box::new(TypeArg {
+                attrs: arg.attrs,
+                lbl: arg.lbl,
+                typ: align_locally_abstract_constructors(arena, arg.typ, vars),
+            }),
+            ret: Box::new(align_locally_abstract_constructors(arena, *ret, vars)),
+            arity,
+        },
+        CoreTypeDesc::Ptyp_tuple(elements) => CoreTypeDesc::Ptyp_tuple(
+            elements
+                .into_iter()
+                .map(|e| align_locally_abstract_constructors(arena, e, vars))
+                .collect(),
+        ),
+        CoreTypeDesc::Ptyp_poly(poly_vars, body) => CoreTypeDesc::Ptyp_poly(
+            poly_vars,
+            Box::new(align_locally_abstract_constructors(arena, *body, vars)),
+        ),
+        CoreTypeDesc::Ptyp_alias(inner, alias) => CoreTypeDesc::Ptyp_alias(
+            Box::new(align_locally_abstract_constructors(arena, *inner, vars)),
+            alias,
+        ),
+        CoreTypeDesc::Ptyp_object(fields, closed) => {
+            let new_fields = fields
+                .into_iter()
+                .map(|field| match field {
+                    ObjectField::Otag(name, attrs, inner_typ) => ObjectField::Otag(
+                        name,
+                        attrs,
+                        align_locally_abstract_constructors(arena, inner_typ, vars),
+                    ),
+                    ObjectField::Oinherit(inner_typ) => {
+                        ObjectField::Oinherit(align_locally_abstract_constructors(arena, inner_typ, vars))
+                    }
+                })
+                .collect();
+            CoreTypeDesc::Ptyp_object(new_fields, closed)
+        }
+        CoreTypeDesc::Ptyp_variant(rows, closed, labels) => {
+            let new_rows = rows
+                .into_iter()
+                .map(|row| match row {
+                    RowField::Rtag(name, attrs, empty, types) => {
+                        let new_types = types
+                            .into_iter()
+                            .map(|t| align_locally_abstract_constructors(arena, t, vars))
+                            .collect();
+                        RowField::Rtag(name, attrs, empty, new_types)
+                    }
+                    RowField::Rinherit(inner_typ) => {
+                        RowField::Rinherit(align_locally_abstract_constructors(arena, inner_typ, vars))
+                    }
+                })
+                .collect();
+            CoreTypeDesc::Ptyp_variant(new_rows, closed, labels)
+        }
+        CoreTypeDesc::Ptyp_package((lid, constraints)) => {
+            let new_constraints = constraints
+                .into_iter()
+                .map(|(c_lid, c_typ)| {
+                    (
+                        c_lid,
+                        align_locally_abstract_constructors(arena, c_typ, vars),
+                    )
+                })
+                .collect();
+            CoreTypeDesc::Ptyp_package((lid, new_constraints))
+        }
+        other => other,
+    };
+    CoreType {
+        ptyp_desc: new_desc,
+        ptyp_loc: typ.ptyp_loc,
+        ptyp_attributes: typ.ptyp_attributes,
+    }
+}
+
 /// Transform a type by converting Ptyp_constr with a single Lident that matches
 /// one of the poly type variables into Ptyp_var.
 /// This is needed for locally abstract types: `type a b c. list<a, b, c>` should
 /// have `a`, `b`, `c` as Ptyp_var, not Ptyp_constr.
-pub fn substitute_type_vars(arena: &crate::parse_arena::ParseArena, typ: CoreType, vars: &HashSet<String>) -> CoreType {
+pub fn substitute_type_vars(arena: &mut crate::parse_arena::ParseArena, typ: CoreType, vars: &HashSet<String>) -> CoreType {
     let new_desc = match typ.ptyp_desc {
         CoreTypeDesc::Ptyp_constr(lid, args) => {
             // Check if this is a simple Lident that matches a type variable
@@ -41,9 +153,12 @@ pub fn substitute_type_vars(arena: &crate::parse_arena::ParseArena, typ: CoreTyp
                 if let Longident::Lident(name_idx) = arena.get_longident(lid.txt) {
                     let name = arena.get_string(*name_idx);
                     if vars.contains(name) {
+                        let source_idx = *name_idx;
+                        let name = name.to_string();
+                        arena.record_tyvar_source(typ.ptyp_loc, source_idx);
                         // Convert to Ptyp_var
                         return CoreType {
-                            ptyp_desc: CoreTypeDesc::Ptyp_var(name.to_string()),
+                            ptyp_desc: CoreTypeDesc::Ptyp_var(name),
                             ptyp_loc: typ.ptyp_loc,
                             ptyp_attributes: typ.ptyp_attributes,
                         };
@@ -1042,17 +1157,16 @@ fn parse_function_type(p: &mut Parser<'_>, start_pos_idx: PosIdx) -> CoreType {
                 let is_direct_arrow = first_arg_start.cnum == post_doc_start.cnum;
                 if is_direct_arrow {
                     // Extend arrow location to include `.`
-                    let end_pos = p.loc_end(typ.ptyp_loc).clone();
-                    let uncurried_start = p.arena().get_position(uncurried_start_idx).clone();
-                    let new_arrow_loc = p.mk_loc_from_positions(&uncurried_start, &end_pos);
+                    let end_pos_idx = p.loc_end_idx(typ.ptyp_loc);
+                    let new_arrow_loc = p.mk_loc_idx(uncurried_start_idx, end_pos_idx);
 
                     // Also extend first argument's location if it's a simple Lident
                     let new_arg = if matches!(
                         &arg.typ.ptyp_desc,
                         CoreTypeDesc::Ptyp_constr(lid, _) if p.arena().is_simple_lident(lid.txt)
                     ) && !arg.typ.ptyp_loc.is_none() {
-                        let arg_end = p.loc_end(arg.typ.ptyp_loc).clone();
-                        let new_arg_loc = p.mk_loc_from_positions(&uncurried_start, &arg_end);
+                        let arg_end_idx = p.loc_end_idx(arg.typ.ptyp_loc);
+                        let new_arg_loc = p.mk_loc_idx(uncurried_start_idx, arg_end_idx);
                         TypeArg {
                             typ: CoreType {
                                 ptyp_loc: new_arg_loc,

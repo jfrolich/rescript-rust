@@ -169,8 +169,10 @@ impl ArenaIdx for ArityIdx {
 pub struct StaticArities {
     /// Static arity for `None` (unknown arity)
     pub arity_none: ArityIdx,
-    /// Static arity for `Some(1)` - used for literal single-argument arrows
+    /// Static arity for parser `Some(1)` literals (`res_core.ml` paths).
     pub arity_1: ArityIdx,
+    /// Static arity for PPX/frontend `Some(1)` literals (`Ast_compatible.fun_` paths).
+    pub arity_ppx_1: ArityIdx,
 }
 
 /// Pre-allocated `Lident "[]"` and `Lident "::"` for list construction.
@@ -264,6 +266,19 @@ pub struct StaticArrayLidents {
     pub belt_list_concat_many: LidentIdx,
 }
 
+/// Pre-allocated static Longident indices for `%external` PPX helpers.
+///
+/// OCaml reuses these longident constants (`Js.typeof`, `Js.undefinedToOption`,
+/// `Js.Undefined`, `Js.Undefined.empty`) across `%external` rewrites.
+#[derive(Debug, Clone, Copy)]
+pub struct StaticPpxLidents {
+    pub js_lident: LidentIdx,
+    pub js_typeof: LidentIdx,
+    pub js_undefined_to_option: LidentIdx,
+    pub js_undefined: LidentIdx,
+    pub js_undefined_empty: LidentIdx,
+}
+
 // ============================================================================
 // ParseArena
 // ============================================================================
@@ -302,6 +317,11 @@ pub struct ParseArena {
     /// Pre-allocated `Ldot(Lident "Stdlib_RegExp", "t")` for `%re` lowering.
     /// OCaml uses `Ast_literal.Lid.regexp_id` as a module-level constant.
     static_regexp_t_lident: LidentIdx,
+    /// Pre-allocated `Ldot(Lident "*predef*", "option")` for lifted option types.
+    /// OCaml uses `Ast_literal.predef_option` as a module-level constant.
+    static_predef_option_lident: LidentIdx,
+    /// Pre-allocated static longidents used by `%external` rewrite helpers.
+    static_ppx_lidents: StaticPpxLidents,
     /// Position deduplication table - maps position content to its index.
     position_dedup: HashMap<PosKey, PosIdx>,
     /// Simple Lident deduplication table - maps StrIdx to its LidentIdx.
@@ -336,6 +356,12 @@ pub struct ParseArena {
     /// PPX-local "Js" identifier string.
     /// Kept separate from parser-token identifiers to match OCaml unit-local identity.
     ppx_js_str: StrIdx,
+    /// PPX-local empty string literal.
+    /// Used for `%external` string delimiters (`Some ""`) in ast_exp_handle_external.ml.
+    ppx_empty_str: StrIdx,
+    /// PPX-local `"undefined"` string literal.
+    /// Used in `%external` rewrites (`Js.typeof(...) == "undefined"`).
+    ppx_undefined_str: StrIdx,
     /// Template-literal-local "++" operator string.
     /// Kept separate from regular infix parser operator strings.
     template_concat_str: StrIdx,
@@ -383,17 +409,26 @@ pub struct ParseArena {
     spice_field_v: Option<StrIdx>,
     /// Literal strings that should be value-shared during marshalling.
     shareable_literal_strs: HashSet<String>,
+    /// Source string identity for Ptyp_var nodes created by varification.
+    ///
+    /// When locally-abstract type varification converts `Ptyp_constr` to
+    /// `Ptyp_var`, OCaml keeps sharing with the original constructor string.
+    /// We record that source `StrIdx` by `CoreType.ptyp_loc` to reproduce the
+    /// same marshal sharing.
+    tyvar_source_by_loc: HashMap<LocIdx, StrIdx>,
 }
 
 impl Default for ParseArena {
     fn default() -> Self {
         // Pre-allocate static arities at known indices
         // Index 0: None (unknown arity)
-        // Index 1: Some(1) (literal single-argument)
-        let arities = vec![None, Some(1)];
+        // Index 1: Some(1) for parser literals
+        // Index 2: Some(1) for PPX/frontend literals
+        let arities = vec![None, Some(1), Some(1)];
         let static_arities = StaticArities {
             arity_none: ArityIdx(0),
             arity_1: ArityIdx(1),
+            arity_ppx_1: ArityIdx(2),
         };
 
         let mut strings = Interner::new();
@@ -407,6 +442,8 @@ impl Default for ParseArena {
         let prim_raw_stmt = strings.push("#raw_stmt".to_string());
         let ppx_eq_str = strings.push("==".to_string());
         let ppx_js_str = strings.push("Js".to_string());
+        let ppx_empty_str = strings.push(String::new());
+        let ppx_undefined_str = strings.push("undefined".to_string());
         let template_concat_str = strings.push("++".to_string());
 
         // Pre-allocate static list lidents.
@@ -440,6 +477,40 @@ impl Default for ParseArena {
         let mut lident_dedup = HashMap::new();
         lident_dedup.insert(expr_nil_str, expr_nil);
         lident_dedup.insert(expr_cons_str, expr_cons);
+
+        // Pre-allocate static `%external` helper longidents.
+        let ppx_js_lident = longidents.push(Longident::Lident(ppx_js_str));
+        lident_dedup.insert(ppx_js_str, ppx_js_lident);
+        let ppx_typeof_str = strings.intern("typeof");
+        let ppx_undefined_to_option_str = strings.intern("undefinedToOption");
+        let ppx_undefined_ctor_str = strings.intern("Undefined");
+        let ppx_empty_field_str = strings.intern("empty");
+        let ppx_js_typeof = longidents.push(Longident::Ldot(
+            Box::new(Longident::Lident(ppx_js_str)),
+            ppx_typeof_str,
+        ));
+        let ppx_js_undefined_to_option = longidents.push(Longident::Ldot(
+            Box::new(Longident::Lident(ppx_js_str)),
+            ppx_undefined_to_option_str,
+        ));
+        let ppx_js_undefined = longidents.push(Longident::Ldot(
+            Box::new(Longident::Lident(ppx_js_str)),
+            ppx_undefined_ctor_str,
+        ));
+        let ppx_js_undefined_empty = longidents.push(Longident::Ldot(
+            Box::new(Longident::Ldot(
+                Box::new(Longident::Lident(ppx_js_str)),
+                ppx_undefined_ctor_str,
+            )),
+            ppx_empty_field_str,
+        ));
+        let static_ppx_lidents = StaticPpxLidents {
+            js_lident: ppx_js_lident,
+            js_typeof: ppx_js_typeof,
+            js_undefined_to_option: ppx_js_undefined_to_option,
+            js_undefined: ppx_js_undefined,
+            js_undefined_empty: ppx_js_undefined_empty,
+        };
 
         // Pre-allocate static array operation lidents.
         // OCaml's native code compiler promotes these constant expressions to
@@ -504,6 +575,14 @@ impl Default for ParseArena {
             regexp_t_str,
         ));
 
+        // Pre-allocate Ast_literal.predef_option = Ldot(Lident "*predef*", "option").
+        let predef_str = strings.intern("*predef*");
+        let option_str = strings.intern("option");
+        let static_predef_option_lident = longidents.push(Longident::Ldot(
+            Box::new(Longident::Lident(predef_str)),
+            option_str,
+        ));
+
         Self {
             positions: Arena::default(),
             locations: Arena::default(),
@@ -513,6 +592,8 @@ impl Default for ParseArena {
             static_list_lidents,
             static_array_lidents,
             static_regexp_t_lident,
+            static_predef_option_lident,
+            static_ppx_lidents,
             position_dedup: HashMap::new(),
             lident_dedup,
             longident_shareable_strs: HashSet::new(),
@@ -523,6 +604,8 @@ impl Default for ParseArena {
             prim_raw_stmt,
             ppx_eq_str,
             ppx_js_str,
+            ppx_empty_str,
+            ppx_undefined_str,
             template_concat_str,
             local_module_counter: 0,
             rewritten_expr_locs: HashSet::new(),
@@ -544,6 +627,7 @@ impl Default for ParseArena {
             spice_pat_v: None,
             spice_field_v: None,
             shareable_literal_strs: HashSet::new(),
+            tyvar_source_by_loc: HashMap::new(),
         }
     }
 }
@@ -1161,6 +1245,15 @@ impl ParseArena {
         self.static_arities.arity_1
     }
 
+    /// Get the static PPX/frontend arity index for `Some(1)`.
+    ///
+    /// OCaml parser (`res_core.ml`) and frontend PPX helpers
+    /// (`ast_compatible.ml` / derive mappers) come from different compilation
+    /// units, so their literal `Some 1` values are not globally shared.
+    pub fn static_ppx_arity_1(&self) -> ArityIdx {
+        self.static_arities.arity_ppx_1
+    }
+
     /// Look up an arity by index.
     pub fn get_arity(&self, idx: ArityIdx) -> Option<i32> {
         self.arities[idx.0 as usize]
@@ -1252,6 +1345,31 @@ impl ParseArena {
         self.static_regexp_t_lident
     }
 
+    /// Get the static `*predef*.option` longident index.
+    pub fn predef_option_lident(&self) -> LidentIdx {
+        self.static_predef_option_lident
+    }
+
+    pub fn ppx_js_lident(&self) -> LidentIdx {
+        self.static_ppx_lidents.js_lident
+    }
+
+    pub fn ppx_js_typeof_lid(&self) -> LidentIdx {
+        self.static_ppx_lidents.js_typeof
+    }
+
+    pub fn ppx_js_undefined_to_option_lid(&self) -> LidentIdx {
+        self.static_ppx_lidents.js_undefined_to_option
+    }
+
+    pub fn ppx_js_undefined_lid(&self) -> LidentIdx {
+        self.static_ppx_lidents.js_undefined
+    }
+
+    pub fn ppx_js_undefined_empty_lid(&self) -> LidentIdx {
+        self.static_ppx_lidents.js_undefined_empty
+    }
+
     // ========================================================================
     // Primitive empty strings
     // ========================================================================
@@ -1280,6 +1398,14 @@ impl ParseArena {
 
     pub fn ppx_js_str(&self) -> StrIdx {
         self.ppx_js_str
+    }
+
+    pub fn ppx_empty_str(&self) -> StrIdx {
+        self.ppx_empty_str
+    }
+
+    pub fn ppx_undefined_str(&self) -> StrIdx {
+        self.ppx_undefined_str
     }
 
     pub fn template_concat_str(&self) -> StrIdx {
@@ -1316,6 +1442,16 @@ impl ParseArena {
     /// Returns true when this expression location was rewritten generically.
     pub fn is_rewritten_expr_loc(&self, loc: LocIdx) -> bool {
         self.rewritten_expr_locs.contains(&loc)
+    }
+
+    /// Record the source constructor string identity for a varified type var.
+    pub fn record_tyvar_source(&mut self, loc: LocIdx, str_idx: StrIdx) {
+        self.tyvar_source_by_loc.entry(loc).or_insert(str_idx);
+    }
+
+    /// Retrieve the source constructor string identity for a varified type var.
+    pub fn tyvar_source_str(&self, loc: LocIdx) -> Option<StrIdx> {
+        self.tyvar_source_by_loc.get(&loc).copied()
     }
 
     /// Check if a longident is a simple Lident with the given name.
