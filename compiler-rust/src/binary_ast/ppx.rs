@@ -7982,7 +7982,10 @@ fn core_type_of_type_declaration_with_attrs(tdcl: &TypeDeclaration, arena: &mut 
 ///    with @res.await and hoists module type declarations before the Pstr_value
 ///
 /// OCaml: bs_builtin_ppx.ml lines 656-755 (structure_mapper)
-pub fn rewrite_structure(structure: &[StructureItem], arena: &mut ParseArena) -> Vec<StructureItem> {
+pub fn rewrite_structure(
+    structure: &[StructureItem],
+    arena: &mut ParseArena,
+) -> Result<Vec<StructureItem>, String> {
     // Context for tracking already-created module type names (per-structure scope)
     let mut await_context = std::collections::HashSet::new();
     let mut result = Vec::new();
@@ -7999,42 +8002,64 @@ pub fn rewrite_structure(structure: &[StructureItem], arena: &mut ParseArena) ->
                 result.extend(module_type_decls);
 
                 // Then process the structure item normally
-                result.extend(rewrite_structure_item(item, arena));
+                result.extend(try_rewrite_structure_item(item, arena)?);
             }
             _ => {
                 // Non-Pstr_value items: just process normally
-                result.extend(rewrite_structure_item(item, arena));
+                result.extend(try_rewrite_structure_item(item, arena)?);
             }
         }
     }
 
-    result
+    Ok(result)
 }
 
 /// Apply built-in PPX transformations to a signature
-pub fn rewrite_signature(signature: &[SignatureItem], arena: &mut ParseArena) -> Vec<SignatureItem> {
-    rewrite_signature_items(signature, arena)
+pub fn rewrite_signature(
+    signature: &[SignatureItem],
+    arena: &mut ParseArena,
+) -> Result<Vec<SignatureItem>, String> {
+    try_rewrite_signature_items(signature, arena)
+}
+
+fn try_rewrite_signature_items(
+    items: &[SignatureItem],
+    arena: &mut ParseArena,
+) -> Result<Vec<SignatureItem>, String> {
+    let mut rewritten = Vec::new();
+    for item in items {
+        let expanded_items = spice_ppx::expand_signature_item(item, arena)?;
+        for expanded in expanded_items {
+            rewritten.push(rewrite_signature_item_no_spice(&expanded, arena));
+        }
+    }
+    Ok(rewritten)
 }
 
 fn rewrite_signature_items(items: &[SignatureItem], arena: &mut ParseArena) -> Vec<SignatureItem> {
-    items
-        .iter()
-        .flat_map(|item| {
-            spice_ppx::expand_signature_item(item, arena)
-                .into_iter()
-                .map(|expanded| rewrite_signature_item_no_spice(&expanded, arena))
-                .collect::<Vec<_>>()
-        })
-        .collect()
+    try_rewrite_signature_items(items, arena).unwrap_or_else(|_| {
+        items
+            .iter()
+            .map(|item| rewrite_signature_item_no_spice(item, arena))
+            .collect()
+    })
+}
+
+fn try_rewrite_structure_item(
+    item: &StructureItem,
+    arena: &mut ParseArena,
+) -> Result<Vec<StructureItem>, String> {
+    let mut result = Vec::new();
+    for expanded in spice_ppx::expand_structure_item(item, arena)? {
+        result.extend(rewrite_structure_item_no_spice(&expanded, arena));
+    }
+    Ok(result)
 }
 
 /// Rewrite a structure item, potentially returning multiple items for @deriving.
 fn rewrite_structure_item(item: &StructureItem, arena: &mut ParseArena) -> Vec<StructureItem> {
-    let mut result = Vec::new();
-    for expanded in spice_ppx::expand_structure_item(item, arena) {
-        result.extend(rewrite_structure_item_no_spice(&expanded, arena));
-    }
-    result
+    try_rewrite_structure_item(item, arena)
+        .unwrap_or_else(|_| rewrite_structure_item_no_spice(item, arena))
 }
 
 fn rewrite_structure_item_no_spice(item: &StructureItem, arena: &mut ParseArena) -> Vec<StructureItem> {

@@ -46,7 +46,8 @@ pub fn compile_source_to_js_with_options(
     if parser.has_errors() {
         return Err(anyhow!("Parse failed with {} error(s)", parser.diagnostics().len()));
     }
-    let structure = spice_ppx::expand_structure(&structure, parser.arena_mut());
+    let structure = spice_ppx::expand_structure(&structure, parser.arena_mut())
+        .map_err(|e| anyhow!("Spice PPX expansion failed: {e}"))?;
 
     // Type check
     let id_gen = IdGenerator::new();

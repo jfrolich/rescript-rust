@@ -205,7 +205,13 @@ fn main() {
             "sexp" => sexp::print_signature(parser.arena(), &signature, &mut io::stdout()),
             "sexp-locs" => sexp_locs::print_signature(&signature, parser.arena(), &mut io::stdout()),
             "sexp-locs-ppx" => {
-                let rewritten = ppx::rewrite_signature(&signature, parser.arena_mut());
+                let rewritten = match ppx::rewrite_signature(&signature, parser.arena_mut()) {
+                    Ok(rewritten) => rewritten,
+                    Err(e) => {
+                        eprintln!("PPX rewrite failed: {e}");
+                        process::exit(1);
+                    }
+                };
                 sexp_locs::print_signature(&rewritten, parser.arena(), &mut io::stdout());
             }
             "sexp0-locs" => {
@@ -306,7 +312,13 @@ fn main() {
             "sexp" => sexp::print_structure(parser.arena(), &structure, &mut io::stdout()),
             "sexp-locs" => sexp_locs::print_structure(&structure, parser.arena(), &mut io::stdout()),
             "sexp-locs-ppx" => {
-                let rewritten = ppx::rewrite_structure(&structure, parser.arena_mut());
+                let rewritten = match ppx::rewrite_structure(&structure, parser.arena_mut()) {
+                    Ok(rewritten) => rewritten,
+                    Err(e) => {
+                        eprintln!("PPX rewrite failed: {e}");
+                        process::exit(1);
+                    }
+                };
                 sexp_locs::print_structure(&rewritten, parser.arena(), &mut io::stdout());
             }
             "sexp0-locs" => {

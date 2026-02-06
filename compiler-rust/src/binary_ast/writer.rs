@@ -116,7 +116,8 @@ pub fn write_structure_ast_current(
     ast: &Structure,
 ) -> io::Result<()> {
     // 1. Apply built-in PPX transformations (FFI encoding for externals, etc.)
-    let rewritten_ast = ppx::rewrite_structure(ast, arena);
+    let rewritten_ast = ppx::rewrite_structure(ast, arena)
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("PPX rewrite failed: {e}")))?;
 
     // 2. Process @@config attributes (e.g., no_export wrapping)
     let rewritten_ast = if has_no_export_config(&rewritten_ast, arena) {
@@ -143,7 +144,8 @@ pub fn write_signature_ast_current(
     ast: &Signature,
 ) -> io::Result<()> {
     // 1. Apply built-in PPX transformations (FFI encoding for externals, etc.)
-    let rewritten_ast = ppx::rewrite_signature(ast, arena);
+    let rewritten_ast = ppx::rewrite_signature(ast, arena)
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("PPX rewrite failed: {e}")))?;
 
     // 2. Extract dependencies from the rewritten AST
     let deps = extract_signature_deps(arena, &rewritten_ast);
