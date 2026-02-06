@@ -48,6 +48,10 @@ pub struct Scanner<'src> {
     pub filename: StrIdx,
     /// Source code being scanned.
     src: &'src str,
+    /// Precomputed character array for O(1) indexed access.
+    chars: Vec<char>,
+    /// Byte offset for each char index: byte_offsets[i] = byte position of chars[i].
+    byte_offsets: Vec<usize>,
     /// Character count (cached for efficiency).
     /// For Latin-1 source, this equals the original byte count.
     src_char_count: usize,
@@ -85,16 +89,16 @@ impl<'src> Scanner<'src> {
     /// Create a new scanner for the given source.
     /// filename should be an interned StrIdx from the arena.
     pub fn new(filename: StrIdx, src: &'src str) -> Self {
-        let src_char_count = src.chars().count();
-        let ch = if src.is_empty() {
-            EOF_CHAR
-        } else {
-            src.chars().next().unwrap_or(EOF_CHAR)
-        };
+        let chars: Vec<char> = src.chars().collect();
+        let byte_offsets: Vec<usize> = src.char_indices().map(|(i, _)| i).collect();
+        let src_char_count = chars.len();
+        let ch = chars.first().copied().unwrap_or(EOF_CHAR);
 
         Self {
             filename,
             src,
+            chars,
+            byte_offsets,
             src_char_count,
             ch,
             offset: 0,
@@ -239,7 +243,7 @@ impl<'src> Scanner<'src> {
 
         // Move to next character
         self.offset = next_offset;
-        self.ch = self.src.chars().nth(self.offset).unwrap_or(EOF_CHAR);
+        self.ch = self.chars.get(self.offset).copied().unwrap_or(EOF_CHAR);
     }
 
     /// Advance by 2 characters.
@@ -257,17 +261,17 @@ impl<'src> Scanner<'src> {
 
     /// Peek at the next character without advancing.
     fn peek(&self) -> char {
-        self.src.chars().nth(self.offset + 1).unwrap_or(EOF_CHAR)
+        self.chars.get(self.offset + 1).copied().unwrap_or(EOF_CHAR)
     }
 
     /// Peek at the character 2 positions ahead.
     fn peek2(&self) -> char {
-        self.src.chars().nth(self.offset + 2).unwrap_or(EOF_CHAR)
+        self.chars.get(self.offset + 2).copied().unwrap_or(EOF_CHAR)
     }
 
     /// Peek at the character 3 positions ahead.
     fn peek3(&self) -> char {
-        self.src.chars().nth(self.offset + 3).unwrap_or(EOF_CHAR)
+        self.chars.get(self.offset + 3).copied().unwrap_or(EOF_CHAR)
     }
 
     /// Check if a character is whitespace.
@@ -298,9 +302,8 @@ impl<'src> Scanner<'src> {
     /// for slicing, since the source string is UTF-8 internally (Latin-1 chars >127
     /// become 2-byte UTF-8 sequences).
     fn substring(&self, start: usize, end: usize) -> &'src str {
-        // Get byte indices for the character range
-        let byte_start = self.src.char_indices().nth(start).map(|(i, _)| i).unwrap_or(self.src.len());
-        let byte_end = self.src.char_indices().nth(end).map(|(i, _)| i).unwrap_or(self.src.len());
+        let byte_start = self.byte_offsets.get(start).copied().unwrap_or(self.src.len());
+        let byte_end = self.byte_offsets.get(end).copied().unwrap_or(self.src.len());
         &self.src[byte_start..byte_end]
     }
 
