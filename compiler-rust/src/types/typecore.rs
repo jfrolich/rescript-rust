@@ -1303,18 +1303,31 @@ fn type_pattern_construct(
             vec![typed_arg]
         }
         (arg_types, Some(arg_pat)) if arg_types.len() > 1 => {
-            // Multiple arguments - the parser wraps them in a tuple pattern
-            // Type check as a tuple, then extract individual patterns
-            let tuple_tys: Vec<_> = arg_types
-                .iter()
-                .map(|t| crate::types::instance(ctx, *t))
-                .collect();
-            let tuple_ty = ctx.new_tuple(tuple_tys);
-            let typed_tuple = type_pattern_inner(tctx, env, arg_pat, tuple_ty, mode, state, 0)?;
-            // Extract tuple pattern elements
-            match &typed_tuple.pat_desc {
-                PatternDesc::Tpat_tuple(elements) => elements.clone(),
-                _ => vec![typed_tuple], // Fallback if not a tuple pattern
+            // Multiple arguments - check if the pattern is a wildcard or tuple
+            match &arg_pat.ppat_desc {
+                crate::parser::ast::PatternDesc::Ppat_any => {
+                    // OCaml replicates Ppat_any for each constructor arg
+                    let mut args = Vec::new();
+                    for arg_ty_ref in arg_types {
+                        let arg_ty = crate::types::instance(ctx, *arg_ty_ref);
+                        let typed_arg = type_pattern_inner(tctx, env, arg_pat, arg_ty, mode, state, 0)?;
+                        args.push(typed_arg);
+                    }
+                    args
+                }
+                _ => {
+                    // Tuple pattern - extract individual elements
+                    let tuple_tys: Vec<_> = arg_types
+                        .iter()
+                        .map(|t| crate::types::instance(ctx, *t))
+                        .collect();
+                    let tuple_ty = ctx.new_tuple(tuple_tys);
+                    let typed_tuple = type_pattern_inner(tctx, env, arg_pat, tuple_ty, mode, state, 0)?;
+                    match &typed_tuple.pat_desc {
+                        PatternDesc::Tpat_tuple(elements) => elements.clone(),
+                        _ => vec![typed_tuple],
+                    }
+                }
             }
         }
         (arg_types, None) if arg_types.is_empty() => {
