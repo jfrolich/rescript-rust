@@ -312,10 +312,10 @@ that OCaml can't parse; these are excluded from parity testing. Total test files
 ---
 
 # Quick mode (stop on first failure, show diff)
-./scripts/test_typedtree_parity.sh --quick
+timeout 300 ./scripts/test_typedtree_parity.sh --quick
 
 # Skip rewatch build (if already built)
-./scripts/test_typedtree_parity.sh --no-build
+timeout 300 ./scripts/test_typedtree_parity.sh --no-build
 
 **This is a common mistake that wastes time. DO NOT make it.**
 
