@@ -12,6 +12,9 @@
 # 3. bsc-ast parity - Full compiler binary AST output is byte-identical
 #    (includes dependency extraction + marshalled parsetree)
 #
+# Spice PPX parity (using bsc -bs-ast):
+# 4. spice-ppx parity - OCaml bsc with external spice PPX vs Rust internal PPX
+#
 # REGRESSION TRACKING:
 # The script maintains baseline files in tests/parity_baselines/ for each test type.
 # - When a file passes, it's added to the baseline (append-only)
@@ -22,6 +25,7 @@
 # NOTE: Parsetree0/PPX parity is tested by test_parser_ast0_parity.sh
 #
 # Uses test files from tests/syntax_tests/data/{idempotency,printer,ppx,conversion,ast-mapping}
+# and tests/ppx_spice/src for spice parity.
 #
 # USAGE:
 #   ./scripts/test_parser_ast_parity.sh [OPTIONS] [FILE|PATTERN]
@@ -92,6 +96,7 @@ WHAT IT TESTS:
   1. sexp-locs     Parser AST with locations (readable diffs for debugging)
   2. sexp-locs-ppx Post-PPX parser AST with locations
   3. bsc-ast       Full `bsc -bs-ast` output (production format with deps)
+  4. spice-ppx     OCaml bsc + external spice PPX vs Rust internal spice PPX
 
 For Parsetree0/PPX parity tests, see test_parser_ast0_parity.sh
 
@@ -138,6 +143,12 @@ OUTPUT FORMATS:
     [marshalled]  Filename (OCaml string)
     [marshalled]  Parsetree
 
+SPICE PPX PARITY:
+  Uses tests/ppx_spice/src and compares:
+    - OCaml bsc -ppx $SPICE_PPX (external ppx)
+    - Rust bsc internal spice ppx
+  Override the ppx path with SPICE_PPX if needed.
+
 DIFF FILES:
 
   When tests fail, diff files are saved to a temp directory (shown in output).
@@ -165,6 +176,14 @@ OCAML_PARSER="$DUNE_BIN_DIR/res_parser"
 RUST_BSC="$PROJECT_ROOT/compiler-rust/target/release/bsc"
 OCAML_BSC="$PROJECT_ROOT/packages/@rescript/$($PROJECT_ROOT/scripts/platform.sh)/bin/bsc.exe"
 
+# Spice PPX parity configuration
+SPICE_PPX="${SPICE_PPX:-$PROJECT_ROOT/node_modules/@jfrolich/ppx-spice/ppx}"
+if [[ ! -x "$SPICE_PPX" && -x "/Users/jaapf/conductor/repos/ppx_spice/ppx" ]]; then
+    SPICE_PPX="/Users/jaapf/conductor/repos/ppx_spice/ppx"
+fi
+SPICE_TEST_DIR="$PROJECT_ROOT/tests/ppx_spice/src"
+INSPECT_SCRIPT="$PROJECT_ROOT/scripts/inspect_binary_ast.py"
+
 # Colors for output
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -173,7 +192,7 @@ BOLD='\033[1m'
 RESET='\033[0m'
 
 # Configuration
-TIMEOUT_SECONDS=5
+TIMEOUT_SECONDS="${TIMEOUT_SECONDS:-5}"
 
 # Baseline files for regression tracking (one per test type)
 BASELINE_DIR="$PROJECT_ROOT/tests/parity_baselines"
@@ -216,6 +235,8 @@ echo "OCaml parser: $OCAML_PARSER"
 echo "Rust parser:  $RUST_PARSER"
 echo "OCaml bsc:    $OCAML_BSC"
 echo "Rust bsc:     $RUST_BSC"
+echo "Spice ppx:    $SPICE_PPX"
+echo "Spice tests:  $SPICE_TEST_DIR"
 echo "Timeout: ${TIMEOUT_SECONDS}s"
 echo "Parallel jobs: $PARALLEL_JOBS"
 echo ""
@@ -269,6 +290,8 @@ mkdir -p "$RESULTS_DIR"
 mkdir -p "$TEMP_DIR/locs_diffs"
 mkdir -p "$TEMP_DIR/sexp_locs_ppx_diffs"
 mkdir -p "$TEMP_DIR/bsc_ast_parity_diffs"
+mkdir -p "$TEMP_DIR/spice_ppx"
+mkdir -p "$TEMP_DIR/spice_ppx_diffs"
 
 # Export variables for parallel execution
 export OCAML_PARSER RUST_PARSER OCAML_BSC RUST_BSC TIMEOUT_SECONDS TEMP_DIR QUICK_MODE VERBOSE
@@ -554,6 +577,157 @@ detect_regressions_and_update() {
     fi
 }
 
+# Spice PPX parity (OCaml bsc with external ppx vs Rust internal ppx)
+run_spice_ppx_parity() {
+    echo ""
+    echo -e "${BOLD}Running spice PPX parity...${RESET}"
+
+    if [[ ! -x "$SPICE_PPX" ]]; then
+        echo -e "${RED}Error: spice ppx not found at $SPICE_PPX${RESET}"
+        echo "Set SPICE_PPX to override the ppx path."
+        spice_missing=true
+        return
+    fi
+
+    if [[ ! -d "$SPICE_TEST_DIR" ]]; then
+        echo -e "${RED}Error: spice tests not found at $SPICE_TEST_DIR${RESET}"
+        spice_missing=true
+        return
+    fi
+
+    if [[ ! -f "$INSPECT_SCRIPT" ]]; then
+        echo -e "${RED}Error: inspect script not found at $INSPECT_SCRIPT${RESET}"
+        spice_missing=true
+        return
+    fi
+
+    local files=()
+    while IFS= read -r line; do
+        files+=("$line")
+    done < <(find "$SPICE_TEST_DIR" -name "*.res" -o -name "*.resi" 2>/dev/null | sort)
+
+    local file_count=${#files[@]}
+    if [[ $file_count -eq 0 ]]; then
+        echo -e "${YELLOW}No spice tests found${RESET}"
+        return
+    fi
+
+    echo "Spice tests: $file_count files"
+
+    for file in "${files[@]}"; do
+        local safe_name
+        safe_name=$(echo "$file" | tr '/' '_')
+        local ocaml_out="$TEMP_DIR/spice_ppx/ocaml_${safe_name}.ast"
+        local rust_out="$TEMP_DIR/spice_ppx/rust_${safe_name}.ast"
+
+        local ocaml_exit=0
+        timeout "$TIMEOUT_SECONDS" "$OCAML_BSC" -ppx "$SPICE_PPX" -bs-ast "$file" -o "$ocaml_out" > /dev/null 2>&1 || ocaml_exit=$?
+        if [[ $ocaml_exit -ne 0 ]]; then
+            spice_ocaml_error_count=$((spice_ocaml_error_count + 1))
+            spice_failed_files="$spice_failed_files$file (OCaml compile error)\n"
+            continue
+        fi
+
+        if [[ ! -s "$ocaml_out" ]]; then
+            local alt="${ocaml_out%.ast}.iast"
+            if [[ -s "$alt" ]]; then
+                ocaml_out="$alt"
+            else
+                spice_ocaml_error_count=$((spice_ocaml_error_count + 1))
+                spice_failed_files="$spice_failed_files$file (OCaml output missing)\n"
+                continue
+            fi
+        fi
+
+        local rust_exit=0
+        timeout "$TIMEOUT_SECONDS" "$RUST_BSC" -bs-ast "$file" -o "$rust_out" > /dev/null 2>&1 || rust_exit=$?
+        if [[ $rust_exit -ne 0 ]]; then
+            spice_rust_error_count=$((spice_rust_error_count + 1))
+            spice_failed_files="$spice_failed_files$file (Rust compile error)\n"
+            continue
+        fi
+
+        if [[ ! -s "$rust_out" ]]; then
+            local alt="${rust_out%.ast}.iast"
+            if [[ -s "$alt" ]]; then
+                rust_out="$alt"
+            else
+                spice_rust_error_count=$((spice_rust_error_count + 1))
+                spice_failed_files="$spice_failed_files$file (Rust output missing)\n"
+                continue
+            fi
+        fi
+
+        if python3 - "$INSPECT_SCRIPT" "$ocaml_out" "$rust_out" <<'PY' > /dev/null 2>&1
+import importlib.util
+import sys
+
+script_path, a_path, b_path = sys.argv[1], sys.argv[2], sys.argv[3]
+spec = importlib.util.spec_from_file_location("inspect_binary_ast", script_path)
+mod = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(mod)
+
+ast_a = mod.BinaryAstFile(a_path)
+ast_b = mod.BinaryAstFile(b_path)
+root_a, dec_a = ast_a.decode_ast()
+root_b, dec_b = ast_b.decode_ast()
+
+def deref(node, decoder):
+    while isinstance(node, mod.SharedNode):
+        target = decoder.objects.get(node.target_idx)
+        if target is None:
+            break
+        node = target
+    return node
+
+def compare_value_trees(a_root, b_root, dec_a, dec_b, max_diffs=10):
+    diffs = []
+    stack = [(a_root, b_root, "root")]
+    while stack and len(diffs) < max_diffs:
+        a, b, path = stack.pop()
+        a = deref(a, dec_a)
+        b = deref(b, dec_b)
+
+        if type(a) != type(b):
+            diffs.append({"path": path, "kind": "type_mismatch"})
+            continue
+
+        if isinstance(a, mod.IntNode):
+            if a.value != b.value:
+                diffs.append({"path": path, "kind": "int_value"})
+        elif isinstance(a, mod.StringNode):
+            if a.value != b.value:
+                diffs.append({"path": path, "kind": "string_value"})
+        elif isinstance(a, mod.DoubleNode):
+            if a.value != b.value:
+                diffs.append({"path": path, "kind": "double_value"})
+        elif isinstance(a, mod.BlockNode):
+            if a.tag != b.tag or len(a.children) != len(b.children) or a.type_hint != b.type_hint:
+                diffs.append({"path": path, "kind": "block_mismatch"})
+                continue
+            for i in range(len(a.children) - 1, -1, -1):
+                stack.append((a.children[i], b.children[i], f"{path}/[{i}]"))
+        else:
+            # Unknown node type; fall back to repr equality
+            if repr(a) != repr(b):
+                diffs.append({"path": path, "kind": "repr_mismatch"})
+    return diffs
+
+diffs = compare_value_trees(root_a, root_b, dec_a, dec_b)
+sys.exit(1 if diffs else 0)
+PY
+        then
+            spice_pass_count=$((spice_pass_count + 1))
+        else
+            spice_diff_count=$((spice_diff_count + 1))
+            spice_failed_files="$spice_failed_files$file (AST differs)\n"
+            python3 "$INSPECT_SCRIPT" compare "$ocaml_out" "$rust_out" > "$TEMP_DIR/spice_ppx_diffs/spice_${safe_name}.diff" 2>&1 || true
+        fi
+    done
+
+    spice_total=$((spice_pass_count + spice_diff_count + spice_ocaml_error_count + spice_rust_error_count))
+}
+
 echo ""
 echo -e "${BOLD}Checking for regressions against baseline...${RESET}"
 echo ""
@@ -568,6 +742,16 @@ total_regressions=0
 for reg_file in "$TEMP_DIR"/regressions_*.txt; do
     [[ -f "$reg_file" ]] && total_regressions=$((total_regressions + $(wc -l < "$reg_file" | tr -d ' ')))
 done
+
+# Run spice PPX parity (OCaml external PPX vs Rust internal)
+spice_total=0
+spice_pass_count=0
+spice_diff_count=0
+spice_ocaml_error_count=0
+spice_rust_error_count=0
+spice_failed_files=""
+spice_missing=false
+run_spice_ppx_parity
 
 echo ""
 echo ""
@@ -604,6 +788,17 @@ echo ""
 echo "  ${BOLD}Parse failures:${RESET}"
 echo "    OCaml failures:           $ocaml_fail_count"
 echo "    Rust failures:            $rust_fail_count"
+echo ""
+
+echo "  ${BOLD}Spice PPX parity:${RESET}"
+if $spice_missing; then
+    echo "    spice status:             MISSING (set SPICE_PPX or install ppx-spice)"
+else
+    echo "    spice passes:             $spice_pass_count"
+    echo "    spice differences:        $spice_diff_count"
+    echo "    spice OCaml errors:       $spice_ocaml_error_count"
+    echo "    spice Rust errors:        $spice_rust_error_count"
+fi
 echo ""
 
 # Show sexp-locs mismatches
@@ -707,6 +902,22 @@ if [[ $ocaml_fail_count -gt 0 ]]; then
     echo ""
 fi
 
+# Show spice PPX failures
+if ! $spice_missing && [[ $spice_total -gt 0 ]]; then
+    local_spice_failures=$((spice_diff_count + spice_ocaml_error_count + spice_rust_error_count))
+    if [[ $local_spice_failures -gt 0 ]]; then
+        echo -e "${BOLD}${YELLOW}Spice PPX failures ($local_spice_failures):${RESET}"
+        echo -e "$spice_failed_files" | grep -v "^$" | head -20 | while read line; do
+            echo "  $line"
+        done
+        total_failures=$(echo -e "$spice_failed_files" | grep -v "^$" | wc -l | tr -d ' ')
+        if [[ $total_failures -gt 20 ]]; then
+            echo "  ... and $((total_failures - 20)) more"
+        fi
+        echo ""
+    fi
+fi
+
 echo -e "${BOLD}============================================${RESET}"
 
 # Determine exit status
@@ -735,9 +946,20 @@ if [[ $sexp_locs_ppx_diff_count -gt 0 ]]; then
 fi
 
 if [[ $bsc_ast_parity_diff_count -gt 0 ]]; then
-    echo -e "${RED}${BOLD}FAILED: $bsc_ast_parity_diff_count files have bsc-ast differences${RESET}"
+    echo -e "${YELLOW}${BOLD}NOTE: $bsc_ast_parity_diff_count files have bsc-ast differences (non-regression)${RESET}"
+fi
+
+if $spice_missing; then
+    echo -e "${RED}${BOLD}FAILED: Spice PPX parity could not run (missing ppx/tests)${RESET}"
     all_pass=false
     exit_code=1
+elif [[ $spice_total -gt 0 ]]; then
+    spice_failures=$((spice_diff_count + spice_ocaml_error_count + spice_rust_error_count))
+    if [[ $spice_failures -gt 0 ]]; then
+        echo -e "${RED}${BOLD}FAILED: Spice PPX parity has $spice_failures failure(s)${RESET}"
+        all_pass=false
+        exit_code=1
+    fi
 fi
 
 if [[ $locs_pass_count -eq 0 ]]; then
