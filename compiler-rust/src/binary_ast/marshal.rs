@@ -1946,7 +1946,7 @@ mod tests {
         let mut arena = ParseArena::default();
         // Create two different StrIdx with the same content
         let idx1 = arena.intern_string("same");
-        let idx2 = arena.push_string("same"); // Different idx, same content
+        let idx2 = arena.push_string("same".to_string()); // Different idx, same content
 
         let mut w = MarshalWriter::new();
         w.set_arena(&arena);

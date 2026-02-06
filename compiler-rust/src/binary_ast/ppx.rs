@@ -8622,8 +8622,12 @@ mod tests {
 
     #[test]
     fn test_prims_to_be_encoded() {
-        assert!(prims_to_be_encoded(&["console.log".to_string()]));
-        assert!(!prims_to_be_encoded(&["#foo".to_string()]));
-        assert!(!prims_to_be_encoded(&[]));
+        use crate::parse_arena::ParseArena;
+        let mut arena = ParseArena::new();
+        let console_log = arena.intern("console.log");
+        let foo = arena.intern("#foo");
+        assert!(prims_to_be_encoded(&[console_log], &arena));
+        assert!(!prims_to_be_encoded(&[foo], &arena));
+        assert!(!prims_to_be_encoded(&[], &arena));
     }
 }

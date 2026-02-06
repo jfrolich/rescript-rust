@@ -1160,17 +1160,23 @@ mod tests {
 
     #[test]
     fn test_arg_label() {
+        use crate::parse_arena::ParseArena;
+        let mut arena = ParseArena::new();
+        let x = arena.intern("x");
+        let y = arena.intern("y");
+
         let mut w = MarshalWriter::new();
+        w.set_arena(&arena);
         ArgLabel::Nolabel.marshal(&mut w);
         assert_eq!(w.payload(), &[0x40]); // int 0
 
         w.reset();
-        ArgLabel::Labelled("x".to_string()).marshal(&mut w);
+        ArgLabel::Labelled(x).marshal(&mut w);
         // Block(tag=0, size=1), "x"
         assert_eq!(w.payload(), &[0x90, 0x21, b'x']);
 
         w.reset();
-        ArgLabel::Optional("y".to_string()).marshal(&mut w);
+        ArgLabel::Optional(y).marshal(&mut w);
         // Block(tag=1, size=1), "y"
         assert_eq!(w.payload(), &[0x91, 0x21, b'y']);
     }
