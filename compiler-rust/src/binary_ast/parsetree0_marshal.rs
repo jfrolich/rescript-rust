@@ -1195,7 +1195,10 @@ mod tests {
 
     #[test]
     fn test_core_type_any() {
+        use crate::parse_arena::ParseArena;
+        let arena = ParseArena::new();
         let mut w = MarshalWriter::new();
+        w.set_arena(&arena);
         let ty = CoreType {
             ptyp_desc: CoreTypeDesc::Any,
             ptyp_loc: crate::location::Location::none(),
@@ -1210,7 +1213,10 @@ mod tests {
 
     #[test]
     fn test_pattern_any() {
+        use crate::parse_arena::ParseArena;
+        let arena = ParseArena::new();
         let mut w = MarshalWriter::new();
+        w.set_arena(&arena);
         let pat = Pattern {
             ppat_desc: PatternDesc::Any,
             ppat_loc: crate::location::Location::none(),

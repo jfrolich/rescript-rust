@@ -172,6 +172,7 @@ mod tests {
         let mut arena = ParseArena::new();
         let test_file = arena.intern("test.res");
         let mut w = MarshalWriter::new();
+        w.set_arena(&arena);
         let pos = Position::new(test_file, 1, 0, 0);
         pos.marshal(&mut w);
 
@@ -194,6 +195,7 @@ mod tests {
         let mut arena = ParseArena::new();
         let test_file = arena.intern("test.res");
         let mut w = MarshalWriter::new();
+        w.set_arena(&arena);
         let loc = Location::from_positions(
             Position::new(test_file, 1, 0, 0),
             Position::new(test_file, 1, 0, 5),
@@ -207,7 +209,9 @@ mod tests {
 
     #[test]
     fn test_located_marshal() {
+        let arena = ParseArena::new();
         let mut w = MarshalWriter::new();
+        w.set_arena(&arena);
         let located = Located::new("hello".to_string(), Location::none());
         located.marshal(&mut w);
 
@@ -284,7 +288,9 @@ mod tests {
 
     #[test]
     fn test_location_none_marshal() {
+        let arena = ParseArena::new();
         let mut w = MarshalWriter::new();
+        w.set_arena(&arena);
         let loc = Location::none();
         loc.marshal(&mut w);
 
