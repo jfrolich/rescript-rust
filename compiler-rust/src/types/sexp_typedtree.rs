@@ -366,12 +366,19 @@ fn sexp_type_expr_aux(arena: &ParseArena, ctx: &TypeContext<'_>, te: TypeExprRef
     match &*desc {
         TypeDesc::Tvar(name) => Sexp::list(vec![Sexp::atom("Tvar"), opt_string(name)]),
         TypeDesc::Tarrow { arg, ret, arity, .. } => {
+            // Visit children in right-to-left order to match OCaml's list literal
+            // evaluation order. OCaml evaluates [e1; e2; e3; e4; e5] as e5, e4, e3, e2, e1.
+            // This affects cycle detection when type nodes are shared.
+            let arity_sexp = opt(|a: &i32| Sexp::atom(&a.to_string()), arity);
+            let ret_sexp = sexp_type_expr_aux(arena, ctx, *ret, visited);
+            let arg_sexp = sexp_type_expr_aux(arena, ctx, arg.typ, visited);
+            let label_sexp = sexp_type_arg_label(&arg.lbl);
             Sexp::list(vec![
                 Sexp::atom("Tarrow"),
-                sexp_type_arg_label(&arg.lbl),
-                sexp_type_expr_aux(arena, ctx, arg.typ, visited),
-                sexp_type_expr_aux(arena, ctx, *ret, visited),
-                opt(|a: &i32| Sexp::atom(&a.to_string()), arity),
+                label_sexp,
+                arg_sexp,
+                ret_sexp,
+                arity_sexp,
             ])
         }
         TypeDesc::Ttuple(types) => {
@@ -395,12 +402,15 @@ fn sexp_type_expr_aux(arena: &ParseArena, ctx: &TypeContext<'_>, te: TypeExprRef
                 FieldKind::Fabsent => "Fabsent",
                 FieldKind::Fvar(_) => "Fvar",
             };
+            // Visit in right-to-left order to match OCaml list literal evaluation
+            let rest_sexp = sexp_type_expr_aux(arena, ctx, *rest, visited);
+            let typ_sexp = sexp_type_expr_aux(arena, ctx, *typ, visited);
             Sexp::list(vec![
                 Sexp::atom("Tfield"),
                 string(name),
                 Sexp::atom(kind_str),
-                sexp_type_expr_aux(arena, ctx, *typ, visited),
-                sexp_type_expr_aux(arena, ctx, *rest, visited),
+                typ_sexp,
+                rest_sexp,
             ])
         }
         TypeDesc::Tnil => Sexp::atom("Tnil"),
@@ -409,10 +419,13 @@ fn sexp_type_expr_aux(arena: &ParseArena, ctx: &TypeContext<'_>, te: TypeExprRef
         TypeDesc::Tvariant(row) => sexp_row_desc_aux(arena, ctx, row, visited),
         TypeDesc::Tunivar(name) => Sexp::list(vec![Sexp::atom("Tunivar"), opt_string(name)]),
         TypeDesc::Tpoly { body, vars } => {
+            // Visit in right-to-left order to match OCaml list literal evaluation
+            let vars_sexp = Sexp::list(vars.iter().map(|t| sexp_type_expr_aux(arena, ctx, *t, visited)).collect());
+            let body_sexp = sexp_type_expr_aux(arena, ctx, *body, visited);
             Sexp::list(vec![
                 Sexp::atom("Tpoly"),
-                sexp_type_expr_aux(arena, ctx, *body, visited),
-                Sexp::list(vars.iter().map(|t| sexp_type_expr_aux(arena, ctx, *t, visited)).collect()),
+                body_sexp,
+                vars_sexp,
             ])
         }
         TypeDesc::Tpackage { path, lids, args } => {

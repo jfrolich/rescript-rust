@@ -37,7 +37,7 @@ use crate::parser::longident::Longident;
 use crate::types::typedtree::{
     ArrowArg, Constant, EnvRef, Expression, ExpressionDesc, Pattern, PatternDesc, ValueBinding,
 };
-use crate::types::{Env, Path, TypeContext, TypeError, TypeExprRef, UnifyState, ValueDescription};
+use crate::types::{Env, Path, TypeContext, TypeDesc, TypeError, TypeExprRef, UnifyState, ValueDescription};
 
 // ============================================================================
 // Location Conversion Helpers
@@ -2129,6 +2129,240 @@ fn unify_expression_types(
 
 /// Type check function application.
 #[allow(clippy::too_many_arguments)]
+/// Unified ops form (unary or binary).
+#[derive(Clone, Copy, PartialEq)]
+enum UnifiedOpForm {
+    Unary,
+    Binary,
+}
+
+/// Check if a path (by name) is a unified op, returning its form.
+fn get_unified_op_form(path_name: &str) -> Option<UnifiedOpForm> {
+    match path_name {
+        // Binary unified ops (matching OCaml's unified_ops.ml)
+        "Pervasives.+" | "Pervasives.-" | "Pervasives.*" | "Pervasives./"
+        | "Pervasives.%" | "Pervasives.mod" | "Pervasives.**"
+        | "Pervasives.<<" | "Pervasives.>>" | "Pervasives.>>>"
+        | "Pervasives.|||" | "Pervasives.^^^" | "Pervasives.&&&" => {
+            Some(UnifiedOpForm::Binary)
+        }
+        // Unary unified ops
+        "Pervasives.~+" | "Pervasives.~-" | "Pervasives.~~~" => {
+            Some(UnifiedOpForm::Unary)
+        }
+        _ => None,
+    }
+}
+
+/// Check if a resolved type is a Tconstr matching a specific type name.
+fn is_type_named(ctx: &TypeContext<'_>, ty: TypeExprRef, name: &str) -> bool {
+    let ty = ctx.repr(ty);
+    let desc = ctx.get_desc(ty);
+    match &*desc {
+        TypeDesc::Tconstr { path, args, .. } if args.is_empty() => {
+            match path {
+                Path::Pident(id) => id.name() == name,
+                _ => false,
+            }
+        }
+        _ => false,
+    }
+}
+
+/// Translate unified ops: specialized type-checking for polymorphic operators.
+///
+/// This matches OCaml's `translate_unified_ops` in typecore.ml.
+/// Unified ops like `+`, `-`, `*`, etc. are polymorphic in Pervasives
+/// (type `('a, 'a) => 'a`) but get specialized based on the argument types.
+/// The default fallback is `int`.
+///
+/// Crucially, this does NOT unify the operator's polymorphic type with the
+/// concrete arg/result types, so the operator expression keeps its
+/// polymorphic instance type (with shared Tvars and cycles in sexp output).
+fn translate_unified_ops(
+    tctx: &mut TypeCheckContext<'_>,
+    env: &Env,
+    loc: LocIdx,
+    typed_funct: &Expression,
+    args: &[(ArgLabel, ParsedExpression)],
+    expected_ty: TypeExprRef,
+    context: Option<TypeClashContext>,
+    attributes: &[crate::parser::ast::Attribute],
+) -> Option<TypeCoreResult<Expression>> {
+    use crate::types::typedtree::ApplyArg;
+
+    // Check if the function is a unified op
+    let path_name = match &typed_funct.exp_desc {
+        ExpressionDesc::Texp_ident(path, _, _) => path.name(),
+        _ => return None,
+    };
+
+    let form = match get_unified_op_form(&path_name) {
+        Some(f) => f,
+        None => return None,
+    };
+
+    let ctx = tctx.type_ctx;
+
+    match form {
+        UnifiedOpForm::Binary if args.len() == 2 => {
+            // Type check LHS and RHS independently (not against function type)
+            let lhs_ty = ctx.new_var(None);
+            let lhs_result = type_expect(tctx, env, &args[0].1, lhs_ty, None);
+            let lhs = match lhs_result {
+                Ok(e) => e,
+                Err(e) => return Some(Err(e)),
+            };
+            let lhs_type = ctx.repr(lhs.exp_type);
+
+            let rhs_ty = ctx.new_var(None);
+            let rhs_result = type_expect(tctx, env, &args[1].1, rhs_ty, None);
+            let rhs = match rhs_result {
+                Ok(e) => e,
+                Err(e) => return Some(Err(e)),
+            };
+            let rhs_type = ctx.repr(rhs.exp_type);
+
+            // Determine the concrete type using unified ops rules:
+            // Rule 1: If LHS is a known primitive type, use it
+            // Rule 2: If RHS is a known primitive type, use it
+            // Rule 3: Default to int
+            let concrete_type_name = if is_type_named(ctx, lhs_type, "int") {
+                "int"
+            } else if is_type_named(ctx, lhs_type, "float") {
+                "float"
+            } else if is_type_named(ctx, lhs_type, "bigint") {
+                "bigint"
+            } else if is_type_named(ctx, lhs_type, "string") {
+                "string"
+            } else if is_type_named(ctx, rhs_type, "int") {
+                "int"
+            } else if is_type_named(ctx, rhs_type, "float") {
+                "float"
+            } else if is_type_named(ctx, rhs_type, "bigint") {
+                "bigint"
+            } else if is_type_named(ctx, rhs_type, "string") {
+                "string"
+            } else {
+                // Default fallback to int
+                "int"
+            };
+
+            // Create SEPARATE concrete type nodes for each position.
+            // OCaml's type_expect calls instance() on the expected type, creating
+            // fresh copies each time. We simulate this by creating separate nodes.
+            let make_concrete = || ctx.new_constr(
+                Path::pident(Ident::create_persistent(concrete_type_name)),
+                vec![],
+            );
+
+            // Unify LHS with a fresh concrete type
+            let lhs_concrete = make_concrete();
+            if let Err(e) = unify_expression_types(tctx, loc, lhs.exp_type, lhs_concrete, None) {
+                return Some(Err(e));
+            }
+            // Re-type RHS with a fresh concrete type (matching OCaml which calls type_expect)
+            let rhs_concrete = make_concrete();
+            let rhs = match type_expect(tctx, env, &args[1].1, rhs_concrete, None) {
+                Ok(e) => e,
+                Err(e) => return Some(Err(e)),
+            };
+
+            // Result type is a fresh concrete type
+            let result_ty = make_concrete();
+
+            // Unify result with expected type
+            if let Err(e) = unify_expression_types(tctx, loc, result_ty, expected_ty, context) {
+                return Some(Err(e));
+            }
+
+            let typed_args = vec![
+                ApplyArg {
+                    label: args[0].0.clone(),
+                    expression: lhs,
+                },
+                ApplyArg {
+                    label: args[1].0.clone(),
+                    expression: rhs,
+                },
+            ];
+
+            Some(Ok(Expression::new(
+                ExpressionDesc::Texp_apply {
+                    funct: Box::new(typed_funct.clone()),
+                    args: typed_args,
+                    partial: false,
+                    transformed_jsx: false,
+                },
+                loc.clone(),
+                result_ty,
+                EnvRef(0),
+                attributes.to_vec(),
+            )))
+        }
+        UnifiedOpForm::Unary if args.len() == 1 => {
+            // Type check the argument independently
+            let arg_ty = ctx.new_var(None);
+            let arg_result = type_expect(tctx, env, &args[0].1, arg_ty, None);
+            let arg = match arg_result {
+                Ok(e) => e,
+                Err(e) => return Some(Err(e)),
+            };
+            let arg_type = ctx.repr(arg.exp_type);
+
+            // Determine the concrete type
+            let concrete_type_name = if is_type_named(ctx, arg_type, "int") {
+                "int"
+            } else if is_type_named(ctx, arg_type, "float") {
+                "float"
+            } else if is_type_named(ctx, arg_type, "bigint") {
+                "bigint"
+            } else {
+                "int" // Default fallback
+            };
+
+            let concrete_ty = ctx.new_constr(
+                Path::pident(Ident::create_persistent(concrete_type_name)),
+                vec![],
+            );
+
+            // Unify arg with concrete type
+            if let Err(e) = unify_expression_types(tctx, loc, arg.exp_type, concrete_ty, None) {
+                return Some(Err(e));
+            }
+
+            // Result type
+            let result_ty = ctx.new_constr(
+                Path::pident(Ident::create_persistent(concrete_type_name)),
+                vec![],
+            );
+
+            if let Err(e) = unify_expression_types(tctx, loc, result_ty, expected_ty, context) {
+                return Some(Err(e));
+            }
+
+            let typed_args = vec![ApplyArg {
+                label: args[0].0.clone(),
+                expression: arg,
+            }];
+
+            Some(Ok(Expression::new(
+                ExpressionDesc::Texp_apply {
+                    funct: Box::new(typed_funct.clone()),
+                    args: typed_args,
+                    partial: false,
+                    transformed_jsx: false,
+                },
+                loc.clone(),
+                result_ty,
+                EnvRef(0),
+                attributes.to_vec(),
+            )))
+        }
+        _ => None, // Wrong number of args for the form
+    }
+}
+
 fn type_application(
     tctx: &mut TypeCheckContext<'_>,
     env: &Env,
@@ -2149,7 +2383,14 @@ fn type_application(
     let funct_ty = ctx.new_var(None);
     let typed_funct = type_expect(tctx, env, funct, funct_ty, None)?;
 
-    // Get the function's type after any unification
+    // Try unified ops dispatch first (matching OCaml's translate_unified_ops)
+    if let Some(result) = translate_unified_ops(
+        tctx, env, loc, &typed_funct, args, expected_ty, context.clone(), attributes,
+    ) {
+        return result;
+    }
+
+    // Normal application: get the function's type after any unification
     let mut current_ty = tctx.type_ctx.repr(typed_funct.exp_type);
 
     // Type check arguments, extracting/building arrow types as we go

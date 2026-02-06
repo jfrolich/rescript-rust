@@ -570,41 +570,62 @@ pub fn initial_env(ctx: &TypeContext<'_>) -> Env {
     };
     env.add_constructor(true_id, true_cstr);
 
-    // Add arithmetic operators for int
-    // Note: In ReScript, + is polymorphic and specialized by the type checker,
-    // but for simplicity we'll add int versions directly
-    add_binary_primitive(&mut env, ctx, "+", "%addint", int_ty, int_ty, int_ty);
-    add_binary_primitive(&mut env, ctx, "-", "%subint", int_ty, int_ty, int_ty);
-    add_binary_primitive(&mut env, ctx, "*", "%mulint", int_ty, int_ty, int_ty);
-    add_binary_primitive(&mut env, ctx, "/", "%divint", int_ty, int_ty, int_ty);
-    add_binary_primitive(&mut env, ctx, "mod", "%modint", int_ty, int_ty, int_ty);
+    // Add polymorphic arithmetic operators matching Pervasives.res:
+    //   external "+": ('a, 'a) => 'a = "%add"
+    // Each operator gets its own fresh 'a Tvar shared across all positions
+    add_poly_binary_primitive(&mut env, ctx, "+", "%add");
+    add_poly_binary_primitive(&mut env, ctx, "-", "%sub");
+    add_poly_binary_primitive(&mut env, ctx, "*", "%mul");
+    add_poly_binary_primitive(&mut env, ctx, "/", "%div");
+    add_poly_binary_primitive(&mut env, ctx, "mod", "%mod");
+    add_poly_binary_primitive(&mut env, ctx, "**", "%pow");
+    add_poly_binary_primitive(&mut env, ctx, "%", "%mod");
 
-    // Add arithmetic operators for float
+    // Add monomorphic float operators matching Pervasives.res:
+    //   external "+.": (float, float) => float = "%addfloat"
     add_binary_primitive(&mut env, ctx, "+.", "%addfloat", float_ty, float_ty, float_ty);
     add_binary_primitive(&mut env, ctx, "-.", "%subfloat", float_ty, float_ty, float_ty);
     add_binary_primitive(&mut env, ctx, "*.", "%mulfloat", float_ty, float_ty, float_ty);
     add_binary_primitive(&mut env, ctx, "/.", "%divfloat", float_ty, float_ty, float_ty);
-    add_binary_primitive(&mut env, ctx, "**", "%powfloat", float_ty, float_ty, float_ty);
 
-    // Add comparison operators (polymorphic - using int for now)
-    add_binary_primitive(&mut env, ctx, "==", "%eq", int_ty, int_ty, bool_ty);
-    add_binary_primitive(&mut env, ctx, "!=", "%noteq", int_ty, int_ty, bool_ty);
-    add_binary_primitive(&mut env, ctx, "<", "%ltint", int_ty, int_ty, bool_ty);
-    add_binary_primitive(&mut env, ctx, ">", "%gtint", int_ty, int_ty, bool_ty);
-    add_binary_primitive(&mut env, ctx, "<=", "%leint", int_ty, int_ty, bool_ty);
-    add_binary_primitive(&mut env, ctx, ">=", "%geint", int_ty, int_ty, bool_ty);
+    // Add polymorphic comparison operators matching Pervasives.res:
+    //   external "==": ('a, 'a) => bool = "%equal"
+    add_poly_cmp_primitive(&mut env, ctx, "==", "%equal", bool_ty);
+    add_poly_cmp_primitive(&mut env, ctx, "!=", "%notequal", bool_ty);
+    add_poly_cmp_primitive(&mut env, ctx, "<", "%lessthan", bool_ty);
+    add_poly_cmp_primitive(&mut env, ctx, ">", "%greaterthan", bool_ty);
+    add_poly_cmp_primitive(&mut env, ctx, "<=", "%lessequal", bool_ty);
+    add_poly_cmp_primitive(&mut env, ctx, ">=", "%greaterequal", bool_ty);
+    add_poly_cmp_primitive(&mut env, ctx, "===", "%eq", bool_ty);
+    add_poly_cmp_primitive(&mut env, ctx, "!==", "%noteq", bool_ty);
 
-    // Add boolean operators
+    // Add boolean operators (monomorphic)
     add_binary_primitive(&mut env, ctx, "&&", "%sequand", bool_ty, bool_ty, bool_ty);
     add_binary_primitive(&mut env, ctx, "||", "%sequor", bool_ty, bool_ty, bool_ty);
     add_unary_primitive(&mut env, ctx, "not", "%boolnot", bool_ty, bool_ty);
 
-    // Add unary minus
-    add_unary_primitive(&mut env, ctx, "~-", "%negint", int_ty, int_ty);
+    // Add polymorphic unary operators matching Pervasives.res:
+    //   external "~-": 'a => 'a = "%neg"
+    add_poly_unary_primitive(&mut env, ctx, "~-", "%neg");
+    add_poly_unary_primitive(&mut env, ctx, "~+", "%plus");
     add_unary_primitive(&mut env, ctx, "~-.", "%negfloat", float_ty, float_ty);
 
-    // Add string concatenation
+    // Add string concatenation (monomorphic)
     add_binary_primitive(&mut env, ctx, "++", "%string_concat", string_ty, string_ty, string_ty);
+
+    // Add polymorphic bitwise operators matching Pervasives.res
+    add_poly_binary_primitive(&mut env, ctx, "&&&", "%bitand");
+    add_poly_binary_primitive(&mut env, ctx, "|||", "%bitor");
+    add_poly_binary_primitive(&mut env, ctx, "^^^", "%bitxor");
+    add_poly_binary_primitive(&mut env, ctx, "<<", "%lsl");
+    add_poly_binary_primitive(&mut env, ctx, ">>", "%asr");
+    add_poly_binary_primitive(&mut env, ctx, ">>>", "%lsr");
+    add_poly_unary_primitive(&mut env, ctx, "~~~", "%bitnot");
+
+    // Add polymorphic comparison/utility from Pervasives.res
+    add_poly_cmp_primitive(&mut env, ctx, "compare", "%compare", int_ty);
+    add_poly_binary_primitive(&mut env, ctx, "min", "%min");
+    add_poly_binary_primitive(&mut env, ctx, "max", "%max");
 
     // Add ignore function (polymorphic)
     let alpha = ctx.new_generic_var(None);
@@ -673,6 +694,44 @@ fn add_unary_primitive(
         val_path: Some(path),
     };
     env.add_value(id, desc);
+}
+
+/// Helper to add a polymorphic binary operator: ('a, 'a) => 'a
+/// Creates a single shared Tvar for all three positions, matching OCaml behavior
+/// where Pervasives declares e.g. `external "+": ('a, 'a) => 'a = "%add"`
+fn add_poly_binary_primitive(
+    env: &mut Env,
+    ctx: &TypeContext<'_>,
+    name: &str,
+    prim_name: &str,
+) {
+    // Create a SINGLE Tvar shared across all three positions
+    let alpha = ctx.new_generic_var(None);
+    add_binary_primitive(env, ctx, name, prim_name, alpha, alpha, alpha);
+}
+
+/// Helper to add a polymorphic comparison operator: ('a, 'a) => ret_ty
+/// Creates a single shared Tvar for the two arg positions
+fn add_poly_cmp_primitive(
+    env: &mut Env,
+    ctx: &TypeContext<'_>,
+    name: &str,
+    prim_name: &str,
+    ret_ty: TypeExprRef,
+) {
+    let alpha = ctx.new_generic_var(None);
+    add_binary_primitive(env, ctx, name, prim_name, alpha, alpha, ret_ty);
+}
+
+/// Helper to add a polymorphic unary operator: 'a => 'a
+fn add_poly_unary_primitive(
+    env: &mut Env,
+    ctx: &TypeContext<'_>,
+    name: &str,
+    prim_name: &str,
+) {
+    let alpha = ctx.new_generic_var(None);
+    add_unary_primitive(env, ctx, name, prim_name, alpha, alpha);
 }
 
 #[cfg(test)]
