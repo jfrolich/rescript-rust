@@ -398,7 +398,7 @@ impl<'a> Node<'a> {
             Node::Case(case) => {
                 // The case location extends from pattern to the end of the expression
                 // Check for braces attribute on RHS - if present, use its end location
-                // This must match the logic in printer2.rs:get_case_pos_range
+                // This must match the logic in printer.rs:get_case_pos_range
                 let start = arena.loc_start(case.pc_lhs.ppat_loc);
                 let end = match parsetree_viewer::process_braces_attr(arena, &case.pc_rhs) {
                     Some(attr) => arena.loc_end(attr.0.loc),

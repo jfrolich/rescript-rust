@@ -81,7 +81,7 @@ If a command hangs, it likely hit the infinite loop. Identify which file trigger
 
 | File | Purpose |
 |------|---------|
-| `compiler-rust/src/parser/printer2.rs` | Main printer implementation |
+| `compiler-rust/src/parser/printer.rs` | Main printer implementation |
 | `compiler-rust/src/parser/comment_table.rs` | Comment attachment logic |
 | `compiler-rust/src/parser/ml_printer.rs` | ML AST printer (for `-print ml`) |
 | `compiler-rust/src/parser/diagnostics.rs` | Error messages and recovery |

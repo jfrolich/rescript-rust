@@ -400,7 +400,7 @@ Reference: https://github.com/ocaml/ocaml/blob/trunk/stdlib/format.ml
     not consumed by the pattern
   - Also fixed Ptyp_arrow comment walking: now uses `parsetree_viewer::arrow_type` to flatten
     the arrow type into a list of parameters before walking, matching OCaml's approach
-- Added value binding sugar printing in printer2.rs:
+- Added value binding sugar printing in printer.rs:
   - When pattern is `Ppat_constraint(pat, Ptyp_poly)` and expression is `Pexp_newtype`,
     print the sugared form `let x: type t. T = expr` instead of desugared form
 - Fixed stack overflow in arrow_type when arity is 0:

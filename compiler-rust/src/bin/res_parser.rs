@@ -22,7 +22,7 @@ use clap::Parser as ClapParser;
 use rescript_compiler::binary_ast::{mapper_from0, mapper_to0, ppx, Marshal, MarshalWriter};
 use rescript_compiler::parse_arena::ParseArena;
 use rescript_compiler::parser::{
-    code_frame, jsx_ppx, ml_printer, module, printer2, sexp, sexp_locs, sexp_locs0, Comment, Parser,
+    code_frame, jsx_ppx, ml_printer, module, printer, sexp, sexp_locs, sexp_locs0, Comment, Parser,
     ParserMode, Scanner, SignatureItem, Structure,
 };
 use std::fs;
@@ -302,7 +302,7 @@ fn main() {
             }
             "res" => {
                 let output =
-                    printer2::print_structure_with_comments(&structure, parser.comments().to_vec(), parser.arena_mut());
+                    printer::print_structure_with_comments(&structure, parser.comments().to_vec(), parser.arena_mut());
                 if !output.is_empty() {
                     // Convert Latin-1 chars back to bytes to preserve original file encoding
                     let bytes: Vec<u8> = output.chars().map(|c| c as u8).collect();
@@ -429,8 +429,8 @@ fn print_tokens(source: &str, filename: &str, out: &mut impl Write) {
 // ============================================================================
 
 fn print_signature_res(signature: &[SignatureItem], comments: Vec<Comment>, arena: &mut ParseArena, out: &mut impl Write) {
-    // Use printer2 to print signature
-    let output = printer2::print_signature_with_comments(signature, comments, arena);
+    // Use printer to print signature
+    let output = printer::print_signature_with_comments(signature, comments, arena);
     if !output.is_empty() {
         // Convert Latin-1 chars back to bytes to preserve original file encoding
         let bytes: Vec<u8> = output.chars().map(|c| c as u8).collect();

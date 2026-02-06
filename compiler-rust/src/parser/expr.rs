@@ -2321,9 +2321,9 @@ pub fn over_parse_constrained_or_coerced_or_arrow_expression(
 
                         // Use ResPrinter to render both interpretations
                         use super::doc::Doc;
-                        use super::printer2;
+                        use super::printer;
                         use super::comment_table::CommentTable;
-                        let state = printer2::PrinterState::init();
+                        let state = printer::PrinterState::init();
                         let mut cmt_tbl = CommentTable::new();
                         let msg = Doc::breakable_group(
                             Doc::concat(vec![
@@ -2331,10 +2331,10 @@ pub fn over_parse_constrained_or_coerced_or_arrow_expression(
                                 Doc::indent(Doc::concat(vec![
                                     Doc::line(),
                                     Doc::text("1) "),
-                                    printer2::print_expression(&state, &arrow1, &mut cmt_tbl, p.arena()),
+                                    printer::print_expression(&state, &arrow1, &mut cmt_tbl, p.arena()),
                                     Doc::line(),
                                     Doc::text("2) "),
-                                    printer2::print_expression(&state, &arrow2, &mut cmt_tbl, p.arena()),
+                                    printer::print_expression(&state, &arrow2, &mut cmt_tbl, p.arena()),
                                 ])),
                             ]),
                             true,
@@ -2359,12 +2359,12 @@ pub fn over_parse_constrained_or_coerced_or_arrow_expression(
 
                     // Use ResPrinter to render the constrained expression in parens
                     use super::doc::Doc;
-                    use super::printer2;
+                    use super::printer;
                     use super::comment_table::CommentTable;
-                    let state = printer2::PrinterState::init();
+                    let state = printer::PrinterState::init();
                     let mut cmt_tbl = CommentTable::new();
-                    let printed = printer2::add_parens(
-                        printer2::print_expression(&state, &constrained, &mut cmt_tbl, p.arena()),
+                    let printed = printer::add_parens(
+                        printer::print_expression(&state, &constrained, &mut cmt_tbl, p.arena()),
                     );
                     let msg = Doc::breakable_group(
                         Doc::concat(vec![
@@ -4819,7 +4819,7 @@ fn parse_if_let_expr(p: &mut Parser<'_>, start_pos_idx: PosIdx) -> Expression {
     // Emit the experimental if-let error message using ResPrinter
     {
         use super::doc::Doc;
-        use super::printer2;
+        use super::printer;
         use super::comment_table::CommentTable;
 
         // Create a copy without attributes for printing
@@ -4828,7 +4828,7 @@ fn parse_if_let_expr(p: &mut Parser<'_>, start_pos_idx: PosIdx) -> Expression {
             ..if_let_expr.clone()
         };
 
-        let state = printer2::PrinterState::init();
+        let state = printer::PrinterState::init();
         let mut cmt_tbl = CommentTable::new();
         let msg = Doc::concat(vec![
             Doc::text("If-let is currently highly experimental."),
@@ -4837,7 +4837,7 @@ fn parse_if_let_expr(p: &mut Parser<'_>, start_pos_idx: PosIdx) -> Expression {
             Doc::concat(vec![
                 Doc::hard_line(),
                 Doc::hard_line(),
-                printer2::print_expression(&state, &switch_expr, &mut cmt_tbl, p.arena()),
+                printer::print_expression(&state, &switch_expr, &mut cmt_tbl, p.arena()),
             ]),
         ]).to_string(80);
 

@@ -51,7 +51,7 @@ pub mod module;
 pub mod parens;
 pub mod parsetree_viewer;
 pub mod pattern;
-pub mod printer2;
+pub mod printer;
 pub mod scanner;
 pub mod state;
 pub mod token;
