@@ -1882,3 +1882,15 @@ pub fn print_typed_structure_with_locs<W: Write>(arena: &ParseArena, ctx: &TypeC
     let sexp = sexp_structure(arena, ctx, true, str);
     writeln!(out, "{}", sexp.to_string())
 }
+
+/// Print a typed signature as sexp (without locations)
+pub fn print_typed_signature<W: Write>(arena: &ParseArena, ctx: &TypeContext<'_>, sig: &crate::types::typedtree::TypedSignature, out: &mut W) -> std::io::Result<()> {
+    let sexp = sexp_typed_signature(arena, ctx, false, sig);
+    writeln!(out, "{}", sexp.to_string())
+}
+
+/// Print a typed signature as sexp (with locations)
+pub fn print_typed_signature_with_locs<W: Write>(arena: &ParseArena, ctx: &TypeContext<'_>, sig: &crate::types::typedtree::TypedSignature, out: &mut W) -> std::io::Result<()> {
+    let sexp = sexp_typed_signature(arena, ctx, true, sig);
+    writeln!(out, "{}", sexp.to_string())
+}

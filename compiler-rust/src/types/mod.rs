@@ -97,7 +97,7 @@ pub use typedtree::{
 };
 
 // typemod exports
-pub use typemod::{TypeModError, TypeModResult, type_module_expr, type_structure};
+pub use typemod::{TypeModError, TypeModResult, type_module_expr, type_structure, transl_signature};
 
 // includemod exports
 pub use includemod::{

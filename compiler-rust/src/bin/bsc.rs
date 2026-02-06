@@ -10,7 +10,7 @@
 
 use anyhow::{anyhow, Context, Result};
 use rescript_compiler::binary_ast::{write_signature_ast_current, write_structure_ast_current};
-use rescript_compiler::driver::{compile_file_to_js_with_options, CompilerOptions};
+use rescript_compiler::driver::{compile_file_to_js_with_options, typecheck_interface_file, CompilerOptions};
 use rescript_compiler::parser::{module, Parser};
 use std::env;
 use std::fs;
@@ -114,11 +114,17 @@ fn run() -> Result<()> {
         return generate_ast(&input, opts.output);
     }
 
-    let source_path = if input.extension().and_then(|s| s.to_str()) == Some("ast") {
+    let ext = input.extension().and_then(|s| s.to_str()).unwrap_or("");
+    let source_path = if ext == "ast" || ext == "iast" {
         read_ast_source_path(&input)?
     } else {
         input
     };
+
+    let is_interface = source_path
+        .extension()
+        .and_then(|s| s.to_str())
+        .is_some_and(|ext| ext == "resi" || ext == "mli");
 
     let compiler_opts = CompilerOptions {
         dump_lambda: opts.dump_lambda,
@@ -127,8 +133,15 @@ fn run() -> Result<()> {
         dump_lambda_sexp: opts.dump_lambda_sexp,
         dump_lambda_sexp_locs: opts.dump_lambda_sexp_locs,
     };
-    let js = compile_file_to_js_with_options(&source_path, &compiler_opts)?;
-    write_outputs(&source_path, &js, &opts)
+
+    if is_interface {
+        // Interface files (.resi) don't produce JS output
+        typecheck_interface_file(&source_path, &compiler_opts)?;
+        Ok(())
+    } else {
+        let js = compile_file_to_js_with_options(&source_path, &compiler_opts)?;
+        write_outputs(&source_path, &js, &opts)
+    }
 }
 
 fn generate_ast(input: &Path, output: Option<PathBuf>) -> Result<()> {

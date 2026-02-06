@@ -12,8 +12,8 @@ use crate::js_ir::printer::print_program;
 use crate::lambda::compile::LambdaCompiler;
 use crate::lambda::convert::LambdaConverter;
 use crate::parser::{module, Parser};
-use crate::types::sexp_typedtree::{print_typed_structure, print_typed_structure_with_locs};
-use crate::types::{initial_env, type_structure, TypeCheckContext, TypeContext};
+use crate::types::sexp_typedtree::{print_typed_structure, print_typed_structure_with_locs, print_typed_signature, print_typed_signature_with_locs};
+use crate::types::{initial_env, type_structure, transl_signature, TypeCheckContext, TypeContext};
 
 /// Compiler options that can be passed to the driver.
 #[derive(Default, Clone)]
@@ -99,6 +99,53 @@ pub fn compile_source_to_js_with_options(
 
     // JS IR -> JS source
     Ok(print_program(&program))
+}
+
+/// Type-check an interface file and dump typed sexp if requested.
+/// Interface files (.resi) don't produce JS output, only .cmi files.
+pub fn typecheck_interface_source(
+    source: &str,
+    filename: &str,
+    options: &CompilerOptions,
+) -> Result<()> {
+    // Parse as signature
+    let mut parser = Parser::new(filename, source);
+    let signature = module::parse_signature(&mut parser);
+    if parser.has_errors() {
+        return Err(anyhow!("Parse failed with {} error(s)", parser.diagnostics().len()));
+    }
+
+    // Type check
+    let id_gen = IdGenerator::new();
+    let type_ctx = TypeContext::new(&id_gen);
+    let mut tctx = TypeCheckContext::new(&type_ctx, parser.arena());
+    let env = initial_env(&type_ctx);
+    let typed_signature = transl_signature(&mut tctx, &env, parser.arena(), &signature)
+        .map_err(|e| anyhow!("Type checking failed: {e:?}"))?;
+
+    // Print typed tree if requested
+    if options.dump_typed_sexp {
+        let mut stderr = std::io::stderr();
+        let _ = print_typed_signature(parser.arena(), &type_ctx, &typed_signature, &mut stderr);
+    }
+    if options.dump_typed_sexp_locs {
+        let mut stderr = std::io::stderr();
+        let _ = print_typed_signature_with_locs(parser.arena(), &type_ctx, &typed_signature, &mut stderr);
+    }
+
+    Ok(())
+}
+
+/// Type-check an interface file and dump typed sexp if requested.
+pub fn typecheck_interface_file(
+    path: &std::path::Path,
+    options: &CompilerOptions,
+) -> Result<()> {
+    let bytes = std::fs::read(path)
+        .with_context(|| format!("Failed to read {}", path.display()))?;
+    let source: String = bytes.iter().map(|&b| b as char).collect();
+    let filename = path.to_string_lossy();
+    typecheck_interface_source(&source, &filename, options)
 }
 
 /// Compile a file to JavaScript.

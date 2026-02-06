@@ -346,7 +346,7 @@ fn transl_modtype<'a>(
 }
 
 /// Translate a parsed signature into a typed signature.
-fn transl_signature<'a>(
+pub fn transl_signature<'a>(
     tctx: &mut TypeCheckContext<'a>,
     env: &Env,
     arena: &'a ParseArena,
