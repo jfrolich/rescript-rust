@@ -30,6 +30,7 @@ struct Options {
     module_name: Option<String>,
     input: Option<PathBuf>,
     include_paths: Vec<PathBuf>,
+    runtime_path: Option<PathBuf>,
 }
 
 fn main() {
@@ -80,6 +81,11 @@ fn run() -> Result<()> {
                 "-I" => {
                     if let Some(val) = args.next() {
                         opts.include_paths.push(PathBuf::from(val));
+                    }
+                }
+                "-runtime-path" => {
+                    if let Some(val) = args.next() {
+                        opts.runtime_path = Some(PathBuf::from(val));
                     }
                 }
                 "-open"
@@ -140,6 +146,7 @@ fn run() -> Result<()> {
         dump_lambda_sexp: opts.dump_lambda_sexp,
         dump_lambda_sexp_locs: opts.dump_lambda_sexp_locs,
         include_paths: opts.include_paths.clone(),
+        runtime_path: opts.runtime_path.clone(),
     };
 
     if is_interface {

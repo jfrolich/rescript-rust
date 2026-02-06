@@ -33,6 +33,9 @@ pub struct CompilerOptions {
     pub dump_lambda_sexp_locs: bool,
     /// Include paths for finding .cmi files (from -I flags)
     pub include_paths: Vec<PathBuf>,
+    /// Runtime package path (from -runtime-path flag)
+    /// Used to locate stdlib CMIs at {runtime_path}/lib/ocaml/
+    pub runtime_path: Option<PathBuf>,
 }
 
 /// Compile ReScript source to JavaScript.
@@ -65,7 +68,7 @@ pub fn compile_source_to_js_with_options(
 
     // Load Pervasives and extend the initial environment
     let mut pers_env = PersistentEnv::new();
-    pers_env.set_load_path(options.include_paths.clone());
+    pers_env.set_load_path(build_load_path(options));
     load_pervasives(&mut pers_env, &mut env, &type_ctx);
 
     // Store persistent env in the type check context for module resolution
@@ -137,7 +140,7 @@ pub fn typecheck_interface_source(
 
     // Load Pervasives and extend the initial environment
     let mut pers_env = PersistentEnv::new();
-    pers_env.set_load_path(options.include_paths.clone());
+    pers_env.set_load_path(build_load_path(options));
     load_pervasives(&mut pers_env, &mut env, &type_ctx);
 
     tctx.set_persistent_env(pers_env);
@@ -191,18 +194,39 @@ pub fn compile_file_to_js_with_options(
     compile_source_to_js_with_options(&source, &filename, options)
 }
 
-/// Load the Pervasives module into the initial environment.
+/// Build the load path from compiler options.
 ///
-/// This is equivalent to OCaml's `Typemod.initial_env()` which loads
-/// Pervasives.cmi and opens it into the environment.
+/// Matches OCaml's `res_compmisc.ml:init_path()`:
+/// - Expands `-I` directories
+/// - Appends `{runtime_path}/lib/ocaml` as the stdlib directory (unless no_stdlib)
+fn build_load_path(options: &CompilerOptions) -> Vec<PathBuf> {
+    let mut paths = options.include_paths.clone();
+    if let Some(ref runtime_path) = options.runtime_path {
+        let stdlib_dir = runtime_path.join("lib").join("ocaml");
+        paths.push(stdlib_dir);
+    }
+    paths
+}
+
+/// Load the Pervasives and Stdlib modules into the initial environment.
+///
+/// This is equivalent to OCaml's `res_compmisc.ml:initial_env()` which loads
+/// Pervasives.cmi and Stdlib.cmi and opens them into the environment.
 fn load_pervasives<'a>(pers_env: &mut PersistentEnv, env: &mut Env, ctx: &'a TypeContext<'a>) {
     use crate::ident::Ident;
 
-    // Try to load Pervasives
+    // Try to load and open Pervasives (matches OCaml: open_implicit_module "Pervasives")
     if pers_env.open_module("Pervasives", env, ctx) {
         // Also add Pervasives as a module in the environment
         if let Some(md) = pers_env.get_module_declaration("Pervasives", ctx) {
             env.add_module(Ident::create_persistent("Pervasives"), md);
+        }
+    }
+
+    // Try to load and open Stdlib (matches OCaml: open_implicit_module "Stdlib")
+    if pers_env.open_module("Stdlib", env, ctx) {
+        if let Some(md) = pers_env.get_module_declaration("Stdlib", ctx) {
+            env.add_module(Ident::create_persistent("Stdlib"), md);
         }
     }
 }

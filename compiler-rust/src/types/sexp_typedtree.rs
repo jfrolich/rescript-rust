@@ -358,7 +358,10 @@ fn sexp_type_expr(arena: &ParseArena, ctx: &TypeContext<'_>, te: TypeExprRef) ->
 
 fn sexp_type_expr_aux(arena: &ParseArena, ctx: &TypeContext<'_>, te: TypeExprRef, visited: &mut HashSet<TypeExprRef>) -> Sexp {
     let te = ctx.repr(te); // Follow Tlink chains
-    // Cycle detection: if we've already visited this type, print <cycle>
+    // Cycle detection: permanently mark visited nodes to prevent infinite recursion.
+    // Note: Rust TypeExprRef values can be shared between different positions in the
+    // type tree (unlike OCaml where instance() creates fresh copies), which can cause
+    // false "<cycle>" markers. A more nuanced approach is needed for full parity.
     if !visited.insert(te) {
         return Sexp::atom("<cycle>");
     }

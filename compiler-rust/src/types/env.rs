@@ -19,8 +19,9 @@
 use super::context::TypeContext;
 use super::asttypes::PrivateFlag;
 use super::decl::{
-    ConstructorDescription, ConstructorTag, LabelDescription, ModtypeDeclaration,
-    ModuleDeclaration, PrimitiveDescription, TypeDeclaration, ValueDescription, ValueKind,
+    ConstructorArguments, ConstructorDeclaration, ConstructorDescription, ConstructorTag,
+    LabelDescription, ModtypeDeclaration, ModuleDeclaration, PrimitiveDescription,
+    TypeDeclaration, TypeKind, ValueDescription, ValueKind,
 };
 use super::path::Path;
 use super::type_expr::TypeExprRef;
@@ -486,40 +487,192 @@ impl Default for Env {
 // ============================================================================
 
 /// Create the initial environment with built-in types.
+///
+/// Matches OCaml's `Predef.common_initial_env`:
+/// - Defines abstract types (int, float, string, char, bigint, etc.)
+/// - Defines variant types with constructors (bool, unit, option, list, result)
+/// - Registers constructors in the environment so they can be looked up
 pub fn initial_env(ctx: &TypeContext<'_>) -> Env {
     let mut env = Env::empty();
 
-    // Add built-in types
-    // These are the primitive types that exist in ReScript
-    let builtins = [
-        ("int", true),     // immediate
-        ("float", false),
-        ("bool", true),    // immediate
-        ("string", false),
-        ("unit", true),    // immediate
-        ("array", false),
-        ("list", false),
-        ("option", false),
-        ("char", true),    // immediate
-    ];
+    // Helper: create an abstract type declaration
+    let decl_abstr = |arity: i32, immediate: bool| TypeDeclaration {
+        type_params: vec![],
+        type_arity: arity,
+        type_kind: TypeKind::TypeAbstract,
+        type_private: PrivateFlag::Public,
+        type_manifest: None,
+        type_variance: vec![],
+        type_newtype_level: None,
+        type_loc: Location::none(),
+        type_attributes: vec![],
+        type_immediate: immediate,
+        type_unboxed: super::decl::UnboxedStatus::default(),
+        type_inlined_types: vec![],
+    };
 
-    for (name, immediate) in builtins {
+    // Helper: create a constructor declaration (like OCaml's Predef.cstr)
+    let cstr = |name: &str, args: Vec<TypeExprRef>| ConstructorDeclaration {
+        cd_id: Ident::create_persistent(name),
+        cd_args: ConstructorArguments::CstrTuple(args),
+        cd_res: None,
+        cd_loc: Location::none(),
+        cd_attributes: vec![],
+    };
+
+    // Helper: add a type with its constructors to the environment
+    // This matches OCaml's Env.store_type which calls Datarepr.constructors_of_type
+    let add_type_with_constrs = |env: &mut Env, name: &str, decl: TypeDeclaration, ctx: &TypeContext<'_>| {
         let id = Ident::create_persistent(name);
-        let decl = TypeDeclaration {
-            type_params: vec![],
-            type_arity: if name == "array" || name == "list" || name == "option" { 1 } else { 0 },
-            type_kind: super::decl::TypeKind::TypeAbstract,
-            type_private: super::asttypes::PrivateFlag::Public,
-            type_manifest: None,
-            type_variance: vec![],
-            type_newtype_level: None,
-            type_loc: Location::none(),
-            type_attributes: vec![],
-            type_immediate: immediate,
-            type_unboxed: super::decl::UnboxedStatus::default(),
-            type_inlined_types: vec![],
-        };
+        let type_path = Path::pident(id.clone());
+
+        // Extract constructors from variant types
+        if let TypeKind::TypeVariant(ref constrs) = decl.type_kind {
+            let num_consts = constrs.iter()
+                .filter(|c| matches!(c.cd_args, ConstructorArguments::CstrTuple(ref args) if args.is_empty()) && c.cd_res.is_none())
+                .count() as i32;
+            let num_nonconsts = constrs.len() as i32 - num_consts;
+            let mut const_idx = 0i32;
+            let mut nonconst_idx = 0i32;
+
+            for cd in constrs {
+                let is_constant = matches!(cd.cd_args, ConstructorArguments::CstrTuple(ref args) if args.is_empty())
+                    && cd.cd_res.is_none();
+
+                let cstr_tag = if is_constant {
+                    let tag = ConstructorTag::CstrConstant(const_idx);
+                    const_idx += 1;
+                    tag
+                } else {
+                    let tag = ConstructorTag::CstrBlock(nonconst_idx);
+                    nonconst_idx += 1;
+                    tag
+                };
+
+                let (cstr_args, cstr_arity) = match &cd.cd_args {
+                    ConstructorArguments::CstrTuple(args) => (args.clone(), args.len() as i32),
+                    ConstructorArguments::CstrRecord(labels) => {
+                        let args: Vec<TypeExprRef> = labels.iter().map(|l| l.ld_type).collect();
+                        let arity = args.len() as i32;
+                        (args, arity)
+                    }
+                };
+
+                let cstr_res = if let Some(res_ty) = cd.cd_res {
+                    res_ty
+                } else {
+                    ctx.new_generic_constr(type_path.clone(), decl.type_params.clone())
+                };
+
+                let cstr_desc = ConstructorDescription {
+                    cstr_name: cd.cd_id.name().to_string(),
+                    cstr_res,
+                    cstr_existentials: vec![],
+                    cstr_args,
+                    cstr_arity,
+                    cstr_tag,
+                    cstr_consts: num_consts,
+                    cstr_nonconsts: num_nonconsts,
+                    cstr_generalized: cd.cd_res.is_some(),
+                    cstr_private: decl.type_private,
+                    cstr_loc: Location::none(),
+                    cstr_attributes: vec![],
+                    cstr_inlined: None,
+                };
+
+                env.add_constructor(cd.cd_id.clone(), cstr_desc);
+            }
+        }
+
         env.add_type(id, decl);
+    };
+
+    // ---- Abstract types ----
+    add_type_with_constrs(&mut env, "int", decl_abstr(0, true), ctx);
+    add_type_with_constrs(&mut env, "char", decl_abstr(0, true), ctx);
+    add_type_with_constrs(&mut env, "float", decl_abstr(0, false), ctx);
+    add_type_with_constrs(&mut env, "bigint", decl_abstr(0, false), ctx);
+    add_type_with_constrs(&mut env, "string", decl_abstr(0, false), ctx);
+    add_type_with_constrs(&mut env, "extension_constructor", decl_abstr(0, false), ctx);
+    add_type_with_constrs(&mut env, "array", decl_abstr(1, false), ctx);
+    add_type_with_constrs(&mut env, "promise", {
+        let tvar = ctx.new_generic_var(None);
+        TypeDeclaration {
+            type_params: vec![tvar],
+            type_arity: 1,
+            ..decl_abstr(1, false)
+        }
+    }, ctx);
+
+    // ---- Variant types (matching OCaml's Predef) ----
+
+    // bool = false | true
+    add_type_with_constrs(&mut env, "bool", TypeDeclaration {
+        type_kind: TypeKind::TypeVariant(vec![
+            cstr("false", vec![]),
+            cstr("true", vec![]),
+        ]),
+        type_immediate: true,
+        ..decl_abstr(0, true)
+    }, ctx);
+
+    // unit = ()
+    add_type_with_constrs(&mut env, "unit", TypeDeclaration {
+        type_kind: TypeKind::TypeVariant(vec![
+            cstr("()", vec![]),
+        ]),
+        type_immediate: true,
+        ..decl_abstr(0, true)
+    }, ctx);
+
+    // exn (type_open)
+    add_type_with_constrs(&mut env, "exn", TypeDeclaration {
+        type_kind: TypeKind::TypeOpen,
+        ..decl_abstr(0, false)
+    }, ctx);
+
+    // option('a) = None | Some('a)
+    {
+        let tvar = ctx.new_generic_var(None);
+        add_type_with_constrs(&mut env, "option", TypeDeclaration {
+            type_params: vec![tvar],
+            type_arity: 1,
+            type_kind: TypeKind::TypeVariant(vec![
+                cstr("None", vec![]),
+                cstr("Some", vec![tvar]),
+            ]),
+            ..decl_abstr(1, false)
+        }, ctx);
+    }
+
+    // result('a, 'b) = Ok('a) | Error('b)
+    {
+        let tvar1 = ctx.new_generic_var(None);
+        let tvar2 = ctx.new_generic_var(None);
+        add_type_with_constrs(&mut env, "result", TypeDeclaration {
+            type_params: vec![tvar1, tvar2],
+            type_arity: 2,
+            type_kind: TypeKind::TypeVariant(vec![
+                cstr("Ok", vec![tvar1]),
+                cstr("Error", vec![tvar2]),
+            ]),
+            ..decl_abstr(2, false)
+        }, ctx);
+    }
+
+    // list('a) = [] | ::('a, list('a))
+    {
+        let tvar = ctx.new_generic_var(None);
+        let list_ty = ctx.new_generic_constr(Path::pident(Ident::create_persistent("list")), vec![tvar]);
+        add_type_with_constrs(&mut env, "list", TypeDeclaration {
+            type_params: vec![tvar],
+            type_arity: 1,
+            type_kind: TypeKind::TypeVariant(vec![
+                cstr("[]", vec![]),
+                cstr("::", vec![tvar, list_ty]),
+            ]),
+            ..decl_abstr(1, false)
+        }, ctx);
     }
 
     // Create type references for primitives at generic level.
@@ -531,44 +684,6 @@ pub fn initial_env(ctx: &TypeContext<'_>) -> Env {
     let bool_ty = ctx.new_generic_constr(Path::pident(Ident::create_persistent("bool")), vec![]);
     let string_ty = ctx.new_generic_constr(Path::pident(Ident::create_persistent("string")), vec![]);
     let unit_ty = ctx.new_generic_constr(Path::pident(Ident::create_persistent("unit")), vec![]);
-
-    // Add boolean constructors: true and false
-    // false has tag 0, true has tag 1
-    let false_id = Ident::create_persistent("false");
-    let false_cstr = ConstructorDescription {
-        cstr_name: "false".to_string(),
-        cstr_res: bool_ty,
-        cstr_existentials: vec![],
-        cstr_args: vec![],
-        cstr_arity: 0,
-        cstr_tag: ConstructorTag::CstrConstant(0),
-        cstr_consts: 2,
-        cstr_nonconsts: 0,
-        cstr_generalized: false,
-        cstr_private: PrivateFlag::Public,
-        cstr_loc: Location::none(),
-        cstr_attributes: vec![],
-        cstr_inlined: None,
-    };
-    env.add_constructor(false_id, false_cstr);
-
-    let true_id = Ident::create_persistent("true");
-    let true_cstr = ConstructorDescription {
-        cstr_name: "true".to_string(),
-        cstr_res: bool_ty,
-        cstr_existentials: vec![],
-        cstr_args: vec![],
-        cstr_arity: 0,
-        cstr_tag: ConstructorTag::CstrConstant(1),
-        cstr_consts: 2,
-        cstr_nonconsts: 0,
-        cstr_generalized: false,
-        cstr_private: PrivateFlag::Public,
-        cstr_loc: Location::none(),
-        cstr_attributes: vec![],
-        cstr_inlined: None,
-    };
-    env.add_constructor(true_id, true_cstr);
 
     // Add polymorphic arithmetic operators matching Pervasives.res:
     //   external "+": ('a, 'a) => 'a = "%add"

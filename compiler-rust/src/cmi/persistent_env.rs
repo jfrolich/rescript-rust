@@ -150,7 +150,6 @@ impl PersistentEnv {
             Some(ps) => ps,
             None => return false,
         };
-
         let module_path = Path::Pident(Ident::create_persistent(name));
         add_signature_to_env(&ps.ps_sig, &module_path, env, ctx);
         true
