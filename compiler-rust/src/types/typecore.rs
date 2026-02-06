@@ -3901,6 +3901,11 @@ pub fn type_expression<'a>(
     let expected_ty = type_ctx.new_var(None);
     let typed_expr = type_expect(&mut tctx, env, expr, expected_ty, None)?;
 
+    // Try to unify with unit (matching OCaml's Bs_toplevel_expression_unit warning behavior)
+    // This resolves unresolved type variables to unit for statement-level expressions
+    let unit_ty = env.type_unit(type_ctx);
+    let _ = crate::types::unify(type_ctx, &mut tctx.unify_state, typed_expr.exp_type, unit_ty);
+
     // End definition scope
     type_ctx.end_def();
 

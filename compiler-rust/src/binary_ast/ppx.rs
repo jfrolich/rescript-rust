@@ -2837,7 +2837,7 @@ fn handle_raw_structure(
     ext_loc: LocIdx,
 ) -> StructureItem {
     // Extract the string expression from the payload
-    let (str_exp, str_loc) = match payload {
+    let (str_exp, str_loc, payload_attrs) = match payload {
         Payload::PStr(items) if items.len() == 1 => {
             if let StructureItemDesc::Pstr_eval(e, _) = &items[0].pstr_desc {
                 if let ExpressionDesc::Pexp_constant(Constant::String(s, _)) = &e.pexp_desc {
@@ -2852,6 +2852,7 @@ fn handle_raw_structure(
                             pexp_attributes: e.pexp_attributes.clone(),
                         },
                         e.pexp_loc,
+                        e.pexp_attributes.clone(), // OCaml's {exp with pexp_desc=...} preserves attrs
                     )
                 } else {
                     return item.clone();
