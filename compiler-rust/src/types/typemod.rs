@@ -366,7 +366,12 @@ fn transl_signature<'a>(
             PSigDesc::Psig_value(vd) => {
                 let name_str = arena.get_string(vd.pval_name.txt).to_string();
                 let id = Ident::create_local(&name_str);
-                let (typed_ctype, _) = transl_type(tctx, env, &vd.pval_type)?;
+                // Use transl_type_scheme pattern: begin_def/end_def/generalize
+                let ctx = tctx.type_ctx;
+                ctx.begin_def();
+                let (typed_ctype, val_ty) = transl_type(tctx, env, &vd.pval_type)?;
+                ctx.end_def();
+                crate::types::ctype::generalize(ctx, val_ty);
                 let encoded = crate::binary_ast::ppx::encode_external(vd, arena);
                 TSigDesc::Tsig_value(crate::types::typedtree::TypedValueDescription {
                     val_id: id,
@@ -657,8 +662,13 @@ fn type_structure_item<'a>(
             let name_str = arena.get_string(vd.pval_name.txt).to_string();
             let id = Ident::create_local(&name_str);
 
-            // Translate the type annotation
-            let (typed_ctype, _val_ty) = transl_type(tctx, env, &vd.pval_type)?;
+            // Translate the type annotation using transl_type_scheme pattern:
+            // begin_def/end_def/generalize to keep Ttyp_any type vars as Tvar None
+            let ctx = tctx.type_ctx;
+            ctx.begin_def();
+            let (typed_ctype, val_ty) = transl_type(tctx, env, &vd.pval_type)?;
+            ctx.end_def();
+            crate::types::ctype::generalize(ctx, val_ty);
 
             // Encode external FFI attributes into prim blob (matching OCaml's PPX encoding)
             let encoded = crate::binary_ast::ppx::encode_external(vd, arena);
