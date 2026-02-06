@@ -1397,29 +1397,31 @@ mod tests {
 
     #[test]
     fn test_map_rec_flag() {
-        let arena = ParseArena::new();
-        let mapper = Mapper::new(&arena);
+        let mut arena = ParseArena::new();
+        let mut mapper = Mapper::new(&mut arena);
         assert!(matches!(mapper.map_rec_flag(current::RecFlag::Nonrecursive), pt0::RecFlag::Nonrecursive));
         assert!(matches!(mapper.map_rec_flag(current::RecFlag::Recursive), pt0::RecFlag::Recursive));
     }
 
     #[test]
     fn test_map_arg_label() {
-        let arena = ParseArena::new();
-        let mut mapper = Mapper::new(&arena);
+        let mut arena = ParseArena::new();
+        let x_idx = arena.intern("x");
+        let y_idx = arena.intern("y");
+        let mut mapper = Mapper::new(&mut arena);
 
         assert!(matches!(mapper.map_arg_label(&current::ArgLabel::Nolabel), pt0::ArgLabel::Nolabel));
 
-        let label = mapper.map_arg_label(&current::ArgLabel::Labelled(Located::mknoloc("x".to_string())));
+        let label = mapper.map_arg_label(&current::ArgLabel::Labelled(Located::mknoloc(x_idx)));
         if let pt0::ArgLabel::Labelled(idx) = label {
-            assert_eq!(arena.get_string(idx), "x");
+            assert_eq!(mapper.arena.get_string(idx), "x");
         } else {
             panic!("Expected Labelled");
         }
 
-        let opt = mapper.map_arg_label(&current::ArgLabel::Optional(Located::mknoloc("y".to_string())));
+        let opt = mapper.map_arg_label(&current::ArgLabel::Optional(Located::mknoloc(y_idx)));
         if let pt0::ArgLabel::Optional(idx) = opt {
-            assert_eq!(arena.get_string(idx), "y");
+            assert_eq!(mapper.arena.get_string(idx), "y");
         } else {
             panic!("Expected Optional");
         }
@@ -1427,8 +1429,8 @@ mod tests {
 
     #[test]
     fn test_map_constant() {
-        let arena = ParseArena::new();
-        let mapper = Mapper::new(&arena);
+        let mut arena = ParseArena::new();
+        let mut mapper = Mapper::new(&mut arena);
 
         let c1 = mapper.map_constant(&current::Constant::Integer("42".to_string(), None));
         assert!(matches!(c1, pt0::Constant::Integer(s, None) if s == "42"));
