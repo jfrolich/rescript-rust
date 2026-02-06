@@ -686,6 +686,10 @@ fn type_structure_item<'a>(
             let ctx = tctx.type_ctx;
             let mut new_env = env.clone();
             let mut typed_tree_decls: Vec<TypedTypeDeclaration> = Vec::new();
+            let mut internal_decls_for_generalize: Vec<crate::types::TypeDeclaration> = Vec::new();
+
+            // OCaml: Ctype.begin_def() before translating type declarations
+            ctx.begin_def();
 
             for decl in decls {
                 let type_name = decl.ptype_name.txt;
@@ -851,6 +855,41 @@ fn type_structure_item<'a>(
                             // Create the result type
                             let res_ty = ctx.new_constr(type_path.clone(), vec![]);
 
+                            // For inline records, create a synthetic type declaration and
+                            // set cstr_args to [Tconstr(path, type_params)] matching OCaml's datarepr.ml
+                            let (cstr_args, cstr_inlined) = if let crate::types::ConstructorArguments::CstrRecord(ref lbls) = internal_cd_args {
+                                // Build path: Pdot(Pident(type_name), cstr_name)
+                                let inline_path = Path::pdot(type_path.clone(), cstr_name_str.to_string());
+                                // Create synthetic inline type declaration
+                                let inline_decl = crate::types::TypeDeclaration {
+                                    type_params: internal_type_params.clone(),
+                                    type_arity,
+                                    type_kind: crate::types::TypeKind::TypeRecord(
+                                        lbls.clone(),
+                                        crate::types::RecordRepresentation::RecordInlined {
+                                            tag: block_tag - 1, // use the tag just assigned
+                                            name: cstr_name_str.to_string(),
+                                            num_nonconsts,
+                                            attrs: vec![], // simplified - parser attrs vs types attrs
+                                        },
+                                    ),
+                                    type_private: crate::types::PrivateFlag::Public,
+                                    type_manifest: None,
+                                    type_variance: internal_type_params.iter().map(|_| TypesVariance::full()).collect(),
+                                    type_newtype_level: None,
+                                    type_loc: Location::none(),
+                                    type_attributes: vec![],
+                                    type_immediate: false,
+                                    type_unboxed: crate::types::UnboxedStatus::default(),
+                                    type_inlined_types: vec![],
+                                };
+                                // cstr_args: single Tconstr pointing to the inline record path
+                                let inline_constr = ctx.new_constr(inline_path, internal_type_params.clone());
+                                (vec![inline_constr], Some(Box::new(inline_decl)))
+                            } else {
+                                (cstr_args, None)
+                            };
+
                             // Create internal constructor declaration
                             internal_cstrs.push(crate::types::ConstructorDeclaration {
                                 cd_id: cstr_id.clone(),
@@ -892,7 +931,7 @@ fn type_structure_item<'a>(
                                 cstr_private: crate::types::PrivateFlag::Public,
                                 cstr_loc: arena.to_location(cstr.pcd_loc),
                                 cstr_attributes: vec![],
-                                cstr_inlined: None,
+                                cstr_inlined,
                             }));
                         }
 
@@ -1119,11 +1158,38 @@ fn type_structure_item<'a>(
                     type_inlined_types: vec![],
                 };
 
+                // Save for generalization after the loop
+                internal_decls_for_generalize.push(internal_decl.clone());
+
                 // Add type to environment
                 new_env.add_type(type_id.clone(), internal_decl.clone());
 
-                // Add constructors to environment
+                // Add constructors to environment, and add inline record labels
                 for (cstr_id, cstr_desc) in constructors {
+                    // For inline records, add the labels to the environment
+                    if let Some(ref inlined_decl) = cstr_desc.cstr_inlined {
+                        if let crate::types::TypeKind::TypeRecord(ref labels, ref repres) = inlined_decl.type_kind {
+                            // Build the inline record type path: Pdot(type_path, cstr_name)
+                            let inline_path = Path::pdot(type_path.clone(), cstr_desc.cstr_name.clone());
+                            let ty_res = ctx.new_constr(inline_path, inlined_decl.type_params.clone());
+                            for (pos, ld) in labels.iter().enumerate() {
+                                let lbl_desc = crate::types::LabelDescription {
+                                    lbl_name: ld.ld_id.name().to_string(),
+                                    lbl_res: ty_res,
+                                    lbl_arg: ld.ld_type,
+                                    lbl_mut: ld.ld_mutable.clone(),
+                                    lbl_optional: ld.ld_optional,
+                                    lbl_pos: pos as i32,
+                                    lbl_all: crate::types::LabelArrayRef(0),
+                                    lbl_repres: repres.clone(),
+                                    lbl_private: crate::types::PrivateFlag::Public,
+                                    lbl_loc: ld.ld_loc.clone(),
+                                    lbl_attributes: ld.ld_attributes.clone(),
+                                };
+                                new_env.add_label(ld.ld_id.clone(), lbl_desc);
+                            }
+                        }
+                    }
                     new_env.add_constructor(cstr_id, cstr_desc);
                 }
 
@@ -1173,6 +1239,23 @@ fn type_structure_item<'a>(
                 };
 
                 typed_tree_decls.push(typed_tree_decl);
+            }
+
+            // OCaml: Ctype.end_def() + generalize_decl for each declaration
+            ctx.end_def();
+            for decl in &internal_decls_for_generalize {
+                // generalize type_params
+                for &param in &decl.type_params {
+                    crate::types::ctype::generalize(ctx, param);
+                }
+                // generalize all types in type_kind
+                crate::types::btype::iter_type_expr_kind(&decl.type_kind, |ty| {
+                    crate::types::ctype::generalize(ctx, ty);
+                });
+                // generalize type_manifest if present
+                if let Some(manifest) = decl.type_manifest {
+                    crate::types::ctype::generalize(ctx, manifest);
+                }
             }
 
             let desc = StructureItemDesc::Tstr_type(*rec_flag, typed_tree_decls);
