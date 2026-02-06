@@ -927,6 +927,7 @@ impl ValueBinding {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::parse_arena::ParseArena;
 
     #[test]
     fn test_constant() {
@@ -955,7 +956,11 @@ mod tests {
 
     #[test]
     fn test_arity() {
-        assert_eq!(Arity::Full(2), Arity::Full(2));
-        assert_ne!(Arity::Full(2), Arity::Unknown);
+        let mut arena = ParseArena::new();
+        let full2a = arena.push_arity(Some(2));
+        let full2b = arena.push_arity(Some(2));
+        let unknown = arena.push_arity(None);
+        assert_eq!(arena.get_arity(full2a), arena.get_arity(full2b));
+        assert_ne!(arena.get_arity(full2a), arena.get_arity(unknown));
     }
 }

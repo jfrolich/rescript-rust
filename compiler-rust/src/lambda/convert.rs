@@ -1040,7 +1040,8 @@ mod tests {
     fn test_convert_let_var() {
         use crate::parser::longident::Longident;
         let mut arena = ParseArena::new();
-        let lid_idx = arena.push_longident(Longident::Lident("x".to_string()));
+        let x_idx = arena.intern("x");
+        let lid_idx = arena.push_longident(Longident::Lident(x_idx));
         let mut conv = LambdaConverter::new(&arena);
         let id = Ident::create_local("x");
         let pat = Pattern::new(

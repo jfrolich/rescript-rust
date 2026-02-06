@@ -3325,11 +3325,12 @@ mod tests {
         let _env = crate::types::initial_env(&ctx);
         let mut state = PatternState::new();
 
-        let arena = ParseArena::new();
+        let mut arena = ParseArena::new();
         let loc = LocIdx::none();
         let ty = ctx.new_var(None);
+        let x_idx = arena.intern("x");
         let name = Located {
-            txt: "x".to_string(),
+            txt: x_idx,
             loc,
         };
 

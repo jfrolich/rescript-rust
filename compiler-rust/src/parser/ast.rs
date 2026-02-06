@@ -930,13 +930,16 @@ pub type Signature = Vec<SignatureItem>;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::parse_arena::ParseArena;
 
     #[test]
     fn test_arg_label() {
+        let mut arena = ParseArena::new();
+        let x = arena.intern("x");
         assert!(ArgLabel::Nolabel.is_nolabel());
-        assert!(!ArgLabel::Labelled(Located::mknoloc("x".to_string())).is_nolabel());
-        assert!(ArgLabel::Optional(Located::mknoloc("x".to_string())).is_optional());
-        assert_eq!(ArgLabel::Labelled(Located::mknoloc("x".to_string())).name(), Some("x"));
+        assert!(!ArgLabel::Labelled(Located::mknoloc(x)).is_nolabel());
+        assert!(ArgLabel::Optional(Located::mknoloc(x)).is_optional());
+        assert_eq!(ArgLabel::Labelled(Located::mknoloc(x)).name_idx(), Some(x));
     }
 
     #[test]
