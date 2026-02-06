@@ -78,23 +78,25 @@ fn run() -> Result<()> {
                 }
                 "-I"
                 | "-open"
-                | "-absname"
                 | "-w"
                 | "-warn-error"
                 | "-color"
                 | "-bs-package-name"
-                | "-bs-read-cmi"
                 | "-pp"
                 | "-ppx"
-                | "-ppxopt"
+                | "-ppxopt" => {
+                    // Consume the next argument if present (value flags).
+                    let _ = args.next();
+                }
+                "-absname"
+                | "-bs-read-cmi"
                 | "-no-alias-deps"
                 | "-bs-no-implicit-stdlib"
                 | "-unsafe"
                 | "-bs-super-errors"
                 | "-bs-stop-after-cmj"
                 | "-bs-no-check-cmi" => {
-                    // Consume the next argument if present (value flags).
-                    let _ = args.next();
+                    // Boolean flags - no argument to consume
                 }
                 _ => {
                     // Unknown flag: ignore, but if it looks like a value flag, try to skip.

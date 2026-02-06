@@ -8203,40 +8203,40 @@ fn expand_extensions_item(item: &StructureItem, arena: &mut ParseArena) -> Vec<S
             }]
         }
         StructureItemDesc::Pstr_module(mb) => {
-            if let ModuleExprDesc::Pmod_structure(items) = &mb.pmb_expr.pmod_desc {
-                let new_items = expand_extensions(items, arena);
-                vec![StructureItem {
-                    pstr_desc: StructureItemDesc::Pstr_module(crate::parser::ast::ModuleBinding {
-                        pmb_name: mb.pmb_name.clone(),
-                        pmb_expr: ModuleExpr {
-                            pmod_desc: ModuleExprDesc::Pmod_structure(new_items),
-                            pmod_loc: mb.pmb_expr.pmod_loc,
-                            pmod_attributes: mb.pmb_expr.pmod_attributes.clone(),
-                        },
-                        pmb_attributes: mb.pmb_attributes.clone(),
-                        pmb_loc: mb.pmb_loc,
-                    }),
-                    pstr_loc: item.pstr_loc,
-                }]
-            } else {
-                vec![item.clone()]
-            }
-        }
-        // Reconstruct arrow type locations for external/primitive declarations
-        // OCaml's FFI processing reconstructs the arrow type with ptyp_loc = pval_loc
-        // before type checking, so the typed tree has pval_loc-based locations.
-        StructureItemDesc::Pstr_primitive(vd) => {
-            let pval_type = reconstruct_arrow_type_with_loc(&vd.pval_type, vd.pval_loc, arena);
+            let new_expr = expand_extensions_mod_expr(&mb.pmb_expr, arena);
             vec![StructureItem {
-                pstr_desc: StructureItemDesc::Pstr_primitive(ValueDescription {
-                    pval_name: vd.pval_name.clone(),
-                    pval_type,
-                    pval_prim: vd.pval_prim.clone(),
-                    pval_attributes: vd.pval_attributes.clone(),
-                    pval_loc: vd.pval_loc,
+                pstr_desc: StructureItemDesc::Pstr_module(crate::parser::ast::ModuleBinding {
+                    pmb_name: mb.pmb_name.clone(),
+                    pmb_expr: new_expr,
+                    pmb_attributes: mb.pmb_attributes.clone(),
+                    pmb_loc: mb.pmb_loc,
                 }),
                 pstr_loc: item.pstr_loc,
             }]
+        }
+        // Reconstruct arrow type locations for external/primitive declarations
+        // OCaml's FFI processing (handle_external_in_stru) reconstructs the arrow type
+        // with ptyp_loc = pval_loc before type checking. This only applies to "real"
+        // externals that go through rs_externals check, NOT built-in primitives like
+        // %identity, %raise, #raw_expr etc. (whose pval_prim starts with % or #).
+        StructureItemDesc::Pstr_primitive(vd) => {
+            let is_builtin = vd.pval_prim.first()
+                .is_some_and(|p| p.starts_with('%') || p.starts_with('#'));
+            if is_builtin {
+                vec![item.clone()]
+            } else {
+                let pval_type = reconstruct_arrow_type_with_loc(&vd.pval_type, vd.pval_loc, arena);
+                vec![StructureItem {
+                    pstr_desc: StructureItemDesc::Pstr_primitive(ValueDescription {
+                        pval_name: vd.pval_name.clone(),
+                        pval_type,
+                        pval_prim: vd.pval_prim.clone(),
+                        pval_attributes: vd.pval_attributes.clone(),
+                        pval_loc: vd.pval_loc,
+                    }),
+                    pstr_loc: item.pstr_loc,
+                }]
+            }
         }
         _ => vec![item.clone()],
     }
@@ -8281,6 +8281,29 @@ fn expand_extensions_expr(expr: &Expression, arena: &mut ParseArena) -> Expressi
             }
         }
         _ => expr.clone(),
+    }
+}
+
+/// Recursively expand extensions in module expressions (handles functors, structures, etc.)
+fn expand_extensions_mod_expr(me: &ModuleExpr, arena: &mut ParseArena) -> ModuleExpr {
+    match &me.pmod_desc {
+        ModuleExprDesc::Pmod_structure(items) => {
+            let new_items = expand_extensions(items, arena);
+            ModuleExpr {
+                pmod_desc: ModuleExprDesc::Pmod_structure(new_items),
+                pmod_loc: me.pmod_loc,
+                pmod_attributes: me.pmod_attributes.clone(),
+            }
+        }
+        ModuleExprDesc::Pmod_functor(name, mty, body) => {
+            let new_body = expand_extensions_mod_expr(body, arena);
+            ModuleExpr {
+                pmod_desc: ModuleExprDesc::Pmod_functor(name.clone(), mty.clone(), Box::new(new_body)),
+                pmod_loc: me.pmod_loc,
+                pmod_attributes: me.pmod_attributes.clone(),
+            }
+        }
+        _ => me.clone(),
     }
 }
 
