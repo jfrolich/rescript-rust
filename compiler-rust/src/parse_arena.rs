@@ -279,6 +279,57 @@ pub struct StaticPpxLidents {
     pub js_undefined_empty: LidentIdx,
 }
 
+#[derive(Clone, Copy, Debug)]
+enum SpiceStringKey {
+    Codecs,
+    Records,
+    Variants,
+    Polyvars,
+    Tuple,
+    Json,
+    JsonT,
+    Option,
+    Dict,
+    Result,
+    Array,
+    RuntimeV,
+    PatV,
+    FieldV,
+}
+
+impl SpiceStringKey {
+    const COUNT: usize = 14;
+
+    fn idx(self) -> usize {
+        self as usize
+    }
+}
+
+#[derive(Debug)]
+struct SpiceCache {
+    none_loc: Option<LocIdx>,
+    json_ctyp_lident: Option<LidentIdx>,
+    strings: [Option<StrIdx>; SpiceStringKey::COUNT],
+}
+
+impl SpiceCache {
+    fn new() -> Self {
+        Self {
+            none_loc: None,
+            json_ctyp_lident: None,
+            strings: [None; SpiceStringKey::COUNT],
+        }
+    }
+
+    fn get_string(&self, key: SpiceStringKey) -> Option<StrIdx> {
+        self.strings[key.idx()]
+    }
+
+    fn set_string(&mut self, key: SpiceStringKey, idx: StrIdx) {
+        self.strings[key.idx()] = Some(idx);
+    }
+}
+
 // ============================================================================
 // ParseArena
 // ============================================================================
@@ -375,38 +426,8 @@ pub struct ParseArena {
     rewritten_expr_locs: HashSet<LocIdx>,
     /// Pre-allocated dummy location (line 0, _none_) used by internal PPX.
     dummy_loc: LocIdx,
-    /// Spice PPX shared none location (line 1, _none_).
-    spice_none_loc: Option<LocIdx>,
-    /// Spice PPX shared "Spice" prefix for codecs module (non-interned).
-    spice_codecs_str: Option<StrIdx>,
-    /// Spice PPX shared "Spice" prefix for records module (non-interned).
-    spice_records_str: Option<StrIdx>,
-    /// Spice PPX shared "Spice" prefix for variants module (non-interned).
-    spice_variants_str: Option<StrIdx>,
-    /// Spice PPX shared "Spice" prefix for polyvariants module (non-interned).
-    spice_polyvars_str: Option<StrIdx>,
-    /// Spice PPX shared "Spice" prefix for tuple module (non-interned).
-    spice_tuple_str: Option<StrIdx>,
-    /// Spice PPX shared "JSON" prefix (non-interned).
-    spice_json_str: Option<StrIdx>,
-    /// Spice PPX shared "t" suffix for metaquoted JSON.t (non-interned).
-    spice_json_t_str: Option<StrIdx>,
-    /// Spice PPX shared Lident for Utils.ctyp_json_t (non-interned JSON).
-    spice_json_ctyp_lident: Option<LidentIdx>,
-    /// Spice PPX shared "Option" prefix (non-interned).
-    spice_option_str: Option<StrIdx>,
-    /// Spice PPX shared "Dict" prefix (non-interned).
-    spice_dict_str: Option<StrIdx>,
-    /// Spice PPX shared "Result" prefix (non-interned).
-    spice_result_str: Option<StrIdx>,
-    /// Spice PPX shared "Array" prefix (non-interned).
-    spice_array_str: Option<StrIdx>,
-    /// Spice PPX shared dynamic "v" identifier (non-interned).
-    spice_runtime_v: Option<StrIdx>,
-    /// Spice PPX shared "v" identifier for pattern variables.
-    spice_pat_v: Option<StrIdx>,
-    /// Spice PPX shared "v" identifier for record field access expressions.
-    spice_field_v: Option<StrIdx>,
+    /// Spice PPX local caches for generated location/string/lident nodes.
+    spice_cache: SpiceCache,
     /// Literal strings that should be value-shared during marshalling.
     shareable_literal_strs: HashSet<String>,
     /// Source string identity for Ptyp_var nodes created by varification.
@@ -610,22 +631,7 @@ impl Default for ParseArena {
             local_module_counter: 0,
             rewritten_expr_locs: HashSet::new(),
             dummy_loc: LocIdx::default(),
-            spice_none_loc: None,
-            spice_codecs_str: None,
-            spice_records_str: None,
-            spice_variants_str: None,
-            spice_polyvars_str: None,
-            spice_tuple_str: None,
-            spice_json_str: None,
-            spice_json_t_str: None,
-            spice_json_ctyp_lident: None,
-            spice_option_str: None,
-            spice_dict_str: None,
-            spice_result_str: None,
-            spice_array_str: None,
-            spice_runtime_v: None,
-            spice_pat_v: None,
-            spice_field_v: None,
+            spice_cache: SpiceCache::new(),
             shareable_literal_strs: HashSet::new(),
             tyvar_source_by_loc: HashMap::new(),
         }
@@ -811,70 +817,57 @@ impl ParseArena {
 
     /// Shared line-1 none location for spice PPX nodes.
     pub fn spice_none_loc(&mut self) -> LocIdx {
-        if let Some(loc) = self.spice_none_loc {
+        if let Some(loc) = self.spice_cache.none_loc {
             return loc;
         }
         let file_idx = self.push_string("_none_".to_string());
         let pos = Position::new(file_idx, 1, 0, -1);
         let pos_idx = self.push_position(pos);
         let loc = self.push_loc(pos_idx, pos_idx, true);
-        self.spice_none_loc = Some(loc);
+        self.spice_cache.none_loc = Some(loc);
         loc
+    }
+
+    fn spice_cached_string(
+        &mut self,
+        key: SpiceStringKey,
+        value: &str,
+        longident_shareable: bool,
+    ) -> StrIdx {
+        if let Some(idx) = self.spice_cache.get_string(key) {
+            return idx;
+        }
+        let idx = self.push_string(value.to_string());
+        if longident_shareable {
+            self.longident_shareable_strs.insert(idx);
+        }
+        self.spice_cache.set_string(key, idx);
+        idx
     }
 
     /// Shared non-interned "Spice" prefix for the codecs module.
     pub fn spice_codecs_str(&mut self) -> StrIdx {
-        if let Some(idx) = self.spice_codecs_str {
-            return idx;
-        }
-        let idx = self.push_string("Spice".to_string());
-        self.longident_shareable_strs.insert(idx);
-        self.spice_codecs_str = Some(idx);
-        idx
+        self.spice_cached_string(SpiceStringKey::Codecs, "Spice", true)
     }
 
     /// Shared non-interned "Spice" prefix for the records module.
     pub fn spice_records_str(&mut self) -> StrIdx {
-        if let Some(idx) = self.spice_records_str {
-            return idx;
-        }
-        let idx = self.push_string("Spice".to_string());
-        self.longident_shareable_strs.insert(idx);
-        self.spice_records_str = Some(idx);
-        idx
+        self.spice_cached_string(SpiceStringKey::Records, "Spice", true)
     }
 
     /// Shared non-interned "Spice" prefix for the variants module.
     pub fn spice_variants_str(&mut self) -> StrIdx {
-        if let Some(idx) = self.spice_variants_str {
-            return idx;
-        }
-        let idx = self.push_string("Spice".to_string());
-        self.longident_shareable_strs.insert(idx);
-        self.spice_variants_str = Some(idx);
-        idx
+        self.spice_cached_string(SpiceStringKey::Variants, "Spice", true)
     }
 
     /// Shared non-interned "Spice" prefix for the polyvariants module.
     pub fn spice_polyvars_str(&mut self) -> StrIdx {
-        if let Some(idx) = self.spice_polyvars_str {
-            return idx;
-        }
-        let idx = self.push_string("Spice".to_string());
-        self.longident_shareable_strs.insert(idx);
-        self.spice_polyvars_str = Some(idx);
-        idx
+        self.spice_cached_string(SpiceStringKey::Polyvars, "Spice", true)
     }
 
     /// Shared non-interned "Spice" prefix for the tuple module.
     pub fn spice_tuple_str(&mut self) -> StrIdx {
-        if let Some(idx) = self.spice_tuple_str {
-            return idx;
-        }
-        let idx = self.push_string("Spice".to_string());
-        self.longident_shareable_strs.insert(idx);
-        self.spice_tuple_str = Some(idx);
-        idx
+        self.spice_cached_string(SpiceStringKey::Tuple, "Spice", true)
     }
 
     /// Register a literal string to be value-shared during marshalling.
@@ -889,111 +882,60 @@ impl ParseArena {
 
     /// Shared non-interned "JSON" prefix for spice PPX.
     pub fn spice_json_str(&mut self) -> StrIdx {
-        if let Some(idx) = self.spice_json_str {
-            return idx;
-        }
-        let idx = self.push_string("JSON".to_string());
-        self.longident_shareable_strs.insert(idx);
-        self.spice_json_str = Some(idx);
-        idx
+        self.spice_cached_string(SpiceStringKey::Json, "JSON", true)
     }
 
     /// Shared non-interned "t" suffix for metaquoted JSON.t.
     pub fn spice_json_t_str(&mut self) -> StrIdx {
-        if let Some(idx) = self.spice_json_t_str {
-            return idx;
-        }
-        let idx = self.push_string("t".to_string());
-        self.spice_json_t_str = Some(idx);
-        idx
+        self.spice_cached_string(SpiceStringKey::JsonT, "t", false)
     }
 
     /// Shared Lident for Utils.ctyp_json_t (uses a distinct non-interned "JSON").
     pub fn spice_json_ctyp_lident(&mut self) -> LidentIdx {
-        if let Some(idx) = self.spice_json_ctyp_lident {
+        if let Some(idx) = self.spice_cache.json_ctyp_lident {
             return idx;
         }
         let json_idx = self.push_string("JSON".to_string());
         let t_idx = self.strings.intern("t");
         let lid = Longident::Ldot(Box::new(Longident::Lident(json_idx)), t_idx);
         let lid_idx = self.longidents.push(lid);
-        self.spice_json_ctyp_lident = Some(lid_idx);
+        self.spice_cache.json_ctyp_lident = Some(lid_idx);
         lid_idx
     }
 
     /// Shared non-interned "Option" prefix for spice PPX.
     pub fn spice_option_str(&mut self) -> StrIdx {
-        if let Some(idx) = self.spice_option_str {
-            return idx;
-        }
-        let idx = self.push_string("Option".to_string());
-        self.longident_shareable_strs.insert(idx);
-        self.spice_option_str = Some(idx);
-        idx
+        self.spice_cached_string(SpiceStringKey::Option, "Option", true)
     }
 
     /// Shared non-interned "Dict" prefix for spice PPX.
     pub fn spice_dict_str(&mut self) -> StrIdx {
-        if let Some(idx) = self.spice_dict_str {
-            return idx;
-        }
-        let idx = self.push_string("Dict".to_string());
-        self.longident_shareable_strs.insert(idx);
-        self.spice_dict_str = Some(idx);
-        idx
+        self.spice_cached_string(SpiceStringKey::Dict, "Dict", true)
     }
 
     /// Shared non-interned "Result" prefix for spice PPX.
     pub fn spice_result_str(&mut self) -> StrIdx {
-        if let Some(idx) = self.spice_result_str {
-            return idx;
-        }
-        let idx = self.push_string("Result".to_string());
-        self.longident_shareable_strs.insert(idx);
-        self.spice_result_str = Some(idx);
-        idx
+        self.spice_cached_string(SpiceStringKey::Result, "Result", true)
     }
 
     /// Shared non-interned "Array" prefix for spice PPX.
     pub fn spice_array_str(&mut self) -> StrIdx {
-        if let Some(idx) = self.spice_array_str {
-            return idx;
-        }
-        let idx = self.push_string("Array".to_string());
-        self.longident_shareable_strs.insert(idx);
-        self.spice_array_str = Some(idx);
-        idx
+        self.spice_cached_string(SpiceStringKey::Array, "Array", true)
     }
 
     /// Shared non-interned "v" identifier for dynamic PPX-generated functions.
     pub fn spice_runtime_v(&mut self) -> StrIdx {
-        if let Some(idx) = self.spice_runtime_v {
-            return idx;
-        }
-        let idx = self.push_string("v".to_string());
-        self.longident_shareable_strs.insert(idx);
-        self.spice_runtime_v = Some(idx);
-        idx
+        self.spice_cached_string(SpiceStringKey::RuntimeV, "v", true)
     }
 
     /// Shared non-interned "v" identifier for pattern variables.
     pub fn spice_pat_v(&mut self) -> StrIdx {
-        if let Some(idx) = self.spice_pat_v {
-            return idx;
-        }
-        let idx = self.push_string("v".to_string());
-        self.spice_pat_v = Some(idx);
-        idx
+        self.spice_cached_string(SpiceStringKey::PatV, "v", false)
     }
 
     /// Shared non-interned "v" identifier for record field access expressions.
     pub fn spice_field_v(&mut self) -> StrIdx {
-        if let Some(idx) = self.spice_field_v {
-            return idx;
-        }
-        let idx = self.push_string("v".to_string());
-        self.spice_field_v = Some(idx);
-        idx
+        self.spice_cached_string(SpiceStringKey::FieldV, "v", false)
     }
 
     /// Mark a StrIdx as shareable when wrapped in a Longident::Lident.

@@ -71,13 +71,6 @@ fn is_pipe_application(expr: &Expression, w: &MarshalWriter) -> bool {
     !is_symbolic_operator(name)
 }
 
-fn has_template_literal_attr(attrs: &Attributes, w: &MarshalWriter) -> bool {
-    let arena = w.get_arena();
-    attrs
-        .iter()
-        .any(|(name, _)| arena.get_string(name.txt) == "res.template")
-}
-
 fn marshal_ptyp_var_desc(name: &str, loc: LocIdx, w: &mut MarshalWriter) {
     w.write_block_header(0, 1);
     if let Some(source_idx) = w.get_arena().tyvar_source_str(loc) {

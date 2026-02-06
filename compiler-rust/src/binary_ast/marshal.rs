@@ -165,11 +165,6 @@ pub struct MarshalWriter {
     /// Used for shared constant strings in PPX output (e.g. spice keys, delimiters).
     string_value_table: HashMap<String, u32>,
 
-    /// Maps Option<i32> values to object counter (for content-based sharing)
-    /// This enables sharing of common arity values like Some(1)
-    /// OCaml shares these because they're often the same pointer (static values)
-    option_i32_table: HashMap<Option<i32>, u32>,
-
     /// Maps ArityIdx values to object counter (for index-based sharing)
     /// Same ArityIdx = same arity value in the arena = shared in output
     /// This matches OCaml's constant folding where `Some 1` literals are physically shared
@@ -309,7 +304,6 @@ impl MarshalWriter {
             longident_value_table: HashMap::new(),
             option_string_table: HashMap::new(),
             string_value_table: HashMap::new(),
-            option_i32_table: HashMap::new(),
             arity_idx_table: HashMap::new(),
 
             string_loc_table: HashMap::new(),
@@ -358,7 +352,6 @@ impl MarshalWriter {
             longident_value_table: HashMap::new(),
             option_string_table: HashMap::new(),
             string_value_table: HashMap::new(),
-            option_i32_table: HashMap::new(),
             arity_idx_table: HashMap::new(),
 
             string_loc_table: HashMap::new(),
@@ -1538,24 +1531,6 @@ impl MarshalWriter {
 
                 // Record for future sharing
                 self.option_string_table.insert(opt.clone(), obj_idx);
-            }
-        }
-    }
-
-    /// Write an Option<i32>.
-    ///
-    /// - None → integer 0
-    /// - Some(n) → Block(tag=0, [n])
-    pub fn write_option_i32(&mut self, opt: &Option<i32>) {
-        match opt {
-            None => {
-                // None is encoded as integer 0, not a block, so no sharing needed
-                self.write_int(0);
-            }
-            Some(n) => {
-                // Write Some(n) as Block(tag=0, [n])
-                self.write_block_header(0, 1);
-                self.write_int(*n as i64);
             }
         }
     }

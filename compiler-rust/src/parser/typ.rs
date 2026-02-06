@@ -3,7 +3,7 @@
 //! This module contains the type expression parsing logic, converting tokens
 //! into type AST nodes.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 
 use crate::parse_arena::{Located, LocIdx, PosIdx, StrIdx};
 use super::ast::*;
@@ -28,118 +28,6 @@ fn get_string_tag(p: &Parser<'_>) -> Option<String> {
 // ============================================================================
 // Type Variable Substitution
 // ============================================================================
-
-/// Rebind zero-arg `Ptyp_constr` occurrences that match locally abstract
-/// type variable names to use the variable binder `StrIdx`.
-///
-/// OCaml's `varify_constructors` keeps sharing between the original constructor
-/// identifiers and the generated `Ptyp_var` names by reusing the same string
-/// values. Rust needs this explicit rebinding so constructor-side `StrIdx`
-/// identity aligns with the `type a b c.` binder identities.
-pub fn align_locally_abstract_constructors(
-    arena: &mut crate::parse_arena::ParseArena,
-    typ: CoreType,
-    vars: &HashMap<String, StrIdx>,
-) -> CoreType {
-    let new_desc = match typ.ptyp_desc {
-        CoreTypeDesc::Ptyp_constr(lid, args) => {
-            let rebound_lid = if args.is_empty() {
-                if let Longident::Lident(name_idx) = arena.get_longident(lid.txt) {
-                    let name = arena.get_string(*name_idx);
-                    if let Some(var_idx) = vars.get(name) {
-                        with_loc(arena.push_lident_from_idx(*var_idx), lid.loc)
-                    } else {
-                        lid
-                    }
-                } else {
-                    lid
-                }
-            } else {
-                lid
-            };
-            let new_args = args
-                .into_iter()
-                .map(|arg| align_locally_abstract_constructors(arena, arg, vars))
-                .collect();
-            CoreTypeDesc::Ptyp_constr(rebound_lid, new_args)
-        }
-        CoreTypeDesc::Ptyp_arrow { arg, ret, arity } => CoreTypeDesc::Ptyp_arrow {
-            arg: Box::new(TypeArg {
-                attrs: arg.attrs,
-                lbl: arg.lbl,
-                typ: align_locally_abstract_constructors(arena, arg.typ, vars),
-            }),
-            ret: Box::new(align_locally_abstract_constructors(arena, *ret, vars)),
-            arity,
-        },
-        CoreTypeDesc::Ptyp_tuple(elements) => CoreTypeDesc::Ptyp_tuple(
-            elements
-                .into_iter()
-                .map(|e| align_locally_abstract_constructors(arena, e, vars))
-                .collect(),
-        ),
-        CoreTypeDesc::Ptyp_poly(poly_vars, body) => CoreTypeDesc::Ptyp_poly(
-            poly_vars,
-            Box::new(align_locally_abstract_constructors(arena, *body, vars)),
-        ),
-        CoreTypeDesc::Ptyp_alias(inner, alias) => CoreTypeDesc::Ptyp_alias(
-            Box::new(align_locally_abstract_constructors(arena, *inner, vars)),
-            alias,
-        ),
-        CoreTypeDesc::Ptyp_object(fields, closed) => {
-            let new_fields = fields
-                .into_iter()
-                .map(|field| match field {
-                    ObjectField::Otag(name, attrs, inner_typ) => ObjectField::Otag(
-                        name,
-                        attrs,
-                        align_locally_abstract_constructors(arena, inner_typ, vars),
-                    ),
-                    ObjectField::Oinherit(inner_typ) => {
-                        ObjectField::Oinherit(align_locally_abstract_constructors(arena, inner_typ, vars))
-                    }
-                })
-                .collect();
-            CoreTypeDesc::Ptyp_object(new_fields, closed)
-        }
-        CoreTypeDesc::Ptyp_variant(rows, closed, labels) => {
-            let new_rows = rows
-                .into_iter()
-                .map(|row| match row {
-                    RowField::Rtag(name, attrs, empty, types) => {
-                        let new_types = types
-                            .into_iter()
-                            .map(|t| align_locally_abstract_constructors(arena, t, vars))
-                            .collect();
-                        RowField::Rtag(name, attrs, empty, new_types)
-                    }
-                    RowField::Rinherit(inner_typ) => {
-                        RowField::Rinherit(align_locally_abstract_constructors(arena, inner_typ, vars))
-                    }
-                })
-                .collect();
-            CoreTypeDesc::Ptyp_variant(new_rows, closed, labels)
-        }
-        CoreTypeDesc::Ptyp_package((lid, constraints)) => {
-            let new_constraints = constraints
-                .into_iter()
-                .map(|(c_lid, c_typ)| {
-                    (
-                        c_lid,
-                        align_locally_abstract_constructors(arena, c_typ, vars),
-                    )
-                })
-                .collect();
-            CoreTypeDesc::Ptyp_package((lid, new_constraints))
-        }
-        other => other,
-    };
-    CoreType {
-        ptyp_desc: new_desc,
-        ptyp_loc: typ.ptyp_loc,
-        ptyp_attributes: typ.ptyp_attributes,
-    }
-}
 
 /// Transform a type by converting Ptyp_constr with a single Lident that matches
 /// one of the poly type variables into Ptyp_var.
