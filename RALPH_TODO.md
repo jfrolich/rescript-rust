@@ -15,6 +15,18 @@ Achieve 100% parity on the typed tree S-expression output (with locations) betwe
 
 ---
 
+## ⚠️ ALWAYS USE TIMEOUTS — THE RUST COMPILER WILL INFINITE LOOP
+
+The Rust type checker is incomplete and **WILL hang/infinite loop** on many inputs. You MUST wrap every invocation of the Rust compiler (`bsc`, test scripts, cargo test) with a timeout. **No exceptions.**
+
+- **Single file tests:** `timeout 10 ./compiler-rust/target/release/bsc ...`
+- **Test scripts:** `timeout 300 ./scripts/test_typedtree_parity.sh ...`
+- **Cargo tests:** `timeout 120 cargo test ...`
+
+If you run the Rust compiler without a timeout, it WILL hang indefinitely and block your entire session. The OCaml compiler does NOT have this problem — only the Rust compiler needs timeouts.
+
+---
+
 ## How to Test
 
 ```bash
@@ -24,11 +36,11 @@ cargo build --manifest-path compiler-rust/Cargo.toml --release
 # Run the typed tree parity test suite (compares -dtyped-sexp output)
 timeout 300 ./scripts/test_typedtree_parity.sh
 
-# Test a single file (fastest for iteration)
-./scripts/test_typedtree_parity.sh tests/tests/src/a.res
+# Test a single file (fastest for iteration — always use timeout!)
+timeout 10 ./scripts/test_typedtree_parity.sh tests/tests/src/a.res
 
 # Test files matching a pattern
-./scripts/test_typedtree_parity.sh "Core_Array"
+timeout 60 ./scripts/test_typedtree_parity.sh "Core_Array"
 
 # Quick mode (stop on first failure, show diff)
 timeout 300 ./scripts/test_typedtree_parity.sh --quick
@@ -39,10 +51,10 @@ timeout 300 ./scripts/test_typedtree_parity.sh --no-build
 # With locations (ultimate goal)
 timeout 300 ./scripts/test_typedtree_parity.sh --with-locs
 
-# Manual comparison of a single file
+# Manual comparison of a single file (ALWAYS use timeout on the Rust compiler)
 echo 'let x = 1' > /tmp/test.res
 ./_build/install/default/bin/bsc -dtyped-sexp-locs /tmp/test.res 2>/tmp/ocaml.sexp
-./compiler-rust/target/release/bsc -dtyped-sexp-locs /tmp/test.res 2>/tmp/rust.sexp
+timeout 10 ./compiler-rust/target/release/bsc -dtyped-sexp-locs /tmp/test.res 2>/tmp/rust.sexp
 diff /tmp/ocaml.sexp /tmp/rust.sexp
 ```
 
