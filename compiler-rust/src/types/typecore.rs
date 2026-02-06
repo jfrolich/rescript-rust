@@ -3132,11 +3132,14 @@ fn type_coerce(
     let typed_inner = type_expect(tctx, env, inner_expr, from_ty, None)?;
 
     // Return the inner expression with the coercion as exp_extra
-    Ok(typed_inner.with_exp_extra(
+    // The expression type becomes the target type after coercion
+    let mut result = typed_inner.with_exp_extra(
         crate::types::typedtree::ExpExtra::Texp_coerce(to_typed_ctype),
         loc.clone(),
         attributes.to_vec(),
-    ))
+    );
+    result.exp_type = to_ty;
+    Ok(result)
 }
 
 /// Type check open expression.
