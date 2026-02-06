@@ -1503,7 +1503,7 @@ mod tests {
         let mut arena = ParseArena::new();
         let test_file = arena.intern("test.res");
         let base_count = arena.position_count();
-        assert_eq!(base_count, 1); // Pre-allocated none position
+        assert_eq!(base_count, 2); // Pre-allocated none + dummy positions
 
         let idx1 = arena.push_pos(test_file, 1, 0, 5);
         let idx2 = arena.push_pos(test_file, 1, 0, 5);
@@ -1522,7 +1522,7 @@ mod tests {
         let mut arena = ParseArena::new();
         let test_file = arena.intern("test.res");
         let base_count = arena.location_count();
-        assert_eq!(base_count, 1); // Pre-allocated none location
+        assert_eq!(base_count, 2); // Pre-allocated none + dummy locations
 
         let start = arena.push_pos(test_file, 1, 0, 0);
         let end = arena.push_pos(test_file, 1, 0, 10);

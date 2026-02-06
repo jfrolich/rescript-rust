@@ -1120,7 +1120,8 @@ mod tests {
         let mut arena = ParseArena::new();
         let words = vec!["Foo".to_string(), "Bar".to_string(), "baz".to_string()];
         let lid = build_longident(&mut arena, &words);
-        assert_eq!(lid.to_string(), "Foo.Bar.baz");
+        let resolved: Vec<&str> = lid.flatten_idx().iter().map(|idx| arena.get_string(*idx)).collect();
+        assert_eq!(resolved.join("."), "Foo.Bar.baz");
     }
 
     #[test]
