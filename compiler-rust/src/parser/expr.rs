@@ -6367,7 +6367,8 @@ mod tests {
     #[test]
     fn test_parse_constant_string() {
         let c = parse_constant_with_timeout("\"hello\"");
-        assert!(matches!(c, Constant::String(s, None) if s == "hello"));
+        // In ParseForTypeChecker mode (default), strings get a "js" tag
+        assert!(matches!(c, Constant::String(s, Some(tag)) if s == "hello" && tag == "js"));
     }
 
     #[test]
