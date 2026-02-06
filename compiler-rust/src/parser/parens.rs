@@ -3,7 +3,7 @@
 //! This module provides functions to determine when parentheses or braces
 //! are needed in printed output. It's a port of OCaml's `res_parens.ml`.
 
-use crate::parse_arena::LocIdx;
+use crate::parse_arena::{LocIdx, ParseArena};
 use crate::parser::ast::*;
 use crate::parser::longident::Longident;
 use crate::parser::parsetree_viewer;
@@ -19,27 +19,36 @@ pub enum ParenKind {
     Nothing,
 }
 
+#[inline]
+fn braces_from_attr(arena: &ParseArena, expr: &Expression) -> Option<ParenKind> {
+    parsetree_viewer::process_braces_attr(arena, expr).map(|attr| ParenKind::Braced(attr.0.loc))
+}
+
+#[inline]
+fn is_module_pack_constraint(expr: &Expression) -> bool {
+    matches!(
+        &expr.pexp_desc,
+        ExpressionDesc::Pexp_constraint(inner, typ)
+            if matches!(&inner.pexp_desc, ExpressionDesc::Pexp_pack(_))
+                && matches!(&typ.ptyp_desc, CoreTypeDesc::Ptyp_package(_))
+    )
+}
+
 /// Check if an expression needs parentheses/braces.
-pub fn expr(arena: &crate::parse_arena::ParseArena, expr: &Expression) -> ParenKind {
-    let opt_braces = parsetree_viewer::process_braces_attr(arena, expr);
-    match opt_braces {
-        Some(attr) => ParenKind::Braced(attr.0.loc),
-        None => match &expr.pexp_desc {
-            // module(M: S) doesn't need parens
-            ExpressionDesc::Pexp_constraint(inner, typ)
-                if matches!(&inner.pexp_desc, ExpressionDesc::Pexp_pack(_))
-                    && matches!(&typ.ptyp_desc, CoreTypeDesc::Ptyp_package(_)) =>
-            {
-                ParenKind::Nothing
-            }
-            ExpressionDesc::Pexp_constraint(_, _) => ParenKind::Parenthesized,
-            _ => ParenKind::Nothing,
-        },
+pub fn expr(arena: &ParseArena, expr: &Expression) -> ParenKind {
+    if let Some(kind) = braces_from_attr(arena, expr) {
+        return kind;
+    }
+
+    match &expr.pexp_desc {
+        _ if is_module_pack_constraint(expr) => ParenKind::Nothing,
+        ExpressionDesc::Pexp_constraint(_, _) => ParenKind::Parenthesized,
+        _ => ParenKind::Nothing,
     }
 }
 
 /// Check if expression record row RHS needs parentheses.
-pub fn expr_record_row_rhs(arena: &crate::parse_arena::ParseArena, optional: bool, e: &Expression) -> ParenKind {
+pub fn expr_record_row_rhs(arena: &ParseArena, optional: bool, e: &Expression) -> ParenKind {
     let kind = expr(arena, e);
     match kind {
         ParenKind::Nothing if optional => match &e.pexp_desc {
@@ -54,161 +63,122 @@ pub fn expr_record_row_rhs(arena: &crate::parse_arena::ParseArena, optional: boo
 }
 
 /// Check if a call expression needs parentheses/braces.
-pub fn call_expr(arena: &crate::parse_arena::ParseArena, expr: &Expression) -> ParenKind {
-    let opt_braces = parsetree_viewer::process_braces_attr(arena, expr);
-    match opt_braces {
-        Some(attr) => ParenKind::Braced(attr.0.loc),
-        None => {
-            // Check for parsing attrs
-            let filtered = parsetree_viewer::filter_parsing_attrs(arena, &expr.pexp_attributes);
-            if !filtered.is_empty() {
-                return ParenKind::Parenthesized;
-            }
+pub fn call_expr(arena: &ParseArena, expr: &Expression) -> ParenKind {
+    if let Some(kind) = braces_from_attr(arena, expr) {
+        return kind;
+    }
 
-            if parsetree_viewer::is_unary_expression(arena, expr)
-                || parsetree_viewer::is_binary_expression(arena, expr)
-            {
-                return ParenKind::Parenthesized;
-            }
+    // Check for parsing attrs
+    let filtered = parsetree_viewer::filter_parsing_attrs(arena, &expr.pexp_attributes);
+    if !filtered.is_empty() {
+        return ParenKind::Parenthesized;
+    }
 
-            match &expr.pexp_desc {
-                // module(M: S) doesn't need parens
-                ExpressionDesc::Pexp_constraint(inner, typ)
-                    if matches!(&inner.pexp_desc, ExpressionDesc::Pexp_pack(_))
-                        && matches!(&typ.ptyp_desc, CoreTypeDesc::Ptyp_package(_)) =>
-                {
-                    ParenKind::Nothing
-                }
-                ExpressionDesc::Pexp_fun { .. }
-                    if parsetree_viewer::is_underscore_apply_sugar(arena, expr) =>
-                {
-                    ParenKind::Nothing
-                }
-                ExpressionDesc::Pexp_assert(_)
-                | ExpressionDesc::Pexp_fun { .. }
-                | ExpressionDesc::Pexp_newtype(_, _)
-                | ExpressionDesc::Pexp_constraint(_, _)
-                | ExpressionDesc::Pexp_setfield(_, _, _)
-                | ExpressionDesc::Pexp_match(_, _)
-                | ExpressionDesc::Pexp_try(_, _)
-                | ExpressionDesc::Pexp_while(_, _)
-                | ExpressionDesc::Pexp_for(_, _, _, _, _)
-                | ExpressionDesc::Pexp_ifthenelse(_, _, _) => ParenKind::Parenthesized,
-                _ if parsetree_viewer::expr_is_uncurried_fun(arena, expr) => ParenKind::Parenthesized,
-                _ if parsetree_viewer::expr_is_await(expr) => ParenKind::Parenthesized,
-                _ => ParenKind::Nothing,
-            }
+    if parsetree_viewer::is_unary_expression(arena, expr)
+        || parsetree_viewer::is_binary_expression(arena, expr)
+    {
+        return ParenKind::Parenthesized;
+    }
+
+    match &expr.pexp_desc {
+        _ if is_module_pack_constraint(expr) => ParenKind::Nothing,
+        ExpressionDesc::Pexp_fun { .. } if parsetree_viewer::is_underscore_apply_sugar(arena, expr) => {
+            ParenKind::Nothing
         }
+        ExpressionDesc::Pexp_assert(_)
+        | ExpressionDesc::Pexp_fun { .. }
+        | ExpressionDesc::Pexp_newtype(_, _)
+        | ExpressionDesc::Pexp_constraint(_, _)
+        | ExpressionDesc::Pexp_setfield(_, _, _)
+        | ExpressionDesc::Pexp_match(_, _)
+        | ExpressionDesc::Pexp_try(_, _)
+        | ExpressionDesc::Pexp_while(_, _)
+        | ExpressionDesc::Pexp_for(_, _, _, _, _)
+        | ExpressionDesc::Pexp_ifthenelse(_, _, _) => ParenKind::Parenthesized,
+        _ if parsetree_viewer::expr_is_uncurried_fun(arena, expr) => ParenKind::Parenthesized,
+        _ if parsetree_viewer::expr_is_await(expr) => ParenKind::Parenthesized,
+        _ => ParenKind::Nothing,
     }
 }
 
 /// Check if a structure expression needs parentheses/braces.
-pub fn structure_expr(arena: &crate::parse_arena::ParseArena, expr: &Expression) -> ParenKind {
-    let opt_braces = parsetree_viewer::process_braces_attr(arena, expr);
-    match opt_braces {
-        Some(attr) => ParenKind::Braced(attr.0.loc),
-        None => match &expr.pexp_desc {
-            ExpressionDesc::Pexp_jsx_element(_) => ParenKind::Nothing,
-            _ if parsetree_viewer::has_attributes(arena, &expr.pexp_attributes) => {
-                ParenKind::Parenthesized
-            }
-            // module(M: S) doesn't need parens
-            ExpressionDesc::Pexp_constraint(inner, typ)
-                if matches!(&inner.pexp_desc, ExpressionDesc::Pexp_pack(_))
-                    && matches!(&typ.ptyp_desc, CoreTypeDesc::Ptyp_package(_)) =>
-            {
-                ParenKind::Nothing
-            }
-            ExpressionDesc::Pexp_constraint(_, _) => ParenKind::Parenthesized,
-            _ => ParenKind::Nothing,
-        },
+pub fn structure_expr(arena: &ParseArena, expr: &Expression) -> ParenKind {
+    if let Some(kind) = braces_from_attr(arena, expr) {
+        return kind;
+    }
+
+    match &expr.pexp_desc {
+        ExpressionDesc::Pexp_jsx_element(_) => ParenKind::Nothing,
+        _ if parsetree_viewer::has_attributes(arena, &expr.pexp_attributes) => {
+            ParenKind::Parenthesized
+        }
+        _ if is_module_pack_constraint(expr) => ParenKind::Nothing,
+        ExpressionDesc::Pexp_constraint(_, _) => ParenKind::Parenthesized,
+        _ => ParenKind::Nothing,
     }
 }
 
 /// Check if a unary expression operand needs parentheses/braces.
-pub fn unary_expr_operand(arena: &crate::parse_arena::ParseArena, expr: &Expression) -> ParenKind {
-    let opt_braces = parsetree_viewer::process_braces_attr(arena, expr);
-    match opt_braces {
-        Some(attr) => ParenKind::Braced(attr.0.loc),
-        None => {
-            let filtered = parsetree_viewer::filter_parsing_attrs(arena, &expr.pexp_attributes);
-            if !filtered.is_empty() {
-                return ParenKind::Parenthesized;
-            }
+pub fn unary_expr_operand(arena: &ParseArena, expr: &Expression) -> ParenKind {
+    if let Some(kind) = braces_from_attr(arena, expr) {
+        return kind;
+    }
 
-            if parsetree_viewer::is_unary_expression(arena, expr)
-                || parsetree_viewer::is_binary_expression(arena, expr)
-            {
-                return ParenKind::Parenthesized;
-            }
+    let filtered = parsetree_viewer::filter_parsing_attrs(arena, &expr.pexp_attributes);
+    if !filtered.is_empty() {
+        return ParenKind::Parenthesized;
+    }
 
-            match &expr.pexp_desc {
-                // module(M: S) doesn't need parens
-                ExpressionDesc::Pexp_constraint(inner, typ)
-                    if matches!(&inner.pexp_desc, ExpressionDesc::Pexp_pack(_))
-                        && matches!(&typ.ptyp_desc, CoreTypeDesc::Ptyp_package(_)) =>
-                {
-                    ParenKind::Nothing
-                }
-                ExpressionDesc::Pexp_fun { .. }
-                    if parsetree_viewer::is_underscore_apply_sugar(arena, expr) =>
-                {
-                    ParenKind::Nothing
-                }
-                ExpressionDesc::Pexp_assert(_)
-                | ExpressionDesc::Pexp_fun { .. }
-                | ExpressionDesc::Pexp_newtype(_, _)
-                | ExpressionDesc::Pexp_constraint(_, _)
-                | ExpressionDesc::Pexp_setfield(_, _, _)
-                | ExpressionDesc::Pexp_extension(_)
-                | ExpressionDesc::Pexp_match(_, _)
-                | ExpressionDesc::Pexp_try(_, _)
-                | ExpressionDesc::Pexp_while(_, _)
-                | ExpressionDesc::Pexp_for(_, _, _, _, _)
-                | ExpressionDesc::Pexp_ifthenelse(_, _, _) => ParenKind::Parenthesized,
-                _ if parsetree_viewer::expr_is_await(expr) => ParenKind::Parenthesized,
-                _ => ParenKind::Nothing,
-            }
+    if parsetree_viewer::is_unary_expression(arena, expr)
+        || parsetree_viewer::is_binary_expression(arena, expr)
+    {
+        return ParenKind::Parenthesized;
+    }
+
+    match &expr.pexp_desc {
+        _ if is_module_pack_constraint(expr) => ParenKind::Nothing,
+        ExpressionDesc::Pexp_fun { .. } if parsetree_viewer::is_underscore_apply_sugar(arena, expr) => {
+            ParenKind::Nothing
         }
+        ExpressionDesc::Pexp_assert(_)
+        | ExpressionDesc::Pexp_fun { .. }
+        | ExpressionDesc::Pexp_newtype(_, _)
+        | ExpressionDesc::Pexp_constraint(_, _)
+        | ExpressionDesc::Pexp_setfield(_, _, _)
+        | ExpressionDesc::Pexp_extension(_)
+        | ExpressionDesc::Pexp_match(_, _)
+        | ExpressionDesc::Pexp_try(_, _)
+        | ExpressionDesc::Pexp_while(_, _)
+        | ExpressionDesc::Pexp_for(_, _, _, _, _)
+        | ExpressionDesc::Pexp_ifthenelse(_, _, _) => ParenKind::Parenthesized,
+        _ if parsetree_viewer::expr_is_await(expr) => ParenKind::Parenthesized,
+        _ => ParenKind::Nothing,
     }
 }
 
 /// Check if a binary expression operand needs parentheses/braces.
-pub fn binary_expr_operand(arena: &crate::parse_arena::ParseArena, is_lhs: bool, expr: &Expression) -> ParenKind {
-    let opt_braces = parsetree_viewer::process_braces_attr(arena, expr);
-    match opt_braces {
-        Some(attr) => ParenKind::Braced(attr.0.loc),
-        None => {
-            match &expr.pexp_desc {
-                // module(M: S) doesn't need parens
-                ExpressionDesc::Pexp_constraint(inner, typ)
-                    if matches!(&inner.pexp_desc, ExpressionDesc::Pexp_pack(_))
-                        && matches!(&typ.ptyp_desc, CoreTypeDesc::Ptyp_package(_)) =>
-                {
-                    ParenKind::Nothing
-                }
-                ExpressionDesc::Pexp_fun { .. }
-                    if parsetree_viewer::is_underscore_apply_sugar(arena, expr) =>
-                {
-                    ParenKind::Nothing
-                }
-                ExpressionDesc::Pexp_constraint(_, _)
-                | ExpressionDesc::Pexp_fun { .. }
-                | ExpressionDesc::Pexp_newtype(_, _) => ParenKind::Parenthesized,
-                _ if parsetree_viewer::expr_is_uncurried_fun(arena, expr) => ParenKind::Parenthesized,
-                _ if parsetree_viewer::is_binary_expression(arena, expr) => ParenKind::Parenthesized,
-                _ if parsetree_viewer::is_ternary_expr(arena, expr) => ParenKind::Parenthesized,
-                ExpressionDesc::Pexp_assert(_) if is_lhs => ParenKind::Parenthesized,
-                _ if parsetree_viewer::expr_is_await(expr) => ParenKind::Parenthesized,
-                _ => {
-                    if parsetree_viewer::has_printable_attributes(arena, &expr.pexp_attributes) {
-                        ParenKind::Parenthesized
-                    } else {
-                        ParenKind::Nothing
-                    }
-                }
-            }
+pub fn binary_expr_operand(arena: &ParseArena, is_lhs: bool, expr: &Expression) -> ParenKind {
+    if let Some(kind) = braces_from_attr(arena, expr) {
+        return kind;
+    }
+
+    match &expr.pexp_desc {
+        _ if is_module_pack_constraint(expr) => ParenKind::Nothing,
+        ExpressionDesc::Pexp_fun { .. } if parsetree_viewer::is_underscore_apply_sugar(arena, expr) => {
+            ParenKind::Nothing
         }
+        ExpressionDesc::Pexp_constraint(_, _)
+        | ExpressionDesc::Pexp_fun { .. }
+        | ExpressionDesc::Pexp_newtype(_, _) => ParenKind::Parenthesized,
+        _ if parsetree_viewer::expr_is_uncurried_fun(arena, expr) => ParenKind::Parenthesized,
+        _ if parsetree_viewer::is_binary_expression(arena, expr) => ParenKind::Parenthesized,
+        _ if parsetree_viewer::is_ternary_expr(arena, expr) => ParenKind::Parenthesized,
+        ExpressionDesc::Pexp_assert(_) if is_lhs => ParenKind::Parenthesized,
+        _ if parsetree_viewer::expr_is_await(expr) => ParenKind::Parenthesized,
+        _ if parsetree_viewer::has_printable_attributes(arena, &expr.pexp_attributes) => {
+            ParenKind::Parenthesized
+        }
+        _ => ParenKind::Nothing,
     }
 }
 
@@ -353,22 +323,21 @@ pub fn binary_operator_inside_await_needs_parens(operator: &str) -> bool {
 }
 
 /// Check if assert or await expression RHS needs parentheses/braces.
-pub fn assert_or_await_expr_rhs(arena: &crate::parse_arena::ParseArena, in_await: bool, expr: &Expression) -> ParenKind {
-    let opt_braces = parsetree_viewer::process_braces_attr(arena, expr);
-    match opt_braces {
-        Some(attr) => ParenKind::Braced(attr.0.loc),
-        None => assert_or_await_expr_rhs_inner(arena, in_await, expr),
+pub fn assert_or_await_expr_rhs(arena: &ParseArena, in_await: bool, expr: &Expression) -> ParenKind {
+    if let Some(kind) = braces_from_attr(arena, expr) {
+        return kind;
     }
+    assert_or_await_expr_rhs_inner(arena, in_await, expr)
 }
 
 /// Check if await expression RHS needs parens, but IGNORE the res.braces attribute.
 /// OCaml's await printing filters out @res.braces before checking, so `await {x}` prints as `await x`.
-pub fn assert_or_await_expr_rhs_ignore_braces(arena: &crate::parse_arena::ParseArena, in_await: bool, expr: &Expression) -> ParenKind {
+pub fn assert_or_await_expr_rhs_ignore_braces(arena: &ParseArena, in_await: bool, expr: &Expression) -> ParenKind {
     // Ignore the braces attribute - just check the expression structure
     assert_or_await_expr_rhs_inner(arena, in_await, expr)
 }
 
-fn assert_or_await_expr_rhs_inner(arena: &crate::parse_arena::ParseArena, in_await: bool, expr: &Expression) -> ParenKind {
+fn assert_or_await_expr_rhs_inner(arena: &ParseArena, in_await: bool, expr: &Expression) -> ParenKind {
     let filtered = parsetree_viewer::filter_parsing_attrs(arena, &expr.pexp_attributes);
     if !filtered.is_empty() {
         return ParenKind::Parenthesized;
@@ -388,13 +357,7 @@ fn assert_or_await_expr_rhs_inner(arena: &crate::parse_arena::ParseArena, in_awa
             }
             ParenKind::Parenthesized
         }
-        // module(M: S) doesn't need parens
-        ExpressionDesc::Pexp_constraint(inner, typ)
-            if matches!(&inner.pexp_desc, ExpressionDesc::Pexp_pack(_))
-                && matches!(&typ.ptyp_desc, CoreTypeDesc::Ptyp_package(_)) =>
-        {
-            ParenKind::Nothing
-        }
+        _ if is_module_pack_constraint(expr) => ParenKind::Nothing,
         ExpressionDesc::Pexp_fun { .. }
             if parsetree_viewer::is_underscore_apply_sugar(arena, expr) =>
         {
@@ -429,98 +392,76 @@ pub fn is_negative_constant(constant: &Constant) -> bool {
 }
 
 /// Check if field expression needs parentheses/braces.
-pub fn field_expr(arena: &crate::parse_arena::ParseArena, expr: &Expression) -> ParenKind {
-    let opt_braces = parsetree_viewer::process_braces_attr(arena, expr);
-    match opt_braces {
-        Some(attr) => ParenKind::Braced(attr.0.loc),
-        None => {
-            let filtered = parsetree_viewer::filter_parsing_attrs(arena, &expr.pexp_attributes);
-            if !filtered.is_empty() {
-                return ParenKind::Parenthesized;
-            }
+pub fn field_expr(arena: &ParseArena, expr: &Expression) -> ParenKind {
+    if let Some(kind) = braces_from_attr(arena, expr) {
+        return kind;
+    }
 
-            if parsetree_viewer::is_binary_expression(arena, expr)
-                || parsetree_viewer::is_unary_expression(arena, expr)
-            {
-                return ParenKind::Parenthesized;
-            }
+    let filtered = parsetree_viewer::filter_parsing_attrs(arena, &expr.pexp_attributes);
+    if !filtered.is_empty() {
+        return ParenKind::Parenthesized;
+    }
 
-            match &expr.pexp_desc {
-                // module(M: S) doesn't need parens
-                ExpressionDesc::Pexp_constraint(inner, typ)
-                    if matches!(&inner.pexp_desc, ExpressionDesc::Pexp_pack(_))
-                        && matches!(&typ.ptyp_desc, CoreTypeDesc::Ptyp_package(_)) =>
-                {
-                    ParenKind::Nothing
-                }
-                ExpressionDesc::Pexp_constant(c) if is_negative_constant(c) => {
-                    ParenKind::Parenthesized
-                }
-                ExpressionDesc::Pexp_fun { .. }
-                    if parsetree_viewer::is_underscore_apply_sugar(arena, expr) =>
-                {
-                    ParenKind::Nothing
-                }
-                ExpressionDesc::Pexp_assert(_)
-                | ExpressionDesc::Pexp_extension(_)
-                | ExpressionDesc::Pexp_fun { .. }
-                | ExpressionDesc::Pexp_newtype(_, _)
-                | ExpressionDesc::Pexp_constraint(_, _)
-                | ExpressionDesc::Pexp_setfield(_, _, _)
-                | ExpressionDesc::Pexp_match(_, _)
-                | ExpressionDesc::Pexp_try(_, _)
-                | ExpressionDesc::Pexp_while(_, _)
-                | ExpressionDesc::Pexp_for(_, _, _, _, _)
-                | ExpressionDesc::Pexp_ifthenelse(_, _, _) => ParenKind::Parenthesized,
-                _ if parsetree_viewer::expr_is_await(expr) => ParenKind::Parenthesized,
-                _ => ParenKind::Nothing,
-            }
+    if parsetree_viewer::is_binary_expression(arena, expr)
+        || parsetree_viewer::is_unary_expression(arena, expr)
+    {
+        return ParenKind::Parenthesized;
+    }
+
+    match &expr.pexp_desc {
+        _ if is_module_pack_constraint(expr) => ParenKind::Nothing,
+        ExpressionDesc::Pexp_constant(c) if is_negative_constant(c) => {
+            ParenKind::Parenthesized
         }
+        ExpressionDesc::Pexp_fun { .. } if parsetree_viewer::is_underscore_apply_sugar(arena, expr) => {
+            ParenKind::Nothing
+        }
+        ExpressionDesc::Pexp_assert(_)
+        | ExpressionDesc::Pexp_extension(_)
+        | ExpressionDesc::Pexp_fun { .. }
+        | ExpressionDesc::Pexp_newtype(_, _)
+        | ExpressionDesc::Pexp_constraint(_, _)
+        | ExpressionDesc::Pexp_setfield(_, _, _)
+        | ExpressionDesc::Pexp_match(_, _)
+        | ExpressionDesc::Pexp_try(_, _)
+        | ExpressionDesc::Pexp_while(_, _)
+        | ExpressionDesc::Pexp_for(_, _, _, _, _)
+        | ExpressionDesc::Pexp_ifthenelse(_, _, _) => ParenKind::Parenthesized,
+        _ if parsetree_viewer::expr_is_await(expr) => ParenKind::Parenthesized,
+        _ => ParenKind::Nothing,
     }
 }
 
 /// Check if set field expression RHS needs parentheses/braces.
-pub fn set_field_expr_rhs(arena: &crate::parse_arena::ParseArena, expr: &Expression) -> ParenKind {
-    let opt_braces = parsetree_viewer::process_braces_attr(arena, expr);
-    match opt_braces {
-        Some(attr) => ParenKind::Braced(attr.0.loc),
-        None => match &expr.pexp_desc {
-            // module(M: S) doesn't need parens
-            ExpressionDesc::Pexp_constraint(inner, typ)
-                if matches!(&inner.pexp_desc, ExpressionDesc::Pexp_pack(_))
-                    && matches!(&typ.ptyp_desc, CoreTypeDesc::Ptyp_package(_)) =>
-            {
-                ParenKind::Nothing
-            }
-            ExpressionDesc::Pexp_constraint(_, _) => ParenKind::Parenthesized,
-            _ => ParenKind::Nothing,
-        },
+pub fn set_field_expr_rhs(arena: &ParseArena, expr: &Expression) -> ParenKind {
+    if let Some(kind) = braces_from_attr(arena, expr) {
+        return kind;
+    }
+
+    match &expr.pexp_desc {
+        _ if is_module_pack_constraint(expr) => ParenKind::Nothing,
+        ExpressionDesc::Pexp_constraint(_, _) => ParenKind::Parenthesized,
+        _ => ParenKind::Nothing,
     }
 }
 
 /// Check if ternary operand needs parentheses/braces.
-pub fn ternary_operand(arena: &crate::parse_arena::ParseArena, expr: &Expression) -> ParenKind {
-    let opt_braces = parsetree_viewer::process_braces_attr(arena, expr);
-    match opt_braces {
-        Some(attr) => ParenKind::Braced(attr.0.loc),
-        None => match &expr.pexp_desc {
-            // module(M: S) doesn't need parens
-            ExpressionDesc::Pexp_constraint(inner, typ)
-                if matches!(&inner.pexp_desc, ExpressionDesc::Pexp_pack(_))
-                    && matches!(&typ.ptyp_desc, CoreTypeDesc::Ptyp_package(_)) =>
-            {
-                ParenKind::Nothing
+pub fn ternary_operand(arena: &ParseArena, expr: &Expression) -> ParenKind {
+    if let Some(kind) = braces_from_attr(arena, expr) {
+        return kind;
+    }
+
+    match &expr.pexp_desc {
+        _ if is_module_pack_constraint(expr) => ParenKind::Nothing,
+        ExpressionDesc::Pexp_constraint(_, _) => ParenKind::Parenthesized,
+        _ if parsetree_viewer::is_fun_newtype(expr) => {
+            let (_, _, return_expr) = parsetree_viewer::fun_expr(arena, expr);
+            match &return_expr.pexp_desc {
+                ExpressionDesc::Pexp_constraint(_, _) => ParenKind::Parenthesized,
+                _ => ParenKind::Nothing,
             }
-            ExpressionDesc::Pexp_constraint(_, _) => ParenKind::Parenthesized,
-            _ if parsetree_viewer::is_fun_newtype(expr) => {
-                let (_, _, return_expr) = parsetree_viewer::fun_expr(arena, expr);
-                match &return_expr.pexp_desc {
-                    ExpressionDesc::Pexp_constraint(_, _) => ParenKind::Parenthesized,
-                    _ => ParenKind::Nothing,
-                }
-            }
-            _ => ParenKind::Nothing,
-        },
+        }
+        _ => ParenKind::Nothing,
     }
 }
 
@@ -530,7 +471,7 @@ pub fn starts_with_minus(txt: &str) -> bool {
 }
 
 /// Check if JSX prop expression needs parentheses/braces.
-pub fn jsx_prop_expr(arena: &crate::parse_arena::ParseArena, expr: &Expression) -> ParenKind {
+pub fn jsx_prop_expr(arena: &ParseArena, expr: &Expression) -> ParenKind {
     match &expr.pexp_desc {
         ExpressionDesc::Pexp_let(_, _, _)
         | ExpressionDesc::Pexp_sequence(_, _)
@@ -538,54 +479,47 @@ pub fn jsx_prop_expr(arena: &crate::parse_arena::ParseArena, expr: &Expression) 
         | ExpressionDesc::Pexp_letmodule(_, _, _)
         | ExpressionDesc::Pexp_open(_, _, _) => ParenKind::Nothing,
         _ => {
-            let opt_braces = parsetree_viewer::process_braces_attr(arena, expr);
-            match opt_braces {
-                Some(attr) => ParenKind::Braced(attr.0.loc),
-                None => {
-                    match &expr.pexp_desc {
-                        ExpressionDesc::Pexp_constant(
-                            Constant::Integer(x, _) | Constant::Float(x, _),
-                        ) if expr.pexp_attributes.is_empty() && starts_with_minus(x) => {
-                            ParenKind::Parenthesized
-                        }
-                        _ if parsetree_viewer::expr_is_await(expr) => ParenKind::Parenthesized,
-                        ExpressionDesc::Pexp_ident(_)
-                        | ExpressionDesc::Pexp_constant(_)
-                        | ExpressionDesc::Pexp_field(_, _)
-                        | ExpressionDesc::Pexp_construct(_, _)
-                        | ExpressionDesc::Pexp_variant(_, _)
-                        | ExpressionDesc::Pexp_array(_)
-                        | ExpressionDesc::Pexp_pack(_)
-                        | ExpressionDesc::Pexp_record { .. }
-                        | ExpressionDesc::Pexp_extension(_)
-                        | ExpressionDesc::Pexp_letmodule(_, _, _)
-                        | ExpressionDesc::Pexp_letexception(_, _)
-                        | ExpressionDesc::Pexp_open(_, _, _)
-                        | ExpressionDesc::Pexp_sequence(_, _)
-                        | ExpressionDesc::Pexp_let(_, _, _)
-                        | ExpressionDesc::Pexp_tuple(_)
-                            if expr.pexp_attributes.is_empty() =>
-                        {
-                            ParenKind::Nothing
-                        }
-                        // module(M: S) doesn't need parens
-                        ExpressionDesc::Pexp_constraint(inner, typ)
-                            if matches!(&inner.pexp_desc, ExpressionDesc::Pexp_pack(_))
-                                && matches!(&typ.ptyp_desc, CoreTypeDesc::Ptyp_package(_))
-                                && expr.pexp_attributes.is_empty() =>
-                        {
-                            ParenKind::Nothing
-                        }
-                        _ => ParenKind::Parenthesized,
-                    }
+            if let Some(kind) = braces_from_attr(arena, expr) {
+                return kind;
+            }
+
+            match &expr.pexp_desc {
+                ExpressionDesc::Pexp_constant(
+                    Constant::Integer(x, _) | Constant::Float(x, _),
+                ) if expr.pexp_attributes.is_empty() && starts_with_minus(x) => {
+                    ParenKind::Parenthesized
                 }
+                _ if parsetree_viewer::expr_is_await(expr) => ParenKind::Parenthesized,
+                ExpressionDesc::Pexp_ident(_)
+                | ExpressionDesc::Pexp_constant(_)
+                | ExpressionDesc::Pexp_field(_, _)
+                | ExpressionDesc::Pexp_construct(_, _)
+                | ExpressionDesc::Pexp_variant(_, _)
+                | ExpressionDesc::Pexp_array(_)
+                | ExpressionDesc::Pexp_pack(_)
+                | ExpressionDesc::Pexp_record { .. }
+                | ExpressionDesc::Pexp_extension(_)
+                | ExpressionDesc::Pexp_letmodule(_, _, _)
+                | ExpressionDesc::Pexp_letexception(_, _)
+                | ExpressionDesc::Pexp_open(_, _, _)
+                | ExpressionDesc::Pexp_sequence(_, _)
+                | ExpressionDesc::Pexp_let(_, _, _)
+                | ExpressionDesc::Pexp_tuple(_)
+                    if expr.pexp_attributes.is_empty() =>
+                {
+                    ParenKind::Nothing
+                }
+                _ if is_module_pack_constraint(expr) && expr.pexp_attributes.is_empty() => {
+                    ParenKind::Nothing
+                }
+                _ => ParenKind::Parenthesized,
             }
         }
     }
 }
 
 /// Check if JSX child expression needs parentheses/braces.
-pub fn jsx_child_expr(arena: &crate::parse_arena::ParseArena, expr: &Expression) -> ParenKind {
+pub fn jsx_child_expr(arena: &ParseArena, expr: &Expression) -> ParenKind {
     match &expr.pexp_desc {
         ExpressionDesc::Pexp_let(_, _, _)
         | ExpressionDesc::Pexp_sequence(_, _)
@@ -593,65 +527,56 @@ pub fn jsx_child_expr(arena: &crate::parse_arena::ParseArena, expr: &Expression)
         | ExpressionDesc::Pexp_letmodule(_, _, _)
         | ExpressionDesc::Pexp_open(_, _, _) => ParenKind::Nothing,
         _ => {
-            let opt_braces = parsetree_viewer::process_braces_attr(arena, expr);
-            match opt_braces {
-                Some(attr) => ParenKind::Braced(attr.0.loc),
-                None => {
-                    match &expr.pexp_desc {
-                        ExpressionDesc::Pexp_constant(
-                            Constant::Integer(x, _) | Constant::Float(x, _),
-                        ) if expr.pexp_attributes.is_empty() && starts_with_minus(x) => {
-                            ParenKind::Parenthesized
-                        }
-                        _ if parsetree_viewer::expr_is_await(expr) => ParenKind::Parenthesized,
-                        ExpressionDesc::Pexp_ident(_)
-                        | ExpressionDesc::Pexp_constant(_)
-                        | ExpressionDesc::Pexp_field(_, _)
-                        | ExpressionDesc::Pexp_construct(_, _)
-                        | ExpressionDesc::Pexp_variant(_, _)
-                        | ExpressionDesc::Pexp_array(_)
-                        | ExpressionDesc::Pexp_pack(_)
-                        | ExpressionDesc::Pexp_record { .. }
-                        | ExpressionDesc::Pexp_extension(_)
-                        | ExpressionDesc::Pexp_letmodule(_, _, _)
-                        | ExpressionDesc::Pexp_letexception(_, _)
-                        | ExpressionDesc::Pexp_open(_, _, _)
-                        | ExpressionDesc::Pexp_sequence(_, _)
-                        | ExpressionDesc::Pexp_let(_, _, _)
-                        | ExpressionDesc::Pexp_jsx_element(_)
-                            if expr.pexp_attributes.is_empty() =>
-                        {
-                            ParenKind::Nothing
-                        }
-                        // module(M: S) doesn't need parens
-                        ExpressionDesc::Pexp_constraint(inner, typ)
-                            if matches!(&inner.pexp_desc, ExpressionDesc::Pexp_pack(_))
-                                && matches!(&typ.ptyp_desc, CoreTypeDesc::Ptyp_package(_))
-                                && expr.pexp_attributes.is_empty() =>
-                        {
-                            ParenKind::Nothing
-                        }
-                        ExpressionDesc::Pexp_jsx_element(_) => ParenKind::Nothing,
-                        _ => ParenKind::Parenthesized,
-                    }
+            if let Some(kind) = braces_from_attr(arena, expr) {
+                return kind;
+            }
+
+            match &expr.pexp_desc {
+                ExpressionDesc::Pexp_constant(
+                    Constant::Integer(x, _) | Constant::Float(x, _),
+                ) if expr.pexp_attributes.is_empty() && starts_with_minus(x) => {
+                    ParenKind::Parenthesized
                 }
+                _ if parsetree_viewer::expr_is_await(expr) => ParenKind::Parenthesized,
+                ExpressionDesc::Pexp_ident(_)
+                | ExpressionDesc::Pexp_constant(_)
+                | ExpressionDesc::Pexp_field(_, _)
+                | ExpressionDesc::Pexp_construct(_, _)
+                | ExpressionDesc::Pexp_variant(_, _)
+                | ExpressionDesc::Pexp_array(_)
+                | ExpressionDesc::Pexp_pack(_)
+                | ExpressionDesc::Pexp_record { .. }
+                | ExpressionDesc::Pexp_extension(_)
+                | ExpressionDesc::Pexp_letmodule(_, _, _)
+                | ExpressionDesc::Pexp_letexception(_, _)
+                | ExpressionDesc::Pexp_open(_, _, _)
+                | ExpressionDesc::Pexp_sequence(_, _)
+                | ExpressionDesc::Pexp_let(_, _, _)
+                | ExpressionDesc::Pexp_jsx_element(_)
+                    if expr.pexp_attributes.is_empty() =>
+                {
+                    ParenKind::Nothing
+                }
+                _ if is_module_pack_constraint(expr) && expr.pexp_attributes.is_empty() => {
+                    ParenKind::Nothing
+                }
+                ExpressionDesc::Pexp_jsx_element(_) => ParenKind::Nothing,
+                _ => ParenKind::Parenthesized,
             }
         }
     }
 }
 
 /// Check if binary expression needs parentheses/braces.
-pub fn binary_expr(arena: &crate::parse_arena::ParseArena, expr: &Expression) -> ParenKind {
-    let opt_braces = parsetree_viewer::process_braces_attr(arena, expr);
-    match opt_braces {
-        Some(attr) => ParenKind::Braced(attr.0.loc),
-        None => {
-            if !expr.pexp_attributes.is_empty() && parsetree_viewer::is_binary_expression(arena, expr) {
-                ParenKind::Parenthesized
-            } else {
-                ParenKind::Nothing
-            }
-        }
+pub fn binary_expr(arena: &ParseArena, expr: &Expression) -> ParenKind {
+    if let Some(kind) = braces_from_attr(arena, expr) {
+        return kind;
+    }
+
+    if !expr.pexp_attributes.is_empty() && parsetree_viewer::is_binary_expression(arena, expr) {
+        ParenKind::Parenthesized
+    } else {
+        ParenKind::Nothing
     }
 }
 
