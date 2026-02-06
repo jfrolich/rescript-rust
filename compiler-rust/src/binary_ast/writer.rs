@@ -202,19 +202,20 @@ fn write_ast_file<A: Marshal>(
 pub fn write_structure_ast_to_vec(source_path: &str, arena: &mut ParseArena, ast: &Structure) -> Vec<u8> {
     let deps = extract_structure_deps(arena, ast);
     let ast0 = map_structure(arena, ast);
-    write_ast_to_vec(source_path, &deps, &ast0)
+    write_ast_to_vec(source_path, arena, &deps, &ast0)
 }
 
 /// Write a signature AST to a Vec<u8> (for testing).
 pub fn write_signature_ast_to_vec(source_path: &str, arena: &mut ParseArena, ast: &Signature) -> Vec<u8> {
     let deps = extract_signature_deps(arena, ast);
     let ast0 = map_signature(arena, ast);
-    write_ast_to_vec(source_path, &deps, &ast0)
+    write_ast_to_vec(source_path, arena, &deps, &ast0)
 }
 
 /// Write an AST to a Vec<u8>.
 fn write_ast_to_vec<A: Marshal>(
     source_path: &str,
+    arena: &ParseArena,
     deps: &std::collections::BTreeSet<String>,
     ast: &A,
 ) -> Vec<u8> {
@@ -230,6 +231,7 @@ fn write_ast_to_vec<A: Marshal>(
 
     // Marshal the AST
     let mut marshal_writer = MarshalWriter::new();
+    marshal_writer.set_arena(arena);
     ast.marshal(&mut marshal_writer);
     let marshal_data = marshal_writer.finish();
 
