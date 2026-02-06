@@ -10,10 +10,12 @@ pub(crate) const PARSE_TIMEOUT: Duration = Duration::from_secs(5);
 
 fn preview_source(source: &str) -> String {
     const MAX_PREVIEW_LEN: usize = 100;
-    if source.len() > MAX_PREVIEW_LEN {
-        format!("{}...", &source[..MAX_PREVIEW_LEN])
+    let mut chars = source.chars();
+    let preview: String = chars.by_ref().take(MAX_PREVIEW_LEN).collect();
+    if chars.next().is_some() {
+        format!("{preview}...")
     } else {
-        source.to_string()
+        preview
     }
 }
 
