@@ -847,7 +847,7 @@ pub fn instance_label(ctx: &TypeContext<'_>, lbl: &super::LabelDescription) -> (
 /// Deep copy a type, creating fresh type variables regardless of level.
 /// Used for label instantiation where types may not be at GENERIC_LEVEL
 /// but still need fresh copies to avoid sharing across different uses.
-fn copy_type_deep(
+pub fn copy_type_deep(
     ctx: &TypeContext<'_>,
     ty: TypeExprRef,
     cache: &mut std::collections::HashMap<TypeExprRef, TypeExprRef>,

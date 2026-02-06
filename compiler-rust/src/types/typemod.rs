@@ -962,7 +962,141 @@ fn type_structure_item<'a>(
                                 ld_attributes: lbl.pld_attributes.clone(),
                             });
                         }
-                        (crate::types::TypeKind::TypeRecord(internal_labels, crate::types::RecordRepresentation::RecordRegular), TypedTypeKind::Ttype_record(typed_tree_labels), vec![])
+                        // Expand record type spreads in typed tree only: replace "..." labels with
+                        // actual fields from the spread target record type.
+                        // Internal labels are kept unchanged to avoid issues with lambda conversion.
+                        //
+                        // Following OCaml's record_type_spread.ml mk_lbl pattern:
+                        // The spread's core_type structure (inner Ttyp_poly) is preserved,
+                        // only the outer ctyp_type is replaced with the actual field type.
+                        let has_spread = typed_tree_labels.iter().any(|l| l.ld_name.txt == "...");
+                        let expanded_typed = if has_spread {
+                            // Recursively collect expanded fields from a type's internal labels.
+                            // This handles chained spreads like type c = {...b} where b = {...a, y: string}.
+                            fn collect_fields(
+                                ctx: &crate::types::TypeContext<'_>,
+                                env: &Env,
+                                fields: &[crate::types::LabelDeclaration],
+                            ) -> Vec<crate::types::LabelDeclaration> {
+                                let mut result = Vec::new();
+                                for field in fields {
+                                    if field.ld_id.name() == "..." {
+                                        // This is a spread — follow the type reference
+                                        let spread_ty = {
+                                            let ty = ctx.repr(field.ld_type);
+                                            let desc = ctx.get_desc(ty);
+                                            match &*desc {
+                                                crate::types::TypeDesc::Tpoly { body, .. } => ctx.repr(*body),
+                                                _ => ty,
+                                            }
+                                        };
+                                        let spread_desc = ctx.get_desc(spread_ty);
+                                        if let crate::types::TypeDesc::Tconstr { path, .. } = &*spread_desc {
+                                            let type_name = match path {
+                                                Path::Pident(id) => id.name().to_string(),
+                                                Path::Pdot(_, name, _) => name.clone(),
+                                                _ => String::new(),
+                                            };
+                                            if let Ok(type_decl) = env.find_type(&type_name) {
+                                                if let crate::types::TypeKind::TypeRecord(ref inner_fields, _) = type_decl.type_kind {
+                                                    result.extend(collect_fields(ctx, env, inner_fields));
+                                                    continue;
+                                                }
+                                            }
+                                        }
+                                        // Couldn't expand — keep as-is
+                                        result.push(field.clone());
+                                    } else {
+                                        result.push(field.clone());
+                                    }
+                                }
+                                result
+                            }
+
+                            let mut expanded: Vec<TypedLabelDeclaration> = Vec::new();
+                            for tl in typed_tree_labels.into_iter() {
+                                if tl.ld_name.txt == "..." {
+                                    // Extract the concrete type from the spread's Tpoly wrapper
+                                    let spread_ty = {
+                                        let ty = ctx.repr(tl.ld_type.ctyp_type);
+                                        let desc = ctx.get_desc(ty);
+                                        match &*desc {
+                                            crate::types::TypeDesc::Tpoly { body, .. } => ctx.repr(*body),
+                                            _ => ty,
+                                        }
+                                    };
+                                    let spread_desc = ctx.get_desc(spread_ty);
+                                    let mut did_expand = false;
+                                    if let crate::types::TypeDesc::Tconstr { path, .. } = &*spread_desc {
+                                        let type_name = match path {
+                                            Path::Pident(id) => id.name().to_string(),
+                                            Path::Pdot(_, name, _) => name.clone(),
+                                            _ => String::new(),
+                                        };
+                                        if let Ok(type_decl) = new_env.find_type(&type_name) {
+                                            if let crate::types::TypeKind::TypeRecord(ref fields, _) = type_decl.type_kind {
+                                                // Recursively expand any nested spreads
+                                                let resolved_fields = collect_fields(ctx, &new_env, fields);
+                                                did_expand = true;
+                                                for field in &resolved_fields {
+                                                    // field.ld_type is Tpoly(actual_type, []) — unwrap for outer.
+                                                    let actual_field_type = {
+                                                        let ty = ctx.repr(field.ld_type);
+                                                        let desc = ctx.get_desc(ty);
+                                                        match &*desc {
+                                                            crate::types::TypeDesc::Tpoly { body, .. } => *body,
+                                                            _ => ty,
+                                                        }
+                                                    };
+                                                    let typed_ld_type = match &tl.ld_type.ctyp_desc {
+                                                        TypedCoreTypeDesc::Ttyp_poly(vars, inner_ctyp) => {
+                                                            // Inner core_type: keep as-is from spread source
+                                                            // Outer Ttyp_poly: replace ctyp_type with actual field type
+                                                            TypedCoreType {
+                                                                ctyp_desc: TypedCoreTypeDesc::Ttyp_poly(vars.clone(), inner_ctyp.clone()),
+                                                                ctyp_type: actual_field_type,
+                                                                ..tl.ld_type.clone()
+                                                            }
+                                                        }
+                                                        _ => {
+                                                            TypedCoreType {
+                                                                ctyp_type: actual_field_type,
+                                                                ..tl.ld_type.clone()
+                                                            }
+                                                        }
+                                                    };
+                                                    let parser_mutable = match &field.ld_mutable {
+                                                        crate::types::MutableFlag::Immutable => crate::parser::ast::MutableFlag::Immutable,
+                                                        crate::types::MutableFlag::Mutable => crate::parser::ast::MutableFlag::Mutable,
+                                                    };
+                                                    expanded.push(TypedLabelDeclaration {
+                                                        ld_id: field.ld_id.clone(),
+                                                        ld_name: crate::parse_arena::Located {
+                                                            txt: field.ld_id.name().to_string(),
+                                                            loc: tl.ld_loc,
+                                                        },
+                                                        ld_mutable: parser_mutable,
+                                                        ld_optional: field.ld_optional,
+                                                        ld_type: typed_ld_type,
+                                                        ld_loc: tl.ld_loc,
+                                                        ld_attributes: vec![],
+                                                    });
+                                                }
+                                            }
+                                        }
+                                    }
+                                    if !did_expand {
+                                        expanded.push(tl);
+                                    }
+                                } else {
+                                    expanded.push(tl);
+                                }
+                            }
+                            expanded
+                        } else {
+                            typed_tree_labels
+                        };
+                        (crate::types::TypeKind::TypeRecord(internal_labels, crate::types::RecordRepresentation::RecordRegular), TypedTypeKind::Ttype_record(expanded_typed), vec![])
                     }
                     crate::parser::ast::TypeKind::Ptype_open => {
                         (crate::types::TypeKind::TypeOpen, TypedTypeKind::Ttype_open, vec![])
