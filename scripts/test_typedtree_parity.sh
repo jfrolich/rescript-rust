@@ -280,6 +280,16 @@ test_single_file() {
         mv "$file_temp/rust_clean.sexp" "$file_temp/rust.sexp"
     fi
 
+    # Skip files where OCaml produces an error (no sexp output after stripping)
+    if [[ "$ocaml_pass" -eq 1 && ! -s "$file_temp/ocaml.sexp" ]]; then
+        ocaml_pass=0
+        ocaml_fail=1
+    fi
+    if [[ "$rust_pass" -eq 1 && ! -s "$file_temp/rust.sexp" ]]; then
+        rust_pass=0
+        rust_fail=1
+    fi
+
     # Compare if both succeeded
     if [[ "$RUST_AVAILABLE" == "true" && "$ocaml_pass" -eq 1 && "$rust_pass" -eq 1 ]]; then
         if diff -q "$file_temp/ocaml.sexp" "$file_temp/rust.sexp" > /dev/null 2>&1; then
