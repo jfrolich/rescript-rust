@@ -292,12 +292,16 @@ test_single_file() {
 
     # Compare if both succeeded
     if [[ "$RUST_AVAILABLE" == "true" && "$ocaml_pass" -eq 1 && "$rust_pass" -eq 1 ]]; then
-        if diff -q "$file_temp/ocaml.sexp" "$file_temp/rust.sexp" > /dev/null 2>&1; then
+        # Strip binary data (e.g. marshalled Location.t in attributes) before comparing
+        # Use LC_ALL=C tr to handle binary safely
+        LC_ALL=C tr -cd '[:print:]\n' < "$file_temp/ocaml.sexp" > "$file_temp/ocaml_text.sexp" 2>/dev/null || cp "$file_temp/ocaml.sexp" "$file_temp/ocaml_text.sexp"
+        LC_ALL=C tr -cd '[:print:]\n' < "$file_temp/rust.sexp" > "$file_temp/rust_text.sexp" 2>/dev/null || cp "$file_temp/rust.sexp" "$file_temp/rust_text.sexp"
+        if diff -q "$file_temp/ocaml_text.sexp" "$file_temp/rust_text.sexp" > /dev/null 2>&1; then
             parity_pass=1
         else
             parity_fail=1
             # Save diff for inspection
-            diff -u "$file_temp/ocaml.sexp" "$file_temp/rust.sexp" > "$TEMP_DIR/diffs/$safe_name.diff" 2>&1 || true
+            diff -u "$file_temp/ocaml_text.sexp" "$file_temp/rust_text.sexp" > "$TEMP_DIR/diffs/$safe_name.diff" 2>&1 || true
         fi
     fi
 
