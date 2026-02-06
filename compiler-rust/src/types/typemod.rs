@@ -733,6 +733,16 @@ fn type_structure_item<'a>(
                         (crate::types::TypeKind::TypeAbstract, TypedTypeKind::Ttype_abstract, vec![])
                     }
                     crate::parser::ast::TypeKind::Ptype_variant(cstrs) => {
+                        // OCaml copies @unboxed and @tag attributes from the type decl
+                        // to each constructor (copy_tag_attr_from_decl in typedecl.ml)
+                        let tag_attrs: Vec<_> = decl.ptype_attributes.iter()
+                            .filter(|attr| {
+                                let name = arena.get_string(attr.0.txt);
+                                name == "unboxed" || name == "tag"
+                            })
+                            .cloned()
+                            .collect();
+
                         let mut internal_cstrs = Vec::new();
                         let mut typed_tree_cstrs = Vec::new();
                         let mut cstr_descs = Vec::new();
@@ -837,7 +847,11 @@ fn type_structure_item<'a>(
                                 cd_args: typed_tree_cd_args,
                                 cd_res: None,
                                 cd_loc: cstr.pcd_loc,
-                                cd_attributes: cstr.pcd_attributes.clone(),
+                                cd_attributes: {
+                                    let mut attrs = tag_attrs.clone();
+                                    attrs.extend(cstr.pcd_attributes.clone());
+                                    attrs
+                                },
                             });
 
                             // Create constructor description for the environment

@@ -1018,11 +1018,11 @@ impl Case {
 
 impl ValueBinding {
     /// Create a new value binding.
-    pub fn new(pat: Pattern, expr: Expression, loc: LocIdx) -> Self {
+    pub fn new(pat: Pattern, expr: Expression, loc: LocIdx, attributes: Attributes) -> Self {
         ValueBinding {
             vb_pat: pat,
             vb_expr: expr,
-            vb_attributes: Vec::new(),
+            vb_attributes: attributes,
             vb_loc: loc,
         }
     }

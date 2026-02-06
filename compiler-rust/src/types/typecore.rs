@@ -3552,6 +3552,7 @@ fn type_let_bindings(
             typed_pat,
             typed_expr,
             binding.pvb_loc.clone(),
+            binding.pvb_attributes.clone(),
         ));
     }
 
