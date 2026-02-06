@@ -376,14 +376,15 @@ mod tests {
     };
     use crate::parser::longident::Longident;
 
-    fn make_simple_let_binding(name: &str, value: i32) -> StructureItem {
+    fn make_simple_let_binding(arena: &mut crate::parse_arena::ParseArena, name: &str, value: i32) -> StructureItem {
+        let name_idx = arena.intern(name);
         StructureItem {
             pstr_desc: StructureItemDesc::Pstr_value(
                 RecFlag::Nonrecursive,
                 vec![ValueBinding {
                     pvb_pat: Pattern {
                         ppat_desc: PatternDesc::Ppat_var(Located {
-                            txt: name.to_string(),
+                            txt: name_idx,
                             loc: LocIdx::none(),
                         }),
                         ppat_loc: LocIdx::none(),
@@ -406,7 +407,9 @@ mod tests {
     }
 
     fn make_module_ref_expr(arena: &mut crate::parse_arena::ParseArena, module: &str, name: &str) -> Expression {
-        let lid_idx = arena.push_longident(Longident::ldot(Longident::lident(module), name));
+        let module_idx = arena.intern(module);
+        let name_idx = arena.intern(name);
+        let lid_idx = arena.push_longident(Longident::ldot(Longident::lident(module_idx), name_idx));
         Expression {
             pexp_desc: ExpressionDesc::Pexp_ident(Located {
                 txt: lid_idx,
@@ -423,9 +426,9 @@ mod tests {
 
     #[test]
     fn test_empty_structure() {
-        let arena = make_test_arena();
+        let mut arena = make_test_arena();
         let ast: Structure = vec![];
-        let result = write_structure_ast_to_vec("/test/empty.res", &arena, &ast);
+        let result = write_structure_ast_to_vec("/test/empty.res", &mut arena, &ast);
 
         // Check header
         let dep_size = u32::from_be_bytes([result[0], result[1], result[2], result[3]]);
@@ -452,9 +455,9 @@ mod tests {
 
     #[test]
     fn test_simple_binding() {
-        let arena = make_test_arena();
-        let ast = vec![make_simple_let_binding("x", 42)];
-        let result = write_structure_ast_to_vec("/test/simple.res", &arena, &ast);
+        let mut arena = make_test_arena();
+        let ast = vec![make_simple_let_binding(&mut arena, "x", 42)];
+        let result = write_structure_ast_to_vec("/test/simple.res", &mut arena, &ast);
 
         // Should have marshal magic number
         let dep_size = u32::from_be_bytes([result[0], result[1], result[2], result[3]]) as usize;
@@ -475,7 +478,7 @@ mod tests {
             pstr_loc: LocIdx::none(),
         }];
 
-        let result = write_structure_ast_to_vec("/test/deps.res", &arena, &ast);
+        let result = write_structure_ast_to_vec("/test/deps.res", &mut arena, &ast);
 
         // Check dependency section
         let dep_size = u32::from_be_bytes([result[0], result[1], result[2], result[3]]) as usize;
@@ -506,7 +509,7 @@ mod tests {
             },
         ];
 
-        let result = write_structure_ast_to_vec("/test/multi.res", &arena, &ast);
+        let result = write_structure_ast_to_vec("/test/multi.res", &mut arena, &ast);
 
         let dep_size = u32::from_be_bytes([result[0], result[1], result[2], result[3]]) as usize;
 
@@ -516,10 +519,10 @@ mod tests {
 
     #[test]
     fn test_source_path_preserved() {
-        let arena = make_test_arena();
+        let mut arena = make_test_arena();
         let ast: Structure = vec![];
         let source_path = "/Users/dev/project/src/Main.res";
-        let result = write_structure_ast_to_vec(source_path, &arena, &ast);
+        let result = write_structure_ast_to_vec(source_path, &mut arena, &ast);
 
         let dep_size = u32::from_be_bytes([result[0], result[1], result[2], result[3]]) as usize;
         let path_start = 4 + dep_size;
@@ -539,9 +542,9 @@ mod tests {
         // Use a temp file in the target directory
         let output_path = std::path::Path::new("target/test_binary_ast_writer.ast");
 
-        let arena = make_test_arena();
-        let ast = vec![make_simple_let_binding("x", 1)];
-        write_structure_ast(output_path, "/test/test.res", &arena, &ast).unwrap();
+        let mut arena = make_test_arena();
+        let ast = vec![make_simple_let_binding(&mut arena, "x", 1)];
+        write_structure_ast(output_path, "/test/test.res", &mut arena, &ast).unwrap();
 
         // Verify file exists and has content
         let content = fs::read(output_path).unwrap();
@@ -561,9 +564,9 @@ mod tests {
 
     #[test]
     fn test_empty_signature() {
-        let arena = make_test_arena();
+        let mut arena = make_test_arena();
         let ast: Signature = vec![];
-        let result = write_signature_ast_to_vec("/test/empty.resi", &arena, &ast);
+        let result = write_signature_ast_to_vec("/test/empty.resi", &mut arena, &ast);
 
         // Should have valid structure
         let dep_size = u32::from_be_bytes([result[0], result[1], result[2], result[3]]);
