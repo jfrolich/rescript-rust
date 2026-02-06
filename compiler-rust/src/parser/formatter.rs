@@ -149,8 +149,12 @@ impl<W: Write> Formatter<W> {
 
     /// Set the margin (line width)
     pub fn set_margin(&mut self, margin: usize) {
-        self.margin = margin as i32;
-        self.max_indent = self.margin - self.min_space_left;
+        self.margin = (margin as i32).max(1);
+        // Clamp max_indent to [1, margin-1] like OCaml's pp_set_margin,
+        // then derive min_space_left from it. This prevents max_indent from
+        // going negative when margin < min_space_left.
+        self.max_indent = self.max_indent.max(1).min(self.margin - 1);
+        self.min_space_left = self.margin - self.max_indent;
         // Reset state like OCaml's pp_rinit
         self.pp_rinit();
     }
