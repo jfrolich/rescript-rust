@@ -823,6 +823,18 @@ pub fn instance(ctx: &TypeContext<'_>, ty: TypeExprRef) -> TypeExprRef {
     copy_type_cached(ctx, ty, &mut cache)
 }
 
+/// Instantiate a constructor description, creating fresh type variables for its
+/// result type and argument types while sharing the same variable substitutions.
+/// Matches OCaml's Ctype.instance_constructor.
+pub fn instance_constructor(ctx: &TypeContext<'_>, cstr: &super::ConstructorDescription) -> (Vec<TypeExprRef>, TypeExprRef) {
+    let mut cache = std::collections::HashMap::new();
+    let ty_res = copy_type_cached(ctx, cstr.cstr_res, &mut cache);
+    let ty_args: Vec<TypeExprRef> = cstr.cstr_args.iter()
+        .map(|&arg| copy_type_cached(ctx, arg, &mut cache))
+        .collect();
+    (ty_args, ty_res)
+}
+
 /// Instantiate a label description, creating fresh type variables for its
 /// result type (record type) and argument type (field type) while sharing
 /// the same variable substitutions between them.

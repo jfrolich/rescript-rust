@@ -675,6 +675,28 @@ pub fn initial_env(ctx: &TypeContext<'_>) -> Env {
         }, ctx);
     }
 
+    // unknown = Unknown('a) (GADT: Unknown returns unknown, not 'a)
+    // Matches OCaml's Predef.decl_unknown
+    {
+        let tvar = ctx.new_generic_var(None);
+        let type_unknown = ctx.new_generic_constr(Path::pident(Ident::create_persistent("unknown")), vec![]);
+        add_type_with_constrs(&mut env, "unknown", TypeDeclaration {
+            type_params: vec![],
+            type_arity: 0,
+            type_kind: TypeKind::TypeVariant(vec![
+                ConstructorDeclaration {
+                    cd_id: Ident::create_persistent("Unknown"),
+                    cd_args: ConstructorArguments::CstrTuple(vec![tvar]),
+                    cd_res: Some(type_unknown),
+                    cd_loc: Location::none(),
+                    cd_attributes: vec![],
+                },
+            ]),
+            type_unboxed: super::decl::UnboxedStatus::TRUE_FALSE,
+            ..decl_abstr(0, false)
+        }, ctx);
+    }
+
     // Create type references for primitives at generic level.
     // Using generic level ensures that instance() creates fresh copies
     // for each use site, matching OCaml's behavior where type schemes

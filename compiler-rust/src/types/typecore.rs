@@ -1336,17 +1336,16 @@ fn type_pattern_construct(
         }
     };
 
-    // Instantiate the result type
-    let result_ty = crate::types::instance(ctx, cstr_desc.cstr_res);
+    // Instantiate constructor: creates fresh type variables shared between
+    // cstr_res and cstr_args, matching OCaml's Ctype.instance_constructor
+    let (inst_arg_types, result_ty) = crate::types::instance_constructor(ctx, &cstr_desc);
     unify_pattern_types(tctx, loc, result_ty, expected_ty)?;
 
     // Type check the argument pattern(s)
-    let arg_types = &cstr_desc.cstr_args;
-    let typed_args = match (arg_types.as_slice(), arg) {
+    let typed_args = match (inst_arg_types.as_slice(), arg) {
         (arg_types, Some(arg_pat)) if arg_types.len() == 1 => {
             // Single argument
-            let arg_ty = crate::types::instance(ctx, arg_types[0]);
-            let typed_arg = type_pattern_inner(tctx, env, arg_pat, arg_ty, mode, state, 0)?;
+            let typed_arg = type_pattern_inner(tctx, env, arg_pat, arg_types[0], mode, state, 0)?;
             vec![typed_arg]
         }
         (arg_types, Some(arg_pat)) if arg_types.len() > 1 => {
@@ -1355,8 +1354,7 @@ fn type_pattern_construct(
                 crate::parser::ast::PatternDesc::Ppat_any => {
                     // OCaml replicates Ppat_any for each constructor arg
                     let mut args = Vec::new();
-                    for arg_ty_ref in arg_types {
-                        let arg_ty = crate::types::instance(ctx, *arg_ty_ref);
+                    for &arg_ty in arg_types {
                         let typed_arg = type_pattern_inner(tctx, env, arg_pat, arg_ty, mode, state, 0)?;
                         args.push(typed_arg);
                     }
@@ -1364,11 +1362,7 @@ fn type_pattern_construct(
                 }
                 _ => {
                     // Tuple pattern - extract individual elements
-                    let tuple_tys: Vec<_> = arg_types
-                        .iter()
-                        .map(|t| crate::types::instance(ctx, *t))
-                        .collect();
-                    let tuple_ty = ctx.new_tuple(tuple_tys);
+                    let tuple_ty = ctx.new_tuple(arg_types.to_vec());
                     let typed_tuple = type_pattern_inner(tctx, env, arg_pat, tuple_ty, mode, state, 0)?;
                     match &typed_tuple.pat_desc {
                         PatternDesc::Tpat_tuple(elements) => elements.clone(),
@@ -2880,27 +2874,21 @@ fn type_construct(
         }
     };
 
-    // Get the result type (instantiate if polymorphic)
-    let result_ty = crate::types::instance(ctx, cstr_desc.cstr_res);
+    // Instantiate constructor: creates fresh type variables shared between
+    // cstr_res and cstr_args, matching OCaml's Ctype.instance_constructor
+    let (inst_arg_types, result_ty) = crate::types::instance_constructor(ctx, &cstr_desc);
     unify_expression_types(tctx, loc, result_ty, expected_ty, None)?;
 
     // Type check arguments
-    let arg_types = &cstr_desc.cstr_args;
-    let typed_args = match (arg_types.as_slice(), arg) {
+    let typed_args = match (inst_arg_types.as_slice(), arg) {
         (arg_types, Some(arg_expr)) if arg_types.len() == 1 => {
             // Single argument
-            let arg_ty = crate::types::instance(ctx, arg_types[0]);
-            let typed_arg = type_expect(tctx, env, arg_expr, arg_ty, None)?;
+            let typed_arg = type_expect(tctx, env, arg_expr, arg_types[0], None)?;
             vec![typed_arg]
         }
         (arg_types, Some(arg_expr)) if arg_types.len() > 1 => {
             // Multiple arguments - the parser wraps them in a tuple
-            // Type check as a tuple, then extract individual elements
-            let instantiated_arg_types: Vec<_> = arg_types
-                .iter()
-                .map(|t| crate::types::instance(ctx, *t))
-                .collect();
-            let tuple_ty = ctx.new_tuple(instantiated_arg_types);
+            let tuple_ty = ctx.new_tuple(arg_types.to_vec());
             let typed_tuple = type_expect(tctx, env, arg_expr, tuple_ty, None)?;
             // Extract tuple elements
             match &typed_tuple.exp_desc {
