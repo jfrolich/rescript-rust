@@ -503,7 +503,7 @@ fn parse_payload(p: &mut Parser<'_>) -> Payload {
 /// for position sharing with simple type constructors.
 fn parse_atomic_typ_expr_with_start(
     p: &mut Parser<'_>,
-    mut attrs: Attributes,
+    attrs: Attributes,
     es6_arrow: bool,
     outer_start_pos_idx: Option<crate::parse_arena::PosIdx>,
 ) -> CoreType {

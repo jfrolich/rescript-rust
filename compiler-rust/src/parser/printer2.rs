@@ -1254,7 +1254,7 @@ pub fn print_expression(
             print_expression_block(state, true, e, cmt_tbl, arena)
         }
         // Array access: Array.get(arr, idx) -> arr[idx]
-        ExpressionDesc::Pexp_apply { funct, args, .. }
+        ExpressionDesc::Pexp_apply { args, .. }
             if parsetree_viewer::is_array_access(arena,e)
                 && !parsetree_viewer::is_rewritten_underscore_apply_sugar(arena,&args[0].1) =>
         {

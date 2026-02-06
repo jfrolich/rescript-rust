@@ -16,7 +16,6 @@ const WIDTH: i32 = 80;
 /// Document type matching OCaml's Res_doc.t
 #[derive(Clone)]
 enum Doc {
-    Nil,
     Text(String),
     Concat(Vec<Doc>),
     Indent(Box<Doc>),
@@ -81,7 +80,6 @@ impl Doc {
             }
 
             match doc {
-                Doc::Nil => {}
                 Doc::Text(s) => {
                     // Use char count to match OCaml's String.length behavior.
                     // With Latin-1 encoding, each original byte becomes one char,
@@ -124,7 +122,6 @@ impl Doc {
 
         while let Some((indent, mode, doc)) = stack.pop() {
             match doc {
-                Doc::Nil => {}
                 Doc::Text(s) => {
                     out.push_str(s);
                     // Use char count to match OCaml's String.length behavior.

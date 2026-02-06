@@ -48,8 +48,6 @@ pub struct Scanner<'src> {
     pub filename: StrIdx,
     /// Source code being scanned.
     src: &'src str,
-    /// Source as bytes for efficient access (UTF-8 encoding of the string).
-    src_bytes: &'src [u8],
     /// Character count (cached for efficiency).
     /// For Latin-1 source, this equals the original byte count.
     src_char_count: usize,
@@ -87,7 +85,6 @@ impl<'src> Scanner<'src> {
     /// Create a new scanner for the given source.
     /// filename should be an interned StrIdx from the arena.
     pub fn new(filename: StrIdx, src: &'src str) -> Self {
-        let src_bytes = src.as_bytes();
         let src_char_count = src.chars().count();
         let ch = if src.is_empty() {
             EOF_CHAR
@@ -98,7 +95,6 @@ impl<'src> Scanner<'src> {
         Self {
             filename,
             src,
-            src_bytes,
             src_char_count,
             ch,
             offset: 0,
@@ -583,126 +579,6 @@ impl<'src> Scanner<'src> {
                 self.next();
             }
         }
-    }
-
-    /// Scan a string escape sequence and return the converted character.
-    /// Returns None if the escape sequence is invalid or produces no character.
-    fn scan_string_escape_sequence_char(&mut self, start_pos: &Position) -> Option<char> {
-        match self.ch {
-            'n' => {
-                self.next();
-                Some('\n')
-            }
-            't' => {
-                self.next();
-                Some('\t')
-            }
-            'b' => {
-                self.next();
-                Some('\x08') // backspace
-            }
-            'r' => {
-                self.next();
-                Some('\r')
-            }
-            '\\' => {
-                self.next();
-                Some('\\')
-            }
-            ' ' => {
-                self.next();
-                Some(' ')
-            }
-            '\'' => {
-                self.next();
-                Some('\'')
-            }
-            '"' => {
-                self.next();
-                Some('"')
-            }
-            '0' if !self.peek().is_ascii_digit() => {
-                self.next();
-                Some('\0')
-            }
-            '0'..='9' => {
-                // Octal/decimal escape \NNN (up to 3 digits)
-                let mut value: u32 = 0;
-                for _ in 0..3 {
-                    if self.ch.is_ascii_digit() {
-                        value = value * 10 + (self.ch as u32 - '0' as u32);
-                        self.next();
-                    } else {
-                        break;
-                    }
-                }
-                // Convert to char (Latin-1 range)
-                char::from_u32(value)
-            }
-            'x' => {
-                // Hex escape \xNN
-                self.next();
-                let mut value: u32 = 0;
-                for _ in 0..2 {
-                    let digit = Self::digit_value(self.ch);
-                    if digit < 16 {
-                        value = value * 16 + digit as u32;
-                        self.next();
-                    } else {
-                        break;
-                    }
-                }
-                char::from_u32(value)
-            }
-            'u' => {
-                self.next();
-                if self.ch == '{' {
-                    // Unicode escape \u{NNNN}
-                    self.next();
-                    let mut value: u32 = 0;
-                    while self.ch.is_ascii_hexdigit() {
-                        value = value * 16 + Self::digit_value(self.ch) as u32;
-                        self.next();
-                    }
-                    if self.ch == '}' {
-                        self.next();
-                    }
-                    char::from_u32(value)
-                } else {
-                    // Unicode escape \uNNNN
-                    let mut value: u32 = 0;
-                    for _ in 0..4 {
-                        let digit = Self::digit_value(self.ch);
-                        if digit < 16 {
-                            value = value * 16 + digit as u32;
-                            self.next();
-                        } else {
-                            break;
-                        }
-                    }
-                    char::from_u32(value)
-                }
-            }
-            c if c == EOF_CHAR => {
-                let end_pos = self.position();
-                self.error(
-                    start_pos.clone(),
-                    end_pos,
-                    DiagnosticCategory::message("unclosed escape sequence"),
-                );
-                None
-            }
-            c => {
-                // Unknown escape - return the char as-is
-                self.next();
-                Some(c)
-            }
-        }
-    }
-
-    /// Scan a string escape sequence (legacy version, doesn't return char).
-    fn scan_string_escape_sequence(&mut self, start_pos: &Position) {
-        let _ = self.scan_string_escape_sequence_char(start_pos);
     }
 
     /// Scan a single-line comment.

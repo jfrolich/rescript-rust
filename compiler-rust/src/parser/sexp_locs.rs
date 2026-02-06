@@ -190,23 +190,6 @@ fn arity(a: &Arity, arena: &ParseArena) -> Sexp {
     }
 }
 
-fn position_opt(pos: &Option<crate::location::Position>) -> Sexp {
-    match pos {
-        None => Sexp::atom("None"),
-        Some(p) => {
-            let col = p.cnum - p.bol;
-            Sexp::list(vec![
-                Sexp::atom("Some"),
-                Sexp::list(vec![
-                    Sexp::atom("pos"),
-                    Sexp::atom(&p.line.to_string()),
-                    Sexp::atom(&col.to_string()),
-                ]),
-            ])
-        }
-    }
-}
-
 fn position_opt_idx(pos: &Option<PosIdx>, arena: &ParseArena) -> Sexp {
     match pos {
         None => Sexp::atom("None"),

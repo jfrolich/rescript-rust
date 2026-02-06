@@ -1246,8 +1246,6 @@ fn parse_record_pattern(p: &mut Parser<'_>) -> Pattern {
 
         let lid_unloc = super::core::build_longident(p.arena_mut(), &parts);
         let lid_idx = p.push_longident(lid_unloc);
-        let pun_name = parts.last().cloned().unwrap_or("_".to_string());
-
         let (lid, pat, opt) = if p.token == Token::Colon {
             // field: pattern or field: ? pattern
             p.next();

@@ -1679,21 +1679,6 @@ pub fn parse_binary_expr(
     left
 }
 
-fn is_jsx_start_after_less_than(p: &mut Parser<'_>) -> bool {
-    p.lookahead(|state| {
-        state.next();
-        let is_adjacent = state.start_pos.cnum == state.prev_end_pos.cnum;
-        is_adjacent
-            && matches!(
-                state.token,
-                Token::Lident(_)
-                    | Token::Uident(_)
-                    | Token::Forwardslash
-                    | Token::GreaterThan
-            )
-    })
-}
-
 /// Get the precedence of an operator token.
 fn get_operator_precedence(token: &Token) -> Option<(Token, i32)> {
     let prec = match token {
@@ -4105,11 +4090,6 @@ fn parse_block_body(p: &mut Parser<'_>) -> Option<Expression> {
     Some(expr)
 }
 
-/// Parse a let expression inside a block, with proper continuation handling.
-fn parse_let_in_block_with_continuation(p: &mut Parser<'_>) -> Expression {
-    parse_let_in_block_with_continuation_and_attrs(p, vec![])
-}
-
 fn parse_let_in_block_with_continuation_and_attrs(
     p: &mut Parser<'_>,
     leading_attrs: Attributes,
@@ -4504,8 +4484,6 @@ fn parse_record_fields(p: &mut Parser<'_>) -> Vec<ExpressionRecordField> {
 
         let lid_unloc = super::core::build_longident(p.arena_mut(), &parts);
         let lid_idx = p.push_longident(lid_unloc);
-        let pun_name = parts.last().cloned().unwrap_or("_".to_string());
-
         let (lid, expr, opt) = if p.token == Token::Colon {
             // field: value or field: ? value
             // Capture lid location - just the identifier, not including the colon
@@ -6127,18 +6105,6 @@ fn parse_jsx_children(p: &mut Parser<'_>) -> Vec<Expression> {
     children
 }
 
-/// Parse a JSX `{ ... }` child/prop expression.
-/// JSX braces can contain block-style expressions (let/open/etc) without extra braces.
-fn parse_jsx_braced_expr(p: &mut Parser<'_>, lbrace_start_idx: PosIdx) -> Expression {
-    match parse_block_body(p) {
-        Some(expr) => expr,
-        None => {
-            let loc = p.mk_loc_idx_to_prev_end(lbrace_start_idx);
-            ast_helper::make_unit(p, loc)
-        }
-    }
-}
-
 // ============================================================================
 // Template Literal Parsing
 // ============================================================================
@@ -6360,127 +6326,6 @@ fn parse_template_literal_with_prefix(
         });
 
         iter.fold(first, concat)
-    }
-}
-
-/// Parse a tagged template literal where the tag is an arbitrary expression (not just an identifier).
-fn parse_tagged_template_literal_with_tag_expr(p: &mut Parser<'_>, tag_expr: Expression) -> Expression {
-    let tag_start_idx = p.loc_start_idx(tag_expr.pexp_loc);
-    let template_start_idx = p.start_pos_idx();
-    let template_str_idx = p.arena_mut().intern("res.template");
-    let template_literal_attr = (mknoloc(template_str_idx), Payload::PStr(vec![]));
-
-    // Parse template parts
-    // OCaml's structure: capture start_pos BEFORE next_template_literal_token, then scan
-    let mut parts: Vec<(Expression, Option<Expression>)> = vec![];
-
-    // First part: position starts at the opening backtick
-    // Store PosIdx instead of Position clone for correct sharing behavior
-    let mut text_start_pos_idx = p.start_pos_idx();
-
-    if p.token == Token::Backtick {
-        p.next_template_literal_token();
-    }
-
-    loop {
-        match &p.token {
-            Token::TemplatePart { text, pos } => {
-                let text = text.clone();
-                let pos = pos.clone();
-                // OCaml uses the embedded last_pos from the token, not p.end_pos
-                let text_end_idx = p.push_pos(pos);
-                let text_loc = p.mk_loc_idx(text_start_pos_idx, text_end_idx);
-                let mut str_expr =
-                    ast_helper::make_constant(Constant::String(text, Some("js".to_string())), text_loc);
-                str_expr.pexp_attributes.push(template_literal_attr.clone());
-                p.next();
-                let expr = parse_expr(p);
-                parts.push((str_expr, Some(expr)));
-                // OCaml captures start_pos BEFORE next_template_literal_token
-                // At this point, p.start_pos is at the closing }
-                text_start_pos_idx = p.start_pos_idx();
-                p.next_template_literal_token();
-            }
-            Token::TemplateTail { text, pos } => {
-                let text = text.clone();
-                let pos = pos.clone();
-                // OCaml uses the embedded last_pos from the token, not p.end_pos
-                let text_end_idx = p.push_pos(pos);
-                let text_loc = p.mk_loc_idx(text_start_pos_idx, text_end_idx);
-                let mut str_expr =
-                    ast_helper::make_constant(Constant::String(text, Some("js".to_string())), text_loc);
-                str_expr.pexp_attributes.push(template_literal_attr.clone());
-                parts.push((str_expr, None));
-                p.next();
-                break;
-            }
-            Token::Backtick => {
-                // Empty template string
-                let text_loc = p.mk_loc_idx_to_end(text_start_pos_idx);
-                let mut str_expr = ast_helper::make_constant(
-                    Constant::String("".to_string(), Some("js".to_string())),
-                    text_loc,
-                );
-                str_expr.pexp_attributes.push(template_literal_attr.clone());
-                parts.push((str_expr, None));
-                p.next();
-                break;
-            }
-            Token::Eof => {
-                p.err(DiagnosticCategory::Message(
-                    "Unterminated template literal".to_string(),
-                ));
-                break;
-            }
-            _ => {
-                p.err_unexpected();
-                p.next();
-                break;
-            }
-        }
-    }
-
-    let strings: Vec<Expression> = parts.iter().map(|(s, _)| s.clone()).collect();
-    let values: Vec<Expression> = parts.iter().filter_map(|(_, v)| v.clone()).collect();
-
-    let strings_array = Expression {
-        pexp_desc: ExpressionDesc::Pexp_array(strings),
-        pexp_loc: LocIdx::none(),
-        pexp_attributes: vec![],
-    };
-    let values_array = Expression {
-        pexp_desc: ExpressionDesc::Pexp_array(values),
-        pexp_loc: LocIdx::none(),
-        pexp_attributes: vec![],
-    };
-
-    let tagged_str_idx = p.arena_mut().intern("res.taggedTemplate");
-    let tagged_template_attr = (
-        mknoloc(tagged_str_idx),
-        Payload::PStr(vec![]),
-    );
-
-    let loc = p.mk_loc_idx_to_prev_end(tag_start_idx);
-
-    // If we failed to advance (EOF / malformed), make sure the location at least starts at the tag.
-    let loc = if p.loc_end(loc).cnum == 0 {
-        p.mk_loc_idx(tag_start_idx, template_start_idx)
-    } else {
-        loc
-    };
-
-    Expression {
-        pexp_desc: ExpressionDesc::Pexp_apply {
-            funct: Box::new(tag_expr),
-            args: vec![
-                (ArgLabel::Nolabel, strings_array),
-                (ArgLabel::Nolabel, values_array),
-            ],
-            partial: false,
-            transformed_jsx: false,
-        },
-        pexp_loc: loc,
-        pexp_attributes: vec![tagged_template_attr],
     }
 }
 

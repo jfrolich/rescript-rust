@@ -2668,15 +2668,6 @@ fn parse_type_declarations(
     (decls, has_inline_types)
 }
 
-/// Parse a single type declaration (wrapper for backward compatibility).
-/// Note: This captures start_pos at the current position as a PosIdx.
-/// For accurate ptype_loc, use parse_type_declaration_with_context with the correct start position.
-fn parse_type_declaration(p: &mut Parser<'_>, outer_attrs: Attributes) -> Option<TypeDeclaration> {
-    let inline_ctx = RefCell::new(InlineTypesContext::new(vec![], Location::none()));
-    let start_pos_idx = p.start_pos_idx();
-    parse_type_declaration_with_context(p, outer_attrs, &inline_ctx, start_pos_idx)
-}
-
 /// Parse a type extension: `type t += ...`.
 fn parse_type_extension(p: &mut Parser<'_>, attrs: Attributes) -> TypeExtension {
     let start_pos_idx = p.start_pos_idx();
@@ -3145,7 +3136,7 @@ fn parse_type_declaration_with_context(
                     }
                     "record_or_object" => {
                         // Parse attributes then check if record or object
-                        let mut attrs = parse_attributes(p);
+                        let attrs = parse_attributes(p);
                         if p.token == Token::Lbrace {
                             if looks_like_object_type_after_lbrace(p) {
                                 let mut typ = typ::parse_typ_expr(p);
@@ -3373,57 +3364,6 @@ fn fix_type_manifest_location(p: &mut Parser<'_>, typ: CoreType) -> CoreType {
         }
         _ => typ,
     }
-}
-
-/// Parse type parameters.
-fn parse_type_params(p: &mut Parser<'_>) -> Vec<(CoreType, Variance)> {
-    let mut params = vec![];
-
-    if p.token == Token::Lparen {
-        p.next();
-        while p.token != Token::Rparen && p.token != Token::Eof {
-            let variance = Variance::Invariant;
-            if p.token == Token::SingleQuote {
-                p.next();
-                match &p.token {
-                    Token::Lident(name) | Token::Uident(name) => {
-                        let name = name.clone();
-                        let loc = p.mk_loc_current();
-                        p.next();
-                        let typ = CoreType {
-                            ptyp_desc: CoreTypeDesc::Ptyp_var(name),
-                            ptyp_loc: loc,
-                            ptyp_attributes: vec![],
-                        };
-                        params.push((typ, variance));
-                    }
-                    _ => {}
-                }
-            }
-            if !p.optional(&Token::Comma) {
-                break;
-            }
-        }
-        p.expect(Token::Rparen);
-    } else if p.token == Token::SingleQuote {
-        p.next();
-        match &p.token {
-            Token::Lident(name) | Token::Uident(name) => {
-                let name = name.clone();
-                let loc = p.mk_loc_current();
-                p.next();
-                let typ = CoreType {
-                    ptyp_desc: CoreTypeDesc::Ptyp_var(name),
-                    ptyp_loc: loc,
-                    ptyp_attributes: vec![],
-                };
-                params.push((typ, Variance::Invariant));
-            }
-            _ => {}
-        }
-    }
-
-    params
 }
 
 /// Parse type parameters in angle bracket syntax: <'a, +'b, -'c, _>

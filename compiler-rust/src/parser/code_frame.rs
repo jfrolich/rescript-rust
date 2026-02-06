@@ -95,8 +95,6 @@ enum Gutter {
 /// A highlighted portion of a line.
 struct HighlightedString {
     s: String,
-    start: usize,
-    end: usize,
 }
 
 /// A line with gutter and content.
@@ -184,50 +182,12 @@ pub fn print(src: &str, start_pos: &Position, end_pos: &Position) -> String {
 
             let content: Vec<HighlightedString> = chunks
                 .iter()
-                .enumerate()
-                .map(|(i, chunk)| {
+                .map(|chunk| {
                     match gutter {
                         Gutter::Elided => HighlightedString {
                             s: chunk.to_string(),
-                            start: 0,
-                            end: 0,
                         },
-                        Gutter::Number(line_number) => {
-                            let highlight_start_col =
-                                (start_pos.cnum - start_pos.bol) as usize;
-                            let highlight_end_col = (end_pos.cnum - end_pos.bol) as usize;
-
-                            // OCaml: start only applies to first chunk (i = 0)
-                            let start = if i == 0 && *line_number == highlight_line_start {
-                                highlight_start_col.saturating_sub(leading_space_to_cut)
-                            } else {
-                                0
-                            };
-
-                            let end = if *line_number < highlight_line_start {
-                                0
-                            } else if *line_number == highlight_line_start
-                                && *line_number == highlight_line_end
-                            {
-                                highlight_end_col.saturating_sub(leading_space_to_cut)
-                            } else if *line_number == highlight_line_start {
-                                chunk.len()
-                            } else if *line_number > highlight_line_start
-                                && *line_number < highlight_line_end
-                            {
-                                chunk.len()
-                            } else if *line_number == highlight_line_end {
-                                highlight_end_col.saturating_sub(leading_space_to_cut)
-                            } else {
-                                0
-                            };
-
-                            HighlightedString {
-                                s: chunk.to_string(),
-                                start,
-                                end,
-                            }
-                        }
+                        Gutter::Number(_) => HighlightedString { s: chunk.to_string() },
                     }
                 })
                 .collect();
