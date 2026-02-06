@@ -860,8 +860,10 @@ pub fn copy_type_deep(
 
     let desc = ctx.get_desc(ty);
     match &*desc {
-        TypeDesc::Tvar(name) => {
-            let fresh = ctx.new_var(name.clone());
+        TypeDesc::Tvar(_name) => {
+            // OCaml's copy_type creates anonymous type variables (None name)
+            // for fresh copies, matching the Tvar None in the sexp output
+            let fresh = ctx.new_var(None);
             cache.insert(ty, fresh);
             fresh
         }
@@ -948,7 +950,7 @@ fn copy_type_cached(ctx: &TypeContext<'_>, ty: TypeExprRef, cache: &mut std::col
         // If the type is generic, create a fresh variable
         if level == GENERIC_LEVEL {
             match &*desc {
-                TypeDesc::Tvar(name) => CopyAction::NewVar(name.clone()),
+                TypeDesc::Tvar(_name) => CopyAction::NewVar(None), // OCaml creates anonymous copies
                 TypeDesc::Tunivar(name) => CopyAction::NewUnivar(name.clone()),
                 _ => {
                     // Fall through to structural copy
