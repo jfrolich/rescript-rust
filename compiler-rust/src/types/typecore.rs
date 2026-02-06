@@ -768,21 +768,39 @@ fn transl_type_inner(
 
         CTD::Ptyp_object(fields, closed) => {
             // Object type: {. name: string, age: int }
-            // Simplified implementation - full version builds proper object type
+            // Build proper Tobject(Tfield(..., Tfield(..., Tnil))) type chain
             let mut typed_fields = Vec::new();
+            // Collect (name, field_type) pairs for building the Tfield chain
+            let mut field_entries: Vec<(String, TypeExprRef)> = Vec::new();
 
             for field in fields.iter() {
                 match field {
                     crate::parser::ast::ObjectField::Otag(label, attrs, field_type) => {
-                        let (field_ctyp, _field_ty) = transl_type_inner(tctx, env, field_type)?;
+                        // OCaml uses transl_poly_type which wraps in Ptyp_poly([], t)
+                        // via force_poly. We simulate this by translating the type
+                        // and wrapping both core type and type in poly.
+                        let (inner_ctyp, inner_ty) = transl_type_inner(tctx, env, field_type)?;
+
+                        // Wrap core type in Ttyp_poly([], inner)
+                        let poly_ty = ctx.new_poly(inner_ty, vec![]);
+                        let poly_ctyp = TypedCoreType {
+                            ctyp_desc: TypedCoreTypeDesc::Ttyp_poly(vec![], Box::new(inner_ctyp)),
+                            ctyp_type: poly_ty,
+                            ctyp_env: EnvRef(0),
+                            ctyp_loc: field_type.ptyp_loc.clone(),
+                            ctyp_attributes: vec![],
+                        };
+
+                        let field_name = tctx.arena.get_string(label.txt).to_string();
+                        field_entries.push((field_name.clone(), poly_ty));
 
                         typed_fields.push(crate::types::typedtree::ObjectField {
                             of_desc: crate::types::typedtree::ObjectFieldDesc::OTtag(
                                 Located {
-                                    txt: tctx.arena.get_string(label.txt).to_string(),
+                                    txt: field_name,
                                     loc: label.loc.clone(),
                                 },
-                                field_ctyp,
+                                poly_ctyp,
                             ),
                             of_loc: label.loc.clone(),
                             of_attributes: attrs.clone(),
@@ -802,8 +820,25 @@ fn transl_type_inner(
                 }
             }
 
-            // Use a fresh type variable for the object type (simplified)
-            let obj_ty = ctx.new_var(None);
+            // Build the Tfield chain terminated by Tnil (closed) or Tvar (open)
+            let ty_init = match closed {
+                crate::parser::ast::ClosedFlag::Closed => ctx.new_type(TypeDesc::Tnil),
+                crate::parser::ast::ClosedFlag::Open => ctx.new_var(None),
+            };
+            // Fold fields into Tfield chain (OCaml uses fold_left on hash-collected fields)
+            let fields_ty = field_entries.iter().fold(ty_init, |rest, (name, field_ty)| {
+                ctx.new_type(TypeDesc::Tfield {
+                    name: name.clone(),
+                    kind: crate::types::type_expr::FieldKind::Fpresent,
+                    typ: *field_ty,
+                    rest,
+                })
+            });
+            // Wrap in Tobject
+            let obj_ty = ctx.new_type(TypeDesc::Tobject {
+                fields: fields_ty,
+                name: None,
+            });
 
             let ctyp = TypedCoreType {
                 ctyp_desc: TypedCoreTypeDesc::Ttyp_object(typed_fields, *closed),
