@@ -195,13 +195,6 @@ impl<W: Write> Formatter<W> {
         self.is_new_line = false;
     }
 
-    /// Format string if non-empty
-    fn format_string(&mut self, s: &str) {
-        if !s.is_empty() {
-            self.format_pp_text(s.len() as i32, s);
-        }
-    }
-
     /// Break to new line with given offset from box width
     fn break_new_line(&mut self, offset: i32, width: i32) {
         self.pp_output_newline();

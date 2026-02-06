@@ -3813,61 +3813,6 @@ fn print_pexp_apply(
     }
 }
 
-/// Check if a binary operand needs parens considering parent operator precedence.
-fn binary_operand_needs_parens(arena: &ParseArena, is_lhs: bool, parent_op: &str, operand: &Expression) -> ParenKind {
-    // First check braces attribute
-    if let Some(attr) = parsetree_viewer::process_braces_attr(arena, operand) {
-        return ParenKind::Braced(attr.0.loc.clone());
-    }
-
-    // Check if it's a binary expression - if so, use precedence comparison
-    if let Some(child_op) = parsetree_viewer::get_binary_operator(arena, operand) {
-        // Use precedence-based check
-        if parens::sub_binary_expr_operand(parent_op, &child_op) {
-            return ParenKind::Parenthesized;
-        }
-        // For RHS, also check right-associativity
-        if !is_lhs && parens::rhs_binary_expr_operand(arena, parent_op, operand) {
-            return ParenKind::Parenthesized;
-        }
-        // Check if operand has printable attributes
-        if parsetree_viewer::has_printable_attributes(arena, &operand.pexp_attributes) {
-            return ParenKind::Parenthesized;
-        }
-        return ParenKind::Nothing;
-    }
-
-    // Special case for Pexp_setfield: OCaml's print_operand handles this specially
-    // - only needs parens when on LHS of a binary expression
-    // - does NOT go through the general binary_expr_operand check
-    if matches!(&operand.pexp_desc, ExpressionDesc::Pexp_setfield(_, _, _)) {
-        if is_lhs {
-            return ParenKind::Parenthesized;
-        } else {
-            return ParenKind::Nothing;
-        }
-    }
-
-    // Special case for #= (JS object set): OCaml's print_operand handles this similarly to setfield
-    // (node["left"] = value)->pipe should keep the parens
-    if let ExpressionDesc::Pexp_apply { funct, args, .. } = &operand.pexp_desc {
-        if args.len() == 2 {
-            if let ExpressionDesc::Pexp_ident(lid) = &funct.pexp_desc {
-                if arena.is_lident(lid.txt, "#=") {
-                    if is_lhs {
-                        return ParenKind::Parenthesized;
-                    } else {
-                        return ParenKind::Nothing;
-                    }
-                }
-            }
-        }
-    }
-
-    // Fall back to the general binary_expr_operand check for non-binary expressions
-    parens::binary_expr_operand(arena, is_lhs, operand)
-}
-
 /// Print binary operator with appropriate spacing.
 /// Matches OCaml's print_binary_operator.
 fn print_binary_operator_with_spacing(operator: &str, inline_rhs: bool) -> Doc {
@@ -4191,11 +4136,6 @@ fn print_binary_expression(
 
         Doc::group(Doc::concat(vec![lhs_doc, right]))
     }
-}
-
-/// Check if operator is an equality operator (==, ===, !=, !==).
-fn is_equality_operator(op: &str) -> bool {
-    matches!(op, "==" | "===" | "!=" | "!==")
 }
 
 /// Print unary expression.
@@ -7293,17 +7233,6 @@ fn print_attributes_with_loc(
     Doc::concat(vec![doc_comment_doc, attrs_doc])
 }
 
-/// Print attributes with configurable separator (deprecated, use print_attributes_with_loc).
-fn print_attributes_with_sep(
-    state: &PrinterState,
-    attrs: &[Attribute],
-    cmt_tbl: &mut CommentTable,
-    arena: &ParseArena,
-    inline: bool,
-) -> Doc {
-    print_attributes_with_loc(state, attrs, None, cmt_tbl, arena, inline)
-}
-
 /// Print a single attribute.
 /// If `standalone` is true, uses `@@` prefix (for floating attributes).
 /// Otherwise uses `@` prefix.
@@ -7864,67 +7793,6 @@ fn print_type_declarations_with_rec_flag(
             false, // don't force break
         )
     }
-}
-
-fn print_type_declarations(
-    state: &PrinterState,
-    decls: &[TypeDeclaration],
-    cmt_tbl: &mut CommentTable,
-    arena: &ParseArena,
-) -> Doc {
-    let docs: Vec<Doc> = decls
-        .iter()
-        .enumerate()
-        .map(|(i, decl)| {
-            let prefix = if i == 0 { Doc::nil() } else { Doc::text("and ") };
-            Doc::concat(vec![prefix, print_type_declaration(state, decl, cmt_tbl, arena)])
-        })
-        .collect();
-    Doc::join(Doc::hard_line(), docs)
-}
-
-/// Print type declarations without attributes on the first declaration.
-/// Used when attributes are printed before the "type" keyword.
-fn print_type_declarations_no_first_attrs(
-    state: &PrinterState,
-    decls: &[TypeDeclaration],
-    cmt_tbl: &mut CommentTable,
-    arena: &ParseArena,
-) -> Doc {
-    let docs: Vec<Doc> = decls
-        .iter()
-        .enumerate()
-        .map(|(i, decl)| {
-            let prefix = if i == 0 { Doc::nil() } else { Doc::text("and ") };
-            if i == 0 {
-                // Skip attributes for first declaration - they're printed before "type"
-                Doc::concat(vec![prefix, print_type_declaration_no_attrs(state, decl, cmt_tbl, arena)])
-            } else {
-                Doc::concat(vec![prefix, print_type_declaration(state, decl, cmt_tbl, arena)])
-            }
-        })
-        .collect();
-    Doc::join(Doc::hard_line(), docs)
-}
-
-/// Print a type declaration.
-fn print_type_declaration(
-    state: &PrinterState,
-    decl: &TypeDeclaration,
-    cmt_tbl: &mut CommentTable,
-    arena: &ParseArena,
-) -> Doc {
-    print_type_declaration_inner(state, decl, cmt_tbl, arena, true)
-}
-
-/// Print a type declaration without attributes.
-fn print_type_declaration_no_attrs(
-    state: &PrinterState,
-    decl: &TypeDeclaration,
-    cmt_tbl: &mut CommentTable,
-    arena: &ParseArena,
-) -> Doc {
-    print_type_declaration_inner(state, decl, cmt_tbl, arena, false)
 }
 
 /// Print a type declaration with optional attributes.

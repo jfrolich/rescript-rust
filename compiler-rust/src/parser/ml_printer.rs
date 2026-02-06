@@ -44,14 +44,6 @@ impl PrintCtx {
 // Helper functions
 // ============================================================================
 
-/// Count the arity of nested Pexp_fun expressions
-fn count_function_arity(expr: &Expression) -> usize {
-    match &expr.pexp_desc {
-        ExpressionDesc::Pexp_fun { rhs, .. } => 1 + count_function_arity(rhs),
-        _ => 0,
-    }
-}
-
 /// Check if pattern is a simple variable with given name (and no attributes)
 fn pattern_is_simple_var(arena: &ParseArena, pat: &Pattern, name: &str) -> bool {
     if !pat.ppat_attributes.is_empty() {
@@ -144,17 +136,6 @@ fn constant_is_negative(c: &Constant) -> bool {
     }
 }
 
-/// Check if a pattern is a cons pattern (::)
-fn is_cons_pattern(p: &Pattern, arena: &ParseArena) -> bool {
-    if let PatternDesc::Ppat_construct(lid, _) = &p.ppat_desc {
-        if let Longident::Lident(name_idx) = arena.get_longident(lid.txt) {
-            let name = arena.get_string(*name_idx);
-            return name == "::";
-        }
-    }
-    false
-}
-
 /// Check if a string represents an infix operator
 fn is_infix_operator(name: &str) -> bool {
     const INFIX_SPECIALS: &[&str] =
@@ -200,76 +181,6 @@ fn get_operator_name<'a>(expr: &Expression, arena: &'a ParseArena) -> Option<&'a
     }
 }
 
-/// Check if expression needs parens in binary context
-fn needs_parens_in_binary_context(expr: &Expression) -> bool {
-    match &expr.pexp_desc {
-        ExpressionDesc::Pexp_ifthenelse(_, _, _)
-        | ExpressionDesc::Pexp_let(_, _, _)
-        | ExpressionDesc::Pexp_fun { .. }
-        | ExpressionDesc::Pexp_match(_, _)
-        | ExpressionDesc::Pexp_try(_, _)
-        | ExpressionDesc::Pexp_sequence(_, _)
-        | ExpressionDesc::Pexp_await(_) => true,
-        // Note: for/while have do...done delimiters so don't need extra parens
-        ExpressionDesc::Pexp_apply { args, .. } if !args.is_empty() => true,
-        _ => false,
-    }
-}
-
-/// Check if expression is an infix operator application
-fn is_infix_application(expr: &Expression, arena: &ParseArena) -> bool {
-    if let ExpressionDesc::Pexp_apply { funct, args, .. } = &expr.pexp_desc {
-        if args.len() == 2 {
-            if let Some(op_name) = get_operator_name(funct, arena) {
-                return is_infix_operator(op_name);
-            }
-        }
-    }
-    false
-}
-
-/// Check if expression is a prefix operator application
-fn is_prefix_application(expr: &Expression, arena: &ParseArena) -> bool {
-    if let ExpressionDesc::Pexp_apply { funct, args, .. } = &expr.pexp_desc {
-        if args.len() == 1 {
-            if let Some(op_name) = get_operator_name(funct, arena) {
-                return is_prefix_operator(op_name);
-            }
-        }
-    }
-    false
-}
-
-/// Check if a function application has labeled arguments
-fn application_has_labeled_args(expr: &Expression) -> bool {
-    if let ExpressionDesc::Pexp_apply { args, .. } = &expr.pexp_desc {
-        args.iter().any(|(label, _)| !matches!(label, ArgLabel::Nolabel))
-    } else {
-        false
-    }
-}
-
-/// Check if expression needs parens when used as a labeled argument value
-fn needs_parens_as_labeled_arg(expr: &Expression, arena: &ParseArena) -> bool {
-    if is_prefix_application(expr, arena) {
-        return false;
-    }
-    needs_parens_in_binary_context(expr) || is_infix_application(expr, arena)
-}
-
-/// Check if expression needs parens when used as an unlabeled function argument
-fn needs_parens_as_function_arg(expr: &Expression, arena: &ParseArena) -> bool {
-    if is_prefix_application(expr, arena) {
-        return false;
-    }
-    needs_parens_in_binary_context(expr) || application_has_labeled_args(expr)
-}
-
-/// Check if expression already prints its own parens
-fn expression_has_own_parens(expr: &Expression) -> bool {
-    matches!(&expr.pexp_desc, ExpressionDesc::Pexp_assert(_))
-}
-
 /// Check if a Pexp_construct is a "simple construct" (like OCaml's is_simple_construct)
 /// This includes: [], (), complete lists [a; b; c], and simple constructors without args
 fn is_simple_construct(expr: &Expression, arena: &ParseArena) -> bool {
@@ -294,35 +205,6 @@ fn is_simple_construct(expr: &Expression, arena: &ParseArena) -> bool {
         }
         _ => false,
     }
-}
-
-/// Check if expression is "simple" - doesn't need parens
-/// Note: This version doesn't have arena access, so it can't check complete lists.
-/// Use is_simple_expression_with_arena for full checking.
-fn is_simple_expression(expr: &Expression) -> bool {
-    if !expr.pexp_attributes.is_empty() {
-        return false;
-    }
-    matches!(
-        &expr.pexp_desc,
-        ExpressionDesc::Pexp_ident(_)
-            | ExpressionDesc::Pexp_constant(_)
-            | ExpressionDesc::Pexp_tuple(_)
-            | ExpressionDesc::Pexp_array(_)
-            | ExpressionDesc::Pexp_record(_, _)
-            | ExpressionDesc::Pexp_constraint(_, _)
-            | ExpressionDesc::Pexp_coerce(_, _, _)
-            | ExpressionDesc::Pexp_variant(_, None)
-            | ExpressionDesc::Pexp_construct(_, None)
-            | ExpressionDesc::Pexp_pack(_)
-            // NOTE: Pexp_field and Pexp_send are NOT simple in OCaml's pprintast.
-            // They are in expression2, which means they need parens when nested.
-            // See expression2 vs simple_expr in pprintast.ml
-            // OCaml's simple_expr handles these directly (no paren wrapping)
-            | ExpressionDesc::Pexp_for(_, _, _, _, _)
-            | ExpressionDesc::Pexp_while(_, _)
-            | ExpressionDesc::Pexp_jsx_element(_)  // JSX elements are simple
-    )
 }
 
 /// Check if expression is "simple" - doesn't need parens (with arena for complete list checking)
@@ -362,29 +244,6 @@ fn needs_parens_in_semi_context(expr: &Expression) -> bool {
         ExpressionDesc::Pexp_fun { .. }
             | ExpressionDesc::Pexp_match(_, _)
             | ExpressionDesc::Pexp_try(_, _)
-            | ExpressionDesc::Pexp_sequence(_, _)
-    )
-}
-
-/// Check if expression needs parens in "pipe" context (match case RHS)
-/// OCaml: when ctxt.pipe is true and expr is Pexp_fun/match/try/sequence, wrap in parens
-/// This is the same set of expressions as semi context
-fn needs_parens_in_pipe_context(expr: &Expression) -> bool {
-    matches!(
-        &expr.pexp_desc,
-        ExpressionDesc::Pexp_fun { .. }
-            | ExpressionDesc::Pexp_match(_, _)
-            | ExpressionDesc::Pexp_try(_, _)
-            | ExpressionDesc::Pexp_sequence(_, _)
-    )
-}
-
-/// Check if expression needs parens in "ifthenelse" context
-/// OCaml: when ctxt.ifthenelse is true and expr is Pexp_ifthenelse/Pexp_sequence, wrap in parens
-fn needs_parens_in_ifthenelse_context(expr: &Expression) -> bool {
-    matches!(
-        &expr.pexp_desc,
-        ExpressionDesc::Pexp_ifthenelse(_, _, _)
             | ExpressionDesc::Pexp_sequence(_, _)
     )
 }
@@ -1065,79 +924,6 @@ fn print_inline_param<W: Write>(
     }
 }
 
-/// Print label_exp matching OCaml's label_exp function (without trailing break).
-/// Used in print_fun_body where the caller adds " -> " after.
-fn print_label_exp<W: Write>(
-    f: &mut Formatter<W>,
-    arena: &ParseArena,
-    label: &ArgLabel,
-    default: &Option<Box<Expression>>,
-    pat: &Pattern,
-) {
-    match label {
-        ArgLabel::Nolabel => {
-            // OCaml: simple_pattern ctxt p followed by "@ "
-            print_simple_pattern(f, arena, pat);
-        }
-        ArgLabel::Labelled(name) => {
-            let name_str = arena.get_string(name.txt);
-            if pattern_is_simple_var(arena, pat, name_str) {
-                // Punned: ~foo
-                f.string("~");
-                f.string(name_str);
-            } else {
-                // Explicit: ~foo:pattern
-                f.string("~");
-                f.string(name_str);
-                f.string(":");
-                print_simple_pattern(f, arena, pat);
-            }
-        }
-        ArgLabel::Optional(name) => {
-            let name_str = arena.get_string(name.txt);
-            if pattern_is_simple_var(arena, pat, name_str) {
-                match default {
-                    Some(def) => {
-                        // ?(%s=@;%a)
-                        f.string("?(");
-                        f.string(name_str);
-                        f.string("=");
-                        f.space();
-                        print_expression(f, arena, def);
-                        f.string(")");
-                    }
-                    None => {
-                        // ?%s
-                        f.string("?");
-                        f.string(name_str);
-                    }
-                }
-            } else {
-                match default {
-                    Some(def) => {
-                        // ?%s:(%a=@;%a)
-                        f.string("?");
-                        f.string(name_str);
-                        f.string(":(");
-                        print_pattern(f, arena, pat);
-                        f.string("=");
-                        f.space();
-                        print_expression(f, arena, def);
-                        f.string(")");
-                    }
-                    None => {
-                        // ?%s:%a
-                        f.string("?");
-                        f.string(name_str);
-                        f.string(":");
-                        print_simple_pattern(f, arena, pat);
-                    }
-                }
-            }
-        }
-    }
-}
-
 /// Print label_exp with trailing break/space, matching OCaml's label_exp.
 /// Used in Pexp_fun expression printing where format breaks are used.
 fn print_label_exp_with_break<W: Write>(
@@ -1335,12 +1121,6 @@ fn print_expression_simple_ctx<W: Write>(f: &mut Formatter<W>, arena: &ParseAren
     }
 }
 
-/// Print expression as simple_expr with under_semi context.
-/// Used for array elements: OCaml uses `simple_expr (under_semi ctxt)`.
-fn print_expression_simple_under_semi<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, expr: &Expression) {
-    print_expression_simple_under_semi_ctx(f, arena, expr, PrintCtx::reset());
-}
-
 /// Context-aware version of print_expression_simple_under_semi.
 /// OCaml: `simple_expr (under_semi ctxt)` - applies under_semi to the inherited context.
 fn print_expression_simple_under_semi_ctx<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, expr: &Expression, ctx: PrintCtx) {
@@ -1359,13 +1139,6 @@ fn print_expression_simple_under_semi_ctx<W: Write>(f: &mut Formatter<W>, arena:
     }
 }
 
-/// Print expression at "expression2" level - used for binary operands and function arguments.
-/// OCaml's under_app: if x.pexp_attributes <> [] then expression ctxt f x else expression2 ctxt f x
-/// Expression2 includes Pexp_field and Pexp_send without parens, other exprs use simple_expr.
-fn print_expression2<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, expr: &Expression) {
-    print_expression2_ctx(f, arena, expr, PrintCtx::reset());
-}
-
 /// Context-aware version of print_expression2.
 /// In OCaml, `expression2 ctxt` passes the context through.
 fn print_expression2_ctx<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, expr: &Expression, ctx: PrintCtx) {
@@ -1382,32 +1155,6 @@ fn print_expression2_ctx<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, exp
         f.string("(");
         print_expression_with_ctx(f, arena, expr, ctx);
         f.string(")");
-    }
-}
-
-fn print_expression_semi_context<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, expr: &Expression) {
-    let attrs = printable_attributes(arena, &expr.pexp_attributes);
-    let has_attrs = !attrs.is_empty();
-    let needs_semi_parens = needs_parens_in_semi_context(expr);
-    let is_simple = is_simple_expression(expr);
-
-    if has_attrs {
-        f.string("((");
-        print_expression_inner(f, arena, expr, false, PrintCtx::reset());
-        f.string(")");
-        f.cut(); // Single cut before all attributes
-        print_attributes(f, arena, &expr.pexp_attributes);
-        f.string(")");
-    } else if needs_semi_parens {
-        f.string("((");
-        print_expression_inner(f, arena, expr, false, PrintCtx::reset());
-        f.string("))");
-    } else if !is_simple {
-        f.string("(");
-        print_expression_inner(f, arena, expr, false, PrintCtx::reset());
-        f.string(")");
-    } else {
-        print_expression_inner(f, arena, expr, false, PrintCtx::reset());
     }
 }
 
@@ -1473,143 +1220,6 @@ fn print_expression_under_semi_inner<W: Write>(f: &mut Formatter<W>, arena: &Par
         f.string(")");
     } else {
         print_expression_inner(f, arena, expr, false, PrintCtx::reset());
-    }
-}
-
-fn print_expression_list_context<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, expr: &Expression) {
-    let attrs = printable_attributes(arena, &expr.pexp_attributes);
-    let has_attrs = !attrs.is_empty();
-    let needs_semi_parens = needs_parens_in_semi_context(expr);
-
-    if has_attrs {
-        f.string("(");
-        print_expression_inner(f, arena, expr, false, PrintCtx::reset());
-        f.cut(); // Single cut before all attributes
-        print_attributes(f, arena, &expr.pexp_attributes);
-        f.string(")");
-    } else if needs_semi_parens {
-        f.string("(");
-        print_expression_inner(f, arena, expr, false, PrintCtx::reset());
-        f.string(")");
-    } else {
-        print_expression(f, arena, expr);
-    }
-}
-
-/// Print expression in "pipe" context (match case RHS)
-/// OCaml wraps Pexp_fun/match/try/sequence in parens when under_pipe
-/// Like under_semi, OCaml checks attributes first, then context.
-fn print_expression_pipe_context<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, expr: &Expression) {
-    let attrs = printable_attributes(arena, &expr.pexp_attributes);
-    let has_attrs = !attrs.is_empty();
-    let needs_pipe_parens = needs_parens_in_pipe_context(expr);
-
-    if has_attrs && needs_pipe_parens {
-        // Attribute handling first, then pipe context for inner expression
-        f.string("((");
-        // Inner: apply pipe parens
-        f.string("(");
-        print_expression_inner(f, arena, expr, false, PrintCtx::reset());
-        f.string(")");
-        f.string(")");
-        f.cut();
-        print_attributes(f, arena, &expr.pexp_attributes);
-        f.string(")");
-    } else if needs_pipe_parens {
-        f.string("(");
-        print_expression(f, arena, expr);
-        f.string(")");
-    } else {
-        print_expression(f, arena, expr);
-    }
-}
-
-/// Print expression under OCaml's `under_ifthenelse` context.
-/// When ifthenelse=true, Pexp_ifthenelse and Pexp_sequence get wrapped in parens.
-/// This is used for the condition and then-body of if-then-else expressions.
-///
-/// Like under_semi, OCaml checks attributes first, then context.
-fn print_expression_under_ifthenelse<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, expr: &Expression) {
-    let attrs = printable_attributes(arena, &expr.pexp_attributes);
-    let has_attrs = !attrs.is_empty();
-
-    if has_attrs {
-        // Attribute handling first, then ifthenelse context for inner expression
-        f.string("((");
-        print_expression_under_ifthenelse_inner(f, arena, expr);
-        f.string(")");
-        f.cut();
-        print_attributes(f, arena, &expr.pexp_attributes);
-        f.string(")");
-    } else if needs_parens_in_ifthenelse_context(expr) {
-        f.string("(");
-        print_expression(f, arena, expr);
-        f.string(")");
-    } else {
-        print_expression(f, arena, expr);
-    }
-}
-
-/// Helper: print inner expression (ignoring attrs) under ifthenelse context
-fn print_expression_under_ifthenelse_inner<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, expr: &Expression) {
-    if needs_parens_in_ifthenelse_context(expr) {
-        f.string("(");
-        print_expression_inner(f, arena, expr, false, PrintCtx::reset());
-        f.string(")");
-    } else {
-        print_expression_inner(f, arena, expr, false, PrintCtx::reset());
-    }
-}
-
-fn print_expression_parens_if_complex<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, expr: &Expression) {
-    let attrs = printable_attributes(arena, &expr.pexp_attributes);
-    let has_attrs = !attrs.is_empty();
-    let needs_parens = needs_parens_as_function_arg(expr, arena);
-    let has_own_parens = expression_has_own_parens(expr);
-
-    if has_attrs {
-        // OCaml Format: pp f "((%a)@,%a)" - one cut before all attributes
-        if has_own_parens {
-            f.string("(");
-            print_expression_inner(f, arena, expr, false, PrintCtx::reset());
-            f.cut(); // Single cut before all attributes
-            print_attributes(f, arena, &expr.pexp_attributes);
-            f.string(")");
-        } else {
-            f.string("((");
-            print_expression_inner(f, arena, expr, false, PrintCtx::reset());
-            f.string(")");
-            f.cut(); // Single cut before all attributes
-            print_attributes(f, arena, &expr.pexp_attributes);
-            f.string(")");
-        }
-    } else if needs_parens && !has_own_parens {
-        f.string("(");
-        print_expression_inner(f, arena, expr, false, PrintCtx::reset());
-        f.string(")");
-    } else {
-        print_expression_inner(f, arena, expr, false, PrintCtx::reset());
-    }
-}
-
-fn print_fun_body<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, expr: &Expression) {
-    match &expr.pexp_desc {
-        ExpressionDesc::Pexp_fun {
-            arg_label,
-            default,
-            lhs,
-            rhs,
-            ..
-        } if expr.pexp_attributes.is_empty() => {
-            f.string("fun ");
-            // OCaml label_exp: handles punning for labeled args
-            print_label_exp(f, arena, arg_label, default, lhs);
-            f.string(" -> ");
-            print_fun_body(f, arena, rhs);
-        }
-        _ => {
-            print_expression_no_outer_parens(f, arena, expr);
-        }
     }
 }
 
@@ -3210,27 +2820,6 @@ fn print_arg_label<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, label: &A
             f.string(":");
         }
     }
-}
-
-/// Print arg label for expression context (uses ~)
-fn print_arg_label_expr<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, label: &ArgLabel) {
-    match label {
-        ArgLabel::Nolabel => {}
-        ArgLabel::Labelled(s) => {
-            f.string("~");
-            f.string(arena.get_string(s.txt));
-            f.string(":");
-        }
-        ArgLabel::Optional(s) => {
-            f.string("?");
-            f.string(arena.get_string(s.txt));
-            f.string(":");
-        }
-    }
-}
-
-fn print_arg_with_label<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, label: &ArgLabel, arg: &Expression) {
-    print_arg_with_label_ctx(f, arena, label, arg, PrintCtx::reset());
 }
 
 /// Context-aware version of print_arg_with_label.
