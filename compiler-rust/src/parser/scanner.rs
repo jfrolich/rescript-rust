@@ -1521,10 +1521,13 @@ impl<'src> Scanner<'src> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::parse_arena::ParseArena;
 
     #[test]
     fn test_scan_identifier() {
-        let mut scanner = Scanner::new("test.res", "hello world");
+        let mut arena = ParseArena::new();
+        let filename = arena.intern("test.res");
+        let mut scanner = Scanner::new(filename, "hello world");
         let result = scanner.scan();
         assert_eq!(result.token, Token::Lident("hello".to_string()));
 
@@ -1534,7 +1537,9 @@ mod tests {
 
     #[test]
     fn test_scan_keyword() {
-        let mut scanner = Scanner::new("test.res", "let if else");
+        let mut arena = ParseArena::new();
+        let filename = arena.intern("test.res");
+        let mut scanner = Scanner::new(filename, "let if else");
         assert_eq!(scanner.scan().token, Token::Let { unwrap: false });
         assert_eq!(scanner.scan().token, Token::If);
         assert_eq!(scanner.scan().token, Token::Else);
@@ -1542,7 +1547,9 @@ mod tests {
 
     #[test]
     fn test_scan_number() {
-        let mut scanner = Scanner::new("test.res", "42 3.14 0xFF");
+        let mut arena = ParseArena::new();
+        let filename = arena.intern("test.res");
+        let mut scanner = Scanner::new(filename, "42 3.14 0xFF");
 
         let result = scanner.scan();
         assert!(matches!(result.token, Token::Int { i, .. } if i == "42"));
@@ -1556,14 +1563,18 @@ mod tests {
 
     #[test]
     fn test_scan_string() {
-        let mut scanner = Scanner::new("test.res", "\"hello\"");
+        let mut arena = ParseArena::new();
+        let filename = arena.intern("test.res");
+        let mut scanner = Scanner::new(filename, "\"hello\"");
         let result = scanner.scan();
         assert!(matches!(result.token, Token::String(s) if s == "hello"));
     }
 
     #[test]
     fn test_scan_operators() {
-        let mut scanner = Scanner::new("test.res", "+ - * / == => ->");
+        let mut arena = ParseArena::new();
+        let filename = arena.intern("test.res");
+        let mut scanner = Scanner::new(filename, "+ - * / == => ->");
 
         assert_eq!(scanner.scan().token, Token::Plus);
         assert_eq!(scanner.scan().token, Token::Minus);
@@ -1576,7 +1587,9 @@ mod tests {
 
     #[test]
     fn test_scan_comment() {
-        let mut scanner = Scanner::new("test.res", "// comment\nfoo");
+        let mut arena = ParseArena::new();
+        let filename = arena.intern("test.res");
+        let mut scanner = Scanner::new(filename, "// comment\nfoo");
 
         let result = scanner.scan();
         assert!(matches!(result.token, Token::Comment(_)));
@@ -1587,7 +1600,9 @@ mod tests {
 
     #[test]
     fn test_scan_multiline_comment() {
-        let mut scanner = Scanner::new("test.res", "/* comment */ foo");
+        let mut arena = ParseArena::new();
+        let filename = arena.intern("test.res");
+        let mut scanner = Scanner::new(filename, "/* comment */ foo");
 
         let result = scanner.scan();
         assert!(matches!(result.token, Token::Comment(_)));
@@ -1598,13 +1613,17 @@ mod tests {
 
     #[test]
     fn test_scan_eof() {
-        let mut scanner = Scanner::new("test.res", "");
+        let mut arena = ParseArena::new();
+        let filename = arena.intern("test.res");
+        let mut scanner = Scanner::new(filename, "");
         assert_eq!(scanner.scan().token, Token::Eof);
     }
 
     #[test]
     fn test_position_tracking() {
-        let mut scanner = Scanner::new("test.res", "let\nfoo");
+        let mut arena = ParseArena::new();
+        let filename = arena.intern("test.res");
+        let mut scanner = Scanner::new(filename, "let\nfoo");
 
         let result = scanner.scan();
         assert_eq!(result.start_pos.line, 1);
@@ -1615,7 +1634,9 @@ mod tests {
 
     #[test]
     fn test_diamond_mode() {
-        let mut scanner = Scanner::new("test.res", ">> >");
+        let mut arena = ParseArena::new();
+        let filename = arena.intern("test.res");
+        let mut scanner = Scanner::new(filename, ">> >");
 
         // Normal mode: >> is right shift
         let result = scanner.scan();
@@ -1629,7 +1650,9 @@ mod tests {
 
     #[test]
     fn test_list_dict_let_special() {
-        let mut scanner = Scanner::new("test.res", "list{ dict{ let?");
+        let mut arena = ParseArena::new();
+        let filename = arena.intern("test.res");
+        let mut scanner = Scanner::new(filename, "list{ dict{ let?");
 
         assert_eq!(scanner.scan().token, Token::List);
         assert_eq!(scanner.scan().token, Token::Dict);
