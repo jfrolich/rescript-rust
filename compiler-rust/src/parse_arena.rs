@@ -327,6 +327,15 @@ pub struct ParseArena {
     /// Pre-allocated "#raw_stmt" string for raw statement primitives.
     /// OCaml shares this literal across all uses in ast_exp_handle_external.ml.
     prim_raw_stmt: StrIdx,
+    /// PPX-local "==" operator string.
+    /// Kept separate from parser-token operator strings to match OCaml unit-local identity.
+    ppx_eq_str: StrIdx,
+    /// PPX-local "Js" identifier string.
+    /// Kept separate from parser-token identifiers to match OCaml unit-local identity.
+    ppx_js_str: StrIdx,
+    /// Template-literal-local "++" operator string.
+    /// Kept separate from regular infix parser operator strings.
+    template_concat_str: StrIdx,
     /// Counter for generating unique local module names (for %%private).
     /// OCaml uses a global ref counter, so this matches that behavior.
     local_module_counter: u32,
@@ -357,6 +366,9 @@ impl Default for ParseArena {
         let prim_empty_js_mapper = strings.push(String::new());
         let prim_raw_expr = strings.push("#raw_expr".to_string());
         let prim_raw_stmt = strings.push("#raw_stmt".to_string());
+        let ppx_eq_str = strings.push("==".to_string());
+        let ppx_js_str = strings.push("Js".to_string());
+        let template_concat_str = strings.push("++".to_string());
 
         // Pre-allocate static list lidents.
         // We need TWO sets: one for pattern contexts (res_core.ml) and one for
@@ -469,6 +481,9 @@ impl Default for ParseArena {
             prim_empty_js_mapper,
             prim_raw_expr,
             prim_raw_stmt,
+            ppx_eq_str,
+            ppx_js_str,
+            template_concat_str,
             local_module_counter: 0,
             rewritten_expr_locs: HashSet::new(),
         }
@@ -969,6 +984,18 @@ impl ParseArena {
 
     pub fn prim_raw_stmt(&self) -> StrIdx {
         self.prim_raw_stmt
+    }
+
+    pub fn ppx_eq_str(&self) -> StrIdx {
+        self.ppx_eq_str
+    }
+
+    pub fn ppx_js_str(&self) -> StrIdx {
+        self.ppx_js_str
+    }
+
+    pub fn template_concat_str(&self) -> StrIdx {
+        self.template_concat_str
     }
 
     /// Get the string content for a StrIdx.

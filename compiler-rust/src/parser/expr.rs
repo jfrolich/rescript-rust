@@ -6320,8 +6320,11 @@ fn parse_template_literal_with_prefix(
             }
         }
 
-        // Fold with ++ operator
-        let lid_idx = p.push_lident_static("++");
+        // Fold with ++ operator.
+        // Use the template-literal-local string identity to avoid oversharing
+        // with regular infix ++ parsed from source tokens.
+        let plusplus_str = p.arena().template_concat_str();
+        let lid_idx = p.push_lident_from_idx(plusplus_str);
         let hidden_operator = Expression {
             pexp_desc: ExpressionDesc::Pexp_ident(mknoloc(lid_idx)),
             pexp_loc: LocIdx::none(),

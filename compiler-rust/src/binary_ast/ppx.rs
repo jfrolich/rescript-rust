@@ -2542,7 +2542,7 @@ fn handle_external_ext(
     };
 
     // Create Js.typeof longident
-    let js_lident = arena.push_lident_static("Js");
+    let js_lident = arena.push_lident_from_idx(arena.ppx_js_str());
     let js_typeof = arena.push_ldot_static(js_lident, "typeof");
 
     // Create Js.typeof(raw_exp)
@@ -2564,8 +2564,8 @@ fn handle_external_ext(
         pexp_attributes: vec![],
     };
 
-    // Create == operator longident
-    let eq_lident = arena.push_lident_static("==");
+    // Use PPX-local == identity to avoid cross-unit sharing with parser operators.
+    let eq_lident = arena.push_lident_from_idx(arena.ppx_eq_str());
 
     // Create "undefined" string constant
     let undefined_str = Expression {
@@ -7086,8 +7086,14 @@ fn handle_abstract_tdcl(
                 let pld_type = &label.pld_type;
 
                 // Check for @as attribute
-                let prim_as_name = get_bs_as_string(&label.pld_attributes, arena)
+                let prim_as_attr = get_bs_as_string(&label.pld_attributes, arena);
+                let prim_as_name = prim_as_attr
+                    .clone()
                     .unwrap_or_else(|| label_name.clone());
+                let prim_as_idx = match &prim_as_attr {
+                    Some(name) if name != &label_name => arena.intern_string(name),
+                    _ => label.pld_name.txt,
+                };
                 let new_label = if prim_as_name != label_name {
                     Located { txt: arena.intern_string(&prim_as_name), loc: label.pld_name.loc }
                 } else {
@@ -7159,7 +7165,7 @@ fn handle_abstract_tdcl(
                         },
                     };
                     vec![
-                        prim_str(arena, prim_as_name.clone()),
+                        prim_as_idx,
                         prim_str(arena, encode_ffi_type(&ffi)),
                     ]
                 } else {
@@ -7207,7 +7213,7 @@ fn handle_abstract_tdcl(
                             loc: label_loc,
                         },
                         pval_type: setter_type,
-                        pval_prim: vec![prim_str(arena, prim_as_name.clone())],
+                        pval_prim: vec![prim_as_idx],
                         pval_attributes: vec![make_set_attr(loc, arena)],
                         pval_loc: label.pld_loc,
                     };
@@ -7240,7 +7246,9 @@ fn handle_abstract_tdcl(
                 let my_prims = compute_maker_prims(&labels_info, has_optional_field, arena);
 
                 let maker_vd = ValueDescription {
-                    pval_name: Located { txt: arena.intern_string(&type_name), loc },
+                    // Reuse the type declaration's name identity so marshal sharing
+                    // matches OCaml in @deriving(abstract) maker generation.
+                    pval_name: Located { txt: tdcl.ptype_name.txt, loc },
                     pval_type: make_type,
                     pval_prim: my_prims,
                     pval_attributes: vec![],

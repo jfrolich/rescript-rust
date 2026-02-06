@@ -169,6 +169,22 @@ pub struct MarshalWriter {
     /// in %obj transformations). Uses arena indices for identity-based sharing.
     string_loc_table: HashMap<(StrIdx, LocIdx), u32>,
 
+    /// Maps (LidentIdx, LocIdx) pairs to object counter (for `Longident.t loc` sharing).
+    /// OCaml may reuse the same located longident record (e.g. in nested `Pexp_open`
+    /// rewrites), so we mirror that pointer sharing by keying on arena indices.
+    lident_loc_table: HashMap<(LidentIdx, LocIdx), u32>,
+
+    /// Maps (label_tag, StrIdx, LocIdx) to object counter for sharing arg_label wrappers.
+    /// label_tag: 0=Labelled, 1=Optional.
+    arg_label_table: HashMap<(u8, StrIdx, LocIdx), u32>,
+
+    /// Maps (LidentIdx, LocIdx) to object counter for sharing `Pmod_ident` wrappers.
+    pmod_ident_table: HashMap<(LidentIdx, LocIdx), u32>,
+
+    /// Maps (StrIdx, LocIdx) to object counter for sharing attribute tuples
+    /// `(name_with_loc, payload)` in contexts where OCaml reuses them.
+    attr_tuple_table: HashMap<(StrIdx, LocIdx), u32>,
+
     /// Maps value-description identity to marshaled object indices for `(pval_name, pval_type)`.
     /// In no-inline external wrappers, OCaml record updates preserve physical sharing of these
     /// fields between the structure primitive and the generated signature value description.
@@ -264,6 +280,10 @@ impl MarshalWriter {
             arity_idx_table: HashMap::new(),
 
             string_loc_table: HashMap::new(),
+            lident_loc_table: HashMap::new(),
+            arg_label_table: HashMap::new(),
+            pmod_ident_table: HashMap::new(),
+            attr_tuple_table: HashMap::new(),
             vd_name_type_table: HashMap::new(),
             singleton_attr_list_table: HashMap::new(),
             tyvar_core_type_table: HashMap::new(),
@@ -301,6 +321,10 @@ impl MarshalWriter {
             arity_idx_table: HashMap::new(),
 
             string_loc_table: HashMap::new(),
+            lident_loc_table: HashMap::new(),
+            arg_label_table: HashMap::new(),
+            pmod_ident_table: HashMap::new(),
+            attr_tuple_table: HashMap::new(),
             vd_name_type_table: HashMap::new(),
             singleton_attr_list_table: HashMap::new(),
             tyvar_core_type_table: HashMap::new(),
@@ -445,6 +469,10 @@ impl MarshalWriter {
         self.string_lident_table.clear();
         self.option_string_table.clear();
         self.string_loc_table.clear();
+        self.lident_loc_table.clear();
+        self.arg_label_table.clear();
+        self.pmod_ident_table.clear();
+        self.attr_tuple_table.clear();
         self.vd_name_type_table.clear();
         self.singleton_attr_list_table.clear();
         self.tyvar_core_type_table.clear();
@@ -826,6 +854,24 @@ impl MarshalWriter {
         }
     }
 
+    /// Write a `Longident.t loc` record with identity-based sharing.
+    ///
+    /// Encodes as `block(0,2) -> [longident, loc]`, sharing by `(LidentIdx, LocIdx)`.
+    pub fn write_lident_loc_shared(&mut self, txt: LidentIdx, loc: LocIdx) {
+        let key = (txt, loc);
+        if let Some(&obj_idx) = self.lident_loc_table.get(&key) {
+            let d = self.obj_counter - obj_idx;
+            self.write_shared_ref(d);
+            return;
+        }
+
+        let obj_idx = self.obj_counter;
+        self.write_block_header(0, 2);
+        self.write_lident_idx(txt);
+        self.write_loc_idx(loc);
+        self.lident_loc_table.insert(key, obj_idx);
+    }
+
     /// Look up an entry in the singleton attribute list sharing table.
     pub fn singleton_attr_list_table_get(&self, key: &(StrIdx, LocIdx)) -> Option<&u32> {
         self.singleton_attr_list_table.get(key)
@@ -834,6 +880,36 @@ impl MarshalWriter {
     /// Insert an entry into the singleton attribute list sharing table.
     pub fn singleton_attr_list_table_insert(&mut self, key: (StrIdx, LocIdx), obj_idx: u32) {
         self.singleton_attr_list_table.insert(key, obj_idx);
+    }
+
+    /// Look up an arg_label wrapper object index.
+    pub fn arg_label_table_get(&self, key: &(u8, StrIdx, LocIdx)) -> Option<&u32> {
+        self.arg_label_table.get(key)
+    }
+
+    /// Insert an arg_label wrapper object index.
+    pub fn arg_label_table_insert(&mut self, key: (u8, StrIdx, LocIdx), obj_idx: u32) {
+        self.arg_label_table.insert(key, obj_idx);
+    }
+
+    /// Look up a `Pmod_ident` wrapper object index.
+    pub fn pmod_ident_table_get(&self, key: &(LidentIdx, LocIdx)) -> Option<&u32> {
+        self.pmod_ident_table.get(key)
+    }
+
+    /// Insert a `Pmod_ident` wrapper object index.
+    pub fn pmod_ident_table_insert(&mut self, key: (LidentIdx, LocIdx), obj_idx: u32) {
+        self.pmod_ident_table.insert(key, obj_idx);
+    }
+
+    /// Look up an attribute tuple `(name_with_loc, payload)` object index.
+    pub fn attr_tuple_table_get(&self, key: &(StrIdx, LocIdx)) -> Option<&u32> {
+        self.attr_tuple_table.get(key)
+    }
+
+    /// Insert an attribute tuple `(name_with_loc, payload)` object index.
+    pub fn attr_tuple_table_insert(&mut self, key: (StrIdx, LocIdx), obj_idx: u32) {
+        self.attr_tuple_table.insert(key, obj_idx);
     }
 
     /// Look up cached value-description `(pval_name, pval_type)` object indices.
@@ -880,11 +956,17 @@ impl MarshalWriter {
 
         // Share selected `Lident` wrappers by StrIdx even when they come from
         // distinct LidentIdx allocations.
-        let string_lident_key = match self.get_arena().get_longident(idx) {
-            Longident::Lident(name_idx) if self.get_arena().get_string(*name_idx) == "string" => {
-                Some(*name_idx)
+        let string_lident_key = {
+            let arena = self.get_arena();
+            let ppx_js = arena.ppx_js_str();
+            match arena.get_longident(idx) {
+                Longident::Lident(name_idx)
+                    if *name_idx == ppx_js || arena.get_string(*name_idx) == "string" =>
+                {
+                    Some(*name_idx)
+                }
+                _ => None,
             }
-            _ => None,
         };
         if let Some(name_idx) = string_lident_key {
             if let Some(&obj_idx) = self.string_lident_table.get(&name_idx) {
@@ -980,8 +1062,23 @@ impl MarshalWriter {
     fn write_longident(&mut self, lid: &Longident) {
         match lid {
             Longident::Lident(s) => {
+                let should_share = {
+                    let arena = self.get_arena();
+                    *s == arena.ppx_js_str() || arena.get_string(*s) == "string"
+                };
+                if should_share {
+                    if let Some(&obj_idx) = self.string_lident_table.get(s) {
+                        let d = self.obj_counter - obj_idx;
+                        self.write_shared_ref(d);
+                        return;
+                    }
+                }
+                let obj_idx = self.obj_counter;
                 self.write_block_header(0, 1);
                 self.write_str_idx(*s);
+                if should_share {
+                    self.string_lident_table.entry(*s).or_insert(obj_idx);
+                }
             }
             Longident::Ldot(prefix, name) => {
                 self.write_block_header(1, 2);
@@ -1189,6 +1286,14 @@ impl MarshalWriter {
     /// - None → integer 0
     /// - Some(s) → Block(tag=0, [s]) with content-based sharing
     pub fn write_option_string(&mut self, opt: &Option<String>) {
+        // OCaml does not reliably share Some("json") wrappers across contexts.
+        // Avoid global content-based sharing for this delimiter.
+        if matches!(opt, Some(s) if s == "json") {
+            self.write_block_header(0, 1);
+            self.write_str("json");
+            return;
+        }
+
         // Check if we've written this exact Option<String> before
         if let Some(&obj_idx) = self.option_string_table.get(opt) {
             let d = self.obj_counter - obj_idx;
