@@ -432,6 +432,8 @@ pub struct TypeCheckContext<'a> {
     /// Used type variables within the current type expression (for sharing).
     /// Maps type variable names to their TypeExprRef, matching OCaml's used_variables.
     pub used_variables: HashMap<String, TypeExprRef>,
+    /// Persistent environment for loading external modules from .cmi files.
+    pub persistent_env: Option<crate::cmi::persistent_env::PersistentEnv>,
 }
 
 /// A diagnostic from type checking.
@@ -453,7 +455,13 @@ impl<'a> TypeCheckContext<'a> {
             newtype_level: None,
             diagnostics: Vec::new(),
             used_variables: HashMap::new(),
+            persistent_env: None,
         }
+    }
+
+    /// Set the persistent environment for module loading.
+    pub fn set_persistent_env(&mut self, env: crate::cmi::persistent_env::PersistentEnv) {
+        self.persistent_env = Some(env);
     }
 
     /// Report an error.

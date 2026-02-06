@@ -66,6 +66,12 @@ impl IdentFlags {
     pub fn with_predef_exn(self) -> Self {
         Self(self.0 | Self::PREDEF_EXN.0)
     }
+
+    /// Create from raw bits (truncating any unknown bits).
+    #[inline]
+    pub fn from_bits_truncate(bits: u8) -> Self {
+        Self(bits & 0x03) // Only keep known flags: GLOBAL (1) and PREDEF_EXN (2)
+    }
 }
 
 /// A unique identifier with a name and stamp.

@@ -3,9 +3,12 @@
 //! This module wires together parsing, type-checking, Lambda conversion, and
 //! JS IR codegen to produce JavaScript output.
 
+use std::path::PathBuf;
+
 use anyhow::{anyhow, Context, Result};
 
 use crate::binary_ast::ppx;
+use crate::cmi::persistent_env::PersistentEnv;
 use crate::context::IdGenerator;
 use crate::binary_ast::spice_ppx;
 use crate::js_ir::printer::print_program;
@@ -28,6 +31,8 @@ pub struct CompilerOptions {
     pub dump_lambda_sexp: bool,
     /// Print the Lambda IR as sexp with locations to stderr (like OCaml's -dlambda-sexp-locs)
     pub dump_lambda_sexp_locs: bool,
+    /// Include paths for finding .cmi files (from -I flags)
+    pub include_paths: Vec<PathBuf>,
 }
 
 /// Compile ReScript source to JavaScript.
@@ -56,7 +61,16 @@ pub fn compile_source_to_js_with_options(
     let id_gen = IdGenerator::new();
     let type_ctx = TypeContext::new(&id_gen);
     let mut tctx = TypeCheckContext::new(&type_ctx, parser.arena());
-    let env = initial_env(&type_ctx);
+    let mut env = initial_env(&type_ctx);
+
+    // Load Pervasives and extend the initial environment
+    let mut pers_env = PersistentEnv::new();
+    pers_env.set_load_path(options.include_paths.clone());
+    load_pervasives(&mut pers_env, &mut env, &type_ctx);
+
+    // Store persistent env in the type check context for module resolution
+    tctx.set_persistent_env(pers_env);
+
     let (typed_structure, _env) = type_structure(&mut tctx, &env, parser.arena(), &structure)
         .map_err(|e| anyhow!("Type checking failed: {e:?}"))?;
 
@@ -119,7 +133,15 @@ pub fn typecheck_interface_source(
     let id_gen = IdGenerator::new();
     let type_ctx = TypeContext::new(&id_gen);
     let mut tctx = TypeCheckContext::new(&type_ctx, parser.arena());
-    let env = initial_env(&type_ctx);
+    let mut env = initial_env(&type_ctx);
+
+    // Load Pervasives and extend the initial environment
+    let mut pers_env = PersistentEnv::new();
+    pers_env.set_load_path(options.include_paths.clone());
+    load_pervasives(&mut pers_env, &mut env, &type_ctx);
+
+    tctx.set_persistent_env(pers_env);
+
     let typed_signature = transl_signature(&mut tctx, &env, parser.arena(), &signature)
         .map_err(|e| anyhow!("Type checking failed: {e:?}"))?;
 
@@ -168,3 +190,21 @@ pub fn compile_file_to_js_with_options(
     let filename = path.to_string_lossy();
     compile_source_to_js_with_options(&source, &filename, options)
 }
+
+/// Load the Pervasives module into the initial environment.
+///
+/// This is equivalent to OCaml's `Typemod.initial_env()` which loads
+/// Pervasives.cmi and opens it into the environment.
+fn load_pervasives<'a>(pers_env: &mut PersistentEnv, env: &mut Env, ctx: &'a TypeContext<'a>) {
+    use crate::ident::Ident;
+
+    // Try to load Pervasives
+    if pers_env.open_module("Pervasives", env, ctx) {
+        // Also add Pervasives as a module in the environment
+        if let Some(md) = pers_env.get_module_declaration("Pervasives", ctx) {
+            env.add_module(Ident::create_persistent("Pervasives"), md);
+        }
+    }
+}
+
+use crate::types::env::Env;

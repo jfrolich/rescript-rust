@@ -275,6 +275,11 @@ impl<'a> TypeContext<'a> {
     // Abbreviation Memos
     // ========================================================================
 
+    /// Allocate an abbreviation memo (Mnil).
+    pub fn alloc_abbrev_nil(&self) -> AbbrevMemoRef {
+        self.alloc_abbrev(AbbrevMemo::Mnil)
+    }
+
     /// Allocate an abbreviation memo.
     fn alloc_abbrev(&self, memo: AbbrevMemo) -> AbbrevMemoRef {
         let m = self.abbrev_arena.alloc(RefCell::new(memo));

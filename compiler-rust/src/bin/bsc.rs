@@ -29,6 +29,7 @@ struct Options {
     namespace: Option<String>,
     module_name: Option<String>,
     input: Option<PathBuf>,
+    include_paths: Vec<PathBuf>,
 }
 
 fn main() {
@@ -76,8 +77,12 @@ fn run() -> Result<()> {
                         opts.input = Some(PathBuf::from(val));
                     }
                 }
-                "-I"
-                | "-open"
+                "-I" => {
+                    if let Some(val) = args.next() {
+                        opts.include_paths.push(PathBuf::from(val));
+                    }
+                }
+                "-open"
                 | "-w"
                 | "-warn-error"
                 | "-color"
@@ -134,6 +139,7 @@ fn run() -> Result<()> {
         dump_typed_sexp_locs: opts.dump_typed_sexp_locs,
         dump_lambda_sexp: opts.dump_lambda_sexp,
         dump_lambda_sexp_locs: opts.dump_lambda_sexp_locs,
+        include_paths: opts.include_paths.clone(),
     };
 
     if is_interface {

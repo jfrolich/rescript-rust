@@ -673,6 +673,17 @@ fn type_structure_item<'a>(
             // Encode external FFI attributes into prim blob (matching OCaml's PPX encoding)
             let encoded = crate::binary_ast::ppx::encode_external(vd, arena);
 
+            // Add the external value to the environment
+            let mut new_env = env.clone();
+            let val_desc_for_env = crate::types::ValueDescription {
+                val_type: val_ty,
+                val_kind: crate::types::ValueKind::ValReg,
+                val_loc: arena.to_location(loc),
+                val_attributes: vec![],
+                val_path: None,
+            };
+            new_env.add_value(id.clone(), val_desc_for_env);
+
             let desc = StructureItemDesc::Tstr_primitive(crate::types::typedtree::TypedValueDescription {
                 val_id: id,
                 val_name: Located { txt: name_str, loc: vd.pval_name.loc },
@@ -687,7 +698,7 @@ fn type_structure_item<'a>(
                     str_loc: loc,
                     str_env: EnvRef(0),
                 },
-                env.clone(),
+                new_env,
             ))
         }
 
@@ -1523,7 +1534,23 @@ fn type_structure_item<'a>(
 
         ParsedStructureItemDesc::Pstr_open(open_desc) => {
             // Open declaration: open M
-            let path = path_from_longident(tctx.resolve_lid(open_desc.popen_lid.txt), |idx| arena.get_string(idx));
+            let longident = tctx.resolve_lid(open_desc.popen_lid.txt);
+            let path = path_from_longident(longident, |idx| arena.get_string(idx));
+
+            // Extend the environment with the opened module's bindings
+            let mut new_env = env.clone();
+            match longident {
+                Longident::Lident(name_idx) => {
+                    let name = arena.get_string(*name_idx);
+                    if let Some(ref mut pers_env) = tctx.persistent_env {
+                        pers_env.open_module(name, &mut new_env, tctx.type_ctx);
+                    }
+                }
+                _ => {
+                    // For dotted paths like Belt.Array, we'd need to resolve
+                    // the sub-module chain. For now, just try the root module.
+                }
+            }
 
             let desc = StructureItemDesc::Tstr_open(OpenDeclaration {
                 open_path: path,
@@ -1538,7 +1565,7 @@ fn type_structure_item<'a>(
                     str_loc: loc,
                     str_env: EnvRef(0),
                 },
-                env.clone(),
+                new_env,
             ))
         }
 
