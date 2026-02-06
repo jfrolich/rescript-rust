@@ -514,7 +514,10 @@ mod tests {
 
     #[test]
     fn test_error_report() {
-        let error = ErrorReport::with_location("type mismatch", Location::in_file("test.res"));
+        use crate::parse_arena::ParseArena;
+        let mut arena = ParseArena::new();
+        let test_file = arena.intern("test.res");
+        let error = ErrorReport::with_location("type mismatch", Location::in_file(test_file));
         assert_eq!(error.message, "type mismatch");
         assert!(error.location.is_some());
     }

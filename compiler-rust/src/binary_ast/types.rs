@@ -169,8 +169,10 @@ mod tests {
 
     #[test]
     fn test_position_marshal() {
+        let mut arena = ParseArena::new();
+        let test_file = arena.intern("test.res");
         let mut w = MarshalWriter::new();
-        let pos = Position::new("test.res", 1, 0, 0);
+        let pos = Position::new(test_file, 1, 0, 0);
         pos.marshal(&mut w);
 
         // Block(tag=0, size=4): 0xC0
@@ -189,10 +191,12 @@ mod tests {
 
     #[test]
     fn test_location_marshal() {
+        let mut arena = ParseArena::new();
+        let test_file = arena.intern("test.res");
         let mut w = MarshalWriter::new();
         let loc = Location::from_positions(
-            Position::new("test.res", 1, 0, 0),
-            Position::new("test.res", 1, 0, 5),
+            Position::new(test_file, 1, 0, 0),
+            Position::new(test_file, 1, 0, 5),
         );
         loc.marshal(&mut w);
 

@@ -141,6 +141,7 @@ impl std::fmt::Display for Comment {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::parse_arena::ParseArena;
 
     #[test]
     fn test_comment_style() {
@@ -152,7 +153,9 @@ mod tests {
 
     #[test]
     fn test_single_line_comment() {
-        let loc = Location::in_file("test.res");
+        let mut arena = ParseArena::new();
+        let test_file = arena.intern("test.res");
+        let loc = Location::in_file(test_file);
         let comment = Comment::make_single_line(loc, "this is a comment".to_string());
 
         assert!(comment.is_single_line());
@@ -162,7 +165,9 @@ mod tests {
 
     #[test]
     fn test_multi_line_comment() {
-        let loc = Location::in_file("test.res");
+        let mut arena = ParseArena::new();
+        let test_file = arena.intern("test.res");
+        let loc = Location::in_file(test_file);
         let comment = Comment::make_multi_line(loc, "multi\nline".to_string(), false, false);
 
         assert!(!comment.is_single_line());
@@ -172,7 +177,9 @@ mod tests {
 
     #[test]
     fn test_doc_comment() {
-        let loc = Location::in_file("test.res");
+        let mut arena = ParseArena::new();
+        let test_file = arena.intern("test.res");
+        let loc = Location::in_file(test_file);
         let comment = Comment::make_multi_line(loc, "documentation".to_string(), true, false);
 
         assert!(comment.is_doc_comment());
@@ -181,7 +188,9 @@ mod tests {
 
     #[test]
     fn test_module_comment() {
-        let loc = Location::in_file("test.res");
+        let mut arena = ParseArena::new();
+        let test_file = arena.intern("test.res");
+        let loc = Location::in_file(test_file);
         let comment = Comment::make_multi_line(loc, "module doc".to_string(), true, true);
 
         assert!(!comment.is_doc_comment());
