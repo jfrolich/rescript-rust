@@ -106,6 +106,11 @@ pub struct TypeContext<'a> {
     /// Populated when loading CMI module signatures so that type alias
     /// expansion can find declarations for types not directly in the env.
     type_decl_store: RefCell<std::collections::HashMap<String, super::decl::TypeDeclaration>>,
+
+    /// Global type declaration store, indexed by ident stamp.
+    /// Used for looking up CMI-loaded type declarations by their stamp
+    /// when the type name is too generic (e.g., "t").
+    type_decl_by_stamp: RefCell<std::collections::HashMap<i32, super::decl::TypeDeclaration>>,
 }
 
 impl<'a> TypeContext<'a> {
@@ -130,6 +135,7 @@ impl<'a> TypeContext<'a> {
             commutables: RefCell::new(Vec::new()),
             field_kinds: RefCell::new(Vec::new()),
             type_decl_store: RefCell::new(std::collections::HashMap::new()),
+            type_decl_by_stamp: RefCell::new(std::collections::HashMap::new()),
         }
     }
 
@@ -139,11 +145,26 @@ impl<'a> TypeContext<'a> {
         self.type_decl_store.borrow_mut().insert(name.to_string(), decl);
     }
 
+    /// Register a type declaration by ident stamp for alias expansion.
+    pub fn register_type_decl_by_stamp(&self, stamp: i32, decl: super::decl::TypeDeclaration) {
+        self.type_decl_by_stamp.borrow_mut().insert(stamp, decl);
+    }
+
     /// Look up a type declaration by name from the global store.
     pub fn find_type_decl(&self, name: &str) -> Option<std::cell::Ref<'_, super::decl::TypeDeclaration>> {
         let store = self.type_decl_store.borrow();
         if store.contains_key(name) {
             Some(std::cell::Ref::map(store, |s| s.get(name).unwrap()))
+        } else {
+            None
+        }
+    }
+
+    /// Look up a type declaration by stamp from the global store.
+    pub fn find_type_decl_by_stamp(&self, stamp: i32) -> Option<std::cell::Ref<'_, super::decl::TypeDeclaration>> {
+        let store = self.type_decl_by_stamp.borrow();
+        if store.contains_key(&stamp) {
+            Some(std::cell::Ref::map(store, |s| s.get(&stamp).unwrap()))
         } else {
             None
         }

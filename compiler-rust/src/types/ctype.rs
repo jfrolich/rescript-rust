@@ -307,49 +307,56 @@ fn try_expand_head(
     let desc = ctx.get_desc(ty);
     match &*desc {
         TypeDesc::Tconstr { path, args, .. } => {
-            // Look up type by name to find manifests for alias expansion.
-            // We use find_type (name-based) rather than lookup_type (ident-based)
-            // because persistent idents share stamp 0, causing stamp-based lookup
-            // to return the wrong type declaration.
             let name = path.head_name().to_string();
+            let args = args.clone();
+            let path = path.clone();
 
-            // Try env by name first
-            let env_decl = env.find_type(&name).ok();
-            if let Some(decl) = env_decl {
-                if let Some(manifest) = decl.type_manifest {
-                    let params = &decl.type_params;
-                    if params.is_empty() {
-                        drop(desc);
-                        return Some(manifest);
-                    } else if params.len() == args.len() {
-                        let params_vec: Vec<TypeExprRef> = params.clone();
-                        let args_vec: Vec<TypeExprRef> = args.clone();
-                        drop(desc);
-                        return Some(subst_type(ctx, &params_vec, &args_vec, manifest));
+            // Try stamp-based lookup first (most precise, handles CMI-loaded types)
+            let stamp = match &path {
+                Path::Pident(id) if id.stamp() != 0 => Some(id.stamp()),
+                _ => None,
+            };
+
+            drop(desc);
+
+            // 1. Try stamp-based global store (precise, for CMI types with non-zero stamps)
+            if let Some(stamp) = stamp {
+                if let Some(store_decl) = ctx.find_type_decl_by_stamp(stamp) {
+                    if let Some(manifest) = store_decl.type_manifest {
+                        let params = &store_decl.type_params;
+                        if params.is_empty() {
+                            return Some(manifest);
+                        } else if params.len() == args.len() {
+                            return Some(subst_type(ctx, &params.clone(), &args, manifest));
+                        }
                     }
                     return None;
                 }
-                // Type found in env but no manifest — this is an abstract type,
-                // not expandable
-                return None;
             }
 
-            // Fall back to global type declaration store
-            let store_decl = ctx.find_type_decl(&name);
-            if let Some(decl) = store_decl {
-                let manifest = match decl.type_manifest {
-                    Some(m) => m,
-                    None => return None,
-                };
-                let params = &decl.type_params;
-                if params.is_empty() {
-                    drop(desc);
-                    return Some(manifest);
-                } else if params.len() == args.len() {
-                    let params_vec: Vec<TypeExprRef> = params.clone();
-                    let args_vec: Vec<TypeExprRef> = args.clone();
-                    drop(desc);
-                    return Some(subst_type(ctx, &params_vec, &args_vec, manifest));
+            // 2. Try env by name
+            if let Ok(env_decl) = env.find_type(&name) {
+                if let Some(manifest) = env_decl.type_manifest {
+                    let params = &env_decl.type_params;
+                    if params.is_empty() {
+                        return Some(manifest);
+                    } else if params.len() == args.len() {
+                        return Some(subst_type(ctx, &params.clone(), &args, manifest));
+                    }
+                    return None;
+                }
+                // Type found in env but no manifest — abstract type, fall through
+            }
+
+            // 3. Fall back to name-based global type declaration store
+            if let Some(store_decl) = ctx.find_type_decl(&name) {
+                if let Some(manifest) = store_decl.type_manifest {
+                    let params = &store_decl.type_params;
+                    if params.is_empty() {
+                        return Some(manifest);
+                    } else if params.len() == args.len() {
+                        return Some(subst_type(ctx, &params.clone(), &args, manifest));
+                    }
                 }
             }
 

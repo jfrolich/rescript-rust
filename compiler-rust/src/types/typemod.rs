@@ -1628,6 +1628,9 @@ fn type_structure_item<'a>(
 
                 // Also register in global type store for alias expansion
                 ctx.register_type_decl(type_name_str, internal_decl.clone());
+                if type_id.stamp() != 0 {
+                    ctx.register_type_decl_by_stamp(type_id.stamp(), internal_decl.clone());
+                }
 
                 // Add constructors to environment, and add inline record labels
                 for (cstr_id, cstr_desc) in constructors {

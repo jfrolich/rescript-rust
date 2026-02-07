@@ -182,6 +182,10 @@ fn register_sig_types_recursive(sig: &Signature, ctx: &TypeContext<'_>) {
         match item {
             SignatureItem::SigType(id, decl, _) => {
                 ctx.register_type_decl(id.name(), decl.clone());
+                // Also register by stamp for precise lookup when name is ambiguous (e.g., "t")
+                if id.stamp() != 0 {
+                    ctx.register_type_decl_by_stamp(id.stamp(), decl.clone());
+                }
             }
             SignatureItem::SigModule(id, md, _) => {
                 // Recurse into sub-module signatures
