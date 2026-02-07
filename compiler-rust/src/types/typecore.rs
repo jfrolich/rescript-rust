@@ -716,9 +716,30 @@ fn transl_type_inner(
                 arg_refs.push(ty);
             }
 
-            // Create path from longident, preserving module qualification
+            // Look up the type in the environment to get the canonical path.
+            // This matches OCaml's Typetexp.transl_type_aux which calls
+            // Env.lookup_type to get the actual Path.t from the environment,
+            // ensuring predef types like int/string/unit use persistent idents
+            // that match the initial_env types and CMI-loaded types.
             let longident = tctx.arena.get_longident(lid.txt);
-            let path = Path::from_longident(longident, |idx| tctx.arena.get_string(idx));
+            let path = match longident {
+                crate::parser::longident::Longident::Lident(name_idx) => {
+                    let name = tctx.arena.get_string(*name_idx);
+                    match env.find_type_with_id(name) {
+                        Ok((id, _decl)) => Path::pident(id.clone()),
+                        Err(_) => {
+                            // Type not found in env - fall back to creating from longident
+                            Path::from_longident(longident, |idx| tctx.arena.get_string(idx))
+                        }
+                    }
+                }
+                crate::parser::longident::Longident::Ldot(prefix, name_idx) => {
+                    // For qualified paths like Module.t, construct from longident
+                    // but try to resolve the module path through the env
+                    Path::from_longident(longident, |idx| tctx.arena.get_string(idx))
+                }
+                _ => Path::from_longident(longident, |idx| tctx.arena.get_string(idx)),
+            };
 
             let constr_ty = ctx.new_constr(path.clone(), arg_refs);
 

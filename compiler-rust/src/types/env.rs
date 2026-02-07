@@ -326,6 +326,16 @@ impl Env {
             .ok_or_else(|| EnvError::TypeNotFound(name.to_string()))
     }
 
+    /// Find a type by name, returning the identifier and declaration.
+    /// The returned identifier has the canonical stamp from the environment
+    /// (e.g., persistent ident for predef types).
+    pub fn find_type_with_id(&self, name: &str) -> EnvResult<(&Ident, &TypeDeclaration)> {
+        self.types
+            .find_by_name_with_id(name)
+            .map(|(id, decl)| (id, decl.as_ref()))
+            .ok_or_else(|| EnvError::TypeNotFound(name.to_string()))
+    }
+
     /// Find a type by path.
     pub fn lookup_type(&self, path: &Path) -> EnvResult<&TypeDeclaration> {
         match path {
