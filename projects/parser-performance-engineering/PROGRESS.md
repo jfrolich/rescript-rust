@@ -12,7 +12,7 @@
 
 | Tier | Description | Status | Progress |
 |------|-------------|--------|----------|
-| Tier 1 | High Impact: Scanner + Token | ✅ Complete | 4/4 |
+| Tier 1 | High Impact: Scanner + Token | 🚧 In Progress | 3/5 |
 | Tier 2 | Medium Impact: Token + Misc | ⏳ Not Started | 0/6 |
 | Tier 3 | Medium Impact: AST + Advanced | ⏳ Not Started | 0/5 |
 | Tier 4 | Architectural | ⏳ Not Started | 0/3 |
@@ -63,6 +63,12 @@ cargo test --release --lib -- benchmark_all --ignored --nocapture
   - Key insight: `rc_cache` must be separate from `intern()` map to preserve marshal parity
   - Impact: Neutral timing (Large 0.82x vs 0.80x baseline, within noise). Memory benefit: shared Rc<str> for duplicate identifiers.
   - Files: `intern.rs`, `parse_arena.rs`, `state.rs`, `expr.rs`, `pattern.rs`, `typ.rs`, `module.rs`, `core.rs`, `jsx_ppx.rs`, `ppx.rs`
+  - ⚠️ **NOTE:** Task 1.3 introduced `Rc<str>` in the Interner. This must be removed — see task 1.4.
+
+- [ ] **1.4 Remove Rc<str> from Interner** ⚠️ HIGH PRIORITY
+  - Replace `Rc<str>` with arena-friendly storage (e.g. `Vec<Box<str>>` + `HashMap<&str, usize>`)
+  - Rc prevents Send+Sync and is slower than direct arena storage
+  - Files: `intern.rs`
 
 ---
 
