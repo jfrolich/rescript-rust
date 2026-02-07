@@ -384,6 +384,9 @@ pub struct ModuleDeclaration {
     pub md_attributes: Vec<Attribute>,
     /// Source location
     pub md_loc: Location,
+    /// Qualified path for this module when accessed through an opened parent.
+    /// E.g., Pdot(Pident "Stdlib") "Console" for Console from opened Stdlib.
+    pub md_path: Option<super::path::Path>,
 }
 
 /// A module type declaration.

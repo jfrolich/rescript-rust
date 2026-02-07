@@ -3840,6 +3840,7 @@ fn type_letmodule(
         md_type: mod_sig,
         md_attributes: vec![],
         md_loc: crate::location::Location::none(),
+        md_path: None,
     };
     body_env.add_module(mod_id.clone(), md_decl);
 
@@ -3940,6 +3941,7 @@ fn build_signature_from_structure(structure: &crate::types::typedtree::Structure
                         md_type: inner_mty,
                         md_attributes: vec![],
                         md_loc: crate::location::Location::none(),
+                        md_path: None,
                     },
                     crate::types::decl::RecStatus::TrecNot,
                 ));
@@ -4334,8 +4336,23 @@ impl Env {
                 // First try local environment
                 if let Ok(md) = self.find_module(mod_name) {
                     let result = Self::resolve_module_type(&md.md_type, pers_env, ctx);
-                    if let Some((sig, _resolved_name)) = result {
-                        return Some((Path::pident(Ident::create_local(mod_name)), sig));
+                    if let Some((sig, resolved_name)) = result {
+                        // Use md_path if available (e.g., Pdot(Pident("Stdlib"), "Console")
+                        // for Console from opened Stdlib), otherwise fall back to Pident.
+                        let path = if let Some(ref qualified_path) = md.md_path {
+                            // If an alias was followed (resolved_name is Some),
+                            // rewrite type paths from the resolved module name
+                            // to the qualified access path.
+                            if let Some(ref old_name) = resolved_name {
+                                crate::cmi::persistent_env::rewrite_module_prefix_in_sig(
+                                    &sig, old_name, qualified_path, ctx,
+                                );
+                            }
+                            qualified_path.clone()
+                        } else {
+                            Path::pident(Ident::create_local(mod_name))
+                        };
+                        return Some((path, sig));
                     }
                 }
                 // Then try persistent environment (external modules)

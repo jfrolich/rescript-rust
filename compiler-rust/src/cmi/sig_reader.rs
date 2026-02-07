@@ -383,6 +383,7 @@ impl<'a> SigReadContext<'a> {
             md_type,
             md_attributes: vec![],
             md_loc: Location::none(),
+            md_path: None,
         }
     }
 

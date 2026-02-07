@@ -309,6 +309,7 @@ fn translate_module_type_to_decl<'a>(
                                 md_type: inner_mty,
                                 md_attributes: vec![],
                                 md_loc: crate::location::Location::none(),
+                                md_path: None,
                             },
                             crate::types::decl::RecStatus::TrecNot,
                         ));
@@ -392,6 +393,7 @@ fn extract_module_type_from_mod_expr(mod_expr: &ModuleExpr) -> Option<crate::typ
                                 md_type: inner_mty,
                                 md_attributes: vec![],
                                 md_loc: crate::location::Location::none(),
+                                md_path: None,
                             },
                             crate::types::decl::RecStatus::TrecNot,
                         ));
@@ -406,6 +408,7 @@ fn extract_module_type_from_mod_expr(mod_expr: &ModuleExpr) -> Option<crate::typ
                                     md_type: inner_mty,
                                     md_attributes: vec![],
                                     md_loc: crate::location::Location::none(),
+                                    md_path: None,
                                 },
                                 crate::types::decl::RecStatus::TrecFirst,
                             ));
@@ -622,6 +625,7 @@ pub fn type_module_expr<'a>(
                         md_type: param_decl_type,
                         md_attributes: vec![],
                         md_loc: crate::location::Location::none(),
+                        md_path: None,
                     });
                 }
             }
@@ -1986,6 +1990,7 @@ fn type_structure_item<'a>(
                     md_type: decl_mod_type,
                     md_attributes: vec![],
                     md_loc: crate::location::Location::none(),
+                    md_path: None,
                 });
             }
 
@@ -2025,6 +2030,7 @@ fn type_structure_item<'a>(
                     md_type: init_mod_type,
                     md_attributes: vec![],
                     md_loc: crate::location::Location::none(),
+                    md_path: None,
                 });
                 mod_ids.push(mod_id);
             }
@@ -2048,6 +2054,7 @@ fn type_structure_item<'a>(
                     md_type: mod_type,
                     md_attributes: vec![],
                     md_loc: crate::location::Location::none(),
+                    md_path: None,
                 });
 
                 typed_bindings.push(ModuleBinding {

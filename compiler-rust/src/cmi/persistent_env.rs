@@ -178,6 +178,7 @@ impl PersistentEnv {
             md_type: ModuleType::MtySignature(ps.ps_sig.clone()),
             md_attributes: vec![],
             md_loc: crate::location::Location::none(),
+            md_path: None,
         })
     }
 }
@@ -863,6 +864,11 @@ pub fn add_signature_to_env(
                 }
             }
             SignatureItem::SigModule(id, md, _rec_status) => {
+                let mut md = md.clone();
+                // Set the qualified path so that when this module is accessed
+                // via Lident (e.g. "Console" from opened Stdlib), we produce
+                // the correct Pdot path (e.g. Pdot(Pident("Stdlib"), "Console"))
+                md.md_path = Some(Path::pdot(module_path.clone(), id.name()));
                 if as_opened {
                     env.add_opened_module(id.clone(), md.clone());
                 } else {
