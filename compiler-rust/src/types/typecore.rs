@@ -3276,31 +3276,32 @@ impl Env {
 mod tests {
     use super::*;
     use crate::context::IdGenerator;
+    use std::borrow::Cow;
 
     #[test]
     fn test_convert_constant_int() {
-        let cst = crate::parser::ast::Constant::Integer("42".to_string(), None);
+        let cst = crate::parser::ast::Constant::Integer(Cow::Borrowed("42"), None);
         let result = convert_constant(&cst).unwrap();
         assert_eq!(result, Constant::Int(42));
     }
 
     #[test]
     fn test_convert_constant_overflow() {
-        let cst = crate::parser::ast::Constant::Integer("99999999999999999".to_string(), None);
+        let cst = crate::parser::ast::Constant::Integer(Cow::Borrowed("99999999999999999"), None);
         let result = convert_constant(&cst);
         assert!(matches!(result, Err(TypeCoreError::LiteralOverflow(_))));
     }
 
     #[test]
     fn test_convert_constant_string() {
-        let cst = crate::parser::ast::Constant::String("hello".to_string(), None);
+        let cst = crate::parser::ast::Constant::String(Cow::Borrowed("hello"), None);
         let result = convert_constant(&cst).unwrap();
         assert!(matches!(result, Constant::String(s, None) if s == "hello"));
     }
 
     #[test]
     fn test_convert_constant_bigint() {
-        let cst = crate::parser::ast::Constant::Integer("12345".to_string(), Some('n'));
+        let cst = crate::parser::ast::Constant::Integer(Cow::Borrowed("12345"), Some('n'));
         let result = convert_constant(&cst).unwrap();
         assert!(matches!(result, Constant::BigInt(true, d) if d == "12345"));
     }

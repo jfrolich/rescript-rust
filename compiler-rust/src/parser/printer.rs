@@ -1631,7 +1631,7 @@ pub fn print_expression(
                 parens::ParenKind::Braced(braces) => print_braces(parent_doc, parent_expr, braces, arena),
                 parens::ParenKind::Nothing => parent_doc,
             };
-            let member_doc = print_comments(Doc::text(&label.txt), cmt_tbl, label.loc, arena);
+            let member_doc = print_comments(Doc::text(&*label.txt), cmt_tbl, label.loc, arena);
             let member = Doc::concat(vec![Doc::text("\""), member_doc, Doc::text("\"")]);
             Doc::group(Doc::concat(vec![
                 parent_doc,
@@ -3312,7 +3312,7 @@ fn print_template_literal(
             // String constant with optional tag prefix (e.g., `j"..."` or just `"..."`)
             ExpressionDesc::Pexp_constant(Constant::String(txt, prefix_opt)) => {
                 if let Some(prefix) = prefix_opt {
-                    *tag = prefix.clone();
+                    *tag = prefix.to_string();
                 }
                 print_string_contents(txt)
             }
@@ -5711,7 +5711,7 @@ fn print_variant_type(
     state: &PrinterState,
     row_fields: &[RowField],
     closed_flag: &ClosedFlag,
-    labels_opt: &Option<Vec<String>>,
+    labels_opt: &Option<Vec<Label>>,
     typ: &CoreType,
     cmt_tbl: &mut CommentTable,
     arena: &ParseArena,

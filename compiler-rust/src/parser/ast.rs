@@ -9,8 +9,28 @@
 #![allow(non_camel_case_types)]
 #![allow(missing_docs)]
 
+use std::borrow::Cow;
+
 use crate::parse_arena::{ArityIdx, LidentIdx, Located, LocIdx, PosIdx, StrIdx};
 use serde::{Deserialize, Serialize};
+
+/// Extend the lifetime of a `Cow<'a, str>` to `'static` for zero-copy AST storage.
+///
+/// # Safety
+///
+/// This is sound when the borrowed source string outlives the AST in all execution
+/// paths. In our codebase, the source `String` lives in `generate_ast()` /
+/// `res_parser::main()`, and the AST is created, transformed, marshaled, and dropped
+/// within the same function scope — so borrowed references into the source are always
+/// valid for the AST's lifetime.
+///
+/// For `Cow::Owned` values, this is a no-op (transmuting the lifetime of an owned
+/// value doesn't affect anything).
+#[inline(always)]
+pub fn extend_cow_lifetime(cow: Cow<'_, str>) -> Cow<'static, str> {
+    // SAFETY: See doc comment above. The source string outlives the AST.
+    unsafe { std::mem::transmute::<Cow<'_, str>, Cow<'static, str>>(cow) }
+}
 
 /// Re-export Located for convenience.
 /// Note: Located<T> uses LocIdx for efficient arena-based storage.
@@ -142,23 +162,33 @@ impl ArgLabel {
 }
 
 /// A label (used for variant constructors, object methods, etc.).
-pub type Label = String;
+///
+/// Uses `Cow<'static, str>` to enable zero-copy from source for the common case.
+/// Parser-produced labels borrow from source via unsafe lifetime extension (sound
+/// because the source string outlives the AST in all execution paths).
+/// PPX-generated labels use `Cow::Owned`.
+pub type Label = Cow<'static, str>;
 
 // ============================================================================
 // Constants
 // ============================================================================
 
 /// Constant values.
+///
+/// Uses `Cow<'static, str>` for string data to enable zero-copy from source.
+/// The `'static` lifetime is sound because the source string outlives the AST
+/// in all execution paths. Parser-produced constants use `Cow::Borrowed` (zero-copy),
+/// while PPX-generated constants use `Cow::Owned`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Constant {
     /// Integer constant with optional suffix (l, L, n).
-    Integer(String, Option<char>),
+    Integer(Cow<'static, str>, Option<char>),
     /// Character constant (Unicode codepoint).
     Char(i32),
     /// String constant with optional delimiter.
-    String(String, Option<String>),
+    String(Cow<'static, str>, Option<Cow<'static, str>>),
     /// Float constant with optional suffix.
-    Float(String, Option<char>),
+    Float(Cow<'static, str>, Option<char>),
 }
 
 // ============================================================================
@@ -219,7 +249,7 @@ pub enum CoreTypeDesc {
     /// Any type: `_`.
     Ptyp_any,
     /// Type variable: `'a`.
-    Ptyp_var(String),
+    Ptyp_var(Cow<'static, str>),
     /// Arrow type: `T1 -> T2`.
     Ptyp_arrow {
         arg: Box<TypeArg>,
@@ -233,7 +263,7 @@ pub enum CoreTypeDesc {
     /// Object type: `{. field: T, ... }`.
     Ptyp_object(Vec<ObjectField>, ClosedFlag),
     /// Type alias: `T as 'a`.
-    Ptyp_alias(Box<CoreType>, String),
+    Ptyp_alias(Box<CoreType>, Cow<'static, str>),
     /// Polymorphic variant: `[> \`A | \`B ]`.
     Ptyp_variant(Vec<RowField>, ClosedFlag, Option<Vec<Label>>),
     /// Polymorphic type: `'a 'b. T`.
@@ -944,10 +974,10 @@ mod tests {
 
     #[test]
     fn test_constant() {
-        let c = Constant::Integer("42".to_string(), None);
+        let c = Constant::Integer(Cow::Borrowed("42"), None);
         assert!(matches!(c, Constant::Integer(..)));
 
-        let c = Constant::String("hello".to_string(), None);
+        let c = Constant::String(Cow::Borrowed("hello"), None);
         assert!(matches!(c, Constant::String(..)));
     }
 

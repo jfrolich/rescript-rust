@@ -3,6 +3,7 @@
 //! This module contains the type expression parsing logic, converting tokens
 //! into type AST nodes.
 
+use std::borrow::Cow;
 use std::collections::HashSet;
 
 use crate::parse_arena::{Located, LocIdx, PosIdx, StrIdx};
@@ -17,9 +18,9 @@ use super::token::Token;
 
 /// Get the string tag based on parser mode.
 /// In typechecker mode, strings are tagged with "js" to indicate JS string literals.
-fn get_string_tag(p: &Parser<'_>) -> Option<String> {
+fn get_string_tag(p: &Parser<'_>) -> Option<Cow<'static, str>> {
     if p.mode == ParserMode::ParseForTypeChecker {
-        Some("js".to_string())
+        Some(Cow::Borrowed("js"))
     } else {
         None
     }
@@ -42,7 +43,7 @@ pub fn substitute_type_vars(arena: &mut crate::parse_arena::ParseArena, typ: Cor
                     let name = arena.get_string(*name_idx);
                     if vars.contains(name) {
                         let source_idx = *name_idx;
-                        let name = name.to_string();
+                        let name = Cow::Owned(name.to_string());
                         arena.record_tyvar_source(typ.ptyp_loc, source_idx);
                         // Convert to Ptyp_var
                         return CoreType {
@@ -180,11 +181,11 @@ pub fn parse_poly_type_expr(p: &mut Parser<'_>) -> CoreType {
             let var_start_idx = p.start_pos_idx();
             let name = match &p.token {
                 Token::Lident(n) | Token::Uident(n) => {
-                    let n = n.to_string();
+                    let n = extend_cow_lifetime(n.clone());
                     p.next();
                     n
                 }
-                _ => "a".to_string(),
+                _ => Cow::Borrowed("a"),
             };
             let var_loc = p.mk_loc_idx_to_prev_end(var_start_idx);
             let typ = CoreType {
@@ -274,9 +275,9 @@ fn parse_type_alias(p: &mut Parser<'_>, typ: CoreType) -> CoreType {
     if p.token == Token::As {
         p.next();
         p.expect(Token::SingleQuote);
-        let var_name = match &p.token {
+        let var_name: Cow<'static, str> = match &p.token {
             Token::Lident(name) | Token::Uident(name) => {
-                let name = name.to_string();
+                let name = extend_cow_lifetime(name.clone());
                 p.next();
                 name
             }
@@ -284,7 +285,7 @@ fn parse_type_alias(p: &mut Parser<'_>, typ: CoreType) -> CoreType {
                 p.err(DiagnosticCategory::Message(
                     "Expected type variable after 'as'".to_string(),
                 ));
-                "a".to_string()
+                Cow::Borrowed("a")
             }
         };
         let typ_start_idx = p.loc_start_idx(typ.ptyp_loc);
@@ -548,7 +549,7 @@ fn parse_atomic_typ_expr_with_start(
                 }
             } else if let Some(first) = vars.first() {
                 CoreType {
-                    ptyp_desc: CoreTypeDesc::Ptyp_var(p.arena().get_string(first.txt).to_string()),
+                    ptyp_desc: CoreTypeDesc::Ptyp_var(Cow::Owned(p.arena().get_string(first.txt).to_string())),
                     ptyp_loc: first.loc.clone(), // Use the variable's location (excludes the ')
                     ptyp_attributes: vec![],
                 }
@@ -1337,7 +1338,7 @@ fn parse_attribute(p: &mut Parser<'_>) -> Option<Attribute> {
 fn parse_attribute_payload(p: &mut Parser<'_>) -> Payload {
     match &p.token {
         Token::String(s) => {
-            let value = s.clone().into_owned();
+            let value = extend_cow_lifetime(s.clone());
             let tag = get_string_tag(p);
             // Capture start_pos before consuming the token
             let start_pos_idx = p.start_pos_idx();
@@ -1663,7 +1664,7 @@ fn parse_poly_variant_type(p: &mut Parser<'_>) -> CoreType {
     p.expect(Token::Lbracket);
 
     // Check for closed/open markers
-    let (closed, mut low_tags) = match &p.token {
+    let (closed, mut low_tags): (ClosedFlag, Option<Vec<Label>>) = match &p.token {
         Token::GreaterThan => {
             p.next();
             (ClosedFlag::Open, None)
@@ -1697,11 +1698,11 @@ fn parse_poly_variant_type(p: &mut Parser<'_>) -> CoreType {
     // For [< ... > #X #Y ], parse the lower bound tag names
     if low_tags.is_some() && p.token == Token::GreaterThan {
         p.next();
-        let mut tags = vec![];
+        let mut tags: Vec<Label> = vec![];
         while p.token == Token::Hash {
             p.next();
             if let Token::Lident(name) | Token::Uident(name) = &p.token {
-                tags.push(name.to_string());
+                tags.push(extend_cow_lifetime(name.clone()));
                 p.next();
             }
         }
@@ -1724,9 +1725,9 @@ fn parse_poly_variant_type_simple(p: &mut Parser<'_>) -> CoreType {
     let start_pos_idx = p.start_pos_idx();
     p.expect(Token::Hash);
 
-    let tag = match &p.token {
+    let tag: Label = match &p.token {
         Token::Lident(name) | Token::Uident(name) => {
-            let name = name.to_string();
+            let name = extend_cow_lifetime(name.clone());
             p.next();
             name
         }
@@ -1742,10 +1743,10 @@ fn parse_poly_variant_type_simple(p: &mut Parser<'_>) -> CoreType {
                 )));
             }
             p.next();
-            tag
+            Cow::Owned(tag)
         }
         Token::String(s) => {
-            let tag = s.to_string();
+            let tag = extend_cow_lifetime(s.clone());
             p.next();
             tag
         }
@@ -1753,7 +1754,7 @@ fn parse_poly_variant_type_simple(p: &mut Parser<'_>) -> CoreType {
             p.err(DiagnosticCategory::Message(
                 "Expected variant tag after #".to_string(),
             ));
-            "error".to_string()
+            Cow::Borrowed("error")
         }
     };
 
@@ -1996,9 +1997,9 @@ fn parse_single_row_field_with_attrs(p: &mut Parser<'_>, attrs: Attributes) -> O
         // Tagged row field: #tag or #tag(args)
         let hash_start_idx = p.start_pos_idx();
         p.next();
-        let tag = match &p.token {
+        let tag: Loc<Label> = match &p.token {
             Token::Lident(name) | Token::Uident(name) => {
-                let name = name.to_string();
+                let name: Label = extend_cow_lifetime(name.clone());
                 let loc = p.mk_loc_idx_to_end(hash_start_idx);
                 p.next();
                 with_loc(name, loc)
@@ -2016,10 +2017,10 @@ fn parse_single_row_field_with_attrs(p: &mut Parser<'_>, attrs: Attributes) -> O
                     )));
                 }
                 p.next();
-                with_loc(tag, loc)
+                with_loc(Cow::Owned(tag), loc)
             }
             Token::String(s) => {
-                let tag = s.to_string();
+                let tag: Label = extend_cow_lifetime(s.clone());
                 let loc = p.mk_loc_idx_to_end(hash_start_idx);
                 p.next();
                 with_loc(tag, loc)
@@ -2027,18 +2028,18 @@ fn parse_single_row_field_with_attrs(p: &mut Parser<'_>, attrs: Attributes) -> O
             Token::True => {
                 let loc = p.mk_loc_idx_to_end(hash_start_idx);
                 p.next();
-                with_loc("true".to_string(), loc)
+                with_loc(Cow::Borrowed("true"), loc)
             }
             Token::False => {
                 let loc = p.mk_loc_idx_to_end(hash_start_idx);
                 p.next();
-                with_loc("false".to_string(), loc)
+                with_loc(Cow::Borrowed("false"), loc)
             }
             _ => {
                 p.err(DiagnosticCategory::Message(
                     "Expected variant tag after #".to_string(),
                 ));
-                mknoloc("error".to_string())
+                mknoloc(Cow::Borrowed("error"))
             }
         };
 
@@ -2123,9 +2124,9 @@ fn parse_row_fields(p: &mut Parser<'_>) -> Vec<RowField> {
             // Capture the # position for location - OCaml includes # in the tag location
             let hash_start_idx = p.start_pos_idx();
             p.next();
-            let tag = match &p.token {
+            let tag: Loc<Label> = match &p.token {
                 Token::Lident(name) | Token::Uident(name) => {
-                    let name = name.to_string();
+                    let name: Label = extend_cow_lifetime(name.clone());
                     let loc = p.mk_loc_idx_to_end(hash_start_idx);
                     p.next();
                     with_loc(name, loc)
@@ -2143,10 +2144,10 @@ fn parse_row_fields(p: &mut Parser<'_>) -> Vec<RowField> {
                         )));
                     }
                     p.next();
-                    with_loc(tag, loc)
+                    with_loc(Cow::Owned(tag), loc)
                 }
                 Token::String(s) => {
-                    let tag = s.to_string();
+                    let tag: Label = extend_cow_lifetime(s.clone());
                     let loc = p.mk_loc_idx_to_end(hash_start_idx);
                     p.next();
                     with_loc(tag, loc)
@@ -2154,18 +2155,18 @@ fn parse_row_fields(p: &mut Parser<'_>) -> Vec<RowField> {
                 Token::True => {
                     let loc = p.mk_loc_idx_to_end(hash_start_idx);
                     p.next();
-                    with_loc("true".to_string(), loc)
+                    with_loc(Cow::Borrowed("true"), loc)
                 }
                 Token::False => {
                     let loc = p.mk_loc_idx_to_end(hash_start_idx);
                     p.next();
-                    with_loc("false".to_string(), loc)
+                    with_loc(Cow::Borrowed("false"), loc)
                 }
                 _ => {
                     p.err(DiagnosticCategory::Message(
                         "Expected variant tag after #".to_string(),
                     ));
-                    mknoloc("error".to_string())
+                    mknoloc(Cow::Borrowed("error"))
                 }
             };
 

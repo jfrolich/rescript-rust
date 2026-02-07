@@ -72,6 +72,14 @@ impl<'a> Mapper<'a> {
         }
     }
 
+    /// Convert a Located<Cow<'static, str>> to OldLocated<String> for labels
+    fn map_label_loc(&mut self, located: &Located<std::borrow::Cow<'static, str>>) -> OldLocated<String> {
+        OldLocated {
+            txt: located.txt.to_string(),
+            loc: self.loc(located.loc),
+        }
+    }
+
     /// Convert a Located<StrIdx> to OldLocated<String> by looking up the string
     fn map_string_loc(&mut self, located: &Located<StrIdx>) -> OldLocated<String> {
         OldLocated {
@@ -362,7 +370,7 @@ impl<'a> Mapper<'a> {
 
     fn map_constant(&mut self, c: &current::Constant) -> pt0::Constant {
         match c {
-            current::Constant::Integer(s, opt) => pt0::Constant::Integer(s.clone(), *opt),
+            current::Constant::Integer(s, opt) => pt0::Constant::Integer(s.to_string(), *opt),
             current::Constant::Char(i) => pt0::Constant::Char(*i),
             current::Constant::String(s, opt) => {
                 // OCaml maps None (regular strings) to Some("js") in parsetree0.
@@ -371,11 +379,11 @@ impl<'a> Mapper<'a> {
                 // For parsetree0 parity, we just need to convert None -> Some("js").
                 let mapped_delim = match opt {
                     None => Some("js".to_string()),
-                    other => other.clone(),
+                    other => other.as_ref().map(|d| d.to_string()),
                 };
-                pt0::Constant::String(s.clone(), mapped_delim)
+                pt0::Constant::String(s.to_string(), mapped_delim)
             }
-            current::Constant::Float(s, opt) => pt0::Constant::Float(s.clone(), *opt),
+            current::Constant::Float(s, opt) => pt0::Constant::Float(s.to_string(), *opt),
         }
     }
 
@@ -482,7 +490,7 @@ impl<'a> Mapper<'a> {
     fn map_core_type_desc(&mut self, desc: &current::CoreTypeDesc) -> pt0::CoreTypeDesc {
         match desc {
             current::CoreTypeDesc::Ptyp_any => pt0::CoreTypeDesc::Any,
-            current::CoreTypeDesc::Ptyp_var(s) => pt0::CoreTypeDesc::Var(s.clone()),
+            current::CoreTypeDesc::Ptyp_var(s) => pt0::CoreTypeDesc::Var(s.to_string()),
             current::CoreTypeDesc::Ptyp_arrow { arg, ret, arity: _ } => {
                 // This branch should not normally be reached since map_core_type handles arrows
                 // But keep it for completeness - treat as no arity
@@ -508,13 +516,13 @@ impl<'a> Mapper<'a> {
                 )
             }
             current::CoreTypeDesc::Ptyp_alias(ty, s) => {
-                pt0::CoreTypeDesc::Alias(Box::new(self.map_core_type(ty)), s.clone())
+                pt0::CoreTypeDesc::Alias(Box::new(self.map_core_type(ty)), s.to_string())
             }
             current::CoreTypeDesc::Ptyp_variant(fields, flag, labels) => {
                 pt0::CoreTypeDesc::Variant(
                     fields.iter().map(|f| self.map_row_field(f)).collect(),
                     self.map_closed_flag(*flag),
-                    labels.clone(),
+                    labels.as_ref().map(|ls| ls.iter().map(|l| l.to_string()).collect()),
                 )
             }
             current::CoreTypeDesc::Ptyp_poly(vars, ty) => {
@@ -549,7 +557,7 @@ impl<'a> Mapper<'a> {
         match field {
             current::RowField::Rtag(label, attrs, b, types) => {
                 pt0::RowField::Rtag(
-                    self.map_loc(label),
+                    self.map_label_loc(label),
                     self.map_attributes(attrs),
                     *b,
                     types.iter().map(|t| self.map_core_type(t)).collect(),
@@ -613,7 +621,7 @@ impl<'a> Mapper<'a> {
                 )
             }
             current::PatternDesc::Ppat_variant(label, opt) => {
-                pt0::PatternDesc::Variant(label.clone(), opt.as_ref().map(|p| Box::new(self.map_pattern(p))))
+                pt0::PatternDesc::Variant(label.to_string(), opt.as_ref().map(|p| Box::new(self.map_pattern(p))))
             }
             current::PatternDesc::Ppat_record(fields, flag) => {
                 // Use RecordElement with 3 fields (lid, x, opt) for current parsetree format
@@ -799,7 +807,7 @@ impl<'a> Mapper<'a> {
             }
             current::ExpressionDesc::Pexp_variant(label, opt) => {
                 pt0::ExpressionDesc::Variant(
-                    label.clone(),
+                    label.to_string(),
                     opt.as_ref().map(|e| Box::new(self.map_expression(e))),
                 )
             }
@@ -869,7 +877,7 @@ impl<'a> Mapper<'a> {
                 pt0::ExpressionDesc::Coerce(Box::new(self.map_expression(e)), (), Box::new(self.map_core_type(ty)))
             }
             current::ExpressionDesc::Pexp_send(e, label) => {
-                pt0::ExpressionDesc::Send(Box::new(self.map_expression(e)), self.map_loc(label))
+                pt0::ExpressionDesc::Send(Box::new(self.map_expression(e)), self.map_label_loc(label))
             }
             current::ExpressionDesc::Pexp_letmodule(name, me, body) => {
                 pt0::ExpressionDesc::Letmodule(
@@ -1429,17 +1437,18 @@ mod tests {
 
     #[test]
     fn test_map_constant() {
+        use std::borrow::Cow;
         let mut arena = ParseArena::new();
         let mut mapper = Mapper::new(&mut arena);
 
-        let c1 = mapper.map_constant(&current::Constant::Integer("42".to_string(), None));
+        let c1 = mapper.map_constant(&current::Constant::Integer(Cow::Borrowed("42"), None));
         assert!(matches!(c1, pt0::Constant::Integer(s, None) if s == "42"));
 
         let c2 = mapper.map_constant(&current::Constant::Char(65));
         assert!(matches!(c2, pt0::Constant::Char(65)));
 
         // Note: None delimiter is mapped to Some("js") for OCaml parsetree0 parity
-        let c3 = mapper.map_constant(&current::Constant::String("hello".to_string(), None));
+        let c3 = mapper.map_constant(&current::Constant::String(Cow::Borrowed("hello"), None));
         assert!(matches!(c3, pt0::Constant::String(s, Some(d)) if s == "hello" && d == "js"));
     }
 }

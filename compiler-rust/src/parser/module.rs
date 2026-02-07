@@ -3,6 +3,7 @@
 //! This module contains the module parsing logic, converting tokens
 //! into module AST nodes (structures, signatures, module expressions, etc.).
 
+use std::borrow::Cow;
 use std::cell::RefCell;
 
 use crate::location::Position;
@@ -2075,7 +2076,7 @@ fn parse_with_constraint(p: &mut Parser<'_>) -> Option<WithConstraint> {
                 // Accept both Lident ('a) and Uident ('X) as type variable names
                 let var = match &p.token {
                     Token::Lident(name) | Token::Uident(name) => {
-                        let name = name.to_string();
+                        let name = extend_cow_lifetime(name.clone());
                         // OCaml: ident_loc spans from 'constraint' keyword to end of identifier
                         let loc = p.mk_loc_idx_to_end(cstr_start_idx);
                         p.next();
@@ -3204,7 +3205,7 @@ fn parse_type_declaration_with_context(
         // Parse the type variable
         p.expect(Token::SingleQuote);
         let var = if let Token::Lident(name) = &p.token {
-            let name = name.to_string();
+            let name = extend_cow_lifetime(name.clone());
             let var_end_idx = p.end_pos_idx();
             p.next();
             // OCaml: type variable location starts at "constraint" keyword
@@ -3398,7 +3399,7 @@ fn parse_type_params_angle(p: &mut Parser<'_>) -> Vec<(CoreType, Variance)> {
             p.next();
             match &p.token {
                 Token::Lident(name) | Token::Uident(name) => {
-                    let name = name.to_string();
+                    let name = extend_cow_lifetime(name.clone());
                     let loc = p.mk_loc_current();
                     p.next();
                     let typ = CoreType {
@@ -3427,7 +3428,7 @@ fn parse_type_params_angle(p: &mut Parser<'_>) -> Vec<(CoreType, Variance)> {
                     p.next();
                     // Still add a param for recovery
                     let typ = CoreType {
-                        ptyp_desc: CoreTypeDesc::Ptyp_var(keyword),
+                        ptyp_desc: CoreTypeDesc::Ptyp_var(Cow::Owned(keyword)),
                         ptyp_loc: loc,
                         ptyp_attributes: vec![],
                     };
@@ -3446,7 +3447,7 @@ fn parse_type_params_angle(p: &mut Parser<'_>) -> Vec<(CoreType, Variance)> {
                     p.next();
                     // Add placeholder for recovery - use empty string for type var
                     let typ = CoreType {
-                        ptyp_desc: CoreTypeDesc::Ptyp_var(String::new()),
+                        ptyp_desc: CoreTypeDesc::Ptyp_var(Cow::Borrowed("")),
                         ptyp_loc: p.mk_loc_idx_to_prev_end(param_start_idx),
                         ptyp_attributes: vec![],
                     };
@@ -3471,7 +3472,7 @@ fn parse_type_params_angle(p: &mut Parser<'_>) -> Vec<(CoreType, Variance)> {
                     }
                     // Add placeholder for recovery - use empty string for type var
                     let typ = CoreType {
-                        ptyp_desc: CoreTypeDesc::Ptyp_var(String::new()),
+                        ptyp_desc: CoreTypeDesc::Ptyp_var(Cow::Borrowed("")),
                         ptyp_loc: p.mk_loc_idx_to_prev_end(param_start_idx),
                         ptyp_attributes: vec![],
                     };
@@ -3503,7 +3504,7 @@ fn parse_type_params_angle(p: &mut Parser<'_>) -> Vec<(CoreType, Variance)> {
             p.next();
             // Add for recovery
             let typ = CoreType {
-                ptyp_desc: CoreTypeDesc::Ptyp_var(name),
+                ptyp_desc: CoreTypeDesc::Ptyp_var(Cow::Owned(name)),
                 ptyp_loc: loc,
                 ptyp_attributes: vec![],
             };
@@ -3535,7 +3536,7 @@ fn parse_type_params_old_style(p: &mut Parser<'_>, _type_name: String) -> Vec<(C
             p.next();
             match &p.token {
                 Token::Lident(name) | Token::Uident(name) => {
-                    let name = name.to_string();
+                    let name = extend_cow_lifetime(name.clone());
                     let loc = p.mk_loc_current();
                     p.next();
                     let typ = CoreType {
@@ -3547,7 +3548,7 @@ fn parse_type_params_old_style(p: &mut Parser<'_>, _type_name: String) -> Vec<(C
                 }
                 t if t.is_keyword() => {
                     // Reserved keyword as type param (e.g., 'for)
-                    let name = format!("{}", t);
+                    let name = Cow::Owned(format!("{}", t));
                     let loc = p.mk_loc_current();
                     p.next();
                     let typ = CoreType {

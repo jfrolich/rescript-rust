@@ -12,7 +12,7 @@
 
 | Tier | Description | Status | Progress |
 |------|-------------|--------|----------|
-| Tier 1 | High Impact: Scanner + Token | 🚧 In Progress | 3/6 |
+| Tier 1 | High Impact: Scanner + Token | 🚧 In Progress | 4/6 |
 | Tier 2 | High Impact: AST + Token Layout | ⏳ Not Started | 0/6 |
 | Tier 3 | Medium Impact: DOD + Misc | ⏳ Not Started | 0/7 |
 | Tier 4 | Architectural | ⏳ Not Started | 0/4 |
@@ -73,12 +73,14 @@ cargo test --release --lib -- benchmark_all --ignored --nocapture
   - All 1196 parity tests pass with zero regressions
   - Files: `intern.rs`, `parse_arena.rs` (doc comments only)
 
-- [ ] **1.5 Zero-copy Constant and Label strings**
-  - `Constant::Integer/Float/String` and `Label` use owned `String` — unnecessary heap alloc
-  - Change to `Cow<'a, str>` or `&'a str`, propagating source lifetime into AST
-  - ~15 hot-path `.clone().into_owned()` calls eliminated (99% are just source borrows)
-  - Only escape-processed strings (5 scanner paths) would allocate
-  - Files: `ast.rs`, `expr.rs`, `typ.rs`, `pattern.rs`, `core.rs`, `module.rs`, marshal
+- [x] **1.5 Zero-copy Constant and Label strings**
+  - Changed `Constant::Integer/Float/String`, `Label`, `Ptyp_var`, `Ptyp_alias` to `Cow<'static, str>`
+  - Uses `extend_cow_lifetime()` (unsafe transmute) to propagate zero-copy borrows from scanner to AST
+  - ~15 hot-path `.clone().into_owned()` heap allocations eliminated
+  - Only escape-processed strings (scanner's `Cow::Owned` paths) allocate
+  - Impact: Large files 0.80x→0.77x (~4% faster)
+  - All 1196 parity tests pass with zero regressions
+  - Files: `ast.rs`, `expr.rs`, `typ.rs`, `pattern.rs`, `module.rs`, `sexp.rs`, `sexp_locs.rs`, `jsx_ppx.rs`, `ppx.rs`, `spice_ppx.rs`, `mapper_from0.rs`, `mapper_to0.rs`, `writer.rs`, `typecore.rs`
 
 ---
 
@@ -198,6 +200,7 @@ cargo test --release --lib -- benchmark_all --ignored --nocapture
 | Zero-copy token strings (Cow) | Feb 2026 | Large files 0.83x→0.80x (~4% faster) | fcab3e407 |
 | String interning (Rc<str>) | Feb 2026 | Neutral timing, reduced memory allocs | ae9fa6ad2 |
 | Remove Rc<str> from Interner | Feb 2026 | Neutral timing, removes Rc overhead, enables Send+Sync | ce156406f |
+| Zero-copy Constant and Label strings | Feb 2026 | Large 0.80x→0.77x (~4% faster) | ae09c8d1f |
 
 ---
 
@@ -284,6 +287,28 @@ Parity: 1196/1196 files pass
 Notes: Timing impact is neutral (within measurement noise of previous).
 Change removes Rc<str> overhead and enables Send+Sync on the Interner,
 unblocking potential future multi-threaded parsing.
+```
+
+### After 1.5 Zero-copy Constant and Label strings (February 2026)
+
+```
+Run: cargo test --release --lib -- benchmark_all --ignored --nocapture
+
+  Size Tier                  Files   Faster       OK Avg Factor Min Factor Max Factor
+  -------------------------------------------------------------------------------------
+  Large (>30KB)                 14       13        1       0.77x       0.53x       1.04x
+  Medium (10-30KB)              73       73        0       0.54x       0.30x       0.79x
+  Small (1-10KB)               443      443        0       0.39x       0.24x       0.65x
+  Tiny (<1KB)                  636      636        0       0.31x       0.13x       0.39x
+
+Overall: 1166/1166 passing (1165 faster, 1 within tolerance), 38 skipped
+Parity: 1196/1196 files pass
+
+Notes: Measurable improvement on large files (0.80x→0.77x, ~4% faster).
+Zero-copy Cow<'static, str> eliminates heap allocations for integer, float,
+string constants, labels, type variables, and variant tags. Only escape-processed
+strings allocate. Uses unsafe extend_cow_lifetime() transmute (sound because
+source string outlives AST in all execution paths).
 ```
 
 *Add new entries below as optimizations are applied.*

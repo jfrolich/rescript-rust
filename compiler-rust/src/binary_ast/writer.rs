@@ -394,7 +394,7 @@ mod tests {
                     },
                     pvb_expr: Expression {
                         pexp_desc: ExpressionDesc::Pexp_constant(Constant::Integer(
-                            value.to_string(),
+                            std::borrow::Cow::Owned(value.to_string()),
                             None,
                         )),
                         pexp_loc: LocIdx::none(),

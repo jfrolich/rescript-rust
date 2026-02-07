@@ -377,7 +377,7 @@ fn constant_inner(c: &Constant) -> Sexp {
         Constant::Char(_) => Sexp::list(vec![Sexp::atom("Pconst_char")]),
         Constant::String(txt, tag) => {
             // Check for internal char marker
-            if tag.as_ref().map(|t| t.as_str()) == Some("INTERNAL_RES_CHAR_CONTENTS") {
+            if tag.as_ref().map(|t| &**t) == Some("INTERNAL_RES_CHAR_CONTENTS") {
                 Sexp::list(vec![Sexp::atom("Pconst_char")])
             } else {
                 // Tagged strings (template literals) don't escape quotes in sexp output

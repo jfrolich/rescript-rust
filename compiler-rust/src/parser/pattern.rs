@@ -3,6 +3,8 @@
 //! This module contains the pattern parsing logic, converting tokens
 //! into pattern AST nodes.
 
+use std::borrow::Cow;
+
 use super::ast::*;
 use super::core::{ast_helper, mknoloc, recover, template_literal_attr, with_loc};
 use super::diagnostics::DiagnosticCategory;
@@ -193,13 +195,13 @@ fn parse_single_pattern(p: &mut Parser<'_>) -> Pattern {
                         p.next();
                         match &p.token {
                             Token::Int { i, suffix } => {
-                                let value = format!("-{}", i);
+                                let value = Cow::Owned(format!("-{}", i));
                                 let suffix = suffix.clone();
                                 p.next();
                                 Constant::Integer(value, suffix)
                             }
                             Token::Float { f, suffix } => {
-                                let value = format!("-{}", f);
+                                let value = Cow::Owned(format!("-{}", f));
                                 let suffix = suffix.clone();
                                 p.next();
                                 Constant::Float(value, suffix)
@@ -208,7 +210,7 @@ fn parse_single_pattern(p: &mut Parser<'_>) -> Pattern {
                                 p.err(DiagnosticCategory::Message(
                                     "Expected number after '-' in interval pattern".to_string(),
                                 ));
-                                Constant::Integer("0".to_string(), None)
+                                Constant::Integer(Cow::Borrowed("0"), None)
                             }
                         }
                     }
@@ -216,7 +218,7 @@ fn parse_single_pattern(p: &mut Parser<'_>) -> Pattern {
                         p.err(DiagnosticCategory::Message(
                             "Expected constant after '..' in pattern".to_string(),
                         ));
-                        Constant::Integer("0".to_string(), None)
+                        Constant::Integer(Cow::Borrowed("0"), None)
                     }
                 };
                 let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
@@ -766,9 +768,9 @@ fn parse_atomic_pattern(p: &mut Parser<'_>) -> Pattern {
             match &p.token {
                 Token::Int { i, suffix } => {
                     let value = if is_negative {
-                        format!("-{}", i)
+                        Cow::Owned(format!("-{}", i))
                     } else {
-                        i.to_string()
+                        extend_cow_lifetime(i.clone())
                     };
                     let suffix = suffix.clone();
                     p.next();
@@ -781,9 +783,9 @@ fn parse_atomic_pattern(p: &mut Parser<'_>) -> Pattern {
                 }
                 Token::Float { f, suffix } => {
                     let value = if is_negative {
-                        format!("-{}", f)
+                        Cow::Owned(format!("-{}", f))
                     } else {
-                        f.to_string()
+                        extend_cow_lifetime(f.clone())
                     };
                     let suffix = suffix.clone();
                     p.next();
@@ -1468,10 +1470,10 @@ fn parse_template_literal_pattern(p: &mut Parser<'_>, start_pos_idx: PosIdx) -> 
     }
 
     // Check if this is a simple template (no interpolation)
-    let delimiter = if let Token::TemplateTail { text: chunk, .. } = &p.token {
+    let delimiter: Option<Cow<'static, str>> = if let Token::TemplateTail { text: chunk, .. } = &p.token {
         text.push_str(chunk);
         p.next();
-        Some("js".to_string())
+        Some(Cow::Borrowed("js"))
     } else {
         // Has interpolation - skip all tokens and report error at original start_pos
         // OCaml: Parser.err ~start_pos ~end_pos:p.prev_end_pos p (message ...)
@@ -1500,7 +1502,7 @@ fn parse_template_literal_pattern(p: &mut Parser<'_>, start_pos_idx: PosIdx) -> 
     let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
 
     Pattern {
-        ppat_desc: PatternDesc::Ppat_constant(Constant::String(text, delimiter)),
+        ppat_desc: PatternDesc::Ppat_constant(Constant::String(Cow::Owned(text), delimiter)),
         ppat_loc: loc,
         ppat_attributes: vec![template_literal_attr(p.arena_mut())],
     }
@@ -1531,9 +1533,9 @@ fn parse_poly_variant_pattern(p: &mut Parser<'_>) -> Pattern {
         };
     }
 
-    let tag = match &p.token {
+    let tag: Label = match &p.token {
         Token::Lident(name) | Token::Uident(name) => {
-            let name = name.to_string();
+            let name = extend_cow_lifetime(name.clone());
             p.next();
             name
         }
@@ -1549,10 +1551,10 @@ fn parse_poly_variant_pattern(p: &mut Parser<'_>) -> Pattern {
                 )));
             }
             p.next();
-            tag
+            Cow::Owned(tag)
         }
         Token::String(s) => {
-            let tag = s.to_string();
+            let tag = extend_cow_lifetime(s.clone());
             p.next();
             tag
         }
@@ -1560,7 +1562,7 @@ fn parse_poly_variant_pattern(p: &mut Parser<'_>) -> Pattern {
             p.err(DiagnosticCategory::Message(
                 "Expected variant tag after #".to_string(),
             ));
-            "error".to_string()
+            Cow::Borrowed("error")
         }
     };
 

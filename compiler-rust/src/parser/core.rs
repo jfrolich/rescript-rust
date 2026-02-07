@@ -7,6 +7,8 @@ use crate::location::Position;
 use crate::parse_arena::{LocIdx, ParseArena, PosIdx, StrIdx};
 use crate::parser::DiagnosticCategory;
 
+use std::borrow::Cow;
+
 use super::ast::*;
 use super::grammar;
 use super::longident::Longident;
@@ -514,7 +516,7 @@ pub fn doc_comment_to_attribute(arena: &mut ParseArena, loc: Location, content: 
         pstr_desc: StructureItemDesc::Pstr_eval(
             Expression {
                 pexp_desc: ExpressionDesc::Pexp_constant(Constant::String(
-                    content.into(),
+                    Cow::Owned(content.into()),
                     None,
                 )),
                 pexp_loc: loc,
@@ -801,7 +803,7 @@ pub fn make_unary_expr(
         (Token::Minus, ExpressionDesc::Pexp_constant(Constant::Integer(n, suffix))) => {
             return Expression {
                 pexp_desc: ExpressionDesc::Pexp_constant(Constant::Integer(
-                    negate_string(n),
+                    Cow::Owned(negate_string(n)),
                     *suffix,
                 )),
                 ..operand
@@ -813,7 +815,7 @@ pub fn make_unary_expr(
         ) => {
             return Expression {
                 pexp_desc: ExpressionDesc::Pexp_constant(Constant::Float(
-                    negate_string(n),
+                    Cow::Owned(negate_string(n)),
                     *suffix,
                 )),
                 ..operand
@@ -1218,7 +1220,7 @@ mod tests {
     fn test_ast_helper_make_expr() {
         let loc = LocIdx::none();
         let expr = ast_helper::make_expr(
-            ExpressionDesc::Pexp_constant(Constant::Integer("42".to_string(), None)),
+            ExpressionDesc::Pexp_constant(Constant::Integer(Cow::Borrowed("42"), None)),
             loc,
         );
         assert!(matches!(

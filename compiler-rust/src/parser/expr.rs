@@ -23,9 +23,9 @@ use super::token::Token;
 /// Get the string tag based on parser mode.
 /// In typechecker mode, strings are tagged with "js" to indicate JS string literals.
 /// In printer mode, strings have no tag.
-fn get_string_tag(p: &Parser<'_>) -> Option<String> {
+fn get_string_tag(p: &Parser<'_>) -> Option<Cow<'static, str>> {
     if p.mode == ParserMode::ParseForTypeChecker {
-        Some("js".to_string())
+        Some(Cow::Borrowed("js"))
     } else {
         None
     }
@@ -35,38 +35,38 @@ fn get_string_tag(p: &Parser<'_>) -> Option<String> {
 pub fn parse_constant(p: &mut Parser<'_>) -> Constant {
     match &p.token {
         Token::Int { i, suffix } => {
-            let value = i.clone().into_owned();
+            let value = extend_cow_lifetime(i.clone());
             let s = *suffix;
             p.next();
             Constant::Integer(value, s)
         }
         Token::Float { f, suffix } => {
-            let value = f.clone().into_owned();
+            let value = extend_cow_lifetime(f.clone());
             let s = *suffix;
             p.next();
             Constant::Float(value, s)
         }
         Token::String(s) => {
-            let value = s.clone().into_owned();
+            let value = extend_cow_lifetime(s.clone());
             let tag = get_string_tag(p);
             p.next();
             Constant::String(value, tag)
         }
         Token::Codepoint { c, original } => {
             let value = *c;
-            let orig = original.clone().into_owned();
+            let orig = extend_cow_lifetime(original.clone());
             p.next();
             // When parsing for the printer (not type checker), preserve the original escape format
             // by encoding it as a string with a special prefix, like OCaml does.
             if p.mode == ParserMode::ParseForTypeChecker {
                 Constant::Char(value)
             } else {
-                Constant::String(orig, Some("INTERNAL_RES_CHAR_CONTENTS".to_string()))
+                Constant::String(orig, Some(Cow::Borrowed("INTERNAL_RES_CHAR_CONTENTS")))
             }
         }
         _ => {
             p.err(DiagnosticCategory::Message("Expected constant".to_string()));
-            Constant::Integer("0".to_string(), None)
+            Constant::Integer(Cow::Borrowed("0"), None)
         }
     }
 }
@@ -1549,7 +1549,7 @@ fn parse_attribute_id(p: &mut Parser<'_>, start_pos_idx: PosIdx) -> StringLoc {
 fn parse_payload(p: &mut Parser<'_>) -> Payload {
     // Simple case: just a string literal like @as("foo")
     if let Token::String(s) = &p.token {
-        let s = s.clone().into_owned();
+        let s = extend_cow_lifetime(s.clone());
         let tag = get_string_tag(p);
         let start_pos_idx = p.start_pos_idx();
         p.next();
@@ -1755,7 +1755,7 @@ pub fn parse_atomic_expr(p: &mut Parser<'_>) -> Expression {
             let regex_str = format!("/{}/{}", pattern, flags);
             let tag = get_string_tag(p);
             let str_expr = Expression {
-                pexp_desc: ExpressionDesc::Pexp_constant(Constant::String(regex_str, tag)),
+                pexp_desc: ExpressionDesc::Pexp_constant(Constant::String(Cow::Owned(regex_str), tag)),
                 pexp_loc: loc.clone(),
                 pexp_attributes: vec![],
             };
@@ -1786,7 +1786,7 @@ pub fn parse_atomic_expr(p: &mut Parser<'_>) -> Expression {
                 let regex_str = format!("/{}/{}", pattern, flags);
                 let tag = get_string_tag(p);
                 let str_expr = Expression {
-                    pexp_desc: ExpressionDesc::Pexp_constant(Constant::String(regex_str, tag)),
+                    pexp_desc: ExpressionDesc::Pexp_constant(Constant::String(Cow::Owned(regex_str), tag)),
                     pexp_loc: loc.clone(),
                     pexp_attributes: vec![],
                 };
@@ -1825,7 +1825,7 @@ pub fn parse_atomic_expr(p: &mut Parser<'_>) -> Expression {
                 let regex_str = format!("/{}/{}", pattern, flags);
                 let tag = get_string_tag(p);
                 let str_expr = Expression {
-                    pexp_desc: ExpressionDesc::Pexp_constant(Constant::String(regex_str, tag)),
+                    pexp_desc: ExpressionDesc::Pexp_constant(Constant::String(Cow::Owned(regex_str), tag)),
                     pexp_loc: loc.clone(),
                     pexp_attributes: vec![],
                 };
@@ -1973,9 +1973,9 @@ pub fn parse_atomic_expr(p: &mut Parser<'_>) -> Expression {
         Token::Hash => {
             // Polyvariant: #tag or #tag(arg)
             p.next();
-            let tag = match &p.token {
+            let tag: Label = match &p.token {
                 Token::Lident(name) | Token::Uident(name) => {
-                    let name = name.to_string();
+                    let name = extend_cow_lifetime(name.clone());
                     p.next();
                     name
                 }
@@ -1991,10 +1991,10 @@ pub fn parse_atomic_expr(p: &mut Parser<'_>) -> Expression {
                         )));
                     }
                     p.next();
-                    tag
+                    Cow::Owned(tag)
                 }
                 Token::String(s) => {
-                    let tag = s.to_string();
+                    let tag = extend_cow_lifetime(s.clone());
                     p.next();
                     tag
                 }
@@ -2002,7 +2002,7 @@ pub fn parse_atomic_expr(p: &mut Parser<'_>) -> Expression {
                     p.err(DiagnosticCategory::Message(
                         "Expected variant tag after #".to_string(),
                     ));
-                    "error".to_string()
+                    Cow::Borrowed("error")
                 }
             };
 
@@ -3338,7 +3338,7 @@ fn parse_dict_expr(p: &mut Parser<'_>, start_pos_idx: PosIdx) -> Expression {
         // Parse key (string)
         match &p.token {
             Token::String(s) => {
-                let key = s.clone().into_owned();
+                let key = extend_cow_lifetime(s.clone());
                 // Dict keys are always None (printed as "key"), not Some("js")
                 // This matches OCaml's behavior where dict keys stay as object property names
                 let key_start_idx = p.start_pos_idx();
@@ -4865,7 +4865,7 @@ fn suppress_fragile_match_warning_attr(p: &mut Parser<'_>) -> Attribute {
             StructureItem {
                 pstr_desc: StructureItemDesc::Pstr_eval(
                     Expression {
-                        pexp_desc: ExpressionDesc::Pexp_constant(Constant::String("-4".to_string(), None)),
+                        pexp_desc: ExpressionDesc::Pexp_constant(Constant::String(Cow::Borrowed("-4"), None)),
                         pexp_loc: loc,
                         pexp_attributes: vec![],
                     },
@@ -6037,7 +6037,7 @@ fn parse_jsx_children(p: &mut Parser<'_>) -> Vec<Expression> {
             children.push(expr);
         } else if let Token::String(s) = &p.token {
             // Handle string literals in JSX content
-            let s = s.clone().into_owned();
+            let s = extend_cow_lifetime(s.clone());
             let start_pos_idx = p.start_pos_idx();
             let tag = get_string_tag(p);
             p.next();
@@ -6124,8 +6124,8 @@ fn parse_template_literal_with_prefix(
 
     // Determine the string delimiter based on prefix (json -> "json", otherwise "js")
     let part_prefix = match &prefix {
-        Some((lid_idx, _)) if p.arena().is_lident(*lid_idx, "json") => Some("json".to_string()),
-        _ => Some("js".to_string()),
+        Some((lid_idx, _)) if p.arena().is_lident(*lid_idx, "json") => Some(Cow::Borrowed("json")),
+        _ => Some(Cow::Borrowed("js")),
     };
 
     // Parse template parts
@@ -6148,7 +6148,7 @@ fn parse_template_literal_with_prefix(
         match &p.token {
             Token::TemplatePart { text, pos } => {
                 // Part before an interpolation ${
-                let text = text.clone().into_owned();
+                let text = extend_cow_lifetime(text.clone());
                 let pos = pos.clone();
                 // OCaml uses the embedded last_pos from the token, not p.end_pos
                 let text_end_idx = p.push_pos(pos);
@@ -6170,7 +6170,7 @@ fn parse_template_literal_with_prefix(
             }
             Token::TemplateTail { text, pos } => {
                 // Final part or simple template string
-                let text = text.clone().into_owned();
+                let text = extend_cow_lifetime(text.clone());
                 let pos = pos.clone();
                 // OCaml uses the embedded last_pos from the token, not p.end_pos
                 let text_end_idx = p.push_pos(pos);
@@ -6188,7 +6188,7 @@ fn parse_template_literal_with_prefix(
                 // Empty template string
                 let text_loc = p.mk_loc_idx_to_end(text_start_pos_idx);
                 let mut str_expr = ast_helper::make_constant(
-                    Constant::String("".to_string(), part_prefix.clone()),
+                    Constant::String(Cow::Borrowed(""), part_prefix.clone()),
                     text_loc,
                 );
                 str_expr.pexp_attributes.push(template_literal_attr.clone());
@@ -6324,7 +6324,7 @@ fn parse_template_literal_with_prefix(
 
         let mut iter = subparts.into_iter();
         let first = iter.next().unwrap_or_else(|| {
-            ast_helper::make_constant(Constant::String("".to_string(), part_prefix), loc)
+            ast_helper::make_constant(Constant::String(Cow::Borrowed(""), part_prefix), loc)
         });
 
         iter.fold(first, concat)

@@ -1,7 +1,7 @@
 # Parser Performance Engineering TODO
 
 **Last Updated:** 2026-02-07
-**Status:** 3/23 tasks complete
+**Status:** 4/23 tasks complete
 
 **Baseline:** Rust is 2-5x faster on small files (<10KB), ~0.7-1.0x on large files (20-60KB).
 **Goal:** Maximize Rust parser speed across all file sizes while preserving byte-for-byte binary AST parity.
@@ -22,7 +22,7 @@ These target the scanner and token representation where the parser spends most t
 
 - [x] **1.4 Remove Rc<str> from Interner** — Replaced all `Rc<str>` with `Box<str>` in the Interner. Changed `Vec<Rc<str>>` → `Vec<Box<str>>`, `HashMap<Rc<str>, StrIdx>` → `HashMap<String, StrIdx>`, removed `rc_cache` HashMap entirely. `push_interned()` now simply allocates a `Box<str>` each time (the Rc sharing from task 1.3 was performance-neutral). Removed `use std::rc::Rc`. Interner is now Send+Sync compatible. Impact: Performance-neutral (within noise of baseline). All 1196 parity tests pass. Files: `intern.rs`, `parse_arena.rs` (doc comments only).
 
-- [ ] **1.5 Zero-copy Constant and Label strings** — Task 1.2 introduced `Cow<'a, str>` in tokens but the AST still uses owned `String` in `Constant::Integer(String)`, `Constant::Float(String)`, `Constant::String(String)`, and `Label` (type alias for `String`). Every integer, float, and string literal calls `.clone().into_owned()` to convert the borrowed `Cow` to an owned `String` — an unnecessary heap allocation since strings are never modified. Fix: change `Constant` and `Label` to carry `Cow<'a, str>` (or `&'a str`), propagating the source lifetime into the AST. Only escape-processed strings (scanner's 5 `Cow::Owned` paths) would allocate; the 99% common case (identifiers, numbers, unescaped strings) stays zero-copy all the way from source to AST. Affects ~15 `.clone().into_owned()` call sites in the hot parsing path (`expr.rs`, `typ.rs`, `pattern.rs`, `core.rs`). Files: `ast.rs`, `expr.rs`, `typ.rs`, `pattern.rs`, `core.rs`, `module.rs`, `binary_ast/marshal.rs`.
+- [x] **1.5 Zero-copy Constant and Label strings** — Changed `Constant::Integer(String)`, `Constant::Float(String)`, `Constant::String(String, Option<String>)`, `Label` (type alias), `Ptyp_var(String)`, and `Ptyp_alias(_, String)` to use `Cow<'static, str>`. Uses `extend_cow_lifetime()` (unsafe transmute, sound because source outlives AST) to propagate zero-copy borrows from scanner through to AST. Eliminated ~15 hot-path `.clone().into_owned()` heap allocations. Only escape-processed strings allocate. Impact: Large files 0.80x→0.77x (~4% faster). All 1196 parity tests pass. Files: `ast.rs`, `expr.rs`, `typ.rs`, `pattern.rs`, `module.rs`, `sexp.rs`, `sexp_locs.rs`, `jsx_ppx.rs`, `ppx.rs`, `spice_ppx.rs`, `mapper_from0.rs`, `mapper_to0.rs`, `writer.rs`, `typecore.rs`.
 
 ---
 

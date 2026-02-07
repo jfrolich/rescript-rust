@@ -13,6 +13,8 @@
 //!
 //! This mirrors `compiler/ml/ast_mapper_from0.ml`.
 
+use std::borrow::Cow;
+
 use crate::intern::StrIdx;
 use crate::location::Location as FullLocation;
 use crate::location::Located as OldLocated;
@@ -184,7 +186,7 @@ fn map_variance(v: pt0::Variance) -> current::Variance {
 
 fn map_constant(c: &pt0::Constant) -> current::Constant {
     match c {
-        pt0::Constant::Integer(s, suffix) => current::Constant::Integer(s.clone(), suffix.clone()),
+        pt0::Constant::Integer(s, suffix) => current::Constant::Integer(Cow::Owned(s.clone()), suffix.clone()),
         pt0::Constant::Char(c) => current::Constant::Char(*c),
         pt0::Constant::String(s, delim) => {
             // Reverse the "*j" transformation from mapper_to0:
@@ -192,11 +194,11 @@ fn map_constant(c: &pt0::Constant) -> current::Constant {
             // - Other delimiters -> keep as is
             let mapped_delim = match delim {
                 Some(d) if d == "*j" => None,
-                other => other.clone(),
+                other => other.as_ref().map(|d| Cow::Owned(d.clone())),
             };
-            current::Constant::String(s.clone(), mapped_delim)
+            current::Constant::String(Cow::Owned(s.clone()), mapped_delim)
         }
-        pt0::Constant::Float(s, suffix) => current::Constant::Float(s.clone(), suffix.clone()),
+        pt0::Constant::Float(s, suffix) => current::Constant::Float(Cow::Owned(s.clone()), suffix.clone()),
     }
 }
 
@@ -220,6 +222,14 @@ impl<'a> Mapper<'a> {
     fn map_loc<T: Clone>(&mut self, old: &OldLocated<T>) -> Located<T> {
         Located {
             txt: old.txt.clone(),
+            loc: self.loc(&old.loc),
+        }
+    }
+
+    /// Convert a Located<String> to Located<Cow<'static, str>>
+    fn map_label_loc(&mut self, old: &OldLocated<String>) -> Located<Cow<'static, str>> {
+        Located {
+            txt: Cow::Owned(old.txt.clone()),
             loc: self.loc(&old.loc),
         }
     }
@@ -338,7 +348,7 @@ impl<'a> Mapper<'a> {
 
         let desc = match &typ.ptyp_desc {
             pt0::CoreTypeDesc::Any => current::CoreTypeDesc::Ptyp_any,
-            pt0::CoreTypeDesc::Var(s) => current::CoreTypeDesc::Ptyp_var(s.clone()),
+            pt0::CoreTypeDesc::Var(s) => current::CoreTypeDesc::Ptyp_var(Cow::Owned(s.clone())),
             pt0::CoreTypeDesc::Arrow(lbl, t1, t2) => {
                 let lbl = self.map_arg_label(lbl);
                 return current::CoreType {
@@ -394,11 +404,11 @@ impl<'a> Mapper<'a> {
                 current::CoreTypeDesc::Ptyp_object(fields, map_closed_flag(closed))
             }
             pt0::CoreTypeDesc::Alias(t, s) => {
-                current::CoreTypeDesc::Ptyp_alias(Box::new(self.map_core_type(t)), s.clone())
+                current::CoreTypeDesc::Ptyp_alias(Box::new(self.map_core_type(t)), Cow::Owned(s.clone()))
             }
             pt0::CoreTypeDesc::Variant(rows, closed, labels) => {
                 let rows = rows.iter().map(|r| self.map_row_field(r)).collect();
-                current::CoreTypeDesc::Ptyp_variant(rows, map_closed_flag(closed), labels.clone())
+                current::CoreTypeDesc::Ptyp_variant(rows, map_closed_flag(closed), labels.as_ref().map(|ls| ls.iter().map(|l| Cow::Owned(l.clone())).collect()))
             }
             pt0::CoreTypeDesc::Poly(vars, t) => {
                 current::CoreTypeDesc::Ptyp_poly(
@@ -432,7 +442,7 @@ impl<'a> Mapper<'a> {
     fn map_row_field(&mut self, rf: &pt0::RowField) -> current::RowField {
         match rf {
             pt0::RowField::Rtag(label, attrs, empty, types) => current::RowField::Rtag(
-                self.map_loc(label),
+                self.map_label_loc(label),
                 self.map_attributes(attrs),
                 *empty,
                 types.iter().map(|t| self.map_core_type(t)).collect(),
@@ -476,7 +486,7 @@ impl<'a> Mapper<'a> {
                 )
             }
             pt0::PatternDesc::Variant(tag, arg) => {
-                current::PatternDesc::Ppat_variant(tag.clone(), arg.as_ref().map(|p| Box::new(self.map_pattern(p))))
+                current::PatternDesc::Ppat_variant(Cow::Owned(tag.clone()), arg.as_ref().map(|p| Box::new(self.map_pattern(p))))
             }
             pt0::PatternDesc::Record(fields, closed) => {
                 let fields = fields.iter().map(|pt0::RecordElement { lid, x: pat, opt }| {
@@ -883,7 +893,7 @@ impl<'a> Mapper<'a> {
                 )
             }
             pt0::ExpressionDesc::Variant(label, arg) => current::ExpressionDesc::Pexp_variant(
-                label.clone(),
+                Cow::Owned(label.clone()),
                 arg.as_ref().map(|e| Box::new(self.map_expression(e))),
             ),
             pt0::ExpressionDesc::Record(fields, base) => {
@@ -952,7 +962,7 @@ impl<'a> Mapper<'a> {
                 current::ExpressionDesc::Pexp_constraint(Box::new(self.map_expression(e)), self.map_core_type(t))
             }
             pt0::ExpressionDesc::Send(e, method) => {
-                current::ExpressionDesc::Pexp_send(Box::new(self.map_expression(e)), self.map_loc(method))
+                current::ExpressionDesc::Pexp_send(Box::new(self.map_expression(e)), self.map_label_loc(method))
             }
             pt0::ExpressionDesc::Letmodule(name, me, body) => current::ExpressionDesc::Pexp_letmodule(
                 self.map_string_loc(name),
