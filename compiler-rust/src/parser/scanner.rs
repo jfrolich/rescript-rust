@@ -14,6 +14,8 @@
 //! - UTF-8 slow path only for non-ASCII characters (comments, strings)
 //! - No upfront Vec<char> or Vec<usize> allocation
 
+use std::borrow::Cow;
+
 use crate::intern::StrIdx;
 use crate::location::Position;
 
@@ -35,7 +37,7 @@ pub enum ScannerMode {
 
 /// A snapshot of scanner state for lookahead/restore.
 #[derive(Debug, Clone)]
-pub struct ScannerSnapshot {
+pub struct ScannerSnapshot<'src> {
     ch: char,
     offset: usize,
     ch_len: usize,
@@ -44,7 +46,7 @@ pub struct ScannerSnapshot {
     line_offset: usize,
     lnum: i32,
     mode: Vec<ScannerMode>,
-    prev_token: Option<Token>,
+    prev_token: Option<Token<'src>>,
     diagnostics_len: usize,
 }
 
@@ -78,18 +80,18 @@ pub struct Scanner<'src> {
     /// Collected diagnostics.
     diagnostics: Vec<ParserDiagnostic>,
     /// Previous non-comment token (for context-sensitive lexing like regex literals).
-    prev_token: Option<Token>,
+    prev_token: Option<Token<'src>>,
 }
 
 /// Result of scanning a token.
 #[derive(Debug, Clone)]
-pub struct ScanResult {
+pub struct ScanResult<'src> {
     /// Start position of the token.
     pub start_pos: Position,
     /// End position of the token.
     pub end_pos: Position,
     /// The scanned token.
-    pub token: Token,
+    pub token: Token<'src>,
 }
 
 impl<'src> Scanner<'src> {
@@ -146,7 +148,7 @@ impl<'src> Scanner<'src> {
     }
 
     /// Create a snapshot of the scanner state for lookahead.
-    pub fn snapshot(&self) -> ScannerSnapshot {
+    pub fn snapshot(&self) -> ScannerSnapshot<'src> {
         ScannerSnapshot {
             ch: self.ch,
             offset: self.offset,
@@ -162,7 +164,7 @@ impl<'src> Scanner<'src> {
     }
 
     /// Restore scanner state from a snapshot.
-    pub fn restore(&mut self, snapshot: ScannerSnapshot) {
+    pub fn restore(&mut self, snapshot: ScannerSnapshot<'src>) {
         self.ch = snapshot.ch;
         self.offset = snapshot.offset;
         self.ch_len = snapshot.ch_len;
@@ -414,7 +416,7 @@ impl<'src> Scanner<'src> {
     }
 
     /// Scan an identifier or keyword.
-    fn scan_identifier(&mut self) -> Token {
+    fn scan_identifier(&mut self) -> Token<'src> {
         let start_off = self.offset;
 
         // Skip valid identifier characters (all ASCII, so byte == char)
@@ -479,7 +481,7 @@ impl<'src> Scanner<'src> {
     }
 
     /// Scan a number literal.
-    fn scan_number(&mut self) -> Token {
+    fn scan_number(&mut self) -> Token<'src> {
         let start_off = self.offset;
 
         // Determine base
@@ -537,7 +539,7 @@ impl<'src> Scanner<'src> {
             _ => {}
         }
 
-        let literal = self.substring(start_off, self.offset).to_string();
+        let literal = Cow::Borrowed(self.substring(start_off, self.offset));
 
         // Suffix
         let suffix = match self.ch {
@@ -557,7 +559,7 @@ impl<'src> Scanner<'src> {
     }
 
     /// Scan a string literal.
-    fn scan_string(&mut self) -> Token {
+    fn scan_string(&mut self) -> Token<'src> {
         let start_pos = self.position();
         self.next(); // consume opening quote
 
@@ -618,7 +620,7 @@ impl<'src> Scanner<'src> {
             }
         }
 
-        Token::String(result)
+        Token::String(Cow::Owned(result))
     }
 
     /// Scan past a string escape sequence, advancing the scanner position.
@@ -691,7 +693,7 @@ impl<'src> Scanner<'src> {
     }
 
     /// Scan a single-line comment.
-    fn scan_single_line_comment(&mut self) -> Token {
+    fn scan_single_line_comment(&mut self) -> Token<'src> {
         let start_off = self.offset;
         let start_pos = self.position();
 
@@ -712,7 +714,7 @@ impl<'src> Scanner<'src> {
     }
 
     /// Scan a multi-line comment.
-    fn scan_multi_line_comment(&mut self) -> Token {
+    fn scan_multi_line_comment(&mut self) -> Token<'src> {
         let doc_comment = self.peek2() == '*' && self.peek3() != '/';
         let standalone = doc_comment && self.peek3() == '*';
 
@@ -782,13 +784,12 @@ impl<'src> Scanner<'src> {
             0
         };
 
-        let content = if content_start_off <= content_end_off && content_start_off < self.src.len()
-        {
-            self.substring(content_start_off, content_end_off)
-                .to_string()
-        } else {
-            String::new()
-        };
+        let content: Cow<'src, str> =
+            if content_start_off <= content_end_off && content_start_off < self.src.len() {
+                Cow::Borrowed(self.substring(content_start_off, content_end_off))
+            } else {
+                Cow::Borrowed("")
+            };
 
         let end_pos = self.position();
         let loc = crate::location::Location::from_positions(start_pos, end_pos);
@@ -801,7 +802,7 @@ impl<'src> Scanner<'src> {
             }
         } else {
             Token::Comment(Comment {
-                txt: content,
+                txt: content.into_owned(),
                 style: CommentStyle::MultiLine,
                 loc,
                 prev_tok_end_pos: Position::default(),
@@ -810,7 +811,7 @@ impl<'src> Scanner<'src> {
     }
 
     /// Scan a template literal token.
-    pub fn scan_template_literal_token(&mut self) -> ScanResult {
+    pub fn scan_template_literal_token(&mut self) -> ScanResult<'src> {
         let start_off = self.offset;
 
         // If starting with }, consume it
@@ -826,7 +827,7 @@ impl<'src> Scanner<'src> {
                 '`' => {
                     self.next();
                     // backtick is 1 byte, so offset - 1 is correct
-                    let contents = self.substring(start_off, self.offset - 1).to_string();
+                    let contents = Cow::Borrowed(self.substring(start_off, self.offset - 1));
                     let end_pos = self.position();
                     return ScanResult {
                         start_pos,
@@ -840,7 +841,7 @@ impl<'src> Scanner<'src> {
                 '$' if self.peek() == '{' => {
                     self.next2();
                     // ${ is 2 bytes, so offset - 2 is correct
-                    let contents = self.substring(start_off, self.offset - 2).to_string();
+                    let contents = Cow::Borrowed(self.substring(start_off, self.offset - 2));
                     let end_pos = self.position();
                     return ScanResult {
                         start_pos,
@@ -874,7 +875,7 @@ impl<'src> Scanner<'src> {
                     } else {
                         start_off
                     };
-                    let contents = self.substring(start_off, end_off).to_string();
+                    let contents = Cow::Borrowed(self.substring(start_off, end_off));
                     return ScanResult {
                         start_pos,
                         end_pos,
@@ -890,7 +891,7 @@ impl<'src> Scanner<'src> {
     }
 
     /// Scan the next token.
-    pub fn scan(&mut self) -> ScanResult {
+    pub fn scan(&mut self) -> ScanResult<'src> {
         self.skip_whitespace();
         let start_pos = self.position();
 
@@ -1196,7 +1197,7 @@ impl<'src> Scanner<'src> {
                     let char_byte_off = self.offset + self.ch_len; // offset of the char after '
                     self.next3();
                     // The character is 1 byte (ASCII) since we matched it against a char pattern
-                    let original = self.substring(char_byte_off, char_byte_off + ch.len_utf8()).to_string();
+                    let original = Cow::Borrowed(self.substring(char_byte_off, char_byte_off + ch.len_utf8()));
                     Token::Codepoint {
                         c: ch as i32,
                         original,
@@ -1348,7 +1349,7 @@ impl<'src> Scanner<'src> {
         }
     }
 
-    fn try_scan_regex_literal(&mut self) -> Option<Token> {
+    fn try_scan_regex_literal(&mut self) -> Option<Token<'src>> {
         let snapshot = self.snapshot();
         let start_pos = self.position();
 
@@ -1394,14 +1395,14 @@ impl<'src> Scanner<'src> {
         }
 
         // Current char is closing '/'
-        let pattern = self.substring(pattern_start, self.offset).to_string();
+        let pattern = Cow::Borrowed(self.substring(pattern_start, self.offset));
         self.next(); // consume closing '/'
 
         let flags_start = self.offset;
         while self.ch.is_ascii_alphabetic() {
             self.next();
         }
-        let flags = self.substring(flags_start, self.offset).to_string();
+        let flags = Cow::Borrowed(self.substring(flags_start, self.offset));
 
         let end_pos = self.position();
         // Record a scanner-level diagnostic if the literal is empty and we didn't advance.
@@ -1422,7 +1423,7 @@ impl<'src> Scanner<'src> {
     /// token in expression position and needs to rescan it as a regex.
     /// Unlike `try_scan_regex_literal`, this does not restore on failure - it emits an error
     /// and returns a Regex token with empty pattern on unterminated regex.
-    pub fn scan_regex(&mut self) -> ScanResult {
+    pub fn scan_regex(&mut self) -> ScanResult<'src> {
         let start_pos = self.position();
         let pattern_start = self.offset;
 
@@ -1438,7 +1439,7 @@ impl<'src> Scanner<'src> {
                         end_pos,
                         DiagnosticCategory::message("unterminated regex".to_string()),
                     );
-                    break (String::new(), String::new());
+                    break (Cow::Borrowed(""), Cow::Borrowed(""));
                 }
                 c if c == EOF_CHAR => {
                     let end_pos = self.position();
@@ -1447,7 +1448,7 @@ impl<'src> Scanner<'src> {
                         end_pos,
                         DiagnosticCategory::message("unterminated regex".to_string()),
                     );
-                    break (String::new(), String::new());
+                    break (Cow::Borrowed(""), Cow::Borrowed(""));
                 }
                 '\\' if !escaped => {
                     escaped = true;
@@ -1464,14 +1465,14 @@ impl<'src> Scanner<'src> {
                 }
                 '/' if !escaped && !in_char_class => {
                     // Closing /
-                    let pattern = self.substring(pattern_start, self.offset).to_string();
+                    let pattern = Cow::Borrowed(self.substring(pattern_start, self.offset));
                     self.next(); // consume closing '/'
 
                     let flags_start = self.offset;
                     while self.ch.is_ascii_alphabetic() {
                         self.next();
                     }
-                    let flags = self.substring(flags_start, self.offset).to_string();
+                    let flags = Cow::Borrowed(self.substring(flags_start, self.offset));
                     break (pattern, flags);
                 }
                 _ => {
@@ -1490,7 +1491,7 @@ impl<'src> Scanner<'src> {
     }
 
     /// Scan an escape sequence in a character literal.
-    fn scan_escape(&mut self) -> Token {
+    fn scan_escape(&mut self) -> Token<'src> {
         // offset points to the first char after '\, and we want to capture from
         // the char before that (the backslash escape char in the source).
         // In the old code: `let offset = self.offset - 1` (char index).
@@ -1553,7 +1554,7 @@ impl<'src> Scanner<'src> {
         };
 
         // Capture the escape sequence contents BEFORE consuming the closing quote
-        let contents = self.substring(escape_byte_start, self.offset).to_string();
+        let contents = Cow::Borrowed(self.substring(escape_byte_start, self.offset));
 
         // Consume closing quote
         if self.ch == '\'' {
@@ -1586,7 +1587,7 @@ impl<'src> Scanner<'src> {
     /// Scan an exotic identifier (e.g., \"foo").
     /// Returns the identifier without surrounding quotes.
     /// `backslash_pos` is the position of the backslash for error reporting.
-    fn scan_exotic_identifier(&mut self, backslash_pos: Position) -> Token {
+    fn scan_exotic_identifier(&mut self, backslash_pos: Position) -> Token<'src> {
         let start_pos = backslash_pos;
 
         self.next(); // consume opening quote
@@ -1598,7 +1599,7 @@ impl<'src> Scanner<'src> {
                     let content_end = self.offset; // end of content (before closing quote)
                     self.next(); // consume closing quote
                     // Return identifier without quotes
-                    let ident = self.substring(content_start, content_end).to_string();
+                    let ident = self.substring(content_start, content_end);
 
                     // Check for empty identifier - OCaml preserves the full exotic form (\"")
                     // when the content is empty, for error recovery purposes
@@ -1613,16 +1614,16 @@ impl<'src> Scanner<'src> {
                         );
                         // Return the full exotic form like OCaml does: \""
                         // (backslash was consumed by caller, so we prepend it)
-                        return Token::Lident("\\\"\"".to_string());
+                        return Token::Lident(Cow::Owned("\\\"\"".to_string()));
                     }
 
                     // OCaml preserves exotic form for uppercase identifiers
                     // (to avoid confusion in OCaml parsetree where uppercase = module)
-                    if ident.chars().next().map_or(false, |c| c.is_ascii_uppercase()) {
-                        return Token::Lident(format!("\\\"{}\"", ident));
+                    if ident.as_bytes().first().map_or(false, |b| b.is_ascii_uppercase()) {
+                        return Token::Lident(Cow::Owned(format!("\\\"{}\"", ident)));
                     }
 
-                    return Token::Lident(ident);
+                    return Token::Lident(Cow::Borrowed(ident));
                 }
                 '\n' | '\r' => {
                     let end_pos = self.position();
@@ -1639,7 +1640,7 @@ impl<'src> Scanner<'src> {
                     self.next(); // consume the linebreak
                     // Build full exotic form: \" + content + actual newline
                     let ident = format!("\\\"{}\n", content);
-                    return Token::Lident(ident);
+                    return Token::Lident(Cow::Owned(ident));
                 }
                 c if c == EOF_CHAR => {
                     let end_pos = self.position();
@@ -1651,7 +1652,7 @@ impl<'src> Scanner<'src> {
                     // OCaml includes the \" prefix in the identifier for error recovery
                     let content = self.substring(content_start, self.offset);
                     let ident = format!("\\\"{}\"", content);
-                    return Token::Lident(ident);
+                    return Token::Lident(Cow::Owned(ident));
                 }
                 _ => self.next(),
             }
@@ -1691,10 +1692,10 @@ mod tests {
         let filename = arena.intern("test.res");
         let mut scanner = Scanner::new(filename, "hello world");
         let result = scanner.scan();
-        assert_eq!(result.token, Token::Lident("hello".to_string()));
+        assert_eq!(result.token, Token::Lident(Cow::Borrowed("hello")));
 
         let result = scanner.scan();
-        assert_eq!(result.token, Token::Lident("world".to_string()));
+        assert_eq!(result.token, Token::Lident(Cow::Borrowed("world")));
     }
 
     #[test]
@@ -1757,7 +1758,7 @@ mod tests {
         assert!(matches!(result.token, Token::Comment(_)));
 
         let result = scanner.scan();
-        assert_eq!(result.token, Token::Lident("foo".to_string()));
+        assert_eq!(result.token, Token::Lident(Cow::Borrowed("foo")));
     }
 
     #[test]
@@ -1770,7 +1771,7 @@ mod tests {
         assert!(matches!(result.token, Token::Comment(_)));
 
         let result = scanner.scan();
-        assert_eq!(result.token, Token::Lident("foo".to_string()));
+        assert_eq!(result.token, Token::Lident(Cow::Borrowed("foo")));
     }
 
     #[test]
