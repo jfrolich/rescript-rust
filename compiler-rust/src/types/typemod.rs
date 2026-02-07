@@ -2184,19 +2184,40 @@ fn type_structure_item<'a>(
             });
             let mut new_env = env.clone();
             if let Some(sig_items) = &final_include_sig {
-                // For include, the module path should be the current module
-                // (items become direct members), but we need a path for qualified access.
-                // Use the included module's path for value paths.
-                let module_path = match &incl.pincl_mod.pmod_desc {
+                // For include, use the included module's path for external modules
+                // (Pmod_ident case) so type paths are properly qualified.
+                // For non-ident includes (struct...end, etc.), add items directly
+                // without a module path prefix since they become direct members.
+                match &incl.pincl_mod.pmod_desc {
                     ParsedModuleExprDesc::Pmod_ident(lid) => {
                         let longident = arena.get_longident(lid.txt);
-                        path_from_longident(longident, |idx| arena.get_string(idx))
+                        let module_path = path_from_longident(longident, |idx| arena.get_string(idx));
+                        crate::cmi::persistent_env::add_signature_to_env(
+                            sig_items, &module_path, &mut new_env, tctx.type_ctx, false,
+                        );
                     }
-                    _ => Path::pident(Ident::create_local("_include_")),
-                };
-                crate::cmi::persistent_env::add_signature_to_env(
-                    sig_items, &module_path, &mut new_env, tctx.type_ctx, false,
-                );
+                    _ => {
+                        // Non-ident include: add items directly to env without
+                        // path rewriting (they become direct scope members)
+                        for item in sig_items {
+                            match item {
+                                crate::types::decl::SignatureItem::SigValue(id, desc) => {
+                                    new_env.add_value(id.clone(), desc.clone());
+                                }
+                                crate::types::decl::SignatureItem::SigType(id, decl, _) => {
+                                    new_env.add_type(id.clone(), decl.clone());
+                                }
+                                crate::types::decl::SignatureItem::SigModule(id, md, _) => {
+                                    new_env.add_module(id.clone(), md.clone());
+                                }
+                                crate::types::decl::SignatureItem::SigModtype(id, mtd) => {
+                                    new_env.add_modtype(id.clone(), mtd.clone());
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+                }
             }
 
             let desc = StructureItemDesc::Tstr_include(IncludeDeclaration {
