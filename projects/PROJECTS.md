@@ -30,14 +30,14 @@ Achieve byte-for-byte identical AST and binary AST output between the Rust and O
 | [RALPH_TODO.md](./parser-parity/RALPH_TODO.md) | Agent task tracking for binary AST parity |
 | [RALPH_SETUP.md](./parser-parity/RALPH_SETUP.md) | Agent setup instructions |
 
-### [parser-optimization](./parser-optimization/)
+### [parser-performance-engineering](./parser-performance-engineering/)
 
-Performance optimization of the Rust parser to achieve best-in-class speed. 4-tier strategy covering byte-level scanning, zero-copy tokens, SIMD, arena allocation, and PGO. Currently 2-5x faster than OCaml on small files, parity on large files.
+Performance engineering of the Rust parser to achieve best-in-class speed. 4-tier strategy covering byte-level scanning, zero-copy tokens, SIMD, arena allocation, and PGO. Currently 2-5x faster than OCaml on small files, parity on large files.
 
 | Document | Description |
 |----------|-------------|
-| [PLAN.md](./parser-optimization/PLAN.md) | Optimization roadmap with 14 items across 4 tiers |
-| [PROGRESS.md](./parser-optimization/PROGRESS.md) | Optimization progress and benchmark log |
+| [PLAN.md](./parser-performance-engineering/PLAN.md) | Optimization roadmap with 14 items across 4 tiers |
+| [PROGRESS.md](./parser-performance-engineering/PROGRESS.md) | Optimization progress and benchmark log |
 
 ### [printer-parity](./printer-parity/)
 
