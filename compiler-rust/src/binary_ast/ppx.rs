@@ -4499,6 +4499,126 @@ fn desugar_hash_set(
     }
 }
 
+/// Check if an expression doesn't need to be bound in a let-binding
+/// (i.e., it's a simple identifier or a constraint on a simple identifier).
+/// Matches OCaml's `no_need_bound` in ast_exp_apply.ml.
+fn no_need_bound(exp: &Expression, arena: &ParseArena) -> bool {
+    match &exp.pexp_desc {
+        ExpressionDesc::Pexp_ident(lid) => {
+            matches!(arena.get_longident(lid.txt), Longident::Lident(_))
+        }
+        ExpressionDesc::Pexp_constraint(e, _) => no_need_bound(e, arena),
+        _ => false,
+    }
+}
+
+/// Apply a pipe-to-tuple distribution.
+/// If `a` is a simple ident, use it directly in each tuple element.
+/// Otherwise, bind it: `let __tuple_internal_obj = a in (f1(obj), f2(obj), ...)`
+/// Matches OCaml's `bound` function in ast_exp_apply.ml.
+fn pipe_tuple_bound(
+    a: Expression,
+    loc: LocIdx,
+    xs: &[Expression],
+    f: &Expression,
+    arena: &mut ParseArena,
+) -> Expression {
+    if no_need_bound(&a, arena) {
+        pipe_tuple_map(a, xs, f)
+    } else {
+        // Create: let __tuple_internal_obj = a in (mapped tuple)
+        let obj_name = arena.intern("__tuple_internal_obj");
+        let obj_lid = arena.push_lident_from_idx(obj_name);
+        let obj_loc = a.pexp_loc;
+
+        // The identifier expression for the bound variable
+        let obj_ident_expr = Expression {
+            pexp_desc: ExpressionDesc::Pexp_ident(Located {
+                txt: obj_lid,
+                loc: obj_loc,
+            }),
+            pexp_loc: obj_loc,
+            pexp_attributes: vec![],
+        };
+
+        let mapped = pipe_tuple_map(obj_ident_expr, xs, f);
+
+        Expression {
+            pexp_desc: ExpressionDesc::Pexp_let(
+                RecFlag::Nonrecursive,
+                vec![ValueBinding {
+                    pvb_pat: Pattern {
+                        ppat_desc: PatternDesc::Ppat_var(Located { txt: obj_name, loc: obj_loc }),
+                        ppat_loc: obj_loc,
+                        ppat_attributes: vec![],
+                    },
+                    pvb_expr: a,
+                    pvb_attributes: vec![],
+                    pvb_loc: obj_loc,
+                }],
+                Box::new(mapped),
+            ),
+            pexp_loc: loc,
+            pexp_attributes: vec![],
+        }
+    }
+}
+
+/// Map each tuple element to apply the piped argument.
+/// For each element fn in the tuple:
+/// - Pexp_construct(ctor, None) -> Pexp_construct(ctor, Some(a))
+/// - Pexp_apply(fn1, args) -> Pexp_apply(fn1, (Nolabel, a) :: args)
+/// - otherwise -> fn(a) = Pexp_apply(fn, [(Nolabel, a)])
+/// Matches OCaml's Ext_list.map in ast_exp_apply.ml lines 105-128.
+fn pipe_tuple_map(a: Expression, xs: &[Expression], f: &Expression) -> Expression {
+    let mapped: Vec<Expression> = xs
+        .iter()
+        .map(|fn_expr| match &fn_expr.pexp_desc {
+            ExpressionDesc::Pexp_construct(ctor, None) => Expression {
+                pexp_desc: ExpressionDesc::Pexp_construct(ctor.clone(), Some(Box::new(a.clone()))),
+                pexp_loc: fn_expr.pexp_loc,
+                pexp_attributes: fn_expr.pexp_attributes.clone(),
+            },
+            ExpressionDesc::Pexp_apply {
+                funct: fn1,
+                args,
+                transformed_jsx,
+                ..
+            } => {
+                let mut new_args = Vec::with_capacity(args.len() + 1);
+                new_args.push((ArgLabel::Nolabel, a.clone()));
+                new_args.extend(args.iter().cloned());
+                Expression {
+                    pexp_desc: ExpressionDesc::Pexp_apply {
+                        funct: fn1.clone(),
+                        args: new_args,
+                        partial: false,
+                        transformed_jsx: *transformed_jsx,
+                    },
+                    pexp_loc: fn_expr.pexp_loc,
+                    pexp_attributes: vec![],
+                }
+            }
+            _ => Expression {
+                pexp_desc: ExpressionDesc::Pexp_apply {
+                    funct: Box::new(fn_expr.clone()),
+                    args: vec![(ArgLabel::Nolabel, a.clone())],
+                    partial: false,
+                    transformed_jsx: false,
+                },
+                pexp_loc: fn_expr.pexp_loc,
+                pexp_attributes: vec![],
+            },
+        })
+        .collect();
+
+    Expression {
+        pexp_desc: ExpressionDesc::Pexp_tuple(mapped),
+        pexp_attributes: f.pexp_attributes.clone(),
+        pexp_loc: f.pexp_loc,
+    }
+}
+
 /// Desugar pipe expression: a -> f
 /// Transforms based on what f is:
 /// - f is Pexp_variant(label, None): becomes Pexp_variant(label, Some(a))
@@ -4555,20 +4675,13 @@ fn desugar_pipe(
             }
         }
 
-        // a -> (x, y) with tuple - for now, just create f(a)
-        // TODO: Handle the bound case properly like OCaml does
-        ExpressionDesc::Pexp_tuple(_) => {
-            // For simplicity, just make it f(a)
-            Expression {
-                pexp_desc: ExpressionDesc::Pexp_apply {
-                    funct: Box::new(f),
-                    args: vec![(ArgLabel::Nolabel, a)],
-                    partial: false,
-                    transformed_jsx: false,
-                },
-                pexp_loc: original.pexp_loc,
-                pexp_attributes: original.pexp_attributes.clone(),
-            }
+        // a -> (x, y) distributes the pipe: becomes (x(a), y(a))
+        // If `a` is not a simple identifier, bind it first to avoid multiple evaluation:
+        //   let __tuple_internal_obj = a in (x(__tuple_internal_obj), y(__tuple_internal_obj))
+        // Matches OCaml's ast_exp_apply.ml lines 100-131
+        ExpressionDesc::Pexp_tuple(xs) => {
+            let loc = original.pexp_loc;
+            pipe_tuple_bound(a, loc, xs, &f, _arena)
         }
 
         // Default: a -> f becomes f(a)
