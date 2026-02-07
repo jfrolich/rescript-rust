@@ -3,6 +3,8 @@
 //! This module contains the expression parsing logic, converting tokens
 //! into expression AST nodes.
 
+use std::borrow::Cow;
+
 use crate::parse_arena::{LidentIdx, Located, LocIdx, ParseArena, PosIdx, StrIdx};
 
 use super::ast::*;
@@ -33,26 +35,26 @@ fn get_string_tag(p: &Parser<'_>) -> Option<String> {
 pub fn parse_constant(p: &mut Parser<'_>) -> Constant {
     match &p.token {
         Token::Int { i, suffix } => {
-            let value = i.clone();
+            let value = i.clone().into_owned();
             let s = *suffix;
             p.next();
             Constant::Integer(value, s)
         }
         Token::Float { f, suffix } => {
-            let value = f.clone();
+            let value = f.clone().into_owned();
             let s = *suffix;
             p.next();
             Constant::Float(value, s)
         }
         Token::String(s) => {
-            let value = s.clone();
+            let value = s.clone().into_owned();
             let tag = get_string_tag(p);
             p.next();
             Constant::String(value, tag)
         }
         Token::Codepoint { c, original } => {
             let value = *c;
-            let orig = original.clone();
+            let orig = original.clone().into_owned();
             p.next();
             // When parsing for the printer (not type checker), preserve the original escape format
             // by encoding it as a string with a special prefix, like OCaml does.
@@ -364,7 +366,7 @@ pub fn parse_value_or_constructor(p: &mut Parser<'_>) -> Expression {
             let name = name.clone();
             p.next();
             let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
-            let lid_idx = p.push_lident(&name);
+            let lid_idx = p.push_lident(&*name);
             ast_helper::make_ident_idx(lid_idx, loc)
         }
         _ => {
@@ -1407,7 +1409,7 @@ fn parse_lident_list(p: &mut Parser<'_>) -> Vec<StringLoc> {
 fn parse_lident(p: &mut Parser<'_>) -> (String, Location) {
     match &p.token {
         Token::Lident(name) => {
-            let name = name.clone();
+            let name = name.to_string();
             let loc = p.mk_loc_current();
             p.next();
             (name, loc)
@@ -1419,7 +1421,7 @@ fn parse_lident(p: &mut Parser<'_>) -> (String, Location) {
         _ => {
             // OCaml: parse_lident recovery - if keyword on same line, skip it.
             // Otherwise skip tokens until we find an Lident or should abort.
-            p.err(DiagnosticCategory::Lident(p.token.clone()));
+            p.err(DiagnosticCategory::Lident(p.token.clone().into_owned()));
             if p.token.is_keyword() && p.prev_end_pos.line == p.start_pos.line {
                 p.next();
             } else {
@@ -1494,7 +1496,7 @@ fn parse_attribute_id(p: &mut Parser<'_>, start_pos_idx: PosIdx) -> StringLoc {
 
     loop {
         let name = match &p.token {
-            Token::Lident(name) | Token::Uident(name) => Some(name.clone()),
+            Token::Lident(name) | Token::Uident(name) => Some(name.to_string()),
             // Keywords that can be used as attribute names
             Token::As => Some("as".to_string()),
             Token::Typ => Some("type".to_string()),
@@ -1547,7 +1549,7 @@ fn parse_attribute_id(p: &mut Parser<'_>, start_pos_idx: PosIdx) -> StringLoc {
 fn parse_payload(p: &mut Parser<'_>) -> Payload {
     // Simple case: just a string literal like @as("foo")
     if let Token::String(s) = &p.token {
-        let s = s.clone();
+        let s = s.clone().into_owned();
         let tag = get_string_tag(p);
         let start_pos_idx = p.start_pos_idx();
         p.next();
@@ -1680,7 +1682,7 @@ pub fn parse_binary_expr(
 }
 
 /// Get the precedence of an operator token.
-fn get_operator_precedence(token: &Token) -> Option<(Token, i32)> {
+fn get_operator_precedence(token: &Token<'_>) -> Option<(Token<'static>, i32)> {
     let prec = match token {
         Token::HashEqual | Token::ColonEqual => 1,
         Token::Lor => 2,
@@ -1708,11 +1710,11 @@ fn get_operator_precedence(token: &Token) -> Option<(Token, i32)> {
         Token::MinusGreater => 12, // Pipe operator - kept as infix, not desugared
         _ => return None,
     };
-    Some((token.clone(), prec))
+    Some((token.clone().into_owned(), prec))
 }
 
 /// Check if an operator is right-associative.
-fn is_right_associative(token: &Token) -> bool {
+fn is_right_associative(token: &Token<'_>) -> bool {
     matches!(token, Token::Exponentiation)
 }
 
@@ -1914,7 +1916,7 @@ pub fn parse_atomic_expr(p: &mut Parser<'_>) -> Expression {
             loop {
                 match &p.token {
                     Token::Lident(name) | Token::Uident(name) => {
-                        parts.push(name.clone());
+                        parts.push(name.to_string());
                         p.next();
                     }
                     _ if p.token.is_keyword() => {
@@ -1973,13 +1975,13 @@ pub fn parse_atomic_expr(p: &mut Parser<'_>) -> Expression {
             p.next();
             let tag = match &p.token {
                 Token::Lident(name) | Token::Uident(name) => {
-                    let name = name.clone();
+                    let name = name.to_string();
                     p.next();
                     name
                 }
                 Token::Int { i, suffix } => {
                     // Clone values before borrowing p mutably
-                    let tag = i.clone();
+                    let tag = i.to_string();
                     let has_suffix = suffix.is_some();
                     // OCaml: emit error if numeric poly variant has a suffix
                     if has_suffix {
@@ -1992,7 +1994,7 @@ pub fn parse_atomic_expr(p: &mut Parser<'_>) -> Expression {
                     tag
                 }
                 Token::String(s) => {
-                    let tag = s.clone();
+                    let tag = s.to_string();
                     p.next();
                     tag
                 }
@@ -2132,7 +2134,7 @@ pub fn parse_atomic_expr(p: &mut Parser<'_>) -> Expression {
             p.err_at(
                 err_start,
                 err_end,
-                DiagnosticCategory::unexpected(p.token.clone(), p.breadcrumbs().to_vec()),
+                DiagnosticCategory::unexpected(p.token.clone().into_owned(), p.breadcrumbs().to_vec()),
             );
 
             // Try to skip tokens and retry parsing if we find a valid start token
@@ -2429,7 +2431,7 @@ pub fn parse_primary_expr(p: &mut Parser<'_>, operand: Expression, no_call: bool
                     Token::Lident(name) => {
                         let name = name.clone();
                         let name_loc = p.mk_loc_current();
-                        let lid_idx = p.push_lident(&name);
+                        let lid_idx = p.push_lident(&*name);
                         p.next();
 
                         // Check for field assignment: expr.field = value
@@ -2465,7 +2467,7 @@ pub fn parse_primary_expr(p: &mut Parser<'_>, operand: Expression, no_call: bool
                         // Quoted field access: expr."switch"
                         let name = name.clone();
                         let name_loc = p.mk_loc_current();
-                        let lid_idx = p.push_lident(&name);
+                        let lid_idx = p.push_lident(&*name);
                         p.next();
 
                         // Check for field assignment: expr."field" = value
@@ -2712,7 +2714,7 @@ fn parse_call_args(p: &mut Parser<'_>) -> (Vec<(ArgLabel, Expression)>, bool) {
             if recover::should_abort_list_parse(p) {
                 break;
             }
-            p.err(DiagnosticCategory::unexpected(p.token.clone(), p.breadcrumbs().to_vec()));
+            p.err(DiagnosticCategory::unexpected(p.token.clone().into_owned(), p.breadcrumbs().to_vec()));
             p.next();
             continue;
         }
@@ -3336,7 +3338,7 @@ fn parse_dict_expr(p: &mut Parser<'_>, start_pos_idx: PosIdx) -> Expression {
         // Parse key (string)
         match &p.token {
             Token::String(s) => {
-                let key = s.clone();
+                let key = s.clone().into_owned();
                 // Dict keys are always None (printed as "key"), not Some("js")
                 // This matches OCaml's behavior where dict keys stay as object property names
                 let key_start_idx = p.start_pos_idx();
@@ -3673,7 +3675,7 @@ fn parse_braced_ident_semicolon(p: &mut Parser<'_>, start_pos_idx: PosIdx) -> Ex
 }
 
 /// Check if a token starts a block expression (vs record).
-fn is_block_expression_start(token: &Token) -> bool {
+fn is_block_expression_start(token: &Token<'_>) -> bool {
     matches!(
         token,
         Token::Open
@@ -4343,7 +4345,7 @@ fn parse_module_longident(p: &mut Parser<'_>) -> Located<LidentIdx> {
     loop {
         match &p.token {
             Token::Uident(name) => {
-                parts.push(name.clone());
+                parts.push(name.to_string());
                 p.next();
                 if p.token == Token::Dot {
                     p.next();
@@ -4352,7 +4354,7 @@ fn parse_module_longident(p: &mut Parser<'_>) -> Located<LidentIdx> {
                 }
             }
             Token::Lident(name) => {
-                parts.push(name.clone());
+                parts.push(name.to_string());
                 p.next();
                 break;
             }
@@ -4430,7 +4432,7 @@ fn parse_record_fields(p: &mut Parser<'_>) -> Vec<ExpressionRecordField> {
         loop {
             match &p.token {
                 Token::Lident(name) | Token::Uident(name) => {
-                    parts.push(name.clone());
+                    parts.push(name.to_string());
                     p.next();
                 }
                 _ => break,
@@ -4588,7 +4590,7 @@ fn parse_js_object_expr(p: &mut Parser<'_>, start_pos_idx: PosIdx) -> Expression
 
             // The lid location should be just the key, not including the value
             let key_loc = p.mk_loc_idx_to_prev_end(field_start_idx);
-            let lid_idx = p.push_lident(&key);
+            let lid_idx = p.push_lident(&*key);
 
             if p.token == Token::Colon {
                 p.next();
@@ -5243,7 +5245,7 @@ fn parse_switch_case_block(p: &mut Parser<'_>) -> Expression {
             p.err_at(
                 p.prev_end_pos.clone(),
                 p.end_pos.clone(),
-                DiagnosticCategory::unexpected(p.token.clone(), p.breadcrumbs().to_vec()),
+                DiagnosticCategory::unexpected(p.token.clone().into_owned(), p.breadcrumbs().to_vec()),
             );
             p.eat_breadcrumb();
         }
@@ -5447,7 +5449,7 @@ fn parse_try_expr(p: &mut Parser<'_>) -> Expression {
     let body = parse_expr_with_context(p, ExprContext::When);
     // "catch" is not a keyword, but OCaml uses `Parser.expect Res_token.catch p`
     // where `Res_token.catch = Lident "catch"`. This produces "Did you forget a `catch` here?"
-    p.expect(Token::Lident("catch".to_string()));
+    p.expect(Token::Lident(Cow::Owned("catch".to_string())));
     p.expect(Token::Lbrace);
 
     let mut cases = vec![];
@@ -5596,7 +5598,7 @@ fn parse_jsx(p: &mut Parser<'_>) -> Expression {
     } else if p.token != Token::GreaterThan {
         // OCaml: | token -> Parser.err p (Diagnostics.unexpected token p.breadcrumbs);
         //        Ast_helper.Exp.jsx_unary_element ~loc name jsx_props
-        p.err(DiagnosticCategory::unexpected(p.token.clone(), p.breadcrumbs().to_vec()));
+        p.err(DiagnosticCategory::unexpected(p.token.clone().into_owned(), p.breadcrumbs().to_vec()));
         let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
 
         p.eat_breadcrumb();
@@ -5757,8 +5759,8 @@ fn parse_jsx_fragment(p: &mut Parser<'_>, start_pos_idx: PosIdx) -> Expression {
 
 /// Read hyphen chain: consumes `-ident` sequences and appends them to the buffer.
 /// Returns the final name with hyphens concatenated.
-fn read_hyphen_chain(p: &mut Parser<'_>, initial: String) -> String {
-    let mut result = initial;
+fn read_hyphen_chain(p: &mut Parser<'_>, initial: impl Into<String>) -> String {
+    let mut result = initial.into();
     while p.token == Token::Minus {
         // Look ahead to see if there's an identifier after the hyphen
         let has_ident_after = p.lookahead(|state| {
@@ -5947,7 +5949,7 @@ fn parse_jsx_props(p: &mut Parser<'_>) -> Vec<JsxProp> {
                 if p.token == Token::Eof || recover::should_abort_list_parse(p) {
                     break;
                 }
-                p.err(DiagnosticCategory::unexpected(p.token.clone(), p.breadcrumbs().to_vec()));
+                p.err(DiagnosticCategory::unexpected(p.token.clone().into_owned(), p.breadcrumbs().to_vec()));
                 p.next();
             }
         }
@@ -6003,7 +6005,7 @@ fn parse_jsx_children(p: &mut Parser<'_>) -> Vec<Expression> {
                     Token::Lident(name) => {
                         let name = name.clone();
                         let name_loc = p.mk_loc_current();
-                        let lid_idx = p.push_lident(&name);
+                        let lid_idx = p.push_lident(&*name);
                         p.next();
                         // Reuse the existing PosIdx from expr.pexp_loc to match OCaml's sharing
                         let loc_start_idx = p.loc_start_idx(expr.pexp_loc);
@@ -6035,7 +6037,7 @@ fn parse_jsx_children(p: &mut Parser<'_>) -> Vec<Expression> {
             children.push(expr);
         } else if let Token::String(s) = &p.token {
             // Handle string literals in JSX content
-            let s = s.clone();
+            let s = s.clone().into_owned();
             let start_pos_idx = p.start_pos_idx();
             let tag = get_string_tag(p);
             p.next();
@@ -6146,7 +6148,7 @@ fn parse_template_literal_with_prefix(
         match &p.token {
             Token::TemplatePart { text, pos } => {
                 // Part before an interpolation ${
-                let text = text.clone();
+                let text = text.clone().into_owned();
                 let pos = pos.clone();
                 // OCaml uses the embedded last_pos from the token, not p.end_pos
                 let text_end_idx = p.push_pos(pos);
@@ -6168,7 +6170,7 @@ fn parse_template_literal_with_prefix(
             }
             Token::TemplateTail { text, pos } => {
                 // Final part or simple template string
-                let text = text.clone();
+                let text = text.clone().into_owned();
                 let pos = pos.clone();
                 // OCaml uses the embedded last_pos from the token, not p.end_pos
                 let text_end_idx = p.push_pos(pos);
