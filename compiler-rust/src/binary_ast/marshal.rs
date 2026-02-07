@@ -24,7 +24,9 @@
 //! - OCaml runtime: runtime/extern.c
 //! - OCaml runtime: runtime/caml/intext.h
 
+use std::cell::RefCell;
 use std::collections::HashMap;
+use std::rc::Rc;
 
 use crate::parse_arena::{LidentIdx, LocIdx, ParseArena, PosIdx, StrIdx};
 use crate::parser::longident::Longident;
@@ -556,6 +558,9 @@ impl MarshalWriter {
         //        1 header word + 2 words on 32-bit
         self.size_32 += 1 + 2; // 32-bit: double is 2 words
         self.size_64 += 1 + 1; // 64-bit: double is 1 word
+
+        // Floats are heap objects in OCaml, so they can be shared
+        self.obj_counter += 1;
     }
 
     // ========== Sharing support ==========
@@ -711,6 +716,307 @@ impl MarshalWriter {
     }
 }
 
+// ============================================================================
+// Marshal Reader and Value Representation
+// ============================================================================
+
+/// A reference-counted marshal value (allows shared references).
+pub type MarshalValueRef = Rc<RefCell<MarshalValue>>;
+
+/// A generic OCaml Marshal value.
+#[derive(Debug, Clone)]
+pub enum MarshalValue {
+    /// Immediate integer
+    Int(i64),
+    /// String / bytes
+    Bytes(Vec<u8>),
+    /// Float
+    Double(f64),
+    /// Block with tag and fields
+    Block {
+        tag: u8,
+        fields: Vec<MarshalValueRef>,
+    },
+}
+
+impl MarshalValue {
+    /// Create a new shared reference for a value.
+    pub fn shared(value: MarshalValue) -> MarshalValueRef {
+        Rc::new(RefCell::new(value))
+    }
+
+    /// Serialize a MarshalValue with sharing preserved by pointer identity.
+    pub fn marshal_value(value: &MarshalValueRef, writer: &mut MarshalWriter) {
+        let ptr = Rc::as_ptr(value) as usize;
+        match &*value.borrow() {
+            MarshalValue::Int(n) => writer.write_int(*n),
+            MarshalValue::Bytes(bytes) => {
+                if writer.check_shared(ptr) {
+                    return;
+                }
+                let obj_idx = writer.obj_counter();
+                writer.write_string(bytes);
+                writer.record_location_at(ptr, obj_idx);
+            }
+            MarshalValue::Double(f) => {
+                if writer.check_shared(ptr) {
+                    return;
+                }
+                let obj_idx = writer.obj_counter();
+                writer.write_double(*f);
+                writer.record_location_at(ptr, obj_idx);
+            }
+            MarshalValue::Block { tag, fields } => {
+                if writer.check_shared(ptr) {
+                    return;
+                }
+                let obj_idx = writer.obj_counter();
+                writer.write_block_header(*tag, fields.len());
+                writer.record_location_at(ptr, obj_idx);
+                for field in fields {
+                    MarshalValue::marshal_value(field, writer);
+                }
+            }
+        }
+    }
+}
+
+/// Reader for OCaml Marshal format.
+#[derive(Debug)]
+pub struct MarshalReader<'a> {
+    bytes: &'a [u8],
+    pos: usize,
+    objects: Vec<MarshalValueRef>,
+    payload_end: usize,
+}
+
+impl<'a> MarshalReader<'a> {
+    /// Create a reader for a buffer containing a Marshal value with header.
+    pub fn new(bytes: &'a [u8]) -> Result<Self, String> {
+        if bytes.len() < 20 {
+            return Err("Marshal buffer too small".to_string());
+        }
+        let magic = u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
+        if magic != MAGIC_NUMBER_SMALL {
+            return Err("Invalid marshal magic number".to_string());
+        }
+        let data_len = u32::from_be_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]) as usize;
+        let payload_start = 20;
+        let payload_end = payload_start + data_len;
+        if payload_end > bytes.len() {
+            return Err("Marshal payload length exceeds buffer".to_string());
+        }
+
+        Ok(MarshalReader {
+            bytes,
+            pos: payload_start,
+            objects: Vec::new(),
+            payload_end,
+        })
+    }
+
+    /// Read the top-level value.
+    pub fn read_value(&mut self) -> Result<MarshalValueRef, String> {
+        let value = self.read_value_inner()?;
+        Ok(value)
+    }
+
+    /// Return the offset immediately after this Marshal value.
+    pub fn end_offset(&self) -> usize {
+        self.payload_end
+    }
+
+    fn read_value_inner(&mut self) -> Result<MarshalValueRef, String> {
+        let byte = self.read_u8()?;
+        if (byte & 0xC0) == PREFIX_SMALL_INT {
+            let n = (byte & 0x3F) as i64;
+            return Ok(MarshalValue::shared(MarshalValue::Int(n)));
+        }
+        if (byte & 0xE0) == PREFIX_SMALL_STRING {
+            let len = (byte & 0x1F) as usize;
+            let data = self.read_bytes(len)?;
+            return Ok(self.register_object(MarshalValue::Bytes(data)));
+        }
+        if (byte & 0x80) == PREFIX_SMALL_BLOCK {
+            let tag = byte & 0x0F;
+            let size = ((byte >> 4) & 0x07) as usize;
+            return self.read_block(tag, size);
+        }
+
+        match byte {
+            CODE_INT8 => {
+                let n = self.read_i8()? as i64;
+                Ok(MarshalValue::shared(MarshalValue::Int(n)))
+            }
+            CODE_INT16 => {
+                let n = self.read_i16_be()? as i64;
+                Ok(MarshalValue::shared(MarshalValue::Int(n)))
+            }
+            CODE_INT32 => {
+                let n = self.read_i32_be()? as i64;
+                Ok(MarshalValue::shared(MarshalValue::Int(n)))
+            }
+            CODE_INT64 => {
+                let n = self.read_i64_be()?;
+                Ok(MarshalValue::shared(MarshalValue::Int(n)))
+            }
+            CODE_STRING8 => {
+                let len = self.read_u8()? as usize;
+                let data = self.read_bytes(len)?;
+                Ok(self.register_object(MarshalValue::Bytes(data)))
+            }
+            CODE_STRING32 => {
+                let len = self.read_u32_be()? as usize;
+                let data = self.read_bytes(len)?;
+                Ok(self.register_object(MarshalValue::Bytes(data)))
+            }
+            CODE_DOUBLE_LITTLE => {
+                let data = self.read_bytes(8)?;
+                let mut bytes = [0u8; 8];
+                bytes.copy_from_slice(&data);
+                let f = f64::from_le_bytes(bytes);
+                Ok(self.register_object(MarshalValue::Double(f)))
+            }
+            CODE_DOUBLE_BIG => {
+                let data = self.read_bytes(8)?;
+                let mut bytes = [0u8; 8];
+                bytes.copy_from_slice(&data);
+                let f = f64::from_be_bytes(bytes);
+                Ok(self.register_object(MarshalValue::Double(f)))
+            }
+            CODE_BLOCK32 => {
+                let header = self.read_u32_be()? as u64;
+                let size = (header >> 10) as usize;
+                let tag = (header & 0xFF) as u8;
+                self.read_block(tag, size)
+            }
+            CODE_BLOCK64 => {
+                let header = self.read_u64_be()?;
+                let size = (header >> 10) as usize;
+                let tag = (header & 0xFF) as u8;
+                self.read_block(tag, size)
+            }
+            CODE_SHARED8 => {
+                let d = self.read_u8()? as usize;
+                self.read_shared(d)
+            }
+            CODE_SHARED16 => {
+                let d = self.read_u16_be()? as usize;
+                self.read_shared(d)
+            }
+            CODE_SHARED32 => {
+                let d = self.read_u32_be()? as usize;
+                self.read_shared(d)
+            }
+            _ => Err(format!("Unsupported marshal opcode: 0x{byte:02X}")),
+        }
+    }
+
+    fn read_block(&mut self, tag: u8, size: usize) -> Result<MarshalValueRef, String> {
+        let node = MarshalValue::shared(MarshalValue::Block {
+            tag,
+            fields: Vec::with_capacity(size),
+        });
+        self.objects.push(node.clone());
+
+        let mut fields = Vec::with_capacity(size);
+        for _ in 0..size {
+            fields.push(self.read_value_inner()?);
+        }
+
+        if let MarshalValue::Block {
+            tag: _,
+            fields: slot,
+        } = &mut *node.borrow_mut()
+        {
+            *slot = fields;
+        }
+
+        Ok(node)
+    }
+
+    fn read_shared(&self, distance: usize) -> Result<MarshalValueRef, String> {
+        if distance == 0 || distance > self.objects.len() {
+            return Err("Invalid shared reference distance".to_string());
+        }
+        let idx = self.objects.len() - distance;
+        Ok(self.objects[idx].clone())
+    }
+
+    fn register_object(&mut self, value: MarshalValue) -> MarshalValueRef {
+        let node = MarshalValue::shared(value);
+        self.objects.push(node.clone());
+        node
+    }
+
+    fn read_u8(&mut self) -> Result<u8, String> {
+        if self.pos >= self.payload_end {
+            return Err("Unexpected end of marshal payload".to_string());
+        }
+        let b = self.bytes[self.pos];
+        self.pos += 1;
+        Ok(b)
+    }
+
+    fn read_bytes(&mut self, len: usize) -> Result<Vec<u8>, String> {
+        if self.pos + len > self.payload_end {
+            return Err("Unexpected end of marshal payload".to_string());
+        }
+        let data = self.bytes[self.pos..self.pos + len].to_vec();
+        self.pos += len;
+        Ok(data)
+    }
+
+    fn read_i8(&mut self) -> Result<i8, String> {
+        Ok(self.read_u8()? as i8)
+    }
+
+    fn read_u16_be(&mut self) -> Result<u16, String> {
+        let hi = self.read_u8()? as u16;
+        let lo = self.read_u8()? as u16;
+        Ok((hi << 8) | lo)
+    }
+
+    fn read_i16_be(&mut self) -> Result<i16, String> {
+        Ok(self.read_u16_be()? as i16)
+    }
+
+    fn read_u32_be(&mut self) -> Result<u32, String> {
+        let b1 = self.read_u8()? as u32;
+        let b2 = self.read_u8()? as u32;
+        let b3 = self.read_u8()? as u32;
+        let b4 = self.read_u8()? as u32;
+        Ok((b1 << 24) | (b2 << 16) | (b3 << 8) | b4)
+    }
+
+    fn read_i32_be(&mut self) -> Result<i32, String> {
+        Ok(self.read_u32_be()? as i32)
+    }
+
+    fn read_u64_be(&mut self) -> Result<u64, String> {
+        let b1 = self.read_u8()? as u64;
+        let b2 = self.read_u8()? as u64;
+        let b3 = self.read_u8()? as u64;
+        let b4 = self.read_u8()? as u64;
+        let b5 = self.read_u8()? as u64;
+        let b6 = self.read_u8()? as u64;
+        let b7 = self.read_u8()? as u64;
+        let b8 = self.read_u8()? as u64;
+        Ok((b1 << 56)
+            | (b2 << 48)
+            | (b3 << 40)
+            | (b4 << 32)
+            | (b5 << 24)
+            | (b6 << 16)
+            | (b7 << 8)
+            | b8)
+    }
+
+    fn read_i64_be(&mut self) -> Result<i64, String> {
+        Ok(self.read_u64_be()? as i64)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -802,10 +1108,7 @@ mod tests {
         let mut w = MarshalWriter::new();
         w.write_string(b"hello");
         // PREFIX_SMALL_STRING | 5, then "hello"
-        assert_eq!(
-            w.payload(),
-            &[0x25, b'h', b'e', b'l', b'l', b'o']
-        );
+        assert_eq!(w.payload(), &[0x25, b'h', b'e', b'l', b'l', b'o']);
     }
 
     #[test]

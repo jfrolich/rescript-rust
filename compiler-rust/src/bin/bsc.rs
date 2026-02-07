@@ -10,6 +10,8 @@
 
 use anyhow::{anyhow, Context, Result};
 use rescript_compiler::binary_ast::{write_signature_ast_current, write_structure_ast_current};
+use rescript_compiler::cmi_format::{read_cmi, write_cmi, CmiInfos};
+use rescript_compiler::cmj_format::{write_cmj, CmjTable};
 use rescript_compiler::driver::{compile_file_to_js_with_options, CompilerOptions};
 use rescript_compiler::parser::{module, Parser};
 use std::env;
@@ -29,6 +31,8 @@ struct Options {
     namespace: Option<String>,
     module_name: Option<String>,
     input: Option<PathBuf>,
+    read_cmi_paths: Vec<PathBuf>,
+    dump_cmi: Option<PathBuf>,
 }
 
 fn main() {
@@ -76,6 +80,11 @@ fn run() -> Result<()> {
                         opts.input = Some(PathBuf::from(val));
                     }
                 }
+                "-dcmi" => {
+                    if let Some(val) = args.next() {
+                        opts.dump_cmi = Some(PathBuf::from(val));
+                    }
+                }
                 "-I"
                 | "-open"
                 | "-absname"
@@ -94,7 +103,13 @@ fn run() -> Result<()> {
                 | "-bs-stop-after-cmj"
                 | "-bs-no-check-cmi" => {
                     // Consume the next argument if present (value flags).
-                    let _ = args.next();
+                    if arg == "-bs-read-cmi" {
+                        if let Some(val) = args.next() {
+                            opts.read_cmi_paths.push(PathBuf::from(val));
+                        }
+                    } else {
+                        let _ = args.next();
+                    }
                 }
                 _ => {
                     // Unknown flag: ignore, but if it looks like a value flag, try to skip.
@@ -103,6 +118,16 @@ fn run() -> Result<()> {
         } else {
             opts.input = Some(PathBuf::from(arg));
         }
+    }
+
+    if let Some(cmi_path) = &opts.dump_cmi {
+        let cmi = read_cmi(cmi_path).map_err(|err| anyhow!(err))?;
+        println!("{}", cmi.cmi_name);
+        return Ok(());
+    }
+
+    for cmi_path in &opts.read_cmi_paths {
+        let _ = read_cmi(cmi_path).map_err(|err| anyhow!(err))?;
     }
 
     let input = opts
@@ -133,8 +158,7 @@ fn run() -> Result<()> {
 
 fn generate_ast(input: &Path, output: Option<PathBuf>) -> Result<()> {
     // Use lossy UTF-8 conversion (like OCaml) to handle files with invalid bytes
-    let bytes =
-        fs::read(input).with_context(|| format!("Failed to read {}", input.display()))?;
+    let bytes = fs::read(input).with_context(|| format!("Failed to read {}", input.display()))?;
     let source = String::from_utf8_lossy(&bytes).into_owned();
 
     // Use the original path as provided (matching OCaml's behavior)
@@ -226,11 +250,20 @@ fn read_ast_source_path(ast_path: &Path) -> Result<PathBuf> {
 }
 
 fn write_outputs(source_path: &Path, js: &str, opts: &Options) -> Result<()> {
+    let module_name = module_name_for_file(
+        source_path,
+        opts.namespace.as_deref(),
+        opts.module_name.as_deref(),
+    );
+    let cmi = CmiInfos::empty(module_name.clone());
+    let cmj = CmjTable::empty();
+
     if let Some(out) = &opts.output {
         if let Some(parent) = out.parent() {
             fs::create_dir_all(parent)?;
         }
         fs::write(out, js)?;
+        write_artifacts(out, &module_name, &cmi, &cmj)?;
         return Ok(());
     }
 
@@ -246,7 +279,8 @@ fn write_outputs(source_path: &Path, js: &str, opts: &Options) -> Result<()> {
                 if let Some(parent) = out_path.parent() {
                     fs::create_dir_all(parent)?;
                 }
-                fs::write(out_path, js)?;
+                fs::write(&out_path, js)?;
+                write_artifacts(&out_path, &module_name, &cmi, &cmj)?;
             }
         }
         return Ok(());
@@ -256,7 +290,36 @@ fn write_outputs(source_path: &Path, js: &str, opts: &Options) -> Result<()> {
     if let Some(parent) = out.parent() {
         fs::create_dir_all(parent)?;
     }
-    fs::write(out, js)?;
+    fs::write(&out, js)?;
+    write_artifacts(&out, &module_name, &cmi, &cmj)?;
+    Ok(())
+}
+
+fn write_artifacts(
+    output_path: &Path,
+    module_name: &str,
+    cmi: &CmiInfos,
+    cmj: &CmjTable,
+) -> Result<()> {
+    let prefix = if output_path.extension().is_some() {
+        output_path.with_extension("")
+    } else {
+        output_path.to_path_buf()
+    };
+    let cmi_path = prefix.with_extension("cmi");
+    let cmj_path = prefix.with_extension("cmj");
+
+    if let Some(parent) = cmi_path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+
+    let mut cmi_with_name = cmi.clone();
+    if cmi_with_name.cmi_name.is_empty() {
+        cmi_with_name.cmi_name = module_name.to_string();
+    }
+
+    write_cmi(&cmi_path, &cmi_with_name).map_err(|err| anyhow!(err))?;
+    write_cmj(&cmj_path, cmj).map_err(|err| anyhow!(err))?;
     Ok(())
 }
 

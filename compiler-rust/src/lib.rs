@@ -37,22 +37,24 @@
 #![warn(rust_2018_idioms)]
 #![allow(clippy::uninlined_format_args)] // Style preference, not a correctness issue
 
+pub mod arena;
 pub mod binary_ast;
 pub mod cache;
+pub mod cmi_format;
+pub mod cmj_format;
 pub mod config;
 pub mod context;
 pub mod diagnostics;
+pub mod driver;
 #[allow(unsafe_code)] // FFI requires unsafe
 pub mod ffi;
-pub mod arena;
 pub mod ident;
 pub mod intern;
 pub mod js_ir;
-pub mod parse_arena;
 pub mod lambda;
 pub mod location;
+pub mod parse_arena;
 pub mod parser;
-pub mod driver;
 pub mod types;
 
 // Re-exports for convenience
