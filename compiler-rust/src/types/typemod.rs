@@ -113,6 +113,78 @@ fn structure_has_duplicate_value_names(structure: &Structure) -> bool {
     false
 }
 
+/// Look up the semantic module type for a longident by searching env and persistent env.
+/// Returns a `decl::ModuleType` (the semantic type), not the `typedtree::ModuleType` (the syntactic type tree).
+fn lookup_module_type_by_lid<'b>(
+    lid: &crate::parser::longident::Longident,
+    arena: &ParseArena,
+    env: &Env,
+    pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
+    ctx: &'b crate::types::context::TypeContext<'b>,
+) -> Option<crate::types::decl::ModuleType> {
+    use crate::parser::longident::Longident;
+    use crate::types::decl::ModuleType as DeclMty;
+    match lid {
+        Longident::Lident(mod_idx) => {
+            let mod_name = arena.get_string(*mod_idx);
+            // Try local env first
+            if let Ok(md) = env.find_module(mod_name) {
+                return Some(md.md_type.clone());
+            }
+            // Try persistent env
+            if let Some(pers) = pers_env.as_mut() {
+                if let Some(ps) = pers.find_pers_struct(mod_name, ctx) {
+                    return Some(DeclMty::MtySignature(ps.ps_sig.clone()));
+                }
+            }
+            None
+        }
+        Longident::Ldot(prefix, submod_idx) => {
+            let submod_name = arena.get_string(*submod_idx);
+            // Recursively resolve prefix to get parent module type
+            let parent_type = lookup_module_type_by_lid(prefix, arena, env, pers_env, ctx)?;
+            // Resolve parent type to signature
+            let parent_sig = resolve_mod_type_to_sig(&parent_type, pers_env, ctx)?;
+            // Find sub-module in parent signature
+            for sig_item in &parent_sig {
+                if let crate::types::decl::SignatureItem::SigModule(id, sub_md, _) = sig_item {
+                    if id.name() == submod_name {
+                        return Some(sub_md.md_type.clone());
+                    }
+                }
+            }
+            None
+        }
+        _ => None,
+    }
+}
+
+/// Resolve a decl::ModuleType to a signature, following aliases via persistent env.
+fn resolve_mod_type_to_sig<'b>(
+    mty: &crate::types::decl::ModuleType,
+    pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
+    ctx: &'b crate::types::context::TypeContext<'b>,
+) -> Option<crate::types::decl::Signature> {
+    use crate::types::decl::ModuleType as DeclMty;
+    match mty {
+        DeclMty::MtySignature(sig) => Some(sig.clone()),
+        DeclMty::MtyAlias(_, path) | DeclMty::MtyIdent(path) => {
+            let mod_name = match path {
+                Path::Pident(id) => id.name().to_string(),
+                Path::Pdot(_, name, _) => name.clone(),
+                _ => return None,
+            };
+            if let Some(pers) = pers_env.as_mut() {
+                if let Some(ps) = pers.find_pers_struct(&mod_name, ctx) {
+                    return Some(ps.ps_sig.clone());
+                }
+            }
+            None
+        }
+        _ => None,
+    }
+}
+
 // ============================================================================
 // Module Expression Type Checking
 // ============================================================================
@@ -130,7 +202,8 @@ pub fn type_module_expr<'a>(
         ParsedModuleExprDesc::Pmod_ident(lid) => {
             // Module identifier: M
             // Look up the module path in the environment
-            let path = path_from_longident(tctx.resolve_lid(lid.txt), |idx| arena.get_string(idx));
+            let longident = tctx.resolve_lid(lid.txt);
+            let path = path_from_longident(longident, |idx| arena.get_string(idx));
 
             Ok(ModuleExpr {
                 mod_desc: ModuleExprDesc::Tmod_ident(path, lid.clone()),
@@ -1463,9 +1536,29 @@ fn type_structure_item<'a>(
 
         ParsedStructureItemDesc::Pstr_module(mb) => {
             // Module binding: module M = ME
+            // Compute the semantic module type BEFORE type-checking the module expr,
+            // so we can use it to extend the environment.
+            let semantic_mod_type = match &mb.pmb_expr.pmod_desc {
+                ParsedModuleExprDesc::Pmod_ident(lid) => {
+                    let longident = arena.get_longident(lid.txt);
+                    lookup_module_type_by_lid(longident, arena, env, &mut tctx.persistent_env, tctx.type_ctx)
+                }
+                _ => None,
+            };
+
             let typed_mod = type_module_expr(tctx, env, arena, &mb.pmb_expr)?;
             let mod_name_str = arena.get_string(mb.pmb_name.txt);
             let mod_id = Ident::create_local(mod_name_str);
+
+            // Extend environment with the new module
+            let mut new_env = env.clone();
+            if let Some(decl_mod_type) = semantic_mod_type {
+                new_env.add_module(mod_id.clone(), crate::types::decl::ModuleDeclaration {
+                    md_type: decl_mod_type,
+                    md_attributes: vec![],
+                    md_loc: crate::location::Location::none(),
+                });
+            }
 
             let desc = StructureItemDesc::Tstr_module(ModuleBinding {
                 mb_id: mod_id,
@@ -1480,7 +1573,7 @@ fn type_structure_item<'a>(
                     str_loc: loc,
                     str_env: EnvRef(0),
                 },
-                env.clone(),
+                new_env,
             ))
         }
 

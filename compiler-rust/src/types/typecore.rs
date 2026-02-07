@@ -733,7 +733,7 @@ fn transl_type_inner(
                         }
                     }
                 }
-                crate::parser::longident::Longident::Ldot(prefix, name_idx) => {
+                crate::parser::longident::Longident::Ldot(_prefix, _name_idx) => {
                     // For qualified paths like Module.t, construct from longident
                     // but try to resolve the module path through the env
                     Path::from_longident(longident, |idx| tctx.arena.get_string(idx))
