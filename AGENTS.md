@@ -267,6 +267,54 @@ The compiler is designed for fast feedback loops and scales to large codebases:
 - **Use appropriate optimization passes** in Lambda and JS IRs
 - **Profile** before and after performance-related changes
 
+### High-Performance Compiler Engineering
+
+These principles apply to all performance-sensitive Rust code in the compiler, especially the parser, type checker, and code generator. They are informed by data-oriented design (DOD) research from OXC, Zig, Roc, Sorbet, and academic work.
+
+#### Data layout principles
+
+- **No `Rc` or `Arc`** — Reference counting prevents thread sharing and is slower than arena allocation. Use arena indices (`ExprIdx(u32)`), bump-allocated references (`&'arena T`), or owned/borrowed data (`Box<T>`, `&T`, `Cow<'a, T>`). The parser's `StrIdx`/`LocIdx`/`PosIdx` pattern is the model.
+
+- **Keep enums small (≤16 bytes)** — Rust enums are sized by their largest variant. If 85% of variants fit in 8 bytes but one variant needs 100 bytes, every instance wastes 92 bytes. Box the large, rare variants. OXC measured 10% speedup from enforcing 16-byte AST enums.
+
+- **Separate hot and cold data** — Fields accessed on every iteration belong together in one struct. Rarely-used fields (error recovery state, diagnostics, attributes) belong in a separate struct or side table. A 280-byte struct spanning 5 cache lines forces the CPU to load 4 cache lines of cold data to access 1 cache line of hot data. The Roc compiler gained 12% by splitting hot/cold data in their `Defs` type.
+
+- **Side tables for sparse data** — If a field is None/empty >80% of the time, don't store it inline. Use a `HashMap<NodeIdx, T>` or `Vec<Option<T>>` side table. Each inline `Vec<Attribute>` wastes 24 bytes when empty (pointer + length + capacity), and ~95% of AST nodes have no attributes.
+
+- **Prefer arrays over pointer-chased trees** — Sequential array access runs at ~0.96 instructions/cycle. Random pointer chasing runs at ~0.12 instructions/cycle (CPU stalled 87.5% of the time waiting for memory). Flattening a pointer-based AST into arena-indexed arrays gave 2.4x speedup in academic benchmarks. The CPU prefetcher can predict linear access but not pointer dereferences.
+
+- **Bottom-up construction enables linear traversal** — When expressions are built bottom-up (children before parents), a depth-first traversal of the flattened array becomes a linear forward scan. This is automatically prefetcher-friendly and gives an additional ~8% speedup on top of flattening.
+
+#### Allocation patterns
+
+- **Arena allocate, bulk free** — Parser AST nodes have correlated lifetimes: they're all created during parsing and discarded together. Arena/bump allocation (single pointer increment) is near-zero cost vs `malloc` (free list search, metadata update). OXC measured 20% speedup from `bumpalo`. Even without bumpalo, storing nodes in `Vec<T>` pools with `u32` indices achieves similar benefits.
+
+- **Pre-size collections** — If you know the approximate count (from source size heuristics or arena counts), pre-allocate Vecs and HashMaps. Repeated reallocation and copying is pure waste.
+
+- **SmallVec for small, fixed-arity collections** — Function arguments average 1-3 items, tuple elements 2-4. `SmallVec<[T; 3]>` stores these inline without heap allocation. Only falls back to heap for the rare >N case.
+
+#### String handling
+
+- **Zero-copy from source** — Use `&'a str` or `Cow<'a, str>` to borrow from the source buffer rather than allocating `String`. Only allocate for strings that need transformation (escape sequences). The scanner produces borrowed strings for 99% of tokens.
+
+- **Intern repeated strings** — Identifiers like `t`, `x`, `unit` appear thousands of times. Store each unique string once and reference by `StrIdx(u32)`. Comparison becomes integer equality instead of byte-by-byte string comparison.
+
+- **Propagate borrows into the AST** — If strings are never modified after parsing, carry `Cow<'a, str>` or `&'a str` all the way into AST node types rather than converting to owned `String` at the token→AST boundary.
+
+#### Serialization
+
+- **Replace HashMaps with indexed Vecs for arena-keyed lookups** — If your keys are already arena indices (`PosIdx`, `LocIdx`, `StrIdx`), use `Vec<Option<u32>>` indexed by the raw index value. O(1) with no hashing, no pointer chasing, and the Vec can be pre-sized from the arena count.
+
+- **Pre-allocate output buffers** — Binary output size correlates with source size. Pre-allocate based on a heuristic (e.g., 4x source bytes) rather than growing from a small default.
+
+#### Measurement
+
+- **Always benchmark** — Every performance change must have before/after numbers. "Should be faster" is not evidence. Use minimum time over multiple iterations (OS scheduling noise only adds time, never removes it).
+
+- **Profile before optimizing** — Use flamegraphs (`cargo flamegraph`), `perf stat` (cache misses, branch misses), or DHAT (heap profiling) to find actual bottlenecks. Don't guess.
+
+- **Measure struct sizes** — Add `assert_eq!(std::mem::size_of::<T>(), N)` tests for critical types. Enum size regressions (someone adds a large variant) silently degrade cache performance across the entire codebase.
+
 ## Coding Conventions
 
 ### Naming
