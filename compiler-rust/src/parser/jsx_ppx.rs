@@ -11,6 +11,8 @@
 //! - Key props use `jsxKeyed`/`jsxsKeyed` instead
 //! - `@react.component` transforms functions to accept props record
 
+use std::borrow::Cow;
+
 use crate::parse_arena::{LidentIdx, Located, ParseArena};
 use super::ast::*;
 use super::longident::Longident;
@@ -398,7 +400,7 @@ fn transform_react_component_binding(
                         CoreTypeDesc::Ptyp_any => {
                             // OCaml uses actual param location for Ptyp_var when interior is Ptyp_any
                             return Some(CoreType {
-                                ptyp_desc: CoreTypeDesc::Ptyp_var("ref".to_string()),
+                                ptyp_desc: CoreTypeDesc::Ptyp_var(Cow::Borrowed("ref")),
                                 ptyp_loc: nt.loc.clone(),
                                 ptyp_attributes: vec![],
                             });
@@ -468,7 +470,7 @@ fn transform_react_component_binding(
                 // No existing constraint, and not unused - add Js.Nullable.t<'ref>
                 // OCaml calls ref_type Location.none, so inner Ptyp_var uses ghost location
                 let ref_type_var = CoreType {
-                    ptyp_desc: CoreTypeDesc::Ptyp_var("ref".to_string()),
+                    ptyp_desc: CoreTypeDesc::Ptyp_var(Cow::Borrowed("ref")),
                     ptyp_loc: empty_loc(),
                     ptyp_attributes: vec![],
                 };
@@ -506,7 +508,7 @@ fn transform_react_component_binding(
         } else if !ref_alias.starts_with('_') {
             // No ref_arg found but alias doesn't start with "_" - add Js.Nullable.t<'ref>
             let ref_type_var = CoreType {
-                ptyp_desc: CoreTypeDesc::Ptyp_var("ref".to_string()),
+                ptyp_desc: CoreTypeDesc::Ptyp_var(Cow::Borrowed("ref")),
                 ptyp_loc: empty_loc(),
                 ptyp_attributes: vec![],
             };
@@ -1791,7 +1793,7 @@ fn make_props_record_type_with_live(arena: &mut ParseArena, name: &str, loc: &Lo
         .map(|nt| {
             // OCaml uses ghost location for the Ptyp_var inside label declarations
             let type_var = CoreType {
-                ptyp_desc: CoreTypeDesc::Ptyp_var(safe_type_from_value(&nt.label)),
+                ptyp_desc: CoreTypeDesc::Ptyp_var(Cow::Owned(safe_type_from_value(&nt.label))),
                 ptyp_loc: empty_loc(),
                 ptyp_attributes: vec![],
             };
@@ -1816,7 +1818,7 @@ fn make_props_record_type_with_live(arena: &mut ParseArena, name: &str, loc: &Lo
         .filter(|nt| nt.label != "key")
         .map(|nt| {
             let var = CoreType {
-                ptyp_desc: CoreTypeDesc::Ptyp_var(safe_type_from_value(&nt.label)),
+                ptyp_desc: CoreTypeDesc::Ptyp_var(Cow::Owned(safe_type_from_value(&nt.label))),
                 ptyp_loc: nt.loc.clone(),
                 ptyp_attributes: vec![],
             };
@@ -2391,7 +2393,7 @@ fn make_props_record_type(arena: &mut ParseArena, name: &str, loc: &Location, na
         .map(|nt| {
             // OCaml uses ghost location for the Ptyp_var inside label declarations
             let type_var = CoreType {
-                ptyp_desc: CoreTypeDesc::Ptyp_var(safe_type_from_value(&nt.label)),
+                ptyp_desc: CoreTypeDesc::Ptyp_var(Cow::Owned(safe_type_from_value(&nt.label))),
                 ptyp_loc: empty_loc(),
                 ptyp_attributes: vec![],
             };
@@ -2417,7 +2419,7 @@ fn make_props_record_type(arena: &mut ParseArena, name: &str, loc: &Location, na
         .map(|nt| {
             (
                 CoreType {
-                    ptyp_desc: CoreTypeDesc::Ptyp_var(safe_type_from_value(&nt.label)),
+                    ptyp_desc: CoreTypeDesc::Ptyp_var(Cow::Owned(safe_type_from_value(&nt.label))),
                     ptyp_loc: nt.loc.clone(),
                     ptyp_attributes: vec![],
                 },
@@ -2457,7 +2459,7 @@ fn make_props_record_type_sig(arena: &mut ParseArena, name: &str, loc: &Location
         .map(|nt| {
             // OCaml uses ghost location for the Ptyp_var inside label declarations
             let type_var = CoreType {
-                ptyp_desc: CoreTypeDesc::Ptyp_var(safe_type_from_value(&nt.label)),
+                ptyp_desc: CoreTypeDesc::Ptyp_var(Cow::Owned(safe_type_from_value(&nt.label))),
                 ptyp_loc: empty_loc(),
                 ptyp_attributes: vec![],
             };
@@ -2482,7 +2484,7 @@ fn make_props_record_type_sig(arena: &mut ParseArena, name: &str, loc: &Location
         .map(|nt| {
             (
                 CoreType {
-                    ptyp_desc: CoreTypeDesc::Ptyp_var(safe_type_from_value(&nt.label)),
+                    ptyp_desc: CoreTypeDesc::Ptyp_var(Cow::Owned(safe_type_from_value(&nt.label))),
                     ptyp_loc: nt.loc.clone(),
                     ptyp_attributes: vec![],
                 },
@@ -2591,7 +2593,7 @@ fn update_config_from_attribute(arena: &ParseArena, attr: &Attribute, config: &m
                             }
                             "module_" => {
                                 if let ExpressionDesc::Pexp_constant(Constant::String(s, _)) = &field.expr.pexp_desc {
-                                    module_raw = Some(s.clone());
+                                    module_raw = Some(s.to_string());
                                 }
                             }
                             _ => {}
@@ -3358,7 +3360,7 @@ fn transform_jsx_unary(
         JsxTagName::Lower(name) => {
             // Lowercase element like <div />
             let component_name_expr = Expression {
-                pexp_desc: ExpressionDesc::Pexp_constant(Constant::String(name.clone(), None)),
+                pexp_desc: ExpressionDesc::Pexp_constant(Constant::String(Cow::Owned(name.clone()), None)),
                 pexp_loc: tag_loc.clone(),
                 pexp_attributes: vec![],
             };
@@ -3436,7 +3438,7 @@ fn transform_jsx_container(
         JsxTagName::Lower(name) => {
             // Lowercase element like <div>...</div>
             let component_name_expr = Expression {
-                pexp_desc: ExpressionDesc::Pexp_constant(Constant::String(name.clone(), None)),
+                pexp_desc: ExpressionDesc::Pexp_constant(Constant::String(Cow::Owned(name.clone()), None)),
                 pexp_loc: tag_loc.clone(),
                 pexp_attributes: vec![],
             };
