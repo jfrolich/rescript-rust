@@ -185,6 +185,32 @@ pub fn resolve_mod_type_to_sig<'b>(
     }
 }
 
+/// Extract the result type of a functor application.
+/// Given a parsed module expression desc for the functor part, looks up its type
+/// and returns the result type if it's a functor type.
+fn extract_functor_result_type<'b>(
+    functor_desc: &ParsedModuleExprDesc,
+    arena: &ParseArena,
+    env: &Env,
+    pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
+    ctx: &'b crate::types::context::TypeContext<'b>,
+) -> Option<crate::types::decl::ModuleType> {
+    use crate::types::decl::ModuleType as DeclMty;
+    // Resolve the functor's module type
+    let functor_mty = match functor_desc {
+        ParsedModuleExprDesc::Pmod_ident(lid) => {
+            let longident = arena.get_longident(lid.txt);
+            lookup_module_type_by_lid(longident, arena, env, pers_env, ctx)?
+        }
+        _ => return None,
+    };
+    // Extract the result type if it's a functor
+    match functor_mty {
+        DeclMty::MtyFunctor { result, .. } => Some(*result),
+        _ => None,
+    }
+}
+
 /// Extract a `decl::ModuleType` from a typed module expression.
 /// For structure modules, builds a signature from the structure items.
 fn extract_module_type_from_mod_expr(mod_expr: &ModuleExpr) -> Option<crate::types::decl::ModuleType> {
@@ -1663,6 +1689,10 @@ fn type_structure_item<'a>(
                     let longident = arena.get_longident(lid.txt);
                     lookup_module_type_by_lid(longident, arena, env, &mut tctx.persistent_env, tctx.type_ctx)
                 }
+                ParsedModuleExprDesc::Pmod_apply(functor_expr, _arg) => {
+                    // For functor application F(A), look up F's type and extract result
+                    extract_functor_result_type(&functor_expr.pmod_desc, arena, env, &mut tctx.persistent_env, tctx.type_ctx)
+                }
                 _ => None,
             };
 
@@ -1702,11 +1732,38 @@ fn type_structure_item<'a>(
 
         ParsedStructureItemDesc::Pstr_recmodule(mbs) => {
             // Recursive modules: module rec M = ...
-            let mut typed_bindings = Vec::new();
-            for mb in mbs {
-                let typed_mod = type_module_expr(tctx, env, arena, &mb.pmb_expr)?;
+            // First pass: add placeholder module types to env so mutual references work
+            let mut rec_env = env.clone();
+            let mut mod_ids = Vec::new();
+            for mb in mbs.iter() {
                 let mod_name_str = arena.get_string(mb.pmb_name.txt);
                 let mod_id = Ident::create_local(mod_name_str);
+                // Add empty signature placeholder for forward references
+                rec_env.add_module(mod_id.clone(), crate::types::decl::ModuleDeclaration {
+                    md_type: crate::types::decl::ModuleType::MtySignature(vec![]),
+                    md_attributes: vec![],
+                    md_loc: crate::location::Location::none(),
+                });
+                mod_ids.push(mod_id);
+            }
+
+            // Second pass: type-check each module body with the env containing all modules
+            let mut typed_bindings = Vec::new();
+            let mut new_env = env.clone();
+            for (i, mb) in mbs.iter().enumerate() {
+                let typed_mod = type_module_expr(tctx, &rec_env, arena, &mb.pmb_expr)?;
+                let mod_id = mod_ids[i].clone();
+                let mod_name_str = arena.get_string(mb.pmb_name.txt);
+
+                // Extract real module type and add to returned environment
+                let mod_type = extract_module_type_from_mod_expr(&typed_mod)
+                    .unwrap_or(crate::types::decl::ModuleType::MtySignature(vec![]));
+                new_env.add_module(mod_id.clone(), crate::types::decl::ModuleDeclaration {
+                    md_type: mod_type,
+                    md_attributes: vec![],
+                    md_loc: crate::location::Location::none(),
+                });
+
                 typed_bindings.push(ModuleBinding {
                     mb_id: mod_id,
                     mb_name: Located { txt: mod_name_str.to_string(), loc: mb.pmb_name.loc },
@@ -1723,7 +1780,7 @@ fn type_structure_item<'a>(
                     str_loc: loc,
                     str_env: EnvRef(0),
                 },
-                env.clone(),
+                new_env,
             ))
         }
 
