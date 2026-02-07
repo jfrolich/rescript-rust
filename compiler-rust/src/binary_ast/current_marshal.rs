@@ -1204,16 +1204,17 @@ impl Marshal for Expression {
         // the default mapper which creates fresh tuples.
         let share_attrs = matches!(
             &*self.pexp_desc,
-            ExpressionDesc::Pexp_constant(Constant::String(_, Some(_)))
-                | ExpressionDesc::Pexp_constant(Constant::Integer(_, Some(_)))
-                | ExpressionDesc::Pexp_extension(_)
-                | ExpressionDesc::Pexp_newtype(Box::new((_, _)))
+            ExpressionDesc::Pexp_constant(c) if matches!(&**c, Constant::String(_, Some(_)) | Constant::Integer(_, Some(_)))
+        ) || matches!(
+            &*self.pexp_desc,
+            ExpressionDesc::Pexp_extension(_)
+                | ExpressionDesc::Pexp_newtype(_)
         );
         let has_braces_or_ternary =
             has_braces_attr(&self.pexp_attributes, w) || has_ternary_attr(&self.pexp_attributes, w);
         let rewritten_await_letmodule = matches!(
             &*self.pexp_desc,
-            ExpressionDesc::Pexp_letmodule(inner) if has_await_attr(&mod_expr.pmod_attributes, w)
+            ExpressionDesc::Pexp_letmodule(inner) if has_await_attr(&inner.1.pmod_attributes, w)
         );
         let rewritten_expr = w.get_arena().is_rewritten_expr_loc(self.pexp_loc);
         let share_singleton_attr_tuple = share_attrs;

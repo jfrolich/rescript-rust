@@ -232,7 +232,7 @@ fn is_simple_expression_with_arena(expr: &Expression, arena: &ParseArena) -> boo
             // NOTE: Pexp_field and Pexp_send are NOT simple in OCaml's pprintast.
             // They are in expression2, which means they need parens when nested.
             // OCaml's simple_expr handles these directly (no paren wrapping)
-            | ExpressionDesc::Pexp_for(Box::new((_, _, _, _, _)))
+            | ExpressionDesc::Pexp_for(inner)
             | ExpressionDesc::Pexp_while(_, _)
             | ExpressionDesc::Pexp_jsx_element(Box::new(_))  // JSX elements are simple in OCaml
     )
@@ -1195,7 +1195,7 @@ fn print_expression_under_semi<W: Write>(f: &mut Formatter<W>, arena: &ParseAren
             ExpressionDesc::Pexp_let(_, _, _)
                 | ExpressionDesc::Pexp_letmodule(_, _, _)
                 | ExpressionDesc::Pexp_open(_, _, _)
-                | ExpressionDesc::Pexp_letexception(Box::new((_, _)))
+                | ExpressionDesc::Pexp_letexception(inner)
         );
         if needs_semi_parens || needs_let_parens {
             // OCaml: paren true (expression reset_ctxt) f x
@@ -1218,7 +1218,7 @@ fn print_expression_under_semi_inner<W: Write>(f: &mut Formatter<W>, arena: &Par
         ExpressionDesc::Pexp_let(_, _, _)
             | ExpressionDesc::Pexp_letmodule(_, _, _)
             | ExpressionDesc::Pexp_open(_, _, _)
-            | ExpressionDesc::Pexp_letexception(Box::new((_, _)))
+            | ExpressionDesc::Pexp_letexception(inner)
     );
     if needs_semi_parens || needs_let_parens {
         // paren true (expression reset_ctxt) f x
@@ -2025,7 +2025,7 @@ fn print_expression_inner<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, ex
                     | ExpressionDesc::Pexp_construct(_, None)
                     | ExpressionDesc::Pexp_tuple(_)
                     | ExpressionDesc::Pexp_array(_)
-                    | ExpressionDesc::Pexp_record(Box::new((_, _)))
+                    | ExpressionDesc::Pexp_record(inner)
             );
             // If has attributes, print_expression already produces ((expr)[@attr ])
             // so we don't need to add extra parens

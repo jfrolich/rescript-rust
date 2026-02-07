@@ -60,7 +60,7 @@ pub fn substitute_type_vars(arena: &mut crate::parse_arena::ParseArena, typ: Cor
                 .into_iter()
                 .map(|arg| substitute_type_vars(arena, arg, vars))
                 .collect();
-            CoreTypeDesc::Ptyp_constr(Box::new((lid, new_args)))
+            CoreTypeDesc::Ptyp_constr(inner)
         }
         CoreTypeDesc::Ptyp_arrow(inner) => {
                     let (ref arg, ref ret, ref arity) = **inner;
@@ -82,11 +82,11 @@ pub fn substitute_type_vars(arena: &mut crate::parse_arena::ParseArena, typ: Cor
         ),
         CoreTypeDesc::Ptyp_poly(inner) => {
                     let (ref poly_vars, ref body) = **inner;
-            CoreTypeDesc::Ptyp_poly(Box::new((poly_vars, Box::new(substitute_type_vars(arena, *body, vars)))))
+            CoreTypeDesc::Ptyp_poly(inner)
         }
         CoreTypeDesc::Ptyp_alias(inner) => {
                     let (ref inner, ref alias) = **inner;
-            CoreTypeDesc::Ptyp_alias(Box::new((Box::new(substitute_type_vars(arena, *inner, vars)), alias)))
+            CoreTypeDesc::Ptyp_alias(inner)
         }
         CoreTypeDesc::Ptyp_object(inner) => {
                     let (ref fields, ref closed) = **inner;
@@ -101,7 +101,7 @@ pub fn substitute_type_vars(arena: &mut crate::parse_arena::ParseArena, typ: Cor
                     }
                 })
                 .collect();
-            CoreTypeDesc::Ptyp_object(Box::new((new_fields, closed)))
+            CoreTypeDesc::Ptyp_object(inner)
         }
         CoreTypeDesc::Ptyp_variant(inner) => {
                     let (ref rows, ref closed, ref labels) = **inner;
@@ -120,7 +120,7 @@ pub fn substitute_type_vars(arena: &mut crate::parse_arena::ParseArena, typ: Cor
                     }
                 })
                 .collect();
-            CoreTypeDesc::Ptyp_variant(Box::new((new_rows, closed, labels)))
+            CoreTypeDesc::Ptyp_variant(inner)
         }
         CoreTypeDesc::Ptyp_package((lid, constraints)) => {
             let new_constraints = constraints

@@ -3745,7 +3745,7 @@ impl<'a> LocCloner<'a> {
                     self.expression(arg);
                 }
             }
-            ExpressionDesc::Pexp_match(Box::new((expr, cases))) | ExpressionDesc::Pexp_try(inner) => {
+            ExpressionDesc::Pexp_match(inner) | ExpressionDesc::Pexp_try(inner) => {
                     let (ref expr, ref cases) = **inner;
                 self.expression(expr);
                 for case in cases {

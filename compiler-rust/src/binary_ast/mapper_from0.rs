@@ -100,7 +100,7 @@ fn get_arity_from_attributes(arena: &ParseArena, attrs: &[current::Attribute]) -
         if arena.get_string(name.txt) == "res.arity" {
             if let current::Payload::PStr(items) = payload {
                 if let Some(item) = items.first() {
-                    if let current::StructureItemDesc::Pstr_eval(Box::new((expr, _))) = item.pstr_desc.as_ref() {
+                    if let current::StructureItemDesc::Pstr_eval(inner) = item.pstr_desc.as_ref() {
                         if let current::ExpressionDesc::Pexp_constant(current::Constant::Integer(
                             s,
                             _,
@@ -391,18 +391,18 @@ impl<'a> Mapper<'a> {
                     }
                 }
 
-                current::CoreTypeDesc::Ptyp_constr(Box::new((self.map_longident_loc(lid), mapped_types)))
+                current::CoreTypeDesc::Ptyp_constr(inner)
             }
             pt0::CoreTypeDesc::Object(fields, closed) => {
                 let fields = fields.iter().map(|f| self.map_object_field(f)).collect();
-                current::CoreTypeDesc::Ptyp_object(Box::new((fields, map_closed_flag(closed))))
+                current::CoreTypeDesc::Ptyp_object(inner)
             }
             pt0::CoreTypeDesc::Alias(t, s) => {
                 current::CoreTypeDesc::Ptyp_alias(Box::new(self.map_core_type(t)), Cow::Owned(s.clone()))
             }
             pt0::CoreTypeDesc::Variant(rows, closed, labels) => {
                 let rows = rows.iter().map(|r| self.map_row_field(r)).collect();
-                current::CoreTypeDesc::Ptyp_variant(Box::new((rows, map_closed_flag(closed), labels.as_ref().map(|ls| ls.iter().map(|l| Cow::Owned(l.clone())).collect()))))
+                current::CoreTypeDesc::Ptyp_variant(inner)
             }
             pt0::CoreTypeDesc::Poly(vars, t) => {
                 current::CoreTypeDesc::Ptyp_poly(
@@ -416,7 +416,7 @@ impl<'a> Mapper<'a> {
                     .iter()
                     .map(|(l, t)| (self.map_longident_loc(l), self.map_core_type(t)))
                     .collect();
-                current::CoreTypeDesc::Ptyp_package(Box::new((self.map_longident_loc(lid), constraints)))
+                current::CoreTypeDesc::Ptyp_package(inner)
             }
             pt0::CoreTypeDesc::Extension(ext) => {
                 current::CoreTypeDesc::Ptyp_extension(Box::new(self.map_extension(ext)))
@@ -468,7 +468,7 @@ impl<'a> Mapper<'a> {
             }
             pt0::PatternDesc::Constant(c) => current::PatternDesc::Ppat_constant(map_constant(c)),
             pt0::PatternDesc::Interval(c1, c2) => {
-                current::PatternDesc::Ppat_interval(Box::new((map_constant(c1), map_constant(c2))))
+                current::PatternDesc::Ppat_interval(inner)
             }
             pt0::PatternDesc::Tuple(pl) => {
                 current::PatternDesc::Ppat_tuple(Box::new(pl.iter().map(|p| self.map_pattern(p)).collect()))
@@ -480,7 +480,7 @@ impl<'a> Mapper<'a> {
                 )
             }
             pt0::PatternDesc::Variant(tag, arg) => {
-                current::PatternDesc::Ppat_variant(Box::new((Cow::Owned(tag.clone()), arg.as_ref().map(|p| Box::new(self.map_pattern(p))))))
+                current::PatternDesc::Ppat_variant(inner)
             }
             pt0::PatternDesc::Record(fields, closed) => {
                 let fields = fields.iter().map(|pt0::RecordElement { lid, x: pat, opt }| {
@@ -496,7 +496,7 @@ impl<'a> Mapper<'a> {
                     };
                     current::PatternRecordField { lid, pat, opt: optional }
                 }).collect();
-                current::PatternDesc::Ppat_record(Box::new((fields, map_closed_flag(closed))))
+                current::PatternDesc::Ppat_record(inner)
             }
             pt0::PatternDesc::Array(pl) => {
                 current::PatternDesc::Ppat_array(Box::new(pl.iter().map(|p| self.map_pattern(p)).collect()))
@@ -971,7 +971,7 @@ impl<'a> Mapper<'a> {
                 current::ExpressionDesc::Pexp_assert(Box::new(self.map_expression(e)))
             }
             pt0::ExpressionDesc::Newtype(name, body) => {
-                current::ExpressionDesc::Pexp_newtype(Box::new((self.map_string_loc(name), Box::new(self.map_expression(body)))))
+                current::ExpressionDesc::Pexp_newtype(inner)
             }
             pt0::ExpressionDesc::Pack(me) => current::ExpressionDesc::Pexp_pack(self.map_module_expr(me)),
             pt0::ExpressionDesc::Open(ovf, lid, body) => current::ExpressionDesc::Pexp_open(
@@ -1134,7 +1134,7 @@ impl<'a> Mapper<'a> {
 
         let desc = match &item.pstr_desc {
             pt0::StructureItemDesc::Eval(e, attrs) => {
-                current::StructureItemDesc::Pstr_eval(Box::new((self.map_expression(e), self.map_attributes(attrs))))
+                current::StructureItemDesc::Pstr_eval(inner)
             }
             pt0::StructureItemDesc::Value(rec_flag, bindings) => current::StructureItemDesc::Pstr_value(
                 map_rec_flag(*rec_flag),
@@ -1169,7 +1169,7 @@ impl<'a> Mapper<'a> {
                 current::StructureItemDesc::Pstr_include(Box::new(self.map_include_declaration(id)))
             }
             pt0::StructureItemDesc::Extension(ext, attrs) => {
-                current::StructureItemDesc::Pstr_extension(Box::new((self.map_extension(ext), self.map_attributes(attrs))))
+                current::StructureItemDesc::Pstr_extension(inner)
             }
             pt0::StructureItemDesc::Attribute(attr) => {
                 current::StructureItemDesc::Pstr_attribute(Box::new(self.map_attribute(attr)))
@@ -1223,7 +1223,7 @@ impl<'a> Mapper<'a> {
                 current::SignatureItemDesc::Psig_include(Box::new(self.map_include_description(id)))
             }
             pt0::SignatureItemDesc::Extension(ext, attrs) => {
-                current::SignatureItemDesc::Psig_extension(Box::new((self.map_extension(ext), self.map_attributes(attrs))))
+                current::SignatureItemDesc::Psig_extension(inner)
             }
             pt0::SignatureItemDesc::Attribute(attr) => {
                 current::SignatureItemDesc::Psig_attribute(Box::new(self.map_attribute(attr)))

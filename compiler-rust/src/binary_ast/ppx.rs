@@ -3760,7 +3760,7 @@ fn rewrite_core_type(typ: &CoreType, arena: &mut ParseArena) -> CoreType {
     let new_desc = match &*typ.ptyp_desc {
         CoreTypeDesc::Ptyp_extension(ext) => {
             let (name, payload) = ext;
-            CoreTypeDesc::Ptyp_extension(Box::new((name.clone(), rewrite_payload(payload, arena))))
+            CoreTypeDesc::Ptyp_extension(inner)
         }
         CoreTypeDesc::Ptyp_arrow(inner) => {
                     let (ref arg, ref ret, ref arity) = **inner;
@@ -3777,15 +3777,15 @@ fn rewrite_core_type(typ: &CoreType, arena: &mut ParseArena) -> CoreType {
         }
         CoreTypeDesc::Ptyp_constr(inner) => {
                     let (ref lid, ref args) = **inner;
-            CoreTypeDesc::Ptyp_constr(Box::new((lid.clone(), args.iter().map(|t| rewrite_core_type(t, arena)).collect())))
+            CoreTypeDesc::Ptyp_constr(inner)
         }
         CoreTypeDesc::Ptyp_alias(inner) => {
                     let (ref inner, ref name) = **inner;
-            CoreTypeDesc::Ptyp_alias(Box::new((Box::new(rewrite_core_type(inner, arena)), name.clone())))
+            CoreTypeDesc::Ptyp_alias(inner)
         }
         CoreTypeDesc::Ptyp_poly(inner) => {
                     let (ref vars, ref inner) = **inner;
-            CoreTypeDesc::Ptyp_poly(Box::new((vars.clone(), Box::new(rewrite_core_type(inner, arena)))))
+            CoreTypeDesc::Ptyp_poly(inner)
         }
         CoreTypeDesc::Ptyp_object(inner) => {
                     let (ref fields, ref closed) = **inner;
@@ -4133,7 +4133,7 @@ fn rewrite_pattern(pat: &Pattern, arena: &mut ParseArena) -> Pattern {
         PatternDesc::Ppat_var(name) => PatternDesc::Ppat_var(name.clone()),
         PatternDesc::Ppat_interval(inner) => {
             let (ref c1, ref c2) = **inner;
-            PatternDesc::Ppat_interval(Box::new((c1.clone(), c2.clone())))
+            PatternDesc::Ppat_interval(inner)
         }
         PatternDesc::Ppat_type(lid) => PatternDesc::Ppat_type(lid.clone()),
         PatternDesc::Ppat_unpack(name) => PatternDesc::Ppat_unpack(name.clone()),

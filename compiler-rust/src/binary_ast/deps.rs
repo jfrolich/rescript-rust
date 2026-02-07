@@ -341,7 +341,7 @@ impl<'a> DependencyCollector<'a> {
                     self.add_expression(arg);
                 }
             }
-            ExpressionDesc::Pexp_match(Box::new((expr, cases))) | ExpressionDesc::Pexp_try(inner) => {
+            ExpressionDesc::Pexp_match(inner) | ExpressionDesc::Pexp_try(inner) => {
                     let (ref expr, ref cases) = **inner;
                 self.add_expression(expr);
                 for case in cases {

@@ -1659,7 +1659,7 @@ fn walk_expression(expr: &Expression, t: &mut CommentTable, comments: Vec<Commen
             walk_module_expr(mod_expr, t, inside, arena);
             t.attach_trailing(mod_expr.pmod_loc, after, arena);
         }
-        ExpressionDesc::Pexp_match(Box::new((match_expr, cases)))
+        ExpressionDesc::Pexp_match(inner)
         | ExpressionDesc::Pexp_try(inner) => {
                     let (ref match_expr, ref cases) = **inner;
             let (before, inside, after) = partition_by_loc(comments, match_expr.pexp_loc, arena);
@@ -2032,7 +2032,7 @@ fn walk_expression(expr: &Expression, t: &mut CommentTable, comments: Vec<Commen
                 }
             }
         }
-        ExpressionDesc::Pexp_send(Box::new((inner, _))) | ExpressionDesc::Pexp_await(inner) => {
+        ExpressionDesc::Pexp_send(inner) | ExpressionDesc::Pexp_await(inner) => {
             walk_expression(inner, t, comments, arena);
         }
         ExpressionDesc::Pexp_jsx_element(jsx) => {

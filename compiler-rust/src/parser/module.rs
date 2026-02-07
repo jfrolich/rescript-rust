@@ -676,7 +676,10 @@ pub fn parse_structure_item(p: &mut Parser<'_>) -> Option<StructureItem> {
                 Payload::PStr(Box::new(vec![]))
             };
             parse_newline_or_semicolon_structure(p);
-            Some(StructureItemDesc::Pstr_extension(Box::new(((id, payload), attrs.clone()))))
+            Some(StructureItemDesc::Pstr_extension(Box::new((
+                (id, payload),
+                attrs.clone(),
+            ))))
         }
         _ => {
             // Could be an expression

@@ -424,7 +424,7 @@ impl<'a> Mapper<'a> {
 
     pub fn map_core_type(&mut self, ty: &current::CoreType) -> pt0::CoreType {
         // Handle arrow types specially to support arity wrapping
-        if let current::CoreTypeDesc::Ptyp_arrow(Box::new((arg, ret, arity))) = &*ty.ptyp_desc {
+        if let current::CoreTypeDesc::Ptyp_arrow(inner) = &*ty.ptyp_desc {
             let loc = self.loc(ty.ptyp_loc);
             // Merge outer type's attributes with arg's attributes (OCaml does this)
             let arrow_attrs: Vec<pt0::Attribute> = self.map_attributes(&ty.ptyp_attributes)
