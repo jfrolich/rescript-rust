@@ -285,7 +285,7 @@ fn parse_single_pattern_with_alias(p: &mut Parser<'_>) -> Pattern {
             p.mk_loc_idx_to_prev_end(alias_start_idx)
         };
         let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
-        let name_idx = p.arena_mut().push_string(name.to_string());
+        let name_idx = p.arena_mut().push_interned_string(&name);
         pat = Pattern {
             ppat_desc: PatternDesc::Ppat_alias(Box::new(pat), with_loc(name_idx, name_with_attrs_loc)),
             ppat_loc: loc,
@@ -396,7 +396,7 @@ pub fn parse_alias_pattern(
                 let name = name.clone();
                 let loc = p.mk_loc_current();
                 p.next();
-                let str_idx = p.arena_mut().push_string(name.to_string());
+                let str_idx = p.arena_mut().push_interned_string(&name);
                 with_loc(str_idx, loc)
             }
             _ => {
@@ -499,9 +499,9 @@ fn parse_atomic_pattern(p: &mut Parser<'_>) -> Pattern {
                 // OCaml: alias name location is just the name, not the whole pattern
                 let alias_name_loc = p.mk_loc_idx_to_prev_end(alias_start_idx);
                 let overall_loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
-                let name_idx = p.arena_mut().push_string(name);
+                let name_idx = p.arena_mut().push_interned_string(&name);
                 let inner = ast_helper::make_var_pat(name_idx, loc);
-                let alias_idx = p.arena_mut().push_string(alias);
+                let alias_idx = p.arena_mut().push_interned_string(&alias);
                 Pattern {
                     ppat_desc: PatternDesc::Ppat_alias(
                         Box::new(inner),
@@ -511,7 +511,7 @@ fn parse_atomic_pattern(p: &mut Parser<'_>) -> Pattern {
                     ppat_attributes: vec![],
                 }
             } else {
-                let name_idx = p.arena_mut().push_string(name);
+                let name_idx = p.arena_mut().push_interned_string(&name);
                 ast_helper::make_var_pat(name_idx, loc)
             }
         }
@@ -592,7 +592,7 @@ fn parse_atomic_pattern(p: &mut Parser<'_>) -> Pattern {
                     let name = name.to_string();
                     let loc = p.mk_loc_current();
                     p.next();
-                    let str_idx = p.arena_mut().push_string(name.to_string());
+                    let str_idx = p.arena_mut().push_interned_string(&name);
                     with_loc(str_idx, loc)
                 }
                 _ => {
@@ -1360,7 +1360,7 @@ fn parse_dict_pattern(p: &mut Parser<'_>, start_pos_idx: PosIdx) -> Pattern {
                 let key = key.to_string();
                 // OCaml: let loc = mk_loc p.start_pos p.end_pos - captures key location BEFORE consuming
                 let key_loc = p.mk_loc_current();
-                let lid_idx = p.push_lident(key.clone());
+                let lid_idx = p.push_lident(&key);
                 p.next();
 
                 p.expect(Token::Colon);

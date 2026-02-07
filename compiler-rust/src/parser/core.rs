@@ -533,15 +533,14 @@ pub fn doc_comment_to_attribute(arena: &mut ParseArena, loc: Location, content: 
 
 /// Build a Longident from a list of strings (in order).
 ///
-/// Note: Strings are pushed (not interned) since they come from user input
-/// and should NOT be shared during marshalling.
+/// Strings are interned so identical strings ARE shared during marshalling.
 pub fn build_longident<S: AsRef<str>>(arena: &mut ParseArena, words: &[S]) -> Longident {
     let mut iter = words.iter();
     let first = iter.next().expect("build_longident: empty words");
-    let first_idx = arena.push_string(first.as_ref().to_owned());
+    let first_idx = arena.push_interned_string(first.as_ref());
     let mut result = Longident::Lident(first_idx);
     for word in iter {
-        let word_idx = arena.push_string(word.as_ref().to_owned());
+        let word_idx = arena.push_interned_string(word.as_ref());
         result = Longident::Ldot(Box::new(result), word_idx);
     }
     result
@@ -554,10 +553,10 @@ pub fn build_longident_idx<S: AsRef<str>>(p: &mut Parser<'_>, words: &[S]) -> cr
     p.push_longident(lid)
 }
 
-/// Create a simple Lident from a dynamic string (from user input).
-/// Uses push (not intern) so strings are NOT shared during marshalling.
-pub fn make_lident(arena: &mut ParseArena, name: impl Into<String>) -> Longident {
-    let str_idx = arena.push_string(name.into());
+/// Create a simple Lident from a string.
+/// Uses intern so identical strings ARE shared during marshalling.
+pub fn make_lident(arena: &mut ParseArena, name: &str) -> Longident {
+    let str_idx = arena.push_interned_string(name);
     Longident::Lident(str_idx)
 }
 

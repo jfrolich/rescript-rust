@@ -232,7 +232,7 @@ fn parse_value_path_after_dot(p: &mut Parser<'_>) -> Located<LidentIdx> {
     match &p.token {
         Token::Uident(name) => {
             let name = name.clone(); // Clone to release the borrow
-            let name_idx = p.arena_mut().push_string(name);
+            let name_idx = p.arena_mut().push_interned_string(&name);
             let mut path = Longident::Lident(name_idx);
             p.next();
 
@@ -242,13 +242,13 @@ fn parse_value_path_after_dot(p: &mut Parser<'_>) -> Located<LidentIdx> {
                 match &p.token {
                     Token::Uident(name) => {
                         let name = name.clone(); // Clone to release the borrow
-                        let name_idx = p.arena_mut().push_string(name);
+                        let name_idx = p.arena_mut().push_interned_string(&name);
                         path = Longident::Ldot(Box::new(path), name_idx);
                         p.next();
                     }
                     Token::Lident(name) => {
                         let name = name.clone(); // Clone to release the borrow
-                        let name_idx = p.arena_mut().push_string(name);
+                        let name_idx = p.arena_mut().push_interned_string(&name);
                         path = Longident::Ldot(Box::new(path), name_idx);
                         p.next();
                         break;
@@ -256,7 +256,7 @@ fn parse_value_path_after_dot(p: &mut Parser<'_>) -> Located<LidentIdx> {
                     Token::String(name) => {
                         // Quoted field: Module."switch"
                         let name = name.clone(); // Clone to release the borrow
-                        let name_idx = p.arena_mut().push_string(name);
+                        let name_idx = p.arena_mut().push_interned_string(&name);
                         path = Longident::Ldot(Box::new(path), name_idx);
                         p.next();
                         break;
@@ -276,14 +276,14 @@ fn parse_value_path_after_dot(p: &mut Parser<'_>) -> Located<LidentIdx> {
             with_loc(lid_idx, loc)
         }
         Token::Lident(name) => {
-            let lid_idx = p.push_lident(name.clone());
+            let lid_idx = p.push_lident(&name.clone());
             p.next();
             let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
             with_loc(lid_idx, loc)
         }
         Token::String(name) => {
             // Quoted field: ."switch"
-            let lid_idx = p.push_lident(name.clone());
+            let lid_idx = p.push_lident(&name.clone());
             p.next();
             let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
             with_loc(lid_idx, loc)
@@ -1207,7 +1207,7 @@ fn parse_parameter(p: &mut Parser<'_>) -> Option<super::core::FundefParameter> {
         // Push a unique string (no global deduplication) - user identifiers should not be shared
         // with other uses of the same name elsewhere. But we DO reuse this same StrIdx for both
         // the label and the pattern in punned cases (like `~x` which means label=x, pattern=x).
-        let lbl_str_idx = p.arena_mut().push_string(lbl_name.clone());
+        let lbl_str_idx = p.arena_mut().push_interned_string(&lbl_name);
         // OCaml: label location is just the name, not including ~
         let lbl_located = Located::new(lbl_str_idx, lbl_loc);
         // OCaml: pattern var location includes ~ (from tilde_pos to end of name)
@@ -1399,7 +1399,7 @@ fn parse_lident_list(p: &mut Parser<'_>) -> Vec<StringLoc> {
         let name = name.clone();
         let loc = p.mk_loc_current();
         p.next();
-        let str_idx = p.arena_mut().push_string(name);
+        let str_idx = p.arena_mut().push_interned_string(&name);
         lidents.push(with_loc(str_idx, loc));
     }
     lidents
@@ -2809,7 +2809,7 @@ fn parse_argument(p: &mut Parser<'_>) -> (ArgLabel, Expression) {
         // Push a unique string (no global deduplication) - user identifiers should not be shared
         // with other uses of the same name elsewhere. The same StrIdx is reused for both label and
         // expression in punned cases (like `f(~x)` which means `f(~x=x)`).
-        let name_str_idx = p.arena_mut().push_string(name.clone());
+        let name_str_idx = p.arena_mut().push_interned_string(&name);
         let name_located = Located::new(name_str_idx, name_loc.clone());
 
         if p.token == Token::Equal {
@@ -3709,7 +3709,7 @@ fn parse_braced_arrow_ident(p: &mut Parser<'_>, start_pos_idx: PosIdx) -> Expres
     let var_loc = pat_loc;
 
     // Create the pattern with extended location
-    let str_idx = p.arena_mut().push_string(ident_name);
+    let str_idx = p.arena_mut().push_interned_string(&ident_name);
     let pat = Pattern {
         ppat_desc: PatternDesc::Ppat_var(with_loc(str_idx, var_loc)),
         ppat_loc: pat_loc,
@@ -4324,7 +4324,7 @@ fn parse_module_name(p: &mut Parser<'_>) -> Located<StrIdx> {
             let name = name.clone();
             let loc = p.mk_loc_current();
             p.next();
-            let str_idx = p.arena_mut().push_string(name);
+            let str_idx = p.arena_mut().push_interned_string(&name);
             with_loc(str_idx, loc)
         }
         _ => {
@@ -5885,7 +5885,7 @@ fn parse_jsx_props(p: &mut Parser<'_>) -> Vec<JsxProp> {
                         // Parse a single operand (not a full binary expression), so we don't consume the tag's `>`/`/>`.
                         parse_operand_expr(p, ExprContext::Ordinary)
                     };
-                    let name_idx = p.arena_mut().push_string(name);
+                    let name_idx = p.arena_mut().push_interned_string(&name);
                     props.push(JsxProp::Value {
                         name: with_loc(name_idx, name_loc),
                         optional,
@@ -5894,7 +5894,7 @@ fn parse_jsx_props(p: &mut Parser<'_>) -> Vec<JsxProp> {
                 } else {
                     // Punning
                     let optional = name.starts_with('?');
-                    let name_idx = p.arena_mut().push_string(name);
+                    let name_idx = p.arena_mut().push_interned_string(&name);
                     props.push(JsxProp::Punning {
                         optional,
                         name: with_loc(name_idx, name_loc),
@@ -5907,7 +5907,7 @@ fn parse_jsx_props(p: &mut Parser<'_>) -> Vec<JsxProp> {
                     let name = name.clone();
                     let name_loc = p.mk_loc_current();
                     p.next();
-                    let name_idx = p.arena_mut().push_string(name);
+                    let name_idx = p.arena_mut().push_interned_string(&name);
                     props.push(JsxProp::Punning {
                         optional: true,
                         name: with_loc(name_idx, name_loc),
@@ -5929,14 +5929,14 @@ fn parse_jsx_props(p: &mut Parser<'_>) -> Vec<JsxProp> {
                     } else {
                         parse_operand_expr(p, ExprContext::Ordinary)
                     };
-                    let name_idx = p.arena_mut().push_string(name.clone());
+                    let name_idx = p.arena_mut().push_interned_string(&name);
                     props.push(JsxProp::Value {
                         name: with_loc(name_idx, name_loc),
                         optional,
                         value,
                     });
                 } else {
-                    let name_idx = p.arena_mut().push_string(name);
+                    let name_idx = p.arena_mut().push_interned_string(&name);
                     props.push(JsxProp::Punning {
                         optional: false,
                         name: with_loc(name_idx, name_loc),

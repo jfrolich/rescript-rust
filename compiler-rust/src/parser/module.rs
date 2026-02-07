@@ -1383,7 +1383,7 @@ fn parse_functor_arg(p: &mut Parser<'_>) -> Option<FunctorArg> {
                     p.next();
                     let mod_type = parse_module_type(p);
                     let loc = p.mk_loc_idx(start_pos_idx, ident_end_pos_idx);
-                    let str_idx = p.arena_mut().push_string(ident.to_string());
+                    let str_idx = p.arena_mut().push_interned_string(&ident);
                     Some(FunctorArg {
                         attrs,
                         name: with_loc(str_idx, loc),
@@ -1394,14 +1394,14 @@ fn parse_functor_arg(p: &mut Parser<'_>) -> Option<FunctorArg> {
                 Token::Dot => {
                     // Module path as type: Foo.Bar (punning for _ : Foo.Bar)
                     // Continue parsing the module path
-                    let ident_str_idx = p.arena_mut().push_string(ident);
+                    let ident_str_idx = p.arena_mut().push_interned_string(&ident);
                     let mut lid = Longident::Lident(ident_str_idx);
                     while p.token == Token::Dot {
                         p.next();
                         match &p.token {
                             Token::Uident(name) => {
                                 let name_clone = name.clone();
-                                let name_str_idx = p.arena_mut().push_string(name_clone);
+                                let name_str_idx = p.arena_mut().push_interned_string(&name_clone);
                                 lid = Longident::Ldot(Box::new(lid), name_str_idx);
                                 p.next();
                             }
@@ -1787,7 +1787,7 @@ fn parse_paren_functor_module_type(p: &mut Parser<'_>) -> ModuleType {
                                 let n = n.clone();
                                 let loc = p.mk_loc_current();
                                 p.next();
-                                let str_idx = p.arena_mut().push_string(n.to_string());
+                                let str_idx = p.arena_mut().push_interned_string(&n);
                                 with_loc(str_idx, loc)
                             }
                             _ => mknoloc(p.arena_mut().intern("_")),
@@ -2919,7 +2919,7 @@ fn parse_type_declaration_with_context(
     }
 
     // Convert name from Located<String> to Located<StrIdx> for ptype_name
-    let name_str_idx = p.arena_mut().push_string(name.txt.clone());
+    let name_str_idx = p.arena_mut().push_interned_string(&name.txt);
     let name: Located<StrIdx> = with_loc(name_str_idx, name.loc);
 
     // The type name path for inline record desugaring (using StrIdx)
@@ -3696,7 +3696,7 @@ fn parse_constructor_impl(p: &mut Parser<'_>, start_pos_idx: PosIdx) -> Option<C
             let n = n.clone();
             let loc = p.mk_loc_current();
             p.next();
-            let n_idx = p.arena_mut().push_string(n.to_string());
+            let n_idx = p.arena_mut().push_interned_string(&n);
             with_loc(n_idx, loc)
         }
         _ => {
@@ -4008,7 +4008,7 @@ fn parse_label_declaration(
             let n = n.clone();
             let loc = p.mk_loc_current();
             p.next();
-            let n_idx = p.arena_mut().push_string(n.to_string());
+            let n_idx = p.arena_mut().push_interned_string(&n);
             with_loc(n_idx, loc)
         }
         _ if p.token.is_keyword() => {
@@ -4253,7 +4253,7 @@ fn parse_value_description(
             let n = n.clone();
             let loc = p.mk_loc_current();
             p.next();
-            let n_idx = p.arena_mut().push_string(n.to_string());
+            let n_idx = p.arena_mut().push_interned_string(&n);
             with_loc(n_idx, loc)
         }
         Token::String(s) => {
@@ -4290,7 +4290,7 @@ fn parse_value_description(
                 let s = s.clone();
                 p.next();
                 // OCaml only parses a single string here
-                vec![p.arena_mut().push_string(s)]
+                vec![p.arena_mut().push_interned_string(&s)]
             }
             _ => {
                 // OCaml: emit error when = is not followed by a string
@@ -4392,7 +4392,7 @@ fn parse_module_definition(p: &mut Parser<'_>, module_start_idx: PosIdx, attrs: 
                 let n = n.clone();
                 let loc = p.mk_loc_current();
                 p.next();
-                let n_idx = p.arena_mut().push_string(n.to_string());
+                let n_idx = p.arena_mut().push_interned_string(&n);
                 with_loc(n_idx, loc)
             }
             _ => {
@@ -4508,7 +4508,7 @@ fn parse_module_declaration(p: &mut Parser<'_>, outer_attrs: Attributes, start_p
     let name = match &p.token {
         Token::Uident(n) => {
             let n_clone = n.clone();
-            let n_idx = p.arena_mut().push_string(n_clone);
+            let n_idx = p.arena_mut().push_interned_string(&n_clone);
             let loc = p.mk_loc_current();
             p.next();
             with_loc(n_idx, loc)
@@ -4620,7 +4620,7 @@ fn parse_module_type_declaration(p: &mut Parser<'_>, outer_attrs: Attributes, in
     let name = match &p.token {
         Token::Uident(n) | Token::Lident(n) => {
             let n_clone = n.clone();
-            let n_idx = p.arena_mut().push_string(n_clone);
+            let n_idx = p.arena_mut().push_interned_string(&n_clone);
             let loc = p.mk_loc_current();
             p.next();
             with_loc(n_idx, loc)

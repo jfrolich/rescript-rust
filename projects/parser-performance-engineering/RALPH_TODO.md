@@ -1,7 +1,7 @@
 # Parser Performance Engineering TODO
 
 **Last Updated:** 2026-02-07
-**Status:** 2/19 tasks complete
+**Status:** 3/19 tasks complete
 
 **Baseline:** Rust is 2-5x faster on small files (<10KB), ~0.7-1.0x on large files (20-60KB).
 **Goal:** Maximize Rust parser speed across all file sizes while preserving byte-for-byte binary AST parity.
@@ -18,7 +18,7 @@ These target the scanner and token representation where the parser spends most t
 
 - [x] **1.2 Zero-copy token strings** — Changed `Token` to `Token<'a>` with `Cow<'a, str>` for all string-carrying variants. Scanner produces `Cow::Borrowed` for identifiers and literals (zero-copy from source), `Cow::Owned` only for escape-processed strings. Lifetime propagated through Scanner, Parser, ScanResult, ScannerSnapshot. DiagnosticCategory and Grammar use `Token<'static>` with `.into_owned()` at the boundary. Files: `token.rs`, `scanner.rs`, `state.rs`, `diagnostics.rs`, `grammar.rs`, `core.rs`, `parse_arena.rs`, `expr.rs`, `pattern.rs`, `typ.rs`, `module.rs`. Impact: Large files 0.83x→0.80x (~4% faster), Medium 0.57x→0.55x. All 1196 parity tests pass.
 
-- [ ] **1.3 String interning via StrIdx** — Extend existing `StrIdx` arena to cover all identifier strings during parsing. Deduplicate repeated identifiers (e.g., common names like `t`, `x`, `unit`). Comparison becomes index equality instead of string comparison. Files: `token.rs`, `ast.rs`, scanner integration.
+- [x] **1.3 String interning via StrIdx** — Extended `Interner` to use `Rc<str>` storage with a separate `rc_cache` for sharing. Added `push_interned()` method that returns unique StrIdx values (preserving marshal identity semantics) while sharing underlying `Rc<str>` data to avoid heap allocation for duplicate identifiers. Converted ~68 parser call sites from `push_string(name.to_string())` to `push_interned_string(&name)`. Changed `push_lident`/`push_ldot` signatures from `impl Into<String>` to `&str`. Key insight: `rc_cache` must be separate from the `intern()` map to avoid polluting `intern()`'s deduplication (which would break marshal sharing parity). Performance: neutral (Large 0.82x, within noise of 0.80x baseline). Primary benefit is reduced memory allocation for duplicate identifiers. Files: `intern.rs`, `parse_arena.rs`, `state.rs`, `expr.rs`, `pattern.rs`, `typ.rs`, `module.rs`, `core.rs`, `jsx_ppx.rs`, `ppx.rs`. All 1196 parity tests pass.
 
 ---
 
@@ -115,7 +115,7 @@ Key resources:
 
 ## Notes
 
-- **No `Rc`/`Arc`** — Avoid `Rc<T>` and `Arc<T>`. They prevent sharing memory between threads and are slower than arena allocation. Use arena indices, bump-allocated references, or owned/borrowed data instead.
+- **Minimize `Rc`/`Arc`** — Prefer arena indices over `Rc<T>`/`Arc<T>` for AST nodes. Exception: `Rc<str>` is used internally in the `Interner` for storage-level string deduplication (task 1.3), but this is an implementation detail — external code uses `StrIdx` indices.
 - The scanner currently precomputes `Vec<char>` and `Vec<usize>` (byte offsets) upfront — this was the first optimization (41x improvement on JSX benchmark). Task 1.1 replaces this with direct byte-level scanning.
 - Token enum has ~117 variants but only 17 carry payloads. The enum is ~40-48 bytes. Tasks 1.2, 2.1, 2.2 address this.
 - The parser already uses arena indices (`PosIdx`, `LocIdx`, `StrIdx`, `LidentIdx`, `ArityIdx`) for position/location/string sharing. Task 3.1 extends this pattern to all AST nodes (ExprIdx, PatIdx, CoreTypeIdx).

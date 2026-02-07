@@ -837,7 +837,7 @@ impl ParseArena {
         if let Some(idx) = self.spice_cache.get_string(key) {
             return idx;
         }
-        let idx = self.push_string(value.to_string());
+        let idx = self.push_interned_string(value);
         if longident_shareable {
             self.longident_shareable_strs.insert(idx);
         }
@@ -1068,10 +1068,11 @@ impl ParseArena {
 
     /// Push a simple identifier (Lident) with a dynamic string (from tokens).
     ///
-    /// Each call creates a new StrIdx, so same content != same identity.
+    /// Each call creates a new StrIdx (for marshal identity), but shares the
+    /// underlying string data via Rc<str> if the same content was seen before.
     /// Use for user identifiers parsed from source (variable names, etc.).
-    pub fn push_lident(&mut self, name: impl Into<String>) -> LidentIdx {
-        let str_idx = self.strings.push(name.into());
+    pub fn push_lident(&mut self, name: &str) -> LidentIdx {
+        let str_idx = self.strings.push_interned(name);
         self.longidents.push(Longident::Lident(str_idx))
     }
 
@@ -1112,8 +1113,8 @@ impl ParseArena {
     }
 
     /// Push a dotted identifier (Ldot) with a dynamic string.
-    pub fn push_ldot(&mut self, prefix: LidentIdx, name: impl Into<String>) -> LidentIdx {
-        let str_idx = self.strings.push(name.into());
+    pub fn push_ldot(&mut self, prefix: LidentIdx, name: &str) -> LidentIdx {
+        let str_idx = self.strings.push_interned(name);
         let prefix_lid = self.get_longident(prefix).clone();
         self.longidents
             .push(Longident::Ldot(Box::new(prefix_lid), str_idx))
@@ -1367,6 +1368,19 @@ impl ParseArena {
     /// Push a string without deduplication (for dynamic user-input strings).
     pub fn push_string(&mut self, s: impl Into<String>) -> StrIdx {
         self.strings.push(s.into())
+    }
+
+    /// Push a string with unique StrIdx but shared Rc<str> storage.
+    ///
+    /// Returns a fresh StrIdx each time (preserving marshal identity semantics),
+    /// but avoids heap allocation for duplicate strings by sharing the underlying
+    /// Rc<str> with the first occurrence.
+    ///
+    /// Use for parsed identifiers from tokens where each occurrence needs its
+    /// own StrIdx (for marshal parity) but the string data can be shared.
+    #[inline]
+    pub fn push_interned_string(&mut self, s: &str) -> StrIdx {
+        self.strings.push_interned(s)
     }
 
     /// Generate the next local module name for %%private expansion.

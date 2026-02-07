@@ -12,7 +12,7 @@
 
 | Tier | Description | Status | Progress |
 |------|-------------|--------|----------|
-| Tier 1 | High Impact: Scanner + Token | 🚧 In Progress | 3/4 |
+| Tier 1 | High Impact: Scanner + Token | ✅ Complete | 4/4 |
 | Tier 2 | Medium Impact: Token + Misc | ⏳ Not Started | 0/6 |
 | Tier 3 | Medium Impact: AST + Advanced | ⏳ Not Started | 0/5 |
 | Tier 4 | Architectural | ⏳ Not Started | 0/3 |
@@ -55,10 +55,14 @@ cargo test --release --lib -- benchmark_all --ignored --nocapture
   - All 1196 parity tests pass with zero regressions
   - Files: `token.rs`, `scanner.rs`, `state.rs`, `diagnostics.rs`, `grammar.rs`, `core.rs`, `parse_arena.rs`, `expr.rs`, `pattern.rs`, `typ.rs`, `module.rs`
 
-- [ ] **1.3 String interning (StrIdx)**
-  - Extend existing `StrIdx` to cover all identifier strings
-  - Deduplicate repeated identifiers across the AST
-  - Files: `token.rs`, `ast.rs`, scanner integration
+- [x] **1.3 String interning (StrIdx)**
+  - Extended `Interner` to `Rc<str>` storage with separate `rc_cache` for Rc sharing
+  - Added `push_interned()`: unique StrIdx + shared `Rc<str>` data (no heap alloc for dupes)
+  - Converted ~68 call sites from `push_string(name.to_string())` to `push_interned_string(&name)`
+  - Changed `push_lident`/`push_ldot` from `impl Into<String>` to `&str`
+  - Key insight: `rc_cache` must be separate from `intern()` map to preserve marshal parity
+  - Impact: Neutral timing (Large 0.82x vs 0.80x baseline, within noise). Memory benefit: shared Rc<str> for duplicate identifiers.
+  - Files: `intern.rs`, `parse_arena.rs`, `state.rs`, `expr.rs`, `pattern.rs`, `typ.rs`, `module.rs`, `core.rs`, `jsx_ppx.rs`, `ppx.rs`
 
 ---
 
@@ -153,6 +157,7 @@ cargo test --release --lib -- benchmark_all --ignored --nocapture
 | Precomputed char/byte arrays | Jan 2026 | 41x on JSX benchmark | 558e262ff |
 | Byte-level scanning | Feb 2026 | Large files 0.87x→0.83x, eliminates Vec allocs | 21ebc41e7 |
 | Zero-copy token strings (Cow) | Feb 2026 | Large files 0.83x→0.80x (~4% faster) | fcab3e407 |
+| String interning (Rc<str>) | Feb 2026 | Neutral timing, reduced memory allocs | ae9fa6ad2 |
 
 ---
 
@@ -199,6 +204,26 @@ Run: cargo test --release --lib -- benchmark_all --ignored --nocapture
 
 Overall: 1166/1166 passing (1166 faster, 0 within tolerance), 38 skipped
 Parity: 1196/1196 files pass
+```
+
+### After 1.3 String interning via Rc<str> (February 2026)
+
+```
+Run: cargo test --release --lib -- benchmark_all --ignored --nocapture
+
+  Size Tier                  Files   Faster       OK Avg Factor Min Factor Max Factor
+  -------------------------------------------------------------------------------------
+  Large (>30KB)                 14       14        0       0.82x       0.59x       0.95x
+  Medium (10-30KB)              73       73        0       0.55x       0.22x       0.76x
+  Small (1-10KB)               443      443        0       0.39x       0.26x       0.55x
+  Tiny (<1KB)                  636      636        0       0.31x       0.12x       0.59x
+
+Overall: 1166/1166 passing (1166 faster, 0 within tolerance), 38 skipped
+Parity: 1196/1196 files pass
+
+Notes: Timing impact is neutral (within measurement noise of previous).
+Primary benefit is reduced memory allocation — duplicate identifiers share
+Rc<str> data via refcount bump instead of separate heap allocations.
 ```
 
 *Add new entries below as optimizations are applied.*

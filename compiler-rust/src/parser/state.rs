@@ -462,7 +462,7 @@ impl<'src> Parser<'src> {
     }
 
     /// Push a simple identifier (Lident) into the arena.
-    pub fn push_lident(&mut self, name: impl Into<String>) -> LidentIdx {
+    pub fn push_lident(&mut self, name: &str) -> LidentIdx {
         self.arena.push_lident(name)
     }
 
@@ -481,14 +481,14 @@ impl<'src> Parser<'src> {
 
     /// Push a dotted identifier (Ldot) into the arena.
     /// Takes a Longident for the prefix (will be pushed first).
-    pub fn push_ldot(&mut self, prefix: Longident, name: impl Into<String>) -> LidentIdx {
-        let str_idx = self.arena.push_string(name.into());
+    pub fn push_ldot(&mut self, prefix: Longident, name: &str) -> LidentIdx {
+        let str_idx = self.arena.push_interned_string(name);
         let lid = Longident::ldot(prefix, str_idx);
         self.arena.push_longident(lid)
     }
 
     /// Push a dotted identifier (Ldot) by extending an existing arena entry.
-    pub fn push_ldot_idx(&mut self, prefix: LidentIdx, name: impl Into<String>) -> LidentIdx {
+    pub fn push_ldot_idx(&mut self, prefix: LidentIdx, name: &str) -> LidentIdx {
         self.arena.push_ldot(prefix, name)
     }
 

@@ -237,7 +237,7 @@ pub fn parse_locally_abstract_type(p: &mut Parser<'_>) -> CoreType {
         let var_start_idx = p.start_pos_idx();
         p.next();
         let var_loc = p.mk_loc_idx_to_prev_end(var_start_idx);
-        let name_idx = p.arena_mut().push_string(name);
+        let name_idx = p.arena_mut().push_interned_string(&name);
         vars.push(with_loc(name_idx, var_loc));
     }
 
@@ -395,7 +395,7 @@ fn parse_es6_arrow_type(p: &mut Parser<'_>, attrs: Attributes) -> CoreType {
         p.expect_with_grammar(Token::Colon, Some(Grammar::TypeExpression));
 
         let typ = parse_typ_expr_inner(p, false);
-        let name_idx = p.arena_mut().push_string(name);
+        let name_idx = p.arena_mut().push_interned_string(&name);
         let mut lbl = ArgLabel::Labelled(Located::new(name_idx, name_loc));
 
         // Optional labeled args: `~x: t=?`
@@ -533,7 +533,7 @@ fn parse_atomic_typ_expr_with_start(
                     // OCaml: parse_ident checks for keywords first
                     super::core::parse_ident(p, super::core::error_messages::TYPE_VAR, var_start_idx)
                 };
-                let name_idx = p.arena_mut().push_string(name);
+                let name_idx = p.arena_mut().push_interned_string(&name);
                 vars.push(with_loc(name_idx, var_loc));
             }
 
@@ -951,7 +951,7 @@ fn parse_function_type(p: &mut Parser<'_>, start_pos_idx: PosIdx) -> CoreType {
             // Pass grammar context for error message: "Did you forget a `:` here? It signals the start of a type"
             p.expect_with_grammar(Token::Colon, Some(Grammar::TypeExpression));
             let typ = parse_typ_expr(p);
-            let name_idx = p.arena_mut().push_string(name);
+            let name_idx = p.arena_mut().push_interned_string(&name);
             (ArgLabel::Labelled(Located::new(name_idx, name_loc)), typ)
         } else if matches!(p.token, Token::Lident(_)) {
             // Check if this is `name: type` (missing tilde)
@@ -1580,7 +1580,7 @@ fn parse_object_fields(p: &mut Parser<'_>) -> Vec<ObjectField> {
                 p.expect_with_grammar(Token::Colon, Some(Grammar::TypeExpression));
                 // OCaml uses parse_poly_type_expr for object field types
                 let typ = parse_poly_type_expr(p);
-                let name_idx = p.arena_mut().push_string(name);
+                let name_idx = p.arena_mut().push_interned_string(&name);
                 fields.push(ObjectField::Otag(with_loc(name_idx, name_loc), field_attrs, typ));
             }
             None => {

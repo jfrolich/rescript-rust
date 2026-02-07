@@ -4741,7 +4741,7 @@ fn rewrite_expression_generic(expr: &Expression, arena: &mut ParseArena) -> Expr
                     let module_type_name = local_module_type_name(located_lid.txt, arena);
                     // OCaml builds this name independently in expression mapper and
                     // structure spelunking paths, so keep a fresh string identity here.
-                    let module_type_lid_idx = arena.push_lident(module_type_name);
+                    let module_type_lid_idx = arena.push_lident(&module_type_name);
                     // OCaml uses me.pmod_loc for this generated lid.
                     let module_type_lid = Located {
                         txt: module_type_lid_idx,
