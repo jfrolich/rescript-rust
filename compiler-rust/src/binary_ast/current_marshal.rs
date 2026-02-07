@@ -1168,7 +1168,7 @@ impl Marshal for Expression {
         if is_external_raw_expansion {
             w.set_raw_expansion_expr(self.pexp_loc, w.obj_counter() - 1);
         }
-        let is_extension = matches!(self.pexp_desc, ExpressionDesc::Pexp_extension(_));
+        let is_extension = matches!(*self.pexp_desc, ExpressionDesc::Pexp_extension(_));
         if is_extension {
             w.enter_extension();
         }

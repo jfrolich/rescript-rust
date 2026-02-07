@@ -385,18 +385,18 @@ mod tests {
                 RecFlag::Nonrecursive,
                 vec![ValueBinding {
                     pvb_pat: Pattern {
-                        ppat_desc: PatternDesc::Ppat_var(Located {
+                        ppat_desc: Box::new(PatternDesc::Ppat_var(Located {
                             txt: name_idx,
                             loc: LocIdx::none(),
-                        }),
+                        })),
                         ppat_loc: LocIdx::none(),
                         ppat_attributes: vec![],
                     },
                     pvb_expr: Expression {
-                        pexp_desc: ExpressionDesc::Pexp_constant(Constant::Integer(
+                        pexp_desc: Box::new(ExpressionDesc::Pexp_constant(Constant::Integer(
                             std::borrow::Cow::Owned(value.to_string()),
                             None,
-                        )),
+                        ))),
                         pexp_loc: LocIdx::none(),
                         pexp_attributes: vec![],
                     },

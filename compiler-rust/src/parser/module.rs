@@ -2407,7 +2407,7 @@ fn parse_let_bindings(
             // Extract type variables and inner type if this is a Ptyp_poly from `type a.` syntax
             // The inner type is used directly for Pexp_constraint (with Ptyp_constr for type vars)
             // But for the Ptyp_poly in the pattern, we need to substitute Ptyp_constr -> Ptyp_var
-            let (final_typ, newtype_info) = match typ.ptyp_desc {
+            let (final_typ, newtype_info) = match *typ.ptyp_desc {
                 CoreTypeDesc::Ptyp_poly(vars, inner) if is_locally_abstract => {
                     // Build the set of variable names for substitution
                     let var_set: std::collections::HashSet<String> =
@@ -2465,9 +2465,9 @@ fn parse_let_bindings(
         let pat = if is_locally_abstract {
             let wrapper_loc = wrapper_loc.expect("locally abstract let-binding should have wrapper loc");
             // Update Ppat_constraint and inner Ptyp_poly locations to use the binding location
-            if let PatternDesc::Ppat_constraint(inner_pat, typ) = pat.ppat_desc {
+            if let PatternDesc::Ppat_constraint(inner_pat, typ) = *pat.ppat_desc {
                 // Update the Ptyp_poly location to use binding location
-                let updated_typ = match typ.ptyp_desc {
+                let updated_typ = match *typ.ptyp_desc {
                     CoreTypeDesc::Ptyp_poly(vars, inner) => CoreType {
                         ptyp_desc: Box::new(CoreTypeDesc::Ptyp_poly(vars, inner)),
                         ptyp_loc: wrapper_loc,
@@ -3258,7 +3258,7 @@ fn fix_spread_first_object_manifest(p: &mut Parser<'_>, typ: CoreType, is_spread
         return (typ, false);
     }
 
-    match typ.ptyp_desc {
+    match *typ.ptyp_desc {
         CoreTypeDesc::Ptyp_object(ref fields, closed) => {
             // Only for CLOSED objects where first field is Oinherit (spread)
             // Open objects (from {.. ...spread}) should NOT use ghost location

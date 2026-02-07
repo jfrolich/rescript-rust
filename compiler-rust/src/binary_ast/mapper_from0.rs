@@ -99,11 +99,11 @@ fn get_arity_from_attributes(arena: &ParseArena, attrs: &[current::Attribute]) -
         if arena.get_string(name.txt) == "res.arity" {
             if let current::Payload::PStr(items) = payload {
                 if let Some(item) = items.first() {
-                    if let current::StructureItemDesc::Pstr_eval(expr, _) = &item.pstr_desc {
+                    if let current::StructureItemDesc::Pstr_eval(expr, _) = item.pstr_desc.as_ref() {
                         if let current::ExpressionDesc::Pexp_constant(current::Constant::Integer(
                             s,
                             _,
-                        )) = &expr.pexp_desc
+                        )) = expr.pexp_desc.as_ref()
                         {
                             return s.parse().ok();
                         }
@@ -373,16 +373,16 @@ impl<'a> Mapper<'a> {
 
                 if let Longident::Lident(name) = &lid.txt {
                     if self.get_str(*name) == "function$" && mapped_types.len() == 2 {
-                        if let current::CoreTypeDesc::Ptyp_arrow { arg, ret, .. } = mapped_types[0].ptyp_desc.clone() {
-                            if let current::CoreTypeDesc::Ptyp_variant(rows, _, _) = &mapped_types[1].ptyp_desc {
+                        if let current::CoreTypeDesc::Ptyp_arrow { arg, ret, .. } = &*mapped_types[0].ptyp_desc {
+                            if let current::CoreTypeDesc::Ptyp_variant(rows, _, _) = &*mapped_types[1].ptyp_desc {
                                 if let Some(row) = rows.first() {
                                     if let current::RowField::Rtag(tag, _, _, _) = row {
                                         if tag.txt.starts_with("Has_arity") {
                                             if let Ok(arity) = tag.txt[9..].parse::<usize>() {
                                                 return current::CoreType {
                                                     ptyp_desc: Box::new(current::CoreTypeDesc::Ptyp_arrow {
-                                                        arg,
-                                                        ret,
+                                                        arg: arg.clone(),
+                                                        ret: ret.clone(),
                                                         arity: self.arena.push_arity(Some(arity as i32)),
                                                     }),
                                                     ptyp_loc: loc,
@@ -795,10 +795,10 @@ impl<'a> Mapper<'a> {
                             if let Some(new_name) = new_name {
                                 let new_str_idx = self.arena.intern_string(new_name);
                                 pt0::Expression {
-                                    pexp_desc: Box::new(pt0::ExpressionDesc::Ident(OldLocated {
+                                    pexp_desc: pt0::ExpressionDesc::Ident(OldLocated {
                                         txt: Longident::Lident(new_str_idx),
                                         loc: lid.loc.clone(),
-                                    })),
+                                    }),
                                     pexp_loc: func.pexp_loc.clone(),
                                     pexp_attributes: func.pexp_attributes.clone(),
                                 }
@@ -866,7 +866,7 @@ impl<'a> Mapper<'a> {
                     if self.get_str(*name) == "Function$" {
                         if let Some(inner) = arg {
                             let mapped = self.map_expression(inner);
-                            if let current::ExpressionDesc::Pexp_fun { arg_label, default, lhs, rhs, is_async, .. } = mapped.pexp_desc {
+                            if let current::ExpressionDesc::Pexp_fun { arg_label, default, lhs, rhs, is_async, .. } = *mapped.pexp_desc {
                                 // Extract arity from attributes
                                 let arity_opt = get_arity_from_attributes(self.arena, &attrs);
                                 let arity = self.arena.push_arity(arity_opt);

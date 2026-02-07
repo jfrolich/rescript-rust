@@ -235,7 +235,7 @@ fn parse_single_pattern(p: &mut Parser<'_>) -> Pattern {
     if !attrs.is_empty() {
         let loc = p.mk_loc_idx_to_end_of(start_pos_idx, pat.ppat_loc);
         // OCaml also extends the inner StringLoc in Ppat_var to include attributes
-        let new_desc = match pat.ppat_desc {
+        let new_desc = match *pat.ppat_desc {
             PatternDesc::Ppat_var(var_loc) => {
                 let extended_loc = p.mk_loc_idx_to_end_of(start_pos_idx, var_loc.loc);
                 PatternDesc::Ppat_var(with_loc(var_loc.txt, extended_loc))
@@ -712,7 +712,7 @@ fn parse_atomic_pattern(p: &mut Parser<'_>) -> Pattern {
                             // If we only have one pattern (trailing comma case), treat as single argument
                             if patterns.len() == 1 {
                                 let single = patterns.into_iter().next().unwrap();
-                                if matches!(single.ppat_desc, PatternDesc::Ppat_tuple(_)) {
+                                if matches!(*single.ppat_desc, PatternDesc::Ppat_tuple(_)) {
                                     let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
                                     Some(Pattern {
                                         ppat_desc: Box::new(PatternDesc::Ppat_tuple(vec![single])),
@@ -737,7 +737,7 @@ fn parse_atomic_pattern(p: &mut Parser<'_>) -> Pattern {
                             // single-element tuple. This distinguishes C((a,b)) from C(a,b).
                             // C((a,b)) = single tuple argument = Ppat_tuple([Ppat_tuple([a,b])])
                             // C(a,b) = multiple arguments = Ppat_tuple([a, b])
-                            if matches!(first.ppat_desc, PatternDesc::Ppat_tuple(_)) {
+                            if matches!(*first.ppat_desc, PatternDesc::Ppat_tuple(_)) {
                                 let loc = p.mk_loc_idx_to_end(start_pos_idx);
                                 Some(Pattern {
                                     ppat_desc: Box::new(PatternDesc::Ppat_tuple(vec![first])),
@@ -920,7 +920,7 @@ fn parse_constructor_pattern(p: &mut Parser<'_>) -> Pattern {
                     let single = patterns.into_iter().next().unwrap();
                     // In printer mode, wrap single tuple arg to distinguish C((a,b)) from C(a,b)
                     // In type-checker mode, pass through directly
-                    if matches!(single.ppat_desc, PatternDesc::Ppat_tuple(_))
+                    if matches!(*single.ppat_desc, PatternDesc::Ppat_tuple(_))
                         && p.mode != ParserMode::ParseForTypeChecker
                     {
                         // OCaml: wrapper tuple location extends to end of next token
@@ -946,7 +946,7 @@ fn parse_constructor_pattern(p: &mut Parser<'_>) -> Pattern {
                 p.expect(Token::Rparen);
                 // In printer mode, wrap single tuple arg to distinguish C((a,b)) from C(a,b)
                 // In type-checker mode, pass through directly
-                if matches!(first.ppat_desc, PatternDesc::Ppat_tuple(_))
+                if matches!(*first.ppat_desc, PatternDesc::Ppat_tuple(_))
                     && p.mode != ParserMode::ParseForTypeChecker
                 {
                     // OCaml: wrapper tuple location starts at outer ( and extends to end of next token
@@ -1641,49 +1641,49 @@ mod tests {
     #[test]
     fn test_parse_pattern_underscore() {
         let pat = parse_pattern_with_timeout("_");
-        assert!(matches!(pat.ppat_desc, PatternDesc::Ppat_any));
+        assert!(matches!(*pat.ppat_desc, PatternDesc::Ppat_any));
     }
 
     #[test]
     fn test_parse_pattern_var() {
         let pat = parse_pattern_with_timeout("foo");
-        assert!(matches!(pat.ppat_desc, PatternDesc::Ppat_var(_)));
+        assert!(matches!(*pat.ppat_desc, PatternDesc::Ppat_var(_)));
     }
 
     #[test]
     fn test_parse_pattern_unit() {
         let pat = parse_pattern_with_timeout("()");
-        assert!(matches!(pat.ppat_desc, PatternDesc::Ppat_construct(..)));
+        assert!(matches!(*pat.ppat_desc, PatternDesc::Ppat_construct(..)));
     }
 
     #[test]
     fn test_parse_pattern_constant() {
         let pat = parse_pattern_with_timeout("42");
-        assert!(matches!(pat.ppat_desc, PatternDesc::Ppat_constant(_)));
+        assert!(matches!(*pat.ppat_desc, PatternDesc::Ppat_constant(_)));
     }
 
     #[test]
     fn test_parse_pattern_tuple() {
         let pat = parse_pattern_with_timeout("(a, b, c)");
-        assert!(matches!(pat.ppat_desc, PatternDesc::Ppat_tuple(_)));
+        assert!(matches!(*pat.ppat_desc, PatternDesc::Ppat_tuple(_)));
     }
 
     #[test]
     fn test_parse_pattern_array() {
         let pat = parse_pattern_with_timeout("[a, b]");
-        assert!(matches!(pat.ppat_desc, PatternDesc::Ppat_array(_)));
+        assert!(matches!(*pat.ppat_desc, PatternDesc::Ppat_array(_)));
     }
 
     #[test]
     fn test_parse_pattern_constructor() {
         let pat = parse_pattern_with_timeout("Some(x)");
-        assert!(matches!(pat.ppat_desc, PatternDesc::Ppat_construct(..)));
+        assert!(matches!(*pat.ppat_desc, PatternDesc::Ppat_construct(..)));
     }
 
     #[test]
     fn test_parse_pattern_record() {
         let pat = parse_pattern_with_timeout("{a, b: x}");
-        assert!(matches!(pat.ppat_desc, PatternDesc::Ppat_record(..)));
+        assert!(matches!(*pat.ppat_desc, PatternDesc::Ppat_record(..)));
     }
 
     #[test]

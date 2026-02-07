@@ -3335,17 +3335,17 @@ fn spelunk_expression_for_await_module_types(
                                     loc: lid_loc,
                                 },
                                 pmtd_type: Some(current::ModuleType {
-                                    pmty_desc: ModuleTypeDesc::Pmty_typeof(Box::new(current::ModuleExpr {
-                                        pmod_desc: ModuleExprDesc::Pmod_ident(Located {
+                                    pmty_desc: Box::new(ModuleTypeDesc::Pmty_typeof(Box::new(current::ModuleExpr {
+                                        pmod_desc: Box::new(ModuleExprDesc::Pmod_ident(Located {
                                             txt: located_lid.txt,
                                             loc: lid_loc,
-                                        }),
+                                        })),
                                         // OCaml: Mty.typeof_ ~loc me - `me` keeps its original
                                         // pmod_loc allocation (distinct from the lid location).
                                         pmod_loc: mod_expr.pmod_loc,
                                         // OCaml: Mty.typeof_ ~loc me uses original `me` attrs.
                                         pmod_attributes: mod_expr.pmod_attributes.clone(),
-                                    })),
+                                    }))),
                                     pmty_loc: lid_loc,
                                     pmty_attributes: vec![],
                                 }),
@@ -3476,17 +3476,17 @@ fn transform_module_await(
                 loc: lid_loc,
             },
             pmtd_type: Some(current::ModuleType {
-                pmty_desc: current::ModuleTypeDesc::Pmty_typeof(Box::new(current::ModuleExpr {
-                    pmod_desc: ModuleExprDesc::Pmod_ident(Located {
+                pmty_desc: Box::new(current::ModuleTypeDesc::Pmty_typeof(Box::new(current::ModuleExpr {
+                    pmod_desc: Box::new(ModuleExprDesc::Pmod_ident(Located {
                         txt: lid,
                         loc: lid_loc,
-                    }),
+                    })),
                     // OCaml: Mty.typeof_ ~loc me - uses the ORIGINAL `me`, whose pmod_loc
                     // was overridden by parse_primary_mod_expr (a fresh allocation, not lid.loc)
                     pmod_loc: mod_expr.pmod_loc,
                     // OCaml: uses original `me` which has @res.await
                     pmod_attributes: mod_expr.pmod_attributes.clone(),
-                })),
+                }))),
                 pmty_loc: lid_loc,
                 pmty_attributes: vec![],
             }),
@@ -4074,7 +4074,7 @@ fn flatten_value_binding(vb: &ValueBinding, arena: &mut ParseArena) -> Vec<Value
     let pvb_expr = rewrite_expression(&vb.pvb_expr, arena);
     let pvb_attributes = rewrite_attributes(&vb.pvb_attributes, arena);
 
-    if let PatternDesc::Ppat_tuple(ref pats) = pvb_pat.ppat_desc {
+    if let PatternDesc::Ppat_tuple(ref pats) = *pvb_pat.ppat_desc {
         if pats.iter().all(is_simple_pattern) {
             if let Some((opens, exprs)) = destruct_open_tuple(&pvb_expr) {
                 if exprs.len() == pats.len() {
@@ -5064,7 +5064,7 @@ fn generate_accessors(
                 let param_pat = Pattern {
                     ppat_desc: Box::new(PatternDesc::Ppat_constraint(
                         Box::new(Pattern {
-                            ppat_desc: PatternDesc::Ppat_var(Located { txt: param_str, loc }),
+                            ppat_desc: Box::new(PatternDesc::Ppat_var(Located { txt: param_str, loc })),
                             ppat_loc: loc,
                             ppat_attributes: vec![],
                         }),
@@ -5078,10 +5078,10 @@ fn generate_accessors(
                 let field_access = Expression {
                     pexp_desc: Box::new(ExpressionDesc::Pexp_field(
                         Box::new(Expression {
-                            pexp_desc: ExpressionDesc::Pexp_ident(Located {
+                            pexp_desc: Box::new(ExpressionDesc::Pexp_ident(Located {
                                 txt: arena.push_lident_from_idx(param_str),
                                 loc,
-                            }),
+                            })),
                             pexp_loc: loc,
                             pexp_attributes: vec![],
                         }),
@@ -5144,10 +5144,10 @@ fn generate_accessors(
                         return StructureItem {
                             pstr_desc: Box::new(StructureItemDesc::Pstr_eval(
                                 Expression {
-                                    pexp_desc: ExpressionDesc::Pexp_construct(
+                                    pexp_desc: Box::new(ExpressionDesc::Pexp_construct(
                                         Located { txt: unit_lid, loc },
                                         None,
-                                    ),
+                                    )),
                                     pexp_loc: loc,
                                     pexp_attributes: vec![],
                                 },
@@ -5163,13 +5163,13 @@ fn generate_accessors(
                     let ctor_expr = Expression {
                         pexp_desc: Box::new(ExpressionDesc::Pexp_constraint(
                             Box::new(Expression {
-                                pexp_desc: ExpressionDesc::Pexp_construct(
+                                pexp_desc: Box::new(ExpressionDesc::Pexp_construct(
                                     Located {
                                         txt: arena.push_longident(Longident::Lident(ctor.pcd_name.txt)),
                                         loc,
                                     },
                                     None,
-                                ),
+                                )),
                                 pexp_loc: loc,
                                 pexp_attributes: vec![],
                             }),
@@ -5214,10 +5214,10 @@ fn generate_accessors(
                         Expression {
                             pexp_desc: Box::new(ExpressionDesc::Pexp_tuple(
                                 params.iter().map(|&p| Expression {
-                                    pexp_desc: ExpressionDesc::Pexp_ident(Located {
+                                    pexp_desc: Box::new(ExpressionDesc::Pexp_ident(Located {
                                         txt: arena.push_lident_from_idx(p),
                                         loc,
-                                    }),
+                                    })),
                                     pexp_loc: loc,
                                     pexp_attributes: vec![],
                                 }).collect()
@@ -5230,13 +5230,13 @@ fn generate_accessors(
                     let ctor_expr = Expression {
                         pexp_desc: Box::new(ExpressionDesc::Pexp_constraint(
                             Box::new(Expression {
-                                pexp_desc: ExpressionDesc::Pexp_construct(
+                                pexp_desc: Box::new(ExpressionDesc::Pexp_construct(
                                     Located {
                                         txt: arena.push_longident(Longident::Lident(ctor.pcd_name.txt)),
                                         loc,
                                     },
                                     Some(Box::new(ctor_arg)),
-                                ),
+                                )),
                                 pexp_loc: loc,
                                 pexp_attributes: vec![],
                             }),
@@ -5253,7 +5253,7 @@ fn generate_accessors(
                                 arg_label: ArgLabel::Nolabel,
                                 default: None,
                                 lhs: Pattern {
-                                    ppat_desc: PatternDesc::Ppat_var(Located { txt: param, loc }),
+                                    ppat_desc: Box::new(PatternDesc::Ppat_var(Located { txt: param, loc })),
                                     ppat_loc: loc,
                                     ppat_attributes: vec![],
                                 },
@@ -5293,7 +5293,7 @@ fn generate_accessors(
 
 /// Set the arity of the outermost Pexp_fun
 fn set_outermost_arity(expr: Expression, arity: i32, arena: &mut ParseArena) -> Expression {
-    if let ExpressionDesc::Pexp_fun { arg_label, default, lhs, rhs, is_async, arity: _ } = expr.pexp_desc {
+    if let ExpressionDesc::Pexp_fun { arg_label, default, lhs, rhs, is_async, arity: _ } = *expr.pexp_desc {
         Expression {
             pexp_desc: Box::new(ExpressionDesc::Pexp_fun {
                 arg_label,
@@ -5700,7 +5700,7 @@ fn create_rev_map_ref_binding(loc: LocIdx, arena: &mut ParseArena) -> StructureI
 
     let binding = ValueBinding {
         pvb_pat: Pattern {
-            ppat_desc: Box::new(PatternDesc::Ppat_var(Located { txt: rev_map_name, loc }),) // OCaml: {loc; txt = rev_map}
+            ppat_desc: Box::new(PatternDesc::Ppat_var(Located { txt: rev_map_name, loc })), // OCaml: {loc; txt = rev_map}
             ppat_loc: none_loc,
             ppat_attributes: vec![],
         },
@@ -5805,7 +5805,7 @@ fn create_to_js_function(
     let param_pat = Pattern {
         ppat_desc: Box::new(PatternDesc::Ppat_constraint(
             Box::new(Pattern {
-                ppat_desc: PatternDesc::Ppat_var(Located { txt: param_name, loc }),
+                ppat_desc: Box::new(PatternDesc::Ppat_var(Located { txt: param_name, loc })),
                 ppat_loc: none_loc,
                 ppat_attributes: vec![],
             }),
@@ -6281,7 +6281,7 @@ fn create_record_to_js_function(
     let param_pat = Pattern {
         ppat_desc: Box::new(PatternDesc::Ppat_constraint(
             Box::new(Pattern {
-                ppat_desc: PatternDesc::Ppat_var(Located { txt: param_str, loc }),
+                ppat_desc: Box::new(PatternDesc::Ppat_var(Located { txt: param_str, loc })),
                 ppat_loc: none_loc,
                 ppat_attributes: vec![],
             }),
@@ -6308,10 +6308,10 @@ fn create_record_to_js_function(
             let field_access = Expression {
                 pexp_desc: Box::new(ExpressionDesc::Pexp_field(
                     Box::new(Expression {
-                        pexp_desc: ExpressionDesc::Pexp_ident(Located {
+                        pexp_desc: Box::new(ExpressionDesc::Pexp_ident(Located {
                             txt: arena.push_lident_from_idx(param_str),
                             loc: type_loc, // OCaml: {Asttypes.txt = Lident param; loc} (tdcl.ptype_loc)
-                        }),
+                        })),
                         pexp_loc: none_loc, // Exp.ident uses !default_loc (ghost)
                         pexp_attributes: vec![],
                     }),
@@ -6363,10 +6363,10 @@ fn create_record_to_js_function(
         let erase_app = Expression {
             pexp_desc: Box::new(ExpressionDesc::Pexp_apply {
                 funct: Box::new(Expression {
-                    pexp_desc: ExpressionDesc::Pexp_ident(Located {
+                    pexp_desc: Box::new(ExpressionDesc::Pexp_ident(Located {
                         txt: arena.push_longident(Longident::Lident(erase_type_ident)),
                         loc: none_loc,
-                    }),
+                    })),
                     pexp_loc: none_loc,
                     pexp_attributes: vec![],
                 }),
@@ -6461,10 +6461,10 @@ fn create_record_from_js_function(
             let js_field = Expression {
                 pexp_desc: Box::new(ExpressionDesc::Pexp_send(
                     Box::new(Expression {
-                        pexp_desc: ExpressionDesc::Pexp_ident(Located {
+                        pexp_desc: Box::new(ExpressionDesc::Pexp_ident(Located {
                             txt: arena.push_lident_from_idx(param_str),
                             loc: type_loc, // OCaml: Exp.ident ident_param where ident_param has tdcl.ptype_loc
-                        }),
+                        })),
                         pexp_loc: none_loc, // Exp.ident uses !default_loc (ghost)
                         pexp_attributes: vec![],
                     }),
@@ -6504,10 +6504,10 @@ fn create_record_from_js_function(
         let constrained_param = Expression {
             pexp_desc: Box::new(ExpressionDesc::Pexp_constraint(
                 Box::new(Expression {
-                    pexp_desc: ExpressionDesc::Pexp_ident(Located {
+                    pexp_desc: Box::new(ExpressionDesc::Pexp_ident(Located {
                         txt: arena.push_lident_from_idx(param_str),
                         loc,
-                    }),
+                    })),
                     pexp_loc: none_loc,
                     pexp_attributes: vec![],
                 }),
@@ -6520,10 +6520,10 @@ fn create_record_from_js_function(
         let erase_app = Expression {
             pexp_desc: Box::new(ExpressionDesc::Pexp_apply {
                 funct: Box::new(Expression {
-                    pexp_desc: ExpressionDesc::Pexp_ident(Located {
+                    pexp_desc: Box::new(ExpressionDesc::Pexp_ident(Located {
                         txt: arena.push_longident(Longident::Lident(erase_type_ident)),
                         loc: none_loc,
-                    }),
+                    })),
                     pexp_loc: none_loc,
                     pexp_attributes: vec![],
                 }),
@@ -6541,7 +6541,7 @@ fn create_record_from_js_function(
                 RecFlag::Nonrecursive,
                 vec![ValueBinding {
                     pvb_pat: Pattern {
-                        ppat_desc: PatternDesc::Ppat_var(Located { txt: param_str, loc }),
+                        ppat_desc: Box::new(PatternDesc::Ppat_var(Located { txt: param_str, loc })),
                         ppat_loc: none_loc,
                         ppat_attributes: vec![],
                     },
@@ -7611,7 +7611,7 @@ fn generate_record_accessors_and_sigs(
         let param_pat = Pattern {
             ppat_desc: Box::new(PatternDesc::Ppat_constraint(
                 Box::new(Pattern {
-                    ppat_desc: PatternDesc::Ppat_var(Located { txt: param_str, loc: label_loc }),
+                    ppat_desc: Box::new(PatternDesc::Ppat_var(Located { txt: param_str, loc: label_loc })),
                     ppat_loc: none_loc,
                     ppat_attributes: vec![],
                 }),
@@ -7626,10 +7626,10 @@ fn generate_record_accessors_and_sigs(
         let field_access = Expression {
             pexp_desc: Box::new(ExpressionDesc::Pexp_field(
                 Box::new(Expression {
-                    pexp_desc: ExpressionDesc::Pexp_ident(Located {
+                    pexp_desc: Box::new(ExpressionDesc::Pexp_ident(Located {
                         txt: arena.push_lident_from_idx(param_str),
                         loc: label_loc,
-                    }),
+                    })),
                     pexp_loc: none_loc,
                     pexp_attributes: vec![],
                 }),
@@ -7758,13 +7758,13 @@ fn generate_variant_accessors_and_sigs(
             let ctor_expr = Expression {
                 pexp_desc: Box::new(ExpressionDesc::Pexp_constraint(
                     Box::new(Expression {
-                        pexp_desc: ExpressionDesc::Pexp_construct(
+                        pexp_desc: Box::new(ExpressionDesc::Pexp_construct(
                             Located {
                                 txt: arena.push_longident(Longident::Lident(ctor.pcd_name.txt)),
                                 loc,
                             },
                             None,
-                        ),
+                        )),
                         pexp_loc: loc,
                         pexp_attributes: vec![],
                     }),
@@ -7823,10 +7823,10 @@ fn generate_variant_accessors_and_sigs(
                 Expression {
                     pexp_desc: Box::new(ExpressionDesc::Pexp_tuple(
                         params.iter().map(|&p| Expression {
-                            pexp_desc: ExpressionDesc::Pexp_ident(Located {
+                            pexp_desc: Box::new(ExpressionDesc::Pexp_ident(Located {
                                 txt: arena.push_lident_from_idx(p),
                                 loc,
-                            }),
+                            })),
                             pexp_loc: loc,
                             pexp_attributes: vec![],
                         }).collect()
@@ -7839,13 +7839,13 @@ fn generate_variant_accessors_and_sigs(
             let ctor_expr = Expression {
                 pexp_desc: Box::new(ExpressionDesc::Pexp_constraint(
                     Box::new(Expression {
-                        pexp_desc: ExpressionDesc::Pexp_construct(
+                        pexp_desc: Box::new(ExpressionDesc::Pexp_construct(
                             Located {
                                 txt: arena.push_longident(Longident::Lident(ctor.pcd_name.txt)),
                                 loc,
                             },
                             Some(Box::new(ctor_arg)),
-                        ),
+                        )),
                         pexp_loc: loc,
                         pexp_attributes: vec![],
                     }),
@@ -7862,7 +7862,7 @@ fn generate_variant_accessors_and_sigs(
                         arg_label: ArgLabel::Nolabel,
                         default: None,
                         lhs: Pattern {
-                            ppat_desc: PatternDesc::Ppat_var(Located { txt: param, loc }),
+                            ppat_desc: Box::new(PatternDesc::Ppat_var(Located { txt: param, loc })),
                             ppat_loc: loc,
                             ppat_attributes: vec![],
                         },
@@ -8108,18 +8108,18 @@ fn rewrite_structure_item_no_spice(item: &StructureItem, arena: &mut ParseArena)
                     vec![StructureItem {
                         pstr_desc: Box::new(StructureItemDesc::Pstr_include(IncludeDeclaration {
                             pincl_mod: ModuleExpr {
-                                pmod_desc: ModuleExprDesc::Pmod_constraint(
+                                pmod_desc: Box::new(ModuleExprDesc::Pmod_constraint(
                                     Box::new(ModuleExpr {
-                                        pmod_desc: ModuleExprDesc::Pmod_structure(vec![
+                                        pmod_desc: Box::new(ModuleExprDesc::Pmod_structure(vec![
                                             external_result,
-                                        ]),
+                                        ])),
                                         pmod_loc: loc,
                                         pmod_attributes: vec![],
                                     }),
                                     Box::new(ModuleType {
-                                        pmty_desc: ModuleTypeDesc::Pmty_signature(vec![
+                                        pmty_desc: Box::new(ModuleTypeDesc::Pmty_signature(vec![
                                             SignatureItem {
-                                                psig_desc: SignatureItemDesc::Psig_value(
+                                                psig_desc: Box::new(SignatureItemDesc::Psig_value(
                                                     ValueDescription {
                                                         pval_name: vd.pval_name.clone(),
                                                         pval_type,
@@ -8127,14 +8127,14 @@ fn rewrite_structure_item_no_spice(item: &StructureItem, arena: &mut ParseArena)
                                                         pval_attributes: encoded.pval_attributes,
                                                         pval_loc: vd.pval_loc,
                                                     },
-                                                ),
+                                                )),
                                                 psig_loc: loc,
                                             },
-                                        ]),
+                                        ])),
                                         pmty_loc: loc,
                                         pmty_attributes: vec![],
                                     }),
-                                ),
+                                )),
                                 pmod_loc: loc,
                                 pmod_attributes: vec![],
                             },

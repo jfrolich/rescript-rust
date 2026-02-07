@@ -428,7 +428,7 @@ fn parse_constructor_arg(p: &mut Parser<'_>) -> Option<Expression> {
                     // C((1,2)) = Pexp_construct(C, Some(Pexp_tuple([1,2])))
                     // In printer mode, wrap it in another tuple to distinguish from multi-arg:
                     // C((1,2)) = Pexp_construct(C, Some(Pexp_tuple([Pexp_tuple([1,2])])))
-                    if matches!(first_expr.pexp_desc, ExpressionDesc::Pexp_tuple(_))
+                    if matches!(*first_expr.pexp_desc, ExpressionDesc::Pexp_tuple(_))
                         && p.mode != ParserMode::ParseForTypeChecker
                     {
                         let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
@@ -2053,7 +2053,7 @@ pub fn parse_atomic_expr(p: &mut Parser<'_>) -> Expression {
                             // Check if it's a tuple that needs extra wrapping in printer mode
                             // This handles #a((1, 2)) case where inner parens create a tuple
                             if p.mode != ParserMode::ParseForTypeChecker {
-                                if matches!(single.pexp_desc, ExpressionDesc::Pexp_tuple(_)) {
+                                if matches!(*single.pexp_desc, ExpressionDesc::Pexp_tuple(_)) {
                                     // Wrap the tuple in another tuple for printer mode
                                     Some(Box::new(Expression {
                                         pexp_desc: Box::new(ExpressionDesc::Pexp_tuple(vec![single])),
@@ -2081,7 +2081,7 @@ pub fn parse_atomic_expr(p: &mut Parser<'_>) -> Expression {
                         // Single expression without comma - check if it's a tuple that needs wrapping
                         // This handles #a((1, 2)) case - inner parens create tuple, wrap for printer
                         if p.mode != ParserMode::ParseForTypeChecker {
-                            if matches!(first_expr.pexp_desc, ExpressionDesc::Pexp_tuple(_)) {
+                            if matches!(*first_expr.pexp_desc, ExpressionDesc::Pexp_tuple(_)) {
                                 let paren_loc = p.mk_loc_idx(lparen_pos_idx, rparen_pos_idx);
                                 Some(Box::new(Expression {
                                     pexp_desc: Box::new(ExpressionDesc::Pexp_tuple(vec![first_expr])),
@@ -2289,7 +2289,7 @@ pub fn over_parse_constrained_or_coerced_or_arrow_expression(
                             default: None,
                             lhs: pat.clone(),
                             rhs: Box::new(Expression {
-                                pexp_desc: ExpressionDesc::Pexp_constraint(Box::new(body.clone()), typ.clone()),
+                                pexp_desc: Box::new(ExpressionDesc::Pexp_constraint(Box::new(body.clone()), typ.clone())),
                                 pexp_loc: p.mk_loc_spanning(body.pexp_loc, typ.ptyp_loc),
                                 pexp_attributes: vec![],
                             }),
@@ -2310,7 +2310,7 @@ pub fn over_parse_constrained_or_coerced_or_arrow_expression(
                                 arg_label: ArgLabel::Nolabel,
                                 default: None,
                                 lhs: Pattern {
-                                    ppat_desc: PatternDesc::Ppat_constraint(Box::new(pat), typ.clone()),
+                                    ppat_desc: Box::new(PatternDesc::Ppat_constraint(Box::new(pat), typ.clone())),
                                     ppat_loc: p.mk_loc_spanning(expr.pexp_loc, typ.ptyp_loc),
                                     ppat_attributes: vec![],
                                 },
@@ -4140,7 +4140,7 @@ fn parse_let_in_block_with_continuation_and_attrs(
         };
 
         // Extract type variables and inner type if this is a Ptyp_poly from `type a.` syntax
-        let (final_typ, newtype_info) = match typ.ptyp_desc {
+        let (final_typ, newtype_info) = match *typ.ptyp_desc {
             CoreTypeDesc::Ptyp_poly(ref vars, ref inner) if is_locally_abstract => {
                 // Build the set of variable names for substitution
                 let var_set: std::collections::HashSet<String> =
@@ -4193,9 +4193,9 @@ fn parse_let_in_block_with_continuation_and_attrs(
     let first_pat = if is_locally_abstract {
         let wrapper_loc = wrapper_loc.expect("locally abstract let-binding should have wrapper loc");
         // Update Ppat_constraint and inner Ptyp_poly locations to use the binding location
-        if let PatternDesc::Ppat_constraint(inner_pat, typ) = first_pat.ppat_desc {
+        if let PatternDesc::Ppat_constraint(inner_pat, typ) = *first_pat.ppat_desc {
             // Update the Ptyp_poly location to use binding location
-            let updated_typ = match typ.ptyp_desc {
+            let updated_typ = match *typ.ptyp_desc {
                 CoreTypeDesc::Ptyp_poly(vars, inner) => CoreType {
                     ptyp_desc: Box::new(CoreTypeDesc::Ptyp_poly(vars, inner)),
                     ptyp_loc: wrapper_loc,
@@ -4802,7 +4802,7 @@ fn parse_if_let_expr(p: &mut Parser<'_>, start_pos_idx: PosIdx) -> Expression {
                 Case {
                     pc_bar: None,
                     pc_lhs: Pattern {
-                        ppat_desc: PatternDesc::Ppat_any,
+                        ppat_desc: Box::new(PatternDesc::Ppat_any),
                         ppat_loc: loc,
                         ppat_attributes: vec![],
                     },
@@ -4865,7 +4865,7 @@ fn suppress_fragile_match_warning_attr(p: &mut Parser<'_>) -> Attribute {
             StructureItem {
                 pstr_desc: Box::new(StructureItemDesc::Pstr_eval(
                     Expression {
-                        pexp_desc: ExpressionDesc::Pexp_constant(Constant::String(Cow::Borrowed("-4"), None)),
+                        pexp_desc: Box::new(ExpressionDesc::Pexp_constant(Constant::String(Cow::Borrowed("-4"), None))),
                         pexp_loc: loc,
                         pexp_attributes: vec![],
                     },
@@ -6385,25 +6385,25 @@ mod tests {
     #[test]
     fn test_parse_expr_ident() {
         let expr = parse_expr_with_timeout("foo");
-        assert!(matches!(expr.pexp_desc, ExpressionDesc::Pexp_ident(_)));
+        assert!(matches!(*expr.pexp_desc, ExpressionDesc::Pexp_ident(_)));
     }
 
     #[test]
     fn test_parse_expr_unit() {
         let expr = parse_expr_with_timeout("()");
-        assert!(matches!(expr.pexp_desc, ExpressionDesc::Pexp_construct(..)));
+        assert!(matches!(*expr.pexp_desc, ExpressionDesc::Pexp_construct(..)));
     }
 
     #[test]
     fn test_parse_expr_true() {
         let expr = parse_expr_with_timeout("true");
-        assert!(matches!(expr.pexp_desc, ExpressionDesc::Pexp_construct(..)));
+        assert!(matches!(*expr.pexp_desc, ExpressionDesc::Pexp_construct(..)));
     }
 
     #[test]
     fn test_parse_array() {
         let expr = parse_expr_with_timeout("[1, 2, 3]");
-        assert!(matches!(expr.pexp_desc, ExpressionDesc::Pexp_array(_)));
+        assert!(matches!(*expr.pexp_desc, ExpressionDesc::Pexp_array(_)));
     }
 
     #[test]

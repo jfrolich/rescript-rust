@@ -5436,7 +5436,7 @@ pub fn print_typ_expr(
 
     // Handle attributes
     let should_print_its_own_attributes =
-        matches!(typ.ptyp_desc, CoreTypeDesc::Ptyp_arrow { .. });
+        matches!(*typ.ptyp_desc, CoreTypeDesc::Ptyp_arrow { .. });
 
     let doc = if !typ.ptyp_attributes.is_empty() && !should_print_its_own_attributes {
         let (doc_comment_attrs, other_attrs) =
@@ -5476,7 +5476,7 @@ fn print_arrow_type(
     let (attrs_before, args, return_type) = parsetree_viewer::arrow_type(arena, typ, max_arity);
 
     let return_type_needs_parens =
-        matches!(return_type.ptyp_desc, CoreTypeDesc::Ptyp_alias(_, _));
+        matches!(*return_type.ptyp_desc, CoreTypeDesc::Ptyp_alias(_, _));
 
     let return_doc = {
         let doc = print_typ_expr(state, return_type, cmt_tbl, arena);
@@ -5798,7 +5798,7 @@ fn print_row_field(
                 let printed_types: Vec<Doc> = types
                     .iter()
                     .map(|t| {
-                        if matches!(t.ptyp_desc, CoreTypeDesc::Ptyp_tuple(_)) {
+                        if matches!(*t.ptyp_desc, CoreTypeDesc::Ptyp_tuple(_)) {
                             print_typ_expr(state, t, cmt_tbl, arena)
                         } else {
                             Doc::concat(vec![
@@ -7000,7 +7000,7 @@ fn print_value_binding(
         PatternDesc::Ppat_constraint(inner_pat, pat_typ),
         ExpressionDesc::Pexp_newtype(_, _),
     ) = (&*vb.pvb_pat.ppat_desc, &*vb.pvb_expr.pexp_desc) {
-        if matches!(pat_typ.ptyp_desc, CoreTypeDesc::Ptyp_poly(_, _)) {
+        if matches!(*pat_typ.ptyp_desc, CoreTypeDesc::Ptyp_poly(_, _)) {
             let (_, parameters, return_expr) = parsetree_viewer::fun_expr(arena, &vb.pvb_expr);
 
             // Build the "type t u." part from NewTypes parameter

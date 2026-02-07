@@ -35,7 +35,7 @@ fn get_string_tag(p: &Parser<'_>) -> Option<Cow<'static, str>> {
 /// This is needed for locally abstract types: `type a b c. list<a, b, c>` should
 /// have `a`, `b`, `c` as Ptyp_var, not Ptyp_constr.
 pub fn substitute_type_vars(arena: &mut crate::parse_arena::ParseArena, typ: CoreType, vars: &HashSet<String>) -> CoreType {
-    let new_desc = match typ.ptyp_desc {
+    let new_desc = match *typ.ptyp_desc {
         CoreTypeDesc::Ptyp_constr(lid, args) => {
             // Check if this is a simple Lident that matches a type variable
             if args.is_empty() {
@@ -1038,7 +1038,7 @@ fn parse_function_type(p: &mut Parser<'_>, start_pos_idx: PosIdx) -> CoreType {
             // We detect direct arrows by checking if the arrow's first arg starts exactly
             // at post_doc_start. For nested arrows, the inner `.` extension moves the
             // first arg location before post_doc_start.
-            if let CoreTypeDesc::Ptyp_arrow { arg, ret, arity } = typ.ptyp_desc {
+            if let CoreTypeDesc::Ptyp_arrow { arg, ret, arity } = *typ.ptyp_desc {
                 let first_arg_start = p.loc_start(arg.typ.ptyp_loc);
                 // If first arg location starts exactly at post_doc_start, it's a direct arrow
                 // If it starts elsewhere (before due to inner `.` or after due to parens), don't extend
@@ -1187,7 +1187,7 @@ fn parse_function_type(p: &mut Parser<'_>, start_pos_idx: PosIdx) -> CoreType {
     let as_underscore_count = if p.in_external {
         params.iter().filter(|(param, _)| {
             matches!(param.lbl, ArgLabel::Labelled(_))
-                && matches!(param.typ.ptyp_desc, CoreTypeDesc::Ptyp_any)
+                && matches!(*param.typ.ptyp_desc, CoreTypeDesc::Ptyp_any)
                 && param.typ.ptyp_attributes.iter().any(|(attr, _)| p.arena().get_string(attr.txt) == "as")
         }).count()
     } else {
@@ -1224,7 +1224,7 @@ fn parse_function_type(p: &mut Parser<'_>, start_pos_idx: PosIdx) -> CoreType {
     let result = acc;
 
     // Update the outermost arrow to have the full arity
-    let result = match result.ptyp_desc {
+    let result = match *result.ptyp_desc {
         CoreTypeDesc::Ptyp_arrow { arg, ret, .. } => CoreType {
             ptyp_desc: Box::new(CoreTypeDesc::Ptyp_arrow {
                 arg,
@@ -1636,7 +1636,7 @@ fn parse_polymorphic_variant_type_args(p: &mut Parser<'_>) -> CoreType {
         // Single tuple type:
         // In type-checker mode: pass through directly (no extra wrapping)
         // In printer mode: wrap in another tuple to distinguish (a, b) from ((a, b))
-        [typ] if matches!(typ.ptyp_desc, CoreTypeDesc::Ptyp_tuple(_)) => {
+        [typ] if matches!(*typ.ptyp_desc, CoreTypeDesc::Ptyp_tuple(_)) => {
             if p.mode == ParserMode::ParseForTypeChecker {
                 args.into_iter().next().unwrap()
             } else {
@@ -2473,37 +2473,37 @@ mod tests {
     #[test]
     fn test_parse_type_var() {
         let typ = parse_type_with_timeout("'a");
-        assert!(matches!(typ.ptyp_desc, CoreTypeDesc::Ptyp_var(_)));
+        assert!(matches!(*typ.ptyp_desc, CoreTypeDesc::Ptyp_var(_)));
     }
 
     #[test]
     fn test_parse_type_any() {
         let typ = parse_type_with_timeout("_");
-        assert!(matches!(typ.ptyp_desc, CoreTypeDesc::Ptyp_any));
+        assert!(matches!(*typ.ptyp_desc, CoreTypeDesc::Ptyp_any));
     }
 
     #[test]
     fn test_parse_type_constr_simple() {
         let typ = parse_type_with_timeout("int");
-        assert!(matches!(typ.ptyp_desc, CoreTypeDesc::Ptyp_constr(..)));
+        assert!(matches!(*typ.ptyp_desc, CoreTypeDesc::Ptyp_constr(..)));
     }
 
     #[test]
     fn test_parse_type_constr_with_args() {
         let typ = parse_type_with_timeout("array<int>");
-        assert!(matches!(typ.ptyp_desc, CoreTypeDesc::Ptyp_constr(..)));
+        assert!(matches!(*typ.ptyp_desc, CoreTypeDesc::Ptyp_constr(..)));
     }
 
     #[test]
     fn test_parse_type_tuple() {
         let typ = parse_type_with_timeout("(int, string)");
-        assert!(matches!(typ.ptyp_desc, CoreTypeDesc::Ptyp_tuple(_)));
+        assert!(matches!(*typ.ptyp_desc, CoreTypeDesc::Ptyp_tuple(_)));
     }
 
     #[test]
     fn test_parse_type_arrow() {
         let typ = parse_type_with_timeout("int => string");
-        assert!(matches!(typ.ptyp_desc, CoreTypeDesc::Ptyp_arrow { .. }));
+        assert!(matches!(*typ.ptyp_desc, CoreTypeDesc::Ptyp_arrow { .. }));
     }
 
     #[test]
