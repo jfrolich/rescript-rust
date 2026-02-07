@@ -108,7 +108,8 @@ impl<T: Clone> BindingTable<T> {
         }
     }
 
-    /// Add a binding.
+    /// Add a binding (local). Goes at the end of the name vector,
+    /// so it takes precedence over earlier bindings (including opened ones).
     pub fn add(&mut self, id: Ident, value: T) {
         let name = id.name().to_string();
         let stamp = id.stamp();
@@ -116,6 +117,20 @@ impl<T: Clone> BindingTable<T> {
         self.by_stamp.insert(stamp, value.clone());
 
         self.by_name.entry(name).or_default().push((id, value));
+    }
+
+    /// Add a binding from an opened module. Goes at the beginning of the name
+    /// vector, so it does NOT shadow existing local bindings.
+    /// This matches OCaml's behavior where opened bindings are searched after
+    /// local bindings (find_by_name returns .last(), so position 0 = lowest priority).
+    pub fn add_opened(&mut self, id: Ident, value: T) {
+        let name = id.name().to_string();
+        let stamp = id.stamp();
+
+        // Only insert into by_stamp if no entry exists yet (don't overwrite local bindings)
+        self.by_stamp.entry(stamp).or_insert_with(|| value.clone());
+
+        self.by_name.entry(name).or_default().insert(0, (id, value));
     }
 
     /// Find a binding by name.
@@ -249,6 +264,13 @@ impl Env {
         self.summary = Arc::new(EnvSummary::Value(self.summary.clone(), id, desc));
     }
 
+    /// Add a value binding from an opened module (lower priority than local bindings).
+    pub fn add_opened_value(&mut self, id: Ident, desc: ValueDescription) {
+        let desc = Arc::new(desc);
+        self.values.add_opened(id.clone(), desc.clone());
+        self.summary = Arc::new(EnvSummary::Value(self.summary.clone(), id, desc));
+    }
+
     /// Find a value by name.
     pub fn find_value(&self, name: &str) -> EnvResult<&ValueDescription> {
         self.values
@@ -289,6 +311,13 @@ impl Env {
         self.summary = Arc::new(EnvSummary::Type(self.summary.clone(), id, decl));
     }
 
+    /// Add a type binding from an opened module (lower priority than local bindings).
+    pub fn add_opened_type(&mut self, id: Ident, decl: TypeDeclaration) {
+        let decl = Arc::new(decl);
+        self.types.add_opened(id.clone(), decl.clone());
+        self.summary = Arc::new(EnvSummary::Type(self.summary.clone(), id, decl));
+    }
+
     /// Find a type by name.
     pub fn find_type(&self, name: &str) -> EnvResult<&TypeDeclaration> {
         self.types
@@ -320,6 +349,12 @@ impl Env {
         self.constrs.add(id, desc);
     }
 
+    /// Add a constructor binding from an opened module (lower priority than local bindings).
+    pub fn add_opened_constructor(&mut self, id: Ident, desc: ConstructorDescription) {
+        let desc = Arc::new(desc);
+        self.constrs.add_opened(id, desc);
+    }
+
     /// Find a constructor by name.
     pub fn find_constructor(&self, name: &str) -> EnvResult<&ConstructorDescription> {
         self.constrs
@@ -347,6 +382,12 @@ impl Env {
         self.labels.add(id, desc);
     }
 
+    /// Add a label binding from an opened module (lower priority than local bindings).
+    pub fn add_opened_label(&mut self, id: Ident, desc: LabelDescription) {
+        let desc = Arc::new(desc);
+        self.labels.add_opened(id, desc);
+    }
+
     /// Find a label by name.
     pub fn find_label(&self, name: &str) -> EnvResult<&LabelDescription> {
         self.labels
@@ -372,6 +413,13 @@ impl Env {
     pub fn add_module(&mut self, id: Ident, decl: ModuleDeclaration) {
         let decl = Arc::new(decl);
         self.modules.add(id.clone(), decl.clone());
+        self.summary = Arc::new(EnvSummary::Module(self.summary.clone(), id, decl));
+    }
+
+    /// Add a module binding from an opened module (lower priority than local bindings).
+    pub fn add_opened_module(&mut self, id: Ident, decl: ModuleDeclaration) {
+        let decl = Arc::new(decl);
+        self.modules.add_opened(id.clone(), decl.clone());
         self.summary = Arc::new(EnvSummary::Module(self.summary.clone(), id, decl));
     }
 
@@ -409,6 +457,13 @@ impl Env {
     pub fn add_modtype(&mut self, id: Ident, decl: ModtypeDeclaration) {
         let decl = Arc::new(decl);
         self.modtypes.add(id.clone(), decl.clone());
+        self.summary = Arc::new(EnvSummary::ModType(self.summary.clone(), id, decl));
+    }
+
+    /// Add a module type binding from an opened module (lower priority than local bindings).
+    pub fn add_opened_modtype(&mut self, id: Ident, decl: ModtypeDeclaration) {
+        let decl = Arc::new(decl);
+        self.modtypes.add_opened(id.clone(), decl.clone());
         self.summary = Arc::new(EnvSummary::ModType(self.summary.clone(), id, decl));
     }
 

@@ -372,14 +372,17 @@ pub fn transl_signature<'a>(
                 let (typed_ctype, val_ty) = transl_type(tctx, env, &vd.pval_type)?;
                 ctx.end_def();
                 crate::types::ctype::generalize(ctx, val_ty);
-                let encoded = crate::binary_ast::ppx::encode_external(vd, arena);
+                // For primitives, we need the pval_prim as Vec<String> for the typed tree
+                let val_prim: Vec<String> = vd.pval_prim.iter()
+                    .map(|s| arena.get_string(*s).to_string())
+                    .collect();
                 TSigDesc::Tsig_value(crate::types::typedtree::TypedValueDescription {
                     val_id: id,
                     val_name: Located { txt: name_str, loc: vd.pval_name.loc },
                     val_desc: typed_ctype,
-                    val_prim: encoded.pval_prim,
+                    val_prim,
                     val_loc: loc,
-                    val_attributes: encoded.pval_attributes,
+                    val_attributes: vd.pval_attributes.clone(),
                 })
             }
             PSigDesc::Psig_type(rec_flag, decls) => {
@@ -670,8 +673,11 @@ fn type_structure_item<'a>(
             ctx.end_def();
             crate::types::ctype::generalize(ctx, val_ty);
 
-            // Encode external FFI attributes into prim blob (matching OCaml's PPX encoding)
-            let encoded = crate::binary_ast::ppx::encode_external(vd, arena);
+            // PPX has already encoded the FFI attributes into pval_prim,
+            // so just resolve StrIdx -> String for the typed tree
+            let val_prim: Vec<String> = vd.pval_prim.iter()
+                .map(|s| arena.get_string(*s).to_string())
+                .collect();
 
             // Add the external value to the environment
             let mut new_env = env.clone();
@@ -688,9 +694,9 @@ fn type_structure_item<'a>(
                 val_id: id,
                 val_name: Located { txt: name_str, loc: vd.pval_name.loc },
                 val_desc: typed_ctype,
-                val_prim: encoded.pval_prim,
+                val_prim,
                 val_loc: loc,
-                val_attributes: encoded.pval_attributes,
+                val_attributes: vd.pval_attributes.clone(),
             });
             Ok((
                 StructureItem {

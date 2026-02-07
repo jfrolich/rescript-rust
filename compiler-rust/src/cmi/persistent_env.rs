@@ -170,10 +170,15 @@ impl PersistentEnv {
     }
 }
 
-/// Add a signature's bindings to an environment.
+/// Add a signature's bindings to an environment as opened bindings.
 ///
 /// This is the core of `open_signature` from OCaml's `env.ml`.
 /// For each signature item, we add the appropriate binding to the environment.
+///
+/// Uses "opened" add methods so that these bindings do NOT shadow existing
+/// local bindings. This matches OCaml's behavior where opened modules have
+/// lower lookup priority than local bindings (e.g., Predef types like `int`
+/// are not shadowed when Pervasives.cmi is opened).
 pub fn add_signature_to_env(
     sig_items: &[SignatureItem],
     module_path: &Path,
@@ -186,11 +191,11 @@ pub fn add_signature_to_env(
                 // Add value binding with qualified path
                 let mut desc = desc.clone();
                 desc.val_path = Some(Path::pdot(module_path.clone(), id.name()));
-                env.add_value(id.clone(), desc);
+                env.add_opened_value(id.clone(), desc);
             }
             SignatureItem::SigType(id, decl, _rec_status) => {
                 // Add type binding
-                env.add_type(id.clone(), decl.clone());
+                env.add_opened_type(id.clone(), decl.clone());
 
                 // Also add constructors and labels from this type
                 match &decl.type_kind {
@@ -255,7 +260,7 @@ pub fn add_signature_to_env(
                                 cstr_inlined: None,
                             };
 
-                            env.add_constructor(cd.cd_id.clone(), cstr_desc);
+                            env.add_opened_constructor(cd.cd_id.clone(), cstr_desc);
                         }
                     }
                     TypeKind::TypeRecord(labels, repr) => {
@@ -276,17 +281,17 @@ pub fn add_signature_to_env(
                                 lbl_loc: crate::location::Location::none(),
                                 lbl_attributes: vec![],
                             };
-                            env.add_label(ld.ld_id.clone(), label_desc);
+                            env.add_opened_label(ld.ld_id.clone(), label_desc);
                         }
                     }
                     _ => {}
                 }
             }
             SignatureItem::SigModule(id, md, _rec_status) => {
-                env.add_module(id.clone(), md.clone());
+                env.add_opened_module(id.clone(), md.clone());
             }
             SignatureItem::SigModtype(id, mtd) => {
-                env.add_modtype(id.clone(), mtd.clone());
+                env.add_opened_modtype(id.clone(), mtd.clone());
             }
             SignatureItem::SigTypext(id, ext, _status) => {
                 // Add extension constructor
@@ -315,7 +320,7 @@ pub fn add_signature_to_env(
                     cstr_attributes: vec![],
                     cstr_inlined: None,
                 };
-                env.add_constructor(id.clone(), cstr_desc);
+                env.add_opened_constructor(id.clone(), cstr_desc);
             }
             SignatureItem::SigClass | SignatureItem::SigClassType => {
                 // Skip class/class_type (not used in ReScript)

@@ -1481,7 +1481,7 @@ fn filter_ffi_attributes(attrs: &[Attribute], arena: &mut ParseArena) -> Vec<Att
 }
 
 /// Encode external value description with FFI metadata
-pub fn encode_external(vd: &ValueDescription, arena: &ParseArena) -> EncodedExternal {
+pub fn encode_external(vd: &ValueDescription, arena: &mut ParseArena) -> EncodedExternal {
     // Get the primitive name
     let prim_name = match vd.pval_prim.first() {
         Some(name) => arena.get_string(*name).to_string(),
@@ -2888,7 +2888,8 @@ fn handle_ffi(
 
     // Create the raw expression (same as %raw with #raw_expr)
     // For %ffi, expr.pexp_loc is the real location since it's parsed as a regular extension
-    let raw_expr = handle_raw(expr, payload, arena, "#raw_expr", expr.pexp_loc);
+    let raw_prim = prim_str(arena, "#raw_expr");
+    let raw_expr = handle_raw(expr, payload, arena, raw_prim, expr.pexp_loc);
 
     // Wrap in type constraint based on arity
     if let Some(arity) = arity {
@@ -8221,7 +8222,10 @@ fn expand_extensions_item(item: &StructureItem, arena: &mut ParseArena) -> Vec<S
         // %identity, %raise, #raw_expr etc. (whose pval_prim starts with % or #).
         StructureItemDesc::Pstr_primitive(vd) => {
             let is_builtin = vd.pval_prim.first()
-                .is_some_and(|p| p.starts_with('%') || p.starts_with('#'));
+                .is_some_and(|p| {
+                    let s = arena.get_string(*p);
+                    s.starts_with('%') || s.starts_with('#')
+                });
             if is_builtin {
                 vec![item.clone()]
             } else {
@@ -8248,9 +8252,12 @@ fn expand_extensions_expr(expr: &Expression, arena: &mut ParseArena) -> Expressi
             let (ext_name, payload) = ext;
             let name = arena.get_string(ext_name.txt).to_string();
             match name.as_str() {
-                "raw" => handle_raw(expr, payload, arena, "#raw_expr", ext_name.loc),
+                "raw" => {
+                    let raw_prim = prim_str(arena, "#raw_expr");
+                    handle_raw(expr, payload, arena, raw_prim, ext_name.loc)
+                }
                 "re" => handle_re(expr, payload, arena, ext_name.loc),
-                "external" => handle_external_ext(expr, payload, arena),
+                "external" => handle_external_ext(expr, payload, arena, ext_name.loc),
                 _ => expr.clone(),
             }
         }
