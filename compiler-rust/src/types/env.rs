@@ -119,18 +119,16 @@ impl<T: Clone> BindingTable<T> {
         self.by_name.entry(name).or_default().push((id, value));
     }
 
-    /// Add a binding from an opened module. Goes at the beginning of the name
-    /// vector, so it does NOT shadow existing local bindings.
-    /// This matches OCaml's behavior where opened bindings are searched after
-    /// local bindings (find_by_name returns .last(), so position 0 = lowest priority).
+    /// Add a binding from an opened module. Goes at the end of the name
+    /// vector, just like local bindings. Later opens shadow earlier ones.
+    /// This matches OCaml's behavior where the most recent open takes precedence.
     pub fn add_opened(&mut self, id: Ident, value: T) {
         let name = id.name().to_string();
         let stamp = id.stamp();
 
-        // Only insert into by_stamp if no entry exists yet (don't overwrite local bindings)
-        self.by_stamp.entry(stamp).or_insert_with(|| value.clone());
+        self.by_stamp.insert(stamp, value.clone());
 
-        self.by_name.entry(name).or_default().insert(0, (id, value));
+        self.by_name.entry(name).or_default().push((id, value));
     }
 
     /// Find a binding by name.
