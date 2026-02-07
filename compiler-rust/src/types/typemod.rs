@@ -185,6 +185,95 @@ pub fn resolve_mod_type_to_sig<'b>(
     }
 }
 
+/// Extract a `decl::ModuleType` from a typed module expression.
+/// For structure modules, builds a signature from the structure items.
+fn extract_module_type_from_mod_expr(mod_expr: &ModuleExpr) -> Option<crate::types::decl::ModuleType> {
+    use crate::types::decl::ModuleType as DeclMty;
+    use crate::types::decl::SignatureItem as SigItem;
+    use crate::types::decl::ValueDescription;
+
+    match &mod_expr.mod_desc {
+        ModuleExprDesc::Tmod_structure(structure) => {
+            let mut sig_items = Vec::new();
+            for item in &structure.str_items {
+                match &item.str_desc {
+                    StructureItemDesc::Tstr_value(_, bindings) => {
+                        for vb in bindings {
+                            // Extract identifier from pattern
+                            extract_sig_values_from_pattern(&vb.vb_pat, vb.vb_expr.exp_type, &mut sig_items);
+                        }
+                    }
+                    StructureItemDesc::Tstr_primitive(vd) => {
+                        let id = vd.val_id.clone();
+                        sig_items.push(SigItem::SigValue(id, ValueDescription {
+                            val_type: vd.val_desc.ctyp_type,
+                            val_kind: crate::types::decl::ValueKind::ValReg,
+                            val_loc: crate::location::Location::none(),
+                            val_attributes: vec![],
+                            val_path: None,
+                        }));
+                    }
+                    StructureItemDesc::Tstr_module(mb) => {
+                        let inner_mty = extract_module_type_from_mod_expr(&mb.mb_expr)
+                            .unwrap_or(DeclMty::MtySignature(vec![]));
+                        sig_items.push(SigItem::SigModule(
+                            mb.mb_id.clone(),
+                            crate::types::decl::ModuleDeclaration {
+                                md_type: inner_mty,
+                                md_attributes: vec![],
+                                md_loc: crate::location::Location::none(),
+                            },
+                            crate::types::decl::RecStatus::TrecNot,
+                        ));
+                    }
+                    // Type declarations, exceptions, open, include, etc.
+                    // skip for now (values and modules are what's needed for open/include)
+                    _ => {}
+                }
+            }
+            Some(DeclMty::MtySignature(sig_items))
+        }
+        ModuleExprDesc::Tmod_constraint(inner, _, _, _) => {
+            extract_module_type_from_mod_expr(inner)
+        }
+        _ => None,
+    }
+}
+
+/// Extract value signature items from a pattern (handles all pattern types).
+fn extract_sig_values_from_pattern(
+    pat: &crate::types::typedtree::Pattern,
+    ty: TypeExprRef,
+    sig_items: &mut Vec<crate::types::decl::SignatureItem>,
+) {
+    use crate::types::typedtree::PatternDesc;
+    use crate::types::decl::{SignatureItem as SigItem, ValueDescription};
+
+    match &pat.pat_desc {
+        PatternDesc::Tpat_var(id, _) => {
+            sig_items.push(SigItem::SigValue(id.clone(), ValueDescription {
+                val_type: ty,
+                val_kind: crate::types::decl::ValueKind::ValReg,
+                val_loc: crate::location::Location::none(),
+                val_attributes: vec![],
+                val_path: None,
+            }));
+        }
+        PatternDesc::Tpat_alias(_, id, _) => {
+            sig_items.push(SigItem::SigValue(id.clone(), ValueDescription {
+                val_type: ty,
+                val_kind: crate::types::decl::ValueKind::ValReg,
+                val_loc: crate::location::Location::none(),
+                val_attributes: vec![],
+                val_path: None,
+            }));
+        }
+        _ => {
+            // Tuple, any, constant, etc. — no named bindings at module level
+        }
+    }
+}
+
 // ============================================================================
 // Module Expression Type Checking
 // ============================================================================
@@ -1582,8 +1671,11 @@ fn type_structure_item<'a>(
             let mod_id = Ident::create_local(mod_name_str);
 
             // Extend environment with the new module
+            // Use semantic_mod_type from Pmod_ident, or extract from typed structure
+            let final_mod_type = semantic_mod_type
+                .or_else(|| extract_module_type_from_mod_expr(&typed_mod));
             let mut new_env = env.clone();
-            if let Some(decl_mod_type) = semantic_mod_type {
+            if let Some(decl_mod_type) = final_mod_type {
                 new_env.add_module(mod_id.clone(), crate::types::decl::ModuleDeclaration {
                     md_type: decl_mod_type,
                     md_attributes: vec![],
@@ -1712,8 +1804,18 @@ fn type_structure_item<'a>(
             let typed_mod = type_module_expr(tctx, env, arena, &incl.pincl_mod)?;
 
             // Extend environment with all bindings from the included module
+            // Also try to extract signature from typed module expr if not from Pmod_ident
+            let final_include_sig = include_sig.or_else(|| {
+                extract_module_type_from_mod_expr(&typed_mod).and_then(|mty| {
+                    if let crate::types::decl::ModuleType::MtySignature(sig) = mty {
+                        Some(sig)
+                    } else {
+                        None
+                    }
+                })
+            });
             let mut new_env = env.clone();
-            if let Some(sig_items) = &include_sig {
+            if let Some(sig_items) = &final_include_sig {
                 // For include, the module path should be the current module
                 // (items become direct members), but we need a path for qualified access.
                 // Use the included module's path for value paths.
