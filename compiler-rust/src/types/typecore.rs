@@ -1727,7 +1727,7 @@ pub fn type_expect<'a>(
         ED::Pexp_ident(lid) => {
             // Identifier expression
             let longident = tctx.arena.get_longident(lid.txt);
-            let (path, desc) = env.lookup_value_by_lid(longident, tctx.arena, tctx.persistent_env.as_mut(), tctx.type_ctx)?;
+            let (path, desc) = env.lookup_value_by_lid(longident, tctx.arena, &mut tctx.persistent_env, tctx.type_ctx)?;
 
             // Instantiate the type
             let ty = crate::types::instance(ctx, desc.val_type);
@@ -4007,7 +4007,7 @@ impl Env {
         &self,
         lid: &Longident,
         arena: &crate::parse_arena::ParseArena,
-        pers_env: Option<&mut crate::cmi::persistent_env::PersistentEnv>,
+        pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
         ctx: &'b crate::types::context::TypeContext<'b>,
     ) -> TypeCoreResult<(Path, ValueDescription)> {
         match lid {
@@ -4027,72 +4027,35 @@ impl Env {
             }
             Longident::Ldot(prefix, idx) => {
                 let value_name = arena.get_string(*idx);
-                // Look up the module by prefix, then find the value within it
-                let mod_name = match prefix.as_ref() {
-                    Longident::Lident(mod_idx) => arena.get_string(*mod_idx).to_string(),
-                    _ => {
-                        // Nested module paths not yet supported
-                        return Err(TypeCoreError::UndefinedMethod {
-                            ty: TypeExprRef(0),
-                            method: format!("<nested module path>.{}", value_name),
-                            alternatives: None,
-                        });
-                    }
-                };
-                // Find the module in the env
-                match self.find_module(&mod_name) {
-                    Ok(md) => {
-                        // Resolve the module type to a signature, following aliases
-                        let sig = Self::resolve_module_signature(&md.md_type, pers_env, ctx);
-                        if let Some(sig) = sig {
-                            for sig_item in &sig {
-                                if let crate::types::decl::SignatureItem::SigValue(id, vd) = sig_item {
-                                    if id.name() == value_name {
-                                        let path = Path::pdot(
-                                            Path::pident(Ident::create_local(&mod_name)),
-                                            value_name.to_string(),
-                                        );
-                                        return Ok((path, vd.clone()));
-                                    }
-                                }
+                // Resolve the module prefix to get a signature and path
+                let lid_str = Self::longident_to_string(lid, arena);
+                if let Some((mod_path, sig)) = self.resolve_module_lid(prefix, arena, pers_env, ctx) {
+                    // Search for the value in the signature
+                    for sig_item in &sig {
+                        if let crate::types::decl::SignatureItem::SigValue(id, vd) = sig_item {
+                            if id.name() == value_name {
+                                let path = Path::pdot(mod_path, value_name.to_string());
+                                return Ok((path, vd.clone()));
                             }
                         }
-                        Err(TypeCoreError::UndefinedMethod {
-                            ty: TypeExprRef(0),
-                            method: format!("{}.{}", mod_name, value_name),
-                            alternatives: None,
-                        })
                     }
-                    Err(_) => {
-                        // Module not found in env - try persistent env (external modules)
-                        if let Some(pers) = pers_env {
-                            if let Some(ps) = pers.find_pers_struct(&mod_name, ctx) {
-                                for sig_item in &ps.ps_sig {
-                                    if let crate::types::decl::SignatureItem::SigValue(id, vd) = sig_item {
-                                        if id.name() == value_name {
-                                            let path = Path::pdot(
-                                                Path::pident(Ident::create_persistent(&mod_name)),
-                                                value_name.to_string(),
-                                            );
-                                            return Ok((path, vd.clone()));
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                        // Fallback: try looking up as a flattened value
-                        match self.find_value_with_id(value_name) {
-                            Ok((id, desc)) => {
-                                let path = desc.val_path.clone().unwrap_or_else(|| Path::pident(id.clone()));
-                                Ok((path, desc.clone()))
-                            }
-                            Err(_) => Err(TypeCoreError::UndefinedMethod {
-                                ty: TypeExprRef(0),
-                                method: format!("{}.{}", mod_name, value_name),
-                                alternatives: None,
-                            }),
-                        }
+                    return Err(TypeCoreError::UndefinedMethod {
+                        ty: TypeExprRef(0),
+                        method: lid_str,
+                        alternatives: None,
+                    });
+                }
+                // Fallback: try looking up as a flattened value in the local env
+                match self.find_value_with_id(value_name) {
+                    Ok((id, desc)) => {
+                        let path = desc.val_path.clone().unwrap_or_else(|| Path::pident(id.clone()));
+                        Ok((path, desc.clone()))
                     }
+                    Err(_) => Err(TypeCoreError::UndefinedMethod {
+                        ty: TypeExprRef(0),
+                        method: lid_str,
+                        alternatives: None,
+                    }),
                 }
             }
             Longident::Lapply(_, _) => {
@@ -4105,10 +4068,76 @@ impl Env {
         }
     }
 
+    /// Convert a longident to a human-readable string for error messages.
+    fn longident_to_string(lid: &Longident, arena: &crate::parse_arena::ParseArena) -> String {
+        match lid {
+            Longident::Lident(idx) => arena.get_string(*idx).to_string(),
+            Longident::Ldot(prefix, idx) => {
+                let prefix_str = Self::longident_to_string(prefix, arena);
+                format!("{}.{}", prefix_str, arena.get_string(*idx))
+            }
+            Longident::Lapply(f, a) => {
+                format!("{}({})", Self::longident_to_string(f, arena), Self::longident_to_string(a, arena))
+            }
+        }
+    }
+
+    /// Resolve a module longident to its signature and path.
+    /// Handles nested module paths like Belt.Array by recursively resolving.
+    fn resolve_module_lid<'b>(
+        &self,
+        lid: &Longident,
+        arena: &crate::parse_arena::ParseArena,
+        pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
+        ctx: &'b crate::types::context::TypeContext<'b>,
+    ) -> Option<(Path, crate::types::decl::Signature)> {
+        match lid {
+            Longident::Lident(mod_idx) => {
+                let mod_name = arena.get_string(*mod_idx);
+                // First try local environment
+                if let Ok(md) = self.find_module(mod_name) {
+                    let sig = Self::resolve_module_type(&md.md_type, pers_env, ctx);
+                    if let Some(sig) = sig {
+                        return Some((Path::pident(Ident::create_local(mod_name)), sig));
+                    }
+                }
+                // Then try persistent environment (external modules)
+                if let Some(pers) = pers_env.as_mut() {
+                    if let Some(ps) = pers.find_pers_struct(mod_name, ctx) {
+                        let sig = ps.ps_sig.clone();
+                        return Some((Path::pident(Ident::create_persistent(mod_name)), sig));
+                    }
+                }
+                None
+            }
+            Longident::Ldot(prefix, submod_idx) => {
+                let submod_name = arena.get_string(*submod_idx);
+                // Recursively resolve the prefix to get a signature
+                if let Some((parent_path, parent_sig)) = self.resolve_module_lid(prefix, arena, pers_env, ctx) {
+                    // Search for the sub-module in the parent's signature
+                    for sig_item in &parent_sig {
+                        if let crate::types::decl::SignatureItem::SigModule(id, sub_md, _) = sig_item {
+                            if id.name() == submod_name {
+                                let sub_path = Path::pdot(parent_path, submod_name.to_string());
+                                let sub_sig = Self::resolve_module_type(&sub_md.md_type, pers_env, ctx);
+                                if let Some(sig) = sub_sig {
+                                    return Some((sub_path, sig));
+                                }
+                                return None;
+                            }
+                        }
+                    }
+                }
+                None
+            }
+            _ => None,
+        }
+    }
+
     /// Resolve a module type to a signature, following aliases and loading from persistent env.
-    fn resolve_module_signature<'b>(
+    fn resolve_module_type<'b>(
         mty: &crate::types::decl::ModuleType,
-        pers_env: Option<&mut crate::cmi::persistent_env::PersistentEnv>,
+        pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
         ctx: &'b crate::types::context::TypeContext<'b>,
     ) -> Option<crate::types::decl::Signature> {
         match mty {
@@ -4121,7 +4150,7 @@ impl Env {
                     Path::Pdot(_, name, _) => name.clone(),
                     _ => return None,
                 };
-                if let Some(pers) = pers_env {
+                if let Some(pers) = pers_env.as_mut() {
                     if let Some(ps) = pers.find_pers_struct(&mod_name, ctx) {
                         return Some(ps.ps_sig.clone());
                     }
