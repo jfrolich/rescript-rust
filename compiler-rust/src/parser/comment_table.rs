@@ -481,7 +481,7 @@ fn get_jsx_prop_loc(prop: &JsxProp, arena: &mut ParseArena) -> LocIdx {
 
 /// Check if an expression is a block expression.
 fn is_block_expr(expr: &Expression) -> bool {
-    match &expr.pexp_desc {
+    match &*expr.pexp_desc {
         ExpressionDesc::Pexp_letmodule(..)
         | ExpressionDesc::Pexp_letexception(..)
         | ExpressionDesc::Pexp_let(..)
@@ -497,7 +497,7 @@ fn is_block_expr(expr: &Expression) -> bool {
 
 /// Check if an expression is an if-then-else.
 fn is_if_then_else_expr(expr: &Expression) -> bool {
-    matches!(&expr.pexp_desc, ExpressionDesc::Pexp_ifthenelse(..))
+    matches!(&*expr.pexp_desc, ExpressionDesc::Pexp_ifthenelse(..))
 }
 
 /// Collect list patterns from a cons pattern.
@@ -506,11 +506,11 @@ fn collect_list_patterns<'a>(arena: &ParseArena, pattern: &'a Pattern) -> Vec<&'
     let mut current = pattern;
 
     loop {
-        match &current.ppat_desc {
+        match &*current.ppat_desc {
             PatternDesc::Ppat_construct(name, Some(args))
                 if arena.is_lident(name.txt, "::") =>
             {
-                if let PatternDesc::Ppat_tuple(tuple) = &args.ppat_desc {
+                if let PatternDesc::Ppat_tuple(tuple) = &*args.ppat_desc {
                     if tuple.len() == 2 {
                         acc.push(&tuple[0]);
                         current = &tuple[1];
@@ -541,11 +541,11 @@ fn collect_list_exprs<'a>(arena: &ParseArena, expr: &'a Expression) -> Vec<&'a E
     let mut current = expr;
 
     loop {
-        match &current.pexp_desc {
+        match &*current.pexp_desc {
             ExpressionDesc::Pexp_construct(name, Some(args))
                 if arena.is_lident(name.txt, "::") =>
             {
-                if let ExpressionDesc::Pexp_tuple(tuple) = &args.pexp_desc {
+                if let ExpressionDesc::Pexp_tuple(tuple) = &*args.pexp_desc {
                     if tuple.len() == 2 {
                         acc.push(&tuple[0]);
                         current = &tuple[1];
@@ -683,7 +683,7 @@ fn walk_structure_item(si: &StructureItem, t: &mut CommentTable, comments: Vec<C
         return;
     }
 
-    match &si.pstr_desc {
+    match &*si.pstr_desc {
         StructureItemDesc::Pstr_primitive(vd) => walk_value_description(vd, t, comments, arena),
         StructureItemDesc::Pstr_open(od) => walk_open_description(od, t, comments, arena),
         StructureItemDesc::Pstr_value(_, bindings) => walk_value_bindings(bindings, t, comments, arena),
@@ -710,7 +710,7 @@ fn walk_signature_item(si: &SignatureItem, t: &mut CommentTable, comments: Vec<C
         return;
     }
 
-    match &si.psig_desc {
+    match &*si.psig_desc {
         SignatureItemDesc::Psig_value(vd) => walk_value_description(vd, t, comments, arena),
         SignatureItemDesc::Psig_type(_, declarations) => {
             walk_type_declarations(declarations, t, comments, arena)
@@ -821,7 +821,7 @@ fn walk_module_binding(mb: &ModuleBinding, t: &mut CommentTable, comments: Vec<C
 
     let (leading, inside, trailing) = partition_by_loc(rest, mb.pmb_expr.pmod_loc, arena);
 
-    match &mb.pmb_expr.pmod_desc {
+    match &*mb.pmb_expr.pmod_desc {
         ModuleExprDesc::Pmod_constraint { .. } => {
             let combined: Vec<Comment> = leading.into_iter().chain(inside.into_iter()).collect();
             walk_module_expr(&mb.pmb_expr, t, combined, arena);
@@ -877,15 +877,15 @@ fn rewrite_value_binding_locs<'a>(vb: &'a ValueBinding, arena: &mut ParseArena) 
     let default = (vb.pvb_pat.ppat_loc, &vb.pvb_expr, vb.pvb_expr.pexp_loc);
 
     // Check for the sugar cases that OCaml handles specially
-    match (&vb.pvb_pat.ppat_desc, &vb.pvb_expr.pexp_desc) {
+    match (&*vb.pvb_pat.ppat_desc, &*vb.pvb_expr.pexp_desc) {
         // Case 1: Ppat_constraint(pat, Ptyp_poly([], t)) with Pexp_constraint(expr, _)
         // let x: t = (expr: typ)
         (
             PatternDesc::Ppat_constraint(pat, typ),
             ExpressionDesc::Pexp_constraint(expr, _),
-        ) if matches!(&typ.ptyp_desc, CoreTypeDesc::Ptyp_poly(vars, _) if vars.is_empty()) => {
+        ) if matches!(&*typ.ptyp_desc, CoreTypeDesc::Ptyp_poly(vars, _) if vars.is_empty()) => {
             // Pattern loc ends at the inner type's location
-            if let CoreTypeDesc::Ptyp_poly(_, inner_typ) = &typ.ptyp_desc {
+            if let CoreTypeDesc::Ptyp_poly(_, inner_typ) = &*typ.ptyp_desc {
                 let new_pat_loc = arena.from_location(&Location {
                     loc_start: arena.loc_start(pat.ppat_loc).clone(),
                     loc_end: arena.loc_end(inner_typ.ptyp_loc).clone(),
@@ -902,9 +902,9 @@ fn rewrite_value_binding_locs<'a>(vb: &'a ValueBinding, arena: &mut ParseArena) 
         (
             PatternDesc::Ppat_constraint(_pat, typ),
             ExpressionDesc::Pexp_fun { .. },
-        ) if matches!(&typ.ptyp_desc, CoreTypeDesc::Ptyp_poly(vars, _) if !vars.is_empty()) => {
+        ) if matches!(&*typ.ptyp_desc, CoreTypeDesc::Ptyp_poly(vars, _) if !vars.is_empty()) => {
             // Pattern loc ends at the inner type's location
-            if let CoreTypeDesc::Ptyp_poly(_, inner_typ) = &typ.ptyp_desc {
+            if let CoreTypeDesc::Ptyp_poly(_, inner_typ) = &*typ.ptyp_desc {
                 let new_pat_loc = arena.from_location(&Location {
                     loc_start: arena.loc_start(vb.pvb_pat.ppat_loc).clone(),
                     loc_end: arena.loc_end(inner_typ.ptyp_loc).clone(),
@@ -922,10 +922,10 @@ fn rewrite_value_binding_locs<'a>(vb: &'a ValueBinding, arena: &mut ParseArena) 
         (
             PatternDesc::Ppat_constraint(_pat, typ),
             ExpressionDesc::Pexp_newtype(_, inner_expr),
-        ) if matches!(&typ.ptyp_desc, CoreTypeDesc::Ptyp_poly(vars, _) if !vars.is_empty()) => {
+        ) if matches!(&*typ.ptyp_desc, CoreTypeDesc::Ptyp_poly(vars, _) if !vars.is_empty()) => {
             // Check if inner expression is Pexp_constraint(expr, _)
-            if let ExpressionDesc::Pexp_constraint(expr, _) = &inner_expr.pexp_desc {
-                if let CoreTypeDesc::Ptyp_poly(_, inner_typ) = &typ.ptyp_desc {
+            if let ExpressionDesc::Pexp_constraint(expr, _) = &*inner_expr.pexp_desc {
+                if let CoreTypeDesc::Ptyp_poly(_, inner_typ) = &*typ.ptyp_desc {
                     let new_pat_loc = arena.from_location(&Location {
                         loc_start: arena.loc_start(vb.pvb_pat.ppat_loc).clone(),
                         loc_end: arena.loc_end(inner_typ.ptyp_loc).clone(),
@@ -1156,7 +1156,7 @@ fn walk_expression(expr: &Expression, t: &mut CommentTable, comments: Vec<Commen
         return;
     }
 
-    match &expr.pexp_desc {
+    match &*expr.pexp_desc {
         ExpressionDesc::Pexp_constant { .. } => {
             let (leading, trailing) = partition_leading_trailing(comments, expr.pexp_loc, arena);
             t.attach_leading(expr.pexp_loc, leading, arena);
@@ -1169,7 +1169,7 @@ fn walk_expression(expr: &Expression, t: &mut CommentTable, comments: Vec<Commen
         }
         ExpressionDesc::Pexp_let(_, bindings, body) => {
             // Check if body is unit
-            let body_is_unit = matches!(&body.pexp_desc, ExpressionDesc::Pexp_construct(name, None) if arena.is_lident(name.txt, "()"));
+            let body_is_unit = matches!(&*body.pexp_desc, ExpressionDesc::Pexp_construct(name, None) if arena.is_lident(name.txt, "()"));
             if body_is_unit {
                 walk_value_bindings(bindings, t, comments, arena);
             } else {
@@ -1256,9 +1256,9 @@ fn walk_expression(expr: &Expression, t: &mut CommentTable, comments: Vec<Commen
             if arena.get_string(ext.0.txt) == "obj" {
                 if let PStr(items) = &ext.1 {
                     if items.len() == 1 {
-                        if let StructureItemDesc::Pstr_eval(inner, _) = &items[0].pstr_desc
+                        if let StructureItemDesc::Pstr_eval(inner, _) = &*items[0].pstr_desc
                         {
-                            if let ExpressionDesc::Pexp_record(fields, _) = &inner.pexp_desc {
+                            if let ExpressionDesc::Pexp_record(fields, _) = &*inner.pexp_desc {
                                 let nodes: Vec<Node<'_>> = fields
                                     .iter()
                                     .map(|f| Node::ExprRecordRow(&f.lid, &f.expr))
@@ -1640,7 +1640,7 @@ fn walk_expression(expr: &Expression, t: &mut CommentTable, comments: Vec<Commen
         ExpressionDesc::Pexp_apply { funct, args, .. } => {
             // Check for unary expressions
             if args.len() == 1 {
-                if let ExpressionDesc::Pexp_ident(ident) = &funct.pexp_desc {
+                if let ExpressionDesc::Pexp_ident(ident) = &*funct.pexp_desc {
                     if let Longident::Lident(op) = arena.get_longident(ident.txt) {
                         let op_str = arena.get_string(*op);
                         if matches!(
@@ -1661,7 +1661,7 @@ fn walk_expression(expr: &Expression, t: &mut CommentTable, comments: Vec<Commen
 
             // Special case for Array.get: walk arguments directly like OCaml
             if args.len() == 2 {
-                if let ExpressionDesc::Pexp_ident(ident) = &funct.pexp_desc {
+                if let ExpressionDesc::Pexp_ident(ident) = &*funct.pexp_desc {
                     if let Longident::Ldot(base, method_idx) = arena.get_longident(ident.txt) {
                         if let Longident::Lident(module_idx) = base.as_ref() {
                             let module = arena.get_string(*module_idx);
@@ -1684,7 +1684,7 @@ fn walk_expression(expr: &Expression, t: &mut CommentTable, comments: Vec<Commen
 
             // Special case for Array.set: walk arguments directly like OCaml
             if args.len() == 3 {
-                if let ExpressionDesc::Pexp_ident(ident) = &funct.pexp_desc {
+                if let ExpressionDesc::Pexp_ident(ident) = &*funct.pexp_desc {
                     if let Longident::Ldot(base, method_idx) = arena.get_longident(ident.txt) {
                         if let Longident::Lident(module_idx) = base.as_ref() {
                             let module = arena.get_string(*module_idx);
@@ -1710,7 +1710,7 @@ fn walk_expression(expr: &Expression, t: &mut CommentTable, comments: Vec<Commen
             // Special case for Primitive_dict.make (dict{} syntax)
             // Match OCaml: just walk the key_values array expression
             if args.len() == 1 {
-                if let ExpressionDesc::Pexp_ident(ident) = &funct.pexp_desc {
+                if let ExpressionDesc::Pexp_ident(ident) = &*funct.pexp_desc {
                     if let Longident::Ldot(parent, method_idx) = arena.get_longident(ident.txt) {
                         if arena.get_string(*method_idx) == "make" {
                             if let Longident::Lident(module_idx) = parent.as_ref() {
@@ -1732,7 +1732,7 @@ fn walk_expression(expr: &Expression, t: &mut CommentTable, comments: Vec<Commen
             // Special case for Belt.Array.concatMany (spread array syntax)
             // Match OCaml: flatten all sub-array expressions and walk them together
             if args.len() == 1 {
-                if let ExpressionDesc::Pexp_ident(ident) = &funct.pexp_desc {
+                if let ExpressionDesc::Pexp_ident(ident) = &*funct.pexp_desc {
                     if let Longident::Ldot(parent, method_idx) = arena.get_longident(ident.txt) {
                         if arena.get_string(*method_idx) == "concatMany" {
                             if let Longident::Ldot(grandparent, parent_name) = parent.as_ref() {
@@ -1741,11 +1741,11 @@ fn walk_expression(expr: &Expression, t: &mut CommentTable, comments: Vec<Commen
                                         if arena.get_string(*base) == "Belt" {
                                             // Found Belt.Array.concatMany
                                             let (_, arg) = &args[0];
-                                            if let ExpressionDesc::Pexp_array(sub_arrays) = &arg.pexp_desc {
+                                            if let ExpressionDesc::Pexp_array(sub_arrays) = &*arg.pexp_desc {
                                                 // Collect all expressions from sub-arrays
                                                 let mut all_exprs: Vec<&Expression> = Vec::new();
                                                 for sub_array in sub_arrays {
-                                                    if let ExpressionDesc::Pexp_array(exprs) = &sub_array.pexp_desc {
+                                                    if let ExpressionDesc::Pexp_array(exprs) = &*sub_array.pexp_desc {
                                                         all_exprs.extend(exprs.iter());
                                                     } else {
                                                         // Spread expression
@@ -1772,7 +1772,7 @@ fn walk_expression(expr: &Expression, t: &mut CommentTable, comments: Vec<Commen
             // Special case for Belt.List.concatMany (spread list syntax)
             // Match OCaml: flatten all sub-list expressions and walk them together
             if args.len() == 1 {
-                if let ExpressionDesc::Pexp_ident(ident) = &funct.pexp_desc {
+                if let ExpressionDesc::Pexp_ident(ident) = &*funct.pexp_desc {
                     if let Longident::Ldot(parent, method_idx) = arena.get_longident(ident.txt) {
                         if arena.get_string(*method_idx) == "concatMany" {
                             if let Longident::Ldot(grandparent, parent_name) = parent.as_ref() {
@@ -1781,7 +1781,7 @@ fn walk_expression(expr: &Expression, t: &mut CommentTable, comments: Vec<Commen
                                         if arena.get_string(*base) == "Belt" {
                                             // Found Belt.List.concatMany
                                             let (_, arg) = &args[0];
-                                            if let ExpressionDesc::Pexp_array(sub_lists) = &arg.pexp_desc {
+                                            if let ExpressionDesc::Pexp_array(sub_lists) = &*arg.pexp_desc {
                                                 // Collect all expressions from sub-lists
                                                 let mut all_exprs: Vec<&Expression> = Vec::new();
                                                 for sub_list in sub_lists {
@@ -1811,7 +1811,7 @@ fn walk_expression(expr: &Expression, t: &mut CommentTable, comments: Vec<Commen
 
             // Check for binary expressions - match OCaml's special handling
             if args.len() == 2 {
-                if let ExpressionDesc::Pexp_ident(ident) = &funct.pexp_desc {
+                if let ExpressionDesc::Pexp_ident(ident) = &*funct.pexp_desc {
                     if let Longident::Lident(op) = arena.get_longident(ident.txt) {
                         let op_str = arena.get_string(*op);
                         if matches!(
@@ -1952,7 +1952,7 @@ fn walk_expression(expr: &Expression, t: &mut CommentTable, comments: Vec<Commen
             }
 
             // Walk return expression
-            match &return_expr.pexp_desc {
+            match &*return_expr.pexp_desc {
                 ExpressionDesc::Pexp_constraint(inner_expr, typ)
                     if arena.loc_start(inner_expr.pexp_loc).cnum >= arena.loc_end(typ.ptyp_loc).cnum =>
                 {
@@ -2321,7 +2321,7 @@ fn walk_pattern(pattern: &Pattern, t: &mut CommentTable, comments: Vec<Comment>,
         return;
     }
 
-    match &pattern.ppat_desc {
+    match &*pattern.ppat_desc {
         PatternDesc::Ppat_any | PatternDesc::Ppat_constant { .. } | PatternDesc::Ppat_interval { .. } => {
             let (leading, trailing) = partition_leading_trailing(comments, pattern.ppat_loc, arena);
             t.attach_leading(pattern.ppat_loc, leading, arena);
@@ -2464,7 +2464,7 @@ fn walk_core_type(ct: &CoreType, t: &mut CommentTable, comments: Vec<Comment>, a
         return;
     }
 
-    match &ct.ptyp_desc {
+    match &*ct.ptyp_desc {
         CoreTypeDesc::Ptyp_any | CoreTypeDesc::Ptyp_var(_) => {
             let (leading, trailing) = partition_leading_trailing(comments, ct.ptyp_loc, arena);
             t.attach_leading(ct.ptyp_loc, leading, arena);
@@ -2684,7 +2684,7 @@ fn walk_module_expr(me: &ModuleExpr, t: &mut CommentTable, comments: Vec<Comment
         return;
     }
 
-    match &me.pmod_desc {
+    match &*me.pmod_desc {
         ModuleExprDesc::Pmod_ident(lid) => {
             let (leading, trailing) = partition_leading_trailing(comments, lid.loc, arena);
             t.attach_leading(lid.loc, leading, arena);
@@ -2722,7 +2722,7 @@ fn walk_module_expr(me: &ModuleExpr, t: &mut CommentTable, comments: Vec<Comment
 
             // Handle return expression, with special case for Pmod_constraint
             // where the constraint comes before the expression (: Set => expr)
-            match &return_mod_expr.pmod_desc {
+            match &*return_mod_expr.pmod_desc {
                 ModuleExprDesc::Pmod_constraint(mod_expr, mod_type)
                     if arena.loc_end(mod_type.pmty_loc).cnum <= arena.loc_start(mod_expr.pmod_loc).cnum =>
                 {
@@ -2826,7 +2826,7 @@ fn walk_mod_type(mt: &ModuleType, t: &mut CommentTable, comments: Vec<Comment>, 
         return;
     }
 
-    match &mt.pmty_desc {
+    match &*mt.pmty_desc {
         ModuleTypeDesc::Pmty_ident(lid) => {
             let (leading, trailing) = partition_leading_trailing(comments, lid.loc, arena);
             t.attach_leading(lid.loc, leading, arena);
@@ -3003,7 +3003,7 @@ fn functor_type_params(modtype: &ModuleType) -> (Vec<(&[Attribute], &crate::pars
         acc: Vec<(&'a [Attribute], &'a crate::parser::ast::StringLoc, Option<&'a ModuleType>)>,
         modtype: &'a ModuleType,
     ) -> (Vec<(&'a [Attribute], &'a crate::parser::ast::StringLoc, Option<&'a ModuleType>)>, &'a ModuleType) {
-        match &modtype.pmty_desc {
+        match &*modtype.pmty_desc {
             ModuleTypeDesc::Pmty_functor(lbl, arg_type, return_type) => {
                 let mut new_acc = acc;
                 new_acc.push((&modtype.pmty_attributes, lbl, arg_type.as_ref().map(|t| t.as_ref())));

@@ -94,7 +94,7 @@ pub fn type_module_expr<'a>(
 ) -> TypeModResult<ModuleExpr> {
     let loc = mod_expr.pmod_loc;
 
-    match &mod_expr.pmod_desc {
+    match &*mod_expr.pmod_desc {
         ParsedModuleExprDesc::Pmod_ident(lid) => {
             // Module identifier: M
             // Look up the module path in the environment
@@ -254,7 +254,7 @@ fn type_structure_item<'a>(
 ) -> TypeModResult<(StructureItem, Env)> {
     let loc = item.pstr_loc;
 
-    match &item.pstr_desc {
+    match &*item.pstr_desc {
         ParsedStructureItemDesc::Pstr_eval(expr, attrs) => {
             // Evaluated expression: E
             let typed_expr = type_expression(tctx.type_ctx, arena, env, expr)?;

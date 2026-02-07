@@ -46,7 +46,7 @@ pub mod recover {
         let str_idx = arena.intern("rescript.exprhole");
         let id = mknoloc(str_idx);
         Expression {
-            pexp_desc: ExpressionDesc::Pexp_extension((id, Payload::PStr(vec![]))),
+            pexp_desc: Box::new(ExpressionDesc::Pexp_extension((id, Payload::PStr(vec![])))),
             pexp_loc: LocIdx::none(),
             pexp_attributes: vec![],
         }
@@ -57,7 +57,7 @@ pub mod recover {
         let str_idx = arena.intern("rescript.typehole");
         let id = mknoloc(str_idx);
         CoreType {
-            ptyp_desc: CoreTypeDesc::Ptyp_extension((id, Payload::PStr(vec![]))),
+            ptyp_desc: Box::new(CoreTypeDesc::Ptyp_extension((id, Payload::PStr(vec![])))),
             ptyp_loc: LocIdx::none(),
             ptyp_attributes: vec![],
         }
@@ -68,7 +68,7 @@ pub mod recover {
         let str_idx = arena.intern("rescript.patternhole");
         let id = mknoloc(str_idx);
         Pattern {
-            ppat_desc: PatternDesc::Ppat_extension((id, Payload::PStr(vec![]))),
+            ppat_desc: Box::new(PatternDesc::Ppat_extension((id, Payload::PStr(vec![])))),
             ppat_loc: LocIdx::none(),
             ppat_attributes: vec![],
         }
@@ -77,7 +77,7 @@ pub mod recover {
     /// Create a default module expression for error recovery.
     pub fn default_module_expr() -> ModuleExpr {
         ModuleExpr {
-            pmod_desc: ModuleExprDesc::Pmod_structure(vec![]),
+            pmod_desc: Box::new(ModuleExprDesc::Pmod_structure(vec![])),
             pmod_loc: LocIdx::none(),
             pmod_attributes: vec![],
         }
@@ -86,7 +86,7 @@ pub mod recover {
     /// Create a default module type for error recovery.
     pub fn default_module_type() -> ModuleType {
         ModuleType {
-            pmty_desc: ModuleTypeDesc::Pmty_signature(vec![]),
+            pmty_desc: Box::new(ModuleTypeDesc::Pmty_signature(vec![])),
             pmty_loc: LocIdx::none(),
             pmty_attributes: vec![],
         }
@@ -98,7 +98,7 @@ pub mod recover {
         let str_idx = arena.intern("rescript.sigitemhole");
         let id = mknoloc(str_idx);
         SignatureItem {
-            psig_desc: SignatureItemDesc::Psig_extension((id, Payload::PStr(vec![])), vec![]),
+            psig_desc: Box::new(SignatureItemDesc::Psig_extension((id, Payload::PStr(vec![])), vec![])),
             psig_loc: LocIdx::none(),
         }
     }
@@ -513,17 +513,17 @@ pub fn doc_comment_to_attribute(arena: &mut ParseArena, loc: Location, content: 
     let str_idx = arena.intern("res.doc");
     let name = with_loc(str_idx, loc);
     let payload = Payload::PStr(vec![StructureItem {
-        pstr_desc: StructureItemDesc::Pstr_eval(
+        pstr_desc: Box::new(StructureItemDesc::Pstr_eval(
             Expression {
-                pexp_desc: ExpressionDesc::Pexp_constant(Constant::String(
+                pexp_desc: Box::new(ExpressionDesc::Pexp_constant(Constant::String(
                     Cow::Owned(content.into()),
                     None,
-                )),
+                ))),
                 pexp_loc: loc,
                 pexp_attributes: vec![],
             },
             vec![],
-        ),
+        )),
         pstr_loc: loc,
     }]);
     (name, payload)
@@ -586,7 +586,7 @@ pub mod ast_helper {
     /// Create an expression with the given description and location.
     pub fn make_expr(desc: ExpressionDesc, loc: Location) -> Expression {
         Expression {
-            pexp_desc: desc,
+            pexp_desc: Box::new(desc),
             pexp_loc: loc,
             pexp_attributes: vec![],
         }
@@ -595,7 +595,7 @@ pub mod ast_helper {
     /// Create a pattern with the given description and location.
     pub fn make_pat(desc: PatternDesc, loc: Location) -> Pattern {
         Pattern {
-            ppat_desc: desc,
+            ppat_desc: Box::new(desc),
             ppat_loc: loc,
             ppat_attributes: vec![],
         }
@@ -604,7 +604,7 @@ pub mod ast_helper {
     /// Create a type with the given description and location.
     pub fn make_typ(desc: CoreTypeDesc, loc: Location) -> CoreType {
         CoreType {
-            ptyp_desc: desc,
+            ptyp_desc: Box::new(desc),
             ptyp_loc: loc,
             ptyp_attributes: vec![],
         }
@@ -690,7 +690,7 @@ pub mod ast_helper {
     /// The caller should push the string to the arena first using `arena.push_string()`.
     pub fn make_var_pat(str_idx: StrIdx, loc: LocIdx) -> Pattern {
         Pattern {
-            ppat_desc: PatternDesc::Ppat_var(with_loc(str_idx, loc)),
+            ppat_desc: Box::new(PatternDesc::Ppat_var(with_loc(str_idx, loc))),
             ppat_loc: loc,
             ppat_attributes: vec![],
         }
@@ -794,7 +794,7 @@ pub fn make_unary_expr(
     operand: Expression,
 ) -> Expression {
     // Handle numeric literal negation specially
-    match (&token, &operand.pexp_desc) {
+    match (&token, &*operand.pexp_desc) {
         (Token::Plus | Token::PlusDot, ExpressionDesc::Pexp_constant(Constant::Integer(..)))
         | (Token::Plus | Token::PlusDot, ExpressionDesc::Pexp_constant(Constant::Float(..))) => {
             // +n is just n
@@ -802,10 +802,10 @@ pub fn make_unary_expr(
         }
         (Token::Minus, ExpressionDesc::Pexp_constant(Constant::Integer(n, suffix))) => {
             return Expression {
-                pexp_desc: ExpressionDesc::Pexp_constant(Constant::Integer(
+                pexp_desc: Box::new(ExpressionDesc::Pexp_constant(Constant::Integer(
                     Cow::Owned(negate_string(n)),
                     *suffix,
-                )),
+                ))),
                 ..operand
             };
         }
@@ -814,10 +814,10 @@ pub fn make_unary_expr(
             ExpressionDesc::Pexp_constant(Constant::Float(n, suffix)),
         ) => {
             return Expression {
-                pexp_desc: ExpressionDesc::Pexp_constant(Constant::Float(
+                pexp_desc: Box::new(ExpressionDesc::Pexp_constant(Constant::Float(
                     Cow::Owned(negate_string(n)),
                     *suffix,
-                )),
+                ))),
                 ..operand
             };
         }

@@ -451,7 +451,7 @@ fn attributes(arena: &ParseArena, attrs: &[Attribute]) -> Sexp {
 // ============================================================================
 
 fn core_type(arena: &ParseArena, typ: &CoreType) -> Sexp {
-    let desc = match &typ.ptyp_desc {
+    let desc = match &*typ.ptyp_desc {
         CoreTypeDesc::Ptyp_any => Sexp::atom("Ptyp_any"),
         CoreTypeDesc::Ptyp_var(var) => Sexp::list(vec![Sexp::atom("Ptyp_var"), Sexp::atom(&quote_string(var))]),
         CoreTypeDesc::Ptyp_arrow { arg, ret, .. } => Sexp::list(vec![
@@ -541,7 +541,7 @@ fn package_type(arena: &ParseArena, mod_name: &Loc<crate::parse_arena::LidentIdx
 // ============================================================================
 
 fn pattern(arena: &ParseArena, p: &Pattern) -> Sexp {
-    let descr = match &p.ppat_desc {
+    let descr = match &*p.ppat_desc {
         PatternDesc::Ppat_any => Sexp::atom("Ppat_any"),
         PatternDesc::Ppat_var(var) => {
             Sexp::list(vec![Sexp::atom("Ppat_var"), Sexp::atom(&quote_string(arena.get_string(var.txt)))])
@@ -608,7 +608,7 @@ fn pattern(arena: &ParseArena, p: &Pattern) -> Sexp {
 // ============================================================================
 
 fn expression(arena: &ParseArena, expr: &Expression) -> Sexp {
-    let desc = match &expr.pexp_desc {
+    let desc = match &*expr.pexp_desc {
         ExpressionDesc::Pexp_ident(lid) => Sexp::list(vec![Sexp::atom("Pexp_ident"), longident_idx(arena, lid.txt)]),
         ExpressionDesc::Pexp_constant(c) => Sexp::list(vec![Sexp::atom("Pexp_constant"), constant(c)]),
         ExpressionDesc::Pexp_let(flag, vbs, body) => Sexp::list(vec![
@@ -957,7 +957,7 @@ fn value_description(arena: &ParseArena, vd: &ValueDescription) -> Sexp {
 // ============================================================================
 
 fn module_expression(arena: &ParseArena, me: &ModuleExpr) -> Sexp {
-    let desc = match &me.pmod_desc {
+    let desc = match &*me.pmod_desc {
         ModuleExprDesc::Pmod_ident(lid) => Sexp::list(vec![Sexp::atom("Pmod_ident"), longident_idx(arena, lid.txt)]),
         ModuleExprDesc::Pmod_structure(items) => {
             Sexp::list(vec![Sexp::atom("Pmod_structure"), structure_inner(arena, items)])
@@ -988,7 +988,7 @@ fn module_expression(arena: &ParseArena, me: &ModuleExpr) -> Sexp {
 }
 
 fn module_type(arena: &ParseArena, mt: &ModuleType) -> Sexp {
-    let desc = match &mt.pmty_desc {
+    let desc = match &*mt.pmty_desc {
         ModuleTypeDesc::Pmty_ident(lid) => Sexp::list(vec![Sexp::atom("Pmty_ident"), longident_idx(arena, lid.txt)]),
         ModuleTypeDesc::Pmty_signature(items) => {
             Sexp::list(vec![Sexp::atom("Pmty_signature"), signature_inner(arena, items)])
@@ -1108,7 +1108,7 @@ fn structure_inner(arena: &ParseArena, items: &[StructureItem]) -> Sexp {
 }
 
 fn structure_item(arena: &ParseArena, si: &StructureItem) -> Sexp {
-    let desc = match &si.pstr_desc {
+    let desc = match &*si.pstr_desc {
         StructureItemDesc::Pstr_eval(e, attrs) => {
             Sexp::list(vec![Sexp::atom("Pstr_eval"), expression(arena, e), attributes(arena, attrs)])
         }
@@ -1173,7 +1173,7 @@ fn signature_inner(arena: &ParseArena, items: &[SignatureItem]) -> Sexp {
 }
 
 fn signature_item(arena: &ParseArena, si: &SignatureItem) -> Sexp {
-    let desc = match &si.psig_desc {
+    let desc = match &*si.psig_desc {
         SignatureItemDesc::Psig_value(vd) => {
             Sexp::list(vec![Sexp::atom("Psig_value"), value_description(arena, vd)])
         }

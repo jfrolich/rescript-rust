@@ -49,7 +49,7 @@ fn pattern_is_simple_var(arena: &ParseArena, pat: &Pattern, name: &str) -> bool 
     if !pat.ppat_attributes.is_empty() {
         return false;
     }
-    match &pat.ppat_desc {
+    match &*pat.ppat_desc {
         PatternDesc::Ppat_var(var) => arena.get_string(var.txt) == name,
         _ => false,
     }
@@ -57,7 +57,7 @@ fn pattern_is_simple_var(arena: &ParseArena, pat: &Pattern, name: &str) -> bool 
 
 /// Check if pattern needs parens when used as a function parameter
 fn pattern_needs_parens_as_param(pat: &Pattern, arena: &ParseArena) -> bool {
-    match &pat.ppat_desc {
+    match &*pat.ppat_desc {
         PatternDesc::Ppat_construct(lid, arg) => {
             match arena.get_longident(lid.txt) {
                 // () and [] don't need parens, but :: with args does
@@ -90,7 +90,7 @@ fn pattern_is_simple(pat: &Pattern, arena: &ParseArena) -> bool {
     if !pat.ppat_attributes.is_empty() {
         return true;
     }
-    match &pat.ppat_desc {
+    match &*pat.ppat_desc {
         // These are all handled directly by simple_pattern:
         PatternDesc::Ppat_any => true,
         PatternDesc::Ppat_var(_) => true,
@@ -172,7 +172,7 @@ fn ident_needs_parens(name: &str) -> bool {
 
 /// Get operator name if expression is an identifier that is an operator
 fn get_operator_name<'a>(expr: &Expression, arena: &'a ParseArena) -> Option<&'a str> {
-    match &expr.pexp_desc {
+    match &*expr.pexp_desc {
         ExpressionDesc::Pexp_ident(lid) => match arena.get_longident(lid.txt) {
             Longident::Lident(name_idx) => Some(arena.get_string(*name_idx)),
             _ => None,
@@ -187,7 +187,7 @@ fn is_simple_construct(expr: &Expression, arena: &ParseArena) -> bool {
     if !expr.pexp_attributes.is_empty() {
         return false;
     }
-    match &expr.pexp_desc {
+    match &*expr.pexp_desc {
         ExpressionDesc::Pexp_construct(_lid, None) => {
             // () and [] and simple constructors are simple
             true
@@ -217,7 +217,7 @@ fn is_simple_expression_with_arena(expr: &Expression, arena: &ParseArena) -> boo
         return true;
     }
     matches!(
-        &expr.pexp_desc,
+        &*expr.pexp_desc,
         ExpressionDesc::Pexp_ident(_)
             | ExpressionDesc::Pexp_constant(_)
             | ExpressionDesc::Pexp_tuple(_)
@@ -240,7 +240,7 @@ fn is_simple_expression_with_arena(expr: &Expression, arena: &ParseArena) -> boo
 /// OCaml: when ctxt.semi is true and expr is Pexp_fun/match/try/sequence, wrap in parens
 fn needs_parens_in_semi_context(expr: &Expression) -> bool {
     matches!(
-        &expr.pexp_desc,
+        &*expr.pexp_desc,
         ExpressionDesc::Pexp_fun { .. }
             | ExpressionDesc::Pexp_match(_, _)
             | ExpressionDesc::Pexp_try(_, _)
@@ -258,7 +258,7 @@ fn is_expression2(expr: &Expression, arena: &ParseArena) -> bool {
         return false;
     }
     // Expression2 includes field and send expressions
-    if matches!(&expr.pexp_desc, ExpressionDesc::Pexp_field(_, _) | ExpressionDesc::Pexp_send(_, _)) {
+    if matches!(&*expr.pexp_desc, ExpressionDesc::Pexp_field(_, _) | ExpressionDesc::Pexp_send(_, _)) {
         return true;
     }
     // Plus everything that's simple
@@ -296,7 +296,7 @@ fn collect_list_elements<'a>(expr: &'a Expression, arena: &ParseArena) -> (Vec<&
             return (elements, false);
         }
 
-        match &current.pexp_desc {
+        match &*current.pexp_desc {
             ExpressionDesc::Pexp_construct(lid, None) => {
                 if let Longident::Lident(name_idx) = arena.get_longident(lid.txt) {
                     let name = arena.get_string(*name_idx);
@@ -311,7 +311,7 @@ fn collect_list_elements<'a>(expr: &'a Expression, arena: &ParseArena) -> (Vec<&
                 if let Longident::Lident(name_idx) = arena.get_longident(lid.txt) {
                     let name = arena.get_string(*name_idx);
                     if name == "::" {
-                        if let ExpressionDesc::Pexp_tuple(items) = &arg.pexp_desc {
+                        if let ExpressionDesc::Pexp_tuple(items) = &*arg.pexp_desc {
                             if items.len() == 2 && arg.pexp_attributes.is_empty() {
                                 elements.push(&items[0]);
                                 current = &items[1];
@@ -390,7 +390,7 @@ pub fn print_signature_ml(signature: &[SignatureItem], arena: &ParseArena, out: 
 // ============================================================================
 
 fn print_structure_item<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, item: &StructureItem) {
-    match &item.pstr_desc {
+    match &*item.pstr_desc {
         StructureItemDesc::Pstr_eval(expr, attrs) => {
             // OCaml: pp f "@[<hov2>;;%a@]%a"
             f.open_box(BoxKind::HOV, 2);
@@ -532,7 +532,7 @@ fn print_structure_item<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, item
             // OCaml: module_helper unwraps Pmod_functor with no attributes
             // and prints functor parameters inline: `module F(A:X) = body`
             let mut me = &mb.pmb_expr;
-            while let ModuleExprDesc::Pmod_functor(name, mt, body) = &me.pmod_desc {
+            while let ModuleExprDesc::Pmod_functor(name, mt, body) = &*me.pmod_desc {
                 if me.pmod_attributes.is_empty() {
                     if let Some(mt) = mt {
                         f.string("(");
@@ -550,7 +550,7 @@ fn print_structure_item<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, item
             }
             // OCaml: special case for Pmod_constraint with ident or signature type
             // prints "module X : mt = me'" instead of "module X = (me' : mt)"
-            if let ModuleExprDesc::Pmod_constraint(inner_me, mt) = &me.pmod_desc {
+            if let ModuleExprDesc::Pmod_constraint(inner_me, mt) = &*me.pmod_desc {
                 let is_sugar_type = matches!(
                     mt.pmty_desc,
                     ModuleTypeDesc::Pmty_ident(..) | ModuleTypeDesc::Pmty_signature(..)
@@ -595,7 +595,7 @@ fn print_structure_item<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, item
                 }
                 f.string(arena.get_string(mb.pmb_name.txt));
                 // Check for constraint sugar: `A:Mt = Me` instead of `A = (Me : Mt)`
-                if let ModuleExprDesc::Pmod_constraint(me, mt) = &mb.pmb_expr.pmod_desc {
+                if let ModuleExprDesc::Pmod_constraint(me, mt) = &*mb.pmb_expr.pmod_desc {
                     f.string(":");
                     print_module_type(f, arena, mt);
                     f.space(); // @ before =
@@ -697,15 +697,15 @@ fn print_value_binding<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, pat: 
     // let f : 'a 'b . type_expr = fun (type a) -> fun (type b) -> (body : type_expr')
     // This gets printed as: let f : type a b. type_expr' = body
     // OCaml pprintast.ml is_desugared_gadt function (lines 1054-1081)
-    if let PatternDesc::Ppat_constraint(inner_pat, typ) = &pat.ppat_desc {
+    if let PatternDesc::Ppat_constraint(inner_pat, typ) = &*pat.ppat_desc {
         if pat.ppat_attributes.is_empty() {
-            if let CoreTypeDesc::Ptyp_poly(tyvars, _) = &typ.ptyp_desc {
+            if let CoreTypeDesc::Ptyp_poly(tyvars, _) = &*typ.ptyp_desc {
                 if !tyvars.is_empty() && typ.ptyp_attributes.is_empty() {
                     // Try to match the desugared GADT pattern
                     // Collect Pexp_newtype chain from expression
                     let mut e_tyvars = Vec::new();
                     let mut curr_expr = expr;
-                    while let ExpressionDesc::Pexp_newtype(tyvar, inner) = &curr_expr.pexp_desc {
+                    while let ExpressionDesc::Pexp_newtype(tyvar, inner) = &*curr_expr.pexp_desc {
                         if !curr_expr.pexp_attributes.is_empty() {
                             break;
                         }
@@ -713,7 +713,7 @@ fn print_value_binding<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, pat: 
                         curr_expr = inner;
                     }
                     // Check if we end with Pexp_constraint(body, ct) and tyvars match
-                    if let ExpressionDesc::Pexp_constraint(body, ct) = &curr_expr.pexp_desc {
+                    if let ExpressionDesc::Pexp_constraint(body, ct) = &*curr_expr.pexp_desc {
                         if curr_expr.pexp_attributes.is_empty() && e_tyvars.len() == tyvars.len() {
                             // Check that tyvar names match (pattern has 'a, expr has a -> same base name)
                             let tyvars_match = tyvars.iter().zip(e_tyvars.iter()).all(|(pt, et)| {
@@ -750,7 +750,7 @@ fn print_value_binding<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, pat: 
 
     // Special case: Ppat_constraint - different handling based on type
     // OCaml pprintast.ml lines 1096-1103
-    if let PatternDesc::Ppat_constraint(inner_pat, typ) = &pat.ppat_desc {
+    if let PatternDesc::Ppat_constraint(inner_pat, typ) = &*pat.ppat_desc {
         if pat.ppat_attributes.is_empty() {
             if matches!(typ.ptyp_desc, CoreTypeDesc::Ptyp_poly(..)) && typ.ptyp_attributes.is_empty() {
                 // Ptyp_poly: print without outer parens
@@ -784,7 +784,7 @@ fn print_value_binding<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, pat: 
         }
     }
 
-    match &expr.pexp_desc {
+    match &*expr.pexp_desc {
         ExpressionDesc::Pexp_fun {
             arg_label,
             default,
@@ -1023,7 +1023,7 @@ fn print_remaining_inline_params_with_arity<'a, W: Write>(
         return expr;
     }
 
-    match &expr.pexp_desc {
+    match &*expr.pexp_desc {
         ExpressionDesc::Pexp_fun {
             arg_label,
             default,
@@ -1184,7 +1184,7 @@ fn print_expression_under_semi<W: Write>(f: &mut Formatter<W>, arena: &ParseAren
     } else {
         let needs_semi_parens = needs_parens_in_semi_context(expr);
         let needs_let_parens = matches!(
-            &expr.pexp_desc,
+            &*expr.pexp_desc,
             ExpressionDesc::Pexp_let(_, _, _)
                 | ExpressionDesc::Pexp_letmodule(_, _, _)
                 | ExpressionDesc::Pexp_open(_, _, _)
@@ -1207,7 +1207,7 @@ fn print_expression_under_semi<W: Write>(f: &mut Formatter<W>, arena: &ParseAren
 fn print_expression_under_semi_inner<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, expr: &Expression) {
     let needs_semi_parens = needs_parens_in_semi_context(expr);
     let needs_let_parens = matches!(
-        &expr.pexp_desc,
+        &*expr.pexp_desc,
         ExpressionDesc::Pexp_let(_, _, _)
             | ExpressionDesc::Pexp_letmodule(_, _, _)
             | ExpressionDesc::Pexp_open(_, _, _)
@@ -1241,7 +1241,7 @@ fn print_expression_with_ctx<W: Write>(f: &mut Formatter<W>, arena: &ParseArena,
 
 fn print_expression_inner<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, expr: &Expression, use_parens: bool, ctx: PrintCtx) {
     // Context-dependent parenthesization (matching OCaml's pprintast lines 606-615)
-    if (ctx.pipe || ctx.semi) && matches!(&expr.pexp_desc,
+    if (ctx.pipe || ctx.semi) && matches!(&*expr.pexp_desc,
         ExpressionDesc::Pexp_fun { .. }
         | ExpressionDesc::Pexp_match(_, _)
         | ExpressionDesc::Pexp_try(_, _)
@@ -1253,7 +1253,7 @@ fn print_expression_inner<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, ex
         if use_parens { f.string(")"); }
         return;
     }
-    if ctx.ifthenelse && matches!(&expr.pexp_desc,
+    if ctx.ifthenelse && matches!(&*expr.pexp_desc,
         ExpressionDesc::Pexp_ifthenelse(_, _, _)
         | ExpressionDesc::Pexp_sequence(_, _)) {
         if use_parens { f.string("("); }
@@ -1263,7 +1263,7 @@ fn print_expression_inner<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, ex
         if use_parens { f.string(")"); }
         return;
     }
-    if ctx.semi && matches!(&expr.pexp_desc,
+    if ctx.semi && matches!(&*expr.pexp_desc,
         ExpressionDesc::Pexp_let(_, _, _)
         | ExpressionDesc::Pexp_letmodule(_, _, _)
         | ExpressionDesc::Pexp_open(_, _, _)
@@ -1276,7 +1276,7 @@ fn print_expression_inner<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, ex
         return;
     }
 
-    match &expr.pexp_desc {
+    match &*expr.pexp_desc {
         ExpressionDesc::Pexp_ident(lid) => {
             // OCaml wraps operators in parens when used as values
             if let Longident::Lident(name_idx) = arena.get_longident(lid.txt) {
@@ -1447,7 +1447,7 @@ fn print_expression_inner<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, ex
                     // (to avoid (- 1) being parsed as negative literal)
                     let shortened_op = match op_name {
                         "~-" | "~+" | "~-." | "~+." | "~~" => {
-                            if !matches!(&arg.pexp_desc, ExpressionDesc::Pexp_constant(_)) {
+                            if !matches!(&*arg.pexp_desc, ExpressionDesc::Pexp_constant(_)) {
                                 &op_name[1..] // Remove leading ~
                             } else {
                                 op_name
@@ -1666,7 +1666,7 @@ fn print_expression_inner<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, ex
                 let is_punned = if let Longident::Lident(name_idx) = lid {
                     let fname = arena.get_string(*name_idx);
                     // Check if expression is Pexp_ident(Lident(fname))
-                    if let ExpressionDesc::Pexp_ident(expr_lid) = &field.expr.pexp_desc {
+                    if let ExpressionDesc::Pexp_ident(expr_lid) = &*field.expr.pexp_desc {
                         match arena.get_longident(expr_lid.txt) {
                             Longident::Lident(var_idx) => arena.get_string(*var_idx) == fname,
                             _ => false,
@@ -1779,7 +1779,7 @@ fn print_expression_inner<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, ex
             elements.push(e1);
             let mut rest = e2.as_ref();
             loop {
-                match &rest.pexp_desc {
+                match &*rest.pexp_desc {
                     ExpressionDesc::Pexp_sequence(next_e1, next_e2) if rest.pexp_attributes.is_empty() => {
                         elements.push(next_e1);
                         rest = next_e2.as_ref();
@@ -1997,7 +1997,7 @@ fn print_expression_inner<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, ex
             // Note: attributed expressions will get their own parens from print_expression
             let has_attrs = !printable_attributes(arena, &e.pexp_attributes).is_empty();
             let is_simple = matches!(
-                &e.pexp_desc,
+                &*e.pexp_desc,
                 ExpressionDesc::Pexp_ident(_)
                     | ExpressionDesc::Pexp_constant(_)
                     | ExpressionDesc::Pexp_construct(_, None)
@@ -2179,7 +2179,7 @@ fn print_simple_pattern<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, pat:
 }
 
 fn print_pattern_inner<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, pat: &Pattern) {
-    match &pat.ppat_desc {
+    match &*pat.ppat_desc {
         PatternDesc::Ppat_any => {
             f.string("_");
         }
@@ -2254,7 +2254,7 @@ fn print_pattern_inner<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, pat: 
                 let name = arena.get_string(*name_idx);
                 if name == "::" {
                     if let Some(a) = arg {
-                        if let PatternDesc::Ppat_tuple(elements) = &a.ppat_desc {
+                        if let PatternDesc::Ppat_tuple(elements) = &*a.ppat_desc {
                             if elements.len() == 2 {
                                 // Left element needs parens if it's an alias or constraint
                                 let left_needs_parens = pattern_needs_parens_as_param(&elements[0], arena);
@@ -2269,7 +2269,7 @@ fn print_pattern_inner<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, pat: 
                                 // Right element needs parens if it's an alias (so it doesn't
                                 // look like `(x::xs) as tail`)
                                 let right_needs_parens = matches!(
-                                    &elements[1].ppat_desc,
+                                    &*elements[1].ppat_desc,
                                     PatternDesc::Ppat_alias(..)
                                 );
                                 if right_needs_parens {
@@ -2326,7 +2326,7 @@ fn print_pattern_inner<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, pat: 
                     Longident::Lident(name_idx) => {
                         let fname = arena.get_string(*name_idx);
                         field.pat.ppat_attributes.is_empty() &&
-                            matches!(&field.pat.ppat_desc, PatternDesc::Ppat_var(var) if arena.get_string(var.txt) == fname)
+                            matches!(&*field.pat.ppat_desc, PatternDesc::Ppat_var(var) if arena.get_string(var.txt) == fname)
                     }
                     _ => false,
                 };
@@ -2350,7 +2350,7 @@ fn print_pattern_inner<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, pat: 
                     f.string("=");
                     f.space(); // @; after =
                     // Print with parens for alias patterns (pattern1 context)
-                    let needs_parens = matches!(&field.pat.ppat_desc,
+                    let needs_parens = matches!(&*field.pat.ppat_desc,
                         PatternDesc::Ppat_alias(..) | PatternDesc::Ppat_or(..)
                     );
                     if needs_parens {
@@ -2486,7 +2486,7 @@ fn print_core_type<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, typ: &Cor
     // OCaml's core_type wraps fallthrough types (those handled by core_type1) in @[<2>...@]
     // Types that already handle their own Box(2): Ptyp_arrow, Ptyp_alias, Ptyp_poly (non-empty vars)
     // Ptyp_poly with empty vars just recurses into core_type, so no extra box needed
-    let needs_box = match &typ.ptyp_desc {
+    let needs_box = match &*typ.ptyp_desc {
         CoreTypeDesc::Ptyp_arrow { .. } => false,
         CoreTypeDesc::Ptyp_alias(..) => false,
         CoreTypeDesc::Ptyp_poly(vars, _) if !vars.is_empty() => false,
@@ -2508,7 +2508,7 @@ fn print_core_type<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, typ: &Cor
 }
 
 fn print_core_type_inner<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, typ: &CoreType) {
-    match &typ.ptyp_desc {
+    match &*typ.ptyp_desc {
         CoreTypeDesc::Ptyp_any => {
             f.string("_");
         }
@@ -2828,7 +2828,7 @@ fn print_arg_with_label_ctx<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, 
     match label {
         ArgLabel::Labelled(name) => {
             let name_str = arena.get_string(name.txt);
-            if let ExpressionDesc::Pexp_ident(lid) = &arg.pexp_desc {
+            if let ExpressionDesc::Pexp_ident(lid) = &*arg.pexp_desc {
                 if let Longident::Lident(arg_name_idx) = arena.get_longident(lid.txt) {
                     let arg_name = arena.get_string(*arg_name_idx);
                     if arg_name == name_str && arg.pexp_attributes.is_empty() {
@@ -2846,7 +2846,7 @@ fn print_arg_with_label_ctx<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, 
         }
         ArgLabel::Optional(name) => {
             let name_str = arena.get_string(name.txt);
-            if let ExpressionDesc::Pexp_ident(lid) = &arg.pexp_desc {
+            if let ExpressionDesc::Pexp_ident(lid) = &*arg.pexp_desc {
                 if let Longident::Lident(arg_name_idx) = arena.get_longident(lid.txt) {
                     let arg_name = arena.get_string(*arg_name_idx);
                     if arg_name == name_str && arg.pexp_attributes.is_empty() {
@@ -2969,7 +2969,7 @@ fn print_payload<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, payload: &P
             // Special case: single Pstr_eval prints just the expression
             // OCaml: pp f "@[<2>%a@]%a" (expression ctxt) e (item_attributes ctxt) attrs
             if items.len() == 1 {
-                if let StructureItemDesc::Pstr_eval(expr, attrs) = &items[0].pstr_desc {
+                if let StructureItemDesc::Pstr_eval(expr, attrs) = &*items[0].pstr_desc {
                     f.open_box(BoxKind::Box, 2);
                     print_expression(f, arena, expr);
                     f.close_box();
@@ -3304,7 +3304,7 @@ fn print_module_expr<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, mexpr: 
 }
 
 fn print_module_expr_inner<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, mexpr: &ModuleExpr) {
-    match &mexpr.pmod_desc {
+    match &*mexpr.pmod_desc {
         ModuleExprDesc::Pmod_ident(lid) => {
             print_longident_idx(f, arena, lid.txt);
         }
@@ -3404,7 +3404,7 @@ fn print_module_type<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, mtype: 
 }
 
 fn print_module_type_inner<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, mtype: &ModuleType) {
-    match &mtype.pmty_desc {
+    match &*mtype.pmty_desc {
         ModuleTypeDesc::Pmty_ident(lid) => {
             print_longident_idx(f, arena, lid.txt);
         }
@@ -3613,7 +3613,7 @@ fn print_module_type_inner<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, m
 // ============================================================================
 
 fn print_signature_item<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, item: &SignatureItem) {
-    match &item.psig_desc {
+    match &*item.psig_desc {
         SignatureItemDesc::Psig_value(vd) => {
             // OCaml: pp f "@[<2>%s@ %a@ :@ %a@]%a"
             f.open_box(BoxKind::Box, 2);
@@ -3721,7 +3721,7 @@ fn print_signature_item<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, item
             // OCaml has special case: if pmd_type is Pmty_alias with no attrs, use = syntax
             f.string("module ");
             f.string(arena.get_string(md.pmd_name.txt));
-            if let ModuleTypeDesc::Pmty_alias(lid) = &md.pmd_type.pmty_desc {
+            if let ModuleTypeDesc::Pmty_alias(lid) = &*md.pmd_type.pmty_desc {
                 if md.pmd_type.pmty_attributes.is_empty() {
                     // module Name = Alias
                     f.string(" = ");

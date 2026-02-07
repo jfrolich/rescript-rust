@@ -308,7 +308,7 @@ fn build_arg_type_specs(typ: &CoreType, arena: &mut ParseArena) -> (Params, usiz
 /// Mirrors OCaml's refine_arg_type / spec_of_ptyp.
 fn refine_arg_type(nolabel: bool, typ: &CoreType, arena: &mut ParseArena) -> Attr {
     // For Ptyp_any with @as attribute, handle constant args
-    if matches!(&typ.ptyp_desc, CoreTypeDesc::Ptyp_any) {
+    if matches!(&*typ.ptyp_desc, CoreTypeDesc::Ptyp_any) {
         // Check for @as attribute on the type
         for (attr_name, payload) in &typ.ptyp_attributes {
             let name = arena.get_string(attr_name.txt).to_string();
@@ -364,8 +364,8 @@ fn get_as_string_attr(attrs: &[Attribute], arena: &ParseArena) -> Option<String>
             // Try to get string payload
             if let Some(items) = payload_str_items(payload) {
                 if items.len() == 1 {
-                    if let StructureItemDesc::Pstr_eval(expr, _) = &items[0].pstr_desc {
-                        if let ExpressionDesc::Pexp_constant(Constant::String(s, _)) = &expr.pexp_desc {
+                    if let StructureItemDesc::Pstr_eval(expr, _) = &*items[0].pstr_desc {
+                        if let ExpressionDesc::Pexp_constant(Constant::String(s, _)) = &*expr.pexp_desc {
                             return Some(s.to_string());
                         }
                     }
@@ -385,8 +385,8 @@ fn get_as_int_attr(attrs: &[Attribute], arena: &ParseArena) -> Option<i64> {
             // Try to get int payload
             if let Some(items) = payload_str_items(payload) {
                 if items.len() == 1 {
-                    if let StructureItemDesc::Pstr_eval(expr, _) = &items[0].pstr_desc {
-                        if let ExpressionDesc::Pexp_constant(Constant::Integer(s, suffix)) = &expr.pexp_desc {
+                    if let StructureItemDesc::Pstr_eval(expr, _) = &*items[0].pstr_desc {
+                        if let ExpressionDesc::Pexp_constant(Constant::Integer(s, suffix)) = &*expr.pexp_desc {
                             // Reject bigint suffix
                             if matches!(suffix, Some('n')) {
                                 return None;
@@ -500,7 +500,7 @@ fn spec_of_ptyp(nolabel: bool, typ: &CoreType, arena: &mut ParseArena) -> Attr {
     match attr_type {
         Some("string") => {
             // @string: must be applied to a closed polyvariant
-            if let CoreTypeDesc::Ptyp_variant(row_fields, current::ClosedFlag::Closed, None) = &typ.ptyp_desc {
+            if let CoreTypeDesc::Ptyp_variant(row_fields, current::ClosedFlag::Closed, None) = &*typ.ptyp_desc {
                 let (has_as, descr) = map_row_fields_into_strings(row_fields, arena);
 
                 // Check if any tags are non-nullary (have payloads)
@@ -529,7 +529,7 @@ fn spec_of_ptyp(nolabel: bool, typ: &CoreType, arena: &mut ParseArena) -> Attr {
         }
         Some("int") => {
             // @int: must be applied to a closed polyvariant
-            if let CoreTypeDesc::Ptyp_variant(row_fields, current::ClosedFlag::Closed, None) = &typ.ptyp_desc {
+            if let CoreTypeDesc::Ptyp_variant(row_fields, current::ClosedFlag::Closed, None) = &*typ.ptyp_desc {
                 let int_list = map_row_fields_into_ints(row_fields, arena);
                 return Attr::Int(int_list);
             }
@@ -539,7 +539,7 @@ fn spec_of_ptyp(nolabel: bool, typ: &CoreType, arena: &mut ParseArena) -> Attr {
         Some("ignore") => Attr::Ignore,
         Some("unwrap") => {
             // @unwrap: must be applied to a closed polyvariant where each tag has exactly one payload
-            if let CoreTypeDesc::Ptyp_variant(row_fields, current::ClosedFlag::Closed, _) = &typ.ptyp_desc {
+            if let CoreTypeDesc::Ptyp_variant(row_fields, current::ClosedFlag::Closed, _) = &*typ.ptyp_desc {
                 if variant_can_unwrap(row_fields) {
                     return Attr::Unwrap;
                 }
@@ -550,7 +550,7 @@ fn spec_of_ptyp(nolabel: bool, typ: &CoreType, arena: &mut ParseArena) -> Attr {
         _ => {
             // No special attribute - default behavior
             // Check if unit type
-            match &typ.ptyp_desc {
+            match &*typ.ptyp_desc {
                 CoreTypeDesc::Ptyp_constr(lid, args) if args.is_empty() => {
                     let longident = arena.get_longident(lid.txt);
                     if matches!(longident, Longident::Lident(s) if arena.get_string(*s) == "unit") {
@@ -568,7 +568,7 @@ fn spec_of_ptyp(nolabel: bool, typ: &CoreType, arena: &mut ParseArena) -> Attr {
 
 /// Check if a type is unit
 fn is_unit_type(typ: &CoreType, arena: &mut ParseArena) -> bool {
-    match &typ.ptyp_desc {
+    match &*typ.ptyp_desc {
         CoreTypeDesc::Ptyp_constr(lid, args) => {
             args.is_empty() && {
                 let longident = arena.get_longident(lid.txt);
@@ -581,7 +581,7 @@ fn is_unit_type(typ: &CoreType, arena: &mut ParseArena) -> bool {
 
 /// Get the result type of an arrow type
 fn get_result_type(typ: &CoreType) -> Option<&CoreType> {
-    match &typ.ptyp_desc {
+    match &*typ.ptyp_desc {
         CoreTypeDesc::Ptyp_arrow { ret, .. } => Some(ret.as_ref()),
         _ => None,
     }
@@ -589,7 +589,7 @@ fn get_result_type(typ: &CoreType) -> Option<&CoreType> {
 
 /// Get the innermost result type (following all arrows)
 fn get_final_result_type(typ: &CoreType) -> &CoreType {
-    match &typ.ptyp_desc {
+    match &*typ.ptyp_desc {
         CoreTypeDesc::Ptyp_arrow { ret, .. } => get_final_result_type(ret),
         _ => typ,
     }
@@ -611,7 +611,7 @@ fn list_of_arrow<'a>(typ: &'a CoreType, arena: &ParseArena) -> (Vec<&'a TypeArg>
     let mut args = Vec::new();
     let mut current = typ;
     loop {
-        match &current.ptyp_desc {
+        match &*current.ptyp_desc {
             CoreTypeDesc::Ptyp_arrow { arg, ret, arity } => {
                 let arity_val = arena.get_arity(*arity);
                 // OCaml: arity = None || acc = []
@@ -667,10 +667,10 @@ fn reconstruct_arrow_type_with_loc(
     if filtered_args.is_empty() && had_args {
         let unit_lid = arena.push_lident_static("unit");
         let unit_type = CoreType {
-            ptyp_desc: CoreTypeDesc::Ptyp_constr(
+            ptyp_desc: Box::new(CoreTypeDesc::Ptyp_constr(
                 Located { txt: unit_lid, loc: loc },
                 vec![],
-            ),
+            )),
             ptyp_loc: loc,
             ptyp_attributes: vec![],
         };
@@ -681,11 +681,11 @@ fn reconstruct_arrow_type_with_loc(
             typ: unit_type,
         };
         return CoreType {
-            ptyp_desc: CoreTypeDesc::Ptyp_arrow {
+            ptyp_desc: Box::new(CoreTypeDesc::Ptyp_arrow {
                 arg: Box::new(unit_arg),
                 ret: Box::new(result.clone()),
                 arity,
-            },
+            }),
             ptyp_loc: loc,
             ptyp_attributes: vec![],
         };
@@ -705,11 +705,11 @@ fn reconstruct_arrow_type_with_loc(
             arena.push_arity(None)
         };
         current = CoreType {
-            ptyp_desc: CoreTypeDesc::Ptyp_arrow {
+            ptyp_desc: Box::new(CoreTypeDesc::Ptyp_arrow {
                 arg: Box::new((*arg).clone()),
                 ret: Box::new(current),
                 arity,
-            },
+            }),
             ptyp_loc: loc,
             ptyp_attributes: vec![],
         };
@@ -740,7 +740,7 @@ fn process_obj_type(
     }
 
     // Check if result type is Ptyp_any
-    let result_is_any = matches!(&result.ptyp_desc, CoreTypeDesc::Ptyp_any);
+    let result_is_any = matches!(&*result.ptyp_desc, CoreTypeDesc::Ptyp_any);
 
     // Build result_types (object fields) from labeled arguments
     // Mirrors OCaml's fold_right in process_obj
@@ -786,10 +786,10 @@ fn process_obj_type(
                         filtered_args.push(arg);
                         let int_lid = arena.push_lident_static("int");
                         let int_type = CoreType {
-                            ptyp_desc: CoreTypeDesc::Ptyp_constr(
+                            ptyp_desc: Box::new(CoreTypeDesc::Ptyp_constr(
                                 Located { txt: int_lid, loc },
                                 vec![],
-                            ),
+                            )),
                             ptyp_loc: loc,
                             ptyp_attributes: vec![],
                         };
@@ -804,10 +804,10 @@ fn process_obj_type(
                         filtered_args.push(arg);
                         let string_lid = arena.push_lident_static("string");
                         let string_type = CoreType {
-                            ptyp_desc: CoreTypeDesc::Ptyp_constr(
+                            ptyp_desc: Box::new(CoreTypeDesc::Ptyp_constr(
                                 Located { txt: string_lid, loc },
                                 vec![],
-                            ),
+                            )),
                             ptyp_loc: loc,
                             ptyp_attributes: vec![],
                         };
@@ -861,10 +861,10 @@ fn process_obj_type(
                         filtered_args.push(arg);
                         let int_lid = arena.push_lident_static("int");
                         let int_type = CoreType {
-                            ptyp_desc: CoreTypeDesc::Ptyp_constr(
+                            ptyp_desc: Box::new(CoreTypeDesc::Ptyp_constr(
                                 Located { txt: int_lid, loc },
                                 vec![],
-                            ),
+                            )),
                             ptyp_loc: loc,
                             ptyp_attributes: vec![],
                         };
@@ -880,10 +880,10 @@ fn process_obj_type(
                         filtered_args.push(arg);
                         let string_lid = arena.push_lident_static("string");
                         let string_type = CoreType {
-                            ptyp_desc: CoreTypeDesc::Ptyp_constr(
+                            ptyp_desc: Box::new(CoreTypeDesc::Ptyp_constr(
                                 Located { txt: string_lid, loc },
                                 vec![],
-                            ),
+                            )),
                             ptyp_loc: loc,
                             ptyp_attributes: vec![],
                         };
@@ -912,7 +912,7 @@ fn process_obj_type(
     // If result type is Ptyp_any, build Ptyp_object from result_types
     let final_result = if result_is_any && !result_types.is_empty() {
         CoreType {
-            ptyp_desc: CoreTypeDesc::Ptyp_object(result_types, current::ClosedFlag::Closed),
+            ptyp_desc: Box::new(CoreTypeDesc::Ptyp_object(result_types, current::ClosedFlag::Closed)),
             ptyp_loc: loc,
             ptyp_attributes: vec![],
         }
@@ -936,11 +936,11 @@ fn process_obj_type(
             arena.push_arity(None)
         };
         current = CoreType {
-            ptyp_desc: CoreTypeDesc::Ptyp_arrow {
+            ptyp_desc: Box::new(CoreTypeDesc::Ptyp_arrow {
                 arg: Box::new((*arg).clone()),
                 ret: Box::new(current),
                 arity,
-            },
+            }),
             ptyp_loc: loc,
             ptyp_attributes: vec![],
         };
@@ -956,14 +956,14 @@ fn get_opt_arg_type(_nolabel: bool, typ: &CoreType, arena: &ParseArena) -> Attr 
     match attr_type {
         Some("ignore") => Attr::Ignore,
         Some("int") => {
-            if let CoreTypeDesc::Ptyp_variant(row_fields, current::ClosedFlag::Closed, None) = &typ.ptyp_desc {
+            if let CoreTypeDesc::Ptyp_variant(row_fields, current::ClosedFlag::Closed, None) = &*typ.ptyp_desc {
                 let int_list = map_row_fields_into_ints(row_fields, arena);
                 return Attr::Int(int_list);
             }
             Attr::Nothing
         }
         Some("string") => {
-            if let CoreTypeDesc::Ptyp_variant(row_fields, current::ClosedFlag::Closed, None) = &typ.ptyp_desc {
+            if let CoreTypeDesc::Ptyp_variant(row_fields, current::ClosedFlag::Closed, None) = &*typ.ptyp_desc {
                 let (has_as, descr) = map_row_fields_into_strings(row_fields, arena);
                 if has_as {
                     return Attr::PolyVarString { descr };
@@ -987,10 +987,10 @@ fn to_undefined_type(typ: &CoreType, loc: LocIdx, arena: &mut ParseArena) -> Cor
     ));
 
     CoreType {
-        ptyp_desc: CoreTypeDesc::Ptyp_constr(
+        ptyp_desc: Box::new(CoreTypeDesc::Ptyp_constr(
             Located { txt: longident, loc },
             vec![typ.clone()],
-        ),
+        )),
         ptyp_loc: loc,
         ptyp_attributes: vec![],
     }
@@ -1145,8 +1145,8 @@ fn parse_external_attrs(attrs: &[Attribute], prim_name: &str, no_arguments: bool
 fn get_payload_string(payload: &current::Payload, arena: &mut ParseArena) -> Option<String> {
     match payload {
         current::Payload::PStr(items) if items.len() == 1 => {
-            if let StructureItemDesc::Pstr_eval(expr, _) = &items[0].pstr_desc {
-                match &expr.pexp_desc {
+            if let StructureItemDesc::Pstr_eval(expr, _) = &*items[0].pstr_desc {
+                match &*expr.pexp_desc {
                     ExpressionDesc::Pexp_constant(current::Constant::String(s, _)) => {
                         return Some(s.to_string());
                     }
@@ -1170,8 +1170,8 @@ fn get_payload_string(payload: &current::Payload, arena: &mut ParseArena) -> Opt
 fn get_payload_int(payload: &current::Payload, arena: &mut ParseArena) -> Option<i32> {
     match payload {
         current::Payload::PStr(items) if items.len() == 1 => {
-            if let StructureItemDesc::Pstr_eval(expr, _) = &items[0].pstr_desc {
-                if let ExpressionDesc::Pexp_constant(current::Constant::Integer(name, suffix)) = &expr.pexp_desc {
+            if let StructureItemDesc::Pstr_eval(expr, _) = &*items[0].pstr_desc {
+                if let ExpressionDesc::Pexp_constant(current::Constant::Integer(name, suffix)) = &*expr.pexp_desc {
                     // OCaml's is_single_int rejects 'n' suffix (bigint)
                     if matches!(suffix, Some('n')) {
                         return None;
@@ -1195,8 +1195,8 @@ fn get_payload_int(payload: &current::Payload, arena: &mut ParseArena) -> Option
 fn get_payload_string_with_delim(payload: &current::Payload, arena: &mut ParseArena) -> Option<(String, Delim)> {
     match payload {
         current::Payload::PStr(items) if items.len() == 1 => {
-            if let StructureItemDesc::Pstr_eval(expr, _) = &items[0].pstr_desc {
-                if let ExpressionDesc::Pexp_constant(current::Constant::String(s, raw_delim)) = &expr.pexp_desc {
+            if let StructureItemDesc::Pstr_eval(expr, _) = &*items[0].pstr_desc {
+                if let ExpressionDesc::Pexp_constant(current::Constant::String(s, raw_delim)) = &*expr.pexp_desc {
                     // Apply parse_processed_delim logic:
                     // In OCaml, strings get rewritten: None → "*j", then
                     // parse_processed_delim maps: None→DNone, "*j"→DStarJ, "json"→DNoQuotes, "bq"→DBackQuotes
@@ -1225,15 +1225,15 @@ fn get_payload_strings(payload: &current::Payload, arena: &mut ParseArena) -> Ve
     match payload {
         current::Payload::PStr(items) if items.is_empty() => vec![],
         current::Payload::PStr(items) if items.len() == 1 => {
-            if let StructureItemDesc::Pstr_eval(expr, _) = &items[0].pstr_desc {
-                match &expr.pexp_desc {
+            if let StructureItemDesc::Pstr_eval(expr, _) = &*items[0].pstr_desc {
+                match &*expr.pexp_desc {
                     ExpressionDesc::Pexp_constant(current::Constant::String(s, _)) => {
                         return vec![s.to_string()];
                     }
                     ExpressionDesc::Pexp_tuple(exprs) => {
                         let mut result = Vec::new();
                         for e in exprs {
-                            if let ExpressionDesc::Pexp_constant(current::Constant::String(s, _)) = &e.pexp_desc {
+                            if let ExpressionDesc::Pexp_constant(current::Constant::String(s, _)) = &*e.pexp_desc {
                                 result.push(s.to_string());
                             }
                         }
@@ -1594,7 +1594,7 @@ fn build_obj_ffi_type(typ: &CoreType, arena: &mut ParseArena) -> FfiType {
                     }
                     Attr::Nothing => {
                         // Check if for_sure_no_nested_option
-                        let for_sure_not_nested = match &arg.typ.ptyp_desc {
+                        let for_sure_not_nested = match &*arg.typ.ptyp_desc {
                             CoreTypeDesc::Ptyp_constr(lid, args) if args.is_empty() => {
                                 let longident = arena.get_longident(lid.txt);
                                 if let Longident::Lident(s) = longident {
@@ -1751,7 +1751,7 @@ fn find_inline_payload_expr<'a>(
             // @inline(expr) has PStr with a single Pstr_eval
             if let Some(items) = payload_str_items(payload) {
                 if items.len() == 1 {
-                    if let StructureItemDesc::Pstr_eval(expr, _) = &items[0].pstr_desc {
+                    if let StructureItemDesc::Pstr_eval(expr, _) = &*items[0].pstr_desc {
                         return Some(expr);
                     }
                 }
@@ -1768,7 +1768,7 @@ fn transform_inline_sig_value(
 ) -> Option<ValueDescription> {
     let expr = find_inline_payload_expr(&vd.pval_attributes, arena)?;
 
-    match &expr.pexp_desc {
+    match &*expr.pexp_desc {
         // @inline("string") let x: t
         ExpressionDesc::Pexp_constant(Constant::String(s, delim)) => {
             let prim = inline_string_primitive(s, delim.as_deref(), arena);
@@ -1841,10 +1841,10 @@ fn make_simple_type(type_name: &'static str, arena: &mut ParseArena) -> CoreType
     let none_loc = arena.none_loc();
     let lid_idx = arena.push_lident_static(type_name);
     CoreType {
-        ptyp_desc: CoreTypeDesc::Ptyp_constr(
+        ptyp_desc: Box::new(CoreTypeDesc::Ptyp_constr(
             Located { txt: lid_idx, loc: none_loc },
             vec![],
-        ),
+        )),
         ptyp_loc: none_loc,
         ptyp_attributes: vec![],
     }
@@ -1858,12 +1858,12 @@ fn transform_inline_binding(
     pstr_loc: LocIdx,
     arena: &mut ParseArena,
 ) -> Option<StructureItem> {
-    match &expr.pexp_desc {
+    match &*expr.pexp_desc {
         // @inline let x = "string"
         ExpressionDesc::Pexp_constant(Constant::String(s, delim)) => {
             let prim = inline_string_primitive(s, delim.as_deref(), arena);
             Some(StructureItem {
-                pstr_desc: StructureItemDesc::Pstr_primitive(ValueDescription {
+                pstr_desc: Box::new(StructureItemDesc::Pstr_primitive(ValueDescription {
                     pval_name: Located {
                         txt: pval_name.txt,
                         loc: pval_name.loc,
@@ -1872,7 +1872,7 @@ fn transform_inline_binding(
                     pval_prim: prim,
                     pval_attributes: vec![],
                     pval_loc: pvb_loc,
-                }),
+                })),
                 pstr_loc,
             })
         }
@@ -1881,7 +1881,7 @@ fn transform_inline_binding(
             let i = s.parse::<i32>().ok()?;
             let prim = inline_int_primitive(i, arena);
             Some(StructureItem {
-                pstr_desc: StructureItemDesc::Pstr_primitive(ValueDescription {
+                pstr_desc: Box::new(StructureItemDesc::Pstr_primitive(ValueDescription {
                     pval_name: Located {
                         txt: pval_name.txt,
                         loc: pval_name.loc,
@@ -1890,7 +1890,7 @@ fn transform_inline_binding(
                     pval_prim: prim,
                     pval_attributes: vec![],
                     pval_loc: pvb_loc,
-                }),
+                })),
                 pstr_loc,
             })
         }
@@ -1898,7 +1898,7 @@ fn transform_inline_binding(
         ExpressionDesc::Pexp_constant(Constant::Float(s, None)) => {
             let prim = inline_float_primitive(s, arena);
             Some(StructureItem {
-                pstr_desc: StructureItemDesc::Pstr_primitive(ValueDescription {
+                pstr_desc: Box::new(StructureItemDesc::Pstr_primitive(ValueDescription {
                     pval_name: Located {
                         txt: pval_name.txt,
                         loc: pval_name.loc,
@@ -1907,7 +1907,7 @@ fn transform_inline_binding(
                     pval_prim: prim,
                     pval_attributes: vec![],
                     pval_loc: pvb_loc,
-                }),
+                })),
                 pstr_loc,
             })
         }
@@ -1919,7 +1919,7 @@ fn transform_inline_binding(
                 if name == "true" || name == "false" {
                     let prim = inline_bool_primitive(name == "true", arena);
                     return Some(StructureItem {
-                        pstr_desc: StructureItemDesc::Pstr_primitive(ValueDescription {
+                        pstr_desc: Box::new(StructureItemDesc::Pstr_primitive(ValueDescription {
                             pval_name: Located {
                                 txt: pval_name.txt,
                                 loc: pval_name.loc,
@@ -1928,7 +1928,7 @@ fn transform_inline_binding(
                             pval_prim: prim,
                             pval_attributes: vec![],
                             pval_loc: pvb_loc,
-                        }),
+                        })),
                         pstr_loc,
                     });
                 }
@@ -1995,8 +1995,8 @@ fn handle_obj(
     // Extract the record expression from the payload: PStr [{ Pstr_eval(Pexp_record(...), _) }]
     let (record_expr, label_exprs) = match payload {
         Payload::PStr(items) if items.len() == 1 => {
-            if let StructureItemDesc::Pstr_eval(e, _) = &items[0].pstr_desc {
-                if let ExpressionDesc::Pexp_record(fields, None) = &e.pexp_desc {
+            if let StructureItemDesc::Pstr_eval(e, _) = &*items[0].pstr_desc {
+                if let ExpressionDesc::Pexp_record(fields, None) = &*e.pexp_desc {
                     (e, fields)
                 } else {
                     return expr.clone();
@@ -2058,7 +2058,7 @@ fn handle_obj(
     // Create type variables 'a0, 'a1, ...
     let tyvars: Vec<CoreType> = (0..arity)
         .map(|i| CoreType {
-            ptyp_desc: CoreTypeDesc::Ptyp_var(Cow::Owned(format!("a{}", i))),
+            ptyp_desc: Box::new(CoreTypeDesc::Ptyp_var(Cow::Owned(format!("a{}", i)))),
             ptyp_loc: loc,
             ptyp_attributes: vec![],
         })
@@ -2078,7 +2078,7 @@ fn handle_obj(
         .collect();
 
     let result_type = CoreType {
-        ptyp_desc: CoreTypeDesc::Ptyp_object(obj_fields, current::ClosedFlag::Closed),
+        ptyp_desc: Box::new(CoreTypeDesc::Ptyp_object(obj_fields, current::ClosedFlag::Closed)),
         ptyp_loc: loc,
         ptyp_attributes: vec![],
     };
@@ -2118,12 +2118,12 @@ fn handle_obj(
     };
 
     let mod_structure = vec![StructureItem {
-        pstr_desc: StructureItemDesc::Pstr_primitive(vd),
+        pstr_desc: Box::new(StructureItemDesc::Pstr_primitive(vd)),
         pstr_loc: loc,
     }];
 
     let mod_expr = ModuleExpr {
-        pmod_desc: ModuleExprDesc::Pmod_structure(mod_structure),
+        pmod_desc: Box::new(ModuleExprDesc::Pmod_structure(mod_structure)),
         pmod_loc: loc,
         pmod_attributes: vec![],
     };
@@ -2133,7 +2133,7 @@ fn handle_obj(
     let j_unsafe_expr = arena.push_ldot_static(j_lident, "unsafe_expr");
 
     let func_ident = Expression {
-        pexp_desc: ExpressionDesc::Pexp_ident(Located { txt: j_unsafe_expr, loc }),
+        pexp_desc: Box::new(ExpressionDesc::Pexp_ident(Located { txt: j_unsafe_expr, loc })),
         pexp_loc: loc,
         pexp_attributes: vec![],
     };
@@ -2156,12 +2156,12 @@ fn handle_obj(
         .collect();
 
     let apply_expr = Expression {
-        pexp_desc: ExpressionDesc::Pexp_apply {
+        pexp_desc: Box::new(ExpressionDesc::Pexp_apply {
             funct: Box::new(func_ident),
             args: apply_args,
             partial: false,
             transformed_jsx: false,
-        },
+        }),
         pexp_loc: loc,
         pexp_attributes: vec![],
     };
@@ -2169,14 +2169,14 @@ fn handle_obj(
     // The final result: {e with pexp_desc = Pexp_letmodule(...)}
     // where e is the record expression, so pexp_loc = record's loc and pexp_attributes = record's attrs
     Expression {
-        pexp_desc: ExpressionDesc::Pexp_letmodule(
+        pexp_desc: Box::new(ExpressionDesc::Pexp_letmodule(
             Located {
                 txt: module_name_idx,
                 loc,
             },
             mod_expr,
             Box::new(apply_expr),
-        ),
+        )),
         pexp_loc: record_expr.pexp_loc,
         pexp_attributes: record_expr.pexp_attributes.clone(),
     }
@@ -2209,11 +2209,11 @@ fn build_arrows(
             arena.push_arity(None)
         };
         current = CoreType {
-            ptyp_desc: CoreTypeDesc::Ptyp_arrow {
+            ptyp_desc: Box::new(CoreTypeDesc::Ptyp_arrow {
                 arg: Box::new(arg),
                 ret: Box::new(current),
                 arity,
-            },
+            }),
             ptyp_loc: loc,
             ptyp_attributes: vec![],
         };
@@ -2246,7 +2246,7 @@ fn handle_debugger(
 
     // Create the type: _ -> unit
     let any_type = CoreType {
-        ptyp_desc: CoreTypeDesc::Ptyp_any,
+        ptyp_desc: Box::new(CoreTypeDesc::Ptyp_any),
         ptyp_loc: none_loc,
         ptyp_attributes: vec![],
     };
@@ -2254,16 +2254,16 @@ fn handle_debugger(
     // Create "unit" type
     let unit_ident = arena.push_lident_static("unit");
     let unit_type = CoreType {
-        ptyp_desc: CoreTypeDesc::Ptyp_constr(
+        ptyp_desc: Box::new(CoreTypeDesc::Ptyp_constr(
             Located { txt: unit_ident, loc: none_loc },
             vec![],
-        ),
+        )),
         ptyp_loc: none_loc,
         ptyp_attributes: vec![],
     };
 
     let pval_type = CoreType {
-        ptyp_desc: CoreTypeDesc::Ptyp_arrow {
+        ptyp_desc: Box::new(CoreTypeDesc::Ptyp_arrow {
             arg: Box::new(TypeArg {
                 attrs: vec![],
                 lbl: ArgLabel::Nolabel,
@@ -2271,7 +2271,7 @@ fn handle_debugger(
             }),
             ret: Box::new(unit_type),
             arity: arena.push_arity(Some(1)),  // OCaml's Typ.arrows computes Some(List.length args) - fresh each call
-        },
+        }),
         ptyp_loc: none_loc,
         ptyp_attributes: vec![],
     };
@@ -2294,12 +2294,12 @@ fn handle_debugger(
 
     // Create the module structure
     let mod_structure = vec![StructureItem {
-        pstr_desc: StructureItemDesc::Pstr_primitive(vd),
+        pstr_desc: Box::new(StructureItemDesc::Pstr_primitive(vd)),
         pstr_loc: loc,
     }];
 
     let mod_expr = ModuleExpr {
-        pmod_desc: ModuleExprDesc::Pmod_structure(mod_structure),
+        pmod_desc: Box::new(ModuleExprDesc::Pmod_structure(mod_structure)),
         pmod_loc: loc,
         pmod_attributes: vec![],
     };
@@ -2311,42 +2311,42 @@ fn handle_debugger(
     // Create the unit literal: ()
     let unit_construct = arena.push_lident_static("()");
     let unit_expr = Expression {
-        pexp_desc: ExpressionDesc::Pexp_construct(
+        pexp_desc: Box::new(ExpressionDesc::Pexp_construct(
             Located { txt: unit_construct, loc },
             None,
-        ),
+        )),
         pexp_loc: loc,
         pexp_attributes: vec![],
     };
 
     // Create the function application: J.unsafe_expr(())
     let func_ident = Expression {
-        pexp_desc: ExpressionDesc::Pexp_ident(Located { txt: j_unsafe_expr, loc }),
+        pexp_desc: Box::new(ExpressionDesc::Pexp_ident(Located { txt: j_unsafe_expr, loc })),
         pexp_loc: loc,
         pexp_attributes: vec![],
     };
 
     let apply_expr = Expression {
-        pexp_desc: ExpressionDesc::Pexp_apply {
+        pexp_desc: Box::new(ExpressionDesc::Pexp_apply {
             funct: Box::new(func_ident),
             args: vec![(ArgLabel::Nolabel, unit_expr)],
             partial: false,
             transformed_jsx: false,
-        },
+        }),
         pexp_loc: loc,
         pexp_attributes: vec![],
     };
 
     // Create the final expression: let module J = struct ... end in J.unsafe_expr(())
     Expression {
-        pexp_desc: ExpressionDesc::Pexp_letmodule(
+        pexp_desc: Box::new(ExpressionDesc::Pexp_letmodule(
             Located {
                 txt: module_name_idx,
                 loc,
             },
             mod_expr,
             Box::new(apply_expr),
-        ),
+        )),
         pexp_loc: loc,
         pexp_attributes: expr.pexp_attributes.clone(),
     }
@@ -2373,20 +2373,20 @@ fn handle_re(expr: &Expression, payload: &Payload, arena: &mut ParseArena, ext_l
     let regexp_t = arena.regexp_t_lident();
 
     let regexp_type = CoreType {
-        ptyp_desc: CoreTypeDesc::Ptyp_constr(
+        ptyp_desc: Box::new(CoreTypeDesc::Ptyp_constr(
             Located {
                 txt: regexp_t,
                 loc,
             },
             vec![],
-        ),
+        )),
         ptyp_loc: loc,
         ptyp_attributes: vec![],
     };
 
     // Wrap the raw expression in a type constraint
     Expression {
-        pexp_desc: ExpressionDesc::Pexp_constraint(Box::new(raw_expr), regexp_type),
+        pexp_desc: Box::new(ExpressionDesc::Pexp_constraint(Box::new(raw_expr), regexp_type)),
         pexp_loc: loc,
         pexp_attributes: vec![],
     }
@@ -2417,8 +2417,8 @@ fn handle_external_ext(
     // %external expects a single identifier like %external(__DEV__)
     let ident_str = match payload {
         Payload::PStr(items) if items.len() == 1 => {
-            if let StructureItemDesc::Pstr_eval(e, _) = &items[0].pstr_desc {
-                if let ExpressionDesc::Pexp_ident(Located { txt, .. }) = &e.pexp_desc {
+            if let StructureItemDesc::Pstr_eval(e, _) = &*items[0].pstr_desc {
+                if let ExpressionDesc::Pexp_ident(Located { txt, .. }) = &*e.pexp_desc {
                     // Get the Longident and check if it's an Lident
                     let lid = arena.get_longident(*txt);
                     if let Longident::Lident(str_idx) = lid {
@@ -2450,23 +2450,23 @@ fn handle_external_ext(
     // OCaml: Ast_compatible.const_exp_string ~loc x ~delimiter:Ext_string.empty
     // The empty delimiter becomes Some("") in the AST
     let str_exp = Expression {
-        pexp_desc: ExpressionDesc::Pexp_constant(Constant::String(
+        pexp_desc: Box::new(ExpressionDesc::Pexp_constant(Constant::String(
             Cow::Owned(ident_str.clone()),
             Some(Cow::Borrowed("")),
-        )),
+        ))),
         pexp_loc: loc,
         pexp_attributes: vec![],
     };
 
     // Create raw_exp as local_external_apply with "#raw_expr"
     let any_type = CoreType {
-        ptyp_desc: CoreTypeDesc::Ptyp_any,
+        ptyp_desc: Box::new(CoreTypeDesc::Ptyp_any),
         ptyp_loc: none_loc,
         ptyp_attributes: vec![],
     };
 
     let pval_type = CoreType {
-        ptyp_desc: CoreTypeDesc::Ptyp_arrow {
+        ptyp_desc: Box::new(CoreTypeDesc::Ptyp_arrow {
             arg: Box::new(TypeArg {
                 attrs: vec![],
                 lbl: ArgLabel::Nolabel,
@@ -2474,7 +2474,7 @@ fn handle_external_ext(
             }),
             ret: Box::new(any_type.clone()),
             arity: arena.push_arity(Some(1)),  // OCaml's Typ.arrows computes Some(List.length args) - fresh each call
-        },
+        }),
         ptyp_loc: none_loc,
         ptyp_attributes: vec![],
     };
@@ -2497,12 +2497,12 @@ fn handle_external_ext(
 
     // Create the module structure
     let mod_structure = vec![StructureItem {
-        pstr_desc: StructureItemDesc::Pstr_primitive(vd),
+        pstr_desc: Box::new(StructureItemDesc::Pstr_primitive(vd)),
         pstr_loc: loc,
     }];
 
     let mod_expr = ModuleExpr {
-        pmod_desc: ModuleExprDesc::Pmod_structure(mod_structure),
+        pmod_desc: Box::new(ModuleExprDesc::Pmod_structure(mod_structure)),
         pmod_loc: loc,
         pmod_attributes: vec![],
     };
@@ -2513,18 +2513,18 @@ fn handle_external_ext(
 
     // Create J.unsafe_expr(ident_str)
     let func_ident = Expression {
-        pexp_desc: ExpressionDesc::Pexp_ident(Located { txt: j_unsafe_expr, loc }),
+        pexp_desc: Box::new(ExpressionDesc::Pexp_ident(Located { txt: j_unsafe_expr, loc })),
         pexp_loc: loc,
         pexp_attributes: vec![],
     };
 
     let apply_expr = Expression {
-        pexp_desc: ExpressionDesc::Pexp_apply {
+        pexp_desc: Box::new(ExpressionDesc::Pexp_apply {
             funct: Box::new(func_ident.clone()),
             args: vec![(ArgLabel::Nolabel, str_exp.clone())],
             partial: false,
             transformed_jsx: false,
-        },
+        }),
         pexp_loc: loc,
         pexp_attributes: vec![],
     };
@@ -2532,14 +2532,14 @@ fn handle_external_ext(
     // Create raw_exp = let module J = ... in J.unsafe_expr(str)
     // This is the full letmodule expression that will be used inside Js.typeof and the else branch
     let raw_exp = Expression {
-        pexp_desc: ExpressionDesc::Pexp_letmodule(
+        pexp_desc: Box::new(ExpressionDesc::Pexp_letmodule(
             Located {
                 txt: module_name_idx,
                 loc,
             },
             mod_expr,
             Box::new(apply_expr),
-        ),
+        )),
         pexp_loc: loc,
         pexp_attributes: vec![],
     };
@@ -2550,18 +2550,18 @@ fn handle_external_ext(
     // Create Js.typeof(raw_exp)
     // OCaml: Ast_helper.Exp.ident {loc; txt = ...} - no ~loc argument, so uses default_loc (ghost)
     let typeof_ident = Expression {
-        pexp_desc: ExpressionDesc::Pexp_ident(Located { txt: js_typeof, loc }),
+        pexp_desc: Box::new(ExpressionDesc::Pexp_ident(Located { txt: js_typeof, loc })),
         pexp_loc: none_loc,
         pexp_attributes: vec![],
     };
 
     let typeof_call = Expression {
-        pexp_desc: ExpressionDesc::Pexp_apply {
+        pexp_desc: Box::new(ExpressionDesc::Pexp_apply {
             funct: Box::new(typeof_ident),
             args: vec![(ArgLabel::Nolabel, raw_exp.clone())],
             partial: false,
             transformed_jsx: false,
-        },
+        }),
         pexp_loc: loc,
         pexp_attributes: vec![],
     };
@@ -2571,23 +2571,23 @@ fn handle_external_ext(
 
     // Create "undefined" string constant
     let undefined_str = Expression {
-        pexp_desc: ExpressionDesc::Pexp_constant(Constant::String(
+        pexp_desc: Box::new(ExpressionDesc::Pexp_constant(Constant::String(
             Cow::Borrowed("undefined"),
             None,
-        )),
+        ))),
         pexp_loc: loc,
         pexp_attributes: vec![],
     };
 
     // Create Js.typeof(raw_exp) == "undefined"
     let eq_ident = Expression {
-        pexp_desc: ExpressionDesc::Pexp_ident(Located { txt: eq_lident, loc }),
+        pexp_desc: Box::new(ExpressionDesc::Pexp_ident(Located { txt: eq_lident, loc })),
         pexp_loc: loc,
         pexp_attributes: vec![],
     };
 
     let condition = Expression {
-        pexp_desc: ExpressionDesc::Pexp_apply {
+        pexp_desc: Box::new(ExpressionDesc::Pexp_apply {
             funct: Box::new(eq_ident),
             args: vec![
                 (ArgLabel::Nolabel, typeof_call),
@@ -2595,7 +2595,7 @@ fn handle_external_ext(
             ],
             partial: false,
             transformed_jsx: false,
-        },
+        }),
         pexp_loc: loc,
         pexp_attributes: vec![],
     };
@@ -2604,21 +2604,21 @@ fn handle_external_ext(
     let js_undefined_empty = arena.ppx_js_undefined_empty_lid();
 
     let empty_expr = Expression {
-        pexp_desc: ExpressionDesc::Pexp_ident(Located {
+        pexp_desc: Box::new(ExpressionDesc::Pexp_ident(Located {
             txt: js_undefined_empty,
             loc,
-        }),
+        })),
         pexp_loc: loc,
         pexp_attributes: vec![],
     };
 
     // Create the if-then-else: if condition then empty else raw_exp
     let if_expr = Expression {
-        pexp_desc: ExpressionDesc::Pexp_ifthenelse(
+        pexp_desc: Box::new(ExpressionDesc::Pexp_ifthenelse(
             Box::new(condition),
             Box::new(empty_expr),
             Some(Box::new(raw_exp)),
-        ),
+        )),
         pexp_loc: loc,
         pexp_attributes: vec![],
     };
@@ -2628,10 +2628,10 @@ fn handle_external_ext(
     let js_undef_to_opt = arena.ppx_js_undefined_to_option_lid();
 
     let undef_to_opt_ident = Expression {
-        pexp_desc: ExpressionDesc::Pexp_ident(Located {
+        pexp_desc: Box::new(ExpressionDesc::Pexp_ident(Located {
             txt: js_undef_to_opt,
             loc,
-        }),
+        })),
         pexp_loc: none_loc,
         pexp_attributes: vec![],
     };
@@ -2640,12 +2640,12 @@ fn handle_external_ext(
     // This is the final result - no additional letmodule wrapping needed
     // because raw_exp already contains the letmodule
     Expression {
-        pexp_desc: ExpressionDesc::Pexp_apply {
+        pexp_desc: Box::new(ExpressionDesc::Pexp_apply {
             funct: Box::new(undef_to_opt_ident),
             args: vec![(ArgLabel::Nolabel, if_expr)],
             partial: false,
             transformed_jsx: false,
-        },
+        }),
         pexp_loc: loc,
         pexp_attributes: expr.pexp_attributes.clone(),
     }
@@ -2673,18 +2673,18 @@ fn handle_raw(
     // Also detect if the JS string contains a function (for internal.expansive attribute).
     let (str_exp, payload_loc, is_function) = match payload {
         Payload::PStr(items) if items.len() == 1 => {
-            if let StructureItemDesc::Pstr_eval(e, _) = &items[0].pstr_desc {
-                if let ExpressionDesc::Pexp_constant(Constant::String(s, _)) = &e.pexp_desc {
+            if let StructureItemDesc::Pstr_eval(e, _) = &*items[0].pstr_desc {
+                if let ExpressionDesc::Pexp_constant(Constant::String(s, _)) = &*e.pexp_desc {
                     // Check if the JS string contains a function
                     let is_func = is_js_function(s);
 
                     // Create a new string expression with delimiter stripped
                     // (OCaml strips the delimiter when transforming %raw)
                     let exp = Expression {
-                        pexp_desc: ExpressionDesc::Pexp_constant(Constant::String(
+                        pexp_desc: Box::new(ExpressionDesc::Pexp_constant(Constant::String(
                             s.clone(),
                             None, // Strip delimiter
-                        )),
+                        ))),
                         pexp_loc: e.pexp_loc,
                         pexp_attributes: e.pexp_attributes.clone(),
                     };
@@ -2710,13 +2710,13 @@ fn handle_raw(
 
     // Create the type: _ -> _
     let any_type = CoreType {
-        ptyp_desc: CoreTypeDesc::Ptyp_any,
+        ptyp_desc: Box::new(CoreTypeDesc::Ptyp_any),
         ptyp_loc: none_loc,
         ptyp_attributes: vec![],
     };
 
     let pval_type = CoreType {
-        ptyp_desc: CoreTypeDesc::Ptyp_arrow {
+        ptyp_desc: Box::new(CoreTypeDesc::Ptyp_arrow {
             arg: Box::new(TypeArg {
                 attrs: vec![],
                 lbl: ArgLabel::Nolabel,
@@ -2724,7 +2724,7 @@ fn handle_raw(
             }),
             ret: Box::new(any_type),
             arity: arena.push_arity(Some(1)),  // OCaml's Typ.arrows computes Some(List.length args) - fresh each call
-        },
+        }),
         ptyp_loc: none_loc,
         ptyp_attributes: vec![],
     };
@@ -2747,12 +2747,12 @@ fn handle_raw(
 
     // Create the module structure: struct external unsafe_expr: _ -> _ = "#raw_expr" end
     let mod_structure = vec![StructureItem {
-        pstr_desc: StructureItemDesc::Pstr_primitive(vd),
+        pstr_desc: Box::new(StructureItemDesc::Pstr_primitive(vd)),
         pstr_loc: loc,
     }];
 
     let mod_expr = ModuleExpr {
-        pmod_desc: ModuleExprDesc::Pmod_structure(mod_structure),
+        pmod_desc: Box::new(ModuleExprDesc::Pmod_structure(mod_structure)),
         pmod_loc: loc,
         pmod_attributes: vec![],
     };
@@ -2766,18 +2766,18 @@ fn handle_raw(
 
     // Create the function application: J.unsafe_expr("code")
     let func_ident = Expression {
-        pexp_desc: ExpressionDesc::Pexp_ident(Located { txt: j_unsafe_expr, loc }),
+        pexp_desc: Box::new(ExpressionDesc::Pexp_ident(Located { txt: j_unsafe_expr, loc })),
         pexp_loc: loc,
         pexp_attributes: vec![],
     };
 
     let apply_expr = Expression {
-        pexp_desc: ExpressionDesc::Pexp_apply {
+        pexp_desc: Box::new(ExpressionDesc::Pexp_apply {
             funct: Box::new(func_ident),
             args: vec![(ArgLabel::Nolabel, str_exp)],
             partial: false,
             transformed_jsx: false,
-        },
+        }),
         pexp_loc: loc,
         pexp_attributes: vec![],
     };
@@ -2809,14 +2809,14 @@ fn handle_raw(
     };
 
     Expression {
-        pexp_desc: ExpressionDesc::Pexp_letmodule(
+        pexp_desc: Box::new(ExpressionDesc::Pexp_letmodule(
             Located {
                 txt: module_name_idx,
                 loc,
             },
             mod_expr,
             Box::new(apply_expr),
-        ),
+        )),
         pexp_loc: payload_loc,
         pexp_attributes: final_attributes,
     }
@@ -2841,15 +2841,15 @@ fn handle_raw_structure(
     // Extract the string expression from the payload
     let (str_exp, str_loc) = match payload {
         Payload::PStr(items) if items.len() == 1 => {
-            if let StructureItemDesc::Pstr_eval(e, _) = &items[0].pstr_desc {
-                if let ExpressionDesc::Pexp_constant(Constant::String(s, _)) = &e.pexp_desc {
+            if let StructureItemDesc::Pstr_eval(e, _) = &*items[0].pstr_desc {
+                if let ExpressionDesc::Pexp_constant(Constant::String(s, _)) = &*e.pexp_desc {
                     // Create a new string expression with delimiter stripped
                     (
                         Expression {
-                            pexp_desc: ExpressionDesc::Pexp_constant(Constant::String(
+                            pexp_desc: Box::new(ExpressionDesc::Pexp_constant(Constant::String(
                                 s.clone(),
                                 None, // Strip delimiter
-                            )),
+                            ))),
                             pexp_loc: e.pexp_loc,
                             pexp_attributes: e.pexp_attributes.clone(),
                         },
@@ -2871,13 +2871,13 @@ fn handle_raw_structure(
 
     // Create the type: _ -> _
     let any_type = CoreType {
-        ptyp_desc: CoreTypeDesc::Ptyp_any,
+        ptyp_desc: Box::new(CoreTypeDesc::Ptyp_any),
         ptyp_loc: none_loc,
         ptyp_attributes: vec![],
     };
 
     let pval_type = CoreType {
-        ptyp_desc: CoreTypeDesc::Ptyp_arrow {
+        ptyp_desc: Box::new(CoreTypeDesc::Ptyp_arrow {
             arg: Box::new(TypeArg {
                 attrs: vec![],
                 lbl: ArgLabel::Nolabel,
@@ -2885,7 +2885,7 @@ fn handle_raw_structure(
             }),
             ret: Box::new(any_type),
             arity: arena.push_arity(Some(1)),  // OCaml's Typ.arrows computes Some(List.length args) - fresh each call
-        },
+        }),
         ptyp_loc: none_loc,
         ptyp_attributes: vec![],
     };
@@ -2908,12 +2908,12 @@ fn handle_raw_structure(
 
     // Create the module structure
     let mod_structure = vec![StructureItem {
-        pstr_desc: StructureItemDesc::Pstr_primitive(vd),
+        pstr_desc: Box::new(StructureItemDesc::Pstr_primitive(vd)),
         pstr_loc: loc,
     }];
 
     let mod_expr = ModuleExpr {
-        pmod_desc: ModuleExprDesc::Pmod_structure(mod_structure),
+        pmod_desc: Box::new(ModuleExprDesc::Pmod_structure(mod_structure)),
         pmod_loc: loc,
         pmod_attributes: vec![],
     };
@@ -2927,18 +2927,18 @@ fn handle_raw_structure(
     let payload_attributes = str_exp.pexp_attributes.clone();
 
     let func_ident = Expression {
-        pexp_desc: ExpressionDesc::Pexp_ident(Located { txt: j_unsafe_expr, loc }),
+        pexp_desc: Box::new(ExpressionDesc::Pexp_ident(Located { txt: j_unsafe_expr, loc })),
         pexp_loc: loc,
         pexp_attributes: vec![],
     };
 
     let apply_expr = Expression {
-        pexp_desc: ExpressionDesc::Pexp_apply {
+        pexp_desc: Box::new(ExpressionDesc::Pexp_apply {
             funct: Box::new(func_ident),
             args: vec![(ArgLabel::Nolabel, str_exp)],
             partial: false,
             transformed_jsx: false,
-        },
+        }),
         pexp_loc: loc,
         pexp_attributes: vec![],
     };
@@ -2946,14 +2946,14 @@ fn handle_raw_structure(
     // Create the let module expression
     // Inherit the template attribute from the string expression (res.template)
     let letmodule_expr = Expression {
-        pexp_desc: ExpressionDesc::Pexp_letmodule(
+        pexp_desc: Box::new(ExpressionDesc::Pexp_letmodule(
             Located {
                 txt: module_name_idx,
                 loc,
             },
             mod_expr,
             Box::new(apply_expr),
-        ),
+        )),
         pexp_loc: str_loc, // Use the string expression's location for outer expr
         pexp_attributes: payload_attributes,
     };
@@ -2961,7 +2961,7 @@ fn handle_raw_structure(
     // Wrap in Pstr_eval - OCaml's Ast_helper.Str.eval uses default_loc (= Location.none)
     // when no ~loc is passed, so we use none_loc here
     StructureItem {
-        pstr_desc: StructureItemDesc::Pstr_eval(letmodule_expr, vec![]),
+        pstr_desc: Box::new(StructureItemDesc::Pstr_eval(letmodule_expr, vec![])),
         pstr_loc: none_loc,
     }
 }
@@ -3034,7 +3034,7 @@ fn handle_private_extension(
             loc: combined_loc,
         },
         pmb_expr: ModuleExpr {
-            pmod_desc: ModuleExprDesc::Pmod_structure(rewritten_items),
+            pmod_desc: Box::new(ModuleExprDesc::Pmod_structure(rewritten_items)),
             pmod_loc: combined_loc,
             pmod_attributes: vec![],
         },
@@ -3043,7 +3043,7 @@ fn handle_private_extension(
     };
 
     let module_item = StructureItem {
-        pstr_desc: StructureItemDesc::Pstr_module(module_binding),
+        pstr_desc: Box::new(StructureItemDesc::Pstr_module(module_binding)),
         pstr_loc: combined_loc,
     };
 
@@ -3061,7 +3061,7 @@ fn handle_private_extension(
     };
 
     let open_item = StructureItem {
-        pstr_desc: StructureItemDesc::Pstr_open(open_desc),
+        pstr_desc: Box::new(StructureItemDesc::Pstr_open(open_desc)),
         pstr_loc: combined_loc,
     };
 
@@ -3085,18 +3085,18 @@ fn transform_await(inner: Expression, loc: LocIdx, arena: &mut ParseArena) -> Ex
     let unsafe_await_lid = arena.push_ldot_static(promise_lident, "unsafe_await");
 
     let func_ident = Expression {
-        pexp_desc: ExpressionDesc::Pexp_ident(Located { txt: unsafe_await_lid, loc: ghost_loc }),
+        pexp_desc: Box::new(ExpressionDesc::Pexp_ident(Located { txt: unsafe_await_lid, loc: ghost_loc })),
         pexp_loc: ghost_loc,
         pexp_attributes: vec![],
     };
 
     Expression {
-        pexp_desc: ExpressionDesc::Pexp_apply {
+        pexp_desc: Box::new(ExpressionDesc::Pexp_apply {
             funct: Box::new(func_ident),
             args: vec![(ArgLabel::Nolabel, inner)],
             partial: false,
             transformed_jsx: false,
-        },
+        }),
         pexp_loc: ghost_loc,
         pexp_attributes: vec![],
     }
@@ -3116,18 +3116,18 @@ fn wrap_with_unsafe_async(inner: Expression, loc: LocIdx, arena: &mut ParseArena
 
     // OCaml uses the same loc object for all three positions
     let func_ident = Expression {
-        pexp_desc: ExpressionDesc::Pexp_ident(Located { txt: unsafe_async_lid, loc }),
+        pexp_desc: Box::new(ExpressionDesc::Pexp_ident(Located { txt: unsafe_async_lid, loc })),
         pexp_loc: loc,
         pexp_attributes: vec![],
     };
 
     Expression {
-        pexp_desc: ExpressionDesc::Pexp_apply {
+        pexp_desc: Box::new(ExpressionDesc::Pexp_apply {
             funct: Box::new(func_ident),
             args: vec![(ArgLabel::Nolabel, inner)],
             partial: false,
             transformed_jsx: false,
-        },
+        }),
         pexp_loc: loc,
         pexp_attributes: vec![],
     }
@@ -3136,7 +3136,7 @@ fn wrap_with_unsafe_async(inner: Expression, loc: LocIdx, arena: &mut ParseArena
 /// Recursively find the innermost body of nested Pexp_fun and wrap it with unsafe_async.
 /// OCaml: ast_async.ml add_promise_to_result
 fn add_promise_to_fun_body(expr: &Expression, loc: LocIdx, arena: &mut ParseArena) -> Expression {
-    match &expr.pexp_desc {
+    match &*expr.pexp_desc {
         ExpressionDesc::Pexp_fun {
             arg_label,
             default,
@@ -3148,14 +3148,14 @@ fn add_promise_to_fun_body(expr: &Expression, loc: LocIdx, arena: &mut ParseAren
             // Recurse into rhs to find innermost body
             let new_rhs = add_promise_to_fun_body(rhs, loc, arena);
             Expression {
-                pexp_desc: ExpressionDesc::Pexp_fun {
+                pexp_desc: Box::new(ExpressionDesc::Pexp_fun {
                     arg_label: arg_label.clone(),
                     default: default.clone(),
                     lhs: lhs.clone(),
                     rhs: Box::new(new_rhs),
                     arity: *arity,
                     is_async: *is_async,
-                },
+                }),
                 pexp_loc: expr.pexp_loc,
                 pexp_attributes: expr.pexp_attributes.clone(),
             }
@@ -3237,7 +3237,7 @@ fn create_await_module_expression(
     };
 
     let pack_expr = Expression {
-        pexp_desc: ExpressionDesc::Pexp_pack(cleaned_mod_expr),
+        pexp_desc: Box::new(ExpressionDesc::Pexp_pack(cleaned_mod_expr)),
         pexp_loc: pmod_loc,
         pexp_attributes: vec![],
     };
@@ -3245,17 +3245,17 @@ fn create_await_module_expression(
     // Create package type: (__ME__, [])
     // The module_type_lid has its own location from the original source
     let package_type = CoreType {
-        ptyp_desc: CoreTypeDesc::Ptyp_package((
+        ptyp_desc: Box::new(CoreTypeDesc::Ptyp_package((
             module_type_lid, // Use the Located<LidentIdx> directly with its location
             vec![], // No with constraints
-        )),
+        ))),
         ptyp_loc: pmod_loc,
         ptyp_attributes: vec![],
     };
 
     // Create constrained expression: (module(ME): __ME__)
     let constrained_pack = Expression {
-        pexp_desc: ExpressionDesc::Pexp_constraint(Box::new(pack_expr), package_type),
+        pexp_desc: Box::new(ExpressionDesc::Pexp_constraint(Box::new(pack_expr), package_type)),
         pexp_loc: pmod_loc,
         pexp_attributes: vec![],
     };
@@ -3266,21 +3266,21 @@ fn create_await_module_expression(
     let import_lid = arena.push_ldot_static(module_lident, "import");
 
     let import_ident = Expression {
-        pexp_desc: ExpressionDesc::Pexp_ident(Located {
+        pexp_desc: Box::new(ExpressionDesc::Pexp_ident(Located {
             txt: import_lid,
             loc: pmod_loc,
-        }),
+        })),
         pexp_loc: pmod_loc,
         pexp_attributes: vec![],
     };
 
     let import_apply = Expression {
-        pexp_desc: ExpressionDesc::Pexp_apply {
+        pexp_desc: Box::new(ExpressionDesc::Pexp_apply {
             funct: Box::new(import_ident),
             args: vec![(ArgLabel::Nolabel, constrained_pack)],
             partial: false,
             transformed_jsx: false,
-        },
+        }),
         pexp_loc: pmod_loc,
         pexp_attributes: vec![],
     };
@@ -3291,7 +3291,7 @@ fn create_await_module_expression(
     // Create unpack(await_expr)
     // OCaml: {e with pmod_desc = Pmod_unpack ...} - keeps original pmod_attributes (with @res.await)
     current::ModuleExpr {
-        pmod_desc: ModuleExprDesc::Pmod_unpack(Box::new(await_expr)),
+        pmod_desc: Box::new(ModuleExprDesc::Pmod_unpack(Box::new(await_expr))),
         pmod_loc: mod_expr.pmod_loc,
         // OCaml's {e with pmod_desc = ...} keeps the original attributes including @res.await
         pmod_attributes: mod_expr.pmod_attributes.clone(),
@@ -3309,13 +3309,13 @@ fn spelunk_expression_for_await_module_types(
     context: &mut std::collections::HashSet<String>,
     arena: &mut ParseArena,
 ) -> Vec<StructureItem> {
-    match &expr.pexp_desc {
+    match &*expr.pexp_desc {
         // Main case: Pexp_letmodule with Pmod_ident and @res.await
         ExpressionDesc::Pexp_letmodule(_, mod_expr, body) => {
             let mut results = Vec::new();
 
             // Check for Pmod_ident with @res.await
-            if let ModuleExprDesc::Pmod_ident(located_lid) = &mod_expr.pmod_desc {
+            if let ModuleExprDesc::Pmod_ident(located_lid) = &*mod_expr.pmod_desc {
                 if has_await_attribute(&mod_expr.pmod_attributes, arena) {
                     let module_type_name = local_module_type_name(located_lid.txt, arena);
 
@@ -3329,7 +3329,7 @@ fn spelunk_expression_for_await_module_types(
                         let lid_loc = located_lid.loc;
 
                         let module_type_decl = StructureItem {
-                            pstr_desc: StructureItemDesc::Pstr_modtype(current::ModuleTypeDeclaration {
+                            pstr_desc: Box::new(StructureItemDesc::Pstr_modtype(current::ModuleTypeDeclaration {
                                 pmtd_name: Located {
                                     txt: module_type_name_idx,
                                     loc: lid_loc,
@@ -3351,7 +3351,7 @@ fn spelunk_expression_for_await_module_types(
                                 }),
                                 pmtd_attributes: vec![],
                                 pmtd_loc: lid_loc,
-                            }),
+                            })),
                             pstr_loc: lid_loc,
                         };
 
@@ -3453,7 +3453,7 @@ fn transform_module_await(
     }
 
     // Get the module identifier and its location
-    let (lid, lid_loc) = match &mod_expr.pmod_desc {
+    let (lid, lid_loc) = match &*mod_expr.pmod_desc {
         ModuleExprDesc::Pmod_ident(located_lid) => (located_lid.txt, located_lid.loc),
         _ => return None, // Only handle Pmod_ident for now
     };
@@ -3470,7 +3470,7 @@ fn transform_module_await(
     // OCaml uses (Mty.typeof_ ~loc me) where `me` is the ORIGINAL module expression
     // This means the Pmty_typeof's inner module expr has the @res.await attribute
     let module_type_decl = StructureItem {
-        pstr_desc: StructureItemDesc::Pstr_modtype(current::ModuleTypeDeclaration {
+        pstr_desc: Box::new(StructureItemDesc::Pstr_modtype(current::ModuleTypeDeclaration {
             pmtd_name: Located {
                 txt: module_type_name_idx,
                 loc: lid_loc,
@@ -3492,7 +3492,7 @@ fn transform_module_await(
             }),
             pmtd_attributes: vec![],
             pmtd_loc: lid_loc,
-        }),
+        })),
         pstr_loc: lid_loc,
     };
 
@@ -3508,10 +3508,10 @@ fn transform_module_await(
     // actually remove the attribute because strings are different objects. So the inner
     // pack expression KEEPS @res.await in the actual output.
     let cleaned_mod_expr = current::ModuleExpr {
-        pmod_desc: ModuleExprDesc::Pmod_ident(Located {
+        pmod_desc: Box::new(ModuleExprDesc::Pmod_ident(Located {
             txt: lid,
             loc: lid_loc, // Preserve original Longident location
-        }),
+        })),
         pmod_loc: mod_expr.pmod_loc,
         // Keep attributes as-is to match OCaml's actual behavior (not its intended behavior)
         pmod_attributes: mod_expr.pmod_attributes.clone(),
@@ -3521,7 +3521,7 @@ fn transform_module_await(
     let pmod_loc = mod_expr.pmod_loc;
 
     let pack_expr = Expression {
-        pexp_desc: ExpressionDesc::Pexp_pack(cleaned_mod_expr),
+        pexp_desc: Box::new(ExpressionDesc::Pexp_pack(cleaned_mod_expr)),
         pexp_loc: pmod_loc,
         pexp_attributes: vec![],
     };
@@ -3529,20 +3529,20 @@ fn transform_module_await(
     // Create package type: (Lident("__Belt_List__"), [])
     // module_type_lid location is mb.pmb_expr.pmod_loc in OCaml
     let package_type = CoreType {
-        ptyp_desc: CoreTypeDesc::Ptyp_package((
+        ptyp_desc: Box::new(CoreTypeDesc::Ptyp_package((
             Located {
                 txt: module_type_lid,
                 loc: pmod_loc,
             },
             vec![], // No with constraints
-        )),
+        ))),
         ptyp_loc: pmod_loc,
         ptyp_attributes: vec![],
     };
 
     // Create constrained expression: (module(Belt.List): __Belt_List__)
     let constrained_pack = Expression {
-        pexp_desc: ExpressionDesc::Pexp_constraint(Box::new(pack_expr), package_type),
+        pexp_desc: Box::new(ExpressionDesc::Pexp_constraint(Box::new(pack_expr), package_type)),
         pexp_loc: pmod_loc,
         pexp_attributes: vec![],
     };
@@ -3553,21 +3553,21 @@ fn transform_module_await(
     let import_lid = arena.push_ldot_static(module_lident, "import");
 
     let import_ident = Expression {
-        pexp_desc: ExpressionDesc::Pexp_ident(Located {
+        pexp_desc: Box::new(ExpressionDesc::Pexp_ident(Located {
             txt: import_lid,
             loc: pmod_loc,
-        }),
+        })),
         pexp_loc: pmod_loc,
         pexp_attributes: vec![],
     };
 
     let import_apply = Expression {
-        pexp_desc: ExpressionDesc::Pexp_apply {
+        pexp_desc: Box::new(ExpressionDesc::Pexp_apply {
             funct: Box::new(import_ident),
             args: vec![(ArgLabel::Nolabel, constrained_pack)],
             partial: false,
             transformed_jsx: false,
-        },
+        }),
         pexp_loc: pmod_loc,
         pexp_attributes: vec![],
     };
@@ -3578,7 +3578,7 @@ fn transform_module_await(
     // Create unpack(await_expr)
     // OCaml: {e with pmod_desc = Pmod_unpack ...} - keeps original pmod_attributes (with @res.await)
     let transformed_mod_expr = current::ModuleExpr {
-        pmod_desc: ModuleExprDesc::Pmod_unpack(Box::new(await_expr)),
+        pmod_desc: Box::new(ModuleExprDesc::Pmod_unpack(Box::new(await_expr))),
         pmod_loc: mod_expr.pmod_loc,
         // OCaml's {e with pmod_desc = ...} keeps the original attributes including @res.await
         pmod_attributes: mod_expr.pmod_attributes.clone(),
@@ -3588,12 +3588,12 @@ fn transform_module_await(
     // OCaml: {item with pstr_desc = Pstr_module {mb with pmb_expr = ...}}
     // This preserves original_pstr_loc (from item), not mb.pmb_loc
     let transformed_mb = StructureItem {
-        pstr_desc: StructureItemDesc::Pstr_module(current::ModuleBinding {
+        pstr_desc: Box::new(StructureItemDesc::Pstr_module(current::ModuleBinding {
             pmb_name: mb.pmb_name.clone(),
             pmb_expr: transformed_mod_expr,
             pmb_attributes: rewrite_attributes(&mb.pmb_attributes, arena),
             pmb_loc: mb.pmb_loc,
-        }),
+        })),
         pstr_loc: original_pstr_loc, // Use original structure item location
     };
 
@@ -3604,12 +3604,12 @@ fn transform_module_await(
 
 /// Check if an expression is a pipe operator application (a -> b)
 fn is_pipe_application(expr: &Expression, arena: &mut ParseArena) -> bool {
-    if let ExpressionDesc::Pexp_apply { funct, args, .. } = &expr.pexp_desc {
+    if let ExpressionDesc::Pexp_apply { funct, args, .. } = &*expr.pexp_desc {
         if args.len() == 2
             && matches!(&args[0].0, ArgLabel::Nolabel)
             && matches!(&args[1].0, ArgLabel::Nolabel)
         {
-            if let ExpressionDesc::Pexp_ident(lid) = &funct.pexp_desc {
+            if let ExpressionDesc::Pexp_ident(lid) = &*funct.pexp_desc {
                 if let Longident::Lident(op_idx) = arena.get_longident(lid.txt) {
                     let op = arena.get_string(*op_idx);
                     return op == "->";
@@ -3746,10 +3746,10 @@ fn transform_string_exp(expr: &Expression, s: &str, delim: &str, arena: &mut Par
         if is_template {
             // Template string: just change delimiter to "bq" (back quotes)
             Expression {
-                pexp_desc: ExpressionDesc::Pexp_constant(Constant::String(
+                pexp_desc: Box::new(ExpressionDesc::Pexp_constant(Constant::String(
                     Cow::Owned(s.to_string()),
                     Some(Cow::Borrowed("bq")),
-                )),
+                ))),
                 pexp_loc: expr.pexp_loc,
                 pexp_attributes: expr.pexp_attributes.clone(),
             }
@@ -3757,10 +3757,10 @@ fn transform_string_exp(expr: &Expression, s: &str, delim: &str, arena: &mut Par
             // JS string: transform the string and change delimiter to "*j"
             let transformed = transform_js_string(s);
             Expression {
-                pexp_desc: ExpressionDesc::Pexp_constant(Constant::String(
+                pexp_desc: Box::new(ExpressionDesc::Pexp_constant(Constant::String(
                     Cow::Owned(transformed),
                     Some(Cow::Borrowed("*j")),
-                )),
+                ))),
                 pexp_loc: expr.pexp_loc,
                 pexp_attributes: expr.pexp_attributes.clone(),
             }
@@ -3783,10 +3783,10 @@ fn transform_string_pat(pat: &Pattern, s: &str, delim: &str) -> Pattern {
         // JS string: transform the string and change delimiter to "*j"
         let transformed = transform_js_string(s);
         Pattern {
-            ppat_desc: PatternDesc::Ppat_constant(Constant::String(
+            ppat_desc: Box::new(PatternDesc::Ppat_constant(Constant::String(
                 Cow::Owned(transformed),
                 Some(Cow::Borrowed("*j")),
-            )),
+            ))),
             ppat_loc: pat.ppat_loc,
             ppat_attributes: pat.ppat_attributes.clone(),
         }
@@ -3830,7 +3830,7 @@ fn rewrite_payload(payload: &Payload, arena: &mut ParseArena) -> Payload {
 /// This matches OCaml's default_mapper.typ behavior, ensuring that expressions
 /// inside Ptyp_extension payloads get the "js" -> "*j" delimiter transformation.
 fn rewrite_core_type(typ: &CoreType, arena: &mut ParseArena) -> CoreType {
-    let new_desc = match &typ.ptyp_desc {
+    let new_desc = match &*typ.ptyp_desc {
         CoreTypeDesc::Ptyp_extension(ext) => {
             let (name, payload) = ext;
             CoreTypeDesc::Ptyp_extension((name.clone(), rewrite_payload(payload, arena)))
@@ -3909,7 +3909,7 @@ fn rewrite_core_type(typ: &CoreType, arena: &mut ParseArena) -> CoreType {
         },
     };
     CoreType {
-        ptyp_desc: new_desc,
+        ptyp_desc: Box::new(new_desc),
         ptyp_loc: typ.ptyp_loc,
         ptyp_attributes: rewrite_attributes(&typ.ptyp_attributes, arena),
     }
@@ -4018,7 +4018,7 @@ struct OpenCtx {
 
 /// Check if a pattern is "simple" enough for tuple flattening
 fn is_simple_pattern(p: &Pattern) -> bool {
-    match &p.ppat_desc {
+    match &*p.ppat_desc {
         PatternDesc::Ppat_any => true,
         PatternDesc::Ppat_var(_) => true,
         PatternDesc::Ppat_constraint(inner, _) => is_simple_pattern(inner),
@@ -4040,7 +4040,7 @@ fn destruct_open_tuple_inner<'a>(
     e: &'a Expression,
     mut acc: Vec<OpenCtx>,
 ) -> Option<(Vec<OpenCtx>, &'a Vec<Expression>)> {
-    match &e.pexp_desc {
+    match &*e.pexp_desc {
         ExpressionDesc::Pexp_open(flag, lid, cont) => {
             acc.push(OpenCtx {
                 flag: *flag,
@@ -4060,7 +4060,7 @@ fn destruct_open_tuple_inner<'a>(
 /// to rebuild the nesting correctly.
 fn restore_exp(expr: Expression, opens: &[OpenCtx]) -> Expression {
     opens.iter().fold(expr, |inner, open| Expression {
-        pexp_desc: ExpressionDesc::Pexp_open(open.flag, open.lid, Box::new(inner)),
+        pexp_desc: Box::new(ExpressionDesc::Pexp_open(open.flag, open.lid, Box::new(inner))),
         pexp_loc: open.loc,
         pexp_attributes: open.attrs.clone(),
     })
@@ -4114,7 +4114,7 @@ fn flatten_value_bindings(bindings: &[ValueBinding], arena: &mut ParseArena) -> 
 fn rewrite_pattern(pat: &Pattern, arena: &mut ParseArena) -> Pattern {
     let attrs = rewrite_attributes(&pat.ppat_attributes, arena);
 
-    let desc = match &pat.ppat_desc {
+    let desc = match &*pat.ppat_desc {
         // String constant with delimiter: transform js -> *j
         PatternDesc::Ppat_constant(Constant::String(s, Some(delim))) => {
             let base = transform_string_pat(pat, s, delim);
@@ -4214,7 +4214,7 @@ fn rewrite_pattern(pat: &Pattern, arena: &mut ParseArena) -> Pattern {
     };
 
     Pattern {
-        ppat_desc: desc,
+        ppat_desc: Box::new(desc),
         ppat_loc: pat.ppat_loc,
         ppat_attributes: attrs,
     }
@@ -4224,7 +4224,7 @@ fn rewrite_pattern(pat: &Pattern, arena: &mut ParseArena) -> Pattern {
 /// `Ppat_var` that location is pointer-identical to `name.loc`. Keep the same
 /// identity when arena indices differ but location contents are equal.
 fn async_lhs_loc(lhs: &Pattern, arena: &ParseArena) -> LocIdx {
-    if let PatternDesc::Ppat_var(name) = &lhs.ppat_desc {
+    if let PatternDesc::Ppat_var(name) = &*lhs.ppat_desc {
         if name.loc != lhs.ppat_loc && arena.get_location(name.loc) == arena.get_location(lhs.ppat_loc)
         {
             return name.loc;
@@ -4236,16 +4236,16 @@ fn async_lhs_loc(lhs: &Pattern, arena: &ParseArena) -> LocIdx {
 /// Rewrite an expression, desugaring pipe operators
 fn rewrite_expression(expr: &Expression, arena: &mut ParseArena) -> Expression {
     // Handle string constant transformations first
-    if let ExpressionDesc::Pexp_constant(Constant::String(s, Some(delim))) = &expr.pexp_desc {
+    if let ExpressionDesc::Pexp_constant(Constant::String(s, Some(delim))) = &*expr.pexp_desc {
         return transform_string_exp(expr, s, delim, arena);
     }
 
     // Handle integer literal suffix stripping ('l' suffix)
     // OCaml: {e with pexp_desc = Pexp_constant (Pconst_integer (s, None))}
     // This is an early-return case that preserves attributes without remapping.
-    if let ExpressionDesc::Pexp_constant(Constant::Integer(s, Some('l'))) = &expr.pexp_desc {
+    if let ExpressionDesc::Pexp_constant(Constant::Integer(s, Some('l'))) = &*expr.pexp_desc {
         return Expression {
-            pexp_desc: ExpressionDesc::Pexp_constant(Constant::Integer(s.clone(), None)),
+            pexp_desc: Box::new(ExpressionDesc::Pexp_constant(Constant::Integer(s.clone(), None))),
             pexp_loc: expr.pexp_loc,
             pexp_attributes: expr.pexp_attributes.clone(),
         };
@@ -4257,14 +4257,14 @@ fn rewrite_expression(expr: &Expression, arena: &mut ParseArena) -> Expression {
         args,
         partial: _,
         transformed_jsx: _,
-    } = &expr.pexp_desc
+    } = &*expr.pexp_desc
     {
         // Check if this is a binary op: -> or #= with two args
         if args.len() == 2
             && matches!(&args[0].0, ArgLabel::Nolabel)
             && matches!(&args[1].0, ArgLabel::Nolabel)
         {
-            if let ExpressionDesc::Pexp_ident(lid) = &funct.pexp_desc {
+            if let ExpressionDesc::Pexp_ident(lid) = &*funct.pexp_desc {
                 if let Longident::Lident(op_idx) = arena.get_longident(lid.txt) {
                     let op = arena.get_string(*op_idx);
                     if op == "->" {
@@ -4306,7 +4306,7 @@ fn desugar_hash_set(
 ) -> Expression {
     let loc = expr.pexp_loc;
 
-    match &obj_expr.pexp_desc {
+    match &*obj_expr.pexp_desc {
         ExpressionDesc::Pexp_send(obj, method_loc) => {
             let obj = rewrite_expression(obj, arena);
             let value = rewrite_expression(value_expr, arena);
@@ -4316,22 +4316,22 @@ fn desugar_hash_set(
 
             // Create Pexp_send(obj, "name#=") with the outer loc
             let send_expr = Expression {
-                pexp_desc: ExpressionDesc::Pexp_send(
+                pexp_desc: Box::new(ExpressionDesc::Pexp_send(
                     Box::new(obj),
                     Located::new(Cow::Owned(setter_name), loc),
-                ),
+                )),
                 pexp_loc: loc,
                 pexp_attributes: vec![],
             };
 
             // Create Pexp_apply(send_expr, [(Nolabel, value)]) with the outer loc
             let apply_expr = Expression {
-                pexp_desc: ExpressionDesc::Pexp_apply {
+                pexp_desc: Box::new(ExpressionDesc::Pexp_apply {
                     funct: Box::new(send_expr),
                     args: vec![(ArgLabel::Nolabel, value)],
                     partial: false,
                     transformed_jsx: false,
-                },
+                }),
                 pexp_loc: loc,
                 pexp_attributes: vec![],
             };
@@ -4339,14 +4339,14 @@ fn desugar_hash_set(
             // Reuse static Lident("unit") to mirror OCaml's Ast_literal.Lid.type_unit sharing.
             let unit_lid_idx = arena.push_lident_static("unit");
             let unit_type = CoreType {
-                ptyp_desc: CoreTypeDesc::Ptyp_constr(Located::new(unit_lid_idx, loc), vec![]),
+                ptyp_desc: Box::new(CoreTypeDesc::Ptyp_constr(Located::new(unit_lid_idx, loc), vec![])),
                 ptyp_loc: loc,
                 ptyp_attributes: vec![],
             };
 
             // Wrap in Pexp_constraint
             Expression {
-                pexp_desc: ExpressionDesc::Pexp_constraint(Box::new(apply_expr), unit_type),
+                pexp_desc: Box::new(ExpressionDesc::Pexp_constraint(Box::new(apply_expr), unit_type)),
                 pexp_loc: loc,
                 pexp_attributes: vec![],
             }
@@ -4371,17 +4371,17 @@ fn desugar_pipe(
     f: Expression,
     _arena: &mut ParseArena,
 ) -> Expression {
-    match &f.pexp_desc {
+    match &*f.pexp_desc {
         // a -> `Variant becomes `Variant(a)
         ExpressionDesc::Pexp_variant(label, None) => Expression {
-            pexp_desc: ExpressionDesc::Pexp_variant(label.clone(), Some(Box::new(a))),
+            pexp_desc: Box::new(ExpressionDesc::Pexp_variant(label.clone(), Some(Box::new(a)))),
             pexp_loc: original.pexp_loc,
             pexp_attributes: original.pexp_attributes.clone(),
         },
 
         // a -> Constructor becomes Constructor(a)
         ExpressionDesc::Pexp_construct(ctor, None) => Expression {
-            pexp_desc: ExpressionDesc::Pexp_construct(ctor.clone(), Some(Box::new(a))),
+            pexp_desc: Box::new(ExpressionDesc::Pexp_construct(ctor.clone(), Some(Box::new(a)))),
             pexp_loc: original.pexp_loc,
             pexp_attributes: original.pexp_attributes.clone(),
         },
@@ -4398,12 +4398,12 @@ fn desugar_pipe(
             new_args.extend(args.iter().cloned());
 
             Expression {
-                pexp_desc: ExpressionDesc::Pexp_apply {
+                pexp_desc: Box::new(ExpressionDesc::Pexp_apply {
                     funct: fn1.clone(),
                     args: new_args,
                     partial: *partial,
                     transformed_jsx: *transformed_jsx,
-                },
+                }),
                 pexp_loc: original.pexp_loc,
                 // Combine attributes from original and f
                 pexp_attributes: {
@@ -4419,12 +4419,12 @@ fn desugar_pipe(
         ExpressionDesc::Pexp_tuple(_) => {
             // For simplicity, just make it f(a)
             Expression {
-                pexp_desc: ExpressionDesc::Pexp_apply {
+                pexp_desc: Box::new(ExpressionDesc::Pexp_apply {
                     funct: Box::new(f),
                     args: vec![(ArgLabel::Nolabel, a)],
                     partial: false,
                     transformed_jsx: false,
-                },
+                }),
                 pexp_loc: original.pexp_loc,
                 pexp_attributes: original.pexp_attributes.clone(),
             }
@@ -4432,12 +4432,12 @@ fn desugar_pipe(
 
         // Default: a -> f becomes f(a)
         _ => Expression {
-            pexp_desc: ExpressionDesc::Pexp_apply {
+            pexp_desc: Box::new(ExpressionDesc::Pexp_apply {
                 funct: Box::new(f),
                 args: vec![(ArgLabel::Nolabel, a)],
                 partial: false,
                 transformed_jsx: false,
-            },
+            }),
             pexp_loc: original.pexp_loc,
             pexp_attributes: original.pexp_attributes.clone(),
         },
@@ -4448,7 +4448,7 @@ fn desugar_pipe(
 fn rewrite_expression_generic(expr: &Expression, arena: &mut ParseArena) -> Expression {
     arena.mark_rewritten_expr_loc(expr.pexp_loc);
 
-    let new_desc = match &expr.pexp_desc {
+    let new_desc = match &*expr.pexp_desc {
         ExpressionDesc::Pexp_ident(_) | ExpressionDesc::Pexp_constant(_) => {
             // Even for simple expressions, we need to rewrite attributes
             // to transform strings (e.g., "js" -> "*j" in @warning("-3"))
@@ -4468,15 +4468,15 @@ fn rewrite_expression_generic(expr: &Expression, arena: &mut ParseArena) -> Expr
             //   match expr with {field1, field2} -> body
             if *rec_flag == RecFlag::Nonrecursive && bindings.len() == 1 {
                 let vb = &bindings[0];
-                let is_record_pat = match &vb.pvb_pat.ppat_desc {
+                let is_record_pat = match &*vb.pvb_pat.ppat_desc {
                     PatternDesc::Ppat_record(..) => true,
                     PatternDesc::Ppat_alias(inner, _) => {
-                        matches!(&inner.ppat_desc, PatternDesc::Ppat_record(..))
+                        matches!(&*inner.ppat_desc, PatternDesc::Ppat_record(..))
                     }
                     _ => false,
                 };
                 // Don't convert if the expression is Pexp_pack (module unpacking)
-                let is_pack = matches!(&vb.pvb_expr.pexp_desc, ExpressionDesc::Pexp_pack(_));
+                let is_pack = matches!(&*vb.pvb_expr.pexp_desc, ExpressionDesc::Pexp_pack(_));
                 if is_record_pat && !is_pack {
                     let rewritten_expr = rewrite_expression(&vb.pvb_expr, arena);
                     let rewritten_pat = rewrite_pattern(&vb.pvb_pat, arena);
@@ -4486,7 +4486,7 @@ fn rewrite_expression_generic(expr: &Expression, arena: &mut ParseArena) -> Expr
                     attrs.extend(vb.pvb_attributes.iter().cloned());
                     let attrs = rewrite_attributes(&attrs, arena);
                     return Expression {
-                        pexp_desc: ExpressionDesc::Pexp_match(
+                        pexp_desc: Box::new(ExpressionDesc::Pexp_match(
                             Box::new(rewritten_expr),
                             vec![Case {
                                 pc_bar: None,
@@ -4494,7 +4494,7 @@ fn rewrite_expression_generic(expr: &Expression, arena: &mut ParseArena) -> Expr
                                 pc_guard: None,
                                 pc_rhs: rewritten_body,
                             }],
-                        ),
+                        )),
                         pexp_loc: expr.pexp_loc,
                         pexp_attributes: attrs,
                     };
@@ -4525,14 +4525,14 @@ fn rewrite_expression_generic(expr: &Expression, arena: &mut ParseArena) -> Expr
 
             // Create the rewritten fun expression
             let mut rewritten_fun = Expression {
-                pexp_desc: ExpressionDesc::Pexp_fun {
+                pexp_desc: Box::new(ExpressionDesc::Pexp_fun {
                     arg_label: arg_label.clone(),
                     default: rewritten_default,
                     lhs: rewritten_lhs,
                     rhs: rewritten_rhs,
                     arity: *arity,
                     is_async: *is_async,
-                },
+                }),
                 pexp_loc: expr.pexp_loc,
                 pexp_attributes: rewrite_attributes(&expr.pexp_attributes, arena),
             };
@@ -4573,14 +4573,14 @@ fn rewrite_expression_generic(expr: &Expression, arena: &mut ParseArena) -> Expr
                 && cases[1].pc_guard.is_none()
             {
                 let is_true = |pat: &Pattern| -> bool {
-                    if let PatternDesc::Ppat_construct(lid, None) = &pat.ppat_desc {
+                    if let PatternDesc::Ppat_construct(lid, None) = &*pat.ppat_desc {
                         matches!(arena.get_longident(lid.txt), Longident::Lident(s) if arena.get_string(*s) == "true")
                     } else {
                         false
                     }
                 };
                 let is_false = |pat: &Pattern| -> bool {
-                    if let PatternDesc::Ppat_construct(lid, None) = &pat.ppat_desc {
+                    if let PatternDesc::Ppat_construct(lid, None) = &*pat.ppat_desc {
                         matches!(arena.get_longident(lid.txt), Longident::Lident(s) if arena.get_string(*s) == "false")
                     } else {
                         false
@@ -4595,11 +4595,11 @@ fn rewrite_expression_generic(expr: &Expression, arena: &mut ParseArena) -> Expr
                 };
                 if let (Some(t_exp), Some(f_exp)) = (t_exp, f_exp) {
                     return Expression {
-                        pexp_desc: ExpressionDesc::Pexp_ifthenelse(
+                        pexp_desc: Box::new(ExpressionDesc::Pexp_ifthenelse(
                             Box::new(rewrite_expression(scrutinee, arena)),
                             Box::new(rewrite_expression(t_exp, arena)),
                             Some(Box::new(rewrite_expression(f_exp, arena))),
-                        ),
+                        )),
                         pexp_loc: expr.pexp_loc,
                         pexp_attributes: rewrite_attributes(&expr.pexp_attributes, arena),
                     };
@@ -4737,7 +4737,7 @@ fn rewrite_expression_generic(expr: &Expression, arena: &mut ParseArena) -> Expr
             //   -> module M = unpack(...) using BeltList
 
             // Check Case 1: Pmod_ident with await
-            if let ModuleExprDesc::Pmod_ident(located_lid) = &mod_expr.pmod_desc {
+            if let ModuleExprDesc::Pmod_ident(located_lid) = &*mod_expr.pmod_desc {
                 if has_await_attribute(&mod_expr.pmod_attributes, arena) {
                     // Generate module type name: __Belt_List__
                     let module_type_name = local_module_type_name(located_lid.txt, arena);
@@ -4754,11 +4754,11 @@ fn rewrite_expression_generic(expr: &Expression, arena: &mut ParseArena) -> Expr
 
                     // OCaml: {e with pexp_desc = Pexp_letmodule(lid, transformed, self.expr self expr)}
                     return Expression {
-                        pexp_desc: ExpressionDesc::Pexp_letmodule(
+                        pexp_desc: Box::new(ExpressionDesc::Pexp_letmodule(
                             name.clone(),
                             transformed_mod_expr,
                             Box::new(rewrite_expression(body, arena)),
-                        ),
+                        )),
                         pexp_loc: expr.pexp_loc,
                         pexp_attributes: expr.pexp_attributes.clone(),
                     };
@@ -4766,9 +4766,9 @@ fn rewrite_expression_generic(expr: &Expression, arena: &mut ParseArena) -> Expr
             }
 
             // Check Case 2: Pmod_constraint(Pmod_ident, Pmty_ident mtyp_lid) with await
-            if let ModuleExprDesc::Pmod_constraint(inner_mod, mty) = &mod_expr.pmod_desc {
-                if let ModuleExprDesc::Pmod_ident(_) = &inner_mod.pmod_desc {
-                    if let ModuleTypeDesc::Pmty_ident(mtyp_lid) = &mty.pmty_desc {
+            if let ModuleExprDesc::Pmod_constraint(inner_mod, mty) = &*mod_expr.pmod_desc {
+                if let ModuleExprDesc::Pmod_ident(_) = &*inner_mod.pmod_desc {
+                    if let ModuleTypeDesc::Pmty_ident(mtyp_lid) = &*mty.pmty_desc {
                         // Check for @res.await on either the inner module or the constraint
                         if has_await_attribute(&inner_mod.pmod_attributes, arena)
                             || has_await_attribute(&mod_expr.pmod_attributes, arena)
@@ -4777,11 +4777,11 @@ fn rewrite_expression_generic(expr: &Expression, arena: &mut ParseArena) -> Expr
                             let transformed_mod_expr = create_await_module_expression(mod_expr, mtyp_lid.clone(), arena);
 
                             return Expression {
-                                pexp_desc: ExpressionDesc::Pexp_letmodule(
+                                pexp_desc: Box::new(ExpressionDesc::Pexp_letmodule(
                                     name.clone(),
                                     transformed_mod_expr,
                                     Box::new(rewrite_expression(body, arena)),
-                                ),
+                                )),
                                 pexp_loc: expr.pexp_loc,
                                 pexp_attributes: expr.pexp_attributes.clone(),
                             };
@@ -4815,10 +4815,10 @@ fn rewrite_expression_generic(expr: &Expression, arena: &mut ParseArena) -> Expr
         // It preserves the original expression's attributes without remapping.
         ExpressionDesc::Pexp_newtype(name, body) => {
             return Expression {
-                pexp_desc: ExpressionDesc::Pexp_newtype(
+                pexp_desc: Box::new(ExpressionDesc::Pexp_newtype(
                     name.clone(),
                     Box::new(rewrite_expression(body, arena)),
-                ),
+                )),
                 pexp_loc: expr.pexp_loc,
                 pexp_attributes: expr.pexp_attributes.clone(),
             };
@@ -4836,7 +4836,7 @@ fn rewrite_expression_generic(expr: &Expression, arena: &mut ParseArena) -> Expr
     };
 
     Expression {
-        pexp_desc: new_desc,
+        pexp_desc: Box::new(new_desc),
         pexp_loc: expr.pexp_loc,
         pexp_attributes: rewrite_attributes(&expr.pexp_attributes, arena),
     }
@@ -4935,8 +4935,8 @@ fn parse_deriving_actions(attrs: &[Attribute], arena: &mut ParseArena) -> (Vec<D
             if let Some(items) = payload_str_items(payload) {
                 // @deriving(accessors) or @deriving({jsConverter: newType})
                 for item in items {
-                    if let StructureItemDesc::Pstr_eval(expr, _) = &item.pstr_desc {
-                        parse_deriving_expr(&expr.pexp_desc, &mut actions, arena);
+                    if let StructureItemDesc::Pstr_eval(expr, _) = &*item.pstr_desc {
+                        parse_deriving_expr(&*expr.pexp_desc, &mut actions, arena);
                     }
                 }
             }
@@ -4967,7 +4967,7 @@ fn parse_deriving_expr(expr_desc: &ExpressionDesc, actions: &mut Vec<DeriveActio
         // Tuple of identifiers: @deriving(accessors, jsConverter)
         ExpressionDesc::Pexp_tuple(exprs) => {
             for expr in exprs {
-                parse_deriving_expr(&expr.pexp_desc, actions, arena);
+                parse_deriving_expr(&*expr.pexp_desc, actions, arena);
             }
         }
         // Record: @deriving({jsConverter: newType})
@@ -4996,7 +4996,7 @@ fn parse_deriving_expr(expr_desc: &ExpressionDesc, actions: &mut Vec<DeriveActio
         // Constructor application for polymorphic variants like @deriving(jsConverter)
         ExpressionDesc::Pexp_apply { funct, args, .. } => {
             // Check if it's a simple ident being applied
-            if let ExpressionDesc::Pexp_ident(lid_loc) = &funct.pexp_desc {
+            if let ExpressionDesc::Pexp_ident(lid_loc) = &*funct.pexp_desc {
                 let lid = arena.get_longident(lid_loc.txt);
                 if let Longident::Lident(s) = lid {
                     let name = arena.get_string(*s);
@@ -5015,7 +5015,7 @@ fn parse_deriving_expr(expr_desc: &ExpressionDesc, actions: &mut Vec<DeriveActio
 
 /// Check if an expression configures newType to true
 fn check_new_type_config(expr: &Expression, arena: &mut ParseArena) -> bool {
-    match &expr.pexp_desc {
+    match &*expr.pexp_desc {
         // {newType: true} or just `newType`
         ExpressionDesc::Pexp_ident(lid_loc) => {
             let lid = arena.get_longident(lid_loc.txt);
@@ -5032,7 +5032,7 @@ fn check_new_type_config(expr: &Expression, arena: &mut ParseArena) -> bool {
                     let field_name = arena.get_string(*s);
                     if field_name == "newType" {
                         // Check if value is `true`
-                        if let ExpressionDesc::Pexp_construct(ctor_lid, None) = &field.expr.pexp_desc {
+                        if let ExpressionDesc::Pexp_construct(ctor_lid, None) = &*field.expr.pexp_desc {
                             let ctor = arena.get_longident(ctor_lid.txt);
                             if let Longident::Lident(s) = ctor {
                                 return arena.get_string(*s) == "true";
@@ -5062,21 +5062,21 @@ fn generate_accessors(
                 // Create: let fieldName = param => param.fieldName
                 let param_str = arena.intern_string("param");
                 let param_pat = Pattern {
-                    ppat_desc: PatternDesc::Ppat_constraint(
+                    ppat_desc: Box::new(PatternDesc::Ppat_constraint(
                         Box::new(Pattern {
                             ppat_desc: PatternDesc::Ppat_var(Located { txt: param_str, loc }),
                             ppat_loc: loc,
                             ppat_attributes: vec![],
                         }),
                         core_type.clone(),
-                    ),
+                    )),
                     ppat_loc: loc,
                     ppat_attributes: vec![],
                 };
 
                 // param.fieldName
                 let field_access = Expression {
-                    pexp_desc: ExpressionDesc::Pexp_field(
+                    pexp_desc: Box::new(ExpressionDesc::Pexp_field(
                         Box::new(Expression {
                             pexp_desc: ExpressionDesc::Pexp_ident(Located {
                                 txt: arena.push_lident_from_idx(param_str),
@@ -5089,30 +5089,30 @@ fn generate_accessors(
                             txt: arena.push_longident(Longident::Lident(label.pld_name.txt)),
                             loc,
                         },
-                    ),
+                    )),
                     pexp_loc: loc,
                     pexp_attributes: vec![],
                 };
 
                 let fun_expr = Expression {
-                    pexp_desc: ExpressionDesc::Pexp_fun {
+                    pexp_desc: Box::new(ExpressionDesc::Pexp_fun {
                         arg_label: ArgLabel::Nolabel,
                         default: None,
                         lhs: param_pat,
                         rhs: Box::new(field_access),
                         is_async: false,
                         arity: arena.static_ppx_arity_1(),
-                    },
+                    }),
                     pexp_loc: loc,
                     pexp_attributes: vec![],
                 };
 
                 let binding = ValueBinding {
                     pvb_pat: Pattern {
-                        ppat_desc: PatternDesc::Ppat_var(Located {
+                        ppat_desc: Box::new(PatternDesc::Ppat_var(Located {
                             txt: label.pld_name.txt,
                             loc: label.pld_name.loc,
-                        }),
+                        })),
                         ppat_loc: loc,
                         ppat_attributes: vec![],
                     },
@@ -5122,7 +5122,7 @@ fn generate_accessors(
                 };
 
                 StructureItem {
-                    pstr_desc: StructureItemDesc::Pstr_value(RecFlag::Nonrecursive, vec![binding]),
+                    pstr_desc: Box::new(StructureItemDesc::Pstr_value(RecFlag::Nonrecursive, vec![binding])),
                     pstr_loc: loc,
                 }
             }).collect()
@@ -5142,7 +5142,7 @@ fn generate_accessors(
                         let unit_str = arena.intern_string("()");
                         let unit_lid = arena.push_longident(Longident::Lident(unit_str));
                         return StructureItem {
-                            pstr_desc: StructureItemDesc::Pstr_eval(
+                            pstr_desc: Box::new(StructureItemDesc::Pstr_eval(
                                 Expression {
                                     pexp_desc: ExpressionDesc::Pexp_construct(
                                         Located { txt: unit_lid, loc },
@@ -5152,7 +5152,7 @@ fn generate_accessors(
                                     pexp_attributes: vec![],
                                 },
                                 vec![],
-                            ),
+                            )),
                             pstr_loc: loc,
                         };
                     }
@@ -5161,7 +5161,7 @@ fn generate_accessors(
                 if arity == 0 {
                     // No args: let ctorName = CtorName
                     let ctor_expr = Expression {
-                        pexp_desc: ExpressionDesc::Pexp_constraint(
+                        pexp_desc: Box::new(ExpressionDesc::Pexp_constraint(
                             Box::new(Expression {
                                 pexp_desc: ExpressionDesc::Pexp_construct(
                                     Located {
@@ -5174,14 +5174,14 @@ fn generate_accessors(
                                 pexp_attributes: vec![],
                             }),
                             core_type,
-                        ),
+                        )),
                         pexp_loc: loc,
                         pexp_attributes: vec![],
                     };
 
                     let binding = ValueBinding {
                         pvb_pat: Pattern {
-                            ppat_desc: PatternDesc::Ppat_var(Located { txt: fn_name_idx, loc }),
+                            ppat_desc: Box::new(PatternDesc::Ppat_var(Located { txt: fn_name_idx, loc })),
                             ppat_loc: loc,
                             ppat_attributes: vec![],
                         },
@@ -5191,7 +5191,7 @@ fn generate_accessors(
                     };
 
                     StructureItem {
-                        pstr_desc: StructureItemDesc::Pstr_value(RecFlag::Nonrecursive, vec![binding]),
+                        pstr_desc: Box::new(StructureItemDesc::Pstr_value(RecFlag::Nonrecursive, vec![binding])),
                         pstr_loc: loc,
                     }
                 } else {
@@ -5203,16 +5203,16 @@ fn generate_accessors(
                     // Build the constructor argument tuple
                     let ctor_arg = if arity == 1 {
                         Expression {
-                            pexp_desc: ExpressionDesc::Pexp_ident(Located {
+                            pexp_desc: Box::new(ExpressionDesc::Pexp_ident(Located {
                                 txt: arena.push_lident_from_idx(params[0]),
                                 loc,
-                            }),
+                            })),
                             pexp_loc: loc,
                             pexp_attributes: vec![],
                         }
                     } else {
                         Expression {
-                            pexp_desc: ExpressionDesc::Pexp_tuple(
+                            pexp_desc: Box::new(ExpressionDesc::Pexp_tuple(
                                 params.iter().map(|&p| Expression {
                                     pexp_desc: ExpressionDesc::Pexp_ident(Located {
                                         txt: arena.push_lident_from_idx(p),
@@ -5221,14 +5221,14 @@ fn generate_accessors(
                                     pexp_loc: loc,
                                     pexp_attributes: vec![],
                                 }).collect()
-                            ),
+                            )),
                             pexp_loc: loc,
                             pexp_attributes: vec![],
                         }
                     };
 
                     let ctor_expr = Expression {
-                        pexp_desc: ExpressionDesc::Pexp_constraint(
+                        pexp_desc: Box::new(ExpressionDesc::Pexp_constraint(
                             Box::new(Expression {
                                 pexp_desc: ExpressionDesc::Pexp_construct(
                                     Located {
@@ -5241,7 +5241,7 @@ fn generate_accessors(
                                 pexp_attributes: vec![],
                             }),
                             core_type,
-                        ),
+                        )),
                         pexp_loc: loc,
                         pexp_attributes: vec![],
                     };
@@ -5249,7 +5249,7 @@ fn generate_accessors(
                     // Wrap with function parameters (fold right)
                     let body = params.iter().rev().fold(ctor_expr, |acc, &param| {
                         Expression {
-                            pexp_desc: ExpressionDesc::Pexp_fun {
+                            pexp_desc: Box::new(ExpressionDesc::Pexp_fun {
                                 arg_label: ArgLabel::Nolabel,
                                 default: None,
                                 lhs: Pattern {
@@ -5260,7 +5260,7 @@ fn generate_accessors(
                                 rhs: Box::new(acc),
                                 is_async: false,
                                 arity: arena.push_arity(None), // Inner functions have no arity annotation
-                            },
+                            }),
                             pexp_loc: loc,
                             pexp_attributes: vec![],
                         }
@@ -5271,7 +5271,7 @@ fn generate_accessors(
 
                     let binding = ValueBinding {
                         pvb_pat: Pattern {
-                            ppat_desc: PatternDesc::Ppat_var(Located { txt: fn_name_idx, loc }),
+                            ppat_desc: Box::new(PatternDesc::Ppat_var(Located { txt: fn_name_idx, loc })),
                             ppat_loc: loc,
                             ppat_attributes: vec![],
                         },
@@ -5281,7 +5281,7 @@ fn generate_accessors(
                     };
 
                     StructureItem {
-                        pstr_desc: StructureItemDesc::Pstr_value(RecFlag::Nonrecursive, vec![binding]),
+                        pstr_desc: Box::new(StructureItemDesc::Pstr_value(RecFlag::Nonrecursive, vec![binding])),
                         pstr_loc: loc,
                     }
                 }
@@ -5295,14 +5295,14 @@ fn generate_accessors(
 fn set_outermost_arity(expr: Expression, arity: i32, arena: &mut ParseArena) -> Expression {
     if let ExpressionDesc::Pexp_fun { arg_label, default, lhs, rhs, is_async, arity: _ } = expr.pexp_desc {
         Expression {
-            pexp_desc: ExpressionDesc::Pexp_fun {
+            pexp_desc: Box::new(ExpressionDesc::Pexp_fun {
                 arg_label,
                 default,
                 lhs,
                 rhs,
                 is_async,
                 arity: arena.push_arity(Some(arity)),
-            },
+            }),
             pexp_loc: expr.pexp_loc,
             pexp_attributes: expr.pexp_attributes,
         }
@@ -5323,10 +5323,10 @@ fn core_type_of_type_declaration(tdcl: &TypeDeclaration, arena: &mut ParseArena)
 
     if tdcl.ptype_params.is_empty() {
         CoreType {
-            ptyp_desc: CoreTypeDesc::Ptyp_constr(
+            ptyp_desc: Box::new(CoreTypeDesc::Ptyp_constr(
                 Located { txt: name_lid, loc: name_loc },
                 vec![],
-            ),
+            )),
             ptyp_loc,
             ptyp_attributes: vec![],
         }
@@ -5336,10 +5336,10 @@ fn core_type_of_type_declaration(tdcl: &TypeDeclaration, arena: &mut ParseArena)
             core_type.clone()
         }).collect();
         CoreType {
-            ptyp_desc: CoreTypeDesc::Ptyp_constr(
+            ptyp_desc: Box::new(CoreTypeDesc::Ptyp_constr(
                 Located { txt: name_lid, loc: name_loc },
                 type_args,
-            ),
+            )),
             ptyp_loc,
             ptyp_attributes: vec![],
         }
@@ -5368,7 +5368,7 @@ fn uncapitalize_first(s: &str) -> String {
 /// Check if a type declaration is an enum polyvariant (all nullary tags)
 fn is_enum_polyvar(tdcl: &TypeDeclaration) -> Option<&[RowField]> {
     if let Some(manifest) = &tdcl.ptype_manifest {
-        if let CoreTypeDesc::Ptyp_variant(row_fields, closed_flag, None) = &manifest.ptyp_desc {
+        if let CoreTypeDesc::Ptyp_variant(row_fields, closed_flag, None) = &*manifest.ptyp_desc {
             if *closed_flag == current::ClosedFlag::Closed {
                 // Check all tags are nullary (empty type list)
                 // RowField::Rtag(name_loc, attrs, is_constant, types)
@@ -5394,9 +5394,9 @@ fn get_as_string_value(attrs: &[Attribute], arena: &ParseArena) -> Option<String
         if name == "as" {
             if let Some(items) = payload_str_items(payload) {
                 if let Some(item) = items.first() {
-                    if let StructureItemDesc::Pstr_eval(expr, _) = &item.pstr_desc {
+                    if let StructureItemDesc::Pstr_eval(expr, _) = &*item.pstr_desc {
                         // Constant::String(txt_str, delim)
-                        if let ExpressionDesc::Pexp_constant(Constant::String(txt_str, _delim)) = &expr.pexp_desc {
+                        if let ExpressionDesc::Pexp_constant(Constant::String(txt_str, _delim)) = &*expr.pexp_desc {
                             return Some(txt_str.to_string());
                         }
                     }
@@ -5468,13 +5468,13 @@ fn create_erase_type_str(arena: &mut ParseArena) -> StructureItem {
 
     // Type: 'a => 'a (Ptyp_any => Ptyp_any)
     let any_type = CoreType {
-        ptyp_desc: CoreTypeDesc::Ptyp_any,
+        ptyp_desc: Box::new(CoreTypeDesc::Ptyp_any),
         ptyp_loc: none_loc,
         ptyp_attributes: vec![],
     };
 
     let arrow_type = CoreType {
-        ptyp_desc: CoreTypeDesc::Ptyp_arrow {
+        ptyp_desc: Box::new(CoreTypeDesc::Ptyp_arrow {
             arg: Box::new(TypeArg {
                 attrs: vec![],
                 lbl: ArgLabel::Nolabel,
@@ -5482,7 +5482,7 @@ fn create_erase_type_str(arena: &mut ParseArena) -> StructureItem {
             }),
             ret: Box::new(any_type),
             arity: arena.push_arity(Some(1)),  // OCaml's Typ.arrows computes Some(List.length args) - fresh each call
-        },
+        }),
         ptyp_loc: none_loc,
         ptyp_attributes: vec![],
     };
@@ -5496,7 +5496,7 @@ fn create_erase_type_str(arena: &mut ParseArena) -> StructureItem {
     };
 
     StructureItem {
-        pstr_desc: StructureItemDesc::Pstr_primitive(val_desc),
+        pstr_desc: Box::new(StructureItemDesc::Pstr_primitive(val_desc)),
         pstr_loc: none_loc,
     }
 }
@@ -5508,14 +5508,14 @@ fn create_unsafe_index_get_str(arena: &mut ParseArena) -> StructureItem {
 
     // Type: 'a => 'b => 'c
     let any_type = CoreType {
-        ptyp_desc: CoreTypeDesc::Ptyp_any,
+        ptyp_desc: Box::new(CoreTypeDesc::Ptyp_any),
         ptyp_loc: none_loc,
         ptyp_attributes: vec![],
     };
 
     // Inner arrow: 'b => 'c
     let inner_arrow = CoreType {
-        ptyp_desc: CoreTypeDesc::Ptyp_arrow {
+        ptyp_desc: Box::new(CoreTypeDesc::Ptyp_arrow {
             arg: Box::new(TypeArg {
                 attrs: vec![],
                 lbl: ArgLabel::Nolabel,
@@ -5523,14 +5523,14 @@ fn create_unsafe_index_get_str(arena: &mut ParseArena) -> StructureItem {
             }),
             ret: Box::new(any_type.clone()),
             arity: arena.push_arity(None), // None for inner arrows
-        },
+        }),
         ptyp_loc: none_loc,
         ptyp_attributes: vec![],
     };
 
     // Outer arrow: 'a => ('b => 'c)
     let arrow_type = CoreType {
-        ptyp_desc: CoreTypeDesc::Ptyp_arrow {
+        ptyp_desc: Box::new(CoreTypeDesc::Ptyp_arrow {
             arg: Box::new(TypeArg {
                 attrs: vec![],
                 lbl: ArgLabel::Nolabel,
@@ -5538,7 +5538,7 @@ fn create_unsafe_index_get_str(arena: &mut ParseArena) -> StructureItem {
             }),
             ret: Box::new(inner_arrow),
             arity: arena.push_arity(Some(2)),
-        },
+        }),
         ptyp_loc: none_loc,
         ptyp_attributes: vec![],
     };
@@ -5562,7 +5562,7 @@ fn create_unsafe_index_get_str(arena: &mut ParseArena) -> StructureItem {
     };
 
     StructureItem {
-        pstr_desc: StructureItemDesc::Pstr_primitive(val_desc),
+        pstr_desc: Box::new(StructureItemDesc::Pstr_primitive(val_desc)),
         pstr_loc: none_loc,
     }
 }
@@ -5582,12 +5582,12 @@ fn create_map_binding(
 
     // Create the module structure with external unsafe_expr: 'a => 'a = "#raw_expr"
     let any_type = CoreType {
-        ptyp_desc: CoreTypeDesc::Ptyp_any,
+        ptyp_desc: Box::new(CoreTypeDesc::Ptyp_any),
         ptyp_loc: none_loc,
         ptyp_attributes: vec![],
     };
     let arrow_type = CoreType {
-        ptyp_desc: CoreTypeDesc::Ptyp_arrow {
+        ptyp_desc: Box::new(CoreTypeDesc::Ptyp_arrow {
             arg: Box::new(TypeArg {
                 attrs: vec![],
                 lbl: ArgLabel::Nolabel,
@@ -5595,7 +5595,7 @@ fn create_map_binding(
             }),
             ret: Box::new(any_type),
             arity: arena.push_arity(Some(1)),  // OCaml's Typ.arrows computes Some(List.length args) - fresh each call
-        },
+        }),
         ptyp_loc: none_loc,
         ptyp_attributes: vec![],
     };
@@ -5609,43 +5609,43 @@ fn create_map_binding(
     };
 
     let module_structure = vec![StructureItem {
-        pstr_desc: StructureItemDesc::Pstr_primitive(unsafe_expr_prim),
+        pstr_desc: Box::new(StructureItemDesc::Pstr_primitive(unsafe_expr_prim)),
         pstr_loc: loc,
     }];
 
     let module_expr = ModuleExpr {
-        pmod_desc: ModuleExprDesc::Pmod_structure(module_structure),
+        pmod_desc: Box::new(ModuleExprDesc::Pmod_structure(module_structure)),
         pmod_loc: loc,
         pmod_attributes: vec![],
     };
 
     // Create J.unsafe_expr(json_str) application
     let j_unsafe_expr = Expression {
-        pexp_desc: ExpressionDesc::Pexp_ident(Located {
+        pexp_desc: Box::new(ExpressionDesc::Pexp_ident(Located {
             txt: arena.push_longident(Longident::Ldot(
                 Box::new(Longident::Lident(module_name_idx)),
                 unsafe_expr_idx,
             )),
             loc,
-        }),
+        })),
         pexp_loc: loc,
         pexp_attributes: vec![],
     };
 
     // Constant::String(txt_string, delim_option)
     let json_const = Expression {
-        pexp_desc: ExpressionDesc::Pexp_constant(Constant::String(Cow::Owned(json_str.to_string()), None)),
+        pexp_desc: Box::new(ExpressionDesc::Pexp_constant(Constant::String(Cow::Owned(json_str.to_string()), None))),
         pexp_loc: none_loc,
         pexp_attributes: vec![],
     };
 
     let apply_expr = Expression {
-        pexp_desc: ExpressionDesc::Pexp_apply {
+        pexp_desc: Box::new(ExpressionDesc::Pexp_apply {
             funct: Box::new(j_unsafe_expr),
             args: vec![(ArgLabel::Nolabel, json_const)],
             partial: false,
             transformed_jsx: false,
-        },
+        }),
         pexp_loc: loc,
         pexp_attributes: vec![],
     };
@@ -5654,11 +5654,11 @@ fn create_map_binding(
     // Pexp_letmodule(StringLoc, ModuleExpr, Box<Expression>)
     // StringLoc is Located<StrIdx>
     let letmodule_expr = Expression {
-        pexp_desc: ExpressionDesc::Pexp_letmodule(
+        pexp_desc: Box::new(ExpressionDesc::Pexp_letmodule(
             Located { txt: module_name_idx, loc },
             module_expr,
             Box::new(apply_expr),
-        ),
+        )),
         pexp_loc: none_loc,
         pexp_attributes: vec![],
     };
@@ -5668,7 +5668,7 @@ fn create_map_binding(
     // But pattern wrapper location is ghost (Pat.var has no ~loc parameter)
     let binding = ValueBinding {
         pvb_pat: Pattern {
-            ppat_desc: PatternDesc::Ppat_var(Located { txt: var_name_idx, loc }),
+            ppat_desc: Box::new(PatternDesc::Ppat_var(Located { txt: var_name_idx, loc })),
             ppat_loc: none_loc,
             ppat_attributes: vec![],
         },
@@ -5678,7 +5678,7 @@ fn create_map_binding(
     };
 
     StructureItem {
-        pstr_desc: StructureItemDesc::Pstr_value(RecFlag::Nonrecursive, vec![binding]),
+        pstr_desc: Box::new(StructureItemDesc::Pstr_value(RecFlag::Nonrecursive, vec![binding])),
         pstr_loc: none_loc,
     }
 }
@@ -5690,17 +5690,17 @@ fn create_rev_map_ref_binding(loc: LocIdx, arena: &mut ParseArena) -> StructureI
     let map_name = arena.intern_string("_map");
 
     let map_ref = Expression {
-        pexp_desc: ExpressionDesc::Pexp_ident(Located {
+        pexp_desc: Box::new(ExpressionDesc::Pexp_ident(Located {
             txt: arena.push_longident(Longident::Lident(map_name)),
             loc,
-        }),
+        })),
         pexp_loc: none_loc,
         pexp_attributes: vec![],
     };
 
     let binding = ValueBinding {
         pvb_pat: Pattern {
-            ppat_desc: PatternDesc::Ppat_var(Located { txt: rev_map_name, loc }), // OCaml: {loc; txt = rev_map}
+            ppat_desc: Box::new(PatternDesc::Ppat_var(Located { txt: rev_map_name, loc }),) // OCaml: {loc; txt = rev_map}
             ppat_loc: none_loc,
             ppat_attributes: vec![],
         },
@@ -5710,7 +5710,7 @@ fn create_rev_map_ref_binding(loc: LocIdx, arena: &mut ParseArena) -> StructureI
     };
 
     StructureItem {
-        pstr_desc: StructureItemDesc::Pstr_value(RecFlag::Nonrecursive, vec![binding]),
+        pstr_desc: Box::new(StructureItemDesc::Pstr_value(RecFlag::Nonrecursive, vec![binding])),
         pstr_loc: none_loc,
     }
 }
@@ -5735,31 +5735,31 @@ fn create_to_js_function(
     let body_expr = if has_bs_as {
         // _index(_map, param)
         let index_ident = Expression {
-            pexp_desc: ExpressionDesc::Pexp_ident(Located {
+            pexp_desc: Box::new(ExpressionDesc::Pexp_ident(Located {
                 txt: index_lid,
                 loc: none_loc,
-            }),
+            })),
             pexp_loc: none_loc,
             pexp_attributes: vec![],
         };
         let map_ident = Expression {
-            pexp_desc: ExpressionDesc::Pexp_ident(Located {
+            pexp_desc: Box::new(ExpressionDesc::Pexp_ident(Located {
                 txt: map_lid,
                 loc,
-            }),
+            })),
             pexp_loc: none_loc,
             pexp_attributes: vec![],
         };
         let param_ident = Expression {
-            pexp_desc: ExpressionDesc::Pexp_ident(Located {
+            pexp_desc: Box::new(ExpressionDesc::Pexp_ident(Located {
                 txt: param_lid,
                 loc,
-            }),
+            })),
             pexp_loc: none_loc,
             pexp_attributes: vec![],
         };
         Expression {
-            pexp_desc: ExpressionDesc::Pexp_apply {
+            pexp_desc: Box::new(ExpressionDesc::Pexp_apply {
                 funct: Box::new(index_ident),
                 args: vec![
                     (ArgLabel::Nolabel, map_ident),
@@ -5767,35 +5767,35 @@ fn create_to_js_function(
                 ],
                 partial: false,
                 transformed_jsx: false,
-            },
+            }),
             pexp_loc: none_loc,
             pexp_attributes: vec![],
         }
     } else {
         // _eraseType(param)
         let erase_ident = Expression {
-            pexp_desc: ExpressionDesc::Pexp_ident(Located {
+            pexp_desc: Box::new(ExpressionDesc::Pexp_ident(Located {
                 txt: erase_type_lid,
                 loc: none_loc,
-            }),
+            })),
             pexp_loc: none_loc,
             pexp_attributes: vec![],
         };
         let param_ident = Expression {
-            pexp_desc: ExpressionDesc::Pexp_ident(Located {
+            pexp_desc: Box::new(ExpressionDesc::Pexp_ident(Located {
                 txt: param_lid,
                 loc,
-            }),
+            })),
             pexp_loc: none_loc,
             pexp_attributes: vec![],
         };
         Expression {
-            pexp_desc: ExpressionDesc::Pexp_apply {
+            pexp_desc: Box::new(ExpressionDesc::Pexp_apply {
                 funct: Box::new(erase_ident),
                 args: vec![(ArgLabel::Nolabel, param_ident)],
                 partial: false,
                 transformed_jsx: false,
-            },
+            }),
             pexp_loc: none_loc,
             pexp_attributes: vec![],
         }
@@ -5803,27 +5803,27 @@ fn create_to_js_function(
 
     // Pattern: (param: color)
     let param_pat = Pattern {
-        ppat_desc: PatternDesc::Ppat_constraint(
+        ppat_desc: Box::new(PatternDesc::Ppat_constraint(
             Box::new(Pattern {
                 ppat_desc: PatternDesc::Ppat_var(Located { txt: param_name, loc }),
                 ppat_loc: none_loc,
                 ppat_attributes: vec![],
             }),
             core_type.clone(),
-        ),
+        )),
         ppat_loc: none_loc,
         ppat_attributes: vec![],
     };
 
     let fun_expr = Expression {
-        pexp_desc: ExpressionDesc::Pexp_fun {
+        pexp_desc: Box::new(ExpressionDesc::Pexp_fun {
             arg_label: ArgLabel::Nolabel,
             default: None,
             lhs: param_pat,
             rhs: Box::new(body_expr),
             is_async: false,
             arity: arena.static_ppx_arity_1(),
-        },
+        }),
         pexp_loc: none_loc,
         pexp_attributes: vec![],
     };
@@ -5831,7 +5831,7 @@ fn create_to_js_function(
     let binding = ValueBinding {
         pvb_pat: Pattern {
             // OCaml uses tdcl.ptype_loc for function name pattern variable
-            ppat_desc: PatternDesc::Ppat_var(Located { txt: fn_name_idx, loc }),
+            ppat_desc: Box::new(PatternDesc::Ppat_var(Located { txt: fn_name_idx, loc })),
             ppat_loc: none_loc,
             ppat_attributes: vec![],
         },
@@ -5841,7 +5841,7 @@ fn create_to_js_function(
     };
 
     StructureItem {
-        pstr_desc: StructureItemDesc::Pstr_value(RecFlag::Nonrecursive, vec![binding]),
+        pstr_desc: Box::new(StructureItemDesc::Pstr_value(RecFlag::Nonrecursive, vec![binding])),
         pstr_loc: none_loc,
     }
 }
@@ -5860,32 +5860,32 @@ fn create_from_js_function(
 
     // _index(_revMap, param)
     let index_ident = Expression {
-        pexp_desc: ExpressionDesc::Pexp_ident(Located {
+        pexp_desc: Box::new(ExpressionDesc::Pexp_ident(Located {
             txt: index_lid,
             loc: none_loc,
-        }),
+        })),
         pexp_loc: none_loc,
         pexp_attributes: vec![],
     };
     let rev_map_ident = Expression {
-        pexp_desc: ExpressionDesc::Pexp_ident(Located {
+        pexp_desc: Box::new(ExpressionDesc::Pexp_ident(Located {
             txt: rev_map_lid,
             loc,
-        }),
+        })),
         pexp_loc: none_loc,
         pexp_attributes: vec![],
     };
     let param_ident = Expression {
-        pexp_desc: ExpressionDesc::Pexp_ident(Located {
+        pexp_desc: Box::new(ExpressionDesc::Pexp_ident(Located {
             txt: param_lid,
             loc,
-        }),
+        })),
         pexp_loc: none_loc,
         pexp_attributes: vec![],
     };
 
     let body_expr = Expression {
-        pexp_desc: ExpressionDesc::Pexp_apply {
+        pexp_desc: Box::new(ExpressionDesc::Pexp_apply {
             funct: Box::new(index_ident),
             args: vec![
                 (ArgLabel::Nolabel, rev_map_ident),
@@ -5893,26 +5893,26 @@ fn create_from_js_function(
             ],
             partial: false,
             transformed_jsx: false,
-        },
+        }),
         pexp_loc: none_loc,
         pexp_attributes: vec![],
     };
 
     let param_pat = Pattern {
-        ppat_desc: PatternDesc::Ppat_var(Located { txt: param_name, loc }),
+        ppat_desc: Box::new(PatternDesc::Ppat_var(Located { txt: param_name, loc })),
         ppat_loc: none_loc,
         ppat_attributes: vec![],
     };
 
     let fun_expr = Expression {
-        pexp_desc: ExpressionDesc::Pexp_fun {
+        pexp_desc: Box::new(ExpressionDesc::Pexp_fun {
             arg_label: ArgLabel::Nolabel,
             default: None,
             lhs: param_pat,
             rhs: Box::new(body_expr),
             is_async: false,
             arity: arena.static_ppx_arity_1(),
-        },
+        }),
         pexp_loc: none_loc,
         pexp_attributes: vec![],
     };
@@ -5920,7 +5920,7 @@ fn create_from_js_function(
     let binding = ValueBinding {
         pvb_pat: Pattern {
             // OCaml uses tdcl.ptype_loc for function name pattern variable
-            ppat_desc: PatternDesc::Ppat_var(Located { txt: fn_name_idx, loc }),
+            ppat_desc: Box::new(PatternDesc::Ppat_var(Located { txt: fn_name_idx, loc })),
             ppat_loc: none_loc,
             ppat_attributes: vec![],
         },
@@ -5930,7 +5930,7 @@ fn create_from_js_function(
     };
 
     StructureItem {
-        pstr_desc: StructureItemDesc::Pstr_value(RecFlag::Nonrecursive, vec![binding]),
+        pstr_desc: Box::new(StructureItemDesc::Pstr_value(RecFlag::Nonrecursive, vec![binding])),
         pstr_loc: none_loc,
     }
 }
@@ -5946,19 +5946,19 @@ fn create_to_js_sig(
     let none_loc = arena.none_loc();
 
     let string_type = CoreType {
-        ptyp_desc: CoreTypeDesc::Ptyp_constr(
+        ptyp_desc: Box::new(CoreTypeDesc::Ptyp_constr(
             Located {
                 txt: string_lid,
                 loc: none_loc,
             },
             vec![],
-        ),
+        )),
         ptyp_loc: none_loc,
         ptyp_attributes: vec![],
     };
 
     let arrow_type = CoreType {
-        ptyp_desc: CoreTypeDesc::Ptyp_arrow {
+        ptyp_desc: Box::new(CoreTypeDesc::Ptyp_arrow {
             arg: Box::new(TypeArg {
                 attrs: vec![],
                 lbl: ArgLabel::Nolabel,
@@ -5966,7 +5966,7 @@ fn create_to_js_sig(
             }),
             ret: Box::new(string_type),
             arity: arena.push_arity(Some(1)),  // OCaml's Typ.arrows computes fresh arity
-        },
+        }),
         ptyp_loc: none_loc,
         ptyp_attributes: vec![],
     };
@@ -5980,7 +5980,7 @@ fn create_to_js_sig(
     };
 
     SignatureItem {
-        psig_desc: SignatureItemDesc::Psig_value(val_desc),
+        psig_desc: Box::new(SignatureItemDesc::Psig_value(val_desc)),
         psig_loc: none_loc,
     }
 }
@@ -5996,32 +5996,32 @@ fn create_from_js_sig(
     let none_loc = arena.none_loc();
 
     let string_type = CoreType {
-        ptyp_desc: CoreTypeDesc::Ptyp_constr(
+        ptyp_desc: Box::new(CoreTypeDesc::Ptyp_constr(
             Located {
                 txt: string_lid,
                 loc: none_loc,
             },
             vec![],
-        ),
+        )),
         ptyp_loc: none_loc,
         ptyp_attributes: vec![],
     };
 
     // option<color> = *predef*.option<color>
     let option_type = CoreType {
-        ptyp_desc: CoreTypeDesc::Ptyp_constr(
+        ptyp_desc: Box::new(CoreTypeDesc::Ptyp_constr(
             Located {
                 txt: arena.predef_option_lident(),
                 loc: none_loc,
             },
             vec![core_type.clone()],
-        ),
+        )),
         ptyp_loc: none_loc,
         ptyp_attributes: vec![],
     };
 
     let arrow_type = CoreType {
-        ptyp_desc: CoreTypeDesc::Ptyp_arrow {
+        ptyp_desc: Box::new(CoreTypeDesc::Ptyp_arrow {
             arg: Box::new(TypeArg {
                 attrs: vec![],
                 lbl: ArgLabel::Nolabel,
@@ -6029,7 +6029,7 @@ fn create_from_js_sig(
             }),
             ret: Box::new(option_type),
             arity: arena.push_arity(Some(1)),  // OCaml's Typ.arrows computes fresh arity
-        },
+        }),
         ptyp_loc: none_loc,
         ptyp_attributes: vec![],
     };
@@ -6043,7 +6043,7 @@ fn create_from_js_sig(
     };
 
     SignatureItem {
-        psig_desc: SignatureItemDesc::Psig_value(val_desc),
+        psig_desc: Box::new(SignatureItemDesc::Psig_value(val_desc)),
         psig_loc: none_loc,
     }
 }
@@ -6229,7 +6229,7 @@ fn create_new_type_declaration(
     };
 
     StructureItem {
-        pstr_desc: StructureItemDesc::Pstr_type(RecFlag::Nonrecursive, vec![new_tdcl]),
+        pstr_desc: Box::new(StructureItemDesc::Pstr_type(RecFlag::Nonrecursive, vec![new_tdcl])),
         pstr_loc: none_loc,
     }
 }
@@ -6256,7 +6256,7 @@ fn create_new_type_sig_declaration(
     };
 
     SignatureItem {
-        psig_desc: SignatureItemDesc::Psig_type(RecFlag::Nonrecursive, vec![new_tdcl]),
+        psig_desc: Box::new(SignatureItemDesc::Psig_type(RecFlag::Nonrecursive, vec![new_tdcl])),
         psig_loc: none_loc,
     }
 }
@@ -6279,14 +6279,14 @@ fn create_record_to_js_function(
 
     // Pattern: (param: <core_type>)
     let param_pat = Pattern {
-        ppat_desc: PatternDesc::Ppat_constraint(
+        ppat_desc: Box::new(PatternDesc::Ppat_constraint(
             Box::new(Pattern {
                 ppat_desc: PatternDesc::Ppat_var(Located { txt: param_str, loc }),
                 ppat_loc: none_loc,
                 ppat_attributes: vec![],
             }),
             core_type.clone(),
-        ),
+        )),
         ppat_loc: none_loc,
         ppat_attributes: vec![],
     };
@@ -6306,7 +6306,7 @@ fn create_record_to_js_function(
 
             // param.field (Pexp_field uses field_loc for the label, none_loc for expressions)
             let field_access = Expression {
-                pexp_desc: ExpressionDesc::Pexp_field(
+                pexp_desc: Box::new(ExpressionDesc::Pexp_field(
                     Box::new(Expression {
                         pexp_desc: ExpressionDesc::Pexp_ident(Located {
                             txt: arena.push_lident_from_idx(param_str),
@@ -6316,7 +6316,7 @@ fn create_record_to_js_function(
                         pexp_attributes: vec![],
                     }),
                     lid.clone(),
-                ),
+                )),
                 pexp_loc: none_loc, // Exp.field uses !default_loc (ghost)
                 pexp_attributes: vec![],
             };
@@ -6330,7 +6330,7 @@ fn create_record_to_js_function(
         .collect();
 
     let record_expr = Expression {
-        pexp_desc: ExpressionDesc::Pexp_record(record_fields, None),
+        pexp_desc: Box::new(ExpressionDesc::Pexp_record(record_fields, None)),
         pexp_loc: none_loc,
         pexp_attributes: vec![],
     };
@@ -6339,13 +6339,13 @@ fn create_record_to_js_function(
     // This creates a Pexp_letmodule with the proper FFI structure
     let obj_ext_name = Located { txt: arena.intern_string("obj"), loc };
     let obj_payload = Payload::PStr(vec![StructureItem {
-        pstr_desc: StructureItemDesc::Pstr_eval(record_expr.clone(), vec![]),
+        pstr_desc: Box::new(StructureItemDesc::Pstr_eval(record_expr.clone(), vec![])),
         pstr_loc: none_loc,
     }]);
 
     // Create a dummy expression with the extension
     let dummy_ext_expr = Expression {
-        pexp_desc: ExpressionDesc::Pexp_extension((obj_ext_name.clone(), obj_payload.clone())),
+        pexp_desc: Box::new(ExpressionDesc::Pexp_extension((obj_ext_name.clone(), obj_payload.clone()))),
         pexp_loc: none_loc,
         pexp_attributes: vec![],
     };
@@ -6361,7 +6361,7 @@ fn create_record_to_js_function(
         // erase_type(obj_extension) :> new_type
         let erase_type_ident = arena.intern_string("_eraseType");
         let erase_app = Expression {
-            pexp_desc: ExpressionDesc::Pexp_apply {
+            pexp_desc: Box::new(ExpressionDesc::Pexp_apply {
                 funct: Box::new(Expression {
                     pexp_desc: ExpressionDesc::Pexp_ident(Located {
                         txt: arena.push_longident(Longident::Lident(erase_type_ident)),
@@ -6373,14 +6373,14 @@ fn create_record_to_js_function(
                 args: vec![(ArgLabel::Nolabel, obj_extension)],
                 partial: false,
                 transformed_jsx: false,
-            },
+            }),
             pexp_loc: none_loc,
             pexp_attributes: vec![],
         };
 
         // Constraint to new type
         Expression {
-            pexp_desc: ExpressionDesc::Pexp_constraint(Box::new(erase_app), new_type),
+            pexp_desc: Box::new(ExpressionDesc::Pexp_constraint(Box::new(erase_app), new_type)),
             pexp_loc: none_loc,
             pexp_attributes: vec![],
         }
@@ -6390,14 +6390,14 @@ fn create_record_to_js_function(
 
     // Function: fun param => body
     let fun_expr = Expression {
-        pexp_desc: ExpressionDesc::Pexp_fun {
+        pexp_desc: Box::new(ExpressionDesc::Pexp_fun {
             arg_label: ArgLabel::Nolabel,
             default: None,
             lhs: param_pat,
             rhs: Box::new(body),
             is_async: false,
             arity: arena.static_ppx_arity_1(),
-        },
+        }),
         pexp_loc: none_loc,
         pexp_attributes: vec![],
     };
@@ -6405,7 +6405,7 @@ fn create_record_to_js_function(
     // Value binding: let <name>ToJs = fun param => body
     let binding = ValueBinding {
         pvb_pat: Pattern {
-            ppat_desc: PatternDesc::Ppat_var(Located { txt: to_js_name_idx, loc }),
+            ppat_desc: Box::new(PatternDesc::Ppat_var(Located { txt: to_js_name_idx, loc })),
             ppat_loc: none_loc,
             ppat_attributes: vec![],
         },
@@ -6415,7 +6415,7 @@ fn create_record_to_js_function(
     };
 
     StructureItem {
-        pstr_desc: StructureItemDesc::Pstr_value(RecFlag::Nonrecursive, vec![binding]),
+        pstr_desc: Box::new(StructureItemDesc::Pstr_value(RecFlag::Nonrecursive, vec![binding])),
         pstr_loc: none_loc,
     }
 }
@@ -6437,7 +6437,7 @@ fn create_record_from_js_function(
 
     // Pattern: param (no constraint for fromJs)
     let param_pat = Pattern {
-        ppat_desc: PatternDesc::Ppat_var(Located { txt: param_str, loc }),
+        ppat_desc: Box::new(PatternDesc::Ppat_var(Located { txt: param_str, loc })),
         ppat_loc: none_loc,
         ppat_attributes: vec![],
     };
@@ -6459,7 +6459,7 @@ fn create_record_from_js_function(
             // OCaml: js_field uses o.pexp_loc for ## ident, and label loc comes from the label parameter
             let field_name_str = arena.get_string(field_name).to_string();
             let js_field = Expression {
-                pexp_desc: ExpressionDesc::Pexp_send(
+                pexp_desc: Box::new(ExpressionDesc::Pexp_send(
                     Box::new(Expression {
                         pexp_desc: ExpressionDesc::Pexp_ident(Located {
                             txt: arena.push_lident_from_idx(param_str),
@@ -6469,7 +6469,7 @@ fn create_record_from_js_function(
                         pexp_attributes: vec![],
                     }),
                     Located { txt: Cow::Owned(field_name_str), loc: none_loc }, // Exp.ident m uses !default_loc
-                ),
+                )),
                 pexp_loc: none_loc, // js_field result uses !default_loc (ghost)
                 pexp_attributes: vec![],
             };
@@ -6483,14 +6483,14 @@ fn create_record_from_js_function(
         .collect();
 
     let record_expr = Expression {
-        pexp_desc: ExpressionDesc::Pexp_record(record_fields, None),
+        pexp_desc: Box::new(ExpressionDesc::Pexp_record(record_fields, None)),
         pexp_loc: none_loc,
         pexp_attributes: vec![],
     };
 
     // Constrain to core_type
     let constrained_record = Expression {
-        pexp_desc: ExpressionDesc::Pexp_constraint(Box::new(record_expr), core_type.clone()),
+        pexp_desc: Box::new(ExpressionDesc::Pexp_constraint(Box::new(record_expr), core_type.clone())),
         pexp_loc: none_loc,
         pexp_attributes: vec![],
     };
@@ -6502,7 +6502,7 @@ fn create_record_from_js_function(
 
         // erase_type (param :> new_type)
         let constrained_param = Expression {
-            pexp_desc: ExpressionDesc::Pexp_constraint(
+            pexp_desc: Box::new(ExpressionDesc::Pexp_constraint(
                 Box::new(Expression {
                     pexp_desc: ExpressionDesc::Pexp_ident(Located {
                         txt: arena.push_lident_from_idx(param_str),
@@ -6512,13 +6512,13 @@ fn create_record_from_js_function(
                     pexp_attributes: vec![],
                 }),
                 new_type,
-            ),
+            )),
             pexp_loc: none_loc,
             pexp_attributes: vec![],
         };
 
         let erase_app = Expression {
-            pexp_desc: ExpressionDesc::Pexp_apply {
+            pexp_desc: Box::new(ExpressionDesc::Pexp_apply {
                 funct: Box::new(Expression {
                     pexp_desc: ExpressionDesc::Pexp_ident(Located {
                         txt: arena.push_longident(Longident::Lident(erase_type_ident)),
@@ -6530,14 +6530,14 @@ fn create_record_from_js_function(
                 args: vec![(ArgLabel::Nolabel, constrained_param)],
                 partial: false,
                 transformed_jsx: false,
-            },
+            }),
             pexp_loc: none_loc,
             pexp_attributes: vec![],
         };
 
         // let param = erase_type(...) in constrained_record
         Expression {
-            pexp_desc: ExpressionDesc::Pexp_let(
+            pexp_desc: Box::new(ExpressionDesc::Pexp_let(
                 RecFlag::Nonrecursive,
                 vec![ValueBinding {
                     pvb_pat: Pattern {
@@ -6550,7 +6550,7 @@ fn create_record_from_js_function(
                     pvb_loc: none_loc,
                 }],
                 Box::new(constrained_record),
-            ),
+            )),
             pexp_loc: none_loc,
             pexp_attributes: vec![],
         }
@@ -6560,14 +6560,14 @@ fn create_record_from_js_function(
 
     // Function: fun param => body
     let fun_expr = Expression {
-        pexp_desc: ExpressionDesc::Pexp_fun {
+        pexp_desc: Box::new(ExpressionDesc::Pexp_fun {
             arg_label: ArgLabel::Nolabel,
             default: None,
             lhs: param_pat,
             rhs: Box::new(body),
             is_async: false,
             arity: arena.static_ppx_arity_1(),
-        },
+        }),
         pexp_loc: none_loc,
         pexp_attributes: vec![],
     };
@@ -6575,7 +6575,7 @@ fn create_record_from_js_function(
     // Value binding
     let binding = ValueBinding {
         pvb_pat: Pattern {
-            ppat_desc: PatternDesc::Ppat_var(Located { txt: from_js_name_idx, loc }),
+            ppat_desc: Box::new(PatternDesc::Ppat_var(Located { txt: from_js_name_idx, loc })),
             ppat_loc: none_loc,
             ppat_attributes: vec![],
         },
@@ -6585,7 +6585,7 @@ fn create_record_from_js_function(
     };
 
     StructureItem {
-        pstr_desc: StructureItemDesc::Pstr_value(RecFlag::Nonrecursive, vec![binding]),
+        pstr_desc: Box::new(StructureItemDesc::Pstr_value(RecFlag::Nonrecursive, vec![binding])),
         pstr_loc: none_loc,
     }
 }
@@ -6607,13 +6607,13 @@ fn create_new_type_ref(
         .collect();
 
     CoreType {
-        ptyp_desc: CoreTypeDesc::Ptyp_constr(
+        ptyp_desc: Box::new(CoreTypeDesc::Ptyp_constr(
             Located {
                 txt: arena.push_longident(Longident::Lident(new_name_idx)),
                 loc: tdcl.ptype_name.loc,
             },
             type_args,
-        ),
+        )),
         ptyp_loc: none_loc,
         ptyp_attributes: vec![],
     }
@@ -6648,14 +6648,14 @@ fn create_record_to_js_sig(
             ))
             .collect();
         CoreType {
-            ptyp_desc: CoreTypeDesc::Ptyp_object(fields, current::ClosedFlag::Closed),
+            ptyp_desc: Box::new(CoreTypeDesc::Ptyp_object(fields, current::ClosedFlag::Closed)),
             ptyp_loc: none_loc,
             ptyp_attributes: vec![],
         }
     };
 
     let arrow_type = CoreType {
-        ptyp_desc: CoreTypeDesc::Ptyp_arrow {
+        ptyp_desc: Box::new(CoreTypeDesc::Ptyp_arrow {
             arg: Box::new(TypeArg {
                 attrs: vec![],
                 lbl: ArgLabel::Nolabel,
@@ -6663,7 +6663,7 @@ fn create_record_to_js_sig(
             }),
             ret: Box::new(ret_type),
             arity: arena.push_arity(Some(1)),  // OCaml's Typ.arrows computes fresh arity
-        },
+        }),
         ptyp_loc: none_loc,
         ptyp_attributes: vec![],
     };
@@ -6677,7 +6677,7 @@ fn create_record_to_js_sig(
     };
 
     SignatureItem {
-        psig_desc: SignatureItemDesc::Psig_value(val_desc),
+        psig_desc: Box::new(SignatureItemDesc::Psig_value(val_desc)),
         psig_loc: none_loc,
     }
 }
@@ -6710,14 +6710,14 @@ fn create_record_from_js_sig(
             ))
             .collect();
         CoreType {
-            ptyp_desc: CoreTypeDesc::Ptyp_object(fields, current::ClosedFlag::Open),
+            ptyp_desc: Box::new(CoreTypeDesc::Ptyp_object(fields, current::ClosedFlag::Open)),
             ptyp_loc: none_loc,
             ptyp_attributes: vec![],
         }
     };
 
     let arrow_type = CoreType {
-        ptyp_desc: CoreTypeDesc::Ptyp_arrow {
+        ptyp_desc: Box::new(CoreTypeDesc::Ptyp_arrow {
             arg: Box::new(TypeArg {
                 attrs: vec![],
                 lbl: ArgLabel::Nolabel,
@@ -6725,7 +6725,7 @@ fn create_record_from_js_sig(
             }),
             ret: Box::new(core_type.clone()),
             arity: arena.push_arity(Some(1)),  // OCaml's Typ.arrows computes fresh arity
-        },
+        }),
         ptyp_loc: none_loc,
         ptyp_attributes: vec![],
     };
@@ -6739,7 +6739,7 @@ fn create_record_from_js_sig(
     };
 
     SignatureItem {
-        psig_desc: SignatureItemDesc::Psig_value(val_desc),
+        psig_desc: Box::new(SignatureItemDesc::Psig_value(val_desc)),
         psig_loc: none_loc,
     }
 }
@@ -6784,19 +6784,19 @@ fn generate_js_converter_include(
 
     // Create include (struct ... end : sig ... end) - use outer_loc (pstr_loc) for wrapper
     let inner_mod = ModuleExpr {
-        pmod_desc: ModuleExprDesc::Pmod_structure(structure_items),
+        pmod_desc: Box::new(ModuleExprDesc::Pmod_structure(structure_items)),
         pmod_loc: outer_loc,
         pmod_attributes: vec![],
     };
 
     let sig_mod_type = ModuleType {
-        pmty_desc: ModuleTypeDesc::Pmty_signature(signature_items),
+        pmty_desc: Box::new(ModuleTypeDesc::Pmty_signature(signature_items)),
         pmty_loc: outer_loc,
         pmty_attributes: vec![],
     };
 
     let constrained_mod = ModuleExpr {
-        pmod_desc: ModuleExprDesc::Pmod_constraint(Box::new(inner_mod), Box::new(sig_mod_type)),
+        pmod_desc: Box::new(ModuleExprDesc::Pmod_constraint(Box::new(inner_mod), Box::new(sig_mod_type))),
         pmod_loc: outer_loc,
         pmod_attributes: vec![],
     };
@@ -6808,7 +6808,7 @@ fn generate_js_converter_include(
     };
 
     StructureItem {
-        pstr_desc: StructureItemDesc::Pstr_include(include_decl),
+        pstr_desc: Box::new(StructureItemDesc::Pstr_include(include_decl)),
         pstr_loc: outer_loc,
     }
 }
@@ -6847,7 +6847,7 @@ fn handle_deriving_type(
             .map(|tdcl| rewrite_type_declaration(tdcl, arena))
             .collect();
         return vec![StructureItem {
-            pstr_desc: StructureItemDesc::Pstr_type(rec_flag, rewritten_tdcls),
+            pstr_desc: Box::new(StructureItemDesc::Pstr_type(rec_flag, rewritten_tdcls)),
             pstr_loc: item.pstr_loc,
         }];
     }
@@ -6891,7 +6891,7 @@ fn handle_deriving_type(
     }
 
     let type_str_item = StructureItem {
-        pstr_desc: StructureItemDesc::Pstr_type(rec_flag, new_tdcls),
+        pstr_desc: Box::new(StructureItemDesc::Pstr_type(rec_flag, new_tdcls)),
         pstr_loc: loc,
     };
 
@@ -6925,7 +6925,7 @@ fn handle_deriving_type(
     inner_structure.extend(include_items);
 
     let mod_expr = ModuleExpr {
-        pmod_desc: ModuleExprDesc::Pmod_structure(inner_structure),
+        pmod_desc: Box::new(ModuleExprDesc::Pmod_structure(inner_structure)),
         pmod_loc: loc,
         pmod_attributes: vec![],
     };
@@ -6937,7 +6937,7 @@ fn handle_deriving_type(
     };
 
     vec![StructureItem {
-        pstr_desc: StructureItemDesc::Pstr_include(include_decl),
+        pstr_desc: Box::new(StructureItemDesc::Pstr_include(include_decl)),
         pstr_loc: loc,
     }]
 }
@@ -6979,7 +6979,7 @@ fn handle_deriving_abstract(
         abstract_tdcls.push(abstract_tdcl);
         for vd in value_descriptions {
             primitives.push(StructureItem {
-                pstr_desc: StructureItemDesc::Pstr_primitive(vd),
+                pstr_desc: Box::new(StructureItemDesc::Pstr_primitive(vd)),
                 pstr_loc: none_loc,
             });
         }
@@ -6987,40 +6987,40 @@ fn handle_deriving_abstract(
 
     // Create the inner include: include (struct <original type with record> end : sig end)
     let type_str_item = StructureItem {
-        pstr_desc: StructureItemDesc::Pstr_type(rec_flag, new_tdcls.to_vec()),
+        pstr_desc: Box::new(StructureItemDesc::Pstr_type(rec_flag, new_tdcls.to_vec())),
         pstr_loc: loc,
     };
 
     let inner_mod = ModuleExpr {
-        pmod_desc: ModuleExprDesc::Pmod_structure(vec![type_str_item]),
+        pmod_desc: Box::new(ModuleExprDesc::Pmod_structure(vec![type_str_item])),
         pmod_loc: loc,
         pmod_attributes: vec![],
     };
 
     let empty_sig = current::ModuleType {
-        pmty_desc: current::ModuleTypeDesc::Pmty_signature(vec![]),
+        pmty_desc: Box::new(current::ModuleTypeDesc::Pmty_signature(vec![])),
         pmty_loc: loc,
         pmty_attributes: vec![],
     };
 
     let constrained_mod = ModuleExpr {
-        pmod_desc: ModuleExprDesc::Pmod_constraint(Box::new(inner_mod), Box::new(empty_sig)),
+        pmod_desc: Box::new(ModuleExprDesc::Pmod_constraint(Box::new(inner_mod), Box::new(empty_sig))),
         pmod_loc: loc,
         pmod_attributes: vec![],
     };
 
     let inner_include = StructureItem {
-        pstr_desc: StructureItemDesc::Pstr_include(current::IncludeDeclaration {
+        pstr_desc: Box::new(StructureItemDesc::Pstr_include(current::IncludeDeclaration {
             pincl_mod: constrained_mod,
             pincl_loc: loc,
             pincl_attributes: vec![],
-        }),
+        })),
         pstr_loc: loc,
     };
 
     // Create the abstract type declaration
     let abstract_type_str = StructureItem {
-        pstr_desc: StructureItemDesc::Pstr_type(rec_flag, abstract_tdcls),
+        pstr_desc: Box::new(StructureItemDesc::Pstr_type(rec_flag, abstract_tdcls)),
         pstr_loc: none_loc,
     };
 
@@ -7029,7 +7029,7 @@ fn handle_deriving_abstract(
     outer_structure.extend(primitives);
 
     let outer_mod = ModuleExpr {
-        pmod_desc: ModuleExprDesc::Pmod_structure(outer_structure),
+        pmod_desc: Box::new(ModuleExprDesc::Pmod_structure(outer_structure)),
         pmod_loc: loc,
         pmod_attributes: vec![],
     };
@@ -7041,7 +7041,7 @@ fn handle_deriving_abstract(
     };
 
     vec![StructureItem {
-        pstr_desc: StructureItemDesc::Pstr_include(outer_include),
+        pstr_desc: Box::new(StructureItemDesc::Pstr_include(outer_include)),
         pstr_loc: loc,
     }]
 }
@@ -7291,13 +7291,13 @@ fn lift_option_type(typ: &CoreType, arena: &mut ParseArena) -> CoreType {
     // predef_option = Ldot(Lident "*predef*", "option")
     let ptyp_loc = typ.ptyp_loc;
     CoreType {
-        ptyp_desc: CoreTypeDesc::Ptyp_constr(
+        ptyp_desc: Box::new(CoreTypeDesc::Ptyp_constr(
             Located {
                 txt: arena.predef_option_lident(),
                 loc: ptyp_loc,
             },
             vec![typ.clone()],
-        ),
+        )),
         ptyp_loc,
         ptyp_attributes: vec![],
     }
@@ -7313,7 +7313,7 @@ fn make_arrow_type(arg: &CoreType, ret: &CoreType, arena: &mut ParseArena) -> Co
 fn make_arrow_type_with_loc(arg: &CoreType, ret: &CoreType, loc: Option<LocIdx>, arena: &mut ParseArena) -> CoreType {
     let ptyp_loc = loc.unwrap_or_else(|| arena.none_loc());
     CoreType {
-        ptyp_desc: CoreTypeDesc::Ptyp_arrow {
+        ptyp_desc: Box::new(CoreTypeDesc::Ptyp_arrow {
             arg: Box::new(TypeArg {
                 attrs: vec![],
                 lbl: ArgLabel::Nolabel,
@@ -7321,7 +7321,7 @@ fn make_arrow_type_with_loc(arg: &CoreType, ret: &CoreType, loc: Option<LocIdx>,
             }),
             ret: Box::new(ret.clone()),
             arity: arena.push_arity(Some(1)),  // OCaml's Typ.arrows computes fresh arity
-        },
+        }),
         ptyp_loc,
         ptyp_attributes: vec![],
     }
@@ -7342,7 +7342,7 @@ fn make_setter_type_with_loc(record_type: &CoreType, field_type: &CoreType, loc:
     // Inner arrow: field_type -> unit (uses ghost location)
     // OCaml's Typ.arrows passes None for inner arrow arities
     let inner = CoreType {
-        ptyp_desc: CoreTypeDesc::Ptyp_arrow {
+        ptyp_desc: Box::new(CoreTypeDesc::Ptyp_arrow {
             arg: Box::new(TypeArg {
                 attrs: vec![],
                 lbl: ArgLabel::Nolabel,
@@ -7350,14 +7350,14 @@ fn make_setter_type_with_loc(record_type: &CoreType, field_type: &CoreType, loc:
             }),
             ret: Box::new(unit_type),
             arity: arena.push_arity(None),  // Inner arrow: OCaml's build_arrows passes None
-        },
+        }),
         ptyp_loc: none_loc,
         ptyp_attributes: vec![],
     };
 
     // Outer arrow: t -> (field_type -> unit) (uses provided location)
     CoreType {
-        ptyp_desc: CoreTypeDesc::Ptyp_arrow {
+        ptyp_desc: Box::new(CoreTypeDesc::Ptyp_arrow {
             arg: Box::new(TypeArg {
                 attrs: vec![],
                 lbl: ArgLabel::Nolabel,
@@ -7365,7 +7365,7 @@ fn make_setter_type_with_loc(record_type: &CoreType, field_type: &CoreType, loc:
             }),
             ret: Box::new(inner),
             arity: arena.push_arity(Some(2)),
-        },
+        }),
         ptyp_loc: outer_loc,
         ptyp_attributes: vec![],
     }
@@ -7376,10 +7376,10 @@ fn make_unit_type(arena: &mut ParseArena) -> CoreType {
     let none_loc = arena.none_loc();
     let unit_ident = arena.push_lident_static("unit");
     CoreType {
-        ptyp_desc: CoreTypeDesc::Ptyp_constr(
+        ptyp_desc: Box::new(CoreTypeDesc::Ptyp_constr(
             Located { txt: unit_ident, loc: none_loc },
             vec![],
-        ),
+        )),
         ptyp_loc: none_loc,
         ptyp_attributes: vec![],
     }
@@ -7415,11 +7415,11 @@ fn make_arrows_type_with_loc(args: &[TypeArg], ret: &CoreType, loc: Option<LocId
         };
 
         result = CoreType {
-            ptyp_desc: CoreTypeDesc::Ptyp_arrow {
+            ptyp_desc: Box::new(CoreTypeDesc::Ptyp_arrow {
                 arg: Box::new(arg.clone()),
                 ret: Box::new(result),
                 arity: current_arity,
-            },
+            }),
             ptyp_loc,  // OCaml uses same loc for all arrows
             ptyp_attributes: vec![],
         };
@@ -7450,8 +7450,8 @@ fn get_bs_as_string(attrs: &[Attribute], arena: &ParseArena) -> Option<String> {
         if name == "as" {
             if let Some(items) = payload_str_items(payload) {
                 if let Some(item) = items.first() {
-                    if let StructureItemDesc::Pstr_eval(expr, _) = &item.pstr_desc {
-                        if let ExpressionDesc::Pexp_constant(Constant::String(txt, _)) = &expr.pexp_desc {
+                    if let StructureItemDesc::Pstr_eval(expr, _) = &*item.pstr_desc {
+                        if let ExpressionDesc::Pexp_constant(Constant::String(txt, _)) = &*expr.pexp_desc {
                             return Some(txt.to_string());
                         }
                     }
@@ -7555,19 +7555,19 @@ fn generate_accessor_include(
     //   Str.include_ ~loc (Incl.mk ~loc (Mod.constraint_ ~loc (Mod.structure ~loc a) (Mty.signature ~loc b)))
     // So the OUTER include structure uses the real location (type declaration location)
     let inner_mod = ModuleExpr {
-        pmod_desc: ModuleExprDesc::Pmod_structure(structure_items),
+        pmod_desc: Box::new(ModuleExprDesc::Pmod_structure(structure_items)),
         pmod_loc: loc,
         pmod_attributes: vec![],
     };
 
     let sig_mod_type = current::ModuleType {
-        pmty_desc: current::ModuleTypeDesc::Pmty_signature(signature_items),
+        pmty_desc: Box::new(current::ModuleTypeDesc::Pmty_signature(signature_items)),
         pmty_loc: loc,
         pmty_attributes: vec![],
     };
 
     let constrained_mod = ModuleExpr {
-        pmod_desc: ModuleExprDesc::Pmod_constraint(Box::new(inner_mod), Box::new(sig_mod_type)),
+        pmod_desc: Box::new(ModuleExprDesc::Pmod_constraint(Box::new(inner_mod), Box::new(sig_mod_type))),
         pmod_loc: loc,
         pmod_attributes: vec![],
     };
@@ -7579,7 +7579,7 @@ fn generate_accessor_include(
     };
 
     Some(StructureItem {
-        pstr_desc: StructureItemDesc::Pstr_include(include_decl),
+        pstr_desc: Box::new(StructureItemDesc::Pstr_include(include_decl)),
         pstr_loc: loc,
     })
 }
@@ -7609,14 +7609,14 @@ fn generate_record_accessors_and_sigs(
         // OCaml: Pat.constraint_ (Pat.var {txt; loc}) core_type
         // Pat.var and Pat.constraint_ have no ~loc, use default_loc (ghost)
         let param_pat = Pattern {
-            ppat_desc: PatternDesc::Ppat_constraint(
+            ppat_desc: Box::new(PatternDesc::Ppat_constraint(
                 Box::new(Pattern {
                     ppat_desc: PatternDesc::Ppat_var(Located { txt: param_str, loc: label_loc }),
                     ppat_loc: none_loc,
                     ppat_attributes: vec![],
                 }),
                 structure_core_type.clone(),
-            ),
+            )),
             ppat_loc: none_loc,
             ppat_attributes: vec![],
         };
@@ -7624,7 +7624,7 @@ fn generate_record_accessors_and_sigs(
         // OCaml: Exp.field (Exp.ident {txt = Lident txt; loc}) {txt = Longident.Lident pld_label; loc}
         // Exp.field and Exp.ident have no ~loc, use default_loc (ghost)
         let field_access = Expression {
-            pexp_desc: ExpressionDesc::Pexp_field(
+            pexp_desc: Box::new(ExpressionDesc::Pexp_field(
                 Box::new(Expression {
                     pexp_desc: ExpressionDesc::Pexp_ident(Located {
                         txt: arena.push_lident_from_idx(param_str),
@@ -7637,21 +7637,21 @@ fn generate_record_accessors_and_sigs(
                     txt: arena.push_longident(Longident::Lident(label.pld_name.txt)),
                     loc: label_loc,
                 },
-            ),
+            )),
             pexp_loc: none_loc,
             pexp_attributes: vec![],
         };
 
         // OCaml: Ast_compatible.fun_ ~arity:(Some 1) pat exp - no ~loc
         let fun_expr = Expression {
-            pexp_desc: ExpressionDesc::Pexp_fun {
+            pexp_desc: Box::new(ExpressionDesc::Pexp_fun {
                 arg_label: ArgLabel::Nolabel,
                 default: None,
                 lhs: param_pat,
                 rhs: Box::new(field_access),
                 is_async: false,
                 arity: arena.static_ppx_arity_1(),
-            },
+            }),
             pexp_loc: none_loc,
             pexp_attributes: vec![],
         };
@@ -7662,10 +7662,10 @@ fn generate_record_accessors_and_sigs(
         // - Str.value has no ~loc, so pstr_loc = ghost
         let binding = ValueBinding {
             pvb_pat: Pattern {
-                ppat_desc: PatternDesc::Ppat_var(Located {
+                ppat_desc: Box::new(PatternDesc::Ppat_var(Located {
                     txt: label.pld_name.txt,
                     loc: label_loc,
-                }),
+                })),
                 ppat_loc: none_loc,
                 ppat_attributes: vec![],
             },
@@ -7675,14 +7675,14 @@ fn generate_record_accessors_and_sigs(
         };
 
         structure_items.push(StructureItem {
-            pstr_desc: StructureItemDesc::Pstr_value(RecFlag::Nonrecursive, vec![binding]),
+            pstr_desc: Box::new(StructureItemDesc::Pstr_value(RecFlag::Nonrecursive, vec![binding])),
             pstr_loc: none_loc,
         });
 
         // Signature item: val fieldName: t -> fieldType
         // OCaml: Ast_helper.Typ.arrows [{attrs; lbl; typ}] pld_type - no ~loc
         let arrow_type = CoreType {
-            ptyp_desc: CoreTypeDesc::Ptyp_arrow {
+            ptyp_desc: Box::new(CoreTypeDesc::Ptyp_arrow {
                 arg: Box::new(TypeArg {
                     attrs: vec![],
                     lbl: ArgLabel::Nolabel,
@@ -7690,7 +7690,7 @@ fn generate_record_accessors_and_sigs(
                 }),
                 ret: Box::new(label.pld_type.clone()),
                 arity: arena.push_arity(Some(1)),  // OCaml's Typ.arrows computes fresh arity
-            },
+            }),
             ptyp_loc: none_loc,
             ptyp_attributes: vec![],
         };
@@ -7711,7 +7711,7 @@ fn generate_record_accessors_and_sigs(
         };
 
         signature_items.push(SignatureItem {
-            psig_desc: SignatureItemDesc::Psig_value(val_desc),
+            psig_desc: Box::new(SignatureItemDesc::Psig_value(val_desc)),
             psig_loc: none_loc,
         });
     }
@@ -7756,7 +7756,7 @@ fn generate_variant_accessors_and_sigs(
         if arity == 0 {
             // No args: let ctorName = CtorName : t
             let ctor_expr = Expression {
-                pexp_desc: ExpressionDesc::Pexp_constraint(
+                pexp_desc: Box::new(ExpressionDesc::Pexp_constraint(
                     Box::new(Expression {
                         pexp_desc: ExpressionDesc::Pexp_construct(
                             Located {
@@ -7769,14 +7769,14 @@ fn generate_variant_accessors_and_sigs(
                         pexp_attributes: vec![],
                     }),
                     structure_annotate_type.clone(),
-                ),
+                )),
                 pexp_loc: loc,
                 pexp_attributes: vec![],
             };
 
             let binding = ValueBinding {
                 pvb_pat: Pattern {
-                    ppat_desc: PatternDesc::Ppat_var(Located { txt: fn_name_idx, loc }),
+                    ppat_desc: Box::new(PatternDesc::Ppat_var(Located { txt: fn_name_idx, loc })),
                     ppat_loc: loc,
                     ppat_attributes: vec![],
                 },
@@ -7786,7 +7786,7 @@ fn generate_variant_accessors_and_sigs(
             };
 
             structure_items.push(StructureItem {
-                pstr_desc: StructureItemDesc::Pstr_value(RecFlag::Nonrecursive, vec![binding]),
+                pstr_desc: Box::new(StructureItemDesc::Pstr_value(RecFlag::Nonrecursive, vec![binding])),
                 pstr_loc: loc,
             });
 
@@ -7800,7 +7800,7 @@ fn generate_variant_accessors_and_sigs(
             };
 
             signature_items.push(SignatureItem {
-                psig_desc: SignatureItemDesc::Psig_value(val_desc),
+                psig_desc: Box::new(SignatureItemDesc::Psig_value(val_desc)),
                 psig_loc: loc,
             });
         } else {
@@ -7812,16 +7812,16 @@ fn generate_variant_accessors_and_sigs(
             // Build constructor argument (single or tuple)
             let ctor_arg = if arity == 1 {
                 Expression {
-                    pexp_desc: ExpressionDesc::Pexp_ident(Located {
+                    pexp_desc: Box::new(ExpressionDesc::Pexp_ident(Located {
                         txt: arena.push_lident_from_idx(params[0]),
                         loc,
-                    }),
+                    })),
                     pexp_loc: loc,
                     pexp_attributes: vec![],
                 }
             } else {
                 Expression {
-                    pexp_desc: ExpressionDesc::Pexp_tuple(
+                    pexp_desc: Box::new(ExpressionDesc::Pexp_tuple(
                         params.iter().map(|&p| Expression {
                             pexp_desc: ExpressionDesc::Pexp_ident(Located {
                                 txt: arena.push_lident_from_idx(p),
@@ -7830,14 +7830,14 @@ fn generate_variant_accessors_and_sigs(
                             pexp_loc: loc,
                             pexp_attributes: vec![],
                         }).collect()
-                    ),
+                    )),
                     pexp_loc: loc,
                     pexp_attributes: vec![],
                 }
             };
 
             let ctor_expr = Expression {
-                pexp_desc: ExpressionDesc::Pexp_constraint(
+                pexp_desc: Box::new(ExpressionDesc::Pexp_constraint(
                     Box::new(Expression {
                         pexp_desc: ExpressionDesc::Pexp_construct(
                             Located {
@@ -7850,7 +7850,7 @@ fn generate_variant_accessors_and_sigs(
                         pexp_attributes: vec![],
                     }),
                     structure_annotate_type.clone(),
-                ),
+                )),
                 pexp_loc: loc,
                 pexp_attributes: vec![],
             };
@@ -7858,7 +7858,7 @@ fn generate_variant_accessors_and_sigs(
             // Wrap with function parameters (fold right)
             let body = params.iter().rev().fold(ctor_expr, |acc, &param| {
                 Expression {
-                    pexp_desc: ExpressionDesc::Pexp_fun {
+                    pexp_desc: Box::new(ExpressionDesc::Pexp_fun {
                         arg_label: ArgLabel::Nolabel,
                         default: None,
                         lhs: Pattern {
@@ -7869,7 +7869,7 @@ fn generate_variant_accessors_and_sigs(
                         rhs: Box::new(acc),
                         is_async: false,
                         arity: arena.push_arity(None),
-                    },
+                    }),
                     pexp_loc: loc,
                     pexp_attributes: vec![],
                 }
@@ -7880,7 +7880,7 @@ fn generate_variant_accessors_and_sigs(
 
             let binding = ValueBinding {
                 pvb_pat: Pattern {
-                    ppat_desc: PatternDesc::Ppat_var(Located { txt: fn_name_idx, loc }),
+                    ppat_desc: Box::new(PatternDesc::Ppat_var(Located { txt: fn_name_idx, loc })),
                     ppat_loc: loc,
                     ppat_attributes: vec![],
                 },
@@ -7890,7 +7890,7 @@ fn generate_variant_accessors_and_sigs(
             };
 
             structure_items.push(StructureItem {
-                pstr_desc: StructureItemDesc::Pstr_value(RecFlag::Nonrecursive, vec![binding]),
+                pstr_desc: Box::new(StructureItemDesc::Pstr_value(RecFlag::Nonrecursive, vec![binding])),
                 pstr_loc: loc,
             });
 
@@ -7915,7 +7915,7 @@ fn generate_variant_accessors_and_sigs(
             };
 
             signature_items.push(SignatureItem {
-                psig_desc: SignatureItemDesc::Psig_value(val_desc),
+                psig_desc: Box::new(SignatureItemDesc::Psig_value(val_desc)),
                 psig_loc: loc,
             });
         }
@@ -7937,11 +7937,11 @@ fn make_arrows(args: Vec<TypeArg>, ret: CoreType, loc: LocIdx, arena: &mut Parse
     let mut result = ret;
     for arg in args.into_iter().rev() {
         result = CoreType {
-            ptyp_desc: CoreTypeDesc::Ptyp_arrow {
+            ptyp_desc: Box::new(CoreTypeDesc::Ptyp_arrow {
                 arg: Box::new(arg),
                 ret: Box::new(result),
                 arity,
-            },
+            }),
             ptyp_loc: loc,
             ptyp_attributes: vec![],
         };
@@ -7964,10 +7964,10 @@ fn core_type_of_type_declaration_with_attrs(tdcl: &TypeDeclaration, arena: &mut 
     }).collect();
 
     CoreType {
-        ptyp_desc: CoreTypeDesc::Ptyp_constr(
+        ptyp_desc: Box::new(CoreTypeDesc::Ptyp_constr(
             Located { txt: name_lid, loc: name_loc },
             type_args,
-        ),
+        )),
         ptyp_loc: none_loc,
         // Include the type declaration's attributes (which has @deriving)
         ptyp_attributes: tdcl.ptype_attributes.clone(),
@@ -7993,7 +7993,7 @@ pub fn rewrite_structure(
     let mut result = Vec::new();
 
     for item in structure {
-        match &item.pstr_desc {
+        match &*item.pstr_desc {
             StructureItemDesc::Pstr_value(_rec_flag, bindings) => {
                 // Spelunk through the ORIGINAL bindings to find await module types
                 // (before expression rewriting transforms them)
@@ -8065,7 +8065,7 @@ fn rewrite_structure_item(item: &StructureItem, arena: &mut ParseArena) -> Vec<S
 }
 
 fn rewrite_structure_item_no_spice(item: &StructureItem, arena: &mut ParseArena) -> Vec<StructureItem> {
-    match &item.pstr_desc {
+    match &*item.pstr_desc {
         StructureItemDesc::Pstr_primitive(vd) => {
             if is_rs_external(&vd.pval_attributes, &vd.pval_prim, arena) {
                 // OCaml rewrites attributes (e.g. "js" -> "*j" in strings) before
@@ -8091,13 +8091,13 @@ fn rewrite_structure_item_no_spice(item: &StructureItem, arena: &mut ParseArena)
                 // For @obj externals, also reconstructs Ptyp_any -> Ptyp_object.
                 let pval_type = process_obj_type(&rewritten_type, vd.pval_loc, &vd.pval_attributes, arena);
                 let external_result = StructureItem {
-                    pstr_desc: StructureItemDesc::Pstr_primitive(ValueDescription {
+                    pstr_desc: Box::new(StructureItemDesc::Pstr_primitive(ValueDescription {
                         pval_prim: encoded.pval_prim,
                         pval_attributes: encoded.pval_attributes.clone(),
                         pval_name: vd.pval_name.clone(),
                         pval_type: pval_type.clone(),
                         pval_loc: vd.pval_loc,
-                    }),
+                    })),
                     pstr_loc: item.pstr_loc,
                 };
 
@@ -8106,7 +8106,7 @@ fn rewrite_structure_item_no_spice(item: &StructureItem, arena: &mut ParseArena)
                     // of relative path externals (ast_external.ml lines 78-98)
                     let loc = vd.pval_loc;
                     vec![StructureItem {
-                        pstr_desc: StructureItemDesc::Pstr_include(IncludeDeclaration {
+                        pstr_desc: Box::new(StructureItemDesc::Pstr_include(IncludeDeclaration {
                             pincl_mod: ModuleExpr {
                                 pmod_desc: ModuleExprDesc::Pmod_constraint(
                                     Box::new(ModuleExpr {
@@ -8140,7 +8140,7 @@ fn rewrite_structure_item_no_spice(item: &StructureItem, arena: &mut ParseArena)
                             },
                             pincl_loc: loc,
                             pincl_attributes: vec![],
-                        }),
+                        })),
                         pstr_loc: loc,
                     }]
                 } else {
@@ -8150,13 +8150,13 @@ fn rewrite_structure_item_no_spice(item: &StructureItem, arena: &mut ParseArena)
                 // Non-ReScript externals still need attribute and type rewriting
                 // (e.g. "js" -> "*j" in @ocaml.doc string delimiters and @as attributes in types)
                 vec![StructureItem {
-                    pstr_desc: StructureItemDesc::Pstr_primitive(ValueDescription {
+                    pstr_desc: Box::new(StructureItemDesc::Pstr_primitive(ValueDescription {
                         pval_name: vd.pval_name.clone(),
                         pval_type: rewrite_core_type(&vd.pval_type, arena),
                         pval_prim: vd.pval_prim.clone(),
                         pval_attributes: rewrite_attributes(&vd.pval_attributes, arena),
                         pval_loc: vd.pval_loc,
-                    }),
+                    })),
                     pstr_loc: item.pstr_loc,
                 }]
             }
@@ -8168,7 +8168,7 @@ fn rewrite_structure_item_no_spice(item: &StructureItem, arena: &mut ParseArena)
             if *rec_flag == RecFlag::Nonrecursive && bindings.len() == 1 {
                 let vb = &bindings[0];
                 // Check if pattern is a simple variable
-                if let PatternDesc::Ppat_var(pval_name) = &vb.pvb_pat.ppat_desc {
+                if let PatternDesc::Ppat_var(pval_name) = &*vb.pvb_pat.ppat_desc {
                     // Rewrite expression first to get string transformation
                     let pvb_expr = rewrite_expression(&vb.pvb_expr, arena);
 
@@ -8188,7 +8188,7 @@ fn rewrite_structure_item_no_spice(item: &StructureItem, arena: &mut ParseArena)
 
                     // No @inline or couldn't transform - return rewritten binding
                     return vec![StructureItem {
-                        pstr_desc: StructureItemDesc::Pstr_value(
+                        pstr_desc: Box::new(StructureItemDesc::Pstr_value(
                             *rec_flag,
                             vec![ValueBinding {
                                 pvb_expr,
@@ -8196,7 +8196,7 @@ fn rewrite_structure_item_no_spice(item: &StructureItem, arena: &mut ParseArena)
                                 pvb_attributes: rewrite_attributes(&vb.pvb_attributes, arena),
                                 pvb_loc: vb.pvb_loc,
                             }],
-                        ),
+                        )),
                         pstr_loc: item.pstr_loc,
                     }];
                 }
@@ -8205,16 +8205,16 @@ fn rewrite_structure_item_no_spice(item: &StructureItem, arena: &mut ParseArena)
             // Default case: rewrite all bindings (with tuple flattening)
             let new_bindings = flatten_value_bindings(bindings, arena);
             vec![StructureItem {
-                pstr_desc: StructureItemDesc::Pstr_value(*rec_flag, new_bindings),
+                pstr_desc: Box::new(StructureItemDesc::Pstr_value(*rec_flag, new_bindings)),
                 pstr_loc: item.pstr_loc,
             }]
         }
         // Handle eval expressions
         StructureItemDesc::Pstr_eval(expr, attrs) => vec![StructureItem {
-            pstr_desc: StructureItemDesc::Pstr_eval(
+            pstr_desc: Box::new(StructureItemDesc::Pstr_eval(
                 rewrite_expression(expr, arena),
                 rewrite_attributes(attrs, arena),
-            ),
+            )),
             pstr_loc: item.pstr_loc,
         }],
         // Module - check for @res.await transformation first, then recurse
@@ -8225,12 +8225,12 @@ fn rewrite_structure_item_no_spice(item: &StructureItem, arena: &mut ParseArena)
             } else {
                 // Normal case - just recurse into module structure
                 vec![StructureItem {
-                    pstr_desc: StructureItemDesc::Pstr_module(current::ModuleBinding {
+                    pstr_desc: Box::new(StructureItemDesc::Pstr_module(current::ModuleBinding {
                         pmb_name: mb.pmb_name.clone(),
                         pmb_expr: rewrite_module_expr(&mb.pmb_expr, arena),
                         pmb_attributes: rewrite_attributes(&mb.pmb_attributes, arena),
                         pmb_loc: mb.pmb_loc,
-                    }),
+                    })),
                     pstr_loc: item.pstr_loc,
                 }]
             }
@@ -8247,17 +8247,17 @@ fn rewrite_structure_item_no_spice(item: &StructureItem, arena: &mut ParseArena)
                 })
                 .collect();
             vec![StructureItem {
-                pstr_desc: StructureItemDesc::Pstr_recmodule(new_mbs),
+                pstr_desc: Box::new(StructureItemDesc::Pstr_recmodule(new_mbs)),
                 pstr_loc: item.pstr_loc,
             }]
         }
         // Include - recurse into module expression
         StructureItemDesc::Pstr_include(incl) => vec![StructureItem {
-            pstr_desc: StructureItemDesc::Pstr_include(current::IncludeDeclaration {
+            pstr_desc: Box::new(StructureItemDesc::Pstr_include(current::IncludeDeclaration {
                 pincl_mod: rewrite_module_expr(&incl.pincl_mod, arena),
                 pincl_loc: incl.pincl_loc,
                 pincl_attributes: rewrite_attributes(&incl.pincl_attributes, arena),
-            }),
+            })),
             pstr_loc: item.pstr_loc,
         }],
         // Handle structure-level extensions (%%raw, %%private)
@@ -8274,10 +8274,10 @@ fn rewrite_structure_item_no_spice(item: &StructureItem, arena: &mut ParseArena)
             } else {
                 // Rewrite payload for string transformation
                 vec![StructureItem {
-                    pstr_desc: StructureItemDesc::Pstr_extension(
+                    pstr_desc: Box::new(StructureItemDesc::Pstr_extension(
                         (ext_name.clone(), rewrite_payload(payload, arena)),
                         rewrite_attributes(attrs, arena),
-                    ),
+                    )),
                     pstr_loc: item.pstr_loc,
                 }]
             }
@@ -8285,7 +8285,7 @@ fn rewrite_structure_item_no_spice(item: &StructureItem, arena: &mut ParseArena)
         // Handle floating attributes (@@attr) - need to transform strings in payload
         StructureItemDesc::Pstr_attribute(attr) => {
             vec![StructureItem {
-                pstr_desc: StructureItemDesc::Pstr_attribute(rewrite_attribute(attr, arena)),
+                pstr_desc: Box::new(StructureItemDesc::Pstr_attribute(rewrite_attribute(attr, arena))),
                 pstr_loc: item.pstr_loc,
             }]
         }
@@ -8295,37 +8295,37 @@ fn rewrite_structure_item_no_spice(item: &StructureItem, arena: &mut ParseArena)
         }
         // Handle open - rewrite attributes
         StructureItemDesc::Pstr_open(od) => vec![StructureItem {
-            pstr_desc: StructureItemDesc::Pstr_open(current::OpenDescription {
+            pstr_desc: Box::new(StructureItemDesc::Pstr_open(current::OpenDescription {
                 popen_lid: od.popen_lid.clone(),
                 popen_override: od.popen_override,
                 popen_loc: od.popen_loc,
                 popen_attributes: rewrite_attributes(&od.popen_attributes, arena),
-            }),
+            })),
             pstr_loc: item.pstr_loc,
         }],
         // Handle modtype - rewrite attributes
         StructureItemDesc::Pstr_modtype(mtd) => vec![StructureItem {
-            pstr_desc: StructureItemDesc::Pstr_modtype(current::ModuleTypeDeclaration {
+            pstr_desc: Box::new(StructureItemDesc::Pstr_modtype(current::ModuleTypeDeclaration {
                 pmtd_name: mtd.pmtd_name.clone(),
                 pmtd_type: mtd.pmtd_type.as_ref().map(|mt| rewrite_module_type(mt, arena)),
                 pmtd_attributes: rewrite_attributes(&mtd.pmtd_attributes, arena),
                 pmtd_loc: mtd.pmtd_loc,
-            }),
+            })),
             pstr_loc: item.pstr_loc,
         }],
         // Handle exception - rewrite attributes
         StructureItemDesc::Pstr_exception(ec) => vec![StructureItem {
-            pstr_desc: StructureItemDesc::Pstr_exception(current::ExtensionConstructor {
+            pstr_desc: Box::new(StructureItemDesc::Pstr_exception(current::ExtensionConstructor {
                 pext_name: ec.pext_name.clone(),
                 pext_kind: ec.pext_kind.clone(),
                 pext_loc: ec.pext_loc,
                 pext_attributes: rewrite_attributes(&ec.pext_attributes, arena),
-            }),
+            })),
             pstr_loc: item.pstr_loc,
         }],
         // Handle type extension - rewrite attributes
         StructureItemDesc::Pstr_typext(te) => vec![StructureItem {
-            pstr_desc: StructureItemDesc::Pstr_typext(current::TypeExtension {
+            pstr_desc: Box::new(StructureItemDesc::Pstr_typext(current::TypeExtension {
                 ptyext_path: te.ptyext_path.clone(),
                 ptyext_params: te.ptyext_params.clone(),
                 ptyext_constructors: te
@@ -8340,7 +8340,7 @@ fn rewrite_structure_item_no_spice(item: &StructureItem, arena: &mut ParseArena)
                     .collect(),
                 ptyext_private: te.ptyext_private,
                 ptyext_attributes: rewrite_attributes(&te.ptyext_attributes, arena),
-            }),
+            })),
             pstr_loc: item.pstr_loc,
         }],
     }
@@ -8351,7 +8351,7 @@ fn rewrite_module_expr(
     mod_expr: &current::ModuleExpr,
     arena: &mut ParseArena,
 ) -> current::ModuleExpr {
-    let new_desc = match &mod_expr.pmod_desc {
+    let new_desc = match &*mod_expr.pmod_desc {
         current::ModuleExprDesc::Pmod_structure(items) => {
             current::ModuleExprDesc::Pmod_structure(
                 items
@@ -8390,7 +8390,7 @@ fn rewrite_module_expr(
     };
 
     current::ModuleExpr {
-        pmod_desc: new_desc,
+        pmod_desc: Box::new(new_desc),
         pmod_loc: mod_expr.pmod_loc,
         pmod_attributes: rewrite_attributes(&mod_expr.pmod_attributes, arena),
     }
@@ -8401,7 +8401,7 @@ fn rewrite_module_type(
     mod_type: &current::ModuleType,
     arena: &mut ParseArena,
 ) -> current::ModuleType {
-    let new_desc = match &mod_type.pmty_desc {
+    let new_desc = match &*mod_type.pmty_desc {
         current::ModuleTypeDesc::Pmty_signature(items) => {
             current::ModuleTypeDesc::Pmty_signature(rewrite_signature_items(items, arena))
         }
@@ -8437,14 +8437,14 @@ fn rewrite_module_type(
     };
 
     current::ModuleType {
-        pmty_desc: new_desc,
+        pmty_desc: Box::new(new_desc),
         pmty_loc: mod_type.pmty_loc,
         pmty_attributes: rewrite_attributes(&mod_type.pmty_attributes, arena),
     }
 }
 
 fn rewrite_signature_item_no_spice(item: &SignatureItem, arena: &mut ParseArena) -> SignatureItem {
-    match &item.psig_desc {
+    match &*item.psig_desc {
         SignatureItemDesc::Psig_value(vd) => {
             // OCaml rewrites attributes (e.g. "js" -> "*j" in strings) before
             // encoding the external (ast_external.ml handle_external_in_sig,
@@ -8463,84 +8463,84 @@ fn rewrite_signature_item_no_spice(item: &SignatureItem, arena: &mut ParseArena)
                 // For @obj externals, also reconstructs Ptyp_any -> Ptyp_object.
                 let pval_type = process_obj_type(&vd.pval_type, vd.pval_loc, &vd.pval_attributes, arena);
                 SignatureItem {
-                    psig_desc: SignatureItemDesc::Psig_value(ValueDescription {
+                    psig_desc: Box::new(SignatureItemDesc::Psig_value(ValueDescription {
                         pval_prim: encoded.pval_prim,
                         pval_attributes: encoded.pval_attributes,
                         pval_name: vd.pval_name.clone(),
                         pval_type,
                         pval_loc: vd.pval_loc,
-                    }),
+                    })),
                     psig_loc: item.psig_loc,
                 }
             } else if let Some(inline_vd) = transform_inline_sig_value(vd, arena) {
                 // Handle @inline("value") let x: t in signature
                 // (bs_builtin_ppx.ml line 413-478)
                 SignatureItem {
-                    psig_desc: SignatureItemDesc::Psig_value(inline_vd),
+                    psig_desc: Box::new(SignatureItemDesc::Psig_value(inline_vd)),
                     psig_loc: item.psig_loc,
                 }
             } else {
                 SignatureItem {
-                    psig_desc: SignatureItemDesc::Psig_value(ValueDescription {
+                    psig_desc: Box::new(SignatureItemDesc::Psig_value(ValueDescription {
                         pval_name: vd.pval_name.clone(),
                         pval_type: vd.pval_type.clone(),
                         pval_prim: vd.pval_prim.clone(),
                         pval_attributes: rewritten_attrs,
                         pval_loc: vd.pval_loc,
-                    }),
+                    })),
                     psig_loc: item.psig_loc,
                 }
             }
         }
         // Handle floating attributes (@@attr) - need to transform strings in payload
         SignatureItemDesc::Psig_attribute(attr) => SignatureItem {
-            psig_desc: SignatureItemDesc::Psig_attribute(rewrite_attribute(attr, arena)),
+            psig_desc: Box::new(SignatureItemDesc::Psig_attribute(rewrite_attribute(attr, arena))),
             psig_loc: item.psig_loc,
         },
         // Handle extensions - need to transform strings in payload
         SignatureItemDesc::Psig_extension(ext, attrs) => {
             let (ext_name, payload) = ext;
             SignatureItem {
-                psig_desc: SignatureItemDesc::Psig_extension(
+                psig_desc: Box::new(SignatureItemDesc::Psig_extension(
                     (ext_name.clone(), rewrite_payload(payload, arena)),
                     rewrite_attributes(attrs, arena),
-                ),
+                )),
                 psig_loc: item.psig_loc,
             }
         }
         // Handle open - rewrite attributes
         SignatureItemDesc::Psig_open(od) => SignatureItem {
-            psig_desc: SignatureItemDesc::Psig_open(current::OpenDescription {
+            psig_desc: Box::new(SignatureItemDesc::Psig_open(current::OpenDescription {
                 popen_lid: od.popen_lid.clone(),
                 popen_override: od.popen_override,
                 popen_loc: od.popen_loc,
                 popen_attributes: rewrite_attributes(&od.popen_attributes, arena),
-            }),
+            })),
             psig_loc: item.psig_loc,
         },
         // Handle modtype - rewrite attributes and module type
         SignatureItemDesc::Psig_modtype(mtd) => SignatureItem {
-            psig_desc: SignatureItemDesc::Psig_modtype(current::ModuleTypeDeclaration {
+            psig_desc: Box::new(SignatureItemDesc::Psig_modtype(current::ModuleTypeDeclaration {
                 pmtd_name: mtd.pmtd_name.clone(),
                 pmtd_type: mtd.pmtd_type.as_ref().map(|mt| rewrite_module_type(mt, arena)),
                 pmtd_attributes: rewrite_attributes(&mtd.pmtd_attributes, arena),
                 pmtd_loc: mtd.pmtd_loc,
-            }),
+            })),
             psig_loc: item.psig_loc,
         },
         // Handle exception - rewrite attributes
         SignatureItemDesc::Psig_exception(ec) => SignatureItem {
-            psig_desc: SignatureItemDesc::Psig_exception(current::ExtensionConstructor {
+            psig_desc: Box::new(SignatureItemDesc::Psig_exception(current::ExtensionConstructor {
                 pext_name: ec.pext_name.clone(),
                 pext_kind: ec.pext_kind.clone(),
                 pext_loc: ec.pext_loc,
                 pext_attributes: rewrite_attributes(&ec.pext_attributes, arena),
-            }),
+            })),
             psig_loc: item.psig_loc,
         },
         // Handle type extension - rewrite attributes
         SignatureItemDesc::Psig_typext(te) => SignatureItem {
-            psig_desc: SignatureItemDesc::Psig_typext(current::TypeExtension {
+            psig_desc: Box::new(SignatureItemDesc::Psig_typext(current::TypeExtension {
                 ptyext_path: te.ptyext_path.clone(),
                 ptyext_params: te.ptyext_params.clone(),
                 ptyext_constructors: te
@@ -8555,7 +8555,7 @@ fn rewrite_signature_item_no_spice(item: &SignatureItem, arena: &mut ParseArena)
                     .collect(),
                 ptyext_private: te.ptyext_private,
                 ptyext_attributes: rewrite_attributes(&te.ptyext_attributes, arena),
-            }),
+            })),
             psig_loc: item.psig_loc,
         },
         // Handle type declarations - rewrite attributes (including constructor/label attributes)
@@ -8565,27 +8565,27 @@ fn rewrite_signature_item_no_spice(item: &SignatureItem, arena: &mut ParseArena)
                 .map(|tdcl| rewrite_type_declaration(tdcl, arena))
                 .collect();
             SignatureItem {
-                psig_desc: SignatureItemDesc::Psig_type(*rec_flag, rewritten_tdcls),
+                psig_desc: Box::new(SignatureItemDesc::Psig_type(*rec_flag, rewritten_tdcls)),
                 psig_loc: item.psig_loc,
             }
         }
         // Handle include - recurse into module type
         SignatureItemDesc::Psig_include(incl) => SignatureItem {
-            psig_desc: SignatureItemDesc::Psig_include(current::IncludeDescription {
+            psig_desc: Box::new(SignatureItemDesc::Psig_include(current::IncludeDescription {
                 pincl_mod: rewrite_module_type(&incl.pincl_mod, arena),
                 pincl_loc: incl.pincl_loc,
                 pincl_attributes: rewrite_attributes(&incl.pincl_attributes, arena),
-            }),
+            })),
             psig_loc: item.psig_loc,
         },
         // Handle module - recurse into module type
         SignatureItemDesc::Psig_module(md) => SignatureItem {
-            psig_desc: SignatureItemDesc::Psig_module(current::ModuleDeclaration {
+            psig_desc: Box::new(SignatureItemDesc::Psig_module(current::ModuleDeclaration {
                 pmd_name: md.pmd_name.clone(),
                 pmd_type: rewrite_module_type(&md.pmd_type, arena),
                 pmd_attributes: rewrite_attributes(&md.pmd_attributes, arena),
                 pmd_loc: md.pmd_loc,
-            }),
+            })),
             psig_loc: item.psig_loc,
         },
         // Handle recursive modules - recurse into module types
@@ -8600,7 +8600,7 @@ fn rewrite_signature_item_no_spice(item: &SignatureItem, arena: &mut ParseArena)
                 })
                 .collect();
             SignatureItem {
-                psig_desc: SignatureItemDesc::Psig_recmodule(new_mds),
+                psig_desc: Box::new(SignatureItemDesc::Psig_recmodule(new_mds)),
                 psig_loc: item.psig_loc,
             }
         }

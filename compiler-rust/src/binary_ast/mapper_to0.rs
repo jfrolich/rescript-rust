@@ -161,7 +161,7 @@ impl<'a> Mapper<'a> {
         (
             OldLocated::new("res.arity".to_string(), full_loc.clone()),
             pt0::Payload::PStr(vec![pt0::StructureItem {
-                pstr_desc: pt0::StructureItemDesc::Eval(
+                pstr_desc: Box::new(pt0::StructureItemDesc::Eval(
                     pt0::Expression {
                         pexp_desc: pt0::ExpressionDesc::Constant(pt0::Constant::Integer(
                             arity.to_string(),
@@ -171,7 +171,7 @@ impl<'a> Mapper<'a> {
                         pexp_attributes: vec![],
                     },
                     vec![],
-                ),
+                )),
                 pstr_loc: full_loc,
             }]),
         )
@@ -190,13 +190,13 @@ impl<'a> Mapper<'a> {
         let full_loc = self.loc(loc);
         let unit_idx = self.intern("()");
         pt0::Expression {
-            pexp_desc: pt0::ExpressionDesc::Construct(
+            pexp_desc: Box::new(pt0::ExpressionDesc::Construct(
                 OldLocated::new(
                     Longident::Lident(unit_idx),
                     full_loc.clone(),
                 ),
                 None,
-            ),
+            )),
             pexp_loc: full_loc,
             pexp_attributes: vec![],
         }
@@ -206,13 +206,13 @@ impl<'a> Mapper<'a> {
         let full_loc = self.loc(loc);
         let nil_idx = self.intern("[]");
         pt0::Expression {
-            pexp_desc: pt0::ExpressionDesc::Construct(
+            pexp_desc: Box::new(pt0::ExpressionDesc::Construct(
                 OldLocated::new(
                     Longident::Lident(nil_idx),
                     full_loc.clone(),
                 ),
                 None,
-            ),
+            )),
             pexp_loc: full_loc,
             pexp_attributes: vec![],
         }
@@ -227,10 +227,10 @@ impl<'a> Mapper<'a> {
                     // Use the StrIdx directly - it's already interned and enables sharing
                     let name_idx = name.txt;
                     let ident_expr = pt0::Expression {
-                        pexp_desc: pt0::ExpressionDesc::Ident(OldLocated::new(
+                        pexp_desc: Box::new(pt0::ExpressionDesc::Ident(OldLocated::new(
                             Longident::Lident(name_idx),
                             name_loc.clone(),
-                        )),
+                        ))),
                         pexp_loc: name_loc,
                         pexp_attributes: vec![],
                     };
@@ -287,7 +287,7 @@ impl<'a> Mapper<'a> {
         for child in children.iter().rev() {
             let child_expr = self.map_expression(child);
             result = pt0::Expression {
-                pexp_desc: pt0::ExpressionDesc::Construct(
+                pexp_desc: Box::new(pt0::ExpressionDesc::Construct(
                     OldLocated::new(
                         Longident::Lident(cons_idx),
                         full_loc.clone(),
@@ -297,7 +297,7 @@ impl<'a> Mapper<'a> {
                         pexp_loc: full_loc.clone(),
                         pexp_attributes: vec![],
                     })),
-                ),
+                )),
                 pexp_loc: full_loc.clone(),
                 pexp_attributes: vec![],
             };
@@ -423,7 +423,7 @@ impl<'a> Mapper<'a> {
 
     pub fn map_core_type(&mut self, ty: &current::CoreType) -> pt0::CoreType {
         // Handle arrow types specially to support arity wrapping
-        if let current::CoreTypeDesc::Ptyp_arrow { arg, ret, arity } = &ty.ptyp_desc {
+        if let current::CoreTypeDesc::Ptyp_arrow { arg, ret, arity } = &*ty.ptyp_desc {
             let loc = self.loc(ty.ptyp_loc);
             // Merge outer type's attributes with arg's attributes (OCaml does this)
             let arrow_attrs: Vec<pt0::Attribute> = self.map_attributes(&ty.ptyp_attributes)
@@ -433,11 +433,11 @@ impl<'a> Mapper<'a> {
 
             // Create the base arrow type
             let arrow_type = pt0::CoreType {
-                ptyp_desc: pt0::CoreTypeDesc::Arrow(
+                ptyp_desc: Box::new(pt0::CoreTypeDesc::Arrow(
                     self.map_arg_label(&arg.lbl),
                     Box::new(self.map_core_type(&arg.typ)),
                     Box::new(self.map_core_type(ret)),
-                ),
+                )),
                 ptyp_loc: loc.clone(),
                 ptyp_attributes: arrow_attrs,
             };
@@ -452,7 +452,7 @@ impl<'a> Mapper<'a> {
                     let arity_string = format!("Has_arity{}", n);
                     let function_idx = self.intern("function$");
                     let arity_type = pt0::CoreType {
-                        ptyp_desc: pt0::CoreTypeDesc::Variant(
+                        ptyp_desc: Box::new(pt0::CoreTypeDesc::Variant(
                             vec![pt0::RowField::Rtag(
                                 OldLocated::new(arity_string, loc.clone()),
                                 vec![],   // no attributes
@@ -461,18 +461,18 @@ impl<'a> Mapper<'a> {
                             )],
                             pt0::ClosedFlag::Closed,
                             None,
-                        ),
+                        )),
                         ptyp_loc: loc.clone(),
                         ptyp_attributes: vec![],
                     };
                     pt0::CoreType {
-                        ptyp_desc: pt0::CoreTypeDesc::Constr(
+                        ptyp_desc: Box::new(pt0::CoreTypeDesc::Constr(
                             OldLocated::new(
                                 Longident::Lident(function_idx),
                                 loc.clone(),
                             ),
                             vec![arrow_type, arity_type],
-                        ),
+                        )),
                         ptyp_loc: loc,
                         ptyp_attributes: vec![],
                     }
@@ -480,7 +480,7 @@ impl<'a> Mapper<'a> {
             }
         } else {
             pt0::CoreType {
-                ptyp_desc: self.map_core_type_desc(&ty.ptyp_desc),
+                ptyp_desc: Box::new(self.map_core_type_desc(&ty.ptyp_desc)),
                 ptyp_loc: self.loc(ty.ptyp_loc),
                 ptyp_attributes: self.map_attributes(&ty.ptyp_attributes),
             }
@@ -592,7 +592,7 @@ impl<'a> Mapper<'a> {
 
     pub fn map_pattern(&mut self, pat: &current::Pattern) -> pt0::Pattern {
         pt0::Pattern {
-            ppat_desc: self.map_pattern_desc(&pat.ppat_desc),
+            ppat_desc: Box::new(self.map_pattern_desc(&pat.ppat_desc)),
             ppat_loc: self.loc(pat.ppat_loc),
             ppat_attributes: self.map_attributes(&pat.ppat_attributes),
         }
@@ -666,13 +666,13 @@ impl<'a> Mapper<'a> {
 
     pub fn map_expression(&mut self, expr: &current::Expression) -> pt0::Expression {
         // Check if this is a JSX element that needs the [@JSX] attribute
-        let is_jsx = matches!(&expr.pexp_desc, current::ExpressionDesc::Pexp_jsx_element(_));
+        let is_jsx = matches!(&*expr.pexp_desc, current::ExpressionDesc::Pexp_jsx_element(_));
         let mut attrs = self.map_attributes(&expr.pexp_attributes);
         if is_jsx {
             attrs.insert(0, self.mk_jsx_attr(expr.pexp_loc));
         }
         pt0::Expression {
-            pexp_desc: self.map_expression_desc(&expr.pexp_desc, expr.pexp_loc),
+            pexp_desc: Box::new(self.map_expression_desc(&expr.pexp_desc, expr.pexp_loc)),
             pexp_loc: self.loc(expr.pexp_loc),
             pexp_attributes: attrs,
         }
@@ -725,7 +725,7 @@ impl<'a> Mapper<'a> {
                     && matches!(&args[0].0, current::ArgLabel::Nolabel)
                     && matches!(&args[1].0, current::ArgLabel::Nolabel)
                 {
-                    if let current::ExpressionDesc::Pexp_ident(lid) = &funct.pexp_desc {
+                    if let current::ExpressionDesc::Pexp_ident(lid) = &*funct.pexp_desc {
                         // Get the StrIdx first to avoid borrow conflicts
                         let op_idx = if let Longident::Lident(op) = self.get_longident(lid.txt) {
                             Some(*op)
@@ -754,14 +754,14 @@ impl<'a> Mapper<'a> {
                 };
 
                 let mapped_funct = if let Some(new_name) = converted_funct {
-                    if let current::ExpressionDesc::Pexp_ident(lid) = &funct.pexp_desc {
+                    if let current::ExpressionDesc::Pexp_ident(lid) = &*funct.pexp_desc {
                         let full_loc = self.loc(lid.loc);
                         let new_name_idx = self.intern(new_name);
                         pt0::Expression {
-                            pexp_desc: pt0::ExpressionDesc::Ident(OldLocated::new(
+                            pexp_desc: Box::new(pt0::ExpressionDesc::Ident(OldLocated::new(
                                 Longident::Lident(new_name_idx),
                                 full_loc,
-                            )),
+                            ))),
                             pexp_loc: self.loc(funct.pexp_loc),
                             pexp_attributes: self.map_attributes(&funct.pexp_attributes),
                         }
@@ -942,10 +942,10 @@ impl<'a> Mapper<'a> {
 
                         pt0::ExpressionDesc::Apply {
                             funct: Box::new(pt0::Expression {
-                                pexp_desc: pt0::ExpressionDesc::Ident(OldLocated::new(
+                                pexp_desc: Box::new(pt0::ExpressionDesc::Ident(OldLocated::new(
                                     tag_ident,
                                     tag_loc.clone(),
-                                )),
+                                ))),
                                 pexp_loc: tag_loc,
                                 pexp_attributes: vec![],
                             }),
@@ -969,10 +969,10 @@ impl<'a> Mapper<'a> {
 
                         pt0::ExpressionDesc::Apply {
                             funct: Box::new(pt0::Expression {
-                                pexp_desc: pt0::ExpressionDesc::Ident(OldLocated::new(
+                                pexp_desc: Box::new(pt0::ExpressionDesc::Ident(OldLocated::new(
                                     tag_ident,
                                     tag_loc.clone(),
-                                )),
+                                ))),
                                 pexp_loc: tag_loc,
                                 pexp_attributes: vec![],
                             }),
@@ -1115,7 +1115,7 @@ impl<'a> Mapper<'a> {
 
     fn map_module_type(&mut self, mt: &current::ModuleType) -> pt0::ModuleType {
         pt0::ModuleType {
-            pmty_desc: self.map_module_type_desc(&mt.pmty_desc),
+            pmty_desc: Box::new(self.map_module_type_desc(&mt.pmty_desc)),
             pmty_loc: self.loc(mt.pmty_loc),
             pmty_attributes: self.map_attributes(&mt.pmty_attributes),
         }
@@ -1181,7 +1181,7 @@ impl<'a> Mapper<'a> {
 
     fn map_module_expr(&mut self, me: &current::ModuleExpr) -> pt0::ModuleExpr {
         pt0::ModuleExpr {
-            pmod_desc: self.map_module_expr_desc(&me.pmod_desc),
+            pmod_desc: Box::new(self.map_module_expr_desc(&me.pmod_desc)),
             pmod_loc: self.loc(me.pmod_loc),
             pmod_attributes: self.map_attributes(&me.pmod_attributes),
         }
@@ -1293,7 +1293,7 @@ impl<'a> Mapper<'a> {
 
     fn map_structure_item(&mut self, item: &current::StructureItem) -> pt0::StructureItem {
         pt0::StructureItem {
-            pstr_desc: self.map_structure_item_desc(&item.pstr_desc),
+            pstr_desc: Box::new(self.map_structure_item_desc(&item.pstr_desc)),
             pstr_loc: self.loc(item.pstr_loc),
         }
     }
@@ -1352,7 +1352,7 @@ impl<'a> Mapper<'a> {
 
     fn map_signature_item(&mut self, item: &current::SignatureItem) -> pt0::SignatureItem {
         pt0::SignatureItem {
-            psig_desc: self.map_signature_item_desc(&item.psig_desc),
+            psig_desc: Box::new(self.map_signature_item_desc(&item.psig_desc)),
             psig_loc: self.loc(item.psig_loc),
         }
     }

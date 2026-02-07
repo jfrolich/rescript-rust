@@ -558,7 +558,7 @@ fn transl_type_inner(
     let ctx = tctx.type_ctx;
     let loc = styp.ptyp_loc.clone();
 
-    match &styp.ptyp_desc {
+    match &*styp.ptyp_desc {
         CTD::Ptyp_any => {
             // Wildcard type: create a fresh type variable
             let ty = ctx.new_var(None);
@@ -876,7 +876,7 @@ fn type_pattern_inner(
     let loc = pat.ppat_loc.clone();
     let ctx = tctx.type_ctx;
 
-    match &pat.ppat_desc {
+    match &*pat.ppat_desc {
         PD::Ppat_any => {
             // Wildcard pattern matches any type
             Ok(Pattern::new(
@@ -1546,7 +1546,7 @@ pub fn type_expect<'a>(
     let loc = expr.pexp_loc.clone();
     let ctx = tctx.type_ctx;
 
-    match &expr.pexp_desc {
+    match &*expr.pexp_desc {
         ED::Pexp_ident(lid) => {
             // Identifier expression
             let longident = tctx.resolve_lid(lid.txt);
@@ -3086,7 +3086,7 @@ fn type_let_bindings(
     let typing_env = if rec_flag == RecFlag::Recursive {
         let mut new_env = env.clone();
         for (binding, ty) in bindings.iter().zip(binding_types.iter()) {
-            if let crate::parser::ast::PatternDesc::Ppat_var(name) = &binding.pvb_pat.ppat_desc {
+            if let crate::parser::ast::PatternDesc::Ppat_var(name) = &*binding.pvb_pat.ppat_desc {
                 let id = Ident::create_local(tctx.arena.get_string(name.txt));
                 let desc = ValueDescription {
                     val_type: *ty,

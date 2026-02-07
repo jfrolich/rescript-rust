@@ -352,7 +352,7 @@ impl<'a> Mapper<'a> {
             pt0::CoreTypeDesc::Arrow(lbl, t1, t2) => {
                 let lbl = self.map_arg_label(lbl);
                 return current::CoreType {
-                    ptyp_desc: current::CoreTypeDesc::Ptyp_arrow {
+                    ptyp_desc: Box::new(current::CoreTypeDesc::Ptyp_arrow {
                         arg: Box::new(current::TypeArg {
                             attrs,
                             lbl,
@@ -360,7 +360,7 @@ impl<'a> Mapper<'a> {
                         }),
                         ret: Box::new(self.map_core_type(t2)),
                         arity: self.arena.push_arity(None),
-                    },
+                    }),
                     ptyp_loc: loc,
                     ptyp_attributes: vec![],
                 };
@@ -380,11 +380,11 @@ impl<'a> Mapper<'a> {
                                         if tag.txt.starts_with("Has_arity") {
                                             if let Ok(arity) = tag.txt[9..].parse::<usize>() {
                                                 return current::CoreType {
-                                                    ptyp_desc: current::CoreTypeDesc::Ptyp_arrow {
+                                                    ptyp_desc: Box::new(current::CoreTypeDesc::Ptyp_arrow {
                                                         arg,
                                                         ret,
                                                         arity: self.arena.push_arity(Some(arity as i32)),
-                                                    },
+                                                    }),
                                                     ptyp_loc: loc,
                                                     ptyp_attributes: attrs,
                                                 };
@@ -433,7 +433,7 @@ impl<'a> Mapper<'a> {
         };
 
         current::CoreType {
-            ptyp_desc: desc,
+            ptyp_desc: Box::new(desc),
             ptyp_loc: loc,
             ptyp_attributes: attrs,
         }
@@ -534,7 +534,7 @@ impl<'a> Mapper<'a> {
         };
 
         current::Pattern {
-            ppat_desc: desc,
+            ppat_desc: Box::new(desc),
             ppat_loc: loc,
             ppat_attributes: attrs,
         }
@@ -706,7 +706,7 @@ impl<'a> Mapper<'a> {
                 pexp_attributes: new_attrs,
             };
             return current::Expression {
-                pexp_desc: current::ExpressionDesc::Pexp_await(Box::new(self.map_expression(&inner_expr))),
+                pexp_desc: Box::new(current::ExpressionDesc::Pexp_await(Box::new(self.map_expression(&inner_expr)))),
                 pexp_loc: loc,
                 pexp_attributes: vec![],
             };
@@ -763,7 +763,7 @@ impl<'a> Mapper<'a> {
                         };
 
                         return current::Expression {
-                            pexp_desc: current::ExpressionDesc::Pexp_jsx_element(jsx_element),
+                            pexp_desc: Box::new(current::ExpressionDesc::Pexp_jsx_element(jsx_element)),
                             pexp_loc: loc,
                             pexp_attributes: jsx_attrs,
                         };
@@ -795,10 +795,10 @@ impl<'a> Mapper<'a> {
                             if let Some(new_name) = new_name {
                                 let new_str_idx = self.arena.intern_string(new_name);
                                 pt0::Expression {
-                                    pexp_desc: pt0::ExpressionDesc::Ident(OldLocated {
+                                    pexp_desc: Box::new(pt0::ExpressionDesc::Ident(OldLocated {
                                         txt: Longident::Lident(new_str_idx),
                                         loc: lid.loc.clone(),
-                                    }),
+                                    })),
                                     pexp_loc: func.pexp_loc.clone(),
                                     pexp_attributes: func.pexp_attributes.clone(),
                                 }
@@ -813,7 +813,7 @@ impl<'a> Mapper<'a> {
                 };
 
                 return current::Expression {
-                    pexp_desc: current::ExpressionDesc::Pexp_apply {
+                    pexp_desc: Box::new(current::ExpressionDesc::Pexp_apply {
                         funct: Box::new(self.map_expression(&func)),
                         args: args
                             .iter()
@@ -821,7 +821,7 @@ impl<'a> Mapper<'a> {
                             .collect(),
                         partial,
                         transformed_jsx: *transformed_jsx,
-                    },
+                    }),
                     pexp_loc: loc,
                     pexp_attributes: attrs,
                 };
@@ -853,7 +853,7 @@ impl<'a> Mapper<'a> {
                                 closing: loc_end_idx,
                             });
                             return current::Expression {
-                                pexp_desc: current::ExpressionDesc::Pexp_jsx_element(jsx_element),
+                                pexp_desc: Box::new(current::ExpressionDesc::Pexp_jsx_element(jsx_element)),
                                 pexp_loc: loc,
                                 pexp_attributes: jsx_attrs,
                             };
@@ -872,14 +872,14 @@ impl<'a> Mapper<'a> {
                                 let arity = self.arena.push_arity(arity_opt);
                                 let new_attrs = remove_arity_attribute(self.arena, &attrs);
                                 return current::Expression {
-                                    pexp_desc: current::ExpressionDesc::Pexp_fun {
+                                    pexp_desc: Box::new(current::ExpressionDesc::Pexp_fun {
                                         arg_label,
                                         default,
                                         lhs,
                                         rhs,
                                         arity,
                                         is_async,
-                                    },
+                                    }),
                                     pexp_loc: loc,
                                     pexp_attributes: new_attrs,
                                 };
@@ -1018,7 +1018,7 @@ impl<'a> Mapper<'a> {
         };
 
         current::Expression {
-            pexp_desc: desc,
+            pexp_desc: Box::new(desc),
             pexp_loc: loc,
             pexp_attributes: attrs,
         }
@@ -1074,7 +1074,7 @@ impl<'a> Mapper<'a> {
         };
 
         current::ModuleExpr {
-            pmod_desc: desc,
+            pmod_desc: Box::new(desc),
             pmod_loc: loc,
             pmod_attributes: attrs,
         }
@@ -1110,7 +1110,7 @@ impl<'a> Mapper<'a> {
         };
 
         current::ModuleType {
-            pmty_desc: desc,
+            pmty_desc: Box::new(desc),
             pmty_loc: loc,
             pmty_attributes: attrs,
         }
@@ -1189,7 +1189,7 @@ impl<'a> Mapper<'a> {
         };
 
         current::StructureItem {
-            pstr_desc: desc,
+            pstr_desc: Box::new(desc),
             pstr_loc: loc,
         }
     }
@@ -1243,7 +1243,7 @@ impl<'a> Mapper<'a> {
         };
 
         current::SignatureItem {
-            psig_desc: desc,
+            psig_desc: Box::new(desc),
             psig_loc: loc,
         }
     }

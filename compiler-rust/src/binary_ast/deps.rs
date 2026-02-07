@@ -137,7 +137,7 @@ impl<'a> DependencyCollector<'a> {
     }
 
     fn add_structure_item(&mut self, item: &StructureItem) {
-        match &item.pstr_desc {
+        match &*item.pstr_desc {
             StructureItemDesc::Pstr_eval(expr, _attrs) => {
                 self.add_expression(expr);
             }
@@ -220,7 +220,7 @@ impl<'a> DependencyCollector<'a> {
     }
 
     fn add_signature_item(&mut self, item: &SignatureItem) {
-        match &item.psig_desc {
+        match &*item.psig_desc {
             SignatureItemDesc::Psig_value(vd) => {
                 self.add_value_description(vd);
             }
@@ -273,7 +273,7 @@ impl<'a> DependencyCollector<'a> {
     // ========== Expressions ==========
 
     fn add_expression(&mut self, expr: &Expression) {
-        match &expr.pexp_desc {
+        match &*expr.pexp_desc {
             ExpressionDesc::Pexp_ident(lid) => {
                 self.add_lident_idx(lid.txt);
             }
@@ -527,7 +527,7 @@ impl<'a> DependencyCollector<'a> {
     }
 
     fn add_pattern_inner(&mut self, pat: &Pattern, unpack_names: &mut HashSet<String>) {
-        match &pat.ppat_desc {
+        match &*pat.ppat_desc {
             PatternDesc::Ppat_any | PatternDesc::Ppat_var(_) | PatternDesc::Ppat_constant(_) => {}
             PatternDesc::Ppat_alias(pat, _name) => {
                 self.add_pattern_inner(pat, unpack_names);
@@ -589,7 +589,7 @@ impl<'a> DependencyCollector<'a> {
     // ========== Core Types ==========
 
     fn add_core_type(&mut self, ty: &CoreType) {
-        match &ty.ptyp_desc {
+        match &*ty.ptyp_desc {
             CoreTypeDesc::Ptyp_any | CoreTypeDesc::Ptyp_var(_) => {}
             CoreTypeDesc::Ptyp_arrow { arg, ret, .. } => {
                 self.add_core_type(&arg.typ);
@@ -654,7 +654,7 @@ impl<'a> DependencyCollector<'a> {
     // ========== Modules ==========
 
     fn add_module_expr(&mut self, me: &ModuleExpr) {
-        match &me.pmod_desc {
+        match &*me.pmod_desc {
             ModuleExprDesc::Pmod_ident(lid) => {
                 // Module ident uses full path (OCaml: addmodule)
                 self.add_lident_idx_full(lid.txt);
@@ -694,7 +694,7 @@ impl<'a> DependencyCollector<'a> {
     }
 
     fn add_module_type(&mut self, mt: &ModuleType) {
-        match &mt.pmty_desc {
+        match &*mt.pmty_desc {
             ModuleTypeDesc::Pmty_ident(lid) => {
                 // Pmty_ident uses add = add_parent (OCaml: add bv l)
                 // For simple Lidents like `Tree` or `Intf`, this adds nothing (correct)
@@ -925,10 +925,10 @@ mod tests {
     fn make_ident_expr(arena: &mut ParseArena, lid: Longident) -> Expression {
         let lid_idx = arena.push_longident(lid);
         Expression {
-            pexp_desc: ExpressionDesc::Pexp_ident(Located {
+            pexp_desc: Box::new(ExpressionDesc::Pexp_ident(Located {
                 txt: lid_idx,
                 loc: LocIdx::none(),
-            }),
+            })),
             pexp_loc: LocIdx::none(),
             pexp_attributes: vec![],
         }
@@ -936,7 +936,7 @@ mod tests {
 
     fn make_eval_item(expr: Expression) -> StructureItem {
         StructureItem {
-            pstr_desc: StructureItemDesc::Pstr_eval(expr, vec![]),
+            pstr_desc: Box::new(StructureItemDesc::Pstr_eval(expr, vec![])),
             pstr_loc: LocIdx::none(),
         }
     }

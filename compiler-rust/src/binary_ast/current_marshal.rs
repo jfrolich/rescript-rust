@@ -37,7 +37,7 @@ fn is_symbolic_operator(name: &str) -> bool {
 fn is_pipe_application(expr: &Expression, w: &MarshalWriter) -> bool {
     let arena = w.get_arena();
 
-    let ExpressionDesc::Pexp_apply { funct, args, .. } = &expr.pexp_desc else {
+    let ExpressionDesc::Pexp_apply { funct, args, .. } = &*expr.pexp_desc else {
         return false;
     };
     if args.is_empty() || !matches!(args[0].0, ArgLabel::Nolabel) {
@@ -59,7 +59,7 @@ fn is_pipe_application(expr: &Expression, w: &MarshalWriter) -> bool {
         return false;
     }
 
-    let ExpressionDesc::Pexp_ident(lid) = &funct.pexp_desc else {
+    let ExpressionDesc::Pexp_ident(lid) = &*funct.pexp_desc else {
         return false;
     };
     let name = match arena.get_longident(lid.txt) {
@@ -134,7 +134,7 @@ fn is_none_loc_idx(loc: LocIdx, w: &MarshalWriter) -> bool {
 }
 
 fn is_raw_expansion_expr(expr: &Expression, w: &MarshalWriter) -> bool {
-    let ExpressionDesc::Pexp_letmodule(module_name, mod_expr, body) = &expr.pexp_desc else {
+    let ExpressionDesc::Pexp_letmodule(module_name, mod_expr, body) = &*expr.pexp_desc else {
         return false;
     };
 
@@ -143,14 +143,14 @@ fn is_raw_expansion_expr(expr: &Expression, w: &MarshalWriter) -> bool {
         return false;
     }
 
-    let ModuleExprDesc::Pmod_structure(items) = &mod_expr.pmod_desc else {
+    let ModuleExprDesc::Pmod_structure(items) = &*mod_expr.pmod_desc else {
         return false;
     };
     if items.len() != 1 {
         return false;
     }
 
-    let StructureItemDesc::Pstr_primitive(vd) = &items[0].pstr_desc else {
+    let StructureItemDesc::Pstr_primitive(vd) = &*items[0].pstr_desc else {
         return false;
     };
     if arena.get_string(vd.pval_name.txt) != "unsafe_expr" {
@@ -164,14 +164,14 @@ fn is_raw_expansion_expr(expr: &Expression, w: &MarshalWriter) -> bool {
         return false;
     }
 
-    let ExpressionDesc::Pexp_apply { funct, args, .. } = &body.pexp_desc else {
+    let ExpressionDesc::Pexp_apply { funct, args, .. } = &*body.pexp_desc else {
         return false;
     };
     if args.len() != 1 || !matches!(args[0].0, ArgLabel::Nolabel) {
         return false;
     }
 
-    let ExpressionDesc::Pexp_ident(lid) = &funct.pexp_desc else {
+    let ExpressionDesc::Pexp_ident(lid) = &*funct.pexp_desc else {
         return false;
     };
     match arena.get_longident(lid.txt) {
@@ -192,28 +192,28 @@ fn is_external_ext_expr(expr: &Expression, w: &MarshalWriter) -> bool {
         funct: outer_funct,
         args: outer_args,
         ..
-    } = &expr.pexp_desc
+    } = &*expr.pexp_desc
     else {
         return false;
     };
     if outer_args.len() != 1 || !matches!(outer_args[0].0, ArgLabel::Nolabel) {
         return false;
     }
-    let ExpressionDesc::Pexp_ident(outer_lid) = &outer_funct.pexp_desc else {
+    let ExpressionDesc::Pexp_ident(outer_lid) = &*outer_funct.pexp_desc else {
         return false;
     };
     if outer_lid.txt != arena.ppx_js_undefined_to_option_lid() {
         return false;
     }
 
-    let ExpressionDesc::Pexp_ifthenelse(cond, then_expr, Some(else_expr)) = &outer_args[0].1.pexp_desc else {
+    let ExpressionDesc::Pexp_ifthenelse(cond, then_expr, Some(else_expr)) = &*outer_args[0].1.pexp_desc else {
         return false;
     };
     if !is_external_raw_expansion_expr(else_expr, w) {
         return false;
     }
     if !matches!(
-        &then_expr.pexp_desc,
+        &*then_expr.pexp_desc,
         ExpressionDesc::Pexp_ident(then_lid) if then_lid.txt == arena.ppx_js_undefined_empty_lid()
     ) {
         return false;
@@ -223,7 +223,7 @@ fn is_external_ext_expr(expr: &Expression, w: &MarshalWriter) -> bool {
         funct: eq_funct,
         args: eq_args,
         ..
-    } = &cond.pexp_desc
+    } = &*cond.pexp_desc
     else {
         return false;
     };
@@ -234,7 +234,7 @@ fn is_external_ext_expr(expr: &Expression, w: &MarshalWriter) -> bool {
         return false;
     }
     if !matches!(
-        &eq_funct.pexp_desc,
+        &*eq_funct.pexp_desc,
         ExpressionDesc::Pexp_ident(eq_lid)
             if matches!(arena.get_longident(eq_lid.txt), Longident::Lident(s) if *s == arena.ppx_eq_str())
     ) {
@@ -245,7 +245,7 @@ fn is_external_ext_expr(expr: &Expression, w: &MarshalWriter) -> bool {
         funct: typeof_funct,
         args: typeof_args,
         ..
-    } = &eq_args[0].1.pexp_desc
+    } = &*eq_args[0].1.pexp_desc
     else {
         return false;
     };
@@ -253,7 +253,7 @@ fn is_external_ext_expr(expr: &Expression, w: &MarshalWriter) -> bool {
         return false;
     }
     if !matches!(
-        &typeof_funct.pexp_desc,
+        &*typeof_funct.pexp_desc,
         ExpressionDesc::Pexp_ident(typeof_lid) if typeof_lid.txt == arena.ppx_js_typeof_lid()
     ) {
         return false;
@@ -263,7 +263,7 @@ fn is_external_ext_expr(expr: &Expression, w: &MarshalWriter) -> bool {
     }
 
     matches!(
-        &eq_args[1].1.pexp_desc,
+        &*eq_args[1].1.pexp_desc,
         ExpressionDesc::Pexp_constant(Constant::String(s, None)) if s == "undefined"
     )
 }
@@ -272,17 +272,17 @@ fn is_external_raw_expansion_expr(expr: &Expression, w: &MarshalWriter) -> bool 
     if !is_raw_expansion_expr(expr, w) {
         return false;
     }
-    let ExpressionDesc::Pexp_letmodule(_, _, body) = &expr.pexp_desc else {
+    let ExpressionDesc::Pexp_letmodule(_, _, body) = &*expr.pexp_desc else {
         return false;
     };
-    let ExpressionDesc::Pexp_apply { args, .. } = &body.pexp_desc else {
+    let ExpressionDesc::Pexp_apply { args, .. } = &*body.pexp_desc else {
         return false;
     };
     if args.len() != 1 || !matches!(args[0].0, ArgLabel::Nolabel) {
         return false;
     }
     matches!(
-        &args[0].1.pexp_desc,
+        &*args[0].1.pexp_desc,
         ExpressionDesc::Pexp_constant(Constant::String(_, Some(delim))) if delim.is_empty()
     )
 }
@@ -803,7 +803,7 @@ impl Marshal for TypeArg {
 
 impl Marshal for CoreType {
     fn marshal(&self, w: &mut MarshalWriter) {
-        let share_empty_pstr = match &self.ptyp_desc {
+        let share_empty_pstr = match &*self.ptyp_desc {
             CoreTypeDesc::Ptyp_object(_, _) => Some(EmptyPayloadShareKind::ObjectTypeAttr),
             _ => None,
         };
@@ -811,7 +811,7 @@ impl Marshal for CoreType {
         // OCaml shares simple builtin `string` core_types (no args, no attrs, no loc)
         // across repeated generated externals (e.g. inline red/black conversion tests).
         // Keep this narrow to avoid reintroducing broader core_type over-sharing.
-        if let CoreTypeDesc::Ptyp_constr(lid, types) = &self.ptyp_desc {
+        if let CoreTypeDesc::Ptyp_constr(lid, types) = &*self.ptyp_desc {
             let should_share_simple_string = self.ptyp_attributes.is_empty()
                 && types.is_empty()
                 && is_none_loc_idx(self.ptyp_loc, w)
@@ -842,7 +842,7 @@ impl Marshal for CoreType {
         // In OCaml's from_labels (handle_obj), the same tyvar CoreType is physically
         // shared between Otag fields and Labelled args. The first write creates the
         // object, subsequent writes with the same (name, loc) emit shared references.
-        if let CoreTypeDesc::Ptyp_var(name) = &self.ptyp_desc {
+        if let CoreTypeDesc::Ptyp_var(name) = &*self.ptyp_desc {
             if self.ptyp_attributes.is_empty() {
                 let key = (name.to_string(), self.ptyp_loc);
                 if let Some(&obj_idx) = w.tyvar_core_type_table_get(&key) {
@@ -862,7 +862,7 @@ impl Marshal for CoreType {
             }
         }
 
-        if let CoreTypeDesc::Ptyp_var(name) = &self.ptyp_desc {
+        if let CoreTypeDesc::Ptyp_var(name) = &*self.ptyp_desc {
             w.write_block_header(0, 3);
             marshal_ptyp_var_desc(name, self.ptyp_loc, w);
             self.ptyp_loc.marshal(w);
@@ -1009,7 +1009,7 @@ impl Marshal for Pattern {
         w.write_block_header(0, 3);
         self.ppat_desc.marshal(w);
         let mut wrote_shared_ppat_loc = false;
-        if let PatternDesc::Ppat_var(name) = &self.ppat_desc {
+        if let PatternDesc::Ppat_var(name) = &*self.ppat_desc {
             if name.loc != self.ppat_loc {
                 let arena = w.get_arena();
                 if arena.get_location(name.loc) == arena.get_location(self.ppat_loc) {
@@ -1196,7 +1196,7 @@ impl Marshal for Expression {
         // While PPX-created instances preserve attrs, user code instances go through
         // the default mapper which creates fresh tuples.
         let share_attrs = matches!(
-            &self.pexp_desc,
+            &*self.pexp_desc,
             ExpressionDesc::Pexp_constant(Constant::String(_, Some(_)))
                 | ExpressionDesc::Pexp_constant(Constant::Integer(_, Some(_)))
                 | ExpressionDesc::Pexp_extension(_)
@@ -1205,7 +1205,7 @@ impl Marshal for Expression {
         let has_braces_or_ternary =
             has_braces_attr(&self.pexp_attributes, w) || has_ternary_attr(&self.pexp_attributes, w);
         let rewritten_await_letmodule = matches!(
-            &self.pexp_desc,
+            &*self.pexp_desc,
             ExpressionDesc::Pexp_letmodule(_, mod_expr, _) if has_await_attr(&mod_expr.pmod_attributes, w)
         );
         let rewritten_expr = w.get_arena().is_rewritten_expr_loc(self.pexp_loc);
@@ -1226,7 +1226,7 @@ impl Marshal for Expression {
             &self.pexp_attributes,
             w,
             share_singleton_attr_tuple,
-            matches!(&self.pexp_desc, ExpressionDesc::Pexp_open(_, _, _)),
+            matches!(&*self.pexp_desc, ExpressionDesc::Pexp_open(_, _, _)),
             share_empty_pstr,
         );
         if is_raw_expansion {
