@@ -232,7 +232,7 @@ fn is_simple_expression_with_arena(expr: &Expression, arena: &ParseArena) -> boo
             // NOTE: Pexp_field and Pexp_send are NOT simple in OCaml's pprintast.
             // They are in expression2, which means they need parens when nested.
             // OCaml's simple_expr handles these directly (no paren wrapping)
-            | ExpressionDesc::Pexp_for(_, _, _, _, _)
+            | ExpressionDesc::Pexp_for(Box::new((_, _, _, _, _)))
             | ExpressionDesc::Pexp_while(_, _)
             | ExpressionDesc::Pexp_jsx_element(Box::new(_))  // JSX elements are simple in OCaml
     )

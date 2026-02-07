@@ -364,7 +364,7 @@ pub fn parse_constrained_pattern(p: &mut Parser<'_>) -> Pattern {
         let end_idx = p.loc_end_idx(typ.ptyp_loc);
         let loc = p.mk_loc_idx_full(start_idx, end_idx);
         Pattern {
-            ppat_desc: Box::new(PatternDesc::Ppat_constraint(Box::new(pat), typ)),
+            ppat_desc: Box::new(PatternDesc::Ppat_constraint(Box::new((Box::new(pat), typ)))),
             ppat_loc: loc,
             ppat_attributes: vec![],
         }
@@ -630,7 +630,7 @@ fn parse_atomic_pattern(p: &mut Parser<'_>) -> Pattern {
                     ppat_attributes: vec![],
                 };
                 Pattern {
-                    ppat_desc: Box::new(PatternDesc::Ppat_constraint(Box::new(unpack), typ)),
+                    ppat_desc: Box::new(PatternDesc::Ppat_constraint(Box::new((Box::new(unpack), typ)))),
                     ppat_loc: loc,
                     ppat_attributes: vec![],
                 }
@@ -1000,7 +1000,7 @@ fn parse_non_spread_pattern(p: &mut Parser<'_>, error_msg: &str) -> Option<Patte
             let typ = super::typ::parse_typ_expr(p);
             let loc = p.mk_loc_spanning(pat.ppat_loc, typ.ptyp_loc);
             Some(Pattern {
-                ppat_desc: Box::new(PatternDesc::Ppat_constraint(Box::new(pat), typ)),
+                ppat_desc: Box::new(PatternDesc::Ppat_constraint(Box::new((Box::new(pat), typ)))),
                 ppat_loc: loc,
                 ppat_attributes: vec![],
             })

@@ -390,7 +390,7 @@ fn expr_variant(label: Cow<'static, str>, arg: Option<Expression>, arena: &mut P
 
 fn expr_match(expr: Expression, cases: Vec<Case>, arena: &mut ParseArena) -> Expression {
     Expression {
-        pexp_desc: Box::new(ExpressionDesc::Pexp_match(Box::new(expr), cases)),
+        pexp_desc: Box::new(ExpressionDesc::Pexp_match(Box::new((Box::new(expr), cases)))),
         pexp_loc: arena.dummy_loc(),
         pexp_attributes: vec![],
     }
@@ -403,11 +403,7 @@ fn expr_ifthenelse(
     arena: &mut ParseArena,
 ) -> Expression {
     Expression {
-        pexp_desc: Box::new(ExpressionDesc::Pexp_ifthenelse(
-            Box::new(cond),
-            Box::new(then_expr),
-            else_expr.map(Box::new),
-        )),
+        pexp_desc: Box::new(ExpressionDesc::Pexp_ifthenelse(Box::new((Box::new(cond), Box::new(then_expr), else_expr.map(Box::new))))),
         pexp_loc: arena.dummy_loc(),
         pexp_attributes: vec![],
     }
@@ -428,7 +424,7 @@ fn expr_let(
 
 fn expr_constraint(expr: Expression, typ: CoreType, arena: &mut ParseArena) -> Expression {
     Expression {
-        pexp_desc: Box::new(ExpressionDesc::Pexp_constraint(Box::new(expr), typ)),
+        pexp_desc: Box::new(ExpressionDesc::Pexp_constraint(Box::new((Box::new(expr), typ)))),
         pexp_loc: arena.dummy_loc(),
         pexp_attributes: vec![],
     }
@@ -576,7 +572,7 @@ fn pat_variant(label: Cow<'static, str>, arg: Option<Pattern>, arena: &mut Parse
 
 fn pat_constraint(pat: Pattern, typ: CoreType, arena: &mut ParseArena) -> Pattern {
     Pattern {
-        ppat_desc: Box::new(PatternDesc::Ppat_constraint(Box::new(pat), typ)),
+        ppat_desc: Box::new(PatternDesc::Ppat_constraint(Box::new((Box::new(pat), typ)))),
         ppat_loc: arena.dummy_loc(),
         ppat_attributes: vec![],
     }
@@ -3749,7 +3745,7 @@ impl<'a> LocCloner<'a> {
                     self.expression(arg);
                 }
             }
-            ExpressionDesc::Pexp_match(expr, cases) | ExpressionDesc::Pexp_try(inner) => {
+            ExpressionDesc::Pexp_match(Box::new((expr, cases))) | ExpressionDesc::Pexp_try(inner) => {
                     let (ref expr, ref cases) = **inner;
                 self.expression(expr);
                 for case in cases {

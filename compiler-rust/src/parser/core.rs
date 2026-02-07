@@ -681,7 +681,7 @@ pub mod ast_helper {
         loc: Location,
     ) -> Expression {
         make_expr(
-            ExpressionDesc::Pexp_let(rec_flag, bindings, Box::new(body)),
+            ExpressionDesc::Pexp_let(Box::new((rec_flag, bindings, Box::new(body)))),
             loc,
         )
     }
@@ -768,7 +768,7 @@ pub mod ast_helper {
         lid_loc: Location,
         ptyp_loc: Location,
     ) -> CoreType {
-        make_typ(CoreTypeDesc::Ptyp_constr(with_loc(lid_idx, lid_loc), args), ptyp_loc)
+        make_typ(CoreTypeDesc::Ptyp_constr(Box::new((with_loc(lid_idx, lid_loc), args))), ptyp_loc)
     }
 }
 

@@ -86,7 +86,7 @@ pub fn substitute_type_vars(arena: &mut crate::parse_arena::ParseArena, typ: Cor
         }
         CoreTypeDesc::Ptyp_alias(inner) => {
                     let (ref inner, ref alias) = **inner;
-            CoreTypeDesc::Ptyp_alias(Box::new(substitute_type_vars(arena, *inner, vars)), alias)
+            CoreTypeDesc::Ptyp_alias(Box::new((Box::new(substitute_type_vars(arena, *inner, vars)), alias)))
         }
         CoreTypeDesc::Ptyp_object(inner) => {
                     let (ref fields, ref closed) = **inner;
@@ -296,7 +296,7 @@ fn parse_type_alias(p: &mut Parser<'_>, typ: CoreType) -> CoreType {
         let end_pos_idx = p.prev_end_pos_idx();
         let loc = p.mk_loc_idx(typ_start_idx, end_pos_idx);
         return CoreType {
-            ptyp_desc: Box::new(CoreTypeDesc::Ptyp_alias(Box::new(typ), var_name)),
+            ptyp_desc: Box::new(CoreTypeDesc::Ptyp_alias(Box::new((Box::new(typ), var_name)))),
             ptyp_loc: loc,
             ptyp_attributes: vec![],
         };
@@ -1470,10 +1470,7 @@ fn parse_record_or_object_type(p: &mut Parser<'_>) -> CoreType {
         let type_args: Vec<CoreType> = params.into_iter().map(|(t, _)| t).collect();
         let lid_idx = p.push_lident(&inline_type_name);
         CoreType {
-            ptyp_desc: Box::new(CoreTypeDesc::Ptyp_constr(
-                with_loc(lid_idx, loc.clone()),
-                type_args,
-            )),
+            ptyp_desc: Box::new(CoreTypeDesc::Ptyp_constr(Box::new((with_loc(lid_idx, loc.clone()), type_args)))),
             ptyp_loc: loc,
             ptyp_attributes: vec![],
         }

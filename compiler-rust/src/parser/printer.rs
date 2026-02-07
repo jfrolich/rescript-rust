@@ -849,10 +849,10 @@ pub fn print_braces(doc: Doc, expr: &Expression, braces_loc: LocIdx, arena: &Par
 
     // These expression types already have braces when printed, so just return doc as-is
     match &*expr.pexp_desc {
-        ExpressionDesc::Pexp_letmodule(_, _, _)
-        | ExpressionDesc::Pexp_letexception(_, _)
-        | ExpressionDesc::Pexp_let(_, _, _)
-        | ExpressionDesc::Pexp_open(_, _, _)
+        ExpressionDesc::Pexp_letmodule(Box::new((_, _, _)))
+        | ExpressionDesc::Pexp_letexception(Box::new((_, _)))
+        | ExpressionDesc::Pexp_let(Box::new((_, _, _)))
+        | ExpressionDesc::Pexp_open(Box::new((_, _, _)))
         | ExpressionDesc::Pexp_sequence(_, _) => {
             return doc;
         }
@@ -1884,7 +1884,7 @@ fn print_pexp_fun(
                 ExpressionDesc::Pexp_array(_)
                 | ExpressionDesc::Pexp_tuple(_)
                 | ExpressionDesc::Pexp_construct(_, Some(_))
-                | ExpressionDesc::Pexp_record(_, _),
+                | ExpressionDesc::Pexp_record(Box::new((_, _))),
                 _,
             ) => true,
             _ => false,
@@ -2129,7 +2129,7 @@ fn print_exp_fun_parameter(
                 // ~d: typ (punning with type)
                 (
                     ArgLabel::Labelled(lbl) | ArgLabel::Optional(lbl),
-                    PatternDesc::Ppat_constraint(inner, typ),
+                    PatternDesc::Ppat_constraint(Box::new((inner, typ))),
                 ) if matches!(&*inner.ppat_desc, PatternDesc::Ppat_var(v) if arena.get_string(lbl.txt) == arena.get_string(v.txt)) => {
                     Doc::concat(vec![
                         print_attributes(state, &pat.ppat_attributes, cmt_tbl, arena),
@@ -6897,10 +6897,10 @@ fn print_case_content(
 ) -> Doc {
     // Print the RHS
     let rhs = match &*case.pc_rhs.pexp_desc {
-        ExpressionDesc::Pexp_let(_, _, _)
-        | ExpressionDesc::Pexp_letmodule(_, _, _)
-        | ExpressionDesc::Pexp_letexception(_, _)
-        | ExpressionDesc::Pexp_open(_, _, _)
+        ExpressionDesc::Pexp_let(Box::new((_, _, _)))
+        | ExpressionDesc::Pexp_letmodule(Box::new((_, _, _)))
+        | ExpressionDesc::Pexp_letexception(Box::new((_, _)))
+        | ExpressionDesc::Pexp_open(Box::new((_, _, _)))
         | ExpressionDesc::Pexp_sequence(_, _) => {
             let braces = parsetree_viewer::is_braced_expr(arena, &case.pc_rhs);
             print_expression_block(state, braces, &case.pc_rhs, cmt_tbl, arena)

@@ -676,10 +676,7 @@ pub fn parse_structure_item(p: &mut Parser<'_>) -> Option<StructureItem> {
                 Payload::PStr(Box::new(vec![]))
             };
             parse_newline_or_semicolon_structure(p);
-            Some(StructureItemDesc::Pstr_extension(
-                (id, payload),
-                attrs.clone(),
-            ))
+            Some(StructureItemDesc::Pstr_extension(Box::new(((id, payload), attrs.clone()))))
         }
         _ => {
             // Could be an expression
@@ -1264,10 +1261,7 @@ fn parse_primary_module_expr(p: &mut Parser<'_>) -> ModuleExpr {
                     p.expect(Token::Rparen);
                     let constraint_loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
                     Expression {
-                        pexp_desc: Box::new(ExpressionDesc::Pexp_constraint(
-                            Box::new(expr),
-                            pkg_type,
-                        )),
+                        pexp_desc: Box::new(ExpressionDesc::Pexp_constraint(Box::new((Box::new(expr), pkg_type)))),
                         pexp_loc: constraint_loc,
                         pexp_attributes: vec![],
                     }
@@ -1574,11 +1568,7 @@ fn parse_functor_module_expr(p: &mut Parser<'_>) -> ModuleExpr {
     args.into_iter().rev().fold(rhs_module_expr, |acc, arg| {
         let loc = p.mk_loc_idx(arg.start_pos_idx, end_pos_idx);
         ModuleExpr {
-            pmod_desc: Box::new(ModuleExprDesc::Pmod_functor(
-                arg.name,
-                arg.mod_type.map(Box::new),
-                Box::new(acc),
-            )),
+            pmod_desc: Box::new(ModuleExprDesc::Pmod_functor(Box::new((arg.name, arg.mod_type.map(Box::new), Box::new(acc))))),
             pmod_loc: loc,
             pmod_attributes: arg.attrs,
         }
@@ -1688,11 +1678,7 @@ fn parse_functor_module_type(p: &mut Parser<'_>) -> ModuleType {
         let body = parse_module_type_no_with(p);
         let loc = p.mk_loc_idx_to_end_of(start_pos_idx, body.pmty_loc);
         return ModuleType {
-            pmty_desc: Box::new(ModuleTypeDesc::Pmty_functor(
-                mknoloc(p.arena_mut().intern("_")),
-                Some(Box::new(param_type)),
-                Box::new(body),
-            )),
+            pmty_desc: Box::new(ModuleTypeDesc::Pmty_functor(Box::new((mknoloc(p.arena_mut().intern("_")), Some(Box::new(param_type)), Box::new(body))))),
             pmty_loc: loc,
             pmty_attributes: vec![],
         };
@@ -1886,11 +1872,7 @@ fn parse_paren_functor_module_type(p: &mut Parser<'_>) -> ModuleType {
             };
             let loc = p.mk_loc_idx(start_idx, end_pos_idx);
             ModuleType {
-                pmty_desc: Box::new(ModuleTypeDesc::Pmty_functor(
-                    param.name,
-                    param.param.map(Box::new),
-                    Box::new(acc),
-                )),
+                pmty_desc: Box::new(ModuleTypeDesc::Pmty_functor(Box::new((param.name, param.param.map(Box::new), Box::new(acc))))),
                 pmty_loc: loc,
                 pmty_attributes: param.attrs,
             }
@@ -2437,7 +2419,7 @@ fn parse_let_bindings(
             // Create a constraint pattern
             let loc = p.mk_loc_spanning(pat.ppat_loc, final_typ.ptyp_loc);
             let pat = Pattern {
-                ppat_desc: Box::new(PatternDesc::Ppat_constraint(Box::new(pat), final_typ)),
+                ppat_desc: Box::new(PatternDesc::Ppat_constraint(Box::new((Box::new(pat), final_typ)))),
                 ppat_loc: loc,
                 ppat_attributes: vec![],
             };
@@ -3288,13 +3270,13 @@ fn fix_spread_first_object_manifest(p: &mut Parser<'_>, typ: CoreType, is_spread
                 // Create a spanning location from fixed_inner start to typ end
                 let new_loc = p.mk_loc_spanning(fixed_inner.ptyp_loc, typ.ptyp_loc);
                 (CoreType {
-                    ptyp_desc: Box::new(CoreTypeDesc::Ptyp_alias(Box::new(fixed_inner), alias)),
+                    ptyp_desc: Box::new(CoreTypeDesc::Ptyp_alias(Box::new((Box::new(fixed_inner), alias)))),
                     ptyp_loc: new_loc,
                     ptyp_attributes: typ.ptyp_attributes,
                 }, true)
             } else {
                 (CoreType {
-                    ptyp_desc: Box::new(CoreTypeDesc::Ptyp_alias(Box::new(fixed_inner), alias)),
+                    ptyp_desc: Box::new(CoreTypeDesc::Ptyp_alias(Box::new((Box::new(fixed_inner), alias)))),
                     ..typ
                 }, false)
             }
@@ -3363,7 +3345,7 @@ fn fix_type_manifest_location(p: &mut Parser<'_>, typ: CoreType) -> CoreType {
             // Recurse into the aliased type (e.g., `Color.t<...> as 'rgb`)
             let fixed_inner = fix_type_manifest_location(p, inner.as_ref().clone());
             CoreType {
-                ptyp_desc: Box::new(CoreTypeDesc::Ptyp_alias(Box::new(fixed_inner), alias_name.clone())),
+                ptyp_desc: Box::new(CoreTypeDesc::Ptyp_alias(Box::new((Box::new(fixed_inner), alias_name.clone())))),
                 ..typ
             }
         }
@@ -4088,10 +4070,7 @@ fn parse_label_declaration(
         // The type is a simple type constructor with the field name
         let lid_idx = p.push_lident_from_idx(name.txt);
         CoreType {
-            ptyp_desc: Box::new(CoreTypeDesc::Ptyp_constr(
-                with_loc(lid_idx, name.loc.clone()),
-                vec![],
-            )),
+            ptyp_desc: Box::new(CoreTypeDesc::Ptyp_constr(Box::new((with_loc(lid_idx, name.loc.clone()), vec![])))),
             ptyp_loc: name.loc.clone(),
             ptyp_attributes: vec![],
         }
@@ -4165,10 +4144,7 @@ fn parse_label_declaration(
             let type_args: Vec<CoreType> = params.into_iter().map(|(t, _)| t).collect();
             let lid_idx = p.push_lident_from_idx(inline_type_idx);
             CoreType {
-                ptyp_desc: Box::new(CoreTypeDesc::Ptyp_constr(
-                    with_loc(lid_idx, type_loc.clone()),
-                    type_args,
-                )),
+                ptyp_desc: Box::new(CoreTypeDesc::Ptyp_constr(Box::new((with_loc(lid_idx, type_loc.clone()), type_args)))),
                 ptyp_loc: type_loc,
                 ptyp_attributes: vec![],
             }
@@ -4778,7 +4754,7 @@ pub fn parse_payload(p: &mut Parser<'_>) -> Payload {
         } else {
             None
         };
-        return Payload::PPat(Box::new(pat), guard);
+        return Payload::PPat(Box::new((Box::new(pat), guard)));
     }
 
     // Otherwise, parse as structure items

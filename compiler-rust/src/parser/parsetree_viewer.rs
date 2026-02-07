@@ -524,7 +524,7 @@ pub fn should_inline_rhs_binary_expr(expr: &Expression) -> bool {
             | ExpressionDesc::Pexp_ifthenelse(_, _, _)
             | ExpressionDesc::Pexp_for(_, _, _, _, _)
             | ExpressionDesc::Pexp_while(_, _)
-            | ExpressionDesc::Pexp_try(_, _)
+            | ExpressionDesc::Pexp_try(Box::new((_, _)))
             | ExpressionDesc::Pexp_array(_)
             | ExpressionDesc::Pexp_record(Box::new((_, _)))
     )
