@@ -825,12 +825,12 @@ fn type_structure_item<'a>(
                 }
 
                 // Convert manifest type (type alias)
-                let typ_manifest = match &decl.ptype_manifest {
+                let (typ_manifest, manifest_type_ref) = match &decl.ptype_manifest {
                     Some(manifest) => {
-                        let (typed_manifest, _) = transl_type(tctx, env, manifest)?;
-                        Some(typed_manifest)
+                        let (typed_manifest, type_ref) = transl_type(tctx, env, manifest)?;
+                        (Some(typed_manifest), Some(type_ref))
                     }
-                    None => None,
+                    None => (None, None),
                 };
 
                 // Convert the type kind - create both internal and typed tree versions
@@ -1250,7 +1250,7 @@ fn type_structure_item<'a>(
                     type_arity,
                     type_kind: internal_type_kind,
                     type_private: crate::types::PrivateFlag::Public,
-                    type_manifest: None,
+                    type_manifest: manifest_type_ref,
                     type_variance: typ_params.iter().map(|(_, v)| *v).collect(),
                     type_newtype_level: None,
                     type_loc: arena.to_location(decl.ptype_loc),
@@ -1265,6 +1265,9 @@ fn type_structure_item<'a>(
 
                 // Add type to environment
                 new_env.add_type(type_id.clone(), internal_decl.clone());
+
+                // Also register in global type store for alias expansion
+                ctx.register_type_decl(type_name_str, internal_decl.clone());
 
                 // Add constructors to environment, and add inline record labels
                 for (cstr_id, cstr_desc) in constructors {
