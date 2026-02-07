@@ -2580,48 +2580,61 @@ fn type_application(
     // Type check arguments, extracting/building arrow types as we go
     let mut typed_args = Vec::new();
     for (label, arg_expr) in args.iter() {
-        // Try to extract argument type and label from current function type
-        let (fn_label, arg_ty, ret_ty) = match crate::types::ctype::split_arrow_with_label(ctx, current_ty) {
-            Some((lbl, arg, ret)) => (Some(lbl), arg, ret),
-            None => {
-                // Not a function type yet - create arrow type with arity
-                let arg_ty = ctx.new_var(None);
-                let ret_ty = ctx.new_var(None);
-                let arrow_ty = ctx.new_arrow(crate::types::ArgLabel::Nolabel, arg_ty, ret_ty, top_arity);
-                unify_expression_types(tctx, loc, current_ty, arrow_ty, None)?;
-                (None, arg_ty, ret_ty)
+        // Skip optional parameters when the call-site provides a Nolabel argument.
+        // This handles cases like f(~x: int=?, unit) called as f(()) where the
+        // optional ~x parameter should be implicitly None.
+        loop {
+            let (fn_label, arg_ty, ret_ty) = match crate::types::ctype::split_arrow_with_label(ctx, current_ty) {
+                Some((lbl, arg, ret)) => (Some(lbl), arg, ret),
+                None => {
+                    // Not a function type yet - create arrow type with arity
+                    let arg_ty = ctx.new_var(None);
+                    let ret_ty = ctx.new_var(None);
+                    let arrow_ty = ctx.new_arrow(crate::types::ArgLabel::Nolabel, arg_ty, ret_ty, top_arity);
+                    unify_expression_types(tctx, loc, current_ty, arrow_ty, None)?;
+                    (None, arg_ty, ret_ty)
+                }
+            };
+
+            let fn_param_is_optional = fn_label.as_ref().map_or(false, |l| l.is_optional());
+            let call_is_optional = label.is_optional();
+
+            // If the function expects an optional parameter but the call-site provides
+            // a Nolabel argument, skip the optional parameter (implicitly pass None)
+            // and try to match against the next parameter.
+            if fn_param_is_optional && label.is_nolabel() {
+                // Skip this optional parameter - advance to next arrow
+                current_ty = ret_ty;
+                continue;
             }
-        };
 
-        // Handle optional parameter wrapping:
-        // When the function parameter is Optional but the call-site passes a concrete
-        // value (Labelled, not Optional), unwrap option<T> to T for type checking,
-        // then wrap the expression in Some(...).
-        let fn_param_is_optional = fn_label.as_ref().map_or(false, |l| l.is_optional());
-        let call_is_optional = label.is_optional();
+            // Handle optional parameter wrapping:
+            // When the function parameter is Optional but the call-site passes a concrete
+            // value (Labelled, not Optional), unwrap option<T> to T for type checking.
+            let effective_arg_ty = if fn_param_is_optional && !call_is_optional {
+                // Unwrap option<T> to get T for type checking the concrete argument
+                crate::types::ctype::extract_option_type(ctx, arg_ty).unwrap_or(arg_ty)
+            } else {
+                arg_ty
+            };
 
-        let effective_arg_ty = if fn_param_is_optional && !call_is_optional && !label.is_nolabel() {
-            // Unwrap option<T> to get T for type checking the concrete argument
-            crate::types::ctype::extract_option_type(ctx, arg_ty).unwrap_or(arg_ty)
-        } else {
-            arg_ty
-        };
+            // Type check the argument
+            let typed_arg = type_expect(
+                tctx,
+                env,
+                arg_expr,
+                effective_arg_ty,
+                Some(TypeClashContext::FunctionCall),
+            )?;
+            typed_args.push(ApplyArg {
+                label: label.clone(),
+                expression: typed_arg,
+            });
 
-        // Type check the argument
-        let typed_arg = type_expect(
-            tctx,
-            env,
-            arg_expr,
-            effective_arg_ty,
-            Some(TypeClashContext::FunctionCall),
-        )?;
-        typed_args.push(ApplyArg {
-            label: label.clone(),
-            expression: typed_arg,
-        });
-
-        // Move to return type for next argument
-        current_ty = ret_ty;
+            // Move to return type for next argument
+            current_ty = ret_ty;
+            break;
+        }
     }
 
     // The final current_ty is the result type
