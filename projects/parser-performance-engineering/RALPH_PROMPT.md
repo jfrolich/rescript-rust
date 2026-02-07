@@ -1,0 +1,130 @@
+# Ralph Loop: Parser Performance Engineering
+
+You are optimizing the **Rust ReScript parser** for maximum performance while preserving **byte-for-byte binary AST parity** with the OCaml reference implementation.
+
+## Core Principle: Performance Without Regressions
+
+**Every optimization MUST preserve binary AST parity.** This is non-negotiable. The Rust `bsc -bs-ast` output must be byte-identical to the OCaml output for all test files.
+
+Before and after every change:
+```bash
+# Parity test (MUST show zero regressions)
+./scripts/test_parser_ast_parity.sh 2>&1 | tail -20
+```
+
+## Your Task
+
+Read `RALPH_TODO.md` and complete the next unchecked task. After completing a task:
+1. Run parity tests — zero regressions required
+2. Run benchmarks and record results
+3. Mark the task `[x]` complete in `RALPH_TODO.md`
+4. Update `PROGRESS.md` with benchmark results
+5. Commit your changes with an atomic commit
+6. If all tasks are complete, output "RALPH_COMPLETE"
+
+## Critical Rules
+
+1. **Parity first, performance second** — Never commit a performance improvement that breaks even one parity test. Run `./scripts/test_parser_ast_parity.sh` before and after every change.
+
+2. **Measure before and after** — Every optimization must have benchmark numbers. Run benchmarks before starting (baseline) and after completing. Record both in your commit message and in `PROGRESS.md`.
+
+3. **Profile before optimizing** — Don't guess where time is spent. Use flamegraphs, `perf stat`, or `cargo bench` to identify actual hotspots before writing code.
+
+4. **Small, incremental changes** — Each task should be one focused optimization. Don't combine multiple optimizations in one commit. This makes it easy to identify regressions.
+
+5. **Commit after each improvement** — Every successful optimization gets committed immediately:
+   ```bash
+   git add <files> && git commit -m "Perf: <description>
+
+   Benchmark: <before> -> <after> on <test>
+   Parity: zero regressions
+
+   Co-Authored-By: Claude <noreply@anthropic.com>"
+   ```
+
+6. **Revert if no measurable improvement** — If an optimization doesn't show measurable improvement in benchmarks, revert it. Don't add complexity without payoff.
+
+7. **Study OXC/SWC for patterns** — These are the state-of-the-art Rust parsers. When implementing an optimization (especially byte-level scanning, zero-copy tokens, SIMD), study how OXC does it first.
+
+## Key Files
+
+| File | Purpose |
+|------|---------|
+| `compiler-rust/src/parser/scanner.rs` | Scanner — primary optimization target |
+| `compiler-rust/src/parser/token.rs` | Token enum — size and allocation optimization |
+| `compiler-rust/src/parser/state.rs` | Parser state — position tracking, breadcrumbs |
+| `compiler-rust/src/parser/expr.rs` | Expression parsing — hot parsing loops |
+| `compiler-rust/src/parser/benchmark.rs` | Benchmark harness |
+| `compiler-rust/src/binary_ast/marshal.rs` | Marshal writer — buffer allocation |
+| `compiler-rust/src/parser/ast.rs` | AST nodes — allocation patterns |
+
+## Current Architecture
+
+```
+Source (&str) -> Scanner (Vec<char> + Vec<usize>) -> Token (enum with String data)
+  -> Parser (recursive descent) -> AST (Box/Vec allocated) -> Marshal (Vec<u8> buffer)
+```
+
+**Key performance characteristics:**
+- Scanner precomputes `Vec<char>` and `Vec<usize>` (byte offsets) upfront for O(1) access
+- Token enum carries `String` data for identifiers/literals (~40+ bytes per token)
+- Parser uses `Vec<(Grammar, Position)>` for breadcrumb stack
+- MarshalWriter starts with 4KB `Vec<u8>` buffer, grows dynamically
+
+## Benchmarks
+
+```bash
+# Quick single benchmark (50 iterations)
+cargo test --release --lib -- benchmark_regex --nocapture
+
+# All benchmarks (700+ files, 10 iterations — ~3 min)
+cargo test --release --lib -- benchmark_all --ignored --nocapture
+
+# Build release binary first
+cargo build --manifest-path compiler-rust/Cargo.toml --release
+```
+
+Benchmark measures `bsc -bs-ast -o <tmpfile> <input.res>` for both Rust and OCaml as subprocesses. Uses minimum time over iterations. MAX_SLOWDOWN_FACTOR = 1.2x.
+
+**Current baseline:** Rust is 2-5x faster on small files (<10KB), ~0.7-1.0x on large files (20-60KB).
+
+## Profiling
+
+```bash
+# Flamegraph (requires cargo-flamegraph)
+cargo flamegraph --release --bin bsc -- -bs-ast -o /dev/null <large_file.res>
+
+# Measure token/struct sizes
+# Add to a test: println!("Token size: {}", std::mem::size_of::<Token>());
+
+# Instruction-level profiling (Linux)
+perf stat -e instructions,cache-misses,branch-misses \
+    target/release/bsc -bs-ast -o /dev/null <large_file.res>
+```
+
+## Debugging / Checking Parity
+
+```bash
+# Full parity test
+./scripts/test_parser_ast_parity.sh
+
+# Single file parity
+./scripts/test_parser_ast_parity.sh tests/syntax_tests/data/printer/expr/record.res
+
+# Quick parity (stop on first failure)
+./scripts/test_parser_ast_parity.sh --quick
+```
+
+## Reference Material
+
+- **PLAN.md** in this directory — Full optimization roadmap with 4 tiers and 14 items
+- **PROGRESS.md** in this directory — Optimization progress and benchmark log
+- **OXC parser**: https://github.com/nickel-org/nickel.rs — Study byte-level scanning, arena allocation
+- **matklad blog**: https://matklad.github.io/ — Rust parser architecture best practices
+
+## Exit Condition
+
+When all tasks in `RALPH_TODO.md` are checked `[x]`, output exactly:
+```
+RALPH_COMPLETE
+```

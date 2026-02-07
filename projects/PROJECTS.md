@@ -38,6 +38,8 @@ Performance engineering of the Rust parser to achieve best-in-class speed. 4-tie
 |----------|-------------|
 | [PLAN.md](./parser-performance-engineering/PLAN.md) | Optimization roadmap with 14 items across 4 tiers |
 | [PROGRESS.md](./parser-performance-engineering/PROGRESS.md) | Optimization progress and benchmark log |
+| [RALPH_PROMPT.md](./parser-performance-engineering/RALPH_PROMPT.md) | Agent loop instructions for performance optimization |
+| [RALPH_TODO.md](./parser-performance-engineering/RALPH_TODO.md) | Agent task tracking for performance optimization |
 
 ### [printer-parity](./printer-parity/)
 
