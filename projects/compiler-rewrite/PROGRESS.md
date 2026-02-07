@@ -1,6 +1,6 @@
 # ReScript Compiler Rust Rewrite - Progress
 
-> **Note**: This is a living document. Update it as you complete tasks, discover new work items, or gain insights. See [BINARY_PARITY_PLAN.md](./BINARY_PARITY_PLAN.md) for the full migration plan.
+> **Note**: This is a living document. Update it as you complete tasks, discover new work items, or gain insights. See [PLAN.md](./PLAN.md) for the full migration plan.
 
 ## Current Phase: Phase 2 - Parser
 
@@ -1195,8 +1195,8 @@ Phase 3 is being developed for Lambda IR transformations and JavaScript code gen
 | `src/binary_ast/mapper_to0.rs` | ✅ Complete | Parsetree to parsetree0 conversion |
 | `src/binary_ast/deps.rs` | ✅ Complete | Module dependency extraction |
 | `src/binary_ast/writer.rs` | ✅ Complete | Binary AST file writer |
-| `BINARY_PARITY_PLAN.md` | ✅ Complete | Comprehensive migration plan |
-| `BINARY_PARITY_PROGRESS.md` | ✅ Complete | This file |
+| `projects/compiler-rewrite/PLAN.md` | ✅ Complete | Comprehensive migration plan |
+| `projects/compiler-rewrite/PROGRESS.md` | ✅ Complete | This file |
 | `GLOBAL_STATE_AUDIT.md` | ✅ Complete | OCaml global state catalog |
 
 ---

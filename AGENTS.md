@@ -485,14 +485,15 @@ The compiler is being rewritten from OCaml to Rust. This is a major undertaking 
 
 ### Key Documents
 
-- **[compiler-rust/PLAN.md](compiler-rust/PLAN.md)** - Parser performance optimization roadmap
-- **[compiler-rust/PROGRESS.md](compiler-rust/PROGRESS.md)** - Parser performance optimization progress tracker
-- **[compiler-rust/BINARY_PARITY_PLAN.md](compiler-rust/BINARY_PARITY_PLAN.md)** - Comprehensive migration plan with phases, technical approach, and success criteria
-- **[compiler-rust/BINARY_PARITY_PROGRESS.md](compiler-rust/BINARY_PARITY_PROGRESS.md)** - Binary parity progress, completed tasks, and next steps
-- **[compiler-rust/GLOBAL_STATE_AUDIT.md](compiler-rust/GLOBAL_STATE_AUDIT.md)** - Catalog of OCaml global state to eliminate
-- **[compiler-rust/BINARY_AST.md](compiler-rust/BINARY_AST.md)** - Binary AST format specification, OCaml Marshal encoding, and arena-based sharing model
+All project documentation is organized under **[projects/](projects/PROJECTS.md)**:
 
-> **Note for AI assistants**: These documents are living documents. Update `PLAN.md` when you discover new insights about parser optimization. Update `PROGRESS.md` as you complete optimizations or record benchmark results. Update `BINARY_PARITY_PLAN.md` for architecture insights. Update `BINARY_PARITY_PROGRESS.md` for rewrite progress. Add to `GLOBAL_STATE_AUDIT.md` when you find additional global state that needs to be eliminated.
+- **[projects/compiler-rewrite/](projects/compiler-rewrite/)** - OCaml-to-Rust compiler rewrite (PLAN, PROGRESS, GLOBAL_STATE_AUDIT, BINARY_AST)
+- **[projects/parser-parity/](projects/parser-parity/)** - Parser AST and binary parity (PLAN, tasks, agent docs)
+- **[projects/parser-optimization/](projects/parser-optimization/)** - Parser performance optimization (PLAN, PROGRESS)
+- **[projects/printer-parity/](projects/printer-parity/)** - Printer/formatter parity (PLAN, formatter, agent docs)
+- **[projects/comptime/](projects/comptime/)** - Compile-time metaprogramming design
+
+> **Note for AI assistants**: These documents are living documents. Update the relevant project's PLAN.md and PROGRESS.md as you make progress. See [projects/PROJECTS.md](projects/PROJECTS.md) for the full index.
 
 ### Rewrite Constraints
 

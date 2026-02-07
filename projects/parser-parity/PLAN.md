@@ -282,6 +282,6 @@ When changing the sexp-locs format:
 
 ### Related Documents
 
-- [PLAN.md](./PLAN.md) - Overall compiler rewrite plan
-- [PROGRESS.md](./PROGRESS.md) - Current progress tracking
-- [GLOBAL_STATE_AUDIT.md](./GLOBAL_STATE_AUDIT.md) - OCaml global state catalog
+- [Compiler Rewrite PLAN.md](../compiler-rewrite/PLAN.md) - Overall compiler rewrite plan
+- [Compiler Rewrite PROGRESS.md](../compiler-rewrite/PROGRESS.md) - Current progress tracking
+- [GLOBAL_STATE_AUDIT.md](../compiler-rewrite/GLOBAL_STATE_AUDIT.md) - OCaml global state catalog

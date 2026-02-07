@@ -313,5 +313,5 @@ perf stat -e instructions,cache-misses,branch-misses \
 - **SWC** (Speedy Web Compiler): https://swc.rs/ - Rust-based JS/TS compiler. Demonstrates effective use of string interning and SIMD.
 - **tree-sitter**: https://tree-sitter.github.io/ - Incremental parsing library with efficient memory layout and error recovery.
 - **Rust Parsing Best Practices**: https://matklad.github.io/ - Blog posts on parser architecture, arena allocation, and performance techniques by the rust-analyzer author.
-- **Binary AST Parity Plan**: See [BINARY_PARITY_PLAN.md](./BINARY_PARITY_PLAN.md) for the overall compiler rewrite plan.
-- **Binary AST Parity Progress**: See [BINARY_PARITY_PROGRESS.md](./BINARY_PARITY_PROGRESS.md) for rewrite progress tracking.
+- **Compiler Rewrite Plan**: See [PLAN.md](../compiler-rewrite/PLAN.md) for the overall compiler rewrite plan.
+- **Compiler Rewrite Progress**: See [PROGRESS.md](../compiler-rewrite/PROGRESS.md) for rewrite progress tracking.

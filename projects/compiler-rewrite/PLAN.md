@@ -1517,8 +1517,8 @@ echo "| Type Errors | $ERROR_TOTAL | $((ERROR_TOTAL - ERROR_PASS)) | ${ERROR_PAS
 ```
 compiler-rust/
 ├── Cargo.toml
-├── BINARY_PARITY_PLAN.md # This file
-├── BINARY_PARITY_PROGRESS.md # Progress tracking
+├── PLAN.md              # See projects/compiler-rewrite/PLAN.md
+├── PROGRESS.md          # See projects/compiler-rewrite/PROGRESS.md
 ├── GLOBAL_STATE_AUDIT.md # Catalog of OCaml globals
 ├── src/
 │   ├── lib.rs
@@ -1568,5 +1568,5 @@ compiler-rust/
 ## References
 
 - [GLOBAL_STATE_AUDIT.md](./GLOBAL_STATE_AUDIT.md) - Complete catalog of OCaml global state
-- [BINARY_PARITY_PROGRESS.md](./BINARY_PARITY_PROGRESS.md) - Current progress and next steps
+- [PROGRESS.md](./PROGRESS.md) - Current progress and next steps
 - `rewatch/src/` - Reference Rust patterns from the build system
