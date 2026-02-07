@@ -7,6 +7,10 @@
 PROMPT_FILE="${1:-RALPH_PROMPT.md}"
 OUTPUT_FILE="/tmp/ralph_output.txt"
 ITERATION=0
+DEFAULT_SLEEP_SECONDS=2
+RATE_LIMIT_BASE_SLEEP_SECONDS=60
+RATE_LIMIT_MAX_SLEEP_SECONDS=900
+RATE_LIMIT_STREAK=0
 
 if [[ ! -f "$PROMPT_FILE" ]]; then
   echo "Error: Prompt file '$PROMPT_FILE' not found"
@@ -120,5 +124,22 @@ while true; do
     exit 1
   fi
 
-  sleep 2
+  # Back off when Claude reports account/request limits to avoid hammering the API.
+  if grep -Eiq "you.?ve hit your limit|hit your limit|rate limit|too many requests|\\b429\\b" "$OUTPUT_FILE" "$OUTPUT_FILE.json"; then
+    RATE_LIMIT_STREAK=$((RATE_LIMIT_STREAK + 1))
+    BACKOFF_SECONDS=$((RATE_LIMIT_BASE_SLEEP_SECONDS * (2 ** (RATE_LIMIT_STREAK - 1))))
+    if [[ $BACKOFF_SECONDS -gt $RATE_LIMIT_MAX_SLEEP_SECONDS ]]; then
+      BACKOFF_SECONDS=$RATE_LIMIT_MAX_SLEEP_SECONDS
+    fi
+
+    echo ""
+    echo "╔══════════════════════════════════════════════════════════════════════╗"
+    printf "║  ⏳ Claude limit detected - sleeping %4ss (streak %2d)              ║\n" "$BACKOFF_SECONDS" "$RATE_LIMIT_STREAK"
+    echo "╚══════════════════════════════════════════════════════════════════════╝"
+    sleep "$BACKOFF_SECONDS"
+    continue
+  fi
+
+  RATE_LIMIT_STREAK=0
+  sleep "$DEFAULT_SLEEP_SECONDS"
 done
