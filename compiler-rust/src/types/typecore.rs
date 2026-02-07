@@ -509,11 +509,11 @@ pub fn convert_constant(cst: &crate::parser::ast::Constant) -> TypeCoreResult<Co
             };
             Ok(Constant::BigInt(sign, digits))
         }
-        ParsedConstant::Integer(i, Some(c)) => Err(TypeCoreError::UnknownLiteral(i.clone(), *c)),
+        ParsedConstant::Integer(i, Some(c)) => Err(TypeCoreError::UnknownLiteral(i.to_string(), *c)),
         ParsedConstant::Char(c) => Ok(Constant::Char(*c)),
-        ParsedConstant::String(s, d) => Ok(Constant::String(s.clone(), d.clone())),
-        ParsedConstant::Float(f, None) => Ok(Constant::Float(f.clone())),
-        ParsedConstant::Float(f, Some(c)) => Err(TypeCoreError::UnknownLiteral(f.clone(), *c)),
+        ParsedConstant::String(s, d) => Ok(Constant::String(s.to_string(), d.as_ref().map(|x| x.to_string()))),
+        ParsedConstant::Float(f, None) => Ok(Constant::Float(f.to_string())),
+        ParsedConstant::Float(f, Some(c)) => Err(TypeCoreError::UnknownLiteral(f.to_string(), *c)),
     }
 }
 
@@ -575,9 +575,9 @@ fn transl_type_inner(
         CTD::Ptyp_var(name) => {
             // Type variable: 'a
             // Look up or create a type variable with this name
-            let ty = ctx.new_var(Some(name.clone()));
+            let ty = ctx.new_var(Some(name.to_string()));
             let ctyp = TypedCoreType {
-                ctyp_desc: TypedCoreTypeDesc::Ttyp_var(Some(name.clone())),
+                ctyp_desc: TypedCoreTypeDesc::Ttyp_var(Some(name.to_string())),
                 ctyp_type: ty,
                 ctyp_env: EnvRef(0),
                 ctyp_loc: loc,
@@ -676,12 +676,12 @@ fn transl_type_inner(
             let (inner_ctyp, inner_ty) = transl_type_inner(tctx, env, inner)?;
 
             // Create a type variable for the alias name and unify with inner type
-            let alias_var = ctx.new_var(Some(name.clone()));
+            let alias_var = ctx.new_var(Some(name.to_string()));
             crate::types::unify(ctx, &mut tctx.unify_state, alias_var, inner_ty)
                 .map_err(|_| TypeCoreError::PatternTypeClash(vec![(alias_var, inner_ty)]))?;
 
             let ctyp = TypedCoreType {
-                ctyp_desc: TypedCoreTypeDesc::Ttyp_alias(Box::new(inner_ctyp), name.clone()),
+                ctyp_desc: TypedCoreTypeDesc::Ttyp_alias(Box::new(inner_ctyp), name.to_string()),
                 ctyp_type: inner_ty,
                 ctyp_env: EnvRef(0),
                 ctyp_loc: loc,
@@ -779,7 +779,7 @@ fn transl_type_inner(
                         typed_rows.push(crate::types::typedtree::RowFieldType {
                             rf_desc: crate::types::typedtree::RowFieldDesc::Rtag(
                                 Located {
-                                    txt: label.txt.clone(),
+                                    txt: label.txt.to_string(),
                                     loc: label.loc.clone(),
                                 },
                                 *constant,
@@ -805,7 +805,7 @@ fn transl_type_inner(
             let variant_ty = row_more; // Simplified - full implementation builds row type
 
             let ctyp = TypedCoreType {
-                ctyp_desc: TypedCoreTypeDesc::Ttyp_variant(typed_rows, *closed, labels.clone()),
+                ctyp_desc: TypedCoreTypeDesc::Ttyp_variant(typed_rows, *closed, labels.as_ref().map(|v| v.iter().map(|s| s.to_string()).collect())),
                 ctyp_type: variant_ty,
                 ctyp_env: EnvRef(0),
                 ctyp_loc: loc,
@@ -2898,7 +2898,7 @@ fn type_send(
     env: &Env,
     loc: LocIdx,
     obj_expr: &ParsedExpression,
-    method: &Located<String>,
+    method: &Located<std::borrow::Cow<'static, str>>,
     expected_ty: TypeExprRef,
     attributes: &[crate::parser::ast::Attribute],
 ) -> TypeCoreResult<Expression> {
@@ -2913,7 +2913,7 @@ fn type_send(
     Ok(Expression::new(
         ExpressionDesc::Texp_send(
             Box::new(typed_obj),
-            crate::types::typedtree::MethKind::Tmeth_name(method.txt.clone()),
+            crate::types::typedtree::MethKind::Tmeth_name(method.txt.to_string()),
         ),
         loc.clone(),
         expected_ty,
