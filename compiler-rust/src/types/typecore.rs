@@ -1705,8 +1705,8 @@ pub fn type_expect<'a>(
     match &expr.pexp_desc {
         ED::Pexp_ident(lid) => {
             // Identifier expression
-            let longident = tctx.resolve_lid(lid.txt);
-            let (path, desc) = env.lookup_value_by_lid(longident, tctx.arena)?;
+            let longident = tctx.arena.get_longident(lid.txt);
+            let (path, desc) = env.lookup_value_by_lid(longident, tctx.arena, tctx.persistent_env.as_mut(), tctx.type_ctx)?;
 
             // Instantiate the type
             let ty = crate::types::instance(ctx, desc.val_type);
@@ -3887,19 +3887,18 @@ fn type_let_bindings(
 
 /// Type check a top-level expression.
 pub fn type_expression<'a>(
-    type_ctx: &'a TypeContext<'a>,
-    arena: &'a ParseArena,
+    tctx: &mut TypeCheckContext<'a>,
     env: &Env,
     expr: &ParsedExpression,
 ) -> TypeCoreResult<Expression> {
-    let mut tctx = TypeCheckContext::new(type_ctx, arena);
+    let type_ctx = tctx.type_ctx;
 
     // Begin a definition scope
     type_ctx.begin_def();
 
     // Type with a fresh variable
     let expected_ty = type_ctx.new_var(None);
-    let typed_expr = type_expect(&mut tctx, env, expr, expected_ty, None)?;
+    let typed_expr = type_expect(tctx, env, expr, expected_ty, None)?;
 
     // Try to unify with unit (matching OCaml's Bs_toplevel_expression_unit warning behavior)
     // This resolves unresolved type variables to unit for statement-level expressions
@@ -3917,14 +3916,12 @@ pub fn type_expression<'a>(
 
 /// Type check a top-level binding.
 pub fn type_binding<'a>(
-    type_ctx: &'a TypeContext<'a>,
-    arena: &'a ParseArena,
+    tctx: &mut TypeCheckContext<'a>,
     env: &Env,
     rec_flag: RecFlag,
     bindings: &[crate::parser::ast::ValueBinding],
 ) -> TypeCoreResult<(Vec<ValueBinding>, Env)> {
-    let mut tctx = TypeCheckContext::new(type_ctx, arena);
-    type_let_bindings(&mut tctx, env, rec_flag, bindings)
+    type_let_bindings(tctx, env, rec_flag, bindings)
 }
 
 // ============================================================================
@@ -3985,7 +3982,13 @@ impl Env {
     }
 
     /// Look up a value by longident.
-    pub fn lookup_value_by_lid(&self, lid: &Longident, arena: &crate::parse_arena::ParseArena) -> TypeCoreResult<(Path, ValueDescription)> {
+    pub fn lookup_value_by_lid<'b>(
+        &self,
+        lid: &Longident,
+        arena: &crate::parse_arena::ParseArena,
+        pers_env: Option<&mut crate::cmi::persistent_env::PersistentEnv>,
+        ctx: &'b crate::types::context::TypeContext<'b>,
+    ) -> TypeCoreResult<(Path, ValueDescription)> {
         match lid {
             Longident::Lident(idx) => {
                 let name = arena.get_string(*idx);
@@ -4018,9 +4021,10 @@ impl Env {
                 // Find the module in the env
                 match self.find_module(&mod_name) {
                     Ok(md) => {
-                        // Search the module's signature for the value
-                        if let crate::types::decl::ModuleType::MtySignature(ref sig) = md.md_type {
-                            for sig_item in sig {
+                        // Resolve the module type to a signature, following aliases
+                        let sig = Self::resolve_module_signature(&md.md_type, pers_env, ctx);
+                        if let Some(sig) = sig {
+                            for sig_item in &sig {
                                 if let crate::types::decl::SignatureItem::SigValue(id, vd) = sig_item {
                                     if id.name() == value_name {
                                         let path = Path::pdot(
@@ -4039,8 +4043,23 @@ impl Env {
                         })
                     }
                     Err(_) => {
-                        // Module not found - try looking up as a flattened value
-                        // (some modules are opened into the env)
+                        // Module not found in env - try persistent env (external modules)
+                        if let Some(pers) = pers_env {
+                            if let Some(ps) = pers.find_pers_struct(&mod_name, ctx) {
+                                for sig_item in &ps.ps_sig {
+                                    if let crate::types::decl::SignatureItem::SigValue(id, vd) = sig_item {
+                                        if id.name() == value_name {
+                                            let path = Path::pdot(
+                                                Path::pident(Ident::create_persistent(&mod_name)),
+                                                value_name.to_string(),
+                                            );
+                                            return Ok((path, vd.clone()));
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        // Fallback: try looking up as a flattened value
                         match self.find_value_with_id(value_name) {
                             Ok((id, desc)) => {
                                 let path = desc.val_path.clone().unwrap_or_else(|| Path::pident(id.clone()));
@@ -4062,6 +4081,33 @@ impl Env {
                     alternatives: None,
                 })
             }
+        }
+    }
+
+    /// Resolve a module type to a signature, following aliases and loading from persistent env.
+    fn resolve_module_signature<'b>(
+        mty: &crate::types::decl::ModuleType,
+        pers_env: Option<&mut crate::cmi::persistent_env::PersistentEnv>,
+        ctx: &'b crate::types::context::TypeContext<'b>,
+    ) -> Option<crate::types::decl::Signature> {
+        match mty {
+            crate::types::decl::ModuleType::MtySignature(sig) => Some(sig.clone()),
+            crate::types::decl::ModuleType::MtyAlias(_, path) |
+            crate::types::decl::ModuleType::MtyIdent(path) => {
+                // Follow the alias: extract the module name from the path
+                let mod_name = match path {
+                    Path::Pident(id) => id.name().to_string(),
+                    Path::Pdot(_, name, _) => name.clone(),
+                    _ => return None,
+                };
+                if let Some(pers) = pers_env {
+                    if let Some(ps) = pers.find_pers_struct(&mod_name, ctx) {
+                        return Some(ps.ps_sig.clone());
+                    }
+                }
+                None
+            }
+            _ => None,
         }
     }
 }

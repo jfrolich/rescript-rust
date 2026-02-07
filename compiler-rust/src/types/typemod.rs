@@ -248,7 +248,7 @@ pub fn type_module_expr<'a>(
 
         ParsedModuleExprDesc::Pmod_unpack(expr) => {
             // Unpack: unpack(E)
-            let typed_expr = type_expression(tctx.type_ctx, arena, env, expr)?;
+            let typed_expr = type_expression(tctx, env, expr)?;
 
             Ok(ModuleExpr {
                 mod_desc: ModuleExprDesc::Tmod_unpack(typed_expr, ModuleType::placeholder()),
@@ -629,7 +629,7 @@ fn type_structure_item<'a>(
     match &item.pstr_desc {
         ParsedStructureItemDesc::Pstr_eval(expr, attrs) => {
             // Evaluated expression: E
-            let typed_expr = type_expression(tctx.type_ctx, arena, env, expr)?;
+            let typed_expr = type_expression(tctx, env, expr)?;
 
             let desc = StructureItemDesc::Tstr_eval(typed_expr, attrs.clone());
             Ok((
@@ -1651,7 +1651,7 @@ fn type_value_bindings<'a>(
     bindings: &[crate::parser::ast::ValueBinding],
 ) -> TypeModResult<Vec<ValueBinding>> {
     // type_binding takes all bindings at once and returns (Vec<ValueBinding>, Env)
-    let (typed_bindings, _new_env) = type_binding(tctx.type_ctx, arena, env, rec_flag, bindings)?;
+    let (typed_bindings, _new_env) = type_binding(tctx, env, rec_flag, bindings)?;
     Ok(typed_bindings)
 }
 
