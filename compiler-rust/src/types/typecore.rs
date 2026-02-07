@@ -2269,10 +2269,36 @@ fn unify_expression_types(
 
     match unify(tctx.type_ctx, &mut tctx.unify_state, ty1, ty2) {
         Ok(()) => Ok(()),
-        Err(_) => Err(TypeCoreError::ExprTypeClash {
-            trace: vec![(ty1, ty2)],
-            context,
-        }),
+        Err(_) => {
+            // Debug: print type descriptions for profiling
+            let r1 = tctx.type_ctx.repr(ty1);
+            Err(TypeCoreError::ExprTypeClash {
+                trace: vec![(ty1, ty2)],
+                context,
+            })
+        }
+    }
+}
+
+/// Debug helper: short string for a type descriptor
+fn debug_type_desc_short(desc: &crate::types::type_expr::TypeDesc) -> String {
+    use crate::types::type_expr::TypeDesc;
+    match desc {
+        TypeDesc::Tvar(None) => "'_".to_string(),
+        TypeDesc::Tvar(Some(n)) => format!("'{}", n),
+        TypeDesc::Tarrow { arity, .. } => format!("Tarrow(arity={:?})", arity),
+        TypeDesc::Ttuple(ts) => format!("Ttuple({})", ts.len()),
+        TypeDesc::Tconstr { path, args, .. } => format!("Tconstr({}, {} args)", path, args.len()),
+        TypeDesc::Tobject { .. } => "Tobject".to_string(),
+        TypeDesc::Tfield { name, .. } => format!("Tfield({})", name),
+        TypeDesc::Tnil => "Tnil".to_string(),
+        TypeDesc::Tlink(_) => "Tlink".to_string(),
+        TypeDesc::Tsubst(_) => "Tsubst".to_string(),
+        TypeDesc::Tvariant(_) => "Tvariant".to_string(),
+        TypeDesc::Tunivar(None) => "Tunivar('_)".to_string(),
+        TypeDesc::Tunivar(Some(n)) => format!("Tunivar('{n})"),
+        TypeDesc::Tpoly { vars, .. } => format!("Tpoly({} vars)", vars.len()),
+        TypeDesc::Tpackage { .. } => "Tpackage".to_string(),
     }
 }
 
