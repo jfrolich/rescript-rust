@@ -1,7 +1,7 @@
 # Parser Performance Engineering TODO
 
 **Last Updated:** 2026-02-07
-**Status:** 3/18 tasks complete
+**Status:** 3/19 tasks complete
 
 **Baseline:** Rust is 2-5x faster on small files (<10KB), ~0.7-1.0x on large files (20-60KB).
 **Goal:** Maximize Rust parser speed across all file sizes while preserving byte-for-byte binary AST parity.
@@ -21,6 +21,8 @@ These target the scanner and token representation where the parser spends most t
 - [x] **1.3 String interning via StrIdx** — Extended `Interner` with `push_interned()` method that returns unique StrIdx values (preserving marshal identity semantics) while sharing underlying string data to avoid heap allocation for duplicate identifiers. Converted ~68 parser call sites from `push_string(name.to_string())` to `push_interned_string(&name)`. Changed `push_lident`/`push_ldot` signatures from `impl Into<String>` to `&str`. Key insight: the interning cache must be separate from the `intern()` map to avoid polluting `intern()`'s deduplication (which would break marshal sharing parity). Performance: neutral (Large 0.82x, within noise of 0.80x baseline). Primary benefit is reduced memory allocation for duplicate identifiers. Files: `intern.rs`, `parse_arena.rs`, `state.rs`, `expr.rs`, `pattern.rs`, `typ.rs`, `module.rs`, `core.rs`, `jsx_ppx.rs`, `ppx.rs`. All 1196 parity tests pass.
 
 - [ ] **1.4 Remove Rc<str> from Interner** ⚠️ HIGH PRIORITY — The Interner currently uses `Rc<str>` for string storage and deduplication (`Vec<Rc<str>>`, `HashMap<Rc<str>, StrIdx>`, `HashMap<Box<str>, Rc<str>>`). This must be replaced with arena-friendly storage — e.g. `Vec<Box<str>>` with a `HashMap<&str, usize>` index for deduplication (safe because strings in the Vec are never moved/removed). `push_interned()` can look up existing strings by content and store a pointer/index to the existing data rather than using Rc refcounting. Rc prevents Send+Sync and is slower than direct arena storage. Files: `intern.rs`.
+
+- [ ] **1.5 Zero-copy Constant and Label strings** — Task 1.2 introduced `Cow<'a, str>` in tokens but the AST still uses owned `String` in `Constant::Integer(String)`, `Constant::Float(String)`, `Constant::String(String)`, and `Label` (type alias for `String`). Every integer, float, and string literal calls `.clone().into_owned()` to convert the borrowed `Cow` to an owned `String` — an unnecessary heap allocation since strings are never modified. Fix: change `Constant` and `Label` to carry `Cow<'a, str>` (or `&'a str`), propagating the source lifetime into the AST. Only escape-processed strings (scanner's 5 `Cow::Owned` paths) would allocate; the 99% common case (identifiers, numbers, unescaped strings) stays zero-copy all the way from source to AST. Affects ~15 `.clone().into_owned()` call sites in the hot parsing path (`expr.rs`, `typ.rs`, `pattern.rs`, `core.rs`). Files: `ast.rs`, `expr.rs`, `typ.rs`, `pattern.rs`, `core.rs`, `module.rs`, `binary_ast/marshal.rs`.
 
 ---
 

@@ -12,7 +12,7 @@
 
 | Tier | Description | Status | Progress |
 |------|-------------|--------|----------|
-| Tier 1 | High Impact: Scanner + Token | 🚧 In Progress | 3/5 |
+| Tier 1 | High Impact: Scanner + Token | 🚧 In Progress | 3/6 |
 | Tier 2 | High Impact: AST Memory Layout | ⏳ Not Started | 0/3 |
 | Tier 3 | Medium Impact: Misc Optimizations | ⏳ Not Started | 0/6 |
 | Tier 4 | Architectural | ⏳ Not Started | 0/4 |
@@ -69,6 +69,13 @@ cargo test --release --lib -- benchmark_all --ignored --nocapture
   - Replace `Rc<str>` with arena-friendly storage (e.g. `Vec<Box<str>>` + `HashMap<&str, usize>`)
   - Rc prevents Send+Sync and is slower than direct arena storage
   - Files: `intern.rs`
+
+- [ ] **1.5 Zero-copy Constant and Label strings**
+  - `Constant::Integer/Float/String` and `Label` use owned `String` — unnecessary heap alloc
+  - Change to `Cow<'a, str>` or `&'a str`, propagating source lifetime into AST
+  - ~15 hot-path `.clone().into_owned()` calls eliminated (99% are just source borrows)
+  - Only escape-processed strings (5 scanner paths) would allocate
+  - Files: `ast.rs`, `expr.rs`, `typ.rs`, `pattern.rs`, `core.rs`, `module.rs`, marshal
 
 ---
 

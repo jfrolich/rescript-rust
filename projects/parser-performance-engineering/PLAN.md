@@ -180,6 +180,25 @@ These target the scanner and token representation, where the parser spends most 
 
 **Expected impact**: Reduce memory usage and improve comparison speed (pointer equality instead of string comparison).
 
+#### 1.5 Zero-Copy Constant and Label Strings
+
+**Current**: Task 1.2 introduced `Cow<'a, str>` in tokens, but the AST's `Constant` type still uses owned `String`:
+```rust
+enum Constant {
+    Integer(String, Option<char>),
+    Float(String, Option<char>),
+    String(String, Option<String>),
+    // ...
+}
+type Label = String;
+```
+
+Every integer, float, and string literal calls `.clone().into_owned()` to convert the borrowed `Cow` into an owned `String` — ~15 call sites in the hot parsing path. Since strings are never modified after parsing, this allocation is unnecessary.
+
+**Proposed**: Change `Constant` and `Label` to carry `Cow<'a, str>` (or `&'a str`), propagating the source lifetime into the AST. Only escape-processed strings (the scanner's 5 `Cow::Owned` paths: escape sequences in string literals and exotic identifiers) would allocate. The 99% common case stays zero-copy from source bytes all the way into the AST.
+
+**Expected impact**: Eliminates one heap allocation per literal in the hot path. Most significant for files with many string/number literals.
+
 ### Tier 2: High Impact — AST Memory Layout
 
 Analysis shows that the biggest performance wins are in AST node representation, not token handling. The parser processes one token at a time (no token array), so token SoA doesn't apply. But AST nodes are allocated on the heap, stored in large enums with massive padding waste, and carry empty attribute vectors. Fixing these is where the Roc/OXC/Sampson research results actually apply.
