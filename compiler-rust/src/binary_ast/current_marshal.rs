@@ -1215,7 +1215,7 @@ impl Marshal for Expression {
             has_braces_attr(&self.pexp_attributes, w) || has_ternary_attr(&self.pexp_attributes, w);
         let rewritten_await_letmodule = matches!(
             &*self.pexp_desc,
-            ExpressionDesc::Pexp_letmodule(inner) if has_await_attr(&inner.1.pmod_attributes, w)
+            ExpressionDesc::Pexp_letmodule(inner) if has_await_attr(&(**inner).1.pmod_attributes, w)
         );
         let rewritten_expr = w.get_arena().is_rewritten_expr_loc(self.pexp_loc);
         let share_singleton_attr_tuple = share_attrs;
@@ -1285,7 +1285,6 @@ impl Marshal for ExpressionDesc {
         // Pexp_jsx_element = tag 29
         match self {
             ExpressionDesc::Pexp_ident(lid) => {
-                    let (_, ref mod_expr, _) = **letmod_inner;
                 w.write_block_header(0, 1);
                 lid.marshal(w);
             }

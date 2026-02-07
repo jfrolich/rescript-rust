@@ -1890,7 +1890,7 @@ fn print_pexp_fun(
                 | ExpressionDesc::Pexp_letmodule(_)
                 | ExpressionDesc::Pexp_letexception(_)
                 | ExpressionDesc::Pexp_open(_)
-                | ExpressionDesc::Pexp_jsx_element(_jsx_el)
+                | ExpressionDesc::Pexp_jsx_element(_)
         );
 
         let return_doc = {
