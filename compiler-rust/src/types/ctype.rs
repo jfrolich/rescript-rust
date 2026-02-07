@@ -1087,6 +1087,20 @@ fn unify_types<'a>(
             unify(ctx, state, t1, link2)
         }
 
+        // Tpoly with empty vars: unwrap and retry
+        (TypeDesc::Tpoly { body, vars }, _) if vars.is_empty() => {
+            let body = *body;
+            drop(desc1);
+            drop(desc2);
+            unify(ctx, state, body, t2)
+        }
+        (_, TypeDesc::Tpoly { body, vars }) if vars.is_empty() => {
+            let body = *body;
+            drop(desc1);
+            drop(desc2);
+            unify(ctx, state, t1, body)
+        }
+
         // Types don't match — try expanding type aliases as last resort
         _ => {
             // Check if either side is a Tconstr that can be expanded
