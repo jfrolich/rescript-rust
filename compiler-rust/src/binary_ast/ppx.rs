@@ -366,9 +366,9 @@ fn get_as_string_attr(attrs: &[Attribute], arena: &ParseArena) -> Option<String>
             if let Some(items) = payload_str_items(payload) {
                 if items.len() == 1 {
                     if let StructureItemDesc::Pstr_eval(eval_inner) = &*items[0].pstr_desc { let (ref expr, _) = **eval_inner;
-                        if let ExpressionDesc::Pexp_constant(Constant::String(s, _)) = &*expr.pexp_desc {
+                        if let ExpressionDesc::Pexp_constant(c) = &*expr.pexp_desc { if let Constant::String(s, _) = &**c {
                             return Some(s.to_string());
-                        }
+                        }}
                     }
                 }
             }
@@ -387,13 +387,13 @@ fn get_as_int_attr(attrs: &[Attribute], arena: &ParseArena) -> Option<i64> {
             if let Some(items) = payload_str_items(payload) {
                 if items.len() == 1 {
                     if let StructureItemDesc::Pstr_eval(eval_inner) = &*items[0].pstr_desc { let (ref expr, _) = **eval_inner;
-                        if let ExpressionDesc::Pexp_constant(Constant::Integer(s, suffix)) = &*expr.pexp_desc {
+                        if let ExpressionDesc::Pexp_constant(c) = &*expr.pexp_desc { if let Constant::Integer(s, suffix) = &**c {
                             // Reject bigint suffix
                             if matches!(suffix, Some('n')) {
                                 return None;
                             }
                             return s.parse::<i64>().ok();
-                        }
+                        }}
                     }
                 }
             }
@@ -1127,9 +1127,9 @@ fn get_payload_string(payload: &current::Payload, arena: &mut ParseArena) -> Opt
         current::Payload::PStr(items) if items.len() == 1 => {
             if let StructureItemDesc::Pstr_eval(eval_inner) = &*items[0].pstr_desc { let (ref expr, _) = **eval_inner;
                 match &*expr.pexp_desc {
-                    ExpressionDesc::Pexp_constant(current::Constant::String(s, _)) => {
+                    ExpressionDesc::Pexp_constant(c) => { if let current::Constant::String(s, _) = &**c {
                         return Some(s.to_string());
-                    }
+                    }}
                     // Handle @attr(ident) where ident is a simple identifier like nullable
                     ExpressionDesc::Pexp_ident(lid) => {
                         let longident = arena.get_longident(lid.txt);
@@ -1151,13 +1151,13 @@ fn get_payload_int(payload: &current::Payload, arena: &mut ParseArena) -> Option
     match payload {
         current::Payload::PStr(items) if items.len() == 1 => {
             if let StructureItemDesc::Pstr_eval(eval_inner) = &*items[0].pstr_desc { let (ref expr, _) = **eval_inner;
-                if let ExpressionDesc::Pexp_constant(current::Constant::Integer(name, suffix)) = &*expr.pexp_desc {
+                if let ExpressionDesc::Pexp_constant(c) = &*expr.pexp_desc { if let current::Constant::Integer(name, suffix) = &**c {
                     // OCaml's is_single_int rejects 'n' suffix (bigint)
                     if matches!(suffix, Some('n')) {
                         return None;
                     }
                     return name.parse::<i32>().ok();
-                }
+                }}
             }
             None
         }
@@ -1176,7 +1176,7 @@ fn get_payload_string_with_delim(payload: &current::Payload, arena: &mut ParseAr
     match payload {
         current::Payload::PStr(items) if items.len() == 1 => {
             if let StructureItemDesc::Pstr_eval(eval_inner) = &*items[0].pstr_desc { let (ref expr, _) = **eval_inner;
-                if let ExpressionDesc::Pexp_constant(current::Constant::String(s, raw_delim)) = &*expr.pexp_desc {
+                if let ExpressionDesc::Pexp_constant(c) = &*expr.pexp_desc { if let current::Constant::String(s, raw_delim) = &**c {
                     // Apply parse_processed_delim logic:
                     // In OCaml, strings get rewritten: None → "*j", then
                     // parse_processed_delim maps: None→DNone, "*j"→DStarJ, "json"→DNoQuotes, "bq"→DBackQuotes
@@ -1191,7 +1191,7 @@ fn get_payload_string_with_delim(payload: &current::Payload, arena: &mut ParseAr
                         _ => return None,              // Unrecognized delimiter
                     };
                     return Some((s.to_string(), delim));
-                }
+                }}
             }
             None
         }
@@ -1207,15 +1207,15 @@ fn get_payload_strings(payload: &current::Payload, arena: &mut ParseArena) -> Ve
         current::Payload::PStr(items) if items.len() == 1 => {
             if let StructureItemDesc::Pstr_eval(eval_inner) = &*items[0].pstr_desc { let (ref expr, _) = **eval_inner;
                 match &*expr.pexp_desc {
-                    ExpressionDesc::Pexp_constant(current::Constant::String(s, _)) => {
+                    ExpressionDesc::Pexp_constant(c) => { if let current::Constant::String(s, _) = &**c {
                         return vec![s.to_string()];
-                    }
+                    }}
                     ExpressionDesc::Pexp_tuple(exprs) => {
                         let mut result = Vec::new();
                         for e in exprs.iter() {
-                            if let ExpressionDesc::Pexp_constant(current::Constant::String(s, _)) = &*e.pexp_desc {
+                            if let ExpressionDesc::Pexp_constant(c) = &*e.pexp_desc { if let current::Constant::String(s, _) = &**c {
                                 result.push(s.to_string());
-                            }
+                            }}
                         }
                         if result.len() == exprs.len() {
                             return result;
@@ -1750,51 +1750,54 @@ fn transform_inline_sig_value(
     let expr = find_inline_payload_expr(&vd.pval_attributes, arena)?;
 
     match &*expr.pexp_desc {
-        // @inline("string") let x: t
-        ExpressionDesc::Pexp_constant(Constant::String(s, delim)) => {
-            let prim = inline_string_primitive(s, delim.as_deref(), arena);
-            Some(ValueDescription {
-                pval_name: vd.pval_name.clone(),
-                pval_type: vd.pval_type.clone(),
-                pval_prim: prim,
-                pval_attributes: vec![], // Clear attributes
-                pval_loc: vd.pval_loc,
-            })
-        }
-        // @inline(42) let x: t
-        ExpressionDesc::Pexp_constant(Constant::Integer(s, None)) => {
-            let i = s.parse::<i32>().ok()?;
-            let prim = inline_int_primitive(i, arena);
-            Some(ValueDescription {
-                pval_name: vd.pval_name.clone(),
-                pval_type: vd.pval_type.clone(),
-                pval_prim: prim,
-                pval_attributes: vec![], // Clear attributes
-                pval_loc: vd.pval_loc,
-            })
-        }
-        // @inline(42n) let x: t (bigint)
-        ExpressionDesc::Pexp_constant(Constant::Integer(s, Some('n'))) => {
-            let prim = inline_bigint_primitive(s, arena);
-            Some(ValueDescription {
-                pval_name: vd.pval_name.clone(),
-                pval_type: vd.pval_type.clone(),
-                pval_prim: prim,
-                pval_attributes: vec![], // Clear attributes
-                pval_loc: vd.pval_loc,
-            })
-        }
-        // @inline(3.14) let x: t
-        ExpressionDesc::Pexp_constant(Constant::Float(s, None)) => {
-            let prim = inline_float_primitive(s, arena);
-            Some(ValueDescription {
-                pval_name: vd.pval_name.clone(),
-                pval_type: vd.pval_type.clone(),
-                pval_prim: prim,
-                pval_attributes: vec![], // Clear attributes
-                pval_loc: vd.pval_loc,
-            })
-        }
+        ExpressionDesc::Pexp_constant(c) => match &**c {
+            // @inline("string") let x: t
+            Constant::String(s, delim) => {
+                let prim = inline_string_primitive(s, delim.as_deref(), arena);
+                Some(ValueDescription {
+                    pval_name: vd.pval_name.clone(),
+                    pval_type: vd.pval_type.clone(),
+                    pval_prim: prim,
+                    pval_attributes: vec![], // Clear attributes
+                    pval_loc: vd.pval_loc,
+                })
+            }
+            // @inline(42) let x: t
+            Constant::Integer(s, None) => {
+                let i = s.parse::<i32>().ok()?;
+                let prim = inline_int_primitive(i, arena);
+                Some(ValueDescription {
+                    pval_name: vd.pval_name.clone(),
+                    pval_type: vd.pval_type.clone(),
+                    pval_prim: prim,
+                    pval_attributes: vec![], // Clear attributes
+                    pval_loc: vd.pval_loc,
+                })
+            }
+            // @inline(42n) let x: t (bigint)
+            Constant::Integer(s, Some('n')) => {
+                let prim = inline_bigint_primitive(s, arena);
+                Some(ValueDescription {
+                    pval_name: vd.pval_name.clone(),
+                    pval_type: vd.pval_type.clone(),
+                    pval_prim: prim,
+                    pval_attributes: vec![], // Clear attributes
+                    pval_loc: vd.pval_loc,
+                })
+            }
+            // @inline(3.14) let x: t
+            Constant::Float(s, None) => {
+                let prim = inline_float_primitive(s, arena);
+                Some(ValueDescription {
+                    pval_name: vd.pval_name.clone(),
+                    pval_type: vd.pval_type.clone(),
+                    pval_prim: prim,
+                    pval_attributes: vec![], // Clear attributes
+                    pval_loc: vd.pval_loc,
+                })
+            }
+            _ => None,
+        },
         // @inline(true) or @inline(false) let x: t
         ExpressionDesc::Pexp_construct(lid, None) => {
             let longident = arena.get_longident(lid.txt);
@@ -1837,58 +1840,61 @@ fn transform_inline_binding(
     arena: &mut ParseArena,
 ) -> Option<StructureItem> {
     match &*expr.pexp_desc {
-        // @inline let x = "string"
-        ExpressionDesc::Pexp_constant(Constant::String(s, delim)) => {
-            let prim = inline_string_primitive(s, delim.as_deref(), arena);
-            Some(StructureItem {
-                pstr_desc: Box::new(StructureItemDesc::Pstr_primitive(Box::new(ValueDescription {
-                    pval_name: Located {
-                        txt: pval_name.txt,
-                        loc: pval_name.loc,
-                    },
-                    pval_type: make_simple_type("string", arena),
-                    pval_prim: prim,
-                    pval_attributes: vec![],
-                    pval_loc: pvb_loc,
-                }))),
-                pstr_loc,
-            })
-        }
-        // @inline let x = 42
-        ExpressionDesc::Pexp_constant(Constant::Integer(s, None)) => {
-            let i = s.parse::<i32>().ok()?;
-            let prim = inline_int_primitive(i, arena);
-            Some(StructureItem {
-                pstr_desc: Box::new(StructureItemDesc::Pstr_primitive(Box::new(ValueDescription {
-                    pval_name: Located {
-                        txt: pval_name.txt,
-                        loc: pval_name.loc,
-                    },
-                    pval_type: make_simple_type("int", arena),
-                    pval_prim: prim,
-                    pval_attributes: vec![],
-                    pval_loc: pvb_loc,
-                }))),
-                pstr_loc,
-            })
-        }
-        // @inline let x = 3.14
-        ExpressionDesc::Pexp_constant(Constant::Float(s, None)) => {
-            let prim = inline_float_primitive(s, arena);
-            Some(StructureItem {
-                pstr_desc: Box::new(StructureItemDesc::Pstr_primitive(Box::new(ValueDescription {
-                    pval_name: Located {
-                        txt: pval_name.txt,
-                        loc: pval_name.loc,
-                    },
-                    pval_type: make_simple_type("float", arena),
-                    pval_prim: prim,
-                    pval_attributes: vec![],
-                    pval_loc: pvb_loc,
-                }))),
-                pstr_loc,
-            })
-        }
+        ExpressionDesc::Pexp_constant(c) => match &**c {
+            // @inline let x = "string"
+            Constant::String(s, delim) => {
+                let prim = inline_string_primitive(s, delim.as_deref(), arena);
+                Some(StructureItem {
+                    pstr_desc: Box::new(StructureItemDesc::Pstr_primitive(Box::new(ValueDescription {
+                        pval_name: Located {
+                            txt: pval_name.txt,
+                            loc: pval_name.loc,
+                        },
+                        pval_type: make_simple_type("string", arena),
+                        pval_prim: prim,
+                        pval_attributes: vec![],
+                        pval_loc: pvb_loc,
+                    }))),
+                    pstr_loc,
+                })
+            }
+            // @inline let x = 42
+            Constant::Integer(s, None) => {
+                let i = s.parse::<i32>().ok()?;
+                let prim = inline_int_primitive(i, arena);
+                Some(StructureItem {
+                    pstr_desc: Box::new(StructureItemDesc::Pstr_primitive(Box::new(ValueDescription {
+                        pval_name: Located {
+                            txt: pval_name.txt,
+                            loc: pval_name.loc,
+                        },
+                        pval_type: make_simple_type("int", arena),
+                        pval_prim: prim,
+                        pval_attributes: vec![],
+                        pval_loc: pvb_loc,
+                    }))),
+                    pstr_loc,
+                })
+            }
+            // @inline let x = 3.14
+            Constant::Float(s, None) => {
+                let prim = inline_float_primitive(s, arena);
+                Some(StructureItem {
+                    pstr_desc: Box::new(StructureItemDesc::Pstr_primitive(Box::new(ValueDescription {
+                        pval_name: Located {
+                            txt: pval_name.txt,
+                            loc: pval_name.loc,
+                        },
+                        pval_type: make_simple_type("float", arena),
+                        pval_prim: prim,
+                        pval_attributes: vec![],
+                        pval_loc: pvb_loc,
+                    }))),
+                    pstr_loc,
+                })
+            }
+            _ => None,
+        },
         // @inline let x = true or @inline let x = false
         ExpressionDesc::Pexp_construct(lid, None) => {
             let longident = arena.get_longident(lid.txt);
@@ -2382,7 +2388,7 @@ fn handle_external_ext(
                 let (ref e, _) = **eval_inner;
                 if let ExpressionDesc::Pexp_ident(Located { txt, .. }) = &*e.pexp_desc {
                     // Get the Longident and check if it's an Lident
-                    let lid = arena.get_longident(txt);
+                    let lid = arena.get_longident(*txt);
                     if let Longident::Lident(str_idx) = lid {
                         Some(arena.get_string(*str_idx).to_string())
                     } else {
@@ -2750,7 +2756,7 @@ fn handle_raw(
                 txt: attr_name_idx,
                 loc: none_loc, // OCaml uses Location.none for this attribute
             },
-            Payload::PStr(vec![]),
+            Payload::PStr(Box::new(vec![])),
         );
         let mut attrs = vec![internal_expansive];
         attrs.extend(payload_attributes);
@@ -2967,7 +2973,7 @@ fn handle_private_extension(
             txt: arena.intern_string("internal.local"),
             loc: none_loc,
         },
-        Payload::PStr(vec![]),
+        Payload::PStr(Box::new(vec![])),
     );
 
     // Create the module binding:
@@ -3793,15 +3799,15 @@ fn rewrite_core_type(typ: &CoreType, arena: &mut ParseArena) -> CoreType {
         }
         CoreTypeDesc::Ptyp_constr(inner) => {
                     let (ref lid, ref args) = **inner;
-            CoreTypeDesc::Ptyp_constr(inner)
+            CoreTypeDesc::Ptyp_constr(Box::new((lid.clone(), args.iter().map(|t| rewrite_core_type(t, arena)).collect())))
         }
-        CoreTypeDesc::Ptyp_alias(inner) => {
-                    let (ref inner, ref name) = **inner;
-            CoreTypeDesc::Ptyp_alias(inner)
+        CoreTypeDesc::Ptyp_alias(alias_inner) => {
+                    let (ref ct, ref name) = **alias_inner;
+            CoreTypeDesc::Ptyp_alias(Box::new((Box::new(rewrite_core_type(ct, arena)), name.clone())))
         }
-        CoreTypeDesc::Ptyp_poly(inner) => {
-                    let (ref vars, ref inner) = **inner;
-            CoreTypeDesc::Ptyp_poly(inner)
+        CoreTypeDesc::Ptyp_poly(poly_inner) => {
+                    let (ref vars, ref ct) = **poly_inner;
+            CoreTypeDesc::Ptyp_poly(Box::new((vars.clone(), Box::new(rewrite_core_type(ct, arena)))))
         }
         CoreTypeDesc::Ptyp_object(inner) => {
                     let (ref fields, ref closed) = **inner;
@@ -3830,7 +3836,7 @@ fn rewrite_core_type(typ: &CoreType, arena: &mut ParseArena) -> CoreType {
                     }
                 }).collect(), *closed, labels.clone())))
         }
-        CoreTypeDesc::Ptyp_package((lid, constraints)) => {
+        CoreTypeDesc::Ptyp_package(pkg_inner) => { let (lid, constraints) = &**pkg_inner;
             CoreTypeDesc::Ptyp_package(Box::new((
                 lid.clone(),
                 constraints.iter().map(|(l, t)| (l.clone(), rewrite_core_type(t, arena))).collect(),
@@ -4054,20 +4060,22 @@ fn rewrite_pattern(pat: &Pattern, arena: &mut ParseArena) -> Pattern {
     let attrs = rewrite_attributes(&pat.ppat_attributes, arena);
 
     let desc = match &*pat.ppat_desc {
-        // String constant with delimiter: transform js -> *j
-        PatternDesc::Ppat_constant(Constant::String(s, Some(delim))) => {
-            let base = transform_string_pat(pat, s, delim);
-            return Pattern {
-                ppat_attributes: attrs,
-                ..base
-            };
+        PatternDesc::Ppat_constant(c) => match &**c {
+            // String constant with delimiter: transform js -> *j
+            Constant::String(s, Some(delim)) => {
+                let base = transform_string_pat(pat, s, delim);
+                return Pattern {
+                    ppat_attributes: attrs,
+                    ..base
+                };
+            }
+            // Strip 'l' suffix from integer literals
+            Constant::Integer(s, Some('l')) => {
+                PatternDesc::Ppat_constant(Box::new(Constant::Integer(s.clone(), None)))
+            }
+            // Other constants: no transformation needed
+            _ => PatternDesc::Ppat_constant(c.clone()),
         }
-        // Strip 'l' suffix from integer literals
-        PatternDesc::Ppat_constant(Constant::Integer(s, Some('l'))) => {
-            PatternDesc::Ppat_constant(Box::new(Constant::Integer(s.clone(), None)))
-        }
-        // Other constants: no transformation needed
-        PatternDesc::Ppat_constant(c) => PatternDesc::Ppat_constant(c.clone()),
 
         // Alias pattern: recurse into the aliased pattern
         PatternDesc::Ppat_alias(inner, name) => {
@@ -4149,7 +4157,7 @@ fn rewrite_pattern(pat: &Pattern, arena: &mut ParseArena) -> Pattern {
         PatternDesc::Ppat_var(name) => PatternDesc::Ppat_var(name.clone()),
         PatternDesc::Ppat_interval(inner) => {
             let (ref c1, ref c2) = **inner;
-            PatternDesc::Ppat_interval(inner)
+            PatternDesc::Ppat_interval(inner.clone())
         }
         PatternDesc::Ppat_type(lid) => PatternDesc::Ppat_type(lid.clone()),
         PatternDesc::Ppat_unpack(name) => PatternDesc::Ppat_unpack(name.clone()),
@@ -4182,20 +4190,20 @@ fn async_lhs_loc(lhs: &Pattern, arena: &ParseArena) -> LocIdx {
 /// Rewrite an expression, desugaring pipe operators
 fn rewrite_expression(expr: &Expression, arena: &mut ParseArena) -> Expression {
     // Handle string constant transformations first
-    if let ExpressionDesc::Pexp_constant(Constant::String(s, Some(delim))) = &*expr.pexp_desc {
+    if let ExpressionDesc::Pexp_constant(c) = &*expr.pexp_desc { if let Constant::String(s, Some(delim)) = &**c {
         return transform_string_exp(expr, s, delim, arena);
-    }
+    }}
 
     // Handle integer literal suffix stripping ('l' suffix)
     // OCaml: {e with pexp_desc = Pexp_constant (Pconst_integer (s, None))}
     // This is an early-return case that preserves attributes without remapping.
-    if let ExpressionDesc::Pexp_constant(Constant::Integer(s, Some('l'))) = &*expr.pexp_desc {
+    if let ExpressionDesc::Pexp_constant(c) = &*expr.pexp_desc { if let Constant::Integer(s, Some('l')) = &**c {
         return Expression {
             pexp_desc: Box::new(ExpressionDesc::Pexp_constant(Box::new(Constant::Integer(s.clone(), None)))),
             pexp_loc: expr.pexp_loc,
             pexp_attributes: expr.pexp_attributes.clone(),
         };
-    }
+    }}
 
     // First check if this is a pipe or #= application
     if let ExpressionDesc::Pexp_apply(inner) = &*expr.pexp_desc {
@@ -4672,7 +4680,7 @@ fn rewrite_expression_generic(expr: &Expression, arena: &mut ParseArena) -> Expr
 
         ExpressionDesc::Pexp_pack(mod_expr) => {
             // Module expressions - don't recurse for now
-            ExpressionDesc::Pexp_pack(Box::new(mod_expr.clone()))
+            ExpressionDesc::Pexp_pack(Box::new((**mod_expr).clone()))
         }
 
         ExpressionDesc::Pexp_letmodule(inner) => {
@@ -5320,7 +5328,7 @@ fn is_enum_polyvar(tdcl: &TypeDeclaration) -> Option<&[RowField]> {
                 // RowField::Rtag(name_loc, attrs, is_constant, types)
                 let all_nullary = row_fields.iter().all(|rf| {
                     match rf {
-                        RowField::Rtag(_name_loc, _attrs, is_constant, types) => is_constant && types.is_empty(),
+                        RowField::Rtag(_name_loc, _attrs, is_constant, types) => *is_constant && types.is_empty(),
                         _ => false,
                     }
                 });
@@ -5342,9 +5350,9 @@ fn get_as_string_value(attrs: &[Attribute], arena: &ParseArena) -> Option<String
                 if let Some(item) = items.first() {
                     if let StructureItemDesc::Pstr_eval(eval_inner) = &*item.pstr_desc { let (ref expr, _) = **eval_inner;
                         // Constant::String(txt_str, delim)
-                        if let ExpressionDesc::Pexp_constant(Constant::String(txt_str, _delim)) = &*expr.pexp_desc {
+                        if let ExpressionDesc::Pexp_constant(c) = &*expr.pexp_desc { if let Constant::String(txt_str, _delim) = &**c {
                             return Some(txt_str.to_string());
-                        }
+                        }}
                     }
                 }
             }
@@ -6241,10 +6249,10 @@ fn create_record_to_js_function(
     // Transform %obj extension using handle_obj
     // This creates a Pexp_letmodule with the proper FFI structure
     let obj_ext_name = Located { txt: arena.intern_string("obj"), loc };
-    let obj_payload = Payload::PStr(vec![StructureItem {
+    let obj_payload = Payload::PStr(Box::new(vec![StructureItem {
         pstr_desc: Box::new(StructureItemDesc::Pstr_eval(Box::new((record_expr.clone(), vec![])))),
         pstr_loc: none_loc,
-    }]);
+    }]));
 
     // Create a dummy expression with the extension
     let dummy_ext_expr = Expression {
@@ -7294,7 +7302,7 @@ fn make_arrows_type_with_loc(args: &[TypeArg], ret: &CoreType, loc: Option<LocId
 fn make_get_attr(loc: LocIdx, arena: &mut ParseArena) -> Attribute {
     (
         Located { txt: arena.intern_string("get"), loc },
-        Payload::PStr(vec![]),
+        Payload::PStr(Box::new(vec![])),
     )
 }
 
@@ -7302,7 +7310,7 @@ fn make_get_attr(loc: LocIdx, arena: &mut ParseArena) -> Attribute {
 fn make_set_attr(loc: LocIdx, arena: &mut ParseArena) -> Attribute {
     (
         Located { txt: arena.intern_string("set"), loc },
-        Payload::PStr(vec![]),
+        Payload::PStr(Box::new(vec![])),
     )
 }
 
@@ -7314,9 +7322,9 @@ fn get_bs_as_string(attrs: &[Attribute], arena: &ParseArena) -> Option<String> {
             if let Some(items) = payload_str_items(payload) {
                 if let Some(item) = items.first() {
                     if let StructureItemDesc::Pstr_eval(eval_inner) = &*item.pstr_desc { let (ref expr, _) = **eval_inner;
-                        if let ExpressionDesc::Pexp_constant(Constant::String(txt, _)) = &*expr.pexp_desc {
+                        if let ExpressionDesc::Pexp_constant(c) = &*expr.pexp_desc { if let Constant::String(txt, _) = &**c {
                             return Some(txt.to_string());
-                        }
+                        }}
                     }
                 }
             }
@@ -8224,7 +8232,7 @@ fn rewrite_module_expr(
         }
         // Handle module extension - rewrite payload
         current::ModuleExprDesc::Pmod_extension(ext) => {
-            let (ext_name, payload) = ext;
+            let (ref ext_name, ref payload) = **ext;
             current::ModuleExprDesc::Pmod_extension(Box::new((
                 ext_name.clone(),
                 rewrite_payload(payload, arena),
@@ -8269,7 +8277,7 @@ fn rewrite_module_type(
             current::ModuleTypeDesc::Pmty_typeof(Box::new(rewrite_module_expr(me, arena)))
         }
         current::ModuleTypeDesc::Pmty_extension(ext) => {
-            let (ext_name, payload) = ext;
+            let (ref ext_name, ref payload) = **ext;
             current::ModuleTypeDesc::Pmty_extension(Box::new((
                 ext_name.clone(),
                 rewrite_payload(payload, arena),

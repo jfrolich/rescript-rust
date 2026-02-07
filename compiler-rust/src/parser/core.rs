@@ -389,7 +389,7 @@ pub fn make_await_attr(arena: &mut ParseArena, loc: Location) -> Attribute {
     let str_idx = arena.intern("res.await");
     (
         with_loc(str_idx, loc),
-        Payload::PStr(vec![]),
+        Payload::PStr(Box::new(vec![])),
     )
 }
 
@@ -398,7 +398,7 @@ pub fn make_braces_attr(arena: &mut ParseArena, loc: Location) -> Attribute {
     let str_idx = arena.intern("res.braces");
     (
         with_loc(str_idx, loc),
-        Payload::PStr(vec![]),
+        Payload::PStr(Box::new(vec![])),
     )
 }
 
@@ -419,7 +419,7 @@ pub fn make_pat_variant_spread_attr(arena: &mut ParseArena) -> Attribute {
     let str_idx = arena.intern("res.patVariantSpread");
     (
         mknoloc(str_idx),
-        Payload::PStr(vec![]),
+        Payload::PStr(Box::new(vec![])),
     )
 }
 
@@ -428,7 +428,7 @@ pub fn tagged_template_literal_attr(arena: &mut ParseArena) -> Attribute {
     let str_idx = arena.intern("res.taggedTemplate");
     (
         mknoloc(str_idx),
-        Payload::PStr(vec![]),
+        Payload::PStr(Box::new(vec![])),
     )
 }
 
@@ -623,7 +623,7 @@ pub mod ast_helper {
 
     /// Create a constant expression.
     pub fn make_constant(constant: Constant, loc: Location) -> Expression {
-        make_expr(ExpressionDesc::Pexp_constant(constant), loc)
+        make_expr(ExpressionDesc::Pexp_constant(Box::new(constant)), loc)
     }
 
     /// Create a unit expression: () (requires parser for arena allocation)
@@ -743,7 +743,7 @@ pub mod ast_helper {
             let end_idx = p.loc_end_idx(result.ppat_loc);
             let tuple_loc = p.mk_loc_idx_full(start_idx, end_idx);
             let cons_loc = tuple_loc;
-            let tuple = make_pat(PatternDesc::Ppat_tuple(vec![item, result]), tuple_loc);
+            let tuple = make_pat(PatternDesc::Ppat_tuple(Box::new(vec![item, result])), tuple_loc);
             let cons = with_loc(cons_idx, cons_loc);
             result = make_pat(
                 PatternDesc::Ppat_construct(cons, Some(Box::new(tuple))),
@@ -1226,12 +1226,12 @@ mod tests {
     fn test_ast_helper_make_expr() {
         let loc = LocIdx::none();
         let expr = ast_helper::make_expr(
-            ExpressionDesc::Pexp_constant(Constant::Integer(Cow::Borrowed("42"), None)),
+            ExpressionDesc::Pexp_constant(Box::new(Constant::Integer(Cow::Borrowed("42"), None))),
             loc,
         );
         assert!(matches!(
-            expr.pexp_desc,
-            ExpressionDesc::Pexp_constant(Constant::Integer(..))
+            &*expr.pexp_desc,
+            ExpressionDesc::Pexp_constant(c) if matches!(&**c, Constant::Integer(..))
         ));
     }
 

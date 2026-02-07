@@ -1765,7 +1765,7 @@ pub fn parse_atomic_expr(p: &mut Parser<'_>) -> Expression {
             Expression {
                 pexp_desc: Box::new(ExpressionDesc::Pexp_extension(Box::new((
                     with_loc(re_str_idx, loc),
-                    Payload::PStr(vec![str_item]),
+                    Payload::PStr(Box::new(vec![str_item])),
                 )))),
                 pexp_loc: LocIdx::none(),
                 pexp_attributes: vec![],
@@ -1794,7 +1794,7 @@ pub fn parse_atomic_expr(p: &mut Parser<'_>) -> Expression {
                 Expression {
                     pexp_desc: Box::new(ExpressionDesc::Pexp_extension(Box::new((
                         with_loc(re_str_idx, loc),
-                        Payload::PStr(vec![str_item]),
+                        Payload::PStr(Box::new(vec![str_item])),
                     )))),
                     pexp_loc: LocIdx::none(),
                     pexp_attributes: vec![],
@@ -1804,7 +1804,7 @@ pub fn parse_atomic_expr(p: &mut Parser<'_>) -> Expression {
                 Expression {
                     pexp_desc: Box::new(ExpressionDesc::Pexp_extension(Box::new((
                         with_loc(re_str_idx, LocIdx::none()),
-                        Payload::PStr(vec![]),
+                        Payload::PStr(Box::new(vec![])),
                     )))),
                     pexp_loc: LocIdx::none(),
                     pexp_attributes: vec![],
@@ -1833,7 +1833,7 @@ pub fn parse_atomic_expr(p: &mut Parser<'_>) -> Expression {
                 Expression {
                     pexp_desc: Box::new(ExpressionDesc::Pexp_extension(Box::new((
                         with_loc(re_str_idx, loc),
-                        Payload::PStr(vec![str_item]),
+                        Payload::PStr(Box::new(vec![str_item])),
                     )))),
                     pexp_loc: LocIdx::none(),
                     pexp_attributes: vec![],
@@ -1843,7 +1843,7 @@ pub fn parse_atomic_expr(p: &mut Parser<'_>) -> Expression {
                 Expression {
                     pexp_desc: Box::new(ExpressionDesc::Pexp_extension(Box::new((
                         with_loc(re_str_idx, LocIdx::none()),
-                        Payload::PStr(vec![]),
+                        Payload::PStr(Box::new(vec![])),
                     )))),
                     pexp_loc: LocIdx::none(),
                     pexp_attributes: vec![],
@@ -2546,8 +2546,7 @@ pub fn parse_primary_expr(p: &mut Parser<'_>, operand: Expression, no_call: bool
                     let value = parse_expr(p);
 
                     // Check if index is a string constant for object property assignment
-                    if let ExpressionDesc::Pexp_constant(Constant::String(s, _)) =
-                        &*index.pexp_desc
+                    if let ExpressionDesc::Pexp_constant(c) = &*index.pexp_desc { if let Constant::String(s, _) = &**c
                     {
                         // String index: obj["prop"] = value -> Pexp_apply("#=", [Pexp_send(obj, "prop"), value])
                         // OCaml: loc = mk_loc start_pos rhs_expr.pexp_loc.loc_end
@@ -2577,7 +2576,7 @@ pub fn parse_primary_expr(p: &mut Parser<'_>, operand: Expression, no_call: bool
                             ],
                             loc,
                         );
-                    } else {
+                    }} else {
                         // Non-string index: arr[index] = value -> Array.set(arr, index, value)
                         // OCaml: loc = mk_loc start_pos p.prev_end_pos
                         // Uses prev_end_pos (includes braces) for Array.set
@@ -2602,8 +2601,7 @@ pub fn parse_primary_expr(p: &mut Parser<'_>, operand: Expression, no_call: bool
                     // Use rbracket_end for the location end (OCaml includes the ] in the location)
                     let loc = p.mk_loc_idx_full(start_pos_idx, rbracket_end_idx);
 
-                    if let ExpressionDesc::Pexp_constant(Constant::String(s, _)) =
-                        &*index.pexp_desc
+                    if let ExpressionDesc::Pexp_constant(c) = &*index.pexp_desc { if let Constant::String(s, _) = &**c
                     {
                         // String index: obj["prop"] -> Pexp_send(Box::new((obj, "prop")))
                         expr = Expression {
@@ -2614,7 +2612,7 @@ pub fn parse_primary_expr(p: &mut Parser<'_>, operand: Expression, no_call: bool
                             pexp_loc: loc,
                             pexp_attributes: vec![],
                         };
-                    } else {
+                    }} else {
                         // Non-string index: arr[index] -> Array.get(arr, index)
                         // Use static pre-allocated Array.get lident for sharing parity with OCaml
                         let array_get_lid_idx = p.arena().array_get_lid();
@@ -3106,7 +3104,7 @@ fn parse_list_expr(p: &mut Parser<'_>, start_pos_idx: PosIdx) -> Expression {
                 // Add the res.spread attribute to match OCaml
                 pexp_attributes: vec![(
                     mknoloc(spread_idx),
-                    Payload::PStr(vec![]),
+                    Payload::PStr(Box::new(vec![])),
                 )],
             };
 
@@ -4177,9 +4175,9 @@ fn parse_let_in_block_with_continuation_and_attrs(
             // Update the Ptyp_poly location to use binding location
             let updated_typ = match *typ.ptyp_desc {
                 CoreTypeDesc::Ptyp_poly(inner) => {
-                    let (ref vars, ref inner) = *inner;
+                    let (vars, ct) = *inner;
                     CoreType {
-                        ptyp_desc: Box::new(CoreTypeDesc::Ptyp_poly(Box::new((vars, inner)))),
+                        ptyp_desc: Box::new(CoreTypeDesc::Ptyp_poly(Box::new((vars, ct)))),
                         ptyp_loc: wrapper_loc,
                         ptyp_attributes: typ.ptyp_attributes,
                     }
@@ -4205,7 +4203,7 @@ fn parse_let_in_block_with_continuation_and_attrs(
         // First wrap the expression in Pexp_constraint with the inner type
         // OCaml uses the binding location for this Pexp_constraint
         first_value = Expression {
-            pexp_desc: Box::new(ExpressionDesc::Pexp_constraint(Box::new((first_value, inner_type)))),
+            pexp_desc: Box::new(ExpressionDesc::Pexp_constraint(Box::new((Box::new(first_value), inner_type)))),
             pexp_loc: wrapper_loc,
             pexp_attributes: vec![],
         };
@@ -4229,7 +4227,7 @@ fn parse_let_in_block_with_continuation_and_attrs(
         let unwrap_idx = p.arena_mut().intern("let.unwrap");
         attrs.push((
             with_loc(unwrap_idx, unwrap_loc),
-            Payload::PStr(vec![]),
+            Payload::PStr(Box::new(vec![])),
         ));
         attrs
     } else {
@@ -4621,7 +4619,7 @@ fn parse_js_object_expr(p: &mut Parser<'_>, start_pos_idx: PosIdx) -> Expression
     Expression {
         pexp_desc: Box::new(ExpressionDesc::Pexp_extension(Box::new((
             with_loc(obj_idx, loc.clone()),
-            Payload::PStr(vec![record_item]),
+            Payload::PStr(Box::new(vec![record_item])),
         )))),
         pexp_loc: loc,
         pexp_attributes: vec![],
@@ -4837,7 +4835,7 @@ fn suppress_fragile_match_warning_attr(p: &mut Parser<'_>) -> Attribute {
     let warning_str_idx = p.arena_mut().intern("warning");
     (
         mknoloc(warning_str_idx),
-        Payload::PStr(vec![
+        Payload::PStr(Box::new(vec![
             StructureItem {
                 pstr_desc: Box::new(StructureItemDesc::Pstr_eval(Box::new((Expression {
                         pexp_desc: Box::new(ExpressionDesc::Pexp_constant(Box::new(Constant::String(Cow::Borrowed("-4"), None)))),
@@ -4846,7 +4844,7 @@ fn suppress_fragile_match_warning_attr(p: &mut Parser<'_>) -> Attribute {
                     }, vec![])))),
                 pstr_loc: loc,
             },
-        ]),
+        ])),
     )
 }
 
@@ -5050,7 +5048,7 @@ fn parse_let_in_switch_case(p: &mut Parser<'_>) -> Expression {
         let unwrap_idx = p.arena_mut().intern("let.unwrap");
         vec![(
             with_loc(unwrap_idx, unwrap_loc),
-            Payload::PStr(vec![]),
+            Payload::PStr(Box::new(vec![])),
         )]
     } else {
         vec![]
@@ -6213,7 +6211,7 @@ fn parse_template_literal_with_prefix(
         let tagged_str_idx = p.arena_mut().intern("res.taggedTemplate");
         let tagged_template_attr = (
             mknoloc(tagged_str_idx),
-            Payload::PStr(vec![]),
+            Payload::PStr(Box::new(vec![])),
         );
 
         // OCaml sets the Pexp_apply location to just the tag location
@@ -6340,8 +6338,8 @@ mod tests {
     fn test_parse_expr_int() {
         let expr = parse_expr_with_timeout("42");
         assert!(matches!(
-            expr.pexp_desc,
-            ExpressionDesc::Pexp_constant(Constant::Integer(..))
+            &*expr.pexp_desc,
+            ExpressionDesc::Pexp_constant(c) if matches!(&**c, Constant::Integer(..))
         ));
     }
 
