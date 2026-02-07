@@ -4012,9 +4012,10 @@ fn type_let_bindings(
         env.clone()
     };
 
-    // Type check each binding
+    // Type check each binding, collecting pattern variables per binding
     let mut typed_bindings = Vec::new();
     let mut state = PatternState::new();
+    let mut all_pattern_vars: Vec<Vec<PatternVariable>> = Vec::new();
 
     for (binding, ty) in bindings.iter().zip(binding_types.iter()) {
         state.reset(false);
@@ -4038,6 +4039,9 @@ fn type_let_bindings(
             binding.pvb_loc.clone(),
             binding.pvb_attributes.clone(),
         ));
+
+        // Save pattern variables from this binding
+        all_pattern_vars.push(state.pattern_variables.clone());
     }
 
     // End definition level
@@ -4048,14 +4052,14 @@ fn type_let_bindings(
         crate::types::generalize(ctx, *ty);
     }
 
-    // Build final environment
+    // Build final environment from all collected pattern variables
     let mut new_env = env.clone();
-    for (binding, ty) in bindings.iter().zip(binding_types.iter()) {
-        for pv in &state.pattern_variables {
+    for (pvars, ty) in all_pattern_vars.iter().zip(binding_types.iter()) {
+        for pv in pvars {
             let desc = ValueDescription {
                 val_type: *ty,
                 val_kind: crate::types::ValueKind::ValReg,
-                val_loc: tctx.arena.to_location(binding.pvb_loc),
+                val_loc: crate::location::Location::none(),
                 val_attributes: vec![],
                 val_path: None,
             };
