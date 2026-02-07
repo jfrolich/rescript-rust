@@ -43,9 +43,9 @@ pub enum RegionStatus {
 ///
 /// Used by `parse_attributes_and_binding` to speculatively parse attributes
 /// and restore state if they're not followed by `and`.
-pub struct ParserSnapshot {
-    scanner_snapshot: super::scanner::ScannerSnapshot,
-    token: Token,
+pub struct ParserSnapshot<'src> {
+    scanner_snapshot: super::scanner::ScannerSnapshot<'src>,
+    token: Token<'src>,
     start_pos: Position,
     end_pos: Position,
     prev_end_pos: Position,
@@ -79,7 +79,7 @@ pub struct Parser<'src> {
     /// The scanner for lexical analysis.
     scanner: Scanner<'src>,
     /// Current token.
-    pub token: Token,
+    pub token: Token<'src>,
     /// Start position of current token (actual value for error reporting).
     pub start_pos: Position,
     /// End position of current token (actual value for error reporting).
@@ -536,7 +536,7 @@ impl<'src> Parser<'src> {
     pub fn err_unexpected(&mut self) {
         let context: Vec<(Grammar, Position)> = self.breadcrumbs.clone();
         self.err(DiagnosticCategory::Unexpected {
-            token: self.token.clone(),
+            token: self.token.clone().into_owned(),
             context,
         });
     }
@@ -548,7 +548,7 @@ impl<'src> Parser<'src> {
             start_pos,
             self.end_pos.clone(),
             DiagnosticCategory::Unexpected {
-                token: self.token.clone(),
+                token: self.token.clone().into_owned(),
                 context,
             },
         );
@@ -713,7 +713,7 @@ impl<'src> Parser<'src> {
     /// Check if the current token matches and consume it if so.
     ///
     /// Returns `true` if the token was consumed.
-    pub fn optional(&mut self, token: &Token) -> bool {
+    pub fn optional(&mut self, token: &Token<'_>) -> bool {
         if &self.token == token {
             self.next();
             true
@@ -725,7 +725,7 @@ impl<'src> Parser<'src> {
     /// Expect a specific token and consume it.
     ///
     /// If the token doesn't match, an error is recorded.
-    pub fn expect(&mut self, token: Token) {
+    pub fn expect(&mut self, token: Token<'static>) {
         self.expect_with_grammar(token, None);
     }
 
@@ -735,7 +735,7 @@ impl<'src> Parser<'src> {
     /// the previous token's end position to the current token's end position.
     /// This matches OCaml's `expect` which uses `~start_pos:p.prev_end_pos` with
     /// default `~end_pos:p.end_pos`.
-    pub fn expect_with_grammar(&mut self, token: Token, grammar: Option<Grammar>) {
+    pub fn expect_with_grammar(&mut self, token: Token<'static>, grammar: Option<Grammar>) {
         if self.token == token {
             self.next();
         } else {
@@ -824,7 +824,7 @@ impl<'src> Parser<'src> {
     ///
     /// Used for speculative parsing with manual backtracking.
     /// Call `restore` to return to this state.
-    pub fn snapshot(&self) -> ParserSnapshot {
+    pub fn snapshot(&self) -> ParserSnapshot<'src> {
         ParserSnapshot {
             scanner_snapshot: self.scanner.snapshot(),
             token: self.token.clone(),
@@ -848,7 +848,7 @@ impl<'src> Parser<'src> {
     /// Used to backtrack after speculative parsing.
     /// Note: Arena allocations made during speculative parsing are not freed,
     /// but the indices won't be stored in the AST since we're restoring state.
-    pub fn restore(&mut self, snapshot: ParserSnapshot) {
+    pub fn restore(&mut self, snapshot: ParserSnapshot<'src>) {
         self.scanner.restore(snapshot.scanner_snapshot);
         self.token = snapshot.token;
         self.start_pos = snapshot.start_pos;
