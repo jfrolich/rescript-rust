@@ -40,8 +40,7 @@ mod tests {
     const MAX_SLOWDOWN_FACTOR: f64 = 1.2;
 
     /// Minimum file size (bytes) for inclusion in comprehensive benchmark.
-    /// Files below this threshold produce times dominated by process startup noise.
-    const MIN_FILE_SIZE: u64 = 500;
+    const MIN_FILE_SIZE: u64 = 0;
 
     /// Base path for test files, relative to compiler-rust/
     const TEST_BASE: &str = "../tests/syntax_tests/data";
@@ -164,7 +163,7 @@ mod tests {
                     if !EXCLUDED_DIRS.contains(&dir_name.as_ref()) {
                         walk_dir(&path, base, files);
                     }
-                } else if path.extension().map_or(false, |e| e == "res") {
+                } else if path.extension().map_or(false, |e| e == "res" || e == "resi") {
                     let size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
                     if size >= MIN_FILE_SIZE {
                         let rel = path.strip_prefix(base).unwrap_or(&path);
