@@ -3533,7 +3533,8 @@ fn transform_module_await(
 
 /// Check if an expression is a pipe operator application (a -> b)
 fn is_pipe_application(expr: &Expression, arena: &mut ParseArena) -> bool {
-    if let ExpressionDesc::Pexp_apply(Box::new(PexpApply { funct, args, .. })) = &*expr.pexp_desc {
+    if let ExpressionDesc::Pexp_apply(inner) = &*expr.pexp_desc {
+        let PexpApply { ref funct, ref args, .. } = **inner;
         if args.len() == 2
             && matches!(&args[0].0, ArgLabel::Nolabel)
             && matches!(&args[1].0, ArgLabel::Nolabel)
@@ -4182,13 +4183,8 @@ fn rewrite_expression(expr: &Expression, arena: &mut ParseArena) -> Expression {
     }
 
     // First check if this is a pipe or #= application
-    if let ExpressionDesc::Pexp_apply(Box::new(PexpApply {
-        funct,
-        args,
-        partial: _,
-        transformed_jsx: _,
-    })) = &*expr.pexp_desc
-    {
+    if let ExpressionDesc::Pexp_apply(inner) = &*expr.pexp_desc {
+        let PexpApply { ref funct, ref args, .. } = **inner;
         // Check if this is a binary op: -> or #= with two args
         if args.len() == 2
             && matches!(&args[0].0, ArgLabel::Nolabel)
@@ -5232,7 +5228,8 @@ fn generate_accessors(
 
 /// Set the arity of the outermost Pexp_fun
 fn set_outermost_arity(expr: Expression, arity: i32, arena: &mut ParseArena) -> Expression {
-    if let ExpressionDesc::Pexp_fun(Box::new(PexpFun { arg_label, default, lhs, rhs, is_async, arity: _ })) = *expr.pexp_desc {
+    if let ExpressionDesc::Pexp_fun(inner) = *expr.pexp_desc {
+        let PexpFun { arg_label, default, lhs, rhs, is_async, arity: _, .. } = *inner;
         Expression {
             pexp_desc: Box::new(ExpressionDesc::Pexp_fun(Box::new(PexpFun {
                 arg_label,
