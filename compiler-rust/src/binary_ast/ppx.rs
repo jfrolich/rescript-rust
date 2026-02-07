@@ -14,6 +14,8 @@
 //! - `compiler/frontend/bs_builtin_ppx.ml`
 //! - `compiler/frontend/ast_external.ml`
 
+use std::borrow::Cow;
+
 use crate::intern::StrIdx;
 use crate::parse_arena::{LidentIdx, Located, LocIdx, ParseArena};
 use crate::parser::ast::{
@@ -121,7 +123,7 @@ pub enum JsExpClassification {
 
 /// Check if an OXC expression is an object literal (recursively).
 /// This matches OCaml's `is_obj_literal` function.
-fn is_obj_literal(expr: &oxc_ast::ast::Expression) -> bool {
+fn is_obj_literal(expr: &oxc_ast::ast::Expression<'_>) -> bool {
     use oxc_ast::ast::Expression;
     match expr {
         Expression::Identifier(id) if id.name == "undefined" => true,
@@ -364,7 +366,7 @@ fn get_as_string_attr(attrs: &[Attribute], arena: &ParseArena) -> Option<String>
                 if items.len() == 1 {
                     if let StructureItemDesc::Pstr_eval(expr, _) = &items[0].pstr_desc {
                         if let ExpressionDesc::Pexp_constant(Constant::String(s, _)) = &expr.pexp_desc {
-                            return Some(s.clone());
+                            return Some(s.to_string());
                         }
                     }
                 }
@@ -422,10 +424,10 @@ fn map_row_fields_into_strings(
                         has_as = true;
                         v
                     }
-                    None => tag.clone(),
+                    None => tag.to_string(),
                 };
 
-                result.push((tag.clone(), value));
+                result.push((tag.to_string(), value));
             }
             RowField::Rinherit(_) => {
                 // Inherited types not supported for @string
@@ -464,7 +466,7 @@ fn map_row_fields_into_ints(
                     }
                 };
 
-                result.push((tag.clone(), value));
+                result.push((tag.to_string(), value));
             }
             RowField::Rinherit(_) => {
                 // Inherited types not supported for @int
@@ -1146,7 +1148,7 @@ fn get_payload_string(payload: &current::Payload, arena: &mut ParseArena) -> Opt
             if let StructureItemDesc::Pstr_eval(expr, _) = &items[0].pstr_desc {
                 match &expr.pexp_desc {
                     ExpressionDesc::Pexp_constant(current::Constant::String(s, _)) => {
-                        return Some(s.clone());
+                        return Some(s.to_string());
                     }
                     // Handle @attr(ident) where ident is a simple identifier like nullable
                     ExpressionDesc::Pexp_ident(lid) => {
@@ -1208,7 +1210,7 @@ fn get_payload_string_with_delim(payload: &current::Payload, arena: &mut ParseAr
                         Some("j") => Delim::DStarJ,   // "j" delimiter → DStarJ
                         _ => return None,              // Unrecognized delimiter
                     };
-                    return Some((s.clone(), delim));
+                    return Some((s.to_string(), delim));
                 }
             }
             None
@@ -1226,13 +1228,13 @@ fn get_payload_strings(payload: &current::Payload, arena: &mut ParseArena) -> Ve
             if let StructureItemDesc::Pstr_eval(expr, _) = &items[0].pstr_desc {
                 match &expr.pexp_desc {
                     ExpressionDesc::Pexp_constant(current::Constant::String(s, _)) => {
-                        return vec![s.clone()];
+                        return vec![s.to_string()];
                     }
                     ExpressionDesc::Pexp_tuple(exprs) => {
                         let mut result = Vec::new();
                         for e in exprs {
                             if let ExpressionDesc::Pexp_constant(current::Constant::String(s, _)) = &e.pexp_desc {
-                                result.push(s.clone());
+                                result.push(s.to_string());
                             }
                         }
                         if result.len() == exprs.len() {
@@ -2056,7 +2058,7 @@ fn handle_obj(
     // Create type variables 'a0, 'a1, ...
     let tyvars: Vec<CoreType> = (0..arity)
         .map(|i| CoreType {
-            ptyp_desc: CoreTypeDesc::Ptyp_var(format!("a{}", i)),
+            ptyp_desc: CoreTypeDesc::Ptyp_var(Cow::Owned(format!("a{}", i))),
             ptyp_loc: loc,
             ptyp_attributes: vec![],
         })
@@ -2449,8 +2451,8 @@ fn handle_external_ext(
     // The empty delimiter becomes Some("") in the AST
     let str_exp = Expression {
         pexp_desc: ExpressionDesc::Pexp_constant(Constant::String(
-            ident_str.clone(),
-            Some("".to_string()),
+            Cow::Owned(ident_str.clone()),
+            Some(Cow::Borrowed("")),
         )),
         pexp_loc: loc,
         pexp_attributes: vec![],
@@ -2570,7 +2572,7 @@ fn handle_external_ext(
     // Create "undefined" string constant
     let undefined_str = Expression {
         pexp_desc: ExpressionDesc::Pexp_constant(Constant::String(
-            "undefined".to_string(),
+            Cow::Borrowed("undefined"),
             None,
         )),
         pexp_loc: loc,
@@ -3745,8 +3747,8 @@ fn transform_string_exp(expr: &Expression, s: &str, delim: &str, arena: &mut Par
             // Template string: just change delimiter to "bq" (back quotes)
             Expression {
                 pexp_desc: ExpressionDesc::Pexp_constant(Constant::String(
-                    s.to_string(),
-                    Some("bq".to_string()),
+                    Cow::Owned(s.to_string()),
+                    Some(Cow::Borrowed("bq")),
                 )),
                 pexp_loc: expr.pexp_loc,
                 pexp_attributes: expr.pexp_attributes.clone(),
@@ -3756,8 +3758,8 @@ fn transform_string_exp(expr: &Expression, s: &str, delim: &str, arena: &mut Par
             let transformed = transform_js_string(s);
             Expression {
                 pexp_desc: ExpressionDesc::Pexp_constant(Constant::String(
-                    transformed,
-                    Some("*j".to_string()),
+                    Cow::Owned(transformed),
+                    Some(Cow::Borrowed("*j")),
                 )),
                 pexp_loc: expr.pexp_loc,
                 pexp_attributes: expr.pexp_attributes.clone(),
@@ -3782,8 +3784,8 @@ fn transform_string_pat(pat: &Pattern, s: &str, delim: &str) -> Pattern {
         let transformed = transform_js_string(s);
         Pattern {
             ppat_desc: PatternDesc::Ppat_constant(Constant::String(
-                transformed,
-                Some("*j".to_string()),
+                Cow::Owned(transformed),
+                Some(Cow::Borrowed("*j")),
             )),
             ppat_loc: pat.ppat_loc,
             ppat_attributes: pat.ppat_attributes.clone(),
@@ -4316,7 +4318,7 @@ fn desugar_hash_set(
             let send_expr = Expression {
                 pexp_desc: ExpressionDesc::Pexp_send(
                     Box::new(obj),
-                    Located::new(setter_name, loc),
+                    Located::new(Cow::Owned(setter_name), loc),
                 ),
                 pexp_loc: loc,
                 pexp_attributes: vec![],
@@ -5395,7 +5397,7 @@ fn get_as_string_value(attrs: &[Attribute], arena: &ParseArena) -> Option<String
                     if let StructureItemDesc::Pstr_eval(expr, _) = &item.pstr_desc {
                         // Constant::String(txt_str, delim)
                         if let ExpressionDesc::Pexp_constant(Constant::String(txt_str, _delim)) = &expr.pexp_desc {
-                            return Some(txt_str.clone());
+                            return Some(txt_str.to_string());
                         }
                     }
                 }
@@ -5416,7 +5418,7 @@ fn build_js_converter_map(row_fields: &[RowField], arena: &ParseArena) -> (Strin
             // RowField::Rtag(name_loc, attrs, is_constant, types)
             // name_loc.txt is a String (Label = String)
             RowField::Rtag(name_loc, attrs, _, _) => {
-                let tag_name = name_loc.txt.clone();
+                let tag_name = name_loc.txt.to_string();
                 let js_name = match get_as_string_value(attrs, arena) {
                     Some(name) => {
                         has_bs_as = true;
@@ -5632,7 +5634,7 @@ fn create_map_binding(
 
     // Constant::String(txt_string, delim_option)
     let json_const = Expression {
-        pexp_desc: ExpressionDesc::Pexp_constant(Constant::String(json_str.to_string(), None)),
+        pexp_desc: ExpressionDesc::Pexp_constant(Constant::String(Cow::Owned(json_str.to_string()), None)),
         pexp_loc: none_loc,
         pexp_attributes: vec![],
     };
@@ -6466,7 +6468,7 @@ fn create_record_from_js_function(
                         pexp_loc: none_loc, // Exp.ident uses !default_loc (ghost)
                         pexp_attributes: vec![],
                     }),
-                    Located { txt: field_name_str, loc: none_loc }, // Exp.ident m uses !default_loc
+                    Located { txt: Cow::Owned(field_name_str), loc: none_loc }, // Exp.ident m uses !default_loc
                 ),
                 pexp_loc: none_loc, // js_field result uses !default_loc (ghost)
                 pexp_attributes: vec![],
@@ -7450,7 +7452,7 @@ fn get_bs_as_string(attrs: &[Attribute], arena: &ParseArena) -> Option<String> {
                 if let Some(item) = items.first() {
                     if let StructureItemDesc::Pstr_eval(expr, _) = &item.pstr_desc {
                         if let ExpressionDesc::Pexp_constant(Constant::String(txt, _)) = &expr.pexp_desc {
-                            return Some(txt.clone());
+                            return Some(txt.to_string());
                         }
                     }
                 }
