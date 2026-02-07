@@ -246,15 +246,91 @@ struct TokenValue { ... }  // Stored separately, accessed only when needed
 
 **Proposed**: Use a fixed-size stack (array + index) for breadcrumbs, since maximum nesting depth is bounded. Avoids Vec allocation and bounds checks.
 
+### Data-Oriented Design (New — Research-Backed)
+
+#### Enforce 16-byte Enum Sizes (OXC Pattern)
+
+**Current**: AST desc enums are large (ExpressionDesc ~80-120 bytes, Token ~40-48 bytes) because the enum size equals the size of the largest variant.
+
+**Proposed**: Box large variants to keep all enums at 16 bytes max. OXC enforces this with compile-time tests and measured a **10% speedup** from improved cache behavior.
+
+**Approach**:
+```rust
+// Before: large enum (~120 bytes)
+enum ExpressionDesc {
+    Pexp_fun(ArgLabel, Option<Expression>, Pattern, Box<Expression>, ArityIdx, bool),
+    Pexp_ident(Located<LongidentIdx>),
+    // ...
+}
+
+// After: 16-byte enum (large variants boxed)
+enum ExpressionDesc {
+    Pexp_fun(Box<FunExpr>),  // Large variant boxed
+    Pexp_ident(Located<LongidentIdx>),  // Small variant stays inline
+    // ...
+}
+```
+
+#### Attributes Side Table
+
+**Current**: Every AST node stores `Vec<Attribute>` inline, adding 24 bytes even when empty (most nodes have no attributes).
+
+**Proposed**: Move attributes to a separate side table indexed by node ID. Only nodes with attributes have entries. Reduces the size of every Expression, Pattern, and CoreType node.
+
+#### Index-Based AST (ExprIdx/PatIdx)
+
+**Current**: AST nodes use `Box<Expression>`, `Vec<Expression>` etc. for tree structure.
+
+**Proposed**: Store all AST nodes in flat `Vec<Expression>` pools in `ParseArena`, referenced by `ExprIdx(u32)` indices. This extends the existing arena pattern (`LocIdx`, `StrIdx`, `LidentIdx`, `ArityIdx`) to all AST nodes.
+
+**Expected impact**: Adrian Sampson (Cornell) measured a **2.4x speedup** from this transformation. 38% of the original time was spent on `free()` alone; even excluding deallocation, the flat version was 1.5x faster from cache locality. Sorbet (Stripe's Ruby type checker) uses this exact pattern.
+
+**Approach**:
+```rust
+// Before: pointer-based
+struct Expression {
+    pexp_desc: ExpressionDesc,
+    pexp_loc: LocIdx,
+    pexp_attributes: Vec<Attribute>,
+}
+enum ExpressionDesc {
+    Pexp_apply { funct: Box<Expression>, args: Vec<(ArgLabel, Expression)>, ... },
+    // ...
+}
+
+// After: index-based
+pub struct ExprIdx(pub u32);
+pub struct PatIdx(pub u32);
+pub struct CoreTypeIdx(pub u32);
+
+// In ParseArena:
+expressions: Vec<Expression>,
+patterns: Vec<Pattern>,
+core_types: Vec<CoreType>,
+
+enum ExpressionDesc {
+    Pexp_apply { funct: ExprIdx, args: Vec<(ArgLabel, ExprIdx)>, ... },
+    // ...
+}
+```
+
+#### Super-Flat AST Packing
+
+**Current**: AST nodes are Rust structs with enum variants.
+
+**Proposed**: Pack each AST node into 8 bytes: `tag: u8` + `length: u24` + `first_child_index: u32`. Children stored contiguously in a flat array. Leaf nodes use remaining bytes for inline data.
+
+**Expected impact**: ~3x memory reduction. Bottom-up construction enables linear array traversal instead of recursive tree walks (8% additional speedup).
+
 ### Tier 4: Architectural (Longer Term)
 
-#### 4.1 Arena-Allocated AST
+#### 4.1 Bump-Allocated AST (bumpalo)
 
 **Current**: AST nodes are heap-allocated via `Box<T>` and `Vec<T>`.
 
-**Proposed**: Allocate all AST nodes from a bump allocator (e.g., `bumpalo`). The entire AST is freed at once when parsing completes. Eliminates individual deallocation overhead.
+**Proposed**: Allocate all AST nodes from a bump allocator (e.g., `bumpalo`). The entire AST is freed at once when parsing completes. Eliminates individual deallocation overhead. OXC measured **~20% speedup** from this.
 
-**Expected impact**: Significant for large files with deep AST trees. This is how OXC achieves its best performance.
+**Note**: If index-based AST is done first, bumpalo may have less incremental value since most allocations are already eliminated.
 
 #### 4.2 Profile-Guided Optimization (PGO)
 
@@ -278,6 +354,21 @@ llvm-profdata merge -o /tmp/pgo-data/merged.profdata /tmp/pgo-data/
 # Step 4: Build optimized binary
 RUSTFLAGS="-Cprofile-use=/tmp/pgo-data/merged.profdata" cargo build --release
 ```
+
+---
+
+## Evidence Base
+
+| Approach | Source | Measured Impact |
+|----------|--------|-----------------|
+| Arena allocation (bumpalo) | OXC parser | ~20% speedup |
+| Enum size enforcement (16 bytes) | OXC parser | ~10% speedup |
+| Span compression (u32 offsets) | OXC parser | ~5% speedup |
+| SoA / data-oriented design | Roc compiler | 12% speedup, 12% less memory |
+| Index-based flat AST | Adrian Sampson (Cornell) | 2.4x speedup |
+| Super-flat 8-byte nodes | jhwlr.io | ~3x memory reduction |
+| String interning | Sorbet (Stripe) | Integer comparison vs string comparison |
+| Precomputed char/byte arrays | Already done | 41x on JSX benchmark |
 
 ---
 
@@ -338,9 +429,20 @@ perf stat -e instructions,cache-misses,branch-misses \
 
 ## References
 
-- **OXC** (Oxidation Compiler): https://oxc.rs/ - Rust-based JS/TS toolchain with best-in-class parser performance. Uses byte-level scanning, arena allocation, and zero-copy tokens.
+### Parser Implementations
+- **OXC** (Oxidation Compiler): https://oxc.rs/ - Rust-based JS/TS toolchain with best-in-class parser performance. Uses byte-level scanning, arena allocation, zero-copy tokens, and 16-byte enum enforcement.
+  - Performance guide: https://oxc.rs/docs/learn/performance
+  - AST guide: https://oxc.rs/docs/contribute/parser/ast
 - **SWC** (Speedy Web Compiler): https://swc.rs/ - Rust-based JS/TS compiler. Demonstrates effective use of string interning and SIMD.
-- **tree-sitter**: https://tree-sitter.github.io/ - Incremental parsing library with efficient memory layout and error recovery.
+- **tree-sitter**: https://tree-sitter.github.io/ - Incremental parsing with flat subtree arrays and inline/heap discrimination.
+- **Sorbet**: https://github.com/sorbet/sorbet - Stripe's Ruby type checker. Uses u32 index-based references everywhere. See: https://blog.nelhage.com/post/why-sorbet-is-fast/
+
+### Techniques
+- **Flattening ASTs**: https://www.cs.cornell.edu/~asampson/blog/flattening.html - Adrian Sampson's 2.4x speedup from index-based flat AST.
+- **Super-flat AST**: https://jhwlr.io/super-flat-ast/ - 8-byte packed nodes, 3x memory reduction.
+- **Data-oriented design for parsers**: https://tweedegolf.nl/en/blog/88/data-oriented-design - Roc compiler SoA transformation, 12% speedup.
 - **Rust Parsing Best Practices**: https://matklad.github.io/ - Blog posts on parser architecture, arena allocation, and performance techniques by the rust-analyzer author.
+
+### Project
 - **Compiler Rewrite Plan**: See [PLAN.md](../compiler-rewrite/PLAN.md) for the overall compiler rewrite plan.
 - **Compiler Rewrite Progress**: See [PROGRESS.md](../compiler-rewrite/PROGRESS.md) for rewrite progress tracking.

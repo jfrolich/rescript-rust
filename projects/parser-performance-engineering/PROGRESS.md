@@ -12,10 +12,10 @@
 
 | Tier | Description | Status | Progress |
 |------|-------------|--------|----------|
-| Tier 1 | High Impact, Medium Effort | 🚧 In Progress | 1/3 |
-| Tier 2 | Medium Impact, Low-Medium Effort | ⏳ Not Started | 0/5 |
-| Tier 3 | Medium Impact, Higher Effort | ⏳ Not Started | 0/4 |
-| Tier 4 | Architectural | ⏳ Not Started | 0/2 |
+| Tier 1 | High Impact: Scanner + Token | 🚧 In Progress | 1/4 |
+| Tier 2 | Medium Impact: Token + Misc | ⏳ Not Started | 0/6 |
+| Tier 3 | Medium Impact: AST + Advanced | ⏳ Not Started | 0/5 |
+| Tier 4 | Architectural | ⏳ Not Started | 0/3 |
 
 ---
 
@@ -58,15 +58,15 @@ cargo test --release --lib -- benchmark_all --ignored --nocapture
 
 ## Tier 2 Progress: Medium Impact, Low-Medium Effort
 
-- [ ] **2.1 Token kind/value split**
+- [ ] **2.1 Token kind/value split (SoA for tokens)**
   - Split `Token` into small `TokenKind` enum + separate value storage
-  - Improves cache usage for token kind checks during parsing
+  - 100/117 variants are zero-sized; SoA pattern (Roc: 12% speedup)
   - Files: `token.rs`, `state.rs`, all parsing modules
 
-- [ ] **2.2 Reduce token enum size**
-  - Measure current `size_of::<Token>()`, target 8-16 bytes
-  - Store embedded data (strings, numbers) out-of-band
-  - Files: `token.rs`
+- [ ] **2.2 Enforce 16-byte enum sizes (OXC pattern)**
+  - Box large variants to keep enums at 16 bytes max (OXC: 10% speedup)
+  - Current: Token ~40-48 bytes, ExpressionDesc ~80-120 bytes
+  - Files: `token.rs`, `ast.rs`
 
 - [ ] **2.3 Strategic `#[inline]` annotations**
   - Profile to identify hot functions
@@ -84,26 +84,37 @@ cargo test --release --lib -- benchmark_all --ignored --nocapture
   - Heuristic: ~4x source size for binary AST
   - Files: `binary_ast/marshal.rs`, `binary_ast/writer.rs`
 
+- [ ] **2.6 Attributes side table**
+  - Move attributes from inline `Vec<Attribute>` to side table
+  - Most nodes have empty attributes; saves 24 bytes per node
+  - Files: `ast.rs`, all parsing modules, PPX, marshal
+
 ---
 
 ## Tier 3 Progress: Medium Impact, Higher Effort
 
-- [ ] **3.1 SmallVec for AST nodes**
+- [ ] **3.1 Index-based AST (ExprIdx/PatIdx)**
+  - Replace `Box<Expression>` with `ExprIdx(u32)` into flat `Vec<Expression>` pools
+  - Extends existing arena pattern (LocIdx, StrIdx, etc.)
+  - Evidence: 2.4x speedup (Sampson), used by Sorbet
+  - Files: `ast.rs`, `parse_arena.rs`, all parsing modules, PPX, marshal
+
+- [ ] **3.2 SmallVec for AST nodes**
   - Replace `Vec<T>` with `SmallVec<[T; N]>` for small collections
   - Targets: function args (N=3), tuple elements (N=3), record fields (N=4)
   - Files: `ast.rs`, all parsing modules
 
-- [ ] **3.2 SIMD whitespace/comment skipping**
+- [ ] **3.3 SIMD whitespace/comment skipping**
   - Use SSE2/NEON to skip whitespace in 16-byte chunks
   - Significant for heavily indented files
   - Files: `scanner.rs`
 
-- [ ] **3.3 Optimize `is_binary_op` and precedence lookup**
+- [ ] **3.4 Optimize `is_binary_op` and precedence lookup**
   - Encode precedence in token kind byte
   - Eliminate match dispatch for precedence checks
   - Files: `token.rs`, `expr.rs`
 
-- [ ] **3.4 Optimize breadcrumb management**
+- [ ] **3.5 Optimize breadcrumb management**
   - Fixed-size stack (array + index) instead of Vec<Grammar>
   - Bounded max nesting depth
   - Files: `state.rs`
@@ -112,12 +123,18 @@ cargo test --release --lib -- benchmark_all --ignored --nocapture
 
 ## Tier 4 Progress: Architectural
 
-- [ ] **4.1 Arena-allocated AST**
-  - Use `bumpalo` for all AST node allocation
+- [ ] **4.1 Bump-allocated AST (bumpalo)**
+  - Use `bumpalo` for all AST node allocation (OXC: 20% speedup)
   - Free entire AST at once when parsing completes
+  - Less incremental value if 3.1 (index-based AST) is done first
   - Files: `ast.rs`, all parsing modules, lifetime changes
 
-- [ ] **4.2 Profile-Guided Optimization (PGO)**
+- [ ] **4.2 Super-flat AST packing**
+  - Pack each node into 8 bytes: tag + length + child_index
+  - Evidence: 3x memory reduction (jhwlr.io)
+  - Files: `ast.rs`, complete AST rewrite
+
+- [ ] **4.3 Profile-Guided Optimization (PGO)**
   - Build instrumented binary, run on representative files, rebuild with profile data
   - Files: build configuration, CI pipeline
 
