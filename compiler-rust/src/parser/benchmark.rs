@@ -158,13 +158,21 @@ mod tests {
         );
     }
 
-    /// Discover all .res files under TEST_BASE, excluding error/recovery dirs,
-    /// filtered to files >= MIN_FILE_SIZE bytes, sorted by size descending.
-    fn discover_test_files() -> Vec<(String, PathBuf, u64)> {
-        let base = Path::new(TEST_BASE);
-        let mut files: Vec<(String, PathBuf, u64)> = Vec::new();
+    /// Info about a discovered test file.
+    struct TestFile {
+        name: String,
+        path: PathBuf,
+        size: u64,
+        lines: u64,
+    }
 
-        fn walk_dir(dir: &Path, base: &Path, files: &mut Vec<(String, PathBuf, u64)>) {
+    /// Discover all .res/.resi files under TEST_BASE, excluding error/recovery dirs,
+    /// filtered to files >= MIN_FILE_SIZE bytes, sorted by size descending.
+    fn discover_test_files() -> Vec<TestFile> {
+        let base = Path::new(TEST_BASE);
+        let mut files: Vec<TestFile> = Vec::new();
+
+        fn walk_dir(dir: &Path, base: &Path, files: &mut Vec<TestFile>) {
             let entries = match std::fs::read_dir(dir) {
                 Ok(e) => e,
                 Err(_) => return,
@@ -181,7 +189,10 @@ mod tests {
                     if size >= MIN_FILE_SIZE {
                         let rel = path.strip_prefix(base).unwrap_or(&path);
                         let name = rel.to_string_lossy().to_string();
-                        files.push((name, path, size));
+                        let lines = std::fs::read(&path)
+                            .map(|b| b.iter().filter(|&&c| c == b'\n').count() as u64)
+                            .unwrap_or(0);
+                        files.push(TestFile { name, path, size, lines });
                     }
                 }
             }
@@ -189,7 +200,7 @@ mod tests {
 
         walk_dir(base, base, &mut files);
         // Sort by size descending (largest files first)
-        files.sort_by(|a, b| b.2.cmp(&a.2));
+        files.sort_by(|a, b| b.size.cmp(&a.size));
         files
     }
 
@@ -423,37 +434,37 @@ mod tests {
         let mut failures: Vec<Result> = Vec::new();
         let mut errors: Vec<String> = Vec::new();
 
-        for (i, (name, path, size)) in files.iter().enumerate() {
+        for (i, file) in files.iter().enumerate() {
             // Progress indicator every 50 files
             if i > 0 && i % 50 == 0 {
                 eprintln!("  [{}/{}] ...", i, total);
             }
 
-            match benchmark_file_n(path, ITERATIONS_ALL) {
+            match benchmark_file_n(&file.path, ITERATIONS_ALL) {
                 Some((rust_min, ocaml_min)) => {
                     let rust_us = rust_min.as_nanos() as f64 / 1000.0;
                     let ocaml_us = ocaml_min.as_nanos() as f64 / 1000.0;
                     let factor = rust_us / ocaml_us;
 
-                    print_result(name, *size, rust_us, ocaml_us, factor);
+                    print_result(&file.name, file.size, rust_us, ocaml_us, factor);
 
                     let r = Result {
-                        name: name.clone(),
-                        size: *size,
+                        name: file.name.clone(),
+                        size: file.size,
                         factor,
                     };
                     if factor > MAX_SLOWDOWN_FACTOR {
                         failures.push(Result {
-                            name: name.clone(),
-                            size: *size,
+                            name: file.name.clone(),
+                            size: file.size,
                             factor,
                         });
                     }
                     results.push(r);
                 }
                 None => {
-                    println!("  {:<70} {:>8} {:>10} {:>10} {:>7}  SKIP", name, size, "-", "-", "-");
-                    errors.push(name.clone());
+                    println!("  {:<70} {:>8} {:>10} {:>10} {:>7}  SKIP", file.name, file.size, "-", "-", "-");
+                    errors.push(file.name.clone());
                 }
             }
         }
@@ -571,6 +582,7 @@ mod tests {
 
         struct InProcResult {
             size: u64,
+            lines: u64,
             parse_us: f64,
             throughput: f64,
             factor: Option<f64>,
@@ -582,13 +594,13 @@ mod tests {
         // Temp dir for OCaml subprocess output
         let tmp_dir = if has_ocaml { tempfile::tempdir().ok() } else { None };
 
-        for (i, (name, path, size)) in files.iter().enumerate() {
+        for (i, file) in files.iter().enumerate() {
             if i > 0 && i % 100 == 0 {
                 eprintln!("  [{}/{}] ...", i, total);
             }
 
             // In-process Rust parse benchmark
-            let parse_time = match benchmark_in_process_n(path, ITERATIONS_ALL_INPROCESS) {
+            let parse_time = match benchmark_in_process_n(&file.path, ITERATIONS_ALL_INPROCESS) {
                 Some(d) => d,
                 None => {
                     skipped += 1;
@@ -597,8 +609,8 @@ mod tests {
             };
 
             let parse_us = parse_time.as_nanos() as f64 / 1000.0;
-            let throughput = if *size > 0 && parse_time.as_nanos() > 0 {
-                (*size as f64) / (parse_time.as_secs_f64() * 1_000_000.0)
+            let throughput = if file.size > 0 && parse_time.as_nanos() > 0 {
+                (file.size as f64) / (parse_time.as_secs_f64() * 1_000_000.0)
             } else {
                 0.0
             };
@@ -608,12 +620,12 @@ mod tests {
                 if let Some(ref tmp) = tmp_dir {
                     let ocaml_out = tmp.path().join("ocaml.ast");
                     // Warm up
-                    run_bsc(OCAML_BSC, path, &ocaml_out);
-                    run_bsc(OCAML_BSC, path, &ocaml_out);
+                    run_bsc(OCAML_BSC, &file.path, &ocaml_out);
+                    run_bsc(OCAML_BSC, &file.path, &ocaml_out);
                     // Benchmark
                     let mut ocaml_min = Duration::MAX;
                     for _ in 0..ocaml_iterations {
-                        if let Some(t) = run_bsc(OCAML_BSC, path, &ocaml_out) {
+                        if let Some(t) = run_bsc(OCAML_BSC, &file.path, &ocaml_out) {
                             ocaml_min = ocaml_min.min(t);
                         }
                     }
@@ -631,13 +643,13 @@ mod tests {
                         };
                         println!(
                             "  {:<60} {:>6} {:>8.0}us {:>8.0}us {:>8.1} {:>7.2}x  {}",
-                            name, size, parse_us, ocaml_us, throughput, f, status
+                            file.name, file.size, parse_us, ocaml_us, throughput, f, status
                         );
                         Some(f)
                     } else {
                         println!(
                             "  {:<60} {:>6} {:>8.0}us {:>8} {:>8.1}",
-                            name, size, parse_us, "err", throughput
+                            file.name, file.size, parse_us, "err", throughput
                         );
                         None
                     }
@@ -647,13 +659,14 @@ mod tests {
             } else {
                 println!(
                     "  {:<60} {:>6} {:>8.0}us {:>8.1}",
-                    name, size, parse_us, throughput
+                    file.name, file.size, parse_us, throughput
                 );
                 None
             };
 
             results.push(InProcResult {
-                size: *size,
+                size: file.size,
+                lines: file.lines,
                 parse_us,
                 throughput,
                 factor,
@@ -730,21 +743,36 @@ mod tests {
 
         // Overall statistics
         let total_size: u64 = results.iter().map(|r| r.size).sum();
+        let total_lines: u64 = results.iter().map(|r| r.lines).sum();
         let total_time_us: f64 = results.iter().map(|r| r.parse_us).sum();
-        let overall_throughput = if total_time_us > 0.0 {
-            // total_size in bytes, total_time_us in microseconds → MB/s
-            (total_size as f64) / (total_time_us / 1_000_000.0) / 1_000_000.0
+        let total_time_s = total_time_us / 1_000_000.0;
+        let overall_throughput_mbs = if total_time_s > 0.0 {
+            (total_size as f64) / total_time_s / 1_000_000.0
+        } else {
+            0.0
+        };
+        let overall_loc_per_s = if total_time_s > 0.0 {
+            total_lines as f64 / total_time_s
         } else {
             0.0
         };
 
         println!("  {} files parsed, {} skipped", results.len(), skipped);
-        println!("  Total source: {:.1} KB", total_size as f64 / 1024.0);
+        println!(
+            "  Total: {:.1} KB, {} lines of code",
+            total_size as f64 / 1024.0,
+            total_lines
+        );
         println!(
             "  Total parse time: {:.1} ms (sum of per-file minimums)",
             total_time_us / 1000.0
         );
-        println!("  Overall throughput: {:.1} MB/s", overall_throughput);
+        println!(
+            "  Throughput: {:.1} MB/s, {:.0} LOC/s ({:.0}K LOC/s)",
+            overall_throughput_mbs,
+            overall_loc_per_s,
+            overall_loc_per_s / 1000.0
+        );
 
         if has_ocaml {
             let factors: Vec<f64> = results.iter().filter_map(|r| r.factor).collect();
