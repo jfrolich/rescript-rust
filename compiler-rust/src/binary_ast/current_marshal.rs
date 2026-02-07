@@ -37,7 +37,7 @@ fn is_symbolic_operator(name: &str) -> bool {
 fn is_pipe_application(expr: &Expression, w: &MarshalWriter) -> bool {
     let arena = w.get_arena();
 
-    let ExpressionDesc::Pexp_apply { funct, args, .. } = &*expr.pexp_desc else {
+    let ExpressionDesc::Pexp_apply(Box::new(PexpApply { funct, args, .. })) = &*expr.pexp_desc else {
         return false;
     };
     if args.is_empty() || !matches!(args[0].0, ArgLabel::Nolabel) {
@@ -164,7 +164,7 @@ fn is_raw_expansion_expr(expr: &Expression, w: &MarshalWriter) -> bool {
         return false;
     }
 
-    let ExpressionDesc::Pexp_apply { funct, args, .. } = &*body.pexp_desc else {
+    let ExpressionDesc::Pexp_apply(Box::new(PexpApply { funct, args, .. })) = &*body.pexp_desc else {
         return false;
     };
     if args.len() != 1 || !matches!(args[0].0, ArgLabel::Nolabel) {
@@ -188,11 +188,11 @@ fn is_raw_expansion_expr(expr: &Expression, w: &MarshalWriter) -> bool {
 fn is_external_ext_expr(expr: &Expression, w: &MarshalWriter) -> bool {
     let arena = w.get_arena();
 
-    let ExpressionDesc::Pexp_apply {
+    let ExpressionDesc::Pexp_apply(Box::new(PexpApply {
         funct: outer_funct,
         args: outer_args,
         ..
-    } = &*expr.pexp_desc
+    })) = &*expr.pexp_desc
     else {
         return false;
     };
@@ -219,11 +219,11 @@ fn is_external_ext_expr(expr: &Expression, w: &MarshalWriter) -> bool {
         return false;
     }
 
-    let ExpressionDesc::Pexp_apply {
+    let ExpressionDesc::Pexp_apply(Box::new(PexpApply {
         funct: eq_funct,
         args: eq_args,
         ..
-    } = &*cond.pexp_desc
+    })) = &*cond.pexp_desc
     else {
         return false;
     };
@@ -241,11 +241,11 @@ fn is_external_ext_expr(expr: &Expression, w: &MarshalWriter) -> bool {
         return false;
     }
 
-    let ExpressionDesc::Pexp_apply {
+    let ExpressionDesc::Pexp_apply(Box::new(PexpApply {
         funct: typeof_funct,
         args: typeof_args,
         ..
-    } = &*eq_args[0].1.pexp_desc
+    })) = &*eq_args[0].1.pexp_desc
     else {
         return false;
     };
@@ -275,7 +275,7 @@ fn is_external_raw_expansion_expr(expr: &Expression, w: &MarshalWriter) -> bool 
     let ExpressionDesc::Pexp_letmodule(_, _, body) = &*expr.pexp_desc else {
         return false;
     };
-    let ExpressionDesc::Pexp_apply { args, .. } = &*body.pexp_desc else {
+    let ExpressionDesc::Pexp_apply(Box::new(PexpApply { args, .. })) = &*body.pexp_desc else {
         return false;
     };
     if args.len() != 1 || !matches!(args[0].0, ArgLabel::Nolabel) {
@@ -435,7 +435,7 @@ fn marshal_attribute_list(
 ///
 /// In OCaml, certain parser attributes (`template_literal_attr`, etc.) are module-level
 /// `let` bindings that create a single physical tuple object. When the PPX preserves
-/// these attributes (early-return cases like `Pexp_constant(Pconst_string(_, Some _))`),
+/// these attributes (early-return cases like `Pexp_constant(Box::new(Pconst_string(_, Some _)))`),
 /// the marshal sees the same physical pointer and writes SHARED references.
 ///
 /// For expressions that go through OCaml's default mapper, `sub.attributes sub attrs`
@@ -804,14 +804,15 @@ impl Marshal for TypeArg {
 impl Marshal for CoreType {
     fn marshal(&self, w: &mut MarshalWriter) {
         let share_empty_pstr = match &*self.ptyp_desc {
-            CoreTypeDesc::Ptyp_object(_, _) => Some(EmptyPayloadShareKind::ObjectTypeAttr),
+            CoreTypeDesc::Ptyp_object(_) => Some(EmptyPayloadShareKind::ObjectTypeAttr),
             _ => None,
         };
 
         // OCaml shares simple builtin `string` core_types (no args, no attrs, no loc)
         // across repeated generated externals (e.g. inline red/black conversion tests).
         // Keep this narrow to avoid reintroducing broader core_type over-sharing.
-        if let CoreTypeDesc::Ptyp_constr(lid, types) = &*self.ptyp_desc {
+        if let CoreTypeDesc::Ptyp_constr(inner) = &*self.ptyp_desc {
+            let (ref lid, ref types) = **inner;
             let should_share_simple_string = self.ptyp_attributes.is_empty()
                 && types.is_empty()
                 && is_none_loc_idx(self.ptyp_loc, w)
@@ -898,7 +899,8 @@ impl Marshal for CoreTypeDesc {
                 w.write_block_header(0, 1);
                 w.write_str(s);
             }
-            CoreTypeDesc::Ptyp_arrow { arg, ret, arity } => {
+            CoreTypeDesc::Ptyp_arrow(inner) => {
+                    let (arg, ret, arity) = *inner;
                 // Ptyp_arrow of { arg: arg; ret: core_type; arity: arity }
                 // Inline record is encoded as block with 3 fields
                 w.write_block_header(1, 3);
@@ -910,28 +912,33 @@ impl Marshal for CoreTypeDesc {
                 w.write_block_header(2, 1);
                 types.marshal(w);
             }
-            CoreTypeDesc::Ptyp_constr(lid, types) => {
+            CoreTypeDesc::Ptyp_constr(inner) => {
+                    let (lid, types) = *inner;
                 w.write_block_header(3, 2);
                 lid.marshal(w);
                 types.marshal(w);
             }
-            CoreTypeDesc::Ptyp_object(fields, flag) => {
+            CoreTypeDesc::Ptyp_object(inner) => {
+                    let (fields, flag) = *inner;
                 w.write_block_header(4, 2);
                 fields.marshal(w);
                 flag.marshal(w);
             }
-            CoreTypeDesc::Ptyp_alias(ty, s) => {
+            CoreTypeDesc::Ptyp_alias(inner) => {
+                    let (ty, s) = *inner;
                 w.write_block_header(5, 2);
                 ty.marshal(w);
                 w.write_str(s);
             }
-            CoreTypeDesc::Ptyp_variant(rows, flag, labels) => {
+            CoreTypeDesc::Ptyp_variant(inner) => {
+                    let (rows, flag, labels) = *inner;
                 w.write_block_header(6, 3);
                 rows.marshal(w);
                 flag.marshal(w);
                 labels.marshal(w);
             }
-            CoreTypeDesc::Ptyp_poly(vars, ty) => {
+            CoreTypeDesc::Ptyp_poly(inner) => {
+                    let (vars, ty) = *inner;
                 w.write_block_header(7, 2);
                 vars.marshal(w);
                 ty.marshal(w);
@@ -1064,7 +1071,8 @@ impl Marshal for PatternDesc {
                 w.write_block_header(2, 1);
                 c.marshal(w);
             }
-            PatternDesc::Ppat_interval(c1, c2) => {
+            PatternDesc::Ppat_interval(inner) => {
+                    let (c1, c2) = *inner;
                 w.write_block_header(3, 2);
                 c1.marshal(w);
                 c2.marshal(w);
@@ -1078,12 +1086,14 @@ impl Marshal for PatternDesc {
                 lid.marshal(w);
                 pat.marshal(w);
             }
-            PatternDesc::Ppat_variant(label, pat) => {
+            PatternDesc::Ppat_variant(inner) => {
+                    let (label, pat) = *inner;
                 w.write_block_header(6, 2);
                 w.write_str(label);
                 pat.marshal(w);
             }
-            PatternDesc::Ppat_record(fields, flag) => {
+            PatternDesc::Ppat_record(inner) => {
+                    let (fields, flag) = *inner;
                 w.write_block_header(7, 2);
                 fields.marshal(w);
                 flag.marshal(w);
@@ -1097,7 +1107,8 @@ impl Marshal for PatternDesc {
                 p1.marshal(w);
                 p2.marshal(w);
             }
-            PatternDesc::Ppat_constraint(p, t) => {
+            PatternDesc::Ppat_constraint(inner) => {
+                    let (p, t) = *inner;
                 w.write_block_header(10, 2);
                 p.marshal(w);
                 t.marshal(w);
@@ -1187,12 +1198,12 @@ impl Marshal for Expression {
         // sharing of singleton `(mknoloc name, PStr [])` module-level constants.
         //
         // Early-return expression types (preserve attribute tuple pointers):
-        // - Pexp_constant(Pconst_string(_, Some _)): template literals
-        // - Pexp_constant(Pconst_integer(_, Some _)): int suffix stripping
+        // - Pexp_constant(Box::new(Pconst_string(_, Some _))): template literals
+        // - Pexp_constant(Box::new(Pconst_integer(_, Some _))): int suffix stripping
         // - Pexp_extension: unknown extensions return unchanged
         // - Pexp_newtype: preserves attrs in record-with update
         //
-        // Note: Pexp_constant(String(_, None)) and Pexp_letmodule are NOT included.
+        // Note: Pexp_constant(Box::new(String(_, None))) and Pexp_letmodule are NOT included.
         // While PPX-created instances preserve attrs, user code instances go through
         // the default mapper which creates fresh tuples.
         let share_attrs = matches!(
@@ -1200,13 +1211,13 @@ impl Marshal for Expression {
             ExpressionDesc::Pexp_constant(Constant::String(_, Some(_)))
                 | ExpressionDesc::Pexp_constant(Constant::Integer(_, Some(_)))
                 | ExpressionDesc::Pexp_extension(_)
-                | ExpressionDesc::Pexp_newtype(_, _)
+                | ExpressionDesc::Pexp_newtype(Box::new((_, _)))
         );
         let has_braces_or_ternary =
             has_braces_attr(&self.pexp_attributes, w) || has_ternary_attr(&self.pexp_attributes, w);
         let rewritten_await_letmodule = matches!(
             &*self.pexp_desc,
-            ExpressionDesc::Pexp_letmodule(_, mod_expr, _) if has_await_attr(&mod_expr.pmod_attributes, w)
+            ExpressionDesc::Pexp_letmodule(inner) if has_await_attr(&mod_expr.pmod_attributes, w)
         );
         let rewritten_expr = w.get_arena().is_rewritten_expr_loc(self.pexp_loc);
         let share_singleton_attr_tuple = share_attrs;
@@ -1276,6 +1287,7 @@ impl Marshal for ExpressionDesc {
         // Pexp_jsx_element = tag 29
         match self {
             ExpressionDesc::Pexp_ident(lid) => {
+                    let (_, mod_expr, _) = *inner;
                 w.write_block_header(0, 1);
                 lid.marshal(w);
             }
@@ -1283,20 +1295,20 @@ impl Marshal for ExpressionDesc {
                 w.write_block_header(1, 1);
                 c.marshal(w);
             }
-            ExpressionDesc::Pexp_let(flag, bindings, body) => {
+            ExpressionDesc::Pexp_let(inner) => {
+                    let (flag, bindings, body) = *inner;
                 w.write_block_header(2, 3);
                 flag.marshal(w);
                 bindings.marshal(w);
                 body.marshal(w);
             }
-            ExpressionDesc::Pexp_fun {
-                arg_label,
+            ExpressionDesc::Pexp_fun(inner) => {
+                    let PexpFun { arg_label,
                 default,
                 lhs,
                 rhs,
                 arity,
-                is_async,
-            } => {
+                is_async, } = *inner;
                 // Pexp_fun of { arg_label; default; lhs; rhs; arity; async }
                 // Inline record with 6 fields
                 w.write_block_header(3, 6);
@@ -1307,12 +1319,11 @@ impl Marshal for ExpressionDesc {
                 arity.marshal(w);
                 w.write_int(if *is_async { 1 } else { 0 });
             }
-            ExpressionDesc::Pexp_apply {
-                funct,
+            ExpressionDesc::Pexp_apply(inner) => {
+                    let PexpApply { funct,
                 args,
                 partial,
-                transformed_jsx,
-            } => {
+                transformed_jsx, } = *inner;
                 // Pexp_apply of { funct; args; partial; transformed_jsx }
                 // Inline record with 4 fields
                 w.write_block_header(4, 4);
@@ -1321,12 +1332,14 @@ impl Marshal for ExpressionDesc {
                 w.write_int(if *partial { 1 } else { 0 });
                 w.write_int(if *transformed_jsx { 1 } else { 0 });
             }
-            ExpressionDesc::Pexp_match(e, cases) => {
+            ExpressionDesc::Pexp_match(inner) => {
+                    let (e, cases) = *inner;
                 w.write_block_header(5, 2);
                 e.marshal(w);
                 cases.marshal(w);
             }
-            ExpressionDesc::Pexp_try(e, cases) => {
+            ExpressionDesc::Pexp_try(inner) => {
+                    let (e, cases) = *inner;
                 w.write_block_header(6, 2);
                 e.marshal(w);
                 cases.marshal(w);
@@ -1340,12 +1353,14 @@ impl Marshal for ExpressionDesc {
                 lid.marshal(w);
                 expr.marshal(w);
             }
-            ExpressionDesc::Pexp_variant(label, expr) => {
+            ExpressionDesc::Pexp_variant(inner) => {
+                    let (label, expr) = *inner;
                 w.write_block_header(9, 2);
                 w.write_str(label);
                 expr.marshal(w);
             }
-            ExpressionDesc::Pexp_record(fields, spread) => {
+            ExpressionDesc::Pexp_record(inner) => {
+                    let (fields, spread) = *inner;
                 w.write_block_header(10, 2);
                 fields.marshal(w);
                 spread.marshal(w);
@@ -1355,7 +1370,8 @@ impl Marshal for ExpressionDesc {
                 e.marshal(w);
                 lid.marshal(w);
             }
-            ExpressionDesc::Pexp_setfield(e1, lid, e2) => {
+            ExpressionDesc::Pexp_setfield(inner) => {
+                    let (e1, lid, e2) = *inner;
                 w.write_block_header(12, 3);
                 e1.marshal(w);
                 lid.marshal(w);
@@ -1365,7 +1381,8 @@ impl Marshal for ExpressionDesc {
                 w.write_block_header(13, 1);
                 exprs.marshal(w);
             }
-            ExpressionDesc::Pexp_ifthenelse(e1, e2, e3) => {
+            ExpressionDesc::Pexp_ifthenelse(inner) => {
+                    let (e1, e2, e3) = *inner;
                 w.write_block_header(14, 3);
                 e1.marshal(w);
                 e2.marshal(w);
@@ -1381,7 +1398,8 @@ impl Marshal for ExpressionDesc {
                 e1.marshal(w);
                 e2.marshal(w);
             }
-            ExpressionDesc::Pexp_for(pat, e1, e2, dir, e3) => {
+            ExpressionDesc::Pexp_for(inner) => {
+                    let (pat, e1, e2, dir, e3) = *inner;
                 w.write_block_header(17, 5);
                 pat.marshal(w);
                 e1.marshal(w);
@@ -1389,12 +1407,14 @@ impl Marshal for ExpressionDesc {
                 dir.marshal(w);
                 e3.marshal(w);
             }
-            ExpressionDesc::Pexp_constraint(e, t) => {
+            ExpressionDesc::Pexp_constraint(inner) => {
+                    let (e, t) = *inner;
                 w.write_block_header(18, 2);
                 e.marshal(w);
                 t.marshal(w);
             }
-            ExpressionDesc::Pexp_coerce(e, _middle, t) => {
+            ExpressionDesc::Pexp_coerce(inner) => {
+                    let (e, _middle, t) = *inner;
                 // Pexp_coerce of expression * unit * core_type
                 // The middle field in Rust is Option<CoreType> but OCaml uses unit
                 w.write_block_header(19, 3);
@@ -1402,12 +1422,14 @@ impl Marshal for ExpressionDesc {
                 w.write_int(0); // unit = ()
                 t.marshal(w);
             }
-            ExpressionDesc::Pexp_send(e, label) => {
+            ExpressionDesc::Pexp_send(inner) => {
+                    let (e, label) = *inner;
                 w.write_block_header(20, 2);
                 e.marshal(w);
                 label.marshal(w);
             }
-            ExpressionDesc::Pexp_letmodule(name, me, body) => {
+            ExpressionDesc::Pexp_letmodule(inner) => {
+                    let (name, me, body) = *inner;
                 w.write_block_header(21, 3);
                 name.marshal(w);
                 w.enter_letmodule_expr();
@@ -1415,7 +1437,8 @@ impl Marshal for ExpressionDesc {
                 w.exit_letmodule_expr();
                 body.marshal(w);
             }
-            ExpressionDesc::Pexp_letexception(ec, body) => {
+            ExpressionDesc::Pexp_letexception(inner) => {
+                    let (ec, body) = *inner;
                 w.write_block_header(22, 2);
                 ec.marshal(w);
                 body.marshal(w);
@@ -1424,7 +1447,8 @@ impl Marshal for ExpressionDesc {
                 w.write_block_header(23, 1);
                 e.marshal(w);
             }
-            ExpressionDesc::Pexp_newtype(name, e) => {
+            ExpressionDesc::Pexp_newtype(inner) => {
+                    let (name, e) = *inner;
                 w.write_block_header(24, 2);
                 name.marshal(w);
                 e.marshal(w);
@@ -1435,7 +1459,8 @@ impl Marshal for ExpressionDesc {
                 me.marshal(w);
                 w.exit_pack();
             }
-            ExpressionDesc::Pexp_open(flag, lid, e) => {
+            ExpressionDesc::Pexp_open(inner) => {
+                    let (flag, lid, e) = *inner;
                 w.write_block_header(26, 3);
                 flag.marshal(w);
                 w.write_lident_loc_shared(lid.txt, lid.loc);
@@ -1500,7 +1525,8 @@ impl Marshal for Payload {
                 w.write_block_header(2, 1);
                 ty.marshal(w);
             }
-            Payload::PPat(pat, guard) => {
+            Payload::PPat(inner) => {
+                    let (pat, guard) = *inner;
                 w.write_block_header(3, 2);
                 pat.marshal(w);
                 guard.marshal(w);
@@ -1535,13 +1561,15 @@ impl Marshal for ModuleTypeDesc {
                 w.write_block_header(1, 1);
                 sig.marshal(w);
             }
-            ModuleTypeDesc::Pmty_functor(name, mt1, mt2) => {
+            ModuleTypeDesc::Pmty_functor(inner) => {
+                    let (name, mt1, mt2) = *inner;
                 w.write_block_header(2, 3);
                 name.marshal(w);
                 mt1.marshal(w);
                 mt2.marshal(w);
             }
-            ModuleTypeDesc::Pmty_with(mt, constraints) => {
+            ModuleTypeDesc::Pmty_with(inner) => {
+                    let (mt, constraints) = *inner;
                 w.write_block_header(3, 2);
                 mt.marshal(w);
                 constraints.marshal(w);
@@ -1628,7 +1656,8 @@ impl Marshal for ModuleExprDesc {
                 w.write_block_header(1, 1);
                 str.marshal(w);
             }
-            ModuleExprDesc::Pmod_functor(name, mt, me) => {
+            ModuleExprDesc::Pmod_functor(inner) => {
+                    let (name, mt, me) = *inner;
                 w.write_block_header(2, 3);
                 name.marshal(w);
                 mt.marshal(w);
@@ -1930,7 +1959,8 @@ impl Marshal for StructureItem {
 impl Marshal for StructureItemDesc {
     fn marshal(&self, w: &mut MarshalWriter) {
         match self {
-            StructureItemDesc::Pstr_eval(e, attrs) => {
+            StructureItemDesc::Pstr_eval(inner) => {
+                    let (e, attrs) = *inner;
                 w.write_block_header(0, 2);
                 e.marshal(w);
                 let share_empty_pstr = if w.in_extension() {
@@ -1940,7 +1970,8 @@ impl Marshal for StructureItemDesc {
                 };
                 marshal_attributes(attrs, w, false, false, share_empty_pstr);
             }
-            StructureItemDesc::Pstr_value(flag, bindings) => {
+            StructureItemDesc::Pstr_value(inner) => {
+                    let (flag, bindings) = *inner;
                 w.write_block_header(1, 2);
                 flag.marshal(w);
                 bindings.marshal(w);
@@ -1949,7 +1980,8 @@ impl Marshal for StructureItemDesc {
                 w.write_block_header(2, 1);
                 vd.marshal(w);
             }
-            StructureItemDesc::Pstr_type(flag, decls) => {
+            StructureItemDesc::Pstr_type(inner) => {
+                    let (flag, decls) = *inner;
                 w.write_block_header(3, 2);
                 flag.marshal(w);
                 decls.marshal(w);
@@ -1986,7 +2018,8 @@ impl Marshal for StructureItemDesc {
                 w.write_block_header(11, 1);
                 attr.marshal(w);
             }
-            StructureItemDesc::Pstr_extension(ext, attrs) => {
+            StructureItemDesc::Pstr_extension(inner) => {
+                    let (ext, attrs) = *inner;
                 w.write_block_header(12, 2);
                 ext.marshal(w);
                 let share_empty_pstr = if w.in_extension() {
@@ -2017,7 +2050,8 @@ impl Marshal for SignatureItemDesc {
                 w.write_block_header(0, 1);
                 vd.marshal(w);
             }
-            SignatureItemDesc::Psig_type(flag, decls) => {
+            SignatureItemDesc::Psig_type(inner) => {
+                    let (flag, decls) = *inner;
                 w.write_block_header(1, 2);
                 flag.marshal(w);
                 decls.marshal(w);
@@ -2054,7 +2088,8 @@ impl Marshal for SignatureItemDesc {
                 w.write_block_header(9, 1);
                 attr.marshal(w);
             }
-            SignatureItemDesc::Psig_extension(ext, attrs) => {
+            SignatureItemDesc::Psig_extension(inner) => {
+                    let (ext, attrs) = *inner;
                 w.write_block_header(10, 2);
                 ext.marshal(w);
                 let share_empty_pstr = if w.in_extension() {
