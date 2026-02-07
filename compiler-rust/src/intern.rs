@@ -9,11 +9,9 @@
 //!
 //! # String Storage
 //!
-//! Strings are stored as `Rc<str>` to enable cheap sharing between entries.
-//! When `push_interned()` is called for a string that already exists,
-//! the Rc refcount is incremented (no heap allocation) and a NEW StrIdx
-//! is returned. This gives unique indices for marshal identity while
-//! avoiding duplicate string allocations.
+//! Strings are stored as `Box<str>` for minimal overhead (one pointer + one
+//! length, no refcount). `push_interned()` always allocates a fresh `Box<str>`
+//! and returns a unique StrIdx — this gives unique indices for marshal identity.
 //!
 //! # Example
 //!
@@ -33,7 +31,6 @@
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::rc::Rc;
 
 // ============================================================================
 // String Index
@@ -71,17 +68,14 @@ impl StrIdx {
 ///
 /// For parser identifiers that need unique StrIdx values (for marshal
 /// identity-based sharing), use `push_interned()` which returns a fresh
-/// StrIdx but shares the underlying Rc<str> data to avoid allocation.
+/// StrIdx with its own `Box<str>` allocation.
 #[derive(Debug)]
 pub struct Interner {
     /// Maps string content to StrIdx — used by `intern()` for deduplication.
     /// Only `intern()` reads/writes this map.
-    map: HashMap<Rc<str>, StrIdx>,
-    /// Cache for `push_interned()` — maps string content to a shared Rc<str>.
-    /// Separate from `map` so that `push_interned` never affects `intern()` lookups.
-    rc_cache: HashMap<Box<str>, Rc<str>>,
+    map: HashMap<String, StrIdx>,
     /// Stores the actual strings, indexed by StrIdx
-    strings: Vec<Rc<str>>,
+    strings: Vec<Box<str>>,
 }
 
 impl Default for Interner {
@@ -95,7 +89,6 @@ impl Interner {
     pub fn new() -> Self {
         Self {
             map: HashMap::new(),
-            rc_cache: HashMap::new(),
             strings: Vec::new(),
         }
     }
@@ -104,7 +97,6 @@ impl Interner {
     pub fn with_capacity(capacity: usize) -> Self {
         Self {
             map: HashMap::with_capacity(capacity),
-            rc_cache: HashMap::with_capacity(capacity),
             strings: Vec::with_capacity(capacity),
         }
     }
@@ -119,9 +111,8 @@ impl Interner {
         }
 
         let idx = StrIdx(self.strings.len() as u32);
-        let rc: Rc<str> = Rc::from(s);
-        self.map.insert(rc.clone(), idx);
-        self.strings.push(rc);
+        self.map.insert(s.to_owned(), idx);
+        self.strings.push(Box::from(s));
         idx
     }
 
@@ -134,9 +125,8 @@ impl Interner {
         }
 
         let idx = StrIdx(self.strings.len() as u32);
-        let rc: Rc<str> = Rc::from(s);
-        self.map.insert(rc.clone(), idx);
-        self.strings.push(rc);
+        self.strings.push(s.as_str().into());
+        self.map.insert(s, idx);
         idx
     }
 
@@ -146,37 +136,25 @@ impl Interner {
     /// be shared during marshalling. Each call returns a unique index.
     ///
     /// For static strings that should be shared, use `intern()` instead.
-    /// For dynamic strings that should have unique indices but share storage,
-    /// use `push_interned()`.
+    /// For dynamic strings that should have unique indices, use `push_interned()`.
     pub fn push(&mut self, s: String) -> StrIdx {
         let idx = StrIdx(self.strings.len() as u32);
-        self.strings.push(Rc::from(s));
+        self.strings.push(s.into_boxed_str());
         // Note: We don't add to the map, so this string won't be found by intern()
         idx
     }
 
-    /// Push a string with a unique StrIdx but shared storage.
+    /// Push a string with a unique StrIdx.
     ///
     /// Like `push()`, this always returns a NEW StrIdx (unique for marshal
-    /// identity). But unlike `push()`, if the string content is already known
-    /// in the interner, it shares the `Rc<str>` data instead of allocating
-    /// a new string. This avoids heap allocations for duplicate identifiers.
+    /// identity). Takes a `&str` reference and allocates a fresh `Box<str>`.
     ///
-    /// Use this for parser identifiers where:
-    /// - Each occurrence needs a unique StrIdx (for marshal parity)
-    /// - But the string data can be shared to save allocations
+    /// Use this for parser identifiers where each occurrence needs a unique
+    /// StrIdx (for marshal parity).
     #[inline]
     pub fn push_interned(&mut self, s: &str) -> StrIdx {
         let idx = StrIdx(self.strings.len() as u32);
-        if let Some(rc) = self.rc_cache.get(s) {
-            // String already seen — clone the Rc (refcount bump only, no heap alloc)
-            self.strings.push(rc.clone());
-        } else {
-            // First time seeing this string — allocate Rc and cache it
-            let rc: Rc<str> = Rc::from(s);
-            self.rc_cache.insert(s.into(), rc.clone());
-            self.strings.push(rc);
-        }
+        self.strings.push(Box::from(s));
         idx
     }
 

@@ -1068,8 +1068,7 @@ impl ParseArena {
 
     /// Push a simple identifier (Lident) with a dynamic string (from tokens).
     ///
-    /// Each call creates a new StrIdx (for marshal identity), but shares the
-    /// underlying string data via Rc<str> if the same content was seen before.
+    /// Each call creates a new StrIdx (for marshal identity).
     /// Use for user identifiers parsed from source (variable names, etc.).
     pub fn push_lident(&mut self, name: &str) -> LidentIdx {
         let str_idx = self.strings.push_interned(name);
@@ -1370,14 +1369,11 @@ impl ParseArena {
         self.strings.push(s.into())
     }
 
-    /// Push a string with unique StrIdx but shared Rc<str> storage.
+    /// Push a string with a unique StrIdx.
     ///
-    /// Returns a fresh StrIdx each time (preserving marshal identity semantics),
-    /// but avoids heap allocation for duplicate strings by sharing the underlying
-    /// Rc<str> with the first occurrence.
-    ///
+    /// Returns a fresh StrIdx each time (preserving marshal identity semantics).
     /// Use for parsed identifiers from tokens where each occurrence needs its
-    /// own StrIdx (for marshal parity) but the string data can be shared.
+    /// own StrIdx (for marshal parity).
     #[inline]
     pub fn push_interned_string(&mut self, s: &str) -> StrIdx {
         self.strings.push_interned(s)

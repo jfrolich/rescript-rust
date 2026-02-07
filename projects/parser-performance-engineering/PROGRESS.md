@@ -12,7 +12,7 @@
 
 | Tier | Description | Status | Progress |
 |------|-------------|--------|----------|
-| Tier 1 | High Impact: Scanner + Token | 🚧 In Progress | 3/6 |
+| Tier 1 | High Impact: Scanner + Token | 🚧 In Progress | 4/6 |
 | Tier 2 | High Impact: AST Memory Layout | ⏳ Not Started | 0/3 |
 | Tier 3 | Medium Impact: Misc Optimizations | ⏳ Not Started | 0/6 |
 | Tier 4 | Architectural | ⏳ Not Started | 0/4 |
@@ -63,12 +63,15 @@ cargo test --release --lib -- benchmark_all --ignored --nocapture
   - Key insight: `rc_cache` must be separate from `intern()` map to preserve marshal parity
   - Impact: Neutral timing (Large 0.82x vs 0.80x baseline, within noise). Memory benefit: shared Rc<str> for duplicate identifiers.
   - Files: `intern.rs`, `parse_arena.rs`, `state.rs`, `expr.rs`, `pattern.rs`, `typ.rs`, `module.rs`, `core.rs`, `jsx_ppx.rs`, `ppx.rs`
-  - ⚠️ **NOTE:** Task 1.3 introduced `Rc<str>` in the Interner. This must be removed — see task 1.4.
+  - ⚠️ **NOTE:** Task 1.3 introduced `Rc<str>` in the Interner. Removed in task 1.4.
 
-- [ ] **1.4 Remove Rc<str> from Interner** ⚠️ HIGH PRIORITY
-  - Replace `Rc<str>` with arena-friendly storage (e.g. `Vec<Box<str>>` + `HashMap<&str, usize>`)
-  - Rc prevents Send+Sync and is slower than direct arena storage
-  - Files: `intern.rs`
+- [x] **1.4 Remove Rc<str> from Interner**
+  - Replaced `Vec<Rc<str>>` → `Vec<Box<str>>`, `HashMap<Rc<str>, StrIdx>` → `HashMap<String, StrIdx>`
+  - Removed `rc_cache` HashMap entirely; `push_interned()` now allocates a fresh `Box<str>` each time
+  - Removed `use std::rc::Rc` — Interner is now Send+Sync compatible
+  - Impact: Performance-neutral (within noise of baseline). Removes Rc overhead.
+  - All 1196 parity tests pass with zero regressions
+  - Files: `intern.rs`, `parse_arena.rs` (doc comments only)
 
 - [ ] **1.5 Zero-copy Constant and Label strings**
   - `Constant::Integer/Float/String` and `Label` use owned `String` — unnecessary heap alloc
@@ -175,6 +178,7 @@ Token kind/value split was removed. Analysis showed the parser processes one tok
 | Byte-level scanning | Feb 2026 | Large files 0.87x→0.83x, eliminates Vec allocs | 21ebc41e7 |
 | Zero-copy token strings (Cow) | Feb 2026 | Large files 0.83x→0.80x (~4% faster) | fcab3e407 |
 | String interning (Rc<str>) | Feb 2026 | Neutral timing, reduced memory allocs | ae9fa6ad2 |
+| Remove Rc<str> from Interner | Feb 2026 | Neutral timing, removes Rc overhead, enables Send+Sync | ce156406f |
 
 ---
 
@@ -241,6 +245,26 @@ Parity: 1196/1196 files pass
 Notes: Timing impact is neutral (within measurement noise of previous).
 Primary benefit is reduced memory allocation — duplicate identifiers share
 Rc<str> data via refcount bump instead of separate heap allocations.
+```
+
+### After 1.4 Remove Rc<str> from Interner (February 2026)
+
+```
+Run: cargo test --release --lib -- benchmark_all --ignored --nocapture
+
+  Size Tier                  Files   Faster       OK Avg Factor Min Factor Max Factor
+  -------------------------------------------------------------------------------------
+  Large (>30KB)                 14       14        0       0.80x       0.58x       0.95x
+  Medium (10-30KB)              73       73        0       0.55x       0.23x       0.77x
+  Small (1-10KB)               443      443        0       0.39x       0.24x       0.70x
+  Tiny (<1KB)                  636      636        0       0.31x       0.23x       0.44x
+
+Overall: 1166/1166 passing (1166 faster, 0 within tolerance), 38 skipped
+Parity: 1196/1196 files pass
+
+Notes: Timing impact is neutral (within measurement noise of previous).
+Change removes Rc<str> overhead and enables Send+Sync on the Interner,
+unblocking potential future multi-threaded parsing.
 ```
 
 *Add new entries below as optimizations are applied.*
