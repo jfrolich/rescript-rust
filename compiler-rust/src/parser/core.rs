@@ -795,31 +795,37 @@ pub fn make_unary_expr(
 ) -> Expression {
     // Handle numeric literal negation specially
     match (&token, &*operand.pexp_desc) {
-        (Token::Plus | Token::PlusDot, ExpressionDesc::Pexp_constant(Box::new(Constant::Integer(..))))
-        | (Token::Plus | Token::PlusDot, ExpressionDesc::Pexp_constant(Box::new(Constant::Float(..)))) => {
+        (Token::Plus | Token::PlusDot, ExpressionDesc::Pexp_constant(c))
+            if matches!(**c, Constant::Integer(..) | Constant::Float(..)) =>
+        {
             // +n is just n
             return operand;
         }
-        (Token::Minus, ExpressionDesc::Pexp_constant(Box::new(Constant::Integer(n, suffix)))) => {
-            return Expression {
-                pexp_desc: Box::new(ExpressionDesc::Pexp_constant(Box::new(Constant::Integer(
-                    Cow::Owned(negate_string(n)),
-                    *suffix,
-                )))),
-                ..operand
-            };
+        (Token::Minus, ExpressionDesc::Pexp_constant(c))
+            if matches!(**c, Constant::Integer(..)) =>
+        {
+            if let Constant::Integer(ref n, ref suffix) = **c {
+                return Expression {
+                    pexp_desc: Box::new(ExpressionDesc::Pexp_constant(Box::new(
+                        Constant::Integer(Cow::Owned(negate_string(n)), *suffix),
+                    ))),
+                    ..operand
+                };
+            }
+            unreachable!()
         }
-        (
-            Token::Minus | Token::MinusDot,
-            ExpressionDesc::Pexp_constant(Constant::Float(n, suffix)),
-        ) => {
-            return Expression {
-                pexp_desc: Box::new(ExpressionDesc::Pexp_constant(Box::new(Constant::Float(
-                    Cow::Owned(negate_string(n)),
-                    *suffix,
-                )))),
-                ..operand
-            };
+        (Token::Minus | Token::MinusDot, ExpressionDesc::Pexp_constant(c))
+            if matches!(**c, Constant::Float(..)) =>
+        {
+            if let Constant::Float(ref n, ref suffix) = **c {
+                return Expression {
+                    pexp_desc: Box::new(ExpressionDesc::Pexp_constant(Box::new(
+                        Constant::Float(Cow::Owned(negate_string(n)), *suffix),
+                    ))),
+                    ..operand
+                };
+            }
+            unreachable!()
         }
         _ => {}
     }

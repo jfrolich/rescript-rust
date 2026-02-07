@@ -323,7 +323,7 @@ fn core_type(typ: &CoreType, arena: &ParseArena) -> Sexp {
         CoreTypeDesc::Ptyp_any => Sexp::atom("Ptyp_any"),
         CoreTypeDesc::Ptyp_var(var) => Sexp::list(vec![Sexp::atom("Ptyp_var"), Sexp::atom(&quote_string(var))]),
         CoreTypeDesc::Ptyp_arrow(inner) => {
-                    let (ref arg, ref ret, ref arity) = **inner;
+                    let (ref arg, ref ret, ref ar) = **inner;
             // OCaml's attribute placement depends on whether there's a label:
             // - For Nolabel: attributes go on the type
             // - For Labelled/Optional: attributes stay in the arrow slot
@@ -350,7 +350,7 @@ fn core_type(typ: &CoreType, arena: &ParseArena) -> Sexp {
                 arrow_attrs,
                 arg_typ_sexp,
                 core_type(ret, arena),
-                arity(arity, arena),
+                arity(ar, arena),
             ])
         }
         CoreTypeDesc::Ptyp_tuple(types) => {

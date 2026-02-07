@@ -425,12 +425,12 @@ fn parse_es6_arrow_type(p: &mut Parser<'_>, attrs: Attributes) -> CoreType {
         };
 
         CoreType {
-            ptyp_desc: Box::new(CoreTypeDesc::Ptyp_arrow {
-                arg: Box::new(arg),
-                ret: Box::new(return_type),
+            ptyp_desc: Box::new(CoreTypeDesc::Ptyp_arrow(Box::new((
+                Box::new(arg),
+                Box::new(return_type),
                 // OCaml uses ~arity:None for parsed type expressions
-                arity: p.push_arity_unknown(),
-            }),
+                p.push_arity_unknown(),
+            )))),
             ptyp_loc: loc,
             ptyp_attributes: vec![],
         }
@@ -1205,12 +1205,12 @@ fn parse_function_type(p: &mut Parser<'_>, start_pos_idx: PosIdx) -> CoreType {
         // OCaml includes the ~ in the location for labeled arguments
         let arrow_loc = p.mk_loc_idx(param_start_idx, end_pos_idx);
         let arrow = CoreType {
-            ptyp_desc: Box::new(CoreTypeDesc::Ptyp_arrow {
-                arg: Box::new(param),
-                ret: Box::new(acc),
+            ptyp_desc: Box::new(CoreTypeDesc::Ptyp_arrow(Box::new((
+                Box::new(param),
+                Box::new(acc),
                 // Inner arrows don't have arity annotation
-                arity: unknown_arity,
-            }),
+                unknown_arity,
+            )))),
             ptyp_loc: arrow_loc,
             ptyp_attributes: vec![],
         };
@@ -1221,7 +1221,7 @@ fn parse_function_type(p: &mut Parser<'_>, start_pos_idx: PosIdx) -> CoreType {
     // Update the outermost arrow to have the full arity
     let result = match *result.ptyp_desc {
         CoreTypeDesc::Ptyp_arrow(inner) => {
-            let (ref arg, ref ret, ..) = *inner;
+            let (arg, ret, ..) = *inner;
             CoreType {
                 ptyp_desc: Box::new(CoreTypeDesc::Ptyp_arrow(Box::new((arg, ret, full_arity)))),
                 ptyp_loc: result.ptyp_loc,

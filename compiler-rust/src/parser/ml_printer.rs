@@ -1040,7 +1040,7 @@ fn print_remaining_inline_params_with_arity<'a, W: Write>(
             .. } = *inner;
             // Print arity for each Pexp_fun that has an arity annotation
             // (matching OCaml's pprintast: only print when explicitly set)
-            if let Some(n) = arena.get_arity(*arity) {
+            if let Some(n) = arena.get_arity(arity) {
                 f.string(&format!("[arity:{}]", n));
             }
             print_inline_param(f, arena, arg_label, default, lhs);

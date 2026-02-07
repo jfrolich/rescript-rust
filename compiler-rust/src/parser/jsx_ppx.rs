@@ -2552,7 +2552,7 @@ fn update_config_from_attribute(arena: &ParseArena, attr: &Attribute, config: &m
     // Matches OCaml's update_config behavior
     if let Payload::PStr(items) = &attr.1 {
         for item in items {
-            if let StructureItemDesc::Pstr_eval(eval_inner) = &*item.pstr_desc { let (ref expr, _) = **eval_inner;
+            if let StructureItemDesc::Pstr_eval(eval_inner) = &*item.pstr_desc { let (ref expr, _) = *eval_inner;
                 if let ExpressionDesc::Pexp_record(fields, _) = &*expr.pexp_desc {
                     let mut module_raw: Option<String> = None;
                     let mut version_raw: Option<i32> = None;
