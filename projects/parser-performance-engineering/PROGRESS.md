@@ -12,7 +12,7 @@
 
 | Tier | Description | Status | Progress |
 |------|-------------|--------|----------|
-| Tier 1 | High Impact: Scanner + Token | 🚧 In Progress | 1/4 |
+| Tier 1 | High Impact: Scanner + Token | 🚧 In Progress | 2/4 |
 | Tier 2 | Medium Impact: Token + Misc | ⏳ Not Started | 0/6 |
 | Tier 3 | Medium Impact: AST + Advanced | ⏳ Not Started | 0/5 |
 | Tier 4 | Architectural | ⏳ Not Started | 0/3 |
@@ -38,10 +38,13 @@ cargo test --release --lib -- benchmark_all --ignored --nocapture
   - Impact: 41x improvement on JSX benchmark (28ms -> 0.7ms)
   - Commit: 558e262ff
 
-- [ ] **1.1 Byte-level scanning**
-  - Operate directly on `&[u8]` instead of `Vec<char>`
-  - ASCII fast path (byte < 0x80), UTF-8 slow path on demand
-  - Eliminates Vec<char> allocation and char-to-byte indirection
+- [x] **1.1 Byte-level scanning**
+  - Replaced `Vec<char>` + `Vec<usize>` with direct `&[u8]` byte operations
+  - ASCII fast path (byte < 0x80), UTF-8 decode on demand for non-ASCII
+  - Scanner struct ~24 bytes smaller, eliminates two heap allocations per parse
+  - Key insight: source is Latin-1 encoded (each file byte → one char), so UTF-16 offset tracking must use codepoint-as-byte-pattern classification for parity
+  - Impact: Large files 0.87x → 0.83x (~5% faster)
+  - All 1196 parity tests pass with zero regressions
   - Files: `scanner.rs`
 
 - [ ] **1.2 Zero-copy token strings**
@@ -145,6 +148,7 @@ cargo test --release --lib -- benchmark_all --ignored --nocapture
 | Optimization | Date | Impact | Commit |
 |-------------|------|--------|--------|
 | Precomputed char/byte arrays | Jan 2026 | 41x on JSX benchmark | 558e262ff |
+| Byte-level scanning | Feb 2026 | Large files 0.87x→0.83x, eliminates Vec allocs | 21ebc41e7 |
 
 ---
 
@@ -159,6 +163,22 @@ Run: cargo test --release --lib -- benchmark_all --ignored --nocapture
 
 Results: Rust is 2-5x faster on small files, ~parity on large files.
 All 17 benchmarks pass (within 1.2x tolerance).
+```
+
+### After 1.1 Byte-level scanning (February 2026)
+
+```
+Run: cargo test --release --lib -- benchmark_all --ignored --nocapture
+
+  Size Tier                  Files   Faster       OK Avg Factor Min Factor Max Factor
+  -------------------------------------------------------------------------------------
+  Large (>30KB)                 14       14        0       0.83x       0.56x       0.98x
+  Medium (10-30KB)              73       73        0       0.57x       0.23x       0.84x
+  Small (1-10KB)               443      443        0       0.40x       0.23x       0.59x
+  Tiny (<1KB)                  636      636        0       0.31x       0.25x       0.61x
+
+Overall: 1166/1166 passing (1166 faster, 0 within tolerance), 38 skipped
+Parity: 1196/1196 files pass
 ```
 
 *Add new entries below as optimizations are applied.*

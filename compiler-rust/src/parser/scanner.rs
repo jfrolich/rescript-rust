@@ -8,6 +8,11 @@
 //! - Template literals
 //! - Regular expressions
 //! - All operators and punctuation
+//!
+//! Uses direct byte-level scanning on &[u8] for performance:
+//! - ASCII fast path (byte < 0x80) for all common token characters
+//! - UTF-8 slow path only for non-ASCII characters (comments, strings)
+//! - No upfront Vec<char> or Vec<usize> allocation
 
 use crate::intern::StrIdx;
 use crate::location::Position;
@@ -33,6 +38,8 @@ pub enum ScannerMode {
 pub struct ScannerSnapshot {
     ch: char,
     offset: usize,
+    ch_len: usize,
+    char_pos: usize,
     offset16: usize,
     line_offset: usize,
     lnum: i32,
@@ -48,21 +55,21 @@ pub struct Scanner<'src> {
     pub filename: StrIdx,
     /// Source code being scanned.
     src: &'src str,
-    /// Precomputed character array for O(1) indexed access.
-    chars: Vec<char>,
-    /// Byte offset for each char index: byte_offsets[i] = byte position of chars[i].
-    byte_offsets: Vec<usize>,
-    /// Character count (cached for efficiency).
-    /// For Latin-1 source, this equals the original byte count.
-    src_char_count: usize,
+    /// Source bytes for direct byte-level access.
+    bytes: &'src [u8],
     /// Current character.
     ch: char,
-    /// Current character offset in source (char index, not byte offset).
-    /// In Latin-1 mode, this equals the original byte offset since each byte is one char.
+    /// Byte length of current character in UTF-8.
+    ch_len: usize,
+    /// Current byte offset in source.
     offset: usize,
+    /// Current character position (increments by 1 per char, like old char-index offset).
+    /// Used for line_offset and position tracking to preserve OCaml parity.
+    char_pos: usize,
     /// UTF-16 code units since line start (for OCaml-compatible column counting).
     offset16: usize,
-    /// Byte offset of current line start.
+    /// Character position of current line start (char-indexed, not byte-indexed).
+    /// This preserves OCaml parity where line_offset is a character position.
     line_offset: usize,
     /// Current line number (1-indexed).
     lnum: i32,
@@ -89,19 +96,24 @@ impl<'src> Scanner<'src> {
     /// Create a new scanner for the given source.
     /// filename should be an interned StrIdx from the arena.
     pub fn new(filename: StrIdx, src: &'src str) -> Self {
-        let chars: Vec<char> = src.chars().collect();
-        let byte_offsets: Vec<usize> = src.char_indices().map(|(i, _)| i).collect();
-        let src_char_count = chars.len();
-        let ch = chars.first().copied().unwrap_or(EOF_CHAR);
+        let bytes = src.as_bytes();
+        let (ch, ch_len) = if bytes.is_empty() {
+            (EOF_CHAR, 0)
+        } else if bytes[0] < 0x80 {
+            (bytes[0] as char, 1)
+        } else {
+            let (cp, len) = utf8::decode_codepoint(bytes, 0);
+            (char::from_u32(cp as u32).unwrap_or(EOF_CHAR), len)
+        };
 
         Self {
             filename,
             src,
-            chars,
-            byte_offsets,
-            src_char_count,
+            bytes,
             ch,
+            ch_len,
             offset: 0,
+            char_pos: 0,
             offset16: 0,
             line_offset: 0,
             lnum: 1,
@@ -138,6 +150,8 @@ impl<'src> Scanner<'src> {
         ScannerSnapshot {
             ch: self.ch,
             offset: self.offset,
+            ch_len: self.ch_len,
+            char_pos: self.char_pos,
             offset16: self.offset16,
             line_offset: self.line_offset,
             lnum: self.lnum,
@@ -151,6 +165,8 @@ impl<'src> Scanner<'src> {
     pub fn restore(&mut self, snapshot: ScannerSnapshot) {
         self.ch = snapshot.ch;
         self.offset = snapshot.offset;
+        self.ch_len = snapshot.ch_len;
+        self.char_pos = snapshot.char_pos;
         self.offset16 = snapshot.offset16;
         self.line_offset = snapshot.line_offset;
         self.lnum = snapshot.lnum;
@@ -174,6 +190,8 @@ impl<'src> Scanner<'src> {
     /// For OCaml parity, we use `line_offset + offset16` for cnum.
     /// This matches OCaml where `pos_cnum = scanner.line_offset + scanner.offset16`,
     /// giving us UTF-16 code unit counting for columns.
+    /// `line_offset` and `char_pos` are character-indexed (not byte-indexed)
+    /// to preserve binary AST parity with the OCaml implementation.
     pub fn position(&self) -> Position {
         Position::new(
             self.filename,
@@ -189,61 +207,92 @@ impl<'src> Scanner<'src> {
             .push(ParserDiagnostic::new(start_pos, end_pos, category));
     }
 
+    /// Decode the character at the given byte offset.
+    #[inline]
+    fn decode_at(&self, byte_offset: usize) -> (char, usize) {
+        if byte_offset >= self.bytes.len() {
+            return (EOF_CHAR, 0);
+        }
+        let b = self.bytes[byte_offset];
+        if b < 0x80 {
+            (b as char, 1)
+        } else {
+            let (cp, len) = utf8::decode_codepoint(self.bytes, byte_offset);
+            (char::from_u32(cp as u32).unwrap_or(EOF_CHAR), len)
+        }
+    }
+
     /// Advance to the next character.
     ///
-    /// For Latin-1 source (each original byte → one char), the character offset
-    /// equals the byte offset. We use chars().nth() for proper character indexing.
+    /// Operates directly on the byte array. For ASCII bytes (< 0x80), this is a single
+    /// byte advance. For multi-byte UTF-8 sequences, advances by the character's byte width.
     ///
     /// We track offset16 (UTF-16 code units since line start) for OCaml-compatible
-    /// column counting. The UTF-16 length depends on the UTF-8 byte classification:
-    /// - ASCII/Single (0x00-0x7F): 1
-    /// - Continuation (0x80-0xBF): 0 (don't count continuation bytes)
-    /// - Leading 2-byte (0xC0-0xDF): 1 (BMP)
-    /// - Leading 3-byte (0xE0-0xEF): 1 (BMP)
-    /// - Leading 4-byte (0xF0-0xF7): 2 (surrogate pair)
-    /// - Invalid (0xF8-0xFF): 1
+    /// column counting. The UTF-16 length is computed by interpreting the character's
+    /// codepoint as a raw byte pattern (matching OCaml's behavior for Latin-1 source):
+    /// - ASCII (0x00-0x7F): 1
+    /// - "Continuation" pattern (0x80-0xBF): 0
+    /// - "2-byte leading" pattern (0xC0-0xDF): 1
+    /// - "3-byte leading" pattern (0xE0-0xEF): 1
+    /// - "4-byte leading" pattern (0xF0-0xF7): 2
     fn next(&mut self) {
-        if self.offset >= self.src_char_count {
+        if self.offset >= self.bytes.len() {
             self.ch = EOF_CHAR;
+            self.ch_len = 0;
             return;
         }
 
-        let next_offset = self.offset + 1;
+        let next_char_pos = self.char_pos + 1;
 
-        // Calculate UTF-16 length based on UTF-8 byte classification
+        // Calculate UTF-16 length using the character's codepoint value interpreted
+        // as a raw byte pattern. This matches the old code which did `self.ch as u32`
+        // and classified it using UTF-8 byte-pattern rules. This is critical for parity
+        // because the source is Latin-1 encoded (each original byte → one char), and
+        // OCaml's scanner uses byte-level classification for position tracking.
+        //
+        // For Latin-1 chars 0x80-0xBF: treated as "continuation bytes" → utf16len = 0
+        // For Latin-1 chars 0xC0-0xDF: treated as "2-byte leading" → utf16len = 1
+        // For Latin-1 chars 0xE0-0xEF: treated as "3-byte leading" → utf16len = 1
+        // For Latin-1 chars 0xF0-0xF7: treated as "4-byte leading" → utf16len = 2
         let byte = self.ch as u32;
         let utf16len = if byte & 0x80 == 0 {
-            // Single byte (ASCII): 0b0xxxxxxx
+            // ASCII: 1 UTF-16 code unit
             1
         } else if byte & 0x40 == 0 {
-            // Continuation byte: 0b10xxxxxx
+            // Continuation byte pattern (Latin-1 0x80-0xBF): 0
             0
         } else if byte & 0x20 == 0 {
-            // Leading 2-byte: 0b110xxxxx
+            // 2-byte leading pattern (Latin-1 0xC0-0xDF): 1
             1
         } else if byte & 0x10 == 0 {
-            // Leading 3-byte: 0b1110xxxx
+            // 3-byte leading pattern (Latin-1 0xE0-0xEF): 1
             1
         } else if byte & 0x08 == 0 {
-            // Leading 4-byte: 0b11110xxx (needs surrogate pair)
+            // 4-byte leading pattern (Latin-1 0xF0-0xF7): 2
             2
         } else {
-            // Invalid byte
+            // Invalid byte pattern
             1
         };
 
         // Handle newlines - update line tracking
         if self.ch == '\n' {
-            self.line_offset = next_offset;
+            self.line_offset = next_char_pos;
             self.offset16 = 0;
             self.lnum += 1;
         } else {
             self.offset16 += utf16len;
         }
 
-        // Move to next character
-        self.offset = next_offset;
-        self.ch = self.chars.get(self.offset).copied().unwrap_or(EOF_CHAR);
+        // Advance byte offset by current character's byte width
+        let next_byte_offset = self.offset + self.ch_len;
+        self.offset = next_byte_offset;
+        self.char_pos = next_char_pos;
+
+        // Decode next character
+        let (ch, ch_len) = self.decode_at(next_byte_offset);
+        self.ch = ch;
+        self.ch_len = ch_len;
     }
 
     /// Advance by 2 characters.
@@ -260,18 +309,76 @@ impl<'src> Scanner<'src> {
     }
 
     /// Peek at the next character without advancing.
+    ///
+    /// Uses byte-level access: skips past current character's bytes to find the next.
     fn peek(&self) -> char {
-        self.chars.get(self.offset + 1).copied().unwrap_or(EOF_CHAR)
+        let next_offset = self.offset + self.ch_len;
+        if next_offset >= self.bytes.len() {
+            return EOF_CHAR;
+        }
+        let b = self.bytes[next_offset];
+        if b < 0x80 {
+            b as char
+        } else {
+            let (cp, _) = utf8::decode_codepoint(self.bytes, next_offset);
+            char::from_u32(cp as u32).unwrap_or(EOF_CHAR)
+        }
     }
 
     /// Peek at the character 2 positions ahead.
     fn peek2(&self) -> char {
-        self.chars.get(self.offset + 2).copied().unwrap_or(EOF_CHAR)
+        let mut off = self.offset + self.ch_len;
+        if off >= self.bytes.len() {
+            return EOF_CHAR;
+        }
+        // Skip one character
+        let b1 = self.bytes[off];
+        if b1 < 0x80 {
+            off += 1;
+        } else {
+            let (_, len) = utf8::decode_codepoint(self.bytes, off);
+            off += len;
+        }
+        // Decode the second character ahead
+        if off >= self.bytes.len() {
+            return EOF_CHAR;
+        }
+        let b2 = self.bytes[off];
+        if b2 < 0x80 {
+            b2 as char
+        } else {
+            let (cp, _) = utf8::decode_codepoint(self.bytes, off);
+            char::from_u32(cp as u32).unwrap_or(EOF_CHAR)
+        }
     }
 
     /// Peek at the character 3 positions ahead.
     fn peek3(&self) -> char {
-        self.chars.get(self.offset + 3).copied().unwrap_or(EOF_CHAR)
+        let mut off = self.offset + self.ch_len;
+        // Skip two characters
+        for _ in 0..2 {
+            if off >= self.bytes.len() {
+                return EOF_CHAR;
+            }
+            let b = self.bytes[off];
+            if b < 0x80 {
+                off += 1;
+            } else {
+                let (_, len) = utf8::decode_codepoint(self.bytes, off);
+                off += len;
+            }
+        }
+        // Decode the third character ahead
+        if off >= self.bytes.len() {
+            return EOF_CHAR;
+        }
+        let b = self.bytes[off];
+        if b < 0x80 {
+            b as char
+        } else {
+            let (cp, _) = utf8::decode_codepoint(self.bytes, off);
+            char::from_u32(cp as u32).unwrap_or(EOF_CHAR)
+        }
     }
 
     /// Check if a character is whitespace.
@@ -296,22 +403,21 @@ impl<'src> Scanner<'src> {
         }
     }
 
-    /// Extract a substring from the source.
+    /// Extract a substring from the source using byte offsets.
     ///
-    /// Note: start and end are character offsets. We convert them to byte offsets
-    /// for slicing, since the source string is UTF-8 internally (Latin-1 chars >127
-    /// become 2-byte UTF-8 sequences).
+    /// In byte-level scanning mode, start and end are byte offsets directly,
+    /// so this is a simple slice operation.
     fn substring(&self, start: usize, end: usize) -> &'src str {
-        let byte_start = self.byte_offsets.get(start).copied().unwrap_or(self.src.len());
-        let byte_end = self.byte_offsets.get(end).copied().unwrap_or(self.src.len());
-        &self.src[byte_start..byte_end]
+        let start = start.min(self.src.len());
+        let end = end.min(self.src.len());
+        &self.src[start..end]
     }
 
     /// Scan an identifier or keyword.
     fn scan_identifier(&mut self) -> Token {
         let start_off = self.offset;
 
-        // Skip valid identifier characters
+        // Skip valid identifier characters (all ASCII, so byte == char)
         while matches!(self.ch, 'A'..='Z' | 'a'..='z' | '0'..='9' | '_' | '\'') {
             self.next();
         }
@@ -610,12 +716,31 @@ impl<'src> Scanner<'src> {
         let doc_comment = self.peek2() == '*' && self.peek3() != '/';
         let standalone = doc_comment && self.peek3() == '*';
 
-        let content_start_off = self.offset
-            + if doc_comment {
-                if standalone { 4 } else { 3 }
-            } else {
-                2
-            };
+        // Calculate content start: skip the comment opener (/*,  /**, /***)
+        // We need to compute byte offsets for the content
+        let content_char_skip = if doc_comment {
+            if standalone { 4 } else { 3 }
+        } else {
+            2
+        };
+
+        // Compute byte offset for content start by skipping N characters from current offset
+        let content_start_off = {
+            let mut off = self.offset;
+            for _ in 0..content_char_skip {
+                if off >= self.bytes.len() {
+                    break;
+                }
+                let b = self.bytes[off];
+                if b < 0x80 {
+                    off += 1;
+                } else {
+                    let (_, len) = utf8::decode_codepoint(self.bytes, off);
+                    off += len;
+                }
+            }
+            off
+        };
 
         let start_pos = self.position();
         let mut depth = 0;
@@ -647,10 +772,19 @@ impl<'src> Scanner<'src> {
             }
         }
 
-        let content_end_off = self.offset.saturating_sub(2);
-        let length = content_end_off.saturating_sub(content_start_off);
-        let content = if content_start_off < self.src.len() {
-            self.substring(content_start_off, content_start_off + length)
+        // Content ends 2 bytes before current position (before closing */)
+        // But we need to compute this in byte offsets
+        let content_end_off = if self.offset >= 2 {
+            // Walk back 2 characters from current byte offset
+            // Since */ is ASCII, we just subtract 2 bytes
+            self.offset - 2
+        } else {
+            0
+        };
+
+        let content = if content_start_off <= content_end_off && content_start_off < self.src.len()
+        {
+            self.substring(content_start_off, content_end_off)
                 .to_string()
         } else {
             String::new()
@@ -691,6 +825,7 @@ impl<'src> Scanner<'src> {
             match self.ch {
                 '`' => {
                     self.next();
+                    // backtick is 1 byte, so offset - 1 is correct
                     let contents = self.substring(start_off, self.offset - 1).to_string();
                     let end_pos = self.position();
                     return ScanResult {
@@ -704,6 +839,7 @@ impl<'src> Scanner<'src> {
                 }
                 '$' if self.peek() == '{' => {
                     self.next2();
+                    // ${ is 2 bytes, so offset - 2 is correct
                     let contents = self.substring(start_off, self.offset - 2).to_string();
                     let end_pos = self.position();
                     return ScanResult {
@@ -730,7 +866,14 @@ impl<'src> Scanner<'src> {
                         DiagnosticCategory::unclosed_template(),
                     );
                     // OCaml uses (max (scanner.offset - 1 - start_off) 0) to exclude the last char
-                    let end_off = if self.offset > start_off { self.offset - 1 } else { start_off };
+                    let end_off = if self.offset > start_off {
+                        // Go back 1 character's worth of bytes
+                        // At EOF, the previous char was the last real char
+                        // We need to compute its byte offset
+                        self.offset.saturating_sub(1).max(start_off)
+                    } else {
+                        start_off
+                    };
                     let contents = self.substring(start_off, end_off).to_string();
                     return ScanResult {
                         start_pos,
@@ -1049,11 +1192,14 @@ impl<'src> Scanner<'src> {
                     self.scan_escape()
                 }
                 (ch, '\'') => {
-                    let offset = self.offset + 1;
+                    // Save the byte offset of the character between quotes
+                    let char_byte_off = self.offset + self.ch_len; // offset of the char after '
                     self.next3();
+                    // The character is 1 byte (ASCII) since we matched it against a char pattern
+                    let original = self.substring(char_byte_off, char_byte_off + ch.len_utf8()).to_string();
                     Token::Codepoint {
                         c: ch as i32,
-                        original: self.substring(offset, offset + 1).to_string(),
+                        original,
                     }
                 }
                 _ => {
@@ -1146,7 +1292,14 @@ impl<'src> Scanner<'src> {
     }
 
     fn is_jsx_close_slash(&self) -> bool {
-        self.offset > 0 && self.src.chars().nth(self.offset - 1) == Some('<')
+        // Check if the byte before current offset is '<'
+        // offset points to '/', so we need to check the character before it
+        if self.offset == 0 {
+            return false;
+        }
+        // The previous byte must be '<' (ASCII, single byte)
+        // We check the raw byte since '<' is ASCII
+        self.bytes.get(self.offset.wrapping_sub(1)).copied() == Some(b'<')
     }
 
     fn can_start_regex_literal(&self) -> bool {
@@ -1338,7 +1491,13 @@ impl<'src> Scanner<'src> {
 
     /// Scan an escape sequence in a character literal.
     fn scan_escape(&mut self) -> Token {
-        let offset = self.offset - 1;
+        // offset points to the first char after '\, and we want to capture from
+        // the char before that (the backslash escape char in the source).
+        // In the old code: `let offset = self.offset - 1` (char index).
+        // In byte mode: we need the byte offset of the previous character.
+        // Since the caller did next2() (skipping ' then \), the char before current
+        // is '\' which is ASCII (1 byte), so offset - 1 is correct.
+        let escape_byte_start = self.offset - 1;
 
         let codepoint = match self.ch {
             '0'..='9' => self.convert_number(3, 10),
@@ -1394,7 +1553,7 @@ impl<'src> Scanner<'src> {
         };
 
         // Capture the escape sequence contents BEFORE consuming the closing quote
-        let contents = self.substring(offset, self.offset).to_string();
+        let contents = self.substring(escape_byte_start, self.offset).to_string();
 
         // Consume closing quote
         if self.ch == '\'' {

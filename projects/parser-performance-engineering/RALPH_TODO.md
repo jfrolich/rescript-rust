@@ -1,7 +1,7 @@
 # Parser Performance Engineering TODO
 
 **Last Updated:** 2026-02-07
-**Status:** 0/19 tasks complete
+**Status:** 1/19 tasks complete
 
 **Baseline:** Rust is 2-5x faster on small files (<10KB), ~0.7-1.0x on large files (20-60KB).
 **Goal:** Maximize Rust parser speed across all file sizes while preserving byte-for-byte binary AST parity.
@@ -14,7 +14,7 @@
 
 These target the scanner and token representation where the parser spends most time.
 
-- [ ] **1.1 Byte-level scanning** — Replace `Vec<char>` with direct `&[u8]` byte operations. ASCII fast path (byte < 0x80), UTF-8 slow path on demand. Eliminates Vec<char> allocation and improves cache locality. OXC and SWC both use byte-level scanning. Files: `scanner.rs`. Measure `size_of::<Scanner>()` before/after. Run parity + benchmarks.
+- [x] **1.1 Byte-level scanning** — Replace `Vec<char>` with direct `&[u8]` byte operations. ASCII fast path (byte < 0x80), UTF-8 slow path on demand. Eliminates Vec<char> allocation and improves cache locality. OXC and SWC both use byte-level scanning. Files: `scanner.rs`. Scanner struct ~24 bytes smaller, eliminates Vec<char>/Vec<usize> heap allocations. Large files improved from 0.87x to 0.83x. All 1196 parity tests pass.
 
 - [ ] **1.2 Zero-copy token strings** — Change `Token` to `Token<'src>` with `&'src str` slices borrowing from source for identifiers and string literals. Only allocate for escaped/interpolated strings. Requires lifetime parameter propagation through Token, Scanner, Parser. Files: `token.rs`, `scanner.rs`, `state.rs`, all parsing modules. Measure token allocation count before/after.
 
