@@ -1471,14 +1471,16 @@ fn type_structure_item<'a>(
             let name_str = arena.get_string(ext_constr.pext_name.txt).to_string();
             let id = Ident::create_local(&name_str);
 
-            // Translate constructor arguments
-            let (typed_args, _ext_ret) = match &ext_constr.pext_kind {
+            // Translate constructor arguments and collect type refs for env registration
+            let (typed_args, _ext_ret, arg_type_refs) = match &ext_constr.pext_kind {
                 crate::parser::ast::ExtensionConstructorKind::Pext_decl(args, ret) => {
+                    let mut arg_ty_refs = Vec::new();
                     let typed_args = match args {
                         crate::parser::ast::ConstructorArguments::Pcstr_tuple(types) => {
                             let mut typed = Vec::new();
                             for ty in types {
-                                let (typed_ct, _ty_ref) = transl_type(tctx, env, ty)?;
+                                let (typed_ct, ty_ref) = transl_type(tctx, env, ty)?;
+                                arg_ty_refs.push(ty_ref);
                                 typed.push(typed_ct);
                             }
                             crate::types::typedtree::ConstructorArgument::Cstr_tuple(typed)
@@ -1495,12 +1497,36 @@ fn type_structure_item<'a>(
                         }
                         None => None,
                     };
-                    (typed_args, typed_ret)
+                    (typed_args, typed_ret, arg_ty_refs)
                 }
                 crate::parser::ast::ExtensionConstructorKind::Pext_rebind(_lid) => {
-                    (crate::types::typedtree::ConstructorArgument::Cstr_tuple(vec![]), None)
+                    (crate::types::typedtree::ConstructorArgument::Cstr_tuple(vec![]), None, vec![])
                 }
             };
+
+            // Register the exception constructor in the environment
+            let exn_ty = tctx.type_ctx.new_constr(
+                Path::pident(Ident::create_persistent("exn")),
+                vec![],
+            );
+            let exn_path = Path::pident(id.clone());
+            let cstr_desc = crate::types::decl::ConstructorDescription {
+                cstr_name: name_str.clone(),
+                cstr_res: exn_ty,
+                cstr_existentials: vec![],
+                cstr_args: arg_type_refs.clone(),
+                cstr_arity: arg_type_refs.len() as i32,
+                cstr_tag: crate::types::decl::ConstructorTag::CstrExtension(exn_path),
+                cstr_consts: 0,
+                cstr_nonconsts: 0,
+                cstr_generalized: false,
+                cstr_private: crate::types::PrivateFlag::Public,
+                cstr_loc: crate::location::Location::none(),
+                cstr_attributes: vec![],
+                cstr_inlined: None,
+            };
+            let mut new_env = env.clone();
+            new_env.add_constructor(id.clone(), cstr_desc);
 
             let desc =
                 StructureItemDesc::Tstr_exception(crate::types::typedtree::ExtensionConstructor {
@@ -1510,9 +1536,9 @@ fn type_structure_item<'a>(
                         loc: ext_constr.pext_name.loc,
                     },
                     ext_type: crate::types::ExtensionConstructor {
-                        ext_type_path: Path::pident(Ident::create_local("exn")),
+                        ext_type_path: Path::pident(Ident::create_persistent("exn")),
                         ext_type_params: vec![],
-                        ext_args: crate::types::ConstructorArguments::CstrTuple(vec![]),
+                        ext_args: crate::types::ConstructorArguments::CstrTuple(arg_type_refs),
                         ext_ret_type: None,
                         ext_private: crate::types::PrivateFlag::Public,
                         ext_loc: arena.to_location(loc),
@@ -1532,7 +1558,7 @@ fn type_structure_item<'a>(
                     str_loc: loc,
                     str_env: EnvRef(0),
                 },
-                env.clone(),
+                new_env,
             ))
         }
 
