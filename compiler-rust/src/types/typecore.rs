@@ -1385,7 +1385,13 @@ fn type_pattern_construct(
         Err(_) => {
             match lookup_constructor_in_module(lid_txt, tctx.arena, env, &mut tctx.persistent_env, tctx.type_ctx) {
                 Some((path, desc)) => (desc, path),
-                None => return Err(TypeCoreError::NotAVariantType(lid_txt.clone())),
+                None => {
+                    // Type-directed disambiguation: look at expected_ty to find the constructor
+                    match lookup_constructor_by_expected_type(&lid_name, expected_ty, env, &mut tctx.persistent_env, tctx.type_ctx) {
+                        Some((path, desc)) => (desc, path),
+                        None => return Err(TypeCoreError::NotAVariantType(lid_txt.clone())),
+                    }
+                }
             }
         }
     };
@@ -2935,7 +2941,13 @@ fn type_construct(
             // Try module-qualified constructor lookup for Ldot paths
             match lookup_constructor_in_module(&longident, tctx.arena, env, &mut tctx.persistent_env, tctx.type_ctx) {
                 Some((path, desc)) => (path, desc),
-                None => return Err(TypeCoreError::NotAVariantType(longident)),
+                None => {
+                    // Type-directed disambiguation: look at expected_ty to find the constructor
+                    match lookup_constructor_by_expected_type(&lid_name, expected_ty, env, &mut tctx.persistent_env, tctx.type_ctx) {
+                        Some((path, desc)) => (path, desc),
+                        None => return Err(TypeCoreError::NotAVariantType(longident)),
+                    }
+                }
             }
         }
     };
@@ -4420,6 +4432,185 @@ fn lookup_constructor_in_module<'b>(
         }
         _ => None,
     }
+}
+
+/// Type-directed constructor disambiguation.
+///
+/// When a constructor like `A` is used without qualification and is not found
+/// in the local env, look at the expected type to find which type defines it.
+/// For example, if the expected type is `M.t` and `M.t` is defined as `A | B(int)`,
+/// we can resolve the unqualified `A` constructor.
+fn lookup_constructor_by_expected_type<'b>(
+    cstr_name: &str,
+    expected_ty: TypeExprRef,
+    env: &Env,
+    pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
+    ctx: &'b crate::types::context::TypeContext<'b>,
+) -> Option<(Path, crate::types::decl::ConstructorDescription)> {
+    let expected_ty = ctx.repr(expected_ty);
+    let desc = ctx.get_desc(expected_ty);
+
+    let type_path = match &*desc {
+        TypeDesc::Tconstr { path, .. } => path.clone(),
+        _ => return None,
+    };
+    drop(desc);
+
+    // Look up the type declaration
+    let type_decl = lookup_type_decl_for_path(&type_path, env, ctx)?;
+
+    // Check if it's a variant type with a matching constructor
+    if let crate::types::TypeKind::TypeVariant(ref constrs) = type_decl.type_kind {
+        let num_consts = constrs.iter()
+            .filter(|c| matches!(c.cd_args, crate::types::ConstructorArguments::CstrTuple(ref args) if args.is_empty()) && c.cd_res.is_none())
+            .count() as i32;
+        let num_nonconsts = constrs.len() as i32 - num_consts;
+        let mut const_idx = 0i32;
+        let mut block_idx = 0i32;
+        for cd in constrs {
+            let is_constant = matches!(cd.cd_args, crate::types::ConstructorArguments::CstrTuple(ref args) if args.is_empty()) && cd.cd_res.is_none();
+            if cd.cd_id.name() == cstr_name {
+                let tag = if is_constant {
+                    crate::types::decl::ConstructorTag::CstrConstant(const_idx)
+                } else {
+                    crate::types::decl::ConstructorTag::CstrBlock(block_idx)
+                };
+                let (cstr_args, cstr_arity) = match &cd.cd_args {
+                    crate::types::ConstructorArguments::CstrTuple(args) => (args.clone(), args.len() as i32),
+                    crate::types::ConstructorArguments::CstrRecord(labels) => {
+                        let args: Vec<_> = labels.iter().map(|l| l.ld_type).collect();
+                        let arity = args.len() as i32;
+                        (args, arity)
+                    }
+                };
+                // Use the type path's head ident for the result type
+                let type_path_ident = match &type_path {
+                    Path::Pident(id) => id.clone(),
+                    Path::Pdot(_, name, _) => Ident::create_persistent(name.as_str()),
+                    _ => return None,
+                };
+                let cstr_res = cd.cd_res.unwrap_or_else(|| {
+                    ctx.new_generic_constr(
+                        Path::pident(type_path_ident),
+                        type_decl.type_params.clone(),
+                    )
+                });
+                let desc = crate::types::decl::ConstructorDescription {
+                    cstr_name: cstr_name.to_string(),
+                    cstr_res,
+                    cstr_existentials: vec![],
+                    cstr_args,
+                    cstr_arity,
+                    cstr_tag: tag,
+                    cstr_consts: num_consts,
+                    cstr_nonconsts: num_nonconsts,
+                    cstr_generalized: false,
+                    cstr_private: crate::types::PrivateFlag::Public,
+                    cstr_loc: crate::location::Location::none(),
+                    cstr_attributes: vec![],
+                    cstr_inlined: None,
+                };
+                let path = Path::pident(Ident::create_persistent(cstr_name));
+                return Some((path, desc));
+            }
+            if is_constant { const_idx += 1; } else { block_idx += 1; }
+        }
+    }
+    None
+}
+
+/// Look up a type declaration for a given path.
+/// Tries env first, then the global type stores.
+fn lookup_type_decl_for_path<'a>(
+    type_path: &Path,
+    env: &Env,
+    ctx: &'a crate::types::context::TypeContext<'a>,
+) -> Option<crate::types::decl::TypeDeclaration> {
+    // Try env.lookup_type first
+    if let Ok(decl) = env.lookup_type(type_path) {
+        return Some(decl.clone());
+    }
+
+    // Try stamp-based lookup
+    if let Path::Pident(id) = type_path {
+        if id.stamp() != 0 {
+            if let Some(decl) = ctx.find_type_decl_by_stamp(id.stamp()) {
+                return Some(decl.clone());
+            }
+        }
+    }
+
+    // Try path-based lookup for Pdot paths
+    if let Path::Pdot(parent, type_name, _) = type_path {
+        let path_name = type_path.name();
+        if let Some(decl) = ctx.find_type_decl_by_path(&path_name) {
+            return Some(decl.clone());
+        }
+
+        // Try resolving the module alias: Pdot(Pident(Nullable/9), "t")
+        // -> look up "Nullable" module in env -> if it's MtyAlias(Stdlib_Nullable)
+        // -> look up "Stdlib_Nullable.t" in the path store or try CMI resolution
+        if let Path::Pident(parent_id) = parent.as_ref() {
+            // Use name-based lookup since stamp in type path may differ from env
+            if let Ok(md) = env.find_module(parent_id.name()) {
+                use crate::types::decl::ModuleType;
+                match &md.md_type {
+                    ModuleType::MtyAlias(_, alias_path) | ModuleType::MtyIdent(alias_path) => {
+                        let resolved_path = Path::pdot(alias_path.clone(), type_name.as_str());
+                        if let Some(decl) = ctx.find_type_decl_by_path(&resolved_path.name()) {
+                            return Some(decl.clone());
+                        }
+                        if let Some(decl) = crate::types::ctype::resolve_type_through_modules(ctx, &resolved_path) {
+                            return Some(decl);
+                        }
+                    }
+                    ModuleType::MtySignature(sig) => {
+                        for item in sig {
+                            if let crate::types::decl::SignatureItem::SigType(id, decl, _) = item {
+                                if id.name() == type_name.as_str() {
+                                    return Some(decl.clone());
+                                }
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        // Try resolving through modules (loading CMI files on demand)
+        if let Some(decl) = crate::types::ctype::resolve_type_through_modules(ctx, type_path) {
+            return Some(decl);
+        }
+
+        // Try Stdlib alias patterns as fallback
+        if let Path::Pident(parent_id) = parent.as_ref() {
+            let flat_name = format!("Stdlib_{}.{}", parent_id.name(), type_name);
+            if let Some(decl) = ctx.find_type_decl_by_path(&flat_name) {
+                return Some(decl.clone());
+            }
+            let stdlib_path = format!("Stdlib.{}.{}", parent_id.name(), type_name);
+            if let Some(decl) = ctx.find_type_decl_by_path(&stdlib_path) {
+                return Some(decl.clone());
+            }
+            // Try loading CMI directly by module name
+            let direct_path = Path::pdot(
+                Path::Pident(Ident::create_persistent(parent_id.name())),
+                type_name.as_str(),
+            );
+            if let Some(decl) = crate::types::ctype::resolve_type_through_modules(ctx, &direct_path) {
+                return Some(decl);
+            }
+        }
+    }
+
+    // Try name-based lookup
+    let name = type_path.head_name();
+    if let Some(decl) = ctx.find_type_decl(name) {
+        return Some(decl.clone());
+    }
+
+    None
 }
 
 #[cfg(test)]

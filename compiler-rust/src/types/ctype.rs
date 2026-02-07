@@ -300,7 +300,7 @@ fn is_predef_type_name(name: &str) -> bool {
 /// 4. Find type `t` in the resolved module's signature
 ///
 /// Returns the type declaration and caches it in the path store.
-fn resolve_type_through_modules<'a>(
+pub fn resolve_type_through_modules<'a>(
     ctx: &'a TypeContext<'a>,
     path: &Path,
 ) -> Option<super::decl::TypeDeclaration> {
