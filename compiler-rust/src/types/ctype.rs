@@ -427,6 +427,76 @@ pub fn resolve_type_through_modules<'a>(
 /// Try to expand a type alias (type abbreviation).
 ///
 /// If the type is `Tconstr(path, args)` and the type declaration for `path`
+/// Resolve a type through local environment modules.
+/// For paths like Pdot(Pident(Ord), "t"), look up module Ord in env,
+/// get its signature, and find type t in it.
+fn resolve_type_through_env<'a>(
+    ctx: &'a TypeContext<'a>,
+    env: &super::env::Env,
+    path: &Path,
+) -> Option<super::decl::TypeDeclaration> {
+    use super::decl::{ModuleType, SignatureItem};
+
+    let (root_id, components) = path.flatten().ok()?;
+    if components.is_empty() {
+        return None;
+    }
+
+    let type_name = *components.last()?;
+    let module_components = &components[..components.len() - 1];
+
+    // Look up the root module in the env
+    let root_module = env.find_module(root_id.name()).ok()?;
+    let mut current_md_type = &root_module.md_type;
+
+    // Navigate through sub-modules
+    for &mod_name in module_components {
+        match current_md_type {
+            ModuleType::MtySignature(sig) => {
+                let mut found = false;
+                for item in sig {
+                    if let SignatureItem::SigModule(id, md, _) = item {
+                        if id.name() == mod_name {
+                            current_md_type = &md.md_type;
+                            found = true;
+                            break;
+                        }
+                    }
+                }
+                if !found {
+                    return None;
+                }
+            }
+            ModuleType::MtyAlias(_, alias_path) => {
+                // Need to resolve through persistent env, which we can't do here.
+                // Fall through to CMI resolution.
+                let _ = alias_path;
+                return None;
+            }
+            _ => return None,
+        }
+    }
+
+    // Now find the type in the current signature
+    match current_md_type {
+        ModuleType::MtySignature(sig) => {
+            for item in sig {
+                if let SignatureItem::SigType(id, decl, _) = item {
+                    if id.name() == type_name {
+                        return Some(decl.clone());
+                    }
+                }
+            }
+            None
+        }
+        ModuleType::MtyAlias(_, alias_path) => {
+            // Module is an alias — try resolving the type through the aliased CMI module
+            resolve_type_through_modules(ctx, &Path::pdot(alias_path.clone(), type_name.to_string()))
+        }
+        _ => None,
+    }
+}
+
 /// has a manifest (i.e., `type t = <body>`), expand it by substituting
 /// the type parameters with the given arguments.
 ///
@@ -492,6 +562,21 @@ fn try_expand_head<'a>(
                 if let Some(resolved_decl) = resolve_type_through_modules(ctx, &path) {
                     if let Some(manifest) = resolved_decl.type_manifest {
                         let params = &resolved_decl.type_params;
+                        if params.is_empty() {
+                            return Some(manifest);
+                        } else if params.len() == args.len() {
+                            return Some(subst_type(ctx, &params.clone(), &args, manifest));
+                        }
+                    }
+                    return None;
+                }
+
+                // 2c. Try resolving Pdot paths through local env modules
+                // For paths like Pdot(Pident(Ord), "t"), look up module Ord in env,
+                // get its signature, and find type t in it
+                if let Some(decl) = resolve_type_through_env(ctx, env, &path) {
+                    if let Some(manifest) = decl.type_manifest {
+                        let params = &decl.type_params;
                         if params.is_empty() {
                             return Some(manifest);
                         } else if params.len() == args.len() {
