@@ -513,6 +513,190 @@ fn substitute_type_expr_path(
     }
 }
 
+/// Rewrite type expression paths that reference an old module name to use a new path prefix.
+/// For example, when accessing `Belt.Array` which is an alias for `Belt_Array`,
+/// types with `Pident("Belt_Array")` or `Pdot(Pident("Belt_Array"), X)` need to be
+/// rewritten to use `Pdot(Pident("Belt"), "Array")` as the prefix.
+fn rewrite_type_expr_prefix(
+    ty_ref: TypeExprRef,
+    old_name: &str,
+    new_prefix: &Path,
+    ctx: &TypeContext<'_>,
+    visited: &mut HashSet<usize>,
+) {
+    if !visited.insert(ty_ref.0) {
+        return; // Already visited (cycle detection)
+    }
+
+    let ty = ctx.get_type(ty_ref);
+    let desc = ty.desc().clone();
+
+    match &desc {
+        TypeDesc::Tconstr { path, args, .. } => {
+            let rewritten = rewrite_path_prefix(path, old_name, new_prefix);
+            if let Some(new_path) = rewritten {
+                let mut desc_mut = ty.desc_mut();
+                if let TypeDesc::Tconstr { ref mut path, .. } = *desc_mut {
+                    *path = new_path;
+                }
+            }
+            for &arg in args {
+                rewrite_type_expr_prefix(arg, old_name, new_prefix, ctx, visited);
+            }
+        }
+        TypeDesc::Tarrow { arg, ret, .. } => {
+            rewrite_type_expr_prefix(arg.typ, old_name, new_prefix, ctx, visited);
+            rewrite_type_expr_prefix(*ret, old_name, new_prefix, ctx, visited);
+        }
+        TypeDesc::Ttuple(types) => {
+            for &t in types {
+                rewrite_type_expr_prefix(t, old_name, new_prefix, ctx, visited);
+            }
+        }
+        TypeDesc::Tlink(t) => {
+            rewrite_type_expr_prefix(*t, old_name, new_prefix, ctx, visited);
+        }
+        TypeDesc::Tsubst(t) => {
+            rewrite_type_expr_prefix(*t, old_name, new_prefix, ctx, visited);
+        }
+        TypeDesc::Tpoly { body, vars } => {
+            rewrite_type_expr_prefix(*body, old_name, new_prefix, ctx, visited);
+            for &v in vars {
+                rewrite_type_expr_prefix(v, old_name, new_prefix, ctx, visited);
+            }
+        }
+        TypeDesc::Tobject { fields, .. } => {
+            rewrite_type_expr_prefix(*fields, old_name, new_prefix, ctx, visited);
+        }
+        TypeDesc::Tfield { typ, rest, .. } => {
+            rewrite_type_expr_prefix(*typ, old_name, new_prefix, ctx, visited);
+            rewrite_type_expr_prefix(*rest, old_name, new_prefix, ctx, visited);
+        }
+        TypeDesc::Tvariant(row) => {
+            rewrite_type_expr_prefix(row.row_more, old_name, new_prefix, ctx, visited);
+            for field in &row.row_fields {
+                match &field.1 {
+                    crate::types::type_expr::RowField::Rpresent(Some(t)) => {
+                        rewrite_type_expr_prefix(*t, old_name, new_prefix, ctx, visited);
+                    }
+                    crate::types::type_expr::RowField::Reither { types, .. } => {
+                        for &t in types {
+                            rewrite_type_expr_prefix(t, old_name, new_prefix, ctx, visited);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        TypeDesc::Tpackage { args, .. } => {
+            for &arg in args {
+                rewrite_type_expr_prefix(arg, old_name, new_prefix, ctx, visited);
+            }
+        }
+        TypeDesc::Tvar(_) | TypeDesc::Tunivar(_) | TypeDesc::Tnil => {}
+    }
+}
+
+/// Rewrite a path's module prefix from an old name to a new path.
+/// Returns Some(new_path) if rewritten, None if unchanged.
+fn rewrite_path_prefix(path: &Path, old_name: &str, new_prefix: &Path) -> Option<Path> {
+    match path {
+        // Pident("Belt_Array") → new_prefix (e.g., Pdot(Pident("Belt"), "Array"))
+        Path::Pident(id) if id.name() == old_name => {
+            Some(new_prefix.clone())
+        }
+        // Pdot(Pident("Belt_Array"), "t", pos) → Pdot(new_prefix, "t", pos)
+        Path::Pdot(inner, name, pos) => {
+            if let Path::Pident(id) = inner.as_ref() {
+                if id.name() == old_name {
+                    return Some(Path::Pdot(Box::new(new_prefix.clone()), name.clone(), *pos));
+                }
+            }
+            // Recursively check deeper paths
+            let rewritten_inner = rewrite_path_prefix(inner, old_name, new_prefix);
+            rewritten_inner.map(|new_inner| Path::Pdot(Box::new(new_inner), name.clone(), *pos))
+        }
+        _ => None,
+    }
+}
+
+/// Rewrite all type paths in a signature from one module prefix to another.
+/// Used when resolving module aliases: e.g., Belt.Array is aliased to Belt_Array,
+/// so types from Belt_Array.cmi need their paths rewritten from
+/// Pdot(Pident("Belt_Array"), X) to Pdot(Pdot(Pident("Belt"), "Array"), X).
+pub fn rewrite_module_prefix_in_sig(
+    sig_items: &[SignatureItem],
+    old_name: &str,
+    new_prefix: &Path,
+    ctx: &TypeContext<'_>,
+) {
+    let mut visited = HashSet::new();
+
+    for item in sig_items {
+        match item {
+            SignatureItem::SigValue(_id, desc) => {
+                rewrite_type_expr_prefix(desc.val_type, old_name, new_prefix, ctx, &mut visited);
+            }
+            SignatureItem::SigType(_id, decl, _) => {
+                for &param in &decl.type_params {
+                    rewrite_type_expr_prefix(param, old_name, new_prefix, ctx, &mut visited);
+                }
+                if let Some(manifest) = decl.type_manifest {
+                    rewrite_type_expr_prefix(manifest, old_name, new_prefix, ctx, &mut visited);
+                }
+                match &decl.type_kind {
+                    TypeKind::TypeVariant(constrs) => {
+                        for cd in constrs {
+                            match &cd.cd_args {
+                                crate::types::decl::ConstructorArguments::CstrTuple(args) => {
+                                    for &arg in args {
+                                        rewrite_type_expr_prefix(arg, old_name, new_prefix, ctx, &mut visited);
+                                    }
+                                }
+                                crate::types::decl::ConstructorArguments::CstrRecord(labels) => {
+                                    for lbl in labels {
+                                        rewrite_type_expr_prefix(lbl.ld_type, old_name, new_prefix, ctx, &mut visited);
+                                    }
+                                }
+                            }
+                            if let Some(res) = cd.cd_res {
+                                rewrite_type_expr_prefix(res, old_name, new_prefix, ctx, &mut visited);
+                            }
+                        }
+                    }
+                    TypeKind::TypeRecord(labels, _) => {
+                        for lbl in labels {
+                            rewrite_type_expr_prefix(lbl.ld_type, old_name, new_prefix, ctx, &mut visited);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            SignatureItem::SigTypext(_id, ext, _) => {
+                for &param in &ext.ext_type_params {
+                    rewrite_type_expr_prefix(param, old_name, new_prefix, ctx, &mut visited);
+                }
+                match &ext.ext_args {
+                    crate::types::decl::ConstructorArguments::CstrTuple(args) => {
+                        for &arg in args {
+                            rewrite_type_expr_prefix(arg, old_name, new_prefix, ctx, &mut visited);
+                        }
+                    }
+                    crate::types::decl::ConstructorArguments::CstrRecord(labels) => {
+                        for lbl in labels {
+                            rewrite_type_expr_prefix(lbl.ld_type, old_name, new_prefix, ctx, &mut visited);
+                        }
+                    }
+                }
+                if let Some(ret) = ext.ext_ret_type {
+                    rewrite_type_expr_prefix(ret, old_name, new_prefix, ctx, &mut visited);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
 /// Recursively substitute type paths in sub-module signatures.
 /// For a module like Belt with sub-modules Array, Map, etc.,
 /// the types in Belt.Array should have paths like Pdot(Pdot(Pident "Belt") "Array") "t"

@@ -4333,8 +4333,8 @@ impl Env {
                 let mod_name = arena.get_string(*mod_idx);
                 // First try local environment
                 if let Ok(md) = self.find_module(mod_name) {
-                    let sig = Self::resolve_module_type(&md.md_type, pers_env, ctx);
-                    if let Some(sig) = sig {
+                    let result = Self::resolve_module_type(&md.md_type, pers_env, ctx);
+                    if let Some((sig, _resolved_name)) = result {
                         return Some((Path::pident(Ident::create_local(mod_name)), sig));
                     }
                 }
@@ -4356,8 +4356,17 @@ impl Env {
                         if let crate::types::decl::SignatureItem::SigModule(id, sub_md, _) = sig_item {
                             if id.name() == submod_name {
                                 let sub_path = Path::pdot(parent_path, submod_name.to_string());
-                                let sub_sig = Self::resolve_module_type(&sub_md.md_type, pers_env, ctx);
-                                if let Some(sig) = sub_sig {
+                                let result = Self::resolve_module_type(&sub_md.md_type, pers_env, ctx);
+                                if let Some((sig, resolved_name)) = result {
+                                    // If an alias was followed, rewrite type paths from the
+                                    // resolved module name to the access path.
+                                    // E.g., Belt.Array aliases Belt_Array, so rewrite
+                                    // Pdot(Pident("Belt_Array"), X) → Pdot(sub_path, X)
+                                    if let Some(ref old_name) = resolved_name {
+                                        crate::cmi::persistent_env::rewrite_module_prefix_in_sig(
+                                            &sig, old_name, &sub_path, ctx,
+                                        );
+                                    }
                                     return Some((sub_path, sig));
                                 }
                                 return None;
@@ -4372,13 +4381,15 @@ impl Env {
     }
 
     /// Resolve a module type to a signature, following aliases and loading from persistent env.
+    /// Returns (signature, Option<resolved_module_name>) where resolved_module_name is Some
+    /// when an alias was followed (so the caller can rewrite paths).
     fn resolve_module_type<'b>(
         mty: &crate::types::decl::ModuleType,
         pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
         ctx: &'b crate::types::context::TypeContext<'b>,
-    ) -> Option<crate::types::decl::Signature> {
+    ) -> Option<(crate::types::decl::Signature, Option<String>)> {
         match mty {
-            crate::types::decl::ModuleType::MtySignature(sig) => Some(sig.clone()),
+            crate::types::decl::ModuleType::MtySignature(sig) => Some((sig.clone(), None)),
             crate::types::decl::ModuleType::MtyAlias(_, path) |
             crate::types::decl::ModuleType::MtyIdent(path) => {
                 // Follow the alias: extract the module name from the path
@@ -4389,7 +4400,7 @@ impl Env {
                 };
                 if let Some(pers) = pers_env.as_mut() {
                     if let Some(ps) = pers.find_pers_struct(&mod_name, ctx) {
-                        return Some(ps.ps_sig.clone());
+                        return Some((ps.ps_sig.clone(), Some(mod_name)));
                     }
                 }
                 None
