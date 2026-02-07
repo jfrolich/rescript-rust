@@ -3366,17 +3366,25 @@ fn type_field(
 
     let field_name = tctx.longident_last_name(tctx.resolve_lid(field_lid.txt));
 
-    // Create fresh type variables for the record and field
+    // Following OCaml's type_label_access pattern:
+    // 1. Type the record expression first (with unconstrained type)
+    // 2. Use the expression's type to disambiguate the label
     let record_ty = ctx.new_var(None);
+    let typed_record = type_expect(tctx, env, record_expr, record_ty, None)?;
+    let ty_exp = typed_record.exp_type;
+
     let field_ty = ctx.new_var(None);
     let _ = crate::types::unify(ctx, &mut tctx.unify_state, field_ty, expected_ty);
 
-    // Try to look up the label from the environment for type info
-    let label_desc = if let Ok(env_label) = env.find_label(&field_name) {
-        let (ty_arg, ty_res) = crate::types::ctype::instance_label(ctx, env_label);
-        // Best-effort unification to propagate type info
-        let _ = crate::types::unify(ctx, &mut tctx.unify_state, ty_arg, field_ty);
+    // Disambiguate label: use the record expression's type to find the right label
+    let env_label = disambiguate_label(&field_name, ty_exp, env, ctx);
+
+    let label_desc = if let Some(env_label) = env_label {
+        let (ty_arg, ty_res) = crate::types::ctype::instance_label(ctx, &env_label);
+        // Unify label's result type with the record's type
         let _ = crate::types::unify(ctx, &mut tctx.unify_state, ty_res, record_ty);
+        // Unify label's arg type with the field type
+        let _ = crate::types::unify(ctx, &mut tctx.unify_state, ty_arg, field_ty);
         crate::types::LabelDescription {
             lbl_name: env_label.lbl_name.clone(),
             lbl_res: record_ty,
@@ -3406,8 +3414,8 @@ fn type_field(
         }
     };
 
-    // Type check the record expression with the proper record type
-    let typed_record = type_expect(tctx, env, record_expr, record_ty, None)?;
+    // Unify the record expression's type with the record type
+    unify_expression_types(tctx, loc, ty_exp, record_ty, None)?;
 
     Ok(Expression::new(
         ExpressionDesc::Texp_field(Box::new(typed_record), field_lid.clone(), label_desc),
@@ -4576,6 +4584,45 @@ fn disambiguate_constructor<'a>(
     let cstr = all_constrs.last().unwrap();
     let path = Path::pident(Ident::create_persistent(cstr_name));
     Some((path, (*cstr).clone()))
+}
+
+/// Disambiguate a label by name, considering the record expression's type.
+/// Follows OCaml's Label.disambiguate pattern:
+/// 1. Get all labels with the given name from the env
+/// 2. Extract the type path from the record expression's type
+/// 3. If we have a type path, prefer the label from that type
+/// 4. Otherwise fall back to the most recent label in scope
+fn disambiguate_label<'a>(
+    label_name: &str,
+    record_ty: TypeExprRef,
+    env: &Env,
+    ctx: &'a crate::types::context::TypeContext<'a>,
+) -> Option<crate::types::LabelDescription> {
+    // Extract type path from the record expression's type
+    let opath = extract_type_path_from_expected(record_ty, env, ctx);
+
+    // Find all labels with this name
+    let all_labels = env.find_all_labels(label_name);
+
+    if all_labels.is_empty() {
+        return None;
+    }
+
+    // If we have a target type path, try to disambiguate
+    if let Some(ref target_path) = opath {
+        for label in &all_labels {
+            let lbl_ty = ctx.repr(label.lbl_res);
+            let lbl_desc = ctx.get_desc(lbl_ty);
+            if let TypeDesc::Tconstr { path: lbl_path, .. } = &*lbl_desc {
+                if lbl_path.same(target_path) {
+                    return Some((*label).clone());
+                }
+            }
+        }
+    }
+
+    // Fall back to the most recent label (last in the list)
+    all_labels.last().map(|l| (*l).clone())
 }
 
 /// Type-directed constructor disambiguation.
