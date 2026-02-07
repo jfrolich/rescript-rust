@@ -4171,7 +4171,7 @@ fn parse_let_in_block_with_continuation_and_attrs(
         let wrapper_loc = wrapper_loc.expect("locally abstract let-binding should have wrapper loc");
         // Update Ppat_constraint and inner Ptyp_poly locations to use the binding location
         if let PatternDesc::Ppat_constraint(inner) = *first_pat.ppat_desc {
-            let (ref inner_pat, ref typ) = *inner;
+            let (inner_pat, typ) = *inner;
             // Update the Ptyp_poly location to use binding location
             let updated_typ = match *typ.ptyp_desc {
                 CoreTypeDesc::Ptyp_poly(inner) => {

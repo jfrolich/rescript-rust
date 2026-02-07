@@ -2033,7 +2033,10 @@ fn walk_expression(expr: &Expression, t: &mut CommentTable, comments: Vec<Commen
                 }
             }
         }
-        ExpressionDesc::Pexp_send(inner) | ExpressionDesc::Pexp_await(inner) => {
+        ExpressionDesc::Pexp_send(inner) => {
+            walk_expression(&inner.0, t, comments, arena);
+        }
+        ExpressionDesc::Pexp_await(inner) => {
             walk_expression(inner, t, comments, arena);
         }
         ExpressionDesc::Pexp_jsx_element(jsx) => {
@@ -2603,7 +2606,7 @@ fn walk_core_type(ct: &CoreType, t: &mut CommentTable, comments: Vec<Comment>, a
             let nodes: Vec<Node<'_>> = fields.iter().map(|f| Node::RowField(f)).collect();
             walk_list(&nodes, t, comments, arena);
         }
-        CoreTypeDesc::Ptyp_package((name, constraints)) => {
+        CoreTypeDesc::Ptyp_package(pkg_inner) => { let (ref name, ref constraints) = **pkg_inner;
             let (leading, trailing) = partition_leading_trailing(comments, name.loc, arena);
             t.attach_leading(name.loc, leading, arena);
 

@@ -209,7 +209,7 @@ fn is_external_ext_expr(expr: &Expression, w: &MarshalWriter) -> bool {
         return false;
     };
     let (ref cond, ref then_expr, ref opt_else) = **ite_inner;
-    let Some(ref else_expr) = opt_else else {
+    let Some(else_expr) = opt_else else {
         return false;
     };
     if !is_external_raw_expansion_expr(else_expr, w) {

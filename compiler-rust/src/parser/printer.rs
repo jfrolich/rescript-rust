@@ -3063,8 +3063,7 @@ fn print_dict_expr(
                         let key_expr = &tuple_items[0];
                         let value_expr = &tuple_items[1];
                         // Key should be a string constant
-                        if let ExpressionDesc::Pexp_constant(Constant::String(txt, _)) =
-                            &*key_expr.pexp_desc
+                        if let ExpressionDesc::Pexp_constant(c) = &*key_expr.pexp_desc { if let Constant::String(txt, _) = &**c
                         {
                             // Create combined location from key to value (for row comments)
                             let (cmt_pos_range, cmt_full_loc) = make_combined_pos_range(
@@ -3094,7 +3093,7 @@ fn print_dict_expr(
                             let row_doc = print_comments(row_doc, cmt_tbl, tuple_expr.pexp_loc, arena);
 
                             return Some(row_doc);
-                        }
+                        }}
                     }
                 }
                 None
@@ -3153,9 +3152,9 @@ fn print_tagged_template_literal(
 
     for (i, s) in strings.iter().enumerate() {
         // Extract string content
-        if let ExpressionDesc::Pexp_constant(Constant::String(txt, _)) = &*s.pexp_desc {
+        if let ExpressionDesc::Pexp_constant(c) = &*s.pexp_desc { if let Constant::String(txt, _) = &**c {
             parts.push(print_string_contents(txt));
-        }
+        }}
 
         // Add interpolation if there's a corresponding value
         if i < values.len() {
@@ -3332,12 +3331,12 @@ fn print_template_literal(
                 Doc::concat(vec![lhs, rhs])
             }
             // String constant with optional tag prefix (e.g., `j"..."` or just `"..."`)
-            ExpressionDesc::Pexp_constant(Constant::String(txt, prefix_opt)) => {
+            ExpressionDesc::Pexp_constant(c) => { if let Constant::String(txt, prefix_opt) = &**c {
                 if let Some(prefix) = prefix_opt {
                     *tag = prefix.to_string();
                 }
                 print_string_contents(txt)
-            }
+            } else { Doc::nil() }}
             // Any other expression: wrap in ${...}
             // Match OCaml: Doc.group (Doc.concat [Doc.text "${"; Doc.indent doc; Doc.rbrace])
             _ => {
@@ -3402,11 +3401,11 @@ fn print_underscore_apply_in_pipe(
         return print_expression_with_comments(state, expr, cmt_tbl, arena);
     }
 
-    let inner = get_underscore_apply_body(expr);
+    let body_expr = get_underscore_apply_body(expr);
 
-    match &*inner.pexp_desc {
-        ExpressionDesc::Pexp_apply(inner) => {
-                    let PexpApply { ref funct, ref args, ref partial, .. } = **inner;
+    match &*body_expr.pexp_desc {
+        ExpressionDesc::Pexp_apply(apply_inner) => {
+                    let PexpApply { ref funct, ref args, ref partial, .. } = **apply_inner;
             // Check if first arg is __x and no other args have __x
             if first_arg_is_underscore(args, arena) && !rest_args_have_underscore(args, arena) {
                 // Single __x in first position - omit it entirely
@@ -3446,7 +3445,7 @@ fn print_underscore_apply_in_pipe(
                 }
             } else {
                 // Multiple __x or not in first position - use regular rewrite
-                print_underscore_apply(state, inner, cmt_tbl, arena)
+                print_underscore_apply(state, body_expr, cmt_tbl, arena)
             }
         }
         _ => print_expression_with_comments(state, expr, cmt_tbl, arena),
@@ -5350,8 +5349,8 @@ pub fn print_typ_expr(
         }
 
         CoreTypeDesc::Ptyp_arrow(inner) => {
-                    let (ref arity, ..) = **inner;
-            print_arrow_type(state, typ, arity.clone(), cmt_tbl, arena)
+                    let (_, _, ref arity) = **inner;
+            print_arrow_type(state, typ, *arity, cmt_tbl, arena)
         }
 
         CoreTypeDesc::Ptyp_constr(inner) => {
@@ -5957,8 +5956,7 @@ fn print_doc_comments_with_sep(
             if let Payload::PStr(items) = &attr.1 {
                 if let Some(item) = items.first() {
                     if let StructureItemDesc::Pstr_eval(eval_inner) = &*item.pstr_desc { let (ref expr, _) = **eval_inner;
-                        if let ExpressionDesc::Pexp_constant(Constant::String(content, _)) =
-                            &*expr.pexp_desc
+                        if let ExpressionDesc::Pexp_constant(c) = &*expr.pexp_desc { if let Constant::String(content, _) = &**c
                         {
                             // OCaml uses `/**` + txt + `*/` without extra spaces
                             // The content already includes the spacing from the parser
@@ -5967,7 +5965,7 @@ fn print_doc_comments_with_sep(
                                 Doc::text(content.clone()),
                                 Doc::text("*/"),
                             ]));
-                        }
+                        }}
                     }
                 }
             }
@@ -7295,13 +7293,13 @@ fn print_attribute(
         if let Payload::PStr(items) = payload {
             if let [single] = &items[..] {
                 if let StructureItemDesc::Pstr_eval(eval_inner) = &*single.pstr_desc { let (ref expr, _) = **eval_inner;
-                    if let ExpressionDesc::Pexp_constant(Constant::String(txt, _)) = &*expr.pexp_desc {
+                    if let ExpressionDesc::Pexp_constant(c) = &*expr.pexp_desc { if let Constant::String(txt, _) = &**c {
                         return Doc::concat(vec![
                             Doc::text(if standalone { "/***" } else { "/**" }),
                             Doc::text(txt.clone()),
                             Doc::text("*/"),
                         ]);
-                    }
+                    }}
                 }
             }
         }

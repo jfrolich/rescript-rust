@@ -1468,8 +1468,8 @@ fn prefix_pattern_var(arena: &mut ParseArena, pat: &mut Pattern, prefix: &str) {
             loc.txt = arena.push_string(new_txt);
         }
         PatternDesc::Ppat_constraint(inner) => {
-                    let (ref inner, _) = **inner;
-            prefix_pattern_var(arena, inner, prefix);
+            let (ref mut inner_pat, _) = **inner;
+            prefix_pattern_var(arena, inner_pat, prefix);
         }
         _ => {}
     }

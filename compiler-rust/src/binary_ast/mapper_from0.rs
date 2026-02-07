@@ -338,8 +338,7 @@ impl<'a> Mapper<'a> {
             pt0::Payload::PStr(str) => current::Payload::PStr(Box::new(self.map_structure(str))),
             pt0::Payload::PSig(sig) => current::Payload::PSig(Box::new(self.map_signature(sig))),
             pt0::Payload::PTyp(t) => current::Payload::PTyp(Box::new(self.map_core_type(t))),
-            pt0::Payload::PPat(inner, _guard) => {
-                    let (ref p, ref guard) = **inner;
+            pt0::Payload::PPat(p, guard) => {
                 current::Payload::PPat(Box::new((Box::new(self.map_pattern(p)), guard.as_ref().map(|g| Box::new(self.map_expression(g))))))
             }
         }
@@ -400,14 +399,14 @@ impl<'a> Mapper<'a> {
             }
             pt0::CoreTypeDesc::Object(fields, closed) => {
                 let fields = fields.iter().map(|f| self.map_object_field(f)).collect();
-                current::CoreTypeDesc::Ptyp_object(Box::new((fields, map_closed_flag(*closed))))
+                current::CoreTypeDesc::Ptyp_object(Box::new((fields, map_closed_flag(closed))))
             }
             pt0::CoreTypeDesc::Alias(t, s) => {
                 current::CoreTypeDesc::Ptyp_alias(Box::new((Box::new(self.map_core_type(t)), Cow::Owned(s.clone()))))
             }
             pt0::CoreTypeDesc::Variant(rows, closed, labels) => {
                 let rows = rows.iter().map(|r| self.map_row_field(r)).collect();
-                current::CoreTypeDesc::Ptyp_variant(Box::new((rows, map_closed_flag(*closed), labels.clone().map(|l| l.iter().map(|s| Cow::Owned(s.clone())).collect()))))
+                current::CoreTypeDesc::Ptyp_variant(Box::new((rows, map_closed_flag(closed), labels.clone().map(|l| l.iter().map(|s| Cow::Owned(s.clone())).collect()))))
             }
             pt0::CoreTypeDesc::Poly(vars, t) => {
                 current::CoreTypeDesc::Ptyp_poly(Box::new((
@@ -501,7 +500,7 @@ impl<'a> Mapper<'a> {
                     };
                     current::PatternRecordField { lid, pat, opt: optional }
                 }).collect();
-                current::PatternDesc::Ppat_record(Box::new((fields, map_closed_flag(*closed))))
+                current::PatternDesc::Ppat_record(Box::new((fields, map_closed_flag(closed))))
             }
             pt0::PatternDesc::Array(pl) => {
                 current::PatternDesc::Ppat_array(Box::new(pl.iter().map(|p| self.map_pattern(p)).collect()))

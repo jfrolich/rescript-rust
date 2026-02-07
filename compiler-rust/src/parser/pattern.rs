@@ -184,7 +184,7 @@ fn parse_single_pattern(p: &mut Parser<'_>) -> Pattern {
     if p.token == Token::DotDot {
         if let PatternDesc::Ppat_constant(from) = &*pat.ppat_desc {
             if is_interval_constant(from) {
-                let from = from.clone();
+                let from = (**from).clone();
                 p.next();
                 let to = match &p.token {
                     Token::Int { .. } | Token::Codepoint { .. } | Token::Float { .. } => {
@@ -655,7 +655,7 @@ fn parse_atomic_pattern(p: &mut Parser<'_>) -> Pattern {
             let spread_attr_name_idx = p.arena_mut().intern("res.patVariantSpread");
             let spread_attr: Attribute = (
                 with_loc(spread_attr_name_idx, LocIdx::none()),
-                Payload::PStr(vec![]),
+                Payload::PStr(Box::new(vec![])),
             );
             Pattern {
                 ppat_desc: Box::new(PatternDesc::Ppat_type(with_loc(lid, lid_loc))),

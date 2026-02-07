@@ -663,7 +663,7 @@ fn print_structure_item<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, item
             f.close_box();
             print_item_attributes(f, arena, &incl.pincl_attributes);
         }
-        StructureItemDesc::Pstr_attribute((name, payload)) => {
+        StructureItemDesc::Pstr_attribute(attr_inner) => { let (ref name, ref payload) = **attr_inner;
             // Standalone/floating attributes use [@@@...] (3 @)
             f.string("[@@@");
             f.string(arena.get_string(name.txt));
@@ -1042,20 +1042,20 @@ fn print_remaining_inline_params_with_arity<'a, W: Write>(
 
     match &*expr.pexp_desc {
         ExpressionDesc::Pexp_fun(inner) => {
-                    let PexpFun { arg_label,
-            default,
-            lhs,
-            rhs,
-            arity,
-            .. } = *inner;
+                    let PexpFun { ref arg_label,
+            ref default,
+            ref lhs,
+            ref rhs,
+            ref arity,
+            .. } = **inner;
             // Print arity for each Pexp_fun that has an arity annotation
             // (matching OCaml's pprintast: only print when explicitly set)
-            if let Some(n) = arena.get_arity(arity) {
+            if let Some(n) = arena.get_arity(*arity) {
                 f.string(&format!("[arity:{}]", n));
             }
             print_inline_param(f, arena, arg_label, default, lhs);
             f.space(); // @ between param and next recursive call
-            print_remaining_inline_params_with_arity(f, arena, rhs, false)
+            print_remaining_inline_params_with_arity(f, arena, &**rhs, false)
         }
         ExpressionDesc::Pexp_newtype(inner) => {
                     let (ref name, ref inner) = **inner;
@@ -1065,7 +1065,7 @@ fn print_remaining_inline_params_with_arity<'a, W: Write>(
             f.string(arena.get_string(name.txt));
             f.string(")");
             f.space(); // @ between ) and next
-            print_remaining_inline_params_with_arity(f, arena, inner, need_arity)
+            print_remaining_inline_params_with_arity(f, arena, &**inner, need_arity)
         }
         _ => expr,
     }
@@ -1308,14 +1308,14 @@ fn print_expression_inner<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, ex
             print_longident_idx(f, arena, lid.txt);
         }
         ExpressionDesc::Pexp_constant(c) => {
-            let is_negative = match c {
+            let is_negative = match &**c {
                 Constant::Integer(s, _) | Constant::Float(s, _) => s.starts_with('-'),
                 _ => false,
             };
             if is_negative {
                 f.string("(");
             }
-            print_constant(f, c);
+            print_constant(f, &**c);
             if is_negative {
                 f.string(")");
             }
@@ -2010,7 +2010,7 @@ fn print_expression_inner<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, ex
                 f.string(")");
             }
         }
-        ExpressionDesc::Pexp_extension((name, payload)) => {
+        ExpressionDesc::Pexp_extension(ext_inner) => { let (ref name, ref payload) = **ext_inner;
             // OCaml: @[<2>[%%%s@ %a]@] — structural box with indent 2
             f.open_box(BoxKind::Box, 2);
             f.string("[%");
@@ -2475,7 +2475,7 @@ fn print_pattern_inner<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, pat: 
                 f.string(")");
             }
         }
-        PatternDesc::Ppat_extension((name, payload)) => {
+        PatternDesc::Ppat_extension(ext_inner) => { let (ref name, ref payload) = **ext_inner;
             f.open_box(BoxKind::H, 2);
             f.string("[%");
             f.string(arena.get_string(name.txt));
@@ -2803,7 +2803,7 @@ fn print_core_type_inner<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, typ
                 f.close_box();
             }
         }
-        CoreTypeDesc::Ptyp_package((lid, constraints)) => {
+        CoreTypeDesc::Ptyp_package(pkg_inner) => { let (ref lid, ref constraints) = **pkg_inner;
             // OCaml: @[<hov2>(module@ %a@ with@ %a)@]
             f.open_box(BoxKind::HOV, 2);
             f.string("(module");
@@ -2831,7 +2831,7 @@ fn print_core_type_inner<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, typ
             f.string(")");
             f.close_box();
         }
-        CoreTypeDesc::Ptyp_extension((name, payload)) => {
+        CoreTypeDesc::Ptyp_extension(ext_inner) => { let (ref name, ref payload) = **ext_inner;
             f.open_box(BoxKind::H, 2);
             f.string("[%");
             f.string(arena.get_string(name.txt));
@@ -3421,7 +3421,7 @@ fn print_module_expr_inner<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, m
             print_expression(f, arena, e);
             f.string(")");
         }
-        ModuleExprDesc::Pmod_extension((name, payload)) => {
+        ModuleExprDesc::Pmod_extension(ext_inner) => { let (ref name, ref payload) = **ext_inner;
             // OCaml: @[<2>[%%%s@ %a]@]
             f.open_box(BoxKind::Box, 2);
             f.string("[%");
@@ -3638,7 +3638,7 @@ fn print_module_type_inner<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, m
             f.string("module type of ");
             print_module_expr(f, arena, mexpr);
         }
-        ModuleTypeDesc::Pmty_extension((name, payload)) => {
+        ModuleTypeDesc::Pmty_extension(ext_inner) => { let (ref name, ref payload) = **ext_inner;
             f.open_box(BoxKind::H, 2);
             f.string("[%");
             f.string(arena.get_string(name.txt));
@@ -3848,7 +3848,7 @@ fn print_signature_item<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, item
             f.close_box();
             print_item_attributes(f, arena, &incl.pincl_attributes);
         }
-        SignatureItemDesc::Psig_attribute((name, payload)) => {
+        SignatureItemDesc::Psig_attribute(attr_inner) => { let (ref name, ref payload) = **attr_inner;
             // Standalone/floating attributes use [@@@...] (3 @)
             f.string("[@@@");
             f.string(arena.get_string(name.txt));

@@ -780,7 +780,7 @@ fn type_structure_item<'a>(
 
         ParsedStructureItemDesc::Pstr_attribute(attr) => {
             // Attribute: @@attr
-            let desc = StructureItemDesc::Tstr_attribute(attr.clone());
+            let desc = StructureItemDesc::Tstr_attribute((**attr).clone());
             Ok((
                 StructureItem {
                     str_desc: desc,

@@ -286,11 +286,12 @@ pub fn expr_is_await(expr: &Expression) -> bool {
 pub fn is_underscore_apply_sugar(arena: &ParseArena, expr: &Expression) -> bool {
     match &*expr.pexp_desc {
         ExpressionDesc::Pexp_fun(inner) => {
-                    let PexpFun { arg_label: ArgLabel::Nolabel,
-            default: None,
-            lhs,
-            rhs,
-            .. } = *inner;
+                    let PexpFun { ref arg_label,
+            ref default,
+            ref lhs,
+            ref rhs,
+            .. } = **inner;
+            if *arg_label != ArgLabel::Nolabel || default.is_some() { return false; }
             if let PatternDesc::Ppat_var(name) = &*lhs.ppat_desc {
                 if arena.get_string(name.txt) == "__x" {
                     return matches!(&*rhs.pexp_desc, ExpressionDesc::Pexp_apply(_));
@@ -370,7 +371,7 @@ pub fn is_huggable_expression(arena: &crate::parse_arena::ParseArena, expr: &Exp
         ExpressionDesc::Pexp_array(_)
         | ExpressionDesc::Pexp_tuple(_)
         | ExpressionDesc::Pexp_record(_) => true,
-        ExpressionDesc::Pexp_constant(Constant::String(_, Some(_))) => true,
+        ExpressionDesc::Pexp_constant(c) if matches!(&**c, Constant::String(_, Some(_))) => true,
         ExpressionDesc::Pexp_construct(lid, _)
             if arena.is_lident(lid.txt, "::") || arena.is_lident(lid.txt, "[]") =>
         {
@@ -379,10 +380,12 @@ pub fn is_huggable_expression(arena: &crate::parse_arena::ParseArena, expr: &Exp
         ExpressionDesc::Pexp_extension(ext) if arena.get_string(ext.0.txt) == "obj" => true,
         _ if is_block_expr(expr) => true,
         _ if is_braced_expr(arena, expr) => true,
-        ExpressionDesc::Pexp_constant(Constant::String(txt, None))
-            if is_multiline_text(txt) =>
-        {
-            true
+        ExpressionDesc::Pexp_constant(c) => {
+            if let Constant::String(txt, None) = &**c {
+                is_multiline_text(txt)
+            } else {
+                false
+            }
         }
         _ => false,
     }
@@ -1089,17 +1092,18 @@ pub fn not_ghost_operator(op: &str, is_ghost: bool) -> bool {
 pub fn get_underscore_apply_inner<'a>(arena: &ParseArena, expr: &'a Expression) -> Option<&'a Expression> {
     match &*expr.pexp_desc {
         ExpressionDesc::Pexp_fun(inner) => {
-                    let PexpFun { arg_label: ArgLabel::Nolabel,
-            default: None,
-            lhs,
-            rhs,
-            .. } = *inner;
+                    let PexpFun { ref arg_label,
+            ref default,
+            ref lhs,
+            ref rhs,
+            .. } = **inner;
+            if *arg_label != ArgLabel::Nolabel || default.is_some() { return None; }
             // Check if pattern is `__x`
             if let PatternDesc::Ppat_var(name) = &*lhs.ppat_desc {
                 if arena.get_string(name.txt) == "__x" {
                     // Check if rhs is an apply
                     if matches!(&*rhs.pexp_desc, ExpressionDesc::Pexp_apply(_)) {
-                        return Some(rhs);
+                        return Some(&**rhs);
                     }
                 }
             }

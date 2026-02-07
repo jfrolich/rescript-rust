@@ -3251,17 +3251,21 @@ fn fix_spread_first_object_manifest(p: &mut Parser<'_>, typ: CoreType, is_spread
 
     match *typ.ptyp_desc {
         CoreTypeDesc::Ptyp_object(inner) => {
-                    let (ref fields, ref closed) = *inner;
             // Only for CLOSED objects where first field is Oinherit (spread)
             // Open objects (from {.. ...spread}) should NOT use ghost location
-            let first_is_spread = fields.first().map_or(false, |f| matches!(f, ObjectField::Oinherit(_)));
-            if first_is_spread && *closed == ClosedFlag::Closed {
+            let first_is_spread = inner.0.first().map_or(false, |f| matches!(f, ObjectField::Oinherit(_)));
+            if first_is_spread && inner.1 == ClosedFlag::Closed {
                 (CoreType {
+                    ptyp_desc: Box::new(CoreTypeDesc::Ptyp_object(inner)),
                     ptyp_loc: Location::none(),
-                    ..typ
+                    ptyp_attributes: typ.ptyp_attributes,
                 }, true)
             } else {
-                (typ, false)
+                (CoreType {
+                    ptyp_desc: Box::new(CoreTypeDesc::Ptyp_object(inner)),
+                    ptyp_loc: typ.ptyp_loc,
+                    ptyp_attributes: typ.ptyp_attributes,
+                }, false)
             }
         }
         CoreTypeDesc::Ptyp_alias(alias_inner) => {

@@ -491,9 +491,8 @@ pub fn jsx_prop_expr(arena: &ParseArena, expr: &Expression) -> ParenKind {
             }
 
             match &*expr.pexp_desc {
-                ExpressionDesc::Pexp_constant(
-                    Constant::Integer(x, _) | Constant::Float(x, _),
-                ) if expr.pexp_attributes.is_empty() && starts_with_minus(x) => {
+                ExpressionDesc::Pexp_constant(c)
+                  if expr.pexp_attributes.is_empty() && matches!(&**c, Constant::Integer(x, _) | Constant::Float(x, _) if starts_with_minus(x)) => {
                     ParenKind::Parenthesized
                 }
                 _ if parsetree_viewer::expr_is_await(expr) => ParenKind::Parenthesized,
@@ -539,9 +538,8 @@ pub fn jsx_child_expr(arena: &ParseArena, expr: &Expression) -> ParenKind {
             }
 
             match &*expr.pexp_desc {
-                ExpressionDesc::Pexp_constant(
-                    Constant::Integer(x, _) | Constant::Float(x, _),
-                ) if expr.pexp_attributes.is_empty() && starts_with_minus(x) => {
+                ExpressionDesc::Pexp_constant(c)
+                  if expr.pexp_attributes.is_empty() && matches!(&**c, Constant::Integer(x, _) | Constant::Float(x, _) if starts_with_minus(x)) => {
                     ParenKind::Parenthesized
                 }
                 _ if parsetree_viewer::expr_is_await(expr) => ParenKind::Parenthesized,

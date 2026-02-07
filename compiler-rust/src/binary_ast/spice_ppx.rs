@@ -3450,7 +3450,8 @@ impl<'a> LocCloner<'a> {
                 }
             }
             Payload::PTyp(typ) => self.core_type(typ),
-            Payload::PPat(pat, guard) => {
+            Payload::PPat(inner) => {
+                let (ref mut pat, ref mut guard) = **inner;
                 self.pattern(pat);
                 if let Some(expr) = guard {
                     self.expression(expr);

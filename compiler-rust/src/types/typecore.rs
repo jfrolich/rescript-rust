@@ -821,7 +821,7 @@ fn transl_type_inner(
             Ok((ctyp, variant_ty))
         }
 
-        CTD::Ptyp_package((_mod_lid, _constraints)) => {
+        CTD::Ptyp_package(pkg_inner) => { let (_mod_lid, _constraints) = &**pkg_inner;
             // Package type: (module S)
             // Simplified implementation - full version handles module types
             let ty = ctx.new_var(None);

@@ -445,7 +445,7 @@ impl<'a> Mapper<'a> {
             };
 
             // Look up arity value from arena (current::Arity is now ArityIdx)
-            let arity_value = self.arena.get_arity(&arity);
+            let arity_value = self.arena.get_arity(*arity);
             match arity_value {
                 None => arrow_type,
                 Some(n) => {
@@ -715,14 +715,14 @@ impl<'a> Mapper<'a> {
                 is_async, } = &**inner;
                 // Output current parsetree format with arity and is_async fields
                 // Look up arity from arena (current::Arity is now ArityIdx)
-                let arity_opt = self.arena.get_arity(&arity);
+                let arity_opt = self.arena.get_arity(*arity);
                 pt0::ExpressionDesc::Fun {
                     arg_label: self.map_arg_label(&arg_label),
                     default: default.as_ref().map(|e| Box::new(self.map_expression(e))),
                     lhs: Box::new(self.map_pattern(&lhs)),
                     rhs: Box::new(self.map_expression(&rhs)),
                     arity: arity_opt,
-                    is_async: is_async,
+                    is_async: *is_async,
                 }
             }
             current::ExpressionDesc::Pexp_apply(inner) => {
@@ -791,8 +791,8 @@ impl<'a> Mapper<'a> {
                 pt0::ExpressionDesc::Apply {
                     funct: Box::new(mapped_funct),
                     args: mapped_args,
-                    partial: partial,
-                    transformed_jsx: transformed_jsx,
+                    partial: *partial,
+                    transformed_jsx: *transformed_jsx,
                 }
             }
             current::ExpressionDesc::Pexp_match(inner) => {

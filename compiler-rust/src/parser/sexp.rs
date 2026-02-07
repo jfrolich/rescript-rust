@@ -513,10 +513,10 @@ fn core_type(arena: &ParseArena, typ: &CoreType) -> Sexp {
                 core_type(arena, t),
             ])
         }
-        CoreTypeDesc::Ptyp_package((mod_name, constraints)) => Sexp::list(vec![
+        CoreTypeDesc::Ptyp_package(pkg_inner) => { let (ref mod_name, ref constraints) = **pkg_inner; Sexp::list(vec![
             Sexp::atom("Ptyp_package"),
             package_type(arena, mod_name, constraints),
-        ]),
+        ])},
         CoreTypeDesc::Ptyp_extension(ext) => Sexp::list(vec![Sexp::atom("Ptyp_extension"), extension(arena, ext)]),
     };
     Sexp::list(vec![Sexp::atom("core_type"), desc])
