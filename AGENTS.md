@@ -485,12 +485,14 @@ The compiler is being rewritten from OCaml to Rust. This is a major undertaking 
 
 ### Key Documents
 
-- **[compiler-rust/PLAN.md](compiler-rust/PLAN.md)** - Comprehensive migration plan with phases, technical approach, and success criteria
-- **[compiler-rust/PROGRESS.md](compiler-rust/PROGRESS.md)** - Current progress, completed tasks, and next steps
+- **[compiler-rust/PLAN.md](compiler-rust/PLAN.md)** - Parser performance optimization roadmap
+- **[compiler-rust/PROGRESS.md](compiler-rust/PROGRESS.md)** - Parser performance optimization progress tracker
+- **[compiler-rust/BINARY_PARITY_PLAN.md](compiler-rust/BINARY_PARITY_PLAN.md)** - Comprehensive migration plan with phases, technical approach, and success criteria
+- **[compiler-rust/BINARY_PARITY_PROGRESS.md](compiler-rust/BINARY_PARITY_PROGRESS.md)** - Binary parity progress, completed tasks, and next steps
 - **[compiler-rust/GLOBAL_STATE_AUDIT.md](compiler-rust/GLOBAL_STATE_AUDIT.md)** - Catalog of OCaml global state to eliminate
 - **[compiler-rust/BINARY_AST.md](compiler-rust/BINARY_AST.md)** - Binary AST format specification, OCaml Marshal encoding, and arena-based sharing model
 
-> **Note for AI assistants**: These documents are living documents. Update `PLAN.md` when you discover new insights about architecture, challenges, or better approaches. Update `PROGRESS.md` as you complete tasks or identify new work items. Add to `GLOBAL_STATE_AUDIT.md` when you find additional global state that needs to be eliminated.
+> **Note for AI assistants**: These documents are living documents. Update `PLAN.md` when you discover new insights about parser optimization. Update `PROGRESS.md` as you complete optimizations or record benchmark results. Update `BINARY_PARITY_PLAN.md` for architecture insights. Update `BINARY_PARITY_PROGRESS.md` for rewrite progress. Add to `GLOBAL_STATE_AUDIT.md` when you find additional global state that needs to be eliminated.
 
 ### Rewrite Constraints
 
