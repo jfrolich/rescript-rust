@@ -2272,10 +2272,17 @@ fn unify_expression_types(
 
     match unify(tctx.type_ctx, &mut tctx.unify_state, ty1, ty2) {
         Ok(()) => Ok(()),
-        Err(_e) => Err(TypeCoreError::ExprTypeClash {
-            trace: vec![(ty1, ty2)],
-            context,
-        }),
+        Err(_e) => {
+            if std::env::var("DEBUG_TYPECLASH").is_ok() {
+                let d1 = tctx.type_ctx.get_desc(tctx.type_ctx.repr(ty1));
+                let d2 = tctx.type_ctx.get_desc(tctx.type_ctx.repr(ty2));
+                eprintln!("TYPECLASH: {:?} vs {:?} ctx={:?}", &*d1, &*d2, context);
+            }
+            Err(TypeCoreError::ExprTypeClash {
+                trace: vec![(ty1, ty2)],
+                context,
+            })
+        }
     }
 }
 

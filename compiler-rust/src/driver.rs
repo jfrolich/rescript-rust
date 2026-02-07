@@ -72,7 +72,9 @@ pub fn compile_source_to_js_with_options(
 
     // Load Pervasives and extend the initial environment
     let mut pers_env = PersistentEnv::new();
-    pers_env.set_load_path(build_load_path(options));
+    let load_path = build_load_path(options);
+    type_ctx.set_load_paths(load_path.clone());
+    pers_env.set_load_path(load_path);
     load_pervasives(&mut pers_env, &mut env, &type_ctx);
 
     // Store persistent env in the type check context for module resolution
@@ -144,7 +146,9 @@ pub fn typecheck_interface_source(
 
     // Load Pervasives and extend the initial environment
     let mut pers_env = PersistentEnv::new();
-    pers_env.set_load_path(build_load_path(options));
+    let load_path = build_load_path(options);
+    type_ctx.set_load_paths(load_path.clone());
+    pers_env.set_load_path(load_path);
     load_pervasives(&mut pers_env, &mut env, &type_ctx);
 
     tctx.set_persistent_env(pers_env);

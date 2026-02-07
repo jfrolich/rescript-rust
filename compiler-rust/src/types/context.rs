@@ -111,6 +111,13 @@ pub struct TypeContext<'a> {
     /// Used for looking up CMI-loaded type declarations by their stamp
     /// when the type name is too generic (e.g., "t").
     type_decl_by_stamp: RefCell<std::collections::HashMap<i32, super::decl::TypeDeclaration>>,
+
+    /// Global type declaration store, indexed by full qualified path string.
+    /// Used for looking up types via Pdot paths (e.g., "Js.Promise.t").
+    type_decl_by_path: RefCell<std::collections::HashMap<String, super::decl::TypeDeclaration>>,
+
+    /// Load paths for resolving CMI files during type alias expansion.
+    load_paths: RefCell<Vec<std::path::PathBuf>>,
 }
 
 impl<'a> TypeContext<'a> {
@@ -136,6 +143,8 @@ impl<'a> TypeContext<'a> {
             field_kinds: RefCell::new(Vec::new()),
             type_decl_store: RefCell::new(std::collections::HashMap::new()),
             type_decl_by_stamp: RefCell::new(std::collections::HashMap::new()),
+            type_decl_by_path: RefCell::new(std::collections::HashMap::new()),
+            load_paths: RefCell::new(Vec::new()),
         }
     }
 
@@ -165,6 +174,31 @@ impl<'a> TypeContext<'a> {
         let store = self.type_decl_by_stamp.borrow();
         if store.contains_key(&stamp) {
             Some(std::cell::Ref::map(store, |s| s.get(&stamp).unwrap()))
+        } else {
+            None
+        }
+    }
+
+    /// Register a type declaration by full qualified path string for alias expansion.
+    pub fn register_type_decl_by_path(&self, path: &str, decl: super::decl::TypeDeclaration) {
+        self.type_decl_by_path.borrow_mut().insert(path.to_string(), decl);
+    }
+
+    /// Set load paths for resolving CMI files.
+    pub fn set_load_paths(&self, paths: Vec<std::path::PathBuf>) {
+        *self.load_paths.borrow_mut() = paths;
+    }
+
+    /// Get the load paths.
+    pub fn load_paths(&self) -> std::cell::Ref<'_, Vec<std::path::PathBuf>> {
+        self.load_paths.borrow()
+    }
+
+    /// Look up a type declaration by full qualified path string.
+    pub fn find_type_decl_by_path(&self, path: &str) -> Option<std::cell::Ref<'_, super::decl::TypeDeclaration>> {
+        let store = self.type_decl_by_path.borrow();
+        if store.contains_key(path) {
+            Some(std::cell::Ref::map(store, |s| s.get(path).unwrap()))
         } else {
             None
         }

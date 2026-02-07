@@ -104,7 +104,8 @@ impl PersistentEnv {
         let signature = sig_ctx.read_signature(&cmi.cmi_sign);
 
         // Register all type declarations in the global store for alias expansion
-        register_sig_types_recursive(&signature, ctx);
+        let module_path = Path::Pident(Ident::create_persistent(name));
+        register_sig_types_recursive(&signature, &module_path, ctx, &self.load_path);
 
         Some(PersStruct {
             ps_name: cmi.cmi_name,
@@ -173,11 +174,18 @@ impl PersistentEnv {
     }
 }
 
-/// Add a signature's bindings to an environment as opened bindings.
-///
 /// Recursively register all type declarations from a signature
 /// into the type context's global store for alias expansion.
-fn register_sig_types_recursive(sig: &Signature, ctx: &TypeContext<'_>) {
+///
+/// `module_path` is the path to the module containing this signature
+/// (e.g., `Pident(Js)` or `Pdot(Pident(Js), "Promise")`).
+/// `load_path` is used to resolve module aliases by loading CMI files.
+fn register_sig_types_recursive<'a>(
+    sig: &Signature,
+    module_path: &Path,
+    ctx: &'a TypeContext<'a>,
+    load_path: &[PathBuf],
+) {
     for item in sig {
         match item {
             SignatureItem::SigType(id, decl, _) => {
@@ -186,16 +194,89 @@ fn register_sig_types_recursive(sig: &Signature, ctx: &TypeContext<'_>) {
                 if id.stamp() != 0 {
                     ctx.register_type_decl_by_stamp(id.stamp(), decl.clone());
                 }
+                // Register by fully qualified path for Pdot lookup (e.g., "Js.Promise.t")
+                let full_path = Path::pdot(module_path.clone(), id.name());
+                ctx.register_type_decl_by_path(&full_path.name(), decl.clone());
             }
             SignatureItem::SigModule(id, md, _) => {
-                // Recurse into sub-module signatures
-                if let ModuleType::MtySignature(sub_sig) = &md.md_type {
-                    register_sig_types_recursive(sub_sig, ctx);
+                let sub_path = Path::pdot(module_path.clone(), id.name());
+                match &md.md_type {
+                    ModuleType::MtySignature(sub_sig) => {
+                        // Recurse into sub-module signatures with extended path
+                        register_sig_types_recursive(sub_sig, &sub_path, ctx, load_path);
+                    }
+                    ModuleType::MtyAlias(_, alias_path) => {
+                        // Module alias: resolve by loading the aliased module's CMI
+                        let alias_module_name = match alias_path {
+                            Path::Pident(alias_id) => Some(alias_id.name().to_string()),
+                            // For Pdot paths like Js_promise.Make, use the root module
+                            Path::Pdot(parent, _, _) => {
+                                if let Path::Pident(alias_id) = parent.as_ref() {
+                                    Some(alias_id.name().to_string())
+                                } else {
+                                    None
+                                }
+                            }
+                            _ => None,
+                        };
+                        if let Some(alias_name) = alias_module_name {
+                            if let Some(alias_sig) = load_module_sig_for_alias(&alias_name, ctx, load_path) {
+                                register_sig_types_recursive(&alias_sig, &sub_path, ctx, load_path);
+                            }
+                        }
+                    }
+                    _ => {}
                 }
             }
             _ => {}
         }
     }
+}
+
+/// Load a module's signature for resolving module aliases during type registration.
+/// This is a lightweight version that doesn't use the persistent env cache.
+fn load_module_sig_for_alias<'a>(
+    name: &str,
+    ctx: &'a TypeContext<'a>,
+    load_path: &[PathBuf],
+) -> Option<Signature> {
+    let cmi_filename = format!("{}.cmi", name);
+
+    // Search load path for the CMI file
+    let full_path = find_in_path(load_path, &cmi_filename)?;
+
+    // Read and parse the CMI file
+    let cmi = cmi_format::read_cmi(&full_path).ok()?;
+
+    // Convert to Rust type structures
+    let mut sig_ctx = SigReadContext::new(ctx);
+    let signature = sig_ctx.read_signature(&cmi.cmi_sign);
+
+    Some(signature)
+}
+
+/// Search load paths for a file (case-insensitive on first character).
+fn find_in_path(load_path: &[PathBuf], filename: &str) -> Option<String> {
+    for dir in load_path {
+        let exact = dir.join(filename);
+        if exact.exists() {
+            return Some(exact.to_string_lossy().into_owned());
+        }
+        if let Some(first_char) = filename.chars().next() {
+            if first_char.is_ascii_uppercase() {
+                let uncap = format!(
+                    "{}{}",
+                    first_char.to_ascii_lowercase(),
+                    &filename[1..]
+                );
+                let uncap_path = dir.join(&uncap);
+                if uncap_path.exists() {
+                    return Some(uncap_path.to_string_lossy().into_owned());
+                }
+            }
+        }
+    }
+    None
 }
 
 /// This is the core of `open_signature` from OCaml's `env.ml`.

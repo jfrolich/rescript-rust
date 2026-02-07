@@ -291,6 +291,139 @@ fn is_predef_type_name(name: &str) -> bool {
 // Type Alias Expansion
 // ============================================================================
 
+/// Resolve a type declaration by walking through module signatures.
+///
+/// For a path like `Pdot(Pdot(Pident(Js), "Promise"), "t")`:
+/// 1. Load the root module's CMI (`Js.cmi`)
+/// 2. Find the sub-module `Promise` in its signature
+/// 3. If it's an alias, load the aliased module
+/// 4. Find type `t` in the resolved module's signature
+///
+/// Returns the type declaration and caches it in the path store.
+fn resolve_type_through_modules<'a>(
+    ctx: &'a TypeContext<'a>,
+    path: &Path,
+) -> Option<super::decl::TypeDeclaration> {
+    use crate::cmi::{cmi_format, sig_reader::SigReadContext};
+    use crate::types::decl::{ModuleType, SignatureItem};
+
+    // Flatten the path to get root ident and component list
+    let (root_id, components) = path.flatten().ok()?;
+    if components.is_empty() {
+        return None; // Not a Pdot path
+    }
+
+    let load_paths = ctx.load_paths();
+    if load_paths.is_empty() {
+        return None;
+    }
+
+    // Load the root module's CMI
+    let root_name = root_id.name();
+    let cmi_filename = format!("{}.cmi", root_name);
+    let full_path = {
+        let mut found = None;
+        for dir in load_paths.iter() {
+            let exact = dir.join(&cmi_filename);
+            if exact.exists() {
+                found = Some(exact.to_string_lossy().into_owned());
+                break;
+            }
+            if let Some(first_char) = cmi_filename.chars().next() {
+                if first_char.is_ascii_uppercase() {
+                    let uncap = format!("{}{}", first_char.to_ascii_lowercase(), &cmi_filename[1..]);
+                    let uncap_path = dir.join(&uncap);
+                    if uncap_path.exists() {
+                        found = Some(uncap_path.to_string_lossy().into_owned());
+                        break;
+                    }
+                }
+            }
+        }
+        found
+    }?;
+
+    let cmi = cmi_format::read_cmi(&full_path).ok()?;
+    let mut sig_ctx = SigReadContext::new(ctx);
+    let root_sig = sig_ctx.read_signature(&cmi.cmi_sign);
+
+    // Walk through the components to find the type
+    // components = ["Promise", "t"] for Js.Promise.t
+    let type_name = components.last()?; // "t"
+    let module_components = &components[..components.len() - 1]; // ["Promise"]
+
+    // Navigate to the right sub-module
+    let mut current_sig = root_sig;
+    for &module_name in module_components {
+        let mut found_sig = None;
+        for item in &current_sig {
+            if let SignatureItem::SigModule(id, md, _) = item {
+                if id.name() == module_name {
+                    match &md.md_type {
+                        ModuleType::MtySignature(sub_sig) => {
+                            found_sig = Some(sub_sig.clone());
+                        }
+                        ModuleType::MtyAlias(_, alias_path) | ModuleType::MtyIdent(alias_path) => {
+                            // Resolve the alias by loading the aliased module's CMI
+                            if let Path::Pident(alias_id) = alias_path {
+                                let alias_cmi = format!("{}.cmi", alias_id.name());
+                                let alias_full_path = {
+                                    let mut f = None;
+                                    for dir in load_paths.iter() {
+                                        let exact = dir.join(&alias_cmi);
+                                        if exact.exists() {
+                                            f = Some(exact.to_string_lossy().into_owned());
+                                            break;
+                                        }
+                                        if let Some(first_char) = alias_cmi.chars().next() {
+                                            if first_char.is_ascii_uppercase() {
+                                                let uncap = format!("{}{}", first_char.to_ascii_lowercase(), &alias_cmi[1..]);
+                                                let uncap_path = dir.join(&uncap);
+                                                if uncap_path.exists() {
+                                                    f = Some(uncap_path.to_string_lossy().into_owned());
+                                                    break;
+                                                }
+                                            }
+                                        }
+                                    }
+                                    f
+                                };
+                                if let Some(alias_fp) = alias_full_path {
+                                    if let Ok(alias_cmi_data) = cmi_format::read_cmi(&alias_fp) {
+                                        let mut alias_sig_ctx = SigReadContext::new(ctx);
+                                        found_sig = Some(alias_sig_ctx.read_signature(&alias_cmi_data.cmi_sign));
+                                    }
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
+                    break;
+                }
+            }
+        }
+        current_sig = found_sig?;
+    }
+
+    // Find the type in the final signature
+    for item in &current_sig {
+        if let SignatureItem::SigType(id, decl, _) = item {
+            if id.name() == *type_name {
+                // Cache in the path store for future lookups
+                let path_name = path.name();
+                ctx.register_type_decl_by_path(&path_name, decl.clone());
+                // Also register by stamp if available
+                if id.stamp() != 0 {
+                    ctx.register_type_decl_by_stamp(id.stamp(), decl.clone());
+                }
+                return Some(decl.clone());
+            }
+        }
+    }
+
+    None
+}
+
 /// Try to expand a type alias (type abbreviation).
 ///
 /// If the type is `Tconstr(path, args)` and the type declaration for `path`
@@ -298,8 +431,8 @@ fn is_predef_type_name(name: &str) -> bool {
 /// the type parameters with the given arguments.
 ///
 /// Returns `Some(expanded)` if expansion was possible, `None` otherwise.
-fn try_expand_head(
-    ctx: &TypeContext<'_>,
+fn try_expand_head<'a>(
+    ctx: &'a TypeContext<'a>,
     env: &Env,
     ty: TypeExprRef,
 ) -> Option<TypeExprRef> {
@@ -314,6 +447,12 @@ fn try_expand_head(
             // Try stamp-based lookup first (most precise, handles CMI-loaded types)
             let stamp = match &path {
                 Path::Pident(id) if id.stamp() != 0 => Some(id.stamp()),
+                _ => None,
+            };
+
+            // For Pdot paths, get the full path name for qualified lookup
+            let full_path_name = match &path {
+                Path::Pdot(_, _, _) => Some(path.name()),
                 _ => None,
             };
 
@@ -334,7 +473,36 @@ fn try_expand_head(
                 }
             }
 
-            // 2. Try env by name
+            // 2. Try full qualified path lookup (for Pdot paths like Js.Promise.t)
+            if let Some(ref _path_name) = full_path_name {
+                // First check cached path store
+                if let Some(store_decl) = ctx.find_type_decl_by_path(_path_name) {
+                    if let Some(manifest) = store_decl.type_manifest {
+                        let params = &store_decl.type_params;
+                        if params.is_empty() {
+                            return Some(manifest);
+                        } else if params.len() == args.len() {
+                            return Some(subst_type(ctx, &params.clone(), &args, manifest));
+                        }
+                    }
+                    return None;
+                }
+
+                // Not cached — resolve by loading CMI files and walking module signatures
+                if let Some(resolved_decl) = resolve_type_through_modules(ctx, &path) {
+                    if let Some(manifest) = resolved_decl.type_manifest {
+                        let params = &resolved_decl.type_params;
+                        if params.is_empty() {
+                            return Some(manifest);
+                        } else if params.len() == args.len() {
+                            return Some(subst_type(ctx, &params.clone(), &args, manifest));
+                        }
+                    }
+                    return None;
+                }
+            }
+
+            // 3. Try env by name
             if let Ok(env_decl) = env.find_type(&name) {
                 if let Some(manifest) = env_decl.type_manifest {
                     let params = &env_decl.type_params;
@@ -348,7 +516,7 @@ fn try_expand_head(
                 // Type found in env but no manifest — abstract type, fall through
             }
 
-            // 3. Fall back to name-based global type declaration store
+            // 4. Fall back to name-based global type declaration store
             if let Some(store_decl) = ctx.find_type_decl(&name) {
                 if let Some(manifest) = store_decl.type_manifest {
                     let params = &store_decl.type_params;
@@ -449,8 +617,8 @@ fn subst_type(
 /// # Errors
 ///
 /// Returns `TypeError::Unify` if the types cannot be unified.
-pub fn unify(
-    ctx: &TypeContext<'_>,
+pub fn unify<'a>(
+    ctx: &'a TypeContext<'a>,
     state: &mut UnifyState,
     t1: TypeExprRef,
     t2: TypeExprRef,
@@ -485,8 +653,8 @@ pub fn unify(
 }
 
 /// Internal unification logic.
-fn unify_types(
-    ctx: &TypeContext<'_>,
+fn unify_types<'a>(
+    ctx: &'a TypeContext<'a>,
     state: &mut UnifyState,
     t1: TypeExprRef,
     t2: TypeExprRef,
@@ -865,8 +1033,8 @@ fn unify_types(
 // ============================================================================
 
 /// Unify two row types (for polymorphic variants).
-fn unify_rows(
-    ctx: &TypeContext<'_>,
+fn unify_rows<'a>(
+    ctx: &'a TypeContext<'a>,
     state: &mut UnifyState,
     row1: &RowDesc,
     row2: &RowDesc,
@@ -900,8 +1068,8 @@ fn unify_rows(
 }
 
 /// Unify two row fields.
-fn unify_row_field(
-    ctx: &TypeContext<'_>,
+fn unify_row_field<'a>(
+    ctx: &'a TypeContext<'a>,
     state: &mut UnifyState,
     field1: &RowField,
     field2: &RowField,
@@ -951,8 +1119,8 @@ fn unify_row_field(
 }
 
 /// Unify object fields.
-fn unify_object_fields(
-    ctx: &TypeContext<'_>,
+fn unify_object_fields<'a>(
+    ctx: &'a TypeContext<'a>,
     state: &mut UnifyState,
     fields1: TypeExprRef,
     fields2: TypeExprRef,
