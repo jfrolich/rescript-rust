@@ -136,7 +136,7 @@ pub mod recover {
     ///    - Else return false (don't retry)
     pub fn skip_tokens_and_maybe_retry<F>(p: &mut Parser<'_>, is_start_of_grammar: F) -> bool
     where
-        F: Fn(&Token) -> bool,
+        F: Fn(&Token<'_>) -> bool,
     {
         // Case 1: keyword on same line - skip it and don't retry
         if p.token.is_keyword() && p.prev_end_pos.line == p.start_pos.line {
@@ -333,7 +333,7 @@ where
 pub fn parse_ident(p: &mut Parser<'_>, msg: &str, start_pos_idx: PosIdx) -> (String, LocIdx) {
     match &p.token {
         Token::Lident(ident) | Token::Uident(ident) => {
-            let ident = ident.clone();
+            let ident = ident.clone().into_owned();
             p.next();
             let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
             (ident, loc)
@@ -453,7 +453,7 @@ pub enum ExprContext {
 // ============================================================================
 
 /// Get the closing token for an opening token.
-pub fn get_closing_token(token: &Token) -> Token {
+pub fn get_closing_token(token: &Token<'_>) -> Token<'static> {
     match token {
         Token::Lparen => Token::Rparen,
         Token::Lbrace => Token::Rbrace,
@@ -466,7 +466,7 @@ pub fn get_closing_token(token: &Token) -> Token {
 }
 
 /// Skip to the closing token, handling nested brackets.
-pub fn go_to_closing(closing_token: &Token, p: &mut Parser<'_>) {
+pub fn go_to_closing(closing_token: &Token<'_>, p: &mut Parser<'_>) {
     loop {
         match (&p.token, closing_token) {
             (Token::Rparen, Token::Rparen)
@@ -507,14 +507,14 @@ pub fn skip_doc_comments(p: &mut Parser<'_>) {
 }
 
 /// Convert a doc comment to a res.doc attribute.
-pub fn doc_comment_to_attribute(arena: &mut ParseArena, loc: Location, content: String) -> Attribute {
+pub fn doc_comment_to_attribute(arena: &mut ParseArena, loc: Location, content: impl Into<String>) -> Attribute {
     let str_idx = arena.intern("res.doc");
     let name = with_loc(str_idx, loc);
     let payload = Payload::PStr(vec![StructureItem {
         pstr_desc: StructureItemDesc::Pstr_eval(
             Expression {
                 pexp_desc: ExpressionDesc::Pexp_constant(Constant::String(
-                    content,
+                    content.into(),
                     None,
                 )),
                 pexp_loc: loc,
@@ -535,13 +535,13 @@ pub fn doc_comment_to_attribute(arena: &mut ParseArena, loc: Location, content: 
 ///
 /// Note: Strings are pushed (not interned) since they come from user input
 /// and should NOT be shared during marshalling.
-pub fn build_longident(arena: &mut ParseArena, words: &[String]) -> Longident {
+pub fn build_longident<S: AsRef<str>>(arena: &mut ParseArena, words: &[S]) -> Longident {
     let mut iter = words.iter();
     let first = iter.next().expect("build_longident: empty words");
-    let first_idx = arena.push_string(first.clone());
+    let first_idx = arena.push_string(first.as_ref().to_owned());
     let mut result = Longident::Lident(first_idx);
     for word in iter {
-        let word_idx = arena.push_string(word.clone());
+        let word_idx = arena.push_string(word.as_ref().to_owned());
         result = Longident::Ldot(Box::new(result), word_idx);
     }
     result
@@ -549,7 +549,7 @@ pub fn build_longident(arena: &mut ParseArena, words: &[String]) -> Longident {
 
 /// Build a longident from a list of path components and push to arena.
 /// Returns the arena index for proper sharing during marshalling.
-pub fn build_longident_idx(p: &mut Parser<'_>, words: &[String]) -> crate::parse_arena::LidentIdx {
+pub fn build_longident_idx<S: AsRef<str>>(p: &mut Parser<'_>, words: &[S]) -> crate::parse_arena::LidentIdx {
     let lid = build_longident(p.arena_mut(), words);
     p.push_longident(lid)
 }
@@ -789,7 +789,7 @@ pub fn make_unary_expr(
     p: &mut Parser<'_>,
     start_pos: PosIdx,
     token_end: PosIdx,
-    token: Token,
+    token: Token<'_>,
     operand: Expression,
 ) -> Expression {
     // Handle numeric literal negation specially
@@ -872,7 +872,7 @@ pub fn make_unary_expr(
 /// emit a helpful error message.
 pub fn make_infix_operator(
     p: &mut Parser<'_>,
-    token: Token,
+    token: Token<'_>,
     start_pos: PosIdx,
     end_pos: PosIdx,
 ) -> Expression {

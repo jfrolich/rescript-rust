@@ -34,7 +34,7 @@ pub enum Grammar {
     /// Record field set expression
     ExprSetField,
     /// Expression after a binary operator
-    ExprBinaryAfterOp(Token),
+    ExprBinaryAfterOp(Token<'static>),
     /// Block with expressions
     ExprBlock,
     /// Function call expression
@@ -203,7 +203,7 @@ impl std::fmt::Display for Grammar {
 }
 
 /// Check if a token can start a signature item.
-pub fn is_signature_item_start(token: &Token) -> bool {
+pub fn is_signature_item_start(token: &Token<'_>) -> bool {
     matches!(
         token,
         Token::At
@@ -220,7 +220,7 @@ pub fn is_signature_item_start(token: &Token) -> bool {
 }
 
 /// Check if a token can start an atomic pattern.
-pub fn is_atomic_pattern_start(token: &Token) -> bool {
+pub fn is_atomic_pattern_start(token: &Token<'_>) -> bool {
     matches!(
         token,
         Token::Int { .. }
@@ -241,7 +241,7 @@ pub fn is_atomic_pattern_start(token: &Token) -> bool {
 }
 
 /// Check if a token can start an atomic expression.
-pub fn is_atomic_expr_start(token: &Token) -> bool {
+pub fn is_atomic_expr_start(token: &Token<'_>) -> bool {
     matches!(
         token,
         Token::True
@@ -269,7 +269,7 @@ pub fn is_atomic_expr_start(token: &Token) -> bool {
 }
 
 /// Check if a token can start an atomic type expression.
-pub fn is_atomic_typ_expr_start(token: &Token) -> bool {
+pub fn is_atomic_typ_expr_start(token: &Token<'_>) -> bool {
     matches!(
         token,
         Token::SingleQuote
@@ -283,7 +283,7 @@ pub fn is_atomic_typ_expr_start(token: &Token) -> bool {
 }
 
 /// Check if a token can start an expression.
-pub fn is_expr_start(token: &Token) -> bool {
+pub fn is_expr_start(token: &Token<'_>) -> bool {
     matches!(
         token,
         Token::Assert
@@ -330,7 +330,7 @@ pub fn is_expr_start(token: &Token) -> bool {
 
 /// Check if a token can start a block expression.
 /// This determines whether consecutive expressions in a block can continue.
-pub fn is_block_expr_start(token: &Token) -> bool {
+pub fn is_block_expr_start(token: &Token<'_>) -> bool {
     matches!(
         token,
         Token::Assert
@@ -376,12 +376,12 @@ pub fn is_block_expr_start(token: &Token) -> bool {
 }
 
 /// Check if a token can start a JSX attribute.
-pub fn is_jsx_attribute_start(token: &Token) -> bool {
+pub fn is_jsx_attribute_start(token: &Token<'_>) -> bool {
     matches!(token, Token::Lident(_) | Token::Question | Token::Lbrace)
 }
 
 /// Check if a token can start a structure item.
-pub fn is_structure_item_start(token: &Token) -> bool {
+pub fn is_structure_item_start(token: &Token<'_>) -> bool {
     matches!(
         token,
         Token::Open
@@ -398,7 +398,7 @@ pub fn is_structure_item_start(token: &Token) -> bool {
 }
 
 /// Check if a token can start a pattern.
-pub fn is_pattern_start(token: &Token) -> bool {
+pub fn is_pattern_start(token: &Token<'_>) -> bool {
     matches!(
         token,
         Token::Int { .. }
@@ -428,12 +428,12 @@ pub fn is_pattern_start(token: &Token) -> bool {
 }
 
 /// Check if a token can start a parameter.
-pub fn is_parameter_start(token: &Token) -> bool {
+pub fn is_parameter_start(token: &Token<'_>) -> bool {
     matches!(token, Token::Typ | Token::Tilde | Token::Dot) || is_pattern_start(token)
 }
 
 /// Check if a token can start a string field declaration.
-pub fn is_string_field_decl_start(token: &Token) -> bool {
+pub fn is_string_field_decl_start(token: &Token<'_>) -> bool {
     matches!(
         token,
         Token::String(_) | Token::Lident(_) | Token::At | Token::DotDotDot
@@ -441,7 +441,7 @@ pub fn is_string_field_decl_start(token: &Token) -> bool {
 }
 
 /// Check if a token can start a field declaration.
-pub fn is_field_decl_start(token: &Token) -> bool {
+pub fn is_field_decl_start(token: &Token<'_>) -> bool {
     matches!(
         token,
         Token::At | Token::Mutable | Token::Lident(_) | Token::Uident(_)
@@ -449,7 +449,7 @@ pub fn is_field_decl_start(token: &Token) -> bool {
 }
 
 /// Check if a token can start a record declaration.
-pub fn is_record_decl_start(token: &Token) -> bool {
+pub fn is_record_decl_start(token: &Token<'_>) -> bool {
     matches!(
         token,
         Token::At | Token::Mutable | Token::Lident(_) | Token::DotDotDot
@@ -457,7 +457,7 @@ pub fn is_record_decl_start(token: &Token) -> bool {
 }
 
 /// Check if a token can start a type expression.
-pub fn is_typ_expr_start(token: &Token) -> bool {
+pub fn is_typ_expr_start(token: &Token<'_>) -> bool {
     matches!(
         token,
         Token::At
@@ -474,12 +474,12 @@ pub fn is_typ_expr_start(token: &Token) -> bool {
 }
 
 /// Check if a token can start a type parameter.
-pub fn is_type_parameter_start(token: &Token) -> bool {
+pub fn is_type_parameter_start(token: &Token<'_>) -> bool {
     matches!(token, Token::Tilde | Token::Dot) || is_typ_expr_start(token)
 }
 
 /// Check if a token can start a type param (in type definition).
-pub fn is_type_param_start(token: &Token) -> bool {
+pub fn is_type_param_start(token: &Token<'_>) -> bool {
     matches!(
         token,
         Token::Plus | Token::Minus | Token::SingleQuote | Token::Underscore
@@ -487,7 +487,7 @@ pub fn is_type_param_start(token: &Token) -> bool {
 }
 
 /// Check if a token can start a functor argument.
-pub fn is_functor_arg_start(token: &Token) -> bool {
+pub fn is_functor_arg_start(token: &Token<'_>) -> bool {
     matches!(
         token,
         Token::At
@@ -500,7 +500,7 @@ pub fn is_functor_arg_start(token: &Token) -> bool {
 }
 
 /// Check if a token can start a module expression.
-pub fn is_mod_expr_start(token: &Token) -> bool {
+pub fn is_mod_expr_start(token: &Token<'_>) -> bool {
     matches!(
         token,
         Token::At
@@ -513,12 +513,12 @@ pub fn is_mod_expr_start(token: &Token) -> bool {
 }
 
 /// Check if a token can start a dict row.
-pub fn is_dict_row_start(token: &Token) -> bool {
+pub fn is_dict_row_start(token: &Token<'_>) -> bool {
     matches!(token, Token::String(_))
 }
 
 /// Check if a token can start a record row.
-pub fn is_record_row_start(token: &Token) -> bool {
+pub fn is_record_row_start(token: &Token<'_>) -> bool {
     matches!(
         token,
         Token::DotDotDot | Token::Uident(_) | Token::Lident(_)
@@ -526,27 +526,27 @@ pub fn is_record_row_start(token: &Token) -> bool {
 }
 
 /// Check if a token can start a record row with string key.
-pub fn is_record_row_string_key_start(token: &Token) -> bool {
+pub fn is_record_row_string_key_start(token: &Token<'_>) -> bool {
     matches!(token, Token::String(_))
 }
 
 /// Check if a token can start an argument.
-pub fn is_argument_start(token: &Token) -> bool {
+pub fn is_argument_start(token: &Token<'_>) -> bool {
     matches!(token, Token::Tilde | Token::Dot | Token::Underscore) || is_expr_start(token)
 }
 
 /// Check if a token can start a pattern match.
-pub fn is_pattern_match_start(token: &Token) -> bool {
+pub fn is_pattern_match_start(token: &Token<'_>) -> bool {
     matches!(token, Token::Bar) || is_pattern_start(token)
 }
 
 /// Check if a token can start an OCaml list pattern.
-pub fn is_pattern_ocaml_list_start(token: &Token) -> bool {
+pub fn is_pattern_ocaml_list_start(token: &Token<'_>) -> bool {
     matches!(token, Token::DotDotDot) || is_pattern_start(token)
 }
 
 /// Check if a token can start a pattern record item.
-pub fn is_pattern_record_item_start(token: &Token) -> bool {
+pub fn is_pattern_record_item_start(token: &Token<'_>) -> bool {
     matches!(
         token,
         Token::DotDotDot | Token::Uident(_) | Token::Lident(_) | Token::Underscore
@@ -554,17 +554,17 @@ pub fn is_pattern_record_item_start(token: &Token) -> bool {
 }
 
 /// Check if a token can start an attribute.
-pub fn is_attribute_start(token: &Token) -> bool {
+pub fn is_attribute_start(token: &Token<'_>) -> bool {
     matches!(token, Token::At)
 }
 
 /// Check if a token can start a JSX child.
-pub fn is_jsx_child_start(token: &Token) -> bool {
+pub fn is_jsx_child_start(token: &Token<'_>) -> bool {
     is_atomic_expr_start(token)
 }
 
 /// Check if a token is a valid list element in the given grammar context.
-pub fn is_list_element(grammar: &Grammar, token: &Token) -> bool {
+pub fn is_list_element(grammar: &Grammar, token: &Token<'_>) -> bool {
     match grammar {
         Grammar::ExprList => *token == Token::DotDotDot || is_expr_start(token),
         Grammar::ListExpr => *token == Token::DotDotDot || is_expr_start(token),
@@ -599,7 +599,7 @@ pub fn is_list_element(grammar: &Grammar, token: &Token) -> bool {
 }
 
 /// Check if a token terminates a list in the given grammar context.
-pub fn is_list_terminator(grammar: &Grammar, token: &Token) -> bool {
+pub fn is_list_terminator(grammar: &Grammar, token: &Token<'_>) -> bool {
     match (grammar, token) {
         (_, Token::Eof) => true,
         (Grammar::ExprList, Token::Rparen | Token::Forwardslash | Token::Rbracket) => true,
@@ -636,7 +636,7 @@ pub fn is_list_terminator(grammar: &Grammar, token: &Token) -> bool {
 }
 
 /// Check if a token is part of a list (either an element or terminator).
-pub fn is_part_of_list(grammar: &Grammar, token: &Token) -> bool {
+pub fn is_part_of_list(grammar: &Grammar, token: &Token<'_>) -> bool {
     is_list_element(grammar, token) || is_list_terminator(grammar, token)
 }
 
@@ -659,10 +659,10 @@ mod tests {
         assert!(is_expr_start(&Token::If));
         assert!(is_expr_start(&Token::True));
         assert!(is_expr_start(&Token::Int {
-            i: "42".to_string(),
+            i: std::borrow::Cow::Borrowed("42"),
             suffix: None
         }));
-        assert!(is_expr_start(&Token::Lident("foo".to_string())));
+        assert!(is_expr_start(&Token::Lident(std::borrow::Cow::Borrowed("foo"))));
         assert!(!is_expr_start(&Token::Rparen));
         assert!(!is_expr_start(&Token::Comma));
     }
@@ -724,5 +724,12 @@ mod tests {
     fn test_grammar_is_send_sync() {
         fn assert_send_sync<T: Send + Sync>() {}
         assert_send_sync::<Grammar>();
+    }
+
+    #[test]
+    fn test_is_mod_expr_start() {
+        // Test the Lident guard pattern still works with Cow
+        assert!(is_mod_expr_start(&Token::Lident(std::borrow::Cow::Borrowed("unpack"))));
+        assert!(!is_mod_expr_start(&Token::Lident(std::borrow::Cow::Borrowed("foo"))));
     }
 }

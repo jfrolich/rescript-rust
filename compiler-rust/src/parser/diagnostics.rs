@@ -10,12 +10,15 @@ use super::grammar::Grammar;
 use super::token::Token;
 
 /// A category of diagnostic message.
+///
+/// Uses `Token<'static>` (owned tokens) because diagnostics outlive the parsing phase.
+/// When creating diagnostics from borrowed tokens, use `token.clone().into_owned()`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum DiagnosticCategory {
     /// An unexpected token was encountered.
     Unexpected {
         /// The unexpected token.
-        token: Token,
+        token: Token<'static>,
         /// The parsing context (stack of grammar rules being parsed).
         context: Vec<(Grammar, Position)>,
     },
@@ -26,14 +29,14 @@ pub enum DiagnosticCategory {
         /// Position of the previous token.
         pos: Position,
         /// The expected token.
-        token: Token,
+        token: Token<'static>,
     },
     /// A general message.
     Message(String),
     /// Expected an uppercase identifier.
-    Uident(Token),
+    Uident(Token<'static>),
     /// Expected a lowercase identifier.
-    Lident(Token),
+    Lident(Token<'static>),
     /// Unclosed string literal.
     UnclosedString,
     /// Unclosed template literal.
@@ -190,7 +193,7 @@ fn uncapitalize_first(s: &str) -> String {
 }
 
 /// Default message for unexpected tokens.
-fn default_unexpected(token: &Token) -> String {
+fn default_unexpected(token: &Token<'_>) -> String {
     format!(
         "I'm not sure what to parse here when looking at \"{}\".",
         token
@@ -203,11 +206,11 @@ fn default_unexpected(token: &Token) -> String {
 /// Note: In OCaml, breadcrumbs are stored with the most recent at the head (prepended).
 /// In Rust, we append to Vec, so the most recent breadcrumb is at the END.
 /// We need to iterate from the end to match OCaml's pattern matching behavior.
-fn explain_unexpected(token: &Token, context: &[(Grammar, Position)]) -> String {
+fn explain_unexpected(token: &Token<'_>, context: &[(Grammar, Position)]) -> String {
     use super::grammar;
 
     // Check if token is a reserved keyword first (OCaml does this at the end, but it's the same)
-    let reserved_keyword = |t: &Token| {
+    let reserved_keyword = |t: &Token<'_>| {
         let name = format!("{}", t);
         format!(
             "`{}` is a reserved keyword. Keywords need to be escaped: \\\"{}\"",
@@ -335,12 +338,12 @@ fn explain_unexpected(token: &Token, context: &[(Grammar, Position)]) -> String 
 /// Convenience constructors for diagnostic categories.
 impl DiagnosticCategory {
     /// Create an unexpected token diagnostic.
-    pub fn unexpected(token: Token, context: Vec<(Grammar, Position)>) -> Self {
+    pub fn unexpected(token: Token<'static>, context: Vec<(Grammar, Position)>) -> Self {
         DiagnosticCategory::Unexpected { token, context }
     }
 
     /// Create an expected token diagnostic.
-    pub fn expected(token: Token, pos: Position, context: Option<Grammar>) -> Self {
+    pub fn expected(token: Token<'static>, pos: Position, context: Option<Grammar>) -> Self {
         DiagnosticCategory::Expected {
             token,
             pos,

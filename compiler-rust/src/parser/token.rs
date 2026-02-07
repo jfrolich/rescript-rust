@@ -2,14 +2,24 @@
 //!
 //! This module defines all tokens that can appear in ReScript source code,
 //! along with utilities for token classification, precedence, and conversion.
+//!
+//! Tokens use `Cow<'a, str>` for string data, enabling zero-copy borrowing
+//! from source for identifiers and literals that don't need transformation,
+//! while still supporting owned strings for escape-processed content.
+
+use std::borrow::Cow;
 
 use super::comment::Comment;
 use crate::location::{Location, Position};
 use serde::{Deserialize, Serialize};
 
 /// A token in ReScript source code.
+///
+/// The lifetime `'a` refers to the source string being scanned.
+/// Most string data (identifiers, numbers) borrows from source via `Cow::Borrowed`.
+/// Strings that need transformation (escape sequences) use `Cow::Owned`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub enum Token {
+pub enum Token<'a> {
     // Keywords
     /// `await` keyword
     Await,
@@ -72,34 +82,34 @@ pub enum Token {
         /// The codepoint value.
         c: i32,
         /// The original string representation.
-        original: String,
+        original: Cow<'a, str>,
     },
     /// Integer literal: `123`, `0xff`, etc.
     Int {
         /// The integer value as a string.
-        i: String,
+        i: Cow<'a, str>,
         /// Optional suffix like `n` for bigint.
         suffix: Option<char>,
     },
     /// Float literal: `1.0`, `1e10`, etc.
     Float {
         /// The float value as a string.
-        f: String,
+        f: Cow<'a, str>,
         /// Optional suffix.
         suffix: Option<char>,
     },
     /// String literal: `"hello"`
-    String(String),
+    String(Cow<'a, str>),
     /// Lowercase identifier: `foo`, `bar`
-    Lident(String),
+    Lident(Cow<'a, str>),
     /// Uppercase identifier: `Foo`, `Bar`
-    Uident(String),
+    Uident(Cow<'a, str>),
     /// Regular expression literal: `/pattern/flags`
     Regex {
         /// The regex pattern.
-        pattern: String,
+        pattern: Cow<'a, str>,
         /// The regex flags.
-        flags: String,
+        flags: Cow<'a, str>,
     },
 
     // Let with optional unwrap
@@ -243,34 +253,34 @@ pub enum Token {
         /// Location of the comment.
         loc: Location,
         /// Content of the comment.
-        content: String,
+        content: Cow<'a, str>,
     },
     /// Module comment with location and content
     ModuleComment {
         /// Location of the comment.
         loc: Location,
         /// Content of the comment.
-        content: String,
+        content: Cow<'a, str>,
     },
 
     // Template strings
     /// Template string tail: `...}`
     TemplateTail {
         /// The text content.
-        text: String,
+        text: Cow<'a, str>,
         /// The position of the tail.
         pos: Position,
     },
     /// Template string part: `...${`
     TemplatePart {
         /// The text content.
-        text: String,
+        text: Cow<'a, str>,
         /// The position of the part.
         pos: Position,
     },
 }
 
-impl Token {
+impl<'a> Token<'a> {
     /// Get the precedence of a token for operator parsing.
     ///
     /// Returns 0 for non-operators.
@@ -345,8 +355,8 @@ impl Token {
     /// Look up a keyword from a string, returning the appropriate token.
     ///
     /// If the string is not a keyword, returns an identifier token
-    /// (Uident for uppercase, Lident for lowercase).
-    pub fn lookup_keyword(s: &str) -> Token {
+    /// (Uident for uppercase, Lident for lowercase) borrowing from the source.
+    pub fn lookup_keyword(s: &'a str) -> Token<'a> {
         match s {
             "and" => Token::And,
             "as" => Token::As,
@@ -378,15 +388,11 @@ impl Token {
             "when" => Token::When,
             "while" => Token::While,
             _ => {
-                // Check first character to determine if Uident or Lident
-                if let Some(c) = s.chars().next() {
-                    if c.is_ascii_uppercase() {
-                        Token::Uident(s.to_string())
-                    } else {
-                        Token::Lident(s.to_string())
-                    }
+                // Check first byte to determine if Uident or Lident (ASCII check)
+                if s.as_bytes().first().map_or(false, |b| b.is_ascii_uppercase()) {
+                    Token::Uident(Cow::Borrowed(s))
                 } else {
-                    Token::Lident(s.to_string())
+                    Token::Lident(Cow::Borrowed(s))
                 }
             }
         }
@@ -429,12 +435,121 @@ impl Token {
     }
 
     /// The special "catch" identifier (not a keyword).
-    pub fn catch() -> Token {
-        Token::Lident("catch".to_string())
+    pub fn catch() -> Token<'a> {
+        Token::Lident(Cow::Borrowed("catch"))
+    }
+
+    /// Convert this token into an owned version with `'static` lifetime.
+    /// Used when storing tokens in diagnostics or other long-lived structures.
+    pub fn into_owned(self) -> Token<'static> {
+        match self {
+            Token::Await => Token::Await,
+            Token::Open => Token::Open,
+            Token::True => Token::True,
+            Token::False => Token::False,
+            Token::As => Token::As,
+            Token::And => Token::And,
+            Token::Rec => Token::Rec,
+            Token::Exception => Token::Exception,
+            Token::Assert => Token::Assert,
+            Token::If => Token::If,
+            Token::Else => Token::Else,
+            Token::For => Token::For,
+            Token::In => Token::In,
+            Token::While => Token::While,
+            Token::Switch => Token::Switch,
+            Token::When => Token::When,
+            Token::External => Token::External,
+            Token::Typ => Token::Typ,
+            Token::Private => Token::Private,
+            Token::Mutable => Token::Mutable,
+            Token::Constraint => Token::Constraint,
+            Token::Include => Token::Include,
+            Token::Module => Token::Module,
+            Token::Of => Token::Of,
+            Token::Try => Token::Try,
+            Token::List => Token::List,
+            Token::Dict => Token::Dict,
+            Token::Codepoint { c, original } => Token::Codepoint { c, original: Cow::Owned(original.into_owned()) },
+            Token::Int { i, suffix } => Token::Int { i: Cow::Owned(i.into_owned()), suffix },
+            Token::Float { f, suffix } => Token::Float { f: Cow::Owned(f.into_owned()), suffix },
+            Token::String(s) => Token::String(Cow::Owned(s.into_owned())),
+            Token::Lident(s) => Token::Lident(Cow::Owned(s.into_owned())),
+            Token::Uident(s) => Token::Uident(Cow::Owned(s.into_owned())),
+            Token::Regex { pattern, flags } => Token::Regex { pattern: Cow::Owned(pattern.into_owned()), flags: Cow::Owned(flags.into_owned()) },
+            Token::Let { unwrap } => Token::Let { unwrap },
+            Token::Dot => Token::Dot,
+            Token::DotDot => Token::DotDot,
+            Token::DotDotDot => Token::DotDotDot,
+            Token::Bang => Token::Bang,
+            Token::Semicolon => Token::Semicolon,
+            Token::Underscore => Token::Underscore,
+            Token::SingleQuote => Token::SingleQuote,
+            Token::Equal => Token::Equal,
+            Token::EqualEqual => Token::EqualEqual,
+            Token::EqualEqualEqual => Token::EqualEqualEqual,
+            Token::Ampersand => Token::Ampersand,
+            Token::Bar => Token::Bar,
+            Token::Lparen => Token::Lparen,
+            Token::Rparen => Token::Rparen,
+            Token::Lbracket => Token::Lbracket,
+            Token::Rbracket => Token::Rbracket,
+            Token::Lbrace => Token::Lbrace,
+            Token::Rbrace => Token::Rbrace,
+            Token::Colon => Token::Colon,
+            Token::Comma => Token::Comma,
+            Token::Eof => Token::Eof,
+            Token::Backslash => Token::Backslash,
+            Token::Forwardslash => Token::Forwardslash,
+            Token::ForwardslashDot => Token::ForwardslashDot,
+            Token::Asterisk => Token::Asterisk,
+            Token::AsteriskDot => Token::AsteriskDot,
+            Token::Exponentiation => Token::Exponentiation,
+            Token::Minus => Token::Minus,
+            Token::MinusDot => Token::MinusDot,
+            Token::Plus => Token::Plus,
+            Token::PlusDot => Token::PlusDot,
+            Token::PlusPlus => Token::PlusPlus,
+            Token::PlusEqual => Token::PlusEqual,
+            Token::ColonGreaterThan => Token::ColonGreaterThan,
+            Token::GreaterThan => Token::GreaterThan,
+            Token::LessThan => Token::LessThan,
+            Token::Hash => Token::Hash,
+            Token::HashEqual => Token::HashEqual,
+            Token::Tilde => Token::Tilde,
+            Token::Question => Token::Question,
+            Token::EqualGreater => Token::EqualGreater,
+            Token::MinusGreater => Token::MinusGreater,
+            Token::Lor => Token::Lor,
+            Token::Land => Token::Land,
+            Token::Bnot => Token::Bnot,
+            Token::Bor => Token::Bor,
+            Token::Bxor => Token::Bxor,
+            Token::Band => Token::Band,
+            Token::Caret => Token::Caret,
+            Token::BangEqual => Token::BangEqual,
+            Token::BangEqualEqual => Token::BangEqualEqual,
+            Token::LessEqual => Token::LessEqual,
+            Token::GreaterEqual => Token::GreaterEqual,
+            Token::ColonEqual => Token::ColonEqual,
+            Token::At => Token::At,
+            Token::AtAt => Token::AtAt,
+            Token::Percent => Token::Percent,
+            Token::PercentPercent => Token::PercentPercent,
+            Token::Backtick => Token::Backtick,
+            Token::LeftShift => Token::LeftShift,
+            Token::RightShift => Token::RightShift,
+            Token::RightShiftUnsigned => Token::RightShiftUnsigned,
+            Token::Comment(c) => Token::Comment(c),
+            Token::DocComment { loc, content } => Token::DocComment { loc, content: Cow::Owned(content.into_owned()) },
+            Token::ModuleComment { loc, content } => Token::ModuleComment { loc, content: Cow::Owned(content.into_owned()) },
+            Token::TemplateTail { text, pos } => Token::TemplateTail { text: Cow::Owned(text.into_owned()), pos },
+            Token::TemplatePart { text, pos } => Token::TemplatePart { text: Cow::Owned(text.into_owned()), pos },
+        }
     }
 }
 
-impl std::fmt::Display for Token {
+impl<'a> std::fmt::Display for Token<'a> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Token::Await => write!(f, "await"),
@@ -565,7 +680,7 @@ mod tests {
         assert!(Token::Let { unwrap: false }.is_keyword());
         assert!(Token::Let { unwrap: true }.is_keyword());
         assert!(!Token::Plus.is_keyword());
-        assert!(!Token::Lident("foo".to_string()).is_keyword());
+        assert!(!Token::<'_>::Lident(Cow::Borrowed("foo")).is_keyword());
     }
 
     #[test]
@@ -575,11 +690,11 @@ mod tests {
         assert_eq!(Token::lookup_keyword("let?"), Token::Let { unwrap: true });
         assert_eq!(
             Token::lookup_keyword("Foo"),
-            Token::Uident("Foo".to_string())
+            Token::Uident(Cow::Borrowed("Foo"))
         );
         assert_eq!(
             Token::lookup_keyword("foo"),
-            Token::Lident("foo".to_string())
+            Token::Lident(Cow::Borrowed("foo"))
         );
     }
 
@@ -593,14 +708,14 @@ mod tests {
 
     #[test]
     fn test_display() {
-        assert_eq!(format!("{}", Token::If), "if");
-        assert_eq!(format!("{}", Token::Plus), "+");
-        assert_eq!(format!("{}", Token::EqualGreater), "=>");
+        assert_eq!(format!("{}", Token::<'_>::If), "if");
+        assert_eq!(format!("{}", Token::<'_>::Plus), "+");
+        assert_eq!(format!("{}", Token::<'_>::EqualGreater), "=>");
         assert_eq!(
             format!(
                 "{}",
                 Token::Int {
-                    i: "42".to_string(),
+                    i: Cow::Borrowed("42"),
                     suffix: None
                 }
             ),
@@ -610,12 +725,23 @@ mod tests {
 
     #[test]
     fn test_catch() {
-        assert_eq!(Token::catch(), Token::Lident("catch".to_string()));
+        assert_eq!(Token::catch(), Token::Lident(Cow::Borrowed("catch")));
     }
 
     #[test]
     fn test_token_is_send_sync() {
         fn assert_send_sync<T: Send + Sync>() {}
-        assert_send_sync::<Token>();
+        assert_send_sync::<Token<'static>>();
+    }
+
+    #[test]
+    fn test_into_owned() {
+        let borrowed: Token<'_> = Token::Lident(Cow::Borrowed("hello"));
+        let owned: Token<'static> = borrowed.into_owned();
+        assert_eq!(owned, Token::Lident(Cow::Owned("hello".to_string())));
+
+        let keyword: Token<'_> = Token::If;
+        let owned_kw: Token<'static> = keyword.into_owned();
+        assert_eq!(owned_kw, Token::If);
     }
 }

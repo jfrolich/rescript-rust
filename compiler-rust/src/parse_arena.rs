@@ -1365,8 +1365,8 @@ impl ParseArena {
     }
 
     /// Push a string without deduplication (for dynamic user-input strings).
-    pub fn push_string(&mut self, s: String) -> StrIdx {
-        self.strings.push(s)
+    pub fn push_string(&mut self, s: impl Into<String>) -> StrIdx {
+        self.strings.push(s.into())
     }
 
     /// Generate the next local module name for %%private expansion.
