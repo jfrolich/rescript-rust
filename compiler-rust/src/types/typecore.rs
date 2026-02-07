@@ -531,16 +531,39 @@ pub fn type_constant(ctx: &TypeContext<'_>, env: &Env, cst: &Constant) -> TypeEx
     }
 }
 
+/// Parse an integer literal string, handling underscores and 0x/0o/0b prefixes.
+/// Returns the value as i64, or None if it can't be parsed.
+fn parse_int_literal(s: &str) -> Option<i64> {
+    let stripped: String = s.chars().filter(|c| *c != '_').collect();
+    let (negative, digits) = if stripped.starts_with('-') {
+        (true, &stripped[1..])
+    } else {
+        (false, &stripped[..])
+    };
+    let abs_val = if digits.starts_with("0x") || digits.starts_with("0X") {
+        i64::from_str_radix(&digits[2..], 16).ok()?
+    } else if digits.starts_with("0o") || digits.starts_with("0O") {
+        i64::from_str_radix(&digits[2..], 8).ok()?
+    } else if digits.starts_with("0b") || digits.starts_with("0B") {
+        i64::from_str_radix(&digits[2..], 2).ok()?
+    } else {
+        digits.parse::<i64>().ok()?
+    };
+    if negative { Some(-abs_val) } else { Some(abs_val) }
+}
+
 /// Convert a parsed constant to a typed constant.
 pub fn convert_constant(cst: &crate::parser::ast::Constant) -> TypeCoreResult<Constant> {
     use crate::parser::ast::Constant as ParsedConstant;
 
     match cst {
         ParsedConstant::Integer(s, None) => {
-            // Try to parse as i32
-            match s.parse::<i32>() {
-                Ok(n) => Ok(Constant::Int(n)),
-                Err(_) => Err(TypeCoreError::LiteralOverflow("int".to_string())),
+            // Parse integer literal, handling underscores and 0x/0o/0b prefixes.
+            // OCaml's native int is 63-bit, so large literals succeed there.
+            // We parse as i64 and wrap to i32 to match JavaScript semantics.
+            match parse_int_literal(s) {
+                Some(n) => Ok(Constant::Int(n as i32)),
+                None => Err(TypeCoreError::LiteralOverflow("int".to_string())),
             }
         }
         ParsedConstant::Integer(s, Some('n')) => {
@@ -4196,10 +4219,33 @@ mod tests {
     }
 
     #[test]
-    fn test_convert_constant_overflow() {
+    fn test_convert_constant_overflow_wraps() {
+        // Values that fit in i64 but not i32 should wrap to i32
         let cst = crate::parser::ast::Constant::Integer("99999999999999999".to_string(), None);
+        let result = convert_constant(&cst).unwrap();
+        assert_eq!(result, Constant::Int(99999999999999999_i64 as i32));
+    }
+
+    #[test]
+    fn test_convert_constant_overflow_too_large() {
+        // Values that don't fit in i64 should still error
+        let cst = crate::parser::ast::Constant::Integer("99999999999999999999999".to_string(), None);
         let result = convert_constant(&cst);
         assert!(matches!(result, Err(TypeCoreError::LiteralOverflow(_))));
+    }
+
+    #[test]
+    fn test_convert_constant_underscores() {
+        let cst = crate::parser::ast::Constant::Integer("949_460_645_006".to_string(), None);
+        let result = convert_constant(&cst).unwrap();
+        assert_eq!(result, Constant::Int(949_460_645_006_i64 as i32));
+    }
+
+    #[test]
+    fn test_convert_constant_hex() {
+        let cst = crate::parser::ast::Constant::Integer("0xffff_ffff".to_string(), None);
+        let result = convert_constant(&cst).unwrap();
+        assert_eq!(result, Constant::Int(0xffff_ffff_i64 as i32));
     }
 
     #[test]
