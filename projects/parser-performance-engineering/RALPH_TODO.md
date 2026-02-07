@@ -1,7 +1,7 @@
 # Parser Performance Engineering TODO
 
 **Last Updated:** 2026-02-07
-**Status:** 1/19 tasks complete
+**Status:** 2/19 tasks complete
 
 **Baseline:** Rust is 2-5x faster on small files (<10KB), ~0.7-1.0x on large files (20-60KB).
 **Goal:** Maximize Rust parser speed across all file sizes while preserving byte-for-byte binary AST parity.
@@ -16,7 +16,7 @@ These target the scanner and token representation where the parser spends most t
 
 - [x] **1.1 Byte-level scanning** — Replace `Vec<char>` with direct `&[u8]` byte operations. ASCII fast path (byte < 0x80), UTF-8 slow path on demand. Eliminates Vec<char> allocation and improves cache locality. OXC and SWC both use byte-level scanning. Files: `scanner.rs`. Scanner struct ~24 bytes smaller, eliminates Vec<char>/Vec<usize> heap allocations. Large files improved from 0.87x to 0.83x. All 1196 parity tests pass.
 
-- [ ] **1.2 Zero-copy token strings** — Change `Token` to `Token<'src>` with `&'src str` slices borrowing from source for identifiers and string literals. Only allocate for escaped/interpolated strings. Requires lifetime parameter propagation through Token, Scanner, Parser. Files: `token.rs`, `scanner.rs`, `state.rs`, all parsing modules. Measure token allocation count before/after.
+- [x] **1.2 Zero-copy token strings** — Changed `Token` to `Token<'a>` with `Cow<'a, str>` for all string-carrying variants. Scanner produces `Cow::Borrowed` for identifiers and literals (zero-copy from source), `Cow::Owned` only for escape-processed strings. Lifetime propagated through Scanner, Parser, ScanResult, ScannerSnapshot. DiagnosticCategory and Grammar use `Token<'static>` with `.into_owned()` at the boundary. Files: `token.rs`, `scanner.rs`, `state.rs`, `diagnostics.rs`, `grammar.rs`, `core.rs`, `parse_arena.rs`, `expr.rs`, `pattern.rs`, `typ.rs`, `module.rs`. Impact: Large files 0.83x→0.80x (~4% faster), Medium 0.57x→0.55x. All 1196 parity tests pass.
 
 - [ ] **1.3 String interning via StrIdx** — Extend existing `StrIdx` arena to cover all identifier strings during parsing. Deduplicate repeated identifiers (e.g., common names like `t`, `x`, `unit`). Comparison becomes index equality instead of string comparison. Files: `token.rs`, `ast.rs`, scanner integration.
 

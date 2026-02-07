@@ -12,7 +12,7 @@
 
 | Tier | Description | Status | Progress |
 |------|-------------|--------|----------|
-| Tier 1 | High Impact: Scanner + Token | 🚧 In Progress | 2/4 |
+| Tier 1 | High Impact: Scanner + Token | 🚧 In Progress | 3/4 |
 | Tier 2 | Medium Impact: Token + Misc | ⏳ Not Started | 0/6 |
 | Tier 3 | Medium Impact: AST + Advanced | ⏳ Not Started | 0/5 |
 | Tier 4 | Architectural | ⏳ Not Started | 0/3 |
@@ -47,10 +47,13 @@ cargo test --release --lib -- benchmark_all --ignored --nocapture
   - All 1196 parity tests pass with zero regressions
   - Files: `scanner.rs`
 
-- [ ] **1.2 Zero-copy token strings**
-  - Change `Token` to `Token<'src>` with `&'src str` for identifiers/strings
-  - Only allocate for escaped strings
-  - Files: `token.rs`, `scanner.rs`, `state.rs`, `expr.rs`, `pattern.rs`, `typ.rs`, `module.rs`
+- [x] **1.2 Zero-copy token strings**
+  - Changed `Token` to `Token<'a>` with `Cow<'a, str>` for all string-carrying variants
+  - Scanner uses `Cow::Borrowed` for identifiers/numbers (zero-copy), `Cow::Owned` for escape-processed strings
+  - DiagnosticCategory/Grammar use `Token<'static>` with `.into_owned()` at boundary
+  - Impact: Large files 0.83x→0.80x (~4% faster), Medium 0.57x→0.55x
+  - All 1196 parity tests pass with zero regressions
+  - Files: `token.rs`, `scanner.rs`, `state.rs`, `diagnostics.rs`, `grammar.rs`, `core.rs`, `parse_arena.rs`, `expr.rs`, `pattern.rs`, `typ.rs`, `module.rs`
 
 - [ ] **1.3 String interning (StrIdx)**
   - Extend existing `StrIdx` to cover all identifier strings
@@ -149,6 +152,7 @@ cargo test --release --lib -- benchmark_all --ignored --nocapture
 |-------------|------|--------|--------|
 | Precomputed char/byte arrays | Jan 2026 | 41x on JSX benchmark | 558e262ff |
 | Byte-level scanning | Feb 2026 | Large files 0.87x→0.83x, eliminates Vec allocs | 21ebc41e7 |
+| Zero-copy token strings (Cow) | Feb 2026 | Large files 0.83x→0.80x (~4% faster) | fcab3e407 |
 
 ---
 
@@ -175,6 +179,22 @@ Run: cargo test --release --lib -- benchmark_all --ignored --nocapture
   Large (>30KB)                 14       14        0       0.83x       0.56x       0.98x
   Medium (10-30KB)              73       73        0       0.57x       0.23x       0.84x
   Small (1-10KB)               443      443        0       0.40x       0.23x       0.59x
+  Tiny (<1KB)                  636      636        0       0.31x       0.25x       0.61x
+
+Overall: 1166/1166 passing (1166 faster, 0 within tolerance), 38 skipped
+Parity: 1196/1196 files pass
+```
+
+### After 1.2 Zero-copy token strings (February 2026)
+
+```
+Run: cargo test --release --lib -- benchmark_all --ignored --nocapture
+
+  Size Tier                  Files   Faster       OK Avg Factor Min Factor Max Factor
+  -------------------------------------------------------------------------------------
+  Large (>30KB)                 14       14        0       0.80x       0.54x       0.95x
+  Medium (10-30KB)              73       73        0       0.55x       0.22x       0.82x
+  Small (1-10KB)               443      443        0       0.39x       0.22x       0.57x
   Tiny (<1KB)                  636      636        0       0.31x       0.25x       0.61x
 
 Overall: 1166/1166 passing (1166 faster, 0 within tolerance), 38 skipped
