@@ -685,7 +685,7 @@ fn type_structure_item<'a>(
         ParsedStructureItemDesc::Pstr_recmodule(mbs) => {
             // Recursive modules: module rec M = ...
             let mut typed_bindings = Vec::new();
-            for mb in mbs {
+            for mb in mbs.iter() {
                 let typed_mod = type_module_expr(tctx, env, arena, &mb.pmb_expr)?;
                 let mod_name_str = arena.get_string(mb.pmb_name.txt);
                 let mod_id = Ident::create_local(mod_name_str);

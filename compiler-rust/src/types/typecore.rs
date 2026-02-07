@@ -627,7 +627,7 @@ fn transl_type_inner(
             let mut typed_types = Vec::new();
             let mut type_refs = Vec::new();
 
-            for t in types {
+            for t in types.iter() {
                 let (ctyp, ty) = transl_type_inner(tctx, env, t)?;
                 typed_types.push(ctyp);
                 type_refs.push(ty);
@@ -1016,7 +1016,7 @@ fn type_pattern_inner(
             unify_pattern_types(tctx, loc, array_ty, expected_ty)?;
 
             let mut typed_pats = Vec::new();
-            for p in pats {
+            for p in pats.iter() {
                 let typed_pat = type_pattern_inner(tctx, env, p, elem_ty, mode, state, 0)?;
                 typed_pats.push(typed_pat);
             }
@@ -1741,7 +1741,7 @@ pub fn type_expect<'a>(
             unify_expression_types(tctx, loc, array_ty, expected_ty, context)?;
 
             let mut typed_exprs = Vec::new();
-            for e in exprs {
+            for e in exprs.iter() {
                 let typed_e =
                     type_expect(tctx, env, e, elem_ty, Some(TypeClashContext::ArrayLiteral))?;
                 typed_exprs.push(typed_e);

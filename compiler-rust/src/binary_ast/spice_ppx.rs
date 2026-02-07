@@ -1478,7 +1478,7 @@ fn codecs_generate_codecs(
         CoreTypeDesc::Ptyp_tuple(types) => {
             let mut encoders = Vec::new();
             let mut decoders = Vec::new();
-            for t in types {
+            for t in types.iter() {
                 let (enc, dec) = codecs_generate_codecs(settings, t, arena)?;
                 if settings.do_encode {
                     encoders.push(require_encoder(enc)?);
@@ -3440,12 +3440,12 @@ impl<'a> LocCloner<'a> {
     fn payload(&mut self, payload: &mut Payload) {
         match payload {
             Payload::PStr(items) => {
-                for item in items {
+                for item in items.iter_mut() {
                     self.structure_item(item);
                 }
             }
             Payload::PSig(items) => {
-                for item in items {
+                for item in items.iter_mut() {
                     self.signature_item(item);
                 }
             }
@@ -3513,7 +3513,7 @@ impl<'a> LocCloner<'a> {
                 self.core_type(ret);
             }
             CoreTypeDesc::Ptyp_tuple(types) => {
-                for typ in types {
+                for typ in types.iter_mut() {
                     self.core_type(typ);
                 }
             }
@@ -3577,7 +3577,7 @@ impl<'a> LocCloner<'a> {
                 self.located(name);
             }
             PatternDesc::Ppat_tuple(items) | PatternDesc::Ppat_array(items) => {
-                for item in items {
+                for item in items.iter_mut() {
                     self.pattern(item);
                 }
             }
@@ -3752,7 +3752,7 @@ impl<'a> LocCloner<'a> {
                 }
             }
             ExpressionDesc::Pexp_tuple(items) | ExpressionDesc::Pexp_array(items) => {
-                for item in items {
+                for item in items.iter_mut() {
                     self.expression(item);
                 }
             }
@@ -3864,7 +3864,7 @@ impl<'a> LocCloner<'a> {
         match desc {
             ModuleExprDesc::Pmod_ident(lid) => self.located(lid),
             ModuleExprDesc::Pmod_structure(items) => {
-                for item in items {
+                for item in items.iter_mut() {
                     self.structure_item(item);
                 }
             }
@@ -3914,7 +3914,7 @@ impl<'a> LocCloner<'a> {
                 self.located(lid);
             }
             ModuleTypeDesc::Pmty_signature(items) => {
-                for item in items {
+                for item in items.iter_mut() {
                     self.signature_item(item);
                 }
             }
@@ -4104,7 +4104,7 @@ impl<'a> LocCloner<'a> {
             StructureItemDesc::Pstr_exception(ext) => self.extension_constructor(ext),
             StructureItemDesc::Pstr_module(binding) => self.module_binding(binding),
             StructureItemDesc::Pstr_recmodule(bindings) => {
-                for binding in bindings {
+                for binding in bindings.iter_mut() {
                     self.module_binding(binding);
                 }
             }
@@ -4138,7 +4138,7 @@ impl<'a> LocCloner<'a> {
             SignatureItemDesc::Psig_exception(ext) => self.extension_constructor(ext),
             SignatureItemDesc::Psig_module(decl) => self.module_declaration(decl),
             SignatureItemDesc::Psig_recmodule(decls) => {
-                for decl in decls {
+                for decl in decls.iter_mut() {
                     self.module_declaration(decl);
                 }
             }

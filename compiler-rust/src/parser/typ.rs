@@ -75,10 +75,10 @@ pub fn substitute_type_vars(arena: &mut crate::parse_arena::ParseArena, typ: Cor
             )))
         },
         CoreTypeDesc::Ptyp_tuple(elements) => CoreTypeDesc::Ptyp_tuple(
-            elements
+            Box::new((*elements)
                 .into_iter()
                 .map(|e| substitute_type_vars(arena, e, vars))
-                .collect(),
+                .collect()),
         ),
         CoreTypeDesc::Ptyp_poly(inner) => {
             CoreTypeDesc::Ptyp_poly(inner)

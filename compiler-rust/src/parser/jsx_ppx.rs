@@ -2552,7 +2552,7 @@ fn update_config_from_attribute(arena: &ParseArena, attr: &Attribute, config: &m
     // Parse @@jsxConfig({version: 4, module_: "React"})
     // Matches OCaml's update_config behavior
     if let Payload::PStr(items) = &attr.1 {
-        for item in items {
+        for item in items.iter() {
             if let StructureItemDesc::Pstr_eval(eval_inner) = &*item.pstr_desc { let (ref expr, _) = *eval_inner;
                 if let ExpressionDesc::Pexp_record(rec_inner) = &*expr.pexp_desc {
                     let (ref fields, _) = *rec_inner;
@@ -2620,7 +2620,7 @@ fn transform_structure_item_desc(desc: StructureItemDesc, config: &JsxConfig, ar
         }
         StructureItemDesc::Pstr_recmodule(mbs) => {
             let mut result = vec![];
-            for mb in mbs {
+            for mb in *mbs {
                 let mut config_clone = config.clone();
                 result.push(transform_module_binding(mb, &mut config_clone, arena));
             }
@@ -2652,7 +2652,7 @@ fn transform_module_type(mty: ModuleType, config: &mut JsxConfig, arena: &mut Pa
                 config.has_component = false;
                 // Transform signature items
                 let mut result = vec![];
-                for item in sig_items {
+                for item in *sig_items {
                     let items = transform_signature_item_multi(item, config, arena);
                     result.extend(items);
                 }

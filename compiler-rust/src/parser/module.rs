@@ -3255,7 +3255,7 @@ fn fix_spread_first_object_manifest(p: &mut Parser<'_>, typ: CoreType, is_spread
             // Only for CLOSED objects where first field is Oinherit (spread)
             // Open objects (from {.. ...spread}) should NOT use ghost location
             let first_is_spread = fields.first().map_or(false, |f| matches!(f, ObjectField::Oinherit(_)));
-            if first_is_spread && closed == ClosedFlag::Closed {
+            if first_is_spread && *closed == ClosedFlag::Closed {
                 (CoreType {
                     ptyp_loc: Location::none(),
                     ..typ

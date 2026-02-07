@@ -1212,7 +1212,7 @@ fn get_payload_strings(payload: &current::Payload, arena: &mut ParseArena) -> Ve
                     }
                     ExpressionDesc::Pexp_tuple(exprs) => {
                         let mut result = Vec::new();
-                        for e in exprs {
+                        for e in exprs.iter() {
                             if let ExpressionDesc::Pexp_constant(current::Constant::String(s, _)) = &*e.pexp_desc {
                                 result.push(s.to_string());
                             }
@@ -4553,7 +4553,7 @@ fn rewrite_expression_generic(expr: &Expression, arena: &mut ParseArena) -> Expr
         }
 
         ExpressionDesc::Pexp_tuple(exprs) => ExpressionDesc::Pexp_tuple(
-            exprs.iter().map(|e| rewrite_expression(e, arena)).collect(),
+            Box::new(exprs.iter().map(|e| rewrite_expression(e, arena)).collect()),
         ),
 
         ExpressionDesc::Pexp_construct(ctor, arg) => ExpressionDesc::Pexp_construct(
@@ -4599,7 +4599,7 @@ fn rewrite_expression_generic(expr: &Expression, arena: &mut ParseArena) -> Expr
         }
 
         ExpressionDesc::Pexp_array(exprs) => ExpressionDesc::Pexp_array(
-            exprs.iter().map(|e| rewrite_expression(e, arena)).collect(),
+            Box::new(exprs.iter().map(|e| rewrite_expression(e, arena)).collect()),
         ),
 
         ExpressionDesc::Pexp_ifthenelse(inner) => {
@@ -4925,7 +4925,7 @@ fn parse_deriving_expr(expr_desc: &ExpressionDesc, actions: &mut Vec<DeriveActio
         }
         // Tuple of identifiers: @deriving(accessors, jsConverter)
         ExpressionDesc::Pexp_tuple(exprs) => {
-            for expr in exprs {
+            for expr in exprs.iter() {
                 parse_deriving_expr(&*expr.pexp_desc, actions, arena);
             }
         }

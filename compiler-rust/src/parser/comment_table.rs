@@ -1796,7 +1796,7 @@ fn walk_expression(expr: &Expression, t: &mut CommentTable, comments: Vec<Commen
                                             if let ExpressionDesc::Pexp_array(sub_arrays) = &*arg.pexp_desc {
                                                 // Collect all expressions from sub-arrays
                                                 let mut all_exprs: Vec<&Expression> = Vec::new();
-                                                for sub_array in sub_arrays {
+                                                for sub_array in sub_arrays.iter() {
                                                     if let ExpressionDesc::Pexp_array(exprs) = &*sub_array.pexp_desc {
                                                         all_exprs.extend(exprs.iter());
                                                     } else {
@@ -1836,7 +1836,7 @@ fn walk_expression(expr: &Expression, t: &mut CommentTable, comments: Vec<Commen
                                             if let ExpressionDesc::Pexp_array(sub_lists) = &*arg.pexp_desc {
                                                 // Collect all expressions from sub-lists
                                                 let mut all_exprs: Vec<&Expression> = Vec::new();
-                                                for sub_list in sub_lists {
+                                                for sub_list in sub_lists.iter() {
                                                     // Collect list elements
                                                     let (exprs, spread) = parsetree_viewer::collect_list_expressions(arena, sub_list);
                                                     all_exprs.extend(exprs);
