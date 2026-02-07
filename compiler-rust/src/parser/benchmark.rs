@@ -839,4 +839,78 @@ mod tests {
         println!("  {} files parsed in {:.1} ms", parsed, elapsed_s * 1000.0);
         println!("  Throughput: {:.1} MB/s, {:.0}K LOC/s", mbs, loc_per_s / 1000.0);
     }
+
+    // ========================================================================
+    // Cold round-trip benchmark: read → parse → print → write, single pass
+    // Run with: cargo test --release --lib -- benchmark_roundtrip_cold --ignored --nocapture
+    // ========================================================================
+
+    #[test]
+    #[ignore]
+    fn benchmark_roundtrip_cold() {
+        if cfg!(debug_assertions) {
+            eprintln!("Skipping benchmark: must run in --release mode");
+            return;
+        }
+
+        let files = discover_test_files();
+        let total_lines: u64 = files.iter().map(|f| f.lines).sum();
+        let total_size: u64 = files.iter().map(|f| f.size).sum();
+
+        let tmp_dir = tempfile::tempdir().expect("failed to create temp dir");
+        let out_path = tmp_dir.path().join("output.res");
+
+        println!("\n=== Cold Round-Trip Benchmark: read → parse → print → write ===");
+        println!("{} files, {} lines, {:.1} KB\n", files.len(), total_lines, total_size as f64 / 1024.0);
+
+        let start = Instant::now();
+        let mut processed = 0u64;
+        for file in &files {
+            // 1. READ
+            let bytes = match std::fs::read(&file.path) {
+                Ok(b) => b,
+                Err(_) => continue,
+            };
+            let source: String = bytes.iter().map(|&b| b as char).collect();
+            let filename = file.path.to_string_lossy().to_string();
+            let is_interface = file.path.extension()
+                .and_then(|s| s.to_str())
+                .is_some_and(|ext| ext == "resi" || ext == "mli");
+
+            // 2. PARSE
+            let mut parser = crate::parser::Parser::new(&filename, &source);
+            let printed = if is_interface {
+                let sig = crate::parser::module::parse_signature(&mut parser);
+                let comments = parser.take_comments();
+                // 3. PRINT
+                crate::parser::printer::print_interface(
+                    &sig,
+                    comments,
+                    crate::parser::printer::DEFAULT_PRINT_WIDTH,
+                    parser.arena_mut(),
+                )
+            } else {
+                let structure = crate::parser::module::parse_structure(&mut parser);
+                let comments = parser.take_comments();
+                // 3. PRINT
+                crate::parser::printer::print_implementation(
+                    &structure,
+                    comments,
+                    crate::parser::printer::DEFAULT_PRINT_WIDTH,
+                    parser.arena_mut(),
+                )
+            };
+
+            // 4. WRITE
+            let _ = std::fs::write(&out_path, printed.as_bytes());
+            processed += 1;
+        }
+        let elapsed = start.elapsed();
+        let elapsed_s = elapsed.as_secs_f64();
+        let loc_per_s = total_lines as f64 / elapsed_s;
+        let mbs = (total_size as f64) / elapsed_s / 1_000_000.0;
+
+        println!("  {} files processed in {:.1} ms", processed, elapsed_s * 1000.0);
+        println!("  Throughput: {:.1} MB/s, {:.0}K LOC/s", mbs, loc_per_s / 1000.0);
+    }
 }
