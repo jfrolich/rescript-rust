@@ -1810,21 +1810,72 @@ fn extend_env_with_bindings(env: &Env, arena: &ParseArena, bindings: &[ValueBind
     let mut new_env = env.clone();
 
     for binding in bindings {
-        // Extract variable names from the pattern and add them to the environment
-        // This is a simplified implementation - full version would handle all pattern types
-        if let crate::types::typedtree::PatternDesc::Tpat_var(id, _) = &binding.vb_pat.pat_desc {
-            let val_desc = crate::types::ValueDescription {
-                val_type: binding.vb_pat.pat_type,
-                val_kind: crate::types::ValueKind::ValReg,
-                val_loc: arena.to_location(binding.vb_loc),
-                val_attributes: vec![],
-                val_path: None,
-            };
-            new_env.add_value(id.clone(), val_desc);
-        }
+        // Extract all variable names from the pattern recursively
+        add_pattern_vars_to_env(&mut new_env, arena, &binding.vb_pat, binding.vb_loc);
     }
 
     new_env
+}
+
+/// Recursively extract variable bindings from a pattern and add them to the environment.
+fn add_pattern_vars_to_env(env: &mut Env, arena: &ParseArena, pat: &crate::types::typedtree::Pattern, loc: LocIdx) {
+    use crate::types::typedtree::PatternDesc;
+    match &pat.pat_desc {
+        PatternDesc::Tpat_var(id, _) => {
+            let val_desc = crate::types::ValueDescription {
+                val_type: pat.pat_type,
+                val_kind: crate::types::ValueKind::ValReg,
+                val_loc: arena.to_location(loc),
+                val_attributes: vec![],
+                val_path: None,
+            };
+            env.add_value(id.clone(), val_desc);
+        }
+        PatternDesc::Tpat_alias(inner, id, _) => {
+            // Add the alias variable
+            let val_desc = crate::types::ValueDescription {
+                val_type: pat.pat_type,
+                val_kind: crate::types::ValueKind::ValReg,
+                val_loc: arena.to_location(loc),
+                val_attributes: vec![],
+                val_path: None,
+            };
+            env.add_value(id.clone(), val_desc);
+            // Also recurse into the inner pattern
+            add_pattern_vars_to_env(env, arena, inner, loc);
+        }
+        PatternDesc::Tpat_tuple(pats) => {
+            for p in pats {
+                add_pattern_vars_to_env(env, arena, p, loc);
+            }
+        }
+        PatternDesc::Tpat_construct(_, _, pats) => {
+            for p in pats {
+                add_pattern_vars_to_env(env, arena, p, loc);
+            }
+        }
+        PatternDesc::Tpat_record(fields, _) => {
+            for (_, _, p, _) in fields {
+                add_pattern_vars_to_env(env, arena, p, loc);
+            }
+        }
+        PatternDesc::Tpat_or(left, _right, _) => {
+            // OR patterns bind the same variables on both sides
+            add_pattern_vars_to_env(env, arena, left, loc);
+        }
+        PatternDesc::Tpat_array(pats) => {
+            for p in pats {
+                add_pattern_vars_to_env(env, arena, p, loc);
+            }
+        }
+        PatternDesc::Tpat_variant(_, Some(inner), _) => {
+            add_pattern_vars_to_env(env, arena, inner, loc);
+        }
+        PatternDesc::Tpat_any | PatternDesc::Tpat_constant(_)
+        | PatternDesc::Tpat_variant(_, None, _) => {
+            // No variables to add
+        }
+    }
 }
 
 // ============================================================================
