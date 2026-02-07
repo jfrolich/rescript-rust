@@ -2546,8 +2546,15 @@ pub fn parse_primary_expr(p: &mut Parser<'_>, operand: Expression, no_call: bool
                     let value = parse_expr(p);
 
                     // Check if index is a string constant for object property assignment
-                    if let ExpressionDesc::Pexp_constant(c) = &*index.pexp_desc { if let Constant::String(s, _) = &**c
-                    {
+                    let is_string_index = if let ExpressionDesc::Pexp_constant(c) = &*index.pexp_desc {
+                        matches!(&**c, Constant::String(..))
+                    } else {
+                        false
+                    };
+                    if is_string_index {
+                        let (s, _) = if let ExpressionDesc::Pexp_constant(c) = &*index.pexp_desc {
+                            if let Constant::String(s, tag) = &**c { (s.clone(), tag.clone()) } else { unreachable!() }
+                        } else { unreachable!() };
                         // String index: obj["prop"] = value -> Pexp_apply("#=", [Pexp_send(obj, "prop"), value])
                         // OCaml: loc = mk_loc start_pos rhs_expr.pexp_loc.loc_end
                         // Use the inner expression's end, not prev_end_pos (which includes braces)
@@ -2557,7 +2564,7 @@ pub fn parse_primary_expr(p: &mut Parser<'_>, operand: Expression, no_call: bool
                         // Use rbracket_end for location (OCaml includes the ] in the location)
                         let send_expr = Expression {
                             pexp_desc: Box::new(ExpressionDesc::Pexp_send(Box::new((Box::new(expr), Loc {
-                                    txt: s.clone(),
+                                    txt: s,
                                     loc: index.pexp_loc.clone(),
                                 })))),
                             pexp_loc: p.mk_loc_idx_full(start_pos_idx, rbracket_end_idx),
@@ -2576,7 +2583,7 @@ pub fn parse_primary_expr(p: &mut Parser<'_>, operand: Expression, no_call: bool
                             ],
                             loc,
                         );
-                    }} else {
+                    } else {
                         // Non-string index: arr[index] = value -> Array.set(arr, index, value)
                         // OCaml: loc = mk_loc start_pos p.prev_end_pos
                         // Uses prev_end_pos (includes braces) for Array.set
@@ -2601,18 +2608,25 @@ pub fn parse_primary_expr(p: &mut Parser<'_>, operand: Expression, no_call: bool
                     // Use rbracket_end for the location end (OCaml includes the ] in the location)
                     let loc = p.mk_loc_idx_full(start_pos_idx, rbracket_end_idx);
 
-                    if let ExpressionDesc::Pexp_constant(c) = &*index.pexp_desc { if let Constant::String(s, _) = &**c
-                    {
+                    let is_string_index = if let ExpressionDesc::Pexp_constant(c) = &*index.pexp_desc {
+                        matches!(&**c, Constant::String(..))
+                    } else {
+                        false
+                    };
+                    if is_string_index {
+                        let s = if let ExpressionDesc::Pexp_constant(c) = &*index.pexp_desc {
+                            if let Constant::String(s, _) = &**c { s.clone() } else { unreachable!() }
+                        } else { unreachable!() };
                         // String index: obj["prop"] -> Pexp_send(Box::new((obj, "prop")))
                         expr = Expression {
                             pexp_desc: Box::new(ExpressionDesc::Pexp_send(Box::new((Box::new(expr), Loc {
-                                    txt: s.clone(),
+                                    txt: s,
                                     loc: index.pexp_loc.clone(),
                                 })))),
                             pexp_loc: loc,
                             pexp_attributes: vec![],
                         };
-                    }} else {
+                    } else {
                         // Non-string index: arr[index] -> Array.get(arr, index)
                         // Use static pre-allocated Array.get lident for sharing parity with OCaml
                         let array_get_lid_idx = p.arena().array_get_lid();
