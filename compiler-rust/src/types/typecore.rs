@@ -1374,7 +1374,7 @@ fn type_pattern_construct(
 ) -> TypeCoreResult<Pattern> {
     let ctx = tctx.type_ctx;
 
-    // Look up constructor
+    // Look up constructor - first try local env, then module-qualified lookup
     let lid_txt = tctx.arena.get_longident(lid.txt);
     let lid_name = tctx.longident_last_name(lid_txt);
     let (cstr_desc, _cstr_path) = match env.find_constructor(&lid_name) {
@@ -1383,7 +1383,10 @@ fn type_pattern_construct(
             Path::pident(Ident::create_persistent(lid_name)),
         ),
         Err(_) => {
-            return Err(TypeCoreError::NotAVariantType(lid_txt.clone()));
+            match lookup_constructor_in_module(lid_txt, tctx.arena, env, &mut tctx.persistent_env, tctx.type_ctx) {
+                Some((path, desc)) => (desc, path),
+                None => return Err(TypeCoreError::NotAVariantType(lid_txt.clone())),
+            }
         }
     };
 
@@ -2935,17 +2938,21 @@ fn type_construct(
     attributes: &[crate::parser::ast::Attribute],
 ) -> TypeCoreResult<Expression> {
     let ctx = tctx.type_ctx;
-    let longident = tctx.resolve_lid(lid.txt);
+    let longident = tctx.resolve_lid(lid.txt).clone();
 
-    // Look up constructor
-    let lid_name = tctx.longident_last_name(longident);
+    // Look up constructor - first try local env, then module-qualified lookup
+    let lid_name = tctx.longident_last_name(&longident);
     let (_cstr_path, cstr_desc) = match env.find_constructor(&lid_name) {
         Ok(desc) => (
             Path::pident(Ident::create_persistent(lid_name)),
             desc.clone(),
         ),
         Err(_) => {
-            return Err(TypeCoreError::NotAVariantType(longident.clone()));
+            // Try module-qualified constructor lookup for Ldot paths
+            match lookup_constructor_in_module(&longident, tctx.arena, env, &mut tctx.persistent_env, tctx.type_ctx) {
+                Some((path, desc)) => (path, desc),
+                None => return Err(TypeCoreError::NotAVariantType(longident)),
+            }
         }
     };
 
@@ -4227,6 +4234,83 @@ impl Env {
             }
             _ => None,
         }
+    }
+}
+
+/// Look up a constructor in a module-qualified path (e.g., Nullable.Value).
+/// For Ldot paths, resolves the module and searches its type declarations.
+fn lookup_constructor_in_module<'b>(
+    lid: &Longident,
+    arena: &ParseArena,
+    env: &Env,
+    pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
+    ctx: &'b crate::types::context::TypeContext<'b>,
+) -> Option<(Path, crate::types::decl::ConstructorDescription)> {
+    use crate::parser::longident::Longident;
+    use crate::types::decl::SignatureItem;
+    match lid {
+        Longident::Ldot(module_lid, cstr_idx) => {
+            let cstr_name = arena.get_string(*cstr_idx);
+            // Resolve the module prefix to get its signature
+            let (_mod_path, sig) = env.resolve_module_lid(module_lid, arena, pers_env, ctx)?;
+            // Search the signature for type declarations that contain the constructor
+            for sig_item in &sig {
+                if let SignatureItem::SigType(_id, type_decl, _rec) = sig_item {
+                    if let crate::types::TypeKind::TypeVariant(ref constrs) = type_decl.type_kind {
+                        let num_consts = constrs.iter()
+                            .filter(|c| matches!(c.cd_args, crate::types::ConstructorArguments::CstrTuple(ref args) if args.is_empty()) && c.cd_res.is_none())
+                            .count() as i32;
+                        let num_nonconsts = constrs.len() as i32 - num_consts;
+                        let mut const_idx = 0i32;
+                        let mut block_idx = 0i32;
+                        for cd in constrs {
+                            let is_constant = matches!(cd.cd_args, crate::types::ConstructorArguments::CstrTuple(ref args) if args.is_empty()) && cd.cd_res.is_none();
+                            if cd.cd_id.name() == cstr_name {
+                                let tag = if is_constant {
+                                    crate::types::decl::ConstructorTag::CstrConstant(const_idx)
+                                } else {
+                                    crate::types::decl::ConstructorTag::CstrBlock(block_idx)
+                                };
+                                let (cstr_args, cstr_arity) = match &cd.cd_args {
+                                    crate::types::ConstructorArguments::CstrTuple(args) => (args.clone(), args.len() as i32),
+                                    crate::types::ConstructorArguments::CstrRecord(labels) => {
+                                        let args: Vec<_> = labels.iter().map(|l| l.ld_type).collect();
+                                        let arity = args.len() as i32;
+                                        (args, arity)
+                                    }
+                                };
+                                let cstr_res = cd.cd_res.unwrap_or_else(|| {
+                                    ctx.new_generic_constr(
+                                        Path::pident(_id.clone()),
+                                        type_decl.type_params.clone(),
+                                    )
+                                });
+                                let desc = crate::types::decl::ConstructorDescription {
+                                    cstr_name: cstr_name.to_string(),
+                                    cstr_res,
+                                    cstr_existentials: vec![],
+                                    cstr_args,
+                                    cstr_arity,
+                                    cstr_tag: tag,
+                                    cstr_consts: num_consts,
+                                    cstr_nonconsts: num_nonconsts,
+                                    cstr_generalized: false,
+                                    cstr_private: crate::types::PrivateFlag::Public,
+                                    cstr_loc: crate::location::Location::none(),
+                                    cstr_attributes: vec![],
+                                    cstr_inlined: None,
+                                };
+                                let path = Path::pident(Ident::create_persistent(cstr_name));
+                                return Some((path, desc));
+                            }
+                            if is_constant { const_idx += 1; } else { block_idx += 1; }
+                        }
+                    }
+                }
+            }
+            None
+        }
+        _ => None,
     }
 }
 
