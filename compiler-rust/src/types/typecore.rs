@@ -2580,17 +2580,31 @@ fn type_application(
     // Type check arguments, extracting/building arrow types as we go
     let mut typed_args = Vec::new();
     for (label, arg_expr) in args.iter() {
-        // Try to extract argument type from current function type
-        let (arg_ty, ret_ty) = match crate::types::split_arrow(ctx, current_ty) {
-            Some((arg, ret)) => (arg, ret),
+        // Try to extract argument type and label from current function type
+        let (fn_label, arg_ty, ret_ty) = match crate::types::ctype::split_arrow_with_label(ctx, current_ty) {
+            Some((lbl, arg, ret)) => (Some(lbl), arg, ret),
             None => {
                 // Not a function type yet - create arrow type with arity
                 let arg_ty = ctx.new_var(None);
                 let ret_ty = ctx.new_var(None);
                 let arrow_ty = ctx.new_arrow(crate::types::ArgLabel::Nolabel, arg_ty, ret_ty, top_arity);
                 unify_expression_types(tctx, loc, current_ty, arrow_ty, None)?;
-                (arg_ty, ret_ty)
+                (None, arg_ty, ret_ty)
             }
+        };
+
+        // Handle optional parameter wrapping:
+        // When the function parameter is Optional but the call-site passes a concrete
+        // value (Labelled, not Optional), unwrap option<T> to T for type checking,
+        // then wrap the expression in Some(...).
+        let fn_param_is_optional = fn_label.as_ref().map_or(false, |l| l.is_optional());
+        let call_is_optional = label.is_optional();
+
+        let effective_arg_ty = if fn_param_is_optional && !call_is_optional && !label.is_nolabel() {
+            // Unwrap option<T> to get T for type checking the concrete argument
+            crate::types::ctype::extract_option_type(ctx, arg_ty).unwrap_or(arg_ty)
+        } else {
+            arg_ty
         };
 
         // Type check the argument
@@ -2598,7 +2612,7 @@ fn type_application(
             tctx,
             env,
             arg_expr,
-            arg_ty,
+            effective_arg_ty,
             Some(TypeClashContext::FunctionCall),
         )?;
         typed_args.push(ApplyArg {

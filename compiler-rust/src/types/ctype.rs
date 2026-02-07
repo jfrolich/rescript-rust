@@ -1540,6 +1540,33 @@ pub fn split_arrow(ctx: &TypeContext<'_>, ty: TypeExprRef) -> Option<(TypeExprRe
     }
 }
 
+/// Extract the argument type, label, and return type from an arrow type.
+pub fn split_arrow_with_label(ctx: &TypeContext<'_>, ty: TypeExprRef) -> Option<(super::ArgLabel, TypeExprRef, TypeExprRef)> {
+    let ty = ctx.repr(ty);
+    let desc = ctx.get_desc(ty);
+    match &*desc {
+        TypeDesc::Tarrow { arg, ret, .. } => Some((arg.lbl.clone(), arg.typ, *ret)),
+        _ => None,
+    }
+}
+
+/// Extract the inner type from option<T>, returning T.
+/// Returns None if the type is not option<T>.
+pub fn extract_option_type(ctx: &TypeContext<'_>, ty: TypeExprRef) -> Option<TypeExprRef> {
+    let ty = ctx.repr(ty);
+    let desc = ctx.get_desc(ty);
+    match &*desc {
+        TypeDesc::Tconstr { path, args, .. } => {
+            if path.head_name() == "option" && args.len() == 1 {
+                Some(args[0])
+            } else {
+                None
+            }
+        }
+        _ => None,
+    }
+}
+
 /// Get the element types of a tuple.
 pub fn tuple_elements(ctx: &TypeContext<'_>, ty: TypeExprRef) -> Option<Vec<TypeExprRef>> {
     let ty = ctx.repr(ty);
