@@ -1657,7 +1657,7 @@ fn parse_module_type_impl(p: &mut Parser<'_>, es6_arrow: bool, parse_with: bool)
         let constraints = parse_with_constraints(p);
         let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
         ModuleType {
-            pmty_desc: Box::new(ModuleTypeDesc::Pmty_with(Box::new(typ), constraints)),
+            pmty_desc: Box::new(ModuleTypeDesc::Pmty_with(Box::new((Box::new(typ), constraints)))),
             pmty_loc: loc,
             pmty_attributes: vec![],
         }

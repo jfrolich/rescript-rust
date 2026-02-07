@@ -512,8 +512,8 @@ pub fn skip_doc_comments(p: &mut Parser<'_>) {
 pub fn doc_comment_to_attribute(arena: &mut ParseArena, loc: Location, content: impl Into<String>) -> Attribute {
     let str_idx = arena.intern("res.doc");
     let name = with_loc(str_idx, loc);
-    let payload = Payload::PStr(vec![StructureItem {
-        pstr_desc: Box::new(StructureItemDesc::Pstr_eval(
+    let payload = Payload::PStr(Box::new(vec![StructureItem {
+        pstr_desc: Box::new(StructureItemDesc::Pstr_eval(Box::new((
             Expression {
                 pexp_desc: Box::new(ExpressionDesc::Pexp_constant(Box::new(Constant::String(
                     Cow::Owned(content.into()),
@@ -523,9 +523,9 @@ pub fn doc_comment_to_attribute(arena: &mut ParseArena, loc: Location, content: 
                 pexp_attributes: vec![],
             },
             vec![],
-        )),
+        )))),
         pstr_loc: loc,
-    }]);
+    }]));
     (name, payload)
 }
 

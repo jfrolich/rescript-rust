@@ -6362,7 +6362,7 @@ fn create_record_from_js_function(
             // OCaml: js_field uses o.pexp_loc for ## ident, and label loc comes from the label parameter
             let field_name_str = arena.get_string(field_name).to_string();
             let js_field = Expression {
-                pexp_desc: Box::new(ExpressionDesc::Pexp_send(
+                pexp_desc: Box::new(ExpressionDesc::Pexp_send(Box::new((
                     Box::new(Expression {
                         pexp_desc: Box::new(ExpressionDesc::Pexp_ident(Located {
                             txt: arena.push_lident_from_idx(param_str),
@@ -6372,7 +6372,7 @@ fn create_record_from_js_function(
                         pexp_attributes: vec![],
                     }),
                     Located { txt: Cow::Owned(field_name_str), loc: none_loc }, // Exp.ident m uses !default_loc
-                )),
+                )))),
                 pexp_loc: none_loc, // js_field result uses !default_loc (ghost)
                 pexp_attributes: vec![],
             };
@@ -8206,11 +8206,11 @@ fn rewrite_module_expr(
         }
         current::ModuleExprDesc::Pmod_functor(inner) => {
                     let (ref param, ref mod_type, ref body) = **inner;
-            current::ModuleExprDesc::Pmod_functor(
+            current::ModuleExprDesc::Pmod_functor(Box::new((
                 param.clone(),
                 mod_type.as_ref().map(|mt| Box::new(rewrite_module_type(mt, arena))),
                 Box::new(rewrite_module_expr(body, arena)),
-            )
+            )))
         }
         current::ModuleExprDesc::Pmod_apply(m1, m2) => current::ModuleExprDesc::Pmod_apply(
             Box::new(rewrite_module_expr(m1, arena)),
@@ -8252,18 +8252,18 @@ fn rewrite_module_type(
         }
         current::ModuleTypeDesc::Pmty_functor(inner) => {
                     let (ref name, ref param_type, ref result_type) = **inner;
-            current::ModuleTypeDesc::Pmty_functor(
+            current::ModuleTypeDesc::Pmty_functor(Box::new((
                 name.clone(),
                 param_type.as_ref().map(|pt| Box::new(rewrite_module_type(pt, arena))),
                 Box::new(rewrite_module_type(result_type, arena)),
-            )
+            )))
         }
         current::ModuleTypeDesc::Pmty_with(inner) => {
                     let (ref mt, ref constraints) = **inner;
-            current::ModuleTypeDesc::Pmty_with(
+            current::ModuleTypeDesc::Pmty_with(Box::new((
                 Box::new(rewrite_module_type(mt, arena)),
                 constraints.clone(),
-            )
+            )))
         }
         current::ModuleTypeDesc::Pmty_typeof(me) => {
             current::ModuleTypeDesc::Pmty_typeof(Box::new(rewrite_module_expr(me, arena)))
