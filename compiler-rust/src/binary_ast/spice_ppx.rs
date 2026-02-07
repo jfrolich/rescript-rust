@@ -3,6 +3,8 @@
 //! This is a direct port of the OCaml ppx_spice implementation, adapted to
 //! ReScript's current AST representation (arity fields, partial flags, etc.).
 
+use std::borrow::Cow;
+
 use crate::parse_arena::{LidentIdx, LocIdx, Located, ParseArena, PosIdx, StrIdx};
 use crate::parser::ast::{
     ArgLabel, Attribute, Attributes, Case, Constant, ConstructorArguments, ConstructorDeclaration,
@@ -49,7 +51,7 @@ struct ParsedVariantDecl {
 
 #[derive(Clone, Debug)]
 struct ParsedPolyvariantField {
-    name: String,
+    name: Cow<'static, str>,
     alias: Expression,
     has_attr_as: bool,
     row_field: crate::parser::ast::RowField,
@@ -255,7 +257,7 @@ fn expr_constant(constant: Constant, arena: &mut ParseArena) -> Expression {
 
 fn expr_constant_literal(arena: &mut ParseArena, value: &str) -> Expression {
     arena.register_shareable_literal(value);
-    expr_constant(Constant::String(value.to_string(), None), arena)
+    expr_constant(Constant::String(Cow::Owned(value.to_string()), None), arena)
 }
 
 fn expr_apply(
@@ -377,7 +379,7 @@ fn expr_construct_with_locs(
     }
 }
 
-fn expr_variant(label: String, arg: Option<Expression>, arena: &mut ParseArena) -> Expression {
+fn expr_variant(label: Cow<'static, str>, arg: Option<Expression>, arena: &mut ParseArena) -> Expression {
     Expression {
         pexp_desc: ExpressionDesc::Pexp_variant(label, arg.map(Box::new)),
         pexp_loc: arena.dummy_loc(),
@@ -563,7 +565,7 @@ fn pat_construct_with_loc(
     }
 }
 
-fn pat_variant(label: String, arg: Option<Pattern>, arena: &mut ParseArena) -> Pattern {
+fn pat_variant(label: Cow<'static, str>, arg: Option<Pattern>, arena: &mut ParseArena) -> Pattern {
     Pattern {
         ppat_desc: PatternDesc::Ppat_variant(label, arg.map(Box::new)),
         ppat_loc: arena.dummy_loc(),
@@ -623,7 +625,7 @@ fn mk_type_constr(lid_idx: LidentIdx, args: Vec<CoreType>, arena: &mut ParseAren
 
 fn mk_type_var(name: &str, arena: &mut ParseArena) -> CoreType {
     CoreType {
-        ptyp_desc: CoreTypeDesc::Ptyp_var(name.to_string()),
+        ptyp_desc: CoreTypeDesc::Ptyp_var(Cow::Owned(name.to_string())),
         ptyp_loc: arena.dummy_loc(),
         ptyp_attributes: vec![],
     }
@@ -734,7 +736,7 @@ fn get_param_names(
     let mut names = Vec::with_capacity(params.len());
     for (typ, _) in params {
         match &typ.ptyp_desc {
-            CoreTypeDesc::Ptyp_var(name) => names.push(name.clone()),
+            CoreTypeDesc::Ptyp_var(name) => names.push(name.to_string()),
             _ => return Err("Unhandled param type".to_string()),
         }
     }
@@ -765,7 +767,7 @@ fn get_float_from_expression(expr: &Expression) -> Result<Option<Constant>, Stri
 
 fn index_const(i: usize, arena: &mut ParseArena) -> Expression {
     let value = format!("[{}]", i);
-    expr_constant(Constant::String(value, Some("*j".to_string())), arena)
+    expr_constant(Constant::String(Cow::Owned(value), Some(Cow::Borrowed("*j"))), arena)
 }
 
 fn check_option_type(typ: &CoreType, arena: &ParseArena) -> bool {
@@ -1583,7 +1585,7 @@ fn records_parse_decl(
         Ok(None) => {
             let name = arena.get_string(decl.pld_name.txt);
             expr_constant(
-                Constant::String(name.to_string(), Some("*j".to_string())),
+                Constant::String(Cow::Owned(name.to_string()), Some(Cow::Borrowed("*j"))),
                 arena,
             )
         }
@@ -1895,7 +1897,7 @@ fn records_generate_flat_decoder_expr(
                     )
                 } else {
                     let missing =
-                        expr_constant(Constant::String(" missing".to_string(), None), arena);
+                        expr_constant(Constant::String(Cow::Borrowed(" missing"), None), arena);
                     let msg = expr_concat(arena, field.key.clone(), missing);
                     let v_loc = arena.dummy_loc();
                     let v_expr = expr_ident_from_str_idx(arena, v_idx, v_loc);
@@ -1914,7 +1916,7 @@ fn records_generate_flat_decoder_expr(
                 default_expr
             }
             None => {
-                let missing = expr_constant(Constant::String(" missing".to_string(), None), arena);
+                let missing = expr_constant(Constant::String(Cow::Borrowed(" missing"), None), arena);
                 let msg = expr_concat(arena, field.key.clone(), missing);
                 let v_loc = arena.dummy_loc();
                 let v_expr = expr_ident_from_str_idx(arena, v_idx, v_loc);
@@ -2123,7 +2125,7 @@ fn variants_parse_decl(
         Ok(Some(attr)) => (get_expression_from_payload(attr)?, true),
         Ok(None) => (
             expr_constant(
-                Constant::String(name_str.to_string(), Some("*j".to_string())),
+                Constant::String(Cow::Owned(name_str.to_string()), Some(Cow::Borrowed("*j"))),
                 arena,
             ),
             false,
@@ -2289,7 +2291,7 @@ fn variants_generate_arg_decoder(
     for (i, arg) in args.iter().enumerate() {
         let (_, dec) = codecs_generate_codecs(settings, arg, arena)?;
         let decoder = require_decoder(dec)?;
-        let idx_expr = expr_constant(Constant::Integer((i + 1).to_string(), None), arena);
+        let idx_expr = expr_constant(Constant::Integer(Cow::Owned((i + 1).to_string()), None), arena);
         let arg_expr = expr_apply(
             expr_ident_path(arena, &["Array", "getUnsafe"]),
             vec![
@@ -2333,7 +2335,7 @@ fn variants_generate_decoder_case(
     match &decl.pcd_args {
         crate::parser::ast::ConstructorArguments::Pcstr_tuple(args) => {
             let arg_len =
-                expr_constant(Constant::Integer((args.len() + 1).to_string(), None), arena);
+                expr_constant(Constant::Integer(Cow::Owned((args.len() + 1).to_string()), None), arena);
             let decoded = if args.is_empty() {
                 let constructor_name = arena.get_string(name_idx).to_string();
                 let constructor_name_idx = arena.push_string(constructor_name);
@@ -2358,7 +2360,7 @@ fn variants_generate_decoder_case(
             let json_str_pat = pat_construct_with_loc(
                 lident_path_static(arena, &["JSON", "String"]),
                 Some(Pattern {
-                    ppat_desc: PatternDesc::Ppat_constant(Constant::String(name_str.clone(), None)),
+                    ppat_desc: PatternDesc::Ppat_constant(Constant::String(Cow::Owned(name_str.clone()), None)),
                     ppat_loc: arena.dummy_loc(),
                     ppat_attributes: vec![],
                 }),
@@ -2618,7 +2620,7 @@ fn variants_generate_codecs(
                     (ArgLabel::Nolabel, json_arr_expr.clone()),
                     (
                         ArgLabel::Nolabel,
-                        expr_constant(Constant::Integer("0".to_string(), None), arena),
+                        expr_constant(Constant::Integer(Cow::Borrowed("0"), None), arena),
                     ),
                 ],
                 false,
@@ -2707,7 +2709,7 @@ fn polyvars_parse_decl(
             Ok(Some(attr)) => (get_expression_from_payload(attr)?, true),
             Ok(None) => (
                 expr_constant(
-                    Constant::String(name.clone(), Some("*j".to_string())),
+                    Constant::String(name.clone(), Some(Cow::Borrowed("*j"))),
                     arena,
                 ),
                 false,
@@ -2845,7 +2847,7 @@ fn polyvars_generate_decode_success_case(
         exprs.push(expr_ident_dynamic(arena, format!("v{}", i)));
     }
     let payload = tuple_or_singleton_expr(exprs, arena);
-    let ctor = expr_variant(constructor_name.to_string(), Some(payload), arena);
+    let ctor = expr_variant(Cow::Owned(constructor_name.to_string()), Some(payload), arena);
     let ok_expr = expr_construct_with_loc(
         {
             let lident_name = arena.intern_string("Ok");
@@ -2871,7 +2873,7 @@ fn polyvars_generate_arg_decoder(
     for (i, arg) in args.iter().enumerate() {
         let (_, dec) = codecs_generate_codecs(settings, arg, arena)?;
         let decoder = require_decoder(dec)?;
-        let idx_expr = expr_constant(Constant::Integer((i + 1).to_string(), None), arena);
+        let idx_expr = expr_constant(Constant::Integer(Cow::Owned((i + 1).to_string()), None), arena);
         let arg_expr = expr_apply(
             expr_ident_path(arena, &["Array", "getUnsafe"]),
             vec![
@@ -2914,7 +2916,7 @@ fn polyvars_generate_decoder_case(
         RowField::Rtag(tag, _, _, core_types) => {
             let args = polyvars_get_args(arena.dummy_loc(), core_types)?;
             let arg_len =
-                expr_constant(Constant::Integer((args.len() + 1).to_string(), None), arena);
+                expr_constant(Constant::Integer(Cow::Owned((args.len() + 1).to_string()), None), arena);
             let decoded = if args.is_empty() {
                 let ctor = expr_variant(tag.txt.clone(), None, arena);
                 expr_construct_with_loc(
@@ -3187,7 +3189,7 @@ fn polyvars_generate_codecs(
                     (ArgLabel::Nolabel, json_arr_expr.clone()),
                     (
                         ArgLabel::Nolabel,
-                        expr_constant(Constant::Integer("0".to_string(), None), arena),
+                        expr_constant(Constant::Integer(Cow::Borrowed("0"), None), arena),
                     ),
                 ],
                 false,
