@@ -2270,8 +2270,6 @@ fn unify_expression_types(
     match unify(tctx.type_ctx, &mut tctx.unify_state, ty1, ty2) {
         Ok(()) => Ok(()),
         Err(_) => {
-            // Debug: print type descriptions for profiling
-            let r1 = tctx.type_ctx.repr(ty1);
             Err(TypeCoreError::ExprTypeClash {
                 trace: vec![(ty1, ty2)],
                 context,

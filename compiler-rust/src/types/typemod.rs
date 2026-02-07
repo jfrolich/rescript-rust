@@ -1493,19 +1493,25 @@ fn type_structure_item<'a>(
             // Type extension: type t += ...
             let path = path_from_longident(tctx.resolve_lid(ext.ptyext_path.txt), |idx| arena.get_string(idx));
 
-            // Translate constructors
+            // The result type for the extension constructors
+            let ext_res_ty = tctx.type_ctx.new_constr(path.clone(), vec![]);
+
+            // Translate constructors and register them in the environment
             let mut typed_constructors = Vec::new();
+            let mut new_env = env.clone();
             for ec in &ext.ptyext_constructors {
                 let name_str = arena.get_string(ec.pext_name.txt).to_string();
                 let id = Ident::create_local(&name_str);
 
-                let (typed_args, typed_ret) = match &ec.pext_kind {
+                let (typed_args, typed_ret, arg_type_refs) = match &ec.pext_kind {
                     crate::parser::ast::ExtensionConstructorKind::Pext_decl(args, ret) => {
+                        let mut arg_ty_refs = Vec::new();
                         let typed_args = match args {
                             crate::parser::ast::ConstructorArguments::Pcstr_tuple(types) => {
                                 let mut typed = Vec::new();
                                 for ty in types {
-                                    let (typed_ct, _ty_ref) = transl_type(tctx, env, ty)?;
+                                    let (typed_ct, ty_ref) = transl_type(tctx, env, ty)?;
+                                    arg_ty_refs.push(ty_ref);
                                     typed.push(typed_ct);
                                 }
                                 crate::types::typedtree::ConstructorArgument::Cstr_tuple(typed)
@@ -1521,12 +1527,31 @@ fn type_structure_item<'a>(
                             }
                             None => None,
                         };
-                        (typed_args, typed_ret)
+                        (typed_args, typed_ret, arg_ty_refs)
                     }
                     crate::parser::ast::ExtensionConstructorKind::Pext_rebind(_lid) => {
-                        (crate::types::typedtree::ConstructorArgument::Cstr_tuple(vec![]), None)
+                        (crate::types::typedtree::ConstructorArgument::Cstr_tuple(vec![]), None, vec![])
                     }
                 };
+
+                // Register the extension constructor in the environment
+                let ext_path = Path::pident(id.clone());
+                let cstr_desc = crate::types::decl::ConstructorDescription {
+                    cstr_name: name_str.clone(),
+                    cstr_res: ext_res_ty,
+                    cstr_existentials: vec![],
+                    cstr_args: arg_type_refs.clone(),
+                    cstr_arity: arg_type_refs.len() as i32,
+                    cstr_tag: crate::types::decl::ConstructorTag::CstrExtension(ext_path),
+                    cstr_consts: 0,
+                    cstr_nonconsts: 0,
+                    cstr_generalized: false,
+                    cstr_private: crate::types::PrivateFlag::Public,
+                    cstr_loc: crate::location::Location::none(),
+                    cstr_attributes: vec![],
+                    cstr_inlined: None,
+                };
+                new_env.add_constructor(id.clone(), cstr_desc);
 
                 typed_constructors.push(crate::types::typedtree::ExtensionConstructor {
                     ext_id: id,
@@ -1537,7 +1562,7 @@ fn type_structure_item<'a>(
                     ext_type: crate::types::ExtensionConstructor {
                         ext_type_path: path.clone(),
                         ext_type_params: vec![],
-                        ext_args: crate::types::ConstructorArguments::CstrTuple(vec![]),
+                        ext_args: crate::types::ConstructorArguments::CstrTuple(arg_type_refs),
                         ext_ret_type: None,
                         ext_private: crate::types::PrivateFlag::Public,
                         ext_loc: arena.to_location(loc),
@@ -1580,7 +1605,7 @@ fn type_structure_item<'a>(
                     str_loc: loc,
                     str_env: EnvRef(0),
                 },
-                env.clone(),
+                new_env,
             ))
         }
 
