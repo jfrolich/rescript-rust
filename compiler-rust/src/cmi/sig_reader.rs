@@ -191,6 +191,7 @@ impl<'a> SigReadContext<'a> {
             type_immediate,
             type_unboxed,
             type_inlined_types,
+            type_path: None,
         }
     }
 

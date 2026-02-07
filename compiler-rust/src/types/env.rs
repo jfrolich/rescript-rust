@@ -573,6 +573,7 @@ pub fn initial_env(ctx: &TypeContext<'_>) -> Env {
         type_immediate: immediate,
         type_unboxed: super::decl::UnboxedStatus::default(),
         type_inlined_types: vec![],
+        type_path: None,
     };
 
     // Helper: create a constructor declaration (like OCaml's Predef.cstr)
@@ -1026,6 +1027,7 @@ mod tests {
             type_immediate: false,
             type_unboxed: super::super::decl::UnboxedStatus::default(),
             type_inlined_types: vec![],
+            type_path: None,
         };
         env.add_type(id.clone(), decl);
 

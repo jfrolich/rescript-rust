@@ -567,13 +567,15 @@ pub fn convert_constant(cst: &crate::parser::ast::Constant) -> TypeCoreResult<Co
             }
         }
         ParsedConstant::Integer(s, Some('n')) => {
-            // BigInt
-            let (sign, digits) = if s.starts_with('-') {
-                (false, s[1..].to_string())
+            // BigInt - strip leading zeros to match OCaml behavior
+            let (sign, raw_digits) = if s.starts_with('-') {
+                (false, &s[1..])
             } else {
-                (true, s.to_string())
+                (true, s.as_str())
             };
-            Ok(Constant::BigInt(sign, digits))
+            let digits = raw_digits.trim_start_matches('0');
+            let digits = if digits.is_empty() { "0" } else { digits };
+            Ok(Constant::BigInt(sign, digits.to_string()))
         }
         ParsedConstant::Integer(i, Some(c)) => Err(TypeCoreError::UnknownLiteral(i.clone(), *c)),
         ParsedConstant::Char(c) => Ok(Constant::Char(*c)),
@@ -756,7 +758,10 @@ fn transl_type_inner(
                 crate::parser::longident::Longident::Lident(name_idx) => {
                     let name = tctx.arena.get_string(*name_idx);
                     match env.find_type_with_id(name) {
-                        Ok((id, _decl)) => Path::pident(id.clone()),
+                        Ok((id, decl)) => {
+                            // Use qualified type_path if available (from opened modules)
+                            decl.type_path.clone().unwrap_or_else(|| Path::pident(id.clone()))
+                        }
                         Err(_) => {
                             // Type not found in env - fall back to creating from longident
                             Path::from_longident(longident, |idx| tctx.arena.get_string(idx))

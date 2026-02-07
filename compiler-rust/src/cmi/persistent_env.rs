@@ -564,7 +564,9 @@ pub fn add_signature_to_env(
                 }
             }
             SignatureItem::SigType(id, decl, _rec_status) => {
-                // Add type binding
+                // Add type binding with qualified path
+                let mut decl = decl.clone();
+                decl.type_path = Some(Path::pdot(module_path.clone(), id.name()));
                 if as_opened {
                     env.add_opened_type(id.clone(), decl.clone());
                 } else {

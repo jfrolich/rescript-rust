@@ -290,6 +290,7 @@ fn translate_module_type_to_decl<'a>(
                                 type_immediate: false,
                                 type_unboxed: crate::types::UnboxedStatus::default(),
                                 type_inlined_types: vec![],
+                    type_path: None,
                             };
                             items.push(SigItem::SigType(
                                 type_id,
@@ -1344,6 +1345,7 @@ fn type_structure_item<'a>(
                                     type_immediate: false,
                                     type_unboxed: crate::types::UnboxedStatus::default(),
                                     type_inlined_types: vec![],
+                    type_path: None,
                                 };
                                 // cstr_args: single Tconstr pointing to the inline record path
                                 let inline_constr = ctx.new_constr(inline_path, internal_type_params.clone());
@@ -1618,6 +1620,7 @@ fn type_structure_item<'a>(
                     type_immediate: false,
                     type_unboxed: crate::types::UnboxedStatus::default(),
                     type_inlined_types: vec![],
+                    type_path: None,
                 };
 
                 // Save for generalization after the loop
@@ -2404,6 +2407,7 @@ fn transl_sig_type_declarations<'a>(
             type_immediate: false,
             type_unboxed: crate::types::UnboxedStatus { unboxed: false, default: false },
             type_inlined_types: vec![],
+                    type_path: None,
         };
 
         typed_tree_decls.push(TypedTypeDeclaration {

@@ -83,6 +83,9 @@ pub struct TypeDeclaration {
     pub type_unboxed: UnboxedStatus,
     /// Inlined types (for record printing)
     pub type_inlined_types: Vec<TypeInlinedType>,
+    /// Qualified path for this type (e.g., Pdot(Pident "Pervasives") "ref").
+    /// Set when loading types from modules; None for locally defined types.
+    pub type_path: Option<super::path::Path>,
 }
 
 /// An inlined type representation.
