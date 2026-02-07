@@ -293,7 +293,7 @@ pub fn is_underscore_apply_sugar(arena: &ParseArena, expr: &Expression) -> bool 
             .. } = *inner;
             if let PatternDesc::Ppat_var(name) = &*lhs.ppat_desc {
                 if arena.get_string(name.txt) == "__x" {
-                    return matches!(&*rhs.pexp_desc, ExpressionDesc::Pexp_apply { .. });
+                    return matches!(&*rhs.pexp_desc, ExpressionDesc::Pexp_apply(_));
                 }
             }
             false
@@ -306,14 +306,14 @@ pub fn is_underscore_apply_sugar(arena: &ParseArena, expr: &Expression) -> bool 
 pub fn is_fun_newtype(expr: &Expression) -> bool {
     matches!(
         &*expr.pexp_desc,
-        ExpressionDesc::Pexp_fun { .. } | ExpressionDesc::Pexp_newtype(_)
+        ExpressionDesc::Pexp_fun(_) | ExpressionDesc::Pexp_newtype(_)
     )
 }
 
 /// Check if expression is an uncurried function (has explicit arity).
 /// Requires arena to look up arity value (Arity is now ArityIdx).
 pub fn expr_is_uncurried_fun(arena: &ParseArena, expr: &Expression) -> bool {
-    if let ExpressionDesc::Pexp_fun(Box::new(PexpFun { arity, .. })) = &*expr.pexp_desc {
+    if let ExpressionDesc::Pexp_fun(fun_inner) = &*expr.pexp_desc {
         // Has explicit arity if arena.get_arity returns Some(_)
         arena.get_arity(*arity).is_some()
     } else {
@@ -524,9 +524,9 @@ pub fn should_inline_rhs_binary_expr(expr: &Expression) -> bool {
             | ExpressionDesc::Pexp_ifthenelse(_)
             | ExpressionDesc::Pexp_for(_)
             | ExpressionDesc::Pexp_while(_, _)
-            | ExpressionDesc::Pexp_try(inner)
+            | ExpressionDesc::Pexp_try(_)
             | ExpressionDesc::Pexp_array(_)
-            | ExpressionDesc::Pexp_record(inner)
+            | ExpressionDesc::Pexp_record(_)
     )
 }
 
@@ -983,7 +983,7 @@ pub fn should_indent_binary_expr(arena: &crate::parse_arena::ParseArena, expr: &
     use crate::parser::longident::Longident;
 
     match &*expr.pexp_desc {
-        ExpressionDesc::Pexp_apply { funct, args, .. } if args.len() == 2 => {
+        ExpressionDesc::Pexp_apply(apply_inner) if args.len() == 2  => { let PexpApply { ref funct, ref args, .. } = **apply_inner;
             if let ExpressionDesc::Pexp_ident(ident) = &*funct.pexp_desc {
                 if let Longident::Lident(op_idx) = arena.get_longident(ident.txt) {
                     let op = arena.get_string(*op_idx);
@@ -1014,7 +1014,7 @@ fn same_precedence_sub_expression(arena: &crate::parse_arena::ParseArena, parent
     use crate::parser::longident::Longident;
 
     match &*sub_expr.pexp_desc {
-        ExpressionDesc::Pexp_apply { funct, args, .. } if args.len() == 2 => {
+        ExpressionDesc::Pexp_apply(apply_inner) if args.len() == 2  => { let PexpApply { ref funct, ref args, .. } = **apply_inner;
             if let ExpressionDesc::Pexp_ident(ident) = &*funct.pexp_desc {
                 if let Longident::Lident(op_idx) = arena.get_longident(ident.txt) {
                     let sub_op = arena.get_string(*op_idx);
@@ -1096,7 +1096,7 @@ pub fn get_underscore_apply_inner<'a>(arena: &ParseArena, expr: &'a Expression) 
             if let PatternDesc::Ppat_var(name) = &*lhs.ppat_desc {
                 if arena.get_string(name.txt) == "__x" {
                     // Check if rhs is an apply
-                    if matches!(&*rhs.pexp_desc, ExpressionDesc::Pexp_apply { .. }) {
+                    if matches!(&*rhs.pexp_desc, ExpressionDesc::Pexp_apply(_)) {
                         return Some(rhs);
                     }
                 }

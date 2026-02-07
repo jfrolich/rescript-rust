@@ -83,11 +83,11 @@ pub fn call_expr(arena: &ParseArena, expr: &Expression) -> ParenKind {
 
     match &*expr.pexp_desc {
         _ if is_module_pack_constraint(expr) => ParenKind::Nothing,
-        ExpressionDesc::Pexp_fun { .. } if parsetree_viewer::is_underscore_apply_sugar(arena, expr) => {
+        ExpressionDesc::Pexp_fun(_) if parsetree_viewer::is_underscore_apply_sugar(arena, expr) => {
             ParenKind::Nothing
         }
         ExpressionDesc::Pexp_assert(_)
-        | ExpressionDesc::Pexp_fun { .. }
+        | ExpressionDesc::Pexp_fun(_)
         | ExpressionDesc::Pexp_newtype(_)
         | ExpressionDesc::Pexp_constraint(_)
         | ExpressionDesc::Pexp_setfield(_)
@@ -138,11 +138,11 @@ pub fn unary_expr_operand(arena: &ParseArena, expr: &Expression) -> ParenKind {
 
     match &*expr.pexp_desc {
         _ if is_module_pack_constraint(expr) => ParenKind::Nothing,
-        ExpressionDesc::Pexp_fun { .. } if parsetree_viewer::is_underscore_apply_sugar(arena, expr) => {
+        ExpressionDesc::Pexp_fun(_) if parsetree_viewer::is_underscore_apply_sugar(arena, expr) => {
             ParenKind::Nothing
         }
         ExpressionDesc::Pexp_assert(_)
-        | ExpressionDesc::Pexp_fun { .. }
+        | ExpressionDesc::Pexp_fun(_)
         | ExpressionDesc::Pexp_newtype(_)
         | ExpressionDesc::Pexp_constraint(_)
         | ExpressionDesc::Pexp_setfield(_)
@@ -165,11 +165,11 @@ pub fn binary_expr_operand(arena: &ParseArena, is_lhs: bool, expr: &Expression) 
 
     match &*expr.pexp_desc {
         _ if is_module_pack_constraint(expr) => ParenKind::Nothing,
-        ExpressionDesc::Pexp_fun { .. } if parsetree_viewer::is_underscore_apply_sugar(arena, expr) => {
+        ExpressionDesc::Pexp_fun(_) if parsetree_viewer::is_underscore_apply_sugar(arena, expr) => {
             ParenKind::Nothing
         }
         ExpressionDesc::Pexp_constraint(_)
-        | ExpressionDesc::Pexp_fun { .. }
+        | ExpressionDesc::Pexp_fun(_)
         | ExpressionDesc::Pexp_newtype(_) => ParenKind::Parenthesized,
         _ if parsetree_viewer::expr_is_uncurried_fun(arena, expr) => ParenKind::Parenthesized,
         _ if parsetree_viewer::is_binary_expression(arena, expr) => ParenKind::Parenthesized,
@@ -352,9 +352,8 @@ fn assert_or_await_expr_rhs_inner(arena: &ParseArena, in_await: bool, expr: &Exp
     }
 
     match &*expr.pexp_desc {
-        ExpressionDesc::Pexp_apply { funct, .. }
-            if parsetree_viewer::is_binary_expression(arena, expr) =>
-        {
+        ExpressionDesc::Pexp_apply(apply_inner)
+            if parsetree_viewer::is_binary_expression(arena, expr)  => { let PexpApply { ref funct, .. } = **apply_inner;
             if let ExpressionDesc::Pexp_ident(ident) = &*funct.pexp_desc {
                 if let Longident::Lident(op_idx) = arena.get_longident(ident.txt) {
                     let operator = arena.get_string(*op_idx);
@@ -366,13 +365,13 @@ fn assert_or_await_expr_rhs_inner(arena: &ParseArena, in_await: bool, expr: &Exp
             ParenKind::Parenthesized
         }
         _ if is_module_pack_constraint(expr) => ParenKind::Nothing,
-        ExpressionDesc::Pexp_fun { .. }
+        ExpressionDesc::Pexp_fun(_)
             if parsetree_viewer::is_underscore_apply_sugar(arena, expr) =>
         {
             ParenKind::Nothing
         }
         ExpressionDesc::Pexp_assert(_)
-        | ExpressionDesc::Pexp_fun { .. }
+        | ExpressionDesc::Pexp_fun(_)
         | ExpressionDesc::Pexp_newtype(_)
         | ExpressionDesc::Pexp_constraint(_)
         | ExpressionDesc::Pexp_setfield(_)
@@ -421,12 +420,12 @@ pub fn field_expr(arena: &ParseArena, expr: &Expression) -> ParenKind {
         ExpressionDesc::Pexp_constant(c) if is_negative_constant(c) => {
             ParenKind::Parenthesized
         }
-        ExpressionDesc::Pexp_fun { .. } if parsetree_viewer::is_underscore_apply_sugar(arena, expr) => {
+        ExpressionDesc::Pexp_fun(_) if parsetree_viewer::is_underscore_apply_sugar(arena, expr) => {
             ParenKind::Nothing
         }
         ExpressionDesc::Pexp_assert(_)
         | ExpressionDesc::Pexp_extension(_)
-        | ExpressionDesc::Pexp_fun { .. }
+        | ExpressionDesc::Pexp_fun(_)
         | ExpressionDesc::Pexp_newtype(_)
         | ExpressionDesc::Pexp_constraint(_)
         | ExpressionDesc::Pexp_setfield(_)
@@ -657,7 +656,7 @@ pub fn mod_expr_parens(mod_expr: &ModuleExpr) -> bool {
 
 /// Check if arrow return type expression needs parentheses.
 pub fn arrow_return_typ_expr(typ_expr: &CoreType) -> bool {
-    matches!(&*typ_expr.ptyp_desc, CoreTypeDesc::Ptyp_arrow { .. })
+    matches!(&*typ_expr.ptyp_desc, CoreTypeDesc::Ptyp_arrow(_))
 }
 
 /// Check if pattern record row RHS needs parentheses.

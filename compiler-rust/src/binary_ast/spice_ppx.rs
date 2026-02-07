@@ -741,7 +741,7 @@ fn get_param_names(
 
 fn get_string_from_expression(expr: &Expression) -> Result<Option<Constant>, String> {
     match &*expr.pexp_desc {
-        ExpressionDesc::Pexp_constant(constant) => match constant {
+        ExpressionDesc::Pexp_constant(constant) => match &**constant {
             Constant::String(_, _) => Ok(Some(constant.clone())),
             Constant::Float(_, _) => Ok(None),
             _ => Err("cannot find a name??".to_string()),
@@ -752,7 +752,7 @@ fn get_string_from_expression(expr: &Expression) -> Result<Option<Constant>, Str
 
 fn get_float_from_expression(expr: &Expression) -> Result<Option<Constant>, String> {
     match &*expr.pexp_desc {
-        ExpressionDesc::Pexp_constant(constant) => match constant {
+        ExpressionDesc::Pexp_constant(constant) => match &**constant {
             Constant::String(_, _) => Ok(None),
             Constant::Float(_, _) => Ok(Some(constant.clone())),
             _ => Err("cannot find a name??".to_string()),
@@ -2151,7 +2151,7 @@ fn variants_generate_encoder_case(
     let pcd_loc = arena.clone_loc(decl.constr_decl.pcd_loc);
 
     let json_expr = match &*decl.alias.pexp_desc {
-        ExpressionDesc::Pexp_constant(constant) => match constant {
+        ExpressionDesc::Pexp_constant(constant) => match &**constant {
             Constant::String(_, _) => expr_construct_with_loc(
                 lident_path_static(arena, &["JSON", "String"]),
                 Some(decl.alias.clone()),
@@ -2739,7 +2739,7 @@ fn polyvars_generate_encoder_case(
     let (json_expr, args) = match &row.row_field {
         RowField::Rtag(_, _, _, core_types) => {
             let json_expr = match &*row.alias.pexp_desc {
-                ExpressionDesc::Pexp_constant(constant) => match constant {
+                ExpressionDesc::Pexp_constant(constant) => match &**constant {
                     Constant::String(_, _) => expr_construct_with_loc(
                         lident_path_static(arena, &["JSON", "String"]),
                         Some(row.alias.clone()),
@@ -3570,7 +3570,7 @@ impl<'a> LocCloner<'a> {
         match desc {
             PatternDesc::Ppat_any
             | PatternDesc::Ppat_constant(_)
-            | PatternDesc::Ppat_interval(inner) => {
+            | PatternDesc::Ppat_interval(_) => {
                     let (_, _) = *inner;}
             PatternDesc::Ppat_var(name) => self.located(name),
             PatternDesc::Ppat_alias(pat, name) => {

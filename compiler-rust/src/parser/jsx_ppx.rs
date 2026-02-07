@@ -274,7 +274,7 @@ fn transform_value_bindings(
 fn spelunk_for_fun_expression<'a>(arena: &ParseArena, expr: &'a Expression) -> (Option<&'a Expression>, bool, &'a Expression) {
     match &*expr.pexp_desc {
         // let make = (~prop) => ...
-        ExpressionDesc::Pexp_fun { .. } | ExpressionDesc::Pexp_newtype(inner) => {
+        ExpressionDesc::Pexp_fun(_) | ExpressionDesc::Pexp_newtype(_) => {
                     let (_, _) = **inner;
             (None, false, expr)
         }
@@ -285,7 +285,7 @@ fn spelunk_for_fun_expression<'a>(arena: &ParseArena, expr: &'a Expression) -> (
             (None, has_forward_ref, inner_expr)
         }
         // let make = React.forwardRef((~prop) => ...)
-        ExpressionDesc::Pexp_apply { funct, args, .. } if args.len() == 1 && matches!(&args[0].0, ArgLabel::Nolabel) => {
+        ExpressionDesc::Pexp_apply(apply_inner) if args.len() == 1 && matches!(&args[0].0, ArgLabel::Nolabel)  => { let PexpApply { ref funct, ref args, .. } = **apply_inner;
             let (_, _, inner_expr) = spelunk_for_fun_expression(arena, &args[0].1);
             let has_forward_ref = is_forward_ref(arena, funct);
             // Return the original funct expression (e.g., React.forwardRef) to preserve its source location
@@ -1833,13 +1833,13 @@ fn collect_prop_types(typ: &CoreType) -> Vec<(ArgLabel, Attributes, Location, Co
 }
 
 fn collect_prop_types_rec(typ: &CoreType, types: &mut Vec<(ArgLabel, Attributes, Location, CoreType)>) {
-    if let CoreTypeDesc::Ptyp_arrow { arg, ret, .. } = &*typ.ptyp_desc {
+    if let CoreTypeDesc::Ptyp_arrow(ptyp_inner) = &*typ.ptyp_desc {
         let label = &arg.lbl;
         if is_labelled(label) || is_optional(label) {
             // OCaml uses different locations based on whether return is another arrow:
             // - If ret is arrow: use typ.ptyp_loc (the enclosing arrow's location)
             // - If ret is not arrow (last arg): use ret.ptyp_loc (return type's location)
-            let loc = if matches!(*ret.ptyp_desc, CoreTypeDesc::Ptyp_arrow { .. }) {
+            let loc = if matches!(*ret.ptyp_desc, CoreTypeDesc::Ptyp_arrow(_)) {
                 typ.ptyp_loc.clone()
             } else {
                 ret.ptyp_loc.clone()

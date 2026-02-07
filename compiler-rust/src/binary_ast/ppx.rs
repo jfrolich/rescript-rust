@@ -586,7 +586,7 @@ fn is_unit_type(typ: &CoreType, arena: &mut ParseArena) -> bool {
 fn get_result_type(typ: &CoreType) -> Option<&CoreType> {
     match &*typ.ptyp_desc {
         CoreTypeDesc::Ptyp_arrow(inner) => {
-            let (_arg, ref ret, _arity) = **inner;
+            let (ref _arg, ref ret, ref _arity) = **inner;
             Some(ret.as_ref())
         }
         _ => None,
@@ -597,7 +597,7 @@ fn get_result_type(typ: &CoreType) -> Option<&CoreType> {
 fn get_final_result_type(typ: &CoreType) -> &CoreType {
     match &*typ.ptyp_desc {
         CoreTypeDesc::Ptyp_arrow(inner) => {
-            let (_arg, ref ret, _arity) = **inner;
+            let (ref _arg, ref ret, ref _arity) = **inner;
             get_final_result_type(ret)
         }
         _ => typ,
@@ -4916,7 +4916,7 @@ fn parse_deriving_expr(expr_desc: &ExpressionDesc, actions: &mut Vec<DeriveActio
         }
         // Record: @deriving({jsConverter: newType})
         ExpressionDesc::Pexp_record(inner) => {
-                    let (ref fields, ref None) = **inner;
+                    let (ref fields, ref _none) = **inner;
             for field in fields {
                 let lid = arena.get_longident(field.lid.txt);
                 if let Longident::Lident(s) = lid {

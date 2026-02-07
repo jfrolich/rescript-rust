@@ -404,10 +404,10 @@ impl<'a> Mapper<'a> {
     fn map_payload(&mut self, payload: &current::Payload) -> pt0::Payload {
         match payload {
             current::Payload::PStr(items) => {
-                pt0::Payload::PStr(Box::new(items.iter().map(|i| self.map_structure_item(i)).collect()))
+                pt0::Payload::PStr(items.iter().map(|i| self.map_structure_item(i)).collect())
             }
             current::Payload::PSig(items) => {
-                pt0::Payload::PSig(Box::new(items.iter().map(|i| self.map_signature_item(i)).collect()))
+                pt0::Payload::PSig(items.iter().map(|i| self.map_signature_item(i)).collect())
             }
             current::Payload::PTyp(ty) => pt0::Payload::PTyp(Box::new(self.map_core_type(ty))),
             current::Payload::PPat(inner) => {
@@ -444,7 +444,7 @@ impl<'a> Mapper<'a> {
             };
 
             // Look up arity value from arena (current::Arity is now ArityIdx)
-            let arity_value = self.arena.get_arity(*arity);
+            let arity_value = self.arena.get_arity(&arity);
             match arity_value {
                 None => arrow_type,
                 Some(n) => {
@@ -711,24 +711,24 @@ impl<'a> Mapper<'a> {
                 lhs,
                 rhs,
                 arity,
-                is_async, } = *inner;
+                is_async, } = &**inner;
                 // Output current parsetree format with arity and is_async fields
                 // Look up arity from arena (current::Arity is now ArityIdx)
-                let arity_opt = self.arena.get_arity(*arity);
+                let arity_opt = self.arena.get_arity(&arity);
                 pt0::ExpressionDesc::Fun {
-                    arg_label: self.map_arg_label(arg_label),
+                    arg_label: self.map_arg_label(&arg_label),
                     default: default.as_ref().map(|e| Box::new(self.map_expression(e))),
-                    lhs: Box::new(self.map_pattern(lhs)),
-                    rhs: Box::new(self.map_expression(rhs)),
+                    lhs: Box::new(self.map_pattern(&lhs)),
+                    rhs: Box::new(self.map_expression(&rhs)),
                     arity: arity_opt,
-                    is_async: *is_async,
+                    is_async: is_async,
                 }
             }
             current::ExpressionDesc::Pexp_apply(inner) => {
                     let PexpApply { funct,
                 args,
                 partial,
-                transformed_jsx, } = *inner;
+                transformed_jsx, } = &**inner;
                 // Convert operators for parsetree0 compatibility
                 // Check if this is a binary operator application that needs conversion
                 let converted_funct = if args.len() == 2
@@ -776,22 +776,22 @@ impl<'a> Mapper<'a> {
                             pexp_attributes: self.map_attributes(&funct.pexp_attributes),
                         }
                     } else {
-                        self.map_expression(funct)
+                        self.map_expression(&funct)
                     }
                 } else {
-                    self.map_expression(funct)
+                    self.map_expression(&funct)
                 };
 
                 let mut mapped_args = Vec::with_capacity(args.len());
                 for (label, e) in args {
-                    mapped_args.push((self.map_arg_label(label), self.map_expression(e)));
+                    mapped_args.push((self.map_arg_label(&label), self.map_expression(&e)));
                 }
 
                 pt0::ExpressionDesc::Apply {
                     funct: Box::new(mapped_funct),
                     args: mapped_args,
-                    partial: *partial,
-                    transformed_jsx: *transformed_jsx,
+                    partial: partial,
+                    transformed_jsx: transformed_jsx,
                 }
             }
             current::ExpressionDesc::Pexp_match(inner) => {
@@ -944,7 +944,7 @@ impl<'a> Mapper<'a> {
             current::ExpressionDesc::Pexp_jsx_element(jsx) => {
                 // Convert JSX element to old-style function application with [@JSX] attribute
                 let _full_loc = self.loc(loc);
-                match jsx {
+                match &**jsx {
                     current::JsxElement::Fragment(fragment) => {
                         // Fragment becomes a list with JSX attribute
                         let list_expr = self.map_jsx_children_to_list(&fragment.children, loc);

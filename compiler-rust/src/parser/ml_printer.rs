@@ -228,13 +228,13 @@ fn is_simple_expression_with_arena(expr: &Expression, arena: &ParseArena) -> boo
             | ExpressionDesc::Pexp_constraint(_)
             | ExpressionDesc::Pexp_coerce(_)
             | ExpressionDesc::Pexp_variant(_, None)
-            | ExpressionDesc::Pexp_pack(Box::new(_))
+            | ExpressionDesc::Pexp_pack(_)
             // NOTE: Pexp_field and Pexp_send are NOT simple in OCaml's pprintast.
             // They are in expression2, which means they need parens when nested.
             // OCaml's simple_expr handles these directly (no paren wrapping)
-            | ExpressionDesc::Pexp_for(inner)
+            | ExpressionDesc::Pexp_for(_)
             | ExpressionDesc::Pexp_while(_, _)
-            | ExpressionDesc::Pexp_jsx_element(Box::new(_))  // JSX elements are simple in OCaml
+            | ExpressionDesc::Pexp_jsx_element(_)  // JSX elements are simple in OCaml
     )
 }
 
@@ -243,7 +243,7 @@ fn is_simple_expression_with_arena(expr: &Expression, arena: &ParseArena) -> boo
 fn needs_parens_in_semi_context(expr: &Expression) -> bool {
     matches!(
         &*expr.pexp_desc,
-        ExpressionDesc::Pexp_fun { .. }
+        ExpressionDesc::Pexp_fun(_)
             | ExpressionDesc::Pexp_match(_)
             | ExpressionDesc::Pexp_try(_)
             | ExpressionDesc::Pexp_sequence(_, _)
@@ -1195,7 +1195,7 @@ fn print_expression_under_semi<W: Write>(f: &mut Formatter<W>, arena: &ParseAren
             ExpressionDesc::Pexp_let(_)
                 | ExpressionDesc::Pexp_letmodule(_)
                 | ExpressionDesc::Pexp_open(_)
-                | ExpressionDesc::Pexp_letexception(inner)
+                | ExpressionDesc::Pexp_letexception(_)
         );
         if needs_semi_parens || needs_let_parens {
             // OCaml: paren true (expression reset_ctxt) f x
@@ -1218,7 +1218,7 @@ fn print_expression_under_semi_inner<W: Write>(f: &mut Formatter<W>, arena: &Par
         ExpressionDesc::Pexp_let(_)
             | ExpressionDesc::Pexp_letmodule(_)
             | ExpressionDesc::Pexp_open(_)
-            | ExpressionDesc::Pexp_letexception(inner)
+            | ExpressionDesc::Pexp_letexception(_)
     );
     if needs_semi_parens || needs_let_parens {
         // paren true (expression reset_ctxt) f x
@@ -1249,7 +1249,7 @@ fn print_expression_with_ctx<W: Write>(f: &mut Formatter<W>, arena: &ParseArena,
 fn print_expression_inner<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, expr: &Expression, use_parens: bool, ctx: PrintCtx) {
     // Context-dependent parenthesization (matching OCaml's pprintast lines 606-615)
     if (ctx.pipe || ctx.semi) && matches!(&*expr.pexp_desc,
-        ExpressionDesc::Pexp_fun { .. }
+        ExpressionDesc::Pexp_fun(_)
         | ExpressionDesc::Pexp_match(_)
         | ExpressionDesc::Pexp_try(_)
         | ExpressionDesc::Pexp_sequence(_, _)) {
@@ -2025,7 +2025,7 @@ fn print_expression_inner<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, ex
                     | ExpressionDesc::Pexp_construct(_, None)
                     | ExpressionDesc::Pexp_tuple(_)
                     | ExpressionDesc::Pexp_array(_)
-                    | ExpressionDesc::Pexp_record(inner)
+                    | ExpressionDesc::Pexp_record(_)
             );
             // If has attributes, print_expression already produces ((expr)[@attr ])
             // so we don't need to add extra parens
@@ -2492,7 +2492,7 @@ fn print_pattern_inner<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, pat: 
 fn print_core_type1<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, typ: &CoreType) {
     let needs_parens = matches!(
         *typ.ptyp_desc,
-        CoreTypeDesc::Ptyp_arrow { .. } | CoreTypeDesc::Ptyp_alias(..)
+        CoreTypeDesc::Ptyp_arrow(_) | CoreTypeDesc::Ptyp_alias(..)
     );
     if needs_parens {
         f.string("(");
@@ -2552,7 +2552,7 @@ fn print_core_type_inner<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, typ
             // wraps them via the `| _ -> paren true (core_type ctxt) f x` fallthrough)
             let arg_needs_parens = matches!(
                 *arg.typ.ptyp_desc,
-                CoreTypeDesc::Ptyp_arrow { .. } | CoreTypeDesc::Ptyp_alias(..)
+                CoreTypeDesc::Ptyp_arrow(_) | CoreTypeDesc::Ptyp_alias(..)
             );
             if arg_needs_parens {
                 f.string("(");
@@ -2671,7 +2671,7 @@ fn print_core_type_inner<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, typ
             // OCaml: pp f "@[<2>%a@;as@;'%s@]" (core_type1 ctxt) ct s
             f.open_box(BoxKind::Box, 2);
             // Arrow types inside alias need parens for precedence
-            let needs_parens = matches!(*t.ptyp_desc, CoreTypeDesc::Ptyp_arrow { .. });
+            let needs_parens = matches!(*t.ptyp_desc, CoreTypeDesc::Ptyp_arrow(_));
             if needs_parens {
                 f.string("(");
             }

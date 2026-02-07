@@ -188,12 +188,12 @@ impl<'a> DependencyCollector<'a> {
             }
             StructureItemDesc::Pstr_recmodule(mbs) => {
                 // First bind all module names so they're not added as dependencies
-                for mb in mbs {
+                for mb in &**mbs {
                     let module_name = self.arena.get_string(mb.pmb_name.txt).to_string();
                     self.bound_modules.insert(module_name);
                 }
                 // Then process all module expressions
-                for mb in mbs {
+                for mb in &**mbs {
                     self.add_module_binding(mb);
                 }
             }
@@ -249,12 +249,12 @@ impl<'a> DependencyCollector<'a> {
             }
             SignatureItemDesc::Psig_recmodule(mds) => {
                 // First bind all module names
-                for md in mds {
+                for md in &**mds {
                     let module_name = self.arena.get_string(md.pmd_name.txt).to_string();
                     self.bound_modules.insert(module_name);
                 }
                 // Then process all module declarations
-                for md in mds {
+                for md in &**mds {
                     self.add_module_declaration(md);
                 }
             }
@@ -315,21 +315,21 @@ impl<'a> DependencyCollector<'a> {
                     let PexpFun { default,
                 lhs,
                 rhs,
-                .. } = *inner;
+                .. } = &**inner;
                 if let Some(default) = default {
-                    self.add_expression(default);
+                    self.add_expression(&default);
                 }
                 // OCaml: add_expr (add_pattern bv p) e
                 // Collect unpack names from pattern and add to bound_modules for rhs,
                 // then remove them after processing (OCaml scopes bv functionally)
-                let unpack_names = self.add_pattern_collecting_unpack(lhs);
+                let unpack_names = self.add_pattern_collecting_unpack(&lhs);
                 // Only track names that are NEWLY added (not already bound) to avoid
                 // removing outer bindings when the scope exits.
                 let newly_added: Vec<String> = unpack_names
                     .into_iter()
                     .filter(|name| self.bound_modules.insert(name.clone()))
                     .collect();
-                self.add_expression(rhs);
+                self.add_expression(&rhs);
                 for name in &newly_added {
                     self.bound_modules.remove(name);
                 }
@@ -349,7 +349,7 @@ impl<'a> DependencyCollector<'a> {
                 }
             }
             ExpressionDesc::Pexp_tuple(exprs) | ExpressionDesc::Pexp_array(exprs) => {
-                for expr in exprs {
+                for expr in &**exprs {
                     self.add_expression(expr);
                 }
             }
@@ -460,7 +460,7 @@ impl<'a> DependencyCollector<'a> {
                 self.add_lident_idx_full(lid.txt);
                 self.add_expression(body);
             }
-            ExpressionDesc::Pexp_extension((_id, _payload)) => {
+            ExpressionDesc::Pexp_extension(_ext_inner) => {
                 // OCaml's handle_extension ignores extension payloads for dependency extraction
             }
             ExpressionDesc::Pexp_await(expr) => {
@@ -554,9 +554,9 @@ impl<'a> DependencyCollector<'a> {
                 self.add_pattern_inner(pat, unpack_names);
             }
             PatternDesc::Ppat_interval(inner) => {
-                    let (_, _) = *inner;}
+                    let (_, _) = &**inner;}
             PatternDesc::Ppat_tuple(pats) | PatternDesc::Ppat_array(pats) => {
-                for pat in pats {
+                for pat in &**pats {
                     self.add_pattern_inner(pat, unpack_names);
                 }
             }
@@ -600,7 +600,7 @@ impl<'a> DependencyCollector<'a> {
             PatternDesc::Ppat_exception(pat) => {
                 self.add_pattern_inner(pat, unpack_names);
             }
-            PatternDesc::Ppat_extension((_id, _payload)) => {
+            PatternDesc::Ppat_extension(_ext_inner) => {
                 // OCaml's handle_extension ignores extension payloads for dependency extraction
             }
             PatternDesc::Ppat_open(lid, pat) => {
@@ -622,7 +622,7 @@ impl<'a> DependencyCollector<'a> {
                 self.add_core_type(ret);
             }
             CoreTypeDesc::Ptyp_tuple(tys) => {
-                for ty in tys {
+                for ty in &**tys {
                     self.add_core_type(ty);
                 }
             }
@@ -655,7 +655,7 @@ impl<'a> DependencyCollector<'a> {
                 for row in rows {
                     match row {
                         RowField::Rtag(_label, _attrs, _bool, tys) => {
-                            for ty in tys {
+                            for ty in &**tys {
                                 self.add_core_type(ty);
                             }
                         }
@@ -669,14 +669,14 @@ impl<'a> DependencyCollector<'a> {
                     let (ref _names, ref ty) = **inner;
                 self.add_core_type(ty);
             }
-            CoreTypeDesc::Ptyp_package((lid, constraints)) => {
+            CoreTypeDesc::Ptyp_package(pkg_inner) => { let (ref lid, ref constraints) = **pkg_inner;
                 self.add_lident_idx(lid.txt);
                 for (lid, ty) in constraints {
                     self.add_lident_idx(lid.txt);
                     self.add_core_type(ty);
                 }
             }
-            CoreTypeDesc::Ptyp_extension((_id, _payload)) => {
+            CoreTypeDesc::Ptyp_extension(_ext_inner) => {
                 // OCaml's handle_extension ignores extension payloads for dependency extraction
             }
         }
@@ -719,7 +719,7 @@ impl<'a> DependencyCollector<'a> {
             ModuleExprDesc::Pmod_unpack(expr) => {
                 self.add_expression(expr);
             }
-            ModuleExprDesc::Pmod_extension((_id, _payload)) => {
+            ModuleExprDesc::Pmod_extension(_ext_inner) => {
                 // OCaml's handle_extension ignores extension payloads for dependency extraction
             }
         }
@@ -764,7 +764,7 @@ impl<'a> DependencyCollector<'a> {
             ModuleTypeDesc::Pmty_typeof(me) => {
                 self.add_module_expr(me);
             }
-            ModuleTypeDesc::Pmty_extension((_id, _payload)) => {
+            ModuleTypeDesc::Pmty_extension(_ext_inner) => {
                 // OCaml's handle_extension ignores extension payloads for dependency extraction
             }
         }
@@ -833,7 +833,7 @@ impl<'a> DependencyCollector<'a> {
     fn add_constructor_arguments(&mut self, args: &ConstructorArguments) {
         match args {
             ConstructorArguments::Pcstr_tuple(tys) => {
-                for ty in tys {
+                for ty in &**tys {
                     self.add_core_type(ty);
                 }
             }

@@ -64,15 +64,15 @@ pub fn substitute_type_vars(arena: &mut crate::parse_arena::ParseArena, typ: Cor
         }
         CoreTypeDesc::Ptyp_arrow(inner) => {
                     let (ref arg, ref ret, ref arity) = **inner;
-                    CoreTypeDesc::Ptyp_arrow {
-            arg: Box::new(TypeArg {
-                attrs: arg.attrs,
-                lbl: arg.lbl,
-                typ: substitute_type_vars(arena, arg.typ, vars),
-            }),
-            ret: Box::new(substitute_type_vars(arena, *ret, vars)),
-            arity
-        }
+                    CoreTypeDesc::Ptyp_arrow(Box::new((
+                Box::new(TypeArg {
+                    attrs: arg.attrs.clone(),
+                    lbl: arg.lbl.clone(),
+                    typ: substitute_type_vars(arena, arg.typ.clone(), vars),
+                }),
+                Box::new(substitute_type_vars(arena, (**ret).clone(), vars)),
+                *arity,
+            )))
         },
         CoreTypeDesc::Ptyp_tuple(elements) => CoreTypeDesc::Ptyp_tuple(
             elements
@@ -2496,7 +2496,7 @@ mod tests {
     #[test]
     fn test_parse_type_arrow() {
         let typ = parse_type_with_timeout("int => string");
-        assert!(matches!(*typ.ptyp_desc, CoreTypeDesc::Ptyp_arrow { .. }));
+        assert!(matches!(*typ.ptyp_desc, CoreTypeDesc::Ptyp_arrow(_)));
     }
 
     #[test]

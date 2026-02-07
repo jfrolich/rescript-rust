@@ -259,7 +259,7 @@ fn is_external_ext_expr(expr: &Expression, w: &MarshalWriter) -> bool {
 
     matches!(
         &*eq_args[1].1.pexp_desc,
-        ExpressionDesc::Pexp_constant(Constant::String(s, None)) if s == "undefined"
+        ExpressionDesc::Pexp_constant(c) if matches!(&**c, Constant::String(s, None) if s == "undefined")
     )
 }
 
@@ -280,7 +280,7 @@ fn is_external_raw_expansion_expr(expr: &Expression, w: &MarshalWriter) -> bool 
     }
     matches!(
         &*args[0].1.pexp_desc,
-        ExpressionDesc::Pexp_constant(Constant::String(_, Some(delim))) if delim.is_empty()
+        ExpressionDesc::Pexp_constant(c) if matches!(&**c, Constant::String(_, Some(delim)) if delim.is_empty())
     )
 }
 
@@ -945,7 +945,7 @@ impl Marshal for CoreTypeDesc {
                 // In await-letmodule rewrites, OCaml reuses the same `Longident.t loc`
                 // node between `Pmty_ident` and the generated package constraint.
                 // Keep this narrowly scoped to the pack-inside-letmodule path.
-                let (lid, constraints) = pkg;
+                let (ref lid, ref constraints) = **pkg;
                 w.write_block_header(0, 2);
                 if w.in_letmodule_expr() {
                     w.write_lident_loc_shared(lid.txt, lid.loc);
@@ -1285,7 +1285,7 @@ impl Marshal for ExpressionDesc {
         // Pexp_jsx_element = tag 29
         match self {
             ExpressionDesc::Pexp_ident(lid) => {
-                    let (_, ref mod_expr, _) = **inner;
+                    let (_, ref mod_expr, _) = **letmod_inner;
                 w.write_block_header(0, 1);
                 lid.marshal(w);
             }
@@ -1301,12 +1301,12 @@ impl Marshal for ExpressionDesc {
                 body.marshal(w);
             }
             ExpressionDesc::Pexp_fun(inner) => {
-                    let PexpFun { arg_label,
-                default,
-                lhs,
-                rhs,
-                arity,
-                is_async, } = *inner;
+                    let PexpFun { ref arg_label,
+                ref default,
+                ref lhs,
+                ref rhs,
+                ref arity,
+                ref is_async, } = **inner;
                 // Pexp_fun of { arg_label; default; lhs; rhs; arity; async }
                 // Inline record with 6 fields
                 w.write_block_header(3, 6);
@@ -1318,10 +1318,10 @@ impl Marshal for ExpressionDesc {
                 w.write_int(if *is_async { 1 } else { 0 });
             }
             ExpressionDesc::Pexp_apply(inner) => {
-                    let PexpApply { funct,
-                args,
-                partial,
-                transformed_jsx, } = *inner;
+                    let PexpApply { ref funct,
+                ref args,
+                ref partial,
+                ref transformed_jsx, } = **inner;
                 // Pexp_apply of { funct; args; partial; transformed_jsx }
                 // Inline record with 4 fields
                 w.write_block_header(4, 4);

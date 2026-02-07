@@ -645,12 +645,12 @@ pub mod ast_helper {
         loc: Location,
     ) -> Expression {
         make_expr(
-            ExpressionDesc::Pexp_apply {
+            ExpressionDesc::Pexp_apply(Box::new(PexpApply {
                 funct: Box::new(func),
                 args,
                 partial: false,
                 transformed_jsx: false,
-            },
+            })),
             loc,
         )
     }
@@ -663,12 +663,12 @@ pub mod ast_helper {
         partial: bool,
     ) -> Expression {
         make_expr(
-            ExpressionDesc::Pexp_apply {
+            ExpressionDesc::Pexp_apply(Box::new(PexpApply {
                 funct: Box::new(func),
                 args,
                 partial,
                 transformed_jsx: false,
-            },
+            })),
             loc,
         )
     }

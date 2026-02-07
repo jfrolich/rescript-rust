@@ -488,7 +488,7 @@ fn is_block_expr(expr: &Expression) -> bool {
         | ExpressionDesc::Pexp_let(..)
         | ExpressionDesc::Pexp_open(..)
         | ExpressionDesc::Pexp_sequence(..) => true,
-        ExpressionDesc::Pexp_apply { funct, .. } if is_block_expr(funct) => true,
+        ExpressionDesc::Pexp_apply(apply_inner) if { let PexpApply { ref funct, .. } = **apply_inner; is_block_expr(funct) } => true,
         ExpressionDesc::Pexp_constraint(inner) if is_block_expr(&inner.0) => true,
         ExpressionDesc::Pexp_field(inner, _) if is_block_expr(inner) => true,
         ExpressionDesc::Pexp_setfield(inner) if is_block_expr(&inner.0) => true,
@@ -923,9 +923,9 @@ fn rewrite_value_binding_locs<'a>(vb: &'a ValueBinding, arena: &mut ParseArena) 
         // let x: type a. t = (a, b) => ...
         (
             PatternDesc::Ppat_constraint(pat_inner),
-            ExpressionDesc::Pexp_fun { .. },
+            ExpressionDesc::Pexp_fun(_),
         ) => {
-            let (_pat, ref typ) = **pat_inner;
+            let (ref _pat, ref typ) = **pat_inner;
             if let CoreTypeDesc::Ptyp_poly(poly_inner) = &*typ.ptyp_desc {
                 let (ref vars, ref inner_typ) = **poly_inner;
                 if !vars.is_empty() {
@@ -951,7 +951,7 @@ fn rewrite_value_binding_locs<'a>(vb: &'a ValueBinding, arena: &mut ParseArena) 
             PatternDesc::Ppat_constraint(pat_inner),
             ExpressionDesc::Pexp_newtype(newtype_inner),
         ) => {
-            let (_pat, ref typ) = **pat_inner;
+            let (ref _pat, ref typ) = **pat_inner;
             let (_name, ref inner_expr) = **newtype_inner;
             if let CoreTypeDesc::Ptyp_poly(poly_inner) = &*typ.ptyp_desc {
                 let (ref vars, ref inner_typ) = **poly_inner;
@@ -1895,7 +1895,7 @@ fn walk_expression(expr: &Expression, t: &mut CommentTable, comments: Vec<Commen
             // Regular apply
             walk_apply_expr(funct, args, t, comments, arena);
         }
-        ExpressionDesc::Pexp_fun { .. } | ExpressionDesc::Pexp_newtype(inner) => {
+        ExpressionDesc::Pexp_fun(_) | ExpressionDesc::Pexp_newtype(_) => {
                     let (_, _) = **inner;
             // Walk through function parameters and body, matching OCaml's handling
             let (_is_async, parameters, return_expr) = parsetree_viewer::fun_expr(arena, expr);
