@@ -84,7 +84,7 @@ fn parse_attribute_id(p: &mut Parser<'_>, start_pos_idx: PosIdx) -> Located<StrI
     loop {
         let name = match &p.token {
             Token::Lident(name) | Token::Uident(name) => {
-                let name = name.clone();
+                let name = name.to_string();
                 p.next();
                 name
             }
@@ -138,7 +138,7 @@ fn parse_type_longident(p: &mut Parser<'_>) -> crate::parse_arena::LidentIdx {
     loop {
         match &p.token {
             Token::Uident(name) => {
-                parts.push(name.clone());
+                parts.push(name.to_string());
                 p.next();
                 if p.token == Token::Dot {
                     p.next();
@@ -147,7 +147,7 @@ fn parse_type_longident(p: &mut Parser<'_>) -> crate::parse_arena::LidentIdx {
                 }
             }
             Token::Lident(name) => {
-                parts.push(name.clone());
+                parts.push(name.to_string());
                 p.next();
                 break;
             }
@@ -265,7 +265,7 @@ fn parse_single_pattern_with_alias(p: &mut Parser<'_>) -> Pattern {
         let alias_attrs = parse_attributes(p);
         let (name, name_loc) = match &p.token {
             Token::Lident(name) => {
-                let name = name.clone();
+                let name = name.to_string();
                 let name_loc = p.mk_loc_current();
                 p.next();
                 (name, name_loc)
@@ -486,7 +486,7 @@ fn parse_atomic_pattern(p: &mut Parser<'_>) -> Pattern {
             }
         }
         Token::Lident(name) => {
-            let name = name.clone();
+            let name = name.to_string();
             p.next();
             let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
 
@@ -589,7 +589,7 @@ fn parse_atomic_pattern(p: &mut Parser<'_>) -> Pattern {
 
             let name_loc = match &p.token {
                 Token::Uident(name) | Token::Lident(name) => {
-                    let name = name.clone();
+                    let name = name.to_string();
                     let loc = p.mk_loc_current();
                     p.next();
                     let str_idx = p.arena_mut().push_string(name.to_string());
@@ -768,7 +768,7 @@ fn parse_atomic_pattern(p: &mut Parser<'_>) -> Pattern {
                     let value = if is_negative {
                         format!("-{}", i)
                     } else {
-                        i.clone()
+                        i.to_string()
                     };
                     let suffix = suffix.clone();
                     p.next();
@@ -783,7 +783,7 @@ fn parse_atomic_pattern(p: &mut Parser<'_>) -> Pattern {
                     let value = if is_negative {
                         format!("-{}", f)
                     } else {
-                        f.clone()
+                        f.to_string()
                     };
                     let suffix = suffix.clone();
                     p.next();
@@ -826,13 +826,13 @@ fn parse_atomic_pattern(p: &mut Parser<'_>) -> Pattern {
 fn parse_lident(p: &mut Parser<'_>) -> String {
     match &p.token {
         Token::Lident(name) => {
-            let name = name.clone();
+            let name = name.to_string();
             p.next();
             name
         }
         _ => {
             // OCaml: parse_lident recovery - emit error, skip tokens, try to find an Lident
-            p.err(DiagnosticCategory::Lident(p.token.clone()));
+            p.err(DiagnosticCategory::Lident(p.token.clone().into_owned()));
             if p.token.is_keyword() && p.prev_end_pos.line == p.start_pos.line {
                 p.next();
             } else {
@@ -861,7 +861,7 @@ fn parse_constructor_pattern(p: &mut Parser<'_>) -> Pattern {
     // Parse the constructor path
     let mut path_parts = vec![];
     while let Token::Uident(name) = &p.token {
-        path_parts.push(name.clone());
+        path_parts.push(name.to_string());
         p.next();
         if p.token == Token::Dot {
             p.next();
@@ -872,7 +872,7 @@ fn parse_constructor_pattern(p: &mut Parser<'_>) -> Pattern {
 
     // Handle lowercase at the end
     if let Token::Lident(name) = &p.token {
-        path_parts.push(name.clone());
+        path_parts.push(name.to_string());
         p.next();
     }
 
@@ -1089,7 +1089,7 @@ fn parse_list_pattern(p: &mut Parser<'_>, start_pos_idx: PosIdx) -> Pattern {
                     break;
                 } else {
                     p.err(DiagnosticCategory::unexpected(
-                        p.token.clone(),
+                        p.token.clone().into_owned(),
                         p.breadcrumbs().to_vec(),
                     ));
                     p.next();
@@ -1196,7 +1196,7 @@ fn parse_record_pattern(p: &mut Parser<'_>) -> Pattern {
         loop {
             match &p.token {
                 Token::Lident(name) | Token::Uident(name) => {
-                    parts.push(name.clone());
+                    parts.push(name.to_string());
                     p.next();
                 }
                 _ => break,
@@ -1357,10 +1357,10 @@ fn parse_dict_pattern(p: &mut Parser<'_>, start_pos_idx: PosIdx) -> Pattern {
     while p.token != Token::Rbrace && p.token != Token::Eof {
         match &p.token {
             Token::String(key) => {
-                let key = key.clone();
+                let key = key.to_string();
                 // OCaml: let loc = mk_loc p.start_pos p.end_pos - captures key location BEFORE consuming
                 let key_loc = p.mk_loc_current();
-                let lid_idx = p.push_lident(&key);
+                let lid_idx = p.push_lident(key.clone());
                 p.next();
 
                 p.expect(Token::Colon);
@@ -1412,7 +1412,7 @@ fn parse_extension_pattern(p: &mut Parser<'_>, start_pos_idx: PosIdx) -> Pattern
     loop {
         match &p.token {
             Token::Lident(name) | Token::Uident(name) => {
-                parts.push(name.clone());
+                parts.push(name.to_string());
                 p.next();
             }
             _ if p.token.is_keyword() => {
@@ -1533,13 +1533,13 @@ fn parse_poly_variant_pattern(p: &mut Parser<'_>) -> Pattern {
 
     let tag = match &p.token {
         Token::Lident(name) | Token::Uident(name) => {
-            let name = name.clone();
+            let name = name.to_string();
             p.next();
             name
         }
         Token::Int { i, suffix } => {
             // Clone values before borrowing p mutably
-            let tag = i.clone();
+            let tag = i.to_string();
             let has_suffix = suffix.is_some();
             // OCaml: emit error if numeric poly variant has a suffix
             if has_suffix {
@@ -1552,7 +1552,7 @@ fn parse_poly_variant_pattern(p: &mut Parser<'_>) -> Pattern {
             tag
         }
         Token::String(s) => {
-            let tag = s.clone();
+            let tag = s.to_string();
             p.next();
             tag
         }
