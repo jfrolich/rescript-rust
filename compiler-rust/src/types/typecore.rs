@@ -4064,10 +4064,10 @@ fn type_let_bindings(
 
     // Build final environment from all collected pattern variables
     let mut new_env = env.clone();
-    for (pvars, ty) in all_pattern_vars.iter().zip(binding_types.iter()) {
+    for pvars in all_pattern_vars.iter() {
         for pv in pvars {
             let desc = ValueDescription {
-                val_type: *ty,
+                val_type: pv.ty,
                 val_kind: crate::types::ValueKind::ValReg,
                 val_loc: crate::location::Location::none(),
                 val_attributes: vec![],
