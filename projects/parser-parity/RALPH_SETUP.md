@@ -208,16 +208,20 @@ Output "RALPH_COMPLETE" when:
 
 ### Recommended: Bash Loop
 
-Use the included `ralph.sh` script:
+Use the included `ralph.sh` script from the repo root:
 
 ```bash
-./ralph.sh                    # Uses RALPH_PROMPT.md by default
-./ralph.sh MY_PROMPT.md       # Or specify a custom prompt file
+./ralph.sh projects/parser-parity/RALPH_PROMPT.md    # Parser parity
+./ralph.sh projects/printer-parity/RALPH_PROMPT.md   # Printer parity
+./ralph.sh projects/<name>/RALPH_PROMPT.md            # Any project
 ```
 
-The script:
-- Tracks iteration count
-- Logs timestamps for each iteration
+The script automatically:
+- Derives the project directory from the prompt file path
+- Finds `RALPH_TODO.md` in the same directory as the prompt
+- Injects project directory context so the agent resolves relative paths correctly
+- Tracks iteration count with timestamps
+- Shows an inline dashboard with progress, next task, and recent commits
 - Detects `RALPH_COMPLETE` → exits successfully
 - Detects `RALPH_BLOCKED` → exits with error for human intervention
 - Fresh context each iteration (never fills up)

@@ -13,12 +13,16 @@ if [[ ! -f "$PROMPT_FILE" ]]; then
   exit 1
 fi
 
+# Derive project directory from prompt file location
+PROJECT_DIR="$(dirname "$PROMPT_FILE")"
+TODO_FILE="$PROJECT_DIR/RALPH_TODO.md"
+
 # Function to show inline dashboard
 show_dashboard() {
   # Get TODO progress
-  if [[ -f RALPH_TODO.md ]]; then
-    TOTAL=$(grep -c "^\- \[" RALPH_TODO.md 2>/dev/null) || TOTAL=0
-    DONE=$(grep -c "^\- \[x\]" RALPH_TODO.md 2>/dev/null) || DONE=0
+  if [[ -f $TODO_FILE ]]; then
+    TOTAL=$(grep -c "^\- \[" $TODO_FILE 2>/dev/null) || TOTAL=0
+    DONE=$(grep -c "^\- \[x\]" $TODO_FILE 2>/dev/null) || DONE=0
     TOTAL=${TOTAL:-0}
     DONE=${DONE:-0}
     REMAINING=$((TOTAL - DONE))
@@ -40,7 +44,7 @@ show_dashboard() {
     printf "│ Progress: %d/%d (%d%%) [%s] │\n" "$DONE" "$TOTAL" "$PERCENT" "$BAR"
 
     # Next task
-    NEXT_TASK=$(grep "^\- \[ \]" RALPH_TODO.md | head -1 | sed 's/^- \[ \] //' | cut -c1-50)
+    NEXT_TASK=$(grep "^\- \[ \]" $TODO_FILE | head -1 | sed 's/^- \[ \] //' | cut -c1-50)
     if [[ -n "$NEXT_TASK" ]]; then
       printf "│ Next: %-60s │\n" "$NEXT_TASK"
     fi
@@ -59,6 +63,7 @@ clear
 echo "╔══════════════════════════════════════════════════════════════════════╗"
 echo "║                         RALPH LOOP                                   ║"
 echo "║  Prompt: $(printf '%-58s' "$PROMPT_FILE")  ║"
+echo "║  Project: $(printf '%-57s' "$PROJECT_DIR/") ║"
 echo "║  Press Ctrl+C to stop                                                ║"
 echo "╚══════════════════════════════════════════════════════════════════════╝"
 echo ""
@@ -78,7 +83,9 @@ while true; do
   echo ""
 
   # Run claude with streaming output for real-time visibility
-  cat "$PROMPT_FILE" | claude --dangerously-skip-permissions --print --output-format stream-json --verbose 2>&1 | \
+  # Prepend project directory context so agent resolves relative paths correctly
+  { echo "**Project directory:** \`$PROJECT_DIR/\` — All relative file references in this prompt (e.g. \`RALPH_TODO.md\`) are relative to this directory."; echo ""; cat "$PROMPT_FILE"; } | \
+  claude --dangerously-skip-permissions --print --output-format stream-json --verbose 2>&1 | \
     tee "$OUTPUT_FILE.json" | \
     while IFS= read -r line; do
       # Parse stream-json and extract content
