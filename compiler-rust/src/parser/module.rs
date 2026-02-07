@@ -637,7 +637,7 @@ pub fn parse_structure_item(p: &mut Parser<'_>) -> Option<StructureItem> {
             loop {
                 match &p.token {
                     Token::Lident(name) | Token::Uident(name) => {
-                        parts.push(name.clone());
+                        parts.push(name.to_string());
                         p.next();
                     }
                     // Keywords can be used as extension names (e.g., %%private)
@@ -1425,7 +1425,7 @@ fn parse_functor_arg(p: &mut Parser<'_>) -> Option<FunctorArg> {
                 _ => {
                     // Just Uident (punning for _ : Uident)
                     let loc = p.mk_loc_idx(start_pos_idx, ident_end_pos_idx);
-                    let lid_idx = p.push_lident(&ident);
+                    let lid_idx = p.push_lident(&*ident);
                     let mod_ident = with_loc(lid_idx, loc.clone());
                     let mod_type = ModuleType {
                         pmty_desc: ModuleTypeDesc::Pmty_ident(mod_ident),
@@ -2075,7 +2075,7 @@ fn parse_with_constraint(p: &mut Parser<'_>) -> Option<WithConstraint> {
                 // Accept both Lident ('a) and Uident ('X) as type variable names
                 let var = match &p.token {
                     Token::Lident(name) | Token::Uident(name) => {
-                        let name = name.clone();
+                        let name = name.to_string();
                         // OCaml: ident_loc spans from 'constraint' keyword to end of identifier
                         let loc = p.mk_loc_idx_to_end(cstr_start_idx);
                         p.next();
@@ -2136,7 +2136,7 @@ fn parse_with_constraint(p: &mut Parser<'_>) -> Option<WithConstraint> {
 // ============================================================================
 
 /// Check if a token can start an expression.
-fn is_expr_start(token: &Token) -> bool {
+fn is_expr_start(token: &Token<'_>) -> bool {
     matches!(
         token,
         Token::True
@@ -2182,7 +2182,7 @@ fn parse_module_long_ident(p: &mut Parser<'_>) -> Loc<LidentIdx> {
     loop {
         match &p.token {
             Token::Uident(name) => {
-                path_parts.push(name.clone());
+                path_parts.push(name.to_string());
                 p.next();
                 if p.token == Token::Dot {
                     p.next();
@@ -2193,7 +2193,7 @@ fn parse_module_long_ident(p: &mut Parser<'_>) -> Loc<LidentIdx> {
             Token::Lident(name) => {
                 // Allow lowercase as final component (for module type names like `t`)
                 // This handles paths like RGLEvents.t where `t` is a module type name
-                path_parts.push(name.clone());
+                path_parts.push(name.to_string());
                 p.next();
                 break;
             }
@@ -2236,7 +2236,7 @@ fn parse_value_path_for_type(p: &mut Parser<'_>) -> (Vec<String>, Position, Posi
 
         // Push the current name
         if let Token::Uident(name) | Token::Lident(name) = &saved_token {
-            path_parts.push(name.clone());
+            path_parts.push(name.to_string());
         }
 
         // Always advance (OCaml: Parser.next p)
@@ -2249,7 +2249,7 @@ fn parse_value_path_for_type(p: &mut Parser<'_>) -> (Vec<String>, Position, Posi
             match &p.token {
                 Token::Lident(name) => {
                     // Terminal: lowercase ident ends the path
-                    path_parts.push(name.clone());
+                    path_parts.push(name.to_string());
                     // Don't consume - let it be consumed by next_unsafe below
                 }
                 Token::Uident(_) => {
@@ -2269,7 +2269,7 @@ fn parse_value_path_for_type(p: &mut Parser<'_>) -> (Vec<String>, Position, Posi
             p.err_at(
                 saved_start,
                 saved_end,
-                DiagnosticCategory::Lident(saved_token),
+                DiagnosticCategory::Lident(saved_token.into_owned()),
             );
             // Return path as-is (OCaml returns `path`)
             return;
@@ -2294,7 +2294,7 @@ fn parse_type_long_ident(p: &mut Parser<'_>) -> Loc<LidentIdx> {
     loop {
         match &p.token {
             Token::Uident(name) => {
-                path_parts.push(name.clone());
+                path_parts.push(name.to_string());
                 p.next();
                 if p.token == Token::Dot {
                     p.next();
@@ -2303,7 +2303,7 @@ fn parse_type_long_ident(p: &mut Parser<'_>) -> Loc<LidentIdx> {
                 }
             }
             Token::Lident(name) => {
-                path_parts.push(name.clone());
+                path_parts.push(name.to_string());
                 p.next();
                 break;
             }
@@ -2683,15 +2683,15 @@ fn parse_type_extension(p: &mut Parser<'_>, attrs: Attributes) -> TypeExtension 
     loop {
         match &p.token {
             Token::Lident(name) => {
-                parts.push(name.clone());
+                parts.push(name.to_string());
                 last_was_uident = false;
                 p.next();
             }
             Token::Uident(name) => {
-                last_uident_name = name.clone();
+                last_uident_name = name.to_string();
                 last_uident_start = p.start_pos.clone();
                 last_uident_end = p.end_pos.clone();
-                parts.push(name.clone());
+                parts.push(name.to_string());
                 last_was_uident = true;
                 p.next();
             }
@@ -2710,7 +2710,7 @@ fn parse_type_extension(p: &mut Parser<'_>, attrs: Attributes) -> TypeExtension 
         p.err_at(
             last_uident_start,
             last_uident_end,
-            DiagnosticCategory::Lident(Token::Uident(last_uident_name)),
+            DiagnosticCategory::Lident(Token::Uident(last_uident_name.into())),
         );
     }
 
@@ -2789,7 +2789,7 @@ fn parse_type_declaration_with_context(
     // If it's just an Uident (T1), emit "Did you mean `t1` instead of `T1`?"
     let name = match &p.token {
         Token::Lident(n) => {
-            let n = n.clone();
+            let n = n.to_string();
             let loc = p.mk_loc_current();
             p.next();
             // Check for module path after the name (e.g., `foo.bar`)
@@ -2801,7 +2801,7 @@ fn parse_type_declaration_with_context(
                     p.next();
                     match &p.token {
                         Token::Lident(s) | Token::Uident(s) => {
-                            parts.push(s.clone());
+                            parts.push(s.to_string());
                             p.next();
                         }
                         _ => break,
@@ -2820,7 +2820,7 @@ fn parse_type_declaration_with_context(
         }
         Token::Uident(n) => {
             // Parse the full path to give a better error message
-            let n = n.clone();
+            let n = n.to_string();
             let name_start = p.start_pos.clone();
             let name_start_idx = p.start_pos_idx();
             p.next();
@@ -2834,7 +2834,7 @@ fn parse_type_declaration_with_context(
                     p.next();
                     match &p.token {
                         Token::Lident(s) | Token::Uident(s) => {
-                            last_name = s.clone();
+                            last_name = s.to_string();
                             p.next();
                         }
                         _ => break,
@@ -2858,7 +2858,7 @@ fn parse_type_declaration_with_context(
                 p.err_at(
                     name_start.clone(),
                     p.prev_end_pos.clone(),
-                    DiagnosticCategory::Lident(Token::Uident(n.clone())),
+                    DiagnosticCategory::Lident(Token::Uident(n.clone().into())),
                 );
             }
             // Use lowercase version for error recovery
@@ -2874,7 +2874,7 @@ fn parse_type_declaration_with_context(
         }
         _ => {
             // OCaml: parse_lident emits Lident diagnostic and returns ("_", loc)
-            p.err(DiagnosticCategory::Lident(p.token.clone()));
+            p.err(DiagnosticCategory::Lident(p.token.clone().into_owned()));
             // Try to recover - if there's something on the same line, skip it
             if p.token.is_keyword() && p.prev_end_pos.line == p.start_pos.line {
                 p.next();
@@ -3204,7 +3204,7 @@ fn parse_type_declaration_with_context(
         // Parse the type variable
         p.expect(Token::SingleQuote);
         let var = if let Token::Lident(name) = &p.token {
-            let name = name.clone();
+            let name = name.to_string();
             let var_end_idx = p.end_pos_idx();
             p.next();
             // OCaml: type variable location starts at "constraint" keyword
@@ -3398,7 +3398,7 @@ fn parse_type_params_angle(p: &mut Parser<'_>) -> Vec<(CoreType, Variance)> {
             p.next();
             match &p.token {
                 Token::Lident(name) | Token::Uident(name) => {
-                    let name = name.clone();
+                    let name = name.to_string();
                     let loc = p.mk_loc_current();
                     p.next();
                     let typ = CoreType {
@@ -3490,7 +3490,7 @@ fn parse_type_params_angle(p: &mut Parser<'_>) -> Vec<(CoreType, Variance)> {
             params.push((typ, variance));
         } else if let Token::Lident(name) = &p.token {
             // Missing singlequote: foo instead of 'foo
-            let name = name.clone();
+            let name = name.to_string();
             p.err_multiple(
                 p.start_pos.clone(),
                 p.end_pos.clone(),
@@ -3535,7 +3535,7 @@ fn parse_type_params_old_style(p: &mut Parser<'_>, _type_name: String) -> Vec<(C
             p.next();
             match &p.token {
                 Token::Lident(name) | Token::Uident(name) => {
-                    let name = name.clone();
+                    let name = name.to_string();
                     let loc = p.mk_loc_current();
                     p.next();
                     let typ = CoreType {
@@ -4690,7 +4690,7 @@ fn parse_attribute_body(p: &mut Parser<'_>, start_pos_idx: PosIdx) -> Attribute 
     loop {
         match &p.token {
             Token::Lident(name) | Token::Uident(name) => {
-                parts.push(name.clone());
+                parts.push(name.to_string());
                 p.next();
             }
             // Attributes can use keyword-like identifiers (e.g. `@module`, `@as`).
@@ -4853,7 +4853,7 @@ fn parse_extension(p: &mut Parser<'_>) -> Extension {
     loop {
         match &p.token {
             Token::Lident(name) | Token::Uident(name) => {
-                parts.push(name.clone());
+                parts.push(name.to_string());
                 p.next();
             }
             _ if p.token.is_keyword() => {
