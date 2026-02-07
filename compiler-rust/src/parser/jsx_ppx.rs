@@ -463,7 +463,7 @@ fn transform_react_component_binding(
         // type constraint, preserve it.
         let ref_pattern = if let Some(arg) = ref_arg {
             // Check if the original pattern already has a type constraint
-            if matches!(*arg.pattern.ppat_desc, PatternDesc::Ppat_constraint(_, _)) {
+            if matches!(*arg.pattern.ppat_desc, PatternDesc::Ppat_constraint(_)) {
                 // Preserve the original pattern with its type annotation
                 arg.pattern.clone()
             } else if !ref_alias.starts_with('_') {

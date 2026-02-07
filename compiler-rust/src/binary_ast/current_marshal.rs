@@ -1235,7 +1235,7 @@ impl Marshal for Expression {
             &self.pexp_attributes,
             w,
             share_singleton_attr_tuple,
-            matches!(&*self.pexp_desc, ExpressionDesc::Pexp_open(_, _, _)),
+            matches!(&*self.pexp_desc, ExpressionDesc::Pexp_open(_)),
             share_empty_pstr,
         );
         if is_raw_expansion {

@@ -224,9 +224,9 @@ fn is_simple_expression_with_arena(expr: &Expression, arena: &ParseArena) -> boo
             | ExpressionDesc::Pexp_constant(_)
             | ExpressionDesc::Pexp_tuple(_)
             | ExpressionDesc::Pexp_array(_)
-            | ExpressionDesc::Pexp_record(_, _)
-            | ExpressionDesc::Pexp_constraint(_, _)
-            | ExpressionDesc::Pexp_coerce(_, _, _)
+            | ExpressionDesc::Pexp_record(_)
+            | ExpressionDesc::Pexp_constraint(_)
+            | ExpressionDesc::Pexp_coerce(_)
             | ExpressionDesc::Pexp_variant(_, None)
             | ExpressionDesc::Pexp_pack(Box::new(_))
             // NOTE: Pexp_field and Pexp_send are NOT simple in OCaml's pprintast.
@@ -244,8 +244,8 @@ fn needs_parens_in_semi_context(expr: &Expression) -> bool {
     matches!(
         &*expr.pexp_desc,
         ExpressionDesc::Pexp_fun { .. }
-            | ExpressionDesc::Pexp_match(_, _)
-            | ExpressionDesc::Pexp_try(_, _)
+            | ExpressionDesc::Pexp_match(_)
+            | ExpressionDesc::Pexp_try(_)
             | ExpressionDesc::Pexp_sequence(_, _)
     )
 }
@@ -260,7 +260,7 @@ fn is_expression2(expr: &Expression, arena: &ParseArena) -> bool {
         return false;
     }
     // Expression2 includes field and send expressions
-    if matches!(&*expr.pexp_desc, ExpressionDesc::Pexp_field(_, _) | ExpressionDesc::Pexp_send(_, _)) {
+    if matches!(&*expr.pexp_desc, ExpressionDesc::Pexp_field(_, _) | ExpressionDesc::Pexp_send(_)) {
         return true;
     }
     // Plus everything that's simple
@@ -1192,9 +1192,9 @@ fn print_expression_under_semi<W: Write>(f: &mut Formatter<W>, arena: &ParseAren
         let needs_semi_parens = needs_parens_in_semi_context(expr);
         let needs_let_parens = matches!(
             &*expr.pexp_desc,
-            ExpressionDesc::Pexp_let(_, _, _)
-                | ExpressionDesc::Pexp_letmodule(_, _, _)
-                | ExpressionDesc::Pexp_open(_, _, _)
+            ExpressionDesc::Pexp_let(_)
+                | ExpressionDesc::Pexp_letmodule(_)
+                | ExpressionDesc::Pexp_open(_)
                 | ExpressionDesc::Pexp_letexception(inner)
         );
         if needs_semi_parens || needs_let_parens {
@@ -1215,9 +1215,9 @@ fn print_expression_under_semi_inner<W: Write>(f: &mut Formatter<W>, arena: &Par
     let needs_semi_parens = needs_parens_in_semi_context(expr);
     let needs_let_parens = matches!(
         &*expr.pexp_desc,
-        ExpressionDesc::Pexp_let(_, _, _)
-            | ExpressionDesc::Pexp_letmodule(_, _, _)
-            | ExpressionDesc::Pexp_open(_, _, _)
+        ExpressionDesc::Pexp_let(_)
+            | ExpressionDesc::Pexp_letmodule(_)
+            | ExpressionDesc::Pexp_open(_)
             | ExpressionDesc::Pexp_letexception(inner)
     );
     if needs_semi_parens || needs_let_parens {
@@ -1250,8 +1250,8 @@ fn print_expression_inner<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, ex
     // Context-dependent parenthesization (matching OCaml's pprintast lines 606-615)
     if (ctx.pipe || ctx.semi) && matches!(&*expr.pexp_desc,
         ExpressionDesc::Pexp_fun { .. }
-        | ExpressionDesc::Pexp_match(_, _)
-        | ExpressionDesc::Pexp_try(_, _)
+        | ExpressionDesc::Pexp_match(_)
+        | ExpressionDesc::Pexp_try(_)
         | ExpressionDesc::Pexp_sequence(_, _)) {
         if use_parens { f.string("("); }
         f.string("(");
@@ -1261,7 +1261,7 @@ fn print_expression_inner<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, ex
         return;
     }
     if ctx.ifthenelse && matches!(&*expr.pexp_desc,
-        ExpressionDesc::Pexp_ifthenelse(_, _, _)
+        ExpressionDesc::Pexp_ifthenelse(_)
         | ExpressionDesc::Pexp_sequence(_, _)) {
         if use_parens { f.string("("); }
         f.string("(");
@@ -1271,10 +1271,10 @@ fn print_expression_inner<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, ex
         return;
     }
     if ctx.semi && matches!(&*expr.pexp_desc,
-        ExpressionDesc::Pexp_let(_, _, _)
-        | ExpressionDesc::Pexp_letmodule(_, _, _)
-        | ExpressionDesc::Pexp_open(_, _, _)
-        | ExpressionDesc::Pexp_letexception(_, _)) {
+        ExpressionDesc::Pexp_let(_)
+        | ExpressionDesc::Pexp_letmodule(_)
+        | ExpressionDesc::Pexp_open(_)
+        | ExpressionDesc::Pexp_letexception(_)) {
         if use_parens { f.string("("); }
         f.string("(");
         print_expression_inner(f, arena, expr, false, PrintCtx::reset());

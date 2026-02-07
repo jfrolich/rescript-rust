@@ -1356,7 +1356,7 @@ pub fn print_expression(
                 false
             } else if parsetree_viewer::is_binary_expression(arena, target_expr) {
                 true
-            } else if let ExpressionDesc::Pexp_ifthenelse(_, _, _) = &*target_expr.pexp_desc {
+            } else if let ExpressionDesc::Pexp_ifthenelse(_) = &*target_expr.pexp_desc {
                 // Check for ternary
                 if parsetree_viewer::has_ternary_attribute(arena, &target_expr.pexp_attributes) {
                     if let ExpressionDesc::Pexp_ifthenelse(if_expr, _, _) = &*target_expr.pexp_desc {
@@ -1368,7 +1368,7 @@ pub fn print_expression(
                 } else {
                     false
                 }
-            } else if matches!(&*target_expr.pexp_desc, ExpressionDesc::Pexp_newtype(_, _)) {
+            } else if matches!(&*target_expr.pexp_desc, ExpressionDesc::Pexp_newtype(_)) {
                 false
             } else {
                 parsetree_viewer::has_attributes(arena, &target_expr.pexp_attributes)
@@ -1892,10 +1892,10 @@ fn print_pexp_fun(
         let should_indent = !matches!(
             &*return_expr.pexp_desc,
             ExpressionDesc::Pexp_sequence(_, _)
-                | ExpressionDesc::Pexp_let(_, _, _)
-                | ExpressionDesc::Pexp_letmodule(_, _, _)
-                | ExpressionDesc::Pexp_letexception(_, _)
-                | ExpressionDesc::Pexp_open(_, _, _)
+                | ExpressionDesc::Pexp_let(_)
+                | ExpressionDesc::Pexp_letmodule(_)
+                | ExpressionDesc::Pexp_letexception(_)
+                | ExpressionDesc::Pexp_open(_)
                 | ExpressionDesc::Pexp_jsx_element(Box::new(JsxElement::Fragment(_)))
         );
 
@@ -5015,8 +5015,8 @@ fn is_huggable_pattern(pat: &Pattern) -> bool {
         &*pat.ppat_desc,
         PatternDesc::Ppat_array(_)
             | PatternDesc::Ppat_tuple(_)
-            | PatternDesc::Ppat_record(_, _)
-            | PatternDesc::Ppat_variant(_, _)
+            | PatternDesc::Ppat_record(_)
+            | PatternDesc::Ppat_variant(_)
             | PatternDesc::Ppat_construct(_, _)
     )
 }
@@ -5510,7 +5510,7 @@ fn print_arrow_type(
     let (attrs_before, args, return_type) = parsetree_viewer::arrow_type(arena, typ, max_arity);
 
     let return_type_needs_parens =
-        matches!(*return_type.ptyp_desc, CoreTypeDesc::Ptyp_alias(_, _));
+        matches!(*return_type.ptyp_desc, CoreTypeDesc::Ptyp_alias(_));
 
     let return_doc = {
         let doc = print_typ_expr(state, return_type, cmt_tbl, arena);
@@ -6324,7 +6324,7 @@ fn print_module_type(
     // Track whether attributes are printed inside the match arm
     let attrs_already_printed = matches!(
         &*mty.pmty_desc,
-        ModuleTypeDesc::Pmty_functor(_, _, _)
+        ModuleTypeDesc::Pmty_functor(_)
             | ModuleTypeDesc::Pmty_signature(_)
             | ModuleTypeDesc::Pmty_ident(_)
     );

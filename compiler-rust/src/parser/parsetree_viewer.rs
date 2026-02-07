@@ -15,10 +15,10 @@ use crate::parser::longident::Longident;
 pub fn is_block_expr(expr: &Expression) -> bool {
     matches!(
         &*expr.pexp_desc,
-        ExpressionDesc::Pexp_letmodule(_, _, _)
-            | ExpressionDesc::Pexp_letexception(_, _)
-            | ExpressionDesc::Pexp_let(_, _, _)
-            | ExpressionDesc::Pexp_open(_, _, _)
+        ExpressionDesc::Pexp_letmodule(_)
+            | ExpressionDesc::Pexp_letexception(_)
+            | ExpressionDesc::Pexp_let(_)
+            | ExpressionDesc::Pexp_open(_)
             | ExpressionDesc::Pexp_sequence(_, _)
     )
 }
@@ -99,7 +99,7 @@ pub fn filter_ternary_attributes<'a>(arena: &ParseArena, attrs: &'a Attributes) 
 pub fn is_if_then_else_expr(expr: &Expression) -> bool {
     matches!(
         &*expr.pexp_desc,
-        ExpressionDesc::Pexp_ifthenelse(_, _, _)
+        ExpressionDesc::Pexp_ifthenelse(_)
     )
 }
 
@@ -111,7 +111,7 @@ pub fn has_if_let_attribute(arena: &ParseArena, attrs: &[Attribute]) -> bool {
 /// Check if an expression is an "if let" expression.
 /// This is a `Pexp_match` with the `res.iflet` attribute.
 pub fn is_if_let_expr(arena: &ParseArena, expr: &Expression) -> bool {
-    matches!(&*expr.pexp_desc, ExpressionDesc::Pexp_match(_, _))
+    matches!(&*expr.pexp_desc, ExpressionDesc::Pexp_match(_))
         && has_if_let_attribute(arena, &expr.pexp_attributes)
 }
 
@@ -306,7 +306,7 @@ pub fn is_underscore_apply_sugar(arena: &ParseArena, expr: &Expression) -> bool 
 pub fn is_fun_newtype(expr: &Expression) -> bool {
     matches!(
         &*expr.pexp_desc,
-        ExpressionDesc::Pexp_fun { .. } | ExpressionDesc::Pexp_newtype(_, _)
+        ExpressionDesc::Pexp_fun { .. } | ExpressionDesc::Pexp_newtype(_)
     )
 }
 
@@ -516,13 +516,13 @@ pub fn should_inline_rhs_binary_expr(expr: &Expression) -> bool {
     matches!(
         &*expr.pexp_desc,
         ExpressionDesc::Pexp_constant(_)
-            | ExpressionDesc::Pexp_let(_, _, _)
-            | ExpressionDesc::Pexp_letmodule(_, _, _)
-            | ExpressionDesc::Pexp_letexception(_, _)
+            | ExpressionDesc::Pexp_let(_)
+            | ExpressionDesc::Pexp_letmodule(_)
+            | ExpressionDesc::Pexp_letexception(_)
             | ExpressionDesc::Pexp_sequence(_, _)
-            | ExpressionDesc::Pexp_open(_, _, _)
-            | ExpressionDesc::Pexp_ifthenelse(_, _, _)
-            | ExpressionDesc::Pexp_for(_, _, _, _, _)
+            | ExpressionDesc::Pexp_open(_)
+            | ExpressionDesc::Pexp_ifthenelse(_)
+            | ExpressionDesc::Pexp_for(_)
             | ExpressionDesc::Pexp_while(_, _)
             | ExpressionDesc::Pexp_try(inner)
             | ExpressionDesc::Pexp_array(_)
@@ -557,8 +557,8 @@ pub fn is_huggable_pattern(pat: &Pattern) -> bool {
         &*pat.ppat_desc,
         PatternDesc::Ppat_array(_)
             | PatternDesc::Ppat_tuple(_)
-            | PatternDesc::Ppat_record(_, _)
-            | PatternDesc::Ppat_variant(_, _)
+            | PatternDesc::Ppat_record(_)
+            | PatternDesc::Ppat_variant(_)
             | PatternDesc::Ppat_construct(_, _)
     )
 }
