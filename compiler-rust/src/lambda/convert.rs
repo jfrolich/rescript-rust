@@ -90,7 +90,7 @@ impl<'a> LambdaConverter<'a> {
     pub fn convert_expr(&mut self, expr: &Expression) -> Lambda {
         match &expr.exp_desc {
             ExpressionDesc::Texp_ident(path, _, desc) => match &desc.val_kind {
-                ValueKind::ValPrim(prim) => self.translate_primitive(self.loc(expr.exp_loc), prim),
+                ValueKind::ValPrim(prim) => self.translate_primitive(self.loc(expr.exp_loc), &prim),
                 ValueKind::ValReg => self.translate_value_path(expr.exp_loc, path),
             },
             ExpressionDesc::Texp_constant(cst) => Lambda::const_(self.convert_constant(cst)),
@@ -105,9 +105,12 @@ impl<'a> LambdaConverter<'a> {
                 arity,
                 async_: _,
             } => self.convert_function(params, body, *partial, *arity),
-            ExpressionDesc::Texp_apply { funct, args, partial: _, transformed_jsx: _ } => {
-                self.convert_apply(self.loc(expr.exp_loc), funct, args)
-            }
+            ExpressionDesc::Texp_apply {
+                funct,
+                args,
+                partial: _,
+                transformed_jsx: _,
+            } => self.convert_apply(self.loc(expr.exp_loc), funct, args),
             ExpressionDesc::Texp_match(scrut, cases, _exn_cases, partial) => {
                 let scrut_lam = self.convert_expr(scrut);
                 self.compile_match(self.loc(expr.exp_loc), scrut_lam, cases, *partial)
@@ -139,7 +142,11 @@ impl<'a> LambdaConverter<'a> {
             ExpressionDesc::Texp_record {
                 fields,
                 extended_expression,
-            } => self.convert_record(self.loc(expr.exp_loc), fields, extended_expression.as_deref()),
+            } => self.convert_record(
+                self.loc(expr.exp_loc),
+                fields,
+                extended_expression.as_deref(),
+            ),
             ExpressionDesc::Texp_field(record, _, lbl) => {
                 let rec_lam = self.convert_expr(record);
                 let primitive = Primitive::Pfield(
@@ -202,6 +209,7 @@ impl<'a> LambdaConverter<'a> {
                 Lambda::if_(cond, Lambda::unit(), failure)
             }
             ExpressionDesc::Texp_pack(_) => Lambda::unit(),
+            ExpressionDesc::Texp_extension_constructor(_, _) => Lambda::unit(),
         }
     }
 
@@ -227,15 +235,18 @@ impl<'a> LambdaConverter<'a> {
         }
     }
 
-    fn convert_let(&mut self, rec_flag: RecFlag, bindings: &[ValueBinding], body: Lambda) -> Lambda {
+    fn convert_let(
+        &mut self,
+        rec_flag: RecFlag,
+        bindings: &[ValueBinding],
+        body: Lambda,
+    ) -> Lambda {
         match rec_flag {
-            RecFlag::Nonrecursive => {
-                bindings.iter().rev().fold(body, |acc, binding| {
-                    let value = self.convert_expr(&binding.vb_expr);
-                    let failure = self.match_failure(self.loc(binding.vb_loc));
-                    self.bind_pattern(&binding.vb_pat, value, acc, failure)
-                })
-            }
+            RecFlag::Nonrecursive => bindings.iter().rev().fold(body, |acc, binding| {
+                let value = self.convert_expr(&binding.vb_expr);
+                let failure = self.match_failure(self.loc(binding.vb_loc));
+                self.bind_pattern(&binding.vb_pat, value, acc, failure)
+            }),
             RecFlag::Recursive => {
                 let mut ids = Vec::new();
                 let mut lam_bindings = Vec::new();
@@ -391,7 +402,11 @@ impl<'a> LambdaConverter<'a> {
         cases: &'b [Case],
         partial: crate::types::typedtree::Partial,
         arity: crate::parser::ast::Arity,
-    ) -> (Vec<&'b FunctionParam>, Option<&'b Expression>, crate::types::typedtree::Partial) {
+    ) -> (
+        Vec<&'b FunctionParam>,
+        Option<&'b Expression>,
+        crate::types::typedtree::Partial,
+    ) {
         use crate::parser::ast::Arity;
         let target_arity = match arity {
             Arity::Full(n) => n,
@@ -437,10 +452,7 @@ impl<'a> LambdaConverter<'a> {
         match &param.pat {
             FunctionParamPattern::Simple(pat) => pat.clone(),
             FunctionParamPattern::Nested(nested) => {
-                let patterns = nested
-                    .iter()
-                    .map(Self::param_pattern)
-                    .collect::<Vec<_>>();
+                let patterns = nested.iter().map(Self::param_pattern).collect::<Vec<_>>();
                 if patterns.is_empty() {
                     Pattern::new(
                         PatternDesc::Tpat_any,
@@ -589,7 +601,7 @@ impl<'a> LambdaConverter<'a> {
                             lbl.lbl_pos,
                             FieldDbgInfo::Record {
                                 name: lbl.lbl_name.clone(),
-                        mutable_flag: to_parser_mutable(lbl.lbl_mut),
+                                mutable_flag: to_parser_mutable(lbl.lbl_mut),
                             },
                         ),
                         vec![Lambda::var(tmp.clone())],
@@ -670,7 +682,10 @@ impl<'a> LambdaConverter<'a> {
                 );
                 let tag_cond = Lambda::prim(
                     Primitive::Pjscomp(Comparison::Eq),
-                    vec![tag_expr, Lambda::const_(Constant::Pointer(cstr.cstr_name.clone()))],
+                    vec![
+                        tag_expr,
+                        Lambda::const_(Constant::Pointer(cstr.cstr_name.clone())),
+                    ],
                     pat_loc.clone(),
                 );
                 let mut result = body;
@@ -721,8 +736,13 @@ impl<'a> LambdaConverter<'a> {
             }
             ConstructorTag::CstrBlock(tag) => {
                 let args_lam = args.iter().map(|e| self.convert_expr(e)).collect();
-                let tag_info = TagInfo::constructor(cstr.cstr_name.clone(), cstr.cstr_nonconsts, *tag);
-                Lambda::prim(Primitive::Pmakeblock(*tag, tag_info, Mutable::Immutable), args_lam, loc)
+                let tag_info =
+                    TagInfo::constructor(cstr.cstr_name.clone(), cstr.cstr_nonconsts, *tag);
+                Lambda::prim(
+                    Primitive::Pmakeblock(*tag, tag_info, Mutable::Immutable),
+                    args_lam,
+                    loc,
+                )
             }
             ConstructorTag::CstrExtension(_path) => {
                 let args_lam = args.iter().map(|e| self.convert_expr(e)).collect();
@@ -768,7 +788,7 @@ impl<'a> LambdaConverter<'a> {
                                 lbl.lbl_pos,
                                 FieldDbgInfo::Record {
                                     name: lbl.lbl_name.clone(),
-                                mutable_flag: to_parser_mutable(lbl.lbl_mut),
+                                    mutable_flag: to_parser_mutable(lbl.lbl_mut),
                                 },
                             ),
                             vec![base_expr.clone()],
@@ -820,12 +840,7 @@ impl<'a> LambdaConverter<'a> {
             crate::types::Path::Pdot(prefix, name, _) => {
                 let prefix_lam = self.translate_value_path(loc_idx, prefix);
                 Lambda::prim(
-                    Primitive::Pfield(
-                        0,
-                        FieldDbgInfo::Module {
-                            name: name.clone(),
-                        },
-                    ),
+                    Primitive::Pfield(0, FieldDbgInfo::Module { name: name.clone() }),
                     vec![prefix_lam],
                     self.loc(loc_idx),
                 )
@@ -834,7 +849,11 @@ impl<'a> LambdaConverter<'a> {
         }
     }
 
-    fn translate_primitive(&mut self, loc: Location, prim: &crate::types::PrimitiveDescription) -> Lambda {
+    fn translate_primitive(
+        &mut self,
+        loc: Location,
+        prim: &crate::types::PrimitiveDescription,
+    ) -> Lambda {
         if prim.prim_name == "%null" && prim.prim_arity == 0 {
             return Lambda::const_(Constant::JsNull);
         }
@@ -1000,7 +1019,6 @@ impl<'a> LambdaConverter<'a> {
         });
         Lambda::prim(Primitive::Praise, vec![msg], loc)
     }
-
 }
 
 fn to_parser_mutable(flag: TypeMutableFlag) -> ParserMutableFlag {
@@ -1040,11 +1058,11 @@ mod tests {
     fn test_convert_let_var() {
         use crate::parser::longident::Longident;
         let mut arena = ParseArena::new();
-        let lid_idx = arena.push_longident(Longident::Lident("x".to_string()));
+        let lid_idx = arena.push_lident("x");
         let mut conv = LambdaConverter::new(&arena);
         let id = Ident::create_local("x");
         let pat = Pattern::new(
-            PatternDesc::Tpat_var(id.clone(), Located::mknoloc("x".to_string())),
+            PatternDesc::Tpat_var(id.clone(), Located::mknoloc(arena.intern_string("x"))),
             LocIdx::none(),
             crate::types::TypeExprRef(0),
             crate::types::typedtree::EnvRef(0),
@@ -1080,11 +1098,7 @@ mod tests {
             vec![],
         );
         let expr = Expression::new(
-            ExpressionDesc::Texp_let(
-            RecFlag::Nonrecursive,
-            vec![vb],
-            Box::new(body),
-        ),
+            ExpressionDesc::Texp_let(RecFlag::Nonrecursive, vec![vb], Box::new(body)),
             LocIdx::none(),
             crate::types::TypeExprRef(0),
             crate::types::typedtree::EnvRef(0),
