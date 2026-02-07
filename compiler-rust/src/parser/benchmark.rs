@@ -788,4 +788,55 @@ mod tests {
             }
         }
     }
+
+    // ========================================================================
+    // Cold-start benchmark: parse each file once, no warmup
+    // Run with: cargo test --release --lib -- benchmark_cold --ignored --nocapture
+    // ========================================================================
+
+    #[test]
+    #[ignore]
+    fn benchmark_cold() {
+        if cfg!(debug_assertions) {
+            eprintln!("Skipping benchmark: must run in --release mode");
+            return;
+        }
+
+        let files = discover_test_files();
+        let total_lines: u64 = files.iter().map(|f| f.lines).sum();
+        let total_size: u64 = files.iter().map(|f| f.size).sum();
+
+        println!("\n=== Cold-Start Benchmark (no warmup, single pass) ===");
+        println!("{} files, {} lines, {:.1} KB\n", files.len(), total_lines, total_size as f64 / 1024.0);
+
+        // Parse every file once, measure total wall-clock time
+        let start = Instant::now();
+        let mut parsed = 0u64;
+        for file in &files {
+            let bytes = match std::fs::read(&file.path) {
+                Ok(b) => b,
+                Err(_) => continue,
+            };
+            let source: String = bytes.iter().map(|&b| b as char).collect();
+            let filename = file.path.to_string_lossy().to_string();
+            let is_interface = file.path.extension()
+                .and_then(|s| s.to_str())
+                .is_some_and(|ext| ext == "resi" || ext == "mli");
+
+            let mut parser = crate::parser::Parser::new(&filename, &source);
+            if is_interface {
+                let _ = crate::parser::module::parse_signature(&mut parser);
+            } else {
+                let _ = crate::parser::module::parse_structure(&mut parser);
+            }
+            parsed += 1;
+        }
+        let elapsed = start.elapsed();
+        let elapsed_s = elapsed.as_secs_f64();
+        let loc_per_s = total_lines as f64 / elapsed_s;
+        let mbs = (total_size as f64) / elapsed_s / 1_000_000.0;
+
+        println!("  {} files parsed in {:.1} ms", parsed, elapsed_s * 1000.0);
+        println!("  Throughput: {:.1} MB/s, {:.0}K LOC/s", mbs, loc_per_s / 1000.0);
+    }
 }
