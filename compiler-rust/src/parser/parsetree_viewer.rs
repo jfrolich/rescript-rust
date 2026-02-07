@@ -315,7 +315,7 @@ pub fn is_fun_newtype(expr: &Expression) -> bool {
 pub fn expr_is_uncurried_fun(arena: &ParseArena, expr: &Expression) -> bool {
     if let ExpressionDesc::Pexp_fun(fun_inner) = &*expr.pexp_desc {
         // Has explicit arity if arena.get_arity returns Some(_)
-        arena.get_arity(*arity).is_some()
+        arena.get_arity(fun_inner.arity).is_some()
     } else {
         false
     }
@@ -983,7 +983,7 @@ pub fn should_indent_binary_expr(arena: &crate::parse_arena::ParseArena, expr: &
     use crate::parser::longident::Longident;
 
     match &*expr.pexp_desc {
-        ExpressionDesc::Pexp_apply(apply_inner) if args.len() == 2  => { let PexpApply { ref funct, ref args, .. } = **apply_inner;
+        ExpressionDesc::Pexp_apply(apply_inner) if apply_inner.args.len() == 2  => { let PexpApply { ref funct, ref args, .. } = **apply_inner;
             if let ExpressionDesc::Pexp_ident(ident) = &*funct.pexp_desc {
                 if let Longident::Lident(op_idx) = arena.get_longident(ident.txt) {
                     let op = arena.get_string(*op_idx);
@@ -1014,7 +1014,7 @@ fn same_precedence_sub_expression(arena: &crate::parse_arena::ParseArena, parent
     use crate::parser::longident::Longident;
 
     match &*sub_expr.pexp_desc {
-        ExpressionDesc::Pexp_apply(apply_inner) if args.len() == 2  => { let PexpApply { ref funct, ref args, .. } = **apply_inner;
+        ExpressionDesc::Pexp_apply(apply_inner) if apply_inner.args.len() == 2  => { let PexpApply { ref funct, ref args, .. } = **apply_inner;
             if let ExpressionDesc::Pexp_ident(ident) = &*funct.pexp_desc {
                 if let Longident::Lident(op_idx) = arena.get_longident(ident.txt) {
                     let sub_op = arena.get_string(*op_idx);

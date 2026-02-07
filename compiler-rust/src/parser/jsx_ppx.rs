@@ -275,7 +275,6 @@ fn spelunk_for_fun_expression<'a>(arena: &ParseArena, expr: &'a Expression) -> (
     match &*expr.pexp_desc {
         // let make = (~prop) => ...
         ExpressionDesc::Pexp_fun(_) | ExpressionDesc::Pexp_newtype(_) => {
-                    let (_, _) = **inner;
             (None, false, expr)
         }
         // let make = {let foo = bar in (~prop) => ...}
@@ -285,7 +284,7 @@ fn spelunk_for_fun_expression<'a>(arena: &ParseArena, expr: &'a Expression) -> (
             (None, has_forward_ref, inner_expr)
         }
         // let make = React.forwardRef((~prop) => ...)
-        ExpressionDesc::Pexp_apply(apply_inner) if args.len() == 1 && matches!(&args[0].0, ArgLabel::Nolabel)  => { let PexpApply { ref funct, ref args, .. } = **apply_inner;
+        ExpressionDesc::Pexp_apply(apply_inner) if apply_inner.args.len() == 1 && matches!(&apply_inner.args[0].0, ArgLabel::Nolabel)  => { let PexpApply { ref funct, ref args, .. } = **apply_inner;
             let (_, _, inner_expr) = spelunk_for_fun_expression(arena, &args[0].1);
             let has_forward_ref = is_forward_ref(arena, funct);
             // Return the original funct expression (e.g., React.forwardRef) to preserve its source location
@@ -1032,7 +1031,7 @@ fn make_with_props_pattern(arena: &mut ParseArena, expr: &Expression) -> Pattern
                 PatternDesc::Ppat_constraint(inner) => {
                     let (_, ref typ) = **inner;
                     match &*typ.ptyp_desc {
-                        CoreTypeDesc::Ptyp_constr(inner) if arena.is_lident(loc.txt, "props") => {
+                        CoreTypeDesc::Ptyp_constr(inner) if arena.is_lident(inner.0.txt, "props") => {
                     let (ref loc, ref args) = **inner;
                             let props_str_idx = arena.intern_string("props");
                             let props_str_idx2 = arena.intern_string("props");
@@ -1834,6 +1833,7 @@ fn collect_prop_types(typ: &CoreType) -> Vec<(ArgLabel, Attributes, Location, Co
 
 fn collect_prop_types_rec(typ: &CoreType, types: &mut Vec<(ArgLabel, Attributes, Location, CoreType)>) {
     if let CoreTypeDesc::Ptyp_arrow(ptyp_inner) = &*typ.ptyp_desc {
+        let (ref arg, ref ret, ref _arity) = **ptyp_inner;
         let label = &arg.lbl;
         if is_labelled(label) || is_optional(label) {
             // OCaml uses different locations based on whether return is another arrow:
@@ -1977,7 +1977,7 @@ fn make_module_name(config: &JsxConfig, fn_name: &str) -> String {
 /// Strip `option<T>` wrapper from a type, returning just `T`
 fn strip_option(arena: &ParseArena, core_type: &CoreType) -> Option<CoreType> {
     match &*core_type.ptyp_desc {
-        CoreTypeDesc::Ptyp_constr(inner) if args.len() == 1 => {
+        CoreTypeDesc::Ptyp_constr(inner) if inner.1.len() == 1 => {
                     let (ref lid, ref args) = **inner;
             let last_idx = arena.get_longident(lid.txt).last_idx();
             let last_str = arena.get_string(last_idx);
@@ -1994,7 +1994,7 @@ fn strip_option(arena: &ParseArena, core_type: &CoreType) -> Option<CoreType> {
 /// Strip `Js.Nullable.t<T>` wrapper from a type, returning just `T`
 fn strip_js_nullable(arena: &ParseArena, core_type: &CoreType) -> Option<CoreType> {
     match &*core_type.ptyp_desc {
-        CoreTypeDesc::Ptyp_constr(inner) if args.len() == 1 => {
+        CoreTypeDesc::Ptyp_constr(inner) if inner.1.len() == 1 => {
                     let (ref lid, ref args) = **inner;
             // Check for Js.Nullable.t
             if let Longident::Ldot(outer, inner_idx) = arena.get_longident(lid.txt) {
@@ -2552,7 +2552,7 @@ fn update_config_from_attribute(arena: &ParseArena, attr: &Attribute, config: &m
     // Matches OCaml's update_config behavior
     if let Payload::PStr(items) = &attr.1 {
         for item in items {
-            if let StructureItemDesc::Pstr_eval(expr, _) = &*item.pstr_desc {
+            if let StructureItemDesc::Pstr_eval(eval_inner) = &*item.pstr_desc { let (ref expr, _) = **eval_inner;
                 if let ExpressionDesc::Pexp_record(fields, _) = &*expr.pexp_desc {
                     let mut module_raw: Option<String> = None;
                     let mut version_raw: Option<i32> = None;

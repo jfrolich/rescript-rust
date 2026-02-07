@@ -1896,7 +1896,6 @@ fn walk_expression(expr: &Expression, t: &mut CommentTable, comments: Vec<Commen
             walk_apply_expr(funct, args, t, comments, arena);
         }
         ExpressionDesc::Pexp_fun(_) | ExpressionDesc::Pexp_newtype(_) => {
-                    let (_, _) = **inner;
             // Walk through function parameters and body, matching OCaml's handling
             let (_is_async, parameters, return_expr) = parsetree_viewer::fun_expr(arena, expr);
 
@@ -2004,8 +2003,8 @@ fn walk_expression(expr: &Expression, t: &mut CommentTable, comments: Vec<Commen
 
             // Walk return expression
             match &*return_expr.pexp_desc {
-                ExpressionDesc::Pexp_constraint(inner) if arena.loc_start(inner_expr.pexp_loc).cnum >= arena.loc_end(typ.ptyp_loc).cnum => {
-                    let (ref inner_expr, ref typ) = **inner;
+                ExpressionDesc::Pexp_constraint(constraint_inner) if arena.loc_start(constraint_inner.0.pexp_loc).cnum >= arena.loc_end(constraint_inner.1.ptyp_loc).cnum => {
+                    let (ref inner_expr, ref typ) = **constraint_inner;
                     let (leading, inside, trailing) = partition_by_loc(comments, typ.ptyp_loc, arena);
                     t.attach_leading(typ.ptyp_loc, leading, arena);
                     walk_core_type(typ, t, inside, arena);

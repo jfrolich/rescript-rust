@@ -3570,8 +3570,7 @@ impl<'a> LocCloner<'a> {
         match desc {
             PatternDesc::Ppat_any
             | PatternDesc::Ppat_constant(_)
-            | PatternDesc::Ppat_interval(_) => {
-                    let (_, _) = *inner;}
+            | PatternDesc::Ppat_interval(_) => {}
             PatternDesc::Ppat_var(name) => self.located(name),
             PatternDesc::Ppat_alias(pat, name) => {
                 self.pattern(pat);

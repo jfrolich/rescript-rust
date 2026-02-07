@@ -1053,7 +1053,7 @@ fn parse_function_type(p: &mut Parser<'_>, start_pos_idx: PosIdx) -> CoreType {
                     // Also extend first argument's location if it's a simple Lident
                     let new_arg = if matches!(
                         &*arg.typ.ptyp_desc,
-                        CoreTypeDesc::Ptyp_constr(inner) if p.arena().is_simple_lident(lid.txt)
+                        CoreTypeDesc::Ptyp_constr(inner) if p.arena().is_simple_lident(inner.0.txt)
                     ) && !arg.typ.ptyp_loc.is_none() {
                         let arg_end_idx = p.loc_end_idx(arg.typ.ptyp_loc);
                         let new_arg_loc = p.mk_loc_idx(uncurried_start_idx, arg_end_idx);
@@ -1106,7 +1106,7 @@ fn parse_function_type(p: &mut Parser<'_>, start_pos_idx: PosIdx) -> CoreType {
         let arrow_attrs = if matches!(label, ArgLabel::Nolabel) && !param_attrs.is_empty() {
             let is_simple_lident = matches!(
                 &*typ.ptyp_desc,
-                CoreTypeDesc::Ptyp_constr(inner) if p.arena().is_simple_lident(lid.txt)
+                CoreTypeDesc::Ptyp_constr(inner) if p.arena().is_simple_lident(inner.0.txt)
             );
             if is_simple_lident && !typ.ptyp_loc.is_none() {
                 // For simple Lident types, OCaml creates the type with location starting at attrs

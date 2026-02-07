@@ -350,7 +350,7 @@ fn core_type(typ: &CoreType, arena: &ParseArena) -> Sexp {
                 arrow_attrs,
                 arg_typ_sexp,
                 core_type(ret, arena),
-                arity(ar, arena),
+                arity(arity, arena),
             ])
         }
         CoreTypeDesc::Ptyp_tuple(types) => {

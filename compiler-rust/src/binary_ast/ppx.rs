@@ -365,7 +365,7 @@ fn get_as_string_attr(attrs: &[Attribute], arena: &ParseArena) -> Option<String>
             // Try to get string payload
             if let Some(items) = payload_str_items(payload) {
                 if items.len() == 1 {
-                    if let StructureItemDesc::Pstr_eval(expr, _) = &*items[0].pstr_desc {
+                    if let StructureItemDesc::Pstr_eval(eval_inner) = &*items[0].pstr_desc { let (ref expr, _) = **eval_inner;
                         if let ExpressionDesc::Pexp_constant(Constant::String(s, _)) = &*expr.pexp_desc {
                             return Some(s.to_string());
                         }
@@ -386,7 +386,7 @@ fn get_as_int_attr(attrs: &[Attribute], arena: &ParseArena) -> Option<i64> {
             // Try to get int payload
             if let Some(items) = payload_str_items(payload) {
                 if items.len() == 1 {
-                    if let StructureItemDesc::Pstr_eval(expr, _) = &*items[0].pstr_desc {
+                    if let StructureItemDesc::Pstr_eval(eval_inner) = &*items[0].pstr_desc { let (ref expr, _) = **eval_inner;
                         if let ExpressionDesc::Pexp_constant(Constant::Integer(s, suffix)) = &*expr.pexp_desc {
                             // Reject bigint suffix
                             if matches!(suffix, Some('n')) {
@@ -501,7 +501,7 @@ fn spec_of_ptyp(nolabel: bool, typ: &CoreType, arena: &mut ParseArena) -> Attr {
     match attr_type {
         Some("string") => {
             // @string: must be applied to a closed polyvariant
-            if let CoreTypeDesc::Ptyp_variant(row_fields, current::ClosedFlag::Closed, None) = &*typ.ptyp_desc {
+            if let CoreTypeDesc::Ptyp_variant(variant_inner) = &*typ.ptyp_desc { let (ref row_fields, _, _) = **variant_inner;
                 let (has_as, descr) = map_row_fields_into_strings(row_fields, arena);
 
                 // Check if any tags are non-nullary (have payloads)
@@ -530,7 +530,7 @@ fn spec_of_ptyp(nolabel: bool, typ: &CoreType, arena: &mut ParseArena) -> Attr {
         }
         Some("int") => {
             // @int: must be applied to a closed polyvariant
-            if let CoreTypeDesc::Ptyp_variant(row_fields, current::ClosedFlag::Closed, None) = &*typ.ptyp_desc {
+            if let CoreTypeDesc::Ptyp_variant(variant_inner) = &*typ.ptyp_desc { let (ref row_fields, _, _) = **variant_inner;
                 let int_list = map_row_fields_into_ints(row_fields, arena);
                 return Attr::Int(int_list);
             }
@@ -540,7 +540,7 @@ fn spec_of_ptyp(nolabel: bool, typ: &CoreType, arena: &mut ParseArena) -> Attr {
         Some("ignore") => Attr::Ignore,
         Some("unwrap") => {
             // @unwrap: must be applied to a closed polyvariant where each tag has exactly one payload
-            if let CoreTypeDesc::Ptyp_variant(row_fields, current::ClosedFlag::Closed, _) = &*typ.ptyp_desc {
+            if let CoreTypeDesc::Ptyp_variant(variant_inner) = &*typ.ptyp_desc { let (ref row_fields, _, _) = **variant_inner;
                 if variant_can_unwrap(row_fields) {
                     return Attr::Unwrap;
                 }
@@ -552,7 +552,7 @@ fn spec_of_ptyp(nolabel: bool, typ: &CoreType, arena: &mut ParseArena) -> Attr {
             // No special attribute - default behavior
             // Check if unit type
             match &*typ.ptyp_desc {
-                CoreTypeDesc::Ptyp_constr(inner) if args.is_empty() => {
+                CoreTypeDesc::Ptyp_constr(inner) if inner.1.is_empty() => {
                     let (ref lid, ref args) = **inner;
                     let longident = arena.get_longident(lid.txt);
                     if matches!(longident, Longident::Lident(s) if arena.get_string(*s) == "unit") {
@@ -939,14 +939,14 @@ fn get_opt_arg_type(_nolabel: bool, typ: &CoreType, arena: &ParseArena) -> Attr 
     match attr_type {
         Some("ignore") => Attr::Ignore,
         Some("int") => {
-            if let CoreTypeDesc::Ptyp_variant(row_fields, current::ClosedFlag::Closed, None) = &*typ.ptyp_desc {
+            if let CoreTypeDesc::Ptyp_variant(variant_inner) = &*typ.ptyp_desc { let (ref row_fields, _, _) = **variant_inner;
                 let int_list = map_row_fields_into_ints(row_fields, arena);
                 return Attr::Int(int_list);
             }
             Attr::Nothing
         }
         Some("string") => {
-            if let CoreTypeDesc::Ptyp_variant(row_fields, current::ClosedFlag::Closed, None) = &*typ.ptyp_desc {
+            if let CoreTypeDesc::Ptyp_variant(variant_inner) = &*typ.ptyp_desc { let (ref row_fields, _, _) = **variant_inner;
                 let (has_as, descr) = map_row_fields_into_strings(row_fields, arena);
                 if has_as {
                     return Attr::PolyVarString { descr };
@@ -1125,7 +1125,7 @@ fn parse_external_attrs(attrs: &[Attribute], prim_name: &str, no_arguments: bool
 fn get_payload_string(payload: &current::Payload, arena: &mut ParseArena) -> Option<String> {
     match payload {
         current::Payload::PStr(items) if items.len() == 1 => {
-            if let StructureItemDesc::Pstr_eval(expr, _) = &*items[0].pstr_desc {
+            if let StructureItemDesc::Pstr_eval(eval_inner) = &*items[0].pstr_desc { let (ref expr, _) = **eval_inner;
                 match &*expr.pexp_desc {
                     ExpressionDesc::Pexp_constant(current::Constant::String(s, _)) => {
                         return Some(s.to_string());
@@ -1150,7 +1150,7 @@ fn get_payload_string(payload: &current::Payload, arena: &mut ParseArena) -> Opt
 fn get_payload_int(payload: &current::Payload, arena: &mut ParseArena) -> Option<i32> {
     match payload {
         current::Payload::PStr(items) if items.len() == 1 => {
-            if let StructureItemDesc::Pstr_eval(expr, _) = &*items[0].pstr_desc {
+            if let StructureItemDesc::Pstr_eval(eval_inner) = &*items[0].pstr_desc { let (ref expr, _) = **eval_inner;
                 if let ExpressionDesc::Pexp_constant(current::Constant::Integer(name, suffix)) = &*expr.pexp_desc {
                     // OCaml's is_single_int rejects 'n' suffix (bigint)
                     if matches!(suffix, Some('n')) {
@@ -1175,7 +1175,7 @@ fn get_payload_int(payload: &current::Payload, arena: &mut ParseArena) -> Option
 fn get_payload_string_with_delim(payload: &current::Payload, arena: &mut ParseArena) -> Option<(String, Delim)> {
     match payload {
         current::Payload::PStr(items) if items.len() == 1 => {
-            if let StructureItemDesc::Pstr_eval(expr, _) = &*items[0].pstr_desc {
+            if let StructureItemDesc::Pstr_eval(eval_inner) = &*items[0].pstr_desc { let (ref expr, _) = **eval_inner;
                 if let ExpressionDesc::Pexp_constant(current::Constant::String(s, raw_delim)) = &*expr.pexp_desc {
                     // Apply parse_processed_delim logic:
                     // In OCaml, strings get rewritten: None → "*j", then
@@ -1205,7 +1205,7 @@ fn get_payload_strings(payload: &current::Payload, arena: &mut ParseArena) -> Ve
     match payload {
         current::Payload::PStr(items) if items.is_empty() => vec![],
         current::Payload::PStr(items) if items.len() == 1 => {
-            if let StructureItemDesc::Pstr_eval(expr, _) = &*items[0].pstr_desc {
+            if let StructureItemDesc::Pstr_eval(eval_inner) = &*items[0].pstr_desc { let (ref expr, _) = **eval_inner;
                 match &*expr.pexp_desc {
                     ExpressionDesc::Pexp_constant(current::Constant::String(s, _)) => {
                         return vec![s.to_string()];
@@ -1575,7 +1575,7 @@ fn build_obj_ffi_type(typ: &CoreType, arena: &mut ParseArena) -> FfiType {
                     Attr::Nothing => {
                         // Check if for_sure_no_nested_option
                         let for_sure_not_nested = match &*arg.typ.ptyp_desc {
-                            CoreTypeDesc::Ptyp_constr(inner) if args.is_empty() => {
+                            CoreTypeDesc::Ptyp_constr(inner) if inner.1.is_empty() => {
                     let (ref lid, ref args) = **inner;
                                 let longident = arena.get_longident(lid.txt);
                                 if let Longident::Lident(s) = longident {
@@ -1732,7 +1732,7 @@ fn find_inline_payload_expr<'a>(
             // @inline(expr) has PStr with a single Pstr_eval
             if let Some(items) = payload_str_items(payload) {
                 if items.len() == 1 {
-                    if let StructureItemDesc::Pstr_eval(expr, _) = &*items[0].pstr_desc {
+                    if let StructureItemDesc::Pstr_eval(eval_inner) = &*items[0].pstr_desc { let (ref expr, _) = **eval_inner;
                         return Some(expr);
                     }
                 }
@@ -3760,8 +3760,7 @@ fn rewrite_payload(payload: &Payload, arena: &mut ParseArena) -> Payload {
 fn rewrite_core_type(typ: &CoreType, arena: &mut ParseArena) -> CoreType {
     let new_desc = match &*typ.ptyp_desc {
         CoreTypeDesc::Ptyp_extension(ext) => {
-            let (name, payload) = ext;
-            CoreTypeDesc::Ptyp_extension(inner)
+            CoreTypeDesc::Ptyp_extension(ext.clone())
         }
         CoreTypeDesc::Ptyp_arrow(inner) => {
                     let (ref arg, ref ret, ref arity) = **inner;
@@ -4879,7 +4878,7 @@ fn parse_deriving_actions(attrs: &[Attribute], arena: &mut ParseArena) -> (Vec<D
             if let Some(items) = payload_str_items(payload) {
                 // @deriving(accessors) or @deriving({jsConverter: newType})
                 for item in items {
-                    if let StructureItemDesc::Pstr_eval(expr, _) = &*item.pstr_desc {
+                    if let StructureItemDesc::Pstr_eval(eval_inner) = &*item.pstr_desc { let (ref expr, _) = **eval_inner;
                         parse_deriving_expr(&*expr.pexp_desc, &mut actions, arena);
                     }
                 }
@@ -5324,7 +5323,7 @@ fn get_as_string_value(attrs: &[Attribute], arena: &ParseArena) -> Option<String
         if name == "as" {
             if let Some(items) = payload_str_items(payload) {
                 if let Some(item) = items.first() {
-                    if let StructureItemDesc::Pstr_eval(expr, _) = &*item.pstr_desc {
+                    if let StructureItemDesc::Pstr_eval(eval_inner) = &*item.pstr_desc { let (ref expr, _) = **eval_inner;
                         // Constant::String(txt_str, delim)
                         if let ExpressionDesc::Pexp_constant(Constant::String(txt_str, _delim)) = &*expr.pexp_desc {
                             return Some(txt_str.to_string());
@@ -7297,7 +7296,7 @@ fn get_bs_as_string(attrs: &[Attribute], arena: &ParseArena) -> Option<String> {
         if name == "as" {
             if let Some(items) = payload_str_items(payload) {
                 if let Some(item) = items.first() {
-                    if let StructureItemDesc::Pstr_eval(expr, _) = &*item.pstr_desc {
+                    if let StructureItemDesc::Pstr_eval(eval_inner) = &*item.pstr_desc { let (ref expr, _) = **eval_inner;
                         if let ExpressionDesc::Pexp_constant(Constant::String(txt, _)) = &*expr.pexp_desc {
                             return Some(txt.to_string());
                         }

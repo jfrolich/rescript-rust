@@ -979,7 +979,6 @@ pub fn print_expression(
         }
         // Function expressions
         ExpressionDesc::Pexp_fun(_) | ExpressionDesc::Pexp_newtype(_) => {
-                    let (_, _) = **inner;
             print_arrow_expression(state, e, cmt_tbl, arena)
         }
         // Constants
@@ -1262,7 +1261,7 @@ pub fn print_expression(
         // Array access: Array.get(arr, idx) -> arr[idx]
         ExpressionDesc::Pexp_apply(apply_inner)
             if parsetree_viewer::is_array_access(arena,e)
-                && !parsetree_viewer::is_rewritten_underscore_apply_sugar(arena,&args[0].1)  => { let PexpApply { ref args, .. } = **apply_inner;
+                && !parsetree_viewer::is_rewritten_underscore_apply_sugar(arena,&apply_inner.args[0].1)  => { let PexpApply { ref args, .. } = **apply_inner;
             let parent_expr = &args[0].1;
             let member_expr = &args[1].1;
             let parent_doc = {
@@ -1390,7 +1389,7 @@ pub fn print_expression(
         }
         // Send-set: obj#prop = value -> obj["prop"] = value
         ExpressionDesc::Pexp_apply(apply_inner)
-            if is_send_set_expr(arena, funct, args)  => { let PexpApply { ref funct, ref args, .. } = **apply_inner;
+            if is_send_set_expr(arena, &apply_inner.funct, &apply_inner.args)  => { let PexpApply { ref funct, ref args, .. } = **apply_inner;
             let lhs = &args[0].1;
             let rhs = &args[1].1;
             // Match OCaml: RHS goes through Parens.expr for brace handling
@@ -1420,10 +1419,10 @@ pub fn print_expression(
         }
         // Spread array: Belt.Array.concatMany([xs, [a, b]]) -> [...xs, a, b]
         ExpressionDesc::Pexp_apply(apply_inner)
-            if args.len() == 1
-                && matches!(&args[0].0, ArgLabel::Nolabel)
-                && matches!(&*args[0].1.pexp_desc, ExpressionDesc::Pexp_array(_))
-                && parsetree_viewer::is_spread_belt_array_concat(arena, funct)  => { let PexpApply { ref funct, ref args, .. } = **apply_inner;
+            if apply_inner.args.len() == 1
+                && matches!(&apply_inner.args[0].0, ArgLabel::Nolabel)
+                && matches!(&*apply_inner.args[0].1.pexp_desc, ExpressionDesc::Pexp_array(_))
+                && parsetree_viewer::is_spread_belt_array_concat(arena, &apply_inner.funct)  => { let PexpApply { ref funct, ref args, .. } = **apply_inner;
             if let ExpressionDesc::Pexp_array(sub_lists) = &*args[0].1.pexp_desc {
                 print_belt_array_concat_apply(state, sub_lists, cmt_tbl, arena)
             } else {
@@ -1432,10 +1431,10 @@ pub fn print_expression(
         }
         // Spread list: Belt.List.concatMany([xs, [a, b]]) -> list{...xs, a, b}
         ExpressionDesc::Pexp_apply(apply_inner)
-            if args.len() == 1
-                && matches!(&args[0].0, ArgLabel::Nolabel)
-                && matches!(&*args[0].1.pexp_desc, ExpressionDesc::Pexp_array(_))
-                && parsetree_viewer::is_spread_belt_list_concat(arena, funct)  => { let PexpApply { ref funct, ref args, .. } = **apply_inner;
+            if apply_inner.args.len() == 1
+                && matches!(&apply_inner.args[0].0, ArgLabel::Nolabel)
+                && matches!(&*apply_inner.args[0].1.pexp_desc, ExpressionDesc::Pexp_array(_))
+                && parsetree_viewer::is_spread_belt_list_concat(arena, &apply_inner.funct)  => { let PexpApply { ref funct, ref args, .. } = **apply_inner;
             if let ExpressionDesc::Pexp_array(sub_lists) = &*args[0].1.pexp_desc {
                 print_belt_list_concat_apply(state, sub_lists, cmt_tbl, arena)
             } else {
@@ -1448,9 +1447,9 @@ pub fn print_expression(
             print_pexp_apply(state, e, funct, args, *partial, cmt_tbl, arena)
         }
         // Constraint with pack: module(M: S)
-        ExpressionDesc::Pexp_constraint(inner) if matches!(&*inner.pexp_desc, ExpressionDesc::Pexp_pack(_))
-                && matches!(&*typ.ptyp_desc, CoreTypeDesc::Ptyp_package(_)) => {
-                    let (inner, typ) = *inner;
+        ExpressionDesc::Pexp_constraint(constraint_inner) if matches!(&*constraint_inner.0.pexp_desc, ExpressionDesc::Pexp_pack(_))
+                && matches!(&*constraint_inner.1.ptyp_desc, CoreTypeDesc::Ptyp_package(_)) => {
+                    let (ref inner, ref typ) = **constraint_inner;
             match (&*inner.pexp_desc, &*typ.ptyp_desc) {
                 (ExpressionDesc::Pexp_pack(mod_expr), CoreTypeDesc::Ptyp_package(package_type)) => {
                     let mod_doc = print_mod_expr(state, mod_expr, cmt_tbl, arena);
@@ -2123,8 +2122,9 @@ fn print_exp_fun_parameter(
                 // ~d: typ (punning with type)
                 (
                     ArgLabel::Labelled(lbl) | ArgLabel::Optional(lbl),
-                    PatternDesc::Ppat_constraint(inner),
-                ) if matches!(&*inner.ppat_desc, PatternDesc::Ppat_var(v) if arena.get_string(lbl.txt) == arena.get_string(v.txt)) => {
+                    PatternDesc::Ppat_constraint(ppat_inner),
+                ) if matches!(&*ppat_inner.0.ppat_desc, PatternDesc::Ppat_var(v) if arena.get_string(lbl.txt) == arena.get_string(v.txt)) => {
+                    let (ref _ppat, ref typ) = **ppat_inner;
                     Doc::concat(vec![
                         print_attributes(state, &pat.ppat_attributes, cmt_tbl, arena),
                         Doc::text("~"),
@@ -3315,8 +3315,8 @@ fn print_template_literal(
         match &*expr.pexp_desc {
             // String concatenation: arg1 ++ arg2
             ExpressionDesc::Pexp_apply(apply_inner)
-                if args.len() == 2
-                    && matches!(&*funct.pexp_desc, ExpressionDesc::Pexp_ident(lid)
+                if apply_inner.args.len() == 2
+                    && matches!(&*apply_inner.funct.pexp_desc, ExpressionDesc::Pexp_ident(lid)
                         if matches!(arena.get_longident(lid.txt), Longident::Lident(op_idx)
                             if arena.get_string(*op_idx) == "++"))  => { let PexpApply { ref funct, ref args, .. } = **apply_inner;
                 let lhs = walk_expr(state, &args[0].1, tag, cmt_tbl, arena);
@@ -3877,6 +3877,7 @@ fn flatten_binary_operand(
     if parsetree_viewer::is_binary_expression(arena, expr) {
         // It's a binary expression - check if we should flatten
         if let ExpressionDesc::Pexp_apply(apply_inner) = &*expr.pexp_desc {
+            let PexpApply { ref funct, ref args, .. } = **apply_inner;
             if args.len() == 2 {
                 if let ExpressionDesc::Pexp_ident(ident) = &*funct.pexp_desc {
                     if let Longident::Lident(op_idx) = arena.get_longident(ident.txt) {
@@ -4020,7 +4021,7 @@ fn flatten_binary_operand(
             }
 
             // JS object set (#=) - only needs parens on LHS
-            ExpressionDesc::Pexp_apply(apply_inner) if args.len() == 2  => { let PexpApply { ref funct, ref args, .. } = **apply_inner;
+            ExpressionDesc::Pexp_apply(apply_inner) if apply_inner.args.len() == 2  => { let PexpApply { ref funct, ref args, .. } = **apply_inner;
                 if let ExpressionDesc::Pexp_ident(ident) = &*funct.pexp_desc {
                     if arena.is_lident(ident.txt, "#=") {
                         let doc = print_expression_with_comments(state, expr, cmt_tbl, arena);
@@ -4889,9 +4890,9 @@ pub fn print_pattern(
             Doc::breakable_group(Doc::concat(docs), is_spread_over_multiple_lines)
         }
         // module(M: S) - first-class module with package type
-        PatternDesc::Ppat_constraint(inner) if matches!(&*inner.ppat_desc, PatternDesc::Ppat_unpack(_))
-                && matches!(&*typ.ptyp_desc, CoreTypeDesc::Ptyp_package(_)) => {
-                    let (inner, typ) = *inner;
+        PatternDesc::Ppat_constraint(ppat_c_inner) if matches!(&*ppat_c_inner.0.ppat_desc, PatternDesc::Ppat_unpack(_))
+                && matches!(&*ppat_c_inner.1.ptyp_desc, CoreTypeDesc::Ptyp_package(_)) => {
+                    let (ref inner, ref typ) = **ppat_c_inner;
             if let (
                 PatternDesc::Ppat_unpack(name),
                 CoreTypeDesc::Ptyp_package(package_type),
@@ -5946,7 +5947,7 @@ fn print_doc_comments_with_sep(
             // with a Pexp_constant(Constant::String(...))
             if let Payload::PStr(items) = &attr.1 {
                 if let Some(item) = items.first() {
-                    if let StructureItemDesc::Pstr_eval(expr, _) = &*item.pstr_desc {
+                    if let StructureItemDesc::Pstr_eval(eval_inner) = &*item.pstr_desc { let (ref expr, _) = **eval_inner;
                         if let ExpressionDesc::Pexp_constant(Constant::String(content, _)) =
                             &*expr.pexp_desc
                         {
@@ -7284,7 +7285,7 @@ fn print_attribute(
     if arena.get_string(name.txt) == "res.doc" {
         if let Payload::PStr(items) = payload {
             if let [single] = &items[..] {
-                if let StructureItemDesc::Pstr_eval(expr, _) = &*single.pstr_desc {
+                if let StructureItemDesc::Pstr_eval(eval_inner) = &*single.pstr_desc { let (ref expr, _) = **eval_inner;
                     if let ExpressionDesc::Pexp_constant(Constant::String(txt, _)) = &*expr.pexp_desc {
                         return Doc::concat(vec![
                             Doc::text(if standalone { "/***" } else { "/**" }),
@@ -8856,6 +8857,7 @@ fn print_jsx_prop(
                     .map(|attr| attr.0.loc);
                 let leading_line_comment_present = match (parens::jsx_prop_expr(arena, value), &*value.pexp_desc) {
                     (parens::ParenKind::Braced(_), ExpressionDesc::Pexp_apply(apply_inner)) => {
+                        let PexpApply { ref funct, ref args, .. } = **apply_inner;
                         let head_arg = args.first().map(|(_, arg)| arg);
                         // Check braces location first (where comments are attached for braced exprs)
                         braces_loc.map_or(false, |loc| has_leading_line_comment(cmt_tbl, loc, arena))
