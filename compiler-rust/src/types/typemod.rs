@@ -211,6 +211,11 @@ fn extract_functor_result_type<'b>(
     }
 }
 
+/// Extract a `decl::ModuleType` from a typed module expression (public wrapper).
+pub fn extract_module_type_from_mod_expr_pub(mod_expr: &ModuleExpr) -> Option<crate::types::decl::ModuleType> {
+    extract_module_type_from_mod_expr(mod_expr)
+}
+
 /// Extract a `decl::ModuleType` from a typed module expression.
 /// For structure modules, builds a signature from the structure items.
 fn extract_module_type_from_mod_expr(mod_expr: &ModuleExpr) -> Option<crate::types::decl::ModuleType> {
@@ -252,8 +257,71 @@ fn extract_module_type_from_mod_expr(mod_expr: &ModuleExpr) -> Option<crate::typ
                             crate::types::decl::RecStatus::TrecNot,
                         ));
                     }
-                    // Type declarations, exceptions, open, include, etc.
-                    // skip for now (values and modules are what's needed for open/include)
+                    StructureItemDesc::Tstr_recmodule(mbs) => {
+                        for mb in mbs {
+                            let inner_mty = extract_module_type_from_mod_expr(&mb.mb_expr)
+                                .unwrap_or(DeclMty::MtySignature(vec![]));
+                            sig_items.push(SigItem::SigModule(
+                                mb.mb_id.clone(),
+                                crate::types::decl::ModuleDeclaration {
+                                    md_type: inner_mty,
+                                    md_attributes: vec![],
+                                    md_loc: crate::location::Location::none(),
+                                },
+                                crate::types::decl::RecStatus::TrecFirst,
+                            ));
+                        }
+                    }
+                    StructureItemDesc::Tstr_type(rec_flag, decls) => {
+                        let rec_status = match rec_flag {
+                            crate::parser::ast::RecFlag::Recursive => crate::types::decl::RecStatus::TrecFirst,
+                            crate::parser::ast::RecFlag::Nonrecursive => crate::types::decl::RecStatus::TrecNot,
+                        };
+                        for decl in decls {
+                            sig_items.push(SigItem::SigType(
+                                decl.typ_id.clone(),
+                                decl.typ_type.clone(),
+                                rec_status,
+                            ));
+                        }
+                    }
+                    StructureItemDesc::Tstr_exception(ext_cstr) => {
+                        sig_items.push(SigItem::SigTypext(
+                            ext_cstr.ext_id.clone(),
+                            ext_cstr.ext_type.clone(),
+                            crate::types::decl::ExtStatus::TextException,
+                        ));
+                    }
+                    StructureItemDesc::Tstr_typext(type_ext) => {
+                        for ext_cstr in &type_ext.tyext_constructors {
+                            sig_items.push(SigItem::SigTypext(
+                                ext_cstr.ext_id.clone(),
+                                ext_cstr.ext_type.clone(),
+                                crate::types::decl::ExtStatus::TextFirst,
+                            ));
+                        }
+                    }
+                    StructureItemDesc::Tstr_modtype(mtd) => {
+                        sig_items.push(SigItem::SigModtype(
+                            mtd.mtd_id.clone(),
+                            crate::types::decl::ModtypeDeclaration {
+                                mtd_type: mtd.mtd_type.as_ref().and_then(|mt| {
+                                    // Extract module type from typed module type
+                                    None // simplified for now
+                                }),
+                                mtd_attributes: vec![],
+                                mtd_loc: crate::location::Location::none(),
+                            },
+                        ));
+                    }
+                    StructureItemDesc::Tstr_include(incl) => {
+                        // Include: merge all signature items from the included module
+                        if let Some(inner_mty) = extract_module_type_from_mod_expr(&incl.incl_mod) {
+                            if let DeclMty::MtySignature(inner_sig) = inner_mty {
+                                sig_items.extend(inner_sig);
+                            }
+                        }
+                    }
                     _ => {}
                 }
             }

@@ -3815,7 +3815,49 @@ fn build_signature_from_structure(structure: &crate::types::typedtree::Structure
                     ));
                 }
             }
-            _ => {} // Skip other structure items for now
+            StructureItemDesc::Tstr_module(mb) => {
+                let inner_mty = crate::types::typemod::extract_module_type_from_mod_expr_pub(&mb.mb_expr)
+                    .unwrap_or(crate::types::decl::ModuleType::MtySignature(vec![]));
+                sig.push(crate::types::decl::SignatureItem::SigModule(
+                    mb.mb_id.clone(),
+                    crate::types::decl::ModuleDeclaration {
+                        md_type: inner_mty,
+                        md_attributes: vec![],
+                        md_loc: crate::location::Location::none(),
+                    },
+                    crate::types::decl::RecStatus::TrecNot,
+                ));
+            }
+            StructureItemDesc::Tstr_type(rec_flag, decls) => {
+                let rec_status = match rec_flag {
+                    crate::parser::ast::RecFlag::Recursive => crate::types::decl::RecStatus::TrecFirst,
+                    crate::parser::ast::RecFlag::Nonrecursive => crate::types::decl::RecStatus::TrecNot,
+                };
+                for decl in decls {
+                    sig.push(crate::types::decl::SignatureItem::SigType(
+                        decl.typ_id.clone(),
+                        decl.typ_type.clone(),
+                        rec_status,
+                    ));
+                }
+            }
+            StructureItemDesc::Tstr_exception(ext_cstr) => {
+                sig.push(crate::types::decl::SignatureItem::SigTypext(
+                    ext_cstr.ext_id.clone(),
+                    ext_cstr.ext_type.clone(),
+                    crate::types::decl::ExtStatus::TextException,
+                ));
+            }
+            StructureItemDesc::Tstr_typext(type_ext) => {
+                for ext_cstr in &type_ext.tyext_constructors {
+                    sig.push(crate::types::decl::SignatureItem::SigTypext(
+                        ext_cstr.ext_id.clone(),
+                        ext_cstr.ext_type.clone(),
+                        crate::types::decl::ExtStatus::TextFirst,
+                    ));
+                }
+            }
+            _ => {}
         }
     }
     sig
@@ -4305,6 +4347,37 @@ fn lookup_constructor_in_module<'b>(
                             }
                             if is_constant { const_idx += 1; } else { block_idx += 1; }
                         }
+                    }
+                }
+                // Also search SigTypext for exception/extension constructors
+                if let SignatureItem::SigTypext(id, ext, _status) = sig_item {
+                    if id.name() == cstr_name {
+                        let (cstr_args, cstr_arity) = match &ext.ext_args {
+                            crate::types::ConstructorArguments::CstrTuple(args) => (args.clone(), args.len() as i32),
+                            crate::types::ConstructorArguments::CstrRecord(labels) => {
+                                let args: Vec<_> = labels.iter().map(|l| l.ld_type).collect();
+                                let arity = args.len() as i32;
+                                (args, arity)
+                            }
+                        };
+                        let cstr_res = ctx.new_generic_constr(ext.ext_type_path.clone(), ext.ext_type_params.clone());
+                        let ext_path = Path::pident(Ident::create_persistent(cstr_name));
+                        let desc = crate::types::decl::ConstructorDescription {
+                            cstr_name: cstr_name.to_string(),
+                            cstr_res,
+                            cstr_existentials: vec![],
+                            cstr_args,
+                            cstr_arity,
+                            cstr_tag: crate::types::decl::ConstructorTag::CstrExtension(ext_path.clone()),
+                            cstr_consts: 0,
+                            cstr_nonconsts: 0,
+                            cstr_generalized: false,
+                            cstr_private: crate::types::PrivateFlag::Public,
+                            cstr_loc: crate::location::Location::none(),
+                            cstr_attributes: vec![],
+                            cstr_inlined: None,
+                        };
+                        return Some((ext_path, desc));
                     }
                 }
             }
