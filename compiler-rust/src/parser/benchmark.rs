@@ -971,4 +971,126 @@ mod tests {
         println!("  Throughput: {:.1} MB/s, {:.0}K LOC/s", mbs, loc_per_s / 1000.0);
         println!("  Per-thread: {:.1} MB/s, {:.0}K LOC/s", mbs / num_threads as f64, loc_per_s / 1000.0 / num_threads as f64);
     }
+
+    // ========================================================================
+    // Parallel comparison: OCaml subprocess vs Rust subprocess vs Rust in-process
+    // Run with: cargo test --release --lib -- benchmark_parallel_compare --ignored --nocapture
+    // ========================================================================
+
+    #[test]
+    #[ignore]
+    fn benchmark_parallel_compare() {
+        use rayon::prelude::*;
+        use std::sync::atomic::{AtomicU64, Ordering};
+
+        if cfg!(debug_assertions) {
+            eprintln!("Skipping benchmark: must run in --release mode");
+            return;
+        }
+
+        let has_rust_bsc = Path::new(RUST_BSC).exists();
+        let has_ocaml_bsc = Path::new(OCAML_BSC).exists();
+        if !has_rust_bsc || !has_ocaml_bsc {
+            eprintln!(
+                "Skipping: need both bsc binaries\n  Rust:  {} ({})\n  OCaml: {} ({})",
+                RUST_BSC, if has_rust_bsc { "found" } else { "missing" },
+                OCAML_BSC, if has_ocaml_bsc { "found" } else { "missing" },
+            );
+            return;
+        }
+
+        let files = discover_test_files();
+        let total_lines: u64 = files.iter().map(|f| f.lines).sum();
+        let total_size: u64 = files.iter().map(|f| f.size).sum();
+        let num_threads = rayon::current_num_threads();
+
+        println!("\n=== Parallel Comparison: OCaml subp vs Rust subp vs Rust in-process ===");
+        println!("{} files, {} lines, {:.1} KB, {} threads\n", files.len(), total_lines, total_size as f64 / 1024.0, num_threads);
+
+        // --- OCaml subprocess parallel ---
+        {
+            let count = AtomicU64::new(0);
+            let start = Instant::now();
+            files.par_iter().for_each(|file| {
+                let tmp = tempfile::NamedTempFile::new().unwrap();
+                let result = Command::new(OCAML_BSC)
+                    .arg("-bs-ast")
+                    .arg("-o")
+                    .arg(tmp.path())
+                    .arg(&file.path)
+                    .output();
+                if result.is_ok_and(|o| o.status.success()) {
+                    count.fetch_add(1, Ordering::Relaxed);
+                }
+            });
+            let elapsed = start.elapsed();
+            let elapsed_s = elapsed.as_secs_f64();
+            let kloc = total_lines as f64 / elapsed_s / 1000.0;
+            let mbs = (total_size as f64) / elapsed_s / 1_000_000.0;
+            println!(
+                "  OCaml bsc (subprocess):     {:>7.1} ms  {:>6.1} MB/s  {:>7.0}K LOC/s  ({} files)",
+                elapsed_s * 1000.0, mbs, kloc, count.load(Ordering::Relaxed)
+            );
+        }
+
+        // --- Rust subprocess parallel ---
+        {
+            let count = AtomicU64::new(0);
+            let start = Instant::now();
+            files.par_iter().for_each(|file| {
+                let tmp = tempfile::NamedTempFile::new().unwrap();
+                let result = Command::new(RUST_BSC)
+                    .arg("-bs-ast")
+                    .arg("-o")
+                    .arg(tmp.path())
+                    .arg(&file.path)
+                    .output();
+                if result.is_ok_and(|o| o.status.success()) {
+                    count.fetch_add(1, Ordering::Relaxed);
+                }
+            });
+            let elapsed = start.elapsed();
+            let elapsed_s = elapsed.as_secs_f64();
+            let kloc = total_lines as f64 / elapsed_s / 1000.0;
+            let mbs = (total_size as f64) / elapsed_s / 1_000_000.0;
+            println!(
+                "  Rust bsc (subprocess):      {:>7.1} ms  {:>6.1} MB/s  {:>7.0}K LOC/s  ({} files)",
+                elapsed_s * 1000.0, mbs, kloc, count.load(Ordering::Relaxed)
+            );
+        }
+
+        // --- Rust in-process parallel ---
+        {
+            let count = AtomicU64::new(0);
+            let start = Instant::now();
+            files.par_iter().for_each(|file| {
+                let bytes = match std::fs::read(&file.path) {
+                    Ok(b) => b,
+                    Err(_) => return,
+                };
+                let source: String = bytes.iter().map(|&b| b as char).collect();
+                let filename = file.path.to_string_lossy().to_string();
+                let is_interface = file.path
+                    .extension()
+                    .and_then(|s| s.to_str())
+                    .is_some_and(|ext| ext == "resi" || ext == "mli");
+
+                let mut parser = crate::parser::Parser::new(&filename, &source);
+                if is_interface {
+                    let _ = crate::parser::module::parse_signature(&mut parser);
+                } else {
+                    let _ = crate::parser::module::parse_structure(&mut parser);
+                }
+                count.fetch_add(1, Ordering::Relaxed);
+            });
+            let elapsed = start.elapsed();
+            let elapsed_s = elapsed.as_secs_f64();
+            let kloc = total_lines as f64 / elapsed_s / 1000.0;
+            let mbs = (total_size as f64) / elapsed_s / 1_000_000.0;
+            println!(
+                "  Rust in-process (parallel):  {:>7.1} ms  {:>6.1} MB/s  {:>7.0}K LOC/s  ({} files)",
+                elapsed_s * 1000.0, mbs, kloc, count.load(Ordering::Relaxed)
+            );
+        }
+    }
 }
