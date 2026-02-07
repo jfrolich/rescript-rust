@@ -103,6 +103,9 @@ impl PersistentEnv {
         let mut sig_ctx = SigReadContext::new(ctx);
         let signature = sig_ctx.read_signature(&cmi.cmi_sign);
 
+        // Register all type declarations in the global store for alias expansion
+        register_sig_types_recursive(&signature, ctx);
+
         Some(PersStruct {
             ps_name: cmi.cmi_name,
             ps_sig: signature,
@@ -172,6 +175,25 @@ impl PersistentEnv {
 
 /// Add a signature's bindings to an environment as opened bindings.
 ///
+/// Recursively register all type declarations from a signature
+/// into the type context's global store for alias expansion.
+fn register_sig_types_recursive(sig: &Signature, ctx: &TypeContext<'_>) {
+    for item in sig {
+        match item {
+            SignatureItem::SigType(id, decl, _) => {
+                ctx.register_type_decl(id.name(), decl.clone());
+            }
+            SignatureItem::SigModule(id, md, _) => {
+                // Recurse into sub-module signatures
+                if let ModuleType::MtySignature(sub_sig) = &md.md_type {
+                    register_sig_types_recursive(sub_sig, ctx);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
 /// This is the core of `open_signature` from OCaml's `env.ml`.
 /// For each signature item, we add the appropriate binding to the environment.
 ///
@@ -208,6 +230,9 @@ pub fn add_signature_to_env(
                 } else {
                     env.add_type(id.clone(), decl.clone());
                 }
+
+                // Also register in global type store for alias expansion
+                ctx.register_type_decl(id.name(), decl.clone());
 
                 // Also add constructors and labels from this type
                 match &decl.type_kind {

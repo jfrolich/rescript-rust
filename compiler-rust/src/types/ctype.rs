@@ -307,24 +307,48 @@ fn try_expand_head(
     let desc = ctx.get_desc(ty);
     match &*desc {
         TypeDesc::Tconstr { path, args, .. } => {
-            let decl = env.lookup_type(path).ok()?;
-            let manifest = decl.type_manifest?;
-            let params = &decl.type_params;
+            // Try env first, then fall back to global type store
+            let name = path.head_name().to_string();
+            let env_decl = env.lookup_type(path).ok();
 
-            if params.is_empty() {
-                // No type parameters, just return the manifest directly
-                drop(desc);
-                Some(manifest)
-            } else if params.len() == args.len() {
-                // Substitute type parameters with arguments
-                let params_vec: Vec<TypeExprRef> = params.clone();
-                let args_vec: Vec<TypeExprRef> = args.clone();
-                drop(desc);
-                Some(subst_type(ctx, &params_vec, &args_vec, manifest))
-            } else {
-                // Arity mismatch, can't expand
-                None
+            if let Some(decl) = env_decl {
+                let manifest = match decl.type_manifest {
+                    Some(m) => m,
+                    None => return None,
+                };
+                let params = &decl.type_params;
+                if params.is_empty() {
+                    drop(desc);
+                    return Some(manifest);
+                } else if params.len() == args.len() {
+                    let params_vec: Vec<TypeExprRef> = params.clone();
+                    let args_vec: Vec<TypeExprRef> = args.clone();
+                    drop(desc);
+                    return Some(subst_type(ctx, &params_vec, &args_vec, manifest));
+                }
+                return None;
             }
+
+            // Fall back to global type declaration store
+            let store_decl = ctx.find_type_decl(&name);
+            if let Some(decl) = store_decl {
+                let manifest = match decl.type_manifest {
+                    Some(m) => m,
+                    None => return None,
+                };
+                let params = &decl.type_params;
+                if params.is_empty() {
+                    drop(desc);
+                    return Some(manifest);
+                } else if params.len() == args.len() {
+                    let params_vec: Vec<TypeExprRef> = params.clone();
+                    let args_vec: Vec<TypeExprRef> = args.clone();
+                    drop(desc);
+                    return Some(subst_type(ctx, &params_vec, &args_vec, manifest));
+                }
+            }
+
+            None
         }
         _ => None,
     }

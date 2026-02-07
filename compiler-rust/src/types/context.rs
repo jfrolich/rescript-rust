@@ -101,6 +101,11 @@ pub struct TypeContext<'a> {
 
     /// Field kind storage
     field_kinds: RefCell<Vec<&'a RefCell<Option<FieldKind>>>>,
+
+    /// Global type declaration store, indexed by type name.
+    /// Populated when loading CMI module signatures so that type alias
+    /// expansion can find declarations for types not directly in the env.
+    type_decl_store: RefCell<std::collections::HashMap<String, super::decl::TypeDeclaration>>,
 }
 
 impl<'a> TypeContext<'a> {
@@ -124,6 +129,23 @@ impl<'a> TypeContext<'a> {
             row_fields: RefCell::new(Vec::new()),
             commutables: RefCell::new(Vec::new()),
             field_kinds: RefCell::new(Vec::new()),
+            type_decl_store: RefCell::new(std::collections::HashMap::new()),
+        }
+    }
+
+    /// Register a type declaration for type alias expansion.
+    /// Called when loading module signatures from CMI files.
+    pub fn register_type_decl(&self, name: &str, decl: super::decl::TypeDeclaration) {
+        self.type_decl_store.borrow_mut().insert(name.to_string(), decl);
+    }
+
+    /// Look up a type declaration by name from the global store.
+    pub fn find_type_decl(&self, name: &str) -> Option<std::cell::Ref<'_, super::decl::TypeDeclaration>> {
+        let store = self.type_decl_store.borrow();
+        if store.contains_key(name) {
+            Some(std::cell::Ref::map(store, |s| s.get(name).unwrap()))
+        } else {
+            None
         }
     }
 
