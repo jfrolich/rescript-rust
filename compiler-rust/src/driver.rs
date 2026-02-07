@@ -60,6 +60,10 @@ pub fn compile_source_to_js_with_options(
     // Expand extension points (%%raw, %raw, %re, %%private) without touching externals
     let structure = ppx::expand_extensions(&structure, parser.arena_mut());
 
+    // Rewrite expressions: desugar pipe (->), setter (#=), property access (##),
+    // await, tagged templates, and encode externals. This matches OCaml's bs_builtin_ppx.
+    let structure = ppx::rewrite_structure(&structure, parser.arena_mut());
+
     // Type check
     let id_gen = IdGenerator::new();
     let type_ctx = TypeContext::new(&id_gen);
