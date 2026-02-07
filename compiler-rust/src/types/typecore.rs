@@ -3777,6 +3777,49 @@ fn type_letmodule(
     ))
 }
 
+/// Extract value signature items from a binding pattern (for building signatures from structures).
+fn extract_sig_values_from_binding_pattern(
+    pat: &crate::types::typedtree::Pattern,
+    ty: TypeExprRef,
+    sig: &mut Vec<crate::types::decl::SignatureItem>,
+) {
+    use crate::types::typedtree::PatternDesc;
+    match &pat.pat_desc {
+        PatternDesc::Tpat_var(id, _) => {
+            sig.push(crate::types::decl::SignatureItem::SigValue(
+                id.clone(),
+                crate::types::decl::ValueDescription {
+                    val_type: ty,
+                    val_kind: crate::types::decl::ValueKind::ValReg,
+                    val_loc: crate::location::Location::none(),
+                    val_attributes: vec![],
+                    val_path: None,
+                },
+            ));
+        }
+        PatternDesc::Tpat_alias(inner, id, _) => {
+            sig.push(crate::types::decl::SignatureItem::SigValue(
+                id.clone(),
+                crate::types::decl::ValueDescription {
+                    val_type: ty,
+                    val_kind: crate::types::decl::ValueKind::ValReg,
+                    val_loc: crate::location::Location::none(),
+                    val_attributes: vec![],
+                    val_path: None,
+                },
+            ));
+            // Also extract from the inner pattern
+            extract_sig_values_from_binding_pattern(inner, ty, sig);
+        }
+        PatternDesc::Tpat_tuple(pats) => {
+            for p in pats {
+                extract_sig_values_from_binding_pattern(p, p.pat_type, sig);
+            }
+        }
+        _ => {}
+    }
+}
+
 /// Build a signature from typed structure items.
 fn build_signature_from_structure(structure: &crate::types::typedtree::Structure) -> Vec<crate::types::decl::SignatureItem> {
     use crate::types::typedtree::StructureItemDesc;
@@ -3802,17 +3845,7 @@ fn build_signature_from_structure(structure: &crate::types::typedtree::Structure
             }
             StructureItemDesc::Tstr_value(_rec, bindings) => {
                 for binding in bindings {
-                    let vd = crate::types::decl::ValueDescription {
-                        val_type: binding.vb_expr.exp_type,
-                        val_kind: crate::types::decl::ValueKind::ValReg,
-                        val_loc: crate::location::Location::none(),
-                        val_attributes: vec![],
-                        val_path: None,
-                    };
-                    sig.push(crate::types::decl::SignatureItem::SigValue(
-                        Ident::create_local("_"),
-                        vd,
-                    ));
+                    extract_sig_values_from_binding_pattern(&binding.vb_pat, binding.vb_expr.exp_type, &mut sig);
                 }
             }
             StructureItemDesc::Tstr_module(mb) => {

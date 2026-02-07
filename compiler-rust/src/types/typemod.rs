@@ -211,6 +211,103 @@ fn extract_functor_result_type<'b>(
     }
 }
 
+/// Translate a parsed module type (signature) into a decl::ModuleType.
+/// Used for recursive module constraint signatures to populate the environment.
+fn translate_module_type_to_decl<'a>(
+    tctx: &mut TypeCheckContext<'a>,
+    env: &Env,
+    arena: &'a ParseArena,
+    mty: &crate::parser::ast::ModuleType,
+) -> TypeModResult<crate::types::decl::ModuleType> {
+    use crate::parser::ast::ModuleTypeDesc as PMtyDesc;
+    use crate::types::decl::{ModuleType as DeclMty, SignatureItem as SigItem, ValueDescription};
+
+    match &mty.pmty_desc {
+        PMtyDesc::Pmty_signature(sig_items) => {
+            let mut items = Vec::new();
+            for sig_item in sig_items {
+                match &sig_item.psig_desc {
+                    crate::parser::ast::SignatureItemDesc::Psig_value(vd) => {
+                        let val_name = arena.get_string(vd.pval_name.txt);
+                        let val_id = Ident::create_persistent(val_name);
+                        let (_typed_ct, val_type) = transl_type(tctx, env, &vd.pval_type)?;
+                        items.push(SigItem::SigValue(val_id, ValueDescription {
+                            val_type,
+                            val_kind: if vd.pval_prim.is_empty() {
+                                crate::types::decl::ValueKind::ValReg
+                            } else {
+                                crate::types::decl::ValueKind::ValPrim(
+                                    crate::types::decl::PrimitiveDescription {
+                                        prim_name: vd.pval_prim.first().map(|s| arena.get_string(*s).to_string()).unwrap_or_default(),
+                                        prim_arity: 1,
+                                        prim_native_name: String::new(),
+                                        prim_native_float: false,
+                                    }
+                                )
+                            },
+                            val_loc: crate::location::Location::none(),
+                            val_attributes: vec![],
+                            val_path: None,
+                        }));
+                    }
+                    crate::parser::ast::SignatureItemDesc::Psig_type(_rec, decls) => {
+                        for decl in decls {
+                            let type_name = arena.get_string(decl.ptype_name.txt);
+                            let type_id = Ident::create_persistent(type_name);
+                            // Create a minimal type declaration
+                            let type_decl = crate::types::TypeDeclaration {
+                                type_params: vec![],
+                                type_arity: decl.ptype_params.len() as i32,
+                                type_kind: crate::types::TypeKind::TypeAbstract,
+                                type_private: crate::types::PrivateFlag::Public,
+                                type_manifest: None,
+                                type_variance: vec![],
+                                type_newtype_level: None,
+                                type_loc: crate::location::Location::none(),
+                                type_attributes: vec![],
+                                type_immediate: false,
+                                type_unboxed: crate::types::UnboxedStatus::default(),
+                                type_inlined_types: vec![],
+                            };
+                            items.push(SigItem::SigType(
+                                type_id,
+                                type_decl,
+                                crate::types::decl::RecStatus::TrecNot,
+                            ));
+                        }
+                    }
+                    crate::parser::ast::SignatureItemDesc::Psig_module(md) => {
+                        let mod_name = arena.get_string(md.pmd_name.txt);
+                        let mod_id = Ident::create_persistent(mod_name);
+                        let inner_mty = translate_module_type_to_decl(tctx, env, arena, &md.pmd_type)?;
+                        items.push(SigItem::SigModule(
+                            mod_id,
+                            crate::types::decl::ModuleDeclaration {
+                                md_type: inner_mty,
+                                md_attributes: vec![],
+                                md_loc: crate::location::Location::none(),
+                            },
+                            crate::types::decl::RecStatus::TrecNot,
+                        ));
+                    }
+                    _ => {}
+                }
+            }
+            Ok(DeclMty::MtySignature(items))
+        }
+        PMtyDesc::Pmty_ident(lid) => {
+            // Module type identifier — try to look it up
+            let longident = arena.get_longident(lid.txt);
+            if let Some(mty) = lookup_module_type_by_lid(longident, arena, env, &mut tctx.persistent_env, tctx.type_ctx) {
+                Ok(mty)
+            } else {
+                Ok(DeclMty::MtySignature(vec![]))
+            }
+        }
+        _ => Ok(DeclMty::MtySignature(vec![])),
+    }
+}
+
 /// Extract a `decl::ModuleType` from a typed module expression (public wrapper).
 pub fn extract_module_type_from_mod_expr_pub(mod_expr: &ModuleExpr) -> Option<crate::types::decl::ModuleType> {
     extract_module_type_from_mod_expr(mod_expr)
@@ -1825,15 +1922,21 @@ fn type_structure_item<'a>(
 
         ParsedStructureItemDesc::Pstr_recmodule(mbs) => {
             // Recursive modules: module rec M = ...
-            // First pass: add placeholder module types to env so mutual references work
+            // First pass: extract module types from constraints and add to env
             let mut rec_env = env.clone();
             let mut mod_ids = Vec::new();
             for mb in mbs.iter() {
                 let mod_name_str = arena.get_string(mb.pmb_name.txt);
                 let mod_id = Ident::create_local(mod_name_str);
-                // Add empty signature placeholder for forward references
+                // Try to extract type from Pmod_constraint (module rec A: SIG = BODY)
+                let init_mod_type = match &mb.pmb_expr.pmod_desc {
+                    ParsedModuleExprDesc::Pmod_constraint(_, mty) => {
+                        translate_module_type_to_decl(tctx, env, arena, mty).ok()
+                    }
+                    _ => None,
+                }.unwrap_or(crate::types::decl::ModuleType::MtySignature(vec![]));
                 rec_env.add_module(mod_id.clone(), crate::types::decl::ModuleDeclaration {
-                    md_type: crate::types::decl::ModuleType::MtySignature(vec![]),
+                    md_type: init_mod_type,
                     md_attributes: vec![],
                     md_loc: crate::location::Location::none(),
                 });
