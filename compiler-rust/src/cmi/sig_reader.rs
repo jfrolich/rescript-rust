@@ -745,6 +745,19 @@ impl<'a> SigReadContext<'a> {
 /// 0: stamp: int
 /// 1: name: string
 /// 2: flags: int (mutable)
+/// Known predef type names that should be normalized to persistent idents.
+/// OCaml creates these with small stamps (1-999) via Ident.create, but
+/// Rust's initial_env uses persistent idents (stamp=0). Normalizing here
+/// ensures CMI types unify with initial_env types.
+fn is_predef_type_name(name: &str) -> bool {
+    matches!(name,
+        "int" | "char" | "float" | "bool" | "unit" | "exn" | "array" |
+        "list" | "option" | "nativeint" | "int32" | "int64" | "lazy_t" |
+        "bytes" | "string" | "ref" | "result" | "dict" | "promise" |
+        "unknown" | "bigint" | "symbol" | "regexp"
+    )
+}
+
 fn read_ident(value: &OcamlValue) -> Ident {
     let fields = &value.as_block().1;
     let stamp = fields[0].as_int() as i32;
@@ -759,6 +772,10 @@ fn read_ident(value: &OcamlValue) -> Ident {
         } else {
             id
         }
+    } else if stamp < 1000 && is_predef_type_name(name) {
+        // Predef type: OCaml uses small stamps, Rust uses persistent idents.
+        // Normalize to persistent so CMI types match initial_env types.
+        Ident::create_persistent(name)
     } else {
         Ident::new(name, stamp, crate::ident::IdentFlags::from_bits_truncate(flags))
     }
