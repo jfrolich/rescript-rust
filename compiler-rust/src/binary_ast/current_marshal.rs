@@ -14,15 +14,14 @@ use super::marshal::MarshalWriter;
 use super::serialize::Marshal;
 use crate::location::{Located, Location, Position};
 use crate::parser::ast::{
-    Arity, ArgLabel, Case, ClosedFlag, Constant, CoreType, CoreTypeDesc,
-    DirectionFlag, Expression, ExpressionDesc, ExpressionRecordField, ExtensionConstructor,
-    ExtensionConstructorKind, IncludeDeclaration, IncludeDescription, LabelDeclaration,
-    ModuleBinding, ModuleDeclaration, ModuleExpr, ModuleExprDesc, ModuleType,
-    ModuleTypeDeclaration, ModuleTypeDesc, MutableFlag, ObjectField, OpenDescription,
-    OverrideFlag, Pattern, PatternDesc, PatternRecordField, Payload, PrivateFlag, RecFlag,
-    RowField, SignatureItem, SignatureItemDesc, StructureItem, StructureItemDesc, TypeArg,
-    TypeDeclaration, TypeExtension, TypeKind, ValueBinding, ValueDescription, Variance,
-    WithConstraint, ConstructorArguments, ConstructorDeclaration,
+    ArgLabel, Arity, Case, ClosedFlag, Constant, ConstructorArguments, ConstructorDeclaration,
+    CoreType, CoreTypeDesc, DirectionFlag, Expression, ExpressionDesc, ExpressionRecordField,
+    ExtensionConstructor, ExtensionConstructorKind, IncludeDeclaration, IncludeDescription,
+    LabelDeclaration, ModuleBinding, ModuleDeclaration, ModuleExpr, ModuleExprDesc, ModuleType,
+    ModuleTypeDeclaration, ModuleTypeDesc, MutableFlag, ObjectField, OpenDescription, OverrideFlag,
+    Pattern, PatternDesc, PatternRecordField, Payload, PrivateFlag, RecFlag, RowField,
+    SignatureItem, SignatureItemDesc, StructureItem, StructureItemDesc, TypeArg, TypeDeclaration,
+    TypeExtension, TypeKind, ValueBinding, ValueDescription, Variance, WithConstraint,
 };
 use crate::parser::longident::Longident;
 
@@ -1161,7 +1160,10 @@ impl Marshal for SignatureItemDesc {
 
 // ========== JSX types ==========
 
-use crate::parser::ast::{JsxClosingTag, JsxContainerElement, JsxElement, JsxFragment, JsxProp, JsxTagName, JsxUnaryElement};
+use crate::parser::ast::{
+    JsxClosingTag, JsxContainerElement, JsxElement, JsxFragment, JsxProp, JsxTagName,
+    JsxUnaryElement,
+};
 
 impl Marshal for JsxElement {
     fn marshal(&self, w: &mut MarshalWriter) {
@@ -1255,7 +1257,11 @@ impl Marshal for JsxProp {
                 w.write_int(if *optional { 1 } else { 0 });
                 name.marshal(w);
             }
-            JsxProp::Value { name, optional, value } => {
+            JsxProp::Value {
+                name,
+                optional,
+                value,
+            } => {
                 w.write_block_header(1, 3);
                 name.marshal(w);
                 w.write_int(if *optional { 1 } else { 0 });

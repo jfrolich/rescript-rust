@@ -245,10 +245,7 @@ mod tests {
         let mut arena = ParseArena::default();
         let foo_idx = arena.intern_string("Foo");
         let bar_idx = arena.intern_string("bar");
-        let lid = Longident::Ldot(
-            Box::new(Longident::Lident(foo_idx)),
-            bar_idx,
-        );
+        let lid = Longident::Ldot(Box::new(Longident::Lident(foo_idx)), bar_idx);
 
         let mut w = MarshalWriter::new();
         w.set_arena(&arena);

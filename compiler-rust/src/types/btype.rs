@@ -15,8 +15,8 @@ use super::context::TypeContext;
 use super::decl::{ConstructorArguments, TypeKind};
 use super::path::Path;
 use super::type_expr::{
-    AbbrevMemoRef, GENERIC_LEVEL, LOWEST_LEVEL, PIVOT_LEVEL, RowDesc, RowField, TypeDesc,
-    TypeExprRef,
+    AbbrevMemoRef, RowDesc, RowField, TypeDesc, TypeExprRef, GENERIC_LEVEL, LOWEST_LEVEL,
+    PIVOT_LEVEL,
 };
 
 // ============================================================================

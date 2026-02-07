@@ -141,7 +141,11 @@ pub fn utf16_len(byte: u8) -> usize {
         ByteClass::Leading(n, _) => {
             // UTF-16 uses 2 code units for codepoints >= 0x10000 (4-byte UTF-8)
             // and 1 code unit for everything else
-            if n >= 3 { 2 } else { 1 }
+            if n >= 3 {
+                2
+            } else {
+                1
+            }
         }
         ByteClass::Cont(_) => 0, // Continuation bytes don't add to UTF-16 length
     }

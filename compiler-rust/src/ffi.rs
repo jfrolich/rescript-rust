@@ -31,8 +31,8 @@
 //! // OCaml side would deserialize using bincode
 //! ```
 
-use serde::{Deserialize, Serialize, de::DeserializeOwned};
-use std::ffi::{CStr, CString, c_char};
+use serde::{de::DeserializeOwned, Deserialize, Serialize};
+use std::ffi::{c_char, CStr, CString};
 use std::ptr;
 
 use crate::diagnostics::Diagnostic;

@@ -460,8 +460,7 @@ impl Doc {
                     }
                 }
                 Doc::Group { should_break, doc } => {
-                    if should_break.get()
-                        || !Self::fits(width - pos, &[(indent, Mode::Flat, doc)])
+                    if should_break.get() || !Self::fits(width - pos, &[(indent, Mode::Flat, doc)])
                     {
                         stack.push((indent, Mode::Break, doc));
                     } else {

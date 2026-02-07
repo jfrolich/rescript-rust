@@ -311,7 +311,13 @@ pub enum ExpressionDesc {
     /// While loop: while E1 do E2 done
     While(Box<Expression>, Box<Expression>),
     /// For loop: for i = E1 to/downto E2 do E3 done
-    For(Box<Pattern>, Box<Expression>, Box<Expression>, DirectionFlag, Box<Expression>),
+    For(
+        Box<Pattern>,
+        Box<Expression>,
+        Box<Expression>,
+        DirectionFlag,
+        Box<Expression>,
+    ),
     /// Type constraint: (E : T)
     Constraint(Box<Expression>, Box<CoreType>),
     /// Coercion: (E :> T)

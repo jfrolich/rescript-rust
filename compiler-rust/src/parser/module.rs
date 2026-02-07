@@ -6,11 +6,11 @@
 use std::cell::RefCell;
 
 use crate::location::Position;
-use crate::parse_arena::{LidentIdx, Located, LocIdx, ParseArena, PosIdx, StrIdx};
+use crate::parse_arena::{LidentIdx, LocIdx, Located, ParseArena, PosIdx, StrIdx};
 
 // Import Location as alias to LocIdx from ast
-use super::ast::*;
 use super::ast::Location;
+use super::ast::*;
 use super::core::{is_es6_arrow_functor, mknoloc, recover, with_loc};
 use super::diagnostics::DiagnosticCategory;
 use super::expr;
@@ -72,15 +72,17 @@ fn module_type_to_package(p: &mut Parser<'_>, mt: &ModuleType) -> PackageType {
                 .filter_map(|c| match c {
                     WithConstraint::Pwith_type(type_lid, type_decl) => {
                         // Extract the manifest type from the type declaration
-                        type_decl.ptype_manifest.as_ref().map(|manifest| {
-                            (type_lid.clone(), manifest.clone())
-                        })
+                        type_decl
+                            .ptype_manifest
+                            .as_ref()
+                            .map(|manifest| (type_lid.clone(), manifest.clone()))
                     }
                     WithConstraint::Pwith_typesubst(type_lid, type_decl) => {
                         // Type substitution also has a manifest
-                        type_decl.ptype_manifest.as_ref().map(|manifest| {
-                            (type_lid.clone(), manifest.clone())
-                        })
+                        type_decl
+                            .ptype_manifest
+                            .as_ref()
+                            .map(|manifest| (type_lid.clone(), manifest.clone()))
                     }
                     // Module constraints are not relevant for package types
                     _ => None,
@@ -171,7 +173,14 @@ pub fn parse_structure_item(p: &mut Parser<'_>) -> Option<StructureItem> {
                 RecFlag::Nonrecursive
             };
             // Pass start_pos_idx to enable position sharing with structure_item
-            let (bindings, _binding_loc_idx) = parse_let_bindings(p, start_pos_idx, let_end_pos, rec_flag, attrs.clone(), unwrap);
+            let (bindings, _binding_loc_idx) = parse_let_bindings(
+                p,
+                start_pos_idx,
+                let_end_pos,
+                rec_flag,
+                attrs.clone(),
+                unwrap,
+            );
             // Don't share LocIdx - OCaml creates separate Location objects for pstr_loc and pvb_loc.
             // The internal positions (PosIdx) are shared, but the Location records themselves are separate.
             Some(StructureItemDesc::Pstr_value(rec_flag, bindings))
@@ -232,7 +241,8 @@ pub fn parse_structure_item(p: &mut Parser<'_>) -> Option<StructureItem> {
                 } else {
                     RecFlag::Nonrecursive
                 };
-                let (decls, has_inline_types) = parse_type_declarations(p, attrs.clone(), type_start_idx);
+                let (decls, has_inline_types) =
+                    parse_type_declarations(p, attrs.clone(), type_start_idx);
                 // Inline record types require the type to be recursive
                 if has_inline_types {
                     rec_flag = RecFlag::Recursive;
@@ -508,7 +518,8 @@ pub fn parse_signature_item(p: &mut Parser<'_>) -> Option<SignatureItem> {
                 } else {
                     RecFlag::Nonrecursive
                 };
-                let (decls, has_inline_types) = parse_type_declarations(p, attrs.clone(), type_start_idx);
+                let (decls, has_inline_types) =
+                    parse_type_declarations(p, attrs.clone(), type_start_idx);
                 // Inline record types require the type to be recursive
                 if has_inline_types {
                     rec_flag = RecFlag::Recursive;
@@ -857,9 +868,7 @@ fn parse_primary_module_expr(p: &mut Parser<'_>) -> ModuleExpr {
                     // OCaml uses colon_start for the package type location start
                     let pkg_loc = p.mk_loc(&colon_pos, &p.loc_end(mod_type.pmty_loc));
                     let pkg_type = CoreType {
-                        ptyp_desc: CoreTypeDesc::Ptyp_package(
-                            module_type_to_package(p, &mod_type),
-                        ),
+                        ptyp_desc: CoreTypeDesc::Ptyp_package(module_type_to_package(p, &mod_type)),
                         ptyp_loc: pkg_loc,
                         ptyp_attributes: vec![],
                     };
@@ -867,10 +876,7 @@ fn parse_primary_module_expr(p: &mut Parser<'_>) -> ModuleExpr {
                     p.expect(Token::Rparen);
                     let constraint_loc = p.mk_loc_to_prev_end(&start_pos);
                     Expression {
-                        pexp_desc: ExpressionDesc::Pexp_constraint(
-                            Box::new(expr),
-                            pkg_type,
-                        ),
+                        pexp_desc: ExpressionDesc::Pexp_constraint(Box::new(expr), pkg_type),
                         pexp_loc: constraint_loc,
                         pexp_attributes: vec![],
                     }
@@ -1859,10 +1865,7 @@ fn parse_let_bindings(
         if unwrap {
             let unwrap_loc = p.mk_loc(&unwrap_attr_start, &unwrap_attr_end);
             let unwrap_idx = p.arena_mut().intern("let.unwrap");
-            attrs.push((
-                with_loc(unwrap_idx, unwrap_loc),
-                Payload::PStr(vec![]),
-            ));
+            attrs.push((with_loc(unwrap_idx, unwrap_loc), Payload::PStr(vec![])));
         }
 
         let pat = pattern::parse_pattern(p);
@@ -1886,18 +1889,24 @@ fn parse_let_bindings(
             let (final_typ, newtype_info) = match typ.ptyp_desc {
                 CoreTypeDesc::Ptyp_poly(vars, inner) if is_locally_abstract => {
                     // Build the set of variable names for substitution
-                    let var_set: std::collections::HashSet<String> =
-                        vars.iter().map(|v| p.arena().get_string(v.txt).to_string()).collect();
+                    let var_set: std::collections::HashSet<String> = vars
+                        .iter()
+                        .map(|v| p.arena().get_string(v.txt).to_string())
+                        .collect();
 
                     // The inner type (with Ptyp_constr) is used for Pexp_constraint
                     let inner_for_constraint = (*inner).clone();
 
                     // Substitute Ptyp_constr -> Ptyp_var for the Ptyp_poly body
-                    let substituted_inner = typ::substitute_type_vars(p.arena(), (*inner).clone(), &var_set);
+                    let substituted_inner =
+                        typ::substitute_type_vars(p.arena(), (*inner).clone(), &var_set);
 
                     // Rebuild the Ptyp_poly with the substituted body
                     let substituted_typ = CoreType {
-                        ptyp_desc: CoreTypeDesc::Ptyp_poly(vars.clone(), Box::new(substituted_inner)),
+                        ptyp_desc: CoreTypeDesc::Ptyp_poly(
+                            vars.clone(),
+                            Box::new(substituted_inner),
+                        ),
                         ptyp_loc: typ.ptyp_loc,
                         ptyp_attributes: typ.ptyp_attributes,
                     };
@@ -2002,13 +2011,29 @@ fn parse_let_bindings(
             // Look ahead to see if attributes/doc comments are followed by And
             let has_and_after = p.lookahead(|state| {
                 // Skip attributes and doc comments
-                while matches!(state.token, Token::At | Token::AtAt | Token::DocComment { .. }) {
+                while matches!(
+                    state.token,
+                    Token::At | Token::AtAt | Token::DocComment { .. }
+                ) {
                     if matches!(state.token, Token::DocComment { .. }) {
                         state.next();
                     } else {
                         state.next(); // @
-                        // Skip the attribute identifier and any payload
-                        while !matches!(state.token, Token::At | Token::AtAt | Token::DocComment { .. } | Token::And | Token::Eof | Token::Let { .. } | Token::Typ | Token::Module | Token::External | Token::Open | Token::Include) {
+                                      // Skip the attribute identifier and any payload
+                        while !matches!(
+                            state.token,
+                            Token::At
+                                | Token::AtAt
+                                | Token::DocComment { .. }
+                                | Token::And
+                                | Token::Eof
+                                | Token::Let { .. }
+                                | Token::Typ
+                                | Token::Module
+                                | Token::External
+                                | Token::Open
+                                | Token::Include
+                        ) {
                             state.next();
                         }
                     }
@@ -2060,17 +2085,16 @@ fn parse_type_declarations(
     loop {
         // Create context for this declaration
         let inline_ctx = RefCell::new(InlineTypesContext::new(vec![], Location::none()));
-        if let Some(decl) = parse_type_declaration_with_context(p, next_attrs, &inline_ctx, decl_start_idx) {
+        if let Some(decl) =
+            parse_type_declaration_with_context(p, next_attrs, &inline_ctx, decl_start_idx)
+        {
             // Collect inline types from the context
             let ctx = inline_ctx.borrow();
             if !ctx.found_inline_types.is_empty() {
                 has_inline_types = true;
                 // Create type declarations for inline types with @res.inlineRecordDefinition attribute
                 let inline_str_idx = p.arena_mut().intern("res.inlineRecordDefinition");
-                let inline_attr: Attribute = (
-                    mknoloc(inline_str_idx),
-                    Payload::PStr(vec![]),
-                );
+                let inline_attr: Attribute = (mknoloc(inline_str_idx), Payload::PStr(vec![]));
                 for (inline_name_idx, loc, type_kind) in ctx.found_inline_types.iter() {
                     // OCaml uses the outer type's name location for inline type ptype_name,
                     // not the inline type's location
@@ -2100,13 +2124,29 @@ fn parse_type_declarations(
             // Look ahead to see if attributes/doc comments are followed by And
             let has_and_after = p.lookahead(|state| {
                 // Skip attributes and doc comments
-                while matches!(state.token, Token::At | Token::AtAt | Token::DocComment { .. }) {
+                while matches!(
+                    state.token,
+                    Token::At | Token::AtAt | Token::DocComment { .. }
+                ) {
                     if matches!(state.token, Token::DocComment { .. }) {
                         state.next();
                     } else {
                         state.next(); // @
-                        // Skip the attribute identifier and any payload
-                        while !matches!(state.token, Token::At | Token::AtAt | Token::DocComment { .. } | Token::And | Token::Eof | Token::Let { .. } | Token::Typ | Token::Module | Token::External | Token::Open | Token::Include) {
+                                      // Skip the attribute identifier and any payload
+                        while !matches!(
+                            state.token,
+                            Token::At
+                                | Token::AtAt
+                                | Token::DocComment { .. }
+                                | Token::And
+                                | Token::Eof
+                                | Token::Let { .. }
+                                | Token::Typ
+                                | Token::Module
+                                | Token::External
+                                | Token::Open
+                                | Token::Include
+                        ) {
                             state.next();
                         }
                     }
@@ -2297,7 +2337,8 @@ fn parse_type_declaration_with_context(
                 while state.token == Token::At {
                     state.next();
                     // Skip attribute id segments (possibly dotted)
-                    if matches!(state.token, Token::Lident(_) | Token::Uident(_)) || state.token.is_keyword()
+                    if matches!(state.token, Token::Lident(_) | Token::Uident(_))
+                        || state.token.is_keyword()
                     {
                         state.next();
                         while state.token == Token::Dot {
@@ -2428,7 +2469,7 @@ fn parse_type_declaration_with_context(
                     // OCaml uses ghost location for this specific case
                     let is_spread_first = p.lookahead(|state| {
                         state.next(); // consume {
-                        // Check if first token is DotDotDot (not Dot or DotDot)
+                                      // Check if first token is DotDotDot (not Dot or DotDot)
                         state.token == Token::DotDotDot
                     });
                     let typ = typ::parse_typ_expr(p);
@@ -2460,8 +2501,10 @@ fn parse_type_declaration_with_context(
                             state.next();
                         } else {
                             state.next(); // @
-                            // Skip attribute name (may be dotted like res.doc)
-                            while matches!(state.token, Token::Lident(_) | Token::Uident(_)) || state.token.is_keyword() {
+                                          // Skip attribute name (may be dotted like res.doc)
+                            while matches!(state.token, Token::Lident(_) | Token::Uident(_))
+                                || state.token.is_keyword()
+                            {
                                 state.next();
                                 if state.token == Token::Dot {
                                     state.next();
@@ -2521,7 +2564,11 @@ fn parse_type_declaration_with_context(
                                 typ.ptyp_attributes = attrs;
                                 manifest = Some(typ);
                             } else {
-                                kind = parse_type_kind(p, Some(inline_ctx), Some(&current_type_name_path));
+                                kind = parse_type_kind(
+                                    p,
+                                    Some(inline_ctx),
+                                    Some(&current_type_name_path),
+                                );
                             }
                         }
                     }
@@ -2553,8 +2600,12 @@ fn parse_type_declaration_with_context(
 
             kind = match &p.token {
                 Token::Bar => parse_type_kind(p, None, None),
-                Token::Lbrace => parse_type_kind(p, Some(inline_ctx), Some(&current_type_name_path)),
-                Token::Uident(_) => TypeKind::Ptype_variant(parse_constructors_without_leading_bar(p)),
+                Token::Lbrace => {
+                    parse_type_kind(p, Some(inline_ctx), Some(&current_type_name_path))
+                }
+                Token::Uident(_) => {
+                    TypeKind::Ptype_variant(parse_constructors_without_leading_bar(p))
+                }
                 Token::DotDot => {
                     p.next();
                     TypeKind::Ptype_open
@@ -2629,7 +2680,11 @@ fn parse_type_declaration_with_context(
 /// Also propagates ghost loc_start to alias wrappers.
 ///
 /// Returns the fixed type and whether the fix was applied.
-fn fix_spread_first_object_manifest(p: &mut Parser<'_>, typ: CoreType, is_spread_first: bool) -> (CoreType, bool) {
+fn fix_spread_first_object_manifest(
+    p: &mut Parser<'_>,
+    typ: CoreType,
+    is_spread_first: bool,
+) -> (CoreType, bool) {
     if !is_spread_first {
         return (typ, false);
     }
@@ -2638,12 +2693,17 @@ fn fix_spread_first_object_manifest(p: &mut Parser<'_>, typ: CoreType, is_spread
         CoreTypeDesc::Ptyp_object(ref fields, closed) => {
             // Only for CLOSED objects where first field is Oinherit (spread)
             // Open objects (from {.. ...spread}) should NOT use ghost location
-            let first_is_spread = fields.first().map_or(false, |f| matches!(f, ObjectField::Oinherit(_)));
+            let first_is_spread = fields
+                .first()
+                .map_or(false, |f| matches!(f, ObjectField::Oinherit(_)));
             if first_is_spread && closed == ClosedFlag::Closed {
-                (CoreType {
-                    ptyp_loc: Location::none(),
-                    ..typ
-                }, true)
+                (
+                    CoreType {
+                        ptyp_loc: Location::none(),
+                        ..typ
+                    },
+                    true,
+                )
             } else {
                 (typ, false)
             }
@@ -2655,16 +2715,22 @@ fn fix_spread_first_object_manifest(p: &mut Parser<'_>, typ: CoreType, is_spread
                 // OCaml uses inner type's loc_start for alias, so if inner is ghost, alias start is ghost too
                 // Create a spanning location from fixed_inner start to typ end
                 let new_loc = p.mk_loc_spanning(fixed_inner.ptyp_loc, typ.ptyp_loc);
-                (CoreType {
-                    ptyp_desc: CoreTypeDesc::Ptyp_alias(Box::new(fixed_inner), alias),
-                    ptyp_loc: new_loc,
-                    ptyp_attributes: typ.ptyp_attributes,
-                }, true)
+                (
+                    CoreType {
+                        ptyp_desc: CoreTypeDesc::Ptyp_alias(Box::new(fixed_inner), alias),
+                        ptyp_loc: new_loc,
+                        ptyp_attributes: typ.ptyp_attributes,
+                    },
+                    true,
+                )
             } else {
-                (CoreType {
-                    ptyp_desc: CoreTypeDesc::Ptyp_alias(Box::new(fixed_inner), alias),
-                    ..typ
-                }, false)
+                (
+                    CoreType {
+                        ptyp_desc: CoreTypeDesc::Ptyp_alias(Box::new(fixed_inner), alias),
+                        ..typ
+                    },
+                    false,
+                )
             }
         }
         CoreTypeDesc::Ptyp_arrow { arg, ret, arity } => {
@@ -2674,14 +2740,17 @@ fn fix_spread_first_object_manifest(p: &mut Parser<'_>, typ: CoreType, is_spread
                 typ: fixed_arg_typ,
                 ..*arg
             };
-            (CoreType {
-                ptyp_desc: CoreTypeDesc::Ptyp_arrow {
-                    arg: Box::new(fixed_arg),
-                    ret,
-                    arity,
+            (
+                CoreType {
+                    ptyp_desc: CoreTypeDesc::Ptyp_arrow {
+                        arg: Box::new(fixed_arg),
+                        ret,
+                        arity,
+                    },
+                    ..typ
                 },
-                ..typ
-            }, false)
+                false,
+            )
         }
         _ => (typ, false),
     }
@@ -2933,7 +3002,10 @@ fn parse_type_params_angle(p: &mut Parser<'_>) -> Vec<(CoreType, Variance)> {
 
 /// Parse old OCaml-style type parameters: ('a, 'b)
 /// This is for error recovery - ReScript requires angle brackets.
-fn parse_type_params_old_style(p: &mut Parser<'_>, _type_name: StrIdx) -> Vec<(CoreType, Variance)> {
+fn parse_type_params_old_style(
+    p: &mut Parser<'_>,
+    _type_name: StrIdx,
+) -> Vec<(CoreType, Variance)> {
     let mut params = vec![];
 
     if p.token != Token::Lparen {
@@ -2989,7 +3061,11 @@ fn parse_type_params_old_style(p: &mut Parser<'_>, _type_name: StrIdx) -> Vec<(C
 }
 
 /// Format a type with angle bracket syntax for error suggestions.
-fn format_type_with_angle_brackets(arena: &ParseArena, name: StrIdx, params: &[(CoreType, Variance)]) -> String {
+fn format_type_with_angle_brackets(
+    arena: &ParseArena,
+    name: StrIdx,
+    params: &[(CoreType, Variance)],
+) -> String {
     let name_str = arena.get_string(name);
     if params.is_empty() {
         name_str.to_string()
@@ -3021,7 +3097,8 @@ fn parse_type_kind(
             // Record type - capture { position for first field's location (OCaml extends first spread field's loc to {)
             let lbrace_pos = p.start_pos.clone();
             p.next();
-            let labels = parse_label_declarations(p, inline_ctx, current_type_name_path, Some(lbrace_pos));
+            let labels =
+                parse_label_declarations(p, inline_ctx, current_type_name_path, Some(lbrace_pos));
             p.expect(Token::Rbrace);
             TypeKind::Ptype_record(labels)
         }
@@ -3082,7 +3159,10 @@ fn parse_constructor(p: &mut Parser<'_>) -> Option<ConstructorDeclaration> {
 }
 
 /// Implementation of constructor parsing with a given start position.
-fn parse_constructor_impl(p: &mut Parser<'_>, start_pos: Position) -> Option<ConstructorDeclaration> {
+fn parse_constructor_impl(
+    p: &mut Parser<'_>,
+    start_pos: Position,
+) -> Option<ConstructorDeclaration> {
     let attrs = parse_attributes(p);
 
     // Check for spread syntax: ...typeName
@@ -3127,7 +3207,7 @@ fn parse_constructor_impl(p: &mut Parser<'_>, start_pos: Position) -> Option<Con
         let is_inline_record = p.token == Token::Lbrace
             && p.lookahead(|state| {
                 state.next(); // consume {
-                // Skip any leading attributes
+                              // Skip any leading attributes
                 while state.token == Token::At {
                     state.next();
                     // Skip attribute id and any payload
@@ -3182,10 +3262,13 @@ fn parse_constructor_impl(p: &mut Parser<'_>, start_pos: Position) -> Option<Con
                     // Check if this is an object type (has ., .., ..., or string keys)
                     let is_object = p.lookahead(|state| {
                         state.next(); // consume {
-                        // Skip any leading attributes
+                                      // Skip any leading attributes
                         while state.token == Token::At {
                             state.next();
-                            if matches!(state.token, Token::Lident(_) | Token::Uident(_) | Token::Module) {
+                            if matches!(
+                                state.token,
+                                Token::Lident(_) | Token::Uident(_) | Token::Module
+                            ) {
                                 state.next();
                             }
                             if state.token == Token::Lparen {
@@ -3203,7 +3286,11 @@ fn parse_constructor_impl(p: &mut Parser<'_>, start_pos: Position) -> Option<Con
                         }
                         matches!(
                             state.token,
-                            Token::String(_) | Token::Dot | Token::DotDot | Token::DotDotDot | Token::Rbrace
+                            Token::String(_)
+                                | Token::Dot
+                                | Token::DotDot
+                                | Token::DotDotDot
+                                | Token::Rbrace
                         )
                     });
                     if is_object {
@@ -3374,10 +3461,7 @@ fn parse_label_declaration(
         // The type is a simple type constructor with the field name
         let lid_idx = p.push_lident_from_idx(name.txt);
         CoreType {
-            ptyp_desc: CoreTypeDesc::Ptyp_constr(
-                with_loc(lid_idx, name.loc.clone()),
-                vec![],
-            ),
+            ptyp_desc: CoreTypeDesc::Ptyp_constr(with_loc(lid_idx, name.loc.clone()), vec![]),
             ptyp_loc: name.loc.clone(),
             ptyp_attributes: vec![],
         }
@@ -3385,15 +3469,19 @@ fn parse_label_declaration(
         // Check if this looks like a record (starts with Lident, Mutable, At, or DotDotDot)
         let looks_like_record = p.lookahead(|state| {
             state.next(); // Skip {
-            // Skip leading attributes
+                          // Skip leading attributes
             while state.token == Token::At {
                 state.next();
                 // Skip attribute identifier
-                if matches!(state.token, Token::Lident(_) | Token::Uident(_)) || state.token.is_keyword() {
+                if matches!(state.token, Token::Lident(_) | Token::Uident(_))
+                    || state.token.is_keyword()
+                {
                     state.next();
                     while state.token == Token::Dot {
                         state.next();
-                        if matches!(state.token, Token::Lident(_) | Token::Uident(_)) || state.token.is_keyword() {
+                        if matches!(state.token, Token::Lident(_) | Token::Uident(_))
+                            || state.token.is_keyword()
+                        {
                             state.next();
                         } else {
                             break;
@@ -3427,7 +3515,12 @@ fn parse_label_declaration(
             p.next(); // consume {
             let inline_ctx = inline_ctx.unwrap();
             let extended_path = extended_path.as_ref().unwrap();
-            let labels = parse_label_declarations(p, Some(inline_ctx), Some(extended_path), Some(type_start_pos.clone()));
+            let labels = parse_label_declarations(
+                p,
+                Some(inline_ctx),
+                Some(extended_path),
+                Some(type_start_pos.clone()),
+            );
             p.expect(Token::Rbrace);
             let type_loc = p.mk_loc_to_prev_end(&type_start_pos);
 
@@ -3440,11 +3533,14 @@ fn parse_label_declaration(
             let inline_type_idx = p.arena_mut().push_string(inline_type_name.to_string());
 
             // Register this inline type (insert at front for correct order)
-            inline_ctx.borrow_mut().found_inline_types.insert(0, (
-                inline_type_idx,
-                type_loc.clone(),
-                TypeKind::Ptype_record(labels),
-            ));
+            inline_ctx.borrow_mut().found_inline_types.insert(
+                0,
+                (
+                    inline_type_idx,
+                    type_loc.clone(),
+                    TypeKind::Ptype_record(labels),
+                ),
+            );
 
             // Return a Ptyp_constr pointing to the inline type
             let params = inline_ctx.borrow().params.clone();
@@ -3587,7 +3683,11 @@ pub fn parse_extension_constructor(
 
 /// Parse a module definition.
 /// `module_start` should be the position BEFORE 'module' was consumed.
-fn parse_module_definition(p: &mut Parser<'_>, module_start: Position, attrs: Attributes) -> Option<StructureItemDesc> {
+fn parse_module_definition(
+    p: &mut Parser<'_>,
+    module_start: Position,
+    attrs: Attributes,
+) -> Option<StructureItemDesc> {
     // Check for module type
     if p.token == Token::Typ {
         p.next();
@@ -3614,7 +3714,10 @@ fn parse_module_definition(p: &mut Parser<'_>, module_start: Position, attrs: At
 
     let mut bindings = vec![];
 
-    let parse_binding = |p: &mut Parser<'_>, binding_start: Position, attrs: Attributes| -> Option<ModuleBinding> {
+    let parse_binding = |p: &mut Parser<'_>,
+                         binding_start: Position,
+                         attrs: Attributes|
+     -> Option<ModuleBinding> {
         let name = match &p.token {
             Token::Uident(n) => {
                 let n = n.clone();
@@ -3646,10 +3749,7 @@ fn parse_module_definition(p: &mut Parser<'_>, module_start: Position, attrs: At
             // Location spans from module type start to module expr end
             let loc = p.mk_loc_spanning(mod_type.pmty_loc, mod_expr.pmod_loc);
             mod_expr = ModuleExpr {
-                pmod_desc: ModuleExprDesc::Pmod_constraint(
-                    Box::new(mod_expr),
-                    Box::new(mod_type),
-                ),
+                pmod_desc: ModuleExprDesc::Pmod_constraint(Box::new(mod_expr), Box::new(mod_type)),
                 pmod_loc: loc,
                 pmod_attributes: vec![],
             };
@@ -3684,13 +3784,29 @@ fn parse_module_definition(p: &mut Parser<'_>, module_start: Position, attrs: At
             // Look ahead to see if attributes/doc comments are followed by And
             let has_and_after = p.lookahead(|state| {
                 // Skip attributes and doc comments
-                while matches!(state.token, Token::At | Token::AtAt | Token::DocComment { .. }) {
+                while matches!(
+                    state.token,
+                    Token::At | Token::AtAt | Token::DocComment { .. }
+                ) {
                     if matches!(state.token, Token::DocComment { .. }) {
                         state.next();
                     } else {
                         state.next(); // @
-                        // Skip the attribute identifier and any payload
-                        while !matches!(state.token, Token::At | Token::AtAt | Token::DocComment { .. } | Token::And | Token::Eof | Token::Let { .. } | Token::Typ | Token::Module | Token::External | Token::Open | Token::Include) {
+                                      // Skip the attribute identifier and any payload
+                        while !matches!(
+                            state.token,
+                            Token::At
+                                | Token::AtAt
+                                | Token::DocComment { .. }
+                                | Token::And
+                                | Token::Eof
+                                | Token::Let { .. }
+                                | Token::Typ
+                                | Token::Module
+                                | Token::External
+                                | Token::Open
+                                | Token::Include
+                        ) {
                             state.next();
                         }
                     }
@@ -3727,7 +3843,11 @@ fn parse_module_definition(p: &mut Parser<'_>, module_start: Position, attrs: At
 /// Parse a module declaration.
 /// If `start_pos` is Some, use it for the location (for recursive modules where it includes 'module rec' or 'and').
 /// If `start_pos` is None, capture it at the current position (for non-recursive modules where loc starts at name).
-fn parse_module_declaration(p: &mut Parser<'_>, outer_attrs: Attributes, start_pos: Option<Position>) -> ModuleDeclaration {
+fn parse_module_declaration(
+    p: &mut Parser<'_>,
+    outer_attrs: Attributes,
+    start_pos: Option<Position>,
+) -> ModuleDeclaration {
     let start_pos = start_pos.unwrap_or_else(|| p.start_pos.clone());
     let inner_attrs = parse_attributes(p);
     // Merge outer (signature item level) attrs with inner (name level) attrs
@@ -3811,7 +3931,11 @@ fn parse_attributes_and_binding(p: &mut Parser<'_>) -> Attributes {
 /// Parse recursive module declarations (for signature).
 /// Parse recursive module declarations (for signature).
 /// `start_pos` is the position before `module rec`, captured by the caller.
-fn parse_rec_module_declarations(p: &mut Parser<'_>, outer_attrs: Attributes, start_pos: Position) -> Vec<ModuleDeclaration> {
+fn parse_rec_module_declarations(
+    p: &mut Parser<'_>,
+    outer_attrs: Attributes,
+    start_pos: Position,
+) -> Vec<ModuleDeclaration> {
     let mut decls = vec![];
 
     // Parse first declaration (gets the outer attrs and start_pos from caller)
@@ -3839,7 +3963,11 @@ fn parse_rec_module_declarations(p: &mut Parser<'_>, outer_attrs: Attributes, st
 /// Parse a module type declaration.
 /// `in_structure` indicates whether this is in a structure (.res) or signature (.resi).
 /// In structure context, OCaml passes ~loc, in signature context it doesn't (uses Location.none).
-fn parse_module_type_declaration(p: &mut Parser<'_>, outer_attrs: Attributes, in_structure: bool) -> ModuleTypeDeclaration {
+fn parse_module_type_declaration(
+    p: &mut Parser<'_>,
+    outer_attrs: Attributes,
+    in_structure: bool,
+) -> ModuleTypeDeclaration {
     let name_start = p.start_pos.clone();
     let inner_attrs = parse_attributes(p);
     // Merge outer (signature item level) attrs with inner (name level) attrs
@@ -3901,7 +4029,11 @@ fn parse_attributes(p: &mut Parser<'_>) -> Attributes {
                 let content = content.clone();
                 p.next();
                 let loc = p.from_location(&loc_cloned);
-                attrs.push(super::core::doc_comment_to_attribute(p.arena_mut(), loc, content));
+                attrs.push(super::core::doc_comment_to_attribute(
+                    p.arena_mut(),
+                    loc,
+                    content,
+                ));
             }
             _ => break,
         }

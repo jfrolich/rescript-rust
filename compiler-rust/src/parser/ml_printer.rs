@@ -6,10 +6,10 @@
 
 use std::io::Write;
 
-use crate::parse_arena::{LidentIdx, Located, ParseArena, StrIdx};
 use super::ast::*;
 use super::formatter::{BoxKind, Formatter};
 use super::longident::Longident;
+use crate::parse_arena::{LidentIdx, Located, ParseArena, StrIdx};
 
 // ============================================================================
 // Helper functions
@@ -86,8 +86,9 @@ fn is_cons_pattern(p: &Pattern, arena: &ParseArena) -> bool {
 
 /// Check if a string represents an infix operator
 fn is_infix_operator(name: &str) -> bool {
-    const INFIX_SPECIALS: &[&str] =
-        &[":=", "!=", "::", "mod", "land", "lor", "lxor", "lsl", "lsr", "asr", "or"];
+    const INFIX_SPECIALS: &[&str] = &[
+        ":=", "!=", "::", "mod", "land", "lor", "lxor", "lsl", "lsr", "asr", "or",
+    ];
     if INFIX_SPECIALS.contains(&name) {
         return true;
     }
@@ -172,7 +173,8 @@ fn is_prefix_application(expr: &Expression, arena: &ParseArena) -> bool {
 /// Check if a function application has labeled arguments
 fn application_has_labeled_args(expr: &Expression) -> bool {
     if let ExpressionDesc::Pexp_apply { args, .. } = &expr.pexp_desc {
-        args.iter().any(|(label, _)| !matches!(label, ArgLabel::Nolabel))
+        args.iter()
+            .any(|(label, _)| !matches!(label, ArgLabel::Nolabel))
     } else {
         false
     }
@@ -240,7 +242,10 @@ fn is_internal_attribute(name: &str) -> bool {
 }
 
 /// Filter attributes to only include ones that should be printed
-fn printable_attributes<'a>(arena: &ParseArena, attrs: &'a [(Located<StrIdx>, Payload)]) -> Vec<&'a (Located<StrIdx>, Payload)> {
+fn printable_attributes<'a>(
+    arena: &ParseArena,
+    attrs: &'a [(Located<StrIdx>, Payload)],
+) -> Vec<&'a (Located<StrIdx>, Payload)> {
     attrs
         .iter()
         .filter(|(name, _)| !is_internal_attribute(arena.get_string(name.txt)))
@@ -253,7 +258,10 @@ fn has_attribute(arena: &ParseArena, attrs: &[(Located<StrIdx>, Payload)], name:
 }
 
 /// Collect list elements from a cons pattern
-fn collect_list_elements<'a>(expr: &'a Expression, arena: &ParseArena) -> (Vec<&'a Expression>, bool) {
+fn collect_list_elements<'a>(
+    expr: &'a Expression,
+    arena: &ParseArena,
+) -> (Vec<&'a Expression>, bool) {
     let mut elements = Vec::new();
     let mut current = expr;
 
@@ -493,7 +501,12 @@ fn print_structure_item<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, item
 // Value bindings
 // ============================================================================
 
-fn print_value_binding<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, pat: &Pattern, expr: &Expression) {
+fn print_value_binding<W: Write>(
+    f: &mut Formatter<W>,
+    arena: &ParseArena,
+    pat: &Pattern,
+    expr: &Expression,
+) {
     if !expr.pexp_attributes.is_empty() {
         print_pattern(f, arena, pat);
         f.string(" =");
@@ -677,7 +690,11 @@ fn print_expression<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, expr: &E
     }
 }
 
-fn print_expression_no_outer_parens<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, expr: &Expression) {
+fn print_expression_no_outer_parens<W: Write>(
+    f: &mut Formatter<W>,
+    arena: &ParseArena,
+    expr: &Expression,
+) {
     let attrs = printable_attributes(arena, &expr.pexp_attributes);
     let has_attrs = !attrs.is_empty();
 
@@ -720,7 +737,11 @@ fn print_expression_simple<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, e
     }
 }
 
-fn print_expression_semi_context<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, expr: &Expression) {
+fn print_expression_semi_context<W: Write>(
+    f: &mut Formatter<W>,
+    arena: &ParseArena,
+    expr: &Expression,
+) {
     let attrs = printable_attributes(arena, &expr.pexp_attributes);
     let has_attrs = !attrs.is_empty();
     let needs_semi_parens = needs_parens_in_semi_context(expr);
@@ -754,7 +775,11 @@ fn print_expression_semi_context<W: Write>(f: &mut Formatter<W>, arena: &ParseAr
     }
 }
 
-fn print_expression_list_context<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, expr: &Expression) {
+fn print_expression_list_context<W: Write>(
+    f: &mut Formatter<W>,
+    arena: &ParseArena,
+    expr: &Expression,
+) {
     let attrs = printable_attributes(arena, &expr.pexp_attributes);
     let has_attrs = !attrs.is_empty();
     let needs_semi_parens = needs_parens_in_semi_context(expr);
@@ -782,7 +807,11 @@ fn print_expression_list_context<W: Write>(f: &mut Formatter<W>, arena: &ParseAr
     }
 }
 
-fn print_expression_parens_if_complex<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, expr: &Expression) {
+fn print_expression_parens_if_complex<W: Write>(
+    f: &mut Formatter<W>,
+    arena: &ParseArena,
+    expr: &Expression,
+) {
     let attrs = printable_attributes(arena, &expr.pexp_attributes);
     let has_attrs = !attrs.is_empty();
     let needs_parens = needs_parens_as_function_arg(expr, arena);
@@ -858,7 +887,12 @@ fn print_fun_body<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, expr: &Exp
     }
 }
 
-fn print_expression_inner<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, expr: &Expression, use_parens: bool) {
+fn print_expression_inner<W: Write>(
+    f: &mut Formatter<W>,
+    arena: &ParseArena,
+    expr: &Expression,
+    use_parens: bool,
+) {
     match &expr.pexp_desc {
         ExpressionDesc::Pexp_ident(lid) => {
             // OCaml wraps operators in parens when used as values
@@ -926,7 +960,11 @@ fn print_expression_inner<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, ex
                 Arity::Full(n) => Some(*n),
                 Arity::Unknown => {
                     let computed = count_function_arity(expr);
-                    if computed > 0 { Some(computed) } else { None }
+                    if computed > 0 {
+                        Some(computed)
+                    } else {
+                        None
+                    }
                 }
             };
             if use_parens {
@@ -955,7 +993,12 @@ fn print_expression_inner<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, ex
                 f.string(")");
             }
         }
-        ExpressionDesc::Pexp_apply { funct, args, partial, .. } => {
+        ExpressionDesc::Pexp_apply {
+            funct,
+            args,
+            partial,
+            ..
+        } => {
             // Array access with @res.array.access
             if has_attribute(arena, &expr.pexp_attributes, "res.array.access") && args.len() == 2 {
                 let (_, arr) = &args[0];
@@ -1515,7 +1558,8 @@ fn print_pattern_inner<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, pat: 
                         if let PatternDesc::Ppat_tuple(elements) = &a.ppat_desc {
                             if elements.len() == 2 {
                                 // Left element needs parens if it's an alias or constraint
-                                let left_needs_parens = pattern_needs_parens_as_param(&elements[0], arena);
+                                let left_needs_parens =
+                                    pattern_needs_parens_as_param(&elements[0], arena);
                                 if left_needs_parens {
                                     f.string("(");
                                 }
@@ -1526,10 +1570,8 @@ fn print_pattern_inner<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, pat: 
                                 f.string("::");
                                 // Right element needs parens if it's an alias (so it doesn't
                                 // look like `(x::xs) as tail`)
-                                let right_needs_parens = matches!(
-                                    &elements[1].ppat_desc,
-                                    PatternDesc::Ppat_alias(..)
-                                );
+                                let right_needs_parens =
+                                    matches!(&elements[1].ppat_desc, PatternDesc::Ppat_alias(..));
                                 if right_needs_parens {
                                     f.string("(");
                                 }
@@ -1830,7 +1872,7 @@ fn print_core_type_inner<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, typ
                 match (closed, &labels) {
                     (ClosedFlag::Closed, None) => f.string(" "), // Just break
                     (ClosedFlag::Closed, Some(_)) => f.string("< "), // < + break
-                    (ClosedFlag::Open, _) => f.string("> "), // > + break
+                    (ClosedFlag::Open, _) => f.string("> "),     // > + break
                 }
 
                 for (i, row) in rows.iter().enumerate() {
@@ -1953,7 +1995,12 @@ fn print_arg_label_expr<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, labe
     }
 }
 
-fn print_arg_with_label<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, label: &ArgLabel, arg: &Expression) {
+fn print_arg_with_label<W: Write>(
+    f: &mut Formatter<W>,
+    arena: &ParseArena,
+    label: &ArgLabel,
+    arg: &Expression,
+) {
     match label {
         ArgLabel::Labelled(name) => {
             let name_str = arena.get_string(name.txt);
@@ -2139,7 +2186,11 @@ fn print_payload<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, payload: &P
 // Type declarations
 // ============================================================================
 
-fn print_type_declaration<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, decl: &TypeDeclaration) {
+fn print_type_declaration<W: Write>(
+    f: &mut Formatter<W>,
+    arena: &ParseArena,
+    decl: &TypeDeclaration,
+) {
     if !decl.ptype_params.is_empty() {
         if decl.ptype_params.len() == 1 {
             print_core_type(f, arena, &decl.ptype_params[0].0);
@@ -2249,7 +2300,11 @@ fn print_type_declaration<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, de
     print_item_attributes(f, arena, &decl.ptype_attributes);
 }
 
-fn print_extension_constructor<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, ext: &ExtensionConstructor) {
+fn print_extension_constructor<W: Write>(
+    f: &mut Formatter<W>,
+    arena: &ParseArena,
+    ext: &ExtensionConstructor,
+) {
     f.string(arena.get_string(ext.pext_name.txt));
     match &ext.pext_kind {
         ExtensionConstructorKind::Pext_decl(args, res) => {
@@ -2603,7 +2658,11 @@ fn print_signature_item<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, item
     }
 }
 
-fn print_item_attributes<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, attrs: &[(Located<StrIdx>, Payload)]) {
+fn print_item_attributes<W: Write>(
+    f: &mut Formatter<W>,
+    arena: &ParseArena,
+    attrs: &[(Located<StrIdx>, Payload)],
+) {
     let attrs = printable_attributes(arena, attrs);
     for (name, payload) in attrs {
         f.string("[@@");
@@ -2619,7 +2678,11 @@ fn print_item_attributes<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, att
 }
 
 /// Print attributes with single @ (for expressions, types, patterns)
-fn print_attributes<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, attrs: &[(Located<StrIdx>, Payload)]) {
+fn print_attributes<W: Write>(
+    f: &mut Formatter<W>,
+    arena: &ParseArena,
+    attrs: &[(Located<StrIdx>, Payload)],
+) {
     let attrs = printable_attributes(arena, attrs);
     for (name, payload) in attrs {
         f.string("[@");

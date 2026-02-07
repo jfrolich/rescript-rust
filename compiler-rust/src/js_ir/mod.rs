@@ -19,7 +19,7 @@ pub mod printer;
 use crate::ident::Ident;
 use crate::lambda::tag_info::TagInfo;
 pub use op::{BinOp, IdentInfo, Kind, LengthObject, MutableFlag, Number, Property, PropertyName};
-pub use printer::{JsPrinter, print_block, print_expression, print_program};
+pub use printer::{print_block, print_expression, print_program, JsPrinter};
 
 /// Module identifier for imports/requires
 #[derive(Debug, Clone, PartialEq)]

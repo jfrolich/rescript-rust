@@ -7,18 +7,16 @@
 
 use crate::location::Location;
 use crate::parse_arena::{LidentIdx, LocIdx, ParseArena};
+use crate::parser::ast::Payload::{PPat, PSig, PStr, PTyp};
 use crate::parser::ast::{
     ArgLabel, Attribute, Case, ConstructorArguments, ConstructorDeclaration, CoreType,
-    CoreTypeDesc, Expression, ExpressionDesc, Extension,
-    ExtensionConstructor, ExtensionConstructorKind, IncludeDeclaration, IncludeDescription,
-    JsxElement, JsxProp,
+    CoreTypeDesc, Expression, ExpressionDesc, Extension, ExtensionConstructor,
+    ExtensionConstructorKind, IncludeDeclaration, IncludeDescription, JsxElement, JsxProp,
     LabelDeclaration, Loc, ModuleBinding, ModuleDeclaration, ModuleExpr, ModuleExprDesc,
     ModuleType, ModuleTypeDeclaration, ModuleTypeDesc, ObjectField, OpenDescription, Pattern,
-    PatternDesc, RowField, SignatureItem,
-    SignatureItemDesc, StructureItem, StructureItemDesc, TypeDeclaration,
-    TypeExtension, TypeKind, ValueBinding, ValueDescription, WithConstraint,
+    PatternDesc, RowField, SignatureItem, SignatureItemDesc, StructureItem, StructureItemDesc,
+    TypeDeclaration, TypeExtension, TypeKind, ValueBinding, ValueDescription, WithConstraint,
 };
-use crate::parser::ast::Payload::{PPat, PSig, PStr, PTyp};
 use crate::parser::comment::Comment;
 use crate::parser::longident::Longident;
 use std::collections::HashMap;
@@ -114,7 +112,12 @@ impl CommentTable {
     ///
     /// This is a simplified implementation that attaches comments based on position.
     /// A full implementation would walk the entire AST tree.
-    pub fn walk_structure_simple(&mut self, structure: &[StructureItem], comments: Vec<Comment>, arena: &mut ParseArena) {
+    pub fn walk_structure_simple(
+        &mut self,
+        structure: &[StructureItem],
+        comments: Vec<Comment>,
+        arena: &mut ParseArena,
+    ) {
         if comments.is_empty() || structure.is_empty() {
             if !comments.is_empty() {
                 // Attach remaining comments to "inside" of the file
@@ -141,13 +144,11 @@ impl CommentTable {
                 i32::MAX
             };
 
-            let (trailing, rest): (Vec<_>, Vec<_>) = rest
-                .into_iter()
-                .partition(|c| {
-                    c.loc().loc_start.cnum >= loc.loc_end.cnum
-                        && c.loc().loc_end.cnum <= next_start
-                        && c.loc().loc_start.line == loc.loc_end.line
-                });
+            let (trailing, rest): (Vec<_>, Vec<_>) = rest.into_iter().partition(|c| {
+                c.loc().loc_start.cnum >= loc.loc_end.cnum
+                    && c.loc().loc_end.cnum <= next_start
+                    && c.loc().loc_start.line == loc.loc_end.line
+            });
 
             // Attach leading comments
             if !leading.is_empty() {
@@ -466,9 +467,7 @@ fn collect_list_patterns<'a>(arena: &ParseArena, pattern: &'a Pattern) -> Vec<&'
 
     loop {
         match &current.ppat_desc {
-            PatternDesc::Ppat_construct(name, Some(args))
-                if arena.is_lident(name.txt, "::") =>
-            {
+            PatternDesc::Ppat_construct(name, Some(args)) if arena.is_lident(name.txt, "::") => {
                 if let PatternDesc::Ppat_tuple(tuple) = &args.ppat_desc {
                     if tuple.len() == 2 {
                         acc.push(&tuple[0]);
@@ -479,9 +478,7 @@ fn collect_list_patterns<'a>(arena: &ParseArena, pattern: &'a Pattern) -> Vec<&'
                 acc.push(current);
                 break;
             }
-            PatternDesc::Ppat_construct(name, None)
-                if arena.is_lident(name.txt, "[]") =>
-            {
+            PatternDesc::Ppat_construct(name, None) if arena.is_lident(name.txt, "[]") => {
                 break;
             }
             _ => {
@@ -501,9 +498,7 @@ fn collect_list_exprs<'a>(arena: &ParseArena, expr: &'a Expression) -> Vec<&'a E
 
     loop {
         match &current.pexp_desc {
-            ExpressionDesc::Pexp_construct(name, Some(args))
-                if arena.is_lident(name.txt, "::") =>
-            {
+            ExpressionDesc::Pexp_construct(name, Some(args)) if arena.is_lident(name.txt, "::") => {
                 if let ExpressionDesc::Pexp_tuple(tuple) = &args.pexp_desc {
                     if tuple.len() == 2 {
                         acc.push(&tuple[0]);
@@ -514,9 +509,7 @@ fn collect_list_exprs<'a>(arena: &ParseArena, expr: &'a Expression) -> Vec<&'a E
                 acc.push(current);
                 break;
             }
-            ExpressionDesc::Pexp_construct(name, _)
-                if arena.is_lident(name.txt, "[]") =>
-            {
+            ExpressionDesc::Pexp_construct(name, _) if arena.is_lident(name.txt, "[]") => {
                 break;
             }
             _ => {
@@ -534,7 +527,12 @@ fn collect_list_exprs<'a>(arena: &ParseArena, expr: &'a Expression) -> Vec<&'a E
 // ============================================================================
 
 /// Walk a structure and attach comments to AST nodes.
-pub fn walk_structure(structure: &[StructureItem], t: &mut CommentTable, comments: Vec<Comment>, arena: &mut ParseArena) {
+pub fn walk_structure(
+    structure: &[StructureItem],
+    t: &mut CommentTable,
+    comments: Vec<Comment>,
+    arena: &mut ParseArena,
+) {
     if comments.is_empty() {
         return;
     }
@@ -548,7 +546,12 @@ pub fn walk_structure(structure: &[StructureItem], t: &mut CommentTable, comment
 }
 
 /// Walk a signature and attach comments to AST nodes.
-pub fn walk_signature(signature: &[SignatureItem], t: &mut CommentTable, comments: Vec<Comment>, arena: &mut ParseArena) {
+pub fn walk_signature(
+    signature: &[SignatureItem],
+    t: &mut CommentTable,
+    comments: Vec<Comment>,
+    arena: &mut ParseArena,
+) {
     if comments.is_empty() {
         return;
     }
@@ -562,11 +565,22 @@ pub fn walk_signature(signature: &[SignatureItem], t: &mut CommentTable, comment
 }
 
 /// Walk a list of nodes.
-fn walk_list(nodes: &[Node<'_>], t: &mut CommentTable, comments: Vec<Comment>, arena: &mut ParseArena) {
+fn walk_list(
+    nodes: &[Node<'_>],
+    t: &mut CommentTable,
+    comments: Vec<Comment>,
+    arena: &mut ParseArena,
+) {
     walk_list_impl(nodes, t, comments, None, arena);
 }
 
-fn walk_list_impl(nodes: &[Node<'_>], t: &mut CommentTable, comments: Vec<Comment>, prev_loc: Option<LocIdx>, arena: &mut ParseArena) {
+fn walk_list_impl(
+    nodes: &[Node<'_>],
+    t: &mut CommentTable,
+    comments: Vec<Comment>,
+    prev_loc: Option<LocIdx>,
+    arena: &mut ParseArena,
+) {
     if comments.is_empty() {
         return;
     }
@@ -595,11 +609,13 @@ fn walk_list_impl(nodes: &[Node<'_>], t: &mut CommentTable, comments: Vec<Commen
             let prev_loc_resolved = prev_loc_resolved.as_ref().unwrap();
             // Check if on same line
             if prev_loc_resolved.loc_end.line == curr_loc_resolved.loc_start.line {
-                let (after_prev, before_curr) = partition_adjacent_trailing(*prev_loc_idx, leading, arena);
+                let (after_prev, before_curr) =
+                    partition_adjacent_trailing(*prev_loc_idx, leading, arena);
                 CommentTable::attach(&mut t.trailing, *prev_loc_idx, after_prev);
                 CommentTable::attach(&mut t.leading, curr_loc, before_curr);
             } else {
-                let (on_same_line_as_prev, after_prev) = partition_by_on_same_line(*prev_loc_idx, leading, arena);
+                let (on_same_line_as_prev, after_prev) =
+                    partition_by_on_same_line(*prev_loc_idx, leading, arena);
                 CommentTable::attach(&mut t.trailing, *prev_loc_idx, on_same_line_as_prev);
                 let (before_curr, _, _) = partition_by_loc(after_prev, curr_loc, arena);
                 CommentTable::attach(&mut t.leading, curr_loc, before_curr);
@@ -612,7 +628,12 @@ fn walk_list_impl(nodes: &[Node<'_>], t: &mut CommentTable, comments: Vec<Commen
 }
 
 /// Walk a node and its children.
-fn walk_node(node: &Node<'_>, t: &mut CommentTable, comments: Vec<Comment>, arena: &mut ParseArena) {
+fn walk_node(
+    node: &Node<'_>,
+    t: &mut CommentTable,
+    comments: Vec<Comment>,
+    arena: &mut ParseArena,
+) {
     match node {
         Node::Case(c) => walk_case(c, t, comments, arena),
         Node::CoreType(ct) => walk_core_type(ct, t, comments, arena),
@@ -637,7 +658,12 @@ fn walk_node(node: &Node<'_>, t: &mut CommentTable, comments: Vec<Comment>, aren
     }
 }
 
-fn walk_structure_item(si: &StructureItem, t: &mut CommentTable, comments: Vec<Comment>, arena: &mut ParseArena) {
+fn walk_structure_item(
+    si: &StructureItem,
+    t: &mut CommentTable,
+    comments: Vec<Comment>,
+    arena: &mut ParseArena,
+) {
     if comments.is_empty() {
         return;
     }
@@ -645,7 +671,9 @@ fn walk_structure_item(si: &StructureItem, t: &mut CommentTable, comments: Vec<C
     match &si.pstr_desc {
         StructureItemDesc::Pstr_primitive(vd) => walk_value_description(vd, t, comments, arena),
         StructureItemDesc::Pstr_open(od) => walk_open_description(od, t, comments, arena),
-        StructureItemDesc::Pstr_value(_, bindings) => walk_value_bindings(bindings, t, comments, arena),
+        StructureItemDesc::Pstr_value(_, bindings) => {
+            walk_value_bindings(bindings, t, comments, arena)
+        }
         StructureItemDesc::Pstr_type(_, declarations) => {
             walk_type_declarations(declarations, t, comments, arena)
         }
@@ -655,7 +683,9 @@ fn walk_structure_item(si: &StructureItem, t: &mut CommentTable, comments: Vec<C
             let nodes: Vec<Node<'_>> = mbs.iter().map(|mb| Node::ModuleBinding(mb)).collect();
             walk_list(&nodes, t, comments, arena);
         }
-        StructureItemDesc::Pstr_modtype(mtd) => walk_module_type_declaration(mtd, t, comments, arena),
+        StructureItemDesc::Pstr_modtype(mtd) => {
+            walk_module_type_declaration(mtd, t, comments, arena)
+        }
         StructureItemDesc::Pstr_attribute(attr) => walk_attribute(attr, t, comments, arena),
         StructureItemDesc::Pstr_extension(ext, _) => walk_extension(ext, t, comments, arena),
         StructureItemDesc::Pstr_include(id) => walk_include_declaration(id, t, comments, arena),
@@ -664,7 +694,12 @@ fn walk_structure_item(si: &StructureItem, t: &mut CommentTable, comments: Vec<C
     }
 }
 
-fn walk_signature_item(si: &SignatureItem, t: &mut CommentTable, comments: Vec<Comment>, arena: &mut ParseArena) {
+fn walk_signature_item(
+    si: &SignatureItem,
+    t: &mut CommentTable,
+    comments: Vec<Comment>,
+    arena: &mut ParseArena,
+) {
     if comments.is_empty() {
         return;
     }
@@ -681,7 +716,9 @@ fn walk_signature_item(si: &SignatureItem, t: &mut CommentTable, comments: Vec<C
             let nodes: Vec<Node<'_>> = mds.iter().map(|md| Node::ModuleDeclaration(md)).collect();
             walk_list(&nodes, t, comments, arena);
         }
-        SignatureItemDesc::Psig_modtype(mtd) => walk_module_type_declaration(mtd, t, comments, arena),
+        SignatureItemDesc::Psig_modtype(mtd) => {
+            walk_module_type_declaration(mtd, t, comments, arena)
+        }
         SignatureItemDesc::Psig_open(od) => walk_open_description(od, t, comments, arena),
         SignatureItemDesc::Psig_include(id) => walk_include_description(id, t, comments, arena),
         SignatureItemDesc::Psig_attribute(attr) => walk_attribute(attr, t, comments, arena),
@@ -689,7 +726,12 @@ fn walk_signature_item(si: &SignatureItem, t: &mut CommentTable, comments: Vec<C
     }
 }
 
-fn walk_value_description(vd: &ValueDescription, t: &mut CommentTable, comments: Vec<Comment>, arena: &mut ParseArena) {
+fn walk_value_description(
+    vd: &ValueDescription,
+    t: &mut CommentTable,
+    comments: Vec<Comment>,
+    arena: &mut ParseArena,
+) {
     let (leading, trailing) = partition_leading_trailing(comments, vd.pval_name.loc, arena);
     CommentTable::attach(&mut t.leading, vd.pval_name.loc, leading);
 
@@ -702,7 +744,12 @@ fn walk_value_description(vd: &ValueDescription, t: &mut CommentTable, comments:
     CommentTable::attach(&mut t.trailing, vd.pval_type.ptyp_loc, after);
 }
 
-fn walk_type_extension(te: &TypeExtension, t: &mut CommentTable, comments: Vec<Comment>, arena: &mut ParseArena) {
+fn walk_type_extension(
+    te: &TypeExtension,
+    t: &mut CommentTable,
+    comments: Vec<Comment>,
+    arena: &mut ParseArena,
+) {
     let (leading, trailing) = partition_leading_trailing(comments, te.ptyext_path.loc, arena);
     CommentTable::attach(&mut t.leading, te.ptyext_path.loc, leading);
 
@@ -732,14 +779,24 @@ fn walk_type_extension(te: &TypeExtension, t: &mut CommentTable, comments: Vec<C
     walk_list(&nodes, t, rest, arena);
 }
 
-fn walk_include_declaration(id: &IncludeDeclaration, t: &mut CommentTable, comments: Vec<Comment>, arena: &mut ParseArena) {
+fn walk_include_declaration(
+    id: &IncludeDeclaration,
+    t: &mut CommentTable,
+    comments: Vec<Comment>,
+    arena: &mut ParseArena,
+) {
     let (before, inside, after) = partition_by_loc(comments, id.pincl_mod.pmod_loc, arena);
     CommentTable::attach(&mut t.leading, id.pincl_mod.pmod_loc, before);
     walk_module_expr(&id.pincl_mod, t, inside, arena);
     CommentTable::attach(&mut t.trailing, id.pincl_mod.pmod_loc, after);
 }
 
-fn walk_include_description(id: &IncludeDescription, t: &mut CommentTable, comments: Vec<Comment>, arena: &mut ParseArena) {
+fn walk_include_description(
+    id: &IncludeDescription,
+    t: &mut CommentTable,
+    comments: Vec<Comment>,
+    arena: &mut ParseArena,
+) {
     let (before, inside, after) = partition_by_loc(comments, id.pincl_mod.pmty_loc, arena);
     CommentTable::attach(&mut t.leading, id.pincl_mod.pmty_loc, before);
     walk_mod_type(&id.pincl_mod, t, inside, arena);
@@ -760,7 +817,8 @@ fn walk_module_type_declaration(
             CommentTable::attach(&mut t.trailing, mtd.pmtd_name.loc, trailing);
         }
         Some(mod_type) => {
-            let (after_name, rest) = partition_adjacent_trailing(mtd.pmtd_name.loc, trailing, arena);
+            let (after_name, rest) =
+                partition_adjacent_trailing(mtd.pmtd_name.loc, trailing, arena);
             CommentTable::attach(&mut t.trailing, mtd.pmtd_name.loc, after_name);
 
             let (before, inside, after) = partition_by_loc(rest, mod_type.pmty_loc, arena);
@@ -771,7 +829,12 @@ fn walk_module_type_declaration(
     }
 }
 
-fn walk_module_binding(mb: &ModuleBinding, t: &mut CommentTable, comments: Vec<Comment>, arena: &mut ParseArena) {
+fn walk_module_binding(
+    mb: &ModuleBinding,
+    t: &mut CommentTable,
+    comments: Vec<Comment>,
+    arena: &mut ParseArena,
+) {
     let (leading, trailing) = partition_leading_trailing(comments, mb.pmb_name.loc, arena);
     CommentTable::attach(&mut t.leading, mb.pmb_name.loc, leading);
 
@@ -793,7 +856,12 @@ fn walk_module_binding(mb: &ModuleBinding, t: &mut CommentTable, comments: Vec<C
     CommentTable::attach(&mut t.trailing, mb.pmb_expr.pmod_loc, trailing);
 }
 
-fn walk_module_declaration(md: &ModuleDeclaration, t: &mut CommentTable, comments: Vec<Comment>, arena: &mut ParseArena) {
+fn walk_module_declaration(
+    md: &ModuleDeclaration,
+    t: &mut CommentTable,
+    comments: Vec<Comment>,
+    arena: &mut ParseArena,
+) {
     let (leading, trailing) = partition_leading_trailing(comments, md.pmd_name.loc, arena);
     CommentTable::attach(&mut t.leading, md.pmd_name.loc, leading);
 
@@ -806,24 +874,44 @@ fn walk_module_declaration(md: &ModuleDeclaration, t: &mut CommentTable, comment
     CommentTable::attach(&mut t.trailing, md.pmd_type.pmty_loc, trailing);
 }
 
-fn walk_open_description(od: &OpenDescription, t: &mut CommentTable, comments: Vec<Comment>, arena: &mut ParseArena) {
+fn walk_open_description(
+    od: &OpenDescription,
+    t: &mut CommentTable,
+    comments: Vec<Comment>,
+    arena: &mut ParseArena,
+) {
     let loc = od.popen_lid.loc;
     let (leading, trailing) = partition_leading_trailing(comments, loc, arena);
     CommentTable::attach(&mut t.leading, loc, leading);
     CommentTable::attach(&mut t.trailing, loc, trailing);
 }
 
-fn walk_value_bindings(vbs: &[ValueBinding], t: &mut CommentTable, comments: Vec<Comment>, arena: &mut ParseArena) {
+fn walk_value_bindings(
+    vbs: &[ValueBinding],
+    t: &mut CommentTable,
+    comments: Vec<Comment>,
+    arena: &mut ParseArena,
+) {
     let nodes: Vec<Node<'_>> = vbs.iter().map(|vb| Node::ValueBinding(vb)).collect();
     walk_list(&nodes, t, comments, arena);
 }
 
-fn walk_type_declarations(tds: &[TypeDeclaration], t: &mut CommentTable, comments: Vec<Comment>, arena: &mut ParseArena) {
+fn walk_type_declarations(
+    tds: &[TypeDeclaration],
+    t: &mut CommentTable,
+    comments: Vec<Comment>,
+    arena: &mut ParseArena,
+) {
     let nodes: Vec<Node<'_>> = tds.iter().map(|td| Node::TypeDeclaration(td)).collect();
     walk_list(&nodes, t, comments, arena);
 }
 
-fn walk_value_binding(vb: &ValueBinding, t: &mut CommentTable, comments: Vec<Comment>, arena: &mut ParseArena) {
+fn walk_value_binding(
+    vb: &ValueBinding,
+    t: &mut CommentTable,
+    comments: Vec<Comment>,
+    arena: &mut ParseArena,
+) {
     let pattern_loc = vb.pvb_pat.ppat_loc;
     let expr_loc = vb.pvb_expr.pexp_loc;
 
@@ -836,7 +924,8 @@ fn walk_value_binding(vb: &ValueBinding, t: &mut CommentTable, comments: Vec<Com
     let (after_pat, surrounding_expr) = partition_adjacent_trailing(pattern_loc, trailing, arena);
     CommentTable::attach(&mut t.trailing, pattern_loc, after_pat);
 
-    let (before_expr, inside_expr, after_expr) = partition_by_loc(surrounding_expr, expr_loc, arena);
+    let (before_expr, inside_expr, after_expr) =
+        partition_by_loc(surrounding_expr, expr_loc, arena);
 
     if is_block_expr(&vb.pvb_expr) {
         let combined: Vec<Comment> = before_expr
@@ -852,7 +941,12 @@ fn walk_value_binding(vb: &ValueBinding, t: &mut CommentTable, comments: Vec<Com
     }
 }
 
-fn walk_type_declaration(td: &TypeDeclaration, t: &mut CommentTable, comments: Vec<Comment>, arena: &mut ParseArena) {
+fn walk_type_declaration(
+    td: &TypeDeclaration,
+    t: &mut CommentTable,
+    comments: Vec<Comment>,
+    arena: &mut ParseArena,
+) {
     let (before_name, rest) = partition_leading_trailing(comments, td.ptype_name.loc, arena);
     CommentTable::attach(&mut t.leading, td.ptype_name.loc, before_name);
 
@@ -877,10 +971,12 @@ fn walk_type_declaration(td: &TypeDeclaration, t: &mut CommentTable, comments: V
     // Manifest: = typexpr
     let rest = match &td.ptype_manifest {
         Some(typexpr) => {
-            let (before_typ, inside_typ, after_typ) = partition_by_loc(rest, typexpr.ptyp_loc, arena);
+            let (before_typ, inside_typ, after_typ) =
+                partition_by_loc(rest, typexpr.ptyp_loc, arena);
             CommentTable::attach(&mut t.leading, typexpr.ptyp_loc, before_typ);
             walk_core_type(typexpr, t, inside_typ, arena);
-            let (after_typ_adj, rest) = partition_adjacent_trailing(typexpr.ptyp_loc, after_typ, arena);
+            let (after_typ_adj, rest) =
+                partition_adjacent_trailing(typexpr.ptyp_loc, after_typ, arena);
             CommentTable::attach(&mut t.trailing, typexpr.ptyp_loc, after_typ_adj);
             rest
         }
@@ -894,7 +990,8 @@ fn walk_type_declaration(td: &TypeDeclaration, t: &mut CommentTable, comments: V
                 CommentTable::attach(&mut t.inside, td.ptype_loc, rest);
                 Vec::new()
             } else {
-                let nodes: Vec<Node<'_>> = lds.iter().map(|ld| Node::LabelDeclaration(ld)).collect();
+                let nodes: Vec<Node<'_>> =
+                    lds.iter().map(|ld| Node::LabelDeclaration(ld)).collect();
                 walk_list(&nodes, t, rest, arena);
                 Vec::new()
             }
@@ -905,7 +1002,12 @@ fn walk_type_declaration(td: &TypeDeclaration, t: &mut CommentTable, comments: V
     CommentTable::attach(&mut t.trailing, td.ptype_loc, rest);
 }
 
-fn walk_label_declaration(ld: &LabelDeclaration, t: &mut CommentTable, comments: Vec<Comment>, arena: &mut ParseArena) {
+fn walk_label_declaration(
+    ld: &LabelDeclaration,
+    t: &mut CommentTable,
+    comments: Vec<Comment>,
+    arena: &mut ParseArena,
+) {
     let (before_name, rest) = partition_leading_trailing(comments, ld.pld_name.loc, arena);
     CommentTable::attach(&mut t.leading, ld.pld_name.loc, before_name);
 
@@ -951,10 +1053,12 @@ fn walk_constructor_declaration(
 
     let rest = match &cd.pcd_res {
         Some(typexpr) => {
-            let (before_typ, inside_typ, after_typ) = partition_by_loc(rest, typexpr.ptyp_loc, arena);
+            let (before_typ, inside_typ, after_typ) =
+                partition_by_loc(rest, typexpr.ptyp_loc, arena);
             CommentTable::attach(&mut t.leading, typexpr.ptyp_loc, before_typ);
             walk_core_type(typexpr, t, inside_typ, arena);
-            let (after_typ_adj, rest) = partition_adjacent_trailing(typexpr.ptyp_loc, after_typ, arena);
+            let (after_typ_adj, rest) =
+                partition_adjacent_trailing(typexpr.ptyp_loc, after_typ, arena);
             CommentTable::attach(&mut t.trailing, typexpr.ptyp_loc, after_typ_adj);
             rest
         }
@@ -982,17 +1086,15 @@ fn walk_constructor_arguments(
                 arena,
             )
         }
-        ConstructorArguments::Pcstr_record(lds) => {
-            visit_list_but_continue_with_remaining_comments(
-                lds,
-                |ld, _arena| ld.pld_loc,
-                |ld, t, comments, arena| walk_label_declaration(ld, t, comments, arena),
-                t,
-                comments,
-                false,
-                arena,
-            )
-        }
+        ConstructorArguments::Pcstr_record(lds) => visit_list_but_continue_with_remaining_comments(
+            lds,
+            |ld, _arena| ld.pld_loc,
+            |ld, t, comments, arena| walk_label_declaration(ld, t, comments, arena),
+            t,
+            comments,
+            false,
+            arena,
+        ),
     }
 }
 
@@ -1027,7 +1129,12 @@ fn walk_extension_constructor(
     }
 }
 
-fn walk_expression(expr: &Expression, t: &mut CommentTable, comments: Vec<Comment>, arena: &mut ParseArena) {
+fn walk_expression(
+    expr: &Expression,
+    t: &mut CommentTable,
+    comments: Vec<Comment>,
+    arena: &mut ParseArena,
+) {
     if comments.is_empty() {
         return;
     }
@@ -1068,7 +1175,8 @@ fn walk_expression(expr: &Expression, t: &mut CommentTable, comments: Vec<Commen
                 if is_block_expr(body) {
                     walk_expression(body, t, comments, arena);
                 } else {
-                    let (leading, inside, trailing) = partition_by_loc(comments, body.pexp_loc, arena);
+                    let (leading, inside, trailing) =
+                        partition_by_loc(comments, body.pexp_loc, arena);
                     CommentTable::attach(&mut t.leading, body.pexp_loc, leading);
                     walk_expression(body, t, inside, arena);
                     CommentTable::attach(&mut t.trailing, body.pexp_loc, trailing);
@@ -1079,7 +1187,8 @@ fn walk_expression(expr: &Expression, t: &mut CommentTable, comments: Vec<Commen
             let (leading, inside, trailing) = partition_by_loc(comments, lhs.pexp_loc, arena);
 
             let comments = if is_block_expr(lhs) {
-                let (after_expr, comments) = partition_by_on_same_line(lhs.pexp_loc, trailing, arena);
+                let (after_expr, comments) =
+                    partition_by_on_same_line(lhs.pexp_loc, trailing, arena);
                 let combined: Vec<Comment> = leading
                     .into_iter()
                     .chain(inside.into_iter())
@@ -1090,7 +1199,8 @@ fn walk_expression(expr: &Expression, t: &mut CommentTable, comments: Vec<Commen
             } else {
                 CommentTable::attach(&mut t.leading, lhs.pexp_loc, leading);
                 walk_expression(lhs, t, inside, arena);
-                let (after_expr, comments) = partition_by_on_same_line(lhs.pexp_loc, trailing, arena);
+                let (after_expr, comments) =
+                    partition_by_on_same_line(lhs.pexp_loc, trailing, arena);
                 CommentTable::attach(&mut t.trailing, lhs.pexp_loc, after_expr);
                 comments
             };
@@ -1132,8 +1242,7 @@ fn walk_expression(expr: &Expression, t: &mut CommentTable, comments: Vec<Commen
             if arena.get_string(ext.0.txt) == "obj" {
                 if let PStr(items) = &ext.1 {
                     if items.len() == 1 {
-                        if let StructureItemDesc::Pstr_eval(inner, _) = &items[0].pstr_desc
-                        {
+                        if let StructureItemDesc::Pstr_eval(inner, _) = &items[0].pstr_desc {
                             if let ExpressionDesc::Pexp_record(fields, _) = &inner.pexp_desc {
                                 let nodes: Vec<Node<'_>> = fields
                                     .iter()
@@ -1191,7 +1300,8 @@ fn walk_expression(expr: &Expression, t: &mut CommentTable, comments: Vec<Commen
             CommentTable::attach(&mut t.leading, module.pmod_loc, before_mod_expr);
             walk_module_expr(module, t, inside_mod_expr, arena);
 
-            let (after_mod_expr_adj, rest) = partition_by_on_same_line(module.pmod_loc, after_mod_expr, arena);
+            let (after_mod_expr_adj, rest) =
+                partition_by_on_same_line(module.pmod_loc, after_mod_expr, arena);
             CommentTable::attach(&mut t.trailing, module.pmod_loc, after_mod_expr_adj);
 
             if is_block_expr(body) {
@@ -1245,14 +1355,10 @@ fn walk_expression(expr: &Expression, t: &mut CommentTable, comments: Vec<Commen
         ExpressionDesc::Pexp_array(exprs) if exprs.is_empty() => {
             CommentTable::attach(&mut t.inside, expr.pexp_loc, comments);
         }
-        ExpressionDesc::Pexp_construct(name, None)
-            if arena.is_lident(name.txt, "[]") =>
-        {
+        ExpressionDesc::Pexp_construct(name, None) if arena.is_lident(name.txt, "[]") => {
             CommentTable::attach(&mut t.inside, expr.pexp_loc, comments);
         }
-        ExpressionDesc::Pexp_construct(name, Some(_))
-            if arena.is_lident(name.txt, "::") =>
-        {
+        ExpressionDesc::Pexp_construct(name, Some(_)) if arena.is_lident(name.txt, "::") => {
             let list_exprs = collect_list_exprs(arena, expr);
             let nodes: Vec<Node<'_>> = list_exprs.iter().map(|e| Node::Expression(e)).collect();
             walk_list(&nodes, t, comments, arena);
@@ -1263,7 +1369,8 @@ fn walk_expression(expr: &Expression, t: &mut CommentTable, comments: Vec<Commen
 
             match args {
                 Some(arg_expr) => {
-                    let (after_longident, rest) = partition_adjacent_trailing(name.loc, trailing, arena);
+                    let (after_longident, rest) =
+                        partition_adjacent_trailing(name.loc, trailing, arena);
                     CommentTable::attach(&mut t.trailing, name.loc, after_longident);
                     walk_expression(arg_expr, t, rest, arena);
                 }
@@ -1309,7 +1416,8 @@ fn walk_expression(expr: &Expression, t: &mut CommentTable, comments: Vec<Commen
             let (leading, inside, trailing) = partition_by_loc(comments, inner.pexp_loc, arena);
 
             let trailing = if is_block_expr(inner) {
-                let (after_expr, rest) = partition_adjacent_trailing(inner.pexp_loc, trailing, arena);
+                let (after_expr, rest) =
+                    partition_adjacent_trailing(inner.pexp_loc, trailing, arena);
                 let combined: Vec<Comment> = leading
                     .into_iter()
                     .chain(inside.into_iter())
@@ -1350,10 +1458,12 @@ fn walk_expression(expr: &Expression, t: &mut CommentTable, comments: Vec<Commen
                 rest
             };
 
-            let (before_longident, after_longident) = partition_leading_trailing(rest, lid.loc, arena);
+            let (before_longident, after_longident) =
+                partition_leading_trailing(rest, lid.loc, arena);
             CommentTable::attach(&mut t.leading, lid.loc, before_longident);
 
-            let (after_longident_adj, rest) = partition_adjacent_trailing(lid.loc, after_longident, arena);
+            let (after_longident_adj, rest) =
+                partition_adjacent_trailing(lid.loc, after_longident, arena);
             CommentTable::attach(&mut t.trailing, lid.loc, after_longident_adj);
 
             if is_block_expr(value) {
@@ -1372,7 +1482,8 @@ fn walk_expression(expr: &Expression, t: &mut CommentTable, comments: Vec<Commen
             let (leading, inside, trailing) = partition_by_loc(rest, cond.pexp_loc, arena);
 
             let comments = if is_block_expr(cond) {
-                let (after_expr, comments) = partition_adjacent_trailing(cond.pexp_loc, trailing, arena);
+                let (after_expr, comments) =
+                    partition_adjacent_trailing(cond.pexp_loc, trailing, arena);
                 let combined: Vec<Comment> = leading
                     .into_iter()
                     .chain(inside.into_iter())
@@ -1383,12 +1494,14 @@ fn walk_expression(expr: &Expression, t: &mut CommentTable, comments: Vec<Commen
             } else {
                 CommentTable::attach(&mut t.leading, cond.pexp_loc, leading);
                 walk_expression(cond, t, inside, arena);
-                let (after_expr, comments) = partition_adjacent_trailing(cond.pexp_loc, trailing, arena);
+                let (after_expr, comments) =
+                    partition_adjacent_trailing(cond.pexp_loc, trailing, arena);
                 CommentTable::attach(&mut t.trailing, cond.pexp_loc, after_expr);
                 comments
             };
 
-            let (leading, inside, trailing) = partition_by_loc(comments, then_branch.pexp_loc, arena);
+            let (leading, inside, trailing) =
+                partition_by_loc(comments, then_branch.pexp_loc, arena);
 
             let comments = if is_block_expr(then_branch) {
                 let (after_expr, trailing) =
@@ -1425,7 +1538,8 @@ fn walk_expression(expr: &Expression, t: &mut CommentTable, comments: Vec<Commen
             let (leading, inside, trailing) = partition_by_loc(comments, cond.pexp_loc, arena);
 
             let rest = if is_block_expr(cond) {
-                let (after_expr, rest) = partition_adjacent_trailing(cond.pexp_loc, trailing, arena);
+                let (after_expr, rest) =
+                    partition_adjacent_trailing(cond.pexp_loc, trailing, arena);
                 let combined: Vec<Comment> = leading
                     .into_iter()
                     .chain(inside.into_iter())
@@ -1436,7 +1550,8 @@ fn walk_expression(expr: &Expression, t: &mut CommentTable, comments: Vec<Commen
             } else {
                 CommentTable::attach(&mut t.leading, cond.pexp_loc, leading);
                 walk_expression(cond, t, inside, arena);
-                let (after_expr, rest) = partition_adjacent_trailing(cond.pexp_loc, trailing, arena);
+                let (after_expr, rest) =
+                    partition_adjacent_trailing(cond.pexp_loc, trailing, arena);
                 CommentTable::attach(&mut t.trailing, cond.pexp_loc, after_expr);
                 rest
             };
@@ -1519,10 +1634,7 @@ fn walk_expression(expr: &Expression, t: &mut CommentTable, comments: Vec<Commen
                 if let ExpressionDesc::Pexp_ident(ident) = &funct.pexp_desc {
                     if let Longident::Lident(op) = arena.get_longident(ident.txt) {
                         let op_str = arena.get_string(*op);
-                        if matches!(
-                            op_str,
-                            "~+" | "~+." | "~-" | "~-." | "~~~" | "not" | "!"
-                        ) {
+                        if matches!(op_str, "~+" | "~+." | "~-" | "~-." | "~~~" | "not" | "!") {
                             let (_, arg_expr) = &args[0];
                             let (before, inside, after) =
                                 partition_by_loc(comments, arg_expr.pexp_loc, arena);
@@ -1551,14 +1663,23 @@ fn walk_expression(expr: &Expression, t: &mut CommentTable, comments: Vec<Commen
     }
 }
 
-fn walk_jsx_element(jsx: &JsxElement, t: &mut CommentTable, comments: Vec<Comment>, arena: &mut ParseArena) {
+fn walk_jsx_element(
+    jsx: &JsxElement,
+    t: &mut CommentTable,
+    comments: Vec<Comment>,
+    arena: &mut ParseArena,
+) {
     if comments.is_empty() {
         return;
     }
 
     match jsx {
         JsxElement::Fragment(fragment) => {
-            let nodes: Vec<Node<'_>> = fragment.children.iter().map(|e| Node::Expression(e)).collect();
+            let nodes: Vec<Node<'_>> = fragment
+                .children
+                .iter()
+                .map(|e| Node::Expression(e))
+                .collect();
             walk_list(&nodes, t, comments, arena);
         }
         JsxElement::Unary(unary) => {
@@ -1575,13 +1696,22 @@ fn walk_jsx_element(jsx: &JsxElement, t: &mut CommentTable, comments: Vec<Commen
             for prop in &container.props {
                 walk_jsx_prop(prop, t, vec![], arena);
             }
-            let nodes: Vec<Node<'_>> = container.children.iter().map(|e| Node::Expression(e)).collect();
+            let nodes: Vec<Node<'_>> = container
+                .children
+                .iter()
+                .map(|e| Node::Expression(e))
+                .collect();
             walk_list(&nodes, t, comments, arena);
         }
     }
 }
 
-fn walk_jsx_prop(prop: &JsxProp, t: &mut CommentTable, comments: Vec<Comment>, arena: &mut ParseArena) {
+fn walk_jsx_prop(
+    prop: &JsxProp,
+    t: &mut CommentTable,
+    comments: Vec<Comment>,
+    arena: &mut ParseArena,
+) {
     match prop {
         JsxProp::Punning { name, .. } => {
             let (leading, trailing) = partition_leading_trailing(comments, name.loc, arena);
@@ -1711,13 +1841,20 @@ fn walk_case(case: &Case, t: &mut CommentTable, comments: Vec<Comment>, arena: &
     }
 }
 
-fn walk_pattern(pattern: &Pattern, t: &mut CommentTable, comments: Vec<Comment>, arena: &mut ParseArena) {
+fn walk_pattern(
+    pattern: &Pattern,
+    t: &mut CommentTable,
+    comments: Vec<Comment>,
+    arena: &mut ParseArena,
+) {
     if comments.is_empty() {
         return;
     }
 
     match &pattern.ppat_desc {
-        PatternDesc::Ppat_any | PatternDesc::Ppat_constant { .. } | PatternDesc::Ppat_interval { .. } => {
+        PatternDesc::Ppat_any
+        | PatternDesc::Ppat_constant { .. }
+        | PatternDesc::Ppat_interval { .. } => {
             let (leading, trailing) = partition_leading_trailing(comments, pattern.ppat_loc, arena);
             CommentTable::attach(&mut t.leading, pattern.ppat_loc, leading);
             CommentTable::attach(&mut t.trailing, pattern.ppat_loc, trailing);
@@ -1745,14 +1882,10 @@ fn walk_pattern(pattern: &Pattern, t: &mut CommentTable, comments: Vec<Comment>,
         PatternDesc::Ppat_array(pats) if pats.is_empty() => {
             CommentTable::attach(&mut t.inside, pattern.ppat_loc, comments);
         }
-        PatternDesc::Ppat_construct(name, None)
-            if arena.is_lident(name.txt, "[]") =>
-        {
+        PatternDesc::Ppat_construct(name, None) if arena.is_lident(name.txt, "[]") => {
             CommentTable::attach(&mut t.inside, pattern.ppat_loc, comments);
         }
-        PatternDesc::Ppat_construct(name, Some(_))
-            if arena.is_lident(name.txt, "::") =>
-        {
+        PatternDesc::Ppat_construct(name, Some(_)) if arena.is_lident(name.txt, "::") => {
             let list_pats = collect_list_patterns(arena, pattern);
             let nodes: Vec<Node<'_>> = list_pats.iter().map(|p| Node::Pattern(p)).collect();
             walk_list(&nodes, t, comments, arena);
@@ -1763,7 +1896,8 @@ fn walk_pattern(pattern: &Pattern, t: &mut CommentTable, comments: Vec<Comment>,
 
             match args {
                 Some(arg_pat) => {
-                    let (after_longident, rest) = partition_adjacent_trailing(name.loc, trailing, arena);
+                    let (after_longident, rest) =
+                        partition_adjacent_trailing(name.loc, trailing, arena);
                     CommentTable::attach(&mut t.trailing, name.loc, after_longident);
                     walk_pattern(arg_pat, t, rest, arena);
                 }
@@ -1860,7 +1994,12 @@ fn walk_pattern_record_row(
     CommentTable::attach(&mut t.trailing, pat.ppat_loc, after);
 }
 
-fn walk_core_type(ct: &CoreType, t: &mut CommentTable, comments: Vec<Comment>, arena: &mut ParseArena) {
+fn walk_core_type(
+    ct: &CoreType,
+    t: &mut CommentTable,
+    comments: Vec<Comment>,
+    arena: &mut ParseArena,
+) {
     if comments.is_empty() {
         return;
     }
@@ -1950,7 +2089,12 @@ fn walk_core_type(ct: &CoreType, t: &mut CommentTable, comments: Vec<Comment>, a
     }
 }
 
-fn walk_object_field(field: &ObjectField, t: &mut CommentTable, comments: Vec<Comment>, arena: &mut ParseArena) {
+fn walk_object_field(
+    field: &ObjectField,
+    t: &mut CommentTable,
+    comments: Vec<Comment>,
+    arena: &mut ParseArena,
+) {
     match field {
         ObjectField::Otag(lbl, _attrs, typ) => {
             let (leading, trailing) = partition_leading_trailing(comments, lbl.loc, arena);
@@ -1970,7 +2114,12 @@ fn walk_object_field(field: &ObjectField, t: &mut CommentTable, comments: Vec<Co
     }
 }
 
-fn walk_row_field(field: &RowField, t: &mut CommentTable, comments: Vec<Comment>, arena: &mut ParseArena) {
+fn walk_row_field(
+    field: &RowField,
+    t: &mut CommentTable,
+    comments: Vec<Comment>,
+    arena: &mut ParseArena,
+) {
     match field {
         RowField::Rtag(tag, _attrs, _flag, args) => {
             let (leading, trailing) = partition_leading_trailing(comments, tag.loc, arena);
@@ -2018,7 +2167,12 @@ fn walk_package_constraint(
     CommentTable::attach(&mut t.trailing, typ.ptyp_loc, after);
 }
 
-fn walk_module_expr(me: &ModuleExpr, t: &mut CommentTable, comments: Vec<Comment>, arena: &mut ParseArena) {
+fn walk_module_expr(
+    me: &ModuleExpr,
+    t: &mut CommentTable,
+    comments: Vec<Comment>,
+    arena: &mut ParseArena,
+) {
     if comments.is_empty() {
         return;
     }
@@ -2094,7 +2248,12 @@ fn walk_module_expr(me: &ModuleExpr, t: &mut CommentTable, comments: Vec<Comment
     }
 }
 
-fn walk_mod_type(mt: &ModuleType, t: &mut CommentTable, comments: Vec<Comment>, arena: &mut ParseArena) {
+fn walk_mod_type(
+    mt: &ModuleType,
+    t: &mut CommentTable,
+    comments: Vec<Comment>,
+    arena: &mut ParseArena,
+) {
     if comments.is_empty() {
         return;
     }
@@ -2148,17 +2307,21 @@ fn walk_mod_type(mt: &ModuleType, t: &mut CommentTable, comments: Vec<Comment>, 
                 match constraint {
                     WithConstraint::Pwith_type(lid, td)
                     | WithConstraint::Pwith_typesubst(lid, td) => {
-                        let (leading, trailing) = partition_leading_trailing(rest.clone(), lid.loc, arena);
+                        let (leading, trailing) =
+                            partition_leading_trailing(rest.clone(), lid.loc, arena);
                         CommentTable::attach(&mut t.leading, lid.loc, leading);
                         walk_type_declaration(td, t, trailing, arena);
                     }
                     WithConstraint::Pwith_module(mod_lid, target_lid)
                     | WithConstraint::Pwith_modsubst(mod_lid, target_lid) => {
-                        let (leading, trailing) = partition_leading_trailing(rest.clone(), mod_lid.loc, arena);
+                        let (leading, trailing) =
+                            partition_leading_trailing(rest.clone(), mod_lid.loc, arena);
                         CommentTable::attach(&mut t.leading, mod_lid.loc, leading);
-                        let (after_mod, rest2) = partition_adjacent_trailing(mod_lid.loc, trailing, arena);
+                        let (after_mod, rest2) =
+                            partition_adjacent_trailing(mod_lid.loc, trailing, arena);
                         CommentTable::attach(&mut t.trailing, mod_lid.loc, after_mod);
-                        let (leading, trailing) = partition_leading_trailing(rest2, target_lid.loc, arena);
+                        let (leading, trailing) =
+                            partition_leading_trailing(rest2, target_lid.loc, arena);
                         CommentTable::attach(&mut t.leading, target_lid.loc, leading);
                         CommentTable::attach(&mut t.trailing, target_lid.loc, trailing);
                     }
@@ -2179,11 +2342,21 @@ fn walk_mod_type(mt: &ModuleType, t: &mut CommentTable, comments: Vec<Comment>, 
     }
 }
 
-fn walk_attribute(_attr: &Attribute, _t: &mut CommentTable, _comments: Vec<Comment>, _arena: &mut ParseArena) {
+fn walk_attribute(
+    _attr: &Attribute,
+    _t: &mut CommentTable,
+    _comments: Vec<Comment>,
+    _arena: &mut ParseArena,
+) {
     // Attributes don't have much structure to walk
 }
 
-fn walk_extension(ext: &Extension, t: &mut CommentTable, comments: Vec<Comment>, arena: &mut ParseArena) {
+fn walk_extension(
+    ext: &Extension,
+    t: &mut CommentTable,
+    comments: Vec<Comment>,
+    arena: &mut ParseArena,
+) {
     let (name, payload) = ext;
     let (leading, trailing) = partition_leading_trailing(comments, name.loc, arena);
     CommentTable::attach(&mut t.leading, name.loc, leading);
@@ -2233,7 +2406,16 @@ fn visit_list_but_continue_with_remaining_comments<'a, T>(
     newline_delimited: bool,
     arena: &mut ParseArena,
 ) -> Vec<Comment> {
-    visit_list_impl(nodes, get_loc, walk_node, t, comments, newline_delimited, None, arena)
+    visit_list_impl(
+        nodes,
+        get_loc,
+        walk_node,
+        t,
+        comments,
+        newline_delimited,
+        None,
+        arena,
+    )
 }
 
 fn visit_list_impl<'a, T>(
@@ -2282,11 +2464,13 @@ fn visit_list_impl<'a, T>(
             let prev_loc_resolved = prev_loc_resolved.as_ref().unwrap();
             // Check if on same line
             if prev_loc_resolved.loc_end.line == curr_loc_resolved.loc_start.line {
-                let (after_prev, before_curr) = partition_adjacent_trailing(*prev_loc_idx, leading, arena);
+                let (after_prev, before_curr) =
+                    partition_adjacent_trailing(*prev_loc_idx, leading, arena);
                 CommentTable::attach(&mut t.trailing, *prev_loc_idx, after_prev);
                 CommentTable::attach(&mut t.leading, curr_loc, before_curr);
             } else {
-                let (on_same_line_as_prev, after_prev) = partition_by_on_same_line(*prev_loc_idx, leading, arena);
+                let (on_same_line_as_prev, after_prev) =
+                    partition_by_on_same_line(*prev_loc_idx, leading, arena);
                 CommentTable::attach(&mut t.trailing, *prev_loc_idx, on_same_line_as_prev);
                 let (before_curr, _, _) = partition_by_loc(after_prev, curr_loc, arena);
                 CommentTable::attach(&mut t.leading, curr_loc, before_curr);
@@ -2308,14 +2492,22 @@ fn visit_list_impl<'a, T>(
 }
 
 /// Create a comment table from a structure and comments.
-pub fn make_for_structure(structure: &[StructureItem], comments: Vec<Comment>, arena: &mut ParseArena) -> CommentTable {
+pub fn make_for_structure(
+    structure: &[StructureItem],
+    comments: Vec<Comment>,
+    arena: &mut ParseArena,
+) -> CommentTable {
     let mut table = CommentTable::new();
     walk_structure(structure, &mut table, comments, arena);
     table
 }
 
 /// Create a comment table from a signature and comments.
-pub fn make_for_signature(signature: &[SignatureItem], comments: Vec<Comment>, arena: &mut ParseArena) -> CommentTable {
+pub fn make_for_signature(
+    signature: &[SignatureItem],
+    comments: Vec<Comment>,
+    arena: &mut ParseArena,
+) -> CommentTable {
     let mut table = CommentTable::new();
     walk_signature(signature, &mut table, comments, arena);
     table

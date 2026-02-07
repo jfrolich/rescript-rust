@@ -302,8 +302,18 @@ impl<'src> Scanner<'src> {
     /// become 2-byte UTF-8 sequences).
     fn substring(&self, start: usize, end: usize) -> &'src str {
         // Get byte indices for the character range
-        let byte_start = self.src.char_indices().nth(start).map(|(i, _)| i).unwrap_or(self.src.len());
-        let byte_end = self.src.char_indices().nth(end).map(|(i, _)| i).unwrap_or(self.src.len());
+        let byte_start = self
+            .src
+            .char_indices()
+            .nth(start)
+            .map(|(i, _)| i)
+            .unwrap_or(self.src.len());
+        let byte_end = self
+            .src
+            .char_indices()
+            .nth(end)
+            .map(|(i, _)| i)
+            .unwrap_or(self.src.len());
         &self.src[byte_start..byte_end]
     }
 
@@ -482,9 +492,7 @@ impl<'src> Scanner<'src> {
 
                     // Check if it was a 3-digit decimal escape
                     let escape_text = self.substring(escape_start, escape_end);
-                    if escape_text.len() == 3
-                        && escape_text.chars().all(|c| c.is_ascii_digit())
-                    {
+                    if escape_text.len() == 3 && escape_text.chars().all(|c| c.is_ascii_digit()) {
                         // Convert decimal to hex format
                         if let Ok(value) = escape_text.parse::<u32>() {
                             if value <= 255 {
@@ -732,7 +740,11 @@ impl<'src> Scanner<'src> {
 
         let content_start_off = self.offset
             + if doc_comment {
-                if standalone { 4 } else { 3 }
+                if standalone {
+                    4
+                } else {
+                    3
+                }
             } else {
                 2
             };
@@ -1472,7 +1484,7 @@ impl<'src> Scanner<'src> {
                 '"' => {
                     let content_end = self.offset; // end of content (before closing quote)
                     self.next(); // consume closing quote
-                    // Return identifier without quotes
+                                 // Return identifier without quotes
                     let ident = self.substring(content_start, content_end).to_string();
                     return Token::Lident(ident);
                 }

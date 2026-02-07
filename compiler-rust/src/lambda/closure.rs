@@ -35,7 +35,10 @@ pub struct VarStats {
 impl VarStats {
     /// Create fresh statistics (unused, top position).
     pub fn fresh() -> Self {
-        VarStats { top: true, times: 0 }
+        VarStats {
+            top: true,
+            times: 0,
+        }
     }
 
     /// Create "sink" statistics for variables in loops.
@@ -120,12 +123,7 @@ pub fn free_variables_with_stats(
     let mut fv = params;
     let mut local_set: HashSet<Ident> = exports.clone();
 
-    fn iter(
-        lam: &Lambda,
-        pos: Position,
-        fv: &mut StatsMap,
-        local_set: &mut HashSet<Ident>,
-    ) {
+    fn iter(lam: &Lambda, pos: Position, fv: &mut StatsMap, local_set: &mut HashSet<Ident>) {
         match lam {
             Lambda::Lvar(v) => {
                 if !local_set.contains(v) {
@@ -334,10 +332,26 @@ mod tests {
 
     #[test]
     fn test_var_stats_top_and_used_zero_or_one() {
-        assert!(VarStats { top: true, times: 0 }.top_and_used_zero_or_one());
-        assert!(VarStats { top: true, times: 1 }.top_and_used_zero_or_one());
-        assert!(!VarStats { top: true, times: 2 }.top_and_used_zero_or_one());
-        assert!(!VarStats { top: false, times: 1 }.top_and_used_zero_or_one());
+        assert!(VarStats {
+            top: true,
+            times: 0
+        }
+        .top_and_used_zero_or_one());
+        assert!(VarStats {
+            top: true,
+            times: 1
+        }
+        .top_and_used_zero_or_one());
+        assert!(!VarStats {
+            top: true,
+            times: 2
+        }
+        .top_and_used_zero_or_one());
+        assert!(!VarStats {
+            top: false,
+            times: 1
+        }
+        .top_and_used_zero_or_one());
     }
 
     #[test]
@@ -433,10 +447,7 @@ mod tests {
         let x = Ident::create_local("x");
 
         // while true do x
-        let while_loop = Lambda::while_(
-            Lambda::true_(),
-            Lambda::var(x.clone()),
-        );
+        let while_loop = Lambda::while_(Lambda::true_(), Lambda::var(x.clone()));
 
         let fv = free_variables_with_stats(&HashSet::new(), HashMap::new(), &while_loop);
 

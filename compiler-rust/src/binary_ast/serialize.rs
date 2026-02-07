@@ -255,10 +255,7 @@ mod tests {
         v.marshal(&mut w);
         // Cons(1, Cons(2, Cons(3, nil)))
         // Block(0,2), 1, Block(0,2), 2, Block(0,2), 3, 0
-        assert_eq!(
-            w.payload(),
-            &[0xA0, 0x41, 0xA0, 0x42, 0xA0, 0x43, 0x40]
-        );
+        assert_eq!(w.payload(), &[0xA0, 0x41, 0xA0, 0x42, 0xA0, 0x43, 0x40]);
     }
 
     #[test]
@@ -283,10 +280,7 @@ mod tests {
     fn test_string() {
         let mut w = MarshalWriter::new();
         "hello".marshal(&mut w);
-        assert_eq!(
-            w.payload(),
-            &[0x25, b'h', b'e', b'l', b'l', b'o']
-        );
+        assert_eq!(w.payload(), &[0x25, b'h', b'e', b'l', b'l', b'o']);
     }
 
     #[test]
@@ -317,7 +311,7 @@ mod tests {
             &[
                 0xA0, 0x21, b'a', // Cons cell 1, "a"
                 0xA0, 0x21, b'b', // Cons cell 2, "b"
-                0x40              // nil
+                0x40  // nil
             ]
         );
     }

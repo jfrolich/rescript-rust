@@ -304,13 +304,11 @@ mod tests {
         assert!(!Constant::int(42).is_allocating());
         assert!(!Constant::string("hello").is_allocating());
         assert!(Constant::Some(Box::new(Constant::int(42))).is_allocating());
-        assert!(
-            Constant::Block {
-                tag: 0,
-                tag_info: TagInfo::Tuple,
-                elements: vec![Constant::int(1), Constant::int(2)],
-            }
-            .is_allocating()
-        );
+        assert!(Constant::Block {
+            tag: 0,
+            tag_info: TagInfo::Tuple,
+            elements: vec![Constant::int(1), Constant::int(2)],
+        }
+        .is_allocating());
     }
 }

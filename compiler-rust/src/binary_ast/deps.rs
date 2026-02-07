@@ -9,6 +9,7 @@
 
 use std::collections::BTreeSet;
 
+use crate::parse_arena::{LidentIdx, ParseArena};
 use crate::parser::ast::{
     Case, ConstructorArguments, CoreType, CoreTypeDesc, Expression, ExpressionDesc,
     ExtensionConstructor, ExtensionConstructorKind, IncludeDeclaration, IncludeDescription,
@@ -17,7 +18,6 @@ use crate::parser::ast::{
     Payload, RowField, SignatureItem, SignatureItemDesc, StructureItem, StructureItemDesc,
     TypeDeclaration, TypeExtension, TypeKind, ValueBinding, ValueDescription, WithConstraint,
 };
-use crate::parse_arena::{LidentIdx, ParseArena};
 use crate::parser::longident::Longident;
 
 /// A set of module dependencies, sorted for deterministic output.
@@ -71,7 +71,11 @@ impl<'a> DependencyCollector<'a> {
             let first_str = self.arena.get_string(*first);
             // Only add if it starts with uppercase (module reference)
             // Lowercase identifiers are local bindings
-            if first_str.chars().next().is_some_and(|c| c.is_ascii_uppercase()) {
+            if first_str
+                .chars()
+                .next()
+                .is_some_and(|c| c.is_ascii_uppercase())
+            {
                 self.deps.insert(first_str.to_string());
             }
         }
@@ -212,10 +216,7 @@ impl<'a> DependencyCollector<'a> {
                 self.add_expression(body);
             }
             ExpressionDesc::Pexp_fun {
-                default,
-                lhs,
-                rhs,
-                ..
+                default, lhs, rhs, ..
             } => {
                 if let Some(default) = default {
                     self.add_expression(default);

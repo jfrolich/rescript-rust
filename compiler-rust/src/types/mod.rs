@@ -59,11 +59,11 @@ pub use decl::{
     PrimitiveDescription, RecStatus, RecordRepresentation, Signature, SignatureItem,
     TypeDeclaration, TypeInlinedType, TypeKind, UnboxedStatus, ValueDescription, ValueKind,
 };
-pub use path::{NOPOS, Path, Typath};
+pub use path::{Path, Typath, NOPOS};
 pub use type_expr::{
-    AbbrevMemo, AbbrevMemoRef, Commutable, CommutableRef, FieldKind, FieldKindRef, GENERIC_LEVEL,
-    LOWEST_LEVEL, ObjectName, PIVOT_LEVEL, RowDesc, RowField, RowFieldRef, TypeArg, TypeDesc,
-    TypeDescSer, TypeExpr, TypeExprRef,
+    AbbrevMemo, AbbrevMemoRef, Commutable, CommutableRef, FieldKind, FieldKindRef, ObjectName,
+    RowDesc, RowField, RowFieldRef, TypeArg, TypeDesc, TypeDescSer, TypeExpr, TypeExprRef,
+    GENERIC_LEVEL, LOWEST_LEVEL, PIVOT_LEVEL,
 };
 pub use variance::{Variance, VarianceFlag};
 
@@ -76,18 +76,18 @@ pub use btype::{
 
 // ctype exports
 pub use ctype::{
-    SubtypeContext, TypeError, TypePair, TypeResult, UnifyMode, UnifyState, copy_type, deep_occur,
-    function_arity, generalize, generalize_structure, instance, is_function, link_type, occurs,
-    split_arrow, tuple_elements, unify, update_level,
+    copy_type, deep_occur, function_arity, generalize, generalize_structure, instance, is_function,
+    link_type, occurs, split_arrow, tuple_elements, unify, update_level, SubtypeContext, TypeError,
+    TypePair, TypeResult, UnifyMode, UnifyState,
 };
 
 // env exports
-pub use env::{BindingTable, Env, EnvError, EnvFlags, EnvResult, EnvSummary, initial_env};
+pub use env::{initial_env, BindingTable, Env, EnvError, EnvFlags, EnvResult, EnvSummary};
 
 // typecore exports
 pub use typecore::{
-    PatternMode, PatternState, TypeCheckContext, TypeClashContext, TypeCoreError, TypeCoreResult,
-    type_binding, type_expression, type_pattern,
+    type_binding, type_expression, type_pattern, PatternMode, PatternState, TypeCheckContext,
+    TypeClashContext, TypeCoreError, TypeCoreResult,
 };
 
 // typedtree exports
@@ -97,12 +97,12 @@ pub use typedtree::{
 };
 
 // typemod exports
-pub use typemod::{TypeModError, TypeModResult, type_module_expr, type_structure};
+pub use typemod::{type_module_expr, type_structure, TypeModError, TypeModResult};
 
 // includemod exports
 pub use includemod::{
-    IncludeModError, IncludeModResult, is_empty_signature, modtypes, signature_modules,
-    signature_types, signature_values, signatures,
+    is_empty_signature, modtypes, signature_modules, signature_types, signature_values, signatures,
+    IncludeModError, IncludeModResult,
 };
 
 #[cfg(test)]

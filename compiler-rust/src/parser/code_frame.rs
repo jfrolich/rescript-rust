@@ -147,7 +147,11 @@ pub fn print(src: &str, start_pos: &Position, end_pos: &Position) -> String {
         .min()
         .unwrap_or(0);
 
-    let separator = if leading_space_to_cut == 0 { "│" } else { "┆" };
+    let separator = if leading_space_to_cut == 0 {
+        "│"
+    } else {
+        "┆"
+    };
 
     // Process lines with highlighting info
     let processed_lines: Vec<Line> = lines
@@ -166,8 +170,7 @@ pub fn print(src: &str, start_pos: &Position, end_pos: &Position) -> String {
                     end: 0,
                 }],
                 Gutter::Number(line_number) => {
-                    let highlight_start_col =
-                        (start_pos.cnum - start_pos.bol) as usize;
+                    let highlight_start_col = (start_pos.cnum - start_pos.bol) as usize;
                     let highlight_end_col = (end_pos.cnum - end_pos.bol) as usize;
 
                     let start = if *line_number == highlight_line_start {
@@ -333,7 +336,10 @@ mod tests {
             cnum: 115,
             ..Default::default()
         };
-        assert_eq!(format_location("test.res", &start, &end), "test.res:5:11-15");
+        assert_eq!(
+            format_location("test.res", &start, &end),
+            "test.res:5:11-15"
+        );
     }
 
     #[test]

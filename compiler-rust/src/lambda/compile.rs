@@ -7,6 +7,7 @@
 
 use crate::context::IdGenerator;
 use crate::ident::Ident;
+use crate::js_ir::op::{IdentInfo, Kind, LengthObject, MutableFlag, Number};
 use crate::js_ir::{
     BinOp, Block, CallInfo, Delim, Expression, ExpressionDesc, ForDirection, ModuleId, Program,
     Statement, StatementDesc, VariableDeclaration,
@@ -15,7 +16,6 @@ use crate::lambda::compat::{Comparison, FieldDbgInfo, LetKind};
 use crate::lambda::constant::{Constant, StringDelim};
 use crate::lambda::primitive::{Mutable, Primitive};
 use crate::lambda::{Apply, Lambda, LambdaSwitch};
-use crate::js_ir::op::{IdentInfo, Kind, LengthObject, MutableFlag, Number};
 
 /// Compilation result for an expression: prelude statements plus a value expression.
 #[derive(Debug, Clone)]
@@ -159,11 +159,8 @@ impl LambdaCompiler {
                 for (id, expr) in bindings {
                     let compiled = self.compile_expr(expr);
                     prelude.extend(compiled.prelude);
-                    let assign = Expression::bin(
-                        BinOp::Eq,
-                        Expression::var(id.clone()),
-                        compiled.expr,
-                    );
+                    let assign =
+                        Expression::bin(BinOp::Eq, Expression::var(id.clone()), compiled.expr);
                     prelude.push(Statement::exp(assign));
                 }
                 let body_compiled = self.compile_expr(body);
@@ -413,11 +410,31 @@ impl LambdaCompiler {
                 Box::new(compiled_args[0].clone()),
                 LengthObject::Array,
             )),
-            Paddint | Paddfloat => Expression::bin(BinOp::Plus, compiled_args[0].clone(), compiled_args[1].clone()),
-            Psubint | Psubfloat => Expression::bin(BinOp::Minus, compiled_args[0].clone(), compiled_args[1].clone()),
-            Pmulint | Pmulfloat => Expression::bin(BinOp::Mul, compiled_args[0].clone(), compiled_args[1].clone()),
-            Pdivint | Pdivfloat => Expression::bin(BinOp::Div, compiled_args[0].clone(), compiled_args[1].clone()),
-            Pmodint | Pmodfloat => Expression::bin(BinOp::Mod, compiled_args[0].clone(), compiled_args[1].clone()),
+            Paddint | Paddfloat => Expression::bin(
+                BinOp::Plus,
+                compiled_args[0].clone(),
+                compiled_args[1].clone(),
+            ),
+            Psubint | Psubfloat => Expression::bin(
+                BinOp::Minus,
+                compiled_args[0].clone(),
+                compiled_args[1].clone(),
+            ),
+            Pmulint | Pmulfloat => Expression::bin(
+                BinOp::Mul,
+                compiled_args[0].clone(),
+                compiled_args[1].clone(),
+            ),
+            Pdivint | Pdivfloat => Expression::bin(
+                BinOp::Div,
+                compiled_args[0].clone(),
+                compiled_args[1].clone(),
+            ),
+            Pmodint | Pmodfloat => Expression::bin(
+                BinOp::Mod,
+                compiled_args[0].clone(),
+                compiled_args[1].clone(),
+            ),
             Ppowfloat => {
                 // Math.pow(base, exponent)
                 let math = Expression::var(Ident::create_persistent("Math"));
@@ -428,12 +445,21 @@ impl LambdaCompiler {
                 ));
                 Expression::call(pow, compiled_args, CallInfo::default())
             }
-            Pintcomp(cmp) | Pfloatcomp(cmp) | Pbigintcomp(cmp) | Pstringcomp(cmp) | Pjscomp(cmp) => {
+            Pintcomp(cmp) | Pfloatcomp(cmp) | Pbigintcomp(cmp) | Pstringcomp(cmp)
+            | Pjscomp(cmp) => {
                 let op = comparison_to_binop(*cmp);
                 Expression::bin(op, compiled_args[0].clone(), compiled_args[1].clone())
             }
-            Psequand => Expression::bin(BinOp::And, compiled_args[0].clone(), compiled_args[1].clone()),
-            Psequor => Expression::bin(BinOp::Or, compiled_args[0].clone(), compiled_args[1].clone()),
+            Psequand => Expression::bin(
+                BinOp::And,
+                compiled_args[0].clone(),
+                compiled_args[1].clone(),
+            ),
+            Psequor => Expression::bin(
+                BinOp::Or,
+                compiled_args[0].clone(),
+                compiled_args[1].clone(),
+            ),
             Pnot => Expression::new(ExpressionDesc::JsNot(Box::new(compiled_args[0].clone()))),
             Pnegint | Pnegfloat => Expression::bin(
                 BinOp::Minus,
@@ -447,8 +473,12 @@ impl LambdaCompiler {
             )),
             Pfield(idx, info) => self.compile_field_access(*idx, info, &compiled_args[0]),
             Psetfield(idx, info) => {
-                let target = self.compile_set_field(*idx, info, &compiled_args[0], &compiled_args[1]);
-                Expression::new(ExpressionDesc::Seq(Box::new(target), Box::new(Expression::undefined(false))))
+                let target =
+                    self.compile_set_field(*idx, info, &compiled_args[0], &compiled_args[1]);
+                Expression::new(ExpressionDesc::Seq(
+                    Box::new(target),
+                    Box::new(Expression::undefined(false)),
+                ))
             }
             Pmakeblock(tag, tag_info, mutable_flag) => {
                 let js_mutable = match mutable_flag {
@@ -462,10 +492,12 @@ impl LambdaCompiler {
                     tag_info.clone(),
                 ))
             }
-            PrawJsCode(info) => Expression::new(ExpressionDesc::RawJsCode(crate::js_ir::JsRawInfo {
-                code: info.code.clone(),
-                is_stmt: info.is_stmt,
-            })),
+            PrawJsCode(info) => {
+                Expression::new(ExpressionDesc::RawJsCode(crate::js_ir::JsRawInfo {
+                    code: info.code.clone(),
+                    is_stmt: info.is_stmt,
+                }))
+            }
             Pdebugger => {
                 prelude.push(Statement::debugger());
                 Expression::undefined(false)
@@ -485,9 +517,11 @@ impl LambdaCompiler {
                 compiled_args,
                 CallInfo::default(),
             ),
-            PjsCall { prim_name, .. } => {
-                Expression::call(Expression::var(Ident::create_persistent(prim_name)), compiled_args, CallInfo::default())
-            }
+            PjsCall { prim_name, .. } => Expression::call(
+                Expression::var(Ident::create_persistent(prim_name)),
+                compiled_args,
+                CallInfo::default(),
+            ),
             _ => Expression::undefined(false),
         };
 
@@ -541,16 +575,19 @@ impl LambdaCompiler {
         }
     }
 
-    fn compile_field_access(&self, idx: i32, info: &FieldDbgInfo, target: &Expression) -> Expression {
+    fn compile_field_access(
+        &self,
+        idx: i32,
+        info: &FieldDbgInfo,
+        target: &Expression,
+    ) -> Expression {
         match info {
             FieldDbgInfo::Module { name }
             | FieldDbgInfo::Record { name, .. }
             | FieldDbgInfo::RecordInline { name }
-            | FieldDbgInfo::RecordExtension { name } => Expression::new(ExpressionDesc::StaticIndex(
-                Box::new(target.clone()),
-                name.clone(),
-                None,
-            )),
+            | FieldDbgInfo::RecordExtension { name } => Expression::new(
+                ExpressionDesc::StaticIndex(Box::new(target.clone()), name.clone(), None),
+            ),
             FieldDbgInfo::VariantTag => Expression::new(ExpressionDesc::StaticIndex(
                 Box::new(target.clone()),
                 "TAG".to_string(),
@@ -581,13 +618,9 @@ impl LambdaCompiler {
         let field = match info {
             crate::lambda::compat::SetFieldDbgInfo::RecordSet(name)
             | crate::lambda::compat::SetFieldDbgInfo::RecordInlineSet(name)
-            | crate::lambda::compat::SetFieldDbgInfo::RecordExtensionSet(name) => {
-                Expression::new(ExpressionDesc::StaticIndex(
-                    Box::new(target.clone()),
-                    name.clone(),
-                    None,
-                ))
-            }
+            | crate::lambda::compat::SetFieldDbgInfo::RecordExtensionSet(name) => Expression::new(
+                ExpressionDesc::StaticIndex(Box::new(target.clone()), name.clone(), None),
+            ),
         };
         Expression::bin(BinOp::Eq, field, value.clone())
     }

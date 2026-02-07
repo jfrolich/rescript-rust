@@ -115,20 +115,23 @@ pub mod recover {
 /// Common error messages for parsing.
 pub mod error_messages {
     /// Error message for list pattern spread.
-    pub const LIST_PATTERN_SPREAD: &str = "List pattern matches only supports one `...` spread, at the end.\n\
+    pub const LIST_PATTERN_SPREAD: &str =
+        "List pattern matches only supports one `...` spread, at the end.\n\
          Explanation: a list spread at the tail is efficient, but a spread in the \
          middle would create new lists; out of performance concern, our pattern \
          matching currently guarantees to never create new intermediate data.";
 
     /// Error message for record pattern spread.
-    pub const RECORD_PATTERN_SPREAD: &str = "Record spread (`...`) is not supported in pattern matches.\n\
+    pub const RECORD_PATTERN_SPREAD: &str =
+        "Record spread (`...`) is not supported in pattern matches.\n\
          Explanation: you can't collect a subset of a record's field into its own \
          record, since a record needs an explicit declaration and that subset \
          wouldn't have one.\n\
          Solution: you need to pull out each field you want explicitly.";
 
     /// Error message for array pattern spread.
-    pub const ARRAY_PATTERN_SPREAD: &str = "Array spread (`...`) is not supported in pattern matches.\n\n\
+    pub const ARRAY_PATTERN_SPREAD: &str =
+        "Array spread (`...`) is not supported in pattern matches.\n\n\
          Explanation: Allowing `...` here would require creating a new subarray at \
          match time, but for performance reasons pattern matching is guaranteed to \
          never create intermediate data.\n\n\
@@ -137,7 +140,8 @@ pub mod error_messages {
          - To extract a subarray: Use `Array.slice`";
 
     /// Error message for record expression spread.
-    pub const RECORD_EXPR_SPREAD: &str = "Records can only have one `...` spread, at the beginning.\n\
+    pub const RECORD_EXPR_SPREAD: &str =
+        "Records can only have one `...` spread, at the beginning.\n\
          Explanation: since records have a known, fixed shape, a spread like `{a, \
          ...b}` wouldn't make sense, as `b` would override every field of `a` \
          anyway.";
@@ -153,7 +157,8 @@ pub mod error_messages {
         "String interpolation is not supported in pattern matching.";
 
     /// Error message for type definition in function.
-    pub const TYPE_DEFINITION_IN_FUNCTION: &str = "Type definitions are not allowed inside functions.\n\
+    pub const TYPE_DEFINITION_IN_FUNCTION: &str =
+        "Type definitions are not allowed inside functions.\n\
          Move this `type` declaration to the top level or into a module.";
 
     /// Error message for type param.
@@ -213,19 +218,13 @@ pub fn if_let_attr(arena: &mut ParseArena) -> Attribute {
 /// Create the await attribute `@res.await` with location.
 pub fn make_await_attr(arena: &mut ParseArena, loc: Location) -> Attribute {
     let str_idx = arena.intern("res.await");
-    (
-        with_loc(str_idx, loc),
-        Payload::PStr(vec![]),
-    )
+    (with_loc(str_idx, loc), Payload::PStr(vec![]))
 }
 
 /// Create the braces attribute `@res.braces` with location.
 pub fn make_braces_attr(arena: &mut ParseArena, loc: Location) -> Attribute {
     let str_idx = arena.intern("res.braces");
-    (
-        with_loc(str_idx, loc),
-        Payload::PStr(vec![]),
-    )
+    (with_loc(str_idx, loc), Payload::PStr(vec![]))
 }
 
 /// Create the template literal attribute `@res.template`.
@@ -243,19 +242,13 @@ pub fn spread_attr(arena: &mut ParseArena) -> Attribute {
 /// Create the pattern variant spread attribute.
 pub fn make_pat_variant_spread_attr(arena: &mut ParseArena) -> Attribute {
     let str_idx = arena.intern("res.patVariantSpread");
-    (
-        mknoloc(str_idx),
-        Payload::PStr(vec![]),
-    )
+    (mknoloc(str_idx), Payload::PStr(vec![]))
 }
 
 /// Create the tagged template literal attribute.
 pub fn tagged_template_literal_attr(arena: &mut ParseArena) -> Attribute {
     let str_idx = arena.intern("res.taggedTemplate");
-    (
-        mknoloc(str_idx),
-        Payload::PStr(vec![]),
-    )
+    (mknoloc(str_idx), Payload::PStr(vec![]))
 }
 
 // ============================================================================
@@ -335,16 +328,17 @@ pub fn skip_doc_comments(p: &mut Parser<'_>) {
 }
 
 /// Convert a doc comment to a res.doc attribute.
-pub fn doc_comment_to_attribute(arena: &mut ParseArena, loc: Location, content: String) -> Attribute {
+pub fn doc_comment_to_attribute(
+    arena: &mut ParseArena,
+    loc: Location,
+    content: String,
+) -> Attribute {
     let str_idx = arena.intern("res.doc");
     let name = with_loc(str_idx, loc);
     let payload = Payload::PStr(vec![StructureItem {
         pstr_desc: StructureItemDesc::Pstr_eval(
             Expression {
-                pexp_desc: ExpressionDesc::Pexp_constant(Constant::String(
-                    content,
-                    None,
-                )),
+                pexp_desc: ExpressionDesc::Pexp_constant(Constant::String(content, None)),
                 pexp_loc: loc,
                 pexp_attributes: vec![],
             },
@@ -439,13 +433,19 @@ pub mod ast_helper {
 
     /// Create an identifier expression with arena-allocated longident.
     pub fn make_ident_idx(lid_idx: crate::parse_arena::LidentIdx, loc: Location) -> Expression {
-        make_expr(ExpressionDesc::Pexp_ident(with_loc(lid_idx, loc.clone())), loc)
+        make_expr(
+            ExpressionDesc::Pexp_ident(with_loc(lid_idx, loc.clone())),
+            loc,
+        )
     }
 
     /// Create an identifier expression (allocates in arena).
     pub fn make_ident(p: &mut Parser<'_>, lid: Longident, loc: Location) -> Expression {
         let lid_idx = p.push_longident(lid);
-        make_expr(ExpressionDesc::Pexp_ident(with_loc(lid_idx, loc.clone())), loc)
+        make_expr(
+            ExpressionDesc::Pexp_ident(with_loc(lid_idx, loc.clone())),
+            loc,
+        )
     }
 
     /// Create a constant expression.
@@ -457,10 +457,7 @@ pub mod ast_helper {
     pub fn make_unit(p: &mut Parser<'_>, loc: Location) -> Expression {
         let lid_idx = p.push_lident_static("()");
         make_expr(
-            ExpressionDesc::Pexp_construct(
-                with_loc(lid_idx, loc.clone()),
-                None,
-            ),
+            ExpressionDesc::Pexp_construct(with_loc(lid_idx, loc.clone()), None),
             loc,
         )
     }
@@ -592,7 +589,10 @@ pub mod ast_helper {
         lid_loc: Location,
         ptyp_loc: Location,
     ) -> CoreType {
-        make_typ(CoreTypeDesc::Ptyp_constr(with_loc(lid_idx, lid_loc), args), ptyp_loc)
+        make_typ(
+            CoreTypeDesc::Ptyp_constr(with_loc(lid_idx, lid_loc), args),
+            ptyp_loc,
+        )
     }
 }
 

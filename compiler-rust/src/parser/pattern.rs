@@ -10,7 +10,7 @@ use super::longident::Longident;
 use super::state::Parser;
 use super::token::Token;
 use crate::location::Position;
-use crate::parse_arena::{Located, LocIdx, StrIdx};
+use crate::parse_arena::{LocIdx, Located, StrIdx};
 
 // ============================================================================
 // Attribute Parsing for Patterns
@@ -31,7 +31,11 @@ fn parse_attributes(p: &mut Parser<'_>) -> Attributes {
                 let content = content.clone();
                 p.next();
                 let loc = p.from_location(&loc_cloned);
-                attrs.push(super::core::doc_comment_to_attribute(p.arena_mut(), loc, content));
+                attrs.push(super::core::doc_comment_to_attribute(
+                    p.arena_mut(),
+                    loc,
+                    content,
+                ));
             }
             _ => break,
         }
@@ -279,7 +283,10 @@ fn parse_single_pattern_with_alias(p: &mut Parser<'_>) -> Pattern {
         let loc = p.mk_loc_to_prev_end(&start_pos);
         let name_idx = p.arena_mut().push_string(name.to_string());
         pat = Pattern {
-            ppat_desc: PatternDesc::Ppat_alias(Box::new(pat), with_loc(name_idx, name_with_attrs_loc)),
+            ppat_desc: PatternDesc::Ppat_alias(
+                Box::new(pat),
+                with_loc(name_idx, name_with_attrs_loc),
+            ),
             ppat_loc: loc,
             ppat_attributes: alias_attrs,
         };
@@ -987,7 +994,11 @@ fn parse_record_pattern(p: &mut Parser<'_>) -> Pattern {
         }
         // For optional punned fields, the pattern location starts after the '?'
         // OCaml: the pattern location is just the identifier, not including '? '
-        let pat_start = if opt_punning { p.start_pos.clone() } else { field_start.clone() };
+        let pat_start = if opt_punning {
+            p.start_pos.clone()
+        } else {
+            field_start.clone()
+        };
 
         // Support qualified record labels in patterns: {Module.label: pat}
         // (also needed for ambiguity disambiguation, mirroring OCaml syntax).
@@ -1178,7 +1189,10 @@ fn parse_extension_pattern(p: &mut Parser<'_>, start_pos: crate::location::Posit
 }
 
 /// Parse a template literal pattern: `foo` (and consumes interpolations if present).
-fn parse_template_literal_pattern(p: &mut Parser<'_>, start_pos: crate::location::Position) -> Pattern {
+fn parse_template_literal_pattern(
+    p: &mut Parser<'_>,
+    start_pos: crate::location::Position,
+) -> Pattern {
     let mut text = String::new();
 
     if p.token == Token::Backtick {

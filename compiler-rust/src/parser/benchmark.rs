@@ -404,7 +404,10 @@ mod tests {
     #[ignore] // Run with `cargo test benchmark_all -- --ignored --nocapture`
     fn benchmark_all() {
         if !ocaml_parser_available() {
-            eprintln!("Skipping benchmarks: OCaml parser not found at {}", OCAML_PARSER_PATH);
+            eprintln!(
+                "Skipping benchmarks: OCaml parser not found at {}",
+                OCAML_PARSER_PATH
+            );
             return;
         }
 

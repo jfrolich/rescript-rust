@@ -434,9 +434,7 @@ mod tests {
         assert!(Primitive::Paddint.eq_approx(&Primitive::Paddint));
         assert!(!Primitive::Paddint.eq_approx(&Primitive::Psubint));
 
-        assert!(
-            Primitive::Pintcomp(Comparison::Eq).eq_approx(&Primitive::Pintcomp(Comparison::Eq))
-        );
+        assert!(Primitive::Pintcomp(Comparison::Eq).eq_approx(&Primitive::Pintcomp(Comparison::Eq)));
         assert!(
             !Primitive::Pintcomp(Comparison::Eq).eq_approx(&Primitive::Pintcomp(Comparison::Neq))
         );

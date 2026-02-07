@@ -15,17 +15,15 @@
 //! - `compiler/frontend/ast_external.ml`
 
 use crate::intern::StrIdx;
-use crate::parse_arena::{LidentIdx, Located, LocIdx, ParseArena};
+use crate::parse_arena::{LidentIdx, LocIdx, Located, ParseArena};
 use crate::parser::ast::{
-    self as current, Attribute, CoreType, CoreTypeDesc, Expression, ExpressionDesc,
-    SignatureItem, SignatureItemDesc, StructureItem, StructureItemDesc,
-    ValueDescription,
+    self as current, Attribute, CoreType, CoreTypeDesc, Expression, ExpressionDesc, SignatureItem,
+    SignatureItemDesc, StructureItem, StructureItemDesc, ValueDescription,
 };
 use crate::parser::longident::Longident;
 
 use super::ffi_types::{
-    encode_ffi_type, Delim, ExternalSpec, FfiType, LamConstant, Params,
-    PointerInfo, ReturnWrapper,
+    encode_ffi_type, Delim, ExternalSpec, FfiType, LamConstant, Params, PointerInfo, ReturnWrapper,
 };
 
 /// The list of attributes that indicate a ReScript external
@@ -176,22 +174,32 @@ fn parse_external_attrs(attrs: &[Attribute], prim_name: &str, arena: &ParseArena
         let name = arena.get_string(attr_name.txt);
         match name {
             "val" => {
-                desc.val_name = Some(get_payload_string(payload, arena).unwrap_or_else(|| prim_name.to_string()));
+                desc.val_name = Some(
+                    get_payload_string(payload, arena).unwrap_or_else(|| prim_name.to_string()),
+                );
             }
             "module" => {
                 desc.module_name = get_payload_string(payload, arena);
             }
             "send" => {
-                desc.send_name = Some(get_payload_string(payload, arena).unwrap_or_else(|| prim_name.to_string()));
+                desc.send_name = Some(
+                    get_payload_string(payload, arena).unwrap_or_else(|| prim_name.to_string()),
+                );
             }
             "new" => {
-                desc.new_name = Some(get_payload_string(payload, arena).unwrap_or_else(|| prim_name.to_string()));
+                desc.new_name = Some(
+                    get_payload_string(payload, arena).unwrap_or_else(|| prim_name.to_string()),
+                );
             }
             "get" => {
-                desc.get_name = Some(get_payload_string(payload, arena).unwrap_or_else(|| prim_name.to_string()));
+                desc.get_name = Some(
+                    get_payload_string(payload, arena).unwrap_or_else(|| prim_name.to_string()),
+                );
             }
             "set" => {
-                desc.set_name = Some(get_payload_string(payload, arena).unwrap_or_else(|| prim_name.to_string()));
+                desc.set_name = Some(
+                    get_payload_string(payload, arena).unwrap_or_else(|| prim_name.to_string()),
+                );
             }
             "get_index" => {
                 desc.get_index = true;
@@ -215,7 +223,9 @@ fn parse_external_attrs(attrs: &[Attribute], prim_name: &str, arena: &ParseArena
                 if let Some(wrapper_str) = get_payload_string(payload, arena) {
                     desc.return_wrapper = match wrapper_str.as_str() {
                         "null_to_opt" => ReturnWrapper::ReturnNullToOpt,
-                        "nullable" | "null_undefined_to_opt" => ReturnWrapper::ReturnNullUndefinedToOpt,
+                        "nullable" | "null_undefined_to_opt" => {
+                            ReturnWrapper::ReturnNullUndefinedToOpt
+                        }
                         "identity" => ReturnWrapper::ReturnIdentity,
                         _ => ReturnWrapper::ReturnUnset,
                     };
@@ -251,7 +261,9 @@ fn get_payload_string(payload: &current::Payload, arena: &ParseArena) -> Option<
     match payload {
         current::Payload::PStr(items) if items.len() == 1 => {
             if let StructureItemDesc::Pstr_eval(expr, _) = &items[0].pstr_desc {
-                if let ExpressionDesc::Pexp_constant(current::Constant::String(s, _)) = &expr.pexp_desc {
+                if let ExpressionDesc::Pexp_constant(current::Constant::String(s, _)) =
+                    &expr.pexp_desc
+                {
                     return Some(s.clone());
                 }
             }
@@ -262,13 +274,19 @@ fn get_payload_string(payload: &current::Payload, arena: &ParseArena) -> Option<
 }
 
 /// Build FFI type from external description and type info
-fn build_ffi_type(desc: &ExternalDesc, prim_name: &str, arity: usize, result_is_unit: bool) -> FfiType {
+fn build_ffi_type(
+    desc: &ExternalDesc,
+    prim_name: &str,
+    arity: usize,
+    result_is_unit: bool,
+) -> FfiType {
     // Determine return wrapper
-    let return_wrapper = if result_is_unit && matches!(desc.return_wrapper, ReturnWrapper::ReturnUnset) {
-        ReturnWrapper::ReturnReplacedWithUnit
-    } else {
-        desc.return_wrapper.clone()
-    };
+    let return_wrapper =
+        if result_is_unit && matches!(desc.return_wrapper, ReturnWrapper::ReturnUnset) {
+            ReturnWrapper::ReturnReplacedWithUnit
+        } else {
+            desc.return_wrapper.clone()
+        };
 
     // Build params - simple case: just use ParamNumber for arity
     let params = Params::ParamNumber(arity as i64);
@@ -308,13 +326,19 @@ fn build_ffi_type(desc: &ExternalDesc, prim_name: &str, arity: usize, result_is_
     } else if arity == 0 {
         // No args = Js_var
         ExternalSpec::JsVar {
-            name: desc.val_name.as_ref().unwrap_or(&prim_name.to_string()).clone(),
+            name: desc
+                .val_name
+                .as_ref()
+                .unwrap_or(&prim_name.to_string())
+                .clone(),
             external_module_name: None, // TODO: handle module
             scopes: desc.scopes.clone(),
         }
     } else {
         // Default: Js_call
-        let name = desc.call_name.as_ref()
+        let name = desc
+            .call_name
+            .as_ref()
             .or(desc.val_name.as_ref())
             .cloned()
             .unwrap_or_else(|| prim_name.to_string());
@@ -357,10 +381,12 @@ pub fn encode_external(vd: &ValueDescription, arena: &ParseArena) -> EncodedExte
     // Get the primitive name
     let prim_name = match vd.pval_prim.first() {
         Some(name) => name.as_str(),
-        None => return EncodedExternal {
-            pval_prim: vd.pval_prim.clone(),
-            pval_attributes: vd.pval_attributes.clone(),
-        },
+        None => {
+            return EncodedExternal {
+                pval_prim: vd.pval_prim.clone(),
+                pval_attributes: vd.pval_attributes.clone(),
+            }
+        }
     };
 
     // Check if this is a ReScript external

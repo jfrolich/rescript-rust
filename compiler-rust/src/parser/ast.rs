@@ -10,7 +10,7 @@
 #![allow(missing_docs)]
 
 use crate::location::Position;
-use crate::parse_arena::{LidentIdx, Located, LocIdx, StrIdx};
+use crate::parse_arena::{LidentIdx, LocIdx, Located, StrIdx};
 use serde::{Deserialize, Serialize};
 
 use super::longident::Longident;
@@ -938,7 +938,10 @@ mod tests {
         assert!(ArgLabel::Nolabel.is_nolabel());
         assert!(!ArgLabel::Labelled(Located::mknoloc("x".to_string())).is_nolabel());
         assert!(ArgLabel::Optional(Located::mknoloc("x".to_string())).is_optional());
-        assert_eq!(ArgLabel::Labelled(Located::mknoloc("x".to_string())).name(), Some("x"));
+        assert_eq!(
+            ArgLabel::Labelled(Located::mknoloc("x".to_string())).name(),
+            Some("x")
+        );
     }
 
     #[test]

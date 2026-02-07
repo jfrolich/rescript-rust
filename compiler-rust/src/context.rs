@@ -20,8 +20,8 @@
 //! TypeContext (per-type-checking, future)
 //! ```
 
-use std::sync::Arc;
 use std::sync::atomic::{AtomicI32, Ordering};
+use std::sync::Arc;
 
 use crate::cache::ModuleCache;
 use crate::config::CompilerConfig;

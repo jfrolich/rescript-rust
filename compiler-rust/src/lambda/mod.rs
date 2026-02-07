@@ -351,7 +351,10 @@ impl Lambda {
 
     /// Check if this is the unit value (undefined with is_unit=true)
     pub fn is_unit(&self) -> bool {
-        matches!(self, Lambda::Lconst(Constant::JsUndefined { is_unit: true }))
+        matches!(
+            self,
+            Lambda::Lconst(Constant::JsUndefined { is_unit: true })
+        )
     }
 }
 

@@ -672,7 +672,10 @@ mod tests {
         });
         // HV box: if it doesn't fit, ALL breaks become newlines
         let newlines = result.matches('\n').count();
-        assert!(newlines == 0 || newlines == 5, "HV box should be all-or-nothing");
+        assert!(
+            newlines == 0 || newlines == 5,
+            "HV box should be all-or-nothing"
+        );
     }
 
     #[test]

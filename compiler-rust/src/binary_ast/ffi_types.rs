@@ -77,8 +77,13 @@ impl Marshal for LabelNoname {
 #[derive(Clone, Debug, PartialEq)]
 pub enum Label {
     ObjEmpty,
-    ObjLabel { name: String },
-    ObjOptional { name: String, for_sure_no_nested_option: bool },
+    ObjLabel {
+        name: String,
+    },
+    ObjOptional {
+        name: String,
+        for_sure_no_nested_option: bool,
+    },
 }
 
 impl Marshal for Label {
@@ -89,7 +94,10 @@ impl Marshal for Label {
                 w.write_block_header(0, 1);
                 w.write_string(name.as_bytes());
             }
-            Label::ObjOptional { name, for_sure_no_nested_option } => {
+            Label::ObjOptional {
+                name,
+                for_sure_no_nested_option,
+            } => {
                 w.write_block_header(1, 2);
                 w.write_string(name.as_bytes());
                 w.write_int(if *for_sure_no_nested_option { 1 } else { 0 });
@@ -101,8 +109,12 @@ impl Marshal for Label {
 /// Attribute type for arguments
 #[derive(Clone, Debug, PartialEq)]
 pub enum Attr {
-    PolyVarString { descr: Vec<(String, String)> },
-    PolyVar { descr: Option<Vec<(String, String)>> },
+    PolyVarString {
+        descr: Vec<(String, String)>,
+    },
+    PolyVar {
+        descr: Option<Vec<(String, String)>>,
+    },
     Int(Vec<(String, i64)>),
     ArgCst(Cst),
     ExternUnit,
@@ -286,7 +298,11 @@ pub enum ExternalSpec {
 impl Marshal for ExternalSpec {
     fn marshal(&self, w: &mut MarshalWriter) {
         match self {
-            ExternalSpec::JsVar { name, external_module_name, scopes } => {
+            ExternalSpec::JsVar {
+                name,
+                external_module_name,
+                scopes,
+            } => {
                 w.write_block_header(0, 3);
                 w.write_string(name.as_bytes());
                 marshal_option(w, external_module_name, |w, m| m.marshal(w));
@@ -296,7 +312,10 @@ impl Marshal for ExternalSpec {
                 w.write_block_header(1, 1);
                 m.marshal(w);
             }
-            ExternalSpec::JsModuleAsFn { external_module_name, splice } => {
+            ExternalSpec::JsModuleAsFn {
+                external_module_name,
+                splice,
+            } => {
                 w.write_block_header(2, 2);
                 external_module_name.marshal(w);
                 w.write_int(if *splice { 1 } else { 0 });
@@ -305,7 +324,13 @@ impl Marshal for ExternalSpec {
                 w.write_block_header(3, 1);
                 m.marshal(w);
             }
-            ExternalSpec::JsCall { name, external_module_name, splice, scopes, tagged_template } => {
+            ExternalSpec::JsCall {
+                name,
+                external_module_name,
+                splice,
+                scopes,
+                tagged_template,
+            } => {
                 w.write_block_header(4, 5);
                 w.write_string(name.as_bytes());
                 marshal_option(w, external_module_name, |w, m| m.marshal(w));
@@ -313,34 +338,53 @@ impl Marshal for ExternalSpec {
                 marshal_string_list(w, scopes);
                 w.write_int(if *tagged_template { 1 } else { 0 });
             }
-            ExternalSpec::JsSend { name, splice, js_send_scopes } => {
+            ExternalSpec::JsSend {
+                name,
+                splice,
+                js_send_scopes,
+            } => {
                 w.write_block_header(5, 3);
                 w.write_string(name.as_bytes());
                 w.write_int(if *splice { 1 } else { 0 });
                 marshal_string_list(w, js_send_scopes);
             }
-            ExternalSpec::JsNew { name, external_module_name, splice, scopes } => {
+            ExternalSpec::JsNew {
+                name,
+                external_module_name,
+                splice,
+                scopes,
+            } => {
                 w.write_block_header(6, 4);
                 w.write_string(name.as_bytes());
                 marshal_option(w, external_module_name, |w, m| m.marshal(w));
                 w.write_int(if *splice { 1 } else { 0 });
                 marshal_string_list(w, scopes);
             }
-            ExternalSpec::JsSet { js_set_name, js_set_scopes } => {
+            ExternalSpec::JsSet {
+                js_set_name,
+                js_set_scopes,
+            } => {
                 w.write_block_header(7, 2);
                 w.write_string(js_set_name.as_bytes());
                 marshal_string_list(w, js_set_scopes);
             }
-            ExternalSpec::JsGet { js_get_name, js_get_scopes } => {
+            ExternalSpec::JsGet {
+                js_get_name,
+                js_get_scopes,
+            } => {
                 w.write_block_header(8, 2);
                 w.write_string(js_get_name.as_bytes());
                 marshal_string_list(w, js_get_scopes);
             }
-            ExternalSpec::JsGetIndex { js_get_index_scopes } => {
+            ExternalSpec::JsGetIndex {
+                js_get_index_scopes,
+            } => {
                 w.write_block_header(9, 1);
                 marshal_string_list(w, js_get_index_scopes);
             }
-            ExternalSpec::JsSetIndex { js_set_index_scopes } => {
+            ExternalSpec::JsSetIndex {
+                js_set_index_scopes,
+            } => {
                 w.write_block_header(10, 1);
                 marshal_string_list(w, js_set_index_scopes);
             }
@@ -408,7 +452,11 @@ pub enum FfiType {
 impl Marshal for FfiType {
     fn marshal(&self, w: &mut MarshalWriter) {
         match self {
-            FfiType::FfiBs { params, return_wrapper, external_spec } => {
+            FfiType::FfiBs {
+                params,
+                return_wrapper,
+                external_spec,
+            } => {
                 w.write_block_header(0, 3);
                 params.marshal(w);
                 return_wrapper.marshal(w);
@@ -580,7 +628,11 @@ impl Marshal for LamConstant {
 
 // ========== Helper functions ==========
 
-fn marshal_option<T>(w: &mut MarshalWriter, opt: &Option<T>, f: impl FnOnce(&mut MarshalWriter, &T)) {
+fn marshal_option<T>(
+    w: &mut MarshalWriter,
+    opt: &Option<T>,
+    f: impl FnOnce(&mut MarshalWriter, &T),
+) {
     match opt {
         None => w.write_int(0),
         Some(val) => {

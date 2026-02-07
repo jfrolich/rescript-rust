@@ -187,14 +187,22 @@ fn write_ast_file<A: Marshal>(
 }
 
 /// Write a structure AST to a Vec<u8> (for testing).
-pub fn write_structure_ast_to_vec(source_path: &str, arena: &mut ParseArena, ast: &Structure) -> Vec<u8> {
+pub fn write_structure_ast_to_vec(
+    source_path: &str,
+    arena: &mut ParseArena,
+    ast: &Structure,
+) -> Vec<u8> {
     let deps = extract_structure_deps(arena, ast);
     let ast0 = map_structure(arena, ast);
     write_ast_to_vec(source_path, &deps, &ast0)
 }
 
 /// Write a signature AST to a Vec<u8> (for testing).
-pub fn write_signature_ast_to_vec(source_path: &str, arena: &mut ParseArena, ast: &Signature) -> Vec<u8> {
+pub fn write_signature_ast_to_vec(
+    source_path: &str,
+    arena: &mut ParseArena,
+    ast: &Signature,
+) -> Vec<u8> {
     let deps = extract_signature_deps(arena, ast);
     let ast0 = map_signature(arena, ast);
     write_ast_to_vec(source_path, &deps, &ast0)
@@ -277,7 +285,11 @@ mod tests {
         }
     }
 
-    fn make_module_ref_expr(arena: &mut crate::parse_arena::ParseArena, module: &str, name: &str) -> Expression {
+    fn make_module_ref_expr(
+        arena: &mut crate::parse_arena::ParseArena,
+        module: &str,
+        name: &str,
+    ) -> Expression {
         let lid_idx = arena.push_longident(Longident::ldot(Longident::lident(module), name));
         Expression {
             pexp_desc: ExpressionDesc::Pexp_ident(Located {
@@ -343,7 +355,10 @@ mod tests {
     fn test_with_dependencies() {
         let mut arena = make_test_arena();
         let ast = vec![StructureItem {
-            pstr_desc: StructureItemDesc::Pstr_eval(make_module_ref_expr(&mut arena, "Array", "map"), vec![]),
+            pstr_desc: StructureItemDesc::Pstr_eval(
+                make_module_ref_expr(&mut arena, "Array", "map"),
+                vec![],
+            ),
             pstr_loc: LocIdx::none(),
         }];
 
@@ -373,7 +388,10 @@ mod tests {
                 pstr_loc: LocIdx::none(),
             },
             StructureItem {
-                pstr_desc: StructureItemDesc::Pstr_eval(make_module_ref_expr(&mut arena, "Js", "log"), vec![]),
+                pstr_desc: StructureItemDesc::Pstr_eval(
+                    make_module_ref_expr(&mut arena, "Js", "log"),
+                    vec![],
+                ),
                 pstr_loc: LocIdx::none(),
             },
         ];
@@ -420,7 +438,8 @@ mod tests {
         assert!(!content.is_empty());
 
         // Verify marshal magic number is present
-        let dep_size = u32::from_be_bytes([content[0], content[1], content[2], content[3]]) as usize;
+        let dep_size =
+            u32::from_be_bytes([content[0], content[1], content[2], content[3]]) as usize;
         let source_path = "/test/test.res";
         let marshal_start = 4 + dep_size + source_path.len() + 1;
 
