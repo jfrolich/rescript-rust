@@ -180,77 +180,13 @@ These target the scanner and token representation, where the parser spends most 
 
 **Expected impact**: Reduce memory usage and improve comparison speed (pointer equality instead of string comparison).
 
-### Tier 2: Medium Impact, Low-Medium Effort
+### Tier 2: High Impact — AST Memory Layout
 
-#### 2.1 Token Kind/Value Split
+Analysis shows that the biggest performance wins are in AST node representation, not token handling. The parser processes one token at a time (no token array), so token SoA doesn't apply. But AST nodes are allocated on the heap, stored in large enums with massive padding waste, and carry empty attribute vectors. Fixing these is where the Roc/OXC/Sampson research results actually apply.
 
-**Current**: Single `Token` enum carries both the kind and the value (e.g., `Lident(String)`).
+#### 2.1 Enforce 16-byte Enum Sizes (OXC Pattern)
 
-**Proposed**: Split into `TokenKind` (small enum, no data) and separate value storage. The kind is checked frequently during parsing; making it smaller improves branch prediction and cache usage.
-
-**Approach**:
-```
-enum TokenKind { Lident, Uident, Int, Float, String, ... }  // 1-2 bytes
-struct TokenValue { ... }  // Stored separately, accessed only when needed
-```
-
-#### 2.2 Reduce Token Enum Size
-
-**Current**: Token is 102 variants with embedded data, likely 40+ bytes per token.
-
-**Proposed**: Minimize token size by storing data out-of-band. Measure `std::mem::size_of::<Token>()` and target 8-16 bytes.
-
-#### 2.3 Strategic `#[inline]` Annotations
-
-**Current**: Compiler decides inlining heuristics.
-
-**Proposed**: Profile-guided `#[inline]` and `#[inline(always)]` on hot scanner/parser methods like `next()`, `peek()`, `scan()`, `expect()`.
-
-#### 2.4 Lookup Tables for Character Classification
-
-**Current**: Character classification uses match statements or if-chains.
-
-**Proposed**: 256-byte lookup tables for ASCII character properties (is_ident_start, is_digit, is_whitespace, etc.). Single array index instead of branching.
-
-#### 2.5 Marshal Vec Pre-allocation
-
-**Current**: `MarshalWriter` grows its `Vec<u8>` buffer dynamically.
-
-**Proposed**: Pre-allocate based on source file size heuristic (e.g., 4x source size for binary AST output). Avoids repeated reallocation during serialization.
-
-### Tier 3: Medium Impact, Higher Effort
-
-#### 3.1 SmallVec for AST Nodes
-
-**Current**: AST nodes use `Vec<T>` for children (e.g., function args, tuple elements).
-
-**Proposed**: Use `SmallVec<[T; N]>` for common small collections (most functions have 1-3 args, most tuples have 2-3 elements). Avoids heap allocation for typical cases.
-
-#### 3.2 SIMD-Accelerated Whitespace/Comment Skipping
-
-**Current**: Whitespace skipping is character-by-character.
-
-**Proposed**: Use SIMD instructions (SSE2/NEON) to skip runs of whitespace and find the next non-whitespace character in 16-byte chunks.
-
-**Expected impact**: Significant for files with lots of whitespace/indentation. OXC uses this technique.
-
-#### 3.3 Optimize `is_binary_op` and Precedence Lookup
-
-**Current**: Operator precedence uses a match on Token enum.
-
-**Proposed**: Encode precedence directly in the token kind (e.g., as a byte alongside the kind discriminant), eliminating the match.
-
-#### 3.4 Optimize Breadcrumb Management
-
-**Current**: Breadcrumbs (grammar context stack) use `Vec<Grammar>` with push/pop.
-
-**Proposed**: Use a fixed-size stack (array + index) for breadcrumbs, since maximum nesting depth is bounded. Avoids Vec allocation and bounds checks.
-
-### Data-Oriented Design (New — Research-Backed)
-
-#### Enforce 16-byte Enum Sizes (OXC Pattern)
-
-**Current**: AST desc enums are large (ExpressionDesc ~80-120 bytes, Token ~40-48 bytes) because the enum size equals the size of the largest variant.
+**Current**: AST desc enums are large (ExpressionDesc ~80-120 bytes, Token ~40-48 bytes) because the enum size equals the size of the largest variant. But 85%+ of ExpressionDesc variants need <16 bytes — `Pexp_ident`, `Pexp_constant`, etc. are tiny. The enum is dominated by `Pexp_fun` (~100+ bytes, 6 fields) and `Pexp_apply` (~60 bytes, Vec).
 
 **Proposed**: Box large variants to keep all enums at 16 bytes max. OXC enforces this with compile-time tests and measured a **10% speedup** from improved cache behavior.
 
@@ -271,17 +207,19 @@ enum ExpressionDesc {
 }
 ```
 
-#### Attributes Side Table
+#### 2.2 Attributes Side Table
 
-**Current**: Every AST node stores `Vec<Attribute>` inline, adding 24 bytes even when empty (most nodes have no attributes).
+**Current**: Every AST node stores `Vec<Attribute>` inline, adding 24 bytes even when empty (~95% of nodes have no attributes).
 
-**Proposed**: Move attributes to a separate side table indexed by node ID. Only nodes with attributes have entries. Reduces the size of every Expression, Pattern, and CoreType node.
+**Proposed**: Move attributes to a separate side table indexed by node ID. Only nodes with attributes have entries. Reduces the size of every Expression, Pattern, and CoreType node by 24 bytes.
 
-#### Index-Based AST (ExprIdx/PatIdx)
+**Combined with 2.1**: These two together could shrink Expression from ~150 bytes to ~20-24 bytes.
 
-**Current**: AST nodes use `Box<Expression>`, `Vec<Expression>` etc. for tree structure.
+#### 2.3 Index-Based AST (ExprIdx/PatIdx)
 
-**Proposed**: Store all AST nodes in flat `Vec<Expression>` pools in `ParseArena`, referenced by `ExprIdx(u32)` indices. This extends the existing arena pattern (`LocIdx`, `StrIdx`, `LidentIdx`, `ArityIdx`) to all AST nodes.
+**Current**: AST nodes use `Box<Expression>`, `Vec<Expression>` etc. for tree structure. Each node is a separate heap allocation.
+
+**Proposed**: Store all AST nodes in flat `Vec<Expression>` pools in `ParseArena`, referenced by `ExprIdx(u32)` indices. This extends the existing arena pattern (`LocIdx`, `StrIdx`, `LidentIdx`, `ArityIdx`) to all AST nodes. Eliminates per-node heap allocation.
 
 **Expected impact**: Adrian Sampson (Cornell) measured a **2.4x speedup** from this transformation. 38% of the original time was spent on `free()` alone; even excluding deallocation, the flat version was 1.5x faster from cache locality. Sorbet (Stripe's Ruby type checker) uses this exact pattern.
 
@@ -314,6 +252,50 @@ enum ExpressionDesc {
 }
 ```
 
+### Tier 3: Medium Impact, Low-Medium Effort
+
+#### 3.1 Strategic `#[inline]` Annotations
+
+**Current**: Compiler decides inlining heuristics.
+
+**Proposed**: Profile-guided `#[inline]` and `#[inline(always)]` on hot scanner/parser methods like `next()`, `peek()`, `scan()`, `expect()`.
+
+#### 3.2 Lookup Tables for Character Classification
+
+**Current**: Character classification uses match statements or if-chains.
+
+**Proposed**: 256-byte lookup tables for ASCII character properties (is_ident_start, is_digit, is_whitespace, etc.). Single array index instead of branching.
+
+#### 3.3 Marshal Vec Pre-allocation
+
+**Current**: `MarshalWriter` grows its `Vec<u8>` buffer dynamically.
+
+**Proposed**: Pre-allocate based on source file size heuristic (e.g., 4x source size for binary AST output). Avoids repeated reallocation during serialization.
+
+#### 3.4 SmallVec for AST Nodes
+
+**Current**: AST nodes use `Vec<T>` for children (e.g., function args, tuple elements).
+
+**Proposed**: Use `SmallVec<[T; N]>` for common small collections (most functions have 1-3 args, most tuples have 2-3 elements). Avoids heap allocation for typical cases.
+
+#### 3.5 Optimize `is_binary_op` and Precedence Lookup
+
+**Current**: Operator precedence uses a match on Token enum.
+
+**Proposed**: Encode precedence directly in the token kind (e.g., as a byte alongside the kind discriminant), eliminating the match.
+
+#### 3.6 Optimize Breadcrumb Management
+
+**Current**: Breadcrumbs (grammar context stack) use `Vec<Grammar>` with push/pop.
+
+**Proposed**: Use a fixed-size stack (array + index) for breadcrumbs, since maximum nesting depth is bounded. Avoids Vec allocation and bounds checks.
+
+### Removed: Token Kind/Value Split (SoA for Tokens)
+
+**Previously proposed**: Split `Token` enum into `TokenKind` (1-2 bytes) + separate `TokenValue` storage.
+
+**Removed because**: The parser processes one token at a time — there is no token array to SoA-ify. SoA benefits come from processing arrays of homogeneous data with better cache locality. With a single `Token<'a>` field in the Parser struct, splitting kind from value just adds indirection. The 367 token clones across parser files are almost all `Cow<'a, str>` payload extractions (`name.clone().into_owned()`), which SoA wouldn't help with. The Roc 12% SoA speedup was for AST node data-oriented design, not single-token processing.
+
 #### Super-Flat AST Packing
 
 **Current**: AST nodes are Rust structs with enum variants.
@@ -324,15 +306,23 @@ enum ExpressionDesc {
 
 ### Tier 4: Architectural (Longer Term)
 
-#### 4.1 Bump-Allocated AST (bumpalo)
+#### 4.1 SIMD-Accelerated Whitespace/Comment Skipping
+
+**Current**: Whitespace skipping is character-by-character.
+
+**Proposed**: Use SIMD instructions (SSE2/NEON) to skip runs of whitespace and find the next non-whitespace character in 16-byte chunks.
+
+**Expected impact**: Significant for files with lots of whitespace/indentation. OXC uses this technique.
+
+#### 4.2 Bump-Allocated AST (bumpalo)
 
 **Current**: AST nodes are heap-allocated via `Box<T>` and `Vec<T>`.
 
 **Proposed**: Allocate all AST nodes from a bump allocator (e.g., `bumpalo`). The entire AST is freed at once when parsing completes. Eliminates individual deallocation overhead. OXC measured **~20% speedup** from this.
 
-**Note**: If index-based AST is done first, bumpalo may have less incremental value since most allocations are already eliminated.
+**Note**: If index-based AST (2.3) is done first, bumpalo may have less incremental value since most allocations are already eliminated.
 
-#### 4.2 Profile-Guided Optimization (PGO)
+#### 4.3 Profile-Guided Optimization (PGO)
 
 **Current**: Standard release build with LTO.
 
@@ -364,7 +354,7 @@ RUSTFLAGS="-Cprofile-use=/tmp/pgo-data/merged.profdata" cargo build --release
 | Arena allocation (bumpalo) | OXC parser | ~20% speedup |
 | Enum size enforcement (16 bytes) | OXC parser | ~10% speedup |
 | Span compression (u32 offsets) | OXC parser | ~5% speedup |
-| SoA / data-oriented design | Roc compiler | 12% speedup, 12% less memory |
+| Data-oriented design (AST nodes) | Roc compiler | 12% speedup, 12% less memory |
 | Index-based flat AST | Adrian Sampson (Cornell) | 2.4x speedup |
 | Super-flat 8-byte nodes | jhwlr.io | ~3x memory reduction |
 | String interning | Sorbet (Stripe) | Integer comparison vs string comparison |

@@ -83,13 +83,15 @@ Some optimizations may seem to conflict with byte-for-byte binary AST parity. Fo
 
 | File | Purpose |
 |------|---------|
-| `compiler-rust/src/parser/scanner.rs` | Scanner — primary optimization target |
-| `compiler-rust/src/parser/token.rs` | Token enum — size and allocation optimization |
+| `compiler-rust/src/parser/ast.rs` | AST nodes — **primary optimization target** (enum sizes, attributes, allocation) |
+| `compiler-rust/src/parse_arena.rs` | Arena allocation — index-based AST pools |
+| `compiler-rust/src/parser/scanner.rs` | Scanner — byte-level scanning, character classification |
+| `compiler-rust/src/parser/token.rs` | Token enum — size optimization |
 | `compiler-rust/src/parser/state.rs` | Parser state — position tracking, breadcrumbs |
 | `compiler-rust/src/parser/expr.rs` | Expression parsing — hot parsing loops |
 | `compiler-rust/src/parser/benchmark.rs` | Benchmark harness |
-| `compiler-rust/src/binary_ast/marshal.rs` | Marshal writer — buffer allocation |
-| `compiler-rust/src/parser/ast.rs` | AST nodes — allocation patterns |
+| `compiler-rust/src/binary_ast/marshal.rs` | Marshal writer — buffer allocation, sharing tables |
+| `compiler-rust/src/intern.rs` | String interner — Rc removal target (task 1.4) |
 
 ## Current Architecture
 
