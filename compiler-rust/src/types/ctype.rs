@@ -307,25 +307,30 @@ fn try_expand_head(
     let desc = ctx.get_desc(ty);
     match &*desc {
         TypeDesc::Tconstr { path, args, .. } => {
-            // Try env first, then fall back to global type store
+            // Look up type by name to find manifests for alias expansion.
+            // We use find_type (name-based) rather than lookup_type (ident-based)
+            // because persistent idents share stamp 0, causing stamp-based lookup
+            // to return the wrong type declaration.
             let name = path.head_name().to_string();
-            let env_decl = env.lookup_type(path).ok();
 
+            // Try env by name first
+            let env_decl = env.find_type(&name).ok();
             if let Some(decl) = env_decl {
-                let manifest = match decl.type_manifest {
-                    Some(m) => m,
-                    None => return None,
-                };
-                let params = &decl.type_params;
-                if params.is_empty() {
-                    drop(desc);
-                    return Some(manifest);
-                } else if params.len() == args.len() {
-                    let params_vec: Vec<TypeExprRef> = params.clone();
-                    let args_vec: Vec<TypeExprRef> = args.clone();
-                    drop(desc);
-                    return Some(subst_type(ctx, &params_vec, &args_vec, manifest));
+                if let Some(manifest) = decl.type_manifest {
+                    let params = &decl.type_params;
+                    if params.is_empty() {
+                        drop(desc);
+                        return Some(manifest);
+                    } else if params.len() == args.len() {
+                        let params_vec: Vec<TypeExprRef> = params.clone();
+                        let args_vec: Vec<TypeExprRef> = args.clone();
+                        drop(desc);
+                        return Some(subst_type(ctx, &params_vec, &args_vec, manifest));
+                    }
+                    return None;
                 }
+                // Type found in env but no manifest — this is an abstract type,
+                // not expandable
                 return None;
             }
 
