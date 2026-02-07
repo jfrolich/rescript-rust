@@ -1757,10 +1757,10 @@ pub fn type_expect<'a>(
         }
 
         ED::Pexp_apply(inner) => {
-                    let PexpApply { funct,
-            args,
-            partial,
-            transformed_jsx, } = *inner;
+            let PexpApply { ref funct,
+            ref args,
+            ref partial,
+            ref transformed_jsx, } = **inner;
             // Function application
             type_application(
                 tctx,
@@ -1805,12 +1805,12 @@ pub fn type_expect<'a>(
         }
 
         ED::Pexp_fun(inner) => {
-                    let PexpFun { arg_label,
-            default,
-            lhs,
-            rhs,
-            arity,
-            is_async, } = *inner;
+            let PexpFun { ref arg_label,
+            ref default,
+            ref lhs,
+            ref rhs,
+            ref arity,
+            ref is_async, } = **inner;
             // Function expression
             type_function(
                 tctx,

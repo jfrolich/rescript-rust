@@ -2395,7 +2395,7 @@ fn parse_let_bindings(
             // But for the Ptyp_poly in the pattern, we need to substitute Ptyp_constr -> Ptyp_var
             let (final_typ, newtype_info) = match *typ.ptyp_desc {
                 CoreTypeDesc::Ptyp_poly(inner) if is_locally_abstract => {
-                    let (ref vars, ref inner) = **inner;
+                    let (ref vars, ref inner) = *inner;
                     // Build the set of variable names for substitution
                     let var_set: std::collections::HashSet<String> =
                         vars.iter().map(|v| p.arena().get_string(v.txt).to_string()).collect();
@@ -2453,11 +2453,11 @@ fn parse_let_bindings(
             let wrapper_loc = wrapper_loc.expect("locally abstract let-binding should have wrapper loc");
             // Update Ppat_constraint and inner Ptyp_poly locations to use the binding location
             if let PatternDesc::Ppat_constraint(inner) = *pat.ppat_desc {
-                let (ref inner_pat, ref typ) = **inner;
+                let (ref inner_pat, ref typ) = *inner;
                 // Update the Ptyp_poly location to use binding location
                 let updated_typ = match *typ.ptyp_desc {
                     CoreTypeDesc::Ptyp_poly(inner) => {
-                        let (ref vars, ref inner) = **inner;
+                        let (ref vars, ref inner) = *inner;
                         CoreType {
                             ptyp_desc: Box::new(CoreTypeDesc::Ptyp_poly(Box::new((vars, inner)))),
                             ptyp_loc: wrapper_loc,
@@ -3251,7 +3251,7 @@ fn fix_spread_first_object_manifest(p: &mut Parser<'_>, typ: CoreType, is_spread
 
     match *typ.ptyp_desc {
         CoreTypeDesc::Ptyp_object(inner) => {
-                    let (ref fields, ref closed) = **inner;
+                    let (ref fields, ref closed) = *inner;
             // Only for CLOSED objects where first field is Oinherit (spread)
             // Open objects (from {.. ...spread}) should NOT use ghost location
             let first_is_spread = fields.first().map_or(false, |f| matches!(f, ObjectField::Oinherit(_)));
@@ -3265,7 +3265,7 @@ fn fix_spread_first_object_manifest(p: &mut Parser<'_>, typ: CoreType, is_spread
             }
         }
         CoreTypeDesc::Ptyp_alias(inner) => {
-                    let (ref inner, ref alias) = **inner;
+                    let (ref inner, ref alias) = *inner;
             // Recurse into inner type
             let (fixed_inner, applied) = fix_spread_first_object_manifest(p, *inner, true);
             if applied {
@@ -3285,7 +3285,7 @@ fn fix_spread_first_object_manifest(p: &mut Parser<'_>, typ: CoreType, is_spread
             }
         }
         CoreTypeDesc::Ptyp_arrow(inner) => {
-                    let (ref arg, ref ret, ref arity) = **inner;
+                    let (ref arg, ref ret, ref arity) = *inner;
             // Recurse into arg ONLY if this is the direct manifest level
             let (fixed_arg_typ, _) = fix_spread_first_object_manifest(p, arg.typ, true);
             let fixed_arg = TypeArg {
@@ -3313,7 +3313,7 @@ fn fix_spread_first_object_manifest(p: &mut Parser<'_>, typ: CoreType, is_spread
 fn fix_type_manifest_location(p: &mut Parser<'_>, typ: CoreType) -> CoreType {
     match &*typ.ptyp_desc {
         CoreTypeDesc::Ptyp_constr(inner) => {
-                    let (ref lid, _) = **inner;
+                    let (ref lid, _) = *inner;
             // Only adjust for qualified identifiers (Ldot) WITHOUT attributes
             // When there are attributes, OCaml keeps the full extent including type args
             if p.arena().is_ldot(lid.txt) && typ.ptyp_attributes.is_empty() {
@@ -3330,7 +3330,7 @@ fn fix_type_manifest_location(p: &mut Parser<'_>, typ: CoreType) -> CoreType {
             }
         }
         CoreTypeDesc::Ptyp_arrow(inner) => {
-                    let (ref arg, ref ret, ref arity) = **inner;
+                    let (ref arg, ref ret, ref arity) = *inner;
             // Also adjust Ldot types in arrow parameter positions
             // But NOT in return types - OCaml keeps type args in return type ptyp_loc
             let fixed_arg = TypeArg {
@@ -3344,7 +3344,7 @@ fn fix_type_manifest_location(p: &mut Parser<'_>, typ: CoreType) -> CoreType {
             }
         }
         CoreTypeDesc::Ptyp_alias(inner) => {
-                    let (ref inner, ref alias_name) = **inner;
+                    let (ref inner, ref alias_name) = *inner;
             // Recurse into the aliased type (e.g., `Color.t<...> as 'rgb`)
             let fixed_inner = fix_type_manifest_location(p, inner.as_ref().clone());
             CoreType {

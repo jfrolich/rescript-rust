@@ -2376,7 +2376,7 @@ fn handle_external_ext(
             if let StructureItemDesc::Pstr_eval(e, _) = &*items[0].pstr_desc {
                 if let ExpressionDesc::Pexp_ident(Located { txt, .. }) = &*e.pexp_desc {
                     // Get the Longident and check if it's an Lident
-                    let lid = arena.get_longident(*txt);
+                    let lid = arena.get_longident(txt);
                     if let Longident::Lident(str_idx) = lid {
                         Some(arena.get_string(*str_idx).to_string())
                     } else {
@@ -3066,7 +3066,7 @@ fn wrap_with_unsafe_async(inner: Expression, loc: LocIdx, arena: &mut ParseArena
 fn add_promise_to_fun_body(expr: &Expression, loc: LocIdx, arena: &mut ParseArena) -> Expression {
     match &*expr.pexp_desc {
         ExpressionDesc::Pexp_fun(inner) => {
-            let PexpFun { ref arg_label, ref default, ref lhs, ref rhs, arity, is_async } = **inner;
+            let PexpFun { ref arg_label, ref default, ref lhs, ref rhs, ref arity, ref is_async } = **inner;
             // Recurse into rhs to find innermost body
             let new_rhs = add_promise_to_fun_body(rhs, loc, arena);
             Expression {
@@ -4314,7 +4314,7 @@ fn desugar_pipe(
 
         // a -> f(b, c) becomes f(a, b, c)
         ExpressionDesc::Pexp_apply(inner) => {
-            let PexpApply { ref funct, ref args, partial, transformed_jsx } = **inner;
+            let PexpApply { ref funct, ref args, ref partial, ref transformed_jsx } = **inner;
             let mut new_args = Vec::with_capacity(args.len() + 1);
             new_args.push((ArgLabel::Nolabel, a));
             new_args.extend(args.iter().cloned());
@@ -4433,7 +4433,7 @@ fn rewrite_expression_generic(expr: &Expression, arena: &mut ParseArena) -> Expr
         }
 
         ExpressionDesc::Pexp_fun(inner) => {
-            let PexpFun { ref arg_label, ref default, ref lhs, ref rhs, arity, is_async } = **inner;
+            let PexpFun { ref arg_label, ref default, ref lhs, ref rhs, ref arity, ref is_async } = **inner;
             // First, recursively rewrite the function components
             let rewritten_default = default.as_ref().map(|e| Box::new(rewrite_expression(e, arena)));
             let rewritten_lhs = rewrite_pattern(lhs, arena);
@@ -4465,7 +4465,7 @@ fn rewrite_expression_generic(expr: &Expression, arena: &mut ParseArena) -> Expr
         }
 
         ExpressionDesc::Pexp_apply(inner) => {
-            let PexpApply { ref funct, ref args, partial, transformed_jsx } = **inner;
+            let PexpApply { ref funct, ref args, ref partial, ref transformed_jsx } = **inner;
             ExpressionDesc::Pexp_apply(Box::new(PexpApply {
                 funct: Box::new(rewrite_expression(funct, arena)),
                 args: args
@@ -5303,7 +5303,7 @@ fn is_enum_polyvar(tdcl: &TypeDeclaration) -> Option<&[RowField]> {
                 // RowField::Rtag(name_loc, attrs, is_constant, types)
                 let all_nullary = row_fields.iter().all(|rf| {
                     match rf {
-                        RowField::Rtag(_name_loc, _attrs, is_constant, types) => *is_constant && types.is_empty(),
+                        RowField::Rtag(_name_loc, _attrs, is_constant, types) => is_constant && types.is_empty(),
                         _ => false,
                     }
                 });

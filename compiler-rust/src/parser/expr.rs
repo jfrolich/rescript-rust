@@ -4120,7 +4120,7 @@ fn parse_let_in_block_with_continuation_and_attrs(
         // Extract type variables and inner type if this is a Ptyp_poly from `type a.` syntax
         let (final_typ, newtype_info) = match *typ.ptyp_desc {
             CoreTypeDesc::Ptyp_poly(inner) if is_locally_abstract => {
-                    let (ref vars, ref inner) = **inner;
+                    let (ref vars, ref inner) = *inner;
                 // Build the set of variable names for substitution
                 let var_set: std::collections::HashSet<String> =
                     vars.iter().map(|v| p.arena().get_string(v.txt).to_string()).collect();
@@ -4173,11 +4173,11 @@ fn parse_let_in_block_with_continuation_and_attrs(
         let wrapper_loc = wrapper_loc.expect("locally abstract let-binding should have wrapper loc");
         // Update Ppat_constraint and inner Ptyp_poly locations to use the binding location
         if let PatternDesc::Ppat_constraint(inner) = *first_pat.ppat_desc {
-            let (ref inner_pat, ref typ) = **inner;
+            let (ref inner_pat, ref typ) = *inner;
             // Update the Ptyp_poly location to use binding location
             let updated_typ = match *typ.ptyp_desc {
                 CoreTypeDesc::Ptyp_poly(inner) => {
-                    let (ref vars, ref inner) = **inner;
+                    let (ref vars, ref inner) = *inner;
                     CoreType {
                         ptyp_desc: Box::new(CoreTypeDesc::Ptyp_poly(Box::new((vars, inner)))),
                         ptyp_loc: wrapper_loc,

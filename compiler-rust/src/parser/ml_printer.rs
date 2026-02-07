@@ -793,12 +793,12 @@ fn print_value_binding<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, pat: 
 
     match &*expr.pexp_desc {
         ExpressionDesc::Pexp_fun(inner) => {
-                    let PexpFun { arg_label,
-            default,
-            lhs,
-            rhs,
-            arity,
-            is_async, } = *inner;
+            let PexpFun { ref arg_label,
+            ref default,
+            ref lhs,
+            ref rhs,
+            ref arity,
+            ref is_async, } = **inner;
             // OCaml: pp f "%a@ %a" (simple_pattern ctxt) p pp_print_pexp_function x
             // where pp_print_pexp_function does: pp f "%s%s%a@ %a" async_str arity_str param recurse
             print_pattern(f, arena, pat);
@@ -1348,12 +1348,12 @@ fn print_expression_inner<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, ex
             }
         }
         ExpressionDesc::Pexp_fun(inner) => {
-                    let PexpFun { arg_label,
-            default,
-            lhs,
-            rhs,
-            arity,
-            is_async, } = *inner;
+            let PexpFun { ref arg_label,
+            ref default,
+            ref lhs,
+            ref rhs,
+            ref arity,
+            ref is_async, } = **inner;
             // OCaml: arity is only printed when explicitly set, not computed
             // Look up arity from arena (Arity is now ArityIdx)
             let arity_value = match arena.get_arity(*arity) {

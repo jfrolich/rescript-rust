@@ -709,7 +709,7 @@ pub fn fun_expr<'a>(arena: &ParseArena, expr: &'a Expression) -> (bool, Vec<FunP
                 lhs,
                 rhs,
                 arity,
-                is_async: expr_is_async, } = *inner;
+                is_async: expr_is_async, } = &**inner;
                 // Check is_async on the FIRST Pexp_fun we encounter
                 // (it may be nested inside Pexp_newtype)
                 if !found_first_pexp_fun {

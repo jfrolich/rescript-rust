@@ -37,7 +37,7 @@ fn get_string_tag(p: &Parser<'_>) -> Option<Cow<'static, str>> {
 pub fn substitute_type_vars(arena: &mut crate::parse_arena::ParseArena, typ: CoreType, vars: &HashSet<String>) -> CoreType {
     let new_desc = match *typ.ptyp_desc {
         CoreTypeDesc::Ptyp_constr(inner) => {
-                    let (ref lid, ref args) = **inner;
+                    let (ref lid, ref args) = *inner;
             // Check if this is a simple Lident that matches a type variable
             if args.is_empty() {
                 if let Longident::Lident(name_idx) = arena.get_longident(lid.txt) {
@@ -63,7 +63,7 @@ pub fn substitute_type_vars(arena: &mut crate::parse_arena::ParseArena, typ: Cor
             CoreTypeDesc::Ptyp_constr(inner)
         }
         CoreTypeDesc::Ptyp_arrow(inner) => {
-                    let (ref arg, ref ret, ref arity) = **inner;
+                    let (ref arg, ref ret, ref arity) = *inner;
                     CoreTypeDesc::Ptyp_arrow(Box::new((
                 Box::new(TypeArg {
                     attrs: arg.attrs.clone(),
@@ -81,15 +81,13 @@ pub fn substitute_type_vars(arena: &mut crate::parse_arena::ParseArena, typ: Cor
                 .collect(),
         ),
         CoreTypeDesc::Ptyp_poly(inner) => {
-                    let (ref poly_vars, ref body) = **inner;
             CoreTypeDesc::Ptyp_poly(inner)
         }
         CoreTypeDesc::Ptyp_alias(inner) => {
-                    let (ref inner, ref alias) = **inner;
             CoreTypeDesc::Ptyp_alias(inner)
         }
         CoreTypeDesc::Ptyp_object(inner) => {
-                    let (ref fields, ref closed) = **inner;
+                    let (ref fields, ref closed) = *inner;
             let new_fields = fields
                 .into_iter()
                 .map(|field| match field {
@@ -104,7 +102,7 @@ pub fn substitute_type_vars(arena: &mut crate::parse_arena::ParseArena, typ: Cor
             CoreTypeDesc::Ptyp_object(inner)
         }
         CoreTypeDesc::Ptyp_variant(inner) => {
-                    let (ref rows, ref closed, ref labels) = **inner;
+                    let (ref rows, ref closed, ref labels) = *inner;
             let new_rows = rows
                 .into_iter()
                 .map(|row| match row {
@@ -1039,7 +1037,7 @@ fn parse_function_type(p: &mut Parser<'_>, start_pos_idx: PosIdx) -> CoreType {
             // at post_doc_start. For nested arrows, the inner `.` extension moves the
             // first arg location before post_doc_start.
             if let CoreTypeDesc::Ptyp_arrow(inner) = *typ.ptyp_desc {
-                let (ref arg, ref ret, ref arity) = **inner;
+                let (ref arg, ref ret, ref arity) = *inner;
                 let first_arg_start = p.loc_start(arg.typ.ptyp_loc);
                 // If first arg location starts exactly at post_doc_start, it's a direct arrow
                 // If it starts elsewhere (before due to inner `.` or after due to parens), don't extend
@@ -1223,7 +1221,7 @@ fn parse_function_type(p: &mut Parser<'_>, start_pos_idx: PosIdx) -> CoreType {
     // Update the outermost arrow to have the full arity
     let result = match *result.ptyp_desc {
         CoreTypeDesc::Ptyp_arrow(inner) => {
-            let (ref arg, ref ret, ..) = **inner;
+            let (ref arg, ref ret, ..) = *inner;
             CoreType {
                 ptyp_desc: Box::new(CoreTypeDesc::Ptyp_arrow(Box::new((arg, ret, full_arity)))),
                 ptyp_loc: result.ptyp_loc,
