@@ -22,26 +22,41 @@ Read `RALPH_TODO.md` and complete the next unchecked task. After completing a ta
 5. Commit your changes with an atomic commit
 6. If all tasks are complete, output "RALPH_COMPLETE"
 
-### When an optimization is blocked by binary parity
+### When an optimization threatens binary parity
 
-Some optimizations may be incompatible with maintaining byte-for-byte binary AST parity. For example, changing AST node layout may affect marshal serialization order, or arena allocation may change object identity patterns that the marshal's sharing tables depend on.
+Some optimizations may seem to conflict with byte-for-byte binary AST parity. For example, changing AST node layout may affect marshal serialization order, or arena allocation may change object identity patterns that the marshal's sharing tables depend on.
 
-**If you determine an optimization cannot be done while preserving parity:**
-1. **Do the analysis first** — Actually investigate *why* parity breaks. Don't just assume it will. Try a prototype and run parity tests.
-2. **Document your findings in `PROGRESS.md`** — Write a clear explanation of:
-   - What you tried
+**Try hard to find a way to preserve parity.** Most optimizations CAN be made parity-safe with the right approach:
+
+1. **Prototype and test first** — Actually try the optimization and run `./scripts/test_parser_ast_parity.sh`. Don't assume it will break parity.
+2. **If parity breaks, analyze the root cause** — Use `python3 scripts/inspect_binary_ast.py test <file.res>` to understand exactly what changed. Is it serialization order? Object sharing? Position identity?
+3. **Try to fix the parity issue** — Common strategies:
+   - **Serialization order changed?** → Adjust the marshal code to traverse in the original order, even if internal layout differs.
+   - **Object sharing changed?** → Update the marshal's sharing tables to key on the new indices/references instead of the old ones.
+   - **Position identity changed?** → Ensure the new data structure preserves the same arena indices that the marshal depends on.
+   - **Decouple internal representation from serialization** — The internal AST can use a different layout than what gets serialized. Add a translation layer if needed.
+4. **Only defer as a last resort** — If after genuine effort you cannot preserve parity, document why in `PROGRESS.md`:
+   - What you tried (every approach, not just one)
    - How parity broke (which files, what kind of difference)
-   - Why it's fundamentally incompatible (not just "it's hard")
+   - Why it's fundamentally incompatible (not just "it's hard" — explain the structural reason)
    - Whether it could become possible after the parity constraint is relaxed
-3. **Mark the task as `[~]` (deferred) in `RALPH_TODO.md`** with a one-line note: `— DEFERRED: <reason>. See PROGRESS.md.`
-4. **Commit the documentation** and move to the next task
-5. Do NOT spend more than one iteration on a blocked task — document and move on
+5. **Mark deferred tasks as `[~]`** in `RALPH_TODO.md` with a note: `— DEFERRED: <reason>. See PROGRESS.md.`
 
 ## Critical Rules
 
 1. **Parity first, performance second** — Never commit a performance improvement that breaks even one parity test. Run `./scripts/test_parser_ast_parity.sh` before and after every change.
 
-2. **Measure before and after** — Every optimization must have benchmark numbers. Run benchmarks before starting (baseline) and after completing. Record both in your commit message and in `PROGRESS.md`.
+2. **ALWAYS run benchmarks** — Every optimization MUST have benchmark numbers. This is the whole point of this project. For every task:
+   ```bash
+   # BEFORE starting: record baseline
+   cargo build --manifest-path compiler-rust/Cargo.toml --release
+   cargo test --release --lib -- benchmark_all --ignored --nocapture 2>&1 | tail -30
+
+   # AFTER implementing: verify improvement
+   cargo build --manifest-path compiler-rust/Cargo.toml --release
+   cargo test --release --lib -- benchmark_all --ignored --nocapture 2>&1 | tail -30
+   ```
+   Record both before/after numbers in your commit message AND in `PROGRESS.md`. If you don't have benchmark numbers, the task is NOT complete.
 
 3. **Profile before optimizing** — Don't guess where time is spent. Use flamegraphs, `perf stat`, or `cargo bench` to identify actual hotspots before writing code.
 
@@ -51,13 +66,14 @@ Some optimizations may be incompatible with maintaining byte-for-byte binary AST
    ```bash
    git add <files> && git commit -m "Perf: <description>
 
-   Benchmark: <before> -> <after> on <test>
+   Benchmark (before): <key numbers>
+   Benchmark (after):  <key numbers>
    Parity: zero regressions
 
    Co-Authored-By: Claude <noreply@anthropic.com>"
    ```
 
-6. **Revert if no measurable improvement** — If an optimization doesn't show measurable improvement in benchmarks, revert it. Don't add complexity without payoff.
+6. **Revert if no measurable improvement** — If an optimization doesn't show measurable improvement in benchmarks, revert it. Don't add complexity without payoff. Record the null result in `PROGRESS.md` anyway (negative results are valuable).
 
 7. **Study OXC/SWC for patterns** — These are the state-of-the-art Rust parsers. When implementing an optimization (especially byte-level scanning, zero-copy tokens, SIMD), study how OXC does it first.
 
