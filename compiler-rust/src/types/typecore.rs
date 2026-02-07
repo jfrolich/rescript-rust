@@ -3747,7 +3747,21 @@ fn type_letmodule(
         _ => {
             let md = crate::types::typemod::type_module_expr(tctx, env, arena, module_expr)
                 .map_err(|e| TypeCoreError::Other(format!("letmodule: {e:?}")))?;
-            (md, crate::types::decl::ModuleType::MtySignature(vec![]))
+            // Try to extract module type from typed expression, or look it up for idents
+            let mod_sig = crate::types::typemod::extract_module_type_from_mod_expr_pub(&md)
+                .or_else(|| {
+                    // For module aliases (Pmod_ident), look up the module's type
+                    if let crate::parser::ast::ModuleExprDesc::Pmod_ident(lid) = &module_expr.pmod_desc {
+                        let longident = arena.get_longident(lid.txt);
+                        crate::types::typemod::lookup_module_type_by_lid(
+                            longident, arena, env, &mut tctx.persistent_env, tctx.type_ctx,
+                        )
+                    } else {
+                        None
+                    }
+                })
+                .unwrap_or(crate::types::decl::ModuleType::MtySignature(vec![]));
+            (md, mod_sig)
         }
     };
 
