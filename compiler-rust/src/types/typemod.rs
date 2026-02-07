@@ -599,6 +599,7 @@ pub fn type_structure<'a>(
     let mut current_env = env.clone();
 
     for item in items {
+        tctx.set_unify_env(&current_env);
         let (typed_item, new_env) = type_structure_item(tctx, &current_env, arena, item)?;
         typed_items.push(typed_item);
         current_env = new_env;
@@ -628,6 +629,7 @@ fn type_structure_no_export<'a>(
     let mut current_env = env.clone();
 
     for item in items {
+        tctx.set_unify_env(&current_env);
         let (typed_item, new_env) = type_structure_item(tctx, &current_env, arena, item)?;
         typed_items.push(typed_item);
         current_env = new_env;

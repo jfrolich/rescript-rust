@@ -24,6 +24,7 @@
 
 use super::btype::{iter_type_expr, row_more, row_repr};
 use super::context::TypeContext;
+use super::env::Env;
 use super::path::Path;
 use super::type_expr::{GENERIC_LEVEL, RowDesc, RowField, TypeDesc, TypeExprRef};
 use std::collections::HashSet;
@@ -114,6 +115,12 @@ pub struct UnifyState {
 
     /// Whether to assume type constructors are injective.
     assume_injective: bool,
+
+    /// Environment for type alias expansion during unification.
+    /// Stored as a raw pointer to avoid lifetime parameter on UnifyState.
+    /// Safety: the env must outlive the UnifyState (which it always does since
+    /// UnifyState is created and used within a single type-checking call).
+    env_ptr: Option<*const Env>,
 }
 
 impl UnifyState {
@@ -124,6 +131,7 @@ impl UnifyState {
             mode: UnifyMode::Expression,
             generate_equations: false,
             assume_injective: false,
+            env_ptr: None,
         }
     }
 
@@ -134,7 +142,19 @@ impl UnifyState {
             mode: UnifyMode::Pattern,
             generate_equations: true,
             assume_injective: false,
+            env_ptr: None,
         }
+    }
+
+    /// Set the environment for type alias expansion.
+    /// Safety: the env must outlive this UnifyState.
+    pub fn set_env(&mut self, env: &Env) {
+        self.env_ptr = Some(env as *const Env);
+    }
+
+    /// Get the environment reference, if set.
+    fn env(&self) -> Option<&Env> {
+        self.env_ptr.map(|ptr| unsafe { &*ptr })
     }
 
     /// Check if two types have already been unified.
@@ -248,6 +268,136 @@ pub fn update_level(ctx: &TypeContext<'_>, level: i32, ty: TypeExprRef) {
         iter_type_expr(ctx, ty, |child| {
             update_level(ctx, level, child);
         });
+    }
+}
+
+// ============================================================================
+// Predef Type Names
+// ============================================================================
+
+/// Check if a type name is a predef (builtin) type.
+/// Predef types may appear under different paths (e.g., `ref` vs `Pervasives.ref`)
+/// but should be treated as the same type during unification.
+fn is_predef_type_name(name: &str) -> bool {
+    matches!(name,
+        "int" | "char" | "float" | "bool" | "unit" | "exn" | "array" |
+        "list" | "option" | "nativeint" | "int32" | "int64" | "lazy_t" |
+        "bytes" | "string" | "ref" | "result" | "dict" | "promise" |
+        "unknown" | "bigint" | "symbol" | "regexp"
+    )
+}
+
+// ============================================================================
+// Type Alias Expansion
+// ============================================================================
+
+/// Try to expand a type alias (type abbreviation).
+///
+/// If the type is `Tconstr(path, args)` and the type declaration for `path`
+/// has a manifest (i.e., `type t = <body>`), expand it by substituting
+/// the type parameters with the given arguments.
+///
+/// Returns `Some(expanded)` if expansion was possible, `None` otherwise.
+fn try_expand_head(
+    ctx: &TypeContext<'_>,
+    env: &Env,
+    ty: TypeExprRef,
+) -> Option<TypeExprRef> {
+    let ty = ctx.repr(ty);
+    let desc = ctx.get_desc(ty);
+    match &*desc {
+        TypeDesc::Tconstr { path, args, .. } => {
+            let decl = env.lookup_type(path).ok()?;
+            let manifest = decl.type_manifest?;
+            let params = &decl.type_params;
+
+            if params.is_empty() {
+                // No type parameters, just return the manifest directly
+                drop(desc);
+                Some(manifest)
+            } else if params.len() == args.len() {
+                // Substitute type parameters with arguments
+                let params_vec: Vec<TypeExprRef> = params.clone();
+                let args_vec: Vec<TypeExprRef> = args.clone();
+                drop(desc);
+                Some(subst_type(ctx, &params_vec, &args_vec, manifest))
+            } else {
+                // Arity mismatch, can't expand
+                None
+            }
+        }
+        _ => None,
+    }
+}
+
+/// Substitute type parameters in a type expression.
+///
+/// Given a mapping from parameter type refs to argument type refs,
+/// create a copy of `ty` with all occurrences of parameters replaced by arguments.
+fn subst_type(
+    ctx: &TypeContext<'_>,
+    params: &[TypeExprRef],
+    args: &[TypeExprRef],
+    ty: TypeExprRef,
+) -> TypeExprRef {
+    let ty = ctx.repr(ty);
+
+    // Check if this type is one of the parameters
+    for (i, param) in params.iter().enumerate() {
+        if ctx.repr(*param) == ty {
+            return args[i];
+        }
+    }
+
+    let desc = ctx.get_desc(ty);
+    match &*desc {
+        TypeDesc::Tvar(_) | TypeDesc::Tunivar(_) => {
+            // Not a parameter, return as-is
+            ty
+        }
+        TypeDesc::Tconstr { path, args: inner_args, .. } => {
+            let new_args: Vec<TypeExprRef> = inner_args
+                .iter()
+                .map(|a| subst_type(ctx, params, args, *a))
+                .collect();
+            if new_args.iter().zip(inner_args.iter()).all(|(a, b)| *a == *b) {
+                // No change
+                ty
+            } else {
+                let path = path.clone();
+                drop(desc);
+                ctx.new_constr(path, new_args)
+            }
+        }
+        TypeDesc::Tarrow { arg, ret, arity, .. } => {
+            let new_arg_typ = subst_type(ctx, params, args, arg.typ);
+            let new_ret = subst_type(ctx, params, args, *ret);
+            if new_arg_typ == arg.typ && new_ret == *ret {
+                ty
+            } else {
+                let lbl = arg.lbl.clone();
+                let arity = *arity;
+                drop(desc);
+                ctx.new_arrow(lbl, new_arg_typ, new_ret, arity)
+            }
+        }
+        TypeDesc::Ttuple(tl) => {
+            let new_tl: Vec<TypeExprRef> = tl
+                .iter()
+                .map(|t| subst_type(ctx, params, args, *t))
+                .collect();
+            if new_tl.iter().zip(tl.iter()).all(|(a, b)| *a == *b) {
+                ty
+            } else {
+                drop(desc);
+                ctx.new_tuple(new_tl)
+            }
+        }
+        _ => {
+            // For other cases (Tpoly, Tvariant, Tobject, etc.), return as-is for now.
+            // Full substitution would be more complex but these cases are rare for type aliases.
+            ty
+        }
     }
 }
 
@@ -410,8 +560,37 @@ fn unify_types(
             },
         ) => {
             if !path1.same(path2) {
+                // Paths differ — check if they resolve to the same type name
+                // (handles predef types like ref/Pervasives.ref, int/Pervasives.int)
+                let name1 = path1.head_name();
+                let name2 = path2.head_name();
+                if name1 == name2 && is_predef_type_name(name1) {
+                    // Same predef type under different paths — unify args
+                    if args1.len() == args2.len() {
+                        let pairs: Vec<_> = args1.iter().zip(args2.iter()).map(|(&a, &b)| (a, b)).collect();
+                        drop(desc1);
+                        drop(desc2);
+                        for (a, b) in pairs {
+                            unify(ctx, state, a, b)?;
+                        }
+                        link_type(ctx, t1, t2);
+                        return Ok(());
+                    }
+                }
+
+                // Try expanding type aliases before giving up
                 drop(desc1);
                 drop(desc2);
+                if let Some(env) = state.env() {
+                    // Try expanding left side
+                    if let Some(expanded1) = try_expand_head(ctx, env, t1) {
+                        return unify(ctx, state, expanded1, t2);
+                    }
+                    // Try expanding right side
+                    if let Some(expanded2) = try_expand_head(ctx, env, t2) {
+                        return unify(ctx, state, t1, expanded2);
+                    }
+                }
                 return Err(TypeError::Unify(vec![(t1, t2)]));
             }
 
@@ -620,10 +799,27 @@ fn unify_types(
             unify(ctx, state, t1, link2)
         }
 
-        // Types don't match
+        // Types don't match — try expanding type aliases as last resort
         _ => {
+            // Check if either side is a Tconstr that can be expanded
+            let is_constr1 = matches!(&*desc1, TypeDesc::Tconstr { .. });
+            let is_constr2 = matches!(&*desc2, TypeDesc::Tconstr { .. });
             drop(desc1);
             drop(desc2);
+
+            if let Some(env) = state.env() {
+                if is_constr1 {
+                    if let Some(expanded1) = try_expand_head(ctx, env, t1) {
+                        return unify(ctx, state, expanded1, t2);
+                    }
+                }
+                if is_constr2 {
+                    if let Some(expanded2) = try_expand_head(ctx, env, t2) {
+                        return unify(ctx, state, t1, expanded2);
+                    }
+                }
+            }
+
             Err(TypeError::Unify(vec![(t1, t2)]))
         }
     }

@@ -459,6 +459,13 @@ impl<'a> TypeCheckContext<'a> {
         }
     }
 
+    /// Set the environment for type alias expansion during unification.
+    /// Should be called before type-checking each structure item so the
+    /// unifier can expand type aliases when paths don't match.
+    pub fn set_unify_env(&mut self, env: &Env) {
+        self.unify_state.set_env(env);
+    }
+
     /// Set the persistent environment for module loading.
     pub fn set_persistent_env(&mut self, env: crate::cmi::persistent_env::PersistentEnv) {
         self.persistent_env = Some(env);
