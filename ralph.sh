@@ -22,7 +22,7 @@ show_dashboard() {
   # Get TODO progress
   if [[ -f $TODO_FILE ]]; then
     TOTAL=$(grep -c "^\- \[" $TODO_FILE 2>/dev/null) || TOTAL=0
-    DONE=$(grep -c "^\- \[x\]" $TODO_FILE 2>/dev/null) || DONE=0
+    DONE=$(grep -c "^\- \[[x~]\]" $TODO_FILE 2>/dev/null) || DONE=0
     TOTAL=${TOTAL:-0}
     DONE=${DONE:-0}
     REMAINING=$((TOTAL - DONE))

@@ -22,6 +22,21 @@ Read `RALPH_TODO.md` and complete the next unchecked task. After completing a ta
 5. Commit your changes with an atomic commit
 6. If all tasks are complete, output "RALPH_COMPLETE"
 
+### When an optimization is blocked by binary parity
+
+Some optimizations may be incompatible with maintaining byte-for-byte binary AST parity. For example, changing AST node layout may affect marshal serialization order, or arena allocation may change object identity patterns that the marshal's sharing tables depend on.
+
+**If you determine an optimization cannot be done while preserving parity:**
+1. **Do the analysis first** — Actually investigate *why* parity breaks. Don't just assume it will. Try a prototype and run parity tests.
+2. **Document your findings in `PROGRESS.md`** — Write a clear explanation of:
+   - What you tried
+   - How parity broke (which files, what kind of difference)
+   - Why it's fundamentally incompatible (not just "it's hard")
+   - Whether it could become possible after the parity constraint is relaxed
+3. **Mark the task as `[~]` (deferred) in `RALPH_TODO.md`** with a one-line note: `— DEFERRED: <reason>. See PROGRESS.md.`
+4. **Commit the documentation** and move to the next task
+5. Do NOT spend more than one iteration on a blocked task — document and move on
+
 ## Critical Rules
 
 1. **Parity first, performance second** — Never commit a performance improvement that breaks even one parity test. Run `./scripts/test_parser_ast_parity.sh` before and after every change.
@@ -117,14 +132,14 @@ perf stat -e instructions,cache-misses,branch-misses \
 
 ## Reference Material
 
-- **PLAN.md** in this directory — Full optimization roadmap with 4 tiers and 14 items
+- **PLAN.md** in this directory — Full optimization roadmap with 4 tiers and 19 items
 - **PROGRESS.md** in this directory — Optimization progress and benchmark log
 - **OXC parser**: https://github.com/nickel-org/nickel.rs — Study byte-level scanning, arena allocation
 - **matklad blog**: https://matklad.github.io/ — Rust parser architecture best practices
 
 ## Exit Condition
 
-When all tasks in `RALPH_TODO.md` are checked `[x]`, output exactly:
+When all tasks in `RALPH_TODO.md` are either `[x]` (completed) or `[~]` (deferred with documented reason), output exactly:
 ```
 RALPH_COMPLETE
 ```
