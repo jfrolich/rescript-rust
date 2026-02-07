@@ -913,4 +913,62 @@ mod tests {
         println!("  {} files processed in {:.1} ms", processed, elapsed_s * 1000.0);
         println!("  Throughput: {:.1} MB/s, {:.0}K LOC/s", mbs, loc_per_s / 1000.0);
     }
+
+    // ========================================================================
+    // Parallel cold-start benchmark: parse all files with rayon, no warmup
+    // Run with: cargo test --release --lib -- benchmark_parallel_cold --ignored --nocapture
+    // ========================================================================
+
+    #[test]
+    #[ignore]
+    fn benchmark_parallel_cold() {
+        use rayon::prelude::*;
+        use std::sync::atomic::{AtomicU64, Ordering};
+
+        if cfg!(debug_assertions) {
+            eprintln!("Skipping benchmark: must run in --release mode");
+            return;
+        }
+
+        let files = discover_test_files();
+        let total_lines: u64 = files.iter().map(|f| f.lines).sum();
+        let total_size: u64 = files.iter().map(|f| f.size).sum();
+        let num_threads = rayon::current_num_threads();
+
+        println!("\n=== Parallel Cold-Start Parse Benchmark ({} threads) ===", num_threads);
+        println!("{} files, {} lines, {:.1} KB\n", files.len(), total_lines, total_size as f64 / 1024.0);
+
+        let parsed = AtomicU64::new(0);
+
+        let start = Instant::now();
+        files.par_iter().for_each(|file| {
+            let bytes = match std::fs::read(&file.path) {
+                Ok(b) => b,
+                Err(_) => return,
+            };
+            let source: String = bytes.iter().map(|&b| b as char).collect();
+            let filename = file.path.to_string_lossy().to_string();
+            let is_interface = file.path
+                .extension()
+                .and_then(|s| s.to_str())
+                .is_some_and(|ext| ext == "resi" || ext == "mli");
+
+            let mut parser = crate::parser::Parser::new(&filename, &source);
+            if is_interface {
+                let _ = crate::parser::module::parse_signature(&mut parser);
+            } else {
+                let _ = crate::parser::module::parse_structure(&mut parser);
+            }
+            parsed.fetch_add(1, Ordering::Relaxed);
+        });
+        let elapsed = start.elapsed();
+        let elapsed_s = elapsed.as_secs_f64();
+        let loc_per_s = total_lines as f64 / elapsed_s;
+        let mbs = (total_size as f64) / elapsed_s / 1_000_000.0;
+        let parsed_count = parsed.load(Ordering::Relaxed);
+
+        println!("  {} files parsed in {:.1} ms ({} threads)", parsed_count, elapsed_s * 1000.0, num_threads);
+        println!("  Throughput: {:.1} MB/s, {:.0}K LOC/s", mbs, loc_per_s / 1000.0);
+        println!("  Per-thread: {:.1} MB/s, {:.0}K LOC/s", mbs / num_threads as f64, loc_per_s / 1000.0 / num_threads as f64);
+    }
 }
