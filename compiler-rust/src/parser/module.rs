@@ -4908,8 +4908,8 @@ mod tests {
         let structure = parse_with_timeout("let x = 42");
         assert_eq!(structure.len(), 1);
         assert!(matches!(
-            structure[0].pstr_desc,
-            StructureItemDesc::Pstr_value { .. }
+            *structure[0].pstr_desc,
+            StructureItemDesc::Pstr_value(_)
         ));
     }
 
@@ -4918,7 +4918,7 @@ mod tests {
         let structure = parse_with_timeout("open Belt");
         assert_eq!(structure.len(), 1);
         assert!(matches!(
-            structure[0].pstr_desc,
+            *structure[0].pstr_desc,
             StructureItemDesc::Pstr_open(_)
         ));
     }
@@ -4928,8 +4928,8 @@ mod tests {
         let structure = parse_with_timeout("type t = int");
         assert_eq!(structure.len(), 1);
         assert!(matches!(
-            structure[0].pstr_desc,
-            StructureItemDesc::Pstr_type(..)
+            *structure[0].pstr_desc,
+            StructureItemDesc::Pstr_type(_)
         ));
     }
 
@@ -4937,7 +4937,8 @@ mod tests {
     fn test_parse_variant_type() {
         let structure = parse_with_timeout("type color = | Red | Green | Blue");
         assert_eq!(structure.len(), 1);
-        if let StructureItemDesc::Pstr_type(_, type_decls) = &*structure[0].pstr_desc {
+        if let StructureItemDesc::Pstr_type(inner) = &*structure[0].pstr_desc {
+            let (_, ref type_decls) = **inner;
             assert_eq!(type_decls.len(), 1);
             if let TypeKind::Ptype_variant(constructors) = &type_decls[0].ptype_kind {
                 assert_eq!(constructors.len(), 3);
@@ -4953,7 +4954,8 @@ mod tests {
     fn test_parse_record_type() {
         let structure = parse_with_timeout("type person = { name: string, age: int }");
         assert_eq!(structure.len(), 1);
-        if let StructureItemDesc::Pstr_type(_, type_decls) = &*structure[0].pstr_desc {
+        if let StructureItemDesc::Pstr_type(inner) = &*structure[0].pstr_desc {
+            let (_, ref type_decls) = **inner;
             assert_eq!(type_decls.len(), 1);
             if let TypeKind::Ptype_record(labels) = &type_decls[0].ptype_kind {
                 assert_eq!(labels.len(), 2);
@@ -4970,7 +4972,7 @@ mod tests {
         let structure = parse_with_timeout("module M = { let x = 1 }");
         assert_eq!(structure.len(), 1);
         assert!(matches!(
-            structure[0].pstr_desc,
+            *structure[0].pstr_desc,
             StructureItemDesc::Pstr_module(_)
         ));
     }
@@ -4980,7 +4982,7 @@ mod tests {
         let structure = parse_with_timeout("external log: string => unit = \"console.log\"");
         assert_eq!(structure.len(), 1);
         assert!(matches!(
-            structure[0].pstr_desc,
+            *structure[0].pstr_desc,
             StructureItemDesc::Pstr_primitive(_)
         ));
     }
@@ -4990,7 +4992,7 @@ mod tests {
         let structure = parse_with_timeout("exception MyError(string)");
         assert_eq!(structure.len(), 1);
         assert!(matches!(
-            structure[0].pstr_desc,
+            *structure[0].pstr_desc,
             StructureItemDesc::Pstr_exception(_)
         ));
     }

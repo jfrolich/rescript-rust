@@ -1151,7 +1151,7 @@ mod tests {
         use crate::parse_arena::ParseArena;
         let mut arena = ParseArena::new();
         let expr = recover::default_expr(&mut arena);
-        assert!(matches!(expr.pexp_desc, ExpressionDesc::Pexp_extension(_)));
+        assert!(matches!(*expr.pexp_desc, ExpressionDesc::Pexp_extension(_)));
     }
 
     #[test]
@@ -1159,7 +1159,7 @@ mod tests {
         use crate::parse_arena::ParseArena;
         let mut arena = ParseArena::new();
         let pat = recover::default_pattern(&mut arena);
-        assert!(matches!(pat.ppat_desc, PatternDesc::Ppat_extension(_)));
+        assert!(matches!(*pat.ppat_desc, PatternDesc::Ppat_extension(_)));
     }
 
     #[test]
@@ -1167,7 +1167,7 @@ mod tests {
         use crate::parse_arena::ParseArena;
         let mut arena = ParseArena::new();
         let typ = recover::default_type(&mut arena);
-        assert!(matches!(typ.ptyp_desc, CoreTypeDesc::Ptyp_extension(_)));
+        assert!(matches!(*typ.ptyp_desc, CoreTypeDesc::Ptyp_extension(_)));
     }
 
     #[test]
@@ -1241,7 +1241,7 @@ mod tests {
         let str_idx = arena.push_string("x".to_string());
         let loc = LocIdx::none();
         let pat = ast_helper::make_var_pat(str_idx, loc);
-        assert!(matches!(pat.ppat_desc, PatternDesc::Ppat_var(_)));
+        assert!(matches!(*pat.ppat_desc, PatternDesc::Ppat_var(_)));
     }
 
     #[test]

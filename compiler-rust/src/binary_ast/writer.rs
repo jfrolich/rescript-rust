@@ -382,7 +382,7 @@ mod tests {
     fn make_simple_let_binding(arena: &mut crate::parse_arena::ParseArena, name: &str, value: i32) -> StructureItem {
         let name_idx = arena.intern(name);
         StructureItem {
-            pstr_desc: Box::new(StructureItemDesc::Pstr_value(
+            pstr_desc: Box::new(StructureItemDesc::Pstr_value(Box::new((
                 RecFlag::Nonrecursive,
                 vec![ValueBinding {
                     pvb_pat: Pattern {
@@ -404,7 +404,7 @@ mod tests {
                     pvb_attributes: vec![],
                     pvb_loc: LocIdx::none(),
                 }],
-            )),
+            )))),
             pstr_loc: LocIdx::none(),
         }
     }
@@ -500,10 +500,10 @@ mod tests {
         let mut arena = make_test_arena();
         let ast = vec![
             StructureItem {
-                pstr_desc: Box::new(StructureItemDesc::Pstr_eval(
+                pstr_desc: Box::new(StructureItemDesc::Pstr_eval(Box::new((
                     make_module_ref_expr(&mut arena, "Array", "map"),
                     vec![],
-                )),
+                )))),
                 pstr_loc: LocIdx::none(),
             },
             StructureItem {
