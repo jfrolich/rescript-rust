@@ -585,21 +585,20 @@ fn unify_types(
         ) => {
             if !path1.same(path2) {
                 // Paths differ — check if they resolve to the same type name
-                // (handles predef types like ref/Pervasives.ref, int/Pervasives.int)
                 let name1 = path1.head_name();
                 let name2 = path2.head_name();
-                if name1 == name2 && is_predef_type_name(name1) {
-                    // Same predef type under different paths — unify args
-                    if args1.len() == args2.len() {
-                        let pairs: Vec<_> = args1.iter().zip(args2.iter()).map(|(&a, &b)| (a, b)).collect();
-                        drop(desc1);
-                        drop(desc2);
-                        for (a, b) in pairs {
-                            unify(ctx, state, a, b)?;
-                        }
-                        link_type(ctx, t1, t2);
-                        return Ok(());
+                // Same name with different stamps: handles predef types (ref/Pervasives.ref),
+                // and locally-defined types where stamp differences arise between
+                // the type declaration and constructor return types
+                if name1 == name2 && args1.len() == args2.len() {
+                    let pairs: Vec<_> = args1.iter().zip(args2.iter()).map(|(&a, &b)| (a, b)).collect();
+                    drop(desc1);
+                    drop(desc2);
+                    for (a, b) in pairs {
+                        unify(ctx, state, a, b)?;
                     }
+                    link_type(ctx, t1, t2);
+                    return Ok(());
                 }
 
                 // Try expanding type aliases before giving up
