@@ -179,13 +179,13 @@ fn transform_structure_item_multi(item: StructureItem, config: &mut JsxConfig, a
     // Handle Pstr_primitive (external) with potential @react.component
     if let StructureItemDesc::Pstr_primitive(vd) = &*item.pstr_desc {
         if has_react_component_attr(arena, &vd.pval_attributes) {
-            return transform_react_component_external(vd.clone(), &item.pstr_loc, config, arena);
+            return transform_react_component_external((**vd).clone(), &item.pstr_loc, config, arena);
         }
     }
 
     // Handle module definitions (for nested module tracking)
     if let StructureItemDesc::Pstr_module(mb) = *item.pstr_desc {
-        let transformed = transform_module_binding_with_tracking(mb, config, arena);
+        let transformed = transform_module_binding_with_tracking(*mb, config, arena);
         return vec![StructureItem {
             pstr_desc: Box::new(StructureItemDesc::Pstr_module(Box::new(transformed))),
             pstr_loc: item.pstr_loc,
@@ -1496,7 +1496,7 @@ fn transform_signature_item_multi(item: SignatureItem, config: &mut JsxConfig, a
     // Handle Psig_value with potential @react.component
     if let SignatureItemDesc::Psig_value(vd) = &*item.psig_desc {
         if has_react_component_attr(arena, &vd.pval_attributes) {
-            return transform_react_component_sig(vd.clone(), &item.psig_loc, config, arena);
+            return transform_react_component_sig((**vd).clone(), &item.psig_loc, config, arena);
         }
     }
 
@@ -1801,11 +1801,11 @@ fn make_props_record_type_with_live(arena: &mut ParseArena, name: &str, loc: &Lo
     let live_idx = arena.intern("live");
     let jsx_props_attr = (
         Loc { txt: jsx_props_idx, loc: empty_loc() },
-        Payload::PStr(vec![]),
+        Payload::PStr(Box::new(vec![])),
     );
     let live_attr = (
         Loc { txt: live_idx, loc: empty_loc() },
-        Payload::PStr(vec![]),
+        Payload::PStr(Box::new(vec![])),
     );
 
     // OCaml uses ghost location for the generated props type structure_item
@@ -2553,9 +2553,9 @@ fn update_config_from_attribute(arena: &ParseArena, attr: &Attribute, config: &m
     // Matches OCaml's update_config behavior
     if let Payload::PStr(items) = &attr.1 {
         for item in items.iter() {
-            if let StructureItemDesc::Pstr_eval(eval_inner) = &*item.pstr_desc { let (ref expr, _) = *eval_inner;
+            if let StructureItemDesc::Pstr_eval(eval_inner) = &*item.pstr_desc { let (ref expr, _) = **eval_inner;
                 if let ExpressionDesc::Pexp_record(rec_inner) = &*expr.pexp_desc {
-                    let (ref fields, _) = *rec_inner;
+                    let (ref fields, _) = **rec_inner;
                     let mut module_raw: Option<String> = None;
                     let mut version_raw: Option<i32> = None;
 
@@ -2564,16 +2564,16 @@ fn update_config_from_attribute(arena: &ParseArena, attr: &Attribute, config: &m
                         let last_str = arena.get_string(last_idx);
                         match last_str {
                             "version" => {
-                                if let ExpressionDesc::Pexp_constant(Constant::Integer(s, _)) = &*field.expr.pexp_desc {
+                                if let ExpressionDesc::Pexp_constant(c) = &*field.expr.pexp_desc { if let Constant::Integer(s, _) = &**c {
                                     if let Ok(v) = s.parse::<i32>() {
                                         version_raw = Some(v);
                                     }
-                                }
+                                }}
                             }
                             "module_" => {
-                                if let ExpressionDesc::Pexp_constant(Constant::String(s, _)) = &*field.expr.pexp_desc {
+                                if let ExpressionDesc::Pexp_constant(c) = &*field.expr.pexp_desc { if let Constant::String(s, _) = &**c {
                                     module_raw = Some(s.to_string());
-                                }
+                                }}
                             }
                             _ => {}
                         }
@@ -2616,7 +2616,7 @@ fn transform_structure_item_desc(desc: StructureItemDesc, config: &JsxConfig, ar
         }
         StructureItemDesc::Pstr_module(mb) => {
             let mut config_clone = config.clone();
-            StructureItemDesc::Pstr_module(Box::new(transform_module_binding(mb, &mut config_clone, arena)))
+            StructureItemDesc::Pstr_module(Box::new(transform_module_binding(*mb, &mut config_clone, arena)))
         }
         StructureItemDesc::Pstr_recmodule(mbs) => {
             let mut result = vec![];
@@ -2628,7 +2628,7 @@ fn transform_structure_item_desc(desc: StructureItemDesc, config: &JsxConfig, ar
         }
         StructureItemDesc::Pstr_modtype(mt) => {
             let mut config_clone = config.clone();
-            StructureItemDesc::Pstr_modtype(Box::new(transform_module_type_declaration(mt, &mut config_clone, arena)))
+            StructureItemDesc::Pstr_modtype(Box::new(transform_module_type_declaration(*mt, &mut config_clone, arena)))
         }
         other => other,
     }
@@ -2699,7 +2699,7 @@ fn transform_signature_item_desc(desc: SignatureItemDesc, config: &mut JsxConfig
         }
         SignatureItemDesc::Psig_modtype(mtd) => {
             // Transform module type declaration
-            SignatureItemDesc::Psig_modtype(Box::new(transform_module_type_declaration(mtd, config, arena)))
+            SignatureItemDesc::Psig_modtype(Box::new(transform_module_type_declaration(*mtd, config, arena)))
         }
         other => other,
     }
@@ -2736,7 +2736,7 @@ fn transform_module_expr(mexpr: ModuleExpr, config: &mut JsxConfig, arena: &mut 
         pmod_desc: Box::new(match *mexpr.pmod_desc {
             ModuleExprDesc::Pmod_structure(items) => {
                 // Transform structure with current config (preserving file_name and nested_modules)
-                ModuleExprDesc::Pmod_structure(Box::new(transform_structure_with_config(items, config, arena)))
+                ModuleExprDesc::Pmod_structure(Box::new(transform_structure_with_config(*items, config, arena)))
             }
             ModuleExprDesc::Pmod_functor(inner) => {
                 ModuleExprDesc::Pmod_functor(inner)
@@ -2773,7 +2773,7 @@ fn transform_value_binding(binding: ValueBinding, config: &JsxConfig, arena: &mu
 fn transform_expression(expr: Expression, config: &JsxConfig, arena: &mut ParseArena) -> Expression {
     let new_desc = match *expr.pexp_desc {
         ExpressionDesc::Pexp_jsx_element(jsx) => {
-            transform_jsx_element(jsx, config, &expr.pexp_loc, &expr.pexp_attributes, arena)
+            transform_jsx_element(*jsx, config, &expr.pexp_loc, &expr.pexp_attributes, arena)
         }
         ExpressionDesc::Pexp_let(inner) => {
             ExpressionDesc::Pexp_let(inner)
@@ -2875,7 +2875,7 @@ fn transform_expression(expr: Expression, config: &JsxConfig, arena: &mut ParseA
         }
         ExpressionDesc::Pexp_pack(mexpr) => {
             let mut config_clone = config.clone();
-            ExpressionDesc::Pexp_pack(Box::new(transform_module_expr(mexpr, &mut config_clone, arena)))
+            ExpressionDesc::Pexp_pack(Box::new(transform_module_expr(*mexpr, &mut config_clone, arena)))
         }
         ExpressionDesc::Pexp_open(inner) => {
             ExpressionDesc::Pexp_open(inner)
