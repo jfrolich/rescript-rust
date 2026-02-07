@@ -3476,16 +3476,30 @@ fn type_open(
     expected_ty: TypeExprRef,
     attributes: &[crate::parser::ast::Attribute],
 ) -> TypeCoreResult<Expression> {
-    // Look up the module and extend the environment with its exports
-    // For now, we just type check the body in the current environment
-    // Full implementation would open the module's bindings into scope
-    let _ = lid; // TODO: Open the module's bindings (use tctx.resolve_lid(lid.txt) when needed)
+    // Open the module's bindings into scope for the body
+    let open_lid = tctx.arena.get_longident(lid.txt);
+    let mut open_env = env.clone();
 
-    // Type check the body expression
-    let typed_body = type_expect(tctx, env, body, expected_ty, None)?;
+    // Resolve the module longident and open its signature
+    let path = crate::types::typemod::path_from_longident(open_lid, |idx| tctx.arena.get_string(idx));
+    let mod_type = crate::types::typemod::lookup_module_type_by_lid(
+        open_lid, tctx.arena, env, &mut tctx.persistent_env, tctx.type_ctx,
+    );
+    if let Some(ref mty) = mod_type {
+        let sig = crate::types::typemod::resolve_mod_type_to_sig(
+            mty, &mut tctx.persistent_env, tctx.type_ctx,
+        );
+        if let Some(ref sig_items) = sig {
+            crate::cmi::persistent_env::add_signature_to_env(
+                sig_items, &path, &mut open_env, tctx.type_ctx, true,
+            );
+        }
+    }
+
+    // Type check the body expression in the extended environment
+    let typed_body = type_expect(tctx, &open_env, body, expected_ty, None)?;
 
     // Return expression with open in exp_extra
-    // For now, return the body directly since we don't have full module support
     Ok(Expression::new(
         typed_body.exp_desc,
         loc.clone(),

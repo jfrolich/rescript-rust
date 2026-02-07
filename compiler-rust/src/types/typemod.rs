@@ -39,7 +39,7 @@ use std::collections::HashSet;
 // ============================================================================
 
 /// Convert a Longident to a Path.
-fn path_from_longident<'a>(lid: &Longident, get_str: impl Fn(StrIdx) -> &'a str + Copy) -> Path {
+pub fn path_from_longident<'a>(lid: &Longident, get_str: impl Fn(StrIdx) -> &'a str + Copy) -> Path {
     match lid {
         Longident::Lident(name) => Path::pident(Ident::create_local(get_str(*name))),
         Longident::Ldot(prefix, name) => {
@@ -115,7 +115,7 @@ fn structure_has_duplicate_value_names(structure: &Structure) -> bool {
 
 /// Look up the semantic module type for a longident by searching env and persistent env.
 /// Returns a `decl::ModuleType` (the semantic type), not the `typedtree::ModuleType` (the syntactic type tree).
-fn lookup_module_type_by_lid<'b>(
+pub fn lookup_module_type_by_lid<'b>(
     lid: &crate::parser::longident::Longident,
     arena: &ParseArena,
     env: &Env,
@@ -160,7 +160,7 @@ fn lookup_module_type_by_lid<'b>(
 }
 
 /// Resolve a decl::ModuleType to a signature, following aliases via persistent env.
-fn resolve_mod_type_to_sig<'b>(
+pub fn resolve_mod_type_to_sig<'b>(
     mty: &crate::types::decl::ModuleType,
     pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
     ctx: &'b crate::types::context::TypeContext<'b>,
