@@ -154,7 +154,7 @@ impl Marshal for Payload {
                 t.marshal(w);
             }
             Payload::PPat(inner) => {
-                    let (p, e) = *inner;
+                    let (ref p, ref e) = **inner;
                 w.write_block_header(3, 2);
                 p.marshal(w);
                 e.marshal(w);

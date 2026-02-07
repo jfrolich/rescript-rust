@@ -335,7 +335,7 @@ impl<'a> Mapper<'a> {
             pt0::Payload::PSig(sig) => current::Payload::PSig(self.map_signature(sig)),
             pt0::Payload::PTyp(t) => current::Payload::PTyp(Box::new(self.map_core_type(t))),
             pt0::Payload::PPat(inner) => {
-                    let (p, guard) = *inner;
+                    let (ref p, ref guard) = **inner;
                 current::Payload::PPat(Box::new(self.map_pattern(p)), guard.as_ref().map(|g| Box::new(self.map_expression(g))))
             }
         }

@@ -552,7 +552,7 @@ fn spec_of_ptyp(nolabel: bool, typ: &CoreType, arena: &mut ParseArena) -> Attr {
             // Check if unit type
             match &*typ.ptyp_desc {
                 CoreTypeDesc::Ptyp_constr(inner) if args.is_empty() => {
-                    let (lid, args) = *inner;
+                    let (ref lid, ref args) = **inner;
                     let longident = arena.get_longident(lid.txt);
                     if matches!(longident, Longident::Lident(s) if arena.get_string(*s) == "unit") {
                         if nolabel {
@@ -571,7 +571,7 @@ fn spec_of_ptyp(nolabel: bool, typ: &CoreType, arena: &mut ParseArena) -> Attr {
 fn is_unit_type(typ: &CoreType, arena: &mut ParseArena) -> bool {
     match &*typ.ptyp_desc {
         CoreTypeDesc::Ptyp_constr(inner) => {
-                    let (lid, args) = *inner;
+                    let (ref lid, ref args) = **inner;
             args.is_empty() && {
                 let longident = arena.get_longident(lid.txt);
                 matches!(longident, Longident::Lident(s) if arena.get_string(*s) == "unit")
@@ -621,7 +621,7 @@ fn list_of_arrow<'a>(typ: &'a CoreType, arena: &ParseArena) -> (Vec<&'a TypeArg>
     loop {
         match &*current.ptyp_desc {
             CoreTypeDesc::Ptyp_arrow(inner) => {
-                    let (arg, ret, arity) = *inner;
+                    let (ref arg, ref ret, ref arity) = **inner;
                 let arity_val = arena.get_arity(*arity);
                 // OCaml: arity = None || acc = []
                 if arity_val.is_none() || args.is_empty() {
@@ -1593,7 +1593,7 @@ fn build_obj_ffi_type(typ: &CoreType, arena: &mut ParseArena) -> FfiType {
                         // Check if for_sure_no_nested_option
                         let for_sure_not_nested = match &*arg.typ.ptyp_desc {
                             CoreTypeDesc::Ptyp_constr(inner) if args.is_empty() => {
-                    let (lid, args) = *inner;
+                    let (ref lid, ref args) = **inner;
                                 let longident = arena.get_longident(lid.txt);
                                 if let Longident::Lident(s) = longident {
                                     let name = arena.get_string(*s);
@@ -3284,7 +3284,7 @@ fn spelunk_expression_for_await_module_types(
     match &*expr.pexp_desc {
         // Main case: Pexp_letmodule with Pmod_ident and @res.await
         ExpressionDesc::Pexp_letmodule(inner) => {
-                    let (_, mod_expr, body) = *inner;
+                    let (_, ref mod_expr, ref body) = **inner;
             let mut results = Vec::new();
 
             // Check for Pmod_ident with @res.await
@@ -3340,7 +3340,7 @@ fn spelunk_expression_for_await_module_types(
 
         // Recursively traverse other expression forms (matching OCaml's aux function)
         ExpressionDesc::Pexp_let(inner) => {
-                    let (_, bindings, body) = *inner;
+                    let (_, ref bindings, ref body) = **inner;
             let mut results = spelunk_expression_for_await_module_types(body, context, arena);
             for vb in bindings {
                 results.extend(spelunk_expression_for_await_module_types(&vb.pvb_expr, context, arena));
@@ -3349,7 +3349,7 @@ fn spelunk_expression_for_await_module_types(
         }
 
         ExpressionDesc::Pexp_ifthenelse(inner) => {
-                    let (_, then_expr, else_expr) = *inner;
+                    let (_, ref then_expr, ref else_expr) = **inner;
             let mut results = spelunk_expression_for_await_module_types(then_expr, context, arena);
             if let Some(else_e) = else_expr {
                 results.extend(spelunk_expression_for_await_module_types(else_e, context, arena));
@@ -3362,22 +3362,22 @@ fn spelunk_expression_for_await_module_types(
         }
 
         ExpressionDesc::Pexp_fun(inner) => {
-                    let PexpFun { rhs: body, .. } = *inner;
+                    let PexpFun { rhs: ref body, .. } = **inner;
             spelunk_expression_for_await_module_types(body, context, arena)
         }
 
         ExpressionDesc::Pexp_newtype(inner) => {
-                    let (_, body) = *inner;
+                    let (_, ref body) = **inner;
             spelunk_expression_for_await_module_types(body, context, arena)
         }
 
         ExpressionDesc::Pexp_constraint(inner) => {
-                    let (e, _) = *inner;
+                    let (ref e, _) = **inner;
             spelunk_expression_for_await_module_types(e, context, arena)
         }
 
         ExpressionDesc::Pexp_match(inner) => {
-                    let (scrut, cases) = *inner;
+                    let (ref scrut, ref cases) = **inner;
             let mut results = spelunk_expression_for_await_module_types(scrut, context, arena);
             for case in cases {
                 results.extend(spelunk_expression_for_await_module_types(&case.pc_rhs, context, arena));
@@ -3797,7 +3797,7 @@ fn rewrite_payload(payload: &Payload, arena: &mut ParseArena) -> Payload {
         }
         Payload::PTyp(typ) => Payload::PTyp(typ.clone()),
         Payload::PPat(inner) => {
-                    let (pat, guard) = *inner;
+                    let (ref pat, ref guard) = **inner;
             Payload::PPat(
                 Box::new(rewrite_pattern(pat, arena)),
                 guard.as_ref().map(|e| Box::new(rewrite_expression(e, arena))),
@@ -3816,7 +3816,7 @@ fn rewrite_core_type(typ: &CoreType, arena: &mut ParseArena) -> CoreType {
             CoreTypeDesc::Ptyp_extension(Box::new((name.clone(), rewrite_payload(payload, arena))))
         }
         CoreTypeDesc::Ptyp_arrow(inner) => {
-                    let (arg, ret, arity) = *inner;
+                    let (ref arg, ref ret, ref arity) = **inner;
             // Note: OCaml's default_mapper.typ for Ptyp_arrow does NOT process arg.attrs
             // through self.attributes - it only maps arg.typ. So we clone arg.attrs as-is.
             CoreTypeDesc::Ptyp_arrow(Box::new((Box::new(TypeArg {
@@ -3829,22 +3829,22 @@ fn rewrite_core_type(typ: &CoreType, arena: &mut ParseArena) -> CoreType {
             CoreTypeDesc::Ptyp_tuple(Box::new(types.iter().map(|t| rewrite_core_type(t, arena)).collect()))
         }
         CoreTypeDesc::Ptyp_constr(inner) => {
-                    let (lid, args) = *inner;
+                    let (ref lid, ref args) = **inner;
             CoreTypeDesc::Ptyp_constr(
                 lid.clone(),
                 args.iter().map(|t| rewrite_core_type(t, arena)).collect(),
             )
         }
         CoreTypeDesc::Ptyp_alias(inner) => {
-                    let (inner, name) = *inner;
+                    let (ref inner, ref name) = **inner;
             CoreTypeDesc::Ptyp_alias(Box::new(rewrite_core_type(inner, arena)), name.clone())
         }
         CoreTypeDesc::Ptyp_poly(inner) => {
-                    let (vars, inner) = *inner;
+                    let (ref vars, ref inner) = **inner;
             CoreTypeDesc::Ptyp_poly(Box::new((vars.clone(), Box::new(rewrite_core_type(inner, arena)))))
         }
         CoreTypeDesc::Ptyp_object(inner) => {
-                    let (fields, closed) = *inner;
+                    let (ref fields, ref closed) = **inner;
             CoreTypeDesc::Ptyp_object(
                 fields.iter().map(|f| match f {
                     ObjectField::Otag(name, attrs, typ) => {
@@ -3858,7 +3858,7 @@ fn rewrite_core_type(typ: &CoreType, arena: &mut ParseArena) -> CoreType {
             )
         }
         CoreTypeDesc::Ptyp_variant(inner) => {
-                    let (rows, closed, labels) = *inner;
+                    let (ref rows, ref closed, ref labels) = **inner;
             CoreTypeDesc::Ptyp_variant(
                 rows.iter().map(|r| match r {
                     RowField::Rtag(label, attrs, empty, types) => {
@@ -4027,7 +4027,7 @@ fn destruct_open_tuple_inner<'a>(
 ) -> Option<(Vec<OpenCtx>, &'a Vec<Expression>)> {
     match &*e.pexp_desc {
         ExpressionDesc::Pexp_open(inner) => {
-                    let (flag, lid, cont) = *inner;
+                    let (ref flag, ref lid, ref cont) = **inner;
             acc.push(OpenCtx {
                 flag: *flag,
                 lid: *lid,
@@ -4301,7 +4301,7 @@ fn desugar_hash_set(
 
     match &*obj_expr.pexp_desc {
         ExpressionDesc::Pexp_send(inner) => {
-                    let (obj, method_loc) = *inner;
+                    let (ref obj, ref method_loc) = **inner;
             let obj = rewrite_expression(obj, arena);
             let value = rewrite_expression(value_expr, arena);
 
@@ -4986,7 +4986,7 @@ fn parse_deriving_expr(expr_desc: &ExpressionDesc, actions: &mut Vec<DeriveActio
         }
         // Record: @deriving({jsConverter: newType})
         ExpressionDesc::Pexp_record(inner) => {
-                    let (fields, None) = *inner;
+                    let (ref fields, ref None) = **inner;
             for field in fields {
                 let lid = arena.get_longident(field.lid.txt);
                 if let Longident::Lident(s) = lid {
@@ -5010,7 +5010,7 @@ fn parse_deriving_expr(expr_desc: &ExpressionDesc, actions: &mut Vec<DeriveActio
         }
         // Constructor application for polymorphic variants like @deriving(jsConverter)
         ExpressionDesc::Pexp_apply(inner) => {
-                    let PexpApply { funct, args, .. } = *inner;
+                    let PexpApply { ref funct, ref args, .. } = **inner;
             // Check if it's a simple ident being applied
             if let ExpressionDesc::Pexp_ident(lid_loc) = &*funct.pexp_desc {
                 let lid = arena.get_longident(lid_loc.txt);
@@ -5042,7 +5042,7 @@ fn check_new_type_config(expr: &Expression, arena: &mut ParseArena) -> bool {
             false
         }
         ExpressionDesc::Pexp_record(inner) => {
-                    let (fields, _) = *inner;
+                    let (ref fields, _) = **inner;
             for field in fields {
                 let lid = arena.get_longident(field.lid.txt);
                 if let Longident::Lident(s) = lid {
@@ -7956,7 +7956,7 @@ pub fn rewrite_structure(
     for item in structure {
         match &*item.pstr_desc {
             StructureItemDesc::Pstr_value(inner) => {
-                    let (_rec_flag, bindings) = *inner;
+                    let (ref _rec_flag, ref bindings) = **inner;
                 // Spelunk through the ORIGINAL bindings to find await module types
                 // (before expression rewriting transforms them)
                 let module_type_decls =
@@ -8126,7 +8126,7 @@ fn rewrite_structure_item_no_spice(item: &StructureItem, arena: &mut ParseArena)
         // Handle value bindings - need to rewrite expressions and patterns
         // Also handle @inline transformation
         StructureItemDesc::Pstr_value(inner) => {
-                    let (rec_flag, bindings) = *inner;
+                    let (ref rec_flag, ref bindings) = **inner;
             // Check for @inline on a single non-recursive let binding
             if *rec_flag == RecFlag::Nonrecursive && bindings.len() == 1 {
                 let vb = &bindings[0];
@@ -8228,7 +8228,7 @@ fn rewrite_structure_item_no_spice(item: &StructureItem, arena: &mut ParseArena)
         }],
         // Handle structure-level extensions (%%raw, %%private)
         StructureItemDesc::Pstr_extension(inner) => {
-                    let (ext, attrs) = *inner;
+                    let (ref ext, ref attrs) = **inner;
             let (ext_name, payload) = ext;
             let name = arena.get_string(ext_name.txt);
             if name == "raw" {
@@ -8258,7 +8258,7 @@ fn rewrite_structure_item_no_spice(item: &StructureItem, arena: &mut ParseArena)
         }
         // Handle type declarations with @deriving
         StructureItemDesc::Pstr_type(inner) => {
-                    let (rec_flag, tdcls) = *inner;
+                    let (ref rec_flag, ref tdcls) = **inner;
             handle_deriving_type(item, *rec_flag, tdcls, arena)
         }
         // Handle open - rewrite attributes
@@ -8329,7 +8329,7 @@ fn rewrite_module_expr(
             ))
         }
         current::ModuleExprDesc::Pmod_functor(inner) => {
-                    let (param, mod_type, body) = *inner;
+                    let (ref param, ref mod_type, ref body) = **inner;
             current::ModuleExprDesc::Pmod_functor(
                 param.clone(),
                 mod_type.as_ref().map(|mt| Box::new(rewrite_module_type(mt, arena))),
@@ -8375,7 +8375,7 @@ fn rewrite_module_type(
             current::ModuleTypeDesc::Pmty_signature(Box::new(rewrite_signature_items(items, arena)))
         }
         current::ModuleTypeDesc::Pmty_functor(inner) => {
-                    let (name, param_type, result_type) = *inner;
+                    let (ref name, ref param_type, ref result_type) = **inner;
             current::ModuleTypeDesc::Pmty_functor(
                 name.clone(),
                 param_type.as_ref().map(|pt| Box::new(rewrite_module_type(pt, arena))),
@@ -8383,7 +8383,7 @@ fn rewrite_module_type(
             )
         }
         current::ModuleTypeDesc::Pmty_with(inner) => {
-                    let (mt, constraints) = *inner;
+                    let (ref mt, ref constraints) = **inner;
             current::ModuleTypeDesc::Pmty_with(
                 Box::new(rewrite_module_type(mt, arena)),
                 constraints.clone(),
@@ -8470,7 +8470,7 @@ fn rewrite_signature_item_no_spice(item: &SignatureItem, arena: &mut ParseArena)
         },
         // Handle extensions - need to transform strings in payload
         SignatureItemDesc::Psig_extension(inner) => {
-                    let (ext, attrs) = *inner;
+                    let (ref ext, ref attrs) = **inner;
             let (ext_name, payload) = ext;
             SignatureItem {
                 psig_desc: Box::new(SignatureItemDesc::Psig_extension(
@@ -8532,7 +8532,7 @@ fn rewrite_signature_item_no_spice(item: &SignatureItem, arena: &mut ParseArena)
         },
         // Handle type declarations - rewrite attributes (including constructor/label attributes)
         SignatureItemDesc::Psig_type(inner) => {
-                    let (rec_flag, tdcls) = *inner;
+                    let (ref rec_flag, ref tdcls) = **inner;
             let rewritten_tdcls: Vec<TypeDeclaration> = tdcls
                 .iter()
                 .map(|tdcl| rewrite_type_declaration(tdcl, arena))

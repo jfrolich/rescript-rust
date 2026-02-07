@@ -1203,7 +1203,7 @@ fn walk_expression(expr: &Expression, t: &mut CommentTable, comments: Vec<Commen
             t.attach_trailing(longident.loc, trailing, arena);
         }
         ExpressionDesc::Pexp_let(inner) => {
-                    let (_, bindings, body) = *inner;
+                    let (_, ref bindings, ref body) = **inner;
             // Check if body is unit
             let body_is_unit = matches!(&*body.pexp_desc, ExpressionDesc::Pexp_construct(name, None) if arena.is_lident(name.txt, "()"));
             if body_is_unit {
@@ -1265,7 +1265,7 @@ fn walk_expression(expr: &Expression, t: &mut CommentTable, comments: Vec<Commen
             }
         }
         ExpressionDesc::Pexp_open(inner) => {
-                    let (_, lid, body) = *inner;
+                    let (_, ref lid, ref body) = **inner;
             let (leading, comments) = partition_leading_trailing(comments, expr.pexp_loc, arena);
             let combined_loc = arena.from_location(&Location::from_positions(
                 arena.loc_start(expr.pexp_loc).clone(),
@@ -1310,7 +1310,7 @@ fn walk_expression(expr: &Expression, t: &mut CommentTable, comments: Vec<Commen
             walk_extension(ext, t, comments, arena);
         }
         ExpressionDesc::Pexp_letexception(inner) => {
-                    let (ext, body) = *inner;
+                    let (ref ext, ref body) = **inner;
             let (leading, comments) = partition_leading_trailing(comments, expr.pexp_loc, arena);
             let combined_loc = arena.from_location(&Location::from_positions(
                 arena.loc_start(expr.pexp_loc).clone(),
@@ -1335,7 +1335,7 @@ fn walk_expression(expr: &Expression, t: &mut CommentTable, comments: Vec<Commen
             }
         }
         ExpressionDesc::Pexp_letmodule(inner) => {
-                    let (name, module, body) = *inner;
+                    let (ref name, ref module, ref body) = **inner;
             let (leading, comments) = partition_leading_trailing(comments, expr.pexp_loc, arena);
             let combined_loc = arena.from_location(&Location::from_positions(
                 arena.loc_start(expr.pexp_loc).clone(),
@@ -1377,7 +1377,7 @@ fn walk_expression(expr: &Expression, t: &mut CommentTable, comments: Vec<Commen
             }
         }
         ExpressionDesc::Pexp_coerce(inner) => {
-                    let (inner, _, typ) = *inner;
+                    let (ref inner, _, ref typ) = **inner;
             let (leading, inside, trailing) = partition_by_loc(comments, inner.pexp_loc, arena);
             t.attach_leading(inner.pexp_loc, leading, arena);
             walk_expression(inner, t, inside, arena);
@@ -1391,7 +1391,7 @@ fn walk_expression(expr: &Expression, t: &mut CommentTable, comments: Vec<Commen
             t.attach_trailing(typ.ptyp_loc, trailing, arena);
         }
         ExpressionDesc::Pexp_constraint(inner) => {
-                    let (inner, typ) = *inner;
+                    let (ref inner, ref typ) = **inner;
             let (leading, inside, trailing) = partition_by_loc(comments, inner.pexp_loc, arena);
             t.attach_leading(inner.pexp_loc, leading, arena);
             walk_expression(inner, t, inside, arena);
@@ -1438,17 +1438,17 @@ fn walk_expression(expr: &Expression, t: &mut CommentTable, comments: Vec<Commen
             }
         }
         ExpressionDesc::Pexp_variant(inner) => {
-                    let (_, None) = *inner;}
-        ExpressionDesc::Pexp_variant(inner) => {
-                    let (_, Some(arg)) = *inner;
-            walk_expression(arg, t, comments, arena);
+            let (_, ref opt_arg) = **inner;
+            if let Some(arg) = opt_arg {
+                walk_expression(arg, t, comments, arena);
+            }
         }
         ExpressionDesc::Pexp_array(exprs) | ExpressionDesc::Pexp_tuple(exprs) => {
             let nodes: Vec<Node<'_>> = exprs.iter().map(|e| Node::Expression(e)).collect();
             walk_list(&nodes, t, comments, arena);
         }
         ExpressionDesc::Pexp_record(inner) => {
-                    let (fields, spread) = *inner;
+                    let (ref fields, ref spread) = **inner;
             if fields.is_empty() {
                 t.attach_inside(expr.pexp_loc, comments, arena);
             } else {
@@ -1499,7 +1499,7 @@ fn walk_expression(expr: &Expression, t: &mut CommentTable, comments: Vec<Commen
             t.attach_trailing(lid.loc, trailing, arena);
         }
         ExpressionDesc::Pexp_setfield(inner) => {
-                    let (obj, lid, value) = *inner;
+                    let (ref obj, ref lid, ref value) = **inner;
             let (leading, inside, trailing) = partition_by_loc(comments, obj.pexp_loc, arena);
 
             let rest = if is_block_expr(obj) {
@@ -1535,7 +1535,7 @@ fn walk_expression(expr: &Expression, t: &mut CommentTable, comments: Vec<Commen
             }
         }
         ExpressionDesc::Pexp_ifthenelse(inner) => {
-                    let (cond, then_branch, else_branch) = *inner;
+                    let (ref cond, ref then_branch, ref else_branch) = **inner;
             let (leading, rest) = partition_leading_trailing(comments, expr.pexp_loc, arena);
             t.attach_leading(expr.pexp_loc, leading, arena);
 
@@ -1621,7 +1621,7 @@ fn walk_expression(expr: &Expression, t: &mut CommentTable, comments: Vec<Commen
             }
         }
         ExpressionDesc::Pexp_for(inner) => {
-                    let (pat, from, to, _, body) = *inner;
+                    let (ref pat, ref from, ref to, _, ref body) = **inner;
             let (leading, inside, trailing) = partition_by_loc(comments, pat.ppat_loc, arena);
             t.attach_leading(pat.ppat_loc, leading, arena);
             walk_pattern(pat, t, inside, arena);
@@ -1660,7 +1660,7 @@ fn walk_expression(expr: &Expression, t: &mut CommentTable, comments: Vec<Commen
         }
         ExpressionDesc::Pexp_match(match_expr, cases)
         | ExpressionDesc::Pexp_try(inner) => {
-                    let (match_expr, cases) = *inner;
+                    let (ref match_expr, ref cases) = **inner;
             let (before, inside, after) = partition_by_loc(comments, match_expr.pexp_loc, arena);
 
             let after = if is_block_expr(match_expr) {
@@ -1686,7 +1686,7 @@ fn walk_expression(expr: &Expression, t: &mut CommentTable, comments: Vec<Commen
             walk_list(&nodes, t, rest, arena);
         }
         ExpressionDesc::Pexp_apply(inner) => {
-                    let PexpApply { funct, args, .. } = *inner;
+                    let PexpApply { ref funct, ref args, .. } = **inner;
             // Check for unary expressions
             if args.len() == 1 {
                 if let ExpressionDesc::Pexp_ident(ident) = &*funct.pexp_desc {
@@ -1895,7 +1895,7 @@ fn walk_expression(expr: &Expression, t: &mut CommentTable, comments: Vec<Commen
             walk_apply_expr(funct, args, t, comments, arena);
         }
         ExpressionDesc::Pexp_fun { .. } | ExpressionDesc::Pexp_newtype(inner) => {
-                    let (_, _) = *inner;
+                    let (_, _) = **inner;
             // Walk through function parameters and body, matching OCaml's handling
             let (_is_async, parameters, return_expr) = parsetree_viewer::fun_expr(arena, expr);
 
@@ -2004,7 +2004,7 @@ fn walk_expression(expr: &Expression, t: &mut CommentTable, comments: Vec<Commen
             // Walk return expression
             match &*return_expr.pexp_desc {
                 ExpressionDesc::Pexp_constraint(inner) if arena.loc_start(inner_expr.pexp_loc).cnum >= arena.loc_end(typ.ptyp_loc).cnum => {
-                    let (inner_expr, typ) = *inner;
+                    let (ref inner_expr, ref typ) = **inner;
                     let (leading, inside, trailing) = partition_by_loc(comments, typ.ptyp_loc, arena);
                     t.attach_leading(typ.ptyp_loc, leading, arena);
                     walk_core_type(typ, t, inside, arena);
@@ -2428,17 +2428,17 @@ fn walk_pattern(pattern: &Pattern, t: &mut CommentTable, comments: Vec<Comment>,
             }
         }
         PatternDesc::Ppat_variant(inner) => {
-                    let (_, None) = *inner;}
-        PatternDesc::Ppat_variant(inner) => {
-                    let (_, Some(arg)) = *inner;
-            walk_pattern(arg, t, comments, arena);
+            let (_, ref opt_arg) = **inner;
+            if let Some(arg) = opt_arg {
+                walk_pattern(arg, t, comments, arena);
+            }
         }
         PatternDesc::Ppat_tuple(pats) | PatternDesc::Ppat_array(pats) => {
             let nodes: Vec<Node<'_>> = pats.iter().map(|p| Node::Pattern(p)).collect();
             walk_list(&nodes, t, comments, arena);
         }
         PatternDesc::Ppat_record(inner) => {
-                    let (fields, _) = *inner;
+                    let (ref fields, _) = **inner;
             let nodes: Vec<Node<'_>> = fields
                 .iter()
                 .map(|f| Node::PatternRecordRow(&f.lid, &f.pat))
@@ -2452,7 +2452,7 @@ fn walk_pattern(pattern: &Pattern, t: &mut CommentTable, comments: Vec<Comment>,
             walk_list(&nodes, t, comments, arena);
         }
         PatternDesc::Ppat_constraint(inner) => {
-                    let (pat, typ) = *inner;
+                    let (ref pat, ref typ) = **inner;
             let (before, inside, after) = partition_by_loc(comments, pat.ppat_loc, arena);
             t.attach_leading(pat.ppat_loc, before, arena);
             walk_pattern(pat, t, inside, arena);
@@ -2524,7 +2524,7 @@ fn walk_core_type(ct: &CoreType, t: &mut CommentTable, comments: Vec<Comment>, a
             t.attach_trailing(ct.ptyp_loc, trailing, arena);
         }
         CoreTypeDesc::Ptyp_constr(inner) => {
-                    let (name, args) = *inner;
+                    let (ref name, ref args) = **inner;
             let (leading, trailing) = partition_leading_trailing(comments, name.loc, arena);
             t.attach_leading(name.loc, leading, arena);
 
@@ -2546,7 +2546,7 @@ fn walk_core_type(ct: &CoreType, t: &mut CommentTable, comments: Vec<Comment>, a
             }
         }
         CoreTypeDesc::Ptyp_arrow(inner) => {
-                    let (..) = *inner;
+                    let (..) = **inner;
             // OCaml flattens the arrow type into a list of parameters first, then walks them.
             // This ensures comments between parameters are properly partitioned.
             use crate::parser::parsetree_viewer;
@@ -2566,12 +2566,12 @@ fn walk_core_type(ct: &CoreType, t: &mut CommentTable, comments: Vec<Comment>, a
             walk_list(&nodes, t, comments, arena);
         }
         CoreTypeDesc::Ptyp_object(inner) => {
-                    let (fields, _) = *inner;
+                    let (ref fields, _) = **inner;
             let nodes: Vec<Node<'_>> = fields.iter().map(|f| Node::ObjectField(f)).collect();
             walk_list(&nodes, t, comments, arena);
         }
         CoreTypeDesc::Ptyp_poly(inner) => {
-                    let (vars, typ) = *inner;
+                    let (ref vars, ref typ) = **inner;
             // OCaml walks type variables as a list, attaching leading/trailing comments to each
             let comments = if vars.is_empty() {
                 comments
@@ -2597,7 +2597,7 @@ fn walk_core_type(ct: &CoreType, t: &mut CommentTable, comments: Vec<Comment>, a
             t.attach_trailing(typ.ptyp_loc, after_typ, arena);
         }
         CoreTypeDesc::Ptyp_variant(inner) => {
-                    let (fields, _, _) = *inner;
+                    let (ref fields, _, _) = **inner;
             let nodes: Vec<Node<'_>> = fields.iter().map(|f| Node::RowField(f)).collect();
             walk_list(&nodes, t, comments, arena);
         }
@@ -2619,7 +2619,7 @@ fn walk_core_type(ct: &CoreType, t: &mut CommentTable, comments: Vec<Comment>, a
             }
         }
         CoreTypeDesc::Ptyp_alias(inner) => {
-                    let (typ, _name) = *inner;
+                    let (ref typ, ref _name) = **inner;
             // The alias name is just a String without location info
             let (before, inside, after) = partition_by_loc(comments, typ.ptyp_loc, arena);
             t.attach_leading(typ.ptyp_loc, before, arena);
@@ -2757,7 +2757,7 @@ fn walk_module_expr(me: &ModuleExpr, t: &mut CommentTable, comments: Vec<Comment
             walk_structure(structure, t, comments, arena);
         }
         ModuleExprDesc::Pmod_functor(inner) => {
-                    let (_, _, _) = *inner;
+                    let (_, _, _) = **inner;
             // Collect all functor parameters and walk them as a list
             let (parameters, return_mod_expr) = parsetree_viewer::mod_expr_functor(me);
 
@@ -2900,7 +2900,7 @@ fn walk_mod_type(mt: &ModuleType, t: &mut CommentTable, comments: Vec<Comment>, 
             walk_signature(sig, t, comments, arena);
         }
         ModuleTypeDesc::Pmty_functor(inner) => {
-                    let (_, _, _) = *inner;
+                    let (_, _, _) = **inner;
             // Collect all functor parameters like OCaml's functor_type
             let (parameters, return_mod_type) = functor_type_params(mt);
 
@@ -2941,7 +2941,7 @@ fn walk_mod_type(mt: &ModuleType, t: &mut CommentTable, comments: Vec<Comment>, 
             t.attach_trailing(return_mod_type.pmty_loc, after, arena);
         }
         ModuleTypeDesc::Pmty_with(inner) => {
-                    let (typ, constraints) = *inner;
+                    let (ref typ, ref constraints) = **inner;
             let (before, inside, after) = partition_by_loc(comments, typ.pmty_loc, arena);
             t.attach_leading(typ.pmty_loc, before, arena);
             walk_mod_type(typ, t, inside, arena);
@@ -3010,7 +3010,7 @@ fn walk_attribute(attr: &Attribute, t: &mut CommentTable, comments: Vec<Comment>
             walk_core_type(typ, t, rest, arena);
         }
         PPat(inner) => {
-                    let (pat, guard) = *inner;
+                    let (ref pat, ref guard) = **inner;
             walk_pattern(pat, t, rest.clone(), arena);
             if let Some(guard_expr) = guard {
                 walk_expression(guard_expr, t, Vec::new(), arena);
@@ -3049,7 +3049,7 @@ fn walk_extension(ext: &Extension, t: &mut CommentTable, comments: Vec<Comment>,
             walk_core_type(typ, t, rest, arena);
         }
         PPat(inner) => {
-                    let (pat, guard) = *inner;
+                    let (ref pat, ref guard) = **inner;
             let (after_name, rest) = partition_adjacent_trailing(name.loc, trailing, arena);
             t.attach_trailing(name.loc, after_name, arena);
             walk_pattern(pat, t, rest.clone(), arena);
@@ -3069,7 +3069,7 @@ fn functor_type_params(modtype: &ModuleType) -> (Vec<(&[Attribute], &crate::pars
     ) -> (Vec<(&'a [Attribute], &'a crate::parser::ast::StringLoc, Option<&'a ModuleType>)>, &'a ModuleType) {
         match &*modtype.pmty_desc {
             ModuleTypeDesc::Pmty_functor(inner) => {
-                    let (lbl, arg_type, return_type) = *inner;
+                    let (ref lbl, ref arg_type, ref return_type) = **inner;
                 let mut new_acc = acc;
                 new_acc.push((&modtype.pmty_attributes, lbl, arg_type.as_ref().map(|t| t.as_ref())));
                 process(new_acc, return_type)

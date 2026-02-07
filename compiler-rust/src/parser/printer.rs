@@ -980,7 +980,7 @@ pub fn print_expression(
         }
         // Function expressions
         ExpressionDesc::Pexp_fun { .. } | ExpressionDesc::Pexp_newtype(inner) => {
-                    let (_, _) = *inner;
+                    let (_, _) = **inner;
             print_arrow_expression(state, e, cmt_tbl, arena)
         }
         // Constants
@@ -1130,7 +1130,7 @@ pub fn print_expression(
         }
         // Variant
         ExpressionDesc::Pexp_variant(inner) => {
-                    let (label, args) = *inner;
+                    let (ref label, ref args) = **inner;
             let variant_name = Doc::concat(vec![
                 Doc::text("#"),
                 print_poly_var_ident(label),
@@ -1185,7 +1185,7 @@ pub fn print_expression(
         }
         // Record expression
         ExpressionDesc::Pexp_record(inner) => {
-                    let (fields, spread) = *inner;
+                    let (ref fields, ref spread) = **inner;
             print_record_expression(state, e.pexp_loc, spread.as_ref().map(|e| e.as_ref()), fields, cmt_tbl, arena)
         }
         // Field access: expr.field
@@ -1202,7 +1202,7 @@ pub fn print_expression(
         }
         // Field set: expr.field = value
         ExpressionDesc::Pexp_setfield(inner) => {
-                    let (expr, longident_loc, value) = *inner;
+                    let (ref expr, ref longident_loc, ref value) = **inner;
             let lhs = {
                 let expr_doc = print_expression_with_comments(state, expr, cmt_tbl, arena);
                 let expr_doc = match parens::field_expr(arena,expr) {
@@ -1244,11 +1244,11 @@ pub fn print_expression(
         }
         // Ternary or if-then-else
         ExpressionDesc::Pexp_ifthenelse(inner) if parsetree_viewer::is_ternary_expr(arena, e) => {
-                    let (_, _, _) = *inner;
+                    let (_, _, _) = **inner;
             print_ternary_expression(state, e, cmt_tbl, arena)
         }
         ExpressionDesc::Pexp_ifthenelse(inner) => {
-                    let (_, _, _) = *inner;
+                    let (_, _, _) = **inner;
             print_if_expression(state, e, cmt_tbl, arena)
         }
         // Sequence: expr1; expr2
@@ -1257,7 +1257,7 @@ pub fn print_expression(
         }
         // Let expression
         ExpressionDesc::Pexp_let(inner) => {
-                    let (_, _, _) = *inner;
+                    let (_, _, _) = **inner;
             print_expression_block(state, true, e, cmt_tbl, arena)
         }
         // Array access: Array.get(arr, idx) -> arr[idx]
@@ -1450,7 +1450,7 @@ pub fn print_expression(
         }
         // Function application
         ExpressionDesc::Pexp_apply(inner) => {
-                    let PexpApply { funct, args, partial, .. } = *inner;
+                    let PexpApply { ref funct, ref args, ref partial, .. } = **inner;
             print_pexp_apply(state, e, funct, args, *partial, cmt_tbl, arena)
         }
         // Constraint with pack: module(M: S)
@@ -1481,7 +1481,7 @@ pub fn print_expression(
         }
         // Constraint: expr: typ (parens added by caller when needed)
         ExpressionDesc::Pexp_constraint(inner) => {
-                    let (expr, typ) = *inner;
+                    let (ref expr, ref typ) = **inner;
             let expr_doc = {
                 let doc = print_expression_with_comments(state, expr, cmt_tbl, arena);
                 match parens::expr(arena,expr) {
@@ -1495,7 +1495,7 @@ pub fn print_expression(
         }
         // Coerce: (expr :> typ)
         ExpressionDesc::Pexp_coerce(inner) => {
-                    let (expr, _, typ) = *inner;
+                    let (ref expr, _, ref typ) = **inner;
             let expr_doc = print_expression_with_comments(state, expr, cmt_tbl, arena);
             let typ_doc = print_typ_expr(state, typ, cmt_tbl, arena);
             Doc::concat(vec![
@@ -1519,12 +1519,12 @@ pub fn print_expression(
         }
         // Match expression
         ExpressionDesc::Pexp_match(inner) => {
-                    let (expr, cases) = *inner;
+                    let (ref expr, ref cases) = **inner;
             print_match_expression(state, expr, cases, cmt_tbl, arena)
         }
         // Try expression
         ExpressionDesc::Pexp_try(inner) => {
-                    let (expr, cases) = *inner;
+                    let (ref expr, ref cases) = **inner;
             print_try_expression(state, expr, cases, cmt_tbl, arena)
         }
         // Assert
@@ -1546,17 +1546,17 @@ pub fn print_expression(
         }
         // Open expression
         ExpressionDesc::Pexp_open(inner) => {
-                    let (_, _, _) = *inner;
+                    let (_, _, _) = **inner;
             print_expression_block(state, true, e, cmt_tbl, arena)
         }
         // Let module
         ExpressionDesc::Pexp_letmodule(inner) => {
-                    let (_, _, _) = *inner;
+                    let (_, _, _) = **inner;
             print_expression_block(state, true, e, cmt_tbl, arena)
         }
         // Let exception
         ExpressionDesc::Pexp_letexception(inner) => {
-                    let (_, _) = *inner;
+                    let (_, _) = **inner;
             print_expression_block(state, true, e, cmt_tbl, arena)
         }
         // While loop
@@ -1588,7 +1588,7 @@ pub fn print_expression(
         }
         // For loop
         ExpressionDesc::Pexp_for(inner) => {
-                    let (pat, start, finish, direction, body) = *inner;
+                    let (ref pat, ref start, ref finish, ref direction, ref body) = **inner;
             let dir = match direction {
                 DirectionFlag::Upto => " to ",
                 DirectionFlag::Downto => " downto ",
@@ -1639,7 +1639,7 @@ pub fn print_expression(
         }
         // Send (method call): expr#method -> expr["method"]
         ExpressionDesc::Pexp_send(inner) => {
-                    let (parent_expr, label) = *inner;
+                    let (ref parent_expr, ref label) = **inner;
             let parent_doc = print_expression_with_comments(state, parent_expr, cmt_tbl, arena);
             // Apply parenthesization if needed (like unary_expr_operand)
             let parent_doc = match parens::unary_expr_operand(arena,parent_expr) {
@@ -1849,7 +1849,7 @@ fn print_pexp_fun(
     // This preserves @res.braces on the body when it's inside a constraint
     let (return_expr_owned, typ_constraint): (Option<Expression>, Option<&CoreType>) = match &*return_expr.pexp_desc {
         ExpressionDesc::Pexp_constraint(inner) => {
-                    let (expr, typ) = *inner;
+                    let (ref expr, ref typ) = **inner;
             // Create a new expression with merged attributes
             let mut merged_expr = expr.as_ref().clone();
             merged_expr.pexp_attributes = [
@@ -2782,7 +2782,7 @@ fn collect_block_rows_inner(
 ) {
     match &*expr.pexp_desc {
         ExpressionDesc::Pexp_letmodule(inner) => {
-                    let (name, mod_expr, body) = *inner;
+                    let (ref name, ref mod_expr, ref body) = **inner;
             // Use combined location (expr start to mod_expr end) to match walker
             let start = arena.loc_start(expr.pexp_loc);
             let end = arena.loc_end(mod_expr.pmod_loc);
@@ -2826,7 +2826,7 @@ fn collect_block_rows_inner(
         }
 
         ExpressionDesc::Pexp_letexception(inner) => {
-                    let (ext_constr, body) = *inner;
+                    let (ref ext_constr, ref body) = **inner;
             // Use combined location (expr start to ext_constr end) to match walker
             let base_start = arena.loc_start(expr.pexp_loc);
             let end = arena.loc_end(ext_constr.pext_loc);
@@ -2850,7 +2850,7 @@ fn collect_block_rows_inner(
         }
 
         ExpressionDesc::Pexp_open(inner) => {
-                    let (override_flag, lid, body) = *inner;
+                    let (ref override_flag, ref lid, ref body) = **inner;
             // Use combined location (expr start to lid end) to match walker
             let start = arena.loc_start(expr.pexp_loc);
             let end = arena.loc_end(lid.loc);
@@ -2900,7 +2900,7 @@ fn collect_block_rows_inner(
         }
 
         ExpressionDesc::Pexp_let(inner) => {
-                    let (rec_flag, bindings, body) = *inner;
+                    let (ref rec_flag, ref bindings, ref body) = **inner;
             // Use first binding's location for comment lookup, matching OCaml's logic
             let (pos_range, base_start_line, end_line) = if let (Some(first), Some(last)) = (bindings.first(), bindings.last()) {
                 // Get the binding location matching what the walker uses
@@ -3405,7 +3405,7 @@ fn print_underscore_apply_in_pipe(
 
     match &*inner.pexp_desc {
         ExpressionDesc::Pexp_apply(inner) => {
-                    let PexpApply { funct, args, partial, .. } = *inner;
+                    let PexpApply { ref funct, ref args, ref partial, .. } = **inner;
             // Check if first arg is __x and no other args have __x
             if first_arg_is_underscore(args, arena) && !rest_args_have_underscore(args, arena) {
                 // Single __x in first position - omit it entirely
@@ -3467,7 +3467,7 @@ fn print_underscore_apply(
 ) -> Doc {
     match &*inner.pexp_desc {
         ExpressionDesc::Pexp_apply(inner) => {
-                    let PexpApply { funct, args, partial, .. } = *inner;
+                    let PexpApply { ref funct, ref args, ref partial, .. } = **inner;
             // Print function part normally
             let funct_doc = print_expression_with_comments(state, funct, cmt_tbl, arena);
             let funct_doc = match parens::call_expr(arena, funct) {
@@ -4017,7 +4017,7 @@ fn flatten_binary_operand(
         match &*expr.pexp_desc {
             // Setfield - only needs parens on LHS
             ExpressionDesc::Pexp_setfield(inner) => {
-                    let (_, _, _) = *inner;
+                    let (_, _, _) = **inner;
                 let doc = print_expression_with_comments(state, expr, cmt_tbl, arena);
                 if is_lhs {
                     add_parens(doc)
@@ -4799,14 +4799,13 @@ pub fn print_pattern(
             };
             Doc::group(Doc::concat(vec![constr, args_doc]))
         }
-        // #variant
+        // #variant or #variant(args)
         PatternDesc::Ppat_variant(inner) => {
-                    let (label, None) = *inner;
-            Doc::concat(vec![Doc::text("#"), print_poly_var_ident(label)])
-        }
-        // #variant(args)
-        PatternDesc::Ppat_variant(inner) => {
-                    let (label, Some(arg)) = *inner;
+            let (ref label, ref opt_arg) = **inner;
+            if opt_arg.is_none() {
+                return Doc::concat(vec![Doc::text("#"), print_poly_var_ident(label)]);
+            }
+            let arg = opt_arg.as_ref().unwrap();
             let variant_name = Doc::concat(vec![Doc::text("#"), print_poly_var_ident(label)]);
             let args_doc = match &*arg.ppat_desc {
                 PatternDesc::Ppat_construct(lid, None)
@@ -4854,7 +4853,7 @@ pub fn print_pattern(
         }
         // {field1, field2: pat, ...spread} or dict{"key": pat}
         PatternDesc::Ppat_record(inner) => {
-                    let (fields, closed) = *inner;
+                    let (ref fields, ref closed) = **inner;
             // Check if this is a dict pattern (has res.dictPattern attribute)
             if parsetree_viewer::has_dict_pattern_attribute(arena, &pat.ppat_attributes) {
                 print_dict_pattern(state, fields, cmt_tbl, arena)
@@ -4922,7 +4921,7 @@ pub fn print_pattern(
         }
         // p : type
         PatternDesc::Ppat_constraint(inner) => {
-                    let (pat, typ) = *inner;
+                    let (ref pat, ref typ) = **inner;
             let pat_doc = print_pattern(state, pat, cmt_tbl, arena);
             let typ_doc = print_typ_expr(state, typ, cmt_tbl, arena);
             Doc::concat(vec![pat_doc, Doc::text(": "), typ_doc])
@@ -4979,7 +4978,7 @@ pub fn print_pattern(
         }
         // interval: 'a' .. 'z'
         PatternDesc::Ppat_interval(inner) => {
-                    let (c1, c2) = *inner;
+                    let (ref c1, ref c2) = **inner;
             Doc::concat(vec![
                 print_constant(false, c1),
                 Doc::text(" .. "),
@@ -5323,7 +5322,7 @@ pub fn print_typ_expr(
         CoreTypeDesc::Ptyp_extension(ext) => print_extension(state, ext, false, cmt_tbl, arena),
 
         CoreTypeDesc::Ptyp_alias(inner) => {
-                    let (inner_typ, alias) = *inner;
+                    let (ref inner_typ, ref alias) = **inner;
             let needs_parens = matches!(&*inner_typ.ptyp_desc, CoreTypeDesc::Ptyp_arrow { .. });
             let typ_doc = print_typ_expr(state, inner_typ, cmt_tbl, arena);
             if needs_parens {
@@ -5344,17 +5343,17 @@ pub fn print_typ_expr(
         }
 
         CoreTypeDesc::Ptyp_object(inner) => {
-                    let (fields, open_flag) = *inner;
+                    let (ref fields, ref open_flag) = **inner;
             print_object(state, fields, open_flag, false, cmt_tbl, arena)
         }
 
         CoreTypeDesc::Ptyp_arrow(inner) => {
-                    let (arity, ..) = *inner;
+                    let (ref arity, ..) = **inner;
             print_arrow_type(state, typ, arity.clone(), cmt_tbl, arena)
         }
 
         CoreTypeDesc::Ptyp_constr(inner) => {
-                    let (lid, args) = *inner;
+                    let (ref lid, ref args) = **inner;
             // Check if this is a reference to an inline record definition
             // OCaml: | Ptyp_constr ({txt = Lident inline_record_name}, _)
             //          when inline_record_definitions |> find_inline_record_definition inline_record_name |> Option.is_some
@@ -5437,7 +5436,7 @@ pub fn print_typ_expr(
         CoreTypeDesc::Ptyp_tuple(types) => print_tuple_type(state, types, false, cmt_tbl, arena),
 
         CoreTypeDesc::Ptyp_poly(inner) => {
-                    let (vars, inner_typ) = *inner;
+                    let (ref vars, ref inner_typ) = **inner;
             if vars.is_empty() {
                 print_typ_expr(state, inner_typ, cmt_tbl, arena)
             } else {
@@ -5464,7 +5463,7 @@ pub fn print_typ_expr(
         }
 
         CoreTypeDesc::Ptyp_variant(inner) => {
-                    let (row_fields, closed_flag, labels_opt) = *inner;
+                    let (ref row_fields, ref closed_flag, ref labels_opt) = **inner;
             print_variant_type(state, row_fields, closed_flag, labels_opt, typ, cmt_tbl, arena)
         }
     };
@@ -6181,7 +6180,7 @@ fn print_mod_expr(
         }
 
         ModuleExprDesc::Pmod_functor(inner) => {
-                    let (_, _, _) = *inner;
+                    let (_, _, _) = **inner;
             print_mod_functor(state, mod_expr, cmt_tbl, arena)
         }
     };
@@ -6386,12 +6385,12 @@ fn print_module_type(
         }
 
         ModuleTypeDesc::Pmty_functor(inner) => {
-                    let (_, _, _) = *inner;
+                    let (_, _, _) = **inner;
             print_module_type_functor(state, mty, cmt_tbl, arena)
         }
 
         ModuleTypeDesc::Pmty_with(inner) => {
-                    let (mod_type, with_constraints) = *inner;
+                    let (ref mod_type, ref with_constraints) = **inner;
             let base_doc = print_module_type(state, mod_type, cmt_tbl, arena);
             let base_doc = if parens::mod_type_with_operand(mod_type) {
                 Doc::concat(vec![Doc::lparen(), base_doc, Doc::rparen()])
@@ -6575,7 +6574,7 @@ fn mod_type_functor(mty: &ModuleType) -> (Vec<(&[Attribute], &StringLoc, Option<
     ) -> (Vec<(&'a [Attribute], &'a StringLoc, Option<&'a ModuleType>)>, &'a ModuleType) {
         match &*mty.pmty_desc {
             ModuleTypeDesc::Pmty_functor(inner) => {
-                    let (lbl, mod_type, return_mty) = *inner;
+                    let (ref lbl, ref mod_type, ref return_mty) = **inner;
                 let mut new_acc = acc;
                 // Attributes on functor are for the parameter
                 new_acc.push((&mty.pmty_attributes, lbl, mod_type.as_ref().map(|t| t.as_ref())));
@@ -6775,7 +6774,7 @@ fn case_pattern_needs_parens(pattern: &Pattern) -> bool {
         // Constraint patterns need parens: | (p: typ) => ...
         // Exception: module(M: S) doesn't need extra parens
         PatternDesc::Ppat_constraint(inner) => {
-                    let (inner, typ) = *inner;
+                    let (ref inner, ref typ) = **inner;
             !(matches!(&*inner.ppat_desc, PatternDesc::Ppat_unpack(_))
                 && matches!(&*typ.ptyp_desc, CoreTypeDesc::Ptyp_package(_)))
         }
@@ -7351,7 +7350,7 @@ fn print_payload(state: &PrinterState, payload: &Payload, cmt_tbl: &mut CommentT
             if let [single] = &items[..] {
                 match &*single.pstr_desc {
                     StructureItemDesc::Pstr_eval(inner) => {
-                    let (expr, attrs) = *inner;
+                    let (ref expr, ref attrs) = **inner;
                         let expr_doc = print_expression_with_comments(state, expr, cmt_tbl, arena);
                         let needs_parens = !attrs.is_empty();
                         let should_hug = parsetree_viewer::is_huggable_expression(arena, expr);
@@ -7384,7 +7383,7 @@ fn print_payload(state: &PrinterState, payload: &Payload, cmt_tbl: &mut CommentT
                         }
                     }
                     StructureItemDesc::Pstr_value(inner) => {
-                    let (_, _) = *inner;
+                    let (_, _) = **inner;
                         // Single value binding - wrap in parens
                         add_parens(print_structure_item(state, single, cmt_tbl, arena))
                     }
@@ -7414,7 +7413,7 @@ fn print_payload(state: &PrinterState, payload: &Payload, cmt_tbl: &mut CommentT
             Doc::text(")"),
         ]),
         Payload::PPat(inner) => {
-                    let (pat, guard) = *inner;
+                    let (ref pat, ref guard) = **inner;
             let pat_doc = print_pattern(state, pat, cmt_tbl, arena);
             // OCaml: when_doc = Doc.line; Doc.text "if "; print_expression ...
             let guard_doc = match guard {
@@ -7500,7 +7499,7 @@ pub fn print_signature_item(
         }
 
         SignatureItemDesc::Psig_type(inner) => {
-                    let (rec_flag, type_decls) = *inner;
+                    let (ref rec_flag, ref type_decls) = **inner;
             // Use print_type_declarations_with_rec_flag which handles everything
             // including the "type " prefix, using print_listi for proper comment handling
             print_type_declarations_with_rec_flag(state, rec_flag, type_decls, cmt_tbl, arena)
@@ -7539,7 +7538,7 @@ pub fn print_signature_item(
         }
 
         SignatureItemDesc::Psig_extension(inner) => {
-                    let (ext, attrs) = *inner;
+                    let (ref ext, ref attrs) = **inner;
             let attrs_doc = print_attributes(state, attrs, cmt_tbl, arena);
             Doc::concat(vec![
                 attrs_doc,
@@ -7661,12 +7660,12 @@ pub fn print_structure_item(
 ) -> Doc {
     match &*item.pstr_desc {
         StructureItemDesc::Pstr_value(inner) => {
-                    let (rec_flag, bindings) = *inner;
+                    let (ref rec_flag, ref bindings) = **inner;
             print_value_bindings(state, bindings, rec_flag, cmt_tbl, arena)
         }
 
         StructureItemDesc::Pstr_type(inner) => {
-                    let (rec_flag, type_decls) = *inner;
+                    let (ref rec_flag, ref type_decls) = **inner;
             // Use print_type_declarations_with_rec_flag which handles everything
             // including the "type " prefix, using print_listi for proper comment handling
             print_type_declarations_with_rec_flag(state, rec_flag, type_decls, cmt_tbl, arena)
@@ -7709,7 +7708,7 @@ pub fn print_structure_item(
         }
 
         StructureItemDesc::Pstr_extension(inner) => {
-                    let (ext, attrs) = *inner;
+                    let (ref ext, ref attrs) = **inner;
             let attrs_doc = print_attributes(state, attrs, cmt_tbl, arena);
             Doc::concat(vec![
                 attrs_doc,
@@ -7718,7 +7717,7 @@ pub fn print_structure_item(
         }
 
         StructureItemDesc::Pstr_eval(inner) => {
-                    let (expr, attrs) = *inner;
+                    let (ref expr, ref attrs) = **inner;
             let attrs_doc = print_attributes(state, attrs, cmt_tbl, arena);
             let expr_doc = {
                 let doc = print_expression_with_comments(state, expr, cmt_tbl, arena);

@@ -139,11 +139,11 @@ impl<'a> DependencyCollector<'a> {
     fn add_structure_item(&mut self, item: &StructureItem) {
         match &*item.pstr_desc {
             StructureItemDesc::Pstr_eval(inner) => {
-                    let (expr, _attrs) = *inner;
+                    let (ref expr, ref _attrs) = **inner;
                 self.add_expression(expr);
             }
             StructureItemDesc::Pstr_value(inner) => {
-                    let (_rec_flag, bindings) = *inner;
+                    let (ref _rec_flag, ref bindings) = **inner;
                 // OCaml's add_bindings collects pattern bindings (including Ppat_unpack)
                 // and adds them to bound_modules so later references don't add dependencies.
                 // First collect all unpack names from patterns
@@ -165,7 +165,7 @@ impl<'a> DependencyCollector<'a> {
                 self.add_value_description(vd);
             }
             StructureItemDesc::Pstr_type(inner) => {
-                    let (_rec_flag, decls) = *inner;
+                    let (ref _rec_flag, ref decls) = **inner;
                 for decl in decls {
                     self.add_type_declaration(decl);
                 }
@@ -209,7 +209,7 @@ impl<'a> DependencyCollector<'a> {
                 // Attributes don't contribute dependencies
             }
             StructureItemDesc::Pstr_extension(inner) => {
-                    let ((_id, _payload), _attrs) = *inner;
+                    // Extension payload ignored for dependency extraction
                 // OCaml's handle_extension ignores extension payloads for dependency extraction
             }
         }
@@ -229,7 +229,7 @@ impl<'a> DependencyCollector<'a> {
                 self.add_value_description(vd);
             }
             SignatureItemDesc::Psig_type(inner) => {
-                    let (_rec_flag, decls) = *inner;
+                    let (ref _rec_flag, ref decls) = **inner;
                 for decl in decls {
                     self.add_type_declaration(decl);
                 }
@@ -270,7 +270,7 @@ impl<'a> DependencyCollector<'a> {
                 // Attributes don't contribute dependencies
             }
             SignatureItemDesc::Psig_extension(inner) => {
-                    let ((_id, _payload), _attrs) = *inner;
+                    // Extension payload ignored for dependency extraction
                 // OCaml's handle_extension ignores extension payloads for dependency extraction
             }
         }
@@ -285,7 +285,7 @@ impl<'a> DependencyCollector<'a> {
             }
             ExpressionDesc::Pexp_constant(_) => {}
             ExpressionDesc::Pexp_let(inner) => {
-                    let (_rec_flag, bindings, body) = *inner;
+                    let (ref _rec_flag, ref bindings, ref body) = **inner;
                 // OCaml's add_bindings collects pattern bindings (including Ppat_unpack)
                 // First collect all unpack names from patterns
                 let mut unpack_names = HashSet::new();
@@ -334,14 +334,14 @@ impl<'a> DependencyCollector<'a> {
                 }
             }
             ExpressionDesc::Pexp_apply(inner) => {
-                    let PexpApply { funct, args, .. } = *inner;
+                    let PexpApply { ref funct, ref args, .. } = **inner;
                 self.add_expression(funct);
                 for (_label, arg) in args {
                     self.add_expression(arg);
                 }
             }
             ExpressionDesc::Pexp_match(expr, cases) | ExpressionDesc::Pexp_try(inner) => {
-                    let (expr, cases) = *inner;
+                    let (ref expr, ref cases) = **inner;
                 self.add_expression(expr);
                 for case in cases {
                     self.add_case(case);
@@ -359,13 +359,13 @@ impl<'a> DependencyCollector<'a> {
                 }
             }
             ExpressionDesc::Pexp_variant(inner) => {
-                    let (_label, arg) = *inner;
+                    let (ref _label, ref arg) = **inner;
                 if let Some(arg) = arg {
                     self.add_expression(arg);
                 }
             }
             ExpressionDesc::Pexp_record(inner) => {
-                    let (fields, spread) = *inner;
+                    let (ref fields, ref spread) = **inner;
                 for field in fields {
                     self.add_lident_idx(field.lid.txt);
                     self.add_expression(&field.expr);
@@ -379,13 +379,13 @@ impl<'a> DependencyCollector<'a> {
                 self.add_lident_idx(lid.txt);
             }
             ExpressionDesc::Pexp_setfield(inner) => {
-                    let (expr1, lid, expr2) = *inner;
+                    let (ref expr1, ref lid, ref expr2) = **inner;
                 self.add_expression(expr1);
                 self.add_lident_idx(lid.txt);
                 self.add_expression(expr2);
             }
             ExpressionDesc::Pexp_ifthenelse(inner) => {
-                    let (cond, then_expr, else_expr) = *inner;
+                    let (ref cond, ref then_expr, ref else_expr) = **inner;
                 self.add_expression(cond);
                 self.add_expression(then_expr);
                 if let Some(else_expr) = else_expr {
@@ -401,7 +401,7 @@ impl<'a> DependencyCollector<'a> {
                 self.add_expression(body);
             }
             ExpressionDesc::Pexp_for(inner) => {
-                    let (_pat, start, end, _dir, body) = *inner;
+                    let (ref _pat, ref start, ref end, ref _dir, ref body) = **inner;
                 // OCaml: Pexp_for (_, e1, e2, _, e3) - ignores the pattern
                 // The for-loop pattern doesn't add dependencies
                 self.add_expression(start);
@@ -409,12 +409,12 @@ impl<'a> DependencyCollector<'a> {
                 self.add_expression(body);
             }
             ExpressionDesc::Pexp_constraint(inner) => {
-                    let (expr, ty) = *inner;
+                    let (ref expr, ref ty) = **inner;
                 self.add_expression(expr);
                 self.add_core_type(ty);
             }
             ExpressionDesc::Pexp_coerce(inner) => {
-                    let (expr, ty1, ty2) = *inner;
+                    let (ref expr, ref ty1, ref ty2) = **inner;
                 self.add_expression(expr);
                 if let Some(ty1) = ty1 {
                     self.add_core_type(ty1);
@@ -422,11 +422,11 @@ impl<'a> DependencyCollector<'a> {
                 self.add_core_type(ty2);
             }
             ExpressionDesc::Pexp_send(inner) => {
-                    let (expr, _label) = *inner;
+                    let (ref expr, ref _label) = **inner;
                 self.add_expression(expr);
             }
             ExpressionDesc::Pexp_letmodule(inner) => {
-                    let (name, me, body) = *inner;
+                    let (ref name, ref me, ref body) = **inner;
                 // Bind the module name so it's not added as a dependency
                 let module_name = self.arena.get_string(name.txt).to_string();
                 // Only track as newly added if not already bound, to avoid
@@ -439,7 +439,7 @@ impl<'a> DependencyCollector<'a> {
                 }
             }
             ExpressionDesc::Pexp_letexception(inner) => {
-                    let (ext_ctor, body) = *inner;
+                    let (ref ext_ctor, ref body) = **inner;
                 self.add_extension_constructor(ext_ctor);
                 self.add_expression(body);
             }
@@ -447,14 +447,14 @@ impl<'a> DependencyCollector<'a> {
                 self.add_expression(expr);
             }
             ExpressionDesc::Pexp_newtype(inner) => {
-                    let (_name, body) = *inner;
+                    let (ref _name, ref body) = **inner;
                 self.add_expression(body);
             }
             ExpressionDesc::Pexp_pack(me) => {
                 self.add_module_expr(me);
             }
             ExpressionDesc::Pexp_open(inner) => {
-                    let (_override, lid, body) = *inner;
+                    let (ref _override, ref lid, ref body) = **inner;
                 // Local open uses full module path
                 self.add_lident_idx_full(lid.txt);
                 self.add_expression(body);
@@ -566,13 +566,13 @@ impl<'a> DependencyCollector<'a> {
                 }
             }
             PatternDesc::Ppat_variant(inner) => {
-                    let (_label, arg) = *inner;
+                    let (ref _label, ref arg) = **inner;
                 if let Some(arg) = arg {
                     self.add_pattern_inner(arg, unpack_names);
                 }
             }
             PatternDesc::Ppat_record(inner) => {
-                    let (fields, _closed) = *inner;
+                    let (ref fields, ref _closed) = **inner;
                 for field in fields {
                     self.add_lident_idx(field.lid.txt);
                     self.add_pattern_inner(&field.pat, unpack_names);
@@ -583,7 +583,7 @@ impl<'a> DependencyCollector<'a> {
                 self.add_pattern_inner(p2, unpack_names);
             }
             PatternDesc::Ppat_constraint(inner) => {
-                    let (pat, ty) = *inner;
+                    let (ref pat, ref ty) = **inner;
                 self.add_pattern_inner(pat, unpack_names);
                 self.add_core_type(ty);
             }
@@ -616,7 +616,7 @@ impl<'a> DependencyCollector<'a> {
         match &*ty.ptyp_desc {
             CoreTypeDesc::Ptyp_any | CoreTypeDesc::Ptyp_var(_) => {}
             CoreTypeDesc::Ptyp_arrow(inner) => {
-                    let (arg, ret, ..) = *inner;
+                    let (ref arg, ref ret, ..) = **inner;
                 self.add_core_type(&arg.typ);
                 self.add_core_type(ret);
             }
@@ -626,14 +626,14 @@ impl<'a> DependencyCollector<'a> {
                 }
             }
             CoreTypeDesc::Ptyp_constr(inner) => {
-                    let (lid, args) = *inner;
+                    let (ref lid, ref args) = **inner;
                 self.add_lident_idx(lid.txt);
                 for arg in args {
                     self.add_core_type(arg);
                 }
             }
             CoreTypeDesc::Ptyp_object(inner) => {
-                    let (fields, _closed) = *inner;
+                    let (ref fields, ref _closed) = **inner;
                 for field in fields {
                     match field {
                         ObjectField::Otag(_label, _attrs, ty) => {
@@ -646,11 +646,11 @@ impl<'a> DependencyCollector<'a> {
                 }
             }
             CoreTypeDesc::Ptyp_alias(inner) => {
-                    let (ty, _name) = *inner;
+                    let (ref ty, ref _name) = **inner;
                 self.add_core_type(ty);
             }
             CoreTypeDesc::Ptyp_variant(inner) => {
-                    let (rows, _closed, _labels) = *inner;
+                    let (ref rows, ref _closed, ref _labels) = **inner;
                 for row in rows {
                     match row {
                         RowField::Rtag(_label, _attrs, _bool, tys) => {
@@ -665,7 +665,7 @@ impl<'a> DependencyCollector<'a> {
                 }
             }
             CoreTypeDesc::Ptyp_poly(inner) => {
-                    let (_names, ty) = *inner;
+                    let (ref _names, ref ty) = **inner;
                 self.add_core_type(ty);
             }
             CoreTypeDesc::Ptyp_package((lid, constraints)) => {
@@ -693,7 +693,7 @@ impl<'a> DependencyCollector<'a> {
                 self.add_structure(str);
             }
             ModuleExprDesc::Pmod_functor(inner) => {
-                    let (name, mt, body) = *inner;
+                    let (ref name, ref mt, ref body) = **inner;
                 if let Some(mt) = mt {
                     self.add_module_type(mt);
                 }
@@ -739,7 +739,7 @@ impl<'a> DependencyCollector<'a> {
                 self.add_signature(sig);
             }
             ModuleTypeDesc::Pmty_functor(inner) => {
-                    let (name, mt1, mt2) = *inner;
+                    let (ref name, ref mt1, ref mt2) = **inner;
                 if let Some(mt1) = mt1 {
                     self.add_module_type(mt1);
                 }
@@ -754,7 +754,7 @@ impl<'a> DependencyCollector<'a> {
                 }
             }
             ModuleTypeDesc::Pmty_with(inner) => {
-                    let (mt, constraints) = *inner;
+                    let (ref mt, ref constraints) = **inner;
                 self.add_module_type(mt);
                 for constraint in constraints {
                     self.add_with_constraint(constraint);
@@ -931,7 +931,7 @@ impl<'a> DependencyCollector<'a> {
                 self.add_core_type(ty);
             }
             Payload::PPat(inner) => {
-                    let (pat, guard) = *inner;
+                    let (ref pat, ref guard) = **inner;
                 self.add_pattern(pat);
                 if let Some(guard) = guard {
                     self.add_expression(guard);

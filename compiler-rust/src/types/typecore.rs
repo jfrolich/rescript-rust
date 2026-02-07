@@ -587,7 +587,7 @@ fn transl_type_inner(
         }
 
         CTD::Ptyp_arrow(inner) => {
-                    let (arg, ret, arity) = *inner;
+                    let (ref arg, ref ret, ref arity) = **inner;
             // Arrow type: T1 -> T2
             let (arg_ctyp, arg_ty) = transl_type_inner(tctx, env, &arg.typ)?;
             let (ret_ctyp, ret_ty) = transl_type_inner(tctx, env, ret)?;
@@ -645,7 +645,7 @@ fn transl_type_inner(
         }
 
         CTD::Ptyp_constr(inner) => {
-                    let (lid, args) = *inner;
+                    let (ref lid, ref args) = **inner;
             // Type constructor: int, string, list<'a>, etc.
             let mut typed_args = Vec::new();
             let mut arg_refs = Vec::new();
@@ -674,7 +674,7 @@ fn transl_type_inner(
         }
 
         CTD::Ptyp_alias(inner) => {
-                    let (inner, name) = *inner;
+                    let (ref inner, ref name) = **inner;
             // Type alias: T as 'a
             let (inner_ctyp, inner_ty) = transl_type_inner(tctx, env, inner)?;
 
@@ -694,7 +694,7 @@ fn transl_type_inner(
         }
 
         CTD::Ptyp_poly(inner) => {
-                    let (vars, body) = *inner;
+                    let (ref vars, ref body) = **inner;
             // Polymorphic type: 'a 'b. T
             let var_names: Vec<String> = vars.iter().map(|v| tctx.arena.get_string(v.txt).to_string()).collect();
 
@@ -718,7 +718,7 @@ fn transl_type_inner(
         }
 
         CTD::Ptyp_object(inner) => {
-                    let (fields, closed) = *inner;
+                    let (ref fields, ref closed) = **inner;
             // Object type: {. name: string, age: int }
             // Simplified implementation - full version builds proper object type
             let mut typed_fields = Vec::new();
@@ -768,7 +768,7 @@ fn transl_type_inner(
         }
 
         CTD::Ptyp_variant(inner) => {
-                    let (rows, closed, labels) = *inner;
+                    let (ref rows, ref closed, ref labels) = **inner;
             // Polymorphic variant type: [> `A | `B of int ]
             let mut typed_rows = Vec::new();
             let row_more = ctx.new_var(None);
@@ -1045,7 +1045,7 @@ fn type_pattern_inner(
         }
 
         PD::Ppat_variant(inner) => {
-                    let (label, arg) = *inner;
+                    let (ref label, ref arg) = **inner;
             // Polymorphic variant pattern: #Red, #Blue(x)
             type_pattern_variant(
                 tctx,
@@ -1061,7 +1061,7 @@ fn type_pattern_inner(
         }
 
         PD::Ppat_record(inner) => {
-                    let (fields, closed_flag) = *inner;
+                    let (ref fields, ref closed_flag) = **inner;
             // Record pattern: {name, age}
             type_pattern_record(
                 tctx,
@@ -1077,7 +1077,7 @@ fn type_pattern_inner(
         }
 
         PD::Ppat_constraint(inner) => {
-                    let (inner_pat, core_type) = *inner;
+                    let (ref inner_pat, ref core_type) = **inner;
             // Type constraint pattern: (x : int)
             type_pattern_constraint(
                 tctx,
@@ -1093,7 +1093,7 @@ fn type_pattern_inner(
         }
 
         PD::Ppat_interval(inner) => {
-                    let (c1, c2) = *inner;
+                    let (ref c1, ref c2) = **inner;
             // Interval pattern: 'a'..'z'
             type_pattern_interval(tctx, env, loc, c1, c2, expected_ty, pat)
         }
@@ -1622,7 +1622,7 @@ pub fn type_expect<'a>(
         }
 
         ED::Pexp_let(inner) => {
-                    let (rec_flag, bindings, body) = *inner;
+                    let (ref rec_flag, ref bindings, ref body) = **inner;
             // Let expression
             let (typed_bindings, new_env) = type_let_bindings(tctx, env, *rec_flag, bindings)?;
 
@@ -1659,7 +1659,7 @@ pub fn type_expect<'a>(
         }
 
         ED::Pexp_ifthenelse(inner) => {
-                    let (cond, then_branch, else_branch) = *inner;
+                    let (ref cond, ref then_branch, ref else_branch) = **inner;
             // If expression
             let bool_ty = env.type_bool(ctx);
 
@@ -1776,7 +1776,7 @@ pub fn type_expect<'a>(
         }
 
         ED::Pexp_match(inner) => {
-                    let (scrutinee, cases) = *inner;
+                    let (ref scrutinee, ref cases) = **inner;
             // Match expression
             type_match(
                 tctx,
@@ -1790,7 +1790,7 @@ pub fn type_expect<'a>(
         }
 
         ED::Pexp_try(inner) => {
-                    let (body, handlers) = *inner;
+                    let (ref body, ref handlers) = **inner;
             // Try expression
             type_try(
                 tctx,
@@ -1827,7 +1827,7 @@ pub fn type_expect<'a>(
         }
 
         ED::Pexp_for(inner) => {
-                    let (pat, start_expr, end_expr, direction, body) = *inner;
+                    let (ref pat, ref start_expr, ref end_expr, ref direction, ref body) = **inner;
             // For loop
             type_for(
                 tctx,
@@ -1858,7 +1858,7 @@ pub fn type_expect<'a>(
         }
 
         ED::Pexp_variant(inner) => {
-                    let (label, arg) = *inner;
+                    let (ref label, ref arg) = **inner;
             // Polymorphic variant
             type_variant(
                 tctx,
@@ -1872,7 +1872,7 @@ pub fn type_expect<'a>(
         }
 
         ED::Pexp_record(inner) => {
-                    let (fields, base) = *inner;
+                    let (ref fields, ref base) = **inner;
             // Record expression
             type_record(
                 tctx,
@@ -1899,7 +1899,7 @@ pub fn type_expect<'a>(
         }
 
         ED::Pexp_setfield(inner) => {
-                    let (record_expr, field_lid, new_value) = *inner;
+                    let (ref record_expr, ref field_lid, ref new_value) = **inner;
             // Field assignment
             type_setfield(
                 tctx,
@@ -1915,7 +1915,7 @@ pub fn type_expect<'a>(
         }
 
         ED::Pexp_constraint(inner) => {
-                    let (inner_expr, core_type) = *inner;
+                    let (ref inner_expr, ref core_type) = **inner;
             // Type constraint
             type_constraint(
                 tctx,
@@ -1929,7 +1929,7 @@ pub fn type_expect<'a>(
         }
 
         ED::Pexp_coerce(inner) => {
-                    let (inner_expr, opt_from_type, to_type) = *inner;
+                    let (ref inner_expr, ref opt_from_type, ref to_type) = **inner;
             // Type coercion: (E :> T) or (E : T1 :> T2)
             type_coerce(
                 tctx,
@@ -1944,7 +1944,7 @@ pub fn type_expect<'a>(
         }
 
         ED::Pexp_open(inner) => {
-                    let (_override_flag, lid, body) = *inner;
+                    let (ref _override_flag, ref lid, ref body) = **inner;
             // Open expression: M.{ E } or open M; E
             type_open(
                 tctx,
@@ -1958,7 +1958,7 @@ pub fn type_expect<'a>(
         }
 
         ED::Pexp_newtype(inner) => {
-                    let (name, body) = *inner;
+                    let (ref name, ref body) = **inner;
             // Newtype expression: (type t) => E
             type_newtype(
                 tctx,
@@ -1985,7 +1985,7 @@ pub fn type_expect<'a>(
         }
 
         ED::Pexp_send(inner) => {
-                    let (obj_expr, method) = *inner;
+                    let (ref obj_expr, ref method) = **inner;
             // Method send: E#m
             type_send(
                 tctx,
@@ -1999,7 +1999,7 @@ pub fn type_expect<'a>(
         }
 
         ED::Pexp_letexception(inner) => {
-                    let (ext_constr, body) = *inner;
+                    let (ref ext_constr, ref body) = **inner;
             // Let exception: { exception C; E }
             type_letexception(
                 tctx,
@@ -2025,7 +2025,7 @@ pub fn type_expect<'a>(
         }
 
         ED::Pexp_letmodule(inner) => {
-                    let (name, module_expr, body) = *inner;
+                    let (ref name, ref module_expr, ref body) = **inner;
             // Let module: { module M = ME; E }
             type_letmodule(
                 tctx,

@@ -37,7 +37,7 @@ fn get_string_tag(p: &Parser<'_>) -> Option<Cow<'static, str>> {
 pub fn substitute_type_vars(arena: &mut crate::parse_arena::ParseArena, typ: CoreType, vars: &HashSet<String>) -> CoreType {
     let new_desc = match *typ.ptyp_desc {
         CoreTypeDesc::Ptyp_constr(inner) => {
-                    let (lid, args) = *inner;
+                    let (ref lid, ref args) = **inner;
             // Check if this is a simple Lident that matches a type variable
             if args.is_empty() {
                 if let Longident::Lident(name_idx) = arena.get_longident(lid.txt) {
@@ -63,7 +63,7 @@ pub fn substitute_type_vars(arena: &mut crate::parse_arena::ParseArena, typ: Cor
             CoreTypeDesc::Ptyp_constr(Box::new((lid, new_args)))
         }
         CoreTypeDesc::Ptyp_arrow(inner) => {
-                    let (arg, ret, arity) = *inner;
+                    let (ref arg, ref ret, ref arity) = **inner;
                     CoreTypeDesc::Ptyp_arrow {
             arg: Box::new(TypeArg {
                 attrs: arg.attrs,
@@ -71,7 +71,8 @@ pub fn substitute_type_vars(arena: &mut crate::parse_arena::ParseArena, typ: Cor
                 typ: substitute_type_vars(arena, arg.typ, vars),
             }),
             ret: Box::new(substitute_type_vars(arena, *ret, vars)),
-            arity,
+            arity
+        }
         },
         CoreTypeDesc::Ptyp_tuple(elements) => CoreTypeDesc::Ptyp_tuple(
             elements
@@ -80,15 +81,15 @@ pub fn substitute_type_vars(arena: &mut crate::parse_arena::ParseArena, typ: Cor
                 .collect(),
         ),
         CoreTypeDesc::Ptyp_poly(inner) => {
-                    let (poly_vars, body) = *inner;
+                    let (ref poly_vars, ref body) = **inner;
             CoreTypeDesc::Ptyp_poly(Box::new((poly_vars, Box::new(substitute_type_vars(arena, *body, vars)))))
         }
         CoreTypeDesc::Ptyp_alias(inner) => {
-                    let (inner, alias) = *inner;
+                    let (ref inner, ref alias) = **inner;
             CoreTypeDesc::Ptyp_alias(Box::new(substitute_type_vars(arena, *inner, vars)), alias)
         }
         CoreTypeDesc::Ptyp_object(inner) => {
-                    let (fields, closed) = *inner;
+                    let (ref fields, ref closed) = **inner;
             let new_fields = fields
                 .into_iter()
                 .map(|field| match field {
@@ -103,7 +104,7 @@ pub fn substitute_type_vars(arena: &mut crate::parse_arena::ParseArena, typ: Cor
             CoreTypeDesc::Ptyp_object(Box::new((new_fields, closed)))
         }
         CoreTypeDesc::Ptyp_variant(inner) => {
-                    let (rows, closed, labels) = *inner;
+                    let (ref rows, ref closed, ref labels) = **inner;
             let new_rows = rows
                 .into_iter()
                 .map(|row| match row {
@@ -130,7 +131,7 @@ pub fn substitute_type_vars(arena: &mut crate::parse_arena::ParseArena, typ: Cor
         }
         // These don't contain nested types, return as-is
         other => other,
-                }};
+                };
     CoreType {
         ptyp_desc: Box::new(new_desc),
         ptyp_loc: typ.ptyp_loc,
@@ -1038,7 +1039,7 @@ fn parse_function_type(p: &mut Parser<'_>, start_pos_idx: PosIdx) -> CoreType {
             // at post_doc_start. For nested arrows, the inner `.` extension moves the
             // first arg location before post_doc_start.
             if let CoreTypeDesc::Ptyp_arrow(inner) = *typ.ptyp_desc {
-                let (arg, ret, arity) = *inner;
+                let (ref arg, ref ret, ref arity) = **inner;
                 let first_arg_start = p.loc_start(arg.typ.ptyp_loc);
                 // If first arg location starts exactly at post_doc_start, it's a direct arrow
                 // If it starts elsewhere (before due to inner `.` or after due to parens), don't extend
@@ -1052,7 +1053,7 @@ fn parse_function_type(p: &mut Parser<'_>, start_pos_idx: PosIdx) -> CoreType {
                     // Also extend first argument's location if it's a simple Lident
                     let new_arg = if matches!(
                         &*arg.typ.ptyp_desc,
-                        CoreTypeDesc::Ptyp_constr(lid, _) if p.arena().is_simple_lident(lid.txt)
+                        CoreTypeDesc::Ptyp_constr(inner) if p.arena().is_simple_lident(lid.txt)
                     ) && !arg.typ.ptyp_loc.is_none() {
                         let arg_end_idx = p.loc_end_idx(arg.typ.ptyp_loc);
                         let new_arg_loc = p.mk_loc_idx(uncurried_start_idx, arg_end_idx);
@@ -1222,7 +1223,7 @@ fn parse_function_type(p: &mut Parser<'_>, start_pos_idx: PosIdx) -> CoreType {
     // Update the outermost arrow to have the full arity
     let result = match *result.ptyp_desc {
         CoreTypeDesc::Ptyp_arrow(inner) => {
-            let (arg, ret, ..) = *inner;
+            let (ref arg, ref ret, ..) = **inner;
             CoreType {
                 ptyp_desc: Box::new(CoreTypeDesc::Ptyp_arrow(Box::new((arg, ret, full_arity)))),
                 ptyp_loc: result.ptyp_loc,
@@ -1237,7 +1238,7 @@ fn parse_function_type(p: &mut Parser<'_>, start_pos_idx: PosIdx) -> CoreType {
         ptyp_loc: p.mk_loc_idx(start_pos_idx, end_pos_idx),
         ..result
     }
-}
+                }
 
 /// Parse a lowercase identifier.
 fn parse_lident(p: &mut Parser<'_>) -> (String, Location) {

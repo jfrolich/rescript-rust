@@ -73,9 +73,12 @@ pub fn collect_ternary_parts<'a>(
     loop {
         match &*current.pexp_desc {
             ExpressionDesc::Pexp_ifthenelse(inner) if has_ternary_attribute(arena, &current.pexp_attributes) => {
-                    let (condition, consequent, Some(alternate)) = *inner;
+                let (ref condition, ref consequent, ref opt_alternate) = **inner;
                 parts.push((condition.as_ref(), consequent.as_ref()));
-                current = alternate;
+                match opt_alternate {
+                    Some(alternate) => current = alternate,
+                    None => break,
+                }
             }
             _ => break,
         }
@@ -133,27 +136,24 @@ pub fn collect_if_expressions<'a>(
     loop {
         let expr_loc = &current.pexp_loc;
         match &*current.pexp_desc {
-            // Regular if-then-else with else branch
+            // Regular if-then-else (with or without else branch)
             ExpressionDesc::Pexp_ifthenelse(inner) => {
-                    let (if_expr, then_expr, Some(else_expr)) = *inner;
+                let (ref if_expr, ref then_expr, ref opt_else) = **inner;
                 acc.push((expr_loc, IfConditionKind::If(if_expr.as_ref()), then_expr.as_ref()));
-                current = else_expr.as_ref();
-            }
-            // Regular if-then without else branch (terminal)
-            ExpressionDesc::Pexp_ifthenelse(inner) => {
-                    let (if_expr, then_expr, None) = *inner;
-                acc.push((expr_loc, IfConditionKind::If(if_expr.as_ref()), then_expr.as_ref()));
-                return (acc, None);
+                match opt_else {
+                    Some(else_expr) => current = else_expr.as_ref(),
+                    None => return (acc, None),
+                }
             }
             // if let with no else (pattern matches unit constructor in else branch)
             ExpressionDesc::Pexp_match(inner) if is_if_let_expr(arena, current)
-                    && cases.len() == 2
-                    && cases[0].pc_guard.is_none()
+                    && inner.1.len() == 2
+                    && inner.1[0].pc_guard.is_none()
                     && matches!(
-                        &*cases[1].pc_rhs.pexp_desc,
+                        &*inner.1[1].pc_rhs.pexp_desc,
                         ExpressionDesc::Pexp_construct(lid, _) if arena.is_lident(lid.txt, "()")
                     ) => {
-                    let (condition, cases) = *inner;
+                let (ref condition, ref cases) = **inner;
                 let pattern = &cases[0].pc_lhs;
                 let then_expr = &cases[0].pc_rhs;
                 acc.push((expr_loc, IfConditionKind::IfLet(pattern, condition.as_ref()), then_expr));
@@ -161,9 +161,9 @@ pub fn collect_if_expressions<'a>(
             }
             // if let with else branch
             ExpressionDesc::Pexp_match(inner) if is_if_let_expr(arena, current)
-                    && cases.len() == 2
-                    && cases[0].pc_guard.is_none() => {
-                    let (condition, cases) = *inner;
+                    && inner.1.len() == 2
+                    && inner.1[0].pc_guard.is_none() => {
+                let (ref condition, ref cases) = **inner;
                 let pattern = &cases[0].pc_lhs;
                 let then_expr = &cases[0].pc_rhs;
                 let else_expr = &cases[1].pc_rhs;
@@ -187,7 +187,7 @@ pub fn is_single_expression(expr: &Expression) -> bool {
 pub fn is_binary_expression(arena: &crate::parse_arena::ParseArena, expr: &Expression) -> bool {
     match &*expr.pexp_desc {
         ExpressionDesc::Pexp_apply(inner) => {
-                    let PexpApply { funct, args, .. } = *inner;
+                    let PexpApply { ref funct, ref args, .. } = **inner;
             if args.len() != 2 {
                 return false;
             }
@@ -211,7 +211,7 @@ pub fn is_binary_expression(arena: &crate::parse_arena::ParseArena, expr: &Expre
 pub fn get_binary_operator(arena: &crate::parse_arena::ParseArena, expr: &Expression) -> Option<String> {
     match &*expr.pexp_desc {
         ExpressionDesc::Pexp_apply(inner) => {
-                    let PexpApply { funct, args, .. } = *inner;
+                    let PexpApply { ref funct, ref args, .. } = **inner;
             if args.len() != 2 {
                 return None;
             }
@@ -240,7 +240,7 @@ pub fn is_single_pipe_expr(arena: &crate::parse_arena::ParseArena, expr: &Expres
     fn is_pipe(arena: &crate::parse_arena::ParseArena, expr: &Expression) -> bool {
         match &*expr.pexp_desc {
             ExpressionDesc::Pexp_apply(inner) => {
-                    let PexpApply { funct, args, .. } = *inner;
+                    let PexpApply { ref funct, ref args, .. } = **inner;
                 if args.len() != 2 {
                     return false;
                 }
@@ -258,7 +258,7 @@ pub fn is_single_pipe_expr(arena: &crate::parse_arena::ParseArena, expr: &Expres
     // Check if this is a pipe where the LHS is NOT also a pipe
     match &*expr.pexp_desc {
         ExpressionDesc::Pexp_apply(inner) => {
-                    let PexpApply { funct, args, .. } = *inner;
+                    let PexpApply { ref funct, ref args, .. } = **inner;
             if args.len() != 2 {
                 return false;
             }
@@ -469,7 +469,7 @@ pub fn is_binary_operator(arena: &crate::parse_arena::ParseArena, lid: &Longiden
 pub fn is_unary_expression(arena: &crate::parse_arena::ParseArena, expr: &Expression) -> bool {
     match &*expr.pexp_desc {
         ExpressionDesc::Pexp_apply(inner) => {
-                    let PexpApply { funct, args, .. } = *inner;
+                    let PexpApply { ref funct, ref args, .. } = **inner;
             if args.len() != 1 {
                 return false;
             }
@@ -1164,7 +1164,7 @@ pub fn arrow_type<'a>(
 
         match &*typ.ptyp_desc {
             CoreTypeDesc::Ptyp_arrow(inner) => {
-                    let (arg, ret, arity) = *inner;
+                    let (ref arg, ref ret, ref arity) = **inner;
                 // Stop at explicitly-aritied arrow if we already have arguments
                 // Arity is now ArityIdx, look up to check if it's Full
                 if arena.get_arity(*arity).is_some() && !acc.is_empty() && arg.attrs.is_empty() {
@@ -1215,7 +1215,7 @@ pub fn arrow_type<'a>(
 
     match &*typ.ptyp_desc {
         CoreTypeDesc::Ptyp_arrow(inner) => {
-                    let (..) = *inner;
+                    let (..) = **inner;
             // Start processing with the type's attributes as attrs_before,
             // and process the type without those attributes
             process(arena, &typ.ptyp_attributes, Vec::new(), typ, max_arity)
@@ -1265,7 +1265,7 @@ pub fn mod_expr_functor(mod_expr: &ModuleExpr) -> (Vec<FunctorParam<'_>>, &Modul
     fn loop_functor<'a>(acc: Vec<FunctorParam<'a>>, mod_expr: &'a ModuleExpr) -> (Vec<FunctorParam<'a>>, &'a ModuleExpr) {
         match &*mod_expr.pmod_desc {
             ModuleExprDesc::Pmod_functor(inner) => {
-                    let (lbl, mod_type, return_mod_expr) = *inner;
+                    let (ref lbl, ref mod_type, ref return_mod_expr) = **inner;
                 let param = FunctorParam {
                     attrs: &mod_expr.pmod_attributes,
                     lbl,
@@ -1295,7 +1295,7 @@ pub fn has_await_attribute(arena: &ParseArena, attrs: &Attributes) -> bool {
 pub fn is_array_access(arena: &crate::parse_arena::ParseArena, expr: &Expression) -> bool {
     match &*expr.pexp_desc {
         ExpressionDesc::Pexp_apply(inner) => {
-                    let PexpApply { funct, args, .. } = *inner;
+                    let PexpApply { ref funct, ref args, .. } = **inner;
             if args.len() != 2 {
                 return false;
             }
@@ -1318,7 +1318,7 @@ pub fn is_array_access(arena: &crate::parse_arena::ParseArena, expr: &Expression
 pub fn is_array_set(arena: &crate::parse_arena::ParseArena, expr: &Expression) -> bool {
     match &*expr.pexp_desc {
         ExpressionDesc::Pexp_apply(inner) => {
-                    let PexpApply { funct, args, .. } = *inner;
+                    let PexpApply { ref funct, ref args, .. } = **inner;
             if args.len() != 3 {
                 return false;
             }
@@ -1341,7 +1341,7 @@ pub fn is_array_set(arena: &crate::parse_arena::ParseArena, expr: &Expression) -
 pub fn is_string_access(arena: &crate::parse_arena::ParseArena, expr: &Expression) -> bool {
     match &*expr.pexp_desc {
         ExpressionDesc::Pexp_apply(inner) => {
-                    let PexpApply { funct, args, .. } = *inner;
+                    let PexpApply { ref funct, ref args, .. } = **inner;
             if args.len() != 2 {
                 return false;
             }

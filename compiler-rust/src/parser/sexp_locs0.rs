@@ -216,7 +216,7 @@ fn payload(arena: &ParseArena, p: &Payload) -> Sexp {
         Payload::PSig(items) => Sexp::list(vec![Sexp::atom("PSig"), signature(arena, items)]),
         Payload::PTyp(ct) => Sexp::list(vec![Sexp::atom("PTyp"), core_type(arena, ct)]),
         Payload::PPat(inner) => {
-                    let (pat, opt_expr) = *inner;
+                    let (ref pat, ref opt_expr) = **inner;
                     Sexp::list(vec![
             Sexp::atom("PPat"),
             pattern(arena, pat),
@@ -224,8 +224,9 @@ fn payload(arena: &ParseArena, p: &Payload) -> Sexp {
                 Some(e) => Sexp::list(vec![Sexp::atom("Some"), expression(arena, e)]),
                 None => Sexp::atom("None"),
             },
-        ]),
-                }}
+        ])
+        }
+                }
 }
 
 fn attribute(arena: &ParseArena, attr: &Attribute) -> Sexp {

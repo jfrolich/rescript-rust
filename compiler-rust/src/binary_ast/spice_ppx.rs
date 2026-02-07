@@ -772,7 +772,7 @@ fn index_const(i: usize, arena: &mut ParseArena) -> Expression {
 fn check_option_type(typ: &CoreType, arena: &ParseArena) -> bool {
     match &*typ.ptyp_desc {
         CoreTypeDesc::Ptyp_constr(inner) => {
-                    let (lid, args) = *inner;
+                    let (ref lid, ref args) = **inner;
             longident_matches(arena, lid.txt, &["option"]) && args.len() == 1
         }
         _ => false,
@@ -782,7 +782,7 @@ fn check_option_type(typ: &CoreType, arena: &ParseArena) -> bool {
 fn extract_null_decoder_arg(decode: &Expression, arena: &ParseArena) -> Option<Expression> {
     match &*decode.pexp_desc {
         ExpressionDesc::Pexp_apply(inner) => {
-                    let PexpApply { funct, args, .. } = *inner;
+                    let PexpApply { ref funct, ref args, .. } = **inner;
             if args.len() != 1 {
                 return None;
             }
@@ -1472,7 +1472,7 @@ fn codecs_generate_codecs(
     match &*typ.ptyp_desc {
         CoreTypeDesc::Ptyp_any => Err(spice_error("Can't generate codecs for `any` type")),
         CoreTypeDesc::Ptyp_arrow(inner) => {
-                    let (..) = *inner;
+                    let (..) = **inner;
             Err(spice_error("Can't generate codecs for function type"))
         }
         CoreTypeDesc::Ptyp_package(_) => {
@@ -1521,7 +1521,7 @@ fn codecs_generate_codecs(
             },
         )),
         CoreTypeDesc::Ptyp_constr(inner) => {
-                    let (constr, type_args) = *inner;
+                    let (ref constr, ref type_args) = **inner;
             let custom_codec = get_attribute_by_name(&typ.ptyp_attributes, "spice.codec", arena);
             let (encode, decode) = match custom_codec {
                 Ok(Some(attr)) => {
@@ -3364,7 +3364,7 @@ fn map_type_decl_structure(
         }
         (Some(manifest), TypeKind::Ptype_abstract) => match &*manifest.ptyp_desc {
             CoreTypeDesc::Ptyp_variant(inner) => {
-                    let (row_fields, _, _) = *inner;
+                    let (ref row_fields, _, _) = **inner;
                 let codecs = polyvars_generate_codecs(settings, row_fields, is_unboxed, arena)?;
                 Ok(generate_codec_decls(&type_name, &param_names, codecs, arena))
             }
@@ -3454,7 +3454,7 @@ impl<'a> LocCloner<'a> {
             }
             Payload::PTyp(typ) => self.core_type(typ),
             Payload::PPat(inner) => {
-                    let (pat, guard) = *inner;
+                    let (ref pat, ref guard) = **inner;
                 self.pattern(pat);
                 if let Some(expr) = guard {
                     self.expression(expr);
@@ -3511,7 +3511,7 @@ impl<'a> LocCloner<'a> {
         match desc {
             CoreTypeDesc::Ptyp_any | CoreTypeDesc::Ptyp_var(_) => {}
             CoreTypeDesc::Ptyp_arrow(inner) => {
-                    let (arg, ret, ..) = *inner;
+                    let (ref arg, ref ret, ..) = **inner;
                 self.type_arg(arg);
                 self.core_type(ret);
             }
@@ -3521,14 +3521,14 @@ impl<'a> LocCloner<'a> {
                 }
             }
             CoreTypeDesc::Ptyp_constr(inner) => {
-                    let (lid, args) = *inner;
+                    let (ref lid, ref args) = **inner;
                 self.located(lid);
                 for typ in args {
                     self.core_type(typ);
                 }
             }
             CoreTypeDesc::Ptyp_object(inner) => {
-                    let (fields, _) = *inner;
+                    let (ref fields, _) = **inner;
                 for field in fields {
                     self.object_field(field);
                 }
@@ -3538,7 +3538,7 @@ impl<'a> LocCloner<'a> {
                 self.core_type(typ);
             }
             CoreTypeDesc::Ptyp_variant(inner) => {
-                    let (rows, _, labels) = *inner;
+                    let (ref rows, _, ref labels) = **inner;
                 for row in rows {
                     self.row_field(row);
                 }
@@ -3547,7 +3547,7 @@ impl<'a> LocCloner<'a> {
                 }
             }
             CoreTypeDesc::Ptyp_poly(inner) => {
-                    let (vars, typ) = *inner;
+                    let (ref vars, ref typ) = **inner;
                 for var in vars {
                     self.located(var);
                 }
@@ -3592,13 +3592,13 @@ impl<'a> LocCloner<'a> {
                 }
             }
             PatternDesc::Ppat_variant(inner) => {
-                    let (_, arg) = *inner;
+                    let (_, ref arg) = **inner;
                 if let Some(arg) = arg {
                     self.pattern(arg);
                 }
             }
             PatternDesc::Ppat_record(inner) => {
-                    let (fields, _) = *inner;
+                    let (ref fields, _) = **inner;
                 for field in fields {
                     self.pattern_record_field(field);
                 }
@@ -3608,7 +3608,7 @@ impl<'a> LocCloner<'a> {
                 self.pattern(rhs);
             }
             PatternDesc::Ppat_constraint(inner) => {
-                    let (pat, typ) = *inner;
+                    let (ref pat, ref typ) = **inner;
                 self.pattern(pat);
                 self.core_type(typ);
             }
@@ -3721,7 +3721,7 @@ impl<'a> LocCloner<'a> {
             ExpressionDesc::Pexp_ident(lid) => self.located(lid),
             ExpressionDesc::Pexp_constant(_) => {}
             ExpressionDesc::Pexp_let(inner) => {
-                    let (_, bindings, body) = *inner;
+                    let (_, ref bindings, ref body) = **inner;
                 for binding in bindings {
                     self.value_binding(binding);
                 }
@@ -3741,7 +3741,7 @@ impl<'a> LocCloner<'a> {
                 self.expression(rhs);
             }
             ExpressionDesc::Pexp_apply(inner) => {
-                    let PexpApply { funct, args, .. } = *inner;
+                    let PexpApply { ref funct, ref args, .. } = **inner;
                 self.expression(funct);
                 for (label, arg) in args {
                     self.arg_label(label);
@@ -3749,7 +3749,7 @@ impl<'a> LocCloner<'a> {
                 }
             }
             ExpressionDesc::Pexp_match(expr, cases) | ExpressionDesc::Pexp_try(inner) => {
-                    let (expr, cases) = *inner;
+                    let (ref expr, ref cases) = **inner;
                 self.expression(expr);
                 for case in cases {
                     self.case(case);
@@ -3767,13 +3767,13 @@ impl<'a> LocCloner<'a> {
                 }
             }
             ExpressionDesc::Pexp_variant(inner) => {
-                    let (_, arg) = *inner;
+                    let (_, ref arg) = **inner;
                 if let Some(expr) = arg {
                     self.expression(expr);
                 }
             }
             ExpressionDesc::Pexp_record(inner) => {
-                    let (fields, base) = *inner;
+                    let (ref fields, ref base) = **inner;
                 for field in fields {
                     self.expression_record_field(field);
                 }
@@ -3786,13 +3786,13 @@ impl<'a> LocCloner<'a> {
                 self.located(lid);
             }
             ExpressionDesc::Pexp_setfield(inner) => {
-                    let (expr, lid, rhs) = *inner;
+                    let (ref expr, ref lid, ref rhs) = **inner;
                 self.expression(expr);
                 self.located(lid);
                 self.expression(rhs);
             }
             ExpressionDesc::Pexp_ifthenelse(inner) => {
-                    let (cond, then_expr, else_expr) = *inner;
+                    let (ref cond, ref then_expr, ref else_expr) = **inner;
                 self.expression(cond);
                 self.expression(then_expr);
                 if let Some(expr) = else_expr {
@@ -3805,19 +3805,19 @@ impl<'a> LocCloner<'a> {
                 self.expression(second);
             }
             ExpressionDesc::Pexp_for(inner) => {
-                    let (pat, start, end, _, body) = *inner;
+                    let (ref pat, ref start, ref end, _, ref body) = **inner;
                 self.pattern(pat);
                 self.expression(start);
                 self.expression(end);
                 self.expression(body);
             }
             ExpressionDesc::Pexp_constraint(inner) => {
-                    let (expr, typ) = *inner;
+                    let (ref expr, ref typ) = **inner;
                 self.expression(expr);
                 self.core_type(typ);
             }
             ExpressionDesc::Pexp_coerce(inner) => {
-                    let (expr, from, to) = *inner;
+                    let (ref expr, ref from, ref to) = **inner;
                 self.expression(expr);
                 if let Some(from) = from {
                     self.core_type(from);
@@ -3825,30 +3825,30 @@ impl<'a> LocCloner<'a> {
                 self.core_type(to);
             }
             ExpressionDesc::Pexp_send(inner) => {
-                    let (expr, method) = *inner;
+                    let (ref expr, ref method) = **inner;
                 self.expression(expr);
                 self.located(method);
             }
             ExpressionDesc::Pexp_letmodule(inner) => {
-                    let (name, module_expr, body) = *inner;
+                    let (ref name, ref module_expr, ref body) = **inner;
                 self.located(name);
                 self.module_expr(module_expr);
                 self.expression(body);
             }
             ExpressionDesc::Pexp_letexception(inner) => {
-                    let (ext, body) = *inner;
+                    let (ref ext, ref body) = **inner;
                 self.extension_constructor(ext);
                 self.expression(body);
             }
             ExpressionDesc::Pexp_assert(expr) => self.expression(expr),
             ExpressionDesc::Pexp_newtype(inner) => {
-                    let (name, expr) = *inner;
+                    let (ref name, ref expr) = **inner;
                 self.located(name);
                 self.expression(expr);
             }
             ExpressionDesc::Pexp_pack(module_expr) => self.module_expr(module_expr),
             ExpressionDesc::Pexp_open(inner) => {
-                    let (_, lid, expr) = *inner;
+                    let (_, ref lid, ref expr) = **inner;
                 self.located(lid);
                 self.expression(expr);
             }
@@ -3873,7 +3873,7 @@ impl<'a> LocCloner<'a> {
                 }
             }
             ModuleExprDesc::Pmod_functor(inner) => {
-                    let (name, mty, body) = *inner;
+                    let (ref name, ref mty, ref body) = **inner;
                 self.located(name);
                 if let Some(mty) = mty {
                     self.module_type(mty);
@@ -3923,7 +3923,7 @@ impl<'a> LocCloner<'a> {
                 }
             }
             ModuleTypeDesc::Pmty_functor(inner) => {
-                    let (name, arg, body) = *inner;
+                    let (ref name, ref arg, ref body) = **inner;
                 self.located(name);
                 if let Some(arg) = arg {
                     self.module_type(arg);
@@ -3931,7 +3931,7 @@ impl<'a> LocCloner<'a> {
                 self.module_type(body);
             }
             ModuleTypeDesc::Pmty_with(inner) => {
-                    let (mty, constraints) = *inner;
+                    let (ref mty, ref constraints) = **inner;
                 self.module_type(mty);
                 for constraint in constraints {
                     self.with_constraint(constraint);
@@ -4087,19 +4087,19 @@ impl<'a> LocCloner<'a> {
     fn structure_item_desc(&mut self, desc: &mut StructureItemDesc) {
         match desc {
             StructureItemDesc::Pstr_eval(inner) => {
-                    let (expr, attrs) = *inner;
+                    let (ref expr, ref attrs) = **inner;
                 self.expression(expr);
                 self.attributes(attrs);
             }
             StructureItemDesc::Pstr_value(inner) => {
-                    let (_, bindings) = *inner;
+                    let (_, ref bindings) = **inner;
                 for binding in bindings {
                     self.value_binding(binding);
                 }
             }
             StructureItemDesc::Pstr_primitive(vd) => self.value_description(vd),
             StructureItemDesc::Pstr_type(inner) => {
-                    let (_, decls) = *inner;
+                    let (_, ref decls) = **inner;
                 for decl in decls {
                     self.type_declaration(decl);
                 }
@@ -4117,7 +4117,7 @@ impl<'a> LocCloner<'a> {
             StructureItemDesc::Pstr_include(include) => self.include_declaration(include),
             StructureItemDesc::Pstr_attribute(attr) => self.attribute(attr),
             StructureItemDesc::Pstr_extension(inner) => {
-                    let (ext, attrs) = *inner;
+                    let (ref ext, ref attrs) = **inner;
                 self.extension(ext);
                 self.attributes(attrs);
             }
@@ -4133,7 +4133,7 @@ impl<'a> LocCloner<'a> {
         match desc {
             SignatureItemDesc::Psig_value(vd) => self.value_description(vd),
             SignatureItemDesc::Psig_type(inner) => {
-                    let (_, decls) = *inner;
+                    let (_, ref decls) = **inner;
                 for decl in decls {
                     self.type_declaration(decl);
                 }
@@ -4151,7 +4151,7 @@ impl<'a> LocCloner<'a> {
             SignatureItemDesc::Psig_include(include) => self.include_description(include),
             SignatureItemDesc::Psig_attribute(attr) => self.attribute(attr),
             SignatureItemDesc::Psig_extension(inner) => {
-                    let (ext, attrs) = *inner;
+                    let (ref ext, ref attrs) = **inner;
                 self.extension(ext);
                 self.attributes(attrs);
             }
@@ -4167,7 +4167,7 @@ fn map_structure_item_spice(
 
     match &*item.pstr_desc {
         StructureItemDesc::Pstr_type(inner) => {
-                    let (rec_flag, decls) = *inner;
+                    let (ref rec_flag, ref decls) = **inner;
             let mut vbs = Vec::new();
             for decl in decls {
                 vbs.extend(map_type_decl_structure(decl, arena)?);
@@ -4314,7 +4314,7 @@ fn map_signature_item_spice(
 
     match &*item.psig_desc {
         SignatureItemDesc::Psig_type(inner) => {
-                    let (_, decls) = *inner;
+                    let (_, ref decls) = **inner;
             let mut generated = Vec::new();
             for decl in decls {
                 let settings =

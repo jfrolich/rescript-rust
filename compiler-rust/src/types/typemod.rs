@@ -123,7 +123,7 @@ pub fn type_module_expr<'a>(
         }
 
         ParsedModuleExprDesc::Pmod_functor(inner) => {
-                    let (name, param_type, body) = *inner;
+                    let (ref name, ref param_type, ref body) = **inner;
             // Functor: (X: S) => ME
             let param_id = Ident::create_local(arena.get_string(name.txt));
 
@@ -257,7 +257,7 @@ fn type_structure_item<'a>(
 
     match &*item.pstr_desc {
         ParsedStructureItemDesc::Pstr_eval(inner) => {
-                    let (expr, attrs) = *inner;
+                    let (ref expr, ref attrs) = **inner;
             // Evaluated expression: E
             let typed_expr = type_expression(tctx.type_ctx, arena, env, expr)?;
 
@@ -273,7 +273,7 @@ fn type_structure_item<'a>(
         }
 
         ParsedStructureItemDesc::Pstr_value(inner) => {
-                    let (rec_flag, bindings) = *inner;
+                    let (ref rec_flag, ref bindings) = **inner;
             // Value binding: let P = E
             let typed_bindings = type_value_bindings(tctx, env, arena, *rec_flag, bindings)?;
 
@@ -312,7 +312,7 @@ fn type_structure_item<'a>(
         }
 
         ParsedStructureItemDesc::Pstr_type(inner) => {
-                    let (rec_flag, decls) = *inner;
+                    let (ref rec_flag, ref decls) = **inner;
             // Type declaration: type t = ...
             let ctx = tctx.type_ctx;
             let mut new_env = env.clone();
@@ -792,7 +792,7 @@ fn type_structure_item<'a>(
         }
 
         ParsedStructureItemDesc::Pstr_extension(inner) => {
-                    let (_ext, _attrs) = *inner;
+                    let (ref _ext, ref _attrs) = **inner;
             // Extension: [%%id]
             // Extensions are typically handled by preprocessors
             // Return a placeholder eval item
