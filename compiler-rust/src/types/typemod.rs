@@ -432,9 +432,37 @@ fn extract_module_type_from_mod_expr(mod_expr: &ModuleExpr) -> Option<crate::typ
                     }
                     StructureItemDesc::Tstr_include(incl) => {
                         // Include: merge all signature items from the included module
+                        let mut included = false;
                         if let Some(inner_mty) = extract_module_type_from_mod_expr(&incl.incl_mod) {
                             if let DeclMty::MtySignature(inner_sig) = inner_mty {
                                 sig_items.extend(inner_sig);
+                                included = true;
+                            }
+                        }
+                        // Fallback for Tmod_ident: look up from already-accumulated sig_items
+                        if !included {
+                            if let ModuleExprDesc::Tmod_ident(path, _) = &incl.incl_mod.mod_desc {
+                                let mod_name = match path {
+                                    crate::types::Path::Pident(id) => Some(id.name().to_string()),
+                                    crate::types::Path::Pdot(_, name, _) => Some(name.clone()),
+                                    _ => None,
+                                };
+                                if let Some(mod_name) = mod_name {
+                                    // Find this module in our already-collected sig_items
+                                    let found_sig: Option<Vec<SigItem>> = sig_items.iter().find_map(|si| {
+                                        if let SigItem::SigModule(id, md, _) = si {
+                                            if id.name() == mod_name.as_str() {
+                                                if let DeclMty::MtySignature(inner) = &md.md_type {
+                                                    return Some(inner.clone());
+                                                }
+                                            }
+                                        }
+                                        None
+                                    });
+                                    if let Some(inner_sig) = found_sig {
+                                        sig_items.extend(inner_sig);
+                                    }
+                                }
                             }
                         }
                     }
@@ -1981,8 +2009,12 @@ fn type_structure_item<'a>(
                 let mod_id = mod_ids[i].clone();
                 let mod_name_str = arena.get_string(mb.pmb_name.txt);
 
-                // Extract real module type and add to returned environment
+                // Extract real module type and add to returned environment.
+                // Fall back to constraint type from rec_env if extraction fails.
                 let mod_type = extract_module_type_from_mod_expr(&typed_mod)
+                    .or_else(|| {
+                        rec_env.find_module(mod_name_str).ok().map(|md| md.md_type.clone())
+                    })
                     .unwrap_or(crate::types::decl::ModuleType::MtySignature(vec![]));
                 new_env.add_module(mod_id.clone(), crate::types::decl::ModuleDeclaration {
                     md_type: mod_type,
