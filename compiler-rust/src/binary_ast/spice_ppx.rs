@@ -742,7 +742,7 @@ fn get_param_names(
 fn get_string_from_expression(expr: &Expression) -> Result<Option<Constant>, String> {
     match &*expr.pexp_desc {
         ExpressionDesc::Pexp_constant(constant) => match &**constant {
-            Constant::String(_, _) => Ok(Some(constant.clone())),
+            Constant::String(_, _) => Ok(Some((**constant).clone())),
             Constant::Float(_, _) => Ok(None),
             _ => Err("cannot find a name??".to_string()),
         },
@@ -754,7 +754,7 @@ fn get_float_from_expression(expr: &Expression) -> Result<Option<Constant>, Stri
     match &*expr.pexp_desc {
         ExpressionDesc::Pexp_constant(constant) => match &**constant {
             Constant::String(_, _) => Ok(None),
-            Constant::Float(_, _) => Ok(Some(constant.clone())),
+            Constant::Float(_, _) => Ok(Some((**constant).clone())),
             _ => Err("cannot find a name??".to_string()),
         },
         _ => Err("cannot find a name??".to_string()),
@@ -2686,7 +2686,7 @@ fn polyvars_get_args(_loc: LocIdx, core_types: &[CoreType]) -> SpiceResult<Vec<C
     match core_types.len() {
         0 => Ok(vec![]),
         1 => match &*core_types[0].ptyp_desc {
-            CoreTypeDesc::Ptyp_tuple(types) => Ok(types.clone()),
+            CoreTypeDesc::Ptyp_tuple(types) => Ok((**types).clone()),
             _ => Ok(vec![core_types[0].clone()]),
         },
         _ => Err(spice_error(
@@ -3450,8 +3450,7 @@ impl<'a> LocCloner<'a> {
                 }
             }
             Payload::PTyp(typ) => self.core_type(typ),
-            Payload::PPat(inner) => {
-                    let (ref pat, ref guard) = **inner;
+            Payload::PPat(pat, guard) => {
                 self.pattern(pat);
                 if let Some(expr) = guard {
                     self.expression(expr);
@@ -3508,7 +3507,7 @@ impl<'a> LocCloner<'a> {
         match desc {
             CoreTypeDesc::Ptyp_any | CoreTypeDesc::Ptyp_var(_) => {}
             CoreTypeDesc::Ptyp_arrow(inner) => {
-                    let (ref arg, ref ret, ..) = **inner;
+                let (ref mut arg, ref mut ret, ..) = **inner;
                 self.type_arg(arg);
                 self.core_type(ret);
             }
@@ -3518,15 +3517,15 @@ impl<'a> LocCloner<'a> {
                 }
             }
             CoreTypeDesc::Ptyp_constr(inner) => {
-                    let (ref lid, ref args) = **inner;
+                let (ref mut lid, ref mut args) = **inner;
                 self.located(lid);
-                for typ in args {
+                for typ in args.iter_mut() {
                     self.core_type(typ);
                 }
             }
             CoreTypeDesc::Ptyp_object(inner) => {
-                    let (ref fields, _) = **inner;
-                for field in fields {
+                let (ref mut fields, _) = **inner;
+                for field in fields.iter_mut() {
                     self.object_field(field);
                 }
             }
@@ -3535,8 +3534,8 @@ impl<'a> LocCloner<'a> {
                 self.core_type(typ);
             }
             CoreTypeDesc::Ptyp_variant(inner) => {
-                    let (ref rows, _, ref labels) = **inner;
-                for row in rows {
+                let (ref mut rows, _, ref labels) = **inner;
+                for row in rows.iter_mut() {
                     self.row_field(row);
                 }
                 if let Some(labels) = labels {
@@ -3544,8 +3543,8 @@ impl<'a> LocCloner<'a> {
                 }
             }
             CoreTypeDesc::Ptyp_poly(inner) => {
-                    let (ref vars, ref typ) = **inner;
-                for var in vars {
+                let (ref mut vars, ref mut typ) = **inner;
+                for var in vars.iter_mut() {
                     self.located(var);
                 }
                 self.core_type(typ);
@@ -3588,14 +3587,14 @@ impl<'a> LocCloner<'a> {
                 }
             }
             PatternDesc::Ppat_variant(inner) => {
-                    let (_, ref arg) = **inner;
+                let (_, ref mut arg) = **inner;
                 if let Some(arg) = arg {
                     self.pattern(arg);
                 }
             }
             PatternDesc::Ppat_record(inner) => {
-                    let (ref fields, _) = **inner;
-                for field in fields {
+                let (ref mut fields, _) = **inner;
+                for field in fields.iter_mut() {
                     self.pattern_record_field(field);
                 }
             }
@@ -3604,7 +3603,7 @@ impl<'a> LocCloner<'a> {
                 self.pattern(rhs);
             }
             PatternDesc::Ppat_constraint(inner) => {
-                    let (ref pat, ref typ) = **inner;
+                let (ref mut pat, ref mut typ) = **inner;
                 self.pattern(pat);
                 self.core_type(typ);
             }
@@ -3717,18 +3716,18 @@ impl<'a> LocCloner<'a> {
             ExpressionDesc::Pexp_ident(lid) => self.located(lid),
             ExpressionDesc::Pexp_constant(_) => {}
             ExpressionDesc::Pexp_let(inner) => {
-                    let (_, ref bindings, ref body) = **inner;
-                for binding in bindings {
+                let (_, ref mut bindings, ref mut body) = **inner;
+                for binding in bindings.iter_mut() {
                     self.value_binding(binding);
                 }
                 self.expression(body);
             }
             ExpressionDesc::Pexp_fun(inner) => {
-                    let PexpFun { arg_label,
-                default,
-                lhs,
-                rhs,
-                .. } = *inner;
+                let PexpFun { ref mut arg_label,
+                ref mut default,
+                ref mut lhs,
+                ref mut rhs,
+                .. } = **inner;
                 self.arg_label(arg_label);
                 if let Some(expr) = default {
                     self.expression(expr);
@@ -3737,17 +3736,17 @@ impl<'a> LocCloner<'a> {
                 self.expression(rhs);
             }
             ExpressionDesc::Pexp_apply(inner) => {
-                    let PexpApply { ref funct, ref args, .. } = **inner;
+                let PexpApply { ref mut funct, ref mut args, .. } = **inner;
                 self.expression(funct);
-                for (label, arg) in args {
+                for (label, arg) in args.iter_mut() {
                     self.arg_label(label);
                     self.expression(arg);
                 }
             }
             ExpressionDesc::Pexp_match(inner) | ExpressionDesc::Pexp_try(inner) => {
-                    let (ref expr, ref cases) = **inner;
+                let (ref mut expr, ref mut cases) = **inner;
                 self.expression(expr);
-                for case in cases {
+                for case in cases.iter_mut() {
                     self.case(case);
                 }
             }
@@ -3763,14 +3762,14 @@ impl<'a> LocCloner<'a> {
                 }
             }
             ExpressionDesc::Pexp_variant(inner) => {
-                    let (_, ref arg) = **inner;
+                let (_, ref mut arg) = **inner;
                 if let Some(expr) = arg {
                     self.expression(expr);
                 }
             }
             ExpressionDesc::Pexp_record(inner) => {
-                    let (ref fields, ref base) = **inner;
-                for field in fields {
+                let (ref mut fields, ref mut base) = **inner;
+                for field in fields.iter_mut() {
                     self.expression_record_field(field);
                 }
                 if let Some(expr) = base {
@@ -3782,13 +3781,13 @@ impl<'a> LocCloner<'a> {
                 self.located(lid);
             }
             ExpressionDesc::Pexp_setfield(inner) => {
-                    let (ref expr, ref lid, ref rhs) = **inner;
+                let (ref mut expr, ref mut lid, ref mut rhs) = **inner;
                 self.expression(expr);
                 self.located(lid);
                 self.expression(rhs);
             }
             ExpressionDesc::Pexp_ifthenelse(inner) => {
-                    let (ref cond, ref then_expr, ref else_expr) = **inner;
+                let (ref mut cond, ref mut then_expr, ref mut else_expr) = **inner;
                 self.expression(cond);
                 self.expression(then_expr);
                 if let Some(expr) = else_expr {
@@ -3801,19 +3800,19 @@ impl<'a> LocCloner<'a> {
                 self.expression(second);
             }
             ExpressionDesc::Pexp_for(inner) => {
-                    let (ref pat, ref start, ref end, _, ref body) = **inner;
+                let (ref mut pat, ref mut start, ref mut end, _, ref mut body) = **inner;
                 self.pattern(pat);
                 self.expression(start);
                 self.expression(end);
                 self.expression(body);
             }
             ExpressionDesc::Pexp_constraint(inner) => {
-                    let (ref expr, ref typ) = **inner;
+                let (ref mut expr, ref mut typ) = **inner;
                 self.expression(expr);
                 self.core_type(typ);
             }
             ExpressionDesc::Pexp_coerce(inner) => {
-                    let (ref expr, ref from, ref to) = **inner;
+                let (ref mut expr, ref mut from, ref mut to) = **inner;
                 self.expression(expr);
                 if let Some(from) = from {
                     self.core_type(from);
@@ -3821,30 +3820,30 @@ impl<'a> LocCloner<'a> {
                 self.core_type(to);
             }
             ExpressionDesc::Pexp_send(inner) => {
-                    let (ref expr, ref method) = **inner;
+                let (ref mut expr, ref mut method) = **inner;
                 self.expression(expr);
                 self.located(method);
             }
             ExpressionDesc::Pexp_letmodule(inner) => {
-                    let (ref name, ref module_expr, ref body) = **inner;
+                let (ref mut name, ref mut module_expr, ref mut body) = **inner;
                 self.located(name);
                 self.module_expr(module_expr);
                 self.expression(body);
             }
             ExpressionDesc::Pexp_letexception(inner) => {
-                    let (ref ext, ref body) = **inner;
+                let (ref mut ext, ref mut body) = **inner;
                 self.extension_constructor(ext);
                 self.expression(body);
             }
             ExpressionDesc::Pexp_assert(expr) => self.expression(expr),
             ExpressionDesc::Pexp_newtype(inner) => {
-                    let (ref name, ref expr) = **inner;
+                let (ref mut name, ref mut expr) = **inner;
                 self.located(name);
                 self.expression(expr);
             }
             ExpressionDesc::Pexp_pack(module_expr) => self.module_expr(module_expr),
             ExpressionDesc::Pexp_open(inner) => {
-                    let (_, ref lid, ref expr) = **inner;
+                let (_, ref mut lid, ref mut expr) = **inner;
                 self.located(lid);
                 self.expression(expr);
             }
@@ -3869,7 +3868,7 @@ impl<'a> LocCloner<'a> {
                 }
             }
             ModuleExprDesc::Pmod_functor(inner) => {
-                    let (ref name, ref mty, ref body) = **inner;
+                let (ref mut name, ref mut mty, ref mut body) = **inner;
                 self.located(name);
                 if let Some(mty) = mty {
                     self.module_type(mty);
@@ -3919,7 +3918,7 @@ impl<'a> LocCloner<'a> {
                 }
             }
             ModuleTypeDesc::Pmty_functor(inner) => {
-                    let (ref name, ref arg, ref body) = **inner;
+                let (ref mut name, ref mut arg, ref mut body) = **inner;
                 self.located(name);
                 if let Some(arg) = arg {
                     self.module_type(arg);
@@ -3927,9 +3926,9 @@ impl<'a> LocCloner<'a> {
                 self.module_type(body);
             }
             ModuleTypeDesc::Pmty_with(inner) => {
-                    let (ref mty, ref constraints) = **inner;
+                let (ref mut mty, ref mut constraints) = **inner;
                 self.module_type(mty);
-                for constraint in constraints {
+                for constraint in constraints.iter_mut() {
                     self.with_constraint(constraint);
                 }
             }
@@ -4083,20 +4082,20 @@ impl<'a> LocCloner<'a> {
     fn structure_item_desc(&mut self, desc: &mut StructureItemDesc) {
         match desc {
             StructureItemDesc::Pstr_eval(inner) => {
-                    let (ref expr, ref attrs) = **inner;
+                let (ref mut expr, ref mut attrs) = **inner;
                 self.expression(expr);
                 self.attributes(attrs);
             }
             StructureItemDesc::Pstr_value(inner) => {
-                    let (_, ref bindings) = **inner;
-                for binding in bindings {
+                let (_, ref mut bindings) = **inner;
+                for binding in bindings.iter_mut() {
                     self.value_binding(binding);
                 }
             }
             StructureItemDesc::Pstr_primitive(vd) => self.value_description(vd),
             StructureItemDesc::Pstr_type(inner) => {
-                    let (_, ref decls) = **inner;
-                for decl in decls {
+                let (_, ref mut decls) = **inner;
+                for decl in decls.iter_mut() {
                     self.type_declaration(decl);
                 }
             }
@@ -4113,7 +4112,7 @@ impl<'a> LocCloner<'a> {
             StructureItemDesc::Pstr_include(include) => self.include_declaration(include),
             StructureItemDesc::Pstr_attribute(attr) => self.attribute(attr),
             StructureItemDesc::Pstr_extension(inner) => {
-                    let (ref ext, ref attrs) = **inner;
+                let (ref mut ext, ref mut attrs) = **inner;
                 self.extension(ext);
                 self.attributes(attrs);
             }
@@ -4129,8 +4128,8 @@ impl<'a> LocCloner<'a> {
         match desc {
             SignatureItemDesc::Psig_value(vd) => self.value_description(vd),
             SignatureItemDesc::Psig_type(inner) => {
-                    let (_, ref decls) = **inner;
-                for decl in decls {
+                let (_, ref mut decls) = **inner;
+                for decl in decls.iter_mut() {
                     self.type_declaration(decl);
                 }
             }
@@ -4147,7 +4146,7 @@ impl<'a> LocCloner<'a> {
             SignatureItemDesc::Psig_include(include) => self.include_description(include),
             SignatureItemDesc::Psig_attribute(attr) => self.attribute(attr),
             SignatureItemDesc::Psig_extension(inner) => {
-                    let (ref ext, ref attrs) = **inner;
+                let (ref mut ext, ref mut attrs) = **inner;
                 self.extension(ext);
                 self.attributes(attrs);
             }
