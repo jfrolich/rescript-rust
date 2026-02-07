@@ -697,6 +697,52 @@ pub fn initial_env(ctx: &TypeContext<'_>) -> Env {
         ..decl_abstr(0, false)
     }, ctx);
 
+    // Standard exception constructors (extension constructors of exn)
+    {
+        let exn_ty = ctx.new_generic_constr(Path::pident(Ident::create_persistent("exn")), vec![]);
+        let string_ty_for_exn = ctx.new_generic_constr(Path::pident(Ident::create_persistent("string")), vec![]);
+        let int_ty_for_exn = ctx.new_generic_constr(Path::pident(Ident::create_persistent("int")), vec![]);
+
+        let add_exception = |env: &mut Env, name: &str, args: Vec<TypeExprRef>, exn_ty: TypeExprRef| {
+            let id = Ident::create_persistent(name);
+            let path = Path::pident(id.clone());
+            let cstr_desc = ConstructorDescription {
+                cstr_name: name.to_string(),
+                cstr_res: exn_ty,
+                cstr_existentials: vec![],
+                cstr_arity: args.len() as i32,
+                cstr_args: args,
+                cstr_tag: ConstructorTag::CstrExtension(path),
+                cstr_consts: 0,
+                cstr_nonconsts: 0,
+                cstr_generalized: false,
+                cstr_private: PrivateFlag::Public,
+                cstr_loc: Location::none(),
+                cstr_attributes: vec![],
+                cstr_inlined: None,
+            };
+            env.add_constructor(id, cstr_desc);
+        };
+
+        add_exception(&mut env, "Not_found", vec![], exn_ty);
+        add_exception(&mut env, "Invalid_argument", vec![string_ty_for_exn], exn_ty);
+        add_exception(&mut env, "Failure", vec![string_ty_for_exn], exn_ty);
+        add_exception(&mut env, "Exit", vec![], exn_ty);
+        add_exception(&mut env, "Match_failure", vec![
+            ctx.new_generic_type(crate::types::type_expr::TypeDesc::Ttuple(vec![string_ty_for_exn, int_ty_for_exn, int_ty_for_exn]))
+        ], exn_ty);
+        add_exception(&mut env, "Assert_failure", vec![
+            ctx.new_generic_type(crate::types::type_expr::TypeDesc::Ttuple(vec![string_ty_for_exn, int_ty_for_exn, int_ty_for_exn]))
+        ], exn_ty);
+        add_exception(&mut env, "Sys_error", vec![string_ty_for_exn], exn_ty);
+        add_exception(&mut env, "End_of_file", vec![], exn_ty);
+        add_exception(&mut env, "Division_by_zero", vec![], exn_ty);
+        add_exception(&mut env, "Stack_overflow", vec![], exn_ty);
+        add_exception(&mut env, "Undefined_recursive_module", vec![
+            ctx.new_generic_type(crate::types::type_expr::TypeDesc::Ttuple(vec![string_ty_for_exn, int_ty_for_exn, int_ty_for_exn]))
+        ], exn_ty);
+    }
+
     // option('a) = None | Some('a)
     {
         let tvar = ctx.new_generic_var(None);
