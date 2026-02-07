@@ -1,7 +1,14 @@
-//! Parser performance benchmarks: Rust bsc vs OCaml bsc (exe-vs-exe).
+//! Parser performance benchmarks.
 //!
-//! Both compilers run as subprocesses with `bsc -bs-ast -o <tmpfile> <input.res>`.
-//! This measures the full parse-to-binary-AST pipeline as seen by the build system.
+//! Two benchmark modes:
+//!
+//! 1. **Subprocess (exe-vs-exe)**: Both Rust and OCaml `bsc` run as subprocesses with
+//!    `bsc -bs-ast -o <tmpfile> <input.res>`. Measures the full parse-to-binary-AST
+//!    pipeline including process startup overhead.
+//!
+//! 2. **In-process**: Calls the Rust parser directly as a library function. Measures
+//!    file I/O + Latin-1 conversion + parsing without subprocess overhead. Shows
+//!    throughput in MB/s and optionally compares against OCaml subprocess times.
 //!
 //! Paths are relative to the `compiler-rust/` directory (where Cargo.toml lives),
 //! since `cargo test` sets the working directory to the package root.
@@ -9,10 +16,13 @@
 //! ## Running benchmarks
 //!
 //! ```bash
-//! # All files (700+), 10 iterations each — takes ~3 minutes:
+//! # Subprocess: all files, 10 iterations each — takes ~3 minutes:
 //! cargo test --release --lib -- benchmark_all --ignored --nocapture
 //!
-//! # Individual quick check (50 iterations):
+//! # In-process: all files, 50 iterations each — takes ~30 seconds:
+//! cargo test --release --lib -- benchmark_all_inprocess --ignored --nocapture
+//!
+//! # Individual subprocess check (50 iterations):
 //! cargo test --release --lib -- benchmark_regex --nocapture
 //! ```
 
@@ -31,8 +41,11 @@ mod tests {
     /// Number of iterations for individual benchmark tests
     const ITERATIONS: u32 = 50;
 
-    /// Number of iterations for the comprehensive benchmark (lower to keep runtime reasonable)
+    /// Number of iterations for the comprehensive subprocess benchmark
     const ITERATIONS_ALL: u32 = 10;
+
+    /// Number of iterations for in-process benchmarks (no subprocess overhead, so fast)
+    const ITERATIONS_ALL_INPROCESS: u32 = 50;
 
     /// Maximum allowed slowdown factor (Rust time / OCaml time).
     /// Slightly above 1.0 to account for subprocess measurement noise.
@@ -332,7 +345,49 @@ mod tests {
     );
 
     // ========================================================================
-    // Comprehensive benchmark: all .res files (700+), 10 iterations each
+    // In-process benchmark helpers
+    // ========================================================================
+
+    /// Benchmark in-process parsing of a single file.
+    /// Each iteration includes file I/O + Latin-1 conversion + parsing.
+    /// Returns minimum duration over N iterations.
+    fn benchmark_in_process_n(source_file: &Path, iterations: u32) -> Option<Duration> {
+        let filename = source_file.to_string_lossy().to_string();
+        let is_interface = source_file
+            .extension()
+            .and_then(|s| s.to_str())
+            .is_some_and(|ext| ext == "resi" || ext == "mli");
+
+        // Helper: read file, convert to Latin-1 string, parse
+        let parse_once = |filename: &str| -> Option<()> {
+            let bytes = std::fs::read(source_file).ok()?;
+            let source: String = bytes.iter().map(|&b| b as char).collect();
+            let mut parser = crate::parser::Parser::new(filename, &source);
+            if is_interface {
+                let _ = crate::parser::module::parse_signature(&mut parser);
+            } else {
+                let _ = crate::parser::module::parse_structure(&mut parser);
+            }
+            Some(())
+        };
+
+        // Warm up (2 runs — primes OS page cache and CPU caches)
+        parse_once(&filename)?;
+        parse_once(&filename)?;
+
+        // Benchmark: take minimum time (includes file I/O, conversion, and parsing)
+        let mut min = Duration::MAX;
+        for _ in 0..iterations {
+            let start = Instant::now();
+            parse_once(&filename)?;
+            min = min.min(start.elapsed());
+        }
+
+        Some(min)
+    }
+
+    // ========================================================================
+    // Comprehensive subprocess benchmark: all .res files (700+), 10 iterations each
     // Run with: cargo test --release --lib -- benchmark_all --ignored --nocapture
     // ========================================================================
 
@@ -465,6 +520,244 @@ mod tests {
                 sorted_failures.len(),
                 MAX_SLOWDOWN_FACTOR
             );
+        }
+    }
+
+    // ========================================================================
+    // In-process benchmark: all files, Rust parser called directly (no subprocess)
+    // Run with: cargo test --release --lib -- benchmark_all_inprocess --ignored --nocapture
+    // ========================================================================
+
+    #[test]
+    #[ignore]
+    fn benchmark_all_inprocess() {
+        if cfg!(debug_assertions) {
+            eprintln!("Skipping benchmark: must run in --release mode");
+            return;
+        }
+
+        let files = discover_test_files();
+        let total = files.len();
+
+        // Check if OCaml binary is available for comparison factors
+        let has_ocaml = Path::new(OCAML_BSC).exists();
+        let ocaml_iterations: u32 = 5; // fewer iterations since subprocess is slow
+
+        println!("\n=== In-Process Parser Benchmark (no subprocess overhead) ===");
+        println!("Discovered {} files, {} iterations each", total, ITERATIONS_ALL_INPROCESS);
+        if has_ocaml {
+            println!("OCaml bsc found — showing factor (Rust in-process / OCaml subprocess)");
+            println!("Note: factor includes OCaml's subprocess overhead, so true speedup is even better");
+        } else {
+            println!("OCaml bsc not found — showing absolute performance only");
+        }
+        println!();
+
+        if has_ocaml {
+            println!("{:-<120}", "");
+            println!(
+                "  {:<60} {:>6} {:>10} {:>10} {:>8} {:>8}  {}",
+                "File", "Size", "Rust parse", "OCaml subp", "MB/s", "Factor", ""
+            );
+            println!("{:-<120}", "");
+        } else {
+            println!("{:-<90}", "");
+            println!(
+                "  {:<60} {:>6} {:>10} {:>8}",
+                "File", "Size", "Rust parse", "MB/s"
+            );
+            println!("{:-<90}", "");
+        }
+
+        struct InProcResult {
+            size: u64,
+            parse_us: f64,
+            throughput: f64,
+            factor: Option<f64>,
+        }
+
+        let mut results: Vec<InProcResult> = Vec::new();
+        let mut skipped: u32 = 0;
+
+        // Temp dir for OCaml subprocess output
+        let tmp_dir = if has_ocaml { tempfile::tempdir().ok() } else { None };
+
+        for (i, (name, path, size)) in files.iter().enumerate() {
+            if i > 0 && i % 100 == 0 {
+                eprintln!("  [{}/{}] ...", i, total);
+            }
+
+            // In-process Rust parse benchmark
+            let parse_time = match benchmark_in_process_n(path, ITERATIONS_ALL_INPROCESS) {
+                Some(d) => d,
+                None => {
+                    skipped += 1;
+                    continue;
+                }
+            };
+
+            let parse_us = parse_time.as_nanos() as f64 / 1000.0;
+            let throughput = if *size > 0 && parse_time.as_nanos() > 0 {
+                (*size as f64) / (parse_time.as_secs_f64() * 1_000_000.0)
+            } else {
+                0.0
+            };
+
+            // Optional OCaml subprocess comparison
+            let factor = if has_ocaml {
+                if let Some(ref tmp) = tmp_dir {
+                    let ocaml_out = tmp.path().join("ocaml.ast");
+                    // Warm up
+                    run_bsc(OCAML_BSC, path, &ocaml_out);
+                    run_bsc(OCAML_BSC, path, &ocaml_out);
+                    // Benchmark
+                    let mut ocaml_min = Duration::MAX;
+                    for _ in 0..ocaml_iterations {
+                        if let Some(t) = run_bsc(OCAML_BSC, path, &ocaml_out) {
+                            ocaml_min = ocaml_min.min(t);
+                        }
+                    }
+                    if ocaml_min < Duration::MAX {
+                        let ocaml_us = ocaml_min.as_nanos() as f64 / 1000.0;
+                        let f = parse_us / ocaml_us;
+                        let status = if f <= 0.1 {
+                            "FAST"
+                        } else if f <= 0.5 {
+                            "FASTER"
+                        } else if f <= 1.0 {
+                            "faster"
+                        } else {
+                            "SLOW"
+                        };
+                        println!(
+                            "  {:<60} {:>6} {:>8.0}us {:>8.0}us {:>8.1} {:>7.2}x  {}",
+                            name, size, parse_us, ocaml_us, throughput, f, status
+                        );
+                        Some(f)
+                    } else {
+                        println!(
+                            "  {:<60} {:>6} {:>8.0}us {:>8} {:>8.1}",
+                            name, size, parse_us, "err", throughput
+                        );
+                        None
+                    }
+                } else {
+                    None
+                }
+            } else {
+                println!(
+                    "  {:<60} {:>6} {:>8.0}us {:>8.1}",
+                    name, size, parse_us, throughput
+                );
+                None
+            };
+
+            results.push(InProcResult {
+                size: *size,
+                parse_us,
+                throughput,
+                factor,
+            });
+        }
+
+        let line_width = if has_ocaml { 120 } else { 90 };
+        println!("{:-<width$}", "", width = line_width);
+        println!();
+
+        // Size tier summary
+        let tiers: &[(&str, u64, u64)] = &[
+            ("Large (>30KB)", 30_000, u64::MAX),
+            ("Medium (10-30KB)", 10_000, 30_000),
+            ("Small (1-10KB)", 1_000, 10_000),
+            ("Tiny (<1KB)", 0, 1_000),
+        ];
+
+        if has_ocaml {
+            println!(
+                "  {:<25} {:>6} {:>12} {:>12} {:>12} {:>10} {:>12}",
+                "Size Tier", "Files", "Avg Parse", "Min Parse", "Max Parse", "Avg MB/s", "Avg Factor"
+            );
+        } else {
+            println!(
+                "  {:<25} {:>6} {:>12} {:>12} {:>12} {:>10}",
+                "Size Tier", "Files", "Avg Parse", "Min Parse", "Max Parse", "Avg MB/s"
+            );
+        }
+        println!("  {:-<95}", "");
+
+        for &(tier_name, min_size, max_size) in tiers {
+            let tier: Vec<&InProcResult> = results
+                .iter()
+                .filter(|r| r.size >= min_size && r.size < max_size)
+                .collect();
+            if tier.is_empty() {
+                continue;
+            }
+            let count = tier.len();
+            let avg_us = tier.iter().map(|r| r.parse_us).sum::<f64>() / count as f64;
+            let min_us = tier
+                .iter()
+                .map(|r| r.parse_us)
+                .fold(f64::MAX, f64::min);
+            let max_us = tier
+                .iter()
+                .map(|r| r.parse_us)
+                .fold(f64::MIN, f64::max);
+            let avg_throughput = tier.iter().map(|r| r.throughput).sum::<f64>() / count as f64;
+
+            if has_ocaml {
+                let factors: Vec<f64> =
+                    tier.iter().filter_map(|r| r.factor).collect();
+                let avg_factor = if !factors.is_empty() {
+                    factors.iter().sum::<f64>() / factors.len() as f64
+                } else {
+                    0.0
+                };
+                println!(
+                    "  {:<25} {:>6} {:>10.0}us {:>10.0}us {:>10.0}us {:>8.1} {:>10.2}x",
+                    tier_name, count, avg_us, min_us, max_us, avg_throughput, avg_factor
+                );
+            } else {
+                println!(
+                    "  {:<25} {:>6} {:>10.0}us {:>10.0}us {:>10.0}us {:>8.1}",
+                    tier_name, count, avg_us, min_us, max_us, avg_throughput
+                );
+            }
+        }
+
+        println!("  {:-<95}", "");
+        println!();
+
+        // Overall statistics
+        let total_size: u64 = results.iter().map(|r| r.size).sum();
+        let total_time_us: f64 = results.iter().map(|r| r.parse_us).sum();
+        let overall_throughput = if total_time_us > 0.0 {
+            // total_size in bytes, total_time_us in microseconds → MB/s
+            (total_size as f64) / (total_time_us / 1_000_000.0) / 1_000_000.0
+        } else {
+            0.0
+        };
+
+        println!("  {} files parsed, {} skipped", results.len(), skipped);
+        println!("  Total source: {:.1} KB", total_size as f64 / 1024.0);
+        println!(
+            "  Total parse time: {:.1} ms (sum of per-file minimums)",
+            total_time_us / 1000.0
+        );
+        println!("  Overall throughput: {:.1} MB/s", overall_throughput);
+
+        if has_ocaml {
+            let factors: Vec<f64> = results.iter().filter_map(|r| r.factor).collect();
+            if !factors.is_empty() {
+                let avg_factor = factors.iter().sum::<f64>() / factors.len() as f64;
+                let min_factor = factors.iter().copied().fold(f64::MAX, f64::min);
+                let max_factor = factors.iter().copied().fold(f64::MIN, f64::max);
+                println!();
+                println!(
+                    "  Factor (Rust in-process / OCaml subprocess): avg {:.2}x, min {:.2}x, max {:.2}x",
+                    avg_factor, min_factor, max_factor
+                );
+            }
         }
     }
 }
