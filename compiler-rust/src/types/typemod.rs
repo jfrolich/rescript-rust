@@ -1668,17 +1668,15 @@ fn type_structure_item<'a>(
             let path = path_from_longident(longident, |idx| arena.get_string(idx));
 
             // Extend the environment with the opened module's bindings
+            // Resolve the module (handles local env, persistent env, and dotted paths)
+            // Use arena.get_longident to avoid borrow conflict with tctx
+            let open_lid = arena.get_longident(open_desc.popen_lid.txt);
             let mut new_env = env.clone();
-            match longident {
-                Longident::Lident(name_idx) => {
-                    let name = arena.get_string(*name_idx);
-                    if let Some(ref mut pers_env) = tctx.persistent_env {
-                        pers_env.open_module(name, &mut new_env, tctx.type_ctx);
-                    }
-                }
-                _ => {
-                    // For dotted paths like Belt.Array, we'd need to resolve
-                    // the sub-module chain. For now, just try the root module.
+            let mod_type = lookup_module_type_by_lid(open_lid, arena, env, &mut tctx.persistent_env, tctx.type_ctx);
+            if let Some(ref mty) = mod_type {
+                let sig = resolve_mod_type_to_sig(mty, &mut tctx.persistent_env, tctx.type_ctx);
+                if let Some(ref sig_items) = sig {
+                    crate::cmi::persistent_env::add_signature_to_env(sig_items, &path, &mut new_env, tctx.type_ctx, true);
                 }
             }
 
