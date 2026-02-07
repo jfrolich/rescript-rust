@@ -10,7 +10,7 @@
 //! searches the load path for a corresponding `.cmi` file. The search is
 //! case-insensitive on the first character (matching OCaml's `find_in_path_uncap`).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
 use crate::ident::Ident;
@@ -21,7 +21,7 @@ use crate::types::decl::{
 };
 use crate::types::env::Env;
 use crate::types::path::Path;
-use crate::types::type_expr::TypeExprRef;
+use crate::types::type_expr::{TypeDesc, TypeExprRef};
 
 use super::cmi_format;
 use super::sig_reader::SigReadContext;
@@ -106,6 +106,14 @@ impl PersistentEnv {
         // Register all type declarations in the global store for alias expansion
         let module_path = Path::Pident(Ident::create_persistent(name));
         register_sig_types_recursive(&signature, &module_path, ctx, &self.load_path);
+
+        // Apply path substitution: rewrite Tconstr paths from internal
+        // (e.g., Pident "ref") to qualified (e.g., Pdot(Pident "Pervasives") "ref").
+        // This matches OCaml's `prefix_idents` + `Subst.type_path` mechanism.
+        substitute_type_paths_in_sig(&signature, &module_path, ctx);
+
+        // Also recursively substitute paths in sub-module signatures
+        substitute_submodule_paths(&signature, &module_path, ctx);
 
         Some(PersStruct {
             ps_name: cmi.cmi_name,
@@ -307,6 +315,224 @@ fn register_types_by_stamp_recursive(
     }
 }
 
+/// Substitute type paths in type expressions.
+///
+/// This implements the equivalent of OCaml's `Subst.type_path` applied to type expressions.
+/// When a module's signature is loaded, type identifiers internal to the module
+/// (e.g., `Pident(ref)` inside Pervasives) need to be rewritten to qualified paths
+/// (e.g., `Pdot(Pident "Pervasives") "ref"`).
+///
+/// The `stamp_map` maps type identifier stamps to their qualified paths.
+/// The `name_map` maps type names (for persistent idents with stamp 0) to their qualified paths.
+fn substitute_type_paths_in_sig(
+    sig_items: &[SignatureItem],
+    module_path: &Path,
+    ctx: &TypeContext<'_>,
+) {
+    // Build substitution maps:
+    // stamp -> qualified_path for stamped idents
+    // name -> qualified_path for persistent idents (stamp 0)
+    let mut stamp_map: HashMap<i32, Path> = HashMap::new();
+    let mut name_map: HashMap<String, Path> = HashMap::new();
+
+    for item in sig_items {
+        if let SignatureItem::SigType(id, _decl, _) = item {
+            let qualified_path = Path::pdot(module_path.clone(), id.name());
+            if id.stamp() != 0 {
+                stamp_map.insert(id.stamp(), qualified_path);
+            } else {
+                name_map.insert(id.name().to_string(), qualified_path);
+            }
+        }
+    }
+
+    if stamp_map.is_empty() && name_map.is_empty() {
+        return;
+    }
+
+    // Now walk all type expressions referenced from the signature
+    // and rewrite Tconstr paths that match our maps
+    let mut visited = HashSet::new();
+
+    for item in sig_items {
+        match item {
+            SignatureItem::SigValue(_id, desc) => {
+                substitute_type_expr_path(desc.val_type, &stamp_map, &name_map, ctx, &mut visited);
+            }
+            SignatureItem::SigType(_id, decl, _) => {
+                // Substitute in type params
+                for &param in &decl.type_params {
+                    substitute_type_expr_path(param, &stamp_map, &name_map, ctx, &mut visited);
+                }
+                // Substitute in manifest
+                if let Some(manifest) = decl.type_manifest {
+                    substitute_type_expr_path(manifest, &stamp_map, &name_map, ctx, &mut visited);
+                }
+                // Substitute in constructor/label types
+                match &decl.type_kind {
+                    TypeKind::TypeVariant(constrs) => {
+                        for cd in constrs {
+                            match &cd.cd_args {
+                                crate::types::decl::ConstructorArguments::CstrTuple(args) => {
+                                    for &arg in args {
+                                        substitute_type_expr_path(arg, &stamp_map, &name_map, ctx, &mut visited);
+                                    }
+                                }
+                                crate::types::decl::ConstructorArguments::CstrRecord(labels) => {
+                                    for lbl in labels {
+                                        substitute_type_expr_path(lbl.ld_type, &stamp_map, &name_map, ctx, &mut visited);
+                                    }
+                                }
+                            }
+                            if let Some(res) = cd.cd_res {
+                                substitute_type_expr_path(res, &stamp_map, &name_map, ctx, &mut visited);
+                            }
+                        }
+                    }
+                    TypeKind::TypeRecord(labels, _) => {
+                        for lbl in labels {
+                            substitute_type_expr_path(lbl.ld_type, &stamp_map, &name_map, ctx, &mut visited);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            SignatureItem::SigTypext(_id, ext, _) => {
+                for &param in &ext.ext_type_params {
+                    substitute_type_expr_path(param, &stamp_map, &name_map, ctx, &mut visited);
+                }
+                match &ext.ext_args {
+                    crate::types::decl::ConstructorArguments::CstrTuple(args) => {
+                        for &arg in args {
+                            substitute_type_expr_path(arg, &stamp_map, &name_map, ctx, &mut visited);
+                        }
+                    }
+                    crate::types::decl::ConstructorArguments::CstrRecord(labels) => {
+                        for lbl in labels {
+                            substitute_type_expr_path(lbl.ld_type, &stamp_map, &name_map, ctx, &mut visited);
+                        }
+                    }
+                }
+                if let Some(ret) = ext.ext_ret_type {
+                    substitute_type_expr_path(ret, &stamp_map, &name_map, ctx, &mut visited);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Recursively walk a type expression and substitute Tconstr paths.
+fn substitute_type_expr_path(
+    ty_ref: TypeExprRef,
+    stamp_map: &HashMap<i32, Path>,
+    name_map: &HashMap<String, Path>,
+    ctx: &TypeContext<'_>,
+    visited: &mut HashSet<usize>,
+) {
+    if !visited.insert(ty_ref.0) {
+        return; // Already visited (cycle detection)
+    }
+
+    let ty = ctx.get_type(ty_ref);
+    let desc = ty.desc().clone();
+
+    match &desc {
+        TypeDesc::Tconstr { path, args, .. } => {
+            // Check if this path needs substitution
+            if let Path::Pident(ident) = path {
+                let new_path = if ident.stamp() != 0 {
+                    stamp_map.get(&ident.stamp()).cloned()
+                } else {
+                    name_map.get(ident.name()).cloned()
+                };
+
+                if let Some(qualified_path) = new_path {
+                    let mut desc_mut = ty.desc_mut();
+                    if let TypeDesc::Tconstr { ref mut path, .. } = *desc_mut {
+                        *path = qualified_path;
+                    }
+                }
+            }
+
+            // Recurse into type arguments
+            for &arg in args {
+                substitute_type_expr_path(arg, stamp_map, name_map, ctx, visited);
+            }
+        }
+        TypeDesc::Tarrow { arg, ret, .. } => {
+            substitute_type_expr_path(arg.typ, stamp_map, name_map, ctx, visited);
+            substitute_type_expr_path(*ret, stamp_map, name_map, ctx, visited);
+        }
+        TypeDesc::Ttuple(types) => {
+            for &t in types {
+                substitute_type_expr_path(t, stamp_map, name_map, ctx, visited);
+            }
+        }
+        TypeDesc::Tlink(t) => {
+            substitute_type_expr_path(*t, stamp_map, name_map, ctx, visited);
+        }
+        TypeDesc::Tsubst(t) => {
+            substitute_type_expr_path(*t, stamp_map, name_map, ctx, visited);
+        }
+        TypeDesc::Tpoly { body, vars } => {
+            substitute_type_expr_path(*body, stamp_map, name_map, ctx, visited);
+            for &v in vars {
+                substitute_type_expr_path(v, stamp_map, name_map, ctx, visited);
+            }
+        }
+        TypeDesc::Tobject { fields, .. } => {
+            substitute_type_expr_path(*fields, stamp_map, name_map, ctx, visited);
+        }
+        TypeDesc::Tfield { typ, rest, .. } => {
+            substitute_type_expr_path(*typ, stamp_map, name_map, ctx, visited);
+            substitute_type_expr_path(*rest, stamp_map, name_map, ctx, visited);
+        }
+        TypeDesc::Tvariant(row) => {
+            substitute_type_expr_path(row.row_more, stamp_map, name_map, ctx, visited);
+            for field in &row.row_fields {
+                match &field.1 {
+                    crate::types::type_expr::RowField::Rpresent(Some(t)) => {
+                        substitute_type_expr_path(*t, stamp_map, name_map, ctx, visited);
+                    }
+                    crate::types::type_expr::RowField::Reither { types, .. } => {
+                        for &t in types {
+                            substitute_type_expr_path(t, stamp_map, name_map, ctx, visited);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        TypeDesc::Tpackage { args, .. } => {
+            for &arg in args {
+                substitute_type_expr_path(arg, stamp_map, name_map, ctx, visited);
+            }
+        }
+        TypeDesc::Tvar(_) | TypeDesc::Tunivar(_) | TypeDesc::Tnil => {}
+    }
+}
+
+/// Recursively substitute type paths in sub-module signatures.
+/// For a module like Belt with sub-modules Array, Map, etc.,
+/// the types in Belt.Array should have paths like Pdot(Pdot(Pident "Belt") "Array") "t"
+/// instead of Pident "t".
+fn substitute_submodule_paths(
+    sig_items: &[SignatureItem],
+    module_path: &Path,
+    ctx: &TypeContext<'_>,
+) {
+    for item in sig_items {
+        if let SignatureItem::SigModule(id, md, _) = item {
+            let sub_path = Path::pdot(module_path.clone(), id.name());
+            if let ModuleType::MtySignature(sub_sig) = &md.md_type {
+                substitute_type_paths_in_sig(sub_sig, &sub_path, ctx);
+                substitute_submodule_paths(sub_sig, &sub_path, ctx);
+            }
+        }
+    }
+}
+
 /// local bindings. This matches OCaml's behavior where opened modules have
 /// lower lookup priority than local bindings (e.g., Predef types like `int`
 /// are not shadowed when Pervasives.cmi is opened).
@@ -320,6 +546,11 @@ pub fn add_signature_to_env(
     ctx: &TypeContext<'_>,
     as_opened: bool,
 ) {
+    // Apply path substitution: rewrite Tconstr paths from internal
+    // (e.g., Pident "ref") to qualified (e.g., Pdot(Pident "Pervasives") "ref").
+    // This matches OCaml's `prefix_idents` + `Subst.type_path` mechanism.
+    substitute_type_paths_in_sig(sig_items, module_path, ctx);
+
     for item in sig_items {
         match item {
             SignatureItem::SigValue(id, desc) => {
