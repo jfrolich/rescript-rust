@@ -169,14 +169,36 @@ pub fn resolve_mod_type_to_sig<'b>(
     match mty {
         DeclMty::MtySignature(sig) => Some(sig.clone()),
         DeclMty::MtyAlias(_, path) | DeclMty::MtyIdent(path) => {
-            let mod_name = match path {
-                Path::Pident(id) => id.name().to_string(),
-                Path::Pdot(_, name, _) => name.clone(),
-                _ => return None,
-            };
+            resolve_path_to_sig(path, pers_env, ctx)
+        }
+        _ => None,
+    }
+}
+
+/// Resolve a module path to a signature by following through persistent env.
+fn resolve_path_to_sig<'b>(
+    path: &Path,
+    pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
+    ctx: &'b crate::types::context::TypeContext<'b>,
+) -> Option<crate::types::decl::Signature> {
+    match path {
+        Path::Pident(id) => {
+            let mod_name = id.name();
             if let Some(pers) = pers_env.as_mut() {
-                if let Some(ps) = pers.find_pers_struct(&mod_name, ctx) {
+                if let Some(ps) = pers.find_pers_struct(mod_name, ctx) {
                     return Some(ps.ps_sig.clone());
+                }
+            }
+            None
+        }
+        Path::Pdot(parent, name, _) => {
+            // Resolve parent path to get its signature, then find submodule
+            let parent_sig = resolve_path_to_sig(parent, pers_env, ctx)?;
+            for sig_item in &parent_sig {
+                if let crate::types::decl::SignatureItem::SigModule(id, md, _) = sig_item {
+                    if id.name() == name.as_str() {
+                        return resolve_mod_type_to_sig(&md.md_type, pers_env, ctx);
+                    }
                 }
             }
             None
