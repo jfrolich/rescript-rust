@@ -1670,7 +1670,35 @@ fn type_structure_item<'a>(
 
         ParsedStructureItemDesc::Pstr_include(incl) => {
             // Include declaration: include ME
+            // Resolve the module's signature to extend the environment
+            let include_sig = match &incl.pincl_mod.pmod_desc {
+                ParsedModuleExprDesc::Pmod_ident(lid) => {
+                    let longident = arena.get_longident(lid.txt);
+                    let mod_type = lookup_module_type_by_lid(longident, arena, env, &mut tctx.persistent_env, tctx.type_ctx);
+                    mod_type.and_then(|mt| resolve_mod_type_to_sig(&mt, &mut tctx.persistent_env, tctx.type_ctx))
+                }
+                _ => None,
+            };
+
             let typed_mod = type_module_expr(tctx, env, arena, &incl.pincl_mod)?;
+
+            // Extend environment with all bindings from the included module
+            let mut new_env = env.clone();
+            if let Some(sig_items) = &include_sig {
+                // For include, the module path should be the current module
+                // (items become direct members), but we need a path for qualified access.
+                // Use the included module's path for value paths.
+                let module_path = match &incl.pincl_mod.pmod_desc {
+                    ParsedModuleExprDesc::Pmod_ident(lid) => {
+                        let longident = arena.get_longident(lid.txt);
+                        path_from_longident(longident, |idx| arena.get_string(idx))
+                    }
+                    _ => Path::pident(Ident::create_local("_include_")),
+                };
+                crate::cmi::persistent_env::add_signature_to_env(
+                    sig_items, &module_path, &mut new_env, tctx.type_ctx, false,
+                );
+            }
 
             let desc = StructureItemDesc::Tstr_include(IncludeDeclaration {
                 incl_mod: typed_mod,
@@ -1684,7 +1712,7 @@ fn type_structure_item<'a>(
                     str_loc: loc,
                     str_env: EnvRef(0),
                 },
-                env.clone(),
+                new_env,
             ))
         }
 
