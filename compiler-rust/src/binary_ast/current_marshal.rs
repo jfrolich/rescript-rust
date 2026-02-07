@@ -135,9 +135,10 @@ fn is_none_loc_idx(loc: LocIdx, w: &MarshalWriter) -> bool {
 }
 
 fn is_raw_expansion_expr(expr: &Expression, w: &MarshalWriter) -> bool {
-    let ExpressionDesc::Pexp_letmodule(module_name, mod_expr, body) = &*expr.pexp_desc else {
+    let ExpressionDesc::Pexp_letmodule(lm_inner) = &*expr.pexp_desc else {
         return false;
     };
+    let (ref module_name, ref mod_expr, ref body) = **lm_inner;
 
     let arena = w.get_arena();
     if arena.get_string(module_name.txt) != "J" {
