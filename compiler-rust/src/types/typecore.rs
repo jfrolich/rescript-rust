@@ -2599,11 +2599,23 @@ fn type_application(
             let fn_param_is_optional = fn_label.as_ref().map_or(false, |l| l.is_optional());
             let call_is_optional = label.is_optional();
 
-            // If the function expects an optional parameter but the call-site provides
-            // a Nolabel argument, skip the optional parameter (implicitly pass None)
-            // and try to match against the next parameter.
-            if fn_param_is_optional && label.is_nolabel() {
-                // Skip this optional parameter - advance to next arrow
+            // Check if the labels match (considering that Optional("x") matches Labelled("x"))
+            let labels_match = match (&fn_label, label) {
+                (Some(fn_lbl), call_lbl) => {
+                    match (fn_lbl.label_name(), call_lbl.name_idx()) {
+                        (Some(fn_name), Some(call_idx)) => fn_name == tctx.arena.get_string(call_idx),
+                        (None, None) => true, // both Nolabel
+                        _ => false,
+                    }
+                }
+                (None, call_lbl) => call_lbl.is_nolabel(),
+            };
+
+            // Skip optional parameters when:
+            // 1. The function expects an optional param and call-site provides Nolabel, OR
+            // 2. The function expects an optional param and call-site provides a different label
+            // In both cases, the optional parameter gets None implicitly.
+            if fn_param_is_optional && !labels_match {
                 current_ty = ret_ty;
                 continue;
             }
