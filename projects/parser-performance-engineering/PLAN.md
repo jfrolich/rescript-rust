@@ -17,6 +17,35 @@ The Rust parser is a fully functional drop-in replacement for the OCaml parser, 
 
 ---
 
+## Critical Constraints
+
+**Every optimization MUST preserve byte-for-byte binary AST parity with the OCaml parser.** This is non-negotiable.
+
+The binary AST (`bsc -bs-ast` output) includes dependency extraction, source path, and OCaml Marshal-encoded parsetree. The Rust output must be identical to the OCaml output byte-for-byte. This is verified by:
+
+```bash
+# Full parity test suite (1300+ files, parallel, with regression tracking)
+./scripts/test_parser_ast_parity.sh
+
+# Quick iteration on a single file
+./scripts/test_parser_ast_parity.sh tests/syntax_tests/data/printer/expr/apply.res
+
+# Stop on first failure
+./scripts/test_parser_ast_parity.sh --quick
+```
+
+The test suite checks:
+1. **sexp-locs parity** — AST structure + locations + attributes match (readable diffs)
+2. **sexp-locs-ppx parity** — Post-PPX AST structure + locations match
+3. **bsc-ast parity** — Full `bsc -bs-ast` binary output is byte-identical
+4. **spice-ppx parity** — OCaml bsc with external spice PPX vs Rust internal PPX
+
+Baselines are maintained in `tests/parity_baselines/`. The suite is append-only: once a file passes, it must never regress.
+
+**Before and after every optimization**: run `./scripts/test_parser_ast_parity.sh` and verify zero regressions.
+
+---
+
 ## Current Architecture
 
 ### Pipeline

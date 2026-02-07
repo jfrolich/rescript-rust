@@ -2,6 +2,12 @@
 
 > **Note**: This is a living document. Update it as you complete optimizations, record benchmark results, or discover new opportunities. See [PLAN.md](./PLAN.md) for the full optimization roadmap.
 
+## Critical: Binary AST Parity Must Be Preserved
+
+**Every optimization must pass `./scripts/test_parser_ast_parity.sh` with zero regressions.** Run it before and after every change. See [PLAN.md](./PLAN.md#critical-constraints) for details.
+
+---
+
 ## Overall Progress
 
 | Tier | Description | Status | Progress |
