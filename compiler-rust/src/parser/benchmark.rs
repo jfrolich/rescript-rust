@@ -5,6 +5,16 @@
 //!
 //! Paths are relative to the `compiler-rust/` directory (where Cargo.toml lives),
 //! since `cargo test` sets the working directory to the package root.
+//!
+//! ## Running benchmarks
+//!
+//! ```bash
+//! # All files (700+), 10 iterations each — takes ~3 minutes:
+//! cargo test --release --lib -- benchmark_all --ignored --nocapture
+//!
+//! # Individual quick check (50 iterations):
+//! cargo test --release --lib -- benchmark_regex --nocapture
+//! ```
 
 #[cfg(test)]
 mod tests {
@@ -18,15 +28,26 @@ mod tests {
     /// Path to the OCaml bsc binary, relative to compiler-rust/
     const OCAML_BSC: &str = "../_build/install/default/bin/bsc";
 
-    /// Number of iterations per benchmark
+    /// Number of iterations for individual benchmark tests
     const ITERATIONS: u32 = 50;
 
+    /// Number of iterations for the comprehensive benchmark (lower to keep runtime reasonable)
+    const ITERATIONS_ALL: u32 = 10;
+
     /// Maximum allowed slowdown factor (Rust time / OCaml time).
-    /// 1.0 means Rust must be at least as fast as OCaml.
-    const MAX_SLOWDOWN_FACTOR: f64 = 1.0;
+    /// Slightly above 1.0 to account for subprocess measurement noise.
+    /// At ~10ms per run, process startup jitter alone is ±1-2ms (~20%).
+    const MAX_SLOWDOWN_FACTOR: f64 = 1.2;
+
+    /// Minimum file size (bytes) for inclusion in comprehensive benchmark.
+    /// Files below this threshold produce times dominated by process startup noise.
+    const MIN_FILE_SIZE: u64 = 500;
 
     /// Base path for test files, relative to compiler-rust/
     const TEST_BASE: &str = "../tests/syntax_tests/data";
+
+    /// Directories to exclude (parse errors, stress tests)
+    const EXCLUDED_DIRS: &[&str] = &["errors", "recovery", "infiniteLoops"];
 
     /// Check if both bsc binaries are available and we're running in release mode.
     /// Benchmarks are only meaningful in release mode to avoid subprocess timing noise.
@@ -71,30 +92,43 @@ mod tests {
         }
     }
 
-    /// Benchmark a single source file: run both bsc binaries ITERATIONS times,
-    /// return (rust_avg, ocaml_avg) durations.
-    fn benchmark_file(source_file: &Path) -> Option<(Duration, Duration)> {
+    /// Benchmark a single source file: run both bsc binaries N times,
+    /// return (rust_min, ocaml_min) durations.
+    ///
+    /// Uses the minimum time across iterations rather than the mean.
+    /// The minimum is the best estimator for subprocess benchmarks because
+    /// OS scheduling noise only adds time, never subtracts it.
+    fn benchmark_file_n(source_file: &Path, iterations: u32) -> Option<(Duration, Duration)> {
         let tmp_dir = tempfile::tempdir().ok()?;
         let rust_out = tmp_dir.path().join("rust.ast");
         let ocaml_out = tmp_dir.path().join("ocaml.ast");
 
-        // Warm up (1 run each)
+        // Warm up (2 runs each to prime caches and page tables)
+        run_bsc(RUST_BSC, source_file, &rust_out)?;
         run_bsc(RUST_BSC, source_file, &rust_out)?;
         run_bsc(OCAML_BSC, source_file, &ocaml_out)?;
+        run_bsc(OCAML_BSC, source_file, &ocaml_out)?;
 
-        // Benchmark Rust bsc
-        let mut rust_total = Duration::ZERO;
-        for _ in 0..ITERATIONS {
-            rust_total += run_bsc(RUST_BSC, source_file, &rust_out)?;
+        // Benchmark Rust bsc - take minimum
+        let mut rust_min = Duration::MAX;
+        for _ in 0..iterations {
+            let t = run_bsc(RUST_BSC, source_file, &rust_out)?;
+            rust_min = rust_min.min(t);
         }
 
-        // Benchmark OCaml bsc
-        let mut ocaml_total = Duration::ZERO;
-        for _ in 0..ITERATIONS {
-            ocaml_total += run_bsc(OCAML_BSC, source_file, &ocaml_out)?;
+        // Benchmark OCaml bsc - take minimum
+        let mut ocaml_min = Duration::MAX;
+        for _ in 0..iterations {
+            let t = run_bsc(OCAML_BSC, source_file, &ocaml_out)?;
+            ocaml_min = ocaml_min.min(t);
         }
 
-        Some((rust_total / ITERATIONS, ocaml_total / ITERATIONS))
+        Some((rust_min, ocaml_min))
+    }
+
+    /// Benchmark with default iteration count
+    fn benchmark_file(source_file: &Path) -> Option<(Duration, Duration)> {
+        benchmark_file_n(source_file, ITERATIONS)
     }
 
     /// Print a benchmark result line
@@ -107,9 +141,44 @@ mod tests {
             "SLOW"
         };
         println!(
-            "  {:<40} {:>8} {:>10.0}us {:>10.0}us {:>7.2}x  {}",
+            "  {:<70} {:>8} {:>10.0}us {:>10.0}us {:>7.2}x  {}",
             name, size, rust_us, ocaml_us, factor, status
         );
+    }
+
+    /// Discover all .res files under TEST_BASE, excluding error/recovery dirs,
+    /// filtered to files >= MIN_FILE_SIZE bytes, sorted by size descending.
+    fn discover_test_files() -> Vec<(String, PathBuf, u64)> {
+        let base = Path::new(TEST_BASE);
+        let mut files: Vec<(String, PathBuf, u64)> = Vec::new();
+
+        fn walk_dir(dir: &Path, base: &Path, files: &mut Vec<(String, PathBuf, u64)>) {
+            let entries = match std::fs::read_dir(dir) {
+                Ok(e) => e,
+                Err(_) => return,
+            };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    let dir_name = path.file_name().unwrap_or_default().to_string_lossy();
+                    if !EXCLUDED_DIRS.contains(&dir_name.as_ref()) {
+                        walk_dir(&path, base, files);
+                    }
+                } else if path.extension().map_or(false, |e| e == "res") {
+                    let size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+                    if size >= MIN_FILE_SIZE {
+                        let rel = path.strip_prefix(base).unwrap_or(&path);
+                        let name = rel.to_string_lossy().to_string();
+                        files.push((name, path, size));
+                    }
+                }
+            }
+        }
+
+        walk_dir(base, base, &mut files);
+        // Sort by size descending (largest files first)
+        files.sort_by(|a, b| b.2.cmp(&a.2));
+        files
     }
 
     /// Macro to generate individual benchmark tests, reducing boilerplate.
@@ -154,8 +223,10 @@ mod tests {
     }
 
     // ========================================================================
-    // Grammar expression benchmarks (small-medium files)
+    // Individual benchmark tests (50 iterations, for quick regression checks)
     // ========================================================================
+
+    // Grammar expression benchmarks (small-medium files)
 
     benchmark_test!(
         benchmark_regex,
@@ -229,9 +300,7 @@ mod tests {
         "parsing/grammar/expressions/firstClassModule.res"
     );
 
-    // ========================================================================
     // Real-world idempotency benchmarks (large files, 20-60KB)
-    // ========================================================================
 
     benchmark_test!(
         benchmark_react_dom_re,
@@ -264,11 +333,12 @@ mod tests {
     );
 
     // ========================================================================
-    // Comprehensive benchmark (all files, ignored by default)
+    // Comprehensive benchmark: all .res files (700+), 10 iterations each
+    // Run with: cargo test --release --lib -- benchmark_all --ignored --nocapture
     // ========================================================================
 
     #[test]
-    #[ignore] // Run with: cargo test --release --lib -- benchmark_all --ignored --nocapture
+    #[ignore]
     fn benchmark_all() {
         if !binaries_available() {
             eprintln!(
@@ -278,85 +348,122 @@ mod tests {
             return;
         }
 
-        let files: &[(&str, &str)] = &[
-            // Grammar expressions
-            ("grammar/regex", "parsing/grammar/expressions/regex.res"),
-            ("grammar/arrow", "parsing/grammar/expressions/arrow.res"),
-            ("grammar/if", "parsing/grammar/expressions/if.res"),
-            ("grammar/UncurriedByDefault", "parsing/grammar/expressions/UncurriedByDefault.res"),
-            ("grammar/block", "parsing/grammar/expressions/block.res"),
-            ("grammar/constants", "parsing/grammar/expressions/constants.res"),
-            ("grammar/record", "parsing/grammar/expressions/record.res"),
-            ("grammar/binary", "parsing/grammar/expressions/binary.res"),
-            ("grammar/array", "parsing/grammar/expressions/array.res"),
-            ("grammar/switch", "parsing/grammar/expressions/switch.res"),
-            ("grammar/async", "parsing/grammar/expressions/async.res"),
-            ("grammar/firstClassModule", "parsing/grammar/expressions/firstClassModule.res"),
-            // Real-world idempotency files
-            ("idempotency/ReactDOMRe", "idempotency/reason-react/src/ReactDOMRe.res"),
-            ("idempotency/Css_Legacy_Core", "idempotency/bs-css/Css_Legacy_Core.res"),
-            ("idempotency/Arnold", "idempotency/genType/src/Arnold.res"),
-            ("idempotency/index", "idempotency/ludum-dare-46/index.res"),
-            ("idempotency/EmitJs", "idempotency/genType/src/EmitJs.res"),
-        ];
+        let files = discover_test_files();
+        let total = files.len();
+        println!("\nDiscovered {} .res files (>= {} bytes)\n", total, MIN_FILE_SIZE);
 
-        println!("\n{:-<90}", "");
+        println!("{:-<110}", "");
         println!(
-            "  {:<40} {:>8} {:>10} {:>10} {:>7}",
+            "  {:<70} {:>8} {:>10} {:>10} {:>7}",
             "Test", "Size", "Rust", "OCaml", "Factor"
         );
-        println!("{:-<90}", "");
+        println!("{:-<110}", "");
 
-        let mut results: Vec<(&str, f64)> = Vec::new();
-        let mut failures: Vec<(&str, f64)> = Vec::new();
+        struct Result {
+            name: String,
+            size: u64,
+            factor: f64,
+        }
 
-        for &(name, relative_path) in files {
-            let source_file = test_path(relative_path);
-            if !source_file.exists() {
-                eprintln!("  {:<40} SKIPPED (file not found)", name);
-                continue;
+        let mut results: Vec<Result> = Vec::new();
+        let mut failures: Vec<Result> = Vec::new();
+        let mut errors: Vec<String> = Vec::new();
+
+        for (i, (name, path, size)) in files.iter().enumerate() {
+            // Progress indicator every 50 files
+            if i > 0 && i % 50 == 0 {
+                eprintln!("  [{}/{}] ...", i, total);
             }
 
-            let size = std::fs::metadata(&source_file).map(|m| m.len()).unwrap_or(0);
-
-            match benchmark_file(&source_file) {
-                Some((rust_avg, ocaml_avg)) => {
-                    let rust_us = rust_avg.as_nanos() as f64 / 1000.0;
-                    let ocaml_us = ocaml_avg.as_nanos() as f64 / 1000.0;
+            match benchmark_file_n(path, ITERATIONS_ALL) {
+                Some((rust_min, ocaml_min)) => {
+                    let rust_us = rust_min.as_nanos() as f64 / 1000.0;
+                    let ocaml_us = ocaml_min.as_nanos() as f64 / 1000.0;
                     let factor = rust_us / ocaml_us;
 
-                    print_result(name, size, rust_us, ocaml_us, factor);
-                    results.push((name, factor));
+                    print_result(name, *size, rust_us, ocaml_us, factor);
 
+                    let r = Result {
+                        name: name.clone(),
+                        size: *size,
+                        factor,
+                    };
                     if factor > MAX_SLOWDOWN_FACTOR {
-                        failures.push((name, factor));
+                        failures.push(Result {
+                            name: name.clone(),
+                            size: *size,
+                            factor,
+                        });
                     }
+                    results.push(r);
                 }
                 None => {
-                    eprintln!("  {:<40} FAILED (benchmark error)", name);
+                    println!("  {:<70} {:>8} {:>10} {:>10} {:>7}  SKIP", name, size, "-", "-", "-");
+                    errors.push(name.clone());
                 }
             }
         }
 
-        println!("{:-<90}", "");
+        println!("{:-<110}", "");
+        println!();
 
-        let passing = results.iter().filter(|(_, f)| *f <= MAX_SLOWDOWN_FACTOR).count();
-        let faster = results.iter().filter(|(_, f)| *f < 1.0).count();
-        let total = results.len();
+        // Aggregate statistics
+        let passing = results.iter().filter(|r| r.factor <= MAX_SLOWDOWN_FACTOR).count();
+        let faster = results.iter().filter(|r| r.factor < 1.0).count();
+        let benchmarked = results.len();
+
+        // Stats by size tier
+        let tiers: &[(&str, u64, u64)] = &[
+            ("Large (>30KB)", 30_000, u64::MAX),
+            ("Medium (10-30KB)", 10_000, 30_000),
+            ("Small (1-10KB)", 1_000, 10_000),
+            ("Tiny (<1KB)", 0, 1_000),
+        ];
+
+        println!("  {:<25} {:>6} {:>8} {:>8} {:>10} {:>10} {:>10}",
+            "Size Tier", "Files", "Faster", "OK", "Avg Factor", "Min Factor", "Max Factor");
+        println!("  {:-<85}", "");
+
+        for &(tier_name, min_size, max_size) in tiers {
+            let tier_results: Vec<&Result> = results.iter()
+                .filter(|r| r.size >= min_size && r.size < max_size)
+                .collect();
+            if tier_results.is_empty() {
+                continue;
+            }
+            let tier_count = tier_results.len();
+            let tier_faster = tier_results.iter().filter(|r| r.factor < 1.0).count();
+            let tier_ok = tier_results.iter().filter(|r| r.factor >= 1.0 && r.factor <= MAX_SLOWDOWN_FACTOR).count();
+            let avg_factor: f64 = tier_results.iter().map(|r| r.factor).sum::<f64>() / tier_count as f64;
+            let min_factor = tier_results.iter().map(|r| r.factor).fold(f64::MAX, f64::min);
+            let max_factor = tier_results.iter().map(|r| r.factor).fold(f64::MIN, f64::max);
+
+            println!("  {:<25} {:>6} {:>8} {:>8} {:>10.2}x {:>10.2}x {:>10.2}x",
+                tier_name, tier_count, tier_faster, tier_ok, avg_factor, min_factor, max_factor);
+        }
+
+        println!("  {:-<85}", "");
+        println!();
 
         println!(
-            "  Results: {}/{} passing, {}/{} faster than OCaml",
-            passing, total, faster, total
+            "  Overall: {}/{} passing ({} faster, {} within tolerance), {} skipped",
+            passing, benchmarked, faster, passing - faster, errors.len()
         );
 
         if !failures.is_empty() {
-            println!("\n  Failures:");
-            for (name, factor) in &failures {
-                println!("    {} is {:.2}x slower than OCaml", name, factor);
+            println!("\n  Failures ({}):", failures.len());
+            // Sort failures by factor descending (worst first)
+            let mut sorted_failures = failures;
+            sorted_failures.sort_by(|a, b| b.factor.partial_cmp(&a.factor).unwrap());
+            for r in &sorted_failures {
+                println!(
+                    "    {:<70} {:>8} {:>7.2}x",
+                    r.name, r.size, r.factor
+                );
             }
             panic!(
                 "{} benchmark(s) failed - Rust bsc is too slow (max allowed: {:.2}x)",
-                failures.len(),
+                sorted_failures.len(),
                 MAX_SLOWDOWN_FACTOR
             );
         }
