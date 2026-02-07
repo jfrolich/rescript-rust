@@ -684,12 +684,14 @@ pub fn fun_expr<'a>(arena: &ParseArena, expr: &'a Expression) -> (bool, Vec<FunP
 
     // First, collect leading Pexp_newtype (like OCaml's top-level match)
     // This combines consecutive newtypes like "type t, type u" into "type t u"
-    if let ExpressionDesc::Pexp_newtype(name, body) = &*current.pexp_desc {
+    if let ExpressionDesc::Pexp_newtype(newtype_inner) = &*current.pexp_desc {
+        let (ref name, ref body) = **newtype_inner;
         let mut names = vec![name];
         current = body;
 
         // Collect any additional consecutive newtypes
-        while let ExpressionDesc::Pexp_newtype(next_name, next_body) = &*current.pexp_desc {
+        while let ExpressionDesc::Pexp_newtype(next_inner) = &*current.pexp_desc {
+            let (ref next_name, ref next_body) = **next_inner;
             names.push(next_name);
             current = next_body;
         }

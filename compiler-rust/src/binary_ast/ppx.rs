@@ -1973,9 +1973,14 @@ fn handle_obj(
     // Extract the record expression from the payload: PStr [{ Pstr_eval(Box::new((Pexp_record(...), _))) }]
     let (record_expr, label_exprs) = match payload {
         Payload::PStr(items) if items.len() == 1 => {
-            if let StructureItemDesc::Pstr_eval(e, _) = &*items[0].pstr_desc {
-                if let ExpressionDesc::Pexp_record(fields, None) = &*e.pexp_desc {
-                    (e, fields)
+            if let StructureItemDesc::Pstr_eval(eval_inner) = &*items[0].pstr_desc {
+                let (ref e, _) = **eval_inner;
+                if let ExpressionDesc::Pexp_record(rec_inner) = &*e.pexp_desc {
+                    if rec_inner.1.is_none() {
+                        (e, &rec_inner.0)
+                    } else {
+                        return expr.clone();
+                    }
                 } else {
                     return expr.clone();
                 }
@@ -2373,7 +2378,8 @@ fn handle_external_ext(
     // %external expects a single identifier like %external(__DEV__)
     let ident_str = match payload {
         Payload::PStr(items) if items.len() == 1 => {
-            if let StructureItemDesc::Pstr_eval(e, _) = &*items[0].pstr_desc {
+            if let StructureItemDesc::Pstr_eval(eval_inner) = &*items[0].pstr_desc {
+                let (ref e, _) = **eval_inner;
                 if let ExpressionDesc::Pexp_ident(Located { txt, .. }) = &*e.pexp_desc {
                     // Get the Longident and check if it's an Lident
                     let lid = arena.get_longident(txt);
@@ -2617,22 +2623,27 @@ fn handle_raw(
     // Also detect if the JS string contains a function (for internal.expansive attribute).
     let (str_exp, payload_loc, is_function) = match payload {
         Payload::PStr(items) if items.len() == 1 => {
-            if let StructureItemDesc::Pstr_eval(e, _) = &*items[0].pstr_desc {
-                if let ExpressionDesc::Pexp_constant(Constant::String(s, _)) = &*e.pexp_desc {
-                    // Check if the JS string contains a function
-                    let is_func = is_js_function(s);
+            if let StructureItemDesc::Pstr_eval(eval_inner) = &*items[0].pstr_desc {
+                let (ref e, _) = **eval_inner;
+                if let ExpressionDesc::Pexp_constant(c) = &*e.pexp_desc {
+                    if let Constant::String(s, _) = &**c {
+                        // Check if the JS string contains a function
+                        let is_func = is_js_function(s);
 
-                    // Create a new string expression with delimiter stripped
-                    // (OCaml strips the delimiter when transforming %raw)
-                    let exp = Expression {
-                        pexp_desc: Box::new(ExpressionDesc::Pexp_constant(Box::new(Constant::String(
-                            s.clone(),
-                            None, // Strip delimiter
-                        )))),
-                        pexp_loc: e.pexp_loc,
-                        pexp_attributes: e.pexp_attributes.clone(),
-                    };
-                    (exp, e.pexp_loc, is_func)
+                        // Create a new string expression with delimiter stripped
+                        // (OCaml strips the delimiter when transforming %raw)
+                        let exp = Expression {
+                            pexp_desc: Box::new(ExpressionDesc::Pexp_constant(Box::new(Constant::String(
+                                s.clone(),
+                                None, // Strip delimiter
+                            )))),
+                            pexp_loc: e.pexp_loc,
+                            pexp_attributes: e.pexp_attributes.clone(),
+                        };
+                        (exp, e.pexp_loc, is_func)
+                    } else {
+                        return expr.clone();
+                    }
                 } else {
                     return expr.clone();
                 }
@@ -2777,20 +2788,25 @@ fn handle_raw_structure(
     // Extract the string expression from the payload
     let (str_exp, str_loc) = match payload {
         Payload::PStr(items) if items.len() == 1 => {
-            if let StructureItemDesc::Pstr_eval(e, _) = &*items[0].pstr_desc {
-                if let ExpressionDesc::Pexp_constant(Constant::String(s, _)) = &*e.pexp_desc {
-                    // Create a new string expression with delimiter stripped
-                    (
-                        Expression {
-                            pexp_desc: Box::new(ExpressionDesc::Pexp_constant(Box::new(Constant::String(
-                                s.clone(),
-                                None, // Strip delimiter
-                            )))),
-                            pexp_loc: e.pexp_loc,
-                            pexp_attributes: e.pexp_attributes.clone(),
-                        },
-                        e.pexp_loc,
-                    )
+            if let StructureItemDesc::Pstr_eval(eval_inner) = &*items[0].pstr_desc {
+                let (ref e, _) = **eval_inner;
+                if let ExpressionDesc::Pexp_constant(c) = &*e.pexp_desc {
+                    if let Constant::String(s, _) = &**c {
+                        // Create a new string expression with delimiter stripped
+                        (
+                            Expression {
+                                pexp_desc: Box::new(ExpressionDesc::Pexp_constant(Box::new(Constant::String(
+                                    s.clone(),
+                                    None, // Strip delimiter
+                                )))),
+                                pexp_loc: e.pexp_loc,
+                                pexp_attributes: e.pexp_attributes.clone(),
+                            },
+                            e.pexp_loc,
+                        )
+                    } else {
+                        return item.clone();
+                    }
                 } else {
                     return item.clone();
                 }
@@ -5297,8 +5313,9 @@ fn uncapitalize_first(s: &str) -> String {
 /// Check if a type declaration is an enum polyvariant (all nullary tags)
 fn is_enum_polyvar(tdcl: &TypeDeclaration) -> Option<&[RowField]> {
     if let Some(manifest) = &tdcl.ptype_manifest {
-        if let CoreTypeDesc::Ptyp_variant(row_fields, closed_flag, None) = &*manifest.ptyp_desc {
-            if *closed_flag == current::ClosedFlag::Closed {
+        if let CoreTypeDesc::Ptyp_variant(var_inner) = &*manifest.ptyp_desc {
+            let (ref row_fields, ref closed_flag, ref labels) = **var_inner;
+            if labels.is_none() && *closed_flag == current::ClosedFlag::Closed {
                 // Check all tags are nullary (empty type list)
                 // RowField::Rtag(name_loc, attrs, is_constant, types)
                 let all_nullary = row_fields.iter().all(|rf| {

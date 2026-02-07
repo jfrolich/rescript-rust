@@ -218,6 +218,11 @@ fn is_simple_expression_with_arena(expr: &Expression, arena: &ParseArena) -> boo
     if is_simple_construct(expr, arena) {
         return true;
     }
+    if let ExpressionDesc::Pexp_variant(v) = &*expr.pexp_desc {
+        if v.1.is_none() {
+            return true;
+        }
+    }
     matches!(
         &*expr.pexp_desc,
         ExpressionDesc::Pexp_ident(_)
@@ -227,7 +232,6 @@ fn is_simple_expression_with_arena(expr: &Expression, arena: &ParseArena) -> boo
             | ExpressionDesc::Pexp_record(_)
             | ExpressionDesc::Pexp_constraint(_)
             | ExpressionDesc::Pexp_coerce(_)
-            | ExpressionDesc::Pexp_variant(_, None)
             | ExpressionDesc::Pexp_pack(_)
             // NOTE: Pexp_field and Pexp_send are NOT simple in OCaml's pprintast.
             // They are in expression2, which means they need parens when nested.
@@ -537,7 +541,8 @@ fn print_structure_item<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, item
             // OCaml: module_helper unwraps Pmod_functor with no attributes
             // and prints functor parameters inline: `module F(A:X) = body`
             let mut me = &mb.pmb_expr;
-            while let ModuleExprDesc::Pmod_functor(name, mt, body) = &*me.pmod_desc {
+            while let ModuleExprDesc::Pmod_functor(func_inner) = &*me.pmod_desc {
+                let (ref name, ref mt, ref body) = **func_inner;
                 if me.pmod_attributes.is_empty() {
                     if let Some(mt) = mt {
                         f.string("(");
@@ -704,15 +709,18 @@ fn print_value_binding<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, pat: 
     // let f : 'a 'b . type_expr = fun (type a) -> fun (type b) -> (body : type_expr')
     // This gets printed as: let f : type a b. type_expr' = body
     // OCaml pprintast.ml is_desugared_gadt function (lines 1054-1081)
-    if let PatternDesc::Ppat_constraint(inner_pat, typ) = &*pat.ppat_desc {
+    if let PatternDesc::Ppat_constraint(ppat_inner) = &*pat.ppat_desc {
+        let (ref inner_pat, ref typ) = **ppat_inner;
         if pat.ppat_attributes.is_empty() {
-            if let CoreTypeDesc::Ptyp_poly(tyvars, _) = &*typ.ptyp_desc {
+            if let CoreTypeDesc::Ptyp_poly(poly_inner) = &*typ.ptyp_desc {
+                let (ref tyvars, _) = **poly_inner;
                 if !tyvars.is_empty() && typ.ptyp_attributes.is_empty() {
                     // Try to match the desugared GADT pattern
                     // Collect Pexp_newtype chain from expression
                     let mut e_tyvars = Vec::new();
                     let mut curr_expr = expr;
-                    while let ExpressionDesc::Pexp_newtype(tyvar, inner) = &*curr_expr.pexp_desc {
+                    while let ExpressionDesc::Pexp_newtype(newtype_inner) = &*curr_expr.pexp_desc {
+                        let (ref tyvar, ref inner) = **newtype_inner;
                         if !curr_expr.pexp_attributes.is_empty() {
                             break;
                         }
@@ -720,7 +728,8 @@ fn print_value_binding<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, pat: 
                         curr_expr = inner;
                     }
                     // Check if we end with Pexp_constraint(Box::new((body, ct))) and tyvars match
-                    if let ExpressionDesc::Pexp_constraint(body, ct) = &*curr_expr.pexp_desc {
+                    if let ExpressionDesc::Pexp_constraint(constr_inner) = &*curr_expr.pexp_desc {
+                        let (ref body, ref ct) = **constr_inner;
                         if curr_expr.pexp_attributes.is_empty() && e_tyvars.len() == tyvars.len() {
                             // Check that tyvar names match (pattern has 'a, expr has a -> same base name)
                             let tyvars_match = tyvars.iter().zip(e_tyvars.iter()).all(|(pt, et)| {
@@ -757,7 +766,8 @@ fn print_value_binding<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, pat: 
 
     // Special case: Ppat_constraint - different handling based on type
     // OCaml pprintast.ml lines 1096-1103
-    if let PatternDesc::Ppat_constraint(inner_pat, typ) = &*pat.ppat_desc {
+    if let PatternDesc::Ppat_constraint(ppat_inner2) = &*pat.ppat_desc {
+        let (ref inner_pat, ref typ) = **ppat_inner2;
         if pat.ppat_attributes.is_empty() {
             if matches!(*typ.ptyp_desc, CoreTypeDesc::Ptyp_poly(..)) && typ.ptyp_attributes.is_empty() {
                 // Ptyp_poly: print without outer parens
@@ -3001,7 +3011,8 @@ fn print_payload<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, payload: &P
             // Special case: single Pstr_eval prints just the expression
             // OCaml: pp f "@[<2>%a@]%a" (expression ctxt) e (item_attributes ctxt) attrs
             if items.len() == 1 {
-                if let StructureItemDesc::Pstr_eval(expr, attrs) = &*items[0].pstr_desc {
+                if let StructureItemDesc::Pstr_eval(eval_inner) = &*items[0].pstr_desc {
+                    let (ref expr, ref attrs) = **eval_inner;
                     f.open_box(BoxKind::Box, 2);
                     print_expression(f, arena, expr);
                     f.close_box();

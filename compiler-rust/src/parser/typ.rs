@@ -771,7 +771,8 @@ fn parse_type_constr_with_start(p: &mut Parser<'_>, outer_start_pos_idx: Option<
         // Collect inline type names first to avoid borrow conflict
         let inline_names: Vec<String> = inline_types.iter().map(|(n, _, _)| n.clone()).collect();
         let count = args.iter().filter(|arg| {
-            if let CoreTypeDesc::Ptyp_constr(lid, _) = &*arg.ptyp_desc {
+            if let CoreTypeDesc::Ptyp_constr(constr_inner) = &*arg.ptyp_desc {
+                let (ref lid, _) = **constr_inner;
                 inline_names.iter().any(|iname| p.arena().is_lident(lid.txt, iname))
             } else {
                 false

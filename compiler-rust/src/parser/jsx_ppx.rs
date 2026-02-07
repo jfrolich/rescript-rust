@@ -171,7 +171,8 @@ fn transform_structure_item_multi(item: StructureItem, config: &mut JsxConfig, a
     }
 
     // Handle Pstr_value with potential @react.component
-    if let StructureItemDesc::Pstr_value(rec_flag, bindings) = *item.pstr_desc {
+    if let StructureItemDesc::Pstr_value(val_inner) = *item.pstr_desc {
+        let (rec_flag, bindings) = *val_inner;
         return transform_value_bindings(rec_flag, bindings, &item.pstr_loc, config, arena);
     }
 
@@ -2553,7 +2554,8 @@ fn update_config_from_attribute(arena: &ParseArena, attr: &Attribute, config: &m
     if let Payload::PStr(items) = &attr.1 {
         for item in items {
             if let StructureItemDesc::Pstr_eval(eval_inner) = &*item.pstr_desc { let (ref expr, _) = *eval_inner;
-                if let ExpressionDesc::Pexp_record(fields, _) = &*expr.pexp_desc {
+                if let ExpressionDesc::Pexp_record(rec_inner) = &*expr.pexp_desc {
+                    let (ref fields, _) = *rec_inner;
                     let mut module_raw: Option<String> = None;
                     let mut version_raw: Option<i32> = None;
 

@@ -215,8 +215,7 @@ fn payload(arena: &ParseArena, p: &Payload) -> Sexp {
         }
         Payload::PSig(items) => Sexp::list(vec![Sexp::atom("PSig"), signature(arena, items)]),
         Payload::PTyp(ct) => Sexp::list(vec![Sexp::atom("PTyp"), core_type(arena, ct)]),
-        Payload::PPat(inner) => {
-                    let (ref pat, ref opt_expr) = **inner;
+        Payload::PPat(pat, opt_expr) => {
                     Sexp::list(vec![
             Sexp::atom("PPat"),
             pattern(arena, pat),

@@ -1355,7 +1355,8 @@ pub fn print_expression(
             } else if let ExpressionDesc::Pexp_ifthenelse(_) = &*target_expr.pexp_desc {
                 // Check for ternary
                 if parsetree_viewer::has_ternary_attribute(arena, &target_expr.pexp_attributes) {
-                    if let ExpressionDesc::Pexp_ifthenelse(if_expr, _, _) = &*target_expr.pexp_desc {
+                    if let ExpressionDesc::Pexp_ifthenelse(ite_inner) = &*target_expr.pexp_desc {
+                        let (ref if_expr, _, _) = **ite_inner;
                         parsetree_viewer::is_binary_expression(arena, if_expr)
                             || parsetree_viewer::has_attributes(arena, &if_expr.pexp_attributes)
                     } else {
@@ -2204,9 +2205,12 @@ fn try_print_obj_extension(
     // Match the pattern: %obj with PStr containing a single Pstr_eval of a Pexp_record
     if let Payload::PStr(items) = payload {
         if let [single] = &items[..] {
-            if let StructureItemDesc::Pstr_eval(expr, attrs) = &*single.pstr_desc {
+            if let StructureItemDesc::Pstr_eval(eval_inner) = &*single.pstr_desc {
+                let (ref expr, ref attrs) = **eval_inner;
                 if attrs.is_empty() {
-                    if let ExpressionDesc::Pexp_record(fields, None) = &*expr.pexp_desc {
+                    if let ExpressionDesc::Pexp_record(rec_inner) = &*expr.pexp_desc {
+                        let (ref fields, ref spread) = **rec_inner;
+                        if spread.is_none() {
                         // Check if object is written over multiple lines
                         // Use the structure item's location (pstr_loc)
                         let pstr_loc = arena.get_location(single.pstr_loc);
@@ -2232,6 +2236,7 @@ fn try_print_obj_extension(
                             ]),
                             force_break,
                         ));
+                        }
                     }
                 }
             }
@@ -2279,10 +2284,13 @@ fn try_print_re_extension(ext: &Extension, arena: &ParseArena) -> Option<Doc> {
     // Match the pattern: %re with PStr containing a single Pstr_eval of a Pexp_constant string
     if let Payload::PStr(items) = payload {
         if let [single] = &items[..] {
-            if let StructureItemDesc::Pstr_eval(expr, attrs) = &*single.pstr_desc {
+            if let StructureItemDesc::Pstr_eval(eval_inner) = &*single.pstr_desc {
+                let (ref expr, ref attrs) = **eval_inner;
                 if attrs.is_empty() {
-                    if let ExpressionDesc::Pexp_constant(Constant::String(s, _)) = &*expr.pexp_desc {
-                        return Some(Doc::text(s.clone()));
+                    if let ExpressionDesc::Pexp_constant(c) = &*expr.pexp_desc {
+                        if let Constant::String(s, _) = &**c {
+                            return Some(Doc::text(s.clone()));
+                        }
                     }
                 }
             }
@@ -5369,7 +5377,8 @@ pub fn print_typ_expr(
 
             // Handle special case: object type inside type constructor
             if let [single_arg] = args.as_slice() {
-                if let CoreTypeDesc::Ptyp_object(fields, open_flag) = &*single_arg.ptyp_desc {
+                if let CoreTypeDesc::Ptyp_object(obj_inner) = &*single_arg.ptyp_desc {
+                    let (ref fields, ref open_flag) = **obj_inner;
                     let constr_name = print_lident_path(lid, cmt_tbl, arena);
                     Doc::concat(vec![
                         constr_name,
@@ -8641,7 +8650,8 @@ fn print_include_declaration(
         if args.len() == 1 && matches!(&*call_expr.pmod_desc, ModuleExprDesc::Pmod_ident(_)) {
             if let ModuleExprDesc::Pmod_structure(items) = &*args[0].pmod_desc {
                 if items.len() == 1 {
-                    if let StructureItemDesc::Pstr_type(_, decls) = &*items[0].pstr_desc {
+                    if let StructureItemDesc::Pstr_type(type_inner) = &*items[0].pstr_desc {
+                        let (_, ref decls) = **type_inner;
                         if decls.len() == 1
                             && matches!(decls[0].ptype_kind, TypeKind::Ptype_abstract)
                             && decls[0].ptype_manifest.is_some()

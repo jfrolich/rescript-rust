@@ -1294,9 +1294,11 @@ fn walk_expression(expr: &Expression, t: &mut CommentTable, comments: Vec<Commen
             if arena.get_string(ext.0.txt) == "obj" {
                 if let PStr(items) = &ext.1 {
                     if items.len() == 1 {
-                        if let StructureItemDesc::Pstr_eval(inner, _) = &*items[0].pstr_desc
+                        if let StructureItemDesc::Pstr_eval(eval_inner) = &*items[0].pstr_desc
                         {
-                            if let ExpressionDesc::Pexp_record(fields, _) = &*inner.pexp_desc {
+                            let (ref inner, _) = **eval_inner;
+                            if let ExpressionDesc::Pexp_record(rec_inner) = &*inner.pexp_desc {
+                                let (ref fields, _) = **rec_inner;
                                 let nodes: Vec<Node<'_>> = fields
                                     .iter()
                                     .map(|f| Node::ExprRecordRow(&f.lid, &f.expr))
