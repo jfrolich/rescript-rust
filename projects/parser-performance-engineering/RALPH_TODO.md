@@ -115,6 +115,7 @@ Key resources:
 
 ## Notes
 
+- **No `Rc`/`Arc`** — Avoid `Rc<T>` and `Arc<T>`. They prevent sharing memory between threads and are slower than arena allocation. Use arena indices, bump-allocated references, or owned/borrowed data instead.
 - The scanner currently precomputes `Vec<char>` and `Vec<usize>` (byte offsets) upfront — this was the first optimization (41x improvement on JSX benchmark). Task 1.1 replaces this with direct byte-level scanning.
 - Token enum has ~117 variants but only 17 carry payloads. The enum is ~40-48 bytes. Tasks 1.2, 2.1, 2.2 address this.
 - The parser already uses arena indices (`PosIdx`, `LocIdx`, `StrIdx`, `LidentIdx`, `ArityIdx`) for position/location/string sharing. Task 3.1 extends this pattern to all AST nodes (ExprIdx, PatIdx, CoreTypeIdx).

@@ -46,6 +46,8 @@ Some optimizations may seem to conflict with byte-for-byte binary AST parity. Fo
 
 1. **Parity first, performance second** — Never commit a performance improvement that breaks even one parity test. Run `./scripts/test_parser_ast_parity.sh` before and after every change.
 
+1. **Avoid `Rc` and `Arc`** — Do not use `Rc<T>` or `Arc<T>` for data structures. Reference counting prevents sharing memory between threads and is generally slower than arena allocation. Prefer arena-allocated indices (e.g., `ExprIdx(u32)` into a `Vec<T>` pool), `&'arena T` references from bump allocators like `bumpalo`, or owned/borrowed data (`Box<T>`, `&T`, `Cow<'a, T>`). The parser's existing `StrIdx`/`LocIdx`/`PosIdx` pattern is the model to follow.
+
 2. **ALWAYS run benchmarks** — Every optimization MUST have benchmark numbers. This is the whole point of this project. For every task:
    ```bash
    # BEFORE starting: record baseline
