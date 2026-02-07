@@ -552,7 +552,7 @@ fn print_structure_item<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, item
             // prints "module X : mt = me'" instead of "module X = (me' : mt)"
             if let ModuleExprDesc::Pmod_constraint(inner_me, mt) = &*me.pmod_desc {
                 let is_sugar_type = matches!(
-                    mt.pmty_desc,
+                    *mt.pmty_desc,
                     ModuleTypeDesc::Pmty_ident(..) | ModuleTypeDesc::Pmty_signature(..)
                 );
                 if is_sugar_type && me.pmod_attributes.is_empty() {
@@ -752,7 +752,7 @@ fn print_value_binding<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, pat: 
     // OCaml pprintast.ml lines 1096-1103
     if let PatternDesc::Ppat_constraint(inner_pat, typ) = &*pat.ppat_desc {
         if pat.ppat_attributes.is_empty() {
-            if matches!(typ.ptyp_desc, CoreTypeDesc::Ptyp_poly(..)) && typ.ptyp_attributes.is_empty() {
+            if matches!(*typ.ptyp_desc, CoreTypeDesc::Ptyp_poly(..)) && typ.ptyp_attributes.is_empty() {
                 // Ptyp_poly: print without outer parens
                 // OCaml: pp f "%a@;:@;%a@;=@;%a"
                 print_simple_pattern(f, arena, inner_pat);
@@ -2236,7 +2236,7 @@ fn print_pattern_inner<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, pat: 
                     f.space(); // ,@; separator
                 }
                 // Alias patterns inside tuples need parentheses
-                let needs_parens = matches!(p.ppat_desc, PatternDesc::Ppat_alias(..));
+                let needs_parens = matches!(*p.ppat_desc, PatternDesc::Ppat_alias(..));
                 if needs_parens {
                     f.string("(");
                 }
@@ -2395,7 +2395,7 @@ fn print_pattern_inner<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, pat: 
             f.string("(");
             // Only alias and or patterns need extra parens (cons is handled by pattern1 without parens)
             let needs_inner_parens = matches!(
-                p.ppat_desc,
+                *p.ppat_desc,
                 PatternDesc::Ppat_alias(..) | PatternDesc::Ppat_or(..)
             );
             if needs_inner_parens {
@@ -2428,7 +2428,7 @@ fn print_pattern_inner<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, pat: 
             f.string("exception ");
             // Or-patterns and alias patterns inside exception need parentheses
             let needs_parens = matches!(
-                p.ppat_desc,
+                *p.ppat_desc,
                 PatternDesc::Ppat_or(..) | PatternDesc::Ppat_alias(..)
             );
             if needs_parens {
@@ -2465,7 +2465,7 @@ fn print_pattern_inner<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, pat: 
 /// Matches OCaml's core_type1 which falls through to paren true (core_type ctxt) for those.
 fn print_core_type1<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, typ: &CoreType) {
     let needs_parens = matches!(
-        typ.ptyp_desc,
+        *typ.ptyp_desc,
         CoreTypeDesc::Ptyp_arrow { .. } | CoreTypeDesc::Ptyp_alias(..)
     );
     if needs_parens {
@@ -2524,7 +2524,7 @@ fn print_core_type_inner<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, typ
             // Arrow and alias types as args need parentheses (OCaml's core_type1
             // wraps them via the `| _ -> paren true (core_type ctxt) f x` fallthrough)
             let arg_needs_parens = matches!(
-                arg.typ.ptyp_desc,
+                *arg.typ.ptyp_desc,
                 CoreTypeDesc::Ptyp_arrow { .. } | CoreTypeDesc::Ptyp_alias(..)
             );
             if arg_needs_parens {
@@ -2556,7 +2556,7 @@ fn print_core_type_inner<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, typ
                     f.space(); // @; after *
                 }
                 // Alias types inside tuple need parens for precedence
-                let needs_parens = matches!(t.ptyp_desc, CoreTypeDesc::Ptyp_alias(..));
+                let needs_parens = matches!(*t.ptyp_desc, CoreTypeDesc::Ptyp_alias(..));
                 if needs_parens {
                     f.string("(");
                 }
@@ -2641,7 +2641,7 @@ fn print_core_type_inner<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, typ
             // OCaml: pp f "@[<2>%a@;as@;'%s@]" (core_type1 ctxt) ct s
             f.open_box(BoxKind::Box, 2);
             // Arrow types inside alias need parens for precedence
-            let needs_parens = matches!(t.ptyp_desc, CoreTypeDesc::Ptyp_arrow { .. });
+            let needs_parens = matches!(*t.ptyp_desc, CoreTypeDesc::Ptyp_arrow { .. });
             if needs_parens {
                 f.string("(");
             }
