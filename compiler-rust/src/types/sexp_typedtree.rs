@@ -1056,8 +1056,10 @@ fn sexp_payload(payload: &Payload) -> Sexp {
         Payload::PStr(_) => Sexp::list(vec![Sexp::atom("PStr"), Sexp::atom("<structure>")]),
         Payload::PSig(_) => Sexp::list(vec![Sexp::atom("PSig"), Sexp::atom("<signature>")]),
         Payload::PTyp(_) => Sexp::list(vec![Sexp::atom("PTyp"), Sexp::atom("<core_type>")]),
-        Payload::PPat(_, _) => Sexp::list(vec![Sexp::atom("PPat"), Sexp::atom("<pattern>")]),
-    }
+        Payload::PPat(inner) => {
+                    let (_, _) = *inner;
+                    Sexp::list(vec![Sexp::atom("PPat"), Sexp::atom("<pattern>")]),
+                }}
 }
 
 fn sexp_attribute(arena: &ParseArena, with_locs: bool, attr: &Attribute) -> Sexp {

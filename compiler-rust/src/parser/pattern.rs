@@ -72,7 +72,7 @@ fn parse_attribute(p: &mut Parser<'_>) -> Option<Attribute> {
         p.expect(Token::Rparen);
         payload
     } else {
-        Payload::PStr(vec![])
+        Payload::PStr(Box::new(vec![]))
     };
 
     Some((attr_id, payload))
@@ -120,7 +120,7 @@ fn parse_payload(p: &mut Parser<'_>) -> Payload {
         // Try to parse an expression for the payload
         let expr = super::expr::parse_expr(p);
         items.push(StructureItem {
-            pstr_desc: Box::new(StructureItemDesc::Pstr_eval(expr, vec![])),
+            pstr_desc: Box::new(StructureItemDesc::Pstr_eval(Box::new((expr, vec![])))),
             pstr_loc: LocIdx::none(),
         });
 
@@ -129,7 +129,7 @@ fn parse_payload(p: &mut Parser<'_>) -> Payload {
         }
     }
 
-    Payload::PStr(items)
+    Payload::PStr(Box::new(items))
 }
 
 /// Parse a type longident (for #...type pattern).
@@ -223,7 +223,7 @@ fn parse_single_pattern(p: &mut Parser<'_>) -> Pattern {
                 };
                 let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
                 pat = Pattern {
-                    ppat_desc: Box::new(PatternDesc::Ppat_interval(from, to)),
+                    ppat_desc: Box::new(PatternDesc::Ppat_interval(Box::new((from, to)))),
                     ppat_loc: loc,
                     ppat_attributes: vec![],
                 };
@@ -463,7 +463,7 @@ pub fn parse_tuple_pattern(
     let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
 
     Pattern {
-        ppat_desc: Box::new(PatternDesc::Ppat_tuple(patterns)),
+        ppat_desc: Box::new(PatternDesc::Ppat_tuple(Box::new(patterns))),
         ppat_loc: loc,
         ppat_attributes: vec![],
     }
@@ -525,7 +525,7 @@ fn parse_atomic_pattern(p: &mut Parser<'_>) -> Pattern {
             let c = super::expr::parse_constant(p);
             let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
             Pattern {
-                ppat_desc: Box::new(PatternDesc::Ppat_constant(c)),
+                ppat_desc: Box::new(PatternDesc::Ppat_constant(Box::new(c))),
                 ppat_loc: loc,
                 ppat_attributes: vec![],
             }
@@ -715,7 +715,7 @@ fn parse_atomic_pattern(p: &mut Parser<'_>) -> Pattern {
                                 if matches!(*single.ppat_desc, PatternDesc::Ppat_tuple(_)) {
                                     let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
                                     Some(Pattern {
-                                        ppat_desc: Box::new(PatternDesc::Ppat_tuple(vec![single])),
+                                        ppat_desc: Box::new(PatternDesc::Ppat_tuple(Box::new(vec![single]))),
                                         ppat_loc: loc,
                                         ppat_attributes: vec![],
                                     })
@@ -726,7 +726,7 @@ fn parse_atomic_pattern(p: &mut Parser<'_>) -> Pattern {
                                 // OCaml uses p.end_pos (end of next token after `)`) for tuple location
                                 let tuple_loc = p.mk_loc_idx_to_end(lparen_pos_idx);
                                 Some(Pattern {
-                                    ppat_desc: Box::new(PatternDesc::Ppat_tuple(patterns)),
+                                    ppat_desc: Box::new(PatternDesc::Ppat_tuple(Box::new(patterns))),
                                     ppat_loc: tuple_loc,
                                     ppat_attributes: vec![],
                                 })
@@ -735,12 +735,12 @@ fn parse_atomic_pattern(p: &mut Parser<'_>) -> Pattern {
                             p.expect(Token::Rparen);
                             // If the single argument is itself a tuple, wrap it in another
                             // single-element tuple. This distinguishes C((a,b)) from C(a,b).
-                            // C((a,b)) = single tuple argument = Ppat_tuple([Ppat_tuple([a,b])])
+                            // C((a,b)) = single tuple argument = Ppat_tuple(Box::new([Ppat_tuple([a,b])]))
                             // C(a,b) = multiple arguments = Ppat_tuple([a, b])
                             if matches!(*first.ppat_desc, PatternDesc::Ppat_tuple(_)) {
                                 let loc = p.mk_loc_idx_to_end(start_pos_idx);
                                 Some(Pattern {
-                                    ppat_desc: Box::new(PatternDesc::Ppat_tuple(vec![first])),
+                                    ppat_desc: Box::new(PatternDesc::Ppat_tuple(Box::new(vec![first]))),
                                     ppat_loc: loc,
                                     ppat_attributes: vec![],
                                 })
@@ -776,7 +776,7 @@ fn parse_atomic_pattern(p: &mut Parser<'_>) -> Pattern {
                     p.next();
                     let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
                     Pattern {
-                        ppat_desc: Box::new(PatternDesc::Ppat_constant(Constant::Integer(value, suffix))),
+                        ppat_desc: Box::new(PatternDesc::Ppat_constant(Box::new(Constant::Integer(value, suffix)))),
                         ppat_loc: loc,
                         ppat_attributes: vec![],
                     }
@@ -791,7 +791,7 @@ fn parse_atomic_pattern(p: &mut Parser<'_>) -> Pattern {
                     p.next();
                     let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
                     Pattern {
-                        ppat_desc: Box::new(PatternDesc::Ppat_constant(Constant::Float(value, suffix))),
+                        ppat_desc: Box::new(PatternDesc::Ppat_constant(Box::new(Constant::Float(value, suffix)))),
                         ppat_loc: loc,
                         ppat_attributes: vec![],
                     }
@@ -926,7 +926,7 @@ fn parse_constructor_pattern(p: &mut Parser<'_>) -> Pattern {
                         // OCaml: wrapper tuple location extends to end of next token
                         let wrap_loc = p.mk_loc_idx_to_end(lparen_pos_idx);
                         Some(Pattern {
-                            ppat_desc: Box::new(PatternDesc::Ppat_tuple(vec![single])),
+                            ppat_desc: Box::new(PatternDesc::Ppat_tuple(Box::new(vec![single]))),
                             ppat_loc: wrap_loc,
                             ppat_attributes: vec![],
                         })
@@ -937,7 +937,7 @@ fn parse_constructor_pattern(p: &mut Parser<'_>) -> Pattern {
                     // OCaml uses p.end_pos (end of next token after `)`) for tuple location
                     let tuple_loc = p.mk_loc_idx_to_end(lparen_pos_idx);
                     Some(Pattern {
-                        ppat_desc: Box::new(PatternDesc::Ppat_tuple(patterns)),
+                        ppat_desc: Box::new(PatternDesc::Ppat_tuple(Box::new(patterns))),
                         ppat_loc: tuple_loc,
                         ppat_attributes: vec![],
                     })
@@ -953,7 +953,7 @@ fn parse_constructor_pattern(p: &mut Parser<'_>) -> Pattern {
                     // This means in `Some((a,b)) =>`, the wrapper tuple includes the ` =>`
                     let wrap_loc = p.mk_loc_idx_to_end(lparen_pos_idx);
                     Some(Pattern {
-                        ppat_desc: Box::new(PatternDesc::Ppat_tuple(vec![first])),
+                        ppat_desc: Box::new(PatternDesc::Ppat_tuple(Box::new(vec![first]))),
                         ppat_loc: wrap_loc,
                         ppat_attributes: vec![],
                     })
@@ -1034,7 +1034,7 @@ fn parse_array_pattern(p: &mut Parser<'_>) -> Pattern {
     let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
 
     Pattern {
-        ppat_desc: Box::new(PatternDesc::Ppat_array(patterns)),
+        ppat_desc: Box::new(PatternDesc::Ppat_array(Box::new(patterns))),
         ppat_loc: loc,
         ppat_attributes: vec![],
     }
@@ -1345,7 +1345,7 @@ fn parse_record_pattern(p: &mut Parser<'_>) -> Pattern {
     }
 
     Pattern {
-        ppat_desc: Box::new(PatternDesc::Ppat_record(fields, closed)),
+        ppat_desc: Box::new(PatternDesc::Ppat_record(Box::new((fields, closed)))),
         ppat_loc: loc,
         ppat_attributes: vec![],
     }
@@ -1398,9 +1398,9 @@ fn parse_dict_pattern(p: &mut Parser<'_>, start_pos_idx: PosIdx) -> Pattern {
     // Dict patterns are parsed as open record patterns with the dictPattern attribute
     let dict_idx = p.arena_mut().intern("res.dictPattern");
     Pattern {
-        ppat_desc: Box::new(PatternDesc::Ppat_record(fields, ClosedFlag::Open)),
+        ppat_desc: Box::new(PatternDesc::Ppat_record(Box::new((fields, ClosedFlag::Open)))),
         ppat_loc: loc,
-        ppat_attributes: vec![(mknoloc(dict_idx), Payload::PStr(vec![]))],
+        ppat_attributes: vec![(mknoloc(dict_idx), Payload::PStr(Box::new(vec![])))],
     }
 }
 
@@ -1449,13 +1449,13 @@ fn parse_extension_pattern(p: &mut Parser<'_>, start_pos_idx: PosIdx) -> Pattern
         p.expect(Token::Rparen);
         payload
     } else {
-        Payload::PStr(vec![])
+        Payload::PStr(Box::new(vec![]))
     };
 
     let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
 
     Pattern {
-        ppat_desc: Box::new(PatternDesc::Ppat_extension((id, payload))),
+        ppat_desc: Box::new(PatternDesc::Ppat_extension(Box::new((id, payload)))),
         ppat_loc: loc,
         ppat_attributes: vec![],
     }
@@ -1502,7 +1502,7 @@ fn parse_template_literal_pattern(p: &mut Parser<'_>, start_pos_idx: PosIdx) -> 
     let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
 
     Pattern {
-        ppat_desc: Box::new(PatternDesc::Ppat_constant(Constant::String(Cow::Owned(text), delimiter))),
+        ppat_desc: Box::new(PatternDesc::Ppat_constant(Box::new(Constant::String(Cow::Owned(text), delimiter)))),
         ppat_loc: loc,
         ppat_attributes: vec![template_literal_attr(p.arena_mut())],
     }
@@ -1602,7 +1602,7 @@ fn parse_poly_variant_pattern(p: &mut Parser<'_>) -> Pattern {
                 } else {
                     let tuple_loc = p.mk_loc_idx_to_prev_end(tuple_start_idx);
                     Some(Box::new(Pattern {
-                        ppat_desc: Box::new(PatternDesc::Ppat_tuple(patterns)),
+                        ppat_desc: Box::new(PatternDesc::Ppat_tuple(Box::new(patterns))),
                         ppat_loc: tuple_loc,
                         ppat_attributes: vec![],
                     }))
@@ -1619,7 +1619,7 @@ fn parse_poly_variant_pattern(p: &mut Parser<'_>) -> Pattern {
     let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
 
     Pattern {
-        ppat_desc: Box::new(PatternDesc::Ppat_variant(tag, arg)),
+        ppat_desc: Box::new(PatternDesc::Ppat_variant(Box::new((tag, arg)))),
         ppat_loc: loc,
         ppat_attributes: vec![],
     }

@@ -161,12 +161,12 @@ fn transform_placeholder_application(
         None => {
             // No placeholders, return normal Pexp_apply
             return Expression {
-                pexp_desc: Box::new(ExpressionDesc::Pexp_apply {
+                pexp_desc: Box::new(ExpressionDesc::Pexp_apply(Box::new(PexpApply {
                     funct,
                     args,
                     partial,
                     transformed_jsx: false,
-                }),
+                }))),
                 pexp_loc: loc,
                 pexp_attributes: vec![],
             };
@@ -186,12 +186,12 @@ fn transform_placeholder_application(
 
     // Create the inner Pexp_apply
     let inner_apply = Expression {
-        pexp_desc: Box::new(ExpressionDesc::Pexp_apply {
+        pexp_desc: Box::new(ExpressionDesc::Pexp_apply(Box::new(PexpApply {
             funct,
             args: transformed_args,
             partial,
             transformed_jsx: false,
-        }),
+        }))),
         pexp_loc: loc,
         pexp_attributes: vec![],
     };
@@ -207,14 +207,14 @@ fn transform_placeholder_application(
     // LITERAL path: OCaml line 614 `Exp.fun_ ~arity:(Some 1)` (underscore sugar)
     // Use static arity to match OCaml's CSE sharing behavior
     Expression {
-        pexp_desc: Box::new(ExpressionDesc::Pexp_fun {
+        pexp_desc: Box::new(ExpressionDesc::Pexp_fun(Box::new(PexpFun {
             arg_label: ArgLabel::Nolabel,
             default: None,
             lhs: pattern,
             rhs: Box::new(inner_apply),
             arity: arena.static_arity_1(),
             is_async: false,
-        }),
+        }))),
         pexp_loc: underscore_loc,
         pexp_attributes: vec![],
     }
@@ -417,7 +417,7 @@ fn parse_constructor_arg(p: &mut Parser<'_>) -> Option<Expression> {
                     } else {
                         let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
                         Some(Expression {
-                            pexp_desc: Box::new(ExpressionDesc::Pexp_tuple(exprs)),
+                            pexp_desc: Box::new(ExpressionDesc::Pexp_tuple(Box::new(exprs))),
                             pexp_loc: loc,
                             pexp_attributes: vec![],
                         })
@@ -425,15 +425,15 @@ fn parse_constructor_arg(p: &mut Parser<'_>) -> Option<Expression> {
                 } else {
                     p.expect(Token::Rparen);
                     // In type-checker mode, a single tuple arg is passed through directly:
-                    // C((1,2)) = Pexp_construct(C, Some(Pexp_tuple([1,2])))
+                    // C((1,2)) = Pexp_construct(C, Some(Pexp_tuple(Box::new([1,2]))))
                     // In printer mode, wrap it in another tuple to distinguish from multi-arg:
-                    // C((1,2)) = Pexp_construct(C, Some(Pexp_tuple([Pexp_tuple([1,2])])))
+                    // C((1,2)) = Pexp_construct(C, Some(Pexp_tuple(Box::new([Pexp_tuple([1,2])]))))
                     if matches!(*first_expr.pexp_desc, ExpressionDesc::Pexp_tuple(_))
                         && p.mode != ParserMode::ParseForTypeChecker
                     {
                         let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
                         Some(Expression {
-                            pexp_desc: Box::new(ExpressionDesc::Pexp_tuple(vec![first_expr])),
+                            pexp_desc: Box::new(ExpressionDesc::Pexp_tuple(Box::new(vec![first_expr]))),
                             pexp_loc: loc,
                             pexp_attributes: vec![],
                         })
@@ -800,14 +800,14 @@ fn parse_es6_arrow_expression_internal(
             ppat_attributes: vec![],
         };
         (Expression {
-            pexp_desc: Box::new(ExpressionDesc::Pexp_fun {
+            pexp_desc: Box::new(ExpressionDesc::Pexp_fun(Box::new(PexpFun {
                 arg_label: ArgLabel::Nolabel,
                 default: None,
                 lhs: unit_pat,
                 rhs: Box::new(body),
                 arity: p.push_arity_full(1),  // Implicit unit param has arity 1
                 is_async,
-            }),
+            }))),
             pexp_loc: pexp_fun_loc.clone(),
             pexp_attributes: vec![],
         }, pexp_fun_loc)
@@ -894,14 +894,14 @@ fn parse_es6_arrow_expression_internal(
                 // Only the outermost function gets is_async: true (OCaml behavior)
                 let fn_is_async = is_outermost && is_async;
                 Expression {
-                    pexp_desc: Box::new(ExpressionDesc::Pexp_fun {
+                    pexp_desc: Box::new(ExpressionDesc::Pexp_fun(Box::new(PexpFun {
                         arg_label: param.label,
                         default: param.expr.map(Box::new),
                         lhs: pat,
                         rhs: Box::new(acc),
                         arity,
                         is_async: fn_is_async,
-                    }),
+                    }))),
                     pexp_loc: loc,
                     pexp_attributes: vec![],
                 }
@@ -929,7 +929,7 @@ fn parse_es6_arrow_expression_internal(
             while let Some(name) = locs_iter.next() {
                 let is_outermost = locs_iter.peek().is_none();
                 expr = Expression {
-                    pexp_desc: Box::new(ExpressionDesc::Pexp_newtype(name, Box::new(expr))),
+                    pexp_desc: Box::new(ExpressionDesc::Pexp_newtype(Box::new((name, Box::new(expr))))),
                     pexp_loc: loc.clone(),
                     // Only outermost gets the combined attrs
                     pexp_attributes: if is_outermost { combined_attrs.clone() } else { vec![] },
@@ -1014,14 +1014,14 @@ fn parse_es6_arrow_expression_with_params(
             };
             let fn_is_async = is_outermost && is_async;
             Expression {
-                pexp_desc: Box::new(ExpressionDesc::Pexp_fun {
+                pexp_desc: Box::new(ExpressionDesc::Pexp_fun(Box::new(PexpFun {
                     arg_label: param.label,
                     default: param.expr.map(Box::new),
                     lhs: pat,
                     rhs: Box::new(acc),
                     arity,
                     is_async: fn_is_async,
-                }),
+                }))),
                 pexp_loc: fun_loc,
                 pexp_attributes: vec![],
             }
@@ -1482,7 +1482,7 @@ fn parse_attribute(p: &mut Parser<'_>) -> Option<Attribute> {
         p.expect(Token::Rparen);
         payload
     } else {
-        Payload::PStr(vec![])
+        Payload::PStr(Box::new(vec![]))
     };
 
     Some((attr_id, payload))
@@ -1558,14 +1558,14 @@ fn parse_payload(p: &mut Parser<'_>) -> Payload {
         let pexp_loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
         let pstr_loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
         let str_expr = Expression {
-            pexp_desc: Box::new(ExpressionDesc::Pexp_constant(Constant::String(s, tag))),
+            pexp_desc: Box::new(ExpressionDesc::Pexp_constant(Box::new(Constant::String(s, tag)))),
             pexp_loc,
             pexp_attributes: vec![],
         };
-        return Payload::PStr(vec![StructureItem {
-            pstr_desc: Box::new(StructureItemDesc::Pstr_eval(str_expr, vec![])),
+        return Payload::PStr(Box::new(vec![StructureItem {
+            pstr_desc: Box::new(StructureItemDesc::Pstr_eval(Box::new((str_expr, vec![])))),
             pstr_loc,
-        }]);
+        }]));
     }
 
     // For other payloads, skip them for now while preserving nesting
@@ -1580,7 +1580,7 @@ fn parse_payload(p: &mut Parser<'_>) -> Payload {
             p.next();
         }
     }
-    Payload::PStr(vec![])
+    Payload::PStr(Box::new(vec![]))
 }
 
 // ============================================================================
@@ -1755,22 +1755,22 @@ pub fn parse_atomic_expr(p: &mut Parser<'_>) -> Expression {
             let regex_str = format!("/{}/{}", pattern, flags);
             let tag = get_string_tag(p);
             let str_expr = Expression {
-                pexp_desc: Box::new(ExpressionDesc::Pexp_constant(Constant::String(Cow::Owned(regex_str), tag))),
+                pexp_desc: Box::new(ExpressionDesc::Pexp_constant(Box::new(Constant::String(Cow::Owned(regex_str), tag)))),
                 pexp_loc: loc.clone(),
                 pexp_attributes: vec![],
             };
             let str_item = StructureItem {
-                pstr_desc: Box::new(StructureItemDesc::Pstr_eval(str_expr, vec![])),
+                pstr_desc: Box::new(StructureItemDesc::Pstr_eval(Box::new((str_expr, vec![])))),
                 pstr_loc: loc.clone(),
             };
 
             // OCaml uses ghost location for the Pexp_extension when parsing regex literals
             let re_str_idx = p.arena_mut().intern("re");
             Expression {
-                pexp_desc: Box::new(ExpressionDesc::Pexp_extension((
+                pexp_desc: Box::new(ExpressionDesc::Pexp_extension(Box::new((
                     with_loc(re_str_idx, loc),
                     Payload::PStr(vec![str_item]),
-                ))),
+                )))),
                 pexp_loc: LocIdx::none(),
                 pexp_attributes: vec![],
             }
@@ -1786,30 +1786,30 @@ pub fn parse_atomic_expr(p: &mut Parser<'_>) -> Expression {
                 let regex_str = format!("/{}/{}", pattern, flags);
                 let tag = get_string_tag(p);
                 let str_expr = Expression {
-                    pexp_desc: Box::new(ExpressionDesc::Pexp_constant(Constant::String(Cow::Owned(regex_str), tag))),
+                    pexp_desc: Box::new(ExpressionDesc::Pexp_constant(Box::new(Constant::String(Cow::Owned(regex_str), tag)))),
                     pexp_loc: loc.clone(),
                     pexp_attributes: vec![],
                 };
                 let str_item = StructureItem {
-                    pstr_desc: Box::new(StructureItemDesc::Pstr_eval(str_expr, vec![])),
+                    pstr_desc: Box::new(StructureItemDesc::Pstr_eval(Box::new((str_expr, vec![])))),
                     pstr_loc: loc.clone(),
                 };
                 let re_str_idx = p.arena_mut().intern("re");
                 Expression {
-                    pexp_desc: Box::new(ExpressionDesc::Pexp_extension((
+                    pexp_desc: Box::new(ExpressionDesc::Pexp_extension(Box::new((
                         with_loc(re_str_idx, loc),
                         Payload::PStr(vec![str_item]),
-                    ))),
+                    )))),
                     pexp_loc: LocIdx::none(),
                     pexp_attributes: vec![],
                 }
             } else {
                 let re_str_idx = p.arena_mut().intern("re");
                 Expression {
-                    pexp_desc: Box::new(ExpressionDesc::Pexp_extension((
+                    pexp_desc: Box::new(ExpressionDesc::Pexp_extension(Box::new((
                         with_loc(re_str_idx, LocIdx::none()),
                         Payload::PStr(vec![]),
-                    ))),
+                    )))),
                     pexp_loc: LocIdx::none(),
                     pexp_attributes: vec![],
                 }
@@ -1825,30 +1825,30 @@ pub fn parse_atomic_expr(p: &mut Parser<'_>) -> Expression {
                 let regex_str = format!("/{}/{}", pattern, flags);
                 let tag = get_string_tag(p);
                 let str_expr = Expression {
-                    pexp_desc: Box::new(ExpressionDesc::Pexp_constant(Constant::String(Cow::Owned(regex_str), tag))),
+                    pexp_desc: Box::new(ExpressionDesc::Pexp_constant(Box::new(Constant::String(Cow::Owned(regex_str), tag)))),
                     pexp_loc: loc.clone(),
                     pexp_attributes: vec![],
                 };
                 let str_item = StructureItem {
-                    pstr_desc: Box::new(StructureItemDesc::Pstr_eval(str_expr, vec![])),
+                    pstr_desc: Box::new(StructureItemDesc::Pstr_eval(Box::new((str_expr, vec![])))),
                     pstr_loc: loc.clone(),
                 };
                 let re_str_idx = p.arena_mut().intern("re");
                 Expression {
-                    pexp_desc: Box::new(ExpressionDesc::Pexp_extension((
+                    pexp_desc: Box::new(ExpressionDesc::Pexp_extension(Box::new((
                         with_loc(re_str_idx, loc),
                         Payload::PStr(vec![str_item]),
-                    ))),
+                    )))),
                     pexp_loc: LocIdx::none(),
                     pexp_attributes: vec![],
                 }
             } else {
                 let re_str_idx = p.arena_mut().intern("re");
                 Expression {
-                    pexp_desc: Box::new(ExpressionDesc::Pexp_extension((
+                    pexp_desc: Box::new(ExpressionDesc::Pexp_extension(Box::new((
                         with_loc(re_str_idx, LocIdx::none()),
                         Payload::PStr(vec![]),
-                    ))),
+                    )))),
                     pexp_loc: LocIdx::none(),
                     pexp_attributes: vec![],
                 }
@@ -1952,12 +1952,12 @@ pub fn parse_atomic_expr(p: &mut Parser<'_>) -> Expression {
                 p.expect(Token::Rparen);
                 payload
             } else {
-                Payload::PStr(vec![])
+                Payload::PStr(Box::new(vec![]))
             };
 
             let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
             Expression {
-                pexp_desc: Box::new(ExpressionDesc::Pexp_extension((name, payload))),
+                pexp_desc: Box::new(ExpressionDesc::Pexp_extension(Box::new((name, payload)))),
                 pexp_loc: loc,
                 pexp_attributes: vec![],
             }
@@ -2045,7 +2045,7 @@ pub fn parse_atomic_expr(p: &mut Parser<'_>) -> Expression {
                         let paren_loc = p.mk_loc_idx(lparen_pos_idx, rparen_pos_idx);
 
                         // OCaml wraps polymorphic variant args differently based on mode:
-                        // - For multiple args #a(1, 2), both modes create Pexp_tuple([1, 2])
+                        // - For multiple args #a(1, 2), both modes create Pexp_tuple(Box::new([1, 2]))
                         // - For single tuple arg #a((1, 2)), printer mode wraps in extra tuple
                         if exprs.len() == 1 {
                             // Single expression (possibly with trailing comma)
@@ -2056,7 +2056,7 @@ pub fn parse_atomic_expr(p: &mut Parser<'_>) -> Expression {
                                 if matches!(*single.pexp_desc, ExpressionDesc::Pexp_tuple(_)) {
                                     // Wrap the tuple in another tuple for printer mode
                                     Some(Box::new(Expression {
-                                        pexp_desc: Box::new(ExpressionDesc::Pexp_tuple(vec![single])),
+                                        pexp_desc: Box::new(ExpressionDesc::Pexp_tuple(Box::new(vec![single]))),
                                         pexp_loc: paren_loc,
                                         pexp_attributes: vec![],
                                     }))
@@ -2070,7 +2070,7 @@ pub fn parse_atomic_expr(p: &mut Parser<'_>) -> Expression {
                             // Multiple expressions - just wrap in a single tuple (no extra wrapping)
                             let tuple_loc = p.mk_loc_idx(tuple_start_idx, rparen_pos_idx);
                             Some(Box::new(Expression {
-                                pexp_desc: Box::new(ExpressionDesc::Pexp_tuple(exprs)),
+                                pexp_desc: Box::new(ExpressionDesc::Pexp_tuple(Box::new(exprs))),
                                 pexp_loc: tuple_loc,
                                 pexp_attributes: vec![],
                             }))
@@ -2084,7 +2084,7 @@ pub fn parse_atomic_expr(p: &mut Parser<'_>) -> Expression {
                             if matches!(*first_expr.pexp_desc, ExpressionDesc::Pexp_tuple(_)) {
                                 let paren_loc = p.mk_loc_idx(lparen_pos_idx, rparen_pos_idx);
                                 Some(Box::new(Expression {
-                                    pexp_desc: Box::new(ExpressionDesc::Pexp_tuple(vec![first_expr])),
+                                    pexp_desc: Box::new(ExpressionDesc::Pexp_tuple(Box::new(vec![first_expr]))),
                                     pexp_loc: paren_loc,
                                     pexp_attributes: vec![],
                                 }))
@@ -2102,7 +2102,7 @@ pub fn parse_atomic_expr(p: &mut Parser<'_>) -> Expression {
 
             let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
             Expression {
-                pexp_desc: Box::new(ExpressionDesc::Pexp_variant(tag, arg)),
+                pexp_desc: Box::new(ExpressionDesc::Pexp_variant(Box::new((tag, arg)))),
                 pexp_loc: loc,
                 pexp_attributes: vec![],
             }
@@ -2283,7 +2283,7 @@ pub fn over_parse_constrained_or_coerced_or_arrow_expression(
                     // Interpretation 1: (param) => (body : type)
                     let unknown_arity = p.arena_mut().push_arity(None);
                     let arrow1 = Expression {
-                        pexp_desc: Box::new(ExpressionDesc::Pexp_fun {
+                        pexp_desc: Box::new(ExpressionDesc::Pexp_fun(Box::new(PexpFun {
                             arity: unknown_arity,
                             arg_label: ArgLabel::Nolabel,
                             default: None,
@@ -2294,7 +2294,7 @@ pub fn over_parse_constrained_or_coerced_or_arrow_expression(
                                 pexp_attributes: vec![],
                             }),
                             is_async: false,
-                        }),
+                        }))),
                         pexp_loc: arrow_loc,
                         pexp_attributes: vec![],
                     };
@@ -2305,7 +2305,7 @@ pub fn over_parse_constrained_or_coerced_or_arrow_expression(
                         // Interpretation 2: (param: type) => body
                         let unknown_arity2 = p.arena_mut().push_arity(None);
                         let arrow2 = Expression {
-                            pexp_desc: Box::new(ExpressionDesc::Pexp_fun {
+                            pexp_desc: Box::new(ExpressionDesc::Pexp_fun(Box::new(PexpFun {
                                 arity: unknown_arity2,
                                 arg_label: ArgLabel::Nolabel,
                                 default: None,
@@ -2316,7 +2316,7 @@ pub fn over_parse_constrained_or_coerced_or_arrow_expression(
                                 },
                                 rhs: Box::new(body.clone()),
                                 is_async: false,
-                            }),
+                            }))),
                             pexp_loc: arrow_loc,
                             pexp_attributes: vec![],
                         };
@@ -2620,7 +2620,7 @@ pub fn parse_primary_expr(p: &mut Parser<'_>, operand: Expression, no_call: bool
                     if let ExpressionDesc::Pexp_constant(Constant::String(s, _)) =
                         &*index.pexp_desc
                     {
-                        // String index: obj["prop"] -> Pexp_send(obj, "prop")
+                        // String index: obj["prop"] -> Pexp_send(Box::new((obj, "prop")))
                         expr = Expression {
                             pexp_desc: Box::new(ExpressionDesc::Pexp_send(
                                 Box::new(expr),
@@ -2934,7 +2934,7 @@ fn parse_tuple_expr(p: &mut Parser<'_>, start_pos_idx: PosIdx, first: Expression
     }
 
     Expression {
-        pexp_desc: Box::new(ExpressionDesc::Pexp_tuple(elements)),
+        pexp_desc: Box::new(ExpressionDesc::Pexp_tuple(Box::new(elements))),
         pexp_loc: loc,
         pexp_attributes: vec![],
     }
@@ -2945,7 +2945,7 @@ fn parse_tuple_expr(p: &mut Parser<'_>, start_pos_idx: PosIdx, first: Expression
 // ============================================================================
 
 /// Parse an array expression [e1, e2, ...].
-/// - `[a, b, c]` becomes `Pexp_array([a, b, c])`
+/// - `[a, b, c]` becomes `Pexp_array(Box::new([a, b, c]))`
 /// - `[...xs, a, b]` becomes `Belt.Array.concatMany([xs, [a, b]])`
 fn parse_array_expr(p: &mut Parser<'_>) -> Expression {
     let start_pos_idx = p.start_pos_idx();
@@ -2980,7 +2980,7 @@ fn parse_array_expr(p: &mut Parser<'_>) -> Expression {
         // Simple case: no spread, just return array
         let elements: Vec<Expression> = items.into_iter().map(|(_, e)| e).collect();
         return Expression {
-            pexp_desc: Box::new(ExpressionDesc::Pexp_array(elements)),
+            pexp_desc: Box::new(ExpressionDesc::Pexp_array(Box::new(elements))),
             pexp_loc: loc,
             pexp_attributes: vec![],
         };
@@ -2997,7 +2997,7 @@ fn parse_array_expr(p: &mut Parser<'_>) -> Expression {
             // Flush any accumulated non-spread items as an array
             if !current_non_spread.is_empty() {
                 array_items.push(Expression {
-                    pexp_desc: Box::new(ExpressionDesc::Pexp_array(std::mem::take(&mut current_non_spread))),
+                    pexp_desc: Box::new(ExpressionDesc::Pexp_array(Box::new(std::mem::take(&mut current_non_spread)))),
                     pexp_loc: loc.clone(),
                     pexp_attributes: vec![],
                 });
@@ -3012,7 +3012,7 @@ fn parse_array_expr(p: &mut Parser<'_>) -> Expression {
     // Flush remaining non-spread items
     if !current_non_spread.is_empty() {
         array_items.push(Expression {
-            pexp_desc: Box::new(ExpressionDesc::Pexp_array(current_non_spread)),
+            pexp_desc: Box::new(ExpressionDesc::Pexp_array(Box::new(current_non_spread))),
             pexp_loc: loc.clone(),
             pexp_attributes: vec![],
         });
@@ -3020,7 +3020,7 @@ fn parse_array_expr(p: &mut Parser<'_>) -> Expression {
 
     // Create Belt.Array.concatMany([...])
     let outer_array = Expression {
-        pexp_desc: Box::new(ExpressionDesc::Pexp_array(array_items)),
+        pexp_desc: Box::new(ExpressionDesc::Pexp_array(Box::new(array_items))),
         pexp_loc: loc.clone(),
         pexp_attributes: vec![],
     };
@@ -3031,16 +3031,16 @@ fn parse_array_expr(p: &mut Parser<'_>) -> Expression {
     let concat_many = Expression {
         pexp_desc: Box::new(ExpressionDesc::Pexp_ident(with_loc(lid_idx, loc.clone()))),
         pexp_loc: loc.clone(),
-        pexp_attributes: vec![(mknoloc(spread_idx), Payload::PStr(vec![]))],
+        pexp_attributes: vec![(mknoloc(spread_idx), Payload::PStr(Box::new(vec![])))],
     };
 
     Expression {
-        pexp_desc: Box::new(ExpressionDesc::Pexp_apply {
+        pexp_desc: Box::new(ExpressionDesc::Pexp_apply(Box::new(PexpApply {
             funct: Box::new(concat_many),
             args: vec![(ArgLabel::Nolabel, outer_array)],
             partial: false,
             transformed_jsx: false,
-        }),
+        }))),
         pexp_loc: loc,
         pexp_attributes: vec![],
     }
@@ -3107,7 +3107,7 @@ fn parse_list_expr(p: &mut Parser<'_>, start_pos_idx: PosIdx) -> Expression {
                 .collect();
 
             let array_expr = Expression {
-                pexp_desc: Box::new(ExpressionDesc::Pexp_array(sub_exprs)),
+                pexp_desc: Box::new(ExpressionDesc::Pexp_array(Box::new(sub_exprs))),
                 pexp_loc: loc.clone(),
                 pexp_attributes: vec![],
             };
@@ -3129,12 +3129,12 @@ fn parse_list_expr(p: &mut Parser<'_>, start_pos_idx: PosIdx) -> Expression {
             };
 
             Expression {
-                pexp_desc: Box::new(ExpressionDesc::Pexp_apply {
+                pexp_desc: Box::new(ExpressionDesc::Pexp_apply(Box::new(PexpApply {
                     funct: Box::new(concat_many_ident),
                     args: vec![(ArgLabel::Nolabel, array_expr)],
                     partial: false,
                     transformed_jsx: false,
-                }),
+                }))),
                 pexp_loc: loc,
                 pexp_attributes: vec![],
             }
@@ -3230,7 +3230,7 @@ fn make_list_expression_simple(
         let item_start_idx = p.loc_start_idx(item.pexp_loc);
         let cons_loc = p.mk_loc_idx_full(item_start_idx, list_end_idx);
         let tuple = Expression {
-            pexp_desc: Box::new(ExpressionDesc::Pexp_tuple(vec![item, acc])),
+            pexp_desc: Box::new(ExpressionDesc::Pexp_tuple(Box::new(vec![item, acc]))),
             pexp_loc: cons_loc,
             pexp_attributes: vec![],
         };
@@ -3289,7 +3289,7 @@ fn make_list_expression_with_loc(
         let item_start_idx = p.loc_start_idx(item.pexp_loc);
         let cons_loc = p.mk_loc_idx_full(item_start_idx, list_end_idx);
         let tuple = Expression {
-            pexp_desc: Box::new(ExpressionDesc::Pexp_tuple(vec![item, acc])),
+            pexp_desc: Box::new(ExpressionDesc::Pexp_tuple(Box::new(vec![item, acc]))),
             pexp_loc: cons_loc,
             pexp_attributes: vec![],
         };
@@ -3352,14 +3352,14 @@ fn parse_dict_expr(p: &mut Parser<'_>, start_pos_idx: PosIdx) -> Expression {
                 // Create tuple (key_string, value)
                 // Key uses None delimiter to be printed as "key" (object property style)
                 let key_expr = Expression {
-                    pexp_desc: Box::new(ExpressionDesc::Pexp_constant(Constant::String(key, None))),
+                    pexp_desc: Box::new(ExpressionDesc::Pexp_constant(Box::new(Constant::String(key, None)))),
                     pexp_loc: key_loc,
                     pexp_attributes: vec![],
                 };
                 // Use the value expression's end position index
                 let tuple_loc = p.mk_loc_idx_full(key_start_idx, value_end_idx);
                 let tuple = Expression {
-                    pexp_desc: Box::new(ExpressionDesc::Pexp_tuple(vec![key_expr, value])),
+                    pexp_desc: Box::new(ExpressionDesc::Pexp_tuple(Box::new(vec![key_expr, value]))),
                     pexp_loc: tuple_loc,
                     pexp_attributes: vec![],
                 };
@@ -3382,7 +3382,7 @@ fn parse_dict_expr(p: &mut Parser<'_>, start_pos_idx: PosIdx) -> Expression {
 
     // Create array of key-value pairs
     let array_expr = Expression {
-        pexp_desc: Box::new(ExpressionDesc::Pexp_array(key_value_pairs)),
+        pexp_desc: Box::new(ExpressionDesc::Pexp_array(Box::new(key_value_pairs))),
         pexp_loc: loc.clone(),
         pexp_attributes: vec![],
     };
@@ -3406,12 +3406,12 @@ fn parse_dict_expr(p: &mut Parser<'_>, start_pos_idx: PosIdx) -> Expression {
 
     // Create application: Primitive_dict.make(array)
     Expression {
-        pexp_desc: Box::new(ExpressionDesc::Pexp_apply {
+        pexp_desc: Box::new(ExpressionDesc::Pexp_apply(Box::new(PexpApply {
             funct: Box::new(make_ident),
             args: vec![(ArgLabel::Nolabel, array_expr)],
             partial: false,
             transformed_jsx: false,
-        }),
+        }))),
         pexp_loc: loc,
         pexp_attributes: vec![],
     }
@@ -3427,7 +3427,7 @@ fn parse_braced_or_record_expr(p: &mut Parser<'_>) -> Expression {
         p.next();
         let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
         return Expression {
-            pexp_desc: Box::new(ExpressionDesc::Pexp_record(vec![], None)),
+            pexp_desc: Box::new(ExpressionDesc::Pexp_record(Box::new((vec![], None)))),
             pexp_loc: loc,
             pexp_attributes: vec![],
         };
@@ -3457,7 +3457,7 @@ fn parse_braced_or_record_expr(p: &mut Parser<'_>) -> Expression {
         p.expect(Token::Rbrace);
         let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
         return Expression {
-            pexp_desc: Box::new(ExpressionDesc::Pexp_record(fields, Some(Box::new(spread)))),
+            pexp_desc: Box::new(ExpressionDesc::Pexp_record(Box::new((fields, Some(Box::new(spread)))))),
             pexp_loc: loc,
             pexp_attributes: vec![],
         };
@@ -3487,7 +3487,7 @@ fn parse_braced_or_record_expr(p: &mut Parser<'_>) -> Expression {
             p.expect(Token::Rbrace);
             let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
             return Expression {
-                pexp_desc: Box::new(ExpressionDesc::Pexp_record(fields, None)),
+                pexp_desc: Box::new(ExpressionDesc::Pexp_record(Box::new((fields, None)))),
                 pexp_loc: loc,
                 pexp_attributes: vec![],
             };
@@ -3571,7 +3571,7 @@ fn parse_braced_or_record_expr(p: &mut Parser<'_>) -> Expression {
         p.expect(Token::Rbrace);
         let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
         return Expression {
-            pexp_desc: Box::new(ExpressionDesc::Pexp_record(fields, None)),
+            pexp_desc: Box::new(ExpressionDesc::Pexp_record(Box::new((fields, None)))),
             pexp_loc: loc,
             pexp_attributes: vec![],
         };
@@ -3866,7 +3866,7 @@ fn parse_block_body(p: &mut Parser<'_>) -> Option<Expression> {
             // OCaml uses p.prev_end_pos for Pexp_open location
             let loc = p.mk_loc_idx_to_prev_end(expr_start_idx);
             Expression {
-                pexp_desc: Box::new(ExpressionDesc::Pexp_open(override_flag, lid, Box::new(body))),
+                pexp_desc: Box::new(ExpressionDesc::Pexp_open(Box::new((override_flag, lid, Box::new(body))))),
                 pexp_loc: loc,
                 pexp_attributes: vec![],
             }
@@ -3974,7 +3974,7 @@ fn parse_block_body(p: &mut Parser<'_>) -> Option<Expression> {
             // OCaml uses p.prev_end_pos for Pexp_letexception location
             let loc = p.mk_loc_idx_to_prev_end(expr_start_idx);
             Expression {
-                pexp_desc: Box::new(ExpressionDesc::Pexp_letexception(ext, Box::new(body))),
+                pexp_desc: Box::new(ExpressionDesc::Pexp_letexception(Box::new((ext, Box::new(body))))),
                 pexp_loc: loc,
                 pexp_attributes: vec![],
             }
@@ -4141,7 +4141,8 @@ fn parse_let_in_block_with_continuation_and_attrs(
 
         // Extract type variables and inner type if this is a Ptyp_poly from `type a.` syntax
         let (final_typ, newtype_info) = match *typ.ptyp_desc {
-            CoreTypeDesc::Ptyp_poly(ref vars, ref inner) if is_locally_abstract => {
+            CoreTypeDesc::Ptyp_poly(inner) if is_locally_abstract => {
+                    let (ref vars, ref inner) = *inner;
                 // Build the set of variable names for substitution
                 let var_set: std::collections::HashSet<String> =
                     vars.iter().map(|v| p.arena().get_string(v.txt).to_string()).collect();
@@ -4155,7 +4156,7 @@ fn parse_let_in_block_with_continuation_and_attrs(
 
                 // Rebuild the Ptyp_poly with the substituted body
                 let substituted_typ = CoreType {
-                    ptyp_desc: Box::new(CoreTypeDesc::Ptyp_poly(vars.clone(), Box::new(substituted_inner))),
+                    ptyp_desc: Box::new(CoreTypeDesc::Ptyp_poly(Box::new((vars.clone(), Box::new(substituted_inner))))),
                     ptyp_loc: typ.ptyp_loc.clone(),
                     ptyp_attributes: typ.ptyp_attributes.clone(),
                 };
@@ -4193,18 +4194,22 @@ fn parse_let_in_block_with_continuation_and_attrs(
     let first_pat = if is_locally_abstract {
         let wrapper_loc = wrapper_loc.expect("locally abstract let-binding should have wrapper loc");
         // Update Ppat_constraint and inner Ptyp_poly locations to use the binding location
-        if let PatternDesc::Ppat_constraint(inner_pat, typ) = *first_pat.ppat_desc {
+        if let PatternDesc::Ppat_constraint(inner) = *first_pat.ppat_desc {
+            let (inner_pat, typ) = *inner;
             // Update the Ptyp_poly location to use binding location
             let updated_typ = match *typ.ptyp_desc {
-                CoreTypeDesc::Ptyp_poly(vars, inner) => CoreType {
-                    ptyp_desc: Box::new(CoreTypeDesc::Ptyp_poly(vars, inner)),
-                    ptyp_loc: wrapper_loc,
-                    ptyp_attributes: typ.ptyp_attributes,
-                },
+                CoreTypeDesc::Ptyp_poly(inner) => {
+                    let (vars, inner) = *inner;
+                    CoreType {
+                        ptyp_desc: Box::new(CoreTypeDesc::Ptyp_poly(Box::new((vars, inner)))),
+                        ptyp_loc: wrapper_loc,
+                        ptyp_attributes: typ.ptyp_attributes,
+                    }
+                }
                 _ => typ,
             };
             Pattern {
-                ppat_desc: Box::new(PatternDesc::Ppat_constraint(inner_pat, updated_typ)),
+                ppat_desc: Box::new(PatternDesc::Ppat_constraint(Box::new((inner_pat, updated_typ)))),
                 ppat_loc: wrapper_loc,
                 ppat_attributes: first_pat.ppat_attributes,
             }
@@ -4222,7 +4227,7 @@ fn parse_let_in_block_with_continuation_and_attrs(
         // First wrap the expression in Pexp_constraint with the inner type
         // OCaml uses the binding location for this Pexp_constraint
         first_value = Expression {
-            pexp_desc: Box::new(ExpressionDesc::Pexp_constraint(Box::new(first_value), inner_type)),
+            pexp_desc: Box::new(ExpressionDesc::Pexp_constraint(Box::new((first_value, inner_type)))),
             pexp_loc: wrapper_loc,
             pexp_attributes: vec![],
         };
@@ -4232,7 +4237,7 @@ fn parse_let_in_block_with_continuation_and_attrs(
         // OCaml uses the binding location for all Pexp_newtype wrappers
         for var in newtype_vars.into_iter().rev() {
             first_value = Expression {
-                pexp_desc: Box::new(ExpressionDesc::Pexp_newtype(var, Box::new(first_value))),
+                pexp_desc: Box::new(ExpressionDesc::Pexp_newtype(Box::new((var, Box::new(first_value))))),
                 pexp_loc: wrapper_loc,
                 pexp_attributes: vec![],
             };
@@ -4311,7 +4316,7 @@ fn parse_let_in_block_with_continuation_and_attrs(
     let loc = p.mk_loc_idx(binding_start_pos_idx, let_end_idx);
 
     Expression {
-        pexp_desc: Box::new(ExpressionDesc::Pexp_let(rec_flag, bindings, Box::new(body))),
+        pexp_desc: Box::new(ExpressionDesc::Pexp_let(Box::new((rec_flag, bindings, Box::new(body))))),
         pexp_loc: loc,
         pexp_attributes: vec![],
     }
@@ -4623,23 +4628,23 @@ fn parse_js_object_expr(p: &mut Parser<'_>, start_pos_idx: PosIdx) -> Expression
 
     // Create the inner record expression
     let record_expr = Expression {
-        pexp_desc: Box::new(ExpressionDesc::Pexp_record(fields, None)),
+        pexp_desc: Box::new(ExpressionDesc::Pexp_record(Box::new((fields, None)))),
         pexp_loc: loc.clone(),
         pexp_attributes: vec![],
     };
 
     // Wrap in %obj extension
     let record_item = StructureItem {
-        pstr_desc: Box::new(StructureItemDesc::Pstr_eval(record_expr, vec![])),
+        pstr_desc: Box::new(StructureItemDesc::Pstr_eval(Box::new((record_expr, vec![])))),
         pstr_loc: loc.clone(),
     };
 
     let obj_idx = p.arena_mut().intern("obj");
     Expression {
-        pexp_desc: Box::new(ExpressionDesc::Pexp_extension((
+        pexp_desc: Box::new(ExpressionDesc::Pexp_extension(Box::new((
             with_loc(obj_idx, loc.clone()),
             Payload::PStr(vec![record_item]),
-        ))),
+        )))),
         pexp_loc: loc,
         pexp_attributes: vec![],
     }
@@ -4865,7 +4870,7 @@ fn suppress_fragile_match_warning_attr(p: &mut Parser<'_>) -> Attribute {
             StructureItem {
                 pstr_desc: Box::new(StructureItemDesc::Pstr_eval(
                     Expression {
-                        pexp_desc: Box::new(ExpressionDesc::Pexp_constant(Constant::String(Cow::Borrowed("-4"), None))),
+                        pexp_desc: Box::new(ExpressionDesc::Pexp_constant(Box::new(Constant::String(Cow::Borrowed("-4"), None)))),
                         pexp_loc: loc,
                         pexp_attributes: vec![],
                     },
@@ -4920,7 +4925,7 @@ fn parse_switch_case_body(p: &mut Parser<'_>) -> Option<Expression> {
             // OCaml uses p.prev_end_pos for Pexp_open location
             let loc = p.mk_loc_idx_to_prev_end(expr_start_idx);
             Expression {
-                pexp_desc: Box::new(ExpressionDesc::Pexp_open(OverrideFlag::Fresh, lid, Box::new(body))),
+                pexp_desc: Box::new(ExpressionDesc::Pexp_open(Box::new((OverrideFlag::Fresh, lid, Box::new(body))))),
                 pexp_loc: loc,
                 pexp_attributes: vec![],
             }
@@ -5002,7 +5007,7 @@ fn parse_switch_case_body(p: &mut Parser<'_>) -> Option<Expression> {
             // OCaml uses p.prev_end_pos for Pexp_letexception location
             let loc = p.mk_loc_idx_to_prev_end(expr_start_idx);
             Expression {
-                pexp_desc: Box::new(ExpressionDesc::Pexp_letexception(ext, Box::new(body))),
+                pexp_desc: Box::new(ExpressionDesc::Pexp_letexception(Box::new((ext, Box::new(body))))),
                 pexp_loc: loc,
                 pexp_attributes: vec![],
             }
@@ -5141,7 +5146,7 @@ fn parse_let_in_switch_case(p: &mut Parser<'_>) -> Expression {
     let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
 
     Expression {
-        pexp_desc: Box::new(ExpressionDesc::Pexp_let(rec_flag, bindings, Box::new(body))),
+        pexp_desc: Box::new(ExpressionDesc::Pexp_let(Box::new((rec_flag, bindings, Box::new(body))))),
         pexp_loc: loc,
         pexp_attributes: vec![],
     }
@@ -5169,14 +5174,14 @@ pub fn parse_first_class_module_expr_from_paren(
 /// Expects the `(` to already be consumed.
 fn parse_first_class_module_expr_inner(p: &mut Parser<'_>, start_pos_idx: PosIdx) -> Expression {
     // Use parse_module_expr_without_constraint so the `:` is available for package type.
-    // For `module(Foo: Bar)`, we want Pexp_constraint(Pexp_pack(Foo), Ptyp_package(Bar)),
-    // not Pexp_pack(Pmod_constraint(Foo, Bar)).
+    // For `module(Foo: Bar)`, we want Pexp_constraint(Pexp_pack(Foo), Ptyp_package(Box::new(Bar))),
+    // not Pexp_pack(Box::new(Pmod_constraint(Foo, Bar))).
     let mod_expr = super::module::parse_module_expr_without_constraint(p);
     // Capture position after module expr for pack_expr location (before parsing type)
     let mod_expr_end_idx = p.prev_end_pos_idx();
 
     // Check for type annotation: module(Expr: ModType)
-    // This becomes Pexp_constraint(Pexp_pack(ME), Ptyp_package(...))
+    // This becomes Pexp_constraint(Box::new((Pexp_pack(ME), Ptyp_package(Box::new(...)))))
     let package_type = if p.token == Token::Colon {
         // OCaml captures colon_start BEFORE consuming colon, then parses attributes,
         // then passes colon_start to parse_package_type
@@ -5205,7 +5210,7 @@ fn parse_first_class_module_expr_inner(p: &mut Parser<'_>, start_pos_idx: PosIdx
         // OCaml: when constrained, pack_expr location spans only start to end of module expr (not including type)
         let pack_loc = p.mk_loc_idx(start_pos_idx, mod_expr_end_idx);
         let pack_expr = Expression {
-            pexp_desc: Box::new(ExpressionDesc::Pexp_pack(mod_expr)),
+            pexp_desc: Box::new(ExpressionDesc::Pexp_pack(Box::new(mod_expr))),
             pexp_loc: pack_loc,
             pexp_attributes: vec![],
         };
@@ -5217,7 +5222,7 @@ fn parse_first_class_module_expr_inner(p: &mut Parser<'_>, start_pos_idx: PosIdx
     } else {
         // Without constraint, pack_expr uses full location
         Expression {
-            pexp_desc: Box::new(ExpressionDesc::Pexp_pack(mod_expr)),
+            pexp_desc: Box::new(ExpressionDesc::Pexp_pack(Box::new(mod_expr))),
             pexp_loc: full_loc,
             pexp_attributes: vec![],
         }
@@ -5588,10 +5593,10 @@ fn parse_jsx(p: &mut Parser<'_>) -> Expression {
         p.eat_breadcrumb();
         p.jsx_depth -= 1;
         Expression {
-            pexp_desc: Box::new(ExpressionDesc::Pexp_jsx_element(JsxElement::Unary(JsxUnaryElement {
+            pexp_desc: Box::new(ExpressionDesc::Pexp_jsx_element(Box::new(JsxElement::Unary(JsxUnaryElement {
                 tag_name: with_loc(tag_name, tag_name_loc),
                 props,
-            }))),
+            })))),
             pexp_loc: loc,
             pexp_attributes: vec![],
         }
@@ -5604,10 +5609,10 @@ fn parse_jsx(p: &mut Parser<'_>) -> Expression {
         p.eat_breadcrumb();
         p.jsx_depth -= 1;
         Expression {
-            pexp_desc: Box::new(ExpressionDesc::Pexp_jsx_element(JsxElement::Unary(JsxUnaryElement {
+            pexp_desc: Box::new(ExpressionDesc::Pexp_jsx_element(Box::new(JsxElement::Unary(JsxUnaryElement {
                 tag_name: with_loc(tag_name, tag_name_loc),
                 props,
-            }))),
+            })))),
             pexp_loc: loc,
             pexp_attributes: vec![],
         }
@@ -5713,7 +5718,7 @@ fn parse_jsx(p: &mut Parser<'_>) -> Expression {
         p.eat_breadcrumb();
         p.jsx_depth -= 1;
         Expression {
-            pexp_desc: Box::new(ExpressionDesc::Pexp_jsx_element(JsxElement::Container(
+            pexp_desc: Box::new(ExpressionDesc::Pexp_jsx_element(Box::new(JsxElement::Container(
                 JsxContainerElement {
                     tag_name_start: with_loc(tag_name, tag_name_loc),
                     opening_end: opening_end_idx,
@@ -5721,7 +5726,7 @@ fn parse_jsx(p: &mut Parser<'_>) -> Expression {
                     children,
                     closing_tag,
                 },
-            ))),
+            )))),
             pexp_loc: loc,
             pexp_attributes: vec![],
         }
@@ -5747,11 +5752,11 @@ fn parse_jsx_fragment(p: &mut Parser<'_>, start_pos_idx: PosIdx) -> Expression {
     let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
 
     Expression {
-        pexp_desc: Box::new(ExpressionDesc::Pexp_jsx_element(JsxElement::Fragment(JsxFragment {
+        pexp_desc: Box::new(ExpressionDesc::Pexp_jsx_element(Box::new(JsxElement::Fragment(JsxFragment {
             opening,
             children,
             closing,
-        }))),
+        })))),
         pexp_loc: loc,
         pexp_attributes: vec![],
     }
@@ -6120,7 +6125,7 @@ fn parse_template_literal_with_prefix(
 ) -> Expression {
     let start_pos_idx = p.start_pos_idx();
     let template_str_idx = p.arena_mut().intern("res.template");
-    let template_literal_attr = (mknoloc(template_str_idx), Payload::PStr(vec![]));
+    let template_literal_attr = (mknoloc(template_str_idx), Payload::PStr(Box::new(vec![])));
 
     // Determine the string delimiter based on prefix (json -> "json", otherwise "js")
     let part_prefix = match &prefix {
@@ -6231,12 +6236,12 @@ fn parse_template_literal_with_prefix(
         let values: Vec<Expression> = parts.iter().filter_map(|(_, v)| v.clone()).collect();
 
         let strings_array = Expression {
-            pexp_desc: Box::new(ExpressionDesc::Pexp_array(strings)),
+            pexp_desc: Box::new(ExpressionDesc::Pexp_array(Box::new(strings))),
             pexp_loc: LocIdx::none(),
             pexp_attributes: vec![],
         };
         let values_array = Expression {
-            pexp_desc: Box::new(ExpressionDesc::Pexp_array(values)),
+            pexp_desc: Box::new(ExpressionDesc::Pexp_array(Box::new(values))),
             pexp_loc: LocIdx::none(),
             pexp_attributes: vec![],
         };
@@ -6255,7 +6260,7 @@ fn parse_template_literal_with_prefix(
 
         // OCaml sets the Pexp_apply location to just the tag location
         Expression {
-            pexp_desc: Box::new(ExpressionDesc::Pexp_apply {
+            pexp_desc: Box::new(ExpressionDesc::Pexp_apply(Box::new(PexpApply {
                 funct: Box::new(tag_expr),
                 args: vec![
                     (ArgLabel::Nolabel, strings_array),
@@ -6263,7 +6268,7 @@ fn parse_template_literal_with_prefix(
                 ],
                 partial: false,
                 transformed_jsx: false,
-            }),
+            }))),
             pexp_loc: prefix_loc,
             pexp_attributes: vec![tagged_template_attr],
         }
@@ -6311,12 +6316,12 @@ fn parse_template_literal_with_prefix(
         let concat = |e1: Expression, e2: Expression| -> Expression {
             let concat_loc = p.mk_loc_spanning(e1.pexp_loc, e2.pexp_loc);
             Expression {
-                pexp_desc: Box::new(ExpressionDesc::Pexp_apply {
+                pexp_desc: Box::new(ExpressionDesc::Pexp_apply(Box::new(PexpApply {
                     funct: Box::new(hidden_operator.clone()),
                     args: vec![(ArgLabel::Nolabel, e1), (ArgLabel::Nolabel, e2)],
                     partial: false,
                     transformed_jsx: false,
-                }),
+                }))),
                 pexp_loc: concat_loc,
                 pexp_attributes: vec![template_literal_attr.clone()],
             }

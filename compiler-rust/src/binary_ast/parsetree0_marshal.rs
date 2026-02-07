@@ -135,10 +135,10 @@ impl Marshal for Constant {
 
 impl Marshal for Payload {
     /// Payload encoding:
-    /// - PStr(s): Block(tag=0, [s])
-    /// - PSig(s): Block(tag=1, [s])
+    /// - PStr(Box::new(s)): Block(tag=0, [s])
+    /// - PSig(Box::new(s)): Block(tag=1, [s])
     /// - PTyp(t): Block(tag=2, [t])
-    /// - PPat(p, e): Block(tag=3, [p, e])
+    /// - PPat(Box::new((p, e))): Block(tag=3, [p, e])
     fn marshal(&self, w: &mut MarshalWriter) {
         match self {
             Payload::PStr(s) => {
@@ -153,7 +153,8 @@ impl Marshal for Payload {
                 w.write_block_header(2, 1);
                 t.marshal(w);
             }
-            Payload::PPat(p, e) => {
+            Payload::PPat(inner) => {
+                    let (p, e) = *inner;
                 w.write_block_header(3, 2);
                 p.marshal(w);
                 e.marshal(w);

@@ -265,12 +265,13 @@ fn has_no_export_config(structure: &[StructureItem], arena: &ParseArena) -> bool
                 let attr_name = arena.get_string(attr.0.txt);
                 if attr_name == "config" {
                     // Found @@config(...) - check if payload contains no_export
-                    if let crate::parser::ast::Payload::PStr(items) = &attr.1 {
+                    if let crate::parser::ast::Payload::PStr(Box::new(items)) = &attr.1 {
                         if let Some(eval_item) = items.first() {
                             if let StructureItemDesc::Pstr_eval(expr, _) = &*eval_item.pstr_desc {
                                 match &*expr.pexp_desc {
                                     // @@config({no_export: ...}) - record form
-                                    ExpressionDesc::Pexp_record(fields, _) => {
+                                    ExpressionDesc::Pexp_record(inner) => {
+                    let (fields, _) = *inner;
                                         for field in fields {
                                             let lid = arena.get_longident(field.lid.txt);
                                             if let Longident::Lident(s) = lid {
@@ -339,13 +340,13 @@ fn wrap_no_export(structure: Vec<StructureItem>) -> Vec<StructureItem> {
 
     // Build: include ((struct <items> end) : (sig end))
     let inner_mod = ModuleExpr {
-        pmod_desc: Box::new(ModuleExprDesc::Pmod_structure(structure)),
+        pmod_desc: Box::new(ModuleExprDesc::Pmod_structure(Box::new(structure))),
         pmod_loc: loc,
         pmod_attributes: vec![],
     };
 
     let empty_sig = ModuleType {
-        pmty_desc: Box::new(ModuleTypeDesc::Pmty_signature(vec![])),
+        pmty_desc: Box::new(ModuleTypeDesc::Pmty_signature(Box::new(vec![]))),
         pmty_loc: loc,
         pmty_attributes: vec![],
     };
@@ -363,7 +364,7 @@ fn wrap_no_export(structure: Vec<StructureItem>) -> Vec<StructureItem> {
     };
 
     vec![StructureItem {
-        pstr_desc: Box::new(StructureItemDesc::Pstr_include(include_decl)),
+        pstr_desc: Box::new(StructureItemDesc::Pstr_include(Box::new(include_decl))),
         pstr_loc: loc,
     }]
 }
@@ -393,10 +394,10 @@ mod tests {
                         ppat_attributes: vec![],
                     },
                     pvb_expr: Expression {
-                        pexp_desc: Box::new(ExpressionDesc::Pexp_constant(Constant::Integer(
+                        pexp_desc: Box::new(ExpressionDesc::Pexp_constant(Box::new(Constant::Integer(
                             std::borrow::Cow::Owned(value.to_string()),
                             None,
-                        ))),
+                        )))),
                         pexp_loc: LocIdx::none(),
                         pexp_attributes: vec![],
                     },
@@ -476,7 +477,7 @@ mod tests {
     fn test_with_dependencies() {
         let mut arena = make_test_arena();
         let ast = vec![StructureItem {
-            pstr_desc: Box::new(StructureItemDesc::Pstr_eval(make_module_ref_expr(&mut arena, "Array", "map"), vec![])),
+            pstr_desc: Box::new(StructureItemDesc::Pstr_eval(Box::new((make_module_ref_expr(&mut arena, "Array", "map"), vec![])))),
             pstr_loc: LocIdx::none(),
         }];
 
@@ -506,7 +507,7 @@ mod tests {
                 pstr_loc: LocIdx::none(),
             },
             StructureItem {
-                pstr_desc: Box::new(StructureItemDesc::Pstr_eval(make_module_ref_expr(&mut arena, "Js", "log"), vec![])),
+                pstr_desc: Box::new(StructureItemDesc::Pstr_eval(Box::new((make_module_ref_expr(&mut arena, "Js", "log"), vec![])))),
                 pstr_loc: LocIdx::none(),
             },
         ];

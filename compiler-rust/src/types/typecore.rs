@@ -586,7 +586,8 @@ fn transl_type_inner(
             Ok((ctyp, ty))
         }
 
-        CTD::Ptyp_arrow { arg, ret, arity } => {
+        CTD::Ptyp_arrow(inner) => {
+                    let (arg, ret, arity) = *inner;
             // Arrow type: T1 -> T2
             let (arg_ctyp, arg_ty) = transl_type_inner(tctx, env, &arg.typ)?;
             let (ret_ctyp, ret_ty) = transl_type_inner(tctx, env, ret)?;
@@ -643,7 +644,8 @@ fn transl_type_inner(
             Ok((ctyp, tuple_ty))
         }
 
-        CTD::Ptyp_constr(lid, args) => {
+        CTD::Ptyp_constr(inner) => {
+                    let (lid, args) = *inner;
             // Type constructor: int, string, list<'a>, etc.
             let mut typed_args = Vec::new();
             let mut arg_refs = Vec::new();
@@ -671,7 +673,8 @@ fn transl_type_inner(
             Ok((ctyp, constr_ty))
         }
 
-        CTD::Ptyp_alias(inner, name) => {
+        CTD::Ptyp_alias(inner) => {
+                    let (inner, name) = *inner;
             // Type alias: T as 'a
             let (inner_ctyp, inner_ty) = transl_type_inner(tctx, env, inner)?;
 
@@ -690,7 +693,8 @@ fn transl_type_inner(
             Ok((ctyp, inner_ty))
         }
 
-        CTD::Ptyp_poly(vars, body) => {
+        CTD::Ptyp_poly(inner) => {
+                    let (vars, body) = *inner;
             // Polymorphic type: 'a 'b. T
             let var_names: Vec<String> = vars.iter().map(|v| tctx.arena.get_string(v.txt).to_string()).collect();
 
@@ -713,7 +717,8 @@ fn transl_type_inner(
             Ok((ctyp, poly_ty))
         }
 
-        CTD::Ptyp_object(fields, closed) => {
+        CTD::Ptyp_object(inner) => {
+                    let (fields, closed) = *inner;
             // Object type: {. name: string, age: int }
             // Simplified implementation - full version builds proper object type
             let mut typed_fields = Vec::new();
@@ -762,7 +767,8 @@ fn transl_type_inner(
             Ok((ctyp, obj_ty))
         }
 
-        CTD::Ptyp_variant(rows, closed, labels) => {
+        CTD::Ptyp_variant(inner) => {
+                    let (rows, closed, labels) = *inner;
             // Polymorphic variant type: [> `A | `B of int ]
             let mut typed_rows = Vec::new();
             let row_more = ctx.new_var(None);
@@ -1038,7 +1044,8 @@ fn type_pattern_inner(
             )
         }
 
-        PD::Ppat_variant(label, arg) => {
+        PD::Ppat_variant(inner) => {
+                    let (label, arg) = *inner;
             // Polymorphic variant pattern: #Red, #Blue(x)
             type_pattern_variant(
                 tctx,
@@ -1053,7 +1060,8 @@ fn type_pattern_inner(
             )
         }
 
-        PD::Ppat_record(fields, closed_flag) => {
+        PD::Ppat_record(inner) => {
+                    let (fields, closed_flag) = *inner;
             // Record pattern: {name, age}
             type_pattern_record(
                 tctx,
@@ -1068,7 +1076,8 @@ fn type_pattern_inner(
             )
         }
 
-        PD::Ppat_constraint(inner_pat, core_type) => {
+        PD::Ppat_constraint(inner) => {
+                    let (inner_pat, core_type) = *inner;
             // Type constraint pattern: (x : int)
             type_pattern_constraint(
                 tctx,
@@ -1083,7 +1092,8 @@ fn type_pattern_inner(
             )
         }
 
-        PD::Ppat_interval(c1, c2) => {
+        PD::Ppat_interval(inner) => {
+                    let (c1, c2) = *inner;
             // Interval pattern: 'a'..'z'
             type_pattern_interval(tctx, env, loc, c1, c2, expected_ty, pat)
         }
@@ -1611,7 +1621,8 @@ pub fn type_expect<'a>(
             ))
         }
 
-        ED::Pexp_let(rec_flag, bindings, body) => {
+        ED::Pexp_let(inner) => {
+                    let (rec_flag, bindings, body) = *inner;
             // Let expression
             let (typed_bindings, new_env) = type_let_bindings(tctx, env, *rec_flag, bindings)?;
 
@@ -1647,7 +1658,8 @@ pub fn type_expect<'a>(
             ))
         }
 
-        ED::Pexp_ifthenelse(cond, then_branch, else_branch) => {
+        ED::Pexp_ifthenelse(inner) => {
+                    let (cond, then_branch, else_branch) = *inner;
             // If expression
             let bool_ty = env.type_bool(ctx);
 
@@ -1743,12 +1755,11 @@ pub fn type_expect<'a>(
             ))
         }
 
-        ED::Pexp_apply {
-            funct,
+        ED::Pexp_apply(inner) => {
+                    let PexpApply { funct,
             args,
             partial,
-            transformed_jsx,
-        } => {
+            transformed_jsx, } = *inner;
             // Function application
             type_application(
                 tctx,
@@ -1764,7 +1775,8 @@ pub fn type_expect<'a>(
             )
         }
 
-        ED::Pexp_match(scrutinee, cases) => {
+        ED::Pexp_match(inner) => {
+                    let (scrutinee, cases) = *inner;
             // Match expression
             type_match(
                 tctx,
@@ -1777,7 +1789,8 @@ pub fn type_expect<'a>(
             )
         }
 
-        ED::Pexp_try(body, handlers) => {
+        ED::Pexp_try(inner) => {
+                    let (body, handlers) = *inner;
             // Try expression
             type_try(
                 tctx,
@@ -1790,14 +1803,13 @@ pub fn type_expect<'a>(
             )
         }
 
-        ED::Pexp_fun {
-            arg_label,
+        ED::Pexp_fun(inner) => {
+                    let PexpFun { arg_label,
             default,
             lhs,
             rhs,
             arity,
-            is_async,
-        } => {
+            is_async, } = *inner;
             // Function expression
             type_function(
                 tctx,
@@ -1814,7 +1826,8 @@ pub fn type_expect<'a>(
             )
         }
 
-        ED::Pexp_for(pat, start_expr, end_expr, direction, body) => {
+        ED::Pexp_for(inner) => {
+                    let (pat, start_expr, end_expr, direction, body) = *inner;
             // For loop
             type_for(
                 tctx,
@@ -1844,7 +1857,8 @@ pub fn type_expect<'a>(
             )
         }
 
-        ED::Pexp_variant(label, arg) => {
+        ED::Pexp_variant(inner) => {
+                    let (label, arg) = *inner;
             // Polymorphic variant
             type_variant(
                 tctx,
@@ -1857,7 +1871,8 @@ pub fn type_expect<'a>(
             )
         }
 
-        ED::Pexp_record(fields, base) => {
+        ED::Pexp_record(inner) => {
+                    let (fields, base) = *inner;
             // Record expression
             type_record(
                 tctx,
@@ -1883,7 +1898,8 @@ pub fn type_expect<'a>(
             )
         }
 
-        ED::Pexp_setfield(record_expr, field_lid, new_value) => {
+        ED::Pexp_setfield(inner) => {
+                    let (record_expr, field_lid, new_value) = *inner;
             // Field assignment
             type_setfield(
                 tctx,
@@ -1898,7 +1914,8 @@ pub fn type_expect<'a>(
             )
         }
 
-        ED::Pexp_constraint(inner_expr, core_type) => {
+        ED::Pexp_constraint(inner) => {
+                    let (inner_expr, core_type) = *inner;
             // Type constraint
             type_constraint(
                 tctx,
@@ -1911,7 +1928,8 @@ pub fn type_expect<'a>(
             )
         }
 
-        ED::Pexp_coerce(inner_expr, opt_from_type, to_type) => {
+        ED::Pexp_coerce(inner) => {
+                    let (inner_expr, opt_from_type, to_type) = *inner;
             // Type coercion: (E :> T) or (E : T1 :> T2)
             type_coerce(
                 tctx,
@@ -1925,7 +1943,8 @@ pub fn type_expect<'a>(
             )
         }
 
-        ED::Pexp_open(_override_flag, lid, body) => {
+        ED::Pexp_open(inner) => {
+                    let (_override_flag, lid, body) = *inner;
             // Open expression: M.{ E } or open M; E
             type_open(
                 tctx,
@@ -1938,7 +1957,8 @@ pub fn type_expect<'a>(
             )
         }
 
-        ED::Pexp_newtype(name, body) => {
+        ED::Pexp_newtype(inner) => {
+                    let (name, body) = *inner;
             // Newtype expression: (type t) => E
             type_newtype(
                 tctx,
@@ -1964,7 +1984,8 @@ pub fn type_expect<'a>(
             )
         }
 
-        ED::Pexp_send(obj_expr, method) => {
+        ED::Pexp_send(inner) => {
+                    let (obj_expr, method) = *inner;
             // Method send: E#m
             type_send(
                 tctx,
@@ -1977,7 +1998,8 @@ pub fn type_expect<'a>(
             )
         }
 
-        ED::Pexp_letexception(ext_constr, body) => {
+        ED::Pexp_letexception(inner) => {
+                    let (ext_constr, body) = *inner;
             // Let exception: { exception C; E }
             type_letexception(
                 tctx,
@@ -2002,7 +2024,8 @@ pub fn type_expect<'a>(
             )
         }
 
-        ED::Pexp_letmodule(name, module_expr, body) => {
+        ED::Pexp_letmodule(inner) => {
+                    let (name, module_expr, body) = *inner;
             // Let module: { module M = ME; E }
             type_letmodule(
                 tctx,

@@ -46,7 +46,7 @@ pub mod recover {
         let str_idx = arena.intern("rescript.exprhole");
         let id = mknoloc(str_idx);
         Expression {
-            pexp_desc: Box::new(ExpressionDesc::Pexp_extension((id, Payload::PStr(vec![])))),
+            pexp_desc: Box::new(ExpressionDesc::Pexp_extension(Box::new((id, Payload::PStr(Box::new(vec![])))))),
             pexp_loc: LocIdx::none(),
             pexp_attributes: vec![],
         }
@@ -57,7 +57,7 @@ pub mod recover {
         let str_idx = arena.intern("rescript.typehole");
         let id = mknoloc(str_idx);
         CoreType {
-            ptyp_desc: Box::new(CoreTypeDesc::Ptyp_extension((id, Payload::PStr(vec![])))),
+            ptyp_desc: Box::new(CoreTypeDesc::Ptyp_extension(Box::new((id, Payload::PStr(Box::new(vec![])))))),
             ptyp_loc: LocIdx::none(),
             ptyp_attributes: vec![],
         }
@@ -68,7 +68,7 @@ pub mod recover {
         let str_idx = arena.intern("rescript.patternhole");
         let id = mknoloc(str_idx);
         Pattern {
-            ppat_desc: Box::new(PatternDesc::Ppat_extension((id, Payload::PStr(vec![])))),
+            ppat_desc: Box::new(PatternDesc::Ppat_extension(Box::new((id, Payload::PStr(Box::new(vec![])))))),
             ppat_loc: LocIdx::none(),
             ppat_attributes: vec![],
         }
@@ -77,7 +77,7 @@ pub mod recover {
     /// Create a default module expression for error recovery.
     pub fn default_module_expr() -> ModuleExpr {
         ModuleExpr {
-            pmod_desc: Box::new(ModuleExprDesc::Pmod_structure(vec![])),
+            pmod_desc: Box::new(ModuleExprDesc::Pmod_structure(Box::new(vec![]))),
             pmod_loc: LocIdx::none(),
             pmod_attributes: vec![],
         }
@@ -86,7 +86,7 @@ pub mod recover {
     /// Create a default module type for error recovery.
     pub fn default_module_type() -> ModuleType {
         ModuleType {
-            pmty_desc: Box::new(ModuleTypeDesc::Pmty_signature(vec![])),
+            pmty_desc: Box::new(ModuleTypeDesc::Pmty_signature(Box::new(vec![]))),
             pmty_loc: LocIdx::none(),
             pmty_attributes: vec![],
         }
@@ -98,7 +98,7 @@ pub mod recover {
         let str_idx = arena.intern("rescript.sigitemhole");
         let id = mknoloc(str_idx);
         SignatureItem {
-            psig_desc: Box::new(SignatureItemDesc::Psig_extension((id, Payload::PStr(vec![])), vec![])),
+            psig_desc: Box::new(SignatureItemDesc::Psig_extension(Box::new(((id, Payload::PStr(Box::new(vec![]))), vec![])))),
             psig_loc: LocIdx::none(),
         }
     }
@@ -375,13 +375,13 @@ pub fn parse_ident(p: &mut Parser<'_>, msg: &str, start_pos_idx: PosIdx) -> (Str
 /// Create the ternary attribute `@res.ternary`.
 pub fn ternary_attr(arena: &mut ParseArena) -> Attribute {
     let str_idx = arena.intern("res.ternary");
-    (mknoloc(str_idx), Payload::PStr(vec![]))
+    (mknoloc(str_idx), Payload::PStr(Box::new(vec![])))
 }
 
 /// Create the if-let attribute `@res.iflet`.
 pub fn if_let_attr(arena: &mut ParseArena) -> Attribute {
     let str_idx = arena.intern("res.iflet");
-    (mknoloc(str_idx), Payload::PStr(vec![]))
+    (mknoloc(str_idx), Payload::PStr(Box::new(vec![])))
 }
 
 /// Create the await attribute `@res.await` with location.
@@ -405,13 +405,13 @@ pub fn make_braces_attr(arena: &mut ParseArena, loc: Location) -> Attribute {
 /// Create the template literal attribute `@res.template`.
 pub fn template_literal_attr(arena: &mut ParseArena) -> Attribute {
     let str_idx = arena.intern("res.template");
-    (mknoloc(str_idx), Payload::PStr(vec![]))
+    (mknoloc(str_idx), Payload::PStr(Box::new(vec![])))
 }
 
 /// Create the spread attribute `@res.spread`.
 pub fn spread_attr(arena: &mut ParseArena) -> Attribute {
     let str_idx = arena.intern("res.spread");
-    (mknoloc(str_idx), Payload::PStr(vec![]))
+    (mknoloc(str_idx), Payload::PStr(Box::new(vec![])))
 }
 
 /// Create the pattern variant spread attribute.
@@ -515,10 +515,10 @@ pub fn doc_comment_to_attribute(arena: &mut ParseArena, loc: Location, content: 
     let payload = Payload::PStr(vec![StructureItem {
         pstr_desc: Box::new(StructureItemDesc::Pstr_eval(
             Expression {
-                pexp_desc: Box::new(ExpressionDesc::Pexp_constant(Constant::String(
+                pexp_desc: Box::new(ExpressionDesc::Pexp_constant(Box::new(Constant::String(
                     Cow::Owned(content.into()),
                     None,
-                ))),
+                )))),
                 pexp_loc: loc,
                 pexp_attributes: vec![],
             },
@@ -795,17 +795,17 @@ pub fn make_unary_expr(
 ) -> Expression {
     // Handle numeric literal negation specially
     match (&token, &*operand.pexp_desc) {
-        (Token::Plus | Token::PlusDot, ExpressionDesc::Pexp_constant(Constant::Integer(..)))
-        | (Token::Plus | Token::PlusDot, ExpressionDesc::Pexp_constant(Constant::Float(..))) => {
+        (Token::Plus | Token::PlusDot, ExpressionDesc::Pexp_constant(Box::new(Constant::Integer(..))))
+        | (Token::Plus | Token::PlusDot, ExpressionDesc::Pexp_constant(Box::new(Constant::Float(..)))) => {
             // +n is just n
             return operand;
         }
-        (Token::Minus, ExpressionDesc::Pexp_constant(Constant::Integer(n, suffix))) => {
+        (Token::Minus, ExpressionDesc::Pexp_constant(Box::new(Constant::Integer(n, suffix)))) => {
             return Expression {
-                pexp_desc: Box::new(ExpressionDesc::Pexp_constant(Constant::Integer(
+                pexp_desc: Box::new(ExpressionDesc::Pexp_constant(Box::new(Constant::Integer(
                     Cow::Owned(negate_string(n)),
                     *suffix,
-                ))),
+                )))),
                 ..operand
             };
         }
@@ -814,10 +814,10 @@ pub fn make_unary_expr(
             ExpressionDesc::Pexp_constant(Constant::Float(n, suffix)),
         ) => {
             return Expression {
-                pexp_desc: Box::new(ExpressionDesc::Pexp_constant(Constant::Float(
+                pexp_desc: Box::new(ExpressionDesc::Pexp_constant(Box::new(Constant::Float(
                     Cow::Owned(negate_string(n)),
                     *suffix,
-                ))),
+                )))),
                 ..operand
             };
         }

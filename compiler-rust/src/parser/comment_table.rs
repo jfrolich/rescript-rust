@@ -488,16 +488,11 @@ fn is_block_expr(expr: &Expression) -> bool {
         | ExpressionDesc::Pexp_open(..)
         | ExpressionDesc::Pexp_sequence(..) => true,
         ExpressionDesc::Pexp_apply { funct, .. } if is_block_expr(funct) => true,
-        ExpressionDesc::Pexp_constraint(inner) if is_block_expr(inner) => {
-                    let (inner, _) = *inner;
-                    true,
+        ExpressionDesc::Pexp_constraint(inner) if is_block_expr(&inner.0) => true,
         ExpressionDesc::Pexp_field(inner, _) if is_block_expr(inner) => true,
-        ExpressionDesc::Pexp_setfield(inner) if is_block_expr(inner) => {
-                    let (inner, _, _) = *inner;
-                    true,
+        ExpressionDesc::Pexp_setfield(inner) if is_block_expr(&inner.0) => true,
         _ => false,
-                }
-                }}
+    }
 }
 
 /// Check if an expression is an if-then-else.
@@ -692,15 +687,17 @@ fn walk_structure_item(si: &StructureItem, t: &mut CommentTable, comments: Vec<C
         StructureItemDesc::Pstr_primitive(vd) => walk_value_description(vd, t, comments, arena),
         StructureItemDesc::Pstr_open(od) => walk_open_description(od, t, comments, arena),
         StructureItemDesc::Pstr_value(inner) => {
-                    let (_, bindings) = *inner;
-                    walk_value_bindings(bindings, t, comments, arena),
+            let (_, ref bindings) = **inner;
+            walk_value_bindings(bindings, t, comments, arena)
+        }
         StructureItemDesc::Pstr_type(inner) => {
-                    let (_, declarations) = *inner;
+            let (_, ref declarations) = **inner;
             walk_type_declarations(declarations, t, comments, arena)
         }
         StructureItemDesc::Pstr_eval(inner) => {
-                    let (expr, _) = *inner;
-                    walk_expression(expr, t, comments, arena),
+            let (ref expr, _) = **inner;
+            walk_expression(expr, t, comments, arena)
+        }
         StructureItemDesc::Pstr_module(mb) => walk_module_binding(mb, t, comments, arena),
         StructureItemDesc::Pstr_recmodule(mbs) => {
             let nodes: Vec<Node<'_>> = mbs.iter().map(|mb| Node::ModuleBinding(mb)).collect();
@@ -709,13 +706,13 @@ fn walk_structure_item(si: &StructureItem, t: &mut CommentTable, comments: Vec<C
         StructureItemDesc::Pstr_modtype(mtd) => walk_module_type_declaration(mtd, t, comments, arena),
         StructureItemDesc::Pstr_attribute(attr) => walk_attribute(attr, t, comments, arena),
         StructureItemDesc::Pstr_extension(inner) => {
-                    let (ext, _) = *inner;
-                    walk_extension(ext, t, comments, arena),
+            let (ref ext, _) = **inner;
+            walk_extension(ext, t, comments, arena)
+        }
         StructureItemDesc::Pstr_include(id) => walk_include_declaration(id, t, comments, arena),
         StructureItemDesc::Pstr_exception(ec) => walk_extension_constructor(ec, t, comments, arena),
         StructureItemDesc::Pstr_typext(te) => walk_type_extension(te, t, comments, arena),
-                }}
-                }}
+    }
 }
 
 fn walk_signature_item(si: &SignatureItem, t: &mut CommentTable, comments: Vec<Comment>, arena: &mut ParseArena) {
@@ -726,7 +723,7 @@ fn walk_signature_item(si: &SignatureItem, t: &mut CommentTable, comments: Vec<C
     match &*si.psig_desc {
         SignatureItemDesc::Psig_value(vd) => walk_value_description(vd, t, comments, arena),
         SignatureItemDesc::Psig_type(inner) => {
-                    let (_, declarations) = *inner;
+            let (_, ref declarations) = **inner;
             walk_type_declarations(declarations, t, comments, arena)
         }
         SignatureItemDesc::Psig_typext(te) => walk_type_extension(te, t, comments, arena),
@@ -741,9 +738,10 @@ fn walk_signature_item(si: &SignatureItem, t: &mut CommentTable, comments: Vec<C
         SignatureItemDesc::Psig_include(id) => walk_include_description(id, t, comments, arena),
         SignatureItemDesc::Psig_attribute(attr) => walk_attribute(attr, t, comments, arena),
         SignatureItemDesc::Psig_extension(inner) => {
-                    let (ext, _) = *inner;
-                    walk_extension(ext, t, comments, arena),
-                }}
+            let (ref ext, _) = **inner;
+            walk_extension(ext, t, comments, arena)
+        }
+    }
 }
 
 fn walk_value_description(vd: &ValueDescription, t: &mut CommentTable, comments: Vec<Comment>, arena: &mut ParseArena) {

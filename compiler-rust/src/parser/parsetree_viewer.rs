@@ -72,9 +72,8 @@ pub fn collect_ternary_parts<'a>(
 
     loop {
         match &*current.pexp_desc {
-            ExpressionDesc::Pexp_ifthenelse(condition, consequent, Some(alternate))
-                if has_ternary_attribute(arena, &current.pexp_attributes) =>
-            {
+            ExpressionDesc::Pexp_ifthenelse(inner) if has_ternary_attribute(arena, &current.pexp_attributes) => {
+                    let (condition, consequent, Some(alternate)) = *inner;
                 parts.push((condition.as_ref(), consequent.as_ref()));
                 current = alternate;
             }
@@ -135,36 +134,36 @@ pub fn collect_if_expressions<'a>(
         let expr_loc = &current.pexp_loc;
         match &*current.pexp_desc {
             // Regular if-then-else with else branch
-            ExpressionDesc::Pexp_ifthenelse(if_expr, then_expr, Some(else_expr)) => {
+            ExpressionDesc::Pexp_ifthenelse(inner) => {
+                    let (if_expr, then_expr, Some(else_expr)) = *inner;
                 acc.push((expr_loc, IfConditionKind::If(if_expr.as_ref()), then_expr.as_ref()));
                 current = else_expr.as_ref();
             }
             // Regular if-then without else branch (terminal)
-            ExpressionDesc::Pexp_ifthenelse(if_expr, then_expr, None) => {
+            ExpressionDesc::Pexp_ifthenelse(inner) => {
+                    let (if_expr, then_expr, None) = *inner;
                 acc.push((expr_loc, IfConditionKind::If(if_expr.as_ref()), then_expr.as_ref()));
                 return (acc, None);
             }
             // if let with no else (pattern matches unit constructor in else branch)
-            ExpressionDesc::Pexp_match(condition, cases)
-                if is_if_let_expr(arena, current)
+            ExpressionDesc::Pexp_match(inner) if is_if_let_expr(arena, current)
                     && cases.len() == 2
                     && cases[0].pc_guard.is_none()
                     && matches!(
                         &*cases[1].pc_rhs.pexp_desc,
                         ExpressionDesc::Pexp_construct(lid, _) if arena.is_lident(lid.txt, "()")
-                    ) =>
-            {
+                    ) => {
+                    let (condition, cases) = *inner;
                 let pattern = &cases[0].pc_lhs;
                 let then_expr = &cases[0].pc_rhs;
                 acc.push((expr_loc, IfConditionKind::IfLet(pattern, condition.as_ref()), then_expr));
                 return (acc, None);
             }
             // if let with else branch
-            ExpressionDesc::Pexp_match(condition, cases)
-                if is_if_let_expr(arena, current)
+            ExpressionDesc::Pexp_match(inner) if is_if_let_expr(arena, current)
                     && cases.len() == 2
-                    && cases[0].pc_guard.is_none() =>
-            {
+                    && cases[0].pc_guard.is_none() => {
+                    let (condition, cases) = *inner;
                 let pattern = &cases[0].pc_lhs;
                 let then_expr = &cases[0].pc_rhs;
                 let else_expr = &cases[1].pc_rhs;
@@ -187,7 +186,8 @@ pub fn is_single_expression(expr: &Expression) -> bool {
 /// Check if expression is a binary expression.
 pub fn is_binary_expression(arena: &crate::parse_arena::ParseArena, expr: &Expression) -> bool {
     match &*expr.pexp_desc {
-        ExpressionDesc::Pexp_apply { funct, args, .. } => {
+        ExpressionDesc::Pexp_apply(inner) => {
+                    let PexpApply { funct, args, .. } = *inner;
             if args.len() != 2 {
                 return false;
             }
@@ -210,7 +210,8 @@ pub fn is_binary_expression(arena: &crate::parse_arena::ParseArena, expr: &Expre
 /// Get the operator from a binary expression, if it is one.
 pub fn get_binary_operator(arena: &crate::parse_arena::ParseArena, expr: &Expression) -> Option<String> {
     match &*expr.pexp_desc {
-        ExpressionDesc::Pexp_apply { funct, args, .. } => {
+        ExpressionDesc::Pexp_apply(inner) => {
+                    let PexpApply { funct, args, .. } = *inner;
             if args.len() != 2 {
                 return None;
             }
@@ -238,7 +239,8 @@ pub fn is_single_pipe_expr(arena: &crate::parse_arena::ParseArena, expr: &Expres
     // Helper to check if expr is a pipe expression
     fn is_pipe(arena: &crate::parse_arena::ParseArena, expr: &Expression) -> bool {
         match &*expr.pexp_desc {
-            ExpressionDesc::Pexp_apply { funct, args, .. } => {
+            ExpressionDesc::Pexp_apply(inner) => {
+                    let PexpApply { funct, args, .. } = *inner;
                 if args.len() != 2 {
                     return false;
                 }
@@ -255,7 +257,8 @@ pub fn is_single_pipe_expr(arena: &crate::parse_arena::ParseArena, expr: &Expres
 
     // Check if this is a pipe where the LHS is NOT also a pipe
     match &*expr.pexp_desc {
-        ExpressionDesc::Pexp_apply { funct, args, .. } => {
+        ExpressionDesc::Pexp_apply(inner) => {
+                    let PexpApply { funct, args, .. } = *inner;
             if args.len() != 2 {
                 return false;
             }
@@ -282,13 +285,12 @@ pub fn expr_is_await(expr: &Expression) -> bool {
 /// Check if expression is underscore apply sugar: `(__x) => f(...)`.
 pub fn is_underscore_apply_sugar(arena: &ParseArena, expr: &Expression) -> bool {
     match &*expr.pexp_desc {
-        ExpressionDesc::Pexp_fun {
-            arg_label: ArgLabel::Nolabel,
+        ExpressionDesc::Pexp_fun(inner) => {
+                    let PexpFun { arg_label: ArgLabel::Nolabel,
             default: None,
             lhs,
             rhs,
-            ..
-        } => {
+            .. } = *inner;
             if let PatternDesc::Ppat_var(name) = &*lhs.ppat_desc {
                 if arena.get_string(name.txt) == "__x" {
                     return matches!(&*rhs.pexp_desc, ExpressionDesc::Pexp_apply { .. });
@@ -311,7 +313,7 @@ pub fn is_fun_newtype(expr: &Expression) -> bool {
 /// Check if expression is an uncurried function (has explicit arity).
 /// Requires arena to look up arity value (Arity is now ArityIdx).
 pub fn expr_is_uncurried_fun(arena: &ParseArena, expr: &Expression) -> bool {
-    if let ExpressionDesc::Pexp_fun { arity, .. } = &*expr.pexp_desc {
+    if let ExpressionDesc::Pexp_fun(Box::new(PexpFun { arity, .. })) = &*expr.pexp_desc {
         // Has explicit arity if arena.get_arity returns Some(_)
         arena.get_arity(*arity).is_some()
     } else {
@@ -367,7 +369,7 @@ pub fn is_huggable_expression(arena: &crate::parse_arena::ParseArena, expr: &Exp
     match &*expr.pexp_desc {
         ExpressionDesc::Pexp_array(_)
         | ExpressionDesc::Pexp_tuple(_)
-        | ExpressionDesc::Pexp_record(_, _) => true,
+        | ExpressionDesc::Pexp_record(_) => true,
         ExpressionDesc::Pexp_constant(Constant::String(_, Some(_))) => true,
         ExpressionDesc::Pexp_construct(lid, _)
             if arena.is_lident(lid.txt, "::") || arena.is_lident(lid.txt, "[]") =>
@@ -411,7 +413,7 @@ pub fn is_huggable_rhs(arena: &ParseArena, expr: &Expression) -> bool {
     match &*expr.pexp_desc {
         ExpressionDesc::Pexp_array(_)
         | ExpressionDesc::Pexp_tuple(_)
-        | ExpressionDesc::Pexp_record(_, _) => true,
+        | ExpressionDesc::Pexp_record(_) => true,
         ExpressionDesc::Pexp_extension(ext) if arena.get_string(ext.0.txt) == "obj" => true,
         _ if is_braced_expr(arena, expr) => true,
         _ => false,
@@ -466,7 +468,8 @@ pub fn is_binary_operator(arena: &crate::parse_arena::ParseArena, lid: &Longiden
 /// Check if an expression is a unary expression.
 pub fn is_unary_expression(arena: &crate::parse_arena::ParseArena, expr: &Expression) -> bool {
     match &*expr.pexp_desc {
-        ExpressionDesc::Pexp_apply { funct, args, .. } => {
+        ExpressionDesc::Pexp_apply(inner) => {
+                    let PexpApply { funct, args, .. } = *inner;
             if args.len() != 1 {
                 return false;
             }
@@ -523,7 +526,7 @@ pub fn should_inline_rhs_binary_expr(expr: &Expression) -> bool {
             | ExpressionDesc::Pexp_while(_, _)
             | ExpressionDesc::Pexp_try(_, _)
             | ExpressionDesc::Pexp_array(_)
-            | ExpressionDesc::Pexp_record(_, _)
+            | ExpressionDesc::Pexp_record(Box::new((_, _)))
     )
 }
 
@@ -700,14 +703,13 @@ pub fn fun_expr<'a>(arena: &ParseArena, expr: &'a Expression) -> (bool, Vec<FunP
 
     loop {
         match &*current.pexp_desc {
-            ExpressionDesc::Pexp_fun {
-                arg_label,
+            ExpressionDesc::Pexp_fun(inner) => {
+                    let PexpFun { arg_label,
                 default,
                 lhs,
                 rhs,
                 arity,
-                is_async: expr_is_async,
-            } => {
+                is_async: expr_is_async, } = *inner;
                 // Check is_async on the FIRST Pexp_fun we encounter
                 // (it may be nested inside Pexp_newtype)
                 if !found_first_pexp_fun {
@@ -1084,13 +1086,12 @@ pub fn not_ghost_operator(op: &str, is_ghost: bool) -> bool {
 /// Returns a reference to the inner apply expression if it matches.
 pub fn get_underscore_apply_inner<'a>(arena: &ParseArena, expr: &'a Expression) -> Option<&'a Expression> {
     match &*expr.pexp_desc {
-        ExpressionDesc::Pexp_fun {
-            arg_label: ArgLabel::Nolabel,
+        ExpressionDesc::Pexp_fun(inner) => {
+                    let PexpFun { arg_label: ArgLabel::Nolabel,
             default: None,
             lhs,
             rhs,
-            ..
-        } => {
+            .. } = *inner;
             // Check if pattern is `__x`
             if let PatternDesc::Ppat_var(name) = &*lhs.ppat_desc {
                 if arena.get_string(name.txt) == "__x" {
@@ -1162,7 +1163,8 @@ pub fn arrow_type<'a>(
         }
 
         match &*typ.ptyp_desc {
-            CoreTypeDesc::Ptyp_arrow { arg, ret, arity } => {
+            CoreTypeDesc::Ptyp_arrow(inner) => {
+                    let (arg, ret, arity) = *inner;
                 // Stop at explicitly-aritied arrow if we already have arguments
                 // Arity is now ArityIdx, look up to check if it's Full
                 if arena.get_arity(*arity).is_some() && !acc.is_empty() && arg.attrs.is_empty() {
@@ -1212,7 +1214,8 @@ pub fn arrow_type<'a>(
     }
 
     match &*typ.ptyp_desc {
-        CoreTypeDesc::Ptyp_arrow { .. } => {
+        CoreTypeDesc::Ptyp_arrow(inner) => {
+                    let (..) = *inner;
             // Start processing with the type's attributes as attrs_before,
             // and process the type without those attributes
             process(arena, &typ.ptyp_attributes, Vec::new(), typ, max_arity)
@@ -1261,7 +1264,8 @@ pub struct FunctorParam<'a> {
 pub fn mod_expr_functor(mod_expr: &ModuleExpr) -> (Vec<FunctorParam<'_>>, &ModuleExpr) {
     fn loop_functor<'a>(acc: Vec<FunctorParam<'a>>, mod_expr: &'a ModuleExpr) -> (Vec<FunctorParam<'a>>, &'a ModuleExpr) {
         match &*mod_expr.pmod_desc {
-            ModuleExprDesc::Pmod_functor(lbl, mod_type, return_mod_expr) => {
+            ModuleExprDesc::Pmod_functor(inner) => {
+                    let (lbl, mod_type, return_mod_expr) = *inner;
                 let param = FunctorParam {
                     attrs: &mod_expr.pmod_attributes,
                     lbl,
@@ -1290,7 +1294,8 @@ pub fn has_await_attribute(arena: &ParseArena, attrs: &Attributes) -> bool {
 /// Check if an expression is `Array.get(arr, idx)`.
 pub fn is_array_access(arena: &crate::parse_arena::ParseArena, expr: &Expression) -> bool {
     match &*expr.pexp_desc {
-        ExpressionDesc::Pexp_apply { funct, args, .. } => {
+        ExpressionDesc::Pexp_apply(inner) => {
+                    let PexpApply { funct, args, .. } = *inner;
             if args.len() != 2 {
                 return false;
             }
@@ -1312,7 +1317,8 @@ pub fn is_array_access(arena: &crate::parse_arena::ParseArena, expr: &Expression
 /// Check if an expression is `Array.set(arr, idx, value)`.
 pub fn is_array_set(arena: &crate::parse_arena::ParseArena, expr: &Expression) -> bool {
     match &*expr.pexp_desc {
-        ExpressionDesc::Pexp_apply { funct, args, .. } => {
+        ExpressionDesc::Pexp_apply(inner) => {
+                    let PexpApply { funct, args, .. } = *inner;
             if args.len() != 3 {
                 return false;
             }
@@ -1334,7 +1340,8 @@ pub fn is_array_set(arena: &crate::parse_arena::ParseArena, expr: &Expression) -
 /// Check if an expression is `String.get(str, idx)`.
 pub fn is_string_access(arena: &crate::parse_arena::ParseArena, expr: &Expression) -> bool {
     match &*expr.pexp_desc {
-        ExpressionDesc::Pexp_apply { funct, args, .. } => {
+        ExpressionDesc::Pexp_apply(inner) => {
+                    let PexpApply { funct, args, .. } = *inner;
             if args.len() != 2 {
                 return false;
             }
