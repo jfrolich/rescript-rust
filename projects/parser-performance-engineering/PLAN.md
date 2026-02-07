@@ -271,49 +271,86 @@ enum ExpressionDesc {
 }
 ```
 
+#### 2.4 Generalized Sparse Data / Side Tables
+
+**Current**: Various AST fields carry `Option<T>` data that is None >80% of the time. Each unused Option still takes 8-24 bytes per node.
+
+**Proposed**: Move rarely-used optional fields to side tables keyed by node index. Candidates: `Pexp_fun`'s default argument, extension nodes, optional type annotations. Only nodes that actually use the field pay storage cost. This is Kelley's sparse data pattern: "When 90% of a field's values are the default, don't store the field in the struct at all."
+
 ### Tier 3: Medium Impact, Low-Medium Effort
 
-#### 3.1 Strategic `#[inline]` Annotations
+#### 3.1 Hot/Cold Split of Parser Struct
+
+**Current**: Parser struct is ~280 bytes (18+ fields) spanning 4-5 cache lines. The inner parsing loop only touches ~50 bytes (token, positions, scanner).
+
+**Proposed**: Move cold fields (`breadcrumbs`, `diagnostics`, `comments`, `regions`, depth counters, `current_type_name_path`, `inline_types_found`) to a separate `ParserColdState` accessed via pointer. Keeps the hot parsing loop within 1 cache line.
+
+#### 3.2 Strategic `#[inline]` Annotations
 
 **Current**: Compiler decides inlining heuristics.
 
 **Proposed**: Profile-guided `#[inline]` and `#[inline(always)]` on hot scanner/parser methods like `next()`, `peek()`, `scan()`, `expect()`.
 
-#### 3.2 Lookup Tables for Character Classification
+#### 3.3 Lookup Tables for Character Classification
 
 **Current**: Character classification uses match statements or if-chains.
 
 **Proposed**: 256-byte lookup tables for ASCII character properties (is_ident_start, is_digit, is_whitespace, etc.). Single array index instead of branching.
 
-#### 3.3 Marshal Vec Pre-allocation
+#### 3.4 Marshal Vec Pre-allocation
 
 **Current**: `MarshalWriter` grows its `Vec<u8>` buffer dynamically.
 
 **Proposed**: Pre-allocate based on source file size heuristic (e.g., 4x source size for binary AST output). Avoids repeated reallocation during serialization.
 
-#### 3.4 SmallVec for AST Nodes
+#### 3.5 SmallVec for AST Nodes
 
 **Current**: AST nodes use `Vec<T>` for children (e.g., function args, tuple elements).
 
 **Proposed**: Use `SmallVec<[T; N]>` for common small collections (most functions have 1-3 args, most tuples have 2-3 elements). Avoids heap allocation for typical cases.
 
-#### 3.5 Optimize `is_binary_op` and Precedence Lookup
+#### 3.6 Optimize `is_binary_op` and Precedence Lookup
 
 **Current**: Operator precedence uses a match on Token enum.
 
 **Proposed**: Encode precedence directly in the token kind (e.g., as a byte alongside the kind discriminant), eliminating the match.
 
-#### 3.6 Optimize Breadcrumb Management
+#### 3.7 Optimize Breadcrumb Management
 
 **Current**: Breadcrumbs (grammar context stack) use `Vec<Grammar>` with push/pop.
 
 **Proposed**: Use a fixed-size stack (array + index) for breadcrumbs, since maximum nesting depth is bounded. Avoids Vec allocation and bounds checks.
 
-### Removed: Token Kind/Value Split (SoA for Tokens)
+#### 2.5 Token Kind/Value Split
 
-**Previously proposed**: Split `Token` enum into `TokenKind` (1-2 bytes) + separate `TokenValue` storage.
+**Current**: `Token<'a>` is a single enum (~40-48 bytes) where the discriminant and payload are bundled. 100 of 117 variants are zero-sized (keywords, punctuation), but the enum is sized for the largest variant. The parser's inner loop constantly matches on token kinds.
 
-**Removed because**: The parser processes one token at a time — there is no token array to SoA-ify. SoA benefits come from processing arrays of homogeneous data with better cache locality. With a single `Token<'a>` field in the Parser struct, splitting kind from value just adds indirection. The 367 token clones across parser files are almost all `Cow<'a, str>` payload extractions (`name.clone().into_owned()`), which SoA wouldn't help with. The Roc 12% SoA speedup was for AST node data-oriented design, not single-token processing.
+**Proposed**: Split into `TokenKind` (1-2 byte enum, no data) + separate `TokenPayload` (accessed only when needed). Store as separate fields in the Parser struct. The inner parsing loop operates on the 1-byte `TokenKind`, and only accesses `TokenPayload` when constructing AST nodes.
+
+**Expected impact**: A 1-byte discriminant means 64 token kind checks fit in a single cache line vs ~1 with the current 48-byte enum. Even with single-token-at-a-time processing, the smaller discriminant improves branch prediction and reduces the Parser struct's cache footprint. Evidence: Zig compiler reduced tokens from 64 bytes to 5 bytes, achieving **22% faster** tokenization (Kelley).
+
+**Approach**:
+```rust
+enum TokenKind { Lident, Uident, Int, Float, String, If, Let, ... }  // 1-2 bytes
+enum TokenPayload<'a> {
+    None,
+    String(Cow<'a, str>),
+    Int { value: Cow<'a, str>, suffix: Option<char> },
+    // ...
+}
+// In Parser:
+struct Parser<'src> {
+    token_kind: TokenKind,           // hot: checked constantly
+    token_payload: TokenPayload<'src>, // cold: accessed only for AST construction
+    // ...
+}
+```
+
+#### 2.6 Marshal Sharing Tables: HashMap → Arena-Indexed Vec
+
+**Current**: MarshalWriter has 17 HashMaps for identity-based sharing. Each AST node triggers 8-12 random HashMap lookups — guaranteed cache misses.
+
+**Proposed**: Since most keys are already arena indices (`PosIdx`, `LocIdx`, `StrIdx`), replace HashMaps with `Vec<Option<u32>>` indexed directly by the arena index. O(1) lookup with no hashing, no pointer chasing. Pre-size based on arena counts.
 
 #### Super-Flat AST Packing
 

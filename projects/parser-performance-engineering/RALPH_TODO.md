@@ -1,7 +1,7 @@
 # Parser Performance Engineering TODO
 
 **Last Updated:** 2026-02-07
-**Status:** 4/19 tasks complete
+**Status:** 3/23 tasks complete
 
 **Baseline:** Rust is 2-5x faster on small files (<10KB), ~0.7-1.0x on large files (20-60KB).
 **Goal:** Maximize Rust parser speed across all file sizes while preserving byte-for-byte binary AST parity.
@@ -34,23 +34,31 @@ These target the AST node representation, where the biggest memory and cache win
 
 - [ ] **2.2 Attributes side table** ⚠️ HIGH PRIORITY — Most AST nodes have empty `Vec<Attribute>`. Move attributes to a side table (`HashMap<NodeId, Vec<Attribute>>` or `Vec<Option<Vec<Attribute>>>`) instead of storing inline on every node. Reduces the size of every Expression, Pattern, and CoreType by ~24 bytes (Vec overhead). ~95% of nodes have empty attributes, so this is almost pure waste. ECS-inspired optimization. Files: `ast.rs`, all parsing modules, PPX, marshal.
 
-- [ ] **2.3 Index-based AST (ExprIdx/PatIdx into ParseArena)** — Replace `Box<Expression>` with `ExprIdx(u32)` indices into flat `Vec<Expression>` pools in `ParseArena`. Similarly for Pattern, CoreType, etc. This extends the existing arena pattern (`LocIdx`, `StrIdx`, `LidentIdx`, `ArityIdx`) to all AST nodes. Eliminates all heap allocation for AST nodes, makes the entire AST a flat array with excellent cache locality. 32-bit indices are half the size of 64-bit pointers. Evidence: Adrian Sampson measured 2.4x speedup (38% of original time was `free()` alone; even excluding deallocation, 1.5x faster from cache locality). Sorbet uses this exact pattern (`NameRef`, `SymbolRef` as u32 indices). Files: `ast.rs`, `parse_arena.rs`, all parsing modules, PPX, marshal.
+- [ ] **2.3 Index-based AST (ExprIdx/PatIdx into ParseArena)** — Replace `Box<Expression>` with `ExprIdx(u32)` indices into flat `Vec<Expression>` pools in `ParseArena`. Similarly for Pattern, CoreType, etc. This extends the existing arena pattern (`LocIdx`, `StrIdx`, `LidentIdx`, `ArityIdx`) to all AST nodes. Eliminates all heap allocation for AST nodes (currently 5-15 Box allocations per expression), makes the entire AST a flat array with excellent cache locality. 32-bit indices are half the size of 64-bit pointers. Evidence: Adrian Sampson measured 2.4x speedup (38% of original time was `free()` alone; even excluding deallocation, 1.5x faster from cache locality). Sorbet uses this exact pattern (`NameRef`, `SymbolRef` as u32 indices). **DOD bonus:** Bottom-up construction means children always have lower indices than parents — depth-first traversal becomes a linear forward scan through the array, which the CPU prefetcher can predict perfectly (Sampson measured additional 8.2% from this). Files: `ast.rs`, `parse_arena.rs`, all parsing modules, PPX, marshal.
+
+- [ ] **2.4 Generalized sparse data / side tables** — Beyond attributes (2.2), identify all `Option<T>` and `Option<Box<T>>` fields that are None >80% of the time and move them to side tables keyed by node index. Candidates: `Pexp_fun`'s default argument (`Option<Expression>`, rarely used), extension nodes on expressions (almost never present), optional type annotations. Each eliminated Option saves 8-24 bytes per node in the common case. Kelley's sparse data pattern: "When 90% of a field's values are the default, don't store the field in the struct at all." Files: `ast.rs`, all parsing modules, PPX, marshal.
+
+- [ ] **2.5 Token kind/value split** — Split `Token<'a>` enum (~40-48 bytes) into a small `TokenKind` enum (1-2 bytes, no data) + separate `TokenPayload` storage accessed only when needed. 100 of 117 variants are zero-sized (keywords, punctuation); only 17 carry payloads. The parser's inner loop constantly checks token kinds — a 1-byte discriminant means 64 token checks per cache line vs ~1 with the current 48-byte enum. Even though the parser processes one token at a time, the smaller discriminant improves branch prediction and reduces the working set of the Parser struct. Evidence: Zig compiler reduced tokens from 64 bytes to 5 bytes with 22% speedup. Approach: `TokenKind` enum for the discriminant, `TokenPayload` union/enum for the rare data, stored as separate fields in the Parser struct. Files: `token.rs`, `state.rs`, all parsing modules.
+
+- [ ] **2.6 Marshal sharing tables: HashMap → arena-indexed Vec** — The MarshalWriter has 17 HashMaps for identity-based sharing. Each AST node triggers 8-12 random HashMap lookups across different tables — guaranteed cache misses. Since most keys are already arena indices (`PosIdx`, `LocIdx`, `StrIdx`), replace HashMaps with `Vec<Option<u32>>` indexed by the arena index directly. O(1) lookup with no hashing, no random pointer chasing. Pre-size based on arena counts (we know exact sizes). This could significantly speed up serialization. Files: `binary_ast/marshal.rs`.
 
 ---
 
 ## Tier 3: Medium Impact, Low-Medium Effort
 
-- [ ] **3.1 Strategic `#[inline]` annotations** — Profile to identify hot functions. Add `#[inline]` or `#[inline(always)]` on scanner `next()`, `peek()`, `scan_token()` and parser `expect()`, `advance()`, `next()`. Benchmark each annotation individually — `#[inline(always)]` can hurt if it bloats the caller. Files: `scanner.rs`, `state.rs`.
+- [ ] **3.1 Hot/cold split of Parser struct** — The Parser struct is ~280 bytes (18+ fields) spanning 4-5 cache lines, but the inner parsing loop only touches ~50 bytes: `token`, position fields, `scanner`. Cold fields (`breadcrumbs`, `diagnostics`, `comments`, `regions`, depth counters, `current_type_name_path`, `inline_types_found`) should be moved to a separate `ParserColdState` accessed via pointer. Keeps the hot parsing loop within 1 cache line. Files: `state.rs`.
 
-- [ ] **3.2 Lookup tables for character classification** — Replace match/if-chain character classification with 256-byte ASCII lookup tables. One array index instead of branching for `is_ident_start`, `is_ident_part`, `is_digit`, `is_whitespace`, etc. Files: `scanner.rs`.
+- [ ] **3.2 Strategic `#[inline]` annotations** — Profile to identify hot functions. Add `#[inline]` or `#[inline(always)]` on scanner `next()`, `peek()`, `scan_token()` and parser `expect()`, `advance()`, `next()`. Benchmark each annotation individually — `#[inline(always)]` can hurt if it bloats the caller. Files: `scanner.rs`, `state.rs`.
 
-- [ ] **3.3 Marshal Vec pre-allocation** — Pre-allocate `MarshalWriter` buffer based on source file size heuristic (e.g., 4x source bytes). Avoids repeated reallocation during serialization. Currently starts at 4KB. Files: `binary_ast/marshal.rs`, `binary_ast/writer.rs`.
+- [ ] **3.3 Lookup tables for character classification** — Replace match/if-chain character classification with 256-byte ASCII lookup tables. One array index instead of branching for `is_ident_start`, `is_ident_part`, `is_digit`, `is_whitespace`, etc. Files: `scanner.rs`.
 
-- [ ] **3.4 SmallVec for AST nodes** — Replace `Vec<T>` with `SmallVec<[T; N]>` for common small collections. Targets: function args (N=3), tuple elements (N=3), record fields (N=4), type params (N=2). Avoids heap allocation for typical cases. Add `smallvec` dependency. Files: `ast.rs`, all parsing modules.
+- [ ] **3.4 Marshal Vec pre-allocation** — Pre-allocate `MarshalWriter` buffer based on source file size heuristic (e.g., 4x source bytes). Avoids repeated reallocation during serialization. Currently starts at 4KB. Files: `binary_ast/marshal.rs`, `binary_ast/writer.rs`.
 
-- [ ] **3.5 Optimize binary op precedence lookup** — Encode operator precedence directly in token kind (e.g., as a byte alongside the discriminant) instead of a match dispatch. The `is_binary_op` / `get_precedence` path is hit on every expression. Files: `token.rs`, `expr.rs`.
+- [ ] **3.5 SmallVec for AST nodes** — Replace `Vec<T>` with `SmallVec<[T; N]>` for common small collections. Targets: function args (N=3), tuple elements (N=3), record fields (N=4), type params (N=2). Typical lengths are 1-3 items but Vec allocates minimum capacity of 4. Avoids heap allocation for typical cases. Add `smallvec` dependency. Files: `ast.rs`, all parsing modules.
 
-- [ ] **3.6 Optimize breadcrumb management** — Replace `Vec<(Grammar, Position)>` breadcrumb stack with a fixed-size array + index. Maximum nesting depth is bounded. Avoids Vec allocation, bounds checks, and potential reallocation. Files: `state.rs`.
+- [ ] **3.6 Optimize binary op precedence lookup** — Encode operator precedence directly in token kind (e.g., as a byte alongside the discriminant) instead of a match dispatch. The `is_binary_op` / `get_precedence` path is hit on every expression. Files: `token.rs`, `expr.rs`.
+
+- [ ] **3.7 Optimize breadcrumb management** — Replace `Vec<(Grammar, Position)>` breadcrumb stack with a fixed-size array + index. Maximum nesting depth is bounded. Avoids Vec allocation, bounds checks, and potential reallocation. Files: `state.rs`.
 
 ---
 
@@ -102,18 +110,28 @@ Evidence for key optimizations:
 | Arena allocation (bumpalo) | OXC parser | ~20% speedup |
 | Enum size enforcement (16 bytes) | OXC parser | ~10% speedup |
 | Span compression (u32 offsets) | OXC parser | ~5% speedup |
-| Data-oriented design (AST nodes) | Roc compiler (Tweede golf blog) | 12% speedup, 12% less memory |
+| Hot/cold data splitting | Roc compiler (Tweede golf blog) | 12% speedup, 12% less memory |
 | Index-based flat AST | Adrian Sampson (Cornell) | 2.4x speedup (38% was free() alone) |
+| Linear scan of flat AST | Adrian Sampson (Cornell) | Additional 8.2% on top of flattening |
 | Super-flat 8-byte nodes | jhwlr.io | ~3x memory reduction |
+| SoA tokens (64B → 5B) | Zig compiler (Kelley) | 22% faster tokenization |
+| SoA AST nodes (120B → 15.6B) | Zig compiler (Kelley) | 22% faster parse |
+| Sparse data in side tables | Kelley DOD talk | Reduced per-entity footprint 50% |
 | String interning | Sorbet (Stripe) | Integer comparison vs string comparison |
 | Precomputed char/byte arrays | Already done (commit 558e262ff) | 41x on JSX benchmark |
+| Remove virtual dispatch | Muratori | 1.5x from eliminating indirection |
+| Full DOD pipeline | jhwlr.io | 3x throughput, 65% less memory |
 
 Key resources:
 - OXC performance: https://oxc.rs/docs/learn/performance
 - Flattening ASTs: https://www.cs.cornell.edu/~asampson/blog/flattening.html
-- Roc SoA: https://tweedegolf.nl/en/blog/88/data-oriented-design
+- Roc hot/cold splitting: https://tweedegolf.nl/en/blog/88/data-oriented-design
 - Why Sorbet is fast: https://blog.nelhage.com/post/why-sorbet-is-fast/
 - Super-flat AST: https://jhwlr.io/super-flat-ast/
+- Kelley DOD (Zig): https://www.josherich.me/podcast/andrew-kelley-practical-data-oriented-design-dod
+- Mike Acton DOD talk: https://www.youtube.com/watch?v=rX0ItVEVjHc
+- Muratori "Clean Code" perf: https://www.computerenhance.com/p/clean-code-horrible-performance
+- Pointer chasing vs linear: https://en.algorithmica.org/hpc/cpu-cache/pointers/
 
 ---
 
@@ -121,9 +139,9 @@ Key resources:
 
 - **No `Rc`/`Arc`** — Do not use `Rc<T>` or `Arc<T>`. They prevent sharing memory between threads and are slower than arena allocation. Use arena indices, bump-allocated references, or owned/borrowed data instead. The existing `Rc<str>` in the Interner (from task 1.3) must be removed — see task 1.4.
 - The scanner currently precomputes `Vec<char>` and `Vec<usize>` (byte offsets) upfront — this was the first optimization (41x improvement on JSX benchmark). Task 1.1 replaces this with direct byte-level scanning.
-- Token enum has ~117 variants but only 17 carry payloads. The enum is ~40-48 bytes. Task 1.2 (zero-copy Cow) addresses string payloads; task 2.1 (16-byte enums) addresses enum size. Note: Token SoA was removed — the parser processes one token at a time (no token array to SoA-ify), and the 367 token clones are almost all Cow payload extractions that SoA wouldn't help with.
+- Token enum has ~117 variants but only 17 carry payloads. The enum is ~40-48 bytes. Task 1.2 (zero-copy Cow) addresses string payloads; task 2.1 (16-byte enums) addresses enum size; task 2.5 (token kind/value split) separates the 1-byte discriminant from the rare payloads for better cache utilization.
 - The parser already uses arena indices (`PosIdx`, `LocIdx`, `StrIdx`, `LidentIdx`, `ArityIdx`) for position/location/string sharing. Task 3.1 extends this pattern to all AST nodes (ExprIdx, PatIdx, CoreTypeIdx).
 - ExpressionDesc has 28 variants, PatternDesc 17, CoreTypeDesc 11. The largest variants (Pexp_fun with 6 fields ~100+ bytes, Pexp_apply with Vec ~60 bytes) dominate enum size while 85%+ of variants need <16 bytes. Boxing large variants per 2.1 is the quick win; 2.3/4.3 are the deeper refactors.
-- MarshalWriter uses ~15 HashMap-based sharing tables. These are correctness-critical for binary parity. Don't optimize them unless profiling shows they're a bottleneck.
+- MarshalWriter uses 17 HashMap-based sharing tables. These are correctness-critical for binary parity. Task 2.6 proposes replacing them with arena-indexed Vec lookups (O(1), no hashing). Must verify parity is preserved.
 - Lookahead parsing (`lookahead_depth > 0`) skips arena allocations to avoid polluting position indices. Any scanner/parser changes must preserve this behavior.
 - The marshal/PPX code does extensive pattern matching on AST desc enums (87+ matches for ExpressionDesc alone). Index-based AST (3.1) changes access patterns from `match expr.pexp_desc` to `match arena.get_expr(expr_idx).pexp_desc` — more verbose but not fundamentally different.

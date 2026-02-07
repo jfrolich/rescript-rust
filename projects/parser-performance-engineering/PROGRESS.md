@@ -12,9 +12,9 @@
 
 | Tier | Description | Status | Progress |
 |------|-------------|--------|----------|
-| Tier 1 | High Impact: Scanner + Token | 🚧 In Progress | 4/6 |
-| Tier 2 | High Impact: AST Memory Layout | ⏳ Not Started | 0/3 |
-| Tier 3 | Medium Impact: Misc Optimizations | ⏳ Not Started | 0/6 |
+| Tier 1 | High Impact: Scanner + Token | 🚧 In Progress | 3/6 |
+| Tier 2 | High Impact: AST + Token Layout | ⏳ Not Started | 0/6 |
+| Tier 3 | Medium Impact: DOD + Misc | ⏳ Not Started | 0/7 |
 | Tier 4 | Architectural | ⏳ Not Started | 0/4 |
 
 ---
@@ -99,50 +99,69 @@ cargo test --release --lib -- benchmark_all --ignored --nocapture
 - [ ] **2.3 Index-based AST (ExprIdx/PatIdx)**
   - Replace `Box<Expression>` with `ExprIdx(u32)` into flat `Vec<Expression>` pools
   - Extends existing arena pattern (LocIdx, StrIdx, etc.)
-  - Eliminates per-node heap allocation, excellent cache locality
-  - Evidence: 2.4x speedup (Sampson), used by Sorbet
+  - Eliminates per-node heap allocation (currently 5-15 Box allocs per expression)
+  - Bottom-up construction → linear forward scan for traversal (prefetcher-friendly)
+  - Evidence: 2.4x speedup (Sampson) + 8.2% bonus from linear scan
   - Files: `ast.rs`, `parse_arena.rs`, all parsing modules, PPX, marshal
+
+- [ ] **2.4 Generalized sparse data / side tables**
+  - Beyond attributes: move all Option<T> fields that are None >80% of the time to side tables
+  - Candidates: Pexp_fun default arg, extension nodes, optional type annotations
+  - Each eliminated Option saves 8-24 bytes per node in common case
+  - Files: `ast.rs`, all parsing modules, PPX, marshal
+
+- [ ] **2.5 Token kind/value split**
+  - Split Token<'a> (~48 bytes) into TokenKind (1-2 bytes) + separate TokenPayload
+  - 100/117 variants are zero-sized; 1-byte discriminant = 64 checks/cache line
+  - Evidence: Zig compiler 64B→5B tokens, 22% speedup (Kelley)
+  - Files: `token.rs`, `state.rs`, all parsing modules
+
+- [ ] **2.6 Marshal sharing tables: HashMap → arena-indexed Vec**
+  - 17 HashMaps trigger 8-12 random lookups per AST node — cache miss city
+  - Keys are mostly arena indices (PosIdx, LocIdx, StrIdx) — use Vec<Option<u32>> instead
+  - O(1) indexed lookup, no hashing, no pointer chasing, pre-sized from arena counts
+  - Files: `binary_ast/marshal.rs`
 
 ---
 
 ## Tier 3 Progress: Medium Impact, Low-Medium Effort
 
-- [ ] **3.1 Strategic `#[inline]` annotations**
+- [ ] **3.1 Hot/cold split of Parser struct**
+  - Parser is ~280 bytes (18+ fields, 4-5 cache lines), only ~50 bytes hot
+  - Hot: token, positions, scanner. Cold: breadcrumbs, diagnostics, comments, regions
+  - Move cold fields to separate ParserColdState — keep hot loop in 1 cache line
+  - Files: `state.rs`
+
+- [ ] **3.2 Strategic `#[inline]` annotations**
   - Profile to identify hot functions
   - Add `#[inline]` to scanner `next()`, `peek()`, `scan()`
   - Add `#[inline]` to parser `expect()`, `advance()`
   - Files: `scanner.rs`, `state.rs`
 
-- [ ] **3.2 Lookup tables for character classification**
+- [ ] **3.3 Lookup tables for character classification**
   - 256-byte tables for is_ident_start, is_digit, is_whitespace
   - Single array index instead of match/if-chain
   - Files: `scanner.rs`
 
-- [ ] **3.3 Marshal Vec pre-allocation**
+- [ ] **3.4 Marshal Vec pre-allocation**
   - Pre-allocate `MarshalWriter` buffer based on source file size
   - Heuristic: ~4x source size for binary AST
   - Files: `binary_ast/marshal.rs`, `binary_ast/writer.rs`
 
-- [ ] **3.4 SmallVec for AST nodes**
+- [ ] **3.5 SmallVec for AST nodes**
   - Replace `Vec<T>` with `SmallVec<[T; N]>` for small collections
-  - Targets: function args (N=3), tuple elements (N=3), record fields (N=4)
+  - Typical lengths: apply args 1-3, tuple 2-4, record fields 2-8
   - Files: `ast.rs`, all parsing modules
 
-- [ ] **3.5 Optimize `is_binary_op` and precedence lookup**
+- [ ] **3.6 Optimize `is_binary_op` and precedence lookup**
   - Encode precedence in token kind byte
   - Eliminate match dispatch for precedence checks
   - Files: `token.rs`, `expr.rs`
 
-- [ ] **3.6 Optimize breadcrumb management**
+- [ ] **3.7 Optimize breadcrumb management**
   - Fixed-size stack (array + index) instead of Vec<Grammar>
   - Bounded max nesting depth
   - Files: `state.rs`
-
----
-
-## Removed: Token SoA (previously 2.1)
-
-Token kind/value split was removed. Analysis showed the parser processes one token at a time (no token array to SoA-ify). The 367 token clones are almost all `Cow<'a, str>` payload extractions, not enum-structure overhead. The Roc 12% SoA speedup was for AST data-oriented design, not single-token processing.
 
 ---
 
