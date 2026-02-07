@@ -17,7 +17,7 @@
 use crate::intern::StrIdx;
 use crate::location::{Location as FullLocation, Located as OldLocated};
 use crate::parse_arena::{Located, LocIdx, ParseArena};
-use crate::parser::ast::{self as current};
+use crate::parser::ast::{self as current, PexpFun, PexpApply};
 use crate::parser::longident::Longident;
 
 use super::parsetree0 as pt0;

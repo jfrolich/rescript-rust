@@ -19,6 +19,7 @@ use crate::parser::ast::{
 };
 use crate::parse_arena::{LidentIdx, ParseArena};
 use crate::parser::longident::Longident;
+use crate::parser::ast::{PexpFun, PexpApply};
 
 /// A set of module dependencies, sorted for deterministic output.
 pub type Dependencies = BTreeSet<String>;

@@ -24,7 +24,7 @@ use crate::parser::ast::{
     RowField, SignatureItem, SignatureItemDesc, StructureItem, StructureItemDesc, TypeArg,
     TypeDeclaration, TypeExtension, TypeKind, ValueBinding, ValueDescription, Variance,
     WithConstraint, ConstructorArguments, ConstructorDeclaration, StringLoc,
-    Extension,
+    Extension, PexpFun, PexpApply,
 };
 
 // ========== Attribute list sharing ==========

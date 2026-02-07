@@ -17,6 +17,7 @@ use crate::parser::ast::{
     PatternDesc, RowField, SignatureItem,
     SignatureItemDesc, StructureItem, StructureItemDesc, TypeDeclaration,
     TypeExtension, TypeKind, ValueBinding, ValueDescription, WithConstraint,
+    PexpApply,
 };
 use crate::parser::ast::Payload::{PPat, PSig, PStr, PTyp};
 use crate::parser::comment::Comment;

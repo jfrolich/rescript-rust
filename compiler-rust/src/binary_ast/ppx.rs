@@ -26,6 +26,7 @@ use crate::parser::ast::{
     ModuleTypeDesc, ObjectField, Pattern, PatternDesc, PatternRecordField, Payload, PrivateFlag,
     RecFlag, RowField, SignatureItem, SignatureItemDesc, StructureItem, StructureItemDesc,
     TypeArg, TypeDeclaration, TypeKind, ValueBinding, ValueDescription,
+    PexpFun, PexpApply,
 };
 use crate::parser::longident::Longident;
 

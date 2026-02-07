@@ -31,6 +31,7 @@ use crate::location::Location;
 use crate::parse_arena::{LidentIdx, Located, LocIdx, ParseArena, StrIdx};
 use crate::parser::ast::{
     ArgLabel, Expression as ParsedExpression, Pattern as ParsedPattern, RecFlag,
+    PexpFun, PexpApply,
 };
 use crate::parser::longident::Longident;
 use crate::types::typedtree::{

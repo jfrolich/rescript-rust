@@ -23,6 +23,7 @@ use crate::parser::ast::{self as current};
 use crate::parser::longident::Longident;
 
 use super::parsetree0 as pt0;
+use crate::parser::ast::{PexpFun, PexpApply};
 
 // ========== Public API ==========
 
