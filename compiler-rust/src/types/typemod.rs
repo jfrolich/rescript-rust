@@ -296,12 +296,31 @@ fn translate_module_type_to_decl<'a>(
             Ok(DeclMty::MtySignature(items))
         }
         PMtyDesc::Pmty_ident(lid) => {
-            // Module type identifier — try to look it up
+            // Module type identifier — look up as module type (not module)
             let longident = arena.get_longident(lid.txt);
-            if let Some(mty) = lookup_module_type_by_lid(longident, arena, env, &mut tctx.persistent_env, tctx.type_ctx) {
-                Ok(mty)
-            } else {
-                Ok(DeclMty::MtySignature(vec![]))
+            match longident {
+                crate::parser::longident::Longident::Lident(idx) => {
+                    let name = arena.get_string(*idx);
+                    if let Ok(mtd) = env.find_modtype(name) {
+                        if let Some(mty) = &mtd.mtd_type {
+                            return Ok(mty.clone());
+                        }
+                    }
+                    // Fallback: try as module (for cases like `module type of M`)
+                    if let Some(mty) = lookup_module_type_by_lid(longident, arena, env, &mut tctx.persistent_env, tctx.type_ctx) {
+                        Ok(mty)
+                    } else {
+                        Ok(DeclMty::MtySignature(vec![]))
+                    }
+                }
+                _ => {
+                    // For dotted paths, try module lookup as fallback
+                    if let Some(mty) = lookup_module_type_by_lid(longident, arena, env, &mut tctx.persistent_env, tctx.type_ctx) {
+                        Ok(mty)
+                    } else {
+                        Ok(DeclMty::MtySignature(vec![]))
+                    }
+                }
             }
         }
         _ => Ok(DeclMty::MtySignature(vec![])),
@@ -538,15 +557,26 @@ pub fn type_module_expr<'a>(
             // Functor: (X: S) => ME
             let param_id = Ident::create_local(arena.get_string(name.txt));
 
-            // Type check the functor body
-            // In a full implementation, we would extend the environment with the parameter
-            let typed_body = type_module_expr(tctx, env, arena, body)?;
-
-            // Translate parameter type if present
+            // Translate parameter type and extend environment with the functor parameter
             let typed_param_type = match param_type {
                 Some(pt) => Some(Box::new(transl_modtype(tctx, env, arena, pt)?)),
                 None => None,
             };
+
+            // Extend environment with the functor parameter module
+            let mut functor_env = env.clone();
+            if let Some(pt) = param_type {
+                if let Ok(param_decl_type) = translate_module_type_to_decl(tctx, env, arena, pt) {
+                    functor_env.add_module(param_id.clone(), crate::types::decl::ModuleDeclaration {
+                        md_type: param_decl_type,
+                        md_attributes: vec![],
+                        md_loc: crate::location::Location::none(),
+                    });
+                }
+            }
+
+            // Type check the functor body with the extended environment
+            let typed_body = type_module_expr(tctx, &functor_env, arena, body)?;
 
             Ok(ModuleExpr {
                 mod_desc: ModuleExprDesc::Tmod_functor(
@@ -1990,6 +2020,15 @@ fn type_structure_item<'a>(
                 None => None,
             };
 
+            let mtd_id_clone = mtd_id.clone();
+
+            // Convert the typed module type to a decl-level modtype declaration
+            let decl_mtd_type = if let Some(mt) = &mtd.pmtd_type {
+                translate_module_type_to_decl(tctx, env, arena, mt).ok()
+            } else {
+                None
+            };
+
             let desc = StructureItemDesc::Tstr_modtype(ModuleTypeDeclaration {
                 mtd_id,
                 mtd_name: Located { txt: mtd_name_str.to_string(), loc: mtd.pmtd_name.loc },
@@ -1997,13 +2036,22 @@ fn type_structure_item<'a>(
                 mtd_attributes: mtd.pmtd_attributes.clone(),
                 mtd_loc: mtd.pmtd_loc,
             });
+
+            // Add the module type to the environment
+            let mut new_env = env.clone();
+            new_env.add_modtype(mtd_id_clone, crate::types::decl::ModtypeDeclaration {
+                mtd_type: decl_mtd_type,
+                mtd_attributes: vec![],
+                mtd_loc: crate::location::Location::none(),
+            });
+
             Ok((
                 StructureItem {
                     str_desc: desc,
                     str_loc: loc,
                     str_env: EnvRef(0),
                 },
-                env.clone(),
+                new_env,
             ))
         }
 
