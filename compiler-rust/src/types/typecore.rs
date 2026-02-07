@@ -1374,23 +1374,34 @@ fn type_pattern_construct(
 ) -> TypeCoreResult<Pattern> {
     let ctx = tctx.type_ctx;
 
-    // Look up constructor - first try local env, then module-qualified lookup
+    // Look up constructor with disambiguation following OCaml's approach:
+    // 1. For module-qualified constructors (Ldot), use direct module lookup
+    // 2. For unqualified constructors (Lident), use disambiguation considering expected type
     let lid_txt = tctx.arena.get_longident(lid.txt);
     let lid_name = tctx.longident_last_name(lid_txt);
-    let (cstr_desc, _cstr_path) = match env.find_constructor(&lid_name) {
-        Ok(desc) => (
-            desc.clone(),
-            Path::pident(Ident::create_persistent(lid_name)),
-        ),
-        Err(_) => {
-            match lookup_constructor_in_module(lid_txt, tctx.arena, env, &mut tctx.persistent_env, tctx.type_ctx) {
-                Some((path, desc)) => (desc, path),
-                None => {
-                    // Type-directed disambiguation: look at expected_ty to find the constructor
-                    match lookup_constructor_by_expected_type(&lid_name, expected_ty, env, &mut tctx.persistent_env, tctx.type_ctx) {
-                        Some((path, desc)) => (desc, path),
-                        None => return Err(TypeCoreError::NotAVariantType(lid_txt.clone())),
-                    }
+    let is_qualified = matches!(lid_txt, Longident::Ldot(..));
+    let (cstr_desc, _cstr_path) = if is_qualified {
+        // Module-qualified: use direct lookup
+        match lookup_constructor_in_module(lid_txt, tctx.arena, env, &mut tctx.persistent_env, tctx.type_ctx) {
+            Some((path, desc)) => (desc, path),
+            None => {
+                match env.find_constructor(&lid_name) {
+                    Ok(desc) => (
+                        desc.clone(),
+                        Path::pident(Ident::create_persistent(lid_name)),
+                    ),
+                    Err(_) => return Err(TypeCoreError::NotAVariantType(lid_txt.clone())),
+                }
+            }
+        }
+    } else {
+        // Unqualified: use disambiguation with expected type
+        match disambiguate_constructor(&lid_name, expected_ty, env, &mut tctx.persistent_env, tctx.type_ctx) {
+            Some((path, desc)) => (desc, path),
+            None => {
+                match lookup_constructor_in_module(lid_txt, tctx.arena, env, &mut tctx.persistent_env, tctx.type_ctx) {
+                    Some((path, desc)) => (desc, path),
+                    None => return Err(TypeCoreError::NotAVariantType(lid_txt.clone())),
                 }
             }
         }
@@ -2969,23 +2980,33 @@ fn type_construct(
     let ctx = tctx.type_ctx;
     let longident = tctx.resolve_lid(lid.txt).clone();
 
-    // Look up constructor - first try local env, then module-qualified lookup
+    // Look up constructor with disambiguation following OCaml's approach:
+    // 1. For module-qualified constructors (Ldot), use direct module lookup
+    // 2. For unqualified constructors (Lident), use disambiguation considering expected type
     let lid_name = tctx.longident_last_name(&longident);
-    let (_cstr_path, cstr_desc) = match env.find_constructor(&lid_name) {
-        Ok(desc) => (
-            Path::pident(Ident::create_persistent(lid_name)),
-            desc.clone(),
-        ),
-        Err(_) => {
-            // Try module-qualified constructor lookup for Ldot paths
-            match lookup_constructor_in_module(&longident, tctx.arena, env, &mut tctx.persistent_env, tctx.type_ctx) {
-                Some((path, desc)) => (path, desc),
-                None => {
-                    // Type-directed disambiguation: look at expected_ty to find the constructor
-                    match lookup_constructor_by_expected_type(&lid_name, expected_ty, env, &mut tctx.persistent_env, tctx.type_ctx) {
-                        Some((path, desc)) => (path, desc),
-                        None => return Err(TypeCoreError::NotAVariantType(longident)),
-                    }
+    let is_qualified = matches!(longident, Longident::Ldot(..));
+    let (_cstr_path, cstr_desc) = if is_qualified {
+        // Module-qualified: use direct lookup
+        match lookup_constructor_in_module(&longident, tctx.arena, env, &mut tctx.persistent_env, tctx.type_ctx) {
+            Some((path, desc)) => (path, desc),
+            None => {
+                match env.find_constructor(&lid_name) {
+                    Ok(desc) => (
+                        Path::pident(Ident::create_persistent(lid_name)),
+                        desc.clone(),
+                    ),
+                    Err(_) => return Err(TypeCoreError::NotAVariantType(longident)),
+                }
+            }
+        }
+    } else {
+        // Unqualified: use disambiguation with expected type
+        match disambiguate_constructor(&lid_name, expected_ty, env, &mut tctx.persistent_env, tctx.type_ctx) {
+            Some((path, desc)) => (path, desc),
+            None => {
+                match lookup_constructor_in_module(&longident, tctx.arena, env, &mut tctx.persistent_env, tctx.type_ctx) {
+                    Some((path, desc)) => (path, desc),
+                    None => return Err(TypeCoreError::NotAVariantType(longident)),
                 }
             }
         }
@@ -4471,6 +4492,90 @@ fn lookup_constructor_in_module<'b>(
         }
         _ => None,
     }
+}
+
+/// Extract the type path from a type expression if it's a concrete type constructor.
+/// Follows repr/Tlink chains, and for abstract types tries to expand through aliases.
+/// Returns the path from the Tconstr if found.
+fn extract_type_path_from_expected<'a>(
+    expected_ty: TypeExprRef,
+    env: &Env,
+    ctx: &'a crate::types::context::TypeContext<'a>,
+) -> Option<Path> {
+    let ty = ctx.repr(expected_ty);
+    let desc = ctx.get_desc(ty);
+    match &*desc {
+        TypeDesc::Tconstr { path, .. } => {
+            // Check if this is a concrete (non-abstract) type
+            if let Some(decl) = lookup_type_decl_for_path(path, env, ctx) {
+                match &decl.type_kind {
+                    crate::types::TypeKind::TypeAbstract => {
+                        // Abstract type - try to expand through manifest
+                        if let Some(manifest) = decl.type_manifest {
+                            drop(desc);
+                            return extract_type_path_from_expected(manifest, env, ctx);
+                        }
+                        None
+                    }
+                    _ => Some(path.clone()),
+                }
+            } else {
+                // Can't find decl, but the path might still work for matching
+                Some(path.clone())
+            }
+        }
+        _ => None,
+    }
+}
+
+/// Disambiguate a constructor by name, considering both the environment and
+/// the expected type. Follows OCaml's disambiguate pattern:
+/// 1. Try to extract the concrete variant type from expected_ty
+/// 2. Find all constructors with the given name in the env
+/// 3. If we have a type path from expected_ty, prefer the constructor matching that type
+/// 4. Otherwise fall back to the most recent constructor in scope
+fn disambiguate_constructor<'a>(
+    cstr_name: &str,
+    expected_ty: TypeExprRef,
+    env: &Env,
+    pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
+    ctx: &'a crate::types::context::TypeContext<'a>,
+) -> Option<(Path, crate::types::decl::ConstructorDescription)> {
+    // Step 1: Try to extract the variant type path from the expected type
+    let opath = extract_type_path_from_expected(expected_ty, env, ctx);
+
+    // Step 2: Find all constructors with this name
+    let all_constrs = env.find_all_constructors(cstr_name);
+
+    if all_constrs.is_empty() {
+        // No constructors found in env - try type-directed lookup
+        return lookup_constructor_by_expected_type(cstr_name, expected_ty, env, pers_env, ctx);
+    }
+
+    // Step 3: If we have a target type path, try to disambiguate
+    if let Some(ref target_path) = opath {
+        // Look for a constructor whose result type matches the expected type's path
+        for cstr in &all_constrs {
+            let cstr_ty = ctx.repr(cstr.cstr_res);
+            let cstr_desc = ctx.get_desc(cstr_ty);
+            if let TypeDesc::Tconstr { path: cstr_path, .. } = &*cstr_desc {
+                if cstr_path.same(target_path) {
+                    let path = Path::pident(Ident::create_persistent(cstr_name));
+                    return Some((path, (*cstr).clone()));
+                }
+            }
+        }
+        // No constructor in env matched the expected type - try type-directed lookup
+        // (the type might be defined in another module loaded from CMI)
+        if let Some(result) = lookup_constructor_by_expected_type(cstr_name, expected_ty, env, pers_env, ctx) {
+            return Some(result);
+        }
+    }
+
+    // Step 4: Fall back to the most recent constructor (last in the list = most recently added)
+    let cstr = all_constrs.last().unwrap();
+    let path = Path::pident(Ident::create_persistent(cstr_name));
+    Some((path, (*cstr).clone()))
 }
 
 /// Type-directed constructor disambiguation.

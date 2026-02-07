@@ -283,6 +283,30 @@ fn find_in_path(load_path: &[PathBuf], filename: &str) -> Option<String> {
 /// For each signature item, we add the appropriate binding to the environment.
 ///
 /// Uses "opened" add methods so that these bindings do NOT shadow existing
+/// Recursively register all types from a module type (and sub-modules) by stamp.
+/// This ensures that types referenced in function signatures can be expanded
+/// during type unification, even when the type comes from a deeply nested module.
+fn register_types_by_stamp_recursive(
+    md_type: &ModuleType,
+    ctx: &TypeContext<'_>,
+) {
+    if let ModuleType::MtySignature(sig) = md_type {
+        for item in sig {
+            match item {
+                SignatureItem::SigType(id, decl, _) => {
+                    if id.stamp() != 0 {
+                        ctx.register_type_decl_by_stamp(id.stamp(), decl.clone());
+                    }
+                }
+                SignatureItem::SigModule(_, md, _) => {
+                    register_types_by_stamp_recursive(&md.md_type, ctx);
+                }
+                _ => {}
+            }
+        }
+    }
+}
+
 /// local bindings. This matches OCaml's behavior where opened modules have
 /// lower lookup priority than local bindings (e.g., Predef types like `int`
 /// are not shadowed when Pervasives.cmi is opened).
@@ -318,6 +342,10 @@ pub fn add_signature_to_env(
 
                 // Also register in global type store for alias expansion
                 ctx.register_type_decl(id.name(), decl.clone());
+                // Register by stamp for types from CMI modules (non-zero stamp)
+                if id.stamp() != 0 {
+                    ctx.register_type_decl_by_stamp(id.stamp(), decl.clone());
+                }
 
                 // Also add constructors and labels from this type
                 match &decl.type_kind {
@@ -423,6 +451,9 @@ pub fn add_signature_to_env(
                 } else {
                     env.add_module(id.clone(), md.clone());
                 }
+                // Recursively register types from sub-module signatures by stamp,
+                // so that types referenced in function return types can be expanded
+                register_types_by_stamp_recursive(&md.md_type, ctx);
             }
             SignatureItem::SigModtype(id, mtd) => {
                 if as_opened {

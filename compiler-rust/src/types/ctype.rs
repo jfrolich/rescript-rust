@@ -405,23 +405,27 @@ pub fn resolve_type_through_modules<'a>(
         current_sig = found_sig?;
     }
 
-    // Find the type in the final signature
+    // Register ALL types in the final signature by stamp for future lookups.
+    // This is important because type manifests may reference sibling types
+    // (e.g., type component<'a> = componentLike<'a, element>), and those
+    // sibling types need to be available for expansion later.
+    let mut result = None;
     for item in &current_sig {
         if let SignatureItem::SigType(id, decl, _) = item {
+            // Register every type by stamp
+            if id.stamp() != 0 {
+                ctx.register_type_decl_by_stamp(id.stamp(), decl.clone());
+            }
             if id.name() == *type_name {
-                // Cache in the path store for future lookups
+                // Cache the target type in the path store
                 let path_name = path.name();
                 ctx.register_type_decl_by_path(&path_name, decl.clone());
-                // Also register by stamp if available
-                if id.stamp() != 0 {
-                    ctx.register_type_decl_by_stamp(id.stamp(), decl.clone());
-                }
-                return Some(decl.clone());
+                result = Some(decl.clone());
             }
         }
     }
 
-    None
+    result
 }
 
 /// Try to expand a type alias (type abbreviation).
@@ -587,8 +591,8 @@ fn try_expand_head<'a>(
                 }
             }
 
-            // 3. Try env by name
-            if let Ok(env_decl) = env.find_type(&name) {
+            // 3. Try env by path (ident-based first, then name fallback)
+            if let Ok(env_decl) = env.lookup_type(&path) {
                 if let Some(manifest) = env_decl.type_manifest {
                     let params = &env_decl.type_params;
                     if params.is_empty() {
@@ -617,6 +621,30 @@ fn try_expand_head<'a>(
         }
         _ => None,
     }
+}
+
+/// Fully expand a type through all aliases until it can't be expanded further.
+/// Like OCaml's expand_head_opt: repeatedly calls try_expand_head until stable.
+fn expand_head<'a>(
+    ctx: &'a TypeContext<'a>,
+    env: &Env,
+    ty: TypeExprRef,
+) -> TypeExprRef {
+    let mut current = ctx.repr(ty);
+    // Limit iterations to prevent infinite loops
+    for _ in 0..20 {
+        match try_expand_head(ctx, env, current) {
+            Some(expanded) => {
+                let expanded = ctx.repr(expanded);
+                if expanded == current {
+                    break;
+                }
+                current = expanded;
+            }
+            None => break,
+        }
+    }
+    current
 }
 
 /// Substitute type parameters in a type expression.
@@ -866,17 +894,14 @@ fn unify_types<'a>(
                     return Ok(());
                 }
 
-                // Try expanding type aliases before giving up
+                // Try fully expanding type aliases before giving up
                 drop(desc1);
                 drop(desc2);
                 if let Some(env) = state.env() {
-                    // Try expanding left side
-                    if let Some(expanded1) = try_expand_head(ctx, env, t1) {
-                        return unify(ctx, state, expanded1, t2);
-                    }
-                    // Try expanding right side
-                    if let Some(expanded2) = try_expand_head(ctx, env, t2) {
-                        return unify(ctx, state, t1, expanded2);
+                    let exp1 = expand_head(ctx, env, t1);
+                    let exp2 = expand_head(ctx, env, t2);
+                    if exp1 != t1 || exp2 != t2 {
+                        return unify(ctx, state, exp1, exp2);
                     }
                 }
                 return Err(TypeError::Unify(vec![(t1, t2)]));
@@ -1101,23 +1126,21 @@ fn unify_types<'a>(
             unify(ctx, state, t1, body)
         }
 
-        // Types don't match — try expanding type aliases as last resort
+        // Types don't match — try fully expanding type aliases as last resort
         _ => {
-            // Check if either side is a Tconstr that can be expanded
             let is_constr1 = matches!(&*desc1, TypeDesc::Tconstr { .. });
             let is_constr2 = matches!(&*desc2, TypeDesc::Tconstr { .. });
             drop(desc1);
             drop(desc2);
 
-            if let Some(env) = state.env() {
-                if is_constr1 {
-                    if let Some(expanded1) = try_expand_head(ctx, env, t1) {
-                        return unify(ctx, state, expanded1, t2);
-                    }
-                }
-                if is_constr2 {
-                    if let Some(expanded2) = try_expand_head(ctx, env, t2) {
-                        return unify(ctx, state, t1, expanded2);
+            if (is_constr1 || is_constr2) {
+                if let Some(env) = state.env() {
+                    // Fully expand both sides through all aliases
+                    let exp1 = if is_constr1 { expand_head(ctx, env, t1) } else { t1 };
+                    let exp2 = if is_constr2 { expand_head(ctx, env, t2) } else { t2 };
+                    // Only retry if at least one side actually changed
+                    if exp1 != t1 || exp2 != t2 {
+                        return unify(ctx, state, exp1, exp2);
                     }
                 }
             }
