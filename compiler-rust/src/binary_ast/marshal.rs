@@ -24,6 +24,7 @@
 //! - OCaml runtime: runtime/extern.c
 //! - OCaml runtime: runtime/caml/intext.h
 
+use std::borrow::Cow;
 use std::collections::HashMap;
 
 use crate::location::{Location, Position};
@@ -157,9 +158,9 @@ pub struct MarshalWriter {
     /// Used to share repeated `Spice.*` longidents constructed as constants.
     longident_value_table: HashMap<Longident, u32>,
 
-    /// Maps Option<String> values to object counter (for content-based sharing)
+    /// Maps Option<Cow<'static, str>> values to object counter (for content-based sharing)
     /// This enables sharing of common delimiter values like Some("js")
-    option_string_table: HashMap<Option<String>, u32>,
+    option_string_table: HashMap<Option<Cow<'static, str>>, u32>,
 
     /// Maps string values to object counter (for content-based sharing)
     /// Used for shared constant strings in PPX output (e.g. spice keys, delimiters).
@@ -1476,10 +1477,10 @@ impl MarshalWriter {
     ///
     /// - None → integer 0
     /// - Some(s) → Block(tag=0, [s]) with content-based sharing
-    pub fn write_option_string(&mut self, opt: &Option<String>) {
+    pub fn write_option_string(&mut self, opt: &Option<Cow<'static, str>>) {
         // OCaml does not reliably share Some("json") wrappers across contexts.
         // Avoid global content-based sharing for this delimiter.
-        if matches!(opt, Some(s) if s == "json") {
+        if matches!(opt, Some(s) if &**s == "json") {
             self.write_block_header(0, 1);
             match opt {
                 Some(s) => self.write_str(s),

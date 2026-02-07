@@ -844,7 +844,7 @@ impl Marshal for CoreType {
         // object, subsequent writes with the same (name, loc) emit shared references.
         if let CoreTypeDesc::Ptyp_var(name) = &self.ptyp_desc {
             if self.ptyp_attributes.is_empty() {
-                let key = (name.clone(), self.ptyp_loc);
+                let key = (name.to_string(), self.ptyp_loc);
                 if let Some(&obj_idx) = w.tyvar_core_type_table_get(&key) {
                     let d = w.obj_counter() - obj_idx;
                     w.write_shared_ref(d);

@@ -119,7 +119,8 @@ impl Marshal for Constant {
                 w.write_block_header(2, 2);
                 w.write_str(s);
                 // Use content-based sharing for string delimiters like Some("js")
-                w.write_option_string(opt);
+                let cow_opt: Option<std::borrow::Cow<'static, str>> = opt.clone().map(std::borrow::Cow::Owned);
+                w.write_option_string(&cow_opt);
             }
             Constant::Float(s, opt) => {
                 w.write_block_header(3, 2);

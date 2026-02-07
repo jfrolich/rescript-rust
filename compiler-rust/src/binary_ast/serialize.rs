@@ -3,6 +3,8 @@
 //! This module defines the `Marshal` trait that types implement to serialize
 //! themselves to the OCaml Marshal format.
 
+use std::borrow::Cow;
+
 use super::marshal::MarshalWriter;
 
 /// Trait for types that can be serialized to OCaml Marshal format
@@ -56,6 +58,13 @@ impl Marshal for String {
 impl Marshal for str {
     /// Strings from source identifiers are Latin-1 encoded (each byte → char),
     /// so we convert back to Latin-1 to match OCaml's byte-level representation.
+    fn marshal(&self, w: &mut MarshalWriter) {
+        w.write_str(self);
+    }
+}
+
+impl Marshal for Cow<'static, str> {
+    /// Cow<'static, str> delegates to the underlying str slice.
     fn marshal(&self, w: &mut MarshalWriter) {
         w.write_str(self);
     }
