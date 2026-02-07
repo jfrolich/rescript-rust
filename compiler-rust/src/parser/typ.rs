@@ -180,7 +180,7 @@ pub fn parse_poly_type_expr(p: &mut Parser<'_>) -> CoreType {
             let var_start_idx = p.start_pos_idx();
             let name = match &p.token {
                 Token::Lident(n) | Token::Uident(n) => {
-                    let n = n.clone();
+                    let n = n.to_string();
                     p.next();
                     n
                 }
@@ -276,7 +276,7 @@ fn parse_type_alias(p: &mut Parser<'_>, typ: CoreType) -> CoreType {
         p.expect(Token::SingleQuote);
         let var_name = match &p.token {
             Token::Lident(name) | Token::Uident(name) => {
-                let name = name.clone();
+                let name = name.to_string();
                 p.next();
                 name
             }
@@ -459,10 +459,10 @@ fn parse_attribute_id(p: &mut Parser<'_>) -> StrIdx {
     let mut id = String::new();
     loop {
         let name = match &p.token {
-            Token::Lident(name) | Token::Uident(name) => Some(name.clone()),
+            Token::Lident(name) | Token::Uident(name) => Some(name.to_string()),
             // Keywords can also be used as attribute names
             Token::As => Some("as".to_string()),
-            Token::String(s) => Some(s.clone()),
+            Token::String(s) => Some(s.to_string()),
             _ => None,
         };
         match name {
@@ -525,7 +525,7 @@ fn parse_atomic_typ_expr_with_start(
                 // OCaml: special case for EOF - emit unexpected token error
                 let (name, var_loc) = if p.token == Token::Eof {
                     p.err(DiagnosticCategory::Unexpected {
-                        token: p.token.clone(),
+                        token: p.token.clone().into_owned(),
                         context: vec![],
                     });
                     (String::new(), p.mk_loc_idx_to_prev_end(var_start_idx))
@@ -707,11 +707,11 @@ fn parse_type_constr_with_start(p: &mut Parser<'_>, outer_start_pos_idx: Option<
     let start_pos_idx = outer_start_pos_idx.unwrap_or_else(|| p.start_pos_idx());
 
     // Parse the path
-    let mut path_parts = vec![];
+    let mut path_parts: Vec<String> = vec![];
     loop {
         match &p.token {
             Token::Lident(name) | Token::Uident(name) => {
-                path_parts.push(name.clone());
+                path_parts.push(name.to_string());
                 p.next();
             }
             _ => break,
@@ -857,7 +857,7 @@ fn parse_type_args(p: &mut Parser<'_>) -> Vec<CoreType> {
                     break;
                 } else {
                     p.err(DiagnosticCategory::unexpected(
-                        p.token.clone(),
+                        p.token.clone().into_owned(),
                         p.breadcrumbs().to_vec(),
                     ));
                     p.next();
@@ -1248,14 +1248,14 @@ fn parse_lident(p: &mut Parser<'_>) -> (String, Location) {
     let start_pos_idx = p.start_pos_idx();
     match &p.token {
         Token::Lident(name) => {
-            let name = name.clone();
+            let name = name.to_string();
             p.next();
             let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
             (name, loc)
         }
         _ => {
             // OCaml uses Lident diagnostic here which produces context-sensitive error
-            p.err(DiagnosticCategory::Lident(p.token.clone()));
+            p.err(DiagnosticCategory::Lident(p.token.clone().into_owned()));
             p.next(); // Consume the invalid token
             let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
             ("_".to_string(), loc)
@@ -1337,7 +1337,7 @@ fn parse_attribute(p: &mut Parser<'_>) -> Option<Attribute> {
 fn parse_attribute_payload(p: &mut Parser<'_>) -> Payload {
     match &p.token {
         Token::String(s) => {
-            let value = s.clone();
+            let value = s.clone().into_owned();
             let tag = get_string_tag(p);
             // Capture start_pos before consuming the token
             let start_pos_idx = p.start_pos_idx();
@@ -1564,8 +1564,8 @@ fn parse_object_fields(p: &mut Parser<'_>) -> Vec<ObjectField> {
 
         // Handle optional field: name?: typ
         let name = match &p.token {
-            Token::Lident(n) => Some(n.clone()),
-            Token::String(s) => Some(s.clone()),
+            Token::Lident(n) => Some(n.to_string()),
+            Token::String(s) => Some(s.to_string()),
             _ => None,
         };
         match name {
@@ -1701,7 +1701,7 @@ fn parse_poly_variant_type(p: &mut Parser<'_>) -> CoreType {
         while p.token == Token::Hash {
             p.next();
             if let Token::Lident(name) | Token::Uident(name) = &p.token {
-                tags.push(name.clone());
+                tags.push(name.to_string());
                 p.next();
             }
         }
@@ -1726,13 +1726,13 @@ fn parse_poly_variant_type_simple(p: &mut Parser<'_>) -> CoreType {
 
     let tag = match &p.token {
         Token::Lident(name) | Token::Uident(name) => {
-            let name = name.clone();
+            let name = name.to_string();
             p.next();
             name
         }
         Token::Int { i, suffix } => {
             // Clone values before borrowing p mutably
-            let tag = i.clone();
+            let tag = i.to_string();
             let has_suffix = suffix.is_some();
             // OCaml: emit error if numeric poly variant has a suffix
             if has_suffix {
@@ -1745,7 +1745,7 @@ fn parse_poly_variant_type_simple(p: &mut Parser<'_>) -> CoreType {
             tag
         }
         Token::String(s) => {
-            let tag = s.clone();
+            let tag = s.to_string();
             p.next();
             tag
         }
@@ -1879,7 +1879,7 @@ fn parse_row_fields_no_marker(p: &mut Parser<'_>) -> Vec<RowField> {
         // Not a valid start - generate error and recover
         // For [...] syntax, OCaml generates TWO type holes (variant needs at least 2 options)
         p.err(DiagnosticCategory::Unexpected {
-            token: p.token.clone(),
+            token: p.token.clone().into_owned(),
             context: vec![],
         });
         // Create two typeholes as recovery
@@ -1969,7 +1969,7 @@ fn parse_row_fields_with_required_first(p: &mut Parser<'_>) -> Vec<RowField> {
         // Not a valid start - generate error and recover
         // This includes the case where token is ] (empty [< ] is invalid)
         p.err(DiagnosticCategory::Unexpected {
-            token: p.token.clone(),
+            token: p.token.clone().into_owned(),
             context: vec![],
         });
         // Create a typehole as recovery
@@ -1998,14 +1998,14 @@ fn parse_single_row_field_with_attrs(p: &mut Parser<'_>, attrs: Attributes) -> O
         p.next();
         let tag = match &p.token {
             Token::Lident(name) | Token::Uident(name) => {
-                let name = name.clone();
+                let name = name.to_string();
                 let loc = p.mk_loc_idx_to_end(hash_start_idx);
                 p.next();
                 with_loc(name, loc)
             }
             Token::Int { i, suffix } => {
                 // Clone values before borrowing p mutably
-                let tag = i.clone();
+                let tag = i.to_string();
                 let has_suffix = suffix.is_some();
                 let loc = p.mk_loc_idx_to_end(hash_start_idx);
                 // OCaml: emit error if numeric poly variant has a suffix
@@ -2019,7 +2019,7 @@ fn parse_single_row_field_with_attrs(p: &mut Parser<'_>, attrs: Attributes) -> O
                 with_loc(tag, loc)
             }
             Token::String(s) => {
-                let tag = s.clone();
+                let tag = s.to_string();
                 let loc = p.mk_loc_idx_to_end(hash_start_idx);
                 p.next();
                 with_loc(tag, loc)
@@ -2125,14 +2125,14 @@ fn parse_row_fields(p: &mut Parser<'_>) -> Vec<RowField> {
             p.next();
             let tag = match &p.token {
                 Token::Lident(name) | Token::Uident(name) => {
-                    let name = name.clone();
+                    let name = name.to_string();
                     let loc = p.mk_loc_idx_to_end(hash_start_idx);
                     p.next();
                     with_loc(name, loc)
                 }
                 Token::Int { i, suffix } => {
                     // Clone values before borrowing p mutably
-                    let tag = i.clone();
+                    let tag = i.to_string();
                     let has_suffix = suffix.is_some();
                     let loc = p.mk_loc_idx_to_end(hash_start_idx);
                     // OCaml: emit error if numeric poly variant has a suffix
@@ -2146,7 +2146,7 @@ fn parse_row_fields(p: &mut Parser<'_>) -> Vec<RowField> {
                     with_loc(tag, loc)
                 }
                 Token::String(s) => {
-                    let tag = s.clone();
+                    let tag = s.to_string();
                     let loc = p.mk_loc_idx_to_end(hash_start_idx);
                     p.next();
                     with_loc(tag, loc)
@@ -2313,10 +2313,10 @@ fn parse_package_type_with_parens(
 /// Parse a module long identifier.
 fn parse_module_long_ident(p: &mut Parser<'_>) -> super::ast::Loc<crate::parse_arena::LidentIdx> {
     let start_pos_idx = p.start_pos_idx();
-    let mut path_parts = vec![];
+    let mut path_parts: Vec<String> = vec![];
 
     while let Token::Uident(name) = &p.token {
-        path_parts.push(name.clone());
+        path_parts.push(name.to_string());
         p.next();
         if p.token == Token::Dot {
             p.next();
@@ -2328,7 +2328,7 @@ fn parse_module_long_ident(p: &mut Parser<'_>) -> super::ast::Loc<crate::parse_a
     if path_parts.is_empty() {
         // Allow lowercase module identifiers in some contexts (e.g. module type names).
         if let Token::Lident(name) = &p.token {
-            path_parts.push(name.clone());
+            path_parts.push(name.to_string());
             p.next();
         } else {
             p.err(DiagnosticCategory::Message(
@@ -2347,12 +2347,12 @@ fn parse_module_long_ident(p: &mut Parser<'_>) -> super::ast::Loc<crate::parse_a
 /// Parse a type long identifier (module path ending in a type name).
 fn parse_type_long_ident(p: &mut Parser<'_>) -> super::ast::Loc<crate::parse_arena::LidentIdx> {
     let start_pos_idx = p.start_pos_idx();
-    let mut path_parts = vec![];
+    let mut path_parts: Vec<String> = vec![];
 
     loop {
         match &p.token {
             Token::Uident(name) => {
-                path_parts.push(name.clone());
+                path_parts.push(name.to_string());
                 p.next();
                 if p.token == Token::Dot {
                     p.next();
@@ -2361,7 +2361,7 @@ fn parse_type_long_ident(p: &mut Parser<'_>) -> super::ast::Loc<crate::parse_are
                 }
             }
             Token::Lident(name) => {
-                path_parts.push(name.clone());
+                path_parts.push(name.to_string());
                 p.next();
                 break;
             }
@@ -2416,7 +2416,7 @@ fn parse_extension(p: &mut Parser<'_>) -> Extension {
     loop {
         match &p.token {
             Token::Lident(name) | Token::Uident(name) => {
-                parts.push(name.clone());
+                parts.push(name.to_string());
                 p.next();
             }
             _ if p.token.is_keyword() => {
