@@ -538,7 +538,10 @@ fn try_expand_head<'a>(
                     if let Some(manifest) = store_decl.type_manifest {
                         let params = &store_decl.type_params;
                         if params.is_empty() {
-                            return Some(manifest);
+                            // Must copy the manifest to avoid corrupting the original
+                            // type declaration during unification (OCaml uses
+                            // instance_parameterized_type which always copies)
+                            return Some(instance(ctx, manifest));
                         } else if params.len() == args.len() {
                             return Some(subst_type(ctx, &params.clone(), &args, manifest));
                         }
@@ -554,7 +557,7 @@ fn try_expand_head<'a>(
                     if let Some(manifest) = store_decl.type_manifest {
                         let params = &store_decl.type_params;
                         if params.is_empty() {
-                            return Some(manifest);
+                            return Some(instance(ctx, manifest));
                         } else if params.len() == args.len() {
                             return Some(subst_type(ctx, &params.clone(), &args, manifest));
                         }
@@ -567,7 +570,7 @@ fn try_expand_head<'a>(
                     if let Some(manifest) = resolved_decl.type_manifest {
                         let params = &resolved_decl.type_params;
                         if params.is_empty() {
-                            return Some(manifest);
+                            return Some(instance(ctx, manifest));
                         } else if params.len() == args.len() {
                             return Some(subst_type(ctx, &params.clone(), &args, manifest));
                         }
@@ -582,7 +585,7 @@ fn try_expand_head<'a>(
                     if let Some(manifest) = decl.type_manifest {
                         let params = &decl.type_params;
                         if params.is_empty() {
-                            return Some(manifest);
+                            return Some(instance(ctx, manifest));
                         } else if params.len() == args.len() {
                             return Some(subst_type(ctx, &params.clone(), &args, manifest));
                         }
@@ -596,7 +599,7 @@ fn try_expand_head<'a>(
                 if let Some(manifest) = env_decl.type_manifest {
                     let params = &env_decl.type_params;
                     if params.is_empty() {
-                        return Some(manifest);
+                        return Some(instance(ctx, manifest));
                     } else if params.len() == args.len() {
                         return Some(subst_type(ctx, &params.clone(), &args, manifest));
                     }
@@ -610,7 +613,7 @@ fn try_expand_head<'a>(
                 if let Some(manifest) = store_decl.type_manifest {
                     let params = &store_decl.type_params;
                     if params.is_empty() {
-                        return Some(manifest);
+                        return Some(instance(ctx, manifest));
                     } else if params.len() == args.len() {
                         return Some(subst_type(ctx, &params.clone(), &args, manifest));
                     }
@@ -814,23 +817,37 @@ fn unify_types<'a>(
             Ok(())
         }
 
-        // Arrow types
+        // Arrow types - propagate arity during unification
         (
             TypeDesc::Tarrow {
                 arg: arg1,
                 ret: ret1,
+                arity: a1,
                 ..
             },
             TypeDesc::Tarrow {
                 arg: arg2,
                 ret: ret2,
+                arity: a2,
                 ..
             },
         ) => {
+            // Check arities: if both have explicit arities, they must match
+            // (matches OCaml's `when a1 = a2` guard behavior)
+            if a1.is_some() && a2.is_some() && a1 != a2 {
+                drop(desc1);
+                drop(desc2);
+                return Err(TypeError::Unify(vec![(t1, t2)]));
+            }
+
             let arg1_typ = arg1.typ;
             let ret1 = *ret1;
             let arg2_typ = arg2.typ;
             let ret2 = *ret2;
+            // Propagate arity: if one side has arity and the other doesn't,
+            // we need to update the surviving side (t2) to carry the arity.
+            let need_arity_update = a1.is_some() && a2.is_none();
+            let arity_to_set = *a1;
             drop(desc1);
             drop(desc2);
 
@@ -838,6 +855,23 @@ fn unify_types<'a>(
             unify(ctx, state, arg1_typ, arg2_typ)?;
             // Unify return types
             unify(ctx, state, ret1, ret2)?;
+
+            // Propagate arity from t1 to t2 if t2 lacks it
+            if need_arity_update {
+                let desc = ctx.get_desc(t2);
+                if let TypeDesc::Tarrow { arg, ret, commutable, .. } = &*desc {
+                    let new_desc = TypeDesc::Tarrow {
+                        arg: arg.clone(),
+                        ret: *ret,
+                        commutable: commutable.clone(),
+                        arity: arity_to_set,
+                    };
+                    drop(desc);
+                    ctx.set_desc(t2, new_desc);
+                } else {
+                    drop(desc);
+                }
+            }
 
             link_type(ctx, t1, t2);
             Ok(())
