@@ -1469,7 +1469,7 @@ pub fn encode_external(vd: &ValueDescription, arena: &mut ParseArena) -> Encoded
         Some(name) => arena.get_string(*name).to_string(),
         None => return EncodedExternal {
             pval_prim: vd.pval_prim.clone(),
-            pval_attributes: vd.pval_attributes.clone().into_vec(),
+            pval_attributes: vd.pval_attributes.clone(),
         },
     };
 
@@ -1477,7 +1477,7 @@ pub fn encode_external(vd: &ValueDescription, arena: &mut ParseArena) -> Encoded
     if !is_rs_external(&vd.pval_attributes, &vd.pval_prim, arena) {
         return EncodedExternal {
             pval_prim: vd.pval_prim.clone(),
-            pval_attributes: vd.pval_attributes.clone().into_vec(),
+            pval_attributes: vd.pval_attributes.clone(),
         };
     }
 
@@ -2760,7 +2760,7 @@ fn handle_raw(
         );
         let mut attrs = vec![internal_expansive];
         attrs.extend(payload_attributes);
-        Attributes::from_vec(attrs)
+        attrs
     } else {
         payload_attributes
     };
@@ -2988,7 +2988,7 @@ fn handle_private_extension(
             pmod_loc: combined_loc,
             pmod_attributes: Attributes::new(),
         },
-        pmb_attributes: Attributes::from_vec(vec![internal_local_attr]),
+        pmb_attributes: vec![internal_local_attr],
         pmb_loc: combined_loc,
     };
 
@@ -3991,7 +3991,7 @@ fn destruct_open_tuple_inner<'a>(
                 flag: *flag,
                 lid: *lid,
                 loc: e.pexp_loc,
-                attrs: e.pexp_attributes.clone().into_vec(),
+                attrs: e.pexp_attributes.clone(),
             });
             destruct_open_tuple_inner(cont, acc)
         }
@@ -7119,7 +7119,7 @@ fn handle_abstract_tdcl(
                         },
                         pval_type: setter_type,
                         pval_prim: vec![prim_as_idx],
-                        pval_attributes: Attributes::from_vec(vec![make_set_attr(loc, arena)]),
+                        pval_attributes: vec![make_set_attr(loc, arena)],
                         pval_loc: label.pld_loc,
                     };
                     // Setter comes before accessor in OCaml's prepend order

@@ -1967,7 +1967,7 @@ fn print_expr_fun_parameters(
             label: ArgLabel::Nolabel,
             default_expr: None,
             pat,
-        }] if parsetree_viewer::filter_parsing_attrs(arena, &attrs.to_vec()).is_empty()
+        }] if parsetree_viewer::filter_parsing_attrs_slice(arena, attrs).is_empty()
             && matches!(&*pat.ppat_desc, PatternDesc::Ppat_any) =>
         {
             let doc = if has_constraint {
@@ -1984,7 +1984,7 @@ fn print_expr_fun_parameters(
             label: ArgLabel::Nolabel,
             default_expr: None,
             pat,
-        }] if parsetree_viewer::filter_parsing_attrs(arena, &attrs.to_vec()).is_empty()
+        }] if parsetree_viewer::filter_parsing_attrs_slice(arena, attrs).is_empty()
             && matches!(&*pat.ppat_desc, PatternDesc::Ppat_var(_))
             && pat.ppat_attributes.is_empty() =>
         {
@@ -2001,7 +2001,7 @@ fn print_expr_fun_parameters(
             label: ArgLabel::Nolabel,
             default_expr: None,
             pat,
-        }] if parsetree_viewer::filter_parsing_attrs(arena, &attrs.to_vec()).is_empty()
+        }] if parsetree_viewer::filter_parsing_attrs_slice(arena, attrs).is_empty()
             && matches!(
                 &*pat.ppat_desc,
                 PatternDesc::Ppat_construct(lid, None)
@@ -2504,8 +2504,10 @@ fn print_ternary_expression(
     let attrs: Vec<&Attribute> = parsetree_viewer::filter_ternary_attributes(arena, &e.pexp_attributes);
 
     // Check if any of the printable attributes need parens wrapping
+    let collected: Vec<_> = attrs.iter().map(|a| (*a).clone()).collect();
+    let collected_attrs = collected;
     let needs_parens = parsetree_viewer::filter_parsing_attrs(
-        arena, &attrs.iter().map(|a| (*a).clone()).collect::<Vec<_>>()
+        arena, &collected_attrs
     ).iter().any(|attr| parsetree_viewer::is_printable_attribute(arena, attr));
 
     let attrs_doc = print_attributes(state, &attrs.into_iter().cloned().collect::<Vec<_>>(), cmt_tbl, arena);
