@@ -18,6 +18,8 @@
 
 8. **Do not count OCaml failures as parity failures** - Parity denominators must include only files where OCaml succeeds for that check. Track OCaml-failing files separately.
 
+9. **Blacklist dual-failure files** - If a file fails in both OCaml and Rust for the same check, add it to the explicit blacklist in `scripts/test_parser_ast_parity.sh` (`find ... -not -path` exclusions) and note it in this TODO. These files are out of parity scope until the OCaml side succeeds.
+
 ---
 
 ## Current Status

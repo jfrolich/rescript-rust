@@ -75,11 +75,13 @@ Read `RALPH_TODO.md` and complete the next unchecked task. After completing a ta
 
 9. **Exclude OCaml-failing files from parity denominators** - Do not count files where OCaml fails as Rust parity failures. Track OCaml failures separately and compute parity percentages only over OCaml-successful files.
 
-10. **Do NOT defer large tasks** - Task size is not a reason to defer or block. If a task requires touching 30+ files, that's fine—just do the implementation. Break it into smaller commits if needed, but complete the work. The goal is completion, not avoiding complexity.
+10. **Blacklist dual-failure files** - If a file fails in both OCaml and Rust for the same check, add it to the explicit blacklist in `scripts/test_parser_ast_parity.sh` (the `find ... -not -path` exclusions) and note it in `RALPH_TODO.md`. Do not spend parity-fix time on files that the OCaml reference parser/compiler cannot process.
 
-11. **Do NOT accept bugs as "fundamental limitations"** - If you find incorrect behavior (like content-based position caching when OCaml uses pointer identity), this is a BUG to fix, not a "structural limitation" to document and move on. The goal is exact byte parity with OCaml. Any difference is a bug. Do not rationalize differences as acceptable.
+11. **Do NOT defer large tasks** - Task size is not a reason to defer or block. If a task requires touching 30+ files, that's fine—just do the implementation. Break it into smaller commits if needed, but complete the work. The goal is completion, not avoiding complexity.
 
-12. **Use explicit `Idx` type names** - Do NOT create aliases like `type Arity = ArityIdx` or similar shortcuts. While it might reduce the number of changes needed, it creates confusion. Always use the explicit indexed type name (e.g., `ArityIdx`, `PosIdx`, `LocIdx`). If you encounter such aliases in the code, replace them with the explicit `Idx` names.
+12. **Do NOT accept bugs as "fundamental limitations"** - If you find incorrect behavior (like content-based position caching when OCaml uses pointer identity), this is a BUG to fix, not a "structural limitation" to document and move on. The goal is exact byte parity with OCaml. Any difference is a bug. Do not rationalize differences as acceptable.
+
+13. **Use explicit `Idx` type names** - Do NOT create aliases like `type Arity = ArityIdx` or similar shortcuts. While it might reduce the number of changes needed, it creates confusion. Always use the explicit indexed type name (e.g., `ArityIdx`, `PosIdx`, `LocIdx`). If you encounter such aliases in the code, replace them with the explicit `Idx` names.
 
 ## Key Files
 
