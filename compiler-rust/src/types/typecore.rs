@@ -1503,7 +1503,7 @@ fn type_pattern_variant(
     };
 
     // For polymorphic variants, we need a row type
-    // Simplified - full implementation needs proper row types
+    // TODO: Full Tvariant row type construction requires mutable row_more for field accumulation
     let variant_ty = ctx.new_var(None);
     unify_pattern_types(tctx, loc, variant_ty, expected_ty)?;
 
@@ -2604,9 +2604,11 @@ fn type_application(
                 Some((lbl, arg, ret)) => (Some(lbl), arg, ret),
                 None => {
                     // Not a function type yet - create arrow type with arity
+                    // Use the call-site label (like OCaml's type_unknown_args)
                     let arg_ty = ctx.new_var(None);
                     let ret_ty = ctx.new_var(None);
-                    let arrow_ty = ctx.new_arrow(crate::types::ArgLabel::Nolabel, arg_ty, ret_ty, top_arity);
+                    let ctx_label = convert_arg_label_for_ctx(label, tctx.arena);
+                    let arrow_ty = ctx.new_arrow(ctx_label, arg_ty, ret_ty, top_arity);
                     unify_expression_types(tctx, loc, current_ty, arrow_ty, None)?;
                     (None, arg_ty, ret_ty)
                 }
@@ -3089,8 +3091,8 @@ fn type_variant(
         None
     };
 
-    // For polymorphic variants, create a row type
-    // This is simplified - full implementation needs row types
+    // For polymorphic variants, create a type variable
+    // TODO: Full Tvariant row type construction requires mutable row_more for field accumulation
     let variant_ty = ctx.new_var(None);
     unify_expression_types(tctx, loc, variant_ty, expected_ty, None)?;
 
@@ -4340,18 +4342,20 @@ impl Env {
                         // Use md_path if available (e.g., Pdot(Pident("Stdlib"), "Console")
                         // for Console from opened Stdlib), otherwise fall back to Pident.
                         let path = if let Some(ref qualified_path) = md.md_path {
-                            // If an alias was followed (resolved_name is Some),
-                            // rewrite type paths from the resolved module name
-                            // to the qualified access path.
-                            if let Some(ref old_name) = resolved_name {
-                                crate::cmi::persistent_env::rewrite_module_prefix_in_sig(
-                                    &sig, old_name, qualified_path, ctx,
-                                );
-                            }
                             qualified_path.clone()
                         } else {
                             Path::pident(Ident::create_local(mod_name))
                         };
+                        // If an alias was followed (resolved_name is Some),
+                        // rewrite type paths from the resolved module name
+                        // to the access path. This handles both:
+                        // - opened modules: Console from Stdlib → Pdot(Pident("Stdlib"), "Console")
+                        // - local aliases: module N = Belt.List → Pident("N")
+                        if let Some(ref old_name) = resolved_name {
+                            crate::cmi::persistent_env::rewrite_module_prefix_in_sig(
+                                &sig, old_name, &path, ctx,
+                            );
+                        }
                         return Some((path, sig));
                     }
                 }
