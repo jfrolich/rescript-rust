@@ -2844,7 +2844,48 @@ fn type_application(
 ) -> TypeCoreResult<Expression> {
     use crate::types::typedtree::ApplyArg;
 
+    fn parser_arg_label_name<'a>(label: &ArgLabel, arena: &'a ParseArena) -> &'a str {
+        match label {
+            ArgLabel::Nolabel => "",
+            ArgLabel::Labelled(loc) | ArgLabel::Optional(loc) => arena.get_string(loc.txt),
+        }
+    }
+
+    fn extract_label_index(
+        remaining_args: &[(ArgLabel, &ParsedExpression)],
+        label_name: &str,
+        arena: &ParseArena,
+    ) -> Option<usize> {
+        remaining_args
+            .iter()
+            .position(|(label, _)| parser_arg_label_name(label, arena) == label_name)
+    }
+
+    fn has_nolabel_arg(remaining_args: &[(ArgLabel, &ParsedExpression)]) -> bool {
+        remaining_args
+            .iter()
+            .any(|(label, _)| matches!(label, ArgLabel::Nolabel))
+    }
+
+    fn apply_arg_label_for_param(
+        param_label: &crate::types::ArgLabel,
+        call_label: &ArgLabel,
+    ) -> ArgLabel {
+        match param_label {
+            crate::types::ArgLabel::Nolabel => ArgLabel::Nolabel,
+            crate::types::ArgLabel::Labelled(_) => match call_label {
+                ArgLabel::Nolabel => ArgLabel::Nolabel,
+                ArgLabel::Labelled(loc) | ArgLabel::Optional(loc) => ArgLabel::Labelled(*loc),
+            },
+            crate::types::ArgLabel::Optional(_) => match call_label {
+                ArgLabel::Nolabel => ArgLabel::Nolabel,
+                ArgLabel::Labelled(loc) | ArgLabel::Optional(loc) => ArgLabel::Optional(*loc),
+            },
+        }
+    }
+
     let ctx = tctx.type_ctx;
+    let total_app = !partial;
 
     // Type check the function
     let funct_ty = ctx.new_var(None);
@@ -2860,127 +2901,108 @@ fn type_application(
     // Normal application: get the function's type after any unification
     let mut current_ty = tctx.type_ctx.repr(typed_funct.exp_type);
 
-    // Check if function type is a Tvar (force_tvar case in OCaml).
-    // In ReScript, all applications are total/uncurried, so when the function's type
-    // is a type variable, we set the arity to the number of arguments.
-    let force_tvar = matches!(&*tctx.type_ctx.get_desc(current_ty), TypeDesc::Tvar(_));
+    // force_tvar only applies to total applications in OCaml.
+    let force_tvar = total_app && matches!(&*tctx.type_ctx.get_desc(current_ty), TypeDesc::Tvar(_));
     let mut top_arity: Option<i32> = if force_tvar {
         Some(args.len() as i32)
     } else {
-        // Check existing arity from function type
         match &*tctx.type_ctx.get_desc(current_ty) {
             TypeDesc::Tarrow { arity, .. } => *arity,
             _ => None,
         }
     };
 
-    // Type check arguments, extracting/building arrow types as we go
+    // Match labels by name (OCaml's extract_label) instead of consuming call args strictly
+    // left-to-right.
+    let mut remaining_args: Vec<(ArgLabel, &ParsedExpression)> = args
+        .iter()
+        .map(|(label, expr)| (label.clone(), expr))
+        .collect();
     let mut typed_args = Vec::new();
+    let mut omitted: Vec<(crate::types::ArgLabel, TypeExprRef)> = Vec::new();
     let mut skipped_optionals = 0usize;
-    let mut drop_trailing_unit = false;
-    for (i, (label, arg_expr)) in args.iter().enumerate() {
-        if drop_trailing_unit {
-            break;
-        }
 
-        // Skip optional parameters when the call-site provides a Nolabel argument.
-        // This handles cases like f(~x: int=?, unit) called as f(()) where the
-        // optional ~x parameter should be implicitly None.
-        loop {
-            let (fn_label, arg_ty, ret_ty) = match crate::types::ctype::split_arrow_with_label(ctx, current_ty) {
-                Some((lbl, arg, ret)) => (Some(lbl), arg, ret),
-                None => {
-                    // OCaml special case: when all function params are optional and
-                    // the call provides only `()`, treat as empty application.
-                    // e.g., `let foo = (~x=3, ~y=4) => x + y; foo()` -- drop the `()`.
-                    // This matches OCaml's typecore.ml line 3641-3645.
-                    if skipped_optionals > 0
-                        && label.is_nolabel()
-                        && i == args.len() - 1
-                    {
-                        if let crate::parser::ast::ExpressionDesc::Pexp_construct(lid, None) = &arg_expr.pexp_desc {
-                            if tctx.arena.is_lident(lid.txt, "()") {
-                                drop_trailing_unit = true;
-                                break;
-                            }
-                        }
-                    }
+    while !remaining_args.is_empty() {
+        if let Some((fn_label, arg_ty, ret_ty)) =
+            crate::types::ctype::split_arrow_with_label(ctx, current_ty)
+        {
+            let fn_label_name = fn_label.label_name().unwrap_or("");
+            if let Some(match_idx) = extract_label_index(&remaining_args, fn_label_name, tctx.arena)
+            {
+                let (call_label, arg_expr) = remaining_args.remove(match_idx);
+                let call_is_optional = call_label.is_optional();
+                let effective_arg_ty = if fn_label.is_optional() && !call_is_optional {
+                    crate::types::ctype::extract_option_type(ctx, arg_ty).unwrap_or(arg_ty)
+                } else {
+                    arg_ty
+                };
 
-                    // Not a function type yet - create arrow type with arity
-                    // Use the call-site label (like OCaml's type_unknown_args)
-                    let arg_ty = ctx.new_var(None);
-                    let ret_ty = ctx.new_var(None);
-                    let ctx_label = convert_arg_label_for_ctx(label, tctx.arena);
-                    let arrow_ty = ctx.new_arrow(ctx_label, arg_ty, ret_ty, top_arity);
-                    unify_expression_types(tctx, loc, current_ty, arrow_ty, None)?;
-                    // OCaml passes ~top_arity:None to recursive calls after the first arrow.
-                    // Only the outermost Tarrow gets the full arity annotation.
-                    top_arity = None;
-                    (None, arg_ty, ret_ty)
-                }
-            };
-
-            if drop_trailing_unit {
-                break;
-            }
-
-            let fn_param_is_optional = fn_label.as_ref().map_or(false, |l| l.is_optional());
-            let call_is_optional = label.is_optional();
-
-            // Check if the labels match (considering that Optional("x") matches Labelled("x"))
-            let labels_match = match (&fn_label, label) {
-                (Some(fn_lbl), call_lbl) => {
-                    match (fn_lbl.label_name(), call_lbl.name_idx()) {
-                        (Some(fn_name), Some(call_idx)) => fn_name == tctx.arena.get_string(call_idx),
-                        (None, None) => true, // both Nolabel
-                        _ => false,
-                    }
-                }
-                (None, call_lbl) => call_lbl.is_nolabel(),
-            };
-
-            // Skip optional parameters when:
-            // 1. The function expects an optional param and call-site provides Nolabel, OR
-            // 2. The function expects an optional param and call-site provides a different label
-            // In both cases, the optional parameter gets None implicitly.
-            if fn_param_is_optional && !labels_match {
+                let typed_arg = type_expect(
+                    tctx,
+                    env,
+                    arg_expr,
+                    effective_arg_ty,
+                    Some(TypeClashContext::FunctionCall),
+                )?;
+                typed_args.push(ApplyArg {
+                    label: apply_arg_label_for_param(&fn_label, &call_label),
+                    expression: typed_arg,
+                });
                 current_ty = ret_ty;
-                skipped_optionals += 1;
                 continue;
             }
 
-            // Handle optional parameter wrapping:
-            // When the function parameter is Optional but the call-site passes a concrete
-            // value (Labelled, not Optional), unwrap option<T> to T for type checking.
-            let effective_arg_ty = if fn_param_is_optional && !call_is_optional {
-                // Unwrap option<T> to get T for type checking the concrete argument
-                crate::types::ctype::extract_option_type(ctx, arg_ty).unwrap_or(arg_ty)
-            } else {
-                arg_ty
-            };
+            if fn_label.is_optional() && (total_app || has_nolabel_arg(&remaining_args)) {
+                skipped_optionals += 1;
+                current_ty = ret_ty;
+                continue;
+            }
 
-            // Type check the argument
-            let typed_arg = type_expect(
-                tctx,
-                env,
-                arg_expr,
-                effective_arg_ty,
-                Some(TypeClashContext::FunctionCall),
-            )?;
-            typed_args.push(ApplyArg {
-                label: label.clone(),
-                expression: typed_arg,
-            });
-
-            // Move to return type for next argument
+            omitted.push((fn_label, arg_ty));
             current_ty = ret_ty;
-            break;
+            continue;
         }
+
+        let (label, arg_expr) = remaining_args.remove(0);
+
+        // OCaml special case: if all supplied args were optional defaults and
+        // the final argument is `()`, treat it as an empty application.
+        if skipped_optionals > 0 && remaining_args.is_empty() && label.is_nolabel() {
+            if let crate::parser::ast::ExpressionDesc::Pexp_construct(lid, None) = &arg_expr.pexp_desc
+            {
+                if tctx.arena.is_lident(lid.txt, "()") {
+                    break;
+                }
+            }
+        }
+
+        // type_unknown_args fallback: build an arrow from call-site label if needed.
+        let arg_ty = ctx.new_var(None);
+        let ret_ty = ctx.new_var(None);
+        let ctx_label = convert_arg_label_for_ctx(&label, tctx.arena);
+        let arrow_ty = ctx.new_arrow(ctx_label, arg_ty, ret_ty, top_arity);
+        unify_expression_types(tctx, loc, current_ty, arrow_ty, None)?;
+        top_arity = None;
+
+        let typed_arg = type_expect(
+            tctx,
+            env,
+            arg_expr,
+            arg_ty,
+            Some(TypeClashContext::FunctionCall),
+        )?;
+        if label.is_optional() {
+            let option_ty = env.type_option(ctx, ctx.new_var(None));
+            unify_expression_types(tctx, loc, typed_arg.exp_type, option_ty, None)?;
+        }
+        typed_args.push(ApplyArg {
+            label,
+            expression: typed_arg,
+        });
+        current_ty = ret_ty;
     }
 
-    // OCaml implicitly applies missing optional arguments with None when the
-    // call is not marked partial.
-    if !partial {
+    if total_app {
         while let Some((fn_label, _arg_ty, ret_ty)) =
             crate::types::ctype::split_arrow_with_label(ctx, current_ty)
         {
@@ -2992,8 +3014,11 @@ fn type_application(
         }
     }
 
-    // The final current_ty is the result type
-    let result_ty = current_ty;
+    // Re-wrap omitted parameters for partial/labeled applications.
+    let mut result_ty = current_ty;
+    for (label, arg_ty) in omitted.iter().rev() {
+        result_ty = ctx.new_arrow(label.clone(), *arg_ty, result_ty, None);
+    }
 
     // Unify result with expected type
     unify_expression_types(tctx, loc, result_ty, expected_ty, context)?;
