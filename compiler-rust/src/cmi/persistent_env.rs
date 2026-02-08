@@ -325,7 +325,7 @@ fn register_types_by_stamp_recursive(
 ///
 /// The `stamp_map` maps type identifier stamps to their qualified paths.
 /// The `name_map` maps type names (for persistent idents with stamp 0) to their qualified paths.
-fn substitute_type_paths_in_sig(
+pub fn substitute_type_paths_in_sig(
     sig_items: &[SignatureItem],
     module_path: &Path,
     ctx: &TypeContext<'_>,
