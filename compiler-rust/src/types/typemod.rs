@@ -369,12 +369,13 @@ fn translate_module_type_to_decl<'a>(
     match &mty.pmty_desc {
         PMtyDesc::Pmty_signature(sig_items) => {
             let mut items = Vec::new();
+            let mut sig_env = env.clone();
             for sig_item in sig_items {
                 match &sig_item.psig_desc {
                     crate::parser::ast::SignatureItemDesc::Psig_value(vd) => {
                         let val_name = arena.get_string(vd.pval_name.txt);
                         let val_id = Ident::create_persistent(val_name);
-                        let (_typed_ct, val_type) = transl_type(tctx, env, &vd.pval_type)?;
+                        let (_typed_ct, val_type) = transl_type(tctx, &sig_env, &vd.pval_type)?;
                         items.push(SigItem::SigValue(val_id, ValueDescription {
                             val_type,
                             val_kind: if vd.pval_prim.is_empty() {
@@ -394,12 +395,14 @@ fn translate_module_type_to_decl<'a>(
                             val_path: None,
                         }));
                     }
-                    crate::parser::ast::SignatureItemDesc::Psig_type(_rec, decls) => {
+                    crate::parser::ast::SignatureItemDesc::Psig_type(rec_flag, decls) => {
+                        let mut declared_type_ids: Vec<Ident> = Vec::with_capacity(decls.len());
+
+                        // Predeclare names so manifests can refer to siblings (matching OCaml).
                         for decl in decls {
                             let type_name = arena.get_string(decl.ptype_name.txt);
                             let type_id = Ident::create_local(type_name);
-                            // Create a minimal type declaration
-                            let type_decl = crate::types::TypeDeclaration {
+                            let placeholder_decl = crate::types::TypeDeclaration {
                                 type_params: vec![],
                                 type_arity: decl.ptype_params.len() as i32,
                                 type_kind: crate::types::TypeKind::TypeAbstract,
@@ -412,19 +415,78 @@ fn translate_module_type_to_decl<'a>(
                                 type_immediate: false,
                                 type_unboxed: crate::types::UnboxedStatus::default(),
                                 type_inlined_types: vec![],
-                    type_path: None,
+                                type_path: Some(Path::pident(type_id.clone())),
                             };
+                            sig_env.add_type(type_id.clone(), placeholder_decl);
+                            declared_type_ids.push(type_id);
+                        }
+
+                        let rec_status = match rec_flag {
+                            RecFlag::Recursive => crate::types::decl::RecStatus::TrecFirst,
+                            RecFlag::Nonrecursive => crate::types::decl::RecStatus::TrecNot,
+                        };
+
+                        for (decl_idx, decl) in decls.iter().enumerate() {
+                            let type_id = declared_type_ids[decl_idx].clone();
+                            let mut type_params = Vec::with_capacity(decl.ptype_params.len());
+                            for (param_ty, _variance) in &decl.ptype_params {
+                                let (_typed_param, param_ref) =
+                                    transl_type(tctx, &sig_env, param_ty)?;
+                                type_params.push(param_ref);
+                            }
+
+                            let type_manifest = match &decl.ptype_manifest {
+                                Some(manifest) => {
+                                    let (_typed_manifest, manifest_ref) =
+                                        transl_type(tctx, &sig_env, manifest)?;
+                                    Some(manifest_ref)
+                                }
+                                None => None,
+                            };
+
+                            let type_decl = crate::types::TypeDeclaration {
+                                type_params,
+                                type_arity: decl.ptype_params.len() as i32,
+                                type_kind: crate::types::TypeKind::TypeAbstract,
+                                type_private: match decl.ptype_private {
+                                    crate::parser::ast::PrivateFlag::Public => {
+                                        crate::types::PrivateFlag::Public
+                                    }
+                                    crate::parser::ast::PrivateFlag::Private => {
+                                        crate::types::PrivateFlag::Private
+                                    }
+                                },
+                                type_manifest,
+                                type_variance: vec![],
+                                type_newtype_level: None,
+                                type_loc: arena.to_location(decl.ptype_loc),
+                                type_attributes: vec![],
+                                type_immediate: false,
+                                type_unboxed: crate::types::UnboxedStatus::default(),
+                                type_inlined_types: vec![],
+                                type_path: Some(Path::pident(type_id.clone())),
+                            };
+                            sig_env.add_type(type_id.clone(), type_decl.clone());
                             items.push(SigItem::SigType(
                                 type_id,
                                 type_decl,
-                                crate::types::decl::RecStatus::TrecNot,
+                                rec_status,
                             ));
                         }
                     }
                     crate::parser::ast::SignatureItemDesc::Psig_module(md) => {
                         let mod_name = arena.get_string(md.pmd_name.txt);
                         let mod_id = Ident::create_persistent(mod_name);
-                        let inner_mty = translate_module_type_to_decl(tctx, env, arena, &md.pmd_type)?;
+                        let inner_mty = translate_module_type_to_decl(tctx, &sig_env, arena, &md.pmd_type)?;
+                        sig_env.add_module(
+                            mod_id.clone(),
+                            crate::types::decl::ModuleDeclaration {
+                                md_type: inner_mty.clone(),
+                                md_attributes: vec![],
+                                md_loc: crate::location::Location::none(),
+                                md_path: None,
+                            },
+                        );
                         items.push(SigItem::SigModule(
                             mod_id,
                             crate::types::decl::ModuleDeclaration {
@@ -435,6 +497,22 @@ fn translate_module_type_to_decl<'a>(
                             },
                             crate::types::decl::RecStatus::TrecNot,
                         ));
+                    }
+                    crate::parser::ast::SignatureItemDesc::Psig_modtype(pmtd) => {
+                        let modtype_name = arena.get_string(pmtd.pmtd_name.txt);
+                        let modtype_id = Ident::create_local(modtype_name);
+                        let mtd_type = pmtd
+                            .pmtd_type
+                            .as_ref()
+                            .map(|inner| translate_module_type_to_decl(tctx, &sig_env, arena, inner))
+                            .transpose()?;
+                        let mtd = crate::types::decl::ModtypeDeclaration {
+                            mtd_type,
+                            mtd_attributes: vec![],
+                            mtd_loc: crate::location::Location::none(),
+                        };
+                        sig_env.add_modtype(modtype_id.clone(), mtd.clone());
+                        items.push(SigItem::SigModtype(modtype_id, mtd));
                     }
                     _ => {}
                 }
@@ -935,9 +1013,22 @@ pub fn type_module_expr<'a>(
         ParsedModuleExprDesc::Pmod_unpack(expr) => {
             // Unpack: unpack(E)
             let typed_expr = type_expression(tctx, env, expr)?;
-            let unpack_mty = find_packed_module_expr(expr)
-                .and_then(|packed| module_type_hint_from_parsed_module_expr(tctx, arena, packed))
-                .unwrap_or_else(ModuleType::placeholder);
+            let expanded = crate::types::ctype::expand_head(tctx.type_ctx, env, typed_expr.exp_type);
+            let unpack_mty = match &*tctx.type_ctx.get_desc(tctx.type_ctx.repr(expanded)) {
+                crate::types::type_expr::TypeDesc::Tpackage { path, .. } => ModuleType {
+                    mty_desc: crate::types::typedtree::ModuleTypeDesc::Tmty_ident(
+                        path.clone(),
+                        arena.placeholder_located(loc),
+                    ),
+                    mty_loc: loc,
+                    mty_attributes: vec![],
+                },
+                crate::types::type_expr::TypeDesc::Tvar(_)
+                | crate::types::type_expr::TypeDesc::Tunivar(_) => {
+                    return Err(TypeModError::CoreError(TypeCoreError::CannotInferSignature));
+                }
+                _ => return Err(TypeModError::CoreError(TypeCoreError::NotAPackedModule(expanded))),
+            };
 
             Ok(ModuleExpr {
                 mod_desc: ModuleExprDesc::Tmod_unpack(typed_expr, unpack_mty.clone()),
@@ -2433,6 +2524,13 @@ fn type_structure_item<'a>(
                 .or_else(|| extract_module_type_from_mod_expr(&typed_mod, Some(env)));
             let mut new_env = env.clone();
             if let Some(decl_mod_type) = final_mod_type {
+                if let crate::types::decl::ModuleType::MtySignature(sig) = &decl_mod_type {
+                    crate::cmi::persistent_env::substitute_type_paths_in_sig(
+                        sig,
+                        &Path::pident(mod_id.clone()),
+                        tctx.type_ctx,
+                    );
+                }
                 new_env.add_module(mod_id.clone(), crate::types::decl::ModuleDeclaration {
                     md_type: decl_mod_type,
                     md_attributes: vec![],

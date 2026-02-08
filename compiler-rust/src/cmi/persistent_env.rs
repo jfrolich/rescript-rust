@@ -337,13 +337,17 @@ pub fn substitute_type_paths_in_sig(
     let mut name_map: HashMap<String, Path> = HashMap::new();
 
     for item in sig_items {
-        if let SignatureItem::SigType(id, _decl, _) = item {
-            let qualified_path = Path::pdot(module_path.clone(), id.name());
-            if id.stamp() != 0 {
-                stamp_map.insert(id.stamp(), qualified_path);
-            } else {
+        match item {
+            SignatureItem::SigType(id, _, _) | SignatureItem::SigModtype(id, _) => {
+                let qualified_path = Path::pdot(module_path.clone(), id.name());
+                if id.stamp() != 0 {
+                    stamp_map.insert(id.stamp(), qualified_path.clone());
+                }
+                // Keep a name-based fallback for locally-created identifiers where
+                // stamps may differ between related syntax/type nodes.
                 name_map.insert(id.name().to_string(), qualified_path);
             }
+            _ => {}
         }
     }
 
@@ -505,7 +509,19 @@ fn substitute_type_expr_path(
                 }
             }
         }
-        TypeDesc::Tpackage { args, .. } => {
+        TypeDesc::Tpackage { path, args, .. } => {
+            if let Path::Pident(ident) = path {
+                let new_path = stamp_map
+                    .get(&ident.stamp())
+                    .cloned()
+                    .or_else(|| name_map.get(ident.name()).cloned());
+                if let Some(qualified_path) = new_path {
+                    let mut desc_mut = ty.desc_mut();
+                    if let TypeDesc::Tpackage { ref mut path, .. } = *desc_mut {
+                        *path = qualified_path;
+                    }
+                }
+            }
             for &arg in args {
                 substitute_type_expr_path(arg, stamp_map, name_map, ctx, visited);
             }

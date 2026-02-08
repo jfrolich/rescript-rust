@@ -76,12 +76,13 @@ The `-dtyped-sexp` flag outputs the typed tree without locations. The `-dtyped-s
 |  | Status |
 |--|--------|
 | OCaml compiles | 657/657 |
-| Rust compiles | 556/657 (101 fail) |
-| Parity match (-dtyped-sexp-locs) | 294/556 (52.9%) |
+| Rust compiles | 559/657 (98 fail) |
+| Parity match (-dtyped-sexp-locs) | 291/559 (52.1%) |
 
-**Task Progress:** 12/12 complete
+**Task Progress:** 13/13 complete
 
 **Task Checklist:**
+- [x] Port OCaml `Pmod_unpack` typing path in `typemod`: derive unpack module types from `expand_head` package types (`Tpackage`) and preserve `Psig_type` manifests/`Psig_modtype` items in `translate_module_type_to_decl`, then qualify module-signature type paths when entering `Pstr_module` bindings. This fixes the `let module X = unpack(v.compare)` compilation failure (`UndefinedMethod "X.compare"` in `defunctor_make_test.res`) and improves full `--with-locs` compilation (`Rust bsc`: 557 -> 559).
 - [x] Match OCaml `@deriving(accessors)` variant accessor location behavior in PPX output by emitting generated value/pattern/expression/signature item locs as `Location.none` while preserving constructor-name locations on `Located` identifiers and `Typ.arrows ~loc` for signature arrow nodes (`DerivingAccessorsCurried.res` parity fixed; `Parity`: 293 -> 295 in the latest full `--with-locs --no-build` run).
 - [x] Fix qualified constructor typing + trailing optional-arg consumption in `type_application` so dict-pattern matches compile instead of failing with `PatternTypeClash`.
 - [x] Reduce remaining Rust compile failures (67), prioritizing root causes in `UndefinedMethod`, `ExprTypeClash`, and `PatternTypeClash`.
