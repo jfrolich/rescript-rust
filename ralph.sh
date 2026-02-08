@@ -133,6 +133,13 @@ render_codex_stream_line() {
   local tool
   local tool_result
 
+  if [[ "$line" != \{* ]]; then
+    if echo "$line" | grep -Eiq "error|warning|failed|fatal"; then
+      echo "$line"
+    fi
+    return
+  fi
+
   text=$(echo "$line" | jq -r '
     def assistant_text:
       if .type == "agent_message" then
@@ -141,10 +148,17 @@ render_codex_stream_line() {
         ([.payload.content[]? | select(.type == "output_text") | .text] | join("\n"))
       elif .type == "message" and .role == "assistant" then
         ([.content[]? | select(.type == "output_text") | .text] | join("\n"))
+      elif .type == "output_text" then
+        (.text // empty)
       else
         empty
       end;
-    [assistant_text, (.payload? | assistant_text)]
+    [
+      assistant_text,
+      (.payload? | assistant_text),
+      (.item? | assistant_text),
+      (.payload?.item? | assistant_text)
+    ]
     | map(select(. != null and . != ""))
     | .[0] // empty
   ' 2>/dev/null)
@@ -161,10 +175,17 @@ render_codex_stream_line() {
         (.payload.name // empty)
       elif .type == "function_call" then
         (.name // empty)
+      elif .type == "item.started" and .item.type == "command_execution" then
+        "command_execution"
       else
         empty
       end;
-    [tool_name, (.payload? | tool_name)]
+    [
+      tool_name,
+      (.payload? | tool_name),
+      (.item? | tool_name),
+      (.payload?.item? | tool_name)
+    ]
     | map(select(. != null and . != ""))
     | .[0] // empty
   ' 2>/dev/null)
@@ -174,7 +195,9 @@ render_codex_stream_line() {
 
   tool_result=$(echo "$line" | jq -r '
     def has_tool_result:
-      (.type == "response_item" and .payload.type == "function_call_output") or .type == "function_call_output";
+      (.type == "response_item" and .payload.type == "function_call_output") or
+      .type == "function_call_output" or
+      (.type == "item.completed" and .item.type == "command_execution");
     if ([., .payload?] | any(has_tool_result)) then "yes" else empty end
   ' 2>/dev/null)
   if [[ "$tool_result" == "yes" ]]; then
