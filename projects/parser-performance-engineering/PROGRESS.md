@@ -463,10 +463,10 @@ Parity:
 Result: Performance remains neutral overall versus the previous 2.3 baseline.
 ```
 
-### Task 2.4 analysis (Generalized sparse data / side tables) — DEFERRED
+### Task 2.4 plan (Generalized sparse data / side tables) — ACTIVE
 
 ```
-Status: Deferred as [~] in RALPH_TODO.md
+Status: Active as [ ] in RALPH_TODO.md
 
 What was tried:
 1) Audited all Option-bearing AST fields in parser AST (`rg "Option<" parser/ast.rs`), with
@@ -489,10 +489,33 @@ Root cause:
 - Doing this piecemeal for one field is not parity-safe: marshal identity/sharing behavior and
   traversal ordering are tightly coupled to current allocation/construction flow.
 
-Decision:
-- Defer 2.4 until a dedicated enabling refactor introduces parity-safe two-phase node
-  reservation/build APIs.
-- This is a structural prerequisite, not a small local optimization.
+Execution plan:
+1) **Enable two-phase node construction**
+   - Add reserve/initialize APIs (or equivalent builder APIs) for expression/pattern/core_type/module arenas.
+   - Guarantee stable node index assignment before sparse fields are attached.
+
+2) **Introduce sparse side tables in ParseArena**
+   - Add typed side tables keyed by node indices for initial targets:
+     - `PexpFun.default`
+     - `Case.pc_guard`
+   - Define explicit lifecycle semantics so parser snapshots/lookahead and PPX rewrites stay parity-safe.
+
+3) **Migrate in strict order**
+   - Parser construction paths first
+   - PPX/JSX rewrites second
+   - Mapper conversions (`mapper_from0` / `mapper_to0`) third
+   - Marshal-sensitive paths last
+
+4) **Validation at each sub-step**
+   - `./scripts/test_parser_ast_parity.sh --quick` for fast guardrails during refactors
+   - full `./scripts/test_parser_ast_parity.sh` after each field family migration
+   - benchmark sweep after each phase
+
+Acceptance criteria:
+- No new parity regressions (sexp-locs, sexp-locs-ppx, bsc-ast).
+- `PexpFun.default` and `Case.pc_guard` migrated to side tables as first milestone.
+- Follow-on sparse fields (`construct/variant/record/if/coerce` options) moved after milestone parity is stable.
+- AST node size and/or memory footprint shows measurable reduction on expression-heavy files.
 ```
 
 *Add new entries below as optimizations are applied.*

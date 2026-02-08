@@ -1,7 +1,7 @@
 # Parser Performance Engineering TODO
 
 **Last Updated:** 2026-02-08
-**Status:** 7/23 tasks complete, 1 deferred
+**Status:** 7/23 tasks complete, 0 deferred
 
 **Baseline:** Rust is 2-5x faster on small files (<10KB), ~0.7-1.0x on large files (20-60KB).
 **Goal:** Maximize Rust parser speed across all file sizes while preserving byte-for-byte binary AST parity.
@@ -36,7 +36,26 @@ These target the AST node representation, where the biggest memory and cache win
 
 - [x] **2.3 Index-based AST (ExprIdx/PatIdx into ParseArena)** — Replaced `Box<Expression>` with `ExprIdx(u32)`, `Box<Pattern>` with `PatIdx(u32)`, `Box<CoreType>` with `CoreTypeIdx(u32)`, `Box<ModuleExpr>` with `ModExprIdx(u32)`, `Box<ModuleType>` with `ModTypeIdx(u32)` indices into flat `Vec<T>` pools in `ParseArena`. All recursive AST references now use 4-byte indices instead of 8-byte pointers. Arena pools (`expressions`, `patterns`, `core_types`, `mod_exprs`, `mod_types`) with `push_*`/`get_*` methods. Fixed 112 borrow checker errors in ppx.rs and jsx_ppx.rs by: (1) changing `list_of_arrow`/`get_result_type`/`get_final_result_type`/`destruct_open_tuple` to return owned data instead of arena references, (2) changing read-only functions (`is_unit_type`, `get_payload_int`, `get_payload_string_with_delim`, `has_external_attrs`, `is_rs_external`) from `&mut ParseArena` to `&ParseArena`, (3) splitting `arena.push_X(fn(..., arena))` patterns into separate `let` bindings. AST enum sizes: ExpressionDesc 24→16 bytes (hit 16-byte target!), PatternDesc 24→16, ModuleExprDesc 24→16. PexpFun 64→56, PexpApply 40→32. Performance: neutral (Large 0.81x, within noise). Zero parity regressions. Files: `ast.rs`, `parse_arena.rs`, `ppx.rs`, `jsx_ppx.rs` + all parsing/PPX/marshal modules.
 
-- [~] **2.4 Generalized sparse data / side tables** — DEFERRED: the current AST is built as by-value nodes before arena index assignment. Moving sparse `Option<...>` fields (e.g. `PexpFun.default`, `Case.pc_guard`) into side tables keyed by node index requires a parity-safe two-phase node reservation/build pipeline across parser + PPX + mapper + marshal. This is a larger enabling refactor and not parity-safe as an isolated optimization in this loop. See `PROGRESS.md` (Post-2.3 follow-up, 2.4 deferral analysis) for attempted approaches and constraints.
+- [ ] **2.4 Generalized sparse data / side tables** — ACTIVE: implement this via a parity-safe two-phase node construction model (`reserve idx` -> `build node` -> `attach sparse side data`) instead of piecemeal field extraction.
+  - Why this shape: sparse `Option<...>` fields are currently embedded in by-value nodes before arena index assignment; side tables must be keyed by stable node indices.
+  - Initial scope: `PexpFun.default` and `Case.pc_guard`, then expand to `Pexp_construct/variant/record/if/coerce` option payloads after parity is stable.
+  - Enabling API work (required first):
+    - Add reserve/initialize APIs for expression/pattern/core_type/module node arenas (or equivalent builder APIs that guarantee stable early index assignment).
+    - Add sparse side tables in `ParseArena` keyed by node indices with explicit reset/clone semantics for parser snapshots and PPX transforms.
+  - Migration order (must stay in this order):
+    - Parser construction paths
+    - PPX / JSX transforms
+    - Mapper conversions (`mapper_from0` / `mapper_to0`)
+    - Marshal writer sharing-sensitive paths
+  - Parity guardrails:
+    - `./scripts/test_parser_ast_parity.sh --quick` on each substep
+    - full `./scripts/test_parser_ast_parity.sh` before/after each migrated field family
+    - benchmark check after each phase to catch regressions
+  - Exit criteria:
+    - target sparse fields moved to side tables
+    - no new parity regressions
+    - measurable AST size reduction on expression-heavy paths
+  - See `PROGRESS.md` (Task 2.4 plan) for detailed rollout and rationale.
 
 - [ ] **2.5 Token kind/value split** — Split `Token<'a>` enum (~40-48 bytes) into a small `TokenKind` enum (1-2 bytes, no data) + separate `TokenPayload` storage accessed only when needed. 100 of 117 variants are zero-sized (keywords, punctuation); only 17 carry payloads. The parser's inner loop constantly checks token kinds — a 1-byte discriminant means 64 token checks per cache line vs ~1 with the current 48-byte enum. Even though the parser processes one token at a time, the smaller discriminant improves branch prediction and reduces the working set of the Parser struct. Evidence: Zig compiler reduced tokens from 64 bytes to 5 bytes with 22% speedup. Approach: `TokenKind` enum for the discriminant, `TokenPayload` union/enum for the rare data, stored as separate fields in the Parser struct. Files: `token.rs`, `state.rs`, all parsing modules.
 
