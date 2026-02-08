@@ -1516,7 +1516,7 @@ fn parse_record_or_object_type(p: &mut Parser<'_>) -> CoreType {
         }
 
         // Return a Ptyp_constr pointing to the inline type
-        let type_args: Vec<CoreTypeIdx> = params.into_iter().map(|(t, _)| p.arena_mut().push_core_type(t)).collect();
+        let type_args: Vec<CoreTypeIdx> = params.into_iter().map(|(t, _)| t).collect();
         let lid_idx = p.push_lident(&inline_type_name);
         CoreType {
             ptyp_desc: Box::new(CoreTypeDesc::Ptyp_constr(Box::new((with_loc(lid_idx, loc.clone()), type_args)))),

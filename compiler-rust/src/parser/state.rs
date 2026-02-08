@@ -127,7 +127,7 @@ pub struct Parser<'src> {
     /// When Some, `{...}` in type positions will be extracted as inline record types.
     pub inline_types_found: Option<Vec<(String, LocIdx, super::ast::TypeKind)>>,
     /// Type parameters from the outer type declaration for inline types.
-    pub inline_types_params: Vec<(super::ast::CoreType, super::ast::Variance)>,
+    pub inline_types_params: Vec<(crate::parse_arena::CoreTypeIdx, super::ast::Variance)>,
 }
 
 impl<'src> Parser<'src> {

@@ -7,7 +7,7 @@ use std::borrow::Cow;
 use std::cell::RefCell;
 
 use crate::location::Position;
-use crate::parse_arena::{CoreTypeIdx, ExprIdx, LidentIdx, Located, LocIdx, ModExprIdx, ModTypeIdx, PatIdx, PosIdx, StrIdx};
+use crate::parse_arena::{CoreTypeIdx, LidentIdx, Located, LocIdx, PosIdx, StrIdx};
 
 // Import Location as alias to LocIdx from ast
 use super::ast::*;
@@ -97,13 +97,13 @@ pub struct InlineTypesContext {
     /// Collected inline types: (dotted_name as StrIdx, location, type_kind)
     pub found_inline_types: Vec<(StrIdx, Location, TypeKind)>,
     /// Type parameters from the outer type declaration
-    pub params: Vec<(CoreType, Variance)>,
+    pub params: Vec<(CoreTypeIdx, Variance)>,
     /// Location of the outer type's name (used for inline type declarations)
     pub outer_name_loc: Location,
 }
 
 impl InlineTypesContext {
-    fn new(params: Vec<(CoreType, Variance)>, outer_name_loc: Location) -> Self {
+    fn new(params: Vec<(CoreTypeIdx, Variance)>, outer_name_loc: Location) -> Self {
         Self {
             found_inline_types: vec![],
             params,
@@ -188,7 +188,7 @@ fn module_type_to_package(p: &mut Parser<'_>, mt: &ModuleType) -> PackageType {
             };
 
             // Convert WithConstraint to package type constraints
-            let pkg_constraints: Vec<(Loc<LidentIdx>, CoreType)> = constraints
+            let pkg_constraints: Vec<(Loc<LidentIdx>, CoreTypeIdx)> = constraints
                 .iter()
                 .filter_map(|c| match c {
                     WithConstraint::Pwith_type(type_lid, type_decl) => {
@@ -579,7 +579,8 @@ pub fn parse_structure_item(p: &mut Parser<'_>) -> Option<StructureItem> {
                 // Continue parsing the expression (handles ->, [], etc.)
                 let expr = super::expr::parse_expr_with_operand(p, pack_expr);
                 parse_newline_or_semicolon_structure(p);
-                Some(StructureItemDesc::Pstr_eval(Box::new((expr, attrs.clone()))))
+                let expr_idx = p.arena_mut().push_expr(expr);
+                Some(StructureItemDesc::Pstr_eval(Box::new((expr_idx, attrs.clone()))))
             } else {
                 let def = parse_module_definition(p, module_start_idx, attrs.clone());
                 parse_newline_or_semicolon_structure(p);
@@ -595,8 +596,9 @@ pub fn parse_structure_item(p: &mut Parser<'_>) -> Option<StructureItem> {
             p.next();
             let mod_expr = parse_module_expr(p);
             parse_newline_or_semicolon_structure(p);
+            let mod_expr_idx = p.arena_mut().push_mod_expr(mod_expr);
             Some(StructureItemDesc::Pstr_include(Box::new(IncludeDeclaration {
-                pincl_mod: mod_expr,
+                pincl_mod: mod_expr_idx,
                 pincl_loc: p.mk_loc_idx_to_prev_end(include_start_idx),
                 pincl_attributes: attrs.clone(),
             })))
@@ -687,7 +689,8 @@ pub fn parse_structure_item(p: &mut Parser<'_>) -> Option<StructureItem> {
             if is_expr_start(&p.token) {
                 let expr = expr::parse_expr(p);
                 parse_newline_or_semicolon_structure(p);
-                Some(StructureItemDesc::Pstr_eval(Box::new((expr, attrs.clone()))))
+                let expr_idx = p.arena_mut().push_expr(expr);
+                Some(StructureItemDesc::Pstr_eval(Box::new((expr_idx, attrs.clone()))))
             } else if let Some(attr) = attrs.first() {
                 // OCaml: when attrs are present but no valid item follows,
                 // report the "Did you forget to attach" error and produce exprhole
@@ -700,7 +703,8 @@ pub fn parse_structure_item(p: &mut Parser<'_>) -> Option<StructureItem> {
                 );
                 let expr = expr::parse_expr(p);
                 parse_newline_or_semicolon_structure(p);
-                Some(StructureItemDesc::Pstr_eval(Box::new((expr, attrs.clone()))))
+                let expr_idx = p.arena_mut().push_expr(expr);
+                Some(StructureItemDesc::Pstr_eval(Box::new((expr_idx, attrs.clone()))))
             } else if p.token != Token::Eof {
                 // Use err_unexpected which creates a proper Unexpected diagnostic
                 // with breadcrumbs, matching OCaml's parse_region behavior
@@ -943,8 +947,9 @@ pub fn parse_signature_item(p: &mut Parser<'_>) -> Option<SignatureItem> {
             p.next();
             let mod_type = parse_module_type(p);
             parse_newline_or_semicolon_signature(p);
+            let mod_type_idx = p.arena_mut().push_mod_type(mod_type);
             Some(SignatureItemDesc::Psig_include(Box::new(IncludeDescription {
-                pincl_mod: mod_type,
+                pincl_mod: mod_type_idx,
                 pincl_loc: p.mk_loc_idx_to_prev_end(start_pos_idx),
                 pincl_attributes: attrs.clone(),
             })))
@@ -1263,12 +1268,13 @@ fn parse_primary_module_expr(p: &mut Parser<'_>) -> ModuleExpr {
                         ptyp_loc: pkg_loc,
                         ptyp_attributes: Attributes::new(),
                     };
+                    let pkg_type_idx = p.arena_mut().push_core_type(pkg_type);
                     // OCaml: expect Rparen first, then create constraint with loc including Rparen
                     p.expect(Token::Rparen);
                     let constraint_loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
                     let expr_idx = p.arena_mut().push_expr(expr);
                     Expression {
-                        pexp_desc: Box::new(ExpressionDesc::Pexp_constraint(Box::new((expr_idx, pkg_type)))),
+                        pexp_desc: Box::new(ExpressionDesc::Pexp_constraint(Box::new((expr_idx, pkg_type_idx)))),
                         pexp_loc: constraint_loc,
                         pexp_attributes: Attributes::new(),
                     }
@@ -2093,9 +2099,12 @@ fn parse_with_constraint(p: &mut Parser<'_>) -> Option<WithConstraint> {
                 };
                 p.expect(Token::Equal);
                 let cstr_typ = typ::parse_typ_expr(p);
-                cstrs.push((var, cstr_typ, p.mk_loc_idx_to_prev_end(cstr_start_idx)));
+                let var_idx = p.arena_mut().push_core_type(var);
+                let cstr_typ_idx = p.arena_mut().push_core_type(cstr_typ);
+                cstrs.push((var_idx, cstr_typ_idx, p.mk_loc_idx_to_prev_end(cstr_start_idx)));
             }
 
+            let typ_idx = p.arena_mut().push_core_type(typ);
             let decl = TypeDeclaration {
                 // OCaml uses the full longident location for the type name location
                 ptype_name: with_loc(type_name_idx, type_loc.clone()),
@@ -2103,7 +2112,7 @@ fn parse_with_constraint(p: &mut Parser<'_>) -> Option<WithConstraint> {
                 ptype_cstrs: cstrs,
                 ptype_kind: TypeKind::Ptype_abstract,
                 ptype_private: private,
-                ptype_manifest: Some(typ),
+                ptype_manifest: Some(typ_idx),
                 ptype_attributes: Attributes::new(),
                 ptype_loc: type_loc,
             };
@@ -2419,6 +2428,7 @@ fn parse_let_bindings(
 
                     // The inner type (with Ptyp_constr) is used for Pexp_constraint
                     let inner_for_constraint = p.arena().get_core_type(ct_idx).clone();
+                    let inner_for_constraint_idx = p.arena_mut().push_core_type(inner_for_constraint);
 
                     // Substitute Ptyp_constr -> Ptyp_var for the Ptyp_poly body
                     let ct_clone = p.arena().get_core_type(ct_idx).clone();
@@ -2433,7 +2443,7 @@ fn parse_let_bindings(
                         ptyp_attributes: typ.ptyp_attributes,
                     };
 
-                    (substituted_typ, Some((vars, inner_for_constraint)))
+                    (substituted_typ, Some((vars, inner_for_constraint_idx)))
                 }
                 _ => (typ, None),
             };
@@ -2441,8 +2451,9 @@ fn parse_let_bindings(
             // Create a constraint pattern
             let loc = p.mk_loc_spanning(pat.ppat_loc, final_typ.ptyp_loc);
             let pat_idx = p.arena_mut().push_pat(pat);
+            let final_typ_idx = p.arena_mut().push_core_type(final_typ);
             let pat = Pattern {
-                ppat_desc: Box::new(PatternDesc::Ppat_constraint(Box::new((pat_idx, final_typ)))),
+                ppat_desc: Box::new(PatternDesc::Ppat_constraint(Box::new((pat_idx, final_typ_idx)))),
                 ppat_loc: loc,
                 ppat_attributes: Attributes::new(),
             };
@@ -2473,21 +2484,23 @@ fn parse_let_bindings(
             let wrapper_loc = wrapper_loc.expect("locally abstract let-binding should have wrapper loc");
             // Update Ppat_constraint and inner Ptyp_poly locations to use the binding location
             if let PatternDesc::Ppat_constraint(inner) = *pat.ppat_desc {
-                let (inner_pat_idx, typ) = *inner;
+                let (inner_pat_idx, typ_idx) = *inner;
                 // Update the Ptyp_poly location to use binding location
-                let updated_typ = match *typ.ptyp_desc {
+                let typ = p.arena().get_core_type(typ_idx).clone();
+                let updated_typ_idx = match *typ.ptyp_desc {
                     CoreTypeDesc::Ptyp_poly(poly_inner) => {
                         let (vars, ct) = *poly_inner;
-                        CoreType {
+                        let updated = CoreType {
                             ptyp_desc: Box::new(CoreTypeDesc::Ptyp_poly(Box::new((vars, ct)))),
                             ptyp_loc: wrapper_loc,
                             ptyp_attributes: typ.ptyp_attributes,
-                        }
+                        };
+                        p.arena_mut().push_core_type(updated)
                     }
-                    _ => typ,
+                    _ => typ_idx,
                 };
                 Pattern {
-                    ppat_desc: Box::new(PatternDesc::Ppat_constraint(Box::new((inner_pat_idx, updated_typ)))),
+                    ppat_desc: Box::new(PatternDesc::Ppat_constraint(Box::new((inner_pat_idx, updated_typ_idx)))),
                     ppat_loc: wrapper_loc,
                     ppat_attributes: pat.ppat_attributes,
                 }
@@ -2525,9 +2538,11 @@ fn parse_let_bindings(
             }
         }
 
+        let pat_idx = p.arena_mut().push_pat(pat);
+        let expr_idx = p.arena_mut().push_expr(expr);
         bindings.push(ValueBinding {
-            pvb_pat: pat,
-            pvb_expr: expr,
+            pvb_pat: pat_idx,
+            pvb_expr: expr_idx,
             pvb_attributes: attrs,
             pvb_loc: vb_loc,
         });
@@ -2911,7 +2926,7 @@ fn parse_type_declaration_with_context(
         // Emit helpful error about angle bracket syntax
         // Use err_at (not err_multiple) so the region is silenced after this error,
         // matching OCaml's behavior where only one error per region is reported.
-        let suggested = format_type_with_angle_brackets(&name.txt, &params);
+        let suggested = format_type_with_angle_brackets(p, &name.txt, &params);
         p.err_at(
             paren_start,
             paren_end,
@@ -3068,9 +3083,10 @@ fn parse_type_declaration_with_context(
                         state.token == Token::DotDotDot
                     });
                     let typ = typ::parse_typ_expr(p);
+                    let typ_idx = p.arena_mut().push_core_type(typ);
                     // Apply ghost location fix for spread-first closed objects
-                    let typ = fix_spread_first_object_manifest(p, typ, is_spread_first).0;
-                    manifest = Some(typ);
+                    let typ_idx = fix_spread_first_object_manifest(p, typ_idx, is_spread_first).0;
+                    manifest = Some(typ_idx);
                 } else {
                     kind = parse_type_kind(p, Some(inline_ctx), Some(&current_type_name_path));
                 }
@@ -3080,7 +3096,8 @@ fn parse_type_declaration_with_context(
                     let constructors = parse_constructors_without_leading_bar(p);
                     kind = TypeKind::Ptype_variant(constructors);
                 } else {
-                    manifest = Some(typ::parse_typ_expr(p));
+                    let typ = typ::parse_typ_expr(p);
+                    manifest = Some(p.arena_mut().push_core_type(typ));
                 }
             }
             Token::At | Token::DocComment { .. } => {
@@ -3155,14 +3172,15 @@ fn parse_type_declaration_with_context(
                             if looks_like_object_type_after_lbrace(p) {
                                 let mut typ = typ::parse_typ_expr(p);
                                 typ.ptyp_attributes = attrs;
-                                manifest = Some(typ);
+                                manifest = Some(p.arena_mut().push_core_type(typ));
                             } else {
                                 kind = parse_type_kind(p, Some(inline_ctx), Some(&current_type_name_path));
                             }
                         }
                     }
                     _ => {
-                        manifest = Some(typ::parse_typ_expr(p));
+                        let typ = typ::parse_typ_expr(p);
+                        manifest = Some(p.arena_mut().push_core_type(typ));
                     }
                 }
             }
@@ -3173,7 +3191,8 @@ fn parse_type_declaration_with_context(
             }
             _ => {
                 // Manifest type
-                manifest = Some(typ::parse_typ_expr(p));
+                let typ = typ::parse_typ_expr(p);
+                manifest = Some(p.arena_mut().push_core_type(typ));
             }
         }
 
@@ -3236,7 +3255,9 @@ fn parse_type_declaration_with_context(
         p.expect(Token::Equal);
         let typ = typ::parse_typ_expr(p);
         // OCaml: constraint tuple location also starts at "constraint" keyword
-        cstrs.push((var, typ, p.mk_loc_idx_to_prev_end(cstr_start_idx)));
+        let var_idx = p.arena_mut().push_core_type(var);
+        let typ_idx = p.arena_mut().push_core_type(typ);
+        cstrs.push((var_idx, typ_idx, p.mk_loc_idx_to_prev_end(cstr_start_idx)));
     }
 
     // In type declarations with qualified type constructors (Ldot),
@@ -3266,67 +3287,71 @@ fn parse_type_declaration_with_context(
 /// Also propagates ghost loc_start to alias wrappers.
 ///
 /// Returns the fixed type and whether the fix was applied.
-fn fix_spread_first_object_manifest(p: &mut Parser<'_>, typ: CoreType, is_spread_first: bool) -> (CoreType, bool) {
+fn fix_spread_first_object_manifest(p: &mut Parser<'_>, typ_idx: CoreTypeIdx, is_spread_first: bool) -> (CoreTypeIdx, bool) {
     if !is_spread_first {
-        return (typ, false);
+        return (typ_idx, false);
     }
 
+    let typ = p.arena().get_core_type(typ_idx).clone();
     match *typ.ptyp_desc {
         CoreTypeDesc::Ptyp_object(inner) => {
             // Only for CLOSED objects where first field is Oinherit (spread)
             // Open objects (from {.. ...spread}) should NOT use ghost location
             let first_is_spread = inner.0.first().map_or(false, |f| matches!(f, ObjectField::Oinherit(_)));
             if first_is_spread && inner.1 == ClosedFlag::Closed {
-                (CoreType {
+                let fixed = CoreType {
                     ptyp_desc: Box::new(CoreTypeDesc::Ptyp_object(inner)),
                     ptyp_loc: Location::none(),
                     ptyp_attributes: typ.ptyp_attributes,
-                }, true)
+                };
+                (p.arena_mut().push_core_type(fixed), true)
             } else {
-                (CoreType {
+                let fixed = CoreType {
                     ptyp_desc: Box::new(CoreTypeDesc::Ptyp_object(inner)),
                     ptyp_loc: typ.ptyp_loc,
                     ptyp_attributes: typ.ptyp_attributes,
-                }, false)
+                };
+                (p.arena_mut().push_core_type(fixed), false)
             }
         }
         CoreTypeDesc::Ptyp_alias(alias_inner) => {
                     let (ct_idx, alias) = *alias_inner;
             // Recurse into inner type
-            let ct = p.arena().get_core_type(ct_idx).clone();
-            let (fixed_inner, applied) = fix_spread_first_object_manifest(p, ct, true);
+            let (fixed_inner_idx, applied) = fix_spread_first_object_manifest(p, ct_idx, true);
             if applied {
                 // OCaml uses inner type's loc_start for alias, so if inner is ghost, alias start is ghost too
                 // Create a spanning location from fixed_inner start to typ end
+                let fixed_inner = p.arena().get_core_type(fixed_inner_idx);
                 let new_loc = p.mk_loc_spanning(fixed_inner.ptyp_loc, typ.ptyp_loc);
-                let fixed_inner_idx = p.arena_mut().push_core_type(fixed_inner);
-                (CoreType {
+                let fixed = CoreType {
                     ptyp_desc: Box::new(CoreTypeDesc::Ptyp_alias(Box::new((fixed_inner_idx, alias)))),
                     ptyp_loc: new_loc,
                     ptyp_attributes: typ.ptyp_attributes,
-                }, true)
+                };
+                (p.arena_mut().push_core_type(fixed), true)
             } else {
-                let fixed_inner_idx = p.arena_mut().push_core_type(fixed_inner);
-                (CoreType {
+                let fixed = CoreType {
                     ptyp_desc: Box::new(CoreTypeDesc::Ptyp_alias(Box::new((fixed_inner_idx, alias)))),
                     ..typ
-                }, false)
+                };
+                (p.arena_mut().push_core_type(fixed), false)
             }
         }
         CoreTypeDesc::Ptyp_arrow(arrow_inner) => {
                     let (arg, ret_idx, arity) = *arrow_inner;
             // Recurse into arg ONLY if this is the direct manifest level
-            let (fixed_arg_typ, _) = fix_spread_first_object_manifest(p, arg.typ, true);
+            let (fixed_arg_typ_idx, _) = fix_spread_first_object_manifest(p, arg.typ, true);
             let fixed_arg = TypeArg {
-                typ: fixed_arg_typ,
+                typ: fixed_arg_typ_idx,
                 ..*arg
             };
-            (CoreType {
+            let fixed = CoreType {
                 ptyp_desc: Box::new(CoreTypeDesc::Ptyp_arrow(Box::new((Box::new(fixed_arg), ret_idx, arity)))),
                 ..typ
-            }, false)
+            };
+            (p.arena_mut().push_core_type(fixed), false)
         }
-        _ => (typ, false),
+        _ => (typ_idx, false),
     }
 }
 
@@ -3339,7 +3364,8 @@ fn fix_spread_first_object_manifest(p: &mut Parser<'_>, typ: CoreType, is_spread
 /// For unqualified (Lident), it uses full extent.
 /// EXCEPTION: When the type has attributes, OCaml keeps the full extent including
 /// type arguments (this allows the location to cover the entire attributed type).
-fn fix_type_manifest_location(p: &mut Parser<'_>, typ: CoreType) -> CoreType {
+fn fix_type_manifest_location(p: &mut Parser<'_>, typ_idx: CoreTypeIdx) -> CoreTypeIdx {
+    let typ = p.arena().get_core_type(typ_idx).clone();
     match &*typ.ptyp_desc {
         CoreTypeDesc::Ptyp_constr(inner) => {
                     let (ref lid, _) = **inner;
@@ -3350,12 +3376,13 @@ fn fix_type_manifest_location(p: &mut Parser<'_>, typ: CoreType) -> CoreType {
                 // This matches OCaml's behavior: fresh Location object, shared positions
                 let lid_loc = p.arena().get_location(lid.loc).clone();
                 let new_loc = p.arena_mut().push_loc(lid_loc.loc_start, lid_loc.loc_end, lid_loc.loc_ghost);
-                CoreType {
+                let fixed = CoreType {
                     ptyp_loc: new_loc,
                     ..typ
-                }
+                };
+                p.arena_mut().push_core_type(fixed)
             } else {
-                typ
+                typ_idx
             }
         }
         CoreTypeDesc::Ptyp_arrow(inner) => {
@@ -3363,32 +3390,32 @@ fn fix_type_manifest_location(p: &mut Parser<'_>, typ: CoreType) -> CoreType {
             // Also adjust Ldot types in arrow parameter positions
             // But NOT in return types - OCaml keeps type args in return type ptyp_loc
             let fixed_arg = TypeArg {
-                typ: fix_type_manifest_location(p, arg.typ.clone()),
+                typ: fix_type_manifest_location(p, arg.typ),
                 ..arg.as_ref().clone()
             };
             // Return type is NOT fixed - OCaml includes type args for return types
-            CoreType {
+            let fixed = CoreType {
                 ptyp_desc: Box::new(CoreTypeDesc::Ptyp_arrow(Box::new((Box::new(fixed_arg), *ret_idx, *arity)))),
                 ..typ
-            }
+            };
+            p.arena_mut().push_core_type(fixed)
         }
         CoreTypeDesc::Ptyp_alias(inner) => {
                     let (ref alias_ct_idx, ref alias_name) = **inner;
             // Recurse into the aliased type (e.g., `Color.t<...> as 'rgb`)
-            let alias_ct = p.arena().get_core_type(*alias_ct_idx).clone();
-            let fixed_inner = fix_type_manifest_location(p, alias_ct);
-            let fixed_inner_idx = p.arena_mut().push_core_type(fixed_inner);
-            CoreType {
+            let fixed_inner_idx = fix_type_manifest_location(p, *alias_ct_idx);
+            let fixed = CoreType {
                 ptyp_desc: Box::new(CoreTypeDesc::Ptyp_alias(Box::new((fixed_inner_idx, alias_name.clone())))),
                 ..typ
-            }
+            };
+            p.arena_mut().push_core_type(fixed)
         }
-        _ => typ,
+        _ => typ_idx,
     }
 }
 
 /// Parse type parameters in angle bracket syntax: <'a, +'b, -'c, _>
-fn parse_type_params_angle(p: &mut Parser<'_>) -> Vec<(CoreType, Variance)> {
+fn parse_type_params_angle(p: &mut Parser<'_>) -> Vec<(CoreTypeIdx, Variance)> {
     let mut params = vec![];
 
     if p.token != Token::LessThan {
@@ -3427,7 +3454,8 @@ fn parse_type_params_angle(p: &mut Parser<'_>) -> Vec<(CoreType, Variance)> {
                         ptyp_loc: loc,
                         ptyp_attributes: Attributes::new(),
                     };
-                    params.push((typ, variance));
+                    let typ_idx = p.arena_mut().push_core_type(typ);
+                    params.push((typ_idx, variance));
                 }
                 t if t.is_keyword() => {
                     // Reserved keyword after singlequote: 'for, 'let, etc.
@@ -3452,7 +3480,8 @@ fn parse_type_params_angle(p: &mut Parser<'_>) -> Vec<(CoreType, Variance)> {
                         ptyp_loc: loc,
                         ptyp_attributes: Attributes::new(),
                     };
-                    params.push((typ, variance));
+                    let typ_idx = p.arena_mut().push_core_type(typ);
+                    params.push((typ_idx, variance));
                 }
                 Token::Underscore => {
                     // '_ is not valid - type param needs a name
@@ -3471,7 +3500,8 @@ fn parse_type_params_angle(p: &mut Parser<'_>) -> Vec<(CoreType, Variance)> {
                         ptyp_loc: p.mk_loc_idx_to_prev_end(param_start_idx),
                         ptyp_attributes: Attributes::new(),
                     };
-                    params.push((typ, variance));
+                    let typ_idx = p.arena_mut().push_core_type(typ);
+                    params.push((typ_idx, variance));
                 }
                 _ => {
                     // Something else after singlequote (like '+ )
@@ -3496,7 +3526,8 @@ fn parse_type_params_angle(p: &mut Parser<'_>) -> Vec<(CoreType, Variance)> {
                         ptyp_loc: p.mk_loc_idx_to_prev_end(param_start_idx),
                         ptyp_attributes: Attributes::new(),
                     };
-                    params.push((typ, variance));
+                    let typ_idx = p.arena_mut().push_core_type(typ);
+                    params.push((typ_idx, variance));
                 }
             }
         } else if p.token == Token::Underscore {
@@ -3508,7 +3539,8 @@ fn parse_type_params_angle(p: &mut Parser<'_>) -> Vec<(CoreType, Variance)> {
                 ptyp_loc: loc,
                 ptyp_attributes: Attributes::new(),
             };
-            params.push((typ, variance));
+            let typ_idx = p.arena_mut().push_core_type(typ);
+            params.push((typ_idx, variance));
         } else if let Token::Lident(name) = &p.token {
             // Missing singlequote: foo instead of 'foo
             let name = name.to_string();
@@ -3528,7 +3560,8 @@ fn parse_type_params_angle(p: &mut Parser<'_>) -> Vec<(CoreType, Variance)> {
                 ptyp_loc: loc,
                 ptyp_attributes: Attributes::new(),
             };
-            params.push((typ, variance));
+            let typ_idx = p.arena_mut().push_core_type(typ);
+            params.push((typ_idx, variance));
         }
 
         if !p.optional(&Token::Comma) {
@@ -3543,7 +3576,7 @@ fn parse_type_params_angle(p: &mut Parser<'_>) -> Vec<(CoreType, Variance)> {
 
 /// Parse old OCaml-style type parameters: ('a, 'b)
 /// This is for error recovery - ReScript requires angle brackets.
-fn parse_type_params_old_style(p: &mut Parser<'_>, _type_name: String) -> Vec<(CoreType, Variance)> {
+fn parse_type_params_old_style(p: &mut Parser<'_>, _type_name: String) -> Vec<(CoreTypeIdx, Variance)> {
     let mut params = vec![];
 
     if p.token != Token::Lparen {
@@ -3564,7 +3597,8 @@ fn parse_type_params_old_style(p: &mut Parser<'_>, _type_name: String) -> Vec<(C
                         ptyp_loc: loc,
                         ptyp_attributes: Attributes::new(),
                     };
-                    params.push((typ, Variance::Invariant));
+                    let typ_idx = p.arena_mut().push_core_type(typ);
+                    params.push((typ_idx, Variance::Invariant));
                 }
                 t if t.is_keyword() => {
                     // Reserved keyword as type param (e.g., 'for)
@@ -3576,7 +3610,8 @@ fn parse_type_params_old_style(p: &mut Parser<'_>, _type_name: String) -> Vec<(C
                         ptyp_loc: loc,
                         ptyp_attributes: Attributes::new(),
                     };
-                    params.push((typ, Variance::Invariant));
+                    let typ_idx = p.arena_mut().push_core_type(typ);
+                    params.push((typ_idx, Variance::Invariant));
                 }
                 _ => {
                     // Skip unknown token
@@ -3599,13 +3634,13 @@ fn parse_type_params_old_style(p: &mut Parser<'_>, _type_name: String) -> Vec<(C
 }
 
 /// Format a type with angle bracket syntax for error suggestions.
-fn format_type_with_angle_brackets(name: &str, params: &[(CoreType, Variance)]) -> String {
+fn format_type_with_angle_brackets(p: &Parser<'_>, name: &str, params: &[(CoreTypeIdx, Variance)]) -> String {
     if params.is_empty() {
         name.to_string()
     } else {
         let param_strs: Vec<String> = params
             .iter()
-            .map(|(t, _)| match &*t.ptyp_desc {
+            .map(|(t, _)| match &*p.arena().get_core_type(*t).ptyp_desc {
                 CoreTypeDesc::Ptyp_var(v) => format!("'{}", v),
                 _ => "_".to_string(),
             })
@@ -3700,12 +3735,13 @@ fn parse_constructor_impl(p: &mut Parser<'_>, start_pos_idx: PosIdx) -> Option<C
         // OCaml uses start_pos (which may include |) for name location as well
         let name_loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
         let spread_type = typ::parse_typ_expr(p);
+        let spread_type_idx = p.arena_mut().push_core_type(spread_type);
         // Declaration location includes type
         let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
         let ellipsis_idx = p.arena_mut().intern("...");
         return Some(ConstructorDeclaration {
             pcd_name: with_loc(ellipsis_idx, name_loc),
-            pcd_args: ConstructorArguments::Pcstr_tuple(vec![spread_type]),
+            pcd_args: ConstructorArguments::Pcstr_tuple(vec![spread_type_idx]),
             pcd_res: None,
             pcd_loc: loc,
             pcd_attributes: attrs,
@@ -3867,7 +3903,8 @@ fn parse_constructor_impl(p: &mut Parser<'_>, start_pos_idx: PosIdx) -> Option<C
                 } else {
                     typ::parse_typ_expr(p)
                 };
-                args.push(arg);
+                let arg_idx = p.arena_mut().push_core_type(arg);
+                args.push(arg_idx);
                 is_first = false;
                 if !p.optional(&Token::Comma) {
                     break;
@@ -3889,7 +3926,8 @@ fn parse_constructor_impl(p: &mut Parser<'_>, start_pos_idx: PosIdx) -> Option<C
     // Optional GADT result type: Constructor: type
     let res = if p.token == Token::Colon {
         p.next();
-        Some(typ::parse_typ_expr(p))
+        let res_typ = typ::parse_typ_expr(p);
+        Some(p.arena_mut().push_core_type(res_typ))
     } else {
         None
     };
@@ -3943,11 +3981,12 @@ fn parse_label_declarations(
             } else {
                 p.mk_loc_idx_to_end_of(loc_start_idx, spread_type.ptyp_loc)
             };
+            let spread_type_idx = p.arena_mut().push_core_type(spread_type);
             let ellipsis_idx = p.arena_mut().intern("...");
             labels.push(LabelDeclaration {
                 pld_name: with_loc(ellipsis_idx, name_loc),
                 pld_mutable: MutableFlag::Immutable,
-                pld_type: spread_type,
+                pld_type: spread_type_idx,
                 pld_loc: loc,
                 pld_attributes: Attributes::new(),
                 pld_optional: false,
@@ -4175,7 +4214,7 @@ fn parse_label_declaration(
 
             // Return a Ptyp_constr pointing to the inline type
             let params = inline_ctx.borrow().params.clone();
-            let type_args: Vec<CoreType> = params.into_iter().map(|(t, _)| t).collect();
+            let type_args: Vec<CoreTypeIdx> = params.into_iter().map(|(t, _)| t).collect();
             let lid_idx = p.push_lident_from_idx(inline_type_idx);
             CoreType {
                 ptyp_desc: Box::new(CoreTypeDesc::Ptyp_constr(Box::new((with_loc(lid_idx, type_loc.clone()), type_args)))),
@@ -4194,10 +4233,11 @@ fn parse_label_declaration(
 
     // OCaml uses typ.ptyp_loc.loc_end for label declaration's end, not p.prev_end_pos
     let loc = p.mk_loc_idx_to_end_of(start_pos_idx, typ.ptyp_loc);
+    let typ_idx = p.arena_mut().push_core_type(typ);
     Some(LabelDeclaration {
         pld_name: name,
         pld_mutable: mutable,
-        pld_type: typ,
+        pld_type: typ_idx,
         pld_loc: loc,
         pld_attributes: attrs,
         pld_optional: is_optional,
@@ -4292,7 +4332,8 @@ fn parse_value_description(
     // OCaml: InExternal.status := true before parsing type
     let was_in_external = p.in_external;
     p.in_external = true;
-    let typ = typ::parse_typ_expr(p);
+    let typ_ct = typ::parse_typ_expr(p);
+    let typ = p.arena_mut().push_core_type(typ_ct);
     p.in_external = was_in_external;
 
     // Parse optional primitive
@@ -4444,9 +4485,10 @@ fn parse_module_definition(p: &mut Parser<'_>, module_start_idx: PosIdx, attrs: 
             };
         }
 
+        let mod_expr_idx = p.arena_mut().push_mod_expr(mod_expr);
         Some(ModuleBinding {
             pmb_name: name,
-            pmb_expr: mod_expr,
+            pmb_expr: mod_expr_idx,
             pmb_attributes: attrs,
             pmb_loc: p.mk_loc_idx_to_prev_end(binding_start_idx),
         })
@@ -4563,9 +4605,10 @@ fn parse_module_declaration(p: &mut Parser<'_>, outer_attrs: Attributes, start_p
     };
 
     let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
+    let mod_type_idx = p.arena_mut().push_mod_type(mod_type);
     ModuleDeclaration {
         pmd_name: name,
-        pmd_type: mod_type,
+        pmd_type: mod_type_idx,
         pmd_attributes: attrs,
         pmd_loc: loc,
     }
@@ -4653,7 +4696,8 @@ fn parse_module_type_declaration(p: &mut Parser<'_>, outer_attrs: Attributes, in
 
     let typ = if p.token == Token::Equal {
         p.next();
-        Some(parse_module_type(p))
+        let mt = parse_module_type(p);
+        Some(p.arena_mut().push_mod_type(mt))
     } else {
         None
     };
@@ -4838,9 +4882,10 @@ pub fn parse_payload(p: &mut Parser<'_>) -> Payload {
             // BEFORE computing the location, so structure item location includes the semicolon
             p.optional(&Token::Semicolon);
             let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
+            let expr_idx = p.arena_mut().push_expr(expr);
 
             items.push(StructureItem {
-                pstr_desc: Box::new(StructureItemDesc::Pstr_eval(Box::new((expr, Attributes::new())))),
+                pstr_desc: Box::new(StructureItemDesc::Pstr_eval(Box::new((expr_idx, Attributes::new())))),
                 pstr_loc: loc,
             });
         }
