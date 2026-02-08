@@ -42,6 +42,7 @@ use crate::types::{Env, Path, TypeContext, TypeDesc, TypeError, TypeExprRef, Uni
 const DICT_PATTERN_ATTRIBUTE: &str = "res.dictPattern";
 const DICT_MAGIC_FIELD_NAME: &str = "dictValuesType";
 const DICT_TYPE_NAME: &str = "dict";
+const PAT_VARIANT_SPREAD_ATTRIBUTE: &str = "res.patVariantSpread";
 
 // ============================================================================
 // Location Conversion Helpers
@@ -1049,6 +1050,133 @@ fn transl_type_inner(
     }
 }
 
+fn has_res_pat_variant_spread_attribute(
+    arena: &ParseArena,
+    attrs: &[crate::parser::ast::Attribute],
+) -> bool {
+    attrs
+        .iter()
+        .any(|attr| arena.get_string(attr.0.txt) == PAT_VARIANT_SPREAD_ATTRIBUTE)
+}
+
+fn find_existing_lident_idx(arena: &ParseArena, name: &str) -> Option<LidentIdx> {
+    for idx in (0..arena.longident_count()).rev() {
+        let lid_idx = LidentIdx(idx as u32);
+        if let Longident::Lident(str_idx) = arena.get_longident(lid_idx) {
+            if arena.get_string(*str_idx) == name {
+                return Some(lid_idx);
+            }
+        }
+    }
+    None
+}
+
+fn extract_type_from_pat_variant_spread(
+    tctx: &mut TypeCheckContext<'_>,
+    env: &Env,
+    lid: &Located<LidentIdx>,
+) -> TypeCoreResult<(Path, Vec<crate::types::ConstructorDeclaration>, TypeExprRef)> {
+    let ctx = tctx.type_ctx;
+    let lid_txt = tctx.resolve_lid(lid.txt).clone();
+    let spread_ct = crate::parser::ast::CoreType {
+        ptyp_desc: crate::parser::ast::CoreTypeDesc::Ptyp_constr(*lid, vec![]),
+        ptyp_loc: lid.loc,
+        ptyp_attributes: vec![],
+    };
+
+    let (_, spread_ty_ref) = transl_type(tctx, env, &spread_ct)?;
+    let spread_ty = ctx.repr(spread_ty_ref);
+    let spread_ty_desc = ctx.get_desc(spread_ty);
+    let (spread_path, spread_args) = match &*spread_ty_desc {
+        TypeDesc::Tconstr { path, args, .. } => (path.clone(), args.clone()),
+        _ => return Err(TypeCoreError::NotAVariantType(lid_txt)),
+    };
+    drop(spread_ty_desc);
+
+    let Some(type_decl) = lookup_type_decl_for_path(&spread_path, env, ctx) else {
+        return Err(TypeCoreError::NotAVariantType(lid_txt));
+    };
+    if !spread_args.is_empty() || !type_decl.type_params.is_empty() {
+        return Err(TypeCoreError::NotAVariantType(lid_txt));
+    }
+
+    let constructors = match &type_decl.type_kind {
+        crate::types::TypeKind::TypeVariant(cstrs) => cstrs.clone(),
+        _ => return Err(TypeCoreError::NotAVariantType(lid_txt)),
+    };
+    let spread_ty = ctx.new_generic_constr(spread_path.clone(), vec![]);
+
+    Ok((spread_path, constructors, spread_ty))
+}
+
+fn build_ppat_or_for_variant_spread(
+    tctx: &mut TypeCheckContext<'_>,
+    env: &Env,
+    pat: &ParsedPattern,
+    _expected_ty: TypeExprRef,
+) -> TypeCoreResult<Option<(ParsedPattern, TypeExprRef)>> {
+    let crate::parser::ast::PatternDesc::Ppat_type(lident) = &pat.ppat_desc else {
+        return Ok(None);
+    };
+    if !has_res_pat_variant_spread_attribute(tctx.arena, &pat.ppat_attributes) {
+        return Ok(None);
+    }
+
+    let (_path, constructors, spread_ty) = extract_type_from_pat_variant_spread(tctx, env, lident)?;
+    let mut synthetic_patterns = Vec::with_capacity(constructors.len());
+    for cstr in constructors {
+        let cstr_name = cstr.cd_id.name();
+        let Some(cstr_lid_idx) = find_existing_lident_idx(tctx.arena, cstr_name) else {
+            return Err(TypeCoreError::NotAVariantType(tctx.resolve_lid(lident.txt).clone()));
+        };
+        let cstr_lid = Located {
+            txt: cstr_lid_idx,
+            loc: lident.loc,
+        };
+        let cstr_arg = match cstr.cd_args {
+            crate::types::ConstructorArguments::CstrTuple(ref args) if args.is_empty() => None,
+            _ => Some(Box::new(ParsedPattern {
+                ppat_desc: crate::parser::ast::PatternDesc::Ppat_any,
+                ppat_loc: LocIdx::none(),
+                ppat_attributes: vec![],
+            })),
+        };
+        synthetic_patterns.push(ParsedPattern {
+            ppat_desc: crate::parser::ast::PatternDesc::Ppat_construct(cstr_lid, cstr_arg),
+            ppat_loc: lident.loc,
+            ppat_attributes: vec![],
+        });
+    }
+
+    synthetic_patterns.reverse();
+    let expanded_pattern = match synthetic_patterns.into_iter().reduce(|lhs, rhs| ParsedPattern {
+        ppat_desc: crate::parser::ast::PatternDesc::Ppat_or(Box::new(lhs), Box::new(rhs)),
+        ppat_loc: pat.ppat_loc,
+        ppat_attributes: vec![],
+    }) {
+        Some(pattern) => pattern,
+        None => pat.clone(),
+    };
+
+    Ok(Some((expanded_pattern, spread_ty)))
+}
+
+fn maybe_expand_variant_spread_in_pattern(
+    tctx: &mut TypeCheckContext<'_>,
+    env: &Env,
+    pat: &ParsedPattern,
+    expected_ty: TypeExprRef,
+) -> TypeCoreResult<Option<ParsedPattern>> {
+    if !matches!(pat.ppat_desc, crate::parser::ast::PatternDesc::Ppat_type(_)) {
+        return Ok(None);
+    }
+    if !has_res_pat_variant_spread_attribute(tctx.arena, &pat.ppat_attributes) {
+        return Ok(None);
+    }
+
+    Ok(build_ppat_or_for_variant_spread(tctx, env, pat, expected_ty)?.map(|(expanded, _)| expanded))
+}
+
 // ============================================================================
 // Pattern Type Checking
 // ============================================================================
@@ -1077,6 +1205,8 @@ fn type_pattern_inner(
 ) -> TypeCoreResult<Pattern> {
     use crate::parser::ast::PatternDesc as PD;
 
+    let expanded_pat = maybe_expand_variant_spread_in_pattern(tctx, env, pat, expected_ty)?;
+    let pat = expanded_pat.as_ref().unwrap_or(pat);
     let loc = pat.ppat_loc.clone();
     let ctx = tctx.type_ctx;
 
@@ -1150,11 +1280,26 @@ fn type_pattern_inner(
 
         PD::Ppat_alias(inner_pat, name) => {
             // Alias pattern: P as x
-            let typed_inner =
-                type_pattern_inner(tctx, env, inner_pat, expected_ty, mode, state, 0)?;
+            let (expanded_inner, override_type_from_variant_spread) =
+                if matches!(inner_pat.ppat_desc, PD::Ppat_type(_))
+                    && has_res_pat_variant_spread_attribute(tctx.arena, &inner_pat.ppat_attributes)
+                {
+                    match build_ppat_or_for_variant_spread(tctx, env, inner_pat, expected_ty)? {
+                        Some((expanded, spread_ty)) => (Some(expanded), Some(spread_ty)),
+                        None => (None, None),
+                    }
+                } else {
+                    (None, None)
+                };
+            let inner_pat = expanded_inner.as_ref().unwrap_or(inner_pat);
+
+            let typed_inner = type_pattern_inner(tctx, env, inner_pat, expected_ty, mode, state, 0)?;
 
             // Build the as-type
-            let ty_var = build_as_type(ctx, env, &typed_inner)?;
+            let ty_var = match override_type_from_variant_spread {
+                Some(ty) => ty,
+                None => build_as_type(ctx, env, &typed_inner)?,
+            };
 
             // Enter the variable with the as-type
             let id = state.enter_variable(loc, name, ty_var, true, false, tctx.arena)?;

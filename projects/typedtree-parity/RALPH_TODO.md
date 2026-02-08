@@ -76,15 +76,16 @@ The `-dtyped-sexp` flag outputs the typed tree without locations. The `-dtyped-s
 |  | Status |
 |--|--------|
 | OCaml compiles | 657/657 |
-| Rust compiles | 594/657 (63 fail) |
-| Parity match (-dtyped-sexp) | 310/594 (52.2%) |
+| Rust compiles | 596/657 (61 fail) |
+| Parity match (-dtyped-sexp) | 310/596 (52.0%) |
 
-**Task Progress:** 3/3 complete
+**Task Progress:** 4/4 complete
 
 **Task Checklist:**
 - [x] Fix qualified constructor typing + trailing optional-arg consumption in `type_application` so dict-pattern matches compile instead of failing with `PatternTypeClash`.
 - [x] Reduce remaining Rust compile failures (67), prioritizing root causes in `UndefinedMethod`, `ExprTypeClash`, and `PatternTypeClash`.
 - [x] Preserve nested module member visibility for awaited/unpacked modules in extracted signatures, and keep declared signatures for recursive self-alias modules (`module rec M = M`) to avoid `UndefinedMethod` regressions (Rust compile failures: 65 -> 63).
+- [x] Port OCaml's variant spread pattern rewrite in `type_pattern` (`Ppat_type` expansion + alias type override) so `...a as a` binds the spread source type (Rust compile failures: 63 -> 61).
 
 **Previous milestones completed:**
 - Parser AST structure: 100% parity (sexp-locs 1196/1196)
@@ -100,6 +101,7 @@ The `-dtyped-sexp` flag outputs the typed tree without locations. The `-dtyped-s
 - Module-qualified constructor result typing + implicit trailing optional-arg consumption in applications (Rust compile failures: 71 -> 67)
 - Recover semantic module types for `Pmod_unpack`/`await` module bindings and `let module` fallback resolution (Rust compile failures: 67 -> 65)
 - Preserve unpacked-module type hints in extracted signatures and keep recmodule self-alias declarations from dropping explicit signatures (Rust compile failures: 65 -> 63)
+- Port OCaml-style variant spread pattern expansion/alias typing for `...Type as x` patterns (Rust compile failures: 63 -> 61)
 
 ---
 
@@ -169,9 +171,9 @@ The type checker takes a Parsetree and produces a Typedtree. The Typedtree is th
 
 ## Key Areas for Improvement
 
-### Rust Compilation Failures (65 files)
+### Rust Compilation Failures (61 files)
 
-65 files fail to compile with the Rust type checker. Top error patterns:
+61 files fail to compile with the Rust type checker. Top error patterns:
 
 | Error | Count | Description |
 |-------|-------|-------------|
@@ -183,7 +185,7 @@ The type checker takes a Parsetree and produces a Typedtree. The Typedtree is th
 
 ### Parity Diff Categories (280 files with diffs)
 
-Of the 592 files that compile, 310 match and 282 differ. Diff categories (overlap):
+Of the 596 files that compile, 310 match and 286 differ. Diff categories (overlap):
 
 | Category | Files | Description |
 |----------|-------|-------------|
