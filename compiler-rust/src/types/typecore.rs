@@ -1574,7 +1574,27 @@ fn type_pattern_record(
             }
         };
 
-        let typed_pat = type_pattern_inner(tctx, env, &field.pat, field_ty, mode, state, 0)?;
+        // process_optional_label: if the label is optional and the user did NOT write '?',
+        // wrap the pattern in Some(...) before type checking.
+        // This matches OCaml's typecore.ml process_optional_label behavior.
+        let typed_pat = if label_desc.lbl_optional && !field.opt {
+            // field_ty is option<T> — extract T to type-check the inner pattern
+            let inner_ty = crate::types::ctype::extract_option_type(ctx, field_ty)
+                .unwrap_or(field_ty);
+            let typed_inner = type_pattern_inner(tctx, env, &field.pat, inner_ty, mode, state, 0)?;
+            // Wrap in Tpat_construct("Some", [typed_inner]) with type option<T>
+            let some_lid = Located { txt: tctx.arena.some_lid(), loc: field.pat.ppat_loc };
+            let some_cstr = make_some_constructor(ctx, field_ty);
+            Pattern::new(
+                PatternDesc::Tpat_construct(some_lid, some_cstr, vec![typed_inner]),
+                field.pat.ppat_loc,
+                field_ty,
+                EnvRef(0),
+                vec![],
+            )
+        } else {
+            type_pattern_inner(tctx, env, &field.pat, field_ty, mode, state, 0)?
+        };
         typed_fields.push((field.lid.clone(), label_desc, typed_pat, field.opt));
     }
 
@@ -2165,12 +2185,13 @@ pub fn type_expect<'a>(
             )
         }
 
-        ED::Pexp_open(_override_flag, lid, body) => {
+        ED::Pexp_open(override_flag, lid, body) => {
             // Open expression: M.{ E } or open M; E
             type_open(
                 tctx,
                 env,
                 loc,
+                override_flag,
                 lid,
                 body,
                 expected_ty,
@@ -3596,6 +3617,7 @@ fn type_open(
     tctx: &mut TypeCheckContext<'_>,
     env: &Env,
     loc: LocIdx,
+    override_flag: &crate::parser::ast::OverrideFlag,
     lid: &Located<LidentIdx>,
     body: &ParsedExpression,
     expected_ty: TypeExprRef,
@@ -3624,12 +3646,15 @@ fn type_open(
     // Type check the body expression in the extended environment
     let typed_body = type_expect(tctx, &open_env, body, expected_ty, None)?;
 
-    // Return expression with open in exp_extra
-    Ok(Expression::new(
-        typed_body.exp_desc,
+    // Return expression with Texp_open in exp_extra (matching OCaml)
+    Ok(typed_body.with_exp_extra(
+        crate::types::typedtree::ExpExtra::Texp_open(
+            override_flag.clone(),
+            path,
+            lid.clone(),
+            EnvRef(0),
+        ),
         loc.clone(),
-        expected_ty,
-        EnvRef(0),
         attributes.to_vec(),
     ))
 }
