@@ -3965,9 +3965,24 @@ fn parse_label_declarations(
     current_type_name_path: Option<&Vec<StrIdx>>,
     lbrace_pos_idx: Option<PosIdx>,
 ) -> Vec<LabelDeclaration> {
+    parse_label_declarations_with_first_state(
+        p,
+        inline_ctx,
+        current_type_name_path,
+        lbrace_pos_idx,
+        true,
+    )
+}
+
+fn parse_label_declarations_with_first_state(
+    p: &mut Parser<'_>,
+    inline_ctx: Option<&RefCell<InlineTypesContext>>,
+    current_type_name_path: Option<&Vec<StrIdx>>,
+    lbrace_pos_idx: Option<PosIdx>,
+    mut is_first: bool,
+) -> Vec<LabelDeclaration> {
     p.leave_breadcrumb(grammar::Grammar::FieldDeclarations);
     let mut labels = vec![];
-    let mut is_first = true;
 
     while p.token != Token::Rbrace && p.token != Token::Eof {
         // Handle spread: ...typ - represented as a label with name "..."
@@ -4061,7 +4076,7 @@ fn parse_label_declarations_with_leading_attrs(
         .map(|(name, _)| p.loc_start_idx(name.loc))
         .expect("leading attrs must be non-empty");
 
-    if let Some(first) = parse_first_label_with_preparsed_attrs(
+    let parsed_first = if let Some(first) = parse_first_label_with_preparsed_attrs(
         p,
         inline_ctx,
         current_type_name_path,
@@ -4069,15 +4084,19 @@ fn parse_label_declarations_with_leading_attrs(
         first_attr_start_idx,
     ) {
         labels.push(first);
-    }
+        true
+    } else {
+        false
+    };
 
     // OCaml uses `Parser.optional p Comma |> ignore` before parsing the rest.
     p.optional(&Token::Comma);
-    labels.extend(parse_label_declarations(
+    labels.extend(parse_label_declarations_with_first_state(
         p,
         inline_ctx,
         current_type_name_path,
         None,
+        !parsed_first,
     ));
 
     labels
@@ -4144,7 +4163,7 @@ fn parse_constructor_record_labels(
     }
 
     let mut labels = Vec::new();
-    if let Some(first) = parse_label_declaration(
+    let parsed_first = if let Some(first) = parse_label_declaration(
         p,
         None,
         None,
@@ -4152,14 +4171,23 @@ fn parse_constructor_record_labels(
         false,
     ) {
         labels.push(first);
-    }
+        true
+    } else {
+        false
+    };
 
     if p.token == Token::Rbrace || p.token == Token::Eof {
         return labels;
     }
 
     p.expect(Token::Comma);
-    labels.extend(parse_label_declarations(p, None, None, None));
+    labels.extend(parse_label_declarations_with_first_state(
+        p,
+        None,
+        None,
+        None,
+        !parsed_first,
+    ));
     labels
 }
 
