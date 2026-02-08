@@ -7,7 +7,7 @@ use std::borrow::Cow;
 use std::cell::RefCell;
 
 use crate::location::Position;
-use crate::parse_arena::{LidentIdx, Located, LocIdx, PosIdx, StrIdx};
+use crate::parse_arena::{CoreTypeIdx, ExprIdx, LidentIdx, Located, LocIdx, ModExprIdx, ModTypeIdx, PatIdx, PosIdx, StrIdx};
 
 // Import Location as alias to LocIdx from ast
 use super::ast::*;
@@ -177,8 +177,9 @@ fn module_type_to_package(p: &mut Parser<'_>, mt: &ModuleType) -> PackageType {
     match &*mt.pmty_desc {
         ModuleTypeDesc::Pmty_ident(lid) => (lid.clone(), vec![]),
         ModuleTypeDesc::Pmty_with(inner) => {
-                    let (ref base, ref constraints) = **inner;
+                    let (ref base_idx, ref constraints) = **inner;
             // For "T with type t = int", extract base identifier and constraints
+            let base = p.arena().get_mod_type(*base_idx);
             let lid = if let ModuleTypeDesc::Pmty_ident(lid) = &*base.pmty_desc {
                 lid.clone()
             } else {
@@ -1073,8 +1074,10 @@ pub fn parse_module_expr(p: &mut Parser<'_>) -> ModuleExpr {
         p.next();
         let mod_type = parse_module_type(p);
         let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
+        let expr_idx = p.arena_mut().push_mod_expr(expr);
+        let mod_type_idx = p.arena_mut().push_mod_type(mod_type);
         ModuleExpr {
-            pmod_desc: Box::new(ModuleExprDesc::Pmod_constraint(Box::new(expr), Box::new(mod_type))),
+            pmod_desc: Box::new(ModuleExprDesc::Pmod_constraint(expr_idx, mod_type_idx)),
             pmod_loc: loc,
             pmod_attributes: Attributes::new(),
         }
@@ -1263,8 +1266,9 @@ fn parse_primary_module_expr(p: &mut Parser<'_>) -> ModuleExpr {
                     // OCaml: expect Rparen first, then create constraint with loc including Rparen
                     p.expect(Token::Rparen);
                     let constraint_loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
+                    let expr_idx = p.arena_mut().push_expr(expr);
                     Expression {
-                        pexp_desc: Box::new(ExpressionDesc::Pexp_constraint(Box::new((Box::new(expr), pkg_type)))),
+                        pexp_desc: Box::new(ExpressionDesc::Pexp_constraint(Box::new((expr_idx, pkg_type)))),
                         pexp_loc: constraint_loc,
                         pexp_attributes: Attributes::new(),
                     }
@@ -1273,8 +1277,9 @@ fn parse_primary_module_expr(p: &mut Parser<'_>) -> ModuleExpr {
                     expr
                 };
                 let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
+                let final_expr_idx = p.arena_mut().push_expr(final_expr);
                 ModuleExpr {
-                    pmod_desc: Box::new(ModuleExprDesc::Pmod_unpack(Box::new(final_expr))),
+                    pmod_desc: Box::new(ModuleExprDesc::Pmod_unpack(final_expr_idx)),
                     pmod_loc: loc,
                     pmod_attributes: Attributes::new(),
                 }
@@ -1340,8 +1345,10 @@ fn parse_module_apply(p: &mut Parser<'_>, func: ModuleExpr) -> ModuleExpr {
             let start_idx = p.loc_start_idx(result.pmod_loc);
             let end_idx = p.loc_end_idx(arg.pmod_loc);
             let loc = p.mk_loc_idx_full(start_idx, end_idx);
+            let result_idx = p.arena_mut().push_mod_expr(result);
+            let arg_idx = p.arena_mut().push_mod_expr(arg);
             result = ModuleExpr {
-                pmod_desc: Box::new(ModuleExprDesc::Pmod_apply(Box::new(result), Box::new(arg))),
+                pmod_desc: Box::new(ModuleExprDesc::Pmod_apply(result_idx, arg_idx)),
                 pmod_loc: loc,
                 pmod_attributes: Attributes::new(),
             };
@@ -1553,10 +1560,12 @@ fn parse_functor_module_expr(p: &mut Parser<'_>) -> ModuleExpr {
             let start_idx = p.loc_start_idx(rhs_module_expr.pmod_loc);
             let end_idx = p.loc_end_idx(mod_type.pmty_loc);
             let loc = p.mk_loc_idx_full(start_idx, end_idx);
+            let expr_idx = p.arena_mut().push_mod_expr(rhs_module_expr);
+            let mod_type_idx = p.arena_mut().push_mod_type(mod_type);
             ModuleExpr {
                 pmod_desc: Box::new(ModuleExprDesc::Pmod_constraint(
-                    Box::new(rhs_module_expr),
-                    Box::new(mod_type),
+                    expr_idx,
+                    mod_type_idx,
                 )),
                 pmod_loc: loc,
                 pmod_attributes: Attributes::new(),
@@ -1570,8 +1579,10 @@ fn parse_functor_module_expr(p: &mut Parser<'_>) -> ModuleExpr {
     // Fold arguments into nested functors (right to left)
     args.into_iter().rev().fold(rhs_module_expr, |acc, arg| {
         let loc = p.mk_loc_idx(arg.start_pos_idx, end_pos_idx);
+        let acc_idx = p.arena_mut().push_mod_expr(acc);
+        let mod_type_idx = arg.mod_type.map(|mt| p.arena_mut().push_mod_type(mt));
         ModuleExpr {
-            pmod_desc: Box::new(ModuleExprDesc::Pmod_functor(Box::new((arg.name, arg.mod_type.map(Box::new), Box::new(acc))))),
+            pmod_desc: Box::new(ModuleExprDesc::Pmod_functor(Box::new((arg.name, mod_type_idx, acc_idx)))),
             pmod_loc: loc,
             pmod_attributes: arg.attrs,
         }
@@ -1656,8 +1667,9 @@ fn parse_module_type_impl(p: &mut Parser<'_>, es6_arrow: bool, parse_with: bool)
         p.next();
         let constraints = parse_with_constraints(p);
         let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
+        let typ_idx = p.arena_mut().push_mod_type(typ);
         ModuleType {
-            pmty_desc: Box::new(ModuleTypeDesc::Pmty_with(Box::new((Box::new(typ), constraints)))),
+            pmty_desc: Box::new(ModuleTypeDesc::Pmty_with(Box::new((typ_idx, constraints)))),
             pmty_loc: loc,
             pmty_attributes: Attributes::new(),
         }
@@ -1680,8 +1692,10 @@ fn parse_functor_module_type(p: &mut Parser<'_>) -> ModuleType {
         // Use parse_module_type_no_with so `with` constraints apply to the outer functor
         let body = parse_module_type_no_with(p);
         let loc = p.mk_loc_idx_to_end_of(start_pos_idx, body.pmty_loc);
+        let param_type_idx = p.arena_mut().push_mod_type(param_type);
+        let body_idx = p.arena_mut().push_mod_type(body);
         return ModuleType {
-            pmty_desc: Box::new(ModuleTypeDesc::Pmty_functor(Box::new((mknoloc(p.arena_mut().intern("_")), Some(Box::new(param_type)), Box::new(body))))),
+            pmty_desc: Box::new(ModuleTypeDesc::Pmty_functor(Box::new((mknoloc(p.arena_mut().intern("_")), Some(param_type_idx), body_idx)))),
             pmty_loc: loc,
             pmty_attributes: Attributes::new(),
         };
@@ -1874,8 +1888,10 @@ fn parse_paren_functor_module_type(p: &mut Parser<'_>) -> ModuleType {
                 param.start_pos_idx
             };
             let loc = p.mk_loc_idx(start_idx, end_pos_idx);
+            let acc_idx = p.arena_mut().push_mod_type(acc);
+            let param_idx = param.param.map(|mt| p.arena_mut().push_mod_type(mt));
             ModuleType {
-                pmty_desc: Box::new(ModuleTypeDesc::Pmty_functor(Box::new((param.name, param.param.map(Box::new), Box::new(acc))))),
+                pmty_desc: Box::new(ModuleTypeDesc::Pmty_functor(Box::new((param.name, param_idx, acc_idx)))),
                 pmty_loc: loc,
                 pmty_attributes: param.attrs,
             }
@@ -1927,8 +1943,9 @@ fn parse_primary_module_type(p: &mut Parser<'_>) -> ModuleType {
                     p.next();
                     let mod_expr = parse_module_expr(p);
                     let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
+                    let mod_expr_idx = p.arena_mut().push_mod_expr(mod_expr);
                     return ModuleType {
-                        pmty_desc: Box::new(ModuleTypeDesc::Pmty_typeof(Box::new(mod_expr))),
+                        pmty_desc: Box::new(ModuleTypeDesc::Pmty_typeof(mod_expr_idx)),
                         pmty_loc: loc,
                         pmty_attributes: Attributes::new(),
                     };
@@ -2395,21 +2412,23 @@ fn parse_let_bindings(
             // But for the Ptyp_poly in the pattern, we need to substitute Ptyp_constr -> Ptyp_var
             let (final_typ, newtype_info) = match *typ.ptyp_desc {
                 CoreTypeDesc::Ptyp_poly(poly_inner) if is_locally_abstract => {
-                    let (vars, ct) = *poly_inner;
+                    let (vars, ct_idx) = *poly_inner;
                     // Build the set of variable names for substitution
                     let var_set: std::collections::HashSet<String> =
                         vars.iter().map(|v| p.arena().get_string(v.txt).to_string()).collect();
 
                     // The inner type (with Ptyp_constr) is used for Pexp_constraint
-                    let inner_for_constraint = (*ct).clone();
+                    let inner_for_constraint = p.arena().get_core_type(ct_idx).clone();
 
                     // Substitute Ptyp_constr -> Ptyp_var for the Ptyp_poly body
+                    let ct_clone = p.arena().get_core_type(ct_idx).clone();
                     let substituted_inner =
-                        typ::substitute_type_vars(p.arena_mut(), (*ct).clone(), &var_set);
+                        typ::substitute_type_vars(p.arena_mut(), ct_clone, &var_set);
 
                     // Rebuild the Ptyp_poly with the substituted body
+                    let substituted_inner_idx = p.arena_mut().push_core_type(substituted_inner);
                     let substituted_typ = CoreType {
-                        ptyp_desc: Box::new(CoreTypeDesc::Ptyp_poly(Box::new((vars.clone(), Box::new(substituted_inner))))),
+                        ptyp_desc: Box::new(CoreTypeDesc::Ptyp_poly(Box::new((vars.clone(), substituted_inner_idx)))),
                         ptyp_loc: typ.ptyp_loc,
                         ptyp_attributes: typ.ptyp_attributes,
                     };
@@ -2421,8 +2440,9 @@ fn parse_let_bindings(
 
             // Create a constraint pattern
             let loc = p.mk_loc_spanning(pat.ppat_loc, final_typ.ptyp_loc);
+            let pat_idx = p.arena_mut().push_pat(pat);
             let pat = Pattern {
-                ppat_desc: Box::new(PatternDesc::Ppat_constraint(Box::new((Box::new(pat), final_typ)))),
+                ppat_desc: Box::new(PatternDesc::Ppat_constraint(Box::new((pat_idx, final_typ)))),
                 ppat_loc: loc,
                 ppat_attributes: Attributes::new(),
             };
@@ -2453,7 +2473,7 @@ fn parse_let_bindings(
             let wrapper_loc = wrapper_loc.expect("locally abstract let-binding should have wrapper loc");
             // Update Ppat_constraint and inner Ptyp_poly locations to use the binding location
             if let PatternDesc::Ppat_constraint(inner) = *pat.ppat_desc {
-                let (inner_pat, typ) = *inner;
+                let (inner_pat_idx, typ) = *inner;
                 // Update the Ptyp_poly location to use binding location
                 let updated_typ = match *typ.ptyp_desc {
                     CoreTypeDesc::Ptyp_poly(poly_inner) => {
@@ -2467,7 +2487,7 @@ fn parse_let_bindings(
                     _ => typ,
                 };
                 Pattern {
-                    ppat_desc: Box::new(PatternDesc::Ppat_constraint(Box::new((inner_pat, updated_typ)))),
+                    ppat_desc: Box::new(PatternDesc::Ppat_constraint(Box::new((inner_pat_idx, updated_typ)))),
                     ppat_loc: wrapper_loc,
                     ppat_attributes: pat.ppat_attributes,
                 }
@@ -2485,8 +2505,9 @@ fn parse_let_bindings(
             let wrapper_loc = wrapper_loc.expect("locally abstract wrappers should have wrapper loc");
             // First wrap the expression in Pexp_constraint with the inner type
             // OCaml uses the binding location for this Pexp_constraint
+            let expr_idx = p.arena_mut().push_expr(expr);
             expr = Expression {
-                pexp_desc: Box::new(ExpressionDesc::Pexp_constraint(Box::new((Box::new(expr), inner_type)))),
+                pexp_desc: Box::new(ExpressionDesc::Pexp_constraint(Box::new((expr_idx, inner_type)))),
                 pexp_loc: wrapper_loc,
                 pexp_attributes: Attributes::new(),
             };
@@ -2495,8 +2516,9 @@ fn parse_let_bindings(
             // Fold in reverse order so that the outermost newtype is the first variable
             // OCaml uses the binding location for all Pexp_newtype wrappers
             for var in newtype_vars.into_iter().rev() {
+                let expr_idx = p.arena_mut().push_expr(expr);
                 expr = Expression {
-                    pexp_desc: Box::new(ExpressionDesc::Pexp_newtype(Box::new((var, Box::new(expr))))),
+                    pexp_desc: Box::new(ExpressionDesc::Pexp_newtype(Box::new((var, expr_idx)))),
                     pexp_loc: wrapper_loc,
                     pexp_attributes: Attributes::new(),
                 };
@@ -3269,27 +3291,30 @@ fn fix_spread_first_object_manifest(p: &mut Parser<'_>, typ: CoreType, is_spread
             }
         }
         CoreTypeDesc::Ptyp_alias(alias_inner) => {
-                    let (ct, alias) = *alias_inner;
+                    let (ct_idx, alias) = *alias_inner;
             // Recurse into inner type
-            let (fixed_inner, applied) = fix_spread_first_object_manifest(p, *ct, true);
+            let ct = p.arena().get_core_type(ct_idx).clone();
+            let (fixed_inner, applied) = fix_spread_first_object_manifest(p, ct, true);
             if applied {
                 // OCaml uses inner type's loc_start for alias, so if inner is ghost, alias start is ghost too
                 // Create a spanning location from fixed_inner start to typ end
                 let new_loc = p.mk_loc_spanning(fixed_inner.ptyp_loc, typ.ptyp_loc);
+                let fixed_inner_idx = p.arena_mut().push_core_type(fixed_inner);
                 (CoreType {
-                    ptyp_desc: Box::new(CoreTypeDesc::Ptyp_alias(Box::new((Box::new(fixed_inner), alias)))),
+                    ptyp_desc: Box::new(CoreTypeDesc::Ptyp_alias(Box::new((fixed_inner_idx, alias)))),
                     ptyp_loc: new_loc,
                     ptyp_attributes: typ.ptyp_attributes,
                 }, true)
             } else {
+                let fixed_inner_idx = p.arena_mut().push_core_type(fixed_inner);
                 (CoreType {
-                    ptyp_desc: Box::new(CoreTypeDesc::Ptyp_alias(Box::new((Box::new(fixed_inner), alias)))),
+                    ptyp_desc: Box::new(CoreTypeDesc::Ptyp_alias(Box::new((fixed_inner_idx, alias)))),
                     ..typ
                 }, false)
             }
         }
         CoreTypeDesc::Ptyp_arrow(arrow_inner) => {
-                    let (arg, ret, arity) = *arrow_inner;
+                    let (arg, ret_idx, arity) = *arrow_inner;
             // Recurse into arg ONLY if this is the direct manifest level
             let (fixed_arg_typ, _) = fix_spread_first_object_manifest(p, arg.typ, true);
             let fixed_arg = TypeArg {
@@ -3297,7 +3322,7 @@ fn fix_spread_first_object_manifest(p: &mut Parser<'_>, typ: CoreType, is_spread
                 ..*arg
             };
             (CoreType {
-                ptyp_desc: Box::new(CoreTypeDesc::Ptyp_arrow(Box::new((Box::new(fixed_arg), Box::new(*ret), arity)))),
+                ptyp_desc: Box::new(CoreTypeDesc::Ptyp_arrow(Box::new((Box::new(fixed_arg), ret_idx, arity)))),
                 ..typ
             }, false)
         }
@@ -3334,7 +3359,7 @@ fn fix_type_manifest_location(p: &mut Parser<'_>, typ: CoreType) -> CoreType {
             }
         }
         CoreTypeDesc::Ptyp_arrow(inner) => {
-                    let (ref arg, ref ret, ref arity) = **inner;
+                    let (ref arg, ref ret_idx, ref arity) = **inner;
             // Also adjust Ldot types in arrow parameter positions
             // But NOT in return types - OCaml keeps type args in return type ptyp_loc
             let fixed_arg = TypeArg {
@@ -3343,16 +3368,18 @@ fn fix_type_manifest_location(p: &mut Parser<'_>, typ: CoreType) -> CoreType {
             };
             // Return type is NOT fixed - OCaml includes type args for return types
             CoreType {
-                ptyp_desc: Box::new(CoreTypeDesc::Ptyp_arrow(Box::new((Box::new(fixed_arg), ret.clone(), *arity)))),
+                ptyp_desc: Box::new(CoreTypeDesc::Ptyp_arrow(Box::new((Box::new(fixed_arg), *ret_idx, *arity)))),
                 ..typ
             }
         }
         CoreTypeDesc::Ptyp_alias(inner) => {
-                    let (ref alias_ct, ref alias_name) = **inner;
+                    let (ref alias_ct_idx, ref alias_name) = **inner;
             // Recurse into the aliased type (e.g., `Color.t<...> as 'rgb`)
-            let fixed_inner = fix_type_manifest_location(p, alias_ct.as_ref().clone());
+            let alias_ct = p.arena().get_core_type(*alias_ct_idx).clone();
+            let fixed_inner = fix_type_manifest_location(p, alias_ct);
+            let fixed_inner_idx = p.arena_mut().push_core_type(fixed_inner);
             CoreType {
-                ptyp_desc: Box::new(CoreTypeDesc::Ptyp_alias(Box::new((Box::new(fixed_inner), alias_name.clone())))),
+                ptyp_desc: Box::new(CoreTypeDesc::Ptyp_alias(Box::new((fixed_inner_idx, alias_name.clone())))),
                 ..typ
             }
         }
@@ -4405,10 +4432,12 @@ fn parse_module_definition(p: &mut Parser<'_>, module_start_idx: PosIdx, attrs: 
         if let Some(mod_type) = mod_type {
             // Location spans from module type start to module expr end
             let loc = p.mk_loc_spanning(mod_type.pmty_loc, mod_expr.pmod_loc);
+            let mod_expr_idx = p.arena_mut().push_mod_expr(mod_expr);
+            let mod_type_idx = p.arena_mut().push_mod_type(mod_type);
             mod_expr = ModuleExpr {
                 pmod_desc: Box::new(ModuleExprDesc::Pmod_constraint(
-                    Box::new(mod_expr),
-                    Box::new(mod_type),
+                    mod_expr_idx,
+                    mod_type_idx,
                 )),
                 pmod_loc: loc,
                 pmod_attributes: Attributes::new(),
@@ -4747,7 +4776,8 @@ pub fn parse_payload(p: &mut Parser<'_>) -> Payload {
         } else {
             // Parse as type
             let typ = super::typ::parse_typ_expr(p);
-            return Payload::PTyp(Box::new(typ));
+            let typ_idx = p.arena_mut().push_core_type(typ);
+            return Payload::PTyp(typ_idx);
         }
     }
 
@@ -4755,13 +4785,15 @@ pub fn parse_payload(p: &mut Parser<'_>) -> Payload {
     if p.token == Token::Question {
         p.next();
         let pat = super::pattern::parse_pattern(p);
+        let pat_idx = p.arena_mut().push_pat(pat);
         let guard = if p.token == Token::When {
             p.next();
-            Some(Box::new(super::expr::parse_expr(p)))
+            let guard_expr = super::expr::parse_expr(p);
+            Some(p.arena_mut().push_expr(guard_expr))
         } else {
             None
         };
-        return Payload::PPat(Box::new((Box::new(pat), guard)));
+        return Payload::PPat(Box::new((pat_idx, guard)));
     }
 
     // Otherwise, parse as structure items
