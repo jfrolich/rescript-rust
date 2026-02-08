@@ -3,7 +3,7 @@
 //! This module provides helper functions for analyzing and inspecting the AST.
 //! It's a port of OCaml's `res_parsetree_viewer.ml`.
 
-use crate::parse_arena::{LocIdx, ParseArena};
+use crate::parse_arena::{CoreTypeIdx, ExprIdx, LocIdx, ParseArena, PatIdx};
 use crate::parser::ast::*;
 use crate::parser::longident::Longident;
 
@@ -154,12 +154,12 @@ pub fn collect_if_expressions<'a>(
                     && inner.1.len() == 2
                     && inner.1[0].pc_guard.is_none()
                     && matches!(
-                        &*inner.1[1].pc_rhs.pexp_desc,
+                        &*arena.get_expr(inner.1[1].pc_rhs).pexp_desc,
                         ExpressionDesc::Pexp_construct(lid, _) if arena.is_lident(lid.txt, "()")
                     ) => {
                 let (ref condition_idx, ref cases) = **inner;
-                let pattern = &cases[0].pc_lhs;
-                let then_expr = &cases[0].pc_rhs;
+                let pattern: &Pattern = unsafe { &*(arena.get_pat(cases[0].pc_lhs) as *const Pattern) };
+                let then_expr: &Expression = unsafe { &*(arena.get_expr(cases[0].pc_rhs) as *const Expression) };
                 let condition: &Expression = unsafe { &*(arena.get_expr(*condition_idx) as *const Expression) };
                 acc.push((expr_loc, IfConditionKind::IfLet(pattern, condition), then_expr));
                 return (acc, None);
@@ -169,9 +169,9 @@ pub fn collect_if_expressions<'a>(
                     && inner.1.len() == 2
                     && inner.1[0].pc_guard.is_none() => {
                 let (ref condition_idx, ref cases) = **inner;
-                let pattern = &cases[0].pc_lhs;
-                let then_expr = &cases[0].pc_rhs;
-                let else_expr = &cases[1].pc_rhs;
+                let pattern: &Pattern = unsafe { &*(arena.get_pat(cases[0].pc_lhs) as *const Pattern) };
+                let then_expr: &Expression = unsafe { &*(arena.get_expr(cases[0].pc_rhs) as *const Expression) };
+                let else_expr: &Expression = unsafe { &*(arena.get_expr(cases[1].pc_rhs) as *const Expression) };
                 let condition: &Expression = unsafe { &*(arena.get_expr(*condition_idx) as *const Expression) };
                 acc.push((expr_loc, IfConditionKind::IfLet(pattern, condition), then_expr));
                 current = else_expr;
@@ -276,7 +276,7 @@ pub fn is_single_pipe_expr(arena: &crate::parse_arena::ParseArena, expr: &Expres
                 if let Longident::Lident(op_idx) = arena.get_longident(ident.txt) {
                     if arena.get_string(*op_idx) == "->" {
                         // It's a pipe - check that LHS is not also a pipe
-                        let operand1 = &args[0].1;
+                        let operand1 = arena.get_expr(args[0].1);
                         return !is_pipe(arena, operand1);
                     }
                 }
@@ -302,7 +302,8 @@ pub fn is_underscore_apply_sugar(arena: &ParseArena, expr: &Expression) -> bool 
             ref rhs,
             .. } = **inner;
             if *arg_label != ArgLabel::Nolabel || default.is_some() { return false; }
-            if let PatternDesc::Ppat_var(name) = &*lhs.ppat_desc {
+            let lhs_pat = arena.get_pat(*lhs);
+            if let PatternDesc::Ppat_var(name) = &*lhs_pat.ppat_desc {
                 if arena.get_string(name.txt) == "__x" {
                     let rhs_expr = arena.get_expr(*rhs);
                     return matches!(&*rhs_expr.pexp_desc, ExpressionDesc::Pexp_apply(_));
@@ -338,9 +339,10 @@ pub fn expr_is_uncurried_fun(arena: &ParseArena, expr: &Expression) -> bool {
 /// all other arguments are NOT functions/newtypes.
 /// Note: underscore apply sugar is NOT considered a callback here because
 /// OCaml rewrites it before this check, and after rewriting it becomes Pexp_apply.
-pub fn requires_special_callback_printing_last_arg(arena: &ParseArena, args: &[(ArgLabel, Expression)]) -> bool {
+pub fn requires_special_callback_printing_last_arg(arena: &ParseArena, args: &[(ArgLabel, ExprIdx)]) -> bool {
     let mut iter = args.iter().peekable();
-    while let Some((_, expr)) = iter.next() {
+    while let Some((_, expr_idx)) = iter.next() {
+        let expr = arena.get_expr(*expr_idx);
         // Skip underscore apply sugar - it gets rewritten to Pexp_apply
         if is_underscore_apply_sugar(arena, expr) {
             continue;
@@ -359,16 +361,17 @@ pub fn requires_special_callback_printing_last_arg(arena: &ParseArena, args: &[(
 /// - The first argument is a function/newtype (but NOT underscore apply sugar)
 /// - AND there is at least one more argument after it
 /// - AND all remaining arguments are NOT functions/newtypes
-pub fn requires_special_callback_printing_first_arg(arena: &ParseArena, args: &[(ArgLabel, Expression)]) -> bool {
+pub fn requires_special_callback_printing_first_arg(arena: &ParseArena, args: &[(ArgLabel, ExprIdx)]) -> bool {
     // Helper: is it a real callback (not underscore apply sugar)
-    let is_real_callback = |expr: &Expression| -> bool {
+    let is_real_callback = |expr_idx: &ExprIdx| -> bool {
+        let expr = arena.get_expr(*expr_idx);
         is_fun_newtype(expr) && !is_underscore_apply_sugar(arena, expr)
     };
     match args {
         // Single argument callback - use normal printing
-        [(_, expr)] if is_real_callback(expr) => false,
+        [(_, expr_idx)] if is_real_callback(expr_idx) => false,
         // First is callback, need to check rest
-        [(_, expr), rest @ ..] if is_real_callback(expr) => {
+        [(_, expr_idx), rest @ ..] if is_real_callback(expr_idx) => {
             // All remaining args must NOT be callbacks
             rest.iter().all(|(_, e)| !is_real_callback(e))
         }
@@ -551,9 +554,9 @@ pub fn should_inline_rhs_binary_expr(expr: &Expression) -> bool {
 
 /// Check if an expression is an array of tuples (for dict detection).
 /// Used to detect dict{} syntax which desugars to Primitive_dict.make([("key", value), ...])
-pub fn is_tuple_array(expr: &Expression) -> bool {
+pub fn is_tuple_array(arena: &ParseArena, expr: &Expression) -> bool {
     if let ExpressionDesc::Pexp_array(items) = &*expr.pexp_desc {
-        items.iter().all(|e| matches!(&*e.pexp_desc, ExpressionDesc::Pexp_tuple(_)))
+        items.iter().all(|e| matches!(&*arena.get_expr(*e).pexp_desc, ExpressionDesc::Pexp_tuple(_)))
     } else {
         false
     }
@@ -594,8 +597,10 @@ pub fn collect_list_expressions<'a>(arena: &'a crate::parse_arena::ParseArena, e
                 let arg: &Expression = unsafe { &*(arena.get_expr(*arg_idx) as *const Expression) };
                 if let ExpressionDesc::Pexp_tuple(exprs) = &*arg.pexp_desc {
                     if exprs.len() == 2 {
-                        acc.push(&exprs[0]);
-                        current = &exprs[1];
+                        let head: &Expression = unsafe { &*(arena.get_expr(exprs[0]) as *const Expression) };
+                        let tail: &Expression = unsafe { &*(arena.get_expr(exprs[1]) as *const Expression) };
+                        acc.push(head);
+                        current = tail;
                         continue;
                     }
                 }
@@ -625,8 +630,10 @@ pub fn collect_list_patterns<'a>(arena: &'a crate::parse_arena::ParseArena, pat:
                 let arg: &Pattern = unsafe { &*(arena.get_pat(*arg_idx) as *const Pattern) };
                 if let PatternDesc::Ppat_tuple(pats) = &*arg.ppat_desc {
                     if pats.len() == 2 {
-                        acc.push(&pats[0]);
-                        current = &pats[1];
+                        let head: &Pattern = unsafe { &*(arena.get_pat(pats[0]) as *const Pattern) };
+                        let tail: &Pattern = unsafe { &*(arena.get_pat(pats[1]) as *const Pattern) };
+                        acc.push(head);
+                        current = tail;
                         continue;
                     }
                 }
@@ -646,10 +653,10 @@ pub fn collect_list_patterns<'a>(arena: &'a crate::parse_arena::ParseArena, pat:
 // ============================================================================
 
 /// Collect expressions from an array (or tuple).
-pub fn collect_array_expressions(expr: &Expression) -> (Vec<&Expression>, Option<&Expression>) {
+pub fn collect_array_expressions<'a>(arena: &'a ParseArena, expr: &'a Expression) -> (Vec<&'a Expression>, Option<&'a Expression>) {
     match &*expr.pexp_desc {
         ExpressionDesc::Pexp_array(exprs) => {
-            (exprs.iter().collect(), None)
+            (exprs.iter().map(|idx| arena.get_expr(*idx)).collect(), None)
         }
         _ => (vec![], Some(expr))
     }
@@ -749,6 +756,7 @@ pub fn fun_expr<'a>(arena: &'a ParseArena, expr: &'a Expression) -> (bool, Vec<F
                     } else {
                         &current.pexp_attributes // Nested: preserve attrs
                     };
+                    let pat_ref: &Pattern = unsafe { &*(arena.get_pat(*lhs) as *const Pattern) };
                     params.push(FunParam::Parameter {
                         attrs,
                         label: arg_label,
@@ -756,7 +764,7 @@ pub fn fun_expr<'a>(arena: &'a ParseArena, expr: &'a Expression) -> (bool, Vec<F
                             let e: &Expression = unsafe { &*(arena.get_expr(*idx) as *const Expression) };
                             e
                         }),
-                        pat: lhs,
+                        pat: pat_ref,
                     });
                     n_fun += 1;
                     current = unsafe { &*(arena.get_expr(*rhs) as *const Expression) };
@@ -1024,7 +1032,8 @@ pub fn should_indent_binary_expr(arena: &crate::parse_arena::ParseArena, expr: &
                             return true;
                         }
                         // Check if LHS is NOT a same-precedence sub-expression
-                        let (_, lhs) = &args[0];
+                        let (_, lhs_idx) = &args[0];
+                        let lhs = arena.get_expr(*lhs_idx);
                         if !same_precedence_sub_expression(arena, op, lhs) {
                             return true;
                         }
@@ -1123,7 +1132,8 @@ pub fn get_underscore_apply_inner<'a>(arena: &'a ParseArena, expr: &'a Expressio
             .. } = **inner;
             if *arg_label != ArgLabel::Nolabel || default.is_some() { return None; }
             // Check if pattern is `__x`
-            if let PatternDesc::Ppat_var(name) = &*lhs.ppat_desc {
+            let lhs_pat = arena.get_pat(*lhs);
+            if let PatternDesc::Ppat_var(name) = &*lhs_pat.ppat_desc {
                 if arena.get_string(name.txt) == "__x" {
                     // Check if rhs is an apply
                     let rhs_expr: &Expression = unsafe { &*(arena.get_expr(*rhs) as *const Expression) };
@@ -1203,6 +1213,7 @@ pub fn arrow_type<'a>(
                 }
 
                 let ret: &CoreType = unsafe { &*(arena.get_core_type(*ret_idx) as *const CoreType) };
+                let arg_typ: &CoreType = unsafe { &*(arena.get_core_type(arg.typ) as *const CoreType) };
 
                 // Unlabeled argument with no attrs - continue processing
                 if matches!(arg.lbl, ArgLabel::Nolabel) && arg.attrs.is_empty() {
@@ -1210,7 +1221,7 @@ pub fn arrow_type<'a>(
                     new_acc.push(TypeParameter {
                         attrs: &arg.attrs,
                         lbl: &arg.lbl,
-                        typ: &arg.typ,
+                        typ: arg_typ,
                     });
                     return process(arena, attrs_before, new_acc, ret, remaining_arity - 1);
                 }
@@ -1224,9 +1235,9 @@ pub fn arrow_type<'a>(
                 // Calculate adjusted arity for @as workaround
                 // OCaml: When arg is Ptyp_any with @as attr, don't decrement arity
                 let adjusted_arity = if matches!(
-                    &*arg.typ.ptyp_desc,
+                    &*arg_typ.ptyp_desc,
                     CoreTypeDesc::Ptyp_any
-                ) && has_as_attr(arena, &arg.typ.ptyp_attributes)
+                ) && has_as_attr(arena, &arg_typ.ptyp_attributes)
                 {
                     remaining_arity
                 } else {
@@ -1237,7 +1248,7 @@ pub fn arrow_type<'a>(
                 new_acc.push(TypeParameter {
                     attrs: &arg.attrs,
                     lbl: &arg.lbl,
-                    typ: &arg.typ,
+                    typ: arg_typ,
                 });
                 process(arena, attrs_before, new_acc, ret, adjusted_arity)
             }
