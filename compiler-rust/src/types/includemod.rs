@@ -532,7 +532,7 @@ mod tests {
                 val_type: val_ty,
                 val_kind: ValueKind::ValReg,
                 val_loc: Location::none(),
-                val_attributes: Attributes::new(),
+                val_attributes: vec![],
                 val_path: None,
             },
         )];
@@ -554,7 +554,7 @@ mod tests {
                 val_type: val_ty,
                 val_kind: ValueKind::ValReg,
                 val_loc: Location::none(),
-                val_attributes: Attributes::new(),
+                val_attributes: vec![],
                 val_path: None,
             },
         )];
@@ -564,7 +564,7 @@ mod tests {
                 val_type: val_ty,
                 val_kind: ValueKind::ValReg,
                 val_loc: Location::none(),
-                val_attributes: Attributes::new(),
+                val_attributes: vec![],
                 val_path: None,
             },
         )];
@@ -609,7 +609,7 @@ mod tests {
                     val_type: val_ty_placeholder,
                     val_kind: ValueKind::ValReg,
                     val_loc: Location::none(),
-                    val_attributes: Attributes::new(),
+                    val_attributes: vec![],
                     val_path: None,
                 },
             ),

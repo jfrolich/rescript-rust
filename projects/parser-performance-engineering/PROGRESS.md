@@ -13,7 +13,7 @@
 | Tier | Description | Status | Progress |
 |------|-------------|--------|----------|
 | Tier 1 | High Impact: Scanner + Token | 🚧 In Progress | 4/6 |
-| Tier 2 | High Impact: AST + Token Layout | 🚧 In Progress | 1/6 |
+| Tier 2 | High Impact: AST + Token Layout | 🚧 In Progress | 2/6 |
 | Tier 3 | Medium Impact: DOD + Misc | ⏳ Not Started | 0/7 |
 | Tier 4 | Architectural | ⏳ Not Started | 0/4 |
 
@@ -96,11 +96,16 @@ cargo test --release --lib -- benchmark_all --ignored --nocapture
   - Zero parity regressions (1193/1196 sexp-locs match; 3 unrelated OCaml ref changes)
   - Files: `ast.rs` + 25 dependent files
 
-- [ ] **2.2 Attributes side table** ⚠️ HIGH PRIORITY
-  - Move attributes from inline `Vec<Attribute>` to side table
-  - ~95% of nodes have empty attributes; saves 24 bytes per node
-  - Combined with 2.1: Expression could shrink from ~150 bytes to ~20-24 bytes
-  - Files: `ast.rs`, all parsing modules, PPX, marshal
+- [x] **2.2 Attributes newtype (Option<Box<Vec>>)** ✅ COMPLETE
+  - Replaced `type Attributes = Vec<Attribute>` (24 bytes) with newtype `struct Attributes(Option<Box<Vec<Attribute>>>)` (8 bytes)
+  - Empty attributes (95%+ of nodes) = `None` — zero heap allocation
+  - Full API via Deref, IntoIterator, FromIterator, plus push/extend/concat methods
+  - Expression 40→24 bytes (40%), Pattern 40→24 bytes, CoreType 40→24 bytes
+  - ValueBinding 112→64 bytes (43%), PexpFun 80→64 bytes, TypeDeclaration 160→128 bytes
+  - Performance: neutral (Large 0.80x→0.81x, within noise)
+  - Parity: zero regressions
+  - AttrsIdx(u32) infrastructure added to ParseArena for future 24→16 byte reduction
+  - Files: `ast.rs` + 20 dependent files
 
 - [ ] **2.3 Index-based AST (ExprIdx/PatIdx)**
   - Replace `Box<Expression>` with `ExprIdx(u32)` into flat `Vec<Expression>` pools
@@ -206,6 +211,7 @@ cargo test --release --lib -- benchmark_all --ignored --nocapture
 | Remove Rc<str> from Interner | Feb 2026 | Neutral timing, removes Rc overhead, enables Send+Sync | ce156406f |
 | Zero-copy Constant and Label strings | Feb 2026 | Large 0.80x→0.77x (~4% faster) | ae09c8d1f |
 | Box large enum variants (OXC pattern) | Feb 2026 | Neutral (enum sizes 64-80→16-24 bytes) | 8ab6f5d66 |
+| Attributes newtype (Option<Box<Vec>>) | Feb 2026 | Neutral timing; Expression/Pattern/CoreType 40→24 bytes (40%) | 74867e6dc |
 
 ---
 
@@ -350,6 +356,39 @@ will eliminate the Box overhead while retaining the cache-friendly enum sizes.
 5 of 8 AST enums hit the 16-byte target; ExpressionDesc and PatternDesc at
 24 bytes due to variants that carry 2 fields (discriminant + Box pointer = 16
 bytes, but alignment of inner data pushes to 24). ModuleExprDesc at 24 bytes.
+```
+
+### After 2.2 Attributes newtype (February 2026)
+
+```
+Run: cargo test --release --lib -- benchmark_all --ignored --nocapture
+
+  Size Tier                  Files   Faster       OK Avg Factor Min Factor Max Factor
+  -------------------------------------------------------------------------------------
+  Large (>30KB)                 14       14        0       0.81x       0.65x       0.92x
+  Medium (10-30KB)              73       73        0       0.54x       0.19x       0.77x
+  Small (1-10KB)               443      443        0       0.40x       0.26x       0.83x
+  Tiny (<1KB)                  636      636        0       0.31x       0.25x       0.84x
+
+Overall: 1166/1166 passing (1166 faster, 0 within tolerance), 38 skipped
+Parity: zero regressions from Attributes newtype
+
+AST Node Sizes (before → after):
+  Expression:         40 → 24 bytes (40% reduction)
+  Pattern:            40 → 24 bytes (40% reduction)
+  CoreType:           40 → 24 bytes (40% reduction)
+  ValueBinding:      112 → 64 bytes (43% reduction)
+  PexpFun:            80 → 64 bytes (20% reduction)
+  TypeDeclaration:   160 → 128 bytes (20% reduction)
+  Attributes:         24 → 8 bytes (67% reduction, inline on every node)
+
+Notes: Timing is roughly neutral (within measurement noise). The primary benefit
+is reduced memory footprint — 16 fewer bytes per Expression, Pattern, and CoreType
+node from eliminating the 24-byte Vec overhead. 95%+ of nodes have empty
+attributes, so the Option<Box<...>> = None case (zero allocation) dominates.
+AttrsIdx(u32) infrastructure was added to ParseArena for a potential future
+reduction from 24 to 16 bytes (8→4 byte field), to be done alongside task 2.3
+(index-based AST).
 ```
 
 *Add new entries below as optimizations are applied.*
