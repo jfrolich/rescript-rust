@@ -5244,6 +5244,10 @@ fn parse_deriving_actions(attrs: &[Attribute], arena: &mut ParseArena) -> (Vec<D
         }
     }
 
+    // OCaml's Ast_attributes.process_derive_type uses fold_left with attr :: acc,
+    // so non-deriving attrs are reversed after @deriving is removed.
+    remaining_attrs.reverse();
+
     (actions, remaining_attrs)
 }
 
@@ -7136,7 +7140,7 @@ fn handle_deriving_type(
         //   external fieldGet: ... -- getters
         //   ...
         // end)
-        return handle_deriving_abstract(tdcls, rec_flag, &new_tdcls, light, loc, arena);
+        return handle_deriving_abstract(&new_tdcls, rec_flag, &new_tdcls, light, loc, arena);
     }
 
     let type_str_item = StructureItem {
@@ -7210,7 +7214,7 @@ fn handle_deriving_type(
 /// end)
 /// ```
 fn handle_deriving_abstract(
-    original_tdcls: &[TypeDeclaration],
+    tdcls: &[TypeDeclaration],
     rec_flag: RecFlag,
     new_tdcls: &[TypeDeclaration],
     light: bool,
@@ -7223,7 +7227,7 @@ fn handle_deriving_abstract(
     let mut abstract_tdcls: Vec<TypeDeclaration> = vec![];
     let mut primitives: Vec<StructureItem> = vec![];
 
-    for tdcl in original_tdcls {
+    for tdcl in tdcls {
         let (abstract_tdcl, value_descriptions) = handle_abstract_tdcl(tdcl, light, arena);
         abstract_tdcls.push(abstract_tdcl);
         for vd in value_descriptions {
@@ -7304,7 +7308,7 @@ fn handle_abstract_tdcl(
 ) -> (TypeDeclaration, Vec<ValueDescription>) {
     let loc = tdcl.ptype_loc;
     let type_name = arena.get_string(tdcl.ptype_name.txt).to_string();
-    let core_type = core_type_of_type_declaration(tdcl, arena);
+    let core_type = core_type_of_type_declaration_with_attrs(tdcl, arena);
 
     // Create abstract type declaration (same name, but Ptype_abstract)
     let abstract_tdcl = TypeDeclaration {

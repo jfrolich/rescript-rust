@@ -31,7 +31,7 @@
 | sexp-locs-ppx (syntax scope) | 1196/1196 (100%) ✅ |
 | bsc-ast (syntax scope) | 1196/1196 (100%) ✅ |
 | sexp-locs (full scope: syntax + TELLA) | 3364/3373 (99.7%) |
-| sexp-locs-ppx (full scope: syntax + TELLA) | 2793/3373 (82.8%) |
+| sexp-locs-ppx (full scope: syntax + TELLA) | 2794/3373 (82.8%) |
 | bsc-ast (full scope: syntax + TELLA) | 593 diffs (OCaml parser failures: 11, Rust parser failures: 20) |
 
 **Scope note:** Final parity targets include both `tests/syntax_tests/data` and `TELLA_DIR`
@@ -41,6 +41,24 @@ Files where OCaml fails are excluded from parity denominators and listed separat
 **Snapshot note:** The `1179` denominator above is a historical in-repo snapshot.
 
 **Session progress (2026-02-08) - newest:**
+- Fixed OCaml/Rust `@deriving` attribute ordering + `@deriving(abstract)` core-type attrs:
+  - OCaml `Ast_attributes.process_derive_type` uses `fold_left` with `attr :: acc`,
+    so non-`@deriving` attrs are reversed after stripping `@deriving`.
+  - Rust `parse_deriving_actions` preserved non-deriving attrs in source order; updated to
+    mirror OCaml by reversing remaining attrs.
+  - OCaml `Ast_tdcls.handle_tdcls_in_stru` passes derive-stripped tdcls into
+    `Ast_derive_abstract.handle_tdcls_in_str`, and `Ast_derive_util.core_type_of_type_declaration`
+    includes `ptype_attributes`.
+  - Rust `@deriving(abstract)` path now uses derive-stripped tdcls for abstract generation and
+    uses `core_type_of_type_declaration_with_attrs` for accessor/maker core types.
+  - `test_parser_ast_parity` now passes `sexp-locs-ppx` for:
+    `/Users/jaapf/dev/tella-fusion/node_modules/@rescript/react/src/ReactDOM.res`,
+    `/Users/jaapf/dev/tella-fusion/node_modules/@rescript/react/src/v3/ReactDOM_V3.res`.
+  - Full-scope run improved:
+    - `sexp-locs differences: 9 -> 9` (no change)
+    - `sexp-locs-ppx differences: 580 -> 579`
+    - `bsc-ast differences: 593 -> 593` (no change)
+
 - Fixed OCaml/Rust parity for unlabeled `Lident` type-parameter parsing with outer attrs
   (e.g. `@uncurry unit => unit`) in `parse_function_type`:
   - OCaml `parse_type_parameter` (Lident non-labeled path) builds `Typ.constr ~attrs`
