@@ -3983,7 +3983,7 @@ fn type_open(
     );
     if let Some(ref mty) = mod_type {
         let sig = crate::types::typemod::resolve_mod_type_to_sig(
-            mty, &mut tctx.persistent_env, tctx.type_ctx,
+            mty, Some(env), &mut tctx.persistent_env, tctx.type_ctx,
         );
         if let Some(ref sig_items) = sig {
             crate::cmi::persistent_env::add_signature_to_env(

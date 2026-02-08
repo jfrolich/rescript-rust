@@ -76,12 +76,13 @@ The `-dtyped-sexp` flag outputs the typed tree without locations. The `-dtyped-s
 |  | Status |
 |--|--------|
 | OCaml compiles | 657/657 |
-| Rust compiles | 565/657 (92 fail) |
-| Parity match (-dtyped-sexp-locs) | 292/565 (51.7%) |
+| Rust compiles | 568/657 (89 fail) |
+| Parity match (-dtyped-sexp-locs) | 291/568 (51.2%) |
 
-**Task Progress:** 15/15 complete
+**Task Progress:** 16/16 complete
 
 **Task Checklist:**
+- [x] Match OCaml `transl_modtype`/`Env.scrape_alias` behavior for module-type identifiers in `typemod`: keep `Pmty_ident` as `MtyIdent(path)` (instead of falling back to empty signatures), resolve `Mty_ident` through local/persistent `Sig_modtype` paths, and preserve `Tstr_modtype` bodies when extracting structure signatures from typed module expressions. This unblocks functor-parameter lookups through dotted modtype paths (`UseCase.Layer`, `Belt.Id.Comparable`) and improves full `--with-locs --no-build` compilation (`Rust bsc`: 565 -> 568, failures: 92 -> 89).
 - [x] Port OCaml module-type extraction behavior for structure-local aliases and functors in `typemod`: resolve `Tmod_ident` through environment/persistent signature scraping, thread an evolving local env while extracting `Tmod_structure` items, and extract `Tmod_functor`/`Tmod_apply` result module types. This unblocks nested module alias/functor member lookup (`coercion_module_alias_test.res` now compiles with Rust) and improves full `--with-locs --no-build` totals (`Rust bsc`: 560 -> 565, `Parity`: 291 -> 292).
 - [x] Match OCaml `expand_head` behavior in `type_application` when handling labeled args for aliased function types (`type t = (~x: int, ~y: int) => int`). Expand the head type before arrow/label matching (and optional-tail skipping) so applications like `f(~y=b, ~x=a)` don't fall into unknown-arg fallback. This fixes `arity.res` compilation and improves full `--with-locs --no-build` results (`Rust bsc`: 556 -> 561, `Parity`: 289 -> 291).
 - [x] Port OCaml `Pmod_unpack` typing path in `typemod`: derive unpack module types from `expand_head` package types (`Tpackage`) and preserve `Psig_type` manifests/`Psig_modtype` items in `translate_module_type_to_decl`, then qualify module-signature type paths when entering `Pstr_module` bindings. This fixes the `let module X = unpack(v.compare)` compilation failure (`UndefinedMethod "X.compare"` in `defunctor_make_test.res`) and improves full `--with-locs` compilation (`Rust bsc`: 557 -> 559).

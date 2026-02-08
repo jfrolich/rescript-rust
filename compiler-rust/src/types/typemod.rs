@@ -144,7 +144,7 @@ pub fn lookup_module_type_by_lid<'b>(
             // Recursively resolve prefix to get parent module type
             let parent_type = lookup_module_type_by_lid(prefix, arena, env, pers_env, ctx)?;
             // Resolve parent type to signature
-            let parent_sig = resolve_mod_type_to_sig(&parent_type, pers_env, ctx)?;
+            let parent_sig = resolve_mod_type_to_sig(&parent_type, Some(env), pers_env, ctx)?;
             // Find sub-module in parent signature
             for sig_item in &parent_sig {
                 if let crate::types::decl::SignatureItem::SigModule(id, sub_md, _) = sig_item {
@@ -159,52 +159,120 @@ pub fn lookup_module_type_by_lid<'b>(
     }
 }
 
-/// Resolve a decl::ModuleType to a signature, following aliases via persistent env.
+/// Resolve a decl::ModuleType to a signature, following aliases via local and
+/// persistent environments. This mirrors OCaml's Env.scrape_alias behavior.
 pub fn resolve_mod_type_to_sig<'b>(
     mty: &crate::types::decl::ModuleType,
+    env: Option<&Env>,
     pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
     ctx: &'b crate::types::context::TypeContext<'b>,
+) -> Option<crate::types::decl::Signature> {
+    let mut visiting = HashSet::new();
+    resolve_mod_type_to_sig_impl(mty, env, pers_env, ctx, &mut visiting)
+}
+
+fn resolve_mod_type_to_sig_impl<'b>(
+    mty: &crate::types::decl::ModuleType,
+    env: Option<&Env>,
+    pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
+    ctx: &'b crate::types::context::TypeContext<'b>,
+    visiting: &mut HashSet<Path>,
 ) -> Option<crate::types::decl::Signature> {
     use crate::types::decl::ModuleType as DeclMty;
     match mty {
         DeclMty::MtySignature(sig) => Some(sig.clone()),
         DeclMty::MtyAlias(_, path) | DeclMty::MtyIdent(path) => {
-            resolve_path_to_sig(path, pers_env, ctx)
+            resolve_path_to_sig_impl(path, env, pers_env, ctx, visiting)
         }
         _ => None,
     }
 }
 
-/// Resolve a module path to a signature by following through persistent env.
-fn resolve_path_to_sig<'b>(
+/// Resolve a module/modtype path to a signature by following through local and
+/// persistent environments.
+fn resolve_path_to_sig_impl<'b>(
     path: &Path,
+    env: Option<&Env>,
     pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
     ctx: &'b crate::types::context::TypeContext<'b>,
+    visiting: &mut HashSet<Path>,
 ) -> Option<crate::types::decl::Signature> {
-    match path {
+    use crate::types::decl::SignatureItem as SigItem;
+
+    if !visiting.insert(path.clone()) {
+        return None;
+    }
+
+    let result = match path {
         Path::Pident(id) => {
-            let mod_name = id.name();
-            if let Some(pers) = pers_env.as_mut() {
-                if let Some(ps) = pers.find_pers_struct(mod_name, ctx) {
-                    return Some(ps.ps_sig.clone());
+            let name = id.name();
+            if let Some(local_env) = env {
+                if let Ok(md) = local_env.find_module(name) {
+                    if let Some(sig) =
+                        resolve_mod_type_to_sig_impl(&md.md_type, env, pers_env, ctx, visiting)
+                    {
+                        visiting.remove(path);
+                        return Some(sig);
+                    }
+                }
+                if let Ok(mtd) = local_env.find_modtype(name) {
+                    if let Some(mty) = &mtd.mtd_type {
+                        if let Some(sig) =
+                            resolve_mod_type_to_sig_impl(mty, env, pers_env, ctx, visiting)
+                        {
+                            visiting.remove(path);
+                            return Some(sig);
+                        }
+                    }
                 }
             }
-            None
+
+            if let Some(pers) = pers_env.as_mut() {
+                if let Some(ps) = pers.find_pers_struct(name, ctx) {
+                    Some(ps.ps_sig.clone())
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
         }
         Path::Pdot(parent, name, _) => {
-            // Resolve parent path to get its signature, then find submodule
-            let parent_sig = resolve_path_to_sig(parent, pers_env, ctx)?;
+            let parent_sig = resolve_path_to_sig_impl(parent, env, pers_env, ctx, visiting)?;
             for sig_item in &parent_sig {
-                if let crate::types::decl::SignatureItem::SigModule(id, md, _) = sig_item {
-                    if id.name() == name.as_str() {
-                        return resolve_mod_type_to_sig(&md.md_type, pers_env, ctx);
+                match sig_item {
+                    SigItem::SigModule(id, md, _) if id.name() == name.as_str() => {
+                        if let Some(sig) = resolve_mod_type_to_sig_impl(
+                            &md.md_type,
+                            env,
+                            pers_env,
+                            ctx,
+                            visiting,
+                        ) {
+                            visiting.remove(path);
+                            return Some(sig);
+                        }
                     }
+                    SigItem::SigModtype(id, mtd) if id.name() == name.as_str() => {
+                        if let Some(mty) = &mtd.mtd_type {
+                            if let Some(sig) =
+                                resolve_mod_type_to_sig_impl(mty, env, pers_env, ctx, visiting)
+                            {
+                                visiting.remove(path);
+                                return Some(sig);
+                            }
+                        }
+                    }
+                    _ => {}
                 }
             }
             None
         }
         _ => None,
-    }
+    };
+
+    visiting.remove(path);
+    result
 }
 
 /// Extract the result type of a functor application.
@@ -520,32 +588,11 @@ fn translate_module_type_to_decl<'a>(
             Ok(DeclMty::MtySignature(items))
         }
         PMtyDesc::Pmty_ident(lid) => {
-            // Module type identifier — look up as module type (not module)
-            let longident = arena.get_longident(lid.txt);
-            match longident {
-                crate::parser::longident::Longident::Lident(idx) => {
-                    let name = arena.get_string(*idx);
-                    if let Ok(mtd) = env.find_modtype(name) {
-                        if let Some(mty) = &mtd.mtd_type {
-                            return Ok(mty.clone());
-                        }
-                    }
-                    // Fallback: try as module (for cases like `module type of M`)
-                    if let Some(mty) = lookup_module_type_by_lid(longident, arena, env, &mut tctx.persistent_env, tctx.type_ctx) {
-                        Ok(mty)
-                    } else {
-                        Ok(DeclMty::MtySignature(vec![]))
-                    }
-                }
-                _ => {
-                    // For dotted paths, try module lookup as fallback
-                    if let Some(mty) = lookup_module_type_by_lid(longident, arena, env, &mut tctx.persistent_env, tctx.type_ctx) {
-                        Ok(mty)
-                    } else {
-                        Ok(DeclMty::MtySignature(vec![]))
-                    }
-                }
-            }
+            // Match OCaml transl_modtype: keep an identifier path and let later
+            // signature scraping resolve aliases/expansions.
+            let longident = tctx.resolve_lid(lid.txt);
+            let path = path_from_longident(longident, |idx| arena.get_string(idx));
+            Ok(DeclMty::MtyIdent(path))
         }
         PMtyDesc::Pmty_functor(name, param_type, result_type) => {
             let param_id = Ident::create_local(arena.get_string(name.txt));
@@ -625,18 +672,31 @@ where
             }
 
             let result = match path {
-                Path::Pident(id) => env.find_module(id.name())
-                    .ok()
-                    .and_then(|md| resolve_mty(&md.md_type, env, visiting)),
+                Path::Pident(id) => {
+                    if let Ok(md) = env.find_module(id.name()) {
+                        if let Some(sig) = resolve_mty(&md.md_type, env, visiting) {
+                            return Some(sig);
+                        }
+                    }
+                    if let Ok(mtd) = env.find_modtype(id.name()) {
+                        if let Some(mty) = &mtd.mtd_type {
+                            return resolve_mty(mty, env, visiting);
+                        }
+                    }
+                    None
+                }
                 Path::Pdot(parent, name, _) => {
                     let parent_sig = resolve_path(parent, env, visiting)?;
                     parent_sig.iter().find_map(|item| {
-                        if let SigItem::SigModule(id, md, _) = item {
-                            if id.name() == name.as_str() {
-                                return resolve_mty(&md.md_type, env, visiting);
+                        match item {
+                            SigItem::SigModule(id, md, _) if id.name() == name.as_str() => {
+                                resolve_mty(&md.md_type, env, visiting)
                             }
+                            SigItem::SigModtype(id, mtd) if id.name() == name.as_str() => {
+                                mtd.mtd_type.as_ref().and_then(|mty| resolve_mty(mty, env, visiting))
+                            }
+                            _ => None,
                         }
-                        None
                     })
                 }
                 Path::Papply(_, _) => None,
@@ -662,15 +722,151 @@ where
         resolve_mty(mty, env, &mut visiting)
     }
 
-    fn decl_module_type_from_typed_module_type(mty: &ModuleType) -> Option<crate::types::decl::ModuleType> {
+    fn decl_module_type_from_typed_module_type(
+        mty: &ModuleType,
+    ) -> Option<crate::types::decl::ModuleType> {
         use crate::types::decl::AliasPresence;
+        use crate::types::decl::ExtStatus;
+        use crate::types::decl::ModuleDeclaration;
+        use crate::types::decl::ModtypeDeclaration;
+        use crate::types::decl::RecStatus;
+        use crate::types::decl::ValueKind;
         use crate::types::typedtree::ModuleTypeDesc;
+        use crate::types::typedtree::TypedSignatureItemDesc;
+
+        fn rec_status_for_index(rec_flag: RecFlag, index: usize) -> RecStatus {
+            match rec_flag {
+                RecFlag::Recursive => {
+                    if index == 0 {
+                        RecStatus::TrecFirst
+                    } else {
+                        RecStatus::TrecNext
+                    }
+                }
+                RecFlag::Nonrecursive => RecStatus::TrecNot,
+            }
+        }
+
+        fn ext_status_for_index(index: usize) -> ExtStatus {
+            if index == 0 {
+                ExtStatus::TextFirst
+            } else {
+                ExtStatus::TextNext
+            }
+        }
+
         match &mty.mty_desc {
             ModuleTypeDesc::Tmty_ident(path, _) => Some(DeclMty::MtyIdent(path.clone())),
             ModuleTypeDesc::Tmty_alias(path, _) => {
                 Some(DeclMty::MtyAlias(AliasPresence::MtaAbsent, path.clone()))
             }
-            _ => None,
+            ModuleTypeDesc::Tmty_signature(sig) => {
+                let mut out = Vec::new();
+                for item in &sig.sig_items {
+                    match &item.sig_desc {
+                        TypedSignatureItemDesc::Tsig_value(vd) => {
+                            out.push(SigItem::SigValue(
+                                vd.val_id.clone(),
+                                ValueDescription {
+                                    val_type: vd.val_desc.ctyp_type,
+                                    val_kind: ValueKind::ValReg,
+                                    val_loc: crate::location::Location::none(),
+                                    val_attributes: vec![],
+                                    val_path: None,
+                                },
+                            ));
+                        }
+                        TypedSignatureItemDesc::Tsig_type(rec_flag, decls) => {
+                            for (i, decl) in decls.iter().enumerate() {
+                                out.push(SigItem::SigType(
+                                    decl.typ_id.clone(),
+                                    decl.typ_type.clone(),
+                                    rec_status_for_index(*rec_flag, i),
+                                ));
+                            }
+                        }
+                        TypedSignatureItemDesc::Tsig_typext(ext) => {
+                            for (i, ext_cstr) in ext.tyext_constructors.iter().enumerate() {
+                                out.push(SigItem::SigTypext(
+                                    ext_cstr.ext_id.clone(),
+                                    ext_cstr.ext_type.clone(),
+                                    ext_status_for_index(i),
+                                ));
+                            }
+                        }
+                        TypedSignatureItemDesc::Tsig_exception(ext) => {
+                            out.push(SigItem::SigTypext(
+                                ext.ext_id.clone(),
+                                ext.ext_type.clone(),
+                                ExtStatus::TextException,
+                            ));
+                        }
+                        TypedSignatureItemDesc::Tsig_module(md) => {
+                            let decl_mty = decl_module_type_from_typed_module_type(&md.md_type)
+                                .unwrap_or(DeclMty::MtySignature(vec![]));
+                            out.push(SigItem::SigModule(
+                                md.md_id.clone(),
+                                ModuleDeclaration {
+                                    md_type: decl_mty,
+                                    md_attributes: vec![],
+                                    md_loc: crate::location::Location::none(),
+                                    md_path: None,
+                                },
+                                RecStatus::TrecNot,
+                            ));
+                        }
+                        TypedSignatureItemDesc::Tsig_recmodule(decls) => {
+                            for (i, md) in decls.iter().enumerate() {
+                                let decl_mty = decl_module_type_from_typed_module_type(&md.md_type)
+                                    .unwrap_or(DeclMty::MtySignature(vec![]));
+                                out.push(SigItem::SigModule(
+                                    md.md_id.clone(),
+                                    ModuleDeclaration {
+                                        md_type: decl_mty,
+                                        md_attributes: vec![],
+                                        md_loc: crate::location::Location::none(),
+                                        md_path: None,
+                                    },
+                                    rec_status_for_index(RecFlag::Recursive, i),
+                                ));
+                            }
+                        }
+                        TypedSignatureItemDesc::Tsig_modtype(mtd) => {
+                            out.push(SigItem::SigModtype(
+                                mtd.mtd_id.clone(),
+                                ModtypeDeclaration {
+                                    mtd_type: mtd
+                                        .mtd_type
+                                        .as_ref()
+                                        .and_then(decl_module_type_from_typed_module_type),
+                                    mtd_attributes: vec![],
+                                    mtd_loc: crate::location::Location::none(),
+                                },
+                            ));
+                        }
+                        TypedSignatureItemDesc::Tsig_include(_incl) => {}
+                        TypedSignatureItemDesc::Tsig_open(_)
+                        | TypedSignatureItemDesc::Tsig_attribute(_) => {}
+                    }
+                }
+                Some(DeclMty::MtySignature(out))
+            }
+            ModuleTypeDesc::Tmty_functor(param, _name, param_mty, result_mty) => {
+                let decl_param_mty = param_mty
+                    .as_ref()
+                    .and_then(|inner| decl_module_type_from_typed_module_type(inner))
+                    .map(Box::new);
+                let decl_result = decl_module_type_from_typed_module_type(result_mty)?;
+                Some(DeclMty::MtyFunctor {
+                    param: param.clone(),
+                    param_type: decl_param_mty,
+                    result: Box::new(decl_result),
+                })
+            }
+            ModuleTypeDesc::Tmty_with(body, _constraints) => {
+                decl_module_type_from_typed_module_type(body)
+            }
+            ModuleTypeDesc::Tmty_typeof(_) | ModuleTypeDesc::Tmty_placeholder => None,
         }
     }
 
@@ -802,10 +998,10 @@ where
                     }
                     StructureItemDesc::Tstr_modtype(mtd) => {
                         let modtype_decl = crate::types::decl::ModtypeDeclaration {
-                            mtd_type: mtd.mtd_type.as_ref().and_then(|mt| {
-                                // Extract module type from typed module type
-                                None // simplified for now
-                            }),
+                            mtd_type: mtd
+                                .mtd_type
+                                .as_ref()
+                                .and_then(decl_module_type_from_typed_module_type),
                             mtd_attributes: vec![],
                             mtd_loc: crate::location::Location::none(),
                         };
@@ -2729,7 +2925,12 @@ fn type_structure_item<'a>(
                             &mut tctx.persistent_env,
                             tctx.type_ctx,
                         )?;
-                        resolve_mod_type_to_sig(&mod_type, &mut tctx.persistent_env, tctx.type_ctx)
+                        resolve_mod_type_to_sig(
+                            &mod_type,
+                            Some(include_env),
+                            &mut tctx.persistent_env,
+                            tctx.type_ctx,
+                        )
                     };
                 extract_module_type_from_mod_expr_with_resolver(
                     &typed_mod,
@@ -2827,6 +3028,7 @@ fn type_structure_item<'a>(
                             )?;
                             resolve_mod_type_to_sig(
                                 &mod_type,
+                                Some(include_env),
                                 &mut tctx.persistent_env,
                                 tctx.type_ctx,
                             )
@@ -2936,7 +3138,12 @@ fn type_structure_item<'a>(
             let mut new_env = env.clone();
             let mod_type = lookup_module_type_by_lid(open_lid, arena, env, &mut tctx.persistent_env, tctx.type_ctx);
             if let Some(ref mty) = mod_type {
-                let sig = resolve_mod_type_to_sig(mty, &mut tctx.persistent_env, tctx.type_ctx);
+                let sig = resolve_mod_type_to_sig(
+                    mty,
+                    Some(env),
+                    &mut tctx.persistent_env,
+                    tctx.type_ctx,
+                );
                 if let Some(ref sig_items) = sig {
                     crate::cmi::persistent_env::add_signature_to_env(sig_items, &path, &mut new_env, tctx.type_ctx, true);
                 }
@@ -2966,7 +3173,14 @@ fn type_structure_item<'a>(
                 ParsedModuleExprDesc::Pmod_ident(lid) => {
                     let longident = arena.get_longident(lid.txt);
                     let mod_type = lookup_module_type_by_lid(longident, arena, env, &mut tctx.persistent_env, tctx.type_ctx);
-                    mod_type.and_then(|mt| resolve_mod_type_to_sig(&mt, &mut tctx.persistent_env, tctx.type_ctx))
+                    mod_type.and_then(|mt| {
+                        resolve_mod_type_to_sig(
+                            &mt,
+                            Some(env),
+                            &mut tctx.persistent_env,
+                            tctx.type_ctx,
+                        )
+                    })
                 }
                 _ => None,
             };
@@ -2989,7 +3203,12 @@ fn type_structure_item<'a>(
                             &mut tctx.persistent_env,
                             tctx.type_ctx,
                         )?;
-                        resolve_mod_type_to_sig(&mod_type, &mut tctx.persistent_env, tctx.type_ctx)
+                        resolve_mod_type_to_sig(
+                            &mod_type,
+                            Some(include_env),
+                            &mut tctx.persistent_env,
+                            tctx.type_ctx,
+                        )
                     };
                 extract_module_type_from_mod_expr_with_resolver(
                     &typed_mod,
