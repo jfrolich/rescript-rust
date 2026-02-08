@@ -19,7 +19,7 @@ use crate::intern::StrIdx;
 use crate::location::Location as FullLocation;
 use crate::location::Located as OldLocated;
 use crate::parse_arena::{Located, LocIdx, ParseArena};
-use crate::parser::ast::{self as current};
+use crate::parser::ast::{self as current, Attributes};
 use crate::parser::longident::Longident;
 
 use super::parsetree0 as pt0;
@@ -87,12 +87,13 @@ fn has_optional_attribute(arena: &ParseArena, attrs: &[current::Attribute]) -> b
     attrs.iter().any(|(name, _)| arena.get_string(name.txt) == "res.optional")
 }
 
-fn remove_optional_attribute(arena: &ParseArena, attrs: &[current::Attribute]) -> Vec<current::Attribute> {
+fn remove_optional_attribute(arena: &ParseArena, attrs: &[current::Attribute]) -> Attributes {
     attrs
         .iter()
         .filter(|(name, _)| arena.get_string(name.txt) != "res.optional")
         .cloned()
-        .collect()
+        .collect::<Vec<_>>()
+        .into()
 }
 
 fn get_arity_from_attributes(arena: &ParseArena, attrs: &[current::Attribute]) -> Option<i32> {
@@ -325,8 +326,9 @@ impl<'a> Mapper<'a> {
         (self.map_string_loc(&attr.0), self.map_payload(&attr.1))
     }
 
-    fn map_attributes(&mut self, attrs: &[pt0::Attribute]) -> Vec<current::Attribute> {
-        attrs.iter().map(|a| self.map_attribute(a)).collect()
+    fn map_attributes(&mut self, attrs: &[pt0::Attribute]) -> Attributes {
+        let v: Vec<current::Attribute> = attrs.iter().map(|a| self.map_attribute(a)).collect();
+        v.into()
     }
 
     fn map_extension(&mut self, ext: &pt0::Extension) -> current::Extension {
@@ -357,12 +359,12 @@ impl<'a> Mapper<'a> {
                 let lbl = self.map_arg_label(lbl);
                 return current::CoreType {
                     ptyp_desc: Box::new(current::CoreTypeDesc::Ptyp_arrow(Box::new((Box::new(current::TypeArg {
-                            attrs,
+                            attrs: attrs,
                             lbl,
                             typ: self.map_core_type(t1),
                         }), Box::new(self.map_core_type(t2)), self.arena.push_arity(None))))),
                     ptyp_loc: loc,
-                    ptyp_attributes: vec![],
+                    ptyp_attributes: Attributes::new(),
                 };
             }
             pt0::CoreTypeDesc::Tuple(tl) => {
@@ -384,7 +386,7 @@ impl<'a> Mapper<'a> {
                                                 return current::CoreType {
                                                     ptyp_desc: Box::new(current::CoreTypeDesc::Ptyp_arrow(Box::new((arg.clone(), ret.clone(), self.arena.push_arity(Some(arity as i32)))))),
                                                     ptyp_loc: loc,
-                                                    ptyp_attributes: attrs,
+                                                    ptyp_attributes: attrs.into(),
                                                 };
                                             }
                                         }
@@ -433,7 +435,7 @@ impl<'a> Mapper<'a> {
         current::CoreType {
             ptyp_desc: Box::new(desc),
             ptyp_loc: loc,
-            ptyp_attributes: attrs,
+            ptyp_attributes: attrs.into(),
         }
     }
 
@@ -493,7 +495,7 @@ impl<'a> Mapper<'a> {
                     let optional = *opt || has_optional_attribute(self.arena, &mapped_attrs);
                     let pat = if has_optional_attribute(self.arena, &mapped_attrs) {
                         let mut mapped = self.map_pattern(pat);
-                        mapped.ppat_attributes = remove_optional_attribute(self.arena, &mapped.ppat_attributes);
+                        mapped.ppat_attributes = remove_optional_attribute(self.arena, &mapped.ppat_attributes).into();
                         mapped
                     } else {
                         self.map_pattern(pat)
@@ -534,7 +536,7 @@ impl<'a> Mapper<'a> {
         current::Pattern {
             ppat_desc: Box::new(desc),
             ppat_loc: loc,
-            ppat_attributes: attrs,
+            ppat_attributes: attrs.into(),
         }
     }
 
@@ -706,7 +708,7 @@ impl<'a> Mapper<'a> {
             return current::Expression {
                 pexp_desc: Box::new(current::ExpressionDesc::Pexp_await(Box::new(self.map_expression(&inner_expr)))),
                 pexp_loc: loc,
-                pexp_attributes: vec![],
+                pexp_attributes: Attributes::new(),
             };
         }
 
@@ -763,7 +765,7 @@ impl<'a> Mapper<'a> {
                         return current::Expression {
                             pexp_desc: Box::new(current::ExpressionDesc::Pexp_jsx_element(Box::new(jsx_element))),
                             pexp_loc: loc,
-                            pexp_attributes: jsx_attrs,
+                            pexp_attributes: jsx_attrs.into(),
                         };
                     }
                 }
@@ -821,7 +823,7 @@ impl<'a> Mapper<'a> {
                         transformed_jsx: *transformed_jsx,
                     }))),
                     pexp_loc: loc,
-                    pexp_attributes: attrs,
+                    pexp_attributes: attrs.into(),
                 };
             }
             pt0::ExpressionDesc::Match(e, cases) => current::ExpressionDesc::Pexp_match(Box::new((
@@ -853,7 +855,7 @@ impl<'a> Mapper<'a> {
                             return current::Expression {
                                 pexp_desc: Box::new(current::ExpressionDesc::Pexp_jsx_element(Box::new(jsx_element))),
                                 pexp_loc: loc,
-                                pexp_attributes: jsx_attrs,
+                                pexp_attributes: jsx_attrs.into(),
                             };
                         }
                     }
@@ -879,7 +881,7 @@ impl<'a> Mapper<'a> {
                                         is_async,
                                     }))),
                                     pexp_loc: loc,
-                                    pexp_attributes: new_attrs,
+                                    pexp_attributes: new_attrs.into(),
                                 };
                             }
                         }
@@ -1018,7 +1020,7 @@ impl<'a> Mapper<'a> {
         current::Expression {
             pexp_desc: Box::new(desc),
             pexp_loc: loc,
-            pexp_attributes: attrs,
+            pexp_attributes: attrs.into(),
         }
     }
 
@@ -1035,7 +1037,7 @@ impl<'a> Mapper<'a> {
         current::ValueBinding {
             pvb_pat: self.map_pattern(&vb.pvb_pat),
             pvb_expr: self.map_expression(&vb.pvb_expr),
-            pvb_attributes: self.map_attributes(&vb.pvb_attributes),
+            pvb_attributes: self.map_attributes(&vb.pvb_attributes).into(),
             pvb_loc: self.loc(&vb.pvb_loc),
         }
     }
@@ -1074,7 +1076,7 @@ impl<'a> Mapper<'a> {
         current::ModuleExpr {
             pmod_desc: Box::new(desc),
             pmod_loc: loc,
-            pmod_attributes: attrs,
+            pmod_attributes: attrs.into(),
         }
     }
 
@@ -1110,7 +1112,7 @@ impl<'a> Mapper<'a> {
         current::ModuleType {
             pmty_desc: Box::new(desc),
             pmty_loc: loc,
-            pmty_attributes: attrs,
+            pmty_attributes: attrs.into(),
         }
     }
 
@@ -1264,7 +1266,7 @@ impl<'a> Mapper<'a> {
             ptype_kind: self.map_type_kind(&td.ptype_kind),
             ptype_private: map_private_flag(td.ptype_private),
             ptype_manifest: td.ptype_manifest.as_ref().map(|t| self.map_core_type(t)),
-            ptype_attributes: self.map_attributes(&td.ptype_attributes),
+            ptype_attributes: self.map_attributes(&td.ptype_attributes).into(),
             ptype_loc: self.loc(&td.ptype_loc),
         }
     }
@@ -1288,7 +1290,7 @@ impl<'a> Mapper<'a> {
             pcd_args: self.map_constructor_arguments(&cd.pcd_args),
             pcd_res: cd.pcd_res.as_ref().map(|t| self.map_core_type(t)),
             pcd_loc: self.loc(&cd.pcd_loc),
-            pcd_attributes: self.map_attributes(&cd.pcd_attributes),
+            pcd_attributes: self.map_attributes(&cd.pcd_attributes).into(),
         }
     }
 
@@ -1317,7 +1319,7 @@ impl<'a> Mapper<'a> {
             pld_mutable: map_mutable_flag(ld.pld_mutable),
             pld_type: self.map_core_type(&ld.pld_type),
             pld_loc: self.loc(&ld.pld_loc),
-            pld_attributes: final_attrs,
+            pld_attributes: final_attrs.into(),
             pld_optional: optional,
         }
     }
@@ -1336,7 +1338,7 @@ impl<'a> Mapper<'a> {
                 .map(|ec| self.map_extension_constructor(ec))
                 .collect(),
             ptyext_private: map_private_flag(te.ptyext_private),
-            ptyext_attributes: self.map_attributes(&te.ptyext_attributes),
+            ptyext_attributes: self.map_attributes(&te.ptyext_attributes).into(),
         }
     }
 
@@ -1345,7 +1347,7 @@ impl<'a> Mapper<'a> {
             pext_name: self.map_string_loc(&ec.pext_name),
             pext_kind: self.map_extension_constructor_kind(&ec.pext_kind),
             pext_loc: self.loc(&ec.pext_loc),
-            pext_attributes: self.map_attributes(&ec.pext_attributes),
+            pext_attributes: self.map_attributes(&ec.pext_attributes).into(),
         }
     }
 
@@ -1375,7 +1377,7 @@ impl<'a> Mapper<'a> {
                 .iter()
                 .map(|s| self.arena.push_string(s.clone()))
                 .collect(),
-            pval_attributes: self.map_attributes(&vd.pval_attributes),
+            pval_attributes: self.map_attributes(&vd.pval_attributes).into(),
             pval_loc: self.loc(&vd.pval_loc),
         }
     }
@@ -1384,7 +1386,7 @@ impl<'a> Mapper<'a> {
         current::ModuleDeclaration {
             pmd_name: self.map_string_loc(&md.pmd_name),
             pmd_type: self.map_module_type(&md.pmd_type),
-            pmd_attributes: self.map_attributes(&md.pmd_attributes),
+            pmd_attributes: self.map_attributes(&md.pmd_attributes).into(),
             pmd_loc: self.loc(&md.pmd_loc),
         }
     }
@@ -1393,7 +1395,7 @@ impl<'a> Mapper<'a> {
         current::ModuleTypeDeclaration {
             pmtd_name: self.map_string_loc(&mtd.pmtd_name),
             pmtd_type: mtd.pmtd_type.as_ref().map(|mt| self.map_module_type(mt)),
-            pmtd_attributes: self.map_attributes(&mtd.pmtd_attributes),
+            pmtd_attributes: self.map_attributes(&mtd.pmtd_attributes).into(),
             pmtd_loc: self.loc(&mtd.pmtd_loc),
         }
     }
@@ -1402,7 +1404,7 @@ impl<'a> Mapper<'a> {
         current::ModuleBinding {
             pmb_name: self.map_string_loc(&mb.pmb_name),
             pmb_expr: self.map_module_expr(&mb.pmb_expr),
-            pmb_attributes: self.map_attributes(&mb.pmb_attributes),
+            pmb_attributes: self.map_attributes(&mb.pmb_attributes).into(),
             pmb_loc: self.loc(&mb.pmb_loc),
         }
     }
@@ -1412,7 +1414,7 @@ impl<'a> Mapper<'a> {
             popen_lid: self.map_longident_loc(&od.popen_lid),
             popen_override: map_override_flag(od.popen_override),
             popen_loc: self.loc(&od.popen_loc),
-            popen_attributes: self.map_attributes(&od.popen_attributes),
+            popen_attributes: self.map_attributes(&od.popen_attributes).into(),
         }
     }
 
@@ -1420,7 +1422,7 @@ impl<'a> Mapper<'a> {
         current::IncludeDeclaration {
             pincl_mod: self.map_module_expr(&id.pincl_mod),
             pincl_loc: self.loc(&id.pincl_loc),
-            pincl_attributes: self.map_attributes(&id.pincl_attributes),
+            pincl_attributes: self.map_attributes(&id.pincl_attributes).into(),
         }
     }
 
@@ -1428,7 +1430,7 @@ impl<'a> Mapper<'a> {
         current::IncludeDescription {
             pincl_mod: self.map_module_type(&id.pincl_mod),
             pincl_loc: self.loc(&id.pincl_loc),
-            pincl_attributes: self.map_attributes(&id.pincl_attributes),
+            pincl_attributes: self.map_attributes(&id.pincl_attributes).into(),
         }
     }
 }
