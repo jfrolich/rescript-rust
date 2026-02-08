@@ -2597,7 +2597,7 @@ fn type_application(
     loc: LocIdx,
     funct: &ParsedExpression,
     args: &[(ArgLabel, ParsedExpression)],
-    _partial: bool,
+    partial: bool,
     _transformed_jsx: bool,
     expected_ty: TypeExprRef,
     context: Option<TypeClashContext>,
@@ -2746,7 +2746,7 @@ fn type_application(
         ExpressionDesc::Texp_apply {
             funct: Box::new(typed_funct),
             args: typed_args,
-            partial: false,
+            partial,
             transformed_jsx: false,
         },
         loc.clone(),
