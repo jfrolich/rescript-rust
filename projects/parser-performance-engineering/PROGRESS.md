@@ -518,4 +518,27 @@ Acceptance criteria:
 - AST node size and/or memory footprint shows measurable reduction on expression-heavy files.
 ```
 
+### Task 4.2 policy (bumpalo) — PROFILING GATED
+
+```
+Decision:
+- The default allocation path is to continue extending typed arena/index storage, not to
+  immediately migrate to bump allocation.
+- Rationale: task 2.3 already moved recursive AST nodes into ParseArena Vec pools, which
+  removes most per-node Box allocation overhead.
+- First finish the remaining high-impact allocation work:
+  - 2.4 sparse side tables
+  - 2.6 marshal sharing HashMap -> arena-indexed Vec
+  - 3.5 SmallVec for tiny per-node collections (where profiling supports it)
+
+Gate to start bumpalo work:
+- Re-run flamegraph/perf after the items above.
+- Start 4.2 only if allocator/deallocator stacks remain a top bottleneck on representative
+  parser workloads (for example >10% wall time or consistently top hotspots).
+
+Expected effect:
+- OXC's "~20%" bumpalo number is treated as an upper-bound reference from a different AST
+  allocation shape, not an automatic expectation for this parser after 2.3.
+```
+
 *Add new entries below as optimizations are applied.*

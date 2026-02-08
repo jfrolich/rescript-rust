@@ -372,11 +372,16 @@ struct Parser<'src> {
 
 #### 4.2 Bump-Allocated AST (bumpalo)
 
-**Current**: AST nodes are heap-allocated via `Box<T>` and `Vec<T>`.
+**Current**: Recursive AST nodes are already in typed arena `Vec<T>` pools after task 2.3 (`ExprIdx`, `PatIdx`, etc.), so most per-node heap allocation has been removed.
 
-**Proposed**: Allocate all AST nodes from a bump allocator (e.g., `bumpalo`). The entire AST is freed at once when parsing completes. Eliminates individual deallocation overhead. OXC measured **~20% speedup** from this.
+**Policy**: Prioritize extending the current index/arena model before introducing `bumpalo`:
+- finish sparse side tables (2.4),
+- convert marshal sharing tables to arena-indexed `Vec` lookups (2.6),
+- and apply inline small-collection storage (3.5) where it helps.
 
-**Note**: If index-based AST (2.3) is done first, bumpalo may have less incremental value since most allocations are already eliminated.
+**Profiling gate**: Revisit `bumpalo` only if, after the steps above, flamegraphs/perf still show allocator/deallocator stacks as a top bottleneck (for example, >10% wall time or a top hotspot on representative parser workloads).
+
+**If gate is met**: Run `bumpalo` as an isolated spike, then keep it only if it produces measurable wins without parity regressions.
 
 #### 4.3 Profile-Guided Optimization (PGO)
 
@@ -407,7 +412,7 @@ RUSTFLAGS="-Cprofile-use=/tmp/pgo-data/merged.profdata" cargo build --release
 
 | Approach | Source | Measured Impact |
 |----------|--------|-----------------|
-| Arena allocation (bumpalo) | OXC parser | ~20% speedup |
+| Arena allocation (bumpalo) | OXC parser | ~20% speedup (reference only; profiling-gated here post-2.4/2.6) |
 | Enum size enforcement (16 bytes) | OXC parser | ~10% speedup |
 | Span compression (u32 offsets) | OXC parser | ~5% speedup |
 | Data-oriented design (AST nodes) | Roc compiler | 12% speedup, 12% less memory |
