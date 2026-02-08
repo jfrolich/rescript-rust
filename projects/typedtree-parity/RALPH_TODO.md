@@ -76,10 +76,10 @@ The `-dtyped-sexp` flag outputs the typed tree without locations. The `-dtyped-s
 |  | Status |
 |--|--------|
 | OCaml compiles | 656/657 |
-| Rust compiles | 554/657 (103 fail) |
-| Parity match (-dtyped-sexp-locs) | 295/554 (53.2%) |
+| Rust compiles | 559/657 (98 fail) |
+| Parity match (-dtyped-sexp-locs) | 296/559 (53.0%) |
 
-**Task Progress:** 10/10 complete
+**Task Progress:** 11/11 complete
 
 **Task Checklist:**
 - [x] Match OCaml `@deriving(accessors)` variant accessor location behavior in PPX output by emitting generated value/pattern/expression/signature item locs as `Location.none` while preserving constructor-name locations on `Located` identifiers and `Typ.arrows ~loc` for signature arrow nodes (`DerivingAccessorsCurried.res` parity fixed; `Parity`: 293 -> 295 in the latest full `--with-locs --no-build` run).
@@ -92,6 +92,7 @@ The `-dtyped-sexp` flag outputs the typed tree without locations. The `-dtyped-s
 - [x] Port OCaml first-class module unpack typing in patterns: translate `Ptyp_package` to `Tpackage`, type `Ppat_unpack` with `Tpat_unpack` extras, allow module unpack patterns in `let` and function parameters, and register package-backed module bindings in env (deterministic sequential compile failures: 61 -> 59, `UndefinedMethod`: 20 -> 16).
 - [x] Port OCaml `extract_label`-style argument matching in `type_application` (label-name lookup across remaining args + omitted-parameter reconstruction), fixing uncurried mixed-label applications in `UncurriedAlways.res` (Rust compile failures: 106 -> 105).
 - [x] Predeclare `Pstr_type` names in the type env before translating constructor argument types (matching OCaml recursive typedecl binding order), and tighten qualified-type lookup to avoid leaf-name fallback for `Pdot` paths. Also qualify module-signature type paths before constructor lookup. This fixes recursive module constructors resolving to outer `t` in `UntaggedVariants.res` and improves overall compilation (`Rust bsc`: 552 -> 559, `Parity`: 291 -> 293).
+- [x] Match OCaml include-signature propagation when extracting module types from typed `Tmod_structure`: resolve `Tstr_include` identifier modules through the current environment (not just already-accumulated local signature items), so transitive included values stay visible (`acyc/x.res` no longer fails with `UndefinedMethod "v"`). Full `--with-locs --no-build` run: `Rust bsc` 554 -> 559, `Parity` 293 -> 296.
 
 **Previous milestones completed:**
 - Parser AST structure: 100% parity (sexp-locs 1196/1196)
