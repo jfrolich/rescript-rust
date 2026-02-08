@@ -4752,6 +4752,7 @@ impl Env {
                                 &sig, old_name, &path, ctx,
                             );
                         }
+                        crate::cmi::persistent_env::substitute_type_paths_in_sig(&sig, &path, ctx);
                         return Some((path, sig));
                     }
                 }
@@ -4784,6 +4785,11 @@ impl Env {
                                             &sig, old_name, &sub_path, ctx,
                                         );
                                     }
+                                    crate::cmi::persistent_env::substitute_type_paths_in_sig(
+                                        &sig,
+                                        &sub_path,
+                                        ctx,
+                                    );
                                     return Some((sub_path, sig));
                                 }
                                 return None;
@@ -4987,15 +4993,15 @@ fn lookup_constructor_in_module<'b>(
                                 } else {
                                     crate::types::decl::ConstructorTag::CstrBlock(block_idx)
                                 };
-                                let (cstr_args, cstr_arity) = match &cd.cd_args {
-                                    crate::types::ConstructorArguments::CstrTuple(args) => (args.clone(), args.len() as i32),
-                                    crate::types::ConstructorArguments::CstrRecord(labels) => {
-                                        let args: Vec<_> = labels.iter().map(|l| l.ld_type).collect();
-                                        let arity = args.len() as i32;
-                                        (args, arity)
-                                    }
-                                };
-                                let type_path = Path::pdot(mod_path.clone(), _id.name().to_string());
+                            let (cstr_args, cstr_arity) = match &cd.cd_args {
+                                crate::types::ConstructorArguments::CstrTuple(args) => (args.clone(), args.len() as i32),
+                                crate::types::ConstructorArguments::CstrRecord(labels) => {
+                                    let args: Vec<_> = labels.iter().map(|l| l.ld_type).collect();
+                                    let arity = args.len() as i32;
+                                    (args, arity)
+                                }
+                            };
+                            let type_path = Path::pdot(mod_path.clone(), _id.name().to_string());
                                 let cstr_res = cd.cd_res.unwrap_or_else(|| {
                                     ctx.new_generic_constr(
                                         type_path.clone(),
@@ -5244,14 +5250,9 @@ fn lookup_constructor_by_expected_type<'b>(
     pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
     ctx: &'b crate::types::context::TypeContext<'b>,
 ) -> Option<(Path, crate::types::decl::ConstructorDescription)> {
-    let expected_ty = ctx.repr(expected_ty);
-    let desc = ctx.get_desc(expected_ty);
-
-    let type_path = match &*desc {
-        TypeDesc::Tconstr { path, .. } => path.clone(),
-        _ => return None,
-    };
-    drop(desc);
+    // Match OCaml's disambiguation behavior: first expand expected type aliases
+    // (extract_concrete_variant), then inspect constructors on the concrete path.
+    let type_path = extract_type_path_from_expected(expected_ty, env, ctx)?;
 
     // Look up the type declaration
     let type_decl = lookup_type_decl_for_path(&type_path, env, ctx)?;
@@ -5281,14 +5282,9 @@ fn lookup_constructor_by_expected_type<'b>(
                     }
                 };
                 // Use the type path's head ident for the result type
-                let type_path_ident = match &type_path {
-                    Path::Pident(id) => id.clone(),
-                    Path::Pdot(_, name, _) => Ident::create_persistent(name.as_str()),
-                    _ => return None,
-                };
                 let cstr_res = cd.cd_res.unwrap_or_else(|| {
                     ctx.new_generic_constr(
-                        Path::pident(type_path_ident),
+                        type_path.clone(),
                         type_decl.type_params.clone(),
                     )
                 });
@@ -5301,10 +5297,10 @@ fn lookup_constructor_by_expected_type<'b>(
                     cstr_tag: tag,
                     cstr_consts: num_consts,
                     cstr_nonconsts: num_nonconsts,
-                    cstr_generalized: false,
-                    cstr_private: crate::types::PrivateFlag::Public,
-                    cstr_loc: crate::location::Location::none(),
-                    cstr_attributes: vec![],
+                    cstr_generalized: cd.cd_res.is_some(),
+                    cstr_private: type_decl.type_private,
+                    cstr_loc: cd.cd_loc,
+                    cstr_attributes: cd.cd_attributes.clone(),
                     cstr_inlined: None,
                 };
                 let path = Path::pident(Ident::create_persistent(cstr_name));
@@ -5323,9 +5319,13 @@ fn lookup_type_decl_for_path<'a>(
     env: &Env,
     ctx: &'a crate::types::context::TypeContext<'a>,
 ) -> Option<crate::types::decl::TypeDeclaration> {
-    // Try env.lookup_type first
-    if let Ok(decl) = env.lookup_type(type_path) {
-        return Some(decl.clone());
+    // Only use env.lookup_type directly for simple identifiers. For qualified
+    // paths, env.lookup_type currently resolves by leaf name and can return an
+    // unrelated declaration with the same type name.
+    if let Path::Pident(_) = type_path {
+        if let Ok(decl) = env.lookup_type(type_path) {
+            return Some(decl.clone());
+        }
     }
 
     // Try stamp-based lookup
@@ -5362,6 +5362,12 @@ fn lookup_type_decl_for_path<'a>(
                         }
                     }
                     ModuleType::MtySignature(sig) => {
+                        let module_path = Path::pident(parent_id.clone());
+                        crate::cmi::persistent_env::substitute_type_paths_in_sig(
+                            sig,
+                            &module_path,
+                            ctx,
+                        );
                         for item in sig {
                             if let crate::types::decl::SignatureItem::SigType(id, decl, _) = item {
                                 if id.name() == type_name.as_str() {
@@ -5401,10 +5407,13 @@ fn lookup_type_decl_for_path<'a>(
         }
     }
 
-    // Try name-based lookup
-    let name = type_path.head_name();
-    if let Some(decl) = ctx.find_type_decl(name) {
-        return Some(decl.clone());
+    // Only fall back to name-based lookup for simple identifiers.
+    // For qualified paths (Pdot), a head-name fallback is unsound and can
+    // resolve to an unrelated type that happens to share the same leaf name.
+    if let Path::Pident(id) = type_path {
+        if let Some(decl) = ctx.find_type_decl(id.name()) {
+            return Some(decl.clone());
+        }
     }
 
     None

@@ -1341,10 +1341,36 @@ fn type_structure_item<'a>(
             // OCaml: Ctype.begin_def() before translating type declarations
             ctx.begin_def();
 
-            for decl in decls {
+            // Predeclare type names in the environment so recursive references
+            // resolve to the current declaration group (matching OCaml typedecl).
+            let mut declared_type_ids: Vec<Ident> = Vec::with_capacity(decls.len());
+            for decl in decls.iter() {
                 let type_name = decl.ptype_name.txt;
                 let type_name_str = arena.get_string(type_name);
                 let type_id = Ident::create_local(type_name_str);
+                let placeholder_decl = crate::types::TypeDeclaration {
+                    type_params: vec![],
+                    type_arity: decl.ptype_params.len() as i32,
+                    type_kind: crate::types::TypeKind::TypeAbstract,
+                    type_private: crate::types::PrivateFlag::Public,
+                    type_manifest: None,
+                    type_variance: vec![],
+                    type_newtype_level: None,
+                    type_loc: arena.to_location(decl.ptype_loc),
+                    type_attributes: vec![],
+                    type_immediate: false,
+                    type_unboxed: crate::types::UnboxedStatus::default(),
+                    type_inlined_types: vec![],
+                    type_path: Some(Path::pident(type_id.clone())),
+                };
+                new_env.add_type(type_id.clone(), placeholder_decl);
+                declared_type_ids.push(type_id);
+            }
+
+            for (decl_idx, decl) in decls.iter().enumerate() {
+                let type_name = decl.ptype_name.txt;
+                let type_name_str = arena.get_string(type_name);
+                let type_id = declared_type_ids[decl_idx].clone();
 
                 // Create the type path for self-reference
                 let type_path = Path::pident(type_id.clone());
@@ -1353,7 +1379,7 @@ fn type_structure_item<'a>(
                 let mut typ_params: Vec<(TypedCoreType, TypesVariance)> = Vec::new();
                 let mut internal_type_params: Vec<TypeExprRef> = Vec::new();
                 for (core_type, parser_var) in &decl.ptype_params {
-                    let (typed_core_type, type_ref) = transl_type(tctx, env, core_type)?;
+                    let (typed_core_type, type_ref) = transl_type(tctx, &new_env, core_type)?;
                     internal_type_params.push(type_ref);
                     let types_var = match parser_var {
                         ParserVariance::Covariant => TypesVariance::covariant(),
@@ -1367,15 +1393,15 @@ fn type_structure_item<'a>(
                 // Convert type constraints
                 let mut typ_cstrs: Vec<(TypedCoreType, TypedCoreType, LocIdx)> = Vec::new();
                 for (ct1, ct2, cstr_loc) in &decl.ptype_cstrs {
-                    let (typed_ct1, _) = transl_type(tctx, env, ct1)?;
-                    let (typed_ct2, _) = transl_type(tctx, env, ct2)?;
+                    let (typed_ct1, _) = transl_type(tctx, &new_env, ct1)?;
+                    let (typed_ct2, _) = transl_type(tctx, &new_env, ct2)?;
                     typ_cstrs.push((typed_ct1, typed_ct2, *cstr_loc));
                 }
 
                 // Convert manifest type (type alias)
                 let (typ_manifest, manifest_type_ref) = match &decl.ptype_manifest {
                     Some(manifest) => {
-                        let (typed_manifest, type_ref) = transl_type(tctx, env, manifest)?;
+                        let (typed_manifest, type_ref) = transl_type(tctx, &new_env, manifest)?;
                         (Some(typed_manifest), Some(type_ref))
                     }
                     None => (None, None),
@@ -1412,7 +1438,7 @@ fn type_structure_item<'a>(
                                 let mut found = None;
                                 if let crate::parser::ast::ConstructorArguments::Pcstr_tuple(ref args) = cstr.pcd_args {
                                     if let Some(spread_type_ct) = args.first() {
-                                        if let Ok((_typed_ct, type_ref)) = transl_type(tctx, env, spread_type_ct) {
+                                        if let Ok((_typed_ct, type_ref)) = transl_type(tctx, &new_env, spread_type_ct) {
                                             // Extract the type declaration from the resolved type
                                             let repr = ctx.repr(type_ref);
                                             if let crate::types::type_expr::TypeDesc::Tconstr { ref path, .. } = *ctx.get_desc(repr) {
@@ -1596,7 +1622,7 @@ fn type_structure_item<'a>(
                                     let mut typed_args: Vec<TypeExprRef> = Vec::new();
                                     let mut typed_tree_args: Vec<TypedCoreType> = Vec::new();
                                     for core_type in types {
-                                        let (typed_core_type, type_ref) = transl_type(tctx, env, core_type)?;
+                                        let (typed_core_type, type_ref) = transl_type(tctx, &new_env, core_type)?;
                                         typed_args.push(type_ref);
                                         typed_tree_args.push(typed_core_type);
                                     }
@@ -1606,7 +1632,7 @@ fn type_structure_item<'a>(
                                     let mut typed_labels: Vec<TypedLabelDeclaration> = Vec::new();
                                     let mut internal_labels: Vec<crate::types::LabelDeclaration> = Vec::new();
                                     for lbl in labels {
-                                        let (typed_core_type, type_ref) = transl_type(tctx, env, &lbl.pld_type)?;
+                                        let (typed_core_type, type_ref) = transl_type(tctx, &new_env, &lbl.pld_type)?;
                                         // OCaml wraps optional label types in option
                                         let (typed_core_type, type_ref) = if lbl.pld_optional {
                                             let option_path = Path::pident(Ident::create_persistent("option"));
@@ -1772,7 +1798,7 @@ fn type_structure_item<'a>(
                         let mut typed_tree_labels: Vec<TypedLabelDeclaration> = Vec::new();
                         for lbl in labels {
                             let lbl_name_str = arena.get_string(lbl.pld_name.txt);
-                            let (typed_core_type, type_ref) = transl_type(tctx, env, &lbl.pld_type)?;
+                            let (typed_core_type, type_ref) = transl_type(tctx, &new_env, &lbl.pld_type)?;
                             // OCaml wraps optional label types in option (typedecl.ml lines 616-628)
                             let (typed_core_type, type_ref) = if lbl.pld_optional {
                                 let option_path = Path::pident(Ident::create_persistent("option"));

@@ -76,10 +76,10 @@ The `-dtyped-sexp` flag outputs the typed tree without locations. The `-dtyped-s
 |  | Status |
 |--|--------|
 | OCaml compiles | 657/657 |
-| Rust compiles | 552/657 (105 fail) |
-| Parity match (-dtyped-sexp-locs) | 291/552 (52.7%) |
+| Rust compiles | 559/657 (98 fail) |
+| Parity match (-dtyped-sexp-locs) | 293/559 (52.4%) |
 
-**Task Progress:** 8/8 complete
+**Task Progress:** 9/9 complete
 
 **Task Checklist:**
 - [x] Fix qualified constructor typing + trailing optional-arg consumption in `type_application` so dict-pattern matches compile instead of failing with `PatternTypeClash`.
@@ -90,6 +90,7 @@ The `-dtyped-sexp` flag outputs the typed tree without locations. The `-dtyped-s
 - [x] Port OCaml external FFI arg-spec behavior for erased `@as(...) _` parameters (including trailing `Extern_unit` insertion) and keep primitive externals untouched during extension-only rewriting so `pval_prim` encodes constants correctly; also emit typedtree sexp with Latin-1 byte output for primitive blobs (`AsInUncurriedExternals.res` parity).
 - [x] Port OCaml first-class module unpack typing in patterns: translate `Ptyp_package` to `Tpackage`, type `Ppat_unpack` with `Tpat_unpack` extras, allow module unpack patterns in `let` and function parameters, and register package-backed module bindings in env (deterministic sequential compile failures: 61 -> 59, `UndefinedMethod`: 20 -> 16).
 - [x] Port OCaml `extract_label`-style argument matching in `type_application` (label-name lookup across remaining args + omitted-parameter reconstruction), fixing uncurried mixed-label applications in `UncurriedAlways.res` (Rust compile failures: 106 -> 105).
+- [x] Predeclare `Pstr_type` names in the type env before translating constructor argument types (matching OCaml recursive typedecl binding order), and tighten qualified-type lookup to avoid leaf-name fallback for `Pdot` paths. Also qualify module-signature type paths before constructor lookup. This fixes recursive module constructors resolving to outer `t` in `UntaggedVariants.res` and improves overall compilation (`Rust bsc`: 552 -> 559, `Parity`: 291 -> 293).
 
 **Previous milestones completed:**
 - Parser AST structure: 100% parity (sexp-locs 1196/1196)
