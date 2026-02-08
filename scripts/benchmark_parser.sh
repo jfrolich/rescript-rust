@@ -70,6 +70,11 @@ if [[ -n "$PATTERN" ]]; then
 fi
 
 sort -u "$TEMP_DIR/files.txt" -o "$TEMP_DIR/files.txt"
+
+# Always ignore duplicated generated trees.
+grep -Ev '(^|/)lib/(bs|ocaml)(/|$)' "$TEMP_DIR/files.txt" > "$TEMP_DIR/files.no_lib_dups.txt" || true
+mv "$TEMP_DIR/files.no_lib_dups.txt" "$TEMP_DIR/files.txt"
+
 TOTAL_FILES=$(wc -l < "$TEMP_DIR/files.txt" | tr -d ' ')
 
 echo -e "Found ${BOLD}$TOTAL_FILES${RESET} test files"

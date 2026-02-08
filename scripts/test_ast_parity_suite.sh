@@ -167,6 +167,9 @@ if [ -d "$TELLA_DIR" ]; then
     FILES=$(printf "%s\n%s\n" "$FILES" "$TELLA_FILES" | grep -v "^$" | sort -u)
 fi
 
+# Always ignore duplicated generated trees.
+FILES=$(echo "$FILES" | grep -Ev '(^|/)lib/(bs|ocaml)(/|$)' || true)
+
 if [ "$LIMIT" -gt 0 ]; then
     FILES=$(echo "$FILES" | head -n "$LIMIT")
 fi

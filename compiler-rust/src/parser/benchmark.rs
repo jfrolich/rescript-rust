@@ -105,7 +105,7 @@ mod tests {
     }
 
     /// Returns true if a path contains `/lib/bs` or `/lib/ocaml` as directory segments.
-    fn is_tella_duplicate_subtree(path: &Path) -> bool {
+    fn is_duplicate_lib_subtree(path: &Path) -> bool {
         let mut prev_was_lib = false;
 
         for component in path.components() {
@@ -232,11 +232,9 @@ mod tests {
                     continue;
                 }
 
-                if corpus_name == "tella-fusion" {
-                    let rel = path.strip_prefix(base).unwrap_or(&path);
-                    if is_tella_duplicate_subtree(rel) {
-                        continue;
-                    }
+                let rel = path.strip_prefix(base).unwrap_or(&path);
+                if is_duplicate_lib_subtree(rel) {
+                    continue;
                 }
 
                 if file_type.is_dir() {

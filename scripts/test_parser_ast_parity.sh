@@ -296,6 +296,10 @@ fi
 
 sort -u "$TEMP_DIR/files.txt" -o "$TEMP_DIR/files.txt"
 
+# Always ignore duplicated generated trees.
+grep -Ev '(^|/)lib/(bs|ocaml)(/|$)' "$TEMP_DIR/files.txt" > "$TEMP_DIR/files.no_lib_dups.txt" || true
+mv "$TEMP_DIR/files.no_lib_dups.txt" "$TEMP_DIR/files.txt"
+
 if [[ ! -s "$TEMP_DIR/files.txt" ]]; then
     if [[ -n "$FILE_ARG" ]]; then
         echo -e "${RED}Error: No files found matching '$FILE_ARG'${RESET}"
