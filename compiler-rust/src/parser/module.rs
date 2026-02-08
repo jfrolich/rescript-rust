@@ -3665,7 +3665,20 @@ fn parse_type_kind(
             // Record type - capture { position for first field's location (OCaml extends first spread field's loc to {)
             let lbrace_pos_idx = p.start_pos_idx();
             p.next();
-            let labels = parse_label_declarations(p, inline_ctx, current_type_name_path, Some(lbrace_pos_idx));
+            // OCaml parse_record_or_object_decl parses leading attrs once and, when present,
+            // attaches them to the first field while forcing first-field loc_start to the
+            // first attribute's loc_start.
+            let leading_attrs = parse_attributes(p);
+            let labels = if leading_attrs.is_empty() {
+                parse_label_declarations(p, inline_ctx, current_type_name_path, Some(lbrace_pos_idx))
+            } else {
+                parse_label_declarations_with_leading_attrs(
+                    p,
+                    inline_ctx,
+                    current_type_name_path,
+                    leading_attrs,
+                )
+            };
             p.expect(Token::Rbrace);
             TypeKind::Ptype_record(labels)
         }
@@ -4027,6 +4040,93 @@ fn parse_label_declarations(
 
     p.eat_breadcrumb();
     labels
+}
+
+/// Parse record label declarations when attrs were parsed once before the first field.
+///
+/// Mirrors OCaml parse_record_or_object_decl's `attr :: _ as attrs` branch:
+/// - attach pre-parsed attrs to the first field
+/// - force first-field `pld_loc.loc_start` to first attr `loc_start`
+/// - then parse the remaining fields normally
+fn parse_label_declarations_with_leading_attrs(
+    p: &mut Parser<'_>,
+    inline_ctx: Option<&RefCell<InlineTypesContext>>,
+    current_type_name_path: Option<&Vec<StrIdx>>,
+    leading_attrs: Attributes,
+) -> Vec<LabelDeclaration> {
+    let mut labels = Vec::new();
+    let first_attr_start_idx = leading_attrs
+        .iter()
+        .next()
+        .map(|(name, _)| p.loc_start_idx(name.loc))
+        .expect("leading attrs must be non-empty");
+
+    if let Some(first) = parse_first_label_with_preparsed_attrs(
+        p,
+        inline_ctx,
+        current_type_name_path,
+        leading_attrs,
+        first_attr_start_idx,
+    ) {
+        labels.push(first);
+    }
+
+    // OCaml uses `Parser.optional p Comma |> ignore` before parsing the rest.
+    p.optional(&Token::Comma);
+    labels.extend(parse_label_declarations(
+        p,
+        inline_ctx,
+        current_type_name_path,
+        None,
+    ));
+
+    labels
+}
+
+/// Parse the first label declaration with already-parsed attrs and an overridden loc start.
+///
+/// Supports both regular fields and spread (`...typ`) fields.
+fn parse_first_label_with_preparsed_attrs(
+    p: &mut Parser<'_>,
+    inline_ctx: Option<&RefCell<InlineTypesContext>>,
+    current_type_name_path: Option<&Vec<StrIdx>>,
+    attrs: Attributes,
+    first_attr_start_idx: PosIdx,
+) -> Option<LabelDeclaration> {
+    if p.token == Token::DotDotDot {
+        let spread_start_idx = p.start_pos_idx();
+        p.next();
+        let name_loc = p.mk_loc_idx_to_prev_end(spread_start_idx);
+        let spread_type = typ::parse_typ_expr(p);
+        let spread_type_end_idx = p.loc_end_idx(spread_type.ptyp_loc);
+        let spread_type_idx = p.arena_mut().push_core_type(spread_type);
+        let ellipsis_idx = p.arena_mut().intern("...");
+        let loc = p.mk_loc_idx_full(first_attr_start_idx, spread_type_end_idx);
+        return Some(LabelDeclaration {
+            pld_name: with_loc(ellipsis_idx, name_loc),
+            pld_mutable: MutableFlag::Immutable,
+            pld_type: spread_type_idx,
+            pld_loc: loc,
+            pld_attributes: attrs,
+            pld_optional: false,
+        });
+    }
+
+    if let Some(mut first) = parse_label_declaration(
+        p,
+        inline_ctx,
+        current_type_name_path,
+        Some(attrs),
+        false,
+    ) {
+        let first_loc = p.arena().get_location(first.pld_loc).clone();
+        first.pld_loc =
+            p.arena_mut()
+                .push_loc(first_attr_start_idx, first_loc.loc_end, first_loc.loc_ghost);
+        Some(first)
+    } else {
+        None
+    }
 }
 
 /// Parse record labels in constructor inline records (`Pcstr_record`).

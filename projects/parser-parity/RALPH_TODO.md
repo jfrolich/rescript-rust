@@ -32,9 +32,9 @@
 | sexp-locs (syntax scope) | 1196/1196 (100%) ✅ |
 | sexp-locs-ppx (syntax scope) | 1196/1196 (100%) ✅ |
 | bsc-ast (syntax scope) | 1196/1196 (100%) ✅ |
-| sexp-locs (full scope: syntax + TELLA) | 3373/3373 (100.0%) ✅ |
-| sexp-locs-ppx (full scope: syntax + TELLA) | 2806/3373 (83.2%) |
-| bsc-ast (full scope: syntax + TELLA) | 583 diffs (OCaml parser failures: 11, Rust parser failures: 20) |
+| sexp-locs (full scope: syntax + TELLA) | 3495/3496 (99.97%) |
+| sexp-locs-ppx (full scope: syntax + TELLA) | 2929/3496 (83.8%) |
+| bsc-ast (full scope: syntax + TELLA) | 581 diffs (OCaml parser failures: 11, Rust parser failures: 20) |
 
 **Scope note:** Final parity targets include both `tests/syntax_tests/data` and `TELLA_DIR`
 when present. Always report parity as `X/Y` where `Y` contains only OCaml-successful files.
@@ -43,6 +43,21 @@ Files where OCaml fails are excluded from parity denominators and listed separat
 **Snapshot note:** The `1179` denominator above is a historical in-repo snapshot.
 
 **Session progress (2026-02-08) - newest:**
+- Fixed OCaml/Rust parity for record type declarations with leading attrs/doc comments:
+  - Investigated with `inspect_binary_ast.py test` on
+    `/Users/jaapf/dev/tella-fusion/node_modules/@rescript/react/src/ReactDOM.res`.
+  - Root cause: OCaml `parse_record_or_object_decl` (`res_core.ml`) parses leading attrs once
+    and rewrites first-field `pld_loc.loc_start` to first-attr `loc_start`; Rust parsed attrs
+    per-field and missed that identity-sharing edge case.
+  - Updated Rust `parse_type_kind` (record branch) to mirror OCaml leading-attrs flow and
+    added first-field handling for both regular and spread (`...typ`) fields with loc-start override.
+  - `test_parser_ast_parity` now passes byte-identically for:
+    `/Users/jaapf/dev/tella-fusion/node_modules/@rescript/react/src/ReactDOM.res`.
+  - Full-scope run improved:
+    - `bsc-ast differences: 583 -> 581`
+    - `sexp-locs-ppx differences: 567 -> 567` (no change)
+    - `sexp-locs differences: 1 -> 1` (no change)
+
 - Fixed remaining parser location parity in signature lets, constructor-record fields, `let.unwrap`, and coercions:
   - Added dedicated signature-`let` parsing (`parse_signature_let_description`) to mirror OCaml
     `parse_sign_let_desc`: use `parse_poly_type_expr` (not external-style `parse_typ_expr`).
@@ -538,7 +553,7 @@ The binary AST structure (sexp-locs) is 100% correct. The differences are in:
 - [x] Task 5.1-5.3: Achieved 838/1179 (71.1%)
 - [x] Task 5.4: Historical snapshot target surpassed (syntax scope now 1196/1196 bsc-ast)
 - [ ] Task 5.5: Full-scope parity target (syntax + TELLA) - complete remaining parser/PPX/share diffs
-- **Note:** Current full-scope run has `bsc-ast differences: 583`.
+- **Note:** Current full-scope run has `bsc-ast differences: 581`.
 
 ### Phase 6: Arity Arena ✅ Complete
 - [x] Tasks 6.1-6.6: All implemented
