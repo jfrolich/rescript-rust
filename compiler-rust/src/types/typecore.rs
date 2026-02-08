@@ -2891,7 +2891,7 @@ fn type_function(
     param: &ParsedPattern,
     body: &ParsedExpression,
     arity: crate::parser::ast::Arity,
-    _is_async: bool,
+    is_async: bool,
     expected_ty: TypeExprRef,
     attributes: &[crate::parser::ast::Attribute],
 ) -> TypeCoreResult<Expression> {
@@ -2965,7 +2965,7 @@ fn type_function(
             body: cases,
             partial: Partial::Total,
             arity,
-            async_: false,
+            async_: is_async,
         },
         loc.clone(),
         func_ty,
