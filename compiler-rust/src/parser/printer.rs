@@ -5018,12 +5018,12 @@ pub fn print_pattern(
             ])
         }
         // open M.(pat)
-        PatternDesc::Ppat_open(lid, pat) => {
+        PatternDesc::Ppat_open(lid, pat_idx) => {
             Doc::concat(vec![
                 print_longident(arena, arena.get_longident(lid.txt)),
                 Doc::text("."),
                 Doc::lparen(),
-                print_pattern(state, pat, cmt_tbl, arena),
+                print_pattern(state, arena.get_pat(*pat_idx), cmt_tbl, arena),
                 Doc::rparen(),
             ])
         }
