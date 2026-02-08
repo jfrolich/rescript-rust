@@ -119,8 +119,9 @@ fn parse_payload(p: &mut Parser<'_>) -> Payload {
     while p.token != Token::Rparen && p.token != Token::Eof {
         // Try to parse an expression for the payload
         let expr = super::expr::parse_expr(p);
+        let expr_idx = p.arena_mut().push_expr(expr);
         items.push(StructureItem {
-            pstr_desc: Box::new(StructureItemDesc::Pstr_eval(Box::new((expr, Attributes::new())))),
+            pstr_desc: Box::new(StructureItemDesc::Pstr_eval(Box::new((expr_idx, Attributes::new())))),
             pstr_loc: LocIdx::none(),
         });
 
@@ -367,8 +368,9 @@ pub fn parse_constrained_pattern(p: &mut Parser<'_>) -> Pattern {
         let end_idx = p.loc_end_idx(typ.ptyp_loc);
         let loc = p.mk_loc_idx_full(start_idx, end_idx);
         let pat_idx = p.arena_mut().push_pat(pat);
+        let typ_idx = p.arena_mut().push_core_type(typ);
         Pattern {
-            ppat_desc: Box::new(PatternDesc::Ppat_constraint(Box::new((pat_idx, typ)))),
+            ppat_desc: Box::new(PatternDesc::Ppat_constraint(Box::new((pat_idx, typ_idx)))),
             ppat_loc: loc,
             ppat_attributes: Attributes::new(),
         }
@@ -467,8 +469,9 @@ pub fn parse_tuple_pattern(
 
     let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
 
+    let pat_indices: Vec<PatIdx> = patterns.into_iter().map(|p_| p.arena_mut().push_pat(p_)).collect();
     Pattern {
-        ppat_desc: Box::new(PatternDesc::Ppat_tuple(Box::new(patterns))),
+        ppat_desc: Box::new(PatternDesc::Ppat_tuple(Box::new(pat_indices))),
         ppat_loc: loc,
         ppat_attributes: Attributes::new(),
     }
@@ -637,8 +640,9 @@ fn parse_atomic_pattern(p: &mut Parser<'_>) -> Pattern {
                     ppat_attributes: Attributes::new(),
                 };
                 let unpack_idx = p.arena_mut().push_pat(unpack);
+                let typ_idx = p.arena_mut().push_core_type(typ);
                 Pattern {
-                    ppat_desc: Box::new(PatternDesc::Ppat_constraint(Box::new((unpack_idx, typ)))),
+                    ppat_desc: Box::new(PatternDesc::Ppat_constraint(Box::new((unpack_idx, typ_idx)))),
                     ppat_loc: loc,
                     ppat_attributes: Attributes::new(),
                 }
@@ -723,8 +727,9 @@ fn parse_atomic_pattern(p: &mut Parser<'_>) -> Pattern {
                                 let single = patterns.into_iter().next().unwrap();
                                 if matches!(*single.ppat_desc, PatternDesc::Ppat_tuple(_)) {
                                     let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
+                                    let single_idx = p.arena_mut().push_pat(single);
                                     Some(Pattern {
-                                        ppat_desc: Box::new(PatternDesc::Ppat_tuple(Box::new(vec![single]))),
+                                        ppat_desc: Box::new(PatternDesc::Ppat_tuple(Box::new(vec![single_idx]))),
                                         ppat_loc: loc,
                                         ppat_attributes: Attributes::new(),
                                     })
@@ -734,8 +739,9 @@ fn parse_atomic_pattern(p: &mut Parser<'_>) -> Pattern {
                             } else {
                                 // OCaml uses p.end_pos (end of next token after `)`) for tuple location
                                 let tuple_loc = p.mk_loc_idx_to_end(lparen_pos_idx);
+                                let pat_indices: Vec<PatIdx> = patterns.into_iter().map(|pat| p.arena_mut().push_pat(pat)).collect();
                                 Some(Pattern {
-                                    ppat_desc: Box::new(PatternDesc::Ppat_tuple(Box::new(patterns))),
+                                    ppat_desc: Box::new(PatternDesc::Ppat_tuple(Box::new(pat_indices))),
                                     ppat_loc: tuple_loc,
                                     ppat_attributes: Attributes::new(),
                                 })
@@ -748,8 +754,9 @@ fn parse_atomic_pattern(p: &mut Parser<'_>) -> Pattern {
                             // C(a,b) = multiple arguments = Ppat_tuple([a, b])
                             if matches!(*first.ppat_desc, PatternDesc::Ppat_tuple(_)) {
                                 let loc = p.mk_loc_idx_to_end(start_pos_idx);
+                                let first_idx = p.arena_mut().push_pat(first);
                                 Some(Pattern {
-                                    ppat_desc: Box::new(PatternDesc::Ppat_tuple(Box::new(vec![first]))),
+                                    ppat_desc: Box::new(PatternDesc::Ppat_tuple(Box::new(vec![first_idx]))),
                                     ppat_loc: loc,
                                     ppat_attributes: Attributes::new(),
                                 })
@@ -936,8 +943,9 @@ fn parse_constructor_pattern(p: &mut Parser<'_>) -> Pattern {
                     {
                         // OCaml: wrapper tuple location extends to end of next token
                         let wrap_loc = p.mk_loc_idx_to_end(lparen_pos_idx);
+                        let single_idx = p.arena_mut().push_pat(single);
                         Some(Pattern {
-                            ppat_desc: Box::new(PatternDesc::Ppat_tuple(Box::new(vec![single]))),
+                            ppat_desc: Box::new(PatternDesc::Ppat_tuple(Box::new(vec![single_idx]))),
                             ppat_loc: wrap_loc,
                             ppat_attributes: Attributes::new(),
                         })
@@ -947,8 +955,9 @@ fn parse_constructor_pattern(p: &mut Parser<'_>) -> Pattern {
                 } else {
                     // OCaml uses p.end_pos (end of next token after `)`) for tuple location
                     let tuple_loc = p.mk_loc_idx_to_end(lparen_pos_idx);
+                    let pat_indices: Vec<PatIdx> = patterns.into_iter().map(|pat| p.arena_mut().push_pat(pat)).collect();
                     Some(Pattern {
-                        ppat_desc: Box::new(PatternDesc::Ppat_tuple(Box::new(patterns))),
+                        ppat_desc: Box::new(PatternDesc::Ppat_tuple(Box::new(pat_indices))),
                         ppat_loc: tuple_loc,
                         ppat_attributes: Attributes::new(),
                     })
@@ -963,8 +972,9 @@ fn parse_constructor_pattern(p: &mut Parser<'_>) -> Pattern {
                     // OCaml: wrapper tuple location starts at outer ( and extends to end of next token
                     // This means in `Some((a,b)) =>`, the wrapper tuple includes the ` =>`
                     let wrap_loc = p.mk_loc_idx_to_end(lparen_pos_idx);
+                    let first_idx = p.arena_mut().push_pat(first);
                     Some(Pattern {
-                        ppat_desc: Box::new(PatternDesc::Ppat_tuple(Box::new(vec![first]))),
+                        ppat_desc: Box::new(PatternDesc::Ppat_tuple(Box::new(vec![first_idx]))),
                         ppat_loc: wrap_loc,
                         ppat_attributes: Attributes::new(),
                     })
@@ -1011,8 +1021,9 @@ fn parse_non_spread_pattern(p: &mut Parser<'_>, error_msg: &str) -> Option<Patte
             let typ = super::typ::parse_typ_expr(p);
             let loc = p.mk_loc_spanning(pat.ppat_loc, typ.ptyp_loc);
             let pat_idx = p.arena_mut().push_pat(pat);
+            let typ_idx = p.arena_mut().push_core_type(typ);
             Some(Pattern {
-                ppat_desc: Box::new(PatternDesc::Ppat_constraint(Box::new((pat_idx, typ)))),
+                ppat_desc: Box::new(PatternDesc::Ppat_constraint(Box::new((pat_idx, typ_idx)))),
                 ppat_loc: loc,
                 ppat_attributes: Attributes::new(),
             })
@@ -1045,8 +1056,9 @@ fn parse_array_pattern(p: &mut Parser<'_>) -> Pattern {
     p.expect(Token::Rbracket);
     let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
 
+    let pat_indices: Vec<PatIdx> = patterns.into_iter().map(|pat| p.arena_mut().push_pat(pat)).collect();
     Pattern {
-        ppat_desc: Box::new(PatternDesc::Ppat_array(Box::new(patterns))),
+        ppat_desc: Box::new(PatternDesc::Ppat_array(Box::new(pat_indices))),
         ppat_loc: loc,
         ppat_attributes: Attributes::new(),
     }
@@ -1239,9 +1251,10 @@ fn parse_record_pattern(p: &mut Parser<'_>) -> Pattern {
                         p.next();
                     }
                     let pat = parse_pattern(p);
+                    let pat_idx = p.arena_mut().push_pat(pat);
                     let lid_idx = p.push_lident(&recovered_name);
                     let lid = with_loc(lid_idx, loc);
-                    raw_fields.push((false, Some(PatternRecordField { lid, pat, opt })));
+                    raw_fields.push((false, Some(PatternRecordField { lid, pat: pat_idx, opt })));
                     if !p.optional(&Token::Comma) {
                         break;
                     }
@@ -1260,7 +1273,7 @@ fn parse_record_pattern(p: &mut Parser<'_>) -> Pattern {
 
         let lid_unloc = super::core::build_longident(p.arena_mut(), &parts);
         let lid_idx = p.push_longident(lid_unloc);
-        let (lid, pat, opt) = if p.token == Token::Colon {
+        let (lid, pat_idx, opt) = if p.token == Token::Colon {
             // field: pattern or field: ? pattern
             p.next();
             // Check for optional marker after colon: name: ? pat
@@ -1269,9 +1282,10 @@ fn parse_record_pattern(p: &mut Parser<'_>) -> Pattern {
                 p.next();
             }
             let pat = parse_pattern(p);
+            let pat_idx = p.arena_mut().push_pat(pat);
             // Longident location only covers the field name, not the pattern
             let lid_loc = p.mk_loc_idx(field_start_idx, lid_end_pos_idx);
-            (with_loc(lid_idx, lid_loc), pat, opt)
+            (with_loc(lid_idx, lid_loc), pat_idx, opt)
         } else if p.token == Token::Equal {
             // OCaml: Token.Equal case in parse_record_pattern_row
             // {field=value} instead of {field: value}
@@ -1288,8 +1302,9 @@ fn parse_record_pattern(p: &mut Parser<'_>) -> Pattern {
                 p.next();
             }
             let pat = parse_pattern(p);
+            let pat_idx = p.arena_mut().push_pat(pat);
             let lid_loc = p.mk_loc_idx(field_start_idx, lid_end_pos_idx);
-            (with_loc(lid_idx, lid_loc), pat, opt)
+            (with_loc(lid_idx, lid_loc), pat_idx, opt)
         } else if p.token == Token::Question {
             // field? (optional punning after field name - less common)
             p.next();
@@ -1297,7 +1312,8 @@ fn parse_record_pattern(p: &mut Parser<'_>) -> Pattern {
             // Reuse StrIdx from the longident's last component for sharing
             let pun_name_idx = p.arena().get_longident(lid_idx).last_idx();
             let pat = ast_helper::make_var_pat(pun_name_idx, loc);
-            (with_loc(lid_idx, loc), pat, true)
+            let pat_idx = p.arena_mut().push_pat(pat);
+            (with_loc(lid_idx, loc), pat_idx, true)
         } else {
             // Punning: field is same as variable (use last identifier in the path)
             // For optional punned fields, the pattern location is just the identifier (using pat_start)
@@ -1305,10 +1321,11 @@ fn parse_record_pattern(p: &mut Parser<'_>) -> Pattern {
             // Reuse StrIdx from the longident's last component for sharing
             let pun_name_idx = p.arena().get_longident(lid_idx).last_idx();
             let pat = ast_helper::make_var_pat(pun_name_idx, loc);
-            (with_loc(lid_idx, loc), pat, opt_punning)
+            let pat_idx = p.arena_mut().push_pat(pat);
+            (with_loc(lid_idx, loc), pat_idx, opt_punning)
         };
 
-        raw_fields.push((has_spread, Some(PatternRecordField { lid, pat, opt })));
+        raw_fields.push((has_spread, Some(PatternRecordField { lid, pat: pat_idx, opt })));
 
         if !p.optional(&Token::Comma) {
             break;
@@ -1340,7 +1357,7 @@ fn parse_record_pattern(p: &mut Parser<'_>) -> Pattern {
                     // OCaml: Parser.err ~start_pos:pattern.ppat_loc.loc_start p
                     // end_pos defaults to p.end_pos (current token end)
                     p.err_at(
-                        p.loc_start(field.pat.ppat_loc),
+                        p.loc_start(p.arena().get_pat(field.pat).ppat_loc),
                         p.end_pos.clone(),
                         DiagnosticCategory::Message(
                             super::core::error_messages::RECORD_PATTERN_SPREAD.to_string(),
@@ -1383,10 +1400,11 @@ fn parse_dict_pattern(p: &mut Parser<'_>, start_pos_idx: PosIdx) -> Pattern {
                 let opt = p.optional(&Token::Question);
 
                 let pat = parse_pattern(p);
+                let pat_idx = p.arena_mut().push_pat(pat);
                 // OCaml: Location.mkloc (Longident.Lident s) loc - uses key location, not whole field
                 fields.push(PatternRecordField {
                     lid: with_loc(lid_idx, key_loc),
-                    pat,
+                    pat: pat_idx,
                     opt,
                 });
             }
@@ -1616,8 +1634,9 @@ fn parse_poly_variant_pattern(p: &mut Parser<'_>) -> Pattern {
                     Some(p.arena_mut().push_pat(single))
                 } else {
                     let tuple_loc = p.mk_loc_idx_to_prev_end(tuple_start_idx);
+                    let pat_indices: Vec<PatIdx> = patterns.into_iter().map(|pat| p.arena_mut().push_pat(pat)).collect();
                     let tuple_pat = Pattern {
-                        ppat_desc: Box::new(PatternDesc::Ppat_tuple(Box::new(patterns))),
+                        ppat_desc: Box::new(PatternDesc::Ppat_tuple(Box::new(pat_indices))),
                         ppat_loc: tuple_loc,
                         ppat_attributes: Attributes::new(),
                     };
