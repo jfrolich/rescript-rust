@@ -30,9 +30,9 @@
 | sexp-locs (syntax scope) | 1196/1196 (100%) ✅ |
 | sexp-locs-ppx (syntax scope) | 1196/1196 (100%) ✅ |
 | bsc-ast (syntax scope) | 1196/1196 (100%) ✅ |
-| sexp-locs (full scope: syntax + TELLA) | 3365/3373 (99.8%) |
-| sexp-locs-ppx (full scope: syntax + TELLA) | 2800/3373 (83.0%) |
-| bsc-ast (full scope: syntax + TELLA) | 589 diffs (OCaml parser failures: 11, Rust parser failures: 20) |
+| sexp-locs (full scope: syntax + TELLA) | 3373/3373 (100.0%) ✅ |
+| sexp-locs-ppx (full scope: syntax + TELLA) | 2806/3373 (83.2%) |
+| bsc-ast (full scope: syntax + TELLA) | 583 diffs (OCaml parser failures: 11, Rust parser failures: 20) |
 
 **Scope note:** Final parity targets include both `tests/syntax_tests/data` and `TELLA_DIR`
 when present. Always report parity as `X/Y` where `Y` contains only OCaml-successful files.
@@ -41,6 +41,28 @@ Files where OCaml fails are excluded from parity denominators and listed separat
 **Snapshot note:** The `1179` denominator above is a historical in-repo snapshot.
 
 **Session progress (2026-02-08) - newest:**
+- Fixed remaining parser location parity in signature lets, constructor-record fields, `let.unwrap`, and coercions:
+  - Added dedicated signature-`let` parsing (`parse_signature_let_description`) to mirror OCaml
+    `parse_sign_let_desc`: use `parse_poly_type_expr` (not external-style `parse_typ_expr`).
+  - Matched OCaml constructor-inline-record field behavior for leading attributes:
+    parse leading attrs once, attach to first field, and keep first-field loc start at field-name token.
+  - Matched OCaml `let.unwrap` attribute location end in expression/module let parsing:
+    use `p.start_pos` after `let?`/optional `rec` (not token end).
+  - Matched OCaml `Pexp_coerce` location construction (`mk_loc expr.loc_start p.prev_end_pos`)
+    by ending coercion loc at parser `prev_end_pos` after target type parse.
+  - Full-scope run improved:
+    - `sexp-locs differences: 8 -> 0`
+    - `sexp-locs-ppx differences: 573 -> 567`
+    - `bsc-ast differences: 588 -> 583`
+  - Notable file-level parity wins:
+    `/Users/jaapf/dev/tella-fusion/node_modules/sury/src/S.resi`,
+    `/Users/jaapf/dev/tella-fusion/node_modules/sury/src/Sury.resi`,
+    `/Users/jaapf/dev/tella-fusion/packages/core/webapp/src/bindings/ReasonLambda.res`,
+    `/Users/jaapf/dev/tella-fusion/packages/core/webapp/src/vendor/Json_decode.resi`,
+    `/Users/jaapf/dev/tella-fusion/packages/core/webapp/src/backend/API__PlaylistAnalytics.res`,
+    `/Users/jaapf/dev/tella-fusion/packages/core/webapp/src/frontend/UI__LayoutPickerStructured.res`,
+    `/Users/jaapf/dev/tella-fusion/packages/core/webapp/src/frontend/UI__LayoutThumbnail.res`.
+
 - Fixed OCaml/Rust parity for `@this` callback/type rewrite identity and optional external arg encoding:
   - Mirrored OCaml `get_opt_arg_type` behavior in `build_arg_type_specs` so optional args
     use `spec_of_ptyp` (`@unwrap` included) instead of being hardcoded to `Nothing`.
@@ -53,11 +75,12 @@ Files where OCaml fails are excluded from parity denominators and listed separat
   - `inspect_binary_ast.py test` now passes byte-identically for:
     `/Users/jaapf/dev/tella-fusion/node_modules/rescript-webapi/src/Webapi/Dom/Webapi__Dom__HtmlOptionsCollection.res`,
     `/Users/jaapf/dev/tella-fusion/node_modules/rescript-nodejs/src/Stream.res`,
+    `/Users/jaapf/dev/tella-fusion/node_modules/rescript-nodejs/test/atomic/Stream.test.res`,
     `/Users/jaapf/dev/tella-fusion/node_modules/rescript-webapi/src/Webapi/Canvas/Webapi__Canvas__Canvas2d.res`.
   - Full-scope run improved:
     - `sexp-locs differences: 9 -> 8`
     - `sexp-locs-ppx differences: 579 -> 573`
-    - `bsc-ast differences: 593 -> 589`
+    - `bsc-ast differences: 593 -> 588`
 
 - Fixed OCaml/Rust `@deriving` attribute ordering + `@deriving(abstract)` core-type attrs:
   - OCaml `Ast_attributes.process_derive_type` uses `fold_left` with `attr :: acc`,
@@ -513,7 +536,7 @@ The binary AST structure (sexp-locs) is 100% correct. The differences are in:
 - [x] Task 5.1-5.3: Achieved 838/1179 (71.1%)
 - [x] Task 5.4: Historical snapshot target surpassed (syntax scope now 1196/1196 bsc-ast)
 - [ ] Task 5.5: Full-scope parity target (syntax + TELLA) - complete remaining parser/PPX/share diffs
-- **Note:** Current full-scope run has `bsc-ast differences: 593`.
+- **Note:** Current full-scope run has `bsc-ast differences: 583`.
 
 ### Phase 6: Arity Arena ✅ Complete
 - [x] Tasks 6.1-6.6: All implemented

@@ -477,7 +477,8 @@ pub fn parse_expr_with_operand(p: &mut Parser<'_>, operand: Expression) -> Expre
     if p.token == Token::ColonGreaterThan {
         p.next();
         let typ = super::typ::parse_typ_expr(p);
-        let loc = p.mk_loc_spanning(expr.pexp_loc, typ.ptyp_loc);
+        let expr_start_idx = p.loc_start_idx(expr.pexp_loc);
+        let loc = p.mk_loc_idx_to_prev_end(expr_start_idx);
         let expr_idx = p.arena_mut().push_expr(expr);
         let typ_idx = p.arena_mut().push_core_type(typ);
         Expression {
@@ -508,7 +509,8 @@ pub fn parse_expr_with_context(p: &mut Parser<'_>, context: ExprContext) -> Expr
     let result = if p.token == Token::ColonGreaterThan {
         p.next();
         let typ = super::typ::parse_typ_expr(p);
-        let loc = p.mk_loc_spanning(expr.pexp_loc, typ.ptyp_loc);
+        let expr_start_idx = p.loc_start_idx(expr.pexp_loc);
+        let loc = p.mk_loc_idx_to_prev_end(expr_start_idx);
         let expr_idx = p.arena_mut().push_expr(expr);
         let typ_idx = p.arena_mut().push_core_type(typ);
         Expression {
@@ -2205,9 +2207,10 @@ pub fn parse_constrained_or_coerced_expr(p: &mut Parser<'_>) -> Expression {
             // OCaml: The inner Pexp_constraint has a location that ends at the constraint type,
             // not extending to the outer coercion target type
             let constraint_loc = p.mk_loc_spanning(expr.pexp_loc, typ.ptyp_loc);
+            let expr_start_idx = p.loc_start_idx(expr.pexp_loc);
             p.next();
             let target_typ = super::typ::parse_typ_expr(p);
-            let coerce_loc = p.mk_loc_spanning(expr.pexp_loc, target_typ.ptyp_loc);
+            let coerce_loc = p.mk_loc_idx_to_prev_end(expr_start_idx);
             // OCaml represents (x : t :> int) as Pexp_coerce(Pexp_constraint(x, t), int)
             // The constraint is nested inside the expression, not as the optional middle type
             let expr_idx = p.arena_mut().push_expr(expr);
@@ -2238,7 +2241,8 @@ pub fn parse_constrained_or_coerced_expr(p: &mut Parser<'_>) -> Expression {
         // Direct coercion: expr :> type
         p.next();
         let typ = super::typ::parse_typ_expr(p);
-        let loc = p.mk_loc_spanning(expr.pexp_loc, typ.ptyp_loc);
+        let expr_start_idx = p.loc_start_idx(expr.pexp_loc);
+        let loc = p.mk_loc_idx_to_prev_end(expr_start_idx);
         let expr_idx = p.arena_mut().push_expr(expr);
         let typ_idx = p.arena_mut().push_core_type(typ);
         Expression {
@@ -2263,7 +2267,8 @@ pub fn over_parse_constrained_or_coerced_or_arrow_expression(
             // Coercion: expr :> type
             p.next();
             let typ = super::typ::parse_typ_expr(p);
-            let loc = p.mk_loc_spanning(expr.pexp_loc, typ.ptyp_loc);
+            let expr_start_idx = p.loc_start_idx(expr.pexp_loc);
+            let loc = p.mk_loc_idx_to_prev_end(expr_start_idx);
             let expr_idx = p.arena_mut().push_expr(expr);
             let typ_idx = p.arena_mut().push_core_type(typ);
             Expression {
@@ -4193,12 +4198,13 @@ fn parse_let_in_block_with_continuation_and_attrs(
         _ => false,
     };
     p.next();
-    // Track let? position for let.unwrap attribute location
-    let let_end_pos_idx = p.prev_end_pos_idx();
+    // Track let?/let? rec span end for let.unwrap location (OCaml uses p.start_pos).
+    let mut let_end_pos_idx = p.start_pos_idx();
 
     // Check for rec
     let rec_flag = if p.token == Token::Rec {
         p.next();
+        let_end_pos_idx = p.start_pos_idx();
         RecFlag::Recursive
     } else {
         RecFlag::Nonrecursive
@@ -5145,12 +5151,13 @@ fn parse_let_in_switch_case(p: &mut Parser<'_>) -> Expression {
         _ => false,
     };
     p.next();
-    // Track let? position for let.unwrap attribute location
-    let let_end_pos_idx = p.prev_end_pos_idx();
+    // Track let?/let? rec span end for let.unwrap location (OCaml uses p.start_pos).
+    let mut let_end_pos_idx = p.start_pos_idx();
 
     // Check for rec
     let rec_flag = if p.token == Token::Rec {
         p.next();
+        let_end_pos_idx = p.start_pos_idx();
         RecFlag::Recursive
     } else {
         RecFlag::Nonrecursive

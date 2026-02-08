@@ -4500,7 +4500,7 @@ fn rewrite_method_callback_expression(
     }
 
     let js_oo = arena.ppx_js_oo_lident();
-    let unsafe_to_method = arena.push_ldot_static(js_oo, "unsafe_to_method");
+    let unsafe_to_method = arena.push_ldot_tracked(js_oo, "unsafe_to_method");
     let callback = arena.ppx_js_oo_callback_lid();
     let callback_arity = arena.push_ldot_tracked(callback, format!("arity{total_arity}").as_str());
 
