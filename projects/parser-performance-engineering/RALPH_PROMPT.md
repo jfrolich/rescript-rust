@@ -14,7 +14,14 @@ Before and after every change:
 
 ## Your Task
 
-Read `RALPH_TODO.md` and complete the next unchecked task. After completing a task:
+Before selecting any new task, always check for unfinished local work:
+
+1. Run `git status --short` first.
+2. If there are uncommitted changes, assume they are an unfinished task in progress.
+3. Continue and finish that in-progress task first (parity + benchmarks + docs updates), then commit it.
+4. Only when the working tree is clean, read `RALPH_TODO.md` and start the next unchecked task.
+
+After completing a task:
 1. Run parity tests — zero regressions required
 2. Run benchmarks and record results
 3. Mark the task `[x]` complete in `RALPH_TODO.md`
