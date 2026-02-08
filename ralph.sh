@@ -1,25 +1,194 @@
 #!/bin/bash
 
 # Ralph Loop Runner with Inline Dashboard
-# Usage: ./ralph.sh [PROMPT_FILE]
-# Default: RALPH_PROMPT.md
+# Usage: ./ralph.sh [PROMPT_FILE] [--agent claude|codex]
+# Default prompt: RALPH_PROMPT.md
+# Default agent: claude (or RALPH_AGENT env var)
 
-PROMPT_FILE="${1:-RALPH_PROMPT.md}"
+PROMPT_FILE="RALPH_PROMPT.md"
+AGENT="${RALPH_AGENT:-claude}"
 OUTPUT_FILE="/tmp/ralph_output.txt"
+OUTPUT_JSON_FILE="/tmp/ralph_output.jsonl"
 ITERATION=0
 DEFAULT_SLEEP_SECONDS=2
 RATE_LIMIT_BASE_SLEEP_SECONDS=60
 RATE_LIMIT_MAX_SLEEP_SECONDS=900
 RATE_LIMIT_STREAK=0
 
+usage() {
+  cat <<'USAGE'
+Usage: ./ralph.sh [PROMPT_FILE] [--agent claude|codex]
+
+Examples:
+  ./ralph.sh
+  ./ralph.sh projects/parser-parity/RALPH_PROMPT.md
+  ./ralph.sh projects/parser-parity/RALPH_PROMPT.md --agent codex
+  RALPH_AGENT=codex ./ralph.sh projects/printer-parity/RALPH_PROMPT.md
+USAGE
+}
+
+PROMPT_SET=0
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    --agent)
+      if [[ -z "${2:-}" ]]; then
+        echo "Error: --agent requires a value (claude or codex)"
+        exit 1
+      fi
+      AGENT="$2"
+      shift 2
+      ;;
+    --agent=*)
+      AGENT="${1#*=}"
+      shift
+      ;;
+    *)
+      if [[ $PROMPT_SET -eq 1 ]]; then
+        echo "Error: Unexpected argument '$1'"
+        usage
+        exit 1
+      fi
+      PROMPT_FILE="$1"
+      PROMPT_SET=1
+      shift
+      ;;
+  esac
+done
+
+case "$AGENT" in
+  claude)
+    AGENT_DISPLAY="Claude Code"
+    ;;
+  codex)
+    AGENT_DISPLAY="Codex"
+    ;;
+  *)
+    echo "Error: Unsupported agent '$AGENT'. Use 'claude' or 'codex'."
+    exit 1
+    ;;
+esac
+
 if [[ ! -f "$PROMPT_FILE" ]]; then
   echo "Error: Prompt file '$PROMPT_FILE' not found"
   exit 1
 fi
 
+if [[ "$AGENT" == "claude" ]]; then
+  if ! command -v claude >/dev/null 2>&1; then
+    echo "Error: 'claude' command not found in PATH"
+    exit 1
+  fi
+else
+  if ! command -v codex >/dev/null 2>&1; then
+    echo "Error: 'codex' command not found in PATH"
+    exit 1
+  fi
+  if ! command -v jq >/dev/null 2>&1; then
+    echo "Error: 'jq' is required for --agent codex"
+    exit 1
+  fi
+fi
+
 # Derive project directory from prompt file location
 PROJECT_DIR="$(dirname "$PROMPT_FILE")"
 TODO_FILE="$PROJECT_DIR/RALPH_TODO.md"
+
+build_prompt_input() {
+  {
+    echo "**Project directory:** \`$PROJECT_DIR/\` — All relative file references in this prompt (e.g. \`RALPH_TODO.md\`) are relative to this directory."
+    echo ""
+    cat "$PROMPT_FILE"
+  }
+}
+
+render_claude_stream_line() {
+  local line="$1"
+
+  # Parse stream-json and extract content
+  if echo "$line" | grep -q '"type":"assistant"'; then
+    # Extract text from assistant messages
+    TEXT=$(echo "$line" | grep -o '"text":"[^"]*"' | sed 's/"text":"//;s/"$//' | sed 's/\\n/\n/g')
+    if [[ -n "$TEXT" ]]; then
+      echo -e "$TEXT"
+    fi
+  elif echo "$line" | grep -q '"tool_use"'; then
+    # Show tool usage
+    TOOL=$(echo "$line" | grep -o '"name":"[^"]*"' | head -1 | sed 's/"name":"//;s/"$//')
+    if [[ -n "$TOOL" ]]; then
+      echo "  ⚡ $TOOL"
+    fi
+  elif echo "$line" | grep -q '"tool_result"'; then
+    echo "  ✓ done"
+  fi
+}
+
+render_codex_stream_line() {
+  local line="$1"
+  local text
+  local tool
+  local tool_result
+
+  text=$(echo "$line" | jq -r '
+    if .type == "agent_message" then
+      (.message // .text // empty)
+    elif .type == "response_item" and .payload.type == "message" and .payload.role == "assistant" then
+      [.payload.content[]? | select(.type == "output_text") | .text] | join("\n")
+    elif .type == "message" and .role == "assistant" then
+      [.content[]? | select(.type == "output_text") | .text] | join("\n")
+    else
+      empty
+    end
+  ' 2>/dev/null)
+  if [[ -n "$text" && "$text" != "null" ]]; then
+    echo -e "$text"
+  fi
+
+  tool=$(echo "$line" | jq -r '
+    if .type == "response_item" and .payload.type == "function_call" then
+      (.payload.name // empty)
+    elif .type == "function_call" then
+      (.name // empty)
+    else
+      empty
+    end
+  ' 2>/dev/null)
+  if [[ -n "$tool" && "$tool" != "null" ]]; then
+    echo "  ⚡ $tool"
+  fi
+
+  tool_result=$(echo "$line" | jq -r '
+    if (.type == "response_item" and .payload.type == "function_call_output") or .type == "function_call_output" then
+      "yes"
+    else
+      empty
+    end
+  ' 2>/dev/null)
+  if [[ "$tool_result" == "yes" ]]; then
+    echo "  ✓ done"
+  fi
+}
+
+run_agent_iteration() {
+  if [[ "$AGENT" == "claude" ]]; then
+    build_prompt_input | \
+      claude --dangerously-skip-permissions --print --output-format stream-json --verbose 2>&1 | \
+      tee "$OUTPUT_JSON_FILE" | \
+      while IFS= read -r line; do
+        render_claude_stream_line "$line"
+      done | tee "$OUTPUT_FILE"
+  else
+    build_prompt_input | \
+      codex exec --dangerously-bypass-approvals-and-sandbox --json - 2>&1 | \
+      tee "$OUTPUT_JSON_FILE" | \
+      while IFS= read -r line; do
+        render_codex_stream_line "$line"
+      done | tee "$OUTPUT_FILE"
+  fi
+}
 
 # Function to show inline dashboard
 show_dashboard() {
@@ -68,6 +237,7 @@ echo "╔═══════════════════════�
 echo "║                         RALPH LOOP                                   ║"
 echo "║  Prompt: $(printf '%-58s' "$PROMPT_FILE")  ║"
 echo "║  Project: $(printf '%-57s' "$PROJECT_DIR/") ║"
+echo "║  Agent: $(printf '%-59s' "$AGENT_DISPLAY") ║"
 echo "║  Press Ctrl+C to stop                                                ║"
 echo "╚══════════════════════════════════════════════════════════════════════╝"
 echo ""
@@ -83,38 +253,17 @@ while true; do
   show_dashboard
 
   echo ""
-  echo "─── Claude Output ─────────────────────────────────────────────────────"
+  echo "─── $AGENT_DISPLAY Output ─────────────────────────────────────────────"
   echo ""
 
-  # Run claude with streaming output for real-time visibility
-  # Prepend project directory context so agent resolves relative paths correctly
-  { echo "**Project directory:** \`$PROJECT_DIR/\` — All relative file references in this prompt (e.g. \`RALPH_TODO.md\`) are relative to this directory."; echo ""; cat "$PROMPT_FILE"; } | \
-  claude --dangerously-skip-permissions --print --output-format stream-json --verbose 2>&1 | \
-    tee "$OUTPUT_FILE.json" | \
-    while IFS= read -r line; do
-      # Parse stream-json and extract content
-      if echo "$line" | grep -q '"type":"assistant"'; then
-        # Extract text from assistant messages
-        TEXT=$(echo "$line" | grep -o '"text":"[^"]*"' | sed 's/"text":"//;s/"$//' | sed 's/\\n/\n/g')
-        if [[ -n "$TEXT" ]]; then
-          echo -e "$TEXT"
-        fi
-      elif echo "$line" | grep -q '"tool_use"'; then
-        # Show tool usage
-        TOOL=$(echo "$line" | grep -o '"name":"[^"]*"' | head -1 | sed 's/"name":"//;s/"$//')
-        if [[ -n "$TOOL" ]]; then
-          echo "  ⚡ $TOOL"
-        fi
-      elif echo "$line" | grep -q '"tool_result"'; then
-        echo "  ✓ done"
-      fi
-    done | tee "$OUTPUT_FILE"
+  # Run selected agent with streaming output for real-time visibility
+  run_agent_iteration
 
   echo ""
   echo "─── End of Iteration $ITERATION ───────────────────────────────────────"
 
   # Check for completion
-  if grep -q "RALPH_COMPLETE" "$OUTPUT_FILE"; then
+  if grep -q "RALPH_COMPLETE" "$OUTPUT_FILE" "$OUTPUT_JSON_FILE"; then
     echo ""
     echo "╔══════════════════════════════════════════════════════════════════════╗"
     echo "║  🎉 RALPH_COMPLETE - Finished after $ITERATION iterations!            ║"
@@ -123,7 +272,7 @@ while true; do
   fi
 
   # Check for blocked state
-  if grep -q "RALPH_BLOCKED" "$OUTPUT_FILE"; then
+  if grep -q "RALPH_BLOCKED" "$OUTPUT_FILE" "$OUTPUT_JSON_FILE"; then
     echo ""
     echo "╔══════════════════════════════════════════════════════════════════════╗"
     echo "║  ⚠️  RALPH_BLOCKED - Needs human intervention                        ║"
@@ -131,8 +280,8 @@ while true; do
     exit 1
   fi
 
-  # Back off when Claude reports account/request limits to avoid hammering the API.
-  if grep -Eiq "you.?ve hit your limit|hit your limit|rate limit|too many requests|\\b429\\b" "$OUTPUT_FILE" "$OUTPUT_FILE.json"; then
+  # Back off when the selected agent reports account/request limits to avoid hammering the API.
+  if grep -Eiq "you.?ve hit your limit|hit your limit|rate limit|rate_limit|too many requests|\\b429\\b|quota exceeded" "$OUTPUT_FILE" "$OUTPUT_JSON_FILE"; then
     RATE_LIMIT_STREAK=$((RATE_LIMIT_STREAK + 1))
     BACKOFF_SECONDS=$((RATE_LIMIT_BASE_SLEEP_SECONDS * (2 ** (RATE_LIMIT_STREAK - 1))))
     if [[ $BACKOFF_SECONDS -gt $RATE_LIMIT_MAX_SLEEP_SECONDS ]]; then
@@ -141,7 +290,7 @@ while true; do
 
     echo ""
     echo "╔══════════════════════════════════════════════════════════════════════╗"
-    printf "║  ⏳ Claude limit detected - sleeping %4ss (streak %2d)              ║\n" "$BACKOFF_SECONDS" "$RATE_LIMIT_STREAK"
+    printf "║  ⏳ %-11s limit detected - sleeping %4ss (streak %2d)              ║\n" "$AGENT_DISPLAY" "$BACKOFF_SECONDS" "$RATE_LIMIT_STREAK"
     echo "╚══════════════════════════════════════════════════════════════════════╝"
     sleep "$BACKOFF_SECONDS"
     continue
