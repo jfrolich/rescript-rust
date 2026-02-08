@@ -2616,7 +2616,13 @@ fn type_application(
 
     // Type check arguments, extracting/building arrow types as we go
     let mut typed_args = Vec::new();
-    for (label, arg_expr) in args.iter() {
+    let mut skipped_optionals = 0usize;
+    let mut drop_trailing_unit = false;
+    for (i, (label, arg_expr)) in args.iter().enumerate() {
+        if drop_trailing_unit {
+            break;
+        }
+
         // Skip optional parameters when the call-site provides a Nolabel argument.
         // This handles cases like f(~x: int=?, unit) called as f(()) where the
         // optional ~x parameter should be implicitly None.
@@ -2624,6 +2630,22 @@ fn type_application(
             let (fn_label, arg_ty, ret_ty) = match crate::types::ctype::split_arrow_with_label(ctx, current_ty) {
                 Some((lbl, arg, ret)) => (Some(lbl), arg, ret),
                 None => {
+                    // OCaml special case: when all function params are optional and
+                    // the call provides only `()`, treat as empty application.
+                    // e.g., `let foo = (~x=3, ~y=4) => x + y; foo()` -- drop the `()`.
+                    // This matches OCaml's typecore.ml line 3641-3645.
+                    if skipped_optionals > 0
+                        && label.is_nolabel()
+                        && i == args.len() - 1
+                    {
+                        if let crate::parser::ast::ExpressionDesc::Pexp_construct(lid, None) = &arg_expr.pexp_desc {
+                            if tctx.arena.is_lident(lid.txt, "()") {
+                                drop_trailing_unit = true;
+                                break;
+                            }
+                        }
+                    }
+
                     // Not a function type yet - create arrow type with arity
                     // Use the call-site label (like OCaml's type_unknown_args)
                     let arg_ty = ctx.new_var(None);
@@ -2634,6 +2656,10 @@ fn type_application(
                     (None, arg_ty, ret_ty)
                 }
             };
+
+            if drop_trailing_unit {
+                break;
+            }
 
             let fn_param_is_optional = fn_label.as_ref().map_or(false, |l| l.is_optional());
             let call_is_optional = label.is_optional();
@@ -2656,6 +2682,7 @@ fn type_application(
             // In both cases, the optional parameter gets None implicitly.
             if fn_param_is_optional && !labels_match {
                 current_ty = ret_ty;
+                skipped_optionals += 1;
                 continue;
             }
 
