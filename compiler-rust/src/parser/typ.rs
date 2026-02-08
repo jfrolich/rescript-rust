@@ -6,7 +6,7 @@
 use std::borrow::Cow;
 use std::collections::HashSet;
 
-use crate::parse_arena::{Located, LocIdx, PosIdx, StrIdx};
+use crate::parse_arena::{CoreTypeIdx, Located, LocIdx, PosIdx, StrIdx};
 use super::ast::*;
 use super::core::{ast_helper, mknoloc, recover, with_loc};
 use super::diagnostics::DiagnosticCategory;
@@ -64,13 +64,16 @@ pub fn substitute_type_vars(arena: &mut crate::parse_arena::ParseArena, typ: Cor
         }
         CoreTypeDesc::Ptyp_arrow(inner) => {
                     let (arg, ret, arity) = *inner;
+                    let ret_type = arena.get_core_type(ret).clone();
+                    let substituted_ret = substitute_type_vars(arena, ret_type, vars);
+                    let new_ret = arena.push_core_type(substituted_ret);
                     CoreTypeDesc::Ptyp_arrow(Box::new((
                 Box::new(TypeArg {
                     attrs: arg.attrs.clone(),
                     lbl: arg.lbl.clone(),
                     typ: substitute_type_vars(arena, arg.typ, vars),
                 }),
-                Box::new(substitute_type_vars(arena, *ret, vars)),
+                new_ret,
                 arity,
             )))
         },
@@ -213,8 +216,9 @@ pub fn parse_poly_type_expr(p: &mut Parser<'_>) -> CoreType {
             };
             // LITERAL path: OCaml line 4367 `Typ.arrow ~arity:(Some 1)`
             // Use static arity to match OCaml's CSE sharing behavior
+            let ret_idx = p.arena_mut().push_core_type(return_type);
             return CoreType {
-                ptyp_desc: Box::new(CoreTypeDesc::Ptyp_arrow(Box::new((Box::new(arg), Box::new(return_type), p.static_arity_1())))),
+                ptyp_desc: Box::new(CoreTypeDesc::Ptyp_arrow(Box::new((Box::new(arg), ret_idx, p.static_arity_1())))),
                 ptyp_loc: loc,
                 ptyp_attributes: Attributes::new(),
             };
@@ -248,8 +252,9 @@ pub fn parse_locally_abstract_type(p: &mut Parser<'_>) -> CoreType {
     p.expect(Token::Dot);
     let body = parse_typ_expr(p);
     let loc = p.mk_loc_to_end_of(&start_pos, body.ptyp_loc);
+    let body_idx = p.arena_mut().push_core_type(body);
     CoreType {
-        ptyp_desc: Box::new(CoreTypeDesc::Ptyp_poly(Box::new((vars, Box::new(body))))),
+        ptyp_desc: Box::new(CoreTypeDesc::Ptyp_poly(Box::new((vars, body_idx)))),
         ptyp_loc: loc,
         ptyp_attributes: Attributes::new(),
     }
@@ -294,8 +299,9 @@ fn parse_type_alias(p: &mut Parser<'_>, typ: CoreType) -> CoreType {
         let typ_start_idx = p.loc_start_idx(typ.ptyp_loc);
         let end_pos_idx = p.prev_end_pos_idx();
         let loc = p.mk_loc_idx(typ_start_idx, end_pos_idx);
+        let typ_idx = p.arena_mut().push_core_type(typ);
         return CoreType {
-            ptyp_desc: Box::new(CoreTypeDesc::Ptyp_alias(Box::new((Box::new(typ), var_name)))),
+            ptyp_desc: Box::new(CoreTypeDesc::Ptyp_alias(Box::new((typ_idx, var_name)))),
             ptyp_loc: loc,
             ptyp_attributes: Attributes::new(),
         };
@@ -375,8 +381,9 @@ fn parse_arrow_type_rest(
 
     // LITERAL path: OCaml line 4822 `Typ.arrow ~arity:(Some 1)`
     // Use static arity to match OCaml's CSE sharing behavior
+    let ret_idx = p.arena_mut().push_core_type(return_type);
     CoreType {
-        ptyp_desc: Box::new(CoreTypeDesc::Ptyp_arrow(Box::new((Box::new(arg), Box::new(return_type), p.static_arity_1())))),
+        ptyp_desc: Box::new(CoreTypeDesc::Ptyp_arrow(Box::new((Box::new(arg), ret_idx, p.static_arity_1())))),
         ptyp_loc: loc,
         ptyp_attributes: Attributes::new(),
     }
@@ -425,10 +432,11 @@ fn parse_es6_arrow_type(p: &mut Parser<'_>, attrs: Attributes) -> CoreType {
             typ,
         };
 
+        let ret_idx = p.arena_mut().push_core_type(return_type);
         CoreType {
             ptyp_desc: Box::new(CoreTypeDesc::Ptyp_arrow(Box::new((
                 Box::new(arg),
-                Box::new(return_type),
+                ret_idx,
                 // OCaml uses ~arity:None for parsed type expressions
                 p.push_arity_unknown(),
             )))),
@@ -541,8 +549,9 @@ fn parse_atomic_typ_expr_with_start(
                 p.next();
                 let body = parse_typ_expr(p);
                 let loc = p.mk_loc_idx_to_end_of(start_pos_idx, body.ptyp_loc);
+                let body_idx = p.arena_mut().push_core_type(body);
                 CoreType {
-                    ptyp_desc: Box::new(CoreTypeDesc::Ptyp_poly(Box::new((vars, Box::new(body))))),
+                    ptyp_desc: Box::new(CoreTypeDesc::Ptyp_poly(Box::new((vars, body_idx)))),
                     ptyp_loc: loc,
                     ptyp_attributes: Attributes::new(),
                 }
@@ -1206,10 +1215,11 @@ fn parse_function_type(p: &mut Parser<'_>, start_pos_idx: PosIdx) -> CoreType {
         // Each arrow's location spans from the label (if any) to the end of return
         // OCaml includes the ~ in the location for labeled arguments
         let arrow_loc = p.mk_loc_idx(param_start_idx, end_pos_idx);
+        let acc_idx = p.arena_mut().push_core_type(acc);
         let arrow = CoreType {
             ptyp_desc: Box::new(CoreTypeDesc::Ptyp_arrow(Box::new((
                 Box::new(param),
-                Box::new(acc),
+                acc_idx,
                 // Inner arrows don't have arity annotation
                 unknown_arity,
             )))),
