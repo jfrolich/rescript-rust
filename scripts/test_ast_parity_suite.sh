@@ -159,7 +159,7 @@ fi
 TELLA_DIR="${TELLA_DIR:-$HOME/dev/tella-fusion}"
 if [ -d "$TELLA_DIR" ]; then
     TELLA_FILES=$(find "$TELLA_DIR" \
-        -type d \( -name .git -o -name target -o -name .next -o -name _build \) -prune \
+        -type d \( -name .git -o -name target -o -name .next -o -name _build -o -path "*/lib/bs" -o -path "*/lib/ocaml" \) -prune \
         -o -type f \( -name "*.res" -o -name "*.resi" \) -print 2>/dev/null | sort)
     if [ -n "$PATTERN" ]; then
         TELLA_FILES=$(echo "$TELLA_FILES" | grep -E "$PATTERN" || true)

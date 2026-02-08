@@ -283,12 +283,12 @@ TELLA_DIR="${TELLA_DIR:-$HOME/dev/tella-fusion}"
 if [[ "$SINGLE_FILE_MODE" != true && -d "$TELLA_DIR" ]]; then
     if [[ "$PATTERN_MODE" == true ]]; then
         find "$TELLA_DIR" \
-            -type d \( -name .git -o -name target -o -name .next -o -name _build \) -prune \
+            -type d \( -name .git -o -name target -o -name .next -o -name _build -o -path "*/lib/bs" -o -path "*/lib/ocaml" \) -prune \
             -o -type f \( -name "*.res" -o -name "*.resi" \) -print 2>/dev/null | \
             grep -E "$FILE_ARG" | sort >> "$TEMP_DIR/files.txt" || true
     else
         find "$TELLA_DIR" \
-            -type d \( -name .git -o -name target -o -name .next -o -name _build \) -prune \
+            -type d \( -name .git -o -name target -o -name .next -o -name _build -o -path "*/lib/bs" -o -path "*/lib/ocaml" \) -prune \
             -o -type f \( -name "*.res" -o -name "*.resi" \) -print 2>/dev/null | \
             sort >> "$TEMP_DIR/files.txt"
     fi

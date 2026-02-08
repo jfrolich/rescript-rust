@@ -104,6 +104,21 @@ mod tests {
         corpora
     }
 
+    /// Returns true if a path contains `/lib/bs` or `/lib/ocaml` as directory segments.
+    fn is_tella_duplicate_subtree(path: &Path) -> bool {
+        let mut prev_was_lib = false;
+
+        for component in path.components() {
+            let name = component.as_os_str().to_string_lossy();
+            if prev_was_lib && (name == "bs" || name == "ocaml") {
+                return true;
+            }
+            prev_was_lib = name == "lib";
+        }
+
+        false
+    }
+
     /// Run a bsc binary on a source file, writing output to a temp file.
     /// Returns the elapsed wall-clock time, or None on failure.
     fn run_bsc(bsc_path: &str, source_file: &Path, output_file: &Path) -> Option<Duration> {
@@ -215,6 +230,13 @@ mod tests {
                 // Skip symlinks to avoid duplicate traversal through linked trees.
                 if file_type.is_symlink() {
                     continue;
+                }
+
+                if corpus_name == "tella-fusion" {
+                    let rel = path.strip_prefix(base).unwrap_or(&path);
+                    if is_tella_duplicate_subtree(rel) {
+                        continue;
+                    }
                 }
 
                 if file_type.is_dir() {
