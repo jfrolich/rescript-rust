@@ -2625,7 +2625,7 @@ fn type_application(
     // In ReScript, all applications are total/uncurried, so when the function's type
     // is a type variable, we set the arity to the number of arguments.
     let force_tvar = matches!(&*tctx.type_ctx.get_desc(current_ty), TypeDesc::Tvar(_));
-    let top_arity: Option<i32> = if force_tvar {
+    let mut top_arity: Option<i32> = if force_tvar {
         Some(args.len() as i32)
     } else {
         // Check existing arity from function type
@@ -2674,6 +2674,9 @@ fn type_application(
                     let ctx_label = convert_arg_label_for_ctx(label, tctx.arena);
                     let arrow_ty = ctx.new_arrow(ctx_label, arg_ty, ret_ty, top_arity);
                     unify_expression_types(tctx, loc, current_ty, arrow_ty, None)?;
+                    // OCaml passes ~top_arity:None to recursive calls after the first arrow.
+                    // Only the outermost Tarrow gets the full arity annotation.
+                    top_arity = None;
                     (None, arg_ty, ret_ty)
                 }
             };
@@ -2785,8 +2788,8 @@ fn type_match(
         ExpressionDesc::Texp_match(
             Box::new(typed_scrutinee),
             typed_cases,
-            vec![],         // No exception cases for now
-            Partial::Total, // Assume total for now
+            vec![],
+            Partial::Total, // TODO: implement proper exhaustiveness checking
         ),
         loc.clone(),
         expected_ty,

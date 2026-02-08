@@ -8178,18 +8178,25 @@ fn generate_variant_accessors_and_sigs(
     (structure_items, signature_items)
 }
 
-/// Create an arrow type from a list of arguments and return type
+/// Create an arrow type from a list of arguments and return type.
+/// Matches OCaml's Typ.arrows: only the outermost arrow gets arity = Some(n),
+/// inner arrows get arity = None.
 fn make_arrows(args: Vec<TypeArg>, ret: CoreType, loc: LocIdx, arena: &mut ParseArena) -> CoreType {
     if args.is_empty() {
         return ret;
     }
 
-    // OCaml's Typ.arrows creates arity = Some(list_length)
-    let arity = arena.push_arity(Some(args.len() as i32));
+    // OCaml's Typ.arrows: outermost arrow gets Some(list_length), inner arrows get None
+    let full_arity = arena.push_arity(Some(args.len() as i32));
+    let none_arity = arena.push_arity(None);
 
     // Build right-to-left (fold_right pattern)
+    // The first arg processed (rightmost) gets None, the last (outermost) gets full_arity
     let mut result = ret;
-    for arg in args.into_iter().rev() {
+    let num_args = args.len();
+    for (i, arg) in args.into_iter().rev().enumerate() {
+        // i=0 is the last (rightmost) arg, i=num_args-1 is the first (outermost) arg
+        let arity = if i == num_args - 1 { full_arity } else { none_arity };
         result = CoreType {
             ptyp_desc: CoreTypeDesc::Ptyp_arrow {
                 arg: Box::new(arg),
