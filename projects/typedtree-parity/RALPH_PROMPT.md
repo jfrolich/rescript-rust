@@ -190,7 +190,12 @@ Goal: Achieve byte-identical binary AST output for all 1049 test files.
 
 ## Exit Condition
 
-When all tasks in `RALPH_TODO.md` are checked `[x]`, output exactly:
+Only output completion when typedtree parity is fully done:
+- `timeout 300 ./scripts/test_typedtree_parity.sh --with-locs` reports `Rust bsc: N passed, 0 failed`
+- The same run reports `Parity: N passed, 0 failed` (100% parity)
+- No regressions have been introduced
+
+When those conditions are true, output exactly:
 ```
 RALPH_COMPLETE
 ```

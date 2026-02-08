@@ -107,6 +107,66 @@ build_prompt_input() {
   }
 }
 
+is_control_token_emitted() {
+  local token="$1"
+  if [[ ! -f "$OUTPUT_FILE" ]]; then
+    return 1
+  fi
+
+  grep -Eq "^[[:space:]]*${token}[[:space:]]*$" "$OUTPUT_FILE"
+}
+
+project_requires_typedtree_parity_gate() {
+  [[ "$PROJECT_DIR" == *"typedtree-parity"* ]]
+}
+
+verify_typedtree_full_parity() {
+  local parity_output
+  local clean_output
+  local total
+  local rust_pass
+  local rust_fail
+  local parity_pass
+  local parity_fail
+
+  echo ""
+  echo "🔎 Verifying typedtree parity before accepting RALPH_COMPLETE..."
+
+  if ! parity_output=$(timeout 600 ./scripts/test_typedtree_parity.sh --with-locs 2>&1); then
+    echo "Typedtree parity gate failed to run cleanly; completion denied."
+    echo "$parity_output" | tail -40
+    return 1
+  fi
+
+  clean_output=$(printf '%s\n' "$parity_output" | sed -E $'s/\x1B\\[[0-9;]*[mK]//g')
+  read -r rust_pass rust_fail <<<"$(printf '%s\n' "$clean_output" | sed -nE 's/^Rust bsc:[[:space:]]*([0-9]+) passed,[[:space:]]*([0-9]+) failed$/\1 \2/p' | tail -1)"
+  read -r parity_pass parity_fail <<<"$(printf '%s\n' "$clean_output" | sed -nE 's/^Parity:[[:space:]]*([0-9]+) passed,[[:space:]]*([0-9]+) failed$/\1 \2/p' | tail -1)"
+  if [[ -n "$rust_pass" && -n "$rust_fail" ]]; then
+    total=$((rust_pass + rust_fail))
+  fi
+
+  if [[ -z "$total" || -z "$rust_pass" || -z "$rust_fail" || -z "$parity_pass" || -z "$parity_fail" ]]; then
+    echo "Typedtree parity gate could not parse summary output; completion denied."
+    echo "$clean_output" | tail -40
+    return 1
+  fi
+
+  if [[ $((parity_pass + parity_fail)) -ne "$total" ]]; then
+    echo "Typedtree parity gate found inconsistent totals; completion denied."
+    echo "$clean_output" | tail -40
+    return 1
+  fi
+
+  echo "Typedtree parity summary: Rust ${rust_pass}/${total} (fail ${rust_fail}), Parity ${parity_pass}/${total} (fail ${parity_fail})"
+
+  if [[ "$rust_fail" -eq 0 && "$parity_fail" -eq 0 && "$rust_pass" -eq "$total" && "$parity_pass" -eq "$total" ]]; then
+    return 0
+  fi
+
+  echo "Typedtree parity is below 100%; ignoring RALPH_COMPLETE and continuing."
+  return 1
+}
+
 render_claude_stream_line() {
   local line="$1"
 
@@ -342,7 +402,13 @@ while true; do
   echo "─── End of Iteration $ITERATION ───────────────────────────────────────"
 
   # Check for completion
-  if grep -q "RALPH_COMPLETE" "$OUTPUT_FILE" "$OUTPUT_JSON_FILE"; then
+  if is_control_token_emitted "RALPH_COMPLETE"; then
+    if project_requires_typedtree_parity_gate && ! verify_typedtree_full_parity; then
+      RATE_LIMIT_STREAK=0
+      sleep "$DEFAULT_SLEEP_SECONDS"
+      continue
+    fi
+
     echo ""
     echo "╔══════════════════════════════════════════════════════════════════════╗"
     echo "║  🎉 RALPH_COMPLETE - Finished after $ITERATION iterations!            ║"
@@ -351,7 +417,7 @@ while true; do
   fi
 
   # Check for blocked state
-  if grep -q "RALPH_BLOCKED" "$OUTPUT_FILE" "$OUTPUT_JSON_FILE"; then
+  if is_control_token_emitted "RALPH_BLOCKED"; then
     echo ""
     echo "╔══════════════════════════════════════════════════════════════════════╗"
     echo "║  ⚠️  RALPH_BLOCKED - Needs human intervention                        ║"
