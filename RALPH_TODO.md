@@ -71,17 +71,23 @@ The `-dtyped-sexp` flag outputs the typed tree without locations. The `-dtyped-s
 
 ## Current Status
 
-**Last Updated:** 2026-02-05
+**Last Updated:** 2026-02-07
 
 |  | Status |
 |--|--------|
 | OCaml compiles | 657/657 |
-| Rust compiles | 58/657 (599 fail) |
-| Parity match | 26/58 (44% of compilable) |
+| Rust compiles | 566/657 (91 fail) |
+| Parity match (-dtyped-sexp) | 286/566 (50.5%) |
 
 **Previous milestones completed:**
 - Parser AST structure: 100% parity (sexp-locs 1196/1196)
 - Syntax tests: 506/506 (100%)
+- CMI loading and module resolution (0.2)
+- Pipe-to-tuple distribution in desugar_pipe
+- Path substitution for CMI-loaded modules (Tconstr rewriting)
+- Module alias path rewriting (Belt.Array -> Pdot, not Pident)
+- Qualified module paths for opened sub-modules (md_path on ModuleDeclaration)
+- Fix _include_ path for non-ident include statements
 
 ---
 
@@ -149,16 +155,46 @@ The type checker takes a Parsetree and produces a Typedtree. The Typedtree is th
 
 ---
 
-## Key Bottleneck: Rust Compilation Failures
+## Key Areas for Improvement
 
-599 of 657 files fail to compile with the Rust type checker. The biggest gains come from fixing compilation failures, not sexp differences.
+### Rust Compilation Failures (91 files)
 
-### Root Cause Profiling (Task 0.1)
+91 files fail to compile with the Rust type checker. Top error patterns:
 
-The 561 compilation failures were profiled. Common categories:
-- Missing CMI loading (module resolution)
-- Missing type constructors / variant resolution
-- Unimplemented type checker features
+| Error | Count | Description |
+|-------|-------|-------------|
+| UndefinedMethod | 24 | Module field access treated as method call |
+| ExprTypeClash (FunctionCall) | 20 | Function call type mismatches |
+| ExprTypeClash (general) | 19 | General type mismatches |
+| PatternTypeClash | 6 | Pattern matching type issues |
+| Stack overflow | 4 | Infinite recursion in type checker |
+| Parse errors | 4 | Unsupported syntax |
+| NotAVariantType | 2 | Variant type resolution |
+
+### Parity Diff Categories (280 files with diffs)
+
+Of the 566 files that compile, 286 match and 280 differ. Diff categories (overlap):
+
+| Category | Files | Description |
+|----------|-------|-------------|
+| Module path | 229 | Pident vs Pdot differences |
+| Cycle detection | 121 | OCaml prints `<cycle>`, Rust expands shared types |
+| Arity (Some N vs None) | 66 | Arrow type arity annotations missing |
+| Tvariant | 43 | Polymorphic variant type inference |
+| Belt alias | 21 | Belt module alias name resolution |
+| Stdlib prefix | 23 | Missing Pdot(Pident("Stdlib"), X) |
+| Texp_open | 13 | Missing local open expression nodes |
+| Pervasives prefix | 14 | Missing Pdot(Pident("Pervasives"), X) |
+| Partial/Total | 11 | Pattern exhaustiveness |
+| External encoding | 3 | External attribute string encoding |
+
+### Root Causes (Highest Impact)
+
+1. **Cycle detection in sexp output** (121 files): OCaml's `instance()` creates shared type nodes; the sexp printer detects these and prints `<cycle>`. Rust creates fresh nodes so sharing patterns differ. Fixing this requires either implementing OCaml-style type sharing in `instance()` or a two-pass sexp printer.
+
+2. **Arrow type arity** (66 files): When creating arrow types during type checking, arity annotations (`Some(N)`) are not always propagated. Fix: ensure arity is set on all Tarrow types created during type inference.
+
+3. **Module path qualification** (229 files): Various issues with module path resolution including local module paths, Belt alias resolution, and missing type path rewriting in various contexts.
 
 ### CMI File Loading (Task 0.2) ✅
 
