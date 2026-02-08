@@ -740,6 +740,9 @@ pub fn initial_env(ctx: &TypeContext<'_>) -> Env {
         add_exception(&mut env, "Undefined_recursive_module", vec![
             ctx.new_generic_type(crate::types::type_expr::TypeDesc::Ttuple(vec![string_ty_for_exn, int_ty_for_exn, int_ty_for_exn]))
         ], exn_ty);
+        // JsExn takes one argument of type `unknown`
+        let unknown_ty_for_exn = ctx.new_generic_constr(Path::pident(Ident::create_persistent("unknown")), vec![]);
+        add_exception(&mut env, "JsExn", vec![unknown_ty_for_exn], exn_ty);
     }
 
     // option('a) = None | Some('a)

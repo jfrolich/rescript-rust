@@ -275,7 +275,7 @@ fn translate_module_type_to_decl<'a>(
                     crate::parser::ast::SignatureItemDesc::Psig_type(_rec, decls) => {
                         for decl in decls {
                             let type_name = arena.get_string(decl.ptype_name.txt);
-                            let type_id = Ident::create_persistent(type_name);
+                            let type_id = Ident::create_local(type_name);
                             // Create a minimal type declaration
                             let type_decl = crate::types::TypeDeclaration {
                                 type_params: vec![],
@@ -1161,7 +1161,7 @@ fn type_structure_item<'a>(
             for decl in decls {
                 let type_name = decl.ptype_name.txt;
                 let type_name_str = arena.get_string(type_name);
-                let type_id = Ident::create_persistent(type_name_str);
+                let type_id = Ident::create_local(type_name_str);
 
                 // Create the type path for self-reference
                 let type_path = Path::pident(type_id.clone());
@@ -2566,7 +2566,7 @@ fn transl_sig_type_declarations<'a>(
     for decl in decls {
         let type_name = decl.ptype_name.txt;
         let type_name_str = arena.get_string(type_name);
-        let type_id = Ident::create_persistent(type_name_str);
+        let type_id = Ident::create_local(type_name_str);
         let type_path = Path::pident(type_id.clone());
 
         // Convert type parameters
