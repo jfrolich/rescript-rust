@@ -267,7 +267,8 @@ fn has_no_export_config(structure: &[StructureItem], arena: &ParseArena) -> bool
                     // Found @@config(...) - check if payload contains no_export
                     if let crate::parser::ast::Payload::PStr(items) = &attr.1 {
                         if let Some(eval_item) = items.first() {
-                            if let StructureItemDesc::Pstr_eval(eval_inner) = &*eval_item.pstr_desc { let (ref expr, _) = **eval_inner;
+                            if let StructureItemDesc::Pstr_eval(eval_inner) = &*eval_item.pstr_desc { let (ref expr_idx, _) = **eval_inner;
+                                let expr = arena.get_expr(*expr_idx);
                                 match &*expr.pexp_desc {
                                     // @@config({no_export: ...}) - record form
                                     ExpressionDesc::Pexp_record(inner) => {
@@ -278,7 +279,7 @@ fn has_no_export_config(structure: &[StructureItem], arena: &ParseArena) -> bool
                                                 if arena.get_string(*s) == "no_export" {
                                                     // Check value: if it's an ident with same name,
                                                     // or `true`, it's true. Only explicit `false` is false.
-                                                    if is_false_literal(&field.expr, arena) {
+                                                    if is_false_literal(field.expr, arena) {
                                                         return false;
                                                     }
                                                     return true;
@@ -315,10 +316,11 @@ fn has_no_export_config(structure: &[StructureItem], arena: &ParseArena) -> bool
 }
 
 /// Check if an expression is the literal `false`.
-fn is_false_literal(expr: &crate::parser::ast::Expression, arena: &ParseArena) -> bool {
+fn is_false_literal(expr_idx: crate::parse_arena::ExprIdx, arena: &ParseArena) -> bool {
     use crate::parser::ast::ExpressionDesc;
     use crate::parser::longident::Longident;
 
+    let expr = arena.get_expr(expr_idx);
     if let ExpressionDesc::Pexp_construct(lid_loc, None) = &*expr.pexp_desc {
         let lid = arena.get_longident(lid_loc.txt);
         if let Longident::Lident(s) = lid {
@@ -360,8 +362,9 @@ fn wrap_no_export(arena: &mut ParseArena, structure: Vec<StructureItem>) -> Vec<
         pmod_attributes: Attributes::new(),
     };
 
+    let constrained_mod_idx = arena.push_mod_expr(constrained_mod);
     let include_decl = IncludeDeclaration {
-        pincl_mod: constrained_mod,
+        pincl_mod: constrained_mod_idx,
         pincl_loc: loc,
         pincl_attributes: Attributes::new(),
     };

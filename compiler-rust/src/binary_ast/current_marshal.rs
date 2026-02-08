@@ -54,7 +54,8 @@ fn is_pipe_application(expr: &Expression, w: &MarshalWriter) -> bool {
     }
     let funct_expr = arena.get_expr(*funct);
     let funct_loc = arena.get_location(funct_expr.pexp_loc);
-    let arg_loc = arena.get_location(args[0].1.pexp_loc);
+    let arg_expr = arena.get_expr(args[0].1);
+    let arg_loc = arena.get_location(arg_expr.pexp_loc);
     let funct_start = arena.get_position(funct_loc.loc_start).cnum;
     let arg_start = arena.get_position(arg_loc.loc_start).cnum;
     if funct_start <= arg_start {
@@ -146,7 +147,8 @@ fn is_raw_expansion_expr(expr: &Expression, w: &MarshalWriter) -> bool {
         return false;
     }
 
-    let ModuleExprDesc::Pmod_structure(items) = &*mod_expr.pmod_desc else {
+    let mod_expr_ref = arena.get_mod_expr(*mod_expr);
+    let ModuleExprDesc::Pmod_structure(items) = &*mod_expr_ref.pmod_desc else {
         return false;
     };
     if items.len() != 1 {
@@ -209,7 +211,8 @@ fn is_external_ext_expr(expr: &Expression, w: &MarshalWriter) -> bool {
         return false;
     }
 
-    let ExpressionDesc::Pexp_ifthenelse(ite_inner) = &*outer_args[0].1.pexp_desc else {
+    let outer_arg_expr = arena.get_expr(outer_args[0].1);
+    let ExpressionDesc::Pexp_ifthenelse(ite_inner) = &*outer_arg_expr.pexp_desc else {
         return false;
     };
     let (ref cond, ref then_expr, ref opt_else) = **ite_inner;
@@ -248,7 +251,8 @@ fn is_external_ext_expr(expr: &Expression, w: &MarshalWriter) -> bool {
         return false;
     }
 
-    let ExpressionDesc::Pexp_apply(typeof_inner) = &*eq_args[0].1.pexp_desc else {
+    let eq_arg0_expr = arena.get_expr(eq_args[0].1);
+    let ExpressionDesc::Pexp_apply(typeof_inner) = &*eq_arg0_expr.pexp_desc else {
         return false;
     };
     let PexpApply { funct: ref typeof_funct, args: ref typeof_args, .. } = **typeof_inner;
@@ -262,12 +266,14 @@ fn is_external_ext_expr(expr: &Expression, w: &MarshalWriter) -> bool {
     ) {
         return false;
     }
-    if !is_external_raw_expansion_expr(&typeof_args[0].1, w) {
+    let typeof_arg_expr = arena.get_expr(typeof_args[0].1);
+    if !is_external_raw_expansion_expr(typeof_arg_expr, w) {
         return false;
     }
 
+    let eq_arg1_expr = arena.get_expr(eq_args[1].1);
     matches!(
-        &*eq_args[1].1.pexp_desc,
+        &*eq_arg1_expr.pexp_desc,
         ExpressionDesc::Pexp_constant(c) if matches!(&**c, Constant::String(s, None) if s == "undefined")
     )
 }
@@ -288,8 +294,9 @@ fn is_external_raw_expansion_expr(expr: &Expression, w: &MarshalWriter) -> bool 
     if args.len() != 1 || !matches!(args[0].0, ArgLabel::Nolabel) {
         return false;
     }
+    let arg_expr = w.get_arena().get_expr(args[0].1);
     matches!(
-        &*args[0].1.pexp_desc,
+        &*arg_expr.pexp_desc,
         ExpressionDesc::Pexp_constant(c) if matches!(&**c, Constant::String(_, Some(delim)) if delim.is_empty())
     )
 }
@@ -1225,7 +1232,7 @@ impl Marshal for Expression {
             has_braces_attr(&self.pexp_attributes, w) || has_ternary_attr(&self.pexp_attributes, w);
         let rewritten_await_letmodule = matches!(
             &*self.pexp_desc,
-            ExpressionDesc::Pexp_letmodule(inner) if has_await_attr(&(**inner).1.pmod_attributes, w)
+            ExpressionDesc::Pexp_letmodule(inner) if has_await_attr(&w.get_arena().get_mod_expr((**inner).1).pmod_attributes, w)
         );
         let rewritten_expr = w.get_arena().is_rewritten_expr_loc(self.pexp_loc);
         let share_singleton_attr_tuple = share_attrs;
