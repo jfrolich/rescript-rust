@@ -249,6 +249,61 @@ fn find_packed_module_expr(expr: &crate::parser::ast::Expression) -> Option<&Par
     }
 }
 
+/// Build a typed module-type hint from a parsed module expression when the module
+/// expression is (or wraps) an identifier.
+fn module_type_hint_from_parsed_module_expr<'a>(
+    tctx: &TypeCheckContext<'a>,
+    arena: &'a ParseArena,
+    mod_expr: &ParsedModuleExpr,
+) -> Option<ModuleType> {
+    match &mod_expr.pmod_desc {
+        ParsedModuleExprDesc::Pmod_ident(lid) => {
+            let longident = tctx.resolve_lid(lid.txt);
+            let path = path_from_longident(longident, |idx| arena.get_string(idx));
+            Some(ModuleType {
+                mty_desc: crate::types::typedtree::ModuleTypeDesc::Tmty_ident(path, lid.clone()),
+                mty_loc: mod_expr.pmod_loc,
+                mty_attributes: mod_expr.pmod_attributes.clone(),
+            })
+        }
+        ParsedModuleExprDesc::Pmod_constraint(inner, _) => {
+            module_type_hint_from_parsed_module_expr(tctx, arena, inner)
+        }
+        _ => None,
+    }
+}
+
+/// Find an embedded packed typed module expression inside a typed expression.
+/// This mirrors `find_packed_module_expr` for parser expressions and is used when
+/// recovering semantic module signatures from `Tmod_unpack`.
+fn find_packed_typed_module_expr(expr: &Expression) -> Option<&ModuleExpr> {
+    use crate::types::typedtree::ExpressionDesc;
+
+    match &expr.exp_desc {
+        ExpressionDesc::Texp_pack(mod_expr) => Some(mod_expr),
+        ExpressionDesc::Texp_apply { funct, args, .. } => {
+            find_packed_typed_module_expr(funct).or_else(|| {
+                args.iter().find_map(|arg| find_packed_typed_module_expr(&arg.expression))
+            })
+        }
+        ExpressionDesc::Texp_let(_, bindings, body) => {
+            bindings
+                .iter()
+                .find_map(|vb| find_packed_typed_module_expr(&vb.vb_expr))
+                .or_else(|| find_packed_typed_module_expr(body))
+        }
+        ExpressionDesc::Texp_sequence(lhs, rhs) => {
+            find_packed_typed_module_expr(lhs).or_else(|| find_packed_typed_module_expr(rhs))
+        }
+        ExpressionDesc::Texp_ifthenelse(cond, then_, else_) => {
+            find_packed_typed_module_expr(cond)
+                .or_else(|| find_packed_typed_module_expr(then_))
+                .or_else(|| else_.as_deref().and_then(find_packed_typed_module_expr))
+        }
+        _ => None,
+    }
+}
+
 /// Extract semantic module type information from an unpack payload expression.
 fn lookup_module_type_from_unpack_expr<'a>(
     tctx: &mut TypeCheckContext<'a>,
@@ -427,7 +482,27 @@ fn extract_module_type_from_mod_expr(mod_expr: &ModuleExpr) -> Option<crate::typ
     use crate::types::decl::SignatureItem as SigItem;
     use crate::types::decl::ValueDescription;
 
+    fn decl_module_type_from_typed_module_type(mty: &ModuleType) -> Option<crate::types::decl::ModuleType> {
+        use crate::types::decl::AliasPresence;
+        use crate::types::typedtree::ModuleTypeDesc;
+        match &mty.mty_desc {
+            ModuleTypeDesc::Tmty_ident(path, _) => Some(DeclMty::MtyIdent(path.clone())),
+            ModuleTypeDesc::Tmty_alias(path, _) => {
+                Some(DeclMty::MtyAlias(AliasPresence::MtaAbsent, path.clone()))
+            }
+            _ => None,
+        }
+    }
+
     match &mod_expr.mod_desc {
+        ModuleExprDesc::Tmod_ident(path, _lid) => Some(DeclMty::MtyIdent(path.clone())),
+        ModuleExprDesc::Tmod_unpack(expr, mty) => {
+            if let Some(decl_mty) = decl_module_type_from_typed_module_type(mty) {
+                return Some(decl_mty);
+            }
+            let packed_mod = find_packed_typed_module_expr(expr)?;
+            extract_module_type_from_mod_expr(packed_mod)
+        }
         ModuleExprDesc::Tmod_structure(structure) => {
             let mut sig_items = Vec::new();
             for item in &structure.str_items {
@@ -751,11 +826,14 @@ pub fn type_module_expr<'a>(
         ParsedModuleExprDesc::Pmod_unpack(expr) => {
             // Unpack: unpack(E)
             let typed_expr = type_expression(tctx, env, expr)?;
+            let unpack_mty = find_packed_module_expr(expr)
+                .and_then(|packed| module_type_hint_from_parsed_module_expr(tctx, arena, packed))
+                .unwrap_or_else(ModuleType::placeholder);
 
             Ok(ModuleExpr {
-                mod_desc: ModuleExprDesc::Tmod_unpack(typed_expr, ModuleType::placeholder()),
+                mod_desc: ModuleExprDesc::Tmod_unpack(typed_expr, unpack_mty.clone()),
                 mod_loc: loc,
-                mod_type: ModuleType::placeholder(),
+                mod_type: unpack_mty,
                 mod_env: EnvRef(0),
                 mod_attributes: mod_expr.pmod_attributes.clone(),
             })
@@ -2278,11 +2356,28 @@ fn type_structure_item<'a>(
                 let mod_name_str = arena.get_string(mb.pmb_name.txt);
 
                 // Extract real module type and add to returned environment.
-                // Fall back to constraint type from rec_env if extraction fails.
-                let mod_type = extract_module_type_from_mod_expr(&typed_mod)
-                    .or_else(|| {
-                        rec_env.find_module(mod_name_str).ok().map(|md| md.md_type.clone())
-                    })
+                // Fall back to the declared recmodule signature when extraction fails,
+                // or when the body is a self-identifier alias (`module rec M = M`) so we
+                // don't lose the explicit signature.
+                let fallback_mod_type = rec_env
+                    .find_module(mod_name_str)
+                    .ok()
+                    .map(|md| md.md_type.clone());
+                let extracted_mod_type = extract_module_type_from_mod_expr(&typed_mod);
+                let mod_type = match extracted_mod_type {
+                    Some(crate::types::decl::ModuleType::MtyIdent(Path::Pident(id)))
+                        if id.name() == mod_name_str =>
+                    {
+                        fallback_mod_type.clone()
+                    }
+                    Some(crate::types::decl::ModuleType::MtyAlias(_, Path::Pident(id)))
+                        if id.name() == mod_name_str =>
+                    {
+                        fallback_mod_type.clone()
+                    }
+                    Some(mty) => Some(mty),
+                    None => fallback_mod_type.clone(),
+                }
                     .unwrap_or(crate::types::decl::ModuleType::MtySignature(vec![]));
                 new_env.add_module(mod_id.clone(), crate::types::decl::ModuleDeclaration {
                     md_type: mod_type,

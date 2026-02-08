@@ -4472,7 +4472,7 @@ impl Env {
                 let mod_name = arena.get_string(*mod_idx);
                 // First try local environment
                 if let Ok(md) = self.find_module(mod_name) {
-                    let result = Self::resolve_module_type(&md.md_type, pers_env, ctx);
+                    let result = self.resolve_module_type(&md.md_type, pers_env, ctx);
                     if let Some((sig, resolved_name)) = result {
                         // Use md_path if available (e.g., Pdot(Pident("Stdlib"), "Console")
                         // for Console from opened Stdlib), otherwise fall back to Pident.
@@ -4512,7 +4512,7 @@ impl Env {
                         if let crate::types::decl::SignatureItem::SigModule(id, sub_md, _) = sig_item {
                             if id.name() == submod_name {
                                 let sub_path = Path::pdot(parent_path, submod_name.to_string());
-                                let result = Self::resolve_module_type(&sub_md.md_type, pers_env, ctx);
+                                let result = self.resolve_module_type(&sub_md.md_type, pers_env, ctx);
                                 if let Some((sig, resolved_name)) = result {
                                     // If an alias was followed, rewrite type paths from the
                                     // resolved module name to the access path.
@@ -4540,29 +4540,98 @@ impl Env {
     /// Returns (signature, Option<resolved_module_name>) where resolved_module_name is Some
     /// when an alias was followed (so the caller can rewrite paths).
     fn resolve_module_type<'b>(
+        &self,
         mty: &crate::types::decl::ModuleType,
         pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
         ctx: &'b crate::types::context::TypeContext<'b>,
     ) -> Option<(crate::types::decl::Signature, Option<String>)> {
-        match mty {
-            crate::types::decl::ModuleType::MtySignature(sig) => Some((sig.clone(), None)),
-            crate::types::decl::ModuleType::MtyAlias(_, path) |
-            crate::types::decl::ModuleType::MtyIdent(path) => {
-                // Follow the alias: extract the module name from the path
-                let mod_name = match path {
-                    Path::Pident(id) => id.name().to_string(),
-                    Path::Pdot(_, name, _) => name.clone(),
-                    _ => return None,
-                };
-                if let Some(pers) = pers_env.as_mut() {
-                    if let Some(ps) = pers.find_pers_struct(&mod_name, ctx) {
-                        return Some((ps.ps_sig.clone(), Some(mod_name)));
-                    }
+        use std::collections::HashSet;
+
+        fn resolve_module_type_inner<'b>(
+            env: &Env,
+            mty: &crate::types::decl::ModuleType,
+            pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
+            ctx: &'b crate::types::context::TypeContext<'b>,
+            visiting: &mut HashSet<Path>,
+        ) -> Option<(crate::types::decl::Signature, Option<String>)> {
+            match mty {
+                crate::types::decl::ModuleType::MtySignature(sig) => Some((sig.clone(), None)),
+                crate::types::decl::ModuleType::MtyAlias(_, path)
+                | crate::types::decl::ModuleType::MtyIdent(path) => {
+                    resolve_path(env, path, pers_env, ctx, visiting)
                 }
-                None
+                _ => None,
             }
-            _ => None,
         }
+
+        fn resolve_path<'b>(
+            env: &Env,
+            path: &Path,
+            pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
+            ctx: &'b crate::types::context::TypeContext<'b>,
+            visiting: &mut HashSet<Path>,
+        ) -> Option<(crate::types::decl::Signature, Option<String>)> {
+            use crate::types::decl::SignatureItem;
+            if !visiting.insert(path.clone()) {
+                return None;
+            }
+
+            match path {
+                Path::Pident(id) => {
+                    let mod_name = id.name();
+                    if let Ok(md) = env.find_module(mod_name) {
+                        let result =
+                            resolve_module_type_inner(env, &md.md_type, pers_env, ctx, visiting);
+                        visiting.remove(path);
+                        return result;
+                    }
+                    if let Some(pers) = pers_env.as_mut() {
+                        if let Some(ps) = pers.find_pers_struct(mod_name, ctx) {
+                            let result = Some((ps.ps_sig.clone(), Some(mod_name.to_string())));
+                            visiting.remove(path);
+                            return result;
+                        }
+                    }
+                    visiting.remove(path);
+                    None
+                }
+                Path::Pdot(parent, submod_name, _) => {
+                    let (parent_sig, _resolved_name) =
+                        match resolve_path(env, parent, pers_env, ctx, visiting) {
+                            Some(x) => x,
+                            None => {
+                                visiting.remove(path);
+                                return None;
+                            }
+                        };
+                    for sig_item in &parent_sig {
+                        if let SignatureItem::SigModule(id, sub_md, _) = sig_item {
+                            if id.name() == submod_name.as_str() {
+                                let result = resolve_module_type_inner(
+                                    env,
+                                    &sub_md.md_type,
+                                    pers_env,
+                                    ctx,
+                                    visiting,
+                                );
+                                visiting.remove(path);
+                                return result;
+                            }
+                        }
+                    }
+                    visiting.remove(path);
+                    None
+                }
+                Path::Papply(_, _) => {
+                    visiting.remove(path);
+                    None
+                }
+            }
+        }
+
+        // Follow aliases through both local and persistent modules, while avoiding cycles.
+        let mut visiting = HashSet::new();
+        resolve_module_type_inner(self, mty, pers_env, ctx, &mut visiting)
     }
 }
 
