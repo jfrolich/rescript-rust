@@ -76,10 +76,10 @@ The `-dtyped-sexp` flag outputs the typed tree without locations. The `-dtyped-s
 |  | Status |
 |--|--------|
 | OCaml compiles | 657/657 |
-| Rust compiles | 552/657 (105 fail) |
-| Parity match (-dtyped-sexp-locs) | 292/552 (52.9%) |
+| Rust compiles | 598/657 (59 fail) |
+| Parity match (-dtyped-sexp-locs) | 303/598 (50.7%) |
 
-**Task Progress:** 6/6 complete
+**Task Progress:** 7/7 complete
 
 **Task Checklist:**
 - [x] Fix qualified constructor typing + trailing optional-arg consumption in `type_application` so dict-pattern matches compile instead of failing with `PatternTypeClash`.
@@ -88,6 +88,7 @@ The `-dtyped-sexp` flag outputs the typed tree without locations. The `-dtyped-s
 - [x] Port OCaml's variant spread pattern rewrite in `type_pattern` (`Ppat_type` expansion + alias type override) so `...a as a` binds the spread source type (Rust compile failures: 63 -> 61).
 - [x] Resolve `Mty_ident` module types through modtype expansion (matching OCaml `Env.scrape_alias` order) before module-path fallback, so opened submodules constrained by modtypes expose their members (`inner_call.res`, Rust compile failures: 61 -> 60).
 - [x] Port OCaml external FFI arg-spec behavior for erased `@as(...) _` parameters (including trailing `Extern_unit` insertion) and keep primitive externals untouched during extension-only rewriting so `pval_prim` encodes constants correctly; also emit typedtree sexp with Latin-1 byte output for primitive blobs (`AsInUncurriedExternals.res` parity).
+- [x] Port OCaml first-class module unpack typing in patterns: translate `Ptyp_package` to `Tpackage`, type `Ppat_unpack` with `Tpat_unpack` extras, allow module unpack patterns in `let` and function parameters, and register package-backed module bindings in env (deterministic sequential compile failures: 61 -> 59, `UndefinedMethod`: 20 -> 16).
 
 **Previous milestones completed:**
 - Parser AST structure: 100% parity (sexp-locs 1196/1196)
@@ -175,21 +176,21 @@ The type checker takes a Parsetree and produces a Typedtree. The Typedtree is th
 
 ## Key Areas for Improvement
 
-### Rust Compilation Failures (60 files)
+### Rust Compilation Failures (59 files)
 
-60 files fail to compile with the Rust type checker. Top error patterns:
+59 files fail to compile with the Rust type checker. Top error patterns:
 
 | Error | Count | Description |
 |-------|-------|-------------|
-| ExprTypeClash | 25 | Function call and general type mismatches |
-| UndefinedMethod | 20 | Module field access still falling back to unresolved value lookup |
+| ExprTypeClash | 28 | Function call and general type mismatches |
+| UndefinedMethod | 16 | Module field access still falling back to unresolved value lookup |
 | NotAVariantType | 6 | Variant type resolution |
 | Parse errors | 5 | Unsupported syntax |
-| Crash/NoOutput/Panic | 4 | Runtime aborts/panics during compilation |
+| Other/Crash | 4 | Runtime aborts/panics and remaining non-bucketed type errors |
 
-### Parity Diff Categories (280 files with diffs)
+### Parity Diff Categories (295 files with diffs)
 
-Of the 597 files that compile, 310 match and 287 differ. Diff categories (overlap):
+Of the 598 files that compile, 303 match and 295 differ. Diff categories (overlap):
 
 | Category | Files | Description |
 |----------|-------|-------------|

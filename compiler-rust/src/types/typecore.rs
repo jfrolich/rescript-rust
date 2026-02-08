@@ -350,6 +350,8 @@ pub struct PatternVariable {
     pub loc: Location,
     /// Whether this is an as-variable.
     pub is_as_variable: bool,
+    /// Whether this variable is bound as an unpacked module.
+    pub is_module: bool,
 }
 
 impl PatternState {
@@ -395,6 +397,7 @@ impl PatternState {
             name: full_name.clone(),
             loc: full_loc.clone(),
             is_as_variable,
+            is_module,
         });
 
         if is_module {
@@ -1019,19 +1022,41 @@ fn transl_type_inner(
             Ok((ctyp, variant_ty))
         }
 
-        CTD::Ptyp_package((_mod_lid, _constraints)) => {
-            // Package type: (module S)
-            // Simplified implementation - full version handles module types
-            let ty = ctx.new_var(None);
+        CTD::Ptyp_package((mod_lid, constraints)) => {
+            // Package type: (module S with type t = T)
+            let longident = tctx.resolve_lid(mod_lid.txt);
+            let pack_path = crate::types::typemod::path_from_longident(
+                longident,
+                |idx| tctx.arena.get_string(idx),
+            );
 
+            let mut typed_fields = Vec::with_capacity(constraints.len());
+            let mut lids = Vec::with_capacity(constraints.len());
+            let mut args = Vec::with_capacity(constraints.len());
+            for (field_lid, field_ty) in constraints {
+                let (typed_field_ty, field_type_ref) = transl_type_inner(tctx, env, field_ty)?;
+                typed_fields.push((field_lid.clone(), typed_field_ty));
+                lids.push(tctx.resolve_lid(field_lid.txt).clone());
+                args.push(field_type_ref);
+            }
+
+            let package_ty = ctx.new_type(TypeDesc::Tpackage {
+                path: pack_path.clone(),
+                lids,
+                args,
+            });
             let ctyp = TypedCoreType {
-                ctyp_desc: TypedCoreTypeDesc::Ttyp_var(None),
-                ctyp_type: ty,
+                ctyp_desc: TypedCoreTypeDesc::Ttyp_package(crate::types::typedtree::PackageType {
+                    pack_path,
+                    pack_txt: mod_lid.clone(),
+                    pack_fields: typed_fields,
+                }),
+                ctyp_type: package_ty,
                 ctyp_env: EnvRef(0),
                 ctyp_loc: loc,
                 ctyp_attributes: styp.ptyp_attributes.clone(),
             };
-            Ok((ctyp, ty))
+            Ok((ctyp, package_ty))
         }
 
         CTD::Ptyp_extension(_) => {
@@ -1457,8 +1482,33 @@ fn type_pattern_inner(
             )
         }
 
+        PD::Ppat_unpack(name) => {
+            // Module unpack pattern: module(M)
+            let id = state.enter_variable(
+                loc,
+                name,
+                expected_ty,
+                false,
+                true,
+                tctx.arena,
+            )?;
+            let pat = Pattern::new(
+                PatternDesc::Tpat_var(id, convert_located_stridx(name, tctx.arena)),
+                loc,
+                expected_ty,
+                EnvRef(0),
+                pat.ppat_attributes.clone(),
+            );
+            let pat_attrs = pat.pat_attributes.clone();
+            Ok(pat.with_pat_extra(
+                crate::types::typedtree::PatExtra::Tpat_unpack,
+                loc,
+                pat_attrs,
+            ))
+        }
+
         // Remaining patterns - return wildcard for now
-        PD::Ppat_type(_) | PD::Ppat_unpack(_) | PD::Ppat_extension(_) => {
+        PD::Ppat_type(_) | PD::Ppat_extension(_) => {
             // These patterns are less common, return wildcard for now
             Ok(Pattern::new(
                 PatternDesc::Tpat_any,
@@ -1851,7 +1901,7 @@ fn type_pattern_constraint(
             let any_pat = Pattern {
                 pat_desc: crate::types::typedtree::PatternDesc::Tpat_any,
                 pat_loc: typed_inner.pat_loc.clone(),
-                pat_extra: vec![],
+                pat_extra: typed_inner.pat_extra.clone(),
                 pat_type: ctype_ty,
                 pat_env: typed_inner.pat_env,
                 pat_attributes: vec![],
@@ -3120,6 +3170,7 @@ fn type_function(
 
     // Type check parameter pattern
     let mut state = PatternState::new();
+    state.reset(true);
     let typed_param = type_pattern(tctx, env, param, param_ty, PatternMode::Normal, &mut state)?;
 
     // Type check default expression if present
@@ -3138,14 +3189,27 @@ fn type_function(
     // Extend environment with parameter binding
     let mut body_env = env.clone();
     for pv in &state.pattern_variables {
-        let desc = ValueDescription {
-            val_type: pv.ty,
-            val_kind: crate::types::ValueKind::ValReg,
-            val_loc: pv.loc.clone(),
-            val_attributes: vec![],
-            val_path: None,
-        };
-        body_env.add_value(pv.id.clone(), desc);
+        if pv.is_module {
+            let module_type = module_type_from_package_binding(ctx, &body_env, pv.ty);
+            body_env.add_module(
+                pv.id.clone(),
+                crate::types::decl::ModuleDeclaration {
+                    md_type: module_type,
+                    md_attributes: vec![],
+                    md_loc: crate::location::Location::none(),
+                    md_path: None,
+                },
+            );
+        } else {
+            let desc = ValueDescription {
+                val_type: pv.ty,
+                val_kind: crate::types::ValueKind::ValReg,
+                val_loc: pv.loc.clone(),
+                val_attributes: vec![],
+                val_path: None,
+            };
+            body_env.add_value(pv.id.clone(), desc);
+        }
     }
 
     // Type check body
@@ -4329,6 +4393,18 @@ fn type_jsx_element(
     ))
 }
 
+fn module_type_from_package_binding<'a>(
+    ctx: &'a TypeContext<'a>,
+    env: &Env,
+    ty: TypeExprRef,
+) -> crate::types::decl::ModuleType {
+    let expanded = crate::types::ctype::expand_head(ctx, env, ty);
+    match &*ctx.get_desc(ctx.repr(expanded)) {
+        TypeDesc::Tpackage { path, .. } => crate::types::decl::ModuleType::MtyIdent(path.clone()),
+        _ => crate::types::decl::ModuleType::MtySignature(vec![]),
+    }
+}
+
 /// Type check let bindings.
 fn type_let_bindings(
     tctx: &mut TypeCheckContext<'_>,
@@ -4371,7 +4447,7 @@ fn type_let_bindings(
     let mut all_pattern_vars: Vec<Vec<PatternVariable>> = Vec::new();
 
     for (binding, ty) in bindings.iter().zip(binding_types.iter()) {
-        state.reset(false);
+        state.reset(true);
 
         // Type check pattern
         let typed_pat = type_pattern(
@@ -4409,14 +4485,29 @@ fn type_let_bindings(
     let mut new_env = env.clone();
     for pvars in all_pattern_vars.iter() {
         for pv in pvars {
-            let desc = ValueDescription {
-                val_type: pv.ty,
-                val_kind: crate::types::ValueKind::ValReg,
-                val_loc: crate::location::Location::none(),
-                val_attributes: vec![],
-                val_path: None,
-            };
-            new_env.add_value(pv.id.clone(), desc);
+            if pv.is_module {
+                // Module unpack bindings carry first-class module package types.
+                // Expose them as modules in the environment for body lookup.
+                let module_type = module_type_from_package_binding(ctx, &new_env, pv.ty);
+                new_env.add_module(
+                    pv.id.clone(),
+                    crate::types::decl::ModuleDeclaration {
+                        md_type: module_type,
+                        md_attributes: vec![],
+                        md_loc: crate::location::Location::none(),
+                        md_path: None,
+                    },
+                );
+            } else {
+                let desc = ValueDescription {
+                    val_type: pv.ty,
+                    val_kind: crate::types::ValueKind::ValReg,
+                    val_loc: crate::location::Location::none(),
+                    val_attributes: vec![],
+                    val_path: None,
+                };
+                new_env.add_value(pv.id.clone(), desc);
+            }
         }
     }
 

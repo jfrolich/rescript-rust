@@ -361,7 +361,10 @@ fn translate_module_type_to_decl<'a>(
     mty: &crate::parser::ast::ModuleType,
 ) -> TypeModResult<crate::types::decl::ModuleType> {
     use crate::parser::ast::ModuleTypeDesc as PMtyDesc;
-    use crate::types::decl::{ModuleType as DeclMty, SignatureItem as SigItem, ValueDescription};
+    use crate::types::decl::{
+        AliasPresence, ModuleType as DeclMty, SignatureItem as SigItem, ValueDescription,
+    };
+    use crate::types::typemod::path_from_longident;
 
     match &mty.pmty_desc {
         PMtyDesc::Pmty_signature(sig_items) => {
@@ -466,7 +469,33 @@ fn translate_module_type_to_decl<'a>(
                 }
             }
         }
-        _ => Ok(DeclMty::MtySignature(vec![])),
+        PMtyDesc::Pmty_functor(name, param_type, result_type) => {
+            let param_id = Ident::create_local(arena.get_string(name.txt));
+            let param_decl = match param_type {
+                Some(pt) => Some(Box::new(translate_module_type_to_decl(tctx, env, arena, pt)?)),
+                None => None,
+            };
+            let result_decl = translate_module_type_to_decl(tctx, env, arena, result_type)?;
+            Ok(DeclMty::MtyFunctor {
+                param: param_id,
+                param_type: param_decl,
+                result: Box::new(result_decl),
+            })
+        }
+        PMtyDesc::Pmty_with(body, _constraints) => {
+            // Keep base module type information; with-constraints are not yet modeled.
+            translate_module_type_to_decl(tctx, env, arena, body)
+        }
+        PMtyDesc::Pmty_typeof(me) => {
+            lookup_module_type_from_parsed_module_expr(tctx, env, arena, me)
+                .ok_or(TypeModError::InvalidModuleExpr(arena.to_location(mty.pmty_loc)))
+        }
+        PMtyDesc::Pmty_alias(lid) => {
+            let longident = tctx.resolve_lid(lid.txt);
+            let path = path_from_longident(longident, |idx| arena.get_string(idx));
+            Ok(DeclMty::MtyAlias(AliasPresence::MtaAbsent, path))
+        }
+        PMtyDesc::Pmty_extension(_) => Ok(DeclMty::MtySignature(vec![])),
     }
 }
 
@@ -636,8 +665,18 @@ fn extract_module_type_from_mod_expr(mod_expr: &ModuleExpr) -> Option<crate::typ
             }
             Some(DeclMty::MtySignature(sig_items))
         }
-        ModuleExprDesc::Tmod_constraint(inner, _, _, _) => {
-            extract_module_type_from_mod_expr(inner)
+        ModuleExprDesc::Tmod_constraint(inner, constrained_mty, modtype_constraint, _) => {
+            // OCaml keeps the constrained module type as the semantic type
+            // exposed by a constrained module expression.
+            let constrained = match modtype_constraint {
+                crate::types::typedtree::ModuleTypeConstraint::Tmodtype_explicit(mty) => {
+                    decl_module_type_from_typed_module_type(mty)
+                }
+                crate::types::typedtree::ModuleTypeConstraint::Tmodtype_implicit => {
+                    decl_module_type_from_typed_module_type(constrained_mty)
+                }
+            };
+            constrained.or_else(|| extract_module_type_from_mod_expr(inner))
         }
         _ => None,
     }
@@ -812,8 +851,10 @@ pub fn type_module_expr<'a>(
             Ok(ModuleExpr {
                 mod_desc: ModuleExprDesc::Tmod_constraint(
                     Box::new(typed_mod),
-                    ModuleType::placeholder(),
-                    crate::types::typedtree::ModuleTypeConstraint::Tmodtype_explicit(Box::new(typed_mty)),
+                    typed_mty.clone(),
+                    crate::types::typedtree::ModuleTypeConstraint::Tmodtype_explicit(
+                        Box::new(typed_mty),
+                    ),
                     ModuleCoercion::Tcoerce_none,
                 ),
                 mod_loc: loc,
