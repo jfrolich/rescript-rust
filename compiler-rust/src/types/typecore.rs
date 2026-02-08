@@ -4620,23 +4620,31 @@ fn extract_type_path_from_expected<'a>(
     env: &Env,
     ctx: &'a crate::types::context::TypeContext<'a>,
 ) -> Option<Path> {
-    let mut visited = std::collections::HashSet::new();
-    extract_type_path_from_expected_inner(expected_ty, env, ctx, &mut visited)
+    let mut visited_types = std::collections::HashSet::new();
+    let mut visited_paths = std::collections::HashSet::new();
+    extract_type_path_from_expected_inner(expected_ty, env, ctx, &mut visited_types, &mut visited_paths)
 }
 
 fn extract_type_path_from_expected_inner<'a>(
     expected_ty: TypeExprRef,
     env: &Env,
     ctx: &'a crate::types::context::TypeContext<'a>,
-    visited: &mut std::collections::HashSet<usize>,
+    visited_types: &mut std::collections::HashSet<usize>,
+    visited_paths: &mut std::collections::HashSet<Path>,
 ) -> Option<Path> {
     let ty = ctx.repr(expected_ty);
-    if !visited.insert(ty.0) {
-        return None; // Already visited this type — break the cycle
+    if !visited_types.insert(ty.0) {
+        return None; // Already visited this type expression — break the cycle
     }
     let desc = ctx.get_desc(ty);
     match &*desc {
         TypeDesc::Tconstr { path, .. } => {
+            // Track visited paths to detect cycles through type declaration manifests.
+            // Different TypeExprRefs can point to the same path via manifests, so
+            // tracking type expression IDs alone is not sufficient.
+            if !visited_paths.insert(path.clone()) {
+                return None; // Already expanded through this path — break the cycle
+            }
             // Check if this is a concrete (non-abstract) type
             if let Some(decl) = lookup_type_decl_for_path(path, env, ctx) {
                 match &decl.type_kind {
@@ -4644,7 +4652,7 @@ fn extract_type_path_from_expected_inner<'a>(
                         // Abstract type - try to expand through manifest
                         if let Some(manifest) = decl.type_manifest {
                             drop(desc);
-                            return extract_type_path_from_expected_inner(manifest, env, ctx, visited);
+                            return extract_type_path_from_expected_inner(manifest, env, ctx, visited_types, visited_paths);
                         }
                         None
                     }
