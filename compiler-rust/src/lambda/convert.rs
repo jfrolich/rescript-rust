@@ -209,7 +209,7 @@ impl<'a> LambdaConverter<'a> {
     fn convert_constant(&self, cst: &TConstant) -> Constant {
         match cst {
             TConstant::Int(i) => Constant::Int {
-                i: *i,
+                i: *i as i32,
                 comment: None,
             },
             TConstant::Char(c) => Constant::Char(*c),

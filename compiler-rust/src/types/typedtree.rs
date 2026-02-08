@@ -37,8 +37,8 @@ pub type Loc<T> = Located<T>;
 /// Typed constants (internal representation after parsing).
 #[derive(Debug, Clone, PartialEq)]
 pub enum Constant {
-    /// Integer constant.
-    Int(i32),
+    /// Integer constant (matches OCaml's native int, 63-bit on 64-bit systems).
+    Int(i64),
     /// Character constant (Unicode codepoint).
     Char(i32),
     /// String constant with optional delimiter.

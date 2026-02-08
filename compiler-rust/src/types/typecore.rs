@@ -552,6 +552,19 @@ fn parse_int_literal(s: &str) -> Option<i64> {
     if negative { Some(-abs_val) } else { Some(abs_val) }
 }
 
+/// Wrap an i64 value to simulate OCaml's native int (63-bit on 64-bit systems).
+/// OCaml's int wraps around at 2^62, so values outside [-2^62, 2^62-1] are wrapped.
+/// This matches OCaml's int_of_string behavior for large integer literals.
+fn wrap_to_ocaml_int(n: i64) -> i64 {
+    // OCaml's native int on 64-bit is 63 bits: range is [-2^62, 2^62-1]
+    // The wrapping is equivalent to: ((n + 2^62) mod 2^63) - 2^62
+    let half = 1i64 << 62; // 2^62 = 4611686018427387904
+    let modulus = 1i128 << 63; // 2^63 as i128 to avoid overflow
+    let shifted = (n as i128) + (half as i128);
+    let wrapped = shifted.rem_euclid(modulus);
+    (wrapped - half as i128) as i64
+}
+
 /// Convert a parsed constant to a typed constant.
 pub fn convert_constant(cst: &crate::parser::ast::Constant) -> TypeCoreResult<Constant> {
     use crate::parser::ast::Constant as ParsedConstant;
@@ -559,10 +572,10 @@ pub fn convert_constant(cst: &crate::parser::ast::Constant) -> TypeCoreResult<Co
     match cst {
         ParsedConstant::Integer(s, None) => {
             // Parse integer literal, handling underscores and 0x/0o/0b prefixes.
-            // OCaml's native int is 63-bit, so large literals succeed there.
-            // We parse as i64 and wrap to i32 to match JavaScript semantics.
+            // OCaml's native int is 63-bit on 64-bit systems. We parse as i64
+            // and simulate 63-bit wrapping to match OCaml's int_of_string behavior.
             match parse_int_literal(s) {
-                Some(n) => Ok(Constant::Int(n as i32)),
+                Some(n) => Ok(Constant::Int(wrap_to_ocaml_int(n))),
                 None => Err(TypeCoreError::LiteralOverflow("int".to_string())),
             }
         }
@@ -4951,11 +4964,11 @@ mod tests {
     }
 
     #[test]
-    fn test_convert_constant_overflow_wraps() {
-        // Values that fit in i64 but not i32 should wrap to i32
+    fn test_convert_constant_large_fits_63bit() {
+        // Values that fit in 63-bit should be preserved
         let cst = crate::parser::ast::Constant::Integer("99999999999999999".to_string(), None);
         let result = convert_constant(&cst).unwrap();
-        assert_eq!(result, Constant::Int(99999999999999999_i64 as i32));
+        assert_eq!(result, Constant::Int(99999999999999999));
     }
 
     #[test]
@@ -4968,16 +4981,26 @@ mod tests {
 
     #[test]
     fn test_convert_constant_underscores() {
+        // 949460645006 fits in 63 bits, should be preserved
         let cst = crate::parser::ast::Constant::Integer("949_460_645_006".to_string(), None);
         let result = convert_constant(&cst).unwrap();
-        assert_eq!(result, Constant::Int(949_460_645_006_i64 as i32));
+        assert_eq!(result, Constant::Int(949_460_645_006));
     }
 
     #[test]
     fn test_convert_constant_hex() {
+        // 0xFFFFFFFF = 4294967295, fits in 63 bits
         let cst = crate::parser::ast::Constant::Integer("0xffff_ffff".to_string(), None);
         let result = convert_constant(&cst).unwrap();
-        assert_eq!(result, Constant::Int(0xffff_ffff_i64 as i32));
+        assert_eq!(result, Constant::Int(4294967295));
+    }
+
+    #[test]
+    fn test_convert_constant_63bit_wrap() {
+        // 4611686018427387904 = 2^62, wraps to -2^62 in 63-bit
+        let cst = crate::parser::ast::Constant::Integer("4611686018427387904".to_string(), None);
+        let result = convert_constant(&cst).unwrap();
+        assert_eq!(result, Constant::Int(-4611686018427387904));
     }
 
     #[test]
