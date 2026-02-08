@@ -1004,16 +1004,24 @@ fn rewrite_value_binding_locs<'a>(vb: &'a ValueBinding, arena: &mut ParseArena) 
                 let inner_typ_loc = arena.get_core_type(*inner_typ_idx).ptyp_loc;
                 if !vars.is_empty() {
                     // Check if inner expression is Pexp_constraint
-                    let inner_expr: &Expression = arena.get_expr(*inner_expr_idx);
-                    if let ExpressionDesc::Pexp_constraint(constraint_inner) = &*inner_expr.pexp_desc {
-                        let (ref expr_idx, _) = **constraint_inner;
+                    // Extract the constraint's inner expr_idx before borrowing arena mutably
+                    let constraint_expr_idx = {
+                        let inner_expr: &Expression = arena.get_expr(*inner_expr_idx);
+                        if let ExpressionDesc::Pexp_constraint(constraint_inner) = &*inner_expr.pexp_desc {
+                            let (ref expr_idx, _) = **constraint_inner;
+                            Some(*expr_idx)
+                        } else {
+                            None
+                        }
+                    };
+                    if let Some(expr_idx) = constraint_expr_idx {
                         let new_pat_loc = arena.from_location(&Location {
                             loc_start: arena.loc_start(vb.pvb_pat.ppat_loc).clone(),
                             loc_end: arena.loc_end(inner_typ_loc).clone(),
                             loc_ghost: false,
                         });
                         // Safety: arena is append-only, expression won't be invalidated
-                        let expr: &'a Expression = unsafe { expr_ref(arena, *expr_idx) };
+                        let expr: &'a Expression = unsafe { expr_ref(arena, expr_idx) };
                         (new_pat_loc, expr, expr.pexp_loc)
                     } else {
                         default
@@ -1487,7 +1495,12 @@ fn walk_expression(expr: &Expression, t: &mut CommentTable, comments: Vec<Commen
         ExpressionDesc::Pexp_construct(name, Some(_))
             if arena.is_lident(name.txt, "::") =>
         {
-            let list_exprs = collect_list_exprs(arena, expr);
+            // Safety: arena is append-only, collected references remain valid
+            // We decouple the lifetime to avoid conflicting borrows with walk_list
+            let list_exprs = unsafe {
+                let arena_ref: &ParseArena = &*(arena as *const ParseArena);
+                collect_list_exprs(arena_ref, expr)
+            };
             let nodes: Vec<Node<'_>> = list_exprs.iter().map(|e| Node::Expression(e)).collect();
             walk_list(&nodes, t, comments, arena);
         }
@@ -1930,10 +1943,14 @@ fn walk_expression(expr: &Expression, t: &mut CommentTable, comments: Vec<Commen
                                             let (_, arg) = &args[0];
                                             if let ExpressionDesc::Pexp_array(sub_lists) = &*arg.pexp_desc {
                                                 // Collect all expressions from sub-lists
+                                                // Safety: arena is append-only, collected references remain valid
                                                 let mut all_exprs: Vec<&Expression> = Vec::new();
                                                 for sub_list in sub_lists.iter() {
-                                                    // Collect list elements
-                                                    let (exprs, spread) = parsetree_viewer::collect_list_expressions(arena, sub_list);
+                                                    // Collect list elements with decoupled lifetime
+                                                    let (exprs, spread) = unsafe {
+                                                        let arena_ref: &ParseArena = &*(arena as *const ParseArena);
+                                                        parsetree_viewer::collect_list_expressions(arena_ref, sub_list)
+                                                    };
                                                     all_exprs.extend(exprs);
                                                     if let Some(spread_expr) = spread {
                                                         all_exprs.push(spread_expr);
@@ -1994,7 +2011,12 @@ fn walk_expression(expr: &Expression, t: &mut CommentTable, comments: Vec<Commen
         }
         ExpressionDesc::Pexp_fun(_) | ExpressionDesc::Pexp_newtype(_) => {
             // Walk through function parameters and body, matching OCaml's handling
-            let (_is_async, parameters, return_expr) = parsetree_viewer::fun_expr(arena, expr);
+            // Safety: arena is append-only, collected references remain valid
+            // We decouple the lifetime to avoid conflicting borrows with subsequent mutable borrows
+            let (_is_async, parameters, return_expr) = unsafe {
+                let arena_ref: &ParseArena = &*(arena as *const ParseArena);
+                parsetree_viewer::fun_expr(arena_ref, expr)
+            };
 
             // Walk each parameter, collecting remaining comments
             let mut prev_loc: Option<LocIdx> = None;
@@ -2516,7 +2538,12 @@ fn walk_pattern(pattern: &Pattern, t: &mut CommentTable, comments: Vec<Comment>,
         PatternDesc::Ppat_construct(name, Some(_))
             if arena.is_lident(name.txt, "::") =>
         {
-            let list_pats = collect_list_patterns(arena, pattern);
+            // Safety: arena is append-only, collected references remain valid
+            // We decouple the lifetime to avoid conflicting borrows with walk_list
+            let list_pats = unsafe {
+                let arena_ref: &ParseArena = &*(arena as *const ParseArena);
+                collect_list_patterns(arena_ref, pattern)
+            };
             let nodes: Vec<Node<'_>> = list_pats.iter().map(|p| Node::Pattern(p)).collect();
             walk_list(&nodes, t, comments, arena);
         }
@@ -2559,7 +2586,11 @@ fn walk_pattern(pattern: &Pattern, t: &mut CommentTable, comments: Vec<Comment>,
         }
         PatternDesc::Ppat_or(_, _) => {
             // Collect the entire or-chain and walk as a list (like OCaml reference)
-            let or_chain = parsetree_viewer::collect_or_pattern_chain(pattern);
+            // Safety: arena is append-only, collected references remain valid
+            let or_chain = unsafe {
+                let arena_ref: &ParseArena = &*(arena as *const ParseArena);
+                parsetree_viewer::collect_or_pattern_chain(arena_ref, pattern)
+            };
             let nodes: Vec<Node<'_>> = or_chain.iter().map(|p| Node::Pattern(p)).collect();
             walk_list(&nodes, t, comments, arena);
         }
@@ -2668,7 +2699,11 @@ fn walk_core_type(ct: &CoreType, t: &mut CommentTable, comments: Vec<Comment>, a
             // OCaml flattens the arrow type into a list of parameters first, then walks them.
             // This ensures comments between parameters are properly partitioned.
             use crate::parser::parsetree_viewer;
-            let (_, parameters, return_type) = parsetree_viewer::arrow_type(arena, ct, None);
+            // Safety: arena is append-only, collected references remain valid
+            let (_, parameters, return_type) = unsafe {
+                let arena_ref: &ParseArena = &*(arena as *const ParseArena);
+                parsetree_viewer::arrow_type(arena_ref, ct, None)
+            };
 
             // Walk type parameters using visit_list_but_continue_with_remaining_comments
             let comments = walk_type_parameters(&parameters, t, comments, arena);
@@ -2881,7 +2916,12 @@ fn walk_module_expr(me: &ModuleExpr, t: &mut CommentTable, comments: Vec<Comment
         ModuleExprDesc::Pmod_functor(inner) => {
                     let (_, _, _) = **inner;
             // Collect all functor parameters and walk them as a list
-            let (parameters, return_mod_expr) = parsetree_viewer::mod_expr_functor(me);
+            // Safety: arena is append-only, collected references remain valid
+            // We decouple the lifetime to avoid conflicting borrows with subsequent mutable borrows
+            let (parameters, return_mod_expr) = unsafe {
+                let arena_ref: &ParseArena = &*(arena as *const ParseArena);
+                parsetree_viewer::mod_expr_functor(arena_ref, me)
+            };
 
             // Use the combined location from label to end of mod_type for each parameter
             let comments = visit_list_but_continue_with_remaining_comments(
@@ -2937,7 +2977,11 @@ fn walk_module_expr(me: &ModuleExpr, t: &mut CommentTable, comments: Vec<Comment
         }
         ModuleExprDesc::Pmod_apply(_, _) => {
             // Collect all module expressions in the apply chain (call_expr first, then args)
-            let (args, call_expr) = parsetree_viewer::mod_expr_apply(me);
+            // Safety: arena is append-only, collected references remain valid
+            let (args, call_expr) = unsafe {
+                let arena_ref: &ParseArena = &*(arena as *const ParseArena);
+                parsetree_viewer::mod_expr_apply(arena_ref, me)
+            };
             // OCaml's mod_expr_apply returns [call_expr, arg1, arg2, ...] but ours returns (args, call_expr)
             // Build the list with call_expr first
             let mut mod_exprs: Vec<&ModuleExpr> = vec![call_expr];
@@ -3036,7 +3080,12 @@ fn walk_mod_type(mt: &ModuleType, t: &mut CommentTable, comments: Vec<Comment>, 
         }
         ModuleTypeDesc::Pmty_functor(_) => {
             // Collect all functor parameters like OCaml's functor_type
-            let (parameters, return_mod_type) = functor_type_params(mt, arena);
+            // Safety: arena is append-only, collected references remain valid
+            // We decouple the lifetime to avoid conflicting borrows with subsequent mutable borrows
+            let (parameters, return_mod_type) = unsafe {
+                let arena_ref: &ParseArena = &*(arena as *const ParseArena);
+                functor_type_params(mt, arena_ref)
+            };
 
             // Walk parameters using list-based comment distribution
             // This matches OCaml's visit_list_but_continue_with_remaining_comments
