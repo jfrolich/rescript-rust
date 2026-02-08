@@ -588,9 +588,10 @@ fn transl_type_inner(
         }
 
         CTD::Ptyp_arrow(inner) => {
-                    let (ref arg, ref ret, ref arity) = **inner;
+                    let (ref arg, ref ret_idx, ref arity) = **inner;
             // Arrow type: T1 -> T2
             let (arg_ctyp, arg_ty) = transl_type_inner(tctx, env, &arg.typ)?;
+            let ret = tctx.arena.get_core_type(*ret_idx);
             let (ret_ctyp, ret_ty) = transl_type_inner(tctx, env, ret)?;
 
             // Convert Arity to Option<i32> for typed tree (matches OCaml's arity option)
@@ -675,8 +676,9 @@ fn transl_type_inner(
         }
 
         CTD::Ptyp_alias(inner) => {
-                    let (ref inner, ref name) = **inner;
+                    let (ref inner_idx, ref name) = **inner;
             // Type alias: T as 'a
+            let inner = tctx.arena.get_core_type(*inner_idx);
             let (inner_ctyp, inner_ty) = transl_type_inner(tctx, env, inner)?;
 
             // Create a type variable for the alias name and unify with inner type
@@ -695,7 +697,7 @@ fn transl_type_inner(
         }
 
         CTD::Ptyp_poly(inner) => {
-                    let (ref vars, ref body) = **inner;
+                    let (ref vars, ref body_idx) = **inner;
             // Polymorphic type: 'a 'b. T
             let var_names: Vec<String> = vars.iter().map(|v| tctx.arena.get_string(v.txt).to_string()).collect();
 
@@ -704,6 +706,7 @@ fn transl_type_inner(
                 let _var = ctx.new_var(Some(name.clone()));
             }
 
+            let body = tctx.arena.get_core_type(*body_idx);
             let (body_ctyp, body_ty) = transl_type_inner(tctx, env, body)?;
 
             let poly_ty = ctx.new_poly(body_ty, vec![]);
@@ -951,8 +954,9 @@ fn type_pattern_inner(
             ))
         }
 
-        PD::Ppat_alias(inner_pat, name) => {
+        PD::Ppat_alias(inner_pat_idx, name) => {
             // Alias pattern: P as x
+            let inner_pat = tctx.arena.get_pat(*inner_pat_idx);
             let typed_inner =
                 type_pattern_inner(tctx, env, inner_pat, expected_ty, mode, state, 0)?;
 
@@ -971,7 +975,7 @@ fn type_pattern_inner(
             ))
         }
 
-        PD::Ppat_or(p1, p2) => {
+        PD::Ppat_or(p1_idx, p2_idx) => {
             // Or-pattern: P1 | P2
             let inner_mode = if mode == PatternMode::SplittingOr {
                 PatternMode::Normal
@@ -983,6 +987,7 @@ fn type_pattern_inner(
             let vars_before = state.pattern_variables.len();
 
             // Type check first branch
+            let p1 = tctx.arena.get_pat(*p1_idx);
             let typed_p1 = type_pattern_inner(tctx, env, p1, expected_ty, inner_mode, state, 0)?;
 
             // Save p1's variables
@@ -992,6 +997,7 @@ fn type_pattern_inner(
             state.pattern_variables.truncate(vars_before);
 
             // Type check second branch
+            let p2 = tctx.arena.get_pat(*p2_idx);
             let typed_p2 = type_pattern_inner(tctx, env, p2, expected_ty, inner_mode, state, 0)?;
 
             // Get p2's variables
@@ -1037,7 +1043,7 @@ fn type_pattern_inner(
                 env,
                 loc,
                 lid,
-                arg.as_ref().map(|p| p.as_ref()),
+                (*arg).map(|idx| tctx.arena.get_pat(idx)),
                 expected_ty,
                 mode,
                 state,
@@ -1053,7 +1059,7 @@ fn type_pattern_inner(
                 env,
                 loc,
                 label,
-                arg.as_ref().map(|p| p.as_ref()),
+                (*arg).map(|idx| tctx.arena.get_pat(idx)),
                 expected_ty,
                 mode,
                 state,
@@ -1078,8 +1084,9 @@ fn type_pattern_inner(
         }
 
         PD::Ppat_constraint(inner) => {
-                    let (ref inner_pat, ref core_type) = **inner;
+                    let (ref inner_pat_idx, ref core_type) = **inner;
             // Type constraint pattern: (x : int)
+            let inner_pat = tctx.arena.get_pat(*inner_pat_idx);
             type_pattern_constraint(
                 tctx,
                 env,
@@ -1099,13 +1106,15 @@ fn type_pattern_inner(
             type_pattern_interval(tctx, env, loc, c1, c2, expected_ty, pat)
         }
 
-        PD::Ppat_exception(inner_pat) => {
+        PD::Ppat_exception(inner_pat_idx) => {
             // Exception pattern
+            let inner_pat = tctx.arena.get_pat(*inner_pat_idx);
             type_pattern_exception(tctx, env, loc, inner_pat, expected_ty, mode, state, pat)
         }
 
-        PD::Ppat_open(mod_lid, inner_pat) => {
+        PD::Ppat_open(mod_lid, inner_pat_idx) => {
             // Local open pattern: M.(p)
+            let inner_pat = tctx.arena.get_pat(*inner_pat_idx);
             type_pattern_open(
                 tctx,
                 env,
@@ -1623,11 +1632,12 @@ pub fn type_expect<'a>(
         }
 
         ED::Pexp_let(inner) => {
-                    let (ref rec_flag, ref bindings, ref body) = **inner;
+                    let (ref rec_flag, ref bindings, ref body_idx) = **inner;
             // Let expression
             let (typed_bindings, new_env) = type_let_bindings(tctx, env, *rec_flag, bindings)?;
 
             // Type check body in extended environment
+            let body = tctx.arena.get_expr(*body_idx);
             let typed_body = type_expect(tctx, &new_env, body, expected_ty, None)?;
             let body_type = typed_body.exp_type;
 
@@ -1640,13 +1650,15 @@ pub fn type_expect<'a>(
             ))
         }
 
-        ED::Pexp_sequence(e1, e2) => {
+        ED::Pexp_sequence(e1_idx, e2_idx) => {
             // Sequence expression: e1; e2
             // e1 should have type unit
             let unit_ty = env.type_unit(ctx);
+            let e1 = tctx.arena.get_expr(*e1_idx);
             let typed_e1 = type_expect(tctx, env, e1, unit_ty, None)?;
 
             // e2 has the expected type
+            let e2 = tctx.arena.get_expr(*e2_idx);
             let typed_e2 = type_expect(tctx, env, e2, expected_ty, None)?;
             let e2_type = typed_e2.exp_type;
 
@@ -1660,18 +1672,21 @@ pub fn type_expect<'a>(
         }
 
         ED::Pexp_ifthenelse(inner) => {
-                    let (ref cond, ref then_branch, ref else_branch) = **inner;
+                    let (ref cond_idx, ref then_idx, ref else_idx) = **inner;
             // If expression
             let bool_ty = env.type_bool(ctx);
 
             // Condition should be bool
+            let cond = tctx.arena.get_expr(*cond_idx);
             let typed_cond = type_expect(tctx, env, cond, bool_ty, None)?;
 
             // Then branch has expected type
+            let then_branch = tctx.arena.get_expr(*then_idx);
             let typed_then = type_expect(tctx, env, then_branch, expected_ty, None)?;
 
             // Else branch, if present
-            let typed_else = if let Some(else_branch) = else_branch {
+            let typed_else = if let Some(else_idx) = else_idx {
+                let else_branch = tctx.arena.get_expr(*else_idx);
                 let typed_else = type_expect(tctx, env, else_branch, expected_ty, None)?;
                 Some(Box::new(typed_else))
             } else {
@@ -1694,12 +1709,14 @@ pub fn type_expect<'a>(
             ))
         }
 
-        ED::Pexp_while(cond, body) => {
+        ED::Pexp_while(cond_idx, body_idx) => {
             // While loop
             let bool_ty = env.type_bool(ctx);
             let unit_ty = env.type_unit(ctx);
 
+            let cond = tctx.arena.get_expr(*cond_idx);
             let typed_cond = type_expect(tctx, env, cond, bool_ty, None)?;
+            let body = tctx.arena.get_expr(*body_idx);
             let typed_body = type_expect(tctx, env, body, unit_ty, None)?;
 
             // While loop has type unit
@@ -1714,11 +1731,12 @@ pub fn type_expect<'a>(
             ))
         }
 
-        ED::Pexp_assert(e) => {
+        ED::Pexp_assert(e_idx) => {
             // Assert expression
             let bool_ty = env.type_bool(ctx);
             let unit_ty = env.type_unit(ctx);
 
+            let e = tctx.arena.get_expr(*e_idx);
             let typed_e = type_expect(tctx, env, e, bool_ty, None)?;
 
             // Assert has type unit
@@ -1762,11 +1780,12 @@ pub fn type_expect<'a>(
             ref partial,
             ref transformed_jsx, } = **inner;
             // Function application
+            let funct_expr = tctx.arena.get_expr(*funct);
             type_application(
                 tctx,
                 env,
                 loc,
-                funct,
+                funct_expr,
                 args,
                 *partial,
                 *transformed_jsx,
@@ -1777,8 +1796,9 @@ pub fn type_expect<'a>(
         }
 
         ED::Pexp_match(inner) => {
-                    let (ref scrutinee, ref cases) = **inner;
+                    let (ref scrutinee_idx, ref cases) = **inner;
             // Match expression
+            let scrutinee = tctx.arena.get_expr(*scrutinee_idx);
             type_match(
                 tctx,
                 env,
@@ -1791,8 +1811,9 @@ pub fn type_expect<'a>(
         }
 
         ED::Pexp_try(inner) => {
-                    let (ref body, ref handlers) = **inner;
+                    let (ref body_idx, ref handlers) = **inner;
             // Try expression
+            let body = tctx.arena.get_expr(*body_idx);
             type_try(
                 tctx,
                 env,
@@ -1812,14 +1833,16 @@ pub fn type_expect<'a>(
             ref arity,
             ref is_async, } = **inner;
             // Function expression
+            let default_expr = (*default).map(|idx| tctx.arena.get_expr(idx));
+            let rhs_expr = tctx.arena.get_expr(*rhs);
             type_function(
                 tctx,
                 env,
                 loc,
                 arg_label,
-                default.as_ref().map(|e| e.as_ref()),
+                default_expr,
                 lhs,
-                rhs,
+                rhs_expr,
                 arity.clone(),
                 *is_async,
                 expected_ty,
@@ -1828,8 +1851,11 @@ pub fn type_expect<'a>(
         }
 
         ED::Pexp_for(inner) => {
-                    let (ref pat, ref start_expr, ref end_expr, ref direction, ref body) = **inner;
+                    let (ref pat, ref start_idx, ref end_idx, ref direction, ref body_idx) = **inner;
             // For loop
+            let start_expr = tctx.arena.get_expr(*start_idx);
+            let end_expr = tctx.arena.get_expr(*end_idx);
+            let body = tctx.arena.get_expr(*body_idx);
             type_for(
                 tctx,
                 env,
@@ -1852,7 +1878,7 @@ pub fn type_expect<'a>(
                 env,
                 loc,
                 lid,
-                arg.as_ref().map(|e| e.as_ref()),
+                (*arg).map(|idx| tctx.arena.get_expr(idx)),
                 expected_ty,
                 &expr.pexp_attributes,
             )
@@ -1866,7 +1892,7 @@ pub fn type_expect<'a>(
                 env,
                 loc,
                 label,
-                arg.as_ref().map(|e| e.as_ref()),
+                (*arg).map(|idx| tctx.arena.get_expr(idx)),
                 expected_ty,
                 &expr.pexp_attributes,
             )
@@ -1880,14 +1906,15 @@ pub fn type_expect<'a>(
                 env,
                 loc,
                 fields,
-                base.as_ref().map(|e| e.as_ref()),
+                (*base).map(|idx| tctx.arena.get_expr(idx)),
                 expected_ty,
                 &expr.pexp_attributes,
             )
         }
 
-        ED::Pexp_field(record_expr, field_lid) => {
+        ED::Pexp_field(record_expr_idx, field_lid) => {
             // Field access
+            let record_expr = tctx.arena.get_expr(*record_expr_idx);
             type_field(
                 tctx,
                 env,
@@ -1900,8 +1927,10 @@ pub fn type_expect<'a>(
         }
 
         ED::Pexp_setfield(inner) => {
-                    let (ref record_expr, ref field_lid, ref new_value) = **inner;
+                    let (ref record_expr_idx, ref field_lid, ref new_value_idx) = **inner;
             // Field assignment
+            let record_expr = tctx.arena.get_expr(*record_expr_idx);
+            let new_value = tctx.arena.get_expr(*new_value_idx);
             type_setfield(
                 tctx,
                 env,
@@ -1916,8 +1945,9 @@ pub fn type_expect<'a>(
         }
 
         ED::Pexp_constraint(inner) => {
-                    let (ref inner_expr, ref core_type) = **inner;
+                    let (ref inner_expr_idx, ref core_type) = **inner;
             // Type constraint
+            let inner_expr = tctx.arena.get_expr(*inner_expr_idx);
             type_constraint(
                 tctx,
                 env,
@@ -1930,8 +1960,9 @@ pub fn type_expect<'a>(
         }
 
         ED::Pexp_coerce(inner) => {
-                    let (ref inner_expr, ref opt_from_type, ref to_type) = **inner;
+                    let (ref inner_expr_idx, ref opt_from_type, ref to_type) = **inner;
             // Type coercion: (E :> T) or (E : T1 :> T2)
+            let inner_expr = tctx.arena.get_expr(*inner_expr_idx);
             type_coerce(
                 tctx,
                 env,
@@ -1945,8 +1976,9 @@ pub fn type_expect<'a>(
         }
 
         ED::Pexp_open(inner) => {
-                    let (ref _override_flag, ref lid, ref body) = **inner;
+                    let (ref _override_flag, ref lid, ref body_idx) = **inner;
             // Open expression: M.{ E } or open M; E
+            let body = tctx.arena.get_expr(*body_idx);
             type_open(
                 tctx,
                 env,
@@ -1959,8 +1991,9 @@ pub fn type_expect<'a>(
         }
 
         ED::Pexp_newtype(inner) => {
-                    let (ref name, ref body) = **inner;
+                    let (ref name, ref body_idx) = **inner;
             // Newtype expression: (type t) => E
+            let body = tctx.arena.get_expr(*body_idx);
             type_newtype(
                 tctx,
                 env,
@@ -1972,8 +2005,9 @@ pub fn type_expect<'a>(
             )
         }
 
-        ED::Pexp_await(inner_expr) => {
+        ED::Pexp_await(inner_expr_idx) => {
             // Await expression: await E
+            let inner_expr = tctx.arena.get_expr(*inner_expr_idx);
             type_await(
                 tctx,
                 env,
@@ -1986,8 +2020,9 @@ pub fn type_expect<'a>(
         }
 
         ED::Pexp_send(inner) => {
-                    let (ref obj_expr, ref method) = **inner;
+                    let (ref obj_expr_idx, ref method) = **inner;
             // Method send: E#m
+            let obj_expr = tctx.arena.get_expr(*obj_expr_idx);
             type_send(
                 tctx,
                 env,
@@ -2000,8 +2035,9 @@ pub fn type_expect<'a>(
         }
 
         ED::Pexp_letexception(inner) => {
-                    let (ref ext_constr, ref body) = **inner;
+                    let (ref ext_constr, ref body_idx) = **inner;
             // Let exception: { exception C; E }
+            let body = tctx.arena.get_expr(*body_idx);
             type_letexception(
                 tctx,
                 env,
@@ -2026,8 +2062,9 @@ pub fn type_expect<'a>(
         }
 
         ED::Pexp_letmodule(inner) => {
-                    let (ref name, ref module_expr, ref body) = **inner;
+                    let (ref name, ref module_expr, ref body_idx) = **inner;
             // Let module: { module M = ME; E }
+            let body = tctx.arena.get_expr(*body_idx);
             type_letmodule(
                 tctx,
                 env,
@@ -2040,8 +2077,9 @@ pub fn type_expect<'a>(
             )
         }
 
-        ED::Pexp_pack(module_expr) => {
+        ED::Pexp_pack(module_expr_idx) => {
             // Pack: module(ME)
+            let module_expr = tctx.arena.get_mod_expr(*module_expr_idx);
             type_pack(
                 tctx,
                 env,
