@@ -10,7 +10,7 @@
 use std::collections::{BTreeSet, HashSet};
 
 use crate::parser::ast::{
-    Case, ConstructorArguments, CoreType, CoreTypeDesc, Expression, ExpressionDesc,
+    Attributes, Case, ConstructorArguments, CoreType, CoreTypeDesc, Expression, ExpressionDesc,
     ExtensionConstructor, ExtensionConstructorKind, IncludeDeclaration, IncludeDescription,
     LabelDeclaration, ModuleBinding, ModuleDeclaration, ModuleExpr, ModuleExprDesc, ModuleType,
     ModuleTypeDeclaration, ModuleTypeDesc, ObjectField, OpenDescription, Pattern, PatternDesc,
@@ -965,13 +965,13 @@ mod tests {
                 loc: LocIdx::none(),
             })),
             pexp_loc: LocIdx::none(),
-            pexp_attributes: vec![],
+            pexp_attributes: Attributes::new(),
         }
     }
 
     fn make_eval_item(expr: Expression) -> StructureItem {
         StructureItem {
-            pstr_desc: Box::new(StructureItemDesc::Pstr_eval(Box::new((expr, vec![])))),
+            pstr_desc: Box::new(StructureItemDesc::Pstr_eval(Box::new((expr, Attributes::new())))),
             pstr_loc: LocIdx::none(),
         }
     }

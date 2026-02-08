@@ -39,8 +39,8 @@ use super::ppx;
 use super::serialize::Marshal;
 use crate::parse_arena::ParseArena;
 use crate::parser::ast::{
-    IncludeDeclaration, ModuleExpr, ModuleExprDesc, ModuleType, ModuleTypeDesc, Signature,
-    Structure, StructureItem, StructureItemDesc,
+    Attributes, IncludeDeclaration, ModuleExpr, ModuleExprDesc, ModuleType, ModuleTypeDesc,
+    Signature, Structure, StructureItem, StructureItemDesc,
 };
 
 /// The separator character used in the binary AST format.
@@ -342,25 +342,25 @@ fn wrap_no_export(structure: Vec<StructureItem>) -> Vec<StructureItem> {
     let inner_mod = ModuleExpr {
         pmod_desc: Box::new(ModuleExprDesc::Pmod_structure(Box::new(structure))),
         pmod_loc: loc,
-        pmod_attributes: vec![],
+        pmod_attributes: Attributes::new(),
     };
 
     let empty_sig = ModuleType {
         pmty_desc: Box::new(ModuleTypeDesc::Pmty_signature(Box::new(vec![]))),
         pmty_loc: loc,
-        pmty_attributes: vec![],
+        pmty_attributes: Attributes::new(),
     };
 
     let constrained_mod = ModuleExpr {
         pmod_desc: Box::new(ModuleExprDesc::Pmod_constraint(Box::new(inner_mod), Box::new(empty_sig))),
         pmod_loc: loc,
-        pmod_attributes: vec![],
+        pmod_attributes: Attributes::new(),
     };
 
     let include_decl = IncludeDeclaration {
         pincl_mod: constrained_mod,
         pincl_loc: loc,
-        pincl_attributes: vec![],
+        pincl_attributes: Attributes::new(),
     };
 
     vec![StructureItem {
@@ -374,8 +374,8 @@ mod tests {
     use super::*;
     use crate::parse_arena::{LocIdx, Located};
     use crate::parser::ast::{
-        Constant, Expression, ExpressionDesc, Pattern, PatternDesc, RecFlag, StructureItem,
-        StructureItemDesc, ValueBinding,
+        Attributes, Constant, Expression, ExpressionDesc, Pattern, PatternDesc, RecFlag,
+        StructureItem, StructureItemDesc, ValueBinding,
     };
     use crate::parser::longident::Longident;
 
@@ -391,7 +391,7 @@ mod tests {
                             loc: LocIdx::none(),
                         })),
                         ppat_loc: LocIdx::none(),
-                        ppat_attributes: vec![],
+                        ppat_attributes: Attributes::new(),
                     },
                     pvb_expr: Expression {
                         pexp_desc: Box::new(ExpressionDesc::Pexp_constant(Box::new(Constant::Integer(
@@ -399,9 +399,9 @@ mod tests {
                             None,
                         )))),
                         pexp_loc: LocIdx::none(),
-                        pexp_attributes: vec![],
+                        pexp_attributes: Attributes::new(),
                     },
-                    pvb_attributes: vec![],
+                    pvb_attributes: Attributes::new(),
                     pvb_loc: LocIdx::none(),
                 }],
             )))),
@@ -419,7 +419,7 @@ mod tests {
                 loc: LocIdx::none(),
             })),
             pexp_loc: LocIdx::none(),
-            pexp_attributes: vec![],
+            pexp_attributes: Attributes::new(),
         }
     }
 
@@ -477,7 +477,7 @@ mod tests {
     fn test_with_dependencies() {
         let mut arena = make_test_arena();
         let ast = vec![StructureItem {
-            pstr_desc: Box::new(StructureItemDesc::Pstr_eval(Box::new((make_module_ref_expr(&mut arena, "Array", "map"), vec![])))),
+            pstr_desc: Box::new(StructureItemDesc::Pstr_eval(Box::new((make_module_ref_expr(&mut arena, "Array", "map"), Attributes::new())))),
             pstr_loc: LocIdx::none(),
         }];
 
@@ -502,12 +502,12 @@ mod tests {
             StructureItem {
                 pstr_desc: Box::new(StructureItemDesc::Pstr_eval(Box::new((
                     make_module_ref_expr(&mut arena, "Array", "map"),
-                    vec![],
+                    Attributes::new(),
                 )))),
                 pstr_loc: LocIdx::none(),
             },
             StructureItem {
-                pstr_desc: Box::new(StructureItemDesc::Pstr_eval(Box::new((make_module_ref_expr(&mut arena, "Js", "log"), vec![])))),
+                pstr_desc: Box::new(StructureItemDesc::Pstr_eval(Box::new((make_module_ref_expr(&mut arena, "Js", "log"), Attributes::new())))),
                 pstr_loc: LocIdx::none(),
             },
         ];

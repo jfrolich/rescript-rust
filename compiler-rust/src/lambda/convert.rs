@@ -16,7 +16,7 @@ use crate::lambda::{
 };
 use crate::location::Location;
 use crate::parse_arena::{LidentIdx, LocIdx, Located, ParseArena};
-use crate::parser::ast::{DirectionFlag, MutableFlag as ParserMutableFlag, RecFlag};
+use crate::parser::ast::{Attributes, DirectionFlag, MutableFlag as ParserMutableFlag, RecFlag};
 use crate::types::asttypes::MutableFlag as TypeMutableFlag;
 use crate::types::decl::{ConstructorDescription, ConstructorTag, LabelDescription, ValueKind};
 use crate::types::typedtree::{
@@ -447,7 +447,7 @@ impl<'a> LambdaConverter<'a> {
                         LocIdx::none(),
                         crate::types::TypeExprRef(0),
                         crate::types::typedtree::EnvRef(0),
-                        vec![],
+                        Attributes::new(),
                     )
                 } else if patterns.len() == 1 {
                     patterns.into_iter().next().unwrap()
@@ -457,7 +457,7 @@ impl<'a> LambdaConverter<'a> {
                         LocIdx::none(),
                         crate::types::TypeExprRef(0),
                         crate::types::typedtree::EnvRef(0),
-                        vec![],
+                        Attributes::new(),
                     )
                 }
             }
@@ -1027,7 +1027,7 @@ mod tests {
             LocIdx::none(),
             crate::types::TypeExprRef(0),
             crate::types::typedtree::EnvRef(0),
-            vec![],
+            Attributes::new(),
         );
         let lam = conv.convert_expr(&expr);
         match lam {
@@ -1049,7 +1049,7 @@ mod tests {
             LocIdx::none(),
             crate::types::TypeExprRef(0),
             crate::types::typedtree::EnvRef(0),
-            vec![],
+            Attributes::new(),
         );
         let vb = ValueBinding {
             vb_pat: pat,
@@ -1058,9 +1058,9 @@ mod tests {
                 LocIdx::none(),
                 crate::types::TypeExprRef(0),
                 crate::types::typedtree::EnvRef(0),
-                vec![],
+                Attributes::new(),
             ),
-            vb_attributes: vec![],
+            vb_attributes: Attributes::new(),
             vb_loc: LocIdx::none(),
         };
         let body = Expression::new(
@@ -1078,7 +1078,7 @@ mod tests {
             LocIdx::none(),
             crate::types::TypeExprRef(0),
             crate::types::typedtree::EnvRef(0),
-            vec![],
+            Attributes::new(),
         );
         let expr = Expression::new(
             ExpressionDesc::Texp_let(
@@ -1089,7 +1089,7 @@ mod tests {
             LocIdx::none(),
             crate::types::TypeExprRef(0),
             crate::types::typedtree::EnvRef(0),
-            vec![],
+            Attributes::new(),
         );
         let lam = conv.convert_expr(&expr);
         match lam {
