@@ -86,6 +86,7 @@ OCAML_BSC="$DUNE_BIN_DIR/bsc"
 RUST_BSC="$PROJECT_ROOT/compiler-rust/target/release/bsc"
 RESCRIPT_CLI="$PROJECT_ROOT/packages/@rescript/darwin-arm64/bin/rescript.exe"
 TEST_PROJECT="$PROJECT_ROOT/tests/tests"
+GENERATED_OUTPUT_SCOPE="tests/tests/src"
 
 # Colors for output
 RED='\033[0;31m'
@@ -124,9 +125,41 @@ if [[ ! -x "$RESCRIPT_CLI" ]]; then
     exit 1
 fi
 
+# Record untracked JS-like files before running so we can remove only newly generated ones.
+capture_untracked_js_snapshot() {
+    local output_file="$1"
+    git -C "$PROJECT_ROOT" ls-files --others --exclude-standard -- "$GENERATED_OUTPUT_SCOPE" \
+        | grep -E '\.(js|mjs|cjs)$' > "$output_file" || true
+}
+
+cleanup_generated_js_outputs() {
+    if [[ -z "${UNTRACKED_JS_BEFORE_FILE:-}" || ! -f "$UNTRACKED_JS_BEFORE_FILE" ]]; then
+        return
+    fi
+
+    local untracked_after_file="$TEMP_DIR/untracked_js_after.txt"
+    local newly_generated_file="$TEMP_DIR/untracked_js_new.txt"
+    local removed_count
+
+    capture_untracked_js_snapshot "$untracked_after_file"
+    comm -13 <(sort "$UNTRACKED_JS_BEFORE_FILE") <(sort "$untracked_after_file") > "$newly_generated_file" || true
+
+    if [[ -s "$newly_generated_file" ]]; then
+        while IFS= read -r rel_file; do
+            [[ -n "$rel_file" ]] || continue
+            rm -f "$PROJECT_ROOT/$rel_file"
+        done < "$newly_generated_file"
+
+        removed_count=$(wc -l < "$newly_generated_file" | tr -d ' ')
+        echo -e "${YELLOW}Cleanup: removed ${removed_count} generated JS/MJS/CJS files.${RESET}"
+    fi
+}
+
 # Create temp directory
 TEMP_DIR=$(mktemp -d)
-trap "rm -rf $TEMP_DIR" EXIT
+UNTRACKED_JS_BEFORE_FILE="$TEMP_DIR/untracked_js_before.txt"
+capture_untracked_js_snapshot "$UNTRACKED_JS_BEFORE_FILE"
+trap "cleanup_generated_js_outputs; rm -rf $TEMP_DIR" EXIT
 
 echo -e "${BOLD}Typed Tree Parity Test${RESET}"
 echo "============================================"
@@ -226,14 +259,14 @@ test_single_file() {
     if [[ -z "$compiler_args_json" ]]; then
         # If compiler-args fails, try direct compilation
         # Run OCaml compiler directly
-        if timeout "$TIMEOUT_SECONDS" "$OCAML_BSC" $SEXP_FLAG "$full_file_path" 2> "$file_temp/ocaml.sexp" 1>/dev/null; then
+        if timeout "$TIMEOUT_SECONDS" "$OCAML_BSC" $SEXP_FLAG -o "$file_temp/ocaml_fallback.js" "$full_file_path" 2> "$file_temp/ocaml.sexp" 1>/dev/null; then
             ocaml_pass=1
         else
             ocaml_fail=1
         fi
 
         if [[ "$RUST_AVAILABLE" == "true" ]]; then
-            if timeout "$TIMEOUT_SECONDS" "$RUST_BSC" $SEXP_FLAG "$full_file_path" 2> "$file_temp/rust.sexp" 1>/dev/null; then
+            if timeout "$TIMEOUT_SECONDS" "$RUST_BSC" $SEXP_FLAG -o "$file_temp/rust_fallback.js" "$full_file_path" 2> "$file_temp/rust.sexp" 1>/dev/null; then
                 rust_pass=1
             else
                 rust_fail=1
