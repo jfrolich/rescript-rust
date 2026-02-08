@@ -75,11 +75,11 @@ The `-dtyped-sexp` flag outputs the typed tree without locations. The `-dtyped-s
 
 |  | Status |
 |--|--------|
-| OCaml compiles | 656/657 |
-| Rust compiles | 559/657 (98 fail) |
-| Parity match (-dtyped-sexp-locs) | 296/559 (53.0%) |
+| OCaml compiles | 657/657 |
+| Rust compiles | 556/657 (101 fail) |
+| Parity match (-dtyped-sexp-locs) | 294/556 (52.9%) |
 
-**Task Progress:** 11/11 complete
+**Task Progress:** 12/12 complete
 
 **Task Checklist:**
 - [x] Match OCaml `@deriving(accessors)` variant accessor location behavior in PPX output by emitting generated value/pattern/expression/signature item locs as `Location.none` while preserving constructor-name locations on `Located` identifiers and `Typ.arrows ~loc` for signature arrow nodes (`DerivingAccessorsCurried.res` parity fixed; `Parity`: 293 -> 295 in the latest full `--with-locs --no-build` run).
@@ -93,6 +93,7 @@ The `-dtyped-sexp` flag outputs the typed tree without locations. The `-dtyped-s
 - [x] Port OCaml `extract_label`-style argument matching in `type_application` (label-name lookup across remaining args + omitted-parameter reconstruction), fixing uncurried mixed-label applications in `UncurriedAlways.res` (Rust compile failures: 106 -> 105).
 - [x] Predeclare `Pstr_type` names in the type env before translating constructor argument types (matching OCaml recursive typedecl binding order), and tighten qualified-type lookup to avoid leaf-name fallback for `Pdot` paths. Also qualify module-signature type paths before constructor lookup. This fixes recursive module constructors resolving to outer `t` in `UntaggedVariants.res` and improves overall compilation (`Rust bsc`: 552 -> 559, `Parity`: 291 -> 293).
 - [x] Match OCaml include-signature propagation when extracting module types from typed `Tmod_structure`: resolve `Tstr_include` identifier modules through the current environment (not just already-accumulated local signature items), so transitive included values stay visible (`acyc/x.res` no longer fails with `UndefinedMethod "v"`). Full `--with-locs --no-build` run: `Rust bsc` 554 -> 559, `Parity` 293 -> 296.
+- [x] Allow variant type constructors to start after leading doc/attribute blocks in `type ... =` declarations by classifying `@...`/doc-comment + `|` as variant syntax and attaching those leading attrs to the first constructor (`arith_syntax.res` now parses and compiles with Rust `bsc` instead of failing with parser errors).
 
 **Previous milestones completed:**
 - Parser AST structure: 100% parity (sexp-locs 1196/1196)

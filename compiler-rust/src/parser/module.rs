@@ -3115,7 +3115,9 @@ fn parse_type_declaration_with_context(
                         }
                     }
                     // Check what comes after attributes
-                    if state.token == Token::DotDot {
+                    if state.token == Token::Bar {
+                        "variant"
+                    } else if state.token == Token::DotDot {
                         "open"
                     } else if state.token == Token::Lbrace {
                         "record_or_object"
@@ -3132,7 +3134,19 @@ fn parse_type_declaration_with_context(
                 });
                 match what_follows {
                     "variant" => {
-                        let constructors = parse_constructors_without_leading_bar(p);
+                        let leading_attrs = parse_attributes(p);
+                        let mut constructors = if p.token == Token::Bar {
+                            parse_constructors(p)
+                        } else {
+                            parse_constructors_without_leading_bar(p)
+                        };
+                        if !leading_attrs.is_empty() {
+                            if let Some(first) = constructors.first_mut() {
+                                let mut attrs = leading_attrs;
+                                attrs.extend(first.pcd_attributes.clone());
+                                first.pcd_attributes = attrs;
+                            }
+                        }
                         kind = TypeKind::Ptype_variant(constructors);
                     }
                     "open" => {
@@ -3680,12 +3694,24 @@ fn parse_type_kind(
 /// Parse variant constructors (starting with |).
 fn parse_constructors(p: &mut Parser<'_>) -> Vec<ConstructorDeclaration> {
     let mut constructors = vec![];
+    let mut pending_attrs: Attributes = vec![];
 
-    while p.token == Token::Bar {
+    while matches!(p.token, Token::Bar | Token::At | Token::DocComment { .. }) {
+        pending_attrs.extend(parse_attributes(p));
+        if p.token != Token::Bar {
+            break;
+        }
+
         // Capture start position BEFORE consuming the bar (like OCaml)
         let bar_start_idx = p.start_pos_idx();
         p.next();
-        if let Some(c) = parse_constructor_with_start(p, bar_start_idx) {
+        if let Some(mut c) = parse_constructor_with_start(p, bar_start_idx) {
+            if !pending_attrs.is_empty() {
+                let mut attrs = pending_attrs;
+                attrs.extend(c.pcd_attributes);
+                c.pcd_attributes = attrs;
+                pending_attrs = vec![];
+            }
             constructors.push(c);
         }
     }
