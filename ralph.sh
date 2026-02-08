@@ -130,8 +130,13 @@ render_claude_stream_line() {
 render_codex_stream_line() {
   local line="$1"
   local text
-  local tool
-  local tool_result
+  local tool_start
+  local tool_done
+  local tool_name
+  local tool_id
+  local tool_meta
+  local tool_status
+  local tool_exit
 
   if [[ "$line" != \{* ]]; then
     if echo "$line" | grep -Eiq "error|warning|failed|fatal"; then
@@ -169,39 +174,68 @@ render_codex_stream_line() {
     fi
   fi
 
-  tool=$(echo "$line" | jq -r '
-    def tool_name:
-      if .type == "response_item" and .payload.type == "function_call" then
-        (.payload.name // empty)
+  tool_start=$(echo "$line" | jq -r '
+    def started_tool:
+      if .type == "item.started" and .item.type == "command_execution" then
+        ["command_execution", (.item.id // ""), (.item.command // "")]
+      elif .type == "response_item" and .payload.type == "function_call" then
+        [(.payload.name // "function_call"), (.payload.call_id // ""), (.payload.arguments // "")]
       elif .type == "function_call" then
-        (.name // empty)
-      elif .type == "item.started" and .item.type == "command_execution" then
-        "command_execution"
+        [(.name // "function_call"), (.call_id // ""), (.arguments // "")]
       else
         empty
       end;
-    [
-      tool_name,
-      (.payload? | tool_name),
-      (.item? | tool_name),
-      (.payload?.item? | tool_name)
-    ]
+    [started_tool, (.payload? | started_tool)]
     | map(select(. != null and . != ""))
-    | .[0] // empty
+    | .[0]
+    | if . == null then
+        empty
+      else
+        .[2] |= (gsub("\\s+"; " ") | .[0:140]) | @tsv
+      end
   ' 2>/dev/null)
-  if [[ -n "$tool" && "$tool" != "null" ]]; then
-    echo "  ⚡ $tool"
+  if [[ -n "$tool_start" && "$tool_start" != "null" ]]; then
+    IFS=$'\t' read -r tool_name tool_id tool_meta <<<"$tool_start"
+    if [[ -n "$tool_id" && -n "$tool_meta" ]]; then
+      echo "  ⚡ $tool_name [$tool_id] $tool_meta"
+    elif [[ -n "$tool_id" ]]; then
+      echo "  ⚡ $tool_name [$tool_id]"
+    else
+      echo "  ⚡ $tool_name"
+    fi
   fi
 
-  tool_result=$(echo "$line" | jq -r '
-    def has_tool_result:
-      (.type == "response_item" and .payload.type == "function_call_output") or
-      .type == "function_call_output" or
-      (.type == "item.completed" and .item.type == "command_execution");
-    if ([., .payload?] | any(has_tool_result)) then "yes" else empty end
+  tool_done=$(echo "$line" | jq -r '
+    def completed_tool:
+      if .type == "item.completed" and .item.type == "command_execution" then
+        ["command_execution", (.item.id // ""), (.item.status // ""), ((.item.exit_code // "") | tostring)]
+      elif .type == "response_item" and .payload.type == "function_call_output" then
+        ["function_call_output", (.payload.call_id // ""), "", ""]
+      elif .type == "function_call_output" then
+        ["function_call_output", (.call_id // ""), "", ""]
+      else
+        empty
+      end;
+    [completed_tool, (.payload? | completed_tool)]
+    | map(select(. != null and . != ""))
+    | .[0]
+    | if . == null then empty else @tsv end
   ' 2>/dev/null)
-  if [[ "$tool_result" == "yes" ]]; then
-    echo "  ✓ done"
+  if [[ -n "$tool_done" && "$tool_done" != "null" ]]; then
+    IFS=$'\t' read -r tool_name tool_id tool_status tool_exit <<<"$tool_done"
+    if [[ "$tool_name" == "command_execution" ]]; then
+      if [[ "$tool_status" == "completed" && "$tool_exit" == "0" ]]; then
+        echo "  ✓ $tool_name [$tool_id] exit $tool_exit"
+      elif [[ -n "$tool_exit" ]]; then
+        echo "  ✗ $tool_name [$tool_id] status ${tool_status:-unknown} exit $tool_exit"
+      else
+        echo "  ✗ $tool_name [$tool_id] status ${tool_status:-unknown}"
+      fi
+    elif [[ -n "$tool_id" ]]; then
+      echo "  ✓ $tool_name [$tool_id]"
+    else
+      echo "  ✓ $tool_name"
+    fi
   fi
 }
 
