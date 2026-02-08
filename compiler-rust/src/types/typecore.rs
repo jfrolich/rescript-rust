@@ -30,7 +30,7 @@ use crate::ident::Ident;
 use crate::location::Location;
 use crate::parse_arena::{LidentIdx, Located, LocIdx, ParseArena, StrIdx};
 use crate::parser::ast::{
-    ArgLabel, Expression as ParsedExpression, Pattern as ParsedPattern, RecFlag,
+    ArgLabel, Attributes, Expression as ParsedExpression, Pattern as ParsedPattern, RecFlag,
     PexpFun, PexpApply,
 };
 use crate::parser::longident::Longident;
@@ -749,7 +749,7 @@ fn transl_type_inner(
                                 inherit_ctyp,
                             ),
                             of_loc: inherit_type.ptyp_loc.clone(),
-                            of_attributes: vec![],
+                            of_attributes: vec![].into(),
                         });
                     }
                 }
@@ -802,7 +802,7 @@ fn transl_type_inner(
                         typed_rows.push(crate::types::typedtree::RowFieldType {
                             rf_desc: crate::types::typedtree::RowFieldDesc::Rinherit(inherit_ctyp),
                             rf_loc: inherit_type.ptyp_loc.clone(),
-                            rf_attributes: vec![],
+                            rf_attributes: vec![].into(),
                         });
                     }
                 }
@@ -1460,14 +1460,14 @@ fn type_pattern_interval(
         loc.clone(),
         expected_ty,
         EnvRef(0),
-        vec![],
+        Attributes::new(),
     );
     let p2 = Pattern::new(
         PatternDesc::Tpat_constant(constant2),
         loc.clone(),
         expected_ty,
         EnvRef(0),
-        vec![],
+        Attributes::new(),
     );
 
     Ok(Pattern::new(
@@ -2163,7 +2163,7 @@ fn type_application(
         loc.clone(),
         result_ty,
         EnvRef(0),
-        attributes.to_vec(),
+        attributes.to_vec().into(),
     ))
 }
 
@@ -2202,7 +2202,7 @@ fn type_match(
         loc.clone(),
         expected_ty,
         EnvRef(0),
-        attributes.to_vec(),
+        attributes.to_vec().into(),
     ))
 }
 
@@ -2287,7 +2287,7 @@ fn type_try(
         loc.clone(),
         expected_ty,
         EnvRef(0),
-        attributes.to_vec(),
+        attributes.to_vec().into(),
     ))
 }
 
@@ -2381,7 +2381,7 @@ fn type_function(
         loc.clone(),
         func_ty,
         EnvRef(0),
-        attributes.to_vec(),
+        attributes.to_vec().into(),
     ))
 }
 
@@ -2450,7 +2450,7 @@ fn type_for(
         loc.clone(),
         unit_ty,
         EnvRef(0),
-        attributes.to_vec(),
+        attributes.to_vec().into(),
     ))
 }
 
@@ -2531,7 +2531,7 @@ fn type_construct(
         loc.clone(),
         result_ty,
         EnvRef(0),
-        attributes.to_vec(),
+        attributes.to_vec().into(),
     ))
 }
 
@@ -2566,7 +2566,7 @@ fn type_variant(
         loc.clone(),
         variant_ty,
         EnvRef(0),
-        attributes.to_vec(),
+        attributes.to_vec().into(),
     ))
 }
 
@@ -2638,7 +2638,7 @@ fn type_record(
         loc.clone(),
         expected_ty,
         EnvRef(0),
-        attributes.to_vec(),
+        attributes.to_vec().into(),
     ))
 }
 
@@ -2682,7 +2682,7 @@ fn type_field(
         loc,
         field_ty,
         EnvRef(0),
-        attributes.to_vec(),
+        attributes.to_vec().into(),
     ))
 }
 
@@ -2740,7 +2740,7 @@ fn type_setfield(
         loc,
         unit_ty,
         EnvRef(0),
-        attributes.to_vec(),
+        attributes.to_vec().into(),
     ))
 }
 
@@ -2772,7 +2772,7 @@ fn type_constraint(
     Ok(typed_inner.with_exp_extra(
         crate::types::typedtree::ExpExtra::Texp_constraint(typed_ctype),
         loc.clone(),
-        attributes.to_vec(),
+        attributes.to_vec().into(),
     ))
 }
 
@@ -2816,7 +2816,7 @@ fn type_coerce(
     Ok(typed_inner.with_exp_extra(
         crate::types::typedtree::ExpExtra::Texp_coerce(opt_from_typed, to_typed_ctype),
         loc.clone(),
-        attributes.to_vec(),
+        attributes.to_vec().into(),
     ))
 }
 
@@ -2845,7 +2845,7 @@ fn type_open(
         loc.clone(),
         expected_ty,
         EnvRef(0),
-        attributes.to_vec(),
+        attributes.to_vec().into(),
     ))
 }
 
@@ -2877,7 +2877,7 @@ fn type_newtype(
     Ok(typed_body.with_exp_extra(
         crate::types::typedtree::ExpExtra::Texp_newtype(name_str),
         loc.clone(),
-        attributes.to_vec(),
+        attributes.to_vec().into(),
     ))
 }
 
@@ -2912,7 +2912,7 @@ fn type_await(
         loc.clone(),
         expected_ty,
         EnvRef(0),
-        attributes.to_vec(),
+        attributes.to_vec().into(),
     ))
 }
 
@@ -2942,7 +2942,7 @@ fn type_send(
         loc.clone(),
         expected_ty,
         EnvRef(0),
-        attributes.to_vec(),
+        attributes.to_vec().into(),
     ))
 }
 
@@ -2969,7 +2969,7 @@ fn type_letexception(
         loc.clone(),
         expected_ty,
         EnvRef(0),
-        attributes.to_vec(),
+        attributes.to_vec().into(),
     ))
 }
 
@@ -2991,7 +2991,7 @@ fn type_extension_expr(
         loc.clone(),
         expected_ty,
         EnvRef(0),
-        attributes.to_vec(),
+        attributes.to_vec().into(),
     ))
 }
 
@@ -3021,7 +3021,7 @@ fn type_letmodule(
         loc.clone(),
         expected_ty,
         EnvRef(0),
-        attributes.to_vec(),
+        attributes.to_vec().into(),
     ))
 }
 
@@ -3051,12 +3051,12 @@ fn type_pack(
             mod_loc: loc,
             mod_type: crate::types::typedtree::ModuleType::placeholder(),
             mod_env: EnvRef(0),
-            mod_attributes: vec![],
+            mod_attributes: vec![].into(),
         })),
         loc,
         expected_ty,
         EnvRef(0),
-        attributes.to_vec(),
+        attributes.to_vec().into(),
     ))
 }
 
@@ -3087,7 +3087,7 @@ fn type_jsx_element(
         loc.clone(),
         expected_ty,
         EnvRef(0),
-        attributes.to_vec(),
+        attributes.to_vec().into(),
     ))
 }
 
