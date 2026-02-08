@@ -28,7 +28,7 @@ use std::borrow::Cow;
 use std::collections::HashMap;
 
 use crate::location::{Location, Position};
-use crate::parse_arena::{ArityIdx, LidentIdx, LocIdx, ParseArena, PosIdx, StrIdx};
+use crate::parse_arena::{ArityIdx, ExprIdx, LidentIdx, LocIdx, ParseArena, PosIdx, StrIdx};
 use crate::parser::longident::Longident;
 
 /// Magic number for small Marshal format
@@ -274,6 +274,14 @@ pub struct MarshalWriter {
     /// Uses raw pointer to avoid lifetime constraints.
     arena: Option<*const ParseArena>,
 
+    /// Current expression index being marshalled.
+    /// Set by `ExprIdx` marshalling so expression-desc writers can consult sparse side tables.
+    current_expr_idx: Option<ExprIdx>,
+
+    /// Stack of owning case-list expressions and the next case index to serialize.
+    /// Used to resolve sparse `Case.pc_guard` side-table entries while marshalling.
+    case_owner_stack: Vec<(ExprIdx, usize)>,
+
     /// Current object counter (incremented each time we record a sharable object)
     obj_counter: u32,
 
@@ -333,6 +341,8 @@ impl MarshalWriter {
             internal_expansive_attr_tuple: None,
 
             arena: None,
+            current_expr_idx: None,
+            case_owner_stack: Vec::new(),
             obj_counter: 0,
             size_32: 0,
             size_64: 0,
@@ -381,6 +391,8 @@ impl MarshalWriter {
             internal_expansive_attr_tuple: None,
 
             arena: None,
+            current_expr_idx: None,
+            case_owner_stack: Vec::new(),
             obj_counter: 0,
             size_32: 0,
             size_64: 0,
@@ -405,6 +417,45 @@ impl MarshalWriter {
                 .expect("MarshalWriter::set_arena must be called before marshalling LocIdx")
                 .as_ref()
                 .unwrap()
+        }
+    }
+
+    #[inline]
+    pub fn with_current_expr_idx<R>(
+        &mut self,
+        idx: ExprIdx,
+        f: impl FnOnce(&mut MarshalWriter) -> R,
+    ) -> R {
+        let prev = self.current_expr_idx;
+        self.current_expr_idx = Some(idx);
+        let result = f(self);
+        self.current_expr_idx = prev;
+        result
+    }
+
+    #[inline]
+    pub fn current_expr_idx(&self) -> Option<ExprIdx> {
+        self.current_expr_idx
+    }
+
+    #[inline]
+    pub fn enter_case_owner(&mut self, owner: ExprIdx) {
+        self.case_owner_stack.push((owner, 0));
+    }
+
+    #[inline]
+    pub fn exit_case_owner(&mut self) {
+        self.case_owner_stack.pop();
+    }
+
+    #[inline]
+    pub fn next_case_owner_index(&mut self) -> Option<(ExprIdx, usize)> {
+        if let Some((owner, next_idx)) = self.case_owner_stack.last_mut() {
+            let case_idx = *next_idx;
+            *next_idx += 1;
+            Some((*owner, case_idx))
+        } else {
+            None
         }
     }
 
@@ -596,6 +647,8 @@ impl MarshalWriter {
         self.simple_core_type_table.clear();
         self.raw_expansion_expr_table.clear();
         self.internal_expansive_attr_tuple = None;
+        self.current_expr_idx = None;
+        self.case_owner_stack.clear();
         self.obj_counter = 0;
         self.size_32 = 0;
         self.size_64 = 0;

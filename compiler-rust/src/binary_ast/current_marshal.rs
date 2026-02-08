@@ -1323,11 +1323,15 @@ impl Marshal for ExpressionDesc {
                 ref rhs,
                 ref arity,
                 ref is_async, } = **inner;
+                let default_idx = w
+                    .current_expr_idx()
+                    .and_then(|owner| w.get_arena().fun_default(owner))
+                    .or(*default);
                 // Pexp_fun of { arg_label; default; lhs; rhs; arity; async }
                 // Inline record with 6 fields
                 w.write_block_header(3, 6);
                 arg_label.marshal(w);
-                default.marshal(w);
+                default_idx.marshal(w);
                 lhs.marshal(w);
                 rhs.marshal(w);
                 arity.marshal(w);
@@ -1350,13 +1354,25 @@ impl Marshal for ExpressionDesc {
                     let (ref e, ref cases) = **inner;
                 w.write_block_header(5, 2);
                 e.marshal(w);
-                cases.marshal(w);
+                if let Some(owner) = w.current_expr_idx() {
+                    w.enter_case_owner(owner);
+                    cases.marshal(w);
+                    w.exit_case_owner();
+                } else {
+                    cases.marshal(w);
+                }
             }
             ExpressionDesc::Pexp_try(inner) => {
                     let (ref e, ref cases) = **inner;
                 w.write_block_header(6, 2);
                 e.marshal(w);
-                cases.marshal(w);
+                if let Some(owner) = w.current_expr_idx() {
+                    w.enter_case_owner(owner);
+                    cases.marshal(w);
+                    w.exit_case_owner();
+                } else {
+                    cases.marshal(w);
+                }
             }
             ExpressionDesc::Pexp_tuple(exprs) => {
                 w.write_block_header(7, 1);
@@ -1501,10 +1517,14 @@ impl Marshal for ExpressionDesc {
 impl Marshal for Case {
     fn marshal(&self, w: &mut MarshalWriter) {
         // case = { pc_bar; pc_lhs; pc_guard; pc_rhs }
+        let guard = w
+            .next_case_owner_index()
+            .and_then(|(owner, case_index)| w.get_arena().case_guard(owner, case_index))
+            .or(self.pc_guard);
         w.write_block_header(0, 4);
         self.pc_bar.marshal(w);
         self.pc_lhs.marshal(w);
-        self.pc_guard.marshal(w);
+        guard.marshal(w);
         self.pc_rhs.marshal(w);
     }
 }

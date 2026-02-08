@@ -119,7 +119,7 @@ impl<'a> Mapper<'a> {
         let expr: &current::Expression = unsafe {
             &*(self.arena.get_expr(idx) as *const current::Expression)
         };
-        self.map_expression(expr)
+        self.map_expression_with_owner(expr, Some(idx))
     }
 
     fn map_pat_idx(&mut self, idx: PatIdx) -> pt0::Pattern {
@@ -717,6 +717,14 @@ impl<'a> Mapper<'a> {
     // ========== Expressions ==========
 
     pub fn map_expression(&mut self, expr: &current::Expression) -> pt0::Expression {
+        self.map_expression_with_owner(expr, None)
+    }
+
+    fn map_expression_with_owner(
+        &mut self,
+        expr: &current::Expression,
+        owner_idx: Option<ExprIdx>,
+    ) -> pt0::Expression {
         // Check if this is a JSX element that needs the [@JSX] attribute
         let is_jsx = matches!(&*expr.pexp_desc, current::ExpressionDesc::Pexp_jsx_element(_));
         let mut attrs = self.map_attributes(&expr.pexp_attributes);
@@ -724,13 +732,18 @@ impl<'a> Mapper<'a> {
             attrs.insert(0, self.mk_jsx_attr(expr.pexp_loc));
         }
         pt0::Expression {
-            pexp_desc: self.map_expression_desc(&*expr.pexp_desc, expr.pexp_loc),
+            pexp_desc: self.map_expression_desc(&*expr.pexp_desc, expr.pexp_loc, owner_idx),
             pexp_loc: self.loc(expr.pexp_loc),
             pexp_attributes: attrs,
         }
     }
 
-    fn map_expression_desc(&mut self, desc: &current::ExpressionDesc, loc: LocIdx) -> pt0::ExpressionDesc {
+    fn map_expression_desc(
+        &mut self,
+        desc: &current::ExpressionDesc,
+        loc: LocIdx,
+        owner_idx: Option<ExprIdx>,
+    ) -> pt0::ExpressionDesc {
         match desc {
             current::ExpressionDesc::Pexp_ident(lid) => {
                 pt0::ExpressionDesc::Ident(self.map_longident_loc(lid))
@@ -756,9 +769,12 @@ impl<'a> Mapper<'a> {
                 // Output current parsetree format with arity and is_async fields
                 // Look up arity from arena (current::Arity is now ArityIdx)
                 let arity_opt = self.arena.get_arity(*arity);
+                let default_idx = owner_idx
+                    .and_then(|owner| self.arena.fun_default(owner))
+                    .or(*default);
                 pt0::ExpressionDesc::Fun {
                     arg_label: self.map_arg_label(&arg_label),
-                    default: default.as_ref().map(|e| Box::new(self.map_expr_idx(*e))),
+                    default: default_idx.map(|e| Box::new(self.map_expr_idx(e))),
                     lhs: Box::new(self.map_pat_idx(*lhs)),
                     rhs: Box::new(self.map_expr_idx(*rhs)),
                     arity: arity_opt,
@@ -821,10 +837,10 @@ impl<'a> Mapper<'a> {
                             pexp_attributes: self.map_attributes(&funct.pexp_attributes),
                         }
                     } else {
-                        self.map_expression(funct)
+                        self.map_expression_with_owner(funct, Some(*funct_idx))
                     }
                 } else {
-                    self.map_expression(funct)
+                    self.map_expression_with_owner(funct, Some(*funct_idx))
                 };
 
                 let mut mapped_args = Vec::with_capacity(args.len());
@@ -843,14 +859,22 @@ impl<'a> Mapper<'a> {
                     let (ref e_idx, ref cases) = **inner;
                 pt0::ExpressionDesc::Match(
                     Box::new(self.map_expr_idx(*e_idx)),
-                    cases.iter().map(|c| self.map_case(c)).collect(),
+                    cases
+                        .iter()
+                        .enumerate()
+                        .map(|(case_index, c)| self.map_case(c, owner_idx, case_index))
+                        .collect(),
                 )
             }
             current::ExpressionDesc::Pexp_try(inner) => {
                     let (ref e_idx, ref cases) = **inner;
                 pt0::ExpressionDesc::Try(
                     Box::new(self.map_expr_idx(*e_idx)),
-                    cases.iter().map(|c| self.map_case(c)).collect(),
+                    cases
+                        .iter()
+                        .enumerate()
+                        .map(|(case_index, c)| self.map_case(c, owner_idx, case_index))
+                        .collect(),
                 )
             }
             current::ExpressionDesc::Pexp_tuple(exprs) => {
@@ -1055,10 +1079,18 @@ impl<'a> Mapper<'a> {
         }
     }
 
-    fn map_case(&mut self, case: &current::Case) -> pt0::Case {
+    fn map_case(
+        &mut self,
+        case: &current::Case,
+        owner_idx: Option<ExprIdx>,
+        case_index: usize,
+    ) -> pt0::Case {
+        let guard = owner_idx
+            .and_then(|owner| self.arena.case_guard(owner, case_index))
+            .or(case.pc_guard);
         pt0::Case {
             pc_lhs: self.map_pat_idx(case.pc_lhs),
-            pc_guard: case.pc_guard.map(|e| self.map_expr_idx(e)),
+            pc_guard: guard.map(|e| self.map_expr_idx(e)),
             pc_rhs: self.map_expr_idx(case.pc_rhs),
         }
     }

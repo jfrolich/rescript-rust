@@ -508,6 +508,58 @@ Result:
 - No parity regressions.
 ```
 
+### Task 2.4 substep: thread sparse side-table population/consumption (February 2026)
+
+```
+Scope:
+- Threaded sparse side-table population through normal expression insertion paths:
+  - `ParseArena::push_expr` now seeds `expr_fun_defaults` / `expr_case_guards` from
+    `Pexp_fun` and `Pexp_match`/`Pexp_try` payloads.
+  - `ParseArena::initialize_expr` now mirrors the same seeding for reserve/init two-phase writes.
+- Added sparse-read fallbacks for migration safety:
+  - `fun_default` and `case_guard` now fall back to inline AST fields when sparse entries are absent.
+  - `get_expr_mut` clears sparse cache entries for the edited slot to avoid stale sparse snapshots.
+- Threaded side-table consumption in conversion/serialization paths:
+  - `mapper_to0` now reads function defaults/case guards through arena sparse accessors
+    keyed by owning `ExprIdx` + case index.
+  - Marshal writer now tracks current `ExprIdx` / case-owner context so `Pexp_fun` default
+    and `Case.pc_guard` serialization reads sparse entries first (with fallback).
+- Added ParseArena unit coverage for seeded sparse entries + fallback behavior after mutation.
+
+Benchmark (before):
+Run: cargo test --manifest-path compiler-rust/Cargo.toml --release --lib -- benchmark_all --ignored --nocapture
+
+  Size Tier                  Files   Faster       OK Avg Factor Min Factor Max Factor
+  -------------------------------------------------------------------------------------
+  Large (>30KB)                 14       14        0       0.80x       0.64x       0.94x
+  Medium (10-30KB)              73       73        0       0.53x       0.25x       0.77x
+  Small (1-10KB)               443      443        0       0.39x       0.13x       0.60x
+  Tiny (<1KB)                  636      636        0       0.31x       0.24x       0.67x
+
+Benchmark (after):
+Run: cargo test --manifest-path compiler-rust/Cargo.toml --release --lib -- benchmark_all --ignored --nocapture
+
+  Size Tier                  Files   Faster       OK Avg Factor Min Factor Max Factor
+  -------------------------------------------------------------------------------------
+  Large (>30KB)                 14       14        0       0.80x       0.60x       0.94x
+  Medium (10-30KB)              73       73        0       0.55x       0.24x       0.78x
+  Small (1-10KB)               443      443        0       0.39x       0.19x       0.63x
+  Tiny (<1KB)                  636      636        0       0.31x       0.26x       0.39x
+
+Overall: 1166/1166 passing (1166 faster, 0 within tolerance), 38 skipped
+
+Parity:
+  ./scripts/test_parser_ast_parity.sh --quick
+  ./scripts/test_parser_ast_parity.sh
+  SUCCESS: All 1196 files have full parity
+
+Result:
+- Side-table migration plumbing is now active in parser/mapper/marshal paths for the
+  initial sparse targets (`PexpFun.default`, `Case.pc_guard`).
+- Throughput is neutral (within benchmark noise); this step is correctness/infrastructure work.
+- No parity regressions.
+```
+
 ### Task 2.4 plan (Generalized sparse data / side tables) — ACTIVE
 
 ```

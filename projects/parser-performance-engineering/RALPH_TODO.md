@@ -43,7 +43,7 @@ These target the AST node representation, where the biggest memory and cache win
   - Enabling API work (required first):
     - [x] Add reserve/initialize APIs for expression/pattern/core_type/module node arenas (or equivalent builder APIs that guarantee stable early index assignment).
     - [x] Add sparse side tables in `ParseArena` keyed by node indices for initial `ExprIdx` owners (`PexpFun.default`, `Case.pc_guard`) with explicit reset semantics on expression slot initialization.
-    - [ ] Thread parser/PPX/mapper/marshal paths to populate and consume the new side tables (migration work still pending).
+    - [x] Thread parser/PPX/mapper/marshal paths to populate and consume the new side tables.
   - Migration order (must stay in this order):
     - Parser construction paths
     - PPX / JSX transforms

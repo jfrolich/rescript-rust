@@ -135,7 +135,7 @@ impl Marshal for ExprIdx {
         let expr: &Expression = unsafe {
             &*(w.get_arena().get_expr(*self) as *const Expression)
         };
-        expr.marshal(w);
+        w.with_current_expr_idx(*self, |w| expr.marshal(w));
     }
 }
 

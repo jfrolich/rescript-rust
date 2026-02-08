@@ -1607,13 +1607,42 @@ impl ParseArena {
         }
     }
 
+    fn extract_fun_default(expr: &Expression) -> Option<ExprIdx> {
+        match &*expr.pexp_desc {
+            ExpressionDesc::Pexp_fun(inner) => inner.default,
+            _ => None,
+        }
+    }
+
+    fn extract_case_guards(expr: &Expression) -> Option<Box<[Option<ExprIdx>]>> {
+        match &*expr.pexp_desc {
+            ExpressionDesc::Pexp_match(inner) | ExpressionDesc::Pexp_try(inner) => {
+                let (_, cases) = &**inner;
+                if cases.iter().all(|case| case.pc_guard.is_none()) {
+                    None
+                } else {
+                    Some(
+                        cases
+                            .iter()
+                            .map(|case| case.pc_guard)
+                            .collect::<Vec<_>>()
+                            .into_boxed_slice(),
+                    )
+                }
+            }
+            _ => None,
+        }
+    }
+
     /// Push an expression into the arena and return its index.
     /// Use this instead of `Box::new(expr)` for recursive AST references.
     #[inline]
     pub fn push_expr(&mut self, expr: Expression) -> ExprIdx {
+        let default = Self::extract_fun_default(&expr);
+        let case_guards = Self::extract_case_guards(&expr);
         let idx = self.expressions.push(expr);
-        self.expr_fun_defaults.push(None);
-        self.expr_case_guards.push(None);
+        self.expr_fun_defaults.push(default);
+        self.expr_case_guards.push(case_guards);
         idx
     }
 
@@ -1635,9 +1664,11 @@ impl ParseArena {
         let slot = idx.0 as usize;
         debug_assert!(slot < self.expr_fun_defaults.len());
         debug_assert!(slot < self.expr_case_guards.len());
+        let default = Self::extract_fun_default(&expr);
+        let case_guards = Self::extract_case_guards(&expr);
         self.expressions.initialize(idx, expr);
-        self.expr_fun_defaults[slot] = None;
-        self.expr_case_guards[slot] = None;
+        self.expr_fun_defaults[slot] = default;
+        self.expr_case_guards[slot] = case_guards;
     }
 
     /// Get an expression by index.
@@ -1649,6 +1680,13 @@ impl ParseArena {
     /// Get a mutable expression by index.
     #[inline]
     pub fn get_expr_mut(&mut self, idx: ExprIdx) -> &mut Expression {
+        let slot = idx.0 as usize;
+        if slot < self.expr_fun_defaults.len() {
+            self.expr_fun_defaults[slot] = None;
+        }
+        if slot < self.expr_case_guards.len() {
+            self.expr_case_guards[slot] = None;
+        }
         self.expressions.get_mut(idx)
     }
 
@@ -1670,10 +1708,15 @@ impl ParseArena {
 
     /// Get sparse function default data for a `Pexp_fun` expression node.
     pub fn fun_default(&self, owner: ExprIdx) -> Option<ExprIdx> {
+        let slot = owner.0 as usize;
         self.expr_fun_defaults
-            .get(owner.0 as usize)
+            .get(slot)
             .copied()
             .flatten()
+            .or_else(|| match &*self.get_expr(owner).pexp_desc {
+                ExpressionDesc::Pexp_fun(inner) => inner.default,
+                _ => None,
+            })
     }
 
     /// Attach sparse case guard data to a `Pexp_match`/`Pexp_try` expression node.
@@ -1684,7 +1727,7 @@ impl ParseArena {
         if slot >= self.expr_case_guards.len() {
             self.expr_case_guards.resize(slot + 1, None);
         }
-        self.expr_case_guards[slot] = if guards.is_empty() {
+        self.expr_case_guards[slot] = if guards.is_empty() || guards.iter().all(|g| g.is_none()) {
             None
         } else {
             Some(guards.into_boxed_slice())
@@ -1704,6 +1747,13 @@ impl ParseArena {
             .and_then(|guards| guards.get(case_index))
             .copied()
             .flatten()
+            .or_else(|| match &*self.get_expr(owner).pexp_desc {
+                ExpressionDesc::Pexp_match(inner) | ExpressionDesc::Pexp_try(inner) => {
+                    let (_, cases) = &**inner;
+                    cases.get(case_index).and_then(|case| case.pc_guard)
+                }
+                _ => None,
+            })
     }
 
     /// Push a pattern into the arena and return its index.
@@ -1901,7 +1951,7 @@ impl<T> Located<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::parser::ast::{Attributes, ExpressionDesc};
+    use crate::parser::ast::{ArgLabel, Attributes, Case, ExpressionDesc, Pattern, PatternDesc, PexpFun};
 
     fn ident_expr(arena: &mut ParseArena, name: &str) -> Expression {
         let lid = arena.push_lident(name);
@@ -2075,6 +2125,66 @@ mod tests {
         assert_eq!(arena.case_guard(owner, 0), None);
         assert_eq!(arena.case_guard(owner, 1), Some(guard_expr));
         assert_eq!(arena.case_guard(owner, 2), None);
+    }
+
+    #[test]
+    fn test_sparse_expr_side_tables_seed_from_expr_and_fallback_after_mutation() {
+        let mut arena = ParseArena::new();
+
+        let lhs = arena.push_pat(Pattern {
+            ppat_desc: Box::new(PatternDesc::Ppat_any),
+            ppat_loc: LocIdx::default(),
+            ppat_attributes: Attributes::new(),
+        });
+        let rhs_expr = ident_expr(&mut arena, "rhs");
+        let rhs = arena.push_expr(rhs_expr);
+        let default_expr_node = ident_expr(&mut arena, "default");
+        let default_expr = arena.push_expr(default_expr_node);
+        let fun_owner = arena.push_expr(Expression {
+            pexp_desc: Box::new(ExpressionDesc::Pexp_fun(Box::new(PexpFun {
+                arg_label: ArgLabel::Nolabel,
+                default: Some(default_expr),
+                lhs,
+                rhs,
+                arity: arena.static_arity_none(),
+                is_async: false,
+            }))),
+            pexp_loc: LocIdx::default(),
+            pexp_attributes: Attributes::new(),
+        });
+
+        let case_lhs = arena.push_pat(Pattern {
+            ppat_desc: Box::new(PatternDesc::Ppat_any),
+            ppat_loc: LocIdx::default(),
+            ppat_attributes: Attributes::new(),
+        });
+        let case_rhs_node = ident_expr(&mut arena, "case_rhs");
+        let case_rhs = arena.push_expr(case_rhs_node);
+        let guard_expr_node = ident_expr(&mut arena, "guard");
+        let guard_expr = arena.push_expr(guard_expr_node);
+        let match_owner = arena.push_expr(Expression {
+            pexp_desc: Box::new(ExpressionDesc::Pexp_match(Box::new((
+                rhs,
+                vec![Case {
+                    pc_bar: None,
+                    pc_lhs: case_lhs,
+                    pc_guard: Some(guard_expr),
+                    pc_rhs: case_rhs,
+                }],
+            )))),
+            pexp_loc: LocIdx::default(),
+            pexp_attributes: Attributes::new(),
+        });
+
+        assert_eq!(arena.fun_default(fun_owner), Some(default_expr));
+        assert_eq!(arena.case_guard(match_owner, 0), Some(guard_expr));
+
+        // get_expr_mut clears sparse cache entries; fallback to inline fields must preserve behavior.
+        let _ = arena.get_expr_mut(fun_owner);
+        let _ = arena.get_expr_mut(match_owner);
+
+        assert_eq!(arena.fun_default(fun_owner), Some(default_expr));
+        assert_eq!(arena.case_guard(match_owner, 0), Some(guard_expr));
     }
 
     #[test]
