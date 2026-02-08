@@ -933,7 +933,7 @@ fn transform_react_component_with_props_binding(
                 pvb_expr: wrapper_expr,
                 pvb_attributes: Attributes::new(),
                 pvb_loc: empty_loc(),
-            }], Box::new(Expression {
+            }], arena.push_expr(Expression {
                 pexp_desc: Box::new(ExpressionDesc::Pexp_ident(Loc {
                     txt: arena.push_longident(Longident::Lident(full_module_name_idx2)),
                     loc: empty_loc(),
@@ -2742,13 +2742,19 @@ fn transform_module_expr(mexpr: ModuleExpr, config: &mut JsxConfig, arena: &mut 
                 ModuleExprDesc::Pmod_functor(inner)
             }
             ModuleExprDesc::Pmod_apply(m1, m2) => {
+                let m1_expr = arena.get_mod_expr(m1).clone();
+                let m2_expr = arena.get_mod_expr(m2).clone();
+                let m1_transformed = transform_module_expr(m1_expr, config, arena);
+                let m2_transformed = transform_module_expr(m2_expr, config, arena);
                 ModuleExprDesc::Pmod_apply(
-                    Box::new(transform_module_expr(*m1, config, arena)),
-                    Box::new(transform_module_expr(*m2, config, arena)),
+                    arena.push_mod_expr(m1_transformed),
+                    arena.push_mod_expr(m2_transformed),
                 )
             }
             ModuleExprDesc::Pmod_constraint(m, mt) => {
-                ModuleExprDesc::Pmod_constraint(Box::new(transform_module_expr(*m, config, arena)), mt)
+                let m_expr = arena.get_mod_expr(m).clone();
+                let m_transformed = transform_module_expr(m_expr, config, arena);
+                ModuleExprDesc::Pmod_constraint(arena.push_mod_expr(m_transformed), mt)
             }
             other => other,
         }),
@@ -2780,19 +2786,27 @@ fn transform_expression(expr: Expression, config: &JsxConfig, arena: &mut ParseA
         }
         ExpressionDesc::Pexp_fun(inner) => {
             let PexpFun { arg_label, default, lhs, rhs, is_async, arity } = *inner;
+            let rhs_expr = arena.get_expr(rhs).clone();
+            let transformed_rhs = transform_expression(rhs_expr, config, arena);
+            let transformed_default = default.map(|d| {
+                let d_expr = arena.get_expr(d).clone();
+                arena.push_expr(transform_expression(d_expr, config, arena))
+            });
             ExpressionDesc::Pexp_fun(Box::new(PexpFun {
                 arg_label,
-                default: default.map(|d| Box::new(transform_expression(*d, config, arena))),
+                default: transformed_default,
                 lhs,
-                rhs: Box::new(transform_expression(*rhs, config, arena)),
+                rhs: arena.push_expr(transformed_rhs),
                 is_async,
                 arity,
             }))
         }
         ExpressionDesc::Pexp_apply(inner) => {
             let PexpApply { funct, args, partial, transformed_jsx } = *inner;
+            let funct_expr = arena.get_expr(funct).clone();
+            let transformed_funct = transform_expression(funct_expr, config, arena);
             ExpressionDesc::Pexp_apply(Box::new(PexpApply {
-                funct: Box::new(transform_expression(*funct, config, arena)),
+                funct: arena.push_expr(transformed_funct),
                 args: args.into_iter().map(|(lbl, e)| (lbl, transform_expression(e, config, arena))).collect(),
                 partial,
                 transformed_jsx,
@@ -2812,7 +2826,10 @@ fn transform_expression(expr: Expression, config: &JsxConfig, arena: &mut ParseA
         ExpressionDesc::Pexp_construct(lid, arg) => {
             ExpressionDesc::Pexp_construct(
                 lid,
-                arg.map(|e| Box::new(transform_expression(*e, config, arena))),
+                arg.map(|e| {
+                    let e_expr = arena.get_expr(e).clone();
+                    arena.push_expr(transform_expression(e_expr, config, arena))
+                }),
             )
         }
         ExpressionDesc::Pexp_variant(inner) => {
@@ -2820,14 +2837,20 @@ fn transform_expression(expr: Expression, config: &JsxConfig, arena: &mut ParseA
         }
         ExpressionDesc::Pexp_record(inner) => {
             let (fields, base) = *inner;
+            let transformed_base = base.map(|e| {
+                let e_expr = arena.get_expr(e).clone();
+                arena.push_expr(transform_expression(e_expr, config, arena))
+            });
             ExpressionDesc::Pexp_record(Box::new((fields.into_iter().map(|f| ExpressionRecordField {
                     lid: f.lid,
                     expr: transform_expression(f.expr, config, arena),
                     opt: f.opt,
-                }).collect(), base.map(|e| Box::new(transform_expression(*e, config, arena))))))
+                }).collect(), transformed_base)))
         }
         ExpressionDesc::Pexp_field(obj, field) => {
-            ExpressionDesc::Pexp_field(Box::new(transform_expression(*obj, config, arena)), field)
+            let obj_expr = arena.get_expr(obj).clone();
+            let transformed_obj = transform_expression(obj_expr, config, arena);
+            ExpressionDesc::Pexp_field(arena.push_expr(transformed_obj), field)
         }
         ExpressionDesc::Pexp_setfield(inner) => {
             ExpressionDesc::Pexp_setfield(inner)
@@ -2841,15 +2864,23 @@ fn transform_expression(expr: Expression, config: &JsxConfig, arena: &mut ParseA
             ExpressionDesc::Pexp_ifthenelse(inner)
         }
         ExpressionDesc::Pexp_sequence(e1, e2) => {
+            let e1_expr = arena.get_expr(e1).clone();
+            let e2_expr = arena.get_expr(e2).clone();
+            let t1 = transform_expression(e1_expr, config, arena);
+            let t2 = transform_expression(e2_expr, config, arena);
             ExpressionDesc::Pexp_sequence(
-                Box::new(transform_expression(*e1, config, arena)),
-                Box::new(transform_expression(*e2, config, arena)),
+                arena.push_expr(t1),
+                arena.push_expr(t2),
             )
         }
         ExpressionDesc::Pexp_while(cond, body) => {
+            let cond_expr = arena.get_expr(cond).clone();
+            let body_expr = arena.get_expr(body).clone();
+            let tc = transform_expression(cond_expr, config, arena);
+            let tb = transform_expression(body_expr, config, arena);
             ExpressionDesc::Pexp_while(
-                Box::new(transform_expression(*cond, config, arena)),
-                Box::new(transform_expression(*body, config, arena)),
+                arena.push_expr(tc),
+                arena.push_expr(tb),
             )
         }
         ExpressionDesc::Pexp_for(inner) => {
@@ -2868,14 +2899,18 @@ fn transform_expression(expr: Expression, config: &JsxConfig, arena: &mut ParseA
             ExpressionDesc::Pexp_letexception(inner)
         }
         ExpressionDesc::Pexp_assert(e) => {
-            ExpressionDesc::Pexp_assert(Box::new(transform_expression(*e, config, arena)))
+            let e_expr = arena.get_expr(e).clone();
+            let transformed = transform_expression(e_expr, config, arena);
+            ExpressionDesc::Pexp_assert(arena.push_expr(transformed))
         }
         ExpressionDesc::Pexp_newtype(inner) => {
             ExpressionDesc::Pexp_newtype(inner)
         }
         ExpressionDesc::Pexp_pack(mexpr) => {
             let mut config_clone = config.clone();
-            ExpressionDesc::Pexp_pack(Box::new(transform_module_expr(*mexpr, &mut config_clone, arena)))
+            let mexpr_val = arena.get_mod_expr(mexpr).clone();
+            let transformed = transform_module_expr(mexpr_val, &mut config_clone, arena);
+            ExpressionDesc::Pexp_pack(arena.push_mod_expr(transformed))
         }
         ExpressionDesc::Pexp_open(inner) => {
             ExpressionDesc::Pexp_open(inner)

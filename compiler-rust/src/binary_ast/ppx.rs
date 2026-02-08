@@ -616,7 +616,7 @@ fn get_final_result_type<'a>(typ: &'a CoreType, arena: &'a ParseArena) -> &'a Co
 /// The guard `arity = None || acc = []` means:
 /// - Always descend for the first arrow (acc is empty)
 /// - For subsequent arrows, only descend if arity is None
-fn list_of_arrow<'a>(typ: &'a CoreType, arena: &ParseArena) -> (Vec<&'a TypeArg>, &'a CoreType) {
+fn list_of_arrow<'a>(typ: &'a CoreType, arena: &'a ParseArena) -> (Vec<&'a TypeArg>, &'a CoreType) {
     let mut args = Vec::new();
     let mut current = typ;
     loop {
