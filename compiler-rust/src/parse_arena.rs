@@ -357,6 +357,8 @@ pub struct StaticArrayLidents {
 ///
 /// OCaml reuses these longident constants (`Js.typeof`, `Js.undefinedToOption`,
 /// `Js.Undefined`, `Js.Undefined.empty`) across `%external` rewrites.
+/// It also reuses `Ast_literal.Lid.js_oo` and `Ast_literal.Lid.js_meth_callback`
+/// across `@this` callback rewrites.
 #[derive(Debug, Clone, Copy)]
 pub struct StaticPpxLidents {
     pub js_lident: LidentIdx,
@@ -364,6 +366,8 @@ pub struct StaticPpxLidents {
     pub js_undefined_to_option: LidentIdx,
     pub js_undefined: LidentIdx,
     pub js_undefined_empty: LidentIdx,
+    pub js_oo_lident: LidentIdx,
+    pub js_oo_callback: LidentIdx,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -488,6 +492,9 @@ pub struct ParseArena {
     /// StrIdx values whose Lident wrappers should be shared by value during marshalling.
     /// This is used for internal PPX nodes that reuse a common prefix (e.g. `Spice`).
     longident_shareable_strs: HashSet<StrIdx>,
+    /// Optional parent `LidentIdx` for `Ldot` nodes created via `push_ldot*`.
+    /// This preserves prefix identity during marshal writing for PPX-generated paths.
+    ldot_prefix_idx_table: HashMap<LidentIdx, LidentIdx>,
     /// String arena for all identifier strings.
     ///
     /// Strings can be added in two ways:
@@ -632,13 +639,29 @@ impl Default for ParseArena {
             )),
             ppx_empty_field_str,
         ));
+        let ppx_js_oo_str = strings.intern("Js_OO");
+        let ppx_callback_str = strings.intern("Callback");
+        let ppx_js_oo_lident = longidents.push(Longident::Lident(ppx_js_oo_str));
+        lident_dedup.insert(ppx_js_oo_str, ppx_js_oo_lident);
+        let ppx_js_oo_callback = longidents.push(Longident::Ldot(
+            Box::new(Longident::Lident(ppx_js_oo_str)),
+            ppx_callback_str,
+        ));
         let static_ppx_lidents = StaticPpxLidents {
             js_lident: ppx_js_lident,
             js_typeof: ppx_js_typeof,
             js_undefined_to_option: ppx_js_undefined_to_option,
             js_undefined: ppx_js_undefined,
             js_undefined_empty: ppx_js_undefined_empty,
+            js_oo_lident: ppx_js_oo_lident,
+            js_oo_callback: ppx_js_oo_callback,
         };
+        let mut ldot_prefix_idx_table = HashMap::new();
+        ldot_prefix_idx_table.insert(ppx_js_typeof, ppx_js_lident);
+        ldot_prefix_idx_table.insert(ppx_js_undefined_to_option, ppx_js_lident);
+        ldot_prefix_idx_table.insert(ppx_js_undefined, ppx_js_lident);
+        ldot_prefix_idx_table.insert(ppx_js_undefined_empty, ppx_js_undefined);
+        ldot_prefix_idx_table.insert(ppx_js_oo_callback, ppx_js_oo_lident);
 
         // Pre-allocate static array operation lidents.
         // OCaml's native code compiler promotes these constant expressions to
@@ -732,6 +755,7 @@ impl Default for ParseArena {
             position_dedup: HashMap::new(),
             lident_dedup,
             longident_shareable_strs: HashSet::new(),
+            ldot_prefix_idx_table,
             strings,
             prim_empty_external_ffi,
             prim_empty_js_mapper,
@@ -1241,6 +1265,20 @@ impl ParseArena {
             .push(Longident::Ldot(Box::new(prefix_lid), str_idx))
     }
 
+    /// Push a dotted identifier (Ldot) and remember the parent index for marshal sharing.
+    ///
+    /// Use this only when OCaml reuses the same prefix pointer and Rust must preserve
+    /// that identity across generated nodes (e.g. `Js_OO.Callback.arityN` in `@this` rewrites).
+    pub fn push_ldot_tracked(&mut self, prefix: LidentIdx, name: &str) -> LidentIdx {
+        let str_idx = self.strings.push_interned(name);
+        let prefix_lid = self.get_longident(prefix).clone();
+        let idx = self
+            .longidents
+            .push(Longident::Ldot(Box::new(prefix_lid), str_idx));
+        self.ldot_prefix_idx_table.insert(idx, prefix);
+        idx
+    }
+
     /// Push a functor application (Lapply) into the arena.
     pub fn push_lapply(&mut self, functor: LidentIdx, arg: LidentIdx) -> LidentIdx {
         let func_lid = self.get_longident(functor).clone();
@@ -1252,6 +1290,11 @@ impl ParseArena {
     /// Look up a longident by index.
     pub fn get_longident(&self, idx: LidentIdx) -> &Longident {
         self.longidents.get(idx)
+    }
+
+    /// Get the parent prefix index for an `Ldot` created via `push_ldot*`.
+    pub fn ldot_prefix_idx(&self, idx: LidentIdx) -> Option<LidentIdx> {
+        self.ldot_prefix_idx_table.get(&idx).copied()
     }
 
     /// Get total number of longidents.
@@ -1424,6 +1467,14 @@ impl ParseArena {
 
     pub fn ppx_js_undefined_empty_lid(&self) -> LidentIdx {
         self.static_ppx_lidents.js_undefined_empty
+    }
+
+    pub fn ppx_js_oo_lident(&self) -> LidentIdx {
+        self.static_ppx_lidents.js_oo_lident
+    }
+
+    pub fn ppx_js_oo_callback_lid(&self) -> LidentIdx {
+        self.static_ppx_lidents.js_oo_callback
     }
 
     // ========================================================================

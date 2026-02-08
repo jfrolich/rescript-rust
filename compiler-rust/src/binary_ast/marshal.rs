@@ -1184,6 +1184,25 @@ impl MarshalWriter {
         // manually-special-cased Ldot constructions below.
         let mut obj_idx = self.obj_counter;
 
+        // For Ldot nodes created via ParseArena::push_ldot*, preserve the original
+        // prefix index identity instead of recursing by value. This mirrors OCaml's
+        // pointer-sharing when transformations reuse a shared prefix value.
+        let ldot_with_prefix_idx = {
+            let arena = self.get_arena();
+            match (arena.ldot_prefix_idx(idx), arena.get_longident(idx)) {
+                (Some(prefix_idx), Longident::Ldot(_, name)) => Some((prefix_idx, *name)),
+                _ => None,
+            }
+        };
+        if let Some((prefix_idx, name)) = ldot_with_prefix_idx {
+            self.write_ldot_with_prefix_idx(prefix_idx, name);
+            self.lident_idx_table.insert(idx, obj_idx);
+            if let Some(name_idx) = string_lident_key {
+                self.string_lident_table.entry(name_idx).or_insert(obj_idx);
+            }
+            return true;
+        }
+
         // Special-case static longidents that share prefix nodes in OCaml.
         let array_set = self.get_arena().array_set_lid();
         let array_get = self.get_arena().array_get_lid();

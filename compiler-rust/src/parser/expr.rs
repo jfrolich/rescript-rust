@@ -4219,7 +4219,7 @@ fn parse_let_in_block_with_continuation_and_attrs(
         let typ = if is_locally_abstract {
             super::typ::parse_locally_abstract_type(p)
         } else {
-            super::typ::parse_typ_expr(p)
+            super::typ::parse_poly_type_expr(p)
         };
 
         // Extract type variables and inner type if this is a Ptyp_poly from `type a.` syntax
@@ -4369,7 +4369,7 @@ fn parse_let_in_block_with_continuation_and_attrs(
         // Handle optional type annotation
         let pat = if p.token == Token::Colon {
             p.next();
-            let typ = super::typ::parse_typ_expr(p);
+            let typ = super::typ::parse_poly_type_expr(p);
             let loc = p.mk_loc_spanning(pat.ppat_loc, typ.ptyp_loc);
             let pat_idx = p.arena_mut().push_pat(pat);
             let typ_idx = p.arena_mut().push_core_type(typ);
@@ -5163,7 +5163,7 @@ fn parse_let_in_switch_case(p: &mut Parser<'_>) -> Expression {
     // Handle optional type annotation: let x: int = ...
     let first_pat = if p.token == Token::Colon {
         p.next();
-        let typ = super::typ::parse_typ_expr(p);
+        let typ = super::typ::parse_poly_type_expr(p);
         // Create a constraint pattern
         let loc = p.mk_loc_spanning(first_pat.ppat_loc, typ.ptyp_loc);
         let pat_idx = p.arena_mut().push_pat(first_pat);
@@ -5212,7 +5212,7 @@ fn parse_let_in_switch_case(p: &mut Parser<'_>) -> Expression {
         // Handle optional type annotation
         let pat = if p.token == Token::Colon {
             p.next();
-            let typ = super::typ::parse_typ_expr(p);
+            let typ = super::typ::parse_poly_type_expr(p);
             let loc = p.mk_loc_spanning(pat.ppat_loc, typ.ptyp_loc);
             let pat_idx = p.arena_mut().push_pat(pat);
             let typ_idx = p.arena_mut().push_core_type(typ);

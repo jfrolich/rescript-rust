@@ -30,9 +30,9 @@
 | sexp-locs (syntax scope) | 1196/1196 (100%) ✅ |
 | sexp-locs-ppx (syntax scope) | 1196/1196 (100%) ✅ |
 | bsc-ast (syntax scope) | 1196/1196 (100%) ✅ |
-| sexp-locs (full scope: syntax + TELLA) | 3364/3373 (99.7%) |
-| sexp-locs-ppx (full scope: syntax + TELLA) | 2794/3373 (82.8%) |
-| bsc-ast (full scope: syntax + TELLA) | 593 diffs (OCaml parser failures: 11, Rust parser failures: 20) |
+| sexp-locs (full scope: syntax + TELLA) | 3365/3373 (99.8%) |
+| sexp-locs-ppx (full scope: syntax + TELLA) | 2800/3373 (83.0%) |
+| bsc-ast (full scope: syntax + TELLA) | 589 diffs (OCaml parser failures: 11, Rust parser failures: 20) |
 
 **Scope note:** Final parity targets include both `tests/syntax_tests/data` and `TELLA_DIR`
 when present. Always report parity as `X/Y` where `Y` contains only OCaml-successful files.
@@ -41,6 +41,24 @@ Files where OCaml fails are excluded from parity denominators and listed separat
 **Snapshot note:** The `1179` denominator above is a historical in-repo snapshot.
 
 **Session progress (2026-02-08) - newest:**
+- Fixed OCaml/Rust parity for `@this` callback/type rewrite identity and optional external arg encoding:
+  - Mirrored OCaml `get_opt_arg_type` behavior in `build_arg_type_specs` so optional args
+    use `spec_of_ptyp` (`@unwrap` included) instead of being hardcoded to `Nothing`.
+  - Added static `Js_OO` / `Js_OO.Callback` PPX longident identities and reused them in
+    `rewrite_core_type` + `rewrite_method_callback_expression`.
+  - Added targeted marshal prefix-index sharing for tracked `Js_OO.Callback.arityN`
+    longidents and static PPX `Ldot` constants (without broad global Ldot tracking).
+  - Updated parser let annotation parity (`parse_poly_type_expr` in expression-let paths),
+    matching OCaml’s polymorphic let annotation parsing.
+  - `inspect_binary_ast.py test` now passes byte-identically for:
+    `/Users/jaapf/dev/tella-fusion/node_modules/rescript-webapi/src/Webapi/Dom/Webapi__Dom__HtmlOptionsCollection.res`,
+    `/Users/jaapf/dev/tella-fusion/node_modules/rescript-nodejs/src/Stream.res`,
+    `/Users/jaapf/dev/tella-fusion/node_modules/rescript-webapi/src/Webapi/Canvas/Webapi__Canvas__Canvas2d.res`.
+  - Full-scope run improved:
+    - `sexp-locs differences: 9 -> 8`
+    - `sexp-locs-ppx differences: 579 -> 573`
+    - `bsc-ast differences: 593 -> 589`
+
 - Fixed OCaml/Rust `@deriving` attribute ordering + `@deriving(abstract)` core-type attrs:
   - OCaml `Ast_attributes.process_derive_type` uses `fold_left` with `attr :: acc`,
     so non-`@deriving` attrs are reversed after stripping `@deriving`.

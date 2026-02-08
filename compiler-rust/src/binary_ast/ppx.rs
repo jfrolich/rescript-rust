@@ -259,10 +259,11 @@ fn build_arg_type_specs(typ: &CoreType, arena: &mut ParseArena) -> (Params, usiz
     for arg in &args {
         let (label_noname, arg_type) = match &arg.lbl {
             ArgLabel::Optional(_) => {
-                // Optional args: get_opt_arg_type
-                // For now, simplified: mark as Arg_optional, Nothing
+                // Optional args: mirror OCaml's get_opt_arg_type path.
+                let arg_typ = arena.get_core_type(arg.typ).clone();
+                let arg_type = get_opt_arg_type(false, &arg_typ, arena);
                 all_simple = false;
-                (LabelNoname::ArgOptional, Attr::Nothing)
+                (LabelNoname::ArgOptional, arg_type)
             }
             ArgLabel::Labelled(_) => {
                 // Labeled args
@@ -831,7 +832,8 @@ fn process_obj_type(
                 let field_name = get_as_string_attr(&arg.attrs, arena)
                     .unwrap_or_else(|| label_name.clone());
 
-                let arg_type = get_opt_arg_type(false, arena.get_core_type(arg.typ), arena);
+                let arg_typ = arena.get_core_type(arg.typ).clone();
+                let arg_type = get_opt_arg_type(false, &arg_typ, arena);
 
                 match arg_type {
                     Attr::Ignore => {
@@ -939,29 +941,10 @@ fn process_obj_type(
 
 /// Get optional arg type (for Optional labels).
 /// Mirrors OCaml's get_opt_arg_type.
-fn get_opt_arg_type(_nolabel: bool, typ: &CoreType, arena: &ParseArena) -> Attr {
-    // Check for special attributes
-    let attr_type = check_type_ffi_attrs(typ, arena);
-    match attr_type {
-        Some("ignore") => Attr::Ignore,
-        Some("int") => {
-            if let CoreTypeDesc::Ptyp_variant(variant_inner) = &*typ.ptyp_desc { let (ref row_fields, _, _) = **variant_inner;
-                let int_list = map_row_fields_into_ints(row_fields, arena);
-                return Attr::Int(int_list);
-            }
-            Attr::Nothing
-        }
-        Some("string") => {
-            if let CoreTypeDesc::Ptyp_variant(variant_inner) = &*typ.ptyp_desc { let (ref row_fields, _, _) = **variant_inner;
-                let (has_as, descr) = map_row_fields_into_strings(row_fields, arena);
-                if has_as {
-                    return Attr::PolyVarString { descr };
-                }
-            }
-            Attr::Nothing
-        }
-        _ => Attr::Nothing,
-    }
+fn get_opt_arg_type(nolabel: bool, typ: &CoreType, arena: &mut ParseArena) -> Attr {
+    // OCaml get_opt_arg_type delegates to spec_of_ptyp after validating
+    // optional underscore usage; the attr classification itself is spec_of_ptyp.
+    spec_of_ptyp(nolabel, typ, arena)
 }
 
 /// Wrap a type in Js.undefined<T>.
@@ -1575,7 +1558,8 @@ fn build_obj_ffi_type(typ: &CoreType, arena: &mut ParseArena) -> FfiType {
                 let field_name = get_as_string_attr(&arg.attrs, arena)
                     .unwrap_or_else(|| label_name.clone());
 
-                let arg_type = get_opt_arg_type(false, arena.get_core_type(arg.typ), arena);
+                let arg_typ = arena.get_core_type(arg.typ).clone();
+                let arg_type = get_opt_arg_type(false, &arg_typ, arena);
 
                 match arg_type {
                     Attr::Ignore => {
@@ -3820,10 +3804,14 @@ fn rewrite_payload(payload: &Payload, arena: &mut ParseArena) -> Payload {
     }
 }
 
+fn has_this_attr(attrs: &[Attribute], arena: &ParseArena) -> bool {
+    attrs.iter().any(|(name, _)| arena.get_string(name.txt) == "this")
+}
+
 /// Rewrite a core type, recursing into nested types and extension payloads.
 /// This matches OCaml's default_mapper.typ behavior, ensuring that expressions
 /// inside Ptyp_extension payloads get the "js" -> "*j" delimiter transformation.
-fn rewrite_core_type(typ: &CoreType, arena: &mut ParseArena) -> CoreType {
+fn rewrite_core_type_default(typ: &CoreType, arena: &mut ParseArena) -> CoreType {
     let new_desc = match &*typ.ptyp_desc {
         CoreTypeDesc::Ptyp_extension(ext) => {
             let (name, payload) = &**ext;
@@ -3958,6 +3946,35 @@ fn rewrite_core_type(typ: &CoreType, arena: &mut ParseArena) -> CoreType {
         ptyp_loc: typ.ptyp_loc,
         ptyp_attributes: rewrite_attributes(&typ.ptyp_attributes, arena).into(),
     }
+}
+
+/// Rewrite core types with the same `@this` callback handling as OCaml's typ_mapper:
+/// `@this` on an uncurried arrow wraps the type in `Js_OO.Callback.arityN`.
+fn rewrite_core_type(typ: &CoreType, arena: &mut ParseArena) -> CoreType {
+    if let CoreTypeDesc::Ptyp_arrow(inner) = &*typ.ptyp_desc {
+        let (_arg, _ret, arity) = &**inner;
+        if has_this_attr(&typ.ptyp_attributes, arena) {
+            let arity_num = arena
+                .get_arity(*arity)
+                .expect("@this attribute requires an uncurried arrow with arity");
+            let meth_type = rewrite_core_type_default(typ, arena);
+            let callback = arena.ppx_js_oo_callback_lid();
+            let callback_arity = arena.push_ldot_tracked(callback, format!("arity{arity_num}").as_str());
+            return CoreType {
+                ptyp_desc: Box::new(CoreTypeDesc::Ptyp_constr(Box::new((
+                    Located {
+                        txt: callback_arity,
+                        loc: typ.ptyp_loc,
+                    },
+                    vec![arena.push_core_type(meth_type)],
+                )))),
+                // OCaml's Ast_helper.Typ.constr default location is Location.none (ghost).
+                ptyp_loc: arena.none_loc(),
+                ptyp_attributes: Attributes::new(),
+            };
+        }
+    }
+    rewrite_core_type_default(typ, arena)
 }
 
 /// Rewrite a type declaration, transforming strings in all nested attributes and types
@@ -4367,6 +4384,188 @@ fn async_lhs_loc(lhs: &Pattern, arena: &ParseArena) -> LocIdx {
     lhs.ppat_loc
 }
 
+fn split_this_attrs(attrs: &[Attribute], arena: &ParseArena) -> (bool, Vec<Attribute>) {
+    let mut has_this = false;
+    let mut remaining = Vec::new();
+    for attr in attrs {
+        if arena.get_string(attr.0.txt) == "this" {
+            has_this = true;
+        } else {
+            remaining.push(attr.clone());
+        }
+    }
+    // OCaml's process_attributes_rev uses fold_left with cons, so non-"this" attrs are reversed.
+    remaining.reverse();
+    (has_this, remaining)
+}
+
+/// Mirrors OCaml's ast_uncurry_gen.to_method_callback for `fun [@this]`.
+fn rewrite_method_callback_expression(
+    expr: &Expression,
+    arg_label: &ArgLabel,
+    lhs: PatIdx,
+    rhs: ExprIdx,
+    is_async: bool,
+    filtered_attrs: Vec<Attribute>,
+    arena: &mut ParseArena,
+) -> Expression {
+    let loc = expr.pexp_loc;
+    let self_pat = arena.get_pat(lhs).clone();
+    let rewritten_self_pat = rewrite_pattern(&self_pat, arena);
+
+    let mut rev_extra_args: Vec<(ArgLabel, Pattern, Vec<Attribute>, bool)> = vec![(
+        arg_label.clone(),
+        rewritten_self_pat,
+        vec![],
+        false,
+    )];
+
+    let mut current_body = arena.get_expr(rhs).clone();
+    let result = loop {
+        let (has_this_attr, body_attrs) = split_this_attrs(&current_body.pexp_attributes, arena);
+        if has_this_attr {
+            break rewrite_expression(&current_body, arena);
+        }
+        match &*current_body.pexp_desc {
+            ExpressionDesc::Pexp_fun(inner) => {
+                let PexpFun {
+                    arg_label: inner_label,
+                    lhs: inner_lhs,
+                    rhs: inner_rhs,
+                    is_async: inner_async,
+                    ..
+                } = &**inner;
+                let inner_pat = arena.get_pat(*inner_lhs).clone();
+                let rewritten_inner_pat = rewrite_pattern(&inner_pat, arena);
+                rev_extra_args.push((
+                    inner_label.clone(),
+                    rewritten_inner_pat,
+                    body_attrs,
+                    *inner_async,
+                ));
+                current_body = arena.get_expr(*inner_rhs).clone();
+            }
+            _ => break rewrite_expression(&current_body, arena),
+        }
+    };
+
+    let mut method_body = result;
+    for (label, pat, attrs, arg_async) in rev_extra_args.iter().rev() {
+        method_body = Expression {
+            pexp_desc: Box::new(ExpressionDesc::Pexp_fun(Box::new(PexpFun {
+                arg_label: label.clone(),
+                default: None,
+                lhs: arena.push_pat(pat.clone()),
+                rhs: arena.push_expr(method_body),
+                arity: arena.static_arity_none(),
+                is_async: *arg_async,
+            }))),
+            pexp_loc: loc,
+            pexp_attributes: attrs.clone().into(),
+        };
+    }
+
+    let total_arity = rev_extra_args.len() as i32;
+    if let ExpressionDesc::Pexp_fun(inner) = &*method_body.pexp_desc {
+        let PexpFun {
+            arg_label: outer_label,
+            default: outer_default,
+            lhs: outer_lhs,
+            rhs: outer_rhs,
+            ..
+        } = &**inner;
+        method_body = Expression {
+            pexp_desc: Box::new(ExpressionDesc::Pexp_fun(Box::new(PexpFun {
+                arg_label: outer_label.clone(),
+                default: *outer_default,
+                lhs: *outer_lhs,
+                rhs: *outer_rhs,
+                arity: arena.push_arity(Some(total_arity)),
+                is_async,
+            }))),
+            pexp_loc: method_body.pexp_loc,
+            pexp_attributes: method_body.pexp_attributes.clone(),
+        };
+    }
+
+    if is_async {
+        let async_loc = match &*method_body.pexp_desc {
+            ExpressionDesc::Pexp_fun(inner) => {
+                let lhs_pat = arena.get_pat(inner.lhs).clone();
+                async_lhs_loc(&lhs_pat, arena)
+            }
+            _ => loc,
+        };
+        method_body = add_promise_to_fun_body(&method_body, async_loc, arena);
+    }
+
+    let js_oo = arena.ppx_js_oo_lident();
+    let unsafe_to_method = arena.push_ldot_static(js_oo, "unsafe_to_method");
+    let callback = arena.ppx_js_oo_callback_lid();
+    let callback_arity = arena.push_ldot_tracked(callback, format!("arity{total_arity}").as_str());
+
+    let hidden_field_name = format!("I{total_arity}");
+    let hidden_field = arena.push_lident(hidden_field_name.as_str());
+    let method_record = Expression {
+        pexp_desc: Box::new(ExpressionDesc::Pexp_record(Box::new((
+            vec![ExpressionRecordField {
+                lid: Located {
+                    txt: hidden_field,
+                    loc,
+                },
+                expr: arena.push_expr(method_body),
+                opt: false,
+            }],
+            None,
+        )))),
+        pexp_loc: loc,
+        pexp_attributes: Attributes::new(),
+    };
+
+    let callback_any_type = CoreType {
+        ptyp_desc: Box::new(CoreTypeDesc::Ptyp_constr(Box::new((
+            Located {
+                txt: callback_arity,
+                loc,
+            },
+            vec![arena.push_core_type(CoreType {
+                ptyp_desc: Box::new(CoreTypeDesc::Ptyp_any),
+                ptyp_loc: loc,
+                ptyp_attributes: Attributes::new(),
+            })],
+        )))),
+        ptyp_loc: loc,
+        ptyp_attributes: Attributes::new(),
+    };
+
+    let constrained_method = Expression {
+        pexp_desc: Box::new(ExpressionDesc::Pexp_constraint(Box::new((
+            arena.push_expr(method_record),
+            arena.push_core_type(callback_any_type),
+        )))),
+        pexp_loc: loc,
+        pexp_attributes: Attributes::new(),
+    };
+
+    Expression {
+        pexp_desc: Box::new(ExpressionDesc::Pexp_apply(Box::new(PexpApply {
+            funct: arena.push_expr(Expression {
+                pexp_desc: Box::new(ExpressionDesc::Pexp_ident(Located {
+                    txt: unsafe_to_method,
+                    loc,
+                })),
+                pexp_loc: loc,
+                pexp_attributes: Attributes::new(),
+            }),
+            args: vec![(ArgLabel::Nolabel, arena.push_expr(constrained_method))],
+            partial: false,
+            transformed_jsx: false,
+        }))),
+        pexp_loc: loc,
+        pexp_attributes: filtered_attrs.into(),
+    }
+}
+
 /// Rewrite an expression, desugaring pipe operators
 fn rewrite_expression(expr: &Expression, arena: &mut ParseArena) -> Expression {
     // Handle string constant transformations first
@@ -4649,6 +4848,18 @@ fn rewrite_expression_generic(expr: &Expression, arena: &mut ParseArena) -> Expr
 
         ExpressionDesc::Pexp_fun(inner) => {
             let PexpFun { ref arg_label, ref default, ref lhs, ref rhs, ref arity, ref is_async } = **inner;
+            let (has_this_attr, filtered_attrs) = split_this_attrs(&expr.pexp_attributes, arena);
+            if has_this_attr {
+                return rewrite_method_callback_expression(
+                    expr,
+                    arg_label,
+                    *lhs,
+                    *rhs,
+                    *is_async,
+                    filtered_attrs,
+                    arena,
+                );
+            }
             // First, recursively rewrite the function components
             let rewritten_default = default.map(|e| {
                 let de = arena.get_expr(e).clone();
@@ -8731,9 +8942,12 @@ fn rewrite_signature_item_no_spice(item: &SignatureItem, arena: &mut ParseArena)
             // bs_builtin_ppx.ml line 409).
             let rewritten_attrs = rewrite_attributes(&vd.pval_attributes, arena);
             if is_rs_external(&vd.pval_attributes, &vd.pval_prim, arena) {
+                // OCaml runs type mapping before external encoding.
+                let vd_type = arena.get_core_type(vd.pval_type).clone();
+                let rewritten_type = rewrite_core_type(&vd_type, arena);
                 let rewritten_vd = ValueDescription {
                     pval_name: vd.pval_name.clone(),
-                    pval_type: vd.pval_type.clone(),
+                    pval_type: arena.push_core_type(rewritten_type.clone()),
                     pval_prim: vd.pval_prim.clone(),
                     pval_attributes: rewritten_attrs.into(),
                     pval_loc: vd.pval_loc,
@@ -8741,8 +8955,8 @@ fn rewrite_signature_item_no_spice(item: &SignatureItem, arena: &mut ParseArena)
                 let encoded = encode_external(&rewritten_vd, arena);
                 // OCaml's FFI processing reconstructs the arrow type with ptyp_loc = pval_loc
                 // For @obj externals, also reconstructs Ptyp_any -> Ptyp_object.
-                let vd_type = arena.get_core_type(vd.pval_type).clone();
-                let pval_type = process_obj_type(&vd_type, vd.pval_loc, &vd.pval_attributes, arena);
+                let pval_type =
+                    process_obj_type(&rewritten_type, vd.pval_loc, &vd.pval_attributes, arena);
                 SignatureItem {
                     psig_desc: Box::new(SignatureItemDesc::Psig_value(Box::new(ValueDescription {
                         pval_prim: encoded.pval_prim,
