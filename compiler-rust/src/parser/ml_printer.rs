@@ -2687,7 +2687,8 @@ fn print_core_type_inner<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, typ
             f.close_box();
         }
         CoreTypeDesc::Ptyp_alias(inner) => {
-                    let (ref t, ref name) = **inner;
+                    let (ref t_idx, ref name) = **inner;
+            let t = arena.get_core_type(*t_idx);
             // OCaml: pp f "@[<2>%a@;as@;'%s@]" (core_type1 ctxt) ct s
             f.open_box(BoxKind::Box, 2);
             // Arrow types inside alias need parens for precedence
@@ -2792,7 +2793,8 @@ fn print_core_type_inner<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, typ
             f.close_box();
         }
         CoreTypeDesc::Ptyp_poly(inner) => {
-                    let (ref vars, ref t) = **inner;
+                    let (ref vars, ref t_idx) = **inner;
+            let t = arena.get_core_type(*t_idx);
             if vars.is_empty() {
                 // OCaml: Ptyp_poly ([], ct) -> core_type ctxt f ct
                 print_core_type(f, arena, t);

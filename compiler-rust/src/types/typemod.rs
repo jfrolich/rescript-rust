@@ -124,12 +124,13 @@ pub fn type_module_expr<'a>(
         }
 
         ParsedModuleExprDesc::Pmod_functor(inner) => {
-                    let (ref name, ref param_type, ref body) = **inner;
+                    let (ref name, ref param_type, ref body_idx) = **inner;
             // Functor: (X: S) => ME
             let param_id = Ident::create_local(arena.get_string(name.txt));
 
             // Type check the functor body
             // In a full implementation, we would extend the environment with the parameter
+            let body = arena.get_mod_expr(*body_idx);
             let typed_body = type_module_expr(tctx, env, arena, body)?;
 
             // Translate parameter type if present
@@ -151,8 +152,10 @@ pub fn type_module_expr<'a>(
             })
         }
 
-        ParsedModuleExprDesc::Pmod_apply(functor, arg) => {
+        ParsedModuleExprDesc::Pmod_apply(functor_idx, arg_idx) => {
             // Functor application: F(M)
+            let functor = arena.get_mod_expr(*functor_idx);
+            let arg = arena.get_mod_expr(*arg_idx);
             let typed_functor = type_module_expr(tctx, env, arena, functor)?;
             let typed_arg = type_module_expr(tctx, env, arena, arg)?;
 
@@ -169,8 +172,9 @@ pub fn type_module_expr<'a>(
             })
         }
 
-        ParsedModuleExprDesc::Pmod_constraint(mod_expr_inner, mod_type) => {
+        ParsedModuleExprDesc::Pmod_constraint(mod_expr_inner_idx, mod_type_idx) => {
             // Constrained module: (ME: MT)
+            let mod_expr_inner = arena.get_mod_expr(*mod_expr_inner_idx);
             let typed_mod = type_module_expr(tctx, env, arena, mod_expr_inner)?;
 
             Ok(ModuleExpr {
@@ -187,8 +191,9 @@ pub fn type_module_expr<'a>(
             })
         }
 
-        ParsedModuleExprDesc::Pmod_unpack(expr) => {
+        ParsedModuleExprDesc::Pmod_unpack(expr_idx) => {
             // Unpack: unpack(E)
+            let expr = arena.get_expr(*expr_idx);
             let typed_expr = type_expression(tctx.type_ctx, arena, env, expr)?;
 
             Ok(ModuleExpr {

@@ -121,7 +121,7 @@ pub fn write_structure_ast_current(
 
     // 2. Process @@config attributes (e.g., no_export wrapping)
     let rewritten_ast = if has_no_export_config(&rewritten_ast, arena) {
-        wrap_no_export(rewritten_ast)
+        wrap_no_export(arena, rewritten_ast)
     } else {
         rewritten_ast
     };
@@ -330,7 +330,7 @@ fn is_false_literal(expr: &crate::parser::ast::Expression, arena: &ParseArena) -
 
 /// Wrap a structure with `include (struct ... end : sig end)` for no_export.
 /// This matches OCaml's `js_implementation.ml no_export` function.
-fn wrap_no_export(structure: Vec<StructureItem>) -> Vec<StructureItem> {
+fn wrap_no_export(arena: &mut ParseArena, structure: Vec<StructureItem>) -> Vec<StructureItem> {
     if structure.is_empty() {
         return structure;
     }
@@ -351,8 +351,11 @@ fn wrap_no_export(structure: Vec<StructureItem>) -> Vec<StructureItem> {
         pmty_attributes: Attributes::new(),
     };
 
+    let inner_mod_idx = arena.push_mod_expr(inner_mod);
+    let empty_sig_idx = arena.push_mod_type(empty_sig);
+
     let constrained_mod = ModuleExpr {
-        pmod_desc: Box::new(ModuleExprDesc::Pmod_constraint(Box::new(inner_mod), Box::new(empty_sig))),
+        pmod_desc: Box::new(ModuleExprDesc::Pmod_constraint(inner_mod_idx, empty_sig_idx)),
         pmod_loc: loc,
         pmod_attributes: Attributes::new(),
     };

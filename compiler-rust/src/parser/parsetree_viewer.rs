@@ -64,7 +64,7 @@ pub fn is_ternary_expr(arena: &ParseArena, expr: &Expression) -> bool {
 /// Collect the parts of a ternary expression chain.
 /// Returns a list of (condition, consequent) pairs and the final alternate expression.
 pub fn collect_ternary_parts<'a>(
-    arena: &ParseArena,
+    arena: &'a ParseArena,
     expr: &'a Expression,
 ) -> (Vec<(&'a Expression, &'a Expression)>, &'a Expression) {
     let mut parts = Vec::new();
@@ -74,9 +74,11 @@ pub fn collect_ternary_parts<'a>(
         match &*current.pexp_desc {
             ExpressionDesc::Pexp_ifthenelse(inner) if has_ternary_attribute(arena, &current.pexp_attributes) => {
                 let (ref condition, ref consequent, ref opt_alternate) = **inner;
-                parts.push((condition.as_ref(), consequent.as_ref()));
+                let condition_expr: &Expression = unsafe { &*(arena.get_expr(*condition) as *const Expression) };
+                let consequent_expr: &Expression = unsafe { &*(arena.get_expr(*consequent) as *const Expression) };
+                parts.push((condition_expr, consequent_expr));
                 match opt_alternate {
-                    Some(alternate) => current = alternate,
+                    Some(alternate) => current = unsafe { &*(arena.get_expr(*alternate) as *const Expression) },
                     None => break,
                 }
             }
@@ -127,7 +129,7 @@ pub enum IfConditionKind<'a> {
 /// Collect all the branches of an if-expression chain.
 /// Returns a list of (location, condition_kind, then_expr) tuples and the final else expression.
 pub fn collect_if_expressions<'a>(
-    arena: &crate::parse_arena::ParseArena,
+    arena: &'a crate::parse_arena::ParseArena,
     expr: &'a Expression,
 ) -> (Vec<(&'a LocIdx, IfConditionKind<'a>, &'a Expression)>, Option<&'a Expression>) {
     let mut acc = Vec::new();
@@ -138,10 +140,12 @@ pub fn collect_if_expressions<'a>(
         match &*current.pexp_desc {
             // Regular if-then-else (with or without else branch)
             ExpressionDesc::Pexp_ifthenelse(inner) => {
-                let (ref if_expr, ref then_expr, ref opt_else) = **inner;
-                acc.push((expr_loc, IfConditionKind::If(if_expr.as_ref()), then_expr.as_ref()));
+                let (ref if_idx, ref then_idx, ref opt_else) = **inner;
+                let if_expr: &Expression = unsafe { &*(arena.get_expr(*if_idx) as *const Expression) };
+                let then_expr: &Expression = unsafe { &*(arena.get_expr(*then_idx) as *const Expression) };
+                acc.push((expr_loc, IfConditionKind::If(if_expr), then_expr));
                 match opt_else {
-                    Some(else_expr) => current = else_expr.as_ref(),
+                    Some(else_idx) => current = unsafe { &*(arena.get_expr(*else_idx) as *const Expression) },
                     None => return (acc, None),
                 }
             }
@@ -153,21 +157,23 @@ pub fn collect_if_expressions<'a>(
                         &*inner.1[1].pc_rhs.pexp_desc,
                         ExpressionDesc::Pexp_construct(lid, _) if arena.is_lident(lid.txt, "()")
                     ) => {
-                let (ref condition, ref cases) = **inner;
+                let (ref condition_idx, ref cases) = **inner;
                 let pattern = &cases[0].pc_lhs;
                 let then_expr = &cases[0].pc_rhs;
-                acc.push((expr_loc, IfConditionKind::IfLet(pattern, condition.as_ref()), then_expr));
+                let condition: &Expression = unsafe { &*(arena.get_expr(*condition_idx) as *const Expression) };
+                acc.push((expr_loc, IfConditionKind::IfLet(pattern, condition), then_expr));
                 return (acc, None);
             }
             // if let with else branch
             ExpressionDesc::Pexp_match(inner) if is_if_let_expr(arena, current)
                     && inner.1.len() == 2
                     && inner.1[0].pc_guard.is_none() => {
-                let (ref condition, ref cases) = **inner;
+                let (ref condition_idx, ref cases) = **inner;
                 let pattern = &cases[0].pc_lhs;
                 let then_expr = &cases[0].pc_rhs;
                 let else_expr = &cases[1].pc_rhs;
-                acc.push((expr_loc, IfConditionKind::IfLet(pattern, condition.as_ref()), then_expr));
+                let condition: &Expression = unsafe { &*(arena.get_expr(*condition_idx) as *const Expression) };
+                acc.push((expr_loc, IfConditionKind::IfLet(pattern, condition), then_expr));
                 current = else_expr;
             }
             // End of chain
@@ -191,7 +197,8 @@ pub fn is_binary_expression(arena: &crate::parse_arena::ParseArena, expr: &Expre
             if args.len() != 2 {
                 return false;
             }
-            match &*funct.pexp_desc {
+            let funct_expr = arena.get_expr(*funct);
+            match &*funct_expr.pexp_desc {
                 ExpressionDesc::Pexp_ident(ident) => {
                     if let Longident::Lident(op_idx) = arena.get_longident(ident.txt) {
                         let op = arena.get_string(*op_idx);
@@ -215,7 +222,8 @@ pub fn get_binary_operator(arena: &crate::parse_arena::ParseArena, expr: &Expres
             if args.len() != 2 {
                 return None;
             }
-            match &*funct.pexp_desc {
+            let funct_expr = arena.get_expr(*funct);
+            match &*funct_expr.pexp_desc {
                 ExpressionDesc::Pexp_ident(ident) => {
                     if let Longident::Lident(op_idx) = arena.get_longident(ident.txt) {
                         let op = arena.get_string(*op_idx);
@@ -244,7 +252,8 @@ pub fn is_single_pipe_expr(arena: &crate::parse_arena::ParseArena, expr: &Expres
                 if args.len() != 2 {
                     return false;
                 }
-                if let ExpressionDesc::Pexp_ident(ident) = &*funct.pexp_desc {
+                let funct_expr = arena.get_expr(*funct);
+                if let ExpressionDesc::Pexp_ident(ident) = &*funct_expr.pexp_desc {
                     if let Longident::Lident(op_idx) = arena.get_longident(ident.txt) {
                         return arena.get_string(*op_idx) == "->";
                     }
@@ -262,7 +271,8 @@ pub fn is_single_pipe_expr(arena: &crate::parse_arena::ParseArena, expr: &Expres
             if args.len() != 2 {
                 return false;
             }
-            if let ExpressionDesc::Pexp_ident(ident) = &*funct.pexp_desc {
+            let funct_expr = arena.get_expr(*funct);
+            if let ExpressionDesc::Pexp_ident(ident) = &*funct_expr.pexp_desc {
                 if let Longident::Lident(op_idx) = arena.get_longident(ident.txt) {
                     if arena.get_string(*op_idx) == "->" {
                         // It's a pipe - check that LHS is not also a pipe
@@ -294,7 +304,8 @@ pub fn is_underscore_apply_sugar(arena: &ParseArena, expr: &Expression) -> bool 
             if *arg_label != ArgLabel::Nolabel || default.is_some() { return false; }
             if let PatternDesc::Ppat_var(name) = &*lhs.ppat_desc {
                 if arena.get_string(name.txt) == "__x" {
-                    return matches!(&*rhs.pexp_desc, ExpressionDesc::Pexp_apply(_));
+                    let rhs_expr = arena.get_expr(*rhs);
+                    return matches!(&*rhs_expr.pexp_desc, ExpressionDesc::Pexp_apply(_));
                 }
             }
             false
@@ -476,7 +487,8 @@ pub fn is_unary_expression(arena: &crate::parse_arena::ParseArena, expr: &Expres
             if args.len() != 1 {
                 return false;
             }
-            if let ExpressionDesc::Pexp_ident(ident) = &*funct.pexp_desc {
+            let funct_expr = arena.get_expr(*funct);
+            if let ExpressionDesc::Pexp_ident(ident) = &*funct_expr.pexp_desc {
                 is_unary_operator_idx(arena, ident.txt)
             } else {
                 false
@@ -568,7 +580,7 @@ pub fn is_huggable_pattern(pat: &Pattern) -> bool {
 
 /// Collect expressions from a list constructor (::).
 /// Returns (list of expressions, optional spread expression).
-pub fn collect_list_expressions<'a>(arena: &crate::parse_arena::ParseArena, expr: &'a Expression) -> (Vec<&'a Expression>, Option<&'a Expression>) {
+pub fn collect_list_expressions<'a>(arena: &'a crate::parse_arena::ParseArena, expr: &'a Expression) -> (Vec<&'a Expression>, Option<&'a Expression>) {
     let mut acc = Vec::new();
     let mut current = expr;
 
@@ -577,8 +589,9 @@ pub fn collect_list_expressions<'a>(arena: &crate::parse_arena::ParseArena, expr
             ExpressionDesc::Pexp_construct(lid, None) if arena.is_lident(lid.txt, "[]") => {
                 return (acc, None);
             }
-            ExpressionDesc::Pexp_construct(lid, Some(arg)) if arena.is_lident(lid.txt, "::") => {
+            ExpressionDesc::Pexp_construct(lid, Some(arg_idx)) if arena.is_lident(lid.txt, "::") => {
                 // The argument should be a tuple of (head, tail)
+                let arg: &Expression = unsafe { &*(arena.get_expr(*arg_idx) as *const Expression) };
                 if let ExpressionDesc::Pexp_tuple(exprs) = &*arg.pexp_desc {
                     if exprs.len() == 2 {
                         acc.push(&exprs[0]);
@@ -598,7 +611,7 @@ pub fn collect_list_expressions<'a>(arena: &crate::parse_arena::ParseArena, expr
 }
 
 /// Collect patterns from a list constructor (::).
-pub fn collect_list_patterns<'a>(arena: &crate::parse_arena::ParseArena, pat: &'a Pattern) -> (Vec<&'a Pattern>, Option<&'a Pattern>) {
+pub fn collect_list_patterns<'a>(arena: &'a crate::parse_arena::ParseArena, pat: &'a Pattern) -> (Vec<&'a Pattern>, Option<&'a Pattern>) {
     let mut acc = Vec::new();
     let mut current = pat;
 
@@ -607,8 +620,9 @@ pub fn collect_list_patterns<'a>(arena: &crate::parse_arena::ParseArena, pat: &'
             PatternDesc::Ppat_construct(lid, None) if arena.is_lident(lid.txt, "[]") => {
                 return (acc, None);
             }
-            PatternDesc::Ppat_construct(lid, Some(arg)) if arena.is_lident(lid.txt, "::") => {
+            PatternDesc::Ppat_construct(lid, Some(arg_idx)) if arena.is_lident(lid.txt, "::") => {
                 // The argument should be a tuple of (head, tail)
+                let arg: &Pattern = unsafe { &*(arena.get_pat(*arg_idx) as *const Pattern) };
                 if let PatternDesc::Ppat_tuple(pats) = &*arg.ppat_desc {
                     if pats.len() == 2 {
                         acc.push(&pats[0]);
@@ -678,7 +692,7 @@ pub enum FunParam<'a> {
 /// IMPORTANT: OCaml's fun_expr only collects Pexp_newtype at the BEGINNING,
 /// not during the collect_params loop. After encountering any Pexp_fun,
 /// the loop stops at non-Pexp_fun nodes (including Pexp_newtype).
-pub fn fun_expr<'a>(arena: &ParseArena, expr: &'a Expression) -> (bool, Vec<FunParam<'a>>, &'a Expression) {
+pub fn fun_expr<'a>(arena: &'a ParseArena, expr: &'a Expression) -> (bool, Vec<FunParam<'a>>, &'a Expression) {
     // Check for async attribute on the outermost expression
     let mut is_async = expr.pexp_attributes.iter().any(|attr| arena.get_string(attr.0.txt) == "res.async");
 
@@ -688,15 +702,15 @@ pub fn fun_expr<'a>(arena: &ParseArena, expr: &'a Expression) -> (bool, Vec<FunP
     // First, collect leading Pexp_newtype (like OCaml's top-level match)
     // This combines consecutive newtypes like "type t, type u" into "type t u"
     if let ExpressionDesc::Pexp_newtype(newtype_inner) = &*current.pexp_desc {
-        let (ref name, ref body) = **newtype_inner;
+        let (ref name, ref body_idx) = **newtype_inner;
         let mut names = vec![name];
-        current = body;
+        current = unsafe { &*(arena.get_expr(*body_idx) as *const Expression) };
 
         // Collect any additional consecutive newtypes
         while let ExpressionDesc::Pexp_newtype(next_inner) = &*current.pexp_desc {
-            let (ref next_name, ref next_body) = **next_inner;
+            let (ref next_name, ref next_body_idx) = **next_inner;
             names.push(next_name);
-            current = next_body;
+            current = unsafe { &*(arena.get_expr(*next_body_idx) as *const Expression) };
         }
 
         params.push(FunParam::NewTypes { attrs: &[], names });
@@ -738,11 +752,14 @@ pub fn fun_expr<'a>(arena: &ParseArena, expr: &'a Expression) -> (bool, Vec<FunP
                     params.push(FunParam::Parameter {
                         attrs,
                         label: arg_label,
-                        default_expr: default.as_ref().map(|e| e.as_ref()),
+                        default_expr: default.as_ref().map(|idx| {
+                            let e: &Expression = unsafe { &*(arena.get_expr(*idx) as *const Expression) };
+                            e
+                        }),
                         pat: lhs,
                     });
                     n_fun += 1;
-                    current = rhs;
+                    current = unsafe { &*(arena.get_expr(*rhs) as *const Expression) };
                 } else {
                     // Stop collecting - arity marker indicates end of this function's params
                     break;
@@ -994,7 +1011,8 @@ pub fn should_indent_binary_expr(arena: &crate::parse_arena::ParseArena, expr: &
 
     match &*expr.pexp_desc {
         ExpressionDesc::Pexp_apply(apply_inner) if apply_inner.args.len() == 2  => { let PexpApply { ref funct, ref args, .. } = **apply_inner;
-            if let ExpressionDesc::Pexp_ident(ident) = &*funct.pexp_desc {
+            let funct_expr = arena.get_expr(*funct);
+            if let ExpressionDesc::Pexp_ident(ident) = &*funct_expr.pexp_desc {
                 if let Longident::Lident(op_idx) = arena.get_longident(ident.txt) {
                     let op = arena.get_string(*op_idx);
                     if is_binary_operator_str(op) {
@@ -1025,7 +1043,8 @@ fn same_precedence_sub_expression(arena: &crate::parse_arena::ParseArena, parent
 
     match &*sub_expr.pexp_desc {
         ExpressionDesc::Pexp_apply(apply_inner) if apply_inner.args.len() == 2  => { let PexpApply { ref funct, ref args, .. } = **apply_inner;
-            if let ExpressionDesc::Pexp_ident(ident) = &*funct.pexp_desc {
+            let funct_expr = arena.get_expr(*funct);
+            if let ExpressionDesc::Pexp_ident(ident) = &*funct_expr.pexp_desc {
                 if let Longident::Lident(op_idx) = arena.get_longident(ident.txt) {
                     let sub_op = arena.get_string(*op_idx);
                     if is_binary_operator_str(sub_op) {
@@ -1094,7 +1113,7 @@ pub fn not_ghost_operator(op: &str, is_ghost: bool) -> bool {
 
 /// Check if an expression is the underscore apply sugar pattern: `(__x) => f(a, __x, c)`.
 /// Returns a reference to the inner apply expression if it matches.
-pub fn get_underscore_apply_inner<'a>(arena: &ParseArena, expr: &'a Expression) -> Option<&'a Expression> {
+pub fn get_underscore_apply_inner<'a>(arena: &'a ParseArena, expr: &'a Expression) -> Option<&'a Expression> {
     match &*expr.pexp_desc {
         ExpressionDesc::Pexp_fun(inner) => {
                     let PexpFun { ref arg_label,
@@ -1107,8 +1126,9 @@ pub fn get_underscore_apply_inner<'a>(arena: &ParseArena, expr: &'a Expression) 
             if let PatternDesc::Ppat_var(name) = &*lhs.ppat_desc {
                 if arena.get_string(name.txt) == "__x" {
                     // Check if rhs is an apply
-                    if matches!(&*rhs.pexp_desc, ExpressionDesc::Pexp_apply(_)) {
-                        return Some(&**rhs);
+                    let rhs_expr: &Expression = unsafe { &*(arena.get_expr(*rhs) as *const Expression) };
+                    if matches!(&*rhs_expr.pexp_desc, ExpressionDesc::Pexp_apply(_)) {
+                        return Some(rhs_expr);
                     }
                 }
             }
@@ -1152,7 +1172,7 @@ fn has_as_attr(arena: &ParseArena, attrs: &Attributes) -> bool {
 /// This decomposes an arrow type like `(a, b) => c` into its argument list
 /// and return type. The `max_arity` parameter limits how many arguments to extract.
 pub fn arrow_type<'a>(
-    arena: &ParseArena,
+    arena: &'a ParseArena,
     typ: &'a CoreType,
     max_arity: Option<usize>,
 ) -> (&'a Attributes, Vec<TypeParameter<'a>>, &'a CoreType) {
@@ -1160,7 +1180,7 @@ pub fn arrow_type<'a>(
     let max_arity: isize = max_arity.map(|n| n as isize).unwrap_or(isize::MAX);
 
     fn process<'a>(
-        arena: &ParseArena,
+        arena: &'a ParseArena,
         attrs_before: &'a Attributes,
         acc: Vec<TypeParameter<'a>>,
         typ: &'a CoreType,
@@ -1175,12 +1195,14 @@ pub fn arrow_type<'a>(
 
         match &*typ.ptyp_desc {
             CoreTypeDesc::Ptyp_arrow(inner) => {
-                    let (ref arg, ref ret, ref arity) = **inner;
+                    let (ref arg, ref ret_idx, ref arity) = **inner;
                 // Stop at explicitly-aritied arrow if we already have arguments
                 // Arity is now ArityIdx, look up to check if it's Full
                 if arena.get_arity(*arity).is_some() && !acc.is_empty() && arg.attrs.is_empty() {
                     return (attrs_before, acc, typ);
                 }
+
+                let ret: &CoreType = unsafe { &*(arena.get_core_type(*ret_idx) as *const CoreType) };
 
                 // Unlabeled argument with no attrs - continue processing
                 if matches!(arg.lbl, ArgLabel::Nolabel) && arg.attrs.is_empty() {
@@ -1245,18 +1267,20 @@ static EMPTY_ATTRS: Attributes = Attributes(None);
 /// Extract functor applications from a module expression.
 ///
 /// For `F(A)(B)(C)`, returns `([A, B, C], F)`.
-pub fn mod_expr_apply(mod_expr: &ModuleExpr) -> (Vec<&ModuleExpr>, &ModuleExpr) {
-    fn loop_apply<'a>(acc: Vec<&'a ModuleExpr>, mod_expr: &'a ModuleExpr) -> (Vec<&'a ModuleExpr>, &'a ModuleExpr) {
+pub fn mod_expr_apply<'a>(arena: &'a ParseArena, mod_expr: &'a ModuleExpr) -> (Vec<&'a ModuleExpr>, &'a ModuleExpr) {
+    fn loop_apply<'a>(arena: &'a ParseArena, acc: Vec<&'a ModuleExpr>, mod_expr: &'a ModuleExpr) -> (Vec<&'a ModuleExpr>, &'a ModuleExpr) {
         match &*mod_expr.pmod_desc {
-            ModuleExprDesc::Pmod_apply(next, arg) => {
-                let mut new_acc = vec![arg.as_ref()];
+            ModuleExprDesc::Pmod_apply(next_idx, arg_idx) => {
+                let arg: &ModuleExpr = unsafe { &*(arena.get_mod_expr(*arg_idx) as *const ModuleExpr) };
+                let next: &ModuleExpr = unsafe { &*(arena.get_mod_expr(*next_idx) as *const ModuleExpr) };
+                let mut new_acc = vec![arg];
                 new_acc.extend(acc);
-                loop_apply(new_acc, next)
+                loop_apply(arena, new_acc, next)
             }
             _ => (acc, mod_expr),
         }
     }
-    loop_apply(Vec::new(), mod_expr)
+    loop_apply(arena, Vec::new(), mod_expr)
 }
 
 /// A functor parameter.
@@ -1272,24 +1296,28 @@ pub struct FunctorParam<'a> {
 /// Extract functor parameters from a module expression.
 ///
 /// For `(A: X, B: Y) => body`, returns `([(attrs, A, Some(X)), (attrs, B, Some(Y))], body)`.
-pub fn mod_expr_functor(mod_expr: &ModuleExpr) -> (Vec<FunctorParam<'_>>, &ModuleExpr) {
-    fn loop_functor<'a>(acc: Vec<FunctorParam<'a>>, mod_expr: &'a ModuleExpr) -> (Vec<FunctorParam<'a>>, &'a ModuleExpr) {
+pub fn mod_expr_functor<'a>(arena: &'a ParseArena, mod_expr: &'a ModuleExpr) -> (Vec<FunctorParam<'a>>, &'a ModuleExpr) {
+    fn loop_functor<'a>(arena: &'a ParseArena, acc: Vec<FunctorParam<'a>>, mod_expr: &'a ModuleExpr) -> (Vec<FunctorParam<'a>>, &'a ModuleExpr) {
         match &*mod_expr.pmod_desc {
             ModuleExprDesc::Pmod_functor(inner) => {
-                    let (ref lbl, ref mod_type, ref return_mod_expr) = **inner;
+                    let (ref lbl, ref mod_type_idx, ref return_mod_expr_idx) = **inner;
                 let param = FunctorParam {
                     attrs: &mod_expr.pmod_attributes,
                     lbl,
-                    mod_type: mod_type.as_ref().map(|t| t.as_ref()),
+                    mod_type: mod_type_idx.as_ref().map(|idx| {
+                        let mt: &ModuleType = unsafe { &*(arena.get_mod_type(*idx) as *const ModuleType) };
+                        mt
+                    }),
                 };
+                let return_mod_expr: &ModuleExpr = unsafe { &*(arena.get_mod_expr(*return_mod_expr_idx) as *const ModuleExpr) };
                 let mut new_acc = acc;
                 new_acc.push(param);
-                loop_functor(new_acc, return_mod_expr)
+                loop_functor(arena, new_acc, return_mod_expr)
             }
             _ => (acc, mod_expr),
         }
     }
-    let (params, body) = loop_functor(Vec::new(), mod_expr);
+    let (params, body) = loop_functor(arena, Vec::new(), mod_expr);
     (params, body)
 }
 
@@ -1310,7 +1338,8 @@ pub fn is_array_access(arena: &crate::parse_arena::ParseArena, expr: &Expression
             if args.len() != 2 {
                 return false;
             }
-            if let ExpressionDesc::Pexp_ident(lid) = &*funct.pexp_desc {
+            let funct_expr = arena.get_expr(*funct);
+            if let ExpressionDesc::Pexp_ident(lid) = &*funct_expr.pexp_desc {
                 if let Longident::Ldot(base, method_idx) = arena.get_longident(lid.txt) {
                     if let Longident::Lident(module_idx) = base.as_ref() {
                         let module = arena.get_string(*module_idx);
@@ -1333,7 +1362,8 @@ pub fn is_array_set(arena: &crate::parse_arena::ParseArena, expr: &Expression) -
             if args.len() != 3 {
                 return false;
             }
-            if let ExpressionDesc::Pexp_ident(lid) = &*funct.pexp_desc {
+            let funct_expr = arena.get_expr(*funct);
+            if let ExpressionDesc::Pexp_ident(lid) = &*funct_expr.pexp_desc {
                 if let Longident::Ldot(base, method_idx) = arena.get_longident(lid.txt) {
                     if let Longident::Lident(module_idx) = base.as_ref() {
                         let module = arena.get_string(*module_idx);
@@ -1356,7 +1386,8 @@ pub fn is_string_access(arena: &crate::parse_arena::ParseArena, expr: &Expressio
             if args.len() != 2 {
                 return false;
             }
-            if let ExpressionDesc::Pexp_ident(lid) = &*funct.pexp_desc {
+            let funct_expr = arena.get_expr(*funct);
+            if let ExpressionDesc::Pexp_ident(lid) = &*funct_expr.pexp_desc {
                 if let Longident::Ldot(base, method_idx) = arena.get_longident(lid.txt) {
                     if let Longident::Lident(module_idx) = base.as_ref() {
                         let module = arena.get_string(*module_idx);
@@ -1405,12 +1436,14 @@ pub fn partition_doc_comment_attributes<'a>(arena: &ParseArena, attrs: &'a Attri
 /// For example, `Red | Blue | Green` becomes `[Red, Blue, Green]`.
 /// For `Red | (Blue | Green)`, this becomes `[Red, Ppat_or(Blue, Green)]`,
 /// preserving the nested or-pattern (which should be wrapped in parens when printed).
-pub fn collect_or_pattern_chain(pat: &Pattern) -> Vec<&Pattern> {
-    fn loop_collect<'a>(pattern: &'a Pattern, chain: &mut Vec<&'a Pattern>) {
+pub fn collect_or_pattern_chain<'a>(arena: &'a ParseArena, pat: &'a Pattern) -> Vec<&'a Pattern> {
+    fn loop_collect<'a>(arena: &'a ParseArena, pattern: &'a Pattern, chain: &mut Vec<&'a Pattern>) {
         match &*pattern.ppat_desc {
-            PatternDesc::Ppat_or(left, right) => {
-                loop_collect(left, chain);
-                chain.push(right.as_ref());
+            PatternDesc::Ppat_or(left_idx, right_idx) => {
+                let left: &Pattern = unsafe { &*(arena.get_pat(*left_idx) as *const Pattern) };
+                let right: &Pattern = unsafe { &*(arena.get_pat(*right_idx) as *const Pattern) };
+                loop_collect(arena, left, chain);
+                chain.push(right);
             }
             _ => {
                 chain.push(pattern);
@@ -1419,7 +1452,7 @@ pub fn collect_or_pattern_chain(pat: &Pattern) -> Vec<&Pattern> {
     }
 
     let mut result = Vec::new();
-    loop_collect(pat, &mut result);
+    loop_collect(arena, pat, &mut result);
     result
 }
 
