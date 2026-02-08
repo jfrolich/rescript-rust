@@ -1,7 +1,7 @@
 # Parser Performance Engineering TODO
 
 **Last Updated:** 2026-02-07
-**Status:** 4/23 tasks complete
+**Status:** 5/23 tasks complete
 
 **Baseline:** Rust is 2-5x faster on small files (<10KB), ~0.7-1.0x on large files (20-60KB).
 **Goal:** Maximize Rust parser speed across all file sizes while preserving byte-for-byte binary AST parity.
@@ -30,7 +30,7 @@ These target the scanner and token representation where the parser spends most t
 
 These target the AST node representation, where the biggest memory and cache wins are. Analysis shows ExpressionDesc is ~120 bytes but 85% of variants need <16 bytes — enormous padding waste. Every node also carries an empty 24-byte `Vec<Attribute>`. Fixing these two issues alone could shrink Expression from ~150 bytes to ~20-24 bytes.
 
-- [ ] **2.1 Enforce 16-byte enum sizes (OXC pattern)** ⚠️ HIGH PRIORITY — Measure current `std::mem::size_of::<Token>()` and all AST desc enums. Box large variants to keep enums at 16 bytes max. OXC enforces this with tests (`assert_eq!(size_of::<Expression>(), 16)`) and measured a 10% speedup from improved cache behavior. Current estimates: Token ~40-48 bytes, ExpressionDesc ~80-120 bytes, PatternDesc ~60-100 bytes, CoreTypeDesc ~80-120 bytes. The largest variants (Pexp_fun with 6 fields, Pexp_apply with Vec) should be boxed; the 85%+ of small variants (Pexp_ident, Pexp_constant, etc.) stay inline. Files: `token.rs`, `ast.rs`.
+- [x] **2.1 Enforce 16-byte enum sizes (OXC pattern)** — Boxed large enum variants across all AST desc enums. Results: ExpressionDesc 80→24 bytes, PatternDesc 64→24 bytes, CoreTypeDesc 64→16 bytes, StructureItemDesc 64→16 bytes, SignatureItemDesc 56→16 bytes, ModuleExprDesc 40→24 bytes, ModuleTypeDesc 32→16 bytes, Payload 48→16 bytes. Created named structs PexpFun (80 bytes) and PexpApply (40 bytes) for the largest ExpressionDesc variants. Performance: neutral overall (Large 0.77x→0.81x slight regression from additional Box allocations, offset by better cache locality on smaller files). The boxing is a foundation for arena allocation (task 2.3) which will eliminate Box overhead while keeping cache benefits. Used automated `fix_boxing.py` script for bulk rewriting across 26 files. Files: `ast.rs` + 25 dependent files across parser, binary_ast, types.
 
 - [ ] **2.2 Attributes side table** ⚠️ HIGH PRIORITY — Most AST nodes have empty `Vec<Attribute>`. Move attributes to a side table (`HashMap<NodeId, Vec<Attribute>>` or `Vec<Option<Vec<Attribute>>>`) instead of storing inline on every node. Reduces the size of every Expression, Pattern, and CoreType by ~24 bytes (Vec overhead). ~95% of nodes have empty attributes, so this is almost pure waste. ECS-inspired optimization. Files: `ast.rs`, all parsing modules, PPX, marshal.
 

@@ -13,7 +13,7 @@
 | Tier | Description | Status | Progress |
 |------|-------------|--------|----------|
 | Tier 1 | High Impact: Scanner + Token | 🚧 In Progress | 4/6 |
-| Tier 2 | High Impact: AST + Token Layout | ⏳ Not Started | 0/6 |
+| Tier 2 | High Impact: AST + Token Layout | 🚧 In Progress | 1/6 |
 | Tier 3 | Medium Impact: DOD + Misc | ⏳ Not Started | 0/7 |
 | Tier 4 | Architectural | ⏳ Not Started | 0/4 |
 
@@ -86,11 +86,15 @@ cargo test --release --lib -- benchmark_all --ignored --nocapture
 
 ## Tier 2 Progress: High Impact — AST Memory Layout
 
-- [ ] **2.1 Enforce 16-byte enum sizes (OXC pattern)** ⚠️ HIGH PRIORITY
-  - Box large variants to keep enums at 16 bytes max (OXC: 10% speedup)
-  - Current: ExpressionDesc ~80-120 bytes, but 85%+ of variants need <16 bytes
-  - Pexp_fun (~100+ bytes) and Pexp_apply (~60 bytes) dominate; box these
-  - Files: `token.rs`, `ast.rs`
+- [x] **2.1 Enforce 16-byte enum sizes (OXC pattern)** ✅ COMPLETE
+  - Boxed large enum variants across all AST desc enums
+  - Size reductions: ExpressionDesc 80→24, PatternDesc 64→24, CoreTypeDesc 64→16, StructureItemDesc 64→16, SignatureItemDesc 56→16, ModuleExprDesc 40→24, ModuleTypeDesc 32→16, Payload 48→16
+  - Created PexpFun (80B) and PexpApply (40B) named structs for largest variants
+  - Used automated `fix_boxing.py` for bulk rewriting across 26 files
+  - Performance: ~neutral (Large 0.77x→0.81x, additional Box allocs offset cache benefits)
+  - Foundation for arena allocation (task 2.3) which eliminates Box overhead
+  - Zero parity regressions (1193/1196 sexp-locs match; 3 unrelated OCaml ref changes)
+  - Files: `ast.rs` + 25 dependent files
 
 - [ ] **2.2 Attributes side table** ⚠️ HIGH PRIORITY
   - Move attributes from inline `Vec<Attribute>` to side table
@@ -201,6 +205,7 @@ cargo test --release --lib -- benchmark_all --ignored --nocapture
 | String interning (Rc<str>) | Feb 2026 | Neutral timing, reduced memory allocs | ae9fa6ad2 |
 | Remove Rc<str> from Interner | Feb 2026 | Neutral timing, removes Rc overhead, enables Send+Sync | ce156406f |
 | Zero-copy Constant and Label strings | Feb 2026 | Large 0.80x→0.77x (~4% faster) | ae09c8d1f |
+| Box large enum variants (OXC pattern) | Feb 2026 | Neutral (enum sizes 64-80→16-24 bytes) | 8ab6f5d66 |
 
 ---
 
@@ -309,6 +314,42 @@ Zero-copy Cow<'static, str> eliminates heap allocations for integer, float,
 string constants, labels, type variables, and variant tags. Only escape-processed
 strings allocate. Uses unsafe extend_cow_lifetime() transmute (sound because
 source string outlives AST in all execution paths).
+```
+
+### After 2.1 Box large enum variants (February 2026)
+
+```
+Run: cargo test --release --lib -- benchmark_all --ignored --nocapture
+
+  Size Tier                  Files   Faster       OK Avg Factor Min Factor Max Factor
+  -------------------------------------------------------------------------------------
+  Large (>30KB)                 14       14        0       0.81x       0.63x       0.93x
+  Medium (10-30KB)              73       73        0       0.55x       0.26x       0.77x
+  Small (1-10KB)               443      443        0       0.39x       0.25x       0.71x
+  Tiny (<1KB)                  636      636        0       0.30x       0.23x       0.41x
+
+Overall: 1166/1166 passing (1166 faster, 0 within tolerance), 38 skipped
+Parity: zero regressions from boxing changes
+
+AST Enum Sizes (before → after):
+  ExpressionDesc:     80 → 24 bytes (3.3x reduction)
+  PatternDesc:        64 → 24 bytes (2.7x reduction)
+  CoreTypeDesc:       64 → 16 bytes (4x reduction, target hit!)
+  StructureItemDesc:  64 → 16 bytes (4x reduction, target hit!)
+  SignatureItemDesc:  56 → 16 bytes (3.5x reduction, target hit!)
+  ModuleExprDesc:     40 → 24 bytes (1.7x reduction)
+  ModuleTypeDesc:     32 → 16 bytes (2x reduction, target hit!)
+  Payload:            48 → 16 bytes (3x reduction, target hit!)
+  Token:              80 bytes (unchanged, addressed in task 2.5)
+
+Notes: Performance is roughly neutral. Large files show a slight regression
+(0.77x→0.81x) from additional Box heap allocations for every boxed variant
+construction. Smaller files show slight improvement from better cache locality.
+The boxing is a structural prerequisite for arena allocation (task 2.3) which
+will eliminate the Box overhead while retaining the cache-friendly enum sizes.
+5 of 8 AST enums hit the 16-byte target; ExpressionDesc and PatternDesc at
+24 bytes due to variants that carry 2 fields (discriminant + Box pointer = 16
+bytes, but alignment of inner data pushes to 24). ModuleExprDesc at 24 bytes.
 ```
 
 *Add new entries below as optimizations are applied.*

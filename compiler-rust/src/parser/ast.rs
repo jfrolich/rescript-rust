@@ -987,4 +987,30 @@ mod tests {
         assert_send_sync::<RecFlag>();
         assert_send_sync::<ClosedFlag>();
     }
+
+    #[test]
+    #[ignore]
+    fn measure_ast_sizes() {
+        use std::mem::size_of;
+        println!("\n=== AST Enum Sizes (after boxing) ===");
+        println!("Token:              {} bytes", size_of::<crate::parser::token::Token>());
+        println!("ExpressionDesc:     {} bytes", size_of::<ExpressionDesc>());
+        println!("PatternDesc:        {} bytes", size_of::<PatternDesc>());
+        println!("CoreTypeDesc:       {} bytes", size_of::<CoreTypeDesc>());
+        println!("StructureItemDesc:  {} bytes", size_of::<StructureItemDesc>());
+        println!("SignatureItemDesc:  {} bytes", size_of::<SignatureItemDesc>());
+        println!("ModuleExprDesc:     {} bytes", size_of::<ModuleExprDesc>());
+        println!("ModuleTypeDesc:     {} bytes", size_of::<ModuleTypeDesc>());
+        println!("Payload:            {} bytes", size_of::<Payload>());
+        println!("Expression:         {} bytes", size_of::<Expression>());
+        println!("Pattern:            {} bytes", size_of::<Pattern>());
+        println!("CoreType:           {} bytes", size_of::<CoreType>());
+        println!("StructureItem:      {} bytes", size_of::<StructureItem>());
+        println!("Constant:           {} bytes", size_of::<Constant>());
+        println!("ArgLabel:           {} bytes", size_of::<ArgLabel>());
+        println!("ValueBinding:       {} bytes", size_of::<ValueBinding>());
+        println!("TypeDeclaration:    {} bytes", size_of::<TypeDeclaration>());
+        println!("PexpFun:            {} bytes", size_of::<PexpFun>());
+        println!("PexpApply:          {} bytes", size_of::<PexpApply>());
+    }
 }
