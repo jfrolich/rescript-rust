@@ -1398,7 +1398,7 @@ pub fn print_expression(
         }
         // Send-set: obj#prop = value -> obj["prop"] = value
         ExpressionDesc::Pexp_apply(apply_inner)
-            if is_send_set_expr(arena, arena.get_expr(apply_inner.funct), &apply_inner.args)  => { let PexpApply { ref _funct, ref args, .. } = **apply_inner;
+            if is_send_set_expr(arena, arena.get_expr(apply_inner.funct), &apply_inner.args)  => { let PexpApply { ref args, .. } = **apply_inner;
             let lhs = &args[0].1;
             let rhs = &args[1].1;
             // Match OCaml: RHS goes through Parens.expr for brace handling
@@ -1431,7 +1431,7 @@ pub fn print_expression(
             if apply_inner.args.len() == 1
                 && matches!(&apply_inner.args[0].0, ArgLabel::Nolabel)
                 && matches!(&*apply_inner.args[0].1.pexp_desc, ExpressionDesc::Pexp_array(_))
-                && parsetree_viewer::is_spread_belt_array_concat(arena, arena.get_expr(apply_inner.funct))  => { let PexpApply { ref _funct, ref args, .. } = **apply_inner;
+                && parsetree_viewer::is_spread_belt_array_concat(arena, arena.get_expr(apply_inner.funct))  => { let PexpApply { ref args, .. } = **apply_inner;
             if let ExpressionDesc::Pexp_array(sub_lists) = &*args[0].1.pexp_desc {
                 print_belt_array_concat_apply(state, sub_lists, cmt_tbl, arena)
             } else {
@@ -1443,7 +1443,7 @@ pub fn print_expression(
             if apply_inner.args.len() == 1
                 && matches!(&apply_inner.args[0].0, ArgLabel::Nolabel)
                 && matches!(&*apply_inner.args[0].1.pexp_desc, ExpressionDesc::Pexp_array(_))
-                && parsetree_viewer::is_spread_belt_list_concat(arena, arena.get_expr(apply_inner.funct))  => { let PexpApply { ref _funct, ref args, .. } = **apply_inner;
+                && parsetree_viewer::is_spread_belt_list_concat(arena, arena.get_expr(apply_inner.funct))  => { let PexpApply { ref args, .. } = **apply_inner;
             if let ExpressionDesc::Pexp_array(sub_lists) = &*args[0].1.pexp_desc {
                 print_belt_list_concat_apply(state, sub_lists, cmt_tbl, arena)
             } else {
@@ -3345,7 +3345,7 @@ fn print_template_literal(
                 if apply_inner.args.len() == 2
                     && matches!(&*arena.get_expr(apply_inner.funct).pexp_desc, ExpressionDesc::Pexp_ident(lid)
                         if matches!(arena.get_longident(lid.txt), Longident::Lident(op_idx)
-                            if arena.get_string(*op_idx) == "++"))  => { let PexpApply { ref _funct, ref args, .. } = **apply_inner;
+                            if arena.get_string(*op_idx) == "++"))  => { let PexpApply { ref args, .. } = **apply_inner;
                 let lhs = walk_expr(state, &args[0].1, tag, cmt_tbl, arena);
                 let rhs = walk_expr(state, &args[1].1, tag, cmt_tbl, arena);
                 Doc::concat(vec![lhs, rhs])
@@ -4051,7 +4051,7 @@ fn flatten_binary_operand(
             }
 
             // JS object set (#=) - only needs parens on LHS
-            ExpressionDesc::Pexp_apply(apply_inner) if apply_inner.args.len() == 2  => { let PexpApply { ref funct, ref _args, .. } = **apply_inner;
+            ExpressionDesc::Pexp_apply(apply_inner) if apply_inner.args.len() == 2  => { let PexpApply { ref funct, .. } = **apply_inner;
                 let funct = arena.get_expr(*funct);
                 if let ExpressionDesc::Pexp_ident(ident) = &*funct.pexp_desc {
                     if arena.is_lident(ident.txt, "#=") {
