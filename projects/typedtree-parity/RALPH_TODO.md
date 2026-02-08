@@ -76,16 +76,17 @@ The `-dtyped-sexp` flag outputs the typed tree without locations. The `-dtyped-s
 |  | Status |
 |--|--------|
 | OCaml compiles | 657/657 |
-| Rust compiles | 596/657 (61 fail) |
-| Parity match (-dtyped-sexp) | 310/596 (52.0%) |
+| Rust compiles | 597/657 (60 fail) |
+| Parity match (-dtyped-sexp) | 310/597 (51.9%) |
 
-**Task Progress:** 4/4 complete
+**Task Progress:** 5/5 complete
 
 **Task Checklist:**
 - [x] Fix qualified constructor typing + trailing optional-arg consumption in `type_application` so dict-pattern matches compile instead of failing with `PatternTypeClash`.
 - [x] Reduce remaining Rust compile failures (67), prioritizing root causes in `UndefinedMethod`, `ExprTypeClash`, and `PatternTypeClash`.
 - [x] Preserve nested module member visibility for awaited/unpacked modules in extracted signatures, and keep declared signatures for recursive self-alias modules (`module rec M = M`) to avoid `UndefinedMethod` regressions (Rust compile failures: 65 -> 63).
 - [x] Port OCaml's variant spread pattern rewrite in `type_pattern` (`Ppat_type` expansion + alias type override) so `...a as a` binds the spread source type (Rust compile failures: 63 -> 61).
+- [x] Resolve `Mty_ident` module types through modtype expansion (matching OCaml `Env.scrape_alias` order) before module-path fallback, so opened submodules constrained by modtypes expose their members (`inner_call.res`, Rust compile failures: 61 -> 60).
 
 **Previous milestones completed:**
 - Parser AST structure: 100% parity (sexp-locs 1196/1196)
@@ -102,6 +103,7 @@ The `-dtyped-sexp` flag outputs the typed tree without locations. The `-dtyped-s
 - Recover semantic module types for `Pmod_unpack`/`await` module bindings and `let module` fallback resolution (Rust compile failures: 67 -> 65)
 - Preserve unpacked-module type hints in extracted signatures and keep recmodule self-alias declarations from dropping explicit signatures (Rust compile failures: 65 -> 63)
 - Port OCaml-style variant spread pattern expansion/alias typing for `...Type as x` patterns (Rust compile failures: 63 -> 61)
+- Resolve `Mty_ident` via modtype expansion before module lookup in module-signature member resolution (`inner_call.res`, Rust compile failures: 61 -> 60)
 
 ---
 
@@ -171,21 +173,21 @@ The type checker takes a Parsetree and produces a Typedtree. The Typedtree is th
 
 ## Key Areas for Improvement
 
-### Rust Compilation Failures (61 files)
+### Rust Compilation Failures (60 files)
 
-61 files fail to compile with the Rust type checker. Top error patterns:
+60 files fail to compile with the Rust type checker. Top error patterns:
 
 | Error | Count | Description |
 |-------|-------|-------------|
-| ExprTypeClash | 28 | Function call and general type mismatches |
-| UndefinedMethod | 22 | Module field access still falling back to unresolved value lookup |
+| ExprTypeClash | 25 | Function call and general type mismatches |
+| UndefinedMethod | 20 | Module field access still falling back to unresolved value lookup |
 | NotAVariantType | 6 | Variant type resolution |
 | Parse errors | 5 | Unsupported syntax |
 | Crash/NoOutput/Panic | 4 | Runtime aborts/panics during compilation |
 
 ### Parity Diff Categories (280 files with diffs)
 
-Of the 596 files that compile, 310 match and 286 differ. Diff categories (overlap):
+Of the 597 files that compile, 310 match and 287 differ. Diff categories (overlap):
 
 | Category | Files | Description |
 |----------|-------|-------------|

@@ -4701,12 +4701,69 @@ impl Env {
         ) -> Option<(crate::types::decl::Signature, Option<String>)> {
             match mty {
                 crate::types::decl::ModuleType::MtySignature(sig) => Some((sig.clone(), None)),
-                crate::types::decl::ModuleType::MtyAlias(_, path)
-                | crate::types::decl::ModuleType::MtyIdent(path) => {
+                crate::types::decl::ModuleType::MtyAlias(_, path) => {
                     resolve_path(env, path, pers_env, ctx, visiting)
+                }
+                crate::types::decl::ModuleType::MtyIdent(path) => {
+                    // Match OCaml Env.scrape_alias: resolve Mty_ident via module-type
+                    // expansion first, then fall back to module-path resolution.
+                    resolve_modtype_path(env, path, pers_env, ctx, visiting)
+                        .or_else(|| resolve_path(env, path, pers_env, ctx, visiting))
                 }
                 _ => None,
             }
+        }
+
+        fn resolve_modtype_path<'b>(
+            env: &Env,
+            path: &Path,
+            pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
+            ctx: &'b crate::types::context::TypeContext<'b>,
+            visiting: &mut HashSet<Path>,
+        ) -> Option<(crate::types::decl::Signature, Option<String>)> {
+            use crate::types::decl::SignatureItem;
+
+            if !visiting.insert(path.clone()) {
+                return None;
+            }
+
+            let result = match path {
+                Path::Pident(id) => {
+                    let modtype_name = id.name();
+                    match env.find_modtype(modtype_name) {
+                        Ok(mtd) => mtd
+                            .mtd_type
+                            .as_ref()
+                            .and_then(|mty| resolve_module_type_inner(env, mty, pers_env, ctx, visiting)),
+                        Err(_) => None,
+                    }
+                }
+                Path::Pdot(parent, modtype_name, _) => {
+                    let (parent_sig, _resolved_name) =
+                        match resolve_path(env, parent, pers_env, ctx, visiting) {
+                            Some(x) => x,
+                            None => {
+                                visiting.remove(path);
+                                return None;
+                            }
+                        };
+                    parent_sig.iter().find_map(|sig_item| {
+                        if let SignatureItem::SigModtype(id, mtd) = sig_item {
+                            if id.name() == modtype_name.as_str() {
+                                return mtd
+                                    .mtd_type
+                                    .as_ref()
+                                    .and_then(|mty| resolve_module_type_inner(env, mty, pers_env, ctx, visiting));
+                            }
+                        }
+                        None
+                    })
+                }
+                Path::Papply(_, _) => None,
+            };
+
+            visiting.remove(path);
+            result
         }
 
         fn resolve_path<'b>(
