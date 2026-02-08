@@ -32,8 +32,8 @@
 | sexp-locs (syntax scope) | 1196/1196 (100%) ✅ |
 | sexp-locs-ppx (syntax scope) | 1196/1196 (100%) ✅ |
 | bsc-ast (syntax scope) | 1196/1196 (100%) ✅ |
-| sexp-locs (full scope: syntax + TELLA) | 3495/3496 (99.97%) |
-| sexp-locs-ppx (full scope: syntax + TELLA) | 2929/3496 (83.8%) |
+| sexp-locs (full scope: syntax + TELLA) | 3496/3496 (100%) ✅ |
+| sexp-locs-ppx (full scope: syntax + TELLA) | 2930/3496 (83.8%) |
 | bsc-ast (full scope: syntax + TELLA) | 581 diffs (OCaml parser failures: 11, Rust parser failures: 20) |
 
 **Scope note:** Final parity targets include both `tests/syntax_tests/data` and `TELLA_DIR`
@@ -43,6 +43,26 @@ Files where OCaml fails are excluded from parity denominators and listed separat
 **Snapshot note:** The `1179` denominator above is a historical in-repo snapshot.
 
 **Session progress (2026-02-08) - newest:**
+- Fixed remaining full-scope `sexp-locs` parser diff and aligned OCaml int32 marshal for `@inline` constants:
+  - Investigated `/Users/jaapf/dev/tella-fusion/node_modules/sury/src/Sury.res` with
+    `test_parser_ast_parity` and `inspect_binary_ast.py test`.
+  - Parser root cause (location-only): after parsing a first field via leading-attrs path,
+    Rust reset spread-field "firstness" for the remainder; OCaml continues with non-first
+    field semantics in `parse_comma_delimited_region`.
+  - Updated Rust `parse_label_declarations` plumbing to track initial `is_first` state across
+    leading-attrs/constructor-record continuation parsing.
+  - FFI root cause (`sexp-locs-ppx`): Rust marshaled `LamConstant::ConstInt` payload as a regular
+    Marshal int, but OCaml marshals `int32` as custom `_i` (`CODE_CUSTOM_FIXED`) object.
+  - Added `MarshalWriter::write_custom_int32` and used it for `LamConstant::ConstInt` in
+    `ffi_types.rs`.
+  - Validation:
+    - `python3 scripts/inspect_binary_ast.py test` for `@inline let x = 1` is byte-identical.
+    - `test_parser_ast_parity` for `Sury.res`: `sexp-locs` and `sexp-locs-ppx` now both pass.
+  - Full-scope run improved:
+    - `sexp-locs differences: 1 -> 0`
+    - `sexp-locs-ppx differences: 567 -> 566`
+    - `bsc-ast differences: 581 -> 581` (no change)
+
 - Fixed OCaml/Rust parity for record type declarations with leading attrs/doc comments:
   - Investigated with `inspect_binary_ast.py test` on
     `/Users/jaapf/dev/tella-fusion/node_modules/@rescript/react/src/ReactDOM.res`.

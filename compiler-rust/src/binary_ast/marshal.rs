@@ -58,6 +58,7 @@ const CODE_BLOCK64: u8 = 0x13;
 const CODE_SHARED64: u8 = 0x14;
 #[allow(dead_code)]
 const CODE_STRING64: u8 = 0x15;
+const CODE_CUSTOM_FIXED: u8 = 0x19;
 
 /// Sharing groups for empty `PStr []` payloads.
 ///
@@ -760,6 +761,23 @@ impl MarshalWriter {
             self.write_u8(CODE_INT64);
             self.write_i64_be(n);
         }
+    }
+
+    /// Write an OCaml `int32` custom value (`Marshal.to_string (Int32.t)`).
+    ///
+    /// Payload format:
+    /// - CODE_CUSTOM_FIXED (0x19)
+    /// - custom identifier "_i\\0"
+    /// - 4-byte big-endian int32 payload
+    pub fn write_custom_int32(&mut self, n: i32) {
+        self.write_u8(CODE_CUSTOM_FIXED);
+        self.write_bytes(b"_i\0");
+        self.write_i32_be(n);
+
+        // Int32 custom block footprint from OCaml marshal headers.
+        self.size_32 += 3;
+        self.size_64 += 3;
+        self.obj_counter += 1;
     }
 
     /// Write a string in Marshal format

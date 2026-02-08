@@ -532,7 +532,7 @@ impl Marshal for LamConstant {
             LamConstant::ConstJsFalse => w.write_int(2),
             LamConstant::ConstInt { i, comment } => {
                 w.write_block_header(1, 2);
-                w.write_int(*i as i64);
+                w.write_custom_int32(*i);
                 comment.marshal(w);
             }
             LamConstant::ConstChar(c) => {
