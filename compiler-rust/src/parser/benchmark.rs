@@ -207,12 +207,22 @@ mod tests {
             };
             for entry in entries.flatten() {
                 let path = entry.path();
-                if path.is_dir() {
+                let file_type = match entry.file_type() {
+                    Ok(ft) => ft,
+                    Err(_) => continue,
+                };
+
+                // Skip symlinks to avoid duplicate traversal through linked trees.
+                if file_type.is_symlink() {
+                    continue;
+                }
+
+                if file_type.is_dir() {
                     let dir_name = path.file_name().unwrap_or_default().to_string_lossy();
                     if !EXCLUDED_DIRS.contains(&dir_name.as_ref()) {
                         walk_dir(&path, base, corpus_name, files);
                     }
-                } else if path.extension().map_or(false, |e| e == "res" || e == "resi") {
+                } else if file_type.is_file() && path.extension().map_or(false, |e| e == "res" || e == "resi") {
                     let size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
                     if size >= MIN_FILE_SIZE {
                         let rel = path.strip_prefix(base).unwrap_or(&path);
