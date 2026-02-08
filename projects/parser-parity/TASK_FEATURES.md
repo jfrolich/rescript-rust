@@ -4,6 +4,8 @@
 
 Complete the Rust ReScript parser to handle all ReScript syntax and eliminate parser-caused failures in the syntax test corpus.
 
+Scope includes the external `tella-fusion` corpus when available (`TELLA_DIR`, default `~/dev/tella-fusion`), in addition to `tests/syntax_tests/data`.
+
 **Status (2026-01-18)** (measured on `tests/syntax_tests/data`, 5s timeout per file):
 
 - Total `.res` files: 1233
@@ -14,6 +16,8 @@ Complete the Rust ReScript parser to handle all ReScript syntax and eliminate pa
 - Timeouts: 0
 
 **Goal**: drive `PARSE_FAIL` and `ROUNDTRIP_PARSE_FAIL` to 0.
+
+When reporting progress, compute percentages over files that OCaml successfully parses for the same mode. Files where OCaml also fails are excluded from parity/success denominators and tracked separately.
 
 ## Concurrency Note
 

@@ -14,6 +14,10 @@
 
 6. **Use `scripts/inspect_binary_ast.py` as your primary debugging tool** - When investigating parity issues, start by using the inspector to compare OCaml and Rust AST output (`python3 scripts/inspect_binary_ast.py test <source.res>`). This shows you exactly where the two diverge. Once you've identified the divergence in the AST, look at the corresponding OCaml and Rust parser code to find the root cause. Only modify the Rust code to fix the issue. If the inspector tool is insufficient for your investigation (e.g., missing a mode, not decoding something correctly), improve the Python tool itself.
 
+7. **TELLA files are required parity scope** - For full-suite/pattern parity runs, include `TELLA_DIR` (`~/dev/tella-fusion` by default) when present. Rust must succeed and match OCaml on those files too.
+
+8. **Do not count OCaml failures as parity failures** - Parity denominators must include only files where OCaml succeeds for that check. Track OCaml-failing files separately.
+
 ---
 
 ## Current Status
@@ -27,8 +31,11 @@
 | sexp-locs-ppx | 1196/1196 (100%) ✅ |
 | bsc-ast | 936/1179 (79.4%) |
 
-**Note:** 1179 = files where OCaml bsc can produce output. 134 files use newer syntax
-that OCaml can't parse; these are excluded from parity testing. Total test files: 1313.
+**Scope note:** Final parity targets include both `tests/syntax_tests/data` and `TELLA_DIR`
+when present. Always report parity as `X/Y` where `Y` contains only OCaml-successful files.
+Files where OCaml fails are excluded from parity denominators and listed separately.
+
+**Snapshot note:** The `1179` denominator above is a historical in-repo snapshot.
 
 **Session progress (2026-02-05) - newest:**
 - Fixed `@deriving(jsConverter)` polyvariant marshal-sharing parity for structure/signature generation:

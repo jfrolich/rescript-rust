@@ -7,6 +7,14 @@ Achieve **100% parse tree parity** between the Rust and OCaml ReScript parsers. 
 2. Identical source locations on all nodes
 3. Identical values for ALL fields in the parsetree
 
+### Corpus Scope (Required)
+
+Parity scope includes:
+- The in-repo syntax corpus under `tests/syntax_tests/data`
+- The external `tella-fusion` corpus when available (`TELLA_DIR`, default `~/dev/tella-fusion`)
+
+Parity percentages and pass/fail targets must be computed only over files where OCaml succeeds for that check (`res_parser`/`bsc -bs-ast`). Files where OCaml fails are out of parity scope and must be tracked separately (informational only).
+
 ## Approach: Complete S-expression Serialization
 
 ### Why S-expressions?
@@ -75,6 +83,8 @@ PARSER=rust ./scripts/test_syntax.sh
 diff <(./_build/install/default/bin/res_parser -print sexp-locs test.res) \
      <(./compiler-rust/target/release/res_parser_rust -print sexp-locs test.res)
 ```
+
+`test_parser_ast_parity.sh` includes `TELLA_DIR` automatically when present and already reports OCaml failures separately from parity diffs. Use that behavior as the source of truth for denominators.
 
 ### Workflow for Fixing Parity Issues
 
@@ -250,6 +260,7 @@ See PROGRESS.md for detailed implementation notes.
 3. **Print roundtrip parity**: `parse → print → parse → print` produces identical output
 4. **AST conversion parity**: `parsetree → parsetree0 → parsetree` produces identical structure
 5. **All tests pass**: `make test-syntax` passes with `PARSER=rust`
+6. **TELLA parity**: for all OCaml-successful files in `TELLA_DIR`, Rust parsing and parity checks must match OCaml
 
 ### Metrics to Track
 
