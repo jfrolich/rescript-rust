@@ -2898,15 +2898,17 @@ fn type_application(
         return result;
     }
 
-    // Normal application: get the function's type after any unification
-    let mut current_ty = tctx.type_ctx.repr(typed_funct.exp_type);
+    // Match OCaml's use of expand_head when deciding application behavior.
+    let mut current_ty = typed_funct.exp_type;
+    let expanded_funct_ty = crate::types::ctype::expand_head(ctx, env, current_ty);
 
     // force_tvar only applies to total applications in OCaml.
-    let force_tvar = total_app && matches!(&*tctx.type_ctx.get_desc(current_ty), TypeDesc::Tvar(_));
+    let force_tvar =
+        total_app && matches!(&*tctx.type_ctx.get_desc(expanded_funct_ty), TypeDesc::Tvar(_));
     let mut top_arity: Option<i32> = if force_tvar {
         Some(args.len() as i32)
     } else {
-        match &*tctx.type_ctx.get_desc(current_ty) {
+        match &*tctx.type_ctx.get_desc(expanded_funct_ty) {
             TypeDesc::Tarrow { arity, .. } => *arity,
             _ => None,
         }
@@ -2923,8 +2925,9 @@ fn type_application(
     let mut skipped_optionals = 0usize;
 
     while !remaining_args.is_empty() {
+        let expanded_current_ty = crate::types::ctype::expand_head(ctx, env, current_ty);
         if let Some((fn_label, arg_ty, ret_ty)) =
-            crate::types::ctype::split_arrow_with_label(ctx, current_ty)
+            crate::types::ctype::split_arrow_with_label(ctx, expanded_current_ty)
         {
             let fn_label_name = fn_label.label_name().unwrap_or("");
             if let Some(match_idx) = extract_label_index(&remaining_args, fn_label_name, tctx.arena)
@@ -2981,7 +2984,7 @@ fn type_application(
         let ret_ty = ctx.new_var(None);
         let ctx_label = convert_arg_label_for_ctx(&label, tctx.arena);
         let arrow_ty = ctx.new_arrow(ctx_label, arg_ty, ret_ty, top_arity);
-        unify_expression_types(tctx, loc, current_ty, arrow_ty, None)?;
+        unify_expression_types(tctx, loc, expanded_current_ty, arrow_ty, None)?;
         top_arity = None;
 
         let typed_arg = type_expect(
@@ -3003,14 +3006,17 @@ fn type_application(
     }
 
     if total_app {
-        while let Some((fn_label, _arg_ty, ret_ty)) =
-            crate::types::ctype::split_arrow_with_label(ctx, current_ty)
-        {
-            if fn_label.is_optional() {
-                current_ty = ret_ty;
-            } else {
-                break;
+        loop {
+            let expanded_current_ty = crate::types::ctype::expand_head(ctx, env, current_ty);
+            if let Some((fn_label, _arg_ty, ret_ty)) =
+                crate::types::ctype::split_arrow_with_label(ctx, expanded_current_ty)
+            {
+                if fn_label.is_optional() {
+                    current_ty = ret_ty;
+                    continue;
+                }
             }
+            break;
         }
     }
 
