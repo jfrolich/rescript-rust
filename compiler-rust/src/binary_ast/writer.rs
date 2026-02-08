@@ -387,26 +387,28 @@ mod tests {
 
     fn make_simple_let_binding(arena: &mut crate::parse_arena::ParseArena, name: &str, value: i32) -> StructureItem {
         let name_idx = arena.intern(name);
+        let pat_idx = arena.push_pat(Pattern {
+            ppat_desc: Box::new(PatternDesc::Ppat_var(Located {
+                txt: name_idx,
+                loc: LocIdx::none(),
+            })),
+            ppat_loc: LocIdx::none(),
+            ppat_attributes: Attributes::new(),
+        });
+        let expr_idx = arena.push_expr(Expression {
+            pexp_desc: Box::new(ExpressionDesc::Pexp_constant(Box::new(Constant::Integer(
+                std::borrow::Cow::Owned(value.to_string()),
+                None,
+            )))),
+            pexp_loc: LocIdx::none(),
+            pexp_attributes: Attributes::new(),
+        });
         StructureItem {
             pstr_desc: Box::new(StructureItemDesc::Pstr_value(Box::new((
                 RecFlag::Nonrecursive,
                 vec![ValueBinding {
-                    pvb_pat: Pattern {
-                        ppat_desc: Box::new(PatternDesc::Ppat_var(Located {
-                            txt: name_idx,
-                            loc: LocIdx::none(),
-                        })),
-                        ppat_loc: LocIdx::none(),
-                        ppat_attributes: Attributes::new(),
-                    },
-                    pvb_expr: Expression {
-                        pexp_desc: Box::new(ExpressionDesc::Pexp_constant(Box::new(Constant::Integer(
-                            std::borrow::Cow::Owned(value.to_string()),
-                            None,
-                        )))),
-                        pexp_loc: LocIdx::none(),
-                        pexp_attributes: Attributes::new(),
-                    },
+                    pvb_pat: pat_idx,
+                    pvb_expr: expr_idx,
                     pvb_attributes: Attributes::new(),
                     pvb_loc: LocIdx::none(),
                 }],
@@ -415,18 +417,18 @@ mod tests {
         }
     }
 
-    fn make_module_ref_expr(arena: &mut crate::parse_arena::ParseArena, module: &str, name: &str) -> Expression {
+    fn make_module_ref_expr(arena: &mut crate::parse_arena::ParseArena, module: &str, name: &str) -> crate::parse_arena::ExprIdx {
         let module_idx = arena.intern(module);
         let name_idx = arena.intern(name);
         let lid_idx = arena.push_longident(Longident::ldot(Longident::lident(module_idx), name_idx));
-        Expression {
+        arena.push_expr(Expression {
             pexp_desc: Box::new(ExpressionDesc::Pexp_ident(Located {
                 txt: lid_idx,
                 loc: LocIdx::none(),
             })),
             pexp_loc: LocIdx::none(),
             pexp_attributes: Attributes::new(),
-        }
+        })
     }
 
     fn make_test_arena() -> crate::parse_arena::ParseArena {

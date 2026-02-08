@@ -755,7 +755,7 @@ fn print_value_binding<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, pat: 
                                 }
                                 f.string(".");
                                 f.space();
-                                print_core_type(f, arena, ct);
+                                print_core_type(f, arena, arena.get_core_type(*ct));
                                 f.space();
                                 f.string("=");
                                 f.space();
@@ -3193,7 +3193,7 @@ fn print_type_declaration<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, de
                                         f.string("*");
                                         f.space(); // @; after *
                                     }
-                                    print_core_type1(f, arena, arg);
+                                    print_core_type1(f, arena, arena.get_core_type(*arg));
                                 }
                             }
                             ConstructorArguments::Pcstr_record(fields) => {
@@ -3703,7 +3703,7 @@ fn print_signature_item<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, item
             f.space();
             // OCaml value_description: pp f "@[<hov2>%a%a@]"
             f.open_box(BoxKind::HOV, 2);
-            print_core_type(f, arena, &vd.pval_type);
+            print_core_type(f, arena, arena.get_core_type(vd.pval_type));
             if !vd.pval_prim.is_empty() {
                 f.space();
                 f.string("=");

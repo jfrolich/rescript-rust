@@ -32,31 +32,31 @@ use std::collections::HashMap;
 /// 3. The reference does not outlive the arena
 #[inline]
 unsafe fn expr_ref<'a>(arena: &ParseArena, idx: ExprIdx) -> &'a Expression {
-    &*(arena.get_expr(idx) as *const Expression)
+    unsafe { &*(arena.get_expr(idx) as *const Expression) }
 }
 
 /// Helper to get a pattern reference from a PatIdx with a decoupled lifetime.
 #[inline]
 unsafe fn pat_ref<'a>(arena: &ParseArena, idx: PatIdx) -> &'a Pattern {
-    &*(arena.get_pat(idx) as *const Pattern)
+    unsafe { &*(arena.get_pat(idx) as *const Pattern) }
 }
 
 /// Helper to get a core type reference from a CoreTypeIdx with a decoupled lifetime.
 #[inline]
 unsafe fn core_type_ref<'a>(arena: &ParseArena, idx: CoreTypeIdx) -> &'a CoreType {
-    &*(arena.get_core_type(idx) as *const CoreType)
+    unsafe { &*(arena.get_core_type(idx) as *const CoreType) }
 }
 
 /// Helper to get a module expression reference from a ModExprIdx with a decoupled lifetime.
 #[inline]
 unsafe fn mod_expr_ref<'a>(arena: &ParseArena, idx: ModExprIdx) -> &'a ModuleExpr {
-    &*(arena.get_mod_expr(idx) as *const ModuleExpr)
+    unsafe { &*(arena.get_mod_expr(idx) as *const ModuleExpr) }
 }
 
 /// Helper to get a module type reference from a ModTypeIdx with a decoupled lifetime.
 #[inline]
 unsafe fn mod_type_ref<'a>(arena: &ParseArena, idx: ModTypeIdx) -> &'a ModuleType {
-    &*(arena.get_mod_type(idx) as *const ModuleType)
+    unsafe { &*(arena.get_mod_type(idx) as *const ModuleType) }
 }
 
 /// Position-based key for comment lookup.
@@ -406,18 +406,21 @@ pub fn partition_between_lines(
 pub enum Node<'a> {
     Case(&'a Case),
     CoreType(&'a CoreType),
-    ExprArgument { expr: &'a Expression, loc: LocIdx },
+    CoreTypeIdx(CoreTypeIdx),
+    ExprArgument { expr: ExprIdx, loc: LocIdx },
     Expression(&'a Expression),
-    ExprRecordRow(&'a Loc<LidentIdx>, &'a Expression),
+    ExpressionIdx(ExprIdx),
+    ExprRecordRow(&'a Loc<LidentIdx>, ExprIdx),
     ExtensionConstructor(&'a ExtensionConstructor),
     LabelDeclaration(&'a LabelDeclaration),
     ModuleBinding(&'a ModuleBinding),
     ModuleDeclaration(&'a ModuleDeclaration),
     ModuleExpr(&'a ModuleExpr),
     ObjectField(&'a ObjectField),
-    PackageConstraint(&'a Loc<LidentIdx>, &'a CoreType),
+    PackageConstraint(&'a Loc<LidentIdx>, CoreTypeIdx),
     Pattern(&'a Pattern),
-    PatternRecordRow(&'a Loc<LidentIdx>, &'a Pattern),
+    PatternIdx(PatIdx),
+    PatternRecordRow(&'a Loc<LidentIdx>, PatIdx),
     RowField(&'a RowField),
     SignatureItem(&'a SignatureItem),
     StructureItem(&'a StructureItem),
@@ -434,14 +437,17 @@ impl<'a> Node<'a> {
                 // The case location extends from pattern to the end of the expression
                 // Check for braces attribute on RHS - if present, use its end location
                 // This must match the logic in printer.rs:get_case_pos_range
-                let start = arena.loc_start(case.pc_lhs.ppat_loc);
-                let end = match parsetree_viewer::process_braces_attr(arena, &case.pc_rhs) {
+                let pc_lhs = arena.get_pat(case.pc_lhs);
+                let pc_rhs = arena.get_expr(case.pc_rhs);
+                let start = arena.loc_start(pc_lhs.ppat_loc);
+                let end = match parsetree_viewer::process_braces_attr(arena, pc_rhs) {
                     Some(attr) => arena.loc_end(attr.0.loc),
-                    None => arena.loc_end(case.pc_rhs.pexp_loc),
+                    None => arena.loc_end(pc_rhs.pexp_loc),
                 };
                 arena.from_location(&Location::from_positions(start.clone(), end.clone()))
             }
             Node::CoreType(ct) => ct.ptyp_loc,
+            Node::CoreTypeIdx(idx) => arena.get_core_type(*idx).ptyp_loc,
             Node::ExprArgument { loc, .. } => *loc,
             Node::Expression(e) => {
                 // Check for braces attribute
@@ -453,7 +459,18 @@ impl<'a> Node<'a> {
                 }
                 e.pexp_loc
             }
-            Node::ExprRecordRow(li, e) => {
+            Node::ExpressionIdx(idx) => {
+                let e = arena.get_expr(*idx);
+                for attr in &e.pexp_attributes {
+                    let attr_name = arena.get_string(attr.0.txt);
+                    if attr_name == "res.braces" || attr_name == "ns.braces" {
+                        return attr.0.loc;
+                    }
+                }
+                e.pexp_loc
+            }
+            Node::ExprRecordRow(li, expr_idx) => {
+                let e = arena.get_expr(*expr_idx);
                 let start = arena.loc_start(li.loc);
                 let end = arena.loc_end(e.pexp_loc);
                 arena.from_location(&Location::from_positions(start.clone(), end.clone()))
@@ -464,20 +481,24 @@ impl<'a> Node<'a> {
             Node::ModuleDeclaration(md) => md.pmd_loc,
             Node::ModuleExpr(me) => me.pmod_loc,
             Node::ObjectField(field) => match field {
-                ObjectField::Otag(lbl, _attrs, typ) => {
+                ObjectField::Otag(lbl, _attrs, typ_idx) => {
+                    let typ = arena.get_core_type(*typ_idx);
                     let start = arena.loc_start(lbl.loc);
                     let end = arena.loc_end(typ.ptyp_loc);
                     arena.from_location(&Location::from_positions(start.clone(), end.clone()))
                 }
-                ObjectField::Oinherit(typ) => typ.ptyp_loc,
+                ObjectField::Oinherit(typ_idx) => arena.get_core_type(*typ_idx).ptyp_loc,
             },
-            Node::PackageConstraint(li, te) => {
+            Node::PackageConstraint(li, typ_idx) => {
+                let te = arena.get_core_type(*typ_idx);
                 let start = arena.loc_start(li.loc);
                 let end = arena.loc_end(te.ptyp_loc);
                 arena.from_location(&Location::from_positions(start.clone(), end.clone()))
             }
             Node::Pattern(p) => p.ppat_loc,
-            Node::PatternRecordRow(li, p) => {
+            Node::PatternIdx(idx) => arena.get_pat(*idx).ppat_loc,
+            Node::PatternRecordRow(li, pat_idx) => {
+                let p = arena.get_pat(*pat_idx);
                 // For punned patterns, li.loc and p.ppat_loc are the same
                 // Use li.loc directly to avoid creating a new LocIdx that won't match during printing
                 if li.loc == p.ppat_loc {
@@ -490,7 +511,7 @@ impl<'a> Node<'a> {
             }
             Node::RowField(rf) => match rf {
                 RowField::Rtag(tag, _attrs, _flag, _args) => tag.loc,
-                RowField::Rinherit(typ) => typ.ptyp_loc,
+                RowField::Rinherit(typ_idx) => arena.get_core_type(*typ_idx).ptyp_loc,
             },
             Node::SignatureItem(si) => si.psig_loc,
             Node::StructureItem(si) => si.pstr_loc,
@@ -506,8 +527,9 @@ fn get_jsx_prop_loc(prop: &JsxProp, arena: &mut ParseArena) -> LocIdx {
     match prop {
         JsxProp::Punning { name, .. } => name.loc,
         JsxProp::Value { name, value, .. } => {
+            let val = arena.get_expr(*value);
             let start = arena.loc_start(name.loc);
-            let end = arena.loc_end(value.pexp_loc);
+            let end = arena.loc_end(val.pexp_loc);
             arena.from_location(&Location::from_positions(start.clone(), end.clone()))
         }
         JsxProp::Spreading { loc, .. } => *loc,
@@ -552,8 +574,8 @@ fn collect_list_patterns<'a>(arena: &'a ParseArena, pattern: &'a Pattern) -> Vec
                 let args = arena.get_pat(*args_idx);
                 if let PatternDesc::Ppat_tuple(tuple) = &*args.ppat_desc {
                     if tuple.len() == 2 {
-                        acc.push(&tuple[0]);
-                        current = &tuple[1];
+                        acc.push(arena.get_pat(tuple[0]));
+                        current = arena.get_pat(tuple[1]);
                         continue;
                     }
                 }
@@ -585,12 +607,11 @@ fn collect_list_exprs<'a>(arena: &'a ParseArena, expr: &'a Expression) -> Vec<&'
             ExpressionDesc::Pexp_construct(name, Some(args_idx))
                 if arena.is_lident(name.txt, "::") =>
             {
-                // Safety: arena is only used for read-only access here
-                let args: &'a Expression = unsafe { expr_ref(arena, *args_idx) };
+                let args = arena.get_expr(*args_idx);
                 if let ExpressionDesc::Pexp_tuple(tuple) = &*args.pexp_desc {
                     if tuple.len() == 2 {
-                        acc.push(&tuple[0]);
-                        current = &tuple[1];
+                        acc.push(arena.get_expr(tuple[0]));
+                        current = arena.get_expr(tuple[1]);
                         continue;
                     }
                 }
@@ -699,18 +720,49 @@ fn walk_node(node: &Node<'_>, t: &mut CommentTable, comments: Vec<Comment>, aren
     match node {
         Node::Case(c) => walk_case(c, t, comments, arena),
         Node::CoreType(ct) => walk_core_type(ct, t, comments, arena),
-        Node::ExprArgument { expr, loc } => walk_expr_argument(expr, loc, t, comments, arena),
+        Node::CoreTypeIdx(idx) => {
+            // Safety: arena is append-only, core type won't be invalidated
+            let ct: &CoreType = unsafe { core_type_ref(arena, *idx) };
+            walk_core_type(ct, t, comments, arena);
+        }
+        Node::ExprArgument { expr, loc } => {
+            // Safety: arena is append-only, expression won't be invalidated
+            let e: &Expression = unsafe { expr_ref(arena, *expr) };
+            walk_expr_argument(e, loc, t, comments, arena);
+        }
         Node::Expression(e) => walk_expression(e, t, comments, arena),
-        Node::ExprRecordRow(li, e) => walk_expr_record_row(li, e, t, comments, arena),
+        Node::ExpressionIdx(idx) => {
+            // Safety: arena is append-only, expression won't be invalidated
+            let e: &Expression = unsafe { expr_ref(arena, *idx) };
+            walk_expression(e, t, comments, arena);
+        }
+        Node::ExprRecordRow(li, expr_idx) => {
+            // Safety: arena is append-only, expression won't be invalidated
+            let e: &Expression = unsafe { expr_ref(arena, *expr_idx) };
+            walk_expr_record_row(li, e, t, comments, arena);
+        }
         Node::ExtensionConstructor(ec) => walk_extension_constructor(ec, t, comments, arena),
         Node::LabelDeclaration(ld) => walk_label_declaration(ld, t, comments, arena),
         Node::ModuleBinding(mb) => walk_module_binding(mb, t, comments, arena),
         Node::ModuleDeclaration(md) => walk_module_declaration(md, t, comments, arena),
         Node::ModuleExpr(me) => walk_module_expr(me, t, comments, arena),
         Node::ObjectField(f) => walk_object_field(f, t, comments, arena),
-        Node::PackageConstraint(li, te) => walk_package_constraint(li, te, t, comments, arena),
+        Node::PackageConstraint(li, typ_idx) => {
+            // Safety: arena is append-only, core type won't be invalidated
+            let te: &CoreType = unsafe { core_type_ref(arena, *typ_idx) };
+            walk_package_constraint(li, te, t, comments, arena);
+        }
         Node::Pattern(p) => walk_pattern(p, t, comments, arena),
-        Node::PatternRecordRow(li, p) => walk_pattern_record_row(li, p, t, comments, arena),
+        Node::PatternIdx(idx) => {
+            // Safety: arena is append-only, pattern won't be invalidated
+            let p: &Pattern = unsafe { pat_ref(arena, *idx) };
+            walk_pattern(p, t, comments, arena);
+        }
+        Node::PatternRecordRow(li, pat_idx) => {
+            // Safety: arena is append-only, pattern won't be invalidated
+            let p: &Pattern = unsafe { pat_ref(arena, *pat_idx) };
+            walk_pattern_record_row(li, p, t, comments, arena);
+        }
         Node::RowField(rf) => walk_row_field(rf, t, comments, arena),
         Node::SignatureItem(si) => walk_signature_item(si, t, comments, arena),
         Node::StructureItem(si) => walk_structure_item(si, t, comments, arena),
@@ -737,7 +789,9 @@ fn walk_structure_item(si: &StructureItem, t: &mut CommentTable, comments: Vec<C
             walk_type_declarations(declarations, t, comments, arena)
         }
         StructureItemDesc::Pstr_eval(inner) => {
-            let (ref expr, _) = **inner;
+            let (ref expr_idx, _) = **inner;
+            // Safety: arena is append-only, expression won't be invalidated
+            let expr: &Expression = unsafe { expr_ref(arena, *expr_idx) };
             walk_expression(expr, t, comments, arena)
         }
         StructureItemDesc::Pstr_module(mb) => walk_module_binding(mb, t, comments, arena),
@@ -793,10 +847,14 @@ fn walk_value_description(vd: &ValueDescription, t: &mut CommentTable, comments:
     let (after_name, rest) = partition_adjacent_trailing(vd.pval_name.loc, trailing, arena);
     t.attach_trailing(vd.pval_name.loc, after_name, arena);
 
-    let (before, inside, after) = partition_by_loc(rest, vd.pval_type.ptyp_loc, arena);
-    t.attach_leading(vd.pval_type.ptyp_loc, before, arena);
-    walk_core_type(&vd.pval_type, t, inside, arena);
-    t.attach_trailing(vd.pval_type.ptyp_loc, after, arena);
+    let pval_type = arena.get_core_type(vd.pval_type);
+    let pval_type_loc = pval_type.ptyp_loc;
+    let (before, inside, after) = partition_by_loc(rest, pval_type_loc, arena);
+    t.attach_leading(pval_type_loc, before, arena);
+    // Safety: arena is append-only, core type won't be invalidated
+    let pval_type: &CoreType = unsafe { core_type_ref(arena, vd.pval_type) };
+    walk_core_type(pval_type, t, inside, arena);
+    t.attach_trailing(pval_type_loc, after, arena);
 }
 
 fn walk_type_extension(te: &TypeExtension, t: &mut CommentTable, comments: Vec<Comment>, arena: &mut ParseArena) {
@@ -812,8 +870,12 @@ fn walk_type_extension(te: &TypeExtension, t: &mut CommentTable, comments: Vec<C
     } else {
         visit_list_but_continue_with_remaining_comments(
             &te.ptyext_params,
-            |param, _arena| param.0.ptyp_loc,
-            |param, t, comments, arena| walk_core_type(&param.0, t, comments, arena),
+            |param, arena| arena.get_core_type(param.0).ptyp_loc,
+            |param, t, comments, arena| {
+                // Safety: arena is append-only, core type won't be invalidated
+                let ct: &CoreType = unsafe { core_type_ref(arena, param.0) };
+                walk_core_type(ct, t, comments, arena);
+            },
             t,
             rest,
             false,
@@ -830,17 +892,25 @@ fn walk_type_extension(te: &TypeExtension, t: &mut CommentTable, comments: Vec<C
 }
 
 fn walk_include_declaration(id: &IncludeDeclaration, t: &mut CommentTable, comments: Vec<Comment>, arena: &mut ParseArena) {
-    let (before, inside, after) = partition_by_loc(comments, id.pincl_mod.pmod_loc, arena);
-    t.attach_leading(id.pincl_mod.pmod_loc, before, arena);
-    walk_module_expr(&id.pincl_mod, t, inside, arena);
-    t.attach_trailing(id.pincl_mod.pmod_loc, after, arena);
+    let pincl_mod = arena.get_mod_expr(id.pincl_mod);
+    let pincl_mod_loc = pincl_mod.pmod_loc;
+    let (before, inside, after) = partition_by_loc(comments, pincl_mod_loc, arena);
+    t.attach_leading(pincl_mod_loc, before, arena);
+    // Safety: arena is append-only, module expression won't be invalidated
+    let pincl_mod: &ModuleExpr = unsafe { mod_expr_ref(arena, id.pincl_mod) };
+    walk_module_expr(pincl_mod, t, inside, arena);
+    t.attach_trailing(pincl_mod_loc, after, arena);
 }
 
 fn walk_include_description(id: &IncludeDescription, t: &mut CommentTable, comments: Vec<Comment>, arena: &mut ParseArena) {
-    let (before, inside, after) = partition_by_loc(comments, id.pincl_mod.pmty_loc, arena);
-    t.attach_leading(id.pincl_mod.pmty_loc, before, arena);
-    walk_mod_type(&id.pincl_mod, t, inside, arena);
-    t.attach_trailing(id.pincl_mod.pmty_loc, after, arena);
+    let pincl_mod = arena.get_mod_type(id.pincl_mod);
+    let pincl_mod_loc = pincl_mod.pmty_loc;
+    let (before, inside, after) = partition_by_loc(comments, pincl_mod_loc, arena);
+    t.attach_leading(pincl_mod_loc, before, arena);
+    // Safety: arena is append-only, module type won't be invalidated
+    let pincl_mod: &ModuleType = unsafe { mod_type_ref(arena, id.pincl_mod) };
+    walk_mod_type(pincl_mod, t, inside, arena);
+    t.attach_trailing(pincl_mod_loc, after, arena);
 }
 
 fn walk_module_type_declaration(
@@ -856,14 +926,17 @@ fn walk_module_type_declaration(
         None => {
             t.attach_trailing(mtd.pmtd_name.loc, trailing, arena);
         }
-        Some(mod_type) => {
+        Some(mod_type_idx) => {
             let (after_name, rest) = partition_adjacent_trailing(mtd.pmtd_name.loc, trailing, arena);
             t.attach_trailing(mtd.pmtd_name.loc, after_name, arena);
 
-            let (before, inside, after) = partition_by_loc(rest, mod_type.pmty_loc, arena);
-            t.attach_leading(mod_type.pmty_loc, before, arena);
+            let mod_type_loc = arena.get_mod_type(*mod_type_idx).pmty_loc;
+            let (before, inside, after) = partition_by_loc(rest, mod_type_loc, arena);
+            t.attach_leading(mod_type_loc, before, arena);
+            // Safety: arena is append-only, module type won't be invalidated
+            let mod_type: &ModuleType = unsafe { mod_type_ref(arena, *mod_type_idx) };
             walk_mod_type(mod_type, t, inside, arena);
-            t.attach_trailing(mod_type.pmty_loc, after, arena);
+            t.attach_trailing(mod_type_loc, after, arena);
         }
     }
 }
@@ -875,19 +948,21 @@ fn walk_module_binding(mb: &ModuleBinding, t: &mut CommentTable, comments: Vec<C
     let (after_name, rest) = partition_adjacent_trailing(mb.pmb_name.loc, trailing, arena);
     t.attach_trailing(mb.pmb_name.loc, after_name, arena);
 
-    let (leading, inside, trailing) = partition_by_loc(rest, mb.pmb_expr.pmod_loc, arena);
+    let pmb_expr = arena.get_mod_expr(mb.pmb_expr);
+    let pmb_expr_loc = pmb_expr.pmod_loc;
+    let is_constraint = matches!(&*pmb_expr.pmod_desc, ModuleExprDesc::Pmod_constraint(..));
+    let (leading, inside, trailing) = partition_by_loc(rest, pmb_expr_loc, arena);
 
-    match &*mb.pmb_expr.pmod_desc {
-        ModuleExprDesc::Pmod_constraint(..) => {
-            let combined: Vec<Comment> = leading.into_iter().chain(inside.into_iter()).collect();
-            walk_module_expr(&mb.pmb_expr, t, combined, arena);
-        }
-        _ => {
-            t.attach_leading(mb.pmb_expr.pmod_loc, leading, arena);
-            walk_module_expr(&mb.pmb_expr, t, inside, arena);
-        }
+    // Safety: arena is append-only, module expression won't be invalidated
+    let pmb_expr: &ModuleExpr = unsafe { mod_expr_ref(arena, mb.pmb_expr) };
+    if is_constraint {
+        let combined: Vec<Comment> = leading.into_iter().chain(inside.into_iter()).collect();
+        walk_module_expr(pmb_expr, t, combined, arena);
+    } else {
+        t.attach_leading(pmb_expr_loc, leading, arena);
+        walk_module_expr(pmb_expr, t, inside, arena);
     }
-    t.attach_trailing(mb.pmb_expr.pmod_loc, trailing, arena);
+    t.attach_trailing(pmb_expr_loc, trailing, arena);
 }
 
 fn walk_module_declaration(md: &ModuleDeclaration, t: &mut CommentTable, comments: Vec<Comment>, arena: &mut ParseArena) {
@@ -897,10 +972,13 @@ fn walk_module_declaration(md: &ModuleDeclaration, t: &mut CommentTable, comment
     let (after_name, rest) = partition_adjacent_trailing(md.pmd_name.loc, trailing, arena);
     t.attach_trailing(md.pmd_name.loc, after_name, arena);
 
-    let (leading, inside, trailing) = partition_by_loc(rest, md.pmd_type.pmty_loc, arena);
-    t.attach_leading(md.pmd_type.pmty_loc, leading, arena);
-    walk_mod_type(&md.pmd_type, t, inside, arena);
-    t.attach_trailing(md.pmd_type.pmty_loc, trailing, arena);
+    let pmd_type_loc = arena.get_mod_type(md.pmd_type).pmty_loc;
+    let (leading, inside, trailing) = partition_by_loc(rest, pmd_type_loc, arena);
+    t.attach_leading(pmd_type_loc, leading, arena);
+    // Safety: arena is append-only, module type won't be invalidated
+    let pmd_type: &ModuleType = unsafe { mod_type_ref(arena, md.pmd_type) };
+    walk_mod_type(pmd_type, t, inside, arena);
+    t.attach_trailing(pmd_type_loc, trailing, arena);
 }
 
 fn walk_open_description(od: &OpenDescription, t: &mut CommentTable, comments: Vec<Comment>, arena: &mut ParseArena) {
@@ -930,19 +1008,23 @@ fn walk_type_declarations(tds: &[TypeDeclaration], t: &mut CommentTable, comment
 /// Returns (pattern_loc, expression_ref, expression_loc)
 fn rewrite_value_binding_locs<'a>(vb: &'a ValueBinding, arena: &mut ParseArena) -> (LocIdx, &'a Expression, LocIdx) {
     // Default: use the value binding's own locations
-    let default = (vb.pvb_pat.ppat_loc, &vb.pvb_expr, vb.pvb_expr.pexp_loc);
+    // Safety: arena is append-only, references won't be invalidated
+    let pvb_pat = unsafe { pat_ref(arena, vb.pvb_pat) };
+    let pvb_expr: &'a Expression = unsafe { expr_ref(arena, vb.pvb_expr) };
+    let default = (pvb_pat.ppat_loc, pvb_expr, pvb_expr.pexp_loc);
 
     // Check for the sugar cases that OCaml handles specially
-    match (&*vb.pvb_pat.ppat_desc, &*vb.pvb_expr.pexp_desc) {
+    match (&*pvb_pat.ppat_desc, &*pvb_expr.pexp_desc) {
         // Case 1: Ppat_constraint with Pexp_constraint, empty Ptyp_poly
         // let x: t = (expr: typ)
         (
             PatternDesc::Ppat_constraint(pat_inner),
             ExpressionDesc::Pexp_constraint(expr_inner),
         ) => {
-            let (ref pat_idx, ref typ) = **pat_inner;
+            let (ref pat_idx, ref typ_idx) = **pat_inner;
             let (ref expr_idx, _) = **expr_inner;
             let pat_loc = arena.get_pat(*pat_idx).ppat_loc;
+            let typ = arena.get_core_type(*typ_idx);
             if let CoreTypeDesc::Ptyp_poly(poly_inner) = &*typ.ptyp_desc {
                 let (ref vars, ref inner_typ_idx) = **poly_inner;
                 let inner_typ_loc = arena.get_core_type(*inner_typ_idx).ptyp_loc;
@@ -954,8 +1036,8 @@ fn rewrite_value_binding_locs<'a>(vb: &'a ValueBinding, arena: &mut ParseArena) 
                         loc_ghost: false,
                     });
                     // Safety: arena is append-only, expression won't be invalidated
-                    let expr_ref: &'a Expression = unsafe { expr_ref(arena, *expr_idx) };
-                    (new_pat_loc, expr_ref, expr_ref.pexp_loc)
+                    let inner_expr: &'a Expression = unsafe { expr_ref(arena, *expr_idx) };
+                    (new_pat_loc, inner_expr, inner_expr.pexp_loc)
                 } else {
                     default
                 }
@@ -970,18 +1052,19 @@ fn rewrite_value_binding_locs<'a>(vb: &'a ValueBinding, arena: &mut ParseArena) 
             PatternDesc::Ppat_constraint(pat_inner),
             ExpressionDesc::Pexp_fun(_),
         ) => {
-            let (ref _pat_idx, ref typ) = **pat_inner;
+            let (ref _pat_idx, ref typ_idx) = **pat_inner;
+            let typ = arena.get_core_type(*typ_idx);
             if let CoreTypeDesc::Ptyp_poly(poly_inner) = &*typ.ptyp_desc {
                 let (ref vars, ref inner_typ_idx) = **poly_inner;
                 let inner_typ_loc = arena.get_core_type(*inner_typ_idx).ptyp_loc;
                 if !vars.is_empty() {
                     // Pattern loc ends at the inner type's location
                     let new_pat_loc = arena.from_location(&Location {
-                        loc_start: arena.loc_start(vb.pvb_pat.ppat_loc).clone(),
+                        loc_start: arena.loc_start(pvb_pat.ppat_loc).clone(),
                         loc_end: arena.loc_end(inner_typ_loc).clone(),
                         loc_ghost: false,
                     });
-                    (new_pat_loc, &vb.pvb_expr, vb.pvb_expr.pexp_loc)
+                    (new_pat_loc, pvb_expr, pvb_expr.pexp_loc)
                 } else {
                     default
                 }
@@ -997,8 +1080,9 @@ fn rewrite_value_binding_locs<'a>(vb: &'a ValueBinding, arena: &mut ParseArena) 
             PatternDesc::Ppat_constraint(pat_inner),
             ExpressionDesc::Pexp_newtype(newtype_inner),
         ) => {
-            let (ref _pat_idx, ref typ) = **pat_inner;
+            let (ref _pat_idx, ref typ_idx) = **pat_inner;
             let (_name, ref inner_expr_idx) = **newtype_inner;
+            let typ = arena.get_core_type(*typ_idx);
             if let CoreTypeDesc::Ptyp_poly(poly_inner) = &*typ.ptyp_desc {
                 let (ref vars, ref inner_typ_idx) = **poly_inner;
                 let inner_typ_loc = arena.get_core_type(*inner_typ_idx).ptyp_loc;
@@ -1016,7 +1100,7 @@ fn rewrite_value_binding_locs<'a>(vb: &'a ValueBinding, arena: &mut ParseArena) 
                     };
                     if let Some(expr_idx) = constraint_expr_idx {
                         let new_pat_loc = arena.from_location(&Location {
-                            loc_start: arena.loc_start(vb.pvb_pat.ppat_loc).clone(),
+                            loc_start: arena.loc_start(pvb_pat.ppat_loc).clone(),
                             loc_end: arena.loc_end(inner_typ_loc).clone(),
                             loc_ghost: false,
                         });
@@ -1048,7 +1132,9 @@ fn walk_value_binding(vb: &ValueBinding, t: &mut CommentTable, comments: Vec<Com
 
     // Everything before start of pattern can only be leading on the pattern
     t.attach_leading(pattern_loc, leading, arena);
-    walk_pattern(&vb.pvb_pat, t, inside, arena);
+    // Safety: arena is append-only, pattern won't be invalidated
+    let pvb_pat: &Pattern = unsafe { pat_ref(arena, vb.pvb_pat) };
+    walk_pattern(pvb_pat, t, inside, arena);
 
     let (after_pat, surrounding_expr) = partition_adjacent_trailing(pattern_loc, trailing, arena);
     t.attach_trailing(pattern_loc, after_pat, arena);
@@ -1082,8 +1168,12 @@ fn walk_type_declaration(td: &TypeDeclaration, t: &mut CommentTable, comments: V
     } else {
         visit_list_but_continue_with_remaining_comments(
             &td.ptype_params,
-            |param, _arena| param.0.ptyp_loc,
-            |param, t, comments, arena| walk_core_type(&param.0, t, comments, arena),
+            |param, arena| arena.get_core_type(param.0).ptyp_loc,
+            |param, t, comments, arena| {
+                // Safety: arena is append-only, core type won't be invalidated
+                let ct: &CoreType = unsafe { core_type_ref(arena, param.0) };
+                walk_core_type(ct, t, comments, arena);
+            },
             t,
             rest,
             false,
@@ -1093,12 +1183,15 @@ fn walk_type_declaration(td: &TypeDeclaration, t: &mut CommentTable, comments: V
 
     // Manifest: = typexpr
     let rest = match &td.ptype_manifest {
-        Some(typexpr) => {
-            let (before_typ, inside_typ, after_typ) = partition_by_loc(rest, typexpr.ptyp_loc, arena);
-            t.attach_leading(typexpr.ptyp_loc, before_typ, arena);
+        Some(typexpr_idx) => {
+            let typexpr_loc = arena.get_core_type(*typexpr_idx).ptyp_loc;
+            let (before_typ, inside_typ, after_typ) = partition_by_loc(rest, typexpr_loc, arena);
+            t.attach_leading(typexpr_loc, before_typ, arena);
+            // Safety: arena is append-only, core type won't be invalidated
+            let typexpr: &CoreType = unsafe { core_type_ref(arena, *typexpr_idx) };
             walk_core_type(typexpr, t, inside_typ, arena);
-            let (after_typ_adj, rest) = partition_adjacent_trailing(typexpr.ptyp_loc, after_typ, arena);
-            t.attach_trailing(typexpr.ptyp_loc, after_typ_adj, arena);
+            let (after_typ_adj, rest) = partition_adjacent_trailing(typexpr_loc, after_typ, arena);
+            t.attach_trailing(typexpr_loc, after_typ_adj, arena);
             rest
         }
         None => rest,
@@ -1129,10 +1222,13 @@ fn walk_label_declaration(ld: &LabelDeclaration, t: &mut CommentTable, comments:
     let (after_name, rest) = partition_adjacent_trailing(ld.pld_name.loc, rest, arena);
     t.attach_trailing(ld.pld_name.loc, after_name, arena);
 
-    let (before_typ, inside_typ, after_typ) = partition_by_loc(rest, ld.pld_type.ptyp_loc, arena);
-    t.attach_leading(ld.pld_type.ptyp_loc, before_typ, arena);
-    walk_core_type(&ld.pld_type, t, inside_typ, arena);
-    t.attach_trailing(ld.pld_type.ptyp_loc, after_typ, arena);
+    let pld_type_loc = arena.get_core_type(ld.pld_type).ptyp_loc;
+    let (before_typ, inside_typ, after_typ) = partition_by_loc(rest, pld_type_loc, arena);
+    t.attach_leading(pld_type_loc, before_typ, arena);
+    // Safety: arena is append-only, core type won't be invalidated
+    let pld_type: &CoreType = unsafe { core_type_ref(arena, ld.pld_type) };
+    walk_core_type(pld_type, t, inside_typ, arena);
+    t.attach_trailing(pld_type_loc, after_typ, arena);
 }
 
 fn walk_constructor_declarations(
@@ -1167,12 +1263,15 @@ fn walk_constructor_declaration(
     let rest = walk_constructor_arguments(&cd.pcd_args, t, rest, arena);
 
     let rest = match &cd.pcd_res {
-        Some(typexpr) => {
-            let (before_typ, inside_typ, after_typ) = partition_by_loc(rest, typexpr.ptyp_loc, arena);
-            t.attach_leading(typexpr.ptyp_loc, before_typ, arena);
+        Some(typexpr_idx) => {
+            let typexpr_loc = arena.get_core_type(*typexpr_idx).ptyp_loc;
+            let (before_typ, inside_typ, after_typ) = partition_by_loc(rest, typexpr_loc, arena);
+            t.attach_leading(typexpr_loc, before_typ, arena);
+            // Safety: arena is append-only, core type won't be invalidated
+            let typexpr: &CoreType = unsafe { core_type_ref(arena, *typexpr_idx) };
             walk_core_type(typexpr, t, inside_typ, arena);
-            let (after_typ_adj, rest) = partition_adjacent_trailing(typexpr.ptyp_loc, after_typ, arena);
-            t.attach_trailing(typexpr.ptyp_loc, after_typ_adj, arena);
+            let (after_typ_adj, rest) = partition_adjacent_trailing(typexpr_loc, after_typ, arena);
+            t.attach_trailing(typexpr_loc, after_typ_adj, arena);
             rest
         }
         None => rest,
@@ -1191,8 +1290,12 @@ fn walk_constructor_arguments(
         ConstructorArguments::Pcstr_tuple(typexprs) => {
             visit_list_but_continue_with_remaining_comments(
                 typexprs,
-                |te, _arena| te.ptyp_loc,
-                |te, t, comments, arena| walk_core_type(te, t, comments, arena),
+                |te_idx, arena| arena.get_core_type(*te_idx).ptyp_loc,
+                |te_idx, t, comments, arena| {
+                    // Safety: arena is append-only, core type won't be invalidated
+                    let te: &CoreType = unsafe { core_type_ref(arena, *te_idx) };
+                    walk_core_type(te, t, comments, arena);
+                },
                 t,
                 comments,
                 false,
@@ -1228,12 +1331,15 @@ fn walk_extension_constructor(
     match &ec.pext_kind {
         ExtensionConstructorKind::Pext_decl(args, res) => {
             let rest = walk_constructor_arguments(args, t, rest, arena);
-            if let Some(typexpr) = res {
+            if let Some(typexpr_idx) = res {
+                let typexpr_loc = arena.get_core_type(*typexpr_idx).ptyp_loc;
                 let (before_typ, inside_typ, after_typ) =
-                    partition_by_loc(rest, typexpr.ptyp_loc, arena);
-                t.attach_leading(typexpr.ptyp_loc, before_typ, arena);
+                    partition_by_loc(rest, typexpr_loc, arena);
+                t.attach_leading(typexpr_loc, before_typ, arena);
+                // Safety: arena is append-only, core type won't be invalidated
+                let typexpr: &CoreType = unsafe { core_type_ref(arena, *typexpr_idx) };
                 walk_core_type(typexpr, t, inside_typ, arena);
-                t.attach_trailing(typexpr.ptyp_loc, after_typ, arena);
+                t.attach_trailing(typexpr_loc, after_typ, arena);
             }
         }
         ExtensionConstructorKind::Pext_rebind(lid) => {
@@ -1272,8 +1378,9 @@ fn walk_expression(expr: &Expression, t: &mut CommentTable, comments: Vec<Commen
                 let comments = visit_list_but_continue_with_remaining_comments(
                     bindings,
                     |vb, arena| {
-                        if arena.loc_ghost(vb.pvb_pat.ppat_loc) {
-                            vb.pvb_expr.pexp_loc
+                        let pvb_pat = arena.get_pat(vb.pvb_pat);
+                        if arena.loc_ghost(pvb_pat.ppat_loc) {
+                            arena.get_expr(vb.pvb_expr).pexp_loc
                         } else {
                             vb.pvb_loc
                         }
@@ -1360,12 +1467,14 @@ fn walk_expression(expr: &Expression, t: &mut CommentTable, comments: Vec<Commen
                     if items.len() == 1 {
                         if let StructureItemDesc::Pstr_eval(eval_inner) = &*items[0].pstr_desc
                         {
-                            let (ref inner, _) = **eval_inner;
+                            let (ref inner_idx, _) = **eval_inner;
+                            let inner = arena.get_expr(*inner_idx);
                             if let ExpressionDesc::Pexp_record(rec_inner) = &*inner.pexp_desc {
                                 let (ref fields, _) = **rec_inner;
-                                let nodes: Vec<Node<'_>> = fields
+                                let record_fields = fields.clone();
+                                let nodes: Vec<Node<'_>> = record_fields
                                     .iter()
-                                    .map(|f| Node::ExprRecordRow(&f.lid, &f.expr))
+                                    .map(|f| Node::ExprRecordRow(&f.lid, f.expr))
                                     .collect();
                                 walk_list(&nodes, t, comments, arena);
                                 return;
@@ -1404,13 +1513,15 @@ fn walk_expression(expr: &Expression, t: &mut CommentTable, comments: Vec<Commen
             }
         }
         ExpressionDesc::Pexp_letmodule(inner) => {
-                    let (ref name, ref module, ref body_idx) = **inner;
+                    let (ref name, ref module_idx, ref body_idx) = **inner;
             // Safety: arena is append-only, expression won't be invalidated
             let body: &Expression = unsafe { expr_ref(arena, *body_idx) };
+            let module = arena.get_mod_expr(*module_idx);
+            let module_loc = module.pmod_loc;
             let (leading, comments) = partition_leading_trailing(comments, expr.pexp_loc, arena);
             let combined_loc = arena.from_location(&Location::from_positions(
                 arena.loc_start(expr.pexp_loc).clone(),
-                arena.loc_end(module.pmod_loc).clone(),
+                arena.loc_end(module_loc).clone(),
             ));
             t.attach_leading(combined_loc, leading, arena);
 
@@ -1421,12 +1532,14 @@ fn walk_expression(expr: &Expression, t: &mut CommentTable, comments: Vec<Commen
             t.attach_trailing(name.loc, after_string, arena);
 
             let (before_mod_expr, inside_mod_expr, after_mod_expr) =
-                partition_by_loc(rest, module.pmod_loc, arena);
-            t.attach_leading(module.pmod_loc, before_mod_expr, arena);
+                partition_by_loc(rest, module_loc, arena);
+            t.attach_leading(module_loc, before_mod_expr, arena);
+            // Safety: arena is append-only, module expression won't be invalidated
+            let module: &ModuleExpr = unsafe { mod_expr_ref(arena, *module_idx) };
             walk_module_expr(module, t, inside_mod_expr, arena);
 
-            let (after_mod_expr_adj, rest) = partition_by_on_same_line(module.pmod_loc, after_mod_expr, arena);
-            t.attach_trailing(module.pmod_loc, after_mod_expr_adj, arena);
+            let (after_mod_expr_adj, rest) = partition_by_on_same_line(module_loc, after_mod_expr, arena);
+            t.attach_trailing(module_loc, after_mod_expr_adj, arena);
 
             if is_block_expr(arena, body) {
                 walk_expression(body, t, rest, arena);
@@ -1450,7 +1563,7 @@ fn walk_expression(expr: &Expression, t: &mut CommentTable, comments: Vec<Commen
             }
         }
         ExpressionDesc::Pexp_coerce(coerce_inner) => {
-                    let (ref inner_idx, _, ref typ) = **coerce_inner;
+                    let (ref inner_idx, _, ref typ_idx) = **coerce_inner;
             // Safety: arena is append-only, expression won't be invalidated
             let inner: &Expression = unsafe { expr_ref(arena, *inner_idx) };
             let (leading, inside, trailing) = partition_by_loc(comments, inner.pexp_loc, arena);
@@ -1460,13 +1573,16 @@ fn walk_expression(expr: &Expression, t: &mut CommentTable, comments: Vec<Commen
             let (after_expr, rest) = partition_adjacent_trailing(inner.pexp_loc, trailing, arena);
             t.attach_trailing(inner.pexp_loc, after_expr, arena);
 
-            let (leading, inside, trailing) = partition_by_loc(rest, typ.ptyp_loc, arena);
-            t.attach_leading(typ.ptyp_loc, leading, arena);
+            let typ_loc = arena.get_core_type(*typ_idx).ptyp_loc;
+            let (leading, inside, trailing) = partition_by_loc(rest, typ_loc, arena);
+            t.attach_leading(typ_loc, leading, arena);
+            // Safety: arena is append-only, core type won't be invalidated
+            let typ: &CoreType = unsafe { core_type_ref(arena, *typ_idx) };
             walk_core_type(typ, t, inside, arena);
-            t.attach_trailing(typ.ptyp_loc, trailing, arena);
+            t.attach_trailing(typ_loc, trailing, arena);
         }
         ExpressionDesc::Pexp_constraint(constraint_inner) => {
-                    let (ref inner_idx, ref typ) = **constraint_inner;
+                    let (ref inner_idx, ref typ_idx) = **constraint_inner;
             // Safety: arena is append-only, expression won't be invalidated
             let inner: &Expression = unsafe { expr_ref(arena, *inner_idx) };
             let (leading, inside, trailing) = partition_by_loc(comments, inner.pexp_loc, arena);
@@ -1476,10 +1592,13 @@ fn walk_expression(expr: &Expression, t: &mut CommentTable, comments: Vec<Commen
             let (after_expr, rest) = partition_adjacent_trailing(inner.pexp_loc, trailing, arena);
             t.attach_trailing(inner.pexp_loc, after_expr, arena);
 
-            let (leading, inside, trailing) = partition_by_loc(rest, typ.ptyp_loc, arena);
-            t.attach_leading(typ.ptyp_loc, leading, arena);
+            let typ_loc = arena.get_core_type(*typ_idx).ptyp_loc;
+            let (leading, inside, trailing) = partition_by_loc(rest, typ_loc, arena);
+            t.attach_leading(typ_loc, leading, arena);
+            // Safety: arena is append-only, core type won't be invalidated
+            let typ: &CoreType = unsafe { core_type_ref(arena, *typ_idx) };
             walk_core_type(typ, t, inside, arena);
-            t.attach_trailing(typ.ptyp_loc, trailing, arena);
+            t.attach_trailing(typ_loc, trailing, arena);
         }
         ExpressionDesc::Pexp_tuple(exprs) if exprs.is_empty() => {
             t.attach_inside(expr.pexp_loc, comments, arena);
@@ -1530,7 +1649,7 @@ fn walk_expression(expr: &Expression, t: &mut CommentTable, comments: Vec<Commen
             }
         }
         ExpressionDesc::Pexp_array(exprs) | ExpressionDesc::Pexp_tuple(exprs) => {
-            let nodes: Vec<Node<'_>> = exprs.iter().map(|e| Node::Expression(e)).collect();
+            let nodes: Vec<Node<'_>> = exprs.iter().map(|e| Node::ExpressionIdx(*e)).collect();
             walk_list(&nodes, t, comments, arena);
         }
         ExpressionDesc::Pexp_record(inner) => {
@@ -1556,7 +1675,7 @@ fn walk_expression(expr: &Expression, t: &mut CommentTable, comments: Vec<Commen
 
                 let nodes: Vec<Node<'_>> = fields
                     .iter()
-                    .map(|f| Node::ExprRecordRow(&f.lid, &f.expr))
+                    .map(|f| Node::ExprRecordRow(&f.lid, f.expr))
                     .collect();
                 walk_list(&nodes, t, comments, arena);
             }
@@ -1722,11 +1841,12 @@ fn walk_expression(expr: &Expression, t: &mut CommentTable, comments: Vec<Commen
             }
         }
         ExpressionDesc::Pexp_for(for_inner) => {
-                    let (ref pat, ref from_idx, ref to_idx, _, ref body_idx) = **for_inner;
-            // Safety: arena is append-only, expressions won't be invalidated
+                    let (ref pat_idx, ref from_idx, ref to_idx, _, ref body_idx) = **for_inner;
+            // Safety: arena is append-only, expressions/patterns won't be invalidated
             let from: &Expression = unsafe { expr_ref(arena, *from_idx) };
             let to: &Expression = unsafe { expr_ref(arena, *to_idx) };
             let body: &Expression = unsafe { expr_ref(arena, *body_idx) };
+            let pat: &Pattern = unsafe { pat_ref(arena, *pat_idx) };
             let (leading, inside, trailing) = partition_by_loc(comments, pat.ppat_loc, arena);
             t.attach_leading(pat.ppat_loc, leading, arena);
             walk_pattern(pat, t, inside, arena);
@@ -1807,7 +1927,9 @@ fn walk_expression(expr: &Expression, t: &mut CommentTable, comments: Vec<Commen
                             op_str,
                             "~+" | "~+." | "~-" | "~-." | "~~~" | "not" | "!"
                         ) {
-                            let (_, arg_expr) = &args[0];
+                            let (_, arg_expr_idx) = &args[0];
+                            // Safety: arena is append-only, expression won't be invalidated
+                            let arg_expr: &Expression = unsafe { expr_ref(arena, *arg_expr_idx) };
                             let (before, inside, after) =
                                 partition_by_loc(comments, arg_expr.pexp_loc, arena);
                             t.attach_leading(arg_expr.pexp_loc, before, arena);
@@ -1828,11 +1950,11 @@ fn walk_expression(expr: &Expression, t: &mut CommentTable, comments: Vec<Commen
                             let method = arena.get_string(*method_idx);
                             if module == "Array" && method == "get" {
                                 // Match OCaml: walk_list [Expression parent_expr; Expression member_expr] t comments
-                                let (_, parent_expr) = &args[0];
-                                let (_, member_expr) = &args[1];
+                                let (_, parent_expr_idx) = &args[0];
+                                let (_, member_expr_idx) = &args[1];
                                 let nodes: Vec<Node<'_>> = vec![
-                                    Node::Expression(parent_expr),
-                                    Node::Expression(member_expr),
+                                    Node::ExpressionIdx(*parent_expr_idx),
+                                    Node::ExpressionIdx(*member_expr_idx),
                                 ];
                                 walk_list(&nodes, t, comments, arena);
                                 return;
@@ -1851,13 +1973,13 @@ fn walk_expression(expr: &Expression, t: &mut CommentTable, comments: Vec<Commen
                             let method = arena.get_string(*method_idx);
                             if module == "Array" && method == "set" {
                                 // Match OCaml: walk_list [Expression parent_expr; Expression member_expr; Expression target_expr] t comments
-                                let (_, parent_expr) = &args[0];
-                                let (_, member_expr) = &args[1];
-                                let (_, target_expr) = &args[2];
+                                let (_, parent_expr_idx) = &args[0];
+                                let (_, member_expr_idx) = &args[1];
+                                let (_, target_expr_idx) = &args[2];
                                 let nodes: Vec<Node<'_>> = vec![
-                                    Node::Expression(parent_expr),
-                                    Node::Expression(member_expr),
-                                    Node::Expression(target_expr),
+                                    Node::ExpressionIdx(*parent_expr_idx),
+                                    Node::ExpressionIdx(*member_expr_idx),
+                                    Node::ExpressionIdx(*target_expr_idx),
                                 ];
                                 walk_list(&nodes, t, comments, arena);
                                 return;
@@ -1875,11 +1997,12 @@ fn walk_expression(expr: &Expression, t: &mut CommentTable, comments: Vec<Commen
                         if arena.get_string(*method_idx) == "make" {
                             if let Longident::Lident(module_idx) = parent.as_ref() {
                                 if arena.get_string(*module_idx) == "Primitive_dict" {
-                                    let (_, key_values) = &args[0];
+                                    let (_, key_values_idx) = &args[0];
+                                    let key_values = arena.get_expr(*key_values_idx);
                                     // Check if key_values is a tuple array (matching OCaml's is_tuple_array)
-                                    if parsetree_viewer::is_tuple_array(key_values) {
+                                    if parsetree_viewer::is_tuple_array(arena, key_values) {
                                         // Walk the key_values expression directly
-                                        walk_list(&[Node::Expression(key_values)], t, comments, arena);
+                                        walk_list(&[Node::ExpressionIdx(*key_values_idx)], t, comments, arena);
                                         return;
                                     }
                                 }
@@ -1900,22 +2023,24 @@ fn walk_expression(expr: &Expression, t: &mut CommentTable, comments: Vec<Commen
                                     if let Longident::Lident(base) = grandparent.as_ref() {
                                         if arena.get_string(*base) == "Belt" {
                                             // Found Belt.Array.concatMany
-                                            let (_, arg) = &args[0];
+                                            let (_, arg_idx) = &args[0];
+                                            let arg = arena.get_expr(*arg_idx);
                                             if let ExpressionDesc::Pexp_array(sub_arrays) = &*arg.pexp_desc {
-                                                // Collect all expressions from sub-arrays
-                                                let mut all_exprs: Vec<&Expression> = Vec::new();
-                                                for sub_array in sub_arrays.iter() {
+                                                // Collect all ExprIdx from sub-arrays
+                                                let mut all_expr_idxs: Vec<ExprIdx> = Vec::new();
+                                                for sub_array_idx in sub_arrays.iter() {
+                                                    let sub_array = arena.get_expr(*sub_array_idx);
                                                     if let ExpressionDesc::Pexp_array(exprs) = &*sub_array.pexp_desc {
-                                                        all_exprs.extend(exprs.iter());
+                                                        all_expr_idxs.extend(exprs.iter().copied());
                                                     } else {
                                                         // Spread expression
-                                                        all_exprs.push(sub_array);
+                                                        all_expr_idxs.push(*sub_array_idx);
                                                     }
                                                 }
                                                 // Walk all expressions together
-                                                let nodes: Vec<Node<'_>> = all_exprs
+                                                let nodes: Vec<Node<'_>> = all_expr_idxs
                                                     .into_iter()
-                                                    .map(|e| Node::Expression(e))
+                                                    .map(|e| Node::ExpressionIdx(e))
                                                     .collect();
                                                 walk_list(&nodes, t, comments, arena);
                                                 return;
@@ -1940,13 +2065,18 @@ fn walk_expression(expr: &Expression, t: &mut CommentTable, comments: Vec<Commen
                                     if let Longident::Lident(base) = grandparent.as_ref() {
                                         if arena.get_string(*base) == "Belt" {
                                             // Found Belt.List.concatMany
-                                            let (_, arg) = &args[0];
+                                            let (_, arg_idx) = &args[0];
+                                            let arg = arena.get_expr(*arg_idx);
                                             if let ExpressionDesc::Pexp_array(sub_lists) = &*arg.pexp_desc {
                                                 // Collect all expressions from sub-lists
                                                 // Safety: arena is append-only, collected references remain valid
                                                 let mut all_exprs: Vec<&Expression> = Vec::new();
-                                                for sub_list in sub_lists.iter() {
+                                                for sub_list_idx in sub_lists.iter() {
                                                     // Collect list elements with decoupled lifetime
+                                                    let sub_list = unsafe {
+                                                        let arena_ref: &ParseArena = &*(arena as *const ParseArena);
+                                                        arena_ref.get_expr(*sub_list_idx)
+                                                    };
                                                     let (exprs, spread) = unsafe {
                                                         let arena_ref: &ParseArena = &*(arena as *const ParseArena);
                                                         parsetree_viewer::collect_list_expressions(arena_ref, sub_list)
@@ -1985,8 +2115,11 @@ fn walk_expression(expr: &Expression, t: &mut CommentTable, comments: Vec<Commen
                             | "|||" | "^^^" | "&&&" | "*" | "*." | "/" | "/." | "**"
                             | "->" | "<>"
                         ) {
-                            let (_, operand1) = &args[0];
-                            let (_, operand2) = &args[1];
+                            let (_, operand1_idx) = &args[0];
+                            let (_, operand2_idx) = &args[1];
+                            // Safety: arena is append-only, expressions won't be invalidated
+                            let operand1: &Expression = unsafe { expr_ref(arena, *operand1_idx) };
+                            let operand2: &Expression = unsafe { expr_ref(arena, *operand2_idx) };
 
                             // Handle operand1
                             let (before, inside, after) = partition_by_loc(comments, operand1.pexp_loc, arena);
@@ -2122,15 +2255,21 @@ fn walk_expression(expr: &Expression, t: &mut CommentTable, comments: Vec<Commen
 
             // Walk return expression
             match &*return_expr.pexp_desc {
-                ExpressionDesc::Pexp_constraint(constraint_inner) if arena.get_expr(constraint_inner.0).pexp_loc != LocIdx::default() && arena.loc_start(arena.get_expr(constraint_inner.0).pexp_loc).cnum >= arena.loc_end(constraint_inner.1.ptyp_loc).cnum => {
-                    let (ref inner_expr_idx, ref typ) = **constraint_inner;
+                ExpressionDesc::Pexp_constraint(constraint_inner) if {
+                    let inner_loc = arena.get_expr(constraint_inner.0).pexp_loc;
+                    let typ_loc = arena.get_core_type(constraint_inner.1).ptyp_loc;
+                    inner_loc != LocIdx::default() && arena.loc_start(inner_loc).cnum >= arena.loc_end(typ_loc).cnum
+                } => {
+                    let (ref inner_expr_idx, ref typ_idx) = **constraint_inner;
                     // Safety: arena is append-only, expression won't be invalidated
                     let inner_expr: &Expression = unsafe { expr_ref(arena, *inner_expr_idx) };
-                    let (leading, inside, trailing) = partition_by_loc(comments, typ.ptyp_loc, arena);
-                    t.attach_leading(typ.ptyp_loc, leading, arena);
+                    let typ_loc = arena.get_core_type(*typ_idx).ptyp_loc;
+                    let (leading, inside, trailing) = partition_by_loc(comments, typ_loc, arena);
+                    t.attach_leading(typ_loc, leading, arena);
+                    let typ: &CoreType = unsafe { core_type_ref(arena, *typ_idx) };
                     walk_core_type(typ, t, inside, arena);
-                    let (after_typ, rest) = partition_adjacent_trailing(typ.ptyp_loc, trailing, arena);
-                    t.attach_trailing(typ.ptyp_loc, after_typ, arena);
+                    let (after_typ, rest) = partition_adjacent_trailing(typ_loc, trailing, arena);
+                    t.attach_trailing(typ_loc, after_typ, arena);
                     if is_block_expr(arena, inner_expr) {
                         walk_expression(inner_expr, t, rest, arena);
                     } else {
@@ -2188,7 +2327,7 @@ fn walk_jsx_element(jsx: &JsxElement, pexp_loc: LocIdx, t: &mut CommentTable, co
             let (on_same_line, rest) = partition_by_on_same_line(opening_loc, comments, arena);
             t.attach_trailing(opening_loc, on_same_line, arena);
 
-            let nodes: Vec<Node<'_>> = fragment.children.iter().map(|e| Node::Expression(e)).collect();
+            let nodes: Vec<Node<'_>> = fragment.children.iter().map(|e| Node::ExpressionIdx(*e)).collect();
             walk_list(&nodes, t, rest, arena);
         }
         JsxElement::Unary(unary) => {
@@ -2326,7 +2465,7 @@ fn walk_jsx_element(jsx: &JsxElement, pexp_loc: LocIdx, t: &mut CommentTable, co
                 }
             } else {
                 // Walk through children
-                let children_nodes: Vec<Node<'_>> = container.children.iter().map(|e| Node::Expression(e)).collect();
+                let children_nodes: Vec<Node<'_>> = container.children.iter().map(|e| Node::ExpressionIdx(*e)).collect();
                 walk_list(&children_nodes, t, comments_for_children, arena);
             }
         }
@@ -2344,30 +2483,33 @@ fn walk_jsx_prop(prop: &JsxProp, t: &mut CommentTable, comments: Vec<Comment>, a
             // Match OCaml's walk_jsx_prop which calls walk_list [Expression value]
             // This is important because walk_list uses get_loc(Expression) which may
             // return the braces location if the expression has res.braces attribute
+            let val = arena.get_expr(*value);
             let name_end_line = arena.loc_end(name.loc).line;
-            let value_start_line = arena.loc_start(value.pexp_loc).line;
+            let value_start_line = arena.loc_start(val.pexp_loc).line;
 
             if name_end_line == value_start_line {
                 // In the rare case that comments are found between name=value,
                 // where both are on the same line,
                 // we assign them to the value, and not to the name.
-                walk_list(&[Node::Expression(value)], t, comments, arena);
+                walk_list(&[Node::ExpressionIdx(*value)], t, comments, arena);
             } else {
                 // otherwise we attach comments that come directly after the name to the name
                 let (on_same_line_as_name, rest) = partition_by_on_same_line(name.loc, comments, arena);
                 t.attach_trailing(name.loc, on_same_line_as_name, arena);
-                walk_list(&[Node::Expression(value)], t, rest, arena);
+                walk_list(&[Node::ExpressionIdx(*value)], t, rest, arena);
             }
         }
         JsxProp::Spreading { expr, .. } => {
-            walk_expression(expr, t, comments, arena);
+            // Safety: arena is append-only, expression won't be invalidated
+            let e: &Expression = unsafe { expr_ref(arena, *expr) };
+            walk_expression(e, t, comments, arena);
         }
     }
 }
 
 fn walk_apply_expr(
     call_expr: &Expression,
-    arguments: &[(ArgLabel, Expression)],
+    arguments: &[(ArgLabel, ExprIdx)],
     t: &mut CommentTable,
     comments: Vec<Comment>,
     arena: &mut ParseArena,
@@ -2394,7 +2536,8 @@ fn walk_apply_expr(
 
     let nodes: Vec<Node<'_>> = arguments
         .iter()
-        .map(|(lbl, expr)| {
+        .map(|(lbl, expr_idx)| {
+            let expr = arena.get_expr(*expr_idx);
             let loc = match lbl {
                 ArgLabel::Labelled(lbl_loc) | ArgLabel::Optional(lbl_loc) => {
                     let start = arena.loc_start(lbl_loc.loc);
@@ -2403,7 +2546,7 @@ fn walk_apply_expr(
                 }
                 ArgLabel::Nolabel => expr.pexp_loc,
             };
-            Node::ExprArgument { expr, loc }
+            Node::ExprArgument { expr: *expr_idx, loc }
         })
         .collect();
 
@@ -2450,20 +2593,25 @@ fn walk_expr_record_row(
 }
 
 fn walk_case(case: &Case, t: &mut CommentTable, comments: Vec<Comment>, arena: &mut ParseArena) {
-    let (before, inside, after) = partition_by_loc(comments, case.pc_lhs.ppat_loc, arena);
+    let pc_lhs_loc = arena.get_pat(case.pc_lhs).ppat_loc;
+    let (before, inside, after) = partition_by_loc(comments, pc_lhs_loc, arena);
     // cases don't have a location on their own, leading comments should go
     // after the bar on the pattern - match OCaml's List.concat [before; inside]
     let pattern_comments: Vec<Comment> = before.into_iter()
         .chain(inside.into_iter())
         .collect();
-    walk_pattern(&case.pc_lhs, t, pattern_comments, arena);
+    // Safety: arena is append-only, pattern won't be invalidated
+    let pc_lhs: &Pattern = unsafe { pat_ref(arena, case.pc_lhs) };
+    walk_pattern(pc_lhs, t, pattern_comments, arena);
 
-    let (after_pat, rest) = partition_adjacent_trailing(case.pc_lhs.ppat_loc, after, arena);
-    t.attach_trailing(case.pc_lhs.ppat_loc, after_pat, arena);
+    let (after_pat, rest) = partition_adjacent_trailing(pc_lhs_loc, after, arena);
+    t.attach_trailing(pc_lhs_loc, after_pat, arena);
 
     // Handle guard - match OCaml's special handling for block expressions
     let rest = match &case.pc_guard {
-        Some(guard) => {
+        Some(guard_idx) => {
+            // Safety: arena is append-only, expression won't be invalidated
+            let guard: &Expression = unsafe { expr_ref(arena, *guard_idx) };
             let (before, inside, after) = partition_by_loc(rest, guard.pexp_loc, arena);
             let (after_guard, rest) = partition_adjacent_trailing(guard.pexp_loc, after, arena);
             if is_block_expr(arena, guard) {
@@ -2483,13 +2631,15 @@ fn walk_case(case: &Case, t: &mut CommentTable, comments: Vec<Comment>, arena: &
         None => rest,
     };
 
-    if is_block_expr(arena, &case.pc_rhs) {
-        walk_expression(&case.pc_rhs, t, rest, arena);
+    // Safety: arena is append-only, expression won't be invalidated
+    let pc_rhs: &Expression = unsafe { expr_ref(arena, case.pc_rhs) };
+    if is_block_expr(arena, pc_rhs) {
+        walk_expression(pc_rhs, t, rest, arena);
     } else {
-        let (before, inside, after) = partition_by_loc(rest, case.pc_rhs.pexp_loc, arena);
-        t.attach_leading(case.pc_rhs.pexp_loc, before, arena);
-        walk_expression(&case.pc_rhs, t, inside, arena);
-        t.attach_trailing(case.pc_rhs.pexp_loc, after, arena);
+        let (before, inside, after) = partition_by_loc(rest, pc_rhs.pexp_loc, arena);
+        t.attach_leading(pc_rhs.pexp_loc, before, arena);
+        walk_expression(pc_rhs, t, inside, arena);
+        t.attach_trailing(pc_rhs.pexp_loc, after, arena);
     }
 }
 
@@ -2573,14 +2723,14 @@ fn walk_pattern(pattern: &Pattern, t: &mut CommentTable, comments: Vec<Comment>,
             }
         }
         PatternDesc::Ppat_tuple(pats) | PatternDesc::Ppat_array(pats) => {
-            let nodes: Vec<Node<'_>> = pats.iter().map(|p| Node::Pattern(p)).collect();
+            let nodes: Vec<Node<'_>> = pats.iter().map(|p| Node::PatternIdx(*p)).collect();
             walk_list(&nodes, t, comments, arena);
         }
         PatternDesc::Ppat_record(inner) => {
                     let (ref fields, _) = **inner;
             let nodes: Vec<Node<'_>> = fields
                 .iter()
-                .map(|f| Node::PatternRecordRow(&f.lid, &f.pat))
+                .map(|f| Node::PatternRecordRow(&f.lid, f.pat))
                 .collect();
             walk_list(&nodes, t, comments, arena);
         }
@@ -2595,7 +2745,7 @@ fn walk_pattern(pattern: &Pattern, t: &mut CommentTable, comments: Vec<Comment>,
             walk_list(&nodes, t, comments, arena);
         }
         PatternDesc::Ppat_constraint(inner) => {
-                    let (ref pat_idx, ref typ) = **inner;
+                    let (ref pat_idx, ref typ_idx) = **inner;
             // Safety: arena is append-only, pattern won't be invalidated
             let pat: &Pattern = unsafe { pat_ref(arena, *pat_idx) };
             let (before, inside, after) = partition_by_loc(comments, pat.ppat_loc, arena);
@@ -2605,10 +2755,13 @@ fn walk_pattern(pattern: &Pattern, t: &mut CommentTable, comments: Vec<Comment>,
             let (after_pat, rest) = partition_adjacent_trailing(pat.ppat_loc, after, arena);
             t.attach_trailing(pat.ppat_loc, after_pat, arena);
 
-            let (before, inside, after) = partition_by_loc(rest, typ.ptyp_loc, arena);
-            t.attach_leading(typ.ptyp_loc, before, arena);
+            let typ_loc = arena.get_core_type(*typ_idx).ptyp_loc;
+            let (before, inside, after) = partition_by_loc(rest, typ_loc, arena);
+            t.attach_leading(typ_loc, before, arena);
+            // Safety: arena is append-only, core type won't be invalidated
+            let typ: &CoreType = unsafe { core_type_ref(arena, *typ_idx) };
             walk_core_type(typ, t, inside, arena);
-            t.attach_trailing(typ.ptyp_loc, after, arena);
+            t.attach_trailing(typ_loc, after, arena);
         }
         PatternDesc::Ppat_type(lid) => {
             let (leading, trailing) = partition_leading_trailing(comments, lid.loc, arena);
@@ -2685,8 +2838,12 @@ fn walk_core_type(ct: &CoreType, t: &mut CommentTable, comments: Vec<Comment>, a
 
                 visit_list_but_continue_with_remaining_comments(
                     args,
-                    |arg, _arena| arg.ptyp_loc,
-                    |arg, t, comments, arena| walk_core_type(arg, t, comments, arena),
+                    |arg, arena| arena.get_core_type(*arg).ptyp_loc,
+                    |arg, t, comments, arena| {
+                        // Safety: arena is append-only, core type won't be invalidated
+                        let ct: &CoreType = unsafe { core_type_ref(arena, *arg) };
+                        walk_core_type(ct, t, comments, arena);
+                    },
                     t,
                     rest,
                     false,
@@ -2715,7 +2872,7 @@ fn walk_core_type(ct: &CoreType, t: &mut CommentTable, comments: Vec<Comment>, a
             t.attach_trailing(return_type.ptyp_loc, after_ret, arena);
         }
         CoreTypeDesc::Ptyp_tuple(types) => {
-            let nodes: Vec<Node<'_>> = types.iter().map(|ty| Node::CoreType(ty)).collect();
+            let nodes: Vec<Node<'_>> = types.iter().map(|ty| Node::CoreTypeIdx(*ty)).collect();
             walk_list(&nodes, t, comments, arena);
         }
         CoreTypeDesc::Ptyp_object(inner) => {
@@ -2768,7 +2925,7 @@ fn walk_core_type(ct: &CoreType, t: &mut CommentTable, comments: Vec<Comment>, a
 
                 let nodes: Vec<Node<'_>> = constraints
                     .iter()
-                    .map(|(li, ty)| Node::PackageConstraint(li, ty))
+                    .map(|(li, ty)| Node::PackageConstraint(li, *ty))
                     .collect();
                 walk_list(&nodes, t, rest, arena);
             }
@@ -2836,12 +2993,17 @@ fn walk_object_field(field: &ObjectField, t: &mut CommentTable, comments: Vec<Co
             let (after_lbl, rest) = partition_adjacent_trailing(lbl.loc, trailing, arena);
             t.attach_trailing(lbl.loc, after_lbl, arena);
 
-            let (before, inside, after) = partition_by_loc(rest, typ.ptyp_loc, arena);
-            t.attach_leading(typ.ptyp_loc, before, arena);
+            let typ_loc = arena.get_core_type(*typ).ptyp_loc;
+            let (before, inside, after) = partition_by_loc(rest, typ_loc, arena);
+            t.attach_leading(typ_loc, before, arena);
+            // Safety: arena is append-only, core type won't be invalidated
+            let typ: &CoreType = unsafe { core_type_ref(arena, *typ) };
             walk_core_type(typ, t, inside, arena);
-            t.attach_trailing(typ.ptyp_loc, after, arena);
+            t.attach_trailing(typ_loc, after, arena);
         }
         ObjectField::Oinherit(typ) => {
+            // Safety: arena is append-only, core type won't be invalidated
+            let typ: &CoreType = unsafe { core_type_ref(arena, *typ) };
             walk_core_type(typ, t, comments, arena);
         }
     }
@@ -2861,8 +3023,12 @@ fn walk_row_field(field: &RowField, t: &mut CommentTable, comments: Vec<Comment>
 
                 visit_list_but_continue_with_remaining_comments(
                     args,
-                    |arg, _arena| arg.ptyp_loc,
-                    |arg, t, comments, arena| walk_core_type(arg, t, comments, arena),
+                    |arg, arena| arena.get_core_type(*arg).ptyp_loc,
+                    |arg, t, comments, arena| {
+                        // Safety: arena is append-only, core type won't be invalidated
+                        let ct: &CoreType = unsafe { core_type_ref(arena, *arg) };
+                        walk_core_type(ct, t, comments, arena);
+                    },
                     t,
                     rest,
                     false,
@@ -2871,6 +3037,8 @@ fn walk_row_field(field: &RowField, t: &mut CommentTable, comments: Vec<Comment>
             }
         }
         RowField::Rinherit(typ) => {
+            // Safety: arena is append-only, core type won't be invalidated
+            let typ: &CoreType = unsafe { core_type_ref(arena, *typ) };
             walk_core_type(typ, t, comments, arena);
         }
     }

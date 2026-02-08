@@ -429,4 +429,38 @@ Fixed 112 borrow checker errors across ppx.rs and jsx_ppx.rs by:
 (3) splitting nested arena.push_X(fn(..., arena)) into separate let bindings.
 ```
 
+### Post-2.3 follow-up: arena-index stabilization (February 2026)
+
+```
+Scope: Finish uncommitted arena-index migration work in parser/binary_ast modules.
+Fixed borrow-checker regressions in ppx/jsx/printer paths and updated binary_ast writer tests
+to use ExprIdx/PatIdx fixtures so benchmark test targets compile again.
+
+Benchmark (before, from last 2.3 baseline):
+  Large avg factor:  0.81x
+  Medium avg factor: 0.54x
+  Small avg factor:  0.38x
+  Tiny avg factor:   0.30x
+
+Benchmark (after):
+Run: cargo test --manifest-path compiler-rust/Cargo.toml --release --lib -- benchmark_all --ignored --nocapture
+
+  Size Tier                  Files   Faster       OK Avg Factor Min Factor Max Factor
+  -------------------------------------------------------------------------------------
+  Large (>30KB)                 14       13        1       0.81x       0.58x       1.05x
+  Medium (10-30KB)              73       73        0       0.53x       0.20x       0.75x
+  Small (1-10KB)               443      443        0       0.39x       0.24x       0.95x
+  Tiny (<1KB)                  636      635        1       0.32x       0.19x       1.13x
+
+Overall: 1166/1166 passing (1164 faster, 2 within tolerance), 38 skipped
+
+Parity:
+  ./scripts/test_parser_ast_parity.sh (baseline unchanged)
+  sexp-locs differences:      3
+  sexp-locs-ppx differences:  7
+  bsc-ast differences:        4 (non-regression)
+
+Result: Performance remains neutral overall versus the previous 2.3 baseline.
+```
+
 *Add new entries below as optimizations are applied.*
