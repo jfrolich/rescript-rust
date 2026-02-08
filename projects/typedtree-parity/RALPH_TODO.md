@@ -76,10 +76,10 @@ The `-dtyped-sexp` flag outputs the typed tree without locations. The `-dtyped-s
 |  | Status |
 |--|--------|
 | OCaml compiles | 657/657 |
-| Rust compiles | 597/657 (60 fail) |
-| Parity match (-dtyped-sexp) | 310/597 (51.9%) |
+| Rust compiles | 552/657 (105 fail) |
+| Parity match (-dtyped-sexp-locs) | 292/552 (52.9%) |
 
-**Task Progress:** 5/5 complete
+**Task Progress:** 6/6 complete
 
 **Task Checklist:**
 - [x] Fix qualified constructor typing + trailing optional-arg consumption in `type_application` so dict-pattern matches compile instead of failing with `PatternTypeClash`.
@@ -87,6 +87,7 @@ The `-dtyped-sexp` flag outputs the typed tree without locations. The `-dtyped-s
 - [x] Preserve nested module member visibility for awaited/unpacked modules in extracted signatures, and keep declared signatures for recursive self-alias modules (`module rec M = M`) to avoid `UndefinedMethod` regressions (Rust compile failures: 65 -> 63).
 - [x] Port OCaml's variant spread pattern rewrite in `type_pattern` (`Ppat_type` expansion + alias type override) so `...a as a` binds the spread source type (Rust compile failures: 63 -> 61).
 - [x] Resolve `Mty_ident` module types through modtype expansion (matching OCaml `Env.scrape_alias` order) before module-path fallback, so opened submodules constrained by modtypes expose their members (`inner_call.res`, Rust compile failures: 61 -> 60).
+- [x] Port OCaml external FFI arg-spec behavior for erased `@as(...) _` parameters (including trailing `Extern_unit` insertion) and keep primitive externals untouched during extension-only rewriting so `pval_prim` encodes constants correctly; also emit typedtree sexp with Latin-1 byte output for primitive blobs (`AsInUncurriedExternals.res` parity).
 
 **Previous milestones completed:**
 - Parser AST structure: 100% parity (sexp-locs 1196/1196)
@@ -104,6 +105,7 @@ The `-dtyped-sexp` flag outputs the typed tree without locations. The `-dtyped-s
 - Preserve unpacked-module type hints in extracted signatures and keep recmodule self-alias declarations from dropping explicit signatures (Rust compile failures: 65 -> 63)
 - Port OCaml-style variant spread pattern expansion/alias typing for `...Type as x` patterns (Rust compile failures: 63 -> 61)
 - Resolve `Mty_ident` via modtype expansion before module lookup in module-signature member resolution (`inner_call.res`, Rust compile failures: 61 -> 60)
+- Match OCaml external primitive encoding and typedtree byte-string output for erased `@as(...) _` externals (`AsInUncurriedExternals.res`)
 
 ---
 

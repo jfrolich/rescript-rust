@@ -241,48 +241,41 @@ fn is_js_function(s: &str) -> bool {
 /// Process args from list_of_arrow into FFI Param specs and compute arity.
 /// This mirrors OCaml's fold_right in handle_attributes which builds
 /// arg_type_specs and arg_type_specs_length.
-///
-/// Returns (params, arity, args_for_type_reconstruction) where:
-/// - params: The Params encoding for the FFI blob
-/// - arity: The number of non-ignored args (for determining JsVar vs JsCall)
-/// - args_for_type_reconstruction: Args to use for type reconstruction (filtered)
 fn build_arg_type_specs(typ: &CoreType, arena: &mut ParseArena) -> (Params, usize) {
     let (args, _result) = list_of_arrow(typ, arena);
 
     let mut param_specs: Vec<Param> = Vec::new();
     let mut arity = 0;
-    let mut all_simple = true; // true if all args are {Nothing, Arg_empty}
+    // OCaml tracks whether any runtime argument remains after filtering Arg_cst.
+    // When all args are constants but arity > 0, it appends a trailing unit param.
+    let mut has_runtime_args = false;
 
     for arg in &args {
-        let (label_noname, arg_type) = match &arg.lbl {
+        let (label_noname, arg_type, keeps_runtime_arg) = match &arg.lbl {
             ArgLabel::Optional(_) => {
-                // Optional args: get_opt_arg_type
-                // For now, simplified: mark as Arg_optional, Nothing
-                all_simple = false;
-                (LabelNoname::ArgOptional, Attr::Nothing)
+                // Optional args are never Arg_cst and are kept in `args`.
+                let arg_type = get_opt_arg_type(false, &arg.typ, arena);
+                (LabelNoname::ArgOptional, arg_type, true)
             }
             ArgLabel::Labelled(_) => {
-                // Labeled args
                 let arg_type = refine_arg_type(false, &arg.typ, arena);
-                all_simple = false;
-                (LabelNoname::ArgLabel, arg_type)
+                let keeps_runtime_arg = !matches!(arg_type, Attr::ArgCst(_));
+                (LabelNoname::ArgLabel, arg_type, keeps_runtime_arg)
             }
             ArgLabel::Nolabel => {
                 let arg_type = refine_arg_type(true, &arg.typ, arena);
-                if !matches!(arg_type, Attr::Nothing) || false {
-                    // Non-trivial arg type
-                }
-                (LabelNoname::ArgEmpty, arg_type)
+                let keeps_runtime_arg = !matches!(arg_type, Attr::ArgCst(_));
+                (LabelNoname::ArgEmpty, arg_type, keeps_runtime_arg)
             }
         };
+
+        if keeps_runtime_arg {
+            has_runtime_args = true;
+        }
 
         let is_ignored = matches!(arg_type, Attr::Ignore);
         if !is_ignored {
             arity += 1;
-        }
-
-        if !matches!((&label_noname, &arg_type), (LabelNoname::ArgEmpty, Attr::Nothing)) {
-            all_simple = false;
         }
 
         param_specs.push(Param {
@@ -291,8 +284,20 @@ fn build_arg_type_specs(typ: &CoreType, arena: &mut ParseArena) -> (Params, usiz
         });
     }
 
+    // OCaml: if every argument got erased from the callable type (all Arg_cst) but
+    // arg_type_specs_length > 0, append a trailing unit parameter to keep it callable.
+    if !has_runtime_args && arity > 0 {
+        param_specs.push(Param {
+            arg_type: Attr::ExternUnit,
+            arg_label: LabelNoname::ArgEmpty,
+        });
+    }
+
     // OCaml's ffi_bs_aux: if all args are {Nothing, Arg_empty}, use ParamNumber(n)
     // Otherwise use Params(list)
+    let all_simple = param_specs
+        .iter()
+        .all(|p| matches!((&p.arg_label, &p.arg_type), (LabelNoname::ArgEmpty, Attr::Nothing)));
     let params = if all_simple {
         Params::ParamNumber(arity as i64)
     } else {
@@ -8335,33 +8340,10 @@ fn expand_extensions_item(item: &StructureItem, arena: &mut ParseArena) -> Vec<S
                 pstr_loc: item.pstr_loc,
             }]
         }
-        // Reconstruct arrow type locations for external/primitive declarations
-        // OCaml's FFI processing (handle_external_in_stru) reconstructs the arrow type
-        // with ptyp_loc = pval_loc before type checking. This only applies to "real"
-        // externals that go through rs_externals check, NOT built-in primitives like
-        // %identity, %raise, #raw_expr etc. (whose pval_prim starts with % or #).
-        StructureItemDesc::Pstr_primitive(vd) => {
-            let is_builtin = vd.pval_prim.first()
-                .is_some_and(|p| {
-                    let s = arena.get_string(*p);
-                    s.starts_with('%') || s.starts_with('#')
-                });
-            if is_builtin {
-                vec![item.clone()]
-            } else {
-                let pval_type = reconstruct_arrow_type_with_loc(&vd.pval_type, vd.pval_loc, arena);
-                vec![StructureItem {
-                    pstr_desc: StructureItemDesc::Pstr_primitive(ValueDescription {
-                        pval_name: vd.pval_name.clone(),
-                        pval_type,
-                        pval_prim: vd.pval_prim.clone(),
-                        pval_attributes: vd.pval_attributes.clone(),
-                        pval_loc: vd.pval_loc,
-                    }),
-                    pstr_loc: item.pstr_loc,
-                }]
-            }
-        }
+        // Keep externals untouched in the lightweight extension pass.
+        // FFI encoding and external type reconstruction happen in rewrite_structure_item_no_spice,
+        // and must operate on the original type to preserve @as(...) constants in pval_prim.
+        StructureItemDesc::Pstr_primitive(_) => vec![item.clone()],
         _ => vec![item.clone()],
     }
 }

@@ -89,6 +89,23 @@ fn latin1_to_utf8(s: &str) -> String {
     String::from_utf8(bytes).unwrap_or_else(|_| s.to_string())
 }
 
+/// Write one output line while preserving OCaml-style raw Latin-1 bytes.
+///
+/// Typedtree sexp output can embed marshaled FFI blobs in quoted primitive strings.
+/// OCaml prints these as raw bytes; Rust `String` would otherwise UTF-8 encode them.
+fn write_latin1_line<W: Write>(out: &mut W, s: &str) -> std::io::Result<()> {
+    for ch in s.chars() {
+        let code = ch as u32;
+        if code <= 0xFF {
+            out.write_all(&[code as u8])?;
+        } else {
+            let mut buf = [0u8; 4];
+            out.write_all(ch.encode_utf8(&mut buf).as_bytes())?;
+        }
+    }
+    out.write_all(b"\n")
+}
+
 fn string(txt: &str) -> Sexp {
     Sexp::atom(&format!("\"{}\"", latin1_to_utf8(txt)))
 }
@@ -1877,23 +1894,23 @@ fn sexp_open_description(arena: &ParseArena, _ctx: &TypeContext<'_>, with_locs: 
 /// Print a typed structure as sexp (without locations)
 pub fn print_typed_structure<W: Write>(arena: &ParseArena, ctx: &TypeContext<'_>, str: &Structure, out: &mut W) -> std::io::Result<()> {
     let sexp = sexp_structure(arena, ctx, false, str);
-    writeln!(out, "{}", sexp.to_string())
+    write_latin1_line(out, &sexp.to_string())
 }
 
 /// Print a typed structure as sexp (with locations)
 pub fn print_typed_structure_with_locs<W: Write>(arena: &ParseArena, ctx: &TypeContext<'_>, str: &Structure, out: &mut W) -> std::io::Result<()> {
     let sexp = sexp_structure(arena, ctx, true, str);
-    writeln!(out, "{}", sexp.to_string())
+    write_latin1_line(out, &sexp.to_string())
 }
 
 /// Print a typed signature as sexp (without locations)
 pub fn print_typed_signature<W: Write>(arena: &ParseArena, ctx: &TypeContext<'_>, sig: &crate::types::typedtree::TypedSignature, out: &mut W) -> std::io::Result<()> {
     let sexp = sexp_typed_signature(arena, ctx, false, sig);
-    writeln!(out, "{}", sexp.to_string())
+    write_latin1_line(out, &sexp.to_string())
 }
 
 /// Print a typed signature as sexp (with locations)
 pub fn print_typed_signature_with_locs<W: Write>(arena: &ParseArena, ctx: &TypeContext<'_>, sig: &crate::types::typedtree::TypedSignature, out: &mut W) -> std::io::Result<()> {
     let sexp = sexp_typed_signature(arena, ctx, true, sig);
-    writeln!(out, "{}", sexp.to_string())
+    write_latin1_line(out, &sexp.to_string())
 }
