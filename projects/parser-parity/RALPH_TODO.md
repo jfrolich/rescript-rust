@@ -22,14 +22,17 @@
 
 ## Current Status
 
-**Last Updated:** 2026-02-05
+**Last Updated:** 2026-02-08
 
 | Test Suite | Status |
 |------------|--------|
 | Syntax tests | 506/506 (100%) ✅ |
-| sexp-locs | 1196/1196 (100%) ✅ |
-| sexp-locs-ppx | 1196/1196 (100%) ✅ |
-| bsc-ast | 936/1179 (79.4%) |
+| sexp-locs (syntax scope) | 1196/1196 (100%) ✅ |
+| sexp-locs-ppx (syntax scope) | 1196/1196 (100%) ✅ |
+| bsc-ast (syntax scope) | 1196/1196 (100%) ✅ |
+| sexp-locs (full scope: syntax + TELLA) | 3364/3373 (99.7%) |
+| sexp-locs-ppx (full scope: syntax + TELLA) | 2793/3373 (82.8%) |
+| bsc-ast (full scope: syntax + TELLA) | 593 diffs (OCaml parser failures: 11, Rust parser failures: 20) |
 
 **Scope note:** Final parity targets include both `tests/syntax_tests/data` and `TELLA_DIR`
 when present. Always report parity as `X/Y` where `Y` contains only OCaml-successful files.
@@ -37,7 +40,23 @@ Files where OCaml fails are excluded from parity denominators and listed separat
 
 **Snapshot note:** The `1179` denominator above is a historical in-repo snapshot.
 
-**Session progress (2026-02-05) - newest:**
+**Session progress (2026-02-08) - newest:**
+- Fixed OCaml/Rust parity for unlabeled `Lident` type-parameter parsing with outer attrs
+  (e.g. `@uncurry unit => unit`) in `parse_function_type`:
+  - OCaml `parse_type_parameter` (Lident non-labeled path) builds `Typ.constr ~attrs`
+    first, then applies `parse_arrow_type_rest`.
+  - Rust previously parsed as a generic type expression and attached attrs to the
+    arrow node, producing wrong locations/attribute ownership.
+  - Updated Rust to mirror OCaml flow in that branch: parse constructor first,
+    attach attrs/location at constructor level, then parse arrow rest/alias.
+  - `test_parser_ast_parity` now passes for:
+    `/Users/jaapf/dev/tella-fusion/node_modules/rescript-nodejs/src/ChildProcess.res`.
+  - Full-scope run improved:
+    - `sexp-locs differences: 16 -> 9`
+    - `sexp-locs-ppx differences: 587 -> 580`
+    - `bsc-ast differences: 600 -> 593`
+
+**Session progress (2026-02-05) - previous:**
 - Fixed `@deriving(jsConverter)` polyvariant marshal-sharing parity for structure/signature generation:
   - `inspect_binary_ast.py test ...ImportPage.res` showed mixed under/over-sharing around
     `itemDestinationToJs`/`itemDestinationFromJs` and nested `Lident "string"` wrappers.
@@ -456,9 +475,9 @@ The binary AST structure (sexp-locs) is 100% correct. The differences are in:
 
 ### Phase 5: Validation
 - [x] Task 5.1-5.3: Achieved 838/1179 (71.1%)
-- [ ] Task 5.4: Target ~1000/1179 (85%) - Requires marshal sharing fixes
-- [ ] Task 5.5: Target 1179/1179 (100%) - Full OCaml sharing parity
-- **Note:** 341 remaining failures are ALL sharing-only (zero structural errors)
+- [x] Task 5.4: Historical snapshot target surpassed (syntax scope now 1196/1196 bsc-ast)
+- [ ] Task 5.5: Full-scope parity target (syntax + TELLA) - complete remaining parser/PPX/share diffs
+- **Note:** Current full-scope run has `bsc-ast differences: 593`.
 
 ### Phase 6: Arity Arena ✅ Complete
 - [x] Tasks 6.1-6.6: All implemented

@@ -984,14 +984,14 @@ fn parse_function_type(p: &mut Parser<'_>, start_pos_idx: PosIdx) -> CoreType {
             p.start_pos_idx()
         };
 
-        let (mut label, mut typ) = if p.token == Token::Tilde {
+        let (mut label, mut typ, prehandled_unlabeled_lident_attrs) = if p.token == Token::Tilde {
             p.next();
             let (name, name_loc) = parse_lident(p);
             // Pass grammar context for error message: "Did you forget a `:` here? It signals the start of a type"
             p.expect_with_grammar(Token::Colon, Some(Grammar::TypeExpression));
             let typ = parse_typ_expr(p);
             let name_idx = p.arena_mut().push_interned_string(&name);
-            (ArgLabel::Labelled(Located::new(name_idx, name_loc)), typ)
+            (ArgLabel::Labelled(Located::new(name_idx, name_loc)), typ, false)
         } else if matches!(p.token, Token::Lident(_)) {
             // Check if this is `name: type` (missing tilde)
             // OCaml: parse Lident first, then check for Colon
@@ -1023,14 +1023,27 @@ fn parse_function_type(p: &mut Parser<'_>, start_pos_idx: PosIdx) -> CoreType {
                 if p.token == Token::Equal {
                     p.next();
                     p.expect(Token::Question);
-                    (ArgLabel::Optional(Located::new(name_idx, name_loc)), typ)
+                    (ArgLabel::Optional(Located::new(name_idx, name_loc)), typ, false)
                 } else {
-                    (ArgLabel::Labelled(Located::new(name_idx, name_loc)), typ)
+                    (ArgLabel::Labelled(Located::new(name_idx, name_loc)), typ, false)
                 }
             } else {
-                // Regular type expression
-                let typ = parse_typ_expr(p);
-                (ArgLabel::Nolabel, typ)
+                // OCaml parse_type_parameter (Lident non-labeled path):
+                // parse the constructor first with attrs on the constructor type,
+                // then continue with parse_arrow_type_rest/parse_type_alias.
+                let mut typ = parse_type_constr(p);
+                if !typ.ptyp_loc.is_none() {
+                    let constr_end_idx = p.prev_end_pos_idx();
+                    typ.ptyp_loc = p.mk_loc_idx(param_start_idx, constr_end_idx);
+                }
+                if !param_attrs.is_empty() {
+                    typ.ptyp_attributes = param_attrs.clone().concat(typ.ptyp_attributes);
+                }
+                if matches!(p.token, Token::EqualGreater | Token::MinusGreater) {
+                    typ = parse_arrow_type_rest(p, typ, param_start_idx);
+                }
+                let typ = parse_type_alias(p, typ);
+                (ArgLabel::Nolabel, typ, true)
             }
         } else {
             // For unlabeled parameters, share param_start_idx with the type's location.
@@ -1042,7 +1055,7 @@ fn parse_function_type(p: &mut Parser<'_>, start_pos_idx: PosIdx) -> CoreType {
             let outer_start = if param_attrs.is_empty() && !has_dot { Some(param_start_idx) } else { None };
             let typ = parse_typ_expr_inner_with_start(p, true, outer_start);
             let typ = parse_type_alias(p, typ);
-            (ArgLabel::Nolabel, typ)
+            (ArgLabel::Nolabel, typ, false)
         };
 
         // OCaml includes the uncurried marker (.) in the argument type's location,
@@ -1051,7 +1064,11 @@ fn parse_function_type(p: &mut Parser<'_>, start_pos_idx: PosIdx) -> CoreType {
         // Also, don't modify ghost locations (synthesized unit types from empty parens)
         // Don't modify parenthesized types with inner attributes - if param_attrs is empty
         // but typ already has attributes, the attrs came from inside parens like (@attr float)
-        if has_dot && matches!(label, ArgLabel::Nolabel) && !typ.ptyp_loc.is_none() {
+        if has_dot
+            && matches!(label, ArgLabel::Nolabel)
+            && !typ.ptyp_loc.is_none()
+            && !prehandled_unlabeled_lident_attrs
+        {
             let is_simple_constr = matches!(
                 &*typ.ptyp_desc,
                 CoreTypeDesc::Ptyp_constr(inner) if p.arena().is_simple_lident(inner.0.txt)
@@ -1144,7 +1161,10 @@ fn parse_function_type(p: &mut Parser<'_>, start_pos_idx: PosIdx) -> CoreType {
         // - For other types: type location unchanged, attrs prepended to ptyp_attributes
         // In both cases, the arrow's attrs are empty for unlabeled args with outer attrs
         // Don't modify ghost locations (synthesized unit types from empty parens)
-        let arrow_attrs = if matches!(label, ArgLabel::Nolabel) && !param_attrs.is_empty() {
+        let arrow_attrs = if prehandled_unlabeled_lident_attrs {
+            // Already attached to the constructor type in the Lident branch above.
+            Attributes::new()
+        } else if matches!(label, ArgLabel::Nolabel) && !param_attrs.is_empty() {
             let is_simple_lident = matches!(
                 &*typ.ptyp_desc,
                 CoreTypeDesc::Ptyp_constr(inner) if p.arena().is_simple_lident(inner.0.txt)
