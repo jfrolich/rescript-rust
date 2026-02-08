@@ -11,6 +11,7 @@ OUTPUT_FILE="/tmp/ralph_output.txt"
 OUTPUT_JSON_FILE="/tmp/ralph_output.jsonl"
 ITERATION=0
 CODEX_LAST_TEXT=""
+CODEX_MCP_UNREACHABLE_REPORTED=0
 DEFAULT_SLEEP_SECONDS=2
 RATE_LIMIT_BASE_SLEEP_SECONDS=60
 RATE_LIMIT_MAX_SLEEP_SECONDS=900
@@ -139,6 +140,15 @@ render_codex_stream_line() {
   local tool_exit
 
   if [[ "$line" != \{* ]]; then
+    if echo "$line" | grep -q "rmcp::transport::worker: worker quit with fatal: Transport channel closed" && \
+       echo "$line" | grep -q "127.0.0.1:3845"; then
+      if [[ $CODEX_MCP_UNREACHABLE_REPORTED -eq 0 ]]; then
+        echo "  ! Codex MCP server not reachable at 127.0.0.1:3845; continuing without MCP."
+        CODEX_MCP_UNREACHABLE_REPORTED=1
+      fi
+      return
+    fi
+
     if echo "$line" | grep -Eiq "error|warning|failed|fatal"; then
       echo "$line"
     fi
@@ -249,6 +259,7 @@ run_agent_iteration() {
       done | tee "$OUTPUT_FILE"
   else
     CODEX_LAST_TEXT=""
+    CODEX_MCP_UNREACHABLE_REPORTED=0
     build_prompt_input | \
       codex exec --dangerously-bypass-approvals-and-sandbox --json - 2>&1 | \
       tee "$OUTPUT_JSON_FILE" | \
