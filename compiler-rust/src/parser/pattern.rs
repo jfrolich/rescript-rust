@@ -12,7 +12,7 @@ use super::grammar::{self, Grammar};
 use super::longident::Longident;
 use super::state::{Parser, ParserMode};
 use super::token::Token;
-use crate::parse_arena::{Located, LocIdx, PosIdx, StrIdx};
+use crate::parse_arena::{Located, LocIdx, PatIdx, PosIdx, StrIdx};
 
 /// Check if a constant is valid for an interval pattern.
 /// This includes integers, floats, characters (Constant::Char), and
@@ -288,8 +288,9 @@ fn parse_single_pattern_with_alias(p: &mut Parser<'_>) -> Pattern {
         };
         let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
         let name_idx = p.arena_mut().push_interned_string(&name);
+        let pat_idx = p.arena_mut().push_pat(pat);
         pat = Pattern {
-            ppat_desc: Box::new(PatternDesc::Ppat_alias(Box::new(pat), with_loc(name_idx, name_with_attrs_loc))),
+            ppat_desc: Box::new(PatternDesc::Ppat_alias(pat_idx, with_loc(name_idx, name_with_attrs_loc))),
             ppat_loc: loc,
             ppat_attributes: alias_attrs,
         };
@@ -341,8 +342,10 @@ fn parse_or_pattern(
             let start_idx = p.loc_start_idx(acc.ppat_loc);
             let end_idx = p.loc_end_idx(pat.ppat_loc);
             let loc = p.mk_loc_idx_full(start_idx, end_idx);
+            let acc_idx = p.arena_mut().push_pat(acc);
+            let pat_idx = p.arena_mut().push_pat(pat);
             Pattern {
-                ppat_desc: Box::new(PatternDesc::Ppat_or(Box::new(acc), Box::new(pat))),
+                ppat_desc: Box::new(PatternDesc::Ppat_or(acc_idx, pat_idx)),
                 ppat_loc: loc,
                 ppat_attributes: Attributes::new(),
             }
@@ -363,8 +366,9 @@ pub fn parse_constrained_pattern(p: &mut Parser<'_>) -> Pattern {
         let start_idx = p.loc_start_idx(pat.ppat_loc);
         let end_idx = p.loc_end_idx(typ.ptyp_loc);
         let loc = p.mk_loc_idx_full(start_idx, end_idx);
+        let pat_idx = p.arena_mut().push_pat(pat);
         Pattern {
-            ppat_desc: Box::new(PatternDesc::Ppat_constraint(Box::new((Box::new(pat), typ)))),
+            ppat_desc: Box::new(PatternDesc::Ppat_constraint(Box::new((pat_idx, typ)))),
             ppat_loc: loc,
             ppat_attributes: Attributes::new(),
         }
@@ -379,7 +383,7 @@ pub fn parse_constrained_pattern(p: &mut Parser<'_>) -> Pattern {
 pub fn make_unit_construct_pattern(p: &mut super::state::Parser<'_>, lid_loc: Location) -> Pattern {
     let lid_idx = p.push_lident_static("()");
     // Use ghost location for the pattern, but real location for the longident
-    ast_helper::make_construct_pat(lid_idx, None, lid_loc, LocIdx::none())
+    ast_helper::make_construct_pat(p.arena_mut(), lid_idx, None, lid_loc, LocIdx::none())
 }
 
 /// Parse an optional alias `as name` after a pattern.
@@ -412,8 +416,9 @@ pub fn parse_alias_pattern(
         // OCaml: {pattern.ppat_loc with loc_end = p.prev_end_pos}
         // This preserves loc_start and loc_ghost from the pattern's location
         let loc = p.mk_loc_extend_to_prev_end(pat.ppat_loc);
+        let pat_idx = p.arena_mut().push_pat(pat);
         pat = Pattern {
-            ppat_desc: Box::new(PatternDesc::Ppat_alias(Box::new(pat), name)),
+            ppat_desc: Box::new(PatternDesc::Ppat_alias(pat_idx, name)),
             ppat_loc: loc,
             ppat_attributes: Attributes::new(),
         };
@@ -503,10 +508,11 @@ fn parse_atomic_pattern(p: &mut Parser<'_>) -> Pattern {
                 let overall_loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
                 let name_idx = p.arena_mut().push_interned_string(&name);
                 let inner = ast_helper::make_var_pat(name_idx, loc);
+                let inner_idx = p.arena_mut().push_pat(inner);
                 let alias_idx = p.arena_mut().push_interned_string(&alias);
                 Pattern {
                     ppat_desc: Box::new(PatternDesc::Ppat_alias(
-                        Box::new(inner),
+                        inner_idx,
                         with_loc(alias_idx, alias_name_loc),
                     )),
                     ppat_loc: overall_loc,
@@ -539,7 +545,7 @@ fn parse_atomic_pattern(p: &mut Parser<'_>) -> Pattern {
             let bool_str_idx = p.arena_mut().intern_string(bool_str);
             let lid = Longident::Lident(bool_str_idx);
             let lid_idx = p.push_longident(lid);
-            ast_helper::make_construct_pat(lid_idx, None, loc.clone(), loc)
+            ast_helper::make_construct_pat(p.arena_mut(), lid_idx, None, loc.clone(), loc)
         }
         Token::Lparen => {
             p.next();
@@ -548,7 +554,7 @@ fn parse_atomic_pattern(p: &mut Parser<'_>) -> Pattern {
                 p.next();
                 let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
                 let lid_idx = p.push_lident_static("()");
-                ast_helper::make_construct_pat(lid_idx, None, loc.clone(), loc)
+                ast_helper::make_construct_pat(p.arena_mut(), lid_idx, None, loc.clone(), loc)
             } else {
                 // Parenthesized pattern or tuple
                 let mut pat = parse_constrained_pattern(p);
@@ -578,8 +584,9 @@ fn parse_atomic_pattern(p: &mut Parser<'_>) -> Pattern {
             p.next();
             let pat = parse_atomic_pattern(p);
             let loc = p.mk_loc_idx_to_end_of(start_pos_idx, pat.ppat_loc);
+            let pat_idx = p.arena_mut().push_pat(pat);
             Pattern {
-                ppat_desc: Box::new(PatternDesc::Ppat_exception(Box::new(pat))),
+                ppat_desc: Box::new(PatternDesc::Ppat_exception(pat_idx)),
                 ppat_loc: loc,
                 ppat_attributes: Attributes::new(),
             }
@@ -629,8 +636,9 @@ fn parse_atomic_pattern(p: &mut Parser<'_>) -> Pattern {
                     ppat_loc: name_loc.loc.clone(),
                     ppat_attributes: Attributes::new(),
                 };
+                let unpack_idx = p.arena_mut().push_pat(unpack);
                 Pattern {
-                    ppat_desc: Box::new(PatternDesc::Ppat_constraint(Box::new((Box::new(unpack), typ)))),
+                    ppat_desc: Box::new(PatternDesc::Ppat_constraint(Box::new((unpack_idx, typ)))),
                     ppat_loc: loc,
                     ppat_attributes: Attributes::new(),
                 }
@@ -690,6 +698,7 @@ fn parse_atomic_pattern(p: &mut Parser<'_>) -> Pattern {
                         let unit_loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
                         let unit_lid_idx = p.push_lident_static("()");
                         Some(ast_helper::make_construct_pat(
+                            p.arena_mut(),
                             unit_lid_idx,
                             None,
                             unit_loc.clone(),
@@ -754,8 +763,9 @@ fn parse_atomic_pattern(p: &mut Parser<'_>) -> Pattern {
                 };
 
                 // OCaml uses just the constructor name location, not including the argument
+                let arg_idx = arg.map(|a| p.arena_mut().push_pat(a));
                 Pattern {
-                    ppat_desc: Box::new(PatternDesc::Ppat_construct(lid, arg.map(Box::new))),
+                    ppat_desc: Box::new(PatternDesc::Ppat_construct(lid, arg_idx)),
                     ppat_loc: lid_loc,
                     ppat_attributes: Attributes::new(),
                 }
@@ -894,6 +904,7 @@ fn parse_constructor_pattern(p: &mut Parser<'_>) -> Pattern {
             let unit_loc = p.mk_loc_idx_to_prev_end(lparen_pos_idx);
             let unit_lid_idx = p.push_lident_static("()");
             Some(ast_helper::make_construct_pat(
+                p.arena_mut(),
                 unit_lid_idx,
                 None,
                 unit_loc.clone(),
@@ -972,7 +983,7 @@ fn parse_constructor_pattern(p: &mut Parser<'_>) -> Pattern {
         loc.clone()
     };
 
-    ast_helper::make_construct_pat(lid_idx, arg, loc, full_loc)
+    ast_helper::make_construct_pat(p.arena_mut(), lid_idx, arg, loc, full_loc)
 }
 
 // ============================================================================
@@ -999,8 +1010,9 @@ fn parse_non_spread_pattern(p: &mut Parser<'_>, error_msg: &str) -> Option<Patte
             p.next();
             let typ = super::typ::parse_typ_expr(p);
             let loc = p.mk_loc_spanning(pat.ppat_loc, typ.ptyp_loc);
+            let pat_idx = p.arena_mut().push_pat(pat);
             Some(Pattern {
-                ppat_desc: Box::new(PatternDesc::Ppat_constraint(Box::new((Box::new(pat), typ)))),
+                ppat_desc: Box::new(PatternDesc::Ppat_constraint(Box::new((pat_idx, typ)))),
                 ppat_loc: loc,
                 ppat_attributes: Attributes::new(),
             })
@@ -1567,7 +1579,7 @@ fn parse_poly_variant_pattern(p: &mut Parser<'_>) -> Pattern {
     };
 
     // Check for argument
-    let arg = if p.token == Token::Lparen {
+    let arg: Option<PatIdx> = if p.token == Token::Lparen {
         let tuple_start_idx = p.start_pos_idx();
         p.next();
         if p.token == Token::Rparen {
@@ -1577,12 +1589,14 @@ fn parse_poly_variant_pattern(p: &mut Parser<'_>) -> Pattern {
             let unit_loc = p.mk_loc_idx_to_prev_end(tuple_start_idx);
             p.next();
             let unit_lid_idx = p.push_lident_static("()");
-            Some(Box::new(ast_helper::make_construct_pat(
+            let unit_pat = ast_helper::make_construct_pat(
+                p.arena_mut(),
                 unit_lid_idx,
                 None,
                 unit_loc.clone(),
                 unit_loc,
-            )))
+            );
+            Some(p.arena_mut().push_pat(unit_pat))
         } else {
             let first = parse_constrained_pattern(p);
             if p.token == Token::Comma {
@@ -1598,18 +1612,20 @@ fn parse_poly_variant_pattern(p: &mut Parser<'_>) -> Pattern {
                 p.expect(Token::Rparen);
                 // Trailing comma with single element: #tag(a,) -> just the pattern, not a tuple
                 if patterns.len() == 1 {
-                    Some(Box::new(patterns.into_iter().next().unwrap()))
+                    let single = patterns.into_iter().next().unwrap();
+                    Some(p.arena_mut().push_pat(single))
                 } else {
                     let tuple_loc = p.mk_loc_idx_to_prev_end(tuple_start_idx);
-                    Some(Box::new(Pattern {
+                    let tuple_pat = Pattern {
                         ppat_desc: Box::new(PatternDesc::Ppat_tuple(Box::new(patterns))),
                         ppat_loc: tuple_loc,
                         ppat_attributes: Attributes::new(),
-                    }))
+                    };
+                    Some(p.arena_mut().push_pat(tuple_pat))
                 }
             } else {
                 p.expect(Token::Rparen);
-                Some(Box::new(first))
+                Some(p.arena_mut().push_pat(first))
             }
         }
     } else {
