@@ -33,6 +33,7 @@ use serde::{Deserialize, Serialize};
 use crate::arena::{Arena, ArenaIdx};
 use crate::intern::Interner;
 use crate::location::{Location, Position};
+use crate::parser::ast::{CoreType, Expression, ModuleExpr, ModuleType, Pattern};
 use crate::parser::longident::Longident;
 
 /// Key for position deduplication.
@@ -146,6 +147,89 @@ pub struct ArityIdx(pub u32);
 impl ArenaIdx for ArityIdx {
     fn from_u32(idx: u32) -> Self {
         ArityIdx(idx)
+    }
+    fn to_u32(self) -> u32 {
+        self.0
+    }
+}
+
+// ============================================================================
+// AST Node Index Types
+// ============================================================================
+
+/// Index into the expression arena.
+///
+/// Replaces `Box<Expression>` for recursive AST references. 4 bytes instead
+/// of 8 bytes (pointer), and eliminates per-node heap allocation. The
+/// Expression is stored in a flat `Vec<Expression>` pool in `ParseArena`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct ExprIdx(pub u32);
+
+impl ArenaIdx for ExprIdx {
+    fn from_u32(idx: u32) -> Self {
+        ExprIdx(idx)
+    }
+    fn to_u32(self) -> u32 {
+        self.0
+    }
+}
+
+/// Index into the pattern arena.
+///
+/// Replaces `Box<Pattern>` for recursive AST references. 4 bytes instead
+/// of 8 bytes (pointer), eliminates per-node heap allocation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct PatIdx(pub u32);
+
+impl ArenaIdx for PatIdx {
+    fn from_u32(idx: u32) -> Self {
+        PatIdx(idx)
+    }
+    fn to_u32(self) -> u32 {
+        self.0
+    }
+}
+
+/// Index into the core type arena.
+///
+/// Replaces `Box<CoreType>` for recursive AST references. 4 bytes instead
+/// of 8 bytes (pointer), eliminates per-node heap allocation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct CoreTypeIdx(pub u32);
+
+impl ArenaIdx for CoreTypeIdx {
+    fn from_u32(idx: u32) -> Self {
+        CoreTypeIdx(idx)
+    }
+    fn to_u32(self) -> u32 {
+        self.0
+    }
+}
+
+/// Index into the module expression arena.
+///
+/// Replaces `Box<ModuleExpr>` for recursive AST references.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct ModExprIdx(pub u32);
+
+impl ArenaIdx for ModExprIdx {
+    fn from_u32(idx: u32) -> Self {
+        ModExprIdx(idx)
+    }
+    fn to_u32(self) -> u32 {
+        self.0
+    }
+}
+
+/// Index into the module type arena.
+///
+/// Replaces `Box<ModuleType>` for recursive AST references.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct ModTypeIdx(pub u32);
+
+impl ArenaIdx for ModTypeIdx {
+    fn from_u32(idx: u32) -> Self {
+        ModTypeIdx(idx)
     }
     fn to_u32(self) -> u32 {
         self.0
@@ -356,6 +440,21 @@ pub struct ParseArena {
     /// Use `push_arity()` for computed paths (fresh indices).
     /// Use `static_arities` for literal paths (shared indices).
     arities: Vec<Option<i32>>,
+    /// Arena of expressions (returns ExprIdx).
+    /// Replaces `Box<Expression>` for recursive AST references.
+    expressions: Arena<Expression, ExprIdx>,
+    /// Arena of patterns (returns PatIdx).
+    /// Replaces `Box<Pattern>` for recursive AST references.
+    patterns: Arena<Pattern, PatIdx>,
+    /// Arena of core types (returns CoreTypeIdx).
+    /// Replaces `Box<CoreType>` for recursive AST references.
+    core_types: Arena<CoreType, CoreTypeIdx>,
+    /// Arena of module expressions (returns ModExprIdx).
+    /// Replaces `Box<ModuleExpr>` for recursive AST references.
+    mod_exprs: Arena<ModuleExpr, ModExprIdx>,
+    /// Arena of module types (returns ModTypeIdx).
+    /// Replaces `Box<ModuleType>` for recursive AST references.
+    mod_types: Arena<ModuleType, ModTypeIdx>,
     /// Pre-allocated static arity indices for literal paths.
     /// These match OCaml's CSE behavior where literal `Some 1` values are shared.
     static_arities: StaticArities,
@@ -609,6 +708,11 @@ impl Default for ParseArena {
             locations: Arena::default(),
             longidents,
             arities,
+            expressions: Arena::default(),
+            patterns: Arena::default(),
+            core_types: Arena::default(),
+            mod_exprs: Arena::default(),
+            mod_types: Arena::default(),
             static_arities,
             static_list_lidents,
             static_array_lidents,
@@ -1440,6 +1544,116 @@ impl ParseArena {
             txt: self.get_longident(loc.txt).clone(),
             loc: self.to_location(loc.loc),
         }
+    }
+
+    // ========================================================================
+    // AST node arenas
+    // ========================================================================
+
+    /// Push an expression into the arena and return its index.
+    /// Use this instead of `Box::new(expr)` for recursive AST references.
+    #[inline]
+    pub fn push_expr(&mut self, expr: Expression) -> ExprIdx {
+        self.expressions.push(expr)
+    }
+
+    /// Get an expression by index.
+    #[inline]
+    pub fn get_expr(&self, idx: ExprIdx) -> &Expression {
+        self.expressions.get(idx)
+    }
+
+    /// Get a mutable expression by index.
+    #[inline]
+    pub fn get_expr_mut(&mut self, idx: ExprIdx) -> &mut Expression {
+        self.expressions.get_mut(idx)
+    }
+
+    /// Get the number of expressions in the arena.
+    pub fn expr_count(&self) -> usize {
+        self.expressions.len()
+    }
+
+    /// Push a pattern into the arena and return its index.
+    #[inline]
+    pub fn push_pat(&mut self, pat: Pattern) -> PatIdx {
+        self.patterns.push(pat)
+    }
+
+    /// Get a pattern by index.
+    #[inline]
+    pub fn get_pat(&self, idx: PatIdx) -> &Pattern {
+        self.patterns.get(idx)
+    }
+
+    /// Get a mutable pattern by index.
+    #[inline]
+    pub fn get_pat_mut(&mut self, idx: PatIdx) -> &mut Pattern {
+        self.patterns.get_mut(idx)
+    }
+
+    /// Get the number of patterns in the arena.
+    pub fn pat_count(&self) -> usize {
+        self.patterns.len()
+    }
+
+    /// Push a core type into the arena and return its index.
+    #[inline]
+    pub fn push_core_type(&mut self, typ: CoreType) -> CoreTypeIdx {
+        self.core_types.push(typ)
+    }
+
+    /// Get a core type by index.
+    #[inline]
+    pub fn get_core_type(&self, idx: CoreTypeIdx) -> &CoreType {
+        self.core_types.get(idx)
+    }
+
+    /// Get a mutable core type by index.
+    #[inline]
+    pub fn get_core_type_mut(&mut self, idx: CoreTypeIdx) -> &mut CoreType {
+        self.core_types.get_mut(idx)
+    }
+
+    /// Get the number of core types in the arena.
+    pub fn core_type_count(&self) -> usize {
+        self.core_types.len()
+    }
+
+    /// Push a module expression into the arena and return its index.
+    #[inline]
+    pub fn push_mod_expr(&mut self, me: ModuleExpr) -> ModExprIdx {
+        self.mod_exprs.push(me)
+    }
+
+    /// Get a module expression by index.
+    #[inline]
+    pub fn get_mod_expr(&self, idx: ModExprIdx) -> &ModuleExpr {
+        self.mod_exprs.get(idx)
+    }
+
+    /// Get a mutable module expression by index.
+    #[inline]
+    pub fn get_mod_expr_mut(&mut self, idx: ModExprIdx) -> &mut ModuleExpr {
+        self.mod_exprs.get_mut(idx)
+    }
+
+    /// Push a module type into the arena and return its index.
+    #[inline]
+    pub fn push_mod_type(&mut self, mt: ModuleType) -> ModTypeIdx {
+        self.mod_types.push(mt)
+    }
+
+    /// Get a module type by index.
+    #[inline]
+    pub fn get_mod_type(&self, idx: ModTypeIdx) -> &ModuleType {
+        self.mod_types.get(idx)
+    }
+
+    /// Get a mutable module type by index.
+    #[inline]
+    pub fn get_mod_type_mut(&mut self, idx: ModTypeIdx) -> &mut ModuleType {
+        self.mod_types.get_mut(idx)
     }
 }
 

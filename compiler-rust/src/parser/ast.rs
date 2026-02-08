@@ -11,7 +11,10 @@
 
 use std::borrow::Cow;
 
-use crate::parse_arena::{ArityIdx, LidentIdx, Located, LocIdx, PosIdx, StrIdx};
+use crate::parse_arena::{
+    ArityIdx, CoreTypeIdx, ExprIdx, LidentIdx, Located, LocIdx, ModExprIdx, ModTypeIdx, PatIdx,
+    PosIdx, StrIdx,
+};
 use serde::{Deserialize, Serialize};
 
 /// Extend the lifetime of a `Cow<'a, str>` to `'static` for zero-copy AST storage.
@@ -420,9 +423,9 @@ pub enum Payload {
     /// Signature payload: `[@@attr: signature]`.
     PSig(Box<Vec<SignatureItem>>),
     /// Type payload: `[@@attr: type]`.
-    PTyp(Box<CoreType>),
+    PTyp(CoreTypeIdx),
     /// Pattern payload with optional guard: `[@@attr? pattern when guard]`.
-    PPat(Box<(Box<Pattern>, Option<Box<Expression>>)>),
+    PPat(Box<(PatIdx, Option<ExprIdx>)>),
 }
 
 // ============================================================================
@@ -459,7 +462,7 @@ pub enum CoreTypeDesc {
     /// Type variable: `'a`.
     Ptyp_var(Box<Cow<'static, str>>),
     /// Arrow type: `T1 -> T2`.
-    Ptyp_arrow(Box<(Box<TypeArg>, Box<CoreType>, Arity)>),
+    Ptyp_arrow(Box<(Box<TypeArg>, CoreTypeIdx, Arity)>),
     /// Tuple type: `(T1, T2, ..., Tn)`.
     Ptyp_tuple(Box<Vec<CoreType>>),
     /// Type constructor: `tconstr` or `T tconstr` or `(T1, ..., Tn) tconstr`.
@@ -467,11 +470,11 @@ pub enum CoreTypeDesc {
     /// Object type: `{. field: T, ... }`.
     Ptyp_object(Box<(Vec<ObjectField>, ClosedFlag)>),
     /// Type alias: `T as 'a`.
-    Ptyp_alias(Box<(Box<CoreType>, Cow<'static, str>)>),
+    Ptyp_alias(Box<(CoreTypeIdx, Cow<'static, str>)>),
     /// Polymorphic variant: `[> \`A | \`B ]`.
     Ptyp_variant(Box<(Vec<RowField>, ClosedFlag, Option<Vec<Label>>)>),
     /// Polymorphic type: `'a 'b. T`.
-    Ptyp_poly(Box<(Vec<StringLoc>, Box<CoreType>)>),
+    Ptyp_poly(Box<(Vec<StringLoc>, CoreTypeIdx)>),
     /// Package type: `module S`.
     Ptyp_package(Box<PackageType>),
     /// Extension: `[%id]`.
@@ -522,7 +525,7 @@ pub enum PatternDesc {
     /// Variable: `x`.
     Ppat_var(StringLoc),
     /// Alias: `P as x`.
-    Ppat_alias(Box<Pattern>, StringLoc),
+    Ppat_alias(PatIdx, StringLoc),
     /// Constant: `1`, `'a'`, `"hello"`.
     Ppat_constant(Box<Constant>),
     /// Interval: `'a'..'z'`.
@@ -530,27 +533,27 @@ pub enum PatternDesc {
     /// Tuple: `(P1, P2, ..., Pn)`.
     Ppat_tuple(Box<Vec<Pattern>>),
     /// Constructor: `C` or `C(P)`.
-    Ppat_construct(Loc<LidentIdx>, Option<Box<Pattern>>),
+    Ppat_construct(Loc<LidentIdx>, Option<PatIdx>),
     /// Variant: `\`A` or `\`A(P)`.
-    Ppat_variant(Box<(Label, Option<Box<Pattern>>)>),
+    Ppat_variant(Box<(Label, Option<PatIdx>)>),
     /// Record: `{l1: P1, ..., ln: Pn}`.
     Ppat_record(Box<(Vec<PatternRecordField>, ClosedFlag)>),
     /// Array: `[P1, ..., Pn]`.
     Ppat_array(Box<Vec<Pattern>>),
     /// Or-pattern: `P1 | P2`.
-    Ppat_or(Box<Pattern>, Box<Pattern>),
+    Ppat_or(PatIdx, PatIdx),
     /// Constraint: `(P: T)`.
-    Ppat_constraint(Box<(Box<Pattern>, CoreType)>),
+    Ppat_constraint(Box<(PatIdx, CoreType)>),
     /// Type pattern: `#tconstr`.
     Ppat_type(Loc<LidentIdx>),
     /// Unpack: `module(P)`.
     Ppat_unpack(StringLoc),
     /// Exception: `exception P`.
-    Ppat_exception(Box<Pattern>),
+    Ppat_exception(PatIdx),
     /// Extension: `[%id]`.
     Ppat_extension(Box<Extension>),
     /// Open: `M.(P)`.
-    Ppat_open(Loc<LidentIdx>, Box<Pattern>),
+    Ppat_open(Loc<LidentIdx>, PatIdx),
 }
 
 /// A record field in a pattern.
@@ -583,9 +586,9 @@ pub struct Expression {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PexpFun {
     pub arg_label: ArgLabel,
-    pub default: Option<Box<Expression>>,
+    pub default: Option<ExprIdx>,
     pub lhs: Pattern,
-    pub rhs: Box<Expression>,
+    pub rhs: ExprIdx,
     pub arity: Arity,
     pub is_async: bool,
 }
@@ -593,7 +596,7 @@ pub struct PexpFun {
 /// Named struct for Pexp_apply variant (boxed for enum size optimization).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PexpApply {
-    pub funct: Box<Expression>,
+    pub funct: ExprIdx,
     pub args: Vec<(ArgLabel, Expression)>,
     pub partial: bool,
     pub transformed_jsx: bool,
@@ -607,59 +610,59 @@ pub enum ExpressionDesc {
     /// Constant: `1`, `'a'`, `"hello"`.
     Pexp_constant(Box<Constant>),
     /// Let binding: `let P = E in E'`.
-    Pexp_let(Box<(RecFlag, Vec<ValueBinding>, Box<Expression>)>),
+    Pexp_let(Box<(RecFlag, Vec<ValueBinding>, ExprIdx)>),
     /// Function: `(P) => E`.
     Pexp_fun(Box<PexpFun>),
     /// Application: `E(E1, E2, ...)`.
     Pexp_apply(Box<PexpApply>),
     /// Match: `switch E { | P1 => E1 | ... }`.
-    Pexp_match(Box<(Box<Expression>, Vec<Case>)>),
+    Pexp_match(Box<(ExprIdx, Vec<Case>)>),
     /// Try: `try E { | P1 => E1 | ... }`.
-    Pexp_try(Box<(Box<Expression>, Vec<Case>)>),
+    Pexp_try(Box<(ExprIdx, Vec<Case>)>),
     /// Tuple: `(E1, E2, ..., En)`.
     Pexp_tuple(Box<Vec<Expression>>),
     /// Constructor: `C` or `C(E)`.
-    Pexp_construct(Loc<LidentIdx>, Option<Box<Expression>>),
+    Pexp_construct(Loc<LidentIdx>, Option<ExprIdx>),
     /// Variant: `\`A` or `\`A(E)`.
-    Pexp_variant(Box<(Label, Option<Box<Expression>>)>),
+    Pexp_variant(Box<(Label, Option<ExprIdx>)>),
     /// Record: `{l1: E1, ..., ln: En}` or `{...E, l1: E1, ...}`.
-    Pexp_record(Box<(Vec<ExpressionRecordField>, Option<Box<Expression>>)>),
+    Pexp_record(Box<(Vec<ExpressionRecordField>, Option<ExprIdx>)>),
     /// Field access: `E.l`.
-    Pexp_field(Box<Expression>, Loc<LidentIdx>),
+    Pexp_field(ExprIdx, Loc<LidentIdx>),
     /// Field set: `E.l = E'`.
-    Pexp_setfield(Box<(Box<Expression>, Loc<LidentIdx>, Box<Expression>)>),
+    Pexp_setfield(Box<(ExprIdx, Loc<LidentIdx>, ExprIdx)>),
     /// Array: `[E1, ..., En]`.
     Pexp_array(Box<Vec<Expression>>),
     /// If-then-else: `if E1 { E2 } else { E3 }`.
-    Pexp_ifthenelse(Box<(Box<Expression>, Box<Expression>, Option<Box<Expression>>)>),
+    Pexp_ifthenelse(Box<(ExprIdx, ExprIdx, Option<ExprIdx>)>),
     /// Sequence: `E1; E2`.
-    Pexp_sequence(Box<Expression>, Box<Expression>),
+    Pexp_sequence(ExprIdx, ExprIdx),
     /// While: `while E1 { E2 }`.
-    Pexp_while(Box<Expression>, Box<Expression>),
+    Pexp_while(ExprIdx, ExprIdx),
     /// For: `for i in E1 to E2 { E3 }`.
-    Pexp_for(Box<(Pattern, Box<Expression>, Box<Expression>, DirectionFlag, Box<Expression>)>),
+    Pexp_for(Box<(Pattern, ExprIdx, ExprIdx, DirectionFlag, ExprIdx)>),
     /// Constraint: `(E: T)`.
-    Pexp_constraint(Box<(Box<Expression>, CoreType)>),
+    Pexp_constraint(Box<(ExprIdx, CoreType)>),
     /// Coercion: `(E :> T)`.
-    Pexp_coerce(Box<(Box<Expression>, Option<CoreType>, CoreType)>),
+    Pexp_coerce(Box<(ExprIdx, Option<CoreType>, CoreType)>),
     /// Send: `E#m`.
-    Pexp_send(Box<(Box<Expression>, Loc<Label>)>),
+    Pexp_send(Box<(ExprIdx, Loc<Label>)>),
     /// Let module: `{ module M = ME; E }`.
-    Pexp_letmodule(Box<(StringLoc, ModuleExpr, Box<Expression>)>),
+    Pexp_letmodule(Box<(StringLoc, ModuleExpr, ExprIdx)>),
     /// Let exception: `{ exception C; E }`.
-    Pexp_letexception(Box<(ExtensionConstructor, Box<Expression>)>),
+    Pexp_letexception(Box<(ExtensionConstructor, ExprIdx)>),
     /// Assert: `assert(E)`.
-    Pexp_assert(Box<Expression>),
+    Pexp_assert(ExprIdx),
     /// Newtype: `(type t) => E`.
-    Pexp_newtype(Box<(StringLoc, Box<Expression>)>),
+    Pexp_newtype(Box<(StringLoc, ExprIdx)>),
     /// Pack: `module(ME)`.
-    Pexp_pack(Box<ModuleExpr>),
+    Pexp_pack(ModExprIdx),
     /// Open: `M.{ E }` or `open M; E`.
-    Pexp_open(Box<(OverrideFlag, Loc<LidentIdx>, Box<Expression>)>),
+    Pexp_open(Box<(OverrideFlag, Loc<LidentIdx>, ExprIdx)>),
     /// Extension: `[%id]`.
     Pexp_extension(Box<Extension>),
     /// Await: `await E`.
-    Pexp_await(Box<Expression>),
+    Pexp_await(ExprIdx),
     /// JSX element.
     Pexp_jsx_element(Box<JsxElement>),
 }
@@ -814,13 +817,13 @@ pub enum ModuleExprDesc {
     /// Module structure: `{ ... }`.
     Pmod_structure(Box<Vec<StructureItem>>),
     /// Functor: `(X: S) => ME`.
-    Pmod_functor(Box<(StringLoc, Option<Box<ModuleType>>, Box<ModuleExpr>)>),
+    Pmod_functor(Box<(StringLoc, Option<ModTypeIdx>, ModExprIdx)>),
     /// Functor application: `F(M)`.
-    Pmod_apply(Box<ModuleExpr>, Box<ModuleExpr>),
+    Pmod_apply(ModExprIdx, ModExprIdx),
     /// Constraint: `(ME: MT)`.
-    Pmod_constraint(Box<ModuleExpr>, Box<ModuleType>),
+    Pmod_constraint(ModExprIdx, ModTypeIdx),
     /// Unpack: `unpack(E)`.
-    Pmod_unpack(Box<Expression>),
+    Pmod_unpack(ExprIdx),
     /// Extension: `[%id]`.
     Pmod_extension(Box<Extension>),
 }
@@ -844,11 +847,11 @@ pub enum ModuleTypeDesc {
     /// Signature: `{ ... }`.
     Pmty_signature(Box<Vec<SignatureItem>>),
     /// Functor type: `(X: S) => MT`.
-    Pmty_functor(Box<(StringLoc, Option<Box<ModuleType>>, Box<ModuleType>)>),
+    Pmty_functor(Box<(StringLoc, Option<ModTypeIdx>, ModTypeIdx)>),
     /// With constraint: `MT with type t = T`.
-    Pmty_with(Box<(Box<ModuleType>, Vec<WithConstraint>)>),
+    Pmty_with(Box<(ModTypeIdx, Vec<WithConstraint>)>),
     /// Type of: `module type of ME`.
-    Pmty_typeof(Box<ModuleExpr>),
+    Pmty_typeof(ModExprIdx),
     /// Extension: `[%id]`.
     Pmty_extension(Box<Extension>),
     /// Alias: `module M`.
