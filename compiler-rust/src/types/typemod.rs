@@ -1214,16 +1214,195 @@ fn type_structure_item<'a>(
                             .cloned()
                             .collect();
 
+                        // Collect spread source type info for variant spread expansion.
+                        // Maps from spread index to the source type's constructor declarations.
+                        // Uses transl_type to resolve the spread source type (handles qualified paths like S.x).
+                        let spread_sources: Vec<Option<Vec<crate::types::ConstructorDeclaration>>> = {
+                            let mut sources = Vec::new();
+                            for cstr in cstrs.iter() {
+                                let cstr_name_str = arena.get_string(cstr.pcd_name.txt);
+                                if cstr_name_str != "..." {
+                                    sources.push(None);
+                                    continue;
+                                }
+                                // Type-check the spread source type to resolve qualified paths
+                                let mut found = None;
+                                if let crate::parser::ast::ConstructorArguments::Pcstr_tuple(ref args) = cstr.pcd_args {
+                                    if let Some(spread_type_ct) = args.first() {
+                                        if let Ok((_typed_ct, type_ref)) = transl_type(tctx, env, spread_type_ct) {
+                                            // Extract the type declaration from the resolved type
+                                            let repr = ctx.repr(type_ref);
+                                            if let crate::types::type_expr::TypeDesc::Tconstr { ref path, .. } = *ctx.get_desc(repr) {
+                                                // Try looking up by path in env
+                                                if let Ok(source_decl) = new_env.lookup_type(path) {
+                                                    if let crate::types::TypeKind::TypeVariant(ref source_cstrs) = source_decl.type_kind {
+                                                        found = Some(source_cstrs.clone());
+                                                    }
+                                                }
+                                                // Try global type store by stamp (for Pident paths)
+                                                if found.is_none() {
+                                                    if let Path::Pident(id) = path {
+                                                        if let Some(source_decl) = ctx.find_type_decl_by_stamp(id.stamp()) {
+                                                            if let crate::types::TypeKind::TypeVariant(ref source_cstrs) = source_decl.type_kind {
+                                                                found = Some(source_cstrs.clone());
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                                // Try global type store by full path string (for Pdot paths like S.s)
+                                                if found.is_none() {
+                                                    let path_str = path.name();
+                                                    if let Some(source_decl) = ctx.find_type_decl_by_path(&path_str) {
+                                                        if let crate::types::TypeKind::TypeVariant(ref source_cstrs) = source_decl.type_kind {
+                                                            found = Some(source_cstrs.clone());
+                                                        }
+                                                    }
+                                                }
+                                                // Try global type store by short name as last resort
+                                                if found.is_none() {
+                                                    let short_name = path.head_name();
+                                                    if let Some(source_decl) = ctx.find_type_decl(short_name) {
+                                                        if let crate::types::TypeKind::TypeVariant(ref source_cstrs) = source_decl.type_kind {
+                                                            found = Some(source_cstrs.clone());
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                                sources.push(found);
+                            }
+                            sources
+                        };
+
                         let mut internal_cstrs = Vec::new();
                         let mut typed_tree_cstrs = Vec::new();
                         let mut cstr_descs = Vec::new();
-                        let num_consts = cstrs.iter().filter(|c| matches!(c.pcd_args, crate::parser::ast::ConstructorArguments::Pcstr_tuple(ref args) if args.is_empty())).count() as i32;
-                        let num_nonconsts = cstrs.len() as i32 - num_consts;
+                        // Count consts/nonconsts including expanded spreads
+                        // Spread markers are NOT counted - only expanded constructors
+                        let (num_consts, num_nonconsts) = {
+                            let mut nc = 0i32;
+                            let mut nnc = 0i32;
+                            for (idx, cstr) in cstrs.iter().enumerate() {
+                                if let Some(ref source_cstrs) = spread_sources[idx] {
+                                    // Count only the expanded source constructors (not the spread marker)
+                                    for sc in source_cstrs {
+                                        match &sc.cd_args {
+                                            crate::types::ConstructorArguments::CstrTuple(args) if args.is_empty() => nc += 1,
+                                            _ => nnc += 1,
+                                        }
+                                    }
+                                } else {
+                                    let is_const = matches!(cstr.pcd_args, crate::parser::ast::ConstructorArguments::Pcstr_tuple(ref args) if args.is_empty());
+                                    if is_const { nc += 1 } else { nnc += 1 }
+                                }
+                            }
+                            (nc, nnc)
+                        };
 
                         let mut const_tag = 0i32;
                         let mut block_tag = 0i32;
 
-                        for cstr in cstrs {
+                        for (cstr_idx, cstr) in cstrs.iter().enumerate() {
+                            // Handle variant spread expansion
+                            // Like OCaml's typedecl.ml: spread markers return None (filtered out)
+                            // and expanded constructors get real types from the source type
+                            if let Some(ref source_cstrs) = spread_sources[cstr_idx] {
+                                // Expand the source type's constructors into this type
+                                // The spread marker itself is NOT included in any output
+                                for source_cstr in source_cstrs {
+                                    let sc_name = source_cstr.cd_id.name().to_string();
+                                    let sc_id = Ident::create_persistent(&sc_name);
+                                    let sc_is_const = matches!(&source_cstr.cd_args, crate::types::ConstructorArguments::CstrTuple(args) if args.is_empty());
+                                    let sc_tag = if sc_is_const {
+                                        let t = const_tag;
+                                        const_tag += 1;
+                                        crate::types::ConstructorTag::CstrConstant(t)
+                                    } else {
+                                        let t = block_tag;
+                                        block_tag += 1;
+                                        crate::types::ConstructorTag::CstrBlock(t)
+                                    };
+
+                                    // Use actual types from the source constructor (like OCaml's typedecl.ml lines 523-530)
+                                    // ctyp_desc = Ttyp_var(None) acts as Ttyp_any placeholder, ctyp_type = real type from source
+                                    let (sc_args, sc_internal_cd_args, sc_typed_tree_cd_args) = match &source_cstr.cd_args {
+                                        crate::types::ConstructorArguments::CstrTuple(args) => {
+                                            // Use the actual types from the source, not fresh vars
+                                            let typed_tree_args: Vec<TypedCoreType> = args.iter().map(|&texpr| TypedCoreType {
+                                                ctyp_desc: TypedCoreTypeDesc::Ttyp_var(None),
+                                                ctyp_type: texpr,
+                                                ctyp_env: EnvRef(0),
+                                                ctyp_loc: cstr.pcd_loc,
+                                                ctyp_attributes: vec![],
+                                            }).collect();
+                                            (args.clone(), source_cstr.cd_args.clone(), TypedConstructorArguments::Cstr_tuple(typed_tree_args))
+                                        }
+                                        crate::types::ConstructorArguments::CstrRecord(lbls) => {
+                                            let typed_lbls: Vec<TypedLabelDeclaration> = lbls.iter().map(|l| TypedLabelDeclaration {
+                                                ld_id: l.ld_id.clone(),
+                                                ld_name: crate::parse_arena::Located { txt: l.ld_id.name().to_string(), loc: cstr.pcd_loc },
+                                                ld_mutable: match l.ld_mutable {
+                                                    crate::types::asttypes::MutableFlag::Mutable => crate::parser::ast::MutableFlag::Mutable,
+                                                    crate::types::asttypes::MutableFlag::Immutable => crate::parser::ast::MutableFlag::Immutable,
+                                                },
+                                                ld_optional: l.ld_optional,
+                                                ld_type: TypedCoreType {
+                                                    ctyp_desc: TypedCoreTypeDesc::Ttyp_var(None),
+                                                    ctyp_type: l.ld_type,
+                                                    ctyp_env: EnvRef(0),
+                                                    ctyp_loc: cstr.pcd_loc,
+                                                    ctyp_attributes: vec![],
+                                                },
+                                                ld_loc: cstr.pcd_loc,
+                                                ld_attributes: vec![],  // Attributes are internal type, typed tree uses parser type
+                                            }).collect();
+                                            let args_vec = lbls.iter().map(|l| l.ld_type).collect::<Vec<_>>();
+                                            (args_vec, source_cstr.cd_args.clone(), TypedConstructorArguments::Cstr_record(typed_lbls))
+                                        }
+                                    };
+
+                                    let res_ty = ctx.new_constr(type_path.clone(), internal_type_params.clone());
+                                    let sc_arity = sc_args.len() as i32;
+
+                                    internal_cstrs.push(crate::types::ConstructorDeclaration {
+                                        cd_id: sc_id.clone(),
+                                        cd_args: sc_internal_cd_args,
+                                        cd_res: None,
+                                        cd_loc: source_cstr.cd_loc.clone(),
+                                        cd_attributes: source_cstr.cd_attributes.clone(),
+                                    });
+                                    typed_tree_cstrs.push(TypedConstructorDeclaration {
+                                        cd_id: sc_id.clone(),
+                                        cd_name: crate::parse_arena::Located {
+                                            txt: sc_name.clone(),
+                                            loc: cstr.pcd_loc,
+                                        },
+                                        cd_args: sc_typed_tree_cd_args,
+                                        cd_res: None,
+                                        cd_loc: cstr.pcd_loc,
+                                        cd_attributes: vec![],  // TODO: add res.constructor_from_spread attribute
+                                    });
+                                    cstr_descs.push((sc_id, crate::types::ConstructorDescription {
+                                        cstr_name: sc_name,
+                                        cstr_res: res_ty,
+                                        cstr_existentials: vec![],
+                                        cstr_args: sc_args,
+                                        cstr_arity: sc_arity,
+                                        cstr_tag: sc_tag,
+                                        cstr_consts: num_consts,
+                                        cstr_nonconsts: num_nonconsts,
+                                        cstr_generalized: false,
+                                        cstr_private: crate::types::PrivateFlag::Public,
+                                        cstr_loc: source_cstr.cd_loc.clone(),
+                                        cstr_attributes: source_cstr.cd_attributes.clone(),
+                                        cstr_inlined: None,
+                                    }));
+                                }
+                                continue;
+                            }
+
                             let cstr_name_str = arena.get_string(cstr.pcd_name.txt);
                             let cstr_id = Ident::create_persistent(cstr_name_str);
                             let is_constant = matches!(cstr.pcd_args, crate::parser::ast::ConstructorArguments::Pcstr_tuple(ref args) if args.is_empty());
