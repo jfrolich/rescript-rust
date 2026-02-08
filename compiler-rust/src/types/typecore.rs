@@ -590,7 +590,7 @@ fn transl_type_inner(
         CTD::Ptyp_arrow(inner) => {
                     let (ref arg, ref ret_idx, ref arity) = **inner;
             // Arrow type: T1 -> T2
-            let (arg_ctyp, arg_ty) = transl_type_inner(tctx, env, &arg.typ)?;
+            let (arg_ctyp, arg_ty) = transl_type_inner(tctx, env, tctx.arena.get_core_type(arg.typ))?;
             let ret = tctx.arena.get_core_type(*ret_idx);
             let (ret_ctyp, ret_ty) = transl_type_inner(tctx, env, ret)?;
 
@@ -629,7 +629,7 @@ fn transl_type_inner(
             let mut type_refs = Vec::new();
 
             for t in types.iter() {
-                let (ctyp, ty) = transl_type_inner(tctx, env, t)?;
+                let (ctyp, ty) = transl_type_inner(tctx, env, tctx.arena.get_core_type(*t))?;
                 typed_types.push(ctyp);
                 type_refs.push(ty);
             }
@@ -653,7 +653,7 @@ fn transl_type_inner(
             let mut arg_refs = Vec::new();
 
             for arg in args {
-                let (ctyp, ty) = transl_type_inner(tctx, env, arg)?;
+                let (ctyp, ty) = transl_type_inner(tctx, env, tctx.arena.get_core_type(*arg))?;
                 typed_args.push(ctyp);
                 arg_refs.push(ty);
             }
@@ -730,7 +730,7 @@ fn transl_type_inner(
             for field in fields.iter() {
                 match field {
                     crate::parser::ast::ObjectField::Otag(label, attrs, field_type) => {
-                        let (field_ctyp, _field_ty) = transl_type_inner(tctx, env, field_type)?;
+                        let (field_ctyp, _field_ty) = transl_type_inner(tctx, env, tctx.arena.get_core_type(*field_type))?;
 
                         typed_fields.push(crate::types::typedtree::ObjectField {
                             of_desc: crate::types::typedtree::ObjectFieldDesc::OTtag(
@@ -745,13 +745,14 @@ fn transl_type_inner(
                         });
                     }
                     crate::parser::ast::ObjectField::Oinherit(inherit_type) => {
+                        let inherit_ct = tctx.arena.get_core_type(*inherit_type);
                         let (inherit_ctyp, _inherit_ty) =
-                            transl_type_inner(tctx, env, inherit_type)?;
+                            transl_type_inner(tctx, env, inherit_ct)?;
                         typed_fields.push(crate::types::typedtree::ObjectField {
                             of_desc: crate::types::typedtree::ObjectFieldDesc::OTinherit(
                                 inherit_ctyp,
                             ),
-                            of_loc: inherit_type.ptyp_loc.clone(),
+                            of_loc: inherit_ct.ptyp_loc.clone(),
                             of_attributes: Attributes::new().into(),
                         });
                     }
@@ -782,7 +783,7 @@ fn transl_type_inner(
                     crate::parser::ast::RowField::Rtag(label, attrs, constant, args) => {
                         let mut typed_args = Vec::new();
                         for arg in args {
-                            let (arg_ctyp, _arg_ty) = transl_type_inner(tctx, env, arg)?;
+                            let (arg_ctyp, _arg_ty) = transl_type_inner(tctx, env, tctx.arena.get_core_type(*arg))?;
                             typed_args.push(arg_ctyp);
                         }
 
@@ -800,11 +801,12 @@ fn transl_type_inner(
                         });
                     }
                     crate::parser::ast::RowField::Rinherit(inherit_type) => {
+                        let inherit_ct = tctx.arena.get_core_type(*inherit_type);
                         let (inherit_ctyp, _inherit_ty) =
-                            transl_type_inner(tctx, env, inherit_type)?;
+                            transl_type_inner(tctx, env, inherit_ct)?;
                         typed_rows.push(crate::types::typedtree::RowFieldType {
                             rf_desc: crate::types::typedtree::RowFieldDesc::Rinherit(inherit_ctyp),
-                            rf_loc: inherit_type.ptyp_loc.clone(),
+                            rf_loc: inherit_ct.ptyp_loc.clone(),
                             rf_attributes: Attributes::new().into(),
                         });
                     }
@@ -941,7 +943,7 @@ fn type_pattern_inner(
             // Type check each element
             let mut typed_pats = Vec::new();
             for (p, ty) in pats.iter().zip(elem_types.iter()) {
-                let typed_pat = type_pattern_inner(tctx, env, p, *ty, mode, state, 0)?;
+                let typed_pat = type_pattern_inner(tctx, env, tctx.arena.get_pat(*p), *ty, mode, state, 0)?;
                 typed_pats.push(typed_pat);
             }
 
@@ -1023,7 +1025,7 @@ fn type_pattern_inner(
 
             let mut typed_pats = Vec::new();
             for p in pats.iter() {
-                let typed_pat = type_pattern_inner(tctx, env, p, elem_ty, mode, state, 0)?;
+                let typed_pat = type_pattern_inner(tctx, env, tctx.arena.get_pat(*p), elem_ty, mode, state, 0)?;
                 typed_pats.push(typed_pat);
             }
 
@@ -1092,7 +1094,7 @@ fn type_pattern_inner(
                 env,
                 loc,
                 inner_pat,
-                core_type,
+                tctx.arena.get_core_type(*core_type),
                 expected_ty,
                 mode,
                 state,
@@ -1371,7 +1373,7 @@ fn type_pattern_record(
     let mut typed_fields = Vec::new();
     for (idx, field) in fields.iter().enumerate() {
         let field_ty = ctx.new_var(None);
-        let typed_pat = type_pattern_inner(tctx, env, &field.pat, field_ty, mode, state, 0)?;
+        let typed_pat = type_pattern_inner(tctx, env, tctx.arena.get_pat(field.pat), field_ty, mode, state, 0)?;
 
         // Create placeholder label description
         let label_desc = crate::types::LabelDescription {
@@ -1618,7 +1620,7 @@ pub fn type_expect<'a>(
             // Type check each element
             let mut typed_exprs = Vec::new();
             for (e, ty) in exprs.iter().zip(elem_types.iter()) {
-                let typed_expr = type_expect(tctx, env, e, *ty, None)?;
+                let typed_expr = type_expect(tctx, env, tctx.arena.get_expr(*e), *ty, None)?;
                 typed_exprs.push(typed_expr);
             }
 
@@ -1761,7 +1763,7 @@ pub fn type_expect<'a>(
             let mut typed_exprs = Vec::new();
             for e in exprs.iter() {
                 let typed_e =
-                    type_expect(tctx, env, e, elem_ty, Some(TypeClashContext::ArrayLiteral))?;
+                    type_expect(tctx, env, tctx.arena.get_expr(*e), elem_ty, Some(TypeClashContext::ArrayLiteral))?;
                 typed_exprs.push(typed_e);
             }
 
@@ -1834,6 +1836,7 @@ pub fn type_expect<'a>(
             ref is_async, } = **inner;
             // Function expression
             let default_expr = (*default).map(|idx| tctx.arena.get_expr(idx));
+            let lhs_pat = tctx.arena.get_pat(*lhs);
             let rhs_expr = tctx.arena.get_expr(*rhs);
             type_function(
                 tctx,
@@ -1841,7 +1844,7 @@ pub fn type_expect<'a>(
                 loc,
                 arg_label,
                 default_expr,
-                lhs,
+                lhs_pat,
                 rhs_expr,
                 arity.clone(),
                 *is_async,
@@ -1853,6 +1856,7 @@ pub fn type_expect<'a>(
         ED::Pexp_for(inner) => {
                     let (ref pat, ref start_idx, ref end_idx, ref direction, ref body_idx) = **inner;
             // For loop
+            let pat_ref = tctx.arena.get_pat(*pat);
             let start_expr = tctx.arena.get_expr(*start_idx);
             let end_expr = tctx.arena.get_expr(*end_idx);
             let body = tctx.arena.get_expr(*body_idx);
@@ -1860,7 +1864,7 @@ pub fn type_expect<'a>(
                 tctx,
                 env,
                 loc,
-                pat,
+                pat_ref,
                 start_expr,
                 end_expr,
                 *direction,
@@ -1948,12 +1952,13 @@ pub fn type_expect<'a>(
                     let (ref inner_expr_idx, ref core_type) = **inner;
             // Type constraint
             let inner_expr = tctx.arena.get_expr(*inner_expr_idx);
+            let core_type_ref = tctx.arena.get_core_type(*core_type);
             type_constraint(
                 tctx,
                 env,
                 loc,
                 inner_expr,
-                core_type,
+                core_type_ref,
                 expected_ty,
                 &expr.pexp_attributes,
             )
@@ -1963,13 +1968,15 @@ pub fn type_expect<'a>(
                     let (ref inner_expr_idx, ref opt_from_type, ref to_type) = **inner;
             // Type coercion: (E :> T) or (E : T1 :> T2)
             let inner_expr = tctx.arena.get_expr(*inner_expr_idx);
+            let to_type_ref = tctx.arena.get_core_type(*to_type);
+            let opt_from_type_ref = opt_from_type.map(|idx| tctx.arena.get_core_type(idx));
             type_coerce(
                 tctx,
                 env,
                 loc,
                 inner_expr,
-                opt_from_type.as_ref(),
-                to_type,
+                opt_from_type_ref,
+                to_type_ref,
                 expected_ty,
                 &expr.pexp_attributes,
             )
@@ -2064,13 +2071,14 @@ pub fn type_expect<'a>(
         ED::Pexp_letmodule(inner) => {
                     let (ref name, ref module_expr, ref body_idx) = **inner;
             // Let module: { module M = ME; E }
+            let module_expr_ref = tctx.arena.get_mod_expr(*module_expr);
             let body = tctx.arena.get_expr(*body_idx);
             type_letmodule(
                 tctx,
                 env,
                 loc,
                 name,
-                module_expr,
+                module_expr_ref,
                 body,
                 expected_ty,
                 &expr.pexp_attributes,
@@ -2134,7 +2142,7 @@ fn type_application(
     env: &Env,
     loc: LocIdx,
     funct: &ParsedExpression,
-    args: &[(ArgLabel, ParsedExpression)],
+    args: &[(ArgLabel, crate::parse_arena::ExprIdx)],
     _partial: bool,
     _transformed_jsx: bool,
     expected_ty: TypeExprRef,
@@ -2154,7 +2162,7 @@ fn type_application(
 
     // Type check arguments, extracting/building arrow types as we go
     let mut typed_args = Vec::new();
-    for (label, arg_expr) in args.iter() {
+    for (label, arg_expr_idx) in args.iter() {
         // Try to extract argument type from current function type
         let (arg_ty, ret_ty) = match crate::types::split_arrow(ctx, current_ty) {
             Some((arg, ret)) => (arg, ret),
@@ -2169,6 +2177,7 @@ fn type_application(
         };
 
         // Type check the argument
+        let arg_expr = tctx.arena.get_expr(*arg_expr_idx);
         let typed_arg = type_expect(
             tctx,
             env,
@@ -2258,7 +2267,7 @@ fn type_case(
     let typed_pat = type_pattern(
         tctx,
         env,
-        &case.pc_lhs,
+        tctx.arena.get_pat(case.pc_lhs),
         scrutinee_ty,
         PatternMode::Normal,
         &mut state,
@@ -2280,13 +2289,13 @@ fn type_case(
     // Type check the guard if present
     let typed_guard = if let Some(guard) = &case.pc_guard {
         let bool_ty = env.type_bool(tctx.type_ctx);
-        Some(type_expect(tctx, &case_env, guard, bool_ty, None)?)
+        Some(type_expect(tctx, &case_env, tctx.arena.get_expr(*guard), bool_ty, None)?)
     } else {
         None
     };
 
     // Type check the body
-    let typed_body = type_expect(tctx, &case_env, &case.pc_rhs, body_ty, None)?;
+    let typed_body = type_expect(tctx, &case_env, tctx.arena.get_expr(case.pc_rhs), body_ty, None)?;
 
     Ok(crate::types::typedtree::Case {
         c_lhs: typed_pat,
@@ -2644,7 +2653,7 @@ fn type_record(
     for (idx, field) in fields.iter().enumerate() {
         // Type check the field expression
         let field_ty = ctx.new_var(None);
-        let typed_expr = type_expect(tctx, env, &field.expr, field_ty, None)?;
+        let typed_expr = type_expect(tctx, env, tctx.arena.get_expr(field.expr), field_ty, None)?;
 
         // Create a placeholder label description
         let label_desc = crate::types::LabelDescription {
@@ -3148,7 +3157,7 @@ fn type_let_bindings(
     let typing_env = if rec_flag == RecFlag::Recursive {
         let mut new_env = env.clone();
         for (binding, ty) in bindings.iter().zip(binding_types.iter()) {
-            if let crate::parser::ast::PatternDesc::Ppat_var(name) = &*binding.pvb_pat.ppat_desc {
+            if let crate::parser::ast::PatternDesc::Ppat_var(name) = &*tctx.arena.get_pat(binding.pvb_pat).ppat_desc {
                 let id = Ident::create_local(tctx.arena.get_string(name.txt));
                 let desc = ValueDescription {
                     val_type: *ty,
@@ -3176,14 +3185,14 @@ fn type_let_bindings(
         let typed_pat = type_pattern(
             tctx,
             &typing_env,
-            &binding.pvb_pat,
+            tctx.arena.get_pat(binding.pvb_pat),
             *ty,
             PatternMode::Normal,
             &mut state,
         )?;
 
         // Type check expression
-        let typed_expr = type_expect(tctx, &typing_env, &binding.pvb_expr, *ty, None)?;
+        let typed_expr = type_expect(tctx, &typing_env, tctx.arena.get_expr(binding.pvb_expr), *ty, None)?;
 
         typed_bindings.push(ValueBinding::new(
             typed_pat,

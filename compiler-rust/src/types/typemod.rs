@@ -265,7 +265,7 @@ fn type_structure_item<'a>(
         ParsedStructureItemDesc::Pstr_eval(inner) => {
                     let (ref expr, ref attrs) = **inner;
             // Evaluated expression: E
-            let typed_expr = type_expression(tctx.type_ctx, arena, env, expr)?;
+            let typed_expr = type_expression(tctx.type_ctx, arena, env, arena.get_expr(*expr))?;
 
             let desc = StructureItemDesc::Tstr_eval(typed_expr, attrs.clone());
             Ok((
@@ -336,7 +336,7 @@ fn type_structure_item<'a>(
                 let mut typ_params: Vec<(TypedCoreType, TypesVariance)> = Vec::new();
                 let mut internal_type_params: Vec<TypeExprRef> = Vec::new();
                 for (core_type, parser_var) in &decl.ptype_params {
-                    let (typed_core_type, type_ref) = transl_type(tctx, env, core_type)?;
+                    let (typed_core_type, type_ref) = transl_type(tctx, env, arena.get_core_type(*core_type))?;
                     internal_type_params.push(type_ref);
                     let types_var = match parser_var {
                         ParserVariance::Covariant => TypesVariance::covariant(),
@@ -350,15 +350,15 @@ fn type_structure_item<'a>(
                 // Convert type constraints
                 let mut typ_cstrs: Vec<(TypedCoreType, TypedCoreType, LocIdx)> = Vec::new();
                 for (ct1, ct2, cstr_loc) in &decl.ptype_cstrs {
-                    let (typed_ct1, _) = transl_type(tctx, env, ct1)?;
-                    let (typed_ct2, _) = transl_type(tctx, env, ct2)?;
+                    let (typed_ct1, _) = transl_type(tctx, env, arena.get_core_type(*ct1))?;
+                    let (typed_ct2, _) = transl_type(tctx, env, arena.get_core_type(*ct2))?;
                     typ_cstrs.push((typed_ct1, typed_ct2, *cstr_loc));
                 }
 
                 // Convert manifest type (type alias)
                 let typ_manifest = match &decl.ptype_manifest {
                     Some(manifest) => {
-                        let (typed_manifest, _) = transl_type(tctx, env, manifest)?;
+                        let (typed_manifest, _) = transl_type(tctx, env, arena.get_core_type(*manifest))?;
                         Some(typed_manifest)
                     }
                     None => None,
@@ -390,7 +390,7 @@ fn type_structure_item<'a>(
                                     let mut typed_args: Vec<TypeExprRef> = Vec::new();
                                     let mut typed_tree_args: Vec<TypedCoreType> = Vec::new();
                                     for core_type in types {
-                                        let (typed_core_type, type_ref) = transl_type(tctx, env, core_type)?;
+                                        let (typed_core_type, type_ref) = transl_type(tctx, env, arena.get_core_type(*core_type))?;
                                         typed_args.push(type_ref);
                                         typed_tree_args.push(typed_core_type);
                                     }
@@ -400,7 +400,7 @@ fn type_structure_item<'a>(
                                     let mut typed_labels: Vec<TypedLabelDeclaration> = Vec::new();
                                     let mut internal_labels: Vec<crate::types::LabelDeclaration> = Vec::new();
                                     for lbl in labels {
-                                        let (typed_core_type, type_ref) = transl_type(tctx, env, &lbl.pld_type)?;
+                                        let (typed_core_type, type_ref) = transl_type(tctx, env, arena.get_core_type(lbl.pld_type))?;
                                         let mutable_flag = match lbl.pld_mutable {
                                             crate::parser::ast::MutableFlag::Immutable => crate::types::MutableFlag::Immutable,
                                             crate::parser::ast::MutableFlag::Mutable => crate::types::MutableFlag::Mutable,
@@ -503,7 +503,7 @@ fn type_structure_item<'a>(
                         let mut typed_tree_labels: Vec<TypedLabelDeclaration> = Vec::new();
                         for lbl in labels {
                             let lbl_name_str = arena.get_string(lbl.pld_name.txt);
-                            let (typed_core_type, type_ref) = transl_type(tctx, env, &lbl.pld_type)?;
+                            let (typed_core_type, type_ref) = transl_type(tctx, env, arena.get_core_type(lbl.pld_type))?;
                             let mutable_flag = match lbl.pld_mutable {
                                 crate::parser::ast::MutableFlag::Immutable => crate::types::MutableFlag::Immutable,
                                 crate::parser::ast::MutableFlag::Mutable => crate::types::MutableFlag::Mutable,
@@ -667,7 +667,7 @@ fn type_structure_item<'a>(
 
         ParsedStructureItemDesc::Pstr_module(mb) => {
             // Module binding: module M = ME
-            let typed_mod = type_module_expr(tctx, env, arena, &mb.pmb_expr)?;
+            let typed_mod = type_module_expr(tctx, env, arena, arena.get_mod_expr(mb.pmb_expr))?;
             let mod_name_str = arena.get_string(mb.pmb_name.txt);
             let mod_id = Ident::create_local(mod_name_str);
 
@@ -692,7 +692,7 @@ fn type_structure_item<'a>(
             // Recursive modules: module rec M = ...
             let mut typed_bindings = Vec::new();
             for mb in mbs.iter() {
-                let typed_mod = type_module_expr(tctx, env, arena, &mb.pmb_expr)?;
+                let typed_mod = type_module_expr(tctx, env, arena, arena.get_mod_expr(mb.pmb_expr))?;
                 let mod_name_str = arena.get_string(mb.pmb_name.txt);
                 let mod_id = Ident::create_local(mod_name_str);
                 typed_bindings.push(ModuleBinding {
@@ -766,7 +766,7 @@ fn type_structure_item<'a>(
 
         ParsedStructureItemDesc::Pstr_include(incl) => {
             // Include declaration: include ME
-            let typed_mod = type_module_expr(tctx, env, arena, &incl.pincl_mod)?;
+            let typed_mod = type_module_expr(tctx, env, arena, arena.get_mod_expr(incl.pincl_mod))?;
 
             let desc = StructureItemDesc::Tstr_include(IncludeDeclaration {
                 incl_mod: typed_mod,
