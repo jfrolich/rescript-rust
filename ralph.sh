@@ -10,6 +10,7 @@ AGENT="${RALPH_AGENT:-claude}"
 OUTPUT_FILE="/tmp/ralph_output.txt"
 OUTPUT_JSON_FILE="/tmp/ralph_output.jsonl"
 ITERATION=0
+CODEX_LAST_TEXT=""
 DEFAULT_SLEEP_SECONDS=2
 RATE_LIMIT_BASE_SLEEP_SECONDS=60
 RATE_LIMIT_MAX_SLEEP_SECONDS=900
@@ -133,39 +134,48 @@ render_codex_stream_line() {
   local tool_result
 
   text=$(echo "$line" | jq -r '
-    if .type == "agent_message" then
-      (.message // .text // empty)
-    elif .type == "response_item" and .payload.type == "message" and .payload.role == "assistant" then
-      [.payload.content[]? | select(.type == "output_text") | .text] | join("\n")
-    elif .type == "message" and .role == "assistant" then
-      [.content[]? | select(.type == "output_text") | .text] | join("\n")
-    else
-      empty
-    end
+    def assistant_text:
+      if .type == "agent_message" then
+        (.message // .text // empty)
+      elif .type == "response_item" and .payload.type == "message" and .payload.role == "assistant" then
+        ([.payload.content[]? | select(.type == "output_text") | .text] | join("\n"))
+      elif .type == "message" and .role == "assistant" then
+        ([.content[]? | select(.type == "output_text") | .text] | join("\n"))
+      else
+        empty
+      end;
+    [assistant_text, (.payload? | assistant_text)]
+    | map(select(. != null and . != ""))
+    | .[0] // empty
   ' 2>/dev/null)
   if [[ -n "$text" && "$text" != "null" ]]; then
-    echo -e "$text"
+    if [[ "$text" != "$CODEX_LAST_TEXT" ]]; then
+      echo -e "$text"
+      CODEX_LAST_TEXT="$text"
+    fi
   fi
 
   tool=$(echo "$line" | jq -r '
-    if .type == "response_item" and .payload.type == "function_call" then
-      (.payload.name // empty)
-    elif .type == "function_call" then
-      (.name // empty)
-    else
-      empty
-    end
+    def tool_name:
+      if .type == "response_item" and .payload.type == "function_call" then
+        (.payload.name // empty)
+      elif .type == "function_call" then
+        (.name // empty)
+      else
+        empty
+      end;
+    [tool_name, (.payload? | tool_name)]
+    | map(select(. != null and . != ""))
+    | .[0] // empty
   ' 2>/dev/null)
   if [[ -n "$tool" && "$tool" != "null" ]]; then
     echo "  ⚡ $tool"
   fi
 
   tool_result=$(echo "$line" | jq -r '
-    if (.type == "response_item" and .payload.type == "function_call_output") or .type == "function_call_output" then
-      "yes"
-    else
-      empty
-    end
+    def has_tool_result:
+      (.type == "response_item" and .payload.type == "function_call_output") or .type == "function_call_output";
+    if ([., .payload?] | any(has_tool_result)) then "yes" else empty end
   ' 2>/dev/null)
   if [[ "$tool_result" == "yes" ]]; then
     echo "  ✓ done"
@@ -181,6 +191,7 @@ run_agent_iteration() {
         render_claude_stream_line "$line"
       done | tee "$OUTPUT_FILE"
   else
+    CODEX_LAST_TEXT=""
     build_prompt_input | \
       codex exec --dangerously-bypass-approvals-and-sandbox --json - 2>&1 | \
       tee "$OUTPUT_JSON_FILE" | \
