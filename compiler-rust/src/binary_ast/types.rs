@@ -6,7 +6,8 @@
 use super::marshal::MarshalWriter;
 use super::serialize::Marshal;
 use crate::location::{Located, Location, Position};
-use crate::parse_arena::{self, LidentIdx, LocIdx, PosIdx, StrIdx};
+use crate::parse_arena::{self, CoreTypeIdx, ExprIdx, LidentIdx, LocIdx, ModExprIdx, ModTypeIdx, PatIdx, PosIdx, StrIdx};
+use crate::parser::ast::{CoreType, Expression, ModuleExpr, ModuleType, Pattern};
 use crate::parser::longident::Longident;
 
 // ========== Position (Lexing.position) ==========
@@ -115,6 +116,62 @@ impl<T: Marshal> Marshal for parse_arena::Located<T> {
         w.write_block_header(0, 2);
         self.txt.marshal(w);
         self.loc.marshal(w);
+    }
+}
+
+// ========== AST Node Index Types ==========
+//
+// These Marshal implementations look up the actual AST node from the arena
+// and delegate to the node's own Marshal implementation. We use a raw pointer
+// cast to avoid borrow conflicts between the arena reference (from get_arena())
+// and the mutable MarshalWriter reference (needed for marshal()).
+//
+// SAFETY: The arena is stored as a raw pointer in MarshalWriter and remains
+// valid for the entire marshalling process. The returned references point into
+// the arena's Vec storage which is not modified during marshalling.
+
+impl Marshal for ExprIdx {
+    fn marshal(&self, w: &mut MarshalWriter) {
+        let expr: &Expression = unsafe {
+            &*(w.get_arena().get_expr(*self) as *const Expression)
+        };
+        expr.marshal(w);
+    }
+}
+
+impl Marshal for PatIdx {
+    fn marshal(&self, w: &mut MarshalWriter) {
+        let pat: &Pattern = unsafe {
+            &*(w.get_arena().get_pat(*self) as *const Pattern)
+        };
+        pat.marshal(w);
+    }
+}
+
+impl Marshal for CoreTypeIdx {
+    fn marshal(&self, w: &mut MarshalWriter) {
+        let ct: &CoreType = unsafe {
+            &*(w.get_arena().get_core_type(*self) as *const CoreType)
+        };
+        ct.marshal(w);
+    }
+}
+
+impl Marshal for ModExprIdx {
+    fn marshal(&self, w: &mut MarshalWriter) {
+        let me: &ModuleExpr = unsafe {
+            &*(w.get_arena().get_mod_expr(*self) as *const ModuleExpr)
+        };
+        me.marshal(w);
+    }
+}
+
+impl Marshal for ModTypeIdx {
+    fn marshal(&self, w: &mut MarshalWriter) {
+        let mt: &ModuleType = unsafe {
+            &*(w.get_arena().get_mod_type(*self) as *const ModuleType)
+        };
+        mt.marshal(w);
     }
 }
 

@@ -52,7 +52,8 @@ fn is_pipe_application(expr: &Expression, w: &MarshalWriter) -> bool {
     {
         return false;
     }
-    let funct_loc = arena.get_location(funct.pexp_loc);
+    let funct_expr = arena.get_expr(*funct);
+    let funct_loc = arena.get_location(funct_expr.pexp_loc);
     let arg_loc = arena.get_location(args[0].1.pexp_loc);
     let funct_start = arena.get_position(funct_loc.loc_start).cnum;
     let arg_start = arena.get_position(arg_loc.loc_start).cnum;
@@ -60,7 +61,7 @@ fn is_pipe_application(expr: &Expression, w: &MarshalWriter) -> bool {
         return false;
     }
 
-    let ExpressionDesc::Pexp_ident(lid) = &*funct.pexp_desc else {
+    let ExpressionDesc::Pexp_ident(lid) = &*funct_expr.pexp_desc else {
         return false;
     };
     let name = match arena.get_longident(lid.txt) {
@@ -166,7 +167,8 @@ fn is_raw_expansion_expr(expr: &Expression, w: &MarshalWriter) -> bool {
         return false;
     }
 
-    let ExpressionDesc::Pexp_apply(inner) = &*body.pexp_desc else {
+    let body_expr = arena.get_expr(*body);
+    let ExpressionDesc::Pexp_apply(inner) = &*body_expr.pexp_desc else {
         return false;
     };
     let PexpApply { ref funct, ref args, .. } = **inner;
@@ -174,7 +176,8 @@ fn is_raw_expansion_expr(expr: &Expression, w: &MarshalWriter) -> bool {
         return false;
     }
 
-    let ExpressionDesc::Pexp_ident(lid) = &*funct.pexp_desc else {
+    let funct_expr = arena.get_expr(*funct);
+    let ExpressionDesc::Pexp_ident(lid) = &*funct_expr.pexp_desc else {
         return false;
     };
     match arena.get_longident(lid.txt) {
@@ -198,7 +201,8 @@ fn is_external_ext_expr(expr: &Expression, w: &MarshalWriter) -> bool {
     if outer_args.len() != 1 || !matches!(outer_args[0].0, ArgLabel::Nolabel) {
         return false;
     }
-    let ExpressionDesc::Pexp_ident(outer_lid) = &*outer_funct.pexp_desc else {
+    let outer_funct_expr = arena.get_expr(*outer_funct);
+    let ExpressionDesc::Pexp_ident(outer_lid) = &*outer_funct_expr.pexp_desc else {
         return false;
     };
     if outer_lid.txt != arena.ppx_js_undefined_to_option_lid() {
@@ -212,17 +216,20 @@ fn is_external_ext_expr(expr: &Expression, w: &MarshalWriter) -> bool {
     let Some(else_expr) = opt_else else {
         return false;
     };
-    if !is_external_raw_expansion_expr(else_expr, w) {
+    let else_expr_ref = arena.get_expr(*else_expr);
+    if !is_external_raw_expansion_expr(else_expr_ref, w) {
         return false;
     }
+    let then_expr_ref = arena.get_expr(*then_expr);
     if !matches!(
-        &*then_expr.pexp_desc,
+        &*then_expr_ref.pexp_desc,
         ExpressionDesc::Pexp_ident(then_lid) if then_lid.txt == arena.ppx_js_undefined_empty_lid()
     ) {
         return false;
     }
 
-    let ExpressionDesc::Pexp_apply(eq_inner) = &*cond.pexp_desc else {
+    let cond_expr = arena.get_expr(*cond);
+    let ExpressionDesc::Pexp_apply(eq_inner) = &*cond_expr.pexp_desc else {
         return false;
     };
     let PexpApply { funct: ref eq_funct, args: ref eq_args, .. } = **eq_inner;
@@ -232,8 +239,9 @@ fn is_external_ext_expr(expr: &Expression, w: &MarshalWriter) -> bool {
     {
         return false;
     }
+    let eq_funct_expr = arena.get_expr(*eq_funct);
     if !matches!(
-        &*eq_funct.pexp_desc,
+        &*eq_funct_expr.pexp_desc,
         ExpressionDesc::Pexp_ident(eq_lid)
             if matches!(arena.get_longident(eq_lid.txt), Longident::Lident(s) if *s == arena.ppx_eq_str())
     ) {
@@ -247,8 +255,9 @@ fn is_external_ext_expr(expr: &Expression, w: &MarshalWriter) -> bool {
     if typeof_args.len() != 1 || !matches!(typeof_args[0].0, ArgLabel::Nolabel) {
         return false;
     }
+    let typeof_funct_expr = arena.get_expr(*typeof_funct);
     if !matches!(
-        &*typeof_funct.pexp_desc,
+        &*typeof_funct_expr.pexp_desc,
         ExpressionDesc::Pexp_ident(typeof_lid) if typeof_lid.txt == arena.ppx_js_typeof_lid()
     ) {
         return false;
@@ -271,7 +280,8 @@ fn is_external_raw_expansion_expr(expr: &Expression, w: &MarshalWriter) -> bool 
         return false;
     };
     let (_, _, ref body) = **lm_inner;
-    let ExpressionDesc::Pexp_apply(apply_inner) = &*body.pexp_desc else {
+    let body_expr = w.get_arena().get_expr(*body);
+    let ExpressionDesc::Pexp_apply(apply_inner) = &*body_expr.pexp_desc else {
         return false;
     };
     let PexpApply { ref args, .. } = **apply_inner;
