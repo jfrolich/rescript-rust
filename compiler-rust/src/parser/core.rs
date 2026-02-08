@@ -4,7 +4,7 @@
 //! stream into an AST. It mirrors `res_core.ml` from the OCaml implementation.
 
 use crate::location::Position;
-use crate::parse_arena::{LocIdx, ParseArena, PosIdx, StrIdx};
+use crate::parse_arena::{CoreTypeIdx, ExprIdx, LocIdx, ModExprIdx, ModTypeIdx, ParseArena, PatIdx, PosIdx, StrIdx};
 use crate::parser::DiagnosticCategory;
 
 use std::borrow::Cow;
@@ -640,13 +640,15 @@ pub mod ast_helper {
 
     /// Create an apply expression.
     pub fn make_apply(
+        arena: &mut ParseArena,
         func: Expression,
         args: Vec<(ArgLabel, Expression)>,
         loc: Location,
     ) -> Expression {
+        let funct = arena.push_expr(func);
         make_expr(
             ExpressionDesc::Pexp_apply(Box::new(PexpApply {
-                funct: Box::new(func),
+                funct,
                 args,
                 partial: false,
                 transformed_jsx: false,
@@ -657,14 +659,16 @@ pub mod ast_helper {
 
     /// Create a partial apply expression.
     pub fn make_apply_partial(
+        arena: &mut ParseArena,
         func: Expression,
         args: Vec<(ArgLabel, Expression)>,
         loc: Location,
         partial: bool,
     ) -> Expression {
+        let funct = arena.push_expr(func);
         make_expr(
             ExpressionDesc::Pexp_apply(Box::new(PexpApply {
-                funct: Box::new(func),
+                funct,
                 args,
                 partial,
                 transformed_jsx: false,
@@ -675,13 +679,15 @@ pub mod ast_helper {
 
     /// Create a let expression.
     pub fn make_let(
+        arena: &mut ParseArena,
         rec_flag: RecFlag,
         bindings: Vec<ValueBinding>,
         body: Expression,
         loc: Location,
     ) -> Expression {
+        let body_idx = arena.push_expr(body);
         make_expr(
-            ExpressionDesc::Pexp_let(Box::new((rec_flag, bindings, Box::new(body)))),
+            ExpressionDesc::Pexp_let(Box::new((rec_flag, bindings, body_idx))),
             loc,
         )
     }
@@ -702,13 +708,14 @@ pub mod ast_helper {
     /// - lid_loc: Just the constructor name (e.g., `Some` at columns 28-32)
     /// - ppat_loc: Full pattern extent (e.g., `Some(y)` at columns 28-35)
     pub fn make_construct_pat(
+        arena: &mut ParseArena,
         lid_idx: crate::parse_arena::LidentIdx,
         arg: Option<Pattern>,
         lid_loc: Location,
         ppat_loc: Location,
     ) -> Pattern {
         make_pat(
-            PatternDesc::Ppat_construct(with_loc(lid_idx, lid_loc), arg.map(Box::new)),
+            PatternDesc::Ppat_construct(with_loc(lid_idx, lid_loc), arg.map(|p| arena.push_pat(p))),
             ppat_loc,
         )
     }
@@ -744,9 +751,10 @@ pub mod ast_helper {
             let tuple_loc = p.mk_loc_idx_full(start_idx, end_idx);
             let cons_loc = tuple_loc;
             let tuple = make_pat(PatternDesc::Ppat_tuple(Box::new(vec![item, result])), tuple_loc);
+            let tuple_idx = p.arena_mut().push_pat(tuple);
             let cons = with_loc(cons_idx, cons_loc);
             result = make_pat(
-                PatternDesc::Ppat_construct(cons, Some(Box::new(tuple))),
+                PatternDesc::Ppat_construct(cons, Some(tuple_idx)),
                 cons_loc,
             );
         }
@@ -839,7 +847,7 @@ pub fn make_unary_expr(
         let op_expr = ast_helper::make_ident(p, lid, token_loc);
         let operand_end_idx = p.loc_end_idx(operand.pexp_loc);
         let loc = p.mk_loc_idx(start_pos, operand_end_idx);
-        return ast_helper::make_apply(op_expr, vec![(ArgLabel::Nolabel, operand)], loc);
+        return ast_helper::make_apply(p.arena_mut(), op_expr, vec![(ArgLabel::Nolabel, operand)], loc);
     }
 
     if matches!(token, Token::Bang) {
@@ -849,7 +857,7 @@ pub fn make_unary_expr(
         let op_expr = ast_helper::make_ident_idx(op_lid_idx, token_loc);
         let operand_end_idx = p.loc_end_idx(operand.pexp_loc);
         let loc = p.mk_loc_idx(start_pos, operand_end_idx);
-        return ast_helper::make_apply(op_expr, vec![(ArgLabel::Nolabel, operand)], loc);
+        return ast_helper::make_apply(p.arena_mut(), op_expr, vec![(ArgLabel::Nolabel, operand)], loc);
     }
 
     let op_expr = if token_string.starts_with('~') {
@@ -871,7 +879,7 @@ pub fn make_unary_expr(
     let operand_end_idx = p.loc_end_idx(operand.pexp_loc);
     let loc = p.mk_loc_idx(start_pos, operand_end_idx);
 
-    ast_helper::make_apply(op_expr, vec![(ArgLabel::Nolabel, operand)], loc)
+    ast_helper::make_apply(p.arena_mut(), op_expr, vec![(ArgLabel::Nolabel, operand)], loc)
 }
 
 /// Create an infix operator expression.
