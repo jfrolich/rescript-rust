@@ -1071,7 +1071,7 @@ mod tests {
                     val_type: crate::types::TypeExprRef(0),
                     val_kind: ValueKind::ValReg,
                     val_loc: Location::none(),
-                    val_attributes: vec![],
+                    val_attributes: Attributes::new(),
                     val_path: None,
                 },
             ),

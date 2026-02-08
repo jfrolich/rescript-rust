@@ -48,7 +48,7 @@ pub mod recover {
         Expression {
             pexp_desc: Box::new(ExpressionDesc::Pexp_extension(Box::new((id, Payload::PStr(Box::new(vec![])))))),
             pexp_loc: LocIdx::none(),
-            pexp_attributes: vec![],
+            pexp_attributes: Attributes::new(),
         }
     }
 
@@ -59,7 +59,7 @@ pub mod recover {
         CoreType {
             ptyp_desc: Box::new(CoreTypeDesc::Ptyp_extension(Box::new((id, Payload::PStr(Box::new(vec![])))))),
             ptyp_loc: LocIdx::none(),
-            ptyp_attributes: vec![],
+            ptyp_attributes: Attributes::new(),
         }
     }
 
@@ -70,7 +70,7 @@ pub mod recover {
         Pattern {
             ppat_desc: Box::new(PatternDesc::Ppat_extension(Box::new((id, Payload::PStr(Box::new(vec![])))))),
             ppat_loc: LocIdx::none(),
-            ppat_attributes: vec![],
+            ppat_attributes: Attributes::new(),
         }
     }
 
@@ -79,7 +79,7 @@ pub mod recover {
         ModuleExpr {
             pmod_desc: Box::new(ModuleExprDesc::Pmod_structure(Box::new(vec![]))),
             pmod_loc: LocIdx::none(),
-            pmod_attributes: vec![],
+            pmod_attributes: Attributes::new(),
         }
     }
 
@@ -88,7 +88,7 @@ pub mod recover {
         ModuleType {
             pmty_desc: Box::new(ModuleTypeDesc::Pmty_signature(Box::new(vec![]))),
             pmty_loc: LocIdx::none(),
-            pmty_attributes: vec![],
+            pmty_attributes: Attributes::new(),
         }
     }
 
@@ -98,7 +98,7 @@ pub mod recover {
         let str_idx = arena.intern("rescript.sigitemhole");
         let id = mknoloc(str_idx);
         SignatureItem {
-            psig_desc: Box::new(SignatureItemDesc::Psig_extension(Box::new(((id, Payload::PStr(Box::new(vec![]))), vec![])))),
+            psig_desc: Box::new(SignatureItemDesc::Psig_extension(Box::new(((id, Payload::PStr(Box::new(vec![]))), Attributes::new())))),
             psig_loc: LocIdx::none(),
         }
     }
@@ -520,9 +520,9 @@ pub fn doc_comment_to_attribute(arena: &mut ParseArena, loc: Location, content: 
                     None,
                 )))),
                 pexp_loc: loc,
-                pexp_attributes: vec![],
+                pexp_attributes: Attributes::new(),
             },
-            vec![],
+            Attributes::new(),
         )))),
         pstr_loc: loc,
     }]));
@@ -588,7 +588,7 @@ pub mod ast_helper {
         Expression {
             pexp_desc: Box::new(desc),
             pexp_loc: loc,
-            pexp_attributes: vec![],
+            pexp_attributes: Attributes::new(),
         }
     }
 
@@ -597,7 +597,7 @@ pub mod ast_helper {
         Pattern {
             ppat_desc: Box::new(desc),
             ppat_loc: loc,
-            ppat_attributes: vec![],
+            ppat_attributes: Attributes::new(),
         }
     }
 
@@ -606,7 +606,7 @@ pub mod ast_helper {
         CoreType {
             ptyp_desc: Box::new(desc),
             ptyp_loc: loc,
-            ptyp_attributes: vec![],
+            ptyp_attributes: Attributes::new(),
         }
     }
 
@@ -692,7 +692,7 @@ pub mod ast_helper {
         Pattern {
             ppat_desc: Box::new(PatternDesc::Ppat_var(with_loc(str_idx, loc))),
             ppat_loc: loc,
-            ppat_attributes: vec![],
+            ppat_attributes: Attributes::new(),
         }
     }
 

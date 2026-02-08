@@ -1203,7 +1203,7 @@ mod tests {
         let ty = CoreType {
             ptyp_desc: CoreTypeDesc::Any,
             ptyp_loc: crate::location::Location::none(),
-            ptyp_attributes: vec![],
+            ptyp_attributes: Attributes::new(),
         };
         ty.marshal(&mut w);
 
@@ -1221,7 +1221,7 @@ mod tests {
         let pat = Pattern {
             ppat_desc: PatternDesc::Any,
             ppat_loc: crate::location::Location::none(),
-            ppat_attributes: vec![],
+            ppat_attributes: Attributes::new(),
         };
         pat.marshal(&mut w);
 
@@ -1245,7 +1245,7 @@ mod tests {
                 crate::location::Location::none(),
             )),
             pexp_loc: crate::location::Location::none(),
-            pexp_attributes: vec![],
+            pexp_attributes: Attributes::new(),
         };
         expr.marshal(&mut w);
 

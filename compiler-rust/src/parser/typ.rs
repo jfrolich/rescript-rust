@@ -198,7 +198,7 @@ pub fn parse_poly_type_expr(p: &mut Parser<'_>) -> CoreType {
             let typ = CoreType {
                 ptyp_desc: Box::new(CoreTypeDesc::Ptyp_var(Box::new(name))),
                 ptyp_loc: var_loc.clone(),
-                ptyp_attributes: vec![],
+                ptyp_attributes: Attributes::new(),
             };
             p.next(); // consume =>
             let return_type = parse_typ_expr_inner(p, true);
@@ -207,7 +207,7 @@ pub fn parse_poly_type_expr(p: &mut Parser<'_>) -> CoreType {
             let end_pos_idx = p.prev_end_pos_idx();
             let loc = p.mk_loc_idx(typ_start_idx, end_pos_idx);
             let arg = TypeArg {
-                attrs: vec![],
+                attrs: Attributes::new(),
                 lbl: ArgLabel::Nolabel,
                 typ,
             };
@@ -216,7 +216,7 @@ pub fn parse_poly_type_expr(p: &mut Parser<'_>) -> CoreType {
             return CoreType {
                 ptyp_desc: Box::new(CoreTypeDesc::Ptyp_arrow(Box::new((Box::new(arg), Box::new(return_type), p.static_arity_1())))),
                 ptyp_loc: loc,
-                ptyp_attributes: vec![],
+                ptyp_attributes: Attributes::new(),
             };
         }
     }
@@ -251,7 +251,7 @@ pub fn parse_locally_abstract_type(p: &mut Parser<'_>) -> CoreType {
     CoreType {
         ptyp_desc: Box::new(CoreTypeDesc::Ptyp_poly(Box::new((vars, Box::new(body))))),
         ptyp_loc: loc,
-        ptyp_attributes: vec![],
+        ptyp_attributes: Attributes::new(),
     }
 }
 
@@ -297,7 +297,7 @@ fn parse_type_alias(p: &mut Parser<'_>, typ: CoreType) -> CoreType {
         return CoreType {
             ptyp_desc: Box::new(CoreTypeDesc::Ptyp_alias(Box::new((Box::new(typ), var_name)))),
             ptyp_loc: loc,
-            ptyp_attributes: vec![],
+            ptyp_attributes: Attributes::new(),
         };
     }
 
@@ -368,7 +368,7 @@ fn parse_arrow_type_rest(
     let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
 
     let arg = TypeArg {
-        attrs: vec![],
+        attrs: Attributes::new(),
         lbl: ArgLabel::Nolabel,
         typ: param_type,
     };
@@ -378,7 +378,7 @@ fn parse_arrow_type_rest(
     CoreType {
         ptyp_desc: Box::new(CoreTypeDesc::Ptyp_arrow(Box::new((Box::new(arg), Box::new(return_type), p.static_arity_1())))),
         ptyp_loc: loc,
-        ptyp_attributes: vec![],
+        ptyp_attributes: Attributes::new(),
     }
 }
 
@@ -433,7 +433,7 @@ fn parse_es6_arrow_type(p: &mut Parser<'_>, attrs: Attributes) -> CoreType {
                 p.push_arity_unknown(),
             )))),
             ptyp_loc: loc,
-            ptyp_attributes: vec![],
+            ptyp_attributes: Attributes::new(),
         }
     } else {
         p.expect(Token::Lparen);
@@ -544,13 +544,13 @@ fn parse_atomic_typ_expr_with_start(
                 CoreType {
                     ptyp_desc: Box::new(CoreTypeDesc::Ptyp_poly(Box::new((vars, Box::new(body))))),
                     ptyp_loc: loc,
-                    ptyp_attributes: vec![],
+                    ptyp_attributes: Attributes::new(),
                 }
             } else if let Some(first) = vars.first() {
                 CoreType {
                     ptyp_desc: Box::new(CoreTypeDesc::Ptyp_var(Box::new(Cow::Owned(p.arena().get_string(first.txt).to_string())))),
                     ptyp_loc: first.loc.clone(), // Use the variable's location (excludes the ')
-                    ptyp_attributes: vec![],
+                    ptyp_attributes: Attributes::new(),
                 }
             } else {
                 p.err(DiagnosticCategory::Message(
@@ -566,7 +566,7 @@ fn parse_atomic_typ_expr_with_start(
             CoreType {
                 ptyp_desc: Box::new(CoreTypeDesc::Ptyp_any),
                 ptyp_loc: loc,
-                ptyp_attributes: vec![],
+                ptyp_attributes: Attributes::new(),
             }
         }
         // In OCaml, parse_value_path captures `let start_pos = p.Parser.start_pos` (line 714).
@@ -662,7 +662,7 @@ fn parse_atomic_typ_expr_with_start(
             CoreType {
                 ptyp_desc: Box::new(CoreTypeDesc::Ptyp_extension(Box::new(ext))),
                 ptyp_loc: loc,
-                ptyp_attributes: vec![],
+                ptyp_attributes: Attributes::new(),
             }
         }
         _ => {
@@ -1121,13 +1121,13 @@ fn parse_function_type(p: &mut Parser<'_>, start_pos_idx: PosIdx) -> CoreType {
                 } else {
                     typ.ptyp_loc
                 };
-                typ.ptyp_attributes = [param_attrs, typ.ptyp_attributes].concat();
+                typ.ptyp_attributes = param_attrs.concat(typ.ptyp_attributes);
             } else {
                 // For other types (or ghost locations), attrs are prepended but location unchanged
-                typ.ptyp_attributes = [param_attrs, typ.ptyp_attributes].concat();
+                typ.ptyp_attributes = param_attrs.concat(typ.ptyp_attributes);
             }
             // For unlabeled args, attributes go on type, not on arrow
-            vec![]
+            Attributes::new()
         } else {
             param_attrs
         };
@@ -1172,7 +1172,7 @@ fn parse_function_type(p: &mut Parser<'_>, start_pos_idx: PosIdx) -> CoreType {
         let lid_loc = p.mk_loc_idx(start_pos_idx, rparen_end_idx);
         let lid_idx = p.push_lident_static("unit");
         params.push((TypeArg {
-            attrs: vec![],
+            attrs: Attributes::new(),
             lbl: ArgLabel::Nolabel,
             typ: ast_helper::make_type_constr(lid_idx, vec![], lid_loc, LocIdx::none()),
         }, start_pos_idx));
@@ -1214,7 +1214,7 @@ fn parse_function_type(p: &mut Parser<'_>, start_pos_idx: PosIdx) -> CoreType {
                 unknown_arity,
             )))),
             ptyp_loc: arrow_loc,
-            ptyp_attributes: vec![],
+            ptyp_attributes: Attributes::new(),
         };
         acc = arrow;
     }
@@ -1262,7 +1262,7 @@ fn parse_lident(p: &mut Parser<'_>) -> (String, Location) {
 
 /// Parse attributes (including doc comments which become res.doc attributes).
 fn parse_attributes(p: &mut Parser<'_>) -> Attributes {
-    let mut attrs = vec![];
+    let mut attrs = Attributes::new();
     loop {
         match &p.token {
             Token::At => {
@@ -1291,7 +1291,7 @@ fn parse_field_attributes(p: &mut Parser<'_>) -> Attributes {
 /// Parse only @-style attributes (NOT doc comments).
 /// Used when doc comments need to be handled separately for location purposes.
 fn parse_regular_attributes(p: &mut Parser<'_>) -> Attributes {
-    let mut attrs = vec![];
+    let mut attrs = Attributes::new();
     while p.token == Token::At {
         if let Some(attr) = parse_attribute(p) {
             attrs.push(attr);
@@ -1349,10 +1349,10 @@ fn parse_attribute_payload(p: &mut Parser<'_>) -> Payload {
             let expr = Expression {
                 pexp_desc: Box::new(ExpressionDesc::Pexp_constant(Box::new(Constant::String(value, tag)))),
                 pexp_loc,
-                pexp_attributes: vec![],
+                pexp_attributes: Attributes::new(),
             };
             let item = StructureItem {
-                pstr_desc: Box::new(StructureItemDesc::Pstr_eval(Box::new((expr, vec![])))),
+                pstr_desc: Box::new(StructureItemDesc::Pstr_eval(Box::new((expr, Attributes::new())))),
                 pstr_loc,
             };
             Payload::PStr(Box::new(vec![item]))
@@ -1369,7 +1369,7 @@ fn parse_attribute_payload(p: &mut Parser<'_>) -> Payload {
             // OCaml structure_item location spans from before expression to after
             let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
             let item = StructureItem {
-                pstr_desc: Box::new(StructureItemDesc::Pstr_eval(Box::new((expr, vec![])))),
+                pstr_desc: Box::new(StructureItemDesc::Pstr_eval(Box::new((expr, Attributes::new())))),
                 pstr_loc: loc,
             };
             Payload::PStr(Box::new(vec![item]))
@@ -1417,7 +1417,7 @@ fn parse_tuple_type(
     CoreType {
         ptyp_desc: Box::new(CoreTypeDesc::Ptyp_tuple(Box::new(types))),
         ptyp_loc: loc,
-        ptyp_attributes: vec![],
+        ptyp_attributes: Attributes::new(),
     }
 }
 
@@ -1472,7 +1472,7 @@ fn parse_record_or_object_type(p: &mut Parser<'_>) -> CoreType {
         CoreType {
             ptyp_desc: Box::new(CoreTypeDesc::Ptyp_constr(Box::new((with_loc(lid_idx, loc.clone()), type_args)))),
             ptyp_loc: loc,
-            ptyp_attributes: vec![],
+            ptyp_attributes: Attributes::new(),
         }
     } else {
         // Check for inline record syntax in wrong position: { name: ... } where object type expected
@@ -1489,7 +1489,7 @@ fn parse_record_or_object_type(p: &mut Parser<'_>) -> CoreType {
         let typ = CoreType {
             ptyp_desc: Box::new(CoreTypeDesc::Ptyp_object(Box::new((fields, closed)))),
             ptyp_loc: loc,
-            ptyp_attributes: vec![],
+            ptyp_attributes: Attributes::new(),
         };
         // Handle type alias: {...} as 'name
         let typ = parse_type_alias(p, typ);
@@ -1522,7 +1522,7 @@ pub fn parse_object_type_body(p: &mut Parser<'_>, start_pos_idx: PosIdx) -> Core
     let typ = CoreType {
         ptyp_desc: Box::new(CoreTypeDesc::Ptyp_object(Box::new((fields, closed)))),
         ptyp_loc: loc,
-        ptyp_attributes: vec![],
+        ptyp_attributes: Attributes::new(),
     };
     // Handle type alias: {...} as 'name
     let typ = parse_type_alias(p, typ);
@@ -1636,7 +1636,7 @@ fn parse_polymorphic_variant_type_args(p: &mut Parser<'_>) -> CoreType {
                 CoreType {
                     ptyp_desc: Box::new(CoreTypeDesc::Ptyp_tuple(Box::new(args))),
                     ptyp_loc: loc,
-                    ptyp_attributes: vec![],
+                    ptyp_attributes: Attributes::new(),
                 }
             }
         }
@@ -1646,7 +1646,7 @@ fn parse_polymorphic_variant_type_args(p: &mut Parser<'_>) -> CoreType {
         _ => CoreType {
             ptyp_desc: Box::new(CoreTypeDesc::Ptyp_tuple(Box::new(args))),
             ptyp_loc: loc,
-            ptyp_attributes: vec![],
+            ptyp_attributes: Attributes::new(),
         },
     }
 }
@@ -1709,7 +1709,7 @@ fn parse_poly_variant_type(p: &mut Parser<'_>) -> CoreType {
     CoreType {
         ptyp_desc: Box::new(CoreTypeDesc::Ptyp_variant(Box::new((fields, closed, low_tags)))),
         ptyp_loc: loc,
-        ptyp_attributes: vec![],
+        ptyp_attributes: Attributes::new(),
     }
 }
 
@@ -1773,7 +1773,7 @@ fn parse_poly_variant_type_simple(p: &mut Parser<'_>) -> CoreType {
 
     let fields = vec![RowField::Rtag(
         with_loc(tag, tag_loc),
-        vec![],
+        Attributes::new(),
         args.is_empty(),
         args,
     )];
@@ -1781,7 +1781,7 @@ fn parse_poly_variant_type_simple(p: &mut Parser<'_>) -> CoreType {
     CoreType {
         ptyp_desc: Box::new(CoreTypeDesc::Ptyp_variant(Box::new((fields, ClosedFlag::Closed, None)))),
         ptyp_loc: loc,
-        ptyp_attributes: vec![],
+        ptyp_attributes: Attributes::new(),
     }
 }
 
@@ -1810,22 +1810,21 @@ fn parse_row_fields_no_marker(p: &mut Parser<'_>) -> Vec<RowField> {
     // Handle optional leading `|` with possible doc comment (e.g., [| #A] or [/** doc */ | #A])
     if is_bar_or_doc_comment_then_bar(p) {
         // Consume doc comment if present (it belongs to the tag after |)
-        let doc_attrs = if let Token::DocComment { loc, content } = &p.token {
+        let doc_attrs: Attributes = if let Token::DocComment { loc, content } = &p.token {
             let loc = loc.clone();
             let content = content.clone();
             p.next();
             let loc = p.from_location(&loc);
-            vec![super::core::doc_comment_to_attribute(p.arena_mut(), loc, content)]
+            Attributes::from_vec(vec![super::core::doc_comment_to_attribute(p.arena_mut(), loc, content)])
         } else {
-            vec![]
+            Attributes::new()
         };
         // Now consume the |
         p.expect(Token::Bar);
         // Parse the first tag spec with doc attrs
         // OCaml's parse_tag_spec: if token is Hash, parse poly variant; otherwise parse_typ_expr.
         // parse_typ_expr will produce a typehole via error recovery for unknown tokens like backtick.
-        let mut attrs = doc_attrs;
-        attrs.extend(parse_type_attributes(p));
+        let attrs = doc_attrs.concat(parse_type_attributes(p));
         if let Some(field) = parse_single_row_field_with_attrs(p, attrs.clone()) {
             fields.push(field);
         } else {
@@ -1839,18 +1838,17 @@ fn parse_row_fields_no_marker(p: &mut Parser<'_>) -> Vec<RowField> {
                 break;
             }
             // Consume doc comment if present
-            let doc_attrs = if let Token::DocComment { loc, content } = &p.token {
+            let doc_attrs: Attributes = if let Token::DocComment { loc, content } = &p.token {
                 let loc = loc.clone();
                 let content = content.clone();
                 p.next();
                 let loc = p.from_location(&loc);
-                vec![super::core::doc_comment_to_attribute(p.arena_mut(), loc, content)]
+                Attributes::from_vec(vec![super::core::doc_comment_to_attribute(p.arena_mut(), loc, content)])
             } else {
-                vec![]
+                Attributes::new()
             };
             p.optional(&Token::Bar);
-            let mut attrs = doc_attrs;
-            attrs.extend(parse_type_attributes(p));
+            let attrs = doc_attrs.concat(parse_type_attributes(p));
             if let Some(field) = parse_single_row_field_with_attrs(p, attrs) {
                 fields.push(field);
             }
@@ -1906,20 +1904,19 @@ fn parse_row_fields_with_required_first(p: &mut Parser<'_>) -> Vec<RowField> {
     // OCaml's parse_tag_spec_first handles this: (Bar | DocComment _) when is_bar_or_doc_comment_then_bar p
     if is_bar_or_doc_comment_then_bar(p) {
         // Consume doc comment if present (it belongs to the tag after |)
-        let doc_attrs = if let Token::DocComment { loc, content } = &p.token {
+        let doc_attrs: Attributes = if let Token::DocComment { loc, content } = &p.token {
             let loc = loc.clone();
             let content = content.clone();
             p.next();
             let loc = p.from_location(&loc);
-            vec![super::core::doc_comment_to_attribute(p.arena_mut(), loc, content)]
+            Attributes::from_vec(vec![super::core::doc_comment_to_attribute(p.arena_mut(), loc, content)])
         } else {
-            vec![]
+            Attributes::new()
         };
         // Now consume the |
         p.expect(Token::Bar);
         // Parse the first tag spec with doc attrs
-        let mut attrs = doc_attrs;
-        attrs.extend(parse_type_attributes(p));
+        let attrs = doc_attrs.concat(parse_type_attributes(p));
         if let Some(field) = parse_single_row_field_with_attrs(p, attrs) {
             fields.push(field);
         }
@@ -1929,18 +1926,17 @@ fn parse_row_fields_with_required_first(p: &mut Parser<'_>) -> Vec<RowField> {
                 break;
             }
             // Consume doc comment if present
-            let doc_attrs = if let Token::DocComment { loc, content } = &p.token {
+            let doc_attrs: Attributes = if let Token::DocComment { loc, content } = &p.token {
                 let loc = loc.clone();
                 let content = content.clone();
                 p.next();
                 let loc = p.from_location(&loc);
-                vec![super::core::doc_comment_to_attribute(p.arena_mut(), loc, content)]
+                Attributes::from_vec(vec![super::core::doc_comment_to_attribute(p.arena_mut(), loc, content)])
             } else {
-                vec![]
+                Attributes::new()
             };
             p.optional(&Token::Bar);
-            let mut attrs = doc_attrs;
-            attrs.extend(parse_type_attributes(p));
+            let attrs = doc_attrs.concat(parse_type_attributes(p));
             if let Some(field) = parse_single_row_field_with_attrs(p, attrs) {
                 fields.push(field);
             }
@@ -2068,7 +2064,7 @@ fn parse_single_row_field_with_attrs(p: &mut Parser<'_>, attrs: Attributes) -> O
             Some(CoreType {
                 ptyp_desc: Box::new(CoreTypeDesc::Ptyp_tuple(Box::new(args))),
                 ptyp_loc: loc,
-                ptyp_attributes: vec![],
+                ptyp_attributes: Attributes::new(),
             })
         } else if args.len() == 1 {
             Some(args.into_iter().next().unwrap())
@@ -2201,7 +2197,7 @@ fn parse_row_fields(p: &mut Parser<'_>) -> Vec<RowField> {
                 Some(CoreType {
                     ptyp_desc: Box::new(CoreTypeDesc::Ptyp_tuple(Box::new(args))),
                     ptyp_loc: loc,
-                    ptyp_attributes: vec![],
+                    ptyp_attributes: Attributes::new(),
                 })
             } else if args.len() == 1 {
                 Some(args.into_iter().next().unwrap())
@@ -2273,7 +2269,7 @@ pub fn parse_package_type(p: &mut Parser<'_>) -> CoreType {
     CoreType {
         ptyp_desc: Box::new(CoreTypeDesc::Ptyp_package(Box::new((lid, constraints)))),
         ptyp_loc: loc,
-        ptyp_attributes: vec![],
+        ptyp_attributes: Attributes::new(),
     }
 }
 
@@ -2300,7 +2296,7 @@ fn parse_package_type_with_parens(
     CoreType {
         ptyp_desc: Box::new(CoreTypeDesc::Ptyp_package(Box::new((lid, constraints)))),
         ptyp_loc: loc,
-        ptyp_attributes: vec![],
+        ptyp_attributes: Attributes::new(),
     }
 }
 

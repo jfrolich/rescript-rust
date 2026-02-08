@@ -199,7 +199,215 @@ pub enum Constant {
 pub type Attribute = (StringLoc, Payload);
 
 /// A list of attributes.
-pub type Attributes = Vec<Attribute>;
+///
+/// Uses `Option<Box<Vec<Attribute>>>` internally (8 bytes) instead of `Vec<Attribute>`
+/// (24 bytes) since ~95% of AST nodes have empty attributes. This saves 16 bytes
+/// per Expression, Pattern, CoreType, and many other nodes (40→24 bytes each).
+///
+/// The empty case is represented as `None` (no heap allocation at all).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Attributes(
+    #[serde(
+        serialize_with = "serialize_attributes",
+        deserialize_with = "deserialize_attributes"
+    )]
+    pub(crate) Option<Box<Vec<Attribute>>>,
+);
+
+fn serialize_attributes<S: serde::Serializer>(
+    attrs: &Option<Box<Vec<Attribute>>>,
+    s: S,
+) -> Result<S::Ok, S::Error> {
+    match attrs {
+        None => Vec::<Attribute>::new().serialize(s),
+        Some(v) => v.serialize(s),
+    }
+}
+
+fn deserialize_attributes<'de, D: serde::Deserializer<'de>>(
+    d: D,
+) -> Result<Option<Box<Vec<Attribute>>>, D::Error> {
+    let v = Vec::<Attribute>::deserialize(d)?;
+    if v.is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(Box::new(v)))
+    }
+}
+
+impl Attributes {
+    /// Create an empty attributes list (no heap allocation).
+    #[inline(always)]
+    pub fn new() -> Self {
+        Self(None)
+    }
+
+    /// Create attributes from a Vec. If the vec is empty, stores None.
+    #[inline]
+    pub fn from_vec(v: Vec<Attribute>) -> Self {
+        if v.is_empty() {
+            Self(None)
+        } else {
+            Self(Some(Box::new(v)))
+        }
+    }
+
+    /// Check if this attributes list is empty.
+    #[inline(always)]
+    pub fn is_empty(&self) -> bool {
+        self.0.is_none()
+    }
+
+    /// Get the number of attributes.
+    #[inline]
+    pub fn len(&self) -> usize {
+        match &self.0 {
+            None => 0,
+            Some(v) => v.len(),
+        }
+    }
+
+    /// Get a slice of the attributes.
+    #[inline]
+    pub fn as_slice(&self) -> &[Attribute] {
+        match &self.0 {
+            None => &[],
+            Some(v) => v.as_slice(),
+        }
+    }
+
+    /// Get an iterator over the attributes.
+    #[inline]
+    pub fn iter(&self) -> std::slice::Iter<'_, Attribute> {
+        self.as_slice().iter()
+    }
+
+    /// Push an attribute, allocating the inner Vec if needed.
+    #[inline]
+    pub fn push(&mut self, attr: Attribute) {
+        match &mut self.0 {
+            None => {
+                self.0 = Some(Box::new(vec![attr]));
+            }
+            Some(v) => v.push(attr),
+        }
+    }
+
+    /// Insert an attribute at the given position.
+    #[inline]
+    pub fn insert(&mut self, index: usize, attr: Attribute) {
+        match &mut self.0 {
+            None => {
+                assert_eq!(index, 0);
+                self.0 = Some(Box::new(vec![attr]));
+            }
+            Some(v) => v.insert(index, attr),
+        }
+    }
+
+    /// Extend with attributes from an iterator.
+    pub fn extend<I: IntoIterator<Item = Attribute>>(&mut self, iter: I) {
+        let mut iter = iter.into_iter();
+        if let Some(first) = iter.next() {
+            match &mut self.0 {
+                None => {
+                    let mut v = vec![first];
+                    v.extend(iter);
+                    self.0 = Some(Box::new(v));
+                }
+                Some(v) => {
+                    v.push(first);
+                    v.extend(iter);
+                }
+            }
+        }
+    }
+
+    /// Concatenate this attributes list with another, returning a new one.
+    /// `self` attrs come first, `other` attrs come after.
+    pub fn concat(self, other: Attributes) -> Attributes {
+        match (self.0, other.0) {
+            (None, None) => Attributes(None),
+            (Some(v), None) => Attributes(Some(v)),
+            (None, Some(v)) => Attributes(Some(v)),
+            (Some(mut a), Some(b)) => {
+                a.extend(b.into_iter());
+                Attributes(Some(a))
+            }
+        }
+    }
+
+    /// Get the inner Vec mutably, allocating if needed.
+    pub fn as_mut_vec(&mut self) -> &mut Vec<Attribute> {
+        if self.0.is_none() {
+            self.0 = Some(Box::new(Vec::new()));
+        }
+        self.0.as_mut().unwrap()
+    }
+
+    /// Convert to a Vec, consuming self.
+    pub fn into_vec(self) -> Vec<Attribute> {
+        match self.0 {
+            None => Vec::new(),
+            Some(v) => *v,
+        }
+    }
+}
+
+impl Default for Attributes {
+    #[inline(always)]
+    fn default() -> Self {
+        Self(None)
+    }
+}
+
+impl std::ops::Deref for Attributes {
+    type Target = [Attribute];
+    #[inline]
+    fn deref(&self) -> &[Attribute] {
+        self.as_slice()
+    }
+}
+
+impl From<Vec<Attribute>> for Attributes {
+    #[inline]
+    fn from(v: Vec<Attribute>) -> Self {
+        Self::from_vec(v)
+    }
+}
+
+impl std::iter::FromIterator<Attribute> for Attributes {
+    fn from_iter<I: IntoIterator<Item = Attribute>>(iter: I) -> Self {
+        Self::from_vec(iter.into_iter().collect())
+    }
+}
+
+impl<'a> IntoIterator for &'a Attributes {
+    type Item = &'a Attribute;
+    type IntoIter = std::slice::Iter<'a, Attribute>;
+    fn into_iter(self) -> Self::IntoIter {
+        self.iter()
+    }
+}
+
+impl<'a> IntoIterator for &'a mut Attributes {
+    type Item = &'a mut Attribute;
+    type IntoIter = std::slice::IterMut<'a, Attribute>;
+    fn into_iter(self) -> Self::IntoIter {
+        match &mut self.0 {
+            None => [].iter_mut(),
+            Some(v) => v.iter_mut(),
+        }
+    }
+}
+
+impl IntoIterator for Attributes {
+    type Item = Attribute;
+    type IntoIter = std::vec::IntoIter<Attribute>;
+    fn into_iter(self) -> Self::IntoIter {
+        self.into_vec().into_iter()
+    }
+}
 
 /// An extension point: `[%id payload]`.
 pub type Extension = (StringLoc, Payload);
