@@ -951,6 +951,7 @@ syntax_tests/data/parsing/grammar/typedefinition/constructorDeclaration.res
 syntax_tests/data/parsing/grammar/typedefinition/diamond.res
 syntax_tests/data/parsing/grammar/typedefinition/missingPipeBeforeConstructorAttribute.res
 syntax_tests/data/parsing/grammar/typedefinition/polyvariant.res
+syntax_tests/data/parsing/grammar/typedefinition/privateTypeEquation.res
 syntax_tests/data/parsing/grammar/typedefinition/recordDeclaration.res
 syntax_tests/data/parsing/grammar/typedefinition/typeConstraint.res
 syntax_tests/data/parsing/grammar/typedefinition/typeDefinition.res
@@ -960,9 +961,11 @@ syntax_tests/data/parsing/grammar/typedefinition/typeRepresentation.res
 syntax_tests/data/parsing/grammar/typedefinition/typedef.res
 syntax_tests/data/parsing/grammar/typedefinition/typeparams.res
 syntax_tests/data/parsing/grammar/typedefinition/typext.res
+syntax_tests/data/parsing/grammar/typexpr/alias.res
 syntax_tests/data/parsing/grammar/typexpr/any.res
 syntax_tests/data/parsing/grammar/typexpr/bsObject.res
 syntax_tests/data/parsing/grammar/typexpr/es6Arrow.res
+syntax_tests/data/parsing/grammar/typexpr/extension.res
 syntax_tests/data/parsing/grammar/typexpr/firstClassModules.res
 syntax_tests/data/parsing/grammar/typexpr/objectTypeSpreading.res
 syntax_tests/data/parsing/grammar/typexpr/parenthesized.res
@@ -998,6 +1001,7 @@ syntax_tests/data/ppx/react/externalWithRef.res
 syntax_tests/data/ppx/react/externalWithTypeVariables.res
 syntax_tests/data/ppx/react/fileLevelConfig.res
 syntax_tests/data/ppx/react/firstClassModules.resi
+syntax_tests/data/ppx/react/forwardRef.res
 syntax_tests/data/ppx/react/forwardRef.resi
 syntax_tests/data/ppx/react/fragment.res
 syntax_tests/data/ppx/react/interface.res
@@ -1006,12 +1010,14 @@ syntax_tests/data/ppx/react/interfaceWithRef.res
 syntax_tests/data/ppx/react/interfaceWithRef.resi
 syntax_tests/data/ppx/react/mangleKeyword.res
 syntax_tests/data/ppx/react/nested.res
+syntax_tests/data/ppx/react/newtype.res
 syntax_tests/data/ppx/react/noPropsWithKey.res
 syntax_tests/data/ppx/react/optimizeAutomaticMode.res
 syntax_tests/data/ppx/react/optionalKeyType.res
 syntax_tests/data/ppx/react/returnConstraint.res
 syntax_tests/data/ppx/react/sharedProps.res
 syntax_tests/data/ppx/react/sharedProps.resi
+syntax_tests/data/ppx/react/sharedPropsWithProps.res
 syntax_tests/data/ppx/react/spreadProps.res
 syntax_tests/data/ppx/react/topLevel.res
 syntax_tests/data/ppx/react/typeConstraint.res
@@ -1045,6 +1051,7 @@ syntax_tests/data/printer/comments/structure4.res
 syntax_tests/data/printer/comments/structureItem.res
 syntax_tests/data/printer/comments/trailingComments.res
 syntax_tests/data/printer/comments/typeDefinition.res
+syntax_tests/data/printer/comments/typexpr.res
 syntax_tests/data/printer/comments/valueBindingSugar.res
 syntax_tests/data/printer/comments/valueBindings.res
 syntax_tests/data/printer/comments/whitespaceCase1.res

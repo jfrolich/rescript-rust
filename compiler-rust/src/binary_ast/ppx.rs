@@ -3826,7 +3826,8 @@ fn rewrite_payload(payload: &Payload, arena: &mut ParseArena) -> Payload {
 fn rewrite_core_type(typ: &CoreType, arena: &mut ParseArena) -> CoreType {
     let new_desc = match &*typ.ptyp_desc {
         CoreTypeDesc::Ptyp_extension(ext) => {
-            CoreTypeDesc::Ptyp_extension(ext.clone())
+            let (name, payload) = &**ext;
+            CoreTypeDesc::Ptyp_extension(Box::new((name.clone(), rewrite_payload(payload, arena))))
         }
         CoreTypeDesc::Ptyp_arrow(inner) => {
             let (ref arg, ref ret, ref arity) = **inner;

@@ -7,6 +7,7 @@
 **Goal:** Maximize Rust parser speed across all file sizes while preserving byte-for-byte binary AST parity.
 
 **Parity constraint:** Every change must pass `./scripts/test_parser_ast_parity.sh` with zero regressions.
+After parser/PPX optimization work, rerun `./scripts/test_parser_ast_parity.sh` explicitly as a required post-optimization gate (optimizations can silently change traversal and rewrite behavior).
 
 ---
 
