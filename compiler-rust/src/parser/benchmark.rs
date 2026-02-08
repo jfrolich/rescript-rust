@@ -68,7 +68,6 @@ mod tests {
         "recovery",
         "infiniteLoops",
         ".git",
-        "node_modules",
         "target",
         "_build",
         ".next",
