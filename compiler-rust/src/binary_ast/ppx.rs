@@ -3305,15 +3305,17 @@ fn spelunk_expression_for_await_module_types(
                 }
             }
 
-            // Continue spelunking into body
-            results.extend(spelunk_expression_for_await_module_types(body, context, arena));
+            // Continue spelunking into body (body is ExprIdx)
+            let body_expr = arena.get_expr(*body).clone();
+            results.extend(spelunk_expression_for_await_module_types(&body_expr, context, arena));
             results
         }
 
         // Recursively traverse other expression forms (matching OCaml's aux function)
         ExpressionDesc::Pexp_let(inner) => {
                     let (_, ref bindings, ref body) = **inner;
-            let mut results = spelunk_expression_for_await_module_types(body, context, arena);
+            let body_expr = arena.get_expr(*body).clone();
+            let mut results = spelunk_expression_for_await_module_types(&body_expr, context, arena);
             for vb in bindings {
                 results.extend(spelunk_expression_for_await_module_types(&vb.pvb_expr, context, arena));
             }
@@ -3321,36 +3323,43 @@ fn spelunk_expression_for_await_module_types(
         }
 
         ExpressionDesc::Pexp_ifthenelse(inner) => {
-                    let (_, ref then_expr, ref else_expr) = **inner;
-            let mut results = spelunk_expression_for_await_module_types(then_expr, context, arena);
-            if let Some(else_e) = else_expr {
-                results.extend(spelunk_expression_for_await_module_types(else_e, context, arena));
+                    let (_, ref then_idx, ref else_idx) = **inner;
+            let then_expr = arena.get_expr(*then_idx).clone();
+            let mut results = spelunk_expression_for_await_module_types(&then_expr, context, arena);
+            if let Some(else_e_idx) = else_idx {
+                let else_expr = arena.get_expr(*else_e_idx).clone();
+                results.extend(spelunk_expression_for_await_module_types(&else_expr, context, arena));
             }
             results
         }
 
-        ExpressionDesc::Pexp_construct(_, Some(e)) => {
-            spelunk_expression_for_await_module_types(e, context, arena)
+        ExpressionDesc::Pexp_construct(_, Some(e_idx)) => {
+            let e_expr = arena.get_expr(*e_idx).clone();
+            spelunk_expression_for_await_module_types(&e_expr, context, arena)
         }
 
         ExpressionDesc::Pexp_fun(inner) => {
                     let PexpFun { rhs: ref body, .. } = **inner;
-            spelunk_expression_for_await_module_types(body, context, arena)
+            let body_expr = arena.get_expr(*body).clone();
+            spelunk_expression_for_await_module_types(&body_expr, context, arena)
         }
 
         ExpressionDesc::Pexp_newtype(inner) => {
                     let (_, ref body) = **inner;
-            spelunk_expression_for_await_module_types(body, context, arena)
+            let body_expr = arena.get_expr(*body).clone();
+            spelunk_expression_for_await_module_types(&body_expr, context, arena)
         }
 
         ExpressionDesc::Pexp_constraint(inner) => {
-                    let (ref e, _) = **inner;
-            spelunk_expression_for_await_module_types(e, context, arena)
+                    let (ref e_idx, _) = **inner;
+            let e_expr = arena.get_expr(*e_idx).clone();
+            spelunk_expression_for_await_module_types(&e_expr, context, arena)
         }
 
         ExpressionDesc::Pexp_match(inner) => {
-                    let (ref scrut, ref cases) = **inner;
-            let mut results = spelunk_expression_for_await_module_types(scrut, context, arena);
+                    let (ref scrut_idx, ref cases) = **inner;
+            let scrut_expr = arena.get_expr(*scrut_idx).clone();
+            let mut results = spelunk_expression_for_await_module_types(&scrut_expr, context, arena);
             for case in cases {
                 results.extend(spelunk_expression_for_await_module_types(&case.pc_rhs, context, arena));
             }
@@ -3768,10 +3777,14 @@ fn rewrite_payload(payload: &Payload, arena: &mut ParseArena) -> Payload {
         Payload::PSig(items) => {
             Payload::PSig(Box::new(rewrite_signature_items(items, arena)))
         }
-        Payload::PTyp(typ) => Payload::PTyp(typ.clone()),
+        Payload::PTyp(typ) => Payload::PTyp(*typ),
         Payload::PPat(inner) => {
-                    let (ref pat, ref guard) = **inner;
-            Payload::PPat(Box::new((arena.push_pat(rewrite_pattern(arena.get_pat(*pat), arena)), guard.as_ref().map(|e| arena.push_expr(rewrite_expression(arena.get_expr(*e), arena))))))
+                    let (ref pat_idx, ref guard) = **inner;
+            let pat = arena.get_pat(*pat_idx).clone();
+            let guard_expr = guard.map(|e| arena.get_expr(e).clone());
+            let rewritten_pat = arena.push_pat(rewrite_pattern(&pat, arena));
+            let rewritten_guard = guard_expr.as_ref().map(|e| arena.push_expr(rewrite_expression(e, arena)));
+            Payload::PPat(Box::new((rewritten_pat, rewritten_guard)))
         }
     }
 }
@@ -3788,11 +3801,12 @@ fn rewrite_core_type(typ: &CoreType, arena: &mut ParseArena) -> CoreType {
                     let (ref arg, ref ret, ref arity) = **inner;
             // Note: OCaml's default_mapper.typ for Ptyp_arrow does NOT process arg.attrs
             // through self.attributes - it only maps arg.typ. So we clone arg.attrs as-is.
+            let ret_ct = arena.get_core_type(*ret).clone();
             CoreTypeDesc::Ptyp_arrow(Box::new((Box::new(TypeArg {
                     attrs: arg.attrs.clone(),
                     lbl: arg.lbl.clone(),
                     typ: rewrite_core_type(&arg.typ, arena),
-                }), arena.push_core_type(rewrite_core_type(arena.get_core_type(*ret), arena)), *arity)))
+                }), arena.push_core_type(rewrite_core_type(&ret_ct, arena)), *arity)))
         }
         CoreTypeDesc::Ptyp_tuple(types) => {
             CoreTypeDesc::Ptyp_tuple(Box::new(types.iter().map(|t| rewrite_core_type(t, arena)).collect()))
@@ -3802,12 +3816,14 @@ fn rewrite_core_type(typ: &CoreType, arena: &mut ParseArena) -> CoreType {
             CoreTypeDesc::Ptyp_constr(Box::new((lid.clone(), args.iter().map(|t| rewrite_core_type(t, arena)).collect())))
         }
         CoreTypeDesc::Ptyp_alias(alias_inner) => {
-                    let (ref ct, ref name) = **alias_inner;
-            CoreTypeDesc::Ptyp_alias(Box::new((arena.push_core_type(rewrite_core_type(arena.get_core_type(*ct), arena)), name.clone())))
+                    let (ref ct_idx, ref name) = **alias_inner;
+            let ct = arena.get_core_type(*ct_idx).clone();
+            CoreTypeDesc::Ptyp_alias(Box::new((arena.push_core_type(rewrite_core_type(&ct, arena)), name.clone())))
         }
         CoreTypeDesc::Ptyp_poly(poly_inner) => {
-                    let (ref vars, ref ct) = **poly_inner;
-            CoreTypeDesc::Ptyp_poly(Box::new((vars.clone(), arena.push_core_type(rewrite_core_type(arena.get_core_type(*ct), arena)))))
+                    let (ref vars, ref ct_idx) = **poly_inner;
+            let ct = arena.get_core_type(*ct_idx).clone();
+            CoreTypeDesc::Ptyp_poly(Box::new((vars.clone(), arena.push_core_type(rewrite_core_type(&ct, arena)))))
         }
         CoreTypeDesc::Ptyp_object(inner) => {
                     let (ref fields, ref closed) = **inner;
@@ -3958,13 +3974,13 @@ struct OpenCtx {
 }
 
 /// Check if a pattern is "simple" enough for tuple flattening
-fn is_simple_pattern(p: &Pattern) -> bool {
+fn is_simple_pattern(p: &Pattern, arena: &ParseArena) -> bool {
     match &*p.ppat_desc {
         PatternDesc::Ppat_any => true,
         PatternDesc::Ppat_var(_) => true,
         PatternDesc::Ppat_constraint(inner) => {
-            let (ref inner, _) = **inner;
-            is_simple_pattern(inner)
+            let (ref inner_idx, _) = **inner;
+            is_simple_pattern(arena.get_pat(*inner_idx), arena)
         }
         _ => false,
     }
@@ -3976,13 +3992,14 @@ fn is_simple_pattern(p: &Pattern) -> bool {
 ///
 /// The open contexts are accumulated in reverse order (innermost first),
 /// matching the OCaml implementation.
-fn destruct_open_tuple(e: &Expression) -> Option<(Vec<OpenCtx>, &Vec<Expression>)> {
-    destruct_open_tuple_inner(e, Vec::new())
+fn destruct_open_tuple<'a>(e: &'a Expression, arena: &'a ParseArena) -> Option<(Vec<OpenCtx>, &'a Vec<Expression>)> {
+    destruct_open_tuple_inner(e, Vec::new(), arena)
 }
 
 fn destruct_open_tuple_inner<'a>(
     e: &'a Expression,
     mut acc: Vec<OpenCtx>,
+    arena: &'a ParseArena,
 ) -> Option<(Vec<OpenCtx>, &'a Vec<Expression>)> {
     match &*e.pexp_desc {
         ExpressionDesc::Pexp_open(inner) => {
@@ -3993,7 +4010,8 @@ fn destruct_open_tuple_inner<'a>(
                 loc: e.pexp_loc,
                 attrs: e.pexp_attributes.to_vec(),
             });
-            destruct_open_tuple_inner(cont, acc)
+            let cont_expr = arena.get_expr(*cont);
+            destruct_open_tuple_inner(cont_expr, acc, arena)
         }
         ExpressionDesc::Pexp_tuple(es) => Some((acc, es)),
         _ => None,
@@ -4003,7 +4021,7 @@ fn destruct_open_tuple_inner<'a>(
 /// Restore open expression wrappers around an expression.
 /// The opens list is in reverse order (innermost first), so we fold left
 /// to rebuild the nesting correctly.
-fn restore_exp(expr: Expression, opens: &[OpenCtx]) -> Expression {
+fn restore_exp(expr: Expression, opens: &[OpenCtx], arena: &mut ParseArena) -> Expression {
     opens.iter().fold(expr, |inner, open| Expression {
         pexp_desc: Box::new(ExpressionDesc::Pexp_open(Box::new((open.flag, open.lid, arena.push_expr(inner))))),
         pexp_loc: open.loc,
@@ -4020,15 +4038,15 @@ fn flatten_value_binding(vb: &ValueBinding, arena: &mut ParseArena) -> Vec<Value
     let pvb_attributes = rewrite_attributes(&vb.pvb_attributes, arena);
 
     if let PatternDesc::Ppat_tuple(ref pats) = *pvb_pat.ppat_desc {
-        if pats.iter().all(is_simple_pattern) {
-            if let Some((opens, exprs)) = destruct_open_tuple(&pvb_expr) {
+        if pats.iter().all(|p| is_simple_pattern(p, arena)) {
+            if let Some((opens, exprs)) = destruct_open_tuple(&pvb_expr, arena) {
                 if exprs.len() == pats.len() {
                     return pats
                         .iter()
                         .zip(exprs.iter())
                         .map(|(pat, expr)| ValueBinding {
                             pvb_pat: pat.clone(),
-                            pvb_expr: restore_exp(expr.clone(), &opens),
+                            pvb_expr: restore_exp(expr.clone(), &opens, arena),
                             pvb_attributes: pvb_attributes.clone().into(),
                             pvb_loc: vb.pvb_loc,
                         })
@@ -4078,8 +4096,9 @@ fn rewrite_pattern(pat: &Pattern, arena: &mut ParseArena) -> Pattern {
         }
 
         // Alias pattern: recurse into the aliased pattern
-        PatternDesc::Ppat_alias(inner, name) => {
-            PatternDesc::Ppat_alias(arena.push_pat(rewrite_pattern(arena.get_pat(*inner), arena)), name.clone())
+        PatternDesc::Ppat_alias(inner_idx, name) => {
+            let inner_pat = arena.get_pat(*inner_idx).clone();
+            PatternDesc::Ppat_alias(arena.push_pat(rewrite_pattern(&inner_pat, arena)), name.clone())
         }
 
         // Tuple pattern: recurse into all elements
@@ -4089,18 +4108,20 @@ fn rewrite_pattern(pat: &Pattern, arena: &mut ParseArena) -> Pattern {
 
         // Constructor pattern: recurse into optional payload
         PatternDesc::Ppat_construct(lid, opt_p) => {
+            let cloned = opt_p.map(|p| arena.get_pat(p).clone());
             PatternDesc::Ppat_construct(
                 lid.clone(),
-                opt_p.as_ref().map(|p| arena.push_pat(rewrite_pattern(arena.get_pat(*p), arena))),
+                cloned.map(|p| arena.push_pat(rewrite_pattern(&p, arena))),
             )
         }
 
         // Variant pattern: recurse into optional payload
         PatternDesc::Ppat_variant(inner) => {
             let (ref label, ref opt_p) = **inner;
+            let cloned = opt_p.map(|p| arena.get_pat(p).clone());
             PatternDesc::Ppat_variant(Box::new((
                 label.clone(),
-                opt_p.as_ref().map(|p| arena.push_pat(rewrite_pattern(arena.get_pat(*p), arena))),
+                cloned.map(|p| arena.push_pat(rewrite_pattern(&p, arena))),
             )))
         }
 
@@ -4127,29 +4148,34 @@ fn rewrite_pattern(pat: &Pattern, arena: &mut ParseArena) -> Pattern {
 
         // Or pattern: recurse into both alternatives
         PatternDesc::Ppat_or(p1, p2) => {
+            let p1_pat = arena.get_pat(*p1).clone();
+            let p2_pat = arena.get_pat(*p2).clone();
             PatternDesc::Ppat_or(
-                arena.push_pat(rewrite_pattern(arena.get_pat(*p1), arena)),
-                arena.push_pat(rewrite_pattern(arena.get_pat(*p2), arena)),
+                arena.push_pat(rewrite_pattern(&p1_pat, arena)),
+                arena.push_pat(rewrite_pattern(&p2_pat, arena)),
             )
         }
 
         // Constraint pattern: recurse into pattern and type
         PatternDesc::Ppat_constraint(inner) => {
-            let (ref inner_pat, ref core_type) = **inner;
+            let (ref inner_pat_idx, ref core_type) = **inner;
+            let inner_pat = arena.get_pat(*inner_pat_idx).clone();
             PatternDesc::Ppat_constraint(Box::new((
-                arena.push_pat(rewrite_pattern(arena.get_pat(*inner_pat), arena)),
+                arena.push_pat(rewrite_pattern(&inner_pat, arena)),
                 rewrite_core_type(core_type, arena),
             )))
         }
 
         // Exception pattern: recurse into inner pattern
-        PatternDesc::Ppat_exception(inner) => {
-            PatternDesc::Ppat_exception(arena.push_pat(rewrite_pattern(arena.get_pat(*inner), arena)))
+        PatternDesc::Ppat_exception(inner_idx) => {
+            let inner_pat = arena.get_pat(*inner_idx).clone();
+            PatternDesc::Ppat_exception(arena.push_pat(rewrite_pattern(&inner_pat, arena)))
         }
 
         // Open pattern: recurse into inner pattern
-        PatternDesc::Ppat_open(lid, inner) => {
-            PatternDesc::Ppat_open(lid.clone(), arena.push_pat(rewrite_pattern(arena.get_pat(*inner), arena)))
+        PatternDesc::Ppat_open(lid, inner_idx) => {
+            let inner_pat = arena.get_pat(*inner_idx).clone();
+            PatternDesc::Ppat_open(lid.clone(), arena.push_pat(rewrite_pattern(&inner_pat, arena)))
         }
 
         // Patterns without nested patterns: clone as-is
@@ -8263,20 +8289,31 @@ fn rewrite_module_expr(
         }
         current::ModuleExprDesc::Pmod_functor(inner) => {
                     let (ref param, ref mod_type, ref body) = **inner;
+            let rewritten_mod_type = mod_type.map(|mt_idx| {
+                let mt = arena.get_mod_type(mt_idx).clone();
+                arena.push_mod_type(rewrite_module_type(&mt, arena))
+            });
+            let body_me = arena.get_mod_expr(*body).clone();
             current::ModuleExprDesc::Pmod_functor(Box::new((
                 param.clone(),
-                mod_type.as_ref().map(|mt| Box::new(rewrite_module_type(mt, arena))),
-                Box::new(rewrite_module_expr(body, arena)),
+                rewritten_mod_type,
+                arena.push_mod_expr(rewrite_module_expr(&body_me, arena)),
             )))
         }
-        current::ModuleExprDesc::Pmod_apply(m1, m2) => current::ModuleExprDesc::Pmod_apply(
-            Box::new(rewrite_module_expr(m1, arena)),
-            Box::new(rewrite_module_expr(m2, arena)),
-        ),
+        current::ModuleExprDesc::Pmod_apply(m1, m2) => {
+            let m1_me = arena.get_mod_expr(*m1).clone();
+            let m2_me = arena.get_mod_expr(*m2).clone();
+            current::ModuleExprDesc::Pmod_apply(
+                arena.push_mod_expr(rewrite_module_expr(&m1_me, arena)),
+                arena.push_mod_expr(rewrite_module_expr(&m2_me, arena)),
+            )
+        }
         current::ModuleExprDesc::Pmod_constraint(m, mt) => {
+            let m_me = arena.get_mod_expr(*m).clone();
+            let mt_mt = arena.get_mod_type(*mt).clone();
             current::ModuleExprDesc::Pmod_constraint(
-                Box::new(rewrite_module_expr(m, arena)),
-                Box::new(rewrite_module_type(mt, arena)),
+                arena.push_mod_expr(rewrite_module_expr(&m_me, arena)),
+                arena.push_mod_type(rewrite_module_type(&mt_mt, arena)),
             )
         }
         // Handle module extension - rewrite payload
@@ -8309,21 +8346,28 @@ fn rewrite_module_type(
         }
         current::ModuleTypeDesc::Pmty_functor(inner) => {
                     let (ref name, ref param_type, ref result_type) = **inner;
+            let rewritten_param = param_type.map(|pt_idx| {
+                let pt = arena.get_mod_type(pt_idx).clone();
+                arena.push_mod_type(rewrite_module_type(&pt, arena))
+            });
+            let result_mt = arena.get_mod_type(*result_type).clone();
             current::ModuleTypeDesc::Pmty_functor(Box::new((
                 name.clone(),
-                param_type.as_ref().map(|pt| Box::new(rewrite_module_type(pt, arena))),
-                Box::new(rewrite_module_type(result_type, arena)),
+                rewritten_param,
+                arena.push_mod_type(rewrite_module_type(&result_mt, arena)),
             )))
         }
         current::ModuleTypeDesc::Pmty_with(inner) => {
-                    let (ref mt, ref constraints) = **inner;
+                    let (ref mt_idx, ref constraints) = **inner;
+            let mt = arena.get_mod_type(*mt_idx).clone();
             current::ModuleTypeDesc::Pmty_with(Box::new((
-                Box::new(rewrite_module_type(mt, arena)),
+                arena.push_mod_type(rewrite_module_type(&mt, arena)),
                 constraints.clone(),
             )))
         }
-        current::ModuleTypeDesc::Pmty_typeof(me) => {
-            current::ModuleTypeDesc::Pmty_typeof(Box::new(rewrite_module_expr(me, arena)))
+        current::ModuleTypeDesc::Pmty_typeof(me_idx) => {
+            let me = arena.get_mod_expr(*me_idx).clone();
+            current::ModuleTypeDesc::Pmty_typeof(arena.push_mod_expr(rewrite_module_expr(&me, arena)))
         }
         current::ModuleTypeDesc::Pmty_extension(ext) => {
             let (ref ext_name, ref payload) = **ext;
