@@ -75,13 +75,14 @@ The `-dtyped-sexp` flag outputs the typed tree without locations. The `-dtyped-s
 
 |  | Status |
 |--|--------|
-| OCaml compiles | 657/657 |
-| Rust compiles | 559/657 (98 fail) |
-| Parity match (-dtyped-sexp-locs) | 293/559 (52.4%) |
+| OCaml compiles | 656/657 |
+| Rust compiles | 554/657 (103 fail) |
+| Parity match (-dtyped-sexp-locs) | 295/554 (53.2%) |
 
-**Task Progress:** 9/9 complete
+**Task Progress:** 10/10 complete
 
 **Task Checklist:**
+- [x] Match OCaml `@deriving(accessors)` variant accessor location behavior in PPX output by emitting generated value/pattern/expression/signature item locs as `Location.none` while preserving constructor-name locations on `Located` identifiers and `Typ.arrows ~loc` for signature arrow nodes (`DerivingAccessorsCurried.res` parity fixed; `Parity`: 293 -> 295 in the latest full `--with-locs --no-build` run).
 - [x] Fix qualified constructor typing + trailing optional-arg consumption in `type_application` so dict-pattern matches compile instead of failing with `PatternTypeClash`.
 - [x] Reduce remaining Rust compile failures (67), prioritizing root causes in `UndefinedMethod`, `ExprTypeClash`, and `PatternTypeClash`.
 - [x] Preserve nested module member visibility for awaited/unpacked modules in extracted signatures, and keep declared signatures for recursive self-alias modules (`module rec M = M`) to avoid `UndefinedMethod` regressions (Rust compile failures: 65 -> 63).

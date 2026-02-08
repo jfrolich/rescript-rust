@@ -7984,13 +7984,15 @@ fn generate_variant_accessors_and_sigs(
     _tdcl: &TypeDeclaration,
     structure_core_type: &CoreType,
     signature_core_type: &CoreType,
-    loc: LocIdx,
+    _loc: LocIdx,
     arena: &mut ParseArena,
 ) -> (Vec<StructureItem>, Vec<SignatureItem>) {
     let mut structure_items = Vec::new();
     let mut signature_items = Vec::new();
+    let none_loc = arena.none_loc();
 
     for ctor in constructors {
+        let ctor_loc = ctor.pcd_name.loc;
         let ctor_name = arena.get_string(ctor.pcd_name.txt);
         let fn_name = uncapitalize_first(ctor_name);
         let fn_name_idx = arena.intern_string(&fn_name);
@@ -8020,47 +8022,53 @@ fn generate_variant_accessors_and_sigs(
                         pexp_desc: ExpressionDesc::Pexp_construct(
                             Located {
                                 txt: arena.push_longident(Longident::Lident(ctor.pcd_name.txt)),
-                                loc,
+                                loc: ctor_loc,
                             },
                             None,
                         ),
-                        pexp_loc: loc,
+                        pexp_loc: none_loc,
                         pexp_attributes: vec![],
                     }),
                     structure_annotate_type.clone(),
                 ),
-                pexp_loc: loc,
+                pexp_loc: none_loc,
                 pexp_attributes: vec![],
             };
 
             let binding = ValueBinding {
                 pvb_pat: Pattern {
-                    ppat_desc: PatternDesc::Ppat_var(Located { txt: fn_name_idx, loc }),
-                    ppat_loc: loc,
+                    ppat_desc: PatternDesc::Ppat_var(Located {
+                        txt: fn_name_idx,
+                        loc: ctor_loc,
+                    }),
+                    ppat_loc: none_loc,
                     ppat_attributes: vec![],
                 },
                 pvb_expr: ctor_expr,
                 pvb_attributes: vec![],
-                pvb_loc: loc,
+                pvb_loc: none_loc,
             };
 
             structure_items.push(StructureItem {
                 pstr_desc: StructureItemDesc::Pstr_value(RecFlag::Nonrecursive, vec![binding]),
-                pstr_loc: loc,
+                pstr_loc: none_loc,
             });
 
             // val ctorName: t
             let val_desc = ValueDescription {
-                pval_name: Located { txt: fn_name_idx, loc },
+                pval_name: Located {
+                    txt: fn_name_idx,
+                    loc: ctor_loc,
+                },
                 pval_type: signature_annotate_type,
                 pval_prim: vec![],
                 pval_attributes: vec![],
-                pval_loc: loc,
+                pval_loc: none_loc,
             };
 
             signature_items.push(SignatureItem {
                 psig_desc: SignatureItemDesc::Psig_value(val_desc),
-                psig_loc: loc,
+                psig_loc: none_loc,
             });
         } else {
             // Has args: let ctorName = (p0, p1, ...) => CtorName(p0, p1, ...)
@@ -8073,9 +8081,9 @@ fn generate_variant_accessors_and_sigs(
                 Expression {
                     pexp_desc: ExpressionDesc::Pexp_ident(Located {
                         txt: arena.push_lident_from_idx(params[0]),
-                        loc,
+                        loc: ctor_loc,
                     }),
-                    pexp_loc: loc,
+                    pexp_loc: none_loc,
                     pexp_attributes: vec![],
                 }
             } else {
@@ -8084,13 +8092,13 @@ fn generate_variant_accessors_and_sigs(
                         params.iter().map(|&p| Expression {
                             pexp_desc: ExpressionDesc::Pexp_ident(Located {
                                 txt: arena.push_lident_from_idx(p),
-                                loc,
+                                loc: ctor_loc,
                             }),
-                            pexp_loc: loc,
+                            pexp_loc: none_loc,
                             pexp_attributes: vec![],
                         }).collect()
                     ),
-                    pexp_loc: loc,
+                    pexp_loc: none_loc,
                     pexp_attributes: vec![],
                 }
             };
@@ -8101,16 +8109,16 @@ fn generate_variant_accessors_and_sigs(
                         pexp_desc: ExpressionDesc::Pexp_construct(
                             Located {
                                 txt: arena.push_longident(Longident::Lident(ctor.pcd_name.txt)),
-                                loc,
+                                loc: ctor_loc,
                             },
                             Some(Box::new(ctor_arg)),
                         ),
-                        pexp_loc: loc,
+                        pexp_loc: none_loc,
                         pexp_attributes: vec![],
                     }),
                     structure_annotate_type.clone(),
                 ),
-                pexp_loc: loc,
+                pexp_loc: none_loc,
                 pexp_attributes: vec![],
             };
 
@@ -8121,15 +8129,18 @@ fn generate_variant_accessors_and_sigs(
                         arg_label: ArgLabel::Nolabel,
                         default: None,
                         lhs: Pattern {
-                            ppat_desc: PatternDesc::Ppat_var(Located { txt: param, loc }),
-                            ppat_loc: loc,
+                            ppat_desc: PatternDesc::Ppat_var(Located {
+                                txt: param,
+                                loc: ctor_loc,
+                            }),
+                            ppat_loc: none_loc,
                             ppat_attributes: vec![],
                         },
                         rhs: Box::new(acc),
                         is_async: false,
                         arity: arena.push_arity(None),
                     },
-                    pexp_loc: loc,
+                    pexp_loc: none_loc,
                     pexp_attributes: vec![],
                 }
             });
@@ -8139,18 +8150,21 @@ fn generate_variant_accessors_and_sigs(
 
             let binding = ValueBinding {
                 pvb_pat: Pattern {
-                    ppat_desc: PatternDesc::Ppat_var(Located { txt: fn_name_idx, loc }),
-                    ppat_loc: loc,
+                    ppat_desc: PatternDesc::Ppat_var(Located {
+                        txt: fn_name_idx,
+                        loc: ctor_loc,
+                    }),
+                    ppat_loc: none_loc,
                     ppat_attributes: vec![],
                 },
                 pvb_expr: final_expr,
                 pvb_attributes: vec![],
-                pvb_loc: loc,
+                pvb_loc: none_loc,
             };
 
             structure_items.push(StructureItem {
                 pstr_desc: StructureItemDesc::Pstr_value(RecFlag::Nonrecursive, vec![binding]),
-                pstr_loc: loc,
+                pstr_loc: none_loc,
             });
 
             // Signature: val ctorName: arg0 -> arg1 -> ... -> t
@@ -8163,19 +8177,22 @@ fn generate_variant_accessors_and_sigs(
                 lbl: ArgLabel::Nolabel,
                 typ: arg_type.clone(),
             }).collect();
-            let arrow_type = make_arrows(args, signature_annotate_type, loc, arena);
+            let arrow_type = make_arrows(args, signature_annotate_type, ctor_loc, arena);
 
             let val_desc = ValueDescription {
-                pval_name: Located { txt: fn_name_idx, loc },
+                pval_name: Located {
+                    txt: fn_name_idx,
+                    loc: ctor_loc,
+                },
                 pval_type: arrow_type,
                 pval_prim: vec![],
                 pval_attributes: vec![],
-                pval_loc: loc,
+                pval_loc: none_loc,
             };
 
             signature_items.push(SignatureItem {
                 psig_desc: SignatureItemDesc::Psig_value(val_desc),
-                psig_loc: loc,
+                psig_loc: none_loc,
             });
         }
     }
