@@ -233,6 +233,70 @@ fn extract_functor_result_type<'b>(
     }
 }
 
+/// Find an embedded packed module expression inside an unpack payload expression.
+/// This follows common wrappers produced by await/import rewrites.
+fn find_packed_module_expr(expr: &crate::parser::ast::Expression) -> Option<&ParsedModuleExpr> {
+    use crate::parser::ast::ExpressionDesc;
+
+    match &expr.pexp_desc {
+        ExpressionDesc::Pexp_pack(mod_expr) => Some(mod_expr),
+        ExpressionDesc::Pexp_constraint(inner, _) => find_packed_module_expr(inner),
+        ExpressionDesc::Pexp_coerce(inner, _, _) => find_packed_module_expr(inner),
+        ExpressionDesc::Pexp_await(inner) => find_packed_module_expr(inner),
+        ExpressionDesc::Pexp_apply { funct, args, .. } => find_packed_module_expr(funct)
+            .or_else(|| args.iter().find_map(|(_, arg)| find_packed_module_expr(arg))),
+        _ => None,
+    }
+}
+
+/// Extract semantic module type information from an unpack payload expression.
+fn lookup_module_type_from_unpack_expr<'a>(
+    tctx: &mut TypeCheckContext<'a>,
+    env: &Env,
+    arena: &'a ParseArena,
+    expr: &crate::parser::ast::Expression,
+) -> Option<crate::types::decl::ModuleType> {
+    let packed_module = find_packed_module_expr(expr)?;
+    lookup_module_type_from_parsed_module_expr(tctx, env, arena, packed_module)
+}
+
+/// Look up semantic module type information for parsed module expressions.
+/// This mirrors OCaml's behavior of using semantic module types for bindings.
+pub fn lookup_module_type_from_parsed_module_expr<'a>(
+    tctx: &mut TypeCheckContext<'a>,
+    env: &Env,
+    arena: &'a ParseArena,
+    mod_expr: &ParsedModuleExpr,
+) -> Option<crate::types::decl::ModuleType> {
+    match &mod_expr.pmod_desc {
+        ParsedModuleExprDesc::Pmod_ident(lid) => {
+            let longident = arena.get_longident(lid.txt);
+            lookup_module_type_by_lid(
+                longident,
+                arena,
+                env,
+                &mut tctx.persistent_env,
+                tctx.type_ctx,
+            )
+        }
+        ParsedModuleExprDesc::Pmod_apply(functor_expr, _arg) => extract_functor_result_type(
+            &functor_expr.pmod_desc,
+            arena,
+            env,
+            &mut tctx.persistent_env,
+            tctx.type_ctx,
+        ),
+        ParsedModuleExprDesc::Pmod_constraint(inner, mty) => {
+            lookup_module_type_from_parsed_module_expr(tctx, env, arena, inner)
+                .or_else(|| translate_module_type_to_decl(tctx, env, arena, mty).ok())
+        }
+        ParsedModuleExprDesc::Pmod_unpack(expr) => {
+            lookup_module_type_from_unpack_expr(tctx, env, arena, expr)
+        }
+        _ => None,
+    }
+}
+
 /// Translate a parsed module type (signature) into a decl::ModuleType.
 /// Used for recursive module constraint signatures to populate the environment.
 fn translate_module_type_to_decl<'a>(
@@ -2143,17 +2207,8 @@ fn type_structure_item<'a>(
             // Module binding: module M = ME
             // Compute the semantic module type BEFORE type-checking the module expr,
             // so we can use it to extend the environment.
-            let semantic_mod_type = match &mb.pmb_expr.pmod_desc {
-                ParsedModuleExprDesc::Pmod_ident(lid) => {
-                    let longident = arena.get_longident(lid.txt);
-                    lookup_module_type_by_lid(longident, arena, env, &mut tctx.persistent_env, tctx.type_ctx)
-                }
-                ParsedModuleExprDesc::Pmod_apply(functor_expr, _arg) => {
-                    // For functor application F(A), look up F's type and extract result
-                    extract_functor_result_type(&functor_expr.pmod_desc, arena, env, &mut tctx.persistent_env, tctx.type_ctx)
-                }
-                _ => None,
-            };
+            let semantic_mod_type =
+                lookup_module_type_from_parsed_module_expr(tctx, env, arena, &mb.pmb_expr);
 
             let typed_mod = type_module_expr(tctx, env, arena, &mb.pmb_expr)?;
             let mod_name_str = arena.get_string(mb.pmb_name.txt);

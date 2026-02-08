@@ -76,14 +76,14 @@ The `-dtyped-sexp` flag outputs the typed tree without locations. The `-dtyped-s
 |  | Status |
 |--|--------|
 | OCaml compiles | 657/657 |
-| Rust compiles | 590/657 (67 fail) |
-| Parity match (-dtyped-sexp) | 310/590 (52.5%) |
+| Rust compiles | 592/657 (65 fail) |
+| Parity match (-dtyped-sexp) | 310/592 (52.4%) |
 
-**Task Progress:** 1/2 complete
+**Task Progress:** 2/2 complete
 
 **Task Checklist:**
 - [x] Fix qualified constructor typing + trailing optional-arg consumption in `type_application` so dict-pattern matches compile instead of failing with `PatternTypeClash`.
-- [ ] Reduce remaining Rust compile failures (67), prioritizing root causes in `UndefinedMethod`, `ExprTypeClash`, and `PatternTypeClash`.
+- [x] Reduce remaining Rust compile failures (67), prioritizing root causes in `UndefinedMethod`, `ExprTypeClash`, and `PatternTypeClash`.
 
 **Previous milestones completed:**
 - Parser AST structure: 100% parity (sexp-locs 1196/1196)
@@ -97,6 +97,7 @@ The `-dtyped-sexp` flag outputs the typed tree without locations. The `-dtyped-s
 - Fix type alias expansion: copy manifests during expansion to prevent corruption
 - Propagate arity in arrow type unification
 - Module-qualified constructor result typing + implicit trailing optional-arg consumption in applications (Rust compile failures: 71 -> 67)
+- Recover semantic module types for `Pmod_unpack`/`await` module bindings and `let module` fallback resolution (Rust compile failures: 67 -> 65)
 
 ---
 
@@ -166,23 +167,21 @@ The type checker takes a Parsetree and produces a Typedtree. The Typedtree is th
 
 ## Key Areas for Improvement
 
-### Rust Compilation Failures (91 files)
+### Rust Compilation Failures (65 files)
 
-91 files fail to compile with the Rust type checker. Top error patterns:
+65 files fail to compile with the Rust type checker. Top error patterns:
 
 | Error | Count | Description |
 |-------|-------|-------------|
-| UndefinedMethod | 24 | Module field access treated as method call |
-| ExprTypeClash (FunctionCall) | 20 | Function call type mismatches |
-| ExprTypeClash (general) | 19 | General type mismatches |
-| PatternTypeClash | 6 | Pattern matching type issues |
-| Stack overflow | 4 | Infinite recursion in type checker |
-| Parse errors | 4 | Unsupported syntax |
-| NotAVariantType | 2 | Variant type resolution |
+| ExprTypeClash | 28 | Function call and general type mismatches |
+| UndefinedMethod | 22 | Module field access still falling back to unresolved value lookup |
+| NotAVariantType | 6 | Variant type resolution |
+| Parse errors | 5 | Unsupported syntax |
+| Crash/NoOutput/Panic | 4 | Runtime aborts/panics during compilation |
 
 ### Parity Diff Categories (280 files with diffs)
 
-Of the 566 files that compile, 286 match and 280 differ. Diff categories (overlap):
+Of the 592 files that compile, 310 match and 282 differ. Diff categories (overlap):
 
 | Category | Files | Description |
 |----------|-------|-------------|
