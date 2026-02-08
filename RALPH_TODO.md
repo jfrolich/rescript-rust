@@ -71,13 +71,13 @@ The `-dtyped-sexp` flag outputs the typed tree without locations. The `-dtyped-s
 
 ## Current Status
 
-**Last Updated:** 2026-02-07
+**Last Updated:** 2026-02-08
 
 |  | Status |
 |--|--------|
-| OCaml compiles | 657/657 |
-| Rust compiles | 566/657 (91 fail) |
-| Parity match (-dtyped-sexp) | 286/566 (50.5%) |
+| OCaml compiles | 659/659 |
+| Rust compiles | 588/659 (71 fail) |
+| Parity match (-dtyped-sexp) | 305/588 (51.9%) |
 
 **Previous milestones completed:**
 - Parser AST structure: 100% parity (sexp-locs 1196/1196)
@@ -88,6 +88,8 @@ The `-dtyped-sexp` flag outputs the typed tree without locations. The `-dtyped-s
 - Module alias path rewriting (Belt.Array -> Pdot, not Pident)
 - Qualified module paths for opened sub-modules (md_path on ModuleDeclaration)
 - Fix _include_ path for non-ident include statements
+- Fix type alias expansion: copy manifests during expansion to prevent corruption
+- Propagate arity in arrow type unification
 
 ---
 
