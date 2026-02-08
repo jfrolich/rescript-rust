@@ -463,6 +463,51 @@ Parity:
 Result: Performance remains neutral overall versus the previous 2.3 baseline.
 ```
 
+### Task 2.4 substep: reserve/init APIs + sparse side-table scaffolding (February 2026)
+
+```
+Scope:
+- Added generic `Arena::reserve_with()` + `Arena::initialize()` for two-phase node construction.
+- Added `ParseArena` reserve/initialize APIs for expression/pattern/core_type/module arenas.
+- Added sparse side-table scaffolding keyed by owning `ExprIdx`:
+  - `expr_fun_defaults: Vec<Option<ExprIdx>>`
+  - `expr_case_guards: Vec<Option<Box<[Option<ExprIdx>]>>>`
+  - accessor/mutator APIs: `set_fun_default`, `fun_default`, `set_case_guards`, `case_guards`, `case_guard`
+- Ensured hot push paths stay direct (`push_*` does not route through reserve/init) to avoid overhead.
+- Added unit tests for reserve/init and sparse table behavior.
+
+Benchmark (before):
+Run: cargo test --manifest-path compiler-rust/Cargo.toml --release --lib -- benchmark_all --ignored --nocapture
+
+  Size Tier                  Files   Faster       OK Avg Factor Min Factor Max Factor
+  -------------------------------------------------------------------------------------
+  Large (>30KB)                 14       13        1       0.79x       0.58x       1.02x
+  Medium (10-30KB)              73       73        0       0.54x       0.26x       0.77x
+  Small (1-10KB)               443      443        0       0.39x       0.28x       0.55x
+  Tiny (<1KB)                  636      636        0       0.31x       0.15x       0.44x
+
+Benchmark (after):
+Run: cargo test --manifest-path compiler-rust/Cargo.toml --release --lib -- benchmark_all --ignored --nocapture
+
+  Size Tier                  Files   Faster       OK Avg Factor Min Factor Max Factor
+  -------------------------------------------------------------------------------------
+  Large (>30KB)                 14       14        0       0.79x       0.60x       0.93x
+  Medium (10-30KB)              73       73        0       0.54x       0.24x       0.73x
+  Small (1-10KB)               443      442        1       0.39x       0.27x       1.05x
+  Tiny (<1KB)                  636      636        0       0.31x       0.20x       0.43x
+
+Overall: 1166/1166 passing (1165 faster, 1 within tolerance), 38 skipped
+
+Parity:
+  ./scripts/test_parser_ast_parity.sh
+  SUCCESS: All 1196 files have full parity
+
+Result:
+- Infrastructure complete for the first 2.4 migration phase (two-phase APIs + keyed sparse tables).
+- Runtime throughput remains neutral (within benchmark noise).
+- No parity regressions.
+```
+
 ### Task 2.4 plan (Generalized sparse data / side tables) — ACTIVE
 
 ```

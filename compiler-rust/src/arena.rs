@@ -98,6 +98,19 @@ impl<T, Idx: ArenaIdx> Arena<T, Idx> {
         Idx::from_u32(idx)
     }
 
+    /// Reserve a new slot with a placeholder value and return its typed index.
+    ///
+    /// This enables two-phase construction: reserve index first, then overwrite
+    /// the slot later once dependent indices are known.
+    pub fn reserve_with(&mut self, placeholder: T) -> Idx {
+        self.push(placeholder)
+    }
+
+    /// Initialize or replace a previously reserved slot.
+    pub fn initialize(&mut self, idx: Idx, item: T) {
+        self.items[idx.to_u32() as usize] = item;
+    }
+
     /// Get a reference to a value by typed index.
     pub fn get(&self, idx: Idx) -> &T {
         &self.items[idx.to_u32() as usize]
@@ -207,5 +220,16 @@ mod tests {
 
         *arena.get_mut(idx) = 20;
         assert_eq!(*arena.get(idx), 20);
+    }
+
+    #[test]
+    fn test_arena_reserve_and_initialize() {
+        let mut arena: Arena<i32, TestIdx> = Arena::new();
+        let idx = arena.reserve_with(0);
+        assert_eq!(idx, TestIdx(0));
+        assert_eq!(*arena.get(idx), 0);
+
+        arena.initialize(idx, 42);
+        assert_eq!(*arena.get(idx), 42);
     }
 }

@@ -33,7 +33,10 @@ use serde::{Deserialize, Serialize};
 use crate::arena::{Arena, ArenaIdx};
 use crate::intern::Interner;
 use crate::location::{Location, Position};
-use crate::parser::ast::{CoreType, Expression, ModuleExpr, ModuleType, Pattern};
+use crate::parser::ast::{
+    Attributes, CoreType, CoreTypeDesc, Expression, ExpressionDesc, ModuleExpr, ModuleExprDesc,
+    ModuleType, ModuleTypeDesc, Pattern, PatternDesc,
+};
 use crate::parser::longident::Longident;
 
 /// Key for position deduplication.
@@ -443,6 +446,11 @@ pub struct ParseArena {
     /// Arena of expressions (returns ExprIdx).
     /// Replaces `Box<Expression>` for recursive AST references.
     expressions: Arena<Expression, ExprIdx>,
+    /// Sparse side table for function default expressions, keyed by function ExprIdx.
+    expr_fun_defaults: Vec<Option<ExprIdx>>,
+    /// Sparse side table for case guards, keyed by owning match/try ExprIdx.
+    /// Value is a case-indexed list of optional guard expressions.
+    expr_case_guards: Vec<Option<Box<[Option<ExprIdx>]>>>,
     /// Arena of patterns (returns PatIdx).
     /// Replaces `Box<Pattern>` for recursive AST references.
     patterns: Arena<Pattern, PatIdx>,
@@ -709,6 +717,8 @@ impl Default for ParseArena {
             longidents,
             arities,
             expressions: Arena::default(),
+            expr_fun_defaults: Vec::new(),
+            expr_case_guards: Vec::new(),
             patterns: Arena::default(),
             core_types: Arena::default(),
             mod_exprs: Arena::default(),
@@ -1550,11 +1560,84 @@ impl ParseArena {
     // AST node arenas
     // ========================================================================
 
+    fn placeholder_lident_loc() -> Located<LidentIdx> {
+        Located {
+            txt: LidentIdx::default(),
+            loc: LocIdx::default(),
+        }
+    }
+
+    fn placeholder_expr() -> Expression {
+        Expression {
+            pexp_desc: Box::new(ExpressionDesc::Pexp_ident(Self::placeholder_lident_loc())),
+            pexp_loc: LocIdx::default(),
+            pexp_attributes: Attributes::new(),
+        }
+    }
+
+    fn placeholder_pat() -> Pattern {
+        Pattern {
+            ppat_desc: Box::new(PatternDesc::Ppat_any),
+            ppat_loc: LocIdx::default(),
+            ppat_attributes: Attributes::new(),
+        }
+    }
+
+    fn placeholder_core_type() -> CoreType {
+        CoreType {
+            ptyp_desc: Box::new(CoreTypeDesc::Ptyp_any),
+            ptyp_loc: LocIdx::default(),
+            ptyp_attributes: Attributes::new(),
+        }
+    }
+
+    fn placeholder_mod_expr() -> ModuleExpr {
+        ModuleExpr {
+            pmod_desc: Box::new(ModuleExprDesc::Pmod_ident(Self::placeholder_lident_loc())),
+            pmod_loc: LocIdx::default(),
+            pmod_attributes: Attributes::new(),
+        }
+    }
+
+    fn placeholder_mod_type() -> ModuleType {
+        ModuleType {
+            pmty_desc: Box::new(ModuleTypeDesc::Pmty_ident(Self::placeholder_lident_loc())),
+            pmty_loc: LocIdx::default(),
+            pmty_attributes: Attributes::new(),
+        }
+    }
+
     /// Push an expression into the arena and return its index.
     /// Use this instead of `Box::new(expr)` for recursive AST references.
     #[inline]
     pub fn push_expr(&mut self, expr: Expression) -> ExprIdx {
-        self.expressions.push(expr)
+        let idx = self.expressions.push(expr);
+        self.expr_fun_defaults.push(None);
+        self.expr_case_guards.push(None);
+        idx
+    }
+
+    /// Reserve an expression index using a placeholder node.
+    ///
+    /// This is the first step of two-phase construction (`reserve -> initialize`),
+    /// used when sparse side data must be keyed by stable `ExprIdx`.
+    #[inline]
+    pub fn reserve_expr(&mut self) -> ExprIdx {
+        let idx = self.expressions.reserve_with(Self::placeholder_expr());
+        self.expr_fun_defaults.push(None);
+        self.expr_case_guards.push(None);
+        idx
+    }
+
+    /// Initialize a previously reserved expression slot.
+    #[inline]
+    pub fn initialize_expr(&mut self, idx: ExprIdx, expr: Expression) {
+        let slot = idx.0 as usize;
+        debug_assert!(slot < self.expr_fun_defaults.len());
+        debug_assert!(slot < self.expr_case_guards.len());
+        self.expressions.initialize(idx, expr);
+        self.expr_fun_defaults[slot] = None;
+        self.expr_case_guards[slot] = None;
     }
 
     /// Get an expression by index.
@@ -1574,10 +1657,71 @@ impl ParseArena {
         self.expressions.len()
     }
 
+    /// Attach sparse function default data to an expression node.
+    ///
+    /// The key must be the `ExprIdx` of the owning `Pexp_fun` expression.
+    pub fn set_fun_default(&mut self, owner: ExprIdx, default: Option<ExprIdx>) {
+        let slot = owner.0 as usize;
+        if slot >= self.expr_fun_defaults.len() {
+            self.expr_fun_defaults.resize(slot + 1, None);
+        }
+        self.expr_fun_defaults[slot] = default;
+    }
+
+    /// Get sparse function default data for a `Pexp_fun` expression node.
+    pub fn fun_default(&self, owner: ExprIdx) -> Option<ExprIdx> {
+        self.expr_fun_defaults
+            .get(owner.0 as usize)
+            .copied()
+            .flatten()
+    }
+
+    /// Attach sparse case guard data to a `Pexp_match`/`Pexp_try` expression node.
+    ///
+    /// Guards are indexed by case position within the node's `Vec<Case>`.
+    pub fn set_case_guards(&mut self, owner: ExprIdx, guards: Vec<Option<ExprIdx>>) {
+        let slot = owner.0 as usize;
+        if slot >= self.expr_case_guards.len() {
+            self.expr_case_guards.resize(slot + 1, None);
+        }
+        self.expr_case_guards[slot] = if guards.is_empty() {
+            None
+        } else {
+            Some(guards.into_boxed_slice())
+        };
+    }
+
+    /// Get the sparse case guard list for a match/try expression.
+    pub fn case_guards(&self, owner: ExprIdx) -> Option<&[Option<ExprIdx>]> {
+        self.expr_case_guards
+            .get(owner.0 as usize)
+            .and_then(|v| v.as_deref())
+    }
+
+    /// Get a sparse case guard by owner expression and case position.
+    pub fn case_guard(&self, owner: ExprIdx, case_index: usize) -> Option<ExprIdx> {
+        self.case_guards(owner)
+            .and_then(|guards| guards.get(case_index))
+            .copied()
+            .flatten()
+    }
+
     /// Push a pattern into the arena and return its index.
     #[inline]
     pub fn push_pat(&mut self, pat: Pattern) -> PatIdx {
         self.patterns.push(pat)
+    }
+
+    /// Reserve a pattern index using a placeholder node.
+    #[inline]
+    pub fn reserve_pat(&mut self) -> PatIdx {
+        self.patterns.reserve_with(Self::placeholder_pat())
+    }
+
+    /// Initialize a previously reserved pattern slot.
+    #[inline]
+    pub fn initialize_pat(&mut self, idx: PatIdx, pat: Pattern) {
+        self.patterns.initialize(idx, pat);
     }
 
     /// Get a pattern by index.
@@ -1603,6 +1747,18 @@ impl ParseArena {
         self.core_types.push(typ)
     }
 
+    /// Reserve a core type index using a placeholder node.
+    #[inline]
+    pub fn reserve_core_type(&mut self) -> CoreTypeIdx {
+        self.core_types.reserve_with(Self::placeholder_core_type())
+    }
+
+    /// Initialize a previously reserved core type slot.
+    #[inline]
+    pub fn initialize_core_type(&mut self, idx: CoreTypeIdx, typ: CoreType) {
+        self.core_types.initialize(idx, typ);
+    }
+
     /// Get a core type by index.
     #[inline]
     pub fn get_core_type(&self, idx: CoreTypeIdx) -> &CoreType {
@@ -1626,6 +1782,18 @@ impl ParseArena {
         self.mod_exprs.push(me)
     }
 
+    /// Reserve a module expression index using a placeholder node.
+    #[inline]
+    pub fn reserve_mod_expr(&mut self) -> ModExprIdx {
+        self.mod_exprs.reserve_with(Self::placeholder_mod_expr())
+    }
+
+    /// Initialize a previously reserved module expression slot.
+    #[inline]
+    pub fn initialize_mod_expr(&mut self, idx: ModExprIdx, me: ModuleExpr) {
+        self.mod_exprs.initialize(idx, me);
+    }
+
     /// Get a module expression by index.
     #[inline]
     pub fn get_mod_expr(&self, idx: ModExprIdx) -> &ModuleExpr {
@@ -1642,6 +1810,18 @@ impl ParseArena {
     #[inline]
     pub fn push_mod_type(&mut self, mt: ModuleType) -> ModTypeIdx {
         self.mod_types.push(mt)
+    }
+
+    /// Reserve a module type index using a placeholder node.
+    #[inline]
+    pub fn reserve_mod_type(&mut self) -> ModTypeIdx {
+        self.mod_types.reserve_with(Self::placeholder_mod_type())
+    }
+
+    /// Initialize a previously reserved module type slot.
+    #[inline]
+    pub fn initialize_mod_type(&mut self, idx: ModTypeIdx, mt: ModuleType) {
+        self.mod_types.initialize(idx, mt);
     }
 
     /// Get a module type by index.
@@ -1721,6 +1901,19 @@ impl<T> Located<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::parser::ast::{Attributes, ExpressionDesc};
+
+    fn ident_expr(arena: &mut ParseArena, name: &str) -> Expression {
+        let lid = arena.push_lident(name);
+        Expression {
+            pexp_desc: Box::new(ExpressionDesc::Pexp_ident(Located {
+                txt: lid,
+                loc: LocIdx::default(),
+            })),
+            pexp_loc: LocIdx::default(),
+            pexp_attributes: Attributes::new(),
+        }
+    }
 
     #[test]
     fn test_position_push() {
@@ -1835,5 +2028,84 @@ mod tests {
         assert_eq!(arena.loc_start(spanning).cnum, 0);
         assert_eq!(arena.loc_end(spanning).line, 2);
         assert_eq!(arena.loc_end(spanning).cnum, 30);
+    }
+
+    #[test]
+    fn test_reserve_initialize_expr_two_phase() {
+        let mut arena = ParseArena::new();
+        let slot = arena.reserve_expr();
+        let placeholder = arena.get_expr(slot);
+        assert!(matches!(
+            &*placeholder.pexp_desc,
+            ExpressionDesc::Pexp_ident(_)
+        ));
+
+        let expr = ident_expr(&mut arena, "ready");
+        arena.initialize_expr(slot, expr);
+
+        let initialized = arena.get_expr(slot);
+        match &*initialized.pexp_desc {
+            ExpressionDesc::Pexp_ident(loc) => {
+                assert_eq!(
+                    arena.get_string(arena.get_longident(loc.txt).last_idx()),
+                    "ready"
+                );
+            }
+            _ => panic!("expected ident expression after initialize"),
+        }
+    }
+
+    #[test]
+    fn test_sparse_expr_side_tables() {
+        let mut arena = ParseArena::new();
+        let owner_expr = ident_expr(&mut arena, "owner");
+        let owner = arena.push_expr(owner_expr);
+        let default_expr_node = ident_expr(&mut arena, "def");
+        let default_expr = arena.push_expr(default_expr_node);
+        let guard_expr_node = ident_expr(&mut arena, "guard");
+        let guard_expr = arena.push_expr(guard_expr_node);
+
+        assert_eq!(arena.fun_default(owner), None);
+        assert_eq!(arena.case_guard(owner, 0), None);
+
+        arena.set_fun_default(owner, Some(default_expr));
+        arena.set_case_guards(owner, vec![None, Some(guard_expr)]);
+
+        assert_eq!(arena.fun_default(owner), Some(default_expr));
+        assert_eq!(arena.case_guard(owner, 0), None);
+        assert_eq!(arena.case_guard(owner, 1), Some(guard_expr));
+        assert_eq!(arena.case_guard(owner, 2), None);
+    }
+
+    #[test]
+    fn test_reserve_initialize_other_node_kinds() {
+        let mut arena = ParseArena::new();
+
+        let pat_slot = arena.reserve_pat();
+        let ty_slot = arena.reserve_core_type();
+        let me_slot = arena.reserve_mod_expr();
+        let mt_slot = arena.reserve_mod_type();
+
+        arena.initialize_pat(pat_slot, ParseArena::placeholder_pat());
+        arena.initialize_core_type(ty_slot, ParseArena::placeholder_core_type());
+        arena.initialize_mod_expr(me_slot, ParseArena::placeholder_mod_expr());
+        arena.initialize_mod_type(mt_slot, ParseArena::placeholder_mod_type());
+
+        assert!(matches!(
+            &*arena.get_pat(pat_slot).ppat_desc,
+            PatternDesc::Ppat_any
+        ));
+        assert!(matches!(
+            &*arena.get_core_type(ty_slot).ptyp_desc,
+            CoreTypeDesc::Ptyp_any
+        ));
+        assert!(matches!(
+            &*arena.get_mod_expr(me_slot).pmod_desc,
+            ModuleExprDesc::Pmod_ident(_)
+        ));
+        assert!(matches!(
+            &*arena.get_mod_type(mt_slot).pmty_desc,
+            ModuleTypeDesc::Pmty_ident(_)
+        ));
     }
 }

@@ -41,8 +41,9 @@ These target the AST node representation, where the biggest memory and cache win
   - Why this shape: sparse `Option<...>` fields are currently embedded in by-value nodes before arena index assignment; side tables must be keyed by stable node indices.
   - Initial scope: `PexpFun.default` and `Case.pc_guard`, then expand to `Pexp_construct/variant/record/if/coerce` option payloads after parity is stable.
   - Enabling API work (required first):
-    - Add reserve/initialize APIs for expression/pattern/core_type/module node arenas (or equivalent builder APIs that guarantee stable early index assignment).
-    - Add sparse side tables in `ParseArena` keyed by node indices with explicit reset/clone semantics for parser snapshots and PPX transforms.
+    - [x] Add reserve/initialize APIs for expression/pattern/core_type/module node arenas (or equivalent builder APIs that guarantee stable early index assignment).
+    - [x] Add sparse side tables in `ParseArena` keyed by node indices for initial `ExprIdx` owners (`PexpFun.default`, `Case.pc_guard`) with explicit reset semantics on expression slot initialization.
+    - [ ] Thread parser/PPX/mapper/marshal paths to populate and consume the new side tables (migration work still pending).
   - Migration order (must stay in this order):
     - Parser construction paths
     - PPX / JSX transforms
