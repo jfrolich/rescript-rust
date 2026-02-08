@@ -450,8 +450,8 @@ pub struct TypeArg {
     pub attrs: Attributes,
     /// Argument label.
     pub lbl: ArgLabel,
-    /// Argument type.
-    pub typ: CoreType,
+    /// Argument type (arena index).
+    pub typ: CoreTypeIdx,
 }
 
 /// Core type descriptions.
@@ -464,9 +464,9 @@ pub enum CoreTypeDesc {
     /// Arrow type: `T1 -> T2`.
     Ptyp_arrow(Box<(Box<TypeArg>, CoreTypeIdx, Arity)>),
     /// Tuple type: `(T1, T2, ..., Tn)`.
-    Ptyp_tuple(Box<Vec<CoreType>>),
+    Ptyp_tuple(Box<Vec<CoreTypeIdx>>),
     /// Type constructor: `tconstr` or `T tconstr` or `(T1, ..., Tn) tconstr`.
-    Ptyp_constr(Box<(Loc<LidentIdx>, Vec<CoreType>)>),
+    Ptyp_constr(Box<(Loc<LidentIdx>, Vec<CoreTypeIdx>)>),
     /// Object type: `{. field: T, ... }`.
     Ptyp_object(Box<(Vec<ObjectField>, ClosedFlag)>),
     /// Type alias: `T as 'a`.
@@ -482,24 +482,24 @@ pub enum CoreTypeDesc {
 }
 
 /// Package type: `module S with type t = T`.
-pub type PackageType = (Loc<LidentIdx>, Vec<(Loc<LidentIdx>, CoreType)>);
+pub type PackageType = (Loc<LidentIdx>, Vec<(Loc<LidentIdx>, CoreTypeIdx)>);
 
 /// Row field in a polymorphic variant.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum RowField {
     /// Tag: `\`A of T1 & T2`.
-    Rtag(Loc<Label>, Attributes, bool, Vec<CoreType>),
+    Rtag(Loc<Label>, Attributes, bool, Vec<CoreTypeIdx>),
     /// Inherited type: `[T]`.
-    Rinherit(CoreType),
+    Rinherit(CoreTypeIdx),
 }
 
 /// Object field.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum ObjectField {
     /// Named field: `name: T`.
-    Otag(StringLoc, Attributes, CoreType),
+    Otag(StringLoc, Attributes, CoreTypeIdx),
     /// Inherited type.
-    Oinherit(CoreType),
+    Oinherit(CoreTypeIdx),
 }
 
 // ============================================================================
@@ -531,7 +531,7 @@ pub enum PatternDesc {
     /// Interval: `'a'..'z'`.
     Ppat_interval(Box<(Constant, Constant)>),
     /// Tuple: `(P1, P2, ..., Pn)`.
-    Ppat_tuple(Box<Vec<Pattern>>),
+    Ppat_tuple(Box<Vec<PatIdx>>),
     /// Constructor: `C` or `C(P)`.
     Ppat_construct(Loc<LidentIdx>, Option<PatIdx>),
     /// Variant: `\`A` or `\`A(P)`.
@@ -539,11 +539,11 @@ pub enum PatternDesc {
     /// Record: `{l1: P1, ..., ln: Pn}`.
     Ppat_record(Box<(Vec<PatternRecordField>, ClosedFlag)>),
     /// Array: `[P1, ..., Pn]`.
-    Ppat_array(Box<Vec<Pattern>>),
+    Ppat_array(Box<Vec<PatIdx>>),
     /// Or-pattern: `P1 | P2`.
     Ppat_or(PatIdx, PatIdx),
     /// Constraint: `(P: T)`.
-    Ppat_constraint(Box<(PatIdx, CoreType)>),
+    Ppat_constraint(Box<(PatIdx, CoreTypeIdx)>),
     /// Type pattern: `#tconstr`.
     Ppat_type(Loc<LidentIdx>),
     /// Unpack: `module(P)`.
@@ -561,8 +561,8 @@ pub enum PatternDesc {
 pub struct PatternRecordField {
     /// Field name.
     pub lid: Loc<LidentIdx>,
-    /// Pattern.
-    pub pat: Pattern,
+    /// Pattern (arena index).
+    pub pat: PatIdx,
     /// Whether this is optional.
     pub opt: bool,
 }
@@ -587,7 +587,7 @@ pub struct Expression {
 pub struct PexpFun {
     pub arg_label: ArgLabel,
     pub default: Option<ExprIdx>,
-    pub lhs: Pattern,
+    pub lhs: PatIdx,
     pub rhs: ExprIdx,
     pub arity: Arity,
     pub is_async: bool,
@@ -597,7 +597,7 @@ pub struct PexpFun {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PexpApply {
     pub funct: ExprIdx,
-    pub args: Vec<(ArgLabel, Expression)>,
+    pub args: Vec<(ArgLabel, ExprIdx)>,
     pub partial: bool,
     pub transformed_jsx: bool,
 }
@@ -620,7 +620,7 @@ pub enum ExpressionDesc {
     /// Try: `try E { | P1 => E1 | ... }`.
     Pexp_try(Box<(ExprIdx, Vec<Case>)>),
     /// Tuple: `(E1, E2, ..., En)`.
-    Pexp_tuple(Box<Vec<Expression>>),
+    Pexp_tuple(Box<Vec<ExprIdx>>),
     /// Constructor: `C` or `C(E)`.
     Pexp_construct(Loc<LidentIdx>, Option<ExprIdx>),
     /// Variant: `\`A` or `\`A(E)`.
@@ -632,7 +632,7 @@ pub enum ExpressionDesc {
     /// Field set: `E.l = E'`.
     Pexp_setfield(Box<(ExprIdx, Loc<LidentIdx>, ExprIdx)>),
     /// Array: `[E1, ..., En]`.
-    Pexp_array(Box<Vec<Expression>>),
+    Pexp_array(Box<Vec<ExprIdx>>),
     /// If-then-else: `if E1 { E2 } else { E3 }`.
     Pexp_ifthenelse(Box<(ExprIdx, ExprIdx, Option<ExprIdx>)>),
     /// Sequence: `E1; E2`.
@@ -640,15 +640,15 @@ pub enum ExpressionDesc {
     /// While: `while E1 { E2 }`.
     Pexp_while(ExprIdx, ExprIdx),
     /// For: `for i in E1 to E2 { E3 }`.
-    Pexp_for(Box<(Pattern, ExprIdx, ExprIdx, DirectionFlag, ExprIdx)>),
+    Pexp_for(Box<(PatIdx, ExprIdx, ExprIdx, DirectionFlag, ExprIdx)>),
     /// Constraint: `(E: T)`.
-    Pexp_constraint(Box<(ExprIdx, CoreType)>),
+    Pexp_constraint(Box<(ExprIdx, CoreTypeIdx)>),
     /// Coercion: `(E :> T)`.
-    Pexp_coerce(Box<(ExprIdx, Option<CoreType>, CoreType)>),
+    Pexp_coerce(Box<(ExprIdx, Option<CoreTypeIdx>, CoreTypeIdx)>),
     /// Send: `E#m`.
     Pexp_send(Box<(ExprIdx, Loc<Label>)>),
     /// Let module: `{ module M = ME; E }`.
-    Pexp_letmodule(Box<(StringLoc, ModuleExpr, ExprIdx)>),
+    Pexp_letmodule(Box<(StringLoc, ModExprIdx, ExprIdx)>),
     /// Let exception: `{ exception C; E }`.
     Pexp_letexception(Box<(ExtensionConstructor, ExprIdx)>),
     /// Assert: `assert(E)`.
@@ -672,8 +672,8 @@ pub enum ExpressionDesc {
 pub struct ExpressionRecordField {
     /// Field name.
     pub lid: Loc<LidentIdx>,
-    /// Expression.
-    pub expr: Expression,
+    /// Expression (arena index).
+    pub expr: ExprIdx,
     /// Whether this is optional.
     pub opt: bool,
 }
@@ -683,21 +683,21 @@ pub struct ExpressionRecordField {
 pub struct Case {
     /// Position of the `|` bar.
     pub pc_bar: Option<PosIdx>,
-    /// Left-hand side pattern.
-    pub pc_lhs: Pattern,
-    /// Optional guard expression.
-    pub pc_guard: Option<Expression>,
-    /// Right-hand side expression.
-    pub pc_rhs: Expression,
+    /// Left-hand side pattern (arena index).
+    pub pc_lhs: PatIdx,
+    /// Optional guard expression (arena index).
+    pub pc_guard: Option<ExprIdx>,
+    /// Right-hand side expression (arena index).
+    pub pc_rhs: ExprIdx,
 }
 
 /// A value binding: `let P = E`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ValueBinding {
-    /// Pattern.
-    pub pvb_pat: Pattern,
-    /// Expression.
-    pub pvb_expr: Expression,
+    /// Pattern (arena index).
+    pub pvb_pat: PatIdx,
+    /// Expression (arena index).
+    pub pvb_expr: ExprIdx,
     /// Attributes.
     pub pvb_attributes: Attributes,
     /// Location.
@@ -738,8 +738,8 @@ pub enum JsxTagName {
 pub struct JsxFragment {
     /// Opening `>` position (arena index for sharing with other positions).
     pub opening: crate::parse_arena::PosIdx,
-    /// Children.
-    pub children: Vec<Expression>,
+    /// Children (arena indices).
+    pub children: Vec<ExprIdx>,
     /// Closing `</` position (arena index for sharing with other positions).
     pub closing: crate::parse_arena::PosIdx,
 }
@@ -762,8 +762,8 @@ pub struct JsxContainerElement {
     pub opening_end: PosIdx,
     /// Props.
     pub props: Vec<JsxProp>,
-    /// Children.
-    pub children: Vec<Expression>,
+    /// Children (arena indices).
+    pub children: Vec<ExprIdx>,
     /// Closing tag.
     pub closing_tag: Option<JsxClosingTag>,
 }
@@ -788,10 +788,10 @@ pub enum JsxProp {
     Value {
         name: StringLoc,
         optional: bool,
-        value: Expression,
+        value: ExprIdx,
     },
     /// Spreading: `{...props}`.
-    Spreading { loc: Location, expr: Expression },
+    Spreading { loc: Location, expr: ExprIdx },
 }
 
 // ============================================================================
@@ -888,7 +888,7 @@ pub struct StructureItem {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum StructureItemDesc {
     /// Expression: `E`.
-    Pstr_eval(Box<(Expression, Attributes)>),
+    Pstr_eval(Box<(ExprIdx, Attributes)>),
     /// Value: `let P = E`.
     Pstr_value(Box<(RecFlag, Vec<ValueBinding>)>),
     /// Primitive declaration: `external`.
@@ -960,8 +960,8 @@ pub enum SignatureItemDesc {
 pub struct ValueDescription {
     /// Name.
     pub pval_name: StringLoc,
-    /// Type.
-    pub pval_type: CoreType,
+    /// Type (arena index).
+    pub pval_type: CoreTypeIdx,
     /// Primitive names (for externals).
     pub pval_prim: Vec<StrIdx>,
     /// Attributes.
@@ -976,15 +976,15 @@ pub struct TypeDeclaration {
     /// Name.
     pub ptype_name: StringLoc,
     /// Type parameters.
-    pub ptype_params: Vec<(CoreType, Variance)>,
+    pub ptype_params: Vec<(CoreTypeIdx, Variance)>,
     /// Constraints.
-    pub ptype_cstrs: Vec<(CoreType, CoreType, Location)>,
+    pub ptype_cstrs: Vec<(CoreTypeIdx, CoreTypeIdx, Location)>,
     /// Kind.
     pub ptype_kind: TypeKind,
     /// Private flag.
     pub ptype_private: PrivateFlag,
-    /// Manifest.
-    pub ptype_manifest: Option<CoreType>,
+    /// Manifest (arena index).
+    pub ptype_manifest: Option<CoreTypeIdx>,
     /// Attributes.
     pub ptype_attributes: Attributes,
     /// Location.
@@ -1011,8 +1011,8 @@ pub struct ConstructorDeclaration {
     pub pcd_name: StringLoc,
     /// Arguments.
     pub pcd_args: ConstructorArguments,
-    /// Return type.
-    pub pcd_res: Option<CoreType>,
+    /// Return type (arena index).
+    pub pcd_res: Option<CoreTypeIdx>,
     /// Location.
     pub pcd_loc: Location,
     /// Attributes.
@@ -1023,7 +1023,7 @@ pub struct ConstructorDeclaration {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum ConstructorArguments {
     /// Tuple arguments: `C(T1, T2)`.
-    Pcstr_tuple(Vec<CoreType>),
+    Pcstr_tuple(Vec<CoreTypeIdx>),
     /// Record arguments: `C({field: T})`.
     Pcstr_record(Vec<LabelDeclaration>),
 }
@@ -1035,8 +1035,8 @@ pub struct LabelDeclaration {
     pub pld_name: StringLoc,
     /// Mutable flag.
     pub pld_mutable: MutableFlag,
-    /// Type.
-    pub pld_type: CoreType,
+    /// Type (arena index).
+    pub pld_type: CoreTypeIdx,
     /// Location.
     pub pld_loc: Location,
     /// Attributes.
@@ -1051,7 +1051,7 @@ pub struct TypeExtension {
     /// Extended type.
     pub ptyext_path: Loc<LidentIdx>,
     /// Type parameters.
-    pub ptyext_params: Vec<(CoreType, Variance)>,
+    pub ptyext_params: Vec<(CoreTypeIdx, Variance)>,
     /// Constructors.
     pub ptyext_constructors: Vec<ExtensionConstructor>,
     /// Private flag.
@@ -1077,7 +1077,7 @@ pub struct ExtensionConstructor {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum ExtensionConstructorKind {
     /// Declaration: `C of T`.
-    Pext_decl(ConstructorArguments, Option<CoreType>),
+    Pext_decl(ConstructorArguments, Option<CoreTypeIdx>),
     /// Rebind: `C = D`.
     Pext_rebind(Loc<LidentIdx>),
 }
@@ -1087,8 +1087,8 @@ pub enum ExtensionConstructorKind {
 pub struct ModuleBinding {
     /// Name.
     pub pmb_name: StringLoc,
-    /// Expression.
-    pub pmb_expr: ModuleExpr,
+    /// Expression (arena index).
+    pub pmb_expr: ModExprIdx,
     /// Attributes.
     pub pmb_attributes: Attributes,
     /// Location.
@@ -1100,8 +1100,8 @@ pub struct ModuleBinding {
 pub struct ModuleDeclaration {
     /// Name.
     pub pmd_name: StringLoc,
-    /// Type.
-    pub pmd_type: ModuleType,
+    /// Type (arena index).
+    pub pmd_type: ModTypeIdx,
     /// Attributes.
     pub pmd_attributes: Attributes,
     /// Location.
@@ -1113,8 +1113,8 @@ pub struct ModuleDeclaration {
 pub struct ModuleTypeDeclaration {
     /// Name.
     pub pmtd_name: StringLoc,
-    /// Type.
-    pub pmtd_type: Option<ModuleType>,
+    /// Type (arena index).
+    pub pmtd_type: Option<ModTypeIdx>,
     /// Attributes.
     pub pmtd_attributes: Attributes,
     /// Location.
@@ -1137,8 +1137,8 @@ pub struct OpenDescription {
 /// Include declaration: `include ME`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct IncludeDeclaration {
-    /// Included module.
-    pub pincl_mod: ModuleExpr,
+    /// Included module (arena index).
+    pub pincl_mod: ModExprIdx,
     /// Location.
     pub pincl_loc: Location,
     /// Attributes.
@@ -1148,8 +1148,8 @@ pub struct IncludeDeclaration {
 /// Include description: `include S`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct IncludeDescription {
-    /// Included module type.
-    pub pincl_mod: ModuleType,
+    /// Included module type (arena index).
+    pub pincl_mod: ModTypeIdx,
     /// Location.
     pub pincl_loc: Location,
     /// Attributes.
@@ -1223,5 +1223,14 @@ mod tests {
         println!("TypeDeclaration:    {} bytes", size_of::<TypeDeclaration>());
         println!("PexpFun:            {} bytes", size_of::<PexpFun>());
         println!("PexpApply:          {} bytes", size_of::<PexpApply>());
+        println!("Case:               {} bytes", size_of::<Case>());
+        println!("ConstructorDecl:    {} bytes", size_of::<ConstructorDeclaration>());
+        println!("ExprRecordField:    {} bytes", size_of::<ExpressionRecordField>());
+        println!("PatRecordField:     {} bytes", size_of::<PatternRecordField>());
+        println!("TypeArg:            {} bytes", size_of::<TypeArg>());
+        println!("ModuleBinding:      {} bytes", size_of::<ModuleBinding>());
+        println!("ModuleDeclaration:  {} bytes", size_of::<ModuleDeclaration>());
+        println!("LabelDeclaration:   {} bytes", size_of::<LabelDeclaration>());
+        println!("JsxProp:            {} bytes", size_of::<JsxProp>());
     }
 }

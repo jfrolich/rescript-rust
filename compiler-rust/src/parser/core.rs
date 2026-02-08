@@ -4,7 +4,7 @@
 //! stream into an AST. It mirrors `res_core.ml` from the OCaml implementation.
 
 use crate::location::Position;
-use crate::parse_arena::{CoreTypeIdx, ExprIdx, LocIdx, ModExprIdx, ModTypeIdx, ParseArena, PatIdx, PosIdx, StrIdx};
+use crate::parse_arena::{CoreTypeIdx, LocIdx, ParseArena, PosIdx, StrIdx};
 use crate::parser::DiagnosticCategory;
 
 use std::borrow::Cow;
@@ -512,16 +512,18 @@ pub fn skip_doc_comments(p: &mut Parser<'_>) {
 pub fn doc_comment_to_attribute(arena: &mut ParseArena, loc: Location, content: impl Into<String>) -> Attribute {
     let str_idx = arena.intern("res.doc");
     let name = with_loc(str_idx, loc);
+    let expr = Expression {
+        pexp_desc: Box::new(ExpressionDesc::Pexp_constant(Box::new(Constant::String(
+            Cow::Owned(content.into()),
+            None,
+        )))),
+        pexp_loc: loc,
+        pexp_attributes: Attributes::new(),
+    };
+    let expr_idx = arena.push_expr(expr);
     let payload = Payload::PStr(Box::new(vec![StructureItem {
         pstr_desc: Box::new(StructureItemDesc::Pstr_eval(Box::new((
-            Expression {
-                pexp_desc: Box::new(ExpressionDesc::Pexp_constant(Box::new(Constant::String(
-                    Cow::Owned(content.into()),
-                    None,
-                )))),
-                pexp_loc: loc,
-                pexp_attributes: Attributes::new(),
-            },
+            expr_idx,
             Attributes::new(),
         )))),
         pstr_loc: loc,
@@ -646,10 +648,11 @@ pub mod ast_helper {
         loc: Location,
     ) -> Expression {
         let funct = arena.push_expr(func);
+        let args_idx = args.into_iter().map(|(lbl, e)| (lbl, arena.push_expr(e))).collect();
         make_expr(
             ExpressionDesc::Pexp_apply(Box::new(PexpApply {
                 funct,
-                args,
+                args: args_idx,
                 partial: false,
                 transformed_jsx: false,
             })),
@@ -666,10 +669,11 @@ pub mod ast_helper {
         partial: bool,
     ) -> Expression {
         let funct = arena.push_expr(func);
+        let args_idx = args.into_iter().map(|(lbl, e)| (lbl, arena.push_expr(e))).collect();
         make_expr(
             ExpressionDesc::Pexp_apply(Box::new(PexpApply {
                 funct,
-                args,
+                args: args_idx,
                 partial,
                 transformed_jsx: false,
             })),
@@ -750,7 +754,9 @@ pub mod ast_helper {
             let end_idx = p.loc_end_idx(result.ppat_loc);
             let tuple_loc = p.mk_loc_idx_full(start_idx, end_idx);
             let cons_loc = tuple_loc;
-            let tuple = make_pat(PatternDesc::Ppat_tuple(Box::new(vec![item, result])), tuple_loc);
+            let item_idx = p.arena_mut().push_pat(item);
+            let result_idx = p.arena_mut().push_pat(result);
+            let tuple = make_pat(PatternDesc::Ppat_tuple(Box::new(vec![item_idx, result_idx])), tuple_loc);
             let tuple_idx = p.arena_mut().push_pat(tuple);
             let cons = with_loc(cons_idx, cons_loc);
             result = make_pat(
@@ -772,7 +778,7 @@ pub mod ast_helper {
     /// This matches OCaml's behavior.
     pub fn make_type_constr(
         lid_idx: crate::parse_arena::LidentIdx,
-        args: Vec<CoreType>,
+        args: Vec<CoreTypeIdx>,
         lid_loc: Location,
         ptyp_loc: Location,
     ) -> CoreType {
