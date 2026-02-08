@@ -625,7 +625,7 @@ fn try_expand_head<'a>(
 
 /// Fully expand a type through all aliases until it can't be expanded further.
 /// Like OCaml's expand_head_opt: repeatedly calls try_expand_head until stable.
-fn expand_head<'a>(
+pub fn expand_head<'a>(
     ctx: &'a TypeContext<'a>,
     env: &Env,
     ty: TypeExprRef,

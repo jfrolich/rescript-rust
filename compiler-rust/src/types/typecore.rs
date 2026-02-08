@@ -871,8 +871,29 @@ fn transl_type_inner(
                         });
                     }
                     crate::parser::ast::ObjectField::Oinherit(inherit_type) => {
-                        let (inherit_ctyp, _inherit_ty) =
+                        let (inherit_ctyp, inherit_ty) =
                             transl_type_inner(tctx, env, inherit_type)?;
+
+                        // Extract fields from the inherited type (OCaml's typetexp.ml lines 597-617).
+                        // expand_head resolves type aliases/constructors to get the underlying object type.
+                        let expanded = crate::types::ctype::expand_head(ctx, env, inherit_ty);
+                        let expanded_desc = ctx.get_desc(expanded);
+                        if let TypeDesc::Tobject { fields: obj_fields, .. } = &*expanded_desc {
+                            // Walk the Tfield chain and add each field to field_entries
+                            let mut current_field = *obj_fields;
+                            loop {
+                                let fd = ctx.get_desc(ctx.repr(current_field));
+                                match &*fd {
+                                    TypeDesc::Tfield { name, typ, rest, .. } => {
+                                        field_entries.push((name.clone(), *typ));
+                                        current_field = *rest;
+                                    }
+                                    TypeDesc::Tnil => break,
+                                    _ => break,
+                                }
+                            }
+                        }
+
                         typed_fields.push(crate::types::typedtree::ObjectField {
                             of_desc: crate::types::typedtree::ObjectFieldDesc::OTinherit(
                                 inherit_ctyp,
