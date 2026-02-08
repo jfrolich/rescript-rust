@@ -1846,10 +1846,7 @@ fn print_pexp_fun(
                     let (ref expr, ref typ) = **inner;
             // Create a new expression with merged attributes
             let mut merged_expr = expr.as_ref().clone();
-            merged_expr.pexp_attributes = [
-                merged_expr.pexp_attributes.clone(),
-                return_expr.pexp_attributes.clone(),
-            ].concat();
+            merged_expr.pexp_attributes = merged_expr.pexp_attributes.clone().concat(return_expr.pexp_attributes.clone());
             (Some(merged_expr), Some(typ))
         }
         _ => (None, None),
@@ -2504,8 +2501,7 @@ fn print_ternary_expression(
     let attrs: Vec<&Attribute> = parsetree_viewer::filter_ternary_attributes(arena, &e.pexp_attributes);
 
     // Check if any of the printable attributes need parens wrapping
-    let collected: Vec<_> = attrs.iter().map(|a| (*a).clone()).collect();
-    let collected_attrs = collected;
+    let collected_attrs: Attributes = attrs.iter().map(|a| (*a).clone()).collect();
     let needs_parens = parsetree_viewer::filter_parsing_attrs(
         arena, &collected_attrs
     ).iter().any(|attr| parsetree_viewer::is_printable_attribute(arena, attr));

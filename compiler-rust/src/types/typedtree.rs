@@ -918,7 +918,7 @@ impl ValueBinding {
         ValueBinding {
             vb_pat: pat,
             vb_expr: expr,
-            vb_attributes: Vec::new(),
+            vb_attributes: Attributes::new(),
             vb_loc: loc,
         }
     }

@@ -749,7 +749,7 @@ fn transl_type_inner(
                                 inherit_ctyp,
                             ),
                             of_loc: inherit_type.ptyp_loc.clone(),
-                            of_attributes: vec![].into(),
+                            of_attributes: Attributes::new().into(),
                         });
                     }
                 }
@@ -802,7 +802,7 @@ fn transl_type_inner(
                         typed_rows.push(crate::types::typedtree::RowFieldType {
                             rf_desc: crate::types::typedtree::RowFieldDesc::Rinherit(inherit_ctyp),
                             rf_loc: inherit_type.ptyp_loc.clone(),
-                            rf_attributes: vec![].into(),
+                            rf_attributes: Attributes::new().into(),
                         });
                     }
                 }
@@ -3051,7 +3051,7 @@ fn type_pack(
             mod_loc: loc,
             mod_type: crate::types::typedtree::ModuleType::placeholder(),
             mod_env: EnvRef(0),
-            mod_attributes: vec![].into(),
+            mod_attributes: Attributes::new().into(),
         })),
         loc,
         expected_ty,

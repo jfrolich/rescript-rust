@@ -13,6 +13,7 @@ use crate::ident::Ident;
 use crate::intern::StrIdx;
 use crate::location::Location;
 use crate::parse_arena::{LocIdx, Located, ParseArena};
+use crate::parser::ast::Attributes;
 use crate::parser::ast::RecFlag;
 use crate::parser::ast::{
     ModuleExpr as ParsedModuleExpr, ModuleExprDesc as ParsedModuleExprDesc,
@@ -416,7 +417,7 @@ fn type_structure_item<'a>(
                                             ctyp_type: poly_type_ref,
                                             ctyp_env: typed_core_type.ctyp_env,
                                             ctyp_loc: typed_core_type.ctyp_loc.clone(),
-                                            ctyp_attributes: vec![],
+                                            ctyp_attributes: Attributes::new(),
                                         };
                                         typed_labels.push(TypedLabelDeclaration {
                                             ld_id: Ident::create_persistent(lbl_name_str),
@@ -518,7 +519,7 @@ fn type_structure_item<'a>(
                                 ctyp_type: poly_type_ref,
                                 ctyp_env: typed_core_type.ctyp_env,
                                 ctyp_loc: typed_core_type.ctyp_loc,
-                                ctyp_attributes: vec![],
+                                ctyp_attributes: Attributes::new(),
                             };
                             typed_tree_labels.push(TypedLabelDeclaration {
                                 ld_id: Ident::create_persistent(lbl_name_str),
@@ -611,7 +612,7 @@ fn type_structure_item<'a>(
                 tyext_constructors: vec![],
                 tyext_private: crate::parser::ast::PrivateFlag::Public,
                 tyext_loc: loc,
-                tyext_attributes: vec![],
+                tyext_attributes: Attributes::new(),
             });
             Ok((
                 StructureItem {
@@ -647,7 +648,7 @@ fn type_structure_item<'a>(
                         None,
                     ),
                     ext_loc: loc,
-                    ext_attributes: vec![],
+                    ext_attributes: Attributes::new(),
                 });
             Ok((
                 StructureItem {
@@ -741,7 +742,7 @@ fn type_structure_item<'a>(
                     mod_loc: loc,
                     mod_type: ModuleType::placeholder(),
                     mod_env: EnvRef(0),
-                    mod_attributes: vec![],
+                    mod_attributes: Attributes::new(),
                 },
                 open_override: open_desc.popen_override,
                 open_env: EnvRef(0),
@@ -806,9 +807,9 @@ fn type_structure_item<'a>(
                     loc.clone(),
                     unit_ty,
                     EnvRef(0),
-                    vec![],
+                    Attributes::new(),
                 ),
-                vec![],
+                Attributes::new(),
             );
             Ok((
                 StructureItem {

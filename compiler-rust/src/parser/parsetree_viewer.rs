@@ -834,6 +834,11 @@ pub fn is_spread_belt_list_concat(arena: &ParseArena, expr: &Expression) -> bool
 
 /// Filter out parsing-only attributes (res.braces, res.ternary, res.await, etc.)
 pub fn filter_parsing_attrs<'a>(arena: &ParseArena, attrs: &'a Attributes) -> Vec<&'a Attribute> {
+    filter_parsing_attrs_slice(arena, attrs.as_slice())
+}
+
+/// Like `filter_parsing_attrs` but takes a plain slice instead of Attributes.
+pub fn filter_parsing_attrs_slice<'a>(arena: &ParseArena, attrs: &'a [Attribute]) -> Vec<&'a Attribute> {
     attrs
         .iter()
         .filter(|attr| {
@@ -1231,7 +1236,7 @@ pub fn arrow_type<'a>(
 }
 
 /// Empty attributes constant for returning references.
-static EMPTY_ATTRS: Attributes = Vec::new();
+static EMPTY_ATTRS: Attributes = Attributes(None);
 
 // ============================================================================
 // Module Analysis
