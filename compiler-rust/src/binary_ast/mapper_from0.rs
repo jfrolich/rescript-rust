@@ -18,7 +18,7 @@ use std::borrow::Cow;
 use crate::intern::StrIdx;
 use crate::location::Location as FullLocation;
 use crate::location::Located as OldLocated;
-use crate::parse_arena::{Located, LocIdx, ParseArena};
+use crate::parse_arena::{Located, LocIdx, ParseArena, ExprIdx, PatIdx, CoreTypeIdx, ModExprIdx, ModTypeIdx};
 use crate::parser::ast::{self as current, Attributes};
 use crate::parser::longident::Longident;
 
@@ -297,6 +297,35 @@ impl<'a> Mapper<'a> {
         self.arena.get_string(idx)
     }
 
+    // ========== Arena push helpers ==========
+    // These methods map a pt0 value and push the result into the arena,
+    // returning an arena index suitable for the current AST types.
+
+    fn push_expr(&mut self, expr: &pt0::Expression) -> ExprIdx {
+        let mapped = self.map_expression(expr);
+        self.arena.push_expr(mapped)
+    }
+
+    fn push_pat(&mut self, pat: &pt0::Pattern) -> PatIdx {
+        let mapped = self.map_pattern(pat);
+        self.arena.push_pat(mapped)
+    }
+
+    fn push_core_type(&mut self, ct: &pt0::CoreType) -> CoreTypeIdx {
+        let mapped = self.map_core_type(ct);
+        self.arena.push_core_type(mapped)
+    }
+
+    fn push_mod_expr(&mut self, me: &pt0::ModuleExpr) -> ModExprIdx {
+        let mapped = self.map_module_expr(me);
+        self.arena.push_mod_expr(mapped)
+    }
+
+    fn push_mod_type(&mut self, mt: &pt0::ModuleType) -> ModTypeIdx {
+        let mapped = self.map_module_type(mt);
+        self.arena.push_mod_type(mapped)
+    }
+
     // ========== Public API ==========
 
     /// Convert a structure from parsetree0 to current parsetree
@@ -339,9 +368,9 @@ impl<'a> Mapper<'a> {
         match payload {
             pt0::Payload::PStr(str) => current::Payload::PStr(Box::new(self.map_structure(str))),
             pt0::Payload::PSig(sig) => current::Payload::PSig(Box::new(self.map_signature(sig))),
-            pt0::Payload::PTyp(t) => current::Payload::PTyp(Box::new(self.map_core_type(t))),
+            pt0::Payload::PTyp(t) => current::Payload::PTyp(self.push_core_type(t)),
             pt0::Payload::PPat(p, guard) => {
-                current::Payload::PPat(Box::new((Box::new(self.map_pattern(p)), guard.as_ref().map(|g| Box::new(self.map_expression(g))))))
+                current::Payload::PPat(Box::new((self.push_pat(p), guard.as_ref().map(|g| self.push_expr(g)))))
             }
         }
     }
@@ -357,12 +386,13 @@ impl<'a> Mapper<'a> {
             pt0::CoreTypeDesc::Var(s) => current::CoreTypeDesc::Ptyp_var(Box::new(Cow::Owned(s.clone()))),
             pt0::CoreTypeDesc::Arrow(lbl, t1, t2) => {
                 let lbl = self.map_arg_label(lbl);
+                let ret_idx = self.push_core_type(t2);
                 return current::CoreType {
                     ptyp_desc: Box::new(current::CoreTypeDesc::Ptyp_arrow(Box::new((Box::new(current::TypeArg {
                             attrs: attrs,
                             lbl,
                             typ: self.map_core_type(t1),
-                        }), Box::new(self.map_core_type(t2)), self.arena.push_arity(None))))),
+                        }), ret_idx, self.arena.push_arity(None))))),
                     ptyp_loc: loc,
                     ptyp_attributes: Attributes::new(),
                 };
@@ -404,16 +434,18 @@ impl<'a> Mapper<'a> {
                 current::CoreTypeDesc::Ptyp_object(Box::new((fields, map_closed_flag(closed))))
             }
             pt0::CoreTypeDesc::Alias(t, s) => {
-                current::CoreTypeDesc::Ptyp_alias(Box::new((Box::new(self.map_core_type(t)), Cow::Owned(s.clone()))))
+                let ct_idx = self.push_core_type(t);
+                current::CoreTypeDesc::Ptyp_alias(Box::new((ct_idx, Cow::Owned(s.clone()))))
             }
             pt0::CoreTypeDesc::Variant(rows, closed, labels) => {
                 let rows = rows.iter().map(|r| self.map_row_field(r)).collect();
                 current::CoreTypeDesc::Ptyp_variant(Box::new((rows, map_closed_flag(closed), labels.clone().map(|l| l.iter().map(|s| Cow::Owned(s.clone())).collect()))))
             }
             pt0::CoreTypeDesc::Poly(vars, t) => {
+                let ct_idx = self.push_core_type(t);
                 current::CoreTypeDesc::Ptyp_poly(Box::new((
                     vars.iter().map(|v| self.map_string_loc(v)).collect(),
-                    Box::new(self.map_core_type(t)),
+                    ct_idx,
                 )))
             }
             pt0::CoreTypeDesc::Package(pkg) => {
@@ -470,7 +502,7 @@ impl<'a> Mapper<'a> {
             pt0::PatternDesc::Any => current::PatternDesc::Ppat_any,
             pt0::PatternDesc::Var(s) => current::PatternDesc::Ppat_var(self.map_string_loc(s)),
             pt0::PatternDesc::Alias(p, s) => {
-                current::PatternDesc::Ppat_alias(Box::new(self.map_pattern(p)), self.map_string_loc(s))
+                current::PatternDesc::Ppat_alias(self.push_pat(p), self.map_string_loc(s))
             }
             pt0::PatternDesc::Constant(c) => current::PatternDesc::Ppat_constant(Box::new(map_constant(c))),
             pt0::PatternDesc::Interval(c1, c2) => {
@@ -482,11 +514,11 @@ impl<'a> Mapper<'a> {
             pt0::PatternDesc::Construct(lid, arg) => {
                 current::PatternDesc::Ppat_construct(
                     self.map_longident_loc(lid),
-                    arg.as_ref().map(|p| Box::new(self.map_pattern(p)))
+                    arg.as_ref().map(|p| self.push_pat(p))
                 )
             }
             pt0::PatternDesc::Variant(tag, arg) => {
-                current::PatternDesc::Ppat_variant(Box::new((Cow::Owned(tag.clone()), arg.as_ref().map(|p| Box::new(self.map_pattern(p))))))
+                current::PatternDesc::Ppat_variant(Box::new((Cow::Owned(tag.clone()), arg.as_ref().map(|p| self.push_pat(p)))))
             }
             pt0::PatternDesc::Record(fields, closed) => {
                 let fields = fields.iter().map(|pt0::RecordElement { lid, x: pat, opt }| {
@@ -508,10 +540,10 @@ impl<'a> Mapper<'a> {
                 current::PatternDesc::Ppat_array(Box::new(pl.iter().map(|p| self.map_pattern(p)).collect()))
             }
             pt0::PatternDesc::Or(p1, p2) => {
-                current::PatternDesc::Ppat_or(Box::new(self.map_pattern(p1)), Box::new(self.map_pattern(p2)))
+                current::PatternDesc::Ppat_or(self.push_pat(p1), self.push_pat(p2))
             }
             pt0::PatternDesc::Constraint(p, t) => {
-                current::PatternDesc::Ppat_constraint(Box::new((Box::new(self.map_pattern(p)), self.map_core_type(t))))
+                current::PatternDesc::Ppat_constraint(Box::new((self.push_pat(p), self.map_core_type(t))))
             }
             pt0::PatternDesc::Type(lid) => {
                 current::PatternDesc::Ppat_type(self.map_longident_loc(lid))
@@ -520,10 +552,10 @@ impl<'a> Mapper<'a> {
                 current::PatternDesc::Ppat_unpack(self.map_string_loc(name))
             }
             pt0::PatternDesc::Open(lid, p) => {
-                current::PatternDesc::Ppat_open(self.map_longident_loc(lid), Box::new(self.map_pattern(p)))
+                current::PatternDesc::Ppat_open(self.map_longident_loc(lid), self.push_pat(p))
             }
             pt0::PatternDesc::Exception(p) => {
-                current::PatternDesc::Ppat_exception(Box::new(self.map_pattern(p)))
+                current::PatternDesc::Ppat_exception(self.push_pat(p))
             }
             pt0::PatternDesc::Extension(ext) => {
                 current::PatternDesc::Ppat_extension(Box::new(self.map_extension(ext)))
@@ -705,8 +737,9 @@ impl<'a> Mapper<'a> {
                 pexp_loc: expr.pexp_loc.clone(),
                 pexp_attributes: new_attrs,
             };
+            let await_idx = self.push_expr(&inner_expr);
             return current::Expression {
-                pexp_desc: Box::new(current::ExpressionDesc::Pexp_await(Box::new(self.map_expression(&inner_expr)))),
+                pexp_desc: Box::new(current::ExpressionDesc::Pexp_await(await_idx)),
                 pexp_loc: loc,
                 pexp_attributes: Attributes::new(),
             };
@@ -715,17 +748,22 @@ impl<'a> Mapper<'a> {
         let desc = match &expr.pexp_desc {
             pt0::ExpressionDesc::Ident(lid) => current::ExpressionDesc::Pexp_ident(self.map_longident_loc(lid)),
             pt0::ExpressionDesc::Constant(c) => current::ExpressionDesc::Pexp_constant(Box::new(map_constant(c))),
-            pt0::ExpressionDesc::Let(rec_flag, bindings, body) => current::ExpressionDesc::Pexp_let(Box::new((
-                map_rec_flag(*rec_flag),
-                bindings.iter().map(|vb| self.map_value_binding(vb)).collect(),
-                Box::new(self.map_expression(body)),
-            ))),
+            pt0::ExpressionDesc::Let(rec_flag, bindings, body) => {
+                let body_idx = self.push_expr(body);
+                current::ExpressionDesc::Pexp_let(Box::new((
+                    map_rec_flag(*rec_flag),
+                    bindings.iter().map(|vb| self.map_value_binding(vb)).collect(),
+                    body_idx,
+                )))
+            }
             pt0::ExpressionDesc::Fun { arg_label: lbl, default, lhs: pat, rhs: body, arity, is_async } => {
+                let default_idx = default.as_ref().map(|e| self.push_expr(e));
+                let rhs_idx = self.push_expr(body);
                 current::ExpressionDesc::Pexp_fun(Box::new(PexpFun {
                     arg_label: self.map_arg_label(lbl),
-                    default: default.as_ref().map(|e| Box::new(self.map_expression(e))),
+                    default: default_idx,
                     lhs: self.map_pattern(pat),
-                    rhs: Box::new(self.map_expression(body)),
+                    rhs: rhs_idx,
                     arity: map_arity(arity, self.arena),
                     is_async: *is_async,
                 }))
@@ -812,9 +850,13 @@ impl<'a> Mapper<'a> {
                     func.as_ref().clone()
                 };
 
+                let funct_idx = {
+                    let mapped = self.map_expression(&func);
+                    self.arena.push_expr(mapped)
+                };
                 return current::Expression {
                     pexp_desc: Box::new(current::ExpressionDesc::Pexp_apply(Box::new(PexpApply {
-                        funct: Box::new(self.map_expression(&func)),
+                        funct: funct_idx,
                         args: args
                             .iter()
                             .map(|(lbl, e)| (self.map_arg_label(lbl), self.map_expression(e)))
@@ -826,14 +868,20 @@ impl<'a> Mapper<'a> {
                     pexp_attributes: attrs.into(),
                 };
             }
-            pt0::ExpressionDesc::Match(e, cases) => current::ExpressionDesc::Pexp_match(Box::new((
-                Box::new(self.map_expression(e)),
-                cases.iter().map(|c| self.map_case(c)).collect(),
-            ))),
-            pt0::ExpressionDesc::Try(e, cases) => current::ExpressionDesc::Pexp_try(Box::new((
-                Box::new(self.map_expression(e)),
-                cases.iter().map(|c| self.map_case(c)).collect(),
-            ))),
+            pt0::ExpressionDesc::Match(e, cases) => {
+                let e_idx = self.push_expr(e);
+                current::ExpressionDesc::Pexp_match(Box::new((
+                    e_idx,
+                    cases.iter().map(|c| self.map_case(c)).collect(),
+                )))
+            }
+            pt0::ExpressionDesc::Try(e, cases) => {
+                let e_idx = self.push_expr(e);
+                current::ExpressionDesc::Pexp_try(Box::new((
+                    e_idx,
+                    cases.iter().map(|c| self.map_case(c)).collect(),
+                )))
+            }
             pt0::ExpressionDesc::Tuple(el) => {
                 current::ExpressionDesc::Pexp_tuple(Box::new(el.iter().map(|e| self.map_expression(e)).collect()))
             }
@@ -889,12 +937,12 @@ impl<'a> Mapper<'a> {
                 }
                 current::ExpressionDesc::Pexp_construct(
                     self.map_longident_loc(lid),
-                    arg.as_ref().map(|e| Box::new(self.map_expression(e))),
+                    arg.as_ref().map(|e| self.push_expr(e)),
                 )
             }
             pt0::ExpressionDesc::Variant(label, arg) => current::ExpressionDesc::Pexp_variant(Box::new((
                 Cow::Owned(label.clone()),
-                arg.as_ref().map(|e| Box::new(self.map_expression(e))),
+                arg.as_ref().map(|e| self.push_expr(e)),
             ))),
             pt0::ExpressionDesc::Record(fields, base) => {
                 let fields = fields
@@ -921,70 +969,104 @@ impl<'a> Mapper<'a> {
                     .collect();
                 current::ExpressionDesc::Pexp_record(Box::new((
                     fields,
-                    base.as_ref().map(|e| Box::new(self.map_expression(e))),
+                    base.as_ref().map(|e| self.push_expr(e)),
                 )))
             }
             pt0::ExpressionDesc::Field(e, lid) => {
-                current::ExpressionDesc::Pexp_field(Box::new(self.map_expression(e)), self.map_longident_loc(lid))
+                let e_idx = self.push_expr(e);
+                current::ExpressionDesc::Pexp_field(e_idx, self.map_longident_loc(lid))
             }
-            pt0::ExpressionDesc::Setfield(e1, lid, e2) => current::ExpressionDesc::Pexp_setfield(Box::new((
-                Box::new(self.map_expression(e1)),
-                self.map_longident_loc(lid),
-                Box::new(self.map_expression(e2)),
-            ))),
+            pt0::ExpressionDesc::Setfield(e1, lid, e2) => {
+                let e1_idx = self.push_expr(e1);
+                let e2_idx = self.push_expr(e2);
+                current::ExpressionDesc::Pexp_setfield(Box::new((
+                    e1_idx,
+                    self.map_longident_loc(lid),
+                    e2_idx,
+                )))
+            }
             pt0::ExpressionDesc::Array(el) => {
                 current::ExpressionDesc::Pexp_array(Box::new(el.iter().map(|e| self.map_expression(e)).collect()))
             }
-            pt0::ExpressionDesc::Ifthenelse(e1, e2, e3) => current::ExpressionDesc::Pexp_ifthenelse(Box::new((
-                Box::new(self.map_expression(e1)),
-                Box::new(self.map_expression(e2)),
-                e3.as_ref().map(|e| Box::new(self.map_expression(e))),
-            ))),
-            pt0::ExpressionDesc::Sequence(e1, e2) => current::ExpressionDesc::Pexp_sequence(
-                Box::new(self.map_expression(e1)),
-                Box::new(self.map_expression(e2)),
-            ),
-            pt0::ExpressionDesc::While(e1, e2) => current::ExpressionDesc::Pexp_while(
-                Box::new(self.map_expression(e1)),
-                Box::new(self.map_expression(e2)),
-            ),
-            pt0::ExpressionDesc::For(pat, e1, e2, dir, e3) => current::ExpressionDesc::Pexp_for(Box::new((
-                self.map_pattern(pat),
-                Box::new(self.map_expression(e1)),
-                Box::new(self.map_expression(e2)),
-                map_direction_flag(*dir),
-                Box::new(self.map_expression(e3)),
-            ))),
+            pt0::ExpressionDesc::Ifthenelse(e1, e2, e3) => {
+                let e1_idx = self.push_expr(e1);
+                let e2_idx = self.push_expr(e2);
+                let e3_idx = e3.as_ref().map(|e| self.push_expr(e));
+                current::ExpressionDesc::Pexp_ifthenelse(Box::new((
+                    e1_idx,
+                    e2_idx,
+                    e3_idx,
+                )))
+            }
+            pt0::ExpressionDesc::Sequence(e1, e2) => {
+                let e1_idx = self.push_expr(e1);
+                let e2_idx = self.push_expr(e2);
+                current::ExpressionDesc::Pexp_sequence(e1_idx, e2_idx)
+            }
+            pt0::ExpressionDesc::While(e1, e2) => {
+                let e1_idx = self.push_expr(e1);
+                let e2_idx = self.push_expr(e2);
+                current::ExpressionDesc::Pexp_while(e1_idx, e2_idx)
+            }
+            pt0::ExpressionDesc::For(pat, e1, e2, dir, e3) => {
+                let e1_idx = self.push_expr(e1);
+                let e2_idx = self.push_expr(e2);
+                let e3_idx = self.push_expr(e3);
+                current::ExpressionDesc::Pexp_for(Box::new((
+                    self.map_pattern(pat),
+                    e1_idx,
+                    e2_idx,
+                    map_direction_flag(*dir),
+                    e3_idx,
+                )))
+            }
             pt0::ExpressionDesc::Coerce(e, _, t) => {
-                current::ExpressionDesc::Pexp_coerce(Box::new((Box::new(self.map_expression(e)), None, self.map_core_type(t))))
+                let e_idx = self.push_expr(e);
+                current::ExpressionDesc::Pexp_coerce(Box::new((e_idx, None, self.map_core_type(t))))
             }
             pt0::ExpressionDesc::Constraint(e, t) => {
-                current::ExpressionDesc::Pexp_constraint(Box::new((Box::new(self.map_expression(e)), self.map_core_type(t))))
+                let e_idx = self.push_expr(e);
+                current::ExpressionDesc::Pexp_constraint(Box::new((e_idx, self.map_core_type(t))))
             }
             pt0::ExpressionDesc::Send(e, method) => {
-                current::ExpressionDesc::Pexp_send(Box::new((Box::new(self.map_expression(e)), self.map_label_loc(method))))
+                let e_idx = self.push_expr(e);
+                current::ExpressionDesc::Pexp_send(Box::new((e_idx, self.map_label_loc(method))))
             }
-            pt0::ExpressionDesc::Letmodule(name, me, body) => current::ExpressionDesc::Pexp_letmodule(Box::new((
-                self.map_string_loc(name),
-                self.map_module_expr(me),
-                Box::new(self.map_expression(body)),
-            ))),
-            pt0::ExpressionDesc::Letexception(ec, body) => current::ExpressionDesc::Pexp_letexception(Box::new((
-                self.map_extension_constructor(ec),
-                Box::new(self.map_expression(body)),
-            ))),
+            pt0::ExpressionDesc::Letmodule(name, me, body) => {
+                let body_idx = self.push_expr(body);
+                current::ExpressionDesc::Pexp_letmodule(Box::new((
+                    self.map_string_loc(name),
+                    self.map_module_expr(me),
+                    body_idx,
+                )))
+            }
+            pt0::ExpressionDesc::Letexception(ec, body) => {
+                let body_idx = self.push_expr(body);
+                current::ExpressionDesc::Pexp_letexception(Box::new((
+                    self.map_extension_constructor(ec),
+                    body_idx,
+                )))
+            }
             pt0::ExpressionDesc::Assert(e) => {
-                current::ExpressionDesc::Pexp_assert(Box::new(self.map_expression(e)))
+                let e_idx = self.push_expr(e);
+                current::ExpressionDesc::Pexp_assert(e_idx)
             }
             pt0::ExpressionDesc::Newtype(name, body) => {
-                current::ExpressionDesc::Pexp_newtype(Box::new((self.map_string_loc(name), Box::new(self.map_expression(body)))))
+                let body_idx = self.push_expr(body);
+                current::ExpressionDesc::Pexp_newtype(Box::new((self.map_string_loc(name), body_idx)))
             }
-            pt0::ExpressionDesc::Pack(me) => current::ExpressionDesc::Pexp_pack(Box::new(self.map_module_expr(me))),
-            pt0::ExpressionDesc::Open(ovf, lid, body) => current::ExpressionDesc::Pexp_open(Box::new((
-                map_override_flag(*ovf),
-                self.map_longident_loc(lid),
-                Box::new(self.map_expression(body)),
-            ))),
+            pt0::ExpressionDesc::Pack(me) => {
+                let me_idx = self.push_mod_expr(me);
+                current::ExpressionDesc::Pexp_pack(me_idx)
+            }
+            pt0::ExpressionDesc::Open(ovf, lid, body) => {
+                let body_idx = self.push_expr(body);
+                current::ExpressionDesc::Pexp_open(Box::new((
+                    map_override_flag(*ovf),
+                    self.map_longident_loc(lid),
+                    body_idx,
+                )))
+            }
             pt0::ExpressionDesc::Extension(ext) => {
                 current::ExpressionDesc::Pexp_extension(Box::new(self.map_extension(ext)))
             }
@@ -1053,20 +1135,28 @@ impl<'a> Mapper<'a> {
             pt0::ModuleExprDesc::Structure(str) => {
                 current::ModuleExprDesc::Pmod_structure(Box::new(self.map_structure(str)))
             }
-            pt0::ModuleExprDesc::Functor(name, mt, body) => current::ModuleExprDesc::Pmod_functor(Box::new((
-                self.map_string_loc(name),
-                mt.as_ref().map(|mt| Box::new(self.map_module_type(mt))),
-                Box::new(self.map_module_expr(body)),
-            ))),
-            pt0::ModuleExprDesc::Apply(m1, m2) => current::ModuleExprDesc::Pmod_apply(
-                Box::new(self.map_module_expr(m1)),
-                Box::new(self.map_module_expr(m2)),
-            ),
+            pt0::ModuleExprDesc::Functor(name, mt, body) => {
+                let mt_idx = mt.as_ref().map(|mt| self.push_mod_type(mt));
+                let body_idx = self.push_mod_expr(body);
+                current::ModuleExprDesc::Pmod_functor(Box::new((
+                    self.map_string_loc(name),
+                    mt_idx,
+                    body_idx,
+                )))
+            }
+            pt0::ModuleExprDesc::Apply(m1, m2) => {
+                let m1_idx = self.push_mod_expr(m1);
+                let m2_idx = self.push_mod_expr(m2);
+                current::ModuleExprDesc::Pmod_apply(m1_idx, m2_idx)
+            }
             pt0::ModuleExprDesc::Constraint(m, mt) => {
-                current::ModuleExprDesc::Pmod_constraint(Box::new(self.map_module_expr(m)), Box::new(self.map_module_type(mt)))
+                let m_idx = self.push_mod_expr(m);
+                let mt_idx = self.push_mod_type(mt);
+                current::ModuleExprDesc::Pmod_constraint(m_idx, mt_idx)
             }
             pt0::ModuleExprDesc::Unpack(e) => {
-                current::ModuleExprDesc::Pmod_unpack(Box::new(self.map_expression(e)))
+                let e_idx = self.push_expr(e);
+                current::ModuleExprDesc::Pmod_unpack(e_idx)
             }
             pt0::ModuleExprDesc::Extension(ext) => {
                 current::ModuleExprDesc::Pmod_extension(Box::new(self.map_extension(ext)))
@@ -1092,17 +1182,25 @@ impl<'a> Mapper<'a> {
             pt0::ModuleTypeDesc::Signature(sig) => {
                 current::ModuleTypeDesc::Pmty_signature(Box::new(self.map_signature(sig)))
             }
-            pt0::ModuleTypeDesc::Functor(name, mt1, mt2) => current::ModuleTypeDesc::Pmty_functor(Box::new((
-                self.map_string_loc(name),
-                mt1.as_ref().map(|m| Box::new(self.map_module_type(m))),
-                Box::new(self.map_module_type(mt2)),
-            ))),
-            pt0::ModuleTypeDesc::With(mt, constraints) => current::ModuleTypeDesc::Pmty_with(Box::new((
-                Box::new(self.map_module_type(mt)),
-                constraints.iter().map(|wc| self.map_with_constraint(wc)).collect(),
-            ))),
+            pt0::ModuleTypeDesc::Functor(name, mt1, mt2) => {
+                let mt1_idx = mt1.as_ref().map(|m| self.push_mod_type(m));
+                let mt2_idx = self.push_mod_type(mt2);
+                current::ModuleTypeDesc::Pmty_functor(Box::new((
+                    self.map_string_loc(name),
+                    mt1_idx,
+                    mt2_idx,
+                )))
+            }
+            pt0::ModuleTypeDesc::With(mt, constraints) => {
+                let mt_idx = self.push_mod_type(mt);
+                current::ModuleTypeDesc::Pmty_with(Box::new((
+                    mt_idx,
+                    constraints.iter().map(|wc| self.map_with_constraint(wc)).collect(),
+                )))
+            }
             pt0::ModuleTypeDesc::Typeof(me) => {
-                current::ModuleTypeDesc::Pmty_typeof(Box::new(self.map_module_expr(me)))
+                let me_idx = self.push_mod_expr(me);
+                current::ModuleTypeDesc::Pmty_typeof(me_idx)
             }
             pt0::ModuleTypeDesc::Extension(ext) => {
                 current::ModuleTypeDesc::Pmty_extension(Box::new(self.map_extension(ext)))
