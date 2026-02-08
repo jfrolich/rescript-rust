@@ -463,4 +463,36 @@ Parity:
 Result: Performance remains neutral overall versus the previous 2.3 baseline.
 ```
 
+### Task 2.4 analysis (Generalized sparse data / side tables) — DEFERRED
+
+```
+Status: Deferred as [~] in RALPH_TODO.md
+
+What was tried:
+1) Audited all Option-bearing AST fields in parser AST (`rg "Option<" parser/ast.rs`), with
+   sparse candidates including:
+   - PexpFun.default: Option<ExprIdx>
+   - Case.pc_guard: Option<ExprIdx>
+   - multiple expression payload options (construct/variant/record/if/coerce)
+2) Traced usage fan-out for PexpFun.default / defaulted function args across parser, PPX,
+   mappers, printers, S-expression emitters, and binary writer.
+3) Validated current baseline before attempting a broad refactor:
+   - benchmark_all: Large 0.81x, Medium 0.53x, Small 0.39x, Tiny 0.32x
+   - parity baseline unchanged (3 sexp-locs, 7 sexp-locs-ppx, 4 bsc-ast non-regression)
+
+Root cause:
+- Sparse options in this AST are embedded in by-value nodes that are constructed before arena
+  index assignment.
+- A side-table design keyed by node index therefore needs a two-phase construction model
+  (reserve index first, then build node + side-table entries) across parser + PPX + mapper
+  + marshal paths.
+- Doing this piecemeal for one field is not parity-safe: marshal identity/sharing behavior and
+  traversal ordering are tightly coupled to current allocation/construction flow.
+
+Decision:
+- Defer 2.4 until a dedicated enabling refactor introduces parity-safe two-phase node
+  reservation/build APIs.
+- This is a structural prerequisite, not a small local optimization.
+```
+
 *Add new entries below as optimizations are applied.*
