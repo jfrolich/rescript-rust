@@ -4,7 +4,7 @@
 //! for pretty-printing instead of direct string output.
 
 use crate::location::Location as FullLocation;
-use crate::parse_arena::{CoreTypeIdx, ExprIdx, LocIdx, ModExprIdx, ModTypeIdx, ParseArena, PatIdx};
+use crate::parse_arena::{LocIdx, ParseArena};
 use crate::parser::ast::*;
 use crate::parser::comment::Comment;
 use crate::parser::comment_table::{walk_signature, walk_structure, CommentTable, PosRange};
@@ -860,7 +860,7 @@ pub fn print_braces(doc: Doc, expr: &Expression, braces_loc: LocIdx, arena: &Par
     }
 
     // For other expressions, wrap in braces
-    let inner_doc = if parens::braced_expr(expr) {
+    let inner_doc = if parens::braced_expr(arena, expr) {
         add_parens(doc)
     } else {
         doc
@@ -1398,7 +1398,7 @@ pub fn print_expression(
         }
         // Send-set: obj#prop = value -> obj["prop"] = value
         ExpressionDesc::Pexp_apply(apply_inner)
-            if is_send_set_expr(arena, arena.get_expr(apply_inner.funct), &apply_inner.args)  => { let PexpApply { ref funct, ref args, .. } = **apply_inner;
+            if is_send_set_expr(arena, arena.get_expr(apply_inner.funct), &apply_inner.args)  => { let PexpApply { ref _funct, ref args, .. } = **apply_inner;
             let lhs = &args[0].1;
             let rhs = &args[1].1;
             // Match OCaml: RHS goes through Parens.expr for brace handling
@@ -1431,7 +1431,7 @@ pub fn print_expression(
             if apply_inner.args.len() == 1
                 && matches!(&apply_inner.args[0].0, ArgLabel::Nolabel)
                 && matches!(&*apply_inner.args[0].1.pexp_desc, ExpressionDesc::Pexp_array(_))
-                && parsetree_viewer::is_spread_belt_array_concat(arena, arena.get_expr(apply_inner.funct))  => { let PexpApply { ref funct, ref args, .. } = **apply_inner;
+                && parsetree_viewer::is_spread_belt_array_concat(arena, arena.get_expr(apply_inner.funct))  => { let PexpApply { ref _funct, ref args, .. } = **apply_inner;
             if let ExpressionDesc::Pexp_array(sub_lists) = &*args[0].1.pexp_desc {
                 print_belt_array_concat_apply(state, sub_lists, cmt_tbl, arena)
             } else {
@@ -1443,7 +1443,7 @@ pub fn print_expression(
             if apply_inner.args.len() == 1
                 && matches!(&apply_inner.args[0].0, ArgLabel::Nolabel)
                 && matches!(&*apply_inner.args[0].1.pexp_desc, ExpressionDesc::Pexp_array(_))
-                && parsetree_viewer::is_spread_belt_list_concat(arena, arena.get_expr(apply_inner.funct))  => { let PexpApply { ref funct, ref args, .. } = **apply_inner;
+                && parsetree_viewer::is_spread_belt_list_concat(arena, arena.get_expr(apply_inner.funct))  => { let PexpApply { ref _funct, ref args, .. } = **apply_inner;
             if let ExpressionDesc::Pexp_array(sub_lists) = &*args[0].1.pexp_desc {
                 print_belt_list_concat_apply(state, sub_lists, cmt_tbl, arena)
             } else {
@@ -2140,8 +2140,8 @@ fn print_exp_fun_parameter(
                 (
                     ArgLabel::Labelled(lbl) | ArgLabel::Optional(lbl),
                     PatternDesc::Ppat_constraint(ppat_inner),
-                ) if matches!(&*ppat_inner.0.ppat_desc, PatternDesc::Ppat_var(v) if arena.get_string(lbl.txt) == arena.get_string(v.txt)) => {
-                    let (ref _ppat, ref typ) = **ppat_inner;
+                ) if matches!(&*arena.get_pat(ppat_inner.0).ppat_desc, PatternDesc::Ppat_var(v) if arena.get_string(lbl.txt) == arena.get_string(v.txt)) => {
+                    let (ref _ppat_idx, ref typ) = **ppat_inner;
                     Doc::concat(vec![
                         print_attributes(state, &pat.ppat_attributes, cmt_tbl, arena),
                         Doc::text("~"),
@@ -3345,7 +3345,7 @@ fn print_template_literal(
                 if apply_inner.args.len() == 2
                     && matches!(&*arena.get_expr(apply_inner.funct).pexp_desc, ExpressionDesc::Pexp_ident(lid)
                         if matches!(arena.get_longident(lid.txt), Longident::Lident(op_idx)
-                            if arena.get_string(*op_idx) == "++"))  => { let PexpApply { ref funct, ref args, .. } = **apply_inner;
+                            if arena.get_string(*op_idx) == "++"))  => { let PexpApply { ref _funct, ref args, .. } = **apply_inner;
                 let lhs = walk_expr(state, &args[0].1, tag, cmt_tbl, arena);
                 let rhs = walk_expr(state, &args[1].1, tag, cmt_tbl, arena);
                 Doc::concat(vec![lhs, rhs])
@@ -4051,7 +4051,7 @@ fn flatten_binary_operand(
             }
 
             // JS object set (#=) - only needs parens on LHS
-            ExpressionDesc::Pexp_apply(apply_inner) if apply_inner.args.len() == 2  => { let PexpApply { ref funct, ref args, .. } = **apply_inner;
+            ExpressionDesc::Pexp_apply(apply_inner) if apply_inner.args.len() == 2  => { let PexpApply { ref funct, ref _args, .. } = **apply_inner;
                 let funct = arena.get_expr(*funct);
                 if let ExpressionDesc::Pexp_ident(ident) = &*funct.pexp_desc {
                     if arena.is_lident(ident.txt, "#=") {
@@ -5180,7 +5180,7 @@ fn print_record_pattern(
                     let label = print_comments(label, cmt_tbl, field.lid.loc, arena);
                     let pat_doc = print_pattern(state, &field.pat, cmt_tbl, arena);
                     // Check if pattern needs parentheses in record row context
-                    let pat_doc = if parens::pattern_record_row_rhs(&field.pat) {
+                    let pat_doc = if parens::pattern_record_row_rhs(arena, &field.pat) {
                         add_parens(pat_doc)
                     } else {
                         pat_doc
@@ -5284,7 +5284,7 @@ fn print_dict_pattern_row(
 
     // Print pattern
     let pat_doc = print_pattern(state, &field.pat, cmt_tbl, arena);
-    let pat_doc = if parens::pattern_record_row_rhs(&field.pat) {
+    let pat_doc = if parens::pattern_record_row_rhs(arena, &field.pat) {
         add_parens(pat_doc)
     } else {
         pat_doc
@@ -5354,7 +5354,8 @@ pub fn print_typ_expr(
         CoreTypeDesc::Ptyp_extension(ext) => print_extension(state, ext, false, cmt_tbl, arena),
 
         CoreTypeDesc::Ptyp_alias(inner) => {
-                    let (ref inner_typ, ref alias) = **inner;
+                    let (ref inner_typ_idx, ref alias) = **inner;
+            let inner_typ = arena.get_core_type(*inner_typ_idx);
             let needs_parens = matches!(&*inner_typ.ptyp_desc, CoreTypeDesc::Ptyp_arrow(_));
             let typ_doc = print_typ_expr(state, inner_typ, cmt_tbl, arena);
             if needs_parens {
@@ -5469,7 +5470,8 @@ pub fn print_typ_expr(
         CoreTypeDesc::Ptyp_tuple(types) => print_tuple_type(state, types, false, cmt_tbl, arena),
 
         CoreTypeDesc::Ptyp_poly(inner) => {
-                    let (ref vars, ref inner_typ) = **inner;
+                    let (ref vars, ref inner_typ_idx) = **inner;
+            let inner_typ = arena.get_core_type(*inner_typ_idx);
             if vars.is_empty() {
                 print_typ_expr(state, inner_typ, cmt_tbl, arena)
             } else {
@@ -6805,12 +6807,13 @@ fn print_try_expression(
 
 /// Check if a pattern needs parentheses in a case context.
 /// Constraint patterns like `(p: typ)` need parens at the case level.
-fn case_pattern_needs_parens(pattern: &Pattern) -> bool {
+fn case_pattern_needs_parens(arena: &ParseArena, pattern: &Pattern) -> bool {
     match &*pattern.ppat_desc {
         // Constraint patterns need parens: | (p: typ) => ...
         // Exception: module(M: S) doesn't need extra parens
         PatternDesc::Ppat_constraint(inner) => {
-                    let (ref inner, ref typ) = **inner;
+                    let (ref inner_idx, ref typ) = **inner;
+            let inner = arena.get_pat(*inner_idx);
             !(matches!(&*inner.ppat_desc, PatternDesc::Ppat_unpack(_))
                 && matches!(&*typ.ptyp_desc, CoreTypeDesc::Ptyp_package(_)))
         }
@@ -6983,7 +6986,7 @@ fn print_case_content(
     // Print pattern
     let pattern_doc = {
         let doc = print_pattern(state, &case.pc_lhs, cmt_tbl, arena);
-        if case_pattern_needs_parens(&case.pc_lhs) {
+        if case_pattern_needs_parens(arena, &case.pc_lhs) {
             add_parens(doc)
         } else {
             doc
@@ -7077,7 +7080,8 @@ fn print_value_binding(
         PatternDesc::Ppat_constraint(pat_inner),
         ExpressionDesc::Pexp_newtype(_),
     ) = (&*vb.pvb_pat.ppat_desc, &*vb.pvb_expr.pexp_desc) {
-        let (ref inner_pat, ref pat_typ) = **pat_inner;
+        let (ref inner_pat_idx, ref pat_typ) = **pat_inner;
+        let inner_pat = arena.get_pat(*inner_pat_idx);
         if matches!(*pat_typ.ptyp_desc, CoreTypeDesc::Ptyp_poly(_)) {
             let (_, parameters, return_expr) = parsetree_viewer::fun_expr(arena, &vb.pvb_expr);
 
@@ -7192,7 +7196,8 @@ fn print_value_binding(
         match &*vb.pvb_expr.pexp_desc {
             // Ternary with res.ternary attribute: indent if condition is binary or has attrs
             ExpressionDesc::Pexp_ifthenelse(inner) if parsetree_viewer::has_ternary_attribute(arena, &vb.pvb_expr.pexp_attributes) => {
-                let (ref if_expr, _, _) = **inner;
+                let (ref if_expr_idx, _, _) = **inner;
+                let if_expr = arena.get_expr(*if_expr_idx);
                 parsetree_viewer::is_binary_expression(arena, if_expr)
                     || parsetree_viewer::has_attributes(arena, &if_expr.pexp_attributes)
             }
@@ -7444,20 +7449,20 @@ fn print_payload(state: &PrinterState, payload: &Payload, cmt_tbl: &mut CommentT
             Doc::soft_line(),
             Doc::rparen(),
         ]),
-        Payload::PTyp(typ) => Doc::concat(vec![
+        Payload::PTyp(typ_idx) => Doc::concat(vec![
             Doc::text("(: "),
-            print_typ_expr(state, typ, cmt_tbl, arena),
+            print_typ_expr(state, arena.get_core_type(*typ_idx), cmt_tbl, arena),
             Doc::text(")"),
         ]),
         Payload::PPat(inner) => {
-                    let (ref pat, ref guard) = **inner;
-            let pat_doc = print_pattern(state, pat, cmt_tbl, arena);
+                    let (ref pat_idx, ref guard) = **inner;
+            let pat_doc = print_pattern(state, arena.get_pat(*pat_idx), cmt_tbl, arena);
             // OCaml: when_doc = Doc.line; Doc.text "if "; print_expression ...
             let guard_doc = match guard {
                 Some(g) => Doc::concat(vec![
                     Doc::line(),
                     Doc::text("if "),
-                    print_expression_with_comments(state, g, cmt_tbl, arena),
+                    print_expression_with_comments(state, arena.get_expr(*g), cmt_tbl, arena),
                 ]),
                 None => Doc::nil(),
             };
@@ -8538,7 +8543,7 @@ fn print_module_binding(
         {
             let expr_doc = print_mod_expr(state, arena.get_mod_expr(*mod_expr_idx), cmt_tbl, arena);
             // Wrap in parens based on the outer binding expr (not inner)
-            let expr_doc = if parens::mod_expr_parens(&binding.pmb_expr) {
+            let expr_doc = if parens::mod_expr_parens(arena, &binding.pmb_expr) {
                 Doc::concat(vec![Doc::lparen(), expr_doc, Doc::rparen()])
             } else {
                 expr_doc
@@ -8598,7 +8603,7 @@ fn print_rec_module_bindings(
                 {
                     let expr_doc = print_mod_expr(state, arena.get_mod_expr(*mod_expr_idx), cmt_tbl, arena);
                     // Wrap in parens based on the outer binding expr (not inner)
-                    let expr_doc = if parens::mod_expr_parens(&binding.pmb_expr) {
+                    let expr_doc = if parens::mod_expr_parens(arena, &binding.pmb_expr) {
                         Doc::concat(vec![Doc::lparen(), expr_doc, Doc::rparen()])
                     } else {
                         expr_doc
@@ -8920,7 +8925,7 @@ fn print_jsx_prop(
                 let doc = print_expression_with_comments(state, value, cmt_tbl, arena);
                 match parens::jsx_prop_expr(arena, value) {
                     parens::ParenKind::Parenthesized | parens::ParenKind::Braced(_) => {
-                        let inner_doc = if parens::braced_expr(value) {
+                        let inner_doc = if parens::braced_expr(arena, value) {
                             add_parens(doc)
                         } else {
                             doc
@@ -9123,7 +9128,7 @@ fn print_jsx_children(
 
         let add_parens_or_braces = |expr_doc: Doc| -> Doc {
             // {(20: int)} make sure we also protect the expression inside
-            let inner_doc = if parens::braced_expr(expr) {
+            let inner_doc = if parens::braced_expr(arena, expr) {
                 add_parens(expr_doc)
             } else {
                 expr_doc
