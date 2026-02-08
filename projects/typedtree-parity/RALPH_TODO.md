@@ -76,12 +76,13 @@ The `-dtyped-sexp` flag outputs the typed tree without locations. The `-dtyped-s
 |  | Status |
 |--|--------|
 | OCaml compiles | 657/657 |
-| Rust compiles | 561/657 (96 fail) |
-| Parity match (-dtyped-sexp-locs) | 291/561 (51.9%) |
+| Rust compiles | 565/657 (92 fail) |
+| Parity match (-dtyped-sexp-locs) | 292/565 (51.7%) |
 
-**Task Progress:** 14/14 complete
+**Task Progress:** 15/15 complete
 
 **Task Checklist:**
+- [x] Port OCaml module-type extraction behavior for structure-local aliases and functors in `typemod`: resolve `Tmod_ident` through environment/persistent signature scraping, thread an evolving local env while extracting `Tmod_structure` items, and extract `Tmod_functor`/`Tmod_apply` result module types. This unblocks nested module alias/functor member lookup (`coercion_module_alias_test.res` now compiles with Rust) and improves full `--with-locs --no-build` totals (`Rust bsc`: 560 -> 565, `Parity`: 291 -> 292).
 - [x] Match OCaml `expand_head` behavior in `type_application` when handling labeled args for aliased function types (`type t = (~x: int, ~y: int) => int`). Expand the head type before arrow/label matching (and optional-tail skipping) so applications like `f(~y=b, ~x=a)` don't fall into unknown-arg fallback. This fixes `arity.res` compilation and improves full `--with-locs --no-build` results (`Rust bsc`: 556 -> 561, `Parity`: 289 -> 291).
 - [x] Port OCaml `Pmod_unpack` typing path in `typemod`: derive unpack module types from `expand_head` package types (`Tpackage`) and preserve `Psig_type` manifests/`Psig_modtype` items in `translate_module_type_to_decl`, then qualify module-signature type paths when entering `Pstr_module` bindings. This fixes the `let module X = unpack(v.compare)` compilation failure (`UndefinedMethod "X.compare"` in `defunctor_make_test.res`) and improves full `--with-locs` compilation (`Rust bsc`: 557 -> 559).
 - [x] Match OCaml `@deriving(accessors)` variant accessor location behavior in PPX output by emitting generated value/pattern/expression/signature item locs as `Location.none` while preserving constructor-name locations on `Located` identifiers and `Typ.arrows ~loc` for signature arrow nodes (`DerivingAccessorsCurried.res` parity fixed; `Parity`: 293 -> 295 in the latest full `--with-locs --no-build` run).
