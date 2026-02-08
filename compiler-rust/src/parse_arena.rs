@@ -320,6 +320,15 @@ pub struct ParseArena {
     /// Pre-allocated `Ldot(Lident "*predef*", "option")` for lifted option types.
     /// OCaml uses `Ast_literal.predef_option` as a module-level constant.
     static_predef_option_lident: LidentIdx,
+    /// Pre-allocated placeholder longident (Lident "placeholder").
+    /// Allocated in `new()`, not `default()`.
+    static_placeholder_lid: LidentIdx,
+    /// Pre-allocated `Lident "None"` for optional field desugaring.
+    /// Allocated in `new()`, not `default()`.
+    static_none_lid: LidentIdx,
+    /// Pre-allocated `Ldot(Lident "*predef*", "Some")` for optional field desugaring.
+    /// Allocated in `new()`, not `default()`.
+    static_some_lid: LidentIdx,
     /// Pre-allocated static longidents used by `%external` rewrite helpers.
     static_ppx_lidents: StaticPpxLidents,
     /// Position deduplication table - maps position content to its index.
@@ -593,6 +602,9 @@ impl Default for ParseArena {
             static_array_lidents,
             static_regexp_t_lident,
             static_predef_option_lident,
+            static_placeholder_lid: LidentIdx::default(),
+            static_none_lid: LidentIdx::default(),
+            static_some_lid: LidentIdx::default(),
             static_ppx_lidents,
             position_dedup: HashMap::new(),
             lident_dedup,
@@ -652,38 +664,37 @@ impl ParseArena {
         let dummy_pos_idx = arena.positions.push(dummy_pos);
         let dummy_loc = InternedLocation::new(dummy_pos_idx, dummy_pos_idx, true);
         arena.dummy_loc = arena.locations.push(dummy_loc);
-        // Pre-allocate placeholder longident at index 0
-        // This way LidentIdx(0) is always a valid "placeholder" identifier
+        // Pre-allocate placeholder longident (for placeholder AST nodes)
         let placeholder_idx = arena.strings.intern("placeholder");
-        arena.longidents.push(Longident::Lident(placeholder_idx));
-        // Pre-allocate "None" longident at index 1 (for optional field desugaring)
+        arena.static_placeholder_lid = arena.longidents.push(Longident::Lident(placeholder_idx));
+        // Pre-allocate "None" longident (for optional field desugaring)
         let none_str = arena.strings.intern("None");
-        arena.longidents.push(Longident::Lident(none_str));
-        // Pre-allocate "*predef*" longident at index 2
+        arena.static_none_lid = arena.longidents.push(Longident::Lident(none_str));
+        // Pre-allocate "*predef*" longident
         let predef_str = arena.strings.intern("*predef*");
         arena.longidents.push(Longident::Lident(predef_str));
-        // Pre-allocate Ldot(*predef*, "Some") longident at index 3
+        // Pre-allocate Ldot(*predef*, "Some") longident (for optional field desugaring)
         let some_str = arena.strings.intern("Some");
-        arena.longidents.push(Longident::Ldot(Box::new(Longident::Lident(predef_str)), some_str));
+        arena.static_some_lid = arena.longidents.push(Longident::Ldot(Box::new(Longident::Lident(predef_str)), some_str));
         arena
     }
 
-    /// Get the placeholder longident index (pre-allocated at index 0).
+    /// Get the placeholder longident index.
     /// This is useful for creating placeholder AST nodes without mutating the arena.
     pub fn placeholder_lid(&self) -> LidentIdx {
-        LidentIdx(0)
+        self.static_placeholder_lid
     }
 
-    /// Get the pre-allocated "None" longident index (index 1).
+    /// Get the pre-allocated "None" longident index.
     /// Used for optional field desugaring (synthesizing None for missing optional fields).
     pub fn none_lid(&self) -> LidentIdx {
-        LidentIdx(1)
+        self.static_none_lid
     }
 
-    /// Get the pre-allocated Ldot(*predef*, "Some") longident index (index 3).
+    /// Get the pre-allocated Ldot(*predef*, "Some") longident index.
     /// Used for optional field desugaring (wrapping provided optional fields in Some).
     pub fn some_lid(&self) -> LidentIdx {
-        LidentIdx(3)
+        self.static_some_lid
     }
 
     /// Create a Located<LidentIdx> with the placeholder longident and given location.
