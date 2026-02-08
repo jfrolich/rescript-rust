@@ -12,6 +12,7 @@
 //!
 //! Paths are relative to the `compiler-rust/` directory (where Cargo.toml lives),
 //! since `cargo test` sets the working directory to the package root.
+//! If `~/dev/tella-fusion` exists, it is included as an additional benchmark corpus.
 //!
 //! ## Running benchmarks
 //!
@@ -55,11 +56,23 @@ mod tests {
     /// Minimum file size (bytes) for inclusion in comprehensive benchmark.
     const MIN_FILE_SIZE: u64 = 0;
 
-    /// Base path for test files, relative to compiler-rust/
+    /// Base path for core syntax tests, relative to compiler-rust/
     const TEST_BASE: &str = "../tests/syntax_tests/data";
 
-    /// Directories to exclude (parse errors, stress tests)
-    const EXCLUDED_DIRS: &[&str] = &["errors", "recovery", "infiniteLoops"];
+    /// Extra benchmark corpus under $HOME. Added when the directory exists.
+    const TELLA_RELATIVE_TO_HOME: &str = "dev/tella-fusion";
+
+    /// Directories to exclude while recursively walking benchmark corpora.
+    const EXCLUDED_DIRS: &[&str] = &[
+        "errors",
+        "recovery",
+        "infiniteLoops",
+        ".git",
+        "node_modules",
+        "target",
+        "_build",
+        ".next",
+    ];
 
     /// Check if both bsc binaries are available and we're running in release mode.
     /// Benchmarks are only meaningful in release mode to avoid subprocess timing noise.
@@ -73,6 +86,23 @@ mod tests {
     /// Resolve a test file path relative to the test base
     fn test_path(relative: &str) -> PathBuf {
         Path::new(TEST_BASE).join(relative)
+    }
+
+    /// Returns benchmark corpora to scan.
+    ///
+    /// Always includes TEST_BASE.
+    /// Also includes ~/dev/tella-fusion when that directory exists.
+    fn benchmark_corpora() -> Vec<(String, PathBuf)> {
+        let mut corpora = vec![("syntax_tests".to_string(), PathBuf::from(TEST_BASE))];
+
+        if let Some(home_dir) = std::env::var_os("HOME") {
+            let tella = PathBuf::from(home_dir).join(TELLA_RELATIVE_TO_HOME);
+            if tella.is_dir() {
+                corpora.push(("tella-fusion".to_string(), tella));
+            }
+        }
+
+        corpora
     }
 
     /// Run a bsc binary on a source file, writing output to a temp file.
@@ -166,13 +196,12 @@ mod tests {
         lines: u64,
     }
 
-    /// Discover all .res/.resi files under TEST_BASE, excluding error/recovery dirs,
+    /// Discover all .res/.resi files under benchmark corpora, excluding ignored dirs,
     /// filtered to files >= MIN_FILE_SIZE bytes, sorted by size descending.
     fn discover_test_files() -> Vec<TestFile> {
-        let base = Path::new(TEST_BASE);
         let mut files: Vec<TestFile> = Vec::new();
 
-        fn walk_dir(dir: &Path, base: &Path, files: &mut Vec<TestFile>) {
+        fn walk_dir(dir: &Path, base: &Path, corpus_name: &str, files: &mut Vec<TestFile>) {
             let entries = match std::fs::read_dir(dir) {
                 Ok(e) => e,
                 Err(_) => return,
@@ -182,13 +211,13 @@ mod tests {
                 if path.is_dir() {
                     let dir_name = path.file_name().unwrap_or_default().to_string_lossy();
                     if !EXCLUDED_DIRS.contains(&dir_name.as_ref()) {
-                        walk_dir(&path, base, files);
+                        walk_dir(&path, base, corpus_name, files);
                     }
                 } else if path.extension().map_or(false, |e| e == "res" || e == "resi") {
                     let size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
                     if size >= MIN_FILE_SIZE {
                         let rel = path.strip_prefix(base).unwrap_or(&path);
-                        let name = rel.to_string_lossy().to_string();
+                        let name = format!("{}/{}", corpus_name, rel.to_string_lossy());
                         let lines = std::fs::read(&path)
                             .map(|b| b.iter().filter(|&&c| c == b'\n').count() as u64)
                             .unwrap_or(0);
@@ -198,7 +227,12 @@ mod tests {
             }
         }
 
-        walk_dir(base, base, &mut files);
+        for (corpus_name, base) in benchmark_corpora() {
+            if base.is_dir() {
+                walk_dir(&base, &base, &corpus_name, &mut files);
+            }
+        }
+
         // Sort by size descending (largest files first)
         files.sort_by(|a, b| b.size.cmp(&a.size));
         files

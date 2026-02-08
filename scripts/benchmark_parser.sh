@@ -2,6 +2,7 @@
 
 # Performance benchmark comparing Rust and OCaml parsers
 # Uses roundtrip test files from tests/syntax_tests/data/{idempotency,printer}
+# and, when present, ~/dev/tella-fusion (by reference, no file copying).
 
 set -e
 
@@ -50,9 +51,25 @@ echo "Benchmark runs: $BENCHMARK_RUNS"
 echo "Timeout: ${TIMEOUT_SECONDS}s"
 echo ""
 
-# Find all test files
+# Find all benchmark files
 cd "$PROJECT_ROOT/tests"
 find syntax_tests/data/idempotency syntax_tests/data/printer -name "*.res" -o -name "*.resi" 2>/dev/null | sort > "$TEMP_DIR/files.txt"
+
+# Include external corpus by reference.
+TELLA_DIR="${TELLA_DIR:-$HOME/dev/tella-fusion}"
+if [[ -d "$TELLA_DIR" ]]; then
+    find "$TELLA_DIR" \
+        -type d \( -name .git -o -name node_modules -o -name target -o -name .next -o -name _build \) -prune \
+        -o -type f \( -name "*.res" -o -name "*.resi" \) -print 2>/dev/null | \
+        sort >> "$TEMP_DIR/files.txt"
+fi
+
+if [[ -n "$PATTERN" ]]; then
+    grep -E "$PATTERN" "$TEMP_DIR/files.txt" > "$TEMP_DIR/files.filtered.txt" || true
+    mv "$TEMP_DIR/files.filtered.txt" "$TEMP_DIR/files.txt"
+fi
+
+sort -u "$TEMP_DIR/files.txt" -o "$TEMP_DIR/files.txt"
 TOTAL_FILES=$(wc -l < "$TEMP_DIR/files.txt" | tr -d ' ')
 
 echo -e "Found ${BOLD}$TOTAL_FILES${RESET} test files"

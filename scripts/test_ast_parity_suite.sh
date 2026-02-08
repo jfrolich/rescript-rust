@@ -155,6 +155,18 @@ else
     FILES=$(find tests/syntax_tests/data/parsing -name "*.res" -not -path "*/errors/*" 2>/dev/null | head -200 | sort)
 fi
 
+# Include external corpus by reference (no file copying).
+TELLA_DIR="${TELLA_DIR:-$HOME/dev/tella-fusion}"
+if [ -d "$TELLA_DIR" ]; then
+    TELLA_FILES=$(find "$TELLA_DIR" \
+        -type d \( -name .git -o -name node_modules -o -name target -o -name .next -o -name _build \) -prune \
+        -o -type f \( -name "*.res" -o -name "*.resi" \) -print 2>/dev/null | sort)
+    if [ -n "$PATTERN" ]; then
+        TELLA_FILES=$(echo "$TELLA_FILES" | grep -E "$PATTERN" || true)
+    fi
+    FILES=$(printf "%s\n%s\n" "$FILES" "$TELLA_FILES" | grep -v "^$" | sort -u)
+fi
+
 if [ "$LIMIT" -gt 0 ]; then
     FILES=$(echo "$FILES" | head -n "$LIMIT")
 fi

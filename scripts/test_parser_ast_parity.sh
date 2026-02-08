@@ -26,6 +26,7 @@
 #
 # Uses test files from tests/syntax_tests/data/{idempotency,printer,ppx,conversion,ast-mapping}
 # and tests/ppx_spice/src for spice parity.
+# Also includes ~/dev/tella-fusion when present (override with TELLA_DIR).
 #
 # USAGE:
 #   ./scripts/test_parser_ast_parity.sh [OPTIONS] [FILE|PATTERN]
@@ -60,6 +61,8 @@ QUICK_MODE=false
 PARALLEL_JOBS=16
 VERBOSE=false
 FILE_ARG=""
+PATTERN_MODE=false
+SINGLE_FILE_MODE=false
 
 while [[ $# -gt 0 ]]; do
     case $1 in
@@ -247,32 +250,60 @@ cd "$PROJECT_ROOT/tests"
 if [[ -n "$FILE_ARG" ]]; then
     # Check if it's an absolute or relative path to a single file
     if [[ -f "$FILE_ARG" ]]; then
+        SINGLE_FILE_MODE=true
         # Convert absolute/relative path to path relative to tests/ directory
         abs_path=$(cd "$(dirname "$FILE_ARG")" && pwd)/$(basename "$FILE_ARG")
         rel_path="${abs_path#$PROJECT_ROOT/tests/}"
         echo "$rel_path" > "$TEMP_DIR/files.txt"
     elif [[ -f "$PROJECT_ROOT/$FILE_ARG" ]]; then
+        SINGLE_FILE_MODE=true
         # Convert project-relative path to tests-relative path
         rel_path="${FILE_ARG#tests/}"
         echo "$rel_path" > "$TEMP_DIR/files.txt"
     elif [[ -f "$PROJECT_ROOT/tests/$FILE_ARG" ]]; then
+        SINGLE_FILE_MODE=true
         echo "$FILE_ARG" > "$TEMP_DIR/files.txt"
     else
+        PATTERN_MODE=true
         # Treat as a pattern and use find with -path
         # Exclude: errors (syntax errors), recovery (error recovery tests), infiniteLoops (stress tests that may hang/fail both parsers)
         # Also exclude specific files where both OCaml and Rust parsers fail
         find syntax_tests/data/idempotency syntax_tests/data/printer syntax_tests/data/ppx syntax_tests/data/conversion syntax_tests/data/ast-mapping syntax_tests/data/parsing \( -name "*.res" -o -name "*.resi" \) -not -path "*/errors/*" -not -path "*/recovery/*" -not -path "*/infiniteLoops/*" -not -path "*/ffi/export.res" -not -path "*/parsing/other/gentype.res" 2>/dev/null | grep -E "$FILE_ARG" | sort > "$TEMP_DIR/files.txt" || true
-        if [[ ! -s "$TEMP_DIR/files.txt" ]]; then
-            echo -e "${RED}Error: No files found matching '$FILE_ARG'${RESET}"
-            echo "Hint: Try a pattern like 'printer/expr/apply' or a full path"
-            exit 1
-        fi
     fi
 else
     # Find all test files
     # Exclude: errors (syntax errors), recovery (error recovery tests), infiniteLoops (stress tests that may hang/fail both parsers)
     # Also exclude specific files where both OCaml and Rust parsers fail
     find syntax_tests/data/idempotency syntax_tests/data/printer syntax_tests/data/ppx syntax_tests/data/conversion syntax_tests/data/ast-mapping syntax_tests/data/parsing \( -name "*.res" -o -name "*.resi" \) -not -path "*/errors/*" -not -path "*/recovery/*" -not -path "*/infiniteLoops/*" -not -path "*/ffi/export.res" -not -path "*/parsing/other/gentype.res" 2>/dev/null | sort > "$TEMP_DIR/files.txt"
+fi
+
+# Include external corpus by reference (no file copying).
+# For full-suite and pattern runs, include ~/dev/tella-fusion if it exists.
+TELLA_DIR="${TELLA_DIR:-$HOME/dev/tella-fusion}"
+if [[ "$SINGLE_FILE_MODE" != true && -d "$TELLA_DIR" ]]; then
+    if [[ "$PATTERN_MODE" == true ]]; then
+        find "$TELLA_DIR" \
+            -type d \( -name .git -o -name node_modules -o -name target -o -name .next -o -name _build \) -prune \
+            -o -type f \( -name "*.res" -o -name "*.resi" \) -print 2>/dev/null | \
+            grep -E "$FILE_ARG" | sort >> "$TEMP_DIR/files.txt" || true
+    else
+        find "$TELLA_DIR" \
+            -type d \( -name .git -o -name node_modules -o -name target -o -name .next -o -name _build \) -prune \
+            -o -type f \( -name "*.res" -o -name "*.resi" \) -print 2>/dev/null | \
+            sort >> "$TEMP_DIR/files.txt"
+    fi
+fi
+
+sort -u "$TEMP_DIR/files.txt" -o "$TEMP_DIR/files.txt"
+
+if [[ ! -s "$TEMP_DIR/files.txt" ]]; then
+    if [[ -n "$FILE_ARG" ]]; then
+        echo -e "${RED}Error: No files found matching '$FILE_ARG'${RESET}"
+        echo "Hint: Try a pattern like 'printer/expr/apply' or a full path"
+    else
+        echo -e "${RED}Error: No test files found${RESET}"
+    fi
+    exit 1
 fi
 
 TOTAL_FILES=$(wc -l < "$TEMP_DIR/files.txt" | tr -d ' ')
