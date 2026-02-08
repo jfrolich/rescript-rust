@@ -211,8 +211,8 @@ Output "RALPH_COMPLETE" when:
 Use the included `ralph.sh` script:
 
 ```bash
-./ralph.sh                    # Uses RALPH_PROMPT.md by default
-./ralph.sh MY_PROMPT.md       # Or specify a custom prompt file
+./ralph.sh projects/typedtree-parity/RALPH_PROMPT.md   # Typed tree parity (current task)
+./ralph.sh projects/<name>/RALPH_PROMPT.md              # Any project task
 ```
 
 The script:
@@ -226,7 +226,7 @@ The script:
 
 ```bash
 while true; do
-  cat RALPH_PROMPT.md | claude --dangerously-skip-permissions --print | tee /tmp/ralph_output.txt
+  cat projects/typedtree-parity/RALPH_PROMPT.md | claude --dangerously-skip-permissions --print | tee /tmp/ralph_output.txt
 
   if grep -q "RALPH_COMPLETE" /tmp/ralph_output.txt; then
     echo "Ralph loop complete!"
@@ -247,7 +247,7 @@ done
 The plugin keeps context within a single session (doesn't clear between iterations):
 
 ```bash
-/ralph-loop "$(cat RALPH_PROMPT.md)" --max-iterations 50 --completion-promise "RALPH_COMPLETE"
+/ralph-loop "$(cat projects/typedtree-parity/RALPH_PROMPT.md)" --max-iterations 50 --completion-promise "RALPH_COMPLETE"
 ```
 
 **When to use the plugin:**
@@ -266,13 +266,13 @@ For debugging or when you want full control:
 
 ```bash
 # Run one iteration
-cat RALPH_PROMPT.md | claude --dangerously-skip-permissions --print
+cat projects/typedtree-parity/RALPH_PROMPT.md | claude --dangerously-skip-permissions --print
 
 # Check progress
 cat RALPH_TODO.md | grep -E "^\- \[[ x]\]" | head -20
 
 # Run another iteration
-cat RALPH_PROMPT.md | claude --dangerously-skip-permissions --print
+cat projects/typedtree-parity/RALPH_PROMPT.md | claude --dangerously-skip-permissions --print
 ```
 
 ## Example: Setting Up a New Ralph Loop
@@ -328,7 +328,7 @@ EOF
 ### Step 4: Run the Loop
 
 ```bash
-while true; do cat RALPH_PROMPT.md | claude --dangerously-skip-permissions --print; done
+while true; do cat projects/typedtree-parity/RALPH_PROMPT.md | claude --dangerously-skip-permissions --print; done
 ```
 
 ## Tips
