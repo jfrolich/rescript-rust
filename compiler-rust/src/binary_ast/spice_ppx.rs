@@ -5,7 +5,7 @@
 
 use std::borrow::Cow;
 
-use crate::parse_arena::{LidentIdx, LocIdx, Located, ParseArena, PosIdx, StrIdx};
+use crate::parse_arena::{CoreTypeIdx, ExprIdx, LidentIdx, LocIdx, Located, ModExprIdx, ModTypeIdx, ParseArena, PatIdx, PosIdx, StrIdx};
 use crate::parser::ast::{
     ArgLabel, Attribute, Attributes, Case, Constant, ConstructorArguments, ConstructorDeclaration,
     CoreType, CoreTypeDesc, Expression, ExpressionDesc, ExpressionRecordField, Extension,
@@ -266,10 +266,12 @@ fn expr_apply(
     args: Vec<(ArgLabel, Expression)>,
     partial: bool,
     loc: LocIdx,
+    arena: &mut ParseArena,
 ) -> Expression {
+    let funct_idx = arena.push_expr(funct);
     Expression {
         pexp_desc: Box::new(ExpressionDesc::Pexp_apply(Box::new(PexpApply {
-            funct: Box::new(funct),
+            funct: funct_idx,
             args,
             partial,
             transformed_jsx: false,
@@ -287,12 +289,13 @@ fn expr_fun(
     arena: &mut ParseArena,
 ) -> Expression {
     let arity_idx = arena.push_arity(arity);
+    let rhs_idx = arena.push_expr(rhs);
     Expression {
         pexp_desc: Box::new(ExpressionDesc::Pexp_fun(Box::new(PexpFun {
             arg_label,
             default: None,
             lhs,
-            rhs: Box::new(rhs),
+            rhs: rhs_idx,
             arity: arity_idx,
             is_async: false,
         }))),
@@ -310,12 +313,13 @@ fn expr_fun_with_loc(
     arena: &mut ParseArena,
 ) -> Expression {
     let arity_idx = arena.push_arity(arity);
+    let rhs_idx = arena.push_expr(rhs);
     Expression {
         pexp_desc: Box::new(ExpressionDesc::Pexp_fun(Box::new(PexpFun {
             arg_label,
             default: None,
             lhs,
-            rhs: Box::new(rhs),
+            rhs: rhs_idx,
             arity: arity_idx,
             is_async: false,
         }))),
@@ -354,10 +358,11 @@ fn expr_construct_with_loc(
     lid_loc: LocIdx,
     arena: &mut ParseArena,
 ) -> Expression {
+    let arg_idx = arg.map(|a| arena.push_expr(a));
     Expression {
         pexp_desc: Box::new(ExpressionDesc::Pexp_construct(
             Located::new(lid_idx, lid_loc),
-            arg.map(Box::new),
+            arg_idx,
         )),
         pexp_loc: arena.dummy_loc(),
         pexp_attributes: Attributes::new(),
@@ -369,11 +374,13 @@ fn expr_construct_with_locs(
     arg: Option<Expression>,
     lid_loc: LocIdx,
     expr_loc: LocIdx,
+    arena: &mut ParseArena,
 ) -> Expression {
+    let arg_idx = arg.map(|a| arena.push_expr(a));
     Expression {
         pexp_desc: Box::new(ExpressionDesc::Pexp_construct(
             Located::new(lid_idx, lid_loc),
-            arg.map(Box::new),
+            arg_idx,
         )),
         pexp_loc: expr_loc,
         pexp_attributes: Attributes::new(),
@@ -381,16 +388,18 @@ fn expr_construct_with_locs(
 }
 
 fn expr_variant(label: Cow<'static, str>, arg: Option<Expression>, arena: &mut ParseArena) -> Expression {
+    let arg_idx = arg.map(|a| arena.push_expr(a));
     Expression {
-        pexp_desc: Box::new(ExpressionDesc::Pexp_variant(Box::new((label, arg.map(Box::new))))),
+        pexp_desc: Box::new(ExpressionDesc::Pexp_variant(Box::new((label, arg_idx)))),
         pexp_loc: arena.dummy_loc(),
         pexp_attributes: Attributes::new(),
     }
 }
 
 fn expr_match(expr: Expression, cases: Vec<Case>, arena: &mut ParseArena) -> Expression {
+    let expr_idx = arena.push_expr(expr);
     Expression {
-        pexp_desc: Box::new(ExpressionDesc::Pexp_match(Box::new((Box::new(expr), cases)))),
+        pexp_desc: Box::new(ExpressionDesc::Pexp_match(Box::new((expr_idx, cases)))),
         pexp_loc: arena.dummy_loc(),
         pexp_attributes: Attributes::new(),
     }
@@ -402,8 +411,11 @@ fn expr_ifthenelse(
     else_expr: Option<Expression>,
     arena: &mut ParseArena,
 ) -> Expression {
+    let cond_idx = arena.push_expr(cond);
+    let then_idx = arena.push_expr(then_expr);
+    let else_idx = else_expr.map(|e| arena.push_expr(e));
     Expression {
-        pexp_desc: Box::new(ExpressionDesc::Pexp_ifthenelse(Box::new((Box::new(cond), Box::new(then_expr), else_expr.map(Box::new))))),
+        pexp_desc: Box::new(ExpressionDesc::Pexp_ifthenelse(Box::new((cond_idx, then_idx, else_idx)))),
         pexp_loc: arena.dummy_loc(),
         pexp_attributes: Attributes::new(),
     }
@@ -415,16 +427,18 @@ fn expr_let(
     body: Expression,
     arena: &mut ParseArena,
 ) -> Expression {
+    let body_idx = arena.push_expr(body);
     Expression {
-        pexp_desc: Box::new(ExpressionDesc::Pexp_let(Box::new((rec_flag, bindings, Box::new(body))))),
+        pexp_desc: Box::new(ExpressionDesc::Pexp_let(Box::new((rec_flag, bindings, body_idx)))),
         pexp_loc: arena.dummy_loc(),
         pexp_attributes: Attributes::new(),
     }
 }
 
 fn expr_constraint(expr: Expression, typ: CoreType, arena: &mut ParseArena) -> Expression {
+    let expr_idx = arena.push_expr(expr);
     Expression {
-        pexp_desc: Box::new(ExpressionDesc::Pexp_constraint(Box::new((Box::new(expr), typ)))),
+        pexp_desc: Box::new(ExpressionDesc::Pexp_constraint(Box::new((expr_idx, typ)))),
         pexp_loc: arena.dummy_loc(),
         pexp_attributes: Attributes::new(),
     }
@@ -436,8 +450,9 @@ fn expr_field_with_loc(
     lid_loc: LocIdx,
     arena: &mut ParseArena,
 ) -> Expression {
+    let expr_idx = arena.push_expr(expr);
     Expression {
-        pexp_desc: Box::new(ExpressionDesc::Pexp_field(Box::new(expr), Located::new(lid_idx, lid_loc))),
+        pexp_desc: Box::new(ExpressionDesc::Pexp_field(expr_idx, Located::new(lid_idx, lid_loc))),
         pexp_loc: arena.dummy_loc(),
         pexp_attributes: Attributes::new(),
     }
@@ -460,8 +475,9 @@ fn expr_record(
     base: Option<Expression>,
     arena: &mut ParseArena,
 ) -> Expression {
+    let base_idx = base.map(|b| arena.push_expr(b));
     Expression {
-        pexp_desc: Box::new(ExpressionDesc::Pexp_record(Box::new((fields, base.map(Box::new))))),
+        pexp_desc: Box::new(ExpressionDesc::Pexp_record(Box::new((fields, base_idx)))),
         pexp_loc: arena.dummy_loc(),
         pexp_attributes: Attributes::new(),
     }
@@ -539,10 +555,11 @@ fn pat_array(items: Vec<Pattern>, arena: &mut ParseArena) -> Pattern {
 }
 
 fn pat_construct(lid_idx: LidentIdx, arg: Option<Pattern>, arena: &mut ParseArena) -> Pattern {
+    let arg_idx = arg.map(|a| arena.push_pat(a));
     Pattern {
         ppat_desc: Box::new(PatternDesc::Ppat_construct(
             Located::new(lid_idx, arena.none_loc()),
-            arg.map(Box::new),
+            arg_idx,
         )),
         ppat_loc: arena.dummy_loc(),
         ppat_attributes: Attributes::new(),
@@ -555,24 +572,27 @@ fn pat_construct_with_loc(
     loc: LocIdx,
     arena: &mut ParseArena,
 ) -> Pattern {
+    let arg_idx = arg.map(|a| arena.push_pat(a));
     Pattern {
-        ppat_desc: Box::new(PatternDesc::Ppat_construct(Located::new(lid_idx, loc), arg.map(Box::new))),
+        ppat_desc: Box::new(PatternDesc::Ppat_construct(Located::new(lid_idx, loc), arg_idx)),
         ppat_loc: arena.dummy_loc(),
         ppat_attributes: Attributes::new(),
     }
 }
 
 fn pat_variant(label: Cow<'static, str>, arg: Option<Pattern>, arena: &mut ParseArena) -> Pattern {
+    let arg_idx = arg.map(|a| arena.push_pat(a));
     Pattern {
-        ppat_desc: Box::new(PatternDesc::Ppat_variant(Box::new((label, arg.map(Box::new))))),
+        ppat_desc: Box::new(PatternDesc::Ppat_variant(Box::new((label, arg_idx)))),
         ppat_loc: arena.dummy_loc(),
         ppat_attributes: Attributes::new(),
     }
 }
 
 fn pat_constraint(pat: Pattern, typ: CoreType, arena: &mut ParseArena) -> Pattern {
+    let pat_idx = arena.push_pat(pat);
     Pattern {
-        ppat_desc: Box::new(PatternDesc::Ppat_constraint(Box::new((Box::new(pat), typ)))),
+        ppat_desc: Box::new(PatternDesc::Ppat_constraint(Box::new((pat_idx, typ)))),
         ppat_loc: arena.dummy_loc(),
         ppat_attributes: Attributes::new(),
     }
@@ -634,8 +654,9 @@ fn mk_type_arrow(arg_type: CoreType, ret_type: CoreType, arena: &mut ParseArena)
         lbl: ArgLabel::Nolabel,
         typ: arg_type,
     };
+    let ret_idx = arena.push_core_type(ret_type);
     CoreType {
-        ptyp_desc: Box::new(CoreTypeDesc::Ptyp_arrow(Box::new((Box::new(arg), Box::new(ret_type), arena.push_arity(Some(1)))))),
+        ptyp_desc: Box::new(CoreTypeDesc::Ptyp_arrow(Box::new((Box::new(arg), ret_idx, arena.push_arity(Some(1)))))),
         ptyp_loc: arena.dummy_loc(),
         ptyp_attributes: Attributes::new(),
     }
@@ -783,7 +804,8 @@ fn extract_null_decoder_arg(decode: &Expression, arena: &ParseArena) -> Option<E
             if args.len() != 1 {
                 return None;
             }
-            match &*funct.pexp_desc {
+            let funct_expr = arena.get_expr(*funct);
+            match &*funct_expr.pexp_desc {
                 ExpressionDesc::Pexp_ident(lid)
                     if longident_matches(arena, lid.txt, &["Spice", "nullFromJson"]) =>
                 {
@@ -815,7 +837,7 @@ fn expr_spice_error_with_prefix(
     }
     args.push((ArgLabel::Nolabel, message));
     args.push((ArgLabel::Nolabel, value));
-    expr_apply(func, args, false, arena.dummy_loc())
+    expr_apply(func, args, false, arena.dummy_loc(), arena)
 }
 
 fn expr_spice_error_records(
@@ -865,6 +887,7 @@ fn expr_concat(arena: &mut ParseArena, left: Expression, right: Expression) -> E
         vec![(ArgLabel::Nolabel, left), (ArgLabel::Nolabel, right)],
         false,
         arena.dummy_loc(),
+        arena,
     )
 }
 
@@ -876,6 +899,7 @@ fn expr_equal(arena: &mut ParseArena, left: Expression, right: Expression) -> Ex
         vec![(ArgLabel::Nolabel, left), (ArgLabel::Nolabel, right)],
         false,
         arena.dummy_loc(),
+        arena,
     )
 }
 
@@ -887,6 +911,7 @@ fn expr_not_equal(arena: &mut ParseArena, left: Expression, right: Expression) -
         vec![(ArgLabel::Nolabel, left), (ArgLabel::Nolabel, right)],
         false,
         arena.dummy_loc(),
+        arena,
     )
 }
 
@@ -902,6 +927,7 @@ fn expr_not_equal_strict(
         vec![(ArgLabel::Nolabel, left), (ArgLabel::Nolabel, right)],
         false,
         arena.dummy_loc(),
+        arena,
     )
 }
 
@@ -1010,6 +1036,7 @@ fn tuple_generate_encoder(
             vec![(ArgLabel::Nolabel, v_expr)],
             false,
             arena.dummy_loc(),
+            arena,
         );
         arr_items.push(applied);
     }
@@ -1090,6 +1117,7 @@ fn tuple_generate_decode_switch(
             vec![(ArgLabel::Nolabel, v_expr)],
             false,
             arena.dummy_loc(),
+            arena,
         );
         decode_exprs.push(applied);
     }
@@ -1379,6 +1407,7 @@ fn codecs_generate_constr_codecs(
                 Some(v_expr),
                 v_loc,
                 v_loc,
+                arena,
             );
             Some(expr_fun_with_loc(
                 ArgLabel::Nolabel,
@@ -1442,7 +1471,7 @@ fn codecs_parameterize_codecs(
                 let enc = require_encoder(e)?;
                 args.push((ArgLabel::Nolabel, enc));
             }
-            Some(expr_apply(func, args, true, arena.dummy_loc()))
+            Some(expr_apply(func, args, true, arena.dummy_loc(), arena))
         }
     };
 
@@ -1454,7 +1483,7 @@ fn codecs_parameterize_codecs(
                 let dec = require_decoder(d)?;
                 args.push((ArgLabel::Nolabel, dec));
             }
-            Some(expr_apply(func, args, true, arena.dummy_loc()))
+            Some(expr_apply(func, args, true, arena.dummy_loc(), arena))
         }
     };
 
@@ -1615,6 +1644,7 @@ fn records_parse_decl(
                     vec![(ArgLabel::Nolabel, encode)],
                     true,
                     arena.dummy_loc(),
+                    arena,
                 );
                 let opt_decode = if let Some(inner) = extract_null_decoder_arg(&decode, arena) {
                     expr_apply(
@@ -1622,6 +1652,7 @@ fn records_parse_decl(
                         vec![(ArgLabel::Nolabel, inner)],
                         true,
                         arena.dummy_loc(),
+                        arena,
                     )
                 } else {
                     expr_apply(
@@ -1629,6 +1660,7 @@ fn records_parse_decl(
                         vec![(ArgLabel::Nolabel, decode)],
                         true,
                         arena.dummy_loc(),
+                        arena,
                     )
                 };
                 (Some(opt_encode), Some(opt_decode))
@@ -1639,6 +1671,7 @@ fn records_parse_decl(
                     vec![(ArgLabel::Nolabel, encode)],
                     true,
                     arena.dummy_loc(),
+                    arena,
                 );
                 (Some(opt_encode), None)
             }
@@ -1649,6 +1682,7 @@ fn records_parse_decl(
                         vec![(ArgLabel::Nolabel, inner)],
                         true,
                         arena.dummy_loc(),
+                        arena,
                     )
                 } else {
                     expr_apply(
@@ -1656,6 +1690,7 @@ fn records_parse_decl(
                         vec![(ArgLabel::Nolabel, decode)],
                         true,
                         arena.dummy_loc(),
+                        arena,
                     )
                 };
                 (None, Some(opt_decode))
@@ -1700,6 +1735,7 @@ fn records_generate_encoder(
             vec![(ArgLabel::Nolabel, field_expr)],
             false,
             arena.dummy_loc(),
+            arena,
         );
         return Ok(expr_fun(ArgLabel::Nolabel, v_pat, applied, Some(1), arena));
     }
@@ -1717,6 +1753,7 @@ fn records_generate_encoder(
             vec![(ArgLabel::Nolabel, field_expr)],
             false,
             arena.dummy_loc(),
+            arena,
         );
         let tuple_expr = if field.is_optional || field.is_option {
             expr_tuple(vec![field.key.clone(), encoded], arena)
@@ -1741,12 +1778,14 @@ fn records_generate_encoder(
         vec![(ArgLabel::Nolabel, arr_expr)],
         false,
         arena.dummy_loc(),
+        arena,
     );
     let dict_from_array = expr_apply(
         expr_ident_path(arena, &["Dict", "fromArray"]),
         vec![(ArgLabel::Nolabel, filtered)],
         false,
         arena.dummy_loc(),
+        arena,
     );
     let json_object = expr_construct_with_loc(
         lident_path_static(arena, &["JSON", "Object"]),
@@ -1786,6 +1825,7 @@ fn records_generate_flat_decoder_expr(
                     ],
                     false,
                     arena.dummy_loc(),
+                    arena,
                 );
                 let decode_applied = decode.clone();
                 let opt_map = expr_apply(
@@ -1796,6 +1836,7 @@ fn records_generate_flat_decoder_expr(
                     ],
                     false,
                     arena.dummy_loc(),
+                    arena,
                 );
 
                 let default_expr = if field.is_optional {
@@ -1819,6 +1860,7 @@ fn records_generate_flat_decoder_expr(
                             ],
                             false,
                             arena.dummy_loc(),
+                            arena,
                         ),
                         None => {
                             let ok_none = expr_construct_with_loc(
@@ -1846,6 +1888,7 @@ fn records_generate_flat_decoder_expr(
                                 ],
                                 false,
                                 arena.dummy_loc(),
+                                arena,
                             )
                         }
                     }
@@ -1875,6 +1918,7 @@ fn records_generate_flat_decoder_expr(
                         ],
                         false,
                         arena.dummy_loc(),
+                        arena,
                     )
                 } else if let Some(d) = &field.default {
                     let ok_default = expr_construct_with_loc(
@@ -1894,6 +1938,7 @@ fn records_generate_flat_decoder_expr(
                         ],
                         false,
                         arena.dummy_loc(),
+                        arena,
                     )
                 } else {
                     let missing =
@@ -1910,6 +1955,7 @@ fn records_generate_flat_decoder_expr(
                         ],
                         false,
                         arena.dummy_loc(),
+                        arena,
                     )
                 };
 
@@ -2046,12 +2092,14 @@ fn records_generate_decoder(
                         )],
                         false,
                         arena.dummy_loc(),
+                        arena,
                     ),
                 ),
                 (ArgLabel::Nolabel, inner_fun),
             ],
             false,
             arena.dummy_loc(),
+            arena,
         );
         return Ok(expr_fun(
             ArgLabel::Nolabel,
@@ -2190,7 +2238,7 @@ fn variants_generate_encoder_case(
                 let encoder = require_encoder(enc)?;
                 let v_expr = expr_ident_dynamic(arena, format!("v{}", i));
                 let applied =
-                    expr_apply(encoder, vec![(ArgLabel::Nolabel, v_expr)], false, pcd_loc);
+                    expr_apply(encoder, vec![(ArgLabel::Nolabel, v_expr)], false, pcd_loc, arena);
                 rhs_list.push(applied);
             }
 
@@ -2300,12 +2348,14 @@ fn variants_generate_arg_decoder(
             ],
             false,
             arena.dummy_loc(),
+            arena,
         );
         let applied = expr_apply(
             decoder,
             vec![(ArgLabel::Nolabel, arg_expr)],
             false,
             arena.dummy_loc(),
+            arena,
         );
         decode_exprs.push(applied);
     }
@@ -2374,6 +2424,7 @@ fn variants_generate_decoder_case(
                 vec![(ArgLabel::Nolabel, json_arr_expr)],
                 false,
                 arena.dummy_loc(),
+                arena,
             );
             let cond = expr_not_equal(arena, len_expr, arg_len);
 
@@ -2479,12 +2530,14 @@ fn variants_generate_unboxed_decode(
                             vec![(ArgLabel::Nolabel, expr_ident_path(arena, &["v"]))],
                             false,
                             arena.dummy_loc(),
+                            arena,
                         ),
                     ),
                     (ArgLabel::Nolabel, inner_fun),
                 ],
                 false,
                 arena.dummy_loc(),
+                arena,
             );
             Ok(Some(expr_fun(
                 ArgLabel::Nolabel,
@@ -2625,6 +2678,7 @@ fn variants_generate_codecs(
                 ],
                 false,
                 arena.dummy_loc(),
+                arena,
             );
             let default_case = case(pat_any(arena), {
                 let invalid_ctor = expr_constant_literal(arena, "Invalid variant constructor");
@@ -2791,6 +2845,7 @@ fn polyvars_generate_encoder_case(
             vec![(ArgLabel::Nolabel, v_expr)],
             false,
             arena.dummy_loc(),
+            arena,
         );
         rhs_list.push(applied);
     }
@@ -2882,12 +2937,14 @@ fn polyvars_generate_arg_decoder(
             ],
             false,
             arena.dummy_loc(),
+            arena,
         );
         let applied = expr_apply(
             decoder,
             vec![(ArgLabel::Nolabel, arg_expr)],
             false,
             arena.dummy_loc(),
+            arena,
         );
         decode_exprs.push(applied);
     }
@@ -2950,6 +3007,7 @@ fn polyvars_generate_decoder_case(
                 vec![(ArgLabel::Nolabel, json_arr_expr)],
                 false,
                 arena.dummy_loc(),
+                arena,
             );
             let cond = expr_not_equal_strict(arena, len_expr, arg_len);
 
@@ -3049,12 +3107,14 @@ fn polyvars_generate_unboxed_decode(
                             vec![(ArgLabel::Nolabel, expr_ident_path(arena, &["v"]))],
                             false,
                             arena.dummy_loc(),
+                            arena,
                         ),
                     ),
                     (ArgLabel::Nolabel, inner_fun),
                 ],
                 false,
                 arena.dummy_loc(),
+                arena,
             );
             Ok(Some(expr_fun(
                 ArgLabel::Nolabel,
@@ -3194,6 +3254,7 @@ fn polyvars_generate_codecs(
                 ],
                 false,
                 arena.dummy_loc(),
+                arena,
             );
             let default_case = case(pat_any(arena), {
                 let invalid_ctor =
@@ -3271,6 +3332,7 @@ fn generate_codec_decls(
                 vec![(ArgLabel::Nolabel, expr_ident_path(arena, &["v"]))],
                 false,
                 arena.dummy_loc(),
+                arena,
             ),
             Some(1),
             arena,
@@ -3304,6 +3366,7 @@ fn generate_codec_decls(
                 vec![(ArgLabel::Nolabel, expr_ident_path(arena, &["v"]))],
                 false,
                 arena.dummy_loc(),
+                arena,
             ),
             Some(1),
             arena,
@@ -3395,6 +3458,31 @@ impl<'a> LocCloner<'a> {
         Self { arena }
     }
 
+    fn expression_idx(&mut self, idx: &mut ExprIdx) {
+        let expr = unsafe { &mut *(self.arena.get_expr_mut(*idx) as *mut Expression) };
+        self.expression(expr);
+    }
+
+    fn pattern_idx(&mut self, idx: &mut PatIdx) {
+        let pat = unsafe { &mut *(self.arena.get_pat_mut(*idx) as *mut Pattern) };
+        self.pattern(pat);
+    }
+
+    fn core_type_idx(&mut self, idx: &mut CoreTypeIdx) {
+        let typ = unsafe { &mut *(self.arena.get_core_type_mut(*idx) as *mut CoreType) };
+        self.core_type(typ);
+    }
+
+    fn mod_expr_idx(&mut self, idx: &mut ModExprIdx) {
+        let me = unsafe { &mut *(self.arena.get_mod_expr_mut(*idx) as *mut ModuleExpr) };
+        self.module_expr(me);
+    }
+
+    fn mod_type_idx(&mut self, idx: &mut ModTypeIdx) {
+        let mt = unsafe { &mut *(self.arena.get_mod_type_mut(*idx) as *mut ModuleType) };
+        self.module_type(mt);
+    }
+
     fn loc(&mut self, loc: &mut LocIdx) {
         if loc.is_none() || *loc == self.arena.dummy_loc() {
             return;
@@ -3449,12 +3537,12 @@ impl<'a> LocCloner<'a> {
                     self.signature_item(item);
                 }
             }
-            Payload::PTyp(typ) => self.core_type(typ),
+            Payload::PTyp(typ) => self.core_type_idx(typ),
             Payload::PPat(inner) => {
                 let (ref mut pat, ref mut guard) = **inner;
-                self.pattern(pat);
+                self.pattern_idx(pat);
                 if let Some(expr) = guard {
-                    self.expression(expr);
+                    self.expression_idx(expr);
                 }
             }
         }
@@ -3510,7 +3598,7 @@ impl<'a> LocCloner<'a> {
             CoreTypeDesc::Ptyp_arrow(inner) => {
                 let (ref mut arg, ref mut ret, ..) = **inner;
                 self.type_arg(arg);
-                self.core_type(ret);
+                self.core_type_idx(ret);
             }
             CoreTypeDesc::Ptyp_tuple(types) => {
                 for typ in types.iter_mut() {
@@ -3532,7 +3620,7 @@ impl<'a> LocCloner<'a> {
             }
             CoreTypeDesc::Ptyp_alias(inner) => {
                 let (ref mut typ, _) = **inner;
-                self.core_type(typ);
+                self.core_type_idx(typ);
             }
             CoreTypeDesc::Ptyp_variant(inner) => {
                 let (ref mut rows, _, ref labels) = **inner;
@@ -3548,7 +3636,7 @@ impl<'a> LocCloner<'a> {
                 for var in vars.iter_mut() {
                     self.located(var);
                 }
-                self.core_type(typ);
+                self.core_type_idx(typ);
             }
             CoreTypeDesc::Ptyp_package(pkg) => self.package_type(pkg),
             CoreTypeDesc::Ptyp_extension(ext) => self.extension(ext),
@@ -3573,7 +3661,7 @@ impl<'a> LocCloner<'a> {
             | PatternDesc::Ppat_interval(_) => {}
             PatternDesc::Ppat_var(name) => self.located(name),
             PatternDesc::Ppat_alias(pat, name) => {
-                self.pattern(pat);
+                self.pattern_idx(pat);
                 self.located(name);
             }
             PatternDesc::Ppat_tuple(items) | PatternDesc::Ppat_array(items) => {
@@ -3584,13 +3672,13 @@ impl<'a> LocCloner<'a> {
             PatternDesc::Ppat_construct(lid, arg) => {
                 self.located(lid);
                 if let Some(arg) = arg {
-                    self.pattern(arg);
+                    self.pattern_idx(arg);
                 }
             }
             PatternDesc::Ppat_variant(inner) => {
                 let (_, ref mut arg) = **inner;
                 if let Some(arg) = arg {
-                    self.pattern(arg);
+                    self.pattern_idx(arg);
                 }
             }
             PatternDesc::Ppat_record(inner) => {
@@ -3600,21 +3688,21 @@ impl<'a> LocCloner<'a> {
                 }
             }
             PatternDesc::Ppat_or(lhs, rhs) => {
-                self.pattern(lhs);
-                self.pattern(rhs);
+                self.pattern_idx(lhs);
+                self.pattern_idx(rhs);
             }
             PatternDesc::Ppat_constraint(inner) => {
                 let (ref mut pat, ref mut typ) = **inner;
-                self.pattern(pat);
+                self.pattern_idx(pat);
                 self.core_type(typ);
             }
             PatternDesc::Ppat_type(lid) => self.located(lid),
             PatternDesc::Ppat_unpack(name) => self.located(name),
-            PatternDesc::Ppat_exception(pat) => self.pattern(pat),
+            PatternDesc::Ppat_exception(pat) => self.pattern_idx(pat),
             PatternDesc::Ppat_extension(ext) => self.extension(ext),
             PatternDesc::Ppat_open(lid, pat) => {
                 self.located(lid);
-                self.pattern(pat);
+                self.pattern_idx(pat);
             }
         }
     }
@@ -3721,7 +3809,7 @@ impl<'a> LocCloner<'a> {
                 for binding in bindings.iter_mut() {
                     self.value_binding(binding);
                 }
-                self.expression(body);
+                self.expression_idx(body);
             }
             ExpressionDesc::Pexp_fun(inner) => {
                 let PexpFun { ref mut arg_label,
@@ -3731,14 +3819,14 @@ impl<'a> LocCloner<'a> {
                 .. } = **inner;
                 self.arg_label(arg_label);
                 if let Some(expr) = default {
-                    self.expression(expr);
+                    self.expression_idx(expr);
                 }
                 self.pattern(lhs);
-                self.expression(rhs);
+                self.expression_idx(rhs);
             }
             ExpressionDesc::Pexp_apply(inner) => {
                 let PexpApply { ref mut funct, ref mut args, .. } = **inner;
-                self.expression(funct);
+                self.expression_idx(funct);
                 for (label, arg) in args.iter_mut() {
                     self.arg_label(label);
                     self.expression(arg);
@@ -3746,7 +3834,7 @@ impl<'a> LocCloner<'a> {
             }
             ExpressionDesc::Pexp_match(inner) | ExpressionDesc::Pexp_try(inner) => {
                 let (ref mut expr, ref mut cases) = **inner;
-                self.expression(expr);
+                self.expression_idx(expr);
                 for case in cases.iter_mut() {
                     self.case(case);
                 }
@@ -3759,13 +3847,13 @@ impl<'a> LocCloner<'a> {
             ExpressionDesc::Pexp_construct(lid, arg) => {
                 self.located(lid);
                 if let Some(expr) = arg {
-                    self.expression(expr);
+                    self.expression_idx(expr);
                 }
             }
             ExpressionDesc::Pexp_variant(inner) => {
                 let (_, ref mut arg) = **inner;
                 if let Some(expr) = arg {
-                    self.expression(expr);
+                    self.expression_idx(expr);
                 }
             }
             ExpressionDesc::Pexp_record(inner) => {
@@ -3774,47 +3862,47 @@ impl<'a> LocCloner<'a> {
                     self.expression_record_field(field);
                 }
                 if let Some(expr) = base {
-                    self.expression(expr);
+                    self.expression_idx(expr);
                 }
             }
             ExpressionDesc::Pexp_field(expr, lid) => {
-                self.expression(expr);
+                self.expression_idx(expr);
                 self.located(lid);
             }
             ExpressionDesc::Pexp_setfield(inner) => {
                 let (ref mut expr, ref mut lid, ref mut rhs) = **inner;
-                self.expression(expr);
+                self.expression_idx(expr);
                 self.located(lid);
-                self.expression(rhs);
+                self.expression_idx(rhs);
             }
             ExpressionDesc::Pexp_ifthenelse(inner) => {
                 let (ref mut cond, ref mut then_expr, ref mut else_expr) = **inner;
-                self.expression(cond);
-                self.expression(then_expr);
+                self.expression_idx(cond);
+                self.expression_idx(then_expr);
                 if let Some(expr) = else_expr {
-                    self.expression(expr);
+                    self.expression_idx(expr);
                 }
             }
             ExpressionDesc::Pexp_sequence(first, second)
             | ExpressionDesc::Pexp_while(first, second) => {
-                self.expression(first);
-                self.expression(second);
+                self.expression_idx(first);
+                self.expression_idx(second);
             }
             ExpressionDesc::Pexp_for(inner) => {
                 let (ref mut pat, ref mut start, ref mut end, _, ref mut body) = **inner;
                 self.pattern(pat);
-                self.expression(start);
-                self.expression(end);
-                self.expression(body);
+                self.expression_idx(start);
+                self.expression_idx(end);
+                self.expression_idx(body);
             }
             ExpressionDesc::Pexp_constraint(inner) => {
                 let (ref mut expr, ref mut typ) = **inner;
-                self.expression(expr);
+                self.expression_idx(expr);
                 self.core_type(typ);
             }
             ExpressionDesc::Pexp_coerce(inner) => {
                 let (ref mut expr, ref mut from, ref mut to) = **inner;
-                self.expression(expr);
+                self.expression_idx(expr);
                 if let Some(from) = from {
                     self.core_type(from);
                 }
@@ -3822,34 +3910,34 @@ impl<'a> LocCloner<'a> {
             }
             ExpressionDesc::Pexp_send(inner) => {
                 let (ref mut expr, ref mut method) = **inner;
-                self.expression(expr);
+                self.expression_idx(expr);
                 self.located(method);
             }
             ExpressionDesc::Pexp_letmodule(inner) => {
                 let (ref mut name, ref mut module_expr, ref mut body) = **inner;
                 self.located(name);
                 self.module_expr(module_expr);
-                self.expression(body);
+                self.expression_idx(body);
             }
             ExpressionDesc::Pexp_letexception(inner) => {
                 let (ref mut ext, ref mut body) = **inner;
                 self.extension_constructor(ext);
-                self.expression(body);
+                self.expression_idx(body);
             }
-            ExpressionDesc::Pexp_assert(expr) => self.expression(expr),
+            ExpressionDesc::Pexp_assert(expr) => self.expression_idx(expr),
             ExpressionDesc::Pexp_newtype(inner) => {
                 let (ref mut name, ref mut expr) = **inner;
                 self.located(name);
-                self.expression(expr);
+                self.expression_idx(expr);
             }
-            ExpressionDesc::Pexp_pack(module_expr) => self.module_expr(module_expr),
+            ExpressionDesc::Pexp_pack(module_expr) => self.mod_expr_idx(module_expr),
             ExpressionDesc::Pexp_open(inner) => {
                 let (_, ref mut lid, ref mut expr) = **inner;
                 self.located(lid);
-                self.expression(expr);
+                self.expression_idx(expr);
             }
             ExpressionDesc::Pexp_extension(ext) => self.extension(ext),
-            ExpressionDesc::Pexp_await(expr) => self.expression(expr),
+            ExpressionDesc::Pexp_await(expr) => self.expression_idx(expr),
             ExpressionDesc::Pexp_jsx_element(element) => self.jsx_element(element),
         }
     }
@@ -3872,19 +3960,19 @@ impl<'a> LocCloner<'a> {
                 let (ref mut name, ref mut mty, ref mut body) = **inner;
                 self.located(name);
                 if let Some(mty) = mty {
-                    self.module_type(mty);
+                    self.mod_type_idx(mty);
                 }
-                self.module_expr(body);
+                self.mod_expr_idx(body);
             }
             ModuleExprDesc::Pmod_apply(lhs, rhs) => {
-                self.module_expr(lhs);
-                self.module_expr(rhs);
+                self.mod_expr_idx(lhs);
+                self.mod_expr_idx(rhs);
             }
             ModuleExprDesc::Pmod_constraint(expr, mty) => {
-                self.module_expr(expr);
-                self.module_type(mty);
+                self.mod_expr_idx(expr);
+                self.mod_type_idx(mty);
             }
-            ModuleExprDesc::Pmod_unpack(expr) => self.expression(expr),
+            ModuleExprDesc::Pmod_unpack(expr) => self.expression_idx(expr),
             ModuleExprDesc::Pmod_extension(ext) => self.extension(ext),
         }
     }
@@ -3922,18 +4010,18 @@ impl<'a> LocCloner<'a> {
                 let (ref mut name, ref mut arg, ref mut body) = **inner;
                 self.located(name);
                 if let Some(arg) = arg {
-                    self.module_type(arg);
+                    self.mod_type_idx(arg);
                 }
-                self.module_type(body);
+                self.mod_type_idx(body);
             }
             ModuleTypeDesc::Pmty_with(inner) => {
                 let (ref mut mty, ref mut constraints) = **inner;
-                self.module_type(mty);
+                self.mod_type_idx(mty);
                 for constraint in constraints.iter_mut() {
                     self.with_constraint(constraint);
                 }
             }
-            ModuleTypeDesc::Pmty_typeof(expr) => self.module_expr(expr),
+            ModuleTypeDesc::Pmty_typeof(expr) => self.mod_expr_idx(expr),
             ModuleTypeDesc::Pmty_extension(ext) => self.extension(ext),
         }
     }
