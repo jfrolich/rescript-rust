@@ -237,90 +237,128 @@ impl MarshalReader {
     }
 
     /// Read a marshalled value without magic/header (raw payload).
+    /// Uses an explicit stack instead of recursion to handle deeply nested structures.
     pub fn read_value<R: Read>(&mut self, reader: &mut R) -> Result<OcamlValue, MarshalError> {
+        // Stack of pending block constructions.
+        // Each entry: (tag, obj_table_index, total_field_count, fields_so_far)
+        let mut stack: Vec<(u8, usize, usize, Vec<OcamlValue>)> = Vec::new();
+
+        loop {
+            // Read the next atomic value (non-block) or start a new block
+            let value = self.read_atom(reader, &mut stack)?;
+
+            // If we got a value back, try to complete pending blocks
+            if let Some(mut val) = value {
+                loop {
+                    match stack.last_mut() {
+                        None => {
+                            // No pending blocks - this is the root value
+                            return Ok(val);
+                        }
+                        Some((tag, obj_idx, total, fields)) => {
+                            fields.push(val);
+                            if fields.len() == *total {
+                                // Block is complete
+                                let completed = OcamlValue::Block(*tag, std::mem::take(fields));
+                                self.obj_table[*obj_idx] = completed.clone();
+                                val = completed;
+                                stack.pop();
+                                // Continue popping - this completed block might be a field of an outer block
+                            } else {
+                                // Need more fields - break out to read the next value
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+            // If value was None, a block was pushed onto the stack and we need to read its fields
+        }
+    }
+
+    /// Read a single atom (non-block value) or push a new block frame onto the stack.
+    /// Returns Some(value) for atomic values, None when a block frame was pushed.
+    fn read_atom<R: Read>(
+        &mut self,
+        reader: &mut R,
+        stack: &mut Vec<(u8, usize, usize, Vec<OcamlValue>)>,
+    ) -> Result<Option<OcamlValue>, MarshalError> {
         let code = read_u8(reader)?;
 
         // Check prefix codes first (high bits)
         if code >= PREFIX_SMALL_BLOCK {
-            // PREFIX_SMALL_BLOCK: 1tttssss where ttt=tag(0-15), ssss=size(0-7)
-            // Actually: 10sssTTTT where sss=size(bits 4-6), TTTT=tag(bits 0-3)
             let tag = code & 0x0F;
             let size = ((code >> 4) & 0x07) as usize;
-            let mut fields = Vec::with_capacity(size);
-            let obj_idx = self.obj_table.len();
-            // Reserve space in obj_table for this block
-            self.obj_table.push(OcamlValue::Int(0)); // placeholder
-            for _ in 0..size {
-                let field = self.read_value(reader)?;
-                fields.push(field);
+            if size == 0 {
+                // Empty block - complete immediately
+                let value = OcamlValue::Block(tag, Vec::new());
+                self.obj_table.push(value.clone());
+                return Ok(Some(value));
             }
-            let value = OcamlValue::Block(tag, fields);
-            self.obj_table[obj_idx] = value.clone();
-            return Ok(value);
+            let obj_idx = self.obj_table.len();
+            self.obj_table.push(OcamlValue::Int(0)); // placeholder
+            stack.push((tag, obj_idx, size, Vec::with_capacity(size)));
+            return Ok(None);
         }
 
         if code >= PREFIX_SMALL_INT {
-            // PREFIX_SMALL_INT: 01xxxxxx — integer 0-63
             let n = (code & 0x3F) as i64;
-            // Integers are NOT added to the object table
-            return Ok(OcamlValue::Int(n));
+            return Ok(Some(OcamlValue::Int(n)));
         }
 
         if code >= PREFIX_SMALL_STRING {
-            // PREFIX_SMALL_STRING: 001xxxxx — string of length 0-31
             let len = (code & 0x1F) as usize;
             let mut buf = vec![0u8; len];
             reader.read_exact(&mut buf)?;
             let s = String::from_utf8_lossy(&buf).into_owned();
             let value = OcamlValue::String(s);
             self.obj_table.push(value.clone());
-            return Ok(value);
+            return Ok(Some(value));
         }
 
         // Explicit opcodes
         match code {
             CODE_INT8 => {
                 let n = read_i8(reader)? as i64;
-                Ok(OcamlValue::Int(n))
+                Ok(Some(OcamlValue::Int(n)))
             }
             CODE_INT16 => {
                 let n = read_i16_be(reader)? as i64;
-                Ok(OcamlValue::Int(n))
+                Ok(Some(OcamlValue::Int(n)))
             }
             CODE_INT32 => {
                 let n = read_i32_be(reader)? as i64;
-                Ok(OcamlValue::Int(n))
+                Ok(Some(OcamlValue::Int(n)))
             }
             CODE_INT64 => {
                 let n = read_i64_be(reader)?;
-                Ok(OcamlValue::Int(n))
+                Ok(Some(OcamlValue::Int(n)))
             }
             CODE_SHARED8 => {
                 let distance = read_u8(reader)? as u32;
-                self.resolve_shared(distance)
+                Ok(Some(self.resolve_shared(distance)?))
             }
             CODE_SHARED16 => {
                 let distance = read_u16_be(reader)? as u32;
-                self.resolve_shared(distance)
+                Ok(Some(self.resolve_shared(distance)?))
             }
             CODE_SHARED32 => {
                 let distance = read_u32_be(reader)?;
-                self.resolve_shared(distance)
+                Ok(Some(self.resolve_shared(distance)?))
             }
             CODE_BLOCK32 => {
                 let header = read_u32_be(reader)?;
                 let tag = (header & 0xFF) as u8;
                 let size = (header >> 10) as usize;
-                let mut fields = Vec::with_capacity(size);
+                if size == 0 {
+                    let value = OcamlValue::Block(tag, Vec::new());
+                    self.obj_table.push(value.clone());
+                    return Ok(Some(value));
+                }
                 let obj_idx = self.obj_table.len();
                 self.obj_table.push(OcamlValue::Int(0)); // placeholder
-                for _ in 0..size {
-                    let field = self.read_value(reader)?;
-                    fields.push(field);
-                }
-                let value = OcamlValue::Block(tag, fields);
-                self.obj_table[obj_idx] = value.clone();
-                Ok(value)
+                stack.push((tag, obj_idx, size, Vec::with_capacity(size)));
+                Ok(None)
             }
             CODE_STRING8 => {
                 let len = read_u8(reader)? as usize;
@@ -329,7 +367,7 @@ impl MarshalReader {
                 let s = String::from_utf8_lossy(&buf).into_owned();
                 let value = OcamlValue::String(s);
                 self.obj_table.push(value.clone());
-                Ok(value)
+                Ok(Some(value))
             }
             CODE_STRING32 => {
                 let len = read_u32_be(reader)? as usize;
@@ -338,21 +376,21 @@ impl MarshalReader {
                 let s = String::from_utf8_lossy(&buf).into_owned();
                 let value = OcamlValue::String(s);
                 self.obj_table.push(value.clone());
-                Ok(value)
+                Ok(Some(value))
             }
             CODE_DOUBLE_BIG => {
                 let bits = read_u64_be(reader)?;
                 let f = f64::from_bits(bits);
                 let value = OcamlValue::Float(f);
                 self.obj_table.push(value.clone());
-                Ok(value)
+                Ok(Some(value))
             }
             CODE_DOUBLE_LITTLE => {
                 let bits = read_u64_le(reader)?;
                 let f = f64::from_bits(bits);
                 let value = OcamlValue::Float(f);
                 self.obj_table.push(value.clone());
-                Ok(value)
+                Ok(Some(value))
             }
             _ => Err(MarshalError::BadOpcode(code)),
         }

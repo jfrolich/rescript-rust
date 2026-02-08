@@ -4620,7 +4620,20 @@ fn extract_type_path_from_expected<'a>(
     env: &Env,
     ctx: &'a crate::types::context::TypeContext<'a>,
 ) -> Option<Path> {
+    let mut visited = std::collections::HashSet::new();
+    extract_type_path_from_expected_inner(expected_ty, env, ctx, &mut visited)
+}
+
+fn extract_type_path_from_expected_inner<'a>(
+    expected_ty: TypeExprRef,
+    env: &Env,
+    ctx: &'a crate::types::context::TypeContext<'a>,
+    visited: &mut std::collections::HashSet<usize>,
+) -> Option<Path> {
     let ty = ctx.repr(expected_ty);
+    if !visited.insert(ty.0) {
+        return None; // Already visited this type — break the cycle
+    }
     let desc = ctx.get_desc(ty);
     match &*desc {
         TypeDesc::Tconstr { path, .. } => {
@@ -4631,7 +4644,7 @@ fn extract_type_path_from_expected<'a>(
                         // Abstract type - try to expand through manifest
                         if let Some(manifest) = decl.type_manifest {
                             drop(desc);
-                            return extract_type_path_from_expected(manifest, env, ctx);
+                            return extract_type_path_from_expected_inner(manifest, env, ctx, visited);
                         }
                         None
                     }

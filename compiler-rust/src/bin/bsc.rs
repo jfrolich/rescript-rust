@@ -34,10 +34,20 @@ struct Options {
 }
 
 fn main() {
-    if let Err(err) = run() {
-        eprintln!("{err}");
-        std::process::exit(1);
-    }
+    // Spawn the compiler in a thread with a large stack to avoid stack overflow
+    // on deeply nested type structures in CMI files
+    let builder = std::thread::Builder::new()
+        .name("compiler".into())
+        .stack_size(512 * 1024 * 1024); // 512MB
+    
+    let handler = builder.spawn(|| {
+        if let Err(err) = run() {
+            eprintln!("{err}");
+            std::process::exit(1);
+        }
+    }).expect("Failed to spawn compiler thread");
+    
+    handler.join().expect("Compiler thread panicked");
 }
 
 fn run() -> Result<()> {
