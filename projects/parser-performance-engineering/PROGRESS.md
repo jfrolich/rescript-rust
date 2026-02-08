@@ -215,7 +215,7 @@ cargo test --release --lib -- benchmark_all --ignored --nocapture
 | Zero-copy Constant and Label strings | Feb 2026 | Large 0.80x→0.77x (~4% faster) | ae09c8d1f |
 | Box large enum variants (OXC pattern) | Feb 2026 | Neutral (enum sizes 64-80→16-24 bytes) | 8ab6f5d66 |
 | Attributes newtype (Option<Box<Vec>>) | Feb 2026 | Neutral timing; Expression/Pattern/CoreType 40→24 bytes (40%) | 74867e6dc |
-| Index-based AST (ExprIdx/PatIdx) | Feb 2026 | Neutral timing; ExpressionDesc/PatternDesc/ModuleExprDesc 24→16 bytes (target!) | TBD |
+| Index-based AST (ExprIdx/PatIdx) | Feb 2026 | Neutral timing; ExpressionDesc/PatternDesc/ModuleExprDesc 24→16 bytes (target!) | dda3dbb46 |
 
 ---
 
