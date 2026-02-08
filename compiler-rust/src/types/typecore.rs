@@ -39,6 +39,10 @@ use crate::types::typedtree::{
 };
 use crate::types::{Env, Path, TypeContext, TypeDesc, TypeError, TypeExprRef, UnifyState, ValueDescription};
 
+const DICT_PATTERN_ATTRIBUTE: &str = "res.dictPattern";
+const DICT_MAGIC_FIELD_NAME: &str = "dictValuesType";
+const DICT_TYPE_NAME: &str = "dict";
+
 // ============================================================================
 // Location Conversion Helpers
 // ============================================================================
@@ -62,6 +66,16 @@ fn convert_located_stridx(loc: &Located<StrIdx>, arena: &ParseArena) -> Located<
         txt: arena.get_string(loc.txt).to_string(),
         loc: loc.loc,
     }
+}
+
+fn has_dict_pattern_attribute(arena: &ParseArena, attrs: &[crate::parser::ast::Attribute]) -> bool {
+    attrs
+        .iter()
+        .any(|attr| arena.get_string(attr.0.txt) == DICT_PATTERN_ATTRIBUTE)
+}
+
+fn is_dict_type_path(path: &Path) -> bool {
+    path.last() == DICT_TYPE_NAME
 }
 
 // ============================================================================
@@ -1427,7 +1441,7 @@ fn type_pattern_construct(
                 match env.find_constructor(&lid_name) {
                     Ok(desc) => (
                         desc.clone(),
-                        Path::pident(Ident::create_persistent(lid_name)),
+                        Path::pident(Ident::create_persistent(&lid_name)),
                     ),
                     Err(_) => return Err(TypeCoreError::NotAVariantType(lid_txt.clone())),
                 }
@@ -1564,6 +1578,18 @@ fn type_pattern_record(
     pat: &ParsedPattern,
 ) -> TypeCoreResult<Pattern> {
     let ctx = tctx.type_ctx;
+    let has_dict_pattern_attr = has_dict_pattern_attribute(tctx.arena, &pat.ppat_attributes);
+
+    // OCaml: dict patterns are forced to type dict<'a>, independent of expected_ty shape.
+    // This enables field-label disambiguation through the dict magic field.
+    let record_ty = if has_dict_pattern_attr {
+        ctx.new_constr(
+            Path::pident(Ident::create_persistent(DICT_TYPE_NAME)),
+            vec![ctx.new_var(None)],
+        )
+    } else {
+        expected_ty
+    };
 
     // Type check each field pattern
     let mut typed_fields = Vec::new();
@@ -1574,14 +1600,16 @@ fn type_pattern_record(
         let field_ty = ctx.new_var(None);
 
         // Try to look up the label from the environment for type info
-        let label_desc = if let Ok(env_label) = env.find_label(&field_name) {
-            let (ty_arg, ty_res) = crate::types::ctype::instance_label(ctx, env_label);
+        let label_desc = if let Some(env_label) =
+            disambiguate_label(&field_name, record_ty, env, ctx)
+        {
+            let (ty_arg, ty_res) = crate::types::ctype::instance_label(ctx, &env_label);
             // Best-effort unification to propagate type info
-            let _ = crate::types::unify(ctx, &mut tctx.unify_state, ty_res, expected_ty);
+            let _ = crate::types::unify(ctx, &mut tctx.unify_state, ty_res, record_ty);
             let _ = crate::types::unify(ctx, &mut tctx.unify_state, ty_arg, field_ty);
             crate::types::LabelDescription {
                 lbl_name: env_label.lbl_name.clone(),
-                lbl_res: expected_ty,
+                lbl_res: record_ty,
                 lbl_arg: field_ty,
                 lbl_mut: env_label.lbl_mut.clone(),
                 lbl_optional: env_label.lbl_optional,
@@ -1595,7 +1623,7 @@ fn type_pattern_record(
         } else {
             crate::types::LabelDescription {
                 lbl_name: field_name,
-                lbl_res: expected_ty,
+                lbl_res: record_ty,
                 lbl_arg: field_ty,
                 lbl_mut: crate::types::MutableFlag::Immutable,
                 lbl_optional: field.opt,
@@ -1631,6 +1659,9 @@ fn type_pattern_record(
         };
         typed_fields.push((field.lid.clone(), label_desc, typed_pat, field.opt));
     }
+
+    // OCaml unifies the inferred record type with the pattern expected type.
+    unify_pattern_types(tctx, loc, record_ty, expected_ty)?;
 
     Ok(Pattern::new(
         PatternDesc::Tpat_record(typed_fields, closed_flag),
@@ -2749,6 +2780,20 @@ fn type_application(
             // Move to return type for next argument
             current_ty = ret_ty;
             break;
+        }
+    }
+
+    // OCaml implicitly applies missing optional arguments with None when the
+    // call is not marked partial.
+    if !partial {
+        while let Some((fn_label, _arg_ty, ret_ty)) =
+            crate::types::ctype::split_arrow_with_label(ctx, current_ty)
+        {
+            if fn_label.is_optional() {
+                current_ty = ret_ty;
+            } else {
+                break;
+            }
         }
     }
 
@@ -4535,7 +4580,7 @@ fn lookup_constructor_in_module<'b>(
         Longident::Ldot(module_lid, cstr_idx) => {
             let cstr_name = arena.get_string(*cstr_idx);
             // Resolve the module prefix to get its signature
-            let (_mod_path, sig) = env.resolve_module_lid(module_lid, arena, pers_env, ctx)?;
+            let (mod_path, sig) = env.resolve_module_lid(module_lid, arena, pers_env, ctx)?;
             // Search the signature for type declarations that contain the constructor
             for sig_item in &sig {
                 if let SignatureItem::SigType(_id, type_decl, _rec) = sig_item {
@@ -4562,9 +4607,10 @@ fn lookup_constructor_in_module<'b>(
                                         (args, arity)
                                     }
                                 };
+                                let type_path = Path::pdot(mod_path.clone(), _id.name().to_string());
                                 let cstr_res = cd.cd_res.unwrap_or_else(|| {
                                     ctx.new_generic_constr(
-                                        Path::pident(_id.clone()),
+                                        type_path.clone(),
                                         type_decl.type_params.clone(),
                                     )
                                 });
@@ -4748,12 +4794,26 @@ fn disambiguate_label<'a>(
     // Extract type path from the record expression's type
     let opath = extract_type_path_from_expected(record_ty, env, ctx);
 
+    // OCaml special-case: when disambiguating labels on dict, route any field lookup
+    // through dictValuesType, then preserve the source field name in the final label.
+    let (lookup_name, override_name) = if let Some(ref path) = opath {
+        if is_dict_type_path(path) {
+            (DICT_MAGIC_FIELD_NAME, Some(label_name.to_string()))
+        } else {
+            (label_name, None)
+        }
+    } else {
+        (label_name, None)
+    };
+
     // Find all labels with this name
-    let all_labels = env.find_all_labels(label_name);
+    let all_labels = env.find_all_labels(lookup_name);
 
     if all_labels.is_empty() {
         return None;
     }
+
+    let mut selected = None;
 
     // If we have a target type path, try to disambiguate
     if let Some(ref target_path) = opath {
@@ -4762,14 +4822,25 @@ fn disambiguate_label<'a>(
             let lbl_desc = ctx.get_desc(lbl_ty);
             if let TypeDesc::Tconstr { path: lbl_path, .. } = &*lbl_desc {
                 if lbl_path.same(target_path) {
-                    return Some((*label).clone());
+                    selected = Some((*label).clone());
+                    break;
                 }
             }
         }
     }
 
     // Fall back to the most recent label (last in the list)
-    all_labels.last().map(|l| (*l).clone())
+    if selected.is_none() {
+        selected = all_labels.last().map(|l| (*l).clone());
+    }
+
+    if let Some(override_name) = override_name {
+        if let Some(label) = selected.as_mut() {
+            label.lbl_name = override_name;
+        }
+    }
+
+    selected
 }
 
 /// Type-directed constructor disambiguation.

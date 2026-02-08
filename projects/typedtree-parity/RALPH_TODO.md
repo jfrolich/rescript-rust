@@ -75,9 +75,15 @@ The `-dtyped-sexp` flag outputs the typed tree without locations. The `-dtyped-s
 
 |  | Status |
 |--|--------|
-| OCaml compiles | 659/659 |
-| Rust compiles | 588/659 (71 fail) |
-| Parity match (-dtyped-sexp) | 305/588 (51.9%) |
+| OCaml compiles | 657/657 |
+| Rust compiles | 590/657 (67 fail) |
+| Parity match (-dtyped-sexp) | 310/590 (52.5%) |
+
+**Task Progress:** 1/2 complete
+
+**Task Checklist:**
+- [x] Fix qualified constructor typing + trailing optional-arg consumption in `type_application` so dict-pattern matches compile instead of failing with `PatternTypeClash`.
+- [ ] Reduce remaining Rust compile failures (67), prioritizing root causes in `UndefinedMethod`, `ExprTypeClash`, and `PatternTypeClash`.
 
 **Previous milestones completed:**
 - Parser AST structure: 100% parity (sexp-locs 1196/1196)
@@ -90,6 +96,7 @@ The `-dtyped-sexp` flag outputs the typed tree without locations. The `-dtyped-s
 - Fix _include_ path for non-ident include statements
 - Fix type alias expansion: copy manifests during expansion to prevent corruption
 - Propagate arity in arrow type unification
+- Module-qualified constructor result typing + implicit trailing optional-arg consumption in applications (Rust compile failures: 71 -> 67)
 
 ---
 
