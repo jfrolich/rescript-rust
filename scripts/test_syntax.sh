@@ -30,6 +30,8 @@ else
   fi
 fi
 
+TELLA_DIR="${TELLA_DIR:-$HOME/dev/tella-fusion}"
+
 function exp {
   echo "$(dirname $1)/expected/$(basename $1).txt"
 }
@@ -214,6 +216,16 @@ if [[ $ROUNDTRIP_TEST = 1 ]]; then
   touch $roundtripTestsResult
 
   find syntax_tests/data/{idempotency,printer} -name "*.res" -o -name "*.resi" >temp/files.txt
+  if [[ -d "$TELLA_DIR" ]]; then
+    echo "Including external roundtrip corpus: $TELLA_DIR"
+    find "$TELLA_DIR" \
+      -type d \( -name .git -o -name target -o -name .next -o -name _build -o -path "*/lib/bs" -o -path "*/lib/ocaml" \) -prune \
+      -o -type f \( -name "*.res" -o -name "*.resi" \) -print >>temp/files.txt
+  fi
+  sort -u temp/files.txt -o temp/files.txt
+  roundtripFileCount=$(wc -l < temp/files.txt | tr -d ' ')
+  echo "Roundtrip files: $roundtripFileCount"
+
   while read file; do {
     mkdir -p temp/$(dirname $file)
     sexpAst1=temp/$file.sexp

@@ -20,6 +20,7 @@ OCAML_PARSER="$DUNE_BIN_DIR/res_parser"
 SPICE_PPX="${SPICE_PPX:-/Users/jaapf/conductor/repos/ppx_spice/ppx}"
 SPICE_TEST_DIR="$PROJECT_ROOT/tests/ppx_spice/src"
 INSPECT_SCRIPT="$PROJECT_ROOT/scripts/inspect_binary_ast.py"
+TELLA_DIR="${TELLA_DIR:-$HOME/dev/tella-fusion}"
 
 # Output directories
 TEMP_DIR="$PROJECT_ROOT/temp/rust-parity"
@@ -612,8 +613,21 @@ run_js_compilation_tests() {
     cd "$PROJECT_ROOT/tests/tests"
     mkdir -p "$TEMP_DIR/js"
 
-    # Find all .res files that have corresponding .mjs snapshots
+    # Find all local .res files (some may not have snapshots and are skipped below).
     find src -name "*.res" 2>/dev/null | sort > "$TEMP_DIR/js_files.txt"
+
+    # Include external corpus by reference (no file copying).
+    # Expected snapshots there are checked-in .bs.js files next to sources.
+    if [[ -d "$TELLA_DIR" ]]; then
+        find "$TELLA_DIR" \
+            -type d \( -name .git -o -name target -o -name .next -o -name _build -o -path "*/lib/bs" -o -path "*/lib/ocaml" \) -prune \
+            -o -type f -name "*.res" -print 2>/dev/null | \
+            sort >> "$TEMP_DIR/js_files.txt"
+    fi
+
+    sort -u "$TEMP_DIR/js_files.txt" -o "$TEMP_DIR/js_files.txt"
+    grep -Ev '(^|/)lib/(bs|ocaml)(/|$)' "$TEMP_DIR/js_files.txt" > "$TEMP_DIR/js_files.filtered.txt" || true
+    mv "$TEMP_DIR/js_files.filtered.txt" "$TEMP_DIR/js_files.txt"
     local file_count=$(wc -l < "$TEMP_DIR/js_files.txt" | tr -d ' ')
 
     echo "Testing $file_count files..."
@@ -627,11 +641,16 @@ run_js_compilation_tests() {
             echo "  Progress: $file_index / $file_count files..."
         fi
 
-        # Get the expected .mjs file path
-        local mjs_file="${res_file%.res}.mjs"
+        # Resolve expected snapshot:
+        # - internal tests use .mjs snapshots
+        # - external corpora (e.g. tella) use checked-in .bs.js snapshots
+        local expected_file="${res_file%.res}.mjs"
+        if [[ ! -f "$expected_file" ]]; then
+            expected_file="${res_file%.res}.bs.js"
+        fi
 
-        # Skip if no snapshot exists (some files might be dependencies only)
-        if [[ ! -f "$mjs_file" ]]; then
+        # Skip files without an in-source expected snapshot.
+        if [[ ! -f "$expected_file" ]]; then
             continue
         fi
 
@@ -640,20 +659,32 @@ run_js_compilation_tests() {
         mkdir -p "$output_dir"
 
         # Compile with Rust bsc
-        local actual_mjs="$output_dir/$(basename "${res_file%.res}.mjs")"
+        local expected_ext="${expected_file##*.}"
+        local output_name="$(basename "${expected_file}")"
+        local actual_mjs="$output_dir/$output_name"
         local compile_output="$TEMP_DIR/js/compile_output.txt"
 
         # Note: We compile to a temp location to not disturb the actual test files
-        # The Rust bsc should output to stdout or we need to copy the file
-        if timeout "$TIMEOUT_SECONDS" "$RUST_BSC" -bs-package-name rescript-tests -bs-module-type esmodule "$res_file" -o "$actual_mjs" > "$compile_output" 2>&1; then
+        # Local syntax tests expect .mjs; external corpora usually expect .bs.js.
+        local compile_ok=false
+        if [[ "$expected_ext" == "mjs" ]]; then
+            if timeout "$TIMEOUT_SECONDS" "$RUST_BSC" -bs-package-name rescript-tests -bs-module-type esmodule "$res_file" -o "$actual_mjs" > "$compile_output" 2>&1; then
+                compile_ok=true
+            fi
+        else
+            if timeout "$TIMEOUT_SECONDS" "$RUST_BSC" -bs-package-name rescript-tests "$res_file" -o "$actual_mjs" > "$compile_output" 2>&1; then
+                compile_ok=true
+            fi
+        fi
+        if $compile_ok; then
             # Check if output file was created
             if [[ -f "$actual_mjs" ]]; then
-                if diff -q "$mjs_file" "$actual_mjs" > /dev/null 2>&1; then
+                if diff -q "$expected_file" "$actual_mjs" > /dev/null 2>&1; then
                     pass_count=$((pass_count + 1))
                 else
                     diff_count=$((diff_count + 1))
                     failed_files="$failed_files$res_file (output differs)\n"
-                    diff -u "$mjs_file" "$actual_mjs" > "$DIFF_DIR/js_$(echo "$res_file" | tr '/' '_').diff" 2>&1 || true
+                    diff -u "$expected_file" "$actual_mjs" > "$DIFF_DIR/js_$(echo "$res_file" | tr '/' '_').diff" 2>&1 || true
                 fi
             else
                 compile_error_count=$((compile_error_count + 1))
