@@ -13,7 +13,7 @@
 | Tier | Description | Status | Progress |
 |------|-------------|--------|----------|
 | Tier 1 | High Impact: Scanner + Token | 🚧 In Progress | 4/6 |
-| Tier 2 | High Impact: AST + Token Layout | 🚧 In Progress | 2/6 |
+| Tier 2 | High Impact: AST + Token Layout | 🚧 In Progress | 3/6 |
 | Tier 3 | Medium Impact: DOD + Misc | ⏳ Not Started | 0/7 |
 | Tier 4 | Architectural | ⏳ Not Started | 0/4 |
 
@@ -107,13 +107,16 @@ cargo test --release --lib -- benchmark_all --ignored --nocapture
   - AttrsIdx(u32) infrastructure added to ParseArena for future 24→16 byte reduction
   - Files: `ast.rs` + 20 dependent files
 
-- [ ] **2.3 Index-based AST (ExprIdx/PatIdx)**
-  - Replace `Box<Expression>` with `ExprIdx(u32)` into flat `Vec<Expression>` pools
-  - Extends existing arena pattern (LocIdx, StrIdx, etc.)
-  - Eliminates per-node heap allocation (currently 5-15 Box allocs per expression)
-  - Bottom-up construction → linear forward scan for traversal (prefetcher-friendly)
-  - Evidence: 2.4x speedup (Sampson) + 8.2% bonus from linear scan
-  - Files: `ast.rs`, `parse_arena.rs`, all parsing modules, PPX, marshal
+- [x] **2.3 Index-based AST (ExprIdx/PatIdx)** ✅ COMPLETE
+  - Replaced Box<Expression/Pattern/CoreType/ModuleExpr/ModuleType> with u32 index types
+  - Five arena pools in ParseArena: expressions, patterns, core_types, mod_exprs, mod_types
+  - All AST desc enum variants use indices for recursive references
+  - Fixed 112 borrow checker errors: owned returns, read-only signatures, split push patterns
+  - ExpressionDesc 24→16 bytes (target!), PatternDesc 24→16, ModuleExprDesc 24→16
+  - PexpFun 64→56, PexpApply 40→32
+  - Performance: neutral (Large 0.81x, consistent with previous)
+  - Parity: zero regressions
+  - Files: `ast.rs`, `parse_arena.rs`, `ppx.rs`, `jsx_ppx.rs` + all parsing/PPX/marshal
 
 - [ ] **2.4 Generalized sparse data / side tables**
   - Beyond attributes: move all Option<T> fields that are None >80% of the time to side tables
@@ -212,6 +215,7 @@ cargo test --release --lib -- benchmark_all --ignored --nocapture
 | Zero-copy Constant and Label strings | Feb 2026 | Large 0.80x→0.77x (~4% faster) | ae09c8d1f |
 | Box large enum variants (OXC pattern) | Feb 2026 | Neutral (enum sizes 64-80→16-24 bytes) | 8ab6f5d66 |
 | Attributes newtype (Option<Box<Vec>>) | Feb 2026 | Neutral timing; Expression/Pattern/CoreType 40→24 bytes (40%) | 74867e6dc |
+| Index-based AST (ExprIdx/PatIdx) | Feb 2026 | Neutral timing; ExpressionDesc/PatternDesc/ModuleExprDesc 24→16 bytes (target!) | TBD |
 
 ---
 
@@ -389,6 +393,40 @@ attributes, so the Option<Box<...>> = None case (zero allocation) dominates.
 AttrsIdx(u32) infrastructure was added to ParseArena for a potential future
 reduction from 24 to 16 bytes (8→4 byte field), to be done alongside task 2.3
 (index-based AST).
+```
+
+### After 2.3 Index-based AST (ExprIdx/PatIdx) (February 2026)
+
+```
+Run: cargo test --release --lib -- benchmark_all --ignored --nocapture
+
+  Size Tier                  Files   Faster       OK Avg Factor Min Factor Max Factor
+  -------------------------------------------------------------------------------------
+  Large (>30KB)                 14       14        0       0.81x       0.67x       0.92x
+  Medium (10-30KB)              73       73        0       0.54x       0.22x       0.80x
+  Small (1-10KB)               443      443        0       0.38x       0.29x       0.64x
+  Tiny (<1KB)                  636      636        0       0.30x       0.18x       0.94x
+
+Overall: 1166/1166 passing (1166 faster, 0 within tolerance), 38 skipped
+Parity: zero regressions (pre-existing 3 sexp-locs diffs unchanged)
+
+AST Enum Sizes (before → after):
+  ExpressionDesc:     24 → 16 bytes (target hit!)
+  PatternDesc:        24 → 16 bytes (target hit!)
+  ModuleExprDesc:     24 → 16 bytes (target hit!)
+  PexpFun:            64 → 56 bytes (12.5% reduction)
+  PexpApply:          40 → 32 bytes (20% reduction)
+  All other AST enums: 16 bytes (unchanged, already at target)
+
+Notes: Performance is neutral (Large 0.81x, consistent with previous 0.81x).
+The index-based AST replaces 8-byte Box<T> pointers with 4-byte u32 indices,
+bringing ExpressionDesc, PatternDesc, and ModuleExprDesc to the 16-byte target.
+The primary benefit is structural: AST nodes are now stored in flat Vec pools
+enabling future linear traversal and cache-friendly access patterns.
+Fixed 112 borrow checker errors across ppx.rs and jsx_ppx.rs by:
+(1) changing arena-borrowing functions to return owned data,
+(2) converting read-only functions from &mut to & signatures,
+(3) splitting nested arena.push_X(fn(..., arena)) into separate let bindings.
 ```
 
 *Add new entries below as optimizations are applied.*

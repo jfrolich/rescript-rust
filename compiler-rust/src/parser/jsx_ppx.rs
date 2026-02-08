@@ -337,7 +337,10 @@ fn transform_react_component_binding(
 
     // Detect forwardRef and get inner expression
     // wrapper_expr is the original React.forwardRef expression with its source location
-    let (wrapper_expr, has_forward_ref, inner_expr) = spelunk_for_fun_expression(arena, &binding.pvb_expr);
+    let (wrapper_expr, has_forward_ref, inner_expr) = {
+        let (w, h, i) = spelunk_for_fun_expression(arena, &binding.pvb_expr);
+        (w.cloned(), h, i.clone())
+    };
 
     // Detect if function is async
     let is_async = is_async_function(arena, &binding.pvb_expr);
@@ -350,7 +353,7 @@ fn transform_react_component_binding(
         .collect();
 
     // Extract labeled arguments from the function (use inner expression to handle forwardRef)
-    let (args, newtypes, _) = recursively_extract_named_args(arena, inner_expr);
+    let (args, newtypes, _) = recursively_extract_named_args(arena, &inner_expr);
 
     // Build named type list for props
     let named_type_list: Vec<NamedType> = args.iter()
@@ -365,7 +368,7 @@ fn transform_react_component_binding(
     };
 
     // Build the internal expression pattern (use inner expression to handle forwardRef)
-    let (patterns_with_label, expression) = build_props_pattern_and_body(inner_expr, &args, config, arena);
+    let (patterns_with_label, expression) = build_props_pattern_and_body(&inner_expr, &args, config, arena);
 
     // Create record pattern: {a, b, _}: props<'a, 'b>
     let record_pattern = if patterns_with_label.is_empty() {
@@ -668,7 +671,7 @@ fn transform_react_component_binding(
     let final_full_expression = if has_forward_ref {
         if let Some(wrapper) = wrapper_expr {
             // Use original wrapper expression from source (preserves location)
-            let wrapper_idx = arena.push_expr(wrapper.clone());
+            let wrapper_idx = arena.push_expr(wrapper);
             Expression {
                 pexp_desc: Box::new(ExpressionDesc::Pexp_apply(Box::new(PexpApply {
                     funct: wrapper_idx,
@@ -951,14 +954,17 @@ fn transform_react_component_with_props_binding(
                 pvb_expr: wrapper_expr,
                 pvb_attributes: Attributes::new(),
                 pvb_loc: empty_loc(),
-            }], arena.push_expr(Expression {
-                pexp_desc: Box::new(ExpressionDesc::Pexp_ident(Loc {
-                    txt: arena.push_longident(Longident::Lident(full_module_name_idx2)),
-                    loc: empty_loc(),
-                })),
-                pexp_loc: empty_loc(),
-                pexp_attributes: Attributes::new(),
-            }))))),
+            }], {
+                let lid = arena.push_longident(Longident::Lident(full_module_name_idx2));
+                arena.push_expr(Expression {
+                    pexp_desc: Box::new(ExpressionDesc::Pexp_ident(Loc {
+                        txt: lid,
+                        loc: empty_loc(),
+                    })),
+                    pexp_loc: empty_loc(),
+                    pexp_attributes: Attributes::new(),
+                })
+            })))),
         pexp_loc: empty_loc(),
         pexp_attributes: Attributes::new(),
     };
@@ -1119,12 +1125,13 @@ fn simple_props_pattern(arena: &mut ParseArena) -> Pattern {
 fn wrap_with_jsx_promise(arena: &mut ParseArena, expr: Expression) -> Expression {
     let jsx_idx = arena.intern_string("Jsx");
     let promise_idx = arena.intern_string("promise");
+    let promise_lid = arena.push_longident(Longident::Ldot(
+        Box::new(Longident::Lident(jsx_idx)),
+        promise_idx,
+    ));
     let funct_idx = arena.push_expr(Expression {
         pexp_desc: Box::new(ExpressionDesc::Pexp_ident(Loc {
-            txt: arena.push_longident(Longident::Ldot(
-                Box::new(Longident::Lident(jsx_idx)),
-                promise_idx,
-            )),
+            txt: promise_lid,
             loc: empty_loc(),
         })),
         pexp_loc: empty_loc(),
@@ -1227,9 +1234,10 @@ fn make_props_wrapper_expr_with_ref(arena: &mut ParseArena, fn_name: &str, rec_f
         RecFlag::Nonrecursive => fn_name.to_string(),
     };
     let fn_str_idx2 = arena.push_interned_string(&called_fn_name);
+    let fn_lid = arena.push_longident(Longident::Lident(fn_str_idx2));
     let funct_idx = arena.push_expr(Expression {
         pexp_desc: Box::new(ExpressionDesc::Pexp_ident(Loc {
-            txt: arena.push_longident(Longident::Lident(fn_str_idx2)),
+            txt: fn_lid,
             loc: empty_loc(),
         })),
         pexp_loc: empty_loc(),
@@ -1387,9 +1395,10 @@ fn add_default_value_matches(arena: &mut ParseArena, mut expr: Expression, args:
             let none_str_idx = arena.intern_string("None");
             let label_name_str_idx = arena.push_interned_string(&label_name);
             let label_name_str_idx2 = arena.push_interned_string(&label_name);
+            let scrutinee_lid = arena.push_longident(Longident::Lident(prefixed_str_idx));
             let match_scrutinee_idx = arena.push_expr(Expression {
                 pexp_desc: Box::new(ExpressionDesc::Pexp_ident(Loc {
-                    txt: arena.push_longident(Longident::Lident(prefixed_str_idx)),
+                    txt: scrutinee_lid,
                     loc: empty_loc(),
                 })),
                 pexp_loc: empty_loc(),
@@ -2849,7 +2858,8 @@ fn transform_expression(expr: Expression, config: &JsxConfig, arena: &mut ParseA
             let transformed_rhs = transform_expression(rhs_expr, config, arena);
             let transformed_default = default.map(|d| {
                 let d_expr = arena.get_expr(d).clone();
-                arena.push_expr(transform_expression(d_expr, config, arena))
+                let rw = transform_expression(d_expr, config, arena);
+                arena.push_expr(rw)
             });
             ExpressionDesc::Pexp_fun(Box::new(PexpFun {
                 arg_label,
@@ -2883,13 +2893,12 @@ fn transform_expression(expr: Expression, config: &JsxConfig, arena: &mut ParseA
             ))
         }
         ExpressionDesc::Pexp_construct(lid, arg) => {
-            ExpressionDesc::Pexp_construct(
-                lid,
-                arg.map(|e| {
-                    let e_expr = arena.get_expr(e).clone();
-                    arena.push_expr(transform_expression(e_expr, config, arena))
-                }),
-            )
+            let rw_arg = arg.map(|e| {
+                let e_expr = arena.get_expr(e).clone();
+                let rw = transform_expression(e_expr, config, arena);
+                arena.push_expr(rw)
+            });
+            ExpressionDesc::Pexp_construct(lid, rw_arg)
         }
         ExpressionDesc::Pexp_variant(inner) => {
             ExpressionDesc::Pexp_variant(inner)
@@ -2898,7 +2907,8 @@ fn transform_expression(expr: Expression, config: &JsxConfig, arena: &mut ParseA
             let (fields, base) = *inner;
             let transformed_base = base.map(|e| {
                 let e_expr = arena.get_expr(e).clone();
-                arena.push_expr(transform_expression(e_expr, config, arena))
+                let rw = transform_expression(e_expr, config, arena);
+                arena.push_expr(rw)
             });
             ExpressionDesc::Pexp_record(Box::new((fields.into_iter().map(|f| ExpressionRecordField {
                     lid: f.lid,
