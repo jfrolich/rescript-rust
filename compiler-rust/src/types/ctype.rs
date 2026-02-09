@@ -1297,6 +1297,14 @@ fn unify_object_fields<'a>(
     let desc2 = ctx.get_desc(fields2);
 
     match (&*desc1, &*desc2) {
+        // Open object rows are represented as type variables. Delegate to
+        // regular unification so the row variable can link to the concrete
+        // field chain (OCaml unify_fields/make_rowvar behavior).
+        (TypeDesc::Tvar(_), _) | (_, TypeDesc::Tvar(_)) => {
+            drop(desc1);
+            drop(desc2);
+            unify(ctx, state, fields1, fields2)
+        }
         (TypeDesc::Tnil, TypeDesc::Tnil) => {
             drop(desc1);
             drop(desc2);
