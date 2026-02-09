@@ -190,6 +190,106 @@ fn substitute_functor_param_in_module_type(
     }
 }
 
+fn unwrap_poly_type(ctx: &crate::types::context::TypeContext<'_>, ty: TypeExprRef) -> TypeExprRef {
+    let repr = ctx.repr(ty);
+    match &*ctx.get_desc(repr) {
+        crate::types::TypeDesc::Tpoly { body, .. } => ctx.repr(*body),
+        _ => repr,
+    }
+}
+
+fn find_type_decl_for_path(
+    env: &Env,
+    ctx: &crate::types::context::TypeContext<'_>,
+    path: &Path,
+) -> Option<crate::types::TypeDeclaration> {
+    if let Ok(type_decl) = env.lookup_type(path) {
+        return Some((*type_decl).clone());
+    }
+    if let Path::Pident(id) = path {
+        if let Some(type_decl) = ctx.find_type_decl_by_stamp(id.stamp()) {
+            return Some((*type_decl).clone());
+        }
+    }
+    let path_str = path.name();
+    if let Some(type_decl) = ctx.find_type_decl_by_path(&path_str) {
+        return Some((*type_decl).clone());
+    }
+    let short_name = path.head_name();
+    ctx.find_type_decl(short_name).map(|decl| (*decl).clone())
+}
+
+fn expand_record_spread_label(
+    ctx: &crate::types::context::TypeContext<'_>,
+    env: &Env,
+    label: &crate::types::LabelDeclaration,
+    visited: &mut HashSet<String>,
+) -> Option<Vec<crate::types::LabelDeclaration>> {
+    if label.ld_id.name() != "..." {
+        return Some(vec![label.clone()]);
+    }
+
+    let spread_ty = unwrap_poly_type(ctx, label.ld_type);
+    let spread_path = match &*ctx.get_desc(spread_ty) {
+        crate::types::TypeDesc::Tconstr { path, .. } => path.clone(),
+        _ => return None,
+    };
+    let path_name = spread_path.name();
+    if !visited.insert(path_name.clone()) {
+        return None;
+    }
+    let result = if let Some(source_decl) = find_type_decl_for_path(env, ctx, &spread_path) {
+        if let crate::types::TypeKind::TypeRecord(inner_fields, _) = &source_decl.type_kind {
+            let mut expanded = Vec::new();
+            for inner_field in inner_fields {
+                expanded.extend(expand_record_spread_label(ctx, env, inner_field, visited)?);
+            }
+            Some(expanded)
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+    visited.remove(&path_name);
+    result
+}
+
+fn make_typed_spread_label(
+    ctx: &crate::types::context::TypeContext<'_>,
+    template: &TypedLabelDeclaration,
+    field: &crate::types::LabelDeclaration,
+) -> TypedLabelDeclaration {
+    let actual_field_type = unwrap_poly_type(ctx, field.ld_type);
+    let typed_ld_type = match &template.ld_type.ctyp_desc {
+        TypedCoreTypeDesc::Ttyp_poly(vars, inner_ctyp) => TypedCoreType {
+            ctyp_desc: TypedCoreTypeDesc::Ttyp_poly(vars.clone(), inner_ctyp.clone()),
+            ctyp_type: actual_field_type,
+            ..template.ld_type.clone()
+        },
+        _ => TypedCoreType {
+            ctyp_type: actual_field_type,
+            ..template.ld_type.clone()
+        },
+    };
+    let parser_mutable = match field.ld_mutable {
+        crate::types::MutableFlag::Immutable => crate::parser::ast::MutableFlag::Immutable,
+        crate::types::MutableFlag::Mutable => crate::parser::ast::MutableFlag::Mutable,
+    };
+    TypedLabelDeclaration {
+        ld_id: field.ld_id.clone(),
+        ld_name: Located {
+            txt: field.ld_id.name().to_string(),
+            loc: template.ld_loc,
+        },
+        ld_mutable: parser_mutable,
+        ld_optional: field.ld_optional,
+        ld_type: typed_ld_type,
+        ld_loc: template.ld_loc,
+        ld_attributes: vec![],
+    }
+}
+
 // ============================================================================
 // Module Type Checking Results
 // ============================================================================
@@ -2826,7 +2926,99 @@ fn type_structure_item<'a>(
                                             ld_attributes: lbl.pld_attributes.clone(),
                                         });
                                     }
-                                    (vec![], crate::types::ConstructorArguments::CstrRecord(internal_labels), TypedConstructorArguments::Cstr_record(typed_labels))
+                                    let has_spread = internal_labels
+                                        .iter()
+                                        .any(|label| label.ld_id.name() == "...");
+                                    if has_spread {
+                                        let mut expanded_internal_labels = Vec::new();
+                                        let mut expanded_typed_labels = Vec::new();
+                                        let mut all_spreads_resolved = true;
+
+                                        for (internal_label, typed_label) in internal_labels
+                                            .iter()
+                                            .zip(typed_labels.iter())
+                                        {
+                                            if internal_label.ld_id.name() != "..." {
+                                                expanded_internal_labels.push(internal_label.clone());
+                                                expanded_typed_labels.push(typed_label.clone());
+                                                continue;
+                                            }
+
+                                            let mut visited = HashSet::new();
+                                            if let Some(resolved_fields) = expand_record_spread_label(
+                                                ctx,
+                                                &new_env,
+                                                internal_label,
+                                                &mut visited,
+                                            ) {
+                                                for resolved_field in resolved_fields {
+                                                    expanded_typed_labels.push(make_typed_spread_label(
+                                                        ctx,
+                                                        typed_label,
+                                                        &resolved_field,
+                                                    ));
+                                                    expanded_internal_labels.push(resolved_field);
+                                                }
+                                            } else {
+                                                all_spreads_resolved = false;
+                                                expanded_internal_labels.push(internal_label.clone());
+                                                expanded_typed_labels.push(typed_label.clone());
+                                            }
+                                        }
+
+                                        if all_spreads_resolved {
+                                            (
+                                                vec![],
+                                                crate::types::ConstructorArguments::CstrRecord(
+                                                    expanded_internal_labels,
+                                                ),
+                                                TypedConstructorArguments::Cstr_record(
+                                                    expanded_typed_labels,
+                                                ),
+                                            )
+                                        } else if labels.len() == 1
+                                            && arena.get_string(labels[0].pld_name.txt) == "..."
+                                        {
+                                            let spread_type = &labels[0].pld_type;
+                                            let object_spread_type = crate::parser::ast::CoreType {
+                                                ptyp_desc: crate::parser::ast::CoreTypeDesc::Ptyp_object(
+                                                    vec![crate::parser::ast::ObjectField::Oinherit(
+                                                        spread_type.clone(),
+                                                    )],
+                                                    crate::parser::ast::ClosedFlag::Closed,
+                                                ),
+                                                ptyp_loc: spread_type.ptyp_loc,
+                                                ptyp_attributes: vec![],
+                                            };
+                                            let (typed_core_type, type_ref) =
+                                                transl_type(tctx, &new_env, &object_spread_type)?;
+                                            (
+                                                vec![type_ref],
+                                                crate::types::ConstructorArguments::CstrTuple(
+                                                    vec![type_ref],
+                                                ),
+                                                TypedConstructorArguments::Cstr_tuple(
+                                                    vec![typed_core_type],
+                                                ),
+                                            )
+                                        } else {
+                                            (
+                                                vec![],
+                                                crate::types::ConstructorArguments::CstrRecord(
+                                                    internal_labels,
+                                                ),
+                                                TypedConstructorArguments::Cstr_record(typed_labels),
+                                            )
+                                        }
+                                    } else {
+                                        (
+                                            vec![],
+                                            crate::types::ConstructorArguments::CstrRecord(
+                                                internal_labels,
+                                            ),
+                                            TypedConstructorArguments::Cstr_record(typed_labels),
+                                        )
+                                    }
                                 }
                             };
 
