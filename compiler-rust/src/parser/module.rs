@@ -782,6 +782,7 @@ pub fn parse_signature(p: &mut Parser<'_>) -> Signature {
 /// Parse a single signature item.
 pub fn parse_signature_item(p: &mut Parser<'_>) -> Option<SignatureItem> {
     let start_pos_idx = p.start_pos_idx();
+    let mut item_loc_idx: Option<LocIdx> = None;
 
     // Parse attributes
     let attrs = parse_attributes(p);
@@ -977,6 +978,8 @@ pub fn parse_signature_item(p: &mut Parser<'_>) -> Option<SignatureItem> {
             p.next();
             let loc = p.mk_loc_idx_to_prev_end(doc_start_idx);
             let attr = super::core::doc_comment_to_attribute(p.arena_mut(), loc, content);
+            // OCaml uses the same `loc` pointer for both Psig_attribute and the attr itself.
+            item_loc_idx = Some(loc);
             Some(SignatureItemDesc::Psig_attribute(Box::new(attr)))
         }
         Token::Percent | Token::PercentPercent => {
@@ -1009,9 +1012,17 @@ pub fn parse_signature_item(p: &mut Parser<'_>) -> Option<SignatureItem> {
         } else {
             p.prev_end_pos_idx()
         };
+        let psig_loc = match item_loc_idx {
+            Some(loc_idx)
+                if p.loc_start_idx(loc_idx) == start_pos_idx && p.loc_end_idx(loc_idx) == end_pos_idx =>
+            {
+                loc_idx
+            }
+            _ => p.mk_loc_idx(start_pos_idx, end_pos_idx),
+        };
         SignatureItem {
             psig_desc: Box::new(d),
-            psig_loc: p.mk_loc_idx(start_pos_idx, end_pos_idx),
+            psig_loc,
         }
     })
 }

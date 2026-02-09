@@ -296,6 +296,30 @@ fi
 
 sort -u "$TEMP_DIR/files.txt" -o "$TEMP_DIR/files.txt"
 
+# Explicit blacklist for files that fail in both OCaml and Rust.
+# These are out of parity scope until the OCaml reference parser/compiler succeeds.
+if [[ -n "$TELLA_DIR" && -d "$TELLA_DIR" ]]; then
+    DUAL_FAIL_BLACKLIST_REL=(
+        "node_modules/@greenlabs/ppx-spice/src/rescript/Spice.res"
+        "node_modules/@greenlabs/ppx-spice/src/rescript/Spice_Codecs.res"
+        "node_modules/bs-css-dom/node_modules/@rescript/react/src/RescriptReactRouter.res"
+        "node_modules/bs-css-dom/node_modules/bs-css/src/Css_Legacy_Core.res"
+        "node_modules/rescript-nodejs/test/atomic/EventEmitter.test.res"
+        "packages/core/gstreamer/gstreamer/subprojects/gst-devtools/validate/gst/validate/validate.res"
+        "packages/core/gstreamer/gstreamer/subprojects/skia/third_party/externals/icu/source/test/testdata/old_e_testtypes.res"
+        "packages/core/gstreamer/gstreamer/subprojects/skia/third_party/externals/icu/source/test/testdata/old_l_testtypes.res"
+        "packages/core/gstreamer/gstreamer/subprojects/skia/third_party/externals/icu/tzres/metaZones.res"
+        "packages/core/gstreamer/gstreamer/subprojects/skia/third_party/externals/icu/tzres/timezoneTypes.res"
+        "packages/core/gstreamer/gstreamer/subprojects/skia/third_party/externals/icu/tzres/zoneinfo64.res"
+    )
+
+    for rel in "${DUAL_FAIL_BLACKLIST_REL[@]}"; do
+        abs="$TELLA_DIR/$rel"
+        grep -Fvx "$abs" "$TEMP_DIR/files.txt" > "$TEMP_DIR/files.filtered" || true
+        mv "$TEMP_DIR/files.filtered" "$TEMP_DIR/files.txt"
+    done
+fi
+
 # Always ignore duplicated generated trees.
 grep -Ev '(^|/)lib/(bs|ocaml)(/|$)' "$TEMP_DIR/files.txt" > "$TEMP_DIR/files.no_lib_dups.txt" || true
 mv "$TEMP_DIR/files.no_lib_dups.txt" "$TEMP_DIR/files.txt"

@@ -3923,15 +3923,24 @@ fn parse_block_body(p: &mut Parser<'_>) -> Option<Expression> {
     }
 
     // Check if we can parse more expressions.
-    // OCaml uses `is_block_expr_start` here to determine if the block continues.
-    // This is important for error recovery - when `else` appears after an if's then-branch,
-    // we should NOT try to parse it as a block expression.
-    if p.token == Token::Rbrace || p.token == Token::Eof || !grammar::is_block_expr_start(&p.token) {
+    // OCaml parse_expr_block always parses leading attributes/doc comments first
+    // (via parse_expr_block_item -> parse_attributes), then decides what to parse.
+    // Keep the early return only for hard block terminators before consuming attrs.
+    if p.token == Token::Rbrace || p.token == Token::Eof {
         return None;
     }
 
     // Parse any leading attributes
     let attrs = parse_attributes(p);
+
+    // After consuming attributes, keep OCaml's behavior:
+    // - if no attrs and token can't start a block item, stop block parsing
+    //   (important for cases like `else` following an if-then block)
+    // - if attrs were present, continue and let parse_expr produce diagnostics
+    //   for invalid constructs (matches OCaml's parse_expr_block_item flow)
+    if attrs.is_empty() && !grammar::is_block_expr_start(&p.token) {
+        return None;
+    }
 
     // Parse the first expression/statement
     let mut expr = match &p.token {
@@ -5582,9 +5591,12 @@ fn parse_try_expr(p: &mut Parser<'_>) -> Expression {
             p.next();
             // OCaml: Parser.leave_breadcrumb p Grammar.Pattern
             p.leave_breadcrumb(Grammar::Pattern);
-            let lhs = super::pattern::parse_constrained_pattern(p);
+            // OCaml parse_pattern_matching uses parse_pattern (not parse_constrained_pattern)
+            // for both switch and try/catch cases.
+            let lhs = super::pattern::parse_pattern(p);
             p.eat_breadcrumb();
-            let guard = if p.token == Token::When {
+            // OCaml parse_pattern_guard accepts both `when` and `if`.
+            let guard = if p.token == Token::When || p.token == Token::If {
                 p.next();
                 Some(parse_expr_with_context(p, ExprContext::When))
             } else {

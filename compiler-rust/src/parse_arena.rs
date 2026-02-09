@@ -1279,6 +1279,20 @@ impl ParseArena {
         idx
     }
 
+    /// Push a dotted identifier (Ldot) with a static string and remember the parent index.
+    ///
+    /// This mirrors OCaml static string literal sharing for PPX-generated longidents
+    /// (e.g. `Js_OO.unsafe_to_method`) while preserving tracked prefix identity.
+    pub fn push_ldot_tracked_static(&mut self, prefix: LidentIdx, name: &'static str) -> LidentIdx {
+        let str_idx = self.strings.intern(name);
+        let prefix_lid = self.get_longident(prefix).clone();
+        let idx = self
+            .longidents
+            .push(Longident::Ldot(Box::new(prefix_lid), str_idx));
+        self.ldot_prefix_idx_table.insert(idx, prefix);
+        idx
+    }
+
     /// Push a functor application (Lapply) into the arena.
     pub fn push_lapply(&mut self, functor: LidentIdx, arg: LidentIdx) -> LidentIdx {
         let func_lid = self.get_longident(functor).clone();
