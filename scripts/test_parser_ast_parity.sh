@@ -387,7 +387,8 @@ test_single_file() {
     fi
 
     # For TELLA files that use @spice, skip raw bsc-ast byte parity and
-    # compare decoded AST value trees (same structural comparison as spice parity).
+    # compare decoded AST value trees. Report this as
+    # "sexp-locs-ppx-and-spice" in summary output.
     local use_spice_structural_bsc=false
     if $use_spice_ppx && [[ -n "$TELLA_DIR" ]] && [[ "$file" == "$TELLA_DIR/"* ]]; then
         use_spice_structural_bsc=true
@@ -522,7 +523,7 @@ PY
                         bsc_ast_diff=1
                         {
                             echo "TELLA @spice file: byte-level bsc-ast parity skipped."
-                            echo "Using decoded AST structural comparison instead."
+                            echo "Category: sexp-locs-ppx-and-spice (decoded structural comparison)."
                             echo "OCaml bsc-ast size: $(wc -c < "$ocaml_ast_file") bytes"
                             echo "Rust bsc-ast size:  $(wc -c < "$rust_ast_file") bytes"
                             echo ""
@@ -967,8 +968,8 @@ echo "  ${BOLD}Compiler parity (bsc -bs-ast output):${RESET}"
 echo "    bsc-ast differences:      $bsc_ast_parity_diff_count"
 echo "    bsc-ast byte checks:      $bsc_ast_byte_checked_count"
 echo "    bsc-ast byte differences: $bsc_ast_byte_diff_count"
-echo "    TELLA @spice structural checks: $bsc_ast_structural_tella_spice_checked_count"
-echo "    TELLA @spice structural differences: $bsc_ast_structural_tella_spice_diff_count"
+echo "    sexp-locs-ppx-and-spice checks: $bsc_ast_structural_tella_spice_checked_count"
+echo "    sexp-locs-ppx-and-spice differences: $bsc_ast_structural_tella_spice_diff_count"
 echo ""
 echo "  ${BOLD}Parse failures:${RESET}"
 echo "    OCaml failures:           $ocaml_fail_count"
@@ -1059,10 +1060,10 @@ if [[ $bsc_ast_byte_diff_count -gt 0 ]]; then
     echo ""
 fi
 
-# Show TELLA @spice structural bsc-ast differences
+# Show sexp-locs-ppx-and-spice differences
 if [[ $bsc_ast_structural_tella_spice_diff_count -gt 0 ]]; then
-    echo -e "${BOLD}${YELLOW}Files with TELLA @spice structural bsc-ast differences ($bsc_ast_structural_tella_spice_diff_count):${RESET}"
-    echo "  (decoded AST value-tree comparison; byte-level parity intentionally skipped)"
+    echo -e "${BOLD}${YELLOW}Files with sexp-locs-ppx-and-spice differences ($bsc_ast_structural_tella_spice_diff_count):${RESET}"
+    echo "  (TELLA @spice files; decoded AST value-tree comparison; byte-level parity intentionally skipped)"
     echo -e "$bsc_ast_structural_tella_spice_diff_files" | grep -v "^$" | head -15 | while read file; do
         echo "  $file"
     done
@@ -1073,7 +1074,7 @@ if [[ $bsc_ast_structural_tella_spice_diff_count -gt 0 ]]; then
     echo ""
 
     # Show first structural diff as example
-    echo -e "${BOLD}Example TELLA @spice structural diff (first file):${RESET}"
+    echo -e "${BOLD}Example sexp-locs-ppx-and-spice diff (first file):${RESET}"
     first_bsc_struct_file=$(echo -e "$bsc_ast_structural_tella_spice_diff_files" | grep -v "^$" | head -1)
     if [[ -n "$first_bsc_struct_file" ]]; then
         first_bsc_struct_diff="$TEMP_DIR/bsc_ast_parity_diffs/$(echo "$first_bsc_struct_file" | tr '/' '_').diff"
