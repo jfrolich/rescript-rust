@@ -132,7 +132,7 @@ verify_typedtree_full_parity() {
   echo ""
   echo "🔎 Verifying typedtree parity before accepting RALPH_COMPLETE..."
 
-  if ! parity_output=$(timeout 600 ./scripts/test_typedtree_parity.sh --with-locs 2>&1); then
+  if ! parity_output=$(timeout 600 ./scripts/test_typedtree_parity.sh --with-locs --parallel 1 2>&1); then
     echo "Typedtree parity gate failed to run cleanly; completion denied."
     echo "$parity_output" | tail -40
     return 1
