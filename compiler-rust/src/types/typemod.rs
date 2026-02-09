@@ -3724,18 +3724,8 @@ fn type_structure_item<'a>(
                 // Convert manifest type (type alias)
                 let (typ_manifest, manifest_type_ref) = match &decl.ptype_manifest {
                     Some(manifest) => {
-                        let (mut typed_manifest, type_ref) = transl_type(tctx, &new_env, manifest)?;
-                        if matches!(decl.ptype_kind, crate::parser::ast::TypeKind::Ptype_abstract)
-                            && matches!(manifest.ptyp_desc, crate::parser::ast::CoreTypeDesc::Ptyp_variant(..))
-                        {
-                            // Keep abstract variant aliases permissive until full variant-flow
-                            // constraint propagation (notably include-ascription flows) matches OCaml.
-                            let fallback = ctx.new_var(None);
-                            typed_manifest.ctyp_type = fallback;
-                            (Some(typed_manifest), Some(fallback))
-                        } else {
-                            (Some(typed_manifest), Some(type_ref))
-                        }
+                        let (typed_manifest, type_ref) = transl_type(tctx, &new_env, manifest)?;
+                        (Some(typed_manifest), Some(type_ref))
                     }
                     None => (None, None),
                 };

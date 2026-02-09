@@ -6112,6 +6112,7 @@ fn create_to_js_function(
 /// Create typeFromJs function: let colorFromJs = param => _index(_revMap, param)
 fn create_from_js_function(
     fn_name_idx: StrIdx,
+    create_type: bool,
     loc: LocIdx,
     param_name: StrIdx,
     param_lid: LidentIdx,
@@ -6147,7 +6148,7 @@ fn create_from_js_function(
         pexp_attributes: vec![],
     };
 
-    let body_expr = Expression {
+    let result_expr = Expression {
         pexp_desc: ExpressionDesc::Pexp_apply {
             funct: Box::new(index_ident),
             args: vec![
@@ -6159,6 +6160,36 @@ fn create_from_js_function(
         },
         pexp_loc: none_loc,
         pexp_attributes: vec![],
+    };
+    // OCaml ast_derive_js_mapper.ml:
+    // let result = _index(_revMap, param) in
+    // if create_type then Primitive_util.raiseWhenNotFound result else result
+    let body_expr = if create_type {
+        let util_lid = arena.intern_string("Primitive_util");
+        let raise_when_not_found = arena.intern_string("raiseWhenNotFound");
+        let raise_when_not_found_ident = Expression {
+            pexp_desc: ExpressionDesc::Pexp_ident(Located {
+                txt: arena.push_longident(Longident::Ldot(
+                    Box::new(Longident::Lident(util_lid)),
+                    raise_when_not_found,
+                )),
+                loc: none_loc,
+            }),
+            pexp_loc: none_loc,
+            pexp_attributes: vec![],
+        };
+        Expression {
+            pexp_desc: ExpressionDesc::Pexp_apply {
+                funct: Box::new(raise_when_not_found_ident),
+                args: vec![(ArgLabel::Nolabel, result_expr)],
+                partial: false,
+                transformed_jsx: false,
+            },
+            pexp_loc: none_loc,
+            pexp_attributes: vec![],
+        }
+    } else {
+        result_expr
     };
 
     let param_pat = Pattern {
@@ -6198,27 +6229,15 @@ fn create_from_js_function(
     }
 }
 
-/// Create toJs signature: val colorToJs: color => string
+/// Create toJs signature: val colorToJs: color => <ret_type>
 fn create_to_js_sig(
     fn_name_idx: StrIdx,
     core_type: &CoreType,
+    ret_type: CoreType,
     loc: LocIdx,
-    string_lid: LidentIdx,
     arena: &mut ParseArena,
 ) -> SignatureItem {
     let none_loc = arena.none_loc();
-
-    let string_type = CoreType {
-        ptyp_desc: CoreTypeDesc::Ptyp_constr(
-            Located {
-                txt: string_lid,
-                loc: none_loc,
-            },
-            vec![],
-        ),
-        ptyp_loc: none_loc,
-        ptyp_attributes: vec![],
-    };
 
     let arrow_type = CoreType {
         ptyp_desc: CoreTypeDesc::Ptyp_arrow {
@@ -6227,7 +6246,7 @@ fn create_to_js_sig(
                 lbl: ArgLabel::Nolabel,
                 typ: core_type.clone(),
             }),
-            ret: Box::new(string_type),
+            ret: Box::new(ret_type),
             arity: arena.push_arity(Some(1)),  // OCaml's Typ.arrows computes fresh arity
         },
         ptyp_loc: none_loc,
@@ -6248,49 +6267,24 @@ fn create_to_js_sig(
     }
 }
 
-/// Create fromJs signature: val colorFromJs: string => option<color>
+/// Create fromJs signature: val colorFromJs: <arg_type> => <ret_type>
 fn create_from_js_sig(
     fn_name_idx: StrIdx,
-    core_type: &CoreType,
+    arg_type: CoreType,
+    ret_type: CoreType,
     loc: LocIdx,
-    string_lid: LidentIdx,
     arena: &mut ParseArena,
 ) -> SignatureItem {
     let none_loc = arena.none_loc();
-
-    let string_type = CoreType {
-        ptyp_desc: CoreTypeDesc::Ptyp_constr(
-            Located {
-                txt: string_lid,
-                loc: none_loc,
-            },
-            vec![],
-        ),
-        ptyp_loc: none_loc,
-        ptyp_attributes: vec![],
-    };
-
-    // option<color> = *predef*.option<color>
-    let option_type = CoreType {
-        ptyp_desc: CoreTypeDesc::Ptyp_constr(
-            Located {
-                txt: arena.predef_option_lident(),
-                loc: none_loc,
-            },
-            vec![core_type.clone()],
-        ),
-        ptyp_loc: none_loc,
-        ptyp_attributes: vec![],
-    };
 
     let arrow_type = CoreType {
         ptyp_desc: CoreTypeDesc::Ptyp_arrow {
             arg: Box::new(TypeArg {
                 attrs: vec![],
                 lbl: ArgLabel::Nolabel,
-                typ: string_type,
+                typ: arg_type,
             }),
-            ret: Box::new(option_type),
+            ret: Box::new(ret_type),
             arity: arena.push_arity(Some(1)),  // OCaml's Typ.arrows computes fresh arity
         },
         ptyp_loc: none_loc,
@@ -6379,6 +6373,7 @@ fn generate_js_converter_polyvar(
     // colorFromJs
     structure_items.push(create_from_js_function(
         from_js_name_structure,
+        create_type,
         inner_loc,
         param_name,
         param_lid,
@@ -6397,21 +6392,61 @@ fn generate_js_converter_polyvar(
     let mut signature_items = vec![];
     let to_js_name_signature = arena.push_string(format!("{}ToJs", type_name));
     let from_js_name_signature = arena.push_string(format!("{}FromJs", type_name));
+    let none_loc = arena.none_loc();
     let string_name = arena.push_string("string".to_string());
-    let to_js_string_lid = arena.push_longident(Longident::Lident(string_name));
-    let from_js_string_lid = arena.push_longident(Longident::Lident(string_name));
+    let string_type = CoreType {
+        ptyp_desc: CoreTypeDesc::Ptyp_constr(
+            Located {
+                txt: arena.push_longident(Longident::Lident(string_name)),
+                loc: none_loc,
+            },
+            vec![],
+        ),
+        ptyp_loc: none_loc,
+        ptyp_attributes: vec![],
+    };
+    let new_type_ref = create_new_type_ref(tdcl, &type_name, arena);
+    let to_js_ret_type = if create_type {
+        new_type_ref.clone()
+    } else {
+        string_type.clone()
+    };
+    let from_js_arg_type = if create_type {
+        new_type_ref
+    } else {
+        string_type
+    };
+    let from_js_ret_type = if create_type {
+        core_type_signature.clone()
+    } else {
+        CoreType {
+            ptyp_desc: CoreTypeDesc::Ptyp_constr(
+                Located {
+                    txt: arena.predef_option_lident(),
+                    loc: none_loc,
+                },
+                vec![core_type_signature.clone()],
+            ),
+            ptyp_loc: none_loc,
+            ptyp_attributes: vec![],
+        }
+    };
+
+    if create_type {
+        signature_items.push(create_new_type_sig_declaration(tdcl, &type_name, arena));
+    }
     signature_items.push(create_to_js_sig(
         to_js_name_signature,
         &core_type_signature,
+        to_js_ret_type,
         inner_loc,
-        to_js_string_lid,
         arena,
     ));
     signature_items.push(create_from_js_sig(
         from_js_name_signature,
-        &core_type_signature,
+        from_js_arg_type,
+        from_js_ret_type,
         inner_loc,
-        from_js_string_lid,
         arena,
     ));
 
