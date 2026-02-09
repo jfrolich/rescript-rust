@@ -803,6 +803,34 @@ pub fn initial_env(ctx: &TypeContext<'_>) -> Env {
         }, ctx);
     }
 
+    // ref('a) = { mutable contents: 'a }
+    {
+        let tvar = ctx.new_generic_var(None);
+        let contents_label = crate::types::decl::LabelDeclaration {
+            ld_id: Ident::create_persistent("contents"),
+            ld_mutable: MutableFlag::Mutable,
+            ld_optional: false,
+            ld_type: tvar,
+            ld_loc: Location::none(),
+            ld_attributes: vec![],
+        };
+        add_type_with_constrs(
+            &mut env,
+            "ref",
+            TypeDeclaration {
+                type_params: vec![tvar],
+                type_arity: 1,
+                type_kind: TypeKind::TypeRecord(
+                    vec![contents_label],
+                    crate::types::decl::RecordRepresentation::RecordRegular,
+                ),
+                type_variance: vec![crate::types::variance::Variance::invariant()],
+                ..decl_abstr(1, false)
+            },
+            ctx,
+        );
+    }
+
     // dict('a) = { dictValuesType?: option<'a> }
     // This mirrors OCaml Predef.decl_dict and powers dict pattern matching.
     {
@@ -957,6 +985,76 @@ pub fn initial_env(ctx: &TypeContext<'_>) -> Env {
     let alpha = ctx.new_generic_var(None);
     add_unary_primitive(&mut env, ctx, "ignore", "%ignore", alpha, unit_ty);
 
+    // Add pair projections matching Pervasives.res
+    //   external fst: (('a, 'b)) => 'a = "%field0"
+    //   external snd: (('a, 'b)) => 'b = "%field1"
+    {
+        let alpha = ctx.new_generic_var(None);
+        let beta = ctx.new_generic_var(None);
+        let tuple_ty = ctx.new_generic_type(crate::types::type_expr::TypeDesc::Ttuple(vec![
+            alpha, beta,
+        ]));
+        add_unary_primitive(&mut env, ctx, "fst", "%field0", tuple_ty, alpha);
+    }
+    {
+        let alpha = ctx.new_generic_var(None);
+        let beta = ctx.new_generic_var(None);
+        let tuple_ty = ctx.new_generic_type(crate::types::type_expr::TypeDesc::Ttuple(vec![
+            alpha, beta,
+        ]));
+        add_unary_primitive(&mut env, ctx, "snd", "%field1", tuple_ty, beta);
+    }
+
+    // Add common numeric conversion helpers used from Pervasives.res
+    add_unary_primitive(
+        &mut env,
+        ctx,
+        "float_of_int",
+        "%floatofint",
+        int_ty,
+        float_ty,
+    );
+    add_unary_primitive(
+        &mut env,
+        ctx,
+        "int_of_float",
+        "%intoffloat",
+        float_ty,
+        int_ty,
+    );
+    add_unary_primitive(&mut env, ctx, "abs_float", "abs", float_ty, float_ty);
+    add_constant_value(&mut env, "min_int", int_ty);
+    add_constant_value(&mut env, "max_int", int_ty);
+
+    // Add ref primitives matching Pervasives.res
+    //   external ref: 'a => ref<'a> = "%makeref"
+    //   external "!" : ref<'a> => 'a = "%refget"
+    //   external ":=": (ref<'a>, 'a) => unit = "%refset"
+    {
+        let alpha = ctx.new_generic_var(None);
+        let ref_ty = ctx.new_generic_constr(
+            Path::pident(Ident::create_persistent("ref")),
+            vec![alpha],
+        );
+        add_unary_primitive(&mut env, ctx, "ref", "%makeref", alpha, ref_ty);
+    }
+    {
+        let alpha = ctx.new_generic_var(None);
+        let ref_ty = ctx.new_generic_constr(
+            Path::pident(Ident::create_persistent("ref")),
+            vec![alpha],
+        );
+        add_unary_primitive(&mut env, ctx, "!", "%refget", ref_ty, alpha);
+    }
+    {
+        let alpha = ctx.new_generic_var(None);
+        let ref_ty = ctx.new_generic_constr(
+            Path::pident(Ident::create_persistent("ref")),
+            vec![alpha],
+        );
+        add_binary_primitive(&mut env, ctx, ":=", "%refset", ref_ty, alpha, unit_ty);
+    }
+
     env
 }
 
@@ -1015,6 +1113,21 @@ fn add_unary_primitive(
             prim_native_name: String::new(),
             prim_native_float: false,
         }),
+        val_loc: Location::none(),
+        val_attributes: vec![],
+        val_path: Some(path),
+    };
+    env.add_value(id, desc);
+}
+
+/// Helper to add a constant value from Pervasives with a known type.
+fn add_constant_value(env: &mut Env, name: &str, ty: TypeExprRef) {
+    let id = Ident::create_persistent(name);
+    let pervasives_id = Ident::create_persistent("Pervasives");
+    let path = Path::pdot(Path::pident(pervasives_id), name.to_string());
+    let desc = ValueDescription {
+        val_type: ty,
+        val_kind: ValueKind::ValReg,
         val_loc: Location::none(),
         val_attributes: vec![],
         val_path: Some(path),

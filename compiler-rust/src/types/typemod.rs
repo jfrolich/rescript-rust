@@ -1626,18 +1626,36 @@ fn translate_module_type_to_decl<'a>(
                             declared_type_ids.push(type_id);
                         }
 
-                        let rec_status = match rec_flag {
-                            RecFlag::Recursive => crate::types::decl::RecStatus::TrecFirst,
+                        let rec_status_for_index = |idx: usize| match rec_flag {
+                            RecFlag::Recursive => {
+                                if idx == 0 {
+                                    crate::types::decl::RecStatus::TrecFirst
+                                } else {
+                                    crate::types::decl::RecStatus::TrecNext
+                                }
+                            }
                             RecFlag::Nonrecursive => crate::types::decl::RecStatus::TrecNot,
                         };
 
                         for (decl_idx, decl) in decls.iter().enumerate() {
                             let type_id = declared_type_ids[decl_idx].clone();
                             let mut type_params = Vec::with_capacity(decl.ptype_params.len());
-                            for (param_ty, _variance) in &decl.ptype_params {
+                            let mut type_variance = Vec::with_capacity(decl.ptype_params.len());
+                            for (param_ty, variance) in &decl.ptype_params {
                                 let (_typed_param, param_ref) =
                                     transl_type(tctx, &sig_env, param_ty)?;
                                 type_params.push(param_ref);
+                                type_variance.push(match variance {
+                                    crate::parser::ast::Variance::Covariant => {
+                                        crate::types::variance::Variance::covariant()
+                                    }
+                                    crate::parser::ast::Variance::Contravariant => {
+                                        crate::types::variance::Variance::contravariant()
+                                    }
+                                    crate::parser::ast::Variance::Invariant => {
+                                        crate::types::variance::Variance::invariant()
+                                    }
+                                });
                             }
 
                             let type_manifest = match &decl.ptype_manifest {
@@ -1649,10 +1667,123 @@ fn translate_module_type_to_decl<'a>(
                                 None => None,
                             };
 
+                            let type_kind = match &decl.ptype_kind {
+                                crate::parser::ast::TypeKind::Ptype_abstract => {
+                                    crate::types::TypeKind::TypeAbstract
+                                }
+                                crate::parser::ast::TypeKind::Ptype_open => {
+                                    crate::types::TypeKind::TypeOpen
+                                }
+                                crate::parser::ast::TypeKind::Ptype_variant(cstrs) => {
+                                    let mut constructors = Vec::with_capacity(cstrs.len());
+                                    for cstr in cstrs {
+                                        let cstr_name = arena.get_string(cstr.pcd_name.txt);
+                                        let cstr_args = match &cstr.pcd_args {
+                                            crate::parser::ast::ConstructorArguments::Pcstr_tuple(
+                                                args,
+                                            ) => {
+                                                let mut tuple_args = Vec::with_capacity(args.len());
+                                                for arg in args {
+                                                    let (_typed_arg, arg_ref) =
+                                                        transl_type(tctx, &sig_env, arg)?;
+                                                    tuple_args.push(arg_ref);
+                                                }
+                                                crate::types::ConstructorArguments::CstrTuple(
+                                                    tuple_args,
+                                                )
+                                            }
+                                            crate::parser::ast::ConstructorArguments::Pcstr_record(
+                                                labels,
+                                            ) => {
+                                                let mut record_labels =
+                                                    Vec::with_capacity(labels.len());
+                                                for label in labels {
+                                                    let lbl_name = arena.get_string(label.pld_name.txt);
+                                                    let (_typed_label_ty, mut lbl_type) =
+                                                        transl_type(tctx, &sig_env, &label.pld_type)?;
+                                                    if label.pld_optional {
+                                                        let option_path =
+                                                            Path::pident(Ident::create_persistent("option"));
+                                                        lbl_type = tctx
+                                                            .type_ctx
+                                                            .new_constr(option_path, vec![lbl_type]);
+                                                    }
+                                                    let lbl_type =
+                                                        tctx.type_ctx.new_poly(lbl_type, vec![]);
+                                                    let mutable_flag = match label.pld_mutable {
+                                                        crate::parser::ast::MutableFlag::Immutable => {
+                                                            crate::types::MutableFlag::Immutable
+                                                        }
+                                                        crate::parser::ast::MutableFlag::Mutable => {
+                                                            crate::types::MutableFlag::Mutable
+                                                        }
+                                                    };
+                                                    record_labels.push(crate::types::LabelDeclaration {
+                                                        ld_id: Ident::create_persistent(lbl_name),
+                                                        ld_mutable: mutable_flag,
+                                                        ld_optional: label.pld_optional,
+                                                        ld_type: lbl_type,
+                                                        ld_loc: arena.to_location(label.pld_loc),
+                                                        ld_attributes: vec![],
+                                                    });
+                                                }
+                                                crate::types::ConstructorArguments::CstrRecord(
+                                                    record_labels,
+                                                )
+                                            }
+                                        };
+                                        constructors.push(crate::types::ConstructorDeclaration {
+                                            cd_id: Ident::create_persistent(cstr_name),
+                                            cd_args: cstr_args,
+                                            cd_res: None,
+                                            cd_loc: arena.to_location(cstr.pcd_loc),
+                                            cd_attributes: vec![],
+                                        });
+                                    }
+                                    crate::types::TypeKind::TypeVariant(constructors)
+                                }
+                                crate::parser::ast::TypeKind::Ptype_record(labels) => {
+                                    let mut record_labels = Vec::with_capacity(labels.len());
+                                    for label in labels {
+                                        let lbl_name = arena.get_string(label.pld_name.txt);
+                                        let (_typed_label_ty, mut lbl_type) =
+                                            transl_type(tctx, &sig_env, &label.pld_type)?;
+                                        if label.pld_optional {
+                                            let option_path =
+                                                Path::pident(Ident::create_persistent("option"));
+                                            lbl_type = tctx
+                                                .type_ctx
+                                                .new_constr(option_path, vec![lbl_type]);
+                                        }
+                                        let lbl_type = tctx.type_ctx.new_poly(lbl_type, vec![]);
+                                        let mutable_flag = match label.pld_mutable {
+                                            crate::parser::ast::MutableFlag::Immutable => {
+                                                crate::types::MutableFlag::Immutable
+                                            }
+                                            crate::parser::ast::MutableFlag::Mutable => {
+                                                crate::types::MutableFlag::Mutable
+                                            }
+                                        };
+                                        record_labels.push(crate::types::LabelDeclaration {
+                                            ld_id: Ident::create_persistent(lbl_name),
+                                            ld_mutable: mutable_flag,
+                                            ld_optional: label.pld_optional,
+                                            ld_type: lbl_type,
+                                            ld_loc: arena.to_location(label.pld_loc),
+                                            ld_attributes: vec![],
+                                        });
+                                    }
+                                    crate::types::TypeKind::TypeRecord(
+                                        record_labels,
+                                        crate::types::RecordRepresentation::RecordRegular,
+                                    )
+                                }
+                            };
+
                             let type_decl = crate::types::TypeDeclaration {
                                 type_params,
                                 type_arity: decl.ptype_params.len() as i32,
-                                type_kind: crate::types::TypeKind::TypeAbstract,
+                                type_kind,
                                 type_private: match decl.ptype_private {
                                     crate::parser::ast::PrivateFlag::Public => {
                                         crate::types::PrivateFlag::Public
@@ -1662,7 +1793,7 @@ fn translate_module_type_to_decl<'a>(
                                     }
                                 },
                                 type_manifest,
-                                type_variance: vec![],
+                                type_variance,
                                 type_newtype_level: None,
                                 type_loc: arena.to_location(decl.ptype_loc),
                                 type_attributes: vec![],
@@ -1675,7 +1806,7 @@ fn translate_module_type_to_decl<'a>(
                             items.push(SigItem::SigType(
                                 type_id,
                                 type_decl,
-                                rec_status,
+                                rec_status_for_index(decl_idx),
                             ));
                         }
                     }

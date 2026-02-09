@@ -3028,12 +3028,10 @@ fn unify_expression_types(
 
     match unify(tctx.type_ctx, &mut tctx.unify_state, ty1, ty2) {
         Ok(()) => Ok(()),
-        Err(_e) => {
-            Err(TypeCoreError::ExprTypeClash {
-                trace: vec![(ty1, ty2)],
-                context,
-            })
-        }
+        Err(_e) => Err(TypeCoreError::ExprTypeClash {
+            trace: vec![(ty1, ty2)],
+            context,
+        }),
     }
 }
 
@@ -4593,17 +4591,18 @@ fn type_setfield(
     let ctx = tctx.type_ctx;
     let unit_ty = env.type_unit(ctx);
     let field_name = tctx.longident_last_name(tctx.resolve_lid(field_lid.txt));
-
-    // Create fresh type variables for the record and field
+    // Match field-access disambiguation: type the record expression first,
+    // then pick the label based on the resolved record type.
     let record_ty = ctx.new_var(None);
+    let typed_record = type_expect(tctx, env, record_expr, record_ty, None)?;
+    let ty_exp = typed_record.exp_type;
     let field_ty = ctx.new_var(None);
 
-    // Try to look up the label from the environment for type info
-    let label_desc = if let Ok(env_label) = env.find_label(&field_name) {
-        let (ty_arg, ty_res) = crate::types::ctype::instance_label(ctx, env_label);
-        // Best-effort unification to propagate type info
-        let _ = crate::types::unify(ctx, &mut tctx.unify_state, ty_arg, field_ty);
-        let _ = crate::types::unify(ctx, &mut tctx.unify_state, ty_res, record_ty);
+    let env_label = disambiguate_label(&field_name, ty_exp, env, ctx);
+    let label_desc = if let Some(env_label) = env_label {
+        let (ty_arg, ty_res) = crate::types::ctype::instance_label(ctx, &env_label);
+        unify_expression_types(tctx, loc, ty_res, record_ty, None)?;
+        unify_expression_types(tctx, loc, ty_arg, field_ty, None)?;
         crate::types::LabelDescription {
             lbl_name: env_label.lbl_name.clone(),
             lbl_res: record_ty,
@@ -4632,9 +4631,6 @@ fn type_setfield(
             lbl_attributes: vec![],
         }
     };
-
-    // Type check the record expression with the proper record type
-    let typed_record = type_expect(tctx, env, record_expr, record_ty, None)?;
 
     // Type check the new value with the proper field type
     let typed_value = type_expect(tctx, env, new_value, field_ty, None)?;
@@ -6412,15 +6408,47 @@ fn disambiguate_label<'a>(
 
     let mut selected = None;
 
-    // If we have a target type path, try to disambiguate
+    // If we have a target type path, try to disambiguate by exact path identity.
+    // Prefer the most recently added matching label (reverse iteration).
     if let Some(ref target_path) = opath {
-        for label in &all_labels {
+        for label in all_labels.iter().rev() {
             let lbl_ty = ctx.repr(label.lbl_res);
             let lbl_desc = ctx.get_desc(lbl_ty);
             if let TypeDesc::Tconstr { path: lbl_path, .. } = &*lbl_desc {
                 if lbl_path.same(target_path) {
                     selected = Some((*label).clone());
                     break;
+                }
+            }
+        }
+
+        // Fallback for semantically identical paths carrying different local stamps.
+        if selected.is_none() {
+            let target_name = target_path.name();
+            for label in all_labels.iter().rev() {
+                let lbl_ty = ctx.repr(label.lbl_res);
+                let lbl_desc = ctx.get_desc(lbl_ty);
+                if let TypeDesc::Tconstr { path: lbl_path, .. } = &*lbl_desc {
+                    if lbl_path.name() == target_name {
+                        selected = Some((*label).clone());
+                        break;
+                    }
+                }
+            }
+        }
+
+        // Final fallback: compare leaf names (ignoring compiler-introduced `!` suffixes
+        // on local aliases like `sprite!`) to recover the concrete record family.
+        if selected.is_none() {
+            let target_leaf = target_path.last().trim_end_matches('!');
+            for label in all_labels.iter().rev() {
+                let lbl_ty = ctx.repr(label.lbl_res);
+                let lbl_desc = ctx.get_desc(lbl_ty);
+                if let TypeDesc::Tconstr { path: lbl_path, .. } = &*lbl_desc {
+                    if lbl_path.last().trim_end_matches('!') == target_leaf {
+                        selected = Some((*label).clone());
+                        break;
+                    }
                 }
             }
         }
