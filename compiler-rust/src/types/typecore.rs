@@ -834,7 +834,7 @@ fn resolve_type_constructor_path(
         }
         Longident::Ldot(prefix, name_idx) => {
             let type_name = tctx.arena.get_string(*name_idx);
-            if let Some((mod_path, sig)) = env.resolve_module_lid(
+            if let Some((mod_path, sig)) = env.resolve_module_lid_raw(
                 prefix,
                 tctx.arena,
                 &mut tctx.persistent_env,
@@ -6397,13 +6397,38 @@ impl Env {
     }
 
     /// Resolve a module longident to its signature and path.
-    /// Handles nested module paths like Belt.Array by recursively resolving.
+    /// Applies path rewriting/substitution for downstream value/module lookups.
     fn resolve_module_lid<'b>(
         &self,
         lid: &Longident,
         arena: &crate::parse_arena::ParseArena,
         pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
         ctx: &'b crate::types::context::TypeContext<'b>,
+    ) -> Option<(Path, crate::types::decl::Signature)> {
+        self.resolve_module_lid_impl(lid, arena, pers_env, ctx, true)
+    }
+
+    /// Resolve a module longident without mutating type paths inside the returned signature.
+    /// This matches OCaml's non-destructive behavior needed for pure type-path lookup.
+    fn resolve_module_lid_raw<'b>(
+        &self,
+        lid: &Longident,
+        arena: &crate::parse_arena::ParseArena,
+        pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
+        ctx: &'b crate::types::context::TypeContext<'b>,
+    ) -> Option<(Path, crate::types::decl::Signature)> {
+        self.resolve_module_lid_impl(lid, arena, pers_env, ctx, false)
+    }
+
+    /// Resolve a module longident to path+signature, optionally applying
+    /// rewrite/substitution to contained type paths.
+    fn resolve_module_lid_impl<'b>(
+        &self,
+        lid: &Longident,
+        arena: &crate::parse_arena::ParseArena,
+        pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
+        ctx: &'b crate::types::context::TypeContext<'b>,
+        apply_subst: bool,
     ) -> Option<(Path, crate::types::decl::Signature)> {
         match lid {
             Longident::Lident(mod_idx) => {
@@ -6424,12 +6449,18 @@ impl Env {
                         // to the access path. This handles both:
                         // - opened modules: Console from Stdlib → Pdot(Pident("Stdlib"), "Console")
                         // - local aliases: module N = Belt.List → Pident("N")
-                        if let Some(ref old_name) = resolved_name {
-                            crate::cmi::persistent_env::rewrite_module_prefix_in_sig(
-                                &sig, old_name, &path, ctx,
+                        if apply_subst {
+                            if let Some(ref old_name) = resolved_name {
+                                crate::cmi::persistent_env::rewrite_module_prefix_in_sig(
+                                    &sig, old_name, &path, ctx,
+                                );
+                            }
+                            crate::cmi::persistent_env::substitute_type_paths_in_sig(
+                                &sig,
+                                &path,
+                                ctx,
                             );
                         }
-                        crate::cmi::persistent_env::substitute_type_paths_in_sig(&sig, &path, ctx);
                         return Some((path, sig));
                     }
                 }
@@ -6445,7 +6476,9 @@ impl Env {
             Longident::Ldot(prefix, submod_idx) => {
                 let submod_name = arena.get_string(*submod_idx);
                 // Recursively resolve the prefix to get a signature
-                if let Some((parent_path, parent_sig)) = self.resolve_module_lid(prefix, arena, pers_env, ctx) {
+                if let Some((parent_path, parent_sig)) =
+                    self.resolve_module_lid_impl(prefix, arena, pers_env, ctx, apply_subst)
+                {
                     // Search for the sub-module in the parent's signature
                     for sig_item in &parent_sig {
                         if let crate::types::decl::SignatureItem::SigModule(id, sub_md, _) = sig_item {
@@ -6457,16 +6490,18 @@ impl Env {
                                     // resolved module name to the access path.
                                     // E.g., Belt.Array aliases Belt_Array, so rewrite
                                     // Pdot(Pident("Belt_Array"), X) → Pdot(sub_path, X)
-                                    if let Some(ref old_name) = resolved_name {
-                                        crate::cmi::persistent_env::rewrite_module_prefix_in_sig(
-                                            &sig, old_name, &sub_path, ctx,
+                                    if apply_subst {
+                                        if let Some(ref old_name) = resolved_name {
+                                            crate::cmi::persistent_env::rewrite_module_prefix_in_sig(
+                                                &sig, old_name, &sub_path, ctx,
+                                            );
+                                        }
+                                        crate::cmi::persistent_env::substitute_type_paths_in_sig(
+                                            &sig,
+                                            &sub_path,
+                                            ctx,
                                         );
                                     }
-                                    crate::cmi::persistent_env::substitute_type_paths_in_sig(
-                                        &sig,
-                                        &sub_path,
-                                        ctx,
-                                    );
                                     return Some((sub_path, sig));
                                 }
                                 return None;
