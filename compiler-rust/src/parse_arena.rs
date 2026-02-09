@@ -1449,6 +1449,20 @@ impl ParseArena {
         self.strings.get(idx)
     }
 
+    /// Find the most recently inserted string index for the given content.
+    ///
+    /// This scans from the end to prefer the latest identity when the same string
+    /// was pushed multiple times without interning.
+    pub fn find_string_idx(&self, s: &str) -> Option<StrIdx> {
+        for i in (0..self.strings.len()).rev() {
+            let idx = StrIdx(i as u32);
+            if self.strings.get(idx) == s {
+                return Some(idx);
+            }
+        }
+        None
+    }
+
     /// Intern a string (returns existing idx if already interned).
     pub fn intern_string(&mut self, s: &str) -> StrIdx {
         self.strings.intern(s)

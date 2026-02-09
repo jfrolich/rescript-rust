@@ -667,6 +667,34 @@ fn convert_arg_label_for_ctx(lbl: &crate::parser::ast::ArgLabel, arena: &ParseAr
     }
 }
 
+/// Convert a types ArgLabel back to parser ArgLabel for typedtree `Texp_apply` args.
+/// OCaml stores labels without source locations in typedtree applications, so we
+/// synthesize labels at `Location.none`.
+fn convert_arg_label_for_apply(
+    lbl: &crate::types::ArgLabel,
+    arena: &ParseArena,
+    loc: LocIdx,
+) -> Option<crate::parser::ast::ArgLabel> {
+    let get_label_str_idx = |name: &str| {
+        arena
+            .find_string_idx(name)
+            .or_else(|| {
+                find_existing_lident_idx(arena, name)
+                    .map(|lid_idx| arena.get_longident(lid_idx).last_idx())
+            })
+    };
+
+    match lbl {
+        crate::types::ArgLabel::Nolabel => Some(crate::parser::ast::ArgLabel::Nolabel),
+        crate::types::ArgLabel::Labelled(name) => get_label_str_idx(&name.txt).map(|str_idx| {
+            crate::parser::ast::ArgLabel::Labelled(crate::parse_arena::Located::new(str_idx, loc))
+        }),
+        crate::types::ArgLabel::Optional(name) => get_label_str_idx(&name.txt).map(|str_idx| {
+            crate::parser::ast::ArgLabel::Optional(crate::parse_arena::Located::new(str_idx, loc))
+        }),
+    }
+}
+
 /// Translate a parsed CoreType to a TypedCoreType and its corresponding TypeExprRef.
 ///
 /// This function converts the surface syntax type annotations into the internal
@@ -3383,7 +3411,8 @@ fn type_application(
         .collect();
     let mut typed_args = Vec::new();
     let mut omitted: Vec<(crate::types::ArgLabel, TypeExprRef)> = Vec::new();
-    let mut skipped_optionals = 0usize;
+    let mut consumed_optional_count = 0usize;
+    let mut synthesized_optional_count = 0usize;
 
     while !remaining_args.is_empty() {
         let expanded_current_ty = crate::types::ctype::expand_head(ctx, env, current_ty);
@@ -3417,7 +3446,34 @@ fn type_application(
             }
 
             if fn_label.is_optional() && (total_app || has_nolabel_arg(&remaining_args)) {
-                skipped_optionals += 1;
+                consumed_optional_count += 1;
+                // OCaml type_application: consumed omitted optional labels still appear
+                // in Texp_apply as explicit None arguments at Location.none.
+                if let Some(apply_label) =
+                    convert_arg_label_for_apply(&fn_label, tctx.arena, tctx.arena.none_loc())
+                {
+                    let none_loc = tctx.arena.none_loc();
+                    let option_ty = crate::types::instance(ctx, arg_ty);
+                    let none_expr = Expression::new(
+                        ExpressionDesc::Texp_construct(
+                            Located {
+                                txt: tctx.arena.none_lid(),
+                                loc: none_loc,
+                            },
+                            make_none_constructor(ctx, option_ty),
+                            vec![],
+                        ),
+                        none_loc,
+                        option_ty,
+                        EnvRef(0),
+                        vec![],
+                    );
+                    typed_args.push(ApplyArg {
+                        label: apply_label,
+                        expression: none_expr,
+                    });
+                    synthesized_optional_count += 1;
+                }
                 current_ty = ret_ty;
                 continue;
             }
@@ -3431,7 +3487,12 @@ fn type_application(
 
         // OCaml special case: if all supplied args were optional defaults and
         // the final argument is `()`, treat it as an empty application.
-        if skipped_optionals > 0 && remaining_args.is_empty() && label.is_nolabel() {
+        if consumed_optional_count > 0
+            && omitted.is_empty()
+            && remaining_args.is_empty()
+            && label.is_nolabel()
+            && typed_args.len() == synthesized_optional_count
+        {
             if let crate::parser::ast::ExpressionDesc::Pexp_construct(lid, None) = &arg_expr.pexp_desc
             {
                 if tctx.arena.is_lident(lid.txt, "()") {
@@ -3469,7 +3530,8 @@ fn type_application(
     if total_app {
         // OCaml only auto-consumes trailing optional arguments when the current
         // application provided fewer arguments than the function arity.
-        let mut applied_count = typed_args.len() + skipped_optionals;
+        let mut applied_count =
+            typed_args.len() + consumed_optional_count.saturating_sub(synthesized_optional_count);
         while (applied_count as i32) < max_arity {
             let expanded_current_ty = crate::types::ctype::expand_head(ctx, env, current_ty);
             if let Some((fn_label, _arg_ty, ret_ty)) =
