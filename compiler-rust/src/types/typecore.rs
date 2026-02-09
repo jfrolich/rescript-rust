@@ -5767,33 +5767,87 @@ fn build_signature_from_structure(structure: &crate::types::typedtree::Structure
 /// Type check pack expression (first-class module).
 fn type_pack(
     tctx: &mut TypeCheckContext<'_>,
-    _env: &Env,
+    env: &Env,
     loc: LocIdx,
-    _module_expr: &crate::parser::ast::ModuleExpr,
+    module_expr: &crate::parser::ast::ModuleExpr,
     expected_ty: TypeExprRef,
     attributes: &[crate::parser::ast::Attribute],
 ) -> TypeCoreResult<Expression> {
-    // Pack creates a first-class module value
-    // Full implementation would:
-    // 1. Type check the module expression
-    // 2. Create a package type from the module type
+    // Match OCaml typecore/typemod type_package flow:
+    // - the expected type must be a package
+    // - type the packed module expression
+    // - wrap it in an implicit module-type constraint
+    let ctx = tctx.type_ctx;
+    let expected_inst = crate::types::ctype::instance(ctx, expected_ty);
+    let expanded = crate::types::ctype::expand_head(ctx, env, expected_inst);
+    let package_info = {
+        let desc = ctx.get_desc(ctx.repr(expanded));
+        match &*desc {
+            TypeDesc::Tpackage { path, lids, args } => {
+                Some((path.clone(), lids.clone(), args.clone()))
+            }
+            _ => None,
+        }
+    };
 
-    // For now, return a placeholder with the expected type
-    let placeholder_lid = tctx.arena.placeholder_located(loc);
+    let (pack_path, pack_lids, pack_args) = match package_info {
+        Some(info) => info,
+        None => {
+            // Keep placeholder behavior when the package expectation is not
+            // available yet. This preserves existing compilation coverage while
+            // still emitting OCaml-like module packing for inferred packages.
+            let placeholder_lid = tctx.arena.placeholder_located(loc);
+            return Ok(Expression::new(
+                ExpressionDesc::Texp_pack(Box::new(crate::types::typedtree::ModuleExpr {
+                    mod_desc: crate::types::typedtree::ModuleExprDesc::Tmod_ident(
+                        crate::types::Path::pident(Ident::create_local("placeholder")),
+                        placeholder_lid,
+                    ),
+                    mod_loc: loc,
+                    mod_type: crate::types::typedtree::ModuleType::placeholder(),
+                    mod_env: EnvRef(0),
+                    mod_attributes: vec![],
+                })),
+                loc,
+                expected_ty,
+                EnvRef(0),
+                attributes.to_vec(),
+            ));
+        }
+    };
+
+    let typed_module = crate::types::typemod::type_module_expr(tctx, env, tctx.arena, module_expr)
+        .map_err(|e| TypeCoreError::Other(format!("pack: {e:?}")))?;
+    let package_mty = crate::types::typedtree::ModuleType {
+        mty_desc: crate::types::typedtree::ModuleTypeDesc::Tmty_ident(
+            pack_path.clone(),
+            tctx.arena.placeholder_located(loc),
+        ),
+        mty_loc: loc,
+        mty_attributes: vec![],
+    };
+    let wrapped_module = crate::types::typedtree::ModuleExpr {
+        mod_desc: crate::types::typedtree::ModuleExprDesc::Tmod_constraint(
+            Box::new(typed_module),
+            package_mty.clone(),
+            crate::types::typedtree::ModuleTypeConstraint::Tmodtype_implicit,
+            crate::types::typedtree::ModuleCoercion::Tcoerce_none,
+        ),
+        mod_loc: loc,
+        mod_type: package_mty,
+        mod_env: EnvRef(0),
+        mod_attributes: vec![],
+    };
+    let packed_type = ctx.new_type(TypeDesc::Tpackage {
+        path: pack_path,
+        lids: pack_lids,
+        args: pack_args,
+    });
 
     Ok(Expression::new(
-        ExpressionDesc::Texp_pack(Box::new(crate::types::typedtree::ModuleExpr {
-            mod_desc: crate::types::typedtree::ModuleExprDesc::Tmod_ident(
-                crate::types::Path::pident(Ident::create_local("placeholder")),
-                placeholder_lid,
-            ),
-            mod_loc: loc,
-            mod_type: crate::types::typedtree::ModuleType::placeholder(),
-            mod_env: EnvRef(0),
-            mod_attributes: vec![],
-        })),
+        ExpressionDesc::Texp_pack(Box::new(wrapped_module)),
         loc,
-        expected_ty,
+        packed_type,
         EnvRef(0),
         attributes.to_vec(),
     ))
