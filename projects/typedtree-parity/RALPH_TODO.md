@@ -79,9 +79,85 @@ The `-dtyped-sexp` flag outputs the typed tree without locations. The `-dtyped-s
 | Rust compiles | 657/657 |
 | Parity match (-dtyped-sexp-locs) | 365/657 (55.6%) |
 
-**Task Progress:** 58/58 complete
+**Task Progress:** 58/59 complete
 
 **Task Checklist:**
+- [ ] Investigate and recover from the typedtree parity session crash on 2026-02-09 (SIGQUIT/core dump) before declaring progress complete again. Resume from the crash trace captured below.
+
+**Crash Report (2026-02-09):**
+
+Latest typedtree parity investigation session crashed before parity verification finished.
+
+Last trace:
+
+```text
+⚡ command_execution [item_75] /bin/zsh -lc "sed -n '2314,2868p' compiler-rust/src/types/typemod.rs"
+  ✓ command_execution [item_75] exit 0
+  ⚡ command_execution [item_77] /bin/zsh -lc "nl -ba compiler-rust/src/types/typemod.rs | sed -n '3620,4335p'"
+  ✓ command_execution [item_77] exit 0
+  ⚡ command_execution [item_79] /bin/zsh -lc "nl -ba compiler-rust/src/types/typemod.rs | sed -n '4330,4475p'"
+  ✓ command_execution [item_79] exit 0
+  ⚡ command_execution [item_81] /bin/zsh -lc "rg -n \"Ptyp_constr|resolve_type_constructor_path|new_constr\\(\" compiler-rust/src/types/typecore.rs | head -n 40"
+  ✓ command_execution [item_81] exit 0
+  ⚡ command_execution [item_82] /bin/zsh -lc "sed -n '940,1045p' compiler-rust/src/types/typecore.rs"
+  ✓ command_execution [item_82] exit 0
+  ⚡ command_execution [item_84] /bin/zsh -lc "rg -n \"type_path\\s*=|type_path:\" compiler-rust/src/types -g'*.rs'"
+  ✓ command_execution [item_84] exit 0
+  ⚡ command_execution [item_86] /bin/zsh -lc "nl -ba compiler-rust/src/types/typemod.rs | sed -n '1920,2228p'"
+  ✓ command_execution [item_86] exit 0
+  ⚡ command_execution [item_88] /bin/zsh -lc "rg -n \"fn new_constr|new_arrow|new_type\\(\" compiler-rust/src/types/context.rs compiler-rust/src/types/type_expr.rs"
+  ✓ command_execution [item_88] exit 0
+  ⚡ command_execution [item_89] /bin/zsh -lc "sed -n '230,340p' compiler-rust/src/types/context.rs"
+  ✓ command_execution [item_89] exit 0
+  ⚡ command_execution [item_91] /bin/zsh -lc 'rg -n "resolve_module_lid_raw|resolve_module_lid|substitute_type_paths_in_sig|module_lid" compiler-rust/src/types/env.rs compi
+  ✓ command_execution [item_91] exit 0
+  ⚡ command_execution [item_93] /bin/zsh -lc "rg -n \"fn resolve_module_lid_raw|resolve_module_lid_raw\\(\" compiler-rust/src/types compiler-rust/src/cmi"
+  ✓ command_execution [item_93] exit 0
+  ⚡ command_execution [item_95] /bin/zsh -lc "sed -n '6370,6528p' compiler-rust/src/types/typecore.rs"
+  ✓ command_execution [item_95] exit 0
+  ⚡ command_execution [item_97] /bin/zsh -lc "sed -n '460,760p' compiler-rust/src/cmi/persistent_env.rs"
+  ⚡ command_execution [item_98] /bin/zsh -lc "sed -n '260,460p' compiler-rust/src/cmi/persistent_env.rs"
+  ⚡ command_execution [item_99] /bin/zsh -lc "sed -n '980,1105p' compiler-rust/src/cmi/persistent_env.rs"
+  ✓ command_execution [item_98] exit 0
+  ✓ command_execution [item_97] exit 0
+  ✓ command_execution [item_99] exit 0
+  ⚡ command_execution [item_101] /bin/zsh -lc "rg -n \"resolve_module_lid\\(\" compiler-rust/src/types/typecore.rs compiler-rust/src/types/typemod.rs"
+  ✓ command_execution [item_101] exit 0
+  ⚡ command_execution [item_102] /bin/zsh -lc "sed -n '6310,6395p' compiler-rust/src/types/typecore.rs"
+  ✓ command_execution [item_102] exit 0
+  ⚡ command_execution [item_104] /bin/zsh -lc 'rg -n "prefix_idents|Subst|scrape|find_module|lookup_module" compiler/ml/env.ml'
+  ⚡ command_execution [item_105] /bin/zsh -lc "sed -n '860,1065p' compiler/ml/env.ml"
+  ⚡ command_execution [item_106] /bin/zsh -lc "sed -n '1065,1280p' compiler/ml/env.ml"
+  ✓ command_execution [item_104] exit 0
+  ✓ command_execution [item_105] exit 0
+  ✓ command_execution [item_106] exit 0
+  ⚡ command_execution [item_108] /bin/zsh -lc "sed -n '1,330p' compiler-rust/src/types/decl.rs"
+  ✓ command_execution [item_108] exit 0
+  ⚡ command_execution [item_110] /bin/zsh -lc "sed -n '330,560p' compiler-rust/src/types/decl.rs"
+  ✓ command_execution [item_110] exit 0
+  ⚡ command_execution [item_112] /bin/zsh -lc 'rg -n "fn copy_type_deep|copy_type_cached|copy_type_expr" compiler-rust/src/types/ctype.rs'
+  ✓ command_execution [item_112] exit 0
+  ⚡ command_execution [item_113] /bin/zsh -lc "sed -n '1520,1705p' compiler-rust/src/types/ctype.rs"
+  ✓ command_execution [item_113] exit 0
+  ⚡ command_execution [item_115] /bin/zsh -lc "rg -n \"enum TypeDesc|enum RowField|struct RowDesc|enum FieldKind\" compiler-rust/src/types/type_expr.rs && sed -n '1,260p' co
+  ✓ command_execution [item_115] exit 0
+  ⚡ command_execution [item_117] /bin/zsh -lc "rg -n \"fn get_level|fn set_level|set_desc\\(|repr\\(\" compiler-rust/src/types/context.rs"
+  ✓ command_execution [item_117] exit 0
+  ⚡ command_execution [item_118] /bin/zsh -lc "sed -n '350,410p' compiler-rust/src/types/context.rs"
+  ✓ command_execution [item_118] exit 0
+  ⚡ command_execution [item_120] /bin/zsh -lc "sed -n '1,120p' compiler-rust/src/types/typecore.rs"
+  ✓ command_execution [item_120] exit 0
+  ⚡ command_execution [item_122] /bin/zsh -lc 'rg -n "trait .*Env|impl .*Env" compiler-rust/src/types/typecore.rs | head -n 20'
+  ✓ command_execution [item_122] exit 0
+  ⚡ command_execution [item_124] /bin/zsh -lc "sed -n '6200,6288p' compiler-rust/src/types/typecore.rs"
+  ✓ command_execution [item_124] exit 0
+Root cause is now clear: module-path substitution in `resolve_module_lid` mutates shared type-expression nodes in signatures, so later lookups rewrite already-typed local module bodies (`Pident` -> `Pdot`). I’m implementing a non-destructive OCaml-aligned fix by deep-copying signature types for lookup-time substitution, then applying substitution on the copy only.
+I’ve added a deep-copy path for signatures used in lookup-time substitution. Next I’m wiring `resolve_module_lid` to run rewrite/substitute on that copy so the typedtree’s original type graph stays untouched.
+I’ve finished the code changes for non-destructive module-signature substitution. I’m compiling the Rust compiler now, then I’ll run the timed parity checks (`ExternalArity` first, then quick full scan) to confirm behavior and detect regressions.
+  ⚡ command_execution [item_133] /bin/zsh -lc 'timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release'
+^\fish: Job 1, './ralph.sh projects/typedtree-p…' terminated by signal SIGQUIT (Quit request from job control with core dump (^\))
+```
+
 - [x] Match OCaml JSX/source fallback intent in Rust `driver` + typedtree application flag threading without regressing compile coverage: recurse JSX-rewrite detection through nested module structures so source-compilation fallback also runs `parser::jsx_ppx::transform_structure` for nested `@react.component` externals (not just top-level items), while keeping the existing forwardRef/recursive value-binding gating to avoid async JSX regressions; and in `typecore::type_application`/`translate_unified_ops`, thread parser `Pexp_apply.transformed_jsx` through to `Texp_apply` instead of forcing `false`. This removes `jsx` -> `not_jsx` drift for transformed JSX applications (for example in `ExternalArity.res`) and keeps deterministic full-run compilation stable. Deterministic full run (`timeout 300 ./scripts/test_typedtree_parity.sh --with-locs --no-build --parallel 1`): `Rust bsc` 657 -> 657 (failures 0 -> 0), `Parity` 365 -> 365 (diffs 292 -> 292).
 - [x] Match OCaml `env.ml` non-destructive module-path substitution intent during type-constructor lookup: keep the existing `resolve_module_lid` rewrite/substitution path for value/module member lookup, but add a raw module-signature resolution path for `typecore::resolve_type_constructor_path` (`Longident::Ldot`) so `X.t` resolution does not mutate shared signature type graphs used by already-typed module bodies. This fixes the `Pident("t")` -> `Pdot(Pident("X"), "t")` drift in `EnvUnifiedOps.res` while preserving full Rust compilation coverage and avoiding substitution-copy performance regressions. Deterministic full run (`timeout 300 ./scripts/test_typedtree_parity.sh --with-locs --no-build --parallel 1`): `Rust bsc` 657 -> 657 (failures 0 -> 0), `Parity` 362 -> 365 (diffs 295 -> 292). Newly matching files include: `EnvUnifiedOps.res`, `caml_compare_test.res`, `js_obj_test.res`, `test_pervasive.res`.
 - [x] Match OCaml `typecore.ml` empty-record literal behavior for `Pexp_record ([], None)` in Rust `typecore::type_record`: when typing `{}` in a known record context with no base expression, keep `Texp_record` fields empty if all labels are optional (do not synthesize explicit `None` overrides), while still raising `LabelsMissing` for required fields. Preserve the existing fallback when Rust cannot reconstruct `lbl_all` (inline-record paths) to avoid compile regressions. This fixes typedtree drift in `EmptyRecord.res` (`Texp_record ()` parity). Deterministic full run (`timeout 300 ./scripts/test_typedtree_parity.sh --with-locs --no-build --parallel 1`): `Rust bsc` 657 -> 657 (failures 0 -> 0), `Parity` 361 -> 362 (diffs 296 -> 295).
