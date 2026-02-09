@@ -36,7 +36,7 @@
 | bsc-ast (syntax scope) | 1196/1196 (100%) ✅ |
 | sexp-locs (full scope: syntax + TELLA) | 3505/3505 (100%) ✅ |
 | sexp-locs-ppx (full scope: syntax + TELLA) | 3505/3505 (100%) ✅ |
-| bsc-ast (full scope: syntax + TELLA) | 585 diffs (2920/3505 matches, 83.3%) |
+| bsc-ast (full scope: syntax + TELLA) | 584 diffs (2921/3505 matches, 83.3%) |
 
 **Scope note:** Final parity targets include both `tests/syntax_tests/data` and `TELLA_DIR`
 when present. Always report parity as `X/Y` where `Y` contains only OCaml-successful files.
@@ -45,6 +45,15 @@ Files where OCaml fails are excluded from parity denominators and listed separat
 **Snapshot note:** The `1179` denominator above is a historical in-repo snapshot.
 
 **Session progress (2026-02-09) - newest:**
+- Fixed dependency extraction scoping/open-member parity to match OCaml `depend.ml`:
+  - In `compiler-rust/src/binary_ast/deps.rs`, nested module bindings from `Pstr_module`/`Pstr_recmodule`/`Psig_module`/`Psig_recmodule` are now scoped locally and restored after body traversal (no leakage into outer scope).
+  - Added local-module member tracking (`module_members`) and OCaml-style `open` behavior so `open M` binds known submodules from local module declarations.
+  - Added regression tests:
+    - `test_nested_module_bindings_do_not_leak_to_outer_scope`
+    - `test_open_brings_local_submodules_into_scope`
+  - Validation:
+    - `cargo test --manifest-path compiler-rust/Cargo.toml binary_ast::deps::tests:: -- --nocapture` passes.
+    - Full-scope parity remains `sexp-locs: 3505/3505`, `sexp-locs-ppx: 3505/3505`, and improves `bsc-ast differences: 585 -> 584`.
 - Fixed full-scope Rust-only parser failures in TELLA by mirroring OCaml `catch` and block-item attribute parsing:
   - `try ... catch` now accepts both `when` and `if` guards (OCaml `parse_pattern_guard` parity).
   - `try ... catch` case LHS parsing now uses `parse_pattern` (not `parse_constrained_pattern`) to match OCaml `parse_pattern_matching`.
@@ -69,7 +78,7 @@ Files where OCaml fails are excluded from parity denominators and listed separat
 - Parser abort-trap blocker status:
   - ✅ Resolved for in-scope files by fixing Rust-only parser failures and excluding 11 dual-failure (OCaml+Rust) files via explicit parity blacklist.
 - Current blocker:
-  - Remaining full-scope `bsc-ast` parity diffs (`585`) are now the primary target (dependency extraction + sharing identity mismatches).
+  - Remaining full-scope `bsc-ast` parity diffs (`584`) are now the primary target (dependency extraction + sharing identity mismatches).
 
 **Session progress (2026-02-08) - newest:**
 - Fixed remaining full-scope `sexp-locs` parser diff and aligned OCaml int32 marshal for `@inline` constants:
@@ -602,7 +611,7 @@ The binary AST structure (sexp-locs) is 100% correct. The differences are in:
 - [x] Task 5.1-5.3: Achieved 838/1179 (71.1%)
 - [x] Task 5.4: Historical snapshot target surpassed (syntax scope now 1196/1196 bsc-ast)
 - [ ] Task 5.5: Full-scope parity target (syntax + TELLA) - complete remaining parser/PPX/share diffs
-- **Note:** Current full-scope run has `bsc-ast differences: 585` over `3505` in-scope files (after excluding 11 dual-failure files).
+- **Note:** Current full-scope run has `bsc-ast differences: 584` over `3505` in-scope files (after excluding 11 dual-failure files).
 
 ### Phase 6: Arity Arena ✅ Complete
 - [x] Tasks 6.1-6.6: All implemented

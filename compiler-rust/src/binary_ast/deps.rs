@@ -7,7 +7,7 @@
 //! from Longidents. Only uppercase module names are collected (lowercase names are
 //! local bindings, not module references).
 
-use std::collections::{BTreeSet, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 
 use crate::parser::ast::{
     Attributes, Case, ConstructorArguments, CoreType, CoreTypeDesc, Expression, ExpressionDesc,
@@ -46,6 +46,9 @@ struct DependencyCollector<'a> {
     deps: BTreeSet<String>,
     /// Bound module names (from letmodule, module, etc.) that should not be added as dependencies
     bound_modules: HashSet<String>,
+    /// For locally-bound modules, track names introduced by their inner structure/signature.
+    /// Used to model OCaml `open_module` behavior (`open M` brings submodules into scope).
+    module_members: HashMap<String, HashSet<String>>,
 }
 
 impl<'a> DependencyCollector<'a> {
@@ -54,6 +57,7 @@ impl<'a> DependencyCollector<'a> {
             arena,
             deps: BTreeSet::new(),
             bound_modules: HashSet::new(),
+            module_members: HashMap::new(),
         }
     }
 
@@ -182,6 +186,31 @@ impl<'a> DependencyCollector<'a> {
         self.add_longident_full(lid);
     }
 
+    fn lident_simple_name(&self, lid_idx: LidentIdx) -> Option<String> {
+        match self.arena.get_longident(lid_idx) {
+            Longident::Lident(name_idx) => Some(self.arena.get_string(*name_idx).to_string()),
+            _ => None,
+        }
+    }
+
+    /// Bind names brought into scope by `open <module>`.
+    /// Returns names newly inserted into bound_modules (for local-open unwinding).
+    fn bind_opened_members(&mut self, lid_idx: LidentIdx) -> Vec<String> {
+        let Some(opened_module) = self.lident_simple_name(lid_idx) else {
+            return Vec::new();
+        };
+
+        let Some(members) = self.module_members.get(&opened_module) else {
+            return Vec::new();
+        };
+
+        let members: Vec<String> = members.iter().cloned().collect();
+        members
+            .into_iter()
+            .filter(|name| self.bound_modules.insert(name.clone()))
+            .collect()
+    }
+
     // ========== Structure ==========
 
     fn add_structure(&mut self, structure: &[StructureItem]) {
@@ -231,13 +260,24 @@ impl<'a> DependencyCollector<'a> {
                 self.add_extension_constructor(ext_ctor);
             }
             StructureItemDesc::Pstr_module(mb) => {
-                // Process the module body FIRST (before binding the name), so that
-                // references inside the body to a module with the same name are
-                // treated as external dependencies. E.g., `module List = { include List }`
-                // should add "List" as a dep from the `include List`.
                 let module_name = self.arena.get_string(mb.pmb_name.txt).to_string();
+                // OCaml's `add_module_binding` returns a local map for the module body.
+                // Nested module bindings inside that body must NOT leak into outer scope.
+                // Keep the body traversal for dependency collection, then restore outer
+                // bindings before adding the module's own binding at this level.
+                let outer_bound_modules = self.bound_modules.clone();
                 self.add_module_binding(mb);
+                let nested_members: HashSet<String> = self
+                    .bound_modules
+                    .difference(&outer_bound_modules)
+                    .cloned()
+                    .collect();
+                self.bound_modules = outer_bound_modules;
                 self.bound_modules.insert(module_name);
+                if !nested_members.is_empty() {
+                    let module_name = self.arena.get_string(mb.pmb_name.txt).to_string();
+                    self.module_members.insert(module_name, nested_members);
+                }
             }
             StructureItemDesc::Pstr_recmodule(mbs) => {
                 // First bind all module names so they're not added as dependencies
@@ -247,7 +287,20 @@ impl<'a> DependencyCollector<'a> {
                 }
                 // Then process all module expressions
                 for mb in &**mbs {
+                    // Match OCaml's functional scoping: nested bindings inside each
+                    // module body do not escape the recursive-module item scope.
+                    let outer_bound_modules = self.bound_modules.clone();
                     self.add_module_binding(mb);
+                    let nested_members: HashSet<String> = self
+                        .bound_modules
+                        .difference(&outer_bound_modules)
+                        .cloned()
+                        .collect();
+                    self.bound_modules = outer_bound_modules;
+                    if !nested_members.is_empty() {
+                        let module_name = self.arena.get_string(mb.pmb_name.txt).to_string();
+                        self.module_members.insert(module_name, nested_members);
+                    }
                 }
             }
             StructureItemDesc::Pstr_modtype(mtd) => {
@@ -298,7 +351,20 @@ impl<'a> DependencyCollector<'a> {
                 // Bind the module name so it's not added as a dependency when referenced
                 let module_name = self.arena.get_string(md.pmd_name.txt).to_string();
                 self.bound_modules.insert(module_name);
+                // Like OCaml `add_modtype_binding`, nested signature bindings are local
+                // to this module declaration and must not leak to outer scope.
+                let outer_bound_modules = self.bound_modules.clone();
                 self.add_module_declaration(md);
+                let nested_members: HashSet<String> = self
+                    .bound_modules
+                    .difference(&outer_bound_modules)
+                    .cloned()
+                    .collect();
+                self.bound_modules = outer_bound_modules;
+                if !nested_members.is_empty() {
+                    let module_name = self.arena.get_string(md.pmd_name.txt).to_string();
+                    self.module_members.insert(module_name, nested_members);
+                }
             }
             SignatureItemDesc::Psig_recmodule(mds) => {
                 // First bind all module names
@@ -308,7 +374,18 @@ impl<'a> DependencyCollector<'a> {
                 }
                 // Then process all module declarations
                 for md in &**mds {
+                    let outer_bound_modules = self.bound_modules.clone();
                     self.add_module_declaration(md);
+                    let nested_members: HashSet<String> = self
+                        .bound_modules
+                        .difference(&outer_bound_modules)
+                        .cloned()
+                        .collect();
+                    self.bound_modules = outer_bound_modules;
+                    if !nested_members.is_empty() {
+                        let module_name = self.arena.get_string(md.pmd_name.txt).to_string();
+                        self.module_members.insert(module_name, nested_members);
+                    }
                 }
             }
             SignatureItemDesc::Psig_modtype(mtd) => {
@@ -564,9 +641,13 @@ impl<'a> DependencyCollector<'a> {
                     let (ref _override, ref lid, ref body) = **inner;
                 // Local open uses full module path
                 self.add_lident_idx_full(lid.txt);
+                let newly_opened_members = self.bind_opened_members(lid.txt);
                 // body is ExprIdx
                 let body = *body;
                 self.add_expr_idx(body);
+                for name in &newly_opened_members {
+                    self.bound_modules.remove(name);
+                }
             }
             ExpressionDesc::Pexp_extension(_ext_inner) => {
                 // OCaml's handle_extension ignores extension payloads for dependency extraction
@@ -1061,6 +1142,7 @@ impl<'a> DependencyCollector<'a> {
     fn add_open_description(&mut self, od: &OpenDescription) {
         // Open uses full module path (like `open Array`)
         self.add_lident_idx_full(od.popen_lid.txt);
+        let _ = self.bind_opened_members(od.popen_lid.txt);
     }
 
     fn add_include_declaration(&mut self, id: &IncludeDeclaration) {
@@ -1302,6 +1384,46 @@ mod tests {
         let deps = extract_structure_deps(&arena, &structure);
         assert_eq!(deps.len(), 1);
         assert!(deps.contains("Array"));
+    }
+
+    #[test]
+    fn test_nested_module_bindings_do_not_leak_to_outer_scope() {
+        let source = r#"
+module Stdlib = {
+  module Array = {
+    let x = 1
+  }
+}
+
+let y = Array.length
+"#;
+        let mut parser = crate::parser::state::Parser::new("scope.res", source);
+        let structure = crate::parser::module::parse_structure(&mut parser);
+        let arena = parser.into_arena();
+
+        let deps = extract_structure_deps(&arena, &structure);
+        assert_eq!(deps.len(), 1);
+        assert!(deps.contains("Array"));
+    }
+
+    #[test]
+    fn test_open_brings_local_submodules_into_scope() {
+        let source = r#"
+module Stdlib = {
+  module Type = {
+    let typeof = x => x
+  }
+}
+
+open Stdlib
+let y = Type.typeof
+"#;
+        let mut parser = crate::parser::state::Parser::new("open_scope.res", source);
+        let structure = crate::parser::module::parse_structure(&mut parser);
+        let arena = parser.into_arena();
+
+        let deps = extract_structure_deps(&arena, &structure);
+        assert!(deps.is_empty());
     }
 
     #[test]
