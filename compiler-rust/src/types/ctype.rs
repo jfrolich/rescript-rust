@@ -531,19 +531,24 @@ fn try_expand_head<'a>(
 
             drop(desc);
 
-            // 1. Prefer environment lookup (matches OCaml Env.find_type behavior).
-            if let Ok(env_decl) = env.lookup_type(&path) {
-                if let Some(manifest) = env_decl.type_manifest {
-                    let params = &env_decl.type_params;
-                    if params.is_empty() {
-                        return Some(instance(ctx, manifest));
-                    } else if params.len() == args.len() {
-                        return Some(subst_type(ctx, &params.clone(), &args, manifest));
+            // 1. Prefer environment lookup for simple identifiers.
+            // OCaml expand_head is path-based (Env.find_type_expansion path env):
+            // for qualified paths, leaf-name lookup can pick an unrelated local
+            // declaration (e.g. local `type t` instead of `Belt.Array.t`).
+            if let Path::Pident(_) = &path {
+                if let Ok(env_decl) = env.lookup_type(&path) {
+                    if let Some(manifest) = env_decl.type_manifest {
+                        let params = &env_decl.type_params;
+                        if params.is_empty() {
+                            return Some(instance(ctx, manifest));
+                        } else if params.len() == args.len() {
+                            return Some(subst_type(ctx, &params.clone(), &args, manifest));
+                        }
+                        return None;
                     }
+                    // Type found in env but no manifest => abstract type.
                     return None;
                 }
-                // Type found in env but no manifest => abstract type.
-                return None;
             }
 
             // 2. Try stamp-based global store (for CMI types with non-zero stamps)
