@@ -1623,23 +1623,23 @@ pub fn copy_type(ctx: &TypeContext<'_>, ty: TypeExprRef) -> TypeExprRef {
     copy_type_cached(ctx, ty, &mut cache)
 }
 
-/// Copy a type with a cache to preserve sharing for type variables.
-/// Only Tvar nodes are cached (to preserve sharing for polymorphic types like 'a -> 'a -> 'a).
-/// Tconstr and other structural nodes are NOT cached, creating fresh copies each time.
-/// This matches OCaml's behavior where Tsubst markers preserve sharing for Tvars
-/// but the resulting type structure after unification has distinct Tconstr nodes.
+/// Copy a type for instantiation.
+///
+/// OCaml `Ctype.copy` only duplicates nodes at `generic_level` and returns
+/// non-generic nodes unchanged (`partial = None` case used by `instance`).
+/// For duplicated generic nodes, sharing is preserved across the copied graph.
 fn copy_type_cached(ctx: &TypeContext<'_>, ty: TypeExprRef, cache: &mut std::collections::HashMap<TypeExprRef, TypeExprRef>) -> TypeExprRef {
     let ty = ctx.repr(ty);
 
-    // Check cache first — but only for Tvar (to preserve polymorphic sharing)
+    // Preserve sharing for already-copied nodes (OCaml Tsubst behavior).
     if let Some(&cached) = cache.get(&ty) {
         return cached;
     }
-    let level = ctx.get_level(ty);
 
-    // Enum to hold what action to take, avoiding borrow issues
+    // Enum to hold what action to take, avoiding borrow issues.
     enum CopyAction {
-        NewVar(Option<String>),
+        ReturnSelf,
+        NewVar,
         NewUnivar(Option<String>),
         Arrow {
             arg_lbl: super::asttypes::ArgLabel,
@@ -1674,71 +1674,62 @@ fn copy_type_cached(ctx: &TypeContext<'_>, ty: TypeExprRef, cache: &mut std::col
             args: Vec<TypeExprRef>,
         },
         Link(TypeExprRef),
-        ReturnSelf,
     }
 
-    // Determine action based on type level and descriptor
+    let level = ctx.get_level(ty);
+
+    // Determine action based on type level and descriptor.
     let action = {
         let desc = ctx.get_desc(ty);
 
-        // If the type is generic, create a fresh variable
-        if level == GENERIC_LEVEL {
-            match &*desc {
-                TypeDesc::Tvar(_name) => CopyAction::NewVar(None), // OCaml creates anonymous copies
-                TypeDesc::Tunivar(name) => CopyAction::NewUnivar(name.clone()),
-                _ => {
-                    // Fall through to structural copy
-                    match &*desc {
-                        TypeDesc::Tvar(_) | TypeDesc::Tunivar(_) => CopyAction::ReturnSelf,
-                        TypeDesc::Tarrow {
-                            arg, ret, arity, ..
-                        } => CopyAction::Arrow {
-                            arg_lbl: arg.lbl.clone(),
-                            arg_typ: arg.typ,
-                            ret: *ret,
-                            arity: *arity,
-                        },
-                        TypeDesc::Ttuple(types) => CopyAction::Tuple(types.clone()),
-                        TypeDesc::Tconstr { path, args, .. } => CopyAction::Constr {
-                            path: path.clone(),
-                            args: args.clone(),
-                        },
-                        TypeDesc::Tobject { fields, name } => CopyAction::Object {
-                            fields: *fields,
-                            name: name.clone(),
-                        },
-                        TypeDesc::Tfield {
-                            name,
-                            kind,
-                            typ,
-                            rest,
-                        } => CopyAction::Field {
-                            name: name.clone(),
-                            kind: kind.clone(),
-                            typ: *typ,
-                            rest: *rest,
-                        },
-                        TypeDesc::Tnil => CopyAction::Nil,
-                        TypeDesc::Tpoly { body, vars } => CopyAction::Poly {
-                            body: *body,
-                            vars: vars.clone(),
-                        },
-                        TypeDesc::Tvariant(row) => CopyAction::Variant(row.clone()),
-                        TypeDesc::Tpackage { path, lids, args } => CopyAction::Package {
-                            path: path.clone(),
-                            lids: lids.clone(),
-                            args: args.clone(),
-                        },
-                        TypeDesc::Tlink(target) | TypeDesc::Tsubst(target) => {
-                            CopyAction::Link(*target)
-                        }
-                    }
-                }
-            }
-        } else {
-            // Not generic, copy structure
+        if level != GENERIC_LEVEL {
             match &*desc {
                 TypeDesc::Tvar(_) | TypeDesc::Tunivar(_) => CopyAction::ReturnSelf,
+                TypeDesc::Tarrow {
+                    arg, ret, arity, ..
+                } => CopyAction::Arrow {
+                    arg_lbl: arg.lbl.clone(),
+                    arg_typ: arg.typ,
+                    ret: *ret,
+                    arity: *arity,
+                },
+                TypeDesc::Ttuple(types) => CopyAction::Tuple(types.clone()),
+                TypeDesc::Tconstr { path, args, .. } => CopyAction::Constr {
+                    path: path.clone(),
+                    args: args.clone(),
+                },
+                TypeDesc::Tobject { fields, name } => CopyAction::Object {
+                    fields: *fields,
+                    name: name.clone(),
+                },
+                TypeDesc::Tfield {
+                    name,
+                    kind,
+                    typ,
+                    rest,
+                } => CopyAction::Field {
+                    name: name.clone(),
+                    kind: kind.clone(),
+                    typ: *typ,
+                    rest: *rest,
+                },
+                TypeDesc::Tnil => CopyAction::Nil,
+                TypeDesc::Tpoly { body, vars } => CopyAction::Poly {
+                    body: *body,
+                    vars: vars.clone(),
+                },
+                TypeDesc::Tvariant(row) => CopyAction::Variant(row.clone()),
+                TypeDesc::Tpackage { path, lids, args } => CopyAction::Package {
+                    path: path.clone(),
+                    lids: lids.clone(),
+                    args: args.clone(),
+                },
+                TypeDesc::Tlink(target) | TypeDesc::Tsubst(target) => CopyAction::Link(*target),
+            }
+        } else {
+            match &*desc {
+                TypeDesc::Tvar(_) => CopyAction::NewVar,
+                TypeDesc::Tunivar(name) => CopyAction::NewUnivar(name.clone()),
                 TypeDesc::Tarrow {
                     arg, ret, arity, ..
                 } => CopyAction::Arrow {
@@ -1783,88 +1774,121 @@ fn copy_type_cached(ctx: &TypeContext<'_>, ty: TypeExprRef, cache: &mut std::col
         }
     };
 
-    // Track if this is a Tvar copy (for caching)
-    let is_var_copy = matches!(action, CopyAction::NewVar(_));
-
-    // Execute the action without holding the borrow
-    let result = match action {
-        CopyAction::NewVar(name) => ctx.new_var(name),
-        CopyAction::NewUnivar(name) => ctx.new_univar(name),
-        CopyAction::Arrow {
-            arg_lbl,
-            arg_typ,
-            ret,
-            arity,
-        } => {
-            let arg_copy = copy_type_cached(ctx, arg_typ, cache);
-            let ret_copy = copy_type_cached(ctx, ret, cache);
-            ctx.new_arrow(arg_lbl, arg_copy, ret_copy, arity)
-        }
-        CopyAction::Tuple(types) => {
-            let types_copy: Vec<_> = types.iter().map(|t| copy_type_cached(ctx, *t, cache)).collect();
-            ctx.new_tuple(types_copy)
-        }
-        CopyAction::Constr { path, args } => {
-            let args_copy: Vec<_> = args.iter().map(|t| copy_type_cached(ctx, *t, cache)).collect();
-            ctx.new_constr(path, args_copy)
-        }
-        CopyAction::Object { fields, name } => {
-            let fields_copy = copy_type_cached(ctx, fields, cache);
-            let name_copy = name.map(|(path, args)| {
-                (
-                    path,
-                    args.iter().map(|t| copy_type_cached(ctx, *t, cache)).collect(),
-                )
-            });
-            ctx.new_type(TypeDesc::Tobject {
-                fields: fields_copy,
-                name: name_copy,
-            })
-        }
-        CopyAction::Field {
-            name,
-            kind,
-            typ,
-            rest,
-        } => {
-            let typ_copy = copy_type_cached(ctx, typ, cache);
-            let rest_copy = copy_type_cached(ctx, rest, cache);
-            ctx.new_type(TypeDesc::Tfield {
-                name,
-                kind,
-                typ: typ_copy,
-                rest: rest_copy,
-            })
-        }
-        CopyAction::Nil => ctx.new_type(TypeDesc::Tnil),
-        CopyAction::Poly { body, vars } => {
-            let body_copy = copy_type_cached(ctx, body, cache);
-            let vars_copy: Vec<_> = vars.iter().map(|v| copy_type_cached(ctx, *v, cache)).collect();
-            ctx.new_poly(body_copy, vars_copy)
-        }
-        CopyAction::Variant(row) => {
-            let row_copy = copy_row_cached(ctx, &row, cache);
-            ctx.new_variant(row_copy)
-        }
-        CopyAction::Package { path, lids, args } => {
-            let args_copy: Vec<_> = args.iter().map(|t| copy_type_cached(ctx, *t, cache)).collect();
-            ctx.new_type(TypeDesc::Tpackage {
-                path,
-                lids,
-                args: args_copy,
-            })
-        }
-        CopyAction::Link(target) => copy_type_cached(ctx, target, cache),
+    // Execute the action without holding the borrow.
+    match action {
         CopyAction::ReturnSelf => ty,
-    };
-
-    // Only cache Tvar copies to preserve sharing for polymorphic types.
-    // We DON'T cache Tconstr/Tarrow/etc so each copy is fresh, avoiding
-    // artificial sharing that would cause incorrect cycle detection.
-    if is_var_copy {
-        cache.insert(ty, result);
+        CopyAction::Link(target) => copy_type_cached(ctx, target, cache),
+        CopyAction::NewVar => {
+            // OCaml creates anonymous copies of generic Tvar nodes.
+            let fresh = ctx.new_var(None);
+            cache.insert(ty, fresh);
+            fresh
+        }
+        CopyAction::NewUnivar(name) => {
+            let fresh = ctx.new_univar(name);
+            cache.insert(ty, fresh);
+            fresh
+        }
+        // Generic structural nodes must be registered before recursion so
+        // recursive references can reuse the same node.
+        structural => {
+            let placeholder = if level == GENERIC_LEVEL {
+                let placeholder = ctx.new_var(None);
+                cache.insert(ty, placeholder);
+                Some(placeholder)
+            } else {
+                None
+            };
+            let copied_desc = match structural {
+                CopyAction::Arrow {
+                    arg_lbl,
+                    arg_typ,
+                    ret,
+                    arity,
+                } => {
+                    let arg_copy = copy_type_cached(ctx, arg_typ, cache);
+                    let ret_copy = copy_type_cached(ctx, ret, cache);
+                    TypeDesc::Tarrow {
+                        arg: crate::types::type_expr::TypeArg {
+                            lbl: arg_lbl,
+                            typ: arg_copy,
+                        },
+                        ret: ret_copy,
+                        commutable: crate::types::type_expr::Commutable::Cok,
+                        arity,
+                    }
+                }
+                CopyAction::Tuple(types) => {
+                    let types_copy: Vec<_> = types.iter().map(|t| copy_type_cached(ctx, *t, cache)).collect();
+                    TypeDesc::Ttuple(types_copy)
+                }
+                CopyAction::Constr { path, args } => {
+                    let args_copy: Vec<_> = args.iter().map(|t| copy_type_cached(ctx, *t, cache)).collect();
+                    TypeDesc::Tconstr {
+                        path,
+                        args: args_copy,
+                        abbrev: ctx.alloc_abbrev_nil(),
+                    }
+                }
+                CopyAction::Object { fields, name } => {
+                    let fields_copy = copy_type_cached(ctx, fields, cache);
+                    let name_copy = name.map(|(path, args)| {
+                        (
+                            path,
+                            args.iter().map(|t| copy_type_cached(ctx, *t, cache)).collect(),
+                        )
+                    });
+                    TypeDesc::Tobject {
+                        fields: fields_copy,
+                        name: name_copy,
+                    }
+                }
+                CopyAction::Field {
+                    name,
+                    kind,
+                    typ,
+                    rest,
+                } => {
+                    let typ_copy = copy_type_cached(ctx, typ, cache);
+                    let rest_copy = copy_type_cached(ctx, rest, cache);
+                    TypeDesc::Tfield {
+                        name,
+                        kind,
+                        typ: typ_copy,
+                        rest: rest_copy,
+                    }
+                }
+                CopyAction::Nil => TypeDesc::Tnil,
+                CopyAction::Poly { body, vars } => {
+                    let body_copy = copy_type_cached(ctx, body, cache);
+                    let vars_copy: Vec<_> = vars.iter().map(|v| copy_type_cached(ctx, *v, cache)).collect();
+                    TypeDesc::Tpoly {
+                        body: body_copy,
+                        vars: vars_copy,
+                    }
+                }
+                CopyAction::Variant(row) => {
+                    let row_copy = copy_row_cached(ctx, &row, cache);
+                    TypeDesc::Tvariant(row_copy)
+                }
+                CopyAction::Package { path, lids, args } => {
+                    let args_copy: Vec<_> = args.iter().map(|t| copy_type_cached(ctx, *t, cache)).collect();
+                    TypeDesc::Tpackage {
+                        path,
+                        lids,
+                        args: args_copy,
+                    }
+                }
+                CopyAction::ReturnSelf | CopyAction::NewVar | CopyAction::NewUnivar(_) | CopyAction::Link(_) => unreachable!(),
+            };
+            if let Some(placeholder) = placeholder {
+                ctx.set_desc(placeholder, copied_desc);
+                placeholder
+            } else {
+                ctx.new_type(copied_desc)
+            }
+        }
     }
-    result
 }
 
 /// Copy a row descriptor.
