@@ -311,6 +311,11 @@ show_dashboard() {
   fi
 }
 
+has_control_token() {
+  local token="$1"
+  grep -Eq "^[[:space:]]*${token}[[:space:]]*$" "$OUTPUT_FILE"
+}
+
 clear
 echo "╔══════════════════════════════════════════════════════════════════════╗"
 echo "║                         RALPH LOOP                                   ║"
@@ -342,7 +347,7 @@ while true; do
   echo "─── End of Iteration $ITERATION ───────────────────────────────────────"
 
   # Check for completion
-  if grep -q "RALPH_COMPLETE" "$OUTPUT_FILE" "$OUTPUT_JSON_FILE"; then
+  if has_control_token "RALPH_COMPLETE"; then
     echo ""
     echo "╔══════════════════════════════════════════════════════════════════════╗"
     echo "║  🎉 RALPH_COMPLETE - Finished after $ITERATION iterations!            ║"
@@ -351,7 +356,7 @@ while true; do
   fi
 
   # Check for blocked state
-  if grep -q "RALPH_BLOCKED" "$OUTPUT_FILE" "$OUTPUT_JSON_FILE"; then
+  if has_control_token "RALPH_BLOCKED"; then
     echo ""
     echo "╔══════════════════════════════════════════════════════════════════════╗"
     echo "║  ⚠️  RALPH_BLOCKED - Needs human intervention                        ║"
