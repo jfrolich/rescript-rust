@@ -667,34 +667,6 @@ fn convert_arg_label_for_ctx(lbl: &crate::parser::ast::ArgLabel, arena: &ParseAr
     }
 }
 
-/// Convert a types ArgLabel back to parser ArgLabel for typedtree `Texp_apply` args.
-/// OCaml stores labels without source locations in typedtree applications, so we
-/// synthesize labels at `Location.none`.
-fn convert_arg_label_for_apply(
-    lbl: &crate::types::ArgLabel,
-    arena: &ParseArena,
-    loc: LocIdx,
-) -> Option<crate::parser::ast::ArgLabel> {
-    let get_label_str_idx = |name: &str| {
-        arena
-            .find_string_idx(name)
-            .or_else(|| {
-                find_existing_lident_idx(arena, name)
-                    .map(|lid_idx| arena.get_longident(lid_idx).last_idx())
-            })
-    };
-
-    match lbl {
-        crate::types::ArgLabel::Nolabel => Some(crate::parser::ast::ArgLabel::Nolabel),
-        crate::types::ArgLabel::Labelled(name) => get_label_str_idx(&name.txt).map(|str_idx| {
-            crate::parser::ast::ArgLabel::Labelled(crate::parse_arena::Located::new(str_idx, loc))
-        }),
-        crate::types::ArgLabel::Optional(name) => get_label_str_idx(&name.txt).map(|str_idx| {
-            crate::parser::ast::ArgLabel::Optional(crate::parse_arena::Located::new(str_idx, loc))
-        }),
-    }
-}
-
 /// Translate a parsed CoreType to a TypedCoreType and its corresponding TypeExprRef.
 ///
 /// This function converts the surface syntax type annotations into the internal
@@ -865,12 +837,12 @@ fn transl_type_inner(
 
             // Convert parser ArgLabel to types ArgLabel for TypeContext
             let ctx_lbl = convert_arg_label_for_ctx(&arg.lbl, tctx.arena);
-            let arrow_ty = ctx.new_arrow(ctx_lbl, arg_ty, ret_ty, arity_opt);
+            let arrow_ty = ctx.new_arrow(ctx_lbl.clone(), arg_ty, ret_ty, arity_opt);
 
             // Create ArrowArg structure matching OCaml's
             let arrow_arg = ArrowArg {
                 attrs: arg.attrs.clone(),
-                lbl: arg.lbl.clone(),
+                lbl: ctx_lbl,
                 typ: Box::new(arg_ctyp),
             };
 
@@ -3233,11 +3205,11 @@ fn translate_unified_ops(
 
             let typed_args = vec![
                 ApplyArg {
-                    label: args[0].0.clone(),
+                    label: convert_arg_label_for_ctx(&args[0].0, tctx.arena),
                     expression: lhs,
                 },
                 ApplyArg {
-                    label: args[1].0.clone(),
+                    label: convert_arg_label_for_ctx(&args[1].0, tctx.arena),
                     expression: rhs,
                 },
             ];
@@ -3297,7 +3269,7 @@ fn translate_unified_ops(
             }
 
             let typed_args = vec![ApplyArg {
-                label: args[0].0.clone(),
+                label: convert_arg_label_for_ctx(&args[0].0, tctx.arena),
                 expression: arg,
             }];
 
@@ -3358,16 +3330,23 @@ fn type_application(
     fn apply_arg_label_for_param(
         param_label: &crate::types::ArgLabel,
         call_label: &ArgLabel,
-    ) -> ArgLabel {
+        arena: &ParseArena,
+    ) -> crate::types::ArgLabel {
         match param_label {
-            crate::types::ArgLabel::Nolabel => ArgLabel::Nolabel,
+            crate::types::ArgLabel::Nolabel => crate::types::ArgLabel::Nolabel,
             crate::types::ArgLabel::Labelled(_) => match call_label {
-                ArgLabel::Nolabel => ArgLabel::Nolabel,
-                ArgLabel::Labelled(loc) | ArgLabel::Optional(loc) => ArgLabel::Labelled(*loc),
+                ArgLabel::Nolabel => crate::types::ArgLabel::Nolabel,
+                ArgLabel::Labelled(loc) | ArgLabel::Optional(loc) => crate::types::ArgLabel::labelled(
+                    arena.get_string(loc.txt).to_string(),
+                    arena.to_location(loc.loc),
+                ),
             },
             crate::types::ArgLabel::Optional(_) => match call_label {
-                ArgLabel::Nolabel => ArgLabel::Nolabel,
-                ArgLabel::Labelled(loc) | ArgLabel::Optional(loc) => ArgLabel::Optional(*loc),
+                ArgLabel::Nolabel => crate::types::ArgLabel::Nolabel,
+                ArgLabel::Labelled(loc) | ArgLabel::Optional(loc) => crate::types::ArgLabel::optional(
+                    arena.get_string(loc.txt).to_string(),
+                    arena.to_location(loc.loc),
+                ),
             },
         }
     }
@@ -3438,7 +3417,7 @@ fn type_application(
                     Some(TypeClashContext::FunctionCall),
                 )?;
                 typed_args.push(ApplyArg {
-                    label: apply_arg_label_for_param(&fn_label, &call_label),
+                    label: apply_arg_label_for_param(&fn_label, &call_label, tctx.arena),
                     expression: typed_arg,
                 });
                 current_ty = ret_ty;
@@ -3449,31 +3428,27 @@ fn type_application(
                 consumed_optional_count += 1;
                 // OCaml type_application: consumed omitted optional labels still appear
                 // in Texp_apply as explicit None arguments at Location.none.
-                if let Some(apply_label) =
-                    convert_arg_label_for_apply(&fn_label, tctx.arena, tctx.arena.none_loc())
-                {
-                    let none_loc = tctx.arena.none_loc();
-                    let option_ty = crate::types::instance(ctx, arg_ty);
-                    let none_expr = Expression::new(
-                        ExpressionDesc::Texp_construct(
-                            Located {
-                                txt: tctx.arena.none_lid(),
-                                loc: none_loc,
-                            },
-                            make_none_constructor(ctx, option_ty),
-                            vec![],
-                        ),
-                        none_loc,
-                        option_ty,
-                        EnvRef(0),
+                let none_loc = tctx.arena.none_loc();
+                let option_ty = crate::types::instance(ctx, arg_ty);
+                let none_expr = Expression::new(
+                    ExpressionDesc::Texp_construct(
+                        Located {
+                            txt: tctx.arena.none_lid(),
+                            loc: none_loc,
+                        },
+                        make_none_constructor(ctx, option_ty),
                         vec![],
-                    );
-                    typed_args.push(ApplyArg {
-                        label: apply_label,
-                        expression: none_expr,
-                    });
-                    synthesized_optional_count += 1;
-                }
+                    ),
+                    none_loc,
+                    option_ty,
+                    EnvRef(0),
+                    vec![],
+                );
+                typed_args.push(ApplyArg {
+                    label: fn_label.clone(),
+                    expression: none_expr,
+                });
+                synthesized_optional_count += 1;
                 current_ty = ret_ty;
                 continue;
             }
@@ -3521,23 +3496,42 @@ fn type_application(
             unify_expression_types(tctx, loc, typed_arg.exp_type, option_ty, None)?;
         }
         typed_args.push(ApplyArg {
-            label,
+            label: convert_arg_label_for_ctx(&label, tctx.arena),
             expression: typed_arg,
         });
         current_ty = ret_ty;
     }
 
     if total_app {
-        // OCaml only auto-consumes trailing optional arguments when the current
-        // application provided fewer arguments than the function arity.
-        let mut applied_count =
-            typed_args.len() + consumed_optional_count.saturating_sub(synthesized_optional_count);
+        // Match OCaml `type_unknown_args []`: for total applications, trailing
+        // optional arrows are materialized as explicit `None` arguments.
+        let mut applied_count = typed_args.len();
         while (applied_count as i32) < max_arity {
             let expanded_current_ty = crate::types::ctype::expand_head(ctx, env, current_ty);
-            if let Some((fn_label, _arg_ty, ret_ty)) =
+            if let Some((fn_label, arg_ty, ret_ty)) =
                 crate::types::ctype::split_arrow_with_label(ctx, expanded_current_ty)
             {
                 if fn_label.is_optional() {
+                    let none_loc = tctx.arena.none_loc();
+                    let option_ty = crate::types::instance(ctx, arg_ty);
+                    let none_expr = Expression::new(
+                        ExpressionDesc::Texp_construct(
+                            Located {
+                                txt: tctx.arena.none_lid(),
+                                loc: none_loc,
+                            },
+                            make_none_constructor(ctx, option_ty),
+                            vec![],
+                        ),
+                        none_loc,
+                        option_ty,
+                        EnvRef(0),
+                        vec![],
+                    );
+                    typed_args.push(ApplyArg {
+                        label: fn_label.clone(),
+                        expression: none_expr,
+                    });
                     current_ty = ret_ty;
                     applied_count += 1;
                     continue;

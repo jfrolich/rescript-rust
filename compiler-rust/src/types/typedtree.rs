@@ -20,9 +20,10 @@
 use crate::ident::Ident;
 use crate::parse_arena::{LidentIdx, Located, LocIdx};
 use crate::parser::ast::{
-    ArgLabel, Arity, Attributes, ClosedFlag, DirectionFlag, MutableFlag, OverrideFlag, PrivateFlag,
-    RecFlag,
+    ArgLabel as ParserArgLabel, Arity, Attributes, ClosedFlag, DirectionFlag, MutableFlag,
+    OverrideFlag, PrivateFlag, RecFlag,
 };
+use crate::types::asttypes::ArgLabel as TypeArgLabel;
 use crate::types::{
     ConstructorDescription, LabelDescription, Path, RowDesc, TypeExprRef, ValueDescription,
 };
@@ -303,7 +304,7 @@ pub enum RecordLabelDefinition {
 #[derive(Debug, Clone)]
 pub struct ApplyArg {
     /// Argument label.
-    pub label: ArgLabel,
+    pub label: TypeArgLabel,
     /// Argument expression.
     pub expression: Expression,
 }
@@ -312,7 +313,7 @@ pub struct ApplyArg {
 #[derive(Debug, Clone)]
 pub struct FunctionParam {
     /// Parameter label.
-    pub label: ArgLabel,
+    pub label: ParserArgLabel,
     /// Default value for optional parameter.
     pub default: Option<Box<Expression>>,
     /// Parameter pattern.
@@ -382,7 +383,7 @@ pub struct ArrowArg {
     /// Attributes on the argument.
     pub attrs: Attributes,
     /// Argument label.
-    pub lbl: ArgLabel,
+    pub lbl: TypeArgLabel,
     /// Argument type (boxed to prevent infinite size).
     pub typ: Box<TypedCoreType>,
 }
