@@ -79,10 +79,10 @@ The `-dtyped-sexp` flag outputs the typed tree without locations. The `-dtyped-s
 | Rust compiles | 657/657 |
 | Parity match (-dtyped-sexp-locs) | 365/657 (55.6%) |
 
-**Task Progress:** 58/59 complete
+**Task Progress:** 59/59 complete
 
 **Task Checklist:**
-- [ ] Investigate and recover from the typedtree parity session crash on 2026-02-09 (SIGQUIT/core dump) before declaring progress complete again. Resume from the crash trace captured below.
+- [x] Investigate and recover from the typedtree parity session crash on 2026-02-09 (SIGQUIT/core dump) before declaring progress complete again. Resume from the crash trace captured below. Recovery verified with deterministic timed run: `timeout 300 ./scripts/test_typedtree_parity.sh --with-locs --no-build --parallel 1` completed successfully with `OCaml bsc 657/657`, `Rust bsc 657/657`, and `Parity 365/657`.
 
 **Crash Report (2026-02-09):**
 
