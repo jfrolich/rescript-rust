@@ -346,6 +346,7 @@ let command_line_flags : (string * Bsc_args.spec * string) array =
     ("-dtyped-sexp", set Clflags.dump_typed_sexp, "*internal* debug typedtree as sexp");
     ("-dtyped-sexp-locs", set Clflags.dump_typed_sexp_locs, "*internal* debug typedtree as sexp with locations");
     ("-dparsetree", set Clflags.dump_parsetree, "*internal* debug parsetree");
+    ("-dparsetree-sexp-locs", set Clflags.dump_parsetree_sexp_locs, "*internal* debug parsetree as sexp with locations");
     ("-drawlambda", set Clflags.dump_rawlambda, "*internal* debug raw lambda");
     ("-dlambda-sexp", set Clflags.dump_lambda_sexp, "*internal* debug lambda as sexp");
     ("-dlambda-sexp-locs", set Clflags.dump_lambda_sexp_locs, "*internal* debug lambda as sexp with locations");

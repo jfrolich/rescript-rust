@@ -31,6 +31,7 @@ and error_size = ref 500 (* -error-size *)
 and transparent_modules = ref false (* -trans-mod *)
 let dump_source = ref false (* -dsource *)
 let dump_parsetree = ref false (* -dparsetree *)
+let dump_parsetree_sexp_locs = ref false (* -dparsetree-sexp-locs *)
 
 and dump_typedtree = ref false (* -dtypedtree *)
 
@@ -57,6 +58,7 @@ let dont_write_files = ref false (* set to true under ocamldoc *)
 let reset_dump_state () =
   dump_source := false;
   dump_parsetree := false;
+  dump_parsetree_sexp_locs := false;
   dump_typedtree := false;
   dump_typed_sexp := false;
   dump_typed_sexp_locs := false;

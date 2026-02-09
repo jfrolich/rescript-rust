@@ -389,8 +389,8 @@ test_single_file() {
     fi
 
     # For TELLA files that use @spice, skip raw bsc-ast byte parity and
-    # compare canonical sexp representations generated from the expanded AST.
-    # Report this as "sexp-locs-ppx-and-spice" in summary output.
+    # compare post-PPX sexp-with-locs emitted by bsc debug output.
+    # Report this as "sexp-with-locs-ppx-and-spice" in summary output.
     local use_spice_structural_bsc=false
     if $use_spice_ppx && [[ -n "$TELLA_DIR" ]] && [[ "$file" == "$TELLA_DIR/"* ]]; then
         use_spice_structural_bsc=true
@@ -440,9 +440,7 @@ test_single_file() {
         fi
 
         # Test bsc -bs-ast parity (full compiler binary AST output with dependencies)
-        # This is the production format used by the build system
-        # Note: Both OCaml and Rust bsc create .iast files for interface (.resi) files,
-        # ignoring the -o extension. We check for both possible output locations.
+        # This is the production format used by the build system.
         local ocaml_ast_file="$file_temp/ocaml.ast"
         local rust_ast_file="$file_temp/rust.ast"
         local ocaml_iast_file="$file_temp/ocaml.iast"
@@ -451,9 +449,37 @@ test_single_file() {
         if $use_spice_ppx; then
             ocaml_bsc_cmd+=(-ppx "$SPICE_PPX")
         fi
-        if timeout "$TIMEOUT_SECONDS" "${ocaml_bsc_cmd[@]}" -bs-ast "$file" -o "$ocaml_ast_file" 2>/dev/null && \
-           timeout "$TIMEOUT_SECONDS" "$RUST_BSC" -bs-ast "$file" -o "$rust_ast_file" 2>/dev/null; then
-            # Both compilers create .iast for .resi files (regardless of -o), so check for that
+        if $use_spice_structural_bsc; then
+            sexp_locs_ppx_spice_checked=1
+            local ocaml_spice_sexp="$file_temp/ocaml.sexp-with-locs-ppx-and-spice"
+            local rust_spice_sexp="$file_temp/rust.sexp-with-locs-ppx-and-spice"
+
+            if timeout "$TIMEOUT_SECONDS" "${ocaml_bsc_cmd[@]}" -bs-ast -dparsetree-sexp-locs "$file" -o "$ocaml_ast_file" > /dev/null 2> "$ocaml_spice_sexp" && \
+               timeout "$TIMEOUT_SECONDS" "$RUST_BSC" -bs-ast -dparsetree-sexp-locs "$file" -o "$rust_ast_file" > /dev/null 2> "$rust_spice_sexp"; then
+                if ! diff -q "$ocaml_spice_sexp" "$rust_spice_sexp" > /dev/null 2>&1; then
+                    sexp_locs_ppx_spice_diff=1
+                    {
+                        echo "Category: sexp-with-locs-ppx-and-spice"
+                        echo "Comparison type: post-PPX sexp-with-locs (not byte-level bsc-ast)"
+                        echo ""
+                        diff -u --text "$ocaml_spice_sexp" "$rust_spice_sexp" || true
+                    } > "$TEMP_DIR/sexp_locs_ppx_spice_diffs/$safe_name.diff" 2>&1
+                fi
+            else
+                sexp_locs_ppx_spice_diff=1
+                {
+                    echo "Failed to produce sexp-with-locs-ppx-and-spice output via bsc."
+                    echo ""
+                    echo "--- OCaml stderr ---"
+                    cat "$ocaml_spice_sexp" 2>/dev/null || true
+                    echo ""
+                    echo "--- Rust stderr ---"
+                    cat "$rust_spice_sexp" 2>/dev/null || true
+                } > "$TEMP_DIR/sexp_locs_ppx_spice_diffs/$safe_name.diff" 2>&1
+            fi
+        elif timeout "$TIMEOUT_SECONDS" "${ocaml_bsc_cmd[@]}" -bs-ast "$file" -o "$ocaml_ast_file" 2>/dev/null && \
+             timeout "$TIMEOUT_SECONDS" "$RUST_BSC" -bs-ast "$file" -o "$rust_ast_file" 2>/dev/null; then
+            # Both compilers create .iast for .resi files (regardless of -o), so check for that.
             if [[ -f "$ocaml_iast_file" && ! -f "$ocaml_ast_file" ]]; then
                 ocaml_ast_file="$ocaml_iast_file"
             fi
@@ -461,127 +487,15 @@ test_single_file() {
                 rust_ast_file="$rust_iast_file"
             fi
             if [[ -f "$ocaml_ast_file" && -f "$rust_ast_file" ]]; then
-                if $use_spice_structural_bsc; then
-                    sexp_locs_ppx_spice_checked=1
-                    local ocaml_spice_sexp="$file_temp/ocaml.sexp-locs-ppx-and-spice"
-                    local rust_spice_sexp="$file_temp/rust.sexp-locs-ppx-and-spice"
-                    local spice_sexp_failed=0
-
-                    if ! python3 - "$INSPECT_SCRIPT" "$ocaml_ast_file" > "$ocaml_spice_sexp" 2>/dev/null <<'PY'
-import importlib.util
-import json
-import sys
-
-script_path, ast_path = sys.argv[1], sys.argv[2]
-spec = importlib.util.spec_from_file_location("inspect_binary_ast", script_path)
-mod = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(mod)
-
-root, dec = mod.BinaryAstFile(ast_path).decode_ast()
-sys.setrecursionlimit(100000)
-
-def deref(node):
-    while isinstance(node, mod.SharedNode):
-        target = dec.objects.get(node.target_idx)
-        if target is None:
-            break
-        node = target
-    return node
-
-def to_sexp(node):
-    node = deref(node)
-    if isinstance(node, mod.IntNode):
-        return str(node.value)
-    if isinstance(node, mod.StringNode):
-        return json.dumps(node.value, ensure_ascii=False)
-    if isinstance(node, mod.DoubleNode):
-        return repr(node.value)
-    if isinstance(node, mod.BlockNode):
-        head = f"(tag:{node.tag}"
-        if not node.children:
-            return head + ")"
-        child_lines = [to_sexp(child) for child in node.children]
-        indented = "\n".join("  " + line.replace("\n", "\n  ") for line in child_lines)
-        return f"{head}\n{indented}\n)"
-    return json.dumps(repr(node), ensure_ascii=False)
-
-print(to_sexp(root))
-PY
-                    then
-                        spice_sexp_failed=1
-                    fi
-
-                    if ! python3 - "$INSPECT_SCRIPT" "$rust_ast_file" > "$rust_spice_sexp" 2>/dev/null <<'PY'
-import importlib.util
-import json
-import sys
-
-script_path, ast_path = sys.argv[1], sys.argv[2]
-spec = importlib.util.spec_from_file_location("inspect_binary_ast", script_path)
-mod = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(mod)
-
-root, dec = mod.BinaryAstFile(ast_path).decode_ast()
-sys.setrecursionlimit(100000)
-
-def deref(node):
-    while isinstance(node, mod.SharedNode):
-        target = dec.objects.get(node.target_idx)
-        if target is None:
-            break
-        node = target
-    return node
-
-def to_sexp(node):
-    node = deref(node)
-    if isinstance(node, mod.IntNode):
-        return str(node.value)
-    if isinstance(node, mod.StringNode):
-        return json.dumps(node.value, ensure_ascii=False)
-    if isinstance(node, mod.DoubleNode):
-        return repr(node.value)
-    if isinstance(node, mod.BlockNode):
-        head = f"(tag:{node.tag}"
-        if not node.children:
-            return head + ")"
-        child_lines = [to_sexp(child) for child in node.children]
-        indented = "\n".join("  " + line.replace("\n", "\n  ") for line in child_lines)
-        return f"{head}\n{indented}\n)"
-    return json.dumps(repr(node), ensure_ascii=False)
-
-print(to_sexp(root))
-PY
-                    then
-                        spice_sexp_failed=1
-                    fi
-
-                    if [[ "$spice_sexp_failed" -eq 1 ]]; then
-                        sexp_locs_ppx_spice_diff=1
-                        {
-                            echo "Failed to produce sexp-locs-ppx-and-spice representation."
-                            echo "OCaml bsc-ast size: $(wc -c < "$ocaml_ast_file") bytes"
-                            echo "Rust bsc-ast size:  $(wc -c < "$rust_ast_file") bytes"
-                        } > "$TEMP_DIR/sexp_locs_ppx_spice_diffs/$safe_name.diff" 2>&1
-                    elif ! diff -q "$ocaml_spice_sexp" "$rust_spice_sexp" > /dev/null 2>&1; then
-                        sexp_locs_ppx_spice_diff=1
-                        {
-                            echo "Category: sexp-locs-ppx-and-spice"
-                            echo "Comparison type: sexp representation (not byte-level bsc-ast)"
-                            echo ""
-                            diff -u --text "$ocaml_spice_sexp" "$rust_spice_sexp" || true
-                        } > "$TEMP_DIR/sexp_locs_ppx_spice_diffs/$safe_name.diff" 2>&1
-                    fi
-                else
-                    if ! diff -q "$ocaml_ast_file" "$rust_ast_file" > /dev/null 2>&1; then
-                        bsc_ast_diff=1
-                        {
-                            echo "OCaml bsc-ast size: $(wc -c < "$ocaml_ast_file") bytes"
-                            echo "Rust bsc-ast size:  $(wc -c < "$rust_ast_file") bytes"
-                            echo ""
-                            echo "First differing bytes (hex dump):"
-                            diff <(xxd "$ocaml_ast_file" | head -50) <(xxd "$rust_ast_file" | head -50) || true
-                        } > "$TEMP_DIR/bsc_ast_parity_diffs/$safe_name.diff" 2>&1
-                    fi
+                if ! diff -q "$ocaml_ast_file" "$rust_ast_file" > /dev/null 2>&1; then
+                    bsc_ast_diff=1
+                    {
+                        echo "OCaml bsc-ast size: $(wc -c < "$ocaml_ast_file") bytes"
+                        echo "Rust bsc-ast size:  $(wc -c < "$rust_ast_file") bytes"
+                        echo ""
+                        echo "First differing bytes (hex dump):"
+                        diff <(xxd "$ocaml_ast_file" | head -50) <(xxd "$rust_ast_file" | head -50) || true
+                    } > "$TEMP_DIR/bsc_ast_parity_diffs/$safe_name.diff" 2>&1
                 fi
             fi
         fi
@@ -997,8 +911,8 @@ echo "  ${BOLD}Parser parity (sexp output for debugging):${RESET}"
 echo "    sexp-locs matches:        $locs_pass_count"
 echo "    sexp-locs differences:    $locs_diff_count"
 echo "    sexp-locs-ppx differences: $sexp_locs_ppx_diff_count"
-echo "    sexp-locs-ppx-and-spice checks: $sexp_locs_ppx_spice_checked_count"
-echo "    sexp-locs-ppx-and-spice differences: $sexp_locs_ppx_spice_diff_count"
+echo "    sexp-with-locs-ppx-and-spice checks: $sexp_locs_ppx_spice_checked_count"
+echo "    sexp-with-locs-ppx-and-spice differences: $sexp_locs_ppx_spice_diff_count"
 echo ""
 echo "  ${BOLD}bsc-ast Byte Parity:${RESET}"
 echo "    bsc-ast byte checks:      $bsc_ast_byte_checked_count"
@@ -1070,9 +984,9 @@ if [[ $sexp_locs_ppx_diff_count -gt 0 ]]; then
     echo ""
 fi
 
-# Show sexp-locs-ppx-and-spice differences
+# Show sexp-with-locs-ppx-and-spice differences
 if [[ $sexp_locs_ppx_spice_diff_count -gt 0 ]]; then
-    echo -e "${BOLD}${YELLOW}Files with sexp-locs-ppx-and-spice differences ($sexp_locs_ppx_spice_diff_count):${RESET}"
+    echo -e "${BOLD}${YELLOW}Files with sexp-with-locs-ppx-and-spice differences ($sexp_locs_ppx_spice_diff_count):${RESET}"
     echo "  (TELLA @spice files; sexp representation comparison)"
     echo -e "$sexp_locs_ppx_spice_diff_files" | grep -v "^$" | head -15 | while read file; do
         echo "  $file"
@@ -1084,7 +998,7 @@ if [[ $sexp_locs_ppx_spice_diff_count -gt 0 ]]; then
     echo ""
 
     # Show first structural diff as example
-    echo -e "${BOLD}Example sexp-locs-ppx-and-spice diff (first file):${RESET}"
+    echo -e "${BOLD}Example sexp-with-locs-ppx-and-spice diff (first file):${RESET}"
     first_spice_ppx_sexp_file=$(echo -e "$sexp_locs_ppx_spice_diff_files" | grep -v "^$" | head -1)
     if [[ -n "$first_spice_ppx_sexp_file" ]]; then
         first_spice_ppx_sexp_diff="$TEMP_DIR/sexp_locs_ppx_spice_diffs/$(echo "$first_spice_ppx_sexp_file" | tr '/' '_').diff"
@@ -1189,7 +1103,7 @@ if [[ $sexp_locs_ppx_diff_count -gt 0 ]]; then
 fi
 
 if [[ $bsc_ast_parity_diff_count -gt 0 ]]; then
-    echo -e "${YELLOW}${BOLD}NOTE: $bsc_ast_parity_diff_count files have bsc-ast differences (non-regression)${RESET}"
+    echo -e "${YELLOW}${BOLD}NOTE: $bsc_ast_parity_diff_count files have bsc-ast byte differences (non-regression)${RESET}"
 fi
 
 if $spice_missing; then

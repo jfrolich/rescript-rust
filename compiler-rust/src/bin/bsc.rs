@@ -9,17 +9,21 @@
 //! All other flags are accepted and ignored.
 
 use anyhow::{anyhow, Context, Result};
-use rescript_compiler::binary_ast::{write_signature_ast_current, write_structure_ast_current};
+use rescript_compiler::binary_ast::{
+    ppx, write_signature_ast_current, write_structure_ast_current,
+};
 use rescript_compiler::driver::{compile_file_to_js_with_options, CompilerOptions};
-use rescript_compiler::parser::{module, Parser};
+use rescript_compiler::parser::{module, sexp_locs, Parser};
 use std::env;
 use std::fs;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 #[derive(Default, Debug)]
 struct Options {
     bs_ast: bool,
     dump_lambda: bool,
+    dump_parsetree_sexp_locs: bool,
     dump_typed_sexp: bool,
     dump_typed_sexp_locs: bool,
     dump_lambda_sexp: bool,
@@ -47,6 +51,7 @@ fn run() -> Result<()> {
             match arg.as_str() {
                 "-bs-ast" => opts.bs_ast = true,
                 "-drawlambda" => opts.dump_lambda = true,
+                "-dparsetree-sexp-locs" => opts.dump_parsetree_sexp_locs = true,
                 "-dtyped-sexp" => opts.dump_typed_sexp = true,
                 "-dtyped-sexp-locs" => opts.dump_typed_sexp_locs = true,
                 "-dlambda-sexp" => opts.dump_lambda_sexp = true,
@@ -111,7 +116,7 @@ fn run() -> Result<()> {
         .ok_or_else(|| anyhow!("Missing input file"))?;
 
     if opts.bs_ast {
-        return generate_ast(&input, opts.output);
+        return generate_ast(&input, opts.output, opts.dump_parsetree_sexp_locs);
     }
 
     let source_path = if input.extension().and_then(|s| s.to_str()) == Some("ast") {
@@ -131,7 +136,11 @@ fn run() -> Result<()> {
     write_outputs(&source_path, &js, &opts)
 }
 
-fn generate_ast(input: &Path, output: Option<PathBuf>) -> Result<()> {
+fn generate_ast(
+    input: &Path,
+    output: Option<PathBuf>,
+    dump_parsetree_sexp_locs: bool,
+) -> Result<()> {
     // Read file as raw bytes, converting each byte to a char (Latin-1 encoding).
     // This matches OCaml's byte-level string handling where each byte is a character.
     // In Latin-1 mode, char offset == original byte offset, which is critical for
@@ -187,6 +196,15 @@ fn generate_ast(input: &Path, output: Option<PathBuf>) -> Result<()> {
                 parser.diagnostics().len()
             ));
         }
+
+        if dump_parsetree_sexp_locs {
+            let rewritten = ppx::rewrite_signature(&signature, parser.arena_mut())
+                .map_err(|e| anyhow!("PPX rewrite failed: {e}"))?;
+            let mut stderr = std::io::stderr();
+            sexp_locs::print_signature(&rewritten, parser.arena(), &mut stderr);
+            let _ = stderr.write_all(b"\n");
+        }
+
         write_signature_ast_current(&out_path, &source_path, parser.arena_mut(), &signature)
             .with_context(|| format!("Failed to write {}", out_path.display()))?;
     } else {
@@ -198,6 +216,15 @@ fn generate_ast(input: &Path, output: Option<PathBuf>) -> Result<()> {
                 parser.diagnostics().len()
             ));
         }
+
+        if dump_parsetree_sexp_locs {
+            let rewritten = ppx::rewrite_structure(&structure, parser.arena_mut())
+                .map_err(|e| anyhow!("PPX rewrite failed: {e}"))?;
+            let mut stderr = std::io::stderr();
+            sexp_locs::print_structure(&rewritten, parser.arena(), &mut stderr);
+            let _ = stderr.write_all(b"\n");
+        }
+
         write_structure_ast_current(&out_path, &source_path, parser.arena_mut(), &structure)
             .with_context(|| format!("Failed to write {}", out_path.display()))?;
     }

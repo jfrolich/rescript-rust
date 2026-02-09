@@ -18,6 +18,7 @@ val error_size : int ref
 val transparent_modules : bool ref
 val dump_source : bool ref
 val dump_parsetree : bool ref
+val dump_parsetree_sexp_locs : bool ref
 val dump_typedtree : bool ref
 val dump_typed_sexp : bool ref
 val dump_typed_sexp_locs : bool ref

@@ -1958,6 +1958,12 @@ end
 
 let sexp_locs_print_engine = SexpAstWithLocs.print_engine
 
+let print_structure_sexp_locs ppf parsetree =
+  parsetree |> SexpAstWithLocs.structure |> Sexp.to_string |> Format.pp_print_string ppf
+
+let print_signature_sexp_locs ppf parsetree =
+  parsetree |> SexpAstWithLocs.signature |> Sexp.to_string |> Format.pp_print_string ppf
+
 (* SexpAst0WithLocs - serializes parsetree0 (frozen PPX-compatible format) to sexp with locations *)
 module SexpAst0WithLocs = struct
   open Parsetree0

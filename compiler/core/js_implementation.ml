@@ -83,6 +83,8 @@ let interface ~parser ppf ?outputprefix fname =
        Mli
   |> Ppx_entry.rewrite_signature
   |> print_if_pipe ppf Clflags.dump_parsetree Printast.interface
+  |> print_if_pipe ppf Clflags.dump_parsetree_sexp_locs
+       Res_ast_debugger.print_signature_sexp_locs
   |> print_if_pipe ppf Clflags.dump_source Pprintast.signature
   |> after_parsing_sig ppf outputprefix
 
@@ -90,6 +92,8 @@ let interface_mliast ppf fname =
   Res_compmisc.init_path ();
   Binary_ast.read_ast_exn ~fname Mli
   |> print_if_pipe ppf Clflags.dump_parsetree Printast.interface
+  |> print_if_pipe ppf Clflags.dump_parsetree_sexp_locs
+       Res_ast_debugger.print_signature_sexp_locs
   |> print_if_pipe ppf Clflags.dump_source Pprintast.signature
   |> after_parsing_sig ppf (Config_util.output_prefix fname)
 
@@ -174,6 +178,8 @@ let implementation ~parser ppf ?outputprefix fname =
        Ml
   |> Ppx_entry.rewrite_implementation
   |> print_if_pipe ppf Clflags.dump_parsetree Printast.implementation
+  |> print_if_pipe ppf Clflags.dump_parsetree_sexp_locs
+       Res_ast_debugger.print_structure_sexp_locs
   |> print_if_pipe ppf Clflags.dump_source Pprintast.structure
   |> after_parsing_impl ppf outputprefix
 
@@ -181,6 +187,8 @@ let implementation_mlast ppf fname =
   Res_compmisc.init_path ();
   Binary_ast.read_ast_exn ~fname Ml
   |> print_if_pipe ppf Clflags.dump_parsetree Printast.implementation
+  |> print_if_pipe ppf Clflags.dump_parsetree_sexp_locs
+       Res_ast_debugger.print_structure_sexp_locs
   |> print_if_pipe ppf Clflags.dump_source Pprintast.structure
   |> after_parsing_impl ppf (Config_util.output_prefix fname)
 
@@ -209,5 +217,7 @@ let implementation_map ppf sourcefile =
   Res_compmisc.init_path ();
   ml_ast
   |> print_if_pipe ppf Clflags.dump_parsetree Printast.implementation
+  |> print_if_pipe ppf Clflags.dump_parsetree_sexp_locs
+       Res_ast_debugger.print_structure_sexp_locs
   |> print_if_pipe ppf Clflags.dump_source Pprintast.structure
   |> after_parsing_impl ppf (Config_util.output_prefix sourcefile)
