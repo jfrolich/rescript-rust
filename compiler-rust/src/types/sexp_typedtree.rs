@@ -94,16 +94,18 @@ fn latin1_to_utf8(s: &str) -> String {
 /// Typedtree sexp output can embed marshaled FFI blobs in quoted primitive strings.
 /// OCaml prints these as raw bytes; Rust `String` would otherwise UTF-8 encode them.
 fn write_latin1_line<W: Write>(out: &mut W, s: &str) -> std::io::Result<()> {
+    let mut bytes = Vec::with_capacity(s.len() + 1);
     for ch in s.chars() {
         let code = ch as u32;
         if code <= 0xFF {
-            out.write_all(&[code as u8])?;
+            bytes.push(code as u8);
         } else {
             let mut buf = [0u8; 4];
-            out.write_all(ch.encode_utf8(&mut buf).as_bytes())?;
+            bytes.extend_from_slice(ch.encode_utf8(&mut buf).as_bytes());
         }
     }
-    out.write_all(b"\n")
+    bytes.push(b'\n');
+    out.write_all(&bytes)
 }
 
 fn string(txt: &str) -> Sexp {
