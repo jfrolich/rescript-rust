@@ -4104,15 +4104,15 @@ fn type_function(
             }
         }
     }
-    let (param_ty, return_ty, func_ty) = match expected_arrow {
+    let (param_ty, return_ty, _func_ty) = match expected_arrow {
         Some((param_ty, return_ty)) => {
-            let func_ty = ctx.new_arrow(ctx_label, param_ty, return_ty, arity_opt);
+            let func_ty = ctx.new_arrow(ctx_label.clone(), param_ty, return_ty, arity_opt);
             (param_ty, return_ty, func_ty)
         }
         _ => {
             let param_ty = ctx.new_var(None);
             let return_ty = ctx.new_var(None);
-            let func_ty = ctx.new_arrow(ctx_label, param_ty, return_ty, arity_opt);
+            let func_ty = ctx.new_arrow(ctx_label.clone(), param_ty, return_ty, arity_opt);
             unify_expression_types(tctx, loc, func_ty, expected_ty, None)?;
             (param_ty, return_ty, func_ty)
         }
@@ -4179,6 +4179,12 @@ fn type_function(
         c_rhs: typed_body,
     }];
 
+    // OCaml typecore.ml: exp_type = instance env (newgenty (Tarrow ...))
+    let exp_type = crate::types::instance(
+        ctx,
+        ctx.new_generic_arrow(ctx_label, param_ty, return_ty, arity_opt),
+    );
+
     Ok(Expression::new(
         ExpressionDesc::Texp_function {
             params: vec![fp],
@@ -4188,7 +4194,7 @@ fn type_function(
             async_: is_async,
         },
         loc.clone(),
-        func_ty,
+        exp_type,
         EnvRef(0),
         attributes.to_vec(),
     ))
