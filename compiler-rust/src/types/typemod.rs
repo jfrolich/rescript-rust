@@ -90,6 +90,239 @@ fn rewrite_module_path_prefix(path: &Path, old_name: &str, new_prefix: &Path) ->
     }
 }
 
+fn rewrite_module_prefix_in_type(
+    ty_ref: TypeExprRef,
+    old_name: &str,
+    new_prefix: &Path,
+    ctx: &crate::types::context::TypeContext<'_>,
+    visited: &mut HashSet<TypeExprRef>,
+) {
+    use crate::types::type_expr::{RowField, TypeDesc};
+
+    let ty_ref = ctx.repr(ty_ref);
+    if !visited.insert(ty_ref) {
+        return;
+    }
+
+    let ty = ctx.get_type(ty_ref);
+    let desc = ty.desc().clone();
+
+    match &desc {
+        TypeDesc::Tconstr { path, args, .. } => {
+            let rewritten = rewrite_module_path_prefix(path, old_name, new_prefix);
+            if rewritten != *path {
+                let mut desc_mut = ty.desc_mut();
+                if let TypeDesc::Tconstr { ref mut path, .. } = *desc_mut {
+                    *path = rewritten;
+                }
+            }
+            for &arg in args {
+                rewrite_module_prefix_in_type(arg, old_name, new_prefix, ctx, visited);
+            }
+        }
+        TypeDesc::Tarrow { arg, ret, .. } => {
+            rewrite_module_prefix_in_type(arg.typ, old_name, new_prefix, ctx, visited);
+            rewrite_module_prefix_in_type(*ret, old_name, new_prefix, ctx, visited);
+        }
+        TypeDesc::Ttuple(types) => {
+            for &ty in types {
+                rewrite_module_prefix_in_type(ty, old_name, new_prefix, ctx, visited);
+            }
+        }
+        TypeDesc::Tlink(ty) | TypeDesc::Tsubst(ty) => {
+            rewrite_module_prefix_in_type(*ty, old_name, new_prefix, ctx, visited);
+        }
+        TypeDesc::Tpoly { body, vars } => {
+            rewrite_module_prefix_in_type(*body, old_name, new_prefix, ctx, visited);
+            for &var in vars {
+                rewrite_module_prefix_in_type(var, old_name, new_prefix, ctx, visited);
+            }
+        }
+        TypeDesc::Tobject { fields, .. } => {
+            rewrite_module_prefix_in_type(*fields, old_name, new_prefix, ctx, visited);
+        }
+        TypeDesc::Tfield { typ, rest, .. } => {
+            rewrite_module_prefix_in_type(*typ, old_name, new_prefix, ctx, visited);
+            rewrite_module_prefix_in_type(*rest, old_name, new_prefix, ctx, visited);
+        }
+        TypeDesc::Tvariant(row) => {
+            rewrite_module_prefix_in_type(row.row_more, old_name, new_prefix, ctx, visited);
+            for (_, row_field) in &row.row_fields {
+                match row_field {
+                    RowField::Rpresent(Some(ty)) => {
+                        rewrite_module_prefix_in_type(*ty, old_name, new_prefix, ctx, visited);
+                    }
+                    RowField::Reither { types, .. } => {
+                        for &ty in types {
+                            rewrite_module_prefix_in_type(ty, old_name, new_prefix, ctx, visited);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        TypeDesc::Tpackage { path, args, .. } => {
+            let rewritten = rewrite_module_path_prefix(path, old_name, new_prefix);
+            if rewritten != *path {
+                let mut desc_mut = ty.desc_mut();
+                if let TypeDesc::Tpackage { ref mut path, .. } = *desc_mut {
+                    *path = rewritten;
+                }
+            }
+            for &arg in args {
+                rewrite_module_prefix_in_type(arg, old_name, new_prefix, ctx, visited);
+            }
+        }
+        TypeDesc::Tvar(_) | TypeDesc::Tunivar(_) | TypeDesc::Tnil => {}
+    }
+}
+
+fn copy_and_rewrite_module_prefix_type(
+    ty_ref: TypeExprRef,
+    old_name: &str,
+    new_prefix: &Path,
+    ctx: &crate::types::context::TypeContext<'_>,
+    copy_cache: &mut HashMap<TypeExprRef, TypeExprRef>,
+) -> TypeExprRef {
+    let copied = crate::types::ctype::copy_type_deep(ctx, ty_ref, copy_cache);
+    let mut visited = HashSet::new();
+    rewrite_module_prefix_in_type(copied, old_name, new_prefix, ctx, &mut visited);
+    copied
+}
+
+fn copy_and_rewrite_constructor_args(
+    args: &crate::types::decl::ConstructorArguments,
+    old_name: &str,
+    arg_path: &Path,
+    ctx: &crate::types::context::TypeContext<'_>,
+    copy_cache: &mut HashMap<TypeExprRef, TypeExprRef>,
+) -> crate::types::decl::ConstructorArguments {
+    match args {
+        crate::types::decl::ConstructorArguments::CstrTuple(args) => {
+            crate::types::decl::ConstructorArguments::CstrTuple(
+                args.iter()
+                    .map(|ty| {
+                        copy_and_rewrite_module_prefix_type(
+                            *ty,
+                            old_name,
+                            arg_path,
+                            ctx,
+                            copy_cache,
+                        )
+                    })
+                    .collect(),
+            )
+        }
+        crate::types::decl::ConstructorArguments::CstrRecord(labels) => {
+            crate::types::decl::ConstructorArguments::CstrRecord(
+                labels
+                    .iter()
+                    .map(|label| {
+                        let mut copied = label.clone();
+                        copied.ld_type = copy_and_rewrite_module_prefix_type(
+                            label.ld_type,
+                            old_name,
+                            arg_path,
+                            ctx,
+                            copy_cache,
+                        );
+                        copied
+                    })
+                    .collect(),
+            )
+        }
+    }
+}
+
+fn copy_and_rewrite_type_kind(
+    type_kind: &crate::types::decl::TypeKind,
+    old_name: &str,
+    arg_path: &Path,
+    ctx: &crate::types::context::TypeContext<'_>,
+    copy_cache: &mut HashMap<TypeExprRef, TypeExprRef>,
+) -> crate::types::decl::TypeKind {
+    match type_kind {
+        crate::types::decl::TypeKind::TypeAbstract => crate::types::decl::TypeKind::TypeAbstract,
+        crate::types::decl::TypeKind::TypeOpen => crate::types::decl::TypeKind::TypeOpen,
+        crate::types::decl::TypeKind::TypeRecord(labels, repr) => {
+            crate::types::decl::TypeKind::TypeRecord(
+                labels
+                    .iter()
+                    .map(|label| {
+                        let mut copied = label.clone();
+                        copied.ld_type = copy_and_rewrite_module_prefix_type(
+                            label.ld_type,
+                            old_name,
+                            arg_path,
+                            ctx,
+                            copy_cache,
+                        );
+                        copied
+                    })
+                    .collect(),
+                repr.clone(),
+            )
+        }
+        crate::types::decl::TypeKind::TypeVariant(constructors) => {
+            crate::types::decl::TypeKind::TypeVariant(
+                constructors
+                    .iter()
+                    .map(|constructor| {
+                        let mut copied = constructor.clone();
+                        copied.cd_args = copy_and_rewrite_constructor_args(
+                            &constructor.cd_args,
+                            old_name,
+                            arg_path,
+                            ctx,
+                            copy_cache,
+                        );
+                        copied.cd_res = constructor.cd_res.map(|ty| {
+                            copy_and_rewrite_module_prefix_type(
+                                ty,
+                                old_name,
+                                arg_path,
+                                ctx,
+                                copy_cache,
+                            )
+                        });
+                        copied
+                    })
+                    .collect(),
+            )
+        }
+    }
+}
+
+fn copy_and_rewrite_type_inlined(
+    inlined: &crate::types::decl::TypeInlinedType,
+    old_name: &str,
+    arg_path: &Path,
+    ctx: &crate::types::context::TypeContext<'_>,
+    copy_cache: &mut HashMap<TypeExprRef, TypeExprRef>,
+) -> crate::types::decl::TypeInlinedType {
+    match inlined {
+        crate::types::decl::TypeInlinedType::Record { type_name, labels } => {
+            crate::types::decl::TypeInlinedType::Record {
+                type_name: type_name.clone(),
+                labels: labels
+                    .iter()
+                    .map(|label| {
+                        let mut copied = label.clone();
+                        copied.ld_type = copy_and_rewrite_module_prefix_type(
+                            label.ld_type,
+                            old_name,
+                            arg_path,
+                            ctx,
+                            copy_cache,
+                        );
+                        copied
+                    })
+                    .collect(),
+            }
+        }
+    }
+}
+
 fn substitute_functor_param_in_signature(
     sig_items: &[crate::types::decl::SignatureItem],
     old_name: &str,
@@ -98,42 +331,125 @@ fn substitute_functor_param_in_signature(
 ) -> Vec<crate::types::decl::SignatureItem> {
     use crate::types::decl::SignatureItem;
 
-    let mut rewritten_sig = sig_items.to_vec();
-    crate::cmi::persistent_env::rewrite_module_prefix_in_sig(
-        &rewritten_sig,
-        old_name,
-        arg_path,
-        ctx,
-    );
-
-    for item in &mut rewritten_sig {
-        match item {
-            SignatureItem::SigModule(_, md, _) => {
-                md.md_type = substitute_functor_param_in_module_type(
+    let mut copy_cache = HashMap::new();
+    sig_items
+        .iter()
+        .map(|item| match item {
+            SignatureItem::SigValue(id, vd) => {
+                let mut copied_vd = vd.clone();
+                copied_vd.val_type = copy_and_rewrite_module_prefix_type(
+                    vd.val_type,
+                    old_name,
+                    arg_path,
+                    ctx,
+                    &mut copy_cache,
+                );
+                SignatureItem::SigValue(id.clone(), copied_vd)
+            }
+            SignatureItem::SigType(id, decl, rec_status) => {
+                let mut copied_decl = decl.clone();
+                copied_decl.type_params = decl
+                    .type_params
+                    .iter()
+                    .map(|ty| {
+                        copy_and_rewrite_module_prefix_type(
+                            *ty,
+                            old_name,
+                            arg_path,
+                            ctx,
+                            &mut copy_cache,
+                        )
+                    })
+                    .collect();
+                copied_decl.type_kind = copy_and_rewrite_type_kind(
+                    &decl.type_kind,
+                    old_name,
+                    arg_path,
+                    ctx,
+                    &mut copy_cache,
+                );
+                copied_decl.type_manifest = decl.type_manifest.map(|ty| {
+                    copy_and_rewrite_module_prefix_type(
+                        ty,
+                        old_name,
+                        arg_path,
+                        ctx,
+                        &mut copy_cache,
+                    )
+                });
+                copied_decl.type_inlined_types = decl
+                    .type_inlined_types
+                    .iter()
+                    .map(|inlined| {
+                        copy_and_rewrite_type_inlined(
+                            inlined,
+                            old_name,
+                            arg_path,
+                            ctx,
+                            &mut copy_cache,
+                        )
+                    })
+                    .collect();
+                SignatureItem::SigType(id.clone(), copied_decl, *rec_status)
+            }
+            SignatureItem::SigTypext(id, ext, ext_status) => {
+                let mut copied_ext = ext.clone();
+                copied_ext.ext_type_params = ext
+                    .ext_type_params
+                    .iter()
+                    .map(|ty| {
+                        copy_and_rewrite_module_prefix_type(
+                            *ty,
+                            old_name,
+                            arg_path,
+                            ctx,
+                            &mut copy_cache,
+                        )
+                    })
+                    .collect();
+                copied_ext.ext_args = copy_and_rewrite_constructor_args(
+                    &ext.ext_args,
+                    old_name,
+                    arg_path,
+                    ctx,
+                    &mut copy_cache,
+                );
+                copied_ext.ext_ret_type = ext.ext_ret_type.map(|ty| {
+                    copy_and_rewrite_module_prefix_type(
+                        ty,
+                        old_name,
+                        arg_path,
+                        ctx,
+                        &mut copy_cache,
+                    )
+                });
+                SignatureItem::SigTypext(id.clone(), copied_ext, *ext_status)
+            }
+            SignatureItem::SigModule(id, md, rec_status) => {
+                let mut rewritten_md = md.clone();
+                rewritten_md.md_type = substitute_functor_param_in_module_type(
                     &md.md_type,
                     old_name,
                     arg_path,
                     ctx,
                 );
-                if let Some(path) = md.md_path.clone() {
-                    md.md_path = Some(rewrite_module_path_prefix(&path, old_name, arg_path));
-                }
+                rewritten_md.md_path = md
+                    .md_path
+                    .as_ref()
+                    .map(|path| rewrite_module_path_prefix(path, old_name, arg_path));
+                SignatureItem::SigModule(id.clone(), rewritten_md, *rec_status)
             }
-            SignatureItem::SigModtype(_, mtd) => {
-                if let Some(inner) = mtd.mtd_type.clone() {
-                    mtd.mtd_type = Some(substitute_functor_param_in_module_type(
-                        &inner,
-                        old_name,
-                        arg_path,
-                        ctx,
-                    ));
-                }
+            SignatureItem::SigModtype(id, mtd) => {
+                let mut rewritten_mtd = mtd.clone();
+                rewritten_mtd.mtd_type = mtd
+                    .mtd_type
+                    .as_ref()
+                    .map(|mty| substitute_functor_param_in_module_type(mty, old_name, arg_path, ctx));
+                SignatureItem::SigModtype(id.clone(), rewritten_mtd)
             }
-            _ => {}
-        }
-    }
-
-    rewritten_sig
+            _ => item.clone(),
+        })
+        .collect()
 }
 
 fn substitute_functor_param_in_module_type(
@@ -577,6 +893,55 @@ fn structure_has_duplicate_value_names(structure: &Structure) -> bool {
         }
     }
     false
+}
+
+/// Look up the semantic module type for a longident by searching env and persistent env.
+/// Returns a `decl::ModuleType` (the semantic type), not the `typedtree::ModuleType` (the syntactic type tree).
+pub fn lookup_module_path_by_lid<'b>(
+    lid: &crate::parser::longident::Longident,
+    arena: &ParseArena,
+    env: &Env,
+    pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
+    ctx: &'b crate::types::context::TypeContext<'b>,
+) -> Option<Path> {
+    use crate::parser::longident::Longident;
+
+    match lid {
+        Longident::Lident(mod_idx) => {
+            let mod_name = arena.get_string(*mod_idx);
+            if let Ok((id, md)) = env.find_module_with_id(mod_name) {
+                if let Some(path) = &md.md_path {
+                    return Some(path.clone());
+                }
+                return Some(Path::pident(id.clone()));
+            }
+            if let Some(pers) = pers_env.as_mut() {
+                if pers.find_pers_struct(mod_name, ctx).is_some() {
+                    return Some(Path::pident(Ident::create_persistent(mod_name)));
+                }
+            }
+            None
+        }
+        Longident::Ldot(prefix, submod_idx) => {
+            let submod_name = arena.get_string(*submod_idx);
+            let parent_path = lookup_module_path_by_lid(prefix, arena, env, pers_env, ctx)?;
+            let parent_type = lookup_module_type_by_lid(prefix, arena, env, pers_env, ctx)?;
+            let parent_sig = resolve_mod_type_to_sig(&parent_type, Some(env), pers_env, ctx)?;
+            for sig_item in &parent_sig {
+                if let crate::types::decl::SignatureItem::SigModule(id, _sub_md, _) = sig_item {
+                    if id.name() == submod_name {
+                        return Some(Path::pdot(parent_path, submod_name));
+                    }
+                }
+            }
+            None
+        }
+        Longident::Lapply(functor, arg) => {
+            let functor_path = lookup_module_path_by_lid(functor, arena, env, pers_env, ctx)?;
+            let arg_path = lookup_module_path_by_lid(arg, arena, env, pers_env, ctx)?;
+            Some(Path::papply(functor_path, arg_path))
+        }
+    }
 }
 
 /// Look up the semantic module type for a longident by searching env and persistent env.
@@ -1858,8 +2223,15 @@ fn translate_module_type_to_decl<'a>(
         PMtyDesc::Pmty_ident(lid) => {
             // Match OCaml transl_modtype: keep an identifier path and let later
             // signature scraping resolve aliases/expansions.
-            let longident = tctx.resolve_lid(lid.txt);
-            let path = path_from_longident(longident, |idx| arena.get_string(idx));
+            let longident = tctx.resolve_lid(lid.txt).clone();
+            let path = lookup_module_path_by_lid(
+                &longident,
+                arena,
+                env,
+                &mut tctx.persistent_env,
+                tctx.type_ctx,
+            )
+            .unwrap_or_else(|| path_from_longident(&longident, |idx| arena.get_string(idx)));
             Ok(DeclMty::MtyIdent(path))
         }
         PMtyDesc::Pmty_functor(name, param_type, result_type) => {
@@ -1884,8 +2256,15 @@ fn translate_module_type_to_decl<'a>(
                 .ok_or(TypeModError::InvalidModuleExpr(arena.to_location(mty.pmty_loc)))
         }
         PMtyDesc::Pmty_alias(lid) => {
-            let longident = tctx.resolve_lid(lid.txt);
-            let path = path_from_longident(longident, |idx| arena.get_string(idx));
+            let longident = tctx.resolve_lid(lid.txt).clone();
+            let path = lookup_module_path_by_lid(
+                &longident,
+                arena,
+                env,
+                &mut tctx.persistent_env,
+                tctx.type_ctx,
+            )
+            .unwrap_or_else(|| path_from_longident(&longident, |idx| arena.get_string(idx)));
             Ok(DeclMty::MtyAlias(AliasPresence::MtaAbsent, path))
         }
         PMtyDesc::Pmty_extension(_) => Ok(DeclMty::MtySignature(vec![])),
@@ -2525,12 +2904,12 @@ fn extract_sig_values_from_pattern(
 // Module Expression Type Checking
 // ============================================================================
 
-/// Type check a module expression.
-pub fn type_module_expr<'a>(
+fn type_module_expr_with_alias<'a>(
     tctx: &mut TypeCheckContext<'a>,
     env: &Env,
     arena: &'a ParseArena,
     mod_expr: &ParsedModuleExpr,
+    alias: bool,
 ) -> TypeModResult<ModuleExpr> {
     let loc = mod_expr.pmod_loc;
 
@@ -2538,21 +2917,57 @@ pub fn type_module_expr<'a>(
         ParsedModuleExprDesc::Pmod_ident(lid) => {
             // Module identifier: M
             // Look up the module path in the environment
-            let longident = tctx.resolve_lid(lid.txt);
-            let path = path_from_longident(longident, |idx| arena.get_string(idx));
+            let longident = tctx.resolve_lid(lid.txt).clone();
+            let path = lookup_module_path_by_lid(
+                &longident,
+                arena,
+                env,
+                &mut tctx.persistent_env,
+                tctx.type_ctx,
+            )
+            .unwrap_or_else(|| path_from_longident(&longident, |idx| arena.get_string(idx)));
+            let mod_type = lookup_module_type_by_lid(
+                &longident,
+                arena,
+                env,
+                &mut tctx.persistent_env,
+                tctx.type_ctx,
+            );
 
-            Ok(ModuleExpr {
+            let ident_mod = ModuleExpr {
                 mod_desc: ModuleExprDesc::Tmod_ident(path, lid.clone()),
                 mod_loc: loc,
                 mod_type: ModuleType::placeholder(),
                 mod_env: EnvRef(0),
                 mod_attributes: mod_expr.pmod_attributes.clone(),
-            })
+            };
+
+            if !alias
+                && matches!(
+                mod_type,
+                Some(crate::types::decl::ModuleType::MtyAlias(_, _))
+            )
+            {
+                Ok(ModuleExpr {
+                    mod_desc: ModuleExprDesc::Tmod_constraint(
+                        Box::new(ident_mod),
+                        ModuleType::placeholder(),
+                        crate::types::typedtree::ModuleTypeConstraint::Tmodtype_implicit,
+                        ModuleCoercion::Tcoerce_none,
+                    ),
+                    mod_loc: loc,
+                    mod_type: ModuleType::placeholder(),
+                    mod_env: EnvRef(0),
+                    mod_attributes: mod_expr.pmod_attributes.clone(),
+                })
+            } else {
+                Ok(ident_mod)
+            }
         }
 
         ParsedModuleExprDesc::Pmod_structure(items) => {
             // Module structure: { ... }
-            let (structure, new_env) = type_structure(tctx, env, arena, items)?;
+            let (structure, _new_env) = type_structure(tctx, env, arena, items)?;
 
             // Like OCaml: if simplify_signature would shrink the signature
             // (duplicate value names), wrap in Tmod_constraint implicit
@@ -2614,7 +3029,7 @@ pub fn type_module_expr<'a>(
             }
 
             // Type check the functor body with the extended environment
-            let typed_body = type_module_expr(tctx, &functor_env, arena, body)?;
+            let typed_body = type_module_expr_with_alias(tctx, &functor_env, arena, body, false)?;
 
             Ok(ModuleExpr {
                 mod_desc: ModuleExprDesc::Tmod_functor(
@@ -2632,8 +3047,8 @@ pub fn type_module_expr<'a>(
 
         ParsedModuleExprDesc::Pmod_apply(functor, arg) => {
             // Functor application: F(M)
-            let typed_functor = type_module_expr(tctx, env, arena, functor)?;
-            let typed_arg = type_module_expr(tctx, env, arena, arg)?;
+            let typed_functor = type_module_expr_with_alias(tctx, env, arena, functor, false)?;
+            let typed_arg = type_module_expr_with_alias(tctx, env, arena, arg, false)?;
 
             Ok(ModuleExpr {
                 mod_desc: ModuleExprDesc::Tmod_apply(
@@ -2650,7 +3065,7 @@ pub fn type_module_expr<'a>(
 
         ParsedModuleExprDesc::Pmod_constraint(mod_expr_inner, mod_type) => {
             // Constrained module: (ME: MT)
-            let typed_mod = type_module_expr(tctx, env, arena, mod_expr_inner)?;
+            let typed_mod = type_module_expr_with_alias(tctx, env, arena, mod_expr_inner, alias)?;
             let typed_mty = transl_modtype(tctx, env, arena, mod_type)?;
 
             Ok(ModuleExpr {
@@ -2716,6 +3131,16 @@ pub fn type_module_expr<'a>(
     }
 }
 
+/// Type check a module expression.
+pub fn type_module_expr<'a>(
+    tctx: &mut TypeCheckContext<'a>,
+    env: &Env,
+    arena: &'a ParseArena,
+    mod_expr: &ParsedModuleExpr,
+) -> TypeModResult<ModuleExpr> {
+    type_module_expr_with_alias(tctx, env, arena, mod_expr, false)
+}
+
 // ============================================================================
 // Module Type Translation
 // ============================================================================
@@ -2736,8 +3161,15 @@ fn transl_modtype<'a>(
 
     let desc = match &smty.pmty_desc {
         PMtyDesc::Pmty_ident(lid) => {
-            let longident = tctx.resolve_lid(lid.txt);
-            let path = path_from_longident(longident, |idx| arena.get_string(idx));
+            let longident = tctx.resolve_lid(lid.txt).clone();
+            let path = lookup_module_path_by_lid(
+                &longident,
+                arena,
+                env,
+                &mut tctx.persistent_env,
+                tctx.type_ctx,
+            )
+            .unwrap_or_else(|| path_from_longident(&longident, |idx| arena.get_string(idx)));
             TMtyDesc::Tmty_ident(path, lid.clone())
         }
         PMtyDesc::Pmty_signature(sig_items) => {
@@ -2768,8 +3200,15 @@ fn transl_modtype<'a>(
             TMtyDesc::Tmty_typeof(Box::new(typed_me))
         }
         PMtyDesc::Pmty_alias(lid) => {
-            let longident = tctx.resolve_lid(lid.txt);
-            let path = path_from_longident(longident, |idx| arena.get_string(idx));
+            let longident = tctx.resolve_lid(lid.txt).clone();
+            let path = lookup_module_path_by_lid(
+                &longident,
+                arena,
+                env,
+                &mut tctx.persistent_env,
+                tctx.type_ctx,
+            )
+            .unwrap_or_else(|| path_from_longident(&longident, |idx| arena.get_string(idx)));
             TMtyDesc::Tmty_alias(path, lid.clone())
         }
         PMtyDesc::Pmty_extension(_) => {
@@ -2856,8 +3295,15 @@ pub fn transl_signature<'a>(
                 })
             }
             PSigDesc::Psig_open(od) => {
-                let longident = tctx.resolve_lid(od.popen_lid.txt);
-                let path = path_from_longident(longident, |idx| arena.get_string(idx));
+                let longident = tctx.resolve_lid(od.popen_lid.txt).clone();
+                let path = lookup_module_path_by_lid(
+                    &longident,
+                    arena,
+                    env,
+                    &mut tctx.persistent_env,
+                    tctx.type_ctx,
+                )
+                .unwrap_or_else(|| path_from_longident(&longident, |idx| arena.get_string(idx)));
                 TSigDesc::Tsig_open(crate::types::typedtree::OpenDeclaration {
                     open_path: path,
                     open_txt: od.popen_lid.clone(),
@@ -4408,7 +4854,7 @@ fn type_structure_item<'a>(
             let semantic_mod_type =
                 lookup_module_type_from_parsed_module_expr(tctx, env, arena, &mb.pmb_expr);
 
-            let typed_mod = type_module_expr(tctx, env, arena, &mb.pmb_expr)?;
+            let typed_mod = type_module_expr_with_alias(tctx, env, arena, &mb.pmb_expr, true)?;
             let mod_name_str = arena.get_string(mb.pmb_name.txt);
             let mod_id = Ident::create_local(mod_name_str);
 
@@ -4631,8 +5077,15 @@ fn type_structure_item<'a>(
 
         ParsedStructureItemDesc::Pstr_open(open_desc) => {
             // Open declaration: open M
-            let longident = tctx.resolve_lid(open_desc.popen_lid.txt);
-            let path = path_from_longident(longident, |idx| arena.get_string(idx));
+            let longident = tctx.resolve_lid(open_desc.popen_lid.txt).clone();
+            let path = lookup_module_path_by_lid(
+                &longident,
+                arena,
+                env,
+                &mut tctx.persistent_env,
+                tctx.type_ctx,
+            )
+            .unwrap_or_else(|| path_from_longident(&longident, |idx| arena.get_string(idx)));
 
             // Extend the environment with the opened module's bindings
             // Resolve the module (handles local env, persistent env, and dotted paths)
