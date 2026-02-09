@@ -3683,7 +3683,7 @@ fn type_application(
     // force_tvar only applies to total applications in OCaml.
     let force_tvar =
         total_app && matches!(&*tctx.type_ctx.get_desc(expanded_funct_ty), TypeDesc::Tvar(_));
-    let mut top_arity: Option<i32> = if force_tvar {
+    let function_arity: Option<i32> = if force_tvar {
         Some(args.len() as i32)
     } else {
         match &*tctx.type_ctx.get_desc(expanded_funct_ty) {
@@ -3691,7 +3691,8 @@ fn type_application(
             _ => None,
         }
     };
-    let max_arity = top_arity.unwrap_or(i32::MAX);
+    let max_arity = function_arity.unwrap_or(i32::MAX);
+    let mut top_arity: Option<i32> = function_arity;
 
     // Match labels by name (OCaml's extract_label) instead of consuming call args strictly
     // left-to-right.
@@ -3856,6 +3857,19 @@ fn type_application(
     let mut result_ty = current_ty;
     for (label, arg_ty) in omitted.iter().rev() {
         result_ty = ctx.new_arrow(label.clone(), *arg_ty, result_ty, None);
+    }
+
+    // OCaml update_uncurried_arity: preserve remaining uncurried arity on
+    // partially applied results.
+    if let Some(arity) = function_arity {
+        let applied_args = args.len() as i32 + consumed_optional_count as i32;
+        let remaining_arity = arity - applied_args;
+        if remaining_arity > 0 {
+            let result_repr = ctx.repr(result_ty);
+            if let TypeDesc::Tarrow { arg, ret, .. } = &*ctx.get_desc(result_repr) {
+                result_ty = ctx.new_arrow(arg.lbl.clone(), arg.typ, *ret, Some(remaining_arity));
+            }
+        }
     }
 
     // Unify result with expected type
