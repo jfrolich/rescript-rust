@@ -329,7 +329,7 @@ mkdir -p "$TEMP_DIR/spice_ppx"
 mkdir -p "$TEMP_DIR/spice_ppx_diffs"
 
 # Export variables for parallel execution
-export OCAML_PARSER RUST_PARSER OCAML_BSC RUST_BSC TIMEOUT_SECONDS TEMP_DIR QUICK_MODE VERBOSE
+export OCAML_PARSER RUST_PARSER OCAML_BSC RUST_BSC SPICE_PPX TIMEOUT_SECONDS TEMP_DIR QUICK_MODE VERBOSE
 
 # Function to test a single file - writes results to a file
 test_single_file() {
@@ -354,6 +354,12 @@ test_single_file() {
     # Create per-file temp directory for parallel safety
     local file_temp="$TEMP_DIR/work/$safe_name"
     mkdir -p "$file_temp"
+
+    # Files using spice annotations must use external spice PPX on the OCaml bsc side.
+    local use_spice_ppx=false
+    if grep -q "@spice" "$file" 2>/dev/null; then
+        use_spice_ppx=true
+    fi
 
     # Run OCaml parser with sexp-locs (primary test - includes all attributes)
     local ocaml_success=false
@@ -397,7 +403,11 @@ test_single_file() {
         local rust_ast_file="$file_temp/rust.ast"
         local ocaml_iast_file="$file_temp/ocaml.iast"
         local rust_iast_file="$file_temp/rust.iast"
-        if timeout "$TIMEOUT_SECONDS" "$OCAML_BSC" -bs-ast "$file" -o "$ocaml_ast_file" 2>/dev/null && \
+        local ocaml_bsc_cmd=("$OCAML_BSC")
+        if $use_spice_ppx; then
+            ocaml_bsc_cmd+=(-ppx "$SPICE_PPX")
+        fi
+        if timeout "$TIMEOUT_SECONDS" "${ocaml_bsc_cmd[@]}" -bs-ast "$file" -o "$ocaml_ast_file" 2>/dev/null && \
            timeout "$TIMEOUT_SECONDS" "$RUST_BSC" -bs-ast "$file" -o "$rust_ast_file" 2>/dev/null; then
             # Both compilers create .iast for .resi files (regardless of -o), so check for that
             if [[ -f "$ocaml_iast_file" && ! -f "$ocaml_ast_file" ]]; then
