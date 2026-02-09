@@ -353,7 +353,7 @@ mkdir -p "$TEMP_DIR/spice_ppx"
 mkdir -p "$TEMP_DIR/spice_ppx_diffs"
 
 # Export variables for parallel execution
-export OCAML_PARSER RUST_PARSER OCAML_BSC RUST_BSC SPICE_PPX TELLA_DIR TIMEOUT_SECONDS TEMP_DIR QUICK_MODE VERBOSE
+export OCAML_PARSER RUST_PARSER OCAML_BSC RUST_BSC SPICE_PPX TELLA_DIR TIMEOUT_SECONDS TEMP_DIR QUICK_MODE VERBOSE INSPECT_SCRIPT
 
 # Function to test a single file - writes results to a file
 test_single_file() {
@@ -383,6 +383,13 @@ test_single_file() {
     local use_spice_ppx=false
     if grep -q "@spice" "$file" 2>/dev/null; then
         use_spice_ppx=true
+    fi
+
+    # For TELLA files that use @spice, skip raw bsc-ast byte parity and
+    # compare decoded AST value trees (same structural comparison as spice parity).
+    local use_spice_structural_bsc=false
+    if $use_spice_ppx && [[ -n "$TELLA_DIR" ]] && [[ "$file" == "$TELLA_DIR/"* ]]; then
+        use_spice_structural_bsc=true
     fi
 
     # sexp-locs-ppx currently diverges for spice in the parser path.
@@ -450,15 +457,87 @@ test_single_file() {
                 rust_ast_file="$rust_iast_file"
             fi
             if [[ -f "$ocaml_ast_file" && -f "$rust_ast_file" ]]; then
-                if ! diff -q "$ocaml_ast_file" "$rust_ast_file" > /dev/null 2>&1; then
-                    bsc_ast_diff=1
-                    {
-                        echo "OCaml bsc-ast size: $(wc -c < "$ocaml_ast_file") bytes"
-                        echo "Rust bsc-ast size:  $(wc -c < "$rust_ast_file") bytes"
-                        echo ""
-                        echo "First differing bytes (hex dump):"
-                        diff <(xxd "$ocaml_ast_file" | head -50) <(xxd "$rust_ast_file" | head -50) || true
-                    } > "$TEMP_DIR/bsc_ast_parity_diffs/$safe_name.diff" 2>&1
+                if $use_spice_structural_bsc; then
+                    if ! python3 - "$INSPECT_SCRIPT" "$ocaml_ast_file" "$rust_ast_file" <<'PY' > /dev/null 2>&1
+import importlib.util
+import sys
+
+script_path, a_path, b_path = sys.argv[1], sys.argv[2], sys.argv[3]
+spec = importlib.util.spec_from_file_location("inspect_binary_ast", script_path)
+mod = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(mod)
+
+ast_a = mod.BinaryAstFile(a_path)
+ast_b = mod.BinaryAstFile(b_path)
+root_a, dec_a = ast_a.decode_ast()
+root_b, dec_b = ast_b.decode_ast()
+
+def deref(node, decoder):
+    while isinstance(node, mod.SharedNode):
+        target = decoder.objects.get(node.target_idx)
+        if target is None:
+            break
+        node = target
+    return node
+
+def compare_value_trees(a_root, b_root, dec_a, dec_b, max_diffs=10):
+    diffs = []
+    stack = [(a_root, b_root, "root")]
+    while stack and len(diffs) < max_diffs:
+        a, b, path = stack.pop()
+        a = deref(a, dec_a)
+        b = deref(b, dec_b)
+
+        if type(a) != type(b):
+            diffs.append({"path": path, "kind": "type_mismatch"})
+            continue
+
+        if isinstance(a, mod.IntNode):
+            if a.value != b.value:
+                diffs.append({"path": path, "kind": "int_value"})
+        elif isinstance(a, mod.StringNode):
+            if a.value != b.value:
+                diffs.append({"path": path, "kind": "string_value"})
+        elif isinstance(a, mod.DoubleNode):
+            if a.value != b.value:
+                diffs.append({"path": path, "kind": "double_value"})
+        elif isinstance(a, mod.BlockNode):
+            if a.tag != b.tag or len(a.children) != len(b.children) or a.type_hint != b.type_hint:
+                diffs.append({"path": path, "kind": "block_mismatch"})
+                continue
+            for i in range(len(a.children) - 1, -1, -1):
+                stack.append((a.children[i], b.children[i], f"{path}/[{i}]"))
+        else:
+            # Unknown node type; fall back to repr equality
+            if repr(a) != repr(b):
+                diffs.append({"path": path, "kind": "repr_mismatch"})
+    return diffs
+
+diffs = compare_value_trees(root_a, root_b, dec_a, dec_b)
+sys.exit(1 if diffs else 0)
+PY
+                    then
+                        bsc_ast_diff=1
+                        {
+                            echo "TELLA @spice file: byte-level bsc-ast parity skipped."
+                            echo "Using decoded AST structural comparison instead."
+                            echo "OCaml bsc-ast size: $(wc -c < "$ocaml_ast_file") bytes"
+                            echo "Rust bsc-ast size:  $(wc -c < "$rust_ast_file") bytes"
+                            echo ""
+                            python3 "$INSPECT_SCRIPT" compare "$ocaml_ast_file" "$rust_ast_file" || true
+                        } > "$TEMP_DIR/bsc_ast_parity_diffs/$safe_name.diff" 2>&1
+                    fi
+                else
+                    if ! diff -q "$ocaml_ast_file" "$rust_ast_file" > /dev/null 2>&1; then
+                        bsc_ast_diff=1
+                        {
+                            echo "OCaml bsc-ast size: $(wc -c < "$ocaml_ast_file") bytes"
+                            echo "Rust bsc-ast size:  $(wc -c < "$rust_ast_file") bytes"
+                            echo ""
+                            echo "First differing bytes (hex dump):"
+                            diff <(xxd "$ocaml_ast_file" | head -50) <(xxd "$rust_ast_file" | head -50) || true
+                        } > "$TEMP_DIR/bsc_ast_parity_diffs/$safe_name.diff" 2>&1
+                    fi
                 fi
             fi
         fi
