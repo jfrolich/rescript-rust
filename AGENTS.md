@@ -71,6 +71,7 @@ The Makefile’s targets build on each other in this order:
 
 - **Avoid warning suppressions** - Never use `[@@warning "..."]` to silence warnings. Instead, fix the underlying issue properly
 - **Skip trailing `; _` in record patterns** - The warning it targets is disabled in this codebase, so prefer `{field = x}` over `{field = x; _}`.
+- **Do not introduce new `unsafe` Rust in compiler code** - Prefer safe ownership/lifetime patterns (owned `String`, arena indices, side tables). If `unsafe` is truly unavoidable (for example, FFI boundaries), keep it narrowly scoped, document invariants, and justify it in the PR/commit message.
 
 - **Do not introduce new keywords unless absolutely necessary** - Try to find ways to implement features without reserving keywords, as seen with the "catch" implementation that avoids making it a keyword.
 

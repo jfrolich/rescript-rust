@@ -17,22 +17,15 @@ use crate::parse_arena::{
 };
 use serde::{Deserialize, Serialize};
 
-/// Extend the lifetime of a `Cow<'a, str>` to `'static` for zero-copy AST storage.
+/// Convert any `Cow<'_, str>` into `Cow<'static, str>` without unsafe.
 ///
-/// # Safety
-///
-/// This is sound when the borrowed source string outlives the AST in all execution
-/// paths. In our codebase, the source `String` lives in `generate_ast()` /
-/// `res_parser::main()`, and the AST is created, transformed, marshaled, and dropped
-/// within the same function scope — so borrowed references into the source are always
-/// valid for the AST's lifetime.
-///
-/// For `Cow::Owned` values, this is a no-op (transmuting the lifetime of an owned
-/// value doesn't affect anything).
+/// Borrowed values are copied into owned strings; owned values are moved through.
 #[inline(always)]
 pub fn extend_cow_lifetime(cow: Cow<'_, str>) -> Cow<'static, str> {
-    // SAFETY: See doc comment above. The source string outlives the AST.
-    unsafe { std::mem::transmute::<Cow<'_, str>, Cow<'static, str>>(cow) }
+    match cow {
+        Cow::Borrowed(s) => Cow::Owned(s.to_string()),
+        Cow::Owned(s) => Cow::Owned(s),
+    }
 }
 
 /// Re-export Located for convenience.
@@ -166,10 +159,8 @@ impl ArgLabel {
 
 /// A label (used for variant constructors, object methods, etc.).
 ///
-/// Uses `Cow<'static, str>` to enable zero-copy from source for the common case.
-/// Parser-produced labels borrow from source via unsafe lifetime extension (sound
-/// because the source string outlives the AST in all execution paths).
-/// PPX-generated labels use `Cow::Owned`.
+/// Uses `Cow<'static, str>` for stable storage across parser and PPX passes.
+/// Values may be borrowed (for true `'static` literals) or owned.
 pub type Label = Cow<'static, str>;
 
 // ============================================================================
@@ -178,10 +169,9 @@ pub type Label = Cow<'static, str>;
 
 /// Constant values.
 ///
-/// Uses `Cow<'static, str>` for string data to enable zero-copy from source.
-/// The `'static` lifetime is sound because the source string outlives the AST
-/// in all execution paths. Parser-produced constants use `Cow::Borrowed` (zero-copy),
-/// while PPX-generated constants use `Cow::Owned`.
+/// Uses `Cow<'static, str>` for string data to support shared APIs between parser
+/// and PPX-generated nodes. Parser-produced values are normalized to owned strings
+/// when needed to keep this representation fully safe.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Constant {
     /// Integer constant with optional suffix (l, L, n).
