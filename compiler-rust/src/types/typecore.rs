@@ -1074,23 +1074,68 @@ fn transl_type_inner(
         CTD::Ptyp_variant(rows, closed, labels) => {
             // Polymorphic variant type: [> `A | `B of int ]
             let mut typed_rows = Vec::new();
-            let row_more = ctx.new_var(None);
+            let mut row_name: Option<(Path, Vec<TypeExprRef>)> = None;
+            let mut row_field_map: HashMap<String, crate::types::type_expr::RowField> = HashMap::new();
+            let mut row_field_order: Vec<String> = Vec::new();
+
+            fn add_row_field(
+                row_field_map: &mut HashMap<String, crate::types::type_expr::RowField>,
+                row_field_order: &mut Vec<String>,
+                label: String,
+                field: crate::types::type_expr::RowField,
+            ) {
+                if !row_field_map.contains_key(&label) {
+                    row_field_order.push(label.clone());
+                    row_field_map.insert(label, field);
+                }
+            }
 
             for row in rows {
                 match row {
                     crate::parser::ast::RowField::Rtag(label, attrs, constant, args) => {
                         let mut typed_args = Vec::new();
+                        let mut arg_types = Vec::new();
                         for arg in args {
-                            let (arg_ctyp, _arg_ty) = transl_type_inner(tctx, env, arg)?;
+                            let (arg_ctyp, arg_ty) = transl_type_inner(tctx, env, arg)?;
                             typed_args.push(arg_ctyp);
+                            arg_types.push(arg_ty);
                         }
+
+                        row_name = None;
+
+                        let is_reither = labels
+                            .as_ref()
+                            .is_some_and(|present| !present.iter().any(|present_lbl| present_lbl == &label.txt));
+                        let row_field = if is_reither {
+                            crate::types::type_expr::RowField::Reither {
+                                constant: *constant,
+                                types: arg_types,
+                                matched: false,
+                                link: crate::types::type_expr::RowFieldRef::null(),
+                            }
+                        } else {
+                            match typed_args.first() {
+                                None => crate::types::type_expr::RowField::Rpresent(None),
+                                Some(first) => {
+                                    crate::types::type_expr::RowField::Rpresent(Some(first.ctyp_type))
+                                }
+                            }
+                        };
+                        add_row_field(
+                            &mut row_field_map,
+                            &mut row_field_order,
+                            label.txt.clone(),
+                            row_field,
+                        );
+
+                        let typed_label = Located {
+                            txt: label.txt.clone(),
+                            loc: label.loc.clone(),
+                        };
 
                         typed_rows.push(crate::types::typedtree::RowFieldType {
                             rf_desc: crate::types::typedtree::RowFieldDesc::Rtag(
-                                Located {
-                                    txt: label.txt.clone(),
-                                    loc: label.loc.clone(),
-                                },
+                                typed_label,
                                 *constant,
                                 typed_args,
                             ),
@@ -1099,8 +1144,69 @@ fn transl_type_inner(
                         });
                     }
                     crate::parser::ast::RowField::Rinherit(inherit_type) => {
-                        let (inherit_ctyp, _inherit_ty) =
+                        let (inherit_ctyp, inherit_ty) =
                             transl_type_inner(tctx, env, inherit_type)?;
+
+                        let inherit_ty_repr = ctx.repr(inherit_ty);
+                        let inherit_name = match &*ctx.get_desc(inherit_ty_repr) {
+                            TypeDesc::Tconstr { path, args, .. } => Some((path.clone(), args.clone())),
+                            _ => None,
+                        };
+                        if row_field_map.is_empty() {
+                            row_name = inherit_name;
+                        } else {
+                            row_name = None;
+                        }
+
+                        let expanded = crate::types::ctype::expand_head(ctx, env, inherit_ty);
+                        let inherited_fields = {
+                            let expanded_desc = ctx.get_desc(expanded);
+                            match &*expanded_desc {
+                                TypeDesc::Tvariant(row_desc)
+                                    if crate::types::btype::static_row(ctx, row_desc) =>
+                                {
+                                    Some(crate::types::btype::row_repr(ctx, row_desc).row_fields)
+                                }
+                                _ => None,
+                            }
+                        };
+                        if let Some(fields) = inherited_fields {
+                            for (label_name, inherited_field) in fields {
+                                let is_reither = labels
+                                    .as_ref()
+                                    .is_some_and(|present| !present.iter().any(|lbl| lbl == &label_name));
+                                let resolved_field = if is_reither {
+                                    match inherited_field {
+                                        crate::types::type_expr::RowField::Rpresent(Some(ty)) => {
+                                            crate::types::type_expr::RowField::Reither {
+                                                constant: false,
+                                                types: vec![ty],
+                                                matched: false,
+                                                link: crate::types::type_expr::RowFieldRef::null(),
+                                            }
+                                        }
+                                        crate::types::type_expr::RowField::Rpresent(None) => {
+                                            crate::types::type_expr::RowField::Reither {
+                                                constant: true,
+                                                types: vec![],
+                                                matched: false,
+                                                link: crate::types::type_expr::RowFieldRef::null(),
+                                            }
+                                        }
+                                        _ => inherited_field,
+                                    }
+                                } else {
+                                    inherited_field
+                                };
+                                add_row_field(
+                                    &mut row_field_map,
+                                    &mut row_field_order,
+                                    label_name,
+                                    resolved_field,
+                                );
+                            }
+                        }
+
                         typed_rows.push(crate::types::typedtree::RowFieldType {
                             rf_desc: crate::types::typedtree::RowFieldDesc::Rinherit(inherit_ctyp),
                             rf_loc: inherit_type.ptyp_loc.clone(),
@@ -1110,8 +1216,21 @@ fn transl_type_inner(
                 }
             }
 
-            // Create variant type
-            let variant_ty = row_more; // Simplified - full implementation builds row type
+            let row_fields = row_field_order
+                .into_iter()
+                .filter_map(|label| row_field_map.remove(&label).map(|field| (label, field)))
+                .collect::<Vec<_>>();
+            let row_closed = *closed == crate::parser::ast::ClosedFlag::Closed;
+            // Keep an explicit row variable for now to avoid over-constraining
+            // polymorphic variant aliases in downstream application typing.
+            let row_more = ctx.new_var(None);
+            let variant_ty = ctx.new_variant(crate::types::type_expr::RowDesc {
+                row_fields,
+                row_more,
+                row_closed,
+                row_fixed: false,
+                row_name,
+            });
 
             let ctyp = TypedCoreType {
                 ctyp_desc: TypedCoreTypeDesc::Ttyp_variant(typed_rows, *closed, labels.clone()),

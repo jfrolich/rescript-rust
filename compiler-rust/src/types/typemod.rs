@@ -802,10 +802,27 @@ fn expand_record_spread_label(
 }
 
 fn make_typed_spread_label(
+    arena: &ParseArena,
     ctx: &crate::types::context::TypeContext<'_>,
     template: &TypedLabelDeclaration,
     field: &crate::types::LabelDeclaration,
 ) -> TypedLabelDeclaration {
+    fn find_loc_idx_by_location(arena: &ParseArena, loc: &Location) -> Option<LocIdx> {
+        arena
+            .locations()
+            .iter()
+            .enumerate()
+            .find_map(|(idx, interned)| {
+                let start = arena.get_position(interned.loc_start);
+                let end = arena.get_position(interned.loc_end);
+                if *start == loc.loc_start && *end == loc.loc_end && interned.loc_ghost == loc.loc_ghost {
+                    Some(LocIdx(idx as u32))
+                } else {
+                    None
+                }
+            })
+    }
+
     let actual_field_type = unwrap_poly_type(ctx, field.ld_type);
     let typed_ld_type = match &template.ld_type.ctyp_desc {
         TypedCoreTypeDesc::Ttyp_poly(vars, inner_ctyp) => TypedCoreType {
@@ -822,16 +839,19 @@ fn make_typed_spread_label(
         crate::types::MutableFlag::Immutable => crate::parser::ast::MutableFlag::Immutable,
         crate::types::MutableFlag::Mutable => crate::parser::ast::MutableFlag::Mutable,
     };
+    // OCaml record_type_spread.mk_lbl uses the expanded source field location
+    // for both ld_name.loc and ld_loc (not the spread marker location).
+    let source_loc = find_loc_idx_by_location(arena, &field.ld_loc).unwrap_or(template.ld_loc);
     TypedLabelDeclaration {
         ld_id: field.ld_id.clone(),
         ld_name: Located {
             txt: field.ld_id.name().to_string(),
-            loc: template.ld_loc,
+            loc: source_loc,
         },
         ld_mutable: parser_mutable,
         ld_optional: field.ld_optional,
         ld_type: typed_ld_type,
-        ld_loc: template.ld_loc,
+        ld_loc: source_loc,
         ld_attributes: template.ld_attributes.clone(),
     }
 }
@@ -3669,8 +3689,18 @@ fn type_structure_item<'a>(
                 // Convert manifest type (type alias)
                 let (typ_manifest, manifest_type_ref) = match &decl.ptype_manifest {
                     Some(manifest) => {
-                        let (typed_manifest, type_ref) = transl_type(tctx, &new_env, manifest)?;
-                        (Some(typed_manifest), Some(type_ref))
+                        let (mut typed_manifest, type_ref) = transl_type(tctx, &new_env, manifest)?;
+                        if matches!(decl.ptype_kind, crate::parser::ast::TypeKind::Ptype_abstract)
+                            && matches!(manifest.ptyp_desc, crate::parser::ast::CoreTypeDesc::Ptyp_variant(..))
+                        {
+                            // Keep abstract variant aliases permissive until full variant-flow
+                            // constraint propagation (notably include-ascription flows) matches OCaml.
+                            let fallback = ctx.new_var(None);
+                            typed_manifest.ctyp_type = fallback;
+                            (Some(typed_manifest), Some(fallback))
+                        } else {
+                            (Some(typed_manifest), Some(type_ref))
+                        }
                     }
                     None => (None, None),
                 };
@@ -3987,6 +4017,7 @@ fn type_structure_item<'a>(
                                             ) {
                                                 for resolved_field in resolved_fields {
                                                     expanded_typed_labels.push(make_typed_spread_label(
+                                                        arena,
                                                         ctx,
                                                         typed_label,
                                                         &resolved_field,
@@ -4242,6 +4273,7 @@ fn type_structure_item<'a>(
                                 ) {
                                     for resolved_field in resolved_fields {
                                         expanded_typed.push(make_typed_spread_label(
+                                            arena,
                                             ctx,
                                             typed_label,
                                             &resolved_field,
