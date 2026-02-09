@@ -348,6 +348,7 @@ RESULTS_DIR="$TEMP_DIR/results"
 mkdir -p "$RESULTS_DIR"
 mkdir -p "$TEMP_DIR/locs_diffs"
 mkdir -p "$TEMP_DIR/sexp_locs_ppx_diffs"
+mkdir -p "$TEMP_DIR/sexp_locs_ppx_spice_diffs"
 mkdir -p "$TEMP_DIR/bsc_ast_parity_diffs"
 mkdir -p "$TEMP_DIR/spice_ppx"
 mkdir -p "$TEMP_DIR/spice_ppx_diffs"
@@ -364,9 +365,10 @@ test_single_file() {
     # Initialize result
     local locs_pass=0 locs_diff=0
     local sexp_locs_ppx_diff=0
+    local sexp_locs_ppx_spice_checked=0
+    local sexp_locs_ppx_spice_diff=0
     local bsc_ast_diff=0
     local ocaml_fail=0 rust_fail=0
-    local bsc_ast_mode="none"
 
     # Determine if it's an interface file
     local intf_flag=""
@@ -387,8 +389,8 @@ test_single_file() {
     fi
 
     # For TELLA files that use @spice, skip raw bsc-ast byte parity and
-    # compare decoded AST value trees. Report this as
-    # "sexp-locs-ppx-and-spice" in summary output.
+    # compare canonical sexp representations generated from the expanded AST.
+    # Report this as "sexp-locs-ppx-and-spice" in summary output.
     local use_spice_structural_bsc=false
     if $use_spice_ppx && [[ -n "$TELLA_DIR" ]] && [[ "$file" == "$TELLA_DIR/"* ]]; then
         use_spice_structural_bsc=true
@@ -460,78 +462,114 @@ test_single_file() {
             fi
             if [[ -f "$ocaml_ast_file" && -f "$rust_ast_file" ]]; then
                 if $use_spice_structural_bsc; then
-                    bsc_ast_mode="structural-spice-tella"
-                    if ! python3 - "$INSPECT_SCRIPT" "$ocaml_ast_file" "$rust_ast_file" <<'PY' > /dev/null 2>&1
+                    sexp_locs_ppx_spice_checked=1
+                    local ocaml_spice_sexp="$file_temp/ocaml.sexp-locs-ppx-and-spice"
+                    local rust_spice_sexp="$file_temp/rust.sexp-locs-ppx-and-spice"
+                    local spice_sexp_failed=0
+
+                    if ! python3 - "$INSPECT_SCRIPT" "$ocaml_ast_file" > "$ocaml_spice_sexp" 2>/dev/null <<'PY'
 import importlib.util
+import json
 import sys
 
-script_path, a_path, b_path = sys.argv[1], sys.argv[2], sys.argv[3]
+script_path, ast_path = sys.argv[1], sys.argv[2]
 spec = importlib.util.spec_from_file_location("inspect_binary_ast", script_path)
 mod = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(mod)
 
-ast_a = mod.BinaryAstFile(a_path)
-ast_b = mod.BinaryAstFile(b_path)
-root_a, dec_a = ast_a.decode_ast()
-root_b, dec_b = ast_b.decode_ast()
+root, dec = mod.BinaryAstFile(ast_path).decode_ast()
+sys.setrecursionlimit(100000)
 
-def deref(node, decoder):
+def deref(node):
     while isinstance(node, mod.SharedNode):
-        target = decoder.objects.get(node.target_idx)
+        target = dec.objects.get(node.target_idx)
         if target is None:
             break
         node = target
     return node
 
-def compare_value_trees(a_root, b_root, dec_a, dec_b, max_diffs=10):
-    diffs = []
-    stack = [(a_root, b_root, "root")]
-    while stack and len(diffs) < max_diffs:
-        a, b, path = stack.pop()
-        a = deref(a, dec_a)
-        b = deref(b, dec_b)
+def to_sexp(node):
+    node = deref(node)
+    if isinstance(node, mod.IntNode):
+        return str(node.value)
+    if isinstance(node, mod.StringNode):
+        return json.dumps(node.value, ensure_ascii=False)
+    if isinstance(node, mod.DoubleNode):
+        return repr(node.value)
+    if isinstance(node, mod.BlockNode):
+        parts = [f"tag:{node.tag}"]
+        if node.type_hint is not None:
+            parts.append(f"type:{node.type_hint}")
+        parts.extend(to_sexp(child) for child in node.children)
+        return "(" + " ".join(parts) + ")"
+    return json.dumps(repr(node), ensure_ascii=False)
 
-        if type(a) != type(b):
-            diffs.append({"path": path, "kind": "type_mismatch"})
-            continue
-
-        if isinstance(a, mod.IntNode):
-            if a.value != b.value:
-                diffs.append({"path": path, "kind": "int_value"})
-        elif isinstance(a, mod.StringNode):
-            if a.value != b.value:
-                diffs.append({"path": path, "kind": "string_value"})
-        elif isinstance(a, mod.DoubleNode):
-            if a.value != b.value:
-                diffs.append({"path": path, "kind": "double_value"})
-        elif isinstance(a, mod.BlockNode):
-            if a.tag != b.tag or len(a.children) != len(b.children) or a.type_hint != b.type_hint:
-                diffs.append({"path": path, "kind": "block_mismatch"})
-                continue
-            for i in range(len(a.children) - 1, -1, -1):
-                stack.append((a.children[i], b.children[i], f"{path}/[{i}]"))
-        else:
-            # Unknown node type; fall back to repr equality
-            if repr(a) != repr(b):
-                diffs.append({"path": path, "kind": "repr_mismatch"})
-    return diffs
-
-diffs = compare_value_trees(root_a, root_b, dec_a, dec_b)
-sys.exit(1 if diffs else 0)
+print(to_sexp(root))
 PY
                     then
-                        bsc_ast_diff=1
+                        spice_sexp_failed=1
+                    fi
+
+                    if ! python3 - "$INSPECT_SCRIPT" "$rust_ast_file" > "$rust_spice_sexp" 2>/dev/null <<'PY'
+import importlib.util
+import json
+import sys
+
+script_path, ast_path = sys.argv[1], sys.argv[2]
+spec = importlib.util.spec_from_file_location("inspect_binary_ast", script_path)
+mod = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(mod)
+
+root, dec = mod.BinaryAstFile(ast_path).decode_ast()
+sys.setrecursionlimit(100000)
+
+def deref(node):
+    while isinstance(node, mod.SharedNode):
+        target = dec.objects.get(node.target_idx)
+        if target is None:
+            break
+        node = target
+    return node
+
+def to_sexp(node):
+    node = deref(node)
+    if isinstance(node, mod.IntNode):
+        return str(node.value)
+    if isinstance(node, mod.StringNode):
+        return json.dumps(node.value, ensure_ascii=False)
+    if isinstance(node, mod.DoubleNode):
+        return repr(node.value)
+    if isinstance(node, mod.BlockNode):
+        parts = [f"tag:{node.tag}"]
+        if node.type_hint is not None:
+            parts.append(f"type:{node.type_hint}")
+        parts.extend(to_sexp(child) for child in node.children)
+        return "(" + " ".join(parts) + ")"
+    return json.dumps(repr(node), ensure_ascii=False)
+
+print(to_sexp(root))
+PY
+                    then
+                        spice_sexp_failed=1
+                    fi
+
+                    if [[ "$spice_sexp_failed" -eq 1 ]]; then
+                        sexp_locs_ppx_spice_diff=1
                         {
-                            echo "TELLA @spice file: byte-level bsc-ast parity skipped."
-                            echo "Category: sexp-locs-ppx-and-spice (decoded structural comparison)."
+                            echo "Failed to produce sexp-locs-ppx-and-spice representation."
                             echo "OCaml bsc-ast size: $(wc -c < "$ocaml_ast_file") bytes"
                             echo "Rust bsc-ast size:  $(wc -c < "$rust_ast_file") bytes"
+                        } > "$TEMP_DIR/sexp_locs_ppx_spice_diffs/$safe_name.diff" 2>&1
+                    elif ! diff -q "$ocaml_spice_sexp" "$rust_spice_sexp" > /dev/null 2>&1; then
+                        sexp_locs_ppx_spice_diff=1
+                        {
+                            echo "Category: sexp-locs-ppx-and-spice"
+                            echo "Comparison type: sexp representation (not byte-level bsc-ast)"
                             echo ""
-                            python3 "$INSPECT_SCRIPT" compare "$ocaml_ast_file" "$rust_ast_file" || true
-                        } > "$TEMP_DIR/bsc_ast_parity_diffs/$safe_name.diff" 2>&1
+                            diff -u --text "$ocaml_spice_sexp" "$rust_spice_sexp" || true
+                        } > "$TEMP_DIR/sexp_locs_ppx_spice_diffs/$safe_name.diff" 2>&1
                     fi
                 else
-                    bsc_ast_mode="byte"
                     if ! diff -q "$ocaml_ast_file" "$rust_ast_file" > /dev/null 2>&1; then
                         bsc_ast_diff=1
                         {
@@ -548,7 +586,7 @@ PY
     fi
 
     # Write results
-    echo "$file:$locs_pass:$locs_diff:$sexp_locs_ppx_diff:$bsc_ast_diff:$ocaml_fail:$rust_fail:$bsc_ast_mode" > "$result_file"
+    echo "$file:$locs_pass:$locs_diff:$sexp_locs_ppx_diff:$sexp_locs_ppx_spice_checked:$sexp_locs_ppx_spice_diff:$bsc_ast_diff:$ocaml_fail:$rust_fail" > "$result_file"
 
     # Clean up per-file temp
     rm -rf "$file_temp"
@@ -582,7 +620,7 @@ if $QUICK_MODE; then
         # Check result
         safe_name=$(echo "$file" | tr '/' '_')
         result=$(cat "$RESULTS_DIR/$safe_name.result")
-        IFS=':' read -r _ locs_pass locs_diff sexp_locs_ppx_diff bsc_ast_diff ocaml_fail rust_fail bsc_ast_mode <<< "$result"
+        IFS=':' read -r _ locs_pass locs_diff sexp_locs_ppx_diff sexp_locs_ppx_spice_checked sexp_locs_ppx_spice_diff bsc_ast_diff ocaml_fail rust_fail <<< "$result"
 
         if [[ "$locs_diff" -eq 1 ]]; then
             echo -e "${RED}FAIL:${RESET} $file (sexp-locs differs)"
@@ -620,52 +658,45 @@ fi
 locs_pass_count=0
 locs_diff_count=0
 sexp_locs_ppx_diff_count=0
+sexp_locs_ppx_spice_checked_count=0
+sexp_locs_ppx_spice_diff_count=0
 bsc_ast_parity_diff_count=0
 bsc_ast_byte_diff_count=0
-bsc_ast_structural_tella_spice_diff_count=0
 bsc_ast_byte_checked_count=0
-bsc_ast_structural_tella_spice_checked_count=0
 ocaml_fail_count=0
 rust_fail_count=0
 
 locs_diff_files=""
 sexp_locs_ppx_diff_files=""
-bsc_ast_parity_diff_files=""
+sexp_locs_ppx_spice_diff_files=""
 bsc_ast_byte_diff_files=""
-bsc_ast_structural_tella_spice_diff_files=""
 ocaml_fail_files=""
 rust_fail_files=""
 
 for result_file in "$RESULTS_DIR"/*.result; do
     [[ -f "$result_file" ]] || continue
     result=$(cat "$result_file")
-    IFS=':' read -r file locs_pass locs_diff sexp_locs_ppx_diff bsc_ast_diff ocaml_fail rust_fail bsc_ast_mode <<< "$result"
+    IFS=':' read -r file locs_pass locs_diff sexp_locs_ppx_diff sexp_locs_ppx_spice_checked sexp_locs_ppx_spice_diff bsc_ast_diff ocaml_fail rust_fail <<< "$result"
 
     locs_pass_count=$((locs_pass_count + locs_pass))
     locs_diff_count=$((locs_diff_count + locs_diff))
     sexp_locs_ppx_diff_count=$((sexp_locs_ppx_diff_count + sexp_locs_ppx_diff))
-    # bsc-ast parity tracks only raw byte-level differences.
+    sexp_locs_ppx_spice_checked_count=$((sexp_locs_ppx_spice_checked_count + sexp_locs_ppx_spice_checked))
+    sexp_locs_ppx_spice_diff_count=$((sexp_locs_ppx_spice_diff_count + sexp_locs_ppx_spice_diff))
     ocaml_fail_count=$((ocaml_fail_count + ocaml_fail))
     rust_fail_count=$((rust_fail_count + rust_fail))
 
-    if [[ "$bsc_ast_mode" == "byte" ]]; then
+    if [[ "$sexp_locs_ppx_spice_checked" -eq 0 ]]; then
         bsc_ast_byte_checked_count=$((bsc_ast_byte_checked_count + 1))
-    elif [[ "$bsc_ast_mode" == "structural-spice-tella" ]]; then
-        bsc_ast_structural_tella_spice_checked_count=$((bsc_ast_structural_tella_spice_checked_count + 1))
     fi
 
     [[ "$locs_diff" -eq 1 ]] && locs_diff_files="$locs_diff_files$file\n"
     [[ "$sexp_locs_ppx_diff" -eq 1 ]] && sexp_locs_ppx_diff_files="$sexp_locs_ppx_diff_files$file\n"
+    [[ "$sexp_locs_ppx_spice_diff" -eq 1 ]] && sexp_locs_ppx_spice_diff_files="$sexp_locs_ppx_spice_diff_files$file\n"
     if [[ "$bsc_ast_diff" -eq 1 ]]; then
-        bsc_ast_parity_diff_files="$bsc_ast_parity_diff_files$file\n"
-        if [[ "$bsc_ast_mode" == "structural-spice-tella" ]]; then
-            bsc_ast_structural_tella_spice_diff_count=$((bsc_ast_structural_tella_spice_diff_count + 1))
-            bsc_ast_structural_tella_spice_diff_files="$bsc_ast_structural_tella_spice_diff_files$file\n"
-        else
-            bsc_ast_parity_diff_count=$((bsc_ast_parity_diff_count + 1))
-            bsc_ast_byte_diff_count=$((bsc_ast_byte_diff_count + 1))
-            bsc_ast_byte_diff_files="$bsc_ast_byte_diff_files$file\n"
-        fi
+        bsc_ast_parity_diff_count=$((bsc_ast_parity_diff_count + 1))
+        bsc_ast_byte_diff_count=$((bsc_ast_byte_diff_count + 1))
+        bsc_ast_byte_diff_files="$bsc_ast_byte_diff_files$file\n"
     fi
     [[ "$ocaml_fail" -eq 1 ]] && ocaml_fail_files="$ocaml_fail_files$file\n"
     [[ "$rust_fail" -eq 1 ]] && rust_fail_files="$rust_fail_files$file\n"
@@ -680,7 +711,7 @@ bsc_ast_pass_files=""
 for result_file in "$RESULTS_DIR"/*.result; do
     [[ -f "$result_file" ]] || continue
     result=$(cat "$result_file")
-    IFS=':' read -r file locs_pass locs_diff sexp_locs_ppx_diff bsc_ast_diff ocaml_fail rust_fail bsc_ast_mode <<< "$result"
+    IFS=':' read -r file locs_pass locs_diff sexp_locs_ppx_diff sexp_locs_ppx_spice_checked sexp_locs_ppx_spice_diff bsc_ast_diff ocaml_fail rust_fail <<< "$result"
 
     # Track all tested files
     all_tested_files="$all_tested_files$file\n"
@@ -964,8 +995,8 @@ echo "  ${BOLD}Parser parity (sexp output for debugging):${RESET}"
 echo "    sexp-locs matches:        $locs_pass_count"
 echo "    sexp-locs differences:    $locs_diff_count"
 echo "    sexp-locs-ppx differences: $sexp_locs_ppx_diff_count"
-echo "    sexp-locs-ppx-and-spice checks: $bsc_ast_structural_tella_spice_checked_count"
-echo "    sexp-locs-ppx-and-spice differences: $bsc_ast_structural_tella_spice_diff_count"
+echo "    sexp-locs-ppx-and-spice checks: $sexp_locs_ppx_spice_checked_count"
+echo "    sexp-locs-ppx-and-spice differences: $sexp_locs_ppx_spice_diff_count"
 echo ""
 echo "  ${BOLD}bsc-ast Byte Parity:${RESET}"
 echo "    bsc-ast byte checks:      $bsc_ast_byte_checked_count"
@@ -1038,24 +1069,24 @@ if [[ $sexp_locs_ppx_diff_count -gt 0 ]]; then
 fi
 
 # Show sexp-locs-ppx-and-spice differences
-if [[ $bsc_ast_structural_tella_spice_diff_count -gt 0 ]]; then
-    echo -e "${BOLD}${YELLOW}Files with sexp-locs-ppx-and-spice differences ($bsc_ast_structural_tella_spice_diff_count):${RESET}"
-    echo "  (TELLA @spice files; decoded AST value-tree comparison; byte-level parity intentionally skipped)"
-    echo -e "$bsc_ast_structural_tella_spice_diff_files" | grep -v "^$" | head -15 | while read file; do
+if [[ $sexp_locs_ppx_spice_diff_count -gt 0 ]]; then
+    echo -e "${BOLD}${YELLOW}Files with sexp-locs-ppx-and-spice differences ($sexp_locs_ppx_spice_diff_count):${RESET}"
+    echo "  (TELLA @spice files; sexp representation comparison)"
+    echo -e "$sexp_locs_ppx_spice_diff_files" | grep -v "^$" | head -15 | while read file; do
         echo "  $file"
     done
-    if [[ $bsc_ast_structural_tella_spice_diff_count -gt 15 ]]; then
-        remaining=$((bsc_ast_structural_tella_spice_diff_count - 15))
+    if [[ $sexp_locs_ppx_spice_diff_count -gt 15 ]]; then
+        remaining=$((sexp_locs_ppx_spice_diff_count - 15))
         echo "  ... and $remaining more"
     fi
     echo ""
 
     # Show first structural diff as example
     echo -e "${BOLD}Example sexp-locs-ppx-and-spice diff (first file):${RESET}"
-    first_bsc_struct_file=$(echo -e "$bsc_ast_structural_tella_spice_diff_files" | grep -v "^$" | head -1)
-    if [[ -n "$first_bsc_struct_file" ]]; then
-        first_bsc_struct_diff="$TEMP_DIR/bsc_ast_parity_diffs/$(echo "$first_bsc_struct_file" | tr '/' '_').diff"
-        [[ -f "$first_bsc_struct_diff" ]] && head -30 "$first_bsc_struct_diff"
+    first_spice_ppx_sexp_file=$(echo -e "$sexp_locs_ppx_spice_diff_files" | grep -v "^$" | head -1)
+    if [[ -n "$first_spice_ppx_sexp_file" ]]; then
+        first_spice_ppx_sexp_diff="$TEMP_DIR/sexp_locs_ppx_spice_diffs/$(echo "$first_spice_ppx_sexp_file" | tr '/' '_').diff"
+        [[ -f "$first_spice_ppx_sexp_diff" ]] && head -30 "$first_spice_ppx_sexp_diff"
     fi
     echo ""
 fi
