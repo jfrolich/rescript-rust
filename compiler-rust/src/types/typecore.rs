@@ -3634,6 +3634,73 @@ fn type_variant(
     ))
 }
 
+fn record_labels_match_ids(
+    labels: &[crate::types::decl::LabelDeclaration],
+    field_names: &[String],
+    closed_record: bool,
+) -> bool {
+    let label_names: HashSet<String> = labels.iter().map(|ld| ld.ld_id.name().to_string()).collect();
+    if !field_names.iter().all(|name| label_names.contains(name)) {
+        return false;
+    }
+
+    if !closed_record {
+        return true;
+    }
+
+    let mandatory_count = labels.iter().filter(|ld| !ld.ld_optional).count();
+    let has_optional = labels.iter().any(|ld| ld.ld_optional);
+    if has_optional {
+        field_names.len() >= mandatory_count
+    } else {
+        field_names.len() == labels.len()
+    }
+}
+
+fn select_record_type_for_fields(
+    tctx: &TypeCheckContext<'_>,
+    env: &Env,
+    field_names: &[String],
+    expected_ty: TypeExprRef,
+    base_ty: Option<TypeExprRef>,
+    closed_record: bool,
+) -> Option<TypeExprRef> {
+    if field_names.len() <= 2 {
+        return None;
+    }
+
+    let ctx = tctx.type_ctx;
+
+    for candidate_ty in [Some(expected_ty), base_ty].into_iter().flatten() {
+        if let Some(labels) = get_record_labels(ctx, env, candidate_ty) {
+            if record_labels_match_ids(&labels, field_names, closed_record) {
+                return Some(candidate_ty);
+            }
+        }
+    }
+
+    let first_name = field_names.first()?;
+    let candidates = env.find_all_labels(first_name);
+    let mut matching: Vec<(Option<Path>, TypeExprRef)> = Vec::new();
+    for label in candidates.into_iter().rev() {
+        if let Some(labels) = get_record_labels(ctx, env, label.lbl_res) {
+            if record_labels_match_ids(&labels, field_names, closed_record) {
+                let key = extract_type_path_from_expected(label.lbl_res, env, ctx);
+                if matching.iter().any(|(existing, _)| *existing == key) {
+                    continue;
+                }
+                matching.push((key, label.lbl_res));
+            }
+        }
+    }
+
+    if matching.len() == 1 {
+        Some(matching[0].1)
+    } else {
+        None
+    }
+}
+
 /// Type check record expression.
 fn type_record(
     tctx: &mut TypeCheckContext<'_>,
@@ -3666,6 +3733,26 @@ fn type_record(
         None
     };
 
+    let field_names: Vec<String> = fields
+        .iter()
+        .map(|field| tctx.longident_last_name(tctx.resolve_lid(field.lid.txt)))
+        .collect();
+    let closed_record = typed_base.is_none();
+    let disambiguation_ty = select_record_type_for_fields(
+        tctx,
+        env,
+        &field_names,
+        expected_ty,
+        typed_base.as_ref().map(|expr| expr.exp_type),
+        closed_record,
+    )
+    .unwrap_or_else(|| {
+        typed_base
+            .as_ref()
+            .map(|expr| expr.exp_type)
+            .unwrap_or(expected_ty)
+    });
+
     // OCaml builds record definitions by label position over the full label set.
     // Keep explicit overrides keyed by lbl_pos so we can reconstruct full fields.
     let mut explicit_overrides: HashMap<
@@ -3678,11 +3765,6 @@ fn type_record(
     > = HashMap::new();
     let mut explicit_overrides_in_order = Vec::new();
     let mut first_disambiguated_label: Option<crate::types::LabelDescription> = None;
-
-    let disambiguation_ty = typed_base
-        .as_ref()
-        .map(|expr| expr.exp_type)
-        .unwrap_or(expected_ty);
 
     // Type check explicitly written fields.
     for (idx, field) in fields.iter().enumerate() {
@@ -3788,7 +3870,7 @@ fn type_record(
     let mut all_labels = if has_dotdotdot_field {
         None
     } else {
-        get_record_labels(ctx, env, expected_ty)
+        get_record_labels(ctx, env, disambiguation_ty)
     };
     if all_labels.is_none() {
         if let Some(base_expr) = typed_base.as_ref() {
