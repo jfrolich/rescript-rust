@@ -497,11 +497,12 @@ def to_sexp(node):
     if isinstance(node, mod.DoubleNode):
         return repr(node.value)
     if isinstance(node, mod.BlockNode):
-        parts = [f"tag:{node.tag}"]
-        if node.type_hint is not None:
-            parts.append(f"type:{node.type_hint}")
-        parts.extend(to_sexp(child) for child in node.children)
-        return "(" + " ".join(parts) + ")"
+        head = f"(tag:{node.tag}"
+        if not node.children:
+            return head + ")"
+        child_lines = [to_sexp(child) for child in node.children]
+        indented = "\n".join("  " + line.replace("\n", "\n  ") for line in child_lines)
+        return f"{head}\n{indented}\n)"
     return json.dumps(repr(node), ensure_ascii=False)
 
 print(to_sexp(root))
@@ -540,11 +541,12 @@ def to_sexp(node):
     if isinstance(node, mod.DoubleNode):
         return repr(node.value)
     if isinstance(node, mod.BlockNode):
-        parts = [f"tag:{node.tag}"]
-        if node.type_hint is not None:
-            parts.append(f"type:{node.type_hint}")
-        parts.extend(to_sexp(child) for child in node.children)
-        return "(" + " ".join(parts) + ")"
+        head = f"(tag:{node.tag}"
+        if not node.children:
+            return head + ")"
+        child_lines = [to_sexp(child) for child in node.children]
+        indented = "\n".join("  " + line.replace("\n", "\n  ") for line in child_lines)
+        return f"{head}\n{indented}\n)"
     return json.dumps(repr(node), ensure_ascii=False)
 
 print(to_sexp(root))
