@@ -4619,6 +4619,33 @@ fn type_record(
     }
 
     let mut typed_fields = Vec::new();
+    // OCaml special-case (typecore.ml, Pexp_record with no base):
+    // for `{}` in a known record context, keep `Texp_record` fields empty when
+    // all fields are optional; only error when required fields are missing.
+    // Do not synthesize explicit `None` overrides for the all-optional case.
+    if typed_base.is_none() && fields.is_empty() {
+        match all_labels.as_ref() {
+            Some(labels) => {
+                let labels_missing: Vec<String> = labels
+                    .iter()
+                    .filter(|ld| !ld.ld_optional)
+                    .map(|ld| ld.ld_id.name().to_string())
+                    .collect();
+                if !labels_missing.is_empty() {
+                    return Err(TypeCoreError::LabelsMissing {
+                        labels: labels_missing,
+                        jsx_component_info: None,
+                    });
+                }
+                all_labels = Some(Vec::new());
+            }
+            None => {
+                // Keep the existing fallback for record shapes where Rust cannot
+                // reconstruct `lbl_all` yet (notably some inline-record paths).
+            }
+        }
+    }
+
     if let Some(all_labels) = all_labels {
         let mut labels_missing = Vec::new();
 
