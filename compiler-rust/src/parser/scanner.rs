@@ -48,8 +48,8 @@ pub struct Scanner<'src> {
     pub filename: StrIdx,
     /// Source code being scanned.
     src: &'src str,
-    /// Source as bytes for efficient access (UTF-8 encoding of the string).
-    src_bytes: &'src [u8],
+    /// Source as raw scanner bytes (Latin-1 char values 0..255).
+    src_bytes: Vec<u8>,
     /// Character count (cached for efficiency).
     /// For Latin-1 source, this equals the original byte count.
     src_char_count: usize,
@@ -87,7 +87,7 @@ impl<'src> Scanner<'src> {
     /// Create a new scanner for the given source.
     /// filename should be an interned StrIdx from the arena.
     pub fn new(filename: StrIdx, src: &'src str) -> Self {
-        let src_bytes = src.as_bytes();
+        let src_bytes = src.chars().map(|ch| ch as u32 as u8).collect();
         let src_char_count = src.chars().count();
         let ch = if src.is_empty() {
             EOF_CHAR
@@ -1178,8 +1178,31 @@ impl<'src> Scanner<'src> {
                     }
                 }
                 _ => {
+                    // Match OCaml res_scanner.ml: try decoding a UTF-8 codepoint literal
+                    // after the opening quote, then fall back to SingleQuote on failure.
+                    let ch = self.peek();
                     self.next();
-                    Token::SingleQuote
+                    let offset = self.offset;
+                    let offset16 = self.offset16;
+                    let (codepoint, length) = utf8::decode_codepoint(&self.src_bytes, self.offset);
+
+                    for _ in 0..length {
+                        self.next();
+                    }
+
+                    if self.ch == '\'' {
+                        let contents = self.substring(offset, offset + length).to_string();
+                        self.next();
+                        Token::Codepoint {
+                            c: codepoint,
+                            original: contents,
+                        }
+                    } else {
+                        self.ch = ch;
+                        self.offset = offset;
+                        self.offset16 = offset16;
+                        Token::SingleQuote
+                    }
                 }
             },
 
