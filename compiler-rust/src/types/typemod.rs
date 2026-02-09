@@ -3161,6 +3161,41 @@ pub fn type_module_expr<'a>(
     type_module_expr_with_alias(tctx, env, arena, mod_expr, false)
 }
 
+/// Match OCaml `type_module_type_of` behavior for `module type of`.
+///
+/// OCaml special-cases `Pmod_ident` to avoid the regular `type_module` path,
+/// which can wrap aliases in an implicit `Tmod_constraint`.
+/// See `compiler/ml/typemod.ml` (`type_module_type_of`).
+fn type_module_type_of_expr<'a>(
+    tctx: &mut TypeCheckContext<'a>,
+    env: &Env,
+    arena: &'a ParseArena,
+    mod_expr: &ParsedModuleExpr,
+) -> TypeModResult<ModuleExpr> {
+    match &mod_expr.pmod_desc {
+        ParsedModuleExprDesc::Pmod_ident(lid) => {
+            let longident = tctx.resolve_lid(lid.txt).clone();
+            let path = lookup_module_path_by_lid(
+                &longident,
+                arena,
+                env,
+                &mut tctx.persistent_env,
+                tctx.type_ctx,
+            )
+            .unwrap_or_else(|| path_from_longident(&longident, |idx| arena.get_string(idx)));
+
+            Ok(ModuleExpr {
+                mod_desc: ModuleExprDesc::Tmod_ident(path, lid.clone()),
+                mod_loc: mod_expr.pmod_loc,
+                mod_type: ModuleType::placeholder(),
+                mod_env: EnvRef(0),
+                mod_attributes: mod_expr.pmod_attributes.clone(),
+            })
+        }
+        _ => type_module_expr(tctx, env, arena, mod_expr),
+    }
+}
+
 // ============================================================================
 // Module Type Translation
 // ============================================================================
@@ -3216,7 +3251,7 @@ fn transl_modtype<'a>(
             TMtyDesc::Tmty_with(Box::new(typed_body), vec![])
         }
         PMtyDesc::Pmty_typeof(me) => {
-            let typed_me = type_module_expr(tctx, env, arena, me)?;
+            let typed_me = type_module_type_of_expr(tctx, env, arena, me)?;
             TMtyDesc::Tmty_typeof(Box::new(typed_me))
         }
         PMtyDesc::Pmty_alias(lid) => {
