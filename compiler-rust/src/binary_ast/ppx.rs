@@ -8277,6 +8277,23 @@ pub fn rewrite_structure(structure: &[StructureItem], arena: &mut ParseArena) ->
 
     for item in structure {
         match &item.pstr_desc {
+            StructureItemDesc::Pstr_module(mb) => {
+                // OCaml structure_mapper handles module-level await here (not in structure_item mapper)
+                // and deduplicates generated module type declarations per structure.
+                if let Some((module_type_decl, transformed_mb)) =
+                    transform_module_await(mb, item.pstr_loc, arena)
+                {
+                    if let ModuleExprDesc::Pmod_ident(located_lid) = &mb.pmb_expr.pmod_desc {
+                        let module_type_name = local_module_type_name(located_lid.txt, arena);
+                        if await_context.insert(module_type_name) {
+                            result.push(module_type_decl);
+                        }
+                    }
+                    result.push(transformed_mb);
+                } else {
+                    result.extend(rewrite_structure_item(item, arena));
+                }
+            }
             StructureItemDesc::Pstr_value(_rec_flag, bindings) => {
                 // Spelunk through the ORIGINAL bindings to find await module types
                 // (before expression rewriting transforms them)
@@ -8615,24 +8632,17 @@ fn rewrite_structure_item_no_spice(item: &StructureItem, arena: &mut ParseArena)
             ),
             pstr_loc: item.pstr_loc,
         }],
-        // Module - check for @res.await transformation first, then recurse
-        StructureItemDesc::Pstr_module(mb) => {
-            // Check for module-level await: module M = @res.await ME
-            if let Some((module_type_decl, transformed_mb)) = transform_module_await(mb, item.pstr_loc, arena) {
-                vec![module_type_decl, transformed_mb]
-            } else {
-                // Normal case - just recurse into module structure
-                vec![StructureItem {
-                    pstr_desc: StructureItemDesc::Pstr_module(current::ModuleBinding {
-                        pmb_name: mb.pmb_name.clone(),
-                        pmb_expr: rewrite_module_expr(&mb.pmb_expr, arena),
-                        pmb_attributes: rewrite_attributes(&mb.pmb_attributes, arena),
-                        pmb_loc: mb.pmb_loc,
-                    }),
-                    pstr_loc: item.pstr_loc,
-                }]
-            }
-        }
+        // Module - recurse into module structure.
+        // Module-level @res.await transformation is handled in rewrite_structure.
+        StructureItemDesc::Pstr_module(mb) => vec![StructureItem {
+            pstr_desc: StructureItemDesc::Pstr_module(current::ModuleBinding {
+                pmb_name: mb.pmb_name.clone(),
+                pmb_expr: rewrite_module_expr(&mb.pmb_expr, arena),
+                pmb_attributes: rewrite_attributes(&mb.pmb_attributes, arena),
+                pmb_loc: mb.pmb_loc,
+            }),
+            pstr_loc: item.pstr_loc,
+        }],
         // Recursive modules
         StructureItemDesc::Pstr_recmodule(mbs) => {
             let new_mbs = mbs
@@ -8751,12 +8761,7 @@ fn rewrite_module_expr(
 ) -> current::ModuleExpr {
     let new_desc = match &mod_expr.pmod_desc {
         current::ModuleExprDesc::Pmod_structure(items) => {
-            current::ModuleExprDesc::Pmod_structure(
-                items
-                    .iter()
-                    .flat_map(|item| rewrite_structure_item(item, arena))
-                    .collect(),
-            )
+            current::ModuleExprDesc::Pmod_structure(rewrite_structure(items, arena))
         }
         current::ModuleExprDesc::Pmod_functor(param, mod_type, body) => {
             current::ModuleExprDesc::Pmod_functor(
