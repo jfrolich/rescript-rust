@@ -10,38 +10,38 @@ use super::marshal::MarshalWriter;
 /// Trait for types that can be serialized to OCaml Marshal format
 pub trait Marshal {
     /// Serialize this value to the Marshal writer
-    fn marshal(&self, w: &mut MarshalWriter);
+    fn marshal(&self, w: &mut MarshalWriter<'_>);
 }
 
 // ========== Primitive type implementations ==========
 
 impl Marshal for bool {
     /// Booleans are encoded as integers: false = 0, true = 1
-    fn marshal(&self, w: &mut MarshalWriter) {
+    fn marshal(&self, w: &mut MarshalWriter<'_>) {
         w.write_int(if *self { 1 } else { 0 });
     }
 }
 
 impl Marshal for i32 {
-    fn marshal(&self, w: &mut MarshalWriter) {
+    fn marshal(&self, w: &mut MarshalWriter<'_>) {
         w.write_int(*self as i64);
     }
 }
 
 impl Marshal for i64 {
-    fn marshal(&self, w: &mut MarshalWriter) {
+    fn marshal(&self, w: &mut MarshalWriter<'_>) {
         w.write_int(*self);
     }
 }
 
 impl Marshal for usize {
-    fn marshal(&self, w: &mut MarshalWriter) {
+    fn marshal(&self, w: &mut MarshalWriter<'_>) {
         w.write_int(*self as i64);
     }
 }
 
 impl Marshal for f64 {
-    fn marshal(&self, w: &mut MarshalWriter) {
+    fn marshal(&self, w: &mut MarshalWriter<'_>) {
         w.write_double(*self);
     }
 }
@@ -50,7 +50,7 @@ impl Marshal for String {
     /// Strings from source identifiers are Latin-1 encoded (each byte → char),
     /// so we convert back to Latin-1 to match OCaml's byte-level representation.
     /// This is safe for ASCII strings (the common case) as Latin-1 = UTF-8 for ASCII.
-    fn marshal(&self, w: &mut MarshalWriter) {
+    fn marshal(&self, w: &mut MarshalWriter<'_>) {
         w.write_str(self);
     }
 }
@@ -58,20 +58,20 @@ impl Marshal for String {
 impl Marshal for str {
     /// Strings from source identifiers are Latin-1 encoded (each byte → char),
     /// so we convert back to Latin-1 to match OCaml's byte-level representation.
-    fn marshal(&self, w: &mut MarshalWriter) {
+    fn marshal(&self, w: &mut MarshalWriter<'_>) {
         w.write_str(self);
     }
 }
 
 impl Marshal for Cow<'static, str> {
     /// Cow<'static, str> delegates to the underlying str slice.
-    fn marshal(&self, w: &mut MarshalWriter) {
+    fn marshal(&self, w: &mut MarshalWriter<'_>) {
         w.write_str(self);
     }
 }
 
 impl Marshal for [u8] {
-    fn marshal(&self, w: &mut MarshalWriter) {
+    fn marshal(&self, w: &mut MarshalWriter<'_>) {
         w.write_string(self);
     }
 }
@@ -80,7 +80,7 @@ impl Marshal for [u8] {
 
 impl Marshal for () {
     /// Unit () is encoded as integer 0
-    fn marshal(&self, w: &mut MarshalWriter) {
+    fn marshal(&self, w: &mut MarshalWriter<'_>) {
         w.write_int(0);
     }
 }
@@ -94,7 +94,7 @@ impl<T: Marshal> Marshal for Option<T> {
     ///
     /// Note: For Option<String> string delimiters, use write_option_string()
     /// directly to enable content-based sharing of common values like Some("js").
-    fn marshal(&self, w: &mut MarshalWriter) {
+    fn marshal(&self, w: &mut MarshalWriter<'_>) {
         match self {
             None => w.write_int(0),
             Some(v) => {
@@ -111,7 +111,7 @@ impl<T: Marshal> Marshal for Vec<T> {
     /// Lists are encoded as linked cons cells:
     /// - [] → integer 0
     /// - [a; b; c] → Block(tag=0, [a, Block(tag=0, [b, Block(tag=0, [c, 0])])])
-    fn marshal(&self, w: &mut MarshalWriter) {
+    fn marshal(&self, w: &mut MarshalWriter<'_>) {
         if self.is_empty() {
             w.write_int(0); // Empty list = int 0
         } else {
@@ -130,7 +130,7 @@ impl<T: Marshal> Marshal for Vec<T> {
 }
 
 impl<T: Marshal> Marshal for [T] {
-    fn marshal(&self, w: &mut MarshalWriter) {
+    fn marshal(&self, w: &mut MarshalWriter<'_>) {
         if self.is_empty() {
             w.write_int(0);
         } else {
@@ -148,7 +148,7 @@ impl<T: Marshal> Marshal for [T] {
 // ========== Box type ==========
 
 impl<T: Marshal> Marshal for Box<T> {
-    fn marshal(&self, w: &mut MarshalWriter) {
+    fn marshal(&self, w: &mut MarshalWriter<'_>) {
         (**self).marshal(w);
     }
 }
@@ -157,7 +157,7 @@ impl<T: Marshal> Marshal for Box<T> {
 
 impl<A: Marshal, B: Marshal> Marshal for (A, B) {
     /// Tuples are blocks with tag 0
-    fn marshal(&self, w: &mut MarshalWriter) {
+    fn marshal(&self, w: &mut MarshalWriter<'_>) {
         w.write_block_header(0, 2);
         self.0.marshal(w);
         self.1.marshal(w);
@@ -165,7 +165,7 @@ impl<A: Marshal, B: Marshal> Marshal for (A, B) {
 }
 
 impl<A: Marshal, B: Marshal, C: Marshal> Marshal for (A, B, C) {
-    fn marshal(&self, w: &mut MarshalWriter) {
+    fn marshal(&self, w: &mut MarshalWriter<'_>) {
         w.write_block_header(0, 3);
         self.0.marshal(w);
         self.1.marshal(w);
@@ -174,7 +174,7 @@ impl<A: Marshal, B: Marshal, C: Marshal> Marshal for (A, B, C) {
 }
 
 impl<A: Marshal, B: Marshal, C: Marshal, D: Marshal> Marshal for (A, B, C, D) {
-    fn marshal(&self, w: &mut MarshalWriter) {
+    fn marshal(&self, w: &mut MarshalWriter<'_>) {
         w.write_block_header(0, 4);
         self.0.marshal(w);
         self.1.marshal(w);
@@ -184,7 +184,7 @@ impl<A: Marshal, B: Marshal, C: Marshal, D: Marshal> Marshal for (A, B, C, D) {
 }
 
 impl<A: Marshal, B: Marshal, C: Marshal, D: Marshal, E: Marshal> Marshal for (A, B, C, D, E) {
-    fn marshal(&self, w: &mut MarshalWriter) {
+    fn marshal(&self, w: &mut MarshalWriter<'_>) {
         w.write_block_header(0, 5);
         self.0.marshal(w);
         self.1.marshal(w);
@@ -201,7 +201,7 @@ impl<A: Marshal, B: Marshal, C: Marshal, D: Marshal, E: Marshal> Marshal for (A,
 /// OCaml characters are integers 0-255.
 /// In ReScript, we typically have Unicode code points.
 impl Marshal for char {
-    fn marshal(&self, w: &mut MarshalWriter) {
+    fn marshal(&self, w: &mut MarshalWriter<'_>) {
         w.write_int(*self as i64);
     }
 }

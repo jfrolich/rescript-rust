@@ -26,7 +26,21 @@ use super::type_expr::{
 };
 use crate::context::IdGenerator;
 use std::cell::{Cell, RefCell};
-use typed_arena::Arena;
+use std::ops::Deref;
+
+/// Snapshot wrapper for a type descriptor.
+///
+/// This keeps call sites ergonomic (`*ctx.get_desc(t)`, `&*desc`) while
+/// avoiding long-lived borrows into arena storage.
+pub struct TypeDescSnapshot(TypeDesc);
+
+impl Deref for TypeDescSnapshot {
+    type Target = TypeDesc;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
 
 /// Type checking context.
 ///
@@ -51,21 +65,6 @@ use typed_arena::Arena;
 /// let func_type = ctx.new_arrow(tvar, int_type);
 /// ```
 pub struct TypeContext<'a> {
-    /// Type expression arena - all types are allocated here
-    arena: Arena<TypeExpr>,
-
-    /// Abbreviation memo arena
-    abbrev_arena: Arena<RefCell<AbbrevMemo>>,
-
-    /// Row field arena
-    row_field_arena: Arena<RefCell<Option<RowField>>>,
-
-    /// Commutable arena
-    commutable_arena: Arena<RefCell<Commutable>>,
-
-    /// Field kind arena
-    field_kind_arena: Arena<RefCell<Option<FieldKind>>>,
-
     /// ID generator for type IDs
     id_gen: &'a IdGenerator,
 
@@ -87,31 +86,27 @@ pub struct TypeContext<'a> {
     /// Simple abbreviations memo
     simple_abbrevs: RefCell<Option<AbbrevMemoRef>>,
 
-    /// Type expression storage (for indexed access)
-    types: RefCell<Vec<&'a TypeExpr>>,
+    /// Type expression storage (for indexed access).
+    /// Boxed values keep stable addresses as the vector grows.
+    types: RefCell<Vec<Box<TypeExpr>>>,
 
     /// Abbreviation memo storage
-    abbrevs: RefCell<Vec<&'a RefCell<AbbrevMemo>>>,
+    abbrevs: RefCell<Vec<RefCell<AbbrevMemo>>>,
 
     /// Row field storage
-    row_fields: RefCell<Vec<&'a RefCell<Option<RowField>>>>,
+    row_fields: RefCell<Vec<RefCell<Option<RowField>>>>,
 
     /// Commutable storage
-    commutables: RefCell<Vec<&'a RefCell<Commutable>>>,
+    commutables: RefCell<Vec<RefCell<Commutable>>>,
 
     /// Field kind storage
-    field_kinds: RefCell<Vec<&'a RefCell<Option<FieldKind>>>>,
+    field_kinds: RefCell<Vec<RefCell<Option<FieldKind>>>>,
 }
 
 impl<'a> TypeContext<'a> {
     /// Create a new type context.
     pub fn new(id_gen: &'a IdGenerator) -> Self {
         TypeContext {
-            arena: Arena::new(),
-            abbrev_arena: Arena::new(),
-            row_field_arena: Arena::new(),
-            commutable_arena: Arena::new(),
-            field_kind_arena: Arena::new(),
             id_gen,
             current_level: Cell::new(0),
             nongen_level: Cell::new(0),
@@ -134,15 +129,9 @@ impl<'a> TypeContext<'a> {
     /// Create a new type expression.
     fn alloc_type(&self, desc: TypeDesc, level: i32) -> TypeExprRef {
         let id = self.id_gen.next_type_id();
-        let ty = self.arena.alloc(TypeExpr::new(desc, level, id));
-
-        // Safety: We're extending the lifetime to 'a which is the arena lifetime.
-        // This is safe because the arena owns the type expression.
-        let ty_ref: &'a TypeExpr = unsafe { std::mem::transmute(ty) };
-
         let mut types = self.types.borrow_mut();
         let idx = types.len();
-        types.push(ty_ref);
+        types.push(Box::new(TypeExpr::new(desc, level, id)));
         TypeExprRef(idx)
     }
 
@@ -223,29 +212,30 @@ impl<'a> TypeContext<'a> {
     // Type Access
     // ========================================================================
 
-    /// Get a type expression by reference.
-    pub fn get_type(&self, r: TypeExprRef) -> &TypeExpr {
-        self.types.borrow()[r.0]
+    /// Access a type expression by reference.
+    fn with_type<R>(&self, r: TypeExprRef, f: impl FnOnce(&TypeExpr) -> R) -> R {
+        let types = self.types.borrow();
+        f(types[r.0].as_ref())
     }
 
     /// Get the descriptor of a type.
-    pub fn get_desc(&self, r: TypeExprRef) -> std::cell::Ref<'_, TypeDesc> {
-        self.get_type(r).desc()
+    pub fn get_desc(&self, r: TypeExprRef) -> TypeDescSnapshot {
+        self.with_type(r, |ty| TypeDescSnapshot(ty.desc().clone()))
     }
 
     /// Get the level of a type.
     pub fn get_level(&self, r: TypeExprRef) -> i32 {
-        self.get_type(r).level()
+        self.with_type(r, |ty| ty.level())
     }
 
     /// Set the level of a type.
     pub fn set_level(&self, r: TypeExprRef, level: i32) {
-        self.get_type(r).set_level(level);
+        self.with_type(r, |ty| ty.set_level(level));
     }
 
     /// Set the descriptor of a type.
     pub fn set_desc(&self, r: TypeExprRef, desc: TypeDesc) {
-        self.get_type(r).set_desc(desc);
+        self.with_type(r, |ty| ty.set_desc(desc));
     }
 
     // ========================================================================
@@ -254,12 +244,9 @@ impl<'a> TypeContext<'a> {
 
     /// Allocate an abbreviation memo.
     fn alloc_abbrev(&self, memo: AbbrevMemo) -> AbbrevMemoRef {
-        let m = self.abbrev_arena.alloc(RefCell::new(memo));
-        let m_ref: &'a RefCell<AbbrevMemo> = unsafe { std::mem::transmute(m) };
-
         let mut abbrevs = self.abbrevs.borrow_mut();
         let idx = abbrevs.len();
-        abbrevs.push(m_ref);
+        abbrevs.push(RefCell::new(memo));
         AbbrevMemoRef(idx)
     }
 
@@ -269,12 +256,9 @@ impl<'a> TypeContext<'a> {
 
     /// Allocate a row field reference.
     fn alloc_row_field(&self, field: Option<RowField>) -> RowFieldRef {
-        let f = self.row_field_arena.alloc(RefCell::new(field));
-        let f_ref: &'a RefCell<Option<RowField>> = unsafe { std::mem::transmute(f) };
-
         let mut row_fields = self.row_fields.borrow_mut();
         let idx = row_fields.len();
-        row_fields.push(f_ref);
+        row_fields.push(RefCell::new(field));
         RowFieldRef(idx)
     }
 
@@ -284,12 +268,9 @@ impl<'a> TypeContext<'a> {
 
     /// Allocate a commutable reference.
     fn alloc_commutable(&self, c: Commutable) -> CommutableRef {
-        let c_alloc = self.commutable_arena.alloc(RefCell::new(c));
-        let c_ref: &'a RefCell<Commutable> = unsafe { std::mem::transmute(c_alloc) };
-
         let mut commutables = self.commutables.borrow_mut();
         let idx = commutables.len();
-        commutables.push(c_ref);
+        commutables.push(RefCell::new(c));
         CommutableRef(idx)
     }
 
@@ -299,12 +280,9 @@ impl<'a> TypeContext<'a> {
 
     /// Allocate a field kind reference.
     fn alloc_field_kind(&self, kind: Option<FieldKind>) -> FieldKindRef {
-        let k = self.field_kind_arena.alloc(RefCell::new(kind));
-        let k_ref: &'a RefCell<Option<FieldKind>> = unsafe { std::mem::transmute(k) };
-
         let mut field_kinds = self.field_kinds.borrow_mut();
         let idx = field_kinds.len();
-        field_kinds.push(k_ref);
+        field_kinds.push(RefCell::new(kind));
         FieldKindRef(idx)
     }
 

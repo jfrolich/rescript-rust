@@ -12,49 +12,49 @@ use super::serialize::Marshal;
 // ========== Flag types (all constant constructors = integers) ==========
 
 impl Marshal for RecFlag {
-    fn marshal(&self, w: &mut MarshalWriter) {
+    fn marshal(&self, w: &mut MarshalWriter<'_>) {
         w.write_int(*self as i64);
     }
 }
 
 impl Marshal for DirectionFlag {
-    fn marshal(&self, w: &mut MarshalWriter) {
+    fn marshal(&self, w: &mut MarshalWriter<'_>) {
         w.write_int(*self as i64);
     }
 }
 
 impl Marshal for PrivateFlag {
-    fn marshal(&self, w: &mut MarshalWriter) {
+    fn marshal(&self, w: &mut MarshalWriter<'_>) {
         w.write_int(*self as i64);
     }
 }
 
 impl Marshal for MutableFlag {
-    fn marshal(&self, w: &mut MarshalWriter) {
+    fn marshal(&self, w: &mut MarshalWriter<'_>) {
         w.write_int(*self as i64);
     }
 }
 
 impl Marshal for VirtualFlag {
-    fn marshal(&self, w: &mut MarshalWriter) {
+    fn marshal(&self, w: &mut MarshalWriter<'_>) {
         w.write_int(*self as i64);
     }
 }
 
 impl Marshal for OverrideFlag {
-    fn marshal(&self, w: &mut MarshalWriter) {
+    fn marshal(&self, w: &mut MarshalWriter<'_>) {
         w.write_int(*self as i64);
     }
 }
 
 impl Marshal for ClosedFlag {
-    fn marshal(&self, w: &mut MarshalWriter) {
+    fn marshal(&self, w: &mut MarshalWriter<'_>) {
         w.write_int(*self as i64);
     }
 }
 
 impl Marshal for Variance {
-    fn marshal(&self, w: &mut MarshalWriter) {
+    fn marshal(&self, w: &mut MarshalWriter<'_>) {
         w.write_int(*self as i64);
     }
 }
@@ -69,7 +69,7 @@ impl Marshal for ArgLabel {
     ///
     /// Uses StrIdx-based sharing to match OCaml's behavior where the same
     /// string (e.g., in punned ~compare) shares memory.
-    fn marshal(&self, w: &mut MarshalWriter) {
+    fn marshal(&self, w: &mut MarshalWriter<'_>) {
         match self {
             ArgLabel::Nolabel => w.write_int(0),
             ArgLabel::Labelled(s) => {
@@ -88,7 +88,7 @@ impl Marshal for ArgLabel {
 
 impl<T: Marshal> Marshal for RecordElement<T> {
     /// RecordElement encoding: block with 3 fields (lid, x, opt)
-    fn marshal(&self, w: &mut MarshalWriter) {
+    fn marshal(&self, w: &mut MarshalWriter<'_>) {
         w.write_block_header(0, 3);
         self.lid.marshal(w);
         self.x.marshal(w);
@@ -104,7 +104,7 @@ impl Marshal for Constant {
     /// - Char(i): Block(tag=1, [i])
     /// - String(s, opt): Block(tag=2, [s, opt])
     /// - Float(s, opt): Block(tag=3, [s, opt])
-    fn marshal(&self, w: &mut MarshalWriter) {
+    fn marshal(&self, w: &mut MarshalWriter<'_>) {
         match self {
             Constant::Integer(s, opt) => {
                 w.write_block_header(0, 2);
@@ -139,7 +139,7 @@ impl Marshal for Payload {
     /// - PSig(Box::new(s)): Block(tag=1, [s])
     /// - PTyp(t): Block(tag=2, [t])
     /// - PPat(Box::new((p, e))): Block(tag=3, [p, e])
-    fn marshal(&self, w: &mut MarshalWriter) {
+    fn marshal(&self, w: &mut MarshalWriter<'_>) {
         match self {
             Payload::PStr(s) => {
                 w.write_block_header(0, 1);
@@ -165,7 +165,7 @@ impl Marshal for Payload {
 // ========== CoreType ==========
 
 impl Marshal for CoreType {
-    fn marshal(&self, w: &mut MarshalWriter) {
+    fn marshal(&self, w: &mut MarshalWriter<'_>) {
         w.write_block_header(0, 3);
         self.ptyp_desc.marshal(w);
         self.ptyp_loc.marshal(w);
@@ -188,7 +188,7 @@ impl Marshal for CoreTypeDesc {
     /// - Poly(...): Block(tag=8)
     /// - Package(...): Block(tag=9)
     /// - Extension(...): Block(tag=10)
-    fn marshal(&self, w: &mut MarshalWriter) {
+    fn marshal(&self, w: &mut MarshalWriter<'_>) {
         match self {
             CoreTypeDesc::Any => w.write_int(0),
             CoreTypeDesc::Var(s) => {
@@ -251,7 +251,7 @@ impl Marshal for RowField {
     /// RowField encoding:
     /// - Rtag(...): Block(tag=0, [label, attrs, bool, types])
     /// - Rinherit(t): Block(tag=1, [t])
-    fn marshal(&self, w: &mut MarshalWriter) {
+    fn marshal(&self, w: &mut MarshalWriter<'_>) {
         match self {
             RowField::Rtag(label, attrs, b, types) => {
                 w.write_block_header(0, 4);
@@ -272,7 +272,7 @@ impl Marshal for ObjectField {
     /// ObjectField encoding:
     /// - Otag(...): Block(tag=0, [label, attrs, type])
     /// - Oinherit(t): Block(tag=1, [t])
-    fn marshal(&self, w: &mut MarshalWriter) {
+    fn marshal(&self, w: &mut MarshalWriter<'_>) {
         match self {
             ObjectField::Otag(label, attrs, t) => {
                 w.write_block_header(0, 3);
@@ -291,7 +291,7 @@ impl Marshal for ObjectField {
 // ========== Pattern ==========
 
 impl Marshal for Pattern {
-    fn marshal(&self, w: &mut MarshalWriter) {
+    fn marshal(&self, w: &mut MarshalWriter<'_>) {
         w.write_block_header(0, 3);
         self.ppat_desc.marshal(w);
         self.ppat_loc.marshal(w);
@@ -320,7 +320,7 @@ impl Marshal for PatternDesc {
     /// - Exception: tag 14
     /// - Extension: tag 15
     /// - Open: tag 16
-    fn marshal(&self, w: &mut MarshalWriter) {
+    fn marshal(&self, w: &mut MarshalWriter<'_>) {
         match self {
             PatternDesc::Any => w.write_int(0),
             PatternDesc::Var(s) => {
@@ -406,7 +406,7 @@ impl Marshal for PatternDesc {
 // ========== Expression ==========
 
 impl Marshal for Expression {
-    fn marshal(&self, w: &mut MarshalWriter) {
+    fn marshal(&self, w: &mut MarshalWriter<'_>) {
         w.write_block_header(0, 3);
         self.pexp_desc.marshal(w);
         self.pexp_loc.marshal(w);
@@ -418,7 +418,7 @@ impl Marshal for ExpressionDesc {
     /// ExpressionDesc encoding:
     /// Constant: Unreachable (int 0)
     /// Non-constant (tags 0-34):
-    fn marshal(&self, w: &mut MarshalWriter) {
+    fn marshal(&self, w: &mut MarshalWriter<'_>) {
         match self {
             ExpressionDesc::Ident(lid) => {
                 w.write_block_header(0, 1);
@@ -615,7 +615,7 @@ impl Marshal for ExpressionDesc {
 }
 
 impl Marshal for Case {
-    fn marshal(&self, w: &mut MarshalWriter) {
+    fn marshal(&self, w: &mut MarshalWriter<'_>) {
         w.write_block_header(0, 3);
         self.pc_lhs.marshal(w);
         self.pc_guard.marshal(w);
@@ -626,7 +626,7 @@ impl Marshal for Case {
 // ========== Value binding and description ==========
 
 impl Marshal for ValueBinding {
-    fn marshal(&self, w: &mut MarshalWriter) {
+    fn marshal(&self, w: &mut MarshalWriter<'_>) {
         w.write_block_header(0, 4);
         self.pvb_pat.marshal(w);
         self.pvb_expr.marshal(w);
@@ -636,7 +636,7 @@ impl Marshal for ValueBinding {
 }
 
 impl Marshal for ValueDescription {
-    fn marshal(&self, w: &mut MarshalWriter) {
+    fn marshal(&self, w: &mut MarshalWriter<'_>) {
         w.write_block_header(0, 5);
         self.pval_name.marshal(w);
         self.pval_type.marshal(w);
@@ -661,7 +661,7 @@ impl Marshal for ValueDescription {
 // ========== Type declarations ==========
 
 impl Marshal for TypeDeclaration {
-    fn marshal(&self, w: &mut MarshalWriter) {
+    fn marshal(&self, w: &mut MarshalWriter<'_>) {
         w.write_block_header(0, 8);
         self.ptype_name.marshal(w);
         self.ptype_params.marshal(w);
@@ -678,7 +678,7 @@ impl Marshal for TypeKind {
     /// TypeKind encoding:
     /// Constant: Abstract (int 0), Open (int 1)
     /// Non-constant: Variant (tag 0), Record (tag 1)
-    fn marshal(&self, w: &mut MarshalWriter) {
+    fn marshal(&self, w: &mut MarshalWriter<'_>) {
         match self {
             TypeKind::Abstract => w.write_int(0),
             TypeKind::Variant(ctors) => {
@@ -695,7 +695,7 @@ impl Marshal for TypeKind {
 }
 
 impl Marshal for LabelDeclaration {
-    fn marshal(&self, w: &mut MarshalWriter) {
+    fn marshal(&self, w: &mut MarshalWriter<'_>) {
         w.write_block_header(0, 5);
         self.pld_name.marshal(w);
         self.pld_mutable.marshal(w);
@@ -706,7 +706,7 @@ impl Marshal for LabelDeclaration {
 }
 
 impl Marshal for ConstructorDeclaration {
-    fn marshal(&self, w: &mut MarshalWriter) {
+    fn marshal(&self, w: &mut MarshalWriter<'_>) {
         w.write_block_header(0, 5);
         self.pcd_name.marshal(w);
         self.pcd_args.marshal(w);
@@ -720,7 +720,7 @@ impl Marshal for ConstructorArguments {
     /// ConstructorArguments encoding:
     /// - Tuple: Block(tag=0, [types])
     /// - Record: Block(tag=1, [labels])
-    fn marshal(&self, w: &mut MarshalWriter) {
+    fn marshal(&self, w: &mut MarshalWriter<'_>) {
         match self {
             ConstructorArguments::Tuple(types) => {
                 w.write_block_header(0, 1);
@@ -737,7 +737,7 @@ impl Marshal for ConstructorArguments {
 // ========== Type extensions ==========
 
 impl Marshal for TypeExtension {
-    fn marshal(&self, w: &mut MarshalWriter) {
+    fn marshal(&self, w: &mut MarshalWriter<'_>) {
         w.write_block_header(0, 5);
         self.ptyext_path.marshal(w);
         self.ptyext_params.marshal(w);
@@ -748,7 +748,7 @@ impl Marshal for TypeExtension {
 }
 
 impl Marshal for ExtensionConstructor {
-    fn marshal(&self, w: &mut MarshalWriter) {
+    fn marshal(&self, w: &mut MarshalWriter<'_>) {
         w.write_block_header(0, 4);
         self.pext_name.marshal(w);
         self.pext_kind.marshal(w);
@@ -761,7 +761,7 @@ impl Marshal for ExtensionConstructorKind {
     /// ExtensionConstructorKind encoding:
     /// - Decl: Block(tag=0, [args, res])
     /// - Rebind: Block(tag=1, [lid])
-    fn marshal(&self, w: &mut MarshalWriter) {
+    fn marshal(&self, w: &mut MarshalWriter<'_>) {
         match self {
             ExtensionConstructorKind::Decl(args, res) => {
                 w.write_block_header(0, 2);
@@ -779,7 +779,7 @@ impl Marshal for ExtensionConstructorKind {
 // ========== Module types ==========
 
 impl Marshal for ModuleType {
-    fn marshal(&self, w: &mut MarshalWriter) {
+    fn marshal(&self, w: &mut MarshalWriter<'_>) {
         w.write_block_header(0, 3);
         self.pmty_desc.marshal(w);
         self.pmty_loc.marshal(w);
@@ -796,7 +796,7 @@ impl Marshal for ModuleTypeDesc {
     /// - Typeof: tag 4
     /// - Extension: tag 5
     /// - Alias: tag 6
-    fn marshal(&self, w: &mut MarshalWriter) {
+    fn marshal(&self, w: &mut MarshalWriter<'_>) {
         match self {
             ModuleTypeDesc::Ident(lid) => {
                 w.write_block_header(0, 1);
@@ -839,7 +839,7 @@ impl Marshal for WithConstraint {
     /// - Module: Block(tag=1, [lid1, lid2])
     /// - TypeSubst: Block(tag=2, [lid, decl])
     /// - ModSubst: Block(tag=3, [lid1, lid2])
-    fn marshal(&self, w: &mut MarshalWriter) {
+    fn marshal(&self, w: &mut MarshalWriter<'_>) {
         match self {
             WithConstraint::Type(lid, decl) => {
                 w.write_block_header(0, 2);
@@ -868,7 +868,7 @@ impl Marshal for WithConstraint {
 // ========== Signatures ==========
 
 impl Marshal for SignatureItem {
-    fn marshal(&self, w: &mut MarshalWriter) {
+    fn marshal(&self, w: &mut MarshalWriter<'_>) {
         w.write_block_header(0, 2);
         self.psig_desc.marshal(w);
         self.psig_loc.marshal(w);
@@ -880,7 +880,7 @@ impl Marshal for SignatureItemDesc {
     /// Non-constant: Value(0), Type(1), Typext(2), Exception(3), Module(4),
     /// Recmodule(5), Modtype(6), Open(7), Include(8), Class(9), ClassType(10),
     /// Attribute(11), Extension(12)
-    fn marshal(&self, w: &mut MarshalWriter) {
+    fn marshal(&self, w: &mut MarshalWriter<'_>) {
         match self {
             SignatureItemDesc::Value(vd) => {
                 w.write_block_header(0, 1);
@@ -941,7 +941,7 @@ impl Marshal for SignatureItemDesc {
 }
 
 impl Marshal for ModuleDeclaration {
-    fn marshal(&self, w: &mut MarshalWriter) {
+    fn marshal(&self, w: &mut MarshalWriter<'_>) {
         w.write_block_header(0, 4);
         self.pmd_name.marshal(w);
         self.pmd_type.marshal(w);
@@ -951,7 +951,7 @@ impl Marshal for ModuleDeclaration {
 }
 
 impl Marshal for ModuleTypeDeclaration {
-    fn marshal(&self, w: &mut MarshalWriter) {
+    fn marshal(&self, w: &mut MarshalWriter<'_>) {
         w.write_block_header(0, 4);
         self.pmtd_name.marshal(w);
         self.pmtd_type.marshal(w);
@@ -961,7 +961,7 @@ impl Marshal for ModuleTypeDeclaration {
 }
 
 impl Marshal for OpenDescription {
-    fn marshal(&self, w: &mut MarshalWriter) {
+    fn marshal(&self, w: &mut MarshalWriter<'_>) {
         w.write_block_header(0, 4);
         self.popen_lid.marshal(w);
         self.popen_override.marshal(w);
@@ -971,7 +971,7 @@ impl Marshal for OpenDescription {
 }
 
 impl<A: Marshal> Marshal for IncludeInfos<A> {
-    fn marshal(&self, w: &mut MarshalWriter) {
+    fn marshal(&self, w: &mut MarshalWriter<'_>) {
         w.write_block_header(0, 3);
         self.pincl_mod.marshal(w);
         self.pincl_loc.marshal(w);
@@ -982,7 +982,7 @@ impl<A: Marshal> Marshal for IncludeInfos<A> {
 // ========== Module expressions ==========
 
 impl Marshal for ModuleExpr {
-    fn marshal(&self, w: &mut MarshalWriter) {
+    fn marshal(&self, w: &mut MarshalWriter<'_>) {
         w.write_block_header(0, 3);
         self.pmod_desc.marshal(w);
         self.pmod_loc.marshal(w);
@@ -999,7 +999,7 @@ impl Marshal for ModuleExprDesc {
     /// - Constraint: tag 4
     /// - Unpack: tag 5
     /// - Extension: tag 6
-    fn marshal(&self, w: &mut MarshalWriter) {
+    fn marshal(&self, w: &mut MarshalWriter<'_>) {
         match self {
             ModuleExprDesc::Ident(lid) => {
                 w.write_block_header(0, 1);
@@ -1040,7 +1040,7 @@ impl Marshal for ModuleExprDesc {
 // ========== Structures ==========
 
 impl Marshal for StructureItem {
-    fn marshal(&self, w: &mut MarshalWriter) {
+    fn marshal(&self, w: &mut MarshalWriter<'_>) {
         w.write_block_header(0, 2);
         self.pstr_desc.marshal(w);
         self.pstr_loc.marshal(w);
@@ -1064,7 +1064,7 @@ impl Marshal for StructureItemDesc {
     /// - Include: tag 12
     /// - Attribute: tag 13
     /// - Extension: tag 14
-    fn marshal(&self, w: &mut MarshalWriter) {
+    fn marshal(&self, w: &mut MarshalWriter<'_>) {
         match self {
             StructureItemDesc::Eval(e, attrs) => {
                 w.write_block_header(0, 2);
@@ -1135,7 +1135,7 @@ impl Marshal for StructureItemDesc {
 }
 
 impl Marshal for ModuleBinding {
-    fn marshal(&self, w: &mut MarshalWriter) {
+    fn marshal(&self, w: &mut MarshalWriter<'_>) {
         w.write_block_header(0, 4);
         self.pmb_name.marshal(w);
         self.pmb_expr.marshal(w);

@@ -121,7 +121,7 @@ impl PrimListShareKind {
 /// ```
 
 #[derive(Debug)]
-pub struct MarshalWriter {
+pub struct MarshalWriter<'a> {
     /// The output buffer containing encoded data
     buffer: Vec<u8>,
 
@@ -272,8 +272,7 @@ pub struct MarshalWriter {
 
     /// Optional reference to ParseArena for LocIdx marshalling.
     /// Set via `set_arena()` before marshalling AST with LocIdx fields.
-    /// Uses raw pointer to avoid lifetime constraints.
-    arena: Option<*const ParseArena>,
+    arena: Option<&'a ParseArena>,
 
     /// Current expression index being marshalled.
     /// Set by `ExprIdx` marshalling so expression-desc writers can consult sparse side tables.
@@ -293,13 +292,13 @@ pub struct MarshalWriter {
     size_64: u32,
 }
 
-impl Default for MarshalWriter {
+impl Default for MarshalWriter<'_> {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl MarshalWriter {
+impl<'a> MarshalWriter<'a> {
     /// Create a new MarshalWriter
     pub fn new() -> Self {
         Self {
@@ -403,29 +402,21 @@ impl MarshalWriter {
     /// Set the ParseArena to use for LocIdx marshalling.
     /// Must be called before marshalling AST with LocIdx fields.
     ///
-    /// # Safety
-    /// The arena must remain valid for the duration of marshalling.
-    pub fn set_arena(&mut self, arena: &ParseArena) {
-        self.arena = Some(arena as *const ParseArena);
+    pub fn set_arena(&mut self, arena: &'a ParseArena) {
+        self.arena = Some(arena);
     }
 
     /// Get the arena reference, panics if not set.
     pub fn get_arena(&self) -> &ParseArena {
-        // SAFETY: We trust that set_arena was called with a valid arena
-        // and that the arena remains valid during marshalling.
-        unsafe {
-            self.arena
-                .expect("MarshalWriter::set_arena must be called before marshalling LocIdx")
-                .as_ref()
-                .unwrap()
-        }
+        self.arena
+            .expect("MarshalWriter::set_arena must be called before marshalling LocIdx")
     }
 
     #[inline]
     pub fn with_current_expr_idx<R>(
         &mut self,
         idx: ExprIdx,
-        f: impl FnOnce(&mut MarshalWriter) -> R,
+        f: impl FnOnce(&mut MarshalWriter<'a>) -> R,
     ) -> R {
         let prev = self.current_expr_idx;
         self.current_expr_idx = Some(idx);
@@ -1679,7 +1670,7 @@ impl MarshalWriter {
     /// - ArityIdx pointing to Some(n) → Block(tag=0, [n]), shared by ArityIdx
     pub fn write_arity_idx(&mut self, idx: ArityIdx) {
         // Get the actual arity value from the arena
-        let arity = self.arena.and_then(|ptr| unsafe { (*ptr).get_arity(idx) });
+        let arity = self.arena.and_then(|arena| arena.get_arity(idx));
 
         match arity {
             None => {

@@ -28,7 +28,7 @@ impl Marshal for Position {
     /// Uses content-based sharing: identical Position values are shared in the
     /// marshal output. This matches OCaml's behavior where the same Position
     /// pointer (e.g., loc_start == loc_end) produces shared references.
-    fn marshal(&self, w: &mut MarshalWriter) {
+    fn marshal(&self, w: &mut MarshalWriter<'_>) {
         w.write_position_shared(self);
     }
 }
@@ -51,7 +51,7 @@ impl Marshal for Location {
     /// Location.none) are shared in the marshal output. This matches OCaml's
     /// behavior where Location.none is a module-level let binding and all
     /// references share the same physical pointer.
-    fn marshal(&self, w: &mut MarshalWriter) {
+    fn marshal(&self, w: &mut MarshalWriter<'_>) {
         w.write_location_shared(self);
     }
 }
@@ -67,7 +67,7 @@ impl<T: Marshal> Marshal for Located<T> {
     /// ```
     ///
     /// Encoded as a block with tag 0 and 2 fields.
-    fn marshal(&self, w: &mut MarshalWriter) {
+    fn marshal(&self, w: &mut MarshalWriter<'_>) {
         w.write_block_header(0, 2);
         self.txt.marshal(w);
         self.loc.marshal(w);
@@ -80,7 +80,7 @@ impl<T: Marshal> Marshal for Located<T> {
 impl Marshal for PosIdx {
     /// Serialize a PosIdx by looking up the position in the arena.
     /// Requires that MarshalWriter::set_arena() was called first.
-    fn marshal(&self, w: &mut MarshalWriter) {
+    fn marshal(&self, w: &mut MarshalWriter<'_>) {
         w.write_pos_idx(*self);
     }
 }
@@ -88,7 +88,7 @@ impl Marshal for PosIdx {
 impl Marshal for LocIdx {
     /// Serialize a LocIdx by looking up the location in the arena.
     /// Requires that MarshalWriter::set_arena() was called first.
-    fn marshal(&self, w: &mut MarshalWriter) {
+    fn marshal(&self, w: &mut MarshalWriter<'_>) {
         w.write_loc_idx(*self);
     }
 }
@@ -97,7 +97,7 @@ impl Marshal for StrIdx {
     /// Serialize a StrIdx by looking up the string in the arena.
     /// Requires that MarshalWriter::set_arena() was called first.
     /// Same StrIdx = same object, will be shared in output via back-references.
-    fn marshal(&self, w: &mut MarshalWriter) {
+    fn marshal(&self, w: &mut MarshalWriter<'_>) {
         w.write_str_idx(*self);
     }
 }
@@ -112,7 +112,7 @@ impl<T: Marshal> Marshal for parse_arena::Located<T> {
     ///
     /// Encoded as a block with tag 0 and 2 fields.
     /// Uses arena-based LocIdx for the location.
-    fn marshal(&self, w: &mut MarshalWriter) {
+    fn marshal(&self, w: &mut MarshalWriter<'_>) {
         w.write_block_header(0, 2);
         self.txt.marshal(w);
         self.loc.marshal(w);
@@ -122,55 +122,40 @@ impl<T: Marshal> Marshal for parse_arena::Located<T> {
 // ========== AST Node Index Types ==========
 //
 // These Marshal implementations look up the actual AST node from the arena
-// and delegate to the node's own Marshal implementation. We use a raw pointer
-// cast to avoid borrow conflicts between the arena reference (from get_arena())
-// and the mutable MarshalWriter reference (needed for marshal()).
-//
-// SAFETY: The arena is stored as a raw pointer in MarshalWriter and remains
-// valid for the entire marshalling process. The returned references point into
-// the arena's Vec storage which is not modified during marshalling.
+// and delegate to the node's own Marshal implementation. We clone the looked-up
+// node to avoid borrowing conflicts with the mutable writer.
 
 impl Marshal for ExprIdx {
-    fn marshal(&self, w: &mut MarshalWriter) {
-        let expr: &Expression = unsafe {
-            &*(w.get_arena().get_expr(*self) as *const Expression)
-        };
+    fn marshal(&self, w: &mut MarshalWriter<'_>) {
+        let expr = w.get_arena().get_expr(*self).clone();
         w.with_current_expr_idx(*self, |w| expr.marshal(w));
     }
 }
 
 impl Marshal for PatIdx {
-    fn marshal(&self, w: &mut MarshalWriter) {
-        let pat: &Pattern = unsafe {
-            &*(w.get_arena().get_pat(*self) as *const Pattern)
-        };
+    fn marshal(&self, w: &mut MarshalWriter<'_>) {
+        let pat = w.get_arena().get_pat(*self).clone();
         pat.marshal(w);
     }
 }
 
 impl Marshal for CoreTypeIdx {
-    fn marshal(&self, w: &mut MarshalWriter) {
-        let ct: &CoreType = unsafe {
-            &*(w.get_arena().get_core_type(*self) as *const CoreType)
-        };
+    fn marshal(&self, w: &mut MarshalWriter<'_>) {
+        let ct = w.get_arena().get_core_type(*self).clone();
         ct.marshal(w);
     }
 }
 
 impl Marshal for ModExprIdx {
-    fn marshal(&self, w: &mut MarshalWriter) {
-        let me: &ModuleExpr = unsafe {
-            &*(w.get_arena().get_mod_expr(*self) as *const ModuleExpr)
-        };
+    fn marshal(&self, w: &mut MarshalWriter<'_>) {
+        let me = w.get_arena().get_mod_expr(*self).clone();
         me.marshal(w);
     }
 }
 
 impl Marshal for ModTypeIdx {
-    fn marshal(&self, w: &mut MarshalWriter) {
-        let mt: &ModuleType = unsafe {
-            &*(w.get_arena().get_mod_type(*self) as *const ModuleType)
-        };
+    fn marshal(&self, w: &mut MarshalWriter<'_>) {
+        let mt = w.get_arena().get_mod_type(*self).clone();
         mt.marshal(w);
     }
 }
@@ -180,7 +165,7 @@ impl Marshal for ModTypeIdx {
 impl Marshal for LidentIdx {
     /// Serialize a LidentIdx by looking up the longident in the arena.
     /// Requires that MarshalWriter::set_arena() was called first.
-    fn marshal(&self, w: &mut MarshalWriter) {
+    fn marshal(&self, w: &mut MarshalWriter<'_>) {
         w.write_lident_idx(*self);
     }
 }
@@ -199,7 +184,7 @@ impl Marshal for Longident {
     /// All constructors are non-constant (have data), so they all use block tags.
     /// Uses StrIdx-based sharing to match OCaml's behavior where the same
     /// string (e.g., "compare" in both a label and identifier) shares memory.
-    fn marshal(&self, w: &mut MarshalWriter) {
+    fn marshal(&self, w: &mut MarshalWriter<'_>) {
         match self {
             Longident::Lident(s) => {
                 w.write_block_header(0, 1);

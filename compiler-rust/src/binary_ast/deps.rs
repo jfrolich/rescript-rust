@@ -73,52 +73,40 @@ impl<'a> DependencyCollector<'a> {
     }
 
     // ========== Arena index helper methods ==========
-    //
-    // These helper methods bridge the borrow checker gap when we need to look up
-    // an arena-indexed AST node and then recursively walk it. The arena is never
-    // mutated during dependency collection, so the raw pointer indirection is safe.
 
     fn add_expr_idx(&mut self, idx: ExprIdx) {
-        let expr: *const Expression = self.arena.get_expr(idx);
-        // SAFETY: add_expression only mutates self.deps and self.bound_modules,
-        // never self.arena, so the pointer remains valid throughout the call.
-        self.add_expression(unsafe { &*expr });
+        let expr = self.arena.get_expr(idx).clone();
+        self.add_expression(&expr);
     }
 
     fn add_pat_idx(&mut self, idx: PatIdx) {
-        let pat: *const Pattern = self.arena.get_pat(idx);
-        // SAFETY: same as add_expr_idx
-        self.add_pattern(unsafe { &*pat });
+        let pat = self.arena.get_pat(idx).clone();
+        self.add_pattern(&pat);
     }
 
     fn add_pat_idx_collecting_unpack(&mut self, idx: PatIdx) -> HashSet<String> {
-        let pat: *const Pattern = self.arena.get_pat(idx);
-        // SAFETY: same as add_expr_idx
-        self.add_pattern_collecting_unpack(unsafe { &*pat })
+        let pat = self.arena.get_pat(idx).clone();
+        self.add_pattern_collecting_unpack(&pat)
     }
 
     fn add_pat_idx_inner(&mut self, idx: PatIdx, unpack_names: &mut HashSet<String>) {
-        let pat: *const Pattern = self.arena.get_pat(idx);
-        // SAFETY: same as add_expr_idx
-        self.add_pattern_inner(unsafe { &*pat }, unpack_names);
+        let pat = self.arena.get_pat(idx).clone();
+        self.add_pattern_inner(&pat, unpack_names);
     }
 
     fn add_core_type_idx(&mut self, idx: CoreTypeIdx) {
-        let ty: *const CoreType = self.arena.get_core_type(idx);
-        // SAFETY: same as add_expr_idx
-        self.add_core_type(unsafe { &*ty });
+        let ty = self.arena.get_core_type(idx).clone();
+        self.add_core_type(&ty);
     }
 
     fn add_mod_expr_idx(&mut self, idx: ModExprIdx) {
-        let me: *const ModuleExpr = self.arena.get_mod_expr(idx);
-        // SAFETY: same as add_expr_idx
-        self.add_module_expr(unsafe { &*me });
+        let me = self.arena.get_mod_expr(idx).clone();
+        self.add_module_expr(&me);
     }
 
     fn add_mod_type_idx(&mut self, idx: ModTypeIdx) {
-        let mt: *const ModuleType = self.arena.get_mod_type(idx);
-        // SAFETY: same as add_expr_idx
-        self.add_module_type(unsafe { &*mt });
+        let mt = self.arena.get_mod_type(idx).clone();
+        self.add_module_type(&mt);
     }
 
     // ========== Longident methods ==========

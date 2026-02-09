@@ -273,7 +273,7 @@ fn transform_value_bindings(
 /// Returns (wrapper_expr, has_forward_ref, inner_expression)
 /// wrapper_expr is the original wrapper (e.g., React.forwardRef) expression with its source location
 fn spelunk_for_fun_expression<'a>(arena: &'a ParseArena, expr_idx: ExprIdx) -> (Option<&'a Expression>, bool, &'a Expression) {
-    let expr: &Expression = unsafe { &*(arena.get_expr(expr_idx) as *const Expression) };
+    let expr: &Expression = arena.get_expr(expr_idx);
     match &*expr.pexp_desc {
         // let make = (~prop) => ...
         ExpressionDesc::Pexp_fun(_) | ExpressionDesc::Pexp_newtype(_) => {
@@ -288,7 +288,7 @@ fn spelunk_for_fun_expression<'a>(arena: &'a ParseArena, expr_idx: ExprIdx) -> (
         // let make = React.forwardRef((~prop) => ...)
         ExpressionDesc::Pexp_apply(apply_inner) if apply_inner.args.len() == 1 && matches!(&apply_inner.args[0].0, ArgLabel::Nolabel)  => { let PexpApply { ref funct, ref args, .. } = **apply_inner;
             let (_, _, inner_expr) = spelunk_for_fun_expression(arena, args[0].1);
-            let funct_expr: &Expression = unsafe { &*(arena.get_expr(*funct) as *const Expression) };
+            let funct_expr: &Expression = arena.get_expr(*funct);
             let has_forward_ref = is_forward_ref(arena, funct_expr);
             // Return the original funct expression (e.g., React.forwardRef) to preserve its source location
             (if has_forward_ref { Some(funct_expr) } else { None }, has_forward_ref, inner_expr)
@@ -1513,17 +1513,17 @@ fn get_function_body(arena: &ParseArena, expr: &Expression) -> Expression {
     match &*expr.pexp_desc {
         ExpressionDesc::Pexp_fun(inner) => {
             let PexpFun { ref rhs, .. } = **inner;
-            let rhs_expr: &Expression = unsafe { &*(arena.get_expr(*rhs) as *const Expression) };
+            let rhs_expr: &Expression = arena.get_expr(*rhs);
             get_function_body(arena, rhs_expr)
         }
         ExpressionDesc::Pexp_newtype(inner) => {
             let (_, ref body_idx) = **inner;
-            let body: &Expression = unsafe { &*(arena.get_expr(*body_idx) as *const Expression) };
+            let body: &Expression = arena.get_expr(*body_idx);
             get_function_body(arena, body)
         }
         ExpressionDesc::Pexp_constraint(inner) => {
             let (ref inner_idx, _) = **inner;
-            let inner: &Expression = unsafe { &*(arena.get_expr(*inner_idx) as *const Expression) };
+            let inner: &Expression = arena.get_expr(*inner_idx);
             get_function_body(arena, inner)
         }
         _ => expr.clone(),
@@ -1919,7 +1919,7 @@ fn collect_prop_types_rec(
 ) {
     if let CoreTypeDesc::Ptyp_arrow(ptyp_inner) = &*typ.ptyp_desc {
         let (ref arg, ref ret_idx, ref _arity) = **ptyp_inner;
-        let ret: &CoreType = unsafe { &*(arena.get_core_type(*ret_idx) as *const CoreType) };
+        let ret: &CoreType = arena.get_core_type(*ret_idx);
         let label = &arg.lbl;
         if is_labelled(label) || is_optional(label) {
             // OCaml uses different locations based on whether return is another arrow:
@@ -2341,7 +2341,7 @@ fn extract_args_rec(arena: &ParseArena, expr: &Expression, args: &mut Vec<Extrac
             {
                 if matches!(arg_label, ArgLabel::Nolabel) {
                     // Continue extracting from body even for skipped args (e.g., forwardRef (_, _ref) => ...)
-                    let rhs_expr: &Expression = unsafe { &*(arena.get_expr(*rhs) as *const Expression) };
+                    let rhs_expr: &Expression = arena.get_expr(*rhs);
                     extract_args_rec(arena, rhs_expr, args, newtypes);
                     return;
                 }
@@ -2360,7 +2360,7 @@ fn extract_args_rec(arena: &ParseArena, expr: &Expression, args: &mut Vec<Extrac
                     type_,
                 });
 
-                let rhs_expr: &Expression = unsafe { &*(arena.get_expr(*rhs) as *const Expression) };
+                let rhs_expr: &Expression = arena.get_expr(*rhs);
                 extract_args_rec(arena, rhs_expr, args, newtypes);
             } else if matches!(arg_label, ArgLabel::Nolabel) {
                 // For forwardRef, capture unlabeled 'ref' or '_ref' argument
@@ -2377,19 +2377,19 @@ fn extract_args_rec(arena: &ParseArena, expr: &Expression, args: &mut Vec<Extrac
                     });
                 }
                 // Continue extracting from body even for ref
-                let rhs_expr: &Expression = unsafe { &*(arena.get_expr(*rhs) as *const Expression) };
+                let rhs_expr: &Expression = arena.get_expr(*rhs);
                 extract_args_rec(arena, rhs_expr, args, newtypes);
             }
         }
         ExpressionDesc::Pexp_newtype(inner) => {
             let (ref name, ref body_idx) = **inner;
             newtypes.push(name.clone());
-            let body: &Expression = unsafe { &*(arena.get_expr(*body_idx) as *const Expression) };
+            let body: &Expression = arena.get_expr(*body_idx);
             extract_args_rec(arena, body, args, newtypes);
         }
         ExpressionDesc::Pexp_constraint(inner) => {
             let (ref inner_idx, _) = **inner;
-            let inner: &Expression = unsafe { &*(arena.get_expr(*inner_idx) as *const Expression) };
+            let inner: &Expression = arena.get_expr(*inner_idx);
             extract_args_rec(arena, inner, args, newtypes);
         }
         _ => {}

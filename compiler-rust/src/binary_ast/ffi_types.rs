@@ -22,7 +22,7 @@ pub enum Delim {
 }
 
 impl Marshal for Delim {
-    fn marshal(&self, w: &mut MarshalWriter) {
+    fn marshal(&self, w: &mut MarshalWriter<'_>) {
         match self {
             Delim::DNone => w.write_int(0),
             Delim::DStarJ => w.write_int(1),
@@ -40,7 +40,7 @@ pub enum Cst {
 }
 
 impl Marshal for Cst {
-    fn marshal(&self, w: &mut MarshalWriter) {
+    fn marshal(&self, w: &mut MarshalWriter<'_>) {
         match self {
             Cst::ArgIntLit(i) => {
                 w.write_block_header(0, 1);
@@ -64,7 +64,7 @@ pub enum LabelNoname {
 }
 
 impl Marshal for LabelNoname {
-    fn marshal(&self, w: &mut MarshalWriter) {
+    fn marshal(&self, w: &mut MarshalWriter<'_>) {
         match self {
             LabelNoname::ArgLabel => w.write_int(0),
             LabelNoname::ArgEmpty => w.write_int(1),
@@ -82,7 +82,7 @@ pub enum Label {
 }
 
 impl Marshal for Label {
-    fn marshal(&self, w: &mut MarshalWriter) {
+    fn marshal(&self, w: &mut MarshalWriter<'_>) {
         match self {
             Label::ObjEmpty => w.write_int(0),
             Label::ObjLabel { name } => {
@@ -112,7 +112,7 @@ pub enum Attr {
 }
 
 impl Marshal for Attr {
-    fn marshal(&self, w: &mut MarshalWriter) {
+    fn marshal(&self, w: &mut MarshalWriter<'_>) {
         match self {
             Attr::PolyVarString { descr } => {
                 w.write_block_header(0, 1);
@@ -158,7 +158,7 @@ pub struct Param {
 }
 
 impl Marshal for Param {
-    fn marshal(&self, w: &mut MarshalWriter) {
+    fn marshal(&self, w: &mut MarshalWriter<'_>) {
         w.write_block_header(0, 2);
         self.arg_type.marshal(w);
         self.arg_label.marshal(w);
@@ -173,7 +173,7 @@ pub struct ObjParam {
 }
 
 impl Marshal for ObjParam {
-    fn marshal(&self, w: &mut MarshalWriter) {
+    fn marshal(&self, w: &mut MarshalWriter<'_>) {
         w.write_block_header(0, 2);
         self.obj_arg_type.marshal(w);
         self.obj_arg_label.marshal(w);
@@ -190,7 +190,7 @@ pub enum ModuleBindName {
 }
 
 impl Marshal for ModuleBindName {
-    fn marshal(&self, w: &mut MarshalWriter) {
+    fn marshal(&self, w: &mut MarshalWriter<'_>) {
         match self {
             ModuleBindName::PhintName(s) => {
                 w.write_block_header(0, 1);
@@ -213,7 +213,7 @@ pub struct ExternalModuleName {
 }
 
 impl Marshal for ExternalModuleName {
-    fn marshal(&self, w: &mut MarshalWriter) {
+    fn marshal(&self, w: &mut MarshalWriter<'_>) {
         w.write_block_header(0, 3);
         w.write_string(self.bundle.as_bytes());
         self.module_bind_name.marshal(w);
@@ -278,7 +278,7 @@ pub enum ExternalSpec {
 }
 
 impl Marshal for ExternalSpec {
-    fn marshal(&self, w: &mut MarshalWriter) {
+    fn marshal(&self, w: &mut MarshalWriter<'_>) {
         match self {
             ExternalSpec::JsVar { name, external_module_name, scopes } => {
                 w.write_block_header(0, 3);
@@ -353,7 +353,7 @@ pub enum ReturnWrapper {
 }
 
 impl Marshal for ReturnWrapper {
-    fn marshal(&self, w: &mut MarshalWriter) {
+    fn marshal(&self, w: &mut MarshalWriter<'_>) {
         match self {
             ReturnWrapper::ReturnUnset => w.write_int(0),
             ReturnWrapper::ReturnIdentity => w.write_int(1),
@@ -372,7 +372,7 @@ pub enum Params {
 }
 
 impl Marshal for Params {
-    fn marshal(&self, w: &mut MarshalWriter) {
+    fn marshal(&self, w: &mut MarshalWriter<'_>) {
         match self {
             Params::Params(params) => {
                 w.write_block_header(0, 1);
@@ -400,7 +400,7 @@ pub enum FfiType {
 }
 
 impl Marshal for FfiType {
-    fn marshal(&self, w: &mut MarshalWriter) {
+    fn marshal(&self, w: &mut MarshalWriter<'_>) {
         match self {
             FfiType::FfiBs { params, return_wrapper, external_spec } => {
                 w.write_block_header(0, 3);
@@ -432,7 +432,7 @@ pub struct ConstructorTag {
 }
 
 impl Marshal for ConstructorTag {
-    fn marshal(&self, w: &mut MarshalWriter) {
+    fn marshal(&self, w: &mut MarshalWriter<'_>) {
         w.write_block_header(0, 3);
         self.cstr_name.marshal(w);
         w.write_int(self.const_);
@@ -447,7 +447,7 @@ pub struct Tag {
 }
 
 impl Marshal for Tag {
-    fn marshal(&self, w: &mut MarshalWriter) {
+    fn marshal(&self, w: &mut MarshalWriter<'_>) {
         w.write_block_header(0, 1);
         w.write_string(self.name.as_bytes());
     }
@@ -463,7 +463,7 @@ pub enum PointerInfo {
 }
 
 impl Marshal for PointerInfo {
-    fn marshal(&self, w: &mut MarshalWriter) {
+    fn marshal(&self, w: &mut MarshalWriter<'_>) {
         match self {
             PointerInfo::None => w.write_int(0),
             PointerInfo::PtConstructor(tag) => {
@@ -487,7 +487,7 @@ pub enum TagInfo {
 }
 
 impl Marshal for TagInfo {
-    fn marshal(&self, w: &mut MarshalWriter) {
+    fn marshal(&self, w: &mut MarshalWriter<'_>) {
         match self {
             TagInfo::Blk(fields) => {
                 w.write_block_header(0, 1);
@@ -521,7 +521,7 @@ pub enum LamConstant {
 }
 
 impl Marshal for LamConstant {
-    fn marshal(&self, w: &mut MarshalWriter) {
+    fn marshal(&self, w: &mut MarshalWriter<'_>) {
         match self {
             LamConstant::ConstJsNull => w.write_int(0),
             LamConstant::ConstJsUndefined { is_unit } => {
@@ -574,7 +574,7 @@ impl Marshal for LamConstant {
 
 // ========== Helper functions ==========
 
-fn marshal_option<T>(w: &mut MarshalWriter, opt: &Option<T>, f: impl FnOnce(&mut MarshalWriter, &T)) {
+fn marshal_option<T>(w: &mut MarshalWriter<'_>, opt: &Option<T>, f: impl FnOnce(&mut MarshalWriter<'_>, &T)) {
     match opt {
         None => w.write_int(0),
         Some(val) => {
@@ -590,7 +590,7 @@ fn marshal_option<T>(w: &mut MarshalWriter, opt: &Option<T>, f: impl FnOnce(&mut
 /// OCaml shares them because the same string pointer is used for both fields.
 /// We replicate this by writing the first string, recording its object index,
 /// then writing a shared reference if the second string is equal.
-fn marshal_string_pair_list(w: &mut MarshalWriter, list: &[(String, String)]) {
+fn marshal_string_pair_list(w: &mut MarshalWriter<'_>, list: &[(String, String)]) {
     if list.is_empty() {
         w.write_int(0);
         return;
@@ -621,7 +621,7 @@ fn marshal_string_pair_list(w: &mut MarshalWriter, list: &[(String, String)]) {
     }
 }
 
-fn marshal_list<T>(w: &mut MarshalWriter, list: &[T], f: impl Fn(&mut MarshalWriter, &T)) {
+fn marshal_list<T>(w: &mut MarshalWriter<'_>, list: &[T], f: impl Fn(&mut MarshalWriter<'_>, &T)) {
     // OCaml lists are encoded as linked cons cells
     // [] is int 0
     // [a; b; c] is Block(0, [a, Block(0, [b, Block(0, [c, int 0])])])
@@ -648,14 +648,14 @@ fn marshal_list<T>(w: &mut MarshalWriter, list: &[T], f: impl Fn(&mut MarshalWri
     }
 }
 
-fn marshal_string_list(w: &mut MarshalWriter, list: &[String]) {
+fn marshal_string_list(w: &mut MarshalWriter<'_>, list: &[String]) {
     if list.is_empty() {
         w.write_int(0);
         return;
     }
 
     // Build list from end
-    fn build_list(w: &mut MarshalWriter, list: &[String], idx: usize) {
+    fn build_list(w: &mut MarshalWriter<'_>, list: &[String], idx: usize) {
         if idx >= list.len() {
             w.write_int(0); // nil
         } else {
@@ -668,7 +668,7 @@ fn marshal_string_list(w: &mut MarshalWriter, list: &[String]) {
     build_list(w, list, 0);
 }
 
-fn marshal_hashtbl(w: &mut MarshalWriter, items: &[(String, String)]) {
+fn marshal_hashtbl(w: &mut MarshalWriter<'_>, items: &[(String, String)]) {
     // OCaml's Hashtbl serialization format
     // This is a simplified version - real hashtables have bucket structure
     // For simplicity, we just store as a list of key-value pairs

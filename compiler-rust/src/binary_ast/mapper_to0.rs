@@ -112,42 +112,31 @@ impl<'a> Mapper<'a> {
 
     // ========== Arena index lookup helpers ==========
     // These methods look up an arena-indexed AST node and map it.
-    // They use unsafe pointer dereferencing to work around the borrow conflict
-    // (self.arena is &mut, but we need to both read from it and call &mut self methods).
+    // We clone the looked-up node to avoid borrow conflicts (`self.arena` is `&mut`).
 
     fn map_expr_idx(&mut self, idx: ExprIdx) -> pt0::Expression {
-        let expr: &current::Expression = unsafe {
-            &*(self.arena.get_expr(idx) as *const current::Expression)
-        };
-        self.map_expression_with_owner(expr, Some(idx))
+        let expr = self.arena.get_expr(idx).clone();
+        self.map_expression_with_owner(&expr, Some(idx))
     }
 
     fn map_pat_idx(&mut self, idx: PatIdx) -> pt0::Pattern {
-        let pat: &current::Pattern = unsafe {
-            &*(self.arena.get_pat(idx) as *const current::Pattern)
-        };
-        self.map_pattern(pat)
+        let pat = self.arena.get_pat(idx).clone();
+        self.map_pattern(&pat)
     }
 
     fn map_core_type_idx(&mut self, idx: CoreTypeIdx) -> pt0::CoreType {
-        let ct: &current::CoreType = unsafe {
-            &*(self.arena.get_core_type(idx) as *const current::CoreType)
-        };
-        self.map_core_type(ct)
+        let ct = self.arena.get_core_type(idx).clone();
+        self.map_core_type(&ct)
     }
 
     fn map_mod_expr_idx(&mut self, idx: ModExprIdx) -> pt0::ModuleExpr {
-        let me: &current::ModuleExpr = unsafe {
-            &*(self.arena.get_mod_expr(idx) as *const current::ModuleExpr)
-        };
-        self.map_module_expr(me)
+        let me = self.arena.get_mod_expr(idx).clone();
+        self.map_module_expr(&me)
     }
 
     fn map_mod_type_idx(&mut self, idx: ModTypeIdx) -> pt0::ModuleType {
-        let mt: &current::ModuleType = unsafe {
-            &*(self.arena.get_mod_type(idx) as *const current::ModuleType)
-        };
-        self.map_module_type(mt)
+        let mt = self.arena.get_mod_type(idx).clone();
+        self.map_module_type(&mt)
     }
 
     // ========== Public API methods ==========
@@ -787,9 +776,7 @@ impl<'a> Mapper<'a> {
                 partial,
                 transformed_jsx, } = &**inner;
                 // Look up the function expression from arena
-                let funct: &current::Expression = unsafe {
-                    &*(self.arena.get_expr(*funct_idx) as *const current::Expression)
-                };
+                let funct = self.arena.get_expr(*funct_idx).clone();
                 // Convert operators for parsetree0 compatibility
                 // Check if this is a binary operator application that needs conversion
                 let converted_funct = if args.len() == 2
@@ -837,10 +824,10 @@ impl<'a> Mapper<'a> {
                             pexp_attributes: self.map_attributes(&funct.pexp_attributes),
                         }
                     } else {
-                        self.map_expression_with_owner(funct, Some(*funct_idx))
+                        self.map_expression_with_owner(&funct, Some(*funct_idx))
                     }
                 } else {
-                    self.map_expression_with_owner(funct, Some(*funct_idx))
+                    self.map_expression_with_owner(&funct, Some(*funct_idx))
                 };
 
                 let mut mapped_args = Vec::with_capacity(args.len());
