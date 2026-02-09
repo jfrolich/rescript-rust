@@ -5625,8 +5625,9 @@ fn type_letmodule(
         }
     }
 
-    fn replace_letmodule_local_paths(
-        ctx: &TypeContext<'_>,
+    fn replace_letmodule_local_paths<'a>(
+        ctx: &'a TypeContext<'a>,
+        env: &Env,
         ty: TypeExprRef,
         module_id: &Ident,
         replacements: &mut HashMap<String, TypeExprRef>,
@@ -5637,25 +5638,50 @@ fn type_letmodule(
             return;
         }
 
-        let replacement = match &*ctx.get_desc(ty) {
+        let local_path = match &*ctx.get_desc(ty) {
             TypeDesc::Tconstr { path, .. } if path_root_is_module(path, module_id) => {
-                let key = path.name();
-                Some(
-                    *replacements
-                        .entry(key)
-                        .or_insert_with(|| ctx.new_var(None)),
-                )
+                Some(path.clone())
             }
             _ => None,
         };
 
-        if let Some(replacement_ty) = replacement {
+        if let Some(local_path) = local_path {
+            // Match OCaml `Ctype.nondep_type`: for local module-rooted paths,
+            // first try to remove the dependency via manifest expansion.
+            let expanded = crate::types::ctype::expand_head(ctx, env, ty);
+            let expanded = ctx.repr(expanded);
+            if expanded != ty {
+                crate::types::link_type(ctx, ty, expanded);
+                replace_letmodule_local_paths(
+                    ctx,
+                    env,
+                    expanded,
+                    module_id,
+                    replacements,
+                    seen,
+                );
+                return;
+            }
+
+            // If no manifest expansion is available, keep the existing fallback:
+            // abstract this module-rooted constructor with a shared fresh variable.
+            let key = local_path.name();
+            let replacement_ty = *replacements
+                .entry(key)
+                .or_insert_with(|| ctx.new_var(None));
             crate::types::link_type(ctx, ty, replacement_ty);
             return;
         }
 
         crate::types::iter_type_expr(ctx, ty, |child| {
-            replace_letmodule_local_paths(ctx, child, module_id, replacements, seen);
+            replace_letmodule_local_paths(
+                ctx,
+                env,
+                child,
+                module_id,
+                replacements,
+                seen,
+            );
         });
     }
 
@@ -5761,6 +5787,7 @@ fn type_letmodule(
         let mut seen: HashSet<TypeExprRef> = HashSet::new();
         replace_letmodule_local_paths(
             ctx,
+            &body_env,
             rewritten_ty,
             &mod_id,
             &mut replacements,
@@ -5768,6 +5795,7 @@ fn type_letmodule(
         );
         replace_letmodule_local_paths(
             ctx,
+            &body_env,
             expected_ty,
             &mod_id,
             &mut replacements,
@@ -5776,6 +5804,7 @@ fn type_letmodule(
         for (_id, value_desc) in env.iter_values() {
             replace_letmodule_local_paths(
                 ctx,
+                &body_env,
                 value_desc.val_type,
                 &mod_id,
                 &mut replacements,
