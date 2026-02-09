@@ -514,7 +514,6 @@ fn try_expand_head<'a>(
     let desc = ctx.get_desc(ty);
     match &*desc {
         TypeDesc::Tconstr { path, args, .. } => {
-            let name = path.head_name().to_string();
             let args = args.clone();
             let path = path.clone();
 
@@ -532,7 +531,22 @@ fn try_expand_head<'a>(
 
             drop(desc);
 
-            // 1. Try stamp-based global store (precise, for CMI types with non-zero stamps)
+            // 1. Prefer environment lookup (matches OCaml Env.find_type behavior).
+            if let Ok(env_decl) = env.lookup_type(&path) {
+                if let Some(manifest) = env_decl.type_manifest {
+                    let params = &env_decl.type_params;
+                    if params.is_empty() {
+                        return Some(instance(ctx, manifest));
+                    } else if params.len() == args.len() {
+                        return Some(subst_type(ctx, &params.clone(), &args, manifest));
+                    }
+                    return None;
+                }
+                // Type found in env but no manifest => abstract type.
+                return None;
+            }
+
+            // 2. Try stamp-based global store (for CMI types with non-zero stamps)
             if let Some(stamp) = stamp {
                 if let Some(store_decl) = ctx.find_type_decl_by_stamp(stamp) {
                     if let Some(manifest) = store_decl.type_manifest {
@@ -546,11 +560,10 @@ fn try_expand_head<'a>(
                             return Some(subst_type(ctx, &params.clone(), &args, manifest));
                         }
                     }
-                    return None;
                 }
             }
 
-            // 2. Try full qualified path lookup (for Pdot paths like Js.Promise.t)
+            // 3. Try full qualified path lookup (for Pdot paths like Js.Promise.t)
             if let Some(ref _path_name) = full_path_name {
                 // First check cached path store
                 if let Some(store_decl) = ctx.find_type_decl_by_path(_path_name) {
@@ -562,7 +575,6 @@ fn try_expand_head<'a>(
                             return Some(subst_type(ctx, &params.clone(), &args, manifest));
                         }
                     }
-                    return None;
                 }
 
                 // Not cached — resolve by loading CMI files and walking module signatures
@@ -575,10 +587,9 @@ fn try_expand_head<'a>(
                             return Some(subst_type(ctx, &params.clone(), &args, manifest));
                         }
                     }
-                    return None;
                 }
 
-                // 2c. Try resolving Pdot paths through local env modules
+                // 3c. Try resolving Pdot paths through local env modules
                 // For paths like Pdot(Pident(Ord), "t"), look up module Ord in env,
                 // get its signature, and find type t in it
                 if let Some(decl) = resolve_type_through_env(ctx, env, &path) {
@@ -590,39 +601,12 @@ fn try_expand_head<'a>(
                             return Some(subst_type(ctx, &params.clone(), &args, manifest));
                         }
                     }
-                    return None;
                 }
             }
 
-            // 3. Try env by path (ident-based first, then name fallback)
-            if let Ok(env_decl) = env.lookup_type(&path) {
-                if let Some(manifest) = env_decl.type_manifest {
-                    let params = &env_decl.type_params;
-                    if params.is_empty() {
-                        return Some(instance(ctx, manifest));
-                    } else if params.len() == args.len() {
-                        return Some(subst_type(ctx, &params.clone(), &args, manifest));
-                    }
-                    return None;
-                }
-                // Type found in env but no manifest — abstract type, fall through
-            }
-
-            // 4. Fall back to name-based global type declaration store only for
-            // simple identifiers. For qualified paths (Pdot), OCaml resolves via
-            // path/module lookup and does not collapse to leaf-name lookup.
-            if matches!(path, Path::Pident(_)) {
-                if let Some(store_decl) = ctx.find_type_decl(&name) {
-                    if let Some(manifest) = store_decl.type_manifest {
-                        let params = &store_decl.type_params;
-                        if params.is_empty() {
-                            return Some(instance(ctx, manifest));
-                        } else if params.len() == args.len() {
-                            return Some(subst_type(ctx, &params.clone(), &args, manifest));
-                        }
-                    }
-                }
-            }
+            // 4. No additional name-only fallback.
+            // OCaml expansion is path-based via env/CMI lookup. Name-only lookup
+            // can pick unrelated declarations and create non-OCaml expansion paths.
 
             None
         }

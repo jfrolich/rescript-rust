@@ -76,14 +76,15 @@ The `-dtyped-sexp` flag outputs the typed tree without locations. The `-dtyped-s
 |  | Status |
 |--|--------|
 | OCaml compiles | 657/657 |
-| Rust compiles | 566/657 (91 fail) |
-| Parity match (-dtyped-sexp-locs) | 291/566 (51.4%) |
+| Rust compiles | 599/657 (58 fail) |
+| Parity match (-dtyped-sexp-locs) | 301/599 (50.3%) |
 
-**Task Progress:** 20/21 complete
+**Task Progress:** 21/22 complete
 
 **Task Checklist:**
 - [x] Match OCaml `expand_head` resolution behavior for qualified type paths in `ctype::try_expand_head`: keep leaf-name fallback (`find_type_decl(head_name)`) for `Pident` only, and do not use it for `Pdot` paths. This removes a non-OCaml alias resolution path that caused infinite `unify -> expand_head` recursion (observed as Rust timeout/hang) and moves `ExternalExtension.res` from Rust compile failure to parity-only diff (`timeout 60 ./scripts/test_typedtree_parity.sh --with-locs --no-build --parallel 1 tests/tests/src/ExternalExtension.res`: Rust `0 -> 1` pass).
-- [ ] Continue reducing Rust compile failures by finding other unification recursion sites triggered by non-OCaml alias expansion paths (`ctype::unify`/`expand_head`), prioritizing currently-timing-out files.
+- [x] Continue reducing Rust compile failures by finding other unification recursion sites triggered by non-OCaml alias expansion paths (`ctype::unify`/`expand_head`), prioritizing currently-timing-out files. Removed the non-OCaml name-only `Pident` fallback in `ctype::try_expand_head` so alias expansion stays path-based; this eliminates nullable alias-expansion recursion in timed-out files and moves `js_nullable_test.res` and `float_test.res` from Rust timeout to full parity pass (`timeout 60 ./scripts/test_typedtree_parity.sh --with-locs --no-build tests/tests/src/js_nullable_test.res` and `tests/tests/src/float_test.res`: Rust `0 -> 1`, Parity `0 -> 1`).
+- [ ] Continue reducing remaining timeout/crash files in typedtree parity (e.g. `belt_list_test.res`, `js_math_test.res`, `test_list.res`) by tracing the next non-OCaml recursion/crash root cause in `ctype::unify`/`expand_head`.
 - [x] Match OCaml `@deriving(abstract)` behavior for non-record declarations in the Rust PPX: keep non-record type declarations unchanged (including alias manifests) and parse `{abstract: light}` config so light-mode accessors keep original field names. This fixes Rust compilation for `bs_abstract_test.res` and moves the file from Rust compile failure to parity-only diff (`--with-locs --no-build tests/tests/src/bs_abstract_test.res`: Rust `0 -> 1` pass).
 - [x] Port OCaml `Pexp_newtype` typing behavior in `typecore`: enter a temporary abstract type declaration in the environment, type the body without an early expected-type constraint, then copy and rewrite the result type by replacing `Tconstr(Pident newtype_id)` with a fresh type variable (matching OCaml's `Subst.type_expr` + `link_type` walk). This fixes Rust compilation for `bench.res` (`--with-locs --no-build tests/tests/src/bench.res`: Rust `0 -> 1` pass), and the deterministic sequential first failure moves from `src/bench.res` at `50/657` to `src/bs_abstract_test.res` at `87/657`.
 - [x] Match OCaml recursive `let` prebinding behavior for constrained variable patterns in `type_let`: predeclare recursive value identifiers through `Ppat_constraint` wrappers (and alias-on-`_` form) before typing RHS expressions, so self-references like `let rec v0: t3<_> = #A({field: v0})` resolve as values instead of falling through to `UndefinedMethod`. This fixes Rust compilation for `unboxed_use_case.res` and improves full `--with-locs --no-build` totals (`Rust bsc`: 567 -> 569, failures: 90 -> 88; `Parity`: 291 -> 291 with additional compiled files).
