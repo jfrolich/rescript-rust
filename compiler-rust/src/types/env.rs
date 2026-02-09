@@ -492,6 +492,14 @@ impl Env {
             .ok_or_else(|| EnvError::ModuleNotFound(name.to_string()))
     }
 
+    /// Find a module type by name, returning both the identifier and declaration.
+    pub fn find_modtype_with_id(&self, name: &str) -> EnvResult<(&Ident, &ModtypeDeclaration)> {
+        self.modtypes
+            .find_by_name_with_id(name)
+            .map(|(id, decl)| (id, decl.as_ref()))
+            .ok_or_else(|| EnvError::ModuleNotFound(name.to_string()))
+    }
+
     // ========================================================================
     // GADT Support
     // ========================================================================

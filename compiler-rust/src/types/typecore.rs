@@ -79,6 +79,27 @@ fn is_dict_type_path(path: &Path) -> bool {
     path.last() == DICT_TYPE_NAME
 }
 
+fn resolve_package_modtype_path(lid: &Longident, env: &Env, arena: &ParseArena) -> Path {
+    match lid {
+        Longident::Lident(name) => {
+            let name_str = arena.get_string(*name);
+            if let Ok((id, _)) = env.find_modtype_with_id(name_str) {
+                Path::pident(id.clone())
+            } else {
+                Path::pident(Ident::create_persistent(name_str))
+            }
+        }
+        Longident::Ldot(prefix, name) => Path::pdot(
+            crate::types::typemod::path_from_longident(prefix, |idx| arena.get_string(idx)),
+            arena.get_string(*name),
+        ),
+        Longident::Lapply(functor, arg) => Path::papply(
+            crate::types::typemod::path_from_longident(functor, |idx| arena.get_string(idx)),
+            crate::types::typemod::path_from_longident(arg, |idx| arena.get_string(idx)),
+        ),
+    }
+}
+
 // ============================================================================
 // Error Types
 // ============================================================================
@@ -1081,10 +1102,7 @@ fn transl_type_inner(
         CTD::Ptyp_package((mod_lid, constraints)) => {
             // Package type: (module S with type t = T)
             let longident = tctx.resolve_lid(mod_lid.txt);
-            let pack_path = crate::types::typemod::path_from_longident(
-                longident,
-                |idx| tctx.arena.get_string(idx),
-            );
+            let pack_path = resolve_package_modtype_path(longident, env, tctx.arena);
 
             let mut typed_fields = Vec::with_capacity(constraints.len());
             let mut lids = Vec::with_capacity(constraints.len());
@@ -4596,7 +4614,7 @@ fn type_letmodule(
     let mod_id = Ident::create_local(&mod_name_str);
 
     // Type check the module expression and build its signature for the env
-    let (typed_mod, mod_sig) = match &module_expr.pmod_desc {
+    let (typed_mod, mut mod_sig) = match &module_expr.pmod_desc {
         crate::parser::ast::ModuleExprDesc::Pmod_structure(items) => {
             let (structure, _inner_env) = crate::types::typemod::type_structure(tctx, env, arena, items)
                 .map_err(|e| TypeCoreError::Other(format!("letmodule: {e:?}")))?;
@@ -4637,6 +4655,33 @@ fn type_letmodule(
         }
     };
 
+    // Keep let-module member lookups stable for direct module aliases
+    // (`module M = List` / constrained direct idents) by materializing
+    // aliases/identifiers to signatures when the environment can resolve them.
+    let materialize_alias_sig = match &module_expr.pmod_desc {
+        crate::parser::ast::ModuleExprDesc::Pmod_ident(_) => true,
+        crate::parser::ast::ModuleExprDesc::Pmod_constraint(inner, _) => {
+            matches!(inner.pmod_desc, crate::parser::ast::ModuleExprDesc::Pmod_ident(_))
+        }
+        _ => false,
+    };
+    if materialize_alias_sig
+        && matches!(
+            &mod_sig,
+            crate::types::decl::ModuleType::MtyIdent(_)
+                | crate::types::decl::ModuleType::MtyAlias(_, _)
+        )
+    {
+        if let Some(sig) = crate::types::typemod::resolve_mod_type_to_sig(
+            &mod_sig,
+            Some(env),
+            &mut tctx.persistent_env,
+            ctx,
+        ) {
+            mod_sig = crate::types::decl::ModuleType::MtySignature(sig);
+        }
+    }
+
     // Add the module to the environment so the body can access M.value
     let mut body_env = env.clone();
     let md_decl = crate::types::decl::ModuleDeclaration {
@@ -4650,22 +4695,11 @@ fn type_letmodule(
     // Type check the body in the extended environment. Match OCaml let-module
     // scoping by abstracting local module-rooted type paths out of the exposed
     // expression type before unifying with the surrounding expectation.
-    let type_snapshot = ctx.type_expr_count();
     let body_expected_ty = ctx.new_var(None);
     let typed_body = type_expect(tctx, &body_env, body, body_expected_ty, None)?;
     let rewritten_ty = typed_body.exp_type;
     let mut replacements: HashMap<String, TypeExprRef> = HashMap::new();
     let mut seen: HashSet<TypeExprRef> = HashSet::new();
-    let current_type_count = ctx.type_expr_count();
-    for idx in type_snapshot..current_type_count {
-        replace_letmodule_local_paths(
-            ctx,
-            TypeExprRef(idx),
-            &mod_id,
-            &mut replacements,
-            &mut seen,
-        );
-    }
     replace_letmodule_local_paths(
         ctx,
         rewritten_ty,
