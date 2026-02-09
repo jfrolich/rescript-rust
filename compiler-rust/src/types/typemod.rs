@@ -790,6 +790,152 @@ fn specialize_functor_result_value_types(
     manifests: &HashMap<String, TypeExprRef>,
     ctx: &crate::types::context::TypeContext<'_>,
 ) -> crate::types::decl::ModuleType {
+    fn specialize_label_decl(
+        label: &crate::types::decl::LabelDeclaration,
+        param_name: &str,
+        manifests: &HashMap<String, TypeExprRef>,
+        ctx: &crate::types::context::TypeContext<'_>,
+        copy_cache: &mut HashMap<TypeExprRef, TypeExprRef>,
+    ) -> crate::types::decl::LabelDeclaration {
+        let mut specialized = label.clone();
+        specialized.ld_type = copy_and_specialize_functor_arg_type(
+            label.ld_type,
+            param_name,
+            manifests,
+            ctx,
+            copy_cache,
+        );
+        specialized
+    }
+
+    fn specialize_constructor_args(
+        args: &crate::types::decl::ConstructorArguments,
+        param_name: &str,
+        manifests: &HashMap<String, TypeExprRef>,
+        ctx: &crate::types::context::TypeContext<'_>,
+        copy_cache: &mut HashMap<TypeExprRef, TypeExprRef>,
+    ) -> crate::types::decl::ConstructorArguments {
+        match args {
+            crate::types::decl::ConstructorArguments::CstrTuple(types) => {
+                crate::types::decl::ConstructorArguments::CstrTuple(
+                    types
+                        .iter()
+                        .map(|ty| {
+                            copy_and_specialize_functor_arg_type(
+                                *ty,
+                                param_name,
+                                manifests,
+                                ctx,
+                                copy_cache,
+                            )
+                        })
+                        .collect(),
+                )
+            }
+            crate::types::decl::ConstructorArguments::CstrRecord(labels) => {
+                crate::types::decl::ConstructorArguments::CstrRecord(
+                    labels
+                        .iter()
+                        .map(|label| {
+                            specialize_label_decl(
+                                label,
+                                param_name,
+                                manifests,
+                                ctx,
+                                copy_cache,
+                            )
+                        })
+                        .collect(),
+                )
+            }
+        }
+    }
+
+    fn specialize_type_kind(
+        kind: &crate::types::decl::TypeKind,
+        param_name: &str,
+        manifests: &HashMap<String, TypeExprRef>,
+        ctx: &crate::types::context::TypeContext<'_>,
+        copy_cache: &mut HashMap<TypeExprRef, TypeExprRef>,
+    ) -> crate::types::decl::TypeKind {
+        match kind {
+            crate::types::decl::TypeKind::TypeAbstract => crate::types::decl::TypeKind::TypeAbstract,
+            crate::types::decl::TypeKind::TypeOpen => crate::types::decl::TypeKind::TypeOpen,
+            crate::types::decl::TypeKind::TypeRecord(labels, repre) => {
+                crate::types::decl::TypeKind::TypeRecord(
+                    labels
+                        .iter()
+                        .map(|label| {
+                            specialize_label_decl(
+                                label,
+                                param_name,
+                                manifests,
+                                ctx,
+                                copy_cache,
+                            )
+                        })
+                        .collect(),
+                    repre.clone(),
+                )
+            }
+            crate::types::decl::TypeKind::TypeVariant(constructors) => {
+                crate::types::decl::TypeKind::TypeVariant(
+                    constructors
+                        .iter()
+                        .map(|constructor| {
+                            let mut specialized = constructor.clone();
+                            specialized.cd_args = specialize_constructor_args(
+                                &constructor.cd_args,
+                                param_name,
+                                manifests,
+                                ctx,
+                                copy_cache,
+                            );
+                            specialized.cd_res = constructor.cd_res.map(|ty| {
+                                copy_and_specialize_functor_arg_type(
+                                    ty,
+                                    param_name,
+                                    manifests,
+                                    ctx,
+                                    copy_cache,
+                                )
+                            });
+                            specialized
+                        })
+                        .collect(),
+                )
+            }
+        }
+    }
+
+    fn specialize_type_inlined(
+        inlined: &crate::types::decl::TypeInlinedType,
+        param_name: &str,
+        manifests: &HashMap<String, TypeExprRef>,
+        ctx: &crate::types::context::TypeContext<'_>,
+        copy_cache: &mut HashMap<TypeExprRef, TypeExprRef>,
+    ) -> crate::types::decl::TypeInlinedType {
+        match inlined {
+            crate::types::decl::TypeInlinedType::Record { type_name, labels } => {
+                crate::types::decl::TypeInlinedType::Record {
+                    type_name: type_name.clone(),
+                    labels: labels
+                        .iter()
+                        .map(|label| {
+                            specialize_label_decl(
+                                label,
+                                param_name,
+                                manifests,
+                                ctx,
+                                copy_cache,
+                            )
+                        })
+                        .collect(),
+                }
+            }
+        }
+    }
+
     fn specialize_inner(
         mty: &crate::types::decl::ModuleType,
         param_name: &str,
@@ -814,6 +960,87 @@ fn specialize_functor_result_value_types(
                                 copy_cache,
                             );
                             SignatureItem::SigValue(id.clone(), specialized_vd)
+                        }
+                        SignatureItem::SigType(id, decl, rec_status) => {
+                            let mut local_copy_cache = HashMap::new();
+                            let mut specialized_decl = decl.clone();
+                            specialized_decl.type_params = decl
+                                .type_params
+                                .iter()
+                                .map(|ty| {
+                                    copy_and_specialize_functor_arg_type(
+                                        *ty,
+                                        param_name,
+                                        manifests,
+                                        ctx,
+                                        &mut local_copy_cache,
+                                    )
+                                })
+                                .collect();
+                            specialized_decl.type_kind = specialize_type_kind(
+                                &decl.type_kind,
+                                param_name,
+                                manifests,
+                                ctx,
+                                &mut local_copy_cache,
+                            );
+                            specialized_decl.type_manifest = decl.type_manifest.map(|ty| {
+                                copy_and_specialize_functor_arg_type(
+                                    ty,
+                                    param_name,
+                                    manifests,
+                                    ctx,
+                                    &mut local_copy_cache,
+                                )
+                            });
+                            specialized_decl.type_inlined_types = decl
+                                .type_inlined_types
+                                .iter()
+                                .map(|inlined| {
+                                    specialize_type_inlined(
+                                        inlined,
+                                        param_name,
+                                        manifests,
+                                        ctx,
+                                        &mut local_copy_cache,
+                                    )
+                                })
+                                .collect();
+                            SignatureItem::SigType(id.clone(), specialized_decl, *rec_status)
+                        }
+                        SignatureItem::SigTypext(id, ext, ext_status) => {
+                            let mut local_copy_cache = HashMap::new();
+                            let mut specialized_ext = ext.clone();
+                            specialized_ext.ext_type_params = ext
+                                .ext_type_params
+                                .iter()
+                                .map(|ty| {
+                                    copy_and_specialize_functor_arg_type(
+                                        *ty,
+                                        param_name,
+                                        manifests,
+                                        ctx,
+                                        &mut local_copy_cache,
+                                    )
+                                })
+                                .collect();
+                            specialized_ext.ext_args = specialize_constructor_args(
+                                &ext.ext_args,
+                                param_name,
+                                manifests,
+                                ctx,
+                                &mut local_copy_cache,
+                            );
+                            specialized_ext.ext_ret_type = ext.ext_ret_type.map(|ty| {
+                                copy_and_specialize_functor_arg_type(
+                                    ty,
+                                    param_name,
+                                    manifests,
+                                    ctx,
+                                    &mut local_copy_cache,
+                                )
+                            });
+                            SignatureItem::SigTypext(id.clone(), specialized_ext, *ext_status)
                         }
                         SignatureItem::SigModule(id, md, rec_status) => {
                             let mut specialized_md = md.clone();
