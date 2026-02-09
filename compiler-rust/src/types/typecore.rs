@@ -4428,10 +4428,11 @@ fn type_letexception(
     let name_str = arena.get_string(ext_constr.pext_name.txt).to_string();
     let id = Ident::create_local(&name_str);
 
-    let (typed_args, typed_ret, ext_args, arg_type_refs, ext_ret_ty) = match &ext_constr.pext_kind {
+    let (typed_args, typed_ret, ext_args, cstr_args, cstr_inlined, ext_ret_ty) =
+        match &ext_constr.pext_kind {
         crate::parser::ast::ExtensionConstructorKind::Pext_decl(args, ret) => {
             let mut arg_ty_refs = Vec::new();
-            let (typed_args, ext_args) = match args {
+            let (typed_args, ext_args, cstr_args, cstr_inlined) = match args {
                 crate::parser::ast::ConstructorArguments::Pcstr_tuple(types) => {
                     let mut typed = Vec::new();
                     for ty in types {
@@ -4442,6 +4443,8 @@ fn type_letexception(
                     (
                         crate::types::typedtree::ConstructorArgument::Cstr_tuple(typed),
                         crate::types::ConstructorArguments::CstrTuple(arg_ty_refs.clone()),
+                        arg_ty_refs.clone(),
+                        None,
                     )
                 }
                 crate::parser::ast::ConstructorArguments::Pcstr_record(labels) => {
@@ -4450,7 +4453,17 @@ fn type_letexception(
                     for label in labels {
                         let label_name = arena.get_string(label.pld_name.txt).to_string();
                         let (typed_ct, ty_ref) = transl_type(tctx, env, &label.pld_type)?;
-                        arg_ty_refs.push(ty_ref);
+                        let poly_ty_ref = ctx.new_poly(ty_ref, vec![]);
+                        let poly_typed_ct = crate::types::typedtree::TypedCoreType {
+                            ctyp_desc: crate::types::typedtree::TypedCoreTypeDesc::Ttyp_poly(
+                                vec![],
+                                Box::new(typed_ct.clone()),
+                            ),
+                            ctyp_type: poly_ty_ref,
+                            ctyp_env: typed_ct.ctyp_env,
+                            ctyp_loc: typed_ct.ctyp_loc,
+                            ctyp_attributes: vec![],
+                        };
                         typed_labels.push(crate::types::typedtree::LabelDeclaration {
                             ld_id: Ident::create_local(&label_name),
                             ld_name: crate::parse_arena::Located {
@@ -4458,7 +4471,7 @@ fn type_letexception(
                                 loc: label.pld_name.loc,
                             },
                             ld_mutable: label.pld_mutable,
-                            ld_type: typed_ct,
+                            ld_type: poly_typed_ct,
                             ld_loc: label.pld_loc,
                             ld_attributes: label.pld_attributes.clone(),
                         });
@@ -4473,14 +4486,36 @@ fn type_letexception(
                                 }
                             },
                             ld_optional: label.pld_optional,
-                            ld_type: ty_ref,
+                            ld_type: poly_ty_ref,
                             ld_loc: arena.to_location(label.pld_loc),
                             ld_attributes: vec![],
                         });
                     }
+                    let inline_path = Path::pident(id.clone());
+                    let inline_ty = ctx.new_constr(inline_path.clone(), vec![]);
+                    let inline_decl = crate::types::TypeDeclaration {
+                        type_params: vec![],
+                        type_arity: 0,
+                        type_kind: crate::types::TypeKind::TypeRecord(
+                            decl_labels.clone(),
+                            crate::types::RecordRepresentation::RecordExtension,
+                        ),
+                        type_private: crate::types::PrivateFlag::Public,
+                        type_manifest: None,
+                        type_variance: vec![],
+                        type_newtype_level: None,
+                        type_loc: crate::location::Location::none(),
+                        type_attributes: vec![],
+                        type_immediate: false,
+                        type_unboxed: crate::types::UnboxedStatus::default(),
+                        type_inlined_types: vec![],
+                        type_path: None,
+                    };
                     (
                         crate::types::typedtree::ConstructorArgument::Cstr_record(typed_labels),
                         crate::types::ConstructorArguments::CstrRecord(decl_labels),
+                        vec![inline_ty],
+                        Some(Box::new(inline_decl)),
                     )
                 }
             };
@@ -4491,13 +4526,21 @@ fn type_letexception(
                 }
                 None => (None, None),
             };
-            (typed_args, typed_ret, ext_args, arg_ty_refs, ext_ret_ty)
+            (
+                typed_args,
+                typed_ret,
+                ext_args,
+                cstr_args,
+                cstr_inlined,
+                ext_ret_ty,
+            )
         }
         crate::parser::ast::ExtensionConstructorKind::Pext_rebind(_lid) => (
             crate::types::typedtree::ConstructorArgument::Cstr_tuple(vec![]),
             None,
             crate::types::ConstructorArguments::CstrTuple(vec![]),
             vec![],
+            None,
             None,
         ),
     };
@@ -4508,8 +4551,8 @@ fn type_letexception(
         cstr_name: name_str.clone(),
         cstr_res: exn_ty,
         cstr_existentials: vec![],
-        cstr_args: arg_type_refs.clone(),
-        cstr_arity: arg_type_refs.len() as i32,
+        cstr_args: cstr_args.clone(),
+        cstr_arity: cstr_args.len() as i32,
         cstr_tag: crate::types::decl::ConstructorTag::CstrExtension(exn_path),
         cstr_consts: 0,
         cstr_nonconsts: 0,
@@ -4517,10 +4560,32 @@ fn type_letexception(
         cstr_private: crate::types::PrivateFlag::Public,
         cstr_loc: crate::location::Location::none(),
         cstr_attributes: vec![],
-        cstr_inlined: None,
+        cstr_inlined: cstr_inlined.clone(),
     };
 
     let mut new_env = env.clone();
+    if let Some(ref inlined_decl) = cstr_inlined {
+        if let crate::types::TypeKind::TypeRecord(ref labels, ref repres) = inlined_decl.type_kind
+        {
+            let ty_res = ctx.new_constr(Path::pident(id.clone()), inlined_decl.type_params.clone());
+            for (pos, ld) in labels.iter().enumerate() {
+                let lbl_desc = crate::types::LabelDescription {
+                    lbl_name: ld.ld_id.name().to_string(),
+                    lbl_res: ty_res,
+                    lbl_arg: ld.ld_type,
+                    lbl_mut: ld.ld_mutable,
+                    lbl_optional: ld.ld_optional,
+                    lbl_pos: pos as i32,
+                    lbl_all: crate::types::LabelArrayRef(0),
+                    lbl_repres: repres.clone(),
+                    lbl_private: inlined_decl.type_private,
+                    lbl_loc: ld.ld_loc.clone(),
+                    lbl_attributes: ld.ld_attributes.clone(),
+                };
+                new_env.add_label(ld.ld_id.clone(), lbl_desc);
+            }
+        }
+    }
     new_env.add_constructor(id.clone(), cstr_desc);
 
     let typed_body = type_expect(tctx, &new_env, body, expected_ty, None)?;
