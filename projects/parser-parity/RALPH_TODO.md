@@ -36,7 +36,7 @@
 | bsc-ast (syntax scope) | 1196/1196 (100%) ✅ |
 | sexp-locs (full scope: syntax + TELLA) | 3505/3505 (100%) ✅ |
 | sexp-locs-ppx (full scope: syntax + TELLA) | 3505/3505 (100%) ✅ |
-| bsc-ast (full scope: syntax + TELLA) | 583 diffs (2922/3505 matches, 83.4%) |
+| bsc-ast (full scope: syntax + TELLA) | 580 diffs (2925/3505 matches, 83.5%) |
 
 **Scope note:** Final parity targets include both `tests/syntax_tests/data` and `TELLA_DIR`
 when present. Always report parity as `X/Y` where `Y` contains only OCaml-successful files.
@@ -45,6 +45,18 @@ Files where OCaml fails are excluded from parity denominators and listed separat
 **Snapshot note:** The `1179` denominator above is a historical in-repo snapshot.
 
 **Session progress (2026-02-09) - newest:**
+- Fixed spice mapper cloning parity for generated codec/signature declarations:
+  - Investigated `@spice` minimal repro (`/tmp/modapply_spice.res`) and matched OCaml by:
+    - preserving stable `v` identity in codec wrappers (`arena.spice_runtime_v()`),
+    - keeping mapper-style `LocCloner` on mapped items,
+    - avoiding extra `LocCloner` passes on generated `Str.value` / `Sig.value` spice outputs.
+  - Added subtree spice detection for module/signature items so mapper-style location cloning
+    runs where OCaml mapper traverses spice-containing subtrees.
+  - Validation:
+    - `inspect_binary_ast.py compare` is byte-identical for `/tmp/modapply_spice.res` (738/738).
+    - Full-scope parity improved:
+      - `bsc-ast differences: 583 -> 580`
+      - `sexp-locs: 3505/3505`, `sexp-locs-ppx: 3505/3505` unchanged.
 - Fixed `Sury.res` binary-ast sharing parity and improved full-scope count:
   - Investigated `/Users/jaapf/dev/tella-fusion/node_modules/sury/src/Sury.res` with `inspect_binary_ast.py`
     and found three missing shares of `res.braces` empty payload blocks (`PStr []`) that OCaml shared with
@@ -97,7 +109,7 @@ Files where OCaml fails are excluded from parity denominators and listed separat
 - Parser abort-trap blocker status:
   - ✅ Resolved for in-scope files by fixing Rust-only parser failures and excluding 11 dual-failure (OCaml+Rust) files via explicit parity blacklist.
 - Current blocker:
-  - Remaining full-scope `bsc-ast` parity diffs (`583`) are now the primary target (dependency extraction + sharing identity mismatches).
+  - Remaining full-scope `bsc-ast` parity diffs (`580`) are now the primary target (dependency extraction + sharing identity mismatches).
 
 **Session progress (2026-02-08) - newest:**
 - Fixed remaining full-scope `sexp-locs` parser diff and aligned OCaml int32 marshal for `@inline` constants:
@@ -630,7 +642,7 @@ The binary AST structure (sexp-locs) is 100% correct. The differences are in:
 - [x] Task 5.1-5.3: Achieved 838/1179 (71.1%)
 - [x] Task 5.4: Historical snapshot target surpassed (syntax scope now 1196/1196 bsc-ast)
 - [ ] Task 5.5: Full-scope parity target (syntax + TELLA) - complete remaining parser/PPX/share diffs
-- **Note:** Current full-scope run has `bsc-ast differences: 583` over `3505` in-scope files (after excluding 11 dual-failure files).
+- **Note:** Current full-scope run has `bsc-ast differences: 580` over `3505` in-scope files (after excluding 11 dual-failure files).
 
 ### Phase 6: Arity Arena ✅ Complete
 - [x] Tasks 6.1-6.6: All implemented

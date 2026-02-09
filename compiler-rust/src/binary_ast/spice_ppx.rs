@@ -3368,9 +3368,10 @@ fn generate_codec_decls(
     let mut vbs = Vec::new();
 
     if let Some(encoder) = codecs.0 {
+        let runtime_v_idx = arena.spice_runtime_v();
         let mut expr = expr_fun(
             ArgLabel::Nolabel,
-            pat_var_dummy(arena, "v"),
+            pat_var_idx(arena, runtime_v_idx, arena.dummy_loc()),
             expr_apply(
                 encoder,
                 vec![(ArgLabel::Nolabel, expr_ident_path(arena, &["v"]))],
@@ -3403,9 +3404,10 @@ fn generate_codec_decls(
     }
 
     if let Some(decoder) = codecs.1 {
+        let runtime_v_idx = arena.spice_runtime_v();
         let mut expr = expr_fun(
             ArgLabel::Nolabel,
-            pat_var_dummy(arena, "v"),
+            pat_var_idx(arena, runtime_v_idx, arena.dummy_loc()),
             expr_apply(
                 decoder,
                 vec![(ArgLabel::Nolabel, expr_ident_path(arena, &["v"]))],
@@ -3496,6 +3498,140 @@ fn map_type_decl_structure(
             Ok(generate_codec_decls(&type_name, &param_names, codecs, arena))
         }
         _ => Err(spice_error("This type is not handled by spice")),
+    }
+}
+
+fn attribute_is_spice(attr: &Attribute, arena: &ParseArena) -> bool {
+    let name = arena.get_string(attr.0.txt);
+    name == ANNOTATION_NAME || name.starts_with("spice.")
+}
+
+fn type_declaration_has_spice_attr(decl: &TypeDeclaration, arena: &ParseArena) -> bool {
+    decl.ptype_attributes
+        .iter()
+        .any(|attr| attribute_is_spice(attr, arena))
+}
+
+fn module_type_contains_spice_type_decl(mod_type: &ModuleType, arena: &ParseArena) -> bool {
+    match &*mod_type.pmty_desc {
+        ModuleTypeDesc::Pmty_signature(items) => items
+            .iter()
+            .any(|item| signature_item_contains_spice_type_decl(item, arena)),
+        ModuleTypeDesc::Pmty_functor(inner) => {
+            let (_, arg, body) = &**inner;
+            arg.map(|arg_idx| {
+                let arg_type = arena.get_mod_type(arg_idx);
+                module_type_contains_spice_type_decl(arg_type, arena)
+            })
+            .unwrap_or(false)
+                || module_type_contains_spice_type_decl(arena.get_mod_type(*body), arena)
+        }
+        ModuleTypeDesc::Pmty_with(inner) => {
+            let (base, constraints) = &**inner;
+            module_type_contains_spice_type_decl(arena.get_mod_type(*base), arena)
+                || constraints.iter().any(|constraint| match constraint {
+                    WithConstraint::Pwith_type(_, decl) | WithConstraint::Pwith_typesubst(_, decl) => {
+                        type_declaration_has_spice_attr(decl, arena)
+                    }
+                    WithConstraint::Pwith_module(_, _) | WithConstraint::Pwith_modsubst(_, _) => false,
+                })
+        }
+        ModuleTypeDesc::Pmty_typeof(expr_idx) => {
+            module_expr_contains_spice_type_decl(arena.get_mod_expr(*expr_idx), arena)
+        }
+        ModuleTypeDesc::Pmty_ident(_)
+        | ModuleTypeDesc::Pmty_alias(_)
+        | ModuleTypeDesc::Pmty_extension(_) => false,
+    }
+}
+
+fn module_expr_contains_spice_type_decl(mod_expr: &ModuleExpr, arena: &ParseArena) -> bool {
+    match &*mod_expr.pmod_desc {
+        ModuleExprDesc::Pmod_structure(items) => items
+            .iter()
+            .any(|item| structure_item_contains_spice_type_decl(item, arena)),
+        ModuleExprDesc::Pmod_functor(inner) => {
+            let (_, arg, body) = &**inner;
+            arg.map(|arg_idx| {
+                let arg_type = arena.get_mod_type(arg_idx);
+                module_type_contains_spice_type_decl(arg_type, arena)
+            })
+            .unwrap_or(false)
+                || module_expr_contains_spice_type_decl(arena.get_mod_expr(*body), arena)
+        }
+        ModuleExprDesc::Pmod_apply(lhs, rhs) => {
+            module_expr_contains_spice_type_decl(arena.get_mod_expr(*lhs), arena)
+                || module_expr_contains_spice_type_decl(arena.get_mod_expr(*rhs), arena)
+        }
+        ModuleExprDesc::Pmod_constraint(lhs, mty) => {
+            module_expr_contains_spice_type_decl(arena.get_mod_expr(*lhs), arena)
+                || module_type_contains_spice_type_decl(arena.get_mod_type(*mty), arena)
+        }
+        ModuleExprDesc::Pmod_ident(_)
+        | ModuleExprDesc::Pmod_unpack(_)
+        | ModuleExprDesc::Pmod_extension(_) => false,
+    }
+}
+
+fn signature_item_contains_spice_type_decl(item: &SignatureItem, arena: &ParseArena) -> bool {
+    match &*item.psig_desc {
+        SignatureItemDesc::Psig_type(inner) => {
+            let (_, decls) = &**inner;
+            decls
+                .iter()
+                .any(|decl| type_declaration_has_spice_attr(decl, arena))
+        }
+        SignatureItemDesc::Psig_module(md) => {
+            module_type_contains_spice_type_decl(arena.get_mod_type(md.pmd_type), arena)
+        }
+        SignatureItemDesc::Psig_recmodule(mds) => mds
+            .iter()
+            .any(|md| module_type_contains_spice_type_decl(arena.get_mod_type(md.pmd_type), arena)),
+        SignatureItemDesc::Psig_modtype(mtd) => mtd
+            .pmtd_type
+            .map(|mod_type| module_type_contains_spice_type_decl(arena.get_mod_type(mod_type), arena))
+            .unwrap_or(false),
+        SignatureItemDesc::Psig_include(incl) => {
+            module_type_contains_spice_type_decl(arena.get_mod_type(incl.pincl_mod), arena)
+        }
+        SignatureItemDesc::Psig_value(_)
+        | SignatureItemDesc::Psig_typext(_)
+        | SignatureItemDesc::Psig_exception(_)
+        | SignatureItemDesc::Psig_open(_)
+        | SignatureItemDesc::Psig_attribute(_)
+        | SignatureItemDesc::Psig_extension(_) => false,
+    }
+}
+
+fn structure_item_contains_spice_type_decl(item: &StructureItem, arena: &ParseArena) -> bool {
+    match &*item.pstr_desc {
+        StructureItemDesc::Pstr_type(inner) => {
+            let (_, decls) = &**inner;
+            decls
+                .iter()
+                .any(|decl| type_declaration_has_spice_attr(decl, arena))
+        }
+        StructureItemDesc::Pstr_module(mb) => {
+            module_expr_contains_spice_type_decl(arena.get_mod_expr(mb.pmb_expr), arena)
+        }
+        StructureItemDesc::Pstr_recmodule(mbs) => mbs
+            .iter()
+            .any(|mb| module_expr_contains_spice_type_decl(arena.get_mod_expr(mb.pmb_expr), arena)),
+        StructureItemDesc::Pstr_modtype(mtd) => mtd
+            .pmtd_type
+            .map(|mod_type| module_type_contains_spice_type_decl(arena.get_mod_type(mod_type), arena))
+            .unwrap_or(false),
+        StructureItemDesc::Pstr_include(incl) => {
+            module_expr_contains_spice_type_decl(arena.get_mod_expr(incl.pincl_mod), arena)
+        }
+        StructureItemDesc::Pstr_eval(_)
+        | StructureItemDesc::Pstr_value(_)
+        | StructureItemDesc::Pstr_primitive(_)
+        | StructureItemDesc::Pstr_typext(_)
+        | StructureItemDesc::Pstr_exception(_)
+        | StructureItemDesc::Pstr_open(_)
+        | StructureItemDesc::Pstr_attribute(_)
+        | StructureItemDesc::Pstr_extension(_) => false,
     }
 }
 
@@ -4298,6 +4434,7 @@ fn map_structure_item_spice(
     arena: &mut ParseArena,
 ) -> SpiceResult<Vec<StructureItem>> {
     let mut mapped_item = item.clone();
+    let contains_spice_subtree = structure_item_contains_spice_type_decl(item, arena);
 
     match &*item.pstr_desc {
         StructureItemDesc::Pstr_type(inner) => {
@@ -4313,17 +4450,20 @@ fn map_structure_item_spice(
                 let mut cloner = LocCloner::new(arena);
                 cloner.structure_item(&mut mapped_item);
 
-                let mut value_item = StructureItem {
+                let value_item = StructureItem {
                     pstr_desc: Box::new(StructureItemDesc::Pstr_value(Box::new((*rec_flag, vbs)))),
                     pstr_loc: arena.dummy_loc(),
                 };
-                let mut cloner = LocCloner::new(arena);
-                cloner.structure_item(&mut value_item);
-
                 Ok(vec![mapped_item, value_item])
             }
         }
-        _ => Ok(vec![mapped_item]),
+        _ => {
+            if contains_spice_subtree {
+                let mut cloner = LocCloner::new(arena);
+                cloner.structure_item(&mut mapped_item);
+            }
+            Ok(vec![mapped_item])
+        }
     }
 }
 
@@ -4445,6 +4585,7 @@ fn map_signature_item_spice(
     arena: &mut ParseArena,
 ) -> SpiceResult<Vec<SignatureItem>> {
     let mut mapped_item = item.clone();
+    let contains_spice_subtree = signature_item_contains_spice_type_decl(item, arena);
 
     match &*item.psig_desc {
         SignatureItemDesc::Psig_type(inner) => {
@@ -4473,18 +4614,19 @@ fn map_signature_item_spice(
                 let mut cloner = LocCloner::new(arena);
                 cloner.signature_item(&mut mapped_item);
 
-                let mut cloner = LocCloner::new(arena);
-                for item in &mut generated {
-                    cloner.signature_item(item);
-                }
-
                 let mut out = Vec::new();
                 out.push(mapped_item);
                 out.extend(generated);
                 Ok(out)
             }
         }
-        _ => Ok(vec![mapped_item]),
+        _ => {
+            if contains_spice_subtree {
+                let mut cloner = LocCloner::new(arena);
+                cloner.signature_item(&mut mapped_item);
+            }
+            Ok(vec![mapped_item])
+        }
     }
 }
 
