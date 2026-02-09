@@ -440,6 +440,14 @@ impl Env {
             .ok_or_else(|| EnvError::ModuleNotFound(name.to_string()))
     }
 
+    /// Find a module by name, returning both the identifier and declaration.
+    pub fn find_module_with_id(&self, name: &str) -> EnvResult<(&Ident, &ModuleDeclaration)> {
+        self.modules
+            .find_by_name_with_id(name)
+            .map(|(id, m)| (id, m.as_ref()))
+            .ok_or_else(|| EnvError::ModuleNotFound(name.to_string()))
+    }
+
     /// Find a module by path.
     pub fn lookup_module(&self, path: &Path) -> EnvResult<&ModuleDeclaration> {
         match path {

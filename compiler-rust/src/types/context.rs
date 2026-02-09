@@ -25,6 +25,7 @@ use super::type_expr::{
     RowDesc, RowField, RowFieldRef, TypeArg, TypeDesc, TypeExpr, TypeExprRef,
 };
 use crate::context::IdGenerator;
+use crate::intern::StrIdx;
 use std::cell::{Cell, RefCell};
 use typed_arena::Arena;
 
@@ -118,6 +119,14 @@ pub struct TypeContext<'a> {
 
     /// Load paths for resolving CMI files during type alias expansion.
     load_paths: RefCell<Vec<std::path::PathBuf>>,
+
+    /// String table for CMI-decoded Longident components.
+    /// CMI decoding happens without a ParseArena, so we allocate synthetic
+    /// StrIdx values here and resolve them later when needed.
+    cmi_longident_names: RefCell<std::collections::HashMap<u32, String>>,
+
+    /// Next synthetic StrIdx raw value for CMI longident strings.
+    next_cmi_longident_idx: Cell<u32>,
 }
 
 impl<'a> TypeContext<'a> {
@@ -145,7 +154,34 @@ impl<'a> TypeContext<'a> {
             type_decl_by_stamp: RefCell::new(std::collections::HashMap::new()),
             type_decl_by_path: RefCell::new(std::collections::HashMap::new()),
             load_paths: RefCell::new(Vec::new()),
+            cmi_longident_names: RefCell::new(std::collections::HashMap::new()),
+            next_cmi_longident_idx: Cell::new(0xF000_0000),
         }
+    }
+
+    /// Intern a CMI longident component and return a synthetic StrIdx.
+    pub fn intern_cmi_longident_name(&self, name: &str) -> StrIdx {
+        let raw = self.next_cmi_longident_idx.get();
+        self.next_cmi_longident_idx
+            .set(raw.wrapping_add(1));
+        self.cmi_longident_names
+            .borrow_mut()
+            .insert(raw, name.to_string());
+        StrIdx::from_raw(raw)
+    }
+
+    /// Resolve a Longident component StrIdx to string, checking CMI synthetic
+    /// indices first and falling back to the parse arena interner.
+    pub fn resolve_longident_component(
+        &self,
+        arena: &crate::parse_arena::ParseArena,
+        idx: StrIdx,
+    ) -> String {
+        self.cmi_longident_names
+            .borrow()
+            .get(&idx.raw())
+            .cloned()
+            .unwrap_or_else(|| arena.get_string(idx).to_string())
     }
 
     /// Register a type declaration for type alias expansion.
@@ -336,6 +372,11 @@ impl<'a> TypeContext<'a> {
     /// Get the level of a type.
     pub fn get_level(&self, r: TypeExprRef) -> i32 {
         self.get_type(r).level()
+    }
+
+    /// Number of allocated type expressions.
+    pub fn type_expr_count(&self) -> usize {
+        self.types.borrow().len()
     }
 
     /// Set the level of a type.

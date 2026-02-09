@@ -628,11 +628,7 @@ impl<'a> SigReadContext<'a> {
                     let lids: Vec<crate::parser::longident::Longident> = fields[1]
                         .as_list()
                         .iter()
-                        .map(|_lid| {
-                            crate::parser::longident::Longident::Lident(
-                                crate::intern::StrIdx::from_raw(0),
-                            )
-                        })
+                        .map(|lid| self.read_longident(lid))
                         .collect();
                     let args: Vec<TypeExprRef> = fields[2]
                         .as_list()
@@ -647,6 +643,39 @@ impl<'a> SigReadContext<'a> {
                 }
             },
             _ => TypeDesc::Tvar(None), // fallback
+        }
+    }
+
+    /// Read a Longident.t.
+    ///
+    /// Tags:
+    /// - 0: Lident(string)
+    /// - 1: Ldot(Longident.t, string)
+    /// - 2: Lapply(Longident.t, Longident.t)
+    fn read_longident(&self, value: &OcamlValue) -> crate::parser::longident::Longident {
+        use crate::parser::longident::Longident;
+
+        match value {
+            OcamlValue::Block(0, fields) => {
+                let name = fields[0].as_string();
+                let idx = self.ctx.intern_cmi_longident_name(name);
+                Longident::Lident(idx)
+            }
+            OcamlValue::Block(1, fields) => {
+                let prefix = self.read_longident(&fields[0]);
+                let name = fields[1].as_string();
+                let idx = self.ctx.intern_cmi_longident_name(name);
+                Longident::Ldot(Box::new(prefix), idx)
+            }
+            OcamlValue::Block(2, fields) => {
+                let funct = self.read_longident(&fields[0]);
+                let arg = self.read_longident(&fields[1]);
+                Longident::Lapply(Box::new(funct), Box::new(arg))
+            }
+            _ => {
+                let idx = self.ctx.intern_cmi_longident_name("");
+                Longident::Lident(idx)
+            }
         }
     }
 
@@ -938,5 +967,3 @@ fn read_unboxed_status(value: &OcamlValue) -> UnboxedStatus {
         default: fields[1].as_bool(),
     }
 }
-
-

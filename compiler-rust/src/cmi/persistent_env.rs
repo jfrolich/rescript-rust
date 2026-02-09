@@ -331,27 +331,40 @@ pub fn substitute_type_paths_in_sig(
     ctx: &TypeContext<'_>,
 ) {
     // Build substitution maps:
-    // stamp -> qualified_path for stamped idents
-    // name -> qualified_path for persistent idents (stamp 0)
-    let mut stamp_map: HashMap<i32, Path> = HashMap::new();
-    let mut name_map: HashMap<String, Path> = HashMap::new();
+    // type stamp/name -> qualified type path
+    // module stamp/name -> qualified module path
+    let mut type_stamp_map: HashMap<i32, Path> = HashMap::new();
+    let mut type_name_map: HashMap<String, Path> = HashMap::new();
+    let mut module_stamp_map: HashMap<i32, Path> = HashMap::new();
+    let mut module_name_map: HashMap<String, Path> = HashMap::new();
 
     for item in sig_items {
         match item {
             SignatureItem::SigType(id, _, _) | SignatureItem::SigModtype(id, _) => {
                 let qualified_path = Path::pdot(module_path.clone(), id.name());
                 if id.stamp() != 0 {
-                    stamp_map.insert(id.stamp(), qualified_path.clone());
+                    type_stamp_map.insert(id.stamp(), qualified_path.clone());
                 }
                 // Keep a name-based fallback for locally-created identifiers where
                 // stamps may differ between related syntax/type nodes.
-                name_map.insert(id.name().to_string(), qualified_path);
+                type_name_map.insert(id.name().to_string(), qualified_path);
+            }
+            SignatureItem::SigModule(id, _, _) => {
+                let qualified_path = Path::pdot(module_path.clone(), id.name());
+                if id.stamp() != 0 {
+                    module_stamp_map.insert(id.stamp(), qualified_path.clone());
+                }
+                module_name_map.insert(id.name().to_string(), qualified_path);
             }
             _ => {}
         }
     }
 
-    if stamp_map.is_empty() && name_map.is_empty() {
+    if type_stamp_map.is_empty()
+        && type_name_map.is_empty()
+        && module_stamp_map.is_empty()
+        && module_name_map.is_empty()
+    {
         return;
     }
 
@@ -362,16 +375,40 @@ pub fn substitute_type_paths_in_sig(
     for item in sig_items {
         match item {
             SignatureItem::SigValue(_id, desc) => {
-                substitute_type_expr_path(desc.val_type, &stamp_map, &name_map, ctx, &mut visited);
+                substitute_type_expr_path(
+                    desc.val_type,
+                    &type_stamp_map,
+                    &type_name_map,
+                    &module_stamp_map,
+                    &module_name_map,
+                    ctx,
+                    &mut visited,
+                );
             }
             SignatureItem::SigType(_id, decl, _) => {
                 // Substitute in type params
                 for &param in &decl.type_params {
-                    substitute_type_expr_path(param, &stamp_map, &name_map, ctx, &mut visited);
+                    substitute_type_expr_path(
+                        param,
+                        &type_stamp_map,
+                        &type_name_map,
+                        &module_stamp_map,
+                        &module_name_map,
+                        ctx,
+                        &mut visited,
+                    );
                 }
                 // Substitute in manifest
                 if let Some(manifest) = decl.type_manifest {
-                    substitute_type_expr_path(manifest, &stamp_map, &name_map, ctx, &mut visited);
+                    substitute_type_expr_path(
+                        manifest,
+                        &type_stamp_map,
+                        &type_name_map,
+                        &module_stamp_map,
+                        &module_name_map,
+                        ctx,
+                        &mut visited,
+                    );
                 }
                 // Substitute in constructor/label types
                 match &decl.type_kind {
@@ -380,23 +417,55 @@ pub fn substitute_type_paths_in_sig(
                             match &cd.cd_args {
                                 crate::types::decl::ConstructorArguments::CstrTuple(args) => {
                                     for &arg in args {
-                                        substitute_type_expr_path(arg, &stamp_map, &name_map, ctx, &mut visited);
+                                        substitute_type_expr_path(
+                                            arg,
+                                            &type_stamp_map,
+                                            &type_name_map,
+                                            &module_stamp_map,
+                                            &module_name_map,
+                                            ctx,
+                                            &mut visited,
+                                        );
                                     }
                                 }
                                 crate::types::decl::ConstructorArguments::CstrRecord(labels) => {
                                     for lbl in labels {
-                                        substitute_type_expr_path(lbl.ld_type, &stamp_map, &name_map, ctx, &mut visited);
+                                        substitute_type_expr_path(
+                                            lbl.ld_type,
+                                            &type_stamp_map,
+                                            &type_name_map,
+                                            &module_stamp_map,
+                                            &module_name_map,
+                                            ctx,
+                                            &mut visited,
+                                        );
                                     }
                                 }
                             }
                             if let Some(res) = cd.cd_res {
-                                substitute_type_expr_path(res, &stamp_map, &name_map, ctx, &mut visited);
+                                substitute_type_expr_path(
+                                    res,
+                                    &type_stamp_map,
+                                    &type_name_map,
+                                    &module_stamp_map,
+                                    &module_name_map,
+                                    ctx,
+                                    &mut visited,
+                                );
                             }
                         }
                     }
                     TypeKind::TypeRecord(labels, _) => {
                         for lbl in labels {
-                            substitute_type_expr_path(lbl.ld_type, &stamp_map, &name_map, ctx, &mut visited);
+                            substitute_type_expr_path(
+                                lbl.ld_type,
+                                &type_stamp_map,
+                                &type_name_map,
+                                &module_stamp_map,
+                                &module_name_map,
+                                ctx,
+                                &mut visited,
+                            );
                         }
                     }
                     _ => {}
@@ -404,22 +473,54 @@ pub fn substitute_type_paths_in_sig(
             }
             SignatureItem::SigTypext(_id, ext, _) => {
                 for &param in &ext.ext_type_params {
-                    substitute_type_expr_path(param, &stamp_map, &name_map, ctx, &mut visited);
+                    substitute_type_expr_path(
+                        param,
+                        &type_stamp_map,
+                        &type_name_map,
+                        &module_stamp_map,
+                        &module_name_map,
+                        ctx,
+                        &mut visited,
+                    );
                 }
                 match &ext.ext_args {
                     crate::types::decl::ConstructorArguments::CstrTuple(args) => {
                         for &arg in args {
-                            substitute_type_expr_path(arg, &stamp_map, &name_map, ctx, &mut visited);
+                            substitute_type_expr_path(
+                                arg,
+                                &type_stamp_map,
+                                &type_name_map,
+                                &module_stamp_map,
+                                &module_name_map,
+                                ctx,
+                                &mut visited,
+                            );
                         }
                     }
                     crate::types::decl::ConstructorArguments::CstrRecord(labels) => {
                         for lbl in labels {
-                            substitute_type_expr_path(lbl.ld_type, &stamp_map, &name_map, ctx, &mut visited);
+                            substitute_type_expr_path(
+                                lbl.ld_type,
+                                &type_stamp_map,
+                                &type_name_map,
+                                &module_stamp_map,
+                                &module_name_map,
+                                ctx,
+                                &mut visited,
+                            );
                         }
                     }
                 }
                 if let Some(ret) = ext.ext_ret_type {
-                    substitute_type_expr_path(ret, &stamp_map, &name_map, ctx, &mut visited);
+                    substitute_type_expr_path(
+                        ret,
+                        &type_stamp_map,
+                        &type_name_map,
+                        &module_stamp_map,
+                        &module_name_map,
+                        ctx,
+                        &mut visited,
+                    );
                 }
             }
             _ => {}
@@ -430,8 +531,10 @@ pub fn substitute_type_paths_in_sig(
 /// Recursively walk a type expression and substitute Tconstr paths.
 fn substitute_type_expr_path(
     ty_ref: TypeExprRef,
-    stamp_map: &HashMap<i32, Path>,
-    name_map: &HashMap<String, Path>,
+    type_stamp_map: &HashMap<i32, Path>,
+    type_name_map: &HashMap<String, Path>,
+    module_stamp_map: &HashMap<i32, Path>,
+    module_name_map: &HashMap<String, Path>,
     ctx: &TypeContext<'_>,
     visited: &mut HashSet<usize>,
 ) {
@@ -444,65 +547,175 @@ fn substitute_type_expr_path(
 
     match &desc {
         TypeDesc::Tconstr { path, args, .. } => {
-            // Check if this path needs substitution
-            if let Path::Pident(ident) = path {
-                let new_path = if ident.stamp() != 0 {
-                    stamp_map.get(&ident.stamp()).cloned()
-                } else {
-                    name_map.get(ident.name()).cloned()
-                };
-
-                if let Some(qualified_path) = new_path {
-                    let mut desc_mut = ty.desc_mut();
-                    if let TypeDesc::Tconstr { ref mut path, .. } = *desc_mut {
-                        *path = qualified_path;
-                    }
+            let new_path = substitute_type_path(
+                path,
+                type_stamp_map,
+                type_name_map,
+                module_stamp_map,
+                module_name_map,
+            );
+            if new_path != *path {
+                let mut desc_mut = ty.desc_mut();
+                if let TypeDesc::Tconstr { ref mut path, .. } = *desc_mut {
+                    *path = new_path;
                 }
             }
 
             // Recurse into type arguments
             for &arg in args {
-                substitute_type_expr_path(arg, stamp_map, name_map, ctx, visited);
+                substitute_type_expr_path(
+                    arg,
+                    type_stamp_map,
+                    type_name_map,
+                    module_stamp_map,
+                    module_name_map,
+                    ctx,
+                    visited,
+                );
             }
         }
         TypeDesc::Tarrow { arg, ret, .. } => {
-            substitute_type_expr_path(arg.typ, stamp_map, name_map, ctx, visited);
-            substitute_type_expr_path(*ret, stamp_map, name_map, ctx, visited);
+            substitute_type_expr_path(
+                arg.typ,
+                type_stamp_map,
+                type_name_map,
+                module_stamp_map,
+                module_name_map,
+                ctx,
+                visited,
+            );
+            substitute_type_expr_path(
+                *ret,
+                type_stamp_map,
+                type_name_map,
+                module_stamp_map,
+                module_name_map,
+                ctx,
+                visited,
+            );
         }
         TypeDesc::Ttuple(types) => {
             for &t in types {
-                substitute_type_expr_path(t, stamp_map, name_map, ctx, visited);
+                substitute_type_expr_path(
+                    t,
+                    type_stamp_map,
+                    type_name_map,
+                    module_stamp_map,
+                    module_name_map,
+                    ctx,
+                    visited,
+                );
             }
         }
         TypeDesc::Tlink(t) => {
-            substitute_type_expr_path(*t, stamp_map, name_map, ctx, visited);
+            substitute_type_expr_path(
+                *t,
+                type_stamp_map,
+                type_name_map,
+                module_stamp_map,
+                module_name_map,
+                ctx,
+                visited,
+            );
         }
         TypeDesc::Tsubst(t) => {
-            substitute_type_expr_path(*t, stamp_map, name_map, ctx, visited);
+            substitute_type_expr_path(
+                *t,
+                type_stamp_map,
+                type_name_map,
+                module_stamp_map,
+                module_name_map,
+                ctx,
+                visited,
+            );
         }
         TypeDesc::Tpoly { body, vars } => {
-            substitute_type_expr_path(*body, stamp_map, name_map, ctx, visited);
+            substitute_type_expr_path(
+                *body,
+                type_stamp_map,
+                type_name_map,
+                module_stamp_map,
+                module_name_map,
+                ctx,
+                visited,
+            );
             for &v in vars {
-                substitute_type_expr_path(v, stamp_map, name_map, ctx, visited);
+                substitute_type_expr_path(
+                    v,
+                    type_stamp_map,
+                    type_name_map,
+                    module_stamp_map,
+                    module_name_map,
+                    ctx,
+                    visited,
+                );
             }
         }
         TypeDesc::Tobject { fields, .. } => {
-            substitute_type_expr_path(*fields, stamp_map, name_map, ctx, visited);
+            substitute_type_expr_path(
+                *fields,
+                type_stamp_map,
+                type_name_map,
+                module_stamp_map,
+                module_name_map,
+                ctx,
+                visited,
+            );
         }
         TypeDesc::Tfield { typ, rest, .. } => {
-            substitute_type_expr_path(*typ, stamp_map, name_map, ctx, visited);
-            substitute_type_expr_path(*rest, stamp_map, name_map, ctx, visited);
+            substitute_type_expr_path(
+                *typ,
+                type_stamp_map,
+                type_name_map,
+                module_stamp_map,
+                module_name_map,
+                ctx,
+                visited,
+            );
+            substitute_type_expr_path(
+                *rest,
+                type_stamp_map,
+                type_name_map,
+                module_stamp_map,
+                module_name_map,
+                ctx,
+                visited,
+            );
         }
         TypeDesc::Tvariant(row) => {
-            substitute_type_expr_path(row.row_more, stamp_map, name_map, ctx, visited);
+            substitute_type_expr_path(
+                row.row_more,
+                type_stamp_map,
+                type_name_map,
+                module_stamp_map,
+                module_name_map,
+                ctx,
+                visited,
+            );
             for field in &row.row_fields {
                 match &field.1 {
                     crate::types::type_expr::RowField::Rpresent(Some(t)) => {
-                        substitute_type_expr_path(*t, stamp_map, name_map, ctx, visited);
+                        substitute_type_expr_path(
+                            *t,
+                            type_stamp_map,
+                            type_name_map,
+                            module_stamp_map,
+                            module_name_map,
+                            ctx,
+                            visited,
+                        );
                     }
                     crate::types::type_expr::RowField::Reither { types, .. } => {
                         for &t in types {
-                            substitute_type_expr_path(t, stamp_map, name_map, ctx, visited);
+                            substitute_type_expr_path(
+                                t,
+                                type_stamp_map,
+                                type_name_map,
+                                module_stamp_map,
+                                module_name_map,
+                                ctx,
+                                visited,
+                            );
                         }
                     }
                     _ => {}
@@ -510,23 +723,98 @@ fn substitute_type_expr_path(
             }
         }
         TypeDesc::Tpackage { path, args, .. } => {
-            if let Path::Pident(ident) = path {
-                let new_path = stamp_map
-                    .get(&ident.stamp())
-                    .cloned()
-                    .or_else(|| name_map.get(ident.name()).cloned());
-                if let Some(qualified_path) = new_path {
-                    let mut desc_mut = ty.desc_mut();
-                    if let TypeDesc::Tpackage { ref mut path, .. } = *desc_mut {
-                        *path = qualified_path;
-                    }
+            // Package paths are module-type paths; OCaml substitutes these through
+            // `Subst.modtype`, not just module substitution.
+            let new_path = substitute_type_path(
+                path,
+                type_stamp_map,
+                type_name_map,
+                module_stamp_map,
+                module_name_map,
+            );
+            if new_path != *path {
+                let mut desc_mut = ty.desc_mut();
+                if let TypeDesc::Tpackage { ref mut path, .. } = *desc_mut {
+                    *path = new_path;
                 }
             }
             for &arg in args {
-                substitute_type_expr_path(arg, stamp_map, name_map, ctx, visited);
+                substitute_type_expr_path(
+                    arg,
+                    type_stamp_map,
+                    type_name_map,
+                    module_stamp_map,
+                    module_name_map,
+                    ctx,
+                    visited,
+                );
             }
         }
         TypeDesc::Tvar(_) | TypeDesc::Tunivar(_) | TypeDesc::Tnil => {}
+    }
+}
+
+fn substitute_type_path(
+    path: &Path,
+    type_stamp_map: &HashMap<i32, Path>,
+    type_name_map: &HashMap<String, Path>,
+    module_stamp_map: &HashMap<i32, Path>,
+    module_name_map: &HashMap<String, Path>,
+) -> Path {
+    match path {
+        Path::Pident(ident) => {
+            if ident.stamp() != 0 {
+                type_stamp_map
+                    .get(&ident.stamp())
+                    .cloned()
+                    .or_else(|| type_name_map.get(ident.name()).cloned())
+                    .unwrap_or_else(|| path.clone())
+            } else {
+                type_name_map
+                    .get(ident.name())
+                    .cloned()
+                    .unwrap_or_else(|| path.clone())
+            }
+        }
+        Path::Pdot(prefix, name, pos) => {
+            let rewritten_prefix = substitute_module_path(prefix, module_stamp_map, module_name_map);
+            Path::Pdot(Box::new(rewritten_prefix), name.clone(), *pos)
+        }
+        Path::Papply(left, right) => Path::Papply(
+            Box::new(substitute_module_path(left, module_stamp_map, module_name_map)),
+            Box::new(substitute_module_path(right, module_stamp_map, module_name_map)),
+        ),
+    }
+}
+
+fn substitute_module_path(
+    path: &Path,
+    module_stamp_map: &HashMap<i32, Path>,
+    module_name_map: &HashMap<String, Path>,
+) -> Path {
+    match path {
+        Path::Pident(ident) => {
+            if ident.stamp() != 0 {
+                module_stamp_map
+                    .get(&ident.stamp())
+                    .cloned()
+                    .or_else(|| module_name_map.get(ident.name()).cloned())
+                    .unwrap_or_else(|| path.clone())
+            } else {
+                module_name_map
+                    .get(ident.name())
+                    .cloned()
+                    .unwrap_or_else(|| path.clone())
+            }
+        }
+        Path::Pdot(prefix, name, pos) => {
+            let rewritten_prefix = substitute_module_path(prefix, module_stamp_map, module_name_map);
+            Path::Pdot(Box::new(rewritten_prefix), name.clone(), *pos)
+        }
+        Path::Papply(left, right) => Path::Papply(
+            Box::new(substitute_module_path(left, module_stamp_map, module_name_map)),
+            Box::new(substitute_module_path(right, module_stamp_map, module_name_map)),
+        ),
     }
 }
 
@@ -605,7 +893,13 @@ fn rewrite_type_expr_prefix(
                 }
             }
         }
-        TypeDesc::Tpackage { args, .. } => {
+        TypeDesc::Tpackage { path, args, .. } => {
+            if let Some(new_path) = rewrite_path_prefix(path, old_name, new_prefix) {
+                let mut desc_mut = ty.desc_mut();
+                if let TypeDesc::Tpackage { ref mut path, .. } = *desc_mut {
+                    *path = new_path;
+                }
+            }
             for &arg in args {
                 rewrite_type_expr_prefix(arg, old_name, new_prefix, ctx, visited);
             }

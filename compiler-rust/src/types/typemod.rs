@@ -411,6 +411,119 @@ fn resolve_path_to_sig_impl<'b>(
     result
 }
 
+type PackageConstraint = (Vec<String>, TypeExprRef);
+
+fn flatten_package_constraint_path(
+    lid: &Longident,
+    arena: &ParseArena,
+    ctx: &crate::types::context::TypeContext<'_>,
+) -> Vec<String> {
+    lid.flatten_idx()
+        .into_iter()
+        .map(|idx| ctx.resolve_longident_component(arena, idx))
+        .collect()
+}
+
+fn nested_package_constraints(
+    module_name: &str,
+    constraints: &[PackageConstraint],
+) -> Vec<PackageConstraint> {
+    constraints
+        .iter()
+        .filter_map(|(path, ty)| {
+            let (head, tail) = path.split_first()?;
+            if head == module_name && !tail.is_empty() {
+                Some((tail.to_vec(), *ty))
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
+fn apply_package_constraints_to_module_type<'b>(
+    env: &Env,
+    mty: &crate::types::decl::ModuleType,
+    constraints: &[PackageConstraint],
+    pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
+    ctx: &'b crate::types::context::TypeContext<'b>,
+) -> Option<crate::types::decl::ModuleType> {
+    use crate::types::decl::ModuleType as DeclMty;
+    use crate::types::decl::SignatureItem;
+
+    if constraints.is_empty() {
+        return Some(mty.clone());
+    }
+
+    let sig = resolve_mod_type_to_sig(mty, Some(env), pers_env, ctx)?;
+    let mut rewritten_sig = Vec::with_capacity(sig.len());
+
+    for item in sig {
+        match item {
+            SignatureItem::SigType(id, mut td, rec_status) => {
+                if td.type_params.is_empty() {
+                    if let Some((_, manifest_ty)) = constraints
+                        .iter()
+                        .find(|(path, _)| path.len() == 1 && path[0] == id.name())
+                    {
+                        td.type_manifest = Some(*manifest_ty);
+                    }
+                }
+                rewritten_sig.push(SignatureItem::SigType(id, td, rec_status));
+            }
+            SignatureItem::SigModule(id, mut md, rec_status) => {
+                let nested = nested_package_constraints(id.name(), constraints);
+                if !nested.is_empty() {
+                    md.md_type = apply_package_constraints_to_module_type(
+                        env,
+                        &md.md_type,
+                        &nested,
+                        pers_env,
+                        ctx,
+                    )?;
+                }
+                rewritten_sig.push(SignatureItem::SigModule(id, md, rec_status));
+            }
+            other => rewritten_sig.push(other),
+        }
+    }
+
+    Some(DeclMty::MtySignature(rewritten_sig))
+}
+
+/// Port of OCaml `Typemod.modtype_of_package` + `package_constraints`.
+/// Converts `Tpackage(path, lids, args)` into a semantic module type by
+/// resolving the package modtype path and applying `with type ... = ...`
+/// constraints onto the resulting signature.
+pub fn modtype_of_package<'b>(
+    env: &Env,
+    package_path: &Path,
+    package_lids: &[Longident],
+    package_args: &[TypeExprRef],
+    arena: &ParseArena,
+    pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
+    ctx: &'b crate::types::context::TypeContext<'b>,
+) -> Option<crate::types::decl::ModuleType> {
+    use crate::types::decl::ModuleType as DeclMty;
+
+    if package_lids.len() != package_args.len() {
+        return None;
+    }
+
+    if package_lids.is_empty() {
+        return Some(DeclMty::MtyIdent(package_path.clone()));
+    }
+
+    let constraints: Vec<PackageConstraint> = package_lids
+        .iter()
+        .zip(package_args.iter())
+        .map(|(lid, ty)| (flatten_package_constraint_path(lid, arena, ctx), *ty))
+        .collect();
+
+    let base_mty = DeclMty::MtyIdent(package_path.clone());
+    apply_package_constraints_to_module_type(env, &base_mty, &constraints, pers_env, ctx)
+}
+
 /// Extract the result type of a functor application.
 /// Given a parsed module expression desc for the functor part, looks up its type
 /// and returns the result type if it's a functor type.
@@ -528,8 +641,34 @@ fn lookup_module_type_from_unpack_expr<'a>(
     arena: &'a ParseArena,
     expr: &crate::parser::ast::Expression,
 ) -> Option<crate::types::decl::ModuleType> {
-    let packed_module = find_packed_module_expr(expr)?;
-    lookup_module_type_from_parsed_module_expr(tctx, env, arena, packed_module)
+    if let Some(packed_module) = find_packed_module_expr(expr) {
+        return lookup_module_type_from_parsed_module_expr(tctx, env, arena, packed_module);
+    }
+
+    // Match OCaml Pmod_unpack typing: inspect the unpack payload type and
+    // derive the semantic module type from its package path + constraints.
+    let typed_expr = type_expression(tctx, env, expr).ok()?;
+    let expanded = crate::types::ctype::expand_head(tctx.type_ctx, env, typed_expr.exp_type);
+    let package_info = {
+        let desc = tctx.type_ctx.get_desc(tctx.type_ctx.repr(expanded));
+        match &*desc {
+            crate::types::type_expr::TypeDesc::Tpackage { path, lids, args } => {
+                Some((path.clone(), lids.clone(), args.clone()))
+            }
+            _ => None,
+        }
+    }?;
+
+    let (package_path, package_lids, package_args) = package_info;
+    modtype_of_package(
+        env,
+        &package_path,
+        &package_lids,
+        &package_args,
+        arena,
+        &mut tctx.persistent_env,
+        tctx.type_ctx,
+    )
 }
 
 /// Look up semantic module type information for parsed module expressions.

@@ -182,24 +182,40 @@ fn sexp_path(p: &Path) -> Sexp {
 // Longident Printer
 // ============================================================================
 
-fn sexp_longident(arena: &ParseArena, li: &Longident) -> Sexp {
+fn sexp_longident(
+    arena: &ParseArena,
+    ctx: &TypeContext<'_>,
+    li: &Longident,
+) -> Sexp {
     match li {
         Longident::Lident(s_idx) => {
-            let s = arena.get_string(*s_idx);
-            Sexp::list(vec![Sexp::atom("Lident"), string(s)])
+            let s = ctx.resolve_longident_component(arena, *s_idx);
+            Sexp::list(vec![Sexp::atom("Lident"), string(&s)])
         }
         Longident::Ldot(parent, s_idx) => {
-            let s = arena.get_string(*s_idx);
-            Sexp::list(vec![Sexp::atom("Ldot"), sexp_longident(arena, parent), string(s)])
+            let s = ctx.resolve_longident_component(arena, *s_idx);
+            Sexp::list(vec![
+                Sexp::atom("Ldot"),
+                sexp_longident(arena, ctx, parent),
+                string(&s),
+            ])
         }
         Longident::Lapply(l1, l2) => {
-            Sexp::list(vec![Sexp::atom("Lapply"), sexp_longident(arena, l1), sexp_longident(arena, l2)])
+            Sexp::list(vec![
+                Sexp::atom("Lapply"),
+                sexp_longident(arena, ctx, l1),
+                sexp_longident(arena, ctx, l2),
+            ])
         }
     }
 }
 
-fn sexp_longident_idx(arena: &ParseArena, idx: crate::parse_arena::LidentIdx) -> Sexp {
-    sexp_longident(arena, arena.get_longident(idx))
+fn sexp_longident_idx(
+    arena: &ParseArena,
+    ctx: &TypeContext<'_>,
+    idx: crate::parse_arena::LidentIdx,
+) -> Sexp {
+    sexp_longident(arena, ctx, arena.get_longident(idx))
 }
 
 // ============================================================================
@@ -454,7 +470,7 @@ fn sexp_type_expr_aux(arena: &ParseArena, ctx: &TypeContext<'_>, te: TypeExprRef
             Sexp::list(vec![
                 Sexp::atom("Tpackage"),
                 sexp_path(path),
-                Sexp::list(lids.iter().map(|li| sexp_longident(arena, li)).collect()),
+                Sexp::list(lids.iter().map(|li| sexp_longident(arena, ctx, li)).collect()),
                 Sexp::list(args.iter().map(|t| sexp_type_expr_aux(arena, ctx, *t, visited)).collect()),
             ])
         }
@@ -592,7 +608,7 @@ fn sexp_pattern_desc(arena: &ParseArena, ctx: &TypeContext<'_>, with_locs: bool,
         PatternDesc::Tpat_construct(li, _, args) => {
             Sexp::list(vec![
                 Sexp::atom("Tpat_construct"),
-                sexp_longident_idx(arena, li.txt),
+                sexp_longident_idx(arena, ctx, li.txt),
                 Sexp::list(args.iter().map(|p| sexp_pattern(arena, ctx, with_locs, p)).collect()),
             ])
         }
@@ -611,7 +627,7 @@ fn sexp_pattern_desc(arena: &ParseArena, ctx: &TypeContext<'_>, with_locs: bool,
                         .iter()
                         .map(|(li, _, p, opt_flag)| {
                             Sexp::list(vec![
-                                sexp_longident_idx(arena, li.txt),
+                                sexp_longident_idx(arena, ctx, li.txt),
                                 sexp_pattern(arena, ctx, with_locs, p),
                                 Sexp::atom(if *opt_flag { "optional" } else { "required" }),
                             ])
@@ -710,7 +726,7 @@ fn sexp_exp_extra(
 fn sexp_expression_desc(arena: &ParseArena, ctx: &TypeContext<'_>, with_locs: bool, desc: &ExpressionDesc) -> Sexp {
     match desc {
         ExpressionDesc::Texp_ident(p, li, _) => {
-            Sexp::list(vec![Sexp::atom("Texp_ident"), sexp_path(p), sexp_longident_idx(arena, li.txt)])
+            Sexp::list(vec![Sexp::atom("Texp_ident"), sexp_path(p), sexp_longident_idx(arena, ctx, li.txt)])
         }
         ExpressionDesc::Texp_constant(c) => {
             Sexp::list(vec![Sexp::atom("Texp_constant"), sexp_constant(c)])
@@ -807,7 +823,7 @@ fn sexp_expression_desc(arena: &ParseArena, ctx: &TypeContext<'_>, with_locs: bo
         ExpressionDesc::Texp_construct(li, _, args) => {
             Sexp::list(vec![
                 Sexp::atom("Texp_construct"),
-                sexp_longident_idx(arena, li.txt),
+                sexp_longident_idx(arena, ctx, li.txt),
                 Sexp::list(args.iter().map(|e| sexp_expression(arena, ctx, with_locs, e)).collect()),
             ])
         }
@@ -835,7 +851,7 @@ fn sexp_expression_desc(arena: &ParseArena, ctx: &TypeContext<'_>, with_locs: bo
                                     let lid_sexp = if li.txt == arena.placeholder_lid() {
                                         Sexp::list(vec![Sexp::atom("Lident"), string(&ld.lbl_name)])
                                     } else {
-                                        sexp_longident_idx(arena, li.txt)
+                                        sexp_longident_idx(arena, ctx, li.txt)
                                     };
                                     Sexp::list(vec![
                                         Sexp::atom("Overridden"),
@@ -860,14 +876,14 @@ fn sexp_expression_desc(arena: &ParseArena, ctx: &TypeContext<'_>, with_locs: bo
             Sexp::list(vec![
                 Sexp::atom("Texp_field"),
                 sexp_expression(arena, ctx, with_locs, e),
-                sexp_longident_idx(arena, li.txt),
+                sexp_longident_idx(arena, ctx, li.txt),
             ])
         }
         ExpressionDesc::Texp_setfield(e1, li, _, e2) => {
             Sexp::list(vec![
                 Sexp::atom("Texp_setfield"),
                 sexp_expression(arena, ctx, with_locs, e1),
-                sexp_longident_idx(arena, li.txt),
+                sexp_longident_idx(arena, ctx, li.txt),
                 sexp_expression(arena, ctx, with_locs, e2),
             ])
         }
@@ -943,7 +959,7 @@ fn sexp_expression_desc(arena: &ParseArena, ctx: &TypeContext<'_>, with_locs: bo
             Sexp::list(vec![Sexp::atom("Texp_pack"), sexp_module_expr(arena, ctx, with_locs, me)])
         }
         ExpressionDesc::Texp_extension_constructor(li, p) => {
-            Sexp::list(vec![Sexp::atom("Texp_extension_constructor"), sexp_longident_idx(arena, li.txt), sexp_path(p)])
+            Sexp::list(vec![Sexp::atom("Texp_extension_constructor"), sexp_longident_idx(arena, ctx, li.txt), sexp_path(p)])
         }
     }
 }
@@ -1063,7 +1079,7 @@ fn sexp_core_type_desc(arena: &ParseArena, ctx: &TypeContext<'_>, with_locs: boo
                     pkg.pack_fields
                         .iter()
                         .map(|(li, ct)| {
-                            Sexp::list(vec![sexp_longident_idx(arena, li.txt), sexp_core_type(arena, ctx, with_locs, ct)])
+                            Sexp::list(vec![sexp_longident_idx(arena, ctx, li.txt), sexp_core_type(arena, ctx, with_locs, ct)])
                         })
                         .collect(),
                 ),
@@ -1615,7 +1631,7 @@ fn sexp_type_extension(arena: &ParseArena, ctx: &TypeContext<'_>, with_locs: boo
     let mut items = vec![
         Sexp::atom("type_extension"),
         sexp_path(&te.tyext_path),
-        sexp_longident_idx(arena, te.tyext_txt.txt),
+        sexp_longident_idx(arena, ctx, te.tyext_txt.txt),
     ];
     items.push(Sexp::list(vec![
         Sexp::atom("params"),
@@ -1872,7 +1888,7 @@ fn sexp_module_binding(arena: &ParseArena, ctx: &TypeContext<'_>, with_locs: boo
     Sexp::list(items)
 }
 
-fn sexp_open_description(arena: &ParseArena, _ctx: &TypeContext<'_>, with_locs: bool, od: &OpenDeclaration) -> Sexp {
+fn sexp_open_description(arena: &ParseArena, ctx: &TypeContext<'_>, with_locs: bool, od: &OpenDeclaration) -> Sexp {
     let loc_sexp = if with_locs {
         vec![location_idx(arena, with_locs, od.open_loc)]
     } else {
@@ -1881,7 +1897,7 @@ fn sexp_open_description(arena: &ParseArena, _ctx: &TypeContext<'_>, with_locs: 
     let mut items = vec![
         Sexp::atom("open_description"),
         sexp_path(&od.open_path),
-        sexp_longident_idx(arena, od.open_txt.txt),
+        sexp_longident_idx(arena, ctx, od.open_txt.txt),
     ];
     items.extend(loc_sexp);
     items.push(sexp_override_flag(&od.open_override));
