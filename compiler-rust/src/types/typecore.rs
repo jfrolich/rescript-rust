@@ -686,6 +686,61 @@ fn parse_int_literal(s: &str) -> Option<i64> {
     if negative { Some(-abs_val) } else { Some(abs_val) }
 }
 
+/// Parse a bigint literal string following OCaml Bigint_utils.parse_bigint:
+/// - keep sign separately as a bool (true for positive, false for negative)
+/// - remove `_` separators
+/// - remove leading zeros only when followed by decimal digits
+/// - preserve non-decimal heads like `00x1` (after `_` removal)
+fn parse_bigint_literal(s: &str) -> (bool, String) {
+    fn remove_leading_sign(s: &str) -> (bool, &str) {
+        if s.is_empty() {
+            (false, s)
+        } else if let Some(rest) = s.strip_prefix('-') {
+            (false, rest)
+        } else if let Some(rest) = s.strip_prefix('+') {
+            (true, rest)
+        } else {
+            (true, s)
+        }
+    }
+
+    fn remove_leading_zeros(s: &str) -> String {
+        // OCaml removes separators before any zero/sign logic.
+        let without_underscores: String = s.chars().filter(|c| *c != '_').collect();
+        let starts_with_minus = without_underscores.starts_with('-');
+        let without_sign = without_underscores
+            .strip_prefix('-')
+            .or_else(|| without_underscores.strip_prefix('+'))
+            .unwrap_or(&without_underscores);
+
+        let processed = if without_sign.is_empty() {
+            String::new()
+        } else {
+            let bytes = without_sign.as_bytes();
+            let mut idx = 0usize;
+            while idx < bytes.len() && bytes[idx] == b'0' {
+                idx += 1;
+            }
+            if idx >= bytes.len() {
+                "0".to_string()
+            } else if bytes[idx].is_ascii_digit() {
+                without_sign[idx..].to_string()
+            } else {
+                without_sign.to_string()
+            }
+        };
+
+        if starts_with_minus {
+            format!("-{processed}")
+        } else {
+            processed
+        }
+    }
+
+    let (sign, digits) = remove_leading_sign(s);
+    (sign, remove_leading_zeros(digits))
+}
+
 /// Wrap an i64 value to simulate OCaml's native int (63-bit on 64-bit systems).
 /// OCaml's int wraps around at 2^62, so values outside [-2^62, 2^62-1] are wrapped.
 /// This matches OCaml's int_of_string behavior for large integer literals.
@@ -714,15 +769,8 @@ pub fn convert_constant(cst: &crate::parser::ast::Constant) -> TypeCoreResult<Co
             }
         }
         ParsedConstant::Integer(s, Some('n')) => {
-            // BigInt - strip leading zeros to match OCaml behavior
-            let (sign, raw_digits) = if s.starts_with('-') {
-                (false, &s[1..])
-            } else {
-                (true, s.as_str())
-            };
-            let digits = raw_digits.trim_start_matches('0');
-            let digits = if digits.is_empty() { "0" } else { digits };
-            Ok(Constant::BigInt(sign, digits.to_string()))
+            let (sign, digits) = parse_bigint_literal(s);
+            Ok(Constant::BigInt(sign, digits))
         }
         ParsedConstant::Integer(i, Some(c)) => Err(TypeCoreError::UnknownLiteral(i.clone(), *c)),
         ParsedConstant::Char(c) => Ok(Constant::Char(*c)),
@@ -7868,6 +7916,20 @@ mod tests {
         let cst = crate::parser::ast::Constant::Integer("12345".to_string(), Some('n'));
         let result = convert_constant(&cst).unwrap();
         assert!(matches!(result, Constant::BigInt(true, d) if d == "12345"));
+    }
+
+    #[test]
+    fn test_convert_constant_bigint_removes_underscores() {
+        let cst = crate::parser::ast::Constant::Integer("01_000_000".to_string(), Some('n'));
+        let result = convert_constant(&cst).unwrap();
+        assert!(matches!(result, Constant::BigInt(true, d) if d == "1000000"));
+    }
+
+    #[test]
+    fn test_convert_constant_bigint_preserves_non_decimal_heads() {
+        let cst = crate::parser::ast::Constant::Integer("00x1_000_000".to_string(), Some('n'));
+        let result = convert_constant(&cst).unwrap();
+        assert!(matches!(result, Constant::BigInt(true, d) if d == "00x1000000"));
     }
 
     #[test]
