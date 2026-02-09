@@ -28,6 +28,7 @@ After completing a task:
 4. Update `PROGRESS.md` with benchmark results
 5. Commit your changes with an atomic commit
 6. If all tasks are complete, output "RALPH_COMPLETE"
+7. Never mention or print `RALPH_COMPLETE` early. The loop stops on that token, so only emit it when the Exit Condition below is truly satisfied.
 
 ### When an optimization threatens binary parity
 
@@ -170,3 +171,5 @@ When all tasks in `RALPH_TODO.md` are either `[x]` (completed) or `[~]` (deferre
 ```
 RALPH_COMPLETE
 ```
+
+Do not output or mention `RALPH_COMPLETE` for partial progress, plans, examples, or "almost done" states. If any task remains unchecked (`[ ]`), continue working and do not emit the token.
