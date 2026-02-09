@@ -4436,6 +4436,25 @@ fn module_type_from_package_binding<'a>(
     }
 }
 
+fn extract_recursive_binding_name(
+    pat: &crate::parser::ast::Pattern,
+) -> Option<&crate::parser::ast::StringLoc> {
+    match &pat.ppat_desc {
+        crate::parser::ast::PatternDesc::Ppat_var(name) => Some(name),
+        crate::parser::ast::PatternDesc::Ppat_constraint(inner, _) => {
+            extract_recursive_binding_name(inner)
+        }
+        crate::parser::ast::PatternDesc::Ppat_alias(inner, alias_name) => {
+            if matches!(inner.ppat_desc, crate::parser::ast::PatternDesc::Ppat_any) {
+                Some(alias_name)
+            } else {
+                None
+            }
+        }
+        _ => None,
+    }
+}
+
 /// Type check let bindings.
 fn type_let_bindings(
     tctx: &mut TypeCheckContext<'_>,
@@ -4455,7 +4474,7 @@ fn type_let_bindings(
     let typing_env = if rec_flag == RecFlag::Recursive {
         let mut new_env = env.clone();
         for (binding, ty) in bindings.iter().zip(binding_types.iter()) {
-            if let crate::parser::ast::PatternDesc::Ppat_var(name) = &binding.pvb_pat.ppat_desc {
+            if let Some(name) = extract_recursive_binding_name(&binding.pvb_pat) {
                 let id = Ident::create_local(tctx.arena.get_string(name.txt));
                 let desc = ValueDescription {
                     val_type: *ty,

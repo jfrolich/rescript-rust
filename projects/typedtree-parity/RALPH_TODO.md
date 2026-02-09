@@ -71,17 +71,18 @@ The `-dtyped-sexp` flag outputs the typed tree without locations. The `-dtyped-s
 
 ## Current Status
 
-**Last Updated:** 2026-02-08
+**Last Updated:** 2026-02-09
 
 |  | Status |
 |--|--------|
 | OCaml compiles | 657/657 |
-| Rust compiles | 568/657 (89 fail) |
-| Parity match (-dtyped-sexp-locs) | 291/568 (51.2%) |
+| Rust compiles | 569/657 (88 fail) |
+| Parity match (-dtyped-sexp-locs) | 291/569 (51.1%) |
 
-**Task Progress:** 16/16 complete
+**Task Progress:** 17/17 complete
 
 **Task Checklist:**
+- [x] Match OCaml recursive `let` prebinding behavior for constrained variable patterns in `type_let`: predeclare recursive value identifiers through `Ppat_constraint` wrappers (and alias-on-`_` form) before typing RHS expressions, so self-references like `let rec v0: t3<_> = #A({field: v0})` resolve as values instead of falling through to `UndefinedMethod`. This fixes Rust compilation for `unboxed_use_case.res` and improves full `--with-locs --no-build` totals (`Rust bsc`: 567 -> 569, failures: 90 -> 88; `Parity`: 291 -> 291 with additional compiled files).
 - [x] Match OCaml `transl_modtype`/`Env.scrape_alias` behavior for module-type identifiers in `typemod`: keep `Pmty_ident` as `MtyIdent(path)` (instead of falling back to empty signatures), resolve `Mty_ident` through local/persistent `Sig_modtype` paths, and preserve `Tstr_modtype` bodies when extracting structure signatures from typed module expressions. This unblocks functor-parameter lookups through dotted modtype paths (`UseCase.Layer`, `Belt.Id.Comparable`) and improves full `--with-locs --no-build` compilation (`Rust bsc`: 565 -> 568, failures: 92 -> 89).
 - [x] Port OCaml module-type extraction behavior for structure-local aliases and functors in `typemod`: resolve `Tmod_ident` through environment/persistent signature scraping, thread an evolving local env while extracting `Tmod_structure` items, and extract `Tmod_functor`/`Tmod_apply` result module types. This unblocks nested module alias/functor member lookup (`coercion_module_alias_test.res` now compiles with Rust) and improves full `--with-locs --no-build` totals (`Rust bsc`: 560 -> 565, `Parity`: 291 -> 292).
 - [x] Match OCaml `expand_head` behavior in `type_application` when handling labeled args for aliased function types (`type t = (~x: int, ~y: int) => int`). Expand the head type before arrow/label matching (and optional-tail skipping) so applications like `f(~y=b, ~x=a)` don't fall into unknown-arg fallback. This fixes `arity.res` compilation and improves full `--with-locs --no-build` results (`Rust bsc`: 556 -> 561, `Parity`: 289 -> 291).
