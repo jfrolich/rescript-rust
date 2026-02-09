@@ -1792,13 +1792,11 @@ fn copy_type_cached(ctx: &TypeContext<'_>, ty: TypeExprRef, cache: &mut std::col
         // Generic structural nodes must be registered before recursion so
         // recursive references can reuse the same node.
         structural => {
-            let placeholder = if level == GENERIC_LEVEL {
-                let placeholder = ctx.new_var(None);
-                cache.insert(ty, placeholder);
-                Some(placeholder)
-            } else {
-                None
-            };
+            let placeholder = ctx.new_var(None);
+            if level != GENERIC_LEVEL {
+                ctx.set_level(placeholder, level);
+            }
+            cache.insert(ty, placeholder);
             let copied_desc = match structural {
                 CopyAction::Arrow {
                     arg_lbl,
@@ -1881,12 +1879,8 @@ fn copy_type_cached(ctx: &TypeContext<'_>, ty: TypeExprRef, cache: &mut std::col
                 }
                 CopyAction::ReturnSelf | CopyAction::NewVar | CopyAction::NewUnivar(_) | CopyAction::Link(_) => unreachable!(),
             };
-            if let Some(placeholder) = placeholder {
-                ctx.set_desc(placeholder, copied_desc);
-                placeholder
-            } else {
-                ctx.new_type(copied_desc)
-            }
+            ctx.set_desc(placeholder, copied_desc);
+            placeholder
         }
     }
 }

@@ -77,11 +77,12 @@ The `-dtyped-sexp` flag outputs the typed tree without locations. The `-dtyped-s
 |--|--------|
 | OCaml compiles | 657/657 |
 | Rust compiles | 657/657 |
-| Parity match (-dtyped-sexp-locs) | 365/657 (55.6%) |
+| Parity match (-dtyped-sexp-locs) | 369/657 (56.2%) |
 
-**Task Progress:** 60/60 complete
+**Task Progress:** 61/61 complete
 
 **Task Checklist:**
+- [x] Preserve OCaml `Ctype.copy` sharing intent for non-generic copied nodes without reintroducing compile hangs: in Rust `ctype::copy_type_cached`, keep non-generic structural copying (to avoid the broad regression from returning all non-generic nodes as-is), but register non-generic nodes in the copy cache and use early placeholders for cycle-safe recursion before descending into children. This restores deterministic full Rust compilation coverage while increasing typedtree parity in the deterministic run (`timeout 300 ./scripts/test_typedtree_parity.sh --with-locs --no-build --parallel 1`): `Rust bsc` 657 -> 657 (failures 0 -> 0), `Parity` 365 -> 369 (diffs 292 -> 288).
 - [x] Investigate and recover from the typedtree parity session crash on 2026-02-09 (SIGQUIT/core dump) before declaring progress complete again. Resume from the crash trace captured below. Recovery verified with deterministic timed run: `timeout 300 ./scripts/test_typedtree_parity.sh --with-locs --no-build --parallel 1` completed successfully with `OCaml bsc 657/657`, `Rust bsc 657/657`, and `Parity 365/657`.
 - [x] Complete the crash-trace in-progress non-destructive substitution work in Rust `typecore`: deep-copy signature type graphs before rewrite/substitution not just in `resolve_module_lid_impl`, but also in `resolve_module_signature_for_path` and the `lookup_type_decl_for_path` `MtySignature` branch, so lookup-time path enrichment no longer mutates typed local module declarations. This removes the `ExternalArity.res` `FormattedMessage.props` drift (`Pdot(Pident "FormattedMessage","props")` vs OCaml's local `Pident "props"`), keeps `EnvUnifiedOps.res` parity-pass, and preserves deterministic full-run totals (`timeout 300 ./scripts/test_typedtree_parity.sh --with-locs --no-build --parallel 1`: `Rust bsc` 657/657, `Parity` 365/657; remaining `ExternalArity.res` diff narrowed to one type-sharing `<cycle>` mismatch).
 
