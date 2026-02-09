@@ -3645,28 +3645,33 @@ impl<'a> LocCloner<'a> {
     }
 
     fn expression_idx(&mut self, idx: &mut ExprIdx) {
-        let expr = unsafe { &mut *(self.arena.get_expr_mut(*idx) as *mut Expression) };
-        self.expression(expr);
+        let mut expr = self.arena.get_expr(*idx).clone();
+        self.expression(&mut expr);
+        *idx = self.arena.push_expr(expr);
     }
 
     fn pattern_idx(&mut self, idx: &mut PatIdx) {
-        let pat = unsafe { &mut *(self.arena.get_pat_mut(*idx) as *mut Pattern) };
-        self.pattern(pat);
+        let mut pat = self.arena.get_pat(*idx).clone();
+        self.pattern(&mut pat);
+        *idx = self.arena.push_pat(pat);
     }
 
     fn core_type_idx(&mut self, idx: &mut CoreTypeIdx) {
-        let typ = unsafe { &mut *(self.arena.get_core_type_mut(*idx) as *mut CoreType) };
-        self.core_type(typ);
+        let mut typ = self.arena.get_core_type(*idx).clone();
+        self.core_type(&mut typ);
+        *idx = self.arena.push_core_type(typ);
     }
 
     fn mod_expr_idx(&mut self, idx: &mut ModExprIdx) {
-        let me = unsafe { &mut *(self.arena.get_mod_expr_mut(*idx) as *mut ModuleExpr) };
-        self.module_expr(me);
+        let mut me = self.arena.get_mod_expr(*idx).clone();
+        self.module_expr(&mut me);
+        *idx = self.arena.push_mod_expr(me);
     }
 
     fn mod_type_idx(&mut self, idx: &mut ModTypeIdx) {
-        let mt = unsafe { &mut *(self.arena.get_mod_type_mut(*idx) as *mut ModuleType) };
-        self.module_type(mt);
+        let mut mt = self.arena.get_mod_type(*idx).clone();
+        self.module_type(&mut mt);
+        *idx = self.arena.push_mod_type(mt);
     }
 
     fn loc(&mut self, loc: &mut LocIdx) {
@@ -4432,6 +4437,7 @@ impl<'a> LocCloner<'a> {
 fn map_structure_item_spice(
     item: &StructureItem,
     arena: &mut ParseArena,
+    mapper_active: bool,
 ) -> SpiceResult<Vec<StructureItem>> {
     let mut mapped_item = item.clone();
     let contains_spice_subtree = structure_item_contains_spice_type_decl(item, arena);
@@ -4445,6 +4451,10 @@ fn map_structure_item_spice(
             }
 
             if vbs.is_empty() {
+                if mapper_active {
+                    let mut cloner = LocCloner::new(arena);
+                    cloner.structure_item(&mut mapped_item);
+                }
                 Ok(vec![mapped_item])
             } else {
                 let mut cloner = LocCloner::new(arena);
@@ -4458,7 +4468,7 @@ fn map_structure_item_spice(
             }
         }
         _ => {
-            if contains_spice_subtree {
+            if mapper_active || contains_spice_subtree {
                 let mut cloner = LocCloner::new(arena);
                 cloner.structure_item(&mut mapped_item);
             }
@@ -4583,6 +4593,7 @@ fn generate_sig_decls(
 fn map_signature_item_spice(
     item: &SignatureItem,
     arena: &mut ParseArena,
+    mapper_active: bool,
 ) -> SpiceResult<Vec<SignatureItem>> {
     let mut mapped_item = item.clone();
     let contains_spice_subtree = signature_item_contains_spice_type_decl(item, arena);
@@ -4609,6 +4620,10 @@ fn map_signature_item_spice(
                 }
             }
             if generated.is_empty() {
+                if mapper_active {
+                    let mut cloner = LocCloner::new(arena);
+                    cloner.signature_item(&mut mapped_item);
+                }
                 Ok(vec![mapped_item])
             } else {
                 let mut cloner = LocCloner::new(arena);
@@ -4621,7 +4636,7 @@ fn map_signature_item_spice(
             }
         }
         _ => {
-            if contains_spice_subtree {
+            if mapper_active || contains_spice_subtree {
                 let mut cloner = LocCloner::new(arena);
                 cloner.signature_item(&mut mapped_item);
             }
@@ -4630,27 +4645,68 @@ fn map_signature_item_spice(
     }
 }
 
+fn structure_contains_spice_type_decl(structure: &[StructureItem], arena: &ParseArena) -> bool {
+    structure
+        .iter()
+        .any(|item| structure_item_contains_spice_type_decl(item, arena))
+}
+
+fn signature_contains_spice_type_decl(signature: &[SignatureItem], arena: &ParseArena) -> bool {
+    signature
+        .iter()
+        .any(|item| signature_item_contains_spice_type_decl(item, arena))
+}
+
+/// Returns true when the Spice mapper should be applied over the whole structure.
+pub fn structure_uses_spice_mapper(structure: &[StructureItem], arena: &ParseArena) -> bool {
+    structure_contains_spice_type_decl(structure, arena)
+}
+
+/// Returns true when the Spice mapper should be applied over the whole signature.
+pub fn signature_uses_spice_mapper(signature: &[SignatureItem], arena: &ParseArena) -> bool {
+    signature_contains_spice_type_decl(signature, arena)
+}
+
+pub fn expand_structure_item_with_mapper(
+    item: &StructureItem,
+    arena: &mut ParseArena,
+    mapper_active: bool,
+) -> SpiceResult<Vec<StructureItem>> {
+    map_structure_item_spice(item, arena, mapper_active)
+}
+
 pub fn expand_structure_item(
     item: &StructureItem,
     arena: &mut ParseArena,
 ) -> SpiceResult<Vec<StructureItem>> {
-    map_structure_item_spice(item, arena)
+    let mapper_active = structure_item_contains_spice_type_decl(item, arena);
+    map_structure_item_spice(item, arena, mapper_active)
 }
 
 pub fn expand_structure(
     structure: &[StructureItem],
     arena: &mut ParseArena,
 ) -> SpiceResult<Vec<StructureItem>> {
+    let mapper_active = structure_contains_spice_type_decl(structure, arena);
     let mut expanded = Vec::new();
     for item in structure {
-        expanded.extend(expand_structure_item(item, arena)?);
+        expanded.extend(expand_structure_item_with_mapper(item, arena, mapper_active)?);
     }
     Ok(expanded)
+}
+
+pub fn expand_signature_item_with_mapper(
+    item: &SignatureItem,
+    arena: &mut ParseArena,
+    mapper_active: bool,
+) -> SpiceResult<Vec<SignatureItem>> {
+    map_signature_item_spice(item, arena, mapper_active)
 }
 
 pub fn expand_signature_item(
     item: &SignatureItem,
     arena: &mut ParseArena,
 ) -> SpiceResult<Vec<SignatureItem>> {
-    map_signature_item_spice(item, arena)
+    let mapper_active = signature_item_contains_spice_type_decl(item, arena);
+    map_signature_item_spice(item, arena, mapper_active)
 }

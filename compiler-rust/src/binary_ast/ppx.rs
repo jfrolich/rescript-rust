@@ -8407,6 +8407,7 @@ pub fn rewrite_structure(
     // Context for tracking already-created module type names (per-structure scope)
     let mut await_context = std::collections::HashSet::new();
     let mut result = Vec::new();
+    let spice_mapper_active = spice_ppx::structure_uses_spice_mapper(structure, arena);
 
     for item in structure {
         match &*item.pstr_desc {
@@ -8421,11 +8422,11 @@ pub fn rewrite_structure(
                 result.extend(module_type_decls);
 
                 // Then process the structure item normally
-                result.extend(try_rewrite_structure_item(item, arena)?);
+                result.extend(try_rewrite_structure_item(item, arena, spice_mapper_active)?);
             }
             _ => {
                 // Non-Pstr_value items: just process normally
-                result.extend(try_rewrite_structure_item(item, arena)?);
+                result.extend(try_rewrite_structure_item(item, arena, spice_mapper_active)?);
             }
         }
     }
@@ -8446,8 +8447,10 @@ fn try_rewrite_signature_items(
     arena: &mut ParseArena,
 ) -> Result<Vec<SignatureItem>, String> {
     let mut rewritten = Vec::new();
+    let spice_mapper_active = spice_ppx::signature_uses_spice_mapper(items, arena);
     for item in items {
-        let expanded_items = spice_ppx::expand_signature_item(item, arena)?;
+        let expanded_items =
+            spice_ppx::expand_signature_item_with_mapper(item, arena, spice_mapper_active)?;
         for expanded in expanded_items {
             rewritten.push(rewrite_signature_item_no_spice(&expanded, arena));
         }
@@ -8467,9 +8470,11 @@ fn rewrite_signature_items(items: &[SignatureItem], arena: &mut ParseArena) -> V
 fn try_rewrite_structure_item(
     item: &StructureItem,
     arena: &mut ParseArena,
+    spice_mapper_active: bool,
 ) -> Result<Vec<StructureItem>, String> {
     let mut result = Vec::new();
-    for expanded in spice_ppx::expand_structure_item(item, arena)? {
+    for expanded in spice_ppx::expand_structure_item_with_mapper(item, arena, spice_mapper_active)?
+    {
         result.extend(rewrite_structure_item_no_spice(&expanded, arena));
     }
     Ok(result)
@@ -8477,7 +8482,9 @@ fn try_rewrite_structure_item(
 
 /// Rewrite a structure item, potentially returning multiple items for @deriving.
 fn rewrite_structure_item(item: &StructureItem, arena: &mut ParseArena) -> Vec<StructureItem> {
-    try_rewrite_structure_item(item, arena)
+    let spice_mapper_active =
+        spice_ppx::structure_uses_spice_mapper(std::slice::from_ref(item), arena);
+    try_rewrite_structure_item(item, arena, spice_mapper_active)
         .unwrap_or_else(|_| rewrite_structure_item_no_spice(item, arena))
 }
 
