@@ -32,7 +32,7 @@ use crate::types::typedtree::{
 };
 use crate::types::Variance as TypesVariance;
 use crate::parser::ast::Variance as ParserVariance;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 // ============================================================================
 // Helper Functions for Path Conversion
@@ -524,23 +524,291 @@ pub fn modtype_of_package<'b>(
     apply_package_constraints_to_module_type(env, &base_mty, &constraints, pers_env, ctx)
 }
 
+fn collect_manifest_type_aliases_for_functor_arg(
+    arg_mty: &crate::types::decl::ModuleType,
+) -> HashMap<String, TypeExprRef> {
+    use crate::types::decl::SignatureItem;
+
+    let mut manifests = HashMap::new();
+
+    if let crate::types::decl::ModuleType::MtySignature(sig_items) = arg_mty {
+        for item in sig_items {
+            if let SignatureItem::SigType(id, decl, _) = item {
+                if decl.type_params.is_empty() {
+                    if let Some(manifest) = decl.type_manifest {
+                        manifests.insert(id.name().to_string(), manifest);
+                    }
+                }
+            }
+        }
+    }
+
+    manifests
+}
+
+fn rewrite_functor_param_type_paths_in_type(
+    ty: TypeExprRef,
+    param_name: &str,
+    manifests: &HashMap<String, TypeExprRef>,
+    ctx: &crate::types::context::TypeContext<'_>,
+    visited: &mut HashSet<TypeExprRef>,
+) {
+    use crate::types::type_expr::{RowField, TypeDesc};
+
+    let ty = ctx.repr(ty);
+    if !visited.insert(ty) {
+        return;
+    }
+
+    let desc = ctx.get_desc(ty).clone();
+    match desc {
+        TypeDesc::Tconstr { path, args, .. } => {
+            let has_args = !args.is_empty();
+            for arg in args {
+                rewrite_functor_param_type_paths_in_type(arg, param_name, manifests, ctx, visited);
+            }
+
+            if let Path::Pdot(prefix, type_name, _) = path {
+                if let Path::Pident(id) = prefix.as_ref() {
+                    if id.name() == param_name && !has_args {
+                        if let Some(manifest_ty) = manifests.get(type_name.as_str()) {
+                            let mut manifest_copy_cache = HashMap::new();
+                            let manifest_copy = crate::types::ctype::copy_type_deep(
+                                ctx,
+                                *manifest_ty,
+                                &mut manifest_copy_cache,
+                            );
+                            let mut manifest_visited = HashSet::new();
+                            rewrite_functor_param_type_paths_in_type(
+                                manifest_copy,
+                                param_name,
+                                manifests,
+                                ctx,
+                                &mut manifest_visited,
+                            );
+                            ctx.set_desc(ty, TypeDesc::Tlink(manifest_copy));
+                        }
+                    }
+                }
+            }
+        }
+        TypeDesc::Tarrow { arg, ret, .. } => {
+            rewrite_functor_param_type_paths_in_type(arg.typ, param_name, manifests, ctx, visited);
+            rewrite_functor_param_type_paths_in_type(ret, param_name, manifests, ctx, visited);
+        }
+        TypeDesc::Ttuple(types) => {
+            for inner in types {
+                rewrite_functor_param_type_paths_in_type(inner, param_name, manifests, ctx, visited);
+            }
+        }
+        TypeDesc::Tobject { fields, .. } => {
+            rewrite_functor_param_type_paths_in_type(fields, param_name, manifests, ctx, visited);
+        }
+        TypeDesc::Tfield { typ, rest, .. } => {
+            rewrite_functor_param_type_paths_in_type(typ, param_name, manifests, ctx, visited);
+            rewrite_functor_param_type_paths_in_type(rest, param_name, manifests, ctx, visited);
+        }
+        TypeDesc::Tvariant(row) => {
+            rewrite_functor_param_type_paths_in_type(
+                row.row_more,
+                param_name,
+                manifests,
+                ctx,
+                visited,
+            );
+            if let Some((_path, row_types)) = row.row_name {
+                for row_ty in row_types {
+                    rewrite_functor_param_type_paths_in_type(
+                        row_ty,
+                        param_name,
+                        manifests,
+                        ctx,
+                        visited,
+                    );
+                }
+            }
+            for (_label, row_field) in row.row_fields {
+                match row_field {
+                    RowField::Rpresent(Some(row_ty)) => {
+                        rewrite_functor_param_type_paths_in_type(
+                            row_ty,
+                            param_name,
+                            manifests,
+                            ctx,
+                            visited,
+                        );
+                    }
+                    RowField::Reither { types, .. } => {
+                        for row_ty in types {
+                            rewrite_functor_param_type_paths_in_type(
+                                row_ty,
+                                param_name,
+                                manifests,
+                                ctx,
+                                visited,
+                            );
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        TypeDesc::Tpoly { body, vars } => {
+            rewrite_functor_param_type_paths_in_type(body, param_name, manifests, ctx, visited);
+            for var in vars {
+                rewrite_functor_param_type_paths_in_type(var, param_name, manifests, ctx, visited);
+            }
+        }
+        TypeDesc::Tpackage { args, .. } => {
+            for arg in args {
+                rewrite_functor_param_type_paths_in_type(arg, param_name, manifests, ctx, visited);
+            }
+        }
+        TypeDesc::Tlink(target) | TypeDesc::Tsubst(target) => {
+            rewrite_functor_param_type_paths_in_type(target, param_name, manifests, ctx, visited);
+        }
+        TypeDesc::Tvar(_) | TypeDesc::Tunivar(_) | TypeDesc::Tnil => {}
+    }
+}
+
+fn copy_and_specialize_functor_arg_type(
+    ty: TypeExprRef,
+    param_name: &str,
+    manifests: &HashMap<String, TypeExprRef>,
+    ctx: &crate::types::context::TypeContext<'_>,
+    copy_cache: &mut HashMap<TypeExprRef, TypeExprRef>,
+) -> TypeExprRef {
+    let copied = crate::types::ctype::copy_type_deep(ctx, ty, copy_cache);
+    let mut visited = HashSet::new();
+    rewrite_functor_param_type_paths_in_type(copied, param_name, manifests, ctx, &mut visited);
+    copied
+}
+
+fn specialize_functor_result_value_types(
+    mty: &crate::types::decl::ModuleType,
+    param_name: &str,
+    manifests: &HashMap<String, TypeExprRef>,
+    ctx: &crate::types::context::TypeContext<'_>,
+) -> crate::types::decl::ModuleType {
+    fn specialize_inner(
+        mty: &crate::types::decl::ModuleType,
+        param_name: &str,
+        manifests: &HashMap<String, TypeExprRef>,
+        ctx: &crate::types::context::TypeContext<'_>,
+        copy_cache: &mut HashMap<TypeExprRef, TypeExprRef>,
+    ) -> crate::types::decl::ModuleType {
+        use crate::types::decl::{ModuleType as DeclMty, SignatureItem};
+
+        match mty {
+            DeclMty::MtySignature(sig_items) => {
+                let specialized_sig = sig_items
+                    .iter()
+                    .map(|item| match item {
+                        SignatureItem::SigValue(id, vd) => {
+                            let mut specialized_vd = vd.clone();
+                            specialized_vd.val_type = copy_and_specialize_functor_arg_type(
+                                vd.val_type,
+                                param_name,
+                                manifests,
+                                ctx,
+                                copy_cache,
+                            );
+                            SignatureItem::SigValue(id.clone(), specialized_vd)
+                        }
+                        SignatureItem::SigModule(id, md, rec_status) => {
+                            let mut specialized_md = md.clone();
+                            specialized_md.md_type = specialize_inner(
+                                &md.md_type,
+                                param_name,
+                                manifests,
+                                ctx,
+                                copy_cache,
+                            );
+                            SignatureItem::SigModule(id.clone(), specialized_md, *rec_status)
+                        }
+                        SignatureItem::SigModtype(id, mtd) => {
+                            let mut specialized_mtd = mtd.clone();
+                            specialized_mtd.mtd_type = mtd
+                                .mtd_type
+                                .as_ref()
+                                .map(|inner| {
+                                    specialize_inner(inner, param_name, manifests, ctx, copy_cache)
+                                });
+                            SignatureItem::SigModtype(id.clone(), specialized_mtd)
+                        }
+                        _ => item.clone(),
+                    })
+                    .collect();
+                DeclMty::MtySignature(specialized_sig)
+            }
+            DeclMty::MtyFunctor {
+                param,
+                param_type,
+                result,
+            } => {
+                let specialized_param_type = param_type.as_ref().map(|inner| {
+                    Box::new(specialize_inner(
+                        inner,
+                        param_name,
+                        manifests,
+                        ctx,
+                        copy_cache,
+                    ))
+                });
+                if param.name() == param_name {
+                    DeclMty::MtyFunctor {
+                        param: param.clone(),
+                        param_type: specialized_param_type,
+                        result: result.clone(),
+                    }
+                } else {
+                    DeclMty::MtyFunctor {
+                        param: param.clone(),
+                        param_type: specialized_param_type,
+                        result: Box::new(specialize_inner(
+                            result,
+                            param_name,
+                            manifests,
+                            ctx,
+                            copy_cache,
+                        )),
+                    }
+                }
+            }
+            DeclMty::MtyIdent(_) | DeclMty::MtyAlias(_, _) => mty.clone(),
+        }
+    }
+
+    if manifests.is_empty() {
+        return mty.clone();
+    }
+
+    let mut copy_cache = HashMap::new();
+    specialize_inner(mty, param_name, manifests, ctx, &mut copy_cache)
+}
+
 /// Extract the result type of a functor application.
 /// Given a parsed module expression desc for the functor part, looks up its type
 /// and returns the result type if it's a functor type.
 fn extract_functor_result_type<'b>(
+    tctx: &mut TypeCheckContext<'b>,
     functor_desc: &ParsedModuleExprDesc,
     arg_expr: &ParsedModuleExpr,
-    arena: &ParseArena,
+    arena: &'b ParseArena,
     env: &Env,
-    pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
-    ctx: &'b crate::types::context::TypeContext<'b>,
 ) -> Option<crate::types::decl::ModuleType> {
     use crate::types::decl::ModuleType as DeclMty;
     // Resolve the functor's module type
     let functor_mty = match functor_desc {
         ParsedModuleExprDesc::Pmod_ident(lid) => {
             let longident = arena.get_longident(lid.txt);
-            lookup_module_type_by_lid(longident, arena, env, pers_env, ctx)?
+            lookup_module_type_by_lid(
+                longident,
+                arena,
+                env,
+                &mut tctx.persistent_env,
+                tctx.type_ctx,
+            )?
         }
         _ => return None,
     };
@@ -553,9 +821,33 @@ fn extract_functor_result_type<'b>(
                     &result,
                     param.name(),
                     &arg_path,
-                    ctx,
+                    tctx.type_ctx,
                 ))
             } else {
+                let arg_mty = lookup_module_type_from_parsed_module_expr(
+                    tctx,
+                    env,
+                    arena,
+                    arg_expr,
+                )
+                .or_else(|| {
+                    type_module_expr(tctx, env, arena, arg_expr)
+                        .ok()
+                        .and_then(|typed_arg| extract_module_type_from_mod_expr(&typed_arg, Some(env)))
+                });
+
+                if let Some(arg_mty) = arg_mty {
+                    let manifests = collect_manifest_type_aliases_for_functor_arg(&arg_mty);
+                    if !manifests.is_empty() {
+                        return Some(specialize_functor_result_value_types(
+                            &result,
+                            param.name(),
+                            &manifests,
+                            tctx.type_ctx,
+                        ));
+                    }
+                }
+
                 Some(result)
             }
         }
@@ -691,12 +983,11 @@ pub fn lookup_module_type_from_parsed_module_expr<'a>(
             )
         }
         ParsedModuleExprDesc::Pmod_apply(functor_expr, arg_expr) => extract_functor_result_type(
+            tctx,
             &functor_expr.pmod_desc,
             arg_expr,
             arena,
             env,
-            &mut tctx.persistent_env,
-            tctx.type_ctx,
         ),
         ParsedModuleExprDesc::Pmod_constraint(inner, mty) => {
             lookup_module_type_from_parsed_module_expr(tctx, env, arena, inner)
