@@ -26,7 +26,7 @@
 #![allow(non_camel_case_types)]
 #![allow(dead_code)]
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use crate::ident::Ident;
 use crate::location::Location;
 use crate::parse_arena::{LidentIdx, Located, LocIdx, ParseArena, StrIdx};
@@ -4018,26 +4018,94 @@ fn type_newtype(
     expected_ty: TypeExprRef,
     attributes: &[crate::parser::ast::Attribute],
 ) -> TypeCoreResult<Expression> {
-    // Create a new abstract type for the newtype
     let ctx = tctx.type_ctx;
     let name_str = tctx.arena.get_string(name.txt).to_string();
+    let replacement_ty = ctx.new_var(None);
 
-    // Create an abstract type that will be bound to the name
-    let new_type_var = ctx.new_var(Some(name_str.clone()));
+    // Match OCaml typecore.ml:
+    // 1. Enter a fresh abstract type declaration for the newtype name.
+    // 2. Type the body with that declaration in scope.
+    // 3. Copy the resulting type and replace occurrences of the newtype constructor
+    //    with a fresh type variable.
+    // 4. Restore definition level even on error.
+    ctx.begin_def();
+    let result = (|| -> TypeCoreResult<Expression> {
+        let level = ctx.current_level();
+        let mut new_env = env.clone();
+        let newtype_id = Ident::create_local(name_str.clone());
+        new_env.add_type(
+            newtype_id.clone(),
+            crate::types::decl::TypeDeclaration {
+                type_params: vec![],
+                type_arity: 0,
+                type_kind: crate::types::decl::TypeKind::TypeAbstract,
+                type_private: crate::types::asttypes::PrivateFlag::Public,
+                type_manifest: None,
+                type_variance: vec![],
+                type_newtype_level: Some((level, level)),
+                type_loc: convert_loc(loc, tctx.arena),
+                type_attributes: vec![],
+                type_immediate: false,
+                type_unboxed: crate::types::decl::UnboxedStatus::FALSE_FALSE,
+                type_inlined_types: vec![],
+                type_path: None,
+            },
+        );
 
-    // Extend environment with the new type (simplified - full implementation
-    // would create a proper type declaration)
-    let _ = new_type_var; // Used to create the abstract type binding
+        // OCaml types the newtype body with type_exp (no expected type).
+        // Use a fresh variable here to avoid constraining the body early.
+        let body_ty = ctx.new_var(None);
+        let typed_body = type_expect(tctx, &new_env, body, body_ty, None)?;
 
-    // Type check the body with the newtype in scope
-    let typed_body = type_expect(tctx, env, body, expected_ty, None)?;
+        // Subst.type_expr Subst.identity in OCaml: copy before rewriting.
+        let rewritten_ty = crate::types::copy_type(ctx, typed_body.exp_type);
 
-    // Return expression with newtype in exp_extra
-    Ok(typed_body.with_exp_extra(
-        crate::types::typedtree::ExpExtra::Texp_newtype(name_str),
-        loc.clone(),
-        attributes.to_vec(),
-    ))
+        fn replace_newtype_path(
+            ctx: &TypeContext<'_>,
+            ty: TypeExprRef,
+            target_id: &Ident,
+            replacement_ty: TypeExprRef,
+            seen: &mut HashSet<TypeExprRef>,
+        ) {
+            let ty = ctx.repr(ty);
+            if !seen.insert(ty) {
+                return;
+            }
+
+            let should_replace = matches!(
+                &*ctx.get_desc(ty),
+                TypeDesc::Tconstr {
+                    path: Path::Pident(id),
+                    ..
+                } if id.same(target_id)
+            );
+
+            if should_replace {
+                crate::types::link_type(ctx, ty, replacement_ty);
+                return;
+            }
+
+            crate::types::iter_type_expr(ctx, ty, |child| {
+                replace_newtype_path(ctx, child, target_id, replacement_ty, seen);
+            });
+        }
+
+        let mut seen = HashSet::new();
+        replace_newtype_path(ctx, rewritten_ty, &newtype_id, replacement_ty, &mut seen);
+
+        unify_expression_types(tctx, loc, rewritten_ty, expected_ty, None)?;
+
+        let mut result = typed_body.with_exp_extra(
+            crate::types::typedtree::ExpExtra::Texp_newtype(name_str),
+            loc,
+            attributes.to_vec(),
+        );
+        result.exp_loc = loc;
+        result.exp_type = rewritten_ty;
+        Ok(result)
+    })();
+    ctx.end_def();
+    result
 }
 
 /// Type check await expression.
