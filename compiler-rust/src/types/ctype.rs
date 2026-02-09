@@ -300,110 +300,89 @@ fn is_predef_type_name(name: &str) -> bool {
 /// 4. Find type `t` in the resolved module's signature
 ///
 /// Returns the type declaration and caches it in the path store.
+fn find_cmi_file(
+    load_paths: &[std::path::PathBuf],
+    module_name: &str,
+) -> Option<String> {
+    let cmi_filename = format!("{}.cmi", module_name);
+    for dir in load_paths {
+        let exact = dir.join(&cmi_filename);
+        if exact.exists() {
+            return Some(exact.to_string_lossy().into_owned());
+        }
+        if let Some(first_char) = cmi_filename.chars().next() {
+            if first_char.is_ascii_uppercase() {
+                let uncap = format!("{}{}", first_char.to_ascii_lowercase(), &cmi_filename[1..]);
+                let uncap_path = dir.join(&uncap);
+                if uncap_path.exists() {
+                    return Some(uncap_path.to_string_lossy().into_owned());
+                }
+            }
+        }
+    }
+    None
+}
+
+fn resolve_module_signature_through_cmi<'a>(
+    ctx: &'a TypeContext<'a>,
+    load_paths: &[std::path::PathBuf],
+    module_path: &Path,
+    visiting: &mut HashSet<Path>,
+) -> Option<super::decl::Signature> {
+    use crate::cmi::{cmi_format, sig_reader::SigReadContext};
+    use crate::types::decl::{ModuleType, SignatureItem};
+
+    if !visiting.insert(module_path.clone()) {
+        return None;
+    }
+
+    let result = match module_path {
+        Path::Pident(id) => {
+            let full_path = find_cmi_file(load_paths, id.name())?;
+            let cmi = cmi_format::read_cmi(&full_path).ok()?;
+            let mut sig_ctx = SigReadContext::new(ctx);
+            Some(sig_ctx.read_signature(&cmi.cmi_sign))
+        }
+        Path::Pdot(parent, module_name, _) => {
+            let parent_sig =
+                resolve_module_signature_through_cmi(ctx, load_paths, parent, visiting)?;
+            parent_sig.into_iter().find_map(|item| match item {
+                SignatureItem::SigModule(id, md, _) if id.name() == module_name => match md.md_type {
+                    ModuleType::MtySignature(sig) => Some(sig),
+                    ModuleType::MtyAlias(_, alias_path) | ModuleType::MtyIdent(alias_path) => {
+                        resolve_module_signature_through_cmi(ctx, load_paths, &alias_path, visiting)
+                    }
+                    _ => None,
+                },
+                _ => None,
+            })
+        }
+        Path::Papply(_, _) => None,
+    };
+
+    visiting.remove(module_path);
+    result
+}
+
 pub fn resolve_type_through_modules<'a>(
     ctx: &'a TypeContext<'a>,
     path: &Path,
 ) -> Option<super::decl::TypeDeclaration> {
-    use crate::cmi::{cmi_format, sig_reader::SigReadContext};
-    use crate::types::decl::{ModuleType, SignatureItem};
+    use crate::types::decl::SignatureItem;
 
-    // Flatten the path to get root ident and component list
-    let (root_id, components) = path.flatten().ok()?;
-    if components.is_empty() {
-        return None; // Not a Pdot path
-    }
+    let (module_path, type_name) = match path {
+        Path::Pdot(parent, name, _) => (parent.as_ref(), name.as_str()),
+        _ => return None,
+    };
 
     let load_paths = ctx.load_paths();
     if load_paths.is_empty() {
         return None;
     }
 
-    // Load the root module's CMI
-    let root_name = root_id.name();
-    let cmi_filename = format!("{}.cmi", root_name);
-    let full_path = {
-        let mut found = None;
-        for dir in load_paths.iter() {
-            let exact = dir.join(&cmi_filename);
-            if exact.exists() {
-                found = Some(exact.to_string_lossy().into_owned());
-                break;
-            }
-            if let Some(first_char) = cmi_filename.chars().next() {
-                if first_char.is_ascii_uppercase() {
-                    let uncap = format!("{}{}", first_char.to_ascii_lowercase(), &cmi_filename[1..]);
-                    let uncap_path = dir.join(&uncap);
-                    if uncap_path.exists() {
-                        found = Some(uncap_path.to_string_lossy().into_owned());
-                        break;
-                    }
-                }
-            }
-        }
-        found
-    }?;
-
-    let cmi = cmi_format::read_cmi(&full_path).ok()?;
-    let mut sig_ctx = SigReadContext::new(ctx);
-    let root_sig = sig_ctx.read_signature(&cmi.cmi_sign);
-
-    // Walk through the components to find the type
-    // components = ["Promise", "t"] for Js.Promise.t
-    let type_name = components.last()?; // "t"
-    let module_components = &components[..components.len() - 1]; // ["Promise"]
-
-    // Navigate to the right sub-module
-    let mut current_sig = root_sig;
-    for &module_name in module_components {
-        let mut found_sig = None;
-        for item in &current_sig {
-            if let SignatureItem::SigModule(id, md, _) = item {
-                if id.name() == module_name {
-                    match &md.md_type {
-                        ModuleType::MtySignature(sub_sig) => {
-                            found_sig = Some(sub_sig.clone());
-                        }
-                        ModuleType::MtyAlias(_, alias_path) | ModuleType::MtyIdent(alias_path) => {
-                            // Resolve the alias by loading the aliased module's CMI
-                            if let Path::Pident(alias_id) = alias_path {
-                                let alias_cmi = format!("{}.cmi", alias_id.name());
-                                let alias_full_path = {
-                                    let mut f = None;
-                                    for dir in load_paths.iter() {
-                                        let exact = dir.join(&alias_cmi);
-                                        if exact.exists() {
-                                            f = Some(exact.to_string_lossy().into_owned());
-                                            break;
-                                        }
-                                        if let Some(first_char) = alias_cmi.chars().next() {
-                                            if first_char.is_ascii_uppercase() {
-                                                let uncap = format!("{}{}", first_char.to_ascii_lowercase(), &alias_cmi[1..]);
-                                                let uncap_path = dir.join(&uncap);
-                                                if uncap_path.exists() {
-                                                    f = Some(uncap_path.to_string_lossy().into_owned());
-                                                    break;
-                                                }
-                                            }
-                                        }
-                                    }
-                                    f
-                                };
-                                if let Some(alias_fp) = alias_full_path {
-                                    if let Ok(alias_cmi_data) = cmi_format::read_cmi(&alias_fp) {
-                                        let mut alias_sig_ctx = SigReadContext::new(ctx);
-                                        found_sig = Some(alias_sig_ctx.read_signature(&alias_cmi_data.cmi_sign));
-                                    }
-                                }
-                            }
-                        }
-                        _ => {}
-                    }
-                    break;
-                }
-            }
-        }
-        current_sig = found_sig?;
-    }
+    let mut visiting = HashSet::new();
+    let current_sig =
+        resolve_module_signature_through_cmi(ctx, &load_paths, module_path, &mut visiting)?;
 
     // Register ALL types in the final signature by stamp for future lookups.
     // This is important because type manifests may reference sibling types
@@ -416,7 +395,7 @@ pub fn resolve_type_through_modules<'a>(
             if id.stamp() != 0 {
                 ctx.register_type_decl_by_stamp(id.stamp(), decl.clone());
             }
-            if id.name() == *type_name {
+            if id.name() == type_name {
                 // Cache the target type in the path store
                 let path_name = path.name();
                 ctx.register_type_decl_by_path(&path_name, decl.clone());
@@ -431,74 +410,109 @@ pub fn resolve_type_through_modules<'a>(
 /// Try to expand a type alias (type abbreviation).
 ///
 /// If the type is `Tconstr(path, args)` and the type declaration for `path`
+fn resolve_module_type_through_env_path<'a>(
+    ctx: &'a TypeContext<'a>,
+    env: &super::env::Env,
+    path: &Path,
+    visiting: &mut HashSet<Path>,
+) -> Option<super::decl::ModuleType> {
+    use super::decl::SignatureItem;
+
+    if !visiting.insert(path.clone()) {
+        return None;
+    }
+
+    let result = match path {
+        Path::Pident(id) => {
+            let name = id.name();
+            if let Ok(md) = env.find_module(name) {
+                Some(md.md_type.clone())
+            } else if let Ok(mtd) = env.find_modtype(name) {
+                mtd.mtd_type.clone()
+            } else {
+                let load_paths = ctx.load_paths();
+                if load_paths.is_empty() {
+                    None
+                } else {
+                    // Mirror OCaml's persistent-module lookup in Env.find_module:
+                    // if not found in local env, consult .cmi signatures.
+                    let mut cmi_visiting = HashSet::new();
+                    resolve_module_signature_through_cmi(
+                        ctx,
+                        &load_paths,
+                        path,
+                        &mut cmi_visiting,
+                    )
+                    .map(super::decl::ModuleType::MtySignature)
+                }
+            }
+        }
+        Path::Pdot(parent, name, _) => {
+            let parent_mty = resolve_module_type_through_env_path(ctx, env, parent, visiting)?;
+            let parent_sig =
+                resolve_signature_through_env_module_type(ctx, env, &parent_mty, visiting)?;
+            parent_sig.into_iter().find_map(|item| match item {
+                SignatureItem::SigModule(id, md, _) if id.name() == name => Some(md.md_type),
+                SignatureItem::SigModtype(id, mtd) if id.name() == name => mtd.mtd_type,
+                _ => None,
+            })
+        }
+        Path::Papply(_, _) => None,
+    };
+
+    visiting.remove(path);
+    result
+}
+
+fn resolve_signature_through_env_module_type<'a>(
+    ctx: &'a TypeContext<'a>,
+    env: &super::env::Env,
+    mty: &super::decl::ModuleType,
+    visiting: &mut HashSet<Path>,
+) -> Option<super::decl::Signature> {
+    use super::decl::ModuleType;
+
+    match mty {
+        ModuleType::MtySignature(sig) => Some(sig.clone()),
+        ModuleType::MtyAlias(_, path) | ModuleType::MtyIdent(path) => {
+            let resolved = resolve_module_type_through_env_path(ctx, env, path, visiting)?;
+            resolve_signature_through_env_module_type(ctx, env, &resolved, visiting)
+        }
+        _ => None,
+    }
+}
+
 /// Resolve a type through local environment modules.
 /// For paths like Pdot(Pident(Ord), "t"), look up module Ord in env,
-/// get its signature, and find type t in it.
+/// follow aliases (MtyAlias/MtyIdent), and then find type t in its signature.
 fn resolve_type_through_env<'a>(
     ctx: &'a TypeContext<'a>,
     env: &super::env::Env,
     path: &Path,
 ) -> Option<super::decl::TypeDeclaration> {
-    use super::decl::{ModuleType, SignatureItem};
+    use super::decl::SignatureItem;
 
-    let (root_id, components) = path.flatten().ok()?;
-    if components.is_empty() {
-        return None;
-    }
+    let (module_path, type_name) = match path {
+        Path::Pdot(parent, name, _) => (parent.as_ref(), name.as_str()),
+        _ => return None,
+    };
 
-    let type_name = *components.last()?;
-    let module_components = &components[..components.len() - 1];
+    let mut visiting = HashSet::new();
+    let module_mty = resolve_module_type_through_env_path(ctx, env, module_path, &mut visiting)?;
+    let module_sig =
+        resolve_signature_through_env_module_type(ctx, env, &module_mty, &mut visiting)?;
 
-    // Look up the root module in the env
-    let root_module = env.find_module(root_id.name()).ok()?;
-    let mut current_md_type = &root_module.md_type;
-
-    // Navigate through sub-modules
-    for &mod_name in module_components {
-        match current_md_type {
-            ModuleType::MtySignature(sig) => {
-                let mut found = false;
-                for item in sig {
-                    if let SignatureItem::SigModule(id, md, _) = item {
-                        if id.name() == mod_name {
-                            current_md_type = &md.md_type;
-                            found = true;
-                            break;
-                        }
-                    }
-                }
-                if !found {
-                    return None;
-                }
+    for item in &module_sig {
+        if let SignatureItem::SigType(id, decl, _) = item {
+            if id.name() == type_name {
+                return Some(decl.clone());
             }
-            ModuleType::MtyAlias(_, alias_path) => {
-                // Need to resolve through persistent env, which we can't do here.
-                // Fall through to CMI resolution.
-                let _ = alias_path;
-                return None;
-            }
-            _ => return None,
         }
     }
 
-    // Now find the type in the current signature
-    match current_md_type {
-        ModuleType::MtySignature(sig) => {
-            for item in sig {
-                if let SignatureItem::SigType(id, decl, _) = item {
-                    if id.name() == type_name {
-                        return Some(decl.clone());
-                    }
-                }
-            }
-            None
-        }
-        ModuleType::MtyAlias(_, alias_path) => {
-            // Module is an alias — try resolving the type through the aliased CMI module
-            resolve_type_through_modules(ctx, &Path::pdot(alias_path.clone(), type_name.to_string()))
-        }
-        _ => None,
-    }
+    // Fall back to CMI-based resolution if local env-based lookup didn't find
+    // the type item (e.g. when only the persistent path is available).
+    resolve_type_through_modules(ctx, path)
 }
 
 /// has a manifest (i.e., `type t = <body>`), expand it by substituting

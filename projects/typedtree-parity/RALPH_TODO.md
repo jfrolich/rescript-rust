@@ -76,12 +76,13 @@ The `-dtyped-sexp` flag outputs the typed tree without locations. The `-dtyped-s
 |  | Status |
 |--|--------|
 | OCaml compiles | 657/657 |
-| Rust compiles | 614/657 (43 fail) |
-| Parity match (-dtyped-sexp-locs) | 303/614 (49.3%) |
+| Rust compiles | 621/657 (36 fail) |
+| Parity match (-dtyped-sexp-locs) | 302/621 (48.6%) |
 
-**Task Progress:** 25/25 complete
+**Task Progress:** 26/26 complete
 
 **Task Checklist:**
+- [x] Match OCaml path-based type alias expansion for dotted module aliases in `ctype` by resolving module signatures through both local env aliases (`Mty_alias`/`Mty_ident`) and CMI alias chains (including non-`Pident` alias paths like `Belt.Array`). This fixes `A.t` vs `array` unification clashes in function calls and moves `belt_hashmap_test.res`, `belt_hashset_int_test.res`, and `belt_sortarray_test.res` from Rust compile failure to parity-only diff. Deterministic full run (`timeout 300 ./scripts/test_typedtree_parity.sh --with-locs --no-build --parallel 1`): `Rust bsc` 614 -> 621 (failures 43 -> 36); `Parity` 303 -> 302 with 7 additional compiled files.
 - [x] Match OCaml `parse_type_constructor_declarations` continuation behavior in the Rust parser: after a `type ... = | ...` variant, continue parsing constructors only for `|` or doc-comment-then-`|` (not bare `@...`). This fixes a parser over-consumption bug where top-level attributes like `@val external` were incorrectly eaten as constructor attrs, producing false "consecutive statements" parse errors. Updated `parse_constructors` in `compiler-rust/src/parser/module.rs` to mirror OCaml’s first-constructor + bar-gated continuation flow. Files moved from Rust compile failure to parity-only diff include `bs_ignore_test.res`, `bs_ignore_effect.res`, and `reactDOM.res`; full `--with-locs --no-build --parallel 1` totals improved (`Rust bsc`: 611 -> 614, failures: 46 -> 43; `Parity`: 303 -> 303 with 3 additional compiled files).
 - [x] Match OCaml path-based alias expansion in `ctype::try_expand_head`: only use direct env lookup for `Pident` type paths, and skip `env.lookup_type` for qualified `Pdot` paths so local leaf-name declarations (`type t = ...`) cannot hijack qualified aliases like `Belt.Array.t`. This fixes `UntaggedVariants.res` Rust compilation (`ExprTypeClash` -> compile success) and improves full `--with-locs --no-build --parallel 1` totals (`Rust bsc`: 602 -> 611, failures: 55 -> 46; `Parity`: 302 -> 303).
 - [x] Match OCaml applicative functor result substitution in `typemod` (`path_of_module` + `Subst.add_module`/`Subst.modtype`) for parsed `Pmod_apply`: when extracting semantic module types from functor applications, substitute functor-parameter module-path references in the result type with the argument module path. This fixes unqualified constructor disambiguation through applied-functor aliases (`variant.res`: Rust compile failure `NotAVariantType` -> Rust compile success, now parity-only diff) and improves full `--with-locs --no-build` totals (`Rust bsc`: 600 -> 602, failures: 57 -> 55).
