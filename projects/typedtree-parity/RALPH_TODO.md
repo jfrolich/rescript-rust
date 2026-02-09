@@ -76,12 +76,13 @@ The `-dtyped-sexp` flag outputs the typed tree without locations. The `-dtyped-s
 |  | Status |
 |--|--------|
 | OCaml compiles | 657/657 |
-| Rust compiles | 600/657 (57 fail) |
-| Parity match (-dtyped-sexp-locs) | 302/600 (50.3%) |
+| Rust compiles | 602/657 (55 fail) |
+| Parity match (-dtyped-sexp-locs) | 302/602 (50.2%) |
 
-**Task Progress:** 22/22 complete
+**Task Progress:** 23/23 complete
 
 **Task Checklist:**
+- [x] Match OCaml applicative functor result substitution in `typemod` (`path_of_module` + `Subst.add_module`/`Subst.modtype`) for parsed `Pmod_apply`: when extracting semantic module types from functor applications, substitute functor-parameter module-path references in the result type with the argument module path. This fixes unqualified constructor disambiguation through applied-functor aliases (`variant.res`: Rust compile failure `NotAVariantType` -> Rust compile success, now parity-only diff) and improves full `--with-locs --no-build` totals (`Rust bsc`: 600 -> 602, failures: 57 -> 55).
 - [x] Match OCaml `expand_head` resolution behavior for qualified type paths in `ctype::try_expand_head`: keep leaf-name fallback (`find_type_decl(head_name)`) for `Pident` only, and do not use it for `Pdot` paths. This removes a non-OCaml alias resolution path that caused infinite `unify -> expand_head` recursion (observed as Rust timeout/hang) and moves `ExternalExtension.res` from Rust compile failure to parity-only diff (`timeout 60 ./scripts/test_typedtree_parity.sh --with-locs --no-build --parallel 1 tests/tests/src/ExternalExtension.res`: Rust `0 -> 1` pass).
 - [x] Continue reducing Rust compile failures by finding other unification recursion sites triggered by non-OCaml alias expansion paths (`ctype::unify`/`expand_head`), prioritizing currently-timing-out files. Removed the non-OCaml name-only `Pident` fallback in `ctype::try_expand_head` so alias expansion stays path-based; this eliminates nullable alias-expansion recursion in timed-out files and moves `js_nullable_test.res` and `float_test.res` from Rust timeout to full parity pass (`timeout 60 ./scripts/test_typedtree_parity.sh --with-locs --no-build tests/tests/src/js_nullable_test.res` and `tests/tests/src/float_test.res`: Rust `0 -> 1`, Parity `0 -> 1`).
 - [x] Continue reducing remaining timeout/crash files in typedtree parity (e.g. `belt_list_test.res`, `js_math_test.res`, `test_list.res`) by tracing the next non-OCaml recursion/crash root cause in `ctype::unify`/`expand_head`. Root cause identified for the remaining timeout case (`belt_list_test.res`): Rust typedtree sexp output wrote Latin-1 bytes to stderr one character at a time (many syscalls), unlike OCaml's single `Format.fprintf` write. Buffering bytes in `write_latin1_line` restores OCaml-like output behavior/performance and moves the file from Rust timeout failure to compiled parity-diff status. Full `--with-locs --no-build` totals improved (`Rust bsc`: 599 -> 600, failures: 58 -> 57; `Parity`: 301 -> 302).

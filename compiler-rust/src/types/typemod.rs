@@ -54,6 +54,142 @@ pub fn path_from_longident<'a>(lid: &Longident, get_str: impl Fn(StrIdx) -> &'a 
     }
 }
 
+/// Try to convert a parsed module expression to a module path.
+/// Mirrors OCaml `Typemod.path_of_module` for applicative functor paths.
+fn path_of_parsed_module_expr(mod_expr: &ParsedModuleExpr, arena: &ParseArena) -> Option<Path> {
+    match &mod_expr.pmod_desc {
+        ParsedModuleExprDesc::Pmod_ident(lid) => {
+            let longident = arena.get_longident(lid.txt);
+            Some(path_from_longident(longident, |idx| arena.get_string(idx)))
+        }
+        ParsedModuleExprDesc::Pmod_apply(functor, arg) => {
+            let funct_path = path_of_parsed_module_expr(functor, arena)?;
+            let arg_path = path_of_parsed_module_expr(arg, arena)?;
+            Some(Path::papply(funct_path, arg_path))
+        }
+        ParsedModuleExprDesc::Pmod_constraint(inner, _) => {
+            path_of_parsed_module_expr(inner, arena)
+        }
+        _ => None,
+    }
+}
+
+fn rewrite_module_path_prefix(path: &Path, old_name: &str, new_prefix: &Path) -> Path {
+    match path {
+        Path::Pident(id) if id.name() == old_name => new_prefix.clone(),
+        Path::Pdot(prefix, name, pos) => Path::Pdot(
+            Box::new(rewrite_module_path_prefix(prefix, old_name, new_prefix)),
+            name.clone(),
+            *pos,
+        ),
+        Path::Papply(functor, arg) => Path::Papply(
+            Box::new(rewrite_module_path_prefix(functor, old_name, new_prefix)),
+            Box::new(rewrite_module_path_prefix(arg, old_name, new_prefix)),
+        ),
+        _ => path.clone(),
+    }
+}
+
+fn substitute_functor_param_in_signature(
+    sig_items: &[crate::types::decl::SignatureItem],
+    old_name: &str,
+    arg_path: &Path,
+    ctx: &crate::types::context::TypeContext<'_>,
+) -> Vec<crate::types::decl::SignatureItem> {
+    use crate::types::decl::SignatureItem;
+
+    let mut rewritten_sig = sig_items.to_vec();
+    crate::cmi::persistent_env::rewrite_module_prefix_in_sig(
+        &rewritten_sig,
+        old_name,
+        arg_path,
+        ctx,
+    );
+
+    for item in &mut rewritten_sig {
+        match item {
+            SignatureItem::SigModule(_, md, _) => {
+                md.md_type = substitute_functor_param_in_module_type(
+                    &md.md_type,
+                    old_name,
+                    arg_path,
+                    ctx,
+                );
+                if let Some(path) = md.md_path.clone() {
+                    md.md_path = Some(rewrite_module_path_prefix(&path, old_name, arg_path));
+                }
+            }
+            SignatureItem::SigModtype(_, mtd) => {
+                if let Some(inner) = mtd.mtd_type.clone() {
+                    mtd.mtd_type = Some(substitute_functor_param_in_module_type(
+                        &inner,
+                        old_name,
+                        arg_path,
+                        ctx,
+                    ));
+                }
+            }
+            _ => {}
+        }
+    }
+
+    rewritten_sig
+}
+
+fn substitute_functor_param_in_module_type(
+    mty: &crate::types::decl::ModuleType,
+    old_name: &str,
+    arg_path: &Path,
+    ctx: &crate::types::context::TypeContext<'_>,
+) -> crate::types::decl::ModuleType {
+    use crate::types::decl::ModuleType as DeclMty;
+
+    match mty {
+        DeclMty::MtySignature(sig_items) => DeclMty::MtySignature(
+            substitute_functor_param_in_signature(sig_items, old_name, arg_path, ctx),
+        ),
+        DeclMty::MtyIdent(path) => {
+            DeclMty::MtyIdent(rewrite_module_path_prefix(path, old_name, arg_path))
+        }
+        DeclMty::MtyAlias(alias_presence, path) => DeclMty::MtyAlias(
+            *alias_presence,
+            rewrite_module_path_prefix(path, old_name, arg_path),
+        ),
+        DeclMty::MtyFunctor {
+            param,
+            param_type,
+            result,
+        } => {
+            let rewritten_param_type = param_type.as_ref().map(|inner| {
+                Box::new(substitute_functor_param_in_module_type(
+                    inner,
+                    old_name,
+                    arg_path,
+                    ctx,
+                ))
+            });
+            if param.name() == old_name {
+                DeclMty::MtyFunctor {
+                    param: param.clone(),
+                    param_type: rewritten_param_type,
+                    result: result.clone(),
+                }
+            } else {
+                DeclMty::MtyFunctor {
+                    param: param.clone(),
+                    param_type: rewritten_param_type,
+                    result: Box::new(substitute_functor_param_in_module_type(
+                        result,
+                        old_name,
+                        arg_path,
+                        ctx,
+                    )),
+                }
+            }
+        }
+    }
+}
+
 // ============================================================================
 // Module Type Checking Results
 // ============================================================================
@@ -280,6 +416,7 @@ fn resolve_path_to_sig_impl<'b>(
 /// and returns the result type if it's a functor type.
 fn extract_functor_result_type<'b>(
     functor_desc: &ParsedModuleExprDesc,
+    arg_expr: &ParsedModuleExpr,
     arena: &ParseArena,
     env: &Env,
     pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
@@ -296,7 +433,19 @@ fn extract_functor_result_type<'b>(
     };
     // Extract the result type if it's a functor
     match functor_mty {
-        DeclMty::MtyFunctor { result, .. } => Some(*result),
+        DeclMty::MtyFunctor { param, result, .. } => {
+            let result = *result;
+            if let Some(arg_path) = path_of_parsed_module_expr(arg_expr, arena) {
+                Some(substitute_functor_param_in_module_type(
+                    &result,
+                    param.name(),
+                    &arg_path,
+                    ctx,
+                ))
+            } else {
+                Some(result)
+            }
+        }
         _ => None,
     }
 }
@@ -402,8 +551,9 @@ pub fn lookup_module_type_from_parsed_module_expr<'a>(
                 tctx.type_ctx,
             )
         }
-        ParsedModuleExprDesc::Pmod_apply(functor_expr, _arg) => extract_functor_result_type(
+        ParsedModuleExprDesc::Pmod_apply(functor_expr, arg_expr) => extract_functor_result_type(
             &functor_expr.pmod_desc,
+            arg_expr,
             arena,
             env,
             &mut tctx.persistent_env,
