@@ -2328,29 +2328,39 @@ fn type_pattern_constraint(
     state: &mut PatternState,
     pat: &ParsedPattern,
 ) -> TypeCoreResult<Pattern> {
-    // Translate the type constraint
+    let ctx = tctx.type_ctx;
+
+    // Match OCaml typecore.ml Ppat_constraint flow:
+    // begin_def; transl_simple_type_delayed; end_def; generalize_structure;
+    // then use two independent instances (constraint ty and inner-pattern ty).
+    ctx.begin_def();
     let (typed_ctype, ctype_ty) = transl_type(tctx, env, core_type)?;
+    let var_level = ctx.current_level();
+    ctx.end_def();
+    crate::types::generalize_structure(ctx, var_level, ctype_ty);
 
-    // Unify the constraint type with the expected type
-    if crate::types::unify(tctx.type_ctx, &mut tctx.unify_state, expected_ty, ctype_ty).is_err() {
-        return Err(TypeCoreError::PatternTypeClash(vec![(
-            expected_ty,
-            ctype_ty,
-        )]));
-    }
+    let constraint_ty = crate::types::instance(ctx, ctype_ty);
+    let inner_expected_ty = crate::types::instance(ctx, ctype_ty);
 
-    // Type check the inner pattern with the constraint type
-    let typed_inner = type_pattern_inner(tctx, env, inner_pat, ctype_ty, mode, state, 0)?;
+    unify_pattern_types(tctx, loc, constraint_ty, expected_ty)?;
 
-    // OCaml converts Tpat_var to Tpat_alias(Tpat_any, id, name) for constraint patterns
-    // (separate = true always in Ppat_constraint case)
+    let typed_inner = type_pattern_inner(tctx, env, inner_pat, inner_expected_ty, mode, state, 0)?;
+
+    // OCaml uses inner pattern attributes for Tpat_constraint extra.
+    let constraint_extra = (
+        crate::types::typedtree::PatExtra::Tpat_constraint(typed_ctype),
+        loc.clone(),
+        inner_pat.ppat_attributes.clone(),
+    );
+
+    // OCaml converts Tpat_var to Tpat_alias(Tpat_any, id, name) and replaces extras.
     let typed_inner = match typed_inner.pat_desc.clone() {
         crate::types::typedtree::PatternDesc::Tpat_var(id, name) => {
             let any_pat = Pattern {
                 pat_desc: crate::types::typedtree::PatternDesc::Tpat_any,
                 pat_loc: typed_inner.pat_loc.clone(),
-                pat_extra: typed_inner.pat_extra.clone(),
-                pat_type: ctype_ty,
+                pat_extra: Vec::new(),
+                pat_type: constraint_ty,
                 pat_env: typed_inner.pat_env,
                 pat_attributes: vec![],
             };
@@ -2360,19 +2370,23 @@ fn type_pattern_constraint(
                     id,
                     name,
                 ),
-                pat_type: ctype_ty,
+                pat_type: constraint_ty,
+                pat_extra: vec![constraint_extra],
                 ..typed_inner
             }
         }
-        _ => typed_inner,
+        _ => {
+            let mut typed_inner = typed_inner;
+            typed_inner.pat_type = constraint_ty;
+            let mut extras = Vec::with_capacity(typed_inner.pat_extra.len() + 1);
+            extras.push(constraint_extra);
+            extras.extend(typed_inner.pat_extra.into_iter());
+            typed_inner.pat_extra = extras;
+            typed_inner
+        }
     };
 
-    // Return the inner pattern with constraint in pat_extra
-    Ok(typed_inner.with_pat_extra(
-        crate::types::typedtree::PatExtra::Tpat_constraint(typed_ctype),
-        loc.clone(),
-        pat.ppat_attributes.clone(),
-    ))
+    Ok(typed_inner)
 }
 
 /// Type check interval pattern.

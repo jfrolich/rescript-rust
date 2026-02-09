@@ -777,6 +777,60 @@ pub fn unify<'a>(
     result
 }
 
+// Match OCaml ctype.ml unify2/unify3 alias-expansion linking direction:
+// unify expanded representatives first, then link the expanded node back to
+// the original non-expanded side to preserve alias-path identity in typedtree.
+fn unify_after_expansion<'a>(
+    ctx: &'a TypeContext<'a>,
+    state: &mut UnifyState,
+    t1: TypeExprRef,
+    t1_expanded: TypeExprRef,
+    t2: TypeExprRef,
+    t2_expanded: TypeExprRef,
+) -> TypeResult<()> {
+    let t1_changed = t1_expanded != t1;
+    let t2_changed = t2_expanded != t2;
+    if t1_changed == t2_changed {
+        return unify(ctx, state, t1_expanded, t2_expanded);
+    }
+
+    // Only apply OCaml-style relinking when the unchanged side is a predef
+    // constructor; this avoids non-predef alias cycles seen in module-heavy code.
+    let (unchanged_ty, from_expanded, to_original) = if t2_changed {
+        (t1, t1_expanded, t2)
+    } else {
+        (t2, t2_expanded, t1)
+    };
+    let should_relink = {
+        let unchanged_desc = ctx.get_desc(unchanged_ty);
+        let is_predef_constr = matches!(
+            &*unchanged_desc,
+            TypeDesc::Tconstr { path, .. } if is_predef_type_name(path.head_name())
+        );
+        drop(unchanged_desc);
+        is_predef_constr
+    };
+    if !should_relink {
+        return unify(ctx, state, t1_expanded, t2_expanded);
+    }
+
+    let t1_expanded = ctx.repr(t1_expanded);
+    let t2_expanded = ctx.repr(t2_expanded);
+    if t1_expanded == t2_expanded {
+        return Ok(());
+    }
+
+    unify(ctx, state, t1_expanded, t2_expanded)?;
+
+    let from_ty = ctx.repr(from_expanded);
+    let to_ty = ctx.repr(to_original);
+    if from_ty != to_ty && !deep_occur(ctx, from_ty, to_ty) {
+        link_type(ctx, from_ty, to_ty);
+    }
+
+    Ok(())
+}
+
 /// Internal unification logic.
 fn unify_types<'a>(
     ctx: &'a TypeContext<'a>,
@@ -944,7 +998,7 @@ fn unify_types<'a>(
                     let exp1 = expand_head(ctx, env, t1);
                     let exp2 = expand_head(ctx, env, t2);
                     if exp1 != t1 || exp2 != t2 {
-                        return unify(ctx, state, exp1, exp2);
+                        return unify_after_expansion(ctx, state, t1, exp1, t2, exp2);
                     }
                 }
                 return Err(TypeError::Unify(vec![(t1, t2)]));
@@ -1183,7 +1237,7 @@ fn unify_types<'a>(
                     let exp2 = if is_constr2 { expand_head(ctx, env, t2) } else { t2 };
                     // Only retry if at least one side actually changed
                     if exp1 != t1 || exp2 != t2 {
-                        return unify(ctx, state, exp1, exp2);
+                        return unify_after_expansion(ctx, state, t1, exp1, t2, exp2);
                     }
                 }
             }
