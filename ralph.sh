@@ -425,8 +425,9 @@ while true; do
     exit 1
   fi
 
-  # Back off when the selected agent reports account/request limits to avoid hammering the API.
-  if grep -Eiq "you.?ve hit your limit|hit your limit|rate limit|rate_limit|too many requests|\\b429\\b|quota exceeded" "$OUTPUT_FILE" "$OUTPUT_JSON_FILE"; then
+  # Back off only on high-confidence limit errors to avoid false positives from
+  # unrelated output (e.g. file line numbers like "429" or generic "rate limit" text).
+  if grep -Eiq "you.?ve hit your limit|hit your limit|rate[_[:space:]-]?limit (reached|exceeded)|too many requests|quota exceeded|insufficient[_[:space:]-]?quota|status( code)?[[:space:]]*429|http[[:space:]]*429" "$OUTPUT_FILE" "$OUTPUT_JSON_FILE"; then
     RATE_LIMIT_STREAK=$((RATE_LIMIT_STREAK + 1))
     BACKOFF_SECONDS=$((RATE_LIMIT_BASE_SLEEP_SECONDS * (2 ** (RATE_LIMIT_STREAK - 1))))
     if [[ $BACKOFF_SECONDS -gt $RATE_LIMIT_MAX_SLEEP_SECONDS ]]; then
