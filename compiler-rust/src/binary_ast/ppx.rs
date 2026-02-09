@@ -1965,6 +1965,7 @@ fn handle_extension(
 
     match name {
         "raw" => handle_raw(expr, payload, arena, arena.prim_raw_expr(), ext_loc),
+        "ffi" => handle_ffi(expr, payload, arena, ext_loc),
         "re" => handle_re(expr, payload, arena, ext_loc),
         "external" => handle_external_ext(expr, payload, arena, ext_loc),
         "debugger" => handle_debugger(expr, payload, arena, ext_loc),
@@ -2876,6 +2877,7 @@ fn handle_ffi(
     expr: &Expression,
     payload: &Payload,
     arena: &mut ParseArena,
+    ext_loc: LocIdx,
 ) -> Expression {
     // Extract the string from the payload to detect arity
     let code_str = match payload {
@@ -2891,19 +2893,20 @@ fn handle_ffi(
 
     let arity = code_str.as_ref().and_then(|s| detect_js_function_arity(s));
 
-    // Create the raw expression (same as %raw with #raw_expr)
-    // For %ffi, expr.pexp_loc is the real location since it's parsed as a regular extension
+    // Create the raw expression (same as %raw with #raw_expr).
+    // OCaml passes the extension identifier location into local_external_apply.
     let raw_prim = prim_str(arena, "#raw_expr");
-    let raw_expr = handle_raw(expr, payload, arena, raw_prim, expr.pexp_loc);
+    let raw_expr = handle_raw(expr, payload, arena, raw_prim, ext_loc);
 
     // Wrap in type constraint based on arity
     if let Some(arity) = arity {
-        let loc = expr.pexp_loc;
-        let none_loc = arena.none_loc();
+        // OCaml constraints the rewritten expression at e.pexp_loc where e is the
+        // payload string expression returned by raw_as_string_exp_exn.
+        let loc = raw_expr.pexp_loc;
 
         let any_type = CoreType {
             ptyp_desc: CoreTypeDesc::Ptyp_any,
-            ptyp_loc: none_loc,
+            ptyp_loc: loc,
             ptyp_attributes: vec![],
         };
 
@@ -2939,24 +2942,9 @@ fn handle_ffi(
             result
         };
 
-        // Add internal_expansive attribute
-        let internal_expansive_attr: Attribute = (
-            Located {
-                txt: arena.intern_string("internal.expansive"),
-                loc: arena.none_loc(),
-            },
-            Payload::PStr(vec![]),
-        );
-
-        let mut attrs = raw_expr.pexp_attributes.clone();
-        attrs.insert(0, internal_expansive_attr);
-
         Expression {
             pexp_desc: ExpressionDesc::Pexp_constraint(
-                Box::new(Expression {
-                    pexp_attributes: attrs,
-                    ..raw_expr
-                }),
+                Box::new(raw_expr),
                 arrow_type,
             ),
             pexp_loc: loc,
