@@ -79,10 +79,11 @@ The `-dtyped-sexp` flag outputs the typed tree without locations. The `-dtyped-s
 | Rust compiles | 657/657 |
 | Parity match (-dtyped-sexp-locs) | 365/657 (55.6%) |
 
-**Task Progress:** 59/59 complete
+**Task Progress:** 60/60 complete
 
 **Task Checklist:**
 - [x] Investigate and recover from the typedtree parity session crash on 2026-02-09 (SIGQUIT/core dump) before declaring progress complete again. Resume from the crash trace captured below. Recovery verified with deterministic timed run: `timeout 300 ./scripts/test_typedtree_parity.sh --with-locs --no-build --parallel 1` completed successfully with `OCaml bsc 657/657`, `Rust bsc 657/657`, and `Parity 365/657`.
+- [x] Complete the crash-trace in-progress non-destructive substitution work in Rust `typecore`: deep-copy signature type graphs before rewrite/substitution not just in `resolve_module_lid_impl`, but also in `resolve_module_signature_for_path` and the `lookup_type_decl_for_path` `MtySignature` branch, so lookup-time path enrichment no longer mutates typed local module declarations. This removes the `ExternalArity.res` `FormattedMessage.props` drift (`Pdot(Pident "FormattedMessage","props")` vs OCaml's local `Pident "props"`), keeps `EnvUnifiedOps.res` parity-pass, and preserves deterministic full-run totals (`timeout 300 ./scripts/test_typedtree_parity.sh --with-locs --no-build --parallel 1`: `Rust bsc` 657/657, `Parity` 365/657; remaining `ExternalArity.res` diff narrowed to one type-sharing `<cycle>` mismatch).
 
 **Crash Report (2026-02-09):**
 

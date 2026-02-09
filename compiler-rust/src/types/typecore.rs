@@ -6268,6 +6268,450 @@ pub fn type_binding<'a>(
     type_let_bindings(tctx, env, rec_flag, bindings)
 }
 
+fn copy_lookup_type_expr(
+    ctx: &TypeContext<'_>,
+    ty: TypeExprRef,
+    cache: &mut HashMap<TypeExprRef, TypeExprRef>,
+) -> TypeExprRef {
+    use crate::types::type_expr::{RowDesc, RowField};
+
+    let ty = ctx.repr(ty);
+    if let Some(&copied) = cache.get(&ty) {
+        return copied;
+    }
+
+    let level = ctx.get_level(ty);
+    let placeholder = ctx.new_var(None);
+    ctx.set_level(placeholder, level);
+    cache.insert(ty, placeholder);
+
+    let copied = {
+        let desc = ctx.get_desc(ty).clone();
+        match desc {
+            TypeDesc::Tvar(name) => {
+                let t = ctx.new_var(name);
+                ctx.set_level(t, level);
+                t
+            }
+            TypeDesc::Tarrow {
+                arg, ret, arity, ..
+            } => {
+                let copied_arg = copy_lookup_type_expr(ctx, arg.typ, cache);
+                let copied_ret = copy_lookup_type_expr(ctx, ret, cache);
+                let t = ctx.new_arrow(arg.lbl, copied_arg, copied_ret, arity);
+                ctx.set_level(t, level);
+                t
+            }
+            TypeDesc::Ttuple(types) => {
+                let copied_items = types
+                    .iter()
+                    .map(|t| copy_lookup_type_expr(ctx, *t, cache))
+                    .collect();
+                let t = ctx.new_tuple(copied_items);
+                ctx.set_level(t, level);
+                t
+            }
+            TypeDesc::Tconstr { path, args, .. } => {
+                let copied_args = args
+                    .iter()
+                    .map(|t| copy_lookup_type_expr(ctx, *t, cache))
+                    .collect();
+                let t = ctx.new_constr(path, copied_args);
+                ctx.set_level(t, level);
+                t
+            }
+            TypeDesc::Tobject { fields, name } => {
+                let copied_fields = copy_lookup_type_expr(ctx, fields, cache);
+                let copied_name = name.map(|(path, args)| {
+                    (
+                        path,
+                        args.into_iter()
+                            .map(|t| copy_lookup_type_expr(ctx, t, cache))
+                            .collect(),
+                    )
+                });
+                let t = ctx.new_type(TypeDesc::Tobject {
+                    fields: copied_fields,
+                    name: copied_name,
+                });
+                ctx.set_level(t, level);
+                t
+            }
+            TypeDesc::Tfield {
+                name,
+                kind,
+                typ,
+                rest,
+            } => {
+                let copied_typ = copy_lookup_type_expr(ctx, typ, cache);
+                let copied_rest = copy_lookup_type_expr(ctx, rest, cache);
+                let t = ctx.new_type(TypeDesc::Tfield {
+                    name,
+                    kind,
+                    typ: copied_typ,
+                    rest: copied_rest,
+                });
+                ctx.set_level(t, level);
+                t
+            }
+            TypeDesc::Tnil => {
+                let t = ctx.new_type(TypeDesc::Tnil);
+                ctx.set_level(t, level);
+                t
+            }
+            TypeDesc::Tlink(target) => copy_lookup_type_expr(ctx, target, cache),
+            TypeDesc::Tsubst(target) => {
+                let copied_target = copy_lookup_type_expr(ctx, target, cache);
+                let t = ctx.new_type(TypeDesc::Tsubst(copied_target));
+                ctx.set_level(t, level);
+                t
+            }
+            TypeDesc::Tvariant(row) => {
+                let copied_row = RowDesc {
+                    row_fields: row
+                        .row_fields
+                        .iter()
+                        .map(|(label, field)| {
+                            let copied_field = match field {
+                                RowField::Rpresent(Some(ty)) => {
+                                    RowField::Rpresent(Some(copy_lookup_type_expr(ctx, *ty, cache)))
+                                }
+                                RowField::Reither {
+                                    constant,
+                                    types,
+                                    matched,
+                                    link,
+                                } => RowField::Reither {
+                                    constant: *constant,
+                                    types: types
+                                        .iter()
+                                        .map(|t| copy_lookup_type_expr(ctx, *t, cache))
+                                        .collect(),
+                                    matched: *matched,
+                                    link: *link,
+                                },
+                                other => other.clone(),
+                            };
+                            (label.clone(), copied_field)
+                        })
+                        .collect(),
+                    row_more: copy_lookup_type_expr(ctx, row.row_more, cache),
+                    row_closed: row.row_closed,
+                    row_fixed: row.row_fixed,
+                    row_name: row.row_name.as_ref().map(|(path, args)| {
+                        (
+                            path.clone(),
+                            args.iter()
+                                .map(|t| copy_lookup_type_expr(ctx, *t, cache))
+                                .collect(),
+                        )
+                    }),
+                };
+                let t = ctx.new_variant(copied_row);
+                ctx.set_level(t, level);
+                t
+            }
+            TypeDesc::Tunivar(name) => {
+                let t = ctx.new_type(TypeDesc::Tunivar(name));
+                ctx.set_level(t, level);
+                t
+            }
+            TypeDesc::Tpoly { body, vars } => {
+                let copied_body = copy_lookup_type_expr(ctx, body, cache);
+                let copied_vars = vars
+                    .iter()
+                    .map(|t| copy_lookup_type_expr(ctx, *t, cache))
+                    .collect();
+                let t = ctx.new_poly(copied_body, copied_vars);
+                ctx.set_level(t, level);
+                t
+            }
+            TypeDesc::Tpackage { path, lids, args } => {
+                let copied_args = args
+                    .iter()
+                    .map(|t| copy_lookup_type_expr(ctx, *t, cache))
+                    .collect();
+                let t = ctx.new_type(TypeDesc::Tpackage {
+                    path,
+                    lids,
+                    args: copied_args,
+                });
+                ctx.set_level(t, level);
+                t
+            }
+        }
+    };
+
+    ctx.set_desc(placeholder, TypeDesc::Tlink(copied));
+    cache.insert(ty, copied);
+    copied
+}
+
+fn copy_lookup_constructor_args(
+    args: &crate::types::decl::ConstructorArguments,
+    ctx: &TypeContext<'_>,
+    cache: &mut HashMap<TypeExprRef, TypeExprRef>,
+) -> crate::types::decl::ConstructorArguments {
+    match args {
+        crate::types::decl::ConstructorArguments::CstrTuple(items) => {
+            crate::types::decl::ConstructorArguments::CstrTuple(
+                items
+                    .iter()
+                    .map(|t| copy_lookup_type_expr(ctx, *t, cache))
+                    .collect(),
+            )
+        }
+        crate::types::decl::ConstructorArguments::CstrRecord(labels) => {
+            crate::types::decl::ConstructorArguments::CstrRecord(
+                labels
+                    .iter()
+                    .map(|label| crate::types::decl::LabelDeclaration {
+                        ld_id: label.ld_id.clone(),
+                        ld_mutable: label.ld_mutable.clone(),
+                        ld_optional: label.ld_optional,
+                        ld_type: copy_lookup_type_expr(ctx, label.ld_type, cache),
+                        ld_loc: label.ld_loc.clone(),
+                        ld_attributes: label.ld_attributes.clone(),
+                    })
+                    .collect(),
+            )
+        }
+    }
+}
+
+fn copy_lookup_type_kind(
+    kind: &crate::types::decl::TypeKind,
+    ctx: &TypeContext<'_>,
+    cache: &mut HashMap<TypeExprRef, TypeExprRef>,
+) -> crate::types::decl::TypeKind {
+    match kind {
+        crate::types::decl::TypeKind::TypeAbstract => crate::types::decl::TypeKind::TypeAbstract,
+        crate::types::decl::TypeKind::TypeOpen => crate::types::decl::TypeKind::TypeOpen,
+        crate::types::decl::TypeKind::TypeRecord(labels, repr) => {
+            crate::types::decl::TypeKind::TypeRecord(
+                labels
+                    .iter()
+                    .map(|label| crate::types::decl::LabelDeclaration {
+                        ld_id: label.ld_id.clone(),
+                        ld_mutable: label.ld_mutable.clone(),
+                        ld_optional: label.ld_optional,
+                        ld_type: copy_lookup_type_expr(ctx, label.ld_type, cache),
+                        ld_loc: label.ld_loc.clone(),
+                        ld_attributes: label.ld_attributes.clone(),
+                    })
+                    .collect(),
+                repr.clone(),
+            )
+        }
+        crate::types::decl::TypeKind::TypeVariant(constructors) => {
+            crate::types::decl::TypeKind::TypeVariant(
+                constructors
+                    .iter()
+                    .map(|constructor| crate::types::decl::ConstructorDeclaration {
+                        cd_id: constructor.cd_id.clone(),
+                        cd_args: copy_lookup_constructor_args(&constructor.cd_args, ctx, cache),
+                        cd_res: constructor
+                            .cd_res
+                            .map(|t| copy_lookup_type_expr(ctx, t, cache)),
+                        cd_loc: constructor.cd_loc.clone(),
+                        cd_attributes: constructor.cd_attributes.clone(),
+                    })
+                    .collect(),
+            )
+        }
+    }
+}
+
+fn copy_lookup_type_inlined(
+    inlined: &crate::types::decl::TypeInlinedType,
+    ctx: &TypeContext<'_>,
+    cache: &mut HashMap<TypeExprRef, TypeExprRef>,
+) -> crate::types::decl::TypeInlinedType {
+    match inlined {
+        crate::types::decl::TypeInlinedType::Record { type_name, labels } => {
+            crate::types::decl::TypeInlinedType::Record {
+                type_name: type_name.clone(),
+                labels: labels
+                    .iter()
+                    .map(|label| crate::types::decl::LabelDeclaration {
+                        ld_id: label.ld_id.clone(),
+                        ld_mutable: label.ld_mutable.clone(),
+                        ld_optional: label.ld_optional,
+                        ld_type: copy_lookup_type_expr(ctx, label.ld_type, cache),
+                        ld_loc: label.ld_loc.clone(),
+                        ld_attributes: label.ld_attributes.clone(),
+                    })
+                    .collect(),
+            }
+        }
+    }
+}
+
+fn copy_lookup_type_decl(
+    decl: &crate::types::decl::TypeDeclaration,
+    ctx: &TypeContext<'_>,
+    cache: &mut HashMap<TypeExprRef, TypeExprRef>,
+) -> crate::types::decl::TypeDeclaration {
+    crate::types::decl::TypeDeclaration {
+        type_params: decl
+            .type_params
+            .iter()
+            .map(|t| copy_lookup_type_expr(ctx, *t, cache))
+            .collect(),
+        type_arity: decl.type_arity,
+        type_kind: copy_lookup_type_kind(&decl.type_kind, ctx, cache),
+        type_private: decl.type_private,
+        type_manifest: decl
+            .type_manifest
+            .map(|t| copy_lookup_type_expr(ctx, t, cache)),
+        type_variance: decl.type_variance.clone(),
+        type_newtype_level: decl.type_newtype_level,
+        type_loc: decl.type_loc.clone(),
+        type_attributes: decl.type_attributes.clone(),
+        type_immediate: decl.type_immediate,
+        type_unboxed: decl.type_unboxed,
+        type_inlined_types: decl
+            .type_inlined_types
+            .iter()
+            .map(|inlined| copy_lookup_type_inlined(inlined, ctx, cache))
+            .collect(),
+        type_path: decl.type_path.clone(),
+    }
+}
+
+fn copy_lookup_extension_constructor(
+    ext: &crate::types::decl::ExtensionConstructor,
+    ctx: &TypeContext<'_>,
+    cache: &mut HashMap<TypeExprRef, TypeExprRef>,
+) -> crate::types::decl::ExtensionConstructor {
+    crate::types::decl::ExtensionConstructor {
+        ext_type_path: ext.ext_type_path.clone(),
+        ext_type_params: ext
+            .ext_type_params
+            .iter()
+            .map(|t| copy_lookup_type_expr(ctx, *t, cache))
+            .collect(),
+        ext_args: copy_lookup_constructor_args(&ext.ext_args, ctx, cache),
+        ext_ret_type: ext
+            .ext_ret_type
+            .map(|t| copy_lookup_type_expr(ctx, t, cache)),
+        ext_private: ext.ext_private,
+        ext_loc: ext.ext_loc.clone(),
+        ext_attributes: ext.ext_attributes.clone(),
+        ext_is_exception: ext.ext_is_exception,
+    }
+}
+
+fn copy_lookup_module_type(
+    module_type: &crate::types::decl::ModuleType,
+    ctx: &TypeContext<'_>,
+    cache: &mut HashMap<TypeExprRef, TypeExprRef>,
+) -> crate::types::decl::ModuleType {
+    match module_type {
+        crate::types::decl::ModuleType::MtyIdent(path) => {
+            crate::types::decl::ModuleType::MtyIdent(path.clone())
+        }
+        crate::types::decl::ModuleType::MtyAlias(alias, path) => {
+            crate::types::decl::ModuleType::MtyAlias(*alias, path.clone())
+        }
+        crate::types::decl::ModuleType::MtyFunctor {
+            param,
+            param_type,
+            result,
+        } => crate::types::decl::ModuleType::MtyFunctor {
+            param: param.clone(),
+            param_type: param_type
+                .as_ref()
+                .map(|inner| Box::new(copy_lookup_module_type(inner, ctx, cache))),
+            result: Box::new(copy_lookup_module_type(result, ctx, cache)),
+        },
+        crate::types::decl::ModuleType::MtySignature(sig_items) => {
+            crate::types::decl::ModuleType::MtySignature(copy_lookup_signature(
+                sig_items,
+                ctx,
+                cache,
+            ))
+        }
+    }
+}
+
+fn copy_lookup_signature(
+    sig_items: &[crate::types::decl::SignatureItem],
+    ctx: &TypeContext<'_>,
+    cache: &mut HashMap<TypeExprRef, TypeExprRef>,
+) -> crate::types::decl::Signature {
+    sig_items
+        .iter()
+        .map(|item| match item {
+            crate::types::decl::SignatureItem::SigValue(id, desc) => {
+                crate::types::decl::SignatureItem::SigValue(
+                    id.clone(),
+                    crate::types::decl::ValueDescription {
+                        val_type: copy_lookup_type_expr(ctx, desc.val_type, cache),
+                        val_kind: desc.val_kind.clone(),
+                        val_loc: desc.val_loc.clone(),
+                        val_attributes: desc.val_attributes.clone(),
+                        val_path: desc.val_path.clone(),
+                    },
+                )
+            }
+            crate::types::decl::SignatureItem::SigType(id, decl, rec_status) => {
+                crate::types::decl::SignatureItem::SigType(
+                    id.clone(),
+                    copy_lookup_type_decl(decl, ctx, cache),
+                    *rec_status,
+                )
+            }
+            crate::types::decl::SignatureItem::SigTypext(id, ext, ext_status) => {
+                crate::types::decl::SignatureItem::SigTypext(
+                    id.clone(),
+                    copy_lookup_extension_constructor(ext, ctx, cache),
+                    *ext_status,
+                )
+            }
+            crate::types::decl::SignatureItem::SigModule(id, md, rec_status) => {
+                crate::types::decl::SignatureItem::SigModule(
+                    id.clone(),
+                    crate::types::decl::ModuleDeclaration {
+                        md_type: copy_lookup_module_type(&md.md_type, ctx, cache),
+                        md_attributes: md.md_attributes.clone(),
+                        md_loc: md.md_loc.clone(),
+                        md_path: md.md_path.clone(),
+                    },
+                    *rec_status,
+                )
+            }
+            crate::types::decl::SignatureItem::SigModtype(id, mtd) => {
+                crate::types::decl::SignatureItem::SigModtype(
+                    id.clone(),
+                    crate::types::decl::ModtypeDeclaration {
+                        mtd_type: mtd
+                            .mtd_type
+                            .as_ref()
+                            .map(|mty| copy_lookup_module_type(mty, ctx, cache)),
+                        mtd_attributes: mtd.mtd_attributes.clone(),
+                        mtd_loc: mtd.mtd_loc.clone(),
+                    },
+                )
+            }
+            crate::types::decl::SignatureItem::SigClass => {
+                crate::types::decl::SignatureItem::SigClass
+            }
+            crate::types::decl::SignatureItem::SigClassType => {
+                crate::types::decl::SignatureItem::SigClassType
+            }
+        })
+        .collect()
+}
+
+fn copy_lookup_signature_for_subst(
+    sig_items: &[crate::types::decl::SignatureItem],
+    ctx: &TypeContext<'_>,
+) -> crate::types::decl::Signature {
+    let mut cache = HashMap::new();
+    copy_lookup_signature(sig_items, ctx, &mut cache)
+}
+
 // ============================================================================
 // Environment Extensions for Built-in Types
 // ============================================================================
@@ -6458,6 +6902,11 @@ impl Env {
                         // to the access path. This handles both:
                         // - opened modules: Console from Stdlib → Pdot(Pident("Stdlib"), "Console")
                         // - local aliases: module N = Belt.List → Pident("N")
+                        let sig = if apply_subst {
+                            copy_lookup_signature_for_subst(&sig, ctx)
+                        } else {
+                            sig
+                        };
                         if apply_subst {
                             if let Some(ref old_name) = resolved_name {
                                 crate::cmi::persistent_env::rewrite_module_prefix_in_sig(
@@ -6499,6 +6948,11 @@ impl Env {
                                     // resolved module name to the access path.
                                     // E.g., Belt.Array aliases Belt_Array, so rewrite
                                     // Pdot(Pident("Belt_Array"), X) → Pdot(sub_path, X)
+                                    let sig = if apply_subst {
+                                        copy_lookup_signature_for_subst(&sig, ctx)
+                                    } else {
+                                        sig
+                                    };
                                     if apply_subst {
                                         if let Some(ref old_name) = resolved_name {
                                             crate::cmi::persistent_env::rewrite_module_prefix_in_sig(
@@ -7113,6 +7567,7 @@ fn resolve_module_signature_for_path<'a>(
                     .md_path
                     .clone()
                     .unwrap_or_else(|| Path::pident(id.clone()));
+                let sig = copy_lookup_signature_for_subst(&sig, ctx);
                 if let Some(old_name) = resolved_name {
                     crate::cmi::persistent_env::rewrite_module_prefix_in_sig(
                         &sig,
@@ -7143,6 +7598,7 @@ fn resolve_module_signature_for_path<'a>(
                         let access_path = md.md_path.clone().unwrap_or_else(|| {
                             Path::pdot(resolved_parent_path.clone(), submodule_name.as_str())
                         });
+                        let sig = copy_lookup_signature_for_subst(&sig, ctx);
                         if let Some(old_name) = resolved_name {
                             crate::cmi::persistent_env::rewrite_module_prefix_in_sig(
                                 &sig,
@@ -7232,12 +7688,9 @@ fn lookup_type_decl_for_path<'a>(
                     }
                     ModuleType::MtySignature(sig) => {
                         let module_path = Path::pident(parent_id.clone());
-                        crate::cmi::persistent_env::substitute_type_paths_in_sig(
-                            sig,
-                            &module_path,
-                            ctx,
-                        );
-                        for item in sig {
+                        let sig = copy_lookup_signature_for_subst(sig, ctx);
+                        crate::cmi::persistent_env::substitute_type_paths_in_sig(&sig, &module_path, ctx);
+                        for item in &sig {
                             if let crate::types::decl::SignatureItem::SigType(id, decl, _) = item {
                                 if id.name() == type_name.as_str() {
                                     return Some(decl.clone());
