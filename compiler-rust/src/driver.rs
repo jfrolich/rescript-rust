@@ -14,7 +14,9 @@ use crate::binary_ast::spice_ppx;
 use crate::js_ir::printer::print_program;
 use crate::lambda::compile::LambdaCompiler;
 use crate::lambda::convert::LambdaConverter;
-use crate::parser::{module, Parser};
+use crate::parser::ast::{Expression, ExpressionDesc, RecFlag, Structure, StructureItemDesc, ValueBinding};
+use crate::parser::longident::Longident;
+use crate::parser::{jsx_ppx, module, Parser};
 use crate::types::sexp_typedtree::{print_typed_structure, print_typed_structure_with_locs, print_typed_signature, print_typed_signature_with_locs};
 use crate::types::{initial_env, type_structure, transl_signature, TypeCheckContext, TypeContext};
 
@@ -38,6 +40,47 @@ pub struct CompilerOptions {
     pub runtime_path: Option<PathBuf>,
 }
 
+fn has_react_component_attr(vb: &ValueBinding, arena: &crate::parse_arena::ParseArena) -> bool {
+    vb.pvb_attributes.iter().any(|attr| {
+        matches!(
+            arena.get_string(attr.0.txt),
+            "react.component" | "jsx.component"
+        )
+    })
+}
+
+fn is_react_forward_ref_wrapper(expr: &Expression, arena: &crate::parse_arena::ParseArena) -> bool {
+    let ExpressionDesc::Pexp_apply { funct, .. } = &expr.pexp_desc else {
+        return false;
+    };
+    let ExpressionDesc::Pexp_ident(lid) = &funct.pexp_desc else {
+        return false;
+    };
+    match arena.get_longident(lid.txt) {
+        Longident::Ldot(prefix, field) if arena.get_string(*field) == "forwardRef" => {
+            matches!(&**prefix, Longident::Lident(module_name) if arena.get_string(*module_name) == "React")
+        }
+        _ => false,
+    }
+}
+
+fn needs_component_rewrite(structure: &Structure, arena: &crate::parse_arena::ParseArena) -> bool {
+    structure.iter().any(|item| {
+        let StructureItemDesc::Pstr_value(rec_flag, bindings) = &item.pstr_desc else {
+            return false;
+        };
+
+        bindings.iter().any(|vb| {
+            if !has_react_component_attr(vb, arena) {
+                return false;
+            }
+
+            // These two forms rely on JSX component lowering for type-checking parity.
+            *rec_flag == RecFlag::Recursive || is_react_forward_ref_wrapper(&vb.pvb_expr, arena)
+        })
+    })
+}
+
 /// Compile ReScript source to JavaScript.
 pub fn compile_source_to_js(source: &str, filename: &str) -> Result<String> {
     compile_source_to_js_with_options(source, filename, &CompilerOptions::default())
@@ -55,6 +98,14 @@ pub fn compile_source_to_js_with_options(
     if parser.has_errors() {
         return Err(anyhow!("Parse failed with {} error(s)", parser.diagnostics().len()));
     }
+
+    // Match OCaml JSX lowering for component wrappers used by typedtree parity inputs.
+    let structure = if needs_component_rewrite(&structure, parser.arena()) {
+        jsx_ppx::transform_structure(structure, 4, parser.arena_mut())
+    } else {
+        structure
+    };
+
     let structure = spice_ppx::expand_structure(&structure, parser.arena_mut());
 
     // Expand extension points (%%raw, %raw, %re, %%private) without touching externals
