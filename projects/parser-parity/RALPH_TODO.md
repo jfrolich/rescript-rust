@@ -36,7 +36,7 @@
 | bsc-ast (syntax scope) | 1196/1196 (100%) ✅ |
 | sexp-locs (full scope: syntax + TELLA) | 3505/3505 (100%) ✅ |
 | sexp-locs-ppx (full scope: syntax + TELLA) | 3505/3505 (100%) ✅ |
-| bsc-ast (full scope: syntax + TELLA) | 584 diffs (2921/3505 matches, 83.3%) |
+| bsc-ast (full scope: syntax + TELLA) | 583 diffs (2922/3505 matches, 83.4%) |
 
 **Scope note:** Final parity targets include both `tests/syntax_tests/data` and `TELLA_DIR`
 when present. Always report parity as `X/Y` where `Y` contains only OCaml-successful files.
@@ -45,6 +45,25 @@ Files where OCaml fails are excluded from parity denominators and listed separat
 **Snapshot note:** The `1179` denominator above is a historical in-repo snapshot.
 
 **Session progress (2026-02-09) - newest:**
+- Fixed `Sury.res` binary-ast sharing parity and improved full-scope count:
+  - Investigated `/Users/jaapf/dev/tella-fusion/node_modules/sury/src/Sury.res` with `inspect_binary_ast.py`
+    and found three missing shares of `res.braces` empty payload blocks (`PStr []`) that OCaml shared with
+    the existing `res.template` payload object.
+  - Restored OCaml-like `Ast_literal` no-loc builtin type identity for `@inline` rewrites by preallocating
+    static core types in `ParseArena` (`string`, `int`, `bool`, `float`) and reusing them in PPX output.
+  - Extended simple no-loc core-type marshal sharing to include `string|int|bool|float` (not just `string`).
+  - Enabled parser-attr empty-payload sharing for braces/ternary-bearing expression/value-binding attrs, while
+    preserving baseline behavior for parser attrs in general.
+  - Avoided over-sharing in `module ... = unpack(...)` contexts by treating `Pmod_unpack` payload marshalling
+    as pack-context for parser-attribute sharing decisions.
+  - Validation:
+    - `inspect_binary_ast.py test` now passes for:
+      - `/Users/jaapf/dev/tella-fusion/node_modules/sury/src/Sury.res`
+      - `tests/syntax_tests/data/printer/modExpr/unpack.res`
+      - all 11 previously-regressed syntax baseline files (no regressions).
+    - Full-scope parity improved:
+      - `bsc-ast differences: 584 -> 583`
+      - `sexp-locs: 3505/3505`, `sexp-locs-ppx: 3505/3505` unchanged.
 - Fixed dependency extraction scoping/open-member parity to match OCaml `depend.ml`:
   - In `compiler-rust/src/binary_ast/deps.rs`, nested module bindings from `Pstr_module`/`Pstr_recmodule`/`Psig_module`/`Psig_recmodule` are now scoped locally and restored after body traversal (no leakage into outer scope).
   - Added local-module member tracking (`module_members`) and OCaml-style `open` behavior so `open M` binds known submodules from local module declarations.
@@ -78,7 +97,7 @@ Files where OCaml fails are excluded from parity denominators and listed separat
 - Parser abort-trap blocker status:
   - ✅ Resolved for in-scope files by fixing Rust-only parser failures and excluding 11 dual-failure (OCaml+Rust) files via explicit parity blacklist.
 - Current blocker:
-  - Remaining full-scope `bsc-ast` parity diffs (`584`) are now the primary target (dependency extraction + sharing identity mismatches).
+  - Remaining full-scope `bsc-ast` parity diffs (`583`) are now the primary target (dependency extraction + sharing identity mismatches).
 
 **Session progress (2026-02-08) - newest:**
 - Fixed remaining full-scope `sexp-locs` parser diff and aligned OCaml int32 marshal for `@inline` constants:
@@ -611,7 +630,7 @@ The binary AST structure (sexp-locs) is 100% correct. The differences are in:
 - [x] Task 5.1-5.3: Achieved 838/1179 (71.1%)
 - [x] Task 5.4: Historical snapshot target surpassed (syntax scope now 1196/1196 bsc-ast)
 - [ ] Task 5.5: Full-scope parity target (syntax + TELLA) - complete remaining parser/PPX/share diffs
-- **Note:** Current full-scope run has `bsc-ast differences: 584` over `3505` in-scope files (after excluding 11 dual-failure files).
+- **Note:** Current full-scope run has `bsc-ast differences: 583` over `3505` in-scope files (after excluding 11 dual-failure files).
 
 ### Phase 6: Arity Arena ✅ Complete
 - [x] Tasks 6.1-6.6: All implemented

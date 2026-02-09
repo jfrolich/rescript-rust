@@ -822,21 +822,25 @@ impl Marshal for CoreType {
             _ => None,
         };
 
-        // OCaml shares simple builtin `string` core_types (no args, no attrs, no loc)
-        // across repeated generated externals (e.g. inline red/black conversion tests).
-        // Keep this narrow to avoid reintroducing broader core_type over-sharing.
+        // OCaml shares simple Ast_literal builtin core_types (no args, no attrs, no loc)
+        // for primitive rewrites (e.g. @inline constants).
+        // Keep this narrow to the Ast_literal no-loc builtins.
         if let CoreTypeDesc::Ptyp_constr(inner) = &*self.ptyp_desc {
             let (ref lid, ref types) = **inner;
-            let should_share_simple_string = self.ptyp_attributes.is_empty()
+            let should_share_simple_builtin = self.ptyp_attributes.is_empty()
                 && types.is_empty()
                 && is_none_loc_idx(self.ptyp_loc, w)
                 && is_none_loc_idx(lid.loc, w)
                 && matches!(
                     w.get_arena().get_longident(lid.txt),
-                    Longident::Lident(name) if w.get_arena().get_string(*name) == "string"
+                    Longident::Lident(name)
+                        if matches!(
+                            w.get_arena().get_string(*name),
+                            "string" | "int" | "bool" | "float"
+                        )
                 );
 
-            if should_share_simple_string {
+            if should_share_simple_builtin {
                 if let Some(&obj_idx) = w.simple_core_type_table_get(&lid.txt) {
                     let d = w.obj_counter() - obj_idx;
                     w.write_shared_ref(d);
@@ -1241,6 +1245,7 @@ impl Marshal for Expression {
         let share_empty_pstr = if !suppress_rewritten_braces
             && (is_pipe_application(self, w)
                 || share_attrs
+                || (has_braces_or_ternary && !w.in_pack())
                 || (w.in_extension() && has_braces_or_ternary)
                 || (rewritten_await_letmodule && has_braces_or_ternary))
         {
@@ -1537,7 +1542,14 @@ impl Marshal for ValueBinding {
         w.write_block_header(0, 4);
         self.pvb_pat.marshal(w);
         self.pvb_expr.marshal(w);
-        marshal_attributes(&self.pvb_attributes, w, false, false, None);
+        let share_empty_pstr = if has_braces_attr(&self.pvb_attributes, w)
+            || has_ternary_attr(&self.pvb_attributes, w)
+        {
+            Some(EmptyPayloadShareKind::ParserAttr)
+        } else {
+            None
+        };
+        marshal_attributes(&self.pvb_attributes, w, false, false, share_empty_pstr);
         self.pvb_loc.marshal(w);
     }
 }
@@ -1709,7 +1721,12 @@ impl Marshal for ModuleExprDesc {
             }
             ModuleExprDesc::Pmod_unpack(e) => {
                 w.write_block_header(5, 1);
+                // Treat module-level unpack expression payload like pack context for
+                // parser-attribute sharing decisions; OCaml does not consistently
+                // reuse empty parser payload objects under unpack.
+                w.enter_pack();
                 e.marshal(w);
+                w.exit_pack();
             }
             ModuleExprDesc::Pmod_extension(ext) => {
                 w.write_block_header(6, 1);

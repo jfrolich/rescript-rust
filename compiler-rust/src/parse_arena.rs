@@ -370,6 +370,18 @@ pub struct StaticPpxLidents {
     pub js_oo_callback: LidentIdx,
 }
 
+/// Pre-allocated `Ast_literal` core type nodes used by PPX rewrites.
+///
+/// OCaml's `ast_literal.ml` exposes module-level constants for these no-loc
+/// core types. Reusing one arena index per type mirrors that pointer identity.
+#[derive(Debug, Clone, Copy)]
+pub struct StaticAstLiteralTypes {
+    pub type_string: CoreTypeIdx,
+    pub type_int: CoreTypeIdx,
+    pub type_bool: CoreTypeIdx,
+    pub type_float: CoreTypeIdx,
+}
+
 #[derive(Clone, Copy, Debug)]
 enum SpiceStringKey {
     Codecs,
@@ -482,6 +494,8 @@ pub struct ParseArena {
     /// Pre-allocated `Ldot(Lident "*predef*", "option")` for lifted option types.
     /// OCaml uses `Ast_literal.predef_option` as a module-level constant.
     static_predef_option_lident: LidentIdx,
+    /// Pre-allocated no-loc builtin types from `Ast_literal.No_loc`.
+    static_ast_literal_types: StaticAstLiteralTypes,
     /// Pre-allocated static longidents used by `%external` rewrite helpers.
     static_ppx_lidents: StaticPpxLidents,
     /// Position deduplication table - maps position content to its index.
@@ -568,6 +582,7 @@ impl Default for ParseArena {
 
         let mut strings = Interner::new();
         let mut longidents: Arena<Longident, LidentIdx> = Arena::default();
+        let mut core_types: Arena<CoreType, CoreTypeIdx> = Arena::default();
 
         // Pre-allocate external primitive empty strings.
         // These model literal "" values coming from distinct OCaml compilation units.
@@ -734,6 +749,29 @@ impl Default for ParseArena {
             option_str,
         ));
 
+        // Pre-allocate Ast_literal.No_loc.{type_string,type_int,type_bool,type_float}.
+        // These all use Location.none, which is LocIdx(0) once ParseArena::new()
+        // inserts the none location.
+        let none_loc = LocIdx::none();
+        let ast_type_string_lid = longidents.push(Longident::Lident(strings.intern("string")));
+        let ast_type_int_lid = longidents.push(Longident::Lident(strings.intern("int")));
+        let ast_type_bool_lid = longidents.push(Longident::Lident(strings.intern("bool")));
+        let ast_type_float_lid = longidents.push(Longident::Lident(strings.intern("float")));
+        let mk_ast_literal_type = |txt: LidentIdx| CoreType {
+            ptyp_desc: Box::new(CoreTypeDesc::Ptyp_constr(Box::new((
+                Located { txt, loc: none_loc },
+                vec![],
+            )))),
+            ptyp_loc: none_loc,
+            ptyp_attributes: Attributes::new(),
+        };
+        let static_ast_literal_types = StaticAstLiteralTypes {
+            type_string: core_types.push(mk_ast_literal_type(ast_type_string_lid)),
+            type_int: core_types.push(mk_ast_literal_type(ast_type_int_lid)),
+            type_bool: core_types.push(mk_ast_literal_type(ast_type_bool_lid)),
+            type_float: core_types.push(mk_ast_literal_type(ast_type_float_lid)),
+        };
+
         Self {
             positions: Arena::default(),
             locations: Arena::default(),
@@ -743,7 +781,7 @@ impl Default for ParseArena {
             expr_fun_defaults: Vec::new(),
             expr_case_guards: Vec::new(),
             patterns: Arena::default(),
-            core_types: Arena::default(),
+            core_types,
             mod_exprs: Arena::default(),
             mod_types: Arena::default(),
             static_arities,
@@ -751,6 +789,7 @@ impl Default for ParseArena {
             static_array_lidents,
             static_regexp_t_lident,
             static_predef_option_lident,
+            static_ast_literal_types,
             static_ppx_lidents,
             position_dedup: HashMap::new(),
             lident_dedup,
@@ -1461,6 +1500,26 @@ impl ParseArena {
     /// Get the static `*predef*.option` longident index.
     pub fn predef_option_lident(&self) -> LidentIdx {
         self.static_predef_option_lident
+    }
+
+    /// Get `Ast_literal.No_loc.type_string`.
+    pub fn ast_literal_type_string(&self) -> CoreTypeIdx {
+        self.static_ast_literal_types.type_string
+    }
+
+    /// Get `Ast_literal.No_loc.type_int`.
+    pub fn ast_literal_type_int(&self) -> CoreTypeIdx {
+        self.static_ast_literal_types.type_int
+    }
+
+    /// Get `Ast_literal.No_loc.type_bool`.
+    pub fn ast_literal_type_bool(&self) -> CoreTypeIdx {
+        self.static_ast_literal_types.type_bool
+    }
+
+    /// Get `Ast_literal.type_float`.
+    pub fn ast_literal_type_float(&self) -> CoreTypeIdx {
+        self.static_ast_literal_types.type_float
     }
 
     pub fn ppx_js_lident(&self) -> LidentIdx {

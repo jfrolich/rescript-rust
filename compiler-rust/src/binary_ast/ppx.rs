@@ -1813,17 +1813,6 @@ fn transform_inline_sig_value(
     }
 }
 
-/// Create a type for a simple builtin type (string, int, float, bool)
-fn make_simple_type(type_name: &'static str, arena: &mut ParseArena) -> CoreType {
-    let none_loc = arena.none_loc();
-    let lid_idx = arena.push_lident_static(type_name);
-    CoreType {
-        ptyp_desc: Box::new(CoreTypeDesc::Ptyp_constr(Box::new((Located { txt: lid_idx, loc: none_loc }, vec![])))),
-        ptyp_loc: none_loc,
-        ptyp_attributes: Attributes::new(),
-    }
-}
-
 /// Transform an @inline let binding into a primitive
 fn transform_inline_binding(
     pval_name: &Located<StrIdx>,
@@ -1837,15 +1826,13 @@ fn transform_inline_binding(
             // @inline let x = "string"
             Constant::String(s, delim) => {
                 let prim = inline_string_primitive(s, delim.as_deref(), arena);
-                let string_type = make_simple_type("string", arena);
-                let string_type_idx = arena.push_core_type(string_type);
                 Some(StructureItem {
                     pstr_desc: Box::new(StructureItemDesc::Pstr_primitive(Box::new(ValueDescription {
                         pval_name: Located {
                             txt: pval_name.txt,
                             loc: pval_name.loc,
                         },
-                        pval_type: string_type_idx,
+                        pval_type: arena.ast_literal_type_string(),
                         pval_prim: prim,
                         pval_attributes: Attributes::new(),
                         pval_loc: pvb_loc,
@@ -1857,15 +1844,13 @@ fn transform_inline_binding(
             Constant::Integer(s, None) => {
                 let i = s.parse::<i32>().ok()?;
                 let prim = inline_int_primitive(i, arena);
-                let int_type = make_simple_type("int", arena);
-                let int_type_idx = arena.push_core_type(int_type);
                 Some(StructureItem {
                     pstr_desc: Box::new(StructureItemDesc::Pstr_primitive(Box::new(ValueDescription {
                         pval_name: Located {
                             txt: pval_name.txt,
                             loc: pval_name.loc,
                         },
-                        pval_type: int_type_idx,
+                        pval_type: arena.ast_literal_type_int(),
                         pval_prim: prim,
                         pval_attributes: Attributes::new(),
                         pval_loc: pvb_loc,
@@ -1876,15 +1861,13 @@ fn transform_inline_binding(
             // @inline let x = 3.14
             Constant::Float(s, None) => {
                 let prim = inline_float_primitive(s, arena);
-                let float_type = make_simple_type("float", arena);
-                let float_type_idx = arena.push_core_type(float_type);
                 Some(StructureItem {
                     pstr_desc: Box::new(StructureItemDesc::Pstr_primitive(Box::new(ValueDescription {
                         pval_name: Located {
                             txt: pval_name.txt,
                             loc: pval_name.loc,
                         },
-                        pval_type: float_type_idx,
+                        pval_type: arena.ast_literal_type_float(),
                         pval_prim: prim,
                         pval_attributes: Attributes::new(),
                         pval_loc: pvb_loc,
@@ -1901,15 +1884,13 @@ fn transform_inline_binding(
                 let name = arena.get_string(*name_idx);
                 if name == "true" || name == "false" {
                     let prim = inline_bool_primitive(name == "true", arena);
-                    let bool_type = make_simple_type("bool", arena);
-                    let bool_type_idx = arena.push_core_type(bool_type);
                     return Some(StructureItem {
                         pstr_desc: Box::new(StructureItemDesc::Pstr_primitive(Box::new(ValueDescription {
                             pval_name: Located {
                                 txt: pval_name.txt,
                                 loc: pval_name.loc,
                             },
-                            pval_type: bool_type_idx,
+                            pval_type: arena.ast_literal_type_bool(),
                             pval_prim: prim,
                             pval_attributes: Attributes::new(),
                             pval_loc: pvb_loc,
