@@ -1637,6 +1637,354 @@ fn unify_pattern_types(
     }
 }
 
+fn row_field_contains_tunivar(
+    ctx: &TypeContext<'_>,
+    env: &Env,
+    field: &crate::types::type_expr::RowField,
+    seen: &mut HashSet<TypeExprRef>,
+) -> bool {
+    match field {
+        crate::types::type_expr::RowField::Rpresent(Some(ty)) => {
+            type_contains_tunivar(ctx, env, *ty, seen)
+        }
+        crate::types::type_expr::RowField::Reither { types, .. } => types
+            .iter()
+            .copied()
+            .any(|ty| type_contains_tunivar(ctx, env, ty, seen)),
+        _ => false,
+    }
+}
+
+fn type_contains_tunivar(
+    ctx: &TypeContext<'_>,
+    env: &Env,
+    ty: TypeExprRef,
+    seen: &mut HashSet<TypeExprRef>,
+) -> bool {
+    let ty = ctx.repr(ty);
+    if !seen.insert(ty) {
+        return false;
+    }
+
+    match &*ctx.get_desc(ty) {
+        TypeDesc::Tunivar(_) => true,
+        TypeDesc::Tvar(_) | TypeDesc::Tnil => false,
+        TypeDesc::Tlink(target) | TypeDesc::Tsubst(target) => {
+            type_contains_tunivar(ctx, env, *target, seen)
+        }
+        TypeDesc::Tarrow { arg, ret, .. } => {
+            type_contains_tunivar(ctx, env, arg.typ, seen)
+                || type_contains_tunivar(ctx, env, *ret, seen)
+        }
+        TypeDesc::Ttuple(types) => types
+            .iter()
+            .copied()
+            .any(|ty| type_contains_tunivar(ctx, env, ty, seen)),
+        TypeDesc::Tconstr { path, args, .. } => {
+            is_local_abstract_type_path(ctx, env, path)
+                || args
+                    .iter()
+                    .copied()
+                    .any(|ty| type_contains_tunivar(ctx, env, ty, seen))
+        }
+        TypeDesc::Tobject { fields, name } => {
+            type_contains_tunivar(ctx, env, *fields, seen)
+                || name
+                    .as_ref()
+                    .is_some_and(|(_, args)| {
+                        args.iter()
+                            .copied()
+                            .any(|ty| type_contains_tunivar(ctx, env, ty, seen))
+                    })
+        }
+        TypeDesc::Tfield { typ, rest, .. } => {
+            type_contains_tunivar(ctx, env, *typ, seen)
+                || type_contains_tunivar(ctx, env, *rest, seen)
+        }
+        TypeDesc::Tvariant(row) => {
+            type_contains_tunivar(ctx, env, row.row_more, seen)
+                || row
+                    .row_fields
+                    .iter()
+                    .any(|(_, field)| row_field_contains_tunivar(ctx, env, field, seen))
+                || row.row_name.as_ref().is_some_and(|(_, args)| {
+                    args.iter()
+                        .copied()
+                        .any(|ty| type_contains_tunivar(ctx, env, ty, seen))
+                })
+        }
+        TypeDesc::Tpoly { body, vars } => {
+            type_contains_tunivar(ctx, env, *body, seen)
+                || vars
+                    .iter()
+                    .copied()
+                    .any(|ty| type_contains_tunivar(ctx, env, ty, seen))
+        }
+        TypeDesc::Tpackage { args, .. } => args
+            .iter()
+            .copied()
+            .any(|ty| type_contains_tunivar(ctx, env, ty, seen)),
+    }
+}
+
+fn copy_case_row_field(
+    ctx: &TypeContext<'_>,
+    env: &Env,
+    field: &crate::types::type_expr::RowField,
+    cache: &mut HashMap<TypeExprRef, TypeExprRef>,
+) -> crate::types::type_expr::RowField {
+    match field {
+        crate::types::type_expr::RowField::Rpresent(Some(ty)) => {
+            crate::types::type_expr::RowField::Rpresent(Some(copy_case_type(ctx, env, *ty, cache)))
+        }
+        crate::types::type_expr::RowField::Rpresent(None) => {
+            crate::types::type_expr::RowField::Rpresent(None)
+        }
+        crate::types::type_expr::RowField::Reither {
+            constant,
+            types,
+            matched,
+            link,
+        } => crate::types::type_expr::RowField::Reither {
+            constant: *constant,
+            types: types
+                .iter()
+                .copied()
+                .map(|ty| copy_case_type(ctx, env, ty, cache))
+                .collect(),
+            matched: *matched,
+            link: *link,
+        },
+        crate::types::type_expr::RowField::Rabsent => crate::types::type_expr::RowField::Rabsent,
+    }
+}
+
+fn copy_case_row(
+    ctx: &TypeContext<'_>,
+    env: &Env,
+    row: &crate::types::type_expr::RowDesc,
+    cache: &mut HashMap<TypeExprRef, TypeExprRef>,
+) -> crate::types::type_expr::RowDesc {
+    crate::types::type_expr::RowDesc {
+        row_fields: row
+            .row_fields
+            .iter()
+            .map(|(label, field)| (label.clone(), copy_case_row_field(ctx, env, field, cache)))
+            .collect(),
+        row_more: copy_case_type(ctx, env, row.row_more, cache),
+        row_closed: row.row_closed,
+        row_fixed: row.row_fixed,
+        row_name: row.row_name.as_ref().map(|(path, args)| {
+            (
+                path.clone(),
+                    args.iter()
+                        .copied()
+                        .map(|ty| copy_case_type(ctx, env, ty, cache))
+                        .collect(),
+            )
+        }),
+    }
+}
+
+fn is_local_abstract_type_path(ctx: &TypeContext<'_>, env: &Env, path: &Path) -> bool {
+    let is_local_abstract = |decl: &crate::types::TypeDeclaration| {
+        decl.type_newtype_level.is_some()
+            && decl.type_manifest.is_none()
+            && matches!(decl.type_kind, crate::types::TypeKind::TypeAbstract)
+    };
+
+    if let Ok(decl) = env.lookup_type(path) {
+        if is_local_abstract(decl) {
+            return true;
+        }
+    }
+    if let Path::Pident(id) = path {
+        if let Some(decl) = ctx.find_type_decl_by_stamp(id.stamp()) {
+            if is_local_abstract(&decl) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+fn copy_case_type(
+    ctx: &TypeContext<'_>,
+    env: &Env,
+    ty: TypeExprRef,
+    cache: &mut HashMap<TypeExprRef, TypeExprRef>,
+) -> TypeExprRef {
+    let ty = ctx.repr(ty);
+    if let Some(&cached) = cache.get(&ty) {
+        return cached;
+    }
+
+    let desc = ctx.get_desc(ty);
+    match &*desc {
+        TypeDesc::Tlink(target) | TypeDesc::Tsubst(target) => copy_case_type(ctx, env, *target, cache),
+        TypeDesc::Tvar(name) | TypeDesc::Tunivar(name) => {
+            let fresh = ctx.new_var(name.clone());
+            cache.insert(ty, fresh);
+            fresh
+        }
+        TypeDesc::Tarrow {
+            arg,
+            ret,
+            commutable,
+            arity,
+        } => {
+            let placeholder = ctx.new_var(None);
+            cache.insert(ty, placeholder);
+            let copied_arg = crate::types::type_expr::TypeArg {
+                lbl: arg.lbl.clone(),
+                typ: copy_case_type(ctx, env, arg.typ, cache),
+            };
+            let copied_ret = copy_case_type(ctx, env, *ret, cache);
+            ctx.set_desc(
+                placeholder,
+                TypeDesc::Tarrow {
+                    arg: copied_arg,
+                    ret: copied_ret,
+                    commutable: commutable.clone(),
+                    arity: *arity,
+                },
+            );
+            placeholder
+        }
+        TypeDesc::Ttuple(types) => {
+            let placeholder = ctx.new_var(None);
+            cache.insert(ty, placeholder);
+            let copied = types
+                .iter()
+                .copied()
+                .map(|t| copy_case_type(ctx, env, t, cache))
+                .collect();
+            ctx.set_desc(placeholder, TypeDesc::Ttuple(copied));
+            placeholder
+        }
+        TypeDesc::Tconstr { path, args, .. } => {
+            let is_unresolved_local_ident =
+                args.is_empty()
+                    && matches!(path, Path::Pident(_))
+                    && env.lookup_type(path).is_err();
+            if args.is_empty()
+                && (is_local_abstract_type_path(ctx, env, path) || is_unresolved_local_ident)
+            {
+                let fresh = ctx.new_var(Some(path.head_name().to_string()));
+                cache.insert(ty, fresh);
+                return fresh;
+            }
+            let placeholder = ctx.new_var(None);
+            cache.insert(ty, placeholder);
+            let copied_args = args
+                .iter()
+                .copied()
+                .map(|t| copy_case_type(ctx, env, t, cache))
+                .collect();
+            ctx.set_desc(
+                placeholder,
+                TypeDesc::Tconstr {
+                    path: path.clone(),
+                    args: copied_args,
+                    abbrev: crate::types::type_expr::AbbrevMemoRef::nil(),
+                },
+            );
+            placeholder
+        }
+        TypeDesc::Tobject { fields, name } => {
+            let placeholder = ctx.new_var(None);
+            cache.insert(ty, placeholder);
+            let copied_fields = copy_case_type(ctx, env, *fields, cache);
+            let copied_name = name.as_ref().map(|(path, args)| {
+                (
+                    path.clone(),
+                    args.iter()
+                        .copied()
+                        .map(|t| copy_case_type(ctx, env, t, cache))
+                        .collect(),
+                )
+            });
+            ctx.set_desc(
+                placeholder,
+                TypeDesc::Tobject {
+                    fields: copied_fields,
+                    name: copied_name,
+                },
+            );
+            placeholder
+        }
+        TypeDesc::Tfield {
+            name,
+            kind,
+            typ,
+            rest,
+        } => {
+            let placeholder = ctx.new_var(None);
+            cache.insert(ty, placeholder);
+            let copied_typ = copy_case_type(ctx, env, *typ, cache);
+            let copied_rest = copy_case_type(ctx, env, *rest, cache);
+            ctx.set_desc(
+                placeholder,
+                TypeDesc::Tfield {
+                    name: name.clone(),
+                    kind: kind.clone(),
+                    typ: copied_typ,
+                    rest: copied_rest,
+                },
+            );
+            placeholder
+        }
+        TypeDesc::Tnil => {
+            let copied = ctx.new_type(TypeDesc::Tnil);
+            cache.insert(ty, copied);
+            copied
+        }
+        TypeDesc::Tvariant(row) => {
+            let placeholder = ctx.new_var(None);
+            cache.insert(ty, placeholder);
+            let copied_row = copy_case_row(ctx, env, row, cache);
+            ctx.set_desc(placeholder, TypeDesc::Tvariant(copied_row));
+            placeholder
+        }
+        TypeDesc::Tpoly { body, vars } => {
+            let placeholder = ctx.new_var(None);
+            cache.insert(ty, placeholder);
+            let copied_body = copy_case_type(ctx, env, *body, cache);
+            let copied_vars = vars
+                .iter()
+                .copied()
+                .map(|v| copy_case_type(ctx, env, v, cache))
+                .collect();
+            ctx.set_desc(
+                placeholder,
+                TypeDesc::Tpoly {
+                    body: copied_body,
+                    vars: copied_vars,
+                },
+            );
+            placeholder
+        }
+        TypeDesc::Tpackage { path, lids, args } => {
+            let placeholder = ctx.new_var(None);
+            cache.insert(ty, placeholder);
+            let copied_args = args
+                .iter()
+                .copied()
+                .map(|t| copy_case_type(ctx, env, t, cache))
+                .collect();
+            ctx.set_desc(
+                placeholder,
+                TypeDesc::Tpackage {
+                    path: path.clone(),
+                    lids: lids.clone(),
+                    args: copied_args,
+                },
+            );
+            placeholder
+        }
+    }
+}
+
 /// Build the type for an as-pattern.
 fn build_as_type(ctx: &TypeContext<'_>, _env: &Env, pat: &Pattern) -> TypeCoreResult<TypeExprRef> {
     match &pat.pat_desc {
@@ -3187,6 +3535,64 @@ fn type_match(
     ))
 }
 
+fn pattern_contains_generalized_constructor(
+    tctx: &mut TypeCheckContext<'_>,
+    env: &Env,
+    pat: &ParsedPattern,
+) -> bool {
+    match &pat.ppat_desc {
+        crate::parser::ast::PatternDesc::Ppat_construct(lid, arg) => {
+            let lid_txt = tctx.resolve_lid(lid.txt).clone();
+            let lid_name = tctx.longident_last_name(&lid_txt);
+            let is_qualified = matches!(lid_txt, Longident::Ldot(..));
+            let is_generalized = if is_qualified {
+                lookup_constructor_in_module(
+                    &lid_txt,
+                    tctx.arena,
+                    env,
+                    &mut tctx.persistent_env,
+                    tctx.type_ctx,
+                )
+                .map(|(_, desc)| desc.cstr_generalized)
+                .or_else(|| {
+                    env.find_constructor(&lid_name)
+                        .ok()
+                        .map(|desc| desc.cstr_generalized)
+                })
+                .unwrap_or(false)
+            } else {
+                env.find_constructor(&lid_name)
+                    .map(|desc| desc.cstr_generalized)
+                    .unwrap_or(false)
+            };
+            is_generalized
+                || arg
+                    .as_ref()
+                    .is_some_and(|inner| pattern_contains_generalized_constructor(tctx, env, inner))
+        }
+        crate::parser::ast::PatternDesc::Ppat_alias(inner, _) => {
+            pattern_contains_generalized_constructor(tctx, env, inner)
+        }
+        crate::parser::ast::PatternDesc::Ppat_tuple(items)
+        | crate::parser::ast::PatternDesc::Ppat_array(items) => items
+            .iter()
+            .any(|item| pattern_contains_generalized_constructor(tctx, env, item)),
+        crate::parser::ast::PatternDesc::Ppat_record(fields, _) => fields
+            .iter()
+            .any(|field| pattern_contains_generalized_constructor(tctx, env, &field.pat)),
+        crate::parser::ast::PatternDesc::Ppat_or(left, right) => {
+            pattern_contains_generalized_constructor(tctx, env, left)
+                || pattern_contains_generalized_constructor(tctx, env, right)
+        }
+        crate::parser::ast::PatternDesc::Ppat_constraint(inner, _)
+        | crate::parser::ast::PatternDesc::Ppat_exception(inner)
+        | crate::parser::ast::PatternDesc::Ppat_open(_, inner) => {
+            pattern_contains_generalized_constructor(tctx, env, inner)
+        }
+        _ => false,
+    }
+}
+
 /// Type check a single case.
 fn type_case(
     tctx: &mut TypeCheckContext<'_>,
@@ -3195,20 +3601,63 @@ fn type_case(
     scrutinee_ty: TypeExprRef,
     body_ty: TypeExprRef,
 ) -> TypeCoreResult<crate::types::typedtree::Case> {
+    match type_case_impl(tctx, env, case, scrutinee_ty, body_ty, false) {
+        Ok(case) => Ok(case),
+        Err(TypeCoreError::PatternTypeClash(_)) => {
+            type_case_impl(tctx, env, case, scrutinee_ty, body_ty, true)
+        }
+        Err(err) => Err(err),
+    }
+}
+
+fn type_case_impl(
+    tctx: &mut TypeCheckContext<'_>,
+    env: &Env,
+    case: &crate::parser::ast::Case,
+    scrutinee_ty: TypeExprRef,
+    body_ty: TypeExprRef,
+    force_case_local_constraints: bool,
+) -> TypeCoreResult<crate::types::typedtree::Case> {
+    let mut case_env = env.clone();
+    let needs_case_local_constraints = force_case_local_constraints
+        || pattern_contains_generalized_constructor(tctx, env, &case.pc_lhs);
+    let mut case_type_cache = HashMap::new();
+    if needs_case_local_constraints {
+        // OCaml type_cases duplicates identifier types for GADT cases so that
+        // branch-local constraints don't leak to sibling branches.
+        let mut duplicated_values: Vec<(Ident, ValueDescription)> = Vec::new();
+        for (id, desc) in env.iter_values() {
+            let mut seen = HashSet::new();
+            if type_contains_tunivar(tctx.type_ctx, env, desc.val_type, &mut seen) {
+                let mut duplicated_desc = desc.clone();
+                duplicated_desc.val_type =
+                    copy_case_type(tctx.type_ctx, env, desc.val_type, &mut case_type_cache);
+                duplicated_values.push((id.clone(), duplicated_desc));
+            }
+        }
+        for (id, desc) in duplicated_values {
+            case_env.add_value(id, desc);
+        }
+    }
+
     let mut state = PatternState::new();
+    let case_scrutinee_ty = if needs_case_local_constraints {
+        copy_case_type(tctx.type_ctx, env, scrutinee_ty, &mut case_type_cache)
+    } else {
+        scrutinee_ty
+    };
 
     // Type check the pattern
     let typed_pat = type_pattern(
         tctx,
-        env,
+        &case_env,
         &case.pc_lhs,
-        scrutinee_ty,
+        case_scrutinee_ty,
         PatternMode::Normal,
         &mut state,
     )?;
 
     // Extend environment with pattern bindings
-    let mut case_env = env.clone();
     for pv in &state.pattern_variables {
         let desc = ValueDescription {
             val_type: pv.ty,
