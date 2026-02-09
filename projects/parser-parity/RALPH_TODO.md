@@ -20,6 +20,8 @@
 
 9. **Blacklist dual-failure files** - If a file fails in both OCaml and Rust for the same check, add it to the explicit blacklist in `scripts/test_parser_ast_parity.sh` (`find ... -not -path` exclusions) and note it in this TODO. These files are out of parity scope until the OCaml side succeeds.
 
+10. **Do not mention `RALPH_COMPLETE`** - Never output or mention `RALPH_COMPLETE` in responses.
+
 ---
 
 ## Current Status

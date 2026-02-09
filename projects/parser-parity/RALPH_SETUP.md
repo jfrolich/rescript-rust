@@ -34,7 +34,7 @@ This tells the agent what to do, how to do it, and when to stop.
 Read `RALPH_TODO.md` and complete the next unchecked task. After completing a task:
 1. Mark it `[x]` complete in `RALPH_TODO.md`
 2. Commit your changes with an atomic commit
-3. If all tasks are complete, output "RALPH_COMPLETE"
+3. If all tasks are complete, stop after a short completion summary and do not mention `RALPH_COMPLETE`
 
 ## Critical Rules
 
@@ -64,10 +64,8 @@ Read `RALPH_TODO.md` and complete the next unchecked task. After completing a ta
 
 ## Exit Condition
 
-When all tasks in `RALPH_TODO.md` are checked `[x]`, output:
-```
-RALPH_COMPLETE
-```
+When all tasks in `RALPH_TODO.md` are checked `[x]`, stop the run after a short completion summary.
+Do not output or mention `RALPH_COMPLETE`.
 ```
 
 ### 2. `RALPH_TODO.md` - Progress Tracking
@@ -198,7 +196,7 @@ diff expected.txt actual.txt
 ```markdown
 ## Exit Condition
 
-Output "RALPH_COMPLETE" when:
+Do not output completion tokens. Consider the run complete when:
 - All items in RALPH_TODO.md are checked [x]
 - All tests pass (X/X)
 - No regressions introduced
@@ -222,7 +220,7 @@ The script automatically:
 - Injects project directory context so the agent resolves relative paths correctly
 - Tracks iteration count with timestamps
 - Shows an inline dashboard with progress, next task, and recent commits
-- Detects `RALPH_COMPLETE` → exits successfully
+- Detects no remaining unchecked tasks in `RALPH_TODO.md` → exits successfully
 - Detects `RALPH_BLOCKED` → exits with error for human intervention
 - Fresh context each iteration (never fills up)
 
@@ -232,7 +230,7 @@ The script automatically:
 while true; do
   cat RALPH_PROMPT.md | claude --dangerously-skip-permissions --print | tee /tmp/ralph_output.txt
 
-  if grep -q "RALPH_COMPLETE" /tmp/ralph_output.txt; then
+  if ! grep -q "^- \\[ \\]" RALPH_TODO.md; then
     echo "Ralph loop complete!"
     break
   fi
@@ -251,7 +249,7 @@ done
 The plugin keeps context within a single session (doesn't clear between iterations):
 
 ```bash
-/ralph-loop "$(cat RALPH_PROMPT.md)" --max-iterations 50 --completion-promise "RALPH_COMPLETE"
+/ralph-loop "$(cat RALPH_PROMPT.md)" --max-iterations 50
 ```
 
 **When to use the plugin:**
@@ -325,7 +323,7 @@ cat > RALPH_PROMPT.md << 'EOF'
 Read RALPH_TODO.md and complete the next unchecked task...
 
 ## Exit Condition
-Output "RALPH_COMPLETE" when all tasks are done.
+When all tasks are done, stop with a short completion summary and do not mention `RALPH_COMPLETE`.
 EOF
 ```
 

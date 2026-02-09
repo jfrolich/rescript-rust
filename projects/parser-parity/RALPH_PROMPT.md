@@ -32,7 +32,7 @@ Read `RALPH_TODO.md` and complete the next unchecked task. After completing a ta
 1. Mark it `[x]` complete in `RALPH_TODO.md`
 2. Update the status counts at the top
 3. Commit your changes with an atomic commit
-4. If all tasks are complete, output "RALPH_COMPLETE"
+4. If all tasks are complete, stop after the final completion summary and do **not** mention `RALPH_COMPLETE`.
 
 ## Critical Rules
 
@@ -193,9 +193,5 @@ Goal: Achieve byte-identical binary AST output for all in-scope files where OCam
 
 ## Exit Condition
 
-When all tasks in `RALPH_TODO.md` are checked `[x]`, output exactly:
-```
-RALPH_COMPLETE
-```
-
-This triggers the Ralph plugin's `--completion-promise` to stop the loop.
+When all tasks in `RALPH_TODO.md` are checked `[x]`, stop after a short completion summary.
+Do **not** output or mention `RALPH_COMPLETE`.
