@@ -4372,23 +4372,143 @@ fn type_letexception(
     tctx: &mut TypeCheckContext<'_>,
     env: &Env,
     loc: LocIdx,
-    _ext_constr: &crate::parser::ast::ExtensionConstructor,
+    ext_constr: &crate::parser::ast::ExtensionConstructor,
     body: &ParsedExpression,
     expected_ty: TypeExprRef,
     attributes: &[crate::parser::ast::Attribute],
 ) -> TypeCoreResult<Expression> {
-    // Register the exception constructor in the environment
-    // For now, just type check the body
-    // Full implementation would add the exception to the environment
+    let ctx = tctx.type_ctx;
+    let arena = tctx.arena;
 
-    let typed_body = type_expect(tctx, env, body, expected_ty, None)?;
+    let name_str = arena.get_string(ext_constr.pext_name.txt).to_string();
+    let id = Ident::create_local(&name_str);
 
-    // Return the body expression
-    // Full implementation would wrap in Texp_letexception
+    let (typed_args, typed_ret, ext_args, arg_type_refs, ext_ret_ty) = match &ext_constr.pext_kind {
+        crate::parser::ast::ExtensionConstructorKind::Pext_decl(args, ret) => {
+            let mut arg_ty_refs = Vec::new();
+            let (typed_args, ext_args) = match args {
+                crate::parser::ast::ConstructorArguments::Pcstr_tuple(types) => {
+                    let mut typed = Vec::new();
+                    for ty in types {
+                        let (typed_ct, ty_ref) = transl_type(tctx, env, ty)?;
+                        arg_ty_refs.push(ty_ref);
+                        typed.push(typed_ct);
+                    }
+                    (
+                        crate::types::typedtree::ConstructorArgument::Cstr_tuple(typed),
+                        crate::types::ConstructorArguments::CstrTuple(arg_ty_refs.clone()),
+                    )
+                }
+                crate::parser::ast::ConstructorArguments::Pcstr_record(labels) => {
+                    let mut typed_labels = Vec::new();
+                    let mut decl_labels = Vec::new();
+                    for label in labels {
+                        let label_name = arena.get_string(label.pld_name.txt).to_string();
+                        let (typed_ct, ty_ref) = transl_type(tctx, env, &label.pld_type)?;
+                        arg_ty_refs.push(ty_ref);
+                        typed_labels.push(crate::types::typedtree::LabelDeclaration {
+                            ld_id: Ident::create_local(&label_name),
+                            ld_name: crate::parse_arena::Located {
+                                txt: label_name.clone(),
+                                loc: label.pld_name.loc,
+                            },
+                            ld_mutable: label.pld_mutable,
+                            ld_type: typed_ct,
+                            ld_loc: label.pld_loc,
+                            ld_attributes: label.pld_attributes.clone(),
+                        });
+                        decl_labels.push(crate::types::decl::LabelDeclaration {
+                            ld_id: Ident::create_local(&label_name),
+                            ld_mutable: match label.pld_mutable {
+                                crate::parser::ast::MutableFlag::Immutable => {
+                                    crate::types::MutableFlag::Immutable
+                                }
+                                crate::parser::ast::MutableFlag::Mutable => {
+                                    crate::types::MutableFlag::Mutable
+                                }
+                            },
+                            ld_optional: label.pld_optional,
+                            ld_type: ty_ref,
+                            ld_loc: arena.to_location(label.pld_loc),
+                            ld_attributes: vec![],
+                        });
+                    }
+                    (
+                        crate::types::typedtree::ConstructorArgument::Cstr_record(typed_labels),
+                        crate::types::ConstructorArguments::CstrRecord(decl_labels),
+                    )
+                }
+            };
+            let (typed_ret, ext_ret_ty) = match ret {
+                Some(ct) => {
+                    let (typed_ct, ty_ref) = transl_type(tctx, env, ct)?;
+                    (Some(typed_ct), Some(ty_ref))
+                }
+                None => (None, None),
+            };
+            (typed_args, typed_ret, ext_args, arg_ty_refs, ext_ret_ty)
+        }
+        crate::parser::ast::ExtensionConstructorKind::Pext_rebind(_lid) => (
+            crate::types::typedtree::ConstructorArgument::Cstr_tuple(vec![]),
+            None,
+            crate::types::ConstructorArguments::CstrTuple(vec![]),
+            vec![],
+            None,
+        ),
+    };
+
+    let exn_ty = ctx.new_constr(Path::pident(Ident::create_persistent("exn")), vec![]);
+    let exn_path = Path::pident(id.clone());
+    let cstr_desc = crate::types::decl::ConstructorDescription {
+        cstr_name: name_str.clone(),
+        cstr_res: exn_ty,
+        cstr_existentials: vec![],
+        cstr_args: arg_type_refs.clone(),
+        cstr_arity: arg_type_refs.len() as i32,
+        cstr_tag: crate::types::decl::ConstructorTag::CstrExtension(exn_path),
+        cstr_consts: 0,
+        cstr_nonconsts: 0,
+        cstr_generalized: false,
+        cstr_private: crate::types::PrivateFlag::Public,
+        cstr_loc: crate::location::Location::none(),
+        cstr_attributes: vec![],
+        cstr_inlined: None,
+    };
+
+    let mut new_env = env.clone();
+    new_env.add_constructor(id.clone(), cstr_desc);
+
+    let typed_body = type_expect(tctx, &new_env, body, expected_ty, None)?;
+
+    let typed_ext_constr = crate::types::typedtree::ExtensionConstructor {
+        ext_id: id,
+        ext_name: crate::parse_arena::Located {
+            txt: name_str,
+            loc: ext_constr.pext_name.loc,
+        },
+        ext_type: crate::types::ExtensionConstructor {
+            ext_type_path: Path::pident(Ident::create_persistent("exn")),
+            ext_type_params: vec![],
+            ext_args,
+            ext_ret_type: ext_ret_ty,
+            ext_private: crate::types::PrivateFlag::Public,
+            ext_loc: arena.to_location(loc),
+            ext_attributes: vec![],
+            ext_is_exception: true,
+        },
+        ext_kind: crate::types::typedtree::ExtensionConstructorKind::Text_decl(
+            typed_args,
+            typed_ret,
+        ),
+        ext_loc: ext_constr.pext_loc,
+        ext_attributes: ext_constr.pext_attributes.clone(),
+    };
+    let body_ty = typed_body.exp_type;
+
     Ok(Expression::new(
-        typed_body.exp_desc,
+        ExpressionDesc::Texp_letexception(typed_ext_constr, Box::new(typed_body)),
         loc.clone(),
-        expected_ty,
+        body_ty,
         EnvRef(0),
         attributes.to_vec(),
     ))

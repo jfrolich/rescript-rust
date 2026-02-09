@@ -17,7 +17,7 @@
 //! - Lookup functions for values, types, and modules
 
 use super::context::TypeContext;
-use super::asttypes::PrivateFlag;
+use super::asttypes::{MutableFlag, PrivateFlag};
 use super::decl::{
     ConstructorArguments, ConstructorDeclaration, ConstructorDescription, ConstructorTag,
     LabelDescription, ModtypeDeclaration, ModuleDeclaration, PrimitiveDescription,
@@ -599,62 +599,85 @@ pub fn initial_env(ctx: &TypeContext<'_>) -> Env {
         let id = Ident::create_persistent(name);
         let type_path = Path::pident(id.clone());
 
-        // Extract constructors from variant types
-        if let TypeKind::TypeVariant(ref constrs) = decl.type_kind {
-            let num_consts = constrs.iter()
-                .filter(|c| matches!(c.cd_args, ConstructorArguments::CstrTuple(ref args) if args.is_empty()) && c.cd_res.is_none())
-                .count() as i32;
-            let num_nonconsts = constrs.len() as i32 - num_consts;
-            let mut const_idx = 0i32;
-            let mut nonconst_idx = 0i32;
+        // Extract constructors/labels from predef declarations so they are
+        // available for disambiguation just like OCaml's initial environment.
+        match &decl.type_kind {
+            TypeKind::TypeVariant(constrs) => {
+                let num_consts = constrs.iter()
+                    .filter(|c| matches!(c.cd_args, ConstructorArguments::CstrTuple(ref args) if args.is_empty()) && c.cd_res.is_none())
+                    .count() as i32;
+                let num_nonconsts = constrs.len() as i32 - num_consts;
+                let mut const_idx = 0i32;
+                let mut nonconst_idx = 0i32;
 
-            for cd in constrs {
-                let is_constant = matches!(cd.cd_args, ConstructorArguments::CstrTuple(ref args) if args.is_empty())
-                    && cd.cd_res.is_none();
+                for cd in constrs {
+                    let is_constant = matches!(cd.cd_args, ConstructorArguments::CstrTuple(ref args) if args.is_empty())
+                        && cd.cd_res.is_none();
 
-                let cstr_tag = if is_constant {
-                    let tag = ConstructorTag::CstrConstant(const_idx);
-                    const_idx += 1;
-                    tag
-                } else {
-                    let tag = ConstructorTag::CstrBlock(nonconst_idx);
-                    nonconst_idx += 1;
-                    tag
-                };
+                    let cstr_tag = if is_constant {
+                        let tag = ConstructorTag::CstrConstant(const_idx);
+                        const_idx += 1;
+                        tag
+                    } else {
+                        let tag = ConstructorTag::CstrBlock(nonconst_idx);
+                        nonconst_idx += 1;
+                        tag
+                    };
 
-                let (cstr_args, cstr_arity) = match &cd.cd_args {
-                    ConstructorArguments::CstrTuple(args) => (args.clone(), args.len() as i32),
-                    ConstructorArguments::CstrRecord(labels) => {
-                        let args: Vec<TypeExprRef> = labels.iter().map(|l| l.ld_type).collect();
-                        let arity = args.len() as i32;
-                        (args, arity)
-                    }
-                };
+                    let (cstr_args, cstr_arity) = match &cd.cd_args {
+                        ConstructorArguments::CstrTuple(args) => (args.clone(), args.len() as i32),
+                        ConstructorArguments::CstrRecord(labels) => {
+                            let args: Vec<TypeExprRef> = labels.iter().map(|l| l.ld_type).collect();
+                            let arity = args.len() as i32;
+                            (args, arity)
+                        }
+                    };
 
-                let cstr_res = if let Some(res_ty) = cd.cd_res {
-                    res_ty
-                } else {
-                    ctx.new_generic_constr(type_path.clone(), decl.type_params.clone())
-                };
+                    let cstr_res = if let Some(res_ty) = cd.cd_res {
+                        res_ty
+                    } else {
+                        ctx.new_generic_constr(type_path.clone(), decl.type_params.clone())
+                    };
 
-                let cstr_desc = ConstructorDescription {
-                    cstr_name: cd.cd_id.name().to_string(),
-                    cstr_res,
-                    cstr_existentials: vec![],
-                    cstr_args,
-                    cstr_arity,
-                    cstr_tag,
-                    cstr_consts: num_consts,
-                    cstr_nonconsts: num_nonconsts,
-                    cstr_generalized: cd.cd_res.is_some(),
-                    cstr_private: decl.type_private,
-                    cstr_loc: Location::none(),
-                    cstr_attributes: vec![],
-                    cstr_inlined: None,
-                };
+                    let cstr_desc = ConstructorDescription {
+                        cstr_name: cd.cd_id.name().to_string(),
+                        cstr_res,
+                        cstr_existentials: vec![],
+                        cstr_args,
+                        cstr_arity,
+                        cstr_tag,
+                        cstr_consts: num_consts,
+                        cstr_nonconsts: num_nonconsts,
+                        cstr_generalized: cd.cd_res.is_some(),
+                        cstr_private: decl.type_private,
+                        cstr_loc: Location::none(),
+                        cstr_attributes: vec![],
+                        cstr_inlined: None,
+                    };
 
-                env.add_constructor(cd.cd_id.clone(), cstr_desc);
+                    env.add_constructor(cd.cd_id.clone(), cstr_desc);
+                }
             }
+            TypeKind::TypeRecord(labels, repr) => {
+                let res_ty = ctx.new_generic_constr(type_path.clone(), decl.type_params.clone());
+                for (pos, ld) in labels.iter().enumerate() {
+                    let label_desc = LabelDescription {
+                        lbl_name: ld.ld_id.name().to_string(),
+                        lbl_res: res_ty,
+                        lbl_arg: ld.ld_type,
+                        lbl_mut: ld.ld_mutable,
+                        lbl_optional: ld.ld_optional,
+                        lbl_pos: pos as i32,
+                        lbl_all: crate::types::decl::LabelArrayRef(0),
+                        lbl_repres: repr.clone(),
+                        lbl_private: decl.type_private,
+                        lbl_loc: ld.ld_loc,
+                        lbl_attributes: ld.ld_attributes.clone(),
+                    };
+                    env.add_label(ld.ld_id.clone(), label_desc);
+                }
+            }
+            _ => {}
         }
 
         env.add_type(id, decl);
@@ -765,6 +788,37 @@ pub fn initial_env(ctx: &TypeContext<'_>) -> Env {
             ]),
             ..decl_abstr(1, false)
         }, ctx);
+    }
+
+    // dict('a) = { dictValuesType?: option<'a> }
+    // This mirrors OCaml Predef.decl_dict and powers dict pattern matching.
+    {
+        let tvar = ctx.new_generic_var(None);
+        let option_t =
+            ctx.new_generic_constr(Path::pident(Ident::create_persistent("option")), vec![tvar]);
+        let dict_label = crate::types::decl::LabelDeclaration {
+            ld_id: Ident::create_persistent("dictValuesType"),
+            ld_mutable: MutableFlag::Immutable,
+            ld_optional: true,
+            ld_type: option_t,
+            ld_loc: Location::none(),
+            ld_attributes: vec![],
+        };
+        add_type_with_constrs(
+            &mut env,
+            "dict",
+            TypeDeclaration {
+                type_params: vec![tvar],
+                type_arity: 1,
+                type_kind: TypeKind::TypeRecord(
+                    vec![dict_label],
+                    crate::types::decl::RecordRepresentation::RecordRegular,
+                ),
+                type_variance: vec![crate::types::variance::Variance::full()],
+                ..decl_abstr(1, false)
+            },
+            ctx,
+        );
     }
 
     // result('a, 'b) = Ok('a) | Error('b)
