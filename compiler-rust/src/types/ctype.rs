@@ -608,14 +608,18 @@ fn try_expand_head<'a>(
                 // Type found in env but no manifest — abstract type, fall through
             }
 
-            // 4. Fall back to name-based global type declaration store
-            if let Some(store_decl) = ctx.find_type_decl(&name) {
-                if let Some(manifest) = store_decl.type_manifest {
-                    let params = &store_decl.type_params;
-                    if params.is_empty() {
-                        return Some(instance(ctx, manifest));
-                    } else if params.len() == args.len() {
-                        return Some(subst_type(ctx, &params.clone(), &args, manifest));
+            // 4. Fall back to name-based global type declaration store only for
+            // simple identifiers. For qualified paths (Pdot), OCaml resolves via
+            // path/module lookup and does not collapse to leaf-name lookup.
+            if matches!(path, Path::Pident(_)) {
+                if let Some(store_decl) = ctx.find_type_decl(&name) {
+                    if let Some(manifest) = store_decl.type_manifest {
+                        let params = &store_decl.type_params;
+                        if params.is_empty() {
+                            return Some(instance(ctx, manifest));
+                        } else if params.len() == args.len() {
+                            return Some(subst_type(ctx, &params.clone(), &args, manifest));
+                        }
                     }
                 }
             }
