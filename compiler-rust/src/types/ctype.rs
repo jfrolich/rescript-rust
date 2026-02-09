@@ -1517,11 +1517,27 @@ fn copy_type_cached(ctx: &TypeContext<'_>, ty: TypeExprRef, cache: &mut std::col
             path: Path,
             args: Vec<TypeExprRef>,
         },
+        Object {
+            fields: TypeExprRef,
+            name: Option<(Path, Vec<TypeExprRef>)>,
+        },
+        Field {
+            name: String,
+            kind: super::type_expr::FieldKind,
+            typ: TypeExprRef,
+            rest: TypeExprRef,
+        },
+        Nil,
         Poly {
             body: TypeExprRef,
             vars: Vec<TypeExprRef>,
         },
         Variant(RowDesc),
+        Package {
+            path: Path,
+            lids: Vec<crate::parser::longident::Longident>,
+            args: Vec<TypeExprRef>,
+        },
         Link(TypeExprRef),
         ReturnSelf,
     }
@@ -1538,6 +1554,7 @@ fn copy_type_cached(ctx: &TypeContext<'_>, ty: TypeExprRef, cache: &mut std::col
                 _ => {
                     // Fall through to structural copy
                     match &*desc {
+                        TypeDesc::Tvar(_) | TypeDesc::Tunivar(_) => CopyAction::ReturnSelf,
                         TypeDesc::Tarrow {
                             arg, ret, arity, ..
                         } => CopyAction::Arrow {
@@ -1551,15 +1568,35 @@ fn copy_type_cached(ctx: &TypeContext<'_>, ty: TypeExprRef, cache: &mut std::col
                             path: path.clone(),
                             args: args.clone(),
                         },
+                        TypeDesc::Tobject { fields, name } => CopyAction::Object {
+                            fields: *fields,
+                            name: name.clone(),
+                        },
+                        TypeDesc::Tfield {
+                            name,
+                            kind,
+                            typ,
+                            rest,
+                        } => CopyAction::Field {
+                            name: name.clone(),
+                            kind: kind.clone(),
+                            typ: *typ,
+                            rest: *rest,
+                        },
+                        TypeDesc::Tnil => CopyAction::Nil,
                         TypeDesc::Tpoly { body, vars } => CopyAction::Poly {
                             body: *body,
                             vars: vars.clone(),
                         },
                         TypeDesc::Tvariant(row) => CopyAction::Variant(row.clone()),
+                        TypeDesc::Tpackage { path, lids, args } => CopyAction::Package {
+                            path: path.clone(),
+                            lids: lids.clone(),
+                            args: args.clone(),
+                        },
                         TypeDesc::Tlink(target) | TypeDesc::Tsubst(target) => {
                             CopyAction::Link(*target)
                         }
-                        _ => CopyAction::ReturnSelf,
                     }
                 }
             }
@@ -1580,13 +1617,33 @@ fn copy_type_cached(ctx: &TypeContext<'_>, ty: TypeExprRef, cache: &mut std::col
                     path: path.clone(),
                     args: args.clone(),
                 },
+                TypeDesc::Tobject { fields, name } => CopyAction::Object {
+                    fields: *fields,
+                    name: name.clone(),
+                },
+                TypeDesc::Tfield {
+                    name,
+                    kind,
+                    typ,
+                    rest,
+                } => CopyAction::Field {
+                    name: name.clone(),
+                    kind: kind.clone(),
+                    typ: *typ,
+                    rest: *rest,
+                },
+                TypeDesc::Tnil => CopyAction::Nil,
                 TypeDesc::Tpoly { body, vars } => CopyAction::Poly {
                     body: *body,
                     vars: vars.clone(),
                 },
                 TypeDesc::Tvariant(row) => CopyAction::Variant(row.clone()),
+                TypeDesc::Tpackage { path, lids, args } => CopyAction::Package {
+                    path: path.clone(),
+                    lids: lids.clone(),
+                    args: args.clone(),
+                },
                 TypeDesc::Tlink(target) | TypeDesc::Tsubst(target) => CopyAction::Link(*target),
-                _ => CopyAction::ReturnSelf,
             }
         }
     };
@@ -1616,6 +1673,35 @@ fn copy_type_cached(ctx: &TypeContext<'_>, ty: TypeExprRef, cache: &mut std::col
             let args_copy: Vec<_> = args.iter().map(|t| copy_type_cached(ctx, *t, cache)).collect();
             ctx.new_constr(path, args_copy)
         }
+        CopyAction::Object { fields, name } => {
+            let fields_copy = copy_type_cached(ctx, fields, cache);
+            let name_copy = name.map(|(path, args)| {
+                (
+                    path,
+                    args.iter().map(|t| copy_type_cached(ctx, *t, cache)).collect(),
+                )
+            });
+            ctx.new_type(TypeDesc::Tobject {
+                fields: fields_copy,
+                name: name_copy,
+            })
+        }
+        CopyAction::Field {
+            name,
+            kind,
+            typ,
+            rest,
+        } => {
+            let typ_copy = copy_type_cached(ctx, typ, cache);
+            let rest_copy = copy_type_cached(ctx, rest, cache);
+            ctx.new_type(TypeDesc::Tfield {
+                name,
+                kind,
+                typ: typ_copy,
+                rest: rest_copy,
+            })
+        }
+        CopyAction::Nil => ctx.new_type(TypeDesc::Tnil),
         CopyAction::Poly { body, vars } => {
             let body_copy = copy_type_cached(ctx, body, cache);
             let vars_copy: Vec<_> = vars.iter().map(|v| copy_type_cached(ctx, *v, cache)).collect();
@@ -1624,6 +1710,14 @@ fn copy_type_cached(ctx: &TypeContext<'_>, ty: TypeExprRef, cache: &mut std::col
         CopyAction::Variant(row) => {
             let row_copy = copy_row_cached(ctx, &row, cache);
             ctx.new_variant(row_copy)
+        }
+        CopyAction::Package { path, lids, args } => {
+            let args_copy: Vec<_> = args.iter().map(|t| copy_type_cached(ctx, *t, cache)).collect();
+            ctx.new_type(TypeDesc::Tpackage {
+                path,
+                lids,
+                args: args_copy,
+            })
         }
         CopyAction::Link(target) => copy_type_cached(ctx, target, cache),
         CopyAction::ReturnSelf => ty,
