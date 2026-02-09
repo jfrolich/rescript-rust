@@ -644,7 +644,7 @@ for result_file in "$RESULTS_DIR"/*.result; do
     locs_pass_count=$((locs_pass_count + locs_pass))
     locs_diff_count=$((locs_diff_count + locs_diff))
     sexp_locs_ppx_diff_count=$((sexp_locs_ppx_diff_count + sexp_locs_ppx_diff))
-    bsc_ast_parity_diff_count=$((bsc_ast_parity_diff_count + bsc_ast_diff))
+    # bsc-ast parity tracks only raw byte-level differences.
     ocaml_fail_count=$((ocaml_fail_count + ocaml_fail))
     rust_fail_count=$((rust_fail_count + rust_fail))
 
@@ -662,6 +662,7 @@ for result_file in "$RESULTS_DIR"/*.result; do
             bsc_ast_structural_tella_spice_diff_count=$((bsc_ast_structural_tella_spice_diff_count + 1))
             bsc_ast_structural_tella_spice_diff_files="$bsc_ast_structural_tella_spice_diff_files$file\n"
         else
+            bsc_ast_parity_diff_count=$((bsc_ast_parity_diff_count + 1))
             bsc_ast_byte_diff_count=$((bsc_ast_byte_diff_count + 1))
             bsc_ast_byte_diff_files="$bsc_ast_byte_diff_files$file\n"
         fi
@@ -963,13 +964,12 @@ echo "  ${BOLD}Parser parity (sexp output for debugging):${RESET}"
 echo "    sexp-locs matches:        $locs_pass_count"
 echo "    sexp-locs differences:    $locs_diff_count"
 echo "    sexp-locs-ppx differences: $sexp_locs_ppx_diff_count"
-echo ""
-echo "  ${BOLD}Compiler parity (bsc -bs-ast output):${RESET}"
-echo "    bsc-ast differences:      $bsc_ast_parity_diff_count"
-echo "    bsc-ast byte checks:      $bsc_ast_byte_checked_count"
-echo "    bsc-ast byte differences: $bsc_ast_byte_diff_count"
 echo "    sexp-locs-ppx-and-spice checks: $bsc_ast_structural_tella_spice_checked_count"
 echo "    sexp-locs-ppx-and-spice differences: $bsc_ast_structural_tella_spice_diff_count"
+echo ""
+echo "  ${BOLD}bsc-ast Byte Parity:${RESET}"
+echo "    bsc-ast byte checks:      $bsc_ast_byte_checked_count"
+echo "    bsc-ast byte differences: $bsc_ast_byte_diff_count"
 echo ""
 echo "  ${BOLD}Parse failures:${RESET}"
 echo "    OCaml failures:           $ocaml_fail_count"
@@ -1037,29 +1037,6 @@ if [[ $sexp_locs_ppx_diff_count -gt 0 ]]; then
     echo ""
 fi
 
-# Show bsc-ast byte-level differences
-if [[ $bsc_ast_byte_diff_count -gt 0 ]]; then
-    echo -e "${BOLD}${RED}Files with bsc-ast byte-level differences ($bsc_ast_byte_diff_count):${RESET}"
-    echo "  (raw bsc -bs-ast bytes differ)"
-    echo -e "$bsc_ast_byte_diff_files" | grep -v "^$" | head -15 | while read file; do
-        echo "  $file"
-    done
-    if [[ $bsc_ast_byte_diff_count -gt 15 ]]; then
-        remaining=$((bsc_ast_byte_diff_count - 15))
-        echo "  ... and $remaining more"
-    fi
-    echo ""
-
-    # Show first byte-level diff as example
-    echo -e "${BOLD}Example bsc-ast byte-level diff (first file):${RESET}"
-    first_bsc_byte_file=$(echo -e "$bsc_ast_byte_diff_files" | grep -v "^$" | head -1)
-    if [[ -n "$first_bsc_byte_file" ]]; then
-        first_bsc_byte_diff="$TEMP_DIR/bsc_ast_parity_diffs/$(echo "$first_bsc_byte_file" | tr '/' '_').diff"
-        [[ -f "$first_bsc_byte_diff" ]] && head -30 "$first_bsc_byte_diff"
-    fi
-    echo ""
-fi
-
 # Show sexp-locs-ppx-and-spice differences
 if [[ $bsc_ast_structural_tella_spice_diff_count -gt 0 ]]; then
     echo -e "${BOLD}${YELLOW}Files with sexp-locs-ppx-and-spice differences ($bsc_ast_structural_tella_spice_diff_count):${RESET}"
@@ -1079,6 +1056,29 @@ if [[ $bsc_ast_structural_tella_spice_diff_count -gt 0 ]]; then
     if [[ -n "$first_bsc_struct_file" ]]; then
         first_bsc_struct_diff="$TEMP_DIR/bsc_ast_parity_diffs/$(echo "$first_bsc_struct_file" | tr '/' '_').diff"
         [[ -f "$first_bsc_struct_diff" ]] && head -30 "$first_bsc_struct_diff"
+    fi
+    echo ""
+fi
+
+# Show bsc-ast byte-level differences
+if [[ $bsc_ast_byte_diff_count -gt 0 ]]; then
+    echo -e "${BOLD}${RED}Files with bsc-ast byte-level differences ($bsc_ast_byte_diff_count):${RESET}"
+    echo "  (raw bsc -bs-ast bytes differ)"
+    echo -e "$bsc_ast_byte_diff_files" | grep -v "^$" | head -15 | while read file; do
+        echo "  $file"
+    done
+    if [[ $bsc_ast_byte_diff_count -gt 15 ]]; then
+        remaining=$((bsc_ast_byte_diff_count - 15))
+        echo "  ... and $remaining more"
+    fi
+    echo ""
+
+    # Show first byte-level diff as example
+    echo -e "${BOLD}Example bsc-ast byte-level diff (first file):${RESET}"
+    first_bsc_byte_file=$(echo -e "$bsc_ast_byte_diff_files" | grep -v "^$" | head -1)
+    if [[ -n "$first_bsc_byte_file" ]]; then
+        first_bsc_byte_diff="$TEMP_DIR/bsc_ast_parity_diffs/$(echo "$first_bsc_byte_file" | tr '/' '_').diff"
+        [[ -f "$first_bsc_byte_diff" ]] && head -30 "$first_bsc_byte_diff"
     fi
     echo ""
 fi
