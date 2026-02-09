@@ -18,7 +18,9 @@ use crate::location::Location;
 use crate::parse_arena::{LidentIdx, LocIdx, Located, ParseArena};
 use crate::parser::ast::{DirectionFlag, MutableFlag as ParserMutableFlag, RecFlag};
 use crate::types::asttypes::MutableFlag as TypeMutableFlag;
-use crate::types::decl::{ConstructorDescription, ConstructorTag, LabelDescription, ValueKind};
+use crate::types::decl::{
+    ConstructorDescription, ConstructorTag, LabelDescription, RecordRepresentation, ValueKind,
+};
 use crate::types::typedtree::{
     Case, Constant as TConstant, Expression, ExpressionDesc, FunctionParam, FunctionParamPattern,
     Pattern, PatternDesc, RecordLabelDefinition, Structure, StructureItem, StructureItemDesc,
@@ -759,17 +761,21 @@ impl<'a> LambdaConverter<'a> {
         let mut values = vec![None; fields.len()];
         let base_lam = base.map(|e| self.convert_expr(e));
 
-        for (lid, lbl, def) in fields {
+        for (idx, (lid, lbl, def)) in fields.iter().enumerate() {
             let value = match def {
                 RecordLabelDefinition::Overridden(_, expr) => self.convert_expr(expr),
                 RecordLabelDefinition::Kept(_) => {
                     if let Some(base_expr) = &base_lam {
+                        let field_pos = match lbl.lbl_repres {
+                            RecordRepresentation::RecordExtension => idx as i32 + 1,
+                            _ => idx as i32,
+                        };
                         Lambda::prim(
                             Primitive::Pfield(
-                                lbl.lbl_pos,
+                                field_pos,
                                 FieldDbgInfo::Record {
                                     name: lbl.lbl_name.clone(),
-                                mutable_flag: to_parser_mutable(lbl.lbl_mut),
+                                    mutable_flag: to_parser_mutable(lbl.lbl_mut),
                                 },
                             ),
                             vec![base_expr.clone()],
@@ -780,7 +786,7 @@ impl<'a> LambdaConverter<'a> {
                     }
                 }
             };
-            values[lbl.lbl_pos as usize] = Some(value);
+            values[idx] = Some(value);
         }
 
         let elements = values
