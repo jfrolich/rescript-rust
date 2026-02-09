@@ -4563,16 +4563,15 @@ fn type_record(
         // user did not write the `?` form.
         let final_expr = if label_desc.lbl_optional && !field.opt {
             let some_cstr = make_some_constructor(ctx, label_desc.lbl_arg);
-            let some_lid = Located {
-                txt: tctx.arena.some_lid(),
-                loc: field.lid.loc,
-            };
+            let some_lid = Located::mknoloc(tctx.arena.some_lid());
+            let wrapped_loc = typed_expr.exp_loc;
+            let wrapped_env = typed_expr.exp_env;
             label_desc.lbl_optional = false;
             Expression::new(
                 ExpressionDesc::Texp_construct(some_lid.clone(), some_cstr, vec![typed_expr]),
-                field.lid.loc,
+                wrapped_loc,
                 label_desc.lbl_arg,
-                EnvRef(0),
+                wrapped_env,
                 vec![],
             )
         } else {
