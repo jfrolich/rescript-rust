@@ -366,6 +366,7 @@ test_single_file() {
     local sexp_locs_ppx_diff=0
     local bsc_ast_diff=0
     local ocaml_fail=0 rust_fail=0
+    local bsc_ast_mode="none"
 
     # Determine if it's an interface file
     local intf_flag=""
@@ -458,6 +459,7 @@ test_single_file() {
             fi
             if [[ -f "$ocaml_ast_file" && -f "$rust_ast_file" ]]; then
                 if $use_spice_structural_bsc; then
+                    bsc_ast_mode="structural-spice-tella"
                     if ! python3 - "$INSPECT_SCRIPT" "$ocaml_ast_file" "$rust_ast_file" <<'PY' > /dev/null 2>&1
 import importlib.util
 import sys
@@ -528,6 +530,7 @@ PY
                         } > "$TEMP_DIR/bsc_ast_parity_diffs/$safe_name.diff" 2>&1
                     fi
                 else
+                    bsc_ast_mode="byte"
                     if ! diff -q "$ocaml_ast_file" "$rust_ast_file" > /dev/null 2>&1; then
                         bsc_ast_diff=1
                         {
@@ -544,7 +547,7 @@ PY
     fi
 
     # Write results
-    echo "$file:$locs_pass:$locs_diff:$sexp_locs_ppx_diff:$bsc_ast_diff:$ocaml_fail:$rust_fail" > "$result_file"
+    echo "$file:$locs_pass:$locs_diff:$sexp_locs_ppx_diff:$bsc_ast_diff:$ocaml_fail:$rust_fail:$bsc_ast_mode" > "$result_file"
 
     # Clean up per-file temp
     rm -rf "$file_temp"
@@ -578,7 +581,7 @@ if $QUICK_MODE; then
         # Check result
         safe_name=$(echo "$file" | tr '/' '_')
         result=$(cat "$RESULTS_DIR/$safe_name.result")
-        IFS=':' read -r _ locs_pass locs_diff sexp_locs_ppx_diff bsc_ast_diff ocaml_fail rust_fail <<< "$result"
+        IFS=':' read -r _ locs_pass locs_diff sexp_locs_ppx_diff bsc_ast_diff ocaml_fail rust_fail bsc_ast_mode <<< "$result"
 
         if [[ "$locs_diff" -eq 1 ]]; then
             echo -e "${RED}FAIL:${RESET} $file (sexp-locs differs)"
@@ -617,19 +620,25 @@ locs_pass_count=0
 locs_diff_count=0
 sexp_locs_ppx_diff_count=0
 bsc_ast_parity_diff_count=0
+bsc_ast_byte_diff_count=0
+bsc_ast_structural_tella_spice_diff_count=0
+bsc_ast_byte_checked_count=0
+bsc_ast_structural_tella_spice_checked_count=0
 ocaml_fail_count=0
 rust_fail_count=0
 
 locs_diff_files=""
 sexp_locs_ppx_diff_files=""
 bsc_ast_parity_diff_files=""
+bsc_ast_byte_diff_files=""
+bsc_ast_structural_tella_spice_diff_files=""
 ocaml_fail_files=""
 rust_fail_files=""
 
 for result_file in "$RESULTS_DIR"/*.result; do
     [[ -f "$result_file" ]] || continue
     result=$(cat "$result_file")
-    IFS=':' read -r file locs_pass locs_diff sexp_locs_ppx_diff bsc_ast_diff ocaml_fail rust_fail <<< "$result"
+    IFS=':' read -r file locs_pass locs_diff sexp_locs_ppx_diff bsc_ast_diff ocaml_fail rust_fail bsc_ast_mode <<< "$result"
 
     locs_pass_count=$((locs_pass_count + locs_pass))
     locs_diff_count=$((locs_diff_count + locs_diff))
@@ -638,9 +647,24 @@ for result_file in "$RESULTS_DIR"/*.result; do
     ocaml_fail_count=$((ocaml_fail_count + ocaml_fail))
     rust_fail_count=$((rust_fail_count + rust_fail))
 
+    if [[ "$bsc_ast_mode" == "byte" ]]; then
+        bsc_ast_byte_checked_count=$((bsc_ast_byte_checked_count + 1))
+    elif [[ "$bsc_ast_mode" == "structural-spice-tella" ]]; then
+        bsc_ast_structural_tella_spice_checked_count=$((bsc_ast_structural_tella_spice_checked_count + 1))
+    fi
+
     [[ "$locs_diff" -eq 1 ]] && locs_diff_files="$locs_diff_files$file\n"
     [[ "$sexp_locs_ppx_diff" -eq 1 ]] && sexp_locs_ppx_diff_files="$sexp_locs_ppx_diff_files$file\n"
-    [[ "$bsc_ast_diff" -eq 1 ]] && bsc_ast_parity_diff_files="$bsc_ast_parity_diff_files$file\n"
+    if [[ "$bsc_ast_diff" -eq 1 ]]; then
+        bsc_ast_parity_diff_files="$bsc_ast_parity_diff_files$file\n"
+        if [[ "$bsc_ast_mode" == "structural-spice-tella" ]]; then
+            bsc_ast_structural_tella_spice_diff_count=$((bsc_ast_structural_tella_spice_diff_count + 1))
+            bsc_ast_structural_tella_spice_diff_files="$bsc_ast_structural_tella_spice_diff_files$file\n"
+        else
+            bsc_ast_byte_diff_count=$((bsc_ast_byte_diff_count + 1))
+            bsc_ast_byte_diff_files="$bsc_ast_byte_diff_files$file\n"
+        fi
+    fi
     [[ "$ocaml_fail" -eq 1 ]] && ocaml_fail_files="$ocaml_fail_files$file\n"
     [[ "$rust_fail" -eq 1 ]] && rust_fail_files="$rust_fail_files$file\n"
 done
@@ -654,7 +678,7 @@ bsc_ast_pass_files=""
 for result_file in "$RESULTS_DIR"/*.result; do
     [[ -f "$result_file" ]] || continue
     result=$(cat "$result_file")
-    IFS=':' read -r file locs_pass locs_diff sexp_locs_ppx_diff bsc_ast_diff ocaml_fail rust_fail <<< "$result"
+    IFS=':' read -r file locs_pass locs_diff sexp_locs_ppx_diff bsc_ast_diff ocaml_fail rust_fail bsc_ast_mode <<< "$result"
 
     # Track all tested files
     all_tested_files="$all_tested_files$file\n"
@@ -941,6 +965,10 @@ echo "    sexp-locs-ppx differences: $sexp_locs_ppx_diff_count"
 echo ""
 echo "  ${BOLD}Compiler parity (bsc -bs-ast output):${RESET}"
 echo "    bsc-ast differences:      $bsc_ast_parity_diff_count"
+echo "    bsc-ast byte checks:      $bsc_ast_byte_checked_count"
+echo "    bsc-ast byte differences: $bsc_ast_byte_diff_count"
+echo "    TELLA @spice structural checks: $bsc_ast_structural_tella_spice_checked_count"
+echo "    TELLA @spice structural differences: $bsc_ast_structural_tella_spice_diff_count"
 echo ""
 echo "  ${BOLD}Parse failures:${RESET}"
 echo "    OCaml failures:           $ocaml_fail_count"
@@ -1008,24 +1036,48 @@ if [[ $sexp_locs_ppx_diff_count -gt 0 ]]; then
     echo ""
 fi
 
-# Show bsc-ast parity differences (full compiler output)
-if [[ $bsc_ast_parity_diff_count -gt 0 ]]; then
-    echo -e "${BOLD}${RED}Files with bsc-ast parity differences ($bsc_ast_parity_diff_count):${RESET}"
-    echo "  (bsc -bs-ast output differs - includes deps + marshalled parsetree)"
-    echo -e "$bsc_ast_parity_diff_files" | grep -v "^$" | head -15 | while read file; do
+# Show bsc-ast byte-level differences
+if [[ $bsc_ast_byte_diff_count -gt 0 ]]; then
+    echo -e "${BOLD}${RED}Files with bsc-ast byte-level differences ($bsc_ast_byte_diff_count):${RESET}"
+    echo "  (raw bsc -bs-ast bytes differ)"
+    echo -e "$bsc_ast_byte_diff_files" | grep -v "^$" | head -15 | while read file; do
         echo "  $file"
     done
-    if [[ $bsc_ast_parity_diff_count -gt 15 ]]; then
-        remaining=$((bsc_ast_parity_diff_count - 15))
+    if [[ $bsc_ast_byte_diff_count -gt 15 ]]; then
+        remaining=$((bsc_ast_byte_diff_count - 15))
         echo "  ... and $remaining more"
     fi
     echo ""
 
-    # Show first bsc-ast diff as example
-    echo -e "${BOLD}Example bsc-ast diff (first file):${RESET}"
-    first_bsc_diff=$(ls "$TEMP_DIR/bsc_ast_parity_diffs/"*.diff 2>/dev/null | head -1)
-    if [[ -n "$first_bsc_diff" ]]; then
-        head -30 "$first_bsc_diff"
+    # Show first byte-level diff as example
+    echo -e "${BOLD}Example bsc-ast byte-level diff (first file):${RESET}"
+    first_bsc_byte_file=$(echo -e "$bsc_ast_byte_diff_files" | grep -v "^$" | head -1)
+    if [[ -n "$first_bsc_byte_file" ]]; then
+        first_bsc_byte_diff="$TEMP_DIR/bsc_ast_parity_diffs/$(echo "$first_bsc_byte_file" | tr '/' '_').diff"
+        [[ -f "$first_bsc_byte_diff" ]] && head -30 "$first_bsc_byte_diff"
+    fi
+    echo ""
+fi
+
+# Show TELLA @spice structural bsc-ast differences
+if [[ $bsc_ast_structural_tella_spice_diff_count -gt 0 ]]; then
+    echo -e "${BOLD}${YELLOW}Files with TELLA @spice structural bsc-ast differences ($bsc_ast_structural_tella_spice_diff_count):${RESET}"
+    echo "  (decoded AST value-tree comparison; byte-level parity intentionally skipped)"
+    echo -e "$bsc_ast_structural_tella_spice_diff_files" | grep -v "^$" | head -15 | while read file; do
+        echo "  $file"
+    done
+    if [[ $bsc_ast_structural_tella_spice_diff_count -gt 15 ]]; then
+        remaining=$((bsc_ast_structural_tella_spice_diff_count - 15))
+        echo "  ... and $remaining more"
+    fi
+    echo ""
+
+    # Show first structural diff as example
+    echo -e "${BOLD}Example TELLA @spice structural diff (first file):${RESET}"
+    first_bsc_struct_file=$(echo -e "$bsc_ast_structural_tella_spice_diff_files" | grep -v "^$" | head -1)
+    if [[ -n "$first_bsc_struct_file" ]]; then
+        first_bsc_struct_diff="$TEMP_DIR/bsc_ast_parity_diffs/$(echo "$first_bsc_struct_file" | tr '/' '_').diff"
+        [[ -f "$first_bsc_struct_diff" ]] && head -30 "$first_bsc_struct_diff"
     fi
     echo ""
 fi
