@@ -3013,6 +3013,7 @@ fn type_application(
             _ => None,
         }
     };
+    let max_arity = top_arity.unwrap_or(i32::MAX);
 
     // Match labels by name (OCaml's extract_label) instead of consuming call args strictly
     // left-to-right.
@@ -3106,13 +3107,17 @@ fn type_application(
     }
 
     if total_app {
-        loop {
+        // OCaml only auto-consumes trailing optional arguments when the current
+        // application provided fewer arguments than the function arity.
+        let mut applied_count = typed_args.len() + skipped_optionals;
+        while (applied_count as i32) < max_arity {
             let expanded_current_ty = crate::types::ctype::expand_head(ctx, env, current_ty);
             if let Some((fn_label, _arg_ty, ret_ty)) =
                 crate::types::ctype::split_arrow_with_label(ctx, expanded_current_ty)
             {
                 if fn_label.is_optional() {
                     current_ty = ret_ty;
+                    applied_count += 1;
                     continue;
                 }
             }
