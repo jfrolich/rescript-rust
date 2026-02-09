@@ -42,8 +42,6 @@ pub mod cache;
 pub mod config;
 pub mod context;
 pub mod diagnostics;
-#[allow(unsafe_code)] // FFI requires unsafe
-pub mod ffi;
 pub mod arena;
 pub mod ident;
 pub mod intern;
@@ -60,7 +58,6 @@ pub use cache::ModuleCache;
 pub use config::CompilerConfig;
 pub use context::{CompilationContext, IdGenerator};
 pub use diagnostics::DiagnosticsContext;
-pub use ffi::{FfiBuffer, FfiResult, FfiStatus};
 pub use ident::Ident;
 pub use lambda::Lambda;
 pub use location::Location;

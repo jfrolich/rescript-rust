@@ -21,10 +21,9 @@ name = "bsc"
 path = "src/bin/bsc.rs"
 
 [dependencies]
-# Serialization (for FFI and config)
+# Serialization
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-bincode = "1.3"
 
 # Error handling
 thiserror = "2.0"
@@ -53,9 +52,6 @@ oxc_parser = "0.49"
 oxc_ast = "0.49"
 oxc_span = "0.49"
 
-# FFI (for transition period)
-# ocaml = { version = "1.0", optional = true }
-
 [dev-dependencies]
 proptest = "1.5"
 criterion = { version = "0.5", features = ["html_reports"] }
@@ -64,7 +60,6 @@ tempfile = "3"
 
 [features]
 default = []
-# ffi = ["ocaml"]  # Enable OCaml FFI for transition period
 
 [profile.release]
 lto = true
