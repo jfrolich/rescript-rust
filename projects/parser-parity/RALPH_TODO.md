@@ -24,7 +24,7 @@
 
 ## Current Status
 
-**Last Updated:** 2026-02-08
+**Last Updated:** 2026-02-09
 
 | Test Suite | Status |
 |------------|--------|
@@ -32,15 +32,27 @@
 | sexp-locs (syntax scope) | 1196/1196 (100%) ✅ |
 | sexp-locs-ppx (syntax scope) | 1196/1196 (100%) ✅ |
 | bsc-ast (syntax scope) | 1196/1196 (100%) ✅ |
-| sexp-locs (full scope: syntax + TELLA) | 3496/3496 (100%) ✅ |
-| sexp-locs-ppx (full scope: syntax + TELLA) | 2930/3496 (83.8%) |
-| bsc-ast (full scope: syntax + TELLA) | 581 diffs (OCaml parser failures: 11, Rust parser failures: 20) |
+| sexp-locs (full scope: syntax + TELLA) | ⚠️ Rust parser aborts (`Abort trap: 6`) on some TELLA files (P0 blocker) |
+| sexp-locs-ppx (full scope: syntax + TELLA) | 2930/3496 (83.8%) + TELLA `@spice` files temporarily skipped |
+| bsc-ast (full scope: syntax + TELLA) | 581 diffs (snapshot from 2026-02-08; rerun after TELLA abort-trap fixes) |
 
 **Scope note:** Final parity targets include both `tests/syntax_tests/data` and `TELLA_DIR`
 when present. Always report parity as `X/Y` where `Y` contains only OCaml-successful files.
 Files where OCaml fails are excluded from parity denominators and listed separately.
 
 **Snapshot note:** The `1179` denominator above is a historical in-repo snapshot.
+
+**Session progress (2026-02-09) - newest:**
+- Spice handling in full-scope parity script is now wired and documented:
+  - `3bf9c5b18`: `test_parser_ast_parity` now detects `@spice` files and runs OCaml `bsc` with `-ppx "$SPICE_PPX"` for apples-to-apples `bsc-ast` parity.
+  - `37ebd343f`: `sexp-locs-ppx` is temporarily skipped only for TELLA `@spice` files (parser path divergence).
+- New active blocker from full-scope runs:
+  - Rust parser still aborts in TELLA during `-print sexp-locs` (`Abort trap: 6`), observed during progress at 153/3516, 246/3516, 319/3516, and 1080/3516 files.
+  - Treat these as parser-failure bugs (P0), not parity-diff noise.
+- Next required steps before any new parity-count claims:
+  - Extract concrete failing file paths from the run summary (`Rust failures`) and reproduce each as single-file runs.
+  - Debug/fix crash root causes in parser path (`res_parser_rust -print sexp-locs <file>`).
+  - Rerun full scope and refresh `sexp-locs`/`sexp-locs-ppx`/`bsc-ast` counts after crash fixes.
 
 **Session progress (2026-02-08) - newest:**
 - Fixed remaining full-scope `sexp-locs` parser diff and aligned OCaml int32 marshal for `@inline` constants:

@@ -83,6 +83,8 @@ Read `RALPH_TODO.md` and complete the next unchecked task. After completing a ta
 
 13. **Use explicit `Idx` type names** - Do NOT create aliases like `type Arity = ArityIdx` or similar shortcuts. While it might reduce the number of changes needed, it creates confusion. Always use the explicit indexed type name (e.g., `ArityIdx`, `PosIdx`, `LocIdx`). If you encounter such aliases in the code, replace them with the explicit `Idx` names.
 
+14. **Treat TELLA parser crashes as P0 blockers** - A Rust parser `Abort trap: 6`/timeout in `-print sexp-locs` is a hard failure and must be fixed before chasing remaining diff-only parity work. Reproduce the exact crashing file with a single-file run, debug the parser crash, and only then continue with diff-count reduction.
+
 ## Key Files
 
 | File | Purpose |
@@ -103,6 +105,12 @@ Read `RALPH_TODO.md` and complete the next unchecked task. After completing a ta
 # Test a specific file
 ./scripts/test_parser_ast_parity.sh tests/syntax_tests/data/printer/expr/record.res
 
+# Reproduce a TELLA crash from the full run on a single file
+./scripts/test_parser_ast_parity.sh /Users/jaapf/dev/tella-fusion/path/to/file.res
+
+# Debug parser crash directly (prefer debug build while investigating abort traps)
+./compiler-rust/target/debug/res_parser_rust -print sexp-locs /Users/jaapf/dev/tella-fusion/path/to/file.res
+
 # Compare binary output manually for a simple file
 echo 'let f = x => x' > /tmp/test.res
 ./packages/@rescript/darwin-arm64/bin/bsc.exe -bs-ast /tmp/test.res -o /tmp/ocaml.ast
@@ -115,17 +123,23 @@ cargo build --manifest-path compiler-rust/Cargo.toml --release
 
 ## Current Status
 
-- **AST structure (sexp-locs)**: 100% parity (1049/1049 files)
-- **Binary output (bsc-ast)**: ~121 files with exact byte parity, ~928 with differences
+- **Syntax scope parity**: 1196/1196 (100%) for `sexp-locs`, `sexp-locs-ppx`, and `bsc-ast`
+- **Full scope (syntax + TELLA)**: spice handling in parity script was fixed on 2026-02-09, but Rust parser still hits `Abort trap: 6` on a subset of TELLA files during `-print sexp-locs`
+- **Current blocker**: eliminate TELLA parser aborts first, then re-baseline full-scope `sexp-locs`/`sexp-locs-ppx`/`bsc-ast` counts
 
 ## Known Issues to Fix
 
-1. **Position sharing differences** - Rust creates fewer/more shared references than OCaml
+1. **TELLA parser abort traps in `sexp-locs` path** - Rust parser crashes (`Abort trap: 6`) on some TELLA files
+   - This is a parser correctness issue, not just a parity diff
+   - Reproduce with single-file `test_parser_ast_parity.sh <absolute path>` and direct `res_parser_rust -print sexp-locs`
+   - Fix parser crash root cause before bsc-ast sharing work
+
+2. **Position sharing differences** - Rust creates fewer/more shared references than OCaml
    - OCaml's sharing is based on pointer equality
    - Rust uses arena indices to approximate this
    - Some patterns still produce different sharing behavior
 
-2. **FFI encoding differences** - Files with `external` declarations
+3. **FFI encoding differences** - Files with `external` declarations
    - OCaml's PPX encodes FFI type information as a marshalled blob in `pval_prim`
    - See `compiler/frontend/external_ffi_types.ml` for the encoding
 
@@ -175,7 +189,7 @@ When porting OCaml code, use these Rust equivalents:
 
 The current status is tracked in `RALPH_TODO.md`. Update it as you complete tasks.
 
-Goal: Achieve byte-identical binary AST output for all 1049 test files.
+Goal: Achieve byte-identical binary AST output for all in-scope files where OCaml succeeds (`tests/syntax_tests/data` + `TELLA_DIR` when present).
 
 ## Exit Condition
 
