@@ -116,11 +116,10 @@ pub struct UnifyState {
     /// Whether to assume type constructors are injective.
     assume_injective: bool,
 
-    /// Environment for type alias expansion during unification.
-    /// Stored as a raw pointer to avoid lifetime parameter on UnifyState.
-    /// Safety: the env must outlive the UnifyState (which it always does since
-    /// UnifyState is created and used within a single type-checking call).
-    env_ptr: Option<*const Env>,
+    /// Environment snapshot for type alias expansion during unification.
+    /// Store an owned clone to avoid dangling pointers when nested typing
+    /// temporarily switches environments.
+    env: Option<Env>,
 }
 
 impl UnifyState {
@@ -131,7 +130,7 @@ impl UnifyState {
             mode: UnifyMode::Expression,
             generate_equations: false,
             assume_injective: false,
-            env_ptr: None,
+            env: None,
         }
     }
 
@@ -142,19 +141,18 @@ impl UnifyState {
             mode: UnifyMode::Pattern,
             generate_equations: true,
             assume_injective: false,
-            env_ptr: None,
+            env: None,
         }
     }
 
-    /// Set the environment for type alias expansion.
-    /// Safety: the env must outlive this UnifyState.
+    /// Set the environment snapshot for type alias expansion.
     pub fn set_env(&mut self, env: &Env) {
-        self.env_ptr = Some(env as *const Env);
+        self.env = Some(env.clone());
     }
 
     /// Get the environment reference, if set.
     fn env(&self) -> Option<&Env> {
-        self.env_ptr.map(|ptr| unsafe { &*ptr })
+        self.env.as_ref()
     }
 
     /// Check if two types have already been unified.
@@ -332,6 +330,8 @@ fn resolve_module_signature_through_cmi<'a>(
     use crate::cmi::{cmi_format, sig_reader::SigReadContext};
     use crate::types::decl::{ModuleType, SignatureItem};
 
+    // Keep visited module paths for the full resolution walk. Removing entries
+    // re-opens alias cycles (`A -> B -> A`) and can recurse until stack overflow.
     if !visiting.insert(module_path.clone()) {
         return None;
     }
@@ -360,7 +360,6 @@ fn resolve_module_signature_through_cmi<'a>(
         Path::Papply(_, _) => None,
     };
 
-    visiting.remove(module_path);
     result
 }
 
@@ -418,6 +417,9 @@ fn resolve_module_type_through_env_path<'a>(
 ) -> Option<super::decl::ModuleType> {
     use super::decl::SignatureItem;
 
+    // Keep visited paths for the entire alias-resolution chain; this mirrors
+    // OCaml's cycle-safe alias scraping and prevents re-entering `Mty_ident`
+    // loops through `resolve_signature_through_env_module_type`.
     if !visiting.insert(path.clone()) {
         return None;
     }
@@ -460,7 +462,6 @@ fn resolve_module_type_through_env_path<'a>(
         Path::Papply(_, _) => None,
     };
 
-    visiting.remove(path);
     result
 }
 

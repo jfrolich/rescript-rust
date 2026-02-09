@@ -16,7 +16,8 @@
 //! - Blocks: PREFIX_SMALL_BLOCK (tag 0-15, size 0-7), CODE_BLOCK32
 //! - Sharing: CODE_SHARED8/16/32 (back-references to already-read objects)
 
-use std::io::{self, Read, Cursor};
+use std::io::{self, Cursor, Read};
+use std::sync::Arc;
 
 /// Magic number for small Marshal format
 const MAGIC_NUMBER_SMALL: u32 = 0x8495A6BE;
@@ -49,7 +50,7 @@ pub enum OcamlValue {
     String(String),
     /// A block (record, variant with args, tuple, array, etc.)
     /// Fields: (tag, fields)
-    Block(u8, Vec<OcamlValue>),
+    Block(u8, Arc<[OcamlValue]>),
     /// A 64-bit float
     Float(f64),
 }
@@ -74,7 +75,7 @@ impl OcamlValue {
     /// Get as block, or panic. Returns (tag, fields).
     pub fn as_block(&self) -> (u8, &[OcamlValue]) {
         match self {
-            OcamlValue::Block(tag, fields) => (*tag, fields),
+            OcamlValue::Block(tag, fields) => (*tag, fields.as_ref()),
             _ => panic!("expected Block, got {:?}", self.short_debug()),
         }
     }
@@ -259,7 +260,10 @@ impl MarshalReader {
                             fields.push(val);
                             if fields.len() == *total {
                                 // Block is complete
-                                let completed = OcamlValue::Block(*tag, std::mem::take(fields));
+                                let completed = OcamlValue::Block(
+                                    *tag,
+                                    Arc::from(std::mem::take(fields)),
+                                );
                                 self.obj_table[*obj_idx] = completed.clone();
                                 val = completed;
                                 stack.pop();
@@ -291,7 +295,7 @@ impl MarshalReader {
             let size = ((code >> 4) & 0x07) as usize;
             if size == 0 {
                 // Empty block - complete immediately
-                let value = OcamlValue::Block(tag, Vec::new());
+                let value = OcamlValue::Block(tag, Arc::new([]));
                 self.obj_table.push(value.clone());
                 return Ok(Some(value));
             }
@@ -351,7 +355,7 @@ impl MarshalReader {
                 let tag = (header & 0xFF) as u8;
                 let size = (header >> 10) as usize;
                 if size == 0 {
-                    let value = OcamlValue::Block(tag, Vec::new());
+                    let value = OcamlValue::Block(tag, Arc::new([]));
                     self.obj_table.push(value.clone());
                     return Ok(Some(value));
                 }
