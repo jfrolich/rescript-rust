@@ -5601,117 +5601,133 @@ fn type_letmodule(
     let ctx = tctx.type_ctx;
     let mod_name_str = arena.get_string(name.txt).to_string();
     let mod_id = Ident::create_local(&mod_name_str);
+    let letmodule_ty = ctx.new_var(None);
 
-    // Type check the module expression and build its signature for the env
-    let (typed_mod, mut mod_sig) = match &module_expr.pmod_desc {
-        crate::parser::ast::ModuleExprDesc::Pmod_structure(items) => {
-            let (structure, _inner_env) = crate::types::typemod::type_structure(tctx, env, arena, items)
-                .map_err(|e| TypeCoreError::Other(format!("letmodule: {e:?}")))?;
+    // Match OCaml `Pexp_letmodule` level scoping (`begin_def`/`end_def`).
+    ctx.begin_def();
+    let scoped_result = (|| -> TypeCoreResult<(
+        crate::types::typedtree::ModuleExpr,
+        Env,
+        Expression,
+        TypeExprRef,
+    )> {
+        // Type check the module expression and build its signature for the env
+        let (typed_mod, mut mod_sig) = match &module_expr.pmod_desc {
+            crate::parser::ast::ModuleExprDesc::Pmod_structure(items) => {
+                let (structure, _inner_env) = crate::types::typemod::type_structure(tctx, env, arena, items)
+                    .map_err(|e| TypeCoreError::Other(format!("letmodule: {e:?}")))?;
 
-            // Build a signature from the typed structure items
-            let sig_items = build_signature_from_structure(&structure);
+                // Build a signature from the typed structure items
+                let sig_items = build_signature_from_structure(&structure);
 
-            let md = crate::types::typedtree::ModuleExpr {
-                mod_desc: crate::types::typedtree::ModuleExprDesc::Tmod_structure(structure),
-                mod_loc: module_expr.pmod_loc,
-                mod_type: crate::types::typedtree::ModuleType::placeholder(),
-                mod_env: EnvRef(0),
-                mod_attributes: vec![],
-            };
-            (md, crate::types::decl::ModuleType::MtySignature(sig_items))
-        }
-        _ => {
-            let md = crate::types::typemod::type_module_expr(tctx, env, arena, module_expr)
-                .map_err(|e| TypeCoreError::Other(format!("letmodule: {e:?}")))?;
-            // Match OCaml Pexp_letmodule: prefer semantic module type from the
-            // parsed module expression (same source as Env.enter_module), then
-            // fall back to typed-expression extraction.
-            let mod_sig = if let Some(sig) = crate::types::typemod::lookup_module_type_from_parsed_module_expr(
-                tctx,
-                env,
-                arena,
-                module_expr,
+                let md = crate::types::typedtree::ModuleExpr {
+                    mod_desc: crate::types::typedtree::ModuleExprDesc::Tmod_structure(structure),
+                    mod_loc: module_expr.pmod_loc,
+                    mod_type: crate::types::typedtree::ModuleType::placeholder(),
+                    mod_env: EnvRef(0),
+                    mod_attributes: vec![],
+                };
+                (md, crate::types::decl::ModuleType::MtySignature(sig_items))
+            }
+            _ => {
+                let md = crate::types::typemod::type_module_expr(tctx, env, arena, module_expr)
+                    .map_err(|e| TypeCoreError::Other(format!("letmodule: {e:?}")))?;
+                // Match OCaml Pexp_letmodule: prefer semantic module type from the
+                // parsed module expression (same source as Env.enter_module), then
+                // fall back to typed-expression extraction.
+                let mod_sig = if let Some(sig) = crate::types::typemod::lookup_module_type_from_parsed_module_expr(
+                    tctx,
+                    env,
+                    arena,
+                    module_expr,
+                ) {
+                    sig
+                } else if let Some(sig) =
+                    crate::types::typemod::extract_module_type_from_mod_expr_pub(&md)
+                {
+                    sig
+                } else {
+                    crate::types::decl::ModuleType::MtySignature(vec![])
+                };
+                (md, mod_sig)
+            }
+        };
+
+        // Keep let-module member lookups stable for direct module aliases
+        // (`module M = List` / constrained direct idents) by materializing
+        // aliases/identifiers to signatures when the environment can resolve them.
+        let materialize_alias_sig = match &module_expr.pmod_desc {
+            crate::parser::ast::ModuleExprDesc::Pmod_ident(_) => true,
+            crate::parser::ast::ModuleExprDesc::Pmod_constraint(inner, _) => {
+                matches!(inner.pmod_desc, crate::parser::ast::ModuleExprDesc::Pmod_ident(_))
+            }
+            _ => false,
+        };
+        if materialize_alias_sig
+            && matches!(
+                &mod_sig,
+                crate::types::decl::ModuleType::MtyIdent(_)
+                    | crate::types::decl::ModuleType::MtyAlias(_, _)
+            )
+        {
+            if let Some(sig) = crate::types::typemod::resolve_mod_type_to_sig(
+                &mod_sig,
+                Some(env),
+                &mut tctx.persistent_env,
+                ctx,
             ) {
-                sig
-            } else if let Some(sig) =
-                crate::types::typemod::extract_module_type_from_mod_expr_pub(&md)
-            {
-                sig
-            } else {
-                crate::types::decl::ModuleType::MtySignature(vec![])
-            };
-            (md, mod_sig)
+                mod_sig = crate::types::decl::ModuleType::MtySignature(sig);
+            }
         }
-    };
 
-    // Keep let-module member lookups stable for direct module aliases
-    // (`module M = List` / constrained direct idents) by materializing
-    // aliases/identifiers to signatures when the environment can resolve them.
-    let materialize_alias_sig = match &module_expr.pmod_desc {
-        crate::parser::ast::ModuleExprDesc::Pmod_ident(_) => true,
-        crate::parser::ast::ModuleExprDesc::Pmod_constraint(inner, _) => {
-            matches!(inner.pmod_desc, crate::parser::ast::ModuleExprDesc::Pmod_ident(_))
-        }
-        _ => false,
-    };
-    if materialize_alias_sig
-        && matches!(
-            &mod_sig,
-            crate::types::decl::ModuleType::MtyIdent(_)
-                | crate::types::decl::ModuleType::MtyAlias(_, _)
-        )
-    {
-        if let Some(sig) = crate::types::typemod::resolve_mod_type_to_sig(
-            &mod_sig,
-            Some(env),
-            &mut tctx.persistent_env,
-            ctx,
-        ) {
-            mod_sig = crate::types::decl::ModuleType::MtySignature(sig);
-        }
-    }
+        // Add the module to the environment so the body can access M.value
+        let mut body_env = env.clone();
+        let md_decl = crate::types::decl::ModuleDeclaration {
+            md_type: mod_sig,
+            md_attributes: vec![],
+            md_loc: crate::location::Location::none(),
+            md_path: None,
+        };
+        body_env.add_module(mod_id.clone(), md_decl);
 
-    // Add the module to the environment so the body can access M.value
-    let mut body_env = env.clone();
-    let md_decl = crate::types::decl::ModuleDeclaration {
-        md_type: mod_sig,
-        md_attributes: vec![],
-        md_loc: crate::location::Location::none(),
-        md_path: None,
-    };
-    body_env.add_module(mod_id.clone(), md_decl);
-
-    // Type check the body in the extended environment. Match OCaml let-module
-    // scoping by abstracting local module-rooted type paths out of the exposed
-    // expression type before unifying with the surrounding expectation.
-    let typed_body = type_expect(tctx, &body_env, body, expected_ty, None)?;
-    let rewritten_ty = typed_body.exp_type;
-    let mut replacements: HashMap<String, TypeExprRef> = HashMap::new();
-    let mut seen: HashSet<TypeExprRef> = HashSet::new();
-    replace_letmodule_local_paths(
-        ctx,
-        rewritten_ty,
-        &mod_id,
-        &mut replacements,
-        &mut seen,
-    );
-    replace_letmodule_local_paths(
-        ctx,
-        expected_ty,
-        &mod_id,
-        &mut replacements,
-        &mut seen,
-    );
-    for (_id, value_desc) in env.iter_values() {
+        // Type check the body in the extended environment. Match OCaml let-module
+        // scoping by abstracting local module-rooted type paths out of the exposed
+        // expression type before unifying with the surrounding expectation.
+        let typed_body = type_expect(tctx, &body_env, body, expected_ty, None)?;
+        let rewritten_ty = typed_body.exp_type;
+        let mut replacements: HashMap<String, TypeExprRef> = HashMap::new();
+        let mut seen: HashSet<TypeExprRef> = HashSet::new();
         replace_letmodule_local_paths(
             ctx,
-            value_desc.val_type,
+            rewritten_ty,
             &mod_id,
             &mut replacements,
             &mut seen,
         );
-    }
-    unify_expression_types(tctx, loc, rewritten_ty, expected_ty, None)?;
+        replace_letmodule_local_paths(
+            ctx,
+            expected_ty,
+            &mod_id,
+            &mut replacements,
+            &mut seen,
+        );
+        for (_id, value_desc) in env.iter_values() {
+            replace_letmodule_local_paths(
+                ctx,
+                value_desc.val_type,
+                &mod_id,
+                &mut replacements,
+                &mut seen,
+            );
+        }
+        unify_expression_types(tctx, loc, rewritten_ty, expected_ty, None)?;
+        Ok((typed_mod, body_env, typed_body, rewritten_ty))
+    })();
+    ctx.end_def();
+
+    let (typed_mod, body_env, typed_body, rewritten_ty) = scoped_result?;
+    tctx.set_unify_env(&body_env);
+    unify_expression_types(tctx, loc, letmodule_ty, rewritten_ty, None)?;
 
     Ok(Expression::new(
         crate::types::typedtree::ExpressionDesc::Texp_letmodule(
@@ -5721,7 +5737,7 @@ fn type_letmodule(
             Box::new(typed_body),
         ),
         loc,
-        rewritten_ty,
+        letmodule_ty,
         EnvRef(0),
         attributes.to_vec(),
     ))
