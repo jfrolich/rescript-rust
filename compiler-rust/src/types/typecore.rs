@@ -2844,32 +2844,53 @@ pub fn type_expect<'a>(
 
             // Condition should be bool
             let typed_cond = type_expect(tctx, env, cond, bool_ty, None)?;
+            match else_branch {
+                Some(else_branch) => {
+                    // OCaml keeps sharing by unifying else with then.exp_type.
+                    let typed_then = type_expect(tctx, env, then_branch, expected_ty, None)?;
+                    let typed_else = type_expect(tctx, env, else_branch, expected_ty, None)?;
+                    unify_expression_types(
+                        tctx,
+                        loc,
+                        typed_else.exp_type,
+                        typed_then.exp_type,
+                        context,
+                    )?;
+                    let then_exp_type = typed_then.exp_type;
 
-            // Then branch has expected type
-            let typed_then = type_expect(tctx, env, then_branch, expected_ty, None)?;
+                    Ok(Expression::new(
+                        ExpressionDesc::Texp_ifthenelse(
+                            Box::new(typed_cond),
+                            Box::new(typed_then),
+                            Some(Box::new(typed_else)),
+                        ),
+                        loc,
+                        then_exp_type,
+                        EnvRef(0),
+                        expr.pexp_attributes.clone(),
+                    ))
+                }
+                None => {
+                    // OCaml uses rue here: type then-branch as unit, then unify
+                    // the whole if-expression with the expected type.
+                    let unit_ty = env.type_unit(ctx);
+                    let typed_then = type_expect(tctx, env, then_branch, unit_ty, None)?;
+                    let then_exp_type = typed_then.exp_type;
+                    unify_expression_types(tctx, loc, then_exp_type, expected_ty, context)?;
 
-            // Else branch, if present
-            let typed_else = if let Some(else_branch) = else_branch {
-                let typed_else = type_expect(tctx, env, else_branch, expected_ty, None)?;
-                Some(Box::new(typed_else))
-            } else {
-                // No else branch - result type should be unit
-                let unit_ty = env.type_unit(ctx);
-                unify_expression_types(tctx, loc, expected_ty, unit_ty, context)?;
-                None
-            };
-
-            Ok(Expression::new(
-                ExpressionDesc::Texp_ifthenelse(
-                    Box::new(typed_cond),
-                    Box::new(typed_then),
-                    typed_else,
-                ),
-                loc,
-                expected_ty,
-                EnvRef(0),
-                expr.pexp_attributes.clone(),
-            ))
+                    Ok(Expression::new(
+                        ExpressionDesc::Texp_ifthenelse(
+                            Box::new(typed_cond),
+                            Box::new(typed_then),
+                            None,
+                        ),
+                        loc,
+                        then_exp_type,
+                        EnvRef(0),
+                        expr.pexp_attributes.clone(),
+                    ))
+                }
+            }
         }
 
         ED::Pexp_while(cond, body) => {
