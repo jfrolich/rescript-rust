@@ -2743,8 +2743,28 @@ pub fn type_expect<'a>(
             let longident = tctx.arena.get_longident(lid.txt);
             let (path, desc) = env.lookup_value_by_lid(longident, tctx.arena, &mut tctx.persistent_env, tctx.type_ctx)?;
 
-            // Instantiate the type
-            let ty = crate::types::instance(ctx, desc.val_type);
+            // Match OCaml `instance` behavior for repeated local monomorphic
+            // identifiers: keep non-generic ground constructor nodes by
+            // identity so multiple occurrences can share through unification.
+            let ty = {
+                let source_ty = ctx.repr(desc.val_type);
+                let reuse_local_ground = match &path {
+                    Path::Pident(id) if !id.is_persistent() => {
+                        if ctx.get_level(source_ty) != crate::types::GENERIC_LEVEL {
+                            let desc = ctx.get_desc(source_ty);
+                            matches!(&*desc, TypeDesc::Tconstr { args, .. } if args.is_empty())
+                        } else {
+                            false
+                        }
+                    }
+                    _ => false,
+                };
+                if reuse_local_ground {
+                    source_ty
+                } else {
+                    crate::types::instance(ctx, desc.val_type)
+                }
+            };
 
             // Unify with expected type
             unify_expression_types(tctx, loc, ty, expected_ty, context)?;
