@@ -5242,7 +5242,8 @@ fn parse_deriving_expr(expr_desc: &ExpressionDesc, actions: &mut Vec<DeriveActio
                             actions.push(DeriveAction::JsConverter { new_type });
                         }
                         "abstract" => {
-                            actions.push(DeriveAction::Abstract { light: false });
+                            let light = check_abstract_light_config(&field.expr, arena);
+                            actions.push(DeriveAction::Abstract { light });
                         }
                         "accessors" => {
                             actions.push(DeriveAction::Accessors);
@@ -5269,6 +5270,21 @@ fn parse_deriving_expr(expr_desc: &ExpressionDesc, actions: &mut Vec<DeriveActio
             }
         }
         _ => {}
+    }
+}
+
+/// Check if abstract config is `light` in @deriving({abstract: light})
+fn check_abstract_light_config(expr: &Expression, arena: &mut ParseArena) -> bool {
+    match &expr.pexp_desc {
+        ExpressionDesc::Pexp_ident(lid_loc) => {
+            let lid = arena.get_longident(lid_loc.txt);
+            if let Longident::Lident(s) = lid {
+                arena.get_string(*s) == "light"
+            } else {
+                false
+            }
+        }
+        _ => false,
     }
 }
 
@@ -7146,7 +7162,7 @@ fn handle_deriving_type(
         //   external fieldGet: ... -- getters
         //   ...
         // end)
-        return handle_deriving_abstract(tdcls, rec_flag, &new_tdcls, light, loc, arena);
+        return handle_deriving_abstract(&new_tdcls, rec_flag, &new_tdcls, light, loc, arena);
     }
 
     let type_str_item = StructureItem {
@@ -7317,21 +7333,20 @@ fn handle_abstract_tdcl(
     let core_type = core_type_of_type_declaration(tdcl, arena);
 
     // Create abstract type declaration (same name, but Ptype_abstract)
-    let abstract_tdcl = TypeDeclaration {
-        ptype_name: tdcl.ptype_name.clone(),
-        ptype_params: tdcl.ptype_params.clone(),
-        ptype_cstrs: tdcl.ptype_cstrs.clone(),
-        ptype_kind: TypeKind::Ptype_abstract,
-        ptype_private: tdcl.ptype_private.clone(),
-        ptype_manifest: None,
-        ptype_attributes: vec![],
-        ptype_loc: tdcl.ptype_loc,
-    };
-
     let is_private = matches!(tdcl.ptype_private, PrivateFlag::Private);
 
     match &tdcl.ptype_kind {
         TypeKind::Ptype_record(labels) => {
+            let abstract_tdcl = TypeDeclaration {
+                ptype_name: tdcl.ptype_name.clone(),
+                ptype_params: tdcl.ptype_params.clone(),
+                ptype_cstrs: tdcl.ptype_cstrs.clone(),
+                ptype_kind: TypeKind::Ptype_abstract,
+                ptype_private: tdcl.ptype_private.clone(),
+                ptype_manifest: tdcl.ptype_manifest.clone(),
+                ptype_attributes: vec![],
+                ptype_loc: tdcl.ptype_loc,
+            };
             // OCaml uses Ext_list.fold_right which processes right-to-left and prepends (::)
             // This results in accessors in the same order as the original labels.
             // We collect into vectors and then reverse to get the same effect.
@@ -7535,8 +7550,8 @@ fn handle_abstract_tdcl(
             (abstract_tdcl, value_descs)
         }
         _ => {
-            // For non-record types, just return abstract with no primitives
-            (abstract_tdcl, vec![])
+            // OCaml keeps non-record declarations unchanged for deriving(abstract).
+            (tdcl.clone(), vec![])
         }
     }
 }
