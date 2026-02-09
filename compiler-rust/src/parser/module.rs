@@ -3693,30 +3693,61 @@ fn parse_type_kind(
 
 /// Parse variant constructors (starting with |).
 fn parse_constructors(p: &mut Parser<'_>) -> Vec<ConstructorDeclaration> {
+    // OCaml parse_type_constructor_declarations:
+    // - First constructor: optional leading `|`
+    // - Remaining constructors: only if token is `|` or doc-comment-then-`|`
     let mut constructors = vec![];
-    let mut pending_attrs: Attributes = vec![];
 
-    while matches!(p.token, Token::Bar | Token::At | Token::DocComment { .. }) {
-        pending_attrs.extend(parse_attributes(p));
-        if p.token != Token::Bar {
+    // First constructor (optional leading bar).
+    let first_start_idx = p.start_pos_idx();
+    p.optional(&Token::Bar);
+    if let Some(c) = parse_constructor_with_start(p, first_start_idx) {
+        constructors.push(c);
+    }
+
+    // Remaining constructors must be introduced by `|` (or doc comment followed by `|`).
+    loop {
+        if !is_bar_or_doc_comment_then_bar(p) {
             break;
         }
 
-        // Capture start position BEFORE consuming the bar (like OCaml)
+        let doc_attrs = if let Token::DocComment { loc, content } = &p.token {
+            let loc = loc.clone();
+            let content = content.clone();
+            p.next();
+            let loc = p.from_location(&loc);
+            vec![super::core::doc_comment_to_attribute(p.arena_mut(), loc, content)]
+        } else {
+            vec![]
+        };
+
         let bar_start_idx = p.start_pos_idx();
-        p.next();
+        p.next(); // consume `|`
+
         if let Some(mut c) = parse_constructor_with_start(p, bar_start_idx) {
-            if !pending_attrs.is_empty() {
-                let mut attrs = pending_attrs;
+            if !doc_attrs.is_empty() {
+                let mut attrs = doc_attrs;
                 attrs.extend(c.pcd_attributes);
                 c.pcd_attributes = attrs;
-                pending_attrs = vec![];
             }
             constructors.push(c);
         }
     }
 
     constructors
+}
+
+/// Check if current token is `|` or doc-comment followed by `|`.
+/// Matches OCaml's `is_bar_or_doc_comment_then_bar`.
+fn is_bar_or_doc_comment_then_bar(p: &mut Parser<'_>) -> bool {
+    match p.token {
+        Token::Bar => true,
+        Token::DocComment { .. } => p.lookahead(|state| {
+            state.next();
+            matches!(state.token, Token::Bar)
+        }),
+        _ => false,
+    }
 }
 
 /// Parse variant constructors where the first doesn't have a leading |.

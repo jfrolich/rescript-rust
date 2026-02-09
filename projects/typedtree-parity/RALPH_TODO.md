@@ -76,12 +76,13 @@ The `-dtyped-sexp` flag outputs the typed tree without locations. The `-dtyped-s
 |  | Status |
 |--|--------|
 | OCaml compiles | 657/657 |
-| Rust compiles | 611/657 (46 fail) |
-| Parity match (-dtyped-sexp-locs) | 303/611 (49.6%) |
+| Rust compiles | 614/657 (43 fail) |
+| Parity match (-dtyped-sexp-locs) | 303/614 (49.3%) |
 
-**Task Progress:** 24/24 complete
+**Task Progress:** 25/25 complete
 
 **Task Checklist:**
+- [x] Match OCaml `parse_type_constructor_declarations` continuation behavior in the Rust parser: after a `type ... = | ...` variant, continue parsing constructors only for `|` or doc-comment-then-`|` (not bare `@...`). This fixes a parser over-consumption bug where top-level attributes like `@val external` were incorrectly eaten as constructor attrs, producing false "consecutive statements" parse errors. Updated `parse_constructors` in `compiler-rust/src/parser/module.rs` to mirror OCaml’s first-constructor + bar-gated continuation flow. Files moved from Rust compile failure to parity-only diff include `bs_ignore_test.res`, `bs_ignore_effect.res`, and `reactDOM.res`; full `--with-locs --no-build --parallel 1` totals improved (`Rust bsc`: 611 -> 614, failures: 46 -> 43; `Parity`: 303 -> 303 with 3 additional compiled files).
 - [x] Match OCaml path-based alias expansion in `ctype::try_expand_head`: only use direct env lookup for `Pident` type paths, and skip `env.lookup_type` for qualified `Pdot` paths so local leaf-name declarations (`type t = ...`) cannot hijack qualified aliases like `Belt.Array.t`. This fixes `UntaggedVariants.res` Rust compilation (`ExprTypeClash` -> compile success) and improves full `--with-locs --no-build --parallel 1` totals (`Rust bsc`: 602 -> 611, failures: 55 -> 46; `Parity`: 302 -> 303).
 - [x] Match OCaml applicative functor result substitution in `typemod` (`path_of_module` + `Subst.add_module`/`Subst.modtype`) for parsed `Pmod_apply`: when extracting semantic module types from functor applications, substitute functor-parameter module-path references in the result type with the argument module path. This fixes unqualified constructor disambiguation through applied-functor aliases (`variant.res`: Rust compile failure `NotAVariantType` -> Rust compile success, now parity-only diff) and improves full `--with-locs --no-build` totals (`Rust bsc`: 600 -> 602, failures: 57 -> 55).
 - [x] Match OCaml `expand_head` resolution behavior for qualified type paths in `ctype::try_expand_head`: keep leaf-name fallback (`find_type_decl(head_name)`) for `Pident` only, and do not use it for `Pdot` paths. This removes a non-OCaml alias resolution path that caused infinite `unify -> expand_head` recursion (observed as Rust timeout/hang) and moves `ExternalExtension.res` from Rust compile failure to parity-only diff (`timeout 60 ./scripts/test_typedtree_parity.sh --with-locs --no-build --parallel 1 tests/tests/src/ExternalExtension.res`: Rust `0 -> 1` pass).
