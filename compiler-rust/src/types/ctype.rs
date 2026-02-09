@@ -27,6 +27,7 @@ use super::context::TypeContext;
 use super::env::Env;
 use super::path::Path;
 use super::type_expr::{GENERIC_LEVEL, RowDesc, RowField, TypeDesc, TypeExprRef};
+use super::variance::{Variance, VarianceFlag};
 use std::collections::HashSet;
 
 // ============================================================================
@@ -1379,6 +1380,86 @@ pub fn generalize_structure(ctx: &TypeContext<'_>, var_level: i32, ty: TypeExprR
     iter_type_expr(ctx, ty, |child| {
         generalize_structure(ctx, var_level, child);
     });
+}
+
+fn generalize_expansive_rec(
+    ctx: &TypeContext<'_>,
+    env: &Env,
+    var_level: i32,
+    visited: &mut HashSet<TypeExprRef>,
+    ty: TypeExprRef,
+) {
+    let ty = ctx.repr(ty);
+    let level = ctx.get_level(ty);
+    if level == GENERIC_LEVEL || level <= var_level {
+        return;
+    }
+    if !visited.insert(ty) {
+        return;
+    }
+
+    enum Action {
+        Constr { path: Path, args: Vec<TypeExprRef> },
+        Package { args: Vec<TypeExprRef> },
+        Arrow { arg: TypeExprRef, ret: TypeExprRef },
+        Recurse(Vec<TypeExprRef>),
+    }
+
+    let action = {
+        let desc = ctx.get_desc(ty);
+        match &*desc {
+            TypeDesc::Tconstr { path, args, .. } => Action::Constr {
+                path: path.clone(),
+                args: args.clone(),
+            },
+            TypeDesc::Tpackage { args, .. } => Action::Package { args: args.clone() },
+            TypeDesc::Tarrow { arg, ret, .. } => Action::Arrow {
+                arg: arg.typ,
+                ret: *ret,
+            },
+            _ => {
+                let mut children = Vec::new();
+                iter_type_expr(ctx, ty, |child| children.push(child));
+                Action::Recurse(children)
+            }
+        }
+    };
+
+    match action {
+        Action::Constr { path, args } => {
+            let variances = env
+                .lookup_type(&path)
+                .map(|decl| decl.type_variance.clone())
+                .unwrap_or_else(|_| vec![Variance::MAY_INV; args.len()]);
+            for (index, arg) in args.iter().enumerate() {
+                let variance = variances.get(index).copied().unwrap_or(Variance::MAY_INV);
+                if variance.mem(VarianceFlag::MayWeak) {
+                    generalize_structure(ctx, var_level, *arg);
+                } else {
+                    generalize_expansive_rec(ctx, env, var_level, visited, *arg);
+                }
+            }
+        }
+        Action::Package { args } => {
+            for arg in args {
+                generalize_structure(ctx, var_level, arg);
+            }
+        }
+        Action::Arrow { arg, ret } => {
+            generalize_structure(ctx, var_level, arg);
+            generalize_expansive_rec(ctx, env, var_level, visited, ret);
+        }
+        Action::Recurse(children) => {
+            for child in children {
+                generalize_expansive_rec(ctx, env, var_level, visited, child);
+            }
+        }
+    }
+}
+
+pub fn generalize_expansive(ctx: &TypeContext<'_>, env: &Env, ty: TypeExprRef) {
+    let mut visited = HashSet::new();
+    generalize_expansive_rec(ctx, env, ctx.nongen_level(), &mut visited, ty);
 }
 
 // ============================================================================

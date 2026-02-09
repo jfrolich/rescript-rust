@@ -5598,6 +5598,142 @@ fn extract_recursive_binding_name(
     }
 }
 
+fn has_internal_expansive_attribute(
+    arena: &ParseArena,
+    attrs: &[crate::parser::ast::Attribute],
+) -> bool {
+    attrs
+        .iter()
+        .any(|attr| arena.get_string(attr.0.txt) == "internal.expansive")
+}
+
+fn is_nonexpansive_expression(tctx: &TypeCheckContext<'_>, exp: &Expression) -> bool {
+    if has_internal_expansive_attribute(tctx.arena, &exp.exp_attributes) {
+        return true;
+    }
+
+    match &exp.exp_desc {
+        ExpressionDesc::Texp_ident(_, _, _) => true,
+        ExpressionDesc::Texp_constant(_) => true,
+        ExpressionDesc::Texp_let(_, bindings, body) => {
+            bindings
+                .iter()
+                .all(|binding| is_nonexpansive_expression(tctx, &binding.vb_expr))
+                && is_nonexpansive_expression(tctx, body)
+        }
+        ExpressionDesc::Texp_function { .. } => true,
+        ExpressionDesc::Texp_match(scrutinee, cases, exn_cases, _) => {
+            exn_cases.is_empty()
+                && is_nonexpansive_expression(tctx, scrutinee)
+                && cases.iter().all(|case| {
+                    case.c_guard
+                        .as_ref()
+                        .map_or(true, |guard| is_nonexpansive_expression(tctx, guard))
+                        && is_nonexpansive_expression(tctx, &case.c_rhs)
+                })
+        }
+        ExpressionDesc::Texp_tuple(items) => items
+            .iter()
+            .all(|item| is_nonexpansive_expression(tctx, item)),
+        ExpressionDesc::Texp_construct(_, _, items) => items
+            .iter()
+            .all(|item| is_nonexpansive_expression(tctx, item)),
+        ExpressionDesc::Texp_variant(_, maybe_arg) => maybe_arg
+            .as_deref()
+            .map_or(true, |arg| is_nonexpansive_expression(tctx, arg)),
+        ExpressionDesc::Texp_record {
+            fields,
+            extended_expression,
+        } => {
+            fields.iter().all(|(_, label, definition)| match definition {
+                crate::types::typedtree::RecordLabelDefinition::Overridden(_, expr) => {
+                    label.lbl_mut == crate::types::MutableFlag::Immutable
+                        && is_nonexpansive_expression(tctx, expr)
+                }
+                crate::types::typedtree::RecordLabelDefinition::Kept(_) => true,
+            }) && extended_expression
+                .as_deref()
+                .map_or(true, |expr| is_nonexpansive_expression(tctx, expr))
+        }
+        ExpressionDesc::Texp_field(expr, _, _) => is_nonexpansive_expression(tctx, expr),
+        ExpressionDesc::Texp_array(_) => false,
+        ExpressionDesc::Texp_ifthenelse(_, ifso, ifnot) => {
+            is_nonexpansive_expression(tctx, ifso)
+                && ifnot
+                    .as_deref()
+                    .map_or(true, |expr| is_nonexpansive_expression(tctx, expr))
+        }
+        ExpressionDesc::Texp_sequence(_, expr) => is_nonexpansive_expression(tctx, expr),
+        ExpressionDesc::Texp_letmodule(_, _, module_expr, expr) => {
+            is_nonexpansive_module_expr(tctx, module_expr) && is_nonexpansive_expression(tctx, expr)
+        }
+        ExpressionDesc::Texp_pack(module_expr) => is_nonexpansive_module_expr(tctx, module_expr),
+        ExpressionDesc::Texp_assert(expr) => is_nonexpansive_expression(tctx, expr),
+        ExpressionDesc::Texp_apply { funct, args, .. } => {
+            if let ExpressionDesc::Texp_ident(_, _, desc) = &funct.exp_desc {
+                if let crate::types::ValueKind::ValPrim(prim) = &desc.val_kind {
+                    if prim.prim_name == "%raise" && args.len() == 1 {
+                        return is_nonexpansive_expression(tctx, &args[0].expression);
+                    }
+                }
+            }
+            false
+        }
+        _ => false,
+    }
+}
+
+fn is_nonexpansive_module_expr(
+    tctx: &TypeCheckContext<'_>,
+    module_expr: &crate::types::typedtree::ModuleExpr,
+) -> bool {
+    match &module_expr.mod_desc {
+        crate::types::typedtree::ModuleExprDesc::Tmod_ident(_, _) => true,
+        crate::types::typedtree::ModuleExprDesc::Tmod_functor(_, _, _, _) => true,
+        crate::types::typedtree::ModuleExprDesc::Tmod_unpack(expr, _) => {
+            is_nonexpansive_expression(tctx, expr)
+        }
+        crate::types::typedtree::ModuleExprDesc::Tmod_constraint(inner, _, _, _) => {
+            is_nonexpansive_module_expr(tctx, inner)
+        }
+        crate::types::typedtree::ModuleExprDesc::Tmod_structure(structure) => {
+            structure.str_items.iter().all(|item| match &item.str_desc {
+                crate::types::typedtree::StructureItemDesc::Tstr_eval(_, _) => true,
+                crate::types::typedtree::StructureItemDesc::Tstr_primitive(_) => true,
+                crate::types::typedtree::StructureItemDesc::Tstr_type(_, _) => true,
+                crate::types::typedtree::StructureItemDesc::Tstr_modtype(_) => true,
+                crate::types::typedtree::StructureItemDesc::Tstr_open(_) => true,
+                crate::types::typedtree::StructureItemDesc::Tstr_attribute(_) => true,
+                crate::types::typedtree::StructureItemDesc::Tstr_value(_, bindings) => bindings
+                    .iter()
+                    .all(|binding| is_nonexpansive_expression(tctx, &binding.vb_expr)),
+                crate::types::typedtree::StructureItemDesc::Tstr_module(binding) => {
+                    is_nonexpansive_module_expr(tctx, &binding.mb_expr)
+                }
+                crate::types::typedtree::StructureItemDesc::Tstr_include(include_decl) => {
+                    is_nonexpansive_module_expr(tctx, &include_decl.incl_mod)
+                }
+                crate::types::typedtree::StructureItemDesc::Tstr_recmodule(bindings) => bindings
+                    .iter()
+                    .all(|binding| is_nonexpansive_module_expr(tctx, &binding.mb_expr)),
+                crate::types::typedtree::StructureItemDesc::Tstr_exception(ext) => matches!(
+                    ext.ext_kind,
+                    crate::types::typedtree::ExtensionConstructorKind::Text_rebind(_, _)
+                ),
+                crate::types::typedtree::StructureItemDesc::Tstr_typext(type_extension) => {
+                    type_extension.tyext_constructors.iter().all(|ext| {
+                        matches!(
+                            ext.ext_kind,
+                            crate::types::typedtree::ExtensionConstructorKind::Text_rebind(_, _)
+                        )
+                    })
+                }
+            })
+        }
+        crate::types::typedtree::ModuleExprDesc::Tmod_apply(_, _, _) => false,
+    }
+}
+
 /// Type check let bindings.
 fn type_let_bindings(
     tctx: &mut TypeCheckContext<'_>,
@@ -5669,6 +5805,12 @@ fn type_let_bindings(
     // End definition level
     ctx.end_def();
 
+    for (binding, ty) in typed_bindings.iter().zip(binding_types.iter()) {
+        if !is_nonexpansive_expression(tctx, &binding.vb_expr) {
+            crate::types::ctype::generalize_expansive(ctx, env, *ty);
+        }
+    }
+
     // Generalize types
     for ty in &binding_types {
         crate::types::generalize(ctx, *ty);
@@ -5733,6 +5875,10 @@ pub fn type_expression<'a>(
 
     // End definition scope
     type_ctx.end_def();
+
+    if !is_nonexpansive_expression(tctx, &typed_expr) {
+        crate::types::ctype::generalize_expansive(type_ctx, env, typed_expr.exp_type);
+    }
 
     // Generalize the type
     crate::types::generalize(type_ctx, typed_expr.exp_type);
