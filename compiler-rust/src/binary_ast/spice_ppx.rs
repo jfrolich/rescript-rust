@@ -16,7 +16,7 @@ use crate::parser::ast::{
     PatternDesc, PatternRecordField, Payload, RecFlag, RowField, SignatureItem, SignatureItemDesc,
     StructureItem, StructureItemDesc, TypeArg, TypeDeclaration, TypeExtension, TypeKind,
     ValueBinding, ValueDescription, WithConstraint,
-    PexpFun, PexpApply,
+    PexpFun, PexpApply, extend_cow_lifetime,
 };
 use crate::parser::longident::Longident;
 
@@ -45,6 +45,7 @@ struct ParsedRecordField {
 #[derive(Clone, Debug)]
 struct ParsedVariantDecl {
     name: StrIdx,
+    name_literal: StrIdx,
     alias: Expression,
     has_attr_as: bool,
     constr_decl: crate::parser::ast::ConstructorDeclaration,
@@ -244,11 +245,6 @@ fn expr_ident_dynamic(arena: &mut ParseArena, name: String) -> Expression {
 }
 
 fn expr_constant(constant: Constant, arena: &mut ParseArena) -> Expression {
-    if let Constant::String(_, Some(delim)) = &constant {
-        if delim == "*j" {
-            arena.register_shareable_literal(delim);
-        }
-    }
     Expression {
         pexp_desc: Box::new(ExpressionDesc::Pexp_constant(Box::new(constant))),
         pexp_loc: arena.dummy_loc(),
@@ -2196,22 +2192,27 @@ fn variants_parse_decl(
     arena: &mut ParseArena,
 ) -> SpiceResult<ParsedVariantDecl> {
     let name = decl.pcd_name.txt;
-    let name_str = arena.get_string(name);
+    let name_literal = name;
     let (alias, has_attr_as) = match get_attribute_by_name(&decl.pcd_attributes, "spice.as", arena)
     {
         Ok(Some(attr)) => (get_expression_from_payload(attr, arena)?, true),
-        Ok(None) => (
-            expr_constant(
-                Constant::String(Cow::Owned(name_str.to_string()), Some(Cow::Borrowed("*j"))),
-                arena,
-            ),
-            false,
-        ),
+        Ok(None) => {
+            let name_str = extend_cow_lifetime(Cow::Borrowed(arena.get_string(name_literal)));
+            arena.register_constant_string_identity(name_str.as_ref(), name_literal);
+            (
+                expr_constant(
+                    Constant::String(name_str, Some(Cow::Borrowed("*j"))),
+                    arena,
+                ),
+                false,
+            )
+        }
         Err(e) => return Err(e),
     };
 
     Ok(ParsedVariantDecl {
         name,
+        name_literal,
         alias,
         has_attr_as,
         constr_decl: decl.clone(),
@@ -2408,12 +2409,12 @@ fn variants_generate_arg_decoder(
 
 fn variants_generate_decoder_case(
     settings: GeneratorSettings,
-    decl: &crate::parser::ast::ConstructorDeclaration,
+    decl: &ParsedVariantDecl,
     arena: &mut ParseArena,
 ) -> SpiceResult<Case> {
-    let name_idx = decl.pcd_name.txt;
-    let name_str = arena.get_string(name_idx).to_string();
-    match &decl.pcd_args {
+    let name_idx = decl.name;
+    let name_literal_idx = decl.name_literal;
+    match &decl.constr_decl.pcd_args {
         crate::parser::ast::ConstructorArguments::Pcstr_tuple(args) => {
             let arg_len =
                 expr_constant(Constant::Integer(Cow::Owned((args.len() + 1).to_string()), None), arena);
@@ -2438,10 +2439,15 @@ fn variants_generate_decoder_case(
                 variants_generate_arg_decoder(settings, args, name_idx, arena)?
             };
 
+            let name_const = extend_cow_lifetime(Cow::Borrowed(arena.get_string(name_literal_idx)));
+            arena.register_constant_string_identity(name_const.as_ref(), name_literal_idx);
             let json_str_pat = pat_construct_with_loc(
                 lident_path_static(arena, &["JSON", "String"]),
                 Some(Pattern {
-                    ppat_desc: Box::new(PatternDesc::Ppat_constant(Box::new(Constant::String(Cow::Owned(name_str.clone()), None)))),
+                    ppat_desc: Box::new(PatternDesc::Ppat_constant(Box::new(Constant::String(
+                        name_const,
+                        None,
+                    )))),
                     ppat_loc: arena.dummy_loc(),
                     ppat_attributes: Attributes::new(),
                 }),
@@ -2697,7 +2703,7 @@ fn variants_generate_codecs(
             ))
         } else {
             let mut cases = Vec::new();
-            for decl in constr_decls {
+            for decl in &parsed {
                 cases.push(variants_generate_decoder_case(settings, decl, arena)?);
             }
             let json_arr_expr = expr_ident_path(arena, &["json_arr"]);

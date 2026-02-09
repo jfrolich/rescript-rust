@@ -558,6 +558,11 @@ pub struct ParseArena {
     spice_cache: SpiceCache,
     /// Literal strings that should be value-shared during marshalling.
     shareable_literal_strs: HashSet<String>,
+    /// Explicit constant-string identity registration `(ptr,len) -> StrIdx`.
+    ///
+    /// Used for narrow PPX parity cases where a `Constant::String` should
+    /// share with a specific arena string identity.
+    constant_string_identity_to_idx: HashMap<(usize, usize), StrIdx>,
     /// Source string identity for Ptyp_var nodes created by varification.
     ///
     /// When locally-abstract type varification converts `Ptyp_constr` to
@@ -810,6 +815,7 @@ impl Default for ParseArena {
             dummy_loc: LocIdx::default(),
             spice_cache: SpiceCache::new(),
             shareable_literal_strs: HashSet::new(),
+            constant_string_identity_to_idx: HashMap::new(),
             tyvar_source_by_loc: HashMap::new(),
         }
     }
@@ -1055,6 +1061,19 @@ impl ParseArena {
     /// Check if a literal string should be value-shared during marshalling.
     pub fn is_shareable_literal(&self, s: &str) -> bool {
         self.shareable_literal_strs.contains(s)
+    }
+
+    /// Register a `Constant::String` identity to marshal via `StrIdx`.
+    pub fn register_constant_string_identity(&mut self, s: &str, idx: StrIdx) {
+        self.constant_string_identity_to_idx
+            .insert((s.as_ptr() as usize, s.len()), idx);
+    }
+
+    /// Look up a registered `Constant::String` identity.
+    pub fn constant_string_str_idx_by_identity(&self, s: &str) -> Option<StrIdx> {
+        self.constant_string_identity_to_idx
+            .get(&(s.as_ptr() as usize, s.len()))
+            .copied()
     }
 
     /// Shared non-interned "JSON" prefix for spice PPX.
