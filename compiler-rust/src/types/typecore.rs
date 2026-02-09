@@ -3325,6 +3325,7 @@ fn translate_unified_ops(
     loc: LocIdx,
     typed_funct: &Expression,
     args: &[(ArgLabel, ParsedExpression)],
+    transformed_jsx: bool,
     expected_ty: TypeExprRef,
     context: Option<TypeClashContext>,
     attributes: &[crate::parser::ast::Attribute],
@@ -3432,7 +3433,7 @@ fn translate_unified_ops(
                     funct: Box::new(typed_funct.clone()),
                     args: typed_args,
                     partial: false,
-                    transformed_jsx: false,
+                    transformed_jsx,
                 },
                 loc.clone(),
                 result_ty,
@@ -3491,7 +3492,7 @@ fn translate_unified_ops(
                     funct: Box::new(typed_funct.clone()),
                     args: typed_args,
                     partial: false,
-                    transformed_jsx: false,
+                    transformed_jsx,
                 },
                 loc.clone(),
                 result_ty,
@@ -3510,7 +3511,7 @@ fn type_application(
     funct: &ParsedExpression,
     args: &[(ArgLabel, ParsedExpression)],
     partial: bool,
-    _transformed_jsx: bool,
+    transformed_jsx: bool,
     expected_ty: TypeExprRef,
     context: Option<TypeClashContext>,
     attributes: &[crate::parser::ast::Attribute],
@@ -3573,7 +3574,15 @@ fn type_application(
 
     // Try unified ops dispatch first (matching OCaml's translate_unified_ops)
     if let Some(result) = translate_unified_ops(
-        tctx, env, loc, &typed_funct, args, expected_ty, context.clone(), attributes,
+        tctx,
+        env,
+        loc,
+        &typed_funct,
+        args,
+        transformed_jsx,
+        expected_ty,
+        context.clone(),
+        attributes,
     ) {
         return result;
     }
@@ -3768,7 +3777,7 @@ fn type_application(
             funct: Box::new(typed_funct),
             args: typed_args,
             partial,
-            transformed_jsx: false,
+            transformed_jsx,
         },
         loc.clone(),
         result_ty,

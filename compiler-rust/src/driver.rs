@@ -14,34 +14,17 @@ use crate::binary_ast::spice_ppx;
 use crate::js_ir::printer::print_program;
 use crate::lambda::compile::LambdaCompiler;
 use crate::lambda::convert::LambdaConverter;
-use crate::parser::ast::{Expression, ExpressionDesc, RecFlag, Structure, StructureItemDesc, ValueBinding};
+use crate::parser::ast::{
+    Attribute, Expression, ExpressionDesc, ModuleExpr, ModuleExprDesc, RecFlag, Structure,
+    StructureItemDesc,
+};
 use crate::parser::longident::Longident;
 use crate::parser::{jsx_ppx, module, Parser};
 use crate::types::sexp_typedtree::{print_typed_structure, print_typed_structure_with_locs, print_typed_signature, print_typed_signature_with_locs};
 use crate::types::{initial_env, type_structure, transl_signature, TypeCheckContext, TypeContext};
 
-/// Compiler options that can be passed to the driver.
-#[derive(Default, Clone)]
-pub struct CompilerOptions {
-    /// Print the Lambda IR to stderr (like OCaml's -drawlambda)
-    pub dump_lambda: bool,
-    /// Print the typed tree as sexp to stderr (like OCaml's -dtyped-sexp)
-    pub dump_typed_sexp: bool,
-    /// Print the typed tree as sexp with locations to stderr (like OCaml's -dtyped-sexp-locs)
-    pub dump_typed_sexp_locs: bool,
-    /// Print the Lambda IR as sexp to stderr (like OCaml's -dlambda-sexp)
-    pub dump_lambda_sexp: bool,
-    /// Print the Lambda IR as sexp with locations to stderr (like OCaml's -dlambda-sexp-locs)
-    pub dump_lambda_sexp_locs: bool,
-    /// Include paths for finding .cmi files (from -I flags)
-    pub include_paths: Vec<PathBuf>,
-    /// Runtime package path (from -runtime-path flag)
-    /// Used to locate stdlib CMIs at {runtime_path}/lib/ocaml/
-    pub runtime_path: Option<PathBuf>,
-}
-
-fn has_react_component_attr(vb: &ValueBinding, arena: &crate::parse_arena::ParseArena) -> bool {
-    vb.pvb_attributes.iter().any(|attr| {
+fn has_react_component_attr(attrs: &[Attribute], arena: &crate::parse_arena::ParseArena) -> bool {
+    attrs.iter().any(|attr| {
         matches!(
             arena.get_string(attr.0.txt),
             "react.component" | "jsx.component"
@@ -64,21 +47,55 @@ fn is_react_forward_ref_wrapper(expr: &Expression, arena: &crate::parse_arena::P
     }
 }
 
-fn needs_component_rewrite(structure: &Structure, arena: &crate::parse_arena::ParseArena) -> bool {
-    structure.iter().any(|item| {
-        let StructureItemDesc::Pstr_value(rec_flag, bindings) = &item.pstr_desc else {
-            return false;
-        };
+fn module_expr_needs_jsx_rewrite(module_expr: &ModuleExpr, arena: &crate::parse_arena::ParseArena) -> bool {
+    match &module_expr.pmod_desc {
+        ModuleExprDesc::Pmod_structure(structure) => structure_needs_jsx_rewrite(structure, arena),
+        ModuleExprDesc::Pmod_functor(_, _, body) => module_expr_needs_jsx_rewrite(body, arena),
+        ModuleExprDesc::Pmod_apply(lhs, rhs) => {
+            module_expr_needs_jsx_rewrite(lhs, arena) || module_expr_needs_jsx_rewrite(rhs, arena)
+        }
+        ModuleExprDesc::Pmod_constraint(inner, _) => module_expr_needs_jsx_rewrite(inner, arena),
+        _ => false,
+    }
+}
 
-        bindings.iter().any(|vb| {
-            if !has_react_component_attr(vb, arena) {
+fn structure_needs_jsx_rewrite(structure: &Structure, arena: &crate::parse_arena::ParseArena) -> bool {
+    structure.iter().any(|item| match &item.pstr_desc {
+        // External @react.component declarations need JSX PPX lowering.
+        StructureItemDesc::Pstr_primitive(vd) => has_react_component_attr(&vd.pval_attributes, arena),
+        StructureItemDesc::Pstr_value(rec_flag, bindings) => bindings.iter().any(|vb| {
+            if !has_react_component_attr(&vb.pvb_attributes, arena) {
                 return false;
             }
-
-            // These two forms rely on JSX component lowering for type-checking parity.
             *rec_flag == RecFlag::Recursive || is_react_forward_ref_wrapper(&vb.pvb_expr, arena)
-        })
+        }),
+        StructureItemDesc::Pstr_module(mb) => module_expr_needs_jsx_rewrite(&mb.pmb_expr, arena),
+        StructureItemDesc::Pstr_recmodule(mbs) => mbs
+            .iter()
+            .any(|mb| module_expr_needs_jsx_rewrite(&mb.pmb_expr, arena)),
+        StructureItemDesc::Pstr_include(incl) => module_expr_needs_jsx_rewrite(&incl.pincl_mod, arena),
+        _ => false,
     })
+}
+
+/// Compiler options that can be passed to the driver.
+#[derive(Default, Clone)]
+pub struct CompilerOptions {
+    /// Print the Lambda IR to stderr (like OCaml's -drawlambda)
+    pub dump_lambda: bool,
+    /// Print the typed tree as sexp to stderr (like OCaml's -dtyped-sexp)
+    pub dump_typed_sexp: bool,
+    /// Print the typed tree as sexp with locations to stderr (like OCaml's -dtyped-sexp-locs)
+    pub dump_typed_sexp_locs: bool,
+    /// Print the Lambda IR as sexp to stderr (like OCaml's -dlambda-sexp)
+    pub dump_lambda_sexp: bool,
+    /// Print the Lambda IR as sexp with locations to stderr (like OCaml's -dlambda-sexp-locs)
+    pub dump_lambda_sexp_locs: bool,
+    /// Include paths for finding .cmi files (from -I flags)
+    pub include_paths: Vec<PathBuf>,
+    /// Runtime package path (from -runtime-path flag)
+    /// Used to locate stdlib CMIs at {runtime_path}/lib/ocaml/
+    pub runtime_path: Option<PathBuf>,
 }
 
 /// Compile ReScript source to JavaScript.
@@ -99,8 +116,8 @@ pub fn compile_source_to_js_with_options(
         return Err(anyhow!("Parse failed with {} error(s)", parser.diagnostics().len()));
     }
 
-    // Match OCaml JSX lowering for component wrappers used by typedtree parity inputs.
-    let structure = if needs_component_rewrite(&structure, parser.arena()) {
+    // Source fallback path: run JSX rewrite for OCaml-aligned shapes that depend on it.
+    let structure = if structure_needs_jsx_rewrite(&structure, parser.arena()) {
         jsx_ppx::transform_structure(structure, 4, parser.arena_mut())
     } else {
         structure
