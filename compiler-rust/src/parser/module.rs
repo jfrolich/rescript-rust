@@ -3134,20 +3134,7 @@ fn parse_type_declaration_with_context(
                 });
                 match what_follows {
                     "variant" => {
-                        let leading_attrs = parse_attributes(p);
-                        let mut constructors = if p.token == Token::Bar {
-                            parse_constructors(p)
-                        } else {
-                            parse_constructors_without_leading_bar(p)
-                        };
-                        if !leading_attrs.is_empty() {
-                            if let Some(first) = constructors.first_mut() {
-                                let mut attrs = leading_attrs;
-                                attrs.extend(first.pcd_attributes.clone());
-                                first.pcd_attributes = attrs;
-                            }
-                        }
-                        kind = TypeKind::Ptype_variant(constructors);
+                        kind = TypeKind::Ptype_variant(parse_constructors(p));
                     }
                     "open" => {
                         // Parse attributes and then ..
@@ -3694,14 +3681,30 @@ fn parse_type_kind(
 /// Parse variant constructors (starting with |).
 fn parse_constructors(p: &mut Parser<'_>) -> Vec<ConstructorDeclaration> {
     // OCaml parse_type_constructor_declarations:
-    // - First constructor: optional leading `|`
+    // - First constructor: optional leading doc comment + optional leading `|`
     // - Remaining constructors: only if token is `|` or doc-comment-then-`|`
     let mut constructors = vec![];
+
+    // First constructor: optional leading doc comment attribute.
+    let first_doc_attrs = if let Token::DocComment { loc, content } = &p.token {
+        let loc = loc.clone();
+        let content = content.clone();
+        p.next();
+        let loc = p.from_location(&loc);
+        vec![super::core::doc_comment_to_attribute(p.arena_mut(), loc, content)]
+    } else {
+        vec![]
+    };
 
     // First constructor (optional leading bar).
     let first_start_idx = p.start_pos_idx();
     p.optional(&Token::Bar);
-    if let Some(c) = parse_constructor_with_start(p, first_start_idx) {
+    if let Some(mut c) = parse_constructor_with_start(p, first_start_idx) {
+        if !first_doc_attrs.is_empty() {
+            let mut attrs = first_doc_attrs;
+            attrs.extend(c.pcd_attributes);
+            c.pcd_attributes = attrs;
+        }
         constructors.push(c);
     }
 
