@@ -2501,6 +2501,7 @@ fn type_structure_item<'a>(
                 let type_name = decl.ptype_name.txt;
                 let type_name_str = arena.get_string(type_name);
                 let type_id = declared_type_ids[decl_idx].clone();
+                let saved_type_variables = std::mem::take(&mut tctx.type_variables);
 
                 // Create the type path for self-reference
                 let type_path = Path::pident(type_id.clone());
@@ -2511,6 +2512,9 @@ fn type_structure_item<'a>(
                 for (core_type, parser_var) in &decl.ptype_params {
                     let (typed_core_type, type_ref) = transl_type(tctx, &new_env, core_type)?;
                     internal_type_params.push(type_ref);
+                    if let crate::parser::ast::CoreTypeDesc::Ptyp_var(name) = &core_type.ptyp_desc {
+                        tctx.type_variables.insert(name.clone(), type_ref);
+                    }
                     let types_var = match parser_var {
                         ParserVariance::Covariant => TypesVariance::covariant(),
                         ParserVariance::Contravariant => TypesVariance::contravariant(),
@@ -3232,6 +3236,7 @@ fn type_structure_item<'a>(
                 };
 
                 typed_tree_decls.push(typed_tree_decl);
+                tctx.type_variables = saved_type_variables;
             }
 
             // OCaml: Ctype.end_def() + generalize_decl for each declaration

@@ -285,6 +285,11 @@ impl Env {
             .ok_or_else(|| EnvError::ValueNotFound(name.to_string()))
     }
 
+    /// Iterate over visible value bindings.
+    pub fn iter_values(&self) -> impl Iterator<Item = (&Ident, &ValueDescription)> {
+        self.values.iter().map(|(id, v)| (id, v.as_ref()))
+    }
+
     /// Find a value by path.
     pub fn lookup_value(&self, path: &Path) -> EnvResult<&ValueDescription> {
         match path {

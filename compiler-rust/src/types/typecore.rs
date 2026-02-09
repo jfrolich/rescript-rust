@@ -471,6 +471,11 @@ pub struct TypeCheckContext<'a> {
     /// Used type variables within the current type expression (for sharing).
     /// Maps type variable names to their TypeExprRef, matching OCaml's used_variables.
     pub used_variables: HashMap<String, TypeExprRef>,
+    /// Bound type variables from the surrounding declaration context.
+    /// This matches OCaml's typetexp `type_variables` table used by
+    /// `globalize_used_variables` to link per-type-expression variables
+    /// back to declaration-level parameters.
+    pub type_variables: HashMap<String, TypeExprRef>,
     /// Persistent environment for loading external modules from .cmi files.
     pub persistent_env: Option<crate::cmi::persistent_env::PersistentEnv>,
 }
@@ -494,6 +499,7 @@ impl<'a> TypeCheckContext<'a> {
             newtype_level: None,
             diagnostics: Vec::new(),
             used_variables: HashMap::new(),
+            type_variables: HashMap::new(),
             persistent_env: None,
         }
     }
@@ -672,7 +678,25 @@ pub fn transl_type(
 ) -> TypeCoreResult<(crate::types::typedtree::TypedCoreType, TypeExprRef)> {
     // Reset used_variables for each top-level type translation (matches OCaml's transl_simple_type)
     tctx.used_variables.clear();
-    transl_type_inner(tctx, env, styp)
+    let translated = transl_type_inner(tctx, env, styp)?;
+
+    // Match OCaml typetexp `globalize_used_variables`: link variables seen in
+    // this type expression back to declaration-bound variables when present.
+    if !tctx.type_variables.is_empty() && !tctx.used_variables.is_empty() {
+        let used_vars: Vec<(String, TypeExprRef)> = tctx
+            .used_variables
+            .iter()
+            .map(|(name, ty)| (name.clone(), *ty))
+            .collect();
+        for (name, used_ty) in used_vars {
+            if let Some(bound_ty) = tctx.type_variables.get(&name).copied() {
+                let _ = crate::types::unify(tctx.type_ctx, &mut tctx.unify_state, used_ty, bound_ty);
+            }
+        }
+    }
+
+    tctx.used_variables.clear();
+    Ok(translated)
 }
 
 fn path_from_longident_persistent(
@@ -2133,6 +2157,10 @@ pub fn type_expect<'a>(
 
     let loc = expr.pexp_loc.clone();
     let ctx = tctx.type_ctx;
+    // Keep alias expansion aligned with the current typing environment.
+    // OCaml passes `env` through all Ctype operations; in Rust we update the
+    // unify-state snapshot on each type_expect entry.
+    tctx.set_unify_env(env);
 
     match &expr.pexp_desc {
         ED::Pexp_ident(lid) => {
@@ -2468,15 +2496,16 @@ pub fn type_expect<'a>(
 
         ED::Pexp_field(record_expr, field_lid) => {
             // Field access
-            type_field(
+            let typed_field = type_field(
                 tctx,
                 env,
                 loc,
                 record_expr,
                 field_lid,
-                expected_ty,
                 &expr.pexp_attributes,
-            )
+            )?;
+            unify_expression_types(tctx, loc, typed_field.exp_type, expected_ty, context)?;
+            Ok(typed_field)
         }
 
         ED::Pexp_setfield(record_expr, field_lid, new_value) => {
@@ -2642,7 +2671,7 @@ pub fn type_expect<'a>(
 /// Unify expression types, raising ExprTypeClash on error.
 fn unify_expression_types(
     tctx: &mut TypeCheckContext<'_>,
-    loc: LocIdx,
+    _loc: LocIdx,
     ty1: TypeExprRef,
     ty2: TypeExprRef,
     context: Option<TypeClashContext>,
@@ -3947,7 +3976,6 @@ fn type_field(
     loc: LocIdx,
     record_expr: &ParsedExpression,
     field_lid: &Located<LidentIdx>,
-    expected_ty: TypeExprRef,
     attributes: &[crate::parser::ast::Attribute],
 ) -> TypeCoreResult<Expression> {
     let ctx = tctx.type_ctx;
@@ -3962,7 +3990,6 @@ fn type_field(
     let ty_exp = typed_record.exp_type;
 
     let field_ty = ctx.new_var(None);
-    let _ = crate::types::unify(ctx, &mut tctx.unify_state, field_ty, expected_ty);
 
     // Disambiguate label: use the record expression's type to find the right label
     let env_label = disambiguate_label(&field_name, ty_exp, env, ctx);
@@ -3970,9 +3997,9 @@ fn type_field(
     let label_desc = if let Some(env_label) = env_label {
         let (ty_arg, ty_res) = crate::types::ctype::instance_label(ctx, &env_label);
         // Unify label's result type with the record's type
-        let _ = crate::types::unify(ctx, &mut tctx.unify_state, ty_res, record_ty);
+        unify_expression_types(tctx, loc, ty_res, record_ty, None)?;
         // Unify label's arg type with the field type
-        let _ = crate::types::unify(ctx, &mut tctx.unify_state, ty_arg, field_ty);
+        unify_expression_types(tctx, loc, ty_arg, field_ty, None)?;
         crate::types::LabelDescription {
             lbl_name: env_label.lbl_name.clone(),
             lbl_res: record_ty,
@@ -4695,8 +4722,7 @@ fn type_letmodule(
     // Type check the body in the extended environment. Match OCaml let-module
     // scoping by abstracting local module-rooted type paths out of the exposed
     // expression type before unifying with the surrounding expectation.
-    let body_expected_ty = ctx.new_var(None);
-    let typed_body = type_expect(tctx, &body_env, body, body_expected_ty, None)?;
+    let typed_body = type_expect(tctx, &body_env, body, expected_ty, None)?;
     let rewritten_ty = typed_body.exp_type;
     let mut replacements: HashMap<String, TypeExprRef> = HashMap::new();
     let mut seen: HashSet<TypeExprRef> = HashSet::new();
@@ -4714,6 +4740,15 @@ fn type_letmodule(
         &mut replacements,
         &mut seen,
     );
+    for (_id, value_desc) in env.iter_values() {
+        replace_letmodule_local_paths(
+            ctx,
+            value_desc.val_type,
+            &mod_id,
+            &mut replacements,
+            &mut seen,
+        );
+    }
     unify_expression_types(tctx, loc, rewritten_ty, expected_ty, None)?;
 
     Ok(Expression::new(
