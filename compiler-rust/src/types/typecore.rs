@@ -44,6 +44,95 @@ const DICT_MAGIC_FIELD_NAME: &str = "dictValuesType";
 const DICT_TYPE_NAME: &str = "dict";
 const PAT_VARIANT_SPREAD_ATTRIBUTE: &str = "res.patVariantSpread";
 
+fn ocaml_hashtbl_power_2_above(mut x: usize, n: usize) -> usize {
+    while x < n {
+        if x > (isize::MAX as usize / 2) {
+            break;
+        }
+        x *= 2;
+    }
+    x
+}
+
+fn ocaml_hash_mix_uint32(mut h: u32, mut d: u32) -> u32 {
+    d = d.wrapping_mul(0xcc9e2d51);
+    d = d.rotate_left(15);
+    d = d.wrapping_mul(0x1b873593);
+    h ^= d;
+    h = h.rotate_left(13);
+    h.wrapping_mul(5).wrapping_add(0xe6546b64)
+}
+
+fn ocaml_hash_final_mix(mut h: u32) -> u32 {
+    h ^= h >> 16;
+    h = h.wrapping_mul(0x85ebca6b);
+    h ^= h >> 13;
+    h = h.wrapping_mul(0xc2b2ae35);
+    h ^= h >> 16;
+    h
+}
+
+fn ocaml_hashtbl_hash_string(s: &str) -> u32 {
+    let bytes = s.as_bytes();
+    let len = bytes.len();
+    let mut h = 0u32;
+    let mut i = 0usize;
+
+    while i + 4 <= len {
+        let w = u32::from_le_bytes([bytes[i], bytes[i + 1], bytes[i + 2], bytes[i + 3]]);
+        h = ocaml_hash_mix_uint32(h, w);
+        i += 4;
+    }
+
+    let rem = len & 3;
+    if rem != 0 {
+        let mut w = 0u32;
+        if rem >= 3 {
+            w |= (bytes[i + 2] as u32) << 16;
+        }
+        if rem >= 2 {
+            w |= (bytes[i + 1] as u32) << 8;
+        }
+        w |= bytes[i] as u32;
+        h = ocaml_hash_mix_uint32(h, w);
+    }
+
+    h ^= len as u32;
+    ocaml_hash_final_mix(h) & 0x3fff_ffff
+}
+
+/// Match OCaml `Hashtbl.create 17` + `Hashtbl.fold` traversal order.
+fn ocaml_hashtbl_fold_order(labels: &[String]) -> Vec<String> {
+    let mut buckets: Vec<Vec<usize>> = vec![Vec::new(); ocaml_hashtbl_power_2_above(16, 17)];
+    let mut size = 0usize;
+
+    for (entry_idx, label) in labels.iter().enumerate() {
+        let bucket_idx = (ocaml_hashtbl_hash_string(label) as usize) & (buckets.len() - 1);
+        buckets[bucket_idx].insert(0, entry_idx);
+        size += 1;
+
+        if size > (buckets.len() << 1) {
+            let mut new_buckets = vec![Vec::new(); buckets.len() * 2];
+            for bucket in &buckets {
+                for &idx in bucket {
+                    let new_idx =
+                        (ocaml_hashtbl_hash_string(&labels[idx]) as usize) & (new_buckets.len() - 1);
+                    new_buckets[new_idx].push(idx);
+                }
+            }
+            buckets = new_buckets;
+        }
+    }
+
+    let mut ordered = Vec::with_capacity(labels.len());
+    for bucket in &buckets {
+        for &idx in bucket {
+            ordered.push(labels[idx].clone());
+        }
+    }
+    ordered
+}
+
 // ============================================================================
 // Location Conversion Helpers
 // ============================================================================
@@ -1076,16 +1165,16 @@ fn transl_type_inner(
             let mut typed_rows = Vec::new();
             let mut row_name: Option<(Path, Vec<TypeExprRef>)> = None;
             let mut row_field_map: HashMap<String, crate::types::type_expr::RowField> = HashMap::new();
-            let mut row_field_order: Vec<String> = Vec::new();
+            let mut row_field_insertions: Vec<String> = Vec::new();
 
             fn add_row_field(
                 row_field_map: &mut HashMap<String, crate::types::type_expr::RowField>,
-                row_field_order: &mut Vec<String>,
+                row_field_insertions: &mut Vec<String>,
                 label: String,
                 field: crate::types::type_expr::RowField,
             ) {
                 if !row_field_map.contains_key(&label) {
-                    row_field_order.push(label.clone());
+                    row_field_insertions.push(label.clone());
                     row_field_map.insert(label, field);
                 }
             }
@@ -1123,7 +1212,7 @@ fn transl_type_inner(
                         };
                         add_row_field(
                             &mut row_field_map,
-                            &mut row_field_order,
+                            &mut row_field_insertions,
                             label.txt.clone(),
                             row_field,
                         );
@@ -1200,7 +1289,7 @@ fn transl_type_inner(
                                 };
                                 add_row_field(
                                     &mut row_field_map,
-                                    &mut row_field_order,
+                                    &mut row_field_insertions,
                                     label_name,
                                     resolved_field,
                                 );
@@ -1216,7 +1305,12 @@ fn transl_type_inner(
                 }
             }
 
-            let row_fields = row_field_order
+            let ordered_labels = if styp.ptyp_attributes.is_empty() {
+                ocaml_hashtbl_fold_order(&row_field_insertions)
+            } else {
+                row_field_insertions
+            };
+            let row_fields = ordered_labels
                 .into_iter()
                 .filter_map(|label| row_field_map.remove(&label).map(|field| (label, field)))
                 .collect::<Vec<_>>();
@@ -7214,5 +7308,34 @@ mod tests {
             &*ctx.get_desc(array_ty),
             crate::types::TypeDesc::Tconstr { .. }
         ));
+    }
+
+    #[test]
+    fn test_ocaml_hashtbl_hash_string_matches_ocaml() {
+        assert_eq!(ocaml_hashtbl_hash_string("_self"), 448_023_825);
+        assert_eq!(ocaml_hashtbl_hash_string("_blank"), 482_879_870);
+        assert_eq!(ocaml_hashtbl_hash_string("_parent"), 914_286_090);
+        assert_eq!(ocaml_hashtbl_hash_string("_top"), 861_764_747);
+        assert_eq!(ocaml_hashtbl_hash_string("foo"), 763_646_369);
+        assert_eq!(ocaml_hashtbl_hash_string("Some"), 26_923_831);
+    }
+
+    #[test]
+    fn test_ocaml_hashtbl_fold_order_matches_ocaml() {
+        let labels = vec![
+            "_self".to_string(),
+            "_blank".to_string(),
+            "_parent".to_string(),
+            "_top".to_string(),
+        ];
+        assert_eq!(
+            ocaml_hashtbl_fold_order(&labels),
+            vec![
+                "_parent".to_string(),
+                "_top".to_string(),
+                "_self".to_string(),
+                "_blank".to_string()
+            ]
+        );
     }
 }

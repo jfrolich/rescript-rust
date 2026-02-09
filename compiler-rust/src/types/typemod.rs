@@ -4922,11 +4922,17 @@ fn type_structure_item<'a>(
             let mut new_env = env.clone();
             if let Some(decl_mod_type) = final_mod_type {
                 if let crate::types::decl::ModuleType::MtySignature(sig) = &decl_mod_type {
-                    crate::cmi::persistent_env::substitute_type_paths_in_sig(
-                        sig,
-                        &Path::pident(mod_id.clone()),
-                        tctx.type_ctx,
+                    let should_substitute_sig_paths = !matches!(
+                        mb.pmb_expr.pmod_desc,
+                        ParsedModuleExprDesc::Pmod_structure(_)
                     );
+                    if should_substitute_sig_paths {
+                        crate::cmi::persistent_env::substitute_type_paths_in_sig(
+                            sig,
+                            &Path::pident(mod_id.clone()),
+                            tctx.type_ctx,
+                        );
+                    }
                 }
                 new_env.add_module(mod_id.clone(), crate::types::decl::ModuleDeclaration {
                     md_type: decl_mod_type,
