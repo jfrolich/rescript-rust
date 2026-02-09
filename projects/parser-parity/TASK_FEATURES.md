@@ -1,5 +1,10 @@
 # Task: Complete Parser Missing Syntax Support
 
+## Rust Safety Requirement
+
+- Do not introduce new `unsafe` Rust code for parser parity work.
+- Find a safe Rust solution instead of using `unsafe`.
+
 ## Objective
 
 Complete the Rust ReScript parser to handle all ReScript syntax and eliminate parser-caused failures in the syntax test corpus.

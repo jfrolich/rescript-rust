@@ -1,5 +1,10 @@
 # Parser Parity Master Plan
 
+## Rust Safety Requirement
+
+- Do not introduce new `unsafe` Rust code for parser parity work.
+- Find a safe Rust solution instead of using `unsafe`.
+
 ## Goal
 
 Achieve **100% parse tree parity** between the Rust and OCaml ReScript parsers. This means:

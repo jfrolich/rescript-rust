@@ -1,5 +1,10 @@
 # Parser Error Reporting Progress
 
+## Rust Safety Requirement
+
+- Do not introduce new `unsafe` Rust code for parser parity work.
+- Find a safe Rust solution instead of using `unsafe`.
+
 ## Current Status: Phase 3 Complete - typeParams.res Passing
 
 ## Test Results

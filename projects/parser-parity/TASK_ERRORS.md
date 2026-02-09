@@ -1,5 +1,10 @@
 # Task: Parser Error Reporting and Recovery
 
+## Rust Safety Requirement
+
+- Do not introduce new `unsafe` Rust code for parser parity work.
+- Find a safe Rust solution instead of using `unsafe`.
+
 ## Overview
 
 The Rust parser needs to match the OCaml parser's error reporting format for the syntax test suite to pass. This includes:

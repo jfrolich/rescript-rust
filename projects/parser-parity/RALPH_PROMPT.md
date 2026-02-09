@@ -2,6 +2,11 @@
 
 You are working on achieving **byte-for-byte binary AST parity** between the Rust ReScript compiler and the OCaml reference implementation.
 
+## Rust Safety Requirement
+
+- Do not introduce new `unsafe` Rust code for parser parity work.
+- Find a safe Rust solution instead of using `unsafe`.
+
 ## Core Principle: 1:1 OCaml Port
 
 **This is a 1:1 rewrite of the OCaml implementation in idiomatic Rust.**

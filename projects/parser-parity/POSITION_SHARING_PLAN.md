@@ -1,5 +1,10 @@
 # Plan: Identity-Based Position Sharing (Remove Content-Based Caching)
 
+## Rust Safety Requirement
+
+- Do not introduce new `unsafe` Rust code for parser parity work.
+- Find a safe Rust solution instead of using `unsafe`.
+
 ## Problem
 
 OCaml shares positions by **pointer identity** — when the same variable is reused, Marshal shares the object. When two functions independently capture `let start_pos = p.start_pos`, they get different heap objects that are NOT shared, even if the values are identical.

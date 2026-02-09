@@ -22,6 +22,8 @@
 
 10. **Do not mention `RALPH_COMPLETE`** - Never output or mention `RALPH_COMPLETE` in responses.
 
+11. **No `unsafe` Rust for parser parity work** - Do not introduce new `unsafe` Rust code. Find a safe Rust implementation instead.
+
 ---
 
 ## Current Status

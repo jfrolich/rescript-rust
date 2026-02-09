@@ -2,6 +2,11 @@
 
 Ralph is an autonomous AI agent loop that runs repeatedly until all tasks are complete. Each iteration starts with fresh context, so progress must be tracked in files and git history.
 
+## Rust Safety Requirement
+
+- Do not introduce new `unsafe` Rust code for parser parity work.
+- Find a safe Rust solution instead of using `unsafe`.
+
 ## Core Concept
 
 ```bash
