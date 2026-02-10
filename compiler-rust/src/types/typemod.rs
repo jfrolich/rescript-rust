@@ -5622,7 +5622,7 @@ fn type_structure_item<'a>(
                 open_path: path,
                 open_txt: open_desc.popen_lid.clone(),
                 open_override: open_desc.popen_override,
-                open_loc: loc,
+                open_loc: open_desc.popen_loc,
                 open_attributes: open_desc.popen_attributes.clone(),
             });
             Ok((
