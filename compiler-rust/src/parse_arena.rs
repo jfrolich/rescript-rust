@@ -320,6 +320,14 @@ pub struct ParseArena {
     /// Pre-allocated `Ldot(Lident "*predef*", "option")` for lifted option types.
     /// OCaml uses `Ast_literal.predef_option` as a module-level constant.
     static_predef_option_lident: LidentIdx,
+    /// Pre-allocated `Lident "string"` for `Ast_literal.No_loc.type_string`.
+    static_ast_literal_type_string_lident: LidentIdx,
+    /// Pre-allocated `Lident "int"` for `Ast_literal.No_loc.type_int`.
+    static_ast_literal_type_int_lident: LidentIdx,
+    /// Pre-allocated `Lident "bool"` for `Ast_literal.No_loc.type_bool`.
+    static_ast_literal_type_bool_lident: LidentIdx,
+    /// Pre-allocated `Lident "float"` for `Ast_literal.type_float`.
+    static_ast_literal_type_float_lident: LidentIdx,
     /// Pre-allocated placeholder longident (Lident "placeholder").
     /// Allocated in `new()`, not `default()`.
     static_placeholder_lid: LidentIdx,
@@ -592,6 +600,22 @@ impl Default for ParseArena {
             option_str,
         ));
 
+        // Pre-allocate Ast_literal no-loc core type longidents.
+        // OCaml reuses these module-level constants (Ast_literal.No_loc.*), so
+        // they must have stable identity distinct from generic parser lidents.
+        let ast_literal_type_string_str = strings.intern("string");
+        let static_ast_literal_type_string_lident =
+            longidents.push(Longident::Lident(ast_literal_type_string_str));
+        let ast_literal_type_int_str = strings.intern("int");
+        let static_ast_literal_type_int_lident =
+            longidents.push(Longident::Lident(ast_literal_type_int_str));
+        let ast_literal_type_bool_str = strings.intern("bool");
+        let static_ast_literal_type_bool_lident =
+            longidents.push(Longident::Lident(ast_literal_type_bool_str));
+        let ast_literal_type_float_str = strings.intern("float");
+        let static_ast_literal_type_float_lident =
+            longidents.push(Longident::Lident(ast_literal_type_float_str));
+
         Self {
             positions: Arena::default(),
             locations: Arena::default(),
@@ -602,6 +626,10 @@ impl Default for ParseArena {
             static_array_lidents,
             static_regexp_t_lident,
             static_predef_option_lident,
+            static_ast_literal_type_string_lident,
+            static_ast_literal_type_int_lident,
+            static_ast_literal_type_bool_lident,
+            static_ast_literal_type_float_lident,
             static_placeholder_lid: LidentIdx::default(),
             static_none_lid: LidentIdx::default(),
             static_some_lid: LidentIdx::default(),
@@ -675,7 +703,10 @@ impl ParseArena {
         arena.longidents.push(Longident::Lident(predef_str));
         // Pre-allocate Ldot(*predef*, "Some") longident (for optional field desugaring)
         let some_str = arena.strings.intern("Some");
-        arena.static_some_lid = arena.longidents.push(Longident::Ldot(Box::new(Longident::Lident(predef_str)), some_str));
+        arena.static_some_lid = arena.longidents.push(Longident::Ldot(
+            Box::new(Longident::Lident(predef_str)),
+            some_str,
+        ));
         arena
     }
 
@@ -1380,6 +1411,34 @@ impl ParseArena {
     /// Get the static `*predef*.option` longident index.
     pub fn predef_option_lident(&self) -> LidentIdx {
         self.static_predef_option_lident
+    }
+
+    /// Get the pre-allocated `Ast_literal.No_loc.type_string` longident.
+    pub fn ast_literal_type_string_lident(&self) -> LidentIdx {
+        self.static_ast_literal_type_string_lident
+    }
+
+    /// Get the pre-allocated `Ast_literal.No_loc.type_int` longident.
+    pub fn ast_literal_type_int_lident(&self) -> LidentIdx {
+        self.static_ast_literal_type_int_lident
+    }
+
+    /// Get the pre-allocated `Ast_literal.No_loc.type_bool` longident.
+    pub fn ast_literal_type_bool_lident(&self) -> LidentIdx {
+        self.static_ast_literal_type_bool_lident
+    }
+
+    /// Get the pre-allocated `Ast_literal.type_float` longident.
+    pub fn ast_literal_type_float_lident(&self) -> LidentIdx {
+        self.static_ast_literal_type_float_lident
+    }
+
+    /// Check whether a longident index is one of Ast_literal's shared simple types.
+    pub fn is_ast_literal_simple_type_lident(&self, idx: LidentIdx) -> bool {
+        idx == self.static_ast_literal_type_string_lident
+            || idx == self.static_ast_literal_type_int_lident
+            || idx == self.static_ast_literal_type_bool_lident
+            || idx == self.static_ast_literal_type_float_lident
     }
 
     pub fn ppx_js_lident(&self) -> LidentIdx {

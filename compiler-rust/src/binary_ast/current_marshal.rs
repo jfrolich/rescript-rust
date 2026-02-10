@@ -815,20 +815,16 @@ impl Marshal for CoreType {
             _ => None,
         };
 
-        // OCaml shares simple builtin `string` core_types (no args, no attrs, no loc)
-        // across repeated generated externals (e.g. inline red/black conversion tests).
-        // Keep this narrow to avoid reintroducing broader core_type over-sharing.
+        // OCaml's Ast_literal.No_loc simple core_types are module-level constants.
+        // Share only those dedicated lidents to avoid value-based over-sharing.
         if let CoreTypeDesc::Ptyp_constr(lid, types) = &self.ptyp_desc {
-            let should_share_simple_string = self.ptyp_attributes.is_empty()
+            let should_share_simple_type = self.ptyp_attributes.is_empty()
                 && types.is_empty()
                 && is_none_loc_idx(self.ptyp_loc, w)
                 && is_none_loc_idx(lid.loc, w)
-                && matches!(
-                    w.get_arena().get_longident(lid.txt),
-                    Longident::Lident(name) if w.get_arena().get_string(*name) == "string"
-                );
+                && w.get_arena().is_ast_literal_simple_type_lident(lid.txt);
 
-            if should_share_simple_string {
+            if should_share_simple_type {
                 if let Some(&obj_idx) = w.simple_core_type_table_get(&lid.txt) {
                     let d = w.obj_counter() - obj_idx;
                     w.write_shared_ref(d);

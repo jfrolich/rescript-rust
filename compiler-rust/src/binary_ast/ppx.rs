@@ -1994,10 +1994,19 @@ fn transform_inline_sig_value(
 /// Create a type for a simple builtin type (string, int, float, bool)
 fn make_simple_type(type_name: &'static str, arena: &mut ParseArena) -> CoreType {
     let none_loc = arena.none_loc();
-    let lid_idx = arena.push_lident_static(type_name);
+    let lid_idx = match type_name {
+        "string" => arena.ast_literal_type_string_lident(),
+        "int" => arena.ast_literal_type_int_lident(),
+        "bool" => arena.ast_literal_type_bool_lident(),
+        "float" => arena.ast_literal_type_float_lident(),
+        _ => arena.push_lident_static(type_name),
+    };
     CoreType {
         ptyp_desc: CoreTypeDesc::Ptyp_constr(
-            Located { txt: lid_idx, loc: none_loc },
+            Located {
+                txt: lid_idx,
+                loc: none_loc,
+            },
             vec![],
         ),
         ptyp_loc: none_loc,
