@@ -6154,6 +6154,21 @@ fn type_constraint(
     Ok(result)
 }
 
+/// OCaml stores expression extras with list-cons, so outer wrappers appear
+/// before inner wrappers in `exp_extra`.
+fn prepend_exp_extra(
+    mut expr: Expression,
+    extra: crate::types::typedtree::ExpExtra,
+    loc: LocIdx,
+    attrs: Vec<crate::parser::ast::Attribute>,
+) -> Expression {
+    let mut extras = Vec::with_capacity(expr.exp_extra.len() + 1);
+    extras.push((extra, loc, attrs));
+    extras.extend(expr.exp_extra.into_iter());
+    expr.exp_extra = extras;
+    expr
+}
+
 /// Type check type coercion.
 #[allow(clippy::too_many_arguments)]
 fn type_coerce(
@@ -6192,7 +6207,8 @@ fn type_coerce(
 
     // Return the inner expression with the coercion as exp_extra
     // The expression type becomes the target type after coercion
-    let mut result = typed_inner.with_exp_extra(
+    let mut result = prepend_exp_extra(
+        typed_inner,
         crate::types::typedtree::ExpExtra::Texp_coerce(to_typed_ctype),
         loc.clone(),
         attributes.to_vec(),
@@ -6248,7 +6264,8 @@ fn type_open(
     let typed_body = type_expect(tctx, &open_env, body, expected_ty, None)?;
 
     // Return expression with Texp_open in exp_extra (matching OCaml)
-    Ok(typed_body.with_exp_extra(
+    Ok(prepend_exp_extra(
+        typed_body,
         crate::types::typedtree::ExpExtra::Texp_open(
             override_flag.clone(),
             path,
@@ -6347,7 +6364,8 @@ fn type_newtype(
 
         unify_expression_types(tctx, loc, rewritten_ty, expected_ty, None)?;
 
-        let mut result = typed_body.with_exp_extra(
+        let mut result = prepend_exp_extra(
+            typed_body,
             crate::types::typedtree::ExpExtra::Texp_newtype(name_str),
             loc,
             attributes.to_vec(),
