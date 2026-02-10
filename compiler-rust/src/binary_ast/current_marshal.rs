@@ -78,6 +78,8 @@ fn marshal_ptyp_var_desc(name: &str, loc: LocIdx, w: &mut MarshalWriter<'_>) {
     w.write_block_header(0, 1);
     if let Some(source_idx) = w.get_arena().tyvar_source_str(loc) {
         w.write_str_idx(source_idx);
+    } else if !is_none_loc_idx(loc, w) {
+        w.write_tyvar_name_shared(name, loc);
     } else {
         w.write_str(name);
     }
@@ -339,6 +341,7 @@ fn should_share_attr_tuple(
 
     match w.get_arena().get_string(name.txt) {
         "res.await" => true,
+        "res.template" => matches!(share_empty_pstr, Some(EmptyPayloadShareKind::ParserAttr)),
         "res.ternary" => matches!(share_empty_pstr, Some(EmptyPayloadShareKind::ParserAttr)),
         _ => false,
     }
@@ -502,6 +505,29 @@ fn marshal_attributes(
         share_empty_pstr
     };
 
+    // Parser-generated `res.doc` attributes can be threaded through rewritten
+    // nodes while preserving the singleton list identity in OCaml.
+    if let [(name, payload)] = attrs_slice {
+        if w.get_arena().get_string(name.txt) == "res.doc" {
+            let key = (name.txt, name.loc);
+            if let Some(&obj_idx) = w.singleton_attr_list_table_get(&key) {
+                let d = w.obj_counter() - obj_idx;
+                w.write_shared_ref(d);
+                return;
+            }
+
+            let obj_idx = w.obj_counter();
+            w.singleton_attr_list_table_insert(key, obj_idx);
+
+            w.write_block_header(0, 2); // cons
+            w.write_block_header(0, 2); // attribute tuple
+            name.marshal(w);
+            marshal_attribute_payload(name, payload, w, share_empty_pstr);
+            w.write_int(0); // []
+            return;
+        }
+    }
+
     // Some JSX transforms keep reusing the exact singleton attribute list object
     // (not just the tuple inside), notably for `@react.component` annotations.
     // Mirror that by sharing the whole `[attr]` list cell for those names.
@@ -578,6 +604,27 @@ fn marshal_attributes(
                 if let Some(&obj_idx) = w.singleton_attr_list_table_get(&key) {
                     let d = w.obj_counter() - obj_idx;
                     w.write_shared_ref(d);
+                } else if share_attr_tuple && w.get_arena().get_string(name.txt) == "res.template" {
+                    // Some parser rewrites first materialize `res.template` via the
+                    // generic attribute path (tracked in `attr_tuple_table`) and later
+                    // hit this singleton fast path. Reuse that earlier tuple to match
+                    // OCaml's pointer identity instead of creating a fresh equivalent.
+                    if let Some(&obj_idx) = w.attr_tuple_table_get(&key) {
+                        let d = w.obj_counter() - obj_idx;
+                        w.write_shared_ref(d);
+                        w.singleton_attr_list_table_insert(key, obj_idx);
+                    } else {
+                        // Record the object index for the tuple
+                        let obj_idx = w.obj_counter();
+
+                        // Write the attribute tuple: Block(tag=0, size=2) [name, payload]
+                        w.write_block_header(0, 2);
+                        name.marshal(w);
+                        marshal_attribute_payload(name, payload, w, share_empty_pstr);
+
+                        w.singleton_attr_list_table_insert(key, obj_idx);
+                        w.attr_tuple_table_insert(key, obj_idx);
+                    }
                 } else {
                     // Record the object index for the tuple
                     let obj_idx = w.obj_counter();
@@ -878,7 +925,14 @@ impl Marshal for CoreType {
         // shared between Otag fields and Labelled args. The first write creates the
         // object, subsequent writes with the same (name, loc) emit shared references.
         if let CoreTypeDesc::Ptyp_var(name) = &*self.ptyp_desc {
-            if self.ptyp_attributes.is_empty() {
+            // Most located tyvars are rebuilt as fresh nodes in OCaml and should not
+            // be globally shared by value. Keep sharing narrow, but allow it in
+            // letmodule/module_typeof scopes where OCaml reuses tyvar core_types in
+            // primitive-wrapper rewrites.
+            let allow_tyvar_share = is_none_loc_idx(self.ptyp_loc, w)
+                || w.in_letmodule_expr()
+                || w.in_module_typeof();
+            if self.ptyp_attributes.is_empty() && allow_tyvar_share {
                 let key = (name.to_string(), self.ptyp_loc);
                 if let Some(&obj_idx) = w.tyvar_core_type_table_get(&key) {
                     let d = w.obj_counter() - obj_idx;

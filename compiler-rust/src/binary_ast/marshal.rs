@@ -212,6 +212,11 @@ pub struct MarshalWriter<'a> {
     /// with Ptyp_var desc, empty attributes, and matching (name, loc) pairs.
     tyvar_core_type_table: HashMap<(String, LocIdx), u32>,
 
+    /// Maps (tyvar_name, LocIdx) to object counter for sharing Ptyp_var name strings.
+    /// Even when OCaml rebuilds surrounding core_type wrappers, it can still reuse
+    /// the same underlying tyvar name string object for the same source location.
+    tyvar_name_table: HashMap<(String, LocIdx), u32>,
+
     /// Maps Location values to object counter for content-based sharing.
     /// In OCaml, Location.none is a module-level let binding, so all references
     /// to it share the same physical pointer. Other locations that happen to be
@@ -323,6 +328,7 @@ impl<'a> MarshalWriter<'a> {
             vd_name_type_table: HashMap::new(),
             singleton_attr_list_table: HashMap::new(),
             tyvar_core_type_table: HashMap::new(),
+            tyvar_name_table: HashMap::new(),
 
             location_value_table: HashMap::new(),
             position_value_table: HashMap::new(),
@@ -373,6 +379,7 @@ impl<'a> MarshalWriter<'a> {
             vd_name_type_table: HashMap::new(),
             singleton_attr_list_table: HashMap::new(),
             tyvar_core_type_table: HashMap::new(),
+            tyvar_name_table: HashMap::new(),
 
             location_value_table: HashMap::new(),
             position_value_table: HashMap::new(),
@@ -628,6 +635,7 @@ impl<'a> MarshalWriter<'a> {
         self.vd_name_type_table.clear();
         self.singleton_attr_list_table.clear();
         self.tyvar_core_type_table.clear();
+        self.tyvar_name_table.clear();
         self.pstr_empty_table = [None; EmptyPayloadShareKind::COUNT];
         self.prim_list_table = [None; PrimListShareKind::COUNT];
         self.jsx_depth = 0;
@@ -1150,6 +1158,24 @@ impl<'a> MarshalWriter<'a> {
     /// Insert a tyvar core_type into the sharing table.
     pub fn tyvar_core_type_table_insert(&mut self, key: (String, LocIdx), obj_idx: u32) {
         self.tyvar_core_type_table.insert(key, obj_idx);
+    }
+
+    /// Write a Ptyp_var name string with sharing scoped by (name, location).
+    ///
+    /// OCaml can rebuild surrounding wrappers while preserving the same string
+    /// object for a given tyvar source location. Keying by (name, LocIdx)
+    /// mirrors that behavior without global value-based sharing.
+    pub fn write_tyvar_name_shared(&mut self, name: &str, loc: LocIdx) {
+        let key = (name.to_string(), loc);
+        if let Some(&obj_idx) = self.tyvar_name_table.get(&key) {
+            let d = self.obj_counter - obj_idx;
+            self.write_shared_ref(d);
+            return;
+        }
+
+        let obj_idx = self.obj_counter;
+        self.write_str(name);
+        self.tyvar_name_table.insert(key, obj_idx);
     }
 
     /// Write a Longident by arena index with sharing.

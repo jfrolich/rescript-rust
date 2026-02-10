@@ -4195,10 +4195,18 @@ fn parse_let_in_block_with_continuation_and_attrs(
 ) -> Expression {
     // If there are leading attributes, the value_binding location should start from them
     // OCaml includes leading attributes in the binding location
-    let binding_start_pos_idx = leading_attrs
-        .first()
-        .map(|attr| p.loc_start_idx(attr.0.loc))
-        .unwrap_or_else(|| p.start_pos_idx());
+    let binding_start_pos_idx = if let Some(attr) = leading_attrs.first() {
+        if p.arena().get_string(attr.0.txt) == "res.doc" {
+            // Parser-inserted `res.doc` comments should not alias the attribute's
+            // existing start position object in value_binding locations.
+            let start_pos = p.loc_start(attr.0.loc);
+            p.arena_mut().push_position(start_pos)
+        } else {
+            p.loc_start_idx(attr.0.loc)
+        }
+    } else {
+        p.start_pos_idx()
+    };
     let start_pos_idx = p.start_pos_idx();
 
     // Consume let token
