@@ -1255,7 +1255,7 @@ fn parse_external_attrs(
                 }
             }
             "return" => {
-                if let Some(wrapper_str) = get_payload_string(payload, arena) {
+                if let Some(wrapper_str) = get_return_wrapper_config(payload, arena) {
                     desc.return_wrapper = match wrapper_str.as_str() {
                         "null_to_opt" => ReturnWrapper::ReturnNullToOpt,
                         "nullable" | "null_undefined_to_opt" => {
@@ -1313,6 +1313,54 @@ fn get_payload_string(payload: &current::Payload, arena: &ParseArena) -> Option<
                 }
             }
             None
+        }
+        _ => None,
+    }
+}
+
+/// Extract return-wrapper config from payload.
+/// Mirrors OCaml's Ast_payload.ident_or_record_as_config shape used by
+/// ast_external_process.ml for `@return`:
+/// - `@return(nullable)` -> `nullable`
+/// - `@return({null_to_opt: null_to_opt})` -> `null_to_opt`
+/// Non-punned record entries are intentionally rejected here.
+fn get_return_wrapper_config(payload: &current::Payload, arena: &ParseArena) -> Option<String> {
+    let current::Payload::PStr(items) = payload else {
+        return None;
+    };
+    if items.len() != 1 {
+        return None;
+    }
+    let StructureItemDesc::Pstr_eval(expr, _) = &items[0].pstr_desc else {
+        return None;
+    };
+
+    match &expr.pexp_desc {
+        ExpressionDesc::Pexp_ident(lid) => {
+            let Longident::Lident(name_idx) = arena.get_longident(lid.txt) else {
+                return None;
+            };
+            Some(arena.get_string(*name_idx).to_string())
+        }
+        ExpressionDesc::Pexp_record(fields, with_obj) => {
+            if with_obj.is_some() || fields.len() != 1 {
+                return None;
+            }
+            let field = &fields[0];
+            let Longident::Lident(field_name_idx) = arena.get_longident(field.lid.txt) else {
+                return None;
+            };
+            let ExpressionDesc::Pexp_ident(value_lid) = &field.expr.pexp_desc else {
+                return None;
+            };
+            let Longident::Lident(value_name_idx) = arena.get_longident(value_lid.txt) else {
+                return None;
+            };
+            if arena.get_string(*field_name_idx) == arena.get_string(*value_name_idx) {
+                Some(arena.get_string(*field_name_idx).to_string())
+            } else {
+                None
+            }
         }
         _ => None,
     }
