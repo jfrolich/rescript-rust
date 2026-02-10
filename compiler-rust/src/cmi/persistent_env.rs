@@ -135,11 +135,7 @@ impl PersistentEnv {
             // Try uncapitalized
             if let Some(first_char) = filename.chars().next() {
                 if first_char.is_ascii_uppercase() {
-                    let uncap = format!(
-                        "{}{}",
-                        first_char.to_ascii_lowercase(),
-                        &filename[1..]
-                    );
+                    let uncap = format!("{}{}", first_char.to_ascii_lowercase(), &filename[1..]);
                     let uncap_path = dir.join(&uncap);
                     if uncap_path.exists() {
                         return Some(uncap_path.to_string_lossy().into_owned());
@@ -152,12 +148,7 @@ impl PersistentEnv {
 
     /// Open a module's signature into the environment.
     /// This adds all the module's exported bindings to the environment.
-    pub fn open_module<'a>(
-        &mut self,
-        name: &str,
-        env: &mut Env,
-        ctx: &'a TypeContext<'a>,
-    ) -> bool {
+    pub fn open_module<'a>(&mut self, name: &str, env: &mut Env, ctx: &'a TypeContext<'a>) -> bool {
         let ps = match self.find_pers_struct(name, ctx) {
             Some(ps) => ps,
             None => return false,
@@ -229,7 +220,9 @@ fn register_sig_types_recursive<'a>(
                             _ => None,
                         };
                         if let Some(alias_name) = alias_module_name {
-                            if let Some(alias_sig) = load_module_sig_for_alias(&alias_name, ctx, load_path) {
+                            if let Some(alias_sig) =
+                                load_module_sig_for_alias(&alias_name, ctx, load_path)
+                            {
                                 register_sig_types_recursive(&alias_sig, &sub_path, ctx, load_path);
                             }
                         }
@@ -273,11 +266,7 @@ fn find_in_path(load_path: &[PathBuf], filename: &str) -> Option<String> {
         }
         if let Some(first_char) = filename.chars().next() {
             if first_char.is_ascii_uppercase() {
-                let uncap = format!(
-                    "{}{}",
-                    first_char.to_ascii_lowercase(),
-                    &filename[1..]
-                );
+                let uncap = format!("{}{}", first_char.to_ascii_lowercase(), &filename[1..]);
                 let uncap_path = dir.join(&uncap);
                 if uncap_path.exists() {
                     return Some(uncap_path.to_string_lossy().into_owned());
@@ -295,10 +284,7 @@ fn find_in_path(load_path: &[PathBuf], filename: &str) -> Option<String> {
 /// Recursively register all types from a module type (and sub-modules) by stamp.
 /// This ensures that types referenced in function signatures can be expanded
 /// during type unification, even when the type comes from a deeply nested module.
-fn register_types_by_stamp_recursive(
-    md_type: &ModuleType,
-    ctx: &TypeContext<'_>,
-) {
+fn register_types_by_stamp_recursive(md_type: &ModuleType, ctx: &TypeContext<'_>) {
     if let ModuleType::MtySignature(sig) = md_type {
         for item in sig {
             match item {
@@ -343,18 +329,24 @@ pub fn substitute_type_paths_in_sig(
             SignatureItem::SigType(id, _, _) | SignatureItem::SigModtype(id, _) => {
                 let qualified_path = Path::pdot(module_path.clone(), id.name());
                 if id.stamp() != 0 {
-                    type_stamp_map.insert(id.stamp(), qualified_path.clone());
+                    // OCaml Subst uses identifier identity for non-persistent ids.
+                    // Only rewrite by stamp in this case.
+                    type_stamp_map.insert(id.stamp(), qualified_path);
+                } else {
+                    // Persistent ids (stamp=0) compare by name.
+                    type_name_map.insert(id.name().to_string(), qualified_path);
                 }
-                // Keep a name-based fallback for locally-created identifiers where
-                // stamps may differ between related syntax/type nodes.
-                type_name_map.insert(id.name().to_string(), qualified_path);
             }
             SignatureItem::SigModule(id, _, _) => {
                 let qualified_path = Path::pdot(module_path.clone(), id.name());
                 if id.stamp() != 0 {
-                    module_stamp_map.insert(id.stamp(), qualified_path.clone());
+                    // OCaml Subst uses identifier identity for non-persistent ids.
+                    // Only rewrite by stamp in this case.
+                    module_stamp_map.insert(id.stamp(), qualified_path);
+                } else {
+                    // Persistent ids (stamp=0) compare by name.
+                    module_name_map.insert(id.name().to_string(), qualified_path);
                 }
-                module_name_map.insert(id.name().to_string(), qualified_path);
             }
             _ => {}
         }
@@ -767,7 +759,6 @@ fn substitute_type_path(
                 type_stamp_map
                     .get(&ident.stamp())
                     .cloned()
-                    .or_else(|| type_name_map.get(ident.name()).cloned())
                     .unwrap_or_else(|| path.clone())
             } else {
                 type_name_map
@@ -777,12 +768,21 @@ fn substitute_type_path(
             }
         }
         Path::Pdot(prefix, name, pos) => {
-            let rewritten_prefix = substitute_module_path(prefix, module_stamp_map, module_name_map);
+            let rewritten_prefix =
+                substitute_module_path(prefix, module_stamp_map, module_name_map);
             Path::Pdot(Box::new(rewritten_prefix), name.clone(), *pos)
         }
         Path::Papply(left, right) => Path::Papply(
-            Box::new(substitute_module_path(left, module_stamp_map, module_name_map)),
-            Box::new(substitute_module_path(right, module_stamp_map, module_name_map)),
+            Box::new(substitute_module_path(
+                left,
+                module_stamp_map,
+                module_name_map,
+            )),
+            Box::new(substitute_module_path(
+                right,
+                module_stamp_map,
+                module_name_map,
+            )),
         ),
     }
 }
@@ -798,7 +798,6 @@ fn substitute_module_path(
                 module_stamp_map
                     .get(&ident.stamp())
                     .cloned()
-                    .or_else(|| module_name_map.get(ident.name()).cloned())
                     .unwrap_or_else(|| path.clone())
             } else {
                 module_name_map
@@ -808,12 +807,21 @@ fn substitute_module_path(
             }
         }
         Path::Pdot(prefix, name, pos) => {
-            let rewritten_prefix = substitute_module_path(prefix, module_stamp_map, module_name_map);
+            let rewritten_prefix =
+                substitute_module_path(prefix, module_stamp_map, module_name_map);
             Path::Pdot(Box::new(rewritten_prefix), name.clone(), *pos)
         }
         Path::Papply(left, right) => Path::Papply(
-            Box::new(substitute_module_path(left, module_stamp_map, module_name_map)),
-            Box::new(substitute_module_path(right, module_stamp_map, module_name_map)),
+            Box::new(substitute_module_path(
+                left,
+                module_stamp_map,
+                module_name_map,
+            )),
+            Box::new(substitute_module_path(
+                right,
+                module_stamp_map,
+                module_name_map,
+            )),
         ),
     }
 }
@@ -913,9 +921,7 @@ fn rewrite_type_expr_prefix(
 fn rewrite_path_prefix(path: &Path, old_name: &str, new_prefix: &Path) -> Option<Path> {
     match path {
         // Pident("Belt_Array") → new_prefix (e.g., Pdot(Pident("Belt"), "Array"))
-        Path::Pident(id) if id.name() == old_name => {
-            Some(new_prefix.clone())
-        }
+        Path::Pident(id) if id.name() == old_name => Some(new_prefix.clone()),
         // Pdot(Pident("Belt_Array"), "t", pos) → Pdot(new_prefix, "t", pos)
         Path::Pdot(inner, name, pos) => {
             if let Path::Pident(id) = inner.as_ref() {
@@ -961,23 +967,47 @@ pub fn rewrite_module_prefix_in_sig(
                             match &cd.cd_args {
                                 crate::types::decl::ConstructorArguments::CstrTuple(args) => {
                                     for &arg in args {
-                                        rewrite_type_expr_prefix(arg, old_name, new_prefix, ctx, &mut visited);
+                                        rewrite_type_expr_prefix(
+                                            arg,
+                                            old_name,
+                                            new_prefix,
+                                            ctx,
+                                            &mut visited,
+                                        );
                                     }
                                 }
                                 crate::types::decl::ConstructorArguments::CstrRecord(labels) => {
                                     for lbl in labels {
-                                        rewrite_type_expr_prefix(lbl.ld_type, old_name, new_prefix, ctx, &mut visited);
+                                        rewrite_type_expr_prefix(
+                                            lbl.ld_type,
+                                            old_name,
+                                            new_prefix,
+                                            ctx,
+                                            &mut visited,
+                                        );
                                     }
                                 }
                             }
                             if let Some(res) = cd.cd_res {
-                                rewrite_type_expr_prefix(res, old_name, new_prefix, ctx, &mut visited);
+                                rewrite_type_expr_prefix(
+                                    res,
+                                    old_name,
+                                    new_prefix,
+                                    ctx,
+                                    &mut visited,
+                                );
                             }
                         }
                     }
                     TypeKind::TypeRecord(labels, _) => {
                         for lbl in labels {
-                            rewrite_type_expr_prefix(lbl.ld_type, old_name, new_prefix, ctx, &mut visited);
+                            rewrite_type_expr_prefix(
+                                lbl.ld_type,
+                                old_name,
+                                new_prefix,
+                                ctx,
+                                &mut visited,
+                            );
                         }
                     }
                     _ => {}
@@ -995,7 +1025,13 @@ pub fn rewrite_module_prefix_in_sig(
                     }
                     crate::types::decl::ConstructorArguments::CstrRecord(labels) => {
                         for lbl in labels {
-                            rewrite_type_expr_prefix(lbl.ld_type, old_name, new_prefix, ctx, &mut visited);
+                            rewrite_type_expr_prefix(
+                                lbl.ld_type,
+                                old_name,
+                                new_prefix,
+                                ctx,
+                                &mut visited,
+                            );
                         }
                     }
                 }
@@ -1199,7 +1235,8 @@ pub fn add_signature_to_env(
                 // Add extension constructor
                 let cstr_desc = ConstructorDescription {
                     cstr_name: id.name().to_string(),
-                    cstr_res: ctx.new_generic_constr(ext.ext_type_path.clone(), ext.ext_type_params.clone()),
+                    cstr_res: ctx
+                        .new_generic_constr(ext.ext_type_path.clone(), ext.ext_type_params.clone()),
                     cstr_existentials: vec![],
                     cstr_args: match &ext.ext_args {
                         crate::types::decl::ConstructorArguments::CstrTuple(args) => args.clone(),
@@ -1208,12 +1245,17 @@ pub fn add_signature_to_env(
                         }
                     },
                     cstr_arity: match &ext.ext_args {
-                        crate::types::decl::ConstructorArguments::CstrTuple(args) => args.len() as i32,
-                        crate::types::decl::ConstructorArguments::CstrRecord(labels) => labels.len() as i32,
+                        crate::types::decl::ConstructorArguments::CstrTuple(args) => {
+                            args.len() as i32
+                        }
+                        crate::types::decl::ConstructorArguments::CstrRecord(labels) => {
+                            labels.len() as i32
+                        }
                     },
-                    cstr_tag: ConstructorTag::CstrExtension(
-                        Path::pdot(module_path.clone(), id.name()),
-                    ),
+                    cstr_tag: ConstructorTag::CstrExtension(Path::pdot(
+                        module_path.clone(),
+                        id.name(),
+                    )),
                     cstr_consts: 0,
                     cstr_nonconsts: 0,
                     cstr_generalized: ext.ext_ret_type.is_some(),
