@@ -2468,10 +2468,13 @@ fn handle_debugger(
     let unit_construct = arena.push_lident_static("()");
     let unit_expr = Expression {
         pexp_desc: ExpressionDesc::Pexp_construct(
-            Located { txt: unit_construct, loc },
+            Located {
+                txt: unit_construct,
+                loc: none_loc,
+            },
             None,
         ),
-        pexp_loc: loc,
+        pexp_loc: none_loc,
         pexp_attributes: vec![],
     };
 
