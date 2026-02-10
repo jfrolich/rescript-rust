@@ -30,6 +30,16 @@ Achieve byte-for-byte identical AST and binary AST output between the Rust and O
 | [RALPH_TODO.md](./parser-parity/RALPH_TODO.md) | Agent task tracking for binary AST parity |
 | [RALPH_SETUP.md](./parser-parity/RALPH_SETUP.md) | Agent setup instructions |
 
+### [parser-diagnostics-parity](./parser-diagnostics-parity/)
+
+Achieve full parser diagnostics parity between OCaml and Rust parsers, including syntax errors, warning output, code-frame rendering, and recovery behavior across in-repo and external corpora. Focuses on warning/error coverage, message parity, and crash-hardening for pathological inputs.
+
+| Document | Description |
+|----------|-------------|
+| [PLAN.md](./parser-diagnostics-parity/PLAN.md) | Diagnostics parity roadmap, phases, acceptance criteria |
+| [PROGRESS.md](./parser-diagnostics-parity/PROGRESS.md) | Current mismatch baseline and execution tracker |
+| [INVENTORY.md](./parser-diagnostics-parity/INVENTORY.md) | OCaml parser warning/error emission inventory from code scan |
+
 ### [parser-performance-engineering](./parser-performance-engineering/)
 
 Performance engineering of the Rust parser to achieve best-in-class speed. 4-tier strategy covering byte-level scanning, zero-copy tokens, SIMD, arena allocation, and PGO. Currently 2-5x faster than OCaml on small files, parity on large files.

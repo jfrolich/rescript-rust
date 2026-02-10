@@ -1,0 +1,165 @@
+# OCaml Parser Diagnostics Inventory
+
+Inventory date: **February 10, 2026**
+
+Scope scanned:
+
+- `compiler/syntax/src/res_diagnostics.ml`
+- `compiler/syntax/src/res_scanner.ml`
+- `compiler/syntax/src/res_parser.ml`
+- `compiler/syntax/src/res_core.ml`
+- `compiler/syntax/src/jsx_v4.ml`
+- `compiler/syntax/src/jsx_common.ml`
+- `compiler/ml/location.ml`
+
+## 1. Core Diagnostic Model
+
+Canonical parser diagnostic categories are defined in
+`compiler/syntax/src/res_diagnostics.ml:4`:
+
+1. `Unexpected`
+2. `Expected`
+3. `Message`
+4. `Uident`
+5. `Lident`
+6. `UnclosedString`
+7. `UnclosedTemplate`
+8. `UnclosedComment`
+9. `UnknownUchar`
+
+Formatting and message specialization pipeline:
+
+- category-to-text logic: `compiler/syntax/src/res_diagnostics.ml:39`
+- contextual special-case hints (array literal + removed `|>` guidance): `compiler/syntax/src/res_diagnostics.ml:134`
+- final render entrypoint through `Location.report_error`: `compiler/syntax/src/res_diagnostics.ml:171`
+
+## 2. Scanner Lexical Diagnostics
+
+Primary lexical diagnostics are emitted in `compiler/syntax/src/res_scanner.ml`.
+
+Literal scanner messages:
+
+1. `Expected digits after exponential notation.` (`:290`)
+2. `A quoted identifier can't contain line breaks.` (`:323`)
+3. `Did you forget a " here?` (`:328`)
+4. `A quoted identifier can't be empty string.` (`:343`)
+5. `unterminated regex` (`:607`)
+
+Category-based scanner diagnostics:
+
+1. `Diagnostics.unclosed_string` (`:463`)
+2. `Diagnostics.unclosed_comment` (`:672`)
+3. `Diagnostics.unclosed_template` (`:732`)
+4. `Diagnostics.unknown_uchar` (`:1031`)
+5. dynamic `Diagnostics.message msg` for escape-sequence problems (`:361`, `:371`, `:415`)
+
+## 3. Parser Grammar Diagnostics (`res_core.ml`)
+
+Main parser diagnostic emission uses `Parser.err` + `Diagnostics.*`.
+Observed count of diagnostics callsites in `res_core.ml`: **118**.
+
+### 3.1 Named parser error-message catalog
+
+`compiler/syntax/src/res_core.ml:68` (`module ErrorMessages`) defines parser-specific message templates used throughout grammar parsing.
+
+Used catalog entries (31):
+
+1. `array_pattern_spread`
+2. `attribute_without_node`
+3. `dict_expr_spread`
+4. `dict_field_missing_colon`
+5. `experimental_if_let`
+6. `experimental_let_unwrap_rec`
+7. `experimental_let_unwrap_sig`
+8. `forbidden_inline_record_declaration`
+9. `keyword_field_in_expr`
+10. `keyword_field_in_pattern`
+11. `keyword_field_in_type`
+12. `labelled_argument_missing_equal`
+13. `list_pattern_spread`
+14. `missing_tilde_labeled_parameter`
+15. `multiple_inline_record_definitions_at_same_path`
+16. `object_quoted_field_name`
+17. `optional_labelled_argument_missing_equal`
+18. `poly_var_int_with_suffix`
+19. `record_expr_spread`
+20. `record_field_missing_colon`
+21. `record_pattern_field_missing_colon`
+22. `record_pattern_spread`
+23. `record_type_field_missing_colon`
+24. `spread_children_no_longer_supported`
+25. `string_interpolation_in_pattern`
+26. `tuple_single_element`
+27. `type_declaration_name_longident`
+28. `type_definition_in_function`
+29. `type_param`
+30. `type_var`
+31. `variant_ident`
+
+### 3.2 Direct string diagnostics (non-catalog)
+
+Examples of direct literal parser messages in `res_core.ml`:
+
+1. `Did you mean \`==\` here?` (`compiler/syntax/src/res_core.ml:489`)
+2. `JSX identifier cannot end with a hyphen` (`compiler/syntax/src/res_core.ml:844`)
+3. `expected identifier after '.' in JSX tag name` (`compiler/syntax/src/res_core.ml:894`)
+4. `Did you forget a \`</\` here?` (`compiler/syntax/src/res_core.ml:2821`)
+5. `JSX prop names must be lowercase` (`compiler/syntax/src/res_core.ml:2991`)
+6. `Pattern matching needs at least one case` (`compiler/syntax/src/res_core.ml:3875`)
+
+Dynamic parser messages also exist (`"Missing " ^ closing`, keyword escapes, etc.).
+
+## 4. JSX Warning/Error Surface
+
+### 4.1 Warning emission
+
+Parser-path warning emission sites in `compiler/syntax/src`: **1**
+
+- `compiler/syntax/src/jsx_v4.ml:271`
+  - `Location.prerr_warning ... (Preprocessor "...optional argument annotations must have explicit option...")`
+  - This is the Warning 22 parity path currently snapshot-tested.
+
+### 4.2 JSX parser-time errors
+
+JSX parser/transform error raises in `compiler/syntax/src/jsx_v4.ml`: **16** sites using
+`Jsx_common.raise_error` or `Location.raise_errorf`.
+
+Representative messages:
+
+1. `JSX component calls cannot be destructured.` (`:66`, `:80`)
+2. `Key cannot be accessed inside of a component...` (`:252`)
+3. `React: react.component refs only support plain arguments...` (`:334`)
+4. `React: props need to be labelled arguments...` (`:461`)
+5. `Components using React.forwardRef cannot use @react.componentWithProps...` (`:839`)
+6. `Only one JSX component call can exist on a component at one time` (`:1001`, `:1090`)
+7. `JSX: use {...p} {x: v} not {x: v} {...p} ...` (`:1160`)
+8. `JSX: element name is neither upper- or lowercase...` (`:1324`, `:1349`)
+
+Shared helper:
+
+- `compiler/syntax/src/jsx_common.ml:45` (`raise_error`)
+
+## 5. Formatting and Presentation Contract
+
+`compiler/ml/location.ml` defines the warning/error output contract consumed by parser diagnostics:
+
+1. Warning/error intro tags and color classes (`compiler/ml/location.ml:95`)
+2. Code-frame rendering with highlight range (`compiler/ml/location.ml:143`)
+3. Warning header format (`Warning number N`) (`compiler/ml/location.ml:151`)
+4. Warning printer entrypoint used by parser warning path (`compiler/ml/location.ml:169`)
+
+This file is part of diagnostics parity scope because output style differences
+are user-visible regressions even when semantic warning/error detection matches.
+
+## 6. Coverage Implications
+
+To claim parser diagnostics parity, tests must cover:
+
+1. Each `Res_diagnostics.category` class.
+2. Scanner-specific lexical diagnostics and category wrappers.
+3. `ErrorMessages` catalog representatives across grammar areas.
+4. Warning 22 emission and formatting parity.
+5. JSX parser-time error text and location parity.
+6. Location/code-frame formatting parity for warnings and syntax errors.
+7. Crash-hardening cases where malformed input stresses code-frame slicing.
+
