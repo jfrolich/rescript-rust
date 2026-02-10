@@ -26,7 +26,7 @@ use rescript_compiler::parser::{
     ml_printer, module, printer, sexp, sexp_locs, sexp_locs0,
 };
 use std::fs;
-use std::io::{self, Write};
+use std::io::{self, IsTerminal, Write};
 use std::path::PathBuf;
 use std::process;
 
@@ -414,13 +414,24 @@ fn print_jsx_preprocessor_warnings(
     warnings: &[jsx_ppx::JsxPreprocessorWarning],
     out: &mut impl Write,
 ) {
+    let use_color = should_enable_color();
     for warning in warnings {
         let _ = writeln!(out);
-        let _ = writeln!(out, "  Warning number 22");
+        if use_color {
+            let _ = writeln!(out, "  \x1b[1;33mWarning number 22\x1b[0m");
+        } else {
+            let _ = writeln!(out, "  Warning number 22");
+        }
+        let location = code_frame::format_location(filename, &warning.start_pos, &warning.end_pos);
+        let location = if use_color {
+            colorize_location(&location)
+        } else {
+            location
+        };
         let _ = writeln!(
             out,
             "  {}",
-            code_frame::format_location(filename, &warning.start_pos, &warning.end_pos)
+            location
         );
         let _ = writeln!(out);
         let _ = writeln!(
@@ -430,6 +441,19 @@ fn print_jsx_preprocessor_warnings(
         );
         let _ = writeln!(out, "  {}", warning.message);
         let _ = writeln!(out);
+    }
+}
+
+fn should_enable_color() -> bool {
+    let term = std::env::var("TERM").unwrap_or_default();
+    term != "dumb" && !term.is_empty() && std::io::stderr().is_terminal()
+}
+
+fn colorize_location(location: &str) -> String {
+    if let Some((file, rest)) = location.split_once(':') {
+        format!("\x1b[36m{}\x1b[0m:\x1b[2m{}\x1b[0m", file, rest)
+    } else {
+        location.to_string()
     }
 }
 

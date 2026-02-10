@@ -16,6 +16,7 @@ use rescript_compiler::binary_ast::{
 use rescript_compiler::parser::{Parser, code_frame, jsx_ppx, let_unwrap_ppx, module};
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::{env, io::IsTerminal};
 
 pub fn generate_asts(
     build_state: &mut BuildCommandState,
@@ -499,13 +500,20 @@ fn append_jsx_preprocessor_warnings(
     filename: &str,
     warnings: &[jsx_ppx::JsxPreprocessorWarning],
 ) {
+    let use_color = should_enable_color();
     for warning in warnings {
-        output.push_str("Warning number 22\n  ");
-        output.push_str(&code_frame::format_location(
-            filename,
-            &warning.start_pos,
-            &warning.end_pos,
-        ));
+        if use_color {
+            output.push_str("\x1b[1;33mWarning number 22\x1b[0m\n  ");
+        } else {
+            output.push_str("Warning number 22\n  ");
+        }
+
+        let location = code_frame::format_location(filename, &warning.start_pos, &warning.end_pos);
+        if use_color {
+            output.push_str(&colorize_location(&location));
+        } else {
+            output.push_str(&location);
+        }
         output.push_str("\n\n");
         output.push_str(&code_frame::print(
             source,
@@ -515,6 +523,19 @@ fn append_jsx_preprocessor_warnings(
         output.push_str("\n  ");
         output.push_str(&warning.message);
         output.push_str("\n\n");
+    }
+}
+
+fn should_enable_color() -> bool {
+    let term = env::var("TERM").unwrap_or_default();
+    term != "dumb" && !term.is_empty() && std::io::stderr().is_terminal()
+}
+
+fn colorize_location(location: &str) -> String {
+    if let Some((file, rest)) = location.split_once(':') {
+        format!("\x1b[36m{}\x1b[0m:\x1b[2m{}\x1b[0m", file, rest)
+    } else {
+        location.to_string()
     }
 }
 
