@@ -2988,6 +2988,10 @@ pub fn type_expect<'a>(
                                 );
                                 args.is_empty() && !keep_alias_path
                             }
+                            // Match OCaml instance() for local monomorphic functions:
+                            // non-generic arrows are returned by identity, which preserves
+                            // sharing through recursive uses.
+                            TypeDesc::Tarrow { .. } => true,
                             _ => false,
                         }
                     }
