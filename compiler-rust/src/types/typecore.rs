@@ -7167,6 +7167,23 @@ fn is_nonexpansive_expression(tctx: &TypeCheckContext<'_>, exp: &Expression) -> 
         ExpressionDesc::Texp_pack(module_expr) => is_nonexpansive_module_expr(tctx, module_expr),
         ExpressionDesc::Texp_assert(expr) => is_nonexpansive_expression(tctx, expr),
         ExpressionDesc::Texp_apply { funct, args, .. } => {
+            if let Some(first_arg) = args.first() {
+                let funct_ty = tctx.type_ctx.repr(funct.exp_type);
+                if let TypeDesc::Tarrow { arg, .. } = &*tctx.type_ctx.get_desc(funct_ty) {
+                    // OCaml marks applications with a leading omitted labelled arg
+                    // (`(_, None) :: _`) as nonexpansive. Our typedtree currently
+                    // doesn't retain explicit `None` entries, so detect the same shape
+                    // via the first provided label not matching the function's first
+                    // parameter label.
+                    if !arg.lbl.same_label(&first_arg.label) {
+                        return is_nonexpansive_expression(tctx, funct)
+                            && args
+                                .iter()
+                                .all(|arg| is_nonexpansive_expression(tctx, &arg.expression));
+                    }
+                }
+            }
+
             if let ExpressionDesc::Texp_ident(_, _, desc) = &funct.exp_desc {
                 if let crate::types::ValueKind::ValPrim(prim) = &desc.val_kind {
                     if prim.prim_name == "%raise" && args.len() == 1 {
