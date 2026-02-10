@@ -3985,7 +3985,12 @@ fn type_structure_item<'a>(
 
                                     // Use actual types from the source constructor (like OCaml's typedecl.ml lines 523-530)
                                     // ctyp_desc = Ttyp_var(None) acts as Ttyp_any placeholder, ctyp_type = real type from source
-                                    let (sc_args, sc_internal_cd_args, sc_typed_tree_cd_args) =
+                                    let (
+                                        sc_args,
+                                        sc_internal_cd_args,
+                                        sc_typed_tree_cd_args,
+                                        sc_inlined_labels,
+                                    ) =
                                         match &source_cstr.cd_args {
                                             crate::types::ConstructorArguments::CstrTuple(args) => {
                                                 // Use the actual types from the source, not fresh vars
@@ -4007,36 +4012,62 @@ fn type_structure_item<'a>(
                                                     TypedConstructorArguments::Cstr_tuple(
                                                         typed_tree_args,
                                                     ),
+                                                    None,
                                                 )
                                             }
                                             crate::types::ConstructorArguments::CstrRecord(
                                                 lbls,
                                             ) => {
-                                                let typed_lbls: Vec<TypedLabelDeclaration> = lbls.iter().map(|l| TypedLabelDeclaration {
-                                                ld_id: l.ld_id.clone(),
-                                                ld_name: crate::parse_arena::Located {
-                                                    txt: l.ld_id.name().to_string(),
-                                                    loc: find_existing_loc_idx(arena, &l.ld_loc)
+                                                // OCaml strips top-level Tpoly wrappers from
+                                                // internal spread label types (transl_labels lbls').
+                                                let normalized_lbls = lbls
+                                                    .iter()
+                                                    .map(|l| {
+                                                        let mut normalized = l.clone();
+                                                        normalized.ld_type =
+                                                            unwrap_poly_type(ctx, l.ld_type);
+                                                        normalized
+                                                    })
+                                                    .collect::<Vec<_>>();
+                                                let typed_lbls: Vec<TypedLabelDeclaration> = normalized_lbls
+                                                    .iter()
+                                                    .map(|l| TypedLabelDeclaration {
+                                                        ld_id: l.ld_id.clone(),
+                                                        ld_name: crate::parse_arena::Located {
+                                                            txt: l.ld_id.name().to_string(),
+                                                            loc: find_existing_loc_idx(
+                                                                arena,
+                                                                &l.ld_loc,
+                                                            )
+                                                            .unwrap_or(source_cd_loc),
+                                                        },
+                                                        ld_mutable: match l.ld_mutable {
+                                                            crate::types::asttypes::MutableFlag::Mutable => crate::parser::ast::MutableFlag::Mutable,
+                                                            crate::types::asttypes::MutableFlag::Immutable => crate::parser::ast::MutableFlag::Immutable,
+                                                        },
+                                                        ld_optional: l.ld_optional,
+                                                        ld_type: TypedCoreType {
+                                                            ctyp_desc: TypedCoreTypeDesc::Ttyp_var(
+                                                                None,
+                                                            ),
+                                                            ctyp_type: l.ld_type,
+                                                            ctyp_env: EnvRef(0),
+                                                            ctyp_loc: find_existing_loc_idx(
+                                                                arena,
+                                                                &l.ld_loc,
+                                                            )
+                                                            .unwrap_or(source_cd_loc),
+                                                            ctyp_attributes: vec![],
+                                                        },
+                                                        ld_loc: find_existing_loc_idx(
+                                                            arena,
+                                                            &l.ld_loc,
+                                                        )
                                                         .unwrap_or(source_cd_loc),
-                                                },
-                                                ld_mutable: match l.ld_mutable {
-                                                    crate::types::asttypes::MutableFlag::Mutable => crate::parser::ast::MutableFlag::Mutable,
-                                                    crate::types::asttypes::MutableFlag::Immutable => crate::parser::ast::MutableFlag::Immutable,
-                                                },
-                                                ld_optional: l.ld_optional,
-                                                ld_type: TypedCoreType {
-                                                    ctyp_desc: TypedCoreTypeDesc::Ttyp_var(None),
-                                                    ctyp_type: l.ld_type,
-                                                    ctyp_env: EnvRef(0),
-                                                    ctyp_loc: find_existing_loc_idx(arena, &l.ld_loc)
-                                                        .unwrap_or(source_cd_loc),
-                                                    ctyp_attributes: vec![],
-                                                },
-                                                ld_loc: find_existing_loc_idx(arena, &l.ld_loc)
-                                                    .unwrap_or(source_cd_loc),
-                                                ld_attributes: vec![],
-                                            }).collect();
-                                                let args_vec = lbls
+                                                        ld_attributes: vec![],
+                                                    })
+                                                    .collect();
+                                                let args_vec = normalized_lbls
                                                     .iter()
                                                     .map(|l| l.ld_type)
                                                     .collect::<Vec<_>>();
@@ -4046,6 +4077,7 @@ fn type_structure_item<'a>(
                                                     TypedConstructorArguments::Cstr_record(
                                                         typed_lbls,
                                                     ),
+                                                    Some(normalized_lbls),
                                                 )
                                             }
                                         };
@@ -4086,14 +4118,64 @@ fn type_structure_item<'a>(
                                             attrs
                                         },
                                     });
+                                    let (sc_desc_args, sc_desc_arity, sc_desc_inlined) =
+                                        if let Some(inline_lbls) = &sc_inlined_labels {
+                                            // Mirror OCaml datarepr.constructor_args for inline records:
+                                            // cstr_args = [Tconstr(type_path.Constructor, params)],
+                                            // cstr_inlined = Some synthetic record declaration.
+                                            let inline_params = inline_record_type_params(
+                                                ctx,
+                                                &internal_type_params,
+                                                inline_lbls,
+                                            );
+                                            let inline_tag = match &sc_tag {
+                                                crate::types::ConstructorTag::CstrBlock(tag) => *tag,
+                                                _ => 0,
+                                            };
+                                            let inline_decl = crate::types::TypeDeclaration {
+                                                type_params: inline_params.clone(),
+                                                type_arity: inline_params.len() as i32,
+                                                type_kind: crate::types::TypeKind::TypeRecord(
+                                                    inline_lbls.clone(),
+                                                    crate::types::RecordRepresentation::RecordInlined {
+                                                        tag: inline_tag,
+                                                        name: sc_name.clone(),
+                                                        num_nonconsts,
+                                                        attrs: source_cstr.cd_attributes.clone(),
+                                                    },
+                                                ),
+                                                type_private: crate::types::PrivateFlag::Public,
+                                                type_manifest: None,
+                                                type_variance: inline_params
+                                                    .iter()
+                                                    .map(|_| TypesVariance::full())
+                                                    .collect(),
+                                                type_newtype_level: None,
+                                                type_loc: Location::none(),
+                                                type_attributes: vec![],
+                                                type_immediate: false,
+                                                type_unboxed:
+                                                    crate::types::UnboxedStatus::default(),
+                                                type_inlined_types: vec![],
+                                                type_path: None,
+                                            };
+                                            let inline_constr = ctx.new_constr(
+                                                Path::pdot(type_path.clone(), sc_name.clone()),
+                                                inline_params,
+                                            );
+                                            (vec![inline_constr], 1, Some(Box::new(inline_decl)))
+                                        } else {
+                                            (sc_args, sc_arity, None)
+                                        };
+
                                     cstr_descs.push((
                                         sc_id,
                                         crate::types::ConstructorDescription {
                                             cstr_name: sc_name,
                                             cstr_res: res_ty,
                                             cstr_existentials: vec![],
-                                            cstr_args: sc_args,
-                                            cstr_arity: sc_arity,
+                                            cstr_args: sc_desc_args,
+                                            cstr_arity: sc_desc_arity,
                                             cstr_tag: sc_tag,
                                             cstr_consts: num_consts,
                                             cstr_nonconsts: num_nonconsts,
@@ -4101,7 +4183,7 @@ fn type_structure_item<'a>(
                                             cstr_private: crate::types::PrivateFlag::Public,
                                             cstr_loc: source_cstr.cd_loc.clone(),
                                             cstr_attributes: source_cstr.cd_attributes.clone(),
-                                            cstr_inlined: None,
+                                            cstr_inlined: sc_desc_inlined,
                                         },
                                     ));
                                 }
