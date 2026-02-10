@@ -931,8 +931,9 @@ pub fn transl_type(
     let translated = transl_type_inner(tctx, env, styp)?;
 
     // Match OCaml typetexp `globalize_used_variables`: link variables seen in
-    // this type expression back to declaration-bound variables when present.
-    if !tctx.type_variables.is_empty() && !tctx.used_variables.is_empty() {
+    // this type expression back to declaration-level variables and register
+    // new names for later constraints in the same typing scope.
+    if !tctx.used_variables.is_empty() {
         let used_vars: Vec<(String, TypeExprRef)> = tctx
             .used_variables
             .iter()
@@ -940,8 +941,14 @@ pub fn transl_type(
             .collect();
         for (name, used_ty) in used_vars {
             if let Some(bound_ty) = tctx.type_variables.get(&name).copied() {
-                let _ =
-                    crate::types::unify(tctx.type_ctx, &mut tctx.unify_state, used_ty, bound_ty);
+                let _ = crate::types::unify(
+                    tctx.type_ctx,
+                    &mut tctx.unify_state,
+                    used_ty,
+                    bound_ty,
+                );
+            } else {
+                tctx.type_variables.insert(name, used_ty);
             }
         }
     }
@@ -7982,6 +7989,8 @@ pub fn type_expression<'a>(
     expr: &ParsedExpression,
 ) -> TypeCoreResult<Expression> {
     let type_ctx = tctx.type_ctx;
+    // Match OCaml Typecore.type_expression -> Typetexp.reset_type_variables.
+    tctx.type_variables.clear();
 
     // Begin a definition scope
     type_ctx.begin_def();
@@ -8020,6 +8029,8 @@ pub fn type_binding<'a>(
     rec_flag: RecFlag,
     bindings: &[crate::parser::ast::ValueBinding],
 ) -> TypeCoreResult<(Vec<ValueBinding>, Env)> {
+    // Match OCaml Typecore.type_binding -> Typetexp.reset_type_variables.
+    tctx.type_variables.clear();
     let (typed_bindings, new_env, _unpacks) = type_let_bindings(tctx, env, rec_flag, bindings)?;
     Ok((typed_bindings, new_env))
 }

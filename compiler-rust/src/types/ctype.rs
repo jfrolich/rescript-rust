@@ -243,26 +243,36 @@ pub fn deep_occur(ctx: &TypeContext<'_>, needle: TypeExprRef, haystack: TypeExpr
 /// This makes `t1` point to `t2`, effectively making them the same type.
 /// The level of `t2` is updated to be the minimum of both levels.
 pub fn link_type(ctx: &TypeContext<'_>, t1: TypeExprRef, t2: TypeExprRef) {
-    // Preserve variable names when linking a named variable to an anonymous one.
-    // This matches OCaml typedtree expectations where the surviving variable
-    // should keep the original source name when available.
     let t1_repr = ctx.repr(t1);
     let t2_repr = ctx.repr(t2);
     let source_name = {
         let desc = ctx.get_desc(t1_repr);
         match &*desc {
-            TypeDesc::Tvar(Some(name)) => Some(name.clone()),
+            TypeDesc::Tvar(name) => Some(name.clone()),
             _ => None,
         }
     };
-    if let Some(name) = source_name {
-        let target_is_anon = {
-            let desc = ctx.get_desc(t2_repr);
-            matches!(&*desc, TypeDesc::Tvar(None))
-        };
-        if target_is_anon {
+    let target_name = {
+        let desc = ctx.get_desc(t2_repr);
+        match &*desc {
+            TypeDesc::Tvar(name) => Some(name.clone()),
+            _ => None,
+        }
+    };
+
+    // Match OCaml Btype.link_type naming behavior:
+    // - propagate source name to an anonymous target variable
+    // - when both are named, keep source name if source level is lower
+    match (source_name, target_name) {
+        (Some(Some(name)), Some(None)) => {
             ctx.set_desc(t2_repr, TypeDesc::Tvar(Some(name)));
         }
+        (Some(Some(name)), Some(Some(_existing))) => {
+            if ctx.get_level(t1_repr) < ctx.get_level(t2_repr) {
+                ctx.set_desc(t2_repr, TypeDesc::Tvar(Some(name)));
+            }
+        }
+        _ => {}
     }
 
     let level1 = ctx.get_level(t1);
@@ -1036,7 +1046,8 @@ fn unify_types<'a>(
                 return Err(TypeError::RecursiveType(t1));
             }
 
-            update_level(ctx, ctx.get_level(t1), t2);
+            let t1_level = ctx.get_level(t1);
+            update_level(ctx, t1_level, t2);
             link_type(ctx, t1, t2);
             Ok(())
         }
@@ -1050,7 +1061,8 @@ fn unify_types<'a>(
                 return Err(TypeError::RecursiveType(t2));
             }
 
-            update_level(ctx, ctx.get_level(t2), t1);
+            let t2_level = ctx.get_level(t2);
+            update_level(ctx, t2_level, t1);
             link_type(ctx, t2, t1);
             Ok(())
         }
