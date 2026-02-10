@@ -162,8 +162,7 @@ impl<'a> TypeContext<'a> {
     /// Intern a CMI longident component and return a synthetic StrIdx.
     pub fn intern_cmi_longident_name(&self, name: &str) -> StrIdx {
         let raw = self.next_cmi_longident_idx.get();
-        self.next_cmi_longident_idx
-            .set(raw.wrapping_add(1));
+        self.next_cmi_longident_idx.set(raw.wrapping_add(1));
         self.cmi_longident_names
             .borrow_mut()
             .insert(raw, name.to_string());
@@ -187,7 +186,9 @@ impl<'a> TypeContext<'a> {
     /// Register a type declaration for type alias expansion.
     /// Called when loading module signatures from CMI files.
     pub fn register_type_decl(&self, name: &str, decl: super::decl::TypeDeclaration) {
-        self.type_decl_store.borrow_mut().insert(name.to_string(), decl);
+        self.type_decl_store
+            .borrow_mut()
+            .insert(name.to_string(), decl);
     }
 
     /// Register a type declaration by ident stamp for alias expansion.
@@ -196,7 +197,10 @@ impl<'a> TypeContext<'a> {
     }
 
     /// Look up a type declaration by name from the global store.
-    pub fn find_type_decl(&self, name: &str) -> Option<std::cell::Ref<'_, super::decl::TypeDeclaration>> {
+    pub fn find_type_decl(
+        &self,
+        name: &str,
+    ) -> Option<std::cell::Ref<'_, super::decl::TypeDeclaration>> {
         let store = self.type_decl_store.borrow();
         if store.contains_key(name) {
             Some(std::cell::Ref::map(store, |s| s.get(name).unwrap()))
@@ -206,7 +210,10 @@ impl<'a> TypeContext<'a> {
     }
 
     /// Look up a type declaration by stamp from the global store.
-    pub fn find_type_decl_by_stamp(&self, stamp: i32) -> Option<std::cell::Ref<'_, super::decl::TypeDeclaration>> {
+    pub fn find_type_decl_by_stamp(
+        &self,
+        stamp: i32,
+    ) -> Option<std::cell::Ref<'_, super::decl::TypeDeclaration>> {
         let store = self.type_decl_by_stamp.borrow();
         if store.contains_key(&stamp) {
             Some(std::cell::Ref::map(store, |s| s.get(&stamp).unwrap()))
@@ -217,7 +224,9 @@ impl<'a> TypeContext<'a> {
 
     /// Register a type declaration by full qualified path string for alias expansion.
     pub fn register_type_decl_by_path(&self, path: &str, decl: super::decl::TypeDeclaration) {
-        self.type_decl_by_path.borrow_mut().insert(path.to_string(), decl);
+        self.type_decl_by_path
+            .borrow_mut()
+            .insert(path.to_string(), decl);
     }
 
     /// Set load paths for resolving CMI files.
@@ -231,7 +240,10 @@ impl<'a> TypeContext<'a> {
     }
 
     /// Look up a type declaration by full qualified path string.
-    pub fn find_type_decl_by_path(&self, path: &str) -> Option<std::cell::Ref<'_, super::decl::TypeDeclaration>> {
+    pub fn find_type_decl_by_path(
+        &self,
+        path: &str,
+    ) -> Option<std::cell::Ref<'_, super::decl::TypeDeclaration>> {
         let store = self.type_decl_by_path.borrow();
         if store.contains_key(path) {
             Some(std::cell::Ref::map(store, |s| s.get(path).unwrap()))
@@ -272,6 +284,11 @@ impl<'a> TypeContext<'a> {
     /// Create a new type variable.
     pub fn new_var(&self, name: Option<String>) -> TypeExprRef {
         self.new_type(TypeDesc::Tvar(name))
+    }
+
+    /// Create a new type variable at the global level.
+    pub fn new_global_var(&self, name: Option<String>) -> TypeExprRef {
+        self.alloc_type(TypeDesc::Tvar(name), self.global_level.get())
     }
 
     /// Create a new generic type variable.

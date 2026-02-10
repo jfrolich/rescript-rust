@@ -2038,8 +2038,19 @@ fn translate_module_type_to_decl<'a>(
                             let mut type_params = Vec::with_capacity(decl.ptype_params.len());
                             let mut type_variance = Vec::with_capacity(decl.ptype_params.len());
                             for (param_ty, variance) in &decl.ptype_params {
-                                let (_typed_param, param_ref) =
-                                    transl_type(tctx, &sig_env, param_ty)?;
+                                let param_ref = match &param_ty.ptyp_desc {
+                                    crate::parser::ast::CoreTypeDesc::Ptyp_any => {
+                                        tctx.type_ctx.new_global_var(Some("_".to_string()))
+                                    }
+                                    crate::parser::ast::CoreTypeDesc::Ptyp_var(name) => {
+                                        tctx.type_ctx.new_global_var(Some(name.clone()))
+                                    }
+                                    _ => {
+                                        let (_typed_param, param_ref) =
+                                            transl_type(tctx, &sig_env, param_ty)?;
+                                        param_ref
+                                    }
+                                };
                                 type_params.push(param_ref);
                                 type_variance.push(match variance {
                                     crate::parser::ast::Variance::Covariant => {
@@ -3771,10 +3782,23 @@ fn type_structure_item<'a>(
                 for (core_type, parser_var) in &decl.ptype_params {
                     let (typed_core_type, type_ref) = match &core_type.ptyp_desc {
                         crate::parser::ast::CoreTypeDesc::Ptyp_any => {
-                            let type_ref = ctx.new_var(Some("_".to_string()));
+                            let type_ref = ctx.new_global_var(Some("_".to_string()));
                             (
                                 TypedCoreType {
                                     ctyp_desc: TypedCoreTypeDesc::Ttyp_var(None),
+                                    ctyp_type: type_ref,
+                                    ctyp_env: EnvRef(0),
+                                    ctyp_loc: core_type.ptyp_loc,
+                                    ctyp_attributes: core_type.ptyp_attributes.clone(),
+                                },
+                                type_ref,
+                            )
+                        }
+                        crate::parser::ast::CoreTypeDesc::Ptyp_var(name) => {
+                            let type_ref = ctx.new_global_var(Some(name.clone()));
+                            (
+                                TypedCoreType {
+                                    ctyp_desc: TypedCoreTypeDesc::Ttyp_var(Some(name.clone())),
                                     ctyp_type: type_ref,
                                     ctyp_env: EnvRef(0),
                                     ctyp_loc: core_type.ptyp_loc,
@@ -5872,7 +5896,6 @@ fn transl_sig_type_declarations<'a>(
         let type_name = decl.ptype_name.txt;
         let type_name_str = arena.get_string(type_name);
         let type_id = Ident::create_local(type_name_str);
-        let type_path = Path::pident(type_id.clone());
 
         // Convert type parameters
         let mut typ_params: Vec<(TypedCoreType, TypesVariance)> = Vec::new();
@@ -5880,10 +5903,23 @@ fn transl_sig_type_declarations<'a>(
         for (core_type, parser_var) in &decl.ptype_params {
             let (typed_core_type, type_ref) = match &core_type.ptyp_desc {
                 crate::parser::ast::CoreTypeDesc::Ptyp_any => {
-                    let type_ref = ctx.new_var(Some("_".to_string()));
+                    let type_ref = ctx.new_global_var(Some("_".to_string()));
                     (
                         TypedCoreType {
                             ctyp_desc: TypedCoreTypeDesc::Ttyp_var(None),
+                            ctyp_type: type_ref,
+                            ctyp_env: EnvRef(0),
+                            ctyp_loc: core_type.ptyp_loc,
+                            ctyp_attributes: core_type.ptyp_attributes.clone(),
+                        },
+                        type_ref,
+                    )
+                }
+                crate::parser::ast::CoreTypeDesc::Ptyp_var(name) => {
+                    let type_ref = ctx.new_global_var(Some(name.clone()));
+                    (
+                        TypedCoreType {
+                            ctyp_desc: TypedCoreTypeDesc::Ttyp_var(Some(name.clone())),
                             ctyp_type: type_ref,
                             ctyp_env: EnvRef(0),
                             ctyp_loc: core_type.ptyp_loc,
@@ -5903,31 +5939,223 @@ fn transl_sig_type_declarations<'a>(
             typ_params.push((typed_core_type, types_var));
         }
 
+        // Convert type constraints
+        let mut typ_cstrs: Vec<(TypedCoreType, TypedCoreType, LocIdx)> = Vec::new();
+        for (ct1, ct2, cstr_loc) in &decl.ptype_cstrs {
+            let (typed_ct1, _) = transl_type(tctx, env, ct1)?;
+            let (typed_ct2, _) = transl_type(tctx, env, ct2)?;
+            typ_cstrs.push((typed_ct1, typed_ct2, *cstr_loc));
+        }
+
         // Convert manifest type (type alias)
-        let typ_manifest = match &decl.ptype_manifest {
+        let (typ_manifest, manifest_type_ref) = match &decl.ptype_manifest {
             Some(manifest) => {
-                let (typed_manifest, _) = transl_type(tctx, env, manifest)?;
-                Some(typed_manifest)
+                let (typed_manifest, manifest_ref) = transl_type(tctx, env, manifest)?;
+                (Some(typed_manifest), Some(manifest_ref))
             }
-            None => None,
+            None => (None, None),
         };
 
-        // For signatures, keep type kind simple (abstract or basic)
-        let typed_tree_kind = TypedTypeKind::Ttype_abstract;
+        // Preserve signature type kind like OCaml transl_signature -> Typedecl.transl_type_decl.
+        let (internal_type_kind, typed_tree_kind) = match &decl.ptype_kind {
+            crate::parser::ast::TypeKind::Ptype_abstract => {
+                (crate::types::TypeKind::TypeAbstract, TypedTypeKind::Ttype_abstract)
+            }
+            crate::parser::ast::TypeKind::Ptype_open => {
+                (crate::types::TypeKind::TypeOpen, TypedTypeKind::Ttype_open)
+            }
+            crate::parser::ast::TypeKind::Ptype_record(labels) => {
+                let mut internal_labels = Vec::with_capacity(labels.len());
+                let mut typed_tree_labels = Vec::with_capacity(labels.len());
+
+                for label in labels {
+                    let lbl_name = arena.get_string(label.pld_name.txt);
+                    let (typed_label_ty, mut lbl_type) = transl_type(tctx, env, &label.pld_type)?;
+                    if label.pld_optional {
+                        let option_path = Path::pident(Ident::create_persistent("option"));
+                        lbl_type = tctx.type_ctx.new_constr(option_path, vec![lbl_type]);
+                    }
+                    let lbl_type = tctx.type_ctx.new_poly(lbl_type, vec![]);
+                    let mutable_flag = match label.pld_mutable {
+                        crate::parser::ast::MutableFlag::Immutable => {
+                            crate::types::MutableFlag::Immutable
+                        }
+                        crate::parser::ast::MutableFlag::Mutable => {
+                            crate::types::MutableFlag::Mutable
+                        }
+                    };
+                    internal_labels.push(crate::types::LabelDeclaration {
+                        ld_id: Ident::create_persistent(lbl_name),
+                        ld_mutable: mutable_flag,
+                        ld_optional: label.pld_optional,
+                        ld_type: lbl_type,
+                        ld_loc: arena.to_location(label.pld_loc),
+                        ld_attributes: vec![],
+                    });
+
+                    let poly_typed_core_type = TypedCoreType {
+                        ctyp_desc: TypedCoreTypeDesc::Ttyp_poly(
+                            vec![],
+                            Box::new(typed_label_ty.clone()),
+                        ),
+                        ctyp_type: lbl_type,
+                        ctyp_env: typed_label_ty.ctyp_env,
+                        ctyp_loc: typed_label_ty.ctyp_loc,
+                        ctyp_attributes: vec![],
+                    };
+
+                    typed_tree_labels.push(TypedLabelDeclaration {
+                        ld_id: Ident::create_persistent(lbl_name),
+                        ld_name: Located {
+                            txt: lbl_name.to_string(),
+                            loc: label.pld_name.loc,
+                        },
+                        ld_mutable: label.pld_mutable,
+                        ld_optional: label.pld_optional,
+                        ld_type: poly_typed_core_type,
+                        ld_loc: label.pld_loc,
+                        ld_attributes: label.pld_attributes.clone(),
+                    });
+                }
+
+                (
+                    crate::types::TypeKind::TypeRecord(
+                        internal_labels,
+                        crate::types::RecordRepresentation::RecordRegular,
+                    ),
+                    TypedTypeKind::Ttype_record(typed_tree_labels),
+                )
+            }
+            crate::parser::ast::TypeKind::Ptype_variant(cstrs) => {
+                let mut internal_cstrs = Vec::with_capacity(cstrs.len());
+                let mut typed_tree_cstrs = Vec::with_capacity(cstrs.len());
+
+                for cstr in cstrs {
+                    let cstr_name = arena.get_string(cstr.pcd_name.txt);
+                    let (internal_args, typed_args) = match &cstr.pcd_args {
+                        crate::parser::ast::ConstructorArguments::Pcstr_tuple(args) => {
+                            let mut internal_tuple_args = Vec::with_capacity(args.len());
+                            let mut typed_tuple_args = Vec::with_capacity(args.len());
+                            for arg in args {
+                                let (typed_arg, arg_ref) = transl_type(tctx, env, arg)?;
+                                internal_tuple_args.push(arg_ref);
+                                typed_tuple_args.push(typed_arg);
+                            }
+                            (
+                                crate::types::ConstructorArguments::CstrTuple(internal_tuple_args),
+                                TypedConstructorArguments::Cstr_tuple(typed_tuple_args),
+                            )
+                        }
+                        crate::parser::ast::ConstructorArguments::Pcstr_record(labels) => {
+                            let mut internal_record_labels = Vec::with_capacity(labels.len());
+                            let mut typed_record_labels = Vec::with_capacity(labels.len());
+                            for label in labels {
+                                let lbl_name = arena.get_string(label.pld_name.txt);
+                                let (typed_label_ty, mut lbl_type) =
+                                    transl_type(tctx, env, &label.pld_type)?;
+                                if label.pld_optional {
+                                    let option_path =
+                                        Path::pident(Ident::create_persistent("option"));
+                                    lbl_type = tctx.type_ctx.new_constr(option_path, vec![lbl_type]);
+                                }
+                                let lbl_type = tctx.type_ctx.new_poly(lbl_type, vec![]);
+                                let mutable_flag = match label.pld_mutable {
+                                    crate::parser::ast::MutableFlag::Immutable => {
+                                        crate::types::MutableFlag::Immutable
+                                    }
+                                    crate::parser::ast::MutableFlag::Mutable => {
+                                        crate::types::MutableFlag::Mutable
+                                    }
+                                };
+                                internal_record_labels.push(crate::types::LabelDeclaration {
+                                    ld_id: Ident::create_persistent(lbl_name),
+                                    ld_mutable: mutable_flag,
+                                    ld_optional: label.pld_optional,
+                                    ld_type: lbl_type,
+                                    ld_loc: arena.to_location(label.pld_loc),
+                                    ld_attributes: vec![],
+                                });
+
+                                let poly_typed_core_type = TypedCoreType {
+                                    ctyp_desc: TypedCoreTypeDesc::Ttyp_poly(
+                                        vec![],
+                                        Box::new(typed_label_ty.clone()),
+                                    ),
+                                    ctyp_type: lbl_type,
+                                    ctyp_env: typed_label_ty.ctyp_env,
+                                    ctyp_loc: typed_label_ty.ctyp_loc,
+                                    ctyp_attributes: vec![],
+                                };
+                                typed_record_labels.push(TypedLabelDeclaration {
+                                    ld_id: Ident::create_persistent(lbl_name),
+                                    ld_name: Located {
+                                        txt: lbl_name.to_string(),
+                                        loc: label.pld_name.loc,
+                                    },
+                                    ld_mutable: label.pld_mutable,
+                                    ld_optional: label.pld_optional,
+                                    ld_type: poly_typed_core_type,
+                                    ld_loc: label.pld_loc,
+                                    ld_attributes: label.pld_attributes.clone(),
+                                });
+                            }
+                            (
+                                crate::types::ConstructorArguments::CstrRecord(
+                                    internal_record_labels,
+                                ),
+                                TypedConstructorArguments::Cstr_record(typed_record_labels),
+                            )
+                        }
+                    };
+
+                    let (typed_res, internal_res) = match &cstr.pcd_res {
+                        Some(res_type) => {
+                            let (typed, internal) = transl_type(tctx, env, res_type)?;
+                            (Some(typed), Some(internal))
+                        }
+                        None => (None, None),
+                    };
+
+                    internal_cstrs.push(crate::types::ConstructorDeclaration {
+                        cd_id: Ident::create_persistent(cstr_name),
+                        cd_args: internal_args,
+                        cd_res: internal_res,
+                        cd_loc: arena.to_location(cstr.pcd_loc),
+                        cd_attributes: vec![],
+                    });
+                    typed_tree_cstrs.push(TypedConstructorDeclaration {
+                        cd_id: Ident::create_persistent(cstr_name),
+                        cd_name: Located {
+                            txt: cstr_name.to_string(),
+                            loc: cstr.pcd_name.loc,
+                        },
+                        cd_args: typed_args,
+                        cd_res: typed_res,
+                        cd_loc: cstr.pcd_loc,
+                        cd_attributes: cstr.pcd_attributes.clone(),
+                    });
+                }
+
+                (
+                    crate::types::TypeKind::TypeVariant(internal_cstrs),
+                    TypedTypeKind::Ttype_variant(typed_tree_cstrs),
+                )
+            }
+        };
 
         let typ_private = decl.ptype_private;
 
-        // Create minimal internal type declaration
+        // Keep internal declaration shape aligned with parsed signature declaration.
         let internal_decl = crate::types::TypeDeclaration {
             type_params: internal_type_params,
             type_arity: decl.ptype_params.len() as i32,
-            type_kind: crate::types::TypeKind::TypeAbstract,
+            type_kind: internal_type_kind,
             type_private: match typ_private {
                 crate::parser::ast::PrivateFlag::Public => crate::types::PrivateFlag::Public,
                 crate::parser::ast::PrivateFlag::Private => crate::types::PrivateFlag::Private,
             },
-            type_manifest: None,
-            type_variance: vec![],
+            type_manifest: manifest_type_ref,
+            type_variance: typ_params.iter().map(|(_, variance)| *variance).collect(),
             type_newtype_level: None,
             type_loc: arena.to_location(decl.ptype_loc),
             type_attributes: vec![],
@@ -5937,7 +6165,7 @@ fn transl_sig_type_declarations<'a>(
                 default: false,
             },
             type_inlined_types: vec![],
-            type_path: None,
+            type_path: Some(Path::pident(type_id.clone())),
         };
 
         typed_tree_decls.push(TypedTypeDeclaration {
@@ -5948,7 +6176,7 @@ fn transl_sig_type_declarations<'a>(
             },
             typ_params,
             typ_type: internal_decl,
-            typ_cstrs: vec![],
+            typ_cstrs,
             typ_kind: typed_tree_kind,
             typ_private: typ_private,
             typ_manifest,

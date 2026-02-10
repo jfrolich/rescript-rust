@@ -243,6 +243,28 @@ pub fn deep_occur(ctx: &TypeContext<'_>, needle: TypeExprRef, haystack: TypeExpr
 /// This makes `t1` point to `t2`, effectively making them the same type.
 /// The level of `t2` is updated to be the minimum of both levels.
 pub fn link_type(ctx: &TypeContext<'_>, t1: TypeExprRef, t2: TypeExprRef) {
+    // Preserve variable names when linking a named variable to an anonymous one.
+    // This matches OCaml typedtree expectations where the surviving variable
+    // should keep the original source name when available.
+    let t1_repr = ctx.repr(t1);
+    let t2_repr = ctx.repr(t2);
+    let source_name = {
+        let desc = ctx.get_desc(t1_repr);
+        match &*desc {
+            TypeDesc::Tvar(Some(name)) => Some(name.clone()),
+            _ => None,
+        }
+    };
+    if let Some(name) = source_name {
+        let target_is_anon = {
+            let desc = ctx.get_desc(t2_repr);
+            matches!(&*desc, TypeDesc::Tvar(None))
+        };
+        if target_is_anon {
+            ctx.set_desc(t2_repr, TypeDesc::Tvar(Some(name)));
+        }
+    }
+
     let level1 = ctx.get_level(t1);
     let level2 = ctx.get_level(t2);
 
@@ -1664,14 +1686,50 @@ pub fn generalize_structure(ctx: &TypeContext<'_>, var_level: i32, ty: TypeExprR
     let ty = ctx.repr(ty);
     let level = ctx.get_level(ty);
 
-    if level > var_level {
-        ctx.set_level(ty, var_level);
+    if level == GENERIC_LEVEL {
+        return;
     }
 
-    // Recursively process children
-    iter_type_expr(ctx, ty, |child| {
-        generalize_structure(ctx, var_level, child);
-    });
+    enum Action {
+        LowerVar,
+        PromoteAndRecurse(Vec<TypeExprRef>),
+        Noop,
+    }
+
+    let action = {
+        let desc = ctx.get_desc(ty);
+        if matches!(&*desc, TypeDesc::Tvar(_)) && level > var_level {
+            Action::LowerVar
+        } else if level > ctx.current_level() {
+            match &*desc {
+                // Match OCaml ctype.ml is_object_type path guard in generalize_structure:
+                // object types (names starting with '#') are not promoted here.
+                TypeDesc::Tconstr { path, .. } if path.head_name().starts_with('#') => {
+                    Action::Noop
+                }
+                _ => {
+                    let mut children = Vec::new();
+                    iter_type_expr(ctx, ty, |child| children.push(child));
+                    Action::PromoteAndRecurse(children)
+                }
+            }
+        } else {
+            Action::Noop
+        }
+    };
+
+    match action {
+        Action::LowerVar => {
+            ctx.set_level(ty, var_level);
+        }
+        Action::PromoteAndRecurse(children) => {
+            ctx.set_level(ty, GENERIC_LEVEL);
+            for child in children {
+                generalize_structure(ctx, var_level, child);
+            }
+        }
+        Action::Noop => {}
+    }
 }
 
 fn generalize_expansive_rec(

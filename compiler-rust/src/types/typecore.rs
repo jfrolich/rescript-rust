@@ -863,6 +863,60 @@ fn convert_arg_label_for_ctx(
     }
 }
 
+fn collect_named_type_vars_from_core_type(
+    ctyp: &crate::types::typedtree::TypedCoreType,
+    out: &mut HashMap<String, TypeExprRef>,
+) {
+    use crate::types::typedtree::{ObjectFieldDesc, RowFieldDesc, TypedCoreTypeDesc};
+
+    match &ctyp.ctyp_desc {
+        TypedCoreTypeDesc::Ttyp_var(Some(name)) => {
+            out.entry(name.clone()).or_insert(ctyp.ctyp_type);
+        }
+        TypedCoreTypeDesc::Ttyp_var(None) => {}
+        TypedCoreTypeDesc::Ttyp_arrow(arg, ret, _) => {
+            collect_named_type_vars_from_core_type(&arg.typ, out);
+            collect_named_type_vars_from_core_type(ret, out);
+        }
+        TypedCoreTypeDesc::Ttyp_tuple(items) | TypedCoreTypeDesc::Ttyp_constr(_, _, items) => {
+            for item in items {
+                collect_named_type_vars_from_core_type(item, out);
+            }
+        }
+        TypedCoreTypeDesc::Ttyp_object(fields, _) => {
+            for field in fields {
+                match &field.of_desc {
+                    ObjectFieldDesc::OTtag(_, ty) | ObjectFieldDesc::OTinherit(ty) => {
+                        collect_named_type_vars_from_core_type(ty, out);
+                    }
+                }
+            }
+        }
+        TypedCoreTypeDesc::Ttyp_poly(_, body) | TypedCoreTypeDesc::Ttyp_alias(body, _) => {
+            collect_named_type_vars_from_core_type(body, out);
+        }
+        TypedCoreTypeDesc::Ttyp_variant(rows, _, _) => {
+            for row in rows {
+                match &row.rf_desc {
+                    RowFieldDesc::Rtag(_, _, tys) => {
+                        for ty in tys {
+                            collect_named_type_vars_from_core_type(ty, out);
+                        }
+                    }
+                    RowFieldDesc::Rinherit(ty) => {
+                        collect_named_type_vars_from_core_type(ty, out);
+                    }
+                }
+            }
+        }
+        TypedCoreTypeDesc::Ttyp_package(pack) => {
+            for (_, ty) in &pack.pack_fields {
+                collect_named_type_vars_from_core_type(ty, out);
+            }
+        }
+    }
+}
+
 /// Translate a parsed CoreType to a TypedCoreType and its corresponding TypeExprRef.
 ///
 /// This function converts the surface syntax type annotations into the internal
@@ -2791,6 +2845,18 @@ fn type_pattern_constraint(
     // then use two independent instances (constraint ty and inner-pattern ty).
     ctx.begin_def();
     let (typed_ctype, ctype_ty) = transl_type(tctx, env, core_type)?;
+    // Match OCaml Typetexp.globalize_used_variables effect for delayed pattern
+    // constraints: names introduced in the constrained pattern should be
+    // available to later constraints in the same function body.
+    let mut pattern_type_vars = HashMap::new();
+    collect_named_type_vars_from_core_type(&typed_ctype, &mut pattern_type_vars);
+    for (name, ty) in pattern_type_vars {
+        if let Some(existing) = tctx.type_variables.get(&name).copied() {
+            let _ = crate::types::unify(ctx, &mut tctx.unify_state, ty, existing);
+        } else {
+            tctx.type_variables.insert(name, ty);
+        }
+    }
     ctx.end_def();
     let var_level = ctx.current_level();
     crate::types::generalize_structure(ctx, var_level, ctype_ty);
@@ -4897,6 +4963,8 @@ fn type_function(
     use crate::types::typedtree::{Case, FunctionParam, FunctionParamPattern, Partial};
 
     let ctx = tctx.type_ctx;
+    let saved_type_variables = std::mem::take(&mut tctx.type_variables);
+    let result = (|| -> TypeCoreResult<Expression> {
 
     // Convert arity to Option<i32> for the arrow type
     // Arity is now ArityIdx, look up from arena
@@ -5064,6 +5132,9 @@ fn type_function(
         EnvRef(0),
         attributes.to_vec(),
     ))
+    })();
+    tctx.type_variables = saved_type_variables;
+    result
 }
 
 /// Type check for loop.
@@ -5913,8 +5984,6 @@ fn type_field(
     let typed_record = type_expect(tctx, env, record_expr, record_ty, None)?;
     let ty_exp = typed_record.exp_type;
 
-    let field_ty = ctx.new_var(None);
-
     // Disambiguate label: use the record expression's type to find the right label
     let env_label = disambiguate_label(
         &field_name,
@@ -5924,27 +5993,15 @@ fn type_field(
         ctx,
     );
 
-    let label_desc = if let Some(env_label) = env_label {
+    let (label_desc, field_ty) = if let Some(env_label) = env_label {
         let (ty_arg, ty_res) = crate::types::ctype::instance_label(ctx, &env_label);
         // Unify label's result type with the record's type
         unify_expression_types(tctx, loc, ty_res, record_ty, None)?;
-        // Unify label's arg type with the field type
-        unify_expression_types(tctx, loc, ty_arg, field_ty, None)?;
-        crate::types::LabelDescription {
-            lbl_name: env_label.lbl_name.clone(),
-            lbl_res: record_ty,
-            lbl_arg: field_ty,
-            lbl_mut: env_label.lbl_mut.clone(),
-            lbl_optional: env_label.lbl_optional,
-            lbl_pos: env_label.lbl_pos,
-            lbl_all: env_label.lbl_all,
-            lbl_repres: env_label.lbl_repres.clone(),
-            lbl_private: env_label.lbl_private.clone(),
-            lbl_loc: env_label.lbl_loc.clone(),
-            lbl_attributes: env_label.lbl_attributes.clone(),
-        }
+        (env_label, ty_arg)
     } else {
-        crate::types::LabelDescription {
+        let field_ty = ctx.new_var(None);
+        (
+            crate::types::LabelDescription {
             lbl_name: field_name,
             lbl_res: record_ty,
             lbl_arg: field_ty,
@@ -5956,7 +6013,9 @@ fn type_field(
             lbl_private: crate::types::PrivateFlag::Public,
             lbl_loc: tctx.arena.to_location(field_lid.loc),
             lbl_attributes: vec![],
-        }
+            },
+            field_ty,
+        )
     };
 
     // Unify the record expression's type with the record type
@@ -5992,7 +6051,6 @@ fn type_setfield(
     let record_ty = ctx.new_var(None);
     let typed_record = type_expect(tctx, env, record_expr, record_ty, None)?;
     let ty_exp = typed_record.exp_type;
-    let field_ty = ctx.new_var(None);
 
     let env_label = disambiguate_label(
         &field_name,
@@ -6001,25 +6059,14 @@ fn type_setfield(
         &mut tctx.persistent_env,
         ctx,
     );
-    let label_desc = if let Some(env_label) = env_label {
+    let (label_desc, field_ty) = if let Some(env_label) = env_label {
         let (ty_arg, ty_res) = crate::types::ctype::instance_label(ctx, &env_label);
         unify_expression_types(tctx, loc, ty_res, record_ty, None)?;
-        unify_expression_types(tctx, loc, ty_arg, field_ty, None)?;
-        crate::types::LabelDescription {
-            lbl_name: env_label.lbl_name.clone(),
-            lbl_res: record_ty,
-            lbl_arg: field_ty,
-            lbl_mut: env_label.lbl_mut.clone(),
-            lbl_optional: env_label.lbl_optional,
-            lbl_pos: env_label.lbl_pos,
-            lbl_all: env_label.lbl_all,
-            lbl_repres: env_label.lbl_repres.clone(),
-            lbl_private: env_label.lbl_private.clone(),
-            lbl_loc: env_label.lbl_loc.clone(),
-            lbl_attributes: env_label.lbl_attributes.clone(),
-        }
+        (env_label, ty_arg)
     } else {
-        crate::types::LabelDescription {
+        let field_ty = ctx.new_var(None);
+        (
+            crate::types::LabelDescription {
             lbl_name: field_name,
             lbl_res: record_ty,
             lbl_arg: field_ty,
@@ -6031,7 +6078,9 @@ fn type_setfield(
             lbl_private: crate::types::PrivateFlag::Public,
             lbl_loc: tctx.arena.to_location(field_lid.loc),
             lbl_attributes: vec![],
-        }
+            },
+            field_ty,
+        )
     };
 
     // Type check the new value with the proper field type
