@@ -879,6 +879,42 @@ impl From<TypeCoreError> for TypeModError {
 // Signature Simplification
 // ============================================================================
 
+/// Iterate identifiers bound by a typed pattern.
+/// Mirrors OCaml `Typedtree.bound_idents` traversal:
+/// - alias patterns visit the inner pattern first, then alias id
+/// - or-patterns visit only the left branch
+fn iter_bound_pattern_idents<'a, F>(pat: &'a crate::types::typedtree::Pattern, f: &mut F)
+where
+    F: FnMut(&'a Ident),
+{
+    use crate::types::typedtree::PatternDesc;
+
+    match &pat.pat_desc {
+        PatternDesc::Tpat_var(id, _) => f(id),
+        PatternDesc::Tpat_alias(inner, id, _) => {
+            iter_bound_pattern_idents(inner, f);
+            f(id);
+        }
+        PatternDesc::Tpat_tuple(pats)
+        | PatternDesc::Tpat_construct(_, _, pats)
+        | PatternDesc::Tpat_array(pats) => {
+            for p in pats {
+                iter_bound_pattern_idents(p, f);
+            }
+        }
+        PatternDesc::Tpat_record(fields, _) => {
+            for (_, _, p, _) in fields {
+                iter_bound_pattern_idents(p, f);
+            }
+        }
+        PatternDesc::Tpat_variant(_, Some(inner), _) => iter_bound_pattern_idents(inner, f),
+        PatternDesc::Tpat_or(left, _right, _) => iter_bound_pattern_idents(left, f),
+        PatternDesc::Tpat_any
+        | PatternDesc::Tpat_constant(_)
+        | PatternDesc::Tpat_variant(_, None, _) => {}
+    }
+}
+
 /// Check if a structure has duplicate value names (like OCaml's simplify_signature).
 /// Returns true if there are duplicates, meaning the structure should be wrapped
 /// in Tmod_constraint with Tmodtype_implicit.
@@ -887,11 +923,13 @@ fn structure_has_duplicate_value_names(structure: &Structure) -> bool {
     for item in structure.str_items.iter().rev() {
         match &item.str_desc {
             StructureItemDesc::Tstr_value(_, bindings) => {
-                for vb in bindings {
-                    if let crate::types::typedtree::PatternDesc::Tpat_var(id, _) =
-                        &vb.vb_pat.pat_desc
-                    {
-                        if !seen.insert(id.name().to_string()) {
+                for vb in bindings.iter().rev() {
+                    let mut bound_names = Vec::new();
+                    iter_bound_pattern_idents(&vb.vb_pat, &mut |id| {
+                        bound_names.push(id.name().to_string());
+                    });
+                    for name in bound_names.into_iter().rev() {
+                        if !seen.insert(name) {
                             return true;
                         }
                     }
@@ -2873,37 +2911,18 @@ fn extract_sig_values_from_pattern(
     sig_items: &mut Vec<crate::types::decl::SignatureItem>,
 ) {
     use crate::types::decl::{SignatureItem as SigItem, ValueDescription};
-    use crate::types::typedtree::PatternDesc;
-
-    match &pat.pat_desc {
-        PatternDesc::Tpat_var(id, _) => {
-            sig_items.push(SigItem::SigValue(
-                id.clone(),
-                ValueDescription {
-                    val_type: ty,
-                    val_kind: crate::types::decl::ValueKind::ValReg,
-                    val_loc: crate::location::Location::none(),
-                    val_attributes: vec![],
-                    val_path: None,
-                },
-            ));
-        }
-        PatternDesc::Tpat_alias(_, id, _) => {
-            sig_items.push(SigItem::SigValue(
-                id.clone(),
-                ValueDescription {
-                    val_type: ty,
-                    val_kind: crate::types::decl::ValueKind::ValReg,
-                    val_loc: crate::location::Location::none(),
-                    val_attributes: vec![],
-                    val_path: None,
-                },
-            ));
-        }
-        _ => {
-            // Tuple, any, constant, etc. — no named bindings at module level
-        }
-    }
+    iter_bound_pattern_idents(pat, &mut |id| {
+        sig_items.push(SigItem::SigValue(
+            id.clone(),
+            ValueDescription {
+                val_type: ty,
+                val_kind: crate::types::decl::ValueKind::ValReg,
+                val_loc: crate::location::Location::none(),
+                val_attributes: vec![],
+                val_path: None,
+            },
+        ));
+    });
 }
 
 // ============================================================================
