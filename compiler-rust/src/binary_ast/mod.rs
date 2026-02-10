@@ -53,18 +53,19 @@ pub mod marshal;
 pub mod parsetree0;
 pub mod parsetree0_marshal;
 pub mod ppx;
-pub mod spice_ppx;
 pub mod serialize;
+pub mod spice_ppx;
 pub mod types;
 pub mod writer;
 
 // Re-exports
-pub use deps::{extract_signature_deps, extract_structure_deps, Dependencies};
+pub use deps::{Dependencies, extract_signature_deps, extract_structure_deps};
 pub use mapper_to0::{map_signature, map_structure};
 pub use marshal::MarshalWriter;
 pub use parsetree0::*;
 pub use serialize::Marshal;
 pub use writer::{
-    write_signature_ast, write_signature_ast_current, write_signature_ast_to_vec,
-    write_structure_ast, write_structure_ast_current, write_structure_ast_to_vec,
+    write_signature_ast, write_signature_ast_current, write_signature_ast_current_with_extra_deps,
+    write_signature_ast_to_vec, write_structure_ast, write_structure_ast_current,
+    write_structure_ast_current_with_extra_deps, write_structure_ast_to_vec,
 };

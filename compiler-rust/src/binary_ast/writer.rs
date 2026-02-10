@@ -115,9 +115,28 @@ pub fn write_structure_ast_current(
     arena: &mut crate::parse_arena::ParseArena,
     ast: &Structure,
 ) -> io::Result<()> {
+    write_structure_ast_current_with_extra_deps(output_path, source_path, arena, ast, &[])
+}
+
+/// Write a binary AST file for a structure in the CURRENT parsetree format,
+/// with additional dependency names.
+///
+/// `extra_deps` are merged with extracted dependencies and used for section 2
+/// of the .ast file (dependency list).
+pub fn write_structure_ast_current_with_extra_deps(
+    output_path: &Path,
+    source_path: &str,
+    arena: &mut crate::parse_arena::ParseArena,
+    ast: &Structure,
+    extra_deps: &[String],
+) -> io::Result<()> {
     // 1. Apply built-in PPX transformations (FFI encoding for externals, etc.)
-    let rewritten_ast = ppx::rewrite_structure(ast, arena)
-        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("PPX rewrite failed: {e}")))?;
+    let rewritten_ast = ppx::rewrite_structure(ast, arena).map_err(|e| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("PPX rewrite failed: {e}"),
+        )
+    })?;
 
     // 2. Process @@config attributes (e.g., no_export wrapping)
     let rewritten_ast = if has_no_export_config(&rewritten_ast, arena) {
@@ -126,8 +145,9 @@ pub fn write_structure_ast_current(
         rewritten_ast
     };
 
-    // 3. Extract dependencies from the rewritten AST
-    let deps = extract_structure_deps(arena, &rewritten_ast);
+    // 3. Extract dependencies from the rewritten AST and merge explicit opens.
+    let mut deps = extract_structure_deps(arena, &rewritten_ast);
+    deps.extend(extra_deps.iter().cloned());
 
     // 4. Write the binary AST file directly (current format, no parsetree0 conversion)
     write_ast_file(output_path, source_path, arena, &deps, &rewritten_ast)
@@ -143,12 +163,32 @@ pub fn write_signature_ast_current(
     arena: &mut crate::parse_arena::ParseArena,
     ast: &Signature,
 ) -> io::Result<()> {
-    // 1. Apply built-in PPX transformations (FFI encoding for externals, etc.)
-    let rewritten_ast = ppx::rewrite_signature(ast, arena)
-        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("PPX rewrite failed: {e}")))?;
+    write_signature_ast_current_with_extra_deps(output_path, source_path, arena, ast, &[])
+}
 
-    // 2. Extract dependencies from the rewritten AST
-    let deps = extract_signature_deps(arena, &rewritten_ast);
+/// Write a binary AST file for a signature in the CURRENT parsetree format,
+/// with additional dependency names.
+///
+/// `extra_deps` are merged with extracted dependencies and used for section 2
+/// of the .iast file (dependency list).
+pub fn write_signature_ast_current_with_extra_deps(
+    output_path: &Path,
+    source_path: &str,
+    arena: &mut crate::parse_arena::ParseArena,
+    ast: &Signature,
+    extra_deps: &[String],
+) -> io::Result<()> {
+    // 1. Apply built-in PPX transformations (FFI encoding for externals, etc.)
+    let rewritten_ast = ppx::rewrite_signature(ast, arena).map_err(|e| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("PPX rewrite failed: {e}"),
+        )
+    })?;
+
+    // 2. Extract dependencies from the rewritten AST and merge explicit opens.
+    let mut deps = extract_signature_deps(arena, &rewritten_ast);
+    deps.extend(extra_deps.iter().cloned());
 
     // 3. Write the binary AST file directly (current format, no parsetree0 conversion)
     write_ast_file(output_path, source_path, arena, &deps, &rewritten_ast)
@@ -199,14 +239,22 @@ fn write_ast_file<A: Marshal>(
 }
 
 /// Write a structure AST to a Vec<u8> (for testing).
-pub fn write_structure_ast_to_vec(source_path: &str, arena: &mut ParseArena, ast: &Structure) -> Vec<u8> {
+pub fn write_structure_ast_to_vec(
+    source_path: &str,
+    arena: &mut ParseArena,
+    ast: &Structure,
+) -> Vec<u8> {
     let deps = extract_structure_deps(arena, ast);
     let ast0 = map_structure(arena, ast);
     write_ast_to_vec(source_path, arena, &deps, &ast0)
 }
 
 /// Write a signature AST to a Vec<u8> (for testing).
-pub fn write_signature_ast_to_vec(source_path: &str, arena: &mut ParseArena, ast: &Signature) -> Vec<u8> {
+pub fn write_signature_ast_to_vec(
+    source_path: &str,
+    arena: &mut ParseArena,
+    ast: &Signature,
+) -> Vec<u8> {
     let deps = extract_signature_deps(arena, ast);
     let ast0 = map_signature(arena, ast);
     write_ast_to_vec(source_path, arena, &deps, &ast0)
@@ -267,12 +315,14 @@ fn has_no_export_config(structure: &[StructureItem], arena: &ParseArena) -> bool
                     // Found @@config(...) - check if payload contains no_export
                     if let crate::parser::ast::Payload::PStr(items) = &attr.1 {
                         if let Some(eval_item) = items.first() {
-                            if let StructureItemDesc::Pstr_eval(eval_inner) = &*eval_item.pstr_desc { let (ref expr_idx, _) = **eval_inner;
+                            if let StructureItemDesc::Pstr_eval(eval_inner) = &*eval_item.pstr_desc
+                            {
+                                let (ref expr_idx, _) = **eval_inner;
                                 let expr = arena.get_expr(*expr_idx);
                                 match &*expr.pexp_desc {
                                     // @@config({no_export: ...}) - record form
                                     ExpressionDesc::Pexp_record(inner) => {
-                    let (ref fields, _) = **inner;
+                                        let (ref fields, _) = **inner;
                                         for field in fields {
                                             let lid = arena.get_longident(field.lid.txt);
                                             if let Longident::Lident(s) = lid {
@@ -357,7 +407,10 @@ fn wrap_no_export(arena: &mut ParseArena, structure: Vec<StructureItem>) -> Vec<
     let empty_sig_idx = arena.push_mod_type(empty_sig);
 
     let constrained_mod = ModuleExpr {
-        pmod_desc: Box::new(ModuleExprDesc::Pmod_constraint(inner_mod_idx, empty_sig_idx)),
+        pmod_desc: Box::new(ModuleExprDesc::Pmod_constraint(
+            inner_mod_idx,
+            empty_sig_idx,
+        )),
         pmod_loc: loc,
         pmod_attributes: Attributes::new(),
     };
@@ -385,7 +438,11 @@ mod tests {
     };
     use crate::parser::longident::Longident;
 
-    fn make_simple_let_binding(arena: &mut crate::parse_arena::ParseArena, name: &str, value: i32) -> StructureItem {
+    fn make_simple_let_binding(
+        arena: &mut crate::parse_arena::ParseArena,
+        name: &str,
+        value: i32,
+    ) -> StructureItem {
         let name_idx = arena.intern(name);
         let pat_idx = arena.push_pat(Pattern {
             ppat_desc: Box::new(PatternDesc::Ppat_var(Located {
@@ -417,10 +474,15 @@ mod tests {
         }
     }
 
-    fn make_module_ref_expr(arena: &mut crate::parse_arena::ParseArena, module: &str, name: &str) -> crate::parse_arena::ExprIdx {
+    fn make_module_ref_expr(
+        arena: &mut crate::parse_arena::ParseArena,
+        module: &str,
+        name: &str,
+    ) -> crate::parse_arena::ExprIdx {
         let module_idx = arena.intern(module);
         let name_idx = arena.intern(name);
-        let lid_idx = arena.push_longident(Longident::ldot(Longident::lident(module_idx), name_idx));
+        let lid_idx =
+            arena.push_longident(Longident::ldot(Longident::lident(module_idx), name_idx));
         arena.push_expr(Expression {
             pexp_desc: Box::new(ExpressionDesc::Pexp_ident(Located {
                 txt: lid_idx,
@@ -433,6 +495,11 @@ mod tests {
 
     fn make_test_arena() -> crate::parse_arena::ParseArena {
         crate::parse_arena::ParseArena::new()
+    }
+
+    fn dependency_section(bytes: &[u8]) -> &[u8] {
+        let dep_size = u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]) as usize;
+        &bytes[4..4 + dep_size]
     }
 
     #[test]
@@ -485,7 +552,10 @@ mod tests {
     fn test_with_dependencies() {
         let mut arena = make_test_arena();
         let ast = vec![StructureItem {
-            pstr_desc: Box::new(StructureItemDesc::Pstr_eval(Box::new((make_module_ref_expr(&mut arena, "Array", "map"), Attributes::new())))),
+            pstr_desc: Box::new(StructureItemDesc::Pstr_eval(Box::new((
+                make_module_ref_expr(&mut arena, "Array", "map"),
+                Attributes::new(),
+            )))),
             pstr_loc: LocIdx::none(),
         }];
 
@@ -515,7 +585,10 @@ mod tests {
                 pstr_loc: LocIdx::none(),
             },
             StructureItem {
-                pstr_desc: Box::new(StructureItemDesc::Pstr_eval(Box::new((make_module_ref_expr(&mut arena, "Js", "log"), Attributes::new())))),
+                pstr_desc: Box::new(StructureItemDesc::Pstr_eval(Box::new((
+                    make_module_ref_expr(&mut arena, "Js", "log"),
+                    Attributes::new(),
+                )))),
                 pstr_loc: LocIdx::none(),
             },
         ];
@@ -562,7 +635,8 @@ mod tests {
         assert!(!content.is_empty());
 
         // Verify marshal magic number is present
-        let dep_size = u32::from_be_bytes([content[0], content[1], content[2], content[3]]) as usize;
+        let dep_size =
+            u32::from_be_bytes([content[0], content[1], content[2], content[3]]) as usize;
         let source_path = "/test/test.res";
         let marshal_start = 4 + dep_size + source_path.len() + 1;
 
@@ -586,5 +660,35 @@ mod tests {
         // Check marshal magic
         let marshal_start = 4 + 1 + "/test/empty.resi\n".len();
         assert_eq!(result[marshal_start], 0x84);
+    }
+
+    #[test]
+    fn test_current_writer_merges_extracted_and_extra_deps() {
+        use std::fs;
+
+        let output_path = std::path::Path::new("target/test_binary_ast_writer_current.ast");
+        let mut arena = make_test_arena();
+        let ast = vec![StructureItem {
+            pstr_desc: Box::new(StructureItemDesc::Pstr_eval(Box::new((
+                make_module_ref_expr(&mut arena, "Array", "map"),
+                Attributes::new(),
+            )))),
+            pstr_loc: LocIdx::none(),
+        }];
+
+        let extra_deps = vec!["TellaStd".to_string(), "Array".to_string()];
+        write_structure_ast_current_with_extra_deps(
+            output_path,
+            "/test/current.res",
+            &mut arena,
+            &ast,
+            &extra_deps,
+        )
+        .unwrap();
+
+        let content = fs::read(output_path).unwrap();
+        assert_eq!(dependency_section(&content), b"\nArray\nTellaStd\n");
+
+        let _ = fs::remove_file(output_path);
     }
 }

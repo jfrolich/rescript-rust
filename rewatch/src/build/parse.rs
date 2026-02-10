@@ -10,7 +10,9 @@ use ahash::AHashSet;
 use anyhow::{Context, anyhow};
 use log::debug;
 use rayon::prelude::*;
-use rescript_compiler::binary_ast::{write_signature_ast_current, write_structure_ast_current};
+use rescript_compiler::binary_ast::{
+    write_signature_ast_current_with_extra_deps, write_structure_ast_current_with_extra_deps,
+};
 use rescript_compiler::parser::{Parser, code_frame, module};
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -342,6 +344,8 @@ fn generate_ast(
     let ast_output_path = build_path_abs.join(&ast_path);
     let source_path = source_file_for_bsc_ast(filename);
     let source_path_str = source_path.to_string_lossy().to_string();
+    let bsc_flags = config::flatten_flags(&package.config.compiler_flags);
+    let open_deps = open_dependencies_from_bsc_flags(&bsc_flags);
 
     // generate the dir of the ast_path (it mirrors the source file dir)
     let ast_parent_path = package.get_build_path().join(ast_path.parent().unwrap());
@@ -358,7 +362,7 @@ fn generate_ast(
                 package.name
             )
         });
-        generate_ast_with_rust_parser(&file_path, &ast_output_path, &source_path_str)
+        generate_ast_with_rust_parser(&file_path, &ast_output_path, &source_path_str, &open_deps)
             .map(|stderr| (ast_path.clone(), merge_warning_with_stderr(warning, stderr)))
     } else {
         let (_expected_ast_path, parser_args) = parser_args(
@@ -436,6 +440,24 @@ fn source_file_for_bsc_ast(filename: &Path) -> PathBuf {
     PathBuf::from("..").join("..").join(filename)
 }
 
+fn open_dependencies_from_bsc_flags(flags: &[String]) -> Vec<String> {
+    let mut deps = Vec::new();
+    let mut seen = AHashSet::new();
+    let mut i = 0;
+    while i < flags.len() {
+        if flags[i] == "-open" {
+            if let Some(dep) = flags.get(i + 1) {
+                if seen.insert(dep.clone()) {
+                    deps.push(dep.clone());
+                }
+            }
+            i += 1;
+        }
+        i += 1;
+    }
+    deps
+}
+
 fn first_unsupported_ppx_for_rust_parser(
     filtered_ppx_flags: &Option<Vec<OneOrMore<String>>>,
 ) -> Option<String> {
@@ -494,6 +516,7 @@ fn generate_ast_with_rust_parser(
     source_file: &Path,
     ast_output_path: &Path,
     source_path_for_ast: &str,
+    extra_deps: &[String],
 ) -> anyhow::Result<Option<helpers::StdErr>> {
     let bytes =
         std::fs::read(source_file).with_context(|| format!("Failed to read {}", source_file.display()))?;
@@ -520,11 +543,12 @@ fn generate_ast_with_rust_parser(
             };
         }
 
-        write_signature_ast_current(
+        write_signature_ast_current_with_extra_deps(
             ast_output_path,
             source_path_for_ast,
             parser.arena_mut(),
             &signature,
+            extra_deps,
         )
         .with_context(|| format!("Failed to write {}", ast_output_path.display()))?;
     } else {
@@ -542,11 +566,12 @@ fn generate_ast_with_rust_parser(
             };
         }
 
-        write_structure_ast_current(
+        write_structure_ast_current_with_extra_deps(
             ast_output_path,
             source_path_for_ast,
             parser.arena_mut(),
             &structure,
+            extra_deps,
         )
         .with_context(|| format!("Failed to write {}", ast_output_path.display()))?;
     }
@@ -569,4 +594,33 @@ fn filter_ppx_flags(
             .map(|x| x.to_owned())
             .collect::<Vec<OneOrMore<String>>>()
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::open_dependencies_from_bsc_flags;
+
+    #[test]
+    fn open_dependencies_extracts_and_dedups() {
+        let flags = vec![
+            "-open".to_string(),
+            "TellaStd".to_string(),
+            "-w".to_string(),
+            "+a".to_string(),
+            "-open".to_string(),
+            "Foo.Bar".to_string(),
+            "-open".to_string(),
+            "TellaStd".to_string(),
+        ];
+
+        let deps = open_dependencies_from_bsc_flags(&flags);
+        assert_eq!(deps, vec!["TellaStd".to_string(), "Foo.Bar".to_string()]);
+    }
+
+    #[test]
+    fn open_dependencies_ignores_missing_arg() {
+        let flags = vec!["-open".to_string()];
+        let deps = open_dependencies_from_bsc_flags(&flags);
+        assert!(deps.is_empty());
+    }
 }
