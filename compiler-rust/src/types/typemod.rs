@@ -3720,7 +3720,7 @@ fn type_structure_item<'a>(
                 }
 
                 // Convert manifest type (type alias)
-                let (typ_manifest, manifest_type_ref) = match &decl.ptype_manifest {
+                let (mut typ_manifest, mut manifest_type_ref) = match &decl.ptype_manifest {
                     Some(manifest) => {
                         let (typed_manifest, type_ref) = transl_type(tctx, &new_env, manifest)?;
                         (Some(typed_manifest), Some(type_ref))
@@ -4276,9 +4276,10 @@ fn type_structure_item<'a>(
                         let has_spread = internal_labels
                             .iter()
                             .any(|label| label.ld_id.name() == "...");
-                        let (internal_labels, typed_tree_labels) = if has_spread {
+                        let (internal_labels, typed_tree_labels, spread_only_object_manifest) = if has_spread {
                             let mut expanded_internal = Vec::new();
                             let mut expanded_typed = Vec::new();
+                            let mut all_spreads_resolved = true;
                             for (internal_label, typed_label) in
                                 internal_labels.iter().zip(typed_tree_labels.iter())
                             {
@@ -4304,14 +4305,57 @@ fn type_structure_item<'a>(
                                         expanded_internal.push(resolved_field);
                                     }
                                 } else {
+                                    all_spreads_resolved = false;
                                     expanded_internal.push(internal_label.clone());
                                     expanded_typed.push(typed_label.clone());
                                 }
                             }
-                            (expanded_internal, expanded_typed)
+                            if all_spreads_resolved {
+                                (expanded_internal, expanded_typed, None)
+                            } else {
+                                let only_spreads = labels
+                                    .iter()
+                                    .all(|label| arena.get_string(label.pld_name.txt) == "...");
+                                if only_spreads {
+                                    let object_fields = labels
+                                        .iter()
+                                        .filter_map(|label| {
+                                            if arena.get_string(label.pld_name.txt) == "..." {
+                                                Some(crate::parser::ast::ObjectField::Oinherit(
+                                                    label.pld_type.clone(),
+                                                ))
+                                            } else {
+                                                None
+                                            }
+                                        })
+                                        .collect::<Vec<_>>();
+                                    let object_manifest = crate::parser::ast::CoreType {
+                                        ptyp_desc: crate::parser::ast::CoreTypeDesc::Ptyp_object(
+                                            object_fields,
+                                            crate::parser::ast::ClosedFlag::Closed,
+                                        ),
+                                        ptyp_loc: decl.ptype_loc,
+                                        ptyp_attributes: vec![],
+                                    };
+                                    (expanded_internal, expanded_typed, Some(object_manifest))
+                                } else {
+                                    (expanded_internal, expanded_typed, None)
+                                }
+                            }
                         } else {
-                            (internal_labels, typed_tree_labels)
+                            (internal_labels, typed_tree_labels, None)
                         };
+                        if let Some(object_manifest) = spread_only_object_manifest {
+                            let (typed_manifest, manifest_ref) =
+                                transl_type(tctx, &new_env, &object_manifest)?;
+                            typ_manifest = Some(typed_manifest);
+                            manifest_type_ref = Some(manifest_ref);
+                            (
+                                crate::types::TypeKind::TypeAbstract,
+                                TypedTypeKind::Ttype_abstract,
+                                vec![],
+                            )
+                        } else {
                         (
                             crate::types::TypeKind::TypeRecord(
                                 internal_labels,
@@ -4320,6 +4364,7 @@ fn type_structure_item<'a>(
                             TypedTypeKind::Ttype_record(typed_tree_labels),
                             vec![],
                         )
+                        }
                     }
                     crate::parser::ast::TypeKind::Ptype_open => {
                         (crate::types::TypeKind::TypeOpen, TypedTypeKind::Ttype_open, vec![])
