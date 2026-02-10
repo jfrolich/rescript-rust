@@ -49,6 +49,7 @@ pub mod format;
 pub mod formatter;
 pub mod grammar;
 pub mod jsx_ppx;
+pub mod let_unwrap_ppx;
 pub mod longident;
 pub mod ml_printer;
 pub mod module;

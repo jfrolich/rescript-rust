@@ -591,6 +591,14 @@ impl Config {
         }
     }
 
+    pub fn has_experimental_feature(&self, feature: ExperimentalFeature) -> bool {
+        self.experimental_features
+            .as_ref()
+            .and_then(|map| map.get(&feature))
+            .copied()
+            .unwrap_or(false)
+    }
+
     pub fn get_gentype_arg(&self) -> Vec<String> {
         match &self.gentype_config {
             Some(_) => vec!["-bs-gentype".to_string()],

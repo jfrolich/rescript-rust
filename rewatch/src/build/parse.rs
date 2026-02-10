@@ -3,7 +3,7 @@ use super::logs;
 use super::namespaces;
 use crate::build::packages::Package;
 use crate::config;
-use crate::config::{Config, OneOrMore};
+use crate::config::{Config, ExperimentalFeature, OneOrMore};
 use crate::helpers;
 use crate::project_context::ProjectContext;
 use ahash::AHashSet;
@@ -13,7 +13,7 @@ use rayon::prelude::*;
 use rescript_compiler::binary_ast::{
     write_signature_ast_current_with_extra_deps, write_structure_ast_current_with_extra_deps,
 };
-use rescript_compiler::parser::{Parser, code_frame, jsx_ppx, module};
+use rescript_compiler::parser::{Parser, code_frame, jsx_ppx, let_unwrap_ppx, module};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -347,6 +347,10 @@ fn generate_ast(
     let bsc_flags = config::flatten_flags(&package.config.compiler_flags);
     let open_deps = open_dependencies_from_bsc_flags(&bsc_flags);
     let jsx_version = rust_parser_effective_jsx_version(build_state.project_context.get_root_config());
+    let let_unwrap_enabled = rust_parser_let_unwrap_enabled(
+        build_state.project_context.get_root_config(),
+        &package.config,
+    );
 
     // generate the dir of the ast_path (it mirrors the source file dir)
     let ast_parent_path = package.get_build_path().join(ast_path.parent().unwrap());
@@ -369,6 +373,7 @@ fn generate_ast(
             &source_path_str,
             &open_deps,
             jsx_version,
+            let_unwrap_enabled,
         )
             .map(|stderr| (ast_path.clone(), merge_warning_with_stderr(warning, stderr)))
     } else {
@@ -480,6 +485,11 @@ fn rust_parser_effective_jsx_version(root_config: &Config) -> i32 {
     if preserve { -1 } else { version }
 }
 
+fn rust_parser_let_unwrap_enabled(root_config: &Config, package_config: &Config) -> bool {
+    package_config.has_experimental_feature(ExperimentalFeature::LetUnwrap)
+        || root_config.has_experimental_feature(ExperimentalFeature::LetUnwrap)
+}
+
 fn first_unsupported_ppx_for_rust_parser(
     filtered_ppx_flags: &Option<Vec<OneOrMore<String>>>,
 ) -> Option<String> {
@@ -540,6 +550,7 @@ fn generate_ast_with_rust_parser(
     source_path_for_ast: &str,
     extra_deps: &[String],
     jsx_version: i32,
+    let_unwrap_enabled: bool,
 ) -> anyhow::Result<Option<helpers::StdErr>> {
     let bytes =
         std::fs::read(source_file).with_context(|| format!("Failed to read {}", source_file.display()))?;
@@ -566,6 +577,12 @@ fn generate_ast_with_rust_parser(
             };
         }
         let signature = jsx_ppx::transform_signature(signature, jsx_version, parser.arena_mut());
+        let signature = let_unwrap_ppx::rewrite_signature(
+            &signature,
+            parser.arena_mut(),
+            let_unwrap_enabled,
+        )
+        .map_err(|e| anyhow!(e))?;
 
         write_signature_ast_current_with_extra_deps(
             ast_output_path,
@@ -590,6 +607,12 @@ fn generate_ast_with_rust_parser(
             };
         }
         let structure = jsx_ppx::transform_structure(structure, jsx_version, parser.arena_mut());
+        let structure = let_unwrap_ppx::rewrite_structure(
+            &structure,
+            parser.arena_mut(),
+            let_unwrap_enabled,
+        )
+        .map_err(|e| anyhow!(e))?;
 
         write_structure_ast_current_with_extra_deps(
             ast_output_path,
@@ -623,7 +646,10 @@ fn filter_ppx_flags(
 
 #[cfg(test)]
 mod tests {
-    use super::{open_dependencies_from_bsc_flags, rust_parser_effective_jsx_version};
+    use super::{
+        open_dependencies_from_bsc_flags, rust_parser_effective_jsx_version,
+        rust_parser_let_unwrap_enabled,
+    };
     use crate::config::Config;
 
     #[test]
@@ -680,5 +706,55 @@ mod tests {
         .unwrap();
 
         assert_eq!(rust_parser_effective_jsx_version(&config), -1);
+    }
+
+    #[test]
+    fn rust_parser_let_unwrap_enabled_from_package_config() {
+        let root = Config::new_from_json_string(
+            r#"
+            {
+                "name": "root",
+                "sources": ["src"]
+            }
+            "#,
+        )
+        .unwrap();
+        let package = Config::new_from_json_string(
+            r#"
+            {
+                "name": "pkg",
+                "sources": ["src"],
+                "experimental-features": { "LetUnwrap": true }
+            }
+            "#,
+        )
+        .unwrap();
+
+        assert!(rust_parser_let_unwrap_enabled(&root, &package));
+    }
+
+    #[test]
+    fn rust_parser_let_unwrap_enabled_from_root_config() {
+        let root = Config::new_from_json_string(
+            r#"
+            {
+                "name": "root",
+                "sources": ["src"],
+                "experimental-features": { "LetUnwrap": true }
+            }
+            "#,
+        )
+        .unwrap();
+        let package = Config::new_from_json_string(
+            r#"
+            {
+                "name": "pkg",
+                "sources": ["src"]
+            }
+            "#,
+        )
+        .unwrap();
+
+        assert!(rust_parser_let_unwrap_enabled(&root, &package));
     }
 }
