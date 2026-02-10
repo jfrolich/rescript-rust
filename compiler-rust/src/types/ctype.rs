@@ -1091,7 +1091,11 @@ fn unify_types<'a>(
             drop(desc1);
             drop(desc2);
 
-            unify_rows(ctx, state, &row1, &row2)?;
+            let merged_row = unify_rows(ctx, state, &row1, &row2)?;
+            // Keep the unified representative row shape (OCaml `unify_row` merges
+            // disjoint labels through row-more links, so the resulting repr exposes
+            // the union of labels rather than whichever side happened to be linked).
+            ctx.set_desc(t2, TypeDesc::Tvariant(merged_row));
             link_type(ctx, t1, t2);
             Ok(())
         }
@@ -1268,9 +1272,11 @@ fn unify_rows<'a>(
     state: &mut UnifyState,
     row1: &RowDesc,
     row2: &RowDesc,
-) -> TypeResult<()> {
+) -> TypeResult<RowDesc> {
     let row1 = row_repr(ctx, row1);
     let row2 = row_repr(ctx, row2);
+
+    let mut merged_fields = row2.row_fields.clone();
 
     // Unify the fields
     for (label, field1) in &row1.row_fields {
@@ -1280,6 +1286,8 @@ fn unify_rows<'a>(
         } else if row2.row_closed {
             // Field not found and row is closed - error
             return Err(TypeError::Unify(vec![]));
+        } else {
+            merged_fields.push((label.clone(), field1.clone()));
         }
         // If row is open, the field might be added later
     }
@@ -1294,7 +1302,21 @@ fn unify_rows<'a>(
     // Unify the "more" types
     let more1 = row_more(ctx, &row1);
     let more2 = row_more(ctx, &row2);
-    unify(ctx, state, more1, more2)
+    unify(ctx, state, more1, more2)?;
+
+    // `row_repr` may produce duplicate labels through nested row flattening.
+    // Keep first occurrence for deterministic output.
+    let mut seen = HashSet::new();
+    merged_fields.retain(|(label, _)| seen.insert(label.clone()));
+    merged_fields.sort_by(|(l1, _), (l2, _)| l1.cmp(l2));
+
+    Ok(RowDesc {
+        row_fields: merged_fields,
+        row_more: ctx.repr(more2),
+        row_closed: row1.row_closed || row2.row_closed,
+        row_fixed: row1.row_fixed || row2.row_fixed,
+        row_name: row2.row_name.clone().or_else(|| row1.row_name.clone()),
+    })
 }
 
 /// Unify two row fields.
