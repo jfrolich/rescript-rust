@@ -28,6 +28,7 @@ serde_ignored = "0.1.11"
 serde_path_to_error = "0.1.16"
 sysinfo = "0.29.10"
 tempfile = "3.10.1"
+rescript-compiler = { path = "../compiler-rust" }
 
 
 [profile.release]

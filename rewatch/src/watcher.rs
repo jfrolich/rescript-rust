@@ -66,6 +66,7 @@ struct AsyncWatchArgs<'a> {
     create_sourcedirs: bool,
     plain_output: bool,
     warn_error: Option<String>,
+    use_rust_parser: bool,
 }
 
 async fn async_watch(
@@ -78,11 +79,19 @@ async fn async_watch(
         create_sourcedirs,
         plain_output,
         warn_error,
+        use_rust_parser,
     }: AsyncWatchArgs<'_>,
 ) -> Result<()> {
-    let mut build_state: build::build_types::BuildCommandState =
-        build::initialize_build(None, filter, show_progress, path, plain_output, warn_error)
-            .with_context(|| "Could not initialize build")?;
+    let mut build_state: build::build_types::BuildCommandState = build::initialize_build(
+        None,
+        filter,
+        show_progress,
+        path,
+        plain_output,
+        warn_error,
+        use_rust_parser,
+    )
+    .with_context(|| "Could not initialize build")?;
     let mut needs_compile_type = CompileType::Incremental;
     // create a mutex to capture if ctrl-c was pressed
     let ctrlc_pressed = Arc::new(Mutex::new(false));
@@ -278,6 +287,7 @@ async fn async_watch(
                     path,
                     plain_output,
                     build_state.get_warn_error_override(),
+                    build_state.use_rust_parser(),
                 )
                 .expect("Could not initialize build");
                 let _ = build::incremental_build(
@@ -325,6 +335,7 @@ pub fn start(
     create_sourcedirs: bool,
     plain_output: bool,
     warn_error: Option<String>,
+    use_rust_parser: bool,
 ) -> Result<()> {
     futures::executor::block_on(async {
         let queue = Arc::new(FifoQueue::<Result<Event, Error>>::new());
@@ -351,6 +362,7 @@ pub fn start(
             create_sourcedirs,
             plain_output,
             warn_error: warn_error.clone(),
+            use_rust_parser,
         })
         .await
     })

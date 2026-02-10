@@ -73,6 +73,7 @@ fn main() -> Result<()> {
                 true, // create_sourcedirs is now always enabled
                 plain_output,
                 (*build_args.warn_error).clone(),
+                *build_args.rust,
             ) {
                 Err(e) => {
                     eprintln!("{:#}", e);
@@ -109,6 +110,7 @@ fn main() -> Result<()> {
                 true, // create_sourcedirs is now always enabled
                 plain_output,
                 (*watch_args.warn_error).clone(),
+                *watch_args.rust,
             ) {
                 Err(e) => {
                     eprintln!("{:#}", e);

@@ -133,6 +133,7 @@ pub fn initialize_build(
     path: &Path,
     plain_output: bool,
     warn_error: Option<String>,
+    use_rust_parser: bool,
 ) -> Result<BuildCommandState> {
     let project_context = ProjectContext::new(path)?;
     let compiler = get_compiler_info(&project_context)?;
@@ -146,7 +147,8 @@ pub fn initialize_build(
         return Err(anyhow!("Failed to validate package dependencies"));
     }
 
-    let mut build_state = BuildCommandState::new(project_context, packages, compiler, warn_error);
+    let mut build_state =
+        BuildCommandState::new(project_context, packages, compiler, warn_error, use_rust_parser);
     packages::parse_packages(&mut build_state)?;
 
     let compile_assets_state = read_compile_state::read(&mut build_state)?;
@@ -501,6 +503,7 @@ pub fn build(
     create_sourcedirs: bool,
     plain_output: bool,
     warn_error: Option<String>,
+    use_rust_parser: bool,
 ) -> Result<BuildCommandState> {
     let default_timing: Option<std::time::Duration> = if no_timing {
         Some(std::time::Duration::new(0.0 as u64, 0.0 as u32))
@@ -515,6 +518,7 @@ pub fn build(
         path,
         plain_output,
         warn_error,
+        use_rust_parser,
     )
     .with_context(|| "Could not initialize build")?;
 

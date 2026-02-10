@@ -217,6 +217,13 @@ pub struct WarnErrorArg {
     pub warn_error: Option<String>,
 }
 
+#[derive(Args, Debug, Clone, Copy)]
+pub struct RustParserArg {
+    /// Parse sources in-process with the Rust parser (no parser subprocess).
+    #[arg(long, default_value_t = false, num_args = 0..=1)]
+    pub rust: bool,
+}
+
 #[derive(Args, Debug, Clone)]
 pub struct BuildArgs {
     #[command(flatten)]
@@ -236,6 +243,9 @@ pub struct BuildArgs {
 
     #[command(flatten)]
     pub warn_error: WarnErrorArg,
+
+    #[command(flatten)]
+    pub rust: RustParserArg,
 
     /// Disable output timing
     #[arg(short, long, default_value_t = false, num_args = 0..=1)]
@@ -332,6 +342,16 @@ mod tests {
         }
     }
 
+    #[test]
+    fn build_rust_flag_is_parsed_normally() {
+        let cli = parse(&["rescript", "build", "--rust"]).expect("expected build command");
+
+        match cli.command {
+            Command::Build(build_args) => assert!(build_args.rust.rust),
+            other => panic!("expected build command, got {other:?}"),
+        }
+    }
+
     // Subcommand flag handling.
     #[test]
     fn respects_global_flag_before_subcommand() {
@@ -344,6 +364,16 @@ mod tests {
     fn invalid_option_for_subcommand_does_not_fallback() {
         let err = parse(&["rescript", "watch", "--no-timing"]).expect_err("expected watch parse failure");
         assert_eq!(err.kind(), ErrorKind::UnknownArgument);
+    }
+
+    #[test]
+    fn watch_rust_flag_is_parsed_normally() {
+        let cli = parse(&["rescript", "watch", "--rust"]).expect("expected watch command");
+
+        match cli.command {
+            Command::Watch(watch_args) => assert!(watch_args.rust.rust),
+            other => panic!("expected watch command, got {other:?}"),
+        }
     }
 
     // Version/help flag handling.
@@ -403,6 +433,9 @@ pub struct WatchArgs {
 
     #[command(flatten)]
     pub warn_error: WarnErrorArg,
+
+    #[command(flatten)]
+    pub rust: RustParserArg,
 }
 
 impl From<BuildArgs> for WatchArgs {
@@ -414,6 +447,7 @@ impl From<BuildArgs> for WatchArgs {
             create_sourcedirs: build_args.create_sourcedirs,
             dev: build_args.dev,
             warn_error: build_args.warn_error,
+            rust: build_args.rust,
         }
     }
 }
@@ -507,5 +541,13 @@ impl Deref for WarnErrorArg {
 
     fn deref(&self) -> &Self::Target {
         &self.warn_error
+    }
+}
+
+impl Deref for RustParserArg {
+    type Target = bool;
+
+    fn deref(&self) -> &Self::Target {
+        &self.rust
     }
 }

@@ -7,9 +7,11 @@ use crate::config::{Config, OneOrMore};
 use crate::helpers;
 use crate::project_context::ProjectContext;
 use ahash::AHashSet;
-use anyhow::anyhow;
+use anyhow::{Context, anyhow};
 use log::debug;
 use rayon::prelude::*;
+use rescript_compiler::binary_ast::{write_signature_ast_current, write_structure_ast_current};
+use rescript_compiler::parser::{Parser, code_frame, module};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -19,6 +21,7 @@ pub fn generate_asts(
 ) -> anyhow::Result<String> {
     let mut has_failure = false;
     let mut stderr = "".to_string();
+    let use_rust_parser = build_state.use_rust_parser();
 
     build_state
         .modules
@@ -53,6 +56,7 @@ pub fn generate_asts(
                             &source_file.implementation.path.to_owned(),
                             build_state,
                             build_state.get_warn_error_override(),
+                            use_rust_parser,
                         )
                         .map_err(|e| e.to_string());
 
@@ -63,6 +67,7 @@ pub fn generate_asts(
                                     &interface_file_path.to_owned(),
                                     build_state,
                                     build_state.get_warn_error_override(),
+                                    use_rust_parser,
                                 ) {
                                     Ok(v) => Ok(Some(v)),
                                     Err(e) => Err(e.to_string()),
@@ -327,59 +332,80 @@ fn generate_ast(
     filename: &Path,
     build_state: &BuildState,
     warn_error_override: Option<String>,
+    use_rust_parser: bool,
 ) -> anyhow::Result<(PathBuf, Option<helpers::StdErr>)> {
     let file_path = PathBuf::from(&package.path).join(filename);
     let contents = helpers::read_file(&file_path).expect("Error reading file");
 
     let build_path_abs = package.get_build_path();
-    let (ast_path, parser_args) = parser_args(
-        &build_state.project_context,
-        &package.config,
-        filename,
-        &contents,
-        package.is_local_dep,
-        warn_error_override,
-    )?;
+    let ast_path = helpers::get_ast_path(filename);
+    let ast_output_path = build_path_abs.join(&ast_path);
+    let source_path = source_file_for_bsc_ast(filename);
+    let source_path_str = source_path.to_string_lossy().to_string();
 
     // generate the dir of the ast_path (it mirrors the source file dir)
     let ast_parent_path = package.get_build_path().join(ast_path.parent().unwrap());
     helpers::create_path(&ast_parent_path);
 
     /* Create .ast */
-    let result = match Some(
-        Command::new(&build_state.compiler_info.bsc_path)
-            .current_dir(&build_path_abs)
-            .args(parser_args)
-            .output()
-            .map_err(|e| {
-                anyhow!(
-                    "Error running bsc for parsing {}: {}",
-                    filename.to_string_lossy(),
-                    e
-                )
-            })?,
-    ) {
-        Some(res_to_ast) => {
-            let stderr = String::from_utf8_lossy(&res_to_ast.stderr).to_string();
-
-            if helpers::contains_ascii_characters(&stderr) {
-                if res_to_ast.status.success() {
-                    Ok((ast_path, Some(stderr.to_string())))
-                } else {
-                    Err(anyhow!("Error in {}:\n{}", package.name, stderr))
-                }
-            } else {
-                Ok((ast_path, None))
-            }
-        }
-        _ => {
-            log::info!("Parsing file {}...", filename.display());
-
+    let result = if use_rust_parser {
+        let filtered_ppx_flags = filter_ppx_flags(&package.config.ppx_flags, &contents);
+        if let Some(unsupported_ppx) = first_unsupported_ppx_for_rust_parser(&filtered_ppx_flags) {
             Err(anyhow!(
-                "Could not find canonicalize_string_path for file {} in package {}",
+                "Rust parser mode (--rust) does not support external ppx `{}` for {} in package {}",
+                unsupported_ppx,
                 filename.display(),
                 package.name
             ))
+        } else {
+            generate_ast_with_rust_parser(&file_path, &ast_output_path, &source_path_str)
+                .map(|stderr| (ast_path.clone(), stderr))
+        }
+    } else {
+        let (_expected_ast_path, parser_args) = parser_args(
+            &build_state.project_context,
+            &package.config,
+            filename,
+            &contents,
+            package.is_local_dep,
+            warn_error_override,
+        )?;
+
+        match Some(
+            Command::new(&build_state.compiler_info.bsc_path)
+                .current_dir(&build_path_abs)
+                .args(parser_args)
+                .output()
+                .map_err(|e| {
+                    anyhow!(
+                        "Error running bsc for parsing {}: {}",
+                        filename.to_string_lossy(),
+                        e
+                    )
+                })?,
+        ) {
+            Some(res_to_ast) => {
+                let stderr = String::from_utf8_lossy(&res_to_ast.stderr).to_string();
+
+                if helpers::contains_ascii_characters(&stderr) {
+                    if res_to_ast.status.success() {
+                        Ok((ast_path.clone(), Some(stderr.to_string())))
+                    } else {
+                        Err(anyhow!("Error in {}:\n{}", package.name, stderr))
+                    }
+                } else {
+                    Ok((ast_path.clone(), None))
+                }
+            }
+            _ => {
+                log::info!("Parsing file {}...", filename.display());
+
+                Err(anyhow!(
+                    "Could not find canonicalize_string_path for file {} in package {}",
+                    filename.display(),
+                    package.name
+                ))
+            }
         }
     };
     if let Ok((ast_path, _)) = &result {
@@ -405,6 +431,113 @@ fn include_ppx(flag: &str, contents: &str) -> bool {
     };
 
     true
+}
+
+fn source_file_for_bsc_ast(filename: &Path) -> PathBuf {
+    PathBuf::from("..").join("..").join(filename)
+}
+
+fn first_unsupported_ppx_for_rust_parser(
+    filtered_ppx_flags: &Option<Vec<OneOrMore<String>>>,
+) -> Option<String> {
+    filtered_ppx_flags.as_ref().and_then(|flags| {
+        flags.iter().find_map(|flag| {
+            let ppx_name = match flag {
+                OneOrMore::Single(s) => Some(s.as_str()),
+                OneOrMore::Multiple(xs) => xs.first().map(String::as_str),
+            };
+            match ppx_name {
+                Some(name) if name.contains("spice") => None,
+                Some(name) => Some(name.to_string()),
+                None => None,
+            }
+        })
+    })
+}
+
+fn diagnostics_to_stderr(parser: &Parser<'_>, source: &str, filename: &str) -> String {
+    parser
+        .diagnostics()
+        .iter()
+        .map(|diag| {
+            code_frame::format_error(
+                filename,
+                source,
+                &diag.start_pos,
+                &diag.end_pos,
+                &diag.explain_with_source(Some(source)),
+            )
+        })
+        .collect::<Vec<String>>()
+        .join("")
+}
+
+fn source_bytes_to_latin1(bytes: &[u8]) -> String {
+    bytes.iter().map(|&b| b as char).collect()
+}
+
+fn generate_ast_with_rust_parser(
+    source_file: &Path,
+    ast_output_path: &Path,
+    source_path_for_ast: &str,
+) -> anyhow::Result<Option<helpers::StdErr>> {
+    let bytes =
+        std::fs::read(source_file).with_context(|| format!("Failed to read {}", source_file.display()))?;
+    let source = source_bytes_to_latin1(&bytes);
+    let mut parser = Parser::new(source_path_for_ast.to_string(), &source);
+
+    let is_interface = source_file
+        .extension()
+        .and_then(|s| s.to_str())
+        .is_some_and(|ext| ext == "resi" || ext == "mli");
+
+    if is_interface {
+        let signature = module::parse_signature(&mut parser);
+        if parser.has_errors() {
+            let stderr = diagnostics_to_stderr(&parser, &source, source_path_for_ast);
+            return if stderr.is_empty() {
+                Err(anyhow!(
+                    "Parse failed with {} error(s) in {}",
+                    parser.diagnostics().len(),
+                    source_file.display()
+                ))
+            } else {
+                Err(anyhow!(stderr))
+            };
+        }
+
+        write_signature_ast_current(
+            ast_output_path,
+            source_path_for_ast,
+            parser.arena_mut(),
+            &signature,
+        )
+        .with_context(|| format!("Failed to write {}", ast_output_path.display()))?;
+    } else {
+        let structure = module::parse_structure(&mut parser);
+        if parser.has_errors() {
+            let stderr = diagnostics_to_stderr(&parser, &source, source_path_for_ast);
+            return if stderr.is_empty() {
+                Err(anyhow!(
+                    "Parse failed with {} error(s) in {}",
+                    parser.diagnostics().len(),
+                    source_file.display()
+                ))
+            } else {
+                Err(anyhow!(stderr))
+            };
+        }
+
+        write_structure_ast_current(
+            ast_output_path,
+            source_path_for_ast,
+            parser.arena_mut(),
+            &structure,
+        )
+        .with_context(|| format!("Failed to write {}", ast_output_path.display()))?;
+    }
+
+    Ok(None)
 }
 
 fn filter_ppx_flags(
