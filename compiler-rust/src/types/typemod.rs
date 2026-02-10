@@ -4951,8 +4951,28 @@ fn type_structure_item<'a>(
             // Module binding: module M = ME
             // Compute the semantic module type BEFORE type-checking the module expr,
             // so we can use it to extend the environment.
-            let semantic_mod_type =
-                lookup_module_type_from_parsed_module_expr(tctx, env, arena, &mb.pmb_expr);
+            let semantic_mod_type = match &mb.pmb_expr.pmod_desc {
+                // Match OCaml typemod: module aliases keep an alias semantic type
+                // (Mty_alias) instead of eagerly replacing it with the aliased
+                // signature. This is required so later Pmod_ident uses can receive
+                // implicit Tmod_constraint wrapping.
+                ParsedModuleExprDesc::Pmod_ident(lid) => {
+                    let longident = arena.get_longident(lid.txt);
+                    let path = lookup_module_path_by_lid(
+                        longident,
+                        arena,
+                        env,
+                        &mut tctx.persistent_env,
+                        tctx.type_ctx,
+                    )
+                    .unwrap_or_else(|| path_from_longident(longident, |idx| arena.get_string(idx)));
+                    Some(crate::types::decl::ModuleType::MtyAlias(
+                        crate::types::decl::AliasPresence::MtaAbsent,
+                        path,
+                    ))
+                }
+                _ => lookup_module_type_from_parsed_module_expr(tctx, env, arena, &mb.pmb_expr),
+            };
 
             let typed_mod = type_module_expr_with_alias(tctx, env, arena, &mb.pmb_expr, true)?;
             let mod_name_str = arena.get_string(mb.pmb_name.txt);
