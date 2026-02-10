@@ -350,17 +350,16 @@ fn generate_ast(
     /* Create .ast */
     let result = if use_rust_parser {
         let filtered_ppx_flags = filter_ppx_flags(&package.config.ppx_flags, &contents);
-        if let Some(unsupported_ppx) = first_unsupported_ppx_for_rust_parser(&filtered_ppx_flags) {
-            Err(anyhow!(
-                "Rust parser mode (--rust) does not support external ppx `{}` for {} in package {}",
+        let warning = first_unsupported_ppx_for_rust_parser(&filtered_ppx_flags).map(|unsupported_ppx| {
+            format!(
+                "Warning: Rust parser mode (--rust) does not run external ppx `{}` for {} in package {}. Continuing with Rust parser output.\n",
                 unsupported_ppx,
                 filename.display(),
                 package.name
-            ))
-        } else {
-            generate_ast_with_rust_parser(&file_path, &ast_output_path, &source_path_str)
-                .map(|stderr| (ast_path.clone(), stderr))
-        }
+            )
+        });
+        generate_ast_with_rust_parser(&file_path, &ast_output_path, &source_path_str)
+            .map(|stderr| (ast_path.clone(), merge_warning_with_stderr(warning, stderr)))
     } else {
         let (_expected_ast_path, parser_args) = parser_args(
             &build_state.project_context,
@@ -453,6 +452,21 @@ fn first_unsupported_ppx_for_rust_parser(
             }
         })
     })
+}
+
+fn merge_warning_with_stderr(
+    warning: Option<helpers::StdErr>,
+    stderr: Option<helpers::StdErr>,
+) -> Option<helpers::StdErr> {
+    match (warning, stderr) {
+        (Some(mut warning), Some(stderr)) => {
+            warning.push_str(&stderr);
+            Some(warning)
+        }
+        (Some(warning), None) => Some(warning),
+        (None, Some(stderr)) => Some(stderr),
+        (None, None) => None,
+    }
 }
 
 fn diagnostics_to_stderr(parser: &Parser<'_>, source: &str, filename: &str) -> String {
