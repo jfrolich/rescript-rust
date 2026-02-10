@@ -787,10 +787,12 @@ fn sexp_expression_desc(arena: &ParseArena, ctx: &TypeContext<'_>, with_locs: bo
                             // OCaml has (arg_label * expression option), so we wrap expression in Some
                             Sexp::list(vec![
                                 sexp_type_arg_label(&arg.label),
-                                Sexp::list(vec![
-                                    Sexp::atom("Some"),
-                                    sexp_expression(arena, ctx, with_locs, &arg.expression),
-                                ]),
+                                opt(
+                                    |expr: &Expression| {
+                                        sexp_expression(arena, ctx, with_locs, expr)
+                                    },
+                                    &arg.expression,
+                                ),
                             ])
                         })
                         .collect(),

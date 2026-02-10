@@ -1794,8 +1794,11 @@ fn find_packed_typed_module_expr(expr: &Expression) -> Option<&ModuleExpr> {
         ExpressionDesc::Texp_pack(mod_expr) => Some(mod_expr),
         ExpressionDesc::Texp_apply { funct, args, .. } => find_packed_typed_module_expr(funct)
             .or_else(|| {
-                args.iter()
-                    .find_map(|arg| find_packed_typed_module_expr(&arg.expression))
+                args.iter().find_map(|arg| {
+                    arg.expression
+                        .as_ref()
+                        .and_then(find_packed_typed_module_expr)
+                })
             }),
         ExpressionDesc::Texp_let(_, bindings, body) => bindings
             .iter()

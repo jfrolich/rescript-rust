@@ -3618,11 +3618,11 @@ fn translate_unified_ops(
             let typed_args = vec![
                 ApplyArg {
                     label: convert_arg_label_for_ctx(&args[0].0, tctx.arena),
-                    expression: lhs,
+                    expression: Some(lhs),
                 },
                 ApplyArg {
                     label: convert_arg_label_for_ctx(&args[1].0, tctx.arena),
-                    expression: rhs,
+                    expression: Some(rhs),
                 },
             ];
 
@@ -3682,7 +3682,7 @@ fn translate_unified_ops(
 
             let typed_args = vec![ApplyArg {
                 label: convert_arg_label_for_ctx(&args[0].0, tctx.arena),
-                expression: arg,
+                expression: Some(arg),
             }];
 
             Some(Ok(Expression::new(
@@ -3726,6 +3726,9 @@ fn type_application(
         SynthOptionalNone {
             label: crate::types::ArgLabel,
             option_ty: TypeExprRef,
+        },
+        Omitted {
+            label: crate::types::ArgLabel,
         },
     }
 
@@ -3873,6 +3876,9 @@ fn type_application(
                 continue;
             }
 
+            pending_args.push(PendingApplyArg::Omitted {
+                label: fn_label.clone(),
+            });
             omitted.push((fn_label, arg_ty));
             current_ty = ret_ty;
             continue;
@@ -3959,7 +3965,7 @@ fn type_application(
                 }
                 typed_args.push(ApplyArg {
                     label,
-                    expression: typed_arg,
+                    expression: Some(typed_arg),
                 });
             }
             PendingApplyArg::SynthOptionalNone { label, option_ty } => {
@@ -3980,7 +3986,13 @@ fn type_application(
                 );
                 typed_args.push(ApplyArg {
                     label,
-                    expression: none_expr,
+                    expression: Some(none_expr),
+                });
+            }
+            PendingApplyArg::Omitted { label } => {
+                typed_args.push(ApplyArg {
+                    label,
+                    expression: None,
                 });
             }
         }
@@ -7167,27 +7179,26 @@ fn is_nonexpansive_expression(tctx: &TypeCheckContext<'_>, exp: &Expression) -> 
         ExpressionDesc::Texp_pack(module_expr) => is_nonexpansive_module_expr(tctx, module_expr),
         ExpressionDesc::Texp_assert(expr) => is_nonexpansive_expression(tctx, expr),
         ExpressionDesc::Texp_apply { funct, args, .. } => {
-            if let Some(first_arg) = args.first() {
-                let funct_ty = tctx.type_ctx.repr(funct.exp_type);
-                if let TypeDesc::Tarrow { arg, .. } = &*tctx.type_ctx.get_desc(funct_ty) {
-                    // OCaml marks applications with a leading omitted labelled arg
-                    // (`(_, None) :: _`) as nonexpansive. Our typedtree currently
-                    // doesn't retain explicit `None` entries, so detect the same shape
-                    // via the first provided label not matching the function's first
-                    // parameter label.
-                    if !arg.lbl.same_label(&first_arg.label) {
-                        return is_nonexpansive_expression(tctx, funct)
-                            && args
-                                .iter()
-                                .all(|arg| is_nonexpansive_expression(tctx, &arg.expression));
-                    }
+            if let Some((first_arg, rest_args)) = args.split_first() {
+                if first_arg.expression.is_none() {
+                    return is_nonexpansive_expression(tctx, funct)
+                        && rest_args.iter().all(|arg| {
+                            arg.expression
+                                .as_ref()
+                                .map_or(true, |expr| is_nonexpansive_expression(tctx, expr))
+                        });
                 }
             }
 
             if let ExpressionDesc::Texp_ident(_, _, desc) = &funct.exp_desc {
                 if let crate::types::ValueKind::ValPrim(prim) = &desc.val_kind {
-                    if prim.prim_name == "%raise" && args.len() == 1 {
-                        return is_nonexpansive_expression(tctx, &args[0].expression);
+                    if prim.prim_name == "%raise"
+                        && args.len() == 1
+                        && matches!(args[0].label, crate::types::ArgLabel::Nolabel)
+                    {
+                        if let Some(arg_expr) = &args[0].expression {
+                            return is_nonexpansive_expression(tctx, arg_expr);
+                        }
                     }
                 }
             }

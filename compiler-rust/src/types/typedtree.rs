@@ -305,8 +305,8 @@ pub enum RecordLabelDefinition {
 pub struct ApplyArg {
     /// Argument label.
     pub label: TypeArgLabel,
-    /// Argument expression.
-    pub expression: Expression,
+    /// Argument expression, or None for omitted labeled arguments.
+    pub expression: Option<Expression>,
 }
 
 /// A function parameter.
