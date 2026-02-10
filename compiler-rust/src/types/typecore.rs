@@ -153,17 +153,19 @@ fn convert_loc(loc: LocIdx, arena: &ParseArena) -> Location {
 }
 
 fn find_loc_idx_by_bounds(arena: &ParseArena, start: PosIdx, end: PosIdx) -> Option<LocIdx> {
-    arena
-        .locations()
-        .iter()
-        .enumerate()
-        .find_map(|(idx, loc)| {
-            if loc.loc_start == start && loc.loc_end == end {
-                Some(LocIdx(idx as u32))
-            } else {
-                None
+    let mut fallback = None;
+    for (idx, loc) in arena.locations().iter().enumerate() {
+        if loc.loc_start == start && loc.loc_end == end {
+            let found = LocIdx(idx as u32);
+            if loc.loc_ghost {
+                return Some(found);
             }
-        })
+            if fallback.is_none() {
+                fallback = Some(found);
+            }
+        }
+    }
+    fallback
 }
 
 /// Convert a Located<StrIdx> to a Located<String> (for typedtree which uses String).
@@ -584,6 +586,9 @@ pub struct TypeCheckContext<'a> {
     /// `globalize_used_variables` to link per-type-expression variables
     /// back to declaration-level parameters.
     pub type_variables: HashMap<String, TypeExprRef>,
+    /// Recursion depth for currently-typed `let rec` groups.
+    /// Used for recursive polymorphic-variant payload fallback.
+    pub recursive_let_depth: usize,
     /// Persistent environment for loading external modules from .cmi files.
     pub persistent_env: Option<crate::cmi::persistent_env::PersistentEnv>,
 }
@@ -608,6 +613,7 @@ impl<'a> TypeCheckContext<'a> {
             diagnostics: Vec::new(),
             used_variables: HashMap::new(),
             type_variables: HashMap::new(),
+            recursive_let_depth: 0,
             persistent_env: None,
         }
     }
@@ -882,7 +888,7 @@ fn path_from_longident_persistent(lid: &Longident, arena: &ParseArena) -> Path {
             let prefix_path = path_from_longident_persistent(prefix, arena);
             Path::pdot(prefix_path, arena.get_string(*name_idx))
         }
-        Longident::Lapply(functor, arg) => {
+            Longident::Lapply(functor, arg) => {
             let funct = path_from_longident_persistent(functor, arena);
             let arg = path_from_longident_persistent(arg, arena);
             Path::papply(funct, arg)
@@ -5180,12 +5186,12 @@ fn type_variant(
 
         let arg_ty = ctx.new_var(None);
         let typed_arg = type_expect(tctx, env, arg_expr, arg_ty, None)?;
-        let use_legacy_fallback = matches!(
-            &arg_expr.pexp_desc,
-            crate::parser::ast::ExpressionDesc::Pexp_ident(_)
-        );
-        let variant_ty = if use_legacy_fallback {
-            // Preserve the old fallback for recursive payload variants like #A(r).
+        let use_recursive_payload_fallback = tctx.recursive_let_depth > 0
+            && matches!(
+                &arg_expr.pexp_desc,
+                crate::parser::ast::ExpressionDesc::Pexp_ident(_)
+            );
+        let variant_ty = if use_recursive_payload_fallback {
             ctx.new_var(None)
         } else {
             ctx.new_variant(crate::types::type_expr::RowDesc {
@@ -7465,115 +7471,125 @@ fn type_let_bindings(
     rec_flag: RecFlag,
     bindings: &[crate::parser::ast::ValueBinding],
 ) -> TypeCoreResult<(Vec<ValueBinding>, Env, Vec<PatternVariable>)> {
-    let ctx = tctx.type_ctx;
+    let previous_recursive_let_depth = tctx.recursive_let_depth;
+    if rec_flag == RecFlag::Recursive {
+        tctx.recursive_let_depth += 1;
+    }
 
-    // Begin a new definition level
-    ctx.begin_def();
+    let result = (|| -> TypeCoreResult<(Vec<ValueBinding>, Env, Vec<PatternVariable>)> {
+        let ctx = tctx.type_ctx;
 
-    // Create type variables for all bindings
-    let binding_types: Vec<TypeExprRef> = bindings.iter().map(|_| ctx.new_var(None)).collect();
+        // Begin a new definition level
+        ctx.begin_def();
 
-    // For recursive bindings, extend environment first
-    let typing_env = if rec_flag == RecFlag::Recursive {
-        let mut new_env = env.clone();
+        // Create type variables for all bindings
+        let binding_types: Vec<TypeExprRef> = bindings.iter().map(|_| ctx.new_var(None)).collect();
+
+        // For recursive bindings, extend environment first
+        let typing_env = if rec_flag == RecFlag::Recursive {
+            let mut new_env = env.clone();
+            for (binding, ty) in bindings.iter().zip(binding_types.iter()) {
+                if let Some(name) = extract_recursive_binding_name(&binding.pvb_pat) {
+                    let id = Ident::create_local(tctx.arena.get_string(name.txt));
+                    let desc = ValueDescription {
+                        val_type: *ty,
+                        val_kind: crate::types::ValueKind::ValReg,
+                        val_loc: tctx.arena.to_location(binding.pvb_loc),
+                        val_attributes: vec![],
+                        val_path: None,
+                    };
+                    new_env.add_value(id, desc);
+                }
+            }
+            new_env
+        } else {
+            env.clone()
+        };
+
+        // Type check each binding, collecting pattern variables per binding
+        let mut typed_bindings = Vec::new();
+        let mut state = PatternState::new();
+        let mut all_pattern_vars: Vec<Vec<PatternVariable>> = Vec::new();
+
         for (binding, ty) in bindings.iter().zip(binding_types.iter()) {
-            if let Some(name) = extract_recursive_binding_name(&binding.pvb_pat) {
-                let id = Ident::create_local(tctx.arena.get_string(name.txt));
+            state.reset(true);
+
+            // Type check pattern
+            let typed_pat = type_pattern(
+                tctx,
+                &typing_env,
+                &binding.pvb_pat,
+                *ty,
+                PatternMode::Normal,
+                &mut state,
+            )?;
+
+            // Type check expression
+            let typed_expr = type_expect(tctx, &typing_env, &binding.pvb_expr, *ty, None)?;
+
+            typed_bindings.push(ValueBinding::new(
+                typed_pat,
+                typed_expr,
+                binding.pvb_loc.clone(),
+                binding.pvb_attributes.clone(),
+            ));
+
+            // Save pattern variables from this binding
+            all_pattern_vars.push(state.pattern_variables.clone());
+        }
+
+        // End definition level
+        ctx.end_def();
+
+        for (binding, ty) in typed_bindings.iter().zip(binding_types.iter()) {
+            if !is_nonexpansive_expression(tctx, &binding.vb_expr) {
+                crate::types::ctype::generalize_expansive(ctx, env, *ty);
+            }
+        }
+
+        // Generalize types
+        for ty in &binding_types {
+            crate::types::generalize(ctx, *ty);
+        }
+
+        // Build final environment from all collected pattern variables.
+        // Module unpack bindings are first bound as values (package type), then
+        // lowered into nested Texp_letmodule wrappers around the let body.
+        let mut new_env = env.clone();
+        let mut unpacks: Vec<PatternVariable> = Vec::new();
+        for pvars in all_pattern_vars.iter() {
+            for pv in pvars {
                 let desc = ValueDescription {
-                    val_type: *ty,
+                    val_type: pv.ty,
                     val_kind: crate::types::ValueKind::ValReg,
-                    val_loc: tctx.arena.to_location(binding.pvb_loc),
+                    val_loc: pv.loc.clone(),
                     val_attributes: vec![],
                     val_path: None,
                 };
-                new_env.add_value(id, desc);
+                new_env.add_value(pv.id.clone(), desc);
+                if pv.is_module {
+                    let module_type = module_type_from_package_binding(tctx, &new_env, pv.ty);
+                    new_env.add_module(
+                        pv.id.clone(),
+                        crate::types::decl::ModuleDeclaration {
+                            md_type: module_type,
+                            md_attributes: vec![],
+                            md_loc: crate::location::Location::none(),
+                            md_path: None,
+                        },
+                    );
+                    // OCaml records unpack vars in reverse insertion order
+                    // (`module_variables := x :: module_variables`).
+                    unpacks.insert(0, pv.clone());
+                }
             }
         }
-        new_env
-    } else {
-        env.clone()
-    };
 
-    // Type check each binding, collecting pattern variables per binding
-    let mut typed_bindings = Vec::new();
-    let mut state = PatternState::new();
-    let mut all_pattern_vars: Vec<Vec<PatternVariable>> = Vec::new();
+        Ok((typed_bindings, new_env, unpacks))
+    })();
 
-    for (binding, ty) in bindings.iter().zip(binding_types.iter()) {
-        state.reset(true);
-
-        // Type check pattern
-        let typed_pat = type_pattern(
-            tctx,
-            &typing_env,
-            &binding.pvb_pat,
-            *ty,
-            PatternMode::Normal,
-            &mut state,
-        )?;
-
-        // Type check expression
-        let typed_expr = type_expect(tctx, &typing_env, &binding.pvb_expr, *ty, None)?;
-
-        typed_bindings.push(ValueBinding::new(
-            typed_pat,
-            typed_expr,
-            binding.pvb_loc.clone(),
-            binding.pvb_attributes.clone(),
-        ));
-
-        // Save pattern variables from this binding
-        all_pattern_vars.push(state.pattern_variables.clone());
-    }
-
-    // End definition level
-    ctx.end_def();
-
-    for (binding, ty) in typed_bindings.iter().zip(binding_types.iter()) {
-        if !is_nonexpansive_expression(tctx, &binding.vb_expr) {
-            crate::types::ctype::generalize_expansive(ctx, env, *ty);
-        }
-    }
-
-    // Generalize types
-    for ty in &binding_types {
-        crate::types::generalize(ctx, *ty);
-    }
-
-    // Build final environment from all collected pattern variables.
-    // Module unpack bindings are first bound as values (package type), then
-    // lowered into nested Texp_letmodule wrappers around the let body.
-    let mut new_env = env.clone();
-    let mut unpacks: Vec<PatternVariable> = Vec::new();
-    for pvars in all_pattern_vars.iter() {
-        for pv in pvars {
-            let desc = ValueDescription {
-                val_type: pv.ty,
-                val_kind: crate::types::ValueKind::ValReg,
-                val_loc: pv.loc.clone(),
-                val_attributes: vec![],
-                val_path: None,
-            };
-            new_env.add_value(pv.id.clone(), desc);
-            if pv.is_module {
-                let module_type = module_type_from_package_binding(tctx, &new_env, pv.ty);
-                new_env.add_module(
-                    pv.id.clone(),
-                    crate::types::decl::ModuleDeclaration {
-                        md_type: module_type,
-                        md_attributes: vec![],
-                        md_loc: crate::location::Location::none(),
-                        md_path: None,
-                    },
-                );
-                // OCaml records unpack vars in reverse insertion order
-                // (`module_variables := x :: module_variables`).
-                unpacks.insert(0, pv.clone());
-            }
-        }
-    }
-
-    Ok((typed_bindings, new_env, unpacks))
+    tctx.recursive_let_depth = previous_recursive_let_depth;
+    result
 }
 
 // ============================================================================
