@@ -2760,8 +2760,8 @@ fn type_pattern_constraint(
     // then use two independent instances (constraint ty and inner-pattern ty).
     ctx.begin_def();
     let (typed_ctype, ctype_ty) = transl_type(tctx, env, core_type)?;
-    let var_level = ctx.current_level();
     ctx.end_def();
+    let var_level = ctx.current_level();
     crate::types::generalize_structure(ctx, var_level, ctype_ty);
 
     let constraint_ty = crate::types::instance(ctx, ctype_ty);
@@ -6398,12 +6398,16 @@ fn type_send(
     let obj_ty = ctx.new_var(None);
     let typed_obj = type_expect(tctx, env, obj_expr, obj_ty, None)?;
 
+    // Keep the existing broad fallback behavior for source-level dynamic
+    // property access, but run precise typing for ghost-loc PPX-generated sends.
     let use_precise_send_typing = {
         let expected_desc = ctx.get_desc(ctx.repr(expected_ty));
-        matches!(&*expected_desc, TypeDesc::Tvar(_))
-            && context.is_none()
-            && method.txt.len() > 1
-            && method_name_is_plain_ident(&method.txt)
+        let method_loc_is_ghost = method.loc == tctx.arena.none_loc();
+        method_loc_is_ghost
+            || (matches!(&*expected_desc, TypeDesc::Tvar(_))
+                && context.is_none()
+                && method.txt.len() > 1
+                && method_name_is_plain_ident(&method.txt))
     };
     if !use_precise_send_typing {
         return Ok(Expression::new(
