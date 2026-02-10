@@ -2469,28 +2469,21 @@ fn type_pattern_variant(
     use crate::types::typedtree::RowDescRef;
     let ctx = tctx.type_ctx;
 
-    if let Some(arg_pat) = arg {
-        let arg_ty = ctx.new_var(None);
-        let variant_ty = ctx.new_var(None);
-        unify_pattern_types(tctx, loc, variant_ty, expected_ty)?;
-        let typed_arg = Some(Box::new(type_pattern_inner(
-            tctx, env, arg_pat, arg_ty, mode, state, 0,
-        )?));
-        return Ok(Pattern::new(
-            PatternDesc::Tpat_variant(label.to_string(), typed_arg, RowDescRef(0)),
-            loc.clone(),
-            expected_ty,
-            EnvRef(0),
-            pat.ppat_attributes.clone(),
-        ));
+    // Match OCaml typecore.ml Ppat_variant:
+    // - always build a single-tag row with Reither
+    // - use `constant = (arg is None)`
+    // - thread payload type into the row when present
+    let arg_ty = arg.map(|_| ctx.new_var(None));
+    let mut row_arg_types = Vec::new();
+    if let Some(ty) = arg_ty {
+        row_arg_types.push(ty);
     }
-
     let variant_ty = ctx.new_variant(crate::types::type_expr::RowDesc {
         row_fields: vec![(
             label.to_string(),
             crate::types::type_expr::RowField::Reither {
-                constant: true,
-                types: vec![],
+                constant: arg.is_none(),
+                types: row_arg_types,
                 matched: true,
                 link: crate::types::type_expr::RowFieldRef::null(),
             },
@@ -2502,8 +2495,15 @@ fn type_pattern_variant(
     });
     unify_pattern_types(tctx, loc, variant_ty, expected_ty)?;
 
+    let typed_arg = match (arg, arg_ty) {
+        (Some(arg_pat), Some(arg_ty)) => Some(Box::new(type_pattern_inner(
+            tctx, env, arg_pat, arg_ty, mode, state, 0,
+        )?)),
+        _ => None,
+    };
+
     Ok(Pattern::new(
-        PatternDesc::Tpat_variant(label.to_string(), None, RowDescRef(0)),
+        PatternDesc::Tpat_variant(label.to_string(), typed_arg, RowDescRef(0)),
         loc.clone(),
         expected_ty,
         EnvRef(0),
@@ -4518,15 +4518,84 @@ fn type_variant(
 ) -> TypeCoreResult<Expression> {
     let ctx = tctx.type_ctx;
 
-    // Keep payload variants on the legacy path for now to avoid regressing
-    // recursive payload-variant typing (e.g. #A(r) in recursive lets).
     if let Some(arg_expr) = arg {
+        // OCaml fast path: when expected type is already a variant row with
+        // this label carrying payload, type the payload against that row slot
+        // and keep `exp_type = instance expected_ty`.
+        let expected_inst = crate::types::ctype::instance(ctx, expected_ty);
+        let expanded_expected = crate::types::ctype::expand_head(ctx, env, expected_ty);
+        let expanded_expected_inst = crate::types::ctype::expand_head(ctx, env, expected_inst);
+
+        let expected_payload = {
+            let expected_desc = ctx.get_desc(ctx.repr(expanded_expected));
+            let expected_inst_desc = ctx.get_desc(ctx.repr(expanded_expected_inst));
+            match (&*expected_desc, &*expected_inst_desc) {
+                (TypeDesc::Tvariant(row), TypeDesc::Tvariant(row0)) => {
+                    let row = crate::types::btype::row_repr(ctx, row);
+                    let row0 = crate::types::btype::row_repr(ctx, row0);
+                    let field = row
+                        .row_fields
+                        .iter()
+                        .find(|(l, _)| l == label)
+                        .map(|(_, rf)| crate::types::btype::row_field_repr(rf));
+                    let field0 = row0
+                        .row_fields
+                        .iter()
+                        .find(|(l, _)| l == label)
+                        .map(|(_, rf)| crate::types::btype::row_field_repr(rf));
+                    match (field, field0) {
+                        (
+                            Some(crate::types::type_expr::RowField::Rpresent(Some(ty))),
+                            Some(crate::types::type_expr::RowField::Rpresent(Some(ty0))),
+                        ) => Some((ty, ty0)),
+                        _ => None,
+                    }
+                }
+                _ => None,
+            }
+        };
+
+        if let Some((arg_ty, arg_ty0)) = expected_payload {
+            let typed_arg = type_expect(tctx, env, arg_expr, arg_ty, None)?;
+            unify_expression_types(tctx, loc, typed_arg.exp_type, arg_ty0, None)?;
+            return Ok(Expression::new(
+                ExpressionDesc::Texp_variant(label.to_string(), Some(Box::new(typed_arg))),
+                loc.clone(),
+                expected_inst,
+                EnvRef(0),
+                attributes.to_vec(),
+            ));
+        }
+
         let arg_ty = ctx.new_var(None);
-        let typed_arg = Some(Box::new(type_expect(tctx, env, arg_expr, arg_ty, None)?));
-        let variant_ty = ctx.new_var(None);
+        let typed_arg = type_expect(tctx, env, arg_expr, arg_ty, None)?;
+        let use_legacy_fallback = matches!(
+            &arg_expr.pexp_desc,
+            crate::parser::ast::ExpressionDesc::Pexp_ident(_)
+        );
+        let variant_ty = if use_legacy_fallback {
+            // Preserve the old fallback for recursive payload variants like #A(r).
+            ctx.new_var(None)
+        } else {
+            ctx.new_variant(crate::types::type_expr::RowDesc {
+                row_fields: vec![(
+                    label.to_string(),
+                    crate::types::type_expr::RowField::Reither {
+                        constant: false,
+                        types: vec![arg_ty],
+                        matched: true,
+                        link: crate::types::type_expr::RowFieldRef::null(),
+                    },
+                )],
+                row_more: ctx.new_var(None),
+                row_closed: false,
+                row_fixed: false,
+                row_name: None,
+            })
+        };
         unify_expression_types(tctx, loc, variant_ty, expected_ty, None)?;
         return Ok(Expression::new(
-            ExpressionDesc::Texp_variant(label.to_string(), typed_arg),
+            ExpressionDesc::Texp_variant(label.to_string(), Some(Box::new(typed_arg))),
             loc.clone(),
             variant_ty,
             EnvRef(0),
