@@ -1060,14 +1060,14 @@ fn transl_type_inner(
                         .unwrap_or_else(|| Path::pident(id.clone()));
                     ctx.new_constr(path, vec![])
                 } else if let Some(&existing) = tctx.used_variables.get(name) {
-                    existing
+                    crate::types::instance(ctx, existing)
                 } else {
                     let v = ctx.new_var(Some(name.clone()));
                     tctx.used_variables.insert(name.clone(), v);
                     v
                 }
             } else if let Some(&existing) = tctx.used_variables.get(name) {
-                existing
+                crate::types::instance(ctx, existing)
             } else {
                 let v = ctx.new_var(Some(name.clone()));
                 tctx.used_variables.insert(name.clone(), v);
@@ -1184,22 +1184,64 @@ fn transl_type_inner(
         }
 
         CTD::Ptyp_alias(inner, name) => {
-            // Type alias: T as 'a
-            let (inner_ctyp, inner_ty) = transl_type_inner(tctx, env, inner)?;
+            // Match OCaml Typetexp.transl_type_aux Ptyp_alias:
+            // - reuse an existing alias binding via `instance` when present
+            // - otherwise register a fresh alias in used_variables *before*
+            //   translating the inner type, then instantiate and name its proxy.
+            let existing_alias = tctx.used_variables.get(name).copied();
 
-            // Create a type variable for the alias name and unify with inner type
-            let alias_var = ctx.new_var(Some(name.clone()));
-            crate::types::unify(ctx, &mut tctx.unify_state, alias_var, inner_ty)
-                .map_err(|_| TypeCoreError::PatternTypeClash(vec![(alias_var, inner_ty)]))?;
+            let (inner_ctyp, alias_ty) = if let Some(existing_alias) = existing_alias {
+                let alias_ty = crate::types::instance(ctx, existing_alias);
+                let (inner_ctyp, inner_ty) = transl_type_inner(tctx, env, inner)?;
+                crate::types::unify(ctx, &mut tctx.unify_state, alias_ty, inner_ty)
+                    .map_err(|_| TypeCoreError::PatternTypeClash(vec![(alias_ty, inner_ty)]))?;
+                (inner_ctyp, inner_ty)
+            } else {
+                let alias_ty = ctx.new_var(None);
+                tctx.used_variables.insert(name.clone(), alias_ty);
+
+                let (inner_ctyp, inner_ty) = transl_type_inner(tctx, env, inner)?;
+
+                // Keep compile coverage for recursive self-alias object types
+                // (for example `type x = {...} as 'self`) until unify_var-style
+                // recursive alias handling is fully ported.
+                if crate::types::occurs(ctx, alias_ty, inner_ty) {
+                    tctx.used_variables.remove(name);
+                    let fallback_alias_ty = ctx.new_var(Some(name.clone()));
+                    crate::types::unify(ctx, &mut tctx.unify_state, fallback_alias_ty, inner_ty)
+                        .map_err(|_| {
+                            TypeCoreError::PatternTypeClash(vec![(fallback_alias_ty, inner_ty)])
+                        })?;
+                    (inner_ctyp, inner_ty)
+                } else {
+                    crate::types::unify(ctx, &mut tctx.unify_state, alias_ty, inner_ty)
+                        .map_err(|_| TypeCoreError::PatternTypeClash(vec![(alias_ty, inner_ty)]))?;
+
+                    let instantiated = crate::types::instance(ctx, alias_ty);
+                    let proxy = crate::types::btype::proxy(ctx, instantiated);
+                    let rename_desc = {
+                        let proxy_desc = ctx.get_desc(proxy);
+                        match &*proxy_desc {
+                            TypeDesc::Tvar(None) => Some(TypeDesc::Tvar(Some(name.clone()))),
+                            TypeDesc::Tunivar(None) => Some(TypeDesc::Tunivar(Some(name.clone()))),
+                            _ => None,
+                        }
+                    };
+                    if let Some(desc) = rename_desc {
+                        ctx.set_desc(proxy, desc);
+                    }
+                    (inner_ctyp, instantiated)
+                }
+            };
 
             let ctyp = TypedCoreType {
                 ctyp_desc: TypedCoreTypeDesc::Ttyp_alias(Box::new(inner_ctyp), name.clone()),
-                ctyp_type: inner_ty,
+                ctyp_type: alias_ty,
                 ctyp_env: EnvRef(0),
                 ctyp_loc: loc,
                 ctyp_attributes: styp.ptyp_attributes.clone(),
             };
-            Ok((ctyp, inner_ty))
+            Ok((ctyp, alias_ty))
         }
 
         CTD::Ptyp_poly(vars, body) => {
