@@ -668,17 +668,132 @@ fn marshal_string_list(w: &mut MarshalWriter, list: &[String]) {
     build_list(w, list, 0);
 }
 
-fn marshal_hashtbl(w: &mut MarshalWriter, items: &[(String, String)]) {
-    // OCaml's Hashtbl serialization format
-    // This is a simplified version - real hashtables have bucket structure
-    // For simplicity, we just store as a list of key-value pairs
-    // TODO: Match exact OCaml hashtable format
-    w.write_block_header(0, items.len());
-    for (k, v) in items {
-        w.write_block_header(0, 2);
-        w.write_string(k.as_bytes());
-        w.write_string(v.as_bytes());
+fn ocaml_hashtbl_power_2_above(mut x: usize, n: usize) -> usize {
+    while x < n {
+        if x > (isize::MAX as usize / 2) {
+            break;
+        }
+        x *= 2;
     }
+    x
+}
+
+fn ocaml_hash_mix_uint32(mut h: u32, mut d: u32) -> u32 {
+    d = d.wrapping_mul(0xcc9e2d51);
+    d = d.rotate_left(15);
+    d = d.wrapping_mul(0x1b873593);
+    h ^= d;
+    h = h.rotate_left(13);
+    h.wrapping_mul(5).wrapping_add(0xe6546b64)
+}
+
+fn ocaml_hash_final_mix(mut h: u32) -> u32 {
+    h ^= h >> 16;
+    h = h.wrapping_mul(0x85ebca6b);
+    h ^= h >> 13;
+    h = h.wrapping_mul(0xc2b2ae35);
+    h ^= h >> 16;
+    h
+}
+
+fn ocaml_hashtbl_hash_string(s: &str) -> u32 {
+    let bytes = s.as_bytes();
+    let len = bytes.len();
+    let mut h = 0u32;
+    let mut i = 0usize;
+
+    while i + 4 <= len {
+        let w = u32::from_le_bytes([bytes[i], bytes[i + 1], bytes[i + 2], bytes[i + 3]]);
+        h = ocaml_hash_mix_uint32(h, w);
+        i += 4;
+    }
+
+    let rem = len & 3;
+    if rem != 0 {
+        let mut w = 0u32;
+        if rem >= 3 {
+            w |= (bytes[i + 2] as u32) << 16;
+        }
+        if rem >= 2 {
+            w |= (bytes[i + 1] as u32) << 8;
+        }
+        w |= bytes[i] as u32;
+        h = ocaml_hash_mix_uint32(h, w);
+    }
+
+    h ^= len as u32;
+    ocaml_hash_final_mix(h) & 0x3fff_ffff
+}
+
+fn rehash_ocaml_string_hashtbl(
+    old_buckets: &[Vec<(String, String)>],
+) -> Vec<Vec<(String, String)>> {
+    let mut new_buckets = vec![Vec::new(); old_buckets.len() * 2];
+    for bucket in old_buckets {
+        for (key, value) in bucket {
+            let idx = (ocaml_hashtbl_hash_string(key) as usize) & (new_buckets.len() - 1);
+            // OCaml resize keeps per-bucket traversal order by appending to the tail.
+            new_buckets[idx].push((key.clone(), value.clone()));
+        }
+    }
+    new_buckets
+}
+
+fn marshal_ocaml_bucketlist(w: &mut MarshalWriter, bucket: &[(String, String)], idx: usize) {
+    if idx >= bucket.len() {
+        // Empty
+        w.write_int(0);
+        return;
+    }
+
+    // Cons { key; data; next } with tag 0 and 3 fields.
+    w.write_block_header(0, 3);
+    w.write_string(bucket[idx].0.as_bytes());
+    w.write_string(bucket[idx].1.as_bytes());
+    marshal_ocaml_bucketlist(w, bucket, idx + 1);
+}
+
+fn marshal_hashtbl(w: &mut MarshalWriter, items: &[(String, String)]) {
+    // OCaml Hashtbl.t fields:
+    // { size; data: bucketlist array; seed; initial_size }
+    // external_ffi_types.ml creates the table with Hashtbl.create (List.length attrs)
+    // and fills it with Hashtbl.replace in source order.
+    let initial_size = ocaml_hashtbl_power_2_above(16, items.len());
+    let mut buckets: Vec<Vec<(String, String)>> = vec![Vec::new(); initial_size];
+    let mut size = 0usize;
+
+    for (key, value) in items {
+        let bucket_idx = (ocaml_hashtbl_hash_string(key) as usize) & (buckets.len() - 1);
+        let mut replaced = false;
+        for (existing_key, existing_value) in &mut buckets[bucket_idx] {
+            if existing_key == key {
+                *existing_key = key.clone();
+                *existing_value = value.clone();
+                replaced = true;
+                break;
+            }
+        }
+        if !replaced {
+            // OCaml Hashtbl.replace inserts at bucket head when key is absent.
+            buckets[bucket_idx].insert(0, (key.clone(), value.clone()));
+            size += 1;
+            if size > (buckets.len() << 1) {
+                buckets = rehash_ocaml_string_hashtbl(&buckets);
+            }
+        }
+    }
+
+    w.write_block_header(0, 4);
+    w.write_int(size as i64);
+
+    w.write_block_header(0, buckets.len());
+    for bucket in &buckets {
+        marshal_ocaml_bucketlist(w, bucket, 0);
+    }
+
+    // external_ffi_types uses non-randomized Hashtbl.create in compiler process.
+    w.write_int(0); // seed
+    w.write_int(initial_size as i64);
 }
 
 // ========== Encoding function ==========
@@ -726,5 +841,32 @@ mod tests {
         // Check it starts with marshal magic
         let bytes: Vec<u8> = encoded.chars().map(|c| c as u8).collect();
         assert_eq!(&bytes[0..4], &[0x84, 0x95, 0xA6, 0xBE]);
+    }
+
+    #[test]
+    fn test_import_attributes_hashtbl_matches_ocaml_marshal() {
+        let mut w = MarshalWriter::new();
+        let attrs = vec![
+            ("type".to_string(), "json".to_string()),
+            ("some-identifier".to_string(), "yep".to_string()),
+        ];
+
+        marshal_hashtbl(&mut w, &attrs);
+        let bytes = w.finish();
+
+        // Generated from OCaml 5.3:
+        // let tbl = Hashtbl.create 2 in
+        // Hashtbl.replace tbl "type" "json";
+        // Hashtbl.replace tbl "some-identifier" "yep";
+        // Marshal.to_string tbl []
+        let expected = vec![
+            0x84, 0x95, 0xA6, 0xBE, 0x00, 0x00, 0x00, 0x39, 0x00, 0x00, 0x00, 0x08, 0x00,
+            0x00, 0x00, 0x2B, 0x00, 0x00, 0x00, 0x27, 0xC0, 0x42, 0x08, 0x00, 0x00, 0x43,
+            0x00, 0x40, 0x40, 0x40, 0xB0, 0x24, 0x74, 0x79, 0x70, 0x65, 0x24, 0x6A, 0x73,
+            0x6F, 0x6E, 0x40, 0xB0, 0x2F, 0x73, 0x6F, 0x6D, 0x65, 0x2D, 0x69, 0x64, 0x65,
+            0x6E, 0x74, 0x69, 0x66, 0x69, 0x65, 0x72, 0x23, 0x79, 0x65, 0x70, 0x40, 0x40,
+            0x40, 0x40, 0x40, 0x40, 0x40, 0x40, 0x40, 0x40, 0x40, 0x40, 0x50,
+        ];
+        assert_eq!(bytes, expected);
     }
 }

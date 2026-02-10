@@ -28,8 +28,9 @@ use crate::parser::ast::{
 use crate::parser::longident::Longident;
 
 use super::ffi_types::{
-    encode_ffi_type, Attr, Cst, Delim, ExternalModuleName, ExternalSpec, FfiType, Label, LabelNoname,
-    LamConstant, ModuleBindName, ObjParam, Param, Params, PointerInfo, ReturnWrapper,
+    encode_ffi_type, Attr, Cst, Delim, ExternalModuleName, ExternalSpec, FfiType,
+    ImportAttributes, Label, LabelNoname, LamConstant, ModuleBindName, ObjParam,
+    Param, Params, PointerInfo, ReturnWrapper,
 };
 use super::spice_ppx;
 
@@ -1006,6 +1007,7 @@ struct ExternalDesc {
     module_as_val: bool,           // @module with no payload
     external_module_name: Option<String>,  // @module("name") with string payload
     module_bind_name: Option<String>,      // @module("name", "bind") second string
+    import_attributes: Option<ImportAttributes>, // @module({from, with})
     call_name: Option<String>,
     send_name: Option<String>,
     new_name: Option<String>,
@@ -1027,6 +1029,7 @@ impl Default for ExternalDesc {
             module_as_val: false,
             external_module_name: None,
             module_bind_name: None,
+            import_attributes: None,
             call_name: None,
             send_name: None,
             new_name: None,
@@ -1058,20 +1061,38 @@ fn parse_external_attrs(attrs: &[Attribute], prim_name: &str, no_arguments: bool
                 }
             }
             "module" => {
+                if let Some((bundle, import_attributes)) =
+                    get_module_import_attributes(payload, arena)
+                {
+                    desc.external_module_name = Some(bundle);
+                    desc.module_bind_name = None;
+                    desc.module_as_val = false;
+                    desc.import_attributes = Some(import_attributes);
+                    continue;
+                }
+
                 let strings = get_payload_strings(payload, arena);
                 match strings.len() {
                     0 => {
                         // @module with no payload - module_as_val, bundle = prim_name
                         desc.module_as_val = true;
+                        desc.external_module_name = None;
+                        desc.module_bind_name = None;
+                        desc.import_attributes = None;
                     }
                     1 => {
                         // @module("name") - sets external_module_name
                         desc.external_module_name = Some(strings[0].clone());
+                        desc.module_bind_name = None;
+                        desc.module_as_val = false;
+                        desc.import_attributes = None;
                     }
                     2 => {
                         // @module("bundle", "bind_name") - sets external_module_name with bind name
                         desc.external_module_name = Some(strings[0].clone());
                         desc.module_bind_name = Some(strings[1].clone());
+                        desc.module_as_val = false;
+                        desc.import_attributes = None;
                     }
                     _ => {}
                 }
@@ -1259,6 +1280,74 @@ fn get_payload_strings(payload: &current::Payload, arena: &ParseArena) -> Vec<St
     }
 }
 
+/// Extract `@module({from: "...", with: {...}})` payload.
+/// Mirrors OCaml `ast_external_process.ml` record-payload path in `parse_external_attributes`.
+fn get_module_import_attributes(
+    payload: &current::Payload,
+    arena: &ParseArena,
+) -> Option<(String, ImportAttributes)> {
+    let current::Payload::PStr(items) = payload else {
+        return None;
+    };
+    if items.len() != 1 {
+        return None;
+    }
+    let StructureItemDesc::Pstr_eval(expr, _) = &items[0].pstr_desc else {
+        return None;
+    };
+    let ExpressionDesc::Pexp_record(fields, _) = &expr.pexp_desc else {
+        return None;
+    };
+
+    let mut from_name: Option<String> = None;
+    let mut with_fields: Option<ImportAttributes> = None;
+
+    for field in fields {
+        let Longident::Lident(field_name_idx) = arena.get_longident(field.lid.txt) else {
+            continue;
+        };
+        match arena.get_string(*field_name_idx) {
+            "from" => {
+                if let ExpressionDesc::Pexp_constant(current::Constant::String(s, _)) =
+                    &field.expr.pexp_desc
+                {
+                    from_name = Some(s.clone());
+                }
+            }
+            "with" => {
+                let ExpressionDesc::Pexp_record(import_fields, _) = &field.expr.pexp_desc else {
+                    continue;
+                };
+                let mut import_attributes: ImportAttributes =
+                    Vec::with_capacity(import_fields.len());
+                for import_field in import_fields {
+                    let Longident::Lident(key_idx) = arena.get_longident(import_field.lid.txt)
+                    else {
+                        continue;
+                    };
+                    let ExpressionDesc::Pexp_constant(current::Constant::String(value, _)) =
+                        &import_field.expr.pexp_desc
+                    else {
+                        continue;
+                    };
+                    let key = match arena.get_string(*key_idx) {
+                        "type_" => "type".to_string(),
+                        key => key.to_string(),
+                    };
+                    import_attributes.push((key, value.clone()));
+                }
+                with_fields = Some(import_attributes);
+            }
+            _ => {}
+        }
+    }
+
+    match (from_name, with_fields) {
+        (Some(from_name), Some(with_fields)) => Some((from_name, with_fields)),
+        _ => None,
+    }
+}
+
 /// Build FFI type from external description and type info
 fn build_ffi_type(desc: &ExternalDesc, prim_name: &str, arity: usize, result_is_unit: bool, params: Params) -> FfiType {
     // Determine return wrapper
@@ -1276,7 +1365,7 @@ fn build_ffi_type(desc: &ExternalDesc, prim_name: &str, arity: usize, result_is_
             Some(name) => ModuleBindName::PhintName(name.clone()),
             None => ModuleBindName::PhintNothing,
         },
-        import_attributes: None,
+        import_attributes: desc.import_attributes.clone(),
     });
 
     // Determine external spec based on attributes
