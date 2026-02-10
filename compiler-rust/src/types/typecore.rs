@@ -7493,6 +7493,112 @@ fn is_nonexpansive_module_expr(
     }
 }
 
+/// OCaml typecore.ml `approx_type`: approximate a parsed core type for recursive let pre-unification.
+fn approx_type_for_rec_let(
+    tctx: &mut TypeCheckContext<'_>,
+    env: &Env,
+    sty: &crate::parser::ast::CoreType,
+) -> TypeExprRef {
+    use crate::parser::ast::CoreTypeDesc as CTD;
+
+    let ctx = tctx.type_ctx;
+
+    match &sty.ptyp_desc {
+        CTD::Ptyp_arrow { arg, ret, arity } => {
+            let arg_ty = if arg.lbl.is_optional() {
+                env.type_option(ctx, ctx.new_var(None))
+            } else {
+                ctx.new_var(None)
+            };
+            let ret_ty = approx_type_for_rec_let(tctx, env, ret);
+            let label = convert_arg_label_for_ctx(&arg.lbl, tctx.arena);
+            ctx.new_arrow(label, arg_ty, ret_ty, tctx.arena.get_arity(*arity))
+        }
+        CTD::Ptyp_tuple(args) => {
+            let tys = args
+                .iter()
+                .map(|arg| approx_type_for_rec_let(tctx, env, arg))
+                .collect();
+            ctx.new_tuple(tys)
+        }
+        CTD::Ptyp_constr(lid, args) => {
+            let longident = tctx.resolve_lid(lid.txt).clone();
+            let (path, decl) = resolve_type_constructor_path(tctx, env, &longident);
+            if let Some(decl) = decl {
+                if args.len() == decl.type_arity as usize {
+                    let tys = args
+                        .iter()
+                        .map(|arg| approx_type_for_rec_let(tctx, env, arg))
+                        .collect();
+                    return ctx.new_constr(path, tys);
+                }
+            }
+            ctx.new_var(None)
+        }
+        CTD::Ptyp_poly(_, inner) => approx_type_for_rec_let(tctx, env, inner),
+        _ => ctx.new_var(None),
+    }
+}
+
+/// OCaml typecore.ml `type_approx`: approximate an expression type for recursive let pre-unification.
+fn type_approx_for_rec_let(
+    tctx: &mut TypeCheckContext<'_>,
+    env: &Env,
+    sexp: &ParsedExpression,
+) -> TypeCoreResult<TypeExprRef> {
+    use crate::parser::ast::ExpressionDesc as ED;
+
+    let ctx = tctx.type_ctx;
+    let loc = sexp.pexp_loc;
+
+    match &sexp.pexp_desc {
+        ED::Pexp_let(_, _, body) => type_approx_for_rec_let(tctx, env, body),
+        ED::Pexp_fun {
+            arg_label,
+            rhs,
+            arity,
+            ..
+        } => {
+            let arg_ty = if arg_label.is_optional() {
+                env.type_option(ctx, ctx.new_var(None))
+            } else {
+                ctx.new_var(None)
+            };
+            let ret_ty = type_approx_for_rec_let(tctx, env, rhs)?;
+            let label = convert_arg_label_for_ctx(arg_label, tctx.arena);
+            Ok(ctx.new_arrow(label, arg_ty, ret_ty, tctx.arena.get_arity(*arity)))
+        }
+        ED::Pexp_match(_, cases) => match cases.first() {
+            Some(case) => type_approx_for_rec_let(tctx, env, &case.pc_rhs),
+            None => Ok(ctx.new_var(None)),
+        },
+        ED::Pexp_try(expr, _) => type_approx_for_rec_let(tctx, env, expr),
+        ED::Pexp_tuple(items) => {
+            let tys: TypeCoreResult<Vec<_>> = items
+                .iter()
+                .map(|item| type_approx_for_rec_let(tctx, env, item))
+                .collect();
+            Ok(ctx.new_tuple(tys?))
+        }
+        ED::Pexp_ifthenelse(_, then_expr, _) => type_approx_for_rec_let(tctx, env, then_expr),
+        ED::Pexp_sequence(_, expr) => type_approx_for_rec_let(tctx, env, expr),
+        ED::Pexp_constraint(expr, sty) => {
+            let ty = type_approx_for_rec_let(tctx, env, expr)?;
+            let ty1 = approx_type_for_rec_let(tctx, env, sty);
+            unify_expression_types(tctx, loc, ty, ty1, None)?;
+            Ok(ty1)
+        }
+        ED::Pexp_coerce(expr, _sty1, sty2) => {
+            let ty = type_approx_for_rec_let(tctx, env, expr)?;
+            let ty1 = ctx.new_var(None);
+            let ty2 = approx_type_for_rec_let(tctx, env, sty2);
+            unify_expression_types(tctx, loc, ty, ty1, None)?;
+            Ok(ty2)
+        }
+        _ => Ok(ctx.new_var(None)),
+    }
+}
+
 /// Type check let bindings.
 fn type_let_bindings(
     tctx: &mut TypeCheckContext<'_>,
@@ -7535,8 +7641,10 @@ fn type_let_bindings(
             env.clone()
         };
 
-        // Type check each binding, collecting pattern variables per binding
-        let mut typed_bindings = Vec::new();
+        // Type check each pattern first, collecting pattern variables per binding.
+        // Matches OCaml `type_let`: recursive pre-unification runs on typed patterns
+        // before typing right-hand-side expressions.
+        let mut typed_patterns = Vec::new();
         let mut state = PatternState::new();
         let mut all_pattern_vars: Vec<Vec<PatternVariable>> = Vec::new();
 
@@ -7553,18 +7661,33 @@ fn type_let_bindings(
                 &mut state,
             )?;
 
-            // Type check expression
-            let typed_expr = type_expect(tctx, &typing_env, &binding.pvb_expr, *ty, None)?;
+            typed_patterns.push(typed_pat);
 
+            // Save pattern variables from this binding
+            all_pattern_vars.push(state.pattern_variables.clone());
+        }
+
+        if rec_flag == RecFlag::Recursive {
+            for (typed_pat, binding) in typed_patterns.iter().zip(bindings.iter()) {
+                let approx_ty = type_approx_for_rec_let(tctx, env, &binding.pvb_expr)?;
+                unify_pattern_types(tctx, typed_pat.pat_loc, typed_pat.pat_type, approx_ty)?;
+            }
+        }
+
+        // Type check expressions after recursive approximation unification.
+        let mut typed_bindings = Vec::new();
+        for ((binding, typed_pat), ty) in bindings
+            .iter()
+            .zip(typed_patterns.into_iter())
+            .zip(binding_types.iter())
+        {
+            let typed_expr = type_expect(tctx, &typing_env, &binding.pvb_expr, *ty, None)?;
             typed_bindings.push(ValueBinding::new(
                 typed_pat,
                 typed_expr,
                 binding.pvb_loc.clone(),
                 binding.pvb_attributes.clone(),
             ));
-
-            // Save pattern variables from this binding
-            all_pattern_vars.push(state.pattern_variables.clone());
         }
 
         // End definition level
@@ -9287,6 +9410,69 @@ fn lookup_type_decl_for_path<'a>(
         let path_name = type_path.name();
         if let Some(decl) = ctx.find_type_decl_by_path(&path_name) {
             return Some(decl.clone());
+        }
+
+        // Inline-record constructor paths are type paths whose parent is also a type path:
+        // `<type_path>.<Constructor>`. Rebuild the synthetic record declaration from
+        // the parent variant declaration so label disambiguation can recover field types.
+        if let Some(parent_decl) = lookup_type_decl_for_path(parent, env, pers_env, ctx) {
+            if let crate::types::TypeKind::TypeVariant(ref constrs) = parent_decl.type_kind {
+                let num_consts = constrs
+                    .iter()
+                    .filter(|c| {
+                        matches!(
+                            c.cd_args,
+                            crate::types::ConstructorArguments::CstrTuple(ref args)
+                                if args.is_empty()
+                        ) && c.cd_res.is_none()
+                    })
+                    .count() as i32;
+                let num_nonconsts = constrs.len() as i32 - num_consts;
+                let mut block_idx = 0i32;
+                for cd in constrs {
+                    let is_constant = matches!(
+                        cd.cd_args,
+                        crate::types::ConstructorArguments::CstrTuple(ref args) if args.is_empty()
+                    ) && cd.cd_res.is_none();
+
+                    if cd.cd_id.name() == type_name.as_str() {
+                        if let crate::types::ConstructorArguments::CstrRecord(labels) = &cd.cd_args
+                        {
+                            return Some(crate::types::TypeDeclaration {
+                                type_params: parent_decl.type_params.clone(),
+                                type_arity: parent_decl.type_params.len() as i32,
+                                type_kind: crate::types::TypeKind::TypeRecord(
+                                    labels.clone(),
+                                    crate::types::RecordRepresentation::RecordInlined {
+                                        tag: block_idx,
+                                        name: type_name.to_string(),
+                                        num_nonconsts,
+                                        attrs: cd.cd_attributes.clone(),
+                                    },
+                                ),
+                                type_private: parent_decl.type_private,
+                                type_manifest: None,
+                                type_variance: parent_decl
+                                    .type_params
+                                    .iter()
+                                    .map(|_| crate::types::variance::Variance::full())
+                                    .collect(),
+                                type_newtype_level: None,
+                                type_loc: cd.cd_loc,
+                                type_attributes: vec![],
+                                type_immediate: false,
+                                type_unboxed: crate::types::UnboxedStatus::default(),
+                                type_inlined_types: vec![],
+                                type_path: None,
+                            });
+                        }
+                    }
+
+                    if !is_constant {
+                        block_idx += 1;
+                    }
+                }
+            }
         }
 
         // Resolve the parent module path through local aliases/signatures,
