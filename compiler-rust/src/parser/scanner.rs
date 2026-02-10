@@ -590,9 +590,7 @@ impl<'src> Scanner<'src> {
 
                     // Check if it was a 3-digit decimal escape
                     let escape_text = self.substring(escape_start, escape_end);
-                    if escape_text.len() == 3
-                        && escape_text.chars().all(|c| c.is_ascii_digit())
-                    {
+                    if escape_text.len() == 3 && escape_text.chars().all(|c| c.is_ascii_digit()) {
                         // Convert decimal to hex format
                         if let Ok(value) = escape_text.parse::<u32>() {
                             if value <= 255 {
@@ -1197,7 +1195,8 @@ impl<'src> Scanner<'src> {
                     let char_byte_off = self.offset + self.ch_len; // offset of the char after '
                     self.next3();
                     // The character is 1 byte (ASCII) since we matched it against a char pattern
-                    let original = Cow::Borrowed(self.substring(char_byte_off, char_byte_off + ch.len_utf8()));
+                    let original =
+                        Cow::Borrowed(self.substring(char_byte_off, char_byte_off + ch.len_utf8()));
                     Token::Codepoint {
                         c: ch as i32,
                         original,
@@ -1274,7 +1273,7 @@ impl<'src> Scanner<'src> {
                 // (start_pos, end_pos, token) - uses outer start_pos, not recursive one
                 let scan_result = self.scan();
                 return ScanResult {
-                    start_pos,  // Use the outer start_pos (before the bad character)
+                    start_pos, // Use the outer start_pos (before the bad character)
                     end_pos: scan_result.end_pos,
                     token: scan_result.token,
                 };
@@ -1619,7 +1618,11 @@ impl<'src> Scanner<'src> {
 
                     // OCaml preserves exotic form for uppercase identifiers
                     // (to avoid confusion in OCaml parsetree where uppercase = module)
-                    if ident.as_bytes().first().map_or(false, |b| b.is_ascii_uppercase()) {
+                    if ident
+                        .as_bytes()
+                        .first()
+                        .map_or(false, |b| b.is_ascii_uppercase())
+                    {
                         return Token::Lident(Cow::Owned(format!("\\\"{}\"", ident)));
                     }
 

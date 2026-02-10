@@ -16,8 +16,8 @@
 //! - `EnvSummary` - A summary of bindings for debugging
 //! - Lookup functions for values, types, and modules
 
-use super::context::TypeContext;
 use super::asttypes::PrivateFlag;
+use super::context::TypeContext;
 use super::decl::{
     ConstructorDescription, ConstructorTag, LabelDescription, ModtypeDeclaration,
     ModuleDeclaration, PrimitiveDescription, TypeDeclaration, ValueDescription, ValueKind,
@@ -492,22 +492,26 @@ pub fn initial_env(ctx: &TypeContext<'_>) -> Env {
     // Add built-in types
     // These are the primitive types that exist in ReScript
     let builtins = [
-        ("int", true),     // immediate
+        ("int", true), // immediate
         ("float", false),
-        ("bool", true),    // immediate
+        ("bool", true), // immediate
         ("string", false),
-        ("unit", true),    // immediate
+        ("unit", true), // immediate
         ("array", false),
         ("list", false),
         ("option", false),
-        ("char", true),    // immediate
+        ("char", true), // immediate
     ];
 
     for (name, immediate) in builtins {
         let id = Ident::create_persistent(name);
         let decl = TypeDeclaration {
             type_params: vec![],
-            type_arity: if name == "array" || name == "list" || name == "option" { 1 } else { 0 },
+            type_arity: if name == "array" || name == "list" || name == "option" {
+                1
+            } else {
+                0
+            },
             type_kind: super::decl::TypeKind::TypeAbstract,
             type_private: super::asttypes::PrivateFlag::Public,
             type_manifest: None,
@@ -577,11 +581,51 @@ pub fn initial_env(ctx: &TypeContext<'_>) -> Env {
     add_binary_primitive(&mut env, ctx, "mod", "%modint", int_ty, int_ty, int_ty);
 
     // Add arithmetic operators for float
-    add_binary_primitive(&mut env, ctx, "+.", "%addfloat", float_ty, float_ty, float_ty);
-    add_binary_primitive(&mut env, ctx, "-.", "%subfloat", float_ty, float_ty, float_ty);
-    add_binary_primitive(&mut env, ctx, "*.", "%mulfloat", float_ty, float_ty, float_ty);
-    add_binary_primitive(&mut env, ctx, "/.", "%divfloat", float_ty, float_ty, float_ty);
-    add_binary_primitive(&mut env, ctx, "**", "%powfloat", float_ty, float_ty, float_ty);
+    add_binary_primitive(
+        &mut env,
+        ctx,
+        "+.",
+        "%addfloat",
+        float_ty,
+        float_ty,
+        float_ty,
+    );
+    add_binary_primitive(
+        &mut env,
+        ctx,
+        "-.",
+        "%subfloat",
+        float_ty,
+        float_ty,
+        float_ty,
+    );
+    add_binary_primitive(
+        &mut env,
+        ctx,
+        "*.",
+        "%mulfloat",
+        float_ty,
+        float_ty,
+        float_ty,
+    );
+    add_binary_primitive(
+        &mut env,
+        ctx,
+        "/.",
+        "%divfloat",
+        float_ty,
+        float_ty,
+        float_ty,
+    );
+    add_binary_primitive(
+        &mut env,
+        ctx,
+        "**",
+        "%powfloat",
+        float_ty,
+        float_ty,
+        float_ty,
+    );
 
     // Add comparison operators (polymorphic - using int for now)
     add_binary_primitive(&mut env, ctx, "==", "%eq", int_ty, int_ty, bool_ty);
@@ -601,7 +645,15 @@ pub fn initial_env(ctx: &TypeContext<'_>) -> Env {
     add_unary_primitive(&mut env, ctx, "~-.", "%negfloat", float_ty, float_ty);
 
     // Add string concatenation
-    add_binary_primitive(&mut env, ctx, "++", "%string_concat", string_ty, string_ty, string_ty);
+    add_binary_primitive(
+        &mut env,
+        ctx,
+        "++",
+        "%string_concat",
+        string_ty,
+        string_ty,
+        string_ty,
+    );
 
     // Add ignore function
     let alpha = ctx.new_var(None);

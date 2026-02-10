@@ -37,20 +37,20 @@
 #![warn(rust_2018_idioms)]
 #![allow(clippy::uninlined_format_args)] // Style preference, not a correctness issue
 
+pub mod arena;
 pub mod binary_ast;
 pub mod cache;
 pub mod config;
 pub mod context;
 pub mod diagnostics;
-pub mod arena;
+pub mod driver;
 pub mod ident;
 pub mod intern;
 pub mod js_ir;
-pub mod parse_arena;
 pub mod lambda;
 pub mod location;
+pub mod parse_arena;
 pub mod parser;
-pub mod driver;
 pub mod types;
 
 // Re-exports for convenience

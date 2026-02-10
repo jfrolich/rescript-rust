@@ -9,6 +9,9 @@
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 
+use crate::parse_arena::{
+    CoreTypeIdx, ExprIdx, LidentIdx, ModExprIdx, ModTypeIdx, ParseArena, PatIdx,
+};
 use crate::parser::ast::{
     Attributes, Case, ConstructorArguments, CoreType, CoreTypeDesc, Expression, ExpressionDesc,
     ExtensionConstructor, ExtensionConstructorKind, IncludeDeclaration, IncludeDescription,
@@ -17,11 +20,8 @@ use crate::parser::ast::{
     Payload, RowField, SignatureItem, SignatureItemDesc, StructureItem, StructureItemDesc,
     TypeDeclaration, TypeExtension, TypeKind, ValueDescription, WithConstraint,
 };
-use crate::parse_arena::{
-    CoreTypeIdx, ExprIdx, LidentIdx, ModExprIdx, ModTypeIdx, ParseArena, PatIdx,
-};
+use crate::parser::ast::{PexpApply, PexpFun};
 use crate::parser::longident::Longident;
-use crate::parser::ast::{PexpFun, PexpApply};
 
 /// A set of module dependencies, sorted for deterministic output.
 pub type Dependencies = BTreeSet<String>;
@@ -122,7 +122,10 @@ impl<'a> DependencyCollector<'a> {
             // Only add if it starts with uppercase (module reference)
             // Lowercase identifiers are local bindings
             // Also skip if it's a bound module name (from letmodule, etc.)
-            if first_str.chars().next().is_some_and(|c| c.is_ascii_uppercase())
+            if first_str
+                .chars()
+                .next()
+                .is_some_and(|c| c.is_ascii_uppercase())
                 && !self.bound_modules.contains(first_str)
             {
                 self.deps.insert(first_str.to_string());
@@ -210,11 +213,11 @@ impl<'a> DependencyCollector<'a> {
     fn add_structure_item(&mut self, item: &StructureItem) {
         match &*item.pstr_desc {
             StructureItemDesc::Pstr_eval(inner) => {
-                    let (ref expr, ref _attrs) = **inner;
+                let (ref expr, ref _attrs) = **inner;
                 self.add_expr_idx(*expr);
             }
             StructureItemDesc::Pstr_value(inner) => {
-                    let (ref _rec_flag, ref bindings) = **inner;
+                let (ref _rec_flag, ref bindings) = **inner;
                 // OCaml's add_bindings collects pattern bindings (including Ppat_unpack)
                 // and adds them to bound_modules so later references don't add dependencies.
                 // First collect all unpack names from patterns
@@ -236,7 +239,7 @@ impl<'a> DependencyCollector<'a> {
                 self.add_value_description(vd);
             }
             StructureItemDesc::Pstr_type(inner) => {
-                    let (ref _rec_flag, ref decls) = **inner;
+                let (ref _rec_flag, ref decls) = **inner;
                 for decl in decls {
                     self.add_type_declaration(decl);
                 }
@@ -304,7 +307,7 @@ impl<'a> DependencyCollector<'a> {
                 // Attributes don't contribute dependencies
             }
             StructureItemDesc::Pstr_extension(inner) => {
-                    // Extension payload ignored for dependency extraction
+                // Extension payload ignored for dependency extraction
                 // OCaml's handle_extension ignores extension payloads for dependency extraction
             }
         }
@@ -324,7 +327,7 @@ impl<'a> DependencyCollector<'a> {
                 self.add_value_description(vd);
             }
             SignatureItemDesc::Psig_type(inner) => {
-                    let (ref _rec_flag, ref decls) = **inner;
+                let (ref _rec_flag, ref decls) = **inner;
                 for decl in decls {
                     self.add_type_declaration(decl);
                 }
@@ -389,7 +392,7 @@ impl<'a> DependencyCollector<'a> {
                 // Attributes don't contribute dependencies
             }
             SignatureItemDesc::Psig_extension(inner) => {
-                    // Extension payload ignored for dependency extraction
+                // Extension payload ignored for dependency extraction
                 // OCaml's handle_extension ignores extension payloads for dependency extraction
             }
         }
@@ -404,7 +407,7 @@ impl<'a> DependencyCollector<'a> {
             }
             ExpressionDesc::Pexp_constant(_) => {}
             ExpressionDesc::Pexp_let(inner) => {
-                    let (ref _rec_flag, ref bindings, ref body) = **inner;
+                let (ref _rec_flag, ref bindings, ref body) = **inner;
                 // OCaml's add_bindings collects pattern bindings (including Ppat_unpack)
                 // First collect all unpack names from patterns
                 let mut unpack_names = HashSet::new();
@@ -432,10 +435,9 @@ impl<'a> DependencyCollector<'a> {
                 }
             }
             ExpressionDesc::Pexp_fun(inner) => {
-                    let PexpFun { default,
-                lhs,
-                rhs,
-                .. } = &**inner;
+                let PexpFun {
+                    default, lhs, rhs, ..
+                } = &**inner;
                 if let Some(default) = default {
                     // default is ExprIdx
                     let default = *default;
@@ -459,7 +461,11 @@ impl<'a> DependencyCollector<'a> {
                 }
             }
             ExpressionDesc::Pexp_apply(inner) => {
-                    let PexpApply { ref funct, ref args, .. } = **inner;
+                let PexpApply {
+                    ref funct,
+                    ref args,
+                    ..
+                } = **inner;
                 // funct is ExprIdx
                 let funct = *funct;
                 self.add_expr_idx(funct);
@@ -468,7 +474,7 @@ impl<'a> DependencyCollector<'a> {
                 }
             }
             ExpressionDesc::Pexp_match(inner) | ExpressionDesc::Pexp_try(inner) => {
-                    let (ref expr, ref cases) = **inner;
+                let (ref expr, ref cases) = **inner;
                 // expr is ExprIdx
                 let expr = *expr;
                 self.add_expr_idx(expr);
@@ -490,7 +496,7 @@ impl<'a> DependencyCollector<'a> {
                 }
             }
             ExpressionDesc::Pexp_variant(inner) => {
-                    let (ref _label, ref arg) = **inner;
+                let (ref _label, ref arg) = **inner;
                 if let Some(arg) = arg {
                     // arg is ExprIdx
                     let arg = *arg;
@@ -498,7 +504,7 @@ impl<'a> DependencyCollector<'a> {
                 }
             }
             ExpressionDesc::Pexp_record(inner) => {
-                    let (ref fields, ref spread) = **inner;
+                let (ref fields, ref spread) = **inner;
                 for field in fields {
                     self.add_lident_idx(field.lid.txt);
                     self.add_expr_idx(field.expr);
@@ -516,7 +522,7 @@ impl<'a> DependencyCollector<'a> {
                 self.add_lident_idx(lid.txt);
             }
             ExpressionDesc::Pexp_setfield(inner) => {
-                    let (ref expr1, ref lid, ref expr2) = **inner;
+                let (ref expr1, ref lid, ref expr2) = **inner;
                 // expr1 and expr2 are ExprIdx
                 let expr1 = *expr1;
                 let expr2 = *expr2;
@@ -525,7 +531,7 @@ impl<'a> DependencyCollector<'a> {
                 self.add_expr_idx(expr2);
             }
             ExpressionDesc::Pexp_ifthenelse(inner) => {
-                    let (ref cond, ref then_expr, ref else_expr) = **inner;
+                let (ref cond, ref then_expr, ref else_expr) = **inner;
                 // cond, then_expr, else_expr are ExprIdx
                 let cond = *cond;
                 let then_expr = *then_expr;
@@ -551,7 +557,7 @@ impl<'a> DependencyCollector<'a> {
                 self.add_expr_idx(body);
             }
             ExpressionDesc::Pexp_for(inner) => {
-                    let (ref _pat, ref start, ref end, ref _dir, ref body) = **inner;
+                let (ref _pat, ref start, ref end, ref _dir, ref body) = **inner;
                 // OCaml: Pexp_for (_, e1, e2, _, e3) - ignores the pattern
                 // The for-loop pattern doesn't add dependencies
                 // start, end, body are ExprIdx
@@ -563,7 +569,7 @@ impl<'a> DependencyCollector<'a> {
                 self.add_expr_idx(body);
             }
             ExpressionDesc::Pexp_constraint(inner) => {
-                    let (ref expr, ref ty) = **inner;
+                let (ref expr, ref ty) = **inner;
                 // expr is ExprIdx, ty is CoreTypeIdx
                 let expr = *expr;
                 let ty = *ty;
@@ -571,7 +577,7 @@ impl<'a> DependencyCollector<'a> {
                 self.add_core_type_idx(ty);
             }
             ExpressionDesc::Pexp_coerce(inner) => {
-                    let (ref expr, ref ty1, ref ty2) = **inner;
+                let (ref expr, ref ty1, ref ty2) = **inner;
                 // expr is ExprIdx, ty1 is Option<CoreTypeIdx>, ty2 is CoreTypeIdx
                 let expr = *expr;
                 self.add_expr_idx(expr);
@@ -581,13 +587,13 @@ impl<'a> DependencyCollector<'a> {
                 self.add_core_type_idx(*ty2);
             }
             ExpressionDesc::Pexp_send(inner) => {
-                    let (ref expr, ref _label) = **inner;
+                let (ref expr, ref _label) = **inner;
                 // expr is ExprIdx
                 let expr = *expr;
                 self.add_expr_idx(expr);
             }
             ExpressionDesc::Pexp_letmodule(inner) => {
-                    let (ref name, ref me, ref body) = **inner;
+                let (ref name, ref me, ref body) = **inner;
                 // Bind the module name so it's not added as a dependency
                 let module_name = self.arena.get_string(name.txt).to_string();
                 // Only track as newly added if not already bound, to avoid
@@ -603,7 +609,7 @@ impl<'a> DependencyCollector<'a> {
                 }
             }
             ExpressionDesc::Pexp_letexception(inner) => {
-                    let (ref ext_ctor, ref body) = **inner;
+                let (ref ext_ctor, ref body) = **inner;
                 self.add_extension_constructor(ext_ctor);
                 // body is ExprIdx
                 let body = *body;
@@ -615,7 +621,7 @@ impl<'a> DependencyCollector<'a> {
                 self.add_expr_idx(expr);
             }
             ExpressionDesc::Pexp_newtype(inner) => {
-                    let (ref _name, ref body) = **inner;
+                let (ref _name, ref body) = **inner;
                 // body is ExprIdx
                 let body = *body;
                 self.add_expr_idx(body);
@@ -626,7 +632,7 @@ impl<'a> DependencyCollector<'a> {
                 self.add_mod_expr_idx(me);
             }
             ExpressionDesc::Pexp_open(inner) => {
-                    let (ref _override, ref lid, ref body) = **inner;
+                let (ref _override, ref lid, ref body) = **inner;
                 // Local open uses full module path
                 self.add_lident_idx_full(lid.txt);
                 let newly_opened_members = self.bind_opened_members(lid.txt);
@@ -739,7 +745,8 @@ impl<'a> DependencyCollector<'a> {
                 self.add_pat_idx_inner(pat_idx, unpack_names);
             }
             PatternDesc::Ppat_interval(inner) => {
-                    let (_, _) = &**inner;}
+                let (_, _) = &**inner;
+            }
             PatternDesc::Ppat_tuple(pats) | PatternDesc::Ppat_array(pats) => {
                 for pat in &**pats {
                     // pat is PatIdx
@@ -755,7 +762,7 @@ impl<'a> DependencyCollector<'a> {
                 }
             }
             PatternDesc::Ppat_variant(inner) => {
-                    let (ref _label, ref arg) = **inner;
+                let (ref _label, ref arg) = **inner;
                 if let Some(arg) = arg {
                     // arg is PatIdx
                     let arg = *arg;
@@ -763,7 +770,7 @@ impl<'a> DependencyCollector<'a> {
                 }
             }
             PatternDesc::Ppat_record(inner) => {
-                    let (ref fields, ref _closed) = **inner;
+                let (ref fields, ref _closed) = **inner;
                 for field in fields {
                     self.add_lident_idx(field.lid.txt);
                     // field.pat is PatIdx
@@ -778,7 +785,7 @@ impl<'a> DependencyCollector<'a> {
                 self.add_pat_idx_inner(p2, unpack_names);
             }
             PatternDesc::Ppat_constraint(inner) => {
-                    let (ref pat_idx, ref ty) = **inner;
+                let (ref pat_idx, ref ty) = **inner;
                 // pat is PatIdx, ty is CoreTypeIdx
                 let pat_idx = *pat_idx;
                 self.add_pat_idx_inner(pat_idx, unpack_names);
@@ -817,7 +824,7 @@ impl<'a> DependencyCollector<'a> {
         match &*ty.ptyp_desc {
             CoreTypeDesc::Ptyp_any | CoreTypeDesc::Ptyp_var(_) => {}
             CoreTypeDesc::Ptyp_arrow(inner) => {
-                    let (ref arg, ref ret, ..) = **inner;
+                let (ref arg, ref ret, ..) = **inner;
                 // arg.typ is CoreTypeIdx, ret is CoreTypeIdx
                 self.add_core_type_idx(arg.typ);
                 let ret = *ret;
@@ -830,7 +837,7 @@ impl<'a> DependencyCollector<'a> {
                 }
             }
             CoreTypeDesc::Ptyp_constr(inner) => {
-                    let (ref lid, ref args) = **inner;
+                let (ref lid, ref args) = **inner;
                 self.add_lident_idx(lid.txt);
                 for arg in args {
                     // arg is CoreTypeIdx
@@ -838,7 +845,7 @@ impl<'a> DependencyCollector<'a> {
                 }
             }
             CoreTypeDesc::Ptyp_object(inner) => {
-                    let (ref fields, ref _closed) = **inner;
+                let (ref fields, ref _closed) = **inner;
                 for field in fields {
                     match field {
                         ObjectField::Otag(_label, _attrs, ty) => {
@@ -853,13 +860,13 @@ impl<'a> DependencyCollector<'a> {
                 }
             }
             CoreTypeDesc::Ptyp_alias(inner) => {
-                    let (ref ty, ref _name) = **inner;
+                let (ref ty, ref _name) = **inner;
                 // ty is CoreTypeIdx
                 let ty = *ty;
                 self.add_core_type_idx(ty);
             }
             CoreTypeDesc::Ptyp_variant(inner) => {
-                    let (ref rows, ref _closed, ref _labels) = **inner;
+                let (ref rows, ref _closed, ref _labels) = **inner;
                 for row in rows {
                     match row {
                         RowField::Rtag(_label, _attrs, _bool, tys) => {
@@ -876,12 +883,13 @@ impl<'a> DependencyCollector<'a> {
                 }
             }
             CoreTypeDesc::Ptyp_poly(inner) => {
-                    let (ref _names, ref ty) = **inner;
+                let (ref _names, ref ty) = **inner;
                 // ty is CoreTypeIdx
                 let ty = *ty;
                 self.add_core_type_idx(ty);
             }
-            CoreTypeDesc::Ptyp_package(pkg_inner) => { let (ref lid, ref constraints) = **pkg_inner;
+            CoreTypeDesc::Ptyp_package(pkg_inner) => {
+                let (ref lid, ref constraints) = **pkg_inner;
                 self.add_lident_idx(lid.txt);
                 for (lid, ty) in constraints {
                     self.add_lident_idx(lid.txt);
@@ -907,7 +915,7 @@ impl<'a> DependencyCollector<'a> {
                 self.add_structure(str);
             }
             ModuleExprDesc::Pmod_functor(inner) => {
-                    let (ref name, ref mt, ref body) = **inner;
+                let (ref name, ref mt, ref body) = **inner;
                 if let Some(mt) = mt {
                     // mt is ModTypeIdx
                     let mt = *mt;
@@ -965,7 +973,7 @@ impl<'a> DependencyCollector<'a> {
                 self.add_signature(sig);
             }
             ModuleTypeDesc::Pmty_functor(inner) => {
-                    let (ref name, ref mt1, ref mt2) = **inner;
+                let (ref name, ref mt1, ref mt2) = **inner;
                 if let Some(mt1) = mt1 {
                     // mt1 is ModTypeIdx
                     let mt1 = *mt1;
@@ -984,7 +992,7 @@ impl<'a> DependencyCollector<'a> {
                 }
             }
             ModuleTypeDesc::Pmty_with(inner) => {
-                    let (ref mt, ref constraints) = **inner;
+                let (ref mt, ref constraints) = **inner;
                 // mt is ModTypeIdx
                 let mt = *mt;
                 self.add_mod_type_idx(mt);
@@ -1180,7 +1188,7 @@ impl<'a> DependencyCollector<'a> {
                 self.add_core_type_idx(ty);
             }
             Payload::PPat(inner) => {
-                    let (ref pat, ref guard) = **inner;
+                let (ref pat, ref guard) = **inner;
                 // pat is PatIdx, guard is Option<ExprIdx>
                 let pat = *pat;
                 self.add_pat_idx(pat);
@@ -1223,7 +1231,10 @@ mod tests {
 
     fn make_eval_item(expr_idx: ExprIdx) -> StructureItem {
         StructureItem {
-            pstr_desc: Box::new(StructureItemDesc::Pstr_eval(Box::new((expr_idx, Attributes::new())))),
+            pstr_desc: Box::new(StructureItemDesc::Pstr_eval(Box::new((
+                expr_idx,
+                Attributes::new(),
+            )))),
             pstr_loc: LocIdx::none(),
         }
     }
@@ -1279,7 +1290,10 @@ mod tests {
 
         let deps = extract_structure_deps(&arena, &structure);
         // None is a simple identifier, not Foo.None, so it's not a module reference
-        assert!(deps.is_empty(), "Simple uppercase identifier 'None' should not be a dependency");
+        assert!(
+            deps.is_empty(),
+            "Simple uppercase identifier 'None' should not be a dependency"
+        );
     }
 
     #[test]
@@ -1292,11 +1306,7 @@ mod tests {
         let e1 = make_ident_expr(&mut arena, lid1);
         let e2 = make_ident_expr(&mut arena, lid2);
         let e3 = make_ident_expr(&mut arena, lid3);
-        let structure = vec![
-            make_eval_item(e1),
-            make_eval_item(e2),
-            make_eval_item(e3),
-        ];
+        let structure = vec![make_eval_item(e1), make_eval_item(e2), make_eval_item(e3)];
 
         let deps = extract_structure_deps(&arena, &structure);
         assert_eq!(deps.len(), 3);
@@ -1315,11 +1325,7 @@ mod tests {
         let e1 = make_ident_expr(&mut arena, lid1);
         let e2 = make_ident_expr(&mut arena, lid2);
         let e3 = make_ident_expr(&mut arena, lid3);
-        let structure = vec![
-            make_eval_item(e1),
-            make_eval_item(e2),
-            make_eval_item(e3),
-        ];
+        let structure = vec![make_eval_item(e1), make_eval_item(e2), make_eval_item(e3)];
 
         let deps = extract_structure_deps(&arena, &structure);
         let deps_vec: Vec<_> = deps.into_iter().collect();
@@ -1363,11 +1369,7 @@ mod tests {
         let e1 = make_ident_expr(&mut arena, lid1);
         let e2 = make_ident_expr(&mut arena, lid2);
         let e3 = make_ident_expr(&mut arena, lid3);
-        let structure = vec![
-            make_eval_item(e1),
-            make_eval_item(e2),
-            make_eval_item(e3),
-        ];
+        let structure = vec![make_eval_item(e1), make_eval_item(e2), make_eval_item(e3)];
 
         let deps = extract_structure_deps(&arena, &structure);
         assert_eq!(deps.len(), 1);

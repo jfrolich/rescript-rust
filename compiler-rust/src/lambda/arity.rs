@@ -126,12 +126,7 @@ impl Arity {
     /// This finds the common prefix of arities between two functions.
     /// Used when the same variable is assigned different functions
     /// in different branches.
-    pub fn merge_arities(
-        xs: &[i32],
-        ys: &[i32],
-        tail_x: bool,
-        tail_y: bool,
-    ) -> Self {
+    pub fn merge_arities(xs: &[i32], ys: &[i32], tail_x: bool, tail_y: bool) -> Self {
         fn aux(acc: &mut Vec<i32>, xs: &[i32], ys: &[i32], tail_x: bool, tail_y: bool) -> bool {
             match (xs, ys) {
                 ([], []) => tail_x && tail_y,

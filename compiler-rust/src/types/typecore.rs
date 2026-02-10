@@ -28,10 +28,10 @@
 
 use crate::ident::Ident;
 use crate::location::Location;
-use crate::parse_arena::{LidentIdx, Located, LocIdx, ParseArena, StrIdx};
+use crate::parse_arena::{LidentIdx, LocIdx, Located, ParseArena, StrIdx};
 use crate::parser::ast::{
-    ArgLabel, Attributes, Expression as ParsedExpression, Pattern as ParsedPattern, RecFlag,
-    PexpFun, PexpApply,
+    ArgLabel, Attributes, Expression as ParsedExpression, Pattern as ParsedPattern, PexpApply,
+    PexpFun, RecFlag,
 };
 use crate::parser::longident::Longident;
 use crate::types::typedtree::{
@@ -510,9 +510,14 @@ pub fn convert_constant(cst: &crate::parser::ast::Constant) -> TypeCoreResult<Co
             };
             Ok(Constant::BigInt(sign, digits))
         }
-        ParsedConstant::Integer(i, Some(c)) => Err(TypeCoreError::UnknownLiteral(i.to_string(), *c)),
+        ParsedConstant::Integer(i, Some(c)) => {
+            Err(TypeCoreError::UnknownLiteral(i.to_string(), *c))
+        }
         ParsedConstant::Char(c) => Ok(Constant::Char(*c)),
-        ParsedConstant::String(s, d) => Ok(Constant::String(s.to_string(), d.as_ref().map(|x| x.to_string()))),
+        ParsedConstant::String(s, d) => Ok(Constant::String(
+            s.to_string(),
+            d.as_ref().map(|x| x.to_string()),
+        )),
         ParsedConstant::Float(f, None) => Ok(Constant::Float(f.to_string())),
         ParsedConstant::Float(f, Some(c)) => Err(TypeCoreError::UnknownLiteral(f.to_string(), *c)),
     }
@@ -523,15 +528,20 @@ pub fn convert_constant(cst: &crate::parser::ast::Constant) -> TypeCoreResult<Co
 // ============================================================================
 
 /// Convert a parser ArgLabel to a types ArgLabel (for TypeContext methods).
-fn convert_arg_label_for_ctx(lbl: &crate::parser::ast::ArgLabel, arena: &ParseArena) -> crate::types::ArgLabel {
+fn convert_arg_label_for_ctx(
+    lbl: &crate::parser::ast::ArgLabel,
+    arena: &ParseArena,
+) -> crate::types::ArgLabel {
     match lbl {
         crate::parser::ast::ArgLabel::Nolabel => crate::types::ArgLabel::Nolabel,
-        crate::parser::ast::ArgLabel::Labelled(s) => {
-            crate::types::ArgLabel::labelled(arena.get_string(s.txt).to_string(), arena.to_location(s.loc))
-        }
-        crate::parser::ast::ArgLabel::Optional(s) => {
-            crate::types::ArgLabel::optional(arena.get_string(s.txt).to_string(), arena.to_location(s.loc))
-        }
+        crate::parser::ast::ArgLabel::Labelled(s) => crate::types::ArgLabel::labelled(
+            arena.get_string(s.txt).to_string(),
+            arena.to_location(s.loc),
+        ),
+        crate::parser::ast::ArgLabel::Optional(s) => crate::types::ArgLabel::optional(
+            arena.get_string(s.txt).to_string(),
+            arena.to_location(s.loc),
+        ),
     }
 }
 
@@ -588,9 +598,10 @@ fn transl_type_inner(
         }
 
         CTD::Ptyp_arrow(inner) => {
-                    let (ref arg, ref ret_idx, ref arity) = **inner;
+            let (ref arg, ref ret_idx, ref arity) = **inner;
             // Arrow type: T1 -> T2
-            let (arg_ctyp, arg_ty) = transl_type_inner(tctx, env, tctx.arena.get_core_type(arg.typ))?;
+            let (arg_ctyp, arg_ty) =
+                transl_type_inner(tctx, env, tctx.arena.get_core_type(arg.typ))?;
             let ret = tctx.arena.get_core_type(*ret_idx);
             let (ret_ctyp, ret_ty) = transl_type_inner(tctx, env, ret)?;
 
@@ -610,11 +621,7 @@ fn transl_type_inner(
             };
 
             let ctyp = TypedCoreType {
-                ctyp_desc: TypedCoreTypeDesc::Ttyp_arrow(
-                    arrow_arg,
-                    Box::new(ret_ctyp),
-                    arity_opt,
-                ),
+                ctyp_desc: TypedCoreTypeDesc::Ttyp_arrow(arrow_arg, Box::new(ret_ctyp), arity_opt),
                 ctyp_type: arrow_ty,
                 ctyp_env: EnvRef(0),
                 ctyp_loc: loc,
@@ -647,7 +654,7 @@ fn transl_type_inner(
         }
 
         CTD::Ptyp_constr(inner) => {
-                    let (ref lid, ref args) = **inner;
+            let (ref lid, ref args) = **inner;
             // Type constructor: int, string, list<'a>, etc.
             let mut typed_args = Vec::new();
             let mut arg_refs = Vec::new();
@@ -676,7 +683,7 @@ fn transl_type_inner(
         }
 
         CTD::Ptyp_alias(inner) => {
-                    let (ref inner_idx, ref name) = **inner;
+            let (ref inner_idx, ref name) = **inner;
             // Type alias: T as 'a
             let inner = tctx.arena.get_core_type(*inner_idx);
             let (inner_ctyp, inner_ty) = transl_type_inner(tctx, env, inner)?;
@@ -697,9 +704,12 @@ fn transl_type_inner(
         }
 
         CTD::Ptyp_poly(inner) => {
-                    let (ref vars, ref body_idx) = **inner;
+            let (ref vars, ref body_idx) = **inner;
             // Polymorphic type: 'a 'b. T
-            let var_names: Vec<String> = vars.iter().map(|v| tctx.arena.get_string(v.txt).to_string()).collect();
+            let var_names: Vec<String> = vars
+                .iter()
+                .map(|v| tctx.arena.get_string(v.txt).to_string())
+                .collect();
 
             // Create type variables for each bound variable
             for name in &var_names {
@@ -722,7 +732,7 @@ fn transl_type_inner(
         }
 
         CTD::Ptyp_object(inner) => {
-                    let (ref fields, ref closed) = **inner;
+            let (ref fields, ref closed) = **inner;
             // Object type: {. name: string, age: int }
             // Simplified implementation - full version builds proper object type
             let mut typed_fields = Vec::new();
@@ -730,7 +740,8 @@ fn transl_type_inner(
             for field in fields.iter() {
                 match field {
                     crate::parser::ast::ObjectField::Otag(label, attrs, field_type) => {
-                        let (field_ctyp, _field_ty) = transl_type_inner(tctx, env, tctx.arena.get_core_type(*field_type))?;
+                        let (field_ctyp, _field_ty) =
+                            transl_type_inner(tctx, env, tctx.arena.get_core_type(*field_type))?;
 
                         typed_fields.push(crate::types::typedtree::ObjectField {
                             of_desc: crate::types::typedtree::ObjectFieldDesc::OTtag(
@@ -746,8 +757,7 @@ fn transl_type_inner(
                     }
                     crate::parser::ast::ObjectField::Oinherit(inherit_type) => {
                         let inherit_ct = tctx.arena.get_core_type(*inherit_type);
-                        let (inherit_ctyp, _inherit_ty) =
-                            transl_type_inner(tctx, env, inherit_ct)?;
+                        let (inherit_ctyp, _inherit_ty) = transl_type_inner(tctx, env, inherit_ct)?;
                         typed_fields.push(crate::types::typedtree::ObjectField {
                             of_desc: crate::types::typedtree::ObjectFieldDesc::OTinherit(
                                 inherit_ctyp,
@@ -773,7 +783,7 @@ fn transl_type_inner(
         }
 
         CTD::Ptyp_variant(inner) => {
-                    let (ref rows, ref closed, ref labels) = **inner;
+            let (ref rows, ref closed, ref labels) = **inner;
             // Polymorphic variant type: [> `A | `B of int ]
             let mut typed_rows = Vec::new();
             let row_more = ctx.new_var(None);
@@ -783,7 +793,8 @@ fn transl_type_inner(
                     crate::parser::ast::RowField::Rtag(label, attrs, constant, args) => {
                         let mut typed_args = Vec::new();
                         for arg in args {
-                            let (arg_ctyp, _arg_ty) = transl_type_inner(tctx, env, tctx.arena.get_core_type(*arg))?;
+                            let (arg_ctyp, _arg_ty) =
+                                transl_type_inner(tctx, env, tctx.arena.get_core_type(*arg))?;
                             typed_args.push(arg_ctyp);
                         }
 
@@ -802,8 +813,7 @@ fn transl_type_inner(
                     }
                     crate::parser::ast::RowField::Rinherit(inherit_type) => {
                         let inherit_ct = tctx.arena.get_core_type(*inherit_type);
-                        let (inherit_ctyp, _inherit_ty) =
-                            transl_type_inner(tctx, env, inherit_ct)?;
+                        let (inherit_ctyp, _inherit_ty) = transl_type_inner(tctx, env, inherit_ct)?;
                         typed_rows.push(crate::types::typedtree::RowFieldType {
                             rf_desc: crate::types::typedtree::RowFieldDesc::Rinherit(inherit_ctyp),
                             rf_loc: inherit_ct.ptyp_loc.clone(),
@@ -817,7 +827,13 @@ fn transl_type_inner(
             let variant_ty = row_more; // Simplified - full implementation builds row type
 
             let ctyp = TypedCoreType {
-                ctyp_desc: TypedCoreTypeDesc::Ttyp_variant(typed_rows, *closed, labels.as_ref().map(|v| v.iter().map(|s| s.to_string()).collect())),
+                ctyp_desc: TypedCoreTypeDesc::Ttyp_variant(
+                    typed_rows,
+                    *closed,
+                    labels
+                        .as_ref()
+                        .map(|v| v.iter().map(|s| s.to_string()).collect()),
+                ),
                 ctyp_type: variant_ty,
                 ctyp_env: EnvRef(0),
                 ctyp_loc: loc,
@@ -826,7 +842,8 @@ fn transl_type_inner(
             Ok((ctyp, variant_ty))
         }
 
-        CTD::Ptyp_package(pkg_inner) => { let (_mod_lid, _constraints) = &**pkg_inner;
+        CTD::Ptyp_package(pkg_inner) => {
+            let (_mod_lid, _constraints) = &**pkg_inner;
             // Package type: (module S)
             // Simplified implementation - full version handles module types
             let ty = ctx.new_var(None);
@@ -943,7 +960,8 @@ fn type_pattern_inner(
             // Type check each element
             let mut typed_pats = Vec::new();
             for (p, ty) in pats.iter().zip(elem_types.iter()) {
-                let typed_pat = type_pattern_inner(tctx, env, tctx.arena.get_pat(*p), *ty, mode, state, 0)?;
+                let typed_pat =
+                    type_pattern_inner(tctx, env, tctx.arena.get_pat(*p), *ty, mode, state, 0)?;
                 typed_pats.push(typed_pat);
             }
 
@@ -969,7 +987,11 @@ fn type_pattern_inner(
             let id = state.enter_variable(loc, name, ty_var, true, false, tctx.arena)?;
 
             Ok(Pattern::new(
-                PatternDesc::Tpat_alias(Box::new(typed_inner), id, convert_located_stridx(name, tctx.arena)),
+                PatternDesc::Tpat_alias(
+                    Box::new(typed_inner),
+                    id,
+                    convert_located_stridx(name, tctx.arena),
+                ),
                 loc,
                 expected_ty,
                 EnvRef(0),
@@ -1025,7 +1047,8 @@ fn type_pattern_inner(
 
             let mut typed_pats = Vec::new();
             for p in pats.iter() {
-                let typed_pat = type_pattern_inner(tctx, env, tctx.arena.get_pat(*p), elem_ty, mode, state, 0)?;
+                let typed_pat =
+                    type_pattern_inner(tctx, env, tctx.arena.get_pat(*p), elem_ty, mode, state, 0)?;
                 typed_pats.push(typed_pat);
             }
 
@@ -1054,7 +1077,7 @@ fn type_pattern_inner(
         }
 
         PD::Ppat_variant(inner) => {
-                    let (ref label, ref arg) = **inner;
+            let (ref label, ref arg) = **inner;
             // Polymorphic variant pattern: #Red, #Blue(x)
             type_pattern_variant(
                 tctx,
@@ -1070,7 +1093,7 @@ fn type_pattern_inner(
         }
 
         PD::Ppat_record(inner) => {
-                    let (ref fields, ref closed_flag) = **inner;
+            let (ref fields, ref closed_flag) = **inner;
             // Record pattern: {name, age}
             type_pattern_record(
                 tctx,
@@ -1086,7 +1109,7 @@ fn type_pattern_inner(
         }
 
         PD::Ppat_constraint(inner) => {
-                    let (ref inner_pat_idx, ref core_type) = **inner;
+            let (ref inner_pat_idx, ref core_type) = **inner;
             // Type constraint pattern: (x : int)
             let inner_pat = tctx.arena.get_pat(*inner_pat_idx);
             type_pattern_constraint(
@@ -1103,7 +1126,7 @@ fn type_pattern_inner(
         }
 
         PD::Ppat_interval(inner) => {
-                    let (ref c1, ref c2) = **inner;
+            let (ref c1, ref c2) = **inner;
             // Interval pattern: 'a'..'z'
             type_pattern_interval(tctx, env, loc, c1, c2, expected_ty, pat)
         }
@@ -1373,7 +1396,15 @@ fn type_pattern_record(
     let mut typed_fields = Vec::new();
     for (idx, field) in fields.iter().enumerate() {
         let field_ty = ctx.new_var(None);
-        let typed_pat = type_pattern_inner(tctx, env, tctx.arena.get_pat(field.pat), field_ty, mode, state, 0)?;
+        let typed_pat = type_pattern_inner(
+            tctx,
+            env,
+            tctx.arena.get_pat(field.pat),
+            field_ty,
+            mode,
+            state,
+            0,
+        )?;
 
         // Create placeholder label description
         let label_desc = crate::types::LabelDescription {
@@ -1634,7 +1665,7 @@ pub fn type_expect<'a>(
         }
 
         ED::Pexp_let(inner) => {
-                    let (ref rec_flag, ref bindings, ref body_idx) = **inner;
+            let (ref rec_flag, ref bindings, ref body_idx) = **inner;
             // Let expression
             let (typed_bindings, new_env) = type_let_bindings(tctx, env, *rec_flag, bindings)?;
 
@@ -1674,7 +1705,7 @@ pub fn type_expect<'a>(
         }
 
         ED::Pexp_ifthenelse(inner) => {
-                    let (ref cond_idx, ref then_idx, ref else_idx) = **inner;
+            let (ref cond_idx, ref then_idx, ref else_idx) = **inner;
             // If expression
             let bool_ty = env.type_bool(ctx);
 
@@ -1762,8 +1793,13 @@ pub fn type_expect<'a>(
 
             let mut typed_exprs = Vec::new();
             for e in exprs.iter() {
-                let typed_e =
-                    type_expect(tctx, env, tctx.arena.get_expr(*e), elem_ty, Some(TypeClashContext::ArrayLiteral))?;
+                let typed_e = type_expect(
+                    tctx,
+                    env,
+                    tctx.arena.get_expr(*e),
+                    elem_ty,
+                    Some(TypeClashContext::ArrayLiteral),
+                )?;
                 typed_exprs.push(typed_e);
             }
 
@@ -1777,10 +1813,12 @@ pub fn type_expect<'a>(
         }
 
         ED::Pexp_apply(inner) => {
-            let PexpApply { ref funct,
-            ref args,
-            ref partial,
-            ref transformed_jsx, } = **inner;
+            let PexpApply {
+                ref funct,
+                ref args,
+                ref partial,
+                ref transformed_jsx,
+            } = **inner;
             // Function application
             let funct_expr = tctx.arena.get_expr(*funct);
             type_application(
@@ -1798,7 +1836,7 @@ pub fn type_expect<'a>(
         }
 
         ED::Pexp_match(inner) => {
-                    let (ref scrutinee_idx, ref cases) = **inner;
+            let (ref scrutinee_idx, ref cases) = **inner;
             // Match expression
             let scrutinee = tctx.arena.get_expr(*scrutinee_idx);
             type_match(
@@ -1813,7 +1851,7 @@ pub fn type_expect<'a>(
         }
 
         ED::Pexp_try(inner) => {
-                    let (ref body_idx, ref handlers) = **inner;
+            let (ref body_idx, ref handlers) = **inner;
             // Try expression
             let body = tctx.arena.get_expr(*body_idx);
             type_try(
@@ -1828,12 +1866,14 @@ pub fn type_expect<'a>(
         }
 
         ED::Pexp_fun(inner) => {
-            let PexpFun { ref arg_label,
-            ref default,
-            ref lhs,
-            ref rhs,
-            ref arity,
-            ref is_async, } = **inner;
+            let PexpFun {
+                ref arg_label,
+                ref default,
+                ref lhs,
+                ref rhs,
+                ref arity,
+                ref is_async,
+            } = **inner;
             // Function expression
             let default_expr = (*default).map(|idx| tctx.arena.get_expr(idx));
             let lhs_pat = tctx.arena.get_pat(*lhs);
@@ -1854,7 +1894,7 @@ pub fn type_expect<'a>(
         }
 
         ED::Pexp_for(inner) => {
-                    let (ref pat, ref start_idx, ref end_idx, ref direction, ref body_idx) = **inner;
+            let (ref pat, ref start_idx, ref end_idx, ref direction, ref body_idx) = **inner;
             // For loop
             let pat_ref = tctx.arena.get_pat(*pat);
             let start_expr = tctx.arena.get_expr(*start_idx);
@@ -1889,7 +1929,7 @@ pub fn type_expect<'a>(
         }
 
         ED::Pexp_variant(inner) => {
-                    let (ref label, ref arg) = **inner;
+            let (ref label, ref arg) = **inner;
             // Polymorphic variant
             type_variant(
                 tctx,
@@ -1903,7 +1943,7 @@ pub fn type_expect<'a>(
         }
 
         ED::Pexp_record(inner) => {
-                    let (ref fields, ref base) = **inner;
+            let (ref fields, ref base) = **inner;
             // Record expression
             type_record(
                 tctx,
@@ -1931,7 +1971,7 @@ pub fn type_expect<'a>(
         }
 
         ED::Pexp_setfield(inner) => {
-                    let (ref record_expr_idx, ref field_lid, ref new_value_idx) = **inner;
+            let (ref record_expr_idx, ref field_lid, ref new_value_idx) = **inner;
             // Field assignment
             let record_expr = tctx.arena.get_expr(*record_expr_idx);
             let new_value = tctx.arena.get_expr(*new_value_idx);
@@ -1949,7 +1989,7 @@ pub fn type_expect<'a>(
         }
 
         ED::Pexp_constraint(inner) => {
-                    let (ref inner_expr_idx, ref core_type) = **inner;
+            let (ref inner_expr_idx, ref core_type) = **inner;
             // Type constraint
             let inner_expr = tctx.arena.get_expr(*inner_expr_idx);
             let core_type_ref = tctx.arena.get_core_type(*core_type);
@@ -1965,7 +2005,7 @@ pub fn type_expect<'a>(
         }
 
         ED::Pexp_coerce(inner) => {
-                    let (ref inner_expr_idx, ref opt_from_type, ref to_type) = **inner;
+            let (ref inner_expr_idx, ref opt_from_type, ref to_type) = **inner;
             // Type coercion: (E :> T) or (E : T1 :> T2)
             let inner_expr = tctx.arena.get_expr(*inner_expr_idx);
             let to_type_ref = tctx.arena.get_core_type(*to_type);
@@ -1983,7 +2023,7 @@ pub fn type_expect<'a>(
         }
 
         ED::Pexp_open(inner) => {
-                    let (ref _override_flag, ref lid, ref body_idx) = **inner;
+            let (ref _override_flag, ref lid, ref body_idx) = **inner;
             // Open expression: M.{ E } or open M; E
             let body = tctx.arena.get_expr(*body_idx);
             type_open(
@@ -1998,7 +2038,7 @@ pub fn type_expect<'a>(
         }
 
         ED::Pexp_newtype(inner) => {
-                    let (ref name, ref body_idx) = **inner;
+            let (ref name, ref body_idx) = **inner;
             // Newtype expression: (type t) => E
             let body = tctx.arena.get_expr(*body_idx);
             type_newtype(
@@ -2027,7 +2067,7 @@ pub fn type_expect<'a>(
         }
 
         ED::Pexp_send(inner) => {
-                    let (ref obj_expr_idx, ref method) = **inner;
+            let (ref obj_expr_idx, ref method) = **inner;
             // Method send: E#m
             let obj_expr = tctx.arena.get_expr(*obj_expr_idx);
             type_send(
@@ -2042,7 +2082,7 @@ pub fn type_expect<'a>(
         }
 
         ED::Pexp_letexception(inner) => {
-                    let (ref ext_constr, ref body_idx) = **inner;
+            let (ref ext_constr, ref body_idx) = **inner;
             // Let exception: { exception C; E }
             let body = tctx.arena.get_expr(*body_idx);
             type_letexception(
@@ -2069,7 +2109,7 @@ pub fn type_expect<'a>(
         }
 
         ED::Pexp_letmodule(inner) => {
-                    let (ref name, ref module_expr, ref body_idx) = **inner;
+            let (ref name, ref module_expr, ref body_idx) = **inner;
             // Let module: { module M = ME; E }
             let module_expr_ref = tctx.arena.get_mod_expr(*module_expr);
             let body = tctx.arena.get_expr(*body_idx);
@@ -2289,13 +2329,25 @@ fn type_case(
     // Type check the guard if present
     let typed_guard = if let Some(guard) = &case.pc_guard {
         let bool_ty = env.type_bool(tctx.type_ctx);
-        Some(type_expect(tctx, &case_env, tctx.arena.get_expr(*guard), bool_ty, None)?)
+        Some(type_expect(
+            tctx,
+            &case_env,
+            tctx.arena.get_expr(*guard),
+            bool_ty,
+            None,
+        )?)
     } else {
         None
     };
 
     // Type check the body
-    let typed_body = type_expect(tctx, &case_env, tctx.arena.get_expr(case.pc_rhs), body_ty, None)?;
+    let typed_body = type_expect(
+        tctx,
+        &case_env,
+        tctx.arena.get_expr(case.pc_rhs),
+        body_ty,
+        None,
+    )?;
 
     Ok(crate::types::typedtree::Case {
         c_lhs: typed_pat,
@@ -3157,7 +3209,9 @@ fn type_let_bindings(
     let typing_env = if rec_flag == RecFlag::Recursive {
         let mut new_env = env.clone();
         for (binding, ty) in bindings.iter().zip(binding_types.iter()) {
-            if let crate::parser::ast::PatternDesc::Ppat_var(name) = &*tctx.arena.get_pat(binding.pvb_pat).ppat_desc {
+            if let crate::parser::ast::PatternDesc::Ppat_var(name) =
+                &*tctx.arena.get_pat(binding.pvb_pat).ppat_desc
+            {
                 let id = Ident::create_local(tctx.arena.get_string(name.txt));
                 let desc = ValueDescription {
                     val_type: *ty,
@@ -3192,7 +3246,13 @@ fn type_let_bindings(
         )?;
 
         // Type check expression
-        let typed_expr = type_expect(tctx, &typing_env, tctx.arena.get_expr(binding.pvb_expr), *ty, None)?;
+        let typed_expr = type_expect(
+            tctx,
+            &typing_env,
+            tctx.arena.get_expr(binding.pvb_expr),
+            *ty,
+            None,
+        )?;
 
         typed_bindings.push(ValueBinding::new(
             typed_pat,
@@ -3331,7 +3391,10 @@ impl Env {
             Ok((id, desc)) => {
                 // Use the stored path if available (e.g., for Pervasives primitives),
                 // otherwise construct from identifier
-                let path = desc.val_path.clone().unwrap_or_else(|| Path::pident(id.clone()));
+                let path = desc
+                    .val_path
+                    .clone()
+                    .unwrap_or_else(|| Path::pident(id.clone()));
                 Ok((path, desc.clone()))
             }
             Err(_) => Err(TypeCoreError::UndefinedMethod {
@@ -3401,10 +3464,7 @@ mod tests {
         let loc = LocIdx::none();
         let ty = ctx.new_var(None);
         let x_idx = arena.intern("x");
-        let name = Located {
-            txt: x_idx,
-            loc,
-        };
+        let name = Located { txt: x_idx, loc };
 
         let id = state.enter_variable(loc, &name, ty, false, false, &arena);
         assert!(id.is_ok());

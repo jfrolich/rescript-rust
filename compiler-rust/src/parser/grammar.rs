@@ -662,7 +662,9 @@ mod tests {
             i: std::borrow::Cow::Borrowed("42"),
             suffix: None
         }));
-        assert!(is_expr_start(&Token::Lident(std::borrow::Cow::Borrowed("foo"))));
+        assert!(is_expr_start(&Token::Lident(std::borrow::Cow::Borrowed(
+            "foo"
+        ))));
         assert!(!is_expr_start(&Token::Rparen));
         assert!(!is_expr_start(&Token::Comma));
     }
@@ -729,7 +731,11 @@ mod tests {
     #[test]
     fn test_is_mod_expr_start() {
         // Test the Lident guard pattern still works with Cow
-        assert!(is_mod_expr_start(&Token::Lident(std::borrow::Cow::Borrowed("unpack"))));
-        assert!(!is_mod_expr_start(&Token::Lident(std::borrow::Cow::Borrowed("foo"))));
+        assert!(is_mod_expr_start(&Token::Lident(
+            std::borrow::Cow::Borrowed("unpack")
+        )));
+        assert!(!is_mod_expr_start(&Token::Lident(
+            std::borrow::Cow::Borrowed("foo")
+        )));
     }
 }

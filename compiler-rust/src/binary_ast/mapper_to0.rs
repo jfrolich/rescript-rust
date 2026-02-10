@@ -15,9 +15,11 @@
 //! This mirrors `compiler/common/ast_mapper_to0.ml`.
 
 use crate::intern::StrIdx;
-use crate::location::{Location as FullLocation, Located as OldLocated};
-use crate::parse_arena::{Located, LocIdx, ParseArena, ExprIdx, PatIdx, CoreTypeIdx, ModExprIdx, ModTypeIdx};
-use crate::parser::ast::{self as current, PexpFun, PexpApply};
+use crate::location::{Located as OldLocated, Location as FullLocation};
+use crate::parse_arena::{
+    CoreTypeIdx, ExprIdx, LocIdx, Located, ModExprIdx, ModTypeIdx, ParseArena, PatIdx,
+};
+use crate::parser::ast::{self as current, PexpApply, PexpFun};
 use crate::parser::longident::Longident;
 
 use super::parsetree0 as pt0;
@@ -73,7 +75,10 @@ impl<'a> Mapper<'a> {
     }
 
     /// Convert a Located<Cow<'static, str>> to OldLocated<String> for labels
-    fn map_label_loc(&mut self, located: &Located<std::borrow::Cow<'static, str>>) -> OldLocated<String> {
+    fn map_label_loc(
+        &mut self,
+        located: &Located<std::borrow::Cow<'static, str>>,
+    ) -> OldLocated<String> {
         OldLocated {
             txt: located.txt.to_string(),
             loc: self.loc(located.loc),
@@ -89,7 +94,10 @@ impl<'a> Mapper<'a> {
     }
 
     /// Convert a Located<LidentIdx> to OldLocated<Longident> by looking up in arena
-    fn map_longident_loc(&mut self, located: &Located<crate::parse_arena::LidentIdx>) -> OldLocated<crate::parser::longident::Longident> {
+    fn map_longident_loc(
+        &mut self,
+        located: &Located<crate::parse_arena::LidentIdx>,
+    ) -> OldLocated<crate::parser::longident::Longident> {
         OldLocated {
             txt: self.arena.get_longident(located.txt).clone(),
             loc: self.loc(located.loc),
@@ -97,7 +105,10 @@ impl<'a> Mapper<'a> {
     }
 
     /// Get the longident for a LidentIdx
-    fn get_longident(&mut self, idx: crate::parse_arena::LidentIdx) -> &crate::parser::longident::Longident {
+    fn get_longident(
+        &mut self,
+        idx: crate::parse_arena::LidentIdx,
+    ) -> &crate::parser::longident::Longident {
         self.arena.get_longident(idx)
     }
 
@@ -143,12 +154,16 @@ impl<'a> Mapper<'a> {
 
     /// Convert a structure from current parsetree to parsetree0
     pub fn map_structure(&mut self, str: &[current::StructureItem]) -> pt0::Structure {
-        str.iter().map(|item| self.map_structure_item(item)).collect()
+        str.iter()
+            .map(|item| self.map_structure_item(item))
+            .collect()
     }
 
     /// Convert a signature from current parsetree to parsetree0
     pub fn map_signature(&mut self, sig: &[current::SignatureItem]) -> pt0::Signature {
-        sig.iter().map(|item| self.map_signature_item(item)).collect()
+        sig.iter()
+            .map(|item| self.map_signature_item(item))
+            .collect()
     }
 
     // ========== Helper functions ==========
@@ -220,10 +235,7 @@ impl<'a> Mapper<'a> {
         let unit_idx = self.intern("()");
         pt0::Expression {
             pexp_desc: pt0::ExpressionDesc::Construct(
-                OldLocated::new(
-                    Longident::Lident(unit_idx),
-                    full_loc.clone(),
-                ),
+                OldLocated::new(Longident::Lident(unit_idx), full_loc.clone()),
                 None,
             ),
             pexp_loc: full_loc,
@@ -236,10 +248,7 @@ impl<'a> Mapper<'a> {
         let nil_idx = self.intern("[]");
         pt0::Expression {
             pexp_desc: pt0::ExpressionDesc::Construct(
-                OldLocated::new(
-                    Longident::Lident(nil_idx),
-                    full_loc.clone(),
-                ),
+                OldLocated::new(Longident::Lident(nil_idx), full_loc.clone()),
                 None,
             ),
             pexp_loc: full_loc,
@@ -247,7 +256,11 @@ impl<'a> Mapper<'a> {
         }
     }
 
-    fn map_jsx_props(&mut self, props: &[current::JsxProp], _loc: LocIdx) -> Vec<(pt0::ArgLabel, pt0::Expression)> {
+    fn map_jsx_props(
+        &mut self,
+        props: &[current::JsxProp],
+        _loc: LocIdx,
+    ) -> Vec<(pt0::ArgLabel, pt0::Expression)> {
         let mut result = Vec::with_capacity(props.len());
         for prop in props {
             let item = match prop {
@@ -270,7 +283,11 @@ impl<'a> Mapper<'a> {
                     };
                     (label, ident_expr)
                 }
-                current::JsxProp::Value { name, optional, value } => {
+                current::JsxProp::Value {
+                    name,
+                    optional,
+                    value,
+                } => {
                     // Use the StrIdx directly
                     let name_idx = name.txt;
                     let label = if *optional {
@@ -282,7 +299,10 @@ impl<'a> Mapper<'a> {
                 }
                 current::JsxProp::Spreading { expr, .. } => {
                     let spread_idx = self.intern("_spreadProps");
-                    (pt0::ArgLabel::Labelled(spread_idx), self.map_expr_idx(*expr))
+                    (
+                        pt0::ArgLabel::Labelled(spread_idx),
+                        self.map_expr_idx(*expr),
+                    )
                 }
             };
             result.push(item);
@@ -317,10 +337,7 @@ impl<'a> Mapper<'a> {
             let child_expr = self.map_expr_idx(*child);
             result = pt0::Expression {
                 pexp_desc: pt0::ExpressionDesc::Construct(
-                    OldLocated::new(
-                        Longident::Lident(cons_idx),
-                        full_loc.clone(),
-                    ),
+                    OldLocated::new(Longident::Lident(cons_idx), full_loc.clone()),
                     Some(Box::new(pt0::Expression {
                         pexp_desc: pt0::ExpressionDesc::Tuple(vec![child_expr, result]),
                         pexp_loc: full_loc.clone(),
@@ -420,10 +437,7 @@ impl<'a> Mapper<'a> {
 
     fn map_attribute(&mut self, attr: &current::Attribute) -> pt0::Attribute {
         let (name, payload) = attr;
-        (
-            self.map_string_loc(name),
-            self.map_payload(payload),
-        )
+        (self.map_string_loc(name), self.map_payload(payload))
     }
 
     fn map_attributes(&mut self, attrs: &current::Attributes) -> pt0::Attributes {
@@ -438,9 +452,11 @@ impl<'a> Mapper<'a> {
             current::Payload::PSig(items) => {
                 pt0::Payload::PSig(items.iter().map(|i| self.map_signature_item(i)).collect())
             }
-            current::Payload::PTyp(ty_idx) => pt0::Payload::PTyp(Box::new(self.map_core_type_idx(*ty_idx))),
+            current::Payload::PTyp(ty_idx) => {
+                pt0::Payload::PTyp(Box::new(self.map_core_type_idx(*ty_idx)))
+            }
             current::Payload::PPat(inner) => {
-                    let (ref pat_idx, ref guard) = **inner;
+                let (ref pat_idx, ref guard) = **inner;
                 pt0::Payload::PPat(
                     Box::new(self.map_pat_idx(*pat_idx)),
                     guard.as_ref().map(|e| Box::new(self.map_expr_idx(*e))),
@@ -457,7 +473,8 @@ impl<'a> Mapper<'a> {
             let (ref arg, ref ret_idx, ref arity) = **inner;
             let loc = self.loc(ty.ptyp_loc);
             // Merge outer type's attributes with arg's attributes (OCaml does this)
-            let arrow_attrs: Vec<pt0::Attribute> = self.map_attributes(&ty.ptyp_attributes)
+            let arrow_attrs: Vec<pt0::Attribute> = self
+                .map_attributes(&ty.ptyp_attributes)
                 .into_iter()
                 .chain(self.map_attributes(&arg.attrs))
                 .collect();
@@ -486,9 +503,9 @@ impl<'a> Mapper<'a> {
                         ptyp_desc: pt0::CoreTypeDesc::Variant(
                             vec![pt0::RowField::Rtag(
                                 OldLocated::new(arity_string, loc.clone()),
-                                vec![],   // no attributes
-                                true,     // constant (no payload)
-                                vec![],   // no types
+                                vec![], // no attributes
+                                true,   // constant (no payload)
+                                vec![], // no types
                             )],
                             pt0::ClosedFlag::Closed,
                             None,
@@ -498,10 +515,7 @@ impl<'a> Mapper<'a> {
                     };
                     pt0::CoreType {
                         ptyp_desc: pt0::CoreTypeDesc::Constr(
-                            OldLocated::new(
-                                Longident::Lident(function_idx),
-                                loc.clone(),
-                            ),
+                            OldLocated::new(Longident::Lident(function_idx), loc.clone()),
                             vec![arrow_type, arity_type],
                         ),
                         ptyp_loc: loc,
@@ -523,7 +537,7 @@ impl<'a> Mapper<'a> {
             current::CoreTypeDesc::Ptyp_any => pt0::CoreTypeDesc::Any,
             current::CoreTypeDesc::Ptyp_var(s) => pt0::CoreTypeDesc::Var(s.to_string()),
             current::CoreTypeDesc::Ptyp_arrow(inner) => {
-                    let (ref arg, ref ret_idx, ref arity) = **inner;
+                let (ref arg, ref ret_idx, ref arity) = **inner;
                 // This branch should not normally be reached since map_core_type handles arrows
                 // But keep it for completeness - treat as no arity
                 pt0::CoreTypeDesc::Arrow(
@@ -536,37 +550,37 @@ impl<'a> Mapper<'a> {
                 pt0::CoreTypeDesc::Tuple(types.iter().map(|t| self.map_core_type_idx(*t)).collect())
             }
             current::CoreTypeDesc::Ptyp_constr(inner) => {
-                    let (ref lid, ref types) = **inner;
+                let (ref lid, ref types) = **inner;
                 pt0::CoreTypeDesc::Constr(
                     self.map_longident_loc(lid),
                     types.iter().map(|t| self.map_core_type_idx(*t)).collect(),
                 )
             }
             current::CoreTypeDesc::Ptyp_object(inner) => {
-                    let (ref fields, ref flag) = **inner;
+                let (ref fields, ref flag) = **inner;
                 pt0::CoreTypeDesc::Object(
                     fields.iter().map(|f| self.map_object_field(f)).collect(),
                     self.map_closed_flag(*flag),
                 )
             }
             current::CoreTypeDesc::Ptyp_alias(inner) => {
-                    let (ref ty_idx, ref s) = **inner;
+                let (ref ty_idx, ref s) = **inner;
                 pt0::CoreTypeDesc::Alias(Box::new(self.map_core_type_idx(*ty_idx)), s.to_string())
             }
             current::CoreTypeDesc::Ptyp_variant(inner) => {
-                    let (ref fields, ref flag, ref labels) = **inner;
+                let (ref fields, ref flag, ref labels) = **inner;
                 pt0::CoreTypeDesc::Variant(
                     fields.iter().map(|f| self.map_row_field(f)).collect(),
                     self.map_closed_flag(*flag),
-                    labels.as_ref().map(|ls| ls.iter().map(|l| l.to_string()).collect()),
+                    labels
+                        .as_ref()
+                        .map(|ls| ls.iter().map(|l| l.to_string()).collect()),
                 )
             }
             current::CoreTypeDesc::Ptyp_poly(inner) => {
-                    let (ref vars, ref ty_idx) = **inner;
+                let (ref vars, ref ty_idx) = **inner;
                 pt0::CoreTypeDesc::Poly(
-                    vars.iter()
-                        .map(|v| self.map_string_loc(v))
-                        .collect(),
+                    vars.iter().map(|v| self.map_string_loc(v)).collect(),
                     Box::new(self.map_core_type_idx(*ty_idx)),
                 )
             }
@@ -592,37 +606,34 @@ impl<'a> Mapper<'a> {
 
     fn map_row_field(&mut self, field: &current::RowField) -> pt0::RowField {
         match field {
-            current::RowField::Rtag(label, attrs, b, types) => {
-                pt0::RowField::Rtag(
-                    self.map_label_loc(label),
-                    self.map_attributes(attrs),
-                    *b,
-                    types.iter().map(|t| self.map_core_type_idx(*t)).collect(),
-                )
+            current::RowField::Rtag(label, attrs, b, types) => pt0::RowField::Rtag(
+                self.map_label_loc(label),
+                self.map_attributes(attrs),
+                *b,
+                types.iter().map(|t| self.map_core_type_idx(*t)).collect(),
+            ),
+            current::RowField::Rinherit(ty_idx) => {
+                pt0::RowField::Rinherit(self.map_core_type_idx(*ty_idx))
             }
-            current::RowField::Rinherit(ty_idx) => pt0::RowField::Rinherit(self.map_core_type_idx(*ty_idx)),
         }
     }
 
     fn map_object_field(&mut self, field: &current::ObjectField) -> pt0::ObjectField {
         match field {
-            current::ObjectField::Otag(label, attrs, ty_idx) => {
-                pt0::ObjectField::Otag(
-                    self.map_string_loc(label),
-                    self.map_attributes(attrs),
-                    self.map_core_type_idx(*ty_idx),
-                )
+            current::ObjectField::Otag(label, attrs, ty_idx) => pt0::ObjectField::Otag(
+                self.map_string_loc(label),
+                self.map_attributes(attrs),
+                self.map_core_type_idx(*ty_idx),
+            ),
+            current::ObjectField::Oinherit(ty_idx) => {
+                pt0::ObjectField::Oinherit(self.map_core_type_idx(*ty_idx))
             }
-            current::ObjectField::Oinherit(ty_idx) => pt0::ObjectField::Oinherit(self.map_core_type_idx(*ty_idx)),
         }
     }
 
     fn map_extension(&mut self, ext: &current::Extension) -> pt0::Extension {
         let (name, payload) = ext;
-        (
-            self.map_string_loc(name),
-            self.map_payload(payload),
-        )
+        (self.map_string_loc(name), self.map_payload(payload))
     }
 
     // ========== Patterns ==========
@@ -638,32 +649,34 @@ impl<'a> Mapper<'a> {
     fn map_pattern_desc(&mut self, desc: &current::PatternDesc) -> pt0::PatternDesc {
         match desc {
             current::PatternDesc::Ppat_any => pt0::PatternDesc::Any,
-            current::PatternDesc::Ppat_var(s) => {
-                pt0::PatternDesc::Var(self.map_string_loc(s))
+            current::PatternDesc::Ppat_var(s) => pt0::PatternDesc::Var(self.map_string_loc(s)),
+            current::PatternDesc::Ppat_alias(pat_idx, s) => pt0::PatternDesc::Alias(
+                Box::new(self.map_pat_idx(*pat_idx)),
+                self.map_string_loc(s),
+            ),
+            current::PatternDesc::Ppat_constant(c) => {
+                pt0::PatternDesc::Constant(self.map_constant(c))
             }
-            current::PatternDesc::Ppat_alias(pat_idx, s) => {
-                pt0::PatternDesc::Alias(Box::new(self.map_pat_idx(*pat_idx)), self.map_string_loc(s))
-            }
-            current::PatternDesc::Ppat_constant(c) => pt0::PatternDesc::Constant(self.map_constant(c)),
             current::PatternDesc::Ppat_interval(inner) => {
-                    let (ref c1, ref c2) = **inner;
+                let (ref c1, ref c2) = **inner;
                 pt0::PatternDesc::Interval(self.map_constant(c1), self.map_constant(c2))
             }
             current::PatternDesc::Ppat_tuple(pats) => {
                 pt0::PatternDesc::Tuple(pats.iter().map(|p| self.map_pat_idx(*p)).collect())
             }
-            current::PatternDesc::Ppat_construct(lid, opt) => {
-                pt0::PatternDesc::Construct(
-                    self.map_longident_loc(lid),
+            current::PatternDesc::Ppat_construct(lid, opt) => pt0::PatternDesc::Construct(
+                self.map_longident_loc(lid),
+                opt.as_ref().map(|p| Box::new(self.map_pat_idx(*p))),
+            ),
+            current::PatternDesc::Ppat_variant(inner) => {
+                let (ref label, ref opt) = **inner;
+                pt0::PatternDesc::Variant(
+                    label.to_string(),
                     opt.as_ref().map(|p| Box::new(self.map_pat_idx(*p))),
                 )
             }
-            current::PatternDesc::Ppat_variant(inner) => {
-                    let (ref label, ref opt) = **inner;
-                pt0::PatternDesc::Variant(label.to_string(), opt.as_ref().map(|p| Box::new(self.map_pat_idx(*p))))
-            }
             current::PatternDesc::Ppat_record(inner) => {
-                    let (ref fields, ref flag) = **inner;
+                let (ref fields, ref flag) = **inner;
                 // Use RecordElement with 3 fields (lid, x, opt) for current parsetree format
                 pt0::PatternDesc::Record(
                     fields
@@ -680,12 +693,16 @@ impl<'a> Mapper<'a> {
             current::PatternDesc::Ppat_array(pats) => {
                 pt0::PatternDesc::Array(pats.iter().map(|p| self.map_pat_idx(*p)).collect())
             }
-            current::PatternDesc::Ppat_or(p1, p2) => {
-                pt0::PatternDesc::Or(Box::new(self.map_pat_idx(*p1)), Box::new(self.map_pat_idx(*p2)))
-            }
+            current::PatternDesc::Ppat_or(p1, p2) => pt0::PatternDesc::Or(
+                Box::new(self.map_pat_idx(*p1)),
+                Box::new(self.map_pat_idx(*p2)),
+            ),
             current::PatternDesc::Ppat_constraint(inner) => {
-                    let (ref pat_idx, ref ty_idx) = **inner;
-                pt0::PatternDesc::Constraint(Box::new(self.map_pat_idx(*pat_idx)), Box::new(self.map_core_type_idx(*ty_idx)))
+                let (ref pat_idx, ref ty_idx) = **inner;
+                pt0::PatternDesc::Constraint(
+                    Box::new(self.map_pat_idx(*pat_idx)),
+                    Box::new(self.map_core_type_idx(*ty_idx)),
+                )
             }
             current::PatternDesc::Ppat_type(lid) => {
                 pt0::PatternDesc::Type(self.map_longident_loc(lid))
@@ -696,10 +713,13 @@ impl<'a> Mapper<'a> {
             current::PatternDesc::Ppat_exception(pat_idx) => {
                 pt0::PatternDesc::Exception(Box::new(self.map_pat_idx(*pat_idx)))
             }
-            current::PatternDesc::Ppat_extension(ext) => pt0::PatternDesc::Extension(self.map_extension(ext)),
-            current::PatternDesc::Ppat_open(lid, pat_idx) => {
-                pt0::PatternDesc::Open(self.map_longident_loc(lid), Box::new(self.map_pat_idx(*pat_idx)))
+            current::PatternDesc::Ppat_extension(ext) => {
+                pt0::PatternDesc::Extension(self.map_extension(ext))
             }
+            current::PatternDesc::Ppat_open(lid, pat_idx) => pt0::PatternDesc::Open(
+                self.map_longident_loc(lid),
+                Box::new(self.map_pat_idx(*pat_idx)),
+            ),
         }
     }
 
@@ -715,7 +735,10 @@ impl<'a> Mapper<'a> {
         owner_idx: Option<ExprIdx>,
     ) -> pt0::Expression {
         // Check if this is a JSX element that needs the [@JSX] attribute
-        let is_jsx = matches!(&*expr.pexp_desc, current::ExpressionDesc::Pexp_jsx_element(_));
+        let is_jsx = matches!(
+            &*expr.pexp_desc,
+            current::ExpressionDesc::Pexp_jsx_element(_)
+        );
         let mut attrs = self.map_attributes(&expr.pexp_attributes);
         if is_jsx {
             attrs.insert(0, self.mk_jsx_attr(expr.pexp_loc));
@@ -741,20 +764,25 @@ impl<'a> Mapper<'a> {
                 pt0::ExpressionDesc::Constant(self.map_constant(c))
             }
             current::ExpressionDesc::Pexp_let(inner) => {
-                    let (ref flag, ref bindings, ref body_idx) = **inner;
+                let (ref flag, ref bindings, ref body_idx) = **inner;
                 pt0::ExpressionDesc::Let(
                     self.map_rec_flag(*flag),
-                    bindings.iter().map(|vb| self.map_value_binding(vb)).collect(),
+                    bindings
+                        .iter()
+                        .map(|vb| self.map_value_binding(vb))
+                        .collect(),
                     Box::new(self.map_expr_idx(*body_idx)),
                 )
             }
             current::ExpressionDesc::Pexp_fun(inner) => {
-                    let PexpFun { arg_label,
-                default,
-                lhs,
-                rhs,
-                arity,
-                is_async, } = &**inner;
+                let PexpFun {
+                    arg_label,
+                    default,
+                    lhs,
+                    rhs,
+                    arity,
+                    is_async,
+                } = &**inner;
                 // Output current parsetree format with arity and is_async fields
                 // Look up arity from arena (current::Arity is now ArityIdx)
                 let arity_opt = self.arena.get_arity(*arity);
@@ -771,10 +799,12 @@ impl<'a> Mapper<'a> {
                 }
             }
             current::ExpressionDesc::Pexp_apply(inner) => {
-                    let PexpApply { funct: funct_idx,
-                args,
-                partial,
-                transformed_jsx, } = &**inner;
+                let PexpApply {
+                    funct: funct_idx,
+                    args,
+                    partial,
+                    transformed_jsx,
+                } = &**inner;
                 // Look up the function expression from arena
                 let funct = self.arena.get_expr(*funct_idx).clone();
                 // Convert operators for parsetree0 compatibility
@@ -843,7 +873,7 @@ impl<'a> Mapper<'a> {
                 }
             }
             current::ExpressionDesc::Pexp_match(inner) => {
-                    let (ref e_idx, ref cases) = **inner;
+                let (ref e_idx, ref cases) = **inner;
                 pt0::ExpressionDesc::Match(
                     Box::new(self.map_expr_idx(*e_idx)),
                     cases
@@ -854,7 +884,7 @@ impl<'a> Mapper<'a> {
                 )
             }
             current::ExpressionDesc::Pexp_try(inner) => {
-                    let (ref e_idx, ref cases) = **inner;
+                let (ref e_idx, ref cases) = **inner;
                 pt0::ExpressionDesc::Try(
                     Box::new(self.map_expr_idx(*e_idx)),
                     cases
@@ -867,21 +897,19 @@ impl<'a> Mapper<'a> {
             current::ExpressionDesc::Pexp_tuple(exprs) => {
                 pt0::ExpressionDesc::Tuple(exprs.iter().map(|e| self.map_expr_idx(*e)).collect())
             }
-            current::ExpressionDesc::Pexp_construct(lid, opt) => {
-                pt0::ExpressionDesc::Construct(
-                    self.map_longident_loc(lid),
-                    opt.as_ref().map(|e| Box::new(self.map_expr_idx(*e))),
-                )
-            }
+            current::ExpressionDesc::Pexp_construct(lid, opt) => pt0::ExpressionDesc::Construct(
+                self.map_longident_loc(lid),
+                opt.as_ref().map(|e| Box::new(self.map_expr_idx(*e))),
+            ),
             current::ExpressionDesc::Pexp_variant(inner) => {
-                    let (ref label, ref opt) = **inner;
+                let (ref label, ref opt) = **inner;
                 pt0::ExpressionDesc::Variant(
                     label.to_string(),
                     opt.as_ref().map(|e| Box::new(self.map_expr_idx(*e))),
                 )
             }
             current::ExpressionDesc::Pexp_record(inner) => {
-                    let (ref fields, ref spread) = **inner;
+                let (ref fields, ref spread) = **inner;
                 // Use RecordElement with 3 fields (lid, x, opt) for current parsetree format
                 pt0::ExpressionDesc::Record(
                     fields
@@ -895,14 +923,12 @@ impl<'a> Mapper<'a> {
                     spread.as_ref().map(|e| Box::new(self.map_expr_idx(*e))),
                 )
             }
-            current::ExpressionDesc::Pexp_field(e_idx, lid) => {
-                pt0::ExpressionDesc::Field(
-                    Box::new(self.map_expr_idx(*e_idx)),
-                    self.map_longident_loc(lid),
-                )
-            }
+            current::ExpressionDesc::Pexp_field(e_idx, lid) => pt0::ExpressionDesc::Field(
+                Box::new(self.map_expr_idx(*e_idx)),
+                self.map_longident_loc(lid),
+            ),
             current::ExpressionDesc::Pexp_setfield(inner) => {
-                    let (ref e1_idx, ref lid, ref e2_idx) = **inner;
+                let (ref e1_idx, ref lid, ref e2_idx) = **inner;
                 pt0::ExpressionDesc::Setfield(
                     Box::new(self.map_expr_idx(*e1_idx)),
                     self.map_longident_loc(lid),
@@ -913,7 +939,7 @@ impl<'a> Mapper<'a> {
                 pt0::ExpressionDesc::Array(exprs.iter().map(|e| self.map_expr_idx(*e)).collect())
             }
             current::ExpressionDesc::Pexp_ifthenelse(inner) => {
-                    let (ref e1_idx, ref e2_idx, ref e3) = **inner;
+                let (ref e1_idx, ref e2_idx, ref e3) = **inner;
                 pt0::ExpressionDesc::Ifthenelse(
                     Box::new(self.map_expr_idx(*e1_idx)),
                     Box::new(self.map_expr_idx(*e2_idx)),
@@ -926,11 +952,12 @@ impl<'a> Mapper<'a> {
                     Box::new(self.map_expr_idx(*e2_idx)),
                 )
             }
-            current::ExpressionDesc::Pexp_while(e1_idx, e2_idx) => {
-                pt0::ExpressionDesc::While(Box::new(self.map_expr_idx(*e1_idx)), Box::new(self.map_expr_idx(*e2_idx)))
-            }
+            current::ExpressionDesc::Pexp_while(e1_idx, e2_idx) => pt0::ExpressionDesc::While(
+                Box::new(self.map_expr_idx(*e1_idx)),
+                Box::new(self.map_expr_idx(*e2_idx)),
+            ),
             current::ExpressionDesc::Pexp_for(inner) => {
-                    let (ref pat_idx, ref e1_idx, ref e2_idx, ref flag, ref e3_idx) = **inner;
+                let (ref pat_idx, ref e1_idx, ref e2_idx, ref flag, ref e3_idx) = **inner;
                 pt0::ExpressionDesc::For(
                     Box::new(self.map_pat_idx(*pat_idx)),
                     Box::new(self.map_expr_idx(*e1_idx)),
@@ -940,23 +967,30 @@ impl<'a> Mapper<'a> {
                 )
             }
             current::ExpressionDesc::Pexp_constraint(inner) => {
-                    let (ref e_idx, ref ty_idx) = **inner;
+                let (ref e_idx, ref ty_idx) = **inner;
                 pt0::ExpressionDesc::Constraint(
                     Box::new(self.map_expr_idx(*e_idx)),
                     Box::new(self.map_core_type_idx(*ty_idx)),
                 )
             }
             current::ExpressionDesc::Pexp_coerce(inner) => {
-                    let (ref e_idx, _, ref ty_idx) = **inner;
+                let (ref e_idx, _, ref ty_idx) = **inner;
                 // parsetree0 has unit instead of Option<CoreType> for the middle arg
-                pt0::ExpressionDesc::Coerce(Box::new(self.map_expr_idx(*e_idx)), (), Box::new(self.map_core_type_idx(*ty_idx)))
+                pt0::ExpressionDesc::Coerce(
+                    Box::new(self.map_expr_idx(*e_idx)),
+                    (),
+                    Box::new(self.map_core_type_idx(*ty_idx)),
+                )
             }
             current::ExpressionDesc::Pexp_send(inner) => {
-                    let (ref e_idx, ref label) = **inner;
-                pt0::ExpressionDesc::Send(Box::new(self.map_expr_idx(*e_idx)), self.map_label_loc(label))
+                let (ref e_idx, ref label) = **inner;
+                pt0::ExpressionDesc::Send(
+                    Box::new(self.map_expr_idx(*e_idx)),
+                    self.map_label_loc(label),
+                )
             }
             current::ExpressionDesc::Pexp_letmodule(inner) => {
-                    let (ref name, ref me_idx, ref body_idx) = **inner;
+                let (ref name, ref me_idx, ref body_idx) = **inner;
                 pt0::ExpressionDesc::Letmodule(
                     self.map_string_loc(name),
                     Box::new(self.map_mod_expr_idx(*me_idx)),
@@ -964,7 +998,7 @@ impl<'a> Mapper<'a> {
                 )
             }
             current::ExpressionDesc::Pexp_letexception(inner) => {
-                    let (ref ext, ref body_idx) = **inner;
+                let (ref ext, ref body_idx) = **inner;
                 pt0::ExpressionDesc::Letexception(
                     self.map_extension_constructor(ext),
                     Box::new(self.map_expr_idx(*body_idx)),
@@ -974,14 +1008,17 @@ impl<'a> Mapper<'a> {
                 pt0::ExpressionDesc::Assert(Box::new(self.map_expr_idx(*e_idx)))
             }
             current::ExpressionDesc::Pexp_newtype(inner) => {
-                    let (ref name, ref body_idx) = **inner;
-                pt0::ExpressionDesc::Newtype(self.map_string_loc(name), Box::new(self.map_expr_idx(*body_idx)))
+                let (ref name, ref body_idx) = **inner;
+                pt0::ExpressionDesc::Newtype(
+                    self.map_string_loc(name),
+                    Box::new(self.map_expr_idx(*body_idx)),
+                )
             }
             current::ExpressionDesc::Pexp_pack(me_idx) => {
                 pt0::ExpressionDesc::Pack(Box::new(self.map_mod_expr_idx(*me_idx)))
             }
             current::ExpressionDesc::Pexp_open(inner) => {
-                    let (ref flag, ref lid, ref body_idx) = **inner;
+                let (ref flag, ref lid, ref body_idx) = **inner;
                 pt0::ExpressionDesc::Open(
                     self.map_override_flag(*flag),
                     self.map_longident_loc(lid),
@@ -1104,7 +1141,13 @@ impl<'a> Mapper<'a> {
             ptype_cstrs: td
                 .ptype_cstrs
                 .iter()
-                .map(|(ty1_idx, ty2_idx, loc)| (self.map_core_type_idx(*ty1_idx), self.map_core_type_idx(*ty2_idx), self.loc(*loc)))
+                .map(|(ty1_idx, ty2_idx, loc)| {
+                    (
+                        self.map_core_type_idx(*ty1_idx),
+                        self.map_core_type_idx(*ty2_idx),
+                        self.loc(*loc),
+                    )
+                })
                 .collect(),
             ptype_kind: self.map_type_kind(&td.ptype_kind),
             ptype_private: self.map_private_flag(td.ptype_private),
@@ -1117,12 +1160,18 @@ impl<'a> Mapper<'a> {
     fn map_type_kind(&mut self, kind: &current::TypeKind) -> pt0::TypeKind {
         match kind {
             current::TypeKind::Ptype_abstract => pt0::TypeKind::Abstract,
-            current::TypeKind::Ptype_variant(ctors) => {
-                pt0::TypeKind::Variant(ctors.iter().map(|c| self.map_constructor_declaration(c)).collect())
-            }
-            current::TypeKind::Ptype_record(labels) => {
-                pt0::TypeKind::Record(labels.iter().map(|l| self.map_label_declaration(l)).collect())
-            }
+            current::TypeKind::Ptype_variant(ctors) => pt0::TypeKind::Variant(
+                ctors
+                    .iter()
+                    .map(|c| self.map_constructor_declaration(c))
+                    .collect(),
+            ),
+            current::TypeKind::Ptype_record(labels) => pt0::TypeKind::Record(
+                labels
+                    .iter()
+                    .map(|l| self.map_label_declaration(l))
+                    .collect(),
+            ),
             current::TypeKind::Ptype_open => pt0::TypeKind::Open,
         }
     }
@@ -1137,7 +1186,10 @@ impl<'a> Mapper<'a> {
         }
     }
 
-    fn map_constructor_declaration(&mut self, cd: &current::ConstructorDeclaration) -> pt0::ConstructorDeclaration {
+    fn map_constructor_declaration(
+        &mut self,
+        cd: &current::ConstructorDeclaration,
+    ) -> pt0::ConstructorDeclaration {
         pt0::ConstructorDeclaration {
             pcd_name: self.map_string_loc(&cd.pcd_name),
             pcd_args: self.map_constructor_arguments(&cd.pcd_args),
@@ -1147,18 +1199,29 @@ impl<'a> Mapper<'a> {
         }
     }
 
-    fn map_constructor_arguments(&mut self, args: &current::ConstructorArguments) -> pt0::ConstructorArguments {
+    fn map_constructor_arguments(
+        &mut self,
+        args: &current::ConstructorArguments,
+    ) -> pt0::ConstructorArguments {
         match args {
-            current::ConstructorArguments::Pcstr_tuple(types) => {
-                pt0::ConstructorArguments::Tuple(types.iter().map(|t| self.map_core_type_idx(*t)).collect())
-            }
+            current::ConstructorArguments::Pcstr_tuple(types) => pt0::ConstructorArguments::Tuple(
+                types.iter().map(|t| self.map_core_type_idx(*t)).collect(),
+            ),
             current::ConstructorArguments::Pcstr_record(labels) => {
-                pt0::ConstructorArguments::Record(labels.iter().map(|l| self.map_label_declaration(l)).collect())
+                pt0::ConstructorArguments::Record(
+                    labels
+                        .iter()
+                        .map(|l| self.map_label_declaration(l))
+                        .collect(),
+                )
             }
         }
     }
 
-    fn map_extension_constructor(&mut self, ec: &current::ExtensionConstructor) -> pt0::ExtensionConstructor {
+    fn map_extension_constructor(
+        &mut self,
+        ec: &current::ExtensionConstructor,
+    ) -> pt0::ExtensionConstructor {
         pt0::ExtensionConstructor {
             pext_name: self.map_string_loc(&ec.pext_name),
             pext_kind: self.map_extension_constructor_kind(&ec.pext_kind),
@@ -1167,7 +1230,10 @@ impl<'a> Mapper<'a> {
         }
     }
 
-    fn map_extension_constructor_kind(&mut self, kind: &current::ExtensionConstructorKind) -> pt0::ExtensionConstructorKind {
+    fn map_extension_constructor_kind(
+        &mut self,
+        kind: &current::ExtensionConstructorKind,
+    ) -> pt0::ExtensionConstructorKind {
         match kind {
             current::ExtensionConstructorKind::Pext_decl(args, res) => {
                 pt0::ExtensionConstructorKind::Decl(
@@ -1214,22 +1280,27 @@ impl<'a> Mapper<'a> {
             current::ModuleTypeDesc::Pmty_ident(lid) => {
                 pt0::ModuleTypeDesc::Ident(self.map_longident_loc(lid))
             }
-            current::ModuleTypeDesc::Pmty_signature(items) => {
-                pt0::ModuleTypeDesc::Signature(items.iter().map(|i| self.map_signature_item(i)).collect())
-            }
+            current::ModuleTypeDesc::Pmty_signature(items) => pt0::ModuleTypeDesc::Signature(
+                items.iter().map(|i| self.map_signature_item(i)).collect(),
+            ),
             current::ModuleTypeDesc::Pmty_functor(inner) => {
-                    let (ref name, ref mty_idx, ref body_idx) = **inner;
+                let (ref name, ref mty_idx, ref body_idx) = **inner;
                 pt0::ModuleTypeDesc::Functor(
                     self.map_string_loc(name),
-                    mty_idx.as_ref().map(|m| Box::new(self.map_mod_type_idx(*m))),
+                    mty_idx
+                        .as_ref()
+                        .map(|m| Box::new(self.map_mod_type_idx(*m))),
                     Box::new(self.map_mod_type_idx(*body_idx)),
                 )
             }
             current::ModuleTypeDesc::Pmty_with(inner) => {
-                    let (ref mty_idx, ref constraints) = **inner;
+                let (ref mty_idx, ref constraints) = **inner;
                 pt0::ModuleTypeDesc::With(
                     Box::new(self.map_mod_type_idx(*mty_idx)),
-                    constraints.iter().map(|wc| self.map_with_constraint(wc)).collect(),
+                    constraints
+                        .iter()
+                        .map(|wc| self.map_with_constraint(wc))
+                        .collect(),
                 )
             }
             current::ModuleTypeDesc::Pmty_typeof(me_idx) => {
@@ -1246,24 +1317,22 @@ impl<'a> Mapper<'a> {
 
     fn map_with_constraint(&mut self, wc: &current::WithConstraint) -> pt0::WithConstraint {
         match wc {
-            current::WithConstraint::Pwith_type(lid, td) => {
-                pt0::WithConstraint::Type(self.map_longident_loc(lid), self.map_type_declaration(td))
-            }
-            current::WithConstraint::Pwith_module(lid1, lid2) => {
-                pt0::WithConstraint::Module(
-                    self.map_longident_loc(lid1),
-                    self.map_longident_loc(lid2),
-                )
-            }
-            current::WithConstraint::Pwith_typesubst(lid, td) => {
-                pt0::WithConstraint::TypeSubst(self.map_longident_loc(lid), self.map_type_declaration(td))
-            }
-            current::WithConstraint::Pwith_modsubst(lid1, lid2) => {
-                pt0::WithConstraint::ModSubst(
-                    self.map_longident_loc(lid1),
-                    self.map_longident_loc(lid2),
-                )
-            }
+            current::WithConstraint::Pwith_type(lid, td) => pt0::WithConstraint::Type(
+                self.map_longident_loc(lid),
+                self.map_type_declaration(td),
+            ),
+            current::WithConstraint::Pwith_module(lid1, lid2) => pt0::WithConstraint::Module(
+                self.map_longident_loc(lid1),
+                self.map_longident_loc(lid2),
+            ),
+            current::WithConstraint::Pwith_typesubst(lid, td) => pt0::WithConstraint::TypeSubst(
+                self.map_longident_loc(lid),
+                self.map_type_declaration(td),
+            ),
+            current::WithConstraint::Pwith_modsubst(lid1, lid2) => pt0::WithConstraint::ModSubst(
+                self.map_longident_loc(lid1),
+                self.map_longident_loc(lid2),
+            ),
         }
     }
 
@@ -1282,23 +1351,23 @@ impl<'a> Mapper<'a> {
             current::ModuleExprDesc::Pmod_ident(lid) => {
                 pt0::ModuleExprDesc::Ident(self.map_longident_loc(lid))
             }
-            current::ModuleExprDesc::Pmod_structure(items) => {
-                pt0::ModuleExprDesc::Structure(items.iter().map(|i| self.map_structure_item(i)).collect())
-            }
+            current::ModuleExprDesc::Pmod_structure(items) => pt0::ModuleExprDesc::Structure(
+                items.iter().map(|i| self.map_structure_item(i)).collect(),
+            ),
             current::ModuleExprDesc::Pmod_functor(inner) => {
-                    let (ref name, ref mty_idx, ref body_idx) = **inner;
+                let (ref name, ref mty_idx, ref body_idx) = **inner;
                 pt0::ModuleExprDesc::Functor(
                     self.map_string_loc(name),
-                    mty_idx.as_ref().map(|m| Box::new(self.map_mod_type_idx(*m))),
+                    mty_idx
+                        .as_ref()
+                        .map(|m| Box::new(self.map_mod_type_idx(*m))),
                     Box::new(self.map_mod_expr_idx(*body_idx)),
                 )
             }
-            current::ModuleExprDesc::Pmod_apply(me1_idx, me2_idx) => {
-                pt0::ModuleExprDesc::Apply(
-                    Box::new(self.map_mod_expr_idx(*me1_idx)),
-                    Box::new(self.map_mod_expr_idx(*me2_idx)),
-                )
-            }
+            current::ModuleExprDesc::Pmod_apply(me1_idx, me2_idx) => pt0::ModuleExprDesc::Apply(
+                Box::new(self.map_mod_expr_idx(*me1_idx)),
+                Box::new(self.map_mod_expr_idx(*me2_idx)),
+            ),
             current::ModuleExprDesc::Pmod_constraint(me_idx, mty_idx) => {
                 pt0::ModuleExprDesc::Constraint(
                     Box::new(self.map_mod_expr_idx(*me_idx)),
@@ -1323,7 +1392,10 @@ impl<'a> Mapper<'a> {
         }
     }
 
-    fn map_module_declaration(&mut self, md: &current::ModuleDeclaration) -> pt0::ModuleDeclaration {
+    fn map_module_declaration(
+        &mut self,
+        md: &current::ModuleDeclaration,
+    ) -> pt0::ModuleDeclaration {
         pt0::ModuleDeclaration {
             pmd_name: self.map_string_loc(&md.pmd_name),
             pmd_type: self.map_mod_type_idx(md.pmd_type),
@@ -1332,7 +1404,10 @@ impl<'a> Mapper<'a> {
         }
     }
 
-    fn map_module_type_declaration(&mut self, mtd: &current::ModuleTypeDeclaration) -> pt0::ModuleTypeDeclaration {
+    fn map_module_type_declaration(
+        &mut self,
+        mtd: &current::ModuleTypeDeclaration,
+    ) -> pt0::ModuleTypeDeclaration {
         pt0::ModuleTypeDeclaration {
             pmtd_name: self.map_string_loc(&mtd.pmtd_name),
             pmtd_type: mtd.pmtd_type.map(|mt| self.map_mod_type_idx(mt)),
@@ -1350,7 +1425,10 @@ impl<'a> Mapper<'a> {
         }
     }
 
-    fn map_include_declaration(&mut self, id: &current::IncludeDeclaration) -> pt0::IncludeDeclaration {
+    fn map_include_declaration(
+        &mut self,
+        id: &current::IncludeDeclaration,
+    ) -> pt0::IncludeDeclaration {
         pt0::IncludeInfos {
             pincl_mod: self.map_mod_expr_idx(id.pincl_mod),
             pincl_loc: self.loc(id.pincl_loc),
@@ -1358,7 +1436,10 @@ impl<'a> Mapper<'a> {
         }
     }
 
-    fn map_include_description(&mut self, id: &current::IncludeDescription) -> pt0::IncludeDescription {
+    fn map_include_description(
+        &mut self,
+        id: &current::IncludeDescription,
+    ) -> pt0::IncludeDescription {
         pt0::IncludeInfos {
             pincl_mod: self.map_mod_type_idx(id.pincl_mod),
             pincl_loc: self.loc(id.pincl_loc),
@@ -1389,27 +1470,36 @@ impl<'a> Mapper<'a> {
         }
     }
 
-    fn map_structure_item_desc(&mut self, desc: &current::StructureItemDesc) -> pt0::StructureItemDesc {
+    fn map_structure_item_desc(
+        &mut self,
+        desc: &current::StructureItemDesc,
+    ) -> pt0::StructureItemDesc {
         match desc {
             current::StructureItemDesc::Pstr_eval(inner) => {
-                    let (ref e_idx, ref attrs) = **inner;
+                let (ref e_idx, ref attrs) = **inner;
                 pt0::StructureItemDesc::Eval(self.map_expr_idx(*e_idx), self.map_attributes(attrs))
             }
             current::StructureItemDesc::Pstr_value(inner) => {
-                    let (ref flag, ref bindings) = **inner;
+                let (ref flag, ref bindings) = **inner;
                 pt0::StructureItemDesc::Value(
                     self.map_rec_flag(*flag),
-                    bindings.iter().map(|vb| self.map_value_binding(vb)).collect(),
+                    bindings
+                        .iter()
+                        .map(|vb| self.map_value_binding(vb))
+                        .collect(),
                 )
             }
             current::StructureItemDesc::Pstr_primitive(vd) => {
                 pt0::StructureItemDesc::Primitive(self.map_value_description(vd))
             }
             current::StructureItemDesc::Pstr_type(inner) => {
-                    let (ref flag, ref decls) = **inner;
+                let (ref flag, ref decls) = **inner;
                 pt0::StructureItemDesc::Type(
                     self.map_rec_flag(*flag),
-                    decls.iter().map(|td| self.map_type_declaration(td)).collect(),
+                    decls
+                        .iter()
+                        .map(|td| self.map_type_declaration(td))
+                        .collect(),
                 )
             }
             current::StructureItemDesc::Pstr_typext(te) => {
@@ -1421,9 +1511,9 @@ impl<'a> Mapper<'a> {
             current::StructureItemDesc::Pstr_module(mb) => {
                 pt0::StructureItemDesc::Module(self.map_module_binding(mb))
             }
-            current::StructureItemDesc::Pstr_recmodule(mbs) => {
-                pt0::StructureItemDesc::Recmodule(mbs.iter().map(|mb| self.map_module_binding(mb)).collect())
-            }
+            current::StructureItemDesc::Pstr_recmodule(mbs) => pt0::StructureItemDesc::Recmodule(
+                mbs.iter().map(|mb| self.map_module_binding(mb)).collect(),
+            ),
             current::StructureItemDesc::Pstr_modtype(mtd) => {
                 pt0::StructureItemDesc::Modtype(self.map_module_type_declaration(mtd))
             }
@@ -1437,8 +1527,11 @@ impl<'a> Mapper<'a> {
                 pt0::StructureItemDesc::Attribute(self.map_attribute(attr))
             }
             current::StructureItemDesc::Pstr_extension(inner) => {
-                    let (ref ext, ref attrs) = **inner;
-                pt0::StructureItemDesc::Extension(self.map_extension(ext), self.map_attributes(attrs))
+                let (ref ext, ref attrs) = **inner;
+                pt0::StructureItemDesc::Extension(
+                    self.map_extension(ext),
+                    self.map_attributes(attrs),
+                )
             }
         }
     }
@@ -1452,16 +1545,22 @@ impl<'a> Mapper<'a> {
         }
     }
 
-    fn map_signature_item_desc(&mut self, desc: &current::SignatureItemDesc) -> pt0::SignatureItemDesc {
+    fn map_signature_item_desc(
+        &mut self,
+        desc: &current::SignatureItemDesc,
+    ) -> pt0::SignatureItemDesc {
         match desc {
             current::SignatureItemDesc::Psig_value(vd) => {
                 pt0::SignatureItemDesc::Value(self.map_value_description(vd))
             }
             current::SignatureItemDesc::Psig_type(inner) => {
-                    let (ref flag, ref decls) = **inner;
+                let (ref flag, ref decls) = **inner;
                 pt0::SignatureItemDesc::Type(
                     self.map_rec_flag(*flag),
-                    decls.iter().map(|td| self.map_type_declaration(td)).collect(),
+                    decls
+                        .iter()
+                        .map(|td| self.map_type_declaration(td))
+                        .collect(),
                 )
             }
             current::SignatureItemDesc::Psig_typext(te) => {
@@ -1473,9 +1572,11 @@ impl<'a> Mapper<'a> {
             current::SignatureItemDesc::Psig_module(md) => {
                 pt0::SignatureItemDesc::Module(self.map_module_declaration(md))
             }
-            current::SignatureItemDesc::Psig_recmodule(mds) => {
-                pt0::SignatureItemDesc::Recmodule(mds.iter().map(|md| self.map_module_declaration(md)).collect())
-            }
+            current::SignatureItemDesc::Psig_recmodule(mds) => pt0::SignatureItemDesc::Recmodule(
+                mds.iter()
+                    .map(|md| self.map_module_declaration(md))
+                    .collect(),
+            ),
             current::SignatureItemDesc::Psig_modtype(mtd) => {
                 pt0::SignatureItemDesc::Modtype(self.map_module_type_declaration(mtd))
             }
@@ -1489,8 +1590,11 @@ impl<'a> Mapper<'a> {
                 pt0::SignatureItemDesc::Attribute(self.map_attribute(attr))
             }
             current::SignatureItemDesc::Psig_extension(inner) => {
-                    let (ref ext, ref attrs) = **inner;
-                pt0::SignatureItemDesc::Extension(self.map_extension(ext), self.map_attributes(attrs))
+                let (ref ext, ref attrs) = **inner;
+                pt0::SignatureItemDesc::Extension(
+                    self.map_extension(ext),
+                    self.map_attributes(attrs),
+                )
             }
         }
     }
@@ -1504,8 +1608,14 @@ mod tests {
     fn test_map_rec_flag() {
         let mut arena = ParseArena::new();
         let mut mapper = Mapper::new(&mut arena);
-        assert!(matches!(mapper.map_rec_flag(current::RecFlag::Nonrecursive), pt0::RecFlag::Nonrecursive));
-        assert!(matches!(mapper.map_rec_flag(current::RecFlag::Recursive), pt0::RecFlag::Recursive));
+        assert!(matches!(
+            mapper.map_rec_flag(current::RecFlag::Nonrecursive),
+            pt0::RecFlag::Nonrecursive
+        ));
+        assert!(matches!(
+            mapper.map_rec_flag(current::RecFlag::Recursive),
+            pt0::RecFlag::Recursive
+        ));
     }
 
     #[test]
@@ -1515,7 +1625,10 @@ mod tests {
         let y_idx = arena.intern("y");
         let mut mapper = Mapper::new(&mut arena);
 
-        assert!(matches!(mapper.map_arg_label(&current::ArgLabel::Nolabel), pt0::ArgLabel::Nolabel));
+        assert!(matches!(
+            mapper.map_arg_label(&current::ArgLabel::Nolabel),
+            pt0::ArgLabel::Nolabel
+        ));
 
         let label = mapper.map_arg_label(&current::ArgLabel::Labelled(Located::mknoloc(x_idx)));
         if let pt0::ArgLabel::Labelled(idx) = label {

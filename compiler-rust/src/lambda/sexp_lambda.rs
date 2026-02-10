@@ -5,15 +5,15 @@
 
 use std::io::Write;
 
-use crate::lambda::constant::{Constant, PointerInfo, StringDelim};
 use crate::lambda::compat::{Comparison, FieldDbgInfo, LetKind, SetFieldDbgInfo};
+use crate::lambda::constant::{Constant, PointerInfo, StringDelim};
 use crate::lambda::primitive::{Mutable, Primitive};
 use crate::lambda::tag_info::TagInfo;
-use crate::parser::ast::MutableFlag;
 use crate::lambda::{
     ApInfo, Apply, ApplyStatus, DirectionFlag, FunctionAttribute, InlineAttribute, LFunction,
     Lambda, LambdaSwitch, PrimInfo,
 };
+use crate::parser::ast::MutableFlag;
 
 /// Simple S-expression type for output.
 pub enum Sexp {
@@ -171,12 +171,7 @@ fn tag_info(info: &TagInfo) -> Sexp {
             mutable_flag,
         } => Sexp::list(vec![
             Sexp::atom("Blk_record"),
-            Sexp::list(
-                fields
-                    .iter()
-                    .map(|(name, _)| string(name))
-                    .collect(),
-            ),
+            Sexp::list(fields.iter().map(|(name, _)| string(name)).collect()),
             mutable_flag_sexp(mutable_flag),
         ]),
         TagInfo::RecordInlined {
@@ -191,12 +186,7 @@ fn tag_info(info: &TagInfo) -> Sexp {
             string(name),
             int(*num_nonconst),
             int(*tag as i32),
-            Sexp::list(
-                fields
-                    .iter()
-                    .map(|(name, _)| string(name))
-                    .collect(),
-            ),
+            Sexp::list(fields.iter().map(|(name, _)| string(name)).collect()),
             mutable_flag_sexp(mutable_flag),
         ]),
         TagInfo::Module(fields) => {
@@ -227,9 +217,7 @@ fn field_dbg_info(info: &FieldDbgInfo) -> Sexp {
             string(name),
             mutable_flag_sexp(mutable_flag),
         ]),
-        FieldDbgInfo::Module { name } => {
-            Sexp::list(vec![Sexp::atom("Fld_module"), string(name)])
-        }
+        FieldDbgInfo::Module { name } => Sexp::list(vec![Sexp::atom("Fld_module"), string(name)]),
         FieldDbgInfo::RecordInline { name } => {
             Sexp::list(vec![Sexp::atom("Fld_record_inline"), string(name)])
         }
@@ -303,13 +291,17 @@ fn constant(c: &Constant) -> Sexp {
             pointer_info(comment),
         ]),
         Constant::Char(c) => Sexp::list(vec![Sexp::atom("Const_char"), int(*c)]),
-        Constant::String { s, delim } => {
-            Sexp::list(vec![Sexp::atom("Const_string"), string(s), string_delim(delim)])
-        }
+        Constant::String { s, delim } => Sexp::list(vec![
+            Sexp::atom("Const_string"),
+            string(s),
+            string_delim(delim),
+        ]),
         Constant::Float(f) => Sexp::list(vec![Sexp::atom("Const_float"), string(f)]),
-        Constant::BigInt { negative, value } => {
-            Sexp::list(vec![Sexp::atom("Const_bigint"), bool_sexp(*negative), string(value)])
-        }
+        Constant::BigInt { negative, value } => Sexp::list(vec![
+            Sexp::atom("Const_bigint"),
+            bool_sexp(*negative),
+            string(value),
+        ]),
         Constant::Pointer(s) => Sexp::list(vec![Sexp::atom("Const_pointer"), string(s)]),
         Constant::Block {
             tag,
@@ -454,9 +446,7 @@ fn primitive(prim: &Primitive, _with_locs: bool) -> Sexp {
         Primitive::Pnotbigint => Sexp::atom("Pnotbigint"),
         Primitive::Plslbigint => Sexp::atom("Plslbigint"),
         Primitive::Pasrbigint => Sexp::atom("Pasrbigint"),
-        Primitive::Pbigintcomp(cmp) => {
-            Sexp::list(vec![Sexp::atom("Pbigintcomp"), comparison(cmp)])
-        }
+        Primitive::Pbigintcomp(cmp) => Sexp::list(vec![Sexp::atom("Pbigintcomp"), comparison(cmp)]),
         Primitive::Pbigintorder => Sexp::atom("Pbigintorder"),
         Primitive::Pbigintmin => Sexp::atom("Pbigintmin"),
         Primitive::Pbigintmax => Sexp::atom("Pbigintmax"),
@@ -499,10 +489,7 @@ fn function_attribute(attr: &FunctionAttribute) -> Sexp {
         ]),
         Sexp::list(vec![Sexp::atom("return_unit"), bool_sexp(attr.return_unit)]),
         Sexp::list(vec![Sexp::atom("async"), bool_sexp(attr.async_)]),
-        Sexp::list(vec![
-            Sexp::atom("directive"),
-            opt_string(&attr.directive),
-        ]),
+        Sexp::list(vec![Sexp::atom("directive"), opt_string(&attr.directive)]),
         Sexp::list(vec![
             Sexp::atom("one_unit_arg"),
             bool_sexp(attr.one_unit_arg),
@@ -680,7 +667,10 @@ fn lambda_switch(sw: &LambdaSwitch, with_locs: bool) -> Sexp {
         ]),
         Sexp::list(vec![
             Sexp::atom("sw_failaction"),
-            opt(|l| lambda(l, with_locs), &sw.sw_failaction.as_ref().map(|b| b.as_ref())),
+            opt(
+                |l| lambda(l, with_locs),
+                &sw.sw_failaction.as_ref().map(|b| b.as_ref()),
+            ),
         ]),
         Sexp::list(vec![
             Sexp::atom("sw_names"),

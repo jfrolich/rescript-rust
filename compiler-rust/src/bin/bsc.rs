@@ -8,12 +8,12 @@
 //!
 //! All other flags are accepted and ignored.
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 use rescript_compiler::binary_ast::{
     ppx, write_signature_ast_current, write_structure_ast_current,
 };
-use rescript_compiler::driver::{compile_file_to_js_with_options, CompilerOptions};
-use rescript_compiler::parser::{module, sexp_locs, Parser};
+use rescript_compiler::driver::{CompilerOptions, compile_file_to_js_with_options};
+use rescript_compiler::parser::{Parser, module, sexp_locs};
 use std::env;
 use std::fs;
 use std::io::Write;
@@ -146,8 +146,7 @@ fn generate_ast(
     // In Latin-1 mode, char offset == original byte offset, which is critical for
     // correct position tracking in the scanner and correct UTF-16 offset calculations
     // for multi-byte UTF-8 sequences (e.g., emoji characters).
-    let bytes =
-        fs::read(input).with_context(|| format!("Failed to read {}", input.display()))?;
+    let bytes = fs::read(input).with_context(|| format!("Failed to read {}", input.display()))?;
     let source: String = bytes.iter().map(|&b| b as char).collect();
 
     // Use the original path as provided (matching OCaml's behavior)

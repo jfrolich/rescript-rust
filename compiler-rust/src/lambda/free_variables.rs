@@ -310,11 +310,7 @@ mod tests {
 
         // try x with exn -> y
         // x and y are free, exn is bound
-        let try_expr = Lambda::try_(
-            Lambda::var(x.clone()),
-            exn.clone(),
-            Lambda::var(y.clone()),
-        );
+        let try_expr = Lambda::try_(Lambda::var(x.clone()), exn.clone(), Lambda::var(y.clone()));
 
         let fv = free_variables(&try_expr);
         assert!(fv.contains(&x));

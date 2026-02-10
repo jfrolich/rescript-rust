@@ -5,8 +5,8 @@
 
 use std::fmt;
 
-use crate::lambda::constant::Constant;
 use crate::lambda::compat::{Comparison, FieldDbgInfo, LetKind};
+use crate::lambda::constant::Constant;
 use crate::lambda::primitive::{Mutable, Primitive};
 use crate::lambda::{DirectionFlag, Lambda};
 
@@ -74,9 +74,7 @@ pub fn format_constant(c: &Constant, f: &mut fmt::Formatter<'_>) -> fmt::Result 
             write!(f, "[some-c]")?;
             format_constant(inner, f)
         }
-        Constant::Block {
-            tag, elements, ..
-        } => {
+        Constant::Block { tag, elements, .. } => {
             if elements.is_empty() {
                 write!(f, "[{tag}]")
             } else {
@@ -279,7 +277,10 @@ fn format_lambda(lam: &Lambda, f: &mut fmt::Formatter<'_>, indent: usize) -> fmt
 
         Lambda::Lapply(apply) => {
             write!(f, "(apply")?;
-            if matches!(apply.ap_info.inlined, crate::lambda::InlineAttribute::Always) {
+            if matches!(
+                apply.ap_info.inlined,
+                crate::lambda::InlineAttribute::Always
+            ) {
                 write!(f, "%inlined")?;
             }
             write!(f, " ")?;

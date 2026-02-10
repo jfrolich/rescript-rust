@@ -242,7 +242,11 @@ mod tests {
                     if !EXCLUDED_DIRS.contains(&dir_name.as_ref()) {
                         walk_dir(&path, base, corpus_name, files);
                     }
-                } else if file_type.is_file() && path.extension().map_or(false, |e| e == "res" || e == "resi") {
+                } else if file_type.is_file()
+                    && path
+                        .extension()
+                        .map_or(false, |e| e == "res" || e == "resi")
+                {
                     let size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
                     if size >= MIN_FILE_SIZE {
                         let rel = path.strip_prefix(base).unwrap_or(&path);
@@ -250,7 +254,12 @@ mod tests {
                         let lines = std::fs::read(&path)
                             .map(|b| b.iter().filter(|&&c| c == b'\n').count() as u64)
                             .unwrap_or(0);
-                        files.push(TestFile { name, path, size, lines });
+                        files.push(TestFile {
+                            name,
+                            path,
+                            size,
+                            lines,
+                        });
                     }
                 }
             }
@@ -478,7 +487,10 @@ mod tests {
 
         let files = discover_test_files();
         let total = files.len();
-        println!("\nDiscovered {} .res files (>= {} bytes)\n", total, MIN_FILE_SIZE);
+        println!(
+            "\nDiscovered {} .res files (>= {} bytes)\n",
+            total, MIN_FILE_SIZE
+        );
 
         println!("{:-<110}", "");
         println!(
@@ -526,7 +538,10 @@ mod tests {
                     results.push(r);
                 }
                 None => {
-                    println!("  {:<70} {:>8} {:>10} {:>10} {:>7}  SKIP", file.name, file.size, "-", "-", "-");
+                    println!(
+                        "  {:<70} {:>8} {:>10} {:>10} {:>7}  SKIP",
+                        file.name, file.size, "-", "-", "-"
+                    );
                     errors.push(file.name.clone());
                 }
             }
@@ -536,7 +551,10 @@ mod tests {
         println!();
 
         // Aggregate statistics
-        let passing = results.iter().filter(|r| r.factor <= MAX_SLOWDOWN_FACTOR).count();
+        let passing = results
+            .iter()
+            .filter(|r| r.factor <= MAX_SLOWDOWN_FACTOR)
+            .count();
         let faster = results.iter().filter(|r| r.factor < 1.0).count();
         let benchmarked = results.len();
 
@@ -548,12 +566,15 @@ mod tests {
             ("Tiny (<1KB)", 0, 1_000),
         ];
 
-        println!("  {:<25} {:>6} {:>8} {:>8} {:>10} {:>10} {:>10}",
-            "Size Tier", "Files", "Faster", "OK", "Avg Factor", "Min Factor", "Max Factor");
+        println!(
+            "  {:<25} {:>6} {:>8} {:>8} {:>10} {:>10} {:>10}",
+            "Size Tier", "Files", "Faster", "OK", "Avg Factor", "Min Factor", "Max Factor"
+        );
         println!("  {:-<85}", "");
 
         for &(tier_name, min_size, max_size) in tiers {
-            let tier_results: Vec<&Result> = results.iter()
+            let tier_results: Vec<&Result> = results
+                .iter()
                 .filter(|r| r.size >= min_size && r.size < max_size)
                 .collect();
             if tier_results.is_empty() {
@@ -561,13 +582,25 @@ mod tests {
             }
             let tier_count = tier_results.len();
             let tier_faster = tier_results.iter().filter(|r| r.factor < 1.0).count();
-            let tier_ok = tier_results.iter().filter(|r| r.factor >= 1.0 && r.factor <= MAX_SLOWDOWN_FACTOR).count();
-            let avg_factor: f64 = tier_results.iter().map(|r| r.factor).sum::<f64>() / tier_count as f64;
-            let min_factor = tier_results.iter().map(|r| r.factor).fold(f64::MAX, f64::min);
-            let max_factor = tier_results.iter().map(|r| r.factor).fold(f64::MIN, f64::max);
+            let tier_ok = tier_results
+                .iter()
+                .filter(|r| r.factor >= 1.0 && r.factor <= MAX_SLOWDOWN_FACTOR)
+                .count();
+            let avg_factor: f64 =
+                tier_results.iter().map(|r| r.factor).sum::<f64>() / tier_count as f64;
+            let min_factor = tier_results
+                .iter()
+                .map(|r| r.factor)
+                .fold(f64::MAX, f64::min);
+            let max_factor = tier_results
+                .iter()
+                .map(|r| r.factor)
+                .fold(f64::MIN, f64::max);
 
-            println!("  {:<25} {:>6} {:>8} {:>8} {:>10.2}x {:>10.2}x {:>10.2}x",
-                tier_name, tier_count, tier_faster, tier_ok, avg_factor, min_factor, max_factor);
+            println!(
+                "  {:<25} {:>6} {:>8} {:>8} {:>10.2}x {:>10.2}x {:>10.2}x",
+                tier_name, tier_count, tier_faster, tier_ok, avg_factor, min_factor, max_factor
+            );
         }
 
         println!("  {:-<85}", "");
@@ -575,7 +608,11 @@ mod tests {
 
         println!(
             "  Overall: {}/{} passing ({} faster, {} within tolerance), {} skipped",
-            passing, benchmarked, faster, passing - faster, errors.len()
+            passing,
+            benchmarked,
+            faster,
+            passing - faster,
+            errors.len()
         );
 
         if !failures.is_empty() {
@@ -584,10 +621,7 @@ mod tests {
             let mut sorted_failures = failures;
             sorted_failures.sort_by(|a, b| b.factor.partial_cmp(&a.factor).unwrap());
             for r in &sorted_failures {
-                println!(
-                    "    {:<70} {:>8} {:>7.2}x",
-                    r.name, r.size, r.factor
-                );
+                println!("    {:<70} {:>8} {:>7.2}x", r.name, r.size, r.factor);
             }
             panic!(
                 "{} benchmark(s) failed - Rust bsc is too slow (max allowed: {:.2}x)",
@@ -618,10 +652,15 @@ mod tests {
         let ocaml_iterations: u32 = 5; // fewer iterations since subprocess is slow
 
         println!("\n=== In-Process Parser Benchmark (no subprocess overhead) ===");
-        println!("Discovered {} files, {} iterations each", total, ITERATIONS_ALL_INPROCESS);
+        println!(
+            "Discovered {} files, {} iterations each",
+            total, ITERATIONS_ALL_INPROCESS
+        );
         if has_ocaml {
             println!("OCaml bsc found — showing factor (Rust in-process / OCaml subprocess)");
-            println!("Note: factor includes OCaml's subprocess overhead, so true speedup is even better");
+            println!(
+                "Note: factor includes OCaml's subprocess overhead, so true speedup is even better"
+            );
         } else {
             println!("OCaml bsc not found — showing absolute performance only");
         }
@@ -655,7 +694,11 @@ mod tests {
         let mut skipped: u32 = 0;
 
         // Temp dir for OCaml subprocess output
-        let tmp_dir = if has_ocaml { tempfile::tempdir().ok() } else { None };
+        let tmp_dir = if has_ocaml {
+            tempfile::tempdir().ok()
+        } else {
+            None
+        };
 
         for (i, file) in files.iter().enumerate() {
             if i > 0 && i % 100 == 0 {
@@ -751,7 +794,13 @@ mod tests {
         if has_ocaml {
             println!(
                 "  {:<25} {:>6} {:>12} {:>12} {:>12} {:>10} {:>12}",
-                "Size Tier", "Files", "Avg Parse", "Min Parse", "Max Parse", "Avg MB/s", "Avg Factor"
+                "Size Tier",
+                "Files",
+                "Avg Parse",
+                "Min Parse",
+                "Max Parse",
+                "Avg MB/s",
+                "Avg Factor"
             );
         } else {
             println!(
@@ -771,19 +820,12 @@ mod tests {
             }
             let count = tier.len();
             let avg_us = tier.iter().map(|r| r.parse_us).sum::<f64>() / count as f64;
-            let min_us = tier
-                .iter()
-                .map(|r| r.parse_us)
-                .fold(f64::MAX, f64::min);
-            let max_us = tier
-                .iter()
-                .map(|r| r.parse_us)
-                .fold(f64::MIN, f64::max);
+            let min_us = tier.iter().map(|r| r.parse_us).fold(f64::MAX, f64::min);
+            let max_us = tier.iter().map(|r| r.parse_us).fold(f64::MIN, f64::max);
             let avg_throughput = tier.iter().map(|r| r.throughput).sum::<f64>() / count as f64;
 
             if has_ocaml {
-                let factors: Vec<f64> =
-                    tier.iter().filter_map(|r| r.factor).collect();
+                let factors: Vec<f64> = tier.iter().filter_map(|r| r.factor).collect();
                 let avg_factor = if !factors.is_empty() {
                     factors.iter().sum::<f64>() / factors.len() as f64
                 } else {
@@ -870,7 +912,12 @@ mod tests {
         let total_size: u64 = files.iter().map(|f| f.size).sum();
 
         println!("\n=== Cold-Start Benchmark (no warmup, single pass) ===");
-        println!("{} files, {} lines, {:.1} KB\n", files.len(), total_lines, total_size as f64 / 1024.0);
+        println!(
+            "{} files, {} lines, {:.1} KB\n",
+            files.len(),
+            total_lines,
+            total_size as f64 / 1024.0
+        );
 
         // Parse every file once, measure total wall-clock time
         let start = Instant::now();
@@ -882,7 +929,9 @@ mod tests {
             };
             let source: String = bytes.iter().map(|&b| b as char).collect();
             let filename = file.path.to_string_lossy().to_string();
-            let is_interface = file.path.extension()
+            let is_interface = file
+                .path
+                .extension()
                 .and_then(|s| s.to_str())
                 .is_some_and(|ext| ext == "resi" || ext == "mli");
 
@@ -900,7 +949,11 @@ mod tests {
         let mbs = (total_size as f64) / elapsed_s / 1_000_000.0;
 
         println!("  {} files parsed in {:.1} ms", parsed, elapsed_s * 1000.0);
-        println!("  Throughput: {:.1} MB/s, {:.0}K LOC/s", mbs, loc_per_s / 1000.0);
+        println!(
+            "  Throughput: {:.1} MB/s, {:.0}K LOC/s",
+            mbs,
+            loc_per_s / 1000.0
+        );
     }
 
     // ========================================================================
@@ -924,7 +977,12 @@ mod tests {
         let out_path = tmp_dir.path().join("output.res");
 
         println!("\n=== Cold Round-Trip Benchmark: read → parse → print → write ===");
-        println!("{} files, {} lines, {:.1} KB\n", files.len(), total_lines, total_size as f64 / 1024.0);
+        println!(
+            "{} files, {} lines, {:.1} KB\n",
+            files.len(),
+            total_lines,
+            total_size as f64 / 1024.0
+        );
 
         let start = Instant::now();
         let mut processed = 0u64;
@@ -936,7 +994,9 @@ mod tests {
             };
             let source: String = bytes.iter().map(|&b| b as char).collect();
             let filename = file.path.to_string_lossy().to_string();
-            let is_interface = file.path.extension()
+            let is_interface = file
+                .path
+                .extension()
                 .and_then(|s| s.to_str())
                 .is_some_and(|ext| ext == "resi" || ext == "mli");
 
@@ -973,8 +1033,16 @@ mod tests {
         let loc_per_s = total_lines as f64 / elapsed_s;
         let mbs = (total_size as f64) / elapsed_s / 1_000_000.0;
 
-        println!("  {} files processed in {:.1} ms", processed, elapsed_s * 1000.0);
-        println!("  Throughput: {:.1} MB/s, {:.0}K LOC/s", mbs, loc_per_s / 1000.0);
+        println!(
+            "  {} files processed in {:.1} ms",
+            processed,
+            elapsed_s * 1000.0
+        );
+        println!(
+            "  Throughput: {:.1} MB/s, {:.0}K LOC/s",
+            mbs,
+            loc_per_s / 1000.0
+        );
     }
 
     // ========================================================================
@@ -998,8 +1066,16 @@ mod tests {
         let total_size: u64 = files.iter().map(|f| f.size).sum();
         let num_threads = rayon::current_num_threads();
 
-        println!("\n=== Parallel Cold-Start Parse Benchmark ({} threads) ===", num_threads);
-        println!("{} files, {} lines, {:.1} KB\n", files.len(), total_lines, total_size as f64 / 1024.0);
+        println!(
+            "\n=== Parallel Cold-Start Parse Benchmark ({} threads) ===",
+            num_threads
+        );
+        println!(
+            "{} files, {} lines, {:.1} KB\n",
+            files.len(),
+            total_lines,
+            total_size as f64 / 1024.0
+        );
 
         let parsed = AtomicU64::new(0);
 
@@ -1011,7 +1087,8 @@ mod tests {
             };
             let source: String = bytes.iter().map(|&b| b as char).collect();
             let filename = file.path.to_string_lossy().to_string();
-            let is_interface = file.path
+            let is_interface = file
+                .path
                 .extension()
                 .and_then(|s| s.to_str())
                 .is_some_and(|ext| ext == "resi" || ext == "mli");
@@ -1030,9 +1107,22 @@ mod tests {
         let mbs = (total_size as f64) / elapsed_s / 1_000_000.0;
         let parsed_count = parsed.load(Ordering::Relaxed);
 
-        println!("  {} files parsed in {:.1} ms ({} threads)", parsed_count, elapsed_s * 1000.0, num_threads);
-        println!("  Throughput: {:.1} MB/s, {:.0}K LOC/s", mbs, loc_per_s / 1000.0);
-        println!("  Per-thread: {:.1} MB/s, {:.0}K LOC/s", mbs / num_threads as f64, loc_per_s / 1000.0 / num_threads as f64);
+        println!(
+            "  {} files parsed in {:.1} ms ({} threads)",
+            parsed_count,
+            elapsed_s * 1000.0,
+            num_threads
+        );
+        println!(
+            "  Throughput: {:.1} MB/s, {:.0}K LOC/s",
+            mbs,
+            loc_per_s / 1000.0
+        );
+        println!(
+            "  Per-thread: {:.1} MB/s, {:.0}K LOC/s",
+            mbs / num_threads as f64,
+            loc_per_s / 1000.0 / num_threads as f64
+        );
     }
 
     // ========================================================================
@@ -1056,8 +1146,10 @@ mod tests {
         if !has_rust_bsc || !has_ocaml_bsc {
             eprintln!(
                 "Skipping: need both bsc binaries\n  Rust:  {} ({})\n  OCaml: {} ({})",
-                RUST_BSC, if has_rust_bsc { "found" } else { "missing" },
-                OCAML_BSC, if has_ocaml_bsc { "found" } else { "missing" },
+                RUST_BSC,
+                if has_rust_bsc { "found" } else { "missing" },
+                OCAML_BSC,
+                if has_ocaml_bsc { "found" } else { "missing" },
             );
             return;
         }
@@ -1068,7 +1160,13 @@ mod tests {
         let num_threads = rayon::current_num_threads();
 
         println!("\n=== Parallel Comparison: OCaml subp vs Rust subp vs Rust in-process ===");
-        println!("{} files, {} lines, {:.1} KB, {} threads\n", files.len(), total_lines, total_size as f64 / 1024.0, num_threads);
+        println!(
+            "{} files, {} lines, {:.1} KB, {} threads\n",
+            files.len(),
+            total_lines,
+            total_size as f64 / 1024.0,
+            num_threads
+        );
 
         // --- OCaml subprocess parallel ---
         {
@@ -1092,7 +1190,10 @@ mod tests {
             let mbs = (total_size as f64) / elapsed_s / 1_000_000.0;
             println!(
                 "  OCaml bsc (subprocess):     {:>7.1} ms  {:>6.1} MB/s  {:>7.0}K LOC/s  ({} files)",
-                elapsed_s * 1000.0, mbs, kloc, count.load(Ordering::Relaxed)
+                elapsed_s * 1000.0,
+                mbs,
+                kloc,
+                count.load(Ordering::Relaxed)
             );
         }
 
@@ -1118,7 +1219,10 @@ mod tests {
             let mbs = (total_size as f64) / elapsed_s / 1_000_000.0;
             println!(
                 "  Rust bsc (subprocess):      {:>7.1} ms  {:>6.1} MB/s  {:>7.0}K LOC/s  ({} files)",
-                elapsed_s * 1000.0, mbs, kloc, count.load(Ordering::Relaxed)
+                elapsed_s * 1000.0,
+                mbs,
+                kloc,
+                count.load(Ordering::Relaxed)
             );
         }
 
@@ -1133,7 +1237,8 @@ mod tests {
                 };
                 let source: String = bytes.iter().map(|&b| b as char).collect();
                 let filename = file.path.to_string_lossy().to_string();
-                let is_interface = file.path
+                let is_interface = file
+                    .path
                     .extension()
                     .and_then(|s| s.to_str())
                     .is_some_and(|ext| ext == "resi" || ext == "mli");
@@ -1152,7 +1257,10 @@ mod tests {
             let mbs = (total_size as f64) / elapsed_s / 1_000_000.0;
             println!(
                 "  Rust in-process (parallel):  {:>7.1} ms  {:>6.1} MB/s  {:>7.0}K LOC/s  ({} files)",
-                elapsed_s * 1000.0, mbs, kloc, count.load(Ordering::Relaxed)
+                elapsed_s * 1000.0,
+                mbs,
+                kloc,
+                count.load(Ordering::Relaxed)
             );
         }
     }

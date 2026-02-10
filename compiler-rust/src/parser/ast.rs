@@ -12,7 +12,7 @@
 use std::borrow::Cow;
 
 use crate::parse_arena::{
-    ArityIdx, CoreTypeIdx, ExprIdx, LidentIdx, Located, LocIdx, ModExprIdx, ModTypeIdx, PatIdx,
+    ArityIdx, CoreTypeIdx, ExprIdx, LidentIdx, LocIdx, Located, ModExprIdx, ModTypeIdx, PatIdx,
     PosIdx, StrIdx,
 };
 use serde::{Deserialize, Serialize};
@@ -1194,12 +1194,21 @@ mod tests {
     fn measure_ast_sizes() {
         use std::mem::size_of;
         println!("\n=== AST Enum Sizes (after boxing) ===");
-        println!("Token:              {} bytes", size_of::<crate::parser::token::Token>());
+        println!(
+            "Token:              {} bytes",
+            size_of::<crate::parser::token::Token>()
+        );
         println!("ExpressionDesc:     {} bytes", size_of::<ExpressionDesc>());
         println!("PatternDesc:        {} bytes", size_of::<PatternDesc>());
         println!("CoreTypeDesc:       {} bytes", size_of::<CoreTypeDesc>());
-        println!("StructureItemDesc:  {} bytes", size_of::<StructureItemDesc>());
-        println!("SignatureItemDesc:  {} bytes", size_of::<SignatureItemDesc>());
+        println!(
+            "StructureItemDesc:  {} bytes",
+            size_of::<StructureItemDesc>()
+        );
+        println!(
+            "SignatureItemDesc:  {} bytes",
+            size_of::<SignatureItemDesc>()
+        );
         println!("ModuleExprDesc:     {} bytes", size_of::<ModuleExprDesc>());
         println!("ModuleTypeDesc:     {} bytes", size_of::<ModuleTypeDesc>());
         println!("Payload:            {} bytes", size_of::<Payload>());
@@ -1214,13 +1223,28 @@ mod tests {
         println!("PexpFun:            {} bytes", size_of::<PexpFun>());
         println!("PexpApply:          {} bytes", size_of::<PexpApply>());
         println!("Case:               {} bytes", size_of::<Case>());
-        println!("ConstructorDecl:    {} bytes", size_of::<ConstructorDeclaration>());
-        println!("ExprRecordField:    {} bytes", size_of::<ExpressionRecordField>());
-        println!("PatRecordField:     {} bytes", size_of::<PatternRecordField>());
+        println!(
+            "ConstructorDecl:    {} bytes",
+            size_of::<ConstructorDeclaration>()
+        );
+        println!(
+            "ExprRecordField:    {} bytes",
+            size_of::<ExpressionRecordField>()
+        );
+        println!(
+            "PatRecordField:     {} bytes",
+            size_of::<PatternRecordField>()
+        );
         println!("TypeArg:            {} bytes", size_of::<TypeArg>());
         println!("ModuleBinding:      {} bytes", size_of::<ModuleBinding>());
-        println!("ModuleDeclaration:  {} bytes", size_of::<ModuleDeclaration>());
-        println!("LabelDeclaration:   {} bytes", size_of::<LabelDeclaration>());
+        println!(
+            "ModuleDeclaration:  {} bytes",
+            size_of::<ModuleDeclaration>()
+        );
+        println!(
+            "LabelDeclaration:   {} bytes",
+            size_of::<LabelDeclaration>()
+        );
         println!("JsxProp:            {} bytes", size_of::<JsxProp>());
     }
 }

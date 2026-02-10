@@ -2094,7 +2094,9 @@ impl<T> Located<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::parser::ast::{ArgLabel, Attributes, Case, ExpressionDesc, Pattern, PatternDesc, PexpFun};
+    use crate::parser::ast::{
+        ArgLabel, Attributes, Case, ExpressionDesc, Pattern, PatternDesc, PexpFun,
+    };
 
     fn ident_expr(arena: &mut ParseArena, name: &str) -> Expression {
         let lid = arena.push_lident(name);

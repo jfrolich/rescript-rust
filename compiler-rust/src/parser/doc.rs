@@ -556,8 +556,15 @@ impl Doc {
                         }
                     }
                 }
-                Doc::Group { doc: contents, should_break } => {
-                    let mode = if should_break.get() { Mode::Break } else { Mode::Flat };
+                Doc::Group {
+                    doc: contents,
+                    should_break,
+                } => {
+                    let mode = if should_break.get() {
+                        Mode::Break
+                    } else {
+                        Mode::Flat
+                    };
                     stack.push((indent, mode, contents));
                 }
                 Doc::IfBreaks { yes, no, .. } => {

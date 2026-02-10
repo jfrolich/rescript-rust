@@ -46,7 +46,10 @@ pub mod recover {
         let str_idx = arena.intern("rescript.exprhole");
         let id = mknoloc(str_idx);
         Expression {
-            pexp_desc: Box::new(ExpressionDesc::Pexp_extension(Box::new((id, Payload::PStr(Box::new(vec![])))))),
+            pexp_desc: Box::new(ExpressionDesc::Pexp_extension(Box::new((
+                id,
+                Payload::PStr(Box::new(vec![])),
+            )))),
             pexp_loc: LocIdx::none(),
             pexp_attributes: Attributes::new(),
         }
@@ -57,7 +60,10 @@ pub mod recover {
         let str_idx = arena.intern("rescript.typehole");
         let id = mknoloc(str_idx);
         CoreType {
-            ptyp_desc: Box::new(CoreTypeDesc::Ptyp_extension(Box::new((id, Payload::PStr(Box::new(vec![])))))),
+            ptyp_desc: Box::new(CoreTypeDesc::Ptyp_extension(Box::new((
+                id,
+                Payload::PStr(Box::new(vec![])),
+            )))),
             ptyp_loc: LocIdx::none(),
             ptyp_attributes: Attributes::new(),
         }
@@ -68,7 +74,10 @@ pub mod recover {
         let str_idx = arena.intern("rescript.patternhole");
         let id = mknoloc(str_idx);
         Pattern {
-            ppat_desc: Box::new(PatternDesc::Ppat_extension(Box::new((id, Payload::PStr(Box::new(vec![])))))),
+            ppat_desc: Box::new(PatternDesc::Ppat_extension(Box::new((
+                id,
+                Payload::PStr(Box::new(vec![])),
+            )))),
             ppat_loc: LocIdx::none(),
             ppat_attributes: Attributes::new(),
         }
@@ -98,7 +107,10 @@ pub mod recover {
         let str_idx = arena.intern("rescript.sigitemhole");
         let id = mknoloc(str_idx);
         SignatureItem {
-            psig_desc: Box::new(SignatureItemDesc::Psig_extension(Box::new(((id, Payload::PStr(Box::new(vec![]))), Attributes::new())))),
+            psig_desc: Box::new(SignatureItemDesc::Psig_extension(Box::new((
+                (id, Payload::PStr(Box::new(vec![]))),
+                Attributes::new(),
+            )))),
             psig_loc: LocIdx::none(),
         }
     }
@@ -387,19 +399,13 @@ pub fn if_let_attr(arena: &mut ParseArena) -> Attribute {
 /// Create the await attribute `@res.await` with location.
 pub fn make_await_attr(arena: &mut ParseArena, loc: Location) -> Attribute {
     let str_idx = arena.intern("res.await");
-    (
-        with_loc(str_idx, loc),
-        Payload::PStr(Box::new(vec![])),
-    )
+    (with_loc(str_idx, loc), Payload::PStr(Box::new(vec![])))
 }
 
 /// Create the braces attribute `@res.braces` with location.
 pub fn make_braces_attr(arena: &mut ParseArena, loc: Location) -> Attribute {
     let str_idx = arena.intern("res.braces");
-    (
-        with_loc(str_idx, loc),
-        Payload::PStr(Box::new(vec![])),
-    )
+    (with_loc(str_idx, loc), Payload::PStr(Box::new(vec![])))
 }
 
 /// Create the template literal attribute `@res.template`.
@@ -417,19 +423,13 @@ pub fn spread_attr(arena: &mut ParseArena) -> Attribute {
 /// Create the pattern variant spread attribute.
 pub fn make_pat_variant_spread_attr(arena: &mut ParseArena) -> Attribute {
     let str_idx = arena.intern("res.patVariantSpread");
-    (
-        mknoloc(str_idx),
-        Payload::PStr(Box::new(vec![])),
-    )
+    (mknoloc(str_idx), Payload::PStr(Box::new(vec![])))
 }
 
 /// Create the tagged template literal attribute.
 pub fn tagged_template_literal_attr(arena: &mut ParseArena) -> Attribute {
     let str_idx = arena.intern("res.taggedTemplate");
-    (
-        mknoloc(str_idx),
-        Payload::PStr(Box::new(vec![])),
-    )
+    (mknoloc(str_idx), Payload::PStr(Box::new(vec![])))
 }
 
 // ============================================================================
@@ -463,7 +463,10 @@ pub fn get_closing_token(token: &Token<'_>) -> Token<'static> {
         Token::List => Token::Rbrace,
         Token::Dict => Token::Rbrace,
         Token::LessThan => Token::GreaterThan,
-        _ => unreachable!("get_closing_token called with non-opening token: {:?}", token),
+        _ => unreachable!(
+            "get_closing_token called with non-opening token: {:?}",
+            token
+        ),
     }
 }
 
@@ -509,7 +512,11 @@ pub fn skip_doc_comments(p: &mut Parser<'_>) {
 }
 
 /// Convert a doc comment to a res.doc attribute.
-pub fn doc_comment_to_attribute(arena: &mut ParseArena, loc: Location, content: impl Into<String>) -> Attribute {
+pub fn doc_comment_to_attribute(
+    arena: &mut ParseArena,
+    loc: Location,
+    content: impl Into<String>,
+) -> Attribute {
     let str_idx = arena.intern("res.doc");
     let name = with_loc(str_idx, loc);
     let expr = Expression {
@@ -552,7 +559,10 @@ pub fn build_longident<S: AsRef<str>>(arena: &mut ParseArena, words: &[S]) -> Lo
 
 /// Build a longident from a list of path components and push to arena.
 /// Returns the arena index for proper sharing during marshalling.
-pub fn build_longident_idx<S: AsRef<str>>(p: &mut Parser<'_>, words: &[S]) -> crate::parse_arena::LidentIdx {
+pub fn build_longident_idx<S: AsRef<str>>(
+    p: &mut Parser<'_>,
+    words: &[S],
+) -> crate::parse_arena::LidentIdx {
     let lid = build_longident(p.arena_mut(), words);
     p.push_longident(lid)
 }
@@ -632,10 +642,7 @@ pub mod ast_helper {
     pub fn make_unit(p: &mut Parser<'_>, loc: Location) -> Expression {
         let lid_idx = p.push_lident_static("()");
         make_expr(
-            ExpressionDesc::Pexp_construct(
-                with_loc(lid_idx, loc),
-                None,
-            ),
+            ExpressionDesc::Pexp_construct(with_loc(lid_idx, loc), None),
             loc,
         )
     }
@@ -648,7 +655,10 @@ pub mod ast_helper {
         loc: Location,
     ) -> Expression {
         let funct = arena.push_expr(func);
-        let args_idx = args.into_iter().map(|(lbl, e)| (lbl, arena.push_expr(e))).collect();
+        let args_idx = args
+            .into_iter()
+            .map(|(lbl, e)| (lbl, arena.push_expr(e)))
+            .collect();
         make_expr(
             ExpressionDesc::Pexp_apply(Box::new(PexpApply {
                 funct,
@@ -669,7 +679,10 @@ pub mod ast_helper {
         partial: bool,
     ) -> Expression {
         let funct = arena.push_expr(func);
-        let args_idx = args.into_iter().map(|(lbl, e)| (lbl, arena.push_expr(e))).collect();
+        let args_idx = args
+            .into_iter()
+            .map(|(lbl, e)| (lbl, arena.push_expr(e)))
+            .collect();
         make_expr(
             ExpressionDesc::Pexp_apply(Box::new(PexpApply {
                 funct,
@@ -756,13 +769,13 @@ pub mod ast_helper {
             let cons_loc = tuple_loc;
             let item_idx = p.arena_mut().push_pat(item);
             let result_idx = p.arena_mut().push_pat(result);
-            let tuple = make_pat(PatternDesc::Ppat_tuple(Box::new(vec![item_idx, result_idx])), tuple_loc);
+            let tuple = make_pat(
+                PatternDesc::Ppat_tuple(Box::new(vec![item_idx, result_idx])),
+                tuple_loc,
+            );
             let tuple_idx = p.arena_mut().push_pat(tuple);
             let cons = with_loc(cons_idx, cons_loc);
-            result = make_pat(
-                PatternDesc::Ppat_construct(cons, Some(tuple_idx)),
-                cons_loc,
-            );
+            result = make_pat(PatternDesc::Ppat_construct(cons, Some(tuple_idx)), cons_loc);
         }
 
         // The outermost pattern uses the full list{...} location
@@ -782,7 +795,10 @@ pub mod ast_helper {
         lid_loc: Location,
         ptyp_loc: Location,
     ) -> CoreType {
-        make_typ(CoreTypeDesc::Ptyp_constr(Box::new((with_loc(lid_idx, lid_loc), args))), ptyp_loc)
+        make_typ(
+            CoreTypeDesc::Ptyp_constr(Box::new((with_loc(lid_idx, lid_loc), args))),
+            ptyp_loc,
+        )
     }
 }
 
@@ -833,9 +849,10 @@ pub fn make_unary_expr(
         {
             if let Constant::Float(ref n, ref suffix) = **c {
                 return Expression {
-                    pexp_desc: Box::new(ExpressionDesc::Pexp_constant(Box::new(
-                        Constant::Float(Cow::Owned(negate_string(n)), *suffix),
-                    ))),
+                    pexp_desc: Box::new(ExpressionDesc::Pexp_constant(Box::new(Constant::Float(
+                        Cow::Owned(negate_string(n)),
+                        *suffix,
+                    )))),
                     ..operand
                 };
             }
@@ -853,7 +870,12 @@ pub fn make_unary_expr(
         let op_expr = ast_helper::make_ident(p, lid, token_loc);
         let operand_end_idx = p.loc_end_idx(operand.pexp_loc);
         let loc = p.mk_loc_idx(start_pos, operand_end_idx);
-        return ast_helper::make_apply(p.arena_mut(), op_expr, vec![(ArgLabel::Nolabel, operand)], loc);
+        return ast_helper::make_apply(
+            p.arena_mut(),
+            op_expr,
+            vec![(ArgLabel::Nolabel, operand)],
+            loc,
+        );
     }
 
     if matches!(token, Token::Bang) {
@@ -863,7 +885,12 @@ pub fn make_unary_expr(
         let op_expr = ast_helper::make_ident_idx(op_lid_idx, token_loc);
         let operand_end_idx = p.loc_end_idx(operand.pexp_loc);
         let loc = p.mk_loc_idx(start_pos, operand_end_idx);
-        return ast_helper::make_apply(p.arena_mut(), op_expr, vec![(ArgLabel::Nolabel, operand)], loc);
+        return ast_helper::make_apply(
+            p.arena_mut(),
+            op_expr,
+            vec![(ArgLabel::Nolabel, operand)],
+            loc,
+        );
     }
 
     let op_expr = if token_string.starts_with('~') {
@@ -885,7 +912,12 @@ pub fn make_unary_expr(
     let operand_end_idx = p.loc_end_idx(operand.pexp_loc);
     let loc = p.mk_loc_idx(start_pos, operand_end_idx);
 
-    ast_helper::make_apply(p.arena_mut(), op_expr, vec![(ArgLabel::Nolabel, operand)], loc)
+    ast_helper::make_apply(
+        p.arena_mut(),
+        op_expr,
+        vec![(ArgLabel::Nolabel, operand)],
+        loc,
+    )
 }
 
 /// Create an infix operator expression.
@@ -904,9 +936,7 @@ pub fn make_infix_operator(
         p.err_at(
             *p.arena().get_position(start_pos),
             *p.arena().get_position(end_pos),
-            DiagnosticCategory::Message(
-                "Did you mean `==` here?".to_string(),
-            ),
+            DiagnosticCategory::Message("Did you mean `==` here?".to_string()),
         );
         "=".to_string()
     } else {
@@ -1141,7 +1171,11 @@ mod tests {
         let mut arena = ParseArena::new();
         let words = vec!["Foo".to_string(), "Bar".to_string(), "baz".to_string()];
         let lid = build_longident(&mut arena, &words);
-        let resolved: Vec<&str> = lid.flatten_idx().iter().map(|idx| arena.get_string(*idx)).collect();
+        let resolved: Vec<&str> = lid
+            .flatten_idx()
+            .iter()
+            .map(|idx| arena.get_string(*idx))
+            .collect();
         assert_eq!(resolved.join("."), "Foo.Bar.baz");
     }
 

@@ -7,9 +7,9 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::ident::Ident;
-use crate::lambda::compat::LetKind;
 use crate::lambda::Lambda;
 use crate::lambda::arity::Arity;
+use crate::lambda::compat::LetKind;
 use crate::lambda::constant::Constant;
 
 /// Label for jump tables (exception handler labels).
@@ -287,11 +287,7 @@ impl CompileContext {
     /// Add handlers to the jump table.
     ///
     /// Returns the updated jump table and a list of (order_id, handler) pairs.
-    pub fn add_handlers(
-        &mut self,
-        exit_id: Ident,
-        handlers: Vec<Handler>,
-    ) -> Vec<(i32, Lambda)> {
+    pub fn add_handlers(&mut self, exit_id: Ident, handlers: Vec<Handler>) -> Vec<(i32, Lambda)> {
         let base_order = self.jmp_table.len() as i32 + 1;
         let mut result = Vec::new();
 

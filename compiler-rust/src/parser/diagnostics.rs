@@ -110,14 +110,16 @@ impl ParserDiagnostic {
                     let bytes = source.as_bytes();
                     // Check for [| (old array literal syntax)
                     if idx_prev < bytes.len() && bytes[idx_prev] == b'[' {
-                        return base + "\n\n  Did you mean to write an array literal? \
+                        return base
+                            + "\n\n  Did you mean to write an array literal? \
                             Arrays are written with `[ ... ]` (not `[| ... |]`).\n  \
                             Quick fix: replace `[|` with `[` and `|]` with `]`.\n  \
                             Example: `[|1, 2, 3|]` -> `[1, 2, 3]`";
                     }
                     // Check for |> (old data-last pipe)
                     if idx_next < bytes.len() && bytes[idx_next] == b'>' {
-                        return base + "\n\n  The old data-last pipe `|>` has been removed \
+                        return base
+                            + "\n\n  The old data-last pipe `|>` has been removed \
                             from the language.\n  Refactor to use a data-first `->` pipe instead.";
                     }
                 }
@@ -240,8 +242,10 @@ fn explain_unexpected(token: &Token<'_>, context: &[(Grammar, Position)]) -> Str
             if let Some(next) = next_grammar {
                 match (next, token) {
                     // In record field declarations
-                    (Grammar::StringFieldDeclarations | Grammar::FieldDeclarations,
-                     Token::String(_) | Token::At | Token::Rbrace | Token::Comma | Token::Eof) => {
+                    (
+                        Grammar::StringFieldDeclarations | Grammar::FieldDeclarations,
+                        Token::String(_) | Token::At | Token::Rbrace | Token::Comma | Token::Eof,
+                    ) => {
                         return "I'm missing a type here".to_string();
                     }
                     _ => {}
@@ -268,7 +272,8 @@ fn explain_unexpected(token: &Token<'_>, context: &[(Grammar, Position)]) -> Str
                     }
                     // Record field mutation
                     (Grammar::ExprSetField, _) => {
-                        return "It seems that this record field mutation misses an expression".to_string();
+                        return "It seems that this record field mutation misses an expression"
+                            .to_string();
                     }
                     // Array mutation
                     (Grammar::ExprArrayMutation, _) => {
@@ -295,7 +300,10 @@ fn explain_unexpected(token: &Token<'_>, context: &[(Grammar, Position)]) -> Str
         // TypeParam context
         Grammar::TypeParam => {
             if let Token::Lident(ident) = token {
-                return format!("Did you mean '{}? A Type parameter starts with a quote.", ident);
+                return format!(
+                    "Did you mean '{}? A Type parameter starts with a quote.",
+                    ident
+                );
             }
             default_unexpected(token)
         }

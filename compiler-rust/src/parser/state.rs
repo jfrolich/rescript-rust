@@ -433,7 +433,8 @@ impl<'src> Parser<'src> {
 
     /// Like mk_loc_spanning, but preserves the ghost flag from the start location.
     pub fn mk_loc_spanning_preserve_ghost(&mut self, start_loc: LocIdx, end_loc: LocIdx) -> LocIdx {
-        self.arena.mk_loc_spanning_preserve_ghost(start_loc, end_loc)
+        self.arena
+            .mk_loc_spanning_preserve_ghost(start_loc, end_loc)
     }
 
     /// Create a location from a start Position to another location's end.
@@ -522,7 +523,12 @@ impl<'src> Parser<'src> {
 
     /// Record a diagnostic error without silencing subsequent errors.
     /// Use this for errors that should allow additional errors to be reported.
-    pub fn err_multiple(&mut self, start_pos: Position, end_pos: Position, category: DiagnosticCategory) {
+    pub fn err_multiple(
+        &mut self,
+        start_pos: Position,
+        end_pos: Position,
+        category: DiagnosticCategory,
+    ) {
         let diagnostic = ParserDiagnostic {
             start_pos,
             end_pos,
@@ -746,11 +752,7 @@ impl<'src> Parser<'src> {
             };
             // OCaml uses prev_end_pos for start and end_pos (current token's end) for end.
             // This creates a span from where we expected the token to the current position.
-            self.err_at(
-                self.prev_end_pos.clone(),
-                self.end_pos.clone(),
-                category,
-            );
+            self.err_at(self.prev_end_pos.clone(), self.end_pos.clone(), category);
         }
     }
 
@@ -860,7 +862,8 @@ impl<'src> Parser<'src> {
         self.breadcrumbs = snapshot.breadcrumbs;
         self.diagnostics.truncate(snapshot.diagnostics_len);
         self.comments.truncate(snapshot.comments_len);
-        self.location_id_counter.store(snapshot.location_id_counter, Ordering::Relaxed);
+        self.location_id_counter
+            .store(snapshot.location_id_counter, Ordering::Relaxed);
         // Note: We don't truncate arena allocations as it's harmless to keep them.
         // The indices from speculative parsing won't be stored in the final AST.
         let _ = (snapshot.arena_positions_len, snapshot.arena_locations_len);

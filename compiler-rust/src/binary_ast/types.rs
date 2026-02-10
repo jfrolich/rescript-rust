@@ -6,7 +6,9 @@
 use super::marshal::MarshalWriter;
 use super::serialize::Marshal;
 use crate::location::{Located, Location, Position};
-use crate::parse_arena::{self, CoreTypeIdx, ExprIdx, LidentIdx, LocIdx, ModExprIdx, ModTypeIdx, PatIdx, PosIdx, StrIdx};
+use crate::parse_arena::{
+    self, CoreTypeIdx, ExprIdx, LidentIdx, LocIdx, ModExprIdx, ModTypeIdx, PatIdx, PosIdx, StrIdx,
+};
 use crate::parser::ast::{CoreType, Expression, ModuleExpr, ModuleType, Pattern};
 use crate::parser::longident::Longident;
 
@@ -73,7 +75,6 @@ impl<T: Marshal> Marshal for Located<T> {
         self.loc.marshal(w);
     }
 }
-
 
 // ========== Arena-based types ==========
 
@@ -288,10 +289,7 @@ mod tests {
         let mut arena = ParseArena::default();
         let foo_idx = arena.intern_string("Foo");
         let bar_idx = arena.intern_string("bar");
-        let lid = Longident::Ldot(
-            Box::new(Longident::Lident(foo_idx)),
-            bar_idx,
-        );
+        let lid = Longident::Ldot(Box::new(Longident::Lident(foo_idx)), bar_idx);
 
         let mut w = MarshalWriter::new();
         w.set_arena(&arena);

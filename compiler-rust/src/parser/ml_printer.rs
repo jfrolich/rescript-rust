@@ -6,11 +6,13 @@
 
 use std::io::Write;
 
-use crate::parse_arena::{CoreTypeIdx, ExprIdx, LidentIdx, Located, ModExprIdx, ModTypeIdx, ParseArena, PatIdx, StrIdx};
 use super::ast::*;
 use super::formatter::{BoxKind, Formatter};
 use super::longident::Longident;
 use super::parsetree_viewer;
+use crate::parse_arena::{
+    CoreTypeIdx, ExprIdx, LidentIdx, Located, ModExprIdx, ModTypeIdx, ParseArena, PatIdx, StrIdx,
+};
 
 // ============================================================================
 // Print context (matching OCaml's pprintast ctxt)
@@ -27,7 +29,11 @@ struct PrintCtx {
 
 impl PrintCtx {
     fn reset() -> Self {
-        Self { pipe: false, semi: false, ifthenelse: false }
+        Self {
+            pipe: false,
+            semi: false,
+            ifthenelse: false,
+        }
     }
     fn under_pipe(self) -> Self {
         Self { pipe: true, ..self }
@@ -36,7 +42,10 @@ impl PrintCtx {
         Self { semi: true, ..self }
     }
     fn under_ifthenelse(self) -> Self {
-        Self { ifthenelse: true, ..self }
+        Self {
+            ifthenelse: true,
+            ..self
+        }
     }
 }
 
@@ -140,8 +149,9 @@ fn constant_is_negative(c: &Constant) -> bool {
 
 /// Check if a string represents an infix operator
 fn is_infix_operator(name: &str) -> bool {
-    const INFIX_SPECIALS: &[&str] =
-        &[":=", "!=", "::", "mod", "land", "lor", "lxor", "lsl", "lsr", "asr", "or"];
+    const INFIX_SPECIALS: &[&str] = &[
+        ":=", "!=", "::", "mod", "land", "lor", "lxor", "lsl", "lsr", "asr", "or",
+    ];
     if INFIX_SPECIALS.contains(&name) {
         return true;
     }
@@ -238,7 +248,7 @@ fn is_simple_expression_with_arena(expr: &Expression, arena: &ParseArena) -> boo
             // OCaml's simple_expr handles these directly (no paren wrapping)
             | ExpressionDesc::Pexp_for(_)
             | ExpressionDesc::Pexp_while(_, _)
-            | ExpressionDesc::Pexp_jsx_element(_)  // JSX elements are simple in OCaml
+            | ExpressionDesc::Pexp_jsx_element(_) // JSX elements are simple in OCaml
     )
 }
 
@@ -264,7 +274,10 @@ fn is_expression2(expr: &Expression, arena: &ParseArena) -> bool {
         return false;
     }
     // Expression2 includes field and send expressions
-    if matches!(&*expr.pexp_desc, ExpressionDesc::Pexp_field(_, _) | ExpressionDesc::Pexp_send(_)) {
+    if matches!(
+        &*expr.pexp_desc,
+        ExpressionDesc::Pexp_field(_, _) | ExpressionDesc::Pexp_send(_)
+    ) {
         return true;
     }
     // Plus everything that's simple
@@ -279,7 +292,10 @@ fn is_internal_attribute(name: &str) -> bool {
 }
 
 /// Filter attributes to only include ones that should be printed
-fn printable_attributes<'a>(arena: &ParseArena, attrs: &'a [(Located<StrIdx>, Payload)]) -> Vec<&'a (Located<StrIdx>, Payload)> {
+fn printable_attributes<'a>(
+    arena: &ParseArena,
+    attrs: &'a [(Located<StrIdx>, Payload)],
+) -> Vec<&'a (Located<StrIdx>, Payload)> {
     attrs
         .iter()
         .filter(|(name, _)| !is_internal_attribute(arena.get_string(name.txt)))
@@ -292,7 +308,10 @@ fn has_attribute(arena: &ParseArena, attrs: &[(Located<StrIdx>, Payload)], name:
 }
 
 /// Collect list elements from a cons pattern
-fn collect_list_elements<'a>(expr: &'a Expression, arena: &'a ParseArena) -> (Vec<&'a Expression>, bool) {
+fn collect_list_elements<'a>(
+    expr: &'a Expression,
+    arena: &'a ParseArena,
+) -> (Vec<&'a Expression>, bool) {
     let mut elements = Vec::new();
     let mut current = expr;
 
@@ -385,7 +404,7 @@ pub fn print_signature_ml(signature: &[SignatureItem], arena: &ParseArena, out: 
     let mut f = Formatter::new(out);
     for (i, item) in signature.iter().enumerate() {
         if i > 0 {
-            f.newline();  // Top-level items on separate lines
+            f.newline(); // Top-level items on separate lines
         }
         print_signature_item(&mut f, arena, item);
     }
@@ -399,7 +418,7 @@ pub fn print_signature_ml(signature: &[SignatureItem], arena: &ParseArena, out: 
 fn print_structure_item<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, item: &StructureItem) {
     match &*item.pstr_desc {
         StructureItemDesc::Pstr_eval(inner) => {
-                    let (ref expr_idx, ref attrs) = **inner;
+            let (ref expr_idx, ref attrs) = **inner;
             // OCaml: pp f "@[<hov2>;;%a@]%a"
             f.open_box(BoxKind::HOV, 2);
             f.string(";;");
@@ -408,7 +427,7 @@ fn print_structure_item<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, item
             print_item_attributes(f, arena, attrs);
         }
         StructureItemDesc::Pstr_value(inner) => {
-                    let (ref rec_flag, ref bindings) = **inner;
+            let (ref rec_flag, ref bindings) = **inner;
             let rec_str = match rec_flag {
                 RecFlag::Recursive => "let rec ",
                 RecFlag::Nonrecursive => "let ",
@@ -424,7 +443,12 @@ fn print_structure_item<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, item
                 } else {
                     f.string(rec_str);
                 }
-                print_value_binding(f, arena, arena.get_pat(binding.pvb_pat), arena.get_expr(binding.pvb_expr));
+                print_value_binding(
+                    f,
+                    arena,
+                    arena.get_pat(binding.pvb_pat),
+                    arena.get_expr(binding.pvb_expr),
+                );
                 f.close_box();
                 // Item attributes are OUTSIDE the box in OCaml
                 print_item_attributes(f, arena, &binding.pvb_attributes);
@@ -461,7 +485,7 @@ fn print_structure_item<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, item
             print_item_attributes(f, arena, &vd.pval_attributes);
         }
         StructureItemDesc::Pstr_type(inner) => {
-                    let (ref rec_flag, ref decls) = **inner;
+            let (ref rec_flag, ref decls) = **inner;
             // OCaml: @[<2>type %a%a%s%s%a@]%a for first, @[<2>and %a@]%a for others
             // Each declaration is wrapped in a box with indent 2
             let rec_str = match rec_flag {
@@ -575,7 +599,7 @@ fn print_structure_item<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, item
                     f.string("=");
                     f.space();
                     print_module_expr(f, arena, arena.get_mod_expr(*inner_me));
-                    f.space();  // OCaml: trailing @; produces space
+                    f.space(); // OCaml: trailing @; produces space
                 } else {
                     f.string(" =");
                     f.space();
@@ -639,8 +663,8 @@ fn print_structure_item<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, item
             f.string(arena.get_string(mtd.pmtd_name.txt));
             if let Some(mt) = &mtd.pmtd_type {
                 // pp_print_space + "@ =" gives two spaces before =
-                f.string(" ");  // literal space from pp_print_space
-                f.space();      // break hint before =
+                f.string(" "); // literal space from pp_print_space
+                f.space(); // break hint before =
                 f.string("=");
                 f.space();
                 print_module_type(f, arena, arena.get_mod_type(*mt));
@@ -666,7 +690,8 @@ fn print_structure_item<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, item
             f.close_box();
             print_item_attributes(f, arena, &incl.pincl_attributes);
         }
-        StructureItemDesc::Pstr_attribute(attr_inner) => { let (ref name, ref payload) = **attr_inner;
+        StructureItemDesc::Pstr_attribute(attr_inner) => {
+            let (ref name, ref payload) = **attr_inner;
             // Standalone/floating attributes use [@@@...] (3 @)
             f.string("[@@@");
             f.string(arena.get_string(name.txt));
@@ -697,7 +722,12 @@ fn print_structure_item<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, item
 // Value bindings
 // ============================================================================
 
-fn print_value_binding<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, pat: &Pattern, expr: &Expression) {
+fn print_value_binding<W: Write>(
+    f: &mut Formatter<W>,
+    arena: &ParseArena,
+    pat: &Pattern,
+    expr: &Expression,
+) {
     if !expr.pexp_attributes.is_empty() {
         // OCaml: pp f "%a@;=@;%a" (pattern ctxt) p (expression ctxt) x
         print_pattern(f, arena, pat);
@@ -737,9 +767,10 @@ fn print_value_binding<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, pat: 
                         let (ref body_idx, ref ct) = **constr_inner;
                         if curr_expr.pexp_attributes.is_empty() && e_tyvars.len() == tyvars.len() {
                             // Check that tyvar names match (pattern has 'a, expr has a -> same base name)
-                            let tyvars_match = tyvars.iter().zip(e_tyvars.iter()).all(|(pt, et)| {
-                                pt.txt == *et
-                            });
+                            let tyvars_match = tyvars
+                                .iter()
+                                .zip(e_tyvars.iter())
+                                .all(|(pt, et)| pt.txt == *et);
                             if tyvars_match {
                                 // Print sugared form: name : type t u v. ct = body
                                 // OCaml: %a@;: type@;%a.@;%a@;=@;%a
@@ -776,7 +807,9 @@ fn print_value_binding<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, pat: 
         let inner_pat = arena.get_pat(*inner_pat_idx);
         let typ = arena.get_core_type(*typ_idx);
         if pat.ppat_attributes.is_empty() {
-            if matches!(*typ.ptyp_desc, CoreTypeDesc::Ptyp_poly(..)) && typ.ptyp_attributes.is_empty() {
+            if matches!(*typ.ptyp_desc, CoreTypeDesc::Ptyp_poly(..))
+                && typ.ptyp_attributes.is_empty()
+            {
                 // Ptyp_poly: print without outer parens
                 // OCaml: pp f "%a@;:@;%a@;=@;%a"
                 print_simple_pattern(f, arena, inner_pat);
@@ -810,12 +843,14 @@ fn print_value_binding<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, pat: 
 
     match &*expr.pexp_desc {
         ExpressionDesc::Pexp_fun(inner) => {
-            let PexpFun { ref arg_label,
-            ref default,
-            ref lhs,
-            ref rhs,
-            ref arity,
-            ref is_async, } = **inner;
+            let PexpFun {
+                ref arg_label,
+                ref default,
+                ref lhs,
+                ref rhs,
+                ref arity,
+                ref is_async,
+            } = **inner;
             // OCaml: pp f "%a@ %a" (simple_pattern ctxt) p pp_print_pexp_function x
             // where pp_print_pexp_function does: pp f "%s%s%a@ %a" async_str arity_str param recurse
             print_pattern(f, arena, pat);
@@ -840,7 +875,7 @@ fn print_value_binding<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, pat: 
             print_expression_no_outer_parens(f, arena, body);
         }
         ExpressionDesc::Pexp_newtype(inner) => {
-                    let (ref name, ref inner_idx) = **inner;
+            let (ref name, ref inner_idx) = **inner;
             // Handle locally abstract types at the start: let f (type t) ...
             // OCaml: pp f "%a@ %a" where second %a is pp_print_pexp_function
             // pp_print_pexp_function for Pexp_newtype: pp f "(type@ %s)@ %a"
@@ -852,7 +887,12 @@ fn print_value_binding<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, pat: 
             f.string(")");
             f.space(); // @ between ) and next
             // Continue collecting newtypes and print arity when we hit a fun
-            let body = print_remaining_inline_params_with_arity(f, arena, arena.get_expr(*inner_idx), true);
+            let body = print_remaining_inline_params_with_arity(
+                f,
+                arena,
+                arena.get_expr(*inner_idx),
+                true,
+            );
             // OCaml: pp f "=@;%a" (expression ctxt) x
             f.string("=");
             f.space();
@@ -1050,12 +1090,14 @@ fn print_remaining_inline_params_with_arity<'a, W: Write>(
 
     match &*expr.pexp_desc {
         ExpressionDesc::Pexp_fun(inner) => {
-                    let PexpFun { ref arg_label,
-            ref default,
-            ref lhs,
-            ref rhs,
-            ref arity,
-            .. } = **inner;
+            let PexpFun {
+                ref arg_label,
+                ref default,
+                ref lhs,
+                ref rhs,
+                ref arity,
+                ..
+            } = **inner;
             // Print arity for each Pexp_fun that has an arity annotation
             // (matching OCaml's pprintast: only print when explicitly set)
             if let Some(n) = arena.get_arity(*arity) {
@@ -1066,14 +1108,19 @@ fn print_remaining_inline_params_with_arity<'a, W: Write>(
             print_remaining_inline_params_with_arity(f, arena, arena.get_expr(*rhs), false)
         }
         ExpressionDesc::Pexp_newtype(inner) => {
-                    let (ref name, ref inner_idx) = **inner;
+            let (ref name, ref inner_idx) = **inner;
             // OCaml: pp f "(type@ %s)@ %a" str.txt pp_print_pexp_function e
             f.string("(type");
             f.space(); // @ inside (type@ %s)
             f.string(arena.get_string(name.txt));
             f.string(")");
             f.space(); // @ between ) and next
-            print_remaining_inline_params_with_arity(f, arena, arena.get_expr(*inner_idx), need_arity)
+            print_remaining_inline_params_with_arity(
+                f,
+                arena,
+                arena.get_expr(*inner_idx),
+                need_arity,
+            )
         }
         _ => expr,
     }
@@ -1101,7 +1148,11 @@ fn print_expression<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, expr: &E
     }
 }
 
-fn print_expression_no_outer_parens<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, expr: &Expression) {
+fn print_expression_no_outer_parens<W: Write>(
+    f: &mut Formatter<W>,
+    arena: &ParseArena,
+    expr: &Expression,
+) {
     let attrs = printable_attributes(arena, &expr.pexp_attributes);
     let has_attrs = !attrs.is_empty();
 
@@ -1125,7 +1176,12 @@ fn print_expression_simple<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, e
 /// Context-aware version of print_expression_simple.
 /// In OCaml, `simple_expr ctxt` passes the context through, so when it falls through
 /// to `expression ctxt`, context-dependent parenthesization (pipe, semi, ifthenelse) is applied.
-fn print_expression_simple_ctx<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, expr: &Expression, ctx: PrintCtx) {
+fn print_expression_simple_ctx<W: Write>(
+    f: &mut Formatter<W>,
+    arena: &ParseArena,
+    expr: &Expression,
+    ctx: PrintCtx,
+) {
     // OCaml's simple_expr wraps non-simple expressions in parens
     // BUT: attributed expressions already produce ((expr)[@attr]) structure
     // so we don't add extra parens for them
@@ -1148,7 +1204,12 @@ fn print_expression_simple_ctx<W: Write>(f: &mut Formatter<W>, arena: &ParseAren
 
 /// Context-aware version of print_expression_simple_under_semi.
 /// OCaml: `simple_expr (under_semi ctxt)` - applies under_semi to the inherited context.
-fn print_expression_simple_under_semi_ctx<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, expr: &Expression, ctx: PrintCtx) {
+fn print_expression_simple_under_semi_ctx<W: Write>(
+    f: &mut Formatter<W>,
+    arena: &ParseArena,
+    expr: &Expression,
+    ctx: PrintCtx,
+) {
     let semi_ctx = ctx.under_semi();
     let has_attrs = !printable_attributes(arena, &expr.pexp_attributes).is_empty();
 
@@ -1166,7 +1227,12 @@ fn print_expression_simple_under_semi_ctx<W: Write>(f: &mut Formatter<W>, arena:
 
 /// Context-aware version of print_expression2.
 /// In OCaml, `expression2 ctxt` passes the context through.
-fn print_expression2_ctx<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, expr: &Expression, ctx: PrintCtx) {
+fn print_expression2_ctx<W: Write>(
+    f: &mut Formatter<W>,
+    arena: &ParseArena,
+    expr: &Expression,
+    ctx: PrintCtx,
+) {
     let has_attrs = !printable_attributes(arena, &expr.pexp_attributes).is_empty();
 
     if has_attrs {
@@ -1191,7 +1257,11 @@ fn print_expression2_ctx<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, exp
 /// When an attributed expression is in semi context, the attribute handling wraps
 /// the expression, and then the inner (unattributed) expression gets the semi parens.
 /// This produces `(((seq)))[@attr]` instead of `(((seq))[@attr])`.
-fn print_expression_under_semi<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, expr: &Expression) {
+fn print_expression_under_semi<W: Write>(
+    f: &mut Formatter<W>,
+    arena: &ParseArena,
+    expr: &Expression,
+) {
     let attrs = printable_attributes(arena, &expr.pexp_attributes);
     let has_attrs = !attrs.is_empty();
 
@@ -1229,7 +1299,11 @@ fn print_expression_under_semi<W: Write>(f: &mut Formatter<W>, arena: &ParseAren
 /// Helper: print the inner expression (ignoring its attributes) under semi context.
 /// This replicates OCaml's behavior where `expression ctxt` is called with attrs stripped,
 /// and the semi context check then applies to the unattributed expression.
-fn print_expression_under_semi_inner<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, expr: &Expression) {
+fn print_expression_under_semi_inner<W: Write>(
+    f: &mut Formatter<W>,
+    arena: &ParseArena,
+    expr: &Expression,
+) {
     let needs_semi_parens = needs_parens_in_semi_context(expr);
     let needs_let_parens = matches!(
         &*expr.pexp_desc,
@@ -1248,7 +1322,12 @@ fn print_expression_under_semi_inner<W: Write>(f: &mut Formatter<W>, arena: &Par
     }
 }
 
-fn print_expression_with_ctx<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, expr: &Expression, ctx: PrintCtx) {
+fn print_expression_with_ctx<W: Write>(
+    f: &mut Formatter<W>,
+    arena: &ParseArena,
+    expr: &Expression,
+    ctx: PrintCtx,
+) {
     let attrs = printable_attributes(arena, &expr.pexp_attributes);
     let has_attrs = !attrs.is_empty();
 
@@ -1264,40 +1343,69 @@ fn print_expression_with_ctx<W: Write>(f: &mut Formatter<W>, arena: &ParseArena,
     }
 }
 
-fn print_expression_inner<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, expr: &Expression, use_parens: bool, ctx: PrintCtx) {
+fn print_expression_inner<W: Write>(
+    f: &mut Formatter<W>,
+    arena: &ParseArena,
+    expr: &Expression,
+    use_parens: bool,
+    ctx: PrintCtx,
+) {
     // Context-dependent parenthesization (matching OCaml's pprintast lines 606-615)
-    if (ctx.pipe || ctx.semi) && matches!(&*expr.pexp_desc,
-        ExpressionDesc::Pexp_fun(_)
-        | ExpressionDesc::Pexp_match(_)
-        | ExpressionDesc::Pexp_try(_)
-        | ExpressionDesc::Pexp_sequence(_, _)) {
-        if use_parens { f.string("("); }
+    if (ctx.pipe || ctx.semi)
+        && matches!(
+            &*expr.pexp_desc,
+            ExpressionDesc::Pexp_fun(_)
+                | ExpressionDesc::Pexp_match(_)
+                | ExpressionDesc::Pexp_try(_)
+                | ExpressionDesc::Pexp_sequence(_, _)
+        )
+    {
+        if use_parens {
+            f.string("(");
+        }
         f.string("(");
         print_expression_inner(f, arena, expr, false, PrintCtx::reset());
         f.string(")");
-        if use_parens { f.string(")"); }
+        if use_parens {
+            f.string(")");
+        }
         return;
     }
-    if ctx.ifthenelse && matches!(&*expr.pexp_desc,
-        ExpressionDesc::Pexp_ifthenelse(_)
-        | ExpressionDesc::Pexp_sequence(_, _)) {
-        if use_parens { f.string("("); }
+    if ctx.ifthenelse
+        && matches!(
+            &*expr.pexp_desc,
+            ExpressionDesc::Pexp_ifthenelse(_) | ExpressionDesc::Pexp_sequence(_, _)
+        )
+    {
+        if use_parens {
+            f.string("(");
+        }
         f.string("(");
         print_expression_inner(f, arena, expr, false, PrintCtx::reset());
         f.string(")");
-        if use_parens { f.string(")"); }
+        if use_parens {
+            f.string(")");
+        }
         return;
     }
-    if ctx.semi && matches!(&*expr.pexp_desc,
-        ExpressionDesc::Pexp_let(_)
-        | ExpressionDesc::Pexp_letmodule(_)
-        | ExpressionDesc::Pexp_open(_)
-        | ExpressionDesc::Pexp_letexception(_)) {
-        if use_parens { f.string("("); }
+    if ctx.semi
+        && matches!(
+            &*expr.pexp_desc,
+            ExpressionDesc::Pexp_let(_)
+                | ExpressionDesc::Pexp_letmodule(_)
+                | ExpressionDesc::Pexp_open(_)
+                | ExpressionDesc::Pexp_letexception(_)
+        )
+    {
+        if use_parens {
+            f.string("(");
+        }
         f.string("(");
         print_expression_inner(f, arena, expr, false, PrintCtx::reset());
         f.string(")");
-        if use_parens { f.string(")"); }
+        if use_parens {
+            f.string(")");
+        }
         return;
     }
 
@@ -1329,7 +1437,7 @@ fn print_expression_inner<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, ex
             }
         }
         ExpressionDesc::Pexp_let(inner) => {
-                    let (ref rec_flag, ref bindings, ref body) = **inner;
+            let (ref rec_flag, ref bindings, ref body) = **inner;
             // OCaml: @[<2>%a in@;<1 -2>%a@]
             // where %a is (bindings reset_ctxt) (rf, l) and (expression ctxt) e
             if use_parens {
@@ -1352,7 +1460,12 @@ fn print_expression_inner<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, ex
                 } else {
                     f.string(rec_str);
                 }
-                print_value_binding(f, arena, arena.get_pat(binding.pvb_pat), arena.get_expr(binding.pvb_expr));
+                print_value_binding(
+                    f,
+                    arena,
+                    arena.get_pat(binding.pvb_pat),
+                    arena.get_expr(binding.pvb_expr),
+                );
                 f.close_box();
                 // Item attributes are outside the binding box in OCaml
                 print_item_attributes(f, arena, &binding.pvb_attributes);
@@ -1366,12 +1479,14 @@ fn print_expression_inner<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, ex
             }
         }
         ExpressionDesc::Pexp_fun(inner) => {
-            let PexpFun { ref arg_label,
-            ref default,
-            ref lhs,
-            ref rhs,
-            ref arity,
-            ref is_async, } = **inner;
+            let PexpFun {
+                ref arg_label,
+                ref default,
+                ref lhs,
+                ref rhs,
+                ref arity,
+                ref is_async,
+            } = **inner;
             // OCaml: arity is only printed when explicitly set, not computed
             // Look up arity from arena (Arity is now ArityIdx)
             let arity_value = match arena.get_arity(*arity) {
@@ -1402,11 +1517,19 @@ fn print_expression_inner<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, ex
             }
         }
         ExpressionDesc::Pexp_apply(inner) => {
-                    let PexpApply { ref funct, ref args, ref partial, .. } = **inner;
+            let PexpApply {
+                ref funct,
+                ref args,
+                ref partial,
+                ..
+            } = **inner;
             // Array access: Array.get(arr, idx) -> arr.(idx)
             // Also handles @res.array.access attribute for backwards compatibility
             // OCaml uses simple_expr for the array expression and expression for the index
-            if (parsetree_viewer::is_array_access(arena, expr) || has_attribute(arena, &expr.pexp_attributes, "res.array.access")) && args.len() == 2 {
+            if (parsetree_viewer::is_array_access(arena, expr)
+                || has_attribute(arena, &expr.pexp_attributes, "res.array.access"))
+                && args.len() == 2
+            {
                 let (_, arr) = &args[0];
                 let (_, idx) = &args[1];
                 if use_parens {
@@ -1507,7 +1630,13 @@ fn print_expression_inner<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, ex
             for (label, arg_idx) in args {
                 f.space(); // Break hint between func and args
                 // OCaml uses (label_x_expression_param reset_ctxt) for all args in normal apply
-                print_arg_with_label_ctx(f, arena, label, arena.get_expr(*arg_idx), PrintCtx::reset());
+                print_arg_with_label_ctx(
+                    f,
+                    arena,
+                    label,
+                    arena.get_expr(*arg_idx),
+                    PrintCtx::reset(),
+                );
             }
             if *partial {
                 f.string(" ...");
@@ -1518,7 +1647,7 @@ fn print_expression_inner<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, ex
             }
         }
         ExpressionDesc::Pexp_match(inner) => {
-                    let (ref scrutinee, ref cases) = **inner;
+            let (ref scrutinee, ref cases) = **inner;
             if use_parens {
                 f.string("(");
             }
@@ -1539,9 +1668,9 @@ fn print_expression_inner<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, ex
                 print_pattern(f, arena, arena.get_pat(case.pc_lhs));
                 if let Some(guard) = &case.pc_guard {
                     // OCaml: (option (expression ctxt) ~first:"@;when@;")
-                    f.space();  // @; before "when"
+                    f.space(); // @; before "when"
                     f.string("when");
-                    f.space();  // @; after "when"
+                    f.space(); // @; after "when"
                     print_expression(f, arena, arena.get_expr(*guard));
                 }
                 f.space();
@@ -1558,7 +1687,7 @@ fn print_expression_inner<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, ex
             }
         }
         ExpressionDesc::Pexp_try(inner) => {
-                    let (ref body, ref cases) = **inner;
+            let (ref body, ref cases) = **inner;
             if use_parens {
                 f.string("(");
             }
@@ -1566,10 +1695,10 @@ fn print_expression_inner<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, ex
             f.open_box(BoxKind::Box, 0);
             f.open_box(BoxKind::HV, 2);
             f.string("try");
-            f.space();  // @ break between try and body
+            f.space(); // @ break between try and body
             print_expression(f, arena, arena.get_expr(*body));
             f.close_box();
-            f.space();  // @ break between try-box and with-box
+            f.space(); // @ break between try-box and with-box
             f.open_box(BoxKind::Box, 0);
             f.string("with");
             for case in cases {
@@ -1578,9 +1707,9 @@ fn print_expression_inner<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, ex
                 f.open_box(BoxKind::Box, 2);
                 print_pattern(f, arena, arena.get_pat(case.pc_lhs));
                 if let Some(guard) = &case.pc_guard {
-                    f.space();  // @; before "when"
+                    f.space(); // @; before "when"
                     f.string("when");
-                    f.space();  // @; after "when"
+                    f.space(); // @; after "when"
                     print_expression(f, arena, arena.get_expr(*guard));
                 }
                 f.string(" -> ");
@@ -1661,7 +1790,7 @@ fn print_expression_inner<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, ex
             }
         }
         ExpressionDesc::Pexp_variant(inner) => {
-                    let (ref label, ref arg) = **inner;
+            let (ref label, ref arg) = **inner;
             if let Some(a) = arg {
                 // OCaml: @[<2>`%s@;%a@] with (simple_expr ctxt) for arg
                 f.open_box(BoxKind::Box, 2);
@@ -1676,7 +1805,7 @@ fn print_expression_inner<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, ex
             }
         }
         ExpressionDesc::Pexp_record(inner) => {
-                    let (ref fields, ref base) = **inner;
+            let (ref fields, ref base) = **inner;
             // OCaml: pp f "@[<hv0>@[<hv2>{@;%a%a@]@;}@]"
             f.open_box(BoxKind::HV, 0);
             f.open_box(BoxKind::HV, 2);
@@ -1716,7 +1845,7 @@ fn print_expression_inner<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, ex
                     f.open_box(BoxKind::HOV, 2);
                     print_longident_idx(f, arena, field.lid.txt);
                     if field.opt {
-                        f.string("?");  // Optional punned field: name?
+                        f.string("?"); // Optional punned field: name?
                     }
                     f.close_box();
                 } else {
@@ -1727,7 +1856,7 @@ fn print_expression_inner<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, ex
                     f.string("=");
                     f.space(); // @; after =
                     if field.opt {
-                        f.string("?");  // Optional field: name = ?value
+                        f.string("?"); // Optional field: name = ?value
                     }
                     // OCaml uses (simple_expr ctxt) for record field values
                     print_expression_simple_ctx(f, arena, arena.get_expr(field.expr), ctx);
@@ -1746,7 +1875,7 @@ fn print_expression_inner<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, ex
             print_longident_idx(f, arena, field.txt);
         }
         ExpressionDesc::Pexp_setfield(inner) => {
-                    let (ref obj, ref field, ref value) = **inner;
+            let (ref obj, ref field, ref value) = **inner;
             // OCaml: pp f "@[<2>%a.%a@ <-@ %a@]" (simple_expr ctxt) e1 longident_loc li (simple_expr ctxt) e2
             // Note: uses simple_expr ctxt for both object and value
             print_expression_simple_ctx(f, arena, arena.get_expr(*obj), ctx);
@@ -1771,7 +1900,7 @@ fn print_expression_inner<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, ex
             f.close_box();
         }
         ExpressionDesc::Pexp_ifthenelse(inner) => {
-                    let (ref cond, ref then_expr, ref else_expr) = **inner;
+            let (ref cond, ref then_expr, ref else_expr) = **inner;
             if use_parens {
                 f.string("(");
             }
@@ -1780,20 +1909,20 @@ fn print_expression_inner<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, ex
             f.open_box(BoxKind::HV, 0);
             f.open_box(BoxKind::Box, 2);
             f.string("if");
-            f.space();  // @ break between if and condition
+            f.space(); // @ break between if and condition
             print_expression_with_ctx(f, arena, arena.get_expr(*cond), ctx.under_ifthenelse());
             f.close_box();
-            f.space();  // @; break between if-box and then-box
+            f.space(); // @; break between if-box and then-box
             f.open_box(BoxKind::Box, 2);
             f.string("then");
-            f.space();  // @ break between then and body
+            f.space(); // @ break between then and body
             print_expression_with_ctx(f, arena, arena.get_expr(*then_expr), ctx.under_ifthenelse());
             f.close_box();
             if let Some(e) = else_expr {
-                f.space();  // @; break before else
+                f.space(); // @; break before else
                 f.open_box(BoxKind::Box, 2);
                 f.string("else");
-                f.space();  // @; break between else and body
+                f.space(); // @; break between else and body
                 // OCaml: expression (under_semi ctxt) for else body
                 print_expression_with_ctx(f, arena, arena.get_expr(*e), ctx.under_semi());
                 f.close_box();
@@ -1815,7 +1944,9 @@ fn print_expression_inner<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, ex
             let mut rest = arena.get_expr(*e2);
             loop {
                 match &*rest.pexp_desc {
-                    ExpressionDesc::Pexp_sequence(next_e1, next_e2) if rest.pexp_attributes.is_empty() => {
+                    ExpressionDesc::Pexp_sequence(next_e1, next_e2)
+                        if rest.pexp_attributes.is_empty() =>
+                    {
                         elements.push(arena.get_expr(*next_e1));
                         rest = arena.get_expr(*next_e2);
                     }
@@ -1862,7 +1993,7 @@ fn print_expression_inner<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, ex
             }
         }
         ExpressionDesc::Pexp_for(inner) => {
-                    let (ref pat, ref start, ref end, ref dir, ref body) = **inner;
+            let (ref pat, ref start, ref end, ref dir, ref body) = **inner;
             // OCaml: @[<hv0>@[<hv2>@[<2>for %a =@;%a@;%a%a@;do@]@;%a@]@;done@]
             if use_parens {
                 f.string("(");
@@ -1897,7 +2028,7 @@ fn print_expression_inner<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, ex
             }
         }
         ExpressionDesc::Pexp_constraint(inner) => {
-                    let (ref e, ref t) = **inner;
+            let (ref e, ref t) = **inner;
             f.string("(");
             print_expression(f, arena, arena.get_expr(*e));
             f.string(" : ");
@@ -1905,7 +2036,7 @@ fn print_expression_inner<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, ex
             f.string(")");
         }
         ExpressionDesc::Pexp_coerce(inner) => {
-                    let (ref e, ref t1, ref t2) = **inner;
+            let (ref e, ref t1, ref t2) = **inner;
             f.string("(");
             print_expression(f, arena, arena.get_expr(*e));
             if let Some(t) = t1 {
@@ -1917,7 +2048,7 @@ fn print_expression_inner<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, ex
             f.string(")");
         }
         ExpressionDesc::Pexp_send(inner) => {
-                    let (ref e, ref meth) = **inner;
+            let (ref e, ref meth) = **inner;
             // OCaml: pp f "@[<hov2>%a#%s@]" (simple_expr ctxt) e s.txt
             f.open_box(super::formatter::BoxKind::HOV, 2);
             print_expression_simple_ctx(f, arena, arena.get_expr(*e), ctx);
@@ -1926,7 +2057,7 @@ fn print_expression_inner<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, ex
             f.close_box();
         }
         ExpressionDesc::Pexp_letmodule(inner) => {
-                    let (ref name, ref mexpr, ref body) = **inner;
+            let (ref name, ref mexpr, ref body) = **inner;
             // OCaml: pp f "@[<hov2>let@ module@ %s@ =@ %a@ in@ %a@]"
             if use_parens {
                 f.string("(");
@@ -1951,7 +2082,7 @@ fn print_expression_inner<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, ex
             }
         }
         ExpressionDesc::Pexp_letexception(inner) => {
-                    let (ref ext, ref body) = **inner;
+            let (ref ext, ref body) = **inner;
             // OCaml: pp f "@[<hov2>let@ exception@ %a@ in@ %a@]"
             if use_parens {
                 f.string("(");
@@ -1980,7 +2111,7 @@ fn print_expression_inner<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, ex
             f.close_box();
         }
         ExpressionDesc::Pexp_newtype(inner) => {
-                    let (ref name, ref body) = **inner;
+            let (ref name, ref body) = **inner;
             // OCaml: pp f "fun@;(type@;%s)@;->@;%a"
             f.string("fun");
             f.space(); // @; after "fun"
@@ -2001,7 +2132,7 @@ fn print_expression_inner<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, ex
             f.string(")");
         }
         ExpressionDesc::Pexp_open(inner) => {
-                    let (ref override_flag, ref lid, ref body) = **inner;
+            let (ref override_flag, ref lid, ref body) = **inner;
             // OCaml: pp f "@[<2>let open%s %a in@;%a@]"
             if use_parens {
                 f.string("(");
@@ -2021,7 +2152,8 @@ fn print_expression_inner<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, ex
                 f.string(")");
             }
         }
-        ExpressionDesc::Pexp_extension(ext_inner) => { let (ref name, ref payload) = **ext_inner;
+        ExpressionDesc::Pexp_extension(ext_inner) => {
+            let (ref name, ref payload) = **ext_inner;
             // OCaml: @[<2>[%%%s@ %a]@] — structural box with indent 2
             f.open_box(BoxKind::Box, 2);
             f.string("[%");
@@ -2035,7 +2167,7 @@ fn print_expression_inner<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, ex
             // OCaml: @[<hov2>await@ %a@]
             f.open_box(BoxKind::HOV, 2);
             f.string("await");
-            f.space();  // @ break between await and expression
+            f.space(); // @ break between await and expression
             // Check if expression is "simple" enough to not need parens
             // Note: attributed expressions will get their own parens from print_expression
             let e_expr = arena.get_expr(*e);
@@ -2078,9 +2210,7 @@ fn jsx_tag_name_to_string(tag_name: &JsxTagName, arena: &ParseArena) -> String {
             let path_str = print_longident_to_string(arena.get_longident(*path), arena);
             format!("{}.{}", path_str, name)
         }
-        JsxTagName::Upper(lident) => {
-            print_longident_to_string(arena.get_longident(*lident), arena)
-        }
+        JsxTagName::Upper(lident) => print_longident_to_string(arena.get_longident(*lident), arena),
         JsxTagName::Invalid(name) => name.clone(),
     }
 }
@@ -2174,7 +2304,11 @@ fn print_jsx_prop<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, prop: &Jsx
             }
             f.string(arena.get_string(name.txt));
         }
-        JsxProp::Value { name, optional, value } => {
+        JsxProp::Value {
+            name,
+            optional,
+            value,
+        } => {
             f.string(arena.get_string(name.txt));
             f.string("=");
             if *optional {
@@ -2251,7 +2385,7 @@ fn print_pattern_inner<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, pat: 
             }
         }
         PatternDesc::Ppat_interval(inner) => {
-                    let (ref c1, ref c2) = **inner;
+            let (ref c1, ref c2) = **inner;
             // Negative numbers in intervals need parentheses
             let c1_needs_parens = constant_is_negative(c1);
             let c2_needs_parens = constant_is_negative(c2);
@@ -2317,10 +2451,8 @@ fn print_pattern_inner<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, pat: 
                                 f.string("::");
                                 // Right element needs parens if it's an alias (so it doesn't
                                 // look like `(x::xs) as tail`)
-                                let right_needs_parens = matches!(
-                                    &*right.ppat_desc,
-                                    PatternDesc::Ppat_alias(..)
-                                );
+                                let right_needs_parens =
+                                    matches!(&*right.ppat_desc, PatternDesc::Ppat_alias(..));
                                 if right_needs_parens {
                                     f.string("(");
                                 }
@@ -2346,7 +2478,7 @@ fn print_pattern_inner<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, pat: 
             }
         }
         PatternDesc::Ppat_variant(inner) => {
-                    let (ref label, ref arg) = **inner;
+            let (ref label, ref arg) = **inner;
             if let Some(a) = arg {
                 // OCaml: @[<2>`%s@;%a@] with simple_pattern
                 f.open_box(BoxKind::Box, 2);
@@ -2361,7 +2493,7 @@ fn print_pattern_inner<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, pat: 
             }
         }
         PatternDesc::Ppat_record(inner) => {
-                    let (ref fields, ref closed) = **inner;
+            let (ref fields, ref closed) = **inner;
             // OCaml closed: @[<2>{@;%a@;}@]  with sep ";@;"
             // OCaml open:   @[<2>{@;%a;_}@]  with sep ";@;"
             f.open_box(BoxKind::Box, 2);
@@ -2377,8 +2509,8 @@ fn print_pattern_inner<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, pat: 
                     Longident::Lident(name_idx) => {
                         let fname = arena.get_string(*name_idx);
                         let field_pat = arena.get_pat(field.pat);
-                        field_pat.ppat_attributes.is_empty() &&
-                            matches!(&*field_pat.ppat_desc, PatternDesc::Ppat_var(var) if arena.get_string(var.txt) == fname)
+                        field_pat.ppat_attributes.is_empty()
+                            && matches!(&*field_pat.ppat_desc, PatternDesc::Ppat_var(var) if arena.get_string(var.txt) == fname)
                     }
                     _ => false,
                 };
@@ -2403,7 +2535,8 @@ fn print_pattern_inner<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, pat: 
                     f.space(); // @; after =
                     // Print with parens for alias patterns (pattern1 context)
                     let field_pat = arena.get_pat(field.pat);
-                    let needs_parens = matches!(&*field_pat.ppat_desc,
+                    let needs_parens = matches!(
+                        &*field_pat.ppat_desc,
                         PatternDesc::Ppat_alias(..) | PatternDesc::Ppat_or(..)
                     );
                     if needs_parens {
@@ -2443,7 +2576,7 @@ fn print_pattern_inner<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, pat: 
             print_pattern(f, arena, arena.get_pat(*p2));
         }
         PatternDesc::Ppat_constraint(inner) => {
-                    let (ref p_idx, ref t_idx) = **inner;
+            let (ref p_idx, ref t_idx) = **inner;
             let p = arena.get_pat(*p_idx);
             let t = arena.get_core_type(*t_idx);
             // OCaml: pp f "@[<2>(%a@;:@;%a)@]" (pattern1 ctxt) p (core_type ctxt) ct
@@ -2496,7 +2629,8 @@ fn print_pattern_inner<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, pat: 
                 f.string(")");
             }
         }
-        PatternDesc::Ppat_extension(ext_inner) => { let (ref name, ref payload) = **ext_inner;
+        PatternDesc::Ppat_extension(ext_inner) => {
+            let (ref name, ref payload) = **ext_inner;
             f.open_box(BoxKind::H, 2);
             f.string("[%");
             f.string(arena.get_string(name.txt));
@@ -2574,7 +2708,7 @@ fn print_core_type_inner<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, typ
             f.string(name);
         }
         CoreTypeDesc::Ptyp_arrow(inner) => {
-                    let (ref arg, ref ret, ref arity) = **inner;
+            let (ref arg, ref ret, ref arity) = **inner;
             // OCaml: pp f "@[<2>%a@;->@;%a%s@]"
             // Structural box with indent 2, break hints around ->
             f.open_box(BoxKind::Box, 2);
@@ -2628,7 +2762,7 @@ fn print_core_type_inner<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, typ
             f.string(")");
         }
         CoreTypeDesc::Ptyp_constr(inner) => {
-                    let (ref lid, ref args) = **inner;
+            let (ref lid, ref args) = **inner;
             // OCaml: | [x] -> pp f "%a@;" (core_type1 ctxt) x
             //        | _ -> list ~first:"(" ~last:")@;" (core_type ctxt) ~sep:",@;" f l
             if !args.is_empty() {
@@ -2652,7 +2786,7 @@ fn print_core_type_inner<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, typ
             print_longident_idx(f, arena, lid.txt);
         }
         CoreTypeDesc::Ptyp_object(inner) => {
-                    let (ref fields, ref closed) = **inner;
+            let (ref fields, ref closed) = **inner;
             // OCaml: pp f "@[<hov2><@ %a%a@ > @]"
             f.open_box(BoxKind::HOV, 2);
             f.string("<");
@@ -2700,7 +2834,7 @@ fn print_core_type_inner<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, typ
             f.close_box();
         }
         CoreTypeDesc::Ptyp_alias(inner) => {
-                    let (ref t_idx, ref name) = **inner;
+            let (ref t_idx, ref name) = **inner;
             let t = arena.get_core_type(*t_idx);
             // OCaml: pp f "@[<2>%a@;as@;'%s@]" (core_type1 ctxt) ct s
             f.open_box(BoxKind::Box, 2);
@@ -2721,7 +2855,7 @@ fn print_core_type_inner<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, typ
             f.close_box();
         }
         CoreTypeDesc::Ptyp_variant(inner) => {
-                    let (ref rows, ref closed, ref labels) = **inner;
+            let (ref rows, ref closed, ref labels) = **inner;
             // OCaml: pp f "@[<2>[%a%a]@]" ...
             f.open_box(BoxKind::Box, 2);
             f.string("[");
@@ -2806,7 +2940,7 @@ fn print_core_type_inner<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, typ
             f.close_box();
         }
         CoreTypeDesc::Ptyp_poly(inner) => {
-                    let (ref vars, ref t_idx) = **inner;
+            let (ref vars, ref t_idx) = **inner;
             let t = arena.get_core_type(*t_idx);
             if vars.is_empty() {
                 // OCaml: Ptyp_poly ([], ct) -> core_type ctxt f ct
@@ -2828,7 +2962,8 @@ fn print_core_type_inner<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, typ
                 f.close_box();
             }
         }
-        CoreTypeDesc::Ptyp_package(pkg_inner) => { let (ref lid, ref constraints) = **pkg_inner;
+        CoreTypeDesc::Ptyp_package(pkg_inner) => {
+            let (ref lid, ref constraints) = **pkg_inner;
             // OCaml: @[<hov2>(module@ %a@ with@ %a)@]
             f.open_box(BoxKind::HOV, 2);
             f.string("(module");
@@ -2856,7 +2991,8 @@ fn print_core_type_inner<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, typ
             f.string(")");
             f.close_box();
         }
-        CoreTypeDesc::Ptyp_extension(ext_inner) => { let (ref name, ref payload) = **ext_inner;
+        CoreTypeDesc::Ptyp_extension(ext_inner) => {
+            let (ref name, ref payload) = **ext_inner;
             f.open_box(BoxKind::H, 2);
             f.string("[%");
             f.string(arena.get_string(name.txt));
@@ -2891,7 +3027,13 @@ fn print_arg_label<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, label: &A
 
 /// Context-aware version of print_arg_with_label.
 /// OCaml's `label_x_expression_param ctxt` passes context through to simple_expr and expression2.
-fn print_arg_with_label_ctx<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, label: &ArgLabel, arg: &Expression, ctx: PrintCtx) {
+fn print_arg_with_label_ctx<W: Write>(
+    f: &mut Formatter<W>,
+    arena: &ParseArena,
+    label: &ArgLabel,
+    arg: &Expression,
+    ctx: PrintCtx,
+) {
     match label {
         ArgLabel::Labelled(name) => {
             let name_str = arena.get_string(name.txt);
@@ -3067,7 +3209,7 @@ fn print_payload<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, payload: &P
             print_core_type(f, arena, arena.get_core_type(*typ_idx));
         }
         Payload::PPat(inner) => {
-                    let (ref pat_idx, ref guard) = **inner;
+            let (ref pat_idx, ref guard) = **inner;
             f.string("?");
             print_pattern(f, arena, arena.get_pat(*pat_idx));
             if let Some(g) = guard {
@@ -3085,7 +3227,11 @@ fn print_payload<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, payload: &P
 /// Print record declaration: {field1: type; field2: type}
 /// Matches OCaml's record_declaration: pp f "{@\n%a}" (list type_record_field ~sep:";@\n") lbls
 /// Each field: @[<2>mutable? name?: type @; attrs@]
-fn print_record_declaration<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, fields: &[LabelDeclaration]) {
+fn print_record_declaration<W: Write>(
+    f: &mut Formatter<W>,
+    arena: &ParseArena,
+    fields: &[LabelDeclaration],
+) {
     // OCaml: pp f "{@\n%a}" (list type_record_field ~sep:";@\n") lbls
     f.string("{");
     f.newline();
@@ -3119,7 +3265,11 @@ fn print_record_declaration<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, 
     }
 }
 
-fn print_type_declaration<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, decl: &TypeDeclaration) {
+fn print_type_declaration<W: Write>(
+    f: &mut Formatter<W>,
+    arena: &ParseArena,
+    decl: &TypeDeclaration,
+) {
     if !decl.ptype_params.is_empty() {
         if decl.ptype_params.len() == 1 {
             // Print variance prefix
@@ -3154,10 +3304,10 @@ fn print_type_declaration<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, de
         // The break hint allows long types to wrap to the next line
         f.string(" =");
         if matches!(decl.ptype_private, PrivateFlag::Private) {
-            f.space();  // Break hint before private
+            f.space(); // Break hint before private
             f.string("private");
         }
-        f.space();  // Break hint before type body (OCaml's @;)
+        f.space(); // Break hint before type body (OCaml's @;)
         print_core_type(f, arena, arena.get_core_type(*manifest));
     }
 
@@ -3276,7 +3426,11 @@ fn print_type_declaration<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, de
     // by the caller (Pstr_type/Psig_type).
 }
 
-fn print_extension_constructor<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, ext: &ExtensionConstructor) {
+fn print_extension_constructor<W: Write>(
+    f: &mut Formatter<W>,
+    arena: &ParseArena,
+    ext: &ExtensionConstructor,
+) {
     f.string(arena.get_string(ext.pext_name.txt));
     match &ext.pext_kind {
         ExtensionConstructorKind::Pext_decl(args, res) => {
@@ -3397,7 +3551,7 @@ fn print_module_expr_inner<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, m
             f.close_box();
         }
         ModuleExprDesc::Pmod_functor(inner) => {
-                    let (ref name, ref mtype, ref body) = **inner;
+            let (ref name, ref mtype, ref body) = **inner;
             if let Some(mt) = mtype {
                 // OCaml: pp f "functor@ (%s@ :@ %a)@;->@;%a"
                 f.string("functor");
@@ -3448,7 +3602,8 @@ fn print_module_expr_inner<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, m
             print_expression(f, arena, arena.get_expr(*e));
             f.string(")");
         }
-        ModuleExprDesc::Pmod_extension(ext_inner) => { let (ref name, ref payload) = **ext_inner;
+        ModuleExprDesc::Pmod_extension(ext_inner) => {
+            let (ref name, ref payload) = **ext_inner;
             // OCaml: @[<2>[%%%s@ %a]@]
             f.open_box(BoxKind::Box, 2);
             f.string("[%");
@@ -3486,20 +3641,20 @@ fn print_module_type_inner<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, m
             f.open_box(BoxKind::HV, 0);
             f.open_box(BoxKind::HV, 2);
             f.string("sig");
-            f.space();  // @ break hint after sig
+            f.space(); // @ break hint after sig
             for (i, item) in items.iter().enumerate() {
                 if i > 0 {
-                    f.space();  // @ break hint between items
+                    f.space(); // @ break hint between items
                 }
                 print_signature_item(f, arena, item);
             }
             f.close_box();
-            f.space();  // @ break hint before end
+            f.space(); // @ break hint before end
             f.string("end");
             f.close_box();
         }
         ModuleTypeDesc::Pmty_functor(inner) => {
-                    let (ref name, ref arg_type, ref ret_type) = **inner;
+            let (ref name, ref arg_type, ref ret_type) = **inner;
             if arg_type.is_none() {
                 // OCaml: pp f "@[<hov2>functor () ->@ %a@]"
                 f.open_box(BoxKind::HOV, 2);
@@ -3542,7 +3697,7 @@ fn print_module_type_inner<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, m
             }
         }
         ModuleTypeDesc::Pmty_with(inner) => {
-                    let (ref mt_idx, ref constraints) = **inner;
+            let (ref mt_idx, ref constraints) = **inner;
             // OCaml: pp f "@[<hov2>(%a@ with@ %a)@]" when there are constraints
             // or pp f "@[<hov2>%a@]" when empty
             if constraints.is_empty() {
@@ -3565,11 +3720,15 @@ fn print_module_type_inner<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, m
                         WithConstraint::Pwith_type(lid, decl) => {
                             // OCaml: pp f "type@ %a %a =@ %a" params lid type_decl
                             f.string("type");
-                            f.space();  // @ after type
+                            f.space(); // @ after type
                             // Print type params
                             if !decl.ptype_params.is_empty() {
                                 if decl.ptype_params.len() == 1 {
-                                    print_core_type(f, arena, arena.get_core_type(decl.ptype_params[0].0));
+                                    print_core_type(
+                                        f,
+                                        arena,
+                                        arena.get_core_type(decl.ptype_params[0].0),
+                                    );
                                     f.string(" ");
                                 } else {
                                     f.string("(");
@@ -3582,13 +3741,13 @@ fn print_module_type_inner<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, m
                                     f.string(") ");
                                 }
                             } else {
-                                f.string(" ");  // space before lid when params empty
+                                f.string(" "); // space before lid when params empty
                             }
                             print_longident_idx(f, arena, lid.txt);
                             f.string(" =");
-                            f.space();  // @ after =
+                            f.space(); // @ after =
                             // type_declaration prints @; then private then manifest then constraints
-                            f.space();  // @; in type_declaration
+                            f.space(); // @; in type_declaration
                             if decl.ptype_private == PrivateFlag::Private {
                                 f.string("private ");
                             }
@@ -3616,7 +3775,11 @@ fn print_module_type_inner<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, m
                             // Print type params
                             if !decl.ptype_params.is_empty() {
                                 if decl.ptype_params.len() == 1 {
-                                    print_core_type(f, arena, arena.get_core_type(decl.ptype_params[0].0));
+                                    print_core_type(
+                                        f,
+                                        arena,
+                                        arena.get_core_type(decl.ptype_params[0].0),
+                                    );
                                     f.string(" ");
                                 } else {
                                     f.string("(");
@@ -3665,7 +3828,8 @@ fn print_module_type_inner<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, m
             f.string("module type of ");
             print_module_expr(f, arena, arena.get_mod_expr(*mexpr));
         }
-        ModuleTypeDesc::Pmty_extension(ext_inner) => { let (ref name, ref payload) = **ext_inner;
+        ModuleTypeDesc::Pmty_extension(ext_inner) => {
+            let (ref name, ref payload) = **ext_inner;
             f.open_box(BoxKind::H, 2);
             f.string("[%");
             f.string(arena.get_string(name.txt));
@@ -3722,7 +3886,7 @@ fn print_signature_item<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, item
             print_item_attributes(f, arena, &vd.pval_attributes);
         }
         SignatureItemDesc::Psig_type(inner) => {
-                    let (ref rec_flag, ref decls) = **inner;
+            let (ref rec_flag, ref decls) = **inner;
             // OCaml: @[<2>type %a%a%s%s%a@]%a for first, @[<2>and %a@]%a for others
             // Each declaration is wrapped in a box with indent 2
             let rec_str = match rec_flag {
@@ -3849,8 +4013,8 @@ fn print_signature_item<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, item
             f.string(arena.get_string(mtd.pmtd_name.txt));
             if let Some(mt) = &mtd.pmtd_type {
                 // pp_print_space + "@ =" gives two spaces before =
-                f.string(" ");  // literal space from pp_print_space
-                f.space();      // break hint before =
+                f.string(" "); // literal space from pp_print_space
+                f.space(); // break hint before =
                 f.string("=");
                 f.space();
                 print_module_type(f, arena, arena.get_mod_type(*mt));
@@ -3876,7 +4040,8 @@ fn print_signature_item<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, item
             f.close_box();
             print_item_attributes(f, arena, &incl.pincl_attributes);
         }
-        SignatureItemDesc::Psig_attribute(attr_inner) => { let (ref name, ref payload) = **attr_inner;
+        SignatureItemDesc::Psig_attribute(attr_inner) => {
+            let (ref name, ref payload) = **attr_inner;
             // Standalone/floating attributes use [@@@...] (3 @)
             f.string("[@@@");
             f.string(arena.get_string(name.txt));
@@ -3903,7 +4068,11 @@ fn print_signature_item<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, item
     }
 }
 
-fn print_item_attributes<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, attrs: &[(Located<StrIdx>, Payload)]) {
+fn print_item_attributes<W: Write>(
+    f: &mut Formatter<W>,
+    arena: &ParseArena,
+    attrs: &[(Located<StrIdx>, Payload)],
+) {
     // OCaml: and item_attribute ctxt f (s, e) = pp f "@[<2>[@@@@%s@ %a]@]" s.txt (payload ctxt) e
     // Each attribute is wrapped in a box with indent 2, with a break hint after the name
     let attrs = printable_attributes(arena, attrs);
@@ -3911,7 +4080,7 @@ fn print_item_attributes<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, att
         f.open_box(BoxKind::Box, 2);
         f.string("[@@");
         f.string(arena.get_string(name.txt));
-        f.space();  // Break hint after name (matches OCaml's `@ `)
+        f.space(); // Break hint after name (matches OCaml's `@ `)
         if !payload_is_empty(payload) {
             print_payload(f, arena, payload);
         }
@@ -3922,13 +4091,17 @@ fn print_item_attributes<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, att
 
 /// Print attributes with single @ (for expressions, types, patterns)
 /// OCaml: and attribute ctxt f (s, e) = pp f "@[<2>[@@%s@ %a]@]" s.txt (payload ctxt) e
-fn print_attributes<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, attrs: &[(Located<StrIdx>, Payload)]) {
+fn print_attributes<W: Write>(
+    f: &mut Formatter<W>,
+    arena: &ParseArena,
+    attrs: &[(Located<StrIdx>, Payload)],
+) {
     let attrs = printable_attributes(arena, attrs);
     for (name, payload) in attrs {
         f.open_box(BoxKind::Box, 2);
         f.string("[@");
         f.string(arena.get_string(name.txt));
-        f.space();  // Break hint after name (matches OCaml's `@ `)
+        f.space(); // Break hint after name (matches OCaml's `@ `)
         if !payload_is_empty(payload) {
             print_payload(f, arena, payload);
         }

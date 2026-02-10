@@ -6,10 +6,10 @@
 //! - Inlining hints: determines if a function is safe/profitable to inline
 
 use crate::ident::Ident;
+use crate::lambda::compat::FieldDbgInfo;
 use crate::lambda::constant::Constant;
 use crate::lambda::primitive::Primitive;
-use crate::lambda::{Lambda, LFunction};
-use crate::lambda::compat::FieldDbgInfo;
+use crate::lambda::{LFunction, Lambda};
 
 /// Check if a constant is definitely not zero.
 /// Used in side effect analysis to determine safe division.
@@ -69,7 +69,9 @@ pub fn no_side_effects(lam: &Lambda) -> bool {
         Lambda::LtryWith(body, _, handler) => no_side_effects(body) && no_side_effects(handler),
 
         // If-then-else is pure if all branches are pure
-        Lambda::LifThenElse(a, b, c) => no_side_effects(a) && no_side_effects(b) && no_side_effects(c),
+        Lambda::LifThenElse(a, b, c) => {
+            no_side_effects(a) && no_side_effects(b) && no_side_effects(c)
+        }
 
         // Sequence is pure if both parts are pure
         Lambda::Lsequence(a, b) => no_side_effects(a) && no_side_effects(b),
@@ -227,9 +229,7 @@ fn is_pure_primitive(prim: &Primitive, args: &[Lambda]) -> bool {
         Primitive::Pmakelist | Primitive::Pmakedict | Primitive::PdictHas => true,
 
         // Type testing primitives
-        Primitive::Pisint
-        | Primitive::PisPolyVarBlock
-        | Primitive::Pisout(_) => true,
+        Primitive::Pisint | Primitive::PisPolyVarBlock | Primitive::Pisout(_) => true,
 
         // Offset and misc
         Primitive::Poffsetint(_)
@@ -384,9 +384,7 @@ fn size_constant(c: &Constant) -> i32 {
 
         Constant::Some(inner) => size_constant(inner),
 
-        Constant::Block { elements, .. } => {
-            elements.iter().map(size_constant).sum()
-        }
+        Constant::Block { elements, .. } => elements.iter().map(size_constant).sum(),
     }
 }
 
@@ -444,7 +442,8 @@ fn destruct_pattern(body: &Lambda, params: &[Ident], args: &[Lambda]) -> bool {
             if let Lambda::Lvar(v) = &**scrutinee {
                 if let Some(Lambda::Lconst(_)) = find_arg(v, params, args) {
                     // Would need to evaluate the switch to check size
-                    return size(&Lambda::Lswitch(scrutinee.clone(), switch.clone())) < SMALL_INLINE_SIZE;
+                    return size(&Lambda::Lswitch(scrutinee.clone(), switch.clone()))
+                        < SMALL_INLINE_SIZE;
                 }
             }
             false
@@ -488,8 +487,8 @@ pub fn safe_to_inline(lam: &Lambda) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::lambda::{FunctionAttribute, LetKind, Primitive};
     use crate::ident::Ident;
+    use crate::lambda::{FunctionAttribute, LetKind, Primitive};
     use crate::location::Location;
 
     #[test]
@@ -709,7 +708,10 @@ mod tests {
         assert_eq!(size_constant(&Constant::JsTrue), 1);
 
         // Some wraps another constant
-        assert_eq!(size_constant(&Constant::Some(Box::new(Constant::int(1)))), 1);
+        assert_eq!(
+            size_constant(&Constant::Some(Box::new(Constant::int(1)))),
+            1
+        );
 
         // Block sums up fields
         assert_eq!(

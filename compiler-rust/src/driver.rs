@@ -3,16 +3,16 @@
 //! This module wires together parsing, type-checking, Lambda conversion, and
 //! JS IR codegen to produce JavaScript output.
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 
-use crate::context::IdGenerator;
 use crate::binary_ast::spice_ppx;
+use crate::context::IdGenerator;
 use crate::js_ir::printer::print_program;
 use crate::lambda::compile::LambdaCompiler;
 use crate::lambda::convert::LambdaConverter;
-use crate::parser::{module, Parser};
+use crate::parser::{Parser, module};
 use crate::types::sexp_typedtree::{print_typed_structure, print_typed_structure_with_locs};
-use crate::types::{initial_env, type_structure, TypeCheckContext, TypeContext};
+use crate::types::{TypeCheckContext, TypeContext, initial_env, type_structure};
 
 /// Compiler options that can be passed to the driver.
 #[derive(Default, Clone)]
@@ -44,7 +44,10 @@ pub fn compile_source_to_js_with_options(
     let mut parser = Parser::new(filename, source);
     let structure = module::parse_structure(&mut parser);
     if parser.has_errors() {
-        return Err(anyhow!("Parse failed with {} error(s)", parser.diagnostics().len()));
+        return Err(anyhow!(
+            "Parse failed with {} error(s)",
+            parser.diagnostics().len()
+        ));
     }
     let structure = spice_ppx::expand_structure(&structure, parser.arena_mut())
         .map_err(|e| anyhow!("Spice PPX expansion failed: {e}"))?;
@@ -64,7 +67,12 @@ pub fn compile_source_to_js_with_options(
     }
     if options.dump_typed_sexp_locs {
         let mut stderr = std::io::stderr();
-        let _ = print_typed_structure_with_locs(parser.arena(), &type_ctx, &typed_structure, &mut stderr);
+        let _ = print_typed_structure_with_locs(
+            parser.arena(),
+            &type_ctx,
+            &typed_structure,
+            &mut stderr,
+        );
     }
 
     // Typedtree -> Lambda
@@ -112,8 +120,8 @@ pub fn compile_file_to_js_with_options(
     // This matches OCaml's byte-level string handling where each byte is a character.
     // In Latin-1 mode, char offset == original byte offset, which is critical for
     // correct position tracking in the scanner.
-    let bytes = std::fs::read(path)
-        .with_context(|| format!("Failed to read {}", path.display()))?;
+    let bytes =
+        std::fs::read(path).with_context(|| format!("Failed to read {}", path.display()))?;
     let source: String = bytes.iter().map(|&b| b as char).collect();
     let filename = path.to_string_lossy();
     compile_source_to_js_with_options(&source, &filename, options)

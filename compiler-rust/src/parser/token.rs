@@ -389,7 +389,10 @@ impl<'a> Token<'a> {
             "while" => Token::While,
             _ => {
                 // Check first byte to determine if Uident or Lident (ASCII check)
-                if s.as_bytes().first().map_or(false, |b| b.is_ascii_uppercase()) {
+                if s.as_bytes()
+                    .first()
+                    .map_or(false, |b| b.is_ascii_uppercase())
+                {
                     Token::Uident(Cow::Borrowed(s))
                 } else {
                     Token::Lident(Cow::Borrowed(s))
@@ -470,13 +473,25 @@ impl<'a> Token<'a> {
             Token::Try => Token::Try,
             Token::List => Token::List,
             Token::Dict => Token::Dict,
-            Token::Codepoint { c, original } => Token::Codepoint { c, original: Cow::Owned(original.into_owned()) },
-            Token::Int { i, suffix } => Token::Int { i: Cow::Owned(i.into_owned()), suffix },
-            Token::Float { f, suffix } => Token::Float { f: Cow::Owned(f.into_owned()), suffix },
+            Token::Codepoint { c, original } => Token::Codepoint {
+                c,
+                original: Cow::Owned(original.into_owned()),
+            },
+            Token::Int { i, suffix } => Token::Int {
+                i: Cow::Owned(i.into_owned()),
+                suffix,
+            },
+            Token::Float { f, suffix } => Token::Float {
+                f: Cow::Owned(f.into_owned()),
+                suffix,
+            },
             Token::String(s) => Token::String(Cow::Owned(s.into_owned())),
             Token::Lident(s) => Token::Lident(Cow::Owned(s.into_owned())),
             Token::Uident(s) => Token::Uident(Cow::Owned(s.into_owned())),
-            Token::Regex { pattern, flags } => Token::Regex { pattern: Cow::Owned(pattern.into_owned()), flags: Cow::Owned(flags.into_owned()) },
+            Token::Regex { pattern, flags } => Token::Regex {
+                pattern: Cow::Owned(pattern.into_owned()),
+                flags: Cow::Owned(flags.into_owned()),
+            },
             Token::Let { unwrap } => Token::Let { unwrap },
             Token::Dot => Token::Dot,
             Token::DotDot => Token::DotDot,
@@ -541,10 +556,22 @@ impl<'a> Token<'a> {
             Token::RightShift => Token::RightShift,
             Token::RightShiftUnsigned => Token::RightShiftUnsigned,
             Token::Comment(c) => Token::Comment(c),
-            Token::DocComment { loc, content } => Token::DocComment { loc, content: Cow::Owned(content.into_owned()) },
-            Token::ModuleComment { loc, content } => Token::ModuleComment { loc, content: Cow::Owned(content.into_owned()) },
-            Token::TemplateTail { text, pos } => Token::TemplateTail { text: Cow::Owned(text.into_owned()), pos },
-            Token::TemplatePart { text, pos } => Token::TemplatePart { text: Cow::Owned(text.into_owned()), pos },
+            Token::DocComment { loc, content } => Token::DocComment {
+                loc,
+                content: Cow::Owned(content.into_owned()),
+            },
+            Token::ModuleComment { loc, content } => Token::ModuleComment {
+                loc,
+                content: Cow::Owned(content.into_owned()),
+            },
+            Token::TemplateTail { text, pos } => Token::TemplateTail {
+                text: Cow::Owned(text.into_owned()),
+                pos,
+            },
+            Token::TemplatePart { text, pos } => Token::TemplatePart {
+                text: Cow::Owned(text.into_owned()),
+                pos,
+            },
         }
     }
 }

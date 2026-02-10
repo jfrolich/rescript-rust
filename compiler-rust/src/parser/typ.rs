@@ -6,7 +6,6 @@
 use std::borrow::Cow;
 use std::collections::HashSet;
 
-use crate::parse_arena::{CoreTypeIdx, Located, LocIdx, PosIdx, StrIdx};
 use super::ast::*;
 use super::core::{ast_helper, mknoloc, recover, with_loc};
 use super::diagnostics::DiagnosticCategory;
@@ -15,6 +14,7 @@ use super::grammar::Grammar;
 use super::longident::Longident;
 use super::state::{Parser, ParserMode};
 use super::token::Token;
+use crate::parse_arena::{CoreTypeIdx, LocIdx, Located, PosIdx, StrIdx};
 
 /// Get the string tag based on parser mode.
 /// In typechecker mode, strings are tagged with "js" to indicate JS string literals.
@@ -34,10 +34,14 @@ fn get_string_tag(p: &Parser<'_>) -> Option<Cow<'static, str>> {
 /// one of the poly type variables into Ptyp_var.
 /// This is needed for locally abstract types: `type a b c. list<a, b, c>` should
 /// have `a`, `b`, `c` as Ptyp_var, not Ptyp_constr.
-pub fn substitute_type_vars(arena: &mut crate::parse_arena::ParseArena, typ: CoreType, vars: &HashSet<String>) -> CoreType {
+pub fn substitute_type_vars(
+    arena: &mut crate::parse_arena::ParseArena,
+    typ: CoreType,
+    vars: &HashSet<String>,
+) -> CoreType {
     let new_desc = match *typ.ptyp_desc {
         CoreTypeDesc::Ptyp_constr(inner) => {
-                    let (lid, args) = *inner;
+            let (lid, args) = *inner;
             // Check if this is a simple Lident that matches a type variable
             if args.is_empty() {
                 if let Longident::Lident(name_idx) = arena.get_longident(lid.txt) {
@@ -67,14 +71,14 @@ pub fn substitute_type_vars(arena: &mut crate::parse_arena::ParseArena, typ: Cor
             CoreTypeDesc::Ptyp_constr(Box::new((lid, new_args)))
         }
         CoreTypeDesc::Ptyp_arrow(inner) => {
-                    let (arg, ret, arity) = *inner;
-                    let ret_type = arena.get_core_type(ret).clone();
-                    let substituted_ret = substitute_type_vars(arena, ret_type, vars);
-                    let new_ret = arena.push_core_type(substituted_ret);
-                    let arg_type = arena.get_core_type(arg.typ).clone();
-                    let substituted_arg = substitute_type_vars(arena, arg_type, vars);
-                    let new_arg_typ = arena.push_core_type(substituted_arg);
-                    CoreTypeDesc::Ptyp_arrow(Box::new((
+            let (arg, ret, arity) = *inner;
+            let ret_type = arena.get_core_type(ret).clone();
+            let substituted_ret = substitute_type_vars(arena, ret_type, vars);
+            let new_ret = arena.push_core_type(substituted_ret);
+            let arg_type = arena.get_core_type(arg.typ).clone();
+            let substituted_arg = substitute_type_vars(arena, arg_type, vars);
+            let new_arg_typ = arena.push_core_type(substituted_arg);
+            CoreTypeDesc::Ptyp_arrow(Box::new((
                 Box::new(TypeArg {
                     attrs: arg.attrs.clone(),
                     lbl: arg.lbl.clone(),
@@ -83,25 +87,21 @@ pub fn substitute_type_vars(arena: &mut crate::parse_arena::ParseArena, typ: Cor
                 new_ret,
                 arity,
             )))
-        },
-        CoreTypeDesc::Ptyp_tuple(elements) => CoreTypeDesc::Ptyp_tuple(
-            Box::new((*elements)
+        }
+        CoreTypeDesc::Ptyp_tuple(elements) => CoreTypeDesc::Ptyp_tuple(Box::new(
+            (*elements)
                 .into_iter()
                 .map(|e_idx| {
                     let e_type = arena.get_core_type(e_idx).clone();
                     let substituted = substitute_type_vars(arena, e_type, vars);
                     arena.push_core_type(substituted)
                 })
-                .collect()),
-        ),
-        CoreTypeDesc::Ptyp_poly(inner) => {
-            CoreTypeDesc::Ptyp_poly(inner)
-        }
-        CoreTypeDesc::Ptyp_alias(inner) => {
-            CoreTypeDesc::Ptyp_alias(inner)
-        }
+                .collect(),
+        )),
+        CoreTypeDesc::Ptyp_poly(inner) => CoreTypeDesc::Ptyp_poly(inner),
+        CoreTypeDesc::Ptyp_alias(inner) => CoreTypeDesc::Ptyp_alias(inner),
         CoreTypeDesc::Ptyp_object(inner) => {
-                    let (fields, closed) = *inner;
+            let (fields, closed) = *inner;
             let new_fields: Vec<ObjectField> = fields
                 .into_iter()
                 .map(|field| match field {
@@ -120,7 +120,7 @@ pub fn substitute_type_vars(arena: &mut crate::parse_arena::ParseArena, typ: Cor
             CoreTypeDesc::Ptyp_object(Box::new((new_fields, closed)))
         }
         CoreTypeDesc::Ptyp_variant(inner) => {
-                    let (rows, closed, labels) = *inner;
+            let (rows, closed, labels) = *inner;
             let new_rows: Vec<RowField> = rows
                 .into_iter()
                 .map(|row| match row {
@@ -158,7 +158,7 @@ pub fn substitute_type_vars(arena: &mut crate::parse_arena::ParseArena, typ: Cor
         }
         // These don't contain nested types, return as-is
         other => other,
-                };
+    };
     CoreType {
         ptyp_desc: Box::new(new_desc),
         ptyp_loc: typ.ptyp_loc,
@@ -244,7 +244,11 @@ pub fn parse_poly_type_expr(p: &mut Parser<'_>) -> CoreType {
             // Use static arity to match OCaml's CSE sharing behavior
             let ret_idx = p.arena_mut().push_core_type(return_type);
             return CoreType {
-                ptyp_desc: Box::new(CoreTypeDesc::Ptyp_arrow(Box::new((Box::new(arg), ret_idx, p.static_arity_1())))),
+                ptyp_desc: Box::new(CoreTypeDesc::Ptyp_arrow(Box::new((
+                    Box::new(arg),
+                    ret_idx,
+                    p.static_arity_1(),
+                )))),
                 ptyp_loc: loc,
                 ptyp_attributes: Attributes::new(),
             };
@@ -267,7 +271,11 @@ pub fn parse_locally_abstract_type(p: &mut Parser<'_>) -> CoreType {
 
     // Collect all type variable names until we see a dot
     while let Token::Lident(_) = &p.token {
-        let name = if let Token::Lident(n) = &p.token { n.clone() } else { unreachable!() };
+        let name = if let Token::Lident(n) = &p.token {
+            n.clone()
+        } else {
+            unreachable!()
+        };
         let var_start_idx = p.start_pos_idx();
         p.next();
         let var_loc = p.mk_loc_idx_to_prev_end(var_start_idx);
@@ -410,7 +418,11 @@ fn parse_arrow_type_rest(
     // Use static arity to match OCaml's CSE sharing behavior
     let ret_idx = p.arena_mut().push_core_type(return_type);
     CoreType {
-        ptyp_desc: Box::new(CoreTypeDesc::Ptyp_arrow(Box::new((Box::new(arg), ret_idx, p.static_arity_1())))),
+        ptyp_desc: Box::new(CoreTypeDesc::Ptyp_arrow(Box::new((
+            Box::new(arg),
+            ret_idx,
+            p.static_arity_1(),
+        )))),
         ptyp_loc: loc,
         ptyp_attributes: Attributes::new(),
     }
@@ -567,7 +579,11 @@ fn parse_atomic_typ_expr_with_start(
                     (String::new(), p.mk_loc_idx_to_prev_end(var_start_idx))
                 } else {
                     // OCaml: parse_ident checks for keywords first
-                    super::core::parse_ident(p, super::core::error_messages::TYPE_VAR, var_start_idx)
+                    super::core::parse_ident(
+                        p,
+                        super::core::error_messages::TYPE_VAR,
+                        var_start_idx,
+                    )
                 };
                 let name_idx = p.arena_mut().push_interned_string(&name);
                 vars.push(with_loc(name_idx, var_loc));
@@ -585,7 +601,9 @@ fn parse_atomic_typ_expr_with_start(
                 }
             } else if let Some(first) = vars.first() {
                 CoreType {
-                    ptyp_desc: Box::new(CoreTypeDesc::Ptyp_var(Box::new(Cow::Owned(p.arena().get_string(first.txt).to_string())))),
+                    ptyp_desc: Box::new(CoreTypeDesc::Ptyp_var(Box::new(Cow::Owned(
+                        p.arena().get_string(first.txt).to_string(),
+                    )))),
                     ptyp_loc: first.loc.clone(), // Use the variable's location (excludes the ')
                     ptyp_attributes: Attributes::new(),
                 }
@@ -621,35 +639,37 @@ fn parse_atomic_typ_expr_with_start(
             // taking a function. So we only treat `( ... ) => ...` as a parameter-list function
             // type when the parens look like a parameter list (start with `~`/`.`/`@` or contain
             // a top-level comma).
-            let is_function_type = es6_arrow && p.lookahead(|state| {
-                let starts_like_params = matches!(state.token, Token::Tilde | Token::Dot | Token::At);
-                let is_empty = state.token == Token::Rparen;
+            let is_function_type = es6_arrow
+                && p.lookahead(|state| {
+                    let starts_like_params =
+                        matches!(state.token, Token::Tilde | Token::Dot | Token::At);
+                    let is_empty = state.token == Token::Rparen;
 
-                let mut depth = 0;
-                let mut saw_top_level_comma = false;
+                    let mut depth = 0;
+                    let mut saw_top_level_comma = false;
 
-                while state.token != Token::Eof {
-                    match state.token {
-                        Token::Lparen => depth += 1,
-                        Token::Rparen => {
-                            if depth == 0 {
-                                state.next();
-                                let followed_by_arrow = state.token == Token::EqualGreater;
-                                return followed_by_arrow
-                                    && !is_empty
-                                    && (starts_like_params || saw_top_level_comma);
+                    while state.token != Token::Eof {
+                        match state.token {
+                            Token::Lparen => depth += 1,
+                            Token::Rparen => {
+                                if depth == 0 {
+                                    state.next();
+                                    let followed_by_arrow = state.token == Token::EqualGreater;
+                                    return followed_by_arrow
+                                        && !is_empty
+                                        && (starts_like_params || saw_top_level_comma);
+                                }
+                                depth -= 1;
                             }
-                            depth -= 1;
+                            Token::Comma if depth == 0 => {
+                                saw_top_level_comma = true;
+                            }
+                            _ => {}
                         }
-                        Token::Comma if depth == 0 => {
-                            saw_top_level_comma = true;
-                        }
-                        _ => {}
+                        state.next();
                     }
-                    state.next();
-                }
-                false
-            });
+                    false
+                });
 
             if is_function_type {
                 parse_function_type(p, start_pos_idx)
@@ -738,7 +758,10 @@ fn parse_atomic_typ_expr(p: &mut Parser<'_>, attrs: Attributes, es6_arrow: bool)
 /// `outer_start_pos_idx` is an optional PosIdx from the caller that can be reused
 /// for position sharing (e.g., when the caller has already pushed a start position
 /// at the same coordinate).
-fn parse_type_constr_with_start(p: &mut Parser<'_>, outer_start_pos_idx: Option<crate::parse_arena::PosIdx>) -> CoreType {
+fn parse_type_constr_with_start(
+    p: &mut Parser<'_>,
+    outer_start_pos_idx: Option<crate::parse_arena::PosIdx>,
+) -> CoreType {
     // Use the outer start position if provided, otherwise use stored index.
     // In OCaml, `let start_pos = p.Parser.start_pos` binds to same pointer.
     let start_pos_idx = outer_start_pos_idx.unwrap_or_else(|| p.start_pos_idx());
@@ -779,10 +802,13 @@ fn parse_type_constr_with_start(p: &mut Parser<'_>, outer_start_pos_idx: Option<
         if p.token == Token::Rparen && opening == Token::Lparen {
             // User wrote parens instead of angle brackets - emit helpful error
             let path_str = path_parts.join(".");
-            let args_str: Vec<String> = args.iter().map(|t| match &*t.ptyp_desc {
-                CoreTypeDesc::Ptyp_var(v) => format!("'{}", v),
-                _ => "_".to_string(),
-            }).collect();
+            let args_str: Vec<String> = args
+                .iter()
+                .map(|t| match &*t.ptyp_desc {
+                    CoreTypeDesc::Ptyp_var(v) => format!("'{}", v),
+                    _ => "_".to_string(),
+                })
+                .collect();
             let type_str = if args_str.is_empty() {
                 path_str
             } else {
@@ -808,14 +834,19 @@ fn parse_type_constr_with_start(p: &mut Parser<'_>, outer_start_pos_idx: Option<
     if let Some(ref inline_types) = p.inline_types_found {
         // Collect inline type names first to avoid borrow conflict
         let inline_names: Vec<String> = inline_types.iter().map(|(n, _, _)| n.clone()).collect();
-        let count = args.iter().filter(|arg| {
-            if let CoreTypeDesc::Ptyp_constr(constr_inner) = &*arg.ptyp_desc {
-                let (ref lid, _) = **constr_inner;
-                inline_names.iter().any(|iname| p.arena().is_lident(lid.txt, iname))
-            } else {
-                false
-            }
-        }).count();
+        let count = args
+            .iter()
+            .filter(|arg| {
+                if let CoreTypeDesc::Ptyp_constr(constr_inner) = &*arg.ptyp_desc {
+                    let (ref lid, _) = **constr_inner;
+                    inline_names
+                        .iter()
+                        .any(|iname| p.arena().is_lident(lid.txt, iname))
+                } else {
+                    false
+                }
+            })
+            .count();
         if count > 1 {
             p.err_at(
                 p.arena().get_position(start_pos_idx).clone(),
@@ -834,7 +865,10 @@ fn parse_type_constr_with_start(p: &mut Parser<'_>, outer_start_pos_idx: Option<
     // when there are no type args, it shares the same end as lid_loc.
     let ptyp_end_idx = p.prev_end_pos_idx();
     let ptyp_loc = p.mk_loc_idx(start_pos_idx, ptyp_end_idx);
-    let args_idx: Vec<CoreTypeIdx> = args.into_iter().map(|a| p.arena_mut().push_core_type(a)).collect();
+    let args_idx: Vec<CoreTypeIdx> = args
+        .into_iter()
+        .map(|a| p.arena_mut().push_core_type(a))
+        .collect();
     ast_helper::make_type_constr(lid_idx, args_idx, lid_loc, ptyp_loc)
 }
 
@@ -873,13 +907,15 @@ fn parse_type_args(p: &mut Parser<'_>) -> Vec<CoreType> {
                 } else if p.token == Token::GreaterThan || p.token == Token::Eof {
                     args.push(typ);
                     break;
-                } else if super::grammar::is_typ_expr_start(&p.token) || p.token == Token::LessThan {
+                } else if super::grammar::is_typ_expr_start(&p.token) || p.token == Token::LessThan
+                {
                     // Missing comma - report and continue
                     p.expect(Token::Comma);
                     args.push(typ);
                 } else {
                     args.push(typ);
-                    if !(p.token == Token::Eof || p.token == Token::GreaterThan
+                    if !(p.token == Token::Eof
+                        || p.token == Token::GreaterThan
                         || super::core::recover::should_abort_list_parse(p))
                     {
                         p.expect(Token::Comma);
@@ -890,7 +926,8 @@ fn parse_type_args(p: &mut Parser<'_>) -> Vec<CoreType> {
                 }
             }
             None => {
-                if p.token == Token::Eof || p.token == Token::GreaterThan
+                if p.token == Token::Eof
+                    || p.token == Token::GreaterThan
                     || super::core::recover::should_abort_list_parse(p)
                 {
                     break;
@@ -954,7 +991,11 @@ fn parse_function_type(p: &mut Parser<'_>, start_pos_idx: PosIdx) -> CoreType {
             let content = content.clone();
             p.next();
             let loc = p.from_location(&loc);
-            doc_attrs.push(super::core::doc_comment_to_attribute(p.arena_mut(), loc, content));
+            doc_attrs.push(super::core::doc_comment_to_attribute(
+                p.arena_mut(),
+                loc,
+                content,
+            ));
         }
 
         // Now capture the start position for the arrow - AFTER doc comments but BEFORE @-attrs
@@ -966,13 +1007,18 @@ fn parse_function_type(p: &mut Parser<'_>, start_pos_idx: PosIdx) -> CoreType {
         let regular_attrs = parse_regular_attributes(p);
 
         // Combine: doc_attrs @ regular_attrs (OCaml: doc_attr @ parse_attributes p)
-        let param_attrs: Attributes = doc_attrs.into_iter().chain(regular_attrs.into_iter()).collect();
+        let param_attrs: Attributes = doc_attrs
+            .into_iter()
+            .chain(regular_attrs.into_iter())
+            .collect();
 
         // Capture start position before label - OCaml includes the ~ in arrow location
         // But if there's an uncurried marker (.), the arrow should start at the .
         // The uncurried marker takes precedence over @-attributes for the start position
         // Doc comments do NOT affect the arrow start position
-        let has_regular_attrs = param_attrs.iter().any(|(name, _)| p.arena().get_string(name.txt) != "res.doc");
+        let has_regular_attrs = param_attrs
+            .iter()
+            .any(|(name, _)| p.arena().get_string(name.txt) != "res.doc");
         let param_start_idx = if has_dot {
             // For uncurried parameters, OCaml includes the . in arrow location
             // Use the already-captured uncurried_start_idx (identity-based)
@@ -991,7 +1037,11 @@ fn parse_function_type(p: &mut Parser<'_>, start_pos_idx: PosIdx) -> CoreType {
             p.expect_with_grammar(Token::Colon, Some(Grammar::TypeExpression));
             let typ = parse_typ_expr(p);
             let name_idx = p.arena_mut().push_interned_string(&name);
-            (ArgLabel::Labelled(Located::new(name_idx, name_loc)), typ, false)
+            (
+                ArgLabel::Labelled(Located::new(name_idx, name_loc)),
+                typ,
+                false,
+            )
         } else if matches!(p.token, Token::Lident(_)) {
             // Check if this is `name: type` (missing tilde)
             // OCaml: parse Lident first, then check for Colon
@@ -1010,11 +1060,7 @@ fn parse_function_type(p: &mut Parser<'_>, start_pos_idx: PosIdx) -> CoreType {
                 let error_msg = super::core::error_messages::missing_tilde_labeled_parameter(&name);
                 let start_pos = p.loc_start(name_loc);
                 let end_pos = p.loc_end(name_loc);
-                p.err_at(
-                    start_pos,
-                    end_pos,
-                    DiagnosticCategory::Message(error_msg),
-                );
+                p.err_at(start_pos, end_pos, DiagnosticCategory::Message(error_msg));
                 // Consume the colon
                 p.next();
                 let typ = parse_typ_expr(p);
@@ -1023,9 +1069,17 @@ fn parse_function_type(p: &mut Parser<'_>, start_pos_idx: PosIdx) -> CoreType {
                 if p.token == Token::Equal {
                     p.next();
                     p.expect(Token::Question);
-                    (ArgLabel::Optional(Located::new(name_idx, name_loc)), typ, false)
+                    (
+                        ArgLabel::Optional(Located::new(name_idx, name_loc)),
+                        typ,
+                        false,
+                    )
                 } else {
-                    (ArgLabel::Labelled(Located::new(name_idx, name_loc)), typ, false)
+                    (
+                        ArgLabel::Labelled(Located::new(name_idx, name_loc)),
+                        typ,
+                        false,
+                    )
                 }
             } else {
                 // OCaml parse_type_parameter (Lident non-labeled path):
@@ -1052,7 +1106,11 @@ fn parse_function_type(p: &mut Parser<'_>, start_pos_idx: PosIdx) -> CoreType {
             // But only when there are no attributes and no uncurried marker - when these
             // are present, the type should have its natural location, and ptyp_loc
             // is adjusted later to include attrs/dot.
-            let outer_start = if param_attrs.is_empty() && !has_dot { Some(param_start_idx) } else { None };
+            let outer_start = if param_attrs.is_empty() && !has_dot {
+                Some(param_start_idx)
+            } else {
+                None
+            };
             let typ = parse_typ_expr_inner_with_start(p, true, outer_start);
             let typ = parse_type_alias(p, typ);
             (ArgLabel::Nolabel, typ, false)
@@ -1110,7 +1168,8 @@ fn parse_function_type(p: &mut Parser<'_>, start_pos_idx: PosIdx) -> CoreType {
                     let new_arg = if matches!(
                         &*arg_typ.ptyp_desc,
                         CoreTypeDesc::Ptyp_constr(ci) if p.arena().is_simple_lident(ci.0.txt)
-                    ) && !arg_typ.ptyp_loc.is_none() {
+                    ) && !arg_typ.ptyp_loc.is_none()
+                    {
                         let arg_end_idx = p.loc_end_idx(arg_typ.ptyp_loc);
                         let new_arg_loc = p.mk_loc_idx(uncurried_start_idx, arg_end_idx);
                         let new_arg_typ = CoreType {
@@ -1127,7 +1186,11 @@ fn parse_function_type(p: &mut Parser<'_>, start_pos_idx: PosIdx) -> CoreType {
                     };
 
                     typ = CoreType {
-                        ptyp_desc: Box::new(CoreTypeDesc::Ptyp_arrow(Box::new((Box::new(new_arg), ret, arity)))),
+                        ptyp_desc: Box::new(CoreTypeDesc::Ptyp_arrow(Box::new((
+                            Box::new(new_arg),
+                            ret,
+                            arity,
+                        )))),
                         ptyp_loc: new_arrow_loc,
                         ptyp_attributes: typ.ptyp_attributes,
                     };
@@ -1194,22 +1257,28 @@ fn parse_function_type(p: &mut Parser<'_>, start_pos_idx: PosIdx) -> CoreType {
         };
 
         let typ_idx = p.arena_mut().push_core_type(typ);
-        params.push((TypeArg {
-            attrs: arrow_attrs,
-            lbl: label,
-            typ: typ_idx,
-        }, param_start_idx));
+        params.push((
+            TypeArg {
+                attrs: arrow_attrs,
+                lbl: label,
+                typ: typ_idx,
+            },
+            param_start_idx,
+        ));
 
         if !p.optional(&Token::Comma) {
             if super::grammar::is_list_element(&super::grammar::Grammar::TypeParameters, &p.token) {
                 // Missing comma but next token looks like another type parameter.
                 // Emit "Did you forget a `,` here?" and continue parsing.
                 p.expect(Token::Comma);
-            } else if p.token != Token::Eof && p.token != Token::Rparen
+            } else if p.token != Token::Eof
+                && p.token != Token::Rparen
                 && !super::core::recover::should_abort_list_parse(p)
             {
                 p.expect(Token::Comma);
-                if p.token == Token::Semicolon { p.next(); }
+                if p.token == Token::Semicolon {
+                    p.next();
+                }
             } else {
                 break;
             }
@@ -1235,23 +1304,32 @@ fn parse_function_type(p: &mut Parser<'_>, start_pos_idx: PosIdx) -> CoreType {
         let lid_idx = p.push_lident_static("unit");
         let unit_type = ast_helper::make_type_constr(lid_idx, vec![], lid_loc, LocIdx::none());
         let unit_type_idx = p.arena_mut().push_core_type(unit_type);
-        params.push((TypeArg {
-            attrs: Attributes::new(),
-            lbl: ArgLabel::Nolabel,
-            typ: unit_type_idx,
-        }, start_pos_idx));
+        params.push((
+            TypeArg {
+                attrs: Attributes::new(),
+                lbl: ArgLabel::Nolabel,
+                typ: unit_type_idx,
+            },
+            start_pos_idx,
+        ));
     }
 
     // The total arity is the number of parameters
     // OCaml: When in external, decrement arity for labeled @as(_) parameters
     // These are parameters where: label is Labelled, type is Ptyp_any, and has @as attribute
     let as_underscore_count = if p.in_external {
-        params.iter().filter(|(param, _)| {
-            let param_typ = p.arena().get_core_type(param.typ);
-            matches!(param.lbl, ArgLabel::Labelled(_))
-                && matches!(*param_typ.ptyp_desc, CoreTypeDesc::Ptyp_any)
-                && param_typ.ptyp_attributes.iter().any(|(attr, _)| p.arena().get_string(attr.txt) == "as")
-        }).count()
+        params
+            .iter()
+            .filter(|(param, _)| {
+                let param_typ = p.arena().get_core_type(param.typ);
+                matches!(param.lbl, ArgLabel::Labelled(_))
+                    && matches!(*param_typ.ptyp_desc, CoreTypeDesc::Ptyp_any)
+                    && param_typ
+                        .ptyp_attributes
+                        .iter()
+                        .any(|(attr, _)| p.arena().get_string(attr.txt) == "as")
+            })
+            .count()
     } else {
         0
     };
@@ -1304,7 +1382,7 @@ fn parse_function_type(p: &mut Parser<'_>, start_pos_idx: PosIdx) -> CoreType {
         ptyp_loc: p.mk_loc_idx(start_pos_idx, end_pos_idx),
         ..result
     }
-                }
+}
 
 /// Parse a lowercase identifier.
 fn parse_lident(p: &mut Parser<'_>) -> (String, Location) {
@@ -1341,7 +1419,11 @@ fn parse_attributes(p: &mut Parser<'_>) -> Attributes {
                 let content = content.clone();
                 p.next();
                 let loc = p.from_location(&loc_cloned);
-                attrs.push(super::core::doc_comment_to_attribute(p.arena_mut(), loc, content));
+                attrs.push(super::core::doc_comment_to_attribute(
+                    p.arena_mut(),
+                    loc,
+                    content,
+                ));
             }
             _ => break,
         }
@@ -1413,13 +1495,18 @@ fn parse_attribute_payload(p: &mut Parser<'_>) -> Payload {
             let pstr_loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
             // Create Pstr_eval(Pexp_constant(Box::new(Pconst_string(s, tag))))
             let expr = Expression {
-                pexp_desc: Box::new(ExpressionDesc::Pexp_constant(Box::new(Constant::String(value, tag)))),
+                pexp_desc: Box::new(ExpressionDesc::Pexp_constant(Box::new(Constant::String(
+                    value, tag,
+                )))),
                 pexp_loc,
                 pexp_attributes: Attributes::new(),
             };
             let expr_idx = p.arena_mut().push_expr(expr);
             let item = StructureItem {
-                pstr_desc: Box::new(StructureItemDesc::Pstr_eval(Box::new((expr_idx, Attributes::new())))),
+                pstr_desc: Box::new(StructureItemDesc::Pstr_eval(Box::new((
+                    expr_idx,
+                    Attributes::new(),
+                )))),
                 pstr_loc,
             };
             Payload::PStr(Box::new(vec![item]))
@@ -1437,7 +1524,10 @@ fn parse_attribute_payload(p: &mut Parser<'_>) -> Payload {
             // OCaml structure_item location spans from before expression to after
             let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
             let item = StructureItem {
-                pstr_desc: Box::new(StructureItemDesc::Pstr_eval(Box::new((expr_idx, Attributes::new())))),
+                pstr_desc: Box::new(StructureItemDesc::Pstr_eval(Box::new((
+                    expr_idx,
+                    Attributes::new(),
+                )))),
                 pstr_loc: loc,
             };
             Payload::PStr(Box::new(vec![item]))
@@ -1450,11 +1540,7 @@ fn parse_attribute_payload(p: &mut Parser<'_>) -> Payload {
 // ============================================================================
 
 /// Parse a tuple type.
-fn parse_tuple_type(
-    p: &mut Parser<'_>,
-    start_pos_idx: PosIdx,
-    first: CoreType,
-) -> CoreType {
+fn parse_tuple_type(p: &mut Parser<'_>, start_pos_idx: PosIdx, first: CoreType) -> CoreType {
     let mut types = vec![first];
 
     while p.token == Token::Comma {
@@ -1482,7 +1568,10 @@ fn parse_tuple_type(
 
     let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
 
-    let types_idx: Vec<CoreTypeIdx> = types.into_iter().map(|t| p.arena_mut().push_core_type(t)).collect();
+    let types_idx: Vec<CoreTypeIdx> = types
+        .into_iter()
+        .map(|t| p.arena_mut().push_core_type(t))
+        .collect();
     CoreType {
         ptyp_desc: Box::new(CoreTypeDesc::Ptyp_tuple(Box::new(types_idx))),
         ptyp_loc: loc,
@@ -1513,7 +1602,10 @@ fn parse_record_or_object_type(p: &mut Parser<'_>) -> CoreType {
 
     // Check if we should extract this as an inline record type
     let has_inline_context = p.inline_types_found.is_some() && p.current_type_name_path.is_some();
-    let is_record_start = matches!(p.token, Token::Lident(_) | Token::Mutable | Token::At | Token::DotDotDot);
+    let is_record_start = matches!(
+        p.token,
+        Token::Lident(_) | Token::Mutable | Token::At | Token::DotDotDot
+    );
 
     if has_inline_context && is_record_start {
         // Extract as inline record type - mimics OCaml's parse_record_or_object_type
@@ -1528,18 +1620,24 @@ fn parse_record_or_object_type(p: &mut Parser<'_>) -> CoreType {
 
         // Register this inline type (insert at front to match OCaml's prepend order)
         if let Some(ref mut found) = p.inline_types_found {
-            found.insert(0, (
-                inline_type_name.clone(),
-                loc.clone(),
-                TypeKind::Ptype_record(labels),
-            ));
+            found.insert(
+                0,
+                (
+                    inline_type_name.clone(),
+                    loc.clone(),
+                    TypeKind::Ptype_record(labels),
+                ),
+            );
         }
 
         // Return a Ptyp_constr pointing to the inline type
         let type_args: Vec<CoreTypeIdx> = params.into_iter().map(|(t, _)| t).collect();
         let lid_idx = p.push_lident(&inline_type_name);
         CoreType {
-            ptyp_desc: Box::new(CoreTypeDesc::Ptyp_constr(Box::new((with_loc(lid_idx, loc.clone()), type_args)))),
+            ptyp_desc: Box::new(CoreTypeDesc::Ptyp_constr(Box::new((
+                with_loc(lid_idx, loc.clone()),
+                type_args,
+            )))),
             ptyp_loc: loc,
             ptyp_attributes: Attributes::new(),
         }
@@ -1646,7 +1744,11 @@ fn parse_object_fields(p: &mut Parser<'_>) -> Vec<ObjectField> {
                 let typ = parse_poly_type_expr(p);
                 let typ_idx = p.arena_mut().push_core_type(typ);
                 let name_idx = p.arena_mut().push_interned_string(&name);
-                fields.push(ObjectField::Otag(with_loc(name_idx, name_loc), field_attrs, typ_idx));
+                fields.push(ObjectField::Otag(
+                    with_loc(name_idx, name_loc),
+                    field_attrs,
+                    typ_idx,
+                ));
             }
             None => {
                 p.err(DiagnosticCategory::Message(
@@ -1659,11 +1761,14 @@ fn parse_object_fields(p: &mut Parser<'_>) -> Vec<ObjectField> {
         if !p.optional(&Token::Comma) {
             if super::grammar::is_list_element(&Grammar::StringFieldDeclarations, &p.token) {
                 p.expect(Token::Comma);
-            } else if p.token != Token::Eof && p.token != Token::Rbrace
+            } else if p.token != Token::Eof
+                && p.token != Token::Rbrace
                 && !super::core::recover::should_abort_list_parse(p)
             {
                 p.expect(Token::Comma);
-                if p.token == Token::Semicolon { p.next(); }
+                if p.token == Token::Semicolon {
+                    p.next();
+                }
             } else {
                 break;
             }
@@ -1704,7 +1809,10 @@ fn parse_polymorphic_variant_type_args(p: &mut Parser<'_>) -> CoreType {
             if p.mode == ParserMode::ParseForTypeChecker {
                 args.into_iter().next().unwrap()
             } else {
-                let args_idx: Vec<CoreTypeIdx> = args.into_iter().map(|a| p.arena_mut().push_core_type(a)).collect();
+                let args_idx: Vec<CoreTypeIdx> = args
+                    .into_iter()
+                    .map(|a| p.arena_mut().push_core_type(a))
+                    .collect();
                 CoreType {
                     ptyp_desc: Box::new(CoreTypeDesc::Ptyp_tuple(Box::new(args_idx))),
                     ptyp_loc: loc,
@@ -1716,13 +1824,16 @@ fn parse_polymorphic_variant_type_args(p: &mut Parser<'_>) -> CoreType {
         [typ] => typ.clone(),
         // Multiple types - create tuple with full parenthesis location
         _ => {
-            let args_idx: Vec<CoreTypeIdx> = args.into_iter().map(|a| p.arena_mut().push_core_type(a)).collect();
+            let args_idx: Vec<CoreTypeIdx> = args
+                .into_iter()
+                .map(|a| p.arena_mut().push_core_type(a))
+                .collect();
             CoreType {
                 ptyp_desc: Box::new(CoreTypeDesc::Ptyp_tuple(Box::new(args_idx))),
                 ptyp_loc: loc,
                 ptyp_attributes: Attributes::new(),
             }
-        },
+        }
     }
 }
 
@@ -1782,7 +1893,9 @@ fn parse_poly_variant_type(p: &mut Parser<'_>) -> CoreType {
     p.expect(Token::Rbracket);
 
     CoreType {
-        ptyp_desc: Box::new(CoreTypeDesc::Ptyp_variant(Box::new((fields, closed, low_tags)))),
+        ptyp_desc: Box::new(CoreTypeDesc::Ptyp_variant(Box::new((
+            fields, closed, low_tags,
+        )))),
         ptyp_loc: loc,
         ptyp_attributes: Attributes::new(),
     }
@@ -1847,7 +1960,10 @@ fn parse_poly_variant_type_simple(p: &mut Parser<'_>) -> CoreType {
     let tag_loc = loc.clone();
 
     let is_constant = args.is_empty();
-    let args_idx: Vec<CoreTypeIdx> = args.into_iter().map(|a| p.arena_mut().push_core_type(a)).collect();
+    let args_idx: Vec<CoreTypeIdx> = args
+        .into_iter()
+        .map(|a| p.arena_mut().push_core_type(a))
+        .collect();
     let fields = vec![RowField::Rtag(
         with_loc(tag, tag_loc),
         Attributes::new(),
@@ -1856,7 +1972,11 @@ fn parse_poly_variant_type_simple(p: &mut Parser<'_>) -> CoreType {
     )];
 
     CoreType {
-        ptyp_desc: Box::new(CoreTypeDesc::Ptyp_variant(Box::new((fields, ClosedFlag::Closed, None)))),
+        ptyp_desc: Box::new(CoreTypeDesc::Ptyp_variant(Box::new((
+            fields,
+            ClosedFlag::Closed,
+            None,
+        )))),
         ptyp_loc: loc,
         ptyp_attributes: Attributes::new(),
     }
@@ -1892,7 +2012,11 @@ fn parse_row_fields_no_marker(p: &mut Parser<'_>) -> Vec<RowField> {
             let content = content.clone();
             p.next();
             let loc = p.from_location(&loc);
-            Attributes::from_vec(vec![super::core::doc_comment_to_attribute(p.arena_mut(), loc, content)])
+            Attributes::from_vec(vec![super::core::doc_comment_to_attribute(
+                p.arena_mut(),
+                loc,
+                content,
+            )])
         } else {
             Attributes::new()
         };
@@ -1921,7 +2045,11 @@ fn parse_row_fields_no_marker(p: &mut Parser<'_>) -> Vec<RowField> {
                 let content = content.clone();
                 p.next();
                 let loc = p.from_location(&loc);
-                Attributes::from_vec(vec![super::core::doc_comment_to_attribute(p.arena_mut(), loc, content)])
+                Attributes::from_vec(vec![super::core::doc_comment_to_attribute(
+                    p.arena_mut(),
+                    loc,
+                    content,
+                )])
             } else {
                 Attributes::new()
             };
@@ -1992,7 +2120,11 @@ fn parse_row_fields_with_required_first(p: &mut Parser<'_>) -> Vec<RowField> {
             let content = content.clone();
             p.next();
             let loc = p.from_location(&loc);
-            Attributes::from_vec(vec![super::core::doc_comment_to_attribute(p.arena_mut(), loc, content)])
+            Attributes::from_vec(vec![super::core::doc_comment_to_attribute(
+                p.arena_mut(),
+                loc,
+                content,
+            )])
         } else {
             Attributes::new()
         };
@@ -2014,7 +2146,11 @@ fn parse_row_fields_with_required_first(p: &mut Parser<'_>) -> Vec<RowField> {
                 let content = content.clone();
                 p.next();
                 let loc = p.from_location(&loc);
-                Attributes::from_vec(vec![super::core::doc_comment_to_attribute(p.arena_mut(), loc, content)])
+                Attributes::from_vec(vec![super::core::doc_comment_to_attribute(
+                    p.arena_mut(),
+                    loc,
+                    content,
+                )])
             } else {
                 Attributes::new()
             };
@@ -2119,35 +2255,42 @@ fn parse_single_row_field_with_attrs(p: &mut Parser<'_>, attrs: Attributes) -> O
         };
 
         // Parse arguments inside parentheses
-        let (args, comma_separated, had_parens, lparen_pos_idx, rparen_end_pos_idx) = if p.token == Token::Lparen {
-            let lparen_pos_idx = p.start_pos_idx();
-            p.next();
-            let mut args = vec![];
-            let mut has_comma = false;
-            while p.token != Token::Rparen && p.token != Token::Eof {
-                args.push(parse_typ_expr_inner(p, true));
-                if p.optional(&Token::Comma) {
-                    has_comma = true;
-                } else if !p.optional(&Token::Ampersand) {
-                    break;
+        let (args, comma_separated, had_parens, lparen_pos_idx, rparen_end_pos_idx) =
+            if p.token == Token::Lparen {
+                let lparen_pos_idx = p.start_pos_idx();
+                p.next();
+                let mut args = vec![];
+                let mut has_comma = false;
+                while p.token != Token::Rparen && p.token != Token::Eof {
+                    args.push(parse_typ_expr_inner(p, true));
+                    if p.optional(&Token::Comma) {
+                        has_comma = true;
+                    } else if !p.optional(&Token::Ampersand) {
+                        break;
+                    }
                 }
-            }
-            p.expect(Token::Rparen);
-            let rparen_end_pos_idx = p.prev_end_pos_idx();
-            (args, has_comma, true, Some(lparen_pos_idx), Some(rparen_end_pos_idx))
-        } else {
-            (vec![], false, false, None, None)
-        };
+                p.expect(Token::Rparen);
+                let rparen_end_pos_idx = p.prev_end_pos_idx();
+                (
+                    args,
+                    has_comma,
+                    true,
+                    Some(lparen_pos_idx),
+                    Some(rparen_end_pos_idx),
+                )
+            } else {
+                (vec![], false, false, None, None)
+            };
 
         let is_constant = !had_parens || args.is_empty();
 
         // Handle tuple wrapping for comma-separated args
         let first_type = if comma_separated && args.len() >= 2 {
-            let loc = p.mk_loc_idx(
-                lparen_pos_idx.unwrap(),
-                rparen_end_pos_idx.unwrap(),
-            );
-            let args_idx: Vec<CoreTypeIdx> = args.into_iter().map(|a| p.arena_mut().push_core_type(a)).collect();
+            let loc = p.mk_loc_idx(lparen_pos_idx.unwrap(), rparen_end_pos_idx.unwrap());
+            let args_idx: Vec<CoreTypeIdx> = args
+                .into_iter()
+                .map(|a| p.arena_mut().push_core_type(a))
+                .collect();
             Some(CoreType {
                 ptyp_desc: Box::new(CoreTypeDesc::Ptyp_tuple(Box::new(args_idx))),
                 ptyp_loc: loc,
@@ -2162,7 +2305,10 @@ fn parse_single_row_field_with_attrs(p: &mut Parser<'_>, attrs: Attributes) -> O
         // Parse additional & constraints
         // OCaml expects parentheses after & and uses parse_polymorphic_variant_type_args
         // which returns the inner type without paren location for single types
-        let mut all_types: Vec<CoreTypeIdx> = first_type.into_iter().map(|t| p.arena_mut().push_core_type(t)).collect();
+        let mut all_types: Vec<CoreTypeIdx> = first_type
+            .into_iter()
+            .map(|t| p.arena_mut().push_core_type(t))
+            .collect();
         while p.optional(&Token::Ampersand) {
             let constraint_typ = if p.token == Token::Lparen {
                 parse_polymorphic_variant_type_args(p)
@@ -2250,26 +2396,33 @@ fn parse_row_fields(p: &mut Parser<'_>) -> Vec<RowField> {
 
             // Parse arguments inside parentheses
             // Track if they're comma-separated (tuple wrap) vs ampersand-separated (no wrap)
-            let (args, comma_separated, had_parens, lparen_pos_idx, rparen_end_pos_idx) = if p.token == Token::Lparen {
-                let lparen_pos_idx = p.start_pos_idx();
-                p.next();
-                let mut args = vec![];
-                let mut has_comma = false;
-                while p.token != Token::Rparen && p.token != Token::Eof {
-                    // Allow arrow types in polymorphic variant arguments (e.g., #Foo(string => unit))
-                    args.push(parse_typ_expr_inner(p, true));
-                    if p.optional(&Token::Comma) {
-                        has_comma = true;
-                    } else if !p.optional(&Token::Ampersand) {
-                        break;
+            let (args, comma_separated, had_parens, lparen_pos_idx, rparen_end_pos_idx) =
+                if p.token == Token::Lparen {
+                    let lparen_pos_idx = p.start_pos_idx();
+                    p.next();
+                    let mut args = vec![];
+                    let mut has_comma = false;
+                    while p.token != Token::Rparen && p.token != Token::Eof {
+                        // Allow arrow types in polymorphic variant arguments (e.g., #Foo(string => unit))
+                        args.push(parse_typ_expr_inner(p, true));
+                        if p.optional(&Token::Comma) {
+                            has_comma = true;
+                        } else if !p.optional(&Token::Ampersand) {
+                            break;
+                        }
                     }
-                }
-                p.expect(Token::Rparen);
-                let rparen_end_pos_idx = p.prev_end_pos_idx();
-                (args, has_comma, true, Some(lparen_pos_idx), Some(rparen_end_pos_idx))
-            } else {
-                (vec![], false, false, None, None)
-            };
+                    p.expect(Token::Rparen);
+                    let rparen_end_pos_idx = p.prev_end_pos_idx();
+                    (
+                        args,
+                        has_comma,
+                        true,
+                        Some(lparen_pos_idx),
+                        Some(rparen_end_pos_idx),
+                    )
+                } else {
+                    (vec![], false, false, None, None)
+                };
 
             // Track if the tag itself is constant (no args in parens)
             // #A is constant, #A(int) is not, #A&(...) is constant (& are constraints, not args)
@@ -2279,11 +2432,11 @@ fn parse_row_fields(p: &mut Parser<'_>) -> Vec<RowField> {
             // For #E(int, int) & (...), we first need to make (int, int) a tuple type
             let first_type = if comma_separated && args.len() >= 2 {
                 // OCaml includes the parentheses in the tuple location
-                let loc = p.mk_loc_idx(
-                    lparen_pos_idx.unwrap(),
-                    rparen_end_pos_idx.unwrap(),
-                );
-                let args_idx: Vec<CoreTypeIdx> = args.into_iter().map(|a| p.arena_mut().push_core_type(a)).collect();
+                let loc = p.mk_loc_idx(lparen_pos_idx.unwrap(), rparen_end_pos_idx.unwrap());
+                let args_idx: Vec<CoreTypeIdx> = args
+                    .into_iter()
+                    .map(|a| p.arena_mut().push_core_type(a))
+                    .collect();
                 Some(CoreType {
                     ptyp_desc: Box::new(CoreTypeDesc::Ptyp_tuple(Box::new(args_idx))),
                     ptyp_loc: loc,
@@ -2298,7 +2451,10 @@ fn parse_row_fields(p: &mut Parser<'_>) -> Vec<RowField> {
             // Parse intersection constraints: #tag & typ1 & typ2
             // OCaml calls parse_polymorphic_variant_type_args after &, which expects parens
             // and handles single types specially (no paren location in the type)
-            let mut constraints: Vec<CoreTypeIdx> = first_type.into_iter().map(|t| p.arena_mut().push_core_type(t)).collect();
+            let mut constraints: Vec<CoreTypeIdx> = first_type
+                .into_iter()
+                .map(|t| p.arena_mut().push_core_type(t))
+                .collect();
             while p.token == Token::Ampersand {
                 p.next();
                 // OCaml expects parentheses after & and uses parse_polymorphic_variant_type_args
@@ -2366,10 +2522,7 @@ pub fn parse_package_type(p: &mut Parser<'_>) -> CoreType {
 }
 
 /// Parse a package type: module(S).
-fn parse_package_type_with_parens(
-    p: &mut Parser<'_>,
-    start_pos_idx: PosIdx,
-) -> CoreType {
+fn parse_package_type_with_parens(p: &mut Parser<'_>, start_pos_idx: PosIdx) -> CoreType {
     p.expect(Token::Lparen);
 
     let lid = parse_module_long_ident(p);
@@ -2465,7 +2618,9 @@ fn parse_type_long_ident(p: &mut Parser<'_>) -> super::ast::Loc<crate::parse_are
 }
 
 /// Parse package constraints.
-fn parse_package_constraints(p: &mut Parser<'_>) -> Vec<(super::ast::Loc<crate::parse_arena::LidentIdx>, CoreTypeIdx)> {
+fn parse_package_constraints(
+    p: &mut Parser<'_>,
+) -> Vec<(super::ast::Loc<crate::parse_arena::LidentIdx>, CoreTypeIdx)> {
     let mut constraints = vec![];
 
     while p.token == Token::Typ || p.token == Token::And {

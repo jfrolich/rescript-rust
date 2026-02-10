@@ -32,7 +32,11 @@ impl fmt::Display for Location {
                         write!(f, "line {}:{}-{}", start_line, start_col, end_col)
                     }
                 } else {
-                    write!(f, "line {}:{}-{}:{}", start_line, start_col, end_line, end_col)
+                    write!(
+                        f,
+                        "line {}:{}-{}:{}",
+                        start_line, start_col, end_line, end_col
+                    )
                 }
             }
         }

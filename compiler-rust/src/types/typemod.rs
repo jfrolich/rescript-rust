@@ -15,24 +15,26 @@ use crate::location::Location;
 use crate::parse_arena::{LocIdx, Located, ParseArena};
 use crate::parser::ast::Attributes;
 use crate::parser::ast::RecFlag;
+use crate::parser::ast::Variance as ParserVariance;
 use crate::parser::ast::{
     ModuleExpr as ParsedModuleExpr, ModuleExprDesc as ParsedModuleExprDesc,
     StructureItem as ParsedStructureItem, StructureItemDesc as ParsedStructureItemDesc,
 };
 use crate::parser::longident::Longident;
 use crate::types::Path;
+use crate::types::Variance as TypesVariance;
 use crate::types::env::Env;
 use crate::types::type_expr::TypeExprRef;
-use crate::types::typecore::{TypeCheckContext, TypeCoreError, type_binding, type_expression, transl_type};
+use crate::types::typecore::{
+    TypeCheckContext, TypeCoreError, transl_type, type_binding, type_expression,
+};
 use crate::types::typedtree::{
     EnvRef, Expression, IncludeDeclaration, ModuleBinding, ModuleCoercion, ModuleExpr,
-    ModuleExprDesc, ModuleType, ModuleTypeDeclaration, OpenDeclaration, Structure,
-    StructureItem, StructureItemDesc, TypeExtension, ValueBinding,
-    TypedTypeDeclaration, TypedTypeKind, TypedConstructorDeclaration, TypedConstructorArguments,
-    TypedLabelDeclaration, TypedCoreType, TypedCoreTypeDesc,
+    ModuleExprDesc, ModuleType, ModuleTypeDeclaration, OpenDeclaration, Structure, StructureItem,
+    StructureItemDesc, TypeExtension, TypedConstructorArguments, TypedConstructorDeclaration,
+    TypedCoreType, TypedCoreTypeDesc, TypedLabelDeclaration, TypedTypeDeclaration, TypedTypeKind,
+    ValueBinding,
 };
-use crate::types::Variance as TypesVariance;
-use crate::parser::ast::Variance as ParserVariance;
 
 // ============================================================================
 // Helper Functions for Path Conversion
@@ -124,7 +126,7 @@ pub fn type_module_expr<'a>(
         }
 
         ParsedModuleExprDesc::Pmod_functor(inner) => {
-                    let (ref name, ref param_type, ref body_idx) = **inner;
+            let (ref name, ref param_type, ref body_idx) = **inner;
             // Functor: (X: S) => ME
             let param_id = Ident::create_local(arena.get_string(name.txt));
 
@@ -141,7 +143,10 @@ pub fn type_module_expr<'a>(
             Ok(ModuleExpr {
                 mod_desc: ModuleExprDesc::Tmod_functor(
                     param_id,
-                    Located { txt: arena.get_string(name.txt).to_string(), loc: name.loc },
+                    Located {
+                        txt: arena.get_string(name.txt).to_string(),
+                        loc: name.loc,
+                    },
                     typed_param_type,
                     Box::new(typed_body),
                 ),
@@ -263,7 +268,7 @@ fn type_structure_item<'a>(
 
     match &*item.pstr_desc {
         ParsedStructureItemDesc::Pstr_eval(inner) => {
-                    let (ref expr, ref attrs) = **inner;
+            let (ref expr, ref attrs) = **inner;
             // Evaluated expression: E
             let typed_expr = type_expression(tctx.type_ctx, arena, env, arena.get_expr(*expr))?;
 
@@ -279,7 +284,7 @@ fn type_structure_item<'a>(
         }
 
         ParsedStructureItemDesc::Pstr_value(inner) => {
-                    let (ref rec_flag, ref bindings) = **inner;
+            let (ref rec_flag, ref bindings) = **inner;
             // Value binding: let P = E
             let typed_bindings = type_value_bindings(tctx, env, arena, *rec_flag, bindings)?;
 
@@ -318,7 +323,7 @@ fn type_structure_item<'a>(
         }
 
         ParsedStructureItemDesc::Pstr_type(inner) => {
-                    let (ref rec_flag, ref decls) = **inner;
+            let (ref rec_flag, ref decls) = **inner;
             // Type declaration: type t = ...
             let ctx = tctx.type_ctx;
             let mut new_env = env.clone();
@@ -336,7 +341,8 @@ fn type_structure_item<'a>(
                 let mut typ_params: Vec<(TypedCoreType, TypesVariance)> = Vec::new();
                 let mut internal_type_params: Vec<TypeExprRef> = Vec::new();
                 for (core_type, parser_var) in &decl.ptype_params {
-                    let (typed_core_type, type_ref) = transl_type(tctx, env, arena.get_core_type(*core_type))?;
+                    let (typed_core_type, type_ref) =
+                        transl_type(tctx, env, arena.get_core_type(*core_type))?;
                     internal_type_params.push(type_ref);
                     let types_var = match parser_var {
                         ParserVariance::Covariant => TypesVariance::covariant(),
@@ -358,7 +364,8 @@ fn type_structure_item<'a>(
                 // Convert manifest type (type alias)
                 let typ_manifest = match &decl.ptype_manifest {
                     Some(manifest) => {
-                        let (typed_manifest, _) = transl_type(tctx, env, arena.get_core_type(*manifest))?;
+                        let (typed_manifest, _) =
+                            transl_type(tctx, env, arena.get_core_type(*manifest))?;
                         Some(typed_manifest)
                     }
                     None => None,
@@ -366,9 +373,11 @@ fn type_structure_item<'a>(
 
                 // Convert the type kind - create both internal and typed tree versions
                 let (internal_type_kind, typed_tree_kind, constructors) = match &decl.ptype_kind {
-                    crate::parser::ast::TypeKind::Ptype_abstract => {
-                        (crate::types::TypeKind::TypeAbstract, TypedTypeKind::Ttype_abstract, vec![])
-                    }
+                    crate::parser::ast::TypeKind::Ptype_abstract => (
+                        crate::types::TypeKind::TypeAbstract,
+                        TypedTypeKind::Ttype_abstract,
+                        vec![],
+                    ),
                     crate::parser::ast::TypeKind::Ptype_variant(cstrs) => {
                         let mut internal_cstrs = Vec::new();
                         let mut typed_tree_cstrs = Vec::new();
@@ -385,25 +394,44 @@ fn type_structure_item<'a>(
                             let is_constant = matches!(cstr.pcd_args, crate::parser::ast::ConstructorArguments::Pcstr_tuple(ref args) if args.is_empty());
 
                             // Convert constructor arguments using transl_type
-                            let (cstr_args, internal_cd_args, typed_tree_cd_args) = match &cstr.pcd_args {
+                            let (cstr_args, internal_cd_args, typed_tree_cd_args) = match &cstr
+                                .pcd_args
+                            {
                                 crate::parser::ast::ConstructorArguments::Pcstr_tuple(types) => {
                                     let mut typed_args: Vec<TypeExprRef> = Vec::new();
                                     let mut typed_tree_args: Vec<TypedCoreType> = Vec::new();
                                     for core_type in types {
-                                        let (typed_core_type, type_ref) = transl_type(tctx, env, arena.get_core_type(*core_type))?;
+                                        let (typed_core_type, type_ref) = transl_type(
+                                            tctx,
+                                            env,
+                                            arena.get_core_type(*core_type),
+                                        )?;
                                         typed_args.push(type_ref);
                                         typed_tree_args.push(typed_core_type);
                                     }
-                                    (typed_args.clone(), crate::types::ConstructorArguments::CstrTuple(typed_args), TypedConstructorArguments::Cstr_tuple(typed_tree_args))
+                                    (
+                                        typed_args.clone(),
+                                        crate::types::ConstructorArguments::CstrTuple(typed_args),
+                                        TypedConstructorArguments::Cstr_tuple(typed_tree_args),
+                                    )
                                 }
                                 crate::parser::ast::ConstructorArguments::Pcstr_record(labels) => {
                                     let mut typed_labels: Vec<TypedLabelDeclaration> = Vec::new();
-                                    let mut internal_labels: Vec<crate::types::LabelDeclaration> = Vec::new();
+                                    let mut internal_labels: Vec<crate::types::LabelDeclaration> =
+                                        Vec::new();
                                     for lbl in labels {
-                                        let (typed_core_type, type_ref) = transl_type(tctx, env, arena.get_core_type(lbl.pld_type))?;
+                                        let (typed_core_type, type_ref) = transl_type(
+                                            tctx,
+                                            env,
+                                            arena.get_core_type(lbl.pld_type),
+                                        )?;
                                         let mutable_flag = match lbl.pld_mutable {
-                                            crate::parser::ast::MutableFlag::Immutable => crate::types::MutableFlag::Immutable,
-                                            crate::parser::ast::MutableFlag::Mutable => crate::types::MutableFlag::Mutable,
+                                            crate::parser::ast::MutableFlag::Immutable => {
+                                                crate::types::MutableFlag::Immutable
+                                            }
+                                            crate::parser::ast::MutableFlag::Mutable => {
+                                                crate::types::MutableFlag::Mutable
+                                            }
                                         };
                                         // OCaml wraps label types in Tpoly for potential generalization
                                         let poly_type_ref = ctx.new_poly(type_ref, vec![]);
@@ -418,7 +446,10 @@ fn type_structure_item<'a>(
                                         });
                                         // OCaml wraps label types in Ttyp_poly for typed tree
                                         let poly_typed_core_type = TypedCoreType {
-                                            ctyp_desc: TypedCoreTypeDesc::Ttyp_poly(vec![], Box::new(typed_core_type.clone())),
+                                            ctyp_desc: TypedCoreTypeDesc::Ttyp_poly(
+                                                vec![],
+                                                Box::new(typed_core_type.clone()),
+                                            ),
                                             ctyp_type: poly_type_ref,
                                             ctyp_env: typed_core_type.ctyp_env,
                                             ctyp_loc: typed_core_type.ctyp_loc.clone(),
@@ -437,7 +468,13 @@ fn type_structure_item<'a>(
                                             ld_attributes: lbl.pld_attributes.clone(),
                                         });
                                     }
-                                    (vec![], crate::types::ConstructorArguments::CstrRecord(internal_labels), TypedConstructorArguments::Cstr_record(typed_labels))
+                                    (
+                                        vec![],
+                                        crate::types::ConstructorArguments::CstrRecord(
+                                            internal_labels,
+                                        ),
+                                        TypedConstructorArguments::Cstr_record(typed_labels),
+                                    )
                                 }
                             };
 
@@ -479,34 +516,46 @@ fn type_structure_item<'a>(
 
                             // Create constructor description for the environment
                             let cstr_arity = cstr_args.len() as i32;
-                            cstr_descs.push((cstr_id, crate::types::ConstructorDescription {
-                                cstr_name: cstr_name_str.to_string(),
-                                cstr_res: res_ty,
-                                cstr_existentials: vec![],
-                                cstr_args,
-                                cstr_arity,
-                                cstr_tag: tag,
-                                cstr_consts: num_consts,
-                                cstr_nonconsts: num_nonconsts,
-                                cstr_generalized: false,
-                                cstr_private: crate::types::PrivateFlag::Public,
-                                cstr_loc: arena.to_location(cstr.pcd_loc),
-                                cstr_attributes: vec![],
-                                cstr_inlined: None,
-                            }));
+                            cstr_descs.push((
+                                cstr_id,
+                                crate::types::ConstructorDescription {
+                                    cstr_name: cstr_name_str.to_string(),
+                                    cstr_res: res_ty,
+                                    cstr_existentials: vec![],
+                                    cstr_args,
+                                    cstr_arity,
+                                    cstr_tag: tag,
+                                    cstr_consts: num_consts,
+                                    cstr_nonconsts: num_nonconsts,
+                                    cstr_generalized: false,
+                                    cstr_private: crate::types::PrivateFlag::Public,
+                                    cstr_loc: arena.to_location(cstr.pcd_loc),
+                                    cstr_attributes: vec![],
+                                    cstr_inlined: None,
+                                },
+                            ));
                         }
 
-                        (crate::types::TypeKind::TypeVariant(internal_cstrs), TypedTypeKind::Ttype_variant(typed_tree_cstrs), cstr_descs)
+                        (
+                            crate::types::TypeKind::TypeVariant(internal_cstrs),
+                            TypedTypeKind::Ttype_variant(typed_tree_cstrs),
+                            cstr_descs,
+                        )
                     }
                     crate::parser::ast::TypeKind::Ptype_record(labels) => {
                         let mut internal_labels: Vec<crate::types::LabelDeclaration> = Vec::new();
                         let mut typed_tree_labels: Vec<TypedLabelDeclaration> = Vec::new();
                         for lbl in labels {
                             let lbl_name_str = arena.get_string(lbl.pld_name.txt);
-                            let (typed_core_type, type_ref) = transl_type(tctx, env, arena.get_core_type(lbl.pld_type))?;
+                            let (typed_core_type, type_ref) =
+                                transl_type(tctx, env, arena.get_core_type(lbl.pld_type))?;
                             let mutable_flag = match lbl.pld_mutable {
-                                crate::parser::ast::MutableFlag::Immutable => crate::types::MutableFlag::Immutable,
-                                crate::parser::ast::MutableFlag::Mutable => crate::types::MutableFlag::Mutable,
+                                crate::parser::ast::MutableFlag::Immutable => {
+                                    crate::types::MutableFlag::Immutable
+                                }
+                                crate::parser::ast::MutableFlag::Mutable => {
+                                    crate::types::MutableFlag::Mutable
+                                }
                             };
                             // OCaml wraps label types in Tpoly for potential generalization
                             let poly_type_ref = ctx.new_poly(type_ref, vec![]);
@@ -520,7 +569,10 @@ fn type_structure_item<'a>(
                             });
                             // OCaml wraps label types in Ttyp_poly for typed tree
                             let poly_typed_core_type = TypedCoreType {
-                                ctyp_desc: TypedCoreTypeDesc::Ttyp_poly(vec![], Box::new(typed_core_type.clone())),
+                                ctyp_desc: TypedCoreTypeDesc::Ttyp_poly(
+                                    vec![],
+                                    Box::new(typed_core_type.clone()),
+                                ),
                                 ctyp_type: poly_type_ref,
                                 ctyp_env: typed_core_type.ctyp_env,
                                 ctyp_loc: typed_core_type.ctyp_loc,
@@ -539,11 +591,20 @@ fn type_structure_item<'a>(
                                 ld_attributes: lbl.pld_attributes.clone(),
                             });
                         }
-                        (crate::types::TypeKind::TypeRecord(internal_labels, crate::types::RecordRepresentation::RecordRegular), TypedTypeKind::Ttype_record(typed_tree_labels), vec![])
+                        (
+                            crate::types::TypeKind::TypeRecord(
+                                internal_labels,
+                                crate::types::RecordRepresentation::RecordRegular,
+                            ),
+                            TypedTypeKind::Ttype_record(typed_tree_labels),
+                            vec![],
+                        )
                     }
-                    crate::parser::ast::TypeKind::Ptype_open => {
-                        (crate::types::TypeKind::TypeOpen, TypedTypeKind::Ttype_open, vec![])
-                    }
+                    crate::parser::ast::TypeKind::Ptype_open => (
+                        crate::types::TypeKind::TypeOpen,
+                        TypedTypeKind::Ttype_open,
+                        vec![],
+                    ),
                 };
 
                 // Create internal type declaration for the environment
@@ -572,8 +633,12 @@ fn type_structure_item<'a>(
 
                 // Convert private flag
                 let typ_private = match decl.ptype_private {
-                    crate::parser::ast::PrivateFlag::Public => crate::parser::ast::PrivateFlag::Public,
-                    crate::parser::ast::PrivateFlag::Private => crate::parser::ast::PrivateFlag::Private,
+                    crate::parser::ast::PrivateFlag::Public => {
+                        crate::parser::ast::PrivateFlag::Public
+                    }
+                    crate::parser::ast::PrivateFlag::Private => {
+                        crate::parser::ast::PrivateFlag::Private
+                    }
                 };
 
                 // Create typed tree type declaration
@@ -673,7 +738,10 @@ fn type_structure_item<'a>(
 
             let desc = StructureItemDesc::Tstr_module(ModuleBinding {
                 mb_id: mod_id,
-                mb_name: Located { txt: mod_name_str.to_string(), loc: mb.pmb_name.loc },
+                mb_name: Located {
+                    txt: mod_name_str.to_string(),
+                    loc: mb.pmb_name.loc,
+                },
                 mb_expr: typed_mod,
                 mb_attributes: mb.pmb_attributes.clone(),
                 mb_loc: mb.pmb_loc,
@@ -692,12 +760,16 @@ fn type_structure_item<'a>(
             // Recursive modules: module rec M = ...
             let mut typed_bindings = Vec::new();
             for mb in mbs.iter() {
-                let typed_mod = type_module_expr(tctx, env, arena, arena.get_mod_expr(mb.pmb_expr))?;
+                let typed_mod =
+                    type_module_expr(tctx, env, arena, arena.get_mod_expr(mb.pmb_expr))?;
                 let mod_name_str = arena.get_string(mb.pmb_name.txt);
                 let mod_id = Ident::create_local(mod_name_str);
                 typed_bindings.push(ModuleBinding {
                     mb_id: mod_id,
-                    mb_name: Located { txt: mod_name_str.to_string(), loc: mb.pmb_name.loc },
+                    mb_name: Located {
+                        txt: mod_name_str.to_string(),
+                        loc: mb.pmb_name.loc,
+                    },
                     mb_expr: typed_mod,
                     mb_attributes: mb.pmb_attributes.clone(),
                     mb_loc: mb.pmb_loc,
@@ -722,7 +794,10 @@ fn type_structure_item<'a>(
 
             let desc = StructureItemDesc::Tstr_modtype(ModuleTypeDeclaration {
                 mtd_id,
-                mtd_name: Located { txt: mtd_name_str.to_string(), loc: mtd.pmtd_name.loc },
+                mtd_name: Located {
+                    txt: mtd_name_str.to_string(),
+                    loc: mtd.pmtd_name.loc,
+                },
                 mtd_type: mtd.pmtd_type.as_ref().map(|_| ModuleType::placeholder()),
                 mtd_attributes: mtd.pmtd_attributes.clone(),
                 mtd_loc: mtd.pmtd_loc,
@@ -739,7 +814,9 @@ fn type_structure_item<'a>(
 
         ParsedStructureItemDesc::Pstr_open(open_desc) => {
             // Open declaration: open M
-            let path = path_from_longident(tctx.resolve_lid(open_desc.popen_lid.txt), |idx| arena.get_string(idx));
+            let path = path_from_longident(tctx.resolve_lid(open_desc.popen_lid.txt), |idx| {
+                arena.get_string(idx)
+            });
 
             let desc = StructureItemDesc::Tstr_open(OpenDeclaration {
                 open_expr: ModuleExpr {
@@ -798,7 +875,7 @@ fn type_structure_item<'a>(
         }
 
         ParsedStructureItemDesc::Pstr_extension(inner) => {
-                    let (ref _ext, ref _attrs) = **inner;
+            let (ref _ext, ref _attrs) = **inner;
             // Extension: [%%id]
             // Extensions are typically handled by preprocessors
             // Return a placeholder eval item

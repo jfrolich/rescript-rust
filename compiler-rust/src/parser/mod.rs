@@ -38,8 +38,6 @@
 pub mod ast;
 #[cfg(test)]
 pub mod benchmark;
-#[cfg(test)]
-pub(crate) mod test_utils;
 pub mod code_frame;
 pub mod comment;
 pub mod comment_table;
@@ -47,25 +45,27 @@ pub mod core;
 pub mod diagnostics;
 pub mod doc;
 pub mod expr;
+pub mod format;
+pub mod formatter;
 pub mod grammar;
+pub mod jsx_ppx;
 pub mod longident;
+pub mod ml_printer;
 pub mod module;
 pub mod parens;
 pub mod parsetree_viewer;
 pub mod pattern;
 pub mod printer;
 pub mod scanner;
-pub mod state;
-pub mod token;
-pub mod typ;
-pub mod utf8;
 pub mod sexp;
 pub mod sexp_locs;
 pub mod sexp_locs0;
-pub mod jsx_ppx;
-pub mod ml_printer;
-pub mod format;
-pub mod formatter;
+pub mod state;
+#[cfg(test)]
+pub(crate) mod test_utils;
+pub mod token;
+pub mod typ;
+pub mod utf8;
 
 // Re-exports
 pub use ast::*;

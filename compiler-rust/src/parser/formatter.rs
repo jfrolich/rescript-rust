@@ -274,17 +274,15 @@ impl<W: Write> Formatter<W> {
                 self.format_stack.pop();
             }
 
-            PpToken::Newline => {
-                match self.format_stack.last() {
-                    None => {
-                        self.pp_output_newline();
-                    }
-                    Some(elem) => {
-                        let width = elem.width;
-                        self.break_line(width);
-                    }
+            PpToken::Newline => match self.format_stack.last() {
+                None => {
+                    self.pp_output_newline();
                 }
-            }
+                Some(elem) => {
+                    let width = elem.width;
+                    self.break_line(width);
+                }
+            },
 
             PpToken::Break { nspaces, offset } => {
                 match self.format_stack.last() {
@@ -726,7 +724,11 @@ mod tests {
         });
         // HV box: if it doesn't fit, ALL breaks become newlines
         let newlines = result.matches('\n').count();
-        assert!(newlines == 0 || newlines == 5, "HV box should be all-or-nothing, got: {:?}", result);
+        assert!(
+            newlines == 0 || newlines == 5,
+            "HV box should be all-or-nothing, got: {:?}",
+            result
+        );
     }
 
     #[test]
