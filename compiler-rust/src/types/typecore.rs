@@ -1171,8 +1171,22 @@ fn transl_type_inner(
             // Object type: {. name: string, age: int }
             // Build proper Tobject(Tfield(..., Tfield(..., Tnil))) type chain
             let mut typed_fields = Vec::new();
-            // Collect (name, field_type) pairs for building the Tfield chain
-            let mut field_entries: Vec<(String, TypeExprRef)> = Vec::new();
+            // Match OCaml Typetexp.transl_fields: collect unique fields in a
+            // hashtable, then iterate in Hashtbl.fold order.
+            let mut field_entries: HashMap<String, TypeExprRef> = HashMap::new();
+            let mut field_insertions: Vec<String> = Vec::new();
+
+            fn add_object_field(
+                field_entries: &mut HashMap<String, TypeExprRef>,
+                field_insertions: &mut Vec<String>,
+                field_name: String,
+                field_type: TypeExprRef,
+            ) {
+                if !field_entries.contains_key(&field_name) {
+                    field_insertions.push(field_name.clone());
+                    field_entries.insert(field_name, field_type);
+                }
+            }
 
             for field in fields.iter() {
                 match field {
@@ -1193,7 +1207,12 @@ fn transl_type_inner(
                         };
 
                         let field_name = tctx.arena.get_string(label.txt).to_string();
-                        field_entries.push((field_name.clone(), poly_ty));
+                        add_object_field(
+                            &mut field_entries,
+                            &mut field_insertions,
+                            field_name.clone(),
+                            poly_ty,
+                        );
 
                         typed_fields.push(crate::types::typedtree::ObjectField {
                             of_desc: crate::types::typedtree::ObjectFieldDesc::OTtag(
@@ -1227,7 +1246,12 @@ fn transl_type_inner(
                                     TypeDesc::Tfield {
                                         name, typ, rest, ..
                                     } => {
-                                        field_entries.push((name.clone(), *typ));
+                                        add_object_field(
+                                            &mut field_entries,
+                                            &mut field_insertions,
+                                            name.clone(),
+                                            *typ,
+                                        );
                                         current_field = *rest;
                                     }
                                     TypeDesc::Tnil => break,
@@ -1252,10 +1276,17 @@ fn transl_type_inner(
                 crate::parser::ast::ClosedFlag::Closed => ctx.new_type(TypeDesc::Tnil),
                 crate::parser::ast::ClosedFlag::Open => ctx.new_var(None),
             };
-            // Sort fields alphabetically to match OCaml's Hashtbl.fold order
-            // (OCaml collects fields into a hash table then folds, producing
-            // hash-bucket order which for small tables with short keys is alphabetical)
-            field_entries.sort_by(|a, b| a.0.cmp(&b.0));
+            let mut ordered_field_names = ocaml_hashtbl_fold_order(&field_insertions);
+            // OCaml transl_fields uses:
+            //   fields = Hashtbl.fold (fun s ty l -> (s, ty) :: l) ...
+            // followed by List.fold_left building Tfield(..., acc).
+            // `ocaml_hashtbl_fold_order` returns traversal order, so reverse it to
+            // match the intermediate Hashtbl.fold list before the left fold.
+            ordered_field_names.reverse();
+            let field_entries = ordered_field_names
+                .into_iter()
+                .filter_map(|name| field_entries.remove(&name).map(|ty| (name, ty)))
+                .collect::<Vec<_>>();
             // Fold fields into Tfield chain
             let fields_ty = field_entries
                 .iter()
