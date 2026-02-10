@@ -102,6 +102,14 @@ struct NamedType {
     has_explicit_type: bool,
 }
 
+/// Warning emitted by JSX transformation, mapped to warning 22 (Preprocessor warning).
+#[derive(Debug, Clone)]
+pub struct JsxPreprocessorWarning {
+    pub start_pos: crate::location::Position,
+    pub end_pos: crate::location::Position,
+    pub message: String,
+}
+
 // ============================================================================
 // Public API
 // ============================================================================
@@ -112,6 +120,16 @@ pub fn transform_structure(
     initial_version: i32,
     arena: &mut ParseArena,
 ) -> Structure {
+    let (structure, _) = transform_structure_with_warnings(structure, initial_version, arena);
+    structure
+}
+
+/// Transform a structure and collect JSX preprocessor warnings.
+pub fn transform_structure_with_warnings(
+    structure: Structure,
+    initial_version: i32,
+    arena: &mut ParseArena,
+) -> (Structure, Vec<JsxPreprocessorWarning>) {
     // Extract file name from first item's location
     let file_name = structure
         .first()
@@ -124,12 +142,13 @@ pub fn transform_structure(
         ..Default::default()
     };
 
+    let mut warnings = vec![];
     let mut result = vec![];
     for item in structure {
-        let items = transform_structure_item_multi(item, &mut config, arena);
+        let items = transform_structure_item_multi(item, &mut config, arena, &mut warnings);
         result.extend(items);
     }
-    result
+    (result, warnings)
 }
 
 /// Transform a signature, applying JSX PPX transformations
@@ -138,6 +157,16 @@ pub fn transform_signature(
     initial_version: i32,
     arena: &mut ParseArena,
 ) -> Signature {
+    let (signature, _) = transform_signature_with_warnings(signature, initial_version, arena);
+    signature
+}
+
+/// Transform a signature and collect JSX preprocessor warnings.
+pub fn transform_signature_with_warnings(
+    signature: Signature,
+    initial_version: i32,
+    arena: &mut ParseArena,
+) -> (Signature, Vec<JsxPreprocessorWarning>) {
     // Extract file name from first item's location
     let file_name = signature
         .first()
@@ -155,7 +184,7 @@ pub fn transform_signature(
         let items = transform_signature_item_multi(item, &mut config, arena);
         result.extend(items);
     }
-    result
+    (result, vec![])
 }
 
 // ============================================================================
@@ -168,6 +197,7 @@ fn transform_structure_item_multi(
     item: StructureItem,
     config: &mut JsxConfig,
     arena: &mut ParseArena,
+    warnings: &mut Vec<JsxPreprocessorWarning>,
 ) -> Vec<StructureItem> {
     // Check for @@jsxConfig attribute
     if let StructureItemDesc::Pstr_attribute(attr) = &*item.pstr_desc {
@@ -185,7 +215,7 @@ fn transform_structure_item_multi(
     // Handle Pstr_value with potential @react.component
     if let StructureItemDesc::Pstr_value(val_inner) = *item.pstr_desc {
         let (rec_flag, bindings) = *val_inner;
-        return transform_value_bindings(rec_flag, bindings, &item.pstr_loc, config, arena);
+        return transform_value_bindings(rec_flag, bindings, &item.pstr_loc, config, arena, warnings);
     }
 
     // Handle Pstr_primitive (external) with potential @react.component
@@ -202,7 +232,7 @@ fn transform_structure_item_multi(
 
     // Handle module definitions (for nested module tracking)
     if let StructureItemDesc::Pstr_module(mb) = *item.pstr_desc {
-        let transformed = transform_module_binding_with_tracking(*mb, config, arena);
+        let transformed = transform_module_binding_with_tracking(*mb, config, arena, warnings);
         return vec![StructureItem {
             pstr_desc: Box::new(StructureItemDesc::Pstr_module(Box::new(transformed))),
             pstr_loc: item.pstr_loc,
@@ -215,6 +245,7 @@ fn transform_structure_item_multi(
             *item.pstr_desc,
             config,
             arena,
+            warnings,
         )),
         pstr_loc: item.pstr_loc,
     }]
@@ -224,13 +255,14 @@ fn transform_module_binding_with_tracking(
     mb: ModuleBinding,
     config: &mut JsxConfig,
     arena: &mut ParseArena,
+    warnings: &mut Vec<JsxPreprocessorWarning>,
 ) -> ModuleBinding {
     // Track nested module name
     let module_name = arena.get_string(mb.pmb_name.txt).to_string();
     config.nested_modules.push(module_name);
     config.has_component = false;
 
-    let transformed = transform_module_binding(mb, config, arena);
+    let transformed = transform_module_binding(mb, config, arena, warnings);
 
     // Pop the module name
     config.nested_modules.pop();
@@ -245,6 +277,7 @@ fn transform_value_bindings(
     loc: &Location,
     config: &mut JsxConfig,
     arena: &mut ParseArena,
+    warnings: &mut Vec<JsxPreprocessorWarning>,
 ) -> Vec<StructureItem> {
     let mut props_types = vec![];
     let mut transformed_bindings = vec![];
@@ -254,7 +287,7 @@ fn transform_value_bindings(
         if has_react_component_attr(arena, &binding.pvb_attributes) {
             // Transform @react.component binding
             let (props_type, transformed, new_binding) =
-                transform_react_component_binding(binding, rec_flag, loc, config, arena);
+                transform_react_component_binding(binding, rec_flag, loc, config, arena, warnings);
 
             if let Some(pt) = props_type {
                 props_types.push(pt);
@@ -360,6 +393,7 @@ fn transform_react_component_binding(
     pstr_loc: &Location,
     config: &mut JsxConfig,
     arena: &mut ParseArena,
+    warnings: &mut Vec<JsxPreprocessorWarning>,
 ) -> (Option<StructureItem>, ValueBinding, Option<ValueBinding>) {
     // Check for multiple components in the same module (OCaml: check_multiple_components)
     if config.has_component {
@@ -402,7 +436,8 @@ fn transform_react_component_binding(
         .collect();
 
     // Extract labeled arguments from the function (use inner expression to handle forwardRef)
-    let (args, newtypes, _) = recursively_extract_named_args(arena, &inner_expr);
+    let (args, newtypes, _, jsx_warnings) = recursively_extract_named_args(arena, &inner_expr);
+    warnings.extend(jsx_warnings);
 
     // Build named type list for props
     let named_type_list: Vec<NamedType> = args
@@ -2633,11 +2668,17 @@ fn empty_loc() -> Location {
 fn recursively_extract_named_args(
     arena: &ParseArena,
     expr: &Expression,
-) -> (Vec<ExtractedArg>, Vec<StringLoc>, Option<CoreType>) {
+) -> (
+    Vec<ExtractedArg>,
+    Vec<StringLoc>,
+    Option<CoreType>,
+    Vec<JsxPreprocessorWarning>,
+) {
     let mut args = vec![];
     let mut newtypes = vec![];
-    extract_args_rec(arena, expr, &mut args, &mut newtypes);
-    (args, newtypes, None)
+    let mut warnings = vec![];
+    extract_args_rec(arena, expr, &mut args, &mut newtypes, &mut warnings);
+    (args, newtypes, None, warnings)
 }
 
 fn extract_args_rec(
@@ -2645,6 +2686,7 @@ fn extract_args_rec(
     expr: &Expression,
     args: &mut Vec<ExtractedArg>,
     newtypes: &mut Vec<StringLoc>,
+    warnings: &mut Vec<JsxPreprocessorWarning>,
 ) {
     match &*expr.pexp_desc {
         ExpressionDesc::Pexp_fun(inner) => {
@@ -2677,12 +2719,20 @@ fn extract_args_rec(
                 if matches!(arg_label, ArgLabel::Nolabel) {
                     // Continue extracting from body even for skipped args (e.g., forwardRef (_, _ref) => ...)
                     let rhs_expr: &Expression = arena.get_expr(*rhs);
-                    extract_args_rec(arena, rhs_expr, args, newtypes);
+                    extract_args_rec(arena, rhs_expr, args, newtypes, warnings);
                     return;
                 }
             }
 
             if is_labelled(arg_label) || is_optional(arg_label) {
+                if let Some(message) = optional_argument_annotation_warning(arena, arg_label, default, lhs_pat) {
+                    let loc = lhs_pat.ppat_loc;
+                    warnings.push(JsxPreprocessorWarning {
+                        start_pos: *arena.loc_start(loc),
+                        end_pos: *arena.loc_end(loc),
+                        message,
+                    });
+                }
                 let alias = get_alias_from_pattern(arena, lhs_pat, arg_label);
                 let type_ = get_type_from_pattern(arena, lhs_pat);
 
@@ -2696,7 +2746,7 @@ fn extract_args_rec(
                 });
 
                 let rhs_expr: &Expression = arena.get_expr(*rhs);
-                extract_args_rec(arena, rhs_expr, args, newtypes);
+                extract_args_rec(arena, rhs_expr, args, newtypes, warnings);
             } else if matches!(arg_label, ArgLabel::Nolabel) {
                 // For forwardRef, capture unlabeled 'ref' or '_ref' argument
                 let alias = get_alias_from_pattern(arena, lhs_pat, arg_label);
@@ -2713,22 +2763,73 @@ fn extract_args_rec(
                 }
                 // Continue extracting from body even for ref
                 let rhs_expr: &Expression = arena.get_expr(*rhs);
-                extract_args_rec(arena, rhs_expr, args, newtypes);
+                extract_args_rec(arena, rhs_expr, args, newtypes, warnings);
             }
         }
         ExpressionDesc::Pexp_newtype(inner) => {
             let (ref name, ref body_idx) = **inner;
             newtypes.push(name.clone());
             let body: &Expression = arena.get_expr(*body_idx);
-            extract_args_rec(arena, body, args, newtypes);
+            extract_args_rec(arena, body, args, newtypes, warnings);
         }
         ExpressionDesc::Pexp_constraint(inner) => {
             let (ref inner_idx, _) = **inner;
             let inner: &Expression = arena.get_expr(*inner_idx);
-            extract_args_rec(arena, inner, args, newtypes);
+            extract_args_rec(arena, inner, args, newtypes, warnings);
         }
         _ => {}
     }
+}
+
+fn optional_argument_annotation_warning(
+    arena: &ParseArena,
+    arg_label: &ArgLabel,
+    default: &Option<ExprIdx>,
+    lhs_pat: &Pattern,
+) -> Option<String> {
+    if !is_optional(arg_label) || default.is_some() {
+        return None;
+    }
+
+    let PatternDesc::Ppat_constraint(inner) = &*lhs_pat.ppat_desc else {
+        return None;
+    };
+
+    let (_, typ_idx) = **inner;
+    let typ = arena.get_core_type(typ_idx);
+
+    match &*typ.ptyp_desc {
+        CoreTypeDesc::Ptyp_constr(inner) if inner.1.len() == 1 => {
+            let last_idx = arena.get_longident(inner.0.txt).last_idx();
+            if arena.get_string(last_idx) == "option" {
+                return None;
+            }
+        }
+        _ => {}
+    }
+
+    let current_type = match &*typ.ptyp_desc {
+        CoreTypeDesc::Ptyp_constr(inner) => {
+            let type_name = arena
+                .get_longident(inner.0.txt)
+                .flatten_idx()
+                .iter()
+                .map(|idx| arena.get_string(*idx))
+                .collect::<Vec<_>>()
+                .join(".");
+            if inner.1.is_empty() {
+                type_name
+            } else {
+                format!("{type_name}(...)")
+            }
+        }
+        _ => "...".to_string(),
+    };
+
+    Some(format!(
+        "React: optional argument annotations must have explicit `option`. Did you mean `option<{}>=?`?",
+        current_type
+    ))
 }
 
 fn get_alias_from_pattern(arena: &ParseArena, pat: &Pattern, label: &ArgLabel) -> String {
@@ -3148,6 +3249,7 @@ fn transform_structure_item_desc(
     desc: StructureItemDesc,
     config: &JsxConfig,
     arena: &mut ParseArena,
+    warnings: &mut Vec<JsxPreprocessorWarning>,
 ) -> StructureItemDesc {
     match desc {
         StructureItemDesc::Pstr_value(inner) => StructureItemDesc::Pstr_value(inner),
@@ -3158,13 +3260,19 @@ fn transform_structure_item_desc(
                 *mb,
                 &mut config_clone,
                 arena,
+                warnings,
             )))
         }
         StructureItemDesc::Pstr_recmodule(mbs) => {
             let mut result = vec![];
             for mb in *mbs {
                 let mut config_clone = config.clone();
-                result.push(transform_module_binding(mb, &mut config_clone, arena));
+                result.push(transform_module_binding(
+                    mb,
+                    &mut config_clone,
+                    arena,
+                    warnings,
+                ));
             }
             StructureItemDesc::Pstr_recmodule(Box::new(result))
         }
@@ -3278,10 +3386,11 @@ fn transform_module_binding(
     mb: ModuleBinding,
     config: &mut JsxConfig,
     arena: &mut ParseArena,
+    warnings: &mut Vec<JsxPreprocessorWarning>,
 ) -> ModuleBinding {
     let pmb_expr = {
         let mexpr_val = arena.get_mod_expr(mb.pmb_expr).clone();
-        let transformed = transform_module_expr(mexpr_val, config, arena);
+        let transformed = transform_module_expr(mexpr_val, config, arena, warnings);
         arena.push_mod_expr(transformed)
     };
     ModuleBinding {
@@ -3297,6 +3406,7 @@ fn transform_structure_with_config(
     structure: Structure,
     config: &mut JsxConfig,
     arena: &mut ParseArena,
+    warnings: &mut Vec<JsxPreprocessorWarning>,
 ) -> Structure {
     // Save and reset has_component (OCaml: config.has_component <- false)
     let old_has_component = config.has_component;
@@ -3304,7 +3414,7 @@ fn transform_structure_with_config(
 
     let mut result = vec![];
     for item in structure {
-        let items = transform_structure_item_multi(item, config, arena);
+        let items = transform_structure_item_multi(item, config, arena, warnings);
         result.extend(items);
     }
 
@@ -3317,19 +3427,20 @@ fn transform_module_expr(
     mexpr: ModuleExpr,
     config: &mut JsxConfig,
     arena: &mut ParseArena,
+    warnings: &mut Vec<JsxPreprocessorWarning>,
 ) -> ModuleExpr {
     ModuleExpr {
         pmod_desc: Box::new(match *mexpr.pmod_desc {
             ModuleExprDesc::Pmod_structure(items) => {
                 // Transform structure with current config (preserving file_name and nested_modules)
                 ModuleExprDesc::Pmod_structure(Box::new(transform_structure_with_config(
-                    *items, config, arena,
+                    *items, config, arena, warnings,
                 )))
             }
             ModuleExprDesc::Pmod_functor(inner) => {
                 let (arg, arg_ty, body) = *inner;
                 let body_expr = arena.get_mod_expr(body).clone();
-                let transformed_body = transform_module_expr(body_expr, config, arena);
+                let transformed_body = transform_module_expr(body_expr, config, arena, warnings);
                 ModuleExprDesc::Pmod_functor(Box::new((
                     arg,
                     arg_ty,
@@ -3339,8 +3450,8 @@ fn transform_module_expr(
             ModuleExprDesc::Pmod_apply(m1, m2) => {
                 let m1_expr = arena.get_mod_expr(m1).clone();
                 let m2_expr = arena.get_mod_expr(m2).clone();
-                let m1_transformed = transform_module_expr(m1_expr, config, arena);
-                let m2_transformed = transform_module_expr(m2_expr, config, arena);
+                let m1_transformed = transform_module_expr(m1_expr, config, arena, warnings);
+                let m2_transformed = transform_module_expr(m2_expr, config, arena, warnings);
                 ModuleExprDesc::Pmod_apply(
                     arena.push_mod_expr(m1_transformed),
                     arena.push_mod_expr(m2_transformed),
@@ -3348,7 +3459,7 @@ fn transform_module_expr(
             }
             ModuleExprDesc::Pmod_constraint(m, mt) => {
                 let m_expr = arena.get_mod_expr(m).clone();
-                let m_transformed = transform_module_expr(m_expr, config, arena);
+                let m_transformed = transform_module_expr(m_expr, config, arena, warnings);
                 ModuleExprDesc::Pmod_constraint(arena.push_mod_expr(m_transformed), mt)
             }
             other => other,
@@ -3612,8 +3723,14 @@ fn transform_expression(
         ExpressionDesc::Pexp_letmodule(inner) => {
             let (name, module_idx, body_idx) = *inner;
             let mut config_clone = config.clone();
+            let mut ignored_warnings = vec![];
             let module_expr = arena.get_mod_expr(module_idx).clone();
-            let transformed_module = transform_module_expr(module_expr, &mut config_clone, arena);
+            let transformed_module = transform_module_expr(
+                module_expr,
+                &mut config_clone,
+                arena,
+                &mut ignored_warnings,
+            );
             let body_expr = arena.get_expr(body_idx).clone();
             let transformed_body = transform_expression(body_expr, config, arena);
             ExpressionDesc::Pexp_letmodule(Box::new((
@@ -3644,8 +3761,14 @@ fn transform_expression(
         }
         ExpressionDesc::Pexp_pack(mexpr) => {
             let mut config_clone = config.clone();
+            let mut ignored_warnings = vec![];
             let mexpr_val = arena.get_mod_expr(mexpr).clone();
-            let transformed = transform_module_expr(mexpr_val, &mut config_clone, arena);
+            let transformed = transform_module_expr(
+                mexpr_val,
+                &mut config_clone,
+                arena,
+                &mut ignored_warnings,
+            );
             ExpressionDesc::Pexp_pack(arena.push_mod_expr(transformed))
         }
         ExpressionDesc::Pexp_open(inner) => {

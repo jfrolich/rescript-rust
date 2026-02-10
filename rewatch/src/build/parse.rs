@@ -493,6 +493,31 @@ fn diagnostics_to_stderr(parser: &Parser<'_>, source: &str, filename: &str) -> S
         .join("")
 }
 
+fn append_jsx_preprocessor_warnings(
+    output: &mut String,
+    source: &str,
+    filename: &str,
+    warnings: &[jsx_ppx::JsxPreprocessorWarning],
+) {
+    for warning in warnings {
+        output.push_str("Warning number 22\n  ");
+        output.push_str(&code_frame::format_location(
+            filename,
+            &warning.start_pos,
+            &warning.end_pos,
+        ));
+        output.push_str("\n\n");
+        output.push_str(&code_frame::print(
+            source,
+            &warning.start_pos,
+            &warning.end_pos,
+        ));
+        output.push_str("\n  ");
+        output.push_str(&warning.message);
+        output.push_str("\n\n");
+    }
+}
+
 fn source_bytes_to_latin1(bytes: &[u8]) -> String {
     bytes.iter().map(|&b| b as char).collect()
 }
@@ -509,6 +534,7 @@ fn generate_ast_with_rust_parser(
         std::fs::read(source_file).with_context(|| format!("Failed to read {}", source_file.display()))?;
     let source = source_bytes_to_latin1(&bytes);
     let mut parser = Parser::new(source_path_for_ast.to_string(), &source);
+    let mut warnings = String::new();
 
     let is_interface = source_file
         .extension()
@@ -529,7 +555,14 @@ fn generate_ast_with_rust_parser(
                 Err(anyhow!(stderr))
             };
         }
-        let signature = jsx_ppx::transform_signature(signature, jsx_version, parser.arena_mut());
+        let (signature, jsx_warnings) =
+            jsx_ppx::transform_signature_with_warnings(signature, jsx_version, parser.arena_mut());
+        append_jsx_preprocessor_warnings(
+            &mut warnings,
+            &source,
+            source_path_for_ast,
+            &jsx_warnings,
+        );
         let signature = let_unwrap_ppx::rewrite_signature(
             &signature,
             parser.arena_mut(),
@@ -559,7 +592,14 @@ fn generate_ast_with_rust_parser(
                 Err(anyhow!(stderr))
             };
         }
-        let structure = jsx_ppx::transform_structure(structure, jsx_version, parser.arena_mut());
+        let (structure, jsx_warnings) =
+            jsx_ppx::transform_structure_with_warnings(structure, jsx_version, parser.arena_mut());
+        append_jsx_preprocessor_warnings(
+            &mut warnings,
+            &source,
+            source_path_for_ast,
+            &jsx_warnings,
+        );
         let structure = let_unwrap_ppx::rewrite_structure(
             &structure,
             parser.arena_mut(),
@@ -577,7 +617,7 @@ fn generate_ast_with_rust_parser(
         .with_context(|| format!("Failed to write {}", ast_output_path.display()))?;
     }
 
-    Ok(None)
+    Ok((!warnings.is_empty()).then_some(warnings))
 }
 
 fn filter_ppx_flags(
