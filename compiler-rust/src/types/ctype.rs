@@ -26,7 +26,7 @@ use super::btype::{iter_type_expr, row_more, row_repr};
 use super::context::TypeContext;
 use super::env::Env;
 use super::path::Path;
-use super::type_expr::{GENERIC_LEVEL, RowDesc, RowField, TypeDesc, TypeExprRef};
+use super::type_expr::{FieldKind, GENERIC_LEVEL, RowDesc, RowField, TypeDesc, TypeExprRef};
 use super::variance::{Variance, VarianceFlag};
 use std::collections::HashSet;
 
@@ -278,11 +278,31 @@ pub fn update_level(ctx: &TypeContext<'_>, level: i32, ty: TypeExprRef) {
 /// Predef types may appear under different paths (e.g., `ref` vs `Pervasives.ref`)
 /// but should be treated as the same type during unification.
 fn is_predef_type_name(name: &str) -> bool {
-    matches!(name,
-        "int" | "char" | "float" | "bool" | "unit" | "exn" | "array" |
-        "list" | "option" | "nativeint" | "int32" | "int64" | "lazy_t" |
-        "bytes" | "string" | "ref" | "result" | "dict" | "promise" |
-        "unknown" | "bigint" | "symbol" | "regexp"
+    matches!(
+        name,
+        "int"
+            | "char"
+            | "float"
+            | "bool"
+            | "unit"
+            | "exn"
+            | "array"
+            | "list"
+            | "option"
+            | "nativeint"
+            | "int32"
+            | "int64"
+            | "lazy_t"
+            | "bytes"
+            | "string"
+            | "ref"
+            | "result"
+            | "dict"
+            | "promise"
+            | "unknown"
+            | "bigint"
+            | "symbol"
+            | "regexp"
     )
 }
 
@@ -299,10 +319,7 @@ fn is_predef_type_name(name: &str) -> bool {
 /// 4. Find type `t` in the resolved module's signature
 ///
 /// Returns the type declaration and caches it in the path store.
-fn find_cmi_file(
-    load_paths: &[std::path::PathBuf],
-    module_name: &str,
-) -> Option<String> {
+fn find_cmi_file(load_paths: &[std::path::PathBuf], module_name: &str) -> Option<String> {
     let cmi_filename = format!("{}.cmi", module_name);
     for dir in load_paths {
         let exact = dir.join(&cmi_filename);
@@ -348,7 +365,8 @@ fn resolve_module_signature_through_cmi<'a>(
             let parent_sig =
                 resolve_module_signature_through_cmi(ctx, load_paths, parent, visiting)?;
             parent_sig.into_iter().find_map(|item| match item {
-                SignatureItem::SigModule(id, md, _) if id.name() == module_name => match md.md_type {
+                SignatureItem::SigModule(id, md, _) if id.name() == module_name => match md.md_type
+                {
                     ModuleType::MtySignature(sig) => Some(sig),
                     ModuleType::MtyAlias(_, alias_path) | ModuleType::MtyIdent(alias_path) => {
                         resolve_module_signature_through_cmi(ctx, load_paths, &alias_path, visiting)
@@ -440,13 +458,8 @@ fn resolve_module_type_through_env_path<'a>(
                     // Mirror OCaml's persistent-module lookup in Env.find_module:
                     // if not found in local env, consult .cmi signatures.
                     let mut cmi_visiting = HashSet::new();
-                    resolve_module_signature_through_cmi(
-                        ctx,
-                        &load_paths,
-                        path,
-                        &mut cmi_visiting,
-                    )
-                    .map(super::decl::ModuleType::MtySignature)
+                    resolve_module_signature_through_cmi(ctx, &load_paths, path, &mut cmi_visiting)
+                        .map(super::decl::ModuleType::MtySignature)
                 }
             }
         }
@@ -648,11 +661,7 @@ pub fn expand_head_once<'a>(
 
 /// Fully expand a type through all aliases until it can't be expanded further.
 /// Like OCaml's expand_head_opt: repeatedly calls try_expand_head until stable.
-pub fn expand_head<'a>(
-    ctx: &'a TypeContext<'a>,
-    env: &Env,
-    ty: TypeExprRef,
-) -> TypeExprRef {
+pub fn expand_head<'a>(ctx: &'a TypeContext<'a>, env: &Env, ty: TypeExprRef) -> TypeExprRef {
     let mut current = ctx.repr(ty);
     // Limit iterations to prevent infinite loops
     for _ in 0..20 {
@@ -668,6 +677,138 @@ pub fn expand_head<'a>(
         }
     }
     current
+}
+
+// ============================================================================
+// Method Filtering (Objects)
+// ============================================================================
+
+fn filter_method_field<'a>(
+    ctx: &'a TypeContext<'a>,
+    env: &Env,
+    method_name: &str,
+    ty: TypeExprRef,
+) -> TypeResult<TypeExprRef> {
+    let ty = expand_head(ctx, env, ty);
+
+    enum FieldAction {
+        FreshField {
+            level: i32,
+        },
+        ExistingField {
+            name: String,
+            kind: FieldKind,
+            typ: TypeExprRef,
+            rest: TypeExprRef,
+        },
+        Error,
+    }
+
+    let action = {
+        let desc = ctx.get_desc(ty);
+        match &*desc {
+            TypeDesc::Tvar(_) => FieldAction::FreshField {
+                level: ctx.get_level(ty),
+            },
+            TypeDesc::Tfield {
+                name,
+                kind,
+                typ,
+                rest,
+            } => FieldAction::ExistingField {
+                name: name.clone(),
+                kind: kind.clone(),
+                typ: *typ,
+                rest: *rest,
+            },
+            _ => FieldAction::Error,
+        }
+    };
+
+    match action {
+        FieldAction::FreshField { level } => {
+            let field_ty = ctx.new_var(None);
+            let rest_ty = ctx.new_var(None);
+            ctx.set_level(field_ty, level);
+            ctx.set_level(rest_ty, level);
+
+            let linked = ctx.new_type(TypeDesc::Tfield {
+                name: method_name.to_string(),
+                kind: FieldKind::Fpresent,
+                typ: field_ty,
+                rest: rest_ty,
+            });
+            ctx.set_level(linked, level);
+            link_type(ctx, ty, linked);
+            Ok(field_ty)
+        }
+        FieldAction::ExistingField {
+            name,
+            kind,
+            typ,
+            rest,
+        } => {
+            let is_absent = matches!(kind, FieldKind::Fabsent);
+            if name == method_name && !is_absent {
+                Ok(typ)
+            } else {
+                filter_method_field(ctx, env, method_name, rest)
+            }
+        }
+        FieldAction::Error => Err(TypeError::Unify(vec![])),
+    }
+}
+
+/// Unify `ty` with an object type that contains method `method_name` and
+/// return the method type.
+///
+/// This mirrors OCaml `Ctype.filter_method` for the public method-send path.
+pub fn filter_method<'a>(
+    ctx: &'a TypeContext<'a>,
+    env: &Env,
+    method_name: &str,
+    ty: TypeExprRef,
+) -> TypeResult<TypeExprRef> {
+    let ty = expand_head(ctx, env, ty);
+
+    enum MethodAction {
+        FreshObject {
+            level: i32,
+        },
+        ExistingObject {
+            fields: TypeExprRef,
+        },
+        Error,
+    }
+
+    let action = {
+        let desc = ctx.get_desc(ty);
+        match &*desc {
+            TypeDesc::Tvar(_) => MethodAction::FreshObject {
+                level: ctx.get_level(ty),
+            },
+            TypeDesc::Tobject { fields, .. } => MethodAction::ExistingObject { fields: *fields },
+            _ => MethodAction::Error,
+        }
+    };
+
+    match action {
+        MethodAction::FreshObject { level } => {
+            let fields_ty = ctx.new_var(None);
+            ctx.set_level(fields_ty, level);
+            let object_ty = ctx.new_type(TypeDesc::Tobject {
+                fields: fields_ty,
+                name: None,
+            });
+            update_level(ctx, level, object_ty);
+            link_type(ctx, ty, object_ty);
+            filter_method_field(ctx, env, method_name, fields_ty)
+        }
+        MethodAction::ExistingObject { fields } => {
+            filter_method_field(ctx, env, method_name, fields)
+        }
+        MethodAction::Error => Err(TypeError::Unify(vec![])),
+    }
 }
 
 /// Substitute type parameters in a type expression.
@@ -695,12 +836,20 @@ fn subst_type(
             // Not a parameter, return as-is
             ty
         }
-        TypeDesc::Tconstr { path, args: inner_args, .. } => {
+        TypeDesc::Tconstr {
+            path,
+            args: inner_args,
+            ..
+        } => {
             let new_args: Vec<TypeExprRef> = inner_args
                 .iter()
                 .map(|a| subst_type(ctx, params, args, *a))
                 .collect();
-            if new_args.iter().zip(inner_args.iter()).all(|(a, b)| *a == *b) {
+            if new_args
+                .iter()
+                .zip(inner_args.iter())
+                .all(|(a, b)| *a == *b)
+            {
                 // No change
                 ty
             } else {
@@ -709,7 +858,9 @@ fn subst_type(
                 ctx.new_constr(path, new_args)
             }
         }
-        TypeDesc::Tarrow { arg, ret, arity, .. } => {
+        TypeDesc::Tarrow {
+            arg, ret, arity, ..
+        } => {
             let new_arg_typ = subst_type(ctx, params, args, arg.typ);
             let new_ret = subst_type(ctx, params, args, *ret);
             if new_arg_typ == arg.typ && new_ret == *ret {
@@ -933,7 +1084,13 @@ fn unify_types<'a>(
             // Propagate arity from t1 to t2 if t2 lacks it
             if need_arity_update {
                 let desc = ctx.get_desc(t2);
-                if let TypeDesc::Tarrow { arg, ret, commutable, .. } = &*desc {
+                if let TypeDesc::Tarrow {
+                    arg,
+                    ret,
+                    commutable,
+                    ..
+                } = &*desc
+                {
                     let new_desc = TypeDesc::Tarrow {
                         arg: arg.clone(),
                         ret: *ret,
@@ -992,7 +1149,11 @@ fn unify_types<'a>(
                 // and locally-defined types where stamp differences arise between
                 // the type declaration and constructor return types
                 if name1 == name2 && args1.len() == args2.len() {
-                    let pairs: Vec<_> = args1.iter().zip(args2.iter()).map(|(&a, &b)| (a, b)).collect();
+                    let pairs: Vec<_> = args1
+                        .iter()
+                        .zip(args2.iter())
+                        .map(|(&a, &b)| (a, b))
+                        .collect();
                     drop(desc1);
                     drop(desc2);
                     for (a, b) in pairs {
@@ -1248,8 +1409,16 @@ fn unify_types<'a>(
             if (is_constr1 || is_constr2) {
                 if let Some(env) = state.env() {
                     // Fully expand both sides through all aliases
-                    let exp1 = if is_constr1 { expand_head(ctx, env, t1) } else { t1 };
-                    let exp2 = if is_constr2 { expand_head(ctx, env, t2) } else { t2 };
+                    let exp1 = if is_constr1 {
+                        expand_head(ctx, env, t1)
+                    } else {
+                        t1
+                    };
+                    let exp2 = if is_constr2 {
+                        expand_head(ctx, env, t2)
+                    } else {
+                        t2
+                    };
                     // Only retry if at least one side actually changed
                     if exp1 != t1 || exp2 != t2 {
                         return unify_after_expansion(ctx, state, t1, exp1, t2, exp2);
@@ -1601,10 +1770,15 @@ pub fn instance(ctx: &TypeContext<'_>, ty: TypeExprRef) -> TypeExprRef {
 /// Instantiate a constructor description, creating fresh type variables for its
 /// result type and argument types while sharing the same variable substitutions.
 /// Matches OCaml's Ctype.instance_constructor.
-pub fn instance_constructor(ctx: &TypeContext<'_>, cstr: &super::ConstructorDescription) -> (Vec<TypeExprRef>, TypeExprRef) {
+pub fn instance_constructor(
+    ctx: &TypeContext<'_>,
+    cstr: &super::ConstructorDescription,
+) -> (Vec<TypeExprRef>, TypeExprRef) {
     let mut cache = std::collections::HashMap::new();
     let ty_res = copy_type_cached(ctx, cstr.cstr_res, &mut cache);
-    let ty_args: Vec<TypeExprRef> = cstr.cstr_args.iter()
+    let ty_args: Vec<TypeExprRef> = cstr
+        .cstr_args
+        .iter()
         .map(|&arg| copy_type_cached(ctx, arg, &mut cache))
         .collect();
     (ty_args, ty_res)
@@ -1614,7 +1788,10 @@ pub fn instance_constructor(ctx: &TypeContext<'_>, cstr: &super::ConstructorDesc
 /// result type (record type) and argument type (field type) while sharing
 /// the same variable substitutions between them.
 /// Handles Tpoly unwrapping like OCaml's instance_label in ctype.ml.
-pub fn instance_label(ctx: &TypeContext<'_>, lbl: &super::LabelDescription) -> (TypeExprRef, TypeExprRef) {
+pub fn instance_label(
+    ctx: &TypeContext<'_>,
+    lbl: &super::LabelDescription,
+) -> (TypeExprRef, TypeExprRef) {
     let mut cache = std::collections::HashMap::new();
     let ty_res = copy_type_deep(ctx, lbl.lbl_res, &mut cache);
     // OCaml's instance_label unwraps Tpoly before copying the field type
@@ -1622,9 +1799,7 @@ pub fn instance_label(ctx: &TypeContext<'_>, lbl: &super::LabelDescription) -> (
     let ty_arg = {
         let desc = ctx.get_desc(arg_repr);
         match &*desc {
-            super::TypeDesc::Tpoly { body, .. } => {
-                copy_type_deep(ctx, *body, &mut cache)
-            }
+            super::TypeDesc::Tpoly { body, .. } => copy_type_deep(ctx, *body, &mut cache),
             _ => copy_type_deep(ctx, lbl.lbl_arg, &mut cache),
         }
     };
@@ -1654,7 +1829,9 @@ pub fn copy_type_deep(
             cache.insert(ty, fresh);
             fresh
         }
-        TypeDesc::Tarrow { arg, ret, arity, .. } => {
+        TypeDesc::Tarrow {
+            arg, ret, arity, ..
+        } => {
             // Create placeholder first to handle cycles
             let placeholder = ctx.new_var(None);
             cache.insert(ty, placeholder);
@@ -1668,21 +1845,30 @@ pub fn copy_type_deep(
             new_ty
         }
         TypeDesc::Ttuple(types) => {
-            let new_types: Vec<_> = types.iter().map(|t| copy_type_deep(ctx, *t, cache)).collect();
+            let new_types: Vec<_> = types
+                .iter()
+                .map(|t| copy_type_deep(ctx, *t, cache))
+                .collect();
             ctx.new_tuple(new_types)
         }
         TypeDesc::Tconstr { path, args, .. } => {
-            let new_args: Vec<_> = args.iter().map(|t| copy_type_deep(ctx, *t, cache)).collect();
+            let new_args: Vec<_> = args
+                .iter()
+                .map(|t| copy_type_deep(ctx, *t, cache))
+                .collect();
             ctx.new_constr(path.clone(), new_args)
         }
         TypeDesc::Tpoly { body, vars } => {
-            let new_vars: Vec<_> = vars.iter().map(|t| copy_type_deep(ctx, *t, cache)).collect();
+            let new_vars: Vec<_> = vars
+                .iter()
+                .map(|t| copy_type_deep(ctx, *t, cache))
+                .collect();
             let new_body = copy_type_deep(ctx, *body, cache);
             ctx.new_poly(new_body, new_vars)
         }
         TypeDesc::Tlink(target) => copy_type_deep(ctx, *target, cache),
         TypeDesc::Tnil | TypeDesc::Tunivar(_) => ty, // Return as-is
-        _ => ty, // For other types, return as-is for now
+        _ => ty,                                     // For other types, return as-is for now
     }
 }
 
@@ -1697,7 +1883,11 @@ pub fn copy_type(ctx: &TypeContext<'_>, ty: TypeExprRef) -> TypeExprRef {
 /// OCaml `Ctype.copy` only duplicates nodes at `generic_level` and returns
 /// non-generic nodes unchanged (`partial = None` case used by `instance`).
 /// For duplicated generic nodes, sharing is preserved across the copied graph.
-fn copy_type_cached(ctx: &TypeContext<'_>, ty: TypeExprRef, cache: &mut std::collections::HashMap<TypeExprRef, TypeExprRef>) -> TypeExprRef {
+fn copy_type_cached(
+    ctx: &TypeContext<'_>,
+    ty: TypeExprRef,
+    cache: &mut std::collections::HashMap<TypeExprRef, TypeExprRef>,
+) -> TypeExprRef {
     let ty = ctx.repr(ty);
 
     // Preserve sharing for already-copied nodes (OCaml Tsubst behavior).
@@ -1886,11 +2076,17 @@ fn copy_type_cached(ctx: &TypeContext<'_>, ty: TypeExprRef, cache: &mut std::col
                     }
                 }
                 CopyAction::Tuple(types) => {
-                    let types_copy: Vec<_> = types.iter().map(|t| copy_type_cached(ctx, *t, cache)).collect();
+                    let types_copy: Vec<_> = types
+                        .iter()
+                        .map(|t| copy_type_cached(ctx, *t, cache))
+                        .collect();
                     TypeDesc::Ttuple(types_copy)
                 }
                 CopyAction::Constr { path, args } => {
-                    let args_copy: Vec<_> = args.iter().map(|t| copy_type_cached(ctx, *t, cache)).collect();
+                    let args_copy: Vec<_> = args
+                        .iter()
+                        .map(|t| copy_type_cached(ctx, *t, cache))
+                        .collect();
                     TypeDesc::Tconstr {
                         path,
                         args: args_copy,
@@ -1902,7 +2098,9 @@ fn copy_type_cached(ctx: &TypeContext<'_>, ty: TypeExprRef, cache: &mut std::col
                     let name_copy = name.map(|(path, args)| {
                         (
                             path,
-                            args.iter().map(|t| copy_type_cached(ctx, *t, cache)).collect(),
+                            args.iter()
+                                .map(|t| copy_type_cached(ctx, *t, cache))
+                                .collect(),
                         )
                     });
                     TypeDesc::Tobject {
@@ -1928,7 +2126,10 @@ fn copy_type_cached(ctx: &TypeContext<'_>, ty: TypeExprRef, cache: &mut std::col
                 CopyAction::Nil => TypeDesc::Tnil,
                 CopyAction::Poly { body, vars } => {
                     let body_copy = copy_type_cached(ctx, body, cache);
-                    let vars_copy: Vec<_> = vars.iter().map(|v| copy_type_cached(ctx, *v, cache)).collect();
+                    let vars_copy: Vec<_> = vars
+                        .iter()
+                        .map(|v| copy_type_cached(ctx, *v, cache))
+                        .collect();
                     TypeDesc::Tpoly {
                         body: body_copy,
                         vars: vars_copy,
@@ -1939,14 +2140,20 @@ fn copy_type_cached(ctx: &TypeContext<'_>, ty: TypeExprRef, cache: &mut std::col
                     TypeDesc::Tvariant(row_copy)
                 }
                 CopyAction::Package { path, lids, args } => {
-                    let args_copy: Vec<_> = args.iter().map(|t| copy_type_cached(ctx, *t, cache)).collect();
+                    let args_copy: Vec<_> = args
+                        .iter()
+                        .map(|t| copy_type_cached(ctx, *t, cache))
+                        .collect();
                     TypeDesc::Tpackage {
                         path,
                         lids,
                         args: args_copy,
                     }
                 }
-                CopyAction::ReturnSelf | CopyAction::NewVar | CopyAction::NewUnivar(_) | CopyAction::Link(_) => unreachable!(),
+                CopyAction::ReturnSelf
+                | CopyAction::NewVar
+                | CopyAction::NewUnivar(_)
+                | CopyAction::Link(_) => unreachable!(),
             };
             ctx.set_desc(placeholder, copied_desc);
             placeholder
@@ -1955,7 +2162,11 @@ fn copy_type_cached(ctx: &TypeContext<'_>, ty: TypeExprRef, cache: &mut std::col
 }
 
 /// Copy a row descriptor.
-fn copy_row_cached(ctx: &TypeContext<'_>, row: &RowDesc, cache: &mut std::collections::HashMap<TypeExprRef, TypeExprRef>) -> RowDesc {
+fn copy_row_cached(
+    ctx: &TypeContext<'_>,
+    row: &RowDesc,
+    cache: &mut std::collections::HashMap<TypeExprRef, TypeExprRef>,
+) -> RowDesc {
     RowDesc {
         row_fields: row
             .row_fields
@@ -1968,14 +2179,21 @@ fn copy_row_cached(ctx: &TypeContext<'_>, row: &RowDesc, cache: &mut std::collec
         row_name: row.row_name.as_ref().map(|(path, types)| {
             (
                 path.clone(),
-                types.iter().map(|t| copy_type_cached(ctx, *t, cache)).collect(),
+                types
+                    .iter()
+                    .map(|t| copy_type_cached(ctx, *t, cache))
+                    .collect(),
             )
         }),
     }
 }
 
 /// Copy a row field.
-fn copy_row_field_cached(ctx: &TypeContext<'_>, field: &RowField, cache: &mut std::collections::HashMap<TypeExprRef, TypeExprRef>) -> RowField {
+fn copy_row_field_cached(
+    ctx: &TypeContext<'_>,
+    field: &RowField,
+    cache: &mut std::collections::HashMap<TypeExprRef, TypeExprRef>,
+) -> RowField {
     match field {
         RowField::Rpresent(Some(ty)) => RowField::Rpresent(Some(copy_type_cached(ctx, *ty, cache))),
         RowField::Rpresent(None) => RowField::Rpresent(None),
@@ -1987,7 +2205,10 @@ fn copy_row_field_cached(ctx: &TypeContext<'_>, field: &RowField, cache: &mut st
             link,
         } => RowField::Reither {
             constant: *constant,
-            types: types.iter().map(|t| copy_type_cached(ctx, *t, cache)).collect(),
+            types: types
+                .iter()
+                .map(|t| copy_type_cached(ctx, *t, cache))
+                .collect(),
             matched: *matched,
             link: *link,
         },
@@ -2029,7 +2250,10 @@ pub fn split_arrow(ctx: &TypeContext<'_>, ty: TypeExprRef) -> Option<(TypeExprRe
 }
 
 /// Extract the argument type, label, and return type from an arrow type.
-pub fn split_arrow_with_label(ctx: &TypeContext<'_>, ty: TypeExprRef) -> Option<(super::ArgLabel, TypeExprRef, TypeExprRef)> {
+pub fn split_arrow_with_label(
+    ctx: &TypeContext<'_>,
+    ty: TypeExprRef,
+) -> Option<(super::ArgLabel, TypeExprRef, TypeExprRef)> {
     let ty = ctx.repr(ty);
     let desc = ctx.get_desc(ty);
     match &*desc {

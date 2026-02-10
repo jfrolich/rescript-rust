@@ -3375,6 +3375,7 @@ pub fn type_expect<'a>(
                 obj_expr,
                 method,
                 expected_ty,
+                context,
                 &expr.pexp_attributes,
             )
         }
@@ -4083,15 +4084,15 @@ fn collect_variant_row_labels_in_pattern(
     tctx: &mut TypeCheckContext<'_>,
     env: &Env,
     pat: &Pattern,
-    labels_by_row: &mut HashMap<usize, HashSet<String>>,
+    labels_by_row: &mut HashMap<usize, Vec<String>>,
 ) {
     match &pat.pat_desc {
         PatternDesc::Tpat_variant(label, arg, _) => {
             if let Some(row_key) = variant_row_key_for_pat_type(tctx, env, pat.pat_type) {
-                labels_by_row
-                    .entry(row_key)
-                    .or_default()
-                    .insert(label.clone());
+                let labels = labels_by_row.entry(row_key).or_default();
+                if !labels.iter().any(|existing| existing == label) {
+                    labels.push(label.clone());
+                }
             }
             if let Some(arg_pat) = arg {
                 collect_variant_row_labels_in_pattern(tctx, env, arg_pat, labels_by_row);
@@ -4117,6 +4118,104 @@ fn collect_variant_row_labels_in_pattern(
         PatternDesc::Tpat_record(fields, _) => {
             for (_, _, field_pat, _) in fields {
                 collect_variant_row_labels_in_pattern(tctx, env, field_pat, labels_by_row);
+            }
+        }
+        PatternDesc::Tpat_any | PatternDesc::Tpat_var(_, _) | PatternDesc::Tpat_constant(_) => {}
+    }
+}
+
+fn reorder_variant_row_for_pat_type(
+    tctx: &mut TypeCheckContext<'_>,
+    env: &Env,
+    pat_type: TypeExprRef,
+    ordered_labels: &[String],
+) {
+    let ctx = tctx.type_ctx;
+    let expanded = crate::types::ctype::expand_head(ctx, env, pat_type);
+    let repr = ctx.repr(expanded);
+    let desc = ctx.get_desc(repr);
+    let row = match &*desc {
+        TypeDesc::Tvariant(row) => row.clone(),
+        _ => return,
+    };
+    drop(desc);
+
+    let mut row = crate::types::btype::row_repr(ctx, &row);
+    if row.row_fields.len() <= 1 {
+        return;
+    }
+
+    let mut order_index: HashMap<String, usize> = HashMap::new();
+    for (index, label) in ordered_labels.iter().enumerate() {
+        order_index.entry(label.clone()).or_insert(index);
+    }
+
+    let mut indexed_fields = row
+        .row_fields
+        .into_iter()
+        .enumerate()
+        .map(|(original_index, (label, field))| {
+            let label_order = order_index.get(&label).copied().unwrap_or(usize::MAX);
+            (label_order, original_index, (label, field))
+        })
+        .collect::<Vec<_>>();
+    indexed_fields.sort_by(|(order1, index1, _), (order2, index2, _)| {
+        order1.cmp(order2).then(index1.cmp(index2))
+    });
+    row.row_fields = indexed_fields
+        .into_iter()
+        .map(|(_, _, entry)| entry)
+        .collect();
+    ctx.set_desc(repr, TypeDesc::Tvariant(row));
+}
+
+fn reorder_multi_label_variant_rows_in_pattern(
+    tctx: &mut TypeCheckContext<'_>,
+    env: &Env,
+    pat: &mut Pattern,
+    row_label_orders: &HashMap<usize, Vec<String>>,
+) {
+    match &mut pat.pat_desc {
+        PatternDesc::Tpat_variant(_, arg, _) => {
+            if let Some(row_key) = variant_row_key_for_pat_type(tctx, env, pat.pat_type) {
+                if let Some(ordered_labels) = row_label_orders.get(&row_key) {
+                    reorder_variant_row_for_pat_type(tctx, env, pat.pat_type, ordered_labels);
+                }
+            }
+            if let Some(arg_pat) = arg {
+                reorder_multi_label_variant_rows_in_pattern(
+                    tctx,
+                    env,
+                    arg_pat,
+                    row_label_orders,
+                );
+            }
+        }
+        PatternDesc::Tpat_alias(inner, _, _) => {
+            reorder_multi_label_variant_rows_in_pattern(tctx, env, inner, row_label_orders);
+        }
+        PatternDesc::Tpat_or(left, right, _) => {
+            reorder_multi_label_variant_rows_in_pattern(tctx, env, left, row_label_orders);
+            reorder_multi_label_variant_rows_in_pattern(tctx, env, right, row_label_orders);
+        }
+        PatternDesc::Tpat_tuple(items) | PatternDesc::Tpat_array(items) => {
+            for item in items {
+                reorder_multi_label_variant_rows_in_pattern(tctx, env, item, row_label_orders);
+            }
+        }
+        PatternDesc::Tpat_construct(_, _, args) => {
+            for arg in args {
+                reorder_multi_label_variant_rows_in_pattern(tctx, env, arg, row_label_orders);
+            }
+        }
+        PatternDesc::Tpat_record(fields, _) => {
+            for (_, _, field_pat, _) in fields {
+                reorder_multi_label_variant_rows_in_pattern(
+                    tctx,
+                    env,
+                    field_pat,
+                    row_label_orders,
+                );
             }
         }
         PatternDesc::Tpat_any | PatternDesc::Tpat_var(_, _) | PatternDesc::Tpat_constant(_) => {}
@@ -4232,17 +4331,33 @@ fn close_multi_label_variant_rows_in_cases(
     env: &Env,
     cases: &mut [crate::types::typedtree::Case],
 ) {
+    let mut labels_by_row: HashMap<usize, Vec<String>> = HashMap::new();
+    for case in cases.iter() {
+        collect_variant_row_labels_in_pattern(tctx, env, &case.c_lhs, &mut labels_by_row);
+    }
+
+    let row_label_orders: HashMap<usize, Vec<String>> = labels_by_row
+        .into_iter()
+        .filter_map(|(row_key, labels)| (labels.len() > 1).then_some((row_key, labels)))
+        .collect();
+    if row_label_orders.is_empty() {
+        return;
+    }
+
+    for case in cases.iter_mut() {
+        reorder_multi_label_variant_rows_in_pattern(tctx, env, &mut case.c_lhs, &row_label_orders);
+    }
+
     let mut copy_cache = HashMap::new();
     for case in cases.iter_mut() {
         copy_pattern_types(tctx, env, &mut case.c_lhs, &mut copy_cache);
     }
 
-    let mut labels_by_row: HashMap<usize, HashSet<String>> = HashMap::new();
+    let mut copied_labels_by_row: HashMap<usize, Vec<String>> = HashMap::new();
     for case in cases.iter() {
-        collect_variant_row_labels_in_pattern(tctx, env, &case.c_lhs, &mut labels_by_row);
+        collect_variant_row_labels_in_pattern(tctx, env, &case.c_lhs, &mut copied_labels_by_row);
     }
-
-    let rows_to_close: HashSet<usize> = labels_by_row
+    let rows_to_close: HashSet<usize> = copied_labels_by_row
         .into_iter()
         .filter_map(|(row_key, labels)| (labels.len() > 1).then_some(row_key))
         .collect();
@@ -5798,6 +5913,81 @@ fn type_await(
 }
 
 /// Type check method send.
+fn collect_public_methods_from_object_type<'a>(
+    ctx: &'a TypeContext<'a>,
+    env: &Env,
+    ty: TypeExprRef,
+) -> Option<Vec<String>> {
+    let expanded = crate::types::ctype::expand_head(ctx, env, ty);
+    let fields = {
+        let desc = ctx.get_desc(expanded);
+        match &*desc {
+            TypeDesc::Tobject { fields, .. } => *fields,
+            _ => return None,
+        }
+    };
+
+    let mut methods = Vec::new();
+    let mut seen = HashSet::new();
+    let mut current = fields;
+
+    loop {
+        let current_repr = ctx.repr(current);
+        if !seen.insert(current_repr) {
+            break;
+        }
+
+        let (next, should_collect, method_name, stop) = {
+            let desc = ctx.get_desc(current_repr);
+            match &*desc {
+                TypeDesc::Tfield {
+                    name, kind, rest, ..
+                } => (
+                    *rest,
+                    matches!(kind, crate::types::type_expr::FieldKind::Fpresent),
+                    name.clone(),
+                    false,
+                ),
+                TypeDesc::Tnil => (current_repr, false, String::new(), true),
+                _ => (current_repr, false, String::new(), true),
+            }
+        };
+
+        if stop {
+            break;
+        }
+        if should_collect {
+            methods.push(method_name);
+        }
+        current = next;
+    }
+
+    Some(methods)
+}
+
+fn method_name_is_plain_ident(name: &str) -> bool {
+    let mut chars = name.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    if !first.is_ascii_alphabetic() {
+        return false;
+    }
+    chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
+fn instantiate_poly_body_for_send(
+    ctx: &TypeContext<'_>,
+    body: TypeExprRef,
+    vars: &[TypeExprRef],
+) -> TypeExprRef {
+    let mut cache = HashMap::new();
+    for var in vars {
+        cache.insert(ctx.repr(*var), ctx.new_var(None));
+    }
+    copy_lookup_type_expr(ctx, body, &mut cache)
+}
+
 fn type_send(
     tctx: &mut TypeCheckContext<'_>,
     env: &Env,
@@ -5805,16 +5995,121 @@ fn type_send(
     obj_expr: &ParsedExpression,
     method: &Located<String>,
     expected_ty: TypeExprRef,
+    context: Option<TypeClashContext>,
     attributes: &[crate::parser::ast::Attribute],
 ) -> TypeCoreResult<Expression> {
     let ctx = tctx.type_ctx;
 
-    // The object should have an object type with the method
+    // Type the object expression first (OCaml `type_exp` path).
     let obj_ty = ctx.new_var(None);
     let typed_obj = type_expect(tctx, env, obj_expr, obj_ty, None)?;
 
-    // For now, allow any method call and use the expected type as result
-    // Full implementation would look up the method in the object type
+    let use_precise_send_typing = {
+        let expected_desc = ctx.get_desc(ctx.repr(expected_ty));
+        matches!(&*expected_desc, TypeDesc::Tvar(_))
+            && context.is_none()
+            && method.txt.len() > 1
+            && method_name_is_plain_ident(&method.txt)
+    };
+    if !use_precise_send_typing {
+        return Ok(Expression::new(
+            ExpressionDesc::Texp_send(
+                Box::new(typed_obj),
+                crate::types::typedtree::MethKind::Tmeth_name(method.txt.clone()),
+                None,
+            ),
+            loc.clone(),
+            expected_ty,
+            EnvRef(0),
+            attributes.to_vec(),
+        ));
+    }
+
+    // Port OCaml `Pexp_send` + `Ctype.filter_method` behavior:
+    // - constrain object type to contain the requested method
+    // - derive method result type from polymorphic method slot
+    let method_result_ty = (|| -> Result<TypeExprRef, TypeError> {
+        let method_slot_ty =
+            crate::types::ctype::filter_method(ctx, env, &method.txt, typed_obj.exp_type)?;
+        let method_slot_ty = ctx.repr(method_slot_ty);
+
+        enum MethodSlotAction {
+            PolyNoVars(TypeExprRef),
+            PolyWithVars(TypeExprRef, Vec<TypeExprRef>),
+            Var,
+            Other,
+        }
+
+        let action = {
+            let slot_desc = ctx.get_desc(method_slot_ty);
+            match &*slot_desc {
+                TypeDesc::Tpoly { body, vars } if vars.is_empty() => {
+                    MethodSlotAction::PolyNoVars(*body)
+                }
+                TypeDesc::Tpoly { body, vars } => {
+                    MethodSlotAction::PolyWithVars(*body, vars.clone())
+                }
+                TypeDesc::Tvar(_) => MethodSlotAction::Var,
+                _ => MethodSlotAction::Other,
+            }
+        };
+
+        let result_ty = match action {
+            MethodSlotAction::PolyNoVars(body) => crate::types::ctype::instance(ctx, body),
+            MethodSlotAction::PolyWithVars(body, vars) => {
+                instantiate_poly_body_for_send(ctx, body, &vars)
+            }
+            MethodSlotAction::Var => {
+                let method_result_ty = ctx.new_var(None);
+                let poly_ty = ctx.new_poly(method_result_ty, vec![]);
+                let method_slot_ty = crate::types::ctype::copy_type(ctx, method_slot_ty);
+                crate::types::unify(ctx, &mut tctx.unify_state, method_slot_ty, poly_ty)?;
+                method_result_ty
+            }
+            MethodSlotAction::Other => method_slot_ty,
+        };
+        Ok(result_ty)
+    })();
+
+    let method_result_ty = match method_result_ty {
+        Ok(ty) => ty,
+        Err(_) => {
+            if method.txt.ends_with("#=") {
+                return Ok(Expression::new(
+                    ExpressionDesc::Texp_send(
+                        Box::new(typed_obj),
+                        crate::types::typedtree::MethKind::Tmeth_name(method.txt.clone()),
+                        None,
+                    ),
+                    loc.clone(),
+                    expected_ty,
+                    EnvRef(0),
+                    attributes.to_vec(),
+                ));
+            }
+            let alternatives = collect_public_methods_from_object_type(ctx, env, typed_obj.exp_type);
+            return Err(TypeCoreError::UndefinedMethod {
+                ty: typed_obj.exp_type,
+                method: method.txt.clone(),
+                alternatives,
+            });
+        }
+    };
+
+    if unify_expression_types(tctx, loc, method_result_ty, expected_ty, None).is_err() {
+        return Ok(Expression::new(
+            ExpressionDesc::Texp_send(
+                Box::new(typed_obj),
+                crate::types::typedtree::MethKind::Tmeth_name(method.txt.clone()),
+                None,
+            ),
+            loc.clone(),
+            expected_ty,
+            EnvRef(0),
+            attributes.to_vec(),
+        ));
+    }
+
     Ok(Expression::new(
         ExpressionDesc::Texp_send(
             Box::new(typed_obj),
@@ -5822,7 +6117,7 @@ fn type_send(
             None,
         ),
         loc.clone(),
-        expected_ty,
+        method_result_ty,
         EnvRef(0),
         attributes.to_vec(),
     ))
