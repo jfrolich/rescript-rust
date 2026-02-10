@@ -2406,6 +2406,11 @@ fn type_pattern_construct(
     let lid_name = tctx.longident_last_name(lid_txt);
     let is_qualified = matches!(lid_txt, Longident::Ldot(..));
     let (cstr_desc, _cstr_path) = if is_qualified {
+        if let Some((path, desc)) =
+            lookup_predef_option_constructor(lid_txt, tctx.arena, env, tctx.type_ctx)
+        {
+            (desc, path)
+        } else {
         // Module-qualified: use direct lookup
         match lookup_constructor_in_module(
             lid_txt,
@@ -2422,6 +2427,7 @@ fn type_pattern_construct(
                 ),
                 Err(_) => return Err(TypeCoreError::NotAVariantType(lid_txt.clone())),
             },
+        }
         }
     } else {
         // Unqualified: use disambiguation with expected type
@@ -3198,6 +3204,132 @@ pub fn type_expect<'a>(
             arity,
             is_async,
         } => {
+            // Match OCaml typecore.ml optional-default rewrite:
+            //   fun ?x:(p=default) -> body
+            // becomes
+            //   fun ?x:*opt* ->
+            //     let[@#default] p =
+            //       match *opt* with Some *sth* -> *sth* | None -> default
+            //     in
+            //     body
+            if arg_label.is_optional() {
+                if let (
+                    Some(default_expr),
+                    crate::parser::ast::PatternDesc::Ppat_var(param_name),
+                ) = (default.as_ref(), &lhs.ppat_desc)
+                {
+                    let default_loc = default_expr.pexp_loc;
+                    let param_lid = find_simple_lident_for_name(rhs, param_name.txt, tctx.arena)
+                        .or_else(|| {
+                            find_simple_lident_for_name(default_expr, param_name.txt, tctx.arena)
+                        });
+
+                    if let Some(param_lid) = param_lid {
+                        let matched_pat = ParsedPattern {
+                            ppat_desc: crate::parser::ast::PatternDesc::Ppat_var(Located {
+                                txt: param_name.txt,
+                                loc: default_loc,
+                            }),
+                            ppat_loc: default_loc,
+                            ppat_attributes: vec![],
+                        };
+
+                        let some_pat = ParsedPattern {
+                            ppat_desc: crate::parser::ast::PatternDesc::Ppat_construct(
+                                Located {
+                                    txt: tctx.arena.some_lid(),
+                                    loc: default_loc,
+                                },
+                                Some(Box::new(matched_pat)),
+                            ),
+                            ppat_loc: default_loc,
+                            ppat_attributes: vec![],
+                        };
+
+                        let none_pat = ParsedPattern {
+                            ppat_desc: crate::parser::ast::PatternDesc::Ppat_construct(
+                                Located {
+                                    txt: tctx.arena.predef_none_lid(),
+                                    loc: default_loc,
+                                },
+                                None,
+                            ),
+                            ppat_loc: default_loc,
+                            ppat_attributes: vec![],
+                        };
+
+                        let some_rhs = ParsedExpression {
+                            pexp_desc: crate::parser::ast::ExpressionDesc::Pexp_ident(Located {
+                                txt: param_lid.txt,
+                                loc: default_loc,
+                            }),
+                            pexp_loc: default_loc,
+                            pexp_attributes: vec![],
+                        };
+
+                        let match_expr = ParsedExpression {
+                            pexp_desc: crate::parser::ast::ExpressionDesc::Pexp_match(
+                                Box::new(ParsedExpression {
+                                    pexp_desc: crate::parser::ast::ExpressionDesc::Pexp_ident(
+                                        Located {
+                                            txt: param_lid.txt,
+                                            loc,
+                                        },
+                                    ),
+                                    pexp_loc: loc,
+                                    pexp_attributes: vec![],
+                                }),
+                                vec![
+                                    crate::parser::ast::Case {
+                                        pc_bar: None,
+                                        pc_lhs: some_pat,
+                                        pc_guard: None,
+                                        pc_rhs: some_rhs,
+                                    },
+                                    crate::parser::ast::Case {
+                                        pc_bar: None,
+                                        pc_lhs: none_pat,
+                                        pc_guard: None,
+                                        pc_rhs: default_expr.as_ref().clone(),
+                                    },
+                                ],
+                            ),
+                            pexp_loc: lhs.ppat_loc,
+                            pexp_attributes: vec![],
+                        };
+
+                        let rewritten_body = ParsedExpression {
+                            pexp_desc: crate::parser::ast::ExpressionDesc::Pexp_let(
+                                RecFlag::Nonrecursive,
+                                vec![crate::parser::ast::ValueBinding {
+                                    pvb_pat: lhs.clone(),
+                                    pvb_expr: match_expr,
+                                    pvb_attributes: vec![],
+                                    pvb_loc: tctx.arena.none_loc(),
+                                }],
+                                rhs.clone(),
+                            ),
+                            pexp_loc: loc,
+                            pexp_attributes: vec![],
+                        };
+
+                        return type_function(
+                            tctx,
+                            env,
+                            loc,
+                            arg_label,
+                            None,
+                            lhs,
+                            &rewritten_body,
+                            *arity,
+                            *is_async,
+                            expected_ty,
+                            &expr.pexp_attributes,
+                        );
+                    }
+                }
+            }
+
             // Function expression
             type_function(
                 tctx,
@@ -3461,6 +3593,100 @@ fn unify_expression_types(
             trace: vec![(ty1, ty2)],
             context,
         }),
+    }
+}
+
+fn find_simple_lident_for_name(
+    expr: &ParsedExpression,
+    name: StrIdx,
+    arena: &ParseArena,
+) -> Option<Located<LidentIdx>> {
+    let target = arena.get_string(name);
+    let lid_matches = |lid: LidentIdx| match arena.get_longident(lid) {
+        Longident::Lident(idx) => arena.get_string(*idx) == target,
+        _ => false,
+    };
+
+    if let crate::parser::ast::ExpressionDesc::Pexp_ident(lid) = &expr.pexp_desc {
+        if lid_matches(lid.txt) {
+            return Some(*lid);
+        }
+    }
+
+    match &expr.pexp_desc {
+        crate::parser::ast::ExpressionDesc::Pexp_let(_, vbs, body) => vbs
+            .iter()
+            .find_map(|vb| find_simple_lident_for_name(&vb.pvb_expr, name, arena))
+            .or_else(|| find_simple_lident_for_name(body, name, arena)),
+        crate::parser::ast::ExpressionDesc::Pexp_fun { default, rhs, .. } => default
+            .as_ref()
+            .and_then(|d| find_simple_lident_for_name(d, name, arena))
+            .or_else(|| find_simple_lident_for_name(rhs, name, arena)),
+        crate::parser::ast::ExpressionDesc::Pexp_apply { funct, args, .. } => {
+            find_simple_lident_for_name(funct, name, arena).or_else(|| {
+                args.iter()
+                    .find_map(|(_, arg)| find_simple_lident_for_name(arg, name, arena))
+            })
+        }
+        crate::parser::ast::ExpressionDesc::Pexp_match(scrutinee, cases)
+        | crate::parser::ast::ExpressionDesc::Pexp_try(scrutinee, cases) => {
+            find_simple_lident_for_name(scrutinee, name, arena).or_else(|| {
+                cases
+                    .iter()
+                    .find_map(|c| find_simple_lident_for_name(&c.pc_rhs, name, arena))
+            })
+        }
+        crate::parser::ast::ExpressionDesc::Pexp_tuple(exprs)
+        | crate::parser::ast::ExpressionDesc::Pexp_array(exprs) => exprs
+            .iter()
+            .find_map(|e| find_simple_lident_for_name(e, name, arena)),
+        crate::parser::ast::ExpressionDesc::Pexp_construct(_, arg)
+        | crate::parser::ast::ExpressionDesc::Pexp_variant(_, arg) => arg
+            .as_ref()
+            .and_then(|e| find_simple_lident_for_name(e, name, arena)),
+        crate::parser::ast::ExpressionDesc::Pexp_record(fields, base) => fields
+            .iter()
+            .find_map(|f| find_simple_lident_for_name(&f.expr, name, arena))
+            .or_else(|| {
+                base.as_ref()
+                    .and_then(|b| find_simple_lident_for_name(b, name, arena))
+            }),
+        crate::parser::ast::ExpressionDesc::Pexp_field(e, _)
+        | crate::parser::ast::ExpressionDesc::Pexp_assert(e)
+        | crate::parser::ast::ExpressionDesc::Pexp_newtype(_, e)
+        | crate::parser::ast::ExpressionDesc::Pexp_open(_, _, e)
+        | crate::parser::ast::ExpressionDesc::Pexp_await(e)
+        | crate::parser::ast::ExpressionDesc::Pexp_send(e, _)
+        | crate::parser::ast::ExpressionDesc::Pexp_constraint(e, _)
+        | crate::parser::ast::ExpressionDesc::Pexp_coerce(e, _, _)
+        | crate::parser::ast::ExpressionDesc::Pexp_letmodule(_, _, e)
+        | crate::parser::ast::ExpressionDesc::Pexp_letexception(_, e) => {
+            find_simple_lident_for_name(e, name, arena)
+        }
+        crate::parser::ast::ExpressionDesc::Pexp_setfield(e1, _, e2)
+        | crate::parser::ast::ExpressionDesc::Pexp_sequence(e1, e2)
+        | crate::parser::ast::ExpressionDesc::Pexp_while(e1, e2) => {
+            find_simple_lident_for_name(e1, name, arena)
+                .or_else(|| find_simple_lident_for_name(e2, name, arena))
+        }
+        crate::parser::ast::ExpressionDesc::Pexp_ifthenelse(cond, then_, else_) => {
+            find_simple_lident_for_name(cond, name, arena)
+                .or_else(|| find_simple_lident_for_name(then_, name, arena))
+                .or_else(|| {
+                    else_.as_ref()
+                        .and_then(|e| find_simple_lident_for_name(e, name, arena))
+                })
+        }
+        crate::parser::ast::ExpressionDesc::Pexp_for(_, start, end, _, body) => {
+            find_simple_lident_for_name(start, name, arena)
+                .or_else(|| find_simple_lident_for_name(end, name, arena))
+                .or_else(|| find_simple_lident_for_name(body, name, arena))
+        }
+        crate::parser::ast::ExpressionDesc::Pexp_ident(_)
+        | crate::parser::ast::ExpressionDesc::Pexp_constant(_)
+        | crate::parser::ast::ExpressionDesc::Pexp_pack(_)
+        | crate::parser::ast::ExpressionDesc::Pexp_extension(_)
+        | crate::parser::ast::ExpressionDesc::Pexp_jsx_element(_) => None,
     }
 }
 
@@ -3857,7 +4083,7 @@ fn type_application(
                     label: apply_arg_label_for_param(&fn_label, &call_label, tctx.arena),
                     expr: arg_expr,
                     expected_ty: effective_arg_ty,
-                    enforce_optional: false,
+                    enforce_optional: fn_label.is_optional() && !call_is_optional,
                 });
                 current_ty = ret_ty;
                 continue;
@@ -3959,10 +4185,27 @@ fn type_application(
                     expected_ty,
                     Some(TypeClashContext::FunctionCall),
                 )?;
-                if enforce_optional {
-                    let option_ty = env.type_option(ctx, ctx.new_var(None));
-                    unify_expression_types(tctx, loc, typed_arg.exp_type, option_ty, None)?;
-                }
+                let typed_arg = if enforce_optional {
+                    let wrapped_loc = typed_arg.exp_loc;
+                    let wrapped_env = typed_arg.exp_env;
+                    let option_ty = env.type_option(ctx, typed_arg.exp_type);
+                    Expression::new(
+                        ExpressionDesc::Texp_construct(
+                            Located {
+                                txt: tctx.arena.some_lid(),
+                                loc: wrapped_loc,
+                            },
+                            make_some_constructor(ctx, option_ty),
+                            vec![typed_arg],
+                        ),
+                        wrapped_loc,
+                        option_ty,
+                        wrapped_env,
+                        vec![],
+                    )
+                } else {
+                    typed_arg
+                };
                 typed_args.push(ApplyArg {
                     label,
                     expression: Some(typed_arg),
@@ -4393,20 +4636,24 @@ fn pattern_contains_generalized_constructor(
             let lid_name = tctx.longident_last_name(&lid_txt);
             let is_qualified = matches!(lid_txt, Longident::Ldot(..));
             let is_generalized = if is_qualified {
-                lookup_constructor_in_module(
-                    &lid_txt,
-                    tctx.arena,
-                    env,
-                    &mut tctx.persistent_env,
-                    tctx.type_ctx,
-                )
-                .map(|(_, desc)| desc.cstr_generalized)
-                .or_else(|| {
-                    env.find_constructor(&lid_name)
-                        .ok()
-                        .map(|desc| desc.cstr_generalized)
-                })
-                .unwrap_or(false)
+                lookup_predef_option_constructor(&lid_txt, tctx.arena, env, tctx.type_ctx)
+                    .map(|(_, desc)| desc.cstr_generalized)
+                    .or_else(|| {
+                        lookup_constructor_in_module(
+                            &lid_txt,
+                            tctx.arena,
+                            env,
+                            &mut tctx.persistent_env,
+                            tctx.type_ctx,
+                        )
+                        .map(|(_, desc)| desc.cstr_generalized)
+                    })
+                    .or_else(|| {
+                        env.find_constructor(&lid_name)
+                            .ok()
+                            .map(|desc| desc.cstr_generalized)
+                    })
+                    .unwrap_or(false)
             } else {
                 env.find_constructor(&lid_name)
                     .map(|desc| desc.cstr_generalized)
@@ -4641,7 +4888,7 @@ fn type_function(
             }
         }
     }
-    let (param_ty, return_ty, _func_ty) = match expected_arrow {
+    let (mut param_ty, return_ty, _func_ty) = match expected_arrow {
         Some((param_ty, return_ty)) => {
             let func_ty = ctx.new_arrow(ctx_label.clone(), param_ty, return_ty, arity_opt);
             (param_ty, return_ty, func_ty)
@@ -4654,6 +4901,13 @@ fn type_function(
             (param_ty, return_ty, func_ty)
         }
     };
+
+    if arg_label.is_optional() && default.is_none() {
+        let tv = ctx.new_var(None);
+        let option_ty = env.type_option(ctx, tv);
+        unify_expression_types(tctx, loc, param_ty, option_ty, None)?;
+        param_ty = option_ty;
+    }
 
     // Type check parameter pattern
     let mut state = PatternState::new();
@@ -4825,6 +5079,11 @@ fn type_construct(
     let lid_name = tctx.longident_last_name(&longident);
     let is_qualified = matches!(longident, Longident::Ldot(..));
     let (_cstr_path, cstr_desc) = if is_qualified {
+        if let Some((path, desc)) =
+            lookup_predef_option_constructor(&longident, tctx.arena, env, tctx.type_ctx)
+        {
+            (path, desc)
+        } else {
         // Module-qualified: use direct lookup
         match lookup_constructor_in_module(
             &longident,
@@ -4841,6 +5100,7 @@ fn type_construct(
                 ),
                 Err(_) => return Err(TypeCoreError::NotAVariantType(longident)),
             },
+        }
         }
     } else {
         // Unqualified: use disambiguation with expected type
@@ -8423,6 +8683,60 @@ fn lookup_constructor_in_module<'b>(
         }
         _ => None,
     }
+}
+
+fn lookup_predef_option_constructor<'b>(
+    lid: &Longident,
+    arena: &ParseArena,
+    env: &Env,
+    ctx: &'b crate::types::context::TypeContext<'b>,
+) -> Option<(Path, crate::types::decl::ConstructorDescription)> {
+    let (prefix, cstr_idx) = match lid {
+        Longident::Ldot(prefix, cstr_idx) => (prefix, cstr_idx),
+        _ => return None,
+    };
+    let module_name = match &**prefix {
+        Longident::Lident(mod_idx) => arena.get_string(*mod_idx),
+        _ => return None,
+    };
+    if module_name != "*predef*" {
+        return None;
+    }
+
+    let cstr_name = arena.get_string(*cstr_idx);
+    let inner_ty = ctx.new_var(None);
+    let option_ty = env.type_option(ctx, inner_ty);
+    let (arity, args, tag) = match cstr_name {
+        "Some" => (
+            1,
+            vec![inner_ty],
+            crate::types::decl::ConstructorTag::CstrBlock(0),
+        ),
+        "None" => (
+            0,
+            vec![],
+            crate::types::decl::ConstructorTag::CstrConstant(0),
+        ),
+        _ => return None,
+    };
+
+    let desc = crate::types::decl::ConstructorDescription {
+        cstr_name: cstr_name.to_string(),
+        cstr_res: option_ty,
+        cstr_existentials: vec![],
+        cstr_args: args,
+        cstr_arity: arity,
+        cstr_tag: tag,
+        cstr_consts: 1,
+        cstr_nonconsts: 1,
+        cstr_generalized: false,
+        cstr_private: crate::types::PrivateFlag::Public,
+        cstr_loc: crate::location::Location::none(),
+        cstr_attributes: vec![],
+        cstr_inlined: None,
+    };
+    let path = Path::pident(Ident::create_persistent(cstr_name));
+    Some((path, desc))
 }
 
 /// Extract the type path from a type expression if it's a concrete type constructor.

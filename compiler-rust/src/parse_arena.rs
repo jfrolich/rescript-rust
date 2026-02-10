@@ -334,6 +334,8 @@ pub struct ParseArena {
     /// Pre-allocated `Lident "None"` for optional field desugaring.
     /// Allocated in `new()`, not `default()`.
     static_none_lid: LidentIdx,
+    /// Pre-allocated `Ldot(Lident "*predef*", "None")` for optional-default rewrites.
+    static_predef_none_lid: LidentIdx,
     /// Pre-allocated `Ldot(Lident "*predef*", "Some")` for optional field desugaring.
     /// Allocated in `new()`, not `default()`.
     static_some_lid: LidentIdx,
@@ -595,9 +597,14 @@ impl Default for ParseArena {
         // Pre-allocate Ast_literal.predef_option = Ldot(Lident "*predef*", "option").
         let predef_str = strings.intern("*predef*");
         let option_str = strings.intern("option");
+        let none_str = strings.intern("None");
         let static_predef_option_lident = longidents.push(Longident::Ldot(
             Box::new(Longident::Lident(predef_str)),
             option_str,
+        ));
+        let static_predef_none_lid = longidents.push(Longident::Ldot(
+            Box::new(Longident::Lident(predef_str)),
+            none_str,
         ));
 
         // Pre-allocate Ast_literal no-loc core type longidents.
@@ -632,6 +639,7 @@ impl Default for ParseArena {
             static_ast_literal_type_float_lident,
             static_placeholder_lid: LidentIdx::default(),
             static_none_lid: LidentIdx::default(),
+            static_predef_none_lid,
             static_some_lid: LidentIdx::default(),
             static_ppx_lidents,
             position_dedup: HashMap::new(),
@@ -720,6 +728,12 @@ impl ParseArena {
     /// Used for optional field desugaring (synthesizing None for missing optional fields).
     pub fn none_lid(&self) -> LidentIdx {
         self.static_none_lid
+    }
+
+    /// Get the pre-allocated Ldot(*predef*, "None") longident index.
+    /// Used for optional-default rewrites where constructors must resolve to option.
+    pub fn predef_none_lid(&self) -> LidentIdx {
+        self.static_predef_none_lid
     }
 
     /// Get the pre-allocated Ldot(*predef*, "Some") longident index.
