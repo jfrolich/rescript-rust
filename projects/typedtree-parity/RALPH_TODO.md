@@ -71,7 +71,7 @@ The `-dtyped-sexp` flag outputs the typed tree without locations. The `-dtyped-s
 
 ## Current Status
 
-**Last Updated:** 2026-02-09
+**Last Updated:** 2026-02-10
 
 |  | Status |
 |--|--------|
@@ -79,9 +79,10 @@ The `-dtyped-sexp` flag outputs the typed tree without locations. The `-dtyped-s
 | Rust compiles | 657/657 |
 | Parity match (-dtyped-sexp-locs) | 387/657 (58.9%) |
 
-**Task Progress:** 73/73 complete
+**Task Progress:** 74/74 complete
 
 **Task Checklist:**
+- [x] Match OCaml `Ctype.nondep_type_rec` let-module dependency removal shape in Rust `typecore::type_letmodule`: switch local-path expansion from full `expand_head` to one-step expansion (OCaml `expand_abbrev` behavior), and when one-step expansion is unavailable, rewrite local module roots through the resolved alias root before falling back to fresh vars (`MS.t` -> `Belt_MapString.t`). Added `ctype::expand_head_once` and kept scoping fallback for genuinely non-eliminable locals. Also aligned `typemod::lookup_module_type_from_unpack_expr` with OCaml `Pmod_unpack` by deriving semantic module types from typed package payloads instead of parsed packed-module peeking. Deterministic full run (`timeout 300 ./scripts/test_typedtree_parity.sh --with-locs --no-build --parallel 1`): `Rust bsc` 657 -> 657 (failures 0 -> 0), `Parity` 387 -> 387 (diffs 270 -> 270). `Import.res` drift narrowed from 15 hunks to 2 hunks in direct diff.
 - [x] Match OCaml `Ctype.nondep_type` manifest-first dependency removal behavior for let-module-local type paths in Rust `typecore::type_letmodule`: update `replace_letmodule_local_paths` to call `ctype::expand_head` in the let-module body environment for module-rooted `Tconstr` nodes before abstracting to fresh vars, and recurse over expanded aliases so manifest-backed paths (for example `M3.t`) stop collapsing prematurely to `Tvar None`. This narrows the `Import.res` drift substantially (13 hunks remaining vs 38 before) while preserving full Rust compile coverage. Deterministic full run (`timeout 300 ./scripts/test_typedtree_parity.sh --with-locs --no-build --parallel 1`): `Rust bsc` 657 -> 657 (failures 0 -> 0), `Parity` 387 -> 387 (diffs 270 -> 270).
 - [x] Match OCaml `ast_derive_js_mapper.ml` polyvariant `@deriving({jsConverter: newType})` behavior in Rust, and drop the non-OCaml abstract-variant manifest fallback that masked this mismatch. In `compiler-rust/src/types/typemod.rs`, remove the `Ptype_abstract` + `Ptyp_variant` branch that rewrote typed manifests to `Tvar None` (OCaml keeps the translated variant type). In `compiler-rust/src/binary_ast/ppx.rs`, port OCaml’s polyvariant `newType` path: wrap generated `FromJs` bodies with `Primitive_util.raiseWhenNotFound`, emit the generated `abs_<name>` type in signatures, and use `abs_<name>` converter signatures (`xToJs: x => abs_x`, `xFromJs: abs_x => x`) instead of the non-OCaml `string => option<x>` fallback. Deterministic full run (`timeout 300 ./scripts/test_typedtree_parity.sh --with-locs --no-build --parallel 1`): `Rust bsc` 657 -> 657 (failures 0 -> 0), `Parity` 384 -> 387 (diffs 273 -> 270).
 - [x] Match OCaml `typecore.ml` `update_uncurried_arity` result-shaping behavior in Rust `typecore::type_application`: preserve the originating function arity and re-annotate the returned arrow after argument consumption (`remaining_arity = original_arity - consumed`) so partial uncurried applications keep OCaml-aligned nested `Tarrow ... (Some 1)` instead of dropping to `None`. This fixes the `PartialApplicationNoRuntimeCurry.res` typedtree drift and improves deterministic full-run parity without regressing compile coverage. Deterministic full run (`timeout 300 ./scripts/test_typedtree_parity.sh --with-locs --no-build --parallel 1`): `Rust bsc` 657 -> 657 (failures 0 -> 0), `Parity` 379 -> 384 (diffs 278 -> 273).

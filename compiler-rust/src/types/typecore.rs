@@ -5625,6 +5625,75 @@ fn type_letmodule(
         }
     }
 
+    fn replace_module_root_path(path: &Path, module_id: &Ident, alias_root: &Path) -> Path {
+        match path {
+            Path::Pident(id) => {
+                if id.same(module_id) || id.name() == module_id.name() {
+                    alias_root.clone()
+                } else {
+                    path.clone()
+                }
+            }
+            Path::Pdot(prefix, name, _) => {
+                let rewritten_prefix = replace_module_root_path(prefix, module_id, alias_root);
+                if rewritten_prefix == **prefix {
+                    path.clone()
+                } else {
+                    Path::pdot(rewritten_prefix, name.clone())
+                }
+            }
+            Path::Papply(_, _) => path.clone(),
+        }
+    }
+
+    fn resolve_alias_root_from_module_type(
+        env: &Env,
+        mty: &crate::types::decl::ModuleType,
+        visited: &mut HashSet<String>,
+    ) -> Option<Path> {
+        use crate::types::decl::ModuleType as DeclMty;
+
+        match mty {
+            DeclMty::MtyAlias(_, alias_path) => Some(alias_path.clone()),
+            DeclMty::MtyIdent(path) => match path {
+                Path::Pident(id) => {
+                    let name = id.name().to_string();
+                    if !visited.insert(name.clone()) {
+                        return None;
+                    }
+
+                    if let Ok(mtd) = env.find_modtype(&name) {
+                        if let Some(inner_mty) = &mtd.mtd_type {
+                            if let Some(alias_root) =
+                                resolve_alias_root_from_module_type(env, inner_mty, visited)
+                            {
+                                return Some(alias_root);
+                            }
+                        }
+                    }
+
+                    if let Ok(md) = env.find_module(&name) {
+                        if let Some(alias_root) =
+                            resolve_alias_root_from_module_type(env, &md.md_type, visited)
+                        {
+                            return Some(alias_root);
+                        }
+                    }
+
+                    None
+                }
+                _ => Some(path.clone()),
+            },
+            _ => None,
+        }
+    }
+
+    fn resolve_letmodule_alias_root(env: &Env, module_id: &Ident) -> Option<Path> {
+        let md = env.find_module(module_id.name()).ok()?;
+        let mut visited = HashSet::new();
+        resolve_alias_root_from_module_type(env, &md.md_type, &mut visited)
+    }
+
     fn replace_letmodule_local_paths<'a>(
         ctx: &'a TypeContext<'a>,
         env: &Env,
@@ -5638,29 +5707,49 @@ fn type_letmodule(
             return;
         }
 
-        let local_path = match &*ctx.get_desc(ty) {
-            TypeDesc::Tconstr { path, .. } if path_root_is_module(path, module_id) => {
-                Some(path.clone())
+        let local_constr = match &*ctx.get_desc(ty) {
+            TypeDesc::Tconstr { path, args, .. } if path_root_is_module(path, module_id) => {
+                Some((path.clone(), args.clone()))
             }
             _ => None,
         };
 
-        if let Some(local_path) = local_path {
+        if let Some((local_path, local_args)) = local_constr {
             // Match OCaml `Ctype.nondep_type`: for local module-rooted paths,
-            // first try to remove the dependency via manifest expansion.
-            let expanded = crate::types::ctype::expand_head(ctx, env, ty);
-            let expanded = ctx.repr(expanded);
-            if expanded != ty {
-                crate::types::link_type(ctx, ty, expanded);
-                replace_letmodule_local_paths(
-                    ctx,
-                    env,
-                    expanded,
-                    module_id,
-                    replacements,
-                    seen,
-                );
-                return;
+            // first try one-step abbreviation expansion.
+            if let Some(expanded) = crate::types::ctype::expand_head_once(ctx, env, ty) {
+                let expanded = ctx.repr(expanded);
+                if expanded != ty {
+                    crate::types::link_type(ctx, ty, expanded);
+                    replace_letmodule_local_paths(
+                        ctx,
+                        env,
+                        expanded,
+                        module_id,
+                        replacements,
+                        seen,
+                    );
+                    return;
+                }
+            }
+
+            // If expansion is unavailable, try replacing the local root module
+            // with its underlying alias root path (`MS.t` -> `Belt_MapString.t`).
+            if let Some(alias_root) = resolve_letmodule_alias_root(env, module_id) {
+                let rewritten_path = replace_module_root_path(&local_path, module_id, &alias_root);
+                if rewritten_path != local_path {
+                    let rewritten_ty = ctx.new_constr(rewritten_path, local_args);
+                    crate::types::link_type(ctx, ty, rewritten_ty);
+                    replace_letmodule_local_paths(
+                        ctx,
+                        env,
+                        rewritten_ty,
+                        module_id,
+                        replacements,
+                        seen,
+                    );
+                    return;
+                }
             }
 
             // If no manifest expansion is available, keep the existing fallback:

@@ -1875,12 +1875,10 @@ fn lookup_module_type_from_unpack_expr<'a>(
     arena: &'a ParseArena,
     expr: &crate::parser::ast::Expression,
 ) -> Option<crate::types::decl::ModuleType> {
-    if let Some(packed_module) = find_packed_module_expr(expr) {
-        return lookup_module_type_from_parsed_module_expr(tctx, env, arena, packed_module);
-    }
-
     // Match OCaml Pmod_unpack typing: inspect the unpack payload type and
     // derive the semantic module type from its package path + constraints.
+    // OCaml does this from the typed package expression, not by peeking at
+    // the packed parsed module expression.
     let typed_expr = type_expression(tctx, env, expr).ok()?;
     let expanded = crate::types::ctype::expand_head(tctx.type_ctx, env, typed_expr.exp_type);
     let package_info = {
