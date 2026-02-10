@@ -1684,7 +1684,7 @@ fn type_pattern_inner(
             // Build the as-type
             let ty_var = match override_type_from_variant_spread {
                 Some(ty) => ty,
-                None => build_as_type(ctx, env, &typed_inner)?,
+                None => build_as_type(tctx, env, &typed_inner)?,
             };
 
             // Enter the variable with the as-type
@@ -2247,15 +2247,39 @@ fn copy_case_type(
 }
 
 /// Build the type for an as-pattern.
-fn build_as_type(ctx: &TypeContext<'_>, _env: &Env, pat: &Pattern) -> TypeCoreResult<TypeExprRef> {
+fn build_as_type(
+    tctx: &mut TypeCheckContext<'_>,
+    env: &Env,
+    pat: &Pattern,
+) -> TypeCoreResult<TypeExprRef> {
+    let ctx = tctx.type_ctx;
     match &pat.pat_desc {
-        PatternDesc::Tpat_alias(inner, _, _) => build_as_type(ctx, _env, inner),
+        PatternDesc::Tpat_alias(inner, _, _) => build_as_type(tctx, env, inner),
         PatternDesc::Tpat_tuple(pats) => {
             let tys: Vec<_> = pats
                 .iter()
-                .map(|p| build_as_type(ctx, _env, p))
+                .map(|p| build_as_type(tctx, env, p))
                 .collect::<TypeCoreResult<_>>()?;
             Ok(ctx.new_tuple(tys))
+        }
+        PatternDesc::Tpat_construct(_, cstr, args) => {
+            let keep = cstr.cstr_private == crate::types::PrivateFlag::Private
+                || !cstr.cstr_existentials.is_empty();
+            if keep {
+                Ok(pat.pat_type)
+            } else {
+                let arg_as_tys: Vec<_> = args
+                    .iter()
+                    .map(|arg| build_as_type(tctx, env, arg))
+                    .collect::<TypeCoreResult<_>>()?;
+                let (inst_arg_tys, ty_res) = crate::types::instance_constructor(ctx, cstr);
+                for ((arg_pat, arg_as_ty), inst_arg_ty) in
+                    args.iter().zip(arg_as_tys.iter()).zip(inst_arg_tys.iter())
+                {
+                    unify_pattern_types(tctx, arg_pat.pat_loc, *arg_as_ty, *inst_arg_ty)?;
+                }
+                Ok(ty_res)
+            }
         }
         _ => Ok(pat.pat_type),
     }

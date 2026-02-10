@@ -105,6 +105,69 @@ fn has_obj_attr(attrs: &[Attribute], arena: &ParseArena) -> bool {
     })
 }
 
+/// Check if attributes contain @let.unwrap.
+fn has_unwrap_attr(attrs: &[Attribute], arena: &ParseArena) -> bool {
+    attrs
+        .iter()
+        .any(|(attr_name, _)| arena.get_string(attr_name.txt) == "let.unwrap")
+}
+
+/// Conservative variable extraction used by OCaml's Ast_pat helper.
+fn single_var_pattern_name_conservative(pat: &Pattern, arena: &ParseArena) -> Option<String> {
+    match &pat.ppat_desc {
+        PatternDesc::Ppat_any => Some(String::new()),
+        PatternDesc::Ppat_var(name) => Some(arena.get_string(name.txt).to_string()),
+        PatternDesc::Ppat_alias(inner, alias_name) => {
+            if single_var_pattern_name_conservative(inner, arena).is_some() {
+                Some(arena.get_string(alias_name.txt).to_string())
+            } else {
+                None
+            }
+        }
+        PatternDesc::Ppat_constraint(inner, _) => single_var_pattern_name_conservative(inner, arena),
+        _ => None,
+    }
+}
+
+#[derive(Clone, Copy)]
+enum LetUnwrapVariant {
+    ResultOk,
+    ResultError,
+    OptionSome,
+    OptionNone,
+}
+
+/// Classify supported let.unwrap binding patterns:
+/// `Ok(_)`, `Error(_)`, `Some(_)`, `None`.
+fn classify_let_unwrap_pattern(
+    pat: &Pattern,
+    arena: &ParseArena,
+) -> Option<(LetUnwrapVariant, String)> {
+    let PatternDesc::Ppat_construct(ctor_lid, payload) = &pat.ppat_desc else {
+        return None;
+    };
+    let Longident::Lident(ctor_name_idx) = arena.get_longident(ctor_lid.txt) else {
+        return None;
+    };
+    let ctor_name = arena.get_string(*ctor_name_idx);
+
+    let variant = match (ctor_name, payload.is_some()) {
+        ("Ok", true) => LetUnwrapVariant::ResultOk,
+        ("Error", true) => LetUnwrapVariant::ResultError,
+        ("Some", true) => LetUnwrapVariant::OptionSome,
+        ("None", false) => LetUnwrapVariant::OptionNone,
+        _ => return None,
+    };
+
+    let var_name = payload
+        .as_ref()
+        .and_then(|inner| single_var_pattern_name_conservative(inner, arena))
+        .filter(|name| !name.is_empty())
+        .unwrap_or_else(|| "x".to_string());
+
+    Some((variant, var_name))
+}
+
 /// Result of classifying a JavaScript expression.
 /// This mirrors OCaml's `Js_raw_info.exp` type.
 #[derive(Debug, Clone, PartialEq)]
@@ -4804,6 +4867,87 @@ fn rewrite_expression_generic(expr: &Expression, arena: &mut ParseArena) -> Expr
             //   match expr with {field1, field2} -> body
             if *rec_flag == RecFlag::Nonrecursive && bindings.len() == 1 {
                 let vb = &bindings[0];
+                if has_unwrap_attr(&vb.pvb_attributes, arena) {
+                    // OCaml bs_builtin_ppx: rewrite supported let? forms into a match with
+                    // an early-return case and a continuation case.
+                    if !matches!(&vb.pvb_expr.pexp_desc, ExpressionDesc::Pexp_pack(_)) {
+                        if let Some((variant, var_name)) = classify_let_unwrap_pattern(&vb.pvb_pat, arena)
+                        {
+                            let loc = arena.mk_ghost_loc(vb.pvb_pat.ppat_loc);
+                            let var_name_idx = arena.intern(&var_name);
+                            let var_lid = arena.push_lident_from_idx(var_name_idx);
+
+                            let (early_ctor_name, early_ctor_payload) = match variant {
+                                LetUnwrapVariant::ResultOk => ("Error", true),
+                                LetUnwrapVariant::ResultError => ("Ok", true),
+                                LetUnwrapVariant::OptionSome => ("None", false),
+                                LetUnwrapVariant::OptionNone => ("Some", true),
+                            };
+                            let early_ctor_idx = arena.intern(early_ctor_name);
+                            let early_ctor_lid = arena.push_lident_from_idx(early_ctor_idx);
+                            let early_ctor_pat = Pattern {
+                                ppat_desc: PatternDesc::Ppat_construct(
+                                    Located {
+                                        txt: early_ctor_lid,
+                                        loc,
+                                    },
+                                    if early_ctor_payload {
+                                        Some(Box::new(Pattern {
+                                            ppat_desc: PatternDesc::Ppat_any,
+                                            ppat_loc: loc,
+                                            ppat_attributes: vec![],
+                                        }))
+                                    } else {
+                                        None
+                                    },
+                                ),
+                                ppat_loc: loc,
+                                ppat_attributes: vec![],
+                            };
+                            let early_case = Case {
+                                pc_bar: None,
+                                pc_lhs: Pattern {
+                                    ppat_desc: PatternDesc::Ppat_alias(
+                                        Box::new(early_ctor_pat),
+                                        Located {
+                                            txt: var_name_idx,
+                                            loc,
+                                        },
+                                    ),
+                                    ppat_loc: arena.none_loc(),
+                                    ppat_attributes: vec![],
+                                },
+                                pc_guard: None,
+                                pc_rhs: Expression {
+                                    pexp_desc: ExpressionDesc::Pexp_ident(Located {
+                                        txt: var_lid,
+                                        loc,
+                                    }),
+                                    pexp_loc: loc,
+                                    pexp_attributes: vec![],
+                                },
+                            };
+                            let cont_case = Case {
+                                pc_bar: None,
+                                pc_lhs: vb.pvb_pat.clone(),
+                                pc_guard: None,
+                                pc_rhs: (*body.clone()),
+                            };
+
+                            let mut attrs = expr.pexp_attributes.clone();
+                            attrs.extend(vb.pvb_attributes.iter().cloned());
+                            let rewritten = Expression {
+                                pexp_desc: ExpressionDesc::Pexp_match(
+                                    Box::new(vb.pvb_expr.clone()),
+                                    vec![early_case, cont_case],
+                                ),
+                                pexp_loc: expr.pexp_loc,
+                                pexp_attributes: attrs,
+                            };
+                            return rewrite_expression_generic(&rewritten, arena);
+                        }
+                    }
+                }
                 let is_record_pat = match &vb.pvb_pat.ppat_desc {
                     PatternDesc::Ppat_record(..) => true,
                     PatternDesc::Ppat_alias(inner, _) => {
