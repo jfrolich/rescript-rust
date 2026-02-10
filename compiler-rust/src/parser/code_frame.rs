@@ -5,6 +5,7 @@
 //! OCaml implementation in `compiler/ml/code_frame.ml`.
 
 use crate::location::Position;
+use std::io::IsTerminal;
 
 /// Count the number of digits in a number.
 fn digits_count(n: i32) -> usize {
@@ -95,12 +96,72 @@ enum Gutter {
 /// A highlighted portion of a line.
 struct HighlightedString {
     s: String,
+    start: usize,
+    end: usize,
 }
 
 /// A line with gutter and content.
 struct Line {
     gutter: Gutter,
     content: Vec<HighlightedString>,
+}
+
+#[derive(Clone, Copy)]
+enum Emphasis {
+    Error,
+    Warning,
+}
+
+const ANSI_DIM: &str = "\x1b[2m";
+const ANSI_ERR: &str = "\x1b[1;31m";
+const ANSI_WARN: &str = "\x1b[1;33m";
+const ANSI_RESET: &str = "\x1b[0m";
+
+fn should_enable_color() -> bool {
+    let term = std::env::var("TERM").unwrap_or_default();
+    term != "dumb" && !term.is_empty() && std::io::stderr().is_terminal()
+}
+
+fn emphasis_ansi(emphasis: Emphasis) -> &'static str {
+    match emphasis {
+        Emphasis::Error => ANSI_ERR,
+        Emphasis::Warning => ANSI_WARN,
+    }
+}
+
+fn char_to_byte_idx(s: &str, char_idx: usize) -> usize {
+    if char_idx == 0 {
+        return 0;
+    }
+    s.char_indices()
+        .nth(char_idx)
+        .map(|(idx, _)| idx)
+        .unwrap_or(s.len())
+}
+
+fn append_highlighted_segment(
+    buf: &mut String,
+    segment: &HighlightedString,
+    use_color: bool,
+    emphasis: Emphasis,
+) {
+    let segment_len = segment.s.chars().count();
+    let start_char = segment.start.min(segment_len);
+    let end_char = segment.end.min(segment_len);
+
+    if !use_color || end_char <= start_char {
+        buf.push_str(&segment.s);
+        return;
+    }
+
+    let start_byte = char_to_byte_idx(&segment.s, start_char);
+    let end_byte = char_to_byte_idx(&segment.s, end_char);
+
+    buf.push_str(&segment.s[..start_byte]);
+    buf.push_str(emphasis_ansi(emphasis));
+    buf.push_str(&segment.s[start_byte..end_byte]);
+    buf.push_str(ANSI_RESET);
+    buf.push_str(&segment.s[end_byte..]);
 }
 
 /// Print a code frame with source context around an error.
@@ -111,9 +172,19 @@ struct Line {
 /// - Highlighting of the error region (when colors enabled)
 /// - Elision of middle lines for large error spans
 pub fn print(src: &str, start_pos: &Position, end_pos: &Position) -> String {
+    print_impl(src, start_pos, end_pos, Emphasis::Error)
+}
+
+/// Print a code frame with warning highlighting.
+pub fn print_warning(src: &str, start_pos: &Position, end_pos: &Position) -> String {
+    print_impl(src, start_pos, end_pos, Emphasis::Warning)
+}
+
+fn print_impl(src: &str, start_pos: &Position, end_pos: &Position, emphasis: Emphasis) -> String {
     let indent = 2;
     let highlight_line_start = start_pos.line;
     let highlight_line_end = end_pos.line;
+    let use_color = should_enable_color();
 
     let (start_offset, first_shown_line) = seek_2_lines_before(src, start_pos);
     let (end_offset, last_shown_line) = seek_2_lines_after(src, end_pos);
@@ -186,13 +257,55 @@ pub fn print(src: &str, start_pos: &Position, end_pos: &Position) -> String {
 
             let content: Vec<HighlightedString> = chunks
                 .iter()
-                .map(|chunk| match gutter {
+                .enumerate()
+                .map(|(chunk_idx, chunk)| match gutter {
                     Gutter::Elided => HighlightedString {
                         s: chunk.to_string(),
+                        start: 0,
+                        end: 0,
                     },
-                    Gutter::Number(_) => HighlightedString {
-                        s: chunk.to_string(),
-                    },
+                    Gutter::Number(line_number) => {
+                        // Keep this policy aligned with compiler/ml/code_frame.ml.
+                        let highlight_line_start_offset =
+                            start_pos.cnum.saturating_sub(start_pos.bol) as isize;
+                        let highlight_line_end_offset =
+                            end_pos.cnum.saturating_sub(end_pos.bol) as isize;
+                        let leading_cut = leading_space_to_cut as isize;
+                        let chunk_len = chunk.chars().count() as isize;
+
+                        let start = if chunk_idx == 0 && *line_number == highlight_line_start {
+                            highlight_line_start_offset - leading_cut
+                        } else {
+                            0
+                        };
+
+                        let end = if *line_number < highlight_line_start {
+                            0
+                        } else if *line_number == highlight_line_start
+                            && *line_number == highlight_line_end
+                        {
+                            highlight_line_end_offset - leading_cut
+                        } else if *line_number == highlight_line_start {
+                            chunk_len
+                        } else if *line_number > highlight_line_start
+                            && *line_number < highlight_line_end
+                        {
+                            chunk_len
+                        } else if *line_number == highlight_line_end {
+                            highlight_line_end_offset - leading_cut
+                        } else {
+                            0
+                        };
+
+                        let start = start.clamp(0, chunk_len) as usize;
+                        let end = end.clamp(0, chunk_len) as usize;
+
+                        HighlightedString {
+                            s: chunk.to_string(),
+                            start,
+                            end,
+                        }
+                    }
                 })
                 .collect();
 
@@ -213,9 +326,15 @@ pub fn print(src: &str, start_pos: &Position, end_pos: &Position) -> String {
                 for _ in 0..(max_line_digits + indent - 1) {
                     buf.push(' ');
                 }
+                if use_color {
+                    buf.push_str(ANSI_DIM);
+                }
                 buf.push_str(".");
                 buf.push(' ');
                 buf.push_str(separator);
+                if use_color {
+                    buf.push_str(ANSI_RESET);
+                }
                 buf.push_str(" ...\n");
             }
             Gutter::Number(line_number) => {
@@ -229,13 +348,27 @@ pub fn print(src: &str, start_pos: &Position, end_pos: &Position) -> String {
                     for _ in 0..(max_line_digits + indent - gutter_content.len()) {
                         buf.push(' ');
                     }
+
+                    let is_highlighted_gutter =
+                        i == 0 && *line_number >= highlight_line_start && *line_number <= highlight_line_end;
+                    if use_color && is_highlighted_gutter {
+                        buf.push_str(emphasis_ansi(emphasis));
+                    }
                     buf.push_str(&gutter_content);
+                    if use_color && is_highlighted_gutter {
+                        buf.push_str(ANSI_RESET);
+                    }
                     buf.push(' ');
+                    if use_color {
+                        buf.push_str(ANSI_DIM);
+                    }
                     buf.push_str(separator);
+                    if use_color {
+                        buf.push_str(ANSI_RESET);
+                    }
                     buf.push(' ');
 
-                    // Draw content (no colors for now, just plain text)
-                    buf.push_str(&hs.s);
+                    append_highlighted_segment(&mut buf, hs, use_color, emphasis);
                     buf.push('\n');
                 }
             }

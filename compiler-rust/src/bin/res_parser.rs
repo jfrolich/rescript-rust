@@ -437,7 +437,7 @@ fn print_jsx_preprocessor_warnings(
         let _ = writeln!(
             out,
             "{}",
-            code_frame::print(source, &warning.start_pos, &warning.end_pos)
+            code_frame::print_warning(source, &warning.start_pos, &warning.end_pos)
         );
         let _ = writeln!(out, "  {}", warning.message);
         let _ = writeln!(out);

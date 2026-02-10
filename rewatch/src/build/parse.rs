@@ -515,7 +515,7 @@ fn append_jsx_preprocessor_warnings(
             output.push_str(&location);
         }
         output.push_str("\n\n");
-        output.push_str(&code_frame::print(
+        output.push_str(&code_frame::print_warning(
             source,
             &warning.start_pos,
             &warning.end_pos,
