@@ -2445,22 +2445,41 @@ fn type_pattern_variant(
     use crate::types::typedtree::RowDescRef;
     let ctx = tctx.type_ctx;
 
-    // Type check the argument if present
-    let typed_arg = if let Some(arg_pat) = arg {
+    if let Some(arg_pat) = arg {
         let arg_ty = ctx.new_var(None);
-        let typed = type_pattern_inner(tctx, env, arg_pat, arg_ty, mode, state, 0)?;
-        Some(Box::new(typed))
-    } else {
-        None
-    };
+        let variant_ty = ctx.new_var(None);
+        unify_pattern_types(tctx, loc, variant_ty, expected_ty)?;
+        let typed_arg = Some(Box::new(type_pattern_inner(
+            tctx, env, arg_pat, arg_ty, mode, state, 0,
+        )?));
+        return Ok(Pattern::new(
+            PatternDesc::Tpat_variant(label.to_string(), typed_arg, RowDescRef(0)),
+            loc.clone(),
+            expected_ty,
+            EnvRef(0),
+            pat.ppat_attributes.clone(),
+        ));
+    }
 
-    // For polymorphic variants, we need a row type
-    // TODO: Full Tvariant row type construction requires mutable row_more for field accumulation
-    let variant_ty = ctx.new_var(None);
+    let variant_ty = ctx.new_variant(crate::types::type_expr::RowDesc {
+        row_fields: vec![(
+            label.to_string(),
+            crate::types::type_expr::RowField::Reither {
+                constant: true,
+                types: vec![],
+                matched: true,
+                link: crate::types::type_expr::RowFieldRef::null(),
+            },
+        )],
+        row_more: ctx.new_var(None),
+        row_closed: false,
+        row_fixed: false,
+        row_name: None,
+    });
     unify_pattern_types(tctx, loc, variant_ty, expected_ty)?;
 
     Ok(Pattern::new(
-        PatternDesc::Tpat_variant(label.to_string(), typed_arg, RowDescRef(0)),
+        PatternDesc::Tpat_variant(label.to_string(), None, RowDescRef(0)),
         loc.clone(),
         expected_ty,
         EnvRef(0),
@@ -4475,22 +4494,37 @@ fn type_variant(
 ) -> TypeCoreResult<Expression> {
     let ctx = tctx.type_ctx;
 
-    // Type check argument if present
-    let typed_arg = if let Some(arg_expr) = arg {
+    // Keep payload variants on the legacy path for now to avoid regressing
+    // recursive payload-variant typing (e.g. #A(r) in recursive lets).
+    if let Some(arg_expr) = arg {
         let arg_ty = ctx.new_var(None);
-        let typed = type_expect(tctx, env, arg_expr, arg_ty, None)?;
-        Some(Box::new(typed))
-    } else {
-        None
-    };
+        let typed_arg = Some(Box::new(type_expect(tctx, env, arg_expr, arg_ty, None)?));
+        let variant_ty = ctx.new_var(None);
+        unify_expression_types(tctx, loc, variant_ty, expected_ty, None)?;
+        return Ok(Expression::new(
+            ExpressionDesc::Texp_variant(label.to_string(), typed_arg),
+            loc.clone(),
+            variant_ty,
+            EnvRef(0),
+            attributes.to_vec(),
+        ));
+    }
 
-    // For polymorphic variants, create a type variable
-    // TODO: Full Tvariant row type construction requires mutable row_more for field accumulation
-    let variant_ty = ctx.new_var(None);
+    // Constant polymorphic variants (`#Tag`) use an explicit one-field open row.
+    let variant_ty = ctx.new_variant(crate::types::type_expr::RowDesc {
+        row_fields: vec![(
+            label.to_string(),
+            crate::types::type_expr::RowField::Rpresent(None),
+        )],
+        row_more: ctx.new_var(None),
+        row_closed: false,
+        row_fixed: false,
+        row_name: None,
+    });
     unify_expression_types(tctx, loc, variant_ty, expected_ty, None)?;
 
     Ok(Expression::new(
-        ExpressionDesc::Texp_variant(label.to_string(), typed_arg),
+        ExpressionDesc::Texp_variant(label.to_string(), None),
         loc.clone(),
         variant_ty,
         EnvRef(0),
