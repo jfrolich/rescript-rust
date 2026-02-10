@@ -997,6 +997,18 @@ fn resolve_type_constructor_path(
         }
         Longident::Ldot(prefix, name_idx) => {
             let type_name = tctx.arena.get_string(*name_idx);
+
+            // Match OCaml typetexp.ml find_component:
+            // `Longident.Ldot (Longident.Lident "*predef*", s)` is looked up as
+            // plain `Lident s` in the initial safe environment.
+            if let Longident::Lident(prefix_idx) = prefix.as_ref() {
+                if tctx.arena.get_string(*prefix_idx) == "*predef*" {
+                    let predef_path = Path::pident(Ident::create_persistent(type_name));
+                    let predef_decl = env.lookup_type(&predef_path).ok().cloned();
+                    return (predef_path, predef_decl);
+                }
+            }
+
             if let Some((mod_path, sig)) = env.resolve_module_lid_raw(
                 prefix,
                 tctx.arena,
