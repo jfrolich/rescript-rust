@@ -8,6 +8,7 @@ Achieve **diagnostic parity** between OCaml parser tooling and Rust parser tooli
 2. Same error-recovery reporting behavior (count/order/locations)
 3. Same diagnostic text and formatting (including code-frame highlights)
 4. No Rust parser panics while printing diagnostics
+5. A complete minimal fixture suite (`.res`/`.resi`) covering every parser warning/error path
 
 This project is separate from binary AST parity. It covers user-facing parser diagnostics.
 
@@ -68,11 +69,15 @@ Representative files:
    - parser syntax errors
    - parser recovery multi-error sequences
    - crash-hardening pathological inputs
-3. Ensure `scripts/test_parser_ast_parity.sh` reports parser diagnostics metrics as parser parity, not binary AST parity.
+3. Build a fixture matrix with one or more minimal `.res/.resi` files for every
+   OCaml parser diagnostic emitter class (scanner, parser, JSX warning/error).
+4. Track fixture-to-emitter mapping in repo docs so uncovered emitters are explicit.
+5. Ensure `scripts/test_parser_ast_parity.sh` reports parser diagnostics metrics as parser parity, not binary AST parity.
 
 Exit criteria:
 
-- Every OCaml parser diagnostic emitter has at least one mapped test fixture.
+- Every OCaml parser diagnostic emitter has at least one mapped minimal fixture.
+- Fixture matrix reports 100% mapped coverage for in-scope parser diagnostics.
 
 ## Phase 1: Crash-Hardening in Rust Diagnostics
 
@@ -126,6 +131,6 @@ All of the following must hold:
 1. No Rust parser diagnostic panics on covered corpora.
 2. Warning fixtures: exact parity (`warning number`, message body, highlight/code-frame shape).
 3. Error fixtures: exact parity (`Syntax error!` sections, count/order/location/message).
-4. External corpus scan reports zero Rust-only diagnostic divergences for in-scope files.
-5. Any remaining exclusions are documented with explicit file list + reason.
-
+4. Minimal fixture suite covers all in-scope parser warning/error emitters for both `.res` and `.resi` where applicable.
+5. External corpus scan reports zero Rust-only diagnostic divergences for in-scope files.
+6. Any remaining exclusions are documented with explicit file list + reason.

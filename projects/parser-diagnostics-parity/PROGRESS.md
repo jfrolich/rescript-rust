@@ -45,13 +45,13 @@ Mismatch classes:
 
 1. Implement Rust diagnostics code-frame panic hardening.
 2. Add reduced regression fixtures for panic-inducing malformed inputs.
-3. Align JSX parser message wording where Rust diverges from OCaml.
-4. Align recovery behavior for known multi-error mismatch files.
-5. Add diagnostics-only parity summary mode in script/CI reporting.
+3. Build a minimal fixture matrix (`.res`/`.resi`) that covers every in-scope parser warning/error emitter.
+4. Align JSX parser message wording where Rust diverges from OCaml.
+5. Align recovery behavior for known multi-error mismatch files.
+6. Add diagnostics-only parity summary mode in script/CI reporting.
 
 ## Open Risks
 
 - Large binary-like `.res` files can bypass normal assumptions about UTF-8 slicing.
 - Recovery-path differences can cascade and inflate mismatch counts.
 - Script-level blacklists can hide regressions if not tracked explicitly by class.
-

@@ -163,3 +163,11 @@ To claim parser diagnostics parity, tests must cover:
 6. Location/code-frame formatting parity for warnings and syntax errors.
 7. Crash-hardening cases where malformed input stresses code-frame slicing.
 
+## 7. Fixture Completeness Target
+
+Required fixture policy for this project:
+
+1. Every in-scope parser warning/error emitter must map to at least one minimal fixture.
+2. Fixtures should be as small as possible and isolated to one primary diagnostic.
+3. Use both `.res` and `.resi` fixtures when an emitter is interface-relevant.
+4. Maintain an explicit emitter-to-fixture matrix so coverage is auditable.
