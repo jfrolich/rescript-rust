@@ -505,6 +505,15 @@ fn sexp_row_field_aux(arena: &ParseArena, ctx: &TypeContext<'_>, rf: &RowField, 
             Sexp::list(vec![Sexp::atom("Rpresent"), sexp_type_expr_aux(arena, ctx, ty, visited)])
         }
         RowField::Reither { constant, types, .. } => {
+            if !constant && types.len() == 1 {
+                return Sexp::list(vec![
+                    Sexp::atom("Rpresent"),
+                    sexp_type_expr_aux(arena, ctx, types[0], visited),
+                ]);
+            }
+            if constant && types.is_empty() {
+                return Sexp::atom("Rpresent_none");
+            }
             Sexp::list(vec![
                 Sexp::atom("Reither"),
                 Sexp::atom(if constant { "const" } else { "non_const" }),
