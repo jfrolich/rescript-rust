@@ -3083,7 +3083,9 @@ pub fn type_expect<'a>(
                                                 Path::Pident(id) if id.name() == "Stdlib_RegExp"
                                             )
                                 );
-                                args.is_empty() && !keep_alias_path
+                                args.is_empty()
+                                    && !keep_alias_path
+                                    && source_path.head_name() != "float"
                             }
                             // Match OCaml instance() for local monomorphic functions:
                             // non-generic arrows are returned by identity, which preserves
