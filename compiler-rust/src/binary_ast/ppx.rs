@@ -4675,7 +4675,6 @@ fn no_need_bound(exp: &Expression, arena: &ParseArena) -> bool {
 /// Matches OCaml's `bound` function in ast_exp_apply.ml.
 fn pipe_tuple_bound(
     a: Expression,
-    loc: LocIdx,
     xs: &[Expression],
     f: &Expression,
     arena: &mut ParseArena,
@@ -4715,7 +4714,7 @@ fn pipe_tuple_bound(
                 }],
                 Box::new(mapped),
             ),
-            pexp_loc: loc,
+            pexp_loc: obj_loc,
             pexp_attributes: vec![],
         }
     }
@@ -4752,7 +4751,7 @@ fn pipe_tuple_map(a: Expression, xs: &[Expression], f: &Expression) -> Expressio
                         partial: false,
                         transformed_jsx: *transformed_jsx,
                     },
-                    pexp_loc: fn_expr.pexp_loc,
+                    pexp_loc: fn1.pexp_loc,
                     pexp_attributes: vec![],
                 }
             }
@@ -4836,10 +4835,7 @@ fn desugar_pipe(
         // If `a` is not a simple identifier, bind it first to avoid multiple evaluation:
         //   let __tuple_internal_obj = a in (x(__tuple_internal_obj), y(__tuple_internal_obj))
         // Matches OCaml's ast_exp_apply.ml lines 100-131
-        ExpressionDesc::Pexp_tuple(xs) => {
-            let loc = original.pexp_loc;
-            pipe_tuple_bound(a, loc, xs, &f, _arena)
-        }
+        ExpressionDesc::Pexp_tuple(xs) => pipe_tuple_bound(a, xs, &f, _arena),
 
         // Default: a -> f becomes f(a)
         _ => Expression {
