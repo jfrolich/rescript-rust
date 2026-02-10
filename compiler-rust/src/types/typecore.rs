@@ -3973,6 +3973,11 @@ fn type_match(
         typed_cases.push(typed_case);
     }
 
+    // Match OCaml typecore/parmatch intent: when multiple polymorphic-variant
+    // tags are constrained by the same match-pattern row, close that row in
+    // typed patterns while leaving expression-side rows unchanged.
+    close_multi_label_variant_rows_in_cases(tctx, env, &mut typed_cases);
+
     Ok(Expression::new(
         ExpressionDesc::Texp_match(
             Box::new(typed_scrutinee),
@@ -3985,6 +3990,196 @@ fn type_match(
         EnvRef(0),
         attributes.to_vec(),
     ))
+}
+
+fn variant_row_key_for_pat_type(
+    tctx: &mut TypeCheckContext<'_>,
+    env: &Env,
+    pat_type: TypeExprRef,
+) -> Option<usize> {
+    let ctx = tctx.type_ctx;
+    let expanded = crate::types::ctype::expand_head(ctx, env, pat_type);
+    let repr = ctx.repr(expanded);
+    let desc = ctx.get_desc(repr);
+    let is_variant = matches!(&*desc, TypeDesc::Tvariant(_));
+    drop(desc);
+    if is_variant { Some(repr.0) } else { None }
+}
+
+fn collect_variant_row_labels_in_pattern(
+    tctx: &mut TypeCheckContext<'_>,
+    env: &Env,
+    pat: &Pattern,
+    labels_by_row: &mut HashMap<usize, HashSet<String>>,
+) {
+    match &pat.pat_desc {
+        PatternDesc::Tpat_variant(label, arg, _) => {
+            if let Some(row_key) = variant_row_key_for_pat_type(tctx, env, pat.pat_type) {
+                labels_by_row
+                    .entry(row_key)
+                    .or_default()
+                    .insert(label.clone());
+            }
+            if let Some(arg_pat) = arg {
+                collect_variant_row_labels_in_pattern(tctx, env, arg_pat, labels_by_row);
+            }
+        }
+        PatternDesc::Tpat_alias(inner, _, _) => {
+            collect_variant_row_labels_in_pattern(tctx, env, inner, labels_by_row);
+        }
+        PatternDesc::Tpat_or(left, right, _) => {
+            collect_variant_row_labels_in_pattern(tctx, env, left, labels_by_row);
+            collect_variant_row_labels_in_pattern(tctx, env, right, labels_by_row);
+        }
+        PatternDesc::Tpat_tuple(items) | PatternDesc::Tpat_array(items) => {
+            for item in items {
+                collect_variant_row_labels_in_pattern(tctx, env, item, labels_by_row);
+            }
+        }
+        PatternDesc::Tpat_construct(_, _, args) => {
+            for arg in args {
+                collect_variant_row_labels_in_pattern(tctx, env, arg, labels_by_row);
+            }
+        }
+        PatternDesc::Tpat_record(fields, _) => {
+            for (_, _, field_pat, _) in fields {
+                collect_variant_row_labels_in_pattern(tctx, env, field_pat, labels_by_row);
+            }
+        }
+        PatternDesc::Tpat_any | PatternDesc::Tpat_var(_, _) | PatternDesc::Tpat_constant(_) => {}
+    }
+}
+
+fn close_variant_row_for_pat_type(
+    tctx: &mut TypeCheckContext<'_>,
+    env: &Env,
+    pat_type: TypeExprRef,
+) {
+    let ctx = tctx.type_ctx;
+    let expanded = crate::types::ctype::expand_head(ctx, env, pat_type);
+    let repr = ctx.repr(expanded);
+    let desc = ctx.get_desc(repr);
+    let row = match &*desc {
+        TypeDesc::Tvariant(row) => row.clone(),
+        _ => return,
+    };
+    drop(desc);
+
+    let mut row = crate::types::btype::row_repr(ctx, &row);
+    if !row.row_closed {
+        row.row_closed = true;
+        ctx.set_desc(repr, TypeDesc::Tvariant(row));
+    }
+}
+
+fn copy_pattern_types(
+    tctx: &mut TypeCheckContext<'_>,
+    env: &Env,
+    pat: &mut Pattern,
+    cache: &mut HashMap<TypeExprRef, TypeExprRef>,
+) {
+    pat.pat_type = copy_case_type(tctx.type_ctx, env, pat.pat_type, cache);
+    match &mut pat.pat_desc {
+        PatternDesc::Tpat_variant(_, arg, _) => {
+            if let Some(arg_pat) = arg {
+                copy_pattern_types(tctx, env, arg_pat, cache);
+            }
+        }
+        PatternDesc::Tpat_alias(inner, _, _) => {
+            copy_pattern_types(tctx, env, inner, cache);
+        }
+        PatternDesc::Tpat_or(left, right, _) => {
+            copy_pattern_types(tctx, env, left, cache);
+            copy_pattern_types(tctx, env, right, cache);
+        }
+        PatternDesc::Tpat_tuple(items) | PatternDesc::Tpat_array(items) => {
+            for item in items {
+                copy_pattern_types(tctx, env, item, cache);
+            }
+        }
+        PatternDesc::Tpat_construct(_, _, args) => {
+            for arg in args {
+                copy_pattern_types(tctx, env, arg, cache);
+            }
+        }
+        PatternDesc::Tpat_record(fields, _) => {
+            for (_, _, field_pat, _) in fields {
+                copy_pattern_types(tctx, env, field_pat, cache);
+            }
+        }
+        PatternDesc::Tpat_any | PatternDesc::Tpat_var(_, _) | PatternDesc::Tpat_constant(_) => {}
+    }
+}
+
+fn close_multi_label_variant_rows_in_pattern(
+    tctx: &mut TypeCheckContext<'_>,
+    env: &Env,
+    pat: &mut Pattern,
+    rows_to_close: &HashSet<usize>,
+) {
+    match &mut pat.pat_desc {
+        PatternDesc::Tpat_variant(_, arg, _) => {
+            if let Some(row_key) = variant_row_key_for_pat_type(tctx, env, pat.pat_type) {
+                if rows_to_close.contains(&row_key) {
+                    close_variant_row_for_pat_type(tctx, env, pat.pat_type);
+                }
+            }
+            if let Some(arg_pat) = arg {
+                close_multi_label_variant_rows_in_pattern(tctx, env, arg_pat, rows_to_close);
+            }
+        }
+        PatternDesc::Tpat_alias(inner, _, _) => {
+            close_multi_label_variant_rows_in_pattern(tctx, env, inner, rows_to_close);
+        }
+        PatternDesc::Tpat_or(left, right, _) => {
+            close_multi_label_variant_rows_in_pattern(tctx, env, left, rows_to_close);
+            close_multi_label_variant_rows_in_pattern(tctx, env, right, rows_to_close);
+        }
+        PatternDesc::Tpat_tuple(items) | PatternDesc::Tpat_array(items) => {
+            for item in items {
+                close_multi_label_variant_rows_in_pattern(tctx, env, item, rows_to_close);
+            }
+        }
+        PatternDesc::Tpat_construct(_, _, args) => {
+            for arg in args {
+                close_multi_label_variant_rows_in_pattern(tctx, env, arg, rows_to_close);
+            }
+        }
+        PatternDesc::Tpat_record(fields, _) => {
+            for (_, _, field_pat, _) in fields {
+                close_multi_label_variant_rows_in_pattern(tctx, env, field_pat, rows_to_close);
+            }
+        }
+        PatternDesc::Tpat_any | PatternDesc::Tpat_var(_, _) | PatternDesc::Tpat_constant(_) => {}
+    }
+}
+
+fn close_multi_label_variant_rows_in_cases(
+    tctx: &mut TypeCheckContext<'_>,
+    env: &Env,
+    cases: &mut [crate::types::typedtree::Case],
+) {
+    let mut copy_cache = HashMap::new();
+    for case in cases.iter_mut() {
+        copy_pattern_types(tctx, env, &mut case.c_lhs, &mut copy_cache);
+    }
+
+    let mut labels_by_row: HashMap<usize, HashSet<String>> = HashMap::new();
+    for case in cases.iter() {
+        collect_variant_row_labels_in_pattern(tctx, env, &case.c_lhs, &mut labels_by_row);
+    }
+
+    let rows_to_close: HashSet<usize> = labels_by_row
+        .into_iter()
+        .filter_map(|(row_key, labels)| (labels.len() > 1).then_some(row_key))
+        .collect();
+    if rows_to_close.is_empty() {
+        return;
+    }
+
+    for case in cases.iter_mut() {
+        close_multi_label_variant_rows_in_pattern(tctx, env, &mut case.c_lhs, &rows_to_close);
+    }
 }
 
 fn pattern_contains_generalized_constructor(
