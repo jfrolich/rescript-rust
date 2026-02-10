@@ -3372,7 +3372,7 @@ pub fn transl_signature<'a>(
                     },
                     val_desc: typed_ctype,
                     val_prim,
-                    val_loc: loc,
+                    val_loc: vd.pval_loc,
                     val_attributes: vd.pval_attributes.clone(),
                 })
             }
@@ -3707,7 +3707,7 @@ fn type_structure_item<'a>(
                     },
                     val_desc: typed_ctype,
                     val_prim,
-                    val_loc: loc,
+                    val_loc: vd.pval_loc,
                     val_attributes: vd.pval_attributes.clone(),
                 });
             Ok((
