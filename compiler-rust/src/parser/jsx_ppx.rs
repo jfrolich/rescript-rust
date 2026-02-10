@@ -3326,7 +3326,16 @@ fn transform_module_expr(
                     *items, config, arena,
                 )))
             }
-            ModuleExprDesc::Pmod_functor(inner) => ModuleExprDesc::Pmod_functor(inner),
+            ModuleExprDesc::Pmod_functor(inner) => {
+                let (arg, arg_ty, body) = *inner;
+                let body_expr = arena.get_mod_expr(body).clone();
+                let transformed_body = transform_module_expr(body_expr, config, arena);
+                ModuleExprDesc::Pmod_functor(Box::new((
+                    arg,
+                    arg_ty,
+                    arena.push_mod_expr(transformed_body),
+                )))
+            }
             ModuleExprDesc::Pmod_apply(m1, m2) => {
                 let m1_expr = arena.get_mod_expr(m1).clone();
                 let m2_expr = arena.get_mod_expr(m2).clone();
@@ -4278,5 +4287,51 @@ fn transform_jsx_container(
             );
             ExpressionDesc::Pexp_jsx_element(Box::new(JsxElement::Container(container)))
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::transform_structure;
+    use crate::parser::{Parser, module, sexp_locs};
+
+    #[test]
+    fn transforms_jsx_inside_functor_module_body() {
+        let source = r#"
+module MakePreset = (Preset: { let value: int }) => {
+  @react.component
+  let make = (~children=?) => {
+    <Div>{children->Option.getOr(React.null)}</Div>
+  }
+}
+"#;
+
+        let mut parser = Parser::new("test.res".to_string(), source);
+        let structure = module::parse_structure(&mut parser);
+        assert!(
+            !parser.has_errors(),
+            "parse failed with {} errors",
+            parser.diagnostics().len()
+        );
+
+        let mut before = Vec::new();
+        sexp_locs::print_structure(&structure, parser.arena(), &mut before);
+        let before = String::from_utf8(before).expect("sexp should be valid utf8");
+        assert!(
+            before.contains("Pexp_jsx"),
+            "expected JSX nodes before transform, got:\n{}",
+            before
+        );
+
+        let transformed = transform_structure(structure, 4, parser.arena_mut());
+
+        let mut after = Vec::new();
+        sexp_locs::print_structure(&transformed, parser.arena(), &mut after);
+        let after = String::from_utf8(after).expect("sexp should be valid utf8");
+        assert!(
+            !after.contains("Pexp_jsx"),
+            "expected no JSX nodes after transform, got:\n{}",
+            after
+        );
     }
 }
