@@ -5579,7 +5579,7 @@ fn type_structure_item<'a>(
         ParsedStructureItemDesc::Pstr_open(open_desc) => {
             // Open declaration: open M
             let longident = tctx.resolve_lid(open_desc.popen_lid.txt).clone();
-            let path = lookup_module_path_by_lid(
+            let fallback_path = lookup_module_path_by_lid(
                 &longident,
                 arena,
                 env,
@@ -5588,35 +5588,24 @@ fn type_structure_item<'a>(
             )
             .unwrap_or_else(|| path_from_longident(&longident, |idx| arena.get_string(idx)));
 
-            // Extend the environment with the opened module's bindings
-            // Resolve the module (handles local env, persistent env, and dotted paths)
-            // Use arena.get_longident to avoid borrow conflict with tctx
+            // Extend the environment with the opened module's bindings using the
+            // same alias-rewritten module resolution path as value lookup.
             let open_lid = arena.get_longident(open_desc.popen_lid.txt);
             let mut new_env = env.clone();
-            let mod_type = lookup_module_type_by_lid(
-                open_lid,
-                arena,
-                env,
-                &mut tctx.persistent_env,
-                tctx.type_ctx,
-            );
-            if let Some(ref mty) = mod_type {
-                let sig = resolve_mod_type_to_sig(
-                    mty,
-                    Some(env),
-                    &mut tctx.persistent_env,
+            let path = if let Some((resolved_path, sig_items)) =
+                env.resolve_module_lid(open_lid, arena, &mut tctx.persistent_env, tctx.type_ctx)
+            {
+                crate::cmi::persistent_env::add_signature_to_env(
+                    &sig_items,
+                    &resolved_path,
+                    &mut new_env,
                     tctx.type_ctx,
+                    true,
                 );
-                if let Some(ref sig_items) = sig {
-                    crate::cmi::persistent_env::add_signature_to_env(
-                        sig_items,
-                        &path,
-                        &mut new_env,
-                        tctx.type_ctx,
-                        true,
-                    );
-                }
-            }
+                resolved_path
+            } else {
+                fallback_path
+            };
 
             let desc = StructureItemDesc::Tstr_open(OpenDeclaration {
                 open_path: path,

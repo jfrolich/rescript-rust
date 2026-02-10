@@ -6232,33 +6232,22 @@ fn type_open(
     let open_lid = tctx.arena.get_longident(lid.txt);
     let mut open_env = env.clone();
 
-    // Resolve the module longident and open its signature
-    let path =
-        crate::types::typemod::path_from_longident(open_lid, |idx| tctx.arena.get_string(idx));
-    let mod_type = crate::types::typemod::lookup_module_type_by_lid(
-        open_lid,
-        tctx.arena,
-        env,
-        &mut tctx.persistent_env,
-        tctx.type_ctx,
-    );
-    if let Some(ref mty) = mod_type {
-        let sig = crate::types::typemod::resolve_mod_type_to_sig(
-            mty,
-            Some(env),
-            &mut tctx.persistent_env,
+    // Resolve through Env alias scraping and rewritten signatures so opened
+    // bindings preserve OCaml-style module prefixes in types.
+    let path = if let Some((resolved_path, sig_items)) =
+        env.resolve_module_lid(open_lid, tctx.arena, &mut tctx.persistent_env, tctx.type_ctx)
+    {
+        crate::cmi::persistent_env::add_signature_to_env(
+            &sig_items,
+            &resolved_path,
+            &mut open_env,
             tctx.type_ctx,
+            true,
         );
-        if let Some(ref sig_items) = sig {
-            crate::cmi::persistent_env::add_signature_to_env(
-                sig_items,
-                &path,
-                &mut open_env,
-                tctx.type_ctx,
-                true,
-            );
-        }
-    }
+        resolved_path
+    } else {
+        crate::types::typemod::path_from_longident(open_lid, |idx| tctx.arena.get_string(idx))
+    };
 
     // Type check the body expression in the extended environment
     let typed_body = type_expect(tctx, &open_env, body, expected_ty, None)?;
@@ -8643,7 +8632,7 @@ impl Env {
 
     /// Resolve a module longident to its signature and path.
     /// Applies path rewriting/substitution for downstream value/module lookups.
-    fn resolve_module_lid<'b>(
+    pub(crate) fn resolve_module_lid<'b>(
         &self,
         lid: &Longident,
         arena: &crate::parse_arena::ParseArena,
