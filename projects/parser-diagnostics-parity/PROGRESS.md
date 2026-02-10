@@ -38,6 +38,12 @@ Mismatch classes:
   - `projects/parser-diagnostics-parity/PLAN.md`
   - `projects/parser-diagnostics-parity/INVENTORY.md`
   - `projects/parser-diagnostics-parity/PROGRESS.md`
+- Added numbered parser diagnostics matrix:
+  - `tests/syntax_tests/data/parsing/diagnostics_numbers.csv`
+  - `84` numbered parser error fixtures (`error,1..84,...`)
+  - `1` numbered parser warning fixture (`warning,22,...`)
+- Added matrix iteration checker:
+  - `scripts/check_parser_diagnostics_numbers.sh`
 - Completed static source inventory of OCaml parser diagnostic emitters.
 - Captured representative runtime failures to anchor the plan.
 
@@ -45,7 +51,7 @@ Mismatch classes:
 
 1. Implement Rust diagnostics code-frame panic hardening.
 2. Add reduced regression fixtures for panic-inducing malformed inputs.
-3. Build a minimal fixture matrix (`.res`/`.resi`) that covers every in-scope parser warning/error emitter.
+3. Expand the numbered matrix from fixture-level coverage to emitter-level coverage (map each source emitter to numbered fixture entries).
 4. Align JSX parser message wording where Rust diverges from OCaml.
 5. Align recovery behavior for known multi-error mismatch files.
 6. Add diagnostics-only parity summary mode in script/CI reporting.

@@ -73,11 +73,14 @@ Representative files:
    OCaml parser diagnostic emitter class (scanner, parser, JSX warning/error).
 4. Track fixture-to-emitter mapping in repo docs so uncovered emitters are explicit.
 5. Ensure `scripts/test_parser_ast_parity.sh` reports parser diagnostics metrics as parser parity, not binary AST parity.
+6. Iterate the numbered matrix in CI/local checks using
+   `scripts/check_parser_diagnostics_numbers.sh`.
 
 Exit criteria:
 
 - Every OCaml parser diagnostic emitter has at least one mapped minimal fixture.
 - Fixture matrix reports 100% mapped coverage for in-scope parser diagnostics.
+- Numbered matrix check passes with no missing/duplicate numbers.
 
 ## Phase 1: Crash-Hardening in Rust Diagnostics
 
@@ -134,3 +137,4 @@ All of the following must hold:
 4. Minimal fixture suite covers all in-scope parser warning/error emitters for both `.res` and `.resi` where applicable.
 5. External corpus scan reports zero Rust-only diagnostic divergences for in-scope files.
 6. Any remaining exclusions are documented with explicit file list + reason.
+7. `scripts/check_parser_diagnostics_numbers.sh` passes (including contiguous parser error-number iteration).

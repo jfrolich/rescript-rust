@@ -171,3 +171,13 @@ Required fixture policy for this project:
 2. Fixtures should be as small as possible and isolated to one primary diagnostic.
 3. Use both `.res` and `.resi` fixtures when an emitter is interface-relevant.
 4. Maintain an explicit emitter-to-fixture matrix so coverage is auditable.
+
+Numbered matrix + checker:
+
+1. Matrix file: `tests/syntax_tests/data/parsing/diagnostics_numbers.csv`
+2. Checker: `scripts/check_parser_diagnostics_numbers.sh`
+3. The checker iterates each numbered parser error/warning entry and validates:
+   - source fixture exists
+   - expected output exists
+   - expected output contains `Syntax error!` (errors) or `Warning number N` (warnings)
+   - parser error numbering is contiguous (no missing numbers in `1..max`)
