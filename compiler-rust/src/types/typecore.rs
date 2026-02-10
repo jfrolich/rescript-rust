@@ -207,6 +207,22 @@ fn resolve_package_modtype_path(lid: &Longident, env: &Env, arena: &ParseArena) 
     }
 }
 
+fn inline_record_type_params(
+    ctx: &TypeContext<'_>,
+    parent_type_params: &[TypeExprRef],
+    labels: &[crate::types::LabelDeclaration],
+) -> Vec<TypeExprRef> {
+    parent_type_params
+        .iter()
+        .copied()
+        .filter(|param| {
+            labels
+                .iter()
+                .any(|label| crate::types::ctype::deep_occur(ctx, *param, label.ld_type))
+        })
+        .collect()
+}
+
 // ============================================================================
 // Error Types
 // ============================================================================
@@ -8711,7 +8727,11 @@ fn lookup_constructor_in_module<'b>(
                                     crate::types::ConstructorArguments::CstrRecord(labels) => {
                                         // Match OCaml Datarepr.constructor_args for Cstr_record:
                                         // cstr_args = [newgenconstr (type_path.cstr_name) type_params].
-                                        let inline_params = type_decl.type_params.clone();
+                                        let inline_params = inline_record_type_params(
+                                            ctx,
+                                            &type_decl.type_params,
+                                            labels,
+                                        );
                                         let inline_path =
                                             Path::pdot(type_path.clone(), cstr_name.to_string());
                                         let inline_constr =
@@ -8790,7 +8810,8 @@ fn lookup_constructor_in_module<'b>(
                                 (args.clone(), args.len() as i32, None)
                             }
                             crate::types::ConstructorArguments::CstrRecord(labels) => {
-                                let inline_params = ext.ext_type_params.clone();
+                                let inline_params =
+                                    inline_record_type_params(ctx, &ext.ext_type_params, labels);
                                 let inline_constr =
                                     ctx.new_generic_constr(ext_path.clone(), inline_params.clone());
                                 let inline_decl = crate::types::TypeDeclaration {
@@ -9239,7 +9260,8 @@ fn lookup_constructor_by_expected_type<'b>(
                         (args.clone(), args.len() as i32, None)
                     }
                     crate::types::ConstructorArguments::CstrRecord(labels) => {
-                        let inline_params = type_decl.type_params.clone();
+                        let inline_params =
+                            inline_record_type_params(ctx, &type_decl.type_params, labels);
                         let inline_path = Path::pdot(type_path.clone(), cstr_name.to_string());
                         let inline_constr =
                             ctx.new_generic_constr(inline_path, inline_params.clone());
@@ -9438,9 +9460,14 @@ fn lookup_type_decl_for_path<'a>(
                     if cd.cd_id.name() == type_name.as_str() {
                         if let crate::types::ConstructorArguments::CstrRecord(labels) = &cd.cd_args
                         {
+                            let inline_params = inline_record_type_params(
+                                ctx,
+                                &parent_decl.type_params,
+                                labels,
+                            );
                             return Some(crate::types::TypeDeclaration {
-                                type_params: parent_decl.type_params.clone(),
-                                type_arity: parent_decl.type_params.len() as i32,
+                                type_params: inline_params.clone(),
+                                type_arity: inline_params.len() as i32,
                                 type_kind: crate::types::TypeKind::TypeRecord(
                                     labels.clone(),
                                     crate::types::RecordRepresentation::RecordInlined {
@@ -9452,8 +9479,7 @@ fn lookup_type_decl_for_path<'a>(
                                 ),
                                 type_private: parent_decl.type_private,
                                 type_manifest: None,
-                                type_variance: parent_decl
-                                    .type_params
+                                type_variance: inline_params
                                     .iter()
                                     .map(|_| crate::types::variance::Variance::full())
                                     .collect(),

@@ -77,6 +77,22 @@ fn path_of_parsed_module_expr(mod_expr: &ParsedModuleExpr, arena: &ParseArena) -
     }
 }
 
+fn inline_record_type_params(
+    ctx: &crate::types::context::TypeContext<'_>,
+    parent_type_params: &[TypeExprRef],
+    labels: &[crate::types::LabelDeclaration],
+) -> Vec<TypeExprRef> {
+    parent_type_params
+        .iter()
+        .copied()
+        .filter(|param| {
+            labels
+                .iter()
+                .any(|label| crate::types::ctype::deep_occur(ctx, *param, label.ld_type))
+        })
+        .collect()
+}
+
 fn rewrite_module_path_prefix(path: &Path, old_name: &str, new_prefix: &Path) -> Path {
     match path {
         Path::Pident(id) if id.name() == old_name => new_prefix.clone(),
@@ -4292,13 +4308,15 @@ fn type_structure_item<'a>(
                                 if let crate::types::ConstructorArguments::CstrRecord(ref lbls) =
                                     internal_cd_args
                                 {
+                                    let inline_params =
+                                        inline_record_type_params(ctx, &internal_type_params, lbls);
                                     // Build path: Pdot(Pident(type_name), cstr_name)
                                     let inline_path =
                                         Path::pdot(type_path.clone(), cstr_name_str.to_string());
                                     // Create synthetic inline type declaration
                                     let inline_decl = crate::types::TypeDeclaration {
-                                        type_params: internal_type_params.clone(),
-                                        type_arity,
+                                        type_params: inline_params.clone(),
+                                        type_arity: inline_params.len() as i32,
                                         type_kind: crate::types::TypeKind::TypeRecord(
                                             lbls.clone(),
                                             crate::types::RecordRepresentation::RecordInlined {
@@ -4310,7 +4328,7 @@ fn type_structure_item<'a>(
                                         ),
                                         type_private: crate::types::PrivateFlag::Public,
                                         type_manifest: None,
-                                        type_variance: internal_type_params
+                                        type_variance: inline_params
                                             .iter()
                                             .map(|_| TypesVariance::full())
                                             .collect(),
@@ -4324,7 +4342,7 @@ fn type_structure_item<'a>(
                                     };
                                     // cstr_args: single Tconstr pointing to the inline record path
                                     let inline_constr =
-                                        ctx.new_constr(inline_path, internal_type_params.clone());
+                                        ctx.new_constr(inline_path, inline_params.clone());
                                     (vec![inline_constr], Some(Box::new(inline_decl)))
                                 } else {
                                     (cstr_args, None)
