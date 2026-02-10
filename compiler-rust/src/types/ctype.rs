@@ -1276,26 +1276,63 @@ fn unify_rows<'a>(
     let row1 = row_repr(ctx, row1);
     let row2 = row_repr(ctx, row2);
 
-    let mut merged_fields = row2.row_fields.clone();
+    // Preserve left-row label order: OCaml `unify_row` updates row-more links and
+    // `row_repr` exposes fields in a left-biased order, not lexicographic order.
+    let mut merged_fields = row1.row_fields.clone();
+    let normalize_const_empty = |field: &RowField| -> RowField {
+        match field {
+            RowField::Reither {
+                constant: true,
+                types,
+                ..
+            } if types.is_empty() => RowField::Rpresent(None),
+            _ => field.clone(),
+        }
+    };
+    let prefer_field = |left: &RowField, right: &RowField| -> RowField {
+        match (left, right) {
+            (RowField::Rpresent(_), _) => left.clone(),
+            (_, RowField::Rpresent(_)) => right.clone(),
+            (
+                RowField::Reither {
+                    constant: true,
+                    types: ltypes,
+                    ..
+                },
+                RowField::Reither {
+                    constant: true,
+                    types: rtypes,
+                    ..
+                },
+            ) if ltypes.is_empty() && rtypes.is_empty() => RowField::Rpresent(None),
+            _ => normalize_const_empty(left),
+        }
+    };
 
     // Unify the fields
     for (label, field1) in &row1.row_fields {
         // Find matching field in row2
         if let Some((_, field2)) = row2.row_fields.iter().find(|(l, _)| l == label) {
             unify_row_field(ctx, state, field1, field2)?;
+            if let Some((_, merged_field)) = merged_fields.iter_mut().find(|(l, _)| l == label) {
+                *merged_field = prefer_field(field1, field2);
+            }
         } else if row2.row_closed {
             // Field not found and row is closed - error
             return Err(TypeError::Unify(vec![]));
         } else {
-            merged_fields.push((label.clone(), field1.clone()));
+            merged_fields.push((label.clone(), normalize_const_empty(field1)));
         }
-        // If row is open, the field might be added later
+        // If row is open, the field might be added later through row-more.
     }
 
     // Check the reverse
-    for (label, _field2) in &row2.row_fields {
-        if !row1.row_fields.iter().any(|(l, _)| l == label) && row1.row_closed {
-            return Err(TypeError::Unify(vec![]));
+    for (label, field2) in &row2.row_fields {
+        if !row1.row_fields.iter().any(|(l, _)| l == label) {
+            if row1.row_closed {
+                return Err(TypeError::Unify(vec![]));
+            }
+            merged_fields.push((label.clone(), normalize_const_empty(field2)));
         }
     }
 
@@ -1308,7 +1345,6 @@ fn unify_rows<'a>(
     // Keep first occurrence to match OCaml lookup semantics.
     let mut seen = HashSet::new();
     merged_fields.retain(|(label, _)| seen.insert(label.clone()));
-    merged_fields.sort_by(|(l1, _), (l2, _)| l1.cmp(l2));
 
     Ok(RowDesc {
         row_fields: merged_fields,
