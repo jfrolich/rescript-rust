@@ -28,7 +28,7 @@
 
 use crate::ident::Ident;
 use crate::location::Location;
-use crate::parse_arena::{LidentIdx, LocIdx, Located, ParseArena, StrIdx};
+use crate::parse_arena::{LidentIdx, LocIdx, Located, ParseArena, PosIdx, StrIdx};
 use crate::parser::ast::{
     ArgLabel, Expression as ParsedExpression, Pattern as ParsedPattern, RecFlag,
 };
@@ -150,6 +150,20 @@ fn convert_located<T: Clone>(loc: &Located<T>, arena: &ParseArena) -> crate::loc
 /// Convert a LocIdx to a Location using the arena.
 fn convert_loc(loc: LocIdx, arena: &ParseArena) -> Location {
     arena.to_location(loc)
+}
+
+fn find_loc_idx_by_bounds(arena: &ParseArena, start: PosIdx, end: PosIdx) -> Option<LocIdx> {
+    arena
+        .locations()
+        .iter()
+        .enumerate()
+        .find_map(|(idx, loc)| {
+            if loc.loc_start == start && loc.loc_end == end {
+                Some(LocIdx(idx as u32))
+            } else {
+                None
+            }
+        })
 }
 
 /// Convert a Located<StrIdx> to a Located<String> (for typedtree which uses String).
@@ -3215,118 +3229,137 @@ pub fn type_expect<'a>(
             if arg_label.is_optional() {
                 if let (
                     Some(default_expr),
-                    crate::parser::ast::PatternDesc::Ppat_var(param_name),
+                    crate::parser::ast::PatternDesc::Ppat_var(_),
                 ) = (default.as_ref(), &lhs.ppat_desc)
                 {
                     let default_loc = default_expr.pexp_loc;
-                    let param_lid = find_simple_lident_for_name(rhs, param_name.txt, tctx.arena)
-                        .or_else(|| {
-                            find_simple_lident_for_name(default_expr, param_name.txt, tctx.arena)
-                        });
+                    let opt_name = tctx.arena.optional_default_opt_str();
+                    let sth_name = tctx.arena.optional_default_sth_str();
+                    let opt_lid = tctx.arena.optional_default_opt_lid();
+                    let sth_lid = tctx.arena.optional_default_sth_lid();
 
-                    if let Some(param_lid) = param_lid {
-                        let matched_pat = ParsedPattern {
-                            ppat_desc: crate::parser::ast::PatternDesc::Ppat_var(Located {
-                                txt: param_name.txt,
+                    let sloc = {
+                        let sloc_start = tctx.arena.loc_start_idx(lhs.ppat_loc);
+                        let sloc_end = tctx.arena.loc_end_idx(default_loc);
+                        find_loc_idx_by_bounds(tctx.arena, sloc_start, sloc_end)
+                            .unwrap_or(lhs.ppat_loc)
+                    };
+
+                    let matched_pat = ParsedPattern {
+                        ppat_desc: crate::parser::ast::PatternDesc::Ppat_var(Located {
+                            txt: sth_name,
+                            loc: default_loc,
+                        }),
+                        ppat_loc: default_loc,
+                        ppat_attributes: vec![],
+                    };
+
+                    let some_pat = ParsedPattern {
+                        ppat_desc: crate::parser::ast::PatternDesc::Ppat_construct(
+                            Located {
+                                txt: tctx.arena.predef_some_lid(),
                                 loc: default_loc,
-                            }),
-                            ppat_loc: default_loc,
-                            ppat_attributes: vec![],
-                        };
+                            },
+                            Some(Box::new(matched_pat)),
+                        ),
+                        ppat_loc: default_loc,
+                        ppat_attributes: vec![],
+                    };
 
-                        let some_pat = ParsedPattern {
-                            ppat_desc: crate::parser::ast::PatternDesc::Ppat_construct(
-                                Located {
-                                    txt: tctx.arena.some_lid(),
-                                    loc: default_loc,
-                                },
-                                Some(Box::new(matched_pat)),
-                            ),
-                            ppat_loc: default_loc,
-                            ppat_attributes: vec![],
-                        };
-
-                        let none_pat = ParsedPattern {
-                            ppat_desc: crate::parser::ast::PatternDesc::Ppat_construct(
-                                Located {
-                                    txt: tctx.arena.predef_none_lid(),
-                                    loc: default_loc,
-                                },
-                                None,
-                            ),
-                            ppat_loc: default_loc,
-                            ppat_attributes: vec![],
-                        };
-
-                        let some_rhs = ParsedExpression {
-                            pexp_desc: crate::parser::ast::ExpressionDesc::Pexp_ident(Located {
-                                txt: param_lid.txt,
+                    let none_pat = ParsedPattern {
+                        ppat_desc: crate::parser::ast::PatternDesc::Ppat_construct(
+                            Located {
+                                txt: tctx.arena.predef_none_lid(),
                                 loc: default_loc,
-                            }),
-                            pexp_loc: default_loc,
-                            pexp_attributes: vec![],
-                        };
-
-                        let match_expr = ParsedExpression {
-                            pexp_desc: crate::parser::ast::ExpressionDesc::Pexp_match(
-                                Box::new(ParsedExpression {
-                                    pexp_desc: crate::parser::ast::ExpressionDesc::Pexp_ident(
-                                        Located {
-                                            txt: param_lid.txt,
-                                            loc,
-                                        },
-                                    ),
-                                    pexp_loc: loc,
-                                    pexp_attributes: vec![],
-                                }),
-                                vec![
-                                    crate::parser::ast::Case {
-                                        pc_bar: None,
-                                        pc_lhs: some_pat,
-                                        pc_guard: None,
-                                        pc_rhs: some_rhs,
-                                    },
-                                    crate::parser::ast::Case {
-                                        pc_bar: None,
-                                        pc_lhs: none_pat,
-                                        pc_guard: None,
-                                        pc_rhs: default_expr.as_ref().clone(),
-                                    },
-                                ],
-                            ),
-                            pexp_loc: lhs.ppat_loc,
-                            pexp_attributes: vec![],
-                        };
-
-                        let rewritten_body = ParsedExpression {
-                            pexp_desc: crate::parser::ast::ExpressionDesc::Pexp_let(
-                                RecFlag::Nonrecursive,
-                                vec![crate::parser::ast::ValueBinding {
-                                    pvb_pat: lhs.clone(),
-                                    pvb_expr: match_expr,
-                                    pvb_attributes: vec![],
-                                    pvb_loc: tctx.arena.none_loc(),
-                                }],
-                                rhs.clone(),
-                            ),
-                            pexp_loc: loc,
-                            pexp_attributes: vec![],
-                        };
-
-                        return type_function(
-                            tctx,
-                            env,
-                            loc,
-                            arg_label,
+                            },
                             None,
-                            lhs,
-                            &rewritten_body,
-                            *arity,
-                            *is_async,
-                            expected_ty,
-                            &expr.pexp_attributes,
-                        );
-                    }
+                        ),
+                        ppat_loc: default_loc,
+                        ppat_attributes: vec![],
+                    };
+
+                    let some_rhs = ParsedExpression {
+                        pexp_desc: crate::parser::ast::ExpressionDesc::Pexp_ident(Located {
+                            txt: sth_lid,
+                            loc: default_loc,
+                        }),
+                        pexp_loc: default_loc,
+                        pexp_attributes: vec![],
+                    };
+
+                    let match_expr = ParsedExpression {
+                        pexp_desc: crate::parser::ast::ExpressionDesc::Pexp_match(
+                            Box::new(ParsedExpression {
+                                pexp_desc: crate::parser::ast::ExpressionDesc::Pexp_ident(
+                                    Located {
+                                        txt: opt_lid,
+                                        loc,
+                                    },
+                                ),
+                                pexp_loc: loc,
+                                pexp_attributes: vec![],
+                            }),
+                            vec![
+                                crate::parser::ast::Case {
+                                    pc_bar: None,
+                                    pc_lhs: some_pat,
+                                    pc_guard: None,
+                                    pc_rhs: some_rhs,
+                                },
+                                crate::parser::ast::Case {
+                                    pc_bar: None,
+                                    pc_lhs: none_pat,
+                                    pc_guard: None,
+                                    pc_rhs: default_expr.as_ref().clone(),
+                                },
+                            ],
+                        ),
+                        pexp_loc: sloc,
+                        pexp_attributes: vec![],
+                    };
+
+                    let default_attr = (
+                        Located::mknoloc(tctx.arena.default_attr_str()),
+                        crate::parser::ast::Payload::PStr(vec![]),
+                    );
+
+                    let rewritten_body = ParsedExpression {
+                        pexp_desc: crate::parser::ast::ExpressionDesc::Pexp_let(
+                            RecFlag::Nonrecursive,
+                            vec![crate::parser::ast::ValueBinding {
+                                pvb_pat: lhs.clone(),
+                                pvb_expr: match_expr,
+                                pvb_attributes: vec![],
+                                pvb_loc: tctx.arena.none_loc(),
+                            }],
+                            rhs.clone(),
+                        ),
+                        pexp_loc: loc,
+                        pexp_attributes: vec![default_attr],
+                    };
+
+                    let opt_param = ParsedPattern {
+                        ppat_desc: crate::parser::ast::PatternDesc::Ppat_var(Located {
+                            txt: opt_name,
+                            loc: sloc,
+                        }),
+                        ppat_loc: sloc,
+                        ppat_attributes: vec![],
+                    };
+
+                    return type_function(
+                        tctx,
+                        env,
+                        loc,
+                        arg_label,
+                        None,
+                        &opt_param,
+                        &rewritten_body,
+                        *arity,
+                        *is_async,
+                        expected_ty,
+                        &expr.pexp_attributes,
+                    );
                 }
             }
 
@@ -3593,100 +3626,6 @@ fn unify_expression_types(
             trace: vec![(ty1, ty2)],
             context,
         }),
-    }
-}
-
-fn find_simple_lident_for_name(
-    expr: &ParsedExpression,
-    name: StrIdx,
-    arena: &ParseArena,
-) -> Option<Located<LidentIdx>> {
-    let target = arena.get_string(name);
-    let lid_matches = |lid: LidentIdx| match arena.get_longident(lid) {
-        Longident::Lident(idx) => arena.get_string(*idx) == target,
-        _ => false,
-    };
-
-    if let crate::parser::ast::ExpressionDesc::Pexp_ident(lid) = &expr.pexp_desc {
-        if lid_matches(lid.txt) {
-            return Some(*lid);
-        }
-    }
-
-    match &expr.pexp_desc {
-        crate::parser::ast::ExpressionDesc::Pexp_let(_, vbs, body) => vbs
-            .iter()
-            .find_map(|vb| find_simple_lident_for_name(&vb.pvb_expr, name, arena))
-            .or_else(|| find_simple_lident_for_name(body, name, arena)),
-        crate::parser::ast::ExpressionDesc::Pexp_fun { default, rhs, .. } => default
-            .as_ref()
-            .and_then(|d| find_simple_lident_for_name(d, name, arena))
-            .or_else(|| find_simple_lident_for_name(rhs, name, arena)),
-        crate::parser::ast::ExpressionDesc::Pexp_apply { funct, args, .. } => {
-            find_simple_lident_for_name(funct, name, arena).or_else(|| {
-                args.iter()
-                    .find_map(|(_, arg)| find_simple_lident_for_name(arg, name, arena))
-            })
-        }
-        crate::parser::ast::ExpressionDesc::Pexp_match(scrutinee, cases)
-        | crate::parser::ast::ExpressionDesc::Pexp_try(scrutinee, cases) => {
-            find_simple_lident_for_name(scrutinee, name, arena).or_else(|| {
-                cases
-                    .iter()
-                    .find_map(|c| find_simple_lident_for_name(&c.pc_rhs, name, arena))
-            })
-        }
-        crate::parser::ast::ExpressionDesc::Pexp_tuple(exprs)
-        | crate::parser::ast::ExpressionDesc::Pexp_array(exprs) => exprs
-            .iter()
-            .find_map(|e| find_simple_lident_for_name(e, name, arena)),
-        crate::parser::ast::ExpressionDesc::Pexp_construct(_, arg)
-        | crate::parser::ast::ExpressionDesc::Pexp_variant(_, arg) => arg
-            .as_ref()
-            .and_then(|e| find_simple_lident_for_name(e, name, arena)),
-        crate::parser::ast::ExpressionDesc::Pexp_record(fields, base) => fields
-            .iter()
-            .find_map(|f| find_simple_lident_for_name(&f.expr, name, arena))
-            .or_else(|| {
-                base.as_ref()
-                    .and_then(|b| find_simple_lident_for_name(b, name, arena))
-            }),
-        crate::parser::ast::ExpressionDesc::Pexp_field(e, _)
-        | crate::parser::ast::ExpressionDesc::Pexp_assert(e)
-        | crate::parser::ast::ExpressionDesc::Pexp_newtype(_, e)
-        | crate::parser::ast::ExpressionDesc::Pexp_open(_, _, e)
-        | crate::parser::ast::ExpressionDesc::Pexp_await(e)
-        | crate::parser::ast::ExpressionDesc::Pexp_send(e, _)
-        | crate::parser::ast::ExpressionDesc::Pexp_constraint(e, _)
-        | crate::parser::ast::ExpressionDesc::Pexp_coerce(e, _, _)
-        | crate::parser::ast::ExpressionDesc::Pexp_letmodule(_, _, e)
-        | crate::parser::ast::ExpressionDesc::Pexp_letexception(_, e) => {
-            find_simple_lident_for_name(e, name, arena)
-        }
-        crate::parser::ast::ExpressionDesc::Pexp_setfield(e1, _, e2)
-        | crate::parser::ast::ExpressionDesc::Pexp_sequence(e1, e2)
-        | crate::parser::ast::ExpressionDesc::Pexp_while(e1, e2) => {
-            find_simple_lident_for_name(e1, name, arena)
-                .or_else(|| find_simple_lident_for_name(e2, name, arena))
-        }
-        crate::parser::ast::ExpressionDesc::Pexp_ifthenelse(cond, then_, else_) => {
-            find_simple_lident_for_name(cond, name, arena)
-                .or_else(|| find_simple_lident_for_name(then_, name, arena))
-                .or_else(|| {
-                    else_.as_ref()
-                        .and_then(|e| find_simple_lident_for_name(e, name, arena))
-                })
-        }
-        crate::parser::ast::ExpressionDesc::Pexp_for(_, start, end, _, body) => {
-            find_simple_lident_for_name(start, name, arena)
-                .or_else(|| find_simple_lident_for_name(end, name, arena))
-                .or_else(|| find_simple_lident_for_name(body, name, arena))
-        }
-        crate::parser::ast::ExpressionDesc::Pexp_ident(_)
-        | crate::parser::ast::ExpressionDesc::Pexp_constant(_)
-        | crate::parser::ast::ExpressionDesc::Pexp_pack(_)
-        | crate::parser::ast::ExpressionDesc::Pexp_extension(_)
-        | crate::parser::ast::ExpressionDesc::Pexp_jsx_element(_) => None,
     }
 }
 
@@ -4192,7 +4131,7 @@ fn type_application(
                     Expression::new(
                         ExpressionDesc::Texp_construct(
                             Located {
-                                txt: tctx.arena.some_lid(),
+                                txt: tctx.arena.plain_some_lid(),
                                 loc: wrapped_loc,
                             },
                             make_some_constructor(ctx, option_ty),

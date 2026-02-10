@@ -336,9 +336,20 @@ pub struct ParseArena {
     static_none_lid: LidentIdx,
     /// Pre-allocated `Ldot(Lident "*predef*", "None")` for optional-default rewrites.
     static_predef_none_lid: LidentIdx,
-    /// Pre-allocated `Ldot(Lident "*predef*", "Some")` for optional field desugaring.
-    /// Allocated in `new()`, not `default()`.
+    /// Pre-allocated `Lident "Some"` for unqualified option wrapping paths.
     static_some_lid: LidentIdx,
+    /// Pre-allocated `Ldot(Lident "*predef*", "Some")` for optional-default rewrites.
+    static_predef_some_lid: LidentIdx,
+    /// Pre-allocated `Lident "*opt*"` for optional-default rewrite binding names.
+    static_optional_default_opt_lid: LidentIdx,
+    /// Pre-allocated `Lident "*sth*"` for optional-default rewrite match payload names.
+    static_optional_default_sth_lid: LidentIdx,
+    /// Pre-allocated `"*opt*"` string for optional-default rewrite binding names.
+    static_optional_default_opt_str: StrIdx,
+    /// Pre-allocated `"*sth*"` string for optional-default rewrite match payload names.
+    static_optional_default_sth_str: StrIdx,
+    /// Pre-allocated `"#default"` attribute name used by optional-default rewrite lets.
+    static_default_attr_str: StrIdx,
     /// Pre-allocated static longidents used by `%external` rewrite helpers.
     static_ppx_lidents: StaticPpxLidents,
     /// Position deduplication table - maps position content to its index.
@@ -464,6 +475,13 @@ impl Default for ParseArena {
         let ppx_empty_str = strings.push(String::new());
         let ppx_undefined_str = strings.push("undefined".to_string());
         let template_concat_str = strings.push("++".to_string());
+        let static_optional_default_opt_str = strings.intern("*opt*");
+        let static_optional_default_sth_str = strings.intern("*sth*");
+        let static_default_attr_str = strings.intern("#default");
+        let static_optional_default_opt_lid =
+            longidents.push(Longident::Lident(static_optional_default_opt_str));
+        let static_optional_default_sth_lid =
+            longidents.push(Longident::Lident(static_optional_default_sth_str));
 
         // Pre-allocate static list lidents.
         // We need TWO sets: one for pattern contexts (res_core.ml) and one for
@@ -606,6 +624,12 @@ impl Default for ParseArena {
             Box::new(Longident::Lident(predef_str)),
             none_str,
         ));
+        let some_str = strings.intern("Some");
+        let static_predef_some_lid = longidents.push(Longident::Ldot(
+            Box::new(Longident::Lident(predef_str)),
+            some_str,
+        ));
+        let static_some_lid = longidents.push(Longident::Lident(some_str));
 
         // Pre-allocate Ast_literal no-loc core type longidents.
         // OCaml reuses these module-level constants (Ast_literal.No_loc.*), so
@@ -640,7 +664,13 @@ impl Default for ParseArena {
             static_placeholder_lid: LidentIdx::default(),
             static_none_lid: LidentIdx::default(),
             static_predef_none_lid,
-            static_some_lid: LidentIdx::default(),
+            static_some_lid,
+            static_predef_some_lid,
+            static_optional_default_opt_lid,
+            static_optional_default_sth_lid,
+            static_optional_default_opt_str,
+            static_optional_default_sth_str,
+            static_default_attr_str,
             static_ppx_lidents,
             position_dedup: HashMap::new(),
             lident_dedup,
@@ -709,12 +739,6 @@ impl ParseArena {
         // Pre-allocate "*predef*" longident
         let predef_str = arena.strings.intern("*predef*");
         arena.longidents.push(Longident::Lident(predef_str));
-        // Pre-allocate Ldot(*predef*, "Some") longident (for optional field desugaring)
-        let some_str = arena.strings.intern("Some");
-        arena.static_some_lid = arena.longidents.push(Longident::Ldot(
-            Box::new(Longident::Lident(predef_str)),
-            some_str,
-        ));
         arena
     }
 
@@ -736,10 +760,49 @@ impl ParseArena {
         self.static_predef_none_lid
     }
 
-    /// Get the pre-allocated Ldot(*predef*, "Some") longident index.
-    /// Used for optional field desugaring (wrapping provided optional fields in Some).
+    /// Get the pre-allocated `Ldot(*predef*, "Some")` longident index.
+    /// Used for optional label processing in typecore.
     pub fn some_lid(&self) -> LidentIdx {
+        self.static_predef_some_lid
+    }
+
+    /// Get the pre-allocated `Ldot(*predef*, "Some")` longident index.
+    /// Used for optional-default rewrites where constructors must resolve to option.
+    pub fn predef_some_lid(&self) -> LidentIdx {
+        self.static_predef_some_lid
+    }
+
+    /// Get the pre-allocated `Lident "Some"` longident index.
+    /// Used for unqualified option wrappers (`option_some` paths).
+    pub fn plain_some_lid(&self) -> LidentIdx {
         self.static_some_lid
+    }
+
+    /// Get the pre-allocated `Lident "*opt*"` longident index.
+    /// Used for optional-default rewrite function parameter binding.
+    pub fn optional_default_opt_lid(&self) -> LidentIdx {
+        self.static_optional_default_opt_lid
+    }
+
+    /// Get the pre-allocated `Lident "*sth*"` longident index.
+    /// Used for optional-default rewrite match payload binding.
+    pub fn optional_default_sth_lid(&self) -> LidentIdx {
+        self.static_optional_default_sth_lid
+    }
+
+    /// Get the pre-allocated `"*opt*"` string index.
+    pub fn optional_default_opt_str(&self) -> StrIdx {
+        self.static_optional_default_opt_str
+    }
+
+    /// Get the pre-allocated `"*sth*"` string index.
+    pub fn optional_default_sth_str(&self) -> StrIdx {
+        self.static_optional_default_sth_str
+    }
+
+    /// Get the pre-allocated `"#default"` attribute string index.
+    pub fn default_attr_str(&self) -> StrIdx {
+        self.static_default_attr_str
     }
 
     /// Create a Located<LidentIdx> with the placeholder longident and given location.
