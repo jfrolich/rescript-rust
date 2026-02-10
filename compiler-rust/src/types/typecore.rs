@@ -5649,26 +5649,36 @@ fn type_constraint(
     expected_ty: TypeExprRef,
     attributes: &[crate::parser::ast::Attribute],
 ) -> TypeCoreResult<Expression> {
-    // Translate the type constraint
+    let ctx = tctx.type_ctx;
+
+    // Match OCaml typecore.ml Pexp_constraint:
+    // begin_def; transl_simple_type; end_def; generalize_structure;
+    // type_argument env sarg ty (instance env ty); exp_type = instance env ty.
+    ctx.begin_def();
     let (typed_ctype, ctype_ty) = transl_type(tctx, env, core_type)?;
+    let var_level = ctx.current_level();
+    ctx.end_def();
+    crate::types::generalize_structure(ctx, var_level, ctype_ty);
 
-    // Unify the constraint type with the expected type
-    if crate::types::unify(tctx.type_ctx, &mut tctx.unify_state, expected_ty, ctype_ty).is_err() {
-        return Err(TypeCoreError::ExprTypeClash {
-            trace: vec![(expected_ty, ctype_ty)],
-            context: None,
-        });
-    }
+    let arg_expected_ty = ctype_ty;
+    let arg_unify_ty = crate::types::instance(ctx, ctype_ty);
+    let result_ty = crate::types::instance(ctx, ctype_ty);
 
-    // Type check the inner expression with the constraint type
-    let typed_inner = type_expect(tctx, env, inner_expr, ctype_ty, None)?;
+    let typed_inner = type_expect(tctx, env, inner_expr, arg_expected_ty, None)?;
+    unify_expression_types(tctx, loc, typed_inner.exp_type, arg_unify_ty, None)?;
+    unify_expression_types(tctx, loc, result_ty, expected_ty, None)?;
 
-    // Return the inner expression with the constraint as exp_extra
-    Ok(typed_inner.with_exp_extra(
+    let mut result = typed_inner;
+    result.exp_type = result_ty;
+    let mut extras = Vec::with_capacity(result.exp_extra.len() + 1);
+    extras.push((
         crate::types::typedtree::ExpExtra::Texp_constraint(typed_ctype),
         loc.clone(),
         attributes.to_vec(),
-    ))
+    ));
+    extras.extend(result.exp_extra.into_iter());
+    result.exp_extra = extras;
+    Ok(result)
 }
 
 /// Type check type coercion.
