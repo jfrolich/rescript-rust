@@ -2949,18 +2949,36 @@ pub fn type_expect<'a>(
                 tctx.type_ctx,
             )?;
 
-            // Match OCaml `instance` behavior for repeated local monomorphic
-            // identifiers: keep non-generic ground constructor nodes by
-            // identity so multiple occurrences can share through unification.
+            // Keep local monomorphic primitive ground constructors by identity
+            // so repeated uses can share through unification, but avoid reusing
+            // alias paths (e.g. Stdlib_RegExp.t) that OCaml keeps distinct in
+            // pattern nodes.
             let ty = {
                 let source_ty = ctx.repr(desc.val_type);
                 let reuse_local_ground = match &path {
-                    Path::Pident(id) if !id.is_persistent() => {
-                        if ctx.get_level(source_ty) != crate::types::GENERIC_LEVEL {
-                            let desc = ctx.get_desc(source_ty);
-                            matches!(&*desc, TypeDesc::Tconstr { args, .. } if args.is_empty())
-                        } else {
-                            false
+                    Path::Pident(id)
+                        if !id.is_persistent()
+                            && ctx.get_level(source_ty) != crate::types::GENERIC_LEVEL =>
+                    {
+                        let desc = ctx.get_desc(source_ty);
+                        match &*desc {
+                            TypeDesc::Tconstr {
+                                path: source_path,
+                                args,
+                                ..
+                            } => {
+                                let keep_alias_path = matches!(
+                                    source_path,
+                                    Path::Pdot(parent, leaf, _)
+                                        if leaf == "t"
+                                            && matches!(
+                                                parent.as_ref(),
+                                                Path::Pident(id) if id.name() == "Stdlib_RegExp"
+                                            )
+                                );
+                                args.is_empty() && !keep_alias_path
+                            }
+                            _ => false,
                         }
                     }
                     _ => false,
