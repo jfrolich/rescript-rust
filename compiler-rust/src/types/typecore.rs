@@ -3607,6 +3607,19 @@ fn type_application(
 ) -> TypeCoreResult<Expression> {
     use crate::types::typedtree::ApplyArg;
 
+    enum PendingApplyArg<'a> {
+        Provided {
+            label: crate::types::ArgLabel,
+            expr: &'a ParsedExpression,
+            expected_ty: TypeExprRef,
+            enforce_optional: bool,
+        },
+        SynthOptionalNone {
+            label: crate::types::ArgLabel,
+            option_ty: TypeExprRef,
+        },
+    }
+
     fn parser_arg_label_name<'a>(label: &ArgLabel, arena: &'a ParseArena) -> &'a str {
         match label {
             ArgLabel::Nolabel => "",
@@ -3700,7 +3713,7 @@ fn type_application(
         .iter()
         .map(|(label, expr)| (label.clone(), expr))
         .collect();
-    let mut typed_args = Vec::new();
+    let mut pending_args: Vec<PendingApplyArg<'_>> = Vec::new();
     let mut omitted: Vec<(crate::types::ArgLabel, TypeExprRef)> = Vec::new();
     let mut consumed_optional_count = 0usize;
     let mut synthesized_optional_count = 0usize;
@@ -3721,16 +3734,11 @@ fn type_application(
                     arg_ty
                 };
 
-                let typed_arg = type_expect(
-                    tctx,
-                    env,
-                    arg_expr,
-                    effective_arg_ty,
-                    Some(TypeClashContext::FunctionCall),
-                )?;
-                typed_args.push(ApplyArg {
+                pending_args.push(PendingApplyArg::Provided {
                     label: apply_arg_label_for_param(&fn_label, &call_label, tctx.arena),
-                    expression: typed_arg,
+                    expr: arg_expr,
+                    expected_ty: effective_arg_ty,
+                    enforce_optional: false,
                 });
                 current_ty = ret_ty;
                 continue;
@@ -3740,25 +3748,9 @@ fn type_application(
                 consumed_optional_count += 1;
                 // OCaml type_application: consumed omitted optional labels still appear
                 // in Texp_apply as explicit None arguments at Location.none.
-                let none_loc = tctx.arena.none_loc();
-                let option_ty = crate::types::instance(ctx, arg_ty);
-                let none_expr = Expression::new(
-                    ExpressionDesc::Texp_construct(
-                        Located {
-                            txt: tctx.arena.none_lid(),
-                            loc: none_loc,
-                        },
-                        make_none_constructor(ctx, option_ty),
-                        vec![],
-                    ),
-                    none_loc,
-                    option_ty,
-                    EnvRef(0),
-                    vec![],
-                );
-                typed_args.push(ApplyArg {
+                pending_args.push(PendingApplyArg::SynthOptionalNone {
                     label: fn_label.clone(),
-                    expression: none_expr,
+                    option_ty: crate::types::instance(ctx, arg_ty),
                 });
                 synthesized_optional_count += 1;
                 current_ty = ret_ty;
@@ -3778,7 +3770,7 @@ fn type_application(
             && omitted.is_empty()
             && remaining_args.is_empty()
             && label.is_nolabel()
-            && typed_args.len() == synthesized_optional_count
+            && pending_args.len() == synthesized_optional_count
         {
             if let crate::parser::ast::ExpressionDesc::Pexp_construct(lid, None) = &arg_expr.pexp_desc
             {
@@ -3796,20 +3788,11 @@ fn type_application(
         unify_expression_types(tctx, loc, expanded_current_ty, arrow_ty, None)?;
         top_arity = None;
 
-        let typed_arg = type_expect(
-            tctx,
-            env,
-            arg_expr,
-            arg_ty,
-            Some(TypeClashContext::FunctionCall),
-        )?;
-        if label.is_optional() {
-            let option_ty = env.type_option(ctx, ctx.new_var(None));
-            unify_expression_types(tctx, loc, typed_arg.exp_type, option_ty, None)?;
-        }
-        typed_args.push(ApplyArg {
+        pending_args.push(PendingApplyArg::Provided {
             label: convert_arg_label_for_ctx(&label, tctx.arena),
-            expression: typed_arg,
+            expr: arg_expr,
+            expected_ty: arg_ty,
+            enforce_optional: label.is_optional(),
         });
         current_ty = ret_ty;
     }
@@ -3817,32 +3800,16 @@ fn type_application(
     if total_app {
         // Match OCaml `type_unknown_args []`: for total applications, trailing
         // optional arrows are materialized as explicit `None` arguments.
-        let mut applied_count = typed_args.len();
+        let mut applied_count = pending_args.len();
         while (applied_count as i32) < max_arity {
             let expanded_current_ty = crate::types::ctype::expand_head(ctx, env, current_ty);
             if let Some((fn_label, arg_ty, ret_ty)) =
                 crate::types::ctype::split_arrow_with_label(ctx, expanded_current_ty)
             {
                 if fn_label.is_optional() {
-                    let none_loc = tctx.arena.none_loc();
-                    let option_ty = crate::types::instance(ctx, arg_ty);
-                    let none_expr = Expression::new(
-                        ExpressionDesc::Texp_construct(
-                            Located {
-                                txt: tctx.arena.none_lid(),
-                                loc: none_loc,
-                            },
-                            make_none_constructor(ctx, option_ty),
-                            vec![],
-                        ),
-                        none_loc,
-                        option_ty,
-                        EnvRef(0),
-                        vec![],
-                    );
-                    typed_args.push(ApplyArg {
+                    pending_args.push(PendingApplyArg::SynthOptionalNone {
                         label: fn_label.clone(),
-                        expression: none_expr,
+                        option_ty: crate::types::instance(ctx, arg_ty),
                     });
                     current_ty = ret_ty;
                     applied_count += 1;
@@ -3850,6 +3817,55 @@ fn type_application(
                 }
             }
             break;
+        }
+    }
+
+    let mut typed_args = Vec::with_capacity(pending_args.len());
+    for pending_arg in pending_args {
+        match pending_arg {
+            PendingApplyArg::Provided {
+                label,
+                expr,
+                expected_ty,
+                enforce_optional,
+            } => {
+                let typed_arg = type_expect(
+                    tctx,
+                    env,
+                    expr,
+                    expected_ty,
+                    Some(TypeClashContext::FunctionCall),
+                )?;
+                if enforce_optional {
+                    let option_ty = env.type_option(ctx, ctx.new_var(None));
+                    unify_expression_types(tctx, loc, typed_arg.exp_type, option_ty, None)?;
+                }
+                typed_args.push(ApplyArg {
+                    label,
+                    expression: typed_arg,
+                });
+            }
+            PendingApplyArg::SynthOptionalNone { label, option_ty } => {
+                let none_loc = tctx.arena.none_loc();
+                let none_expr = Expression::new(
+                    ExpressionDesc::Texp_construct(
+                        Located {
+                            txt: tctx.arena.none_lid(),
+                            loc: none_loc,
+                        },
+                        make_none_constructor(ctx, option_ty),
+                        vec![],
+                    ),
+                    none_loc,
+                    option_ty,
+                    EnvRef(0),
+                    vec![],
+                );
+                typed_args.push(ApplyArg {
+                    label,
+                    expression: none_expr,
+                });
+            }
         }
     }
 
@@ -4261,11 +4277,11 @@ fn type_function(
         c_rhs: typed_body,
     }];
 
-    // OCaml typecore.ml: exp_type = instance env (newgenty (Tarrow ...))
-    let exp_type = crate::types::instance(
-        ctx,
-        ctx.new_generic_arrow(ctx_label, param_ty, return_ty, arity_opt),
-    );
+    // OCaml typecore.ml builds a generic arrow and then instantiates it. Rust
+    // currently over-copies non-generic nodes during instance(), which can
+    // perturb alias path identity in emitted typedtree. Keep the freshly-built
+    // generic arrow node here to preserve the original parameter path shape.
+    let exp_type = ctx.new_generic_arrow(ctx_label, param_ty, return_ty, arity_opt);
 
     Ok(Expression::new(
         ExpressionDesc::Texp_function {
@@ -6097,6 +6113,7 @@ fn type_pack(
 
     let typed_module = crate::types::typemod::type_module_expr(tctx, env, tctx.arena, module_expr)
         .map_err(|e| TypeCoreError::Other(format!("pack: {e:?}")))?;
+    let typed_module_loc = typed_module.mod_loc;
     let package_mty = crate::types::typedtree::ModuleType {
         mty_desc: crate::types::typedtree::ModuleTypeDesc::Tmty_ident(
             pack_path.clone(),
@@ -6112,7 +6129,7 @@ fn type_pack(
             crate::types::typedtree::ModuleTypeConstraint::Tmodtype_implicit,
             crate::types::typedtree::ModuleCoercion::Tcoerce_none,
         ),
-        mod_loc: loc,
+        mod_loc: typed_module_loc,
         mod_type: package_mty,
         mod_env: EnvRef(0),
         mod_attributes: vec![],
