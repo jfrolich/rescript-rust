@@ -2635,8 +2635,13 @@ fn type_pattern_record(
         let field_ty = ctx.new_var(None);
 
         // Try to look up the label from the environment for type info
-        let label_desc =
-            if let Some(env_label) = disambiguate_label(&field_name, record_ty, env, ctx) {
+        let label_desc = if let Some(env_label) = disambiguate_label(
+            &field_name,
+            record_ty,
+            env,
+            &mut tctx.persistent_env,
+            ctx,
+        ) {
                 let (ty_arg, ty_res) = crate::types::ctype::instance_label(ctx, &env_label);
                 // Best-effort unification to propagate type info
                 let _ = crate::types::unify(ctx, &mut tctx.unify_state, ty_res, record_ty);
@@ -5388,7 +5393,13 @@ fn type_record(
     // Type check explicitly written fields.
     for (idx, field) in fields.iter().enumerate() {
         let field_name = tctx.longident_last_name(tctx.resolve_lid(field.lid.txt));
-        let disambiguated = disambiguate_label(&field_name, disambiguation_ty, env, ctx);
+        let disambiguated = disambiguate_label(
+            &field_name,
+            disambiguation_ty,
+            env,
+            &mut tctx.persistent_env,
+            ctx,
+        );
         if first_disambiguated_label.is_none() {
             first_disambiguated_label = disambiguated.clone();
         }
@@ -5540,7 +5551,13 @@ fn type_record(
 
         for (lbl_idx, label_decl) in all_labels.iter().enumerate() {
             let label_name = label_decl.ld_id.name().to_string();
-            let disambiguated = disambiguate_label(&label_name, disambiguation_ty, env, ctx);
+                let disambiguated = disambiguate_label(
+                    &label_name,
+                    disambiguation_ty,
+                    env,
+                    &mut tctx.persistent_env,
+                    ctx,
+                );
 
             let label_desc = if let Some(env_label) = disambiguated {
                 let (ty_arg, ty_res) = crate::types::ctype::instance_label(ctx, &env_label);
@@ -5730,7 +5747,13 @@ fn type_field(
     let field_ty = ctx.new_var(None);
 
     // Disambiguate label: use the record expression's type to find the right label
-    let env_label = disambiguate_label(&field_name, ty_exp, env, ctx);
+    let env_label = disambiguate_label(
+        &field_name,
+        ty_exp,
+        env,
+        &mut tctx.persistent_env,
+        ctx,
+    );
 
     let label_desc = if let Some(env_label) = env_label {
         let (ty_arg, ty_res) = crate::types::ctype::instance_label(ctx, &env_label);
@@ -5802,7 +5825,13 @@ fn type_setfield(
     let ty_exp = typed_record.exp_type;
     let field_ty = ctx.new_var(None);
 
-    let env_label = disambiguate_label(&field_name, ty_exp, env, ctx);
+    let env_label = disambiguate_label(
+        &field_name,
+        ty_exp,
+        env,
+        &mut tctx.persistent_env,
+        ctx,
+    );
     let label_desc = if let Some(env_label) = env_label {
         let (ty_arg, ty_res) = crate::types::ctype::instance_label(ctx, &env_label);
         unify_expression_types(tctx, loc, ty_res, record_ty, None)?;
@@ -5879,10 +5908,10 @@ fn type_constraint(
 
     let arg_expected_ty = ctype_ty;
     let arg_unify_ty = crate::types::instance(ctx, ctype_ty);
-    let result_ty = crate::types::instance(ctx, ctype_ty);
 
     let typed_inner = type_expect(tctx, env, inner_expr, arg_expected_ty, None)?;
     unify_expression_types(tctx, loc, typed_inner.exp_type, arg_unify_ty, None)?;
+    let result_ty = crate::types::instance(ctx, ctype_ty);
     unify_expression_types(tctx, loc, result_ty, expected_ty, None)?;
 
     let mut result = typed_inner;
@@ -8835,6 +8864,46 @@ fn disambiguate_constructor<'a>(
     Some((path, (*cstr).clone()))
 }
 
+/// Type-directed label disambiguation when the label is not in scope.
+///
+/// OCaml's `Label.disambiguate` can still resolve labels using `opath` even
+/// when `find_all_labels` is empty. Mirror that by inspecting the expected
+/// record type declaration directly.
+fn lookup_label_by_expected_type<'a>(
+    label_name: &str,
+    record_ty: TypeExprRef,
+    env: &Env,
+    pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
+    ctx: &'a crate::types::context::TypeContext<'a>,
+) -> Option<crate::types::LabelDescription> {
+    let type_path =
+        extract_type_path_from_expected_with_persistent_env(record_ty, env, pers_env, ctx)?;
+    let type_decl = lookup_type_decl_for_path(&type_path, env, pers_env, ctx)?;
+    let (labels, repr) = match &type_decl.type_kind {
+        crate::types::TypeKind::TypeRecord(labels, repr) => (labels, repr),
+        _ => return None,
+    };
+    let res_ty = ctx.new_generic_constr(type_path, type_decl.type_params.clone());
+    for (pos, ld) in labels.iter().enumerate() {
+        if ld.ld_id.name() == label_name {
+            return Some(crate::types::LabelDescription {
+                lbl_name: ld.ld_id.name().to_string(),
+                lbl_res: res_ty,
+                lbl_arg: ld.ld_type,
+                lbl_mut: ld.ld_mutable,
+                lbl_optional: ld.ld_optional,
+                lbl_pos: pos as i32,
+                lbl_all: crate::types::LabelArrayRef(0),
+                lbl_repres: repr.clone(),
+                lbl_private: type_decl.type_private,
+                lbl_loc: ld.ld_loc.clone(),
+                lbl_attributes: ld.ld_attributes.clone(),
+            });
+        }
+    }
+    None
+}
+
 /// Disambiguate a label by name, considering the record expression's type.
 /// Follows OCaml's Label.disambiguate pattern:
 /// 1. Get all labels with the given name from the env
@@ -8845,10 +8914,12 @@ fn disambiguate_label<'a>(
     label_name: &str,
     record_ty: TypeExprRef,
     env: &Env,
+    pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
     ctx: &'a crate::types::context::TypeContext<'a>,
 ) -> Option<crate::types::LabelDescription> {
     // Extract type path from the record expression's type
-    let opath = extract_type_path_from_expected(record_ty, env, ctx);
+    let opath =
+        extract_type_path_from_expected_with_persistent_env(record_ty, env, pers_env, ctx);
 
     // OCaml special-case: when disambiguating labels on dict, route any field lookup
     // through dictValuesType, then preserve the source field name in the final label.
@@ -8866,7 +8937,14 @@ fn disambiguate_label<'a>(
     let all_labels = env.find_all_labels(lookup_name);
 
     if all_labels.is_empty() {
-        return None;
+        let mut selected =
+            lookup_label_by_expected_type(lookup_name, record_ty, env, pers_env, ctx);
+        if let Some(override_name) = override_name {
+            if let Some(label) = selected.as_mut() {
+                label.lbl_name = override_name;
+            }
+        }
+        return selected;
     }
 
     let mut selected = None;
@@ -8918,6 +8996,10 @@ fn disambiguate_label<'a>(
     }
 
     // Fall back to the most recent label (last in the list)
+    if selected.is_none() {
+        selected = lookup_label_by_expected_type(lookup_name, record_ty, env, pers_env, ctx);
+    }
+
     if selected.is_none() {
         selected = all_labels.last().map(|l| (*l).clone());
     }
