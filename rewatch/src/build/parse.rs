@@ -13,7 +13,7 @@ use rayon::prelude::*;
 use rescript_compiler::binary_ast::{
     write_signature_ast_current_with_extra_deps, write_structure_ast_current_with_extra_deps,
 };
-use rescript_compiler::parser::{Parser, code_frame, module};
+use rescript_compiler::parser::{Parser, code_frame, jsx_ppx, module};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -346,6 +346,7 @@ fn generate_ast(
     let source_path_str = source_path.to_string_lossy().to_string();
     let bsc_flags = config::flatten_flags(&package.config.compiler_flags);
     let open_deps = open_dependencies_from_bsc_flags(&bsc_flags);
+    let jsx_version = rust_parser_effective_jsx_version(build_state.project_context.get_root_config());
 
     // generate the dir of the ast_path (it mirrors the source file dir)
     let ast_parent_path = package.get_build_path().join(ast_path.parent().unwrap());
@@ -362,7 +363,13 @@ fn generate_ast(
                 package.name
             )
         });
-        generate_ast_with_rust_parser(&file_path, &ast_output_path, &source_path_str, &open_deps)
+        generate_ast_with_rust_parser(
+            &file_path,
+            &ast_output_path,
+            &source_path_str,
+            &open_deps,
+            jsx_version,
+        )
             .map(|stderr| (ast_path.clone(), merge_warning_with_stderr(warning, stderr)))
     } else {
         let (_expected_ast_path, parser_args) = parser_args(
@@ -458,6 +465,21 @@ fn open_dependencies_from_bsc_flags(flags: &[String]) -> Vec<String> {
     deps
 }
 
+fn rust_parser_effective_jsx_version(root_config: &Config) -> i32 {
+    let version = root_config
+        .jsx
+        .as_ref()
+        .and_then(|jsx| jsx.version)
+        .unwrap_or(-1);
+    let preserve = root_config
+        .jsx
+        .as_ref()
+        .and_then(|jsx| jsx.preserve)
+        .unwrap_or(false);
+
+    if preserve { -1 } else { version }
+}
+
 fn first_unsupported_ppx_for_rust_parser(
     filtered_ppx_flags: &Option<Vec<OneOrMore<String>>>,
 ) -> Option<String> {
@@ -517,6 +539,7 @@ fn generate_ast_with_rust_parser(
     ast_output_path: &Path,
     source_path_for_ast: &str,
     extra_deps: &[String],
+    jsx_version: i32,
 ) -> anyhow::Result<Option<helpers::StdErr>> {
     let bytes =
         std::fs::read(source_file).with_context(|| format!("Failed to read {}", source_file.display()))?;
@@ -542,6 +565,7 @@ fn generate_ast_with_rust_parser(
                 Err(anyhow!(stderr))
             };
         }
+        let signature = jsx_ppx::transform_signature(signature, jsx_version, parser.arena_mut());
 
         write_signature_ast_current_with_extra_deps(
             ast_output_path,
@@ -565,6 +589,7 @@ fn generate_ast_with_rust_parser(
                 Err(anyhow!(stderr))
             };
         }
+        let structure = jsx_ppx::transform_structure(structure, jsx_version, parser.arena_mut());
 
         write_structure_ast_current_with_extra_deps(
             ast_output_path,
@@ -598,7 +623,8 @@ fn filter_ppx_flags(
 
 #[cfg(test)]
 mod tests {
-    use super::open_dependencies_from_bsc_flags;
+    use super::{open_dependencies_from_bsc_flags, rust_parser_effective_jsx_version};
+    use crate::config::Config;
 
     #[test]
     fn open_dependencies_extracts_and_dedups() {
@@ -622,5 +648,37 @@ mod tests {
         let flags = vec!["-open".to_string()];
         let deps = open_dependencies_from_bsc_flags(&flags);
         assert!(deps.is_empty());
+    }
+
+    #[test]
+    fn rust_parser_effective_jsx_version_uses_rescript_json_version() {
+        let config = Config::new_from_json_string(
+            r#"
+            {
+                "name": "demo",
+                "sources": ["src"],
+                "jsx": { "version": 4, "mode": "automatic" }
+            }
+            "#,
+        )
+        .unwrap();
+
+        assert_eq!(rust_parser_effective_jsx_version(&config), 4);
+    }
+
+    #[test]
+    fn rust_parser_effective_jsx_version_respects_preserve_flag() {
+        let config = Config::new_from_json_string(
+            r#"
+            {
+                "name": "demo",
+                "sources": ["src"],
+                "jsx": { "version": 4, "mode": "automatic", "preserve": true }
+            }
+            "#,
+        )
+        .unwrap();
+
+        assert_eq!(rust_parser_effective_jsx_version(&config), -1);
     }
 }
