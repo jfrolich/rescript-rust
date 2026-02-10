@@ -45,6 +45,7 @@ const DICT_PATTERN_ATTRIBUTE: &str = "res.dictPattern";
 const DICT_MAGIC_FIELD_NAME: &str = "dictValuesType";
 const DICT_TYPE_NAME: &str = "dict";
 const PAT_VARIANT_SPREAD_ATTRIBUTE: &str = "res.patVariantSpread";
+const PAT_FROM_VARIANT_SPREAD_ATTRIBUTE: &str = "res.patFromVariantSpread";
 
 fn ocaml_hashtbl_power_2_above(mut x: usize, n: usize) -> usize {
     while x < n {
@@ -1586,6 +1587,15 @@ fn build_ppat_or_for_variant_spread(
     }
 
     let (_path, constructors, spread_ty) = extract_type_from_pat_variant_spread(tctx, env, lident)?;
+    debug_assert_eq!(
+        tctx.arena
+            .get_string(tctx.arena.pat_from_variant_spread_attr_str()),
+        PAT_FROM_VARIANT_SPREAD_ATTRIBUTE
+    );
+    let pat_from_variant_spread_attr = (
+        Located::mknoloc(tctx.arena.pat_from_variant_spread_attr_str()),
+        crate::parser::ast::Payload::PStr(vec![]),
+    );
     let mut synthetic_patterns = Vec::with_capacity(constructors.len());
     for cstr in constructors {
         let cstr_name = cstr.cd_id.name();
@@ -1609,7 +1619,7 @@ fn build_ppat_or_for_variant_spread(
         synthetic_patterns.push(ParsedPattern {
             ppat_desc: crate::parser::ast::PatternDesc::Ppat_construct(cstr_lid, cstr_arg),
             ppat_loc: lident.loc,
-            ppat_attributes: vec![],
+            ppat_attributes: vec![pat_from_variant_spread_attr.clone()],
         });
     }
 
@@ -1618,7 +1628,7 @@ fn build_ppat_or_for_variant_spread(
         .into_iter()
         .reduce(|lhs, rhs| ParsedPattern {
             ppat_desc: crate::parser::ast::PatternDesc::Ppat_or(Box::new(lhs), Box::new(rhs)),
-            ppat_loc: pat.ppat_loc,
+            ppat_loc: LocIdx::none(),
             ppat_attributes: vec![],
         }) {
         Some(pattern) => pattern,

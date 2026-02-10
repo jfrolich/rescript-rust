@@ -93,6 +93,16 @@ fn inline_record_type_params(
         .collect()
 }
 
+fn find_existing_loc_idx(arena: &ParseArena, target: &Location) -> Option<LocIdx> {
+    for idx in (0..arena.locations().len()).rev() {
+        let loc_idx = LocIdx(idx as u32);
+        if arena.to_location(loc_idx) == *target {
+            return Some(loc_idx);
+        }
+    }
+    None
+}
+
 fn rewrite_module_path_prefix(path: &Path, old_name: &str, new_prefix: &Path) -> Path {
     match path {
         Path::Pident(id) if id.name() == old_name => new_prefix.clone(),
@@ -3953,6 +3963,15 @@ fn type_structure_item<'a>(
                                 for source_cstr in source_cstrs {
                                     let sc_name = source_cstr.cd_id.name().to_string();
                                     let sc_id = Ident::create_persistent(&sc_name);
+                                    let spread_constructor_attr = (
+                                        Located::mknoloc(
+                                            arena.constructor_from_spread_attr_str(),
+                                        ),
+                                        crate::parser::ast::Payload::PStr(vec![]),
+                                    );
+                                    let source_cd_loc =
+                                        find_existing_loc_idx(arena, &source_cstr.cd_loc)
+                                            .unwrap_or(cstr.pcd_loc);
                                     let sc_is_const = matches!(&source_cstr.cd_args, crate::types::ConstructorArguments::CstrTuple(args) if args.is_empty());
                                     let sc_tag = if sc_is_const {
                                         let t = const_tag;
@@ -3978,7 +3997,7 @@ fn type_structure_item<'a>(
                                                         ),
                                                         ctyp_type: texpr,
                                                         ctyp_env: EnvRef(0),
-                                                        ctyp_loc: cstr.pcd_loc,
+                                                        ctyp_loc: source_cd_loc,
                                                         ctyp_attributes: vec![],
                                                     })
                                                     .collect();
@@ -3995,7 +4014,11 @@ fn type_structure_item<'a>(
                                             ) => {
                                                 let typed_lbls: Vec<TypedLabelDeclaration> = lbls.iter().map(|l| TypedLabelDeclaration {
                                                 ld_id: l.ld_id.clone(),
-                                                ld_name: crate::parse_arena::Located { txt: l.ld_id.name().to_string(), loc: cstr.pcd_loc },
+                                                ld_name: crate::parse_arena::Located {
+                                                    txt: l.ld_id.name().to_string(),
+                                                    loc: find_existing_loc_idx(arena, &l.ld_loc)
+                                                        .unwrap_or(source_cd_loc),
+                                                },
                                                 ld_mutable: match l.ld_mutable {
                                                     crate::types::asttypes::MutableFlag::Mutable => crate::parser::ast::MutableFlag::Mutable,
                                                     crate::types::asttypes::MutableFlag::Immutable => crate::parser::ast::MutableFlag::Immutable,
@@ -4005,11 +4028,13 @@ fn type_structure_item<'a>(
                                                     ctyp_desc: TypedCoreTypeDesc::Ttyp_var(None),
                                                     ctyp_type: l.ld_type,
                                                     ctyp_env: EnvRef(0),
-                                                    ctyp_loc: cstr.pcd_loc,
+                                                    ctyp_loc: find_existing_loc_idx(arena, &l.ld_loc)
+                                                        .unwrap_or(source_cd_loc),
                                                     ctyp_attributes: vec![],
                                                 },
-                                                ld_loc: cstr.pcd_loc,
-                                                ld_attributes: vec![],  // Attributes are internal type, typed tree uses parser type
+                                                ld_loc: find_existing_loc_idx(arena, &l.ld_loc)
+                                                    .unwrap_or(source_cd_loc),
+                                                ld_attributes: vec![],
                                             }).collect();
                                                 let args_vec = lbls
                                                     .iter()
@@ -4043,19 +4068,23 @@ fn type_structure_item<'a>(
                                             ctyp_desc: TypedCoreTypeDesc::Ttyp_var(None),
                                             ctyp_type: ty,
                                             ctyp_env: EnvRef(0),
-                                            ctyp_loc: cstr.pcd_loc,
+                                            ctyp_loc: source_cd_loc,
                                             ctyp_attributes: vec![],
                                         });
                                     typed_tree_cstrs.push(TypedConstructorDeclaration {
                                         cd_id: sc_id.clone(),
                                         cd_name: crate::parse_arena::Located {
                                             txt: sc_name.clone(),
-                                            loc: cstr.pcd_loc,
+                                            loc: source_cd_loc,
                                         },
                                         cd_args: sc_typed_tree_cd_args,
                                         cd_res: spread_cd_res,
-                                        cd_loc: cstr.pcd_loc,
-                                        cd_attributes: vec![], // TODO: add res.constructor_from_spread attribute
+                                        cd_loc: source_cd_loc,
+                                        cd_attributes: {
+                                            let mut attrs = tag_attrs.clone();
+                                            attrs.push(spread_constructor_attr.clone());
+                                            attrs
+                                        },
                                     });
                                     cstr_descs.push((
                                         sc_id,

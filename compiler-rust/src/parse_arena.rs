@@ -350,6 +350,10 @@ pub struct ParseArena {
     static_optional_default_sth_str: StrIdx,
     /// Pre-allocated `"#default"` attribute name used by optional-default rewrite lets.
     static_default_attr_str: StrIdx,
+    /// Pre-allocated `"res.constructor_from_spread"` attribute name used by variant spreads.
+    static_constructor_from_spread_attr_str: StrIdx,
+    /// Pre-allocated `"res.patFromVariantSpread"` attribute name used for synthetic spread patterns.
+    static_pat_from_variant_spread_attr_str: StrIdx,
     /// Pre-allocated static longidents used by `%external` rewrite helpers.
     static_ppx_lidents: StaticPpxLidents,
     /// Position deduplication table - maps position content to its index.
@@ -478,6 +482,10 @@ impl Default for ParseArena {
         let static_optional_default_opt_str = strings.intern("*opt*");
         let static_optional_default_sth_str = strings.intern("*sth*");
         let static_default_attr_str = strings.intern("#default");
+        let static_constructor_from_spread_attr_str =
+            strings.intern("res.constructor_from_spread");
+        let static_pat_from_variant_spread_attr_str =
+            strings.intern("res.patFromVariantSpread");
         let static_optional_default_opt_lid =
             longidents.push(Longident::Lident(static_optional_default_opt_str));
         let static_optional_default_sth_lid =
@@ -671,6 +679,8 @@ impl Default for ParseArena {
             static_optional_default_opt_str,
             static_optional_default_sth_str,
             static_default_attr_str,
+            static_constructor_from_spread_attr_str,
+            static_pat_from_variant_spread_attr_str,
             static_ppx_lidents,
             position_dedup: HashMap::new(),
             lident_dedup,
@@ -803,6 +813,16 @@ impl ParseArena {
     /// Get the pre-allocated `"#default"` attribute string index.
     pub fn default_attr_str(&self) -> StrIdx {
         self.static_default_attr_str
+    }
+
+    /// Get the pre-allocated `"res.constructor_from_spread"` attribute string index.
+    pub fn constructor_from_spread_attr_str(&self) -> StrIdx {
+        self.static_constructor_from_spread_attr_str
+    }
+
+    /// Get the pre-allocated `"res.patFromVariantSpread"` attribute string index.
+    pub fn pat_from_variant_spread_attr_str(&self) -> StrIdx {
+        self.static_pat_from_variant_spread_attr_str
     }
 
     /// Create a Located<LidentIdx> with the placeholder longident and given location.
