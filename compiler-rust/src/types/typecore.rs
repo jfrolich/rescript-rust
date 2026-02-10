@@ -934,9 +934,24 @@ fn transl_type_inner(
 
         CTD::Ptyp_var(name) => {
             // Type variable: 'a
-            // Look up existing or create a new type variable with this name.
-            // Matches OCaml's used_variables table to ensure sharing within a type expression.
-            let ty = if let Some(&existing) = tctx.used_variables.get(name) {
+            // OCaml treats locally abstract type binders (`(type t, ...)`) as
+            // abstract type constructors in env rather than ordinary variables.
+            // When such a type is in scope, resolve `t` to `Tconstr(Pident t,[])`.
+            let ty = if let Ok((id, decl)) = env.find_type_with_id(name) {
+                if decl.type_newtype_level.is_some() {
+                    let path = decl
+                        .type_path
+                        .clone()
+                        .unwrap_or_else(|| Path::pident(id.clone()));
+                    ctx.new_constr(path, vec![])
+                } else if let Some(&existing) = tctx.used_variables.get(name) {
+                    existing
+                } else {
+                    let v = ctx.new_var(Some(name.clone()));
+                    tctx.used_variables.insert(name.clone(), v);
+                    v
+                }
+            } else if let Some(&existing) = tctx.used_variables.get(name) {
                 existing
             } else {
                 let v = ctx.new_var(Some(name.clone()));

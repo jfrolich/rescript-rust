@@ -2118,7 +2118,14 @@ fn translate_module_type_to_decl<'a>(
                                         constructors.push(crate::types::ConstructorDeclaration {
                                             cd_id: Ident::create_persistent(cstr_name),
                                             cd_args: cstr_args,
-                                            cd_res: None,
+                                            cd_res: match &cstr.pcd_res {
+                                                Some(res_core_type) => {
+                                                    let (_typed_res, res_ref) =
+                                                        transl_type(tctx, &sig_env, res_core_type)?;
+                                                    Some(res_ref)
+                                                }
+                                                None => None,
+                                            },
                                             cd_loc: arena.to_location(cstr.pcd_loc),
                                             cd_attributes: vec![],
                                         });
@@ -3899,9 +3906,16 @@ fn type_structure_item<'a>(
                                     internal_cstrs.push(crate::types::ConstructorDeclaration {
                                         cd_id: sc_id.clone(),
                                         cd_args: sc_internal_cd_args,
-                                        cd_res: None,
+                                        cd_res: source_cstr.cd_res,
                                         cd_loc: source_cstr.cd_loc.clone(),
                                         cd_attributes: source_cstr.cd_attributes.clone(),
+                                    });
+                                    let spread_cd_res = source_cstr.cd_res.map(|ty| TypedCoreType {
+                                        ctyp_desc: TypedCoreTypeDesc::Ttyp_var(None),
+                                        ctyp_type: ty,
+                                        ctyp_env: EnvRef(0),
+                                        ctyp_loc: cstr.pcd_loc,
+                                        ctyp_attributes: vec![],
                                     });
                                     typed_tree_cstrs.push(TypedConstructorDeclaration {
                                         cd_id: sc_id.clone(),
@@ -3910,7 +3924,7 @@ fn type_structure_item<'a>(
                                             loc: cstr.pcd_loc,
                                         },
                                         cd_args: sc_typed_tree_cd_args,
-                                        cd_res: None,
+                                        cd_res: spread_cd_res,
                                         cd_loc: cstr.pcd_loc,
                                         cd_attributes: vec![],  // TODO: add res.constructor_from_spread attribute
                                     });
@@ -4110,6 +4124,17 @@ fn type_structure_item<'a>(
                                 }
                             };
 
+                            // Determine constructor result type (GADT constructors carry `pcd_res`).
+                            let (typed_cd_res, internal_cd_res) = match &cstr.pcd_res {
+                                Some(res_core_type) => {
+                                    let (typed_res, res_ty) = transl_type(tctx, &new_env, res_core_type)?;
+                                    (Some(typed_res), Some(res_ty))
+                                }
+                                None => {
+                                    (None, None)
+                                }
+                            };
+
                             // Determine the tag
                             let tag = if is_constant {
                                 let t = const_tag;
@@ -4120,9 +4145,6 @@ fn type_structure_item<'a>(
                                 block_tag += 1;
                                 crate::types::ConstructorTag::CstrBlock(t)
                             };
-
-                            // Create the result type: Tconstr(type_path, type_params)
-                            let res_ty = ctx.new_constr(type_path.clone(), internal_type_params.clone());
 
                             // For inline records, create a synthetic type declaration and
                             // set cstr_args to [Tconstr(path, type_params)] matching OCaml's datarepr.ml
@@ -4164,7 +4186,7 @@ fn type_structure_item<'a>(
                             internal_cstrs.push(crate::types::ConstructorDeclaration {
                                 cd_id: cstr_id.clone(),
                                 cd_args: internal_cd_args,
-                                cd_res: None,
+                                cd_res: internal_cd_res,
                                 cd_loc: arena.to_location(cstr.pcd_loc),
                                 cd_attributes: vec![],
                             });
@@ -4177,7 +4199,7 @@ fn type_structure_item<'a>(
                                     loc: cstr.pcd_name.loc,
                                 },
                                 cd_args: typed_tree_cd_args,
-                                cd_res: None,
+                                cd_res: typed_cd_res,
                                 cd_loc: cstr.pcd_loc,
                                 cd_attributes: {
                                     let mut attrs = tag_attrs.clone();
@@ -4190,7 +4212,7 @@ fn type_structure_item<'a>(
                             let cstr_arity = cstr_args.len() as i32;
                             cstr_descs.push((cstr_id, crate::types::ConstructorDescription {
                                 cstr_name: cstr_name_str.to_string(),
-                                cstr_res: res_ty,
+                                cstr_res: ctx.new_constr(type_path.clone(), internal_type_params.clone()),
                                 cstr_existentials: vec![],
                                 cstr_args,
                                 cstr_arity,
