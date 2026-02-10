@@ -9429,11 +9429,6 @@ fn lookup_type_decl_for_path<'a>(
 
     // Try path-based lookup for Pdot paths
     if let Path::Pdot(parent, type_name, _) = type_path {
-        let path_name = type_path.name();
-        if let Some(decl) = ctx.find_type_decl_by_path(&path_name) {
-            return Some(decl.clone());
-        }
-
         // Inline-record constructor paths are type paths whose parent is also a type path:
         // `<type_path>.<Constructor>`. Rebuild the synthetic record declaration from
         // the parent variant declaration so label disambiguation can recover field types.
@@ -9553,6 +9548,15 @@ fn lookup_type_decl_for_path<'a>(
                     _ => {}
                 }
             }
+        }
+
+        // Fall back to direct path lookup only after module-signature resolution.
+        // OCaml's Env.components_of_module applies Subst.type_declaration before
+        // exposing Sig_type entries; preferring substituted signatures first avoids
+        // returning stale unqualified recursive paths (e.g. JSON.t self refs as Pident "t").
+        let path_name = type_path.name();
+        if let Some(decl) = ctx.find_type_decl_by_path(&path_name) {
+            return Some(decl.clone());
         }
 
         // Try resolving through modules (loading CMI files on demand)
