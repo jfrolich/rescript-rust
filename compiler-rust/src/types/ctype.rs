@@ -1944,6 +1944,13 @@ fn copy_type_cached(
         if level != GENERIC_LEVEL {
             match &*desc {
                 TypeDesc::Tvar(_) | TypeDesc::Tunivar(_) => CopyAction::ReturnSelf,
+                // Keep identity for non-generic `string` constructors to match
+                // OCaml sharing in higher-order callback expectations.
+                TypeDesc::Tconstr { path, args, .. }
+                    if args.is_empty() && path.head_name() == "string" =>
+                {
+                    CopyAction::ReturnSelf
+                }
                 TypeDesc::Tarrow {
                     arg, ret, arity, ..
                 } => CopyAction::Arrow {
