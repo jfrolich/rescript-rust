@@ -176,7 +176,7 @@ pub fn cleanup_previous_build(
             // interface AND implementation. For some reason the CMI file is not always rewritten if it
             // doesn't have any changes, that's why we just look at the CMT file.
             if let Some(cmt_last_modified) = cmt_last_modified
-                && cmt_last_modified > ast_last_modified
+                && cmt_last_modified >= ast_last_modified
                 && !deleted_interfaces.contains(module_name)
             {
                 module.compile_dirty = false;
@@ -192,13 +192,13 @@ pub fn cleanup_previous_build(
                             .expect("Could not find interface for module");
 
                         let source_last_modified = interface.last_modified;
-                        if ast_last_modified > &source_last_modified {
+                        if ast_last_modified >= &source_last_modified {
                             interface.parse_dirty = false;
                         }
                     } else {
                         let implementation = &mut source_file.implementation;
                         let source_last_modified = implementation.last_modified;
-                        if ast_last_modified > &source_last_modified
+                        if ast_last_modified >= &source_last_modified
                             && !deleted_interfaces.contains(module_name)
                         {
                             implementation.parse_dirty = false;

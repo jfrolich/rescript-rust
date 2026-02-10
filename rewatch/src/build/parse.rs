@@ -342,8 +342,7 @@ fn generate_ast(
     let build_path_abs = package.get_build_path();
     let ast_path = helpers::get_ast_path(filename);
     let ast_output_path = build_path_abs.join(&ast_path);
-    let source_path = source_file_for_bsc_ast(filename);
-    let source_path_str = source_path.to_string_lossy().to_string();
+    let source_path_str = file_path.to_string_lossy().to_string();
     let bsc_flags = config::flatten_flags(&package.config.compiler_flags);
     let open_deps = open_dependencies_from_bsc_flags(&bsc_flags);
     let jsx_version = rust_parser_effective_jsx_version(build_state.project_context.get_root_config());
@@ -358,15 +357,6 @@ fn generate_ast(
 
     /* Create .ast */
     let result = if use_rust_parser {
-        let filtered_ppx_flags = filter_ppx_flags(&package.config.ppx_flags, &contents);
-        let warning = first_unsupported_ppx_for_rust_parser(&filtered_ppx_flags).map(|unsupported_ppx| {
-            format!(
-                "Warning: Rust parser mode (--rust) does not run external ppx `{}` for {} in package {}. Continuing with Rust parser output.\n",
-                unsupported_ppx,
-                filename.display(),
-                package.name
-            )
-        });
         generate_ast_with_rust_parser(
             &file_path,
             &ast_output_path,
@@ -375,7 +365,7 @@ fn generate_ast(
             jsx_version,
             let_unwrap_enabled,
         )
-            .map(|stderr| (ast_path.clone(), merge_warning_with_stderr(warning, stderr)))
+        .map(|stderr| (ast_path.clone(), stderr))
     } else {
         let (_expected_ast_path, parser_args) = parser_args(
             &build_state.project_context,
@@ -448,10 +438,6 @@ fn include_ppx(flag: &str, contents: &str) -> bool {
     true
 }
 
-fn source_file_for_bsc_ast(filename: &Path) -> PathBuf {
-    PathBuf::from("..").join("..").join(filename)
-}
-
 fn open_dependencies_from_bsc_flags(flags: &[String]) -> Vec<String> {
     let mut deps = Vec::new();
     let mut seen = AHashSet::new();
@@ -488,39 +474,6 @@ fn rust_parser_effective_jsx_version(root_config: &Config) -> i32 {
 fn rust_parser_let_unwrap_enabled(root_config: &Config, package_config: &Config) -> bool {
     package_config.has_experimental_feature(ExperimentalFeature::LetUnwrap)
         || root_config.has_experimental_feature(ExperimentalFeature::LetUnwrap)
-}
-
-fn first_unsupported_ppx_for_rust_parser(
-    filtered_ppx_flags: &Option<Vec<OneOrMore<String>>>,
-) -> Option<String> {
-    filtered_ppx_flags.as_ref().and_then(|flags| {
-        flags.iter().find_map(|flag| {
-            let ppx_name = match flag {
-                OneOrMore::Single(s) => Some(s.as_str()),
-                OneOrMore::Multiple(xs) => xs.first().map(String::as_str),
-            };
-            match ppx_name {
-                Some(name) if name.contains("spice") => None,
-                Some(name) => Some(name.to_string()),
-                None => None,
-            }
-        })
-    })
-}
-
-fn merge_warning_with_stderr(
-    warning: Option<helpers::StdErr>,
-    stderr: Option<helpers::StdErr>,
-) -> Option<helpers::StdErr> {
-    match (warning, stderr) {
-        (Some(mut warning), Some(stderr)) => {
-            warning.push_str(&stderr);
-            Some(warning)
-        }
-        (Some(warning), None) => Some(warning),
-        (None, Some(stderr)) => Some(stderr),
-        (None, None) => None,
-    }
 }
 
 fn diagnostics_to_stderr(parser: &Parser<'_>, source: &str, filename: &str) -> String {
