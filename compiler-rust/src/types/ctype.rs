@@ -1305,7 +1305,7 @@ fn unify_rows<'a>(
     unify(ctx, state, more1, more2)?;
 
     // `row_repr` may produce duplicate labels through nested row flattening.
-    // Keep first occurrence for deterministic output.
+    // Keep first occurrence to match OCaml lookup semantics.
     let mut seen = HashSet::new();
     merged_fields.retain(|(label, _)| seen.insert(label.clone()));
     merged_fields.sort_by(|(l1, _), (l2, _)| l1.cmp(l2));
