@@ -3743,7 +3743,22 @@ fn type_structure_item<'a>(
                 let mut typ_params: Vec<(TypedCoreType, TypesVariance)> = Vec::new();
                 let mut internal_type_params: Vec<TypeExprRef> = Vec::new();
                 for (core_type, parser_var) in &decl.ptype_params {
-                    let (typed_core_type, type_ref) = transl_type(tctx, &new_env, core_type)?;
+                    let (typed_core_type, type_ref) = match &core_type.ptyp_desc {
+                        crate::parser::ast::CoreTypeDesc::Ptyp_any => {
+                            let type_ref = ctx.new_var(Some("_".to_string()));
+                            (
+                                TypedCoreType {
+                                    ctyp_desc: TypedCoreTypeDesc::Ttyp_var(None),
+                                    ctyp_type: type_ref,
+                                    ctyp_env: EnvRef(0),
+                                    ctyp_loc: core_type.ptyp_loc,
+                                    ctyp_attributes: core_type.ptyp_attributes.clone(),
+                                },
+                                type_ref,
+                            )
+                        }
+                        _ => transl_type(tctx, &new_env, core_type)?,
+                    };
                     internal_type_params.push(type_ref);
                     if let crate::parser::ast::CoreTypeDesc::Ptyp_var(name) = &core_type.ptyp_desc {
                         tctx.type_variables.insert(name.clone(), type_ref);
@@ -5734,7 +5749,22 @@ fn transl_sig_type_declarations<'a>(
         let mut typ_params: Vec<(TypedCoreType, TypesVariance)> = Vec::new();
         let mut internal_type_params: Vec<TypeExprRef> = Vec::new();
         for (core_type, parser_var) in &decl.ptype_params {
-            let (typed_core_type, type_ref) = transl_type(tctx, env, core_type)?;
+            let (typed_core_type, type_ref) = match &core_type.ptyp_desc {
+                crate::parser::ast::CoreTypeDesc::Ptyp_any => {
+                    let type_ref = ctx.new_var(Some("_".to_string()));
+                    (
+                        TypedCoreType {
+                            ctyp_desc: TypedCoreTypeDesc::Ttyp_var(None),
+                            ctyp_type: type_ref,
+                            ctyp_env: EnvRef(0),
+                            ctyp_loc: core_type.ptyp_loc,
+                            ctyp_attributes: core_type.ptyp_attributes.clone(),
+                        },
+                        type_ref,
+                    )
+                }
+                _ => transl_type(tctx, env, core_type)?,
+            };
             internal_type_params.push(type_ref);
             let types_var = match parser_var {
                 ParserVariance::Covariant => TypesVariance::covariant(),
