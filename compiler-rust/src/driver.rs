@@ -15,10 +15,9 @@ use crate::js_ir::printer::print_program;
 use crate::lambda::compile::LambdaCompiler;
 use crate::lambda::convert::LambdaConverter;
 use crate::parser::ast::{
-    Attribute, Expression, ExpressionDesc, ModuleExpr, ModuleExprDesc, RecFlag, Structure,
+    Attribute, Constant, Expression, ModuleExpr, ModuleExprDesc, Payload, Structure,
     StructureItemDesc,
 };
-use crate::parser::longident::Longident;
 use crate::parser::{jsx_ppx, module, Parser};
 use crate::types::sexp_typedtree::{print_typed_structure, print_typed_structure_with_locs, print_typed_signature, print_typed_signature_with_locs};
 use crate::types::{initial_env, type_structure, transl_signature, TypeCheckContext, TypeContext};
@@ -32,19 +31,245 @@ fn has_react_component_attr(attrs: &[Attribute], arena: &crate::parse_arena::Par
     })
 }
 
-fn is_react_forward_ref_wrapper(expr: &Expression, arena: &crate::parse_arena::ParseArena) -> bool {
-    let ExpressionDesc::Pexp_apply { funct, .. } = &expr.pexp_desc else {
-        return false;
-    };
-    let ExpressionDesc::Pexp_ident(lid) = &funct.pexp_desc else {
-        return false;
-    };
-    match arena.get_longident(lid.txt) {
-        Longident::Ldot(prefix, field) if arena.get_string(*field) == "forwardRef" => {
-            matches!(&**prefix, Longident::Lident(module_name) if arena.get_string(*module_name) == "React")
+fn has_react_component_with_props_attr(
+    attrs: &[Attribute],
+    arena: &crate::parse_arena::ParseArena,
+) -> bool {
+    attrs.iter().any(|attr| {
+        matches!(
+            arena.get_string(attr.0.txt),
+            "react.componentWithProps" | "jsx.componentWithProps"
+        )
+    })
+}
+
+fn expression_has_string_literal(expr: &Expression, value: &str) -> bool {
+    use crate::parser::ast::ExpressionDesc;
+
+    match &expr.pexp_desc {
+        ExpressionDesc::Pexp_constant(Constant::String(s, _)) => s == value,
+        ExpressionDesc::Pexp_constant(_) => false,
+        ExpressionDesc::Pexp_let(_, bindings, body) => {
+            bindings
+                .iter()
+                .any(|vb| expression_has_string_literal(&vb.pvb_expr, value))
+                || expression_has_string_literal(body, value)
+        }
+        ExpressionDesc::Pexp_fun { default, rhs, .. } => {
+            default
+                .as_ref()
+                .is_some_and(|e| expression_has_string_literal(e, value))
+                || expression_has_string_literal(rhs, value)
+        }
+        ExpressionDesc::Pexp_apply { funct, args, .. } => {
+            expression_has_string_literal(funct, value)
+                || args
+                    .iter()
+                    .any(|(_, arg)| expression_has_string_literal(arg, value))
+        }
+        ExpressionDesc::Pexp_match(scrutinee, cases) | ExpressionDesc::Pexp_try(scrutinee, cases) => {
+            expression_has_string_literal(scrutinee, value)
+                || cases.iter().any(|case| {
+                    case.pc_guard
+                        .as_ref()
+                        .is_some_and(|g| expression_has_string_literal(g, value))
+                        || expression_has_string_literal(&case.pc_rhs, value)
+                })
+        }
+        ExpressionDesc::Pexp_tuple(items) | ExpressionDesc::Pexp_array(items) => {
+            items.iter().any(|item| expression_has_string_literal(item, value))
+        }
+        ExpressionDesc::Pexp_construct(_, arg) | ExpressionDesc::Pexp_variant(_, arg) => arg
+            .as_ref()
+            .is_some_and(|arg| expression_has_string_literal(arg, value)),
+        ExpressionDesc::Pexp_record(fields, base) => {
+            fields
+                .iter()
+                .any(|field| expression_has_string_literal(&field.expr, value))
+                || base
+                    .as_ref()
+                    .is_some_and(|base| expression_has_string_literal(base, value))
+        }
+        ExpressionDesc::Pexp_field(expr, _)
+        | ExpressionDesc::Pexp_assert(expr)
+        | ExpressionDesc::Pexp_await(expr)
+        | ExpressionDesc::Pexp_newtype(_, expr)
+        | ExpressionDesc::Pexp_constraint(expr, _)
+        | ExpressionDesc::Pexp_coerce(expr, _, _)
+        | ExpressionDesc::Pexp_send(expr, _) => expression_has_string_literal(expr, value),
+        ExpressionDesc::Pexp_setfield(lhs, _, rhs)
+        | ExpressionDesc::Pexp_sequence(lhs, rhs)
+        | ExpressionDesc::Pexp_while(lhs, rhs) => {
+            expression_has_string_literal(lhs, value) || expression_has_string_literal(rhs, value)
+        }
+        ExpressionDesc::Pexp_ifthenelse(cond, then_expr, else_expr) => {
+            expression_has_string_literal(cond, value)
+                || expression_has_string_literal(then_expr, value)
+                || else_expr
+                    .as_ref()
+                    .is_some_and(|else_expr| expression_has_string_literal(else_expr, value))
+        }
+        ExpressionDesc::Pexp_for(_, start, end, _, body) => {
+            expression_has_string_literal(start, value)
+                || expression_has_string_literal(end, value)
+                || expression_has_string_literal(body, value)
+        }
+        ExpressionDesc::Pexp_letmodule(_, module_expr, body) => {
+            module_expr_has_config_string(module_expr, value)
+                || expression_has_string_literal(body, value)
+        }
+        ExpressionDesc::Pexp_pack(module_expr) => module_expr_has_config_string(module_expr, value),
+        ExpressionDesc::Pexp_letexception(_, body) | ExpressionDesc::Pexp_open(_, _, body) => {
+            expression_has_string_literal(body, value)
+        }
+        ExpressionDesc::Pexp_extension((_, payload)) => payload_has_string_literal(payload, value),
+        ExpressionDesc::Pexp_ident(_) | ExpressionDesc::Pexp_jsx_element(_) => false,
+    }
+}
+
+fn payload_has_string_literal(payload: &Payload, value: &str) -> bool {
+    match payload {
+        Payload::PStr(items) => items.iter().any(|item| match &item.pstr_desc {
+            StructureItemDesc::Pstr_eval(expr, _) => expression_has_string_literal(expr, value),
+            StructureItemDesc::Pstr_attribute((_, nested_payload)) => {
+                payload_has_string_literal(nested_payload, value)
+            }
+            _ => false,
+        }),
+        Payload::PPat(pat, guard) => {
+            pattern_has_string_literal(pat, value)
+                || guard
+                    .as_ref()
+                    .is_some_and(|guard| expression_has_string_literal(guard, value))
+        }
+        Payload::PTyp(_) | Payload::PSig(_) => false,
+    }
+}
+
+fn pattern_has_string_literal(pat: &crate::parser::ast::Pattern, value: &str) -> bool {
+    use crate::parser::ast::PatternDesc;
+
+    match &pat.ppat_desc {
+        PatternDesc::Ppat_constant(Constant::String(s, _)) => s == value,
+        PatternDesc::Ppat_alias(inner, _)
+        | PatternDesc::Ppat_constraint(inner, _)
+        | PatternDesc::Ppat_exception(inner)
+        | PatternDesc::Ppat_open(_, inner) => pattern_has_string_literal(inner, value),
+        PatternDesc::Ppat_tuple(items) | PatternDesc::Ppat_array(items) => {
+            items.iter().any(|item| pattern_has_string_literal(item, value))
+        }
+        PatternDesc::Ppat_construct(_, Some(arg)) | PatternDesc::Ppat_variant(_, Some(arg)) => {
+            pattern_has_string_literal(arg, value)
+        }
+        PatternDesc::Ppat_or(lhs, rhs) => {
+            pattern_has_string_literal(lhs, value) || pattern_has_string_literal(rhs, value)
+        }
+        PatternDesc::Ppat_record(rows, _) => rows
+            .iter()
+            .any(|row| pattern_has_string_literal(&row.pat, value)),
+        PatternDesc::Ppat_extension((_, payload)) => payload_has_string_literal(payload, value),
+        _ => false,
+    }
+}
+
+fn module_expr_has_config_string(module_expr: &ModuleExpr, value: &str) -> bool {
+    match &module_expr.pmod_desc {
+        ModuleExprDesc::Pmod_structure(structure) => structure_has_config_string(structure, value),
+        ModuleExprDesc::Pmod_functor(_, _, body) => module_expr_has_config_string(body, value),
+        ModuleExprDesc::Pmod_apply(lhs, rhs) => {
+            module_expr_has_config_string(lhs, value) || module_expr_has_config_string(rhs, value)
+        }
+        ModuleExprDesc::Pmod_constraint(inner, module_type) => {
+            module_expr_has_config_string(inner, value)
+                || module_type_has_config_string(module_type, value)
         }
         _ => false,
     }
+}
+
+fn module_type_has_config_string(
+    module_type: &crate::parser::ast::ModuleType,
+    value: &str,
+) -> bool {
+    use crate::parser::ast::ModuleTypeDesc;
+
+    match &module_type.pmty_desc {
+        ModuleTypeDesc::Pmty_signature(sig_items) => sig_items.iter().any(|item| match &item.psig_desc
+        {
+            crate::parser::ast::SignatureItemDesc::Psig_attribute((_, payload)) => {
+                payload_has_string_literal(payload, value)
+            }
+            _ => false,
+        }),
+        ModuleTypeDesc::Pmty_functor(_, param, body) => {
+            param
+                .as_ref()
+                .is_some_and(|param| module_type_has_config_string(param, value))
+                || module_type_has_config_string(body, value)
+        }
+        ModuleTypeDesc::Pmty_with(inner, _) => module_type_has_config_string(inner, value),
+        _ => false,
+    }
+}
+
+fn structure_has_config_string(structure: &Structure, value: &str) -> bool {
+    structure.iter().any(|item| match &item.pstr_desc {
+        StructureItemDesc::Pstr_attribute(attr) => payload_has_string_literal(&attr.1, value),
+        StructureItemDesc::Pstr_module(mb) => module_expr_has_config_string(&mb.pmb_expr, value),
+        StructureItemDesc::Pstr_recmodule(mbs) => mbs
+            .iter()
+            .any(|mb| module_expr_has_config_string(&mb.pmb_expr, value)),
+        StructureItemDesc::Pstr_include(incl) => module_expr_has_config_string(&incl.pincl_mod, value),
+        _ => false,
+    })
+}
+
+fn is_async_component_expr(expr: &Expression) -> bool {
+    use crate::parser::ast::ExpressionDesc;
+
+    match &expr.pexp_desc {
+        ExpressionDesc::Pexp_fun { is_async, .. } => *is_async,
+        ExpressionDesc::Pexp_constraint(inner, _) => is_async_component_expr(inner),
+        ExpressionDesc::Pexp_apply { args, .. } => args
+            .iter()
+            .any(|(_, arg)| is_async_component_expr(arg)),
+        ExpressionDesc::Pexp_sequence(_, inner) => is_async_component_expr(inner),
+        _ => false,
+    }
+}
+
+fn module_expr_has_async_component(
+    module_expr: &ModuleExpr,
+    arena: &crate::parse_arena::ParseArena,
+) -> bool {
+    match &module_expr.pmod_desc {
+        ModuleExprDesc::Pmod_structure(structure) => structure_has_async_component(structure, arena),
+        ModuleExprDesc::Pmod_functor(_, _, body) => module_expr_has_async_component(body, arena),
+        ModuleExprDesc::Pmod_apply(lhs, rhs) => {
+            module_expr_has_async_component(lhs, arena)
+                || module_expr_has_async_component(rhs, arena)
+        }
+        ModuleExprDesc::Pmod_constraint(inner, _) => module_expr_has_async_component(inner, arena),
+        _ => false,
+    }
+}
+
+fn structure_has_async_component(
+    structure: &Structure,
+    arena: &crate::parse_arena::ParseArena,
+) -> bool {
+    structure.iter().any(|item| match &item.pstr_desc {
+        StructureItemDesc::Pstr_value(_, bindings) => bindings.iter().any(|vb| {
+            has_react_component_attr(&vb.pvb_attributes, arena)
+                && is_async_component_expr(&vb.pvb_expr)
+        }),
+        StructureItemDesc::Pstr_module(mb) => module_expr_has_async_component(&mb.pmb_expr, arena),
+        StructureItemDesc::Pstr_recmodule(mbs) => mbs
+            .iter()
+            .any(|mb| module_expr_has_async_component(&mb.pmb_expr, arena)),
+        StructureItemDesc::Pstr_include(incl) => module_expr_has_async_component(&incl.pincl_mod, arena),
+        _ => false,
+    })
 }
 
 fn module_expr_needs_jsx_rewrite(module_expr: &ModuleExpr, arena: &crate::parse_arena::ParseArena) -> bool {
@@ -63,11 +288,9 @@ fn structure_needs_jsx_rewrite(structure: &Structure, arena: &crate::parse_arena
     structure.iter().any(|item| match &item.pstr_desc {
         // External @react.component declarations need JSX PPX lowering.
         StructureItemDesc::Pstr_primitive(vd) => has_react_component_attr(&vd.pval_attributes, arena),
-        StructureItemDesc::Pstr_value(rec_flag, bindings) => bindings.iter().any(|vb| {
-            if !has_react_component_attr(&vb.pvb_attributes, arena) {
-                return false;
-            }
-            *rec_flag == RecFlag::Recursive || is_react_forward_ref_wrapper(&vb.pvb_expr, arena)
+        StructureItemDesc::Pstr_value(_, bindings) => bindings.iter().any(|vb| {
+            has_react_component_attr(&vb.pvb_attributes, arena)
+                || has_react_component_with_props_attr(&vb.pvb_attributes, arena)
         }),
         StructureItemDesc::Pstr_module(mb) => module_expr_needs_jsx_rewrite(&mb.pmb_expr, arena),
         StructureItemDesc::Pstr_recmodule(mbs) => mbs
@@ -116,8 +339,14 @@ pub fn compile_source_to_js_with_options(
         return Err(anyhow!("Parse failed with {} error(s)", parser.diagnostics().len()));
     }
 
-    // Source fallback path: run JSX rewrite for OCaml-aligned shapes that depend on it.
-    let structure = if structure_needs_jsx_rewrite(&structure, parser.arena()) {
+    // Source fallback path: only run JSX rewrite when the file enables `-bs-jsx`,
+    // and skip known-unstable async component lowering in this path.
+    let jsx_enabled = structure_has_config_string(&structure, "-bs-jsx");
+    let has_async_component = structure_has_async_component(&structure, parser.arena());
+    let structure = if jsx_enabled
+        && !has_async_component
+        && structure_needs_jsx_rewrite(&structure, parser.arena())
+    {
         jsx_ppx::transform_structure(structure, 4, parser.arena_mut())
     } else {
         structure
