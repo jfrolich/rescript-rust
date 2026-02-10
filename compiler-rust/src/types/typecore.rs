@@ -6071,8 +6071,8 @@ fn type_constraint(
     // type_argument env sarg ty (instance env ty); exp_type = instance env ty.
     ctx.begin_def();
     let (typed_ctype, ctype_ty) = transl_type(tctx, env, core_type)?;
-    let var_level = ctx.current_level();
     ctx.end_def();
+    let var_level = ctx.current_level();
     crate::types::generalize_structure(ctx, var_level, ctype_ty);
 
     let arg_expected_ty = ctype_ty;
