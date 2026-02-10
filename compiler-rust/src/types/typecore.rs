@@ -5259,6 +5259,49 @@ fn type_variant(
         ));
     }
 
+    // OCaml fast path for constant polyvariants: if expected type is already a
+    // variant row containing this constant tag, keep `exp_type = instance expected_ty`.
+    let expected_inst = crate::types::ctype::instance(ctx, expected_ty);
+    let expanded_expected = crate::types::ctype::expand_head(ctx, env, expected_ty);
+    let expanded_expected_inst = crate::types::ctype::expand_head(ctx, env, expected_inst);
+    let expected_constant_tag = {
+        let expected_desc = ctx.get_desc(ctx.repr(expanded_expected));
+        let expected_inst_desc = ctx.get_desc(ctx.repr(expanded_expected_inst));
+        match (&*expected_desc, &*expected_inst_desc) {
+            (TypeDesc::Tvariant(row), TypeDesc::Tvariant(row0)) => {
+                let row = crate::types::btype::row_repr(ctx, row);
+                let row0 = crate::types::btype::row_repr(ctx, row0);
+                let field = row
+                    .row_fields
+                    .iter()
+                    .find(|(l, _)| l == label)
+                    .map(|(_, rf)| crate::types::btype::row_field_repr(rf));
+                let field0 = row0
+                    .row_fields
+                    .iter()
+                    .find(|(l, _)| l == label)
+                    .map(|(_, rf)| crate::types::btype::row_field_repr(rf));
+                matches!(
+                    (field, field0),
+                    (
+                        Some(crate::types::type_expr::RowField::Rpresent(None)),
+                        Some(crate::types::type_expr::RowField::Rpresent(None))
+                    )
+                )
+            }
+            _ => false,
+        }
+    };
+    if expected_constant_tag {
+        return Ok(Expression::new(
+            ExpressionDesc::Texp_variant(label.to_string(), None),
+            loc.clone(),
+            expected_inst,
+            EnvRef(0),
+            attributes.to_vec(),
+        ));
+    }
+
     // Constant polymorphic variants (`#Tag`) use an explicit one-field open row.
     let variant_ty = ctx.new_variant(crate::types::type_expr::RowDesc {
         row_fields: vec![(
@@ -5307,9 +5350,10 @@ fn record_labels_match_ids(
     }
 }
 
-fn select_record_type_for_fields(
-    tctx: &TypeCheckContext<'_>,
+fn select_record_type_for_fields<'a>(
+    ctx: &'a TypeContext<'a>,
     env: &Env,
+    pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
     field_names: &[String],
     expected_ty: TypeExprRef,
     base_ty: Option<TypeExprRef>,
@@ -5319,10 +5363,8 @@ fn select_record_type_for_fields(
         return None;
     }
 
-    let ctx = tctx.type_ctx;
-
     for candidate_ty in [Some(expected_ty), base_ty].into_iter().flatten() {
-        if let Some(labels) = get_record_labels(ctx, env, candidate_ty) {
+        if let Some(labels) = get_record_labels(ctx, env, pers_env, candidate_ty) {
             if record_labels_match_ids(&labels, field_names, closed_record) {
                 return Some(candidate_ty);
             }
@@ -5333,7 +5375,7 @@ fn select_record_type_for_fields(
     let candidates = env.find_all_labels(first_name);
     let mut matching: Vec<(Option<Path>, TypeExprRef)> = Vec::new();
     for label in candidates.into_iter().rev() {
-        if let Some(labels) = get_record_labels(ctx, env, label.lbl_res) {
+        if let Some(labels) = get_record_labels(ctx, env, pers_env, label.lbl_res) {
             if record_labels_match_ids(&labels, field_names, closed_record) {
                 let key = extract_type_path_from_expected(label.lbl_res, env, ctx);
                 if matching.iter().any(|(existing, _)| *existing == key) {
@@ -5389,8 +5431,9 @@ fn type_record(
         .collect();
     let closed_record = typed_base.is_none();
     let disambiguation_ty = select_record_type_for_fields(
-        tctx,
+        ctx,
         env,
+        &mut tctx.persistent_env,
         &field_names,
         expected_ty,
         typed_base.as_ref().map(|expr| expr.exp_type),
@@ -5533,16 +5576,16 @@ fn type_record(
     let mut all_labels = if has_dotdotdot_field {
         None
     } else {
-        get_record_labels(ctx, env, disambiguation_ty)
+        get_record_labels(ctx, env, &mut tctx.persistent_env, disambiguation_ty)
     };
     if all_labels.is_none() {
         if let Some(base_expr) = typed_base.as_ref() {
-            all_labels = get_record_labels(ctx, env, base_expr.exp_type);
+            all_labels = get_record_labels(ctx, env, &mut tctx.persistent_env, base_expr.exp_type);
         }
     }
     if all_labels.is_none() {
         if let Some(lbl) = first_disambiguated_label {
-            all_labels = get_record_labels(ctx, env, lbl.lbl_res);
+            all_labels = get_record_labels(ctx, env, &mut tctx.persistent_env, lbl.lbl_res);
         }
     }
     if all_labels
@@ -5741,15 +5784,16 @@ fn make_none_constructor(
 }
 
 /// Get all label declarations for a record type from the environment.
-fn get_record_labels(
-    ctx: &TypeContext<'_>,
+fn get_record_labels<'a>(
+    ctx: &'a TypeContext<'a>,
     env: &Env,
+    pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
     ty: TypeExprRef,
 ) -> Option<Vec<crate::types::decl::LabelDeclaration>> {
     let repr = ctx.repr(ty);
     let desc = ctx.get_desc(repr);
     if let crate::types::TypeDesc::Tconstr { ref path, .. } = *desc {
-        if let Ok(type_decl) = env.lookup_type(path) {
+        if let Some(type_decl) = lookup_type_decl_for_path(path, env, pers_env, ctx) {
             if let crate::types::TypeKind::TypeRecord(ref labels, _) = type_decl.type_kind {
                 return Some(labels.clone());
             }
