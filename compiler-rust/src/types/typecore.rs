@@ -8579,19 +8579,53 @@ fn lookup_constructor_in_module<'b>(
                                 } else {
                                     crate::types::decl::ConstructorTag::CstrBlock(block_idx)
                                 };
-                                let (cstr_args, cstr_arity) = match &cd.cd_args {
-                                    crate::types::ConstructorArguments::CstrTuple(args) => {
-                                        (args.clone(), args.len() as i32)
-                                    }
-                                    crate::types::ConstructorArguments::CstrRecord(labels) => {
-                                        let args: Vec<_> =
-                                            labels.iter().map(|l| l.ld_type).collect();
-                                        let arity = args.len() as i32;
-                                        (args, arity)
-                                    }
-                                };
                                 let type_path =
                                     Path::pdot(mod_path.clone(), _id.name().to_string());
+                                let (cstr_args, cstr_arity, cstr_inlined) = match &cd.cd_args {
+                                    crate::types::ConstructorArguments::CstrTuple(args) => {
+                                        (args.clone(), args.len() as i32, None)
+                                    }
+                                    crate::types::ConstructorArguments::CstrRecord(labels) => {
+                                        // Match OCaml Datarepr.constructor_args for Cstr_record:
+                                        // cstr_args = [newgenconstr (type_path.cstr_name) type_params].
+                                        let inline_params = type_decl.type_params.clone();
+                                        let inline_path =
+                                            Path::pdot(type_path.clone(), cstr_name.to_string());
+                                        let inline_constr =
+                                            ctx.new_generic_constr(inline_path, inline_params.clone());
+                                        let inline_decl = crate::types::TypeDeclaration {
+                                            type_params: inline_params.clone(),
+                                            type_arity: inline_params.len() as i32,
+                                            type_kind: crate::types::TypeKind::TypeRecord(
+                                                labels.clone(),
+                                                crate::types::RecordRepresentation::RecordInlined {
+                                                    tag: block_idx,
+                                                    name: cstr_name.to_string(),
+                                                    num_nonconsts,
+                                                    attrs: cd.cd_attributes.clone(),
+                                                },
+                                            ),
+                                            type_private: type_decl.type_private,
+                                            type_manifest: None,
+                                            type_variance: inline_params
+                                                .iter()
+                                                .map(|_| crate::types::variance::Variance::full())
+                                                .collect(),
+                                            type_newtype_level: None,
+                                            type_loc: cd.cd_loc,
+                                            type_attributes: vec![],
+                                            type_immediate: false,
+                                            type_unboxed: crate::types::UnboxedStatus::default(),
+                                            type_inlined_types: vec![],
+                                            type_path: None,
+                                        };
+                                        (
+                                            vec![inline_constr],
+                                            1,
+                                            Some(Box::new(inline_decl)),
+                                        )
+                                    }
+                                };
                                 let cstr_res = cd.cd_res.unwrap_or_else(|| {
                                     ctx.new_generic_constr(
                                         type_path.clone(),
@@ -8607,11 +8641,11 @@ fn lookup_constructor_in_module<'b>(
                                     cstr_tag: tag,
                                     cstr_consts: num_consts,
                                     cstr_nonconsts: num_nonconsts,
-                                    cstr_generalized: false,
-                                    cstr_private: crate::types::PrivateFlag::Public,
-                                    cstr_loc: crate::location::Location::none(),
-                                    cstr_attributes: vec![],
-                                    cstr_inlined: None,
+                                    cstr_generalized: cd.cd_res.is_some(),
+                                    cstr_private: type_decl.type_private,
+                                    cstr_loc: cd.cd_loc,
+                                    cstr_attributes: cd.cd_attributes.clone(),
+                                    cstr_inlined,
                                 };
                                 let path = Path::pident(Ident::create_persistent(cstr_name));
                                 return Some((path, desc));
@@ -8627,21 +8661,47 @@ fn lookup_constructor_in_module<'b>(
                 // Also search SigTypext for exception/extension constructors
                 if let SignatureItem::SigTypext(id, ext, _status) = sig_item {
                     if id.name() == cstr_name {
-                        let (cstr_args, cstr_arity) = match &ext.ext_args {
+                        let ext_path = Path::pident(Ident::create_persistent(cstr_name));
+                        let (cstr_args, cstr_arity, cstr_inlined) = match &ext.ext_args {
                             crate::types::ConstructorArguments::CstrTuple(args) => {
-                                (args.clone(), args.len() as i32)
+                                (args.clone(), args.len() as i32, None)
                             }
                             crate::types::ConstructorArguments::CstrRecord(labels) => {
-                                let args: Vec<_> = labels.iter().map(|l| l.ld_type).collect();
-                                let arity = args.len() as i32;
-                                (args, arity)
+                                let inline_params = ext.ext_type_params.clone();
+                                let inline_constr =
+                                    ctx.new_generic_constr(ext_path.clone(), inline_params.clone());
+                                let inline_decl = crate::types::TypeDeclaration {
+                                    type_params: inline_params.clone(),
+                                    type_arity: inline_params.len() as i32,
+                                    type_kind: crate::types::TypeKind::TypeRecord(
+                                        labels.clone(),
+                                        crate::types::RecordRepresentation::RecordExtension,
+                                    ),
+                                    type_private: ext.ext_private,
+                                    type_manifest: None,
+                                    type_variance: inline_params
+                                        .iter()
+                                        .map(|_| crate::types::variance::Variance::full())
+                                        .collect(),
+                                    type_newtype_level: None,
+                                    type_loc: ext.ext_loc,
+                                    type_attributes: vec![],
+                                    type_immediate: false,
+                                    type_unboxed: crate::types::UnboxedStatus::default(),
+                                    type_inlined_types: vec![],
+                                    type_path: None,
+                                };
+                                (
+                                    vec![inline_constr],
+                                    1,
+                                    Some(Box::new(inline_decl)),
+                                )
                             }
                         };
                         let cstr_res = ctx.new_generic_constr(
                             ext.ext_type_path.clone(),
                             ext.ext_type_params.clone(),
                         );
-                        let ext_path = Path::pident(Ident::create_persistent(cstr_name));
                         let desc = crate::types::decl::ConstructorDescription {
                             cstr_name: cstr_name.to_string(),
                             cstr_res,
@@ -8653,11 +8713,11 @@ fn lookup_constructor_in_module<'b>(
                             ),
                             cstr_consts: 0,
                             cstr_nonconsts: 0,
-                            cstr_generalized: false,
-                            cstr_private: crate::types::PrivateFlag::Public,
-                            cstr_loc: crate::location::Location::none(),
-                            cstr_attributes: vec![],
-                            cstr_inlined: None,
+                            cstr_generalized: ext.ext_ret_type.is_some(),
+                            cstr_private: ext.ext_private,
+                            cstr_loc: ext.ext_loc,
+                            cstr_attributes: ext.ext_attributes.clone(),
+                            cstr_inlined,
                         };
                         return Some((ext_path, desc));
                     }
@@ -9051,14 +9111,46 @@ fn lookup_constructor_by_expected_type<'b>(
                 } else {
                     crate::types::decl::ConstructorTag::CstrBlock(block_idx)
                 };
-                let (cstr_args, cstr_arity) = match &cd.cd_args {
+                let (cstr_args, cstr_arity, cstr_inlined) = match &cd.cd_args {
                     crate::types::ConstructorArguments::CstrTuple(args) => {
-                        (args.clone(), args.len() as i32)
+                        (args.clone(), args.len() as i32, None)
                     }
                     crate::types::ConstructorArguments::CstrRecord(labels) => {
-                        let args: Vec<_> = labels.iter().map(|l| l.ld_type).collect();
-                        let arity = args.len() as i32;
-                        (args, arity)
+                        let inline_params = type_decl.type_params.clone();
+                        let inline_path = Path::pdot(type_path.clone(), cstr_name.to_string());
+                        let inline_constr =
+                            ctx.new_generic_constr(inline_path, inline_params.clone());
+                        let inline_decl = crate::types::TypeDeclaration {
+                            type_params: inline_params.clone(),
+                            type_arity: inline_params.len() as i32,
+                            type_kind: crate::types::TypeKind::TypeRecord(
+                                labels.clone(),
+                                crate::types::RecordRepresentation::RecordInlined {
+                                    tag: block_idx,
+                                    name: cstr_name.to_string(),
+                                    num_nonconsts,
+                                    attrs: cd.cd_attributes.clone(),
+                                },
+                            ),
+                            type_private: type_decl.type_private,
+                            type_manifest: None,
+                            type_variance: inline_params
+                                .iter()
+                                .map(|_| crate::types::variance::Variance::full())
+                                .collect(),
+                            type_newtype_level: None,
+                            type_loc: cd.cd_loc,
+                            type_attributes: vec![],
+                            type_immediate: false,
+                            type_unboxed: crate::types::UnboxedStatus::default(),
+                            type_inlined_types: vec![],
+                            type_path: None,
+                        };
+                        (
+                            vec![inline_constr],
+                            1,
+                            Some(Box::new(inline_decl)),
+                        )
                     }
                 };
                 // Use the type path's head ident for the result type
@@ -9078,7 +9170,7 @@ fn lookup_constructor_by_expected_type<'b>(
                     cstr_private: type_decl.type_private,
                     cstr_loc: cd.cd_loc,
                     cstr_attributes: cd.cd_attributes.clone(),
-                    cstr_inlined: None,
+                    cstr_inlined,
                 };
                 let path = Path::pident(Ident::create_persistent(cstr_name));
                 return Some((path, desc));
