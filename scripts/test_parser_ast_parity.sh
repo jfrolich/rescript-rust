@@ -15,6 +15,9 @@
 # Spice PPX parity (using bsc -bs-ast):
 # 4. spice-ppx parity - OCaml bsc with external spice PPX vs Rust internal PPX
 #
+# Parser warning output parity:
+# 5. parser-warning-snapshots - Warning/text output parity for curated fixtures
+#
 # REGRESSION TRACKING:
 # The script maintains baseline files in tests/parity_baselines/ for each test type.
 # - When a file passes, it's added to the baseline (append-only)
@@ -100,6 +103,8 @@ WHAT IT TESTS:
   2. sexp-locs-ppx Post-PPX parser AST with locations
   3. bsc-ast       Full `bsc -bs-ast` output (production format with deps)
   4. spice-ppx     OCaml bsc + external spice PPX vs Rust internal spice PPX
+  5. parser-warning-snapshots
+                   Warning/text output for curated parser warning fixtures
 
 For Parsetree0/PPX parity tests, see test_parser_ast0_parity.sh
 
@@ -352,6 +357,8 @@ mkdir -p "$TEMP_DIR/sexp_locs_ppx_spice_diffs"
 mkdir -p "$TEMP_DIR/bsc_ast_parity_diffs"
 mkdir -p "$TEMP_DIR/spice_ppx"
 mkdir -p "$TEMP_DIR/spice_ppx_diffs"
+mkdir -p "$TEMP_DIR/parser_warning"
+mkdir -p "$TEMP_DIR/parser_warning_diffs"
 
 # Export variables for parallel execution
 export OCAML_PARSER RUST_PARSER OCAML_BSC RUST_BSC SPICE_PPX TELLA_DIR TIMEOUT_SECONDS TEMP_DIR QUICK_MODE VERBOSE INSPECT_SCRIPT
@@ -707,6 +714,83 @@ detect_regressions_and_update() {
     fi
 }
 
+# Parser warning snapshot parity (curated fixtures with expected text output)
+run_parser_warning_snapshot_parity() {
+    echo ""
+    echo -e "${BOLD}Running parser warning snapshot parity...${RESET}"
+
+    local files=()
+    while IFS= read -r line; do
+        files+=("$line")
+    done < <(find syntax_tests/data/ppx/react/warnings \( -name "*.res" -o -name "*.resi" \) 2>/dev/null | sort)
+
+    local file_count=${#files[@]}
+    parser_warning_total=$file_count
+    if [[ $file_count -eq 0 ]]; then
+        echo -e "${YELLOW}No parser warning fixtures found${RESET}"
+        return
+    fi
+
+    echo "Warning fixtures: $file_count files"
+
+    for file in "${files[@]}"; do
+        local safe_name
+        safe_name=$(echo "$file" | tr '/' '_')
+        local expected="$(dirname "$file")/expected/$(basename "$file").txt"
+        local ocaml_out="$TEMP_DIR/parser_warning/ocaml_${safe_name}.txt"
+        local rust_out="$TEMP_DIR/parser_warning/rust_${safe_name}.txt"
+        local diff_out="$TEMP_DIR/parser_warning_diffs/${safe_name}.diff"
+
+        local fail_reason=""
+        local ocaml_exit=0
+        local rust_exit=0
+
+        timeout "$TIMEOUT_SECONDS" "$OCAML_PARSER" -jsx-version 4 "$file" > "$ocaml_out" 2>&1 || ocaml_exit=$?
+        timeout "$TIMEOUT_SECONDS" "$RUST_PARSER" -jsx-version 4 "$file" > "$rust_out" 2>&1 || rust_exit=$?
+
+        if [[ ! -f "$expected" ]]; then
+            fail_reason="missing expected file"
+            {
+                echo "Missing expected snapshot: $expected"
+            } > "$diff_out"
+        elif [[ $ocaml_exit -eq 124 || $rust_exit -eq 124 ]]; then
+            fail_reason="timeout"
+            {
+                echo "Timeout while running parser warning snapshot check."
+                echo "OCaml exit: $ocaml_exit"
+                echo "Rust exit:  $rust_exit"
+            } > "$diff_out"
+        elif [[ $ocaml_exit -ne 0 ]]; then
+            fail_reason="OCaml parser failed"
+            {
+                echo "OCaml parser exited with $ocaml_exit"
+                echo ""
+                cat "$ocaml_out" 2>/dev/null || true
+            } > "$diff_out"
+        elif [[ $rust_exit -ne 0 ]]; then
+            fail_reason="Rust parser failed"
+            {
+                echo "Rust parser exited with $rust_exit"
+                echo ""
+                cat "$rust_out" 2>/dev/null || true
+            } > "$diff_out"
+        elif ! diff -q "$ocaml_out" "$rust_out" > /dev/null 2>&1; then
+            fail_reason="OCaml and Rust outputs differ"
+            diff -u --text "$ocaml_out" "$rust_out" > "$diff_out" 2>&1 || true
+        elif ! diff -q "$expected" "$rust_out" > /dev/null 2>&1; then
+            fail_reason="Rust output differs from expected snapshot"
+            diff -u --text "$expected" "$rust_out" > "$diff_out" 2>&1 || true
+        fi
+
+        if [[ -n "$fail_reason" ]]; then
+            parser_warning_diff_count=$((parser_warning_diff_count + 1))
+            parser_warning_failed_files="$parser_warning_failed_files$file ($fail_reason)\n"
+        else
+            parser_warning_pass_count=$((parser_warning_pass_count + 1))
+        fi
+    done
+}
+
 # Spice PPX parity (OCaml bsc with external ppx vs Rust internal ppx)
 run_spice_ppx_parity() {
     echo ""
@@ -883,6 +967,13 @@ spice_failed_files=""
 spice_missing=false
 run_spice_ppx_parity
 
+# Run parser warning snapshot parity
+parser_warning_total=0
+parser_warning_pass_count=0
+parser_warning_diff_count=0
+parser_warning_failed_files=""
+run_parser_warning_snapshot_parity
+
 echo ""
 echo ""
 echo -e "${BOLD}============================================${RESET}"
@@ -932,6 +1023,12 @@ else
     echo "    spice OCaml errors:       $spice_ocaml_error_count"
     echo "    spice Rust errors:        $spice_rust_error_count"
 fi
+echo ""
+
+echo "  ${BOLD}Parser Warning Snapshots:${RESET}"
+echo "    warning fixtures:         $parser_warning_total"
+echo "    warning passes:           $parser_warning_pass_count"
+echo "    warning differences:      $parser_warning_diff_count"
 echo ""
 
 # Show sexp-locs mismatches
@@ -1075,6 +1172,26 @@ if ! $spice_missing && [[ $spice_total -gt 0 ]]; then
     fi
 fi
 
+if [[ $parser_warning_diff_count -gt 0 ]]; then
+    echo -e "${BOLD}${YELLOW}Parser warning snapshot failures ($parser_warning_diff_count):${RESET}"
+    echo -e "$parser_warning_failed_files" | grep -v "^$" | head -20 | while read line; do
+        echo "  $line"
+    done
+    total_failures=$(echo -e "$parser_warning_failed_files" | grep -v "^$" | wc -l | tr -d ' ')
+    if [[ $total_failures -gt 20 ]]; then
+        echo "  ... and $((total_failures - 20)) more"
+    fi
+    echo ""
+
+    echo -e "${BOLD}Example parser warning snapshot diff (first file):${RESET}"
+    first_warning_file=$(echo -e "$parser_warning_failed_files" | grep -v "^$" | head -1 | sed -E 's/ \(.+$//')
+    if [[ -n "$first_warning_file" ]]; then
+        first_warning_diff="$TEMP_DIR/parser_warning_diffs/$(echo "$first_warning_file" | tr '/' '_').diff"
+        [[ -f "$first_warning_diff" ]] && head -50 "$first_warning_diff"
+    fi
+    echo ""
+fi
+
 echo -e "${BOLD}============================================${RESET}"
 
 # Determine exit status
@@ -1117,6 +1234,12 @@ elif [[ $spice_total -gt 0 ]]; then
         all_pass=false
         exit_code=1
     fi
+fi
+
+if [[ $parser_warning_diff_count -gt 0 ]]; then
+    echo -e "${RED}${BOLD}FAILED: Parser warning snapshots have $parser_warning_diff_count failure(s)${RESET}"
+    all_pass=false
+    exit_code=1
 fi
 
 if [[ $locs_pass_count -eq 0 ]]; then

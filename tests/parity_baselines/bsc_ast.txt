@@ -1023,6 +1023,7 @@ syntax_tests/data/ppx/react/topLevel.res
 syntax_tests/data/ppx/react/typeConstraint.res
 syntax_tests/data/ppx/react/uncurriedProps.res
 syntax_tests/data/ppx/react/v4.res
+syntax_tests/data/ppx/react/warnings/optionalReactElement.res
 syntax_tests/data/printer/comments/array.res
 syntax_tests/data/printer/comments/binaryExpr.res
 syntax_tests/data/printer/comments/blockExpr.res

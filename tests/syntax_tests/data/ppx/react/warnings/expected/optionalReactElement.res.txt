@@ -1,0 +1,24 @@
+
+  Warning number 22
+  syntax_tests/data/ppx/react/warnings/optionalReactElement.res:4:3-29
+
+  2 │ let make = (
+  3 │   ~triggerLabel: string,
+  4 │   ~triggerIcon: React.element=?,
+  5 │ ) => {
+  6 │   React.null
+
+  React: optional argument annotations must have explicit `option`. Did you mean `option<React.element>=?`?
+
+@res.jsxComponentProps
+type props<'triggerLabel, 'triggerIcon> = {
+  triggerLabel: 'triggerLabel,
+  triggerIcon?: 'triggerIcon,
+}
+let make = ({triggerLabel, ?triggerIcon, _}: props<string, React.element>): React.element => {
+  React.null
+}
+let make = {
+  let \"OptionalReactElement" = (props: props<_>) => make(props)
+  \"OptionalReactElement"
+}

@@ -179,9 +179,10 @@ fn main() {
             }
         }
 
-        // Apply JSX PPX transformation
-        let signature =
-            jsx_ppx::transform_signature(signature, args.jsx_version, parser.arena_mut());
+        // Apply JSX PPX transformation and emit JSX preprocessor warnings.
+        let (signature, jsx_warnings) =
+            jsx_ppx::transform_signature_with_warnings(signature, args.jsx_version, parser.arena_mut());
+        print_jsx_preprocessor_warnings(&source, &filename, &jsx_warnings, &mut io::stderr());
 
         // Apply AST conversion round-trip if requested (for testing)
         let signature = if args.test_ast_conversion {
@@ -286,9 +287,10 @@ fn main() {
             }
         }
 
-        // Apply JSX PPX transformation
-        let structure =
-            jsx_ppx::transform_structure(structure, args.jsx_version, parser.arena_mut());
+        // Apply JSX PPX transformation and emit JSX preprocessor warnings.
+        let (structure, jsx_warnings) =
+            jsx_ppx::transform_structure_with_warnings(structure, args.jsx_version, parser.arena_mut());
+        print_jsx_preprocessor_warnings(&source, &filename, &jsx_warnings, &mut io::stderr());
 
         // Apply AST conversion round-trip if requested (for testing)
         let structure = if args.test_ast_conversion {
@@ -403,6 +405,31 @@ fn print_diagnostics(parser: &Parser, source: &str, filename: &str, out: &mut im
             &diag.explain_with_source(Some(source)),
         );
         let _ = out.write_all(error_msg.as_bytes());
+    }
+}
+
+fn print_jsx_preprocessor_warnings(
+    source: &str,
+    filename: &str,
+    warnings: &[jsx_ppx::JsxPreprocessorWarning],
+    out: &mut impl Write,
+) {
+    for warning in warnings {
+        let _ = writeln!(out);
+        let _ = writeln!(out, "  Warning number 22");
+        let _ = writeln!(
+            out,
+            "  {}",
+            code_frame::format_location(filename, &warning.start_pos, &warning.end_pos)
+        );
+        let _ = writeln!(out);
+        let _ = writeln!(
+            out,
+            "{}",
+            code_frame::print(source, &warning.start_pos, &warning.end_pos)
+        );
+        let _ = writeln!(out, "  {}", warning.message);
+        let _ = writeln!(out);
     }
 }
 
