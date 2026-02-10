@@ -305,14 +305,17 @@ fn sexp_arity(arena: &ParseArena, arity: &Arity) -> Sexp {
 /// Returns the ident from Tpat_var, or creates a dummy ident for other patterns.
 fn extract_param_ident(param: &FunctionParam) -> Ident {
     match &param.pat {
-        FunctionParamPattern::Simple(pat) => {
-            match &pat.pat_desc {
-                PatternDesc::Tpat_var(id, _) => id.clone(),
-                PatternDesc::Tpat_alias(_, id, _) => id.clone(),
-                // For other patterns, create a synthetic ident
+        FunctionParamPattern::Simple(pat) => match &pat.pat_desc {
+            PatternDesc::Tpat_var(id, _) => id.clone(),
+            PatternDesc::Tpat_alias(_, id, _) => id.clone(),
+            // Match OCaml typecore `id_of_pattern`:
+            // Tpat_construct(_, _, [Tpat_var|Tpat_alias]) -> Some (Ident.rename id)
+            PatternDesc::Tpat_construct(_, _, args) if args.len() == 1 => match &args[0].pat_desc {
+                PatternDesc::Tpat_var(id, _) | PatternDesc::Tpat_alias(_, id, _) => id.clone(),
                 _ => Ident::create_persistent("param"),
-            }
-        }
+            },
+            _ => Ident::create_persistent("param"),
+        },
         FunctionParamPattern::Nested(_) => Ident::create_persistent("param"),
     }
 }
