@@ -3063,8 +3063,13 @@ pub fn type_expect<'a>(
 
             // Type check body in extended environment
             let typed_body = type_expect(tctx, &new_env, body, expected_ty, None)?;
-            let typed_body =
-                wrap_module_unpacks_in_expression(tctx, &new_env, typed_body, &unpacks);
+            let typed_body = wrap_module_unpacks_in_expression(
+                tctx,
+                &new_env,
+                typed_body,
+                &unpacks,
+                body.pexp_loc,
+            );
             let body_type = typed_body.exp_type;
 
             Ok(Expression::new(
@@ -4746,6 +4751,7 @@ fn type_case_impl(
     )?;
 
     // Extend environment with pattern bindings
+    let mut unpacks: Vec<PatternVariable> = Vec::new();
     for pv in &state.pattern_variables {
         let desc = ValueDescription {
             val_type: pv.ty,
@@ -4755,18 +4761,47 @@ fn type_case_impl(
             val_path: None,
         };
         case_env.add_value(pv.id.clone(), desc);
+        if pv.is_module {
+            let module_type = module_type_from_package_binding(tctx, &case_env, pv.ty);
+            case_env.add_module(
+                pv.id.clone(),
+                crate::types::decl::ModuleDeclaration {
+                    md_type: module_type,
+                    md_attributes: vec![],
+                    md_loc: crate::location::Location::none(),
+                    md_path: None,
+                },
+            );
+            // OCaml records unpack vars in reverse insertion order
+            // (`module_variables := x :: module_variables`).
+            unpacks.insert(0, pv.clone());
+        }
     }
 
     // Type check the guard if present
     let typed_guard = if let Some(guard) = &case.pc_guard {
         let bool_ty = env.type_bool(tctx.type_ctx);
-        Some(type_expect(tctx, &case_env, guard, bool_ty, None)?)
+        let typed_guard = type_expect(tctx, &case_env, guard, bool_ty, None)?;
+        Some(wrap_module_unpacks_in_expression(
+            tctx,
+            &case_env,
+            typed_guard,
+            &unpacks,
+            guard.pexp_loc,
+        ))
     } else {
         None
     };
 
     // Type check the body
     let typed_body = type_expect(tctx, &case_env, &case.pc_rhs, body_ty, None)?;
+    let typed_body = wrap_module_unpacks_in_expression(
+        tctx,
+        &case_env,
+        typed_body,
+        &unpacks,
+        case.pc_rhs.pexp_loc,
+    );
 
     Ok(crate::types::typedtree::Case {
         c_lhs: typed_pat,
@@ -4923,7 +4958,17 @@ fn type_function(
 
     // Extend environment with parameter binding
     let mut body_env = env.clone();
+    let mut unpacks: Vec<PatternVariable> = Vec::new();
     for pv in &state.pattern_variables {
+        let desc = ValueDescription {
+            val_type: pv.ty,
+            val_kind: crate::types::ValueKind::ValReg,
+            val_loc: pv.loc.clone(),
+            val_attributes: vec![],
+            val_path: None,
+        };
+        body_env.add_value(pv.id.clone(), desc);
+
         if pv.is_module {
             let module_type = module_type_from_package_binding(tctx, &body_env, pv.ty);
             body_env.add_module(
@@ -4935,20 +4980,21 @@ fn type_function(
                     md_path: None,
                 },
             );
-        } else {
-            let desc = ValueDescription {
-                val_type: pv.ty,
-                val_kind: crate::types::ValueKind::ValReg,
-                val_loc: pv.loc.clone(),
-                val_attributes: vec![],
-                val_path: None,
-            };
-            body_env.add_value(pv.id.clone(), desc);
+            // OCaml records unpack vars in reverse insertion order
+            // (`module_variables := x :: module_variables`).
+            unpacks.insert(0, pv.clone());
         }
     }
 
     // Type check body
     let typed_body = type_expect(tctx, &body_env, body, return_ty, None)?;
+    let typed_body = wrap_module_unpacks_in_expression(
+        tctx,
+        &body_env,
+        typed_body,
+        &unpacks,
+        body.pexp_loc,
+    );
 
     // Build function parameter
     let fp = FunctionParam {
@@ -7330,6 +7376,7 @@ fn wrap_module_unpacks_in_expression(
     env: &Env,
     mut body: Expression,
     unpacks: &[PatternVariable],
+    wrapper_loc: LocIdx,
 ) -> Expression {
     fn ensure_string_idx(arena: &ParseArena, s: &str) -> StrIdx {
         if let Some(idx) = arena.find_string_idx(s) {
@@ -7381,7 +7428,9 @@ fn wrap_module_unpacks_in_expression(
             mod_attributes: vec![],
         };
 
-        let wrapped_loc = body.exp_loc;
+        // OCaml `wrap_unpacks` uses the source expression location (`sexp.pexp_loc`)
+        // for each generated `let module` wrapper.
+        let wrapped_loc = wrapper_loc;
         let wrapped_ty = body.exp_type;
         let modulepat_attrs = vec![(
             Located {
