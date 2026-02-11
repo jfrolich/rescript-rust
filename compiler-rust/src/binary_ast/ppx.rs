@@ -1162,12 +1162,32 @@ fn parse_external_attrs(
     attrs: &[Attribute],
     prim_name: &str,
     no_arguments: bool,
+    pval_loc: LocIdx,
     arena: &ParseArena,
 ) -> ExternalDesc {
     let mut desc = ExternalDesc::default();
 
     for (attr_name, payload) in attrs {
         let name = arena.get_string(attr_name.txt);
+        if name == "genType.import" || name == "gentype.import" {
+            // Match OCaml ast_external_process.parse_external_attributes:
+            // @genType.import/@gentype.import rewrites externals to import from
+            // "./<basename>.gen", which must be treated as a relative module path.
+            let input_name = arena.get_string(arena.to_location(pval_loc).loc_start.file_name);
+            let basename = std::path::Path::new(input_name)
+                .file_name()
+                .and_then(|s| s.to_str())
+                .unwrap_or(input_name);
+            let stem = basename
+                .rsplit_once('.')
+                .map(|(name, _)| name)
+                .unwrap_or(basename);
+            desc.external_module_name = Some(format!("./{stem}.gen"));
+            desc.module_bind_name = None;
+            desc.module_as_val = false;
+            desc.import_attributes = None;
+            continue;
+        }
         match name {
             "val" => {
                 let name =
@@ -1697,7 +1717,13 @@ fn check_external_relative(vd: &ValueDescription, arena: &mut ParseArena) -> boo
     let (params, arity) = build_arg_type_specs(&vd.pval_type, arena);
     let (args, result_type) = list_of_arrow(&vd.pval_type, arena);
     let no_arguments = args.is_empty();
-    let desc = parse_external_attrs(&vd.pval_attributes, prim_name.as_str(), no_arguments, arena);
+    let desc = parse_external_attrs(
+        &vd.pval_attributes,
+        prim_name.as_str(),
+        no_arguments,
+        vd.pval_loc,
+        arena,
+    );
     let result_is_unit = is_unit_type(result_type, arena);
     let ffi = build_ffi_type(&desc, prim_name.as_str(), arity, result_is_unit, params);
     check_ffi_relative(&ffi)
@@ -1799,7 +1825,13 @@ pub fn encode_external(vd: &ValueDescription, arena: &mut ParseArena) -> Encoded
     let no_arguments = args.is_empty();
 
     // Parse attributes
-    let desc = parse_external_attrs(&vd.pval_attributes, prim_name.as_str(), no_arguments, arena);
+    let desc = parse_external_attrs(
+        &vd.pval_attributes,
+        prim_name.as_str(),
+        no_arguments,
+        vd.pval_loc,
+        arena,
+    );
 
     // Check if result is unit - use the result from list_of_arrow, not get_final_result_type
     // OCaml's handle_attributes uses result_type from list_of_arrow, which respects arity boundaries.
