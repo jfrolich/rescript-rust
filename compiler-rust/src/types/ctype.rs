@@ -2014,10 +2014,14 @@ fn copy_type_cached(
         if level != GENERIC_LEVEL {
             match &*desc {
                 TypeDesc::Tvar(_) | TypeDesc::Tunivar(_) => CopyAction::ReturnSelf,
-                // Preserve identity for non-generic nullary constructors.
-                // This better matches OCaml sharing for predef leaves (int, string, bool, etc.)
-                // without changing Rust's current structural-copy discipline for other nodes.
-                TypeDesc::Tconstr { args, .. } if args.is_empty() => CopyAction::ReturnSelf,
+                // Preserve identity only for non-generic nullary predef constructors
+                // (int, string, bool, etc.). Non-predef aliases like Stdlib_RegExp.t
+                // must still be structurally copied to avoid over-sharing.
+                TypeDesc::Tconstr { path, args, .. }
+                    if args.is_empty() && is_predef_type_name(path.head_name()) =>
+                {
+                    CopyAction::ReturnSelf
+                }
                 TypeDesc::Tarrow {
                     arg, ret, arity, ..
                 } => CopyAction::Arrow {
