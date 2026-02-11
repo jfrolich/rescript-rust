@@ -5221,6 +5221,7 @@ fn type_function(
         default: typed_default,
         pat: FunctionParamPattern::Simple(typed_param.clone()),
     };
+    let exp_param_ty = typed_param.pat_type;
 
     // Build single case for the body
     let cases = vec![Case {
@@ -5235,8 +5236,57 @@ fn type_function(
     // node-sharing behavior in typedtree output.
     let exp_type = crate::types::instance(
         ctx,
-        ctx.new_generic_arrow(ctx_label, param_ty, return_ty, arity_opt),
+        ctx.new_generic_arrow(ctx_label, exp_param_ty, return_ty, arity_opt),
     );
+    // OCaml `instance` keeps non-generic children by identity. Our broader
+    // instantiation path may structurally copy them, so re-anchor top-level
+    // function arg/ret nodes when they are non-generic to preserve sharing.
+    let exp_type_repr = ctx.repr(exp_type);
+    let mut anchored_arrow: Option<(
+        crate::types::asttypes::ArgLabel,
+        TypeExprRef,
+        TypeExprRef,
+        crate::types::type_expr::Commutable,
+        Option<i32>,
+    )> = None;
+    {
+        let exp_type_desc = ctx.get_desc(exp_type_repr);
+        if let TypeDesc::Tarrow {
+            arg,
+            ret,
+            commutable,
+            arity,
+        } = &*exp_type_desc
+        {
+            let arg_ty = if ctx.get_level(ctx.repr(exp_param_ty)) != crate::types::GENERIC_LEVEL {
+                exp_param_ty
+            } else {
+                arg.typ
+            };
+            let ret_ty = if ctx.get_level(ctx.repr(return_ty)) != crate::types::GENERIC_LEVEL {
+                return_ty
+            } else {
+                *ret
+            };
+            if arg_ty != arg.typ || ret_ty != *ret {
+                anchored_arrow = Some((arg.lbl.clone(), arg_ty, ret_ty, commutable.clone(), *arity));
+            }
+        }
+    }
+    if let Some((arg_lbl, arg_ty, ret_ty, commutable, arity)) = anchored_arrow {
+        ctx.set_desc(
+            exp_type_repr,
+            TypeDesc::Tarrow {
+                arg: crate::types::type_expr::TypeArg {
+                    lbl: arg_lbl,
+                    typ: arg_ty,
+                },
+                ret: ret_ty,
+                commutable,
+                arity,
+            },
+        );
+    }
 
     Ok(Expression::new(
         ExpressionDesc::Texp_function {
