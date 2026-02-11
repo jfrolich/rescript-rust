@@ -5229,11 +5229,14 @@ fn type_function(
         c_rhs: typed_body,
     }];
 
-    // OCaml typecore.ml builds a generic arrow and then instantiates it. Rust
-    // currently over-copies non-generic nodes during instance(), which can
-    // perturb alias path identity in emitted typedtree. Keep the freshly-built
-    // generic arrow node here to preserve the original parameter path shape.
-    let exp_type = ctx.new_generic_arrow(ctx_label, param_ty, return_ty, arity_opt);
+    // Match OCaml typecore.ml:
+    //   exp_type = instance env (newgenty (Tarrow (...)))
+    // Instantiating the freshly built generic arrow preserves OCaml's
+    // node-sharing behavior in typedtree output.
+    let exp_type = crate::types::instance(
+        ctx,
+        ctx.new_generic_arrow(ctx_label, param_ty, return_ty, arity_opt),
+    );
 
     Ok(Expression::new(
         ExpressionDesc::Texp_function {
