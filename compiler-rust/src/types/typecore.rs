@@ -608,6 +608,8 @@ pub struct TypeCheckContext<'a> {
     pub recursive_let_depth: usize,
     /// Persistent environment for loading external modules from .cmi files.
     pub persistent_env: Option<crate::cmi::persistent_env::PersistentEnv>,
+    /// Force fresh allocation for local float identifiers in repeated argument sites.
+    pub force_fresh_local_float: bool,
 }
 
 /// A diagnostic from type checking.
@@ -632,6 +634,7 @@ impl<'a> TypeCheckContext<'a> {
             type_variables: HashMap::new(),
             recursive_let_depth: 0,
             persistent_env: None,
+            force_fresh_local_float: false,
         }
     }
 
@@ -3123,7 +3126,8 @@ pub fn type_expect<'a>(
             // pattern nodes.
             let ty = {
                 let source_ty = ctx.repr(desc.val_type);
-                let reuse_local_ground = match &path {
+                let force_fresh_local_float = tctx.force_fresh_local_float;
+                let (reuse_local_ground, fresh_local_float_path) = match &path {
                     Path::Pident(id)
                         if !id.is_persistent()
                             && ctx.get_level(source_ty) != crate::types::GENERIC_LEVEL =>
@@ -3144,20 +3148,33 @@ pub fn type_expect<'a>(
                                                 Path::Pident(id) if id.name() == "Stdlib_RegExp"
                                             )
                                 );
-                                args.is_empty()
-                                    && !keep_alias_path
-                                    && source_path.head_name() != "float"
+                                // Keep previous local-identity behavior for non-float nullary
+                                // constructors, but allocate a fresh node for float to avoid
+                                // over-sharing argument slots in repeated uses like `x *. x`.
+                                let is_local_float = force_fresh_local_float
+                                    && args.is_empty()
+                                    && source_path.head_name() == "float";
+                                (
+                                    args.is_empty() && !keep_alias_path && !is_local_float,
+                                    if is_local_float {
+                                        Some(source_path.clone())
+                                    } else {
+                                        None
+                                    },
+                                )
                             }
                             // Match OCaml instance() for local monomorphic functions:
                             // non-generic arrows are returned by identity, which preserves
                             // sharing through recursive uses.
-                            TypeDesc::Tarrow { .. } => true,
-                            _ => false,
+                            TypeDesc::Tarrow { .. } => (true, None),
+                            _ => (false, None),
                         }
                     }
-                    _ => false,
+                    _ => (false, None),
                 };
-                if reuse_local_ground {
+                if let Some(float_path) = fresh_local_float_path {
+                    ctx.new_constr(float_path, vec![])
+                } else if reuse_local_ground {
                     source_ty
                 } else {
                     crate::types::instance(ctx, desc.val_type)
@@ -4332,6 +4349,21 @@ fn type_application(
         }
     }
 
+    let mut repeated_local_ident_counts: std::collections::HashMap<String, usize> =
+        std::collections::HashMap::new();
+    for pending_arg in &pending_args {
+        if let PendingApplyArg::Provided { expr, .. } = pending_arg {
+            if let crate::parser::ast::ExpressionDesc::Pexp_ident(lid) = &expr.pexp_desc {
+                if let crate::parser::longident::Longident::Lident(idx) =
+                    tctx.arena.get_longident(lid.txt)
+                {
+                    let name = tctx.arena.get_string(*idx).to_string();
+                    *repeated_local_ident_counts.entry(name).or_insert(0) += 1;
+                }
+            }
+        }
+    }
+
     let mut typed_args = Vec::with_capacity(pending_args.len());
     for pending_arg in pending_args {
         match pending_arg {
@@ -4341,13 +4373,34 @@ fn type_application(
                 expected_ty,
                 enforce_optional,
             } => {
-                let typed_arg = type_expect(
+                let force_fresh_local_float = if let crate::parser::ast::ExpressionDesc::Pexp_ident(
+                    lid,
+                ) = &expr.pexp_desc
+                {
+                    if let crate::parser::longident::Longident::Lident(idx) =
+                        tctx.arena.get_longident(lid.txt)
+                    {
+                        let name = tctx.arena.get_string(*idx);
+                        repeated_local_ident_counts.get(name).copied().unwrap_or(0) > 1
+                    } else {
+                        false
+                    }
+                } else {
+                    false
+                };
+
+                let previous_force_fresh_local_float = tctx.force_fresh_local_float;
+                tctx.force_fresh_local_float = force_fresh_local_float;
+                let typed_arg_result = type_expect(
                     tctx,
                     env,
                     expr,
                     expected_ty,
                     Some(TypeClashContext::FunctionCall),
-                )?;
+                );
+                tctx.force_fresh_local_float = previous_force_fresh_local_float;
+
+                let typed_arg = typed_arg_result?;
                 let typed_arg = if enforce_optional {
                     let wrapped_loc = typed_arg.exp_loc;
                     let wrapped_env = typed_arg.exp_env;
