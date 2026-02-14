@@ -13,19 +13,18 @@
 use super::marshal::{EmptyPayloadShareKind, MarshalWriter, PrimListShareKind};
 use super::serialize::Marshal;
 use crate::parse_arena::{LocIdx, StrIdx};
-use crate::parser::longident::Longident;
 use crate::parser::ast::{
-    Arity, ArgLabel, Attribute, Attributes, Case, ClosedFlag, Constant, CoreType, CoreTypeDesc,
-    DirectionFlag, Expression, ExpressionDesc, ExpressionRecordField, ExtensionConstructor,
-    ExtensionConstructorKind, IncludeDeclaration, IncludeDescription, LabelDeclaration,
-    ModuleBinding, ModuleDeclaration, ModuleExpr, ModuleExprDesc, ModuleType,
-    ModuleTypeDeclaration, ModuleTypeDesc, MutableFlag, ObjectField, OpenDescription,
-    OverrideFlag, Pattern, PatternDesc, PatternRecordField, Payload, PrivateFlag, RecFlag,
-    RowField, SignatureItem, SignatureItemDesc, StructureItem, StructureItemDesc, TypeArg,
-    TypeDeclaration, TypeExtension, TypeKind, ValueBinding, ValueDescription, Variance,
-    WithConstraint, ConstructorArguments, ConstructorDeclaration, StringLoc,
-    Extension,
+    ArgLabel, Arity, Attribute, Attributes, Case, ClosedFlag, Constant, ConstructorArguments,
+    ConstructorDeclaration, CoreType, CoreTypeDesc, DirectionFlag, Expression, ExpressionDesc,
+    ExpressionRecordField, Extension, ExtensionConstructor, ExtensionConstructorKind,
+    IncludeDeclaration, IncludeDescription, LabelDeclaration, ModuleBinding, ModuleDeclaration,
+    ModuleExpr, ModuleExprDesc, ModuleType, ModuleTypeDeclaration, ModuleTypeDesc, MutableFlag,
+    ObjectField, OpenDescription, OverrideFlag, Pattern, PatternDesc, PatternRecordField, Payload,
+    PrivateFlag, RecFlag, RowField, SignatureItem, SignatureItemDesc, StringLoc, StructureItem,
+    StructureItemDesc, TypeArg, TypeDeclaration, TypeExtension, TypeKind, ValueBinding,
+    ValueDescription, Variance, WithConstraint,
 };
+use crate::parser::longident::Longident;
 
 // ========== Attribute list sharing ==========
 
@@ -111,10 +110,7 @@ fn has_await_attr(attrs: &Attributes, w: &MarshalWriter) -> bool {
 fn should_share_singleton_attr_list(name: &str) -> bool {
     matches!(
         name,
-        "react.component"
-            | "jsx.component"
-            | "react.componentWithProps"
-            | "jsx.componentWithProps"
+        "react.component" | "jsx.component" | "react.componentWithProps" | "jsx.componentWithProps"
     )
 }
 
@@ -213,7 +209,9 @@ fn is_external_ext_expr(expr: &Expression, w: &MarshalWriter) -> bool {
         return false;
     }
 
-    let ExpressionDesc::Pexp_ifthenelse(cond, then_expr, Some(else_expr)) = &outer_args[0].1.pexp_desc else {
+    let ExpressionDesc::Pexp_ifthenelse(cond, then_expr, Some(else_expr)) =
+        &outer_args[0].1.pexp_desc
+    else {
         return false;
     };
     if !is_external_raw_expansion_expr(else_expr, w) {
@@ -384,8 +382,9 @@ fn marshal_attribute_list(
     if let Some((head, tail)) = attrs.split_first() {
         let (name, payload) = head;
         let payload_is_empty = matches!(payload, Payload::PStr(items) if items.is_empty());
-        let is_singleton_res_await =
-            tail.is_empty() && payload_is_empty && w.get_arena().get_string(name.txt) == "res.await";
+        let is_singleton_res_await = tail.is_empty()
+            && payload_is_empty
+            && w.get_arena().get_string(name.txt) == "res.await";
 
         // Even when we must serialize a fresh list cell (e.g. inside Pexp_pack),
         // remember the first singleton @res.await list so later non-pack sites can
@@ -507,8 +506,7 @@ fn marshal_attributes(
             let share_res_await_list = name_str == "res.await" && !w.in_pack();
             if should_share_singleton_attr_list(name_str)
                 || share_res_await_list
-                || (share_parser_singleton_attr
-                    && matches!(name_str, "res.braces" | "res.ternary"))
+                || (share_parser_singleton_attr && matches!(name_str, "res.braces" | "res.ternary"))
             {
                 let key = (name.txt, name.loc);
                 if let Some(&obj_idx) = w.singleton_attr_list_table_get(&key) {
@@ -557,9 +555,7 @@ fn marshal_attributes(
     // - The tuple inside is shared when share_singleton=true and a matching entry exists
     if share_singleton {
         if let [(name, payload)] = attrs_slice {
-            if payload_is_empty_str(payload)
-                && is_none_loc_idx(name.loc, w)
-            {
+            if payload_is_empty_str(payload) && is_none_loc_idx(name.loc, w) {
                 let key = (name.txt, name.loc);
 
                 // Write the cons cell (list with one element): Block(tag=0, size=2) [tuple, nil]
@@ -1213,8 +1209,10 @@ impl Marshal for Expression {
         );
         let rewritten_expr = w.get_arena().is_rewritten_expr_loc(self.pexp_loc);
         let share_singleton_attr_tuple = share_attrs;
-        let suppress_rewritten_braces =
-            rewritten_expr && has_braces_or_ternary && !w.in_extension() && !rewritten_await_letmodule;
+        let suppress_rewritten_braces = rewritten_expr
+            && has_braces_or_ternary
+            && !w.in_extension()
+            && !rewritten_await_letmodule;
         let share_empty_pstr = if !suppress_rewritten_braces
             && (is_pipe_application(self, w)
                 || share_attrs
@@ -1837,10 +1835,7 @@ fn marshal_prim_list(prims: &[StrIdx], w: &mut MarshalWriter) {
             let share_by_idx = {
                 let prim_str = w.get_arena().get_string(*prim);
                 !prim_str.contains('-')
-                    && !matches!(
-                        prim_str,
-                        "open" | "type" | "begin" | "end" | "in" | "to"
-                    )
+                    && !matches!(prim_str, "open" | "type" | "begin" | "end" | "in" | "to")
             };
             if share_by_idx {
                 w.write_str_idx(*prim);
@@ -2073,7 +2068,10 @@ impl Marshal for SignatureItemDesc {
 
 // ========== JSX types ==========
 
-use crate::parser::ast::{JsxClosingTag, JsxContainerElement, JsxElement, JsxFragment, JsxProp, JsxTagName, JsxUnaryElement};
+use crate::parser::ast::{
+    JsxClosingTag, JsxContainerElement, JsxElement, JsxFragment, JsxProp, JsxTagName,
+    JsxUnaryElement,
+};
 
 impl Marshal for JsxElement {
     fn marshal(&self, w: &mut MarshalWriter) {
@@ -2169,7 +2167,11 @@ impl Marshal for JsxProp {
                 w.write_int(if *optional { 1 } else { 0 });
                 name.marshal(w);
             }
-            JsxProp::Value { name, optional, value } => {
+            JsxProp::Value {
+                name,
+                optional,
+                value,
+            } => {
                 w.write_block_header(1, 3);
                 name.marshal(w);
                 w.write_int(if *optional { 1 } else { 0 });

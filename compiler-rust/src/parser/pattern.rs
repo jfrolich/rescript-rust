@@ -10,7 +10,7 @@ use super::grammar::{self, Grammar};
 use super::longident::Longident;
 use super::state::{Parser, ParserMode};
 use super::token::Token;
-use crate::parse_arena::{Located, LocIdx, PosIdx, StrIdx};
+use crate::parse_arena::{LocIdx, Located, PosIdx, StrIdx};
 
 /// Check if a constant is valid for an interval pattern.
 /// This includes integers, floats, characters (Constant::Char), and
@@ -42,7 +42,11 @@ fn parse_attributes(p: &mut Parser<'_>) -> Attributes {
                 let content = content.clone();
                 p.next();
                 let loc = p.from_location(&loc_cloned);
-                attrs.push(super::core::doc_comment_to_attribute(p.arena_mut(), loc, content));
+                attrs.push(super::core::doc_comment_to_attribute(
+                    p.arena_mut(),
+                    loc,
+                    content,
+                ));
             }
             _ => break,
         }
@@ -287,7 +291,10 @@ fn parse_single_pattern_with_alias(p: &mut Parser<'_>) -> Pattern {
         let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
         let name_idx = p.arena_mut().push_string(name.to_string());
         pat = Pattern {
-            ppat_desc: PatternDesc::Ppat_alias(Box::new(pat), with_loc(name_idx, name_with_attrs_loc)),
+            ppat_desc: PatternDesc::Ppat_alias(
+                Box::new(pat),
+                with_loc(name_idx, name_with_attrs_loc),
+            ),
             ppat_loc: loc,
             ppat_attributes: alias_attrs,
         };
@@ -316,11 +323,7 @@ pub fn parse_pattern(p: &mut Parser<'_>) -> Pattern {
 }
 
 /// Parse an or-pattern (pat1 | pat2).
-fn parse_or_pattern(
-    p: &mut Parser<'_>,
-    first: Pattern,
-    _start_pos_idx: PosIdx,
-) -> Pattern {
+fn parse_or_pattern(p: &mut Parser<'_>, first: Pattern, _start_pos_idx: PosIdx) -> Pattern {
     let mut patterns = vec![first];
 
     while p.token == Token::Bar {
@@ -1018,7 +1021,9 @@ fn parse_array_pattern(p: &mut Parser<'_>) -> Pattern {
     while p.token != Token::Rbracket && p.token != Token::Eof {
         // Use parse_non_spread_pattern to disallow spread in array patterns
         // and emit appropriate error message
-        if let Some(pat) = parse_non_spread_pattern(p, super::core::error_messages::ARRAY_PATTERN_SPREAD) {
+        if let Some(pat) =
+            parse_non_spread_pattern(p, super::core::error_messages::ARRAY_PATTERN_SPREAD)
+        {
             patterns.push(pat);
             if !p.optional(&Token::Comma) {
                 break;
@@ -1067,13 +1072,15 @@ fn parse_list_pattern(p: &mut Parser<'_>, start_pos_idx: PosIdx) -> Pattern {
                 } else if p.token == Token::Rbrace || p.token == Token::Eof {
                     items.push(node);
                     break;
-                } else if super::grammar::is_pattern_start(&p.token) || p.token == Token::DotDotDot {
+                } else if super::grammar::is_pattern_start(&p.token) || p.token == Token::DotDotDot
+                {
                     // Missing comma - report and continue
                     p.expect(Token::Comma);
                     items.push(node);
                 } else {
                     items.push(node);
-                    if !(p.token == Token::Eof || p.token == Token::Rbrace
+                    if !(p.token == Token::Eof
+                        || p.token == Token::Rbrace
                         || super::core::recover::should_abort_list_parse(p))
                     {
                         p.expect(Token::Comma);
@@ -1083,7 +1090,8 @@ fn parse_list_pattern(p: &mut Parser<'_>, start_pos_idx: PosIdx) -> Pattern {
                 }
             }
             None => {
-                if p.token == Token::Eof || p.token == Token::Rbrace
+                if p.token == Token::Eof
+                    || p.token == Token::Rbrace
                     || super::core::recover::should_abort_list_parse(p)
                 {
                     break;
@@ -1187,7 +1195,11 @@ fn parse_record_pattern(p: &mut Parser<'_>) -> Pattern {
         }
         // For optional punned fields, the pattern location starts after the '?'
         // OCaml: the pattern location is just the identifier, not including '? '
-        let pat_start_idx = if opt_punning { p.start_pos_idx() } else { field_start_idx };
+        let pat_start_idx = if opt_punning {
+            p.start_pos_idx()
+        } else {
+            field_start_idx
+        };
 
         // Support qualified record labels in patterns: {Module.label: pat}
         // (also needed for ambiguity disambiguation, mirroring OCaml syntax).
@@ -1213,10 +1225,12 @@ fn parse_record_pattern(p: &mut Parser<'_>) -> Pattern {
         if parts.is_empty() {
             if p.token.is_keyword() {
                 // Try to recover keyword as field name if followed by colon
-                if let Some((recovered_name, loc)) = super::core::recover_keyword_field_name_if_probably_field(
-                    p,
-                    super::core::error_messages::keyword_field_in_pattern,
-                ) {
+                if let Some((recovered_name, loc)) =
+                    super::core::recover_keyword_field_name_if_probably_field(
+                        p,
+                        super::core::error_messages::keyword_field_in_pattern,
+                    )
+                {
                     // OCaml: Parser.expect Colon p
                     p.expect(Token::Colon);
                     // Check for optional marker after colon: name: ? pat
@@ -1234,7 +1248,10 @@ fn parse_record_pattern(p: &mut Parser<'_>) -> Pattern {
                     continue;
                 } else {
                     // Just emit the error and break
-                    super::core::emit_keyword_field_error(p, super::core::error_messages::keyword_field_in_pattern);
+                    super::core::emit_keyword_field_error(
+                        p,
+                        super::core::error_messages::keyword_field_in_pattern,
+                    );
                     break;
                 }
             }

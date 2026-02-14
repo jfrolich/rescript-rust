@@ -19,11 +19,11 @@
 //!   -typechecker            Parse for typechecker (not printer)
 
 use clap::Parser as ClapParser;
-use rescript_compiler::binary_ast::{mapper_from0, mapper_to0, ppx, Marshal, MarshalWriter};
+use rescript_compiler::binary_ast::{Marshal, MarshalWriter, mapper_from0, mapper_to0, ppx};
 use rescript_compiler::parse_arena::ParseArena;
 use rescript_compiler::parser::{
-    code_frame, jsx_ppx, ml_printer, module, printer2, sexp, sexp_locs, sexp_locs0, Comment, Parser,
-    ParserMode, Scanner, SignatureItem, Structure,
+    Comment, Parser, ParserMode, Scanner, SignatureItem, Structure, code_frame, jsx_ppx,
+    ml_printer, module, printer2, sexp, sexp_locs, sexp_locs0,
 };
 use std::fs;
 use std::io::{self, Write};
@@ -180,7 +180,8 @@ fn main() {
         }
 
         // Apply JSX PPX transformation
-        let signature = jsx_ppx::transform_signature(signature, args.jsx_version, parser.arena_mut());
+        let signature =
+            jsx_ppx::transform_signature(signature, args.jsx_version, parser.arena_mut());
 
         // Apply AST conversion round-trip if requested (for testing)
         let signature = if args.test_ast_conversion {
@@ -201,9 +202,16 @@ fn main() {
                 let bytes: Vec<u8> = output.chars().map(|c| c as u8).collect();
                 let _ = io::stdout().write_all(&bytes);
             }
-            "res" => print_signature_res(&signature, parser.comments().to_vec(), parser.arena_mut(), &mut io::stdout()),
+            "res" => print_signature_res(
+                &signature,
+                parser.comments().to_vec(),
+                parser.arena_mut(),
+                &mut io::stdout(),
+            ),
             "sexp" => sexp::print_signature(parser.arena(), &signature, &mut io::stdout()),
-            "sexp-locs" => sexp_locs::print_signature(&signature, parser.arena(), &mut io::stdout()),
+            "sexp-locs" => {
+                sexp_locs::print_signature(&signature, parser.arena(), &mut io::stdout())
+            }
             "sexp-locs-ppx" => {
                 let rewritten = ppx::rewrite_signature(&signature, parser.arena_mut());
                 sexp_locs::print_signature(&rewritten, parser.arena(), &mut io::stdout());
@@ -273,7 +281,8 @@ fn main() {
         }
 
         // Apply JSX PPX transformation
-        let structure = jsx_ppx::transform_structure(structure, args.jsx_version, parser.arena_mut());
+        let structure =
+            jsx_ppx::transform_structure(structure, args.jsx_version, parser.arena_mut());
 
         // Apply AST conversion round-trip if requested (for testing)
         let structure = if args.test_ast_conversion {
@@ -295,8 +304,11 @@ fn main() {
                 let _ = io::stdout().write_all(&bytes);
             }
             "res" => {
-                let output =
-                    printer2::print_structure_with_comments(&structure, parser.comments().to_vec(), parser.arena_mut());
+                let output = printer2::print_structure_with_comments(
+                    &structure,
+                    parser.comments().to_vec(),
+                    parser.arena_mut(),
+                );
                 if !output.is_empty() {
                     // Convert Latin-1 chars back to bytes to preserve original file encoding
                     let bytes: Vec<u8> = output.chars().map(|c| c as u8).collect();
@@ -304,7 +316,9 @@ fn main() {
                 }
             }
             "sexp" => sexp::print_structure(parser.arena(), &structure, &mut io::stdout()),
-            "sexp-locs" => sexp_locs::print_structure(&structure, parser.arena(), &mut io::stdout()),
+            "sexp-locs" => {
+                sexp_locs::print_structure(&structure, parser.arena(), &mut io::stdout())
+            }
             "sexp-locs-ppx" => {
                 let rewritten = ppx::rewrite_structure(&structure, parser.arena_mut());
                 sexp_locs::print_structure(&rewritten, parser.arena(), &mut io::stdout());
@@ -416,7 +430,12 @@ fn print_tokens(source: &str, filename: &str, out: &mut impl Write) {
 // ReScript Printer
 // ============================================================================
 
-fn print_signature_res(signature: &[SignatureItem], comments: Vec<Comment>, arena: &mut ParseArena, out: &mut impl Write) {
+fn print_signature_res(
+    signature: &[SignatureItem],
+    comments: Vec<Comment>,
+    arena: &mut ParseArena,
+    out: &mut impl Write,
+) {
     // Use printer2 to print signature
     let output = printer2::print_signature_with_comments(signature, comments, arena);
     if !output.is_empty() {

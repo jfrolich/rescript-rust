@@ -53,13 +53,13 @@ pub mod marshal;
 pub mod parsetree0;
 pub mod parsetree0_marshal;
 pub mod ppx;
-pub mod spice_ppx;
 pub mod serialize;
+pub mod spice_ppx;
 pub mod types;
 pub mod writer;
 
 // Re-exports
-pub use deps::{extract_signature_deps, extract_structure_deps, Dependencies};
+pub use deps::{Dependencies, extract_signature_deps, extract_structure_deps};
 pub use mapper_to0::{map_signature, map_structure};
 pub use marshal::MarshalWriter;
 pub use parsetree0::*;

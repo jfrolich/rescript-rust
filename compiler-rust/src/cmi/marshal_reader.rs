@@ -120,7 +120,10 @@ impl OcamlValue {
     pub fn field(&self, idx: usize) -> &OcamlValue {
         match self {
             OcamlValue::Block(_, fields) => &fields[idx],
-            _ => panic!("expected Block for field access, got {:?}", self.short_debug()),
+            _ => panic!(
+                "expected Block for field access, got {:?}",
+                self.short_debug()
+            ),
         }
     }
 
@@ -143,7 +146,9 @@ impl OcamlValue {
                     format!("String(\"{}\")", s)
                 }
             }
-            OcamlValue::Block(tag, fields) => format!("Block(tag={}, {} fields)", tag, fields.len()),
+            OcamlValue::Block(tag, fields) => {
+                format!("Block(tag={}, {} fields)", tag, fields.len())
+            }
             OcamlValue::Float(f) => format!("Float({})", f),
         }
     }
@@ -220,7 +225,10 @@ impl MarshalReader {
     }
 
     /// Read a marshalled value including magic number and header.
-    pub fn read_with_header<R: Read>(&mut self, reader: &mut R) -> Result<OcamlValue, MarshalError> {
+    pub fn read_with_header<R: Read>(
+        &mut self,
+        reader: &mut R,
+    ) -> Result<OcamlValue, MarshalError> {
         let magic = read_u32_be(reader)?;
         if magic != MAGIC_NUMBER_SMALL {
             return Err(MarshalError::BadMagic(magic));
@@ -260,10 +268,8 @@ impl MarshalReader {
                             fields.push(val);
                             if fields.len() == *total {
                                 // Block is complete
-                                let completed = OcamlValue::Block(
-                                    *tag,
-                                    Arc::from(std::mem::take(fields)),
-                                );
+                                let completed =
+                                    OcamlValue::Block(*tag, Arc::from(std::mem::take(fields)));
                                 self.obj_table[*obj_idx] = completed.clone();
                                 val = completed;
                                 stack.pop();
@@ -516,8 +522,7 @@ mod tests {
             0x84, 0x95, 0xA6, 0xBE, // magic
             0x00, 0x00, 0x00, 0x03, // data_len = 3
             0x00, 0x00, 0x00, 0x01, // obj_count = 1
-            0x00, 0x00, 0x00, 0x00,
-            0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
             0xA0, // PREFIX_SMALL_BLOCK(tag=0, size=2)
             0x41, // PREFIX_SMALL_INT(1)
             0x42, // PREFIX_SMALL_INT(2)

@@ -6654,31 +6654,6 @@ fn type_send(
     let obj_ty = ctx.new_var(None);
     let typed_obj = type_expect(tctx, env, obj_expr, obj_ty, None)?;
 
-    // Keep the existing broad fallback behavior for source-level dynamic
-    // property access, but run precise typing for ghost-loc PPX-generated sends.
-    let use_precise_send_typing = {
-        let expected_desc = ctx.get_desc(ctx.repr(expected_ty));
-        let method_loc_is_ghost = method.loc == tctx.arena.none_loc();
-        method_loc_is_ghost
-            || (matches!(&*expected_desc, TypeDesc::Tvar(_))
-                && context.is_none()
-                && method.txt.len() > 1
-                && method_name_is_plain_ident(&method.txt))
-    };
-    if !use_precise_send_typing {
-        return Ok(Expression::new(
-            ExpressionDesc::Texp_send(
-                Box::new(typed_obj),
-                crate::types::typedtree::MethKind::Tmeth_name(method.txt.clone()),
-                None,
-            ),
-            loc.clone(),
-            expected_ty,
-            EnvRef(0),
-            attributes.to_vec(),
-        ));
-    }
-
     // Port OCaml `Pexp_send` + `Ctype.filter_method` behavior:
     // - constrain object type to contain the requested method
     // - derive method result type from polymorphic method slot

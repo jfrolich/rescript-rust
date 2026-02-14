@@ -167,7 +167,11 @@ pub fn print(src: &str, start_pos: &Position, end_pos: &Position) -> String {
         .min()
         .unwrap_or(0);
 
-    let separator = if leading_space_to_cut == 0 { "│" } else { "┆" };
+    let separator = if leading_space_to_cut == 0 {
+        "│"
+    } else {
+        "┆"
+    };
 
     // Process lines with highlighting info, breaking long lines into chunks
     let processed_lines: Vec<Line> = lines
@@ -193,8 +197,7 @@ pub fn print(src: &str, start_pos: &Position, end_pos: &Position) -> String {
                             end: 0,
                         },
                         Gutter::Number(line_number) => {
-                            let highlight_start_col =
-                                (start_pos.cnum - start_pos.bol) as usize;
+                            let highlight_start_col = (start_pos.cnum - start_pos.bol) as usize;
                             let highlight_end_col = (end_pos.cnum - end_pos.bol) as usize;
 
                             // OCaml: start only applies to first chunk (i = 0)
@@ -285,7 +288,7 @@ pub fn print(src: &str, start_pos: &Position, end_pos: &Position) -> String {
 pub fn format_location(filename: &str, start_pos: &Position, end_pos: &Position) -> String {
     // OCaml uses 1-indexed columns: col = pos_cnum - pos_bol + 1
     let start_col = start_pos.cnum - start_pos.bol + 1;
-    let end_col = end_pos.cnum - end_pos.bol;  // OCaml doesn't add +1 for end (it's exclusive)
+    let end_col = end_pos.cnum - end_pos.bol; // OCaml doesn't add +1 for end (it's exclusive)
 
     if start_pos.line == end_pos.line && end_col > start_col {
         format!("{}:{}:{}-{}", filename, start_pos.line, start_col, end_col)
@@ -368,7 +371,10 @@ mod tests {
             cnum: 115,
             ..Default::default()
         };
-        assert_eq!(format_location("test.res", &start, &end), "test.res:5:11-15");
+        assert_eq!(
+            format_location("test.res", &start, &end),
+            "test.res:5:11-15"
+        );
     }
 
     #[test]

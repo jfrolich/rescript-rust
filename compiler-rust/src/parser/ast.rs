@@ -9,7 +9,7 @@
 #![allow(non_camel_case_types)]
 #![allow(missing_docs)]
 
-use crate::parse_arena::{ArityIdx, LidentIdx, Located, LocIdx, PosIdx, StrIdx};
+use crate::parse_arena::{ArityIdx, LidentIdx, LocIdx, Located, PosIdx, StrIdx};
 use serde::{Deserialize, Serialize};
 
 /// Re-export Located for convenience.
@@ -936,7 +936,10 @@ mod tests {
         assert!(ArgLabel::Nolabel.is_nolabel());
         assert!(!ArgLabel::Labelled(Located::mknoloc("x".to_string())).is_nolabel());
         assert!(ArgLabel::Optional(Located::mknoloc("x".to_string())).is_optional());
-        assert_eq!(ArgLabel::Labelled(Located::mknoloc("x".to_string())).name(), Some("x"));
+        assert_eq!(
+            ArgLabel::Labelled(Located::mknoloc("x".to_string())).name(),
+            Some("x")
+        );
     }
 
     #[test]

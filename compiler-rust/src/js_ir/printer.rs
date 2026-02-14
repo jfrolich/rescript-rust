@@ -851,7 +851,9 @@ impl JsPrinter {
                     TagInfo::Record { fields, .. } if fields.len() == elements.len() => {
                         // Output as JS object
                         self.write_char('{');
-                        for (i, (elem, (field_name, _optional))) in elements.iter().zip(fields.iter()).enumerate() {
+                        for (i, (elem, (field_name, _optional))) in
+                            elements.iter().zip(fields.iter()).enumerate()
+                        {
                             if i > 0 {
                                 self.write(", ");
                             }
@@ -864,7 +866,9 @@ impl JsPrinter {
                     TagInfo::RecordInlined { fields, .. } if fields.len() == elements.len() => {
                         // Output as JS object for inlined records
                         self.write_char('{');
-                        for (i, (elem, (field_name, _optional))) in elements.iter().zip(fields.iter()).enumerate() {
+                        for (i, (elem, (field_name, _optional))) in
+                            elements.iter().zip(fields.iter()).enumerate()
+                        {
                             if i > 0 {
                                 self.write(", ");
                             }
@@ -877,7 +881,9 @@ impl JsPrinter {
                     TagInfo::RecordExt { fields, .. } if fields.len() == elements.len() => {
                         // Output as JS object for record extensions
                         self.write_char('{');
-                        for (i, (elem, field_name)) in elements.iter().zip(fields.iter()).enumerate() {
+                        for (i, (elem, field_name)) in
+                            elements.iter().zip(fields.iter()).enumerate()
+                        {
                             if i > 0 {
                                 self.write(", ");
                             }

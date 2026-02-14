@@ -21,9 +21,9 @@ use crate::context::IdGenerator;
 use crate::ident::Ident;
 use crate::lambda::analysis::no_side_effects;
 use crate::lambda::closure::StatsMap;
-use crate::lambda::subst::{Subst, subst};
 use crate::lambda::compat::LetKind;
 use crate::lambda::primitive::Primitive;
+use crate::lambda::subst::{Subst, subst};
 use crate::lambda::{Apply, Lambda, PrimInfo};
 
 /// Tracking state for simple beta reduction.
@@ -45,11 +45,7 @@ struct ArgUsage {
 /// - Arguments in the body are variables or constants
 ///
 /// Returns `Some(reduced)` if reduction is possible, `None` otherwise.
-pub fn simple_beta_reduce(
-    params: &[Ident],
-    body: &Lambda,
-    args: &[Lambda],
-) -> Option<Lambda> {
+pub fn simple_beta_reduce(params: &[Ident], body: &Lambda, args: &[Lambda]) -> Option<Lambda> {
     // Build parameter -> argument mapping
     let mut param_map: HashMap<Ident, ArgUsage> = HashMap::new();
     for (param, arg) in params.iter().zip(args.iter()) {
@@ -307,8 +303,14 @@ mod tests {
         match reduced {
             Lambda::Lprim(ref info) => {
                 assert_eq!(info.args.len(), 2);
-                assert!(matches!(info.args[0], Lambda::Lconst(Constant::Int { i: 1, .. })));
-                assert!(matches!(info.args[1], Lambda::Lconst(Constant::Int { i: 2, .. })));
+                assert!(matches!(
+                    info.args[0],
+                    Lambda::Lconst(Constant::Int { i: 1, .. })
+                ));
+                assert!(matches!(
+                    info.args[1],
+                    Lambda::Lconst(Constant::Int { i: 2, .. })
+                ));
             }
             _ => panic!("Expected Lprim"),
         }
@@ -322,12 +324,12 @@ mod tests {
         // (fun x y -> x) 1 (side_effect) => side_effect; 1
         // Note: y is unused, but we need to evaluate the argument
         let params = vec![x.clone(), y.clone()];
-        let body = Lambda::var(x.clone());  // Only uses x
+        let body = Lambda::var(x.clone()); // Only uses x
 
         // For simple_beta_reduce, complex unused args prevent optimization
         let args = vec![
             Lambda::const_(Constant::int(1)),
-            Lambda::var(Ident::create_local("z")),  // Variable, so it's okay
+            Lambda::var(Ident::create_local("z")), // Variable, so it's okay
         ];
 
         // This should NOT work because body is not a prim or apply
@@ -376,10 +378,7 @@ mod tests {
         );
         let f = Ident::create_local("f");
         let g = Ident::create_local("g");
-        let args = vec![
-            Lambda::var(f),
-            Lambda::var(g),
-        ];
+        let args = vec![Lambda::var(f), Lambda::var(g)];
 
         let result = no_names_beta_reduce(&params, &body, &args);
 
@@ -401,23 +400,29 @@ mod tests {
         let params = vec![x.clone()];
         let body = Lambda::prim(
             Primitive::Paddint,
-            vec![
-                Lambda::var(x.clone()),
-                Lambda::const_(Constant::int(1)),
-            ],
+            vec![Lambda::var(x.clone()), Lambda::const_(Constant::int(1))],
             Location::none(),
         );
         let args = vec![Lambda::const_(Constant::int(5))];
 
         let mut stats = StatsMap::new();
-        stats.insert(x.clone(), VarStats { top: true, times: 1 });
+        stats.insert(
+            x.clone(),
+            VarStats {
+                top: true,
+                times: 1,
+            },
+        );
 
         let result = propagate_beta_reduce_with_map(&id_gen, &stats, &params, &body, &args);
 
         // Should get direct primitive application
         match result {
             Lambda::Lprim(ref info) => {
-                assert!(matches!(info.args[0], Lambda::Lconst(Constant::Int { i: 5, .. })));
+                assert!(matches!(
+                    info.args[0],
+                    Lambda::Lconst(Constant::Int { i: 5, .. })
+                ));
             }
             _ => panic!("Expected Lprim, got {result:?}"),
         }
@@ -435,28 +440,29 @@ mod tests {
         let params = vec![x.clone()];
         let body = Lambda::prim(
             Primitive::Paddint,
-            vec![
-                Lambda::var(x.clone()),
-                Lambda::const_(Constant::int(1)),
-            ],
+            vec![Lambda::var(x.clone()), Lambda::const_(Constant::int(1))],
             Location::none(),
         );
         // Lambda::var is pure
         let args = vec![Lambda::var(y.clone())];
 
         let mut stats = StatsMap::new();
-        stats.insert(x.clone(), VarStats { top: true, times: 1 });
+        stats.insert(
+            x.clone(),
+            VarStats {
+                top: true,
+                times: 1,
+            },
+        );
 
         let result = propagate_beta_reduce_with_map(&id_gen, &stats, &params, &body, &args);
 
         // Should substitute y directly
         match result {
-            Lambda::Lprim(ref info) => {
-                match &info.args[0] {
-                    Lambda::Lvar(id) => assert_eq!(id.name(), "y"),
-                    _ => panic!("Expected Lvar"),
-                }
-            }
+            Lambda::Lprim(ref info) => match &info.args[0] {
+                Lambda::Lvar(id) => assert_eq!(id.name(), "y"),
+                _ => panic!("Expected Lvar"),
+            },
             _ => panic!("Expected Lprim, got {result:?}"),
         }
     }
@@ -471,7 +477,10 @@ mod tests {
 
         let result = refine_let(LetKind::Strict, x, value.clone(), body);
 
-        assert!(matches!(result, Lambda::Lconst(Constant::Int { i: 42, .. })));
+        assert!(matches!(
+            result,
+            Lambda::Lconst(Constant::Int { i: 42, .. })
+        ));
     }
 
     #[test]

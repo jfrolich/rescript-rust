@@ -12,7 +12,7 @@
 
 use std::io::{self, Cursor};
 
-use super::marshal_reader::{MarshalReader, MarshalError, OcamlValue};
+use super::marshal_reader::{MarshalError, MarshalReader, OcamlValue};
 
 /// CMI magic number
 const CMI_MAGIC: &[u8; 12] = b"Caml1999I022";

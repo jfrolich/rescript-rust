@@ -11,9 +11,7 @@
 use std::collections::HashMap;
 
 use crate::ident::Ident;
-use crate::lambda::{
-    Apply, Lambda, LFunction, LambdaSwitch, PrimInfo,
-};
+use crate::lambda::{Apply, LFunction, Lambda, LambdaSwitch, PrimInfo};
 
 /// A substitution mapping identifiers to Lambda expressions.
 pub type Subst = HashMap<Ident, Lambda>;
@@ -46,32 +44,26 @@ fn subst_aux(s: &Subst, lam: &Lambda) -> Lambda {
 
         Lambda::Lconst(_) => lam.clone(),
 
-        Lambda::Lapply(apply) => {
-            Lambda::Lapply(Apply {
-                ap_func: Box::new(subst_aux(s, &apply.ap_func)),
-                ap_args: apply.ap_args.iter().map(|arg| subst_aux(s, arg)).collect(),
-                ap_info: apply.ap_info.clone(),
-                ap_transformed_jsx: apply.ap_transformed_jsx,
-            })
-        }
+        Lambda::Lapply(apply) => Lambda::Lapply(Apply {
+            ap_func: Box::new(subst_aux(s, &apply.ap_func)),
+            ap_args: apply.ap_args.iter().map(|arg| subst_aux(s, arg)).collect(),
+            ap_info: apply.ap_info.clone(),
+            ap_transformed_jsx: apply.ap_transformed_jsx,
+        }),
 
-        Lambda::Lfunction(func) => {
-            Lambda::Lfunction(LFunction {
-                arity: func.arity,
-                params: func.params.clone(),
-                body: Box::new(subst_aux(s, &func.body)),
-                attr: func.attr.clone(),
-            })
-        }
+        Lambda::Lfunction(func) => Lambda::Lfunction(LFunction {
+            arity: func.arity,
+            params: func.params.clone(),
+            body: Box::new(subst_aux(s, &func.body)),
+            attr: func.attr.clone(),
+        }),
 
-        Lambda::Llet(kind, id, arg, body) => {
-            Lambda::Llet(
-                *kind,
-                id.clone(),
-                Box::new(subst_aux(s, arg)),
-                Box::new(subst_aux(s, body)),
-            )
-        }
+        Lambda::Llet(kind, id, arg, body) => Lambda::Llet(
+            *kind,
+            id.clone(),
+            Box::new(subst_aux(s, arg)),
+            Box::new(subst_aux(s, body)),
+        ),
 
         Lambda::Lletrec(bindings, body) => {
             let new_bindings: Vec<_> = bindings
@@ -81,76 +73,67 @@ fn subst_aux(s: &Subst, lam: &Lambda) -> Lambda {
             Lambda::Lletrec(new_bindings, Box::new(subst_aux(s, body)))
         }
 
-        Lambda::Lprim(prim_info) => {
-            Lambda::Lprim(PrimInfo {
-                primitive: prim_info.primitive.clone(),
-                args: prim_info.args.iter().map(|arg| subst_aux(s, arg)).collect(),
-                loc: prim_info.loc.clone(),
-            })
-        }
+        Lambda::Lprim(prim_info) => Lambda::Lprim(PrimInfo {
+            primitive: prim_info.primitive.clone(),
+            args: prim_info.args.iter().map(|arg| subst_aux(s, arg)).collect(),
+            loc: prim_info.loc.clone(),
+        }),
 
         Lambda::LglobalModule(_, _) => lam.clone(),
 
-        Lambda::Lswitch(arg, switch) => {
-            Lambda::Lswitch(
-                Box::new(subst_aux(s, arg)),
-                LambdaSwitch {
-                    sw_consts_full: switch.sw_consts_full,
-                    sw_consts: switch
-                        .sw_consts
-                        .iter()
-                        .map(|(k, v)| (*k, subst_aux(s, v)))
-                        .collect(),
-                    sw_blocks_full: switch.sw_blocks_full,
-                    sw_blocks: switch
-                        .sw_blocks
-                        .iter()
-                        .map(|(k, v)| (*k, subst_aux(s, v)))
-                        .collect(),
-                    sw_failaction: switch.sw_failaction.as_ref().map(|f| Box::new(subst_aux(s, f))),
-                    sw_names: switch.sw_names.clone(),
-                },
-            )
-        }
-
-        Lambda::LstringSwitch(arg, cases, default) => {
-            Lambda::LstringSwitch(
-                Box::new(subst_aux(s, arg)),
-                cases
+        Lambda::Lswitch(arg, switch) => Lambda::Lswitch(
+            Box::new(subst_aux(s, arg)),
+            LambdaSwitch {
+                sw_consts_full: switch.sw_consts_full,
+                sw_consts: switch
+                    .sw_consts
                     .iter()
-                    .map(|(k, v)| (k.clone(), subst_aux(s, v)))
+                    .map(|(k, v)| (*k, subst_aux(s, v)))
                     .collect(),
-                default.as_ref().map(|d| Box::new(subst_aux(s, d))),
-            )
-        }
+                sw_blocks_full: switch.sw_blocks_full,
+                sw_blocks: switch
+                    .sw_blocks
+                    .iter()
+                    .map(|(k, v)| (*k, subst_aux(s, v)))
+                    .collect(),
+                sw_failaction: switch
+                    .sw_failaction
+                    .as_ref()
+                    .map(|f| Box::new(subst_aux(s, f))),
+                sw_names: switch.sw_names.clone(),
+            },
+        ),
+
+        Lambda::LstringSwitch(arg, cases, default) => Lambda::LstringSwitch(
+            Box::new(subst_aux(s, arg)),
+            cases
+                .iter()
+                .map(|(k, v)| (k.clone(), subst_aux(s, v)))
+                .collect(),
+            default.as_ref().map(|d| Box::new(subst_aux(s, d))),
+        ),
 
         Lambda::LstaticRaise(i, args) => {
             Lambda::LstaticRaise(*i, args.iter().map(|arg| subst_aux(s, arg)).collect())
         }
 
-        Lambda::LstaticCatch(body, (i, vars), handler) => {
-            Lambda::LstaticCatch(
-                Box::new(subst_aux(s, body)),
-                (*i, vars.clone()),
-                Box::new(subst_aux(s, handler)),
-            )
-        }
+        Lambda::LstaticCatch(body, (i, vars), handler) => Lambda::LstaticCatch(
+            Box::new(subst_aux(s, body)),
+            (*i, vars.clone()),
+            Box::new(subst_aux(s, handler)),
+        ),
 
-        Lambda::LtryWith(body, exn, handler) => {
-            Lambda::LtryWith(
-                Box::new(subst_aux(s, body)),
-                exn.clone(),
-                Box::new(subst_aux(s, handler)),
-            )
-        }
+        Lambda::LtryWith(body, exn, handler) => Lambda::LtryWith(
+            Box::new(subst_aux(s, body)),
+            exn.clone(),
+            Box::new(subst_aux(s, handler)),
+        ),
 
-        Lambda::LifThenElse(cond, then_, else_) => {
-            Lambda::LifThenElse(
-                Box::new(subst_aux(s, cond)),
-                Box::new(subst_aux(s, then_)),
-                Box::new(subst_aux(s, else_)),
-            )
-        }
+        Lambda::LifThenElse(cond, then_, else_) => Lambda::LifThenElse(
+            Box::new(subst_aux(s, cond)),
+            Box::new(subst_aux(s, then_)),
+            Box::new(subst_aux(s, else_)),
+        ),
 
         Lambda::Lsequence(e1, e2) => {
             Lambda::Lsequence(Box::new(subst_aux(s, e1)), Box::new(subst_aux(s, e2)))
@@ -160,19 +143,15 @@ fn subst_aux(s: &Subst, lam: &Lambda) -> Lambda {
             Lambda::Lwhile(Box::new(subst_aux(s, cond)), Box::new(subst_aux(s, body)))
         }
 
-        Lambda::Lfor(v, e1, e2, dir, e3) => {
-            Lambda::Lfor(
-                v.clone(),
-                Box::new(subst_aux(s, e1)),
-                Box::new(subst_aux(s, e2)),
-                *dir,
-                Box::new(subst_aux(s, e3)),
-            )
-        }
+        Lambda::Lfor(v, e1, e2, dir, e3) => Lambda::Lfor(
+            v.clone(),
+            Box::new(subst_aux(s, e1)),
+            Box::new(subst_aux(s, e2)),
+            *dir,
+            Box::new(subst_aux(s, e3)),
+        ),
 
-        Lambda::Lassign(id, e) => {
-            Lambda::Lassign(id.clone(), Box::new(subst_aux(s, e)))
-        }
+        Lambda::Lassign(id, e) => Lambda::Lassign(id.clone(), Box::new(subst_aux(s, e))),
     }
 }
 
@@ -217,7 +196,10 @@ mod tests {
         let s = singleton(x, replacement.clone());
         let result = subst(&s, &var);
 
-        assert!(matches!(result, Lambda::Lconst(Constant::Int { i: 42, .. })));
+        assert!(matches!(
+            result,
+            Lambda::Lconst(Constant::Int { i: 42, .. })
+        ));
 
         // y should not be substituted
         let var_y = Lambda::var(y.clone());
@@ -283,7 +265,10 @@ mod tests {
 
         match result {
             Lambda::Lfunction(ref f) => {
-                assert!(matches!(*f.body, Lambda::Lconst(Constant::Int { i: 42, .. })));
+                assert!(matches!(
+                    *f.body,
+                    Lambda::Lconst(Constant::Int { i: 42, .. })
+                ));
             }
             _ => panic!("Expected Lfunction"),
         }
@@ -307,8 +292,14 @@ mod tests {
         match result {
             Lambda::Lprim(ref info) => {
                 assert_eq!(info.args.len(), 2);
-                assert!(matches!(info.args[0], Lambda::Lconst(Constant::Int { i: 5, .. })));
-                assert!(matches!(info.args[1], Lambda::Lconst(Constant::Int { i: 5, .. })));
+                assert!(matches!(
+                    info.args[0],
+                    Lambda::Lconst(Constant::Int { i: 5, .. })
+                ));
+                assert!(matches!(
+                    info.args[1],
+                    Lambda::Lconst(Constant::Int { i: 5, .. })
+                ));
             }
             _ => panic!("Expected Lprim"),
         }
@@ -376,7 +367,10 @@ mod tests {
 
         let result = subst_single(&x, &replacement, &var);
 
-        assert!(matches!(result, Lambda::Lconst(Constant::Int { i: 42, .. })));
+        assert!(matches!(
+            result,
+            Lambda::Lconst(Constant::Int { i: 42, .. })
+        ));
     }
 
     #[test]
@@ -402,7 +396,10 @@ mod tests {
                 let (_, func_expr) = &bindings[0];
                 match func_expr {
                     Lambda::Lfunction(func) => {
-                        assert!(matches!(*func.body, Lambda::Lconst(Constant::Int { i: 42, .. })));
+                        assert!(matches!(
+                            *func.body,
+                            Lambda::Lconst(Constant::Int { i: 42, .. })
+                        ));
                     }
                     _ => panic!("Expected Lfunction in letrec binding"),
                 }

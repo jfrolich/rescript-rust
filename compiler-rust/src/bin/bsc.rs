@@ -8,10 +8,12 @@
 //!
 //! All other flags are accepted and ignored.
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 use rescript_compiler::binary_ast::{write_signature_ast_current, write_structure_ast_current};
-use rescript_compiler::driver::{compile_file_to_js_with_options, typecheck_interface_file, CompilerOptions};
-use rescript_compiler::parser::{module, Parser};
+use rescript_compiler::driver::{
+    CompilerOptions, compile_file_to_js_with_options, typecheck_interface_file,
+};
+use rescript_compiler::parser::{Parser, module};
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -39,14 +41,16 @@ fn main() {
     let builder = std::thread::Builder::new()
         .name("compiler".into())
         .stack_size(512 * 1024 * 1024); // 512MB
-    
-    let handler = builder.spawn(|| {
-        if let Err(err) = run() {
-            eprintln!("{err}");
-            std::process::exit(1);
-        }
-    }).expect("Failed to spawn compiler thread");
-    
+
+    let handler = builder
+        .spawn(|| {
+            if let Err(err) = run() {
+                eprintln!("{err}");
+                std::process::exit(1);
+            }
+        })
+        .expect("Failed to spawn compiler thread");
+
     handler.join().expect("Compiler thread panicked");
 }
 
@@ -98,13 +102,7 @@ fn run() -> Result<()> {
                         opts.runtime_path = Some(PathBuf::from(val));
                     }
                 }
-                "-open"
-                | "-w"
-                | "-warn-error"
-                | "-color"
-                | "-bs-package-name"
-                | "-pp"
-                | "-ppx"
+                "-open" | "-w" | "-warn-error" | "-color" | "-bs-package-name" | "-pp" | "-ppx"
                 | "-ppxopt" => {
                     // Consume the next argument if present (value flags).
                     let _ = args.next();
@@ -175,8 +173,7 @@ fn generate_ast(input: &Path, output: Option<PathBuf>) -> Result<()> {
     // In Latin-1 mode, char offset == original byte offset, which is critical for
     // correct position tracking in the scanner and correct UTF-16 offset calculations
     // for multi-byte UTF-8 sequences (e.g., emoji characters).
-    let bytes =
-        fs::read(input).with_context(|| format!("Failed to read {}", input.display()))?;
+    let bytes = fs::read(input).with_context(|| format!("Failed to read {}", input.display()))?;
     let source: String = bytes.iter().map(|&b| b as char).collect();
 
     // Use the original path as provided (matching OCaml's behavior)

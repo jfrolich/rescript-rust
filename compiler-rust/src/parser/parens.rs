@@ -39,7 +39,11 @@ pub fn expr(arena: &crate::parse_arena::ParseArena, expr: &Expression) -> ParenK
 }
 
 /// Check if expression record row RHS needs parentheses.
-pub fn expr_record_row_rhs(arena: &crate::parse_arena::ParseArena, optional: bool, e: &Expression) -> ParenKind {
+pub fn expr_record_row_rhs(
+    arena: &crate::parse_arena::ParseArena,
+    optional: bool,
+    e: &Expression,
+) -> ParenKind {
     let kind = expr(arena, e);
     match kind {
         ParenKind::Nothing if optional => match &e.pexp_desc {
@@ -94,7 +98,9 @@ pub fn call_expr(arena: &crate::parse_arena::ParseArena, expr: &Expression) -> P
                 | ExpressionDesc::Pexp_while(_, _)
                 | ExpressionDesc::Pexp_for(_, _, _, _, _)
                 | ExpressionDesc::Pexp_ifthenelse(_, _, _) => ParenKind::Parenthesized,
-                _ if parsetree_viewer::expr_is_uncurried_fun(arena, expr) => ParenKind::Parenthesized,
+                _ if parsetree_viewer::expr_is_uncurried_fun(arena, expr) => {
+                    ParenKind::Parenthesized
+                }
                 _ if parsetree_viewer::expr_is_await(expr) => ParenKind::Parenthesized,
                 _ => ParenKind::Nothing,
             }
@@ -174,7 +180,11 @@ pub fn unary_expr_operand(arena: &crate::parse_arena::ParseArena, expr: &Express
 }
 
 /// Check if a binary expression operand needs parentheses/braces.
-pub fn binary_expr_operand(arena: &crate::parse_arena::ParseArena, is_lhs: bool, expr: &Expression) -> ParenKind {
+pub fn binary_expr_operand(
+    arena: &crate::parse_arena::ParseArena,
+    is_lhs: bool,
+    expr: &Expression,
+) -> ParenKind {
     let opt_braces = parsetree_viewer::process_braces_attr(arena, expr);
     match opt_braces {
         Some(attr) => ParenKind::Braced(attr.0.loc.clone()),
@@ -195,8 +205,12 @@ pub fn binary_expr_operand(arena: &crate::parse_arena::ParseArena, is_lhs: bool,
                 ExpressionDesc::Pexp_constraint(_, _)
                 | ExpressionDesc::Pexp_fun { .. }
                 | ExpressionDesc::Pexp_newtype(_, _) => ParenKind::Parenthesized,
-                _ if parsetree_viewer::expr_is_uncurried_fun(arena, expr) => ParenKind::Parenthesized,
-                _ if parsetree_viewer::is_binary_expression(arena, expr) => ParenKind::Parenthesized,
+                _ if parsetree_viewer::expr_is_uncurried_fun(arena, expr) => {
+                    ParenKind::Parenthesized
+                }
+                _ if parsetree_viewer::is_binary_expression(arena, expr) => {
+                    ParenKind::Parenthesized
+                }
                 _ if parsetree_viewer::is_ternary_expr(arena, expr) => ParenKind::Parenthesized,
                 ExpressionDesc::Pexp_assert(_) if is_lhs => ParenKind::Parenthesized,
                 _ if parsetree_viewer::expr_is_await(expr) => ParenKind::Parenthesized,
@@ -225,13 +239,13 @@ pub fn sub_binary_expr_operand(parent_operator: &str, child_operator: &str) -> b
 }
 
 /// Check if RHS binary expression operand needs parentheses.
-pub fn rhs_binary_expr_operand(arena: &crate::parse_arena::ParseArena, parent_operator: &str, rhs: &Expression) -> bool {
+pub fn rhs_binary_expr_operand(
+    arena: &crate::parse_arena::ParseArena,
+    parent_operator: &str,
+    rhs: &Expression,
+) -> bool {
     match &rhs.pexp_desc {
-        ExpressionDesc::Pexp_apply {
-            funct,
-            args,
-            ..
-        } => {
+        ExpressionDesc::Pexp_apply { funct, args, .. } => {
             if args.len() != 2 {
                 return false;
             }
@@ -256,7 +270,11 @@ pub fn rhs_binary_expr_operand(arena: &crate::parse_arena::ParseArena, parent_op
 }
 
 /// Check if flatten operand RHS needs parentheses.
-pub fn flatten_operand_rhs(arena: &crate::parse_arena::ParseArena, parent_operator: &str, rhs: &Expression) -> bool {
+pub fn flatten_operand_rhs(
+    arena: &crate::parse_arena::ParseArena,
+    parent_operator: &str,
+    rhs: &Expression,
+) -> bool {
     match &rhs.pexp_desc {
         ExpressionDesc::Pexp_apply { funct, args, .. } => {
             if args.len() != 2 {
@@ -302,7 +320,11 @@ pub fn flatten_operand_rhs(arena: &crate::parse_arena::ParseArena, parent_operat
 
 /// Check if flatten operand RHS needs parentheses, ignoring the attribute check.
 /// This is used when we've already partitioned printable attrs and will handle them separately.
-pub fn flatten_operand_rhs_without_attrs(arena: &crate::parse_arena::ParseArena, parent_operator: &str, rhs: &Expression) -> bool {
+pub fn flatten_operand_rhs_without_attrs(
+    arena: &crate::parse_arena::ParseArena,
+    parent_operator: &str,
+    rhs: &Expression,
+) -> bool {
     match &rhs.pexp_desc {
         ExpressionDesc::Pexp_apply { funct, args, .. } => {
             if args.len() != 2 {
@@ -353,7 +375,11 @@ pub fn binary_operator_inside_await_needs_parens(operator: &str) -> bool {
 }
 
 /// Check if assert or await expression RHS needs parentheses/braces.
-pub fn assert_or_await_expr_rhs(arena: &crate::parse_arena::ParseArena, in_await: bool, expr: &Expression) -> ParenKind {
+pub fn assert_or_await_expr_rhs(
+    arena: &crate::parse_arena::ParseArena,
+    in_await: bool,
+    expr: &Expression,
+) -> ParenKind {
     let opt_braces = parsetree_viewer::process_braces_attr(arena, expr);
     match opt_braces {
         Some(attr) => ParenKind::Braced(attr.0.loc.clone()),
@@ -363,12 +389,20 @@ pub fn assert_or_await_expr_rhs(arena: &crate::parse_arena::ParseArena, in_await
 
 /// Check if await expression RHS needs parens, but IGNORE the res.braces attribute.
 /// OCaml's await printing filters out @res.braces before checking, so `await {x}` prints as `await x`.
-pub fn assert_or_await_expr_rhs_ignore_braces(arena: &crate::parse_arena::ParseArena, in_await: bool, expr: &Expression) -> ParenKind {
+pub fn assert_or_await_expr_rhs_ignore_braces(
+    arena: &crate::parse_arena::ParseArena,
+    in_await: bool,
+    expr: &Expression,
+) -> ParenKind {
     // Ignore the braces attribute - just check the expression structure
     assert_or_await_expr_rhs_inner(arena, in_await, expr)
 }
 
-fn assert_or_await_expr_rhs_inner(arena: &crate::parse_arena::ParseArena, in_await: bool, expr: &Expression) -> ParenKind {
+fn assert_or_await_expr_rhs_inner(
+    arena: &crate::parse_arena::ParseArena,
+    in_await: bool,
+    expr: &Expression,
+) -> ParenKind {
     let filtered = parsetree_viewer::filter_parsing_attrs(arena, &expr.pexp_attributes);
     if !filtered.is_empty() {
         return ParenKind::Parenthesized;
@@ -410,9 +444,7 @@ fn assert_or_await_expr_rhs_inner(arena: &crate::parse_arena::ParseArena, in_awa
         | ExpressionDesc::Pexp_while(_, _)
         | ExpressionDesc::Pexp_for(_, _, _, _, _)
         | ExpressionDesc::Pexp_ifthenelse(_, _, _) => ParenKind::Parenthesized,
-        _ if !in_await && parsetree_viewer::expr_is_await(expr) => {
-            ParenKind::Parenthesized
-        }
+        _ if !in_await && parsetree_viewer::expr_is_await(expr) => ParenKind::Parenthesized,
         _ => ParenKind::Nothing,
     }
 }
@@ -646,7 +678,9 @@ pub fn binary_expr(arena: &crate::parse_arena::ParseArena, expr: &Expression) ->
     match opt_braces {
         Some(attr) => ParenKind::Braced(attr.0.loc.clone()),
         None => {
-            if !expr.pexp_attributes.is_empty() && parsetree_viewer::is_binary_expression(arena, expr) {
+            if !expr.pexp_attributes.is_empty()
+                && parsetree_viewer::is_binary_expression(arena, expr)
+            {
                 ParenKind::Parenthesized
             } else {
                 ParenKind::Nothing

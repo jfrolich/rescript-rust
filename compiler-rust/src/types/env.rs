@@ -16,12 +16,12 @@
 //! - `EnvSummary` - A summary of bindings for debugging
 //! - Lookup functions for values, types, and modules
 
-use super::context::TypeContext;
 use super::asttypes::{MutableFlag, PrivateFlag};
+use super::context::TypeContext;
 use super::decl::{
     ConstructorArguments, ConstructorDeclaration, ConstructorDescription, ConstructorTag,
-    LabelDescription, ModtypeDeclaration, ModuleDeclaration, PrimitiveDescription,
-    TypeDeclaration, TypeKind, ValueDescription, ValueKind,
+    LabelDescription, ModtypeDeclaration, ModuleDeclaration, PrimitiveDescription, TypeDeclaration,
+    TypeKind, ValueDescription, ValueKind,
 };
 use super::path::Path;
 use super::type_expr::TypeExprRef;
@@ -608,7 +608,10 @@ pub fn initial_env(ctx: &TypeContext<'_>) -> Env {
 
     // Helper: add a type with its constructors to the environment
     // This matches OCaml's Env.store_type which calls Datarepr.constructors_of_type
-    let add_type_with_constrs = |env: &mut Env, name: &str, decl: TypeDeclaration, ctx: &TypeContext<'_>| {
+    let add_type_with_constrs = |env: &mut Env,
+                                 name: &str,
+                                 decl: TypeDeclaration,
+                                 ctx: &TypeContext<'_>| {
         let id = Ident::create_persistent(name);
         let type_path = Path::pident(id.clone());
 
@@ -704,103 +707,159 @@ pub fn initial_env(ctx: &TypeContext<'_>) -> Env {
     add_type_with_constrs(&mut env, "string", decl_abstr(0, false), ctx);
     add_type_with_constrs(&mut env, "extension_constructor", decl_abstr(0, false), ctx);
     add_type_with_constrs(&mut env, "array", decl_abstr(1, false), ctx);
-    add_type_with_constrs(&mut env, "promise", {
-        let tvar = ctx.new_generic_var(None);
-        TypeDeclaration {
-            type_params: vec![tvar],
-            type_arity: 1,
-            ..decl_abstr(1, false)
-        }
-    }, ctx);
+    add_type_with_constrs(
+        &mut env,
+        "promise",
+        {
+            let tvar = ctx.new_generic_var(None);
+            TypeDeclaration {
+                type_params: vec![tvar],
+                type_arity: 1,
+                ..decl_abstr(1, false)
+            }
+        },
+        ctx,
+    );
 
     // ---- Variant types (matching OCaml's Predef) ----
 
     // bool = false | true
-    add_type_with_constrs(&mut env, "bool", TypeDeclaration {
-        type_kind: TypeKind::TypeVariant(vec![
-            cstr("false", vec![]),
-            cstr("true", vec![]),
-        ]),
-        type_immediate: true,
-        ..decl_abstr(0, true)
-    }, ctx);
+    add_type_with_constrs(
+        &mut env,
+        "bool",
+        TypeDeclaration {
+            type_kind: TypeKind::TypeVariant(vec![cstr("false", vec![]), cstr("true", vec![])]),
+            type_immediate: true,
+            ..decl_abstr(0, true)
+        },
+        ctx,
+    );
 
     // unit = ()
-    add_type_with_constrs(&mut env, "unit", TypeDeclaration {
-        type_kind: TypeKind::TypeVariant(vec![
-            cstr("()", vec![]),
-        ]),
-        type_immediate: true,
-        ..decl_abstr(0, true)
-    }, ctx);
+    add_type_with_constrs(
+        &mut env,
+        "unit",
+        TypeDeclaration {
+            type_kind: TypeKind::TypeVariant(vec![cstr("()", vec![])]),
+            type_immediate: true,
+            ..decl_abstr(0, true)
+        },
+        ctx,
+    );
 
     // exn (type_open)
-    add_type_with_constrs(&mut env, "exn", TypeDeclaration {
-        type_kind: TypeKind::TypeOpen,
-        ..decl_abstr(0, false)
-    }, ctx);
+    add_type_with_constrs(
+        &mut env,
+        "exn",
+        TypeDeclaration {
+            type_kind: TypeKind::TypeOpen,
+            ..decl_abstr(0, false)
+        },
+        ctx,
+    );
 
     // Standard exception constructors (extension constructors of exn)
     {
         let exn_ty = ctx.new_generic_constr(Path::pident(Ident::create_persistent("exn")), vec![]);
-        let string_ty_for_exn = ctx.new_generic_constr(Path::pident(Ident::create_persistent("string")), vec![]);
-        let int_ty_for_exn = ctx.new_generic_constr(Path::pident(Ident::create_persistent("int")), vec![]);
+        let string_ty_for_exn =
+            ctx.new_generic_constr(Path::pident(Ident::create_persistent("string")), vec![]);
+        let int_ty_for_exn =
+            ctx.new_generic_constr(Path::pident(Ident::create_persistent("int")), vec![]);
 
-        let add_exception = |env: &mut Env, name: &str, args: Vec<TypeExprRef>, exn_ty: TypeExprRef| {
-            let id = Ident::create_persistent(name);
-            let path = Path::pident(id.clone());
-            let cstr_desc = ConstructorDescription {
-                cstr_name: name.to_string(),
-                cstr_res: exn_ty,
-                cstr_existentials: vec![],
-                cstr_arity: args.len() as i32,
-                cstr_args: args,
-                cstr_tag: ConstructorTag::CstrExtension(path),
-                cstr_consts: 0,
-                cstr_nonconsts: 0,
-                cstr_generalized: false,
-                cstr_private: PrivateFlag::Public,
-                cstr_loc: Location::none(),
-                cstr_attributes: vec![],
-                cstr_inlined: None,
+        let add_exception =
+            |env: &mut Env, name: &str, args: Vec<TypeExprRef>, exn_ty: TypeExprRef| {
+                let id = Ident::create_persistent(name);
+                let path = Path::pident(id.clone());
+                let cstr_desc = ConstructorDescription {
+                    cstr_name: name.to_string(),
+                    cstr_res: exn_ty,
+                    cstr_existentials: vec![],
+                    cstr_arity: args.len() as i32,
+                    cstr_args: args,
+                    cstr_tag: ConstructorTag::CstrExtension(path),
+                    cstr_consts: 0,
+                    cstr_nonconsts: 0,
+                    cstr_generalized: false,
+                    cstr_private: PrivateFlag::Public,
+                    cstr_loc: Location::none(),
+                    cstr_attributes: vec![],
+                    cstr_inlined: None,
+                };
+                env.add_constructor(id, cstr_desc);
             };
-            env.add_constructor(id, cstr_desc);
-        };
 
         add_exception(&mut env, "Not_found", vec![], exn_ty);
-        add_exception(&mut env, "Invalid_argument", vec![string_ty_for_exn], exn_ty);
+        add_exception(
+            &mut env,
+            "Invalid_argument",
+            vec![string_ty_for_exn],
+            exn_ty,
+        );
         add_exception(&mut env, "Failure", vec![string_ty_for_exn], exn_ty);
         add_exception(&mut env, "Exit", vec![], exn_ty);
-        add_exception(&mut env, "Match_failure", vec![
-            ctx.new_generic_type(crate::types::type_expr::TypeDesc::Ttuple(vec![string_ty_for_exn, int_ty_for_exn, int_ty_for_exn]))
-        ], exn_ty);
-        add_exception(&mut env, "Assert_failure", vec![
-            ctx.new_generic_type(crate::types::type_expr::TypeDesc::Ttuple(vec![string_ty_for_exn, int_ty_for_exn, int_ty_for_exn]))
-        ], exn_ty);
+        add_exception(
+            &mut env,
+            "Match_failure",
+            vec![
+                ctx.new_generic_type(crate::types::type_expr::TypeDesc::Ttuple(vec![
+                    string_ty_for_exn,
+                    int_ty_for_exn,
+                    int_ty_for_exn,
+                ])),
+            ],
+            exn_ty,
+        );
+        add_exception(
+            &mut env,
+            "Assert_failure",
+            vec![
+                ctx.new_generic_type(crate::types::type_expr::TypeDesc::Ttuple(vec![
+                    string_ty_for_exn,
+                    int_ty_for_exn,
+                    int_ty_for_exn,
+                ])),
+            ],
+            exn_ty,
+        );
         add_exception(&mut env, "Sys_error", vec![string_ty_for_exn], exn_ty);
         add_exception(&mut env, "End_of_file", vec![], exn_ty);
         add_exception(&mut env, "Division_by_zero", vec![], exn_ty);
         add_exception(&mut env, "Stack_overflow", vec![], exn_ty);
-        add_exception(&mut env, "Undefined_recursive_module", vec![
-            ctx.new_generic_type(crate::types::type_expr::TypeDesc::Ttuple(vec![string_ty_for_exn, int_ty_for_exn, int_ty_for_exn]))
-        ], exn_ty);
+        add_exception(
+            &mut env,
+            "Undefined_recursive_module",
+            vec![
+                ctx.new_generic_type(crate::types::type_expr::TypeDesc::Ttuple(vec![
+                    string_ty_for_exn,
+                    int_ty_for_exn,
+                    int_ty_for_exn,
+                ])),
+            ],
+            exn_ty,
+        );
         // JsExn takes one argument of type `unknown`
-        let unknown_ty_for_exn = ctx.new_generic_constr(Path::pident(Ident::create_persistent("unknown")), vec![]);
+        let unknown_ty_for_exn =
+            ctx.new_generic_constr(Path::pident(Ident::create_persistent("unknown")), vec![]);
         add_exception(&mut env, "JsExn", vec![unknown_ty_for_exn], exn_ty);
     }
 
     // option('a) = None | Some('a)
     {
         let tvar = ctx.new_generic_var(None);
-        add_type_with_constrs(&mut env, "option", TypeDeclaration {
-            type_params: vec![tvar],
-            type_arity: 1,
-            type_kind: TypeKind::TypeVariant(vec![
-                cstr("None", vec![]),
-                cstr("Some", vec![tvar]),
-            ]),
-            ..decl_abstr(1, false)
-        }, ctx);
+        add_type_with_constrs(
+            &mut env,
+            "option",
+            TypeDeclaration {
+                type_params: vec![tvar],
+                type_arity: 1,
+                type_kind: TypeKind::TypeVariant(vec![
+                    cstr("None", vec![]),
+                    cstr("Some", vec![tvar]),
+                ]),
+                ..decl_abstr(1, false)
+            },
+            ctx,
+        );
     }
 
     // ref('a) = { mutable contents: 'a }
@@ -866,52 +925,67 @@ pub fn initial_env(ctx: &TypeContext<'_>) -> Env {
     {
         let tvar1 = ctx.new_generic_var(None);
         let tvar2 = ctx.new_generic_var(None);
-        add_type_with_constrs(&mut env, "result", TypeDeclaration {
-            type_params: vec![tvar1, tvar2],
-            type_arity: 2,
-            type_kind: TypeKind::TypeVariant(vec![
-                cstr("Ok", vec![tvar1]),
-                cstr("Error", vec![tvar2]),
-            ]),
-            ..decl_abstr(2, false)
-        }, ctx);
+        add_type_with_constrs(
+            &mut env,
+            "result",
+            TypeDeclaration {
+                type_params: vec![tvar1, tvar2],
+                type_arity: 2,
+                type_kind: TypeKind::TypeVariant(vec![
+                    cstr("Ok", vec![tvar1]),
+                    cstr("Error", vec![tvar2]),
+                ]),
+                ..decl_abstr(2, false)
+            },
+            ctx,
+        );
     }
 
     // list('a) = [] | ::('a, list('a))
     {
         let tvar = ctx.new_generic_var(None);
-        let list_ty = ctx.new_generic_constr(Path::pident(Ident::create_persistent("list")), vec![tvar]);
-        add_type_with_constrs(&mut env, "list", TypeDeclaration {
-            type_params: vec![tvar],
-            type_arity: 1,
-            type_kind: TypeKind::TypeVariant(vec![
-                cstr("[]", vec![]),
-                cstr("::", vec![tvar, list_ty]),
-            ]),
-            ..decl_abstr(1, false)
-        }, ctx);
+        let list_ty =
+            ctx.new_generic_constr(Path::pident(Ident::create_persistent("list")), vec![tvar]);
+        add_type_with_constrs(
+            &mut env,
+            "list",
+            TypeDeclaration {
+                type_params: vec![tvar],
+                type_arity: 1,
+                type_kind: TypeKind::TypeVariant(vec![
+                    cstr("[]", vec![]),
+                    cstr("::", vec![tvar, list_ty]),
+                ]),
+                ..decl_abstr(1, false)
+            },
+            ctx,
+        );
     }
 
     // unknown = Unknown('a) (GADT: Unknown returns unknown, not 'a)
     // Matches OCaml's Predef.decl_unknown
     {
         let tvar = ctx.new_generic_var(None);
-        let type_unknown = ctx.new_generic_constr(Path::pident(Ident::create_persistent("unknown")), vec![]);
-        add_type_with_constrs(&mut env, "unknown", TypeDeclaration {
-            type_params: vec![],
-            type_arity: 0,
-            type_kind: TypeKind::TypeVariant(vec![
-                ConstructorDeclaration {
+        let type_unknown =
+            ctx.new_generic_constr(Path::pident(Ident::create_persistent("unknown")), vec![]);
+        add_type_with_constrs(
+            &mut env,
+            "unknown",
+            TypeDeclaration {
+                type_params: vec![],
+                type_arity: 0,
+                type_kind: TypeKind::TypeVariant(vec![ConstructorDeclaration {
                     cd_id: Ident::create_persistent("Unknown"),
                     cd_args: ConstructorArguments::CstrTuple(vec![tvar]),
                     cd_res: Some(type_unknown),
                     cd_loc: Location::none(),
                     cd_attributes: vec![],
-                },
-            ]),
-            type_unboxed: super::decl::UnboxedStatus::TRUE_FALSE,
-            ..decl_abstr(0, false)
-        }, ctx);
+                }]),
+                type_unboxed: super::decl::UnboxedStatus::TRUE_FALSE,
+                ..decl_abstr(0, false)
+            },
+            ctx,
+        );
     }
 
     // Create type references for primitives at generic level.
@@ -921,7 +995,8 @@ pub fn initial_env(ctx: &TypeContext<'_>) -> Env {
     let int_ty = ctx.new_generic_constr(Path::pident(Ident::create_persistent("int")), vec![]);
     let float_ty = ctx.new_generic_constr(Path::pident(Ident::create_persistent("float")), vec![]);
     let bool_ty = ctx.new_generic_constr(Path::pident(Ident::create_persistent("bool")), vec![]);
-    let string_ty = ctx.new_generic_constr(Path::pident(Ident::create_persistent("string")), vec![]);
+    let string_ty =
+        ctx.new_generic_constr(Path::pident(Ident::create_persistent("string")), vec![]);
     let unit_ty = ctx.new_generic_constr(Path::pident(Ident::create_persistent("unit")), vec![]);
 
     // Add polymorphic arithmetic operators matching Pervasives.res:
@@ -937,10 +1012,42 @@ pub fn initial_env(ctx: &TypeContext<'_>) -> Env {
 
     // Add monomorphic float operators matching Pervasives.res:
     //   external "+.": (float, float) => float = "%addfloat"
-    add_binary_primitive(&mut env, ctx, "+.", "%addfloat", float_ty, float_ty, float_ty);
-    add_binary_primitive(&mut env, ctx, "-.", "%subfloat", float_ty, float_ty, float_ty);
-    add_binary_primitive(&mut env, ctx, "*.", "%mulfloat", float_ty, float_ty, float_ty);
-    add_binary_primitive(&mut env, ctx, "/.", "%divfloat", float_ty, float_ty, float_ty);
+    add_binary_primitive(
+        &mut env,
+        ctx,
+        "+.",
+        "%addfloat",
+        float_ty,
+        float_ty,
+        float_ty,
+    );
+    add_binary_primitive(
+        &mut env,
+        ctx,
+        "-.",
+        "%subfloat",
+        float_ty,
+        float_ty,
+        float_ty,
+    );
+    add_binary_primitive(
+        &mut env,
+        ctx,
+        "*.",
+        "%mulfloat",
+        float_ty,
+        float_ty,
+        float_ty,
+    );
+    add_binary_primitive(
+        &mut env,
+        ctx,
+        "/.",
+        "%divfloat",
+        float_ty,
+        float_ty,
+        float_ty,
+    );
 
     // Add polymorphic comparison operators matching Pervasives.res:
     //   external "==": ('a, 'a) => bool = "%equal"
@@ -965,7 +1072,15 @@ pub fn initial_env(ctx: &TypeContext<'_>) -> Env {
     add_unary_primitive(&mut env, ctx, "~-.", "%negfloat", float_ty, float_ty);
 
     // Add string concatenation (monomorphic)
-    add_binary_primitive(&mut env, ctx, "++", "%string_concat", string_ty, string_ty, string_ty);
+    add_binary_primitive(
+        &mut env,
+        ctx,
+        "++",
+        "%string_concat",
+        string_ty,
+        string_ty,
+        string_ty,
+    );
 
     // Add polymorphic bitwise operators matching Pervasives.res
     add_poly_binary_primitive(&mut env, ctx, "&&&", "%bitand");
@@ -991,17 +1106,15 @@ pub fn initial_env(ctx: &TypeContext<'_>) -> Env {
     {
         let alpha = ctx.new_generic_var(None);
         let beta = ctx.new_generic_var(None);
-        let tuple_ty = ctx.new_generic_type(crate::types::type_expr::TypeDesc::Ttuple(vec![
-            alpha, beta,
-        ]));
+        let tuple_ty =
+            ctx.new_generic_type(crate::types::type_expr::TypeDesc::Ttuple(vec![alpha, beta]));
         add_unary_primitive(&mut env, ctx, "fst", "%field0", tuple_ty, alpha);
     }
     {
         let alpha = ctx.new_generic_var(None);
         let beta = ctx.new_generic_var(None);
-        let tuple_ty = ctx.new_generic_type(crate::types::type_expr::TypeDesc::Ttuple(vec![
-            alpha, beta,
-        ]));
+        let tuple_ty =
+            ctx.new_generic_type(crate::types::type_expr::TypeDesc::Ttuple(vec![alpha, beta]));
         add_unary_primitive(&mut env, ctx, "snd", "%field1", tuple_ty, beta);
     }
 
@@ -1032,26 +1145,20 @@ pub fn initial_env(ctx: &TypeContext<'_>) -> Env {
     //   external ":=": (ref<'a>, 'a) => unit = "%refset"
     {
         let alpha = ctx.new_generic_var(None);
-        let ref_ty = ctx.new_generic_constr(
-            Path::pident(Ident::create_persistent("ref")),
-            vec![alpha],
-        );
+        let ref_ty =
+            ctx.new_generic_constr(Path::pident(Ident::create_persistent("ref")), vec![alpha]);
         add_unary_primitive(&mut env, ctx, "ref", "%makeref", alpha, ref_ty);
     }
     {
         let alpha = ctx.new_generic_var(None);
-        let ref_ty = ctx.new_generic_constr(
-            Path::pident(Ident::create_persistent("ref")),
-            vec![alpha],
-        );
+        let ref_ty =
+            ctx.new_generic_constr(Path::pident(Ident::create_persistent("ref")), vec![alpha]);
         add_unary_primitive(&mut env, ctx, "!", "%refget", ref_ty, alpha);
     }
     {
         let alpha = ctx.new_generic_var(None);
-        let ref_ty = ctx.new_generic_constr(
-            Path::pident(Ident::create_persistent("ref")),
-            vec![alpha],
-        );
+        let ref_ty =
+            ctx.new_generic_constr(Path::pident(Ident::create_persistent("ref")), vec![alpha]);
         add_binary_primitive(&mut env, ctx, ":=", "%refset", ref_ty, alpha, unit_ty);
     }
 
@@ -1070,7 +1177,8 @@ fn add_binary_primitive(
 ) {
     // Build at generic level so instance() creates fresh copies per use site
     let inner_ty = ctx.new_generic_arrow(crate::types::ArgLabel::Nolabel, arg2_ty, ret_ty, None);
-    let func_ty = ctx.new_generic_arrow(crate::types::ArgLabel::Nolabel, arg1_ty, inner_ty, Some(2));
+    let func_ty =
+        ctx.new_generic_arrow(crate::types::ArgLabel::Nolabel, arg1_ty, inner_ty, Some(2));
     let id = Ident::create_persistent(name);
     // Primitives come from Pervasives module
     let pervasives_id = Ident::create_persistent("Pervasives");
@@ -1138,12 +1246,7 @@ fn add_constant_value(env: &mut Env, name: &str, ty: TypeExprRef) {
 /// Helper to add a polymorphic binary operator: ('a, 'a) => 'a
 /// Creates a single shared Tvar for all three positions, matching OCaml behavior
 /// where Pervasives declares e.g. `external "+": ('a, 'a) => 'a = "%add"`
-fn add_poly_binary_primitive(
-    env: &mut Env,
-    ctx: &TypeContext<'_>,
-    name: &str,
-    prim_name: &str,
-) {
+fn add_poly_binary_primitive(env: &mut Env, ctx: &TypeContext<'_>, name: &str, prim_name: &str) {
     // Create a SINGLE Tvar shared across all three positions
     let alpha = ctx.new_generic_var(None);
     add_binary_primitive(env, ctx, name, prim_name, alpha, alpha, alpha);
@@ -1163,12 +1266,7 @@ fn add_poly_cmp_primitive(
 }
 
 /// Helper to add a polymorphic unary operator: 'a => 'a
-fn add_poly_unary_primitive(
-    env: &mut Env,
-    ctx: &TypeContext<'_>,
-    name: &str,
-    prim_name: &str,
-) {
+fn add_poly_unary_primitive(env: &mut Env, ctx: &TypeContext<'_>, name: &str, prim_name: &str) {
     let alpha = ctx.new_generic_var(None);
     add_unary_primitive(env, ctx, name, prim_name, alpha, alpha);
 }

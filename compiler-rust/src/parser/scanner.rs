@@ -303,8 +303,18 @@ impl<'src> Scanner<'src> {
     /// become 2-byte UTF-8 sequences).
     fn substring(&self, start: usize, end: usize) -> &'src str {
         // Get byte indices for the character range
-        let byte_start = self.src.char_indices().nth(start).map(|(i, _)| i).unwrap_or(self.src.len());
-        let byte_end = self.src.char_indices().nth(end).map(|(i, _)| i).unwrap_or(self.src.len());
+        let byte_start = self
+            .src
+            .char_indices()
+            .nth(start)
+            .map(|(i, _)| i)
+            .unwrap_or(self.src.len());
+        let byte_end = self
+            .src
+            .char_indices()
+            .nth(end)
+            .map(|(i, _)| i)
+            .unwrap_or(self.src.len());
         &self.src[byte_start..byte_end]
     }
 
@@ -483,9 +493,7 @@ impl<'src> Scanner<'src> {
 
                     // Check if it was a 3-digit decimal escape
                     let escape_text = self.substring(escape_start, escape_end);
-                    if escape_text.len() == 3
-                        && escape_text.chars().all(|c| c.is_ascii_digit())
-                    {
+                    if escape_text.len() == 3 && escape_text.chars().all(|c| c.is_ascii_digit()) {
                         // Convert decimal to hex format
                         if let Ok(value) = escape_text.parse::<u32>() {
                             if value <= 255 {
@@ -851,7 +859,11 @@ impl<'src> Scanner<'src> {
                         DiagnosticCategory::unclosed_template(),
                     );
                     // OCaml uses (max (scanner.offset - 1 - start_off) 0) to exclude the last char
-                    let end_off = if self.offset > start_off { self.offset - 1 } else { start_off };
+                    let end_off = if self.offset > start_off {
+                        self.offset - 1
+                    } else {
+                        start_off
+                    };
                     let contents = self.substring(start_off, end_off).to_string();
                     return ScanResult {
                         start_pos,
@@ -1271,7 +1283,7 @@ impl<'src> Scanner<'src> {
                 // (start_pos, end_pos, token) - uses outer start_pos, not recursive one
                 let scan_result = self.scan();
                 return ScanResult {
-                    start_pos,  // Use the outer start_pos (before the bad character)
+                    start_pos, // Use the outer start_pos (before the bad character)
                     end_pos: scan_result.end_pos,
                     token: scan_result.token,
                 };
@@ -1603,7 +1615,11 @@ impl<'src> Scanner<'src> {
 
                     // OCaml preserves exotic form for uppercase identifiers
                     // (to avoid confusion in OCaml parsetree where uppercase = module)
-                    if ident.chars().next().map_or(false, |c| c.is_ascii_uppercase()) {
+                    if ident
+                        .chars()
+                        .next()
+                        .map_or(false, |c| c.is_ascii_uppercase())
+                    {
                         return Token::Lident(format!("\\\"{}\"", ident));
                     }
 

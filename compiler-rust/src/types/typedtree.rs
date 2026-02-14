@@ -18,7 +18,7 @@
 #![allow(non_camel_case_types)]
 
 use crate::ident::Ident;
-use crate::parse_arena::{LidentIdx, Located, LocIdx};
+use crate::parse_arena::{LidentIdx, LocIdx, Located};
 use crate::parser::ast::{
     ArgLabel as ParserArgLabel, Arity, Attributes, ClosedFlag, DirectionFlag, MutableFlag,
     OverrideFlag, PrivateFlag, RecFlag,

@@ -385,19 +385,13 @@ pub fn if_let_attr(arena: &mut ParseArena) -> Attribute {
 /// Create the await attribute `@res.await` with location.
 pub fn make_await_attr(arena: &mut ParseArena, loc: Location) -> Attribute {
     let str_idx = arena.intern("res.await");
-    (
-        with_loc(str_idx, loc),
-        Payload::PStr(vec![]),
-    )
+    (with_loc(str_idx, loc), Payload::PStr(vec![]))
 }
 
 /// Create the braces attribute `@res.braces` with location.
 pub fn make_braces_attr(arena: &mut ParseArena, loc: Location) -> Attribute {
     let str_idx = arena.intern("res.braces");
-    (
-        with_loc(str_idx, loc),
-        Payload::PStr(vec![]),
-    )
+    (with_loc(str_idx, loc), Payload::PStr(vec![]))
 }
 
 /// Create the template literal attribute `@res.template`.
@@ -415,19 +409,13 @@ pub fn spread_attr(arena: &mut ParseArena) -> Attribute {
 /// Create the pattern variant spread attribute.
 pub fn make_pat_variant_spread_attr(arena: &mut ParseArena) -> Attribute {
     let str_idx = arena.intern("res.patVariantSpread");
-    (
-        mknoloc(str_idx),
-        Payload::PStr(vec![]),
-    )
+    (mknoloc(str_idx), Payload::PStr(vec![]))
 }
 
 /// Create the tagged template literal attribute.
 pub fn tagged_template_literal_attr(arena: &mut ParseArena) -> Attribute {
     let str_idx = arena.intern("res.taggedTemplate");
-    (
-        mknoloc(str_idx),
-        Payload::PStr(vec![]),
-    )
+    (mknoloc(str_idx), Payload::PStr(vec![]))
 }
 
 // ============================================================================
@@ -507,16 +495,17 @@ pub fn skip_doc_comments(p: &mut Parser<'_>) {
 }
 
 /// Convert a doc comment to a res.doc attribute.
-pub fn doc_comment_to_attribute(arena: &mut ParseArena, loc: Location, content: String) -> Attribute {
+pub fn doc_comment_to_attribute(
+    arena: &mut ParseArena,
+    loc: Location,
+    content: String,
+) -> Attribute {
     let str_idx = arena.intern("res.doc");
     let name = with_loc(str_idx, loc);
     let payload = Payload::PStr(vec![StructureItem {
         pstr_desc: StructureItemDesc::Pstr_eval(
             Expression {
-                pexp_desc: ExpressionDesc::Pexp_constant(Constant::String(
-                    content,
-                    None,
-                )),
+                pexp_desc: ExpressionDesc::Pexp_constant(Constant::String(content, None)),
                 pexp_loc: loc,
                 pexp_attributes: vec![],
             },
@@ -611,13 +600,19 @@ pub mod ast_helper {
 
     /// Create an identifier expression with arena-allocated longident.
     pub fn make_ident_idx(lid_idx: crate::parse_arena::LidentIdx, loc: Location) -> Expression {
-        make_expr(ExpressionDesc::Pexp_ident(with_loc(lid_idx, loc.clone())), loc)
+        make_expr(
+            ExpressionDesc::Pexp_ident(with_loc(lid_idx, loc.clone())),
+            loc,
+        )
     }
 
     /// Create an identifier expression (allocates in arena).
     pub fn make_ident(p: &mut Parser<'_>, lid: Longident, loc: Location) -> Expression {
         let lid_idx = p.push_longident(lid);
-        make_expr(ExpressionDesc::Pexp_ident(with_loc(lid_idx, loc.clone())), loc)
+        make_expr(
+            ExpressionDesc::Pexp_ident(with_loc(lid_idx, loc.clone())),
+            loc,
+        )
     }
 
     /// Create a constant expression.
@@ -629,10 +624,7 @@ pub mod ast_helper {
     pub fn make_unit(p: &mut Parser<'_>, loc: Location) -> Expression {
         let lid_idx = p.push_lident_static("()");
         make_expr(
-            ExpressionDesc::Pexp_construct(
-                with_loc(lid_idx, loc.clone()),
-                None,
-            ),
+            ExpressionDesc::Pexp_construct(with_loc(lid_idx, loc.clone()), None),
             loc,
         )
     }
@@ -767,7 +759,10 @@ pub mod ast_helper {
         lid_loc: Location,
         ptyp_loc: Location,
     ) -> CoreType {
-        make_typ(CoreTypeDesc::Ptyp_constr(with_loc(lid_idx, lid_loc), args), ptyp_loc)
+        make_typ(
+            CoreTypeDesc::Ptyp_constr(with_loc(lid_idx, lid_loc), args),
+            ptyp_loc,
+        )
     }
 }
 
@@ -883,9 +878,7 @@ pub fn make_infix_operator(
         p.err_at(
             p.arena().get_position(start_pos).clone(),
             p.arena().get_position(end_pos).clone(),
-            DiagnosticCategory::Message(
-                "Did you mean `==` here?".to_string(),
-            ),
+            DiagnosticCategory::Message("Did you mean `==` here?".to_string()),
         );
         "=".to_string()
     } else {

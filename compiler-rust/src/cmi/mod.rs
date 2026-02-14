@@ -11,10 +11,10 @@
 //! - `sig_reader`: Converts generic marshal values into Rust `Types` structures
 //! - `persistent_env`: Caches loaded modules and provides lookup functions
 
-pub mod marshal_reader;
 pub mod cmi_format;
-pub mod sig_reader;
+pub mod marshal_reader;
 pub mod persistent_env;
+pub mod sig_reader;
 
 pub use cmi_format::CmiInfos;
 pub use persistent_env::PersistentEnv;

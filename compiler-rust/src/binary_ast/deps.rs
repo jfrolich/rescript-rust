@@ -9,6 +9,7 @@
 
 use std::collections::{BTreeSet, HashSet};
 
+use crate::parse_arena::{LidentIdx, ParseArena};
 use crate::parser::ast::{
     Case, ConstructorArguments, CoreType, CoreTypeDesc, Expression, ExpressionDesc,
     ExtensionConstructor, ExtensionConstructorKind, IncludeDeclaration, IncludeDescription,
@@ -17,7 +18,6 @@ use crate::parser::ast::{
     Payload, RowField, SignatureItem, SignatureItemDesc, StructureItem, StructureItemDesc,
     TypeDeclaration, TypeExtension, TypeKind, ValueBinding, ValueDescription, WithConstraint,
 };
-use crate::parse_arena::{LidentIdx, ParseArena};
 use crate::parser::longident::Longident;
 
 /// A set of module dependencies, sorted for deterministic output.
@@ -76,7 +76,10 @@ impl<'a> DependencyCollector<'a> {
             // Only add if it starts with uppercase (module reference)
             // Lowercase identifiers are local bindings
             // Also skip if it's a bound module name (from letmodule, etc.)
-            if first_str.chars().next().is_some_and(|c| c.is_ascii_uppercase())
+            if first_str
+                .chars()
+                .next()
+                .is_some_and(|c| c.is_ascii_uppercase())
                 && !self.bound_modules.contains(first_str)
             {
                 self.deps.insert(first_str.to_string());
@@ -304,10 +307,7 @@ impl<'a> DependencyCollector<'a> {
                 }
             }
             ExpressionDesc::Pexp_fun {
-                default,
-                lhs,
-                rhs,
-                ..
+                default, lhs, rhs, ..
             } => {
                 if let Some(default) = default {
                     self.add_expression(default);
@@ -992,7 +992,10 @@ mod tests {
 
         let deps = extract_structure_deps(&arena, &structure);
         // None is a simple identifier, not Foo.None, so it's not a module reference
-        assert!(deps.is_empty(), "Simple uppercase identifier 'None' should not be a dependency");
+        assert!(
+            deps.is_empty(),
+            "Simple uppercase identifier 'None' should not be a dependency"
+        );
     }
 
     #[test]
