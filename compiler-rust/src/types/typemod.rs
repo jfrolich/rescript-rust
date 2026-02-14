@@ -5435,10 +5435,34 @@ fn type_structure_item<'a>(
             }
 
             // Second pass: type-check each module body with the env containing all modules
+            // Match OCaml: for Pmod_constraint(expr, typ), type-check only expr (inner body),
+            // then wrap in Tmod_constraint with mod_loc from the inner module (not the
+            // constraint wrapper). OCaml does this in check_recmodule_inclusion.
             let mut typed_bindings = Vec::new();
             let mut new_env = env.clone();
             for (i, mb) in mbs.iter().enumerate() {
-                let typed_mod = type_module_expr(tctx, &rec_env, arena, &mb.pmb_expr)?;
+                let typed_mod = match &mb.pmb_expr.pmod_desc {
+                    ParsedModuleExprDesc::Pmod_constraint(inner_expr, mty) => {
+                        let typed_inner = type_module_expr(tctx, &rec_env, arena, inner_expr)?;
+                        let typed_mty = transl_modtype(tctx, &rec_env, arena, mty)?;
+                        let inner_loc = typed_inner.mod_loc;
+                        ModuleExpr {
+                            mod_desc: ModuleExprDesc::Tmod_constraint(
+                                Box::new(typed_inner),
+                                typed_mty.clone(),
+                                crate::types::typedtree::ModuleTypeConstraint::Tmodtype_explicit(
+                                    Box::new(typed_mty),
+                                ),
+                                ModuleCoercion::Tcoerce_none,
+                            ),
+                            mod_loc: inner_loc,
+                            mod_type: ModuleType::placeholder(),
+                            mod_env: EnvRef(0),
+                            mod_attributes: vec![],
+                        }
+                    }
+                    _ => type_module_expr(tctx, &rec_env, arena, &mb.pmb_expr)?,
+                };
                 let mod_id = mod_ids[i].clone();
                 let mod_name_str = arena.get_string(mb.pmb_name.txt);
 
