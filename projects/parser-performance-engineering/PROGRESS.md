@@ -28,7 +28,8 @@ Run benchmarks:
 cargo test --release --lib -- benchmark_all --ignored --nocapture
 
 # Repeated single-thread throughput (in-process, min/median/p95 KLOC/s)
-./scripts/benchmark_parser_kloc.py --runs 10 --warmup 2
+RAYON_NUM_THREADS=1 PARSER_BENCH_WARMUP=2 PARSER_BENCH_RUNS=10 \
+cargo test --manifest-path compiler-rust/Cargo.toml --release --lib -- benchmark_cold_repeat --ignored --nocapture
 ```
 
 ---
