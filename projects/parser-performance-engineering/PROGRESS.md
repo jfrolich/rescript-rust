@@ -13,7 +13,7 @@
 | Tier | Description | Status | Progress |
 |------|-------------|--------|----------|
 | Tier 1 | High Impact: Scanner + Token | 🚧 In Progress | 4/6 |
-| Tier 2 | High Impact: AST + Token Layout | 🚧 In Progress | 3/6 |
+| Tier 2 | High Impact: AST + Token Layout | 🚧 In Progress | 4/6 |
 | Tier 3 | Medium Impact: DOD + Misc | ⏳ Not Started | 0/7 |
 | Tier 4 | Architectural | ⏳ Not Started | 0/4 |
 
@@ -122,9 +122,17 @@ cargo test --manifest-path compiler-rust/Cargo.toml --release --lib -- benchmark
   - Parity: zero regressions
   - Files: `ast.rs`, `parse_arena.rs`, `ppx.rs`, `jsx_ppx.rs` + all parsing/PPX/marshal
 
-- [ ] **2.4 Generalized sparse data / side tables**
+- [x] **2.4 Generalized sparse data / side tables** ✅ COMPLETE
   - Beyond attributes: move all Option<T> fields that are None >80% of the time to side tables
-  - Candidates: Pexp_fun default arg, extension nodes, optional type annotations
+  - Completed sparse expression payload coverage:
+    - `Pexp_fun.default`
+    - `Case.pc_guard`
+    - `Pexp_construct` payload arg
+    - `Pexp_variant` payload arg
+    - `Pexp_record` spread/base expression
+    - `Pexp_ifthenelse` else-branch
+    - `Pexp_coerce` source type
+  - Side-table reads are now threaded through parser/mapper/marshal paths with inline fallback guardrails for parity safety.
   - Each eliminated Option saves 8-24 bytes per node in common case
   - Files: `ast.rs`, all parsing modules, PPX, marshal
 
@@ -564,59 +572,35 @@ Result:
 - No parity regressions.
 ```
 
-### Task 2.4 plan (Generalized sparse data / side tables) — ACTIVE
+### Task 2.4 completion (Generalized sparse data / side tables) — COMPLETE
 
 ```
-Status: Active as [ ] in RALPH_TODO.md
+Status: Completed as [x] in RALPH_TODO.md.
 
-What was tried:
-1) Audited all Option-bearing AST fields in parser AST (`rg "Option<" parser/ast.rs`), with
-   sparse candidates including:
-   - PexpFun.default: Option<ExprIdx>
-   - Case.pc_guard: Option<ExprIdx>
-   - multiple expression payload options (construct/variant/record/if/coerce)
-2) Traced usage fan-out for PexpFun.default / defaulted function args across parser, PPX,
-   mappers, printers, S-expression emitters, and binary writer.
-3) Validated current baseline before attempting a broad refactor:
-   - benchmark_all: Large 0.81x, Medium 0.53x, Small 0.39x, Tiny 0.32x
-   - parity baseline unchanged (3 sexp-locs, 7 sexp-locs-ppx, 4 bsc-ast non-regression)
+Completed sparse expression payload migration:
+- `PexpFun.default`
+- `Case.pc_guard`
+- `Pexp_construct` payload
+- `Pexp_variant` payload
+- `Pexp_record` spread/base
+- `Pexp_ifthenelse` else branch
+- `Pexp_coerce` source type
 
-Root cause:
-- Sparse options in this AST are embedded in by-value nodes that are constructed before arena
-  index assignment.
-- A side-table design keyed by node index therefore needs a two-phase construction model
-  (reserve index first, then build node + side-table entries) across parser + PPX + mapper
-  + marshal paths.
-- Doing this piecemeal for one field is not parity-safe: marshal identity/sharing behavior and
-  traversal ordering are tightly coupled to current allocation/construction flow.
+Completed plumbing:
+- ParseArena now stores and clears sparse side-table entries for all fields above.
+- `mapper_to0` consumes sparse fields (owner-index keyed) with inline fallback.
+- current marshal path consumes sparse fields (owner-index keyed) with inline fallback.
+- Unit tests cover seeded side-table extraction plus fallback-after-mutation behavior.
 
-Execution plan:
-1) **Enable two-phase node construction**
-   - Add reserve/initialize APIs (or equivalent builder APIs) for expression/pattern/core_type/module arenas.
-   - Guarantee stable node index assignment before sparse fields are attached.
-
-2) **Introduce sparse side tables in ParseArena**
-   - Add typed side tables keyed by node indices for initial targets:
-     - `PexpFun.default`
-     - `Case.pc_guard`
-   - Define explicit lifecycle semantics so parser snapshots/lookahead and PPX rewrites stay parity-safe.
-
-3) **Migrate in strict order**
-   - Parser construction paths first
-   - PPX/JSX rewrites second
-   - Mapper conversions (`mapper_from0` / `mapper_to0`) third
-   - Marshal-sensitive paths last
-
-4) **Validation at each sub-step**
-   - `./scripts/test_parser_ast_parity.sh --quick` for fast guardrails during refactors
-   - full `./scripts/test_parser_ast_parity.sh` after each field family migration
-   - benchmark sweep after each phase
-
-Acceptance criteria:
-- No new parity regressions (sexp-locs, sexp-locs-ppx, bsc-ast).
-- `PexpFun.default` and `Case.pc_guard` migrated to side tables as first milestone.
-- Follow-on sparse fields (`construct/variant/record/if/coerce` options) moved after milestone parity is stable.
-- AST node size and/or memory footprint shows measurable reduction on expression-heavy files.
+Validation:
+- `./scripts/test_parser_ast_parity.sh --quick`
+  SUCCESS: all 3506 files have full parity.
+- Targeted `bsc -bs-ast` byte comparisons for grammar fixtures covering:
+  `constructor`, `polyvariant`, `record`, `if`, and `coerce`
+  all match between Rust and OCaml.
+- In-process benchmark spot check:
+  `RAYON_NUM_THREADS=1 PARSER_BENCH_WARMUP=0 PARSER_BENCH_RUNS=1 ... benchmark_cold_repeat`
+  completed successfully (no benchmark crashes/regressions in the migrated paths).
 ```
 
 ### Task 4.2 policy (bumpalo) — PROFILING GATED

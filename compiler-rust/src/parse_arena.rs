@@ -467,6 +467,16 @@ pub struct ParseArena {
     /// Sparse side table for case guards, keyed by owning match/try ExprIdx.
     /// Value is a case-indexed list of optional guard expressions.
     expr_case_guards: Vec<Option<Box<[Option<ExprIdx>]>>>,
+    /// Sparse side table for constructor payload argument, keyed by construct ExprIdx.
+    expr_construct_args: Vec<Option<ExprIdx>>,
+    /// Sparse side table for polymorphic variant payload argument, keyed by variant ExprIdx.
+    expr_variant_args: Vec<Option<ExprIdx>>,
+    /// Sparse side table for record spread/base expression, keyed by record ExprIdx.
+    expr_record_spreads: Vec<Option<ExprIdx>>,
+    /// Sparse side table for if-then-else else branch expression, keyed by if ExprIdx.
+    expr_if_else_branches: Vec<Option<ExprIdx>>,
+    /// Sparse side table for `Pexp_coerce` source type annotation, keyed by coerce ExprIdx.
+    expr_coerce_from_types: Vec<Option<CoreTypeIdx>>,
     /// Arena of patterns (returns PatIdx).
     /// Replaces `Box<Pattern>` for recursive AST references.
     patterns: Arena<Pattern, PatIdx>,
@@ -785,6 +795,11 @@ impl Default for ParseArena {
             expressions: Arena::default(),
             expr_fun_defaults: Vec::new(),
             expr_case_guards: Vec::new(),
+            expr_construct_args: Vec::new(),
+            expr_variant_args: Vec::new(),
+            expr_record_spreads: Vec::new(),
+            expr_if_else_branches: Vec::new(),
+            expr_coerce_from_types: Vec::new(),
             patterns: Arena::default(),
             core_types,
             mod_exprs: Arena::default(),
@@ -1777,15 +1792,72 @@ impl ParseArena {
         }
     }
 
+    fn extract_construct_arg(expr: &Expression) -> Option<ExprIdx> {
+        match &*expr.pexp_desc {
+            ExpressionDesc::Pexp_construct(_, arg) => *arg,
+            _ => None,
+        }
+    }
+
+    fn extract_variant_arg(expr: &Expression) -> Option<ExprIdx> {
+        match &*expr.pexp_desc {
+            ExpressionDesc::Pexp_variant(inner) => {
+                let (_, arg) = &**inner;
+                *arg
+            }
+            _ => None,
+        }
+    }
+
+    fn extract_record_spread(expr: &Expression) -> Option<ExprIdx> {
+        match &*expr.pexp_desc {
+            ExpressionDesc::Pexp_record(inner) => {
+                let (_, spread) = &**inner;
+                *spread
+            }
+            _ => None,
+        }
+    }
+
+    fn extract_if_else_branch(expr: &Expression) -> Option<ExprIdx> {
+        match &*expr.pexp_desc {
+            ExpressionDesc::Pexp_ifthenelse(inner) => {
+                let (_, _, else_branch) = &**inner;
+                *else_branch
+            }
+            _ => None,
+        }
+    }
+
+    fn extract_coerce_from_type(expr: &Expression) -> Option<CoreTypeIdx> {
+        match &*expr.pexp_desc {
+            ExpressionDesc::Pexp_coerce(inner) => {
+                let (_, from_type, _) = &**inner;
+                *from_type
+            }
+            _ => None,
+        }
+    }
+
     /// Push an expression into the arena and return its index.
     /// Use this instead of `Box::new(expr)` for recursive AST references.
     #[inline]
     pub fn push_expr(&mut self, expr: Expression) -> ExprIdx {
         let default = Self::extract_fun_default(&expr);
         let case_guards = Self::extract_case_guards(&expr);
+        let construct_arg = Self::extract_construct_arg(&expr);
+        let variant_arg = Self::extract_variant_arg(&expr);
+        let record_spread = Self::extract_record_spread(&expr);
+        let if_else = Self::extract_if_else_branch(&expr);
+        let coerce_from = Self::extract_coerce_from_type(&expr);
         let idx = self.expressions.push(expr);
         self.expr_fun_defaults.push(default);
         self.expr_case_guards.push(case_guards);
+        self.expr_construct_args.push(construct_arg);
+        self.expr_variant_args.push(variant_arg);
+        self.expr_record_spreads.push(record_spread);
+        self.expr_if_else_branches.push(if_else);
+        self.expr_coerce_from_types.push(coerce_from);
         idx
     }
 
@@ -1798,6 +1870,11 @@ impl ParseArena {
         let idx = self.expressions.reserve_with(Self::placeholder_expr());
         self.expr_fun_defaults.push(None);
         self.expr_case_guards.push(None);
+        self.expr_construct_args.push(None);
+        self.expr_variant_args.push(None);
+        self.expr_record_spreads.push(None);
+        self.expr_if_else_branches.push(None);
+        self.expr_coerce_from_types.push(None);
         idx
     }
 
@@ -1807,11 +1884,26 @@ impl ParseArena {
         let slot = idx.0 as usize;
         debug_assert!(slot < self.expr_fun_defaults.len());
         debug_assert!(slot < self.expr_case_guards.len());
+        debug_assert!(slot < self.expr_construct_args.len());
+        debug_assert!(slot < self.expr_variant_args.len());
+        debug_assert!(slot < self.expr_record_spreads.len());
+        debug_assert!(slot < self.expr_if_else_branches.len());
+        debug_assert!(slot < self.expr_coerce_from_types.len());
         let default = Self::extract_fun_default(&expr);
         let case_guards = Self::extract_case_guards(&expr);
+        let construct_arg = Self::extract_construct_arg(&expr);
+        let variant_arg = Self::extract_variant_arg(&expr);
+        let record_spread = Self::extract_record_spread(&expr);
+        let if_else = Self::extract_if_else_branch(&expr);
+        let coerce_from = Self::extract_coerce_from_type(&expr);
         self.expressions.initialize(idx, expr);
         self.expr_fun_defaults[slot] = default;
         self.expr_case_guards[slot] = case_guards;
+        self.expr_construct_args[slot] = construct_arg;
+        self.expr_variant_args[slot] = variant_arg;
+        self.expr_record_spreads[slot] = record_spread;
+        self.expr_if_else_branches[slot] = if_else;
+        self.expr_coerce_from_types[slot] = coerce_from;
     }
 
     /// Get an expression by index.
@@ -1829,6 +1921,21 @@ impl ParseArena {
         }
         if slot < self.expr_case_guards.len() {
             self.expr_case_guards[slot] = None;
+        }
+        if slot < self.expr_construct_args.len() {
+            self.expr_construct_args[slot] = None;
+        }
+        if slot < self.expr_variant_args.len() {
+            self.expr_variant_args[slot] = None;
+        }
+        if slot < self.expr_record_spreads.len() {
+            self.expr_record_spreads[slot] = None;
+        }
+        if slot < self.expr_if_else_branches.len() {
+            self.expr_if_else_branches[slot] = None;
+        }
+        if slot < self.expr_coerce_from_types.len() {
+            self.expr_coerce_from_types[slot] = None;
         }
         self.expressions.get_mut(idx)
     }
@@ -1894,6 +2001,128 @@ impl ParseArena {
                 ExpressionDesc::Pexp_match(inner) | ExpressionDesc::Pexp_try(inner) => {
                     let (_, cases) = &**inner;
                     cases.get(case_index).and_then(|case| case.pc_guard)
+                }
+                _ => None,
+            })
+    }
+
+    /// Attach sparse constructor payload argument data to a construct expression node.
+    pub fn set_construct_arg(&mut self, owner: ExprIdx, arg: Option<ExprIdx>) {
+        let slot = owner.0 as usize;
+        if slot >= self.expr_construct_args.len() {
+            self.expr_construct_args.resize(slot + 1, None);
+        }
+        self.expr_construct_args[slot] = arg;
+    }
+
+    /// Get sparse constructor payload argument data for a `Pexp_construct` expression node.
+    pub fn construct_arg(&self, owner: ExprIdx) -> Option<ExprIdx> {
+        let slot = owner.0 as usize;
+        self.expr_construct_args
+            .get(slot)
+            .copied()
+            .flatten()
+            .or_else(|| match &*self.get_expr(owner).pexp_desc {
+                ExpressionDesc::Pexp_construct(_, arg) => *arg,
+                _ => None,
+            })
+    }
+
+    /// Attach sparse polymorphic variant payload argument data to a variant expression node.
+    pub fn set_variant_arg(&mut self, owner: ExprIdx, arg: Option<ExprIdx>) {
+        let slot = owner.0 as usize;
+        if slot >= self.expr_variant_args.len() {
+            self.expr_variant_args.resize(slot + 1, None);
+        }
+        self.expr_variant_args[slot] = arg;
+    }
+
+    /// Get sparse polymorphic variant payload argument data for a `Pexp_variant` expression node.
+    pub fn variant_arg(&self, owner: ExprIdx) -> Option<ExprIdx> {
+        let slot = owner.0 as usize;
+        self.expr_variant_args
+            .get(slot)
+            .copied()
+            .flatten()
+            .or_else(|| match &*self.get_expr(owner).pexp_desc {
+                ExpressionDesc::Pexp_variant(inner) => {
+                    let (_, arg) = &**inner;
+                    *arg
+                }
+                _ => None,
+            })
+    }
+
+    /// Attach sparse record spread/base expression data to a record expression node.
+    pub fn set_record_spread(&mut self, owner: ExprIdx, spread: Option<ExprIdx>) {
+        let slot = owner.0 as usize;
+        if slot >= self.expr_record_spreads.len() {
+            self.expr_record_spreads.resize(slot + 1, None);
+        }
+        self.expr_record_spreads[slot] = spread;
+    }
+
+    /// Get sparse record spread/base expression data for a `Pexp_record` expression node.
+    pub fn record_spread(&self, owner: ExprIdx) -> Option<ExprIdx> {
+        let slot = owner.0 as usize;
+        self.expr_record_spreads
+            .get(slot)
+            .copied()
+            .flatten()
+            .or_else(|| match &*self.get_expr(owner).pexp_desc {
+                ExpressionDesc::Pexp_record(inner) => {
+                    let (_, spread) = &**inner;
+                    *spread
+                }
+                _ => None,
+            })
+    }
+
+    /// Attach sparse else-branch expression data to an if-then-else expression node.
+    pub fn set_if_else_branch(&mut self, owner: ExprIdx, else_branch: Option<ExprIdx>) {
+        let slot = owner.0 as usize;
+        if slot >= self.expr_if_else_branches.len() {
+            self.expr_if_else_branches.resize(slot + 1, None);
+        }
+        self.expr_if_else_branches[slot] = else_branch;
+    }
+
+    /// Get sparse else-branch expression data for a `Pexp_ifthenelse` expression node.
+    pub fn if_else_branch(&self, owner: ExprIdx) -> Option<ExprIdx> {
+        let slot = owner.0 as usize;
+        self.expr_if_else_branches
+            .get(slot)
+            .copied()
+            .flatten()
+            .or_else(|| match &*self.get_expr(owner).pexp_desc {
+                ExpressionDesc::Pexp_ifthenelse(inner) => {
+                    let (_, _, else_branch) = &**inner;
+                    *else_branch
+                }
+                _ => None,
+            })
+    }
+
+    /// Attach sparse source type data to a coerce expression node.
+    pub fn set_coerce_from_type(&mut self, owner: ExprIdx, from_type: Option<CoreTypeIdx>) {
+        let slot = owner.0 as usize;
+        if slot >= self.expr_coerce_from_types.len() {
+            self.expr_coerce_from_types.resize(slot + 1, None);
+        }
+        self.expr_coerce_from_types[slot] = from_type;
+    }
+
+    /// Get sparse source type data for a `Pexp_coerce` expression node.
+    pub fn coerce_from_type(&self, owner: ExprIdx) -> Option<CoreTypeIdx> {
+        let slot = owner.0 as usize;
+        self.expr_coerce_from_types
+            .get(slot)
+            .copied()
+            .flatten()
+            .or_else(|| match &*self.get_expr(owner).pexp_desc {
+                ExpressionDesc::Pexp_coerce(inner) => {
+                    let (_, from_type, _) = &**inner;
+                    *from_type
                 }
                 _ => None,
             })
@@ -2259,17 +2488,33 @@ mod tests {
         let default_expr = arena.push_expr(default_expr_node);
         let guard_expr_node = ident_expr(&mut arena, "guard");
         let guard_expr = arena.push_expr(guard_expr_node);
+        let from_type = arena.push_core_type(ParseArena::placeholder_core_type());
 
         assert_eq!(arena.fun_default(owner), None);
         assert_eq!(arena.case_guard(owner, 0), None);
+        assert_eq!(arena.construct_arg(owner), None);
+        assert_eq!(arena.variant_arg(owner), None);
+        assert_eq!(arena.record_spread(owner), None);
+        assert_eq!(arena.if_else_branch(owner), None);
+        assert_eq!(arena.coerce_from_type(owner), None);
 
         arena.set_fun_default(owner, Some(default_expr));
         arena.set_case_guards(owner, vec![None, Some(guard_expr)]);
+        arena.set_construct_arg(owner, Some(default_expr));
+        arena.set_variant_arg(owner, Some(guard_expr));
+        arena.set_record_spread(owner, Some(default_expr));
+        arena.set_if_else_branch(owner, Some(guard_expr));
+        arena.set_coerce_from_type(owner, Some(from_type));
 
         assert_eq!(arena.fun_default(owner), Some(default_expr));
         assert_eq!(arena.case_guard(owner, 0), None);
         assert_eq!(arena.case_guard(owner, 1), Some(guard_expr));
         assert_eq!(arena.case_guard(owner, 2), None);
+        assert_eq!(arena.construct_arg(owner), Some(default_expr));
+        assert_eq!(arena.variant_arg(owner), Some(guard_expr));
+        assert_eq!(arena.record_spread(owner), Some(default_expr));
+        assert_eq!(arena.if_else_branch(owner), Some(guard_expr));
+        assert_eq!(arena.coerce_from_type(owner), Some(from_type));
     }
 
     #[test]
@@ -2321,15 +2566,80 @@ mod tests {
             pexp_attributes: Attributes::new(),
         });
 
+        let ctor_lid = Located {
+            txt: arena.push_lident("Ctor"),
+            loc: LocIdx::default(),
+        };
+        let construct_owner = arena.push_expr(Expression {
+            pexp_desc: Box::new(ExpressionDesc::Pexp_construct(ctor_lid, Some(default_expr))),
+            pexp_loc: LocIdx::default(),
+            pexp_attributes: Attributes::new(),
+        });
+
+        let variant_owner = arena.push_expr(Expression {
+            pexp_desc: Box::new(ExpressionDesc::Pexp_variant(Box::new((
+                "Tag".into(),
+                Some(guard_expr),
+            )))),
+            pexp_loc: LocIdx::default(),
+            pexp_attributes: Attributes::new(),
+        });
+
+        let record_owner = arena.push_expr(Expression {
+            pexp_desc: Box::new(ExpressionDesc::Pexp_record(Box::new((
+                vec![],
+                Some(default_expr),
+            )))),
+            pexp_loc: LocIdx::default(),
+            pexp_attributes: Attributes::new(),
+        });
+
+        let if_owner = arena.push_expr(Expression {
+            pexp_desc: Box::new(ExpressionDesc::Pexp_ifthenelse(Box::new((
+                rhs,
+                case_rhs,
+                Some(guard_expr),
+            )))),
+            pexp_loc: LocIdx::default(),
+            pexp_attributes: Attributes::new(),
+        });
+
+        let from_type = arena.push_core_type(ParseArena::placeholder_core_type());
+        let to_type = arena.push_core_type(ParseArena::placeholder_core_type());
+        let coerce_owner = arena.push_expr(Expression {
+            pexp_desc: Box::new(ExpressionDesc::Pexp_coerce(Box::new((
+                rhs,
+                Some(from_type),
+                to_type,
+            )))),
+            pexp_loc: LocIdx::default(),
+            pexp_attributes: Attributes::new(),
+        });
+
         assert_eq!(arena.fun_default(fun_owner), Some(default_expr));
         assert_eq!(arena.case_guard(match_owner, 0), Some(guard_expr));
+        assert_eq!(arena.construct_arg(construct_owner), Some(default_expr));
+        assert_eq!(arena.variant_arg(variant_owner), Some(guard_expr));
+        assert_eq!(arena.record_spread(record_owner), Some(default_expr));
+        assert_eq!(arena.if_else_branch(if_owner), Some(guard_expr));
+        assert_eq!(arena.coerce_from_type(coerce_owner), Some(from_type));
 
         // get_expr_mut clears sparse cache entries; fallback to inline fields must preserve behavior.
         let _ = arena.get_expr_mut(fun_owner);
         let _ = arena.get_expr_mut(match_owner);
+        let _ = arena.get_expr_mut(construct_owner);
+        let _ = arena.get_expr_mut(variant_owner);
+        let _ = arena.get_expr_mut(record_owner);
+        let _ = arena.get_expr_mut(if_owner);
+        let _ = arena.get_expr_mut(coerce_owner);
 
         assert_eq!(arena.fun_default(fun_owner), Some(default_expr));
         assert_eq!(arena.case_guard(match_owner, 0), Some(guard_expr));
+        assert_eq!(arena.construct_arg(construct_owner), Some(default_expr));
+        assert_eq!(arena.variant_arg(variant_owner), Some(guard_expr));
+        assert_eq!(arena.record_spread(record_owner), Some(default_expr));
+        assert_eq!(arena.if_else_branch(if_owner), Some(guard_expr));
+        assert_eq!(arena.coerce_from_type(coerce_owner), Some(from_type));
     }
 
     #[test]

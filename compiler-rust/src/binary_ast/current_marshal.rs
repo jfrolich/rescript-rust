@@ -1470,21 +1470,33 @@ impl Marshal for ExpressionDesc {
                 exprs.marshal(w);
             }
             ExpressionDesc::Pexp_construct(lid, expr) => {
+                let arg_idx = w
+                    .current_expr_idx()
+                    .and_then(|owner| w.get_arena().construct_arg(owner))
+                    .or(*expr);
                 w.write_block_header(8, 2);
                 lid.marshal(w);
-                expr.marshal(w);
+                arg_idx.marshal(w);
             }
             ExpressionDesc::Pexp_variant(inner) => {
                 let (ref label, ref expr) = **inner;
+                let arg_idx = w
+                    .current_expr_idx()
+                    .and_then(|owner| w.get_arena().variant_arg(owner))
+                    .or(*expr);
                 w.write_block_header(9, 2);
                 w.write_str(label);
-                expr.marshal(w);
+                arg_idx.marshal(w);
             }
             ExpressionDesc::Pexp_record(inner) => {
                 let (ref fields, ref spread) = **inner;
+                let spread_idx = w
+                    .current_expr_idx()
+                    .and_then(|owner| w.get_arena().record_spread(owner))
+                    .or(*spread);
                 w.write_block_header(10, 2);
                 fields.marshal(w);
-                spread.marshal(w);
+                spread_idx.marshal(w);
             }
             ExpressionDesc::Pexp_field(e, lid) => {
                 w.write_block_header(11, 2);
@@ -1504,10 +1516,14 @@ impl Marshal for ExpressionDesc {
             }
             ExpressionDesc::Pexp_ifthenelse(inner) => {
                 let (ref e1, ref e2, ref e3) = **inner;
+                let else_idx = w
+                    .current_expr_idx()
+                    .and_then(|owner| w.get_arena().if_else_branch(owner))
+                    .or(*e3);
                 w.write_block_header(14, 3);
                 e1.marshal(w);
                 e2.marshal(w);
-                e3.marshal(w);
+                else_idx.marshal(w);
             }
             ExpressionDesc::Pexp_sequence(e1, e2) => {
                 w.write_block_header(15, 2);
@@ -1536,6 +1552,9 @@ impl Marshal for ExpressionDesc {
             }
             ExpressionDesc::Pexp_coerce(inner) => {
                 let (ref e, ref _middle, ref t) = **inner;
+                let _from_type = w
+                    .current_expr_idx()
+                    .and_then(|owner| w.get_arena().coerce_from_type(owner));
                 // Pexp_coerce of expression * unit * core_type
                 // The middle field in Rust is Option<CoreType> but OCaml uses unit
                 w.write_block_header(19, 3);

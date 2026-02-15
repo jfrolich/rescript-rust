@@ -897,19 +897,30 @@ impl<'a> Mapper<'a> {
             current::ExpressionDesc::Pexp_tuple(exprs) => {
                 pt0::ExpressionDesc::Tuple(exprs.iter().map(|e| self.map_expr_idx(*e)).collect())
             }
-            current::ExpressionDesc::Pexp_construct(lid, opt) => pt0::ExpressionDesc::Construct(
-                self.map_longident_loc(lid),
-                opt.as_ref().map(|e| Box::new(self.map_expr_idx(*e))),
-            ),
+            current::ExpressionDesc::Pexp_construct(lid, opt) => {
+                let arg_idx = owner_idx
+                    .and_then(|owner| self.arena.construct_arg(owner))
+                    .or(*opt);
+                pt0::ExpressionDesc::Construct(
+                    self.map_longident_loc(lid),
+                    arg_idx.map(|e| Box::new(self.map_expr_idx(e))),
+                )
+            }
             current::ExpressionDesc::Pexp_variant(inner) => {
                 let (ref label, ref opt) = **inner;
+                let arg_idx = owner_idx
+                    .and_then(|owner| self.arena.variant_arg(owner))
+                    .or(*opt);
                 pt0::ExpressionDesc::Variant(
                     label.to_string(),
-                    opt.as_ref().map(|e| Box::new(self.map_expr_idx(*e))),
+                    arg_idx.map(|e| Box::new(self.map_expr_idx(e))),
                 )
             }
             current::ExpressionDesc::Pexp_record(inner) => {
                 let (ref fields, ref spread) = **inner;
+                let spread_idx = owner_idx
+                    .and_then(|owner| self.arena.record_spread(owner))
+                    .or(*spread);
                 // Use RecordElement with 3 fields (lid, x, opt) for current parsetree format
                 pt0::ExpressionDesc::Record(
                     fields
@@ -920,7 +931,7 @@ impl<'a> Mapper<'a> {
                             opt: f.opt,
                         })
                         .collect(),
-                    spread.as_ref().map(|e| Box::new(self.map_expr_idx(*e))),
+                    spread_idx.map(|e| Box::new(self.map_expr_idx(e))),
                 )
             }
             current::ExpressionDesc::Pexp_field(e_idx, lid) => pt0::ExpressionDesc::Field(
@@ -940,10 +951,13 @@ impl<'a> Mapper<'a> {
             }
             current::ExpressionDesc::Pexp_ifthenelse(inner) => {
                 let (ref e1_idx, ref e2_idx, ref e3) = **inner;
+                let else_idx = owner_idx
+                    .and_then(|owner| self.arena.if_else_branch(owner))
+                    .or(*e3);
                 pt0::ExpressionDesc::Ifthenelse(
                     Box::new(self.map_expr_idx(*e1_idx)),
                     Box::new(self.map_expr_idx(*e2_idx)),
-                    e3.as_ref().map(|e| Box::new(self.map_expr_idx(*e))),
+                    else_idx.map(|e| Box::new(self.map_expr_idx(e))),
                 )
             }
             current::ExpressionDesc::Pexp_sequence(e1_idx, e2_idx) => {
@@ -975,6 +989,8 @@ impl<'a> Mapper<'a> {
             }
             current::ExpressionDesc::Pexp_coerce(inner) => {
                 let (ref e_idx, _, ref ty_idx) = **inner;
+                let _from_type = owner_idx
+                    .and_then(|owner| self.arena.coerce_from_type(owner));
                 // parsetree0 has unit instead of Option<CoreType> for the middle arg
                 pt0::ExpressionDesc::Coerce(
                     Box::new(self.map_expr_idx(*e_idx)),
