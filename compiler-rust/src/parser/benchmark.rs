@@ -23,6 +23,10 @@
 //! # In-process: all files, 50 iterations each — takes ~30 seconds:
 //! cargo test --release --lib -- benchmark_all_inprocess --ignored --nocapture
 //!
+//! # In-process repeated corpus benchmark (single process):
+//! RAYON_NUM_THREADS=1 PARSER_BENCH_WARMUP=2 PARSER_BENCH_RUNS=10 \
+//!   cargo test --release --lib -- benchmark_cold_repeat --ignored --nocapture
+//!
 //! # Individual subprocess check (50 iterations):
 //! cargo test --release --lib -- benchmark_regex --nocapture
 //! ```
@@ -274,6 +278,52 @@ mod tests {
         // Sort by size descending (largest files first)
         files.sort_by(|a, b| b.size.cmp(&a.size));
         files
+    }
+
+    /// Parse all discovered files once in-process.
+    /// Returns (parsed_file_count, elapsed_duration).
+    fn parse_corpus_once(files: &[TestFile]) -> (u64, Duration) {
+        let start = Instant::now();
+        let mut parsed = 0u64;
+
+        for file in files {
+            let bytes = match std::fs::read(&file.path) {
+                Ok(b) => b,
+                Err(_) => continue,
+            };
+            let source: String = bytes.iter().map(|&b| b as char).collect();
+            let filename = file.path.to_string_lossy().to_string();
+            let is_interface = file
+                .path
+                .extension()
+                .and_then(|s| s.to_str())
+                .is_some_and(|ext| ext == "resi" || ext == "mli");
+
+            let mut parser = crate::parser::Parser::new(&filename, &source);
+            if is_interface {
+                let _ = crate::parser::module::parse_signature(&mut parser);
+            } else {
+                let _ = crate::parser::module::parse_structure(&mut parser);
+            }
+            parsed += 1;
+        }
+
+        (parsed, start.elapsed())
+    }
+
+    fn env_u32(var: &str, default: u32) -> u32 {
+        std::env::var(var)
+            .ok()
+            .and_then(|v| v.parse::<u32>().ok())
+            .unwrap_or(default)
+    }
+
+    fn percentile_nearest_rank(values: &[f64], percentile: f64) -> f64 {
+        let mut sorted = values.to_vec();
+        sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        let rank = ((percentile / 100.0) * sorted.len() as f64).ceil() as usize;
+        let index = rank.saturating_sub(1).min(sorted.len().saturating_sub(1));
+        sorted[index]
     }
 
     /// Macro to generate individual benchmark tests, reducing boilerplate.
@@ -919,31 +969,7 @@ mod tests {
             total_size as f64 / 1024.0
         );
 
-        // Parse every file once, measure total wall-clock time
-        let start = Instant::now();
-        let mut parsed = 0u64;
-        for file in &files {
-            let bytes = match std::fs::read(&file.path) {
-                Ok(b) => b,
-                Err(_) => continue,
-            };
-            let source: String = bytes.iter().map(|&b| b as char).collect();
-            let filename = file.path.to_string_lossy().to_string();
-            let is_interface = file
-                .path
-                .extension()
-                .and_then(|s| s.to_str())
-                .is_some_and(|ext| ext == "resi" || ext == "mli");
-
-            let mut parser = crate::parser::Parser::new(&filename, &source);
-            if is_interface {
-                let _ = crate::parser::module::parse_signature(&mut parser);
-            } else {
-                let _ = crate::parser::module::parse_structure(&mut parser);
-            }
-            parsed += 1;
-        }
-        let elapsed = start.elapsed();
+        let (parsed, elapsed) = parse_corpus_once(&files);
         let elapsed_s = elapsed.as_secs_f64();
         let loc_per_s = total_lines as f64 / elapsed_s;
         let mbs = (total_size as f64) / elapsed_s / 1_000_000.0;
@@ -953,6 +979,132 @@ mod tests {
             "  Throughput: {:.1} MB/s, {:.0}K LOC/s",
             mbs,
             loc_per_s / 1000.0
+        );
+    }
+
+    // ========================================================================
+    // Repeated in-process cold benchmark: parse full corpus in one process
+    // Run with:
+    //   RAYON_NUM_THREADS=1 PARSER_BENCH_WARMUP=2 PARSER_BENCH_RUNS=10 \
+    //   cargo test --release --lib -- benchmark_cold_repeat --ignored --nocapture
+    // ========================================================================
+
+    #[test]
+    #[ignore]
+    fn benchmark_cold_repeat() {
+        if cfg!(debug_assertions) {
+            eprintln!("Skipping benchmark: must run in --release mode");
+            return;
+        }
+
+        let warmup_runs = env_u32("PARSER_BENCH_WARMUP", 2);
+        let bench_runs = env_u32("PARSER_BENCH_RUNS", 10);
+        if bench_runs == 0 {
+            eprintln!("PARSER_BENCH_RUNS must be > 0");
+            return;
+        }
+
+        let files = discover_test_files();
+        let total_lines: u64 = files.iter().map(|f| f.lines).sum();
+        let total_size: u64 = files.iter().map(|f| f.size).sum();
+
+        println!("\n=== In-Process Repeated Parser Benchmark ===");
+        println!(
+            "{} files, {} lines, {:.1} KB",
+            files.len(),
+            total_lines,
+            total_size as f64 / 1024.0
+        );
+        println!(
+            "Warmup runs: {}, measured runs: {}\n",
+            warmup_runs, bench_runs
+        );
+
+        for i in 0..warmup_runs {
+            let (_parsed, elapsed) = parse_corpus_once(&files);
+            println!(
+                "Warmup {:>2}/{:>2}: {:>7.1} ms",
+                i + 1,
+                warmup_runs,
+                elapsed.as_secs_f64() * 1000.0
+            );
+        }
+
+        if warmup_runs > 0 {
+            println!();
+        }
+
+        let mut elapsed_ms_values: Vec<f64> = Vec::with_capacity(bench_runs as usize);
+        let mut kloc_per_s_values: Vec<f64> = Vec::with_capacity(bench_runs as usize);
+        let mut mb_per_s_values: Vec<f64> = Vec::with_capacity(bench_runs as usize);
+
+        for i in 0..bench_runs {
+            let (parsed, elapsed) = parse_corpus_once(&files);
+            let elapsed_s = elapsed.as_secs_f64();
+            let elapsed_ms = elapsed_s * 1000.0;
+            let kloc_per_s = total_lines as f64 / elapsed_s / 1000.0;
+            let mb_per_s = total_size as f64 / elapsed_s / 1_000_000.0;
+
+            elapsed_ms_values.push(elapsed_ms);
+            kloc_per_s_values.push(kloc_per_s);
+            mb_per_s_values.push(mb_per_s);
+
+            println!(
+                "Run {:>2}/{:>2}: {:>7.1} ms {:>8.1} KLOC/s {:>6.2} MB/s ({} files)",
+                i + 1,
+                bench_runs,
+                elapsed_ms,
+                kloc_per_s,
+                mb_per_s,
+                parsed
+            );
+        }
+
+        let min_kloc = kloc_per_s_values
+            .iter()
+            .copied()
+            .fold(f64::INFINITY, f64::min);
+        let max_kloc = kloc_per_s_values
+            .iter()
+            .copied()
+            .fold(f64::NEG_INFINITY, f64::max);
+        let median_kloc = percentile_nearest_rank(&kloc_per_s_values, 50.0);
+        let p95_kloc = percentile_nearest_rank(&kloc_per_s_values, 95.0);
+
+        let min_ms = elapsed_ms_values
+            .iter()
+            .copied()
+            .fold(f64::INFINITY, f64::min);
+        let max_ms = elapsed_ms_values
+            .iter()
+            .copied()
+            .fold(f64::NEG_INFINITY, f64::max);
+        let median_ms = percentile_nearest_rank(&elapsed_ms_values, 50.0);
+        let p95_ms = percentile_nearest_rank(&elapsed_ms_values, 95.0);
+
+        let min_mbs = mb_per_s_values.iter().copied().fold(f64::INFINITY, f64::min);
+        let median_mbs = percentile_nearest_rank(&mb_per_s_values, 50.0);
+
+        println!("\nSummary");
+        println!("=======");
+        println!(
+            "Corpus: {} files, {} LOC, {:.1} KB",
+            files.len(),
+            total_lines,
+            total_size as f64 / 1024.0
+        );
+        println!(
+            "KLOC/s: min {:.1}  median {:.1}  p95 {:.1}  max {:.1}",
+            min_kloc, median_kloc, p95_kloc, max_kloc
+        );
+        println!(
+            "ms:     min {:.1}  median {:.1}  p95 {:.1}  max {:.1}",
+            min_ms, median_ms, p95_ms, max_ms
+        );
+        println!("MB/s:   min {:.2}  median {:.2}", min_mbs, median_mbs);
+        println!(
+            "Best-case throughput (max KLOC/s / min ms): {:.1} KLOC/s @ {:.1} ms",
+            max_kloc, min_ms
         );
     }
 

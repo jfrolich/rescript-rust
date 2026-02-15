@@ -113,7 +113,7 @@ cargo test --release --lib -- benchmark_regex --nocapture
 # All benchmarks (700+ files, ~3 min)
 cargo test --release --lib -- benchmark_all --ignored --nocapture
 
-# Repeated single-thread throughput (min/median/p95 KLOC/s)
+# Repeated single-thread throughput (in-process, min/median/p95 KLOC/s)
 ./scripts/benchmark_parser_kloc.py --runs 10 --warmup 2
 
 # Measure struct sizes (add to any test temporarily)
