@@ -28,7 +28,7 @@
 
 use crate::ident::Ident;
 use crate::location::Location;
-use crate::parse_arena::{LidentIdx, LocIdx, Located, ParseArena, StrIdx};
+use crate::parse_arena::{ExprIdx, LidentIdx, LocIdx, Located, ParseArena, StrIdx};
 use crate::parser::ast::{
     ArgLabel, Attributes, Expression as ParsedExpression, Pattern as ParsedPattern, PexpApply,
     PexpFun, RecFlag,
@@ -578,7 +578,7 @@ fn transl_type_inner(
                 ctyp_type: ty,
                 ctyp_env: EnvRef(0),
                 ctyp_loc: loc,
-                ctyp_attributes: styp.ptyp_attributes.clone(),
+                ctyp_attributes: tctx.arena.core_type_attributes_by_ref(styp).clone(),
             };
             Ok((ctyp, ty))
         }
@@ -592,7 +592,7 @@ fn transl_type_inner(
                 ctyp_type: ty,
                 ctyp_env: EnvRef(0),
                 ctyp_loc: loc,
-                ctyp_attributes: styp.ptyp_attributes.clone(),
+                ctyp_attributes: tctx.arena.core_type_attributes_by_ref(styp).clone(),
             };
             Ok((ctyp, ty))
         }
@@ -625,7 +625,7 @@ fn transl_type_inner(
                 ctyp_type: arrow_ty,
                 ctyp_env: EnvRef(0),
                 ctyp_loc: loc,
-                ctyp_attributes: styp.ptyp_attributes.clone(),
+                ctyp_attributes: tctx.arena.core_type_attributes_by_ref(styp).clone(),
             };
             Ok((ctyp, arrow_ty))
         }
@@ -648,7 +648,7 @@ fn transl_type_inner(
                 ctyp_type: tuple_ty,
                 ctyp_env: EnvRef(0),
                 ctyp_loc: loc,
-                ctyp_attributes: styp.ptyp_attributes.clone(),
+                ctyp_attributes: tctx.arena.core_type_attributes_by_ref(styp).clone(),
             };
             Ok((ctyp, tuple_ty))
         }
@@ -677,7 +677,7 @@ fn transl_type_inner(
                 ctyp_type: constr_ty,
                 ctyp_env: EnvRef(0),
                 ctyp_loc: loc,
-                ctyp_attributes: styp.ptyp_attributes.clone(),
+                ctyp_attributes: tctx.arena.core_type_attributes_by_ref(styp).clone(),
             };
             Ok((ctyp, constr_ty))
         }
@@ -698,7 +698,7 @@ fn transl_type_inner(
                 ctyp_type: inner_ty,
                 ctyp_env: EnvRef(0),
                 ctyp_loc: loc,
-                ctyp_attributes: styp.ptyp_attributes.clone(),
+                ctyp_attributes: tctx.arena.core_type_attributes_by_ref(styp).clone(),
             };
             Ok((ctyp, inner_ty))
         }
@@ -726,7 +726,7 @@ fn transl_type_inner(
                 ctyp_type: poly_ty,
                 ctyp_env: EnvRef(0),
                 ctyp_loc: loc,
-                ctyp_attributes: styp.ptyp_attributes.clone(),
+                ctyp_attributes: tctx.arena.core_type_attributes_by_ref(styp).clone(),
             };
             Ok((ctyp, poly_ty))
         }
@@ -777,7 +777,7 @@ fn transl_type_inner(
                 ctyp_type: obj_ty,
                 ctyp_env: EnvRef(0),
                 ctyp_loc: loc,
-                ctyp_attributes: styp.ptyp_attributes.clone(),
+                ctyp_attributes: tctx.arena.core_type_attributes_by_ref(styp).clone(),
             };
             Ok((ctyp, obj_ty))
         }
@@ -837,7 +837,7 @@ fn transl_type_inner(
                 ctyp_type: variant_ty,
                 ctyp_env: EnvRef(0),
                 ctyp_loc: loc,
-                ctyp_attributes: styp.ptyp_attributes.clone(),
+                ctyp_attributes: tctx.arena.core_type_attributes_by_ref(styp).clone(),
             };
             Ok((ctyp, variant_ty))
         }
@@ -853,7 +853,7 @@ fn transl_type_inner(
                 ctyp_type: ty,
                 ctyp_env: EnvRef(0),
                 ctyp_loc: loc,
-                ctyp_attributes: styp.ptyp_attributes.clone(),
+                ctyp_attributes: tctx.arena.core_type_attributes_by_ref(styp).clone(),
             };
             Ok((ctyp, ty))
         }
@@ -867,7 +867,7 @@ fn transl_type_inner(
                 ctyp_type: ty,
                 ctyp_env: EnvRef(0),
                 ctyp_loc: loc,
-                ctyp_attributes: styp.ptyp_attributes.clone(),
+                ctyp_attributes: tctx.arena.core_type_attributes_by_ref(styp).clone(),
             };
             Ok((ctyp, ty))
         }
@@ -913,7 +913,7 @@ fn type_pattern_inner(
                 loc,
                 expected_ty,
                 EnvRef(0),
-                pat.ppat_attributes.clone(),
+                tctx.arena.pat_attributes_by_ref(pat).clone(),
             ))
         }
 
@@ -925,7 +925,7 @@ fn type_pattern_inner(
                 loc,
                 expected_ty,
                 EnvRef(0),
-                pat.ppat_attributes.clone(),
+                tctx.arena.pat_attributes_by_ref(pat).clone(),
             ))
         }
 
@@ -942,7 +942,7 @@ fn type_pattern_inner(
                 loc,
                 expected_ty,
                 EnvRef(0),
-                pat.ppat_attributes.clone(),
+                tctx.arena.pat_attributes_by_ref(pat).clone(),
             ))
         }
 
@@ -970,7 +970,7 @@ fn type_pattern_inner(
                 loc,
                 expected_ty,
                 EnvRef(0),
-                pat.ppat_attributes.clone(),
+                tctx.arena.pat_attributes_by_ref(pat).clone(),
             ))
         }
 
@@ -995,7 +995,7 @@ fn type_pattern_inner(
                 loc,
                 expected_ty,
                 EnvRef(0),
-                pat.ppat_attributes.clone(),
+                tctx.arena.pat_attributes_by_ref(pat).clone(),
             ))
         }
 
@@ -1035,7 +1035,7 @@ fn type_pattern_inner(
                 loc,
                 expected_ty,
                 EnvRef(0),
-                pat.ppat_attributes.clone(),
+                tctx.arena.pat_attributes_by_ref(pat).clone(),
             ))
         }
 
@@ -1057,7 +1057,7 @@ fn type_pattern_inner(
                 loc,
                 expected_ty,
                 EnvRef(0),
-                pat.ppat_attributes.clone(),
+                tctx.arena.pat_attributes_by_ref(pat).clone(),
             ))
         }
 
@@ -1161,7 +1161,7 @@ fn type_pattern_inner(
                 loc,
                 expected_ty,
                 EnvRef(0),
-                pat.ppat_attributes.clone(),
+                tctx.arena.pat_attributes_by_ref(pat).clone(),
             ))
         }
     }
@@ -1334,7 +1334,7 @@ fn type_pattern_construct(
         loc.clone(),
         expected_ty,
         EnvRef(0),
-        pat.ppat_attributes.clone(),
+        tctx.arena.pat_attributes_by_ref(pat).clone(),
     ))
 }
 
@@ -1373,7 +1373,7 @@ fn type_pattern_variant(
         loc.clone(),
         expected_ty,
         EnvRef(0),
-        pat.ppat_attributes.clone(),
+        tctx.arena.pat_attributes_by_ref(pat).clone(),
     ))
 }
 
@@ -1429,7 +1429,7 @@ fn type_pattern_record(
         loc.clone(),
         expected_ty,
         EnvRef(0),
-        pat.ppat_attributes.clone(),
+        tctx.arena.pat_attributes_by_ref(pat).clone(),
     ))
 }
 
@@ -1464,7 +1464,7 @@ fn type_pattern_constraint(
     Ok(typed_inner.with_pat_extra(
         crate::types::typedtree::PatExtra::Tpat_constraint(typed_ctype),
         loc.clone(),
-        pat.ppat_attributes.clone(),
+        tctx.arena.pat_attributes_by_ref(pat).clone(),
     ))
 }
 
@@ -1517,7 +1517,7 @@ fn type_pattern_interval(
         loc.clone(),
         expected_ty,
         EnvRef(0),
-        pat.ppat_attributes.clone(),
+        tctx.arena.pat_attributes_by_ref(pat).clone(),
     ))
 }
 
@@ -1548,7 +1548,7 @@ fn type_pattern_exception(
         loc.clone(),
         exn_ty,
         EnvRef(0),
-        pat.ppat_attributes.clone(),
+        tctx.arena.pat_attributes_by_ref(pat).clone(),
     ))
 }
 
@@ -1578,7 +1578,7 @@ fn type_pattern_open(
         loc.clone(),
         expected_ty,
         EnvRef(0),
-        pat.ppat_attributes.clone(),
+        tctx.arena.pat_attributes_by_ref(pat).clone(),
     ))
 }
 
@@ -1616,7 +1616,7 @@ pub fn type_expect<'a>(
                 loc,
                 ty,
                 EnvRef(0),
-                expr.pexp_attributes.clone(),
+                tctx.arena.expr_attributes_by_ref(expr).clone(),
             ))
         }
 
@@ -1633,7 +1633,7 @@ pub fn type_expect<'a>(
                 loc,
                 ty,
                 EnvRef(0),
-                expr.pexp_attributes.clone(),
+                tctx.arena.expr_attributes_by_ref(expr).clone(),
             ))
         }
 
@@ -1660,7 +1660,7 @@ pub fn type_expect<'a>(
                 loc,
                 tuple_ty,
                 EnvRef(0),
-                expr.pexp_attributes.clone(),
+                tctx.arena.expr_attributes_by_ref(expr).clone(),
             ))
         }
 
@@ -1679,7 +1679,7 @@ pub fn type_expect<'a>(
                 loc,
                 body_type,
                 EnvRef(0),
-                expr.pexp_attributes.clone(),
+                tctx.arena.expr_attributes_by_ref(expr).clone(),
             ))
         }
 
@@ -1700,12 +1700,12 @@ pub fn type_expect<'a>(
                 loc,
                 e2_type,
                 EnvRef(0),
-                expr.pexp_attributes.clone(),
+                tctx.arena.expr_attributes_by_ref(expr).clone(),
             ))
         }
 
         ED::Pexp_ifthenelse(inner) => {
-            let (ref cond_idx, ref then_idx, ref else_idx) = **inner;
+            let (ref cond_idx, ref then_idx) = **inner;
             // If expression
             let bool_ty = env.type_bool(ctx);
 
@@ -1718,8 +1718,8 @@ pub fn type_expect<'a>(
             let typed_then = type_expect(tctx, env, then_branch, expected_ty, None)?;
 
             // Else branch, if present
-            let typed_else = if let Some(else_idx) = else_idx {
-                let else_branch = tctx.arena.get_expr(*else_idx);
+            let typed_else = if let Some(else_idx) = tctx.arena.if_else_branch_by_ref(expr) {
+                let else_branch = tctx.arena.get_expr(else_idx);
                 let typed_else = type_expect(tctx, env, else_branch, expected_ty, None)?;
                 Some(Box::new(typed_else))
             } else {
@@ -1738,7 +1738,7 @@ pub fn type_expect<'a>(
                 loc,
                 expected_ty,
                 EnvRef(0),
-                expr.pexp_attributes.clone(),
+                tctx.arena.expr_attributes_by_ref(expr).clone(),
             ))
         }
 
@@ -1760,7 +1760,7 @@ pub fn type_expect<'a>(
                 loc,
                 unit_ty,
                 EnvRef(0),
-                expr.pexp_attributes.clone(),
+                tctx.arena.expr_attributes_by_ref(expr).clone(),
             ))
         }
 
@@ -1780,7 +1780,7 @@ pub fn type_expect<'a>(
                 loc,
                 unit_ty,
                 EnvRef(0),
-                expr.pexp_attributes.clone(),
+                tctx.arena.expr_attributes_by_ref(expr).clone(),
             ))
         }
 
@@ -1808,7 +1808,7 @@ pub fn type_expect<'a>(
                 loc,
                 array_ty,
                 EnvRef(0),
-                expr.pexp_attributes.clone(),
+                tctx.arena.expr_attributes_by_ref(expr).clone(),
             ))
         }
 
@@ -1831,7 +1831,7 @@ pub fn type_expect<'a>(
                 *transformed_jsx,
                 expected_ty,
                 context,
-                &expr.pexp_attributes,
+                tctx.arena.expr_attributes_by_ref(expr),
             )
         }
 
@@ -1845,8 +1845,9 @@ pub fn type_expect<'a>(
                 loc,
                 scrutinee,
                 cases,
+                tctx.arena.case_guards_by_ref(expr),
                 expected_ty,
-                &expr.pexp_attributes,
+                tctx.arena.expr_attributes_by_ref(expr),
             )
         }
 
@@ -1860,22 +1861,25 @@ pub fn type_expect<'a>(
                 loc,
                 body,
                 handlers,
+                tctx.arena.case_guards_by_ref(expr),
                 expected_ty,
-                &expr.pexp_attributes,
+                tctx.arena.expr_attributes_by_ref(expr),
             )
         }
 
         ED::Pexp_fun(inner) => {
             let PexpFun {
                 ref arg_label,
-                ref default,
                 ref lhs,
                 ref rhs,
                 ref arity,
                 ref is_async,
             } = **inner;
             // Function expression
-            let default_expr = (*default).map(|idx| tctx.arena.get_expr(idx));
+            let default_expr = tctx
+                .arena
+                .fun_default_by_ref(expr)
+                .map(|idx| tctx.arena.get_expr(idx));
             let lhs_pat = tctx.arena.get_pat(*lhs);
             let rhs_expr = tctx.arena.get_expr(*rhs);
             type_function(
@@ -1889,7 +1893,7 @@ pub fn type_expect<'a>(
                 arity.clone(),
                 *is_async,
                 expected_ty,
-                &expr.pexp_attributes,
+                tctx.arena.expr_attributes_by_ref(expr),
             )
         }
 
@@ -1911,48 +1915,51 @@ pub fn type_expect<'a>(
                 body,
                 expected_ty,
                 context,
-                &expr.pexp_attributes,
+                tctx.arena.expr_attributes_by_ref(expr),
             )
         }
 
-        ED::Pexp_construct(lid, arg) => {
+        ED::Pexp_construct(lid) => {
             // Constructor application
             type_construct(
                 tctx,
                 env,
                 loc,
                 lid,
-                (*arg).map(|idx| tctx.arena.get_expr(idx)),
+                tctx.arena.construct_arg_by_ref(expr).map(|idx| tctx.arena.get_expr(idx)),
                 expected_ty,
-                &expr.pexp_attributes,
+                tctx.arena.expr_attributes_by_ref(expr),
             )
         }
 
         ED::Pexp_variant(inner) => {
-            let (ref label, ref arg) = **inner;
+            let label = &**inner;
             // Polymorphic variant
             type_variant(
                 tctx,
                 env,
                 loc,
                 label,
-                (*arg).map(|idx| tctx.arena.get_expr(idx)),
+                tctx.arena.variant_arg_by_ref(expr).map(|idx| tctx.arena.get_expr(idx)),
                 expected_ty,
-                &expr.pexp_attributes,
+                tctx.arena.expr_attributes_by_ref(expr),
             )
         }
 
         ED::Pexp_record(inner) => {
-            let (ref fields, ref base) = **inner;
+            let fields = &**inner;
             // Record expression
             type_record(
                 tctx,
                 env,
                 loc,
                 fields,
-                (*base).map(|idx| tctx.arena.get_expr(idx)),
+                tctx
+                    .arena
+                    .record_spread_by_ref(expr)
+                    .map(|idx| tctx.arena.get_expr(idx)),
                 expected_ty,
-                &expr.pexp_attributes,
+                tctx.arena.expr_attributes_by_ref(expr),
             )
         }
 
@@ -1966,7 +1973,7 @@ pub fn type_expect<'a>(
                 record_expr,
                 field_lid,
                 expected_ty,
-                &expr.pexp_attributes,
+                tctx.arena.expr_attributes_by_ref(expr),
             )
         }
 
@@ -1984,7 +1991,7 @@ pub fn type_expect<'a>(
                 new_value,
                 expected_ty,
                 context,
-                &expr.pexp_attributes,
+                tctx.arena.expr_attributes_by_ref(expr),
             )
         }
 
@@ -2000,16 +2007,19 @@ pub fn type_expect<'a>(
                 inner_expr,
                 core_type_ref,
                 expected_ty,
-                &expr.pexp_attributes,
+                tctx.arena.expr_attributes_by_ref(expr),
             )
         }
 
         ED::Pexp_coerce(inner) => {
-            let (ref inner_expr_idx, ref opt_from_type, ref to_type) = **inner;
+            let (ref inner_expr_idx, ref to_type) = **inner;
             // Type coercion: (E :> T) or (E : T1 :> T2)
             let inner_expr = tctx.arena.get_expr(*inner_expr_idx);
             let to_type_ref = tctx.arena.get_core_type(*to_type);
-            let opt_from_type_ref = opt_from_type.map(|idx| tctx.arena.get_core_type(idx));
+            let opt_from_type_ref = tctx
+                .arena
+                .coerce_from_type_by_ref(expr)
+                .map(|idx| tctx.arena.get_core_type(idx));
             type_coerce(
                 tctx,
                 env,
@@ -2018,7 +2028,7 @@ pub fn type_expect<'a>(
                 opt_from_type_ref,
                 to_type_ref,
                 expected_ty,
-                &expr.pexp_attributes,
+                tctx.arena.expr_attributes_by_ref(expr),
             )
         }
 
@@ -2033,7 +2043,7 @@ pub fn type_expect<'a>(
                 lid,
                 body,
                 expected_ty,
-                &expr.pexp_attributes,
+                tctx.arena.expr_attributes_by_ref(expr),
             )
         }
 
@@ -2048,7 +2058,7 @@ pub fn type_expect<'a>(
                 name,
                 body,
                 expected_ty,
-                &expr.pexp_attributes,
+                tctx.arena.expr_attributes_by_ref(expr),
             )
         }
 
@@ -2062,7 +2072,7 @@ pub fn type_expect<'a>(
                 inner_expr,
                 expected_ty,
                 context,
-                &expr.pexp_attributes,
+                tctx.arena.expr_attributes_by_ref(expr),
             )
         }
 
@@ -2077,7 +2087,7 @@ pub fn type_expect<'a>(
                 obj_expr,
                 method,
                 expected_ty,
-                &expr.pexp_attributes,
+                tctx.arena.expr_attributes_by_ref(expr),
             )
         }
 
@@ -2092,7 +2102,7 @@ pub fn type_expect<'a>(
                 ext_constr,
                 body,
                 expected_ty,
-                &expr.pexp_attributes,
+                tctx.arena.expr_attributes_by_ref(expr),
             )
         }
 
@@ -2104,7 +2114,7 @@ pub fn type_expect<'a>(
                 loc,
                 extension,
                 expected_ty,
-                &expr.pexp_attributes,
+                tctx.arena.expr_attributes_by_ref(expr),
             )
         }
 
@@ -2121,7 +2131,7 @@ pub fn type_expect<'a>(
                 module_expr_ref,
                 body,
                 expected_ty,
-                &expr.pexp_attributes,
+                tctx.arena.expr_attributes_by_ref(expr),
             )
         }
 
@@ -2134,7 +2144,7 @@ pub fn type_expect<'a>(
                 loc,
                 module_expr,
                 expected_ty,
-                &expr.pexp_attributes,
+                tctx.arena.expr_attributes_by_ref(expr),
             )
         }
 
@@ -2146,7 +2156,7 @@ pub fn type_expect<'a>(
                 loc,
                 jsx_element,
                 expected_ty,
-                &expr.pexp_attributes,
+                tctx.arena.expr_attributes_by_ref(expr),
             )
         }
     }
@@ -2261,6 +2271,7 @@ fn type_match(
     loc: LocIdx,
     scrutinee: &ParsedExpression,
     cases: &[crate::parser::ast::Case],
+    guards: Option<&[Option<ExprIdx>]>,
     expected_ty: TypeExprRef,
     attributes: &[crate::parser::ast::Attribute],
 ) -> TypeCoreResult<Expression> {
@@ -2274,8 +2285,9 @@ fn type_match(
 
     // Type check each case
     let mut typed_cases = Vec::new();
-    for case in cases {
-        let typed_case = type_case(tctx, env, case, scrutinee_ty, expected_ty)?;
+    for (case_index, case) in cases.iter().enumerate() {
+        let guard = guards.and_then(|g| g.get(case_index)).copied().flatten();
+        let typed_case = type_case(tctx, env, case, guard, scrutinee_ty, expected_ty)?;
         typed_cases.push(typed_case);
     }
 
@@ -2298,6 +2310,7 @@ fn type_case(
     tctx: &mut TypeCheckContext<'_>,
     env: &Env,
     case: &crate::parser::ast::Case,
+    guard: Option<ExprIdx>,
     scrutinee_ty: TypeExprRef,
     body_ty: TypeExprRef,
 ) -> TypeCoreResult<crate::types::typedtree::Case> {
@@ -2327,12 +2340,12 @@ fn type_case(
     }
 
     // Type check the guard if present
-    let typed_guard = if let Some(guard) = &case.pc_guard {
+    let typed_guard = if let Some(guard) = guard {
         let bool_ty = env.type_bool(tctx.type_ctx);
         Some(type_expect(
             tctx,
             &case_env,
-            tctx.arena.get_expr(*guard),
+            tctx.arena.get_expr(guard),
             bool_ty,
             None,
         )?)
@@ -2363,6 +2376,7 @@ fn type_try(
     loc: LocIdx,
     body: &ParsedExpression,
     handlers: &[crate::parser::ast::Case],
+    guards: Option<&[Option<ExprIdx>]>,
     expected_ty: TypeExprRef,
     attributes: &[crate::parser::ast::Attribute],
 ) -> TypeCoreResult<Expression> {
@@ -2376,8 +2390,9 @@ fn type_try(
     let exn_ty = ctx.new_constr(Path::pident(Ident::create_persistent("exn")), vec![]);
 
     let mut typed_handlers = Vec::new();
-    for handler in handlers {
-        let typed_case = type_case(tctx, env, handler, exn_ty, expected_ty)?;
+    for (case_index, handler) in handlers.iter().enumerate() {
+        let guard = guards.and_then(|g| g.get(case_index)).copied().flatten();
+        let typed_case = type_case(tctx, env, handler, guard, exn_ty, expected_ty)?;
         typed_handlers.push(typed_case);
     }
 

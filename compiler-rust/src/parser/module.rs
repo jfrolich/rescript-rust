@@ -1134,7 +1134,6 @@ pub fn parse_module_expr(p: &mut Parser<'_>) -> ModuleExpr {
         ModuleExpr {
             pmod_desc: Box::new(ModuleExprDesc::Pmod_constraint(expr_idx, mod_type_idx)),
             pmod_loc: loc,
-            pmod_attributes: Attributes::new(),
         }
     } else {
         expr
@@ -1144,10 +1143,11 @@ pub fn parse_module_expr(p: &mut Parser<'_>) -> ModuleExpr {
     if attrs.is_empty() {
         expr
     } else {
-        let mut combined_attrs = expr.pmod_attributes.clone();
+        let mut combined_attrs = p.arena().mod_expr_attributes_by_ref(&expr).clone();
         combined_attrs.extend(attrs);
+        p.arena_mut()
+            .stash_mod_expr_attributes_for_loc(expr.pmod_loc, combined_attrs);
         ModuleExpr {
-            pmod_attributes: combined_attrs,
             ..expr
         }
     }
@@ -1214,10 +1214,11 @@ pub fn parse_module_expr_without_constraint(p: &mut Parser<'_>) -> ModuleExpr {
     if attrs.is_empty() {
         expr
     } else {
-        let mut combined_attrs = expr.pmod_attributes.clone();
+        let mut combined_attrs = p.arena().mod_expr_attributes_by_ref(&expr).clone();
         combined_attrs.extend(attrs);
+        p.arena_mut()
+            .stash_mod_expr_attributes_for_loc(expr.pmod_loc, combined_attrs);
         ModuleExpr {
-            pmod_attributes: combined_attrs,
             ..expr
         }
     }
@@ -1234,7 +1235,6 @@ fn parse_primary_module_expr(p: &mut Parser<'_>) -> ModuleExpr {
             ModuleExpr {
                 pmod_desc: Box::new(ModuleExprDesc::Pmod_ident(lid.clone())),
                 pmod_loc: lid.loc,
-                pmod_attributes: Attributes::new(),
             }
         }
         Token::Lbrace => {
@@ -1246,7 +1246,6 @@ fn parse_primary_module_expr(p: &mut Parser<'_>) -> ModuleExpr {
             ModuleExpr {
                 pmod_desc: Box::new(ModuleExprDesc::Pmod_structure(Box::new(items))),
                 pmod_loc: loc,
-                pmod_attributes: Attributes::new(),
             }
         }
         Token::Lparen => {
@@ -1263,7 +1262,6 @@ fn parse_primary_module_expr(p: &mut Parser<'_>) -> ModuleExpr {
                     ModuleExpr {
                         pmod_desc: Box::new(ModuleExprDesc::Pmod_structure(Box::new(vec![]))),
                         pmod_loc: loc,
-                        pmod_attributes: Attributes::new(),
                     }
                 } else {
                     let inner = parse_module_expr(p);
@@ -1281,7 +1279,6 @@ fn parse_primary_module_expr(p: &mut Parser<'_>) -> ModuleExpr {
             ModuleExpr {
                 pmod_desc: Box::new(ModuleExprDesc::Pmod_extension(Box::new(ext))),
                 pmod_loc: loc,
-                pmod_attributes: Attributes::new(),
             }
         }
         Token::At => {
@@ -1289,10 +1286,11 @@ fn parse_primary_module_expr(p: &mut Parser<'_>) -> ModuleExpr {
             // But we might get here for nested calls, so parse and attach
             let attrs = parse_attributes(p);
             let inner = parse_primary_module_expr(p);
-            let mut combined_attrs = inner.pmod_attributes.clone();
+            let mut combined_attrs = p.arena().mod_expr_attributes_by_ref(&inner).clone();
             combined_attrs.extend(attrs);
+            p.arena_mut()
+                .stash_mod_expr_attributes_for_loc(inner.pmod_loc, combined_attrs);
             ModuleExpr {
-                pmod_attributes: combined_attrs,
                 ..inner
             }
         }
@@ -1316,7 +1314,6 @@ fn parse_primary_module_expr(p: &mut Parser<'_>) -> ModuleExpr {
                             module_type_to_package(p, &mod_type),
                         ))),
                         ptyp_loc: pkg_loc,
-                        ptyp_attributes: Attributes::new(),
                     };
                     let pkg_type_idx = p.arena_mut().push_core_type(pkg_type);
                     // OCaml: expect Rparen first, then create constraint with loc including Rparen
@@ -1329,7 +1326,6 @@ fn parse_primary_module_expr(p: &mut Parser<'_>) -> ModuleExpr {
                             pkg_type_idx,
                         )))),
                         pexp_loc: constraint_loc,
-                        pexp_attributes: Attributes::new(),
                     }
                 } else {
                     p.expect(Token::Rparen);
@@ -1340,7 +1336,6 @@ fn parse_primary_module_expr(p: &mut Parser<'_>) -> ModuleExpr {
                 ModuleExpr {
                     pmod_desc: Box::new(ModuleExprDesc::Pmod_unpack(final_expr_idx)),
                     pmod_loc: loc,
-                    pmod_attributes: Attributes::new(),
                 }
             } else {
                 p.err(DiagnosticCategory::Message(
@@ -1373,7 +1368,6 @@ fn parse_module_apply(p: &mut Parser<'_>, func: ModuleExpr) -> ModuleExpr {
             vec![ModuleExpr {
                 pmod_desc: Box::new(ModuleExprDesc::Pmod_structure(Box::new(vec![]))),
                 pmod_loc: loc,
-                pmod_attributes: Attributes::new(),
             }]
         } else {
             let mut args = vec![];
@@ -1409,7 +1403,6 @@ fn parse_module_apply(p: &mut Parser<'_>, func: ModuleExpr) -> ModuleExpr {
             result = ModuleExpr {
                 pmod_desc: Box::new(ModuleExprDesc::Pmod_apply(result_idx, arg_idx)),
                 pmod_loc: loc,
-                pmod_attributes: Attributes::new(),
             };
         }
     }
@@ -1481,7 +1474,6 @@ fn parse_functor_arg(p: &mut Parser<'_>) -> Option<FunctorArg> {
                             loc.clone(),
                         ))),
                         pmty_loc: loc,
-                        pmty_attributes: Attributes::new(),
                     };
                     Some(FunctorArg {
                         attrs,
@@ -1498,7 +1490,6 @@ fn parse_functor_arg(p: &mut Parser<'_>) -> Option<FunctorArg> {
                     let mod_type = ModuleType {
                         pmty_desc: Box::new(ModuleTypeDesc::Pmty_ident(mod_ident)),
                         pmty_loc: loc,
-                        pmty_attributes: Attributes::new(),
                     };
                     Some(FunctorArg {
                         attrs,
@@ -1627,7 +1618,6 @@ fn parse_functor_module_expr(p: &mut Parser<'_>) -> ModuleExpr {
             ModuleExpr {
                 pmod_desc: Box::new(ModuleExprDesc::Pmod_constraint(expr_idx, mod_type_idx)),
                 pmod_loc: loc,
-                pmod_attributes: Attributes::new(),
             }
         }
         None => rhs_module_expr,
@@ -1647,7 +1637,6 @@ fn parse_functor_module_expr(p: &mut Parser<'_>) -> ModuleExpr {
                 acc_idx,
             )))),
             pmod_loc: loc,
-            pmod_attributes: arg.attrs,
         }
     })
 }
@@ -1721,7 +1710,10 @@ fn parse_module_type_impl(p: &mut Parser<'_>, es6_arrow: bool, parse_with: bool)
     // not `Pmty_with(Box::new((Foo, constraints)))[@attr]`.
     let mut typ = typ;
     if !attrs.is_empty() {
-        typ.pmty_attributes.extend(attrs);
+        let mut combined_attrs = p.arena().mod_type_attributes_by_ref(&typ).clone();
+        combined_attrs.extend(attrs);
+        p.arena_mut()
+            .stash_mod_type_attributes_for_loc(typ.pmty_loc, combined_attrs);
     }
 
     // Handle with constraint: S with type t = ...
@@ -1734,7 +1726,6 @@ fn parse_module_type_impl(p: &mut Parser<'_>, es6_arrow: bool, parse_with: bool)
         ModuleType {
             pmty_desc: Box::new(ModuleTypeDesc::Pmty_with(Box::new((typ_idx, constraints)))),
             pmty_loc: loc,
-            pmty_attributes: Attributes::new(),
         }
     } else {
         typ
@@ -1764,7 +1755,6 @@ fn parse_functor_module_type(p: &mut Parser<'_>) -> ModuleType {
                 body_idx,
             )))),
             pmty_loc: loc,
-            pmty_attributes: Attributes::new(),
         };
     }
 
@@ -1882,7 +1872,6 @@ fn parse_paren_functor_module_type(p: &mut Parser<'_>) -> ModuleType {
                         let param_ty = ModuleType {
                             pmty_desc: Box::new(ModuleTypeDesc::Pmty_ident(lid)),
                             pmty_loc: loc,
-                            pmty_attributes: Attributes::new(),
                         };
                         params.push(FunctorParam {
                             name: mknoloc(p.arena_mut().intern("_")),
@@ -1962,7 +1951,6 @@ fn parse_paren_functor_module_type(p: &mut Parser<'_>) -> ModuleType {
                     param.name, param_idx, acc_idx,
                 )))),
                 pmty_loc: loc,
-                pmty_attributes: param.attrs,
             }
         })
 }
@@ -1978,7 +1966,6 @@ fn parse_primary_module_type(p: &mut Parser<'_>) -> ModuleType {
             ModuleType {
                 pmty_desc: Box::new(ModuleTypeDesc::Pmty_ident(lid)),
                 pmty_loc: p.mk_loc_idx_to_prev_end(start_pos_idx),
-                pmty_attributes: Attributes::new(),
             }
         }
         Token::Lbrace => {
@@ -1990,7 +1977,6 @@ fn parse_primary_module_type(p: &mut Parser<'_>) -> ModuleType {
             ModuleType {
                 pmty_desc: Box::new(ModuleTypeDesc::Pmty_signature(Box::new(items))),
                 pmty_loc: loc,
-                pmty_attributes: Attributes::new(),
             }
         }
         Token::Lparen => {
@@ -2016,7 +2002,6 @@ fn parse_primary_module_type(p: &mut Parser<'_>) -> ModuleType {
                     return ModuleType {
                         pmty_desc: Box::new(ModuleTypeDesc::Pmty_typeof(mod_expr_idx)),
                         pmty_loc: loc,
-                        pmty_attributes: Attributes::new(),
                     };
                 }
             }
@@ -2032,7 +2017,6 @@ fn parse_primary_module_type(p: &mut Parser<'_>) -> ModuleType {
             ModuleType {
                 pmty_desc: Box::new(ModuleTypeDesc::Pmty_extension(Box::new(ext))),
                 pmty_loc: loc,
-                pmty_attributes: Attributes::new(),
             }
         }
         _ => {
@@ -2155,7 +2139,6 @@ fn parse_with_constraint(p: &mut Parser<'_>) -> Option<WithConstraint> {
                         CoreType {
                             ptyp_desc: Box::new(CoreTypeDesc::Ptyp_var(Box::new(name))),
                             ptyp_loc: loc,
-                            ptyp_attributes: Attributes::new(),
                         }
                     }
                     _ => break,
@@ -2513,7 +2496,6 @@ fn parse_let_bindings(
                             substituted_inner_idx,
                         )))),
                         ptyp_loc: typ.ptyp_loc,
-                        ptyp_attributes: typ.ptyp_attributes,
                     };
 
                     (substituted_typ, Some((vars, inner_for_constraint_idx)))
@@ -2531,7 +2513,6 @@ fn parse_let_bindings(
                     final_typ_idx,
                 )))),
                 ppat_loc: loc,
-                ppat_attributes: Attributes::new(),
             };
             (pat, newtype_info, is_locally_abstract)
         } else {
@@ -2570,7 +2551,6 @@ fn parse_let_bindings(
                         let updated = CoreType {
                             ptyp_desc: Box::new(CoreTypeDesc::Ptyp_poly(Box::new((vars, ct)))),
                             ptyp_loc: wrapper_loc,
-                            ptyp_attributes: typ.ptyp_attributes,
                         };
                         p.arena_mut().push_core_type(updated)
                     }
@@ -2582,7 +2562,6 @@ fn parse_let_bindings(
                         updated_typ_idx,
                     )))),
                     ppat_loc: wrapper_loc,
-                    ppat_attributes: pat.ppat_attributes,
                 }
             } else {
                 pat
@@ -2605,7 +2584,6 @@ fn parse_let_bindings(
                     expr_idx, inner_type,
                 )))),
                 pexp_loc: wrapper_loc,
-                pexp_attributes: Attributes::new(),
             };
 
             // Then wrap in Pexp_newtype for each type variable
@@ -2616,7 +2594,6 @@ fn parse_let_bindings(
                 expr = Expression {
                     pexp_desc: Box::new(ExpressionDesc::Pexp_newtype(Box::new((var, expr_idx)))),
                     pexp_loc: wrapper_loc,
-                    pexp_attributes: Attributes::new(),
                 };
             }
         }
@@ -3297,7 +3274,9 @@ fn parse_type_declaration_with_context(
                         if p.token == Token::Lbrace {
                             if looks_like_object_type_after_lbrace(p) {
                                 let mut typ = typ::parse_typ_expr(p);
-                                typ.ptyp_attributes = attrs;
+                                if !attrs.is_empty() {
+                                    p.arena_mut().stash_core_type_attributes_for_loc(typ.ptyp_loc, attrs);
+                                }
                                 manifest = Some(p.arena_mut().push_core_type(typ));
                             } else {
                                 kind = parse_type_kind(
@@ -3378,7 +3357,6 @@ fn parse_type_declaration_with_context(
             CoreType {
                 ptyp_desc: Box::new(CoreTypeDesc::Ptyp_var(Box::new(name))),
                 ptyp_loc: p.mk_loc_idx(cstr_start_idx, var_end_idx),
-                ptyp_attributes: Attributes::new(),
             }
         } else {
             p.err(DiagnosticCategory::Message(
@@ -3443,14 +3421,12 @@ fn fix_spread_first_object_manifest(
                 let fixed = CoreType {
                     ptyp_desc: Box::new(CoreTypeDesc::Ptyp_object(inner)),
                     ptyp_loc: Location::none(),
-                    ptyp_attributes: typ.ptyp_attributes,
                 };
                 (p.arena_mut().push_core_type(fixed), true)
             } else {
                 let fixed = CoreType {
                     ptyp_desc: Box::new(CoreTypeDesc::Ptyp_object(inner)),
                     ptyp_loc: typ.ptyp_loc,
-                    ptyp_attributes: typ.ptyp_attributes,
                 };
                 (p.arena_mut().push_core_type(fixed), false)
             }
@@ -3470,7 +3446,6 @@ fn fix_spread_first_object_manifest(
                         alias,
                     )))),
                     ptyp_loc: new_loc,
-                    ptyp_attributes: typ.ptyp_attributes,
                 };
                 (p.arena_mut().push_core_type(fixed), true)
             } else {
@@ -3522,7 +3497,7 @@ fn fix_type_manifest_location(p: &mut Parser<'_>, typ_idx: CoreTypeIdx) -> CoreT
             let (ref lid, _) = **inner;
             // Only adjust for qualified identifiers (Ldot) WITHOUT attributes
             // When there are attributes, OCaml keeps the full extent including type args
-            if p.arena().is_ldot(lid.txt) && typ.ptyp_attributes.is_empty() {
+            if p.arena().is_ldot(lid.txt) && p.arena().core_type_attributes_by_ref(&typ).is_empty() {
                 // Create a NEW LocIdx with the same positions as lid.loc
                 // This matches OCaml's behavior: fresh Location object, shared positions
                 let lid_loc = p.arena().get_location(lid.loc).clone();
@@ -3612,7 +3587,6 @@ fn parse_type_params_angle(p: &mut Parser<'_>) -> Vec<(CoreTypeIdx, Variance)> {
                     let typ = CoreType {
                         ptyp_desc: Box::new(CoreTypeDesc::Ptyp_var(Box::new(name))),
                         ptyp_loc: loc,
-                        ptyp_attributes: Attributes::new(),
                     };
                     let typ_idx = p.arena_mut().push_core_type(typ);
                     params.push((typ_idx, variance));
@@ -3638,7 +3612,6 @@ fn parse_type_params_angle(p: &mut Parser<'_>) -> Vec<(CoreTypeIdx, Variance)> {
                     let typ = CoreType {
                         ptyp_desc: Box::new(CoreTypeDesc::Ptyp_var(Box::new(Cow::Owned(keyword)))),
                         ptyp_loc: loc,
-                        ptyp_attributes: Attributes::new(),
                     };
                     let typ_idx = p.arena_mut().push_core_type(typ);
                     params.push((typ_idx, variance));
@@ -3658,7 +3631,6 @@ fn parse_type_params_angle(p: &mut Parser<'_>) -> Vec<(CoreTypeIdx, Variance)> {
                     let typ = CoreType {
                         ptyp_desc: Box::new(CoreTypeDesc::Ptyp_var(Box::new(Cow::Borrowed("")))),
                         ptyp_loc: p.mk_loc_idx_to_prev_end(param_start_idx),
-                        ptyp_attributes: Attributes::new(),
                     };
                     let typ_idx = p.arena_mut().push_core_type(typ);
                     params.push((typ_idx, variance));
@@ -3684,7 +3656,6 @@ fn parse_type_params_angle(p: &mut Parser<'_>) -> Vec<(CoreTypeIdx, Variance)> {
                     let typ = CoreType {
                         ptyp_desc: Box::new(CoreTypeDesc::Ptyp_var(Box::new(Cow::Borrowed("")))),
                         ptyp_loc: p.mk_loc_idx_to_prev_end(param_start_idx),
-                        ptyp_attributes: Attributes::new(),
                     };
                     let typ_idx = p.arena_mut().push_core_type(typ);
                     params.push((typ_idx, variance));
@@ -3697,7 +3668,6 @@ fn parse_type_params_angle(p: &mut Parser<'_>) -> Vec<(CoreTypeIdx, Variance)> {
             let typ = CoreType {
                 ptyp_desc: Box::new(CoreTypeDesc::Ptyp_any),
                 ptyp_loc: loc,
-                ptyp_attributes: Attributes::new(),
             };
             let typ_idx = p.arena_mut().push_core_type(typ);
             params.push((typ_idx, variance));
@@ -3718,7 +3688,6 @@ fn parse_type_params_angle(p: &mut Parser<'_>) -> Vec<(CoreTypeIdx, Variance)> {
             let typ = CoreType {
                 ptyp_desc: Box::new(CoreTypeDesc::Ptyp_var(Box::new(Cow::Owned(name)))),
                 ptyp_loc: loc,
-                ptyp_attributes: Attributes::new(),
             };
             let typ_idx = p.arena_mut().push_core_type(typ);
             params.push((typ_idx, variance));
@@ -3758,7 +3727,6 @@ fn parse_type_params_old_style(
                     let typ = CoreType {
                         ptyp_desc: Box::new(CoreTypeDesc::Ptyp_var(Box::new(name))),
                         ptyp_loc: loc,
-                        ptyp_attributes: Attributes::new(),
                     };
                     let typ_idx = p.arena_mut().push_core_type(typ);
                     params.push((typ_idx, Variance::Invariant));
@@ -3771,7 +3739,6 @@ fn parse_type_params_old_style(
                     let typ = CoreType {
                         ptyp_desc: Box::new(CoreTypeDesc::Ptyp_var(Box::new(name))),
                         ptyp_loc: loc,
-                        ptyp_attributes: Attributes::new(),
                     };
                     let typ_idx = p.arena_mut().push_core_type(typ);
                     params.push((typ_idx, Variance::Invariant));
@@ -4493,7 +4460,6 @@ fn parse_label_declaration(
                 vec![],
             )))),
             ptyp_loc: name.loc.clone(),
-            ptyp_attributes: Attributes::new(),
         }
     } else if p.token == Token::Lbrace && inline_ctx.is_some() && extended_path.is_some() {
         // Check if this looks like a record (starts with Lident, Mutable, At, or DotDotDot)
@@ -4582,7 +4548,6 @@ fn parse_label_declaration(
                     type_args,
                 )))),
                 ptyp_loc: type_loc,
-                ptyp_attributes: Attributes::new(),
             }
         } else {
             // Not a record - parse as regular type (object type)
@@ -4913,7 +4878,6 @@ fn parse_module_definition(
             mod_expr = ModuleExpr {
                 pmod_desc: Box::new(ModuleExprDesc::Pmod_constraint(mod_expr_idx, mod_type_idx)),
                 pmod_loc: loc,
-                pmod_attributes: Attributes::new(),
             };
         }
 
@@ -5048,7 +5012,6 @@ fn parse_module_declaration(
             ModuleType {
                 pmty_desc: Box::new(ModuleTypeDesc::Pmty_alias(lid)),
                 pmty_loc: Location::none(),
-                pmty_attributes: Attributes::new(),
             }
         }
     } else {

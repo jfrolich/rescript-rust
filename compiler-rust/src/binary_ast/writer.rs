@@ -67,8 +67,8 @@ pub fn write_structure_ast(
     // 1. Extract dependencies
     let deps = extract_structure_deps(arena, ast);
 
-    // 1.5 Compact duplicated sparse storage now that dependency extraction has run.
-    arena.strip_expr_sparse_inline_fields();
+    // 1.5 Ensure side tables are sized before serialization.
+    arena.ensure_expr_sparse_side_table_capacity();
     arena.strip_arena_node_inline_attributes();
 
     // 2. Convert AST to parsetree0 format
@@ -99,8 +99,8 @@ pub fn write_signature_ast(
     // 1. Extract dependencies
     let deps = extract_signature_deps(arena, ast);
 
-    // 1.5 Compact duplicated sparse storage now that dependency extraction has run.
-    arena.strip_expr_sparse_inline_fields();
+    // 1.5 Ensure side tables are sized before serialization.
+    arena.ensure_expr_sparse_side_table_capacity();
     arena.strip_arena_node_inline_attributes();
 
     // 2. Convert AST to parsetree0 format
@@ -157,8 +157,8 @@ pub fn write_structure_ast_current_with_extra_deps(
     let mut deps = extract_structure_deps(arena, &rewritten_ast);
     deps.extend(extra_deps.iter().cloned());
 
-    // 3.5 Remove duplicated inline sparse fields once side tables are in place.
-    arena.strip_expr_sparse_inline_fields();
+    // 3.5 Ensure side tables are sized before serialization.
+    arena.ensure_expr_sparse_side_table_capacity();
     arena.strip_arena_node_inline_attributes();
 
     // 4. Write the binary AST file directly (current format, no parsetree0 conversion)
@@ -202,8 +202,8 @@ pub fn write_signature_ast_current_with_extra_deps(
     let mut deps = extract_signature_deps(arena, &rewritten_ast);
     deps.extend(extra_deps.iter().cloned());
 
-    // 2.5 Remove duplicated inline sparse fields once side tables are in place.
-    arena.strip_expr_sparse_inline_fields();
+    // 2.5 Ensure side tables are sized before serialization.
+    arena.ensure_expr_sparse_side_table_capacity();
     arena.strip_arena_node_inline_attributes();
 
     // 3. Write the binary AST file directly (current format, no parsetree0 conversion)
@@ -261,7 +261,7 @@ pub fn write_structure_ast_to_vec(
     ast: &Structure,
 ) -> Vec<u8> {
     let deps = extract_structure_deps(arena, ast);
-    arena.strip_expr_sparse_inline_fields();
+    arena.ensure_expr_sparse_side_table_capacity();
     arena.strip_arena_node_inline_attributes();
     let ast0 = map_structure(arena, ast);
     write_ast_to_vec(source_path, arena, &deps, &ast0)
@@ -274,7 +274,7 @@ pub fn write_signature_ast_to_vec(
     ast: &Signature,
 ) -> Vec<u8> {
     let deps = extract_signature_deps(arena, ast);
-    arena.strip_expr_sparse_inline_fields();
+    arena.ensure_expr_sparse_side_table_capacity();
     arena.strip_arena_node_inline_attributes();
     let ast0 = map_signature(arena, ast);
     write_ast_to_vec(source_path, arena, &deps, &ast0)
@@ -342,7 +342,7 @@ fn has_no_export_config(structure: &[StructureItem], arena: &ParseArena) -> bool
                                 match &*expr.pexp_desc {
                                     // @@config({no_export: ...}) - record form
                                     ExpressionDesc::Pexp_record(inner) => {
-                                        let (ref fields, _) = **inner;
+                                        let fields = &**inner;
                                         for field in fields {
                                             let lid = arena.get_longident(field.lid.txt);
                                             if let Longident::Lident(s) = lid {
@@ -391,7 +391,10 @@ fn is_false_literal(expr_idx: crate::parse_arena::ExprIdx, arena: &ParseArena) -
     use crate::parser::longident::Longident;
 
     let expr = arena.get_expr(expr_idx);
-    if let ExpressionDesc::Pexp_construct(lid_loc, None) = &*expr.pexp_desc {
+    if let ExpressionDesc::Pexp_construct(lid_loc) = &*expr.pexp_desc {
+        if arena.construct_arg(expr_idx).is_some() {
+            return false;
+        }
         let lid = arena.get_longident(lid_loc.txt);
         if let Longident::Lident(s) = lid {
             return arena.get_string(*s) == "false";
@@ -414,13 +417,11 @@ fn wrap_no_export(arena: &mut ParseArena, structure: Vec<StructureItem>) -> Vec<
     let inner_mod = ModuleExpr {
         pmod_desc: Box::new(ModuleExprDesc::Pmod_structure(Box::new(structure))),
         pmod_loc: loc,
-        pmod_attributes: Attributes::new(),
     };
 
     let empty_sig = ModuleType {
         pmty_desc: Box::new(ModuleTypeDesc::Pmty_signature(Box::new(vec![]))),
         pmty_loc: loc,
-        pmty_attributes: Attributes::new(),
     };
 
     let inner_mod_idx = arena.push_mod_expr(inner_mod);
@@ -432,7 +433,6 @@ fn wrap_no_export(arena: &mut ParseArena, structure: Vec<StructureItem>) -> Vec<
             empty_sig_idx,
         )),
         pmod_loc: loc,
-        pmod_attributes: Attributes::new(),
     };
 
     let constrained_mod_idx = arena.push_mod_expr(constrained_mod);
@@ -470,7 +470,6 @@ mod tests {
                 loc: LocIdx::none(),
             })),
             ppat_loc: LocIdx::none(),
-            ppat_attributes: Attributes::new(),
         });
         let expr_idx = arena.push_expr(Expression {
             pexp_desc: Box::new(ExpressionDesc::Pexp_constant(Box::new(Constant::Integer(
@@ -478,7 +477,6 @@ mod tests {
                 None,
             )))),
             pexp_loc: LocIdx::none(),
-            pexp_attributes: Attributes::new(),
         });
         StructureItem {
             pstr_desc: Box::new(StructureItemDesc::Pstr_value(Box::new((
@@ -509,7 +507,6 @@ mod tests {
                 loc: LocIdx::none(),
             })),
             pexp_loc: LocIdx::none(),
-            pexp_attributes: Attributes::new(),
         })
     }
 

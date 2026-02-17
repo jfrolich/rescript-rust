@@ -74,7 +74,7 @@ pub fn call_expr(arena: &ParseArena, expr: &Expression) -> ParenKind {
     }
 
     // Check for parsing attrs
-    let filtered = parsetree_viewer::filter_parsing_attrs(arena, &expr.pexp_attributes);
+    let filtered = parsetree_viewer::filter_parsing_attrs(arena, &arena.expr_attributes_by_ref(expr));
     if !filtered.is_empty() {
         return ParenKind::Parenthesized;
     }
@@ -114,7 +114,7 @@ pub fn structure_expr(arena: &ParseArena, expr: &Expression) -> ParenKind {
 
     match &*expr.pexp_desc {
         ExpressionDesc::Pexp_jsx_element(_) => ParenKind::Nothing,
-        _ if parsetree_viewer::has_attributes(arena, &expr.pexp_attributes) => {
+        _ if parsetree_viewer::has_attributes(arena, &arena.expr_attributes_by_ref(expr)) => {
             ParenKind::Parenthesized
         }
         _ if is_module_pack_constraint(arena, expr) => ParenKind::Nothing,
@@ -129,7 +129,7 @@ pub fn unary_expr_operand(arena: &ParseArena, expr: &Expression) -> ParenKind {
         return kind;
     }
 
-    let filtered = parsetree_viewer::filter_parsing_attrs(arena, &expr.pexp_attributes);
+    let filtered = parsetree_viewer::filter_parsing_attrs(arena, &arena.expr_attributes_by_ref(expr));
     if !filtered.is_empty() {
         return ParenKind::Parenthesized;
     }
@@ -180,7 +180,7 @@ pub fn binary_expr_operand(arena: &ParseArena, is_lhs: bool, expr: &Expression) 
         _ if parsetree_viewer::is_ternary_expr(arena, expr) => ParenKind::Parenthesized,
         ExpressionDesc::Pexp_assert(_) if is_lhs => ParenKind::Parenthesized,
         _ if parsetree_viewer::expr_is_await(expr) => ParenKind::Parenthesized,
-        _ if parsetree_viewer::has_printable_attributes(arena, &expr.pexp_attributes) => {
+        _ if parsetree_viewer::has_printable_attributes(arena, &arena.expr_attributes_by_ref(expr)) => {
             ParenKind::Parenthesized
         }
         _ => ParenKind::Nothing,
@@ -217,7 +217,7 @@ pub fn rhs_binary_expr_operand(
             }
             let funct_expr = arena.get_expr(*funct);
             match &*funct_expr.pexp_desc {
-                ExpressionDesc::Pexp_ident(ident) if funct_expr.pexp_attributes.is_empty() => {
+                ExpressionDesc::Pexp_ident(ident) if arena.expr_attributes_by_ref(funct_expr).is_empty() => {
                     if let Longident::Lident(op_idx) = arena.get_longident(ident.txt) {
                         let operator = arena.get_string(*op_idx);
                         if parsetree_viewer::not_ghost_operator(operator, ident.loc.is_none()) {
@@ -261,7 +261,7 @@ pub fn flatten_operand_rhs(
                             let prec_parent =
                                 parsetree_viewer::operator_precedence(parent_operator);
                             let prec_child = parsetree_viewer::operator_precedence(operator);
-                            return prec_parent >= prec_child || !rhs.pexp_attributes.is_empty();
+                            return prec_parent >= prec_child || !arena.expr_attributes_by_ref(rhs).is_empty();
                         }
                     }
                     false
@@ -325,7 +325,7 @@ pub fn flatten_operand_rhs_without_attrs(
                             let prec_parent =
                                 parsetree_viewer::operator_precedence(parent_operator);
                             let prec_child = parsetree_viewer::operator_precedence(operator);
-                            // NOTE: Unlike flatten_operand_rhs, we don't check rhs.pexp_attributes here
+                            // NOTE: Unlike flatten_operand_rhs, we don't check arena.expr_attributes_by_ref(rhs) here
                             return prec_parent >= prec_child;
                         }
                     }
@@ -397,7 +397,7 @@ fn assert_or_await_expr_rhs_inner(
     in_await: bool,
     expr: &Expression,
 ) -> ParenKind {
-    let filtered = parsetree_viewer::filter_parsing_attrs(arena, &expr.pexp_attributes);
+    let filtered = parsetree_viewer::filter_parsing_attrs(arena, &arena.expr_attributes_by_ref(expr));
     if !filtered.is_empty() {
         return ParenKind::Parenthesized;
     }
@@ -454,7 +454,7 @@ pub fn field_expr(arena: &ParseArena, expr: &Expression) -> ParenKind {
         return kind;
     }
 
-    let filtered = parsetree_viewer::filter_parsing_attrs(arena, &expr.pexp_attributes);
+    let filtered = parsetree_viewer::filter_parsing_attrs(arena, &arena.expr_attributes_by_ref(expr));
     if !filtered.is_empty() {
         return ParenKind::Parenthesized;
     }
@@ -540,7 +540,7 @@ pub fn jsx_prop_expr(arena: &ParseArena, expr: &Expression) -> ParenKind {
 
             match &*expr.pexp_desc {
                 ExpressionDesc::Pexp_constant(c)
-                    if expr.pexp_attributes.is_empty()
+                    if arena.expr_attributes_by_ref(expr).is_empty()
                         && matches!(&**c, Constant::Integer(x, _) | Constant::Float(x, _) if starts_with_minus(x)) =>
                 {
                     ParenKind::Parenthesized
@@ -549,11 +549,11 @@ pub fn jsx_prop_expr(arena: &ParseArena, expr: &Expression) -> ParenKind {
                 ExpressionDesc::Pexp_ident(_)
                 | ExpressionDesc::Pexp_constant(_)
                 | ExpressionDesc::Pexp_field(_, _)
-                | ExpressionDesc::Pexp_construct(_, _)
+                | ExpressionDesc::Pexp_construct(_)
                 | ExpressionDesc::Pexp_variant(_)
                 | ExpressionDesc::Pexp_array(_)
                 | ExpressionDesc::Pexp_pack(_)
-                | ExpressionDesc::Pexp_record { .. }
+                | ExpressionDesc::Pexp_record(_)
                 | ExpressionDesc::Pexp_extension(_)
                 | ExpressionDesc::Pexp_letmodule(_)
                 | ExpressionDesc::Pexp_letexception(_)
@@ -561,11 +561,11 @@ pub fn jsx_prop_expr(arena: &ParseArena, expr: &Expression) -> ParenKind {
                 | ExpressionDesc::Pexp_sequence(_, _)
                 | ExpressionDesc::Pexp_let(_)
                 | ExpressionDesc::Pexp_tuple(_)
-                    if expr.pexp_attributes.is_empty() =>
+                    if arena.expr_attributes_by_ref(expr).is_empty() =>
                 {
                     ParenKind::Nothing
                 }
-                _ if is_module_pack_constraint(arena, expr) && expr.pexp_attributes.is_empty() => {
+                _ if is_module_pack_constraint(arena, expr) && arena.expr_attributes_by_ref(expr).is_empty() => {
                     ParenKind::Nothing
                 }
                 _ => ParenKind::Parenthesized,
@@ -589,7 +589,7 @@ pub fn jsx_child_expr(arena: &ParseArena, expr: &Expression) -> ParenKind {
 
             match &*expr.pexp_desc {
                 ExpressionDesc::Pexp_constant(c)
-                    if expr.pexp_attributes.is_empty()
+                    if arena.expr_attributes_by_ref(expr).is_empty()
                         && matches!(&**c, Constant::Integer(x, _) | Constant::Float(x, _) if starts_with_minus(x)) =>
                 {
                     ParenKind::Parenthesized
@@ -598,11 +598,11 @@ pub fn jsx_child_expr(arena: &ParseArena, expr: &Expression) -> ParenKind {
                 ExpressionDesc::Pexp_ident(_)
                 | ExpressionDesc::Pexp_constant(_)
                 | ExpressionDesc::Pexp_field(_, _)
-                | ExpressionDesc::Pexp_construct(_, _)
+                | ExpressionDesc::Pexp_construct(_)
                 | ExpressionDesc::Pexp_variant(_)
                 | ExpressionDesc::Pexp_array(_)
                 | ExpressionDesc::Pexp_pack(_)
-                | ExpressionDesc::Pexp_record { .. }
+                | ExpressionDesc::Pexp_record(_)
                 | ExpressionDesc::Pexp_extension(_)
                 | ExpressionDesc::Pexp_letmodule(_)
                 | ExpressionDesc::Pexp_letexception(_)
@@ -610,11 +610,11 @@ pub fn jsx_child_expr(arena: &ParseArena, expr: &Expression) -> ParenKind {
                 | ExpressionDesc::Pexp_sequence(_, _)
                 | ExpressionDesc::Pexp_let(_)
                 | ExpressionDesc::Pexp_jsx_element(_)
-                    if expr.pexp_attributes.is_empty() =>
+                    if arena.expr_attributes_by_ref(expr).is_empty() =>
                 {
                     ParenKind::Nothing
                 }
-                _ if is_module_pack_constraint(arena, expr) && expr.pexp_attributes.is_empty() => {
+                _ if is_module_pack_constraint(arena, expr) && arena.expr_attributes_by_ref(expr).is_empty() => {
                     ParenKind::Nothing
                 }
                 ExpressionDesc::Pexp_jsx_element(_) => ParenKind::Nothing,
@@ -630,7 +630,7 @@ pub fn binary_expr(arena: &ParseArena, expr: &Expression) -> ParenKind {
         return kind;
     }
 
-    if !expr.pexp_attributes.is_empty() && parsetree_viewer::is_binary_expression(arena, expr) {
+    if !arena.expr_attributes_by_ref(expr).is_empty() && parsetree_viewer::is_binary_expression(arena, expr) {
         ParenKind::Parenthesized
     } else {
         ParenKind::Nothing

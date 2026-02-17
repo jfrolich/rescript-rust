@@ -165,7 +165,6 @@ fn expr_ident_with_loc(lid_idx: LidentIdx, ident_loc: LocIdx, expr_loc: LocIdx) 
     Expression {
         pexp_desc: Box::new(ExpressionDesc::Pexp_ident(Located::new(lid_idx, ident_loc))),
         pexp_loc: expr_loc,
-        pexp_attributes: Attributes::new(),
     }
 }
 
@@ -250,7 +249,6 @@ fn expr_constant(constant: Constant, arena: &mut ParseArena) -> Expression {
     Expression {
         pexp_desc: Box::new(ExpressionDesc::Pexp_constant(Box::new(constant))),
         pexp_loc: arena.dummy_loc(),
-        pexp_attributes: Attributes::new(),
     }
 }
 
@@ -279,7 +277,6 @@ fn expr_apply(
             transformed_jsx: false,
         }))),
         pexp_loc: loc,
-        pexp_attributes: Attributes::new(),
     }
 }
 
@@ -296,14 +293,12 @@ fn expr_fun(
     Expression {
         pexp_desc: Box::new(ExpressionDesc::Pexp_fun(Box::new(PexpFun {
             arg_label,
-            default: None,
             lhs: lhs_idx,
             rhs: rhs_idx,
             arity: arity_idx,
             is_async: false,
         }))),
         pexp_loc: arena.dummy_loc(),
-        pexp_attributes: Attributes::new(),
     }
 }
 
@@ -321,14 +316,12 @@ fn expr_fun_with_loc(
     Expression {
         pexp_desc: Box::new(ExpressionDesc::Pexp_fun(Box::new(PexpFun {
             arg_label,
-            default: None,
             lhs: lhs_idx,
             rhs: rhs_idx,
             arity: arity_idx,
             is_async: false,
         }))),
         pexp_loc: loc,
-        pexp_attributes: Attributes::new(),
     }
 }
 
@@ -337,7 +330,6 @@ fn expr_tuple(items: Vec<Expression>, arena: &mut ParseArena) -> Expression {
     Expression {
         pexp_desc: Box::new(ExpressionDesc::Pexp_tuple(Box::new(items_idx))),
         pexp_loc: arena.dummy_loc(),
-        pexp_attributes: Attributes::new(),
     }
 }
 
@@ -346,7 +338,6 @@ fn expr_array(items: Vec<Expression>, arena: &mut ParseArena) -> Expression {
     Expression {
         pexp_desc: Box::new(ExpressionDesc::Pexp_array(Box::new(items_idx))),
         pexp_loc: arena.dummy_loc(),
-        pexp_attributes: Attributes::new(),
     }
 }
 
@@ -365,14 +356,12 @@ fn expr_construct_with_loc(
     arena: &mut ParseArena,
 ) -> Expression {
     let arg_idx = arg.map(|a| arena.push_expr(a));
-    Expression {
-        pexp_desc: Box::new(ExpressionDesc::Pexp_construct(
-            Located::new(lid_idx, lid_loc),
-            arg_idx,
-        )),
+    let expr = Expression {
+        pexp_desc: Box::new(ExpressionDesc::Pexp_construct(Located::new(lid_idx, lid_loc))),
         pexp_loc: arena.dummy_loc(),
-        pexp_attributes: Attributes::new(),
-    }
+    };
+    arena.stash_construct_arg_for_loc(expr.pexp_loc, arg_idx);
+    expr
 }
 
 fn expr_construct_with_locs(
@@ -383,14 +372,12 @@ fn expr_construct_with_locs(
     arena: &mut ParseArena,
 ) -> Expression {
     let arg_idx = arg.map(|a| arena.push_expr(a));
-    Expression {
-        pexp_desc: Box::new(ExpressionDesc::Pexp_construct(
-            Located::new(lid_idx, lid_loc),
-            arg_idx,
-        )),
+    let expr = Expression {
+        pexp_desc: Box::new(ExpressionDesc::Pexp_construct(Located::new(lid_idx, lid_loc))),
         pexp_loc: expr_loc,
-        pexp_attributes: Attributes::new(),
-    }
+    };
+    arena.stash_construct_arg_for_loc(expr.pexp_loc, arg_idx);
+    expr
 }
 
 fn expr_variant(
@@ -399,11 +386,12 @@ fn expr_variant(
     arena: &mut ParseArena,
 ) -> Expression {
     let arg_idx = arg.map(|a| arena.push_expr(a));
-    Expression {
-        pexp_desc: Box::new(ExpressionDesc::Pexp_variant(Box::new((label, arg_idx)))),
+    let expr = Expression {
+        pexp_desc: Box::new(ExpressionDesc::Pexp_variant(Box::new(label))),
         pexp_loc: arena.dummy_loc(),
-        pexp_attributes: Attributes::new(),
-    }
+    };
+    arena.stash_variant_arg_for_loc(expr.pexp_loc, arg_idx);
+    expr
 }
 
 fn expr_match(expr: Expression, cases: Vec<Case>, arena: &mut ParseArena) -> Expression {
@@ -411,7 +399,6 @@ fn expr_match(expr: Expression, cases: Vec<Case>, arena: &mut ParseArena) -> Exp
     Expression {
         pexp_desc: Box::new(ExpressionDesc::Pexp_match(Box::new((expr_idx, cases)))),
         pexp_loc: arena.dummy_loc(),
-        pexp_attributes: Attributes::new(),
     }
 }
 
@@ -424,13 +411,12 @@ fn expr_ifthenelse(
     let cond_idx = arena.push_expr(cond);
     let then_idx = arena.push_expr(then_expr);
     let else_idx = else_expr.map(|e| arena.push_expr(e));
-    Expression {
-        pexp_desc: Box::new(ExpressionDesc::Pexp_ifthenelse(Box::new((
-            cond_idx, then_idx, else_idx,
-        )))),
+    let expr = Expression {
+        pexp_desc: Box::new(ExpressionDesc::Pexp_ifthenelse(Box::new((cond_idx, then_idx)))),
         pexp_loc: arena.dummy_loc(),
-        pexp_attributes: Attributes::new(),
-    }
+    };
+    arena.stash_if_else_branch_for_loc(expr.pexp_loc, else_idx);
+    expr
 }
 
 fn expr_let(
@@ -445,7 +431,6 @@ fn expr_let(
             rec_flag, bindings, body_idx,
         )))),
         pexp_loc: arena.dummy_loc(),
-        pexp_attributes: Attributes::new(),
     }
 }
 
@@ -457,7 +442,6 @@ fn expr_constraint(expr: Expression, typ: CoreType, arena: &mut ParseArena) -> E
             expr_idx, typ_idx,
         )))),
         pexp_loc: arena.dummy_loc(),
-        pexp_attributes: Attributes::new(),
     }
 }
 
@@ -474,7 +458,6 @@ fn expr_field_with_loc(
             Located::new(lid_idx, lid_loc),
         )),
         pexp_loc: arena.dummy_loc(),
-        pexp_attributes: Attributes::new(),
     }
 }
 
@@ -496,18 +479,18 @@ fn expr_record(
     arena: &mut ParseArena,
 ) -> Expression {
     let base_idx = base.map(|b| arena.push_expr(b));
-    Expression {
-        pexp_desc: Box::new(ExpressionDesc::Pexp_record(Box::new((fields, base_idx)))),
+    let expr = Expression {
+        pexp_desc: Box::new(ExpressionDesc::Pexp_record(Box::new(fields))),
         pexp_loc: arena.dummy_loc(),
-        pexp_attributes: Attributes::new(),
-    }
+    };
+    arena.stash_record_spread_for_loc(expr.pexp_loc, base_idx);
+    expr
 }
 
 fn pat_any(arena: &mut ParseArena) -> Pattern {
     Pattern {
         ppat_desc: Box::new(PatternDesc::Ppat_any),
         ppat_loc: arena.dummy_loc(),
-        ppat_attributes: Attributes::new(),
     }
 }
 
@@ -515,7 +498,6 @@ fn pat_var_idx(arena: &mut ParseArena, idx: StrIdx, loc: LocIdx) -> Pattern {
     Pattern {
         ppat_desc: Box::new(PatternDesc::Ppat_var(Located::new(idx, loc))),
         ppat_loc: arena.dummy_loc(),
-        ppat_attributes: Attributes::new(),
     }
 }
 
@@ -523,7 +505,6 @@ fn pat_var_idx_with_loc(arena: &mut ParseArena, idx: StrIdx, loc: LocIdx) -> Pat
     Pattern {
         ppat_desc: Box::new(PatternDesc::Ppat_var(Located::new(idx, loc))),
         ppat_loc: loc,
-        ppat_attributes: Attributes::new(),
     }
 }
 
@@ -563,7 +544,6 @@ fn pat_tuple(items: Vec<Pattern>, arena: &mut ParseArena) -> Pattern {
     Pattern {
         ppat_desc: Box::new(PatternDesc::Ppat_tuple(Box::new(items_idx))),
         ppat_loc: arena.dummy_loc(),
-        ppat_attributes: Attributes::new(),
     }
 }
 
@@ -572,7 +552,6 @@ fn pat_array(items: Vec<Pattern>, arena: &mut ParseArena) -> Pattern {
     Pattern {
         ppat_desc: Box::new(PatternDesc::Ppat_array(Box::new(items_idx))),
         ppat_loc: arena.dummy_loc(),
-        ppat_attributes: Attributes::new(),
     }
 }
 
@@ -584,7 +563,6 @@ fn pat_construct(lid_idx: LidentIdx, arg: Option<Pattern>, arena: &mut ParseAren
             arg_idx,
         )),
         ppat_loc: arena.dummy_loc(),
-        ppat_attributes: Attributes::new(),
     }
 }
 
@@ -601,7 +579,6 @@ fn pat_construct_with_loc(
             arg_idx,
         )),
         ppat_loc: arena.dummy_loc(),
-        ppat_attributes: Attributes::new(),
     }
 }
 
@@ -610,7 +587,6 @@ fn pat_variant(label: Cow<'static, str>, arg: Option<Pattern>, arena: &mut Parse
     Pattern {
         ppat_desc: Box::new(PatternDesc::Ppat_variant(Box::new((label, arg_idx)))),
         ppat_loc: arena.dummy_loc(),
-        ppat_attributes: Attributes::new(),
     }
 }
 
@@ -620,7 +596,6 @@ fn pat_constraint(pat: Pattern, typ: CoreType, arena: &mut ParseArena) -> Patter
     Pattern {
         ppat_desc: Box::new(PatternDesc::Ppat_constraint(Box::new((pat_idx, typ_idx)))),
         ppat_loc: arena.dummy_loc(),
-        ppat_attributes: Attributes::new(),
     }
 }
 
@@ -630,7 +605,6 @@ fn case(pat: Pattern, rhs: Expression, arena: &mut ParseArena) -> Case {
     Case {
         pc_bar: None,
         pc_lhs: pat_idx,
-        pc_guard: None,
         pc_rhs: rhs_idx,
     }
 }
@@ -667,7 +641,6 @@ fn mk_type_constr_with_lid_loc(
             args_idx,
         )))),
         ptyp_loc: arena.dummy_loc(),
-        ptyp_attributes: Attributes::new(),
     }
 }
 
@@ -681,7 +654,6 @@ fn mk_type_var(name: &str, arena: &mut ParseArena) -> CoreType {
             name.to_string(),
         )))),
         ptyp_loc: arena.dummy_loc(),
-        ptyp_attributes: Attributes::new(),
     }
 }
 
@@ -700,7 +672,6 @@ fn mk_type_arrow(arg_type: CoreType, ret_type: CoreType, arena: &mut ParseArena)
             arena.push_arity(Some(1)),
         )))),
         ptyp_loc: arena.dummy_loc(),
-        ptyp_attributes: Attributes::new(),
     }
 }
 
@@ -723,7 +694,6 @@ fn mk_type_arrow_no_arity(
             arena.push_arity(None),
         )))),
         ptyp_loc: arena.dummy_loc(),
-        ptyp_attributes: Attributes::new(),
     }
 }
 
@@ -1098,7 +1068,6 @@ fn generate_error_case(num_args: usize, index: usize, arena: &mut ParseArena) ->
     Case {
         pc_bar: None,
         pc_lhs: lhs_idx,
-        pc_guard: None,
         pc_rhs: rhs_idx,
     }
 }
@@ -1639,7 +1608,8 @@ fn codecs_generate_codecs(
         )),
         CoreTypeDesc::Ptyp_constr(inner) => {
             let (ref constr, ref type_args) = **inner;
-            let custom_codec = get_attribute_by_name(&typ.ptyp_attributes, "spice.codec", arena);
+            let custom_codec =
+                get_attribute_by_name(arena.core_type_attributes_by_ref(typ), "spice.codec", arena);
             let (encode, decode) = match custom_codec {
                 Ok(Some(attr)) => {
                     let expr = get_expression_from_payload(attr, arena)?;
@@ -2393,7 +2363,6 @@ fn variants_generate_encoder_case(
     Ok(Case {
         pc_bar: None,
         pc_lhs: arena.push_pat(pat),
-        pc_guard: None,
         pc_rhs: arena.push_expr(rhs),
     })
 }
@@ -2541,7 +2510,6 @@ fn variants_generate_decoder_case(
                         name_const, None,
                     )))),
                     ppat_loc: arena.dummy_loc(),
-                    ppat_attributes: Attributes::new(),
                 }),
                 arena.none_loc(),
                 arena,
@@ -3028,7 +2996,6 @@ fn polyvars_generate_encoder_case(
     Ok(Case {
         pc_bar: None,
         pc_lhs: arena.push_pat(pat),
-        pc_guard: None,
         pc_rhs: arena.push_expr(rhs),
     })
 }
@@ -3163,7 +3130,6 @@ fn polyvars_generate_decoder_case(
                         None,
                     )))),
                     ppat_loc: arena.dummy_loc(),
-                    ppat_attributes: Attributes::new(),
                 }),
                 arena.none_loc(),
                 arena,
@@ -3817,33 +3783,84 @@ impl<'a> LocCloner<'a> {
     }
 
     fn expression_idx(&mut self, idx: &mut ExprIdx) {
-        let mut expr = self.arena.get_expr(*idx).clone();
-        self.expression(&mut expr);
-        *idx = self.arena.push_expr(expr);
+        let old_idx = *idx;
+        let mut expr = self.arena.get_expr(old_idx).clone();
+        let mut attrs = self.arena.expr_attributes(old_idx).clone();
+
+        let mut fun_default = self.arena.fun_default(old_idx);
+        let mut case_guards = self.arena.case_guards(old_idx).map(|guards| guards.to_vec());
+        let mut construct_arg = self.arena.construct_arg(old_idx);
+        let mut variant_arg = self.arena.variant_arg(old_idx);
+        let mut record_spread = self.arena.record_spread(old_idx);
+        let mut if_else_branch = self.arena.if_else_branch(old_idx);
+        let mut coerce_from_type = self.arena.coerce_from_type(old_idx);
+
+        if let Some(default) = fun_default.as_mut() {
+            self.expression_idx(default);
+        }
+        if let Some(guards) = case_guards.as_mut() {
+            for guard in guards.iter_mut().flatten() {
+                self.expression_idx(guard);
+            }
+        }
+        if let Some(arg) = construct_arg.as_mut() {
+            self.expression_idx(arg);
+        }
+        if let Some(arg) = variant_arg.as_mut() {
+            self.expression_idx(arg);
+        }
+        if let Some(spread) = record_spread.as_mut() {
+            self.expression_idx(spread);
+        }
+        if let Some(else_branch) = if_else_branch.as_mut() {
+            self.expression_idx(else_branch);
+        }
+        if let Some(from_type) = coerce_from_type.as_mut() {
+            self.core_type_idx(from_type);
+        }
+
+        self.expression(&mut expr, &mut attrs);
+        let new_idx = self.arena.push_expr_with_attrs(expr, attrs);
+
+        self.arena.set_fun_default(new_idx, fun_default);
+        if let Some(guards) = case_guards {
+            self.arena.set_case_guards(new_idx, guards);
+        }
+        self.arena.set_construct_arg(new_idx, construct_arg);
+        self.arena.set_variant_arg(new_idx, variant_arg);
+        self.arena.set_record_spread(new_idx, record_spread);
+        self.arena.set_if_else_branch(new_idx, if_else_branch);
+        self.arena.set_coerce_from_type(new_idx, coerce_from_type);
+
+        *idx = new_idx;
     }
 
     fn pattern_idx(&mut self, idx: &mut PatIdx) {
         let mut pat = self.arena.get_pat(*idx).clone();
-        self.pattern(&mut pat);
-        *idx = self.arena.push_pat(pat);
+        let mut attrs = self.arena.pat_attributes(*idx).clone();
+        self.pattern(&mut pat, &mut attrs);
+        *idx = self.arena.push_pat_with_attrs(pat, attrs);
     }
 
     fn core_type_idx(&mut self, idx: &mut CoreTypeIdx) {
         let mut typ = self.arena.get_core_type(*idx).clone();
-        self.core_type(&mut typ);
-        *idx = self.arena.push_core_type(typ);
+        let mut attrs = self.arena.core_type_attributes(*idx).clone();
+        self.core_type(&mut typ, &mut attrs);
+        *idx = self.arena.push_core_type_with_attrs(typ, attrs);
     }
 
     fn mod_expr_idx(&mut self, idx: &mut ModExprIdx) {
         let mut me = self.arena.get_mod_expr(*idx).clone();
-        self.module_expr(&mut me);
-        *idx = self.arena.push_mod_expr(me);
+        let mut attrs = self.arena.mod_expr_attributes(*idx).clone();
+        self.module_expr(&mut me, &mut attrs);
+        *idx = self.arena.push_mod_expr_with_attrs(me, attrs);
     }
 
     fn mod_type_idx(&mut self, idx: &mut ModTypeIdx) {
         let mut mt = self.arena.get_mod_type(*idx).clone();
-        self.module_type(&mut mt);
-        *idx = self.arena.push_mod_type(mt);
+        let mut attrs = self.arena.mod_type_attributes(*idx).clone();
+        self.module_type(&mut mt, &mut attrs);
+        *idx = self.arena.push_mod_type_with_attrs(mt, attrs);
     }
 
     fn loc(&mut self, loc: &mut LocIdx) {
@@ -3969,9 +3986,9 @@ impl<'a> LocCloner<'a> {
         }
     }
 
-    fn core_type(&mut self, typ: &mut CoreType) {
+    fn core_type(&mut self, typ: &mut CoreType, attrs: &mut Attributes) {
         self.loc(&mut typ.ptyp_loc);
-        self.attributes(&mut typ.ptyp_attributes);
+        self.attributes(attrs);
         self.core_type_desc(&mut typ.ptyp_desc);
     }
 
@@ -4069,9 +4086,9 @@ impl<'a> LocCloner<'a> {
         self.pattern_idx(&mut field.pat);
     }
 
-    fn pattern(&mut self, pat: &mut Pattern) {
+    fn pattern(&mut self, pat: &mut Pattern, attrs: &mut Attributes) {
         self.loc(&mut pat.ppat_loc);
-        self.attributes(&mut pat.ppat_attributes);
+        self.attributes(attrs);
         self.pattern_desc(&mut pat.ppat_desc);
     }
 
@@ -4137,9 +4154,6 @@ impl<'a> LocCloner<'a> {
         // External spice PPX path drops bar positions in mapped cases.
         case.pc_bar = None;
         self.pattern_idx(&mut case.pc_lhs);
-        if let Some(expr) = &mut case.pc_guard {
-            self.expression_idx(expr);
-        }
         self.expression_idx(&mut case.pc_rhs);
     }
 
@@ -4230,9 +4244,9 @@ impl<'a> LocCloner<'a> {
         }
     }
 
-    fn expression(&mut self, expr: &mut Expression) {
+    fn expression(&mut self, expr: &mut Expression, attrs: &mut Attributes) {
         self.loc(&mut expr.pexp_loc);
-        self.attributes(&mut expr.pexp_attributes);
+        self.attributes(attrs);
         self.expression_desc(&mut expr.pexp_desc);
         self.normalize_jsx_fragment_expr_loc(expr);
         let is_async_fun = matches!(
@@ -4240,7 +4254,7 @@ impl<'a> LocCloner<'a> {
             ExpressionDesc::Pexp_fun(inner) if inner.is_async
         );
         if is_async_fun {
-            self.ensure_res_async_attr(&mut expr.pexp_attributes);
+            self.ensure_res_async_attr(attrs);
         }
     }
 
@@ -4258,15 +4272,11 @@ impl<'a> LocCloner<'a> {
             ExpressionDesc::Pexp_fun(inner) => {
                 let PexpFun {
                     ref mut arg_label,
-                    ref mut default,
                     ref mut lhs,
                     ref mut rhs,
                     ..
                 } = **inner;
                 self.arg_label(arg_label);
-                if let Some(expr) = default {
-                    self.expression_idx(expr);
-                }
                 self.pattern_idx(lhs);
                 self.expression_idx(rhs);
             }
@@ -4294,25 +4304,14 @@ impl<'a> LocCloner<'a> {
                     self.expression_idx(item);
                 }
             }
-            ExpressionDesc::Pexp_construct(lid, arg) => {
+            ExpressionDesc::Pexp_construct(lid) => {
                 self.located(lid);
-                if let Some(expr) = arg {
-                    self.expression_idx(expr);
-                }
             }
-            ExpressionDesc::Pexp_variant(inner) => {
-                let (_, ref mut arg) = **inner;
-                if let Some(expr) = arg {
-                    self.expression_idx(expr);
-                }
-            }
+            ExpressionDesc::Pexp_variant(_) => {}
             ExpressionDesc::Pexp_record(inner) => {
-                let (ref mut fields, ref mut base) = **inner;
+                let fields = &mut **inner;
                 for field in fields.iter_mut() {
                     self.expression_record_field(field);
-                }
-                if let Some(expr) = base {
-                    self.expression_idx(expr);
                 }
             }
             ExpressionDesc::Pexp_field(expr, lid) => {
@@ -4326,12 +4325,9 @@ impl<'a> LocCloner<'a> {
                 self.expression_idx(rhs);
             }
             ExpressionDesc::Pexp_ifthenelse(inner) => {
-                let (ref mut cond, ref mut then_expr, ref mut else_expr) = **inner;
+                let (ref mut cond, ref mut then_expr) = **inner;
                 self.expression_idx(cond);
                 self.expression_idx(then_expr);
-                if let Some(expr) = else_expr {
-                    self.expression_idx(expr);
-                }
             }
             ExpressionDesc::Pexp_sequence(first, second)
             | ExpressionDesc::Pexp_while(first, second) => {
@@ -4351,11 +4347,8 @@ impl<'a> LocCloner<'a> {
                 self.core_type_idx(typ);
             }
             ExpressionDesc::Pexp_coerce(inner) => {
-                let (ref mut expr, ref mut from, ref mut to) = **inner;
+                let (ref mut expr, ref mut to) = **inner;
                 self.expression_idx(expr);
-                if let Some(from) = from {
-                    self.core_type_idx(from);
-                }
                 self.core_type_idx(to);
             }
             ExpressionDesc::Pexp_send(inner) => {
@@ -4392,9 +4385,9 @@ impl<'a> LocCloner<'a> {
         }
     }
 
-    fn module_expr(&mut self, module_expr: &mut ModuleExpr) {
+    fn module_expr(&mut self, module_expr: &mut ModuleExpr, attrs: &mut Attributes) {
         self.loc(&mut module_expr.pmod_loc);
-        self.attributes(&mut module_expr.pmod_attributes);
+        self.attributes(attrs);
         self.module_expr_desc(&mut module_expr.pmod_desc);
     }
 
@@ -4427,9 +4420,9 @@ impl<'a> LocCloner<'a> {
         }
     }
 
-    fn module_type(&mut self, module_type: &mut ModuleType) {
+    fn module_type(&mut self, module_type: &mut ModuleType, attrs: &mut Attributes) {
         self.loc(&mut module_type.pmty_loc);
-        self.attributes(&mut module_type.pmty_attributes);
+        self.attributes(attrs);
         self.module_type_desc(&mut module_type.pmty_desc);
     }
 

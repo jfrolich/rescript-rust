@@ -54,7 +54,6 @@ pub fn substitute_type_vars(
                         return CoreType {
                             ptyp_desc: Box::new(CoreTypeDesc::Ptyp_var(Box::new(name))),
                             ptyp_loc: typ.ptyp_loc,
-                            ptyp_attributes: typ.ptyp_attributes,
                         };
                     }
                 }
@@ -162,7 +161,6 @@ pub fn substitute_type_vars(
     CoreType {
         ptyp_desc: Box::new(new_desc),
         ptyp_loc: typ.ptyp_loc,
-        ptyp_attributes: typ.ptyp_attributes,
     }
 }
 
@@ -226,7 +224,6 @@ pub fn parse_poly_type_expr(p: &mut Parser<'_>) -> CoreType {
             let typ = CoreType {
                 ptyp_desc: Box::new(CoreTypeDesc::Ptyp_var(Box::new(name))),
                 ptyp_loc: var_loc.clone(),
-                ptyp_attributes: Attributes::new(),
             };
             p.next(); // consume =>
             let return_type = parse_typ_expr_inner(p, true);
@@ -250,7 +247,6 @@ pub fn parse_poly_type_expr(p: &mut Parser<'_>) -> CoreType {
                     p.static_arity_1(),
                 )))),
                 ptyp_loc: loc,
-                ptyp_attributes: Attributes::new(),
             };
         }
     }
@@ -290,7 +286,6 @@ pub fn parse_locally_abstract_type(p: &mut Parser<'_>) -> CoreType {
     CoreType {
         ptyp_desc: Box::new(CoreTypeDesc::Ptyp_poly(Box::new((vars, body_idx)))),
         ptyp_loc: loc,
-        ptyp_attributes: Attributes::new(),
     }
 }
 
@@ -337,7 +332,6 @@ fn parse_type_alias(p: &mut Parser<'_>, typ: CoreType) -> CoreType {
         return CoreType {
             ptyp_desc: Box::new(CoreTypeDesc::Ptyp_alias(Box::new((typ_idx, var_name)))),
             ptyp_loc: loc,
-            ptyp_attributes: Attributes::new(),
         };
     }
 
@@ -424,7 +418,6 @@ fn parse_arrow_type_rest(
             p.static_arity_1(),
         )))),
         ptyp_loc: loc,
-        ptyp_attributes: Attributes::new(),
     }
 }
 
@@ -481,13 +474,15 @@ fn parse_es6_arrow_type(p: &mut Parser<'_>, attrs: Attributes) -> CoreType {
                 p.push_arity_unknown(),
             )))),
             ptyp_loc: loc,
-            ptyp_attributes: Attributes::new(),
         }
     } else {
         p.expect(Token::Lparen);
         let mut typ = parse_function_type(p, start_pos_idx);
         if !attrs.is_empty() {
-            typ.ptyp_attributes.extend(attrs);
+            let mut merged_attrs = p.arena().core_type_attributes_by_ref(&typ).clone();
+            merged_attrs.extend(attrs);
+            p.arena_mut()
+                .stash_core_type_attributes_for_loc(typ.ptyp_loc, merged_attrs);
         }
         typ
     }
@@ -597,7 +592,6 @@ fn parse_atomic_typ_expr_with_start(
                 CoreType {
                     ptyp_desc: Box::new(CoreTypeDesc::Ptyp_poly(Box::new((vars, body_idx)))),
                     ptyp_loc: loc,
-                    ptyp_attributes: Attributes::new(),
                 }
             } else if let Some(first) = vars.first() {
                 CoreType {
@@ -605,7 +599,6 @@ fn parse_atomic_typ_expr_with_start(
                         p.arena().get_string(first.txt).to_string(),
                     )))),
                     ptyp_loc: first.loc.clone(), // Use the variable's location (excludes the ')
-                    ptyp_attributes: Attributes::new(),
                 }
             } else {
                 p.err(DiagnosticCategory::Message(
@@ -621,7 +614,6 @@ fn parse_atomic_typ_expr_with_start(
             CoreType {
                 ptyp_desc: Box::new(CoreTypeDesc::Ptyp_any),
                 ptyp_loc: loc,
-                ptyp_attributes: Attributes::new(),
             }
         }
         // In OCaml, parse_value_path captures `let start_pos = p.Parser.start_pos` (line 714).
@@ -719,7 +711,6 @@ fn parse_atomic_typ_expr_with_start(
             CoreType {
                 ptyp_desc: Box::new(CoreTypeDesc::Ptyp_extension(Box::new(ext))),
                 ptyp_loc: loc,
-                ptyp_attributes: Attributes::new(),
             }
         }
         _ => {
@@ -738,7 +729,10 @@ fn parse_atomic_typ_expr_with_start(
 
     // Attach any leading attributes to the type
     if !attrs.is_empty() {
-        typ.ptyp_attributes.extend(attrs);
+        let mut merged_attrs = p.arena().core_type_attributes_by_ref(&typ).clone();
+        merged_attrs.extend(attrs);
+        p.arena_mut()
+            .stash_core_type_attributes_for_loc(typ.ptyp_loc, merged_attrs);
     }
 
     p.eat_breadcrumb();
@@ -1091,7 +1085,11 @@ fn parse_function_type(p: &mut Parser<'_>, start_pos_idx: PosIdx) -> CoreType {
                     typ.ptyp_loc = p.mk_loc_idx(param_start_idx, constr_end_idx);
                 }
                 if !param_attrs.is_empty() {
-                    typ.ptyp_attributes = param_attrs.clone().concat(typ.ptyp_attributes);
+                    let existing_attrs = p.arena().core_type_attributes_by_ref(&typ).clone();
+                    p.arena_mut().stash_core_type_attributes_for_loc(
+                        typ.ptyp_loc,
+                        param_attrs.clone().concat(existing_attrs),
+                    );
                 }
                 if matches!(p.token, Token::EqualGreater | Token::MinusGreater) {
                     typ = parse_arrow_type_rest(p, typ, param_start_idx);
@@ -1135,7 +1133,7 @@ fn parse_function_type(p: &mut Parser<'_>, start_pos_idx: PosIdx) -> CoreType {
             // a parenthesized expression with inner attributes like `(@attr float)`.
             // In that case, OCaml doesn't extend the type location to include the `.`
             let was_not_parenthesized_with_inner_attrs =
-                !param_attrs.is_empty() || typ.ptyp_attributes.is_empty();
+                !param_attrs.is_empty() || p.arena().core_type_attributes_by_ref(&typ).is_empty();
             if is_simple_constr && was_not_parenthesized_with_inner_attrs {
                 let end_pos_idx = p.loc_end_idx(typ.ptyp_loc);
                 typ = CoreType {
@@ -1192,7 +1190,6 @@ fn parse_function_type(p: &mut Parser<'_>, start_pos_idx: PosIdx) -> CoreType {
                             arity,
                         )))),
                         ptyp_loc: new_arrow_loc,
-                        ptyp_attributes: typ.ptyp_attributes,
                     };
                 } else {
                     // Restore the type without modification
@@ -1245,10 +1242,18 @@ fn parse_function_type(p: &mut Parser<'_>, start_pos_idx: PosIdx) -> CoreType {
                 } else {
                     typ.ptyp_loc
                 };
-                typ.ptyp_attributes = param_attrs.concat(typ.ptyp_attributes);
+                let existing_attrs = p.arena().core_type_attributes_by_ref(&typ).clone();
+                p.arena_mut().stash_core_type_attributes_for_loc(
+                    typ.ptyp_loc,
+                    param_attrs.concat(existing_attrs),
+                );
             } else {
                 // For other types (or ghost locations), attrs are prepended but location unchanged
-                typ.ptyp_attributes = param_attrs.concat(typ.ptyp_attributes);
+                let existing_attrs = p.arena().core_type_attributes_by_ref(&typ).clone();
+                p.arena_mut().stash_core_type_attributes_for_loc(
+                    typ.ptyp_loc,
+                    param_attrs.concat(existing_attrs),
+                );
             }
             // For unlabeled args, attributes go on type, not on arrow
             Attributes::new()
@@ -1324,8 +1329,8 @@ fn parse_function_type(p: &mut Parser<'_>, start_pos_idx: PosIdx) -> CoreType {
                 let param_typ = p.arena().get_core_type(param.typ);
                 matches!(param.lbl, ArgLabel::Labelled(_))
                     && matches!(*param_typ.ptyp_desc, CoreTypeDesc::Ptyp_any)
-                    && param_typ
-                        .ptyp_attributes
+                    && p.arena()
+                        .core_type_attributes_by_ref(param_typ)
                         .iter()
                         .any(|(attr, _)| p.arena().get_string(attr.txt) == "as")
             })
@@ -1358,7 +1363,6 @@ fn parse_function_type(p: &mut Parser<'_>, start_pos_idx: PosIdx) -> CoreType {
                 unknown_arity,
             )))),
             ptyp_loc: arrow_loc,
-            ptyp_attributes: Attributes::new(),
         };
         acc = arrow;
     }
@@ -1371,7 +1375,6 @@ fn parse_function_type(p: &mut Parser<'_>, start_pos_idx: PosIdx) -> CoreType {
             CoreType {
                 ptyp_desc: Box::new(CoreTypeDesc::Ptyp_arrow(Box::new((arg, ret, full_arity)))),
                 ptyp_loc: result.ptyp_loc,
-                ptyp_attributes: result.ptyp_attributes,
             }
         }
         _ => result,
@@ -1499,7 +1502,6 @@ fn parse_attribute_payload(p: &mut Parser<'_>) -> Payload {
                     value, tag,
                 )))),
                 pexp_loc,
-                pexp_attributes: Attributes::new(),
             };
             let expr_idx = p.arena_mut().push_expr(expr);
             let item = StructureItem {
@@ -1575,7 +1577,6 @@ fn parse_tuple_type(p: &mut Parser<'_>, start_pos_idx: PosIdx, first: CoreType) 
     CoreType {
         ptyp_desc: Box::new(CoreTypeDesc::Ptyp_tuple(Box::new(types_idx))),
         ptyp_loc: loc,
-        ptyp_attributes: Attributes::new(),
     }
 }
 
@@ -1639,7 +1640,6 @@ fn parse_record_or_object_type(p: &mut Parser<'_>) -> CoreType {
                 type_args,
             )))),
             ptyp_loc: loc,
-            ptyp_attributes: Attributes::new(),
         }
     } else {
         // Check for inline record syntax in wrong position: { name: ... } where object type expected
@@ -1656,7 +1656,6 @@ fn parse_record_or_object_type(p: &mut Parser<'_>) -> CoreType {
         let typ = CoreType {
             ptyp_desc: Box::new(CoreTypeDesc::Ptyp_object(Box::new((fields, closed)))),
             ptyp_loc: loc,
-            ptyp_attributes: Attributes::new(),
         };
         // Handle type alias: {...} as 'name
         let typ = parse_type_alias(p, typ);
@@ -1689,7 +1688,6 @@ pub fn parse_object_type_body(p: &mut Parser<'_>, start_pos_idx: PosIdx) -> Core
     let typ = CoreType {
         ptyp_desc: Box::new(CoreTypeDesc::Ptyp_object(Box::new((fields, closed)))),
         ptyp_loc: loc,
-        ptyp_attributes: Attributes::new(),
     };
     // Handle type alias: {...} as 'name
     let typ = parse_type_alias(p, typ);
@@ -1816,7 +1814,6 @@ fn parse_polymorphic_variant_type_args(p: &mut Parser<'_>) -> CoreType {
                 CoreType {
                     ptyp_desc: Box::new(CoreTypeDesc::Ptyp_tuple(Box::new(args_idx))),
                     ptyp_loc: loc,
-                    ptyp_attributes: Attributes::new(),
                 }
             }
         }
@@ -1831,7 +1828,6 @@ fn parse_polymorphic_variant_type_args(p: &mut Parser<'_>) -> CoreType {
             CoreType {
                 ptyp_desc: Box::new(CoreTypeDesc::Ptyp_tuple(Box::new(args_idx))),
                 ptyp_loc: loc,
-                ptyp_attributes: Attributes::new(),
             }
         }
     }
@@ -1897,7 +1893,6 @@ fn parse_poly_variant_type(p: &mut Parser<'_>) -> CoreType {
             fields, closed, low_tags,
         )))),
         ptyp_loc: loc,
-        ptyp_attributes: Attributes::new(),
     }
 }
 
@@ -1978,7 +1973,6 @@ fn parse_poly_variant_type_simple(p: &mut Parser<'_>) -> CoreType {
             None,
         )))),
         ptyp_loc: loc,
-        ptyp_attributes: Attributes::new(),
     }
 }
 
@@ -2294,7 +2288,6 @@ fn parse_single_row_field_with_attrs(p: &mut Parser<'_>, attrs: Attributes) -> O
             Some(CoreType {
                 ptyp_desc: Box::new(CoreTypeDesc::Ptyp_tuple(Box::new(args_idx))),
                 ptyp_loc: loc,
-                ptyp_attributes: Attributes::new(),
             })
         } else if args.len() == 1 {
             Some(args.into_iter().next().unwrap())
@@ -2440,7 +2433,6 @@ fn parse_row_fields(p: &mut Parser<'_>) -> Vec<RowField> {
                 Some(CoreType {
                     ptyp_desc: Box::new(CoreTypeDesc::Ptyp_tuple(Box::new(args_idx))),
                     ptyp_loc: loc,
-                    ptyp_attributes: Attributes::new(),
                 })
             } else if args.len() == 1 {
                 Some(args.into_iter().next().unwrap())
@@ -2474,8 +2466,9 @@ fn parse_row_fields(p: &mut Parser<'_>) -> Vec<RowField> {
             if !attrs.is_empty() {
                 // Prepend attrs to the type's existing attributes
                 let mut new_attrs = attrs;
-                new_attrs.extend(typ.ptyp_attributes);
-                typ.ptyp_attributes = new_attrs;
+                new_attrs.extend(p.arena().core_type_attributes_by_ref(&typ).clone());
+                p.arena_mut()
+                    .stash_core_type_attributes_for_loc(typ.ptyp_loc, new_attrs);
             }
             let typ_idx = p.arena_mut().push_core_type(typ);
             fields.push(RowField::Rinherit(typ_idx));
@@ -2517,7 +2510,6 @@ pub fn parse_package_type(p: &mut Parser<'_>) -> CoreType {
     CoreType {
         ptyp_desc: Box::new(CoreTypeDesc::Ptyp_package(Box::new((lid, constraints)))),
         ptyp_loc: loc,
-        ptyp_attributes: Attributes::new(),
     }
 }
 
@@ -2541,7 +2533,6 @@ fn parse_package_type_with_parens(p: &mut Parser<'_>, start_pos_idx: PosIdx) -> 
     CoreType {
         ptyp_desc: Box::new(CoreTypeDesc::Ptyp_package(Box::new((lid, constraints)))),
         ptyp_loc: loc,
-        ptyp_attributes: Attributes::new(),
     }
 }
 

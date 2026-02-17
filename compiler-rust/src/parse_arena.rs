@@ -27,6 +27,7 @@
 //! ```
 
 use std::collections::{HashMap, HashSet};
+use std::sync::OnceLock;
 
 use serde::{Deserialize, Serialize};
 
@@ -479,26 +480,50 @@ pub struct ParseArena {
     expr_coerce_from_types: Vec<Option<CoreTypeIdx>>,
     /// Sparse side table for expression attributes, keyed by ExprIdx.
     expr_attributes: Vec<Attributes>,
+    /// Pending expression attributes keyed by source location for detached nodes.
+    pending_expr_attributes_by_loc: HashMap<LocIdx, Vec<Attributes>>,
+    /// Pending function defaults keyed by expression location for detached nodes.
+    pending_fun_defaults_by_loc: HashMap<LocIdx, Vec<ExprIdx>>,
+    /// Pending case guards keyed by expression location for detached nodes.
+    pending_case_guards_by_loc: HashMap<LocIdx, Vec<Box<[Option<ExprIdx>]>>>,
+    /// Pending constructor arguments keyed by expression location for detached nodes.
+    pending_construct_args_by_loc: HashMap<LocIdx, Vec<ExprIdx>>,
+    /// Pending variant arguments keyed by expression location for detached nodes.
+    pending_variant_args_by_loc: HashMap<LocIdx, Vec<ExprIdx>>,
+    /// Pending record spreads keyed by expression location for detached nodes.
+    pending_record_spreads_by_loc: HashMap<LocIdx, Vec<ExprIdx>>,
+    /// Pending else branches keyed by expression location for detached nodes.
+    pending_if_else_branches_by_loc: HashMap<LocIdx, Vec<ExprIdx>>,
+    /// Pending coerce-from types keyed by expression location for detached nodes.
+    pending_coerce_from_types_by_loc: HashMap<LocIdx, Vec<CoreTypeIdx>>,
     /// Arena of patterns (returns PatIdx).
     /// Replaces `Box<Pattern>` for recursive AST references.
     patterns: Arena<Pattern, PatIdx>,
     /// Sparse side table for pattern attributes, keyed by PatIdx.
     pat_attributes: Vec<Attributes>,
+    /// Pending pattern attributes keyed by source location for detached nodes.
+    pending_pat_attributes_by_loc: HashMap<LocIdx, Vec<Attributes>>,
     /// Arena of core types (returns CoreTypeIdx).
     /// Replaces `Box<CoreType>` for recursive AST references.
     core_types: Arena<CoreType, CoreTypeIdx>,
     /// Sparse side table for core type attributes, keyed by CoreTypeIdx.
     core_type_attributes: Vec<Attributes>,
+    /// Pending core-type attributes keyed by source location for detached nodes.
+    pending_core_type_attributes_by_loc: HashMap<LocIdx, Vec<Attributes>>,
     /// Arena of module expressions (returns ModExprIdx).
     /// Replaces `Box<ModuleExpr>` for recursive AST references.
     mod_exprs: Arena<ModuleExpr, ModExprIdx>,
     /// Sparse side table for module expression attributes, keyed by ModExprIdx.
     mod_expr_attributes: Vec<Attributes>,
+    /// Pending module-expression attributes keyed by source location for detached nodes.
+    pending_mod_expr_attributes_by_loc: HashMap<LocIdx, Vec<Attributes>>,
     /// Arena of module types (returns ModTypeIdx).
     /// Replaces `Box<ModuleType>` for recursive AST references.
     mod_types: Arena<ModuleType, ModTypeIdx>,
     /// Sparse side table for module type attributes, keyed by ModTypeIdx.
     mod_type_attributes: Vec<Attributes>,
+    /// Pending module-type attributes keyed by source location for detached nodes.
+    pending_mod_type_attributes_by_loc: HashMap<LocIdx, Vec<Attributes>>,
     /// Pre-allocated static arity indices for literal paths.
     /// These match OCaml's CSE behavior where literal `Some 1` values are shared.
     static_arities: StaticArities,
@@ -788,7 +813,6 @@ impl Default for ParseArena {
                 vec![],
             )))),
             ptyp_loc: none_loc,
-            ptyp_attributes: Attributes::new(),
         };
         let static_ast_literal_types = StaticAstLiteralTypes {
             type_string: core_types.push(mk_ast_literal_type(ast_type_string_lid)),
@@ -796,6 +820,7 @@ impl Default for ParseArena {
             type_bool: core_types.push(mk_ast_literal_type(ast_type_bool_lid)),
             type_float: core_types.push(mk_ast_literal_type(ast_type_float_lid)),
         };
+        let core_type_attributes = vec![Attributes::new(); core_types.len()];
 
         Self {
             positions: Arena::default(),
@@ -811,14 +836,26 @@ impl Default for ParseArena {
             expr_if_else_branches: Vec::new(),
             expr_coerce_from_types: Vec::new(),
             expr_attributes: Vec::new(),
+            pending_expr_attributes_by_loc: HashMap::new(),
+            pending_fun_defaults_by_loc: HashMap::new(),
+            pending_case_guards_by_loc: HashMap::new(),
+            pending_construct_args_by_loc: HashMap::new(),
+            pending_variant_args_by_loc: HashMap::new(),
+            pending_record_spreads_by_loc: HashMap::new(),
+            pending_if_else_branches_by_loc: HashMap::new(),
+            pending_coerce_from_types_by_loc: HashMap::new(),
             patterns: Arena::default(),
             pat_attributes: Vec::new(),
+            pending_pat_attributes_by_loc: HashMap::new(),
             core_types,
-            core_type_attributes: Vec::new(),
+            core_type_attributes,
+            pending_core_type_attributes_by_loc: HashMap::new(),
             mod_exprs: Arena::default(),
             mod_expr_attributes: Vec::new(),
+            pending_mod_expr_attributes_by_loc: HashMap::new(),
             mod_types: Arena::default(),
             mod_type_attributes: Vec::new(),
+            pending_mod_type_attributes_by_loc: HashMap::new(),
             static_arities,
             static_list_lidents,
             static_array_lidents,
@@ -852,6 +889,284 @@ impl Default for ParseArena {
 }
 
 impl ParseArena {
+    fn empty_attributes() -> &'static Attributes {
+        static EMPTY: OnceLock<Attributes> = OnceLock::new();
+        EMPTY.get_or_init(Attributes::new)
+    }
+
+    fn stash_pending_value<T>(map: &mut HashMap<LocIdx, Vec<T>>, loc: LocIdx, value: T) {
+        map.entry(loc).or_default().push(value);
+    }
+
+    fn take_pending_value<T>(map: &mut HashMap<LocIdx, Vec<T>>, loc: LocIdx) -> Option<T> {
+        let value = {
+            let entry = map.get_mut(&loc)?;
+            entry.pop()
+        };
+        if map.get(&loc).is_some_and(|entry| entry.is_empty()) {
+            map.remove(&loc);
+        }
+        value
+    }
+
+    fn stash_pending_attrs(map: &mut HashMap<LocIdx, Vec<Attributes>>, loc: LocIdx, attrs: Attributes) {
+        if attrs.is_empty() {
+            return;
+        }
+        Self::stash_pending_value(map, loc, attrs);
+    }
+
+    fn take_pending_attrs(map: &mut HashMap<LocIdx, Vec<Attributes>>, loc: LocIdx) -> Option<Attributes> {
+        Self::take_pending_value(map, loc)
+    }
+
+    pub fn stash_expr_attributes_for_loc(&mut self, loc: LocIdx, attrs: Attributes) {
+        Self::stash_pending_attrs(&mut self.pending_expr_attributes_by_loc, loc, attrs);
+    }
+
+    pub fn stash_fun_default_for_loc(&mut self, loc: LocIdx, default: Option<ExprIdx>) {
+        if let Some(default) = default {
+            Self::stash_pending_value(&mut self.pending_fun_defaults_by_loc, loc, default);
+        }
+    }
+
+    pub fn stash_case_guards_for_loc(&mut self, loc: LocIdx, guards: Vec<Option<ExprIdx>>) {
+        if guards.iter().all(|g| g.is_none()) {
+            return;
+        }
+        Self::stash_pending_value(
+            &mut self.pending_case_guards_by_loc,
+            loc,
+            guards.into_boxed_slice(),
+        );
+    }
+
+    pub fn stash_construct_arg_for_loc(&mut self, loc: LocIdx, arg: Option<ExprIdx>) {
+        if let Some(arg) = arg {
+            Self::stash_pending_value(&mut self.pending_construct_args_by_loc, loc, arg);
+        }
+    }
+
+    pub fn stash_variant_arg_for_loc(&mut self, loc: LocIdx, arg: Option<ExprIdx>) {
+        if let Some(arg) = arg {
+            Self::stash_pending_value(&mut self.pending_variant_args_by_loc, loc, arg);
+        }
+    }
+
+    pub fn stash_record_spread_for_loc(&mut self, loc: LocIdx, spread: Option<ExprIdx>) {
+        if let Some(spread) = spread {
+            Self::stash_pending_value(&mut self.pending_record_spreads_by_loc, loc, spread);
+        }
+    }
+
+    pub fn stash_if_else_branch_for_loc(&mut self, loc: LocIdx, else_branch: Option<ExprIdx>) {
+        if let Some(else_branch) = else_branch {
+            Self::stash_pending_value(&mut self.pending_if_else_branches_by_loc, loc, else_branch);
+        }
+    }
+
+    pub fn stash_coerce_from_type_for_loc(&mut self, loc: LocIdx, from_type: Option<CoreTypeIdx>) {
+        if let Some(from_type) = from_type {
+            Self::stash_pending_value(&mut self.pending_coerce_from_types_by_loc, loc, from_type);
+        }
+    }
+
+    pub fn stash_pat_attributes_for_loc(&mut self, loc: LocIdx, attrs: Attributes) {
+        Self::stash_pending_attrs(&mut self.pending_pat_attributes_by_loc, loc, attrs);
+    }
+
+    pub fn stash_core_type_attributes_for_loc(&mut self, loc: LocIdx, attrs: Attributes) {
+        Self::stash_pending_attrs(&mut self.pending_core_type_attributes_by_loc, loc, attrs);
+    }
+
+    pub fn stash_mod_expr_attributes_for_loc(&mut self, loc: LocIdx, attrs: Attributes) {
+        Self::stash_pending_attrs(&mut self.pending_mod_expr_attributes_by_loc, loc, attrs);
+    }
+
+    pub fn stash_mod_type_attributes_for_loc(&mut self, loc: LocIdx, attrs: Attributes) {
+        Self::stash_pending_attrs(&mut self.pending_mod_type_attributes_by_loc, loc, attrs);
+    }
+
+    #[inline]
+    fn expr_idx_for_ref(&self, expr: &Expression) -> Option<ExprIdx> {
+        let exprs = self.expressions.as_slice();
+        exprs
+            .iter()
+            .position(|candidate| std::ptr::eq(candidate, expr))
+            .or_else(|| exprs.iter().position(|candidate| candidate == expr))
+            .map(|i| ExprIdx(i as u32))
+    }
+
+    #[inline]
+    fn pat_idx_for_ref(&self, pat: &Pattern) -> Option<PatIdx> {
+        let pats = self.patterns.as_slice();
+        pats
+            .iter()
+            .position(|candidate| std::ptr::eq(candidate, pat))
+            .or_else(|| pats.iter().position(|candidate| candidate == pat))
+            .map(|i| PatIdx(i as u32))
+    }
+
+    #[inline]
+    fn core_type_idx_for_ref(&self, typ: &CoreType) -> Option<CoreTypeIdx> {
+        let types = self.core_types.as_slice();
+        types
+            .iter()
+            .position(|candidate| std::ptr::eq(candidate, typ))
+            .or_else(|| types.iter().position(|candidate| candidate == typ))
+            .map(|i| CoreTypeIdx(i as u32))
+    }
+
+    #[inline]
+    fn mod_expr_idx_for_ref(&self, me: &ModuleExpr) -> Option<ModExprIdx> {
+        let mod_exprs = self.mod_exprs.as_slice();
+        mod_exprs
+            .iter()
+            .position(|candidate| std::ptr::eq(candidate, me))
+            .or_else(|| mod_exprs.iter().position(|candidate| candidate == me))
+            .map(|i| ModExprIdx(i as u32))
+    }
+
+    #[inline]
+    fn mod_type_idx_for_ref(&self, mt: &ModuleType) -> Option<ModTypeIdx> {
+        let mod_types = self.mod_types.as_slice();
+        mod_types
+            .iter()
+            .position(|candidate| std::ptr::eq(candidate, mt))
+            .or_else(|| mod_types.iter().position(|candidate| candidate == mt))
+            .map(|i| ModTypeIdx(i as u32))
+    }
+
+    pub fn expr_attributes_by_ref(&self, expr: &Expression) -> &Attributes {
+        if let Some(idx) = self.expr_idx_for_ref(expr) {
+            return self.expr_attributes(idx);
+        }
+        if let Some(attrs_by_loc) = self.pending_expr_attributes_by_loc.get(&expr.pexp_loc) {
+            if let Some(attrs) = attrs_by_loc.last() {
+                return attrs;
+            }
+        }
+        Self::empty_attributes()
+    }
+
+    pub fn fun_default_by_ref(&self, expr: &Expression) -> Option<ExprIdx> {
+        if let Some(idx) = self.expr_idx_for_ref(expr) {
+            return self.fun_default(idx);
+        }
+        self.pending_fun_defaults_by_loc
+            .get(&expr.pexp_loc)
+            .and_then(|v| v.last().copied())
+    }
+
+    pub fn case_guards_by_ref(&self, expr: &Expression) -> Option<&[Option<ExprIdx>]> {
+        if let Some(idx) = self.expr_idx_for_ref(expr) {
+            return self.case_guards(idx);
+        }
+        self.pending_case_guards_by_loc
+            .get(&expr.pexp_loc)
+            .and_then(|v| v.last().map(|boxed| boxed.as_ref()))
+    }
+
+    pub fn case_guard_by_ref(&self, expr: &Expression, case_index: usize) -> Option<ExprIdx> {
+        self.case_guards_by_ref(expr)
+            .and_then(|guards| guards.get(case_index))
+            .copied()
+            .flatten()
+    }
+
+    pub fn construct_arg_by_ref(&self, expr: &Expression) -> Option<ExprIdx> {
+        if let Some(idx) = self.expr_idx_for_ref(expr) {
+            return self.construct_arg(idx);
+        }
+        self.pending_construct_args_by_loc
+            .get(&expr.pexp_loc)
+            .and_then(|v| v.last().copied())
+    }
+
+    pub fn variant_arg_by_ref(&self, expr: &Expression) -> Option<ExprIdx> {
+        if let Some(idx) = self.expr_idx_for_ref(expr) {
+            return self.variant_arg(idx);
+        }
+        self.pending_variant_args_by_loc
+            .get(&expr.pexp_loc)
+            .and_then(|v| v.last().copied())
+    }
+
+    pub fn record_spread_by_ref(&self, expr: &Expression) -> Option<ExprIdx> {
+        if let Some(idx) = self.expr_idx_for_ref(expr) {
+            return self.record_spread(idx);
+        }
+        self.pending_record_spreads_by_loc
+            .get(&expr.pexp_loc)
+            .and_then(|v| v.last().copied())
+    }
+
+    pub fn if_else_branch_by_ref(&self, expr: &Expression) -> Option<ExprIdx> {
+        if let Some(idx) = self.expr_idx_for_ref(expr) {
+            return self.if_else_branch(idx);
+        }
+        self.pending_if_else_branches_by_loc
+            .get(&expr.pexp_loc)
+            .and_then(|v| v.last().copied())
+    }
+
+    pub fn coerce_from_type_by_ref(&self, expr: &Expression) -> Option<CoreTypeIdx> {
+        if let Some(idx) = self.expr_idx_for_ref(expr) {
+            return self.coerce_from_type(idx);
+        }
+        self.pending_coerce_from_types_by_loc
+            .get(&expr.pexp_loc)
+            .and_then(|v| v.last().copied())
+    }
+
+    pub fn pat_attributes_by_ref(&self, pat: &Pattern) -> &Attributes {
+        if let Some(idx) = self.pat_idx_for_ref(pat) {
+            return self.pat_attributes(idx);
+        }
+        if let Some(attrs_by_loc) = self.pending_pat_attributes_by_loc.get(&pat.ppat_loc) {
+            if let Some(attrs) = attrs_by_loc.last() {
+                return attrs;
+            }
+        }
+        Self::empty_attributes()
+    }
+
+    pub fn core_type_attributes_by_ref(&self, typ: &CoreType) -> &Attributes {
+        if let Some(idx) = self.core_type_idx_for_ref(typ) {
+            return self.core_type_attributes(idx);
+        }
+        if let Some(attrs_by_loc) = self.pending_core_type_attributes_by_loc.get(&typ.ptyp_loc) {
+            if let Some(attrs) = attrs_by_loc.last() {
+                return attrs;
+            }
+        }
+        Self::empty_attributes()
+    }
+
+    pub fn mod_expr_attributes_by_ref(&self, me: &ModuleExpr) -> &Attributes {
+        if let Some(idx) = self.mod_expr_idx_for_ref(me) {
+            return self.mod_expr_attributes(idx);
+        }
+        if let Some(attrs_by_loc) = self.pending_mod_expr_attributes_by_loc.get(&me.pmod_loc) {
+            if let Some(attrs) = attrs_by_loc.last() {
+                return attrs;
+            }
+        }
+        Self::empty_attributes()
+    }
+
+    pub fn mod_type_attributes_by_ref(&self, mt: &ModuleType) -> &Attributes {
+        if let Some(idx) = self.mod_type_idx_for_ref(mt) {
+            return self.mod_type_attributes(idx);
+        }
+        if let Some(attrs_by_loc) = self.pending_mod_type_attributes_by_loc.get(&mt.pmty_loc) {
+            if let Some(attrs) = attrs_by_loc.last() {
+                return attrs;
+            }
+        }
+        Self::empty_attributes()
+    }
+
     /// Create a new arena with the "none" position and location pre-allocated at index 0.
     ///
     /// This ensures that `LocIdx::default()` (which is `LocIdx(0)`) always refers to
@@ -1744,7 +2059,6 @@ impl ParseArena {
         Expression {
             pexp_desc: Box::new(ExpressionDesc::Pexp_ident(Self::placeholder_lident_loc())),
             pexp_loc: LocIdx::default(),
-            pexp_attributes: Attributes::new(),
         }
     }
 
@@ -1752,7 +2066,6 @@ impl ParseArena {
         Pattern {
             ppat_desc: Box::new(PatternDesc::Ppat_any),
             ppat_loc: LocIdx::default(),
-            ppat_attributes: Attributes::new(),
         }
     }
 
@@ -1760,7 +2073,6 @@ impl ParseArena {
         CoreType {
             ptyp_desc: Box::new(CoreTypeDesc::Ptyp_any),
             ptyp_loc: LocIdx::default(),
-            ptyp_attributes: Attributes::new(),
         }
     }
 
@@ -1768,7 +2080,6 @@ impl ParseArena {
         ModuleExpr {
             pmod_desc: Box::new(ModuleExprDesc::Pmod_ident(Self::placeholder_lident_loc())),
             pmod_loc: LocIdx::default(),
-            pmod_attributes: Attributes::new(),
         }
     }
 
@@ -1776,81 +2087,6 @@ impl ParseArena {
         ModuleType {
             pmty_desc: Box::new(ModuleTypeDesc::Pmty_ident(Self::placeholder_lident_loc())),
             pmty_loc: LocIdx::default(),
-            pmty_attributes: Attributes::new(),
-        }
-    }
-
-    fn extract_fun_default(expr: &Expression) -> Option<ExprIdx> {
-        match &*expr.pexp_desc {
-            ExpressionDesc::Pexp_fun(inner) => inner.default,
-            _ => None,
-        }
-    }
-
-    fn extract_case_guards(expr: &Expression) -> Option<Box<[Option<ExprIdx>]>> {
-        match &*expr.pexp_desc {
-            ExpressionDesc::Pexp_match(inner) | ExpressionDesc::Pexp_try(inner) => {
-                let (_, cases) = &**inner;
-                if cases.iter().all(|case| case.pc_guard.is_none()) {
-                    None
-                } else {
-                    Some(
-                        cases
-                            .iter()
-                            .map(|case| case.pc_guard)
-                            .collect::<Vec<_>>()
-                            .into_boxed_slice(),
-                    )
-                }
-            }
-            _ => None,
-        }
-    }
-
-    fn extract_construct_arg(expr: &Expression) -> Option<ExprIdx> {
-        match &*expr.pexp_desc {
-            ExpressionDesc::Pexp_construct(_, arg) => *arg,
-            _ => None,
-        }
-    }
-
-    fn extract_variant_arg(expr: &Expression) -> Option<ExprIdx> {
-        match &*expr.pexp_desc {
-            ExpressionDesc::Pexp_variant(inner) => {
-                let (_, arg) = &**inner;
-                *arg
-            }
-            _ => None,
-        }
-    }
-
-    fn extract_record_spread(expr: &Expression) -> Option<ExprIdx> {
-        match &*expr.pexp_desc {
-            ExpressionDesc::Pexp_record(inner) => {
-                let (_, spread) = &**inner;
-                *spread
-            }
-            _ => None,
-        }
-    }
-
-    fn extract_if_else_branch(expr: &Expression) -> Option<ExprIdx> {
-        match &*expr.pexp_desc {
-            ExpressionDesc::Pexp_ifthenelse(inner) => {
-                let (_, _, else_branch) = &**inner;
-                *else_branch
-            }
-            _ => None,
-        }
-    }
-
-    fn extract_coerce_from_type(expr: &Expression) -> Option<CoreTypeIdx> {
-        match &*expr.pexp_desc {
-            ExpressionDesc::Pexp_coerce(inner) => {
-                let (_, from_type, _) = &**inner;
-                *from_type
-            }
-            _ => None,
         }
     }
 
@@ -1858,14 +2094,31 @@ impl ParseArena {
     /// Use this instead of `Box::new(expr)` for recursive AST references.
     #[inline]
     pub fn push_expr(&mut self, expr: Expression) -> ExprIdx {
-        let default = Self::extract_fun_default(&expr);
-        let case_guards = Self::extract_case_guards(&expr);
-        let construct_arg = Self::extract_construct_arg(&expr);
-        let variant_arg = Self::extract_variant_arg(&expr);
-        let record_spread = Self::extract_record_spread(&expr);
-        let if_else = Self::extract_if_else_branch(&expr);
-        let coerce_from = Self::extract_coerce_from_type(&expr);
-        let attrs = expr.pexp_attributes.clone();
+        self.push_expr_with_attrs(expr, Attributes::new())
+    }
+
+    /// Push an expression into the arena with side-table attributes.
+    #[inline]
+    pub fn push_expr_with_attrs(&mut self, expr: Expression, attrs: Attributes) -> ExprIdx {
+        let attrs = if attrs.is_empty() {
+            Self::take_pending_attrs(&mut self.pending_expr_attributes_by_loc, expr.pexp_loc)
+                .unwrap_or_else(Attributes::new)
+        } else {
+            attrs
+        };
+        let default = Self::take_pending_value(&mut self.pending_fun_defaults_by_loc, expr.pexp_loc);
+        let case_guards =
+            Self::take_pending_value(&mut self.pending_case_guards_by_loc, expr.pexp_loc);
+        let construct_arg =
+            Self::take_pending_value(&mut self.pending_construct_args_by_loc, expr.pexp_loc);
+        let variant_arg =
+            Self::take_pending_value(&mut self.pending_variant_args_by_loc, expr.pexp_loc);
+        let record_spread =
+            Self::take_pending_value(&mut self.pending_record_spreads_by_loc, expr.pexp_loc);
+        let if_else =
+            Self::take_pending_value(&mut self.pending_if_else_branches_by_loc, expr.pexp_loc);
+        let coerce_from =
+            Self::take_pending_value(&mut self.pending_coerce_from_types_by_loc, expr.pexp_loc);
         let idx = self.expressions.push(expr);
         self.expr_fun_defaults.push(default);
         self.expr_case_guards.push(case_guards);
@@ -1899,6 +2152,12 @@ impl ParseArena {
     /// Initialize a previously reserved expression slot.
     #[inline]
     pub fn initialize_expr(&mut self, idx: ExprIdx, expr: Expression) {
+        self.initialize_expr_with_attrs(idx, expr, Attributes::new());
+    }
+
+    /// Initialize a previously reserved expression slot with side-table attributes.
+    #[inline]
+    pub fn initialize_expr_with_attrs(&mut self, idx: ExprIdx, expr: Expression, attrs: Attributes) {
         let slot = idx.0 as usize;
         debug_assert!(slot < self.expr_fun_defaults.len());
         debug_assert!(slot < self.expr_case_guards.len());
@@ -1908,14 +2167,25 @@ impl ParseArena {
         debug_assert!(slot < self.expr_if_else_branches.len());
         debug_assert!(slot < self.expr_coerce_from_types.len());
         debug_assert!(slot < self.expr_attributes.len());
-        let default = Self::extract_fun_default(&expr);
-        let case_guards = Self::extract_case_guards(&expr);
-        let construct_arg = Self::extract_construct_arg(&expr);
-        let variant_arg = Self::extract_variant_arg(&expr);
-        let record_spread = Self::extract_record_spread(&expr);
-        let if_else = Self::extract_if_else_branch(&expr);
-        let coerce_from = Self::extract_coerce_from_type(&expr);
-        let attrs = expr.pexp_attributes.clone();
+        let attrs = if attrs.is_empty() {
+            Self::take_pending_attrs(&mut self.pending_expr_attributes_by_loc, expr.pexp_loc)
+                .unwrap_or_else(Attributes::new)
+        } else {
+            attrs
+        };
+        let default = Self::take_pending_value(&mut self.pending_fun_defaults_by_loc, expr.pexp_loc);
+        let case_guards =
+            Self::take_pending_value(&mut self.pending_case_guards_by_loc, expr.pexp_loc);
+        let construct_arg =
+            Self::take_pending_value(&mut self.pending_construct_args_by_loc, expr.pexp_loc);
+        let variant_arg =
+            Self::take_pending_value(&mut self.pending_variant_args_by_loc, expr.pexp_loc);
+        let record_spread =
+            Self::take_pending_value(&mut self.pending_record_spreads_by_loc, expr.pexp_loc);
+        let if_else =
+            Self::take_pending_value(&mut self.pending_if_else_branches_by_loc, expr.pexp_loc);
+        let coerce_from =
+            Self::take_pending_value(&mut self.pending_coerce_from_types_by_loc, expr.pexp_loc);
         self.expressions.initialize(idx, expr);
         self.expr_fun_defaults[slot] = default;
         self.expr_case_guards[slot] = case_guards;
@@ -1958,9 +2228,6 @@ impl ParseArena {
         if slot < self.expr_coerce_from_types.len() {
             self.expr_coerce_from_types[slot] = None;
         }
-        if slot < self.expr_attributes.len() {
-            self.expr_attributes[slot] = Attributes::new();
-        }
         self.expressions.get_mut(idx)
     }
 
@@ -1987,10 +2254,6 @@ impl ParseArena {
             .get(slot)
             .copied()
             .flatten()
-            .or_else(|| match &*self.get_expr(owner).pexp_desc {
-                ExpressionDesc::Pexp_fun(inner) => inner.default,
-                _ => None,
-            })
     }
 
     /// Attach sparse case guard data to a `Pexp_match`/`Pexp_try` expression node.
@@ -2021,13 +2284,6 @@ impl ParseArena {
             .and_then(|guards| guards.get(case_index))
             .copied()
             .flatten()
-            .or_else(|| match &*self.get_expr(owner).pexp_desc {
-                ExpressionDesc::Pexp_match(inner) | ExpressionDesc::Pexp_try(inner) => {
-                    let (_, cases) = &**inner;
-                    cases.get(case_index).and_then(|case| case.pc_guard)
-                }
-                _ => None,
-            })
     }
 
     /// Attach sparse constructor payload argument data to a construct expression node.
@@ -2046,10 +2302,6 @@ impl ParseArena {
             .get(slot)
             .copied()
             .flatten()
-            .or_else(|| match &*self.get_expr(owner).pexp_desc {
-                ExpressionDesc::Pexp_construct(_, arg) => *arg,
-                _ => None,
-            })
     }
 
     /// Attach sparse polymorphic variant payload argument data to a variant expression node.
@@ -2068,13 +2320,6 @@ impl ParseArena {
             .get(slot)
             .copied()
             .flatten()
-            .or_else(|| match &*self.get_expr(owner).pexp_desc {
-                ExpressionDesc::Pexp_variant(inner) => {
-                    let (_, arg) = &**inner;
-                    *arg
-                }
-                _ => None,
-            })
     }
 
     /// Attach sparse record spread/base expression data to a record expression node.
@@ -2093,13 +2338,6 @@ impl ParseArena {
             .get(slot)
             .copied()
             .flatten()
-            .or_else(|| match &*self.get_expr(owner).pexp_desc {
-                ExpressionDesc::Pexp_record(inner) => {
-                    let (_, spread) = &**inner;
-                    *spread
-                }
-                _ => None,
-            })
     }
 
     /// Attach sparse else-branch expression data to an if-then-else expression node.
@@ -2118,13 +2356,6 @@ impl ParseArena {
             .get(slot)
             .copied()
             .flatten()
-            .or_else(|| match &*self.get_expr(owner).pexp_desc {
-                ExpressionDesc::Pexp_ifthenelse(inner) => {
-                    let (_, _, else_branch) = &**inner;
-                    *else_branch
-                }
-                _ => None,
-            })
     }
 
     /// Attach sparse source type data to a coerce expression node.
@@ -2143,13 +2374,6 @@ impl ParseArena {
             .get(slot)
             .copied()
             .flatten()
-            .or_else(|| match &*self.get_expr(owner).pexp_desc {
-                ExpressionDesc::Pexp_coerce(inner) => {
-                    let (_, from_type, _) = &**inner;
-                    *from_type
-                }
-                _ => None,
-            })
     }
 
     /// Attach sparse expression attributes to an expression node.
@@ -2162,101 +2386,58 @@ impl ParseArena {
     }
 
     /// Get sparse expression attributes for an expression node.
-    ///
-    /// Falls back to inline AST fields when sparse entries are absent.
     pub fn expr_attributes(&self, owner: ExprIdx) -> &Attributes {
-        let slot = owner.0 as usize;
-        if let Some(attrs) = self.expr_attributes.get(slot) {
-            if !attrs.is_empty() {
-                return attrs;
-            }
-        }
-        &self.get_expr(owner).pexp_attributes
+        self.expr_attributes
+            .get(owner.0 as usize)
+            .expect("expr attribute side table missing owner index")
     }
 
-    /// Rebuild expression sparse side tables from inline AST fields.
+    /// Ensure expression sparse side tables are sized for all expressions.
     ///
-    /// This is useful after transformations that directly mutate arena nodes.
-    pub fn resync_expr_sparse_side_tables_from_inline(&mut self) {
-        let exprs = self.expressions.as_slice();
-        self.expr_fun_defaults.clear();
-        self.expr_case_guards.clear();
-        self.expr_construct_args.clear();
-        self.expr_variant_args.clear();
-        self.expr_record_spreads.clear();
-        self.expr_if_else_branches.clear();
-        self.expr_coerce_from_types.clear();
-        self.expr_attributes.clear();
-
-        self.expr_fun_defaults.reserve(exprs.len());
-        self.expr_case_guards.reserve(exprs.len());
-        self.expr_construct_args.reserve(exprs.len());
-        self.expr_variant_args.reserve(exprs.len());
-        self.expr_record_spreads.reserve(exprs.len());
-        self.expr_if_else_branches.reserve(exprs.len());
-        self.expr_coerce_from_types.reserve(exprs.len());
-        self.expr_attributes.reserve(exprs.len());
-
-        for expr in exprs {
-            self.expr_fun_defaults.push(Self::extract_fun_default(expr));
-            self.expr_case_guards.push(Self::extract_case_guards(expr));
-            self.expr_construct_args.push(Self::extract_construct_arg(expr));
-            self.expr_variant_args.push(Self::extract_variant_arg(expr));
-            self.expr_record_spreads.push(Self::extract_record_spread(expr));
-            self.expr_if_else_branches
-                .push(Self::extract_if_else_branch(expr));
-            self.expr_coerce_from_types
-                .push(Self::extract_coerce_from_type(expr));
-            self.expr_attributes.push(expr.pexp_attributes.clone());
+    /// In strict sparse mode all sparse data lives only in side tables.
+    pub fn ensure_expr_sparse_side_table_capacity(&mut self) {
+        let expr_count = self.expressions.len();
+        if self.expr_fun_defaults.len() < expr_count {
+            self.expr_fun_defaults.resize(expr_count, None);
         }
-    }
-
-    /// Strip duplicated inline sparse expression fields once side tables are synced.
-    ///
-    /// This removes the duplicated storage for fields already tracked in sparse tables.
-    pub fn strip_expr_sparse_inline_fields(&mut self) {
-        self.resync_expr_sparse_side_tables_from_inline();
-        for i in 0..self.expressions.len() {
-            let idx = ExprIdx(i as u32);
-            let expr = self.expressions.get_mut(idx);
-            match &mut *expr.pexp_desc {
-                ExpressionDesc::Pexp_fun(inner) => {
-                    inner.default = None;
-                }
-                ExpressionDesc::Pexp_match(inner) | ExpressionDesc::Pexp_try(inner) => {
-                    let (_, cases) = &mut **inner;
-                    for case in cases.iter_mut() {
-                        case.pc_guard = None;
-                    }
-                }
-                ExpressionDesc::Pexp_construct(_, arg) => {
-                    *arg = None;
-                }
-                ExpressionDesc::Pexp_variant(inner) => {
-                    let (_, arg) = &mut **inner;
-                    *arg = None;
-                }
-                ExpressionDesc::Pexp_record(inner) => {
-                    let (_, spread) = &mut **inner;
-                    *spread = None;
-                }
-                ExpressionDesc::Pexp_ifthenelse(inner) => {
-                    let (_, _, else_branch) = &mut **inner;
-                    *else_branch = None;
-                }
-                ExpressionDesc::Pexp_coerce(inner) => {
-                    let (_, from_type, _) = &mut **inner;
-                    *from_type = None;
-                }
-                _ => {}
-            }
+        if self.expr_case_guards.len() < expr_count {
+            self.expr_case_guards.resize(expr_count, None);
+        }
+        if self.expr_construct_args.len() < expr_count {
+            self.expr_construct_args.resize(expr_count, None);
+        }
+        if self.expr_variant_args.len() < expr_count {
+            self.expr_variant_args.resize(expr_count, None);
+        }
+        if self.expr_record_spreads.len() < expr_count {
+            self.expr_record_spreads.resize(expr_count, None);
+        }
+        if self.expr_if_else_branches.len() < expr_count {
+            self.expr_if_else_branches.resize(expr_count, None);
+        }
+        if self.expr_coerce_from_types.len() < expr_count {
+            self.expr_coerce_from_types.resize(expr_count, None);
+        }
+        if self.expr_attributes.len() < expr_count {
+            self.expr_attributes.resize(expr_count, Attributes::new());
         }
     }
 
     /// Push a pattern into the arena and return its index.
     #[inline]
     pub fn push_pat(&mut self, pat: Pattern) -> PatIdx {
-        let attrs = pat.ppat_attributes.clone();
+        self.push_pat_with_attrs(pat, Attributes::new())
+    }
+
+    /// Push a pattern into the arena with side-table attributes.
+    #[inline]
+    pub fn push_pat_with_attrs(&mut self, pat: Pattern, attrs: Attributes) -> PatIdx {
+        let attrs = if attrs.is_empty() {
+            Self::take_pending_attrs(&mut self.pending_pat_attributes_by_loc, pat.ppat_loc)
+                .unwrap_or_else(Attributes::new)
+        } else {
+            attrs
+        };
         let idx = self.patterns.push(pat);
         self.pat_attributes.push(attrs);
         idx
@@ -2273,9 +2454,20 @@ impl ParseArena {
     /// Initialize a previously reserved pattern slot.
     #[inline]
     pub fn initialize_pat(&mut self, idx: PatIdx, pat: Pattern) {
+        self.initialize_pat_with_attrs(idx, pat, Attributes::new());
+    }
+
+    /// Initialize a previously reserved pattern slot with side-table attributes.
+    #[inline]
+    pub fn initialize_pat_with_attrs(&mut self, idx: PatIdx, pat: Pattern, attrs: Attributes) {
         let slot = idx.0 as usize;
         debug_assert!(slot < self.pat_attributes.len());
-        let attrs = pat.ppat_attributes.clone();
+        let attrs = if attrs.is_empty() {
+            Self::take_pending_attrs(&mut self.pending_pat_attributes_by_loc, pat.ppat_loc)
+                .unwrap_or_else(Attributes::new)
+        } else {
+            attrs
+        };
         self.patterns.initialize(idx, pat);
         self.pat_attributes[slot] = attrs;
     }
@@ -2289,10 +2481,6 @@ impl ParseArena {
     /// Get a mutable pattern by index.
     #[inline]
     pub fn get_pat_mut(&mut self, idx: PatIdx) -> &mut Pattern {
-        let slot = idx.0 as usize;
-        if slot < self.pat_attributes.len() {
-            self.pat_attributes[slot] = Attributes::new();
-        }
         self.patterns.get_mut(idx)
     }
 
@@ -2304,7 +2492,18 @@ impl ParseArena {
     /// Push a core type into the arena and return its index.
     #[inline]
     pub fn push_core_type(&mut self, typ: CoreType) -> CoreTypeIdx {
-        let attrs = typ.ptyp_attributes.clone();
+        self.push_core_type_with_attrs(typ, Attributes::new())
+    }
+
+    /// Push a core type into the arena with side-table attributes.
+    #[inline]
+    pub fn push_core_type_with_attrs(&mut self, typ: CoreType, attrs: Attributes) -> CoreTypeIdx {
+        let attrs = if attrs.is_empty() {
+            Self::take_pending_attrs(&mut self.pending_core_type_attributes_by_loc, typ.ptyp_loc)
+                .unwrap_or_else(Attributes::new)
+        } else {
+            attrs
+        };
         let idx = self.core_types.push(typ);
         self.core_type_attributes.push(attrs);
         idx
@@ -2321,9 +2520,25 @@ impl ParseArena {
     /// Initialize a previously reserved core type slot.
     #[inline]
     pub fn initialize_core_type(&mut self, idx: CoreTypeIdx, typ: CoreType) {
+        self.initialize_core_type_with_attrs(idx, typ, Attributes::new());
+    }
+
+    /// Initialize a previously reserved core type slot with side-table attributes.
+    #[inline]
+    pub fn initialize_core_type_with_attrs(
+        &mut self,
+        idx: CoreTypeIdx,
+        typ: CoreType,
+        attrs: Attributes,
+    ) {
         let slot = idx.0 as usize;
         debug_assert!(slot < self.core_type_attributes.len());
-        let attrs = typ.ptyp_attributes.clone();
+        let attrs = if attrs.is_empty() {
+            Self::take_pending_attrs(&mut self.pending_core_type_attributes_by_loc, typ.ptyp_loc)
+                .unwrap_or_else(Attributes::new)
+        } else {
+            attrs
+        };
         self.core_types.initialize(idx, typ);
         self.core_type_attributes[slot] = attrs;
     }
@@ -2337,10 +2552,6 @@ impl ParseArena {
     /// Get a mutable core type by index.
     #[inline]
     pub fn get_core_type_mut(&mut self, idx: CoreTypeIdx) -> &mut CoreType {
-        let slot = idx.0 as usize;
-        if slot < self.core_type_attributes.len() {
-            self.core_type_attributes[slot] = Attributes::new();
-        }
         self.core_types.get_mut(idx)
     }
 
@@ -2352,7 +2563,18 @@ impl ParseArena {
     /// Push a module expression into the arena and return its index.
     #[inline]
     pub fn push_mod_expr(&mut self, me: ModuleExpr) -> ModExprIdx {
-        let attrs = me.pmod_attributes.clone();
+        self.push_mod_expr_with_attrs(me, Attributes::new())
+    }
+
+    /// Push a module expression into the arena with side-table attributes.
+    #[inline]
+    pub fn push_mod_expr_with_attrs(&mut self, me: ModuleExpr, attrs: Attributes) -> ModExprIdx {
+        let attrs = if attrs.is_empty() {
+            Self::take_pending_attrs(&mut self.pending_mod_expr_attributes_by_loc, me.pmod_loc)
+                .unwrap_or_else(Attributes::new)
+        } else {
+            attrs
+        };
         let idx = self.mod_exprs.push(me);
         self.mod_expr_attributes.push(attrs);
         idx
@@ -2369,9 +2591,25 @@ impl ParseArena {
     /// Initialize a previously reserved module expression slot.
     #[inline]
     pub fn initialize_mod_expr(&mut self, idx: ModExprIdx, me: ModuleExpr) {
+        self.initialize_mod_expr_with_attrs(idx, me, Attributes::new());
+    }
+
+    /// Initialize a previously reserved module expression slot with side-table attributes.
+    #[inline]
+    pub fn initialize_mod_expr_with_attrs(
+        &mut self,
+        idx: ModExprIdx,
+        me: ModuleExpr,
+        attrs: Attributes,
+    ) {
         let slot = idx.0 as usize;
         debug_assert!(slot < self.mod_expr_attributes.len());
-        let attrs = me.pmod_attributes.clone();
+        let attrs = if attrs.is_empty() {
+            Self::take_pending_attrs(&mut self.pending_mod_expr_attributes_by_loc, me.pmod_loc)
+                .unwrap_or_else(Attributes::new)
+        } else {
+            attrs
+        };
         self.mod_exprs.initialize(idx, me);
         self.mod_expr_attributes[slot] = attrs;
     }
@@ -2385,17 +2623,24 @@ impl ParseArena {
     /// Get a mutable module expression by index.
     #[inline]
     pub fn get_mod_expr_mut(&mut self, idx: ModExprIdx) -> &mut ModuleExpr {
-        let slot = idx.0 as usize;
-        if slot < self.mod_expr_attributes.len() {
-            self.mod_expr_attributes[slot] = Attributes::new();
-        }
         self.mod_exprs.get_mut(idx)
     }
 
     /// Push a module type into the arena and return its index.
     #[inline]
     pub fn push_mod_type(&mut self, mt: ModuleType) -> ModTypeIdx {
-        let attrs = mt.pmty_attributes.clone();
+        self.push_mod_type_with_attrs(mt, Attributes::new())
+    }
+
+    /// Push a module type into the arena with side-table attributes.
+    #[inline]
+    pub fn push_mod_type_with_attrs(&mut self, mt: ModuleType, attrs: Attributes) -> ModTypeIdx {
+        let attrs = if attrs.is_empty() {
+            Self::take_pending_attrs(&mut self.pending_mod_type_attributes_by_loc, mt.pmty_loc)
+                .unwrap_or_else(Attributes::new)
+        } else {
+            attrs
+        };
         let idx = self.mod_types.push(mt);
         self.mod_type_attributes.push(attrs);
         idx
@@ -2412,9 +2657,25 @@ impl ParseArena {
     /// Initialize a previously reserved module type slot.
     #[inline]
     pub fn initialize_mod_type(&mut self, idx: ModTypeIdx, mt: ModuleType) {
+        self.initialize_mod_type_with_attrs(idx, mt, Attributes::new());
+    }
+
+    /// Initialize a previously reserved module type slot with side-table attributes.
+    #[inline]
+    pub fn initialize_mod_type_with_attrs(
+        &mut self,
+        idx: ModTypeIdx,
+        mt: ModuleType,
+        attrs: Attributes,
+    ) {
         let slot = idx.0 as usize;
         debug_assert!(slot < self.mod_type_attributes.len());
-        let attrs = mt.pmty_attributes.clone();
+        let attrs = if attrs.is_empty() {
+            Self::take_pending_attrs(&mut self.pending_mod_type_attributes_by_loc, mt.pmty_loc)
+                .unwrap_or_else(Attributes::new)
+        } else {
+            attrs
+        };
         self.mod_types.initialize(idx, mt);
         self.mod_type_attributes[slot] = attrs;
     }
@@ -2428,10 +2689,6 @@ impl ParseArena {
     /// Get a mutable module type by index.
     #[inline]
     pub fn get_mod_type_mut(&mut self, idx: ModTypeIdx) -> &mut ModuleType {
-        let slot = idx.0 as usize;
-        if slot < self.mod_type_attributes.len() {
-            self.mod_type_attributes[slot] = Attributes::new();
-        }
         self.mod_types.get_mut(idx)
     }
 
@@ -2445,16 +2702,10 @@ impl ParseArena {
     }
 
     /// Get sparse pattern attributes for a pattern node.
-    ///
-    /// Falls back to inline AST fields when sparse entries are absent.
     pub fn pat_attributes(&self, owner: PatIdx) -> &Attributes {
-        let slot = owner.0 as usize;
-        if let Some(attrs) = self.pat_attributes.get(slot) {
-            if !attrs.is_empty() {
-                return attrs;
-            }
-        }
-        &self.get_pat(owner).ppat_attributes
+        self.pat_attributes
+            .get(owner.0 as usize)
+            .expect("pattern attribute side table missing owner index")
     }
 
     /// Attach sparse core type attributes to a core type node.
@@ -2468,16 +2719,10 @@ impl ParseArena {
     }
 
     /// Get sparse core type attributes for a core type node.
-    ///
-    /// Falls back to inline AST fields when sparse entries are absent.
     pub fn core_type_attributes(&self, owner: CoreTypeIdx) -> &Attributes {
-        let slot = owner.0 as usize;
-        if let Some(attrs) = self.core_type_attributes.get(slot) {
-            if !attrs.is_empty() {
-                return attrs;
-            }
-        }
-        &self.get_core_type(owner).ptyp_attributes
+        self.core_type_attributes
+            .get(owner.0 as usize)
+            .expect("core-type attribute side table missing owner index")
     }
 
     /// Attach sparse module expression attributes to a module expression node.
@@ -2491,16 +2736,10 @@ impl ParseArena {
     }
 
     /// Get sparse module expression attributes for a module expression node.
-    ///
-    /// Falls back to inline AST fields when sparse entries are absent.
     pub fn mod_expr_attributes(&self, owner: ModExprIdx) -> &Attributes {
-        let slot = owner.0 as usize;
-        if let Some(attrs) = self.mod_expr_attributes.get(slot) {
-            if !attrs.is_empty() {
-                return attrs;
-            }
-        }
-        &self.get_mod_expr(owner).pmod_attributes
+        self.mod_expr_attributes
+            .get(owner.0 as usize)
+            .expect("module-expr attribute side table missing owner index")
     }
 
     /// Attach sparse module type attributes to a module type node.
@@ -2514,79 +2753,39 @@ impl ParseArena {
     }
 
     /// Get sparse module type attributes for a module type node.
-    ///
-    /// Falls back to inline AST fields when sparse entries are absent.
     pub fn mod_type_attributes(&self, owner: ModTypeIdx) -> &Attributes {
-        let slot = owner.0 as usize;
-        if let Some(attrs) = self.mod_type_attributes.get(slot) {
-            if !attrs.is_empty() {
-                return attrs;
-            }
-        }
-        &self.get_mod_type(owner).pmty_attributes
+        self.mod_type_attributes
+            .get(owner.0 as usize)
+            .expect("module-type attribute side table missing owner index")
     }
 
-    /// Rebuild sparse attribute side tables from inline AST fields.
-    ///
-    /// This is useful after transformations that directly mutate arena nodes.
+    /// Ensure sparse attribute side tables stay aligned with arena node counts.
     pub fn resync_sparse_attribute_side_tables_from_inline(&mut self) {
-        self.expr_attributes.clear();
-        self.expr_attributes.reserve(self.expressions.len());
-        for expr in self.expressions.as_slice() {
-            self.expr_attributes.push(expr.pexp_attributes.clone());
+        if self.expr_attributes.len() < self.expressions.len() {
+            self.expr_attributes
+                .resize(self.expressions.len(), Attributes::new());
         }
-
-        self.pat_attributes.clear();
-        self.pat_attributes.reserve(self.patterns.len());
-        for pat in self.patterns.as_slice() {
-            self.pat_attributes.push(pat.ppat_attributes.clone());
+        if self.pat_attributes.len() < self.patterns.len() {
+            self.pat_attributes
+                .resize(self.patterns.len(), Attributes::new());
         }
-
-        self.core_type_attributes.clear();
-        self.core_type_attributes.reserve(self.core_types.len());
-        for typ in self.core_types.as_slice() {
-            self.core_type_attributes.push(typ.ptyp_attributes.clone());
+        if self.core_type_attributes.len() < self.core_types.len() {
+            self.core_type_attributes
+                .resize(self.core_types.len(), Attributes::new());
         }
-
-        self.mod_expr_attributes.clear();
-        self.mod_expr_attributes.reserve(self.mod_exprs.len());
-        for me in self.mod_exprs.as_slice() {
-            self.mod_expr_attributes.push(me.pmod_attributes.clone());
+        if self.mod_expr_attributes.len() < self.mod_exprs.len() {
+            self.mod_expr_attributes
+                .resize(self.mod_exprs.len(), Attributes::new());
         }
-
-        self.mod_type_attributes.clear();
-        self.mod_type_attributes.reserve(self.mod_types.len());
-        for mt in self.mod_types.as_slice() {
-            self.mod_type_attributes.push(mt.pmty_attributes.clone());
+        if self.mod_type_attributes.len() < self.mod_types.len() {
+            self.mod_type_attributes
+                .resize(self.mod_types.len(), Attributes::new());
         }
     }
 
-    /// Strip duplicated inline arena-node attributes once side tables are synced.
-    ///
-    /// This removes duplicated storage for attributes already tracked in sparse tables.
+    /// No-op in strict side-table mode.
     pub fn strip_arena_node_inline_attributes(&mut self) {
         self.resync_sparse_attribute_side_tables_from_inline();
-
-        for i in 0..self.expressions.len() {
-            let idx = ExprIdx(i as u32);
-            self.expressions.get_mut(idx).pexp_attributes = Attributes::new();
-        }
-        for i in 0..self.patterns.len() {
-            let idx = PatIdx(i as u32);
-            self.patterns.get_mut(idx).ppat_attributes = Attributes::new();
-        }
-        for i in 0..self.core_types.len() {
-            let idx = CoreTypeIdx(i as u32);
-            self.core_types.get_mut(idx).ptyp_attributes = Attributes::new();
-        }
-        for i in 0..self.mod_exprs.len() {
-            let idx = ModExprIdx(i as u32);
-            self.mod_exprs.get_mut(idx).pmod_attributes = Attributes::new();
-        }
-        for i in 0..self.mod_types.len() {
-            let idx = ModTypeIdx(i as u32);
-            self.mod_types.get_mut(idx).pmty_attributes = Attributes::new();
-        }
     }
 }
 
@@ -2667,7 +2866,6 @@ mod tests {
                 loc: LocIdx::default(),
             })),
             pexp_loc: LocIdx::default(),
-            pexp_attributes: Attributes::new(),
         }
     }
 
@@ -2861,13 +3059,12 @@ mod tests {
     }
 
     #[test]
-    fn test_sparse_expr_side_tables_seed_from_expr_and_fallback_after_mutation() {
+    fn test_sparse_expr_side_tables_explicit_storage_after_mutation() {
         let mut arena = ParseArena::new();
 
         let lhs = arena.push_pat(Pattern {
             ppat_desc: Box::new(PatternDesc::Ppat_any),
             ppat_loc: LocIdx::default(),
-            ppat_attributes: Attributes::new(),
         });
         let rhs_expr = ident_expr(&mut arena, "rhs");
         let rhs = arena.push_expr(rhs_expr);
@@ -2876,20 +3073,18 @@ mod tests {
         let fun_owner = arena.push_expr(Expression {
             pexp_desc: Box::new(ExpressionDesc::Pexp_fun(Box::new(PexpFun {
                 arg_label: ArgLabel::Nolabel,
-                default: Some(default_expr),
                 lhs,
                 rhs,
                 arity: arena.static_arity_none(),
                 is_async: false,
             }))),
             pexp_loc: LocIdx::default(),
-            pexp_attributes: Attributes::new(),
         });
+        arena.set_fun_default(fun_owner, Some(default_expr));
 
         let case_lhs = arena.push_pat(Pattern {
             ppat_desc: Box::new(PatternDesc::Ppat_any),
             ppat_loc: LocIdx::default(),
-            ppat_attributes: Attributes::new(),
         });
         let case_rhs_node = ident_expr(&mut arena, "case_rhs");
         let case_rhs = arena.push_expr(case_rhs_node);
@@ -2901,63 +3096,48 @@ mod tests {
                 vec![Case {
                     pc_bar: None,
                     pc_lhs: case_lhs,
-                    pc_guard: Some(guard_expr),
                     pc_rhs: case_rhs,
                 }],
             )))),
             pexp_loc: LocIdx::default(),
-            pexp_attributes: Attributes::new(),
         });
+        arena.set_case_guards(match_owner, vec![Some(guard_expr)]);
 
         let ctor_lid = Located {
             txt: arena.push_lident("Ctor"),
             loc: LocIdx::default(),
         };
         let construct_owner = arena.push_expr(Expression {
-            pexp_desc: Box::new(ExpressionDesc::Pexp_construct(ctor_lid, Some(default_expr))),
+            pexp_desc: Box::new(ExpressionDesc::Pexp_construct(ctor_lid)),
             pexp_loc: LocIdx::default(),
-            pexp_attributes: Attributes::new(),
         });
+        arena.set_construct_arg(construct_owner, Some(default_expr));
 
         let variant_owner = arena.push_expr(Expression {
-            pexp_desc: Box::new(ExpressionDesc::Pexp_variant(Box::new((
-                "Tag".into(),
-                Some(guard_expr),
-            )))),
+            pexp_desc: Box::new(ExpressionDesc::Pexp_variant(Box::new("Tag".into()))),
             pexp_loc: LocIdx::default(),
-            pexp_attributes: Attributes::new(),
         });
+        arena.set_variant_arg(variant_owner, Some(guard_expr));
 
         let record_owner = arena.push_expr(Expression {
-            pexp_desc: Box::new(ExpressionDesc::Pexp_record(Box::new((
-                vec![],
-                Some(default_expr),
-            )))),
+            pexp_desc: Box::new(ExpressionDesc::Pexp_record(Box::new(vec![]))),
             pexp_loc: LocIdx::default(),
-            pexp_attributes: Attributes::new(),
         });
+        arena.set_record_spread(record_owner, Some(default_expr));
 
         let if_owner = arena.push_expr(Expression {
-            pexp_desc: Box::new(ExpressionDesc::Pexp_ifthenelse(Box::new((
-                rhs,
-                case_rhs,
-                Some(guard_expr),
-            )))),
+            pexp_desc: Box::new(ExpressionDesc::Pexp_ifthenelse(Box::new((rhs, case_rhs)))),
             pexp_loc: LocIdx::default(),
-            pexp_attributes: Attributes::new(),
         });
+        arena.set_if_else_branch(if_owner, Some(guard_expr));
 
         let from_type = arena.push_core_type(ParseArena::placeholder_core_type());
         let to_type = arena.push_core_type(ParseArena::placeholder_core_type());
         let coerce_owner = arena.push_expr(Expression {
-            pexp_desc: Box::new(ExpressionDesc::Pexp_coerce(Box::new((
-                rhs,
-                Some(from_type),
-                to_type,
-            )))),
+            pexp_desc: Box::new(ExpressionDesc::Pexp_coerce(Box::new((rhs, to_type)))),
             pexp_loc: LocIdx::default(),
-            pexp_attributes: Attributes::new(),
         });
+        arena.set_coerce_from_type(coerce_owner, Some(from_type));
 
         assert_eq!(arena.fun_default(fun_owner), Some(default_expr));
         assert_eq!(arena.case_guard(match_owner, 0), Some(guard_expr));
@@ -2967,7 +3147,7 @@ mod tests {
         assert_eq!(arena.if_else_branch(if_owner), Some(guard_expr));
         assert_eq!(arena.coerce_from_type(coerce_owner), Some(from_type));
 
-        // get_expr_mut clears sparse cache entries; fallback to inline fields must preserve behavior.
+        // get_expr_mut clears sparse side-table entries to force explicit re-registration.
         let _ = arena.get_expr_mut(fun_owner);
         let _ = arena.get_expr_mut(match_owner);
         let _ = arena.get_expr_mut(construct_owner);
@@ -2975,6 +3155,22 @@ mod tests {
         let _ = arena.get_expr_mut(record_owner);
         let _ = arena.get_expr_mut(if_owner);
         let _ = arena.get_expr_mut(coerce_owner);
+
+        assert_eq!(arena.fun_default(fun_owner), None);
+        assert_eq!(arena.case_guard(match_owner, 0), None);
+        assert_eq!(arena.construct_arg(construct_owner), None);
+        assert_eq!(arena.variant_arg(variant_owner), None);
+        assert_eq!(arena.record_spread(record_owner), None);
+        assert_eq!(arena.if_else_branch(if_owner), None);
+        assert_eq!(arena.coerce_from_type(coerce_owner), None);
+
+        arena.set_fun_default(fun_owner, Some(default_expr));
+        arena.set_case_guards(match_owner, vec![Some(guard_expr)]);
+        arena.set_construct_arg(construct_owner, Some(default_expr));
+        arena.set_variant_arg(variant_owner, Some(guard_expr));
+        arena.set_record_spread(record_owner, Some(default_expr));
+        arena.set_if_else_branch(if_owner, Some(guard_expr));
+        arena.set_coerce_from_type(coerce_owner, Some(from_type));
 
         assert_eq!(arena.fun_default(fun_owner), Some(default_expr));
         assert_eq!(arena.case_guard(match_owner, 0), Some(guard_expr));
@@ -3018,13 +3214,12 @@ mod tests {
     }
 
     #[test]
-    fn test_strip_expr_sparse_inline_fields_keeps_side_table_values() {
+    fn test_ensure_expr_sparse_side_table_capacity_keeps_side_table_values() {
         let mut arena = ParseArena::new();
 
         let lhs = arena.push_pat(Pattern {
             ppat_desc: Box::new(PatternDesc::Ppat_any),
             ppat_loc: LocIdx::default(),
-            ppat_attributes: Attributes::new(),
         });
         let rhs_expr = ident_expr(&mut arena, "rhs");
         let rhs = arena.push_expr(rhs_expr);
@@ -3036,20 +3231,18 @@ mod tests {
         let fun_owner = arena.push_expr(Expression {
             pexp_desc: Box::new(ExpressionDesc::Pexp_fun(Box::new(PexpFun {
                 arg_label: ArgLabel::Nolabel,
-                default: Some(default_expr),
                 lhs,
                 rhs,
                 arity: arena.static_arity_none(),
                 is_async: false,
             }))),
             pexp_loc: LocIdx::default(),
-            pexp_attributes: Attributes::new(),
         });
+        arena.set_fun_default(fun_owner, Some(default_expr));
 
         let case_lhs = arena.push_pat(Pattern {
             ppat_desc: Box::new(PatternDesc::Ppat_any),
             ppat_loc: LocIdx::default(),
-            ppat_attributes: Attributes::new(),
         });
         let case_rhs_expr = ident_expr(&mut arena, "case_rhs");
         let case_rhs = arena.push_expr(case_rhs_expr);
@@ -3059,61 +3252,46 @@ mod tests {
                 vec![Case {
                     pc_bar: None,
                     pc_lhs: case_lhs,
-                    pc_guard: Some(guard_expr),
                     pc_rhs: case_rhs,
                 }],
             )))),
             pexp_loc: LocIdx::default(),
-            pexp_attributes: Attributes::new(),
         });
+        arena.set_case_guards(match_owner, vec![Some(guard_expr)]);
 
         let ctor_lid = Located {
             txt: arena.push_lident("Ctor"),
             loc: LocIdx::default(),
         };
         let construct_owner = arena.push_expr(Expression {
-            pexp_desc: Box::new(ExpressionDesc::Pexp_construct(ctor_lid, Some(default_expr))),
+            pexp_desc: Box::new(ExpressionDesc::Pexp_construct(ctor_lid)),
             pexp_loc: LocIdx::default(),
-            pexp_attributes: Attributes::new(),
         });
+        arena.set_construct_arg(construct_owner, Some(default_expr));
         let variant_owner = arena.push_expr(Expression {
-            pexp_desc: Box::new(ExpressionDesc::Pexp_variant(Box::new((
-                "Tag".into(),
-                Some(guard_expr),
-            )))),
+            pexp_desc: Box::new(ExpressionDesc::Pexp_variant(Box::new("Tag".into()))),
             pexp_loc: LocIdx::default(),
-            pexp_attributes: Attributes::new(),
         });
+        arena.set_variant_arg(variant_owner, Some(guard_expr));
         let record_owner = arena.push_expr(Expression {
-            pexp_desc: Box::new(ExpressionDesc::Pexp_record(Box::new((
-                vec![],
-                Some(default_expr),
-            )))),
+            pexp_desc: Box::new(ExpressionDesc::Pexp_record(Box::new(vec![]))),
             pexp_loc: LocIdx::default(),
-            pexp_attributes: Attributes::new(),
         });
+        arena.set_record_spread(record_owner, Some(default_expr));
         let if_owner = arena.push_expr(Expression {
-            pexp_desc: Box::new(ExpressionDesc::Pexp_ifthenelse(Box::new((
-                rhs,
-                case_rhs,
-                Some(guard_expr),
-            )))),
+            pexp_desc: Box::new(ExpressionDesc::Pexp_ifthenelse(Box::new((rhs, case_rhs)))),
             pexp_loc: LocIdx::default(),
-            pexp_attributes: Attributes::new(),
         });
+        arena.set_if_else_branch(if_owner, Some(guard_expr));
         let from_type = arena.push_core_type(ParseArena::placeholder_core_type());
         let to_type = arena.push_core_type(ParseArena::placeholder_core_type());
         let coerce_owner = arena.push_expr(Expression {
-            pexp_desc: Box::new(ExpressionDesc::Pexp_coerce(Box::new((
-                rhs,
-                Some(from_type),
-                to_type,
-            )))),
+            pexp_desc: Box::new(ExpressionDesc::Pexp_coerce(Box::new((rhs, to_type)))),
             pexp_loc: LocIdx::default(),
-            pexp_attributes: Attributes::new(),
         });
+        arena.set_coerce_from_type(coerce_owner, Some(from_type));
 
-        arena.strip_expr_sparse_inline_fields();
+        arena.ensure_expr_sparse_side_table_capacity();
 
         assert_eq!(arena.fun_default(fun_owner), Some(default_expr));
         assert_eq!(arena.case_guard(match_owner, 0), Some(guard_expr));
@@ -3123,41 +3301,26 @@ mod tests {
         assert_eq!(arena.if_else_branch(if_owner), Some(guard_expr));
         assert_eq!(arena.coerce_from_type(coerce_owner), Some(from_type));
 
-        if let ExpressionDesc::Pexp_fun(inner) = &*arena.get_expr(fun_owner).pexp_desc {
-            assert_eq!(inner.default, None);
-        } else {
-            panic!("expected Pexp_fun");
-        }
-        if let ExpressionDesc::Pexp_match(inner) = &*arena.get_expr(match_owner).pexp_desc {
-            assert_eq!(inner.1[0].pc_guard, None);
-        } else {
-            panic!("expected Pexp_match");
-        }
-        if let ExpressionDesc::Pexp_construct(_, arg) = &*arena.get_expr(construct_owner).pexp_desc {
-            assert_eq!(*arg, None);
-        } else {
-            panic!("expected Pexp_construct");
-        }
-        if let ExpressionDesc::Pexp_variant(inner) = &*arena.get_expr(variant_owner).pexp_desc {
-            assert_eq!(inner.1, None);
-        } else {
-            panic!("expected Pexp_variant");
-        }
-        if let ExpressionDesc::Pexp_record(inner) = &*arena.get_expr(record_owner).pexp_desc {
-            assert_eq!(inner.1, None);
-        } else {
-            panic!("expected Pexp_record");
-        }
-        if let ExpressionDesc::Pexp_ifthenelse(inner) = &*arena.get_expr(if_owner).pexp_desc {
-            assert_eq!(inner.2, None);
-        } else {
-            panic!("expected Pexp_ifthenelse");
-        }
-        if let ExpressionDesc::Pexp_coerce(inner) = &*arena.get_expr(coerce_owner).pexp_desc {
-            assert_eq!(inner.1, None);
-        } else {
-            panic!("expected Pexp_coerce");
-        }
+        assert!(matches!(
+            &*arena.get_expr(construct_owner).pexp_desc,
+            ExpressionDesc::Pexp_construct(_)
+        ));
+        assert!(matches!(
+            &*arena.get_expr(variant_owner).pexp_desc,
+            ExpressionDesc::Pexp_variant(_)
+        ));
+        assert!(matches!(
+            &*arena.get_expr(record_owner).pexp_desc,
+            ExpressionDesc::Pexp_record(_)
+        ));
+        assert!(matches!(
+            &*arena.get_expr(if_owner).pexp_desc,
+            ExpressionDesc::Pexp_ifthenelse(_)
+        ));
+        assert!(matches!(
+            &*arena.get_expr(coerce_owner).pexp_desc,
+            ExpressionDesc::Pexp_coerce(_)
+        ));
     }
 
     #[test]
@@ -3172,17 +3335,14 @@ mod tests {
                 loc: LocIdx::default(),
             })),
             pexp_loc: LocIdx::default(),
-            pexp_attributes: Attributes::from_vec(vec![attr.clone()]),
         });
         let pat_owner = arena.push_pat(Pattern {
             ppat_desc: Box::new(PatternDesc::Ppat_any),
             ppat_loc: LocIdx::default(),
-            ppat_attributes: Attributes::from_vec(vec![attr.clone()]),
         });
         let type_owner = arena.push_core_type(CoreType {
             ptyp_desc: Box::new(CoreTypeDesc::Ptyp_any),
             ptyp_loc: LocIdx::default(),
-            ptyp_attributes: Attributes::from_vec(vec![attr.clone()]),
         });
         let m_lid = arena.push_lident("M");
         let mod_expr_owner = arena.push_mod_expr(ModuleExpr {
@@ -3191,7 +3351,6 @@ mod tests {
                 loc: LocIdx::default(),
             })),
             pmod_loc: LocIdx::default(),
-            pmod_attributes: Attributes::from_vec(vec![attr.clone()]),
         });
         let s_lid = arena.push_lident("S");
         let mod_type_owner = arena.push_mod_type(ModuleType {
@@ -3200,16 +3359,15 @@ mod tests {
                 loc: LocIdx::default(),
             })),
             pmty_loc: LocIdx::default(),
-            pmty_attributes: Attributes::from_vec(vec![attr]),
         });
 
-        arena.strip_arena_node_inline_attributes();
+        arena.set_expr_attributes(expr_owner, Attributes::from_vec(vec![attr.clone()]));
+        arena.set_pat_attributes(pat_owner, Attributes::from_vec(vec![attr.clone()]));
+        arena.set_core_type_attributes(type_owner, Attributes::from_vec(vec![attr.clone()]));
+        arena.set_mod_expr_attributes(mod_expr_owner, Attributes::from_vec(vec![attr.clone()]));
+        arena.set_mod_type_attributes(mod_type_owner, Attributes::from_vec(vec![attr]));
 
-        assert!(arena.get_expr(expr_owner).pexp_attributes.is_empty());
-        assert!(arena.get_pat(pat_owner).ppat_attributes.is_empty());
-        assert!(arena.get_core_type(type_owner).ptyp_attributes.is_empty());
-        assert!(arena.get_mod_expr(mod_expr_owner).pmod_attributes.is_empty());
-        assert!(arena.get_mod_type(mod_type_owner).pmty_attributes.is_empty());
+        arena.strip_arena_node_inline_attributes();
 
         assert_eq!(arena.expr_attributes(expr_owner).len(), 1);
         assert_eq!(arena.pat_attributes(pat_owner).len(), 1);

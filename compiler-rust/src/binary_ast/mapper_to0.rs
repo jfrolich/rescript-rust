@@ -478,7 +478,7 @@ impl<'a> Mapper<'a> {
     ) -> pt0::CoreType {
         let type_attrs = owner_idx
             .map(|owner| self.arena.core_type_attributes(owner).clone())
-            .unwrap_or_else(|| ty.ptyp_attributes.clone());
+            .unwrap_or_else(current::Attributes::new);
         // Handle arrow types specially to support arity wrapping
         if let current::CoreTypeDesc::Ptyp_arrow(inner) = &*ty.ptyp_desc {
             let (ref arg, ref ret_idx, ref arity) = **inner;
@@ -660,7 +660,7 @@ impl<'a> Mapper<'a> {
     ) -> pt0::Pattern {
         let pat_attrs = owner_idx
             .map(|owner| self.arena.pat_attributes(owner).clone())
-            .unwrap_or_else(|| pat.ppat_attributes.clone());
+            .unwrap_or_else(current::Attributes::new);
         pt0::Pattern {
             ppat_desc: self.map_pattern_desc(&*pat.ppat_desc),
             ppat_loc: self.loc(pat.ppat_loc),
@@ -763,7 +763,7 @@ impl<'a> Mapper<'a> {
         );
         let expr_attrs = owner_idx
             .map(|owner| self.arena.expr_attributes(owner).clone())
-            .unwrap_or_else(|| expr.pexp_attributes.clone());
+            .unwrap_or_else(current::Attributes::new);
         let mut attrs = self.map_attributes(&expr_attrs);
         if is_jsx {
             attrs.insert(0, self.mk_jsx_attr(expr.pexp_loc));
@@ -802,7 +802,6 @@ impl<'a> Mapper<'a> {
             current::ExpressionDesc::Pexp_fun(inner) => {
                 let PexpFun {
                     arg_label,
-                    default,
                     lhs,
                     rhs,
                     arity,
@@ -812,8 +811,7 @@ impl<'a> Mapper<'a> {
                 // Look up arity from arena (current::Arity is now ArityIdx)
                 let arity_opt = self.arena.get_arity(*arity);
                 let default_idx = owner_idx
-                    .and_then(|owner| self.arena.fun_default(owner))
-                    .or(*default);
+                    .and_then(|owner| self.arena.fun_default(owner));
                 pt0::ExpressionDesc::Fun {
                     arg_label: self.map_arg_label(&arg_label),
                     default: default_idx.map(|e| Box::new(self.map_expr_idx(e))),
@@ -870,13 +868,14 @@ impl<'a> Mapper<'a> {
                     if let current::ExpressionDesc::Pexp_ident(lid) = &*funct.pexp_desc {
                         let full_loc = self.loc(lid.loc);
                         let new_name_idx = self.intern(new_name);
+                        let funct_attrs = self.arena.expr_attributes(*funct_idx).clone();
                         pt0::Expression {
                             pexp_desc: pt0::ExpressionDesc::Ident(OldLocated::new(
                                 Longident::Lident(new_name_idx),
                                 full_loc,
                             )),
                             pexp_loc: self.loc(funct.pexp_loc),
-                            pexp_attributes: self.map_attributes(&funct.pexp_attributes),
+                            pexp_attributes: self.map_attributes(&funct_attrs),
                         }
                     } else {
                         self.map_expression_with_owner(&funct, Some(*funct_idx))
@@ -922,30 +921,24 @@ impl<'a> Mapper<'a> {
             current::ExpressionDesc::Pexp_tuple(exprs) => {
                 pt0::ExpressionDesc::Tuple(exprs.iter().map(|e| self.map_expr_idx(*e)).collect())
             }
-            current::ExpressionDesc::Pexp_construct(lid, opt) => {
-                let arg_idx = owner_idx
-                    .and_then(|owner| self.arena.construct_arg(owner))
-                    .or(*opt);
+            current::ExpressionDesc::Pexp_construct(lid) => {
+                let arg_idx = owner_idx.and_then(|owner| self.arena.construct_arg(owner));
                 pt0::ExpressionDesc::Construct(
                     self.map_longident_loc(lid),
                     arg_idx.map(|e| Box::new(self.map_expr_idx(e))),
                 )
             }
             current::ExpressionDesc::Pexp_variant(inner) => {
-                let (ref label, ref opt) = **inner;
-                let arg_idx = owner_idx
-                    .and_then(|owner| self.arena.variant_arg(owner))
-                    .or(*opt);
+                let label = &**inner;
+                let arg_idx = owner_idx.and_then(|owner| self.arena.variant_arg(owner));
                 pt0::ExpressionDesc::Variant(
                     label.to_string(),
                     arg_idx.map(|e| Box::new(self.map_expr_idx(e))),
                 )
             }
             current::ExpressionDesc::Pexp_record(inner) => {
-                let (ref fields, ref spread) = **inner;
-                let spread_idx = owner_idx
-                    .and_then(|owner| self.arena.record_spread(owner))
-                    .or(*spread);
+                let fields = &**inner;
+                let spread_idx = owner_idx.and_then(|owner| self.arena.record_spread(owner));
                 // Use RecordElement with 3 fields (lid, x, opt) for current parsetree format
                 pt0::ExpressionDesc::Record(
                     fields
@@ -975,10 +968,8 @@ impl<'a> Mapper<'a> {
                 pt0::ExpressionDesc::Array(exprs.iter().map(|e| self.map_expr_idx(*e)).collect())
             }
             current::ExpressionDesc::Pexp_ifthenelse(inner) => {
-                let (ref e1_idx, ref e2_idx, ref e3) = **inner;
-                let else_idx = owner_idx
-                    .and_then(|owner| self.arena.if_else_branch(owner))
-                    .or(*e3);
+                let (ref e1_idx, ref e2_idx) = **inner;
+                let else_idx = owner_idx.and_then(|owner| self.arena.if_else_branch(owner));
                 pt0::ExpressionDesc::Ifthenelse(
                     Box::new(self.map_expr_idx(*e1_idx)),
                     Box::new(self.map_expr_idx(*e2_idx)),
@@ -1013,7 +1004,7 @@ impl<'a> Mapper<'a> {
                 )
             }
             current::ExpressionDesc::Pexp_coerce(inner) => {
-                let (ref e_idx, _, ref ty_idx) = **inner;
+                let (ref e_idx, ref ty_idx) = **inner;
                 let _from_type = owner_idx
                     .and_then(|owner| self.arena.coerce_from_type(owner));
                 // parsetree0 has unit instead of Option<CoreType> for the middle arg
@@ -1151,8 +1142,7 @@ impl<'a> Mapper<'a> {
         case_index: usize,
     ) -> pt0::Case {
         let guard = owner_idx
-            .and_then(|owner| self.arena.case_guard(owner, case_index))
-            .or(case.pc_guard);
+            .and_then(|owner| self.arena.case_guard(owner, case_index));
         pt0::Case {
             pc_lhs: self.map_pat_idx(case.pc_lhs),
             pc_guard: guard.map(|e| self.map_expr_idx(e)),
@@ -1319,7 +1309,7 @@ impl<'a> Mapper<'a> {
     ) -> pt0::ModuleType {
         let mty_attrs = owner_idx
             .map(|owner| self.arena.mod_type_attributes(owner).clone())
-            .unwrap_or_else(|| mt.pmty_attributes.clone());
+            .unwrap_or_else(current::Attributes::new);
         pt0::ModuleType {
             pmty_desc: self.map_module_type_desc(&*mt.pmty_desc),
             pmty_loc: self.loc(mt.pmty_loc),
@@ -1401,7 +1391,7 @@ impl<'a> Mapper<'a> {
     ) -> pt0::ModuleExpr {
         let mod_attrs = owner_idx
             .map(|owner| self.arena.mod_expr_attributes(owner).clone())
-            .unwrap_or_else(|| me.pmod_attributes.clone());
+            .unwrap_or_else(current::Attributes::new);
         pt0::ModuleExpr {
             pmod_desc: self.map_module_expr_desc(&*me.pmod_desc),
             pmod_loc: self.loc(me.pmod_loc),
