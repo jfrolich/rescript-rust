@@ -201,6 +201,9 @@ pub fn write_signature_ast_current_with_extra_deps(
     let mut deps = extract_signature_deps(arena, &rewritten_ast);
     deps.extend(extra_deps.iter().cloned());
 
+    // 2.5 Remove duplicated inline sparse expression fields once side tables are in place.
+    arena.strip_expr_sparse_inline_fields();
+
     // 3. Write the binary AST file directly (current format, no parsetree0 conversion)
     write_ast_file(output_path, source_path, arena, &deps, &rewritten_ast)
 }
