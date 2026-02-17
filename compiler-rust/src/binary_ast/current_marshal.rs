@@ -48,7 +48,15 @@ fn is_pipe_application(expr: &Expression, w: &MarshalWriter<'_>) -> bool {
         return false;
     }
 
-    if expr
+    if let Some(owner) = w.current_expr_idx() {
+        if arena
+            .expr_attributes(owner)
+            .iter()
+            .any(|(name, _)| arena.get_string(name.txt) == "res.taggedTemplate")
+        {
+            return false;
+        }
+    } else if expr
         .pexp_attributes
         .iter()
         .any(|(name, _)| arena.get_string(name.txt) == "res.taggedTemplate")
@@ -893,6 +901,11 @@ impl Marshal for TypeArg {
 
 impl Marshal for CoreType {
     fn marshal(&self, w: &mut MarshalWriter<'_>) {
+        let attrs = if let Some(owner) = w.current_core_type_idx() {
+            w.get_arena().core_type_attributes(owner)
+        } else {
+            &self.ptyp_attributes
+        };
         let share_empty_pstr = match &*self.ptyp_desc {
             CoreTypeDesc::Ptyp_object(_) => Some(EmptyPayloadShareKind::ObjectTypeAttr),
             _ => None,
@@ -903,7 +916,7 @@ impl Marshal for CoreType {
         // Keep this narrow to the Ast_literal no-loc builtins.
         if let CoreTypeDesc::Ptyp_constr(inner) = &*self.ptyp_desc {
             let (ref lid, ref types) = **inner;
-            let should_share_simple_builtin = self.ptyp_attributes.is_empty()
+            let should_share_simple_builtin = attrs.is_empty()
                 && types.is_empty()
                 && is_none_loc_idx(self.ptyp_loc, w)
                 && is_none_loc_idx(lid.loc, w)
@@ -927,7 +940,7 @@ impl Marshal for CoreType {
                 w.write_block_header(0, 3);
                 self.ptyp_desc.marshal(w);
                 self.ptyp_loc.marshal(w);
-                marshal_attributes(&self.ptyp_attributes, w, false, false, share_empty_pstr);
+                marshal_attributes(attrs, w, false, false, share_empty_pstr);
                 w.simple_core_type_table_insert(lid.txt, obj_idx);
                 return;
             }
@@ -944,7 +957,7 @@ impl Marshal for CoreType {
             // primitive-wrapper rewrites.
             let allow_tyvar_share =
                 is_none_loc_idx(self.ptyp_loc, w) || w.in_letmodule_expr() || w.in_module_typeof();
-            if self.ptyp_attributes.is_empty() && allow_tyvar_share {
+            if attrs.is_empty() && allow_tyvar_share {
                 let key = (name.to_string(), self.ptyp_loc);
                 if let Some(&obj_idx) = w.tyvar_core_type_table_get(&key) {
                     let d = w.obj_counter() - obj_idx;
@@ -957,7 +970,7 @@ impl Marshal for CoreType {
                 w.write_block_header(0, 3);
                 marshal_ptyp_var_desc(name, self.ptyp_loc, w);
                 self.ptyp_loc.marshal(w);
-                marshal_attributes(&self.ptyp_attributes, w, false, false, share_empty_pstr);
+                marshal_attributes(attrs, w, false, false, share_empty_pstr);
                 w.tyvar_core_type_table_insert(key, obj_idx);
                 return;
             }
@@ -967,7 +980,7 @@ impl Marshal for CoreType {
             w.write_block_header(0, 3);
             marshal_ptyp_var_desc(name, self.ptyp_loc, w);
             self.ptyp_loc.marshal(w);
-            marshal_attributes(&self.ptyp_attributes, w, false, false, share_empty_pstr);
+            marshal_attributes(attrs, w, false, false, share_empty_pstr);
             return;
         }
 
@@ -975,7 +988,7 @@ impl Marshal for CoreType {
         w.write_block_header(0, 3);
         self.ptyp_desc.marshal(w);
         self.ptyp_loc.marshal(w);
-        marshal_attributes(&self.ptyp_attributes, w, false, false, share_empty_pstr);
+        marshal_attributes(attrs, w, false, false, share_empty_pstr);
     }
 }
 
@@ -1113,6 +1126,11 @@ impl Marshal for ObjectField {
 
 impl Marshal for Pattern {
     fn marshal(&self, w: &mut MarshalWriter<'_>) {
+        let attrs = if let Some(owner) = w.current_pat_idx() {
+            w.get_arena().pat_attributes(owner)
+        } else {
+            &self.ppat_attributes
+        };
         w.write_block_header(0, 3);
         self.ppat_desc.marshal(w);
         let mut wrote_shared_ppat_loc = false;
@@ -1131,8 +1149,8 @@ impl Marshal for Pattern {
         if !wrote_shared_ppat_loc {
             self.ppat_loc.marshal(w);
         }
-        let share_singleton = is_singleton_template_attr(&self.ppat_attributes, w);
-        marshal_attributes(&self.ppat_attributes, w, share_singleton, false, None);
+        let share_singleton = is_singleton_template_attr(attrs, w);
+        marshal_attributes(attrs, w, share_singleton, false, None);
     }
 }
 
@@ -1264,6 +1282,11 @@ impl Marshal for ExpressionRecordField {
 
 impl Marshal for Expression {
     fn marshal(&self, w: &mut MarshalWriter<'_>) {
+        let attrs = if let Some(owner) = w.current_expr_idx() {
+            w.get_arena().expr_attributes(owner)
+        } else {
+            &self.pexp_attributes
+        };
         let is_raw_expansion = is_raw_expansion_expr(self, w);
         let is_external_raw_expansion = is_external_raw_expansion_expr(self, w);
         let is_external_ext = is_external_ext_expr(self, w);
@@ -1313,11 +1336,11 @@ impl Marshal for Expression {
             &*self.pexp_desc,
             ExpressionDesc::Pexp_extension(_) | ExpressionDesc::Pexp_newtype(_)
         );
-        let has_braces_or_ternary =
-            has_braces_attr(&self.pexp_attributes, w) || has_ternary_attr(&self.pexp_attributes, w);
+        let has_braces_or_ternary = has_braces_attr(attrs, w) || has_ternary_attr(attrs, w);
         let rewritten_await_letmodule = matches!(
             &*self.pexp_desc,
-            ExpressionDesc::Pexp_letmodule(inner) if has_await_attr(&w.get_arena().get_mod_expr((**inner).1).pmod_attributes, w)
+            ExpressionDesc::Pexp_letmodule(inner)
+                if has_await_attr(w.get_arena().mod_expr_attributes((**inner).1), w)
         );
         let rewritten_expr = w.get_arena().is_rewritten_expr_loc(self.pexp_loc);
         let share_singleton_attr_tuple = share_attrs;
@@ -1337,7 +1360,7 @@ impl Marshal for Expression {
             None
         };
         marshal_attributes(
-            &self.pexp_attributes,
+            attrs,
             w,
             share_singleton_attr_tuple,
             matches!(&*self.pexp_desc, ExpressionDesc::Pexp_open(_)),
@@ -1691,10 +1714,15 @@ impl Marshal for Payload {
 
 impl Marshal for ModuleType {
     fn marshal(&self, w: &mut MarshalWriter<'_>) {
+        let attrs = if let Some(owner) = w.current_mod_type_idx() {
+            w.get_arena().mod_type_attributes(owner)
+        } else {
+            &self.pmty_attributes
+        };
         w.write_block_header(0, 3);
         self.pmty_desc.marshal(w);
         self.pmty_loc.marshal(w);
-        marshal_attributes(&self.pmty_attributes, w, false, false, None);
+        marshal_attributes(attrs, w, false, false, None);
     }
 }
 
@@ -1775,17 +1803,22 @@ impl Marshal for WithConstraint {
 
 impl Marshal for ModuleExpr {
     fn marshal(&self, w: &mut MarshalWriter<'_>) {
+        let attrs = if let Some(owner) = w.current_mod_expr_idx() {
+            w.get_arena().mod_expr_attributes(owner)
+        } else {
+            &self.pmod_attributes
+        };
         w.write_block_header(0, 3);
         self.pmod_desc.marshal(w);
         self.pmod_loc.marshal(w);
-        let share_empty_pstr = if has_await_attr(&self.pmod_attributes, w)
+        let share_empty_pstr = if has_await_attr(attrs, w)
             && (w.in_letmodule_expr() || w.in_module_typeof())
         {
             Some(EmptyPayloadShareKind::ParserAttr)
         } else {
             None
         };
-        marshal_attributes(&self.pmod_attributes, w, false, false, share_empty_pstr);
+        marshal_attributes(attrs, w, false, false, share_empty_pstr);
     }
 }
 

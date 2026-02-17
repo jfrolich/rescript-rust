@@ -28,7 +28,10 @@ use std::borrow::Cow;
 use std::collections::HashMap;
 
 use crate::location::{Location, Position};
-use crate::parse_arena::{ArityIdx, ExprIdx, LidentIdx, LocIdx, ParseArena, PosIdx, StrIdx};
+use crate::parse_arena::{
+    ArityIdx, CoreTypeIdx, ExprIdx, LidentIdx, LocIdx, ModExprIdx, ModTypeIdx, ParseArena, PatIdx,
+    PosIdx, StrIdx,
+};
 use crate::parser::longident::Longident;
 
 /// Magic number for small Marshal format
@@ -283,6 +286,22 @@ pub struct MarshalWriter<'a> {
     /// Set by `ExprIdx` marshalling so expression-desc writers can consult sparse side tables.
     current_expr_idx: Option<ExprIdx>,
 
+    /// Current pattern index being marshalled.
+    /// Set by `PatIdx` marshalling for side-table-backed attribute access.
+    current_pat_idx: Option<PatIdx>,
+
+    /// Current core-type index being marshalled.
+    /// Set by `CoreTypeIdx` marshalling for side-table-backed attribute access.
+    current_core_type_idx: Option<CoreTypeIdx>,
+
+    /// Current module-expression index being marshalled.
+    /// Set by `ModExprIdx` marshalling for side-table-backed attribute access.
+    current_mod_expr_idx: Option<ModExprIdx>,
+
+    /// Current module-type index being marshalled.
+    /// Set by `ModTypeIdx` marshalling for side-table-backed attribute access.
+    current_mod_type_idx: Option<ModTypeIdx>,
+
     /// Stack of owning case-list expressions and the next case index to serialize.
     /// Used to resolve sparse `Case.pc_guard` side-table entries while marshalling.
     case_owner_stack: Vec<(ExprIdx, usize)>,
@@ -348,6 +367,10 @@ impl<'a> MarshalWriter<'a> {
 
             arena: None,
             current_expr_idx: None,
+            current_pat_idx: None,
+            current_core_type_idx: None,
+            current_mod_expr_idx: None,
+            current_mod_type_idx: None,
             case_owner_stack: Vec::new(),
             obj_counter: 0,
             size_32: 0,
@@ -399,6 +422,10 @@ impl<'a> MarshalWriter<'a> {
 
             arena: None,
             current_expr_idx: None,
+            current_pat_idx: None,
+            current_core_type_idx: None,
+            current_mod_expr_idx: None,
+            current_mod_type_idx: None,
             case_owner_stack: Vec::new(),
             obj_counter: 0,
             size_32: 0,
@@ -414,7 +441,7 @@ impl<'a> MarshalWriter<'a> {
     }
 
     /// Get the arena reference, panics if not set.
-    pub fn get_arena(&self) -> &ParseArena {
+    pub fn get_arena(&self) -> &'a ParseArena {
         self.arena
             .expect("MarshalWriter::set_arena must be called before marshalling LocIdx")
     }
@@ -435,6 +462,78 @@ impl<'a> MarshalWriter<'a> {
     #[inline]
     pub fn current_expr_idx(&self) -> Option<ExprIdx> {
         self.current_expr_idx
+    }
+
+    #[inline]
+    pub fn with_current_pat_idx<R>(
+        &mut self,
+        idx: PatIdx,
+        f: impl FnOnce(&mut MarshalWriter<'a>) -> R,
+    ) -> R {
+        let prev = self.current_pat_idx;
+        self.current_pat_idx = Some(idx);
+        let result = f(self);
+        self.current_pat_idx = prev;
+        result
+    }
+
+    #[inline]
+    pub fn current_pat_idx(&self) -> Option<PatIdx> {
+        self.current_pat_idx
+    }
+
+    #[inline]
+    pub fn with_current_core_type_idx<R>(
+        &mut self,
+        idx: CoreTypeIdx,
+        f: impl FnOnce(&mut MarshalWriter<'a>) -> R,
+    ) -> R {
+        let prev = self.current_core_type_idx;
+        self.current_core_type_idx = Some(idx);
+        let result = f(self);
+        self.current_core_type_idx = prev;
+        result
+    }
+
+    #[inline]
+    pub fn current_core_type_idx(&self) -> Option<CoreTypeIdx> {
+        self.current_core_type_idx
+    }
+
+    #[inline]
+    pub fn with_current_mod_expr_idx<R>(
+        &mut self,
+        idx: ModExprIdx,
+        f: impl FnOnce(&mut MarshalWriter<'a>) -> R,
+    ) -> R {
+        let prev = self.current_mod_expr_idx;
+        self.current_mod_expr_idx = Some(idx);
+        let result = f(self);
+        self.current_mod_expr_idx = prev;
+        result
+    }
+
+    #[inline]
+    pub fn current_mod_expr_idx(&self) -> Option<ModExprIdx> {
+        self.current_mod_expr_idx
+    }
+
+    #[inline]
+    pub fn with_current_mod_type_idx<R>(
+        &mut self,
+        idx: ModTypeIdx,
+        f: impl FnOnce(&mut MarshalWriter<'a>) -> R,
+    ) -> R {
+        let prev = self.current_mod_type_idx;
+        self.current_mod_type_idx = Some(idx);
+        let result = f(self);
+        self.current_mod_type_idx = prev;
+        result
+    }
+
+    #[inline]
+    pub fn current_mod_type_idx(&self) -> Option<ModTypeIdx> {
+        self.current_mod_type_idx
     }
 
     #[inline]
@@ -648,6 +747,10 @@ impl<'a> MarshalWriter<'a> {
         self.raw_expansion_expr_table.clear();
         self.internal_expansive_attr_tuple = None;
         self.current_expr_idx = None;
+        self.current_pat_idx = None;
+        self.current_core_type_idx = None;
+        self.current_mod_expr_idx = None;
+        self.current_mod_type_idx = None;
         self.case_owner_stack.clear();
         self.obj_counter = 0;
         self.size_32 = 0;
