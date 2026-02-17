@@ -226,10 +226,11 @@ fn is_external_ext_expr(expr: &Expression, w: &MarshalWriter<'_>) -> bool {
         return false;
     };
     let (ref cond, ref then_expr, ref opt_else) = **ite_inner;
-    let Some(else_expr) = opt_else else {
+    let else_expr_opt = arena.if_else_branch(outer_args[0].1).or(*opt_else);
+    let Some(else_expr) = else_expr_opt else {
         return false;
     };
-    let else_expr_ref = arena.get_expr(*else_expr);
+    let else_expr_ref = arena.get_expr(else_expr);
     if !is_external_raw_expansion_expr(else_expr_ref, w) {
         return false;
     }

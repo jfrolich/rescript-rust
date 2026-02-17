@@ -67,6 +67,10 @@ pub fn write_structure_ast(
     // 1. Extract dependencies
     let deps = extract_structure_deps(arena, ast);
 
+    // 1.5 Compact duplicated sparse storage now that dependency extraction has run.
+    arena.strip_expr_sparse_inline_fields();
+    arena.strip_arena_node_inline_attributes();
+
     // 2. Convert AST to parsetree0 format
     let ast0 = map_structure(arena, ast);
 
@@ -94,6 +98,10 @@ pub fn write_signature_ast(
 ) -> io::Result<()> {
     // 1. Extract dependencies
     let deps = extract_signature_deps(arena, ast);
+
+    // 1.5 Compact duplicated sparse storage now that dependency extraction has run.
+    arena.strip_expr_sparse_inline_fields();
+    arena.strip_arena_node_inline_attributes();
 
     // 2. Convert AST to parsetree0 format
     let ast0 = map_signature(arena, ast);
@@ -148,6 +156,9 @@ pub fn write_structure_ast_current_with_extra_deps(
     // 3. Extract dependencies from the rewritten AST and merge explicit opens.
     let mut deps = extract_structure_deps(arena, &rewritten_ast);
     deps.extend(extra_deps.iter().cloned());
+
+    // 3.5 Remove duplicated inline sparse expression fields once side tables are in place.
+    arena.strip_expr_sparse_inline_fields();
 
     // 4. Write the binary AST file directly (current format, no parsetree0 conversion)
     write_ast_file(output_path, source_path, arena, &deps, &rewritten_ast)
@@ -245,6 +256,8 @@ pub fn write_structure_ast_to_vec(
     ast: &Structure,
 ) -> Vec<u8> {
     let deps = extract_structure_deps(arena, ast);
+    arena.strip_expr_sparse_inline_fields();
+    arena.strip_arena_node_inline_attributes();
     let ast0 = map_structure(arena, ast);
     write_ast_to_vec(source_path, arena, &deps, &ast0)
 }
@@ -256,6 +269,8 @@ pub fn write_signature_ast_to_vec(
     ast: &Signature,
 ) -> Vec<u8> {
     let deps = extract_signature_deps(arena, ast);
+    arena.strip_expr_sparse_inline_fields();
+    arena.strip_arena_node_inline_attributes();
     let ast0 = map_signature(arena, ast);
     write_ast_to_vec(source_path, arena, &deps, &ast0)
 }
