@@ -242,6 +242,7 @@ fn rewrite_module_expr(
     Ok(ModuleExpr {
         pmod_desc: Box::new(desc),
         pmod_loc: mod_expr.pmod_loc,
+        pmod_attributes: mod_expr.pmod_attributes.clone(),
     })
 }
 
@@ -278,14 +279,14 @@ fn rewrite_expression(
             );
         }
         ExpressionDesc::Pexp_fun(inner) => {
-            let rewritten_default = arena
-                .fun_default_by_ref(expr)
+            let rewritten_default = inner
+                .default
                 .map(|idx| rewrite_expr_idx(idx, arena, let_unwrap_enabled))
                 .transpose()?;
-            arena.stash_fun_default_for_loc(expr.pexp_loc, rewritten_default);
             let rewritten_rhs = rewrite_expr_idx(inner.rhs, arena, let_unwrap_enabled)?;
             ExpressionDesc::Pexp_fun(Box::new(crate::parser::ast::PexpFun {
                 arg_label: inner.arg_label.clone(),
+                default: rewritten_default,
                 lhs: inner.lhs,
                 rhs: rewritten_rhs,
                 arity: inner.arity,
@@ -312,15 +313,13 @@ fn rewrite_expression(
         ExpressionDesc::Pexp_match(inner) => {
             let (scrutinee, cases) = &**inner;
             let rewritten_scrutinee = rewrite_expr_idx(*scrutinee, arena, let_unwrap_enabled)?;
-            let rewritten_cases =
-                rewrite_cases(expr, cases, arena, let_unwrap_enabled)?;
+            let rewritten_cases = rewrite_cases(cases, arena, let_unwrap_enabled)?;
             ExpressionDesc::Pexp_match(Box::new((rewritten_scrutinee, rewritten_cases)))
         }
         ExpressionDesc::Pexp_try(inner) => {
             let (body, cases) = &**inner;
             let rewritten_body = rewrite_expr_idx(*body, arena, let_unwrap_enabled)?;
-            let rewritten_cases =
-                rewrite_cases(expr, cases, arena, let_unwrap_enabled)?;
+            let rewritten_cases = rewrite_cases(cases, arena, let_unwrap_enabled)?;
             ExpressionDesc::Pexp_try(Box::new((rewritten_body, rewritten_cases)))
         }
         ExpressionDesc::Pexp_tuple(items) => {
@@ -330,25 +329,21 @@ fn rewrite_expression(
                 .collect::<Result<Vec<_>, _>>()?;
             ExpressionDesc::Pexp_tuple(Box::new(rewritten))
         }
-        ExpressionDesc::Pexp_construct(lid) => {
-            let rewritten_arg = arena
-                .construct_arg_by_ref(expr)
+        ExpressionDesc::Pexp_construct(lid, arg) => {
+            let rewritten_arg = arg
                 .map(|idx| rewrite_expr_idx(idx, arena, let_unwrap_enabled))
                 .transpose()?;
-            arena.stash_construct_arg_for_loc(expr.pexp_loc, rewritten_arg);
-            ExpressionDesc::Pexp_construct(*lid)
+            ExpressionDesc::Pexp_construct(*lid, rewritten_arg)
         }
         ExpressionDesc::Pexp_variant(inner) => {
-            let label = &**inner;
-            let rewritten_arg = arena
-                .variant_arg_by_ref(expr)
+            let (label, arg) = &**inner;
+            let rewritten_arg = arg
                 .map(|idx| rewrite_expr_idx(idx, arena, let_unwrap_enabled))
                 .transpose()?;
-            arena.stash_variant_arg_for_loc(expr.pexp_loc, rewritten_arg);
-            ExpressionDesc::Pexp_variant(Box::new(label.clone()))
+            ExpressionDesc::Pexp_variant(Box::new((label.clone(), rewritten_arg)))
         }
         ExpressionDesc::Pexp_record(inner) => {
-            let fields = &**inner;
+            let (fields, spread) = &**inner;
             let rewritten_fields = fields
                 .iter()
                 .map(|field| {
@@ -360,12 +355,10 @@ fn rewrite_expression(
                     })
                 })
                 .collect::<Result<Vec<_>, String>>()?;
-            let rewritten_spread = arena
-                .record_spread_by_ref(expr)
+            let rewritten_spread = spread
                 .map(|idx| rewrite_expr_idx(idx, arena, let_unwrap_enabled))
                 .transpose()?;
-            arena.stash_record_spread_for_loc(expr.pexp_loc, rewritten_spread);
-            ExpressionDesc::Pexp_record(Box::new(rewritten_fields))
+            ExpressionDesc::Pexp_record(Box::new((rewritten_fields, rewritten_spread)))
         }
         ExpressionDesc::Pexp_field(owner, lid) => {
             let rewritten_owner = rewrite_expr_idx(*owner, arena, let_unwrap_enabled)?;
@@ -385,15 +378,17 @@ fn rewrite_expression(
             ExpressionDesc::Pexp_array(Box::new(rewritten))
         }
         ExpressionDesc::Pexp_ifthenelse(inner) => {
-            let (cond, then_expr) = &**inner;
+            let (cond, then_expr, else_expr) = &**inner;
             let rewritten_cond = rewrite_expr_idx(*cond, arena, let_unwrap_enabled)?;
             let rewritten_then = rewrite_expr_idx(*then_expr, arena, let_unwrap_enabled)?;
-            let rewritten_else = arena
-                .if_else_branch_by_ref(expr)
+            let rewritten_else = else_expr
                 .map(|idx| rewrite_expr_idx(idx, arena, let_unwrap_enabled))
                 .transpose()?;
-            arena.stash_if_else_branch_for_loc(expr.pexp_loc, rewritten_else);
-            ExpressionDesc::Pexp_ifthenelse(Box::new((rewritten_cond, rewritten_then)))
+            ExpressionDesc::Pexp_ifthenelse(Box::new((
+                rewritten_cond,
+                rewritten_then,
+                rewritten_else,
+            )))
         }
         ExpressionDesc::Pexp_sequence(lhs, rhs) => {
             let rewritten_lhs = rewrite_expr_idx(*lhs, arena, let_unwrap_enabled)?;
@@ -424,11 +419,9 @@ fn rewrite_expression(
             ExpressionDesc::Pexp_constraint(Box::new((rewritten_subject, *typ)))
         }
         ExpressionDesc::Pexp_coerce(inner) => {
-            let (subject, to) = &**inner;
+            let (subject, from, to) = &**inner;
             let rewritten_subject = rewrite_expr_idx(*subject, arena, let_unwrap_enabled)?;
-            let from = arena.coerce_from_type_by_ref(expr);
-            arena.stash_coerce_from_type_for_loc(expr.pexp_loc, from);
-            ExpressionDesc::Pexp_coerce(Box::new((rewritten_subject, *to)))
+            ExpressionDesc::Pexp_coerce(Box::new((rewritten_subject, *from, *to)))
         }
         ExpressionDesc::Pexp_send(inner) => {
             let (subject, method) = &**inner;
@@ -479,35 +472,31 @@ fn rewrite_expression(
     Ok(Expression {
         pexp_desc: Box::new(desc),
         pexp_loc: expr.pexp_loc,
+        pexp_attributes: expr.pexp_attributes.clone(),
     })
 }
 
 fn rewrite_cases(
-    owner_expr: &Expression,
     cases: &[Case],
     arena: &mut ParseArena,
     let_unwrap_enabled: bool,
 ) -> Result<Vec<Case>, String> {
-    let mut rewritten_guards = Vec::with_capacity(cases.len());
-    let rewritten_cases = cases
+    cases
         .iter()
-        .enumerate()
-        .map(|(case_index, case)| {
-            let rewritten_guard = arena
-                .case_guard_by_ref(owner_expr, case_index)
+        .map(|case| {
+            let rewritten_guard = case
+                .pc_guard
                 .map(|idx| rewrite_expr_idx(idx, arena, let_unwrap_enabled))
                 .transpose()?;
-            rewritten_guards.push(rewritten_guard);
             let rewritten_rhs = rewrite_expr_idx(case.pc_rhs, arena, let_unwrap_enabled)?;
             Ok(Case {
                 pc_bar: case.pc_bar,
                 pc_lhs: case.pc_lhs,
+                pc_guard: rewritten_guard,
                 pc_rhs: rewritten_rhs,
             })
         })
-        .collect::<Result<Vec<_>, String>>()?;
-    arena.stash_case_guards_for_loc(owner_expr.pexp_loc, rewritten_guards);
-    Ok(rewritten_cases)
+        .collect()
 }
 
 fn rewrite_let_expression(
@@ -551,6 +540,7 @@ fn rewrite_let_expression(
             rewritten_body,
         )))),
         pexp_loc: original_expr.pexp_loc,
+        pexp_attributes: original_expr.pexp_attributes.clone(),
     })
 }
 
@@ -575,6 +565,7 @@ fn rewrite_supported_let_unwrap(
                 rewritten_body,
             )))),
             pexp_loc: original_expr.pexp_loc,
+            pexp_attributes: original_expr.pexp_attributes.clone(),
         });
     }
 
@@ -585,16 +576,16 @@ fn rewrite_supported_let_unwrap(
     let cont_case = Case {
         pc_bar: None,
         pc_lhs: vb.pvb_pat,
+        pc_guard: None,
         pc_rhs: rewritten_body_idx,
     };
 
     let loc = arena.mk_ghost_loc(pat.ppat_loc);
     let alias_name = extract_binding_name(&pat, arena).unwrap_or_else(|| arena.intern_string("x"));
     let early_case = make_let_unwrap_early_case(kind, alias_name, loc, arena);
-    arena.stash_case_guards_for_loc(original_expr.pexp_loc, vec![None, None]);
 
-    let mut _attrs = arena.expr_attributes_by_ref(original_expr).clone();
-    _attrs.extend(vb.pvb_attributes.iter().cloned());
+    let mut attrs = original_expr.pexp_attributes.clone();
+    attrs.extend(vb.pvb_attributes.iter().cloned());
 
     Ok(Expression {
         pexp_desc: Box::new(ExpressionDesc::Pexp_match(Box::new((
@@ -602,6 +593,7 @@ fn rewrite_supported_let_unwrap(
             vec![early_case, cont_case],
         )))),
         pexp_loc: original_expr.pexp_loc,
+        pexp_attributes: attrs,
     })
 }
 
@@ -629,6 +621,7 @@ fn make_let_unwrap_early_case(
             },
         )),
         ppat_loc: loc,
+        ppat_attributes: Attributes::new(),
     };
     let alias_pat_idx = arena.push_pat(alias_pat);
 
@@ -639,12 +632,14 @@ fn make_let_unwrap_early_case(
             loc,
         })),
         pexp_loc: loc,
+        pexp_attributes: Attributes::new(),
     };
     let alias_expr_idx = arena.push_expr(alias_expr);
 
     Case {
         pc_bar: None,
         pc_lhs: alias_pat_idx,
+        pc_guard: None,
         pc_rhs: alias_expr_idx,
     }
 }
@@ -661,6 +656,7 @@ fn make_ctor_pattern(
         let any_idx = arena.push_pat(Pattern {
             ppat_desc: Box::new(PatternDesc::Ppat_any),
             ppat_loc: loc,
+            ppat_attributes: Attributes::new(),
         });
         Some(any_idx)
     } else {
@@ -675,6 +671,7 @@ fn make_ctor_pattern(
             payload,
         )),
         ppat_loc: loc,
+        ppat_attributes: Attributes::new(),
     }
 }
 

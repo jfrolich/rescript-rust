@@ -108,7 +108,7 @@ pub fn type_module_expr<'a>(
                 mod_loc: loc,
                 mod_type: ModuleType::placeholder(),
                 mod_env: EnvRef(0),
-                mod_attributes: arena.mod_expr_attributes_by_ref(mod_expr).clone(),
+                mod_attributes: mod_expr.pmod_attributes.clone(),
             })
         }
 
@@ -121,7 +121,7 @@ pub fn type_module_expr<'a>(
                 mod_loc: loc,
                 mod_type: ModuleType::placeholder(),
                 mod_env: EnvRef(0),
-                mod_attributes: arena.mod_expr_attributes_by_ref(mod_expr).clone(),
+                mod_attributes: mod_expr.pmod_attributes.clone(),
             })
         }
 
@@ -153,7 +153,7 @@ pub fn type_module_expr<'a>(
                 mod_loc: loc,
                 mod_type: ModuleType::placeholder(),
                 mod_env: EnvRef(0),
-                mod_attributes: arena.mod_expr_attributes_by_ref(mod_expr).clone(),
+                mod_attributes: mod_expr.pmod_attributes.clone(),
             })
         }
 
@@ -173,7 +173,7 @@ pub fn type_module_expr<'a>(
                 mod_loc: loc,
                 mod_type: ModuleType::placeholder(),
                 mod_env: EnvRef(0),
-                mod_attributes: arena.mod_expr_attributes_by_ref(mod_expr).clone(),
+                mod_attributes: mod_expr.pmod_attributes.clone(),
             })
         }
 
@@ -192,7 +192,7 @@ pub fn type_module_expr<'a>(
                 mod_loc: loc,
                 mod_type: ModuleType::placeholder(),
                 mod_env: EnvRef(0),
-                mod_attributes: arena.mod_expr_attributes_by_ref(mod_expr).clone(),
+                mod_attributes: mod_expr.pmod_attributes.clone(),
             })
         }
 
@@ -206,7 +206,7 @@ pub fn type_module_expr<'a>(
                 mod_loc: loc,
                 mod_type: ModuleType::placeholder(),
                 mod_env: EnvRef(0),
-                mod_attributes: arena.mod_expr_attributes_by_ref(mod_expr).clone(),
+                mod_attributes: mod_expr.pmod_attributes.clone(),
             })
         }
 
@@ -222,7 +222,7 @@ pub fn type_module_expr<'a>(
                 mod_loc: loc,
                 mod_type: ModuleType::placeholder(),
                 mod_env: EnvRef(0),
-                mod_attributes: arena.mod_expr_attributes_by_ref(mod_expr).clone(),
+                mod_attributes: mod_expr.pmod_attributes.clone(),
             })
         }
     }

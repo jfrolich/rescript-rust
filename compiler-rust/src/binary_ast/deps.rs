@@ -75,8 +75,8 @@ impl<'a> DependencyCollector<'a> {
     // ========== Arena index helper methods ==========
 
     fn add_expr_idx(&mut self, idx: ExprIdx) {
-        let expr = self.arena.get_expr(idx);
-        self.add_expression(expr, Some(idx));
+        let expr = self.arena.get_expr(idx).clone();
+        self.add_expression(&expr);
     }
 
     fn add_pat_idx(&mut self, idx: PatIdx) {
@@ -400,7 +400,7 @@ impl<'a> DependencyCollector<'a> {
 
     // ========== Expressions ==========
 
-    fn add_expression(&mut self, expr: &Expression, owner: Option<ExprIdx>) {
+    fn add_expression(&mut self, expr: &Expression) {
         match &*expr.pexp_desc {
             ExpressionDesc::Pexp_ident(lid) => {
                 self.add_lident_idx(lid.txt);
@@ -435,12 +435,12 @@ impl<'a> DependencyCollector<'a> {
                 }
             }
             ExpressionDesc::Pexp_fun(inner) => {
-                let PexpFun { lhs, rhs, .. } = &**inner;
-                let default = owner
-                    .and_then(|idx| self.arena.fun_default(idx))
-                    .or_else(|| self.arena.fun_default_by_ref(expr));
+                let PexpFun {
+                    default, lhs, rhs, ..
+                } = &**inner;
                 if let Some(default) = default {
                     // default is ExprIdx
+                    let default = *default;
                     self.add_expr_idx(default);
                 }
                 // OCaml: add_expr (add_pattern bv p) e
@@ -478,8 +478,8 @@ impl<'a> DependencyCollector<'a> {
                 // expr is ExprIdx
                 let expr = *expr;
                 self.add_expr_idx(expr);
-                for (case_index, case) in cases.iter().enumerate() {
-                    self.add_case(case, owner, case_index);
+                for case in cases {
+                    self.add_case(case);
                 }
             }
             ExpressionDesc::Pexp_tuple(exprs) | ExpressionDesc::Pexp_array(exprs) => {
@@ -487,34 +487,31 @@ impl<'a> DependencyCollector<'a> {
                     self.add_expr_idx(*expr);
                 }
             }
-            ExpressionDesc::Pexp_construct(lid) => {
+            ExpressionDesc::Pexp_construct(lid, arg) => {
                 self.add_lident_idx(lid.txt);
-                let arg = owner
-                    .and_then(|idx| self.arena.construct_arg(idx))
-                    .or_else(|| self.arena.construct_arg_by_ref(expr));
                 if let Some(arg) = arg {
+                    // arg is ExprIdx
+                    let arg = *arg;
                     self.add_expr_idx(arg);
                 }
             }
             ExpressionDesc::Pexp_variant(inner) => {
-                let _label = &**inner;
-                let arg = owner
-                    .and_then(|idx| self.arena.variant_arg(idx))
-                    .or_else(|| self.arena.variant_arg_by_ref(expr));
+                let (ref _label, ref arg) = **inner;
                 if let Some(arg) = arg {
+                    // arg is ExprIdx
+                    let arg = *arg;
                     self.add_expr_idx(arg);
                 }
             }
             ExpressionDesc::Pexp_record(inner) => {
-                let fields = &**inner;
+                let (ref fields, ref spread) = **inner;
                 for field in fields {
                     self.add_lident_idx(field.lid.txt);
                     self.add_expr_idx(field.expr);
                 }
-                let spread = owner
-                    .and_then(|idx| self.arena.record_spread(idx))
-                    .or_else(|| self.arena.record_spread_by_ref(expr));
                 if let Some(spread) = spread {
+                    // spread is ExprIdx
+                    let spread = *spread;
                     self.add_expr_idx(spread);
                 }
             }
@@ -534,16 +531,14 @@ impl<'a> DependencyCollector<'a> {
                 self.add_expr_idx(expr2);
             }
             ExpressionDesc::Pexp_ifthenelse(inner) => {
-                let (ref cond, ref then_expr) = **inner;
+                let (ref cond, ref then_expr, ref else_expr) = **inner;
                 // cond, then_expr, else_expr are ExprIdx
                 let cond = *cond;
                 let then_expr = *then_expr;
                 self.add_expr_idx(cond);
                 self.add_expr_idx(then_expr);
-                let else_expr = owner
-                    .and_then(|idx| self.arena.if_else_branch(idx))
-                    .or_else(|| self.arena.if_else_branch_by_ref(expr));
                 if let Some(else_expr) = else_expr {
+                    let else_expr = *else_expr;
                     self.add_expr_idx(else_expr);
                 }
             }
@@ -582,14 +577,12 @@ impl<'a> DependencyCollector<'a> {
                 self.add_core_type_idx(ty);
             }
             ExpressionDesc::Pexp_coerce(inner) => {
-                let (ref expr_idx, ref ty2) = **inner;
+                let (ref expr, ref ty1, ref ty2) = **inner;
                 // expr is ExprIdx, ty1 is Option<CoreTypeIdx>, ty2 is CoreTypeIdx
-                self.add_expr_idx(*expr_idx);
-                let ty1 = owner
-                    .and_then(|idx| self.arena.coerce_from_type(idx))
-                    .or_else(|| self.arena.coerce_from_type_by_ref(expr));
+                let expr = *expr;
+                self.add_expr_idx(expr);
                 if let Some(ty1) = ty1 {
-                    self.add_core_type_idx(ty1);
+                    self.add_core_type_idx(*ty1);
                 }
                 self.add_core_type_idx(*ty2);
             }
@@ -1158,7 +1151,7 @@ impl<'a> DependencyCollector<'a> {
         self.add_mod_type_idx(id.pincl_mod);
     }
 
-    fn add_case(&mut self, case: &Case, owner: Option<ExprIdx>, case_index: usize) {
+    fn add_case(&mut self, case: &Case) {
         // OCaml: let bv = add_pattern bv pc_lhs in
         // Collect unpack names from pattern for guard and rhs,
         // then remove them after processing (OCaml scopes bv functionally)
@@ -1170,9 +1163,9 @@ impl<'a> DependencyCollector<'a> {
             .into_iter()
             .filter(|name| self.bound_modules.insert(name.clone()))
             .collect();
-        let guard = owner.and_then(|idx| self.arena.case_guard(idx, case_index));
-        if let Some(guard) = guard {
-            self.add_expr_idx(guard);
+        if let Some(guard) = &case.pc_guard {
+            // guard is ExprIdx
+            self.add_expr_idx(*guard);
         }
         // pc_rhs is ExprIdx
         self.add_expr_idx(case.pc_rhs);
@@ -1231,6 +1224,7 @@ mod tests {
                 loc: LocIdx::none(),
             })),
             pexp_loc: LocIdx::none(),
+            pexp_attributes: Attributes::new(),
         };
         arena.push_expr(expr)
     }

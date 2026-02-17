@@ -10,8 +10,6 @@
 //! - Pexp_apply uses inline record with 4 fields
 //! - record_element is polymorphic {lid; x; opt}
 
-use std::sync::OnceLock;
-
 use super::marshal::{EmptyPayloadShareKind, MarshalWriter, PrimListShareKind};
 use super::serialize::Marshal;
 use crate::parse_arena::{LocIdx, StrIdx};
@@ -50,12 +48,16 @@ fn is_pipe_application(expr: &Expression, w: &MarshalWriter<'_>) -> bool {
         return false;
     }
 
-    let attrs = if let Some(owner) = w.current_expr_idx() {
-        arena.expr_attributes(owner)
-    } else {
-        empty_attributes()
-    };
-    if attrs
+    if let Some(owner) = w.current_expr_idx() {
+        if arena
+            .expr_attributes(owner)
+            .iter()
+            .any(|(name, _)| arena.get_string(name.txt) == "res.taggedTemplate")
+        {
+            return false;
+        }
+    } else if expr
+        .pexp_attributes
         .iter()
         .any(|(name, _)| arena.get_string(name.txt) == "res.taggedTemplate")
     {
@@ -113,11 +115,6 @@ fn has_await_attr(attrs: &Attributes, w: &MarshalWriter<'_>) -> bool {
     attrs
         .iter()
         .any(|(name, _)| arena.get_string(name.txt) == "res.await")
-}
-
-fn empty_attributes() -> &'static Attributes {
-    static EMPTY: OnceLock<Attributes> = OnceLock::new();
-    EMPTY.get_or_init(Attributes::new)
 }
 
 fn should_share_singleton_attr_list(name: &str) -> bool {
@@ -236,8 +233,8 @@ fn is_external_ext_expr(expr: &Expression, w: &MarshalWriter<'_>) -> bool {
     let ExpressionDesc::Pexp_ifthenelse(ite_inner) = &*outer_arg_expr.pexp_desc else {
         return false;
     };
-    let (ref cond, ref then_expr) = **ite_inner;
-    let else_expr_opt = arena.if_else_branch(outer_args[0].1);
+    let (ref cond, ref then_expr, ref opt_else) = **ite_inner;
+    let else_expr_opt = arena.if_else_branch(outer_args[0].1).or(*opt_else);
     let Some(else_expr) = else_expr_opt else {
         return false;
     };
@@ -907,7 +904,7 @@ impl Marshal for CoreType {
         let attrs = if let Some(owner) = w.current_core_type_idx() {
             w.get_arena().core_type_attributes(owner)
         } else {
-            empty_attributes()
+            &self.ptyp_attributes
         };
         let share_empty_pstr = match &*self.ptyp_desc {
             CoreTypeDesc::Ptyp_object(_) => Some(EmptyPayloadShareKind::ObjectTypeAttr),
@@ -1132,7 +1129,7 @@ impl Marshal for Pattern {
         let attrs = if let Some(owner) = w.current_pat_idx() {
             w.get_arena().pat_attributes(owner)
         } else {
-            empty_attributes()
+            &self.ppat_attributes
         };
         w.write_block_header(0, 3);
         self.ppat_desc.marshal(w);
@@ -1288,7 +1285,7 @@ impl Marshal for Expression {
         let attrs = if let Some(owner) = w.current_expr_idx() {
             w.get_arena().expr_attributes(owner)
         } else {
-            empty_attributes()
+            &self.pexp_attributes
         };
         let is_raw_expansion = is_raw_expansion_expr(self, w);
         let is_external_raw_expansion = is_external_raw_expansion_expr(self, w);
@@ -1433,6 +1430,7 @@ impl Marshal for ExpressionDesc {
             ExpressionDesc::Pexp_fun(inner) => {
                 let PexpFun {
                     ref arg_label,
+                    ref default,
                     ref lhs,
                     ref rhs,
                     ref arity,
@@ -1440,7 +1438,8 @@ impl Marshal for ExpressionDesc {
                 } = **inner;
                 let default_idx = w
                     .current_expr_idx()
-                    .and_then(|owner| w.get_arena().fun_default(owner));
+                    .and_then(|owner| w.get_arena().fun_default(owner))
+                    .or(*default);
                 // Pexp_fun of { arg_label; default; lhs; rhs; arity; async }
                 // Inline record with 6 fields
                 w.write_block_header(3, 6);
@@ -1494,28 +1493,31 @@ impl Marshal for ExpressionDesc {
                 w.write_block_header(7, 1);
                 exprs.marshal(w);
             }
-            ExpressionDesc::Pexp_construct(lid) => {
+            ExpressionDesc::Pexp_construct(lid, expr) => {
                 let arg_idx = w
                     .current_expr_idx()
-                    .and_then(|owner| w.get_arena().construct_arg(owner));
+                    .and_then(|owner| w.get_arena().construct_arg(owner))
+                    .or(*expr);
                 w.write_block_header(8, 2);
                 lid.marshal(w);
                 arg_idx.marshal(w);
             }
             ExpressionDesc::Pexp_variant(inner) => {
-                let label = &**inner;
+                let (ref label, ref expr) = **inner;
                 let arg_idx = w
                     .current_expr_idx()
-                    .and_then(|owner| w.get_arena().variant_arg(owner));
+                    .and_then(|owner| w.get_arena().variant_arg(owner))
+                    .or(*expr);
                 w.write_block_header(9, 2);
                 w.write_str(label);
                 arg_idx.marshal(w);
             }
             ExpressionDesc::Pexp_record(inner) => {
-                let fields = &**inner;
+                let (ref fields, ref spread) = **inner;
                 let spread_idx = w
                     .current_expr_idx()
-                    .and_then(|owner| w.get_arena().record_spread(owner));
+                    .and_then(|owner| w.get_arena().record_spread(owner))
+                    .or(*spread);
                 w.write_block_header(10, 2);
                 fields.marshal(w);
                 spread_idx.marshal(w);
@@ -1537,10 +1539,11 @@ impl Marshal for ExpressionDesc {
                 exprs.marshal(w);
             }
             ExpressionDesc::Pexp_ifthenelse(inner) => {
-                let (ref e1, ref e2) = **inner;
+                let (ref e1, ref e2, ref e3) = **inner;
                 let else_idx = w
                     .current_expr_idx()
-                    .and_then(|owner| w.get_arena().if_else_branch(owner));
+                    .and_then(|owner| w.get_arena().if_else_branch(owner))
+                    .or(*e3);
                 w.write_block_header(14, 3);
                 e1.marshal(w);
                 e2.marshal(w);
@@ -1572,7 +1575,7 @@ impl Marshal for ExpressionDesc {
                 t.marshal(w);
             }
             ExpressionDesc::Pexp_coerce(inner) => {
-                let (ref e, ref t) = **inner;
+                let (ref e, ref _middle, ref t) = **inner;
                 let _from_type = w
                     .current_expr_idx()
                     .and_then(|owner| w.get_arena().coerce_from_type(owner));
@@ -1650,7 +1653,8 @@ impl Marshal for Case {
         // case = { pc_bar; pc_lhs; pc_guard; pc_rhs }
         let guard = w
             .next_case_owner_index()
-            .and_then(|(owner, case_index)| w.get_arena().case_guard(owner, case_index));
+            .and_then(|(owner, case_index)| w.get_arena().case_guard(owner, case_index))
+            .or(self.pc_guard);
         w.write_block_header(0, 4);
         self.pc_bar.marshal(w);
         self.pc_lhs.marshal(w);
@@ -1713,7 +1717,7 @@ impl Marshal for ModuleType {
         let attrs = if let Some(owner) = w.current_mod_type_idx() {
             w.get_arena().mod_type_attributes(owner)
         } else {
-            empty_attributes()
+            &self.pmty_attributes
         };
         w.write_block_header(0, 3);
         self.pmty_desc.marshal(w);
@@ -1802,7 +1806,7 @@ impl Marshal for ModuleExpr {
         let attrs = if let Some(owner) = w.current_mod_expr_idx() {
             w.get_arena().mod_expr_attributes(owner)
         } else {
-            empty_attributes()
+            &self.pmod_attributes
         };
         w.write_block_header(0, 3);
         self.pmod_desc.marshal(w);

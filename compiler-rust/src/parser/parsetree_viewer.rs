@@ -29,18 +29,15 @@ pub fn is_braced_expr(arena: &ParseArena, expr: &Expression) -> bool {
 }
 
 /// Check if expression has the "res.braces" attribute and return it.
-pub fn process_braces_attr<'a>(
-    arena: &'a ParseArena,
-    expr: &'a Expression,
-) -> Option<&'a Attribute> {
-    arena.expr_attributes_by_ref(expr)
+pub fn process_braces_attr<'a>(arena: &ParseArena, expr: &'a Expression) -> Option<&'a Attribute> {
+    expr.pexp_attributes
         .iter()
         .find(|attr| arena.get_string(attr.0.txt) == "res.braces")
 }
 
 /// Check if an expression is a template literal.
 pub fn is_template_literal(arena: &ParseArena, expr: &Expression) -> bool {
-    has_template_literal_attr(arena, &arena.expr_attributes_by_ref(expr))
+    has_template_literal_attr(arena, &expr.pexp_attributes)
 }
 
 /// Check if attributes contain template literal marker.
@@ -69,7 +66,7 @@ pub fn has_tagged_template_attr(arena: &ParseArena, attrs: &Attributes) -> bool 
 /// for expressions like `cond ? a : b` (as opposed to `if cond { a } else { b }`).
 pub fn is_ternary_expr(arena: &ParseArena, expr: &Expression) -> bool {
     // Check for res.ternary attribute - this distinguishes ternary from if-then-else
-    has_ternary_attribute(arena, &arena.expr_attributes_by_ref(expr))
+    has_ternary_attribute(arena, &expr.pexp_attributes)
 }
 
 /// Collect the parts of a ternary expression chain.
@@ -84,14 +81,14 @@ pub fn collect_ternary_parts<'a>(
     loop {
         match &*current.pexp_desc {
             ExpressionDesc::Pexp_ifthenelse(inner)
-                if has_ternary_attribute(arena, &arena.expr_attributes_by_ref(current)) =>
+                if has_ternary_attribute(arena, &current.pexp_attributes) =>
             {
-                let (ref condition, ref consequent) = **inner;
+                let (ref condition, ref consequent, ref opt_alternate) = **inner;
                 let condition_expr: &Expression = arena.get_expr(*condition);
                 let consequent_expr: &Expression = arena.get_expr(*consequent);
                 parts.push((condition_expr, consequent_expr));
-                match arena.if_else_branch_by_ref(current) {
-                    Some(alternate) => current = arena.get_expr(alternate),
+                match opt_alternate {
+                    Some(alternate) => current = arena.get_expr(*alternate),
                     None => break,
                 }
             }
@@ -129,7 +126,7 @@ pub fn has_if_let_attribute(arena: &ParseArena, attrs: &[Attribute]) -> bool {
 /// This is a `Pexp_match` with the `res.iflet` attribute.
 pub fn is_if_let_expr(arena: &ParseArena, expr: &Expression) -> bool {
     matches!(&*expr.pexp_desc, ExpressionDesc::Pexp_match(_))
-        && has_if_let_attribute(arena, &arena.expr_attributes_by_ref(expr))
+        && has_if_let_attribute(arena, &expr.pexp_attributes)
 }
 
 /// Represents the kind of condition in an if-chain.
@@ -158,12 +155,12 @@ pub fn collect_if_expressions<'a>(
         match &*current.pexp_desc {
             // Regular if-then-else (with or without else branch)
             ExpressionDesc::Pexp_ifthenelse(inner) => {
-                let (ref if_idx, ref then_idx) = **inner;
+                let (ref if_idx, ref then_idx, ref opt_else) = **inner;
                 let if_expr: &Expression = arena.get_expr(*if_idx);
                 let then_expr: &Expression = arena.get_expr(*then_idx);
                 acc.push((expr_loc, IfConditionKind::If(if_expr), then_expr));
-                match arena.if_else_branch_by_ref(current) {
-                    Some(else_idx) => current = arena.get_expr(else_idx),
+                match opt_else {
+                    Some(else_idx) => current = arena.get_expr(*else_idx),
                     None => return (acc, None),
                 }
             }
@@ -171,11 +168,10 @@ pub fn collect_if_expressions<'a>(
             ExpressionDesc::Pexp_match(inner)
                 if is_if_let_expr(arena, current)
                     && inner.1.len() == 2
-                    && arena.case_guard_by_ref(current, 0).is_none()
+                    && inner.1[0].pc_guard.is_none()
                     && matches!(
                         &*arena.get_expr(inner.1[1].pc_rhs).pexp_desc,
-                        ExpressionDesc::Pexp_construct(lid)
-                            if arena.is_lident(lid.txt, "()")
+                        ExpressionDesc::Pexp_construct(lid, _) if arena.is_lident(lid.txt, "()")
                     ) =>
             {
                 let (ref condition_idx, ref cases) = **inner;
@@ -193,7 +189,7 @@ pub fn collect_if_expressions<'a>(
             ExpressionDesc::Pexp_match(inner)
                 if is_if_let_expr(arena, current)
                     && inner.1.len() == 2
-                    && arena.case_guard_by_ref(current, 0).is_none() =>
+                    && inner.1[0].pc_guard.is_none() =>
             {
                 let (ref condition_idx, ref cases) = **inner;
                 let pattern: &Pattern = arena.get_pat(cases[0].pc_lhs);
@@ -348,11 +344,12 @@ pub fn is_underscore_apply_sugar(arena: &ParseArena, expr: &Expression) -> bool 
         ExpressionDesc::Pexp_fun(inner) => {
             let PexpFun {
                 ref arg_label,
+                ref default,
                 ref lhs,
                 ref rhs,
                 ..
             } = **inner;
-            if *arg_label != ArgLabel::Nolabel || arena.fun_default_by_ref(expr).is_some() {
+            if *arg_label != ArgLabel::Nolabel || default.is_some() {
                 return false;
             }
             let lhs_pat = arena.get_pat(*lhs);
@@ -445,7 +442,7 @@ pub fn is_huggable_expression(arena: &crate::parse_arena::ParseArena, expr: &Exp
         | ExpressionDesc::Pexp_tuple(_)
         | ExpressionDesc::Pexp_record(_) => true,
         ExpressionDesc::Pexp_constant(c) if matches!(&**c, Constant::String(_, Some(_))) => true,
-        ExpressionDesc::Pexp_construct(lid)
+        ExpressionDesc::Pexp_construct(lid, _)
             if arena.is_lident(lid.txt, "::") || arena.is_lident(lid.txt, "[]") =>
         {
             true
@@ -665,17 +662,14 @@ pub fn collect_list_expressions<'a>(
 
     loop {
         match &*current.pexp_desc {
-            ExpressionDesc::Pexp_construct(lid)
-                if arena.is_lident(lid.txt, "[]") && arena.construct_arg_by_ref(current).is_none() =>
-            {
+            ExpressionDesc::Pexp_construct(lid, None) if arena.is_lident(lid.txt, "[]") => {
                 return (acc, None);
             }
-            ExpressionDesc::Pexp_construct(lid) if arena.is_lident(lid.txt, "::") => {
+            ExpressionDesc::Pexp_construct(lid, Some(arg_idx))
+                if arena.is_lident(lid.txt, "::") =>
+            {
                 // The argument should be a tuple of (head, tail)
-                let Some(arg_idx) = arena.construct_arg_by_ref(current) else {
-                    return (acc, Some(current));
-                };
-                let arg: &Expression = arena.get_expr(arg_idx);
+                let arg: &Expression = arena.get_expr(*arg_idx);
                 if let ExpressionDesc::Pexp_tuple(exprs) = &*arg.pexp_desc {
                     if exprs.len() == 2 {
                         let head: &Expression = arena.get_expr(exprs[0]);
@@ -791,8 +785,8 @@ pub fn fun_expr<'a>(
     expr: &'a Expression,
 ) -> (bool, Vec<FunParam<'a>>, &'a Expression) {
     // Check for async attribute on the outermost expression
-    let mut is_async = arena
-        .expr_attributes_by_ref(expr)
+    let mut is_async = expr
+        .pexp_attributes
         .iter()
         .any(|attr| arena.get_string(attr.0.txt) == "res.async");
 
@@ -825,12 +819,12 @@ pub fn fun_expr<'a>(
             ExpressionDesc::Pexp_fun(inner) => {
                 let PexpFun {
                     arg_label,
+                    default,
                     lhs,
                     rhs,
                     arity,
                     is_async: expr_is_async,
                 } = &**inner;
-                let default = arena.fun_default_by_ref(current);
                 // Check is_async on the FIRST Pexp_fun we encounter
                 // (it may be nested inside Pexp_newtype)
                 if !found_first_pexp_fun {
@@ -849,14 +843,14 @@ pub fn fun_expr<'a>(
                     let attrs: &[Attribute] = if n_fun == 0 {
                         &[] // First parameter: OCaml strips top-level attrs
                     } else {
-                        &arena.expr_attributes_by_ref(current) // Nested: preserve attrs
+                        &current.pexp_attributes // Nested: preserve attrs
                     };
                     let pat_ref: &Pattern = arena.get_pat(*lhs);
                     params.push(FunParam::Parameter {
                         attrs,
                         label: arg_label,
-                        default_expr: default.map(|idx| {
-                            let e: &Expression = arena.get_expr(idx);
+                        default_expr: default.as_ref().map(|idx| {
+                            let e: &Expression = arena.get_expr(*idx);
                             e
                         }),
                         pat: pat_ref,
@@ -919,7 +913,7 @@ pub fn is_spread_belt_array_concat(arena: &ParseArena, expr: &Expression) -> boo
                         if arena.get_string(*parent_name_idx) == "Array" {
                             if let Longident::Lident(base_idx) = grandparent.as_ref() {
                                 if arena.get_string(*base_idx) == "Belt" {
-                                    return has_spread_attr(arena, &arena.expr_attributes_by_ref(expr));
+                                    return has_spread_attr(arena, &expr.pexp_attributes);
                                 }
                             }
                         }
@@ -944,7 +938,7 @@ pub fn is_spread_belt_list_concat(arena: &ParseArena, expr: &Expression) -> bool
                         if arena.get_string(*parent_name_idx) == "List" {
                             if let Longident::Lident(base_idx) = grandparent.as_ref() {
                                 if arena.get_string(*base_idx) == "Belt" {
-                                    return has_spread_attr(arena, &arena.expr_attributes_by_ref(expr));
+                                    return has_spread_attr(arena, &expr.pexp_attributes);
                                 }
                             }
                         }
@@ -1259,11 +1253,12 @@ pub fn get_underscore_apply_inner<'a>(
         ExpressionDesc::Pexp_fun(inner) => {
             let PexpFun {
                 ref arg_label,
+                ref default,
                 ref lhs,
                 ref rhs,
                 ..
             } = **inner;
-            if *arg_label != ArgLabel::Nolabel || arena.fun_default_by_ref(expr).is_some() {
+            if *arg_label != ArgLabel::Nolabel || default.is_some() {
                 return None;
             }
             // Check if pattern is `__x`
@@ -1372,7 +1367,7 @@ pub fn arrow_type<'a>(
                 // Calculate adjusted arity for @as workaround
                 // OCaml: When arg is Ptyp_any with @as attr, don't decrement arity
                 let adjusted_arity = if matches!(&*arg_typ.ptyp_desc, CoreTypeDesc::Ptyp_any)
-                    && has_as_attr(arena, &arena.core_type_attributes_by_ref(arg_typ))
+                    && has_as_attr(arena, &arg_typ.ptyp_attributes)
                 {
                     remaining_arity
                 } else {
@@ -1397,7 +1392,7 @@ pub fn arrow_type<'a>(
             let (..) = **inner;
             // Start processing with the type's attributes as attrs_before,
             // and process the type without those attributes
-            process(arena, &arena.core_type_attributes_by_ref(typ), Vec::new(), typ, max_arity)
+            process(arena, &typ.ptyp_attributes, Vec::new(), typ, max_arity)
         }
         _ => process(arena, &EMPTY_ATTRS, Vec::new(), typ, max_arity),
     }
@@ -1462,7 +1457,7 @@ pub fn mod_expr_functor<'a>(
             ModuleExprDesc::Pmod_functor(inner) => {
                 let (ref lbl, ref mod_type_idx, ref return_mod_expr_idx) = **inner;
                 let param = FunctorParam {
-                    attrs: &arena.mod_expr_attributes_by_ref(mod_expr),
+                    attrs: &mod_expr.pmod_attributes,
                     lbl,
                     mod_type: mod_type_idx.as_ref().map(|idx| {
                         let mt: &ModuleType = arena.get_mod_type(*idx);

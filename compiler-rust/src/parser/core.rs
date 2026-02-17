@@ -51,6 +51,7 @@ pub mod recover {
                 Payload::PStr(Box::new(vec![])),
             )))),
             pexp_loc: LocIdx::none(),
+            pexp_attributes: Attributes::new(),
         }
     }
 
@@ -64,6 +65,7 @@ pub mod recover {
                 Payload::PStr(Box::new(vec![])),
             )))),
             ptyp_loc: LocIdx::none(),
+            ptyp_attributes: Attributes::new(),
         }
     }
 
@@ -77,6 +79,7 @@ pub mod recover {
                 Payload::PStr(Box::new(vec![])),
             )))),
             ppat_loc: LocIdx::none(),
+            ppat_attributes: Attributes::new(),
         }
     }
 
@@ -85,6 +88,7 @@ pub mod recover {
         ModuleExpr {
             pmod_desc: Box::new(ModuleExprDesc::Pmod_structure(Box::new(vec![]))),
             pmod_loc: LocIdx::none(),
+            pmod_attributes: Attributes::new(),
         }
     }
 
@@ -93,6 +97,7 @@ pub mod recover {
         ModuleType {
             pmty_desc: Box::new(ModuleTypeDesc::Pmty_signature(Box::new(vec![]))),
             pmty_loc: LocIdx::none(),
+            pmty_attributes: Attributes::new(),
         }
     }
 
@@ -520,6 +525,7 @@ pub fn doc_comment_to_attribute(
             None,
         )))),
         pexp_loc: loc,
+        pexp_attributes: Attributes::new(),
     };
     let expr_idx = arena.push_expr(expr);
     let payload = Payload::PStr(Box::new(vec![StructureItem {
@@ -594,6 +600,7 @@ pub mod ast_helper {
         Expression {
             pexp_desc: Box::new(desc),
             pexp_loc: loc,
+            pexp_attributes: Attributes::new(),
         }
     }
 
@@ -602,6 +609,7 @@ pub mod ast_helper {
         Pattern {
             ppat_desc: Box::new(desc),
             ppat_loc: loc,
+            ppat_attributes: Attributes::new(),
         }
     }
 
@@ -610,6 +618,7 @@ pub mod ast_helper {
         CoreType {
             ptyp_desc: Box::new(desc),
             ptyp_loc: loc,
+            ptyp_attributes: Attributes::new(),
         }
     }
 
@@ -632,7 +641,10 @@ pub mod ast_helper {
     /// Create a unit expression: () (requires parser for arena allocation)
     pub fn make_unit(p: &mut Parser<'_>, loc: Location) -> Expression {
         let lid_idx = p.push_lident_static("()");
-        make_expr(ExpressionDesc::Pexp_construct(with_loc(lid_idx, loc)), loc)
+        make_expr(
+            ExpressionDesc::Pexp_construct(with_loc(lid_idx, loc), None),
+            loc,
+        )
     }
 
     /// Create an apply expression.
@@ -703,6 +715,7 @@ pub mod ast_helper {
         Pattern {
             ppat_desc: Box::new(PatternDesc::Ppat_var(with_loc(str_idx, loc))),
             ppat_loc: loc,
+            ppat_attributes: Attributes::new(),
         }
     }
 

@@ -429,6 +429,8 @@ pub struct CoreType {
     pub ptyp_desc: Box<CoreTypeDesc>,
     /// Location.
     pub ptyp_loc: Location,
+    /// Attributes.
+    pub ptyp_attributes: Attributes,
 }
 
 /// Argument in an arrow type.
@@ -501,6 +503,8 @@ pub struct Pattern {
     pub ppat_desc: Box<PatternDesc>,
     /// Location.
     pub ppat_loc: Location,
+    /// Attributes.
+    pub ppat_attributes: Attributes,
 }
 
 /// Pattern descriptions.
@@ -564,12 +568,15 @@ pub struct Expression {
     pub pexp_desc: Box<ExpressionDesc>,
     /// Location.
     pub pexp_loc: Location,
+    /// Attributes.
+    pub pexp_attributes: Attributes,
 }
 
 /// Named struct for Pexp_fun variant (boxed for enum size optimization).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PexpFun {
     pub arg_label: ArgLabel,
+    pub default: Option<ExprIdx>,
     pub lhs: PatIdx,
     pub rhs: ExprIdx,
     pub arity: Arity,
@@ -604,20 +611,20 @@ pub enum ExpressionDesc {
     Pexp_try(Box<(ExprIdx, Vec<Case>)>),
     /// Tuple: `(E1, E2, ..., En)`.
     Pexp_tuple(Box<Vec<ExprIdx>>),
-    /// Constructor: `C` or `C(E)` (payload tracked in ParseArena side table).
-    Pexp_construct(Loc<LidentIdx>),
-    /// Variant: `\`A` or `\`A(E)` (payload tracked in ParseArena side table).
-    Pexp_variant(Box<Label>),
-    /// Record: `{l1: E1, ..., ln: En}` or `{...E, l1: E1, ...}` (spread tracked in ParseArena side table).
-    Pexp_record(Box<Vec<ExpressionRecordField>>),
+    /// Constructor: `C` or `C(E)`.
+    Pexp_construct(Loc<LidentIdx>, Option<ExprIdx>),
+    /// Variant: `\`A` or `\`A(E)`.
+    Pexp_variant(Box<(Label, Option<ExprIdx>)>),
+    /// Record: `{l1: E1, ..., ln: En}` or `{...E, l1: E1, ...}`.
+    Pexp_record(Box<(Vec<ExpressionRecordField>, Option<ExprIdx>)>),
     /// Field access: `E.l`.
     Pexp_field(ExprIdx, Loc<LidentIdx>),
     /// Field set: `E.l = E'`.
     Pexp_setfield(Box<(ExprIdx, Loc<LidentIdx>, ExprIdx)>),
     /// Array: `[E1, ..., En]`.
     Pexp_array(Box<Vec<ExprIdx>>),
-    /// If-then-else: `if E1 { E2 } else { E3 }` (else branch tracked in ParseArena side table).
-    Pexp_ifthenelse(Box<(ExprIdx, ExprIdx)>),
+    /// If-then-else: `if E1 { E2 } else { E3 }`.
+    Pexp_ifthenelse(Box<(ExprIdx, ExprIdx, Option<ExprIdx>)>),
     /// Sequence: `E1; E2`.
     Pexp_sequence(ExprIdx, ExprIdx),
     /// While: `while E1 { E2 }`.
@@ -626,8 +633,8 @@ pub enum ExpressionDesc {
     Pexp_for(Box<(PatIdx, ExprIdx, ExprIdx, DirectionFlag, ExprIdx)>),
     /// Constraint: `(E: T)`.
     Pexp_constraint(Box<(ExprIdx, CoreTypeIdx)>),
-    /// Coercion: `(E :> T)` (source type tracked in ParseArena side table).
-    Pexp_coerce(Box<(ExprIdx, CoreTypeIdx)>),
+    /// Coercion: `(E :> T)`.
+    Pexp_coerce(Box<(ExprIdx, Option<CoreTypeIdx>, CoreTypeIdx)>),
     /// Send: `E#m`.
     Pexp_send(Box<(ExprIdx, Loc<Label>)>),
     /// Let module: `{ module M = ME; E }`.
@@ -668,6 +675,8 @@ pub struct Case {
     pub pc_bar: Option<PosIdx>,
     /// Left-hand side pattern (arena index).
     pub pc_lhs: PatIdx,
+    /// Optional guard expression (arena index).
+    pub pc_guard: Option<ExprIdx>,
     /// Right-hand side expression (arena index).
     pub pc_rhs: ExprIdx,
 }
@@ -786,6 +795,8 @@ pub struct ModuleExpr {
     pub pmod_desc: Box<ModuleExprDesc>,
     /// Location.
     pub pmod_loc: Location,
+    /// Attributes.
+    pub pmod_attributes: Attributes,
 }
 
 /// Module expression descriptions.
@@ -814,6 +825,8 @@ pub struct ModuleType {
     pub pmty_desc: Box<ModuleTypeDesc>,
     /// Location.
     pub pmty_loc: Location,
+    /// Attributes.
+    pub pmty_attributes: Attributes,
 }
 
 /// Module type descriptions.
