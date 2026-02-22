@@ -10314,8 +10314,9 @@ fn is_private_extension(item: &StructureItem, arena: &ParseArena) -> bool {
 }
 
 fn expand_extensions_item(item: &StructureItem, arena: &mut ParseArena) -> Vec<StructureItem> {
-    match &item.pstr_desc {
-        StructureItemDesc::Pstr_extension(ext, _attrs) => {
+    match &*item.pstr_desc {
+        StructureItemDesc::Pstr_extension(inner) => {
+            let (ref ext, ref _attrs) = **inner;
             let (ext_name, payload) = ext;
             let name = arena.get_string(ext_name.txt).to_string();
             if name == "raw" {
@@ -10327,40 +10328,46 @@ fn expand_extensions_item(item: &StructureItem, arena: &mut ParseArena) -> Vec<S
             }
         }
         // Recurse into expressions to expand %raw, %re
-        StructureItemDesc::Pstr_eval(expr, attrs) => {
-            let new_expr = expand_extensions_expr(expr, arena);
+        StructureItemDesc::Pstr_eval(inner) => {
+            let (ref expr_idx, ref attrs) = **inner;
+            let expr = arena.get_expr(*expr_idx).clone();
+            let new_expr = expand_extensions_expr(&expr, arena);
+            let new_expr_idx = arena.push_expr(new_expr);
             vec![StructureItem {
-                pstr_desc: StructureItemDesc::Pstr_eval(new_expr, attrs.clone()),
+                pstr_desc: Box::new(StructureItemDesc::Pstr_eval(Box::new((new_expr_idx, attrs.clone())))),
                 pstr_loc: item.pstr_loc,
             }]
         }
-        StructureItemDesc::Pstr_value(rec, bindings) => {
+        StructureItemDesc::Pstr_value(inner) => {
+            let (ref rec, ref bindings) = **inner;
             let new_bindings: Vec<_> = bindings
                 .iter()
                 .map(|vb| {
-                    let new_expr = expand_extensions_expr(&vb.pvb_expr, arena);
+                    let vb_expr = arena.get_expr(vb.pvb_expr).clone();
+                    let new_expr = expand_extensions_expr(&vb_expr, arena);
+                    let new_expr_idx = arena.push_expr(new_expr);
                     crate::parser::ast::ValueBinding {
                         pvb_pat: vb.pvb_pat.clone(),
-                        pvb_expr: new_expr,
+                        pvb_expr: new_expr_idx,
                         pvb_attributes: vb.pvb_attributes.clone(),
                         pvb_loc: vb.pvb_loc,
                     }
                 })
                 .collect();
             vec![StructureItem {
-                pstr_desc: StructureItemDesc::Pstr_value(*rec, new_bindings),
+                pstr_desc: Box::new(StructureItemDesc::Pstr_value(Box::new((*rec, new_bindings)))),
                 pstr_loc: item.pstr_loc,
             }]
         }
         StructureItemDesc::Pstr_module(mb) => {
-            let new_expr = expand_extensions_mod_expr(&mb.pmb_expr, arena);
+            let new_expr_idx = expand_extensions_mod_expr(mb.pmb_expr, arena);
             vec![StructureItem {
-                pstr_desc: StructureItemDesc::Pstr_module(crate::parser::ast::ModuleBinding {
+                pstr_desc: Box::new(StructureItemDesc::Pstr_module(Box::new(crate::parser::ast::ModuleBinding {
                     pmb_name: mb.pmb_name.clone(),
-                    pmb_expr: new_expr,
+                    pmb_expr: new_expr_idx,
                     pmb_attributes: mb.pmb_attributes.clone(),
                     pmb_loc: mb.pmb_loc,
-                }),
+                }))),
                 pstr_loc: item.pstr_loc,
             }]
         }
@@ -10373,9 +10380,9 @@ fn expand_extensions_item(item: &StructureItem, arena: &mut ParseArena) -> Vec<S
 }
 
 fn expand_extensions_expr(expr: &Expression, arena: &mut ParseArena) -> Expression {
-    match &expr.pexp_desc {
+    match &*expr.pexp_desc {
         ExpressionDesc::Pexp_extension(ext) => {
-            let (ext_name, payload) = ext;
+            let (ref ext_name, ref payload) = **ext;
             let name = arena.get_string(ext_name.txt).to_string();
             match name.as_str() {
                 "raw" => {
@@ -10387,28 +10394,40 @@ fn expand_extensions_expr(expr: &Expression, arena: &mut ParseArena) -> Expressi
                 _ => expr.clone(),
             }
         }
-        ExpressionDesc::Pexp_let(rec_flag, bindings, body) => {
+        ExpressionDesc::Pexp_let(inner) => {
+            let (ref rec_flag, ref bindings, ref body) = **inner;
             let new_bindings: Vec<_> = bindings
                 .iter()
-                .map(|vb| crate::parser::ast::ValueBinding {
-                    pvb_pat: vb.pvb_pat.clone(),
-                    pvb_expr: expand_extensions_expr(&vb.pvb_expr, arena),
-                    pvb_attributes: vb.pvb_attributes.clone(),
-                    pvb_loc: vb.pvb_loc,
+                .map(|vb| {
+                    let vb_expr = arena.get_expr(vb.pvb_expr).clone();
+                    let new_expr = expand_extensions_expr(&vb_expr, arena);
+                    let new_expr_idx = arena.push_expr(new_expr);
+                    crate::parser::ast::ValueBinding {
+                        pvb_pat: vb.pvb_pat.clone(),
+                        pvb_expr: new_expr_idx,
+                        pvb_attributes: vb.pvb_attributes.clone(),
+                        pvb_loc: vb.pvb_loc,
+                    }
                 })
                 .collect();
-            let new_body = expand_extensions_expr(body, arena);
+            let body_expr = arena.get_expr(*body).clone();
+            let new_body = expand_extensions_expr(&body_expr, arena);
+            let new_body_idx = arena.push_expr(new_body);
             Expression {
-                pexp_desc: ExpressionDesc::Pexp_let(*rec_flag, new_bindings, Box::new(new_body)),
+                pexp_desc: Box::new(ExpressionDesc::Pexp_let(Box::new((*rec_flag, new_bindings, new_body_idx)))),
                 pexp_loc: expr.pexp_loc,
                 pexp_attributes: expr.pexp_attributes.clone(),
             }
         }
         ExpressionDesc::Pexp_sequence(e1, e2) => {
-            let new_e1 = expand_extensions_expr(e1, arena);
-            let new_e2 = expand_extensions_expr(e2, arena);
+            let e1_expr = arena.get_expr(*e1).clone();
+            let e2_expr = arena.get_expr(*e2).clone();
+            let new_e1 = expand_extensions_expr(&e1_expr, arena);
+            let new_e2 = expand_extensions_expr(&e2_expr, arena);
+            let new_e1_idx = arena.push_expr(new_e1);
+            let new_e2_idx = arena.push_expr(new_e2);
             Expression {
-                pexp_desc: ExpressionDesc::Pexp_sequence(Box::new(new_e1), Box::new(new_e2)),
+                pexp_desc: Box::new(ExpressionDesc::Pexp_sequence(new_e1_idx, new_e2_idx)),
                 pexp_loc: expr.pexp_loc,
                 pexp_attributes: expr.pexp_attributes.clone(),
             }
@@ -10418,42 +10437,48 @@ fn expand_extensions_expr(expr: &Expression, arena: &mut ParseArena) -> Expressi
 }
 
 /// Recursively expand extensions in module expressions (handles functors, structures, etc.)
-fn expand_extensions_mod_expr(me: &ModuleExpr, arena: &mut ParseArena) -> ModuleExpr {
-    match &me.pmod_desc {
+fn expand_extensions_mod_expr(me_idx: ModExprIdx, arena: &mut ParseArena) -> ModExprIdx {
+    let me = arena.get_mod_expr(me_idx).clone();
+    match &*me.pmod_desc {
         ModuleExprDesc::Pmod_structure(items) => {
             let new_items = expand_extensions(items, arena);
-            ModuleExpr {
-                pmod_desc: ModuleExprDesc::Pmod_structure(new_items),
+            let new_me = ModuleExpr {
+                pmod_desc: Box::new(ModuleExprDesc::Pmod_structure(Box::new(new_items))),
                 pmod_loc: me.pmod_loc,
                 pmod_attributes: me.pmod_attributes.clone(),
-            }
+            };
+            arena.push_mod_expr(new_me)
         }
-        ModuleExprDesc::Pmod_functor(name, mty, body) => {
-            let new_body = expand_extensions_mod_expr(body, arena);
-            ModuleExpr {
-                pmod_desc: ModuleExprDesc::Pmod_functor(name.clone(), mty.clone(), Box::new(new_body)),
+        ModuleExprDesc::Pmod_functor(inner) => {
+            let (ref name, ref mty, ref body) = **inner;
+            let new_body_idx = expand_extensions_mod_expr(*body, arena);
+            let new_me = ModuleExpr {
+                pmod_desc: Box::new(ModuleExprDesc::Pmod_functor(Box::new((name.clone(), mty.clone(), new_body_idx)))),
                 pmod_loc: me.pmod_loc,
                 pmod_attributes: me.pmod_attributes.clone(),
-            }
+            };
+            arena.push_mod_expr(new_me)
         }
         ModuleExprDesc::Pmod_apply(me1, me2) => {
-            let new_me1 = expand_extensions_mod_expr(me1, arena);
-            let new_me2 = expand_extensions_mod_expr(me2, arena);
-            ModuleExpr {
-                pmod_desc: ModuleExprDesc::Pmod_apply(Box::new(new_me1), Box::new(new_me2)),
+            let new_me1_idx = expand_extensions_mod_expr(*me1, arena);
+            let new_me2_idx = expand_extensions_mod_expr(*me2, arena);
+            let new_me = ModuleExpr {
+                pmod_desc: Box::new(ModuleExprDesc::Pmod_apply(new_me1_idx, new_me2_idx)),
                 pmod_loc: me.pmod_loc,
                 pmod_attributes: me.pmod_attributes.clone(),
-            }
+            };
+            arena.push_mod_expr(new_me)
         }
-        ModuleExprDesc::Pmod_constraint(inner, mty) => {
-            let new_inner = expand_extensions_mod_expr(inner, arena);
-            ModuleExpr {
-                pmod_desc: ModuleExprDesc::Pmod_constraint(Box::new(new_inner), mty.clone()),
+        ModuleExprDesc::Pmod_constraint(inner_idx, mty) => {
+            let new_inner_idx = expand_extensions_mod_expr(*inner_idx, arena);
+            let new_me = ModuleExpr {
+                pmod_desc: Box::new(ModuleExprDesc::Pmod_constraint(new_inner_idx, *mty)),
                 pmod_loc: me.pmod_loc,
                 pmod_attributes: me.pmod_attributes.clone(),
-            }
+            };
+            arena.push_mod_expr(new_me)
         }
-        _ => me.clone(),
+        _ => me_idx,
     }
 }
 
@@ -11192,8 +11217,7 @@ fn rewrite_signature_item_no_spice(item: &SignatureItem, arena: &mut ParseArena)
                 psig_loc: item.psig_loc,
             }
         }
-        // Any remaining cases - just clone (no string constants to transform)
-        _ => item.clone(),
+        // All SignatureItemDesc variants are covered above
     }
 }
 
