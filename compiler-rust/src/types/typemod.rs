@@ -83,7 +83,7 @@ fn force_poly_typed_core_type(
                 ctyp_type: poly_ty,
                 ctyp_env: typed_core_type.ctyp_env,
                 ctyp_loc: typed_core_type.ctyp_loc,
-                ctyp_attributes: vec![],
+                ctyp_attributes: Attributes::new(),
             };
             (poly_ctyp, poly_ty)
         }
@@ -93,17 +93,17 @@ fn force_poly_typed_core_type(
 /// Try to convert a parsed module expression to a module path.
 /// Mirrors OCaml `Typemod.path_of_module` for applicative functor paths.
 fn path_of_parsed_module_expr(mod_expr: &ParsedModuleExpr, arena: &ParseArena) -> Option<Path> {
-    match &mod_expr.pmod_desc {
+    match &*mod_expr.pmod_desc {
         ParsedModuleExprDesc::Pmod_ident(lid) => {
             let longident = arena.get_longident(lid.txt);
             Some(path_from_longident(longident, |idx| arena.get_string(idx)))
         }
         ParsedModuleExprDesc::Pmod_apply(functor, arg) => {
-            let funct_path = path_of_parsed_module_expr(functor, arena)?;
-            let arg_path = path_of_parsed_module_expr(arg, arena)?;
+            let funct_path = path_of_parsed_module_expr(arena.get_mod_expr(*functor), arena)?;
+            let arg_path = path_of_parsed_module_expr(arena.get_mod_expr(*arg), arena)?;
             Some(Path::papply(funct_path, arg_path))
         }
-        ParsedModuleExprDesc::Pmod_constraint(inner, _) => path_of_parsed_module_expr(inner, arena),
+        ParsedModuleExprDesc::Pmod_constraint(inner, _) => path_of_parsed_module_expr(arena.get_mod_expr(*inner), arena),
         _ => None,
     }
 }
@@ -341,17 +341,17 @@ fn rewrite_module_prefix_in_type(
         return;
     }
 
-    let ty = ctx.get_type(ty_ref);
-    let desc = ty.desc().clone();
+    let desc = ctx.get_desc(ty_ref);
 
-    match &desc {
+    match &*desc {
         TypeDesc::Tconstr { path, args, .. } => {
             let rewritten = rewrite_module_path_prefix(path, old_param, new_prefix);
             if rewritten != *path {
-                let mut desc_mut = ty.desc_mut();
-                if let TypeDesc::Tconstr { ref mut path, .. } = *desc_mut {
+                let mut new_desc = (*desc).clone();
+                if let TypeDesc::Tconstr { ref mut path, .. } = new_desc {
                     *path = rewritten;
                 }
+                ctx.set_desc(ty_ref, new_desc);
             }
             for &arg in args {
                 rewrite_module_prefix_in_type(arg, old_param, new_prefix, ctx, visited);
@@ -401,10 +401,11 @@ fn rewrite_module_prefix_in_type(
         TypeDesc::Tpackage { path, args, .. } => {
             let rewritten = rewrite_module_path_prefix(path, old_param, new_prefix);
             if rewritten != *path {
-                let mut desc_mut = ty.desc_mut();
-                if let TypeDesc::Tpackage { ref mut path, .. } = *desc_mut {
+                let mut new_desc = (*desc).clone();
+                if let TypeDesc::Tpackage { ref mut path, .. } = new_desc {
                     *path = rewritten;
                 }
+                ctx.set_desc(ty_ref, new_desc);
             }
             for &arg in args {
                 rewrite_module_prefix_in_type(arg, old_param, new_prefix, ctx, visited);
@@ -1715,8 +1716,8 @@ fn collect_pmty_with_type_constraints<'a>(
         match constraint {
             ParsedWithConstraint::Pwith_type(lid, decl)
             | ParsedWithConstraint::Pwith_typesubst(lid, decl) => {
-                if let Some(manifest) = &decl.ptype_manifest {
-                    let (_, manifest_ty) = transl_type(tctx, env, manifest)?;
+                if let Some(manifest) = decl.ptype_manifest {
+                    let (_, manifest_ty) = transl_type(tctx, env, arena.get_core_type(manifest))?;
                     let longident = tctx.resolve_lid(lid.txt).clone();
                     let path = flatten_package_constraint_path(&longident, arena, tctx.type_ctx);
                     out.push((path, manifest_ty));
@@ -2403,18 +2404,18 @@ fn extract_functor_result_type<'b>(
 
 /// Find an embedded packed module expression inside an unpack payload expression.
 /// This follows common wrappers produced by await/import rewrites.
-fn find_packed_module_expr(expr: &crate::parser::ast::Expression) -> Option<&ParsedModuleExpr> {
+fn find_packed_module_expr<'a>(expr: &'a crate::parser::ast::Expression, arena: &'a ParseArena) -> Option<&'a ParsedModuleExpr> {
     use crate::parser::ast::ExpressionDesc;
 
-    match &expr.pexp_desc {
-        ExpressionDesc::Pexp_pack(mod_expr) => Some(mod_expr),
-        ExpressionDesc::Pexp_constraint(inner, _) => find_packed_module_expr(inner),
-        ExpressionDesc::Pexp_coerce(inner, _, _) => find_packed_module_expr(inner),
-        ExpressionDesc::Pexp_await(inner) => find_packed_module_expr(inner),
-        ExpressionDesc::Pexp_apply { funct, args, .. } => {
-            find_packed_module_expr(funct).or_else(|| {
-                args.iter()
-                    .find_map(|(_, arg)| find_packed_module_expr(arg))
+    match &*expr.pexp_desc {
+        ExpressionDesc::Pexp_pack(mod_expr_idx) => Some(arena.get_mod_expr(*mod_expr_idx)),
+        ExpressionDesc::Pexp_constraint(inner) => find_packed_module_expr(arena.get_expr(inner.0), arena),
+        ExpressionDesc::Pexp_coerce(inner) => find_packed_module_expr(arena.get_expr(inner.0), arena),
+        ExpressionDesc::Pexp_await(inner) => find_packed_module_expr(arena.get_expr(*inner), arena),
+        ExpressionDesc::Pexp_apply(apply) => {
+            find_packed_module_expr(arena.get_expr(apply.funct), arena).or_else(|| {
+                apply.args.iter()
+                    .find_map(|(_, arg)| find_packed_module_expr(arena.get_expr(*arg), arena))
             })
         }
         _ => None,
@@ -2428,7 +2429,7 @@ fn module_type_hint_from_parsed_module_expr<'a>(
     arena: &'a ParseArena,
     mod_expr: &ParsedModuleExpr,
 ) -> Option<ModuleType> {
-    match &mod_expr.pmod_desc {
+    match &*mod_expr.pmod_desc {
         ParsedModuleExprDesc::Pmod_ident(lid) => {
             let longident = tctx.resolve_lid(lid.txt);
             let path = path_from_longident(longident, |idx| arena.get_string(idx));
@@ -2439,7 +2440,7 @@ fn module_type_hint_from_parsed_module_expr<'a>(
             })
         }
         ParsedModuleExprDesc::Pmod_constraint(inner, _) => {
-            module_type_hint_from_parsed_module_expr(tctx, arena, inner)
+            module_type_hint_from_parsed_module_expr(tctx, arena, arena.get_mod_expr(*inner))
         }
         _ => None,
     }
@@ -2518,7 +2519,7 @@ pub fn lookup_module_type_from_parsed_module_expr<'a>(
     arena: &'a ParseArena,
     mod_expr: &ParsedModuleExpr,
 ) -> Option<crate::types::decl::ModuleType> {
-    match &mod_expr.pmod_desc {
+    match &*mod_expr.pmod_desc {
         ParsedModuleExprDesc::Pmod_ident(lid) => {
             let longident = arena.get_longident(lid.txt);
             lookup_module_type_by_lid(
@@ -2529,14 +2530,19 @@ pub fn lookup_module_type_from_parsed_module_expr<'a>(
                 tctx.type_ctx,
             )
         }
-        ParsedModuleExprDesc::Pmod_apply(functor_expr, arg_expr) => {
-            extract_functor_result_type(tctx, &functor_expr.pmod_desc, arg_expr, arena, env)
+        ParsedModuleExprDesc::Pmod_apply(functor_idx, arg_idx) => {
+            let functor_expr = arena.get_mod_expr(*functor_idx);
+            let arg_expr = arena.get_mod_expr(*arg_idx);
+            extract_functor_result_type(tctx, &*functor_expr.pmod_desc, arg_expr, arena, env)
         }
-        ParsedModuleExprDesc::Pmod_constraint(inner, mty) => {
+        ParsedModuleExprDesc::Pmod_constraint(inner_idx, mty_idx) => {
+            let inner = arena.get_mod_expr(*inner_idx);
+            let mty = arena.get_mod_type(*mty_idx);
             lookup_module_type_from_parsed_module_expr(tctx, env, arena, inner)
                 .or_else(|| translate_module_type_to_decl(tctx, env, arena, mty).ok())
         }
-        ParsedModuleExprDesc::Pmod_unpack(expr) => {
+        ParsedModuleExprDesc::Pmod_unpack(expr_idx) => {
+            let expr = arena.get_expr(*expr_idx);
             lookup_module_type_from_unpack_expr(tctx, env, arena, expr)
         }
         _ => None,
@@ -2557,12 +2563,12 @@ fn translate_module_type_to_decl<'a>(
     };
     use crate::types::typemod::path_from_longident;
 
-    match &mty.pmty_desc {
+    match &*mty.pmty_desc {
         PMtyDesc::Pmty_signature(sig_items) => {
             let mut items = Vec::new();
             let mut sig_env = env.clone();
-            for sig_item in sig_items {
-                match &sig_item.psig_desc {
+            for sig_item in sig_items.iter() {
+                match &*sig_item.psig_desc {
                     crate::parser::ast::SignatureItemDesc::Psig_value(vd) => {
                         let val_name = arena.get_string(vd.pval_name.txt);
                         let val_id = Ident::create_persistent(val_name);
@@ -2570,7 +2576,7 @@ fn translate_module_type_to_decl<'a>(
                         // so that type variables become generic and instance() strips their names
                         let ctx = tctx.type_ctx;
                         ctx.begin_def();
-                        let (_typed_ct, val_type) = transl_type(tctx, &sig_env, &vd.pval_type)?;
+                        let (_typed_ct, val_type) = transl_type(tctx, &sig_env, arena.get_core_type(vd.pval_type))?;
                         let ctx = tctx.type_ctx;
                         ctx.end_def();
                         crate::types::ctype::generalize(ctx, val_type);
@@ -2600,7 +2606,9 @@ fn translate_module_type_to_decl<'a>(
                             },
                         ));
                     }
-                    crate::parser::ast::SignatureItemDesc::Psig_type(rec_flag, decls) => {
+                    crate::parser::ast::SignatureItemDesc::Psig_type(args) => {
+                        let rec_flag = &args.0;
+                        let decls = &args.1;
                         let mut declared_type_ids: Vec<Ident> = Vec::with_capacity(decls.len());
 
                         // Predeclare names so manifests can refer to siblings (matching OCaml).
@@ -2641,13 +2649,14 @@ fn translate_module_type_to_decl<'a>(
                             let type_id = declared_type_ids[decl_idx].clone();
                             let mut type_params = Vec::with_capacity(decl.ptype_params.len());
                             let mut type_variance = Vec::with_capacity(decl.ptype_params.len());
-                            for (param_ty, variance) in &decl.ptype_params {
-                                let param_ref = match &param_ty.ptyp_desc {
+                            for (param_ty_idx, variance) in &decl.ptype_params {
+                                let param_ty = arena.get_core_type(*param_ty_idx);
+                                let param_ref = match &*param_ty.ptyp_desc {
                                     crate::parser::ast::CoreTypeDesc::Ptyp_any => {
                                         tctx.type_ctx.new_global_var(Some("_".to_string()))
                                     }
                                     crate::parser::ast::CoreTypeDesc::Ptyp_var(name) => {
-                                        tctx.type_ctx.new_global_var(Some(name.clone()))
+                                        tctx.type_ctx.new_global_var(Some(name.to_string()))
                                     }
                                     _ => {
                                         let (_typed_param, param_ref) =
@@ -2670,7 +2679,8 @@ fn translate_module_type_to_decl<'a>(
                             }
 
                             let type_manifest = match &decl.ptype_manifest {
-                                Some(manifest) => {
+                                Some(manifest_idx) => {
+                                    let manifest = arena.get_core_type(*manifest_idx);
                                     let (_typed_manifest, manifest_ref) =
                                         transl_type(tctx, &sig_env, manifest)?;
                                     Some(manifest_ref)
@@ -2694,7 +2704,8 @@ fn translate_module_type_to_decl<'a>(
                                                 args,
                                             ) => {
                                                 let mut tuple_args = Vec::with_capacity(args.len());
-                                                for arg in args {
+                                                for arg_idx in args {
+                                                    let arg = arena.get_core_type(*arg_idx);
                                                     let (_typed_arg, arg_ref) =
                                                         transl_type(tctx, &sig_env, arg)?;
                                                     tuple_args.push(arg_ref);
@@ -2711,7 +2722,7 @@ fn translate_module_type_to_decl<'a>(
                                                 for label in labels {
                                                     let lbl_name = arena.get_string(label.pld_name.txt);
                                                     let (_typed_label_ty, mut lbl_type) =
-                                                        transl_type(tctx, &sig_env, &label.pld_type)?;
+                                                        transl_type(tctx, &sig_env, arena.get_core_type(label.pld_type))?;
                                                     if label.pld_optional {
                                                         let option_path =
                                                             Path::pident(Ident::create_persistent("option"));
@@ -2747,7 +2758,8 @@ fn translate_module_type_to_decl<'a>(
                                             cd_id: Ident::create_persistent(cstr_name),
                                             cd_args: cstr_args,
                                             cd_res: match &cstr.pcd_res {
-                                                Some(res_core_type) => {
+                                                Some(res_core_type_idx) => {
+                                                    let res_core_type = arena.get_core_type(*res_core_type_idx);
                                                     let (_typed_res, res_ref) =
                                                         transl_type(tctx, &sig_env, res_core_type)?;
                                                     Some(res_ref)
@@ -2765,7 +2777,7 @@ fn translate_module_type_to_decl<'a>(
                                     for label in labels {
                                         let lbl_name = arena.get_string(label.pld_name.txt);
                                         let (_typed_label_ty, mut lbl_type) =
-                                            transl_type(tctx, &sig_env, &label.pld_type)?;
+                                            transl_type(tctx, &sig_env, arena.get_core_type(label.pld_type))?;
                                         if label.pld_optional {
                                             let option_path =
                                                 Path::pident(Ident::create_persistent("option"));
@@ -2832,7 +2844,7 @@ fn translate_module_type_to_decl<'a>(
                         let mod_name = arena.get_string(md.pmd_name.txt);
                         let mod_id = Ident::create_persistent(mod_name);
                         let inner_mty =
-                            translate_module_type_to_decl(tctx, &sig_env, arena, &md.pmd_type)?;
+                            translate_module_type_to_decl(tctx, &sig_env, arena, arena.get_mod_type(md.pmd_type))?;
                         sig_env.add_module(
                             mod_id.clone(),
                             crate::types::decl::ModuleDeclaration {
@@ -2859,8 +2871,8 @@ fn translate_module_type_to_decl<'a>(
                         let mtd_type = pmtd
                             .pmtd_type
                             .as_ref()
-                            .map(|inner| {
-                                translate_module_type_to_decl(tctx, &sig_env, arena, inner)
+                            .map(|inner_idx| {
+                                translate_module_type_to_decl(tctx, &sig_env, arena, arena.get_mod_type(*inner_idx))
                             })
                             .transpose()?;
                         let mtd = crate::types::decl::ModtypeDeclaration {
@@ -2890,23 +2902,25 @@ fn translate_module_type_to_decl<'a>(
             .unwrap_or_else(|| path_from_longident(&longident, |idx| arena.get_string(idx)));
             Ok(DeclMty::MtyIdent(path))
         }
-        PMtyDesc::Pmty_functor(name, param_type, result_type) => {
+        PMtyDesc::Pmty_functor(args) => {
+            let (name, param_type, result_type_idx) = &**args;
             let param_id = Ident::create_local(arena.get_string(name.txt));
             let param_decl = match param_type {
-                Some(pt) => Some(Box::new(translate_module_type_to_decl(
-                    tctx, env, arena, pt,
+                Some(pt_idx) => Some(Box::new(translate_module_type_to_decl(
+                    tctx, env, arena, arena.get_mod_type(*pt_idx),
                 )?)),
                 None => None,
             };
-            let result_decl = translate_module_type_to_decl(tctx, env, arena, result_type)?;
+            let result_decl = translate_module_type_to_decl(tctx, env, arena, arena.get_mod_type(*result_type_idx))?;
             Ok(DeclMty::MtyFunctor {
                 param: param_id,
                 param_type: param_decl,
                 result: Box::new(result_decl),
             })
         }
-        PMtyDesc::Pmty_with(body, constraints) => {
-            let base_mty = translate_module_type_to_decl(tctx, env, arena, body)?;
+        PMtyDesc::Pmty_with(args) => {
+            let (body_idx, constraints) = &**args;
+            let base_mty = translate_module_type_to_decl(tctx, env, arena, arena.get_mod_type(*body_idx))?;
             let type_constraints =
                 collect_pmty_with_type_constraints(tctx, env, arena, constraints)?;
             if type_constraints.is_empty() {
@@ -2924,7 +2938,8 @@ fn translate_module_type_to_decl<'a>(
                 .unwrap_or(base_mty))
             }
         }
-        PMtyDesc::Pmty_typeof(me) => {
+        PMtyDesc::Pmty_typeof(me_idx) => {
+            let me = arena.get_mod_expr(*me_idx);
             lookup_module_type_from_parsed_module_expr(tctx, env, arena, me).ok_or(
                 TypeModError::InvalidModuleExpr(arena.to_location(mty.pmty_loc)),
             )
@@ -3505,7 +3520,7 @@ where
                 .as_deref()
                 .and_then(decl_module_type_from_typed_module_type);
 
-            let mut body_env_storage: Option<Env> = None;
+            let body_env_storage: Option<Env>;
             let body_env = if let Some(parent_env) = env {
                 let mut extended = parent_env.clone();
                 if let Some(ref param_decl) = decl_param_mty {
@@ -3556,7 +3571,6 @@ where
                 extract_module_type_from_mod_expr_with_resolver(inner, env, resolve_ident_sig)
             })
         }
-        _ => None,
     }
 }
 
@@ -3659,7 +3673,7 @@ fn type_module_expr_with_alias<'a>(
                 mod_loc: loc,
                 mod_type: ModuleType::placeholder(),
                 mod_env: EnvRef(0),
-                mod_attributes: vec![],
+                mod_attributes: Attributes::new(),
             };
 
             if needs_constraint {
@@ -3693,14 +3707,14 @@ fn type_module_expr_with_alias<'a>(
 
             // Translate parameter type and extend environment with the functor parameter
             let typed_param_type = match param_type {
-                Some(pt) => Some(Box::new(transl_modtype(tctx, env, arena, pt)?)),
+                Some(pt) => Some(Box::new(transl_modtype(tctx, env, arena, arena.get_mod_type(*pt))?)),
                 None => None,
             };
 
             // Extend environment with the functor parameter module
             let mut functor_env = env.clone();
             if let Some(pt) = param_type {
-                if let Ok(param_decl_type) = translate_module_type_to_decl(tctx, env, arena, pt) {
+                if let Ok(param_decl_type) = translate_module_type_to_decl(tctx, env, arena, arena.get_mod_type(*pt)) {
                     functor_env.add_module(
                         param_id.clone(),
                         crate::types::decl::ModuleDeclaration {
@@ -3758,7 +3772,7 @@ fn type_module_expr_with_alias<'a>(
             // Constrained module: (ME: MT)
             let mod_expr_inner = arena.get_mod_expr(*mod_expr_inner_idx);
             let typed_mod = type_module_expr_with_alias(tctx, env, arena, mod_expr_inner, alias)?;
-            let typed_mty = transl_modtype(tctx, env, arena, mod_type)?;
+            let typed_mty = transl_modtype(tctx, env, arena, arena.get_mod_type(*mod_type_idx))?;
 
             Ok(ModuleExpr {
                 mod_desc: ModuleExprDesc::Tmod_constraint(
@@ -3789,7 +3803,7 @@ fn type_module_expr_with_alias<'a>(
                         arena.placeholder_located(loc),
                     ),
                     mty_loc: loc,
-                    mty_attributes: vec![],
+                    mty_attributes: Attributes::new(),
                 },
                 crate::types::type_expr::TypeDesc::Tvar(_)
                 | crate::types::type_expr::TypeDesc::Tunivar(_) => {
@@ -3861,7 +3875,7 @@ fn type_module_type_of_expr<'a>(
     arena: &'a ParseArena,
     mod_expr: &ParsedModuleExpr,
 ) -> TypeModResult<ModuleExpr> {
-    match &mod_expr.pmod_desc {
+    match &*mod_expr.pmod_desc {
         ParsedModuleExprDesc::Pmod_ident(lid) => {
             let longident = tctx.resolve_lid(lid.txt).clone();
             let path = lookup_module_path_by_lid(
@@ -3903,7 +3917,7 @@ fn transl_modtype<'a>(
     let loc = smty.pmty_loc;
     let attrs = smty.pmty_attributes.clone();
 
-    let desc = match &smty.pmty_desc {
+    let desc = match &*smty.pmty_desc {
         PMtyDesc::Pmty_ident(lid) => {
             let longident = tctx.resolve_lid(lid.txt).clone();
             let path = lookup_module_path_by_lid(
@@ -3920,12 +3934,14 @@ fn transl_modtype<'a>(
             let typed_sig = transl_signature(tctx, env, arena, sig_items)?;
             TMtyDesc::Tmty_signature(typed_sig)
         }
-        PMtyDesc::Pmty_functor(name, param_type, result_type) => {
+        PMtyDesc::Pmty_functor(inner) => {
+            let (ref name, ref param_type, ref result_type_idx) = **inner;
             let param_id = Ident::create_local(arena.get_string(name.txt));
             let typed_param = match param_type {
-                Some(pt) => Some(Box::new(transl_modtype(tctx, env, arena, pt)?)),
+                Some(pt) => Some(Box::new(transl_modtype(tctx, env, arena, arena.get_mod_type(*pt))?)),
                 None => None,
             };
+            let result_type = arena.get_mod_type(*result_type_idx);
             let typed_result = transl_modtype(tctx, env, arena, result_type)?;
             TMtyDesc::Tmty_functor(
                 param_id,
@@ -3937,12 +3953,15 @@ fn transl_modtype<'a>(
                 Box::new(typed_result),
             )
         }
-        PMtyDesc::Pmty_with(body, constraints) => {
+        PMtyDesc::Pmty_with(inner) => {
+            let (ref body_idx, ref constraints) = **inner;
+            let body = arena.get_mod_type(*body_idx);
             let typed_body = transl_modtype(tctx, env, arena, body)?;
             let typed_constraints = transl_with_constraints(tctx, env, arena, constraints)?;
             TMtyDesc::Tmty_with(Box::new(typed_body), typed_constraints)
         }
-        PMtyDesc::Pmty_typeof(me) => {
+        PMtyDesc::Pmty_typeof(me_idx) => {
+            let me = arena.get_mod_expr(*me_idx);
             let typed_me = type_module_type_of_expr(tctx, env, arena, me)?;
             TMtyDesc::Tmty_typeof(Box::new(typed_me))
         }
@@ -3984,14 +4003,14 @@ pub fn transl_signature<'a>(
 
     for item in items {
         let loc = item.psig_loc;
-        let desc = match &item.psig_desc {
+        let desc = match &*item.psig_desc {
             PSigDesc::Psig_value(vd) => {
                 let name_str = arena.get_string(vd.pval_name.txt).to_string();
                 let id = Ident::create_local(&name_str);
                 // Use transl_type_scheme pattern: begin_def/end_def/generalize
                 let ctx = tctx.type_ctx;
                 ctx.begin_def();
-                let (typed_ctype, val_ty) = transl_type(tctx, env, &vd.pval_type)?;
+                let (typed_ctype, val_ty) = transl_type(tctx, env, arena.get_core_type(vd.pval_type))?;
                 ctx.end_def();
                 crate::types::ctype::generalize(ctx, val_ty);
                 // For primitives, we need the pval_prim as Vec<String> for the typed tree
@@ -4012,14 +4031,15 @@ pub fn transl_signature<'a>(
                     val_attributes: vd.pval_attributes.clone(),
                 })
             }
-            PSigDesc::Psig_type(rec_flag, decls) => {
+            PSigDesc::Psig_type(inner) => {
+                let (ref rec_flag, ref decls) = **inner;
                 let typed_decls = transl_sig_type_declarations(tctx, env, arena, decls)?;
                 TSigDesc::Tsig_type(*rec_flag, typed_decls)
             }
             PSigDesc::Psig_module(md) => {
                 let name_str = arena.get_string(md.pmd_name.txt).to_string();
                 let id = Ident::create_local(&name_str);
-                let typed_mty = transl_modtype(tctx, env, arena, &md.pmd_type)?;
+                let typed_mty = transl_modtype(tctx, env, arena, arena.get_mod_type(md.pmd_type))?;
                 TSigDesc::Tsig_module(TypedModuleDeclaration {
                     md_id: id,
                     md_name: Located {
@@ -4035,7 +4055,7 @@ pub fn transl_signature<'a>(
                 let name_str = arena.get_string(mtd.pmtd_name.txt).to_string();
                 let id = Ident::create_local(&name_str);
                 let typed_mty = match &mtd.pmtd_type {
-                    Some(mt) => Some(transl_modtype(tctx, env, arena, mt)?),
+                    Some(mt) => Some(transl_modtype(tctx, env, arena, arena.get_mod_type(*mt))?),
                     None => None,
                 };
                 TSigDesc::Tsig_modtype(crate::types::typedtree::ModuleTypeDeclaration {
@@ -4067,14 +4087,14 @@ pub fn transl_signature<'a>(
                     open_loc: od.popen_loc,
                 })
             }
-            PSigDesc::Psig_attribute(attr) => TSigDesc::Tsig_attribute(attr.clone()),
+            PSigDesc::Psig_attribute(attr) => TSigDesc::Tsig_attribute((**attr).clone()),
             // For unsupported signature items, use Tsig_attribute as placeholder
             _ => TSigDesc::Tsig_attribute((
                 Located {
                     txt: crate::intern::StrIdx(0),
                     loc: LocIdx(0),
                 },
-                crate::parser::ast::Payload::PStr(vec![]),
+                crate::parser::ast::Payload::PStr(Box::new(vec![])),
             )),
         };
 
@@ -4100,16 +4120,19 @@ fn has_no_export_config(arena: &ParseArena, items: &[ParsedStructureItem]) -> bo
     use crate::parser::ast::{ExpressionDesc, Payload};
 
     for item in items {
-        match &item.pstr_desc {
-            ParsedStructureItemDesc::Pstr_attribute((name, payload)) => {
+        match &*item.pstr_desc {
+            ParsedStructureItemDesc::Pstr_attribute(attr) => {
+                let (ref name, ref payload) = **attr;
                 let attr_name = arena.get_string(name.txt);
                 if attr_name == "config" {
                     // Check if payload contains no_export
                     if let Payload::PStr(str_items) = payload {
-                        for si in str_items {
-                            match &si.pstr_desc {
-                                ParsedStructureItemDesc::Pstr_eval(expr, _) => {
-                                    match &expr.pexp_desc {
+                        for si in str_items.iter() {
+                            match &*si.pstr_desc {
+                                ParsedStructureItemDesc::Pstr_eval(inner) => {
+                                    let (ref expr_idx, ref _attrs) = **inner;
+                                    let expr = arena.get_expr(*expr_idx);
+                                    match &*expr.pexp_desc {
                                         // @@config(no_export)
                                         ExpressionDesc::Pexp_ident(lid) => {
                                             let longident = arena.get_longident(lid.txt);
@@ -4119,7 +4142,8 @@ fn has_no_export_config(arena: &ParseArena, items: &[ParsedStructureItem]) -> bo
                                             }
                                         }
                                         // @@config({no_export: ...})
-                                        ExpressionDesc::Pexp_record(fields, _) => {
+                                        ExpressionDesc::Pexp_record(inner) => {
+                                            let (ref fields, ref _spread) = **inner;
                                             for field in fields {
                                                 let longident = arena.get_longident(field.lid.txt);
                                                 let field_name =
@@ -4217,7 +4241,7 @@ fn type_structure_no_export<'a>(
         mod_loc: loc,
         mod_type: ModuleType::placeholder(),
         mod_env: EnvRef(0),
-        mod_attributes: vec![],
+        mod_attributes: Attributes::new(),
     };
 
     // If duplicates detected, wrap in Tmod_constraint(implicit) first
@@ -4232,7 +4256,7 @@ fn type_structure_no_export<'a>(
             mod_loc: loc,
             mod_type: ModuleType::placeholder(),
             mod_env: EnvRef(0),
-            mod_attributes: vec![],
+            mod_attributes: Attributes::new(),
         }
     } else {
         mod_structure
@@ -4244,7 +4268,7 @@ fn type_structure_no_export<'a>(
             crate::types::typedtree::TypedSignature { sig_items: vec![] },
         ),
         mty_loc: loc,
-        mty_attributes: vec![],
+        mty_attributes: Attributes::new(),
     };
     let mod_constraint = ModuleExpr {
         mod_desc: ModuleExprDesc::Tmod_constraint(
@@ -4256,7 +4280,7 @@ fn type_structure_no_export<'a>(
         mod_loc: loc,
         mod_type: ModuleType::placeholder(),
         mod_env: EnvRef(0),
-        mod_attributes: vec![],
+        mod_attributes: Attributes::new(),
     };
 
     // Build: Tstr_include(include_declaration(...))
@@ -4264,7 +4288,7 @@ fn type_structure_no_export<'a>(
         str_desc: StructureItemDesc::Tstr_include(IncludeDeclaration {
             incl_mod: mod_constraint,
             incl_type: vec![],
-            incl_attributes: vec![],
+            incl_attributes: Attributes::new(),
             incl_loc: loc,
         }),
         str_loc: loc,
@@ -4331,7 +4355,7 @@ fn type_structure_item<'a>(
             // begin_def/end_def/generalize to keep Ttyp_any type vars as Tvar None
             let ctx = tctx.type_ctx;
             ctx.begin_def();
-            let (typed_ctype, val_ty) = transl_type(tctx, env, &vd.pval_type)?;
+            let (typed_ctype, val_ty) = transl_type(tctx, env, arena.get_core_type(vd.pval_type))?;
             ctx.end_def();
             crate::types::ctype::generalize(ctx, val_ty);
 
@@ -4454,10 +4478,10 @@ fn type_structure_item<'a>(
                             )
                         }
                         crate::parser::ast::CoreTypeDesc::Ptyp_var(name) => {
-                            let type_ref = ctx.new_global_var(Some(name.clone()));
+                            let type_ref = ctx.new_global_var(Some(name.to_string()));
                             (
                                 TypedCoreType {
-                                    ctyp_desc: TypedCoreTypeDesc::Ttyp_var(Some(name.clone())),
+                                    ctyp_desc: TypedCoreTypeDesc::Ttyp_var(Some(name.to_string())),
                                     ctyp_type: type_ref,
                                     ctyp_env: EnvRef(0),
                                     ctyp_loc: core_type.ptyp_loc,
@@ -4470,7 +4494,7 @@ fn type_structure_item<'a>(
                     };
                     internal_type_params.push(type_ref);
                     if let crate::parser::ast::CoreTypeDesc::Ptyp_var(name) = &*core_type.ptyp_desc {
-                        tctx.type_variables.insert(name.clone(), type_ref);
+                        tctx.type_variables.insert(name.to_string(), type_ref);
                     }
                     let types_var = match parser_var {
                         ParserVariance::Covariant => TypesVariance::covariant(),
@@ -4538,7 +4562,7 @@ fn type_structure_item<'a>(
                                 {
                                     if let Some(spread_type_ct) = args.first() {
                                         if let Ok((_typed_ct, type_ref)) =
-                                            transl_type(tctx, &temp_env, spread_type_ct)
+                                            transl_type(tctx, &temp_env, arena.get_core_type(*spread_type_ct))
                                         {
                                             // Extract the type declaration from the resolved type
                                             let repr = ctx.repr(type_ref);
@@ -4651,7 +4675,7 @@ fn type_structure_item<'a>(
                                         Located::mknoloc(
                                             arena.constructor_from_spread_attr_str(),
                                         ),
-                                        crate::parser::ast::Payload::PStr(vec![]),
+                                        crate::parser::ast::Payload::PStr(Box::new(vec![])),
                                     );
                                     let source_cd_loc =
                                         find_existing_loc_idx(arena, &source_cstr.cd_loc)
@@ -4687,7 +4711,7 @@ fn type_structure_item<'a>(
                                                         ctyp_type: texpr,
                                                         ctyp_env: EnvRef(0),
                                                         ctyp_loc: source_cd_loc,
-                                                        ctyp_attributes: vec![],
+                                                        ctyp_attributes: Attributes::new(),
                                                     })
                                                     .collect();
                                                 (
@@ -4741,14 +4765,14 @@ fn type_structure_item<'a>(
                                                                 &l.ld_loc,
                                                             )
                                                             .unwrap_or(source_cd_loc),
-                                                            ctyp_attributes: vec![],
+                                                            ctyp_attributes: Attributes::new(),
                                                         },
                                                         ld_loc: find_existing_loc_idx(
                                                             arena,
                                                             &l.ld_loc,
                                                         )
                                                         .unwrap_or(source_cd_loc),
-                                                        ld_attributes: vec![],
+                                                        ld_attributes: Attributes::new(),
                                                     })
                                                     .collect();
                                                 let args_vec = normalized_lbls
@@ -4785,7 +4809,7 @@ fn type_structure_item<'a>(
                                             ctyp_type: ty,
                                             ctyp_env: EnvRef(0),
                                             ctyp_loc: source_cd_loc,
-                                            ctyp_attributes: vec![],
+                                            ctyp_attributes: Attributes::new(),
                                         });
                                     typed_tree_cstrs.push(TypedConstructorDeclaration {
                                         cd_id: sc_id.clone(),
@@ -4799,7 +4823,7 @@ fn type_structure_item<'a>(
                                         cd_attributes: {
                                             let mut attrs = tag_attrs.clone();
                                             attrs.push(spread_constructor_attr.clone());
-                                            attrs
+                                            Attributes::from_vec(attrs)
                                         },
                                     });
                                     let (sc_desc_args, sc_desc_arity, sc_desc_inlined) =
@@ -4925,7 +4949,7 @@ fn type_structure_item<'a>(
                                                 ctyp_type: option_type_ref,
                                                 ctyp_env: EnvRef(0),
                                                 ctyp_loc: lbl_type.ptyp_loc,
-                                                ctyp_attributes: vec![],
+                                                ctyp_attributes: Attributes::new(),
                                             };
                                             (option_typed, option_type_ref)
                                         } else {
@@ -5086,7 +5110,7 @@ fn type_structure_item<'a>(
                             let (typed_cd_res, internal_cd_res) = match &cstr.pcd_res {
                                 Some(res_core_type) => {
                                     let (typed_res, res_ty) =
-                                        transl_type(tctx, &temp_env, res_core_type)?;
+                                        transl_type(tctx, &temp_env, arena.get_core_type(*res_core_type))?;
                                     (Some(typed_res), Some(res_ty))
                                 }
                                 None => (None, None),
@@ -5170,8 +5194,8 @@ fn type_structure_item<'a>(
                                 cd_loc: cstr.pcd_loc,
                                 cd_attributes: {
                                     let mut attrs = tag_attrs.clone();
-                                    attrs.extend(cstr.pcd_attributes.clone());
-                                    attrs
+                                    attrs.extend(cstr.pcd_attributes.iter().cloned());
+                                    Attributes::from_vec(attrs)
                                 },
                             });
 
@@ -5232,7 +5256,7 @@ fn type_structure_item<'a>(
                                     ctyp_type: option_type_ref,
                                     ctyp_env: EnvRef(0),
                                     ctyp_loc: lbl_type.ptyp_loc,
-                                    ctyp_attributes: vec![],
+                                    ctyp_attributes: Attributes::new(),
                                 };
                                 (option_typed, option_type_ref)
                             } else {
@@ -5334,13 +5358,16 @@ fn type_structure_item<'a>(
                                             })
                                             .collect::<Vec<_>>();
                                         let object_manifest = crate::parser::ast::CoreType {
-                                            ptyp_desc:
+                                            ptyp_desc: Box::new(
                                                 crate::parser::ast::CoreTypeDesc::Ptyp_object(
-                                                    object_fields,
-                                                    crate::parser::ast::ClosedFlag::Closed,
+                                                    Box::new((
+                                                        object_fields,
+                                                        crate::parser::ast::ClosedFlag::Closed,
+                                                    )),
                                                 ),
+                                            ),
                                             ptyp_loc: decl.ptype_loc,
-                                            ptyp_attributes: vec![],
+                                            ptyp_attributes: Attributes::new(),
                                         };
                                         (expanded_internal, expanded_typed, Some(object_manifest))
                                     } else {
@@ -5557,7 +5584,7 @@ fn type_structure_item<'a>(
                             crate::parser::ast::ConstructorArguments::Pcstr_tuple(types) => {
                                 let mut typed = Vec::new();
                                 for ty in types {
-                                    let (typed_ct, ty_ref) = transl_type(tctx, env, ty)?;
+                                    let (typed_ct, ty_ref) = transl_type(tctx, env, arena.get_core_type(*ty))?;
                                     arg_ty_refs.push(ty_ref);
                                     typed.push(typed_ct);
                                 }
@@ -5577,7 +5604,7 @@ fn type_structure_item<'a>(
                                     let label_name =
                                         arena.get_string(label.pld_name.txt).to_string();
                                     let (typed_ct, ty_ref) =
-                                        transl_type(tctx, env, &label.pld_type)?;
+                                        transl_type(tctx, env, arena.get_core_type(label.pld_type))?;
                                     let (poly_typed_ct, poly_ty_ref) =
                                         force_poly_typed_core_type(ctx, typed_ct, ty_ref);
                                     let internal_ty_ref = match &*ctx.get_desc(poly_ty_ref) {
@@ -5644,7 +5671,7 @@ fn type_structure_item<'a>(
                         };
                         let typed_ret = match ret {
                             Some(ct) => {
-                                let (typed_ct, _) = transl_type(tctx, env, ct)?;
+                                let (typed_ct, _) = transl_type(tctx, env, arena.get_core_type(*ct))?;
                                 Some(typed_ct)
                             }
                             None => None,
@@ -5730,7 +5757,7 @@ fn type_structure_item<'a>(
             // Translate params
             let mut typed_params = Vec::new();
             for (ct, v) in &ext.ptyext_params {
-                let (typed_ct, _) = transl_type(tctx, env, ct)?;
+                let (typed_ct, _) = transl_type(tctx, env, arena.get_core_type(*ct))?;
                 let variance = match v {
                     ParserVariance::Covariant => TypesVariance::covariant(),
                     ParserVariance::Contravariant => TypesVariance::contravariant(),
@@ -5774,7 +5801,7 @@ fn type_structure_item<'a>(
                         crate::parser::ast::ConstructorArguments::Pcstr_tuple(types) => {
                             let mut typed = Vec::new();
                             for ty in types {
-                                let (typed_ct, ty_ref) = transl_type(tctx, env, ty)?;
+                                let (typed_ct, ty_ref) = transl_type(tctx, env, arena.get_core_type(*ty))?;
                                 arg_ty_refs.push(ty_ref);
                                 typed.push(typed_ct);
                             }
@@ -5790,7 +5817,7 @@ fn type_structure_item<'a>(
                             let mut decl_labels = Vec::new();
                             for label in labels {
                                 let label_name = arena.get_string(label.pld_name.txt).to_string();
-                                let (typed_ct, ty_ref) = transl_type(tctx, env, &label.pld_type)?;
+                                let (typed_ct, ty_ref) = transl_type(tctx, env, arena.get_core_type(label.pld_type))?;
                                 let (poly_typed_ct, poly_ty_ref) =
                                     force_poly_typed_core_type(ctx, typed_ct, ty_ref);
                                 let internal_ty_ref = match &*ctx.get_desc(poly_ty_ref) {
@@ -5857,7 +5884,7 @@ fn type_structure_item<'a>(
                     };
                     let typed_ret = match ret {
                         Some(ct) => {
-                            let (typed_ct, _) = transl_type(tctx, env, ct)?;
+                            let (typed_ct, _) = transl_type(tctx, env, arena.get_core_type(*ct))?;
                             Some(typed_ct)
                         }
                         None => None,
@@ -6120,7 +6147,7 @@ fn type_structure_item<'a>(
                             mod_loc: inner_loc,
                             mod_type: ModuleType::placeholder(),
                             mod_env: EnvRef(0),
-                            mod_attributes: vec![],
+                            mod_attributes: Attributes::new(),
                         }
                     }
                     _ => type_module_expr(tctx, &rec_env, arena, arena.get_mod_expr(mb.pmb_expr))?,
@@ -6217,7 +6244,7 @@ fn type_structure_item<'a>(
             let mtd_id = Ident::create_local(mtd_name_str);
 
             let typed_mty = match &mtd.pmtd_type {
-                Some(mt) => Some(transl_modtype(tctx, env, arena, mt)?),
+                Some(mt) => Some(transl_modtype(tctx, env, arena, arena.get_mod_type(*mt))?),
                 None => None,
             };
 
@@ -6225,7 +6252,7 @@ fn type_structure_item<'a>(
 
             // Convert the typed module type to a decl-level modtype declaration
             let decl_mtd_type = if let Some(mt) = &mtd.pmtd_type {
-                translate_module_type_to_decl(tctx, env, arena, mt).ok()
+                translate_module_type_to_decl(tctx, env, arena, arena.get_mod_type(*mt)).ok()
             } else {
                 None
             };
@@ -6524,8 +6551,9 @@ fn transl_sig_type_declarations<'a>(
         // Convert type parameters
         let mut typ_params: Vec<(TypedCoreType, TypesVariance)> = Vec::new();
         let mut internal_type_params: Vec<TypeExprRef> = Vec::new();
-        for (core_type, parser_var) in &decl.ptype_params {
-            let (typed_core_type, type_ref) = match &core_type.ptyp_desc {
+        for (core_type_idx, parser_var) in &decl.ptype_params {
+            let core_type = arena.get_core_type(*core_type_idx);
+            let (typed_core_type, type_ref) = match &*core_type.ptyp_desc {
                 crate::parser::ast::CoreTypeDesc::Ptyp_any => {
                     let type_ref = ctx.new_global_var(Some("_".to_string()));
                     (
@@ -6540,10 +6568,10 @@ fn transl_sig_type_declarations<'a>(
                     )
                 }
                 crate::parser::ast::CoreTypeDesc::Ptyp_var(name) => {
-                    let type_ref = ctx.new_global_var(Some(name.clone()));
+                    let type_ref = ctx.new_global_var(Some(name.to_string()));
                     (
                         TypedCoreType {
-                            ctyp_desc: TypedCoreTypeDesc::Ttyp_var(Some(name.clone())),
+                            ctyp_desc: TypedCoreTypeDesc::Ttyp_var(Some(name.to_string())),
                             ctyp_type: type_ref,
                             ctyp_env: EnvRef(0),
                             ctyp_loc: core_type.ptyp_loc,
@@ -6566,15 +6594,15 @@ fn transl_sig_type_declarations<'a>(
         // Convert type constraints
         let mut typ_cstrs: Vec<(TypedCoreType, TypedCoreType, LocIdx)> = Vec::new();
         for (ct1, ct2, cstr_loc) in &decl.ptype_cstrs {
-            let (typed_ct1, _) = transl_type(tctx, env, ct1)?;
-            let (typed_ct2, _) = transl_type(tctx, env, ct2)?;
+            let (typed_ct1, _) = transl_type(tctx, env, arena.get_core_type(*ct1))?;
+            let (typed_ct2, _) = transl_type(tctx, env, arena.get_core_type(*ct2))?;
             typ_cstrs.push((typed_ct1, typed_ct2, *cstr_loc));
         }
 
         // Convert manifest type (type alias)
         let (typ_manifest, manifest_type_ref) = match &decl.ptype_manifest {
             Some(manifest) => {
-                let (typed_manifest, manifest_ref) = transl_type(tctx, env, manifest)?;
+                let (typed_manifest, manifest_ref) = transl_type(tctx, env, arena.get_core_type(*manifest))?;
                 (Some(typed_manifest), Some(manifest_ref))
             }
             None => (None, None),
@@ -6594,7 +6622,7 @@ fn transl_sig_type_declarations<'a>(
 
                 for label in labels {
                     let lbl_name = arena.get_string(label.pld_name.txt);
-                    let (typed_label_ty, mut lbl_type) = transl_type(tctx, env, &label.pld_type)?;
+                    let (typed_label_ty, mut lbl_type) = transl_type(tctx, env, arena.get_core_type(label.pld_type))?;
                     if label.pld_optional {
                         let option_path = Path::pident(Ident::create_persistent("option"));
                         lbl_type = tctx.type_ctx.new_constr(option_path, vec![lbl_type]);
@@ -6655,7 +6683,7 @@ fn transl_sig_type_declarations<'a>(
                             let mut internal_tuple_args = Vec::with_capacity(args.len());
                             let mut typed_tuple_args = Vec::with_capacity(args.len());
                             for arg in args {
-                                let (typed_arg, arg_ref) = transl_type(tctx, env, arg)?;
+                                let (typed_arg, arg_ref) = transl_type(tctx, env, arena.get_core_type(*arg))?;
                                 internal_tuple_args.push(arg_ref);
                                 typed_tuple_args.push(typed_arg);
                             }
@@ -6670,7 +6698,7 @@ fn transl_sig_type_declarations<'a>(
                             for label in labels {
                                 let lbl_name = arena.get_string(label.pld_name.txt);
                                 let (typed_label_ty, mut lbl_type) =
-                                    transl_type(tctx, env, &label.pld_type)?;
+                                    transl_type(tctx, env, arena.get_core_type(label.pld_type))?;
                                 if label.pld_optional {
                                     let option_path =
                                         Path::pident(Ident::create_persistent("option"));
@@ -6722,7 +6750,7 @@ fn transl_sig_type_declarations<'a>(
 
                     let (typed_res, internal_res) = match &cstr.pcd_res {
                         Some(res_type) => {
-                            let (typed, internal) = transl_type(tctx, env, res_type)?;
+                            let (typed, internal) = transl_type(tctx, env, arena.get_core_type(*res_type))?;
                             (Some(typed), Some(internal))
                         }
                         None => (None, None),

@@ -765,10 +765,9 @@ fn substitute_type_expr_path(
         return; // Already visited (cycle detection)
     }
 
-    let ty = ctx.get_type(ty_ref);
-    let desc = ty.desc().clone();
+    let desc = ctx.get_desc(ty_ref);
 
-    match &desc {
+    match &*desc {
         TypeDesc::Tconstr { path, args, .. } => {
             let new_path = substitute_type_path(
                 path,
@@ -778,10 +777,11 @@ fn substitute_type_expr_path(
                 module_name_map,
             );
             if new_path != *path {
-                let mut desc_mut = ty.desc_mut();
-                if let TypeDesc::Tconstr { ref mut path, .. } = *desc_mut {
+                let mut new_desc = (*desc).clone();
+                if let TypeDesc::Tconstr { ref mut path, .. } = new_desc {
                     *path = new_path;
                 }
+                ctx.set_desc(ty_ref, new_desc);
             }
 
             // Recurse into type arguments
@@ -956,10 +956,11 @@ fn substitute_type_expr_path(
                 module_name_map,
             );
             if new_path != *path {
-                let mut desc_mut = ty.desc_mut();
-                if let TypeDesc::Tpackage { ref mut path, .. } = *desc_mut {
+                let mut new_desc = (*desc).clone();
+                if let TypeDesc::Tpackage { ref mut path, .. } = new_desc {
                     *path = new_path;
                 }
+                ctx.set_desc(ty_ref, new_desc);
             }
             for &arg in args {
                 substitute_type_expr_path(
@@ -1072,17 +1073,17 @@ fn rewrite_type_expr_prefix(
         return; // Already visited (cycle detection)
     }
 
-    let ty = ctx.get_type(ty_ref);
-    let desc = ty.desc().clone();
+    let desc = ctx.get_desc(ty_ref);
 
-    match &desc {
+    match &*desc {
         TypeDesc::Tconstr { path, args, .. } => {
             let rewritten = rewrite_path_prefix(path, old_name, new_prefix);
             if let Some(new_path) = rewritten {
-                let mut desc_mut = ty.desc_mut();
-                if let TypeDesc::Tconstr { ref mut path, .. } = *desc_mut {
+                let mut new_desc = (*desc).clone();
+                if let TypeDesc::Tconstr { ref mut path, .. } = new_desc {
                     *path = new_path;
                 }
+                ctx.set_desc(ty_ref, new_desc);
             }
             for &arg in args {
                 rewrite_type_expr_prefix(arg, old_name, new_prefix, ctx, visited);
@@ -1134,10 +1135,11 @@ fn rewrite_type_expr_prefix(
         }
         TypeDesc::Tpackage { path, args, .. } => {
             if let Some(new_path) = rewrite_path_prefix(path, old_name, new_prefix) {
-                let mut desc_mut = ty.desc_mut();
-                if let TypeDesc::Tpackage { ref mut path, .. } = *desc_mut {
+                let mut new_desc = (*desc).clone();
+                if let TypeDesc::Tpackage { ref mut path, .. } = new_desc {
                     *path = new_path;
                 }
+                ctx.set_desc(ty_ref, new_desc);
             }
             for &arg in args {
                 rewrite_type_expr_prefix(arg, old_name, new_prefix, ctx, visited);
