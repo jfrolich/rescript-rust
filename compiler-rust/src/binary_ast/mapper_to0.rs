@@ -132,22 +132,22 @@ impl<'a> Mapper<'a> {
 
     fn map_pat_idx(&mut self, idx: PatIdx) -> pt0::Pattern {
         let pat = self.arena.get_pat(idx).clone();
-        self.map_pattern_with_owner(&pat, Some(idx))
+        self.map_pattern(&pat)
     }
 
     fn map_core_type_idx(&mut self, idx: CoreTypeIdx) -> pt0::CoreType {
         let ct = self.arena.get_core_type(idx).clone();
-        self.map_core_type_with_owner(&ct, Some(idx))
+        self.map_core_type(&ct)
     }
 
     fn map_mod_expr_idx(&mut self, idx: ModExprIdx) -> pt0::ModuleExpr {
         let me = self.arena.get_mod_expr(idx).clone();
-        self.map_module_expr_with_owner(&me, Some(idx))
+        self.map_module_expr(&me)
     }
 
     fn map_mod_type_idx(&mut self, idx: ModTypeIdx) -> pt0::ModuleType {
         let mt = self.arena.get_mod_type(idx).clone();
-        self.map_module_type_with_owner(&mt, Some(idx))
+        self.map_module_type(&mt)
     }
 
     // ========== Public API methods ==========
@@ -468,24 +468,13 @@ impl<'a> Mapper<'a> {
     // ========== Core Types ==========
 
     pub fn map_core_type(&mut self, ty: &current::CoreType) -> pt0::CoreType {
-        self.map_core_type_with_owner(ty, None)
-    }
-
-    fn map_core_type_with_owner(
-        &mut self,
-        ty: &current::CoreType,
-        owner_idx: Option<CoreTypeIdx>,
-    ) -> pt0::CoreType {
-        let type_attrs = owner_idx
-            .map(|owner| self.arena.core_type_attributes(owner).clone())
-            .unwrap_or_else(|| ty.ptyp_attributes.clone());
         // Handle arrow types specially to support arity wrapping
         if let current::CoreTypeDesc::Ptyp_arrow(inner) = &*ty.ptyp_desc {
             let (ref arg, ref ret_idx, ref arity) = **inner;
             let loc = self.loc(ty.ptyp_loc);
             // Merge outer type's attributes with arg's attributes (OCaml does this)
             let arrow_attrs: Vec<pt0::Attribute> = self
-                .map_attributes(&type_attrs)
+                .map_attributes(&ty.ptyp_attributes)
                 .into_iter()
                 .chain(self.map_attributes(&arg.attrs))
                 .collect();
@@ -538,7 +527,7 @@ impl<'a> Mapper<'a> {
             pt0::CoreType {
                 ptyp_desc: self.map_core_type_desc(&*ty.ptyp_desc),
                 ptyp_loc: self.loc(ty.ptyp_loc),
-                ptyp_attributes: self.map_attributes(&type_attrs),
+                ptyp_attributes: self.map_attributes(&ty.ptyp_attributes),
             }
         }
     }
@@ -650,21 +639,10 @@ impl<'a> Mapper<'a> {
     // ========== Patterns ==========
 
     pub fn map_pattern(&mut self, pat: &current::Pattern) -> pt0::Pattern {
-        self.map_pattern_with_owner(pat, None)
-    }
-
-    fn map_pattern_with_owner(
-        &mut self,
-        pat: &current::Pattern,
-        owner_idx: Option<PatIdx>,
-    ) -> pt0::Pattern {
-        let pat_attrs = owner_idx
-            .map(|owner| self.arena.pat_attributes(owner).clone())
-            .unwrap_or_else(|| pat.ppat_attributes.clone());
         pt0::Pattern {
             ppat_desc: self.map_pattern_desc(&*pat.ppat_desc),
             ppat_loc: self.loc(pat.ppat_loc),
-            ppat_attributes: self.map_attributes(&pat_attrs),
+            ppat_attributes: self.map_attributes(&pat.ppat_attributes),
         }
     }
 
@@ -761,10 +739,7 @@ impl<'a> Mapper<'a> {
             &*expr.pexp_desc,
             current::ExpressionDesc::Pexp_jsx_element(_)
         );
-        let expr_attrs = owner_idx
-            .map(|owner| self.arena.expr_attributes(owner).clone())
-            .unwrap_or_else(|| expr.pexp_attributes.clone());
-        let mut attrs = self.map_attributes(&expr_attrs);
+        let mut attrs = self.map_attributes(&expr.pexp_attributes);
         if is_jsx {
             attrs.insert(0, self.mk_jsx_attr(expr.pexp_loc));
         }
@@ -1309,21 +1284,10 @@ impl<'a> Mapper<'a> {
     // ========== Module types ==========
 
     fn map_module_type(&mut self, mt: &current::ModuleType) -> pt0::ModuleType {
-        self.map_module_type_with_owner(mt, None)
-    }
-
-    fn map_module_type_with_owner(
-        &mut self,
-        mt: &current::ModuleType,
-        owner_idx: Option<ModTypeIdx>,
-    ) -> pt0::ModuleType {
-        let mty_attrs = owner_idx
-            .map(|owner| self.arena.mod_type_attributes(owner).clone())
-            .unwrap_or_else(|| mt.pmty_attributes.clone());
         pt0::ModuleType {
             pmty_desc: self.map_module_type_desc(&*mt.pmty_desc),
             pmty_loc: self.loc(mt.pmty_loc),
-            pmty_attributes: self.map_attributes(&mty_attrs),
+            pmty_attributes: self.map_attributes(&mt.pmty_attributes),
         }
     }
 
@@ -1391,21 +1355,10 @@ impl<'a> Mapper<'a> {
     // ========== Module expressions ==========
 
     fn map_module_expr(&mut self, me: &current::ModuleExpr) -> pt0::ModuleExpr {
-        self.map_module_expr_with_owner(me, None)
-    }
-
-    fn map_module_expr_with_owner(
-        &mut self,
-        me: &current::ModuleExpr,
-        owner_idx: Option<ModExprIdx>,
-    ) -> pt0::ModuleExpr {
-        let mod_attrs = owner_idx
-            .map(|owner| self.arena.mod_expr_attributes(owner).clone())
-            .unwrap_or_else(|| me.pmod_attributes.clone());
         pt0::ModuleExpr {
             pmod_desc: self.map_module_expr_desc(&*me.pmod_desc),
             pmod_loc: self.loc(me.pmod_loc),
-            pmod_attributes: self.map_attributes(&mod_attrs),
+            pmod_attributes: self.map_attributes(&me.pmod_attributes),
         }
     }
 

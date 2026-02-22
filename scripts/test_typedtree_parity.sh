@@ -15,6 +15,7 @@
 #   -j, --parallel N  Run N tests in parallel (default: 16)
 #   -v, --verbose     Show progress for each file
 #   --no-build        Skip the initial rewatch build (assume already built)
+#   --with-locs       Use -dtyped-sexp-locs (with locations) instead of -dtyped-sexp
 #   -h, --help        Show this help message
 #
 # EXAMPLES:
@@ -38,6 +39,7 @@ PARALLEL_JOBS=16
 VERBOSE=false
 FILE_ARG=""
 SKIP_BUILD=false
+WITH_LOCS=false
 
 while [[ $# -gt 0 ]]; do
     case $1 in
@@ -62,6 +64,10 @@ while [[ $# -gt 0 ]]; do
             SKIP_BUILD=true
             shift
             ;;
+        --with-locs)
+            WITH_LOCS=true
+            shift
+            ;;
         -h|--help)
             head -35 "$0" | tail -30
             exit 0
@@ -80,6 +86,7 @@ OCAML_BSC="$DUNE_BIN_DIR/bsc"
 RUST_BSC="$PROJECT_ROOT/compiler-rust/target/release/bsc"
 RESCRIPT_CLI="$PROJECT_ROOT/packages/@rescript/darwin-arm64/bin/rescript.exe"
 TEST_PROJECT="$PROJECT_ROOT/tests/tests"
+GENERATED_OUTPUT_SCOPE="tests/tests/src"
 
 # Colors for output
 RED='\033[0;31m'
@@ -90,6 +97,11 @@ RESET='\033[0m'
 
 # Configuration
 TIMEOUT_SECONDS=10
+if [[ "$WITH_LOCS" == "true" ]]; then
+    SEXP_FLAG="-dtyped-sexp-locs"
+else
+    SEXP_FLAG="-dtyped-sexp"
+fi
 
 # Check if compilers exist
 if [[ ! -x "$OCAML_BSC" ]]; then
@@ -113,9 +125,41 @@ if [[ ! -x "$RESCRIPT_CLI" ]]; then
     exit 1
 fi
 
+# Record untracked JS-like files before running so we can remove only newly generated ones.
+capture_untracked_js_snapshot() {
+    local output_file="$1"
+    git -C "$PROJECT_ROOT" ls-files --others --exclude-standard -- "$GENERATED_OUTPUT_SCOPE" \
+        | grep -E '\.(js|mjs|cjs)$' > "$output_file" || true
+}
+
+cleanup_generated_js_outputs() {
+    if [[ -z "${UNTRACKED_JS_BEFORE_FILE:-}" || ! -f "$UNTRACKED_JS_BEFORE_FILE" ]]; then
+        return
+    fi
+
+    local untracked_after_file="$TEMP_DIR/untracked_js_after.txt"
+    local newly_generated_file="$TEMP_DIR/untracked_js_new.txt"
+    local removed_count
+
+    capture_untracked_js_snapshot "$untracked_after_file"
+    comm -13 <(sort "$UNTRACKED_JS_BEFORE_FILE") <(sort "$untracked_after_file") > "$newly_generated_file" || true
+
+    if [[ -s "$newly_generated_file" ]]; then
+        while IFS= read -r rel_file; do
+            [[ -n "$rel_file" ]] || continue
+            rm -f "$PROJECT_ROOT/$rel_file"
+        done < "$newly_generated_file"
+
+        removed_count=$(wc -l < "$newly_generated_file" | tr -d ' ')
+        echo -e "${YELLOW}Cleanup: removed ${removed_count} generated JS/MJS/CJS files.${RESET}"
+    fi
+}
+
 # Create temp directory
 TEMP_DIR=$(mktemp -d)
-trap "rm -rf $TEMP_DIR" EXIT
+UNTRACKED_JS_BEFORE_FILE="$TEMP_DIR/untracked_js_before.txt"
+capture_untracked_js_snapshot "$UNTRACKED_JS_BEFORE_FILE"
+trap "cleanup_generated_js_outputs; rm -rf $TEMP_DIR" EXIT
 
 echo -e "${BOLD}Typed Tree Parity Test${RESET}"
 echo "============================================"
@@ -125,6 +169,7 @@ if [[ "$RUST_AVAILABLE" == "true" ]]; then
 else
     echo "Rust bsc:  (not available)"
 fi
+echo "Sexp flag: $SEXP_FLAG"
 echo "Timeout: ${TIMEOUT_SECONDS}s"
 echo "Parallel jobs: $PARALLEL_JOBS"
 echo ""
@@ -180,7 +225,7 @@ mkdir -p "$RESULTS_DIR"
 mkdir -p "$TEMP_DIR/diffs"
 
 # Export variables for parallel execution
-export OCAML_BSC RUST_BSC RESCRIPT_CLI TIMEOUT_SECONDS TEMP_DIR QUICK_MODE VERBOSE RUST_AVAILABLE PROJECT_ROOT RESULTS_DIR TEST_PROJECT
+export OCAML_BSC RUST_BSC RESCRIPT_CLI TIMEOUT_SECONDS TEMP_DIR QUICK_MODE VERBOSE RUST_AVAILABLE PROJECT_ROOT RESULTS_DIR TEST_PROJECT SEXP_FLAG
 
 # Function to test a single file - writes results to a file
 test_single_file() {
@@ -213,15 +258,20 @@ test_single_file() {
 
     if [[ -z "$compiler_args_json" ]]; then
         # If compiler-args fails, try direct compilation
+        # Build include flags for test project's compiled modules
+        local include_flags=""
+        if [[ -d "$TEST_PROJECT/lib/ocaml" ]]; then
+            include_flags="-I $TEST_PROJECT/lib/ocaml"
+        fi
         # Run OCaml compiler directly
-        if timeout "$TIMEOUT_SECONDS" "$OCAML_BSC" -dtyped-sexp "$full_file_path" 2> "$file_temp/ocaml.sexp" 1>/dev/null; then
+        if timeout "$TIMEOUT_SECONDS" "$OCAML_BSC" $SEXP_FLAG $include_flags -o "$file_temp/ocaml_fallback.js" "$full_file_path" 2> "$file_temp/ocaml.sexp" 1>/dev/null; then
             ocaml_pass=1
         else
             ocaml_fail=1
         fi
 
         if [[ "$RUST_AVAILABLE" == "true" ]]; then
-            if timeout "$TIMEOUT_SECONDS" "$RUST_BSC" -dtyped-sexp "$full_file_path" 2> "$file_temp/rust.sexp" 1>/dev/null; then
+            if timeout "$TIMEOUT_SECONDS" "$RUST_BSC" $SEXP_FLAG $include_flags -o "$file_temp/rust_fallback.js" "$full_file_path" 2> "$file_temp/rust.sexp" 1>/dev/null; then
                 rust_pass=1
             else
                 rust_fail=1
@@ -234,9 +284,9 @@ test_single_file() {
         args=$(echo "$compiler_args_json" | python3 -c "import sys, json; d=json.load(sys.stdin); print(' '.join(d.get('compiler_args', [])))" 2>/dev/null) || args=""
 
         if [[ -n "$args" ]]; then
-            # Run OCaml compiler with the args + -dtyped-sexp
+            # Run OCaml compiler with the args + $SEXP_FLAG
             cd "$TEST_PROJECT/lib/bs"
-            if timeout "$TIMEOUT_SECONDS" "$OCAML_BSC" -dtyped-sexp $args 2> "$file_temp/ocaml.sexp" 1>/dev/null; then
+            if timeout "$TIMEOUT_SECONDS" "$OCAML_BSC" $SEXP_FLAG $args 2> "$file_temp/ocaml.sexp" 1>/dev/null; then
                 ocaml_pass=1
             else
                 ocaml_fail=1
@@ -244,7 +294,7 @@ test_single_file() {
 
             # Run Rust compiler if available
             if [[ "$RUST_AVAILABLE" == "true" ]]; then
-                if timeout "$TIMEOUT_SECONDS" "$RUST_BSC" -dtyped-sexp $args 2> "$file_temp/rust.sexp" 1>/dev/null; then
+                if timeout "$TIMEOUT_SECONDS" "$RUST_BSC" $SEXP_FLAG $args 2> "$file_temp/rust.sexp" 1>/dev/null; then
                     rust_pass=1
                 else
                     rust_fail=1
@@ -257,14 +307,47 @@ test_single_file() {
         fi
     fi
 
+    # Strip warning messages from sexp output (OCaml emits warnings to stderr mixed with sexp)
+    # Warnings appear before "(structure" and after the sexp closing ")"
+    # The sexp itself never contains blank lines, so delete from first blank line to end
+    if [[ -f "$file_temp/ocaml.sexp" ]]; then
+        LC_ALL=C sed -n '/^(structure/,$p' "$file_temp/ocaml.sexp" | LC_ALL=C sed '/^$/,$d' > "$file_temp/ocaml_clean.sexp"
+        mv "$file_temp/ocaml_clean.sexp" "$file_temp/ocaml.sexp"
+    fi
+    if [[ -f "$file_temp/rust.sexp" ]]; then
+        LC_ALL=C sed -n '/^(structure/,$p' "$file_temp/rust.sexp" | LC_ALL=C sed '/^$/,$d' > "$file_temp/rust_clean.sexp"
+        mv "$file_temp/rust_clean.sexp" "$file_temp/rust.sexp"
+    fi
+
+    # Determine pass/fail based on whether sexp output was actually produced,
+    # not exit code (compilers exit non-zero for warnings but still produce sexp)
+    if [[ -s "$file_temp/ocaml.sexp" ]]; then
+        ocaml_pass=1
+        ocaml_fail=0
+    else
+        ocaml_pass=0
+        ocaml_fail=1
+    fi
+    if [[ -s "$file_temp/rust.sexp" ]]; then
+        rust_pass=1
+        rust_fail=0
+    else
+        rust_pass=0
+        rust_fail=1
+    fi
+
     # Compare if both succeeded
     if [[ "$RUST_AVAILABLE" == "true" && "$ocaml_pass" -eq 1 && "$rust_pass" -eq 1 ]]; then
-        if diff -q "$file_temp/ocaml.sexp" "$file_temp/rust.sexp" > /dev/null 2>&1; then
+        # Strip binary data (e.g. marshalled Location.t in attributes) before comparing
+        # Use LC_ALL=C tr to handle binary safely
+        LC_ALL=C tr -cd '[:print:]\n' < "$file_temp/ocaml.sexp" > "$file_temp/ocaml_text.sexp" 2>/dev/null || cp "$file_temp/ocaml.sexp" "$file_temp/ocaml_text.sexp"
+        LC_ALL=C tr -cd '[:print:]\n' < "$file_temp/rust.sexp" > "$file_temp/rust_text.sexp" 2>/dev/null || cp "$file_temp/rust.sexp" "$file_temp/rust_text.sexp"
+        if diff -q "$file_temp/ocaml_text.sexp" "$file_temp/rust_text.sexp" > /dev/null 2>&1; then
             parity_pass=1
         else
             parity_fail=1
             # Save diff for inspection
-            diff -u "$file_temp/ocaml.sexp" "$file_temp/rust.sexp" > "$TEMP_DIR/diffs/$safe_name.diff" 2>&1 || true
+            diff -u "$file_temp/ocaml_text.sexp" "$file_temp/rust_text.sexp" > "$TEMP_DIR/diffs/$safe_name.diff" 2>&1 || true
         fi
     fi
 

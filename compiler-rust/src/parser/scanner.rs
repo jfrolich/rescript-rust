@@ -415,6 +415,37 @@ impl<'src> Scanner<'src> {
         &self.src[start..end]
     }
 
+    /// Decode a UTF-8 codepoint from the scanner's Latin-1 source view.
+    ///
+    /// Source files are loaded as "one byte -> one char", so each source char
+    /// stores an original byte value in its low 8 bits. Reconstruct those bytes
+    /// before calling UTF-8 decode, matching OCaml scanner behavior.
+    fn decode_codepoint_from_latin1_source(&self, start: usize) -> (i32, usize) {
+        let Some(tail) = self.src.get(start..) else {
+            return (utf8::REPLACEMENT_CHAR, 1);
+        };
+        let mut raw = [0u8; 6];
+        let mut len = 0usize;
+        for ch in tail.chars().take(raw.len()) {
+            raw[len] = ch as u8;
+            len += 1;
+        }
+        if len == 0 {
+            (utf8::REPLACEMENT_CHAR, 1)
+        } else {
+            utf8::decode_codepoint(&raw[..len], 0)
+        }
+    }
+
+    /// Extract `char_len` source characters from `start`, preserving the scanner's
+    /// Latin-1 byte view used by codepoint literals.
+    fn substring_latin1_chars(&self, start: usize, char_len: usize) -> String {
+        self.src
+            .get(start..)
+            .map(|s| s.chars().take(char_len).collect())
+            .unwrap_or_default()
+    }
+
     /// Scan an identifier or keyword.
     fn scan_identifier(&mut self) -> Token<'src> {
         let start_off = self.offset;
@@ -1203,8 +1234,36 @@ impl<'src> Scanner<'src> {
                     }
                 }
                 _ => {
+                    // Match OCaml res_scanner.ml: try decoding a UTF-8 codepoint literal
+                    // after the opening quote, then fall back to SingleQuote on failure.
+                    let ch = self.peek();
                     self.next();
-                    Token::SingleQuote
+                    let offset = self.offset;
+                    let offset16 = self.offset16;
+                    let char_pos = self.char_pos;
+                    let ch_len = self.ch_len;
+                    let (codepoint, length) =
+                        self.decode_codepoint_from_latin1_source(self.offset);
+
+                    for _ in 0..length {
+                        self.next();
+                    }
+
+                    if self.ch == '\'' {
+                        let contents = self.substring_latin1_chars(offset, length);
+                        self.next();
+                        Token::Codepoint {
+                            c: codepoint,
+                            original: contents.into(),
+                        }
+                    } else {
+                        self.ch = ch;
+                        self.offset = offset;
+                        self.offset16 = offset16;
+                        self.char_pos = char_pos;
+                        self.ch_len = ch_len;
+                        Token::SingleQuote
+                    }
                 }
             },
 

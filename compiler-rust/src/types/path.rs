@@ -127,6 +127,15 @@ impl Path {
         self.name_with_paren(|_| false)
     }
 
+    /// Get the last component name of the path (e.g., "ref" for both "ref" and "Pervasives.ref").
+    pub fn head_name(&self) -> &str {
+        match self {
+            Path::Pident(id) => id.name(),
+            Path::Pdot(_, s, _) => s.as_str(),
+            Path::Papply(_, arg) => arg.head_name(),
+        }
+    }
+
     /// Get the string name with parenthesization for operators.
     pub fn name_with_paren(&self, paren: impl Fn(&str) -> bool + Copy) -> String {
         match self {

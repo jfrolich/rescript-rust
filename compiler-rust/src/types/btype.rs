@@ -126,10 +126,13 @@ fn row_repr_aux(ctx: &TypeContext<'_>, ll: &[Vec<(String, RowField)>], row: &Row
             if ll.is_empty() {
                 row.clone()
             } else {
-                let mut combined_fields = row.row_fields.clone();
+                // Match OCaml `rev_concat row.row_fields ll`: prepend accumulated
+                // nested row-field blocks (outermost first), then terminal fields.
+                let mut combined_fields = Vec::new();
                 for fields in ll.iter().rev() {
                     combined_fields.extend(fields.iter().cloned());
                 }
+                combined_fields.extend(row.row_fields.iter().cloned());
                 RowDesc {
                     row_fields: combined_fields,
                     row_more: row.row_more,

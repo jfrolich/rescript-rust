@@ -1,6 +1,10 @@
-# Ralph TODO: Binary AST Parity
+# Ralph TODO: Typed AST Parity (with Locations)
 
-## ⚠️ CRITICAL INSTRUCTIONS FOR AGENTS
+## Goal
+
+Achieve 100% parity on the typed tree S-expression output (with locations) between the OCaml and Rust compilers. The test compares `-dtyped-sexp-locs` output from both compilers on all files in `tests/tests/src/`.
+
+## Instructions for Agents
 
 1. **NEVER revert commits made by other agents or humans** - If you think a commit is wrong, document your concerns but DO NOT revert it.
 
@@ -513,9 +517,11 @@ Files where OCaml fails are excluded from parity denominators and listed separat
 
 ---
 
-## 🚨 CRITICAL: parsetree0 is NOT involved in .ast file generation!
+# Quick mode (stop on first failure, show diff)
+timeout 300 ./scripts/test_typedtree_parity.sh --quick
 
-**⚠️ WARNING: If your analysis concludes that parsetree0 causes .ast file differences, YOUR ANALYSIS IS WRONG. Go back and re-analyze.**
+# Skip rewatch build (if already built)
+timeout 300 ./scripts/test_typedtree_parity.sh --no-build
 
 **This is a common mistake that wastes time. DO NOT make it.**
 
@@ -730,11 +736,9 @@ bsc -bs-ast "$f" -o "/tmp/out.$ext"
 
 ---
 
-## Debugging Commands
+## Key Differences Between OCaml and Rust Sexp Printers
 
-```bash
-# Run full parity test
-./scripts/test_parser_ast_parity.sh 2>&1 | tail -50
+Side-by-side comparison of the sexp format for key constructs. The Rust printer must exactly match the OCaml format.
 
 # Test a single file
 ./scripts/test_parser_ast_parity.sh tests/syntax_tests/data/printer/expr/record.res
@@ -770,7 +774,7 @@ python3 scripts/inspect_binary_ast.py decode <file.ast> [--max-depth N]
 
 ---
 
-## Reference Files
+## Debugging Tips
 
 | File | Purpose |
 |------|---------|

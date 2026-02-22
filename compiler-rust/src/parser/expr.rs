@@ -1379,6 +1379,18 @@ fn parse_parameter(p: &mut Parser<'_>) -> Option<super::core::FundefParameter> {
                 } else {
                     expr
                 };
+
+                // OCaml typecore rewrites optional defaults through a synthetic
+                // ghost span from lhs start to default end. Seed that span here
+                // so later typedtree rewriting can reuse it by bounds.
+                if matches!(label, ArgLabel::Optional(_))
+                    && matches!(&*pat.ppat_desc, PatternDesc::Ppat_var(_))
+                {
+                    let sloc_start = p.loc_start_idx(pat.ppat_loc);
+                    let sloc_end = p.loc_end_idx(expr.pexp_loc);
+                    p.arena_mut().push_loc(sloc_start, sloc_end, true);
+                }
+
                 (label, pat, Some(expr))
             }
         } else {

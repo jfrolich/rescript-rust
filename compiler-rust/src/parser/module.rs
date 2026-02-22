@@ -569,7 +569,7 @@ pub fn parse_structure_item(p: &mut Parser<'_>) -> Option<StructureItem> {
         Token::External => {
             p.next();
             // Use item_start_idx (which equals start_pos_idx) to share position with pstr_loc
-            let vd = parse_value_description(p, attrs.clone(), item_start_idx);
+            let vd = parse_value_description(p, attrs.clone(), item_start_idx, false);
             parse_newline_or_semicolon_structure(p);
             Some(StructureItemDesc::Pstr_primitive(Box::new(vd)))
         }
@@ -857,7 +857,7 @@ pub fn parse_signature_item(p: &mut Parser<'_>) -> Option<SignatureItem> {
                 );
             }
             p.next();
-            let vd = parse_signature_let_description(p, attrs.clone(), let_pos_idx);
+            let vd = parse_value_description(p, attrs.clone(), let_pos_idx, true);
             parse_newline_or_semicolon_signature(p);
             p.end_region();
             Some(SignatureItemDesc::Psig_value(Box::new(vd)))
@@ -937,7 +937,7 @@ pub fn parse_signature_item(p: &mut Parser<'_>) -> Option<SignatureItem> {
         Token::External => {
             p.next();
             // Use start_pos_idx to share position with psig_loc
-            let vd = parse_value_description(p, attrs.clone(), start_pos_idx);
+            let vd = parse_value_description(p, attrs.clone(), start_pos_idx, false);
             parse_newline_or_semicolon_signature(p);
             Some(SignatureItemDesc::Psig_value(Box::new(vd)))
         }
@@ -3263,7 +3263,9 @@ fn parse_type_declaration_with_context(
                         }
                     }
                     // Check what comes after attributes
-                    if state.token == Token::DotDot {
+                    if state.token == Token::Bar {
+                        "variant"
+                    } else if state.token == Token::DotDot {
                         "open"
                     } else if state.token == Token::Lbrace {
                         "record_or_object"
@@ -3280,8 +3282,7 @@ fn parse_type_declaration_with_context(
                 });
                 match what_follows {
                     "variant" => {
-                        let constructors = parse_constructors_without_leading_bar(p);
-                        kind = TypeKind::Ptype_variant(constructors);
+                        kind = TypeKind::Ptype_variant(parse_constructors(p));
                     }
                     "open" => {
                         // Parse attributes and then ..
@@ -3860,18 +3861,77 @@ fn parse_type_kind(
 
 /// Parse variant constructors (starting with |).
 fn parse_constructors(p: &mut Parser<'_>) -> Vec<ConstructorDeclaration> {
+    // OCaml parse_type_constructor_declarations:
+    // - First constructor: optional leading doc comment + optional leading `|`
+    // - Remaining constructors: only if token is `|` or doc-comment-then-`|`
     let mut constructors = vec![];
 
-    while p.token == Token::Bar {
-        // Capture start position BEFORE consuming the bar (like OCaml)
-        let bar_start_idx = p.start_pos_idx();
+    // First constructor: optional leading doc comment attribute.
+    let first_doc_attrs = if let Token::DocComment { loc, content } = &p.token {
+        let loc = loc.clone();
+        let content = content.clone();
         p.next();
-        if let Some(c) = parse_constructor_with_start(p, bar_start_idx) {
+        let loc = p.from_location(&loc);
+        vec![super::core::doc_comment_to_attribute(p.arena_mut(), loc, content)]
+    } else {
+        vec![]
+    };
+
+    // First constructor (optional leading bar).
+    let first_start_idx = p.start_pos_idx();
+    p.optional(&Token::Bar);
+    if let Some(mut c) = parse_constructor_with_start(p, first_start_idx) {
+        if !first_doc_attrs.is_empty() {
+            let mut attrs = first_doc_attrs;
+            attrs.extend(c.pcd_attributes);
+            c.pcd_attributes = attrs;
+        }
+        constructors.push(c);
+    }
+
+    // Remaining constructors must be introduced by `|` (or doc comment followed by `|`).
+    loop {
+        if !is_bar_or_doc_comment_then_bar(p) {
+            break;
+        }
+
+        let doc_attrs = if let Token::DocComment { loc, content } = &p.token {
+            let loc = loc.clone();
+            let content = content.clone();
+            p.next();
+            let loc = p.from_location(&loc);
+            vec![super::core::doc_comment_to_attribute(p.arena_mut(), loc, content)]
+        } else {
+            vec![]
+        };
+
+        let bar_start_idx = p.start_pos_idx();
+        p.next(); // consume `|`
+
+        if let Some(mut c) = parse_constructor_with_start(p, bar_start_idx) {
+            if !doc_attrs.is_empty() {
+                let mut attrs = doc_attrs;
+                attrs.extend(c.pcd_attributes);
+                c.pcd_attributes = attrs;
+            }
             constructors.push(c);
         }
     }
 
     constructors
+}
+
+/// Check if current token is `|` or doc-comment followed by `|`.
+/// Matches OCaml's `is_bar_or_doc_comment_then_bar`.
+fn is_bar_or_doc_comment_then_bar(p: &mut Parser<'_>) -> bool {
+    match p.token {
+        Token::Bar => true,
+        Token::DocComment { .. } => p.lookahead(|state| {
+            state.next();
+            matches!(state.token, Token::Bar)
+        }),
+        _ => false,
+    }
 }
 
 /// Parse variant constructors where the first doesn't have a leading |.
@@ -4676,6 +4736,7 @@ fn parse_value_description(
     p: &mut Parser<'_>,
     outer_attrs: Attributes,
     loc_start_idx: PosIdx,
+    use_poly_type: bool,
 ) -> ValueDescription {
     let inner_attrs = parse_attributes(p);
     // Merge outer (structure-level) attrs with inner (name-level) attrs
@@ -4710,7 +4771,15 @@ fn parse_value_description(
     // OCaml: InExternal.status := true before parsing type
     let was_in_external = p.in_external;
     p.in_external = true;
-    let typ_ct = typ::parse_typ_expr(p);
+    // OCaml's parse_sign_let_desc uses parse_poly_type_expr for signature `let`,
+    // while parse_external_def uses parse_typ_expr for `external`.
+    // The difference matters for `'a => T` where parse_poly_type_expr uses the
+    // type var's location (excluding ') for the arrow start, matching OCaml.
+    let typ_ct = if use_poly_type {
+        typ::parse_poly_type_expr(p)
+    } else {
+        typ::parse_typ_expr(p)
+    };
     let typ = p.arena_mut().push_core_type(typ_ct);
     p.in_external = was_in_external;
 

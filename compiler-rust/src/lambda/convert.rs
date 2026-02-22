@@ -18,7 +18,9 @@ use crate::location::Location;
 use crate::parse_arena::{LidentIdx, LocIdx, Located, ParseArena};
 use crate::parser::ast::{Attributes, DirectionFlag, MutableFlag as ParserMutableFlag, RecFlag};
 use crate::types::asttypes::MutableFlag as TypeMutableFlag;
-use crate::types::decl::{ConstructorDescription, ConstructorTag, LabelDescription, ValueKind};
+use crate::types::decl::{
+    ConstructorDescription, ConstructorTag, LabelDescription, RecordRepresentation, ValueKind,
+};
 use crate::types::typedtree::{
     Case, Constant as TConstant, Expression, ExpressionDesc, FunctionParam, FunctionParamPattern,
     Pattern, PatternDesc, RecordLabelDefinition, Structure, StructureItem, StructureItemDesc,
@@ -200,7 +202,7 @@ impl<'a> LambdaConverter<'a> {
                 };
                 Lambda::for_(var.clone(), start_lam, end_lam, dir, body_lam)
             }
-            ExpressionDesc::Texp_send(_, _) => Lambda::unit(),
+            ExpressionDesc::Texp_send(_, _, _) => Lambda::unit(),
             ExpressionDesc::Texp_letmodule(_, _, _, body) => self.convert_expr(body),
             ExpressionDesc::Texp_letexception(_, body) => self.convert_expr(body),
             ExpressionDesc::Texp_assert(inner_expr) => {
@@ -209,13 +211,14 @@ impl<'a> LambdaConverter<'a> {
                 Lambda::if_(cond, Lambda::unit(), failure)
             }
             ExpressionDesc::Texp_pack(_) => Lambda::unit(),
+            ExpressionDesc::Texp_extension_constructor(_, _) => Lambda::unit(),
         }
     }
 
     fn convert_constant(&self, cst: &TConstant) -> Constant {
         match cst {
             TConstant::Int(i) => Constant::Int {
-                i: *i,
+                i: *i as i32,
                 comment: None,
             },
             TConstant::Char(c) => Constant::Char(*c),
@@ -273,34 +276,145 @@ impl<'a> LambdaConverter<'a> {
         funct: &Expression,
         args: &[crate::types::typedtree::ApplyArg],
     ) -> Lambda {
+        fn lapply(loc: Location, func: Lambda, args: Vec<Lambda>) -> Lambda {
+            let ap_info = ApInfo {
+                loc,
+                inlined: InlineAttribute::Default,
+                status: ApplyStatus::Na,
+            };
+            Lambda::Lapply(Apply {
+                ap_func: Box::new(func),
+                ap_args: args,
+                ap_info,
+                ap_transformed_jsx: false,
+            })
+        }
+
+        fn protect(
+            converter: &mut LambdaConverter<'_>,
+            name: &str,
+            lam: Lambda,
+            defs: &mut Vec<(Ident, Lambda)>,
+        ) -> Lambda {
+            match lam {
+                Lambda::Lvar(_) | Lambda::Lconst(_) => lam,
+                _ => {
+                    let id = converter.id_gen.create(name);
+                    defs.push((id.clone(), lam));
+                    Lambda::var(id)
+                }
+            }
+        }
+
+        fn build_apply(
+            converter: &mut LambdaConverter<'_>,
+            loc: Location,
+            lam: Lambda,
+            args_rev: Vec<(Lambda, bool)>,
+            pending: &[(Option<Lambda>, bool)],
+        ) -> Lambda {
+            match pending.split_first() {
+                Some(((None, optional), tail)) => {
+                    let mut defs: Vec<(Ident, Lambda)> = Vec::new();
+                    let all_optional = args_rev.iter().all(|(_, is_optional)| *is_optional);
+                    let (applied_args, remaining_args) = if all_optional {
+                        (Vec::new(), args_rev)
+                    } else {
+                        (args_rev, Vec::new())
+                    };
+
+                    let applied = if applied_args.is_empty() {
+                        lam
+                    } else {
+                        lapply(
+                            loc.clone(),
+                            lam,
+                            applied_args
+                                .into_iter()
+                                .rev()
+                                .map(|(arg, _)| arg)
+                                .collect(),
+                        )
+                    };
+
+                    let handle = protect(converter, "func", applied, &mut defs);
+                    let mut protected_tail: Vec<(Option<Lambda>, bool)> =
+                        Vec::with_capacity(tail.len());
+                    for (arg, is_opt) in tail {
+                        let protected_arg = arg
+                            .as_ref()
+                            .map(|lam| protect(converter, "arg", lam.clone(), &mut defs));
+                        protected_tail.push((protected_arg, *is_opt));
+                    }
+
+                    let id_arg = converter.id_gen.create("param");
+                    let mut next_args_rev = Vec::with_capacity(1 + remaining_args.len());
+                    next_args_rev.push((Lambda::var(id_arg.clone()), *optional));
+                    next_args_rev.extend(remaining_args.into_iter());
+
+                    let body =
+                        build_apply(converter, loc.clone(), handle, next_args_rev, &protected_tail);
+
+                    let mut wrapped = match body {
+                        Lambda::Lfunction(func) => {
+                            let mut params = Vec::with_capacity(1 + func.params.len());
+                            params.push(id_arg.clone());
+                            params.extend(func.params);
+                            Lambda::function_(params.len() as i32, params, *func.body, func.attr)
+                        }
+                        other => Lambda::function_(
+                            1,
+                            vec![id_arg.clone()],
+                            other,
+                            FunctionAttribute::default(),
+                        ),
+                    };
+
+                    for (id, def_lam) in defs {
+                        wrapped = Lambda::let_(LetKind::Strict, id, def_lam, wrapped);
+                    }
+                    wrapped
+                }
+                Some(((Some(arg), optional), tail)) => {
+                    let mut next_args_rev = args_rev;
+                    next_args_rev.push((arg.clone(), *optional));
+                    build_apply(converter, loc, lam, next_args_rev, tail)
+                }
+                None => lapply(
+                    loc,
+                    lam,
+                    args_rev.into_iter().rev().map(|(arg, _)| arg).collect(),
+                ),
+            }
+        }
+
         if let ExpressionDesc::Texp_ident(_, _, desc) = &funct.exp_desc {
             if let ValueKind::ValPrim(prim) = &desc.val_kind {
-                let mut actual_args = Vec::new();
-                for arg in args {
-                    actual_args.push(self.convert_expr(&arg.expression));
-                }
-                if let Some(prim) = self.primitive_from_name(&prim.prim_name) {
-                    return Lambda::prim(prim, actual_args, loc);
+                if args.iter().all(|arg| arg.expression.is_some()) {
+                    let mut actual_args = Vec::new();
+                    for arg in args {
+                        if let Some(expr) = &arg.expression {
+                            actual_args.push(self.convert_expr(expr));
+                        }
+                    }
+                    if let Some(prim) = self.primitive_from_name(&prim.prim_name) {
+                        return Lambda::prim(prim, actual_args, loc);
+                    }
                 }
             }
         }
 
         let func_lam = self.convert_expr(funct);
-        let mut args_lam = Vec::new();
-        for arg in args {
-            args_lam.push(self.convert_expr(&arg.expression));
-        }
-        let ap_info = ApInfo {
-            loc,
-            inlined: InlineAttribute::Default,
-            status: ApplyStatus::Na,
-        };
-        Lambda::Lapply(Apply {
-            ap_func: Box::new(func_lam),
-            ap_args: args_lam,
-            ap_info,
-            ap_transformed_jsx: false,
-        })
+        let pending_args: Vec<(Option<Lambda>, bool)> = args
+            .iter()
+            .map(|arg| {
+                (
+                    arg.expression.as_ref().map(|expr| self.convert_expr(expr)),
+                    arg.label.is_optional(),
+                )
+            })
+            .collect();
+        build_apply(self, loc, func_lam, Vec::new(), &pending_args)
     }
 
     fn convert_function(
@@ -771,20 +885,24 @@ impl<'a> LambdaConverter<'a> {
     fn convert_record(
         &mut self,
         loc: Location,
-        fields: &[(Located<LidentIdx>, LabelDescription, RecordLabelDefinition)],
+        fields: &[(Located<LidentIdx>, LabelDescription, RecordLabelDefinition, bool)],
         base: Option<&Expression>,
     ) -> Lambda {
         let mut values = vec![None; fields.len()];
         let base_lam = base.map(|e| self.convert_expr(e));
 
-        for (lid, lbl, def) in fields {
+        for (idx, (lid, lbl, def, _opt)) in fields.iter().enumerate() {
             let value = match def {
                 RecordLabelDefinition::Overridden(_, expr) => self.convert_expr(expr),
                 RecordLabelDefinition::Kept(_) => {
                     if let Some(base_expr) = &base_lam {
+                        let field_pos = match lbl.lbl_repres {
+                            RecordRepresentation::RecordExtension => idx as i32 + 1,
+                            _ => idx as i32,
+                        };
                         Lambda::prim(
                             Primitive::Pfield(
-                                lbl.lbl_pos,
+                                field_pos,
                                 FieldDbgInfo::Record {
                                     name: lbl.lbl_name.clone(),
                                     mutable_flag: to_parser_mutable(lbl.lbl_mut),
@@ -798,7 +916,7 @@ impl<'a> LambdaConverter<'a> {
                     }
                 }
             };
-            values[lbl.lbl_pos as usize] = Some(value);
+            values[idx] = Some(value);
         }
 
         let elements = values
@@ -808,14 +926,14 @@ impl<'a> LambdaConverter<'a> {
 
         let fields_info = fields
             .iter()
-            .map(|(_, lbl, _)| (lbl.lbl_name.clone(), lbl.lbl_optional))
+            .map(|(_, lbl, _, _)| (lbl.lbl_name.clone(), lbl.lbl_optional))
             .collect();
 
         let tag_info = TagInfo::Record {
             fields: fields_info,
             mutable_flag: fields
                 .iter()
-                .find(|(_, lbl, _)| lbl.lbl_mut == TypeMutableFlag::Mutable)
+                .find(|(_, lbl, _, _)| lbl.lbl_mut == TypeMutableFlag::Mutable)
                 .map(|_| ParserMutableFlag::Mutable)
                 .unwrap_or(ParserMutableFlag::Immutable),
         };

@@ -603,37 +603,6 @@ Validation:
   completed successfully (no benchmark crashes/regressions in the migrated paths).
 ```
 
-### Task 2.4 follow-up: per-kind attribute side tables + inline stripping (February 2026)
-
-```
-Status: Completed follow-up for the same 2.4 theme (sparse side tables).
-
-Added separate sparse attribute side tables in `ParseArena`:
-- `expr_attributes`
-- `pat_attributes`
-- `core_type_attributes`
-- `mod_expr_attributes`
-- `mod_type_attributes`
-
-Behavioral details:
-- Reserve/initialize/push/get_mut paths now keep these side tables index-aligned with node arenas.
-- Getter/setter APIs provide side-table-first reads with inline fallback during migration.
-- Added resync + strip helpers to remove duplicated inline attribute storage after side tables are populated.
-
-Compaction integration:
-- `binary_ast/writer.rs` now strips duplicated sparse inline expression fields and duplicated inline
-  node attributes before parsetree0 mapping/writing (after dependency extraction).
-- `binary_ast/current_marshal.rs` `%external` detection now reads `if-then-else` else-branch from the
-  side table (with inline fallback), so stripped sparse fields remain readable.
-- `binary_ast/mapper_to0.rs` owner-indexed mapping paths now read attributes from side tables.
-
-Validation run:
-- `cargo check --manifest-path compiler-rust/Cargo.toml`
-- `cargo test --manifest-path compiler-rust/Cargo.toml test_strip_`
-  - `test_strip_expr_sparse_inline_fields_keeps_side_table_values`
-  - `test_strip_arena_node_inline_attributes_keeps_sparse_attribute_tables`
-```
-
 ### Task 4.2 policy (bumpalo) — PROFILING GATED
 
 ```

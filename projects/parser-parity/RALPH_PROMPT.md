@@ -31,6 +31,19 @@ When you encounter a parity issue:
 3. Ensure the Rust implementation matches that logic exactly
 4. Only then make changes
 
+## Priority: Compilation Before Parity
+
+**Get all files to compile first, THEN fix parity.**
+
+Currently only 96/657 files compile with the Rust compiler. The remaining 561 files fail with errors like `UndefinedMethod` (module path resolution) and `NotAVariantType` (variant/constructor resolution). Fixing these compilation failures is strictly higher priority than fixing sexp parity on the 96 files that already compile.
+
+Rationale:
+- A file that doesn't compile produces ZERO useful typed tree output
+- Many parity issues will resolve themselves once the type checker handles more constructs correctly
+- Compilation failures reveal missing type checker features that block large swaths of files
+
+**Do NOT work on sexp parity tasks until Rust compiles all 657 files (or very close to it).**
+
 ## Your Task
 
 Read `RALPH_TODO.md` and complete the next unchecked task. After completing a task:
@@ -55,8 +68,10 @@ Read `RALPH_TODO.md` and complete the next unchecked task. After completing a ta
 
 4. **Run tests frequently** - After each change:
    ```bash
-   ./scripts/test_parser_ast_parity.sh 2>&1 | tail -40
+   timeout 300 ./scripts/test_parser_ast_parity.sh 2>&1 | tail -40
    ```
+
+4b. **ALWAYS use timeouts** - Logic errors can cause infinite loops in the compiler. EVERY compiler invocation must be wrapped with `timeout`. Use `timeout 10` for single-file compilations and `timeout 300` for batch test scripts. Never run the compiler without a timeout, especially when iterating over many files. A single infinite loop will block the agent session indefinitely.
 
 5. **Commit after each fix** - Every time tests improve, commit immediately. Include the new parity in the commit message:
    ```bash
@@ -103,12 +118,14 @@ Read `RALPH_TODO.md` and complete the next unchecked task. After completing a ta
 
 ## Debugging Workflow
 
-```bash
-# Run full parity test
-./scripts/test_parser_ast_parity.sh
+**IMPORTANT: Always use `timeout` when invoking the compiler. Logic errors can cause infinite loops that block the agent session indefinitely.**
 
-# Test a specific file
-./scripts/test_parser_ast_parity.sh tests/syntax_tests/data/printer/expr/record.res
+```bash
+# Run full parity test (ALWAYS with timeout)
+timeout 300 ./scripts/test_parser_ast_parity.sh
+
+# Test a specific file (ALWAYS with timeout)
+timeout 10 ./scripts/test_parser_ast_parity.sh tests/syntax_tests/data/printer/expr/record.res
 
 # Reproduce a TELLA crash from the full run on a single file
 ./scripts/test_parser_ast_parity.sh /Users/jaapf/dev/tella-fusion/path/to/file.res
@@ -118,8 +135,8 @@ Read `RALPH_TODO.md` and complete the next unchecked task. After completing a ta
 
 # Compare binary output manually for a simple file
 echo 'let f = x => x' > /tmp/test.res
-./packages/@rescript/darwin-arm64/bin/bsc.exe -bs-ast /tmp/test.res -o /tmp/ocaml.ast
-./compiler-rust/target/release/bsc -bs-ast /tmp/test.res -o /tmp/rust.ast
+timeout 10 ./packages/@rescript/darwin-arm64/bin/bsc.exe -bs-ast /tmp/test.res -o /tmp/ocaml.ast
+timeout 10 ./compiler-rust/target/release/bsc -bs-ast /tmp/test.res -o /tmp/rust.ast
 diff <(xxd /tmp/ocaml.ast) <(xxd /tmp/rust.ast)
 
 # Build after changes

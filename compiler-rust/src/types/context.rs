@@ -19,12 +19,13 @@
 //! one per compilation unit.
 
 use super::asttypes::ArgLabel;
-use super::path::Path;
+use super::path::{Path, NOPOS};
 use super::type_expr::{
     AbbrevMemo, AbbrevMemoRef, Commutable, CommutableRef, FieldKind, FieldKindRef, GENERIC_LEVEL,
     RowDesc, RowField, RowFieldRef, TypeArg, TypeDesc, TypeExpr, TypeExprRef,
 };
 use crate::context::IdGenerator;
+use crate::intern::StrIdx;
 use std::cell::{Cell, RefCell};
 use std::ops::Deref;
 
@@ -83,8 +84,12 @@ pub struct TypeContext<'a> {
     /// GADT instance tracking flag
     trace_gadt_instances: Cell<bool>,
 
-    /// Simple abbreviations memo
-    simple_abbrevs: RefCell<Option<AbbrevMemoRef>>,
+    /// Simple abbreviations memo: maps nullary Tconstr paths (identity-aware)
+    /// to previously-expanded Tconstr nodes. This matches OCaml's
+    /// `Path.same`-based lookup in `simple_abbrevs`.
+    simple_abbrevs: RefCell<std::collections::HashMap<Path, TypeExprRef>>,
+    /// Previous env ID for check_abbrev_env (OCaml ctype.ml:1272)
+    previous_env_id: Cell<u64>,
 
     /// Type expression storage (for indexed access).
     /// Boxed values keep stable addresses as the vector grows.
@@ -101,9 +106,51 @@ pub struct TypeContext<'a> {
 
     /// Field kind storage
     field_kinds: RefCell<Vec<RefCell<Option<FieldKind>>>>,
+
+    /// Global type declaration store, indexed by type name.
+    /// Populated when loading CMI module signatures so that type alias
+    /// expansion can find declarations for types not directly in the env.
+    type_decl_store: RefCell<std::collections::HashMap<String, super::decl::TypeDeclaration>>,
+
+    /// Global type declaration store, indexed by ident stamp.
+    /// Used for looking up CMI-loaded type declarations by their stamp
+    /// when the type name is too generic (e.g., "t").
+    type_decl_by_stamp: RefCell<std::collections::HashMap<i32, super::decl::TypeDeclaration>>,
+
+    /// Global type declaration store, indexed by full qualified path string.
+    /// Used for looking up types via Pdot paths (e.g., "Js.Promise.t").
+    type_decl_by_path: RefCell<std::collections::HashMap<String, super::decl::TypeDeclaration>>,
+
+    /// Load paths for resolving CMI files during type alias expansion.
+    load_paths: RefCell<Vec<std::path::PathBuf>>,
+
+    /// String table for CMI-decoded Longident components.
+    /// CMI decoding happens without a ParseArena, so we allocate synthetic
+    /// StrIdx values here and resolve them later when needed.
+    cmi_longident_names: RefCell<std::collections::HashMap<u32, String>>,
+
+    /// Next synthetic StrIdx raw value for CMI longident strings.
+    next_cmi_longident_idx: Cell<u32>,
 }
 
 impl<'a> TypeContext<'a> {
+    /// Canonicalize path keys for simple_abbrevs to match OCaml Path.same:
+    /// ignore Pdot position hints when comparing paths.
+    fn canonicalize_simple_abbrev_path(path: &Path) -> Path {
+        match path {
+            Path::Pident(id) => Path::Pident(id.clone()),
+            Path::Pdot(prefix, name, _) => Path::Pdot(
+                Box::new(Self::canonicalize_simple_abbrev_path(prefix)),
+                name.clone(),
+                NOPOS,
+            ),
+            Path::Papply(functor, arg) => Path::Papply(
+                Box::new(Self::canonicalize_simple_abbrev_path(functor)),
+                Box::new(Self::canonicalize_simple_abbrev_path(arg)),
+            ),
+        }
+    }
+
     /// Create a new type context.
     pub fn new(id_gen: &'a IdGenerator) -> Self {
         TypeContext {
@@ -113,12 +160,112 @@ impl<'a> TypeContext<'a> {
             global_level: Cell::new(1),
             saved_levels: RefCell::new(Vec::new()),
             trace_gadt_instances: Cell::new(false),
-            simple_abbrevs: RefCell::new(None),
+            simple_abbrevs: RefCell::new(std::collections::HashMap::new()),
+            previous_env_id: Cell::new(0),
             types: RefCell::new(Vec::new()),
             abbrevs: RefCell::new(Vec::new()),
             row_fields: RefCell::new(Vec::new()),
             commutables: RefCell::new(Vec::new()),
             field_kinds: RefCell::new(Vec::new()),
+            type_decl_store: RefCell::new(std::collections::HashMap::new()),
+            type_decl_by_stamp: RefCell::new(std::collections::HashMap::new()),
+            type_decl_by_path: RefCell::new(std::collections::HashMap::new()),
+            load_paths: RefCell::new(Vec::new()),
+            cmi_longident_names: RefCell::new(std::collections::HashMap::new()),
+            next_cmi_longident_idx: Cell::new(0xF000_0000),
+        }
+    }
+
+    /// Intern a CMI longident component and return a synthetic StrIdx.
+    pub fn intern_cmi_longident_name(&self, name: &str) -> StrIdx {
+        let raw = self.next_cmi_longident_idx.get();
+        self.next_cmi_longident_idx.set(raw.wrapping_add(1));
+        self.cmi_longident_names
+            .borrow_mut()
+            .insert(raw, name.to_string());
+        StrIdx::from_raw(raw)
+    }
+
+    /// Resolve a Longident component StrIdx to string, checking CMI synthetic
+    /// indices first and falling back to the parse arena interner.
+    pub fn resolve_longident_component(
+        &self,
+        arena: &crate::parse_arena::ParseArena,
+        idx: StrIdx,
+    ) -> String {
+        self.cmi_longident_names
+            .borrow()
+            .get(&idx.raw())
+            .cloned()
+            .unwrap_or_else(|| arena.get_string(idx).to_string())
+    }
+
+    /// Register a type declaration for type alias expansion.
+    /// Called when loading module signatures from CMI files.
+    pub fn register_type_decl(&self, name: &str, decl: super::decl::TypeDeclaration) {
+        self.type_decl_store
+            .borrow_mut()
+            .insert(name.to_string(), decl);
+    }
+
+    /// Register a type declaration by ident stamp for alias expansion.
+    pub fn register_type_decl_by_stamp(&self, stamp: i32, decl: super::decl::TypeDeclaration) {
+        self.type_decl_by_stamp.borrow_mut().insert(stamp, decl);
+    }
+
+    /// Look up a type declaration by name from the global store.
+    pub fn find_type_decl(
+        &self,
+        name: &str,
+    ) -> Option<std::cell::Ref<'_, super::decl::TypeDeclaration>> {
+        let store = self.type_decl_store.borrow();
+        if store.contains_key(name) {
+            Some(std::cell::Ref::map(store, |s| s.get(name).unwrap()))
+        } else {
+            None
+        }
+    }
+
+    /// Look up a type declaration by stamp from the global store.
+    pub fn find_type_decl_by_stamp(
+        &self,
+        stamp: i32,
+    ) -> Option<std::cell::Ref<'_, super::decl::TypeDeclaration>> {
+        let store = self.type_decl_by_stamp.borrow();
+        if store.contains_key(&stamp) {
+            Some(std::cell::Ref::map(store, |s| s.get(&stamp).unwrap()))
+        } else {
+            None
+        }
+    }
+
+    /// Register a type declaration by full qualified path string for alias expansion.
+    pub fn register_type_decl_by_path(&self, path: &str, decl: super::decl::TypeDeclaration) {
+        self.type_decl_by_path
+            .borrow_mut()
+            .insert(path.to_string(), decl);
+    }
+
+    /// Set load paths for resolving CMI files.
+    pub fn set_load_paths(&self, paths: Vec<std::path::PathBuf>) {
+        *self.load_paths.borrow_mut() = paths;
+    }
+
+    /// Get the load paths.
+    pub fn load_paths(&self) -> std::cell::Ref<'_, Vec<std::path::PathBuf>> {
+        self.load_paths.borrow()
+    }
+
+    /// Look up a type declaration by full qualified path string.
+    pub fn find_type_decl_by_path(
+        &self,
+        path: &str,
+    ) -> Option<std::cell::Ref<'_, super::decl::TypeDeclaration>> {
+        let store = self.type_decl_by_path.borrow();
+        if store.contains_key(path) {
+            Some(std::cell::Ref::map(store, |s| s.get(path).unwrap()))
+        } else {
+            None
         }
     }
 
@@ -135,6 +282,11 @@ impl<'a> TypeContext<'a> {
         TypeExprRef(idx)
     }
 
+    /// Create a new type at a specific level.
+    pub fn alloc_type_at_level(&self, desc: TypeDesc, level: i32) -> TypeExprRef {
+        self.alloc_type(desc, level)
+    }
+
     /// Create a new type at the current level.
     pub fn new_type(&self, desc: TypeDesc) -> TypeExprRef {
         self.alloc_type(desc, self.current_level.get())
@@ -148,6 +300,11 @@ impl<'a> TypeContext<'a> {
     /// Create a new type variable.
     pub fn new_var(&self, name: Option<String>) -> TypeExprRef {
         self.new_type(TypeDesc::Tvar(name))
+    }
+
+    /// Create a new type variable at the global level.
+    pub fn new_global_var(&self, name: Option<String>) -> TypeExprRef {
+        self.alloc_type(TypeDesc::Tvar(name), self.global_level.get())
     }
 
     /// Create a new generic type variable.
@@ -186,6 +343,29 @@ impl<'a> TypeContext<'a> {
     pub fn new_constr(&self, path: Path, args: Vec<TypeExprRef>) -> TypeExprRef {
         let abbrev = self.alloc_abbrev(AbbrevMemo::Mnil);
         self.new_type(TypeDesc::Tconstr { path, args, abbrev })
+    }
+
+    /// Create a type constructor at generic level (for type schemes).
+    pub fn new_generic_constr(&self, path: Path, args: Vec<TypeExprRef>) -> TypeExprRef {
+        let abbrev = self.alloc_abbrev(AbbrevMemo::Mnil);
+        self.new_generic_type(TypeDesc::Tconstr { path, args, abbrev })
+    }
+
+    /// Create an arrow type at generic level (for type schemes).
+    pub fn new_generic_arrow(
+        &self,
+        arg_label: ArgLabel,
+        arg_type: TypeExprRef,
+        ret_type: TypeExprRef,
+        arity: Option<i32>,
+    ) -> TypeExprRef {
+        let commutable = self.alloc_commutable(Commutable::Cok);
+        self.new_generic_type(TypeDesc::Tarrow {
+            arg: TypeArg::new(arg_label, arg_type),
+            ret: ret_type,
+            commutable: Commutable::Clink(commutable),
+            arity,
+        })
     }
 
     /// Create a link type (for unification).
@@ -228,6 +408,11 @@ impl<'a> TypeContext<'a> {
         self.with_type(r, |ty| ty.level())
     }
 
+    /// Number of allocated type expressions.
+    pub fn type_expr_count(&self) -> usize {
+        self.types.borrow().len()
+    }
+
     /// Set the level of a type.
     pub fn set_level(&self, r: TypeExprRef, level: i32) {
         self.with_type(r, |ty| ty.set_level(level));
@@ -239,8 +424,48 @@ impl<'a> TypeContext<'a> {
     }
 
     // ========================================================================
+    // Simple Abbreviations (cross-instance sharing for nullary Tconstr)
+    // ========================================================================
+
+    /// OCaml's check_abbrev_env: clear abbreviation cache when environment changes.
+    /// This prevents stale abbreviations from causing incorrect cross-instance sharing.
+    pub fn check_abbrev_env(&self, env: &crate::types::env::Env) {
+        let env_id = env.id();
+        if env_id != self.previous_env_id.get() {
+            self.clear_simple_abbrevs();
+            self.previous_env_id.set(env_id);
+        }
+    }
+
+    /// Record a nullary Tconstr expansion for cross-instance sharing.
+    /// Matches OCaml's memorize_abbrev into simple_abbrevs.
+    pub fn memorize_simple_abbrev(&self, path: Path, ty: TypeExprRef) {
+        // OCaml stores abbreviations as an Mcons stack; later entries shadow
+        // earlier ones for the same path during find_repr.
+        let path = Self::canonicalize_simple_abbrev_path(&path);
+        self.simple_abbrevs.borrow_mut().insert(path, ty);
+    }
+
+    /// Look up a previously-expanded nullary Tconstr by path identity.
+    /// Matches OCaml's find_repr on simple_abbrevs.
+    pub fn find_simple_abbrev(&self, path: &Path) -> Option<TypeExprRef> {
+        let path = Self::canonicalize_simple_abbrev_path(path);
+        self.simple_abbrevs.borrow().get(&path).copied()
+    }
+
+    /// Clear simple abbreviations. Called during generalize/generalize_structure.
+    pub fn clear_simple_abbrevs(&self) {
+        self.simple_abbrevs.borrow_mut().clear();
+    }
+
+    // ========================================================================
     // Abbreviation Memos
     // ========================================================================
+
+    /// Allocate an abbreviation memo (Mnil).
+    pub fn alloc_abbrev_nil(&self) -> AbbrevMemoRef {
+        self.alloc_abbrev(AbbrevMemo::Mnil)
+    }
 
     /// Allocate an abbreviation memo.
     fn alloc_abbrev(&self, memo: AbbrevMemo) -> AbbrevMemoRef {

@@ -51,16 +51,6 @@ Performance engineering of the Rust parser to achieve best-in-class speed. 4-tie
 | [RALPH_PROMPT.md](./parser-performance-engineering/RALPH_PROMPT.md) | Agent loop instructions for performance optimization |
 | [RALPH_TODO.md](./parser-performance-engineering/RALPH_TODO.md) | Agent task tracking for performance optimization |
 
-### [parser-strict-side-tables](./parser-strict-side-tables/)
-
-Strict migration of parser AST sparse/attribute storage: remove remaining inline AST attributes and eliminate location-based stash/pending flows in favor of immediate owner-index side-table writes.
-
-| Document | Description |
-|----------|-------------|
-| [PLAN.md](./parser-strict-side-tables/PLAN.md) | End-to-end phased plan for strict side-table architecture |
-| [INVENTORY.md](./parser-strict-side-tables/INVENTORY.md) | Baseline inventory of inline attribute carriers and stash/pending usage |
-| [PROGRESS.md](./parser-strict-side-tables/PROGRESS.md) | Milestone tracker and execution log |
-
 ### [printer-parity](./printer-parity/)
 
 Achieve byte-for-byte identical printer/formatter output between Rust and OCaml. Covers the AST printer, OCaml Format module compatibility, and roundtrip idempotence. Currently at 423/506 syntax tests passing (83%).

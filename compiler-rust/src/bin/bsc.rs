@@ -12,12 +12,65 @@ use anyhow::{Context, Result, anyhow};
 use rescript_compiler::binary_ast::{
     ppx, write_signature_ast_current, write_structure_ast_current,
 };
-use rescript_compiler::driver::{CompilerOptions, compile_file_to_js_with_options};
+use rescript_compiler::driver::{
+    CompilerOptions, compile_file_to_js_with_options, typecheck_interface_file,
+};
 use rescript_compiler::parser::{Parser, module, sexp_locs};
 use std::env;
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
+
+/// Auto-detect the runtime path based on the executable's location.
+/// Mirrors OCaml's runtime_package.ml default_path logic.
+fn default_runtime_path() -> Option<PathBuf> {
+    let exe = env::current_exe().ok()?;
+    let dir = exe.parent()?;
+    let components: Vec<_> = dir.components().collect();
+    let len = components.len();
+
+    if len < 4 {
+        return None;
+    }
+
+    // Check case 1: npm installation
+    // bin: node_modules/@rescript/{platform}/bin
+    // runtime: node_modules/@rescript/runtime
+    let last = components[len - 1].as_os_str().to_str().unwrap_or("");
+    let third = components[len - 3].as_os_str().to_str().unwrap_or("");
+    let fourth = components[len - 4].as_os_str().to_str().unwrap_or("");
+
+    if last == "bin" && third == "@rescript" && fourth == "node_modules" {
+        let base: PathBuf = components[..len - 4].iter().collect();
+        let runtime = base
+            .join("node_modules")
+            .join("@rescript")
+            .join("runtime");
+        if runtime.exists() {
+            return Some(runtime);
+        }
+    }
+
+    // Case 2: local development — walk up from exe dir looking for packages/@rescript/runtime.
+    // This handles various layouts:
+    //   OCaml: _build/install/default/bin/bsc (4 levels)
+    //   Rust:  compiler-rust/target/release/bsc (3 levels)
+    let mut search_dir = dir.to_path_buf();
+    for _ in 0..6 {
+        let runtime = search_dir
+            .join("packages")
+            .join("@rescript")
+            .join("runtime");
+        if runtime.exists() {
+            return Some(runtime);
+        }
+        if !search_dir.pop() {
+            break;
+        }
+    }
+
+    None
+}
 
 #[derive(Default, Debug)]
 struct Options {
@@ -33,13 +86,25 @@ struct Options {
     namespace: Option<String>,
     module_name: Option<String>,
     input: Option<PathBuf>,
+    include_paths: Vec<PathBuf>,
+    runtime_path: Option<PathBuf>,
 }
 
 fn main() {
-    if let Err(err) = run() {
-        eprintln!("{err}");
-        std::process::exit(1);
-    }
+    // Spawn the compiler in a thread with a large stack to avoid stack overflow
+    // on deeply nested type structures in CMI files
+    let builder = std::thread::Builder::new()
+        .name("compiler".into())
+        .stack_size(512 * 1024 * 1024); // 512MB
+    
+    let handler = builder.spawn(|| {
+        if let Err(err) = run() {
+            eprintln!("{err}");
+            std::process::exit(1);
+        }
+    }).expect("Failed to spawn compiler thread");
+    
+    handler.join().expect("Compiler thread panicked");
 }
 
 fn run() -> Result<()> {
@@ -81,25 +146,36 @@ fn run() -> Result<()> {
                         opts.input = Some(PathBuf::from(val));
                     }
                 }
-                "-I"
-                | "-open"
-                | "-absname"
+                "-I" => {
+                    if let Some(val) = args.next() {
+                        opts.include_paths.push(PathBuf::from(val));
+                    }
+                }
+                "-runtime-path" => {
+                    if let Some(val) = args.next() {
+                        opts.runtime_path = Some(PathBuf::from(val));
+                    }
+                }
+                "-open"
                 | "-w"
                 | "-warn-error"
                 | "-color"
                 | "-bs-package-name"
-                | "-bs-read-cmi"
                 | "-pp"
                 | "-ppx"
-                | "-ppxopt"
+                | "-ppxopt" => {
+                    // Consume the next argument if present (value flags).
+                    let _ = args.next();
+                }
+                "-absname"
+                | "-bs-read-cmi"
                 | "-no-alias-deps"
                 | "-bs-no-implicit-stdlib"
                 | "-unsafe"
                 | "-bs-super-errors"
                 | "-bs-stop-after-cmj"
                 | "-bs-no-check-cmi" => {
-                    // Consume the next argument if present (value flags).
-                    let _ = args.next();
+                    // Boolean flags - no argument to consume
                 }
                 _ => {
                     // Unknown flag: ignore, but if it looks like a value flag, try to skip.
@@ -119,11 +195,20 @@ fn run() -> Result<()> {
         return generate_ast(&input, opts.output, opts.dump_parsetree_sexp_locs);
     }
 
-    let source_path = if input.extension().and_then(|s| s.to_str()) == Some("ast") {
+    let ext = input.extension().and_then(|s| s.to_str()).unwrap_or("");
+    let source_path = if ext == "ast" || ext == "iast" {
         read_ast_source_path(&input)?
     } else {
         input
     };
+
+    let is_interface = source_path
+        .extension()
+        .and_then(|s| s.to_str())
+        .is_some_and(|ext| ext == "resi" || ext == "mli");
+
+    // Auto-detect runtime path if not explicitly provided
+    let runtime_path = opts.runtime_path.clone().or_else(default_runtime_path);
 
     let compiler_opts = CompilerOptions {
         dump_lambda: opts.dump_lambda,
@@ -131,9 +216,18 @@ fn run() -> Result<()> {
         dump_typed_sexp_locs: opts.dump_typed_sexp_locs,
         dump_lambda_sexp: opts.dump_lambda_sexp,
         dump_lambda_sexp_locs: opts.dump_lambda_sexp_locs,
+        include_paths: opts.include_paths.clone(),
+        runtime_path,
     };
-    let js = compile_file_to_js_with_options(&source_path, &compiler_opts)?;
-    write_outputs(&source_path, &js, &opts)
+
+    if is_interface {
+        // Interface files (.resi) don't produce JS output
+        typecheck_interface_file(&source_path, &compiler_opts)?;
+        Ok(())
+    } else {
+        let js = compile_file_to_js_with_options(&source_path, &compiler_opts)?;
+        write_outputs(&source_path, &js, &opts)
+    }
 }
 
 fn generate_ast(

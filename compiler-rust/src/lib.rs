@@ -40,6 +40,8 @@
 pub mod arena;
 pub mod binary_ast;
 pub mod cache;
+/// CMI file loading infrastructure.
+pub mod cmi;
 pub mod config;
 pub mod context;
 pub mod diagnostics;

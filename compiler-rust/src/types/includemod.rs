@@ -628,6 +628,7 @@ mod tests {
                     type_immediate: false,
                     type_unboxed: UnboxedStatus::FALSE_FALSE,
                     type_inlined_types: vec![],
+                    type_path: None,
                 },
                 RecStatus::TrecNot,
             ),

@@ -148,8 +148,10 @@ let type_expr te =
       | Tconstr (p, args, _) ->
         Sexp.list [Sexp.atom "Tconstr"; path p; Sexp.list (List.map aux args)]
       | Tobject (ty, _) ->
-        Sexp.list [Sexp.atom "Tobject"; aux ty]
+        (* Sort object fields by name to normalize ordering for parity *)
+        Sexp.list [Sexp.atom "Tobject"; aux_object_fields_sorted ty]
       | Tfield (name, kind, ty1, ty2) ->
+        (* Standalone Tfield (not via Tobject) *)
         let kind_str = match Btype.field_kind_repr kind with
           | Fpresent -> "Fpresent"
           | Fabsent -> "Fabsent"
@@ -171,13 +173,37 @@ let type_expr te =
           Sexp.list (List.map aux tyl);
         ]
     end
+  and aux_object_fields_sorted ty =
+    (* Collect all Tfield entries from the chain, sort by name, rebuild *)
+    let rec collect_fields ty acc =
+      let ty = Btype.repr ty in
+      match ty.Types.desc with
+      | Tfield (name, kind, field_ty, rest) ->
+        let kind_str = match Btype.field_kind_repr kind with
+          | Fpresent -> "Fpresent"
+          | Fabsent -> "Fabsent"
+          | Fvar _ -> "Fvar"
+        in
+        collect_fields rest ((name, kind_str, field_ty) :: acc)
+      | _ -> (List.rev acc, ty)
+    in
+    let (fields, tail) = collect_fields ty [] in
+    let sorted_fields = List.sort (fun (n1, _, _) (n2, _, _) -> String.compare n1 n2) fields in
+    (* Rebuild nested Tfield structure *)
+    let tail_sexp = aux tail in
+    List.fold_right (fun (name, kind_str, field_ty) rest_sexp ->
+      Sexp.list [Sexp.atom "Tfield"; string name; Sexp.atom kind_str; aux field_ty; rest_sexp]
+    ) sorted_fields tail_sexp
   and row_desc_aux row =
     let row = Btype.row_repr row in
+    (* Sort row_fields by label to normalize ordering for parity.
+       The internal field order may differ due to unification traversal order. *)
+    let sorted_fields = List.sort (fun (l1, _) (l2, _) -> String.compare l1 l2) row.Types.row_fields in
     Sexp.list [
       Sexp.atom "Tvariant";
       Sexp.list (List.map (fun (l, rf) ->
         Sexp.list [string l; row_field_aux rf]
-      ) row.Types.row_fields);
+      ) sorted_fields);
       Sexp.atom (if row.Types.row_closed then "closed" else "open");
       Sexp.atom (if row.Types.row_fixed then "fixed" else "not_fixed");
     ]

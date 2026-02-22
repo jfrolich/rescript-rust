@@ -83,6 +83,9 @@ pub struct TypeDeclaration {
     pub type_unboxed: UnboxedStatus,
     /// Inlined types (for record printing)
     pub type_inlined_types: Vec<TypeInlinedType>,
+    /// Qualified path for this type (e.g., Pdot(Pident "Pervasives") "ref").
+    /// Set when loading types from modules; None for locally defined types.
+    pub type_path: Option<super::path::Path>,
 }
 
 /// An inlined type representation.
@@ -381,6 +384,9 @@ pub struct ModuleDeclaration {
     pub md_attributes: Vec<Attribute>,
     /// Source location
     pub md_loc: Location,
+    /// Qualified path for this module when accessed through an opened parent.
+    /// E.g., Pdot(Pident "Stdlib") "Console" for Console from opened Stdlib.
+    pub md_path: Option<super::path::Path>,
 }
 
 /// A module type declaration.

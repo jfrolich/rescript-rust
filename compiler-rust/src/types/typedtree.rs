@@ -20,9 +20,10 @@
 use crate::ident::Ident;
 use crate::parse_arena::{LidentIdx, LocIdx, Located};
 use crate::parser::ast::{
-    ArgLabel, Arity, Attributes, ClosedFlag, DirectionFlag, MutableFlag, OverrideFlag, PrivateFlag,
-    RecFlag,
+    ArgLabel as ParserArgLabel, Arity, Attributes, ClosedFlag, DirectionFlag, MutableFlag,
+    OverrideFlag, PrivateFlag, RecFlag,
 };
+use crate::types::asttypes::ArgLabel as TypeArgLabel;
 use crate::types::{
     ConstructorDescription, LabelDescription, Path, RowDesc, TypeExprRef, ValueDescription,
 };
@@ -37,8 +38,8 @@ pub type Loc<T> = Located<T>;
 /// Typed constants (internal representation after parsing).
 #[derive(Debug, Clone, PartialEq)]
 pub enum Constant {
-    /// Integer constant.
-    Int(i32),
+    /// Integer constant (matches OCaml's native int, 63-bit on 64-bit systems).
+    Int(i64),
     /// Character constant (Unicode codepoint).
     Char(i32),
     /// String constant with optional delimiter.
@@ -162,9 +163,8 @@ pub struct Expression {
 pub enum ExpExtra {
     /// Type constraint: `E : T`.
     Texp_constraint(TypedCoreType),
-    /// Coercion: `(E : T1 :> T2)` or `(E :> T)`.
-    /// First is optional source type, second is required target type.
-    Texp_coerce(Option<TypedCoreType>, TypedCoreType),
+    /// Coercion: `(E :> T)`.
+    Texp_coerce(TypedCoreType),
     /// Open: `let open M in E`.
     Texp_open(OverrideFlag, Path, Loc<LidentIdx>, EnvRef),
     /// Newtype: `fun (type t) -> E`.
@@ -222,9 +222,9 @@ pub enum ExpressionDesc {
     Texp_variant(String, Option<Box<Expression>>),
 
     /// Record: `{l1: E1, ..., ln: En}` or `{...E0, l1: E1, ...}`.
-    /// Fields are (lid, label_desc, definition).
+    /// Fields are (lid, label_desc, definition, optional).
     Texp_record {
-        fields: Vec<(Loc<LidentIdx>, LabelDescription, RecordLabelDefinition)>,
+        fields: Vec<(Loc<LidentIdx>, LabelDescription, RecordLabelDefinition, bool)>,
         extended_expression: Option<Box<Expression>>,
     },
 
@@ -262,7 +262,7 @@ pub enum ExpressionDesc {
     ),
 
     /// Send: `E#m` (object method call).
-    Texp_send(Box<Expression>, MethKind),
+    Texp_send(Box<Expression>, MethKind, Option<Box<Expression>>),
 
     /// Let module: `let module M = ME in E`.
     Texp_letmodule(Ident, Loc<String>, Box<ModuleExpr>, Box<Expression>),
@@ -275,6 +275,9 @@ pub enum ExpressionDesc {
 
     /// Pack: `(module M : MT)`.
     Texp_pack(Box<ModuleExpr>),
+
+    /// Extension constructor: `[%extension_constructor C]`.
+    Texp_extension_constructor(Loc<LidentIdx>, Path),
 }
 
 // DirectionFlag and Arity are re-exported from parser::ast
@@ -301,16 +304,16 @@ pub enum RecordLabelDefinition {
 #[derive(Debug, Clone)]
 pub struct ApplyArg {
     /// Argument label.
-    pub label: ArgLabel,
-    /// Argument expression.
-    pub expression: Expression,
+    pub label: TypeArgLabel,
+    /// Argument expression, or None for omitted labeled arguments.
+    pub expression: Option<Expression>,
 }
 
 /// A function parameter.
 #[derive(Debug, Clone)]
 pub struct FunctionParam {
     /// Parameter label.
-    pub label: ArgLabel,
+    pub label: ParserArgLabel,
     /// Default value for optional parameter.
     pub default: Option<Box<Expression>>,
     /// Parameter pattern.
@@ -380,7 +383,7 @@ pub struct ArrowArg {
     /// Attributes on the argument.
     pub attrs: Attributes,
     /// Argument label.
-    pub lbl: ArgLabel,
+    pub lbl: TypeArgLabel,
     /// Argument type (boxed to prevent infinite size).
     pub typ: Box<TypedCoreType>,
 }
@@ -501,18 +504,102 @@ pub enum ModuleExprDesc {
     Tmod_unpack(Expression, ModuleType),
 }
 
-/// Module type (placeholder - full definition in decl.rs).
-#[derive(Debug, Clone, Default)]
+/// Module type (matches OCaml's `Typedtree.module_type`).
+#[derive(Debug, Clone)]
 pub struct ModuleType {
-    // Placeholder - actual module type comes from decl.rs
-    _placeholder: (),
+    /// Module type description.
+    pub mty_desc: ModuleTypeDesc,
+    /// Location.
+    pub mty_loc: LocIdx,
+    /// Attributes.
+    pub mty_attributes: Attributes,
 }
 
 impl ModuleType {
-    /// Create a new placeholder module type.
+    /// Create a new placeholder module type (for backwards compat during incremental implementation).
     pub fn placeholder() -> Self {
-        Self { _placeholder: () }
+        Self {
+            mty_desc: ModuleTypeDesc::Tmty_placeholder,
+            mty_loc: LocIdx(0),
+            mty_attributes: vec![],
+        }
     }
+}
+
+/// Module type description (matches OCaml's `Typedtree.module_type_desc`).
+#[derive(Debug, Clone)]
+pub enum ModuleTypeDesc {
+    /// Named module type: `S` or `M.S`.
+    Tmty_ident(Path, Loc<LidentIdx>),
+    /// Signature: `sig ... end` / `{ ... }`.
+    Tmty_signature(TypedSignature),
+    /// Functor type: `functor (X : MT1) -> MT2`.
+    Tmty_functor(Ident, Loc<String>, Option<Box<ModuleType>>, Box<ModuleType>),
+    /// With constraint: `MT with ...`.
+    Tmty_with(Box<ModuleType>, Vec<(Path, Loc<LidentIdx>, WithConstraint)>),
+    /// Typeof: `module type of ME`.
+    Tmty_typeof(Box<ModuleExpr>),
+    /// Alias: `(module M)`.
+    Tmty_alias(Path, Loc<LidentIdx>),
+    /// Placeholder for incremental implementation.
+    Tmty_placeholder,
+}
+
+/// With constraint (matches OCaml's `Typedtree.with_constraint`).
+#[derive(Debug, Clone)]
+pub enum WithConstraint {
+    Twith_type(TypedTypeDeclaration),
+    Twith_module(Path, Loc<LidentIdx>),
+    Twith_typesubst(TypedTypeDeclaration),
+    Twith_modsubst(Path, Loc<LidentIdx>),
+}
+
+/// Typed signature (matches OCaml's `Typedtree.signature`).
+#[derive(Debug, Clone)]
+pub struct TypedSignature {
+    pub sig_items: Vec<TypedSignatureItem>,
+}
+
+/// Typed signature item (matches OCaml's `Typedtree.signature_item`).
+#[derive(Debug, Clone)]
+pub struct TypedSignatureItem {
+    pub sig_desc: TypedSignatureItemDesc,
+    pub sig_env: EnvRef,
+    pub sig_loc: LocIdx,
+}
+
+/// Typed signature item description (matches OCaml's `Typedtree.signature_item_desc`).
+#[derive(Debug, Clone)]
+pub enum TypedSignatureItemDesc {
+    Tsig_value(TypedValueDescription),
+    Tsig_type(RecFlag, Vec<TypedTypeDeclaration>),
+    Tsig_typext(TypeExtension),
+    Tsig_exception(ExtensionConstructor),
+    Tsig_module(TypedModuleDeclaration),
+    Tsig_recmodule(Vec<TypedModuleDeclaration>),
+    Tsig_modtype(ModuleTypeDeclaration),
+    Tsig_open(OpenDeclaration),
+    Tsig_include(IncludeDescription),
+    Tsig_attribute(crate::parser::ast::Attribute),
+}
+
+/// Typed module declaration (matches OCaml's `Typedtree.module_declaration`).
+#[derive(Debug, Clone)]
+pub struct TypedModuleDeclaration {
+    pub md_id: Ident,
+    pub md_name: Loc<String>,
+    pub md_type: ModuleType,
+    pub md_attributes: Attributes,
+    pub md_loc: LocIdx,
+}
+
+/// Include description (for signatures, matches OCaml's `Typedtree.include_description`).
+#[derive(Debug, Clone)]
+pub struct IncludeDescription {
+    pub incl_mod: ModuleType,
+    pub incl_type: Vec<SignatureItem>,
+    pub incl_attributes: Attributes,
+    pub incl_loc: LocIdx,
 }
 
 /// Module type constraint.
@@ -585,7 +672,7 @@ pub enum StructureItemDesc {
     /// Value binding: `let P = E`.
     Tstr_value(RecFlag, Vec<ValueBinding>),
     /// Primitive declaration: `external f : t = "..."`.
-    Tstr_primitive(ValueDescription),
+    Tstr_primitive(TypedValueDescription),
     /// Type declaration: `type t = ...`.
     Tstr_type(RecFlag, Vec<TypedTypeDeclaration>),
     /// Type extension: `type t += ...`.
@@ -745,19 +832,19 @@ pub struct ModuleTypeDeclaration {
     pub mtd_loc: LocIdx,
 }
 
-/// An open declaration.
+/// An open description (matches OCaml's `open_description`).
 #[derive(Debug, Clone)]
 pub struct OpenDeclaration {
-    /// Opened module expression.
-    pub open_expr: ModuleExpr,
+    /// Resolved module path.
+    pub open_path: Path,
+    /// Original longident as written.
+    pub open_txt: Located<LidentIdx>,
     /// Open override flag.
     pub open_override: OverrideFlag,
-    /// Environment after open.
-    pub open_env: EnvRef,
-    /// Attributes.
-    pub open_attributes: Attributes,
     /// Location.
     pub open_loc: LocIdx,
+    /// Attributes.
+    pub open_attributes: Attributes,
 }
 
 /// An include declaration.
@@ -771,6 +858,24 @@ pub struct IncludeDeclaration {
     pub incl_attributes: Attributes,
     /// Location.
     pub incl_loc: LocIdx,
+}
+
+/// Typed value description (for `external` declarations).
+/// Matches OCaml's `Typedtree.value_description`.
+#[derive(Debug, Clone)]
+pub struct TypedValueDescription {
+    /// Identifier.
+    pub val_id: Ident,
+    /// Name with location.
+    pub val_name: Loc<String>,
+    /// Typed core type (the annotated type).
+    pub val_desc: TypedCoreType,
+    /// Primitive names.
+    pub val_prim: Vec<String>,
+    /// Location.
+    pub val_loc: LocIdx,
+    /// Attributes.
+    pub val_attributes: Attributes,
 }
 
 /// Signature item (placeholder).
@@ -801,7 +906,7 @@ pub struct ExtensionConstructor {
 #[derive(Debug, Clone)]
 pub enum ExtensionConstructorKind {
     /// Declaration with argument types and optional result type.
-    Text_decl(Vec<ConstructorArgument>, Option<TypedCoreType>),
+    Text_decl(ConstructorArgument, Option<TypedCoreType>),
     /// Rebind to another constructor.
     Text_rebind(Path, Loc<LidentIdx>),
 }
@@ -824,6 +929,8 @@ pub struct LabelDeclaration {
     pub ld_name: Loc<String>,
     /// Whether the label is mutable.
     pub ld_mutable: MutableFlag,
+    /// Whether the label is optional.
+    pub ld_optional: bool,
     /// Label type.
     pub ld_type: TypedCoreType,
     /// Location.
@@ -914,11 +1021,11 @@ impl Case {
 
 impl ValueBinding {
     /// Create a new value binding.
-    pub fn new(pat: Pattern, expr: Expression, loc: LocIdx) -> Self {
+    pub fn new(pat: Pattern, expr: Expression, loc: LocIdx, attributes: Attributes) -> Self {
         ValueBinding {
             vb_pat: pat,
             vb_expr: expr,
-            vb_attributes: Attributes::new(),
+            vb_attributes: attributes,
             vb_loc: loc,
         }
     }

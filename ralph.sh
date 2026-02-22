@@ -2,10 +2,10 @@
 
 # Ralph Loop Runner with Inline Dashboard
 # Usage: ./ralph.sh [PROMPT_FILE] [--agent claude|codex]
-# Default prompt: RALPH_PROMPT.md
+# Default prompt: projects/typedtree-parity/RALPH_PROMPT.md
 # Default agent: claude (or RALPH_AGENT env var)
 
-PROMPT_FILE="RALPH_PROMPT.md"
+PROMPT_FILE="projects/typedtree-parity/RALPH_PROMPT.md"
 AGENT="${RALPH_AGENT:-claude}"
 OUTPUT_FILE="/tmp/ralph_output.txt"
 OUTPUT_JSON_FILE="/tmp/ralph_output.jsonl"
@@ -23,9 +23,9 @@ Usage: ./ralph.sh [PROMPT_FILE] [--agent claude|codex]
 
 Examples:
   ./ralph.sh
-  ./ralph.sh projects/parser-parity/RALPH_PROMPT.md
-  ./ralph.sh projects/parser-parity/RALPH_PROMPT.md --agent codex
-  RALPH_AGENT=codex ./ralph.sh projects/printer-parity/RALPH_PROMPT.md
+  ./ralph.sh projects/typedtree-parity/RALPH_PROMPT.md
+  ./ralph.sh projects/typedtree-parity/RALPH_PROMPT.md --agent codex
+  RALPH_AGENT=codex ./ralph.sh projects/typedtree-parity/RALPH_PROMPT.md
 USAGE
 }
 
@@ -105,6 +105,66 @@ build_prompt_input() {
     echo ""
     cat "$PROMPT_FILE"
   }
+}
+
+is_control_token_emitted() {
+  local token="$1"
+  if [[ ! -f "$OUTPUT_FILE" ]]; then
+    return 1
+  fi
+
+  grep -Eq "^[[:space:]]*${token}[[:space:]]*$" "$OUTPUT_FILE"
+}
+
+project_requires_typedtree_parity_gate() {
+  [[ "$PROJECT_DIR" == *"typedtree-parity"* ]]
+}
+
+verify_typedtree_full_parity() {
+  local parity_output
+  local clean_output
+  local total
+  local rust_pass
+  local rust_fail
+  local parity_pass
+  local parity_fail
+
+  echo ""
+  echo "🔎 Verifying typedtree parity before accepting RALPH_COMPLETE..."
+
+  if ! parity_output=$(timeout 600 ./scripts/test_typedtree_parity.sh --with-locs --parallel 1 2>&1); then
+    echo "Typedtree parity gate failed to run cleanly; completion denied."
+    echo "$parity_output" | tail -40
+    return 1
+  fi
+
+  clean_output=$(printf '%s\n' "$parity_output" | sed -E $'s/\x1B\\[[0-9;]*[mK]//g')
+  read -r rust_pass rust_fail <<<"$(printf '%s\n' "$clean_output" | sed -nE 's/^Rust bsc:[[:space:]]*([0-9]+) passed,[[:space:]]*([0-9]+) failed$/\1 \2/p' | tail -1)"
+  read -r parity_pass parity_fail <<<"$(printf '%s\n' "$clean_output" | sed -nE 's/^Parity:[[:space:]]*([0-9]+) passed,[[:space:]]*([0-9]+) failed$/\1 \2/p' | tail -1)"
+  if [[ -n "$rust_pass" && -n "$rust_fail" ]]; then
+    total=$((rust_pass + rust_fail))
+  fi
+
+  if [[ -z "$total" || -z "$rust_pass" || -z "$rust_fail" || -z "$parity_pass" || -z "$parity_fail" ]]; then
+    echo "Typedtree parity gate could not parse summary output; completion denied."
+    echo "$clean_output" | tail -40
+    return 1
+  fi
+
+  if [[ $((parity_pass + parity_fail)) -ne "$total" ]]; then
+    echo "Typedtree parity gate found inconsistent totals; completion denied."
+    echo "$clean_output" | tail -40
+    return 1
+  fi
+
+  echo "Typedtree parity summary: Rust ${rust_pass}/${total} (fail ${rust_fail}), Parity ${parity_pass}/${total} (fail ${parity_fail})"
+
+  if [[ "$rust_fail" -eq 0 && "$parity_fail" -eq 0 && "$rust_pass" -eq "$total" && "$parity_pass" -eq "$total" ]]; then
+    return 0
+  fi
+
+  echo "Typedtree parity is below 100%; ignoring RALPH_COMPLETE and continuing."
+  return 1
 }
 
 render_claude_stream_line() {
@@ -347,7 +407,12 @@ while true; do
   echo "─── End of Iteration $ITERATION ───────────────────────────────────────"
 
   # Check for completion
-  if has_control_token "RALPH_COMPLETE"; then
+  if is_control_token_emitted "RALPH_COMPLETE"; then
+    if project_requires_typedtree_parity_gate && ! verify_typedtree_full_parity; then
+      RATE_LIMIT_STREAK=0
+      sleep "$DEFAULT_SLEEP_SECONDS"
+      continue
+    fi
     echo ""
     echo "╔══════════════════════════════════════════════════════════════════════╗"
     echo "║  🎉 RALPH_COMPLETE - Finished after $ITERATION iterations!            ║"
@@ -356,7 +421,7 @@ while true; do
   fi
 
   # Check for blocked state
-  if has_control_token "RALPH_BLOCKED"; then
+  if is_control_token_emitted "RALPH_BLOCKED"; then
     echo ""
     echo "╔══════════════════════════════════════════════════════════════════════╗"
     echo "║  ⚠️  RALPH_BLOCKED - Needs human intervention                        ║"
@@ -364,8 +429,9 @@ while true; do
     exit 1
   fi
 
-  # Back off when the selected agent reports account/request limits to avoid hammering the API.
-  if grep -Eiq "you.?ve hit your limit|hit your limit|rate limit|rate_limit|too many requests|\\b429\\b|quota exceeded" "$OUTPUT_FILE" "$OUTPUT_JSON_FILE"; then
+  # Back off only on high-confidence limit errors to avoid false positives from
+  # unrelated output (e.g. file line numbers like "429" or generic "rate limit" text).
+  if grep -Eiq "you.?ve hit your limit|hit your limit|rate[_[:space:]-]?limit (reached|exceeded)|too many requests|quota exceeded|insufficient[_[:space:]-]?quota|status( code)?[[:space:]]*429|http[[:space:]]*429" "$OUTPUT_FILE" "$OUTPUT_JSON_FILE"; then
     RATE_LIMIT_STREAK=$((RATE_LIMIT_STREAK + 1))
     BACKOFF_SECONDS=$((RATE_LIMIT_BASE_SLEEP_SECONDS * (2 ** (RATE_LIMIT_STREAK - 1))))
     if [[ $BACKOFF_SECONDS -gt $RATE_LIMIT_MAX_SLEEP_SECONDS ]]; then

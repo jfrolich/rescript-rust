@@ -77,8 +77,8 @@ pub use btype::{
 // ctype exports
 pub use ctype::{
     SubtypeContext, TypeError, TypePair, TypeResult, UnifyMode, UnifyState, copy_type, deep_occur,
-    function_arity, generalize, generalize_structure, instance, is_function, link_type, occurs,
-    split_arrow, tuple_elements, unify, update_level,
+    function_arity, generalize, generalize_structure, instance, instance_constructor, is_function,
+    link_type, occurs, split_arrow, tuple_elements, unify, update_level,
 };
 
 // env exports
@@ -97,7 +97,9 @@ pub use typedtree::{
 };
 
 // typemod exports
-pub use typemod::{TypeModError, TypeModResult, type_module_expr, type_structure};
+pub use typemod::{
+    TypeModError, TypeModResult, transl_signature, type_module_expr, type_structure,
+};
 
 // includemod exports
 pub use includemod::{

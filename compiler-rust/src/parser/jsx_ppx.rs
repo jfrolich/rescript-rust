@@ -953,9 +953,9 @@ fn transform_react_component_binding(
                 pvb_pat: arena.push_pat(Pattern {
                     ppat_desc: Box::new(PatternDesc::Ppat_var(Loc {
                         txt: fn_name_idx_binding,
-                        loc: original_binding_loc.clone(),
+                        loc: fn_name_loc.clone(),
                     })),
-                    ppat_loc: original_binding_loc,
+                    ppat_loc: fn_name_loc,
                     ppat_attributes: Attributes::new(),
                 }),
                 pvb_expr: arena.push_expr(outer_let),

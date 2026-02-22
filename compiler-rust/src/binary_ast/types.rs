@@ -136,28 +136,28 @@ impl Marshal for ExprIdx {
 impl Marshal for PatIdx {
     fn marshal(&self, w: &mut MarshalWriter<'_>) {
         let pat = w.get_arena().get_pat(*self).clone();
-        w.with_current_pat_idx(*self, |w| pat.marshal(w));
+        pat.marshal(w);
     }
 }
 
 impl Marshal for CoreTypeIdx {
     fn marshal(&self, w: &mut MarshalWriter<'_>) {
         let ct = w.get_arena().get_core_type(*self).clone();
-        w.with_current_core_type_idx(*self, |w| ct.marshal(w));
+        ct.marshal(w);
     }
 }
 
 impl Marshal for ModExprIdx {
     fn marshal(&self, w: &mut MarshalWriter<'_>) {
         let me = w.get_arena().get_mod_expr(*self).clone();
-        w.with_current_mod_expr_idx(*self, |w| me.marshal(w));
+        me.marshal(w);
     }
 }
 
 impl Marshal for ModTypeIdx {
     fn marshal(&self, w: &mut MarshalWriter<'_>) {
         let mt = w.get_arena().get_mod_type(*self).clone();
-        w.with_current_mod_type_idx(*self, |w| mt.marshal(w));
+        mt.marshal(w);
     }
 }
 
