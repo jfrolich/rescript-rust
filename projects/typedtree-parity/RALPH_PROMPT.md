@@ -2,14 +2,18 @@
 
 You are working on achieving **100% typedtree parity** between the Rust compiler and the OCaml reference implementation using `-dtyped-sexp-locs`.
 
-## Verified Baseline (2026-02-17)
+## Current Baseline (2026-02-22)
 
 - OCaml compile coverage: **657/657**
 - Rust compile coverage: **657/657**
-- Typedtree parity (`-dtyped-sexp-locs`): **612/657** (45 diffs)
+- Typedtree parity (`-dtyped-sexp-locs`): **607/657** (50 diffs)
 - Parser/binary parity guard is fully green
 
-This loop is currently stalled by process drift (docs-only revalidation and no unchecked tasks), not by lack of remaining work.
+**IMPORTANT: Read `RALPH_GUIDANCE.md` before starting work.** It contains:
+- Detailed root cause analysis of all 50 failures, categorized into 4 clusters
+- Exact code changes needed for each fix (with before/after patterns)
+- Known anti-patterns that cause regressions (DO NOT RETRY)
+- Priority order: cycle detection (38 tests) → identity (6) → type_function (3) → driver (3) → hard (3)
 
 ## Core Principle: 1:1 OCaml Port
 
@@ -83,11 +87,13 @@ Never run Rust compiler/test commands without timeout.
 4. Solve one cluster at a time with OCaml-aligned changes.
 5. Require parity delta after each successful fix.
 
-Seed clusters to prioritize:
-- Set/map cycle-sharing drift (`bs_mutable_set_test.res`, `bs_set_int_test.res`, `bs_poly_map_test.res`, `test_set.res`, `bs_queue_test.res`)
-- Option/constructor identity drift (`option_repr_test.res`)
-- Labeled/optional application drift (`jsx_optional_props_test.res`)
-- Residual syntax/typing drift (`miss_colon_test.res`)
+**IMPORTANT: Follow the priority order in RALPH_GUIDANCE.md:**
+1. **sexp_typedtree.rs cycle detection** (~38 tests) — stack-based marking, evaluation order, row_field_repr_ctx
+2. **ctype.rs non-generic identity** (~6 tests) — Tarrow/Tobject/Tfield/Tnil ReturnSelf
+3. **typecore.rs begin_def/generalize/instance** (~3 tests) — type_function pattern/body cycle
+4. **driver.rs interface constraints** (~3 tests) — apply_interface_constraints
+5. **typemod.rs supporting fixes** — force_generalize, init_def, env threading
+6. **Hard failures** — mario_game, reasonReact, defunctor_make_test
 
 ## Commit Rules
 

@@ -193,13 +193,55 @@ The following fixes were applied on the `typed-ast-parity` branch between Feb 17
 
 ## Active Unchecked Queue (Required)
 
-These tasks are intentionally unchecked. Keep this queue non-empty until typedtree parity reaches `657/657`.
+**READ `RALPH_GUIDANCE.md` FIRST** — it contains detailed fix strategies, categorized failure lists, and anti-patterns.
 
-- [ ] **FIRST PRIORITY**: Build the Rust compiler, run full parity test, and record actual parity count. Update this status section with results.
-- [ ] Identify which fixes from the reconstruction notes above are missing by comparing parity count to 654/657 target.
-- [ ] Re-apply any missing fixes to `typemod.rs`, `sexp_typedtree.rs`, `context.rs`, `driver.rs`, `btype.rs`, `persistent_env.rs` using the reconstruction notes and OCaml reference.
+**Current baseline: 607/657 (50 failures). See RALPH_GUIDANCE.md for full categorization.**
+
+### Phase 1: Re-apply Lost Fixes (607 → ~654)
+
+- [ ] **1A. HIGHEST PRIORITY — Stack-based cycle detection in sexp_typedtree.rs (~38 tests)**
+  Change cycle detection from permanent marking (visited set never cleared) to stack-based marking (add on entry, remove on exit). Also fix evaluation order (Tarrow/Tfield/Tpoly left-to-right) and use `row_field_repr_ctx` for Reither printing. See RALPH_GUIDANCE.md §1A for exact code pattern. OCaml ref: `compiler/ml/sexp_typedtree.ml`. WARNING: Do NOT try leaf-node exemption or ancestor-path tracking — both cause massive regressions.
+
+- [ ] **1B. Non-generic Tarrow/Tobject/Tfield/Tnil identity in ctype.rs (~6 tests)**
+  In `copy_type_cached`, return `ReturnSelf` for non-generic Tarrow, Tobject, Tfield, Tnil. See RALPH_GUIDANCE.md §1B. OCaml ref: `compiler/ml/ctype.ml` `copy`. WARNING: Do NOT extend to Tvariant or ALL types.
+
+- [ ] **1C. begin_def/generalize/instance in typecore.rs type_function (~3 tests)**
+  Add begin_def before pattern typing, end_def after, generalize pattern types, instance() for body env. Also extend update_level_expand guard to skip expansion for ALL local Pident types. See RALPH_GUIDANCE.md §1C. OCaml ref: `compiler/ml/typecore.ml` lines 3906-4024.
+
+- [ ] **1D. force_generalize skip for Pmod_structure in typemod.rs**
+  Skip force_generalize call in Pmod_structure handler to preserve non-generic levels from value restriction. OCaml ref: `compiler/ml/typemod.ml` `type_module_aux` Pmod_structure case.
+
+- [ ] **1E. Interface constraint propagation in driver.rs (~3 tests)**
+  Add `apply_interface_constraints`, `propagate_sig_types`, `try_alias_param_propagation`. See RALPH_GUIDANCE.md §1E. OCaml ref: `compiler/ml/typemod.ml` signature matching.
+
+- [ ] **1F. Supporting infrastructure in context.rs, btype.rs, persistent_env.rs, typemod.rs**
+  - context.rs: `current_stamp()` accessor, `new_row_field_ref` public method
+  - btype.rs: `row_field_repr_ctx` / `row_field_repr_ctx_aux`
+  - persistent_env.rs: Recursive module prefix rewriting
+  - typemod.rs: `init_def(current_time())` synchronization, `transl_signature` env threading
+
+### Phase 2: Remaining 3 Hard Failures (654 → 657)
+
+- [ ] **2A. mario_game.res** — Path normalization Pident→Pdot(Actors) (246 hunks) + type alias `xy` expansion (2 hunks). See RALPH_GUIDANCE.md §2A.
+- [ ] **2B. reasonReact.res** — 5 sub-issues: over-resolution, locations, under-resolution in WrapProps, alias, paths. See RALPH_GUIDANCE.md §2B.
+- [ ] **2C. defunctor_make_test.res** — Functor application substitution missing (Pmod_apply). See RALPH_GUIDANCE.md §2C.
+
+### Phase 3: Cross-cutting path normalization
+
+- [ ] **3A. Stdlib.X → Stdlib_X path normalization** (4 tests: json_decorders, Stdlib_JsonTests, Stdlib_TempTests, Stdlib_Intl_DateTimeFormatTest)
+- [ ] **3B. Belt.X.t → base type path normalization** (3 tests: gpr_1701_test, splice_test, ext_array_test)
+- [ ] **3C. Js.X.t → base type path normalization** (2 tests: js_string_test, reasonReactRouter)
+- [ ] **3D. Polymorphic variant row normalization** (gpr_4280_test: Rpresent/closed vs Reither/open)
+- [ ] **3E. async_jsx.res JSX async desugaring** (fundamentally different tree structure)
+- [ ] **3F. unboxed_use_case.res Tunivar vs Tvar** + type under-resolution
+
+### Validation
+
+- [ ] Keep this queue non-empty until the completion gate is truly met (`Rust bsc 657/657`, `Parity 657/657`, parser/binary parity green).
 - [ ] Tackle remaining 3 failures: mario_game.res, reasonReact.res, defunctor_make_test.res.
 - [ ] Keep this queue non-empty until the completion gate is truly met (`Rust bsc 657/657`, `Parity 657/657`, parser/binary parity green).
+
+**NOTE:** The above tasks are SUPERSEDED by the Active Unchecked Queue above. They are kept for historical context only.
 
 **Pre-Reconstruction Session Log (from worktree baseline at 609-612/657 parity — these are HISTORICAL and superseded by the reconstruction notes above):**
 - [x] Completed the active unchecked queue task by regenerating the deterministic with-locs failure manifest and recording it at `projects/typedtree-parity/.tmp/current_failures_with_locs.txt` (`46` failures). During this session, tested and fully reverted a non-improving OCaml-alignment probe in Rust `compiler-rust/src/types/ctype.rs` (`should_preserve_local_t_alias_during_level_update` list-alias preservation). Revalidated deterministically on reverted source with two full runs (`timeout 300 ./scripts/test_typedtree_parity.sh --with-locs --no-build --parallel 1`): compile coverage remains complete (`OCaml bsc 657 passed, 0 failed`; `Rust bsc 657 passed, 0 failed`) and parity is stable at `611/657` (`46` diffs). Reran parser/binary guard (`timeout 300 ./scripts/test_parser_ast_parity.sh 2>&1 | tail -40`) confirming full green (`sexp-locs differences: 0`, `sexp-locs-ppx differences: 0`, `bsc-ast differences: 0`, `spice differences: 0`, `spice OCaml errors: 0`, `spice Rust errors: 0`, `SUCCESS: All 1196 files have full parity`). Completion gate remains unmet because typedtree parity is not `657/657`.
