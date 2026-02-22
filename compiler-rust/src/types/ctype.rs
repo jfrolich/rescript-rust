@@ -2693,6 +2693,9 @@ fn copy_type_cached(
                 {
                     CopyAction::ReturnSelf
                 }
+                // Non-generic Tobject: return identity to prevent stack overflow
+                // on self-referential object types (e.g. `type x = {"y": 'self => int} as 'self`).
+                TypeDesc::Tobject { .. } => CopyAction::ReturnSelf,
                 TypeDesc::Tarrow {
                     arg, ret, arity, ..
                 } => CopyAction::Arrow {
@@ -2705,10 +2708,6 @@ fn copy_type_cached(
                 TypeDesc::Tconstr { path, args, .. } => CopyAction::Constr {
                     path: path.clone(),
                     args: args.clone(),
-                },
-                TypeDesc::Tobject { fields, name } => CopyAction::Object {
-                    fields: *fields,
-                    name: name.clone(),
                 },
                 TypeDesc::Tfield {
                     name,
