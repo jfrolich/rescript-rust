@@ -530,7 +530,12 @@ impl<'a> TypeContext<'a> {
         self.global_level.get()
     }
 
-    /// Initialize definition level.
+    /// Get the current ident stamp value (equivalent of OCaml's `Ident.current_time()`).
+    pub fn current_stamp(&self) -> i32 {
+        self.id_gen.current_stamp()
+    }
+
+    /// Initialize definition level (equivalent of OCaml's `Ctype.init_def`).
     pub fn init_def(&self, level: i32) {
         self.current_level.set(level);
         self.nongen_level.set(level);

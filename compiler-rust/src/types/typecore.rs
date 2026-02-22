@@ -10880,11 +10880,12 @@ fn extract_variant_type_path_from_expected_with_persistent_env<'a>(
         let mut current = path.clone();
         let mut visited = HashSet::new();
         loop {
-            let normalized = env.normalize_path(&current);
-            if !normalized.same(&current) {
-                current = normalized;
-                continue;
-            }
+            // Don't normalize module aliases at the top of the loop — this would
+            // flatten qualified paths like Pdot(Pdot(Pident("Stdlib"), "JSON"), "t")
+            // into Pdot(Pident("Stdlib_JSON"), "t"), losing the module-qualified
+            // structure. lookup_type_decl_for_path handles module aliases internally
+            // via resolve_module_signature_for_path. Module alias normalization is
+            // only used as a fallback for self-manifest cycles (below).
             if !visited.insert(current.name()) {
                 return None;
             }
