@@ -382,10 +382,10 @@ fn structure_has_async_component(
     arena: &crate::parse_arena::ParseArena,
 ) -> bool {
     structure.iter().any(|item| match &*item.pstr_desc {
-        StructureItemDesc::Pstr_value(_, bindings) => bindings.iter().any(|vb| {
+        StructureItemDesc::Pstr_value(inner) => { let (_, bindings) = &**inner; bindings.iter().any(|vb| {
             has_react_component_attr(&vb.pvb_attributes, arena)
                 && is_async_component_expr(arena.get_expr(vb.pvb_expr), arena)
-        }),
+        })},
         StructureItemDesc::Pstr_module(mb) => {
             module_expr_has_async_component(arena.get_mod_expr(mb.pmb_expr), arena)
         }
@@ -427,10 +427,10 @@ fn structure_needs_jsx_rewrite(
     structure.iter().any(|item| match &*item.pstr_desc {
         // External @react.component declarations need JSX PPX lowering.
         StructureItemDesc::Pstr_primitive(vd) => has_react_component_attr(&vd.pval_attributes, arena),
-        StructureItemDesc::Pstr_value(_, bindings) => bindings.iter().any(|vb| {
+        StructureItemDesc::Pstr_value(inner) => { let (_, bindings) = &**inner; bindings.iter().any(|vb| {
             has_react_component_attr(&vb.pvb_attributes, arena)
                 || has_react_component_with_props_attr(&vb.pvb_attributes, arena)
-        }),
+        })},
         StructureItemDesc::Pstr_module(mb) => {
             module_expr_needs_jsx_rewrite(arena.get_mod_expr(mb.pmb_expr), arena)
         }
@@ -505,7 +505,8 @@ pub fn compile_source_to_js_with_options(
 
     // Rewrite expressions: desugar pipe (->), setter (#=), property access (##),
     // await, tagged templates, and encode externals. This matches OCaml's bs_builtin_ppx.
-    let structure = ppx::rewrite_structure(&structure, parser.arena_mut());
+    let structure = ppx::rewrite_structure(&structure, parser.arena_mut())
+        .map_err(|e| anyhow!("PPX rewrite failed: {e}"))?;
 
     // Type check
     let id_gen = IdGenerator::new();

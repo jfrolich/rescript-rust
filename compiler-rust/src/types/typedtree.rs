@@ -521,7 +521,7 @@ impl ModuleType {
         Self {
             mty_desc: ModuleTypeDesc::Tmty_placeholder,
             mty_loc: LocIdx(0),
-            mty_attributes: vec![],
+            mty_attributes: Attributes::new(),
         }
     }
 }

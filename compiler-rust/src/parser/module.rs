@@ -3882,8 +3882,8 @@ fn parse_constructors(p: &mut Parser<'_>) -> Vec<ConstructorDeclaration> {
     p.optional(&Token::Bar);
     if let Some(mut c) = parse_constructor_with_start(p, first_start_idx) {
         if !first_doc_attrs.is_empty() {
-            let mut attrs = first_doc_attrs;
-            attrs.extend(c.pcd_attributes);
+            let mut attrs = Attributes::from_vec(first_doc_attrs);
+            attrs.extend(c.pcd_attributes.into_vec());
             c.pcd_attributes = attrs;
         }
         constructors.push(c);
@@ -3910,8 +3910,8 @@ fn parse_constructors(p: &mut Parser<'_>) -> Vec<ConstructorDeclaration> {
 
         if let Some(mut c) = parse_constructor_with_start(p, bar_start_idx) {
             if !doc_attrs.is_empty() {
-                let mut attrs = doc_attrs;
-                attrs.extend(c.pcd_attributes);
+                let mut attrs = Attributes::from_vec(doc_attrs);
+                attrs.extend(c.pcd_attributes.into_vec());
                 c.pcd_attributes = attrs;
             }
             constructors.push(c);
