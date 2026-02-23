@@ -4981,7 +4981,10 @@ fn type_application(
                                 if !arg_path.same(ret_path) || arg_path.head_name() != "t" {
                                     false
                                 } else if arg_args.is_empty() && ret_args.is_empty() {
-                                    true
+                                    // Only link module-qualified paths (Pdot), not
+                                    // local Pident types, to avoid false cycles
+                                    // (e.g., local `t -> t` in update_record_test).
+                                    !matches!(arg_path, Path::Pident(_))
                                 } else {
                                     match (arg_path, ret_path) {
                                         // For local recursive `type t<'a> = ...`, keep the
