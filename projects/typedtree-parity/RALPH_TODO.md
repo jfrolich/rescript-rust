@@ -127,6 +127,14 @@ This repo was reconstructed after accidental deletion. The base comes from a `/t
 
 ---
 
+## Immediate Priority: Recover 478 → ~614 (Raw Byte Parity)
+
+The old parity script post-processed sexp output (stripping non-printable chars, trimming whitespace, normalizing newlines) before comparing. That gave ~614 passing. The new script does **raw byte-for-byte comparison**, which dropped us to 478. The ~136 extra failures are NOT structural type differences — they're sexp output formatting issues (trailing newlines, whitespace, non-printable chars in stderr leaking into sexp output, etc.).
+
+**Fix these in the Rust sexp printer (`sexp_typedtree.rs`) to match OCaml's exact byte output.** This should be straightforward and recover us to ~614 before tackling the harder type checker fixes below. Look at the diffs in `.parity-cache/tests/diffs/` — many will show only whitespace/newline differences.
+
+---
+
 ## Re-apply Tasks (611 → ~654)
 
 **Completed:**
