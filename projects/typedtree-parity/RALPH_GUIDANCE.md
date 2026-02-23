@@ -6,7 +6,7 @@
 
 This document lists the **exact fixes** from the `typed-ast-parity` branch (612→654 range), verified against Claude session logs. Each fix has its original parity delta, commit hash, and description. We've verified which are present vs missing on the current branch.
 
-**Full fix inventory with diffs:** `.parity-cache/fixes_612_to_654.md` — contains all 24 fixes with commit hashes. You can inspect the original diffs via `git show <commit>` on `origin/typed-ast-parity`.
+**Full fix inventory with diffs:** `projects/typedtree-parity/fixes_612_to_654.md` — contains all 24 fixes with commit hashes. You can inspect the original diffs via `git show <commit>` on `origin/typed-ast-parity`.
 
 ---
 

@@ -241,6 +241,18 @@ compare_project_sexp() {
     echo "$ocaml_only_files" > "$TEMP_DIR/$label/ocaml_only.txt"
     echo "$rust_only_files" > "$TEMP_DIR/$label/rust_only.txt"
 
+    # Cache results to .parity-cache for LLM agents to inspect
+    local cache_dir="$PROJECT_ROOT/.parity-cache/$label"
+    rm -rf "$cache_dir"
+    mkdir -p "$cache_dir/diffs"
+    cp "$TEMP_DIR/$label/summary.txt" "$cache_dir/"
+    echo -e "$parity_failures" > "$cache_dir/failures.txt"
+    echo -e "$ocaml_only_files" > "$cache_dir/ocaml_only.txt"
+    echo -e "$rust_only_files" > "$cache_dir/rust_only.txt"
+    if [[ -d "$diff_dir" ]]; then
+        cp "$diff_dir"/*.diff "$cache_dir/diffs/" 2>/dev/null || true
+    fi
+
     # Show parity failure list
     if [[ "$parity_fail" -gt 0 && "$parity_fail" -le 100 ]]; then
         echo -e "  ${YELLOW}Parity failure modules:${RESET}"

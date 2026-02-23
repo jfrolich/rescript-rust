@@ -112,3 +112,6 @@ tests/parity_baselines/*.txt
 __pycache__/
 .cache
 tmp_diffs
+
+# Parity test cache (generated diffs/summaries, inspected by LLM agents)
+.parity-cache/
