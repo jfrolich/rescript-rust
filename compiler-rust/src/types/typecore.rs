@@ -7866,6 +7866,17 @@ fn type_coerce(
     // Type check the inner expression with the from type
     let typed_inner = type_expect(tctx, env, inner_expr, from_ty, None)?;
 
+    // When no explicit from_type and from_ty is still an unresolved Tvar,
+    // unify it with the target type. This matches OCaml's subtype approximation
+    // which resolves unconstrained expression types to the coercion target.
+    // Guard: only when still Tvar to avoid incorrectly replacing private types.
+    if opt_from_type.is_none() {
+        let from_repr = tctx.type_ctx.repr(from_ty);
+        if matches!(&*tctx.type_ctx.get_desc(from_repr), TypeDesc::Tvar(_)) {
+            let _ = crate::types::unify(tctx.type_ctx, &mut tctx.unify_state, from_ty, to_ty);
+        }
+    }
+
     // Return the inner expression with the coercion as exp_extra
     // The expression type becomes the target type after coercion
     let mut result = prepend_exp_extra(
