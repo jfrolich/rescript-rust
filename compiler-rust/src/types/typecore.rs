@@ -5519,14 +5519,15 @@ fn type_match(
         }
     }
 
-    // Match OCaml typecore/parmatch intent: when multiple polymorphic-variant
-    // tags are constrained by the same match-pattern row, close that row in
-    // typed patterns while leaving expression-side rows unchanged. This mirrors
-    // `Parmatch.pressure_variants env patl` before `finalize_variant`.
+    // Match OCaml typecore/parmatch: pressure_variants closes rows without
+    // wildcard coverage, then finalize_variant converts Reither→Rpresent
+    // in still-open rows. Both operate on ORIGINAL types first (shared with
+    // expression types) to match OCaml's in-place mutation semantics, then
+    // close_multi_label_variant_rows_in_cases copies and closes for pattern types.
+    pressure_and_finalize_variant_rows(tctx, env, &mut typed_val_cases);
     close_multi_label_variant_rows_in_cases(tctx, env, &mut typed_val_cases);
 
-    // Finalize variant patterns: convert Reither to Rpresent in open rows.
-    // Matches OCaml's finalize_variant called via iter_pattern after pressure_variants.
+    // Also finalize on the copies (for fields in rows that stayed open after copy+close).
     for case in typed_val_cases.iter_mut() {
         finalize_variant_in_pattern(tctx, env, &mut case.c_lhs);
     }
@@ -5777,19 +5778,11 @@ fn finalize_variant_in_pattern(
                                 }
                             }
                         }
-                        crate::types::type_expr::RowField::Reither {
-                            constant,
-                            matched: true,
-                            link,
-                            ..
-                        } if !crate::types::btype::row_fixed(ctx, &row) => {
-                            replacement = Some(crate::types::type_expr::RowField::Reither {
-                                constant,
-                                types: vec![],
-                                matched: false,
-                                link,
-                            });
-                        }
+                        // Case 3: In OCaml, set_row_field is a no-op if the link ref
+                        // is already set (which happens during unification). Since we
+                        // don't have mutable ref links, skip this case to avoid
+                        // destructively clearing types that should be preserved.
+                        crate::types::type_expr::RowField::Reither { .. } => {}
                         _ => {}
                     }
                     if let Some(new_field) = replacement {
@@ -5940,6 +5933,197 @@ fn close_multi_label_variant_rows_in_pattern(
     }
 }
 
+/// Like finalize_variant_in_pattern but ONLY performs Reither→Rpresent conversion
+/// (cases 1+2). Does NOT clear types in case 3. Used for modifying original types
+/// shared with expression types, where OCaml's mutable ref links would preserve
+/// the original field structure.
+fn finalize_variant_rpresent_only(
+    tctx: &mut TypeCheckContext<'_>,
+    env: &Env,
+    pat: &mut Pattern,
+) {
+    match &pat.pat_desc {
+        PatternDesc::Tpat_variant(tag, arg, _) => {
+            let ctx = tctx.type_ctx;
+            let expanded = crate::types::ctype::expand_head(ctx, env, pat.pat_type);
+            let repr = ctx.repr(expanded);
+            let desc = ctx.get_desc(repr);
+            if let TypeDesc::Tvariant(row) = &*desc {
+                let mut row = crate::types::btype::row_repr(ctx, row);
+                if let Some(field_index) = row.row_fields.iter().position(|(label, _)| label == tag) {
+                    let field = row.row_fields[field_index].1.clone();
+                    let field_repr = crate::types::btype::row_field_repr(&field);
+                    let mut replacement: Option<crate::types::type_expr::RowField> = None;
+                    match field_repr {
+                        crate::types::type_expr::RowField::Rabsent => {}
+                        crate::types::type_expr::RowField::Reither {
+                            constant: true,
+                            types,
+                            ..
+                        } if !row.row_closed && types.is_empty() => {
+                            replacement = Some(crate::types::type_expr::RowField::Rpresent(None));
+                        }
+                        crate::types::type_expr::RowField::Reither {
+                            constant: false,
+                            types,
+                            ..
+                        } if !row.row_closed && !types.is_empty() => {
+                            let head = types[0];
+                            replacement =
+                                Some(crate::types::type_expr::RowField::Rpresent(Some(head)));
+                            if let Some(arg_pat) = arg.as_ref() {
+                                for ty in types {
+                                    let _ = unify_pattern_types(
+                                        tctx,
+                                        arg_pat.pat_loc,
+                                        arg_pat.pat_type,
+                                        ty,
+                                    );
+                                }
+                            }
+                        }
+                        // Skip case 3 (types-clearing) — OCaml uses mutable ref links
+                        // for this case, preserving the original field structure visible
+                        // to other references through row_field_repr.
+                        _ => {}
+                    }
+                    if let Some(new_field) = replacement {
+                        drop(desc);
+                        row.row_fields[field_index].1 = new_field;
+                        ctx.set_desc(repr, TypeDesc::Tvariant(row));
+                    }
+                }
+            }
+        }
+        _ => {}
+    }
+
+    // Recurse into sub-patterns
+    match &mut pat.pat_desc {
+        PatternDesc::Tpat_variant(_, arg, _) => {
+            if let Some(arg_pat) = arg {
+                finalize_variant_rpresent_only(tctx, env, arg_pat);
+            }
+        }
+        PatternDesc::Tpat_alias(inner, _, _) => {
+            finalize_variant_rpresent_only(tctx, env, inner);
+        }
+        PatternDesc::Tpat_or(left, right, _) => {
+            finalize_variant_rpresent_only(tctx, env, left);
+            finalize_variant_rpresent_only(tctx, env, right);
+        }
+        PatternDesc::Tpat_tuple(items) | PatternDesc::Tpat_array(items) => {
+            for item in items {
+                finalize_variant_rpresent_only(tctx, env, item);
+            }
+        }
+        PatternDesc::Tpat_construct(_, _, args) => {
+            for arg in args {
+                finalize_variant_rpresent_only(tctx, env, arg);
+            }
+        }
+        PatternDesc::Tpat_record(fields, _) => {
+            for (_, _, field_pat, _) in fields {
+                finalize_variant_rpresent_only(tctx, env, field_pat);
+            }
+        }
+        PatternDesc::Tpat_any | PatternDesc::Tpat_var(_, _) | PatternDesc::Tpat_constant(_) => {}
+    }
+}
+
+/// Collect variant row keys where any case has a non-variant pattern (wildcard/any/var)
+/// at a position whose type is a variant. These rows have "wildcard coverage" and
+/// should NOT be closed (matching OCaml's pressure_variants behavior).
+fn collect_rows_with_wildcard_coverage(
+    tctx: &mut TypeCheckContext<'_>,
+    env: &Env,
+    pat: &Pattern,
+    result: &mut HashSet<usize>,
+) {
+    match &pat.pat_desc {
+        PatternDesc::Tpat_variant(_, arg, _) => {
+            // This IS a variant pattern — not a wildcard for this row
+            if let Some(arg_pat) = arg {
+                collect_rows_with_wildcard_coverage(tctx, env, arg_pat, result);
+            }
+        }
+        PatternDesc::Tpat_any | PatternDesc::Tpat_var(_, _) => {
+            // Wildcard: if this position's type is a variant, mark that row
+            if let Some(row_key) = variant_row_key_for_pat_type(tctx, env, pat.pat_type) {
+                result.insert(row_key);
+            }
+        }
+        PatternDesc::Tpat_alias(inner, _, _) => {
+            collect_rows_with_wildcard_coverage(tctx, env, inner, result);
+        }
+        PatternDesc::Tpat_or(left, right, _) => {
+            collect_rows_with_wildcard_coverage(tctx, env, left, result);
+            collect_rows_with_wildcard_coverage(tctx, env, right, result);
+        }
+        PatternDesc::Tpat_tuple(items) | PatternDesc::Tpat_array(items) => {
+            for item in items {
+                collect_rows_with_wildcard_coverage(tctx, env, item, result);
+            }
+        }
+        PatternDesc::Tpat_construct(_, _, args) => {
+            for arg in args {
+                collect_rows_with_wildcard_coverage(tctx, env, arg, result);
+            }
+        }
+        PatternDesc::Tpat_record(fields, _) => {
+            for (_, _, field_pat, _) in fields {
+                collect_rows_with_wildcard_coverage(tctx, env, field_pat, result);
+            }
+        }
+        PatternDesc::Tpat_constant(_) => {}
+    }
+}
+
+/// Match OCaml's pressure_variants + finalize_variant on ORIGINAL types.
+/// 1. Close variant rows without wildcard coverage (like OCaml's pressure_variants)
+/// 2. Convert Reither→Rpresent in still-open rows (like OCaml's finalize_variant)
+/// Both operate on the original types shared with expression types.
+/// NOTE: Only performs Rpresent conversion (cases 1+2), NOT the types-clearing
+/// case 3, because OCaml's case 3 uses mutable ref links that preserve the
+/// original field structure visible to other references.
+fn pressure_and_finalize_variant_rows(
+    tctx: &mut TypeCheckContext<'_>,
+    env: &Env,
+    cases: &mut [crate::types::typedtree::Case],
+) {
+    // Step 1: Collect variant row labels and wildcard coverage info
+    let mut labels_by_row: HashMap<usize, Vec<String>> = HashMap::new();
+    let mut rows_with_wildcards: HashSet<usize> = HashSet::new();
+
+    for case in cases.iter() {
+        collect_variant_row_labels_in_pattern(tctx, env, &case.c_lhs, &mut labels_by_row);
+        collect_rows_with_wildcard_coverage(tctx, env, &case.c_lhs, &mut rows_with_wildcards);
+    }
+
+    // Step 2: Determine which rows to close (has labels, no wildcard coverage)
+    // OCaml's pressure_variants closes any variant row without wildcard coverage,
+    // even single-tag rows.
+    let rows_to_close: HashSet<usize> = labels_by_row
+        .iter()
+        .filter_map(|(row_key, labels)| {
+            (!labels.is_empty() && !rows_with_wildcards.contains(row_key))
+                .then_some(*row_key)
+        })
+        .collect();
+
+    // Step 3: Close those rows in the original types
+    if !rows_to_close.is_empty() {
+        for case in cases.iter_mut() {
+            close_multi_label_variant_rows_in_pattern(tctx, env, &mut case.c_lhs, &rows_to_close);
+        }
+    }
+
+    // Step 4: Convert Reither→Rpresent in still-open rows (cases 1+2 only)
+    for case in cases.iter_mut() {
+        finalize_variant_rpresent_only(tctx, env, &mut case.c_lhs);
+    }
+}
+
 fn close_multi_label_variant_rows_in_cases(
     tctx: &mut TypeCheckContext<'_>,
     env: &Env,
@@ -5947,6 +6131,7 @@ fn close_multi_label_variant_rows_in_cases(
 ) {
     let mut labels_by_row: HashMap<usize, Vec<String>> = HashMap::new();
     let mut row_has_non_variant_case: HashSet<usize> = HashSet::new();
+    let mut rows_with_wildcards: HashSet<usize> = HashSet::new();
     for case in cases.iter() {
         if let Some(row_key) = variant_row_key_for_pat_type(tctx, env, case.c_lhs.pat_type) {
             let mut tags = HashSet::new();
@@ -5957,12 +6142,16 @@ fn close_multi_label_variant_rows_in_cases(
             }
         }
         collect_variant_row_labels_in_pattern(tctx, env, &case.c_lhs, &mut labels_by_row);
+        // Also detect nested wildcard patterns at variant-typed positions
+        collect_rows_with_wildcard_coverage(tctx, env, &case.c_lhs, &mut rows_with_wildcards);
     }
 
     let row_label_orders: HashMap<usize, Vec<String>> = labels_by_row
         .into_iter()
         .filter_map(|(row_key, labels)| {
-            (!labels.is_empty() && !row_has_non_variant_case.contains(&row_key))
+            (!labels.is_empty()
+                && !row_has_non_variant_case.contains(&row_key)
+                && !rows_with_wildcards.contains(&row_key))
                 .then_some((row_key, labels))
         })
         .collect();
@@ -5981,6 +6170,7 @@ fn close_multi_label_variant_rows_in_cases(
 
     let mut copied_labels_by_row: HashMap<usize, Vec<String>> = HashMap::new();
     let mut copied_row_has_non_variant_case: HashSet<usize> = HashSet::new();
+    let mut copied_rows_with_wildcards: HashSet<usize> = HashSet::new();
     for case in cases.iter() {
         if let Some(row_key) = variant_row_key_for_pat_type(tctx, env, case.c_lhs.pat_type) {
             let mut tags = HashSet::new();
@@ -5991,11 +6181,14 @@ fn close_multi_label_variant_rows_in_cases(
             }
         }
         collect_variant_row_labels_in_pattern(tctx, env, &case.c_lhs, &mut copied_labels_by_row);
+        collect_rows_with_wildcard_coverage(tctx, env, &case.c_lhs, &mut copied_rows_with_wildcards);
     }
     let rows_to_close: HashSet<usize> = copied_labels_by_row
         .into_iter()
         .filter_map(|(row_key, labels)| {
-            (!labels.is_empty() && !copied_row_has_non_variant_case.contains(&row_key))
+            (!labels.is_empty()
+                && !copied_row_has_non_variant_case.contains(&row_key)
+                && !copied_rows_with_wildcards.contains(&row_key))
                 .then_some(row_key)
         })
         .collect();
