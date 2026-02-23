@@ -132,33 +132,33 @@ This repo was reconstructed after accidental deletion. The base comes from a `/t
 - [x] **1B. Tarrow/Tfield/Tnil: COPY not identity** — Reverted ReturnSelf to copy. 610→611.
 
 **Remaining — 15 missing fixes from typed-ast-parity session logs.**
-**Full details:** `RALPH_GUIDANCE.md` + `projects/typedtree-parity/fixes_612_to_654.md` (commit hashes, inspect diffs via `git show <hash>` on `origin/typed-ast-parity`)
+**Full details:** `RALPH_GUIDANCE.md`
 
-- [x] **2. Fix predef type variances in env.rs** — `option`/`list`/`result`/`array`/`promise` now have correct variance. Parity-neutral at 611 baseline (prerequisite for downstream fixes). (Orig commit `06049811b`, 647→648, test: ext_array_test.res)
-- [x] **3. Depth-restricted prefix rewriting in persistent_env.rs** — Added alias prefix rewriting with depth >= 2 guard. Uses collect_alias_rewrites + rewrite_deep_prefix_in_sig + effective_module_path for nested aliases. 612→613 (+1). (Orig `b589ea199`, test: Stdlib_TempTests.res + Stdlib_Intl_NumberFormatTest.res)
-- [x] **4. Coercion subtype approximation in typecore.rs** — In `type_coerce`, unify result with `from_ty` when still Tvar. 611→612 (+1). (Orig `9c50c0ad5`, 629→630, test: type_coercion_free_vars.res)
-- [ ] **5. Deep-copy Tvariant/Tobject/Tfield in copy_type_deep** — `copy_type_deep_inner` catch-all returns original, needs deep copy. (Orig `b622d705b`, 642→643, test: jsxv4_newtype.res)
-- [ ] **6. Expand abbreviations before structural match for same-path Tconstr** — When same path + n_args>0, expand both, unify expanded. (Orig `01a5aec01`, 638→639, tests: unboxed_use_case.res, ExternalArity.res)
-- [ ] **7. build_as_type for Tpat_variant and Tpat_or** — Add Tpat_variant (open row+Rpresent) and Tpat_or (open row). (Orig `342f2eeb8`, 643→644, test: more_poly_variant_test.res)
-- [ ] **8. Label type param sharing** — Add `remap_label_type_to_params` so lbl_arg/lbl_res share Tvar nodes. (Orig `7957bdca3`, 646→647, test: gpr_4274_test.res)
+- [x] **2. Fix predef type variances in env.rs** — `option`/`list`/`result`/`array`/`promise` now have correct variance. Parity-neutral at 611 baseline (prerequisite for downstream fixes). (647→648, test: ext_array_test.res)
+- [x] **3. Depth-restricted prefix rewriting in persistent_env.rs** — Added alias prefix rewriting with depth >= 2 guard. Uses collect_alias_rewrites + rewrite_deep_prefix_in_sig + effective_module_path for nested aliases. 612→613 (+1). (test: Stdlib_TempTests.res + Stdlib_Intl_NumberFormatTest.res)
+- [x] **4. Coercion subtype approximation in typecore.rs** — In `type_coerce`, unify result with `from_ty` when still Tvar. 611→612 (+1). (629→630, test: type_coercion_free_vars.res)
+- [ ] **5. Deep-copy Tvariant/Tobject/Tfield in copy_type_deep** — `copy_type_deep_inner` catch-all returns original, needs deep copy. (642→643, test: jsxv4_newtype.res)
+- [ ] **6. Expand abbreviations before structural match for same-path Tconstr** — When same path + n_args>0, expand both, unify expanded. (638→639, tests: unboxed_use_case.res, ExternalArity.res)
+- [ ] **7. build_as_type for Tpat_variant and Tpat_or** — Add Tpat_variant (open row+Rpresent) and Tpat_or (open row). (643→644, test: more_poly_variant_test.res)
+- [ ] **8. Label type param sharing** — Add `remap_label_type_to_params` so lbl_arg/lbl_res share Tvar nodes. (646→647, test: gpr_4274_test.res)
   - 2026-02-23 attempt: implemented/remapped `lbl_arg` at label construction sites (`typemod.rs`, `typecore.rs`, `env.rs`, `persistent_env.rs`) and ran deterministic full parity. Result stayed **478/657 → 478/657** (179 failures). `gpr_4274_test` diff unchanged. Reverted experiment; keep this task unchecked.
 - [ ] **8A. Qualified label disambiguation for module-scoped records (NEW)** — `gpr_4274_test` still resolves `X.i` / `Foo.foo` through fresh `Tvar None` instead of concrete record paths (`N.t`, `Foo.record`), indicating label lookup/disambiguation fallback is selecting or synthesizing unconstrained labels.
   - Evidence: deterministic filtered diff on 2026-02-23 shows repeated `Tconstr(Pdot(Pident \"N\"), \"t\") -> Tvar None` and `Tconstr(Pdot(Pident \"Foo\"), \"record\") -> Tvar None`.
   - Session confirmation (2026-02-23): `timeout 300 ./scripts/test_typedtree_parity.sh` remained **478/657** with **179** parity failures; `timeout 300 ./scripts/test_typedtree_parity.sh gpr_4274_test` remained **0/1** with the same drift.
   - Next OCaml refs: `typecore.ml` label disambiguation path (`NameChoice`/`extract_label`) and module-qualified label lookup behavior.
   - Next Rust refs: `typecore.rs` `disambiguate_label`, `lookup_label_by_expected_type`, and module-signature path resolution helpers.
-- [ ] **9. Shallow-copy pattern variable types** — Shallow Tconstr copies for pattern vars with non-empty args. (Orig `d75afe709`, 631→634, +3 tests)
-- [ ] **10. Protect scrutinee type from pattern unification** — Shallow copy when instance() returns identity. (Orig `d74b94a6f`, 636→637, test: option_repr_test.res)
-- [ ] **11. Shallow copy nullary pattern var types** — Prevent scrutinee contamination via body unification. (Orig `1d940b052`, 645→646, test: reasonReactRouter.res)
-- [ ] **12. Force-generalize module sig value types** — Walk sig types to GENERIC_LEVEL (exclude nullary Tconstr). (Orig `a66dcf40f`, 637→638, net +1)
-- [ ] **13. GADT equation support** — gadt_equations, with_gadt_mode, add_gadt_equation, is_newtype_path. Complex. (Orig `6660a316f`, 650→651, test: js_json_test.res)
-- [ ] **14. Per-case pattern generalization in type_case_impl** — begin_def/end_def/generalize around pattern typing. Replaces fix 9. (Orig `95e8141e5`, 644→645)
-- [ ] **15. begin_def/generalize/instance in type_function** — Same as 14 for type_function. Needs update_level_expand Pident guard (committed). (Orig `4c45ce41b`, 653→654, test: ticker.res)
-- [ ] **16. Stack-based cycle detection — TRY LAST** — On old branch: +16 (613→629). Current branch: 610→220 REGRESSION. Only after all above fixes. (Orig `bb5a4d7b2`)
+- [ ] **9. Shallow-copy pattern variable types** — Shallow Tconstr copies for pattern vars with non-empty args. (631→634, +3 tests)
+- [ ] **10. Protect scrutinee type from pattern unification** — Shallow copy when instance() returns identity. (636→637, test: option_repr_test.res)
+- [ ] **11. Shallow copy nullary pattern var types** — Prevent scrutinee contamination via body unification. (645→646, test: reasonReactRouter.res)
+- [ ] **12. Force-generalize module sig value types** — Walk sig types to GENERIC_LEVEL (exclude nullary Tconstr). (637→638, net +1)
+- [ ] **13. GADT equation support** — gadt_equations, with_gadt_mode, add_gadt_equation, is_newtype_path. Complex. (650→651, test: js_json_test.res)
+- [ ] **14. Per-case pattern generalization in type_case_impl** — begin_def/end_def/generalize around pattern typing. Replaces fix 9. (644→645)
+- [ ] **15. begin_def/generalize/instance in type_function** — Same as 14 for type_function. Needs update_level_expand Pident guard (committed). (653→654, test: ticker.res)
+- [ ] **16. Stack-based cycle detection — TRY LAST** — On old branch: +16 (613→629). Current branch: 610→220 REGRESSION. Only after all above fixes.
 
 **Partial fixes:**
-- [ ] **P1. Qualified label lookup last-defined** — Return last match for ambiguous labels. (Orig `3508b51b5`, 630→631, test: Stdlib_Intl_DateTimeFormatTest.res)
-- [ ] **P2. Generalize local Pdot expansion guard** — Extend from `.t`/`.cmp` to ALL nullary Pdot with local roots. (Orig `c89d6d802`, 649→650, test: topsort_test.res)
+- [ ] **P1. Qualified label lookup last-defined** — Return last match for ambiguous labels. (630→631, test: Stdlib_Intl_DateTimeFormatTest.res)
+- [ ] **P2. Generalize local Pdot expansion guard** — Extend from `.t`/`.cmp` to ALL nullary Pdot with local roots. (649→650, test: topsort_test.res)
 
 ---
 

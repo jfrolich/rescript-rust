@@ -4,9 +4,7 @@
 **Current:** 607/657 (50 failures) on `typed-tree-parity-2`
 **Previous Best:** 654/657 on `typed-ast-parity` (lost in repo reconstruction)
 
-This document lists the **exact fixes** from the `typed-ast-parity` branch (612→654 range), verified against Claude session logs. Each fix has its original parity delta, commit hash, and description. We've verified which are present vs missing on the current branch.
-
-**Full fix inventory with diffs:** `projects/typedtree-parity/fixes_612_to_654.md` — contains all 24 fixes with commit hashes. You can inspect the original diffs via `git show <commit>` on `origin/typed-ast-parity`.
+This document lists the **exact fixes** from the `typed-ast-parity` branch (612→654 range), verified against Claude session logs. Each fix has its original parity delta and description. We've verified which are present vs missing on the current branch.
 
 ---
 
@@ -54,7 +52,6 @@ These are ordered by recommended application order (safest/most-independent firs
 
 ## Fix 18: Predef Type Variances (647→648, +1)
 
-**Commit:** `06049811b`
 **File:** `compiler-rust/src/types/env.rs`
 **Test:** `ext_array_test.res`
 
@@ -66,7 +63,6 @@ Standard predef types (`option`, `list`, `result`) have empty `type_variance: ve
 
 ## Fix 19: Depth-Restricted Prefix Rewriting (648→649, +1)
 
-**Commit:** `b589ea199`
 **File:** `compiler-rust/src/cmi/persistent_env.rs`
 **Test:** `Stdlib_TempTests.res`
 
@@ -76,7 +72,6 @@ In `substitute_submodule_paths`, add a `min_depth` parameter (default 2) so path
 
 ## Fix 3: Coercion Subtype Approximation (629→630, +1)
 
-**Commit:** `9c50c0ad5`
 **File:** `compiler-rust/src/types/typecore.rs` — `type_coerce` / `Pexp_coerce`
 **Test:** `type_coercion_free_vars.res`
 
@@ -88,7 +83,6 @@ In `type_coerce`, when there's no explicit `from_type` and `from_ty` is a fresh 
 
 ## Fix 13: Deep-Copy Tvariant/Tobject/Tfield in copy_type_deep (642→643, +1)
 
-**Commit:** `b622d705b`
 **File:** `compiler-rust/src/types/ctype.rs` — `copy_type_deep_inner`
 **Test:** `jsxv4_newtype.res`
 
@@ -105,7 +99,6 @@ Without this, `replace_newtype_path` corrupts both copy and original.
 
 ## Fix 9: Expand Abbreviations Before Structural Match (638→639, +1)
 
-**Commit:** `01a5aec01`
 **File:** `compiler-rust/src/types/ctype.rs` — unification
 **Tests:** `unboxed_use_case.res`, `ExternalArity.res`
 
@@ -117,7 +110,6 @@ When both Tconstr types have the same path and `n_args > 0`, expand both and if 
 
 ## Fix 14: build_as_type for Tpat_variant and Tpat_or (643→644, +1)
 
-**Commit:** `342f2eeb8`
 **File:** `compiler-rust/src/types/typecore.rs` — `build_as_type`
 **Test:** `more_poly_variant_test.res`
 
@@ -131,7 +123,6 @@ Currently Tpat_variant and Tpat_or fall through to `_ => pat.pat_type`. Add:
 
 ## Fix 17: Label Type Param Sharing (646→647, +1)
 
-**Commit:** `7957bdca3`
 **File:** `compiler-rust/src/types/typecore.rs`
 **Test:** `gpr_4274_test.res`
 
@@ -141,7 +132,6 @@ When building `LabelDescription` from type declarations, `lbl_arg` and `lbl_res`
 
 ## Fix 5: Shallow-Copy Pattern Variable Types (631→634, +3)
 
-**Commit:** `d75afe709`
 **File:** `compiler-rust/src/types/typecore.rs` — `type_function`, `type_case_impl`
 **Tests:** 3 Belt-related files
 
@@ -153,7 +143,6 @@ When adding pattern variables to the body environment, create shallow Tconstr co
 
 ## Fix 7: Protect Scrutinee Type from Pattern Unification (636→637, +1)
 
-**Commit:** `d74b94a6f`
 **File:** `compiler-rust/src/types/typecore.rs`
 **Test:** `option_repr_test.res`
 
@@ -163,7 +152,6 @@ When `instance()` returns the scrutinee's `exp_type` by identity (non-generic pr
 
 ## Fix 16: Shallow Copy Nullary Pattern Var Types (645→646, +1)
 
-**Commit:** `1d940b052`
 **File:** `compiler-rust/src/types/typecore.rs`
 **Test:** `reasonReactRouter.res`
 
@@ -173,7 +161,6 @@ Body typing unifying pattern variable (e.g., `raw`) with `Js.String.t` contamina
 
 ## Fix 8: Force-Generalize Module Sig Value Types (637→638, +1 net)
 
-**Commit:** `a66dcf40f`
 **Files:** `compiler-rust/src/types/ctype.rs`, `compiler-rust/src/types/typemod.rs`
 **Tests:** `inline_map2_test.res`, `set_gen.res` (+2), `LetUnwrap.res` (-1 regression)
 
@@ -183,7 +170,6 @@ Add `force_generalize()` that walks all reachable types in a module signature an
 
 ## Fix 21: GADT Equation Support (650→651, +1)
 
-**Commit:** `6660a316f`
 **Files:** `compiler-rust/src/types/ctype.rs`, `compiler-rust/src/types/typecore.rs`
 **Test:** `js_json_test.res`
 
@@ -200,7 +186,6 @@ Add GADT-aware unification preserving existential type variables. Key additions:
 
 ## Fix 15: Per-Case Pattern Generalization (644→645, +1)
 
-**Commit:** `95e8141e5`
 **Files:** `compiler-rust/src/types/typecore.rs`, `compiler-rust/src/types/ctype.rs`
 
 Add `begin_def()/end_def()/generalize()` around pattern typing in `type_case_impl`. This replaces/improves fix 5's shallow copy approach. Also add guard in `update_level_expand` to preserve nullary local type alias identity.
@@ -209,7 +194,6 @@ Add `begin_def()/end_def()/generalize()` around pattern typing in `type_case_imp
 
 ## Fix 24: begin_def/generalize/instance in type_function (653→654, +1)
 
-**Commit:** `4c45ce41b`
 **Files:** `compiler-rust/src/types/typecore.rs`, `compiler-rust/src/types/ctype.rs`
 **Test:** `ticker.res`
 
@@ -219,7 +203,6 @@ Same pattern as fix 15 but for `type_function` specifically. **REQUIRES** extend
 
 ## Fix 2: Stack-Based Cycle Detection — TRY LAST (613→629, +16)
 
-**Commit:** `bb5a4d7b2`
 **File:** `compiler-rust/src/types/sexp_typedtree.rs`
 
 Switch permanent-marking cycle detection to stack-based (add on entry, remove on exit). On the old branch this gained +16 tests at parity 613. **On current branch: 607→220 regression.** Only try after ALL above fixes are applied — the sharing context must be correct first.
@@ -228,7 +211,6 @@ Switch permanent-marking cycle detection to stack-based (add on entry, remove on
 
 ## Partial Fix 4: Qualified Label Lookup Last-Defined (630→631, +1)
 
-**Commit:** `3508b51b5`
 **File:** `compiler-rust/src/types/typecore.rs`
 **Test:** `Stdlib_Intl_DateTimeFormatTest.res`
 
@@ -238,7 +220,6 @@ In `lookup_label_in_module`, when multiple record types define the same field na
 
 ## Partial Fix 20: General Local Pdot Expansion Guard (649→650, +1)
 
-**Commit:** `c89d6d802`
 **File:** `compiler-rust/src/types/ctype.rs`
 **Test:** `topsort_test.res`
 
