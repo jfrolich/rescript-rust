@@ -149,6 +149,7 @@ The old parity script post-processed sexp output (stripping non-printable chars,
 - [x] **4. Coercion subtype approximation in typecore.rs** — In `type_coerce`, unify result with `from_ty` when still Tvar. 611→612 (+1). (629→630, test: type_coercion_free_vars.res)
 - [ ] **5. Deep-copy Tvariant/Tobject/Tfield in copy_type_deep** — `copy_type_deep_inner` catch-all returns original, needs deep copy. (642→643, test: jsxv4_newtype.res)
 - [ ] **6. Expand abbreviations before structural match for same-path Tconstr** — When same path + n_args>0, expand both, unify expanded. (638→639, tests: unboxed_use_case.res, ExternalArity.res)
+  - 2026-02-24 attempt: added same-path expansion branch in `ctype.rs` (`unify` Tconstr/Tconstr path-equal case) with direct `unify(exp1, exp2)` when expansion leaves `Tconstr` and no pre-link of `t1 -> t2`. Deterministic full parity stayed **478/657 → 478/657** (179 failures). Targeted `unboxed_use_case` and `ExternalArity` remained **0/1**. Reverted.
 - [ ] **7. build_as_type for Tpat_variant and Tpat_or** — Add Tpat_variant (open row+Rpresent) and Tpat_or (open row). (643→644, test: more_poly_variant_test.res)
 - [ ] **8. Label type param sharing** — Add `remap_label_type_to_params` so lbl_arg/lbl_res share Tvar nodes. (646→647, test: gpr_4274_test.res)
   - 2026-02-23 attempt: implemented/remapped `lbl_arg` at label construction sites (`typemod.rs`, `typecore.rs`, `env.rs`, `persistent_env.rs`) and ran deterministic full parity. Result stayed **478/657 → 478/657** (179 failures). `gpr_4274_test` diff unchanged. Reverted experiment; keep this task unchecked.
@@ -157,6 +158,11 @@ The old parity script post-processed sexp output (stripping non-printable chars,
   - Session confirmation (2026-02-23): `timeout 300 ./scripts/test_typedtree_parity.sh` remained **478/657** with **179** parity failures; `timeout 300 ./scripts/test_typedtree_parity.sh gpr_4274_test` remained **0/1** with the same drift.
   - Next OCaml refs: `typecore.ml` label disambiguation path (`NameChoice`/`extract_label`) and module-qualified label lookup behavior.
   - Next Rust refs: `typecore.rs` `disambiguate_label`, `lookup_label_by_expected_type`, and module-signature path resolution helpers.
+- [ ] **8B. Verify longident preservation for record labels before disambiguation (NEW)** — determine whether module qualifiers (`X.i`, `Foo.foo`) are preserved in `ExpressionRecordField.lid` / `PatternRecordField.lid` by the time `typecore` runs.
+  - Evidence (2026-02-24): added `disambiguate_label_by_lid` + module-signature label lookup (`resolve_module_lid`, last-defined `SigType` record-label selection) and threaded through record/pattern/field access. Deterministic full parity stayed **478/657 → 478/657** (179 failures); filtered `gpr_4274_test` remained **0/1** with unchanged `Tconstr(Pdot(Pident \"N\"), \"t\") -> Tvar None` and `Tconstr(Pdot(Pident \"Foo\"), \"record\") -> Tvar None` drift. Reverted.
+  - Hypothesis: record-field longidents may already be de-qualified (or normalized to non-module paths) before label disambiguation, so module-aware lookup is never exercised.
+  - Next OCaml refs: `typecore.ml` record-field typing paths (`type_label_exp`, record/pattern label lookup) and `NameChoice` handling of qualified labels.
+  - Next Rust refs: parser/binary-ast longident plumbing for record fields, `type_pattern_record` and `type_record` call sites, and `TypeCheckContext::resolve_lid`.
 - [ ] **9. Shallow-copy pattern variable types** — Shallow Tconstr copies for pattern vars with non-empty args. (631→634, +3 tests)
 - [ ] **10. Protect scrutinee type from pattern unification** — Shallow copy when instance() returns identity. (636→637, test: option_repr_test.res)
 - [ ] **11. Shallow copy nullary pattern var types** — Prevent scrutinee contamination via body unification. (645→646, test: reasonReactRouter.res)
@@ -169,6 +175,7 @@ The old parity script post-processed sexp output (stripping non-printable chars,
 **Partial fixes:**
 - [ ] **P1. Qualified label lookup last-defined** — Return last match for ambiguous labels. (630→631, test: Stdlib_Intl_DateTimeFormatTest.res)
 - [ ] **P2. Generalize local Pdot expansion guard** — Extend from `.t`/`.cmp` to ALL nullary Pdot with local roots. (649→650, test: topsort_test.res)
+  - 2026-02-24 attempt: generalized `update_level_expand` guard in `ctype.rs` to preserve all nullary local `Pdot` aliases before expansion. Deterministic full parity stayed **478/657 → 478/657** (179 failures); targeted `topsort_test` remained **0/1**. Reverted.
 
 ---
 
