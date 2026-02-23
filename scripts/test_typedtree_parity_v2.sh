@@ -779,8 +779,7 @@ TELLA_RUST_PASS=0 TELLA_RUST_FAIL=0
 # Source the aggregated results
 source "$AGG_FILE"
 
-BOTH_TYPED=$((PARITY_PASS + PARITY_FAIL))
-BOTH_ERRORED=$((ERROR_PARITY_PASS + ERROR_PARITY_FAIL))
+TOTAL_TESTED=$((OCAML_PASS + OCAML_FAIL))
 
 # Helper to compute percentage (integer)
 pct() { if [[ "$2" -gt 0 ]]; then echo "$((100 * $1 / $2))"; else echo "-"; fi; }
@@ -795,19 +794,14 @@ display_group() {
     local g_rust_only="${11}" g_ocaml_only="${12}"
     [[ "$total" -gt 0 ]] || return 0
 
-    local g_both_typed=$((g_parity_pass + g_parity_fail))
-    local g_both_errored=$((g_err_pass + g_err_fail))
-    local typed_pct=$(pct "$g_parity_pass" "$g_both_typed")
-    local err_pct=$(pct "$g_err_pass" "$g_both_errored")
+    local parity_pct=$(pct "$g_parity_pass" "$total")
 
     echo -e "${BOLD}$label ($total files):${RESET}"
     echo -e "  OCaml type-check: ${GREEN}$g_ocaml_pass${RESET}   OCaml error: ${RED}$g_ocaml_fail${RESET}"
     echo -e "  Rust  type-check: ${GREEN}$g_rust_pass${RESET}   Rust  error: ${RED}$g_rust_fail${RESET}"
-    if [[ "$g_both_typed" -gt 0 ]]; then
-        echo -e "  Typecheck parity: ${GREEN}$g_parity_pass${RESET}/$g_both_typed (${typed_pct}%)"
-    fi
-    if [[ "$g_both_errored" -gt 0 ]]; then
-        echo -e "  Error parity:     ${GREEN}$g_err_pass${RESET}/$g_both_errored (${err_pct}%)"
+    echo -e "  Typecheck parity: ${GREEN}$g_parity_pass${RESET}/$total (${parity_pct}%)"
+    if [[ "$g_parity_fail" -gt 0 ]]; then
+        echo -e "  Parity failures:  ${RED}$g_parity_fail${RESET}"
     fi
     if [[ "$g_rust_only" -gt 0 ]]; then
         echo -e "  ${YELLOW}Rust-only pass (OCaml rejects): $g_rust_only${RESET}"
@@ -848,15 +842,12 @@ echo ""
 echo "============================================"
 echo -e "${BOLD}Overall ($TOTAL_FILES files):${RESET}"
 if [[ "$RUST_AVAILABLE" == "true" ]]; then
+    PARITY_PCT=$(pct "$PARITY_PASS" "$TOTAL_TESTED")
     echo -e "  OCaml type-check: ${GREEN}$OCAML_PASS${RESET}   OCaml error: ${RED}$OCAML_FAIL${RESET}"
     echo -e "  Rust  type-check: ${GREEN}$RUST_PASS${RESET}   Rust  error: ${RED}$RUST_FAIL${RESET}"
-    if [[ "$BOTH_TYPED" -gt 0 ]]; then
-        TYPED_PCT=$(pct "$PARITY_PASS" "$BOTH_TYPED")
-        echo -e "  Typecheck parity: ${GREEN}$PARITY_PASS${RESET}/$BOTH_TYPED (${TYPED_PCT}%)"
-    fi
-    if [[ "$BOTH_ERRORED" -gt 0 ]]; then
-        ERR_PCT=$(pct "$ERROR_PARITY_PASS" "$BOTH_ERRORED")
-        echo -e "  Error parity:     ${GREEN}$ERROR_PARITY_PASS${RESET}/$BOTH_ERRORED (${ERR_PCT}%)"
+    echo -e "  Typecheck parity: ${GREEN}$PARITY_PASS${RESET}/$TOTAL_TESTED (${PARITY_PCT}%)"
+    if [[ "$PARITY_FAIL" -gt 0 ]]; then
+        echo -e "  Parity failures:  ${RED}$PARITY_FAIL${RESET}"
     fi
     if [[ "$RUST_ONLY_PASS" -gt 0 ]]; then
         echo -e "  ${YELLOW}Rust-only pass (OCaml rejects): $RUST_ONLY_PASS${RESET}"
@@ -865,7 +856,7 @@ if [[ "$RUST_AVAILABLE" == "true" ]]; then
         echo -e "  ${YELLOW}OCaml-only pass (Rust rejects): $OCAML_ONLY_PASS${RESET}"
     fi
     echo "============================================"
-    if [[ "$PARITY_FAIL" -eq 0 && "$ERROR_PARITY_FAIL" -eq 0 && "$RUST_ONLY_PASS" -eq 0 && "$OCAML_ONLY_PASS" -eq 0 ]]; then
+    if [[ "$PARITY_PASS" -eq "$TOTAL_TESTED" ]]; then
         echo -e "${GREEN}${BOLD}SUCCESS: Full parity across all files!${RESET}"
     fi
 else
