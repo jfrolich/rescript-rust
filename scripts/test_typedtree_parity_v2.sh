@@ -228,7 +228,7 @@ if [[ "$SKIP_BUILD" != "true" ]]; then
         # Find rescript.json files with actual sources (skip empty root configs, skip node_modules)
         while IFS= read -r cfg; do
             proj_dir=$(dirname "$cfg")
-            has_sources=$(jq -r 'if .sources then "1" else "0" end' "$cfg" 2>/dev/null) || has_sources=0
+            has_sources=$(jq -r 'if (.sources | length) > 0 then "1" else "0" end' "$cfg" 2>/dev/null) || has_sources=0
             if [[ "$has_sources" == "1" ]]; then
                 echo "    Building $proj_dir..."
                 cd "$proj_dir"
@@ -247,20 +247,21 @@ if [[ "$SKIP_BUILD" != "true" ]]; then
     fi
     echo ""
 else
-    # When skipping build, detect pre-built tella sub-projects
+    # When skipping build, detect pre-built tella sub-projects (including node_modules deps)
     TELLA_AVAILABLE=false
     TELLA_PROJECTS=""
     if [[ -d "$TELLA_DIR" ]]; then
+        # Find rescript.json and bsconfig.json (older packages use bsconfig.json)
         while IFS= read -r cfg; do
             proj_dir=$(dirname "$cfg")
-            if [[ -d "$proj_dir/lib/bs" ]]; then
-                has_sources=$(jq -r 'if .sources then "1" else "0" end' "$cfg" 2>/dev/null) || has_sources=0
+            if [[ -d "$proj_dir/lib/ocaml" ]]; then
+                has_sources=$(jq -r 'if (.sources | length) > 0 then "1" else "0" end' "$cfg" 2>/dev/null) || has_sources=0
                 if [[ "$has_sources" == "1" ]]; then
                     TELLA_PROJECTS="${TELLA_PROJECTS}${proj_dir}"$'\n'
                     TELLA_AVAILABLE=true
                 fi
             fi
-        done < <(find "$TELLA_DIR" -name "rescript.json" -not -path "*/node_modules/*" 2>/dev/null | sort)
+        done < <(find "$TELLA_DIR" \( -name "rescript.json" -o -name "bsconfig.json" \) 2>/dev/null | sort -u)
     fi
 fi
 
@@ -417,14 +418,14 @@ test_single_file() {
     if [[ "$NO_CACHE" != "true" ]]; then
         local hash_source=""
         if [[ -n "$project_root" ]]; then
-            # For project files, hash the .ast file
-            local rel="${full_file_path#$project_root/}"
-            local ext="${rel##*.}"
+            # For project files, hash the .ast file (lives flat in lib/ocaml/)
+            local basename="${full_file_path##*/}"
+            local ext="${basename##*.}"
             local ast_file
             if [[ "$ext" == "resi" ]]; then
-                ast_file="$project_root/${rel%.resi}.iast"
+                ast_file="$project_root/lib/ocaml/${basename%.resi}.iast"
             else
-                ast_file="$project_root/${rel%.res}.ast"
+                ast_file="$project_root/lib/ocaml/${basename%.res}.ast"
             fi
             if [[ -f "$ast_file" ]]; then
                 hash_source="$ast_file"

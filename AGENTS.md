@@ -2,6 +2,17 @@
 
 This file provides guidance to AI coding assistants when working with code in this repository.
 
+## ⚠️ CRITICAL: NEVER use `rm -rf` on directories
+
+**An agent previously deleted the entire repository with `rm -rf`.** This is catastrophic and unrecoverable.
+
+Rules:
+- **NEVER run `rm -rf` on any directory** unless the user explicitly asks you to delete that specific directory
+- **NEVER run `rm -rf` with variables** (e.g., `rm -rf $DIR`) — variable expansion bugs can delete wrong paths
+- To clean caches or temp files, remove specific files by name (e.g., `rm /path/to/specific/file`)
+- If you need to clear a cache directory, use `rm /path/to/cache/*.ext` with a specific extension, NOT `rm -rf /path/to/cache/`
+- When in doubt, use `ls` first to see what you'd be deleting, and ask the user before proceeding
+
 ## ⚠️ Repository Setup - READ FIRST
 
 This repository has two Git remotes configured:
