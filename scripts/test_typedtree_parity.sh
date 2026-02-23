@@ -12,15 +12,23 @@
 # 2. ~/dev/tella-fusion     - External corpus (override with TELLA_DIR)
 #
 # USAGE:
-#   ./scripts/test_typedtree_parity_v2.sh [OPTIONS]
+#   ./scripts/test_typedtree_parity.sh [OPTIONS] [FILTER]
 #
 # OPTIONS:
 #   --no-build        Skip the build steps (assume sexp files already exist)
 #   -h, --help        Show this help message
+#
+# FILTER:
+#   Optional file path or module name pattern to test a single file.
+#   Examples:
+#     ./scripts/test_typedtree_parity.sh tests/tests/src/a.res
+#     ./scripts/test_typedtree_parity.sh a
+#     ./scripts/test_typedtree_parity.sh "Core_*"
 
 set -e
 
 SKIP_BUILD=false
+FILTER=""
 
 while [[ $# -gt 0 ]]; do
     case $1 in
@@ -29,14 +37,25 @@ while [[ $# -gt 0 ]]; do
             shift
             ;;
         -h|--help)
-            head -18 "$0" | tail -15
+            head -24 "$0" | tail -21
             exit 0
             ;;
+        -*)
+            echo "Unknown option: $1"
+            exit 1
+            ;;
         *)
+            FILTER="$1"
             shift
             ;;
     esac
 done
+
+# Normalize filter: if it's a file path, extract module name
+if [[ -n "$FILTER" ]]; then
+    # Strip directory and extension (e.g. tests/tests/src/a.res -> a)
+    FILTER_MODULE=$(basename "$FILTER" | sed 's/\.\(res\|resi\|ml\|mli\)$//')
+fi
 
 scriptDir=$(dirname "$0")
 PROJECT_ROOT=$(cd "$scriptDir/.."; pwd -P)
@@ -72,6 +91,9 @@ echo -e "${BOLD}Typed Tree Parity Test${RESET}"
 echo "============================================"
 echo "OCaml bsc:    $OCAML_BSC"
 echo "Rescript CLI: $RESCRIPT_CLI"
+if [[ -n "$FILTER_MODULE" ]]; then
+    echo "Filter:       $FILTER_MODULE"
+fi
 
 # Build and generate sexp for a project
 # Args: project_dir label [extra_env...]
@@ -140,6 +162,16 @@ compare_project_sexp() {
     while IFS= read -r sexp_file; do
         [[ -n "$sexp_file" ]] || continue
         local module="${sexp_file%.sexp}"
+
+        # Apply filter if set
+        if [[ -n "$FILTER_MODULE" ]]; then
+            # shellcheck disable=SC2254
+            case "$module" in
+                $FILTER_MODULE) ;;  # exact or glob match
+                *) continue ;;
+            esac
+        fi
+
         total=$((total + 1))
 
         local ocaml_file="$ocaml_dir/$sexp_file"
@@ -205,6 +237,16 @@ compare_project_sexp() {
     if [[ "$parity_fail" -gt 0 && "$parity_fail" -le 100 ]]; then
         echo -e "  ${YELLOW}Parity failure modules:${RESET}"
         echo -e "$parity_failures"
+    fi
+
+    # In single-file mode, show diffs inline
+    if [[ -n "$FILTER_MODULE" && "$parity_fail" -gt 0 ]]; then
+        for df in "$diff_dir"/*.diff; do
+            [[ -f "$df" ]] || continue
+            echo -e "${BOLD}--- Diff: $(basename "$df" .diff) ---${RESET}"
+            cat "$df"
+            echo ""
+        done
     fi
 }
 
