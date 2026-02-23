@@ -598,10 +598,8 @@ fn sexp_row_field_aux(arena: &ParseArena, ctx: &TypeContext<'_>, rf: &RowField, 
         }
         RowField::Reither { constant, types, .. } => {
             // Print Reither faithfully. OCaml's sexp printer calls row_field_repr
-            // which follows Reither ref links - but since we use Rpresent directly
-            // in expressions (matching OCaml typecore.ml:2600) and finalize_variant
-            // converts Reither→Rpresent in patterns, remaining Reither fields are
-            // genuinely Reither.
+            // which follows Reither ref links - but since we don't implement mutable
+            // row field links, we print Reither as-is.
             Sexp::list(vec![
                 Sexp::atom("Reither"),
                 Sexp::atom(if constant { "const" } else { "non_const" }),
