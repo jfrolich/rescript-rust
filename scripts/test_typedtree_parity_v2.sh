@@ -7,11 +7,11 @@
 # 2. error parity - When both compilers fail, error output matches
 #
 # Sources tested:
-# 1. tests/tests/src/       - Main test project (built with rewatch, compiler-args)
-# 2. syntax_tests/data/     - Parser test files (standalone compilation, skip if both fail)
-#    Includes: idempotency, printer, ppx, conversion, ast-mapping, parsing
-#    Excludes: errors, recovery, infiniteLoops
-# 3. ~/dev/tella-fusion     - External corpus (built with rewatch, override with TELLA_DIR)
+# 1. tests/tests/src/       - Main test project (built with rewatch, in-process sexp)
+# 2. ~/dev/tella-fusion     - External corpus (built with rewatch, in-process sexp, override with TELLA_DIR)
+#
+# Standalone files (syntax_tests) are excluded by default but the standalone
+# compilation path is retained in test_single_file for future use.
 #
 # Files that don't type-check with both compilers are tracked separately.
 #
@@ -230,34 +230,58 @@ if [[ "$SKIP_BUILD" != "true" ]]; then
     if [[ -d "$TELLA_DIR" ]]; then
         echo "  Finding tella-fusion sub-projects..."
         # Find rescript.json files with actual sources (skip empty root configs, skip node_modules)
+        # Also skip packages nested inside another project's packages/ dir (workspace-internal deps)
+        tella_candidates=()
         while IFS= read -r cfg; do
             proj_dir=$(dirname "$cfg")
             has_sources=$(jq -r 'if (.sources | length) > 0 then "1" else "0" end' "$cfg" 2>/dev/null) || has_sources=0
             if [[ "$has_sources" == "1" ]]; then
-                echo "    Building $proj_dir (normal + Rust sexp)..."
-                cd "$proj_dir"
-                # Normal build first for .cmi/.cmj, then sexp generation
-                timeout 300 env RESCRIPT_BSC_EXE="$OCAML_BSC" "$RESCRIPT_CLI" build 2>&1 | tail -3 || true
-                if timeout 300 env RESCRIPT_BSC_EXE="$OCAML_BSC" "$RESCRIPT_CLI" build --dump-typed-sexp --rust 2>&1 | tail -3; then
-                    TELLA_PROJECTS="${TELLA_PROJECTS}${proj_dir}"$'\n'
-                    TELLA_AVAILABLE=true
-                else
-                    echo -e "${YELLOW}    Warning: build failed for $proj_dir${RESET}"
-                fi
-                cd "$PROJECT_ROOT"
+                tella_candidates+=("$proj_dir")
             fi
         done < <(find "$TELLA_DIR" -name "rescript.json" -not -path "*/node_modules/*" 2>/dev/null | sort)
+
+        # Filter out sub-packages that are nested inside another candidate's packages/ dir
+        for proj_dir in "${tella_candidates[@]}"; do
+            is_nested=false
+            for other in "${tella_candidates[@]}"; do
+                if [[ "$proj_dir" != "$other" && "$proj_dir" == "$other/packages/"* ]]; then
+                    is_nested=true
+                    break
+                fi
+            done
+            if [[ "$is_nested" == "true" ]]; then
+                echo "    Skipping $proj_dir (nested sub-package, built as dependency)"
+                # Still register it so we can find its source files and sexp output
+                TELLA_PROJECTS="${TELLA_PROJECTS}${proj_dir}"$'\n'
+                TELLA_AVAILABLE=true
+                continue
+            fi
+
+            echo "    Building $proj_dir (normal + Rust sexp)..."
+            cd "$proj_dir"
+            # Normal build first for .cmi/.cmj, then sexp generation
+            timeout 300 env RESCRIPT_BSC_EXE="$OCAML_BSC" RESCRIPT_RUNTIME="$TELLA_DIR/node_modules/@rescript/runtime" "$RESCRIPT_CLI" build 2>&1 | tail -3 || true
+            if timeout 300 env RESCRIPT_BSC_EXE="$OCAML_BSC" RESCRIPT_RUNTIME="$TELLA_DIR/node_modules/@rescript/runtime" "$RESCRIPT_CLI" build --dump-typed-sexp --rust 2>&1 | tail -3; then
+                TELLA_PROJECTS="${TELLA_PROJECTS}${proj_dir}"$'\n'
+                TELLA_AVAILABLE=true
+            else
+                echo -e "${YELLOW}    Warning: sexp build failed for $proj_dir (may be partial)${RESET}"
+                # Still register the project so we can test whatever files were built
+                TELLA_PROJECTS="${TELLA_PROJECTS}${proj_dir}"$'\n'
+                TELLA_AVAILABLE=true
+            fi
+            cd "$PROJECT_ROOT"
+        done
         if [[ "$TELLA_AVAILABLE" != "true" ]]; then
-            echo -e "${YELLOW}Warning: No tella-fusion sub-projects built successfully${RESET}"
+            echo -e "${YELLOW}Warning: No tella-fusion sub-projects found${RESET}"
         fi
     fi
     echo ""
 else
-    # When skipping build, detect pre-built tella sub-projects (including node_modules deps)
+    # When skipping build, detect pre-built tella sub-projects (skip node_modules)
     TELLA_AVAILABLE=false
     TELLA_PROJECTS=""
     if [[ -d "$TELLA_DIR" ]]; then
-        # Find rescript.json and bsconfig.json (older packages use bsconfig.json)
         while IFS= read -r cfg; do
             proj_dir=$(dirname "$cfg")
             if [[ -d "$proj_dir/lib/ocaml" ]]; then
@@ -267,7 +291,7 @@ else
                     TELLA_AVAILABLE=true
                 fi
             fi
-        done < <(find "$TELLA_DIR" \( -name "rescript.json" -o -name "bsconfig.json" \) 2>/dev/null | sort -u)
+        done < <(find "$TELLA_DIR" -name "rescript.json" -not -path "*/node_modules/*" 2>/dev/null | sort)
     fi
 fi
 
@@ -311,17 +335,11 @@ if [[ -n "$FILE_ARG" ]]; then
         # Treat as a pattern - search across all source groups
         {
             find tests/tests/src -name "*.res" 2>/dev/null
-            find tests/syntax_tests/data/idempotency tests/syntax_tests/data/printer \
-                tests/syntax_tests/data/ppx tests/syntax_tests/data/conversion \
-                tests/syntax_tests/data/ast-mapping tests/syntax_tests/data/parsing \
-                \( -name "*.res" -o -name "*.resi" \) \
-                -not -path "*/errors/*" -not -path "*/recovery/*" \
-                -not -path "*/infiniteLoops/*" 2>/dev/null || true
             if [[ "$TELLA_AVAILABLE" == "true" ]]; then
-                find "$TELLA_DIR" \
-                    -type d \( -name .git -o -name target -o -name .next -o -name _build \
-                    -o -path "*/lib/bs" -o -path "*/lib/ocaml" \) -prune \
-                    -o -type f \( -name "*.res" -o -name "*.resi" \) -print 2>/dev/null || true
+                while IFS= read -r proj; do
+                    [[ -z "$proj" ]] && continue
+                    find "$proj/src" \( -name "*.res" -o -name "*.resi" \) -type f 2>/dev/null || true
+                done <<< "$TELLA_PROJECTS"
             fi
         } | grep -E "$FILE_ARG" | sort > "$TEMP_DIR/files.txt" || true
         if [[ ! -s "$TEMP_DIR/files.txt" ]]; then
@@ -336,20 +354,12 @@ else
         # Group 1: tests/tests/src (project-based)
         find tests/tests/src -name "*.res" -type f 2>/dev/null
 
-        # Group 2: syntax_tests/data (standalone compilation)
-        find tests/syntax_tests/data/idempotency tests/syntax_tests/data/printer \
-            tests/syntax_tests/data/ppx tests/syntax_tests/data/conversion \
-            tests/syntax_tests/data/ast-mapping tests/syntax_tests/data/parsing \
-            \( -name "*.res" -o -name "*.resi" \) \
-            -not -path "*/errors/*" -not -path "*/recovery/*" \
-            -not -path "*/infiniteLoops/*" 2>/dev/null || true
-
-        # Group 3: tella-fusion (project-based, if available)
+        # Group 2: tella-fusion (project-based, if available)
         if [[ "$TELLA_AVAILABLE" == "true" ]]; then
-            find "$TELLA_DIR" \
-                -type d \( -name .git -o -name target -o -name .next -o -name _build \
-                -o -path "*/lib/bs" -o -path "*/lib/ocaml" \) -prune \
-                -o -type f \( -name "*.res" -o -name "*.resi" \) -print 2>/dev/null || true
+            while IFS= read -r proj; do
+                [[ -z "$proj" ]] && continue
+                find "$proj/src" \( -name "*.res" -o -name "*.resi" \) -type f 2>/dev/null || true
+            done <<< "$TELLA_PROJECTS"
         fi
     } | sort -u > "$TEMP_DIR/files.txt"
 fi
