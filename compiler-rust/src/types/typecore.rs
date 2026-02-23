@@ -2858,6 +2858,40 @@ fn build_as_type(
                 Ok(ty_res)
             }
         }
+        PatternDesc::Tpat_variant(label, opt_arg, _) => {
+            // OCaml typecore.ml:488-498: create single-field open row with Rpresent
+            let opt_ty = match opt_arg {
+                Some(p) => Some(build_as_type(tctx, env, p)?),
+                None => None,
+            };
+            let row = crate::types::type_expr::RowDesc {
+                row_fields: vec![(label.clone(), crate::types::type_expr::RowField::Rpresent(opt_ty))],
+                row_more: ctx.new_var(None),
+                row_name: None,
+                row_fixed: false,
+                row_closed: false,
+            };
+            Ok(ctx.new_variant(row))
+        }
+        PatternDesc::Tpat_or(p1, p2, opt_row) => {
+            // OCaml typecore.ml:526-534
+            match opt_row {
+                None => {
+                    let ty1 = build_as_type(tctx, env, p1)?;
+                    let ty2 = build_as_type(tctx, env, p2)?;
+                    unify_pattern_types(tctx, p2.pat_loc, ty2, ty1)?;
+                    Ok(ty1)
+                }
+                Some(row) => {
+                    // Open the row: set row_closed=false and fresh row_more
+                    let row = crate::types::btype::row_repr(ctx, row);
+                    let mut new_row = row;
+                    new_row.row_closed = false;
+                    new_row.row_more = ctx.new_var(None);
+                    Ok(ctx.new_variant(new_row))
+                }
+            }
+        }
         _ => Ok(pat.pat_type),
     }
 }
