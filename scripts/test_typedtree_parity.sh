@@ -167,6 +167,17 @@ UNTRACKED_JS_BEFORE_FILE="$TEMP_DIR/untracked_js_before.txt"
 capture_untracked_js_snapshot "$UNTRACKED_JS_BEFORE_FILE"
 trap "cleanup_generated_js_outputs; rm -rf $TEMP_DIR" EXIT
 
+timer_start() { date +%s; }
+timer_elapsed() { local start=$1; echo "$(($(date +%s) - start))s"; }
+SCRIPT_START=$(timer_start)
+
+# Always use -dtyped-sexp-locs since rewatch --dump-typed-sexp --rust generates with-locs
+SEXP_FLAG="-dtyped-sexp-locs"
+
+# OCaml sexp cache directory
+CACHE_DIR="$PROJECT_ROOT/.cache/parity"
+mkdir -p "$CACHE_DIR"
+
 echo -e "${BOLD}Typed Tree Parity Test${RESET}"
 echo "============================================"
 echo "OCaml bsc: $OCAML_BSC"
@@ -176,6 +187,8 @@ else
     echo "Rust bsc:  (not available)"
 fi
 echo "Sexp flag: $SEXP_FLAG"
+echo "Rust sexp: in-process via rewatch (cached in lib/ocaml/)"
+echo "OCaml cache: $CACHE_DIR"
 echo "Timeout: ${TIMEOUT_SECONDS}s"
 echo "Parallel jobs: $PARALLEL_JOBS"
 echo ""
@@ -184,14 +197,22 @@ echo ""
 if [[ "$SKIP_BUILD" != "true" ]]; then
     echo -e "${BOLD}Step 1: Building test project with rewatch...${RESET}"
     cd "$TEST_PROJECT"
-    # Use the standard OCaml bsc for the initial build
     RESCRIPT_BSC_EXE="$OCAML_BSC" "$RESCRIPT_CLI" clean 2>/dev/null || true
-    if ! RESCRIPT_BSC_EXE="$OCAML_BSC" "$RESCRIPT_CLI" build 2>&1 | tail -5; then
+    if ! RESCRIPT_BSC_EXE="$OCAML_BSC" "$RESCRIPT_CLI" build --dump-typed-sexp --rust 2>&1 | tail -5; then
         echo -e "${YELLOW}Warning: Some files may have failed to build${RESET}"
     fi
     cd "$PROJECT_ROOT"
     echo ""
 fi
+
+# Pre-compute compiler base args once (not per-file)
+PRECOMPUTE_START=$(timer_start)
+TEST_BASE_ARGS=""
+if [[ -d "$TEST_PROJECT/lib/bs" ]]; then
+    TEST_BASE_ARGS=$(cd "$TEST_PROJECT" && "$RESCRIPT_CLI" compiler-args src/a.res 2>/dev/null \
+        | jq -r '.compiler_args[:-1] | join(" ")' 2>/dev/null) || TEST_BASE_ARGS=""
+fi
+echo -e "  [timer] Pre-compute args: $(timer_elapsed $PRECOMPUTE_START)"
 
 # Find test files based on arguments
 cd "$PROJECT_ROOT"
@@ -232,6 +253,7 @@ mkdir -p "$TEMP_DIR/diffs"
 
 # Export variables for parallel execution
 export OCAML_BSC RUST_BSC RESCRIPT_CLI TIMEOUT_SECONDS TEMP_DIR QUICK_MODE VERBOSE RUST_AVAILABLE PROJECT_ROOT RESULTS_DIR TEST_PROJECT SEXP_FLAG
+export TEST_BASE_ARGS CACHE_DIR
 
 # Function to test a single file - writes results to a file
 test_single_file() {
@@ -239,15 +261,12 @@ test_single_file() {
     local safe_name=$(echo "$file" | tr '/' '_')
     local result_file="$RESULTS_DIR/$safe_name.result"
 
-    # Initialize result
     local ocaml_pass=0 rust_pass=0 parity_pass=0
     local ocaml_fail=0 rust_fail=0 parity_fail=0
 
-    # Create per-file temp directory for parallel safety
     local file_temp="$TEMP_DIR/work/$safe_name"
     mkdir -p "$file_temp"
 
-    # Determine full file path (handle both absolute and relative paths)
     local full_file_path
     if [[ "$file" = /* ]]; then
         full_file_path="$file"
@@ -255,135 +274,103 @@ test_single_file() {
         full_file_path="$PROJECT_ROOT/$file"
     fi
 
-    # Get relative path from test project
-    local rel_path="${full_file_path#$TEST_PROJECT/}"
-
-    # Get compiler arguments from rewatch
-    local compiler_args_json
-    compiler_args_json=$(cd "$TEST_PROJECT" && "$RESCRIPT_CLI" compiler-args "$rel_path" 2>/dev/null) || true
-
-    if [[ -z "$compiler_args_json" ]]; then
-        # If compiler-args fails, try direct compilation
-        # Build include flags for test project's compiled modules
-        local include_flags=""
-        if [[ -d "$TEST_PROJECT/lib/ocaml" ]]; then
-            include_flags="-I $TEST_PROJECT/lib/ocaml"
-        fi
-        # Run OCaml compiler directly
-        if timeout "$TIMEOUT_SECONDS" "$OCAML_BSC" $SEXP_FLAG $include_flags -o "$file_temp/ocaml_fallback.js" "$full_file_path" 2> "$file_temp/ocaml.sexp" 1>/dev/null; then
-            ocaml_pass=1
-        else
-            ocaml_fail=1
-        fi
-
-        if [[ "$RUST_AVAILABLE" == "true" ]]; then
-            if timeout "$TIMEOUT_SECONDS" "$RUST_BSC" $SEXP_FLAG $include_flags -o "$file_temp/rust_fallback.js" "$full_file_path" 2> "$file_temp/rust.sexp" 1>/dev/null; then
-                rust_pass=1
-            else
-                rust_fail=1
-            fi
-        fi
+    # --- OCaml sexp: check cache first ---
+    local basename="${full_file_path##*/}"
+    local ext="${basename##*.}"
+    local ast_file
+    if [[ "$ext" == "resi" ]]; then
+        ast_file="$TEST_PROJECT/lib/ocaml/${basename%.resi}.iast"
     else
-        # Extract compiler args from JSON and build command
-        # Parse the compiler_args array from JSON
-        local args
-        args=$(echo "$compiler_args_json" | python3 -c "import sys, json; d=json.load(sys.stdin); print(' '.join(d.get('compiler_args', [])))" 2>/dev/null) || args=""
-
-        if [[ -n "$args" ]]; then
-            # Run OCaml compiler with the args + $SEXP_FLAG
-            cd "$TEST_PROJECT/lib/bs"
-            if timeout "$TIMEOUT_SECONDS" "$OCAML_BSC" $SEXP_FLAG $args 2> "$file_temp/ocaml.sexp" 1>/dev/null; then
-                ocaml_pass=1
-            else
-                ocaml_fail=1
-            fi
-
-            # Run Rust compiler if available
-            if [[ "$RUST_AVAILABLE" == "true" ]]; then
-                if timeout "$TIMEOUT_SECONDS" "$RUST_BSC" $SEXP_FLAG $args 2> "$file_temp/rust.sexp" 1>/dev/null; then
-                    rust_pass=1
-                else
-                    rust_fail=1
-                fi
-            fi
-            cd "$PROJECT_ROOT"
-        else
-            ocaml_fail=1
-            rust_fail=1
+        ast_file="$TEST_PROJECT/lib/ocaml/${basename%.res}.ast"
+    fi
+    local cache_key="" cache_file=""
+    if [[ -f "$ast_file" ]]; then
+        cache_key=$(md5 -q "$ast_file" 2>/dev/null) || cache_key=""
+        if [[ -n "$cache_key" ]]; then
+            cache_file="$CACHE_DIR/${cache_key}.sexp"
         fi
     fi
 
-    # Strip warning messages from sexp output (OCaml emits warnings to stderr mixed with sexp)
-    # Warnings appear before "(structure" and after the sexp closing ")"
-    # The sexp itself never contains blank lines, so delete from first blank line to end
-    if [[ -f "$file_temp/ocaml.sexp" ]]; then
-        LC_ALL=C sed -n '/^(structure/,$p' "$file_temp/ocaml.sexp" | LC_ALL=C sed '/^$/,$d' > "$file_temp/ocaml_clean.sexp"
+    local ocaml_cached=false
+    if [[ -n "$cache_file" && -f "$cache_file" ]]; then
+        cp "$cache_file" "$file_temp/ocaml.sexp"
+        ocaml_cached=true
+    fi
+
+    # --- Rust sexp: use cached from rewatch --dump-typed-sexp --rust ---
+    if [[ "$RUST_AVAILABLE" == "true" ]]; then
+        local stem="${basename%.*}"
+        if [[ -f "$TEST_PROJECT/lib/ocaml/${stem}.sexp" ]]; then
+            cp "$TEST_PROJECT/lib/ocaml/${stem}.sexp" "$file_temp/rust.sexp"
+        fi
+    fi
+
+    # --- OCaml: invoke bsc if not cached ---
+    if [[ "$ocaml_cached" != "true" && -n "$TEST_BASE_ARGS" ]]; then
+        local rel_path="${full_file_path#$TEST_PROJECT/}"
+        local ast_arg
+        if [[ "$ext" == "resi" ]]; then
+            ast_arg="${rel_path%.resi}.iast"
+        else
+            ast_arg="${rel_path%.res}.ast"
+        fi
+        cd "$TEST_PROJECT/lib/bs"
+        timeout "$TIMEOUT_SECONDS" "$OCAML_BSC" $SEXP_FLAG $TEST_BASE_ARGS $ast_arg 2> "$file_temp/ocaml.sexp" 1>/dev/null || true
+        cd "$PROJECT_ROOT"
+    fi
+
+    # --- Strip warnings from sexp output ---
+    if [[ "$ocaml_cached" != "true" && -f "$file_temp/ocaml.sexp" ]]; then
+        LC_ALL=C sed -E -n '/^\(structure|^\(signature/,$p' "$file_temp/ocaml.sexp" | LC_ALL=C sed '/^$/,$d' > "$file_temp/ocaml_clean.sexp"
         mv "$file_temp/ocaml_clean.sexp" "$file_temp/ocaml.sexp"
+        # Cache result (including empty = OCaml error)
+        if [[ -n "$cache_file" ]]; then
+            cp "$file_temp/ocaml.sexp" "$cache_file"
+        fi
     fi
     if [[ -f "$file_temp/rust.sexp" ]]; then
-        LC_ALL=C sed -n '/^(structure/,$p' "$file_temp/rust.sexp" | LC_ALL=C sed '/^$/,$d' > "$file_temp/rust_clean.sexp"
+        LC_ALL=C sed -E -n '/^\(structure|^\(signature/,$p' "$file_temp/rust.sexp" | LC_ALL=C sed '/^$/,$d' > "$file_temp/rust_clean.sexp"
         mv "$file_temp/rust_clean.sexp" "$file_temp/rust.sexp"
     fi
 
-    # Determine pass/fail based on whether sexp output was actually produced,
-    # not exit code (compilers exit non-zero for warnings but still produce sexp)
+    # --- Determine pass/fail ---
     if [[ -s "$file_temp/ocaml.sexp" ]]; then
         ocaml_pass=1
-        ocaml_fail=0
     else
-        ocaml_pass=0
         ocaml_fail=1
     fi
     if [[ -s "$file_temp/rust.sexp" ]]; then
         rust_pass=1
-        rust_fail=0
     else
-        rust_pass=0
         rust_fail=1
     fi
 
-    # Compare if both succeeded
+    # --- Compare if both succeeded ---
     if [[ "$RUST_AVAILABLE" == "true" && "$ocaml_pass" -eq 1 && "$rust_pass" -eq 1 ]]; then
-        # Strip binary data (e.g. marshalled Location.t in attributes) before comparing
-        # Use LC_ALL=C tr to handle binary safely
         LC_ALL=C tr -cd '[:print:]\n' < "$file_temp/ocaml.sexp" > "$file_temp/ocaml_text.sexp" 2>/dev/null || cp "$file_temp/ocaml.sexp" "$file_temp/ocaml_text.sexp"
         LC_ALL=C tr -cd '[:print:]\n' < "$file_temp/rust.sexp" > "$file_temp/rust_text.sexp" 2>/dev/null || cp "$file_temp/rust.sexp" "$file_temp/rust_text.sexp"
         if diff -q "$file_temp/ocaml_text.sexp" "$file_temp/rust_text.sexp" > /dev/null 2>&1; then
             parity_pass=1
         else
             parity_fail=1
-            # Save diff for inspection
             diff -u "$file_temp/ocaml_text.sexp" "$file_temp/rust_text.sexp" > "$TEMP_DIR/diffs/$safe_name.diff" 2>&1 || true
         fi
     fi
 
-    # Write result
     echo "$file:ocaml_pass=$ocaml_pass:ocaml_fail=$ocaml_fail:rust_pass=$rust_pass:rust_fail=$rust_fail:parity_pass=$parity_pass:parity_fail=$parity_fail" > "$result_file"
 
-    # Verbose output
     if [[ "$VERBOSE" == "true" ]]; then
-        if [[ "$ocaml_pass" -eq 1 ]]; then
-            echo -e "${GREEN}PASS${RESET} [OCaml] $file"
-        else
-            echo -e "${RED}FAIL${RESET} [OCaml] $file"
-        fi
-        if [[ "$RUST_AVAILABLE" == "true" ]]; then
-            if [[ "$rust_pass" -eq 1 ]]; then
-                echo -e "${GREEN}PASS${RESET} [Rust] $file"
-            else
-                echo -e "${RED}FAIL${RESET} [Rust] $file"
-            fi
-            if [[ "$parity_pass" -eq 1 ]]; then
-                echo -e "${GREEN}PASS${RESET} [Parity] $file"
-            elif [[ "$parity_fail" -eq 1 ]]; then
-                echo -e "${RED}FAIL${RESET} [Parity] $file"
-            fi
+        if [[ "$parity_pass" -eq 1 ]]; then
+            echo -e "${GREEN}PASS${RESET} $file"
+        elif [[ "$parity_fail" -eq 1 ]]; then
+            echo -e "${RED}FAIL${RESET} $file"
+        elif [[ "$ocaml_pass" -eq 1 && "$rust_fail" -eq 1 ]]; then
+            echo -e "${YELLOW}RUST_FAIL${RESET} $file"
         fi
     fi
 
-    # Quick mode - exit on failure
-    if [[ "$QUICK_MODE" == "true" && ("$ocaml_fail" -eq 1 || "$parity_fail" -eq 1) ]]; then
-        echo -e "${RED}Quick mode: stopping on first failure${RESET}"
+    if [[ "$QUICK_MODE" == "true" && "$parity_fail" -eq 1 ]]; then
+        echo -e "${RED}Quick mode: stopping on first parity failure${RESET}"
         if [[ -f "$TEMP_DIR/diffs/$safe_name.diff" ]]; then
             echo -e "\nParity diff:"
             head -50 "$TEMP_DIR/diffs/$safe_name.diff"
@@ -395,6 +382,7 @@ test_single_file() {
 export -f test_single_file
 
 # Run tests
+STEP2_START=$(timer_start)
 echo -e "${BOLD}Step 2: Running typed tree parity tests...${RESET}"
 echo ""
 if [[ "$PARALLEL_JOBS" -eq 1 ]]; then
@@ -405,85 +393,74 @@ else
     cat "$TEMP_DIR/files.txt" | xargs -P "$PARALLEL_JOBS" -I {} bash -c 'test_single_file "$@"' _ {}
 fi
 
+echo -e "  [timer] Step 2 (test files): $(timer_elapsed $STEP2_START)"
+
 # Aggregate results
 echo ""
 echo -e "${BOLD}Results${RESET}"
 echo "========"
 
-# Count results
-OCAML_PASS=0 OCAML_FAIL=0
-RUST_PASS=0 RUST_FAIL=0
-PARITY_PASS=0 PARITY_FAIL=0
-OCAML_FAILURES=""
-RUST_FAILURES=""
-PARITY_FAILURES=""
+# Count results using awk (fast single pass)
+AGG_FILE="$TEMP_DIR/aggregated.sh"
+cat "$RESULTS_DIR"/*.result 2>/dev/null | awk -F: '
+{
+    file = $1
+    delete v
+    for (i = 2; i <= NF; i++) {
+        n = split($i, kv, "=")
+        if (n == 2) v[kv[1]] = kv[2]
+    }
+    G["OCAML_PASS"] += v["ocaml_pass"]
+    G["OCAML_FAIL"] += v["ocaml_fail"]
+    G["RUST_PASS"] += v["rust_pass"]
+    G["RUST_FAIL"] += v["rust_fail"]
+    G["PARITY_PASS"] += v["parity_pass"]
+    G["PARITY_FAIL"] += v["parity_fail"]
+    if (v["ocaml_pass"] == 1 && v["rust_fail"] == 1) { G["OCAML_ONLY"]++; ocaml_only = ocaml_only "  " file "\n" }
+    if (v["ocaml_fail"] == 1 && v["rust_pass"] == 1) { G["RUST_ONLY"]++; rust_only = rust_only "  " file "\n" }
+    if (v["parity_fail"] == 1) parity_failures = parity_failures "  " file "\n"
+}
+END {
+    for (k in G) printf "%s=%d\n", k, G[k]+0
+    printf "PARITY_FAILURES=\"%s\"\n", parity_failures
+    printf "OCAML_ONLY_FILES=\"%s\"\n", ocaml_only
+    printf "RUST_ONLY_FILES=\"%s\"\n", rust_only
+}
+' > "$AGG_FILE"
 
-for result_file in "$RESULTS_DIR"/*.result; do
-    [[ -f "$result_file" ]] || continue
-    result=$(cat "$result_file")
-    file=$(echo "$result" | cut -d: -f1)
+OCAML_PASS=0 OCAML_FAIL=0 RUST_PASS=0 RUST_FAIL=0 PARITY_PASS=0 PARITY_FAIL=0 OCAML_ONLY=0 RUST_ONLY=0
+PARITY_FAILURES="" OCAML_ONLY_FILES="" RUST_ONLY_FILES=""
+source "$AGG_FILE"
 
-    if echo "$result" | grep -q "ocaml_pass=1"; then
-        OCAML_PASS=$((OCAML_PASS + 1))
-    elif echo "$result" | grep -q "ocaml_fail=1"; then
-        OCAML_FAIL=$((OCAML_FAIL + 1))
-        OCAML_FAILURES="$OCAML_FAILURES  $file\n"
-    fi
+BOTH_SUCCEEDED=$((PARITY_PASS + PARITY_FAIL))
 
-    if [[ "$RUST_AVAILABLE" == "true" ]]; then
-        if echo "$result" | grep -q "rust_pass=1"; then
-            RUST_PASS=$((RUST_PASS + 1))
-        elif echo "$result" | grep -q "rust_fail=1"; then
-            RUST_FAIL=$((RUST_FAIL + 1))
-            RUST_FAILURES="$RUST_FAILURES  $file\n"
-        fi
-
-        if echo "$result" | grep -q "parity_pass=1"; then
-            PARITY_PASS=$((PARITY_PASS + 1))
-        elif echo "$result" | grep -q "parity_fail=1"; then
-            PARITY_FAIL=$((PARITY_FAIL + 1))
-            PARITY_FAILURES="$PARITY_FAILURES  $file\n"
-        fi
-    fi
-done
-
-echo -e "OCaml bsc:    ${GREEN}$OCAML_PASS passed${RESET}, ${RED}$OCAML_FAIL failed${RESET}"
+echo -e "  OCaml type-check: ${GREEN}$OCAML_PASS${RESET}   OCaml error: ${RED}$OCAML_FAIL${RESET}"
 if [[ "$RUST_AVAILABLE" == "true" ]]; then
-    echo -e "Rust bsc:     ${GREEN}$RUST_PASS passed${RESET}, ${RED}$RUST_FAIL failed${RESET}"
-    echo -e "Parity:       ${GREEN}$PARITY_PASS passed${RESET}, ${RED}$PARITY_FAIL failed${RESET}"
+    echo -e "  Rust  type-check: ${GREEN}$RUST_PASS${RESET}   Rust  error: ${RED}$RUST_FAIL${RESET}"
+    if [[ "$BOTH_SUCCEEDED" -gt 0 ]]; then
+        PARITY_PCT=$((100 * PARITY_PASS / BOTH_SUCCEEDED))
+        echo -e "  Typecheck parity: ${GREEN}$PARITY_PASS${RESET}/$BOTH_SUCCEEDED (${PARITY_PCT}%)"
+    fi
+    if [[ "$OCAML_ONLY" -gt 0 ]]; then
+        echo -e "  ${YELLOW}OCaml-only pass (Rust rejects): $OCAML_ONLY${RESET}"
+    fi
+    if [[ "$RUST_ONLY" -gt 0 ]]; then
+        echo -e "  ${YELLOW}Rust-only pass (OCaml rejects): $RUST_ONLY${RESET}"
+    fi
+fi
+echo "============================================"
+
+if [[ "$RUST_AVAILABLE" == "true" && "$PARITY_FAIL" -eq 0 && "$BOTH_SUCCEEDED" -gt 0 ]]; then
+    echo -e "${GREEN}${BOLD}SUCCESS: All $PARITY_PASS files have matching typed trees!${RESET}"
+elif [[ "$BOTH_SUCCEEDED" -gt 0 ]]; then
+    echo -e "${YELLOW}${BOLD}Parity: $PARITY_PASS/$BOTH_SUCCEEDED files match ($PARITY_PCT%)${RESET}"
 fi
 
-# Show failures
-if [[ -n "$OCAML_FAILURES" && "$OCAML_FAIL" -gt 0 && "$OCAML_FAIL" -le 50 ]]; then
+if [[ "$PARITY_FAIL" -gt 0 && -n "$PARITY_FAILURES" ]]; then
     echo ""
-    echo -e "${YELLOW}OCaml failures:${RESET}"
-    echo -e "$OCAML_FAILURES"
-fi
-
-if [[ "$RUST_AVAILABLE" == "true" && -n "$RUST_FAILURES" && "$RUST_FAIL" -gt 0 && "$RUST_FAIL" -le 50 ]]; then
-    echo ""
-    echo -e "${YELLOW}Rust failures:${RESET}"
-    echo -e "$RUST_FAILURES"
-fi
-
-if [[ "$RUST_AVAILABLE" == "true" && -n "$PARITY_FAILURES" && "$PARITY_FAIL" -gt 0 ]]; then
-    echo ""
-    echo -e "${YELLOW}Parity failures (diffs saved in $TEMP_DIR/diffs/):${RESET}"
+    echo -e "${YELLOW}Parity failures ($PARITY_FAIL):${RESET}"
     echo -e "$PARITY_FAILURES"
 fi
 
-# Calculate and display parity percentage
-if [[ "$RUST_AVAILABLE" == "true" ]]; then
-    # Only count files where both compilers succeeded
-    BOTH_SUCCEEDED=$((PARITY_PASS + PARITY_FAIL))
-    if [[ "$BOTH_SUCCEEDED" -gt 0 ]]; then
-        PARITY_PCT=$((100 * PARITY_PASS / BOTH_SUCCEEDED))
-        echo ""
-        echo "============================================"
-        if [[ "$PARITY_FAIL" -eq 0 ]]; then
-            echo -e "${GREEN}${BOLD}SUCCESS: All $PARITY_PASS files have matching typed trees!${RESET}"
-        else
-            echo -e "${YELLOW}${BOLD}Parity: $PARITY_PASS/$BOTH_SUCCEEDED files match ($PARITY_PCT%)${RESET}"
-        fi
-    fi
-fi
+echo -e "  [timer] Total: $(timer_elapsed $SCRIPT_START)"
+echo -e "Diffs saved in: $TEMP_DIR/diffs/"
