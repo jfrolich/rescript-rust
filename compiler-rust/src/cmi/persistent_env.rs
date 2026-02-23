@@ -43,6 +43,11 @@ pub struct PersistentEnv {
     cache: HashMap<String, Option<PersStruct>>,
     /// Load path: list of directories to search for .cmi files
     load_path: Vec<PathBuf>,
+    /// Alias prefix rewrites: flattened_name -> qualified_path.
+    /// Populated when loading a CMI that has MtyAlias submodules
+    /// (e.g., Stdlib.cmi has module JSON = Stdlib_JSON, so we record
+    /// "Stdlib_JSON" → Pdot(Pident("Stdlib"), "JSON")).
+    alias_prefix_rewrites: HashMap<String, Path>,
 }
 
 impl PersistentEnv {
@@ -51,6 +56,7 @@ impl PersistentEnv {
         PersistentEnv {
             cache: HashMap::new(),
             load_path: Vec::new(),
+            alias_prefix_rewrites: HashMap::new(),
         }
     }
 
@@ -85,7 +91,7 @@ impl PersistentEnv {
     }
 
     /// Load a module from a .cmi file.
-    fn load_module<'a>(&self, name: &str, ctx: &'a TypeContext<'a>) -> Option<PersStruct> {
+    fn load_module<'a>(&mut self, name: &str, ctx: &'a TypeContext<'a>) -> Option<PersStruct> {
         // Search for the CMI file
         let cmi_filename = format!("{}.cmi", name);
         let full_path = self.find_in_path_uncap(&cmi_filename)?;
@@ -114,6 +120,30 @@ impl PersistentEnv {
 
         // Also recursively substitute paths in sub-module signatures
         substitute_submodule_paths(&signature, &module_path, ctx);
+
+        // If this module has a registered alias rewrite (e.g., "Stdlib_JSON" was
+        // registered when loading Stdlib.cmi), apply depth-restricted prefix
+        // rewriting: only rewrite Tconstr paths where the flattened name appears
+        // at depth >= 2 (i.e., as a nested module prefix, not the direct parent).
+        // This matches OCaml's behavior where:
+        // - Pdot(Pident("Stdlib_JSON"), "t") stays as-is (direct type access)
+        // - Pdot(Pdot(Pident("Stdlib_JSON"), "Classify"), "t") gets rewritten
+        //   to Pdot(Pdot(Pdot(Pident("Stdlib"), "JSON"), "Classify"), "t")
+        if let Some(qualified_path) = self.alias_prefix_rewrites.get(name).cloned() {
+            rewrite_deep_prefix_in_sig(&signature, name, &qualified_path, ctx);
+        }
+
+        // Collect alias submodule mappings: when a module has submodules declared
+        // as MtyAlias (e.g., Stdlib has module JSON = Stdlib_JSON), record the
+        // mapping so that when Stdlib_JSON.cmi is later loaded, its type paths
+        // get rewritten from Pident("Stdlib_JSON") to Pdot(Pident("Stdlib"), "JSON").
+        // Use the qualified path (if available) so nested aliases produce fully
+        // qualified paths. E.g., Stdlib_Intl's "NumberFormat" alias becomes
+        // Pdot(Pdot(Pident("Stdlib"), "Intl"), "NumberFormat") not
+        // Pdot(Pident("Stdlib_Intl"), "NumberFormat").
+        let effective_module_path = self.alias_prefix_rewrites.get(name).cloned()
+            .unwrap_or_else(|| module_path.clone());
+        collect_alias_rewrites(&signature, &effective_module_path, &mut self.alias_prefix_rewrites);
 
         Some(PersStruct {
             ps_name: cmi.cmi_name,
@@ -1300,6 +1330,257 @@ fn substitute_submodule_paths(
                 substitute_submodule_paths(sub_sig, &sub_path, ctx);
             }
         }
+    }
+}
+
+/// Collect alias rewrite mappings from MtyAlias submodules.
+/// When a module has `module JSON = Stdlib_JSON` (MtyAlias), record
+/// "Stdlib_JSON" → Pdot(Pident("Stdlib"), "JSON") so that when
+/// Stdlib_JSON.cmi is later loaded, its types get rewritten.
+fn collect_alias_rewrites(
+    sig_items: &[SignatureItem],
+    module_path: &Path,
+    rewrites: &mut HashMap<String, Path>,
+) {
+    for item in sig_items {
+        if let SignatureItem::SigModule(id, md, _) = item {
+            if let ModuleType::MtyAlias(_, alias_path) = &md.md_type {
+                // The alias target is typically Pident("Stdlib_JSON") for
+                // flattened submodules. Record the mapping.
+                if let Path::Pident(alias_id) = alias_path {
+                    let qualified = Path::pdot(module_path.clone(), id.name());
+                    rewrites
+                        .entry(alias_id.name().to_string())
+                        .or_insert(qualified);
+                }
+            }
+            // Also recurse into MtySignature submodules to find nested aliases
+            if let ModuleType::MtySignature(sub_sig) = &md.md_type {
+                let sub_path = Path::pdot(module_path.clone(), id.name());
+                collect_alias_rewrites(sub_sig, &sub_path, rewrites);
+            }
+        }
+    }
+}
+
+/// Depth-restricted prefix rewriting for an entire signature.
+/// Only rewrites Tconstr paths where old_name appears as a module prefix
+/// at depth >= 2 (not as the direct parent of a type name).
+fn rewrite_deep_prefix_in_sig(
+    sig_items: &[SignatureItem],
+    old_name: &str,
+    new_prefix: &Path,
+    ctx: &TypeContext<'_>,
+) {
+    let mut visited = HashSet::new();
+
+    for item in sig_items {
+        match item {
+            SignatureItem::SigValue(_id, desc) => {
+                rewrite_deep_prefix_expr(desc.val_type, old_name, new_prefix, ctx, &mut visited);
+            }
+            SignatureItem::SigType(_id, decl, _) => {
+                for &param in &decl.type_params {
+                    rewrite_deep_prefix_expr(param, old_name, new_prefix, ctx, &mut visited);
+                }
+                if let Some(manifest) = decl.type_manifest {
+                    rewrite_deep_prefix_expr(manifest, old_name, new_prefix, ctx, &mut visited);
+                }
+                match &decl.type_kind {
+                    TypeKind::TypeVariant(constrs) => {
+                        for cd in constrs {
+                            match &cd.cd_args {
+                                crate::types::decl::ConstructorArguments::CstrTuple(args) => {
+                                    for &arg in args {
+                                        rewrite_deep_prefix_expr(
+                                            arg, old_name, new_prefix, ctx, &mut visited,
+                                        );
+                                    }
+                                }
+                                crate::types::decl::ConstructorArguments::CstrRecord(labels) => {
+                                    for lbl in labels {
+                                        rewrite_deep_prefix_expr(
+                                            lbl.ld_type, old_name, new_prefix, ctx, &mut visited,
+                                        );
+                                    }
+                                }
+                            }
+                            if let Some(res) = cd.cd_res {
+                                rewrite_deep_prefix_expr(
+                                    res, old_name, new_prefix, ctx, &mut visited,
+                                );
+                            }
+                        }
+                    }
+                    TypeKind::TypeRecord(labels, _) => {
+                        for lbl in labels {
+                            rewrite_deep_prefix_expr(
+                                lbl.ld_type, old_name, new_prefix, ctx, &mut visited,
+                            );
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            SignatureItem::SigTypext(_id, ext, _) => {
+                for &param in &ext.ext_type_params {
+                    rewrite_deep_prefix_expr(param, old_name, new_prefix, ctx, &mut visited);
+                }
+                match &ext.ext_args {
+                    crate::types::decl::ConstructorArguments::CstrTuple(args) => {
+                        for &arg in args {
+                            rewrite_deep_prefix_expr(
+                                arg, old_name, new_prefix, ctx, &mut visited,
+                            );
+                        }
+                    }
+                    crate::types::decl::ConstructorArguments::CstrRecord(labels) => {
+                        for lbl in labels {
+                            rewrite_deep_prefix_expr(
+                                lbl.ld_type, old_name, new_prefix, ctx, &mut visited,
+                            );
+                        }
+                    }
+                }
+                if let Some(ret) = ext.ext_ret_type {
+                    rewrite_deep_prefix_expr(ret, old_name, new_prefix, ctx, &mut visited);
+                }
+            }
+            SignatureItem::SigModule(_, md, _) => {
+                // Recurse into sub-module signatures
+                if let ModuleType::MtySignature(sub_sig) = &md.md_type {
+                    rewrite_deep_prefix_in_sig(sub_sig, old_name, new_prefix, ctx);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Walk a type expression and rewrite Tconstr paths where old_name appears
+/// at depth >= 2 as a module prefix. Depth 1 (direct parent) is preserved.
+fn rewrite_deep_prefix_expr(
+    ty_ref: TypeExprRef,
+    old_name: &str,
+    new_prefix: &Path,
+    ctx: &TypeContext<'_>,
+    visited: &mut HashSet<usize>,
+) {
+    if !visited.insert(ty_ref.0) {
+        return;
+    }
+
+    let desc = ctx.get_desc(ty_ref);
+
+    match &*desc {
+        TypeDesc::Tconstr { path, args, .. } => {
+            // Only rewrite if the path has depth >= 2 for the old_name prefix.
+            // Pdot(Pident("old_name"), "t") → depth 1, don't rewrite
+            // Pdot(Pdot(Pident("old_name"), "Sub"), "t") → depth 2, rewrite
+            if let Some(new_path) = rewrite_path_deep(path, old_name, new_prefix) {
+
+                let mut new_desc = (*desc).clone();
+                if let TypeDesc::Tconstr { ref mut path, .. } = new_desc {
+                    *path = new_path;
+                }
+                ctx.set_desc(ty_ref, new_desc);
+            }
+            for &arg in args {
+                rewrite_deep_prefix_expr(arg, old_name, new_prefix, ctx, visited);
+            }
+        }
+        TypeDesc::Tarrow { arg, ret, .. } => {
+            rewrite_deep_prefix_expr(arg.typ, old_name, new_prefix, ctx, visited);
+            rewrite_deep_prefix_expr(*ret, old_name, new_prefix, ctx, visited);
+        }
+        TypeDesc::Ttuple(types) => {
+            for &t in types {
+                rewrite_deep_prefix_expr(t, old_name, new_prefix, ctx, visited);
+            }
+        }
+        TypeDesc::Tlink(t) => {
+            rewrite_deep_prefix_expr(*t, old_name, new_prefix, ctx, visited);
+        }
+        TypeDesc::Tsubst(t) => {
+            rewrite_deep_prefix_expr(*t, old_name, new_prefix, ctx, visited);
+        }
+        TypeDesc::Tpoly { body, vars } => {
+            rewrite_deep_prefix_expr(*body, old_name, new_prefix, ctx, visited);
+            for &v in vars {
+                rewrite_deep_prefix_expr(v, old_name, new_prefix, ctx, visited);
+            }
+        }
+        TypeDesc::Tobject { fields, .. } => {
+            rewrite_deep_prefix_expr(*fields, old_name, new_prefix, ctx, visited);
+        }
+        TypeDesc::Tfield { typ, rest, .. } => {
+            rewrite_deep_prefix_expr(*typ, old_name, new_prefix, ctx, visited);
+            rewrite_deep_prefix_expr(*rest, old_name, new_prefix, ctx, visited);
+        }
+        TypeDesc::Tvariant(row) => {
+            rewrite_deep_prefix_expr(row.row_more, old_name, new_prefix, ctx, visited);
+            for field in &row.row_fields {
+                match &field.1 {
+                    crate::types::type_expr::RowField::Rpresent(Some(t)) => {
+                        rewrite_deep_prefix_expr(*t, old_name, new_prefix, ctx, visited);
+                    }
+                    crate::types::type_expr::RowField::Reither { types, .. } => {
+                        for &t in types {
+                            rewrite_deep_prefix_expr(t, old_name, new_prefix, ctx, visited);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        TypeDesc::Tpackage { path, args, .. } => {
+            if let Some(new_path) = rewrite_path_deep(path, old_name, new_prefix) {
+                let mut new_desc = (*desc).clone();
+                if let TypeDesc::Tpackage { ref mut path, .. } = new_desc {
+                    *path = new_path;
+                }
+                ctx.set_desc(ty_ref, new_desc);
+            }
+            for &arg in args {
+                rewrite_deep_prefix_expr(arg, old_name, new_prefix, ctx, visited);
+            }
+        }
+        TypeDesc::Tvar(_) | TypeDesc::Tunivar(_) | TypeDesc::Tnil => {}
+    }
+}
+
+/// Rewrite a path only when old_name appears at depth >= 2.
+/// Pdot(Pident("old"), "t") → None (depth 1, don't rewrite)
+/// Pdot(Pdot(Pident("old"), "Sub"), "t") → Some(Pdot(Pdot(new_prefix, "Sub"), "t"))
+fn rewrite_path_deep(path: &Path, old_name: &str, new_prefix: &Path) -> Option<Path> {
+    match path {
+        // Pident("old_name") → depth 0 as type path: don't rewrite
+        Path::Pident(_) => None,
+        Path::Pdot(inner, name, pos) => {
+            match inner.as_ref() {
+                // Pdot(Pident("old_name"), "t") → depth 1: don't rewrite
+                Path::Pident(id) if id.name() == old_name => None,
+                // Pdot(Pdot(...), name) → check if inner has a rewritable prefix
+                _ => {
+                    let rewritten_inner = rewrite_inner_prefix(inner, old_name, new_prefix)?;
+                    Some(Path::Pdot(Box::new(rewritten_inner), name.clone(), *pos))
+                }
+            }
+        }
+        Path::Papply(_, _) => None,
+    }
+}
+
+/// Rewrite old_name in a module path (at any depth).
+/// Used for the inner part of a depth >= 2 path.
+fn rewrite_inner_prefix(path: &Path, old_name: &str, new_prefix: &Path) -> Option<Path> {
+    match path {
+        Path::Pident(id) if id.name() == old_name => Some(new_prefix.clone()),
+        Path::Pdot(inner, name, pos) => {
+            let rewritten_inner = rewrite_inner_prefix(inner, old_name, new_prefix)?;
+            Some(Path::Pdot(Box::new(rewritten_inner), name.clone(), *pos))
+        }
+        _ => None,
     }
 }
 
