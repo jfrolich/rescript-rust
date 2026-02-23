@@ -747,12 +747,20 @@ fn compile_file(
     // When dump_typed_sexp with Rust parser: skip OCaml bsc entirely,
     // just typecheck in-process and write sexp.
     if dump_typed_sexp && use_rust_parser {
+        // Resolve include paths relative to build_path_abs (lib/bs), since compiler args
+        // use relative paths like "../ocaml" that are meant to be resolved from lib/bs.
         let mut include_paths: Vec<PathBuf> = Vec::new();
         let mut runtime_path: Option<PathBuf> = None;
         let mut i = 0;
         while i < to_mjs_args.len() {
             if to_mjs_args[i] == "-I" && i + 1 < to_mjs_args.len() {
-                include_paths.push(PathBuf::from(&to_mjs_args[i + 1]));
+                let p = PathBuf::from(&to_mjs_args[i + 1]);
+                let resolved = if p.is_relative() {
+                    build_path_abs.join(&p)
+                } else {
+                    p
+                };
+                include_paths.push(resolved);
                 i += 2;
             } else if to_mjs_args[i] == "-runtime-path" && i + 1 < to_mjs_args.len() {
                 runtime_path = Some(PathBuf::from(&to_mjs_args[i + 1]));
@@ -775,19 +783,23 @@ fn compile_file(
         let sexp_path = ocaml_build_path_abs.join(format!("{basename}.sexp"));
         if let Some(stored_ast) = stored {
             if let Ok(mut file) = std::fs::File::create(&sexp_path) {
-                match stored_ast {
+                let result = match stored_ast {
                     super::build_types::StoredAst::Structure(arena, structure) => {
-                        let _ = rescript_compiler::driver::typecheck_stored_structure_and_dump_sexp(
+                        rescript_compiler::driver::typecheck_stored_structure_and_dump_sexp(
                             arena, structure, &opts, &mut file,
-                        );
+                        )
                     }
                     super::build_types::StoredAst::Signature(arena, signature) => {
-                        let _ = rescript_compiler::driver::typecheck_stored_signature_and_dump_sexp(
+                        rescript_compiler::driver::typecheck_stored_signature_and_dump_sexp(
                             arena, signature, &opts, &mut file,
-                        );
+                        )
                     }
-                }
+                };
+                let _ = result;
             }
+        } else {
+            // No stored AST — create empty sexp file so downstream knows it was attempted
+            let _ = std::fs::File::create(&sexp_path);
         }
 
         return Ok(None);
