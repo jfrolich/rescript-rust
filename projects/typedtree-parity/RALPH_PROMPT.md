@@ -10,10 +10,10 @@ You are working on achieving **100% typedtree parity** between the Rust compiler
 - Parser/binary parity guard is fully green
 
 **IMPORTANT: Read `RALPH_GUIDANCE.md` before starting work.** It contains:
-- Detailed root cause analysis of all 50 failures, categorized into 4 clusters
+- Detailed root cause analysis of all 50 failures — caused by TYPE CHECKER sharing, NOT the serializer
 - Exact code changes needed for each fix (with before/after patterns)
-- Known anti-patterns that cause regressions (DO NOT RETRY)
-- Priority order: cycle detection (38 tests) → identity (6) → type_function (3) → driver (3) → hard (3)
+- Known anti-patterns that cause regressions (DO NOT RETRY — especially serializer cycle detection changes!)
+- Priority order: copy_type_cached placeholders (~40) → Pexp_ident sharing (~80) → type_function (~3) → infrastructure (~6) → non-generic identity (~6) → hard (3)
 
 ## Core Principle: 1:1 OCaml Port
 
@@ -88,12 +88,16 @@ Never run Rust compiler/test commands without timeout.
 5. Require parity delta after each successful fix.
 
 **IMPORTANT: Follow the priority order in RALPH_GUIDANCE.md:**
-1. **sexp_typedtree.rs cycle detection** (~38 tests) — stack-based marking, evaluation order, row_field_repr_ctx
-2. **ctype.rs non-generic identity** (~6 tests) — Tarrow/Tobject/Tfield/Tnil ReturnSelf
-3. **typecore.rs begin_def/generalize/instance** (~3 tests) — type_function pattern/body cycle
-4. **driver.rs interface constraints** (~3 tests) — apply_interface_constraints
-5. **typemod.rs supporting fixes** — force_generalize, init_def, env threading
-6. **Hard failures** — mario_game, reasonReact, defunctor_make_test
+1. **ctype.rs `copy_type_cached` placeholder caching** (~40 tests) — match OCaml's `Tsubst` pattern: allocate first, cache, recurse, fill in
+2. **typecore.rs `Pexp_ident` monomorphic sharing** (~80 tests) — reuse source type by identity for non-generic values
+3. **typecore.rs `type_function` instantiation** (~3 tests) — `instance(new_generic_arrow(...))` pattern
+4. **Small type checker fixes** — link_type, exp_extra ordering, object fold ordering, etc.
+5. **typemod.rs/driver.rs infrastructure** — force_generalize, interface constraints, init_def
+6. **typecore.rs begin_def/generalize/instance** (~3 tests) — AFTER update_level_expand guard
+7. **ctype.rs non-generic Tarrow/Tobject/Tfield/Tnil identity** (~6 tests) — AFTER steps 1-6
+8. **Hard failures** — mario_game, reasonReact, defunctor_make_test
+
+**NEVER CHANGE sexp_typedtree.rs CYCLE DETECTION** — permanent marking is correct. Stack-based = 607→220 regression. See RALPH_GUIDANCE.md.
 
 ## Commit Rules
 
