@@ -111,13 +111,31 @@ This repo was reconstructed after accidental deletion. The base comes from a `/t
 
 ## Re-apply Tasks (611 → ~654)
 
-- [x] **1A. ~~Stack-based cycle detection~~ INVALID** — Typed-ast-parity uses permanent marking. Stack-based causes 610→220 regression. DO NOT ATTEMPT.
-- [x] **1B. Non-generic Tarrow/Tfield/Tnil: COPY not identity** — Verified typed-ast-parity COPIES these types. Reverted from ReturnSelf to copy. Result: 610→611 (gained bal_set_mini.res). Tobject stays ReturnSelf for stack overflow safety.
-- [ ] **1C. begin_def/generalize/instance in typecore.rs type_function (~3 tests)** — Add begin_def before pattern typing, end_def after, generalize pattern types, instance() for body env. Also extend update_level_expand guard to skip ALL local Pident types.
-- [ ] **1D. ~~force_generalize skip for Pmod_structure~~ NEEDS VERIFICATION** — Does NOT exist on typed-ast-parity branch. May have been added independently.
-- [ ] **1E. ~~Interface constraint propagation in driver.rs~~ NEEDS VERIFICATION** — `apply_interface_constraints`, `propagate_sig_types`, `try_alias_param_propagation` do NOT exist on typed-ast-parity branch.
-- [ ] **1F. Supporting infrastructure in context.rs, btype.rs, persistent_env.rs, typemod.rs** — `current_stamp()`, `new_row_field_ref`, `row_field_repr_ctx`, recursive module prefix rewriting, `init_def(current_time())` synchronization, `transl_signature` env threading.
-- [ ] **NEW: Apply remaining fixes from RALPH_GUIDANCE.md** — Fix 18 (predef variances), Fix 19 (depth-restricted prefix rewriting), Fix 3 (coercion subtype), Fix 13 (deep-copy Tvariant), Fix 9 (expand before structural match), Fix 14 (build_as_type), Fix 17 (label type param sharing), Fix 5 (shallow-copy pattern vars), Fix 7 (scrutinee type protection), Fix 16 (shallow copy nullary pattern vars), Fix 8 (force-generalize module sig), Fix 21 (GADT equations), Fix 15 (per-case generalization), Fix 24 (begin_def in type_function), Fix 4 (qualified label lookup), Fix 20 (local Pdot expansion guard).
+**Completed:**
+- [x] **1A. Stack-based cycle detection** — INVALID. Causes 610→220 regression. DO NOT ATTEMPT.
+- [x] **1B. Tarrow/Tfield/Tnil: COPY not identity** — Reverted ReturnSelf to copy. 610→611.
+
+**Remaining — 15 missing fixes from typed-ast-parity session logs (see RALPH_GUIDANCE.md for full details):**
+
+- [ ] **2. Fix predef type variances in env.rs** — `option`/`list`/`result` need covariant variance. (Orig commit `06049811b`, 647→648, test: ext_array_test.res)
+- [ ] **3. Depth-restricted prefix rewriting in persistent_env.rs** — Add `min_depth` to `substitute_submodule_paths`. (Orig `b589ea199`, 648→649, test: Stdlib_TempTests.res)
+- [ ] **4. Coercion subtype approximation in typecore.rs** — In `type_coerce`, unify result with `from_ty` when still Tvar. (Orig `9c50c0ad5`, 629→630, test: type_coercion_free_vars.res)
+- [ ] **5. Deep-copy Tvariant/Tobject/Tfield in copy_type_deep** — `copy_type_deep_inner` catch-all returns original, needs deep copy. (Orig `b622d705b`, 642→643, test: jsxv4_newtype.res)
+- [ ] **6. Expand abbreviations before structural match for same-path Tconstr** — When same path + n_args>0, expand both, unify expanded. (Orig `01a5aec01`, 638→639, tests: unboxed_use_case.res, ExternalArity.res)
+- [ ] **7. build_as_type for Tpat_variant and Tpat_or** — Add Tpat_variant (open row+Rpresent) and Tpat_or (open row). (Orig `342f2eeb8`, 643→644, test: more_poly_variant_test.res)
+- [ ] **8. Label type param sharing** — Add `remap_label_type_to_params` so lbl_arg/lbl_res share Tvar nodes. (Orig `7957bdca3`, 646→647, test: gpr_4274_test.res)
+- [ ] **9. Shallow-copy pattern variable types** — Shallow Tconstr copies for pattern vars with non-empty args. (Orig `d75afe709`, 631→634, +3 tests)
+- [ ] **10. Protect scrutinee type from pattern unification** — Shallow copy when instance() returns identity. (Orig `d74b94a6f`, 636→637, test: option_repr_test.res)
+- [ ] **11. Shallow copy nullary pattern var types** — Prevent scrutinee contamination via body unification. (Orig `1d940b052`, 645→646, test: reasonReactRouter.res)
+- [ ] **12. Force-generalize module sig value types** — Walk sig types to GENERIC_LEVEL (exclude nullary Tconstr). (Orig `a66dcf40f`, 637→638, net +1)
+- [ ] **13. GADT equation support** — gadt_equations, with_gadt_mode, add_gadt_equation, is_newtype_path. Complex. (Orig `6660a316f`, 650→651, test: js_json_test.res)
+- [ ] **14. Per-case pattern generalization in type_case_impl** — begin_def/end_def/generalize around pattern typing. Replaces fix 9. (Orig `95e8141e5`, 644→645)
+- [ ] **15. begin_def/generalize/instance in type_function** — Same as 14 for type_function. Needs update_level_expand Pident guard (committed). (Orig `4c45ce41b`, 653→654, test: ticker.res)
+- [ ] **16. Stack-based cycle detection — TRY LAST** — On old branch: +16 (613→629). Current branch: 610→220 REGRESSION. Only after all above fixes. (Orig `bb5a4d7b2`)
+
+**Partial fixes:**
+- [ ] **P1. Qualified label lookup last-defined** — Return last match for ambiguous labels. (Orig `3508b51b5`, 630→631, test: Stdlib_Intl_DateTimeFormatTest.res)
+- [ ] **P2. Generalize local Pdot expansion guard** — Extend from `.t`/`.cmp` to ALL nullary Pdot with local roots. (Orig `c89d6d802`, 649→650, test: topsort_test.res)
 
 ---
 

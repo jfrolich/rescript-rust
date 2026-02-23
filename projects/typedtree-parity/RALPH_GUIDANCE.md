@@ -4,272 +4,243 @@
 **Current:** 607/657 (50 failures) on `typed-tree-parity-2`
 **Previous Best:** 654/657 on `typed-ast-parity` (lost in repo reconstruction)
 
----
-
-## CRITICAL: Do NOT Change the Sexp Serializer's Cycle Detection
-
-**The sexp_typedtree.rs serializer uses permanent marking. This is CORRECT. Do NOT change it.**
-
-Five alternative serializer approaches have been tried. ALL failed or regressed:
-
-| Approach | Result |
-|----------|--------|
-| Stack-based (temporary) marking | 607 → 220 (massive regression) |
-| One-level look-ahead | No improvement |
-| Hybrid marking | No improvement |
-| Raw TypeExprRef keys | No improvement |
-| Leaf-node skip | 607 → 239 (massive regression) |
-
-**Why serializer changes don't work:** The root cause of cycle diffs is NOT in the serializer — it's in the **type checker's sharing semantics**. OCaml's `instance()`/`copy()` creates more separate physical type nodes than Rust does. When two subtrees share the same arena node in Rust but have separate physical objects in OCaml, the Rust serializer correctly detects a "cycle" (revisited node) while OCaml expands both independently. Conversely, when OCaml has a real cycle through Tlink chains, Rust may not share the same nodes. The fix is to make Rust's type checker produce the **same sharing pattern** as OCaml.
-
-**Currently-passing tests rely on Rust's "false cycles" to coincidentally match OCaml's real cycles.** Stack-based marking removes all false cycles, destroying these coincidental matches → massive regression.
+This document lists the **exact fixes** from the `typed-ast-parity` branch (612→654 range), verified against Claude session logs. Each fix has its original parity delta, commit hash, and description. We've verified which are present vs missing on the current branch.
 
 ---
 
-## Executive Summary
+## CRITICAL: Stack-Based Cycle Detection
 
-The 50 failing tests are caused by differences in type checker behavior, NOT the serializer. The path from 607 → 654 was previously achieved on the `typed-ast-parity` branch through **11 specific type checker fixes**. These need to be re-applied in order.
+On the old `typed-ast-parity` branch, stack-based cycle detection was applied early (at parity 613) and gained +16 tests. **On the current branch it causes 607→220 regression.**
 
-The fixes fall into 3 phases:
-1. **Type sharing fixes** (~38 tests) — Make `copy_type_cached` and `instance()` produce same sharing as OCaml
-2. **Scoping/level fixes** (~6 tests) — `type_function` begin_def/generalize/instance, non-generic identity
-3. **Infrastructure fixes** (~6 tests) — Interface constraints, module typing, supporting infrastructure
+**Why:** The current branch has typecore.rs/ctype.rs from the FINAL state (654), which has non-generic identity returns, deep copies, etc. creating MORE arena node sharing than the old branch had at 613. Stack-based detection + more sharing = massive false expansions.
 
-Plus 3 "hard" failures that were never solved (same 3 from 654/657):
-- `mario_game.res`, `reasonReact.res`, `defunctor_make_test.res`
+**When to try:** Only AFTER all other missing type checker fixes are applied. Even then, test carefully.
 
----
-
-## Phase 1: Type Checker Sharing Fixes (607 → ~645)
-
-These are the highest-impact fixes. They change how `copy_type_cached` and `instance()` create/reuse type nodes, making Rust's type graph sharing match OCaml's. These fixes were the core of the typed-ast-parity branch's journey from 330 → 654.
-
-### 1A. `copy_type_cached` Generic Sharing via Placeholders (~40 tests)
-
-**This is the single highest-impact fix. Do this FIRST.**
-
-**Problem:** When `copy_type_cached` copies a generic type node, it currently recurses into children first, then creates the copy. OCaml's `copy` (ctype.ml ~line 863) uses `Tsubst` as a placeholder — it allocates the copy node FIRST, caches it with `Tsubst`, then fills in children. This means if the same generic node is encountered again during recursion, it returns the already-allocated placeholder instead of creating a second copy.
-
-Rust's approach creates separate copies for each encounter of the same generic node → different sharing pattern → different cycle detection results.
-
-**What to change in `compiler-rust/src/types/ctype.rs` `copy_type_cached`:**
-
-1. For generic types that need structural copying (Tconstr with args, Ttuple, Tarrow, etc.), **allocate a placeholder node FIRST** and insert it into the copy cache
-2. Then recurse into children
-3. Then fill in the placeholder with the real children
-4. If the same node is encountered during recursion, return the cached placeholder
-
-This matches OCaml's pattern:
-```ocaml
-(* OCaml ctype.ml copy *)
-let t = newty2 ty.level Tnil in  (* allocate placeholder *)
-For_copy.redirect_desc scope ty (Tsubst t);  (* cache it *)
-(* ... recurse into children ... *)
-t.desc <- Tconstr(p, List.map copy tl, ref Mnil);  (* fill in *)
-```
-
-**Previously achieved:** On typed-ast-parity branch this was the first fix applied (from 330 baseline). Current branch already has partial sharing fixes, so the delta will be different.
-
-**OCaml reference:** `compiler/ml/ctype.ml` function `copy` — look for the `Tsubst` pattern.
+Five serializer approaches failed on this branch:
+- Stack-based: 607→220
+- Leaf-node skip: 607→239
+- Ancestor-path tracking: massive regression
+- One-level look-ahead: no improvement
+- Hybrid marking: no improvement
 
 ---
 
-### 1B. `Pexp_ident` Local Monomorphic Type Sharing (~80 tests)
+## Fix Inventory: What's Present vs Missing
 
-**This is the second highest-impact fix.**
+### Already Present (7 fixes)
+| # | Original Parity | Fix |
+|---|----------------|-----|
+| 1 | 612→613 | Restrict linking heuristics to Pdot paths |
+| 6 | 634→636 | Deep copy in type_newtype (subst_identity_copy) |
+| 10 | 639→640 | pressure_variants for let binding patterns |
+| 11 | 640→641 | unify_pats re-unification for polyvariant cases |
+| 12 | 641→642 | Unify-based poly variant row closure |
+| 22 | 651→652 | Label disambiguation lookup_from_type fallback |
+| 23 | 652→653 | Non-generic Tarrow/Tobject/Tfield/Tnil identity |
 
-**Problem:** When typing `Pexp_ident` (variable references), Rust calls `instance()` on every value type. For non-generic (monomorphic) types, OCaml's `instance()` returns the ORIGINAL type node by identity (since `copy` returns immediately for non-generic types). Rust's `copy_type_cached` does this selectively but misses important cases.
+### Partially Present (2 fixes)
+| # | Original Parity | Fix | What's Missing |
+|---|----------------|-----|----------------|
+| 4 | 630→631 | Qualified label lookup returns last-defined | No explicit last-match for ambiguous labels in lookup_label_in_module |
+| 20 | 649→650 | Skip expansion for local Pdot in update_level_expand | Only handles specific `.t`/`.cmp` paths, needs all nullary Pdot with local roots |
 
-For local values with non-generic types (especially nullary `Tconstr` and `Tarrow`), Rust should reuse the source type directly instead of creating a copy.
+### Missing — 15 Fixes to Apply
 
-**What to change in `compiler-rust/src/types/typecore.rs` around `Pexp_ident`:**
-
-When the value's type is non-generic:
-- For nullary `Tconstr` (especially predef types like `int`, `string`, `float`): return source type by identity
-- For `Tarrow`: return source type by identity if non-generic
-
-This reduces the number of distinct arena nodes → reduces false sharing differences → fewer cycle detection mismatches.
-
-**Previously achieved:** Major impact on typed-ast-parity branch (combined with 1A).
-
-**OCaml reference:** `compiler/ml/typecore.ml` `type_ident` → `Ctype.instance` → `copy` which returns identity for non-generic types.
-
----
-
-### 1C. Non-Generic Identity in `copy_type_cached` (~6 additional tests)
-
-**Problem:** OCaml's `copy` returns the original node for ALL non-generic types (ctype.ml line ~863: `if ty.level != generic_level then ty`). Rust does this selectively. Currently missing: `Tarrow`, `Tobject`, `Tfield`, `Tnil`.
-
-**What to change in `compiler-rust/src/types/ctype.rs` `copy_type_cached`:**
-
-Add `ReturnSelf` cases for non-generic:
-- `Tarrow` (when level is non-generic)
-- `Tobject` (when level is non-generic)
-- `Tfield` (when level is non-generic)
-- `Tnil` (when level is non-generic)
-
-**IMPORTANT:** This fix may regress if applied WITHOUT fixes 1A and 1B already in place. On the current branch (without 1A/1B), it caused 607→604 regression. On the typed-ast-parity branch (with 1A/1B), it worked correctly (652→654).
-
-**WARNING:** Do NOT extend to ALL types. `Tvariant` identity causes 1 regression. ALL non-generic types identity causes defunctor compile failure + 3 regressions.
-
-**Previously achieved:** Final polish on typed-ast-parity branch (652 → 654/657), but only AFTER 1A and 1B were in place.
-
-**OCaml reference:** `compiler/ml/ctype.ml` `copy` function — the `if ty.level != generic_level` check.
+These are ordered by recommended application order (safest/most-independent first):
 
 ---
 
-## Phase 2: Scoping and Level Fixes (~6 tests)
+## Fix 18: Predef Type Variances (647→648, +1)
 
-### 2A. `type_function` begin_def/generalize/instance Cycle (~3 tests)
+**Commit:** `06049811b`
+**File:** `compiler-rust/src/types/env.rs`
+**Test:** `ext_array_test.res`
 
-**Problem:** OCaml's `type_cases` (typecore.ml:3906-4024) follows a specific pattern:
-1. `begin_def()` — raise the definition level
-2. Type the pattern (at elevated level)
-3. `end_def()` — lower the level back
-4. `generalize` the pattern type — mark type vars at elevated level as generic
-5. `instance()` creates fresh copies for body environment
+Standard predef types (`option`, `list`, `result`) have empty `type_variance: vec![]`. Add correct variance annotations: `option` covariant, `list` covariant, `result` covariant in both params.
 
-Rust's `type_function` doesn't do this cycle. Pattern types leak into the body at wrong level.
-
-**What to change in `compiler-rust/src/types/typecore.rs` `type_function`:**
-
-```rust
-// Before typing each function case pattern:
-ctx.begin_def();
-
-// ... type the pattern ...
-
-ctx.end_def();
-generalize(ctx, pat_type);
-
-// Create fresh instance for the body environment
-let body_type = instance(ctx, pat_type);
-```
-
-**ALSO REQUIRED:** Extend the `update_level_expand` guard in `ctype.rs` to skip expansion for ALL local `Pident` types (not just nullary). Without this guard, the elevated level from `begin_def` triggers cascading `update_level_expand` issues causing 20+ regressions.
-
-**Previously achieved:** Fixed `ticker.res` on typed-ast-parity branch (combined with 1C).
-
-**WARNING:**
-- `begin_def` WITHOUT the `update_level_expand` guard = 20+ regressions
-- Copying ALL Tconstr in body env = 7 regressions
-- The `update_level_expand` guard for local Pident is essential
-
-**OCaml reference:** `compiler/ml/typecore.ml` lines 3906-4024 (`type_cases`)
+**OCaml ref:** `compiler/ml/predef.ml`
 
 ---
 
-### 2B. `type_function` exp_type Instantiation (~2 tests)
+## Fix 19: Depth-Restricted Prefix Rewriting (648→649, +1)
 
-**Problem:** OCaml's `type_function` creates the expected function type as a generic arrow and then instantiates it, producing fresh type variables for pattern and body. Rust may construct the arrow type differently.
+**Commit:** `b589ea199`
+**File:** `compiler-rust/src/cmi/persistent_env.rs`
+**Test:** `Stdlib_TempTests.res`
 
-**What to change:** In `type_function`, create the expected type via:
-```rust
-let exp_type = instance(ctx, new_generic_arrow(param_ty, body_ty));
-```
-Then re-anchor the pattern type and body type from the instantiated arrow.
-
-**Previously achieved:** Significant impact on typed-ast-parity branch (combined with 1A, 1B).
-
-**OCaml reference:** `compiler/ml/typecore.ml` `type_function` — look for how `ty_arg` and `ty_res` are derived from the expected type.
+In `substitute_submodule_paths`, add a `min_depth` parameter (default 2) so paths are only rewritten when the old module name appears as a module prefix (e.g., `Stdlib_JSON.Classify → Stdlib.JSON.Classify`) but preserved when it directly prefixes a type name (e.g., `Stdlib_Date.msSinceEpoch` stays as identity).
 
 ---
 
-## Phase 3: Infrastructure and Module Fixes (~6 tests)
+## Fix 3: Coercion Subtype Approximation (629→630, +1)
 
-### 3A. `force_generalize` Skip for `Pmod_structure` in typemod.rs
+**Commit:** `9c50c0ad5`
+**File:** `compiler-rust/src/types/typecore.rs` — `type_coerce` / `Pexp_coerce`
+**Test:** `type_coercion_free_vars.res`
 
-**Problem:** OCaml skips `force_generalize` for `Pmod_structure` to preserve non-generic levels from value restriction. This allows `instance()` to return identity for Tvars, enabling correct signature matching.
+In `type_coerce`, when there's no explicit `from_type` and `from_ty` is a fresh `new_var(None)`, unify the coercion result type with `from_ty` when `from_ty` is still an unresolved Tvar. Guard: only unify when still Tvar to avoid incorrectly replacing `type t = private int`.
 
-**What to change in `compiler-rust/src/types/typemod.rs`:** Find the `Pmod_structure` handler and skip the `force_generalize` call.
-
-**OCaml reference:** `compiler/ml/typemod.ml` `type_module_aux` — the `Pmod_structure` case.
-
----
-
-### 3B. Interface Constraint Propagation in driver.rs (~3 tests)
-
-**Problem:** When a `.resi` exists, OCaml propagates type constraints from interface to implementation through weak type variables.
-
-**What to add to `compiler-rust/src/driver.rs`:**
-
-1. `apply_interface_constraints`: After typing implementation, read CMI, walk impl and sig types in parallel, link non-generic Tvars from impl to sig types
-2. `propagate_sig_types`: Walk module signatures recursively for nested modules
-3. `try_alias_param_propagation`: Handle parametric type aliases with different arities
-
-**OCaml reference:** `compiler/ml/typemod.ml` `check_sig_item` and Includemod signature matching.
+**OCaml ref:** `compiler/ml/typecore.ml` `Pexp_coerce` handler
 
 ---
 
-### 3C. Supporting Infrastructure
+## Fix 13: Deep-Copy Tvariant/Tobject/Tfield in copy_type_deep (642→643, +1)
 
-**In `context.rs`:**
-- `current_stamp()` accessor (Rust equivalent of OCaml's `Ident.current_time()`)
-- `new_row_field_ref` public method
+**Commit:** `b622d705b`
+**File:** `compiler-rust/src/types/ctype.rs` — `copy_type_deep_inner`
+**Test:** `jsxv4_newtype.res`
 
-**In `btype.rs`:**
-- `row_field_repr_ctx` / `row_field_repr_ctx_aux`: Follow RowFieldRef links through TypeContext
+The `copy_type_deep_inner` currently returns Tvariant, Tobject, Tfield via `_ => ty` catch-all (no copy). Add proper deep copying:
+- **Tvariant**: Copy `row_fields`, `row_more`, `row_name`
+- **Tobject**: Copy fields and row variable
+- **Tfield**: Copy field components
 
-**In `persistent_env.rs`:**
-- Recursive module prefix rewriting: descend into SigModule submodules when rewriting flattened module names
+Without this, `replace_newtype_path` corrupts both copy and original.
 
-**In `typemod.rs`:**
-- `init_def(current_time())` synchronization before structure/signature items
-- `transl_signature` environment threading through open statements
-
-**WARNING:** `init_def(current_time())` before structure items WITHOUT proper guards = 11 compile failures + ~20 regressions. The Rust level system doesn't work identically to OCaml's.
+**OCaml ref:** `compiler/ml/subst.ml` `Subst.type_expr`
 
 ---
 
-### 3D. Additional Type Checker Fixes (from typed-ast-parity branch)
+## Fix 9: Expand Abbreviations Before Structural Match (638→639, +1)
 
-These smaller fixes were applied on the typed-ast-parity branch and contributed to parity improvements:
+**Commit:** `01a5aec01`
+**File:** `compiler-rust/src/types/ctype.rs` — unification
+**Tests:** `unboxed_use_case.res`, `ExternalArity.res`
 
-1. **Float identity freshening**: For repeated application idents involving floats
-2. **`link_type` name propagation**: Ensure type names propagate correctly during unification linking
-3. **`type_variables` reset**: Stop clearing `type_variables` in `type_function` (OCaml does NOT clear it)
-4. **`Pexp_constraint` generalization ordering**: `var_level` after `end_def`
-5. **`exp_extra` prepend ordering**: Insert at position 0 (not append)
-6. **Object field fold ordering**: Use `ocaml_hashtbl_fold_order` for deterministic output
-7. **Signature path substitution identity in persistent_env.rs**
-8. **Recursive module `Tmod_constraint` location fix** (490→497/653)
+When both Tconstr types have the same path and `n_args > 0`, expand both and if they expand away from Tconstr (e.g., to Tvariant for polymorphic variant aliases), unify the expanded forms directly instead of unifying args. This prevents phantom type parameters from being incorrectly concretized. Do NOT link `t1→t2` in the expansion path.
+
+**OCaml ref:** `compiler/ml/ctype.ml` `unify2` → `unify3`
 
 ---
 
-## Phase 4: Hard Failures (654 → 657)
+## Fix 14: build_as_type for Tpat_variant and Tpat_or (643→644, +1)
 
-After re-applying all Phase 1-3 fixes, you should be at ~654/657. The remaining 3 are deep structural issues that were never solved.
+**Commit:** `342f2eeb8`
+**File:** `compiler-rust/src/types/typecore.rs` — `build_as_type`
+**Test:** `more_poly_variant_test.res`
 
-### mario_game.res (248 hunks)
+Currently Tpat_variant and Tpat_or fall through to `_ => pat.pat_type`. Add:
+- **Tpat_variant**: Create single-field open row with Rpresent
+- **Tpat_or**: Open the row (`row_closed=false`, fresh `row_more`)
 
-**Root Cause A (246 hunks):** Path normalization `Pident → Pdot(Actors)`. Inside `mario_game.res`, types from local module `Actors` are referenced. OCaml preserves `Pdot(Pident("Actors"), "xy")` while Rust resolves to `Pident("xy")`.
-
-**Root Cause B (2 hunks):** Type alias `xy` expanded to `(float, float)`. OCaml preserves `Tconstr(xy, [])` but Rust expands it.
-
-### reasonReact.res (36 hunks)
-
-5 distinct sub-issues: (A) over-resolution Tvar→Tconstr(element), (B) location diffs, (C) under-resolution in WrapProps module, (D) componentSpec vs component alias, (E) Pdot(ReasonReact) path normalization.
-
-### defunctor_make_test.res (80 hunks)
-
-Functor application substitution missing. When OCaml types `Pmod_apply(F, Arg)`, it substitutes functor parameter types throughout the result. Rust returns placeholder. Plus Tvar→Tconstr under-resolution for functor params.
+**OCaml ref:** `compiler/ml/typecore.ml` `build_as_type`
 
 ---
 
-## Recommended Fix Order
+## Fix 17: Label Type Param Sharing (646→647, +1)
 
-**The order matters.** Later fixes depend on earlier ones being in place.
+**Commit:** `7957bdca3`
+**File:** `compiler-rust/src/types/typecore.rs`
+**Test:** `gpr_4274_test.res`
 
-1. **1A: `copy_type_cached` placeholder caching** — Highest impact, independent
-2. **1B: `Pexp_ident` monomorphic sharing** — Depends on 1A for full effect
-3. **2B: `type_function` exp_type instantiation** — Can be done in parallel with 1B
-4. **3D: Small type checker fixes** (link_type, exp_extra ordering, etc.) — Independent
-5. **3A: force_generalize skip** — Independent
-6. **3B: Interface constraints** — Independent
-7. **3C: Supporting infrastructure** — Supports 2A and 3B
-8. **2A: type_function begin_def/generalize/instance** — Requires `update_level_expand` guard
-9. **1C: Non-generic Tarrow/Tobject/Tfield/Tnil identity** — REQUIRES 1A, 1B, 2A to be in place first (otherwise regresses)
-10. **Phase 4: Hard failures** — After everything else
+When building `LabelDescription` from type declarations, `lbl_arg` and `lbl_res` can reference different Tvar nodes despite being the same type parameter. Add `remap_label_type_to_params` that walks label type and replaces Tvar nodes with corresponding `type_params` entries by name matching. Without this, `instance_label`'s cache breaks, leaving closure params as `Tvar(None)`.
+
+---
+
+## Fix 5: Shallow-Copy Pattern Variable Types (631→634, +3)
+
+**Commit:** `d75afe709`
+**File:** `compiler-rust/src/types/typecore.rs` — `type_function`, `type_case_impl`
+**Tests:** 3 Belt-related files
+
+When adding pattern variables to the body environment, create shallow Tconstr copies for pattern variable types that have non-empty args. Apply in `type_function` (only for non-simple-variable patterns) and `type_case_impl` (always). This gives the body its own type node to unify against while preserving pattern type identity.
+
+**Note:** Fix 15 (per-case generalization) later replaces this with proper begin_def/end_def/generalize, but this simpler version is a useful stepping stone.
+
+---
+
+## Fix 7: Protect Scrutinee Type from Pattern Unification (636→637, +1)
+
+**Commit:** `d74b94a6f`
+**File:** `compiler-rust/src/types/typecore.rs`
+**Test:** `option_repr_test.res`
+
+When `instance()` returns the scrutinee's `exp_type` by identity (non-generic predef Tconstr like `option`), pattern unification can corrupt the scrutinee's path (e.g., `option` becoming `u`). Create a shallow copy when `instance()` returns the same node.
+
+---
+
+## Fix 16: Shallow Copy Nullary Pattern Var Types (645→646, +1)
+
+**Commit:** `1d940b052`
+**File:** `compiler-rust/src/types/typecore.rs`
+**Test:** `reasonReactRouter.res`
+
+Body typing unifying pattern variable (e.g., `raw`) with `Js.String.t` contaminates shared scrutinee type, causing other patterns to show wrong path. Create shallow copy of nullary Tconstr pattern variable types for the body env.
+
+---
+
+## Fix 8: Force-Generalize Module Sig Value Types (637→638, +1 net)
+
+**Commit:** `a66dcf40f`
+**Files:** `compiler-rust/src/types/ctype.rs`, `compiler-rust/src/types/typemod.rs`
+**Tests:** `inline_map2_test.res`, `set_gen.res` (+2), `LetUnwrap.res` (-1 regression)
+
+Add `force_generalize()` that walks all reachable types in a module signature and promotes to `GENERIC_LEVEL`. **Guard:** exclude nullary Tconstr from generalization to avoid `find_simple_abbrev` remap.
+
+---
+
+## Fix 21: GADT Equation Support (650→651, +1)
+
+**Commit:** `6660a316f`
+**Files:** `compiler-rust/src/types/ctype.rs`, `compiler-rust/src/types/typecore.rs`
+**Test:** `js_json_test.res`
+
+Add GADT-aware unification preserving existential type variables. Key additions:
+- `UnifyState` with `gadt_equations` storage
+- `with_gadt_mode` context
+- `add_gadt_equation` for type constraints
+- `is_newtype_path` in ctype
+- `copy_case_type` keeps locally abstract types as Tconstr (not Tvar)
+
+**OCaml ref:** `compiler/ml/ctype.ml` `unify_gadt`
+
+---
+
+## Fix 15: Per-Case Pattern Generalization (644→645, +1)
+
+**Commit:** `95e8141e5`
+**Files:** `compiler-rust/src/types/typecore.rs`, `compiler-rust/src/types/ctype.rs`
+
+Add `begin_def()/end_def()/generalize()` around pattern typing in `type_case_impl`. This replaces/improves fix 5's shallow copy approach. Also add guard in `update_level_expand` to preserve nullary local type alias identity.
+
+---
+
+## Fix 24: begin_def/generalize/instance in type_function (653→654, +1)
+
+**Commit:** `4c45ce41b`
+**Files:** `compiler-rust/src/types/typecore.rs`, `compiler-rust/src/types/ctype.rs`
+**Test:** `ticker.res`
+
+Same pattern as fix 15 but for `type_function` specifically. **REQUIRES** extending `update_level_expand` to skip expansion for ALL local Pident types (the guard committed as `1ef01d46c` on this branch). Without the guard: 20+ regressions.
+
+---
+
+## Fix 2: Stack-Based Cycle Detection — TRY LAST (613→629, +16)
+
+**Commit:** `bb5a4d7b2`
+**File:** `compiler-rust/src/types/sexp_typedtree.rs`
+
+Switch permanent-marking cycle detection to stack-based (add on entry, remove on exit). On the old branch this gained +16 tests at parity 613. **On current branch: 607→220 regression.** Only try after ALL above fixes are applied — the sharing context must be correct first.
+
+---
+
+## Partial Fix 4: Qualified Label Lookup Last-Defined (630→631, +1)
+
+**Commit:** `3508b51b5`
+**File:** `compiler-rust/src/types/typecore.rs`
+**Test:** `Stdlib_Intl_DateTimeFormatTest.res`
+
+In `lookup_label_in_module`, when multiple record types define the same field name, return the LAST match (most recently defined). Current code has leaf-name fallback but not explicit last-match for ambiguous labels.
+
+---
+
+## Partial Fix 20: General Local Pdot Expansion Guard (649→650, +1)
+
+**Commit:** `c89d6d802`
+**File:** `compiler-rust/src/types/ctype.rs`
+**Test:** `topsort_test.res`
+
+Generalize the `update_level_expand` Pdot guard from specific `.t`/`.cmp` patterns to ALL nullary Pdot paths with local roots. This prevents expansion of type aliases like `String_set.value → string`.
 
 ---
 
@@ -277,69 +248,33 @@ Functor application substitution missing. When OCaml types `Pmod_apply(F, Arg)`,
 
 | Approach | Result | Why |
 |----------|--------|-----|
-| **Stack-based cycle detection in serializer** | **607 → 220** | **Removes false cycles that coincidentally match OCaml's real cycles** |
-| **Leaf-node cycle exemption in serializer** | **607 → 239** | **Same reason** |
-| Ancestor-path tracking in serializer | Massive regression | Same reason |
+| Stack-based cycle detection (on current branch) | 607→220 | Current sharing causes massive false expansions |
+| Leaf-node cycle exemption | 607→239 | Same issue |
 | ALL non-generic types → identity | 650/656 | defunctor compile failure + 3 regressions |
 | Non-generic Tvariant → identity | 1 regression | |
 | Blanket unify_var on pattern nodes | 619/657 | Modifies shared nodes |
-| Fresh Tvar for all pattern vars | 622/657 | Over-generalizes |
 | init_def before structure items (no guards) | 11 compile failures | Level system differences |
-| begin_def + raising param_ty level | 20+ regressions | Cascading update_level_expand |
+| begin_def + raising param_ty level (no guard) | 20+ regressions | Cascading expansion |
 | Copy ALL Tconstr in type_function body | 7 regressions | Contamination |
 | Stdlib flattened-path probes | 612→606 | Over-broad normalization |
 | UnifyMode::Pattern routing | 609→602 | Over-broad |
-| Broad non-generic Tarrow identity (alone) | 609→607 | Needs 1A/1B first |
-| Removing arg_expr_is_apply gate | Over-sharing | Worsens call sites |
 | Skipping SigValue path substitution | Parity 431/622 | Load-bearing |
-| Broad Ctype.copy all non-generic identity | Parity 585/651 | |
 
 ---
 
 ## Diagnostic Recipes
 
-### Quick single-file comparison
 ```bash
+# Quick single-file comparison
 cd tests/tests/lib/bs
 args=$(cd ../.. && timeout 10 ../../packages/@rescript/darwin-arm64/bin/rescript.exe compiler-args "src/FILE.res")
 timeout 10 ../../../../packages/@rescript/darwin-arm64/bin/bsc.exe $args -dtyped-sexp-locs "../../src/FILE.res" > /tmp/ocaml.sexp 2>&1
 timeout 10 ../../../../compiler-rust/target/release/bsc $args -dtyped-sexp-locs "../../src/FILE.res" > /tmp/rust.sexp 2>&1
 diff /tmp/ocaml.sexp /tmp/rust.sexp | head -80
-```
 
-### Count diff hunks
-```bash
+# Count diff hunks
 diff /tmp/ocaml.sexp /tmp/rust.sexp | grep "^[0-9]" | wc -l
-```
 
-### Check if failure is cycle-related
-```bash
+# Check if failure is cycle-related
 diff /tmp/ocaml.sexp /tmp/rust.sexp | grep -c "cycle"
 ```
-
----
-
-## Key Architecture Notes
-
-- **OCaml `copy` uses `Tsubst` placeholder pattern** — allocate first, cache, recurse, fill in. This is the key to correct sharing.
-- **OCaml `instance()` returns identity for ALL non-generic types** via `copy`. Rust can only do this selectively (some types cause regressions).
-- **OCaml `type_cases` processes ALL patterns before ALL bodies** (batch). Rust processes each case independently.
-- **CMI value-type path substitution is load-bearing** — can't remove without fixing type identity system.
-- **Sexp permanent marking is CORRECT** — the cycle detection differences come from the type checker, not the serializer.
-- **Record pattern fields must be sorted by `lbl_pos`** (OCaml invariant).
-- **OCaml Reither has mutable `ref option` link** — set during unification, followed by `row_field_repr`. Rust's `RowFieldRef` link is allocated but NEVER set.
-
----
-
-## Key Files Reference
-
-| File | Key Functions | Notes |
-|------|--------------|-------|
-| `compiler-rust/src/types/ctype.rs` | `copy_type_cached`, `update_level_expand`, `instance` | **Primary fix target** |
-| `compiler-rust/src/types/typecore.rs` | `type_function`, `type_case_impl`, Pexp_ident | Sharing + scoping |
-| `compiler-rust/src/types/sexp_typedtree.rs` | Cycle detection | **DO NOT CHANGE** |
-| `compiler-rust/src/types/typemod.rs` | `force_generalize`, `type_structure` | Module-level fixes |
-| `compiler-rust/src/driver.rs` | Interface constraints | New code needed |
-| `compiler-rust/src/types/context.rs` | `begin_def`, `end_def`, `new_var` | Supporting |
-| `compiler/ml/ctype.ml` | `copy` (Tsubst pattern) | OCaml reference |
-| `compiler/ml/typecore.ml` | `type_cases`, `type_function` | OCaml reference |

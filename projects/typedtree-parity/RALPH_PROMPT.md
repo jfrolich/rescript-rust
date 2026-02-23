@@ -10,10 +10,10 @@ You are working on achieving **100% typedtree parity** between the Rust compiler
 - Parser/binary parity guard is fully green
 
 **IMPORTANT: Read `RALPH_GUIDANCE.md` before starting work.** It contains:
-- Detailed root cause analysis of all 50 failures, categorized into 4 clusters
-- Exact code changes needed for each fix (with before/after patterns)
+- 15 specific missing fixes from typed-ast-parity branch (with commit hashes, OCaml refs, test names)
+- Exact code changes needed for each fix
 - Known anti-patterns that cause regressions (DO NOT RETRY)
-- Priority order: cycle detection (38 tests) → identity (6) → type_function (3) → driver (3) → hard (3)
+- **DO NOT change sexp_typedtree.rs cycle detection** — causes 607→220 regression
 
 ## Core Principle: 1:1 OCaml Port
 
@@ -87,13 +87,16 @@ Never run Rust compiler/test commands without timeout.
 4. Solve one cluster at a time with OCaml-aligned changes.
 5. Require parity delta after each successful fix.
 
-**IMPORTANT: Follow the priority order in RALPH_GUIDANCE.md:**
-1. **sexp_typedtree.rs cycle detection** (~38 tests) — stack-based marking, evaluation order, row_field_repr_ctx
-2. **ctype.rs non-generic identity** (~6 tests) — Tarrow/Tobject/Tfield/Tnil ReturnSelf
-3. **typecore.rs begin_def/generalize/instance** (~3 tests) — type_function pattern/body cycle
-4. **driver.rs interface constraints** (~3 tests) — apply_interface_constraints
-5. **typemod.rs supporting fixes** — force_generalize, init_def, env threading
-6. **Hard failures** — mario_game, reasonReact, defunctor_make_test
+**IMPORTANT: Follow the task list in RALPH_TODO.md (tasks 2-16). Key order:**
+1. **Predef variances, prefix rewriting, coercion subtype** — small, independent fixes
+2. **Deep-copy Tvariant/Tobject/Tfield, expand abbreviations, build_as_type** — ctype.rs/typecore.rs fixes
+3. **Label type param sharing, pattern var shallow copies, scrutinee protection** — typecore.rs fixes
+4. **Force-generalize module sigs, GADT equations** — complex infrastructure
+5. **Per-case generalization, begin_def in type_function** — requires update_level_expand guard
+6. **Stack-based cycle detection — TRY LAST** (regresses 607→220 on current branch, only after all above)
+7. **Hard failures** — mario_game, reasonReact, defunctor_make_test
+
+**NEVER change sexp_typedtree.rs cycle detection until step 6. It WILL regress.**
 
 ## Commit Rules
 
