@@ -54,10 +54,31 @@ fn execute_post_build_command(cmd: &str, js_file_path: &Path) -> Result<()> {
 /// Everything before that is warnings.
 /// Returns (warnings, Option<sexp>).
 fn extract_sexp_from_stderr(stderr: &str) -> (String, Option<String>) {
-    // Find the start of the sexp - it begins with "(structure" or "(signature"
-    if let Some(pos) = stderr.find("(structure").or_else(|| stderr.find("(signature")) {
+    // Find the start of the sexp - it begins with "(structure" or "(signature" at the start of a line
+    let pos = stderr
+        .find("\n(structure")
+        .map(|p| p + 1)
+        .or_else(|| stderr.find("\n(signature").map(|p| p + 1))
+        .or_else(|| {
+            if stderr.starts_with("(structure") || stderr.starts_with("(signature") {
+                Some(0)
+            } else {
+                None
+            }
+        });
+    if let Some(pos) = pos {
         let warnings = stderr[..pos].to_string();
-        let sexp = stderr[pos..].to_string();
+        let sexp_region = &stderr[pos..];
+        // The sexp never contains blank lines, so trim at the first blank line
+        let mut sexp = if let Some(blank_pos) = sexp_region.find("\n\n") {
+            sexp_region[..blank_pos].to_string()
+        } else {
+            sexp_region.trim_end().to_string()
+        };
+        // Ensure trailing newline for consistency with Rust sexp output
+        if !sexp.ends_with('\n') {
+            sexp.push('\n');
+        }
         (warnings, Some(sexp))
     } else {
         (stderr.to_string(), None)
@@ -830,9 +851,7 @@ fn compile_file(
             "Could not compile file. Error: {e}. Path to AST: {ast_path:?}"
         )),
         Ok(x) => {
-            let raw_stderr = std::str::from_utf8(&x.stderr)
-                .expect("stderr should be valid utf8")
-                .to_string();
+            let raw_stderr = String::from_utf8_lossy(&x.stderr).to_string();
 
             let err = if dump_typed_sexp {
                 let (warnings, sexp) = extract_sexp_from_stderr(&raw_stderr);
