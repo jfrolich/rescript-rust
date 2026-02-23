@@ -52,6 +52,69 @@ timeout 300 ./scripts/test_typedtree_parity.sh --with-locs --no-build --quick
 
 ---
 
+## Repo Reconstruction Context
+
+This repo was reconstructed after accidental deletion. The base comes from a `/tmp/rescript_head_clean/` worktree (Feb 18, ~611/657 state on HEAD branch, NOT the `typed-ast-parity` branch which had reached ~654/657). The two most-modified files were overlaid from more recent `/tmp` snapshots:
+- `typecore.rs` from `/tmp/typecore_with_fix.rs` (Feb 22, 12,595 lines)
+- `ctype.rs` from `/tmp/ctype_current.rs` (Feb 21, 4,121 lines)
+
+**Other files (`typemod.rs`, `sexp_typedtree.rs`, `context.rs`, `driver.rs`) are at the Feb 18 worktree state and may be missing fixes applied between Feb 18-22.** Recovery artifacts are saved at `~/dev/recovery/` (3.6 GB).
+
+### Fixes Applied Between 611/657 → 654/657 (may need re-applying)
+
+#### In `ctype.rs` (overlaid from Feb 21 — should have most fixes)
+- **`copy_type_cached` selective non-generic identity**: Return `ReturnSelf` for Tvar, Tunivar, predef Tconstr (nullary + concrete args), Ttuple, Tarrow, Tobject, Tfield, Tnil. Do NOT return identity for all Tconstr, Tvariant, or Tpackage.
+- **`update_level_expand` path preservation guards**: Skip expansion for nullary Pident local types and nullary Pdot paths with local roots.
+- **`try_expand_head` split**: Into `try_expand_head` (with normalization) and `try_expand_head_inner` (without) for level updates.
+- **Shared RowFieldRef linking**: Reither/Reither unification creates shared refs (OCaml ctype.ml:2700-2704).
+
+#### In `typecore.rs` (overlaid from Feb 22 — should have all fixes)
+- **`type_function` begin_def/generalize/instance cycle**: begin_def before pattern typing, end_def after, generalize pattern types, instance() for body env. (OCaml typecore.ml:3906-4024)
+- **`type_function` stop clearing `type_variables`**: OCaml does NOT clear in type_function.
+- **`type_argument` re-unification**: Preserve type alias identity in record field values.
+- **Pattern variable shallow copy**: Protect from body unification contamination.
+- **Scrutinee type protection**: Shallow-copy Tconstr when instance() returns identity.
+- **`close_variant_row_for_pat_type` rewrite**: Match OCaml parmatch.ml:808-832.
+- **Label disambiguation `lookup_from_type`**: Add before leaf-name fallback.
+
+#### In `typemod.rs` (MAY NEED RE-APPLYING — at Feb 18 state)
+- **`init_def(current_time())` synchronization**: Before each structure item in `type_structure`, before each signature item in `transl_signature`, in functor body, and in rec module. (OCaml typemod.ml lines ~1598, ~750, ~1291, ~950)
+- **`transl_signature` environment threading**: Thread env through open statements.
+- **`force_generalize` skip for `Pmod_structure`**: Preserve non-generic levels from value restriction.
+
+#### In `sexp_typedtree.rs` (MAY NEED RE-APPLYING — at Feb 18 state)
+- **Stack-based cycle detection**: Change from permanent to temporary marking (mark on entry, remove on exit). This was the +87 file improvement.
+- **Evaluation order**: Tarrow, Tfield, Tpoly → left-to-right child evaluation.
+- **Reither faithful printing**: Use `row_field_repr_ctx` instead of `row_field_repr`.
+
+#### In `context.rs` (MAY NEED RE-APPLYING — at Feb 18 state)
+- **`current_stamp()` accessor**: Rust equivalent of OCaml's `Ident.current_time()`.
+- **`new_row_field_ref` public method**: For shared RowFieldRef linking.
+
+#### In `driver.rs` (MAY NEED RE-APPLYING — at Feb 18 state)
+- **`apply_interface_constraints`**: Read CMI, walk impl/sig types in parallel, link non-generic Tvars.
+- **`propagate_sig_types`**: Walk module signatures recursively.
+- **`try_alias_param_propagation`**: Handle parametric type aliases with different arities.
+
+#### In `btype.rs` (MAY NEED RE-APPLYING)
+- **`row_field_repr_ctx` / `row_field_repr_ctx_aux`**: Follow RowFieldRef links through TypeContext.
+
+#### In `persistent_env.rs` (MAY NEED RE-APPLYING)
+- **Recursive module prefix rewriting**: Recursively descend into SigModule submodule signatures when rewriting flattened module names.
+
+---
+
+## Re-apply Tasks (610 → ~654)
+
+- [ ] **1A. Stack-based cycle detection in sexp_typedtree.rs (~38 tests)** — Change from permanent to stack-based marking. Also fix eval order (Tarrow/Tfield/Tpoly left-to-right) and use `row_field_repr_ctx` for Reither. WARNING: Do NOT try leaf-node exemption or ancestor-path tracking.
+- [ ] **1B. Non-generic Tarrow/Tobject/Tfield/Tnil identity in ctype.rs (~6 tests)** — Return `ReturnSelf` for non-generic Tarrow, Tobject, Tfield, Tnil. WARNING: Do NOT extend to Tvariant or ALL types.
+- [ ] **1C. begin_def/generalize/instance in typecore.rs type_function (~3 tests)** — Add begin_def before pattern typing, end_def after, generalize pattern types, instance() for body env. Also extend update_level_expand guard to skip ALL local Pident types.
+- [ ] **1D. force_generalize skip for Pmod_structure in typemod.rs** — Skip force_generalize in Pmod_structure to preserve non-generic levels from value restriction.
+- [ ] **1E. Interface constraint propagation in driver.rs (~3 tests)** — Add `apply_interface_constraints`, `propagate_sig_types`, `try_alias_param_propagation`.
+- [ ] **1F. Supporting infrastructure in context.rs, btype.rs, persistent_env.rs, typemod.rs** — `current_stamp()`, `new_row_field_ref`, `row_field_repr_ctx`, recursive module prefix rewriting, `init_def(current_time())` synchronization, `transl_signature` env threading.
+
+---
+
 ## Remaining Failure Root Causes
 
 All remaining failures are deep structural issues:
