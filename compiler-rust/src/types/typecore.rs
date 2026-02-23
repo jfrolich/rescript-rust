@@ -1949,6 +1949,9 @@ fn build_or_pat(
     let ty = ctx.new_variant(row);
 
     // Step 5: Create Tpat_variant for each pattern
+    // OCaml's fold_left builds pats with :: prepend, implicitly reversing them.
+    // We must reverse to match OCaml's order in the or-pattern chain.
+    pats.reverse();
     let ghost_loc = loc.clone(); // OCaml uses ghost location
     let typed_pats: Vec<Pattern> = pats
         .into_iter()
