@@ -70,14 +70,8 @@ timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release
 # Full parity check (builds OCaml + Rust sexp via rewatch, compares raw output)
 ./scripts/test_typedtree_parity.sh
 
-# Reuse cached sexp from previous full run (instant comparison)
-./scripts/test_typedtree_parity.sh --no-build
-
 # Single file (regenerates sexp for just that file via rewatch --filter, ~1s)
 ./scripts/test_typedtree_parity.sh async_inline
-
-# Single file with cached sexp (instant)
-./scripts/test_typedtree_parity.sh --no-build async_inline
 
 # Glob pattern
 ./scripts/test_typedtree_parity.sh "belt_*"
@@ -98,7 +92,7 @@ Both OCaml and Rust sexp are generated via **rewatch** (single command each):
 2. `rescript build --dump-typed-sexp` — OCaml bsc generates sexp to `lib/ocaml/*.sexp`
 3. `rescript build --dump-typed-sexp --rust` — Rust in-process generates sexp to `lib/ocaml/*.sexp`
 
-The script saves OCaml sexp files before Rust overwrites them, then does **raw byte-for-byte comparison** (`cmp -s`). Results are cached in `.parity-cache/` for `--no-build` reuse.
+The script saves OCaml sexp files before Rust overwrites them, then does **raw byte-for-byte comparison** (`cmp -s`). Results go to a temp dir that is cleaned up on exit.
 
 ### Raw comparison — no post-processing
 

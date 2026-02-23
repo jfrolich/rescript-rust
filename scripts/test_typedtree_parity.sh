@@ -7,19 +7,16 @@
 #   2. `rescript build --dump-typed-sexp --rust`  → Rust sexp in lib/ocaml/*.sexp
 # Then we compare the two sets of .sexp files.
 #
-# Sources tested:
-# 1. tests/tests/src/       - Main test project
-# 2. ~/dev/tella-fusion     - External corpus (override with TELLA_DIR)
-#
 # USAGE:
 #   ./scripts/test_typedtree_parity.sh [OPTIONS] [FILTER]
 #
 # OPTIONS:
-#   --no-build        Skip the build steps (assume sexp files already exist)
 #   -h, --help        Show this help message
 #
 # FILTER:
 #   Optional file path or module name pattern to test a single file.
+#   When filtering, skips clean/full-build (assumes prior build exists)
+#   and passes --filter to rewatch for fast ~1s single-file sexp generation.
 #   Examples:
 #     ./scripts/test_typedtree_parity.sh tests/tests/src/a.res
 #     ./scripts/test_typedtree_parity.sh a
@@ -27,17 +24,12 @@
 
 set -e
 
-SKIP_BUILD=false
 FILTER=""
 
 while [[ $# -gt 0 ]]; do
     case $1 in
-        --no-build)
-            SKIP_BUILD=true
-            shift
-            ;;
         -h|--help)
-            head -24 "$0" | tail -21
+            head -22 "$0" | tail -19
             exit 0
             ;;
         -*)
@@ -52,6 +44,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 # Normalize filter: if it's a file path, extract module name
+FILTER_MODULE=""
 if [[ -n "$FILTER" ]]; then
     # Strip directory and extension (e.g. tests/tests/src/a.res -> a)
     FILTER_MODULE=$(basename "$FILTER" | sed 's/\.\(res\|resi\|ml\|mli\)$//')
@@ -85,9 +78,8 @@ if [[ ! -x "$RESCRIPT_CLI" ]]; then
     exit 1
 fi
 
-CACHE_DIR="$PROJECT_ROOT/.parity-cache"
-mkdir -p "$CACHE_DIR"
-TEMP_DIR="$CACHE_DIR"
+TEMP_DIR=$(mktemp -d)
+trap "rm -rf $TEMP_DIR" EXIT
 
 echo -e "${BOLD}Typed Tree Parity Test${RESET}"
 echo "============================================"
@@ -267,47 +259,44 @@ compare_project_sexp() {
 }
 
 # Step 1: Build projects and generate sexp
-if [[ "$SKIP_BUILD" != "true" ]]; then
-    echo ""
-    echo -e "${BOLD}Step 1: Building and generating sexp...${RESET}"
+echo ""
+echo -e "${BOLD}Step 1: Building and generating sexp...${RESET}"
 
-    build_project_sexp "$TEST_PROJECT" "tests"
+build_project_sexp "$TEST_PROJECT" "tests"
 
-    # Build tella-fusion if present
-    if [[ -d "$TELLA_DIR" ]]; then
-        # Find rescript.json files with sources (skip empty root, skip node_modules)
-        tella_candidates=()
-        while IFS= read -r cfg; do
-            proj_dir=$(dirname "$cfg")
-            has_sources=$(jq -r 'if (.sources | length) > 0 then "1" else "0" end' "$cfg" 2>/dev/null) || has_sources=0
-            if [[ "$has_sources" == "1" ]]; then
-                tella_candidates+=("$proj_dir")
+# Build tella-fusion if present
+if [[ -n "$TELLA_DIR" && -d "$TELLA_DIR" ]]; then
+    # Find rescript.json files with sources (skip empty root, skip node_modules)
+    tella_candidates=()
+    while IFS= read -r cfg; do
+        proj_dir=$(dirname "$cfg")
+        has_sources=$(jq -r 'if (.sources | length) > 0 then "1" else "0" end' "$cfg" 2>/dev/null) || has_sources=0
+        if [[ "$has_sources" == "1" ]]; then
+            tella_candidates+=("$proj_dir")
+        fi
+    done < <(find "$TELLA_DIR" -name "rescript.json" -not -path "*/node_modules/*" 2>/dev/null | sort)
+
+    # Only build top-level projects (skip nested sub-packages)
+    for proj_dir in "${tella_candidates[@]}"; do
+        is_nested=false
+        for other in "${tella_candidates[@]}"; do
+            if [[ "$proj_dir" != "$other" && "$proj_dir" == "$other/packages/"* ]]; then
+                is_nested=true
+                break
             fi
-        done < <(find "$TELLA_DIR" -name "rescript.json" -not -path "*/node_modules/*" 2>/dev/null | sort)
-
-        # Only build top-level projects (skip nested sub-packages)
-        for proj_dir in "${tella_candidates[@]}"; do
-            is_nested=false
-            for other in "${tella_candidates[@]}"; do
-                if [[ "$proj_dir" != "$other" && "$proj_dir" == "$other/packages/"* ]]; then
-                    is_nested=true
-                    break
-                fi
-            done
-            if [[ "$is_nested" == "true" ]]; then
-                echo "  Skipping $proj_dir (nested, built as dependency)"
-                continue
-            fi
-
-            # Use a safe label derived from the project path
-            safe_label=$(echo "${proj_dir#$TELLA_DIR/}" | tr '/' '_')
-            build_project_sexp "$proj_dir" "tella_$safe_label" \
-                "RESCRIPT_RUNTIME=$TELLA_DIR/node_modules/@rescript/runtime"
         done
-    fi
-    echo ""
+        if [[ "$is_nested" == "true" ]]; then
+            echo "  Skipping $proj_dir (nested, built as dependency)"
+            continue
+        fi
 
+        # Use a safe label derived from the project path
+        safe_label=$(echo "${proj_dir#$TELLA_DIR/}" | tr '/' '_')
+        build_project_sexp "$proj_dir" "tella_$safe_label" \
+            "RESCRIPT_RUNTIME=$TELLA_DIR/node_modules/@rescript/runtime"
+    done
 fi
+echo ""
 
 # Step 2: Compare sexp files
 echo -e "${BOLD}Step 2: Comparing sexp files...${RESET}"
@@ -379,5 +368,3 @@ if [[ "$OVERALL_TOTAL" -gt 0 ]]; then
 else
     echo "No sexp files found to compare."
 fi
-echo ""
-echo "Diffs saved in: $TEMP_DIR/*/diffs/"

@@ -37,23 +37,14 @@ cargo build --manifest-path compiler-rust/Cargo.toml --release
 # Full parity check (~30s, builds OCaml + Rust sexp via rewatch, raw comparison)
 ./scripts/test_typedtree_parity.sh
 
-# Reuse cached sexp from previous full run (instant)
-./scripts/test_typedtree_parity.sh --no-build
-
-# Single file (regenerates via rewatch --filter, ~1s)
+# Single file (~1s, uses rewatch --filter, shows diff inline on failure)
 ./scripts/test_typedtree_parity.sh async_inline
 
-# Single file with cache (instant, shows diff inline on failure)
-./scripts/test_typedtree_parity.sh --no-build async_inline
-
 # Glob pattern
-./scripts/test_typedtree_parity.sh --no-build "belt_*"
+./scripts/test_typedtree_parity.sh "belt_*"
 
 # File path (extracts module name)
-./scripts/test_typedtree_parity.sh --no-build tests/tests/src/a.res
-
-# Manual diff of cached sexp
-diff .parity-cache/tests/ocaml/MODULE.sexp .parity-cache/tests/rust/MODULE.sexp
+./scripts/test_typedtree_parity.sh tests/tests/src/a.res
 ```
 
 **Important:** The comparison is raw byte-for-byte (`cmp -s`). No post-processing. Both compilers must produce identical output.

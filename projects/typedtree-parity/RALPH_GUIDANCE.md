@@ -269,22 +269,11 @@ Generalize the `update_level_expand` Pdot guard from specific `.t`/`.cmp` patter
 ./scripts/test_typedtree_parity.sh FILE_MODULE
 # e.g.: ./scripts/test_typedtree_parity.sh async_inline
 
-# Instant re-compare using cached sexp from previous full run
-./scripts/test_typedtree_parity.sh --no-build FILE_MODULE
-
 # Glob pattern (e.g. all belt tests)
-./scripts/test_typedtree_parity.sh --no-build "belt_*"
+./scripts/test_typedtree_parity.sh "belt_*"
 
 # Full parity run (all modules, ~30s)
 ./scripts/test_typedtree_parity.sh
 
 # When filter matches a failing file, the diff is shown inline.
-# For manual inspection of cached sexp:
-diff .parity-cache/tests/ocaml/FILE_MODULE.sexp .parity-cache/tests/rust/FILE_MODULE.sexp | head -80
-
-# Count diff hunks
-diff .parity-cache/tests/ocaml/FILE_MODULE.sexp .parity-cache/tests/rust/FILE_MODULE.sexp | grep "^[0-9]" | wc -l
-
-# Check if failure is cycle-related
-diff .parity-cache/tests/ocaml/FILE_MODULE.sexp .parity-cache/tests/rust/FILE_MODULE.sexp | grep -c "cycle"
 ```
