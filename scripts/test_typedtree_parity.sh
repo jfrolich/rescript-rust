@@ -110,14 +110,28 @@ build_project_sexp() {
 
     cd "$project_dir"
 
-    echo "  [$label] Cleaning..."
-    env "${env_vars[@]}" RESCRIPT_BSC_EXE="$OCAML_BSC" "$RESCRIPT_CLI" clean 2>/dev/null || true
+    # Build filter args for rewatch --filter
+    local filter_args=()
+    if [[ -n "$FILTER_MODULE" ]]; then
+        # Convert glob pattern to regex: * -> .*, escape dots
+        local regex="${FILTER_MODULE//./\\.}"
+        regex="${regex//\*/.*}"
+        filter_args=(--filter "^${regex}\\.")
+    fi
 
-    echo "  [$label] Normal build (produces .cmi/.cmj)..."
-    timeout 120 env "${env_vars[@]}" RESCRIPT_BSC_EXE="$OCAML_BSC" "$RESCRIPT_CLI" build 2>&1 | tail -3 || true
+    if [[ ${#filter_args[@]} -eq 0 ]]; then
+        echo "  [$label] Cleaning..."
+        env "${env_vars[@]}" RESCRIPT_BSC_EXE="$OCAML_BSC" "$RESCRIPT_CLI" clean 2>/dev/null || true
+
+        echo "  [$label] Normal build (produces .cmi/.cmj)..."
+        timeout 120 env "${env_vars[@]}" RESCRIPT_BSC_EXE="$OCAML_BSC" "$RESCRIPT_CLI" build 2>&1 | tail -3 || true
+    elif [[ ! -d "$project_dir/lib/ocaml" ]]; then
+        echo "  [$label] Normal build (produces .cmi/.cmj, needed for filtered sexp)..."
+        timeout 120 env "${env_vars[@]}" RESCRIPT_BSC_EXE="$OCAML_BSC" "$RESCRIPT_CLI" build 2>&1 | tail -3 || true
+    fi
 
     echo "  [$label] OCaml sexp generation..."
-    timeout 120 env "${env_vars[@]}" RESCRIPT_BSC_EXE="$OCAML_BSC" "$RESCRIPT_CLI" build --dump-typed-sexp 2>&1 | tail -3 || true
+    timeout 120 env "${env_vars[@]}" RESCRIPT_BSC_EXE="$OCAML_BSC" "$RESCRIPT_CLI" build --dump-typed-sexp "${filter_args[@]}" 2>&1 | tail -3 || true
 
     # Save OCaml sexp files
     local count=0
@@ -129,7 +143,7 @@ build_project_sexp() {
     echo "  [$label] Saved $count OCaml sexp files"
 
     echo "  [$label] Rust sexp generation..."
-    timeout 120 env "${env_vars[@]}" RESCRIPT_BSC_EXE="$OCAML_BSC" "$RESCRIPT_CLI" build --dump-typed-sexp --rust 2>&1 | tail -3 || true
+    timeout 120 env "${env_vars[@]}" RESCRIPT_BSC_EXE="$OCAML_BSC" "$RESCRIPT_CLI" build --dump-typed-sexp --rust "${filter_args[@]}" 2>&1 | tail -3 || true
 
     # Save Rust sexp files
     count=0
