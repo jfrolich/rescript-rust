@@ -489,25 +489,14 @@ test_single_file() {
                 fi
             fi
 
+            # Use cached Rust sexp if available (no sexp = Rust typecheck failed)
+            if [[ -n "$cached_rust_sexp" ]]; then
+                cp "$cached_rust_sexp" "$file_temp/rust.sexp"
+            fi
+
             cd "$project_root/lib/bs"
             if [[ "$ocaml_cached" != "true" ]]; then
-                # Run OCaml bsc
-                timeout "$TIMEOUT_SECONDS" "$OCAML_BSC" $SEXP_FLAG $args 2> "$file_temp/ocaml.sexp" 1>/dev/null &
-                local ocaml_pid=$!
-                # Use cached Rust sexp if available, otherwise fall back to per-file Rust bsc
-                if [[ -n "$cached_rust_sexp" ]]; then
-                    cp "$cached_rust_sexp" "$file_temp/rust.sexp"
-                elif [[ "$RUST_AVAILABLE" == "true" ]]; then
-                    timeout "$TIMEOUT_SECONDS" "$RUST_BSC" $SEXP_FLAG $args 2> "$file_temp/rust.sexp" 1>/dev/null || true
-                fi
-                wait $ocaml_pid 2>/dev/null || true
-            else
-                # OCaml cached, only need Rust
-                if [[ -n "$cached_rust_sexp" ]]; then
-                    cp "$cached_rust_sexp" "$file_temp/rust.sexp"
-                elif [[ "$RUST_AVAILABLE" == "true" ]]; then
-                    timeout "$TIMEOUT_SECONDS" "$RUST_BSC" $SEXP_FLAG $args 2> "$file_temp/rust.sexp" 1>/dev/null || true
-                fi
+                timeout "$TIMEOUT_SECONDS" "$OCAML_BSC" $SEXP_FLAG $args 2> "$file_temp/ocaml.sexp" 1>/dev/null || true
             fi
             cd "$PROJECT_ROOT"
         else

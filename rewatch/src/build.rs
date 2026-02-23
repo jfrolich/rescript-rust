@@ -242,6 +242,24 @@ pub fn incremental_build(
     plain_output: bool,
 ) -> Result<(), IncrementalBuildError> {
     logs::initialize(&build_state.packages);
+
+    // When dump_typed_sexp is set, force all modules parse_dirty and compile_dirty
+    // so every file gets re-parsed (to store AST) and sexp-dumped
+    if build_state.dump_typed_sexp() {
+        for module in build_state.modules.values_mut() {
+            module.compile_dirty = true;
+            match &mut module.source_type {
+                crate::build::build_types::SourceType::SourceFile(sf) => {
+                    sf.implementation.parse_dirty = true;
+                    if let Some(ref mut iface) = sf.interface {
+                        iface.parse_dirty = true;
+                    }
+                }
+                crate::build::build_types::SourceType::MlMap(mlmap) => mlmap.parse_dirty = true,
+            }
+        }
+    }
+
     let num_dirty_modules = build_state.modules.values().filter(|m| is_dirty(m)).count() as u64;
     let pb = if !plain_output && show_progress {
         ProgressBar::new(num_dirty_modules)

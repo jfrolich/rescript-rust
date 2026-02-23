@@ -3,6 +3,9 @@ use crate::config::Config;
 use crate::project_context::ProjectContext;
 use ahash::{AHashMap, AHashSet};
 use blake3::Hash;
+use rescript_compiler::parse_arena::ParseArena;
+use rescript_compiler::parser::ast::{Signature, Structure};
+use std::sync::Mutex;
 use std::{fmt::Display, ops::Deref, path::PathBuf, time::SystemTime};
 
 #[derive(Debug, Clone, PartialEq)]
@@ -64,6 +67,20 @@ impl Display for SourceType {
     }
 }
 
+pub enum StoredAst {
+    Structure(ParseArena, Structure),
+    Signature(ParseArena, Signature),
+}
+
+impl std::fmt::Debug for StoredAst {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            StoredAst::Structure(_, _) => write!(f, "StoredAst::Structure(..)"),
+            StoredAst::Signature(_, _) => write!(f, "StoredAst::Signature(..)"),
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Module {
     pub source_type: SourceType,
@@ -121,6 +138,8 @@ pub struct BuildCommandState {
     pub use_rust_parser: bool,
     // Command-line --dump-typed-sexp flag: dump typed tree sexp to .sexp files.
     pub dump_typed_sexp: bool,
+    // Stored ASTs from parse phase, keyed by "{module_name}:impl" or "{module_name}:intf"
+    pub stored_asts: Mutex<AHashMap<String, StoredAst>>,
 }
 
 #[derive(Debug, Clone)]
@@ -179,6 +198,7 @@ impl BuildCommandState {
             warn_error_override,
             use_rust_parser,
             dump_typed_sexp,
+            stored_asts: Mutex::new(AHashMap::new()),
         }
     }
 

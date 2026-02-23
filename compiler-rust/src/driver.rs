@@ -15,8 +15,8 @@ use crate::js_ir::printer::print_program;
 use crate::lambda::compile::LambdaCompiler;
 use crate::lambda::convert::LambdaConverter;
 use crate::parser::ast::{
-    Attribute, Constant, Expression, ModuleExpr, ModuleExprDesc, Payload, Structure,
-    StructureItemDesc,
+    Attribute, Constant, Expression, ModuleExpr, ModuleExprDesc, Payload, Signature, Structure,
+    SignatureItemDesc, StructureItemDesc,
 };
 use crate::parser::{jsx_ppx, module, Parser};
 use crate::types::sexp_typedtree::{
@@ -778,6 +778,194 @@ pub fn typecheck_and_dump_sexp<W: std::io::Write>(
         print_typed_structure_with_locs(parser.arena(), &type_ctx, &typed_structure, writer)
             .map_err(|e| anyhow!("Failed to write sexp: {e}"))?;
     }
+
+    Ok(())
+}
+
+/// Per-file configuration overrides extracted from `@@config({flags: [...]})`.
+#[derive(Debug, Default)]
+pub struct FileConfigOverrides {
+    pub let_unwrap: bool,
+    pub jsx_version: Option<i32>,
+}
+
+fn parse_config_flags(flags: &[String]) -> FileConfigOverrides {
+    let mut overrides = FileConfigOverrides::default();
+    let mut i = 0;
+    while i < flags.len() {
+        match flags[i].as_str() {
+            "-enable-experimental" => {
+                if i + 1 < flags.len() && flags[i + 1] == "LetUnwrap" {
+                    overrides.let_unwrap = true;
+                    i += 2;
+                    continue;
+                }
+            }
+            "-bs-jsx" => {
+                if i + 1 < flags.len() {
+                    if let Ok(v) = flags[i + 1].parse::<i32>() {
+                        overrides.jsx_version = Some(v);
+                    }
+                    i += 2;
+                    continue;
+                }
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    overrides
+}
+
+fn extract_flags_from_config_payload(
+    payload: &Payload,
+    arena: &crate::parse_arena::ParseArena,
+) -> Vec<String> {
+    use crate::parser::ast::ExpressionDesc as ED;
+    use crate::parser::longident::Longident;
+    let mut result = Vec::new();
+    if let Payload::PStr(items) = payload {
+        for item in items.iter() {
+            if let StructureItemDesc::Pstr_eval(inner) = &*item.pstr_desc {
+                let (expr_idx, _attrs) = &**inner;
+                let expr = arena.get_expr(*expr_idx);
+                if let ED::Pexp_record(inner) = &*expr.pexp_desc {
+                    let (fields, _spread) = &**inner;
+                    for field in fields {
+                        let lid = arena.get_longident(field.lid.txt);
+                        let is_flags = match lid {
+                            Longident::Lident(str_idx) => arena.get_string(*str_idx) == "flags",
+                            _ => false,
+                        };
+                        if is_flags {
+                            let field_expr = arena.get_expr(field.expr);
+                            if let ED::Pexp_array(elements) = &*field_expr.pexp_desc {
+                                for elem_idx in elements.iter() {
+                                    let elem = arena.get_expr(*elem_idx);
+                                    if let ED::Pexp_constant(c) = &*elem.pexp_desc {
+                                        if let Constant::String(s, _) = &**c {
+                                            result.push(s.to_string());
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    result
+}
+
+/// Extract `@@config({flags: [...]})` overrides from a parsed structure.
+pub fn extract_file_config_from_structure(
+    structure: &Structure,
+    arena: &crate::parse_arena::ParseArena,
+) -> FileConfigOverrides {
+    for item in structure {
+        if let StructureItemDesc::Pstr_attribute(attr) = &*item.pstr_desc {
+            let name = arena.get_string(attr.0.txt);
+            if name == "config" {
+                let flags = extract_flags_from_config_payload(&attr.1, arena);
+                if !flags.is_empty() {
+                    return parse_config_flags(&flags);
+                }
+            }
+        }
+    }
+    FileConfigOverrides::default()
+}
+
+/// Extract `@@config({flags: [...]})` overrides from a parsed signature.
+pub fn extract_file_config_from_signature(
+    signature: &Signature,
+    arena: &crate::parse_arena::ParseArena,
+) -> FileConfigOverrides {
+    for item in signature {
+        if let SignatureItemDesc::Psig_attribute(attr) = &*item.psig_desc {
+            let name = arena.get_string(attr.0.txt);
+            if name == "config" {
+                let flags = extract_flags_from_config_payload(&attr.1, arena);
+                if !flags.is_empty() {
+                    return parse_config_flags(&flags);
+                }
+            }
+        }
+    }
+    FileConfigOverrides::default()
+}
+
+/// Typecheck a stored structure AST (from parse phase) and dump sexp.
+/// Applies remaining PPX passes (spice, expand_extensions, rewrite_structure) before typechecking.
+pub fn typecheck_stored_structure_and_dump_sexp<W: std::io::Write>(
+    mut arena: crate::parse_arena::ParseArena,
+    structure: Structure,
+    options: &CompilerOptions,
+    writer: &mut W,
+) -> Result<()> {
+    let jsx_enabled = structure_has_config_string(&structure, "-bs-jsx", &arena);
+    let has_async_component = structure_has_async_component(&structure, &arena);
+    let structure = if jsx_enabled
+        && !has_async_component
+        && structure_needs_jsx_rewrite(&structure, &arena)
+    {
+        jsx_ppx::transform_structure(structure, 4, &mut arena)
+    } else {
+        structure
+    };
+
+    let structure = spice_ppx::expand_structure(&structure, &mut arena)
+        .map_err(|e| anyhow!("Spice PPX expansion failed: {e}"))?;
+    let structure = ppx::expand_extensions(&structure, &mut arena);
+    let structure = ppx::rewrite_structure(&structure, &mut arena)
+        .map_err(|e| anyhow!("PPX rewrite failed: {e}"))?;
+
+    let id_gen = IdGenerator::new();
+    let type_ctx = TypeContext::new(&id_gen);
+    let mut tctx = TypeCheckContext::new(&type_ctx, &arena);
+    let mut env = initial_env(&type_ctx);
+
+    let mut pers_env = PersistentEnv::new();
+    let load_path = build_load_path(options);
+    type_ctx.set_load_paths(load_path.clone());
+    pers_env.set_load_path(load_path);
+    load_pervasives(&mut pers_env, &mut env, &type_ctx);
+    tctx.set_persistent_env(pers_env);
+
+    let (typed_structure, _env) = type_structure(&mut tctx, &env, &arena, &structure)
+        .map_err(|e| anyhow!("Type checking failed: {e:?}"))?;
+
+    print_typed_structure_with_locs(&arena, &type_ctx, &typed_structure, writer)
+        .map_err(|e| anyhow!("Failed to write sexp: {e}"))?;
+
+    Ok(())
+}
+
+/// Typecheck a stored signature AST (from parse phase) and dump sexp.
+pub fn typecheck_stored_signature_and_dump_sexp<W: std::io::Write>(
+    arena: crate::parse_arena::ParseArena,
+    signature: Signature,
+    options: &CompilerOptions,
+    writer: &mut W,
+) -> Result<()> {
+    let id_gen = IdGenerator::new();
+    let type_ctx = TypeContext::new(&id_gen);
+    let mut tctx = TypeCheckContext::new(&type_ctx, &arena);
+    let mut env = initial_env(&type_ctx);
+
+    let mut pers_env = PersistentEnv::new();
+    let load_path = build_load_path(options);
+    type_ctx.set_load_paths(load_path.clone());
+    pers_env.set_load_path(load_path);
+    load_pervasives(&mut pers_env, &mut env, &type_ctx);
+    tctx.set_persistent_env(pers_env);
+
+    let typed_signature = transl_signature(&mut tctx, &env, &arena, &signature)
+        .map_err(|e| anyhow!("Type checking failed: {e:?}"))?;
+
+    print_typed_signature_with_locs(&arena, &type_ctx, &typed_signature, writer)
+        .map_err(|e| anyhow!("Failed to write sexp: {e}"))?;
 
     Ok(())
 }

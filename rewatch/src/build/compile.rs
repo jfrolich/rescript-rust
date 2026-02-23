@@ -143,6 +143,15 @@ pub fn compile(
         .map(|module_name| module_name.to_string())
         .collect::<AHashSet<String>>();
 
+    // Extract stored_asts reference for use in par_iter (avoids borrow conflict with build_state)
+    let stored_asts_ref: Option<&std::sync::Mutex<ahash::AHashMap<String, super::build_types::StoredAst>>> =
+        if build_state.dump_typed_sexp() && build_state.use_rust_parser() {
+            let ptr = &build_state.stored_asts as *const std::sync::Mutex<ahash::AHashMap<String, super::build_types::StoredAst>>;
+            Some(unsafe { &*ptr })
+        } else {
+            None
+        };
+
     loop {
         files_current_loop_count = 0;
         loop_count += 1;
@@ -207,11 +216,13 @@ pub fn compile(
                                         package,
                                         &helpers::get_ast_path(&path),
                                         module,
+                                        module_name,
                                         true,
                                         build_state,
                                         build_state.get_warn_error_override(),
                                         build_state.dump_typed_sexp,
                                         build_state.use_rust_parser,
+                                        stored_asts_ref,
                                     );
                                     Some(result)
                                 }
@@ -221,11 +232,13 @@ pub fn compile(
                                 package,
                                 &helpers::get_ast_path(&source_file.implementation.path),
                                 module,
+                                module_name,
                                 false,
                                 build_state,
                                 build_state.get_warn_error_override(),
                                 build_state.dump_typed_sexp,
                                 build_state.use_rust_parser,
+                                stored_asts_ref,
                             );
                             let cmi_digest_after = helpers::compute_file_hash(Path::new(&cmi_path));
 
@@ -688,11 +701,13 @@ fn compile_file(
     package: &packages::Package,
     ast_path: &Path,
     module: &Module,
+    module_name: &str,
     is_interface: bool,
     build_state: &BuildState,
     warn_error_override: Option<String>,
     dump_typed_sexp: bool,
     use_rust_parser: bool,
+    stored_asts: Option<&std::sync::Mutex<ahash::AHashMap<String, super::build_types::StoredAst>>>,
 ) -> Result<Option<String>> {
     let BuildState {
         packages,
@@ -791,37 +806,35 @@ fn compile_file(
                 }
                 warnings
             } else if dump_typed_sexp && use_rust_parser {
-                // Rust in-process path: read source and typecheck directly
-                let source_file_path = match &module.source_type {
-                    SourceType::SourceFile(sf) => {
-                        if is_interface {
-                            sf.interface.as_ref().map(|i| &i.path).unwrap_or(&sf.implementation.path)
-                        } else {
-                            &sf.implementation.path
-                        }
-                    }
-                    _ => implementation_file_path,
+                // Rust in-process path: use stored AST from parse phase if available,
+                // otherwise fall back to re-reading source.
+                let ast_key = format!("{}:{}", module_name, if is_interface { "intf" } else { "impl" });
+                let stored = stored_asts.and_then(|m| m.lock().unwrap().remove(&ast_key));
+
+                // Use pre-extracted include paths and runtime path from compiler args.
+                let (include_paths, runtime_path) = rust_sexp_paths.clone().unwrap();
+                let opts = rescript_compiler::driver::CompilerOptions {
+                    dump_typed_sexp_locs: true,
+                    include_paths,
+                    runtime_path,
+                    ..Default::default()
                 };
-                let abs_source_path = Path::new(&package.path).join(source_file_path);
-                if let Ok(source_bytes) = std::fs::read(&abs_source_path) {
-                    let source: String = source_bytes.iter().map(|&b| b as char).collect();
-                    let filename = abs_source_path.to_string_lossy().to_string();
 
-                    // Use pre-extracted include paths and runtime path from compiler args.
-                    let (include_paths, runtime_path) = rust_sexp_paths.clone().unwrap();
-
-                    let opts = rescript_compiler::driver::CompilerOptions {
-                        dump_typed_sexp_locs: true,
-                        include_paths,
-                        runtime_path,
-                        ..Default::default()
-                    };
-
-                    let sexp_path = ocaml_build_path_abs.join(format!("{basename}.sexp"));
+                let sexp_path = ocaml_build_path_abs.join(format!("{basename}.sexp"));
+                if let Some(stored_ast) = stored {
                     if let Ok(mut file) = std::fs::File::create(&sexp_path) {
-                        let _ = rescript_compiler::driver::typecheck_and_dump_sexp(
-                            &source, &filename, &opts, &mut file,
-                        );
+                        match stored_ast {
+                            super::build_types::StoredAst::Structure(arena, structure) => {
+                                let _ = rescript_compiler::driver::typecheck_stored_structure_and_dump_sexp(
+                                    arena, structure, &opts, &mut file,
+                                );
+                            }
+                            super::build_types::StoredAst::Signature(arena, signature) => {
+                                let _ = rescript_compiler::driver::typecheck_stored_signature_and_dump_sexp(
+                                    arena, signature, &opts, &mut file,
+                                );
+                            }
+                        }
                     }
                 }
                 raw_stderr
