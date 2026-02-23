@@ -244,7 +244,7 @@ compare_project_sexp() {
     # Cache results to .parity-cache for LLM agents to inspect
     local cache_dir="$PROJECT_ROOT/.parity-cache/$label"
     rm -rf "$cache_dir"
-    mkdir -p "$cache_dir/diffs"
+    mkdir -p "$cache_dir/diffs" "$cache_dir/ocaml" "$cache_dir/rust"
     cp "$TEMP_DIR/$label/summary.txt" "$cache_dir/"
     echo -e "$parity_failures" > "$cache_dir/failures.txt"
     echo -e "$ocaml_only_files" > "$cache_dir/ocaml_only.txt"
@@ -252,6 +252,9 @@ compare_project_sexp() {
     if [[ -d "$diff_dir" ]]; then
         cp "$diff_dir"/*.diff "$cache_dir/diffs/" 2>/dev/null || true
     fi
+    # Save raw sexp files so agents can inspect them
+    cp "$ocaml_dir"/*.sexp "$cache_dir/ocaml/" 2>/dev/null || true
+    cp "$rust_dir"/*.sexp "$cache_dir/rust/" 2>/dev/null || true
 
     # Show parity failure list
     if [[ "$parity_fail" -gt 0 && "$parity_fail" -le 100 ]]; then
