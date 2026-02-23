@@ -11397,6 +11397,13 @@ fn disambiguate_label<'a>(
             }
         }
 
+        // Try lookup_label_by_expected_type BEFORE the leaf-name fallback.
+        // This correctly resolves labels like `children` to `React.Context.props`
+        // instead of a local `props` type that happens to share the leaf name.
+        if selected.is_none() {
+            selected = lookup_label_by_expected_type(lookup_name, record_ty, env, pers_env, ctx);
+        }
+
         // Final fallback: compare leaf names (ignoring compiler-introduced `!` suffixes
         // on local aliases like `sprite!`) to recover the concrete record family.
         if selected.is_none() {
