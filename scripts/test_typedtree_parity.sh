@@ -84,8 +84,9 @@ if [[ ! -x "$RESCRIPT_CLI" ]]; then
     exit 1
 fi
 
-TEMP_DIR=$(mktemp -d)
-trap "rm -rf $TEMP_DIR" EXIT
+CACHE_DIR="$PROJECT_ROOT/.parity-cache"
+mkdir -p "$CACHE_DIR"
+TEMP_DIR="$CACHE_DIR"
 
 echo -e "${BOLD}Typed Tree Parity Test${RESET}"
 echo "============================================"
@@ -290,6 +291,7 @@ if [[ "$SKIP_BUILD" != "true" ]]; then
         done
     fi
     echo ""
+
 fi
 
 # Step 2: Compare sexp files

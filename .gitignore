@@ -112,3 +112,4 @@ tests/parity_baselines/*.txt
 __pycache__/
 .cache
 tmp_diffs
+.parity-cache
