@@ -3192,7 +3192,7 @@ fn type_pattern_record(
             &mut tctx.persistent_env,
             ctx,
         ) {
-                let (ty_arg, ty_res) = crate::types::ctype::instance_label(ctx, &env_label);
+                let (_poly_vars, ty_arg, ty_res) = crate::types::ctype::instance_label(ctx, &env_label);
                 // Best-effort unification to propagate type info
                 let _ = crate::types::unify(ctx, &mut tctx.unify_state, ty_res, record_ty);
                 let _ = crate::types::unify(ctx, &mut tctx.unify_state, ty_arg, field_ty);
@@ -7290,8 +7290,8 @@ fn type_record(
         }
 
         // Build label description (prefer env-disambiguated metadata).
-        let (mut label_desc, field_input_ty) = if let Some(env_label) = disambiguated {
-            let (ty_arg, ty_res) = crate::types::ctype::instance_label(ctx, &env_label);
+        let (mut label_desc, field_input_ty, poly_vars) = if let Some(env_label) = disambiguated {
+            let (poly_vars, ty_arg, ty_res) = crate::types::ctype::instance_label(ctx, &env_label);
             let _ = crate::types::unify(ctx, &mut tctx.unify_state, ty_res, expected_ty);
 
             let input_ty = if env_label.lbl_optional && !field.opt {
@@ -7315,6 +7315,7 @@ fn type_record(
                     lbl_attributes: env_label.lbl_attributes.clone(),
                 },
                 input_ty,
+                poly_vars,
             )
         } else {
             let inner_ty = ctx.new_var(None);
@@ -7339,6 +7340,7 @@ fn type_record(
                     lbl_attributes: vec![],
                 },
                 lbl_arg,
+                vec![],
             )
         };
 
@@ -7349,6 +7351,11 @@ fn type_record(
             field_input_ty,
             None,
         )?;
+
+        // OCaml check_univars: convert fresh Tvars back to Tunivar for poly fields
+        if !poly_vars.is_empty() {
+            crate::types::ctype::check_univars(ctx, &poly_vars);
+        }
 
         // process_optional_label: wrap optional fields in Some(...) only when the
         // user did not write the `?` form.
@@ -7452,7 +7459,7 @@ fn type_record(
                 );
 
             let label_desc = if let Some(env_label) = disambiguated {
-                let (ty_arg, ty_res) = crate::types::ctype::instance_label(ctx, &env_label);
+                let (_poly_vars, ty_arg, ty_res) = crate::types::ctype::instance_label(ctx, &env_label);
                 let _ = crate::types::unify(ctx, &mut tctx.unify_state, ty_res, expected_ty);
                 crate::types::LabelDescription {
                     lbl_name: env_label.lbl_name.clone(),
@@ -7562,7 +7569,7 @@ fn type_record(
             )
         });
         if let Some(env_label) = label_for_unify {
-            let (_ty_arg, ty_res) = crate::types::ctype::instance_label(ctx, &env_label);
+            let (_poly_vars, _ty_arg, ty_res) = crate::types::ctype::instance_label(ctx, &env_label);
             let _ = crate::types::unify(ctx, &mut tctx.unify_state, base_exp_ty, ty_res);
         } else {
             // Fallback: direct unification
@@ -7697,7 +7704,7 @@ fn type_field(
     );
 
     let (label_desc, field_ty) = if let Some(env_label) = env_label {
-        let (ty_arg, ty_res) = crate::types::ctype::instance_label(ctx, &env_label);
+        let (_poly_vars, ty_arg, ty_res) = crate::types::ctype::instance_label(ctx, &env_label);
         // Unify label's result type with the record's type
         unify_expression_types(tctx, loc, ty_res, record_ty, None)?;
         (env_label, ty_arg)
@@ -7763,7 +7770,7 @@ fn type_setfield(
         ctx,
     );
     let (label_desc, field_ty) = if let Some(env_label) = env_label {
-        let (ty_arg, ty_res) = crate::types::ctype::instance_label(ctx, &env_label);
+        let (_poly_vars, ty_arg, ty_res) = crate::types::ctype::instance_label(ctx, &env_label);
         unify_expression_types(tctx, loc, ty_res, record_ty, None)?;
         (env_label, ty_arg)
     } else {

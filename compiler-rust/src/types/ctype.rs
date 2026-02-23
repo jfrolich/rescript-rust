@@ -2357,34 +2357,54 @@ pub fn instance_constructor(
 pub fn instance_label(
     ctx: &TypeContext<'_>,
     lbl: &super::LabelDescription,
-) -> (TypeExprRef, TypeExprRef) {
+) -> (Vec<TypeExprRef>, TypeExprRef, TypeExprRef) {
     let mut cache = std::collections::HashMap::new();
     let ty_res = copy_type_deep(ctx, lbl.lbl_res, &mut cache);
     // OCaml's instance_label unwraps Tpoly before copying the field type.
     // For each Tunivar in the poly vars, pre-seed the cache with a fresh Tvar
     // so that Tunivar → Tvar conversion happens during the copy (like instance_poly).
     let arg_repr = ctx.repr(lbl.lbl_arg);
-    let ty_arg = {
+    let (poly_vars, ty_arg) = {
         let desc = ctx.get_desc(arg_repr);
         match &*desc {
             super::TypeDesc::Tpoly { body, vars } => {
                 let body = *body;
                 let vars = vars.clone();
                 drop(desc);
+                let mut fresh_vars = Vec::new();
                 for v in &vars {
                     let v_repr = ctx.repr(*v);
                     let fresh = ctx.new_var(None);
                     cache.insert(v_repr, fresh);
+                    fresh_vars.push(fresh);
                 }
-                copy_type_deep(ctx, body, &mut cache)
+                (fresh_vars, copy_type_deep(ctx, body, &mut cache))
             }
             _ => {
                 drop(desc);
-                copy_type_deep(ctx, lbl.lbl_arg, &mut cache)
+                (vec![], copy_type_deep(ctx, lbl.lbl_arg, &mut cache))
             }
         }
     };
-    (ty_arg, ty_res)
+    (poly_vars, ty_arg, ty_res)
+}
+
+/// OCaml's check_univars: after typing a polymorphic field value,
+/// convert any still-unresolved fresh Tvars back to Tunivar.
+/// This preserves the universal quantification in the typed tree.
+pub fn check_univars(ctx: &TypeContext<'_>, vars: &[TypeExprRef]) {
+    for &v in vars {
+        let v = ctx.repr(v);
+        let desc = ctx.get_desc(v);
+        match &*desc {
+            super::TypeDesc::Tvar(name) => {
+                let name = name.clone();
+                drop(desc);
+                ctx.set_desc(v, super::TypeDesc::Tunivar(name));
+            }
+            _ => {}
+        }
+    }
 }
 
 /// Deep copy a type, creating fresh type variables regardless of level.
