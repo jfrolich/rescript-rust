@@ -5567,7 +5567,7 @@ fn type_structure_item<'a>(
             };
 
             // The result type for the extension constructors
-            let ext_res_ty = tctx.type_ctx.new_constr(path.clone(), vec![]);
+            let ext_res_ty = tctx.type_ctx.new_generic_constr(path.clone(), vec![]);
 
             // Translate constructors and register them in the environment
             let mut typed_constructors = Vec::new();
@@ -5903,7 +5903,7 @@ fn type_structure_item<'a>(
             // Register the exception constructor in the environment
             let exn_ty = tctx
                 .type_ctx
-                .new_constr(Path::pident(Ident::create_persistent("exn")), vec![]);
+                .new_generic_constr(Path::pident(Ident::create_persistent("exn")), vec![]);
             let exn_path = Path::pident(id.clone());
             let cstr_desc = crate::types::decl::ConstructorDescription {
                 cstr_name: name_str.clone(),

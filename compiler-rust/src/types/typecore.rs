@@ -8406,7 +8406,7 @@ fn type_letexception(
             ),
         };
 
-    let exn_ty = ctx.new_constr(Path::pident(Ident::create_persistent("exn")), vec![]);
+    let exn_ty = ctx.new_generic_constr(Path::pident(Ident::create_persistent("exn")), vec![]);
     let exn_path = Path::pident(id.clone());
     let cstr_desc = crate::types::decl::ConstructorDescription {
         cstr_name: name_str.clone(),
