@@ -91,10 +91,10 @@ build_project_sexp() {
     env "${env_vars[@]}" RESCRIPT_BSC_EXE="$OCAML_BSC" "$RESCRIPT_CLI" clean 2>/dev/null || true
 
     echo "  [$label] Normal build (produces .cmi/.cmj)..."
-    timeout 300 env "${env_vars[@]}" RESCRIPT_BSC_EXE="$OCAML_BSC" "$RESCRIPT_CLI" build 2>&1 | tail -3 || true
+    timeout 120 env "${env_vars[@]}" RESCRIPT_BSC_EXE="$OCAML_BSC" "$RESCRIPT_CLI" build 2>&1 | tail -3 || true
 
     echo "  [$label] OCaml sexp generation..."
-    timeout 300 env "${env_vars[@]}" RESCRIPT_BSC_EXE="$OCAML_BSC" "$RESCRIPT_CLI" build --dump-typed-sexp 2>&1 | tail -3 || true
+    timeout 120 env "${env_vars[@]}" RESCRIPT_BSC_EXE="$OCAML_BSC" "$RESCRIPT_CLI" build --dump-typed-sexp 2>&1 | tail -3 || true
 
     # Save OCaml sexp files
     local count=0
@@ -106,7 +106,7 @@ build_project_sexp() {
     echo "  [$label] Saved $count OCaml sexp files"
 
     echo "  [$label] Rust sexp generation..."
-    timeout 300 env "${env_vars[@]}" RESCRIPT_BSC_EXE="$OCAML_BSC" "$RESCRIPT_CLI" build --dump-typed-sexp --rust 2>&1 | tail -3 || true
+    timeout 120 env "${env_vars[@]}" RESCRIPT_BSC_EXE="$OCAML_BSC" "$RESCRIPT_CLI" build --dump-typed-sexp --rust 2>&1 | tail -3 || true
 
     # Save Rust sexp files
     count=0
