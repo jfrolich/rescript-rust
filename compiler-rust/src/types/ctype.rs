@@ -330,7 +330,13 @@ pub fn update_level_expand<'a>(ctx: &'a TypeContext<'a>, env: &Env, level: i32, 
                 let binding_time = path_binding_time(&path);
                 let should_try_expand = current != GENERIC_LEVEL && level < binding_time;
                 drop(desc);
-                if should_try_expand {
+                // Guard: skip expansion for all local Pident types (not predef).
+                // OCaml's update_level tries expansion but often fails for local types
+                // (Env.find_type raises Not_found). In Rust, try_expand_head succeeds
+                // more often, causing unwanted alias expansion that changes type identity.
+                // Preserving local Pident aliases matches OCaml's effective behavior.
+                let is_local_pident = matches!(&path, Path::Pident(id) if id.stamp() != 0 && !is_predef_type_name(id.name()));
+                if should_try_expand && !is_local_pident {
                     if let Some(expanded) = try_expand_head(ctx, env, ty) {
                         let expanded = ctx.repr(expanded);
                         if should_preserve_local_t_alias_during_level_update(
