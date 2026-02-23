@@ -131,7 +131,8 @@ This repo was reconstructed after accidental deletion. The base comes from a `/t
 - [x] **1A. Stack-based cycle detection** — INVALID. Causes 610→220 regression. DO NOT ATTEMPT.
 - [x] **1B. Tarrow/Tfield/Tnil: COPY not identity** — Reverted ReturnSelf to copy. 610→611.
 
-**Remaining — 15 missing fixes from typed-ast-parity session logs (see RALPH_GUIDANCE.md for full details):**
+**Remaining — 15 missing fixes from typed-ast-parity session logs.**
+**Full details:** `RALPH_GUIDANCE.md` + `.parity-cache/fixes_612_to_654.md` (commit hashes, inspect diffs via `git show <hash>` on `origin/typed-ast-parity`)
 
 - [x] **2. Fix predef type variances in env.rs** — `option`/`list`/`result`/`array`/`promise` now have correct variance. Parity-neutral at 611 baseline (prerequisite for downstream fixes). (Orig commit `06049811b`, 647→648, test: ext_array_test.res)
 - [x] **3. Depth-restricted prefix rewriting in persistent_env.rs** — Added alias prefix rewriting with depth >= 2 guard. Uses collect_alias_rewrites + rewrite_deep_prefix_in_sig + effective_module_path for nested aliases. 612→613 (+1). (Orig `b589ea199`, test: Stdlib_TempTests.res + Stdlib_Intl_NumberFormatTest.res)
