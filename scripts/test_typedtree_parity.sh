@@ -64,8 +64,9 @@ OCAML_BSC="$DUNE_BIN_DIR/bsc"
 RESCRIPT_CLI="$PROJECT_ROOT/rewatch/target/release/rescript"
 TEST_PROJECT="$PROJECT_ROOT/tests/tests"
 
-# External corpus
-TELLA_DIR="${TELLA_DIR:-$HOME/dev/tella-fusion}"
+# External corpus (disabled for now — tella builds hang)
+# TELLA_DIR="${TELLA_DIR:-$HOME/dev/tella-fusion}"
+TELLA_DIR=""
 
 # Colors
 RED='\033[0;31m'
