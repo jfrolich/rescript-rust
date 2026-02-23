@@ -2453,9 +2453,89 @@ pub fn copy_type_deep(
             cache.insert(ty, result);
             result
         }
+        TypeDesc::Tvariant(row) => {
+            // Deep copy polymorphic variant row description
+            let placeholder = ctx.new_var(None);
+            cache.insert(ty, placeholder);
+            let new_row_fields: Vec<_> = row.row_fields.iter().map(|(label, field)| {
+                let new_field = match field {
+                    crate::types::type_expr::RowField::Rpresent(opt_ty) => {
+                        crate::types::type_expr::RowField::Rpresent(
+                            opt_ty.map(|t| copy_type_deep(ctx, t, cache))
+                        )
+                    }
+                    crate::types::type_expr::RowField::Reither { constant, types, matched, link } => {
+                        crate::types::type_expr::RowField::Reither {
+                            constant: *constant,
+                            types: types.iter().map(|t| copy_type_deep(ctx, *t, cache)).collect(),
+                            matched: *matched,
+                            link: *link,
+                        }
+                    }
+                    crate::types::type_expr::RowField::Rabsent => crate::types::type_expr::RowField::Rabsent,
+                };
+                (label.clone(), new_field)
+            }).collect();
+            let new_row_more = copy_type_deep(ctx, row.row_more, cache);
+            let new_row_name = row.row_name.as_ref().map(|(path, args)| {
+                let new_args: Vec<_> = args.iter().map(|t| copy_type_deep(ctx, *t, cache)).collect();
+                (path.clone(), new_args)
+            });
+            let new_row = crate::types::type_expr::RowDesc {
+                row_fields: new_row_fields,
+                row_more: new_row_more,
+                row_closed: row.row_closed,
+                row_fixed: row.row_fixed,
+                row_name: new_row_name,
+            };
+            let result = ctx.new_variant(new_row);
+            ctx.set_desc(placeholder, TypeDesc::Tlink(result));
+            cache.insert(ty, result);
+            result
+        }
+        TypeDesc::Tobject { fields, name } => {
+            let placeholder = ctx.new_var(None);
+            cache.insert(ty, placeholder);
+            let new_fields = copy_type_deep(ctx, *fields, cache);
+            let result = ctx.new_type(TypeDesc::Tobject {
+                fields: new_fields,
+                name: name.as_ref().map(|(path, args)| {
+                    let new_args: Vec<_> = args.iter().map(|t| copy_type_deep(ctx, *t, cache)).collect();
+                    (path.clone(), new_args)
+                }),
+            });
+            ctx.set_desc(placeholder, TypeDesc::Tlink(result));
+            cache.insert(ty, result);
+            result
+        }
+        TypeDesc::Tfield { name, kind, typ, rest } => {
+            let new_typ = copy_type_deep(ctx, *typ, cache);
+            let new_rest = copy_type_deep(ctx, *rest, cache);
+            let result = ctx.new_type(TypeDesc::Tfield {
+                name: name.clone(),
+                kind: kind.clone(),
+                typ: new_typ,
+                rest: new_rest,
+            });
+            cache.insert(ty, result);
+            result
+        }
+        TypeDesc::Tsubst(target) => copy_type_deep(ctx, *target, cache),
         TypeDesc::Tlink(target) => copy_type_deep(ctx, *target, cache),
         TypeDesc::Tnil | TypeDesc::Tunivar(_) => ty, // Return as-is
-        _ => ty,                                     // For other types, return as-is for now
+        TypeDesc::Tpackage { path, lids, args } => {
+            let new_args: Vec<_> = args
+                .iter()
+                .map(|t| copy_type_deep(ctx, *t, cache))
+                .collect();
+            let result = ctx.new_type(TypeDesc::Tpackage {
+                path: path.clone(),
+                lids: lids.clone(),
+                args: new_args,
+            });
+            cache.insert(ty, result);
+            result
+        }
     }
 }
 
