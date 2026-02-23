@@ -144,6 +144,7 @@ This repo was reconstructed after accidental deletion. The base comes from a `/t
   - 2026-02-23 attempt: implemented/remapped `lbl_arg` at label construction sites (`typemod.rs`, `typecore.rs`, `env.rs`, `persistent_env.rs`) and ran deterministic full parity. Result stayed **478/657 → 478/657** (179 failures). `gpr_4274_test` diff unchanged. Reverted experiment; keep this task unchecked.
 - [ ] **8A. Qualified label disambiguation for module-scoped records (NEW)** — `gpr_4274_test` still resolves `X.i` / `Foo.foo` through fresh `Tvar None` instead of concrete record paths (`N.t`, `Foo.record`), indicating label lookup/disambiguation fallback is selecting or synthesizing unconstrained labels.
   - Evidence: deterministic filtered diff on 2026-02-23 shows repeated `Tconstr(Pdot(Pident \"N\"), \"t\") -> Tvar None` and `Tconstr(Pdot(Pident \"Foo\"), \"record\") -> Tvar None`.
+  - Session confirmation (2026-02-23): `timeout 300 ./scripts/test_typedtree_parity.sh` remained **478/657** with **179** parity failures; `timeout 300 ./scripts/test_typedtree_parity.sh gpr_4274_test` remained **0/1** with the same drift.
   - Next OCaml refs: `typecore.ml` label disambiguation path (`NameChoice`/`extract_label`) and module-qualified label lookup behavior.
   - Next Rust refs: `typecore.rs` `disambiguate_label`, `lookup_label_by_expected_type`, and module-signature path resolution helpers.
 - [ ] **9. Shallow-copy pattern variable types** — Shallow Tconstr copies for pattern vars with non-empty args. (Orig `d75afe709`, 631→634, +3 tests)
