@@ -92,7 +92,12 @@ Both OCaml and Rust sexp are generated via **rewatch** (single command each):
 2. `rescript build --dump-typed-sexp` — OCaml bsc generates sexp to `lib/ocaml/*.sexp`
 3. `rescript build --dump-typed-sexp --rust` — Rust in-process generates sexp to `lib/ocaml/*.sexp`
 
-The script saves OCaml sexp files before Rust overwrites them, then does **raw byte-for-byte comparison** (`cmp -s`). Results go to a temp dir that is cleaned up on exit.
+The script saves OCaml sexp files before Rust overwrites them, then does **raw byte-for-byte comparison** (`cmp -s`). All results persist in `.parity-cache/` for inspection:
+- `.parity-cache/$label/ocaml/*.sexp` — raw OCaml sexp files
+- `.parity-cache/$label/rust/*.sexp` — raw Rust sexp files
+- `.parity-cache/$label/diffs/*.diff` — per-module diffs (only for failing files)
+- `.parity-cache/$label/summary.txt` — counts
+- `.parity-cache/$label/failures.txt` — list of failing modules
 
 ### Raw comparison — no post-processing
 

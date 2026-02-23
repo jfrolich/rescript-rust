@@ -47,6 +47,8 @@ cargo build --manifest-path compiler-rust/Cargo.toml --release
 ./scripts/test_typedtree_parity.sh tests/tests/src/a.res
 ```
 
+Results persist in `.parity-cache/` — inspect diffs at `.parity-cache/tests/diffs/*.diff`, raw sexp at `.parity-cache/tests/ocaml/*.sexp` and `.parity-cache/tests/rust/*.sexp`.
+
 **Important:** The comparison is raw byte-for-byte (`cmp -s`). No post-processing. Both compilers must produce identical output.
 
 ---

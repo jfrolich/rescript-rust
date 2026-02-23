@@ -260,3 +260,14 @@ Generalize the `update_level_expand` Pdot guard from specific `.t`/`.cmp` patter
 
 # When filter matches a failing file, the diff is shown inline.
 ```
+
+### Inspecting cached results
+
+All parity results persist in `.parity-cache/` between runs:
+- `.parity-cache/$label/ocaml/*.sexp` — raw OCaml sexp output
+- `.parity-cache/$label/rust/*.sexp` — raw Rust sexp output
+- `.parity-cache/$label/diffs/*.diff` — per-module diffs (failing files only)
+- `.parity-cache/$label/summary.txt` — pass/fail counts
+- `.parity-cache/$label/failures.txt` — list of failing module names
+
+Where `$label` is `tests` for the main test project or `tella_*` for external corpora.
