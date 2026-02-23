@@ -744,13 +744,9 @@ fn compile_file(
         warn_error_override,
     )?;
 
-    if dump_typed_sexp && !use_rust_parser {
-        to_mjs_args.push("-dtyped-sexp-locs".to_string());
-    }
-
-    // Pre-extract include paths and runtime path from compiler args for Rust in-process sexp dump.
-    // Must happen before to_mjs_args is moved into Command::args().
-    let rust_sexp_paths = if dump_typed_sexp && use_rust_parser {
+    // When dump_typed_sexp with Rust parser: skip OCaml bsc entirely,
+    // just typecheck in-process and write sexp.
+    if dump_typed_sexp && use_rust_parser {
         let mut include_paths: Vec<PathBuf> = Vec::new();
         let mut runtime_path: Option<PathBuf> = None;
         let mut i = 0;
@@ -765,10 +761,41 @@ fn compile_file(
                 i += 1;
             }
         }
-        Some((include_paths, runtime_path))
-    } else {
-        None
-    };
+
+        let ast_key = format!("{}:{}", module_name, if is_interface { "intf" } else { "impl" });
+        let stored = stored_asts.and_then(|m| m.lock().unwrap().remove(&ast_key));
+
+        let opts = rescript_compiler::driver::CompilerOptions {
+            dump_typed_sexp_locs: true,
+            include_paths,
+            runtime_path,
+            ..Default::default()
+        };
+
+        let sexp_path = ocaml_build_path_abs.join(format!("{basename}.sexp"));
+        if let Some(stored_ast) = stored {
+            if let Ok(mut file) = std::fs::File::create(&sexp_path) {
+                match stored_ast {
+                    super::build_types::StoredAst::Structure(arena, structure) => {
+                        let _ = rescript_compiler::driver::typecheck_stored_structure_and_dump_sexp(
+                            arena, structure, &opts, &mut file,
+                        );
+                    }
+                    super::build_types::StoredAst::Signature(arena, signature) => {
+                        let _ = rescript_compiler::driver::typecheck_stored_signature_and_dump_sexp(
+                            arena, signature, &opts, &mut file,
+                        );
+                    }
+                }
+            }
+        }
+
+        return Ok(None);
+    }
+
+    if dump_typed_sexp {
+        to_mjs_args.push("-dtyped-sexp-locs".to_string());
+    }
 
     let to_mjs = Command::new(&compiler_info.bsc_path)
         .current_dir(
@@ -795,49 +822,13 @@ fn compile_file(
                 .expect("stderr should be valid utf8")
                 .to_string();
 
-            // If dump_typed_sexp is enabled, generate .sexp files.
-            // OCaml path: extract sexp from bsc's stderr (bsc was invoked with -dtyped-sexp-locs).
-            // Rust path: typecheck in-process and write sexp directly.
-            let err = if dump_typed_sexp && !use_rust_parser {
+            let err = if dump_typed_sexp {
                 let (warnings, sexp) = extract_sexp_from_stderr(&raw_stderr);
                 if let Some(sexp_content) = sexp {
                     let sexp_path = ocaml_build_path_abs.join(format!("{basename}.sexp"));
                     let _ = std::fs::write(&sexp_path, sexp_content);
                 }
                 warnings
-            } else if dump_typed_sexp && use_rust_parser {
-                // Rust in-process path: use stored AST from parse phase if available,
-                // otherwise fall back to re-reading source.
-                let ast_key = format!("{}:{}", module_name, if is_interface { "intf" } else { "impl" });
-                let stored = stored_asts.and_then(|m| m.lock().unwrap().remove(&ast_key));
-
-                // Use pre-extracted include paths and runtime path from compiler args.
-                let (include_paths, runtime_path) = rust_sexp_paths.clone().unwrap();
-                let opts = rescript_compiler::driver::CompilerOptions {
-                    dump_typed_sexp_locs: true,
-                    include_paths,
-                    runtime_path,
-                    ..Default::default()
-                };
-
-                let sexp_path = ocaml_build_path_abs.join(format!("{basename}.sexp"));
-                if let Some(stored_ast) = stored {
-                    if let Ok(mut file) = std::fs::File::create(&sexp_path) {
-                        match stored_ast {
-                            super::build_types::StoredAst::Structure(arena, structure) => {
-                                let _ = rescript_compiler::driver::typecheck_stored_structure_and_dump_sexp(
-                                    arena, structure, &opts, &mut file,
-                                );
-                            }
-                            super::build_types::StoredAst::Signature(arena, signature) => {
-                                let _ = rescript_compiler::driver::typecheck_stored_signature_and_dump_sexp(
-                                    arena, signature, &opts, &mut file,
-                                );
-                            }
-                        }
-                    }
-                }
-                raw_stderr
             } else {
                 raw_stderr
             };

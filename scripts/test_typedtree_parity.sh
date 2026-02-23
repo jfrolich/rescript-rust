@@ -187,7 +187,6 @@ else
     echo "Rust bsc:  (not available)"
 fi
 echo "Sexp flag: $SEXP_FLAG"
-echo "Rust sexp: in-process via rewatch (cached in lib/ocaml/)"
 echo "OCaml cache: $CACHE_DIR"
 echo "Timeout: ${TIMEOUT_SECONDS}s"
 echo "Parallel jobs: $PARALLEL_JOBS"
@@ -274,27 +273,36 @@ test_single_file() {
         full_file_path="$PROJECT_ROOT/$file"
     fi
 
-    # --- OCaml sexp: check cache first ---
+    # --- Derive .ast path from source ---
     local basename="${full_file_path##*/}"
     local ext="${basename##*.}"
-    local ast_file
+    local rel_path="${full_file_path#$TEST_PROJECT/}"
+    local ast_arg
     if [[ "$ext" == "resi" ]]; then
-        ast_file="$TEST_PROJECT/lib/ocaml/${basename%.resi}.iast"
+        ast_arg="${rel_path%.resi}.iast"
     else
-        ast_file="$TEST_PROJECT/lib/ocaml/${basename%.res}.ast"
+        ast_arg="${rel_path%.res}.ast"
     fi
+
+    # --- OCaml sexp: check cache, else invoke bsc ---
+    local ast_file="$TEST_PROJECT/lib/ocaml/${basename%.*}.ast"
+    [[ "$ext" == "resi" ]] && ast_file="$TEST_PROJECT/lib/ocaml/${basename%.*}.iast"
     local cache_key="" cache_file=""
     if [[ -f "$ast_file" ]]; then
         cache_key=$(md5 -q "$ast_file" 2>/dev/null) || cache_key=""
-        if [[ -n "$cache_key" ]]; then
-            cache_file="$CACHE_DIR/${cache_key}.sexp"
-        fi
+        [[ -n "$cache_key" ]] && cache_file="$CACHE_DIR/${cache_key}.sexp"
     fi
 
     local ocaml_cached=false
     if [[ -n "$cache_file" && -f "$cache_file" ]]; then
         cp "$cache_file" "$file_temp/ocaml.sexp"
         ocaml_cached=true
+    fi
+
+    if [[ "$ocaml_cached" != "true" && -n "$TEST_BASE_ARGS" ]]; then
+        cd "$TEST_PROJECT/lib/bs"
+        timeout "$TIMEOUT_SECONDS" "$OCAML_BSC" $SEXP_FLAG $TEST_BASE_ARGS $ast_arg 2> "$file_temp/ocaml.sexp" 1>/dev/null || true
+        cd "$PROJECT_ROOT"
     fi
 
     # --- Rust sexp: use cached from rewatch --dump-typed-sexp --rust ---
@@ -305,28 +313,11 @@ test_single_file() {
         fi
     fi
 
-    # --- OCaml: invoke bsc if not cached ---
-    if [[ "$ocaml_cached" != "true" && -n "$TEST_BASE_ARGS" ]]; then
-        local rel_path="${full_file_path#$TEST_PROJECT/}"
-        local ast_arg
-        if [[ "$ext" == "resi" ]]; then
-            ast_arg="${rel_path%.resi}.iast"
-        else
-            ast_arg="${rel_path%.res}.ast"
-        fi
-        cd "$TEST_PROJECT/lib/bs"
-        timeout "$TIMEOUT_SECONDS" "$OCAML_BSC" $SEXP_FLAG $TEST_BASE_ARGS $ast_arg 2> "$file_temp/ocaml.sexp" 1>/dev/null || true
-        cd "$PROJECT_ROOT"
-    fi
-
     # --- Strip warnings from sexp output ---
     if [[ "$ocaml_cached" != "true" && -f "$file_temp/ocaml.sexp" ]]; then
         LC_ALL=C sed -E -n '/^\(structure|^\(signature/,$p' "$file_temp/ocaml.sexp" | LC_ALL=C sed '/^$/,$d' > "$file_temp/ocaml_clean.sexp"
         mv "$file_temp/ocaml_clean.sexp" "$file_temp/ocaml.sexp"
-        # Cache result (including empty = OCaml error)
-        if [[ -n "$cache_file" ]]; then
-            cp "$file_temp/ocaml.sexp" "$cache_file"
-        fi
+        [[ -n "$cache_file" ]] && cp "$file_temp/ocaml.sexp" "$cache_file"
     fi
     if [[ -f "$file_temp/rust.sexp" ]]; then
         LC_ALL=C sed -E -n '/^\(structure|^\(signature/,$p' "$file_temp/rust.sexp" | LC_ALL=C sed '/^$/,$d' > "$file_temp/rust_clean.sexp"
