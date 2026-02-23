@@ -82,7 +82,13 @@ done
 scriptDir=$(dirname "$0")
 PROJECT_ROOT=$(cd "$scriptDir/.."; pwd -P)
 DUNE_BIN_DIR="$PROJECT_ROOT/_build/install/default/bin"
-OCAML_BSC="$DUNE_BIN_DIR/bsc"
+# Prefer the pre-built bsc.exe (stable reference) over dune-built bsc (may have local patches)
+PREBUILT_BSC="$PROJECT_ROOT/packages/@rescript/darwin-arm64/bin/bsc.exe"
+if [[ -x "$PREBUILT_BSC" ]]; then
+    OCAML_BSC="$PREBUILT_BSC"
+else
+    OCAML_BSC="$DUNE_BIN_DIR/bsc"
+fi
 RUST_BSC="$PROJECT_ROOT/compiler-rust/target/release/bsc"
 RESCRIPT_CLI="$PROJECT_ROOT/packages/@rescript/darwin-arm64/bin/rescript.exe"
 TEST_PROJECT="$PROJECT_ROOT/tests/tests"
