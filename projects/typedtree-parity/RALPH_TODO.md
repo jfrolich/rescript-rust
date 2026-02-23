@@ -48,7 +48,7 @@ timeout 300 ./scripts/test_typedtree_parity.sh --with-locs --no-build --quick
 
 ## Current Status
 
-**612/657 (45 failures)**
+**613/657 (44 failures)**
 
 ---
 
@@ -118,7 +118,7 @@ This repo was reconstructed after accidental deletion. The base comes from a `/t
 **Remaining — 15 missing fixes from typed-ast-parity session logs (see RALPH_GUIDANCE.md for full details):**
 
 - [x] **2. Fix predef type variances in env.rs** — `option`/`list`/`result`/`array`/`promise` now have correct variance. Parity-neutral at 611 baseline (prerequisite for downstream fixes). (Orig commit `06049811b`, 647→648, test: ext_array_test.res)
-- [ ] **3. Depth-restricted prefix rewriting in persistent_env.rs** — Add `min_depth` to `substitute_submodule_paths`. (Orig `b589ea199`, 648→649, test: Stdlib_TempTests.res)
+- [x] **3. Depth-restricted prefix rewriting in persistent_env.rs** — Added alias prefix rewriting with depth >= 2 guard. Uses collect_alias_rewrites + rewrite_deep_prefix_in_sig + effective_module_path for nested aliases. 612→613 (+1). (Orig `b589ea199`, test: Stdlib_TempTests.res + Stdlib_Intl_NumberFormatTest.res)
 - [x] **4. Coercion subtype approximation in typecore.rs** — In `type_coerce`, unify result with `from_ty` when still Tvar. 611→612 (+1). (Orig `9c50c0ad5`, 629→630, test: type_coercion_free_vars.res)
 - [ ] **5. Deep-copy Tvariant/Tobject/Tfield in copy_type_deep** — `copy_type_deep_inner` catch-all returns original, needs deep copy. (Orig `b622d705b`, 642→643, test: jsxv4_newtype.res)
 - [ ] **6. Expand abbreviations before structural match for same-path Tconstr** — When same path + n_args>0, expand both, unify expanded. (Orig `01a5aec01`, 638→639, tests: unboxed_use_case.res, ExternalArity.res)
