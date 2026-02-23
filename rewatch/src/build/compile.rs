@@ -68,17 +68,7 @@ fn extract_sexp_from_stderr(stderr: &str) -> (String, Option<String>) {
         });
     if let Some(pos) = pos {
         let warnings = stderr[..pos].to_string();
-        let sexp_region = &stderr[pos..];
-        // The sexp never contains blank lines, so trim at the first blank line
-        let mut sexp = if let Some(blank_pos) = sexp_region.find("\n\n") {
-            sexp_region[..blank_pos].to_string()
-        } else {
-            sexp_region.trim_end().to_string()
-        };
-        // Ensure trailing newline for consistency with Rust sexp output
-        if !sexp.ends_with('\n') {
-            sexp.push('\n');
-        }
+        let sexp = stderr[pos..].to_string();
         (warnings, Some(sexp))
     } else {
         (stderr.to_string(), None)
