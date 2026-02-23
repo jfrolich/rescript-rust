@@ -75,7 +75,7 @@ while [[ $# -gt 0 ]]; do
             shift
             ;;
         --with-locs)
-            WITH_LOCS=true
+            # Always enabled now (rewatch --dump-typed-sexp --rust generates with-locs)
             shift
             ;;
         --no-cache)
@@ -114,11 +114,9 @@ RESET='\033[0m'
 
 # Configuration
 TIMEOUT_SECONDS=10
-if [[ "$WITH_LOCS" == "true" ]]; then
-    SEXP_FLAG="-dtyped-sexp-locs"
-else
-    SEXP_FLAG="-dtyped-sexp"
-fi
+# Always use -dtyped-sexp-locs since rewatch --dump-typed-sexp --rust generates with-locs
+SEXP_FLAG="-dtyped-sexp-locs"
+WITH_LOCS=true
 
 # OCaml sexp cache
 CACHE_DIR="$PROJECT_ROOT/.cache/parity"
@@ -193,6 +191,7 @@ else
     echo "Rust bsc:  (not available)"
 fi
 echo "Sexp flag: $SEXP_FLAG"
+echo "Rust sexp: in-process via rewatch (cached in lib/ocaml/)"
 echo "Timeout: ${TIMEOUT_SECONDS}s"
 echo "Parallel jobs: $PARALLEL_JOBS"
 if [[ "$NO_CACHE" == "true" ]]; then
@@ -211,11 +210,11 @@ echo ""
 if [[ "$SKIP_BUILD" != "true" ]]; then
     echo -e "${BOLD}Step 1: Building test projects with rewatch...${RESET}"
 
-    # Build tests/tests
-    echo "  Building tests/tests..."
+    # Build tests/tests (with --dump-typed-sexp --rust to pre-generate Rust sexp files in-process)
+    echo "  Building tests/tests (with Rust sexp generation)..."
     cd "$TEST_PROJECT"
     RESCRIPT_BSC_EXE="$OCAML_BSC" "$RESCRIPT_CLI" clean 2>/dev/null || true
-    if ! RESCRIPT_BSC_EXE="$OCAML_BSC" "$RESCRIPT_CLI" build 2>&1 | tail -5; then
+    if ! RESCRIPT_BSC_EXE="$OCAML_BSC" "$RESCRIPT_CLI" build --dump-typed-sexp --rust 2>&1 | tail -5; then
         echo -e "${YELLOW}Warning: Some test files may have failed to build${RESET}"
     fi
     cd "$PROJECT_ROOT"
@@ -230,9 +229,9 @@ if [[ "$SKIP_BUILD" != "true" ]]; then
             proj_dir=$(dirname "$cfg")
             has_sources=$(jq -r 'if (.sources | length) > 0 then "1" else "0" end' "$cfg" 2>/dev/null) || has_sources=0
             if [[ "$has_sources" == "1" ]]; then
-                echo "    Building $proj_dir..."
+                echo "    Building $proj_dir (with Rust sexp generation)..."
                 cd "$proj_dir"
-                if timeout 300 env RESCRIPT_BSC_EXE="$OCAML_BSC" "$RESCRIPT_CLI" build 2>&1 | tail -3; then
+                if timeout 300 env RESCRIPT_BSC_EXE="$OCAML_BSC" "$RESCRIPT_CLI" build --dump-typed-sexp --rust 2>&1 | tail -3; then
                     TELLA_PROJECTS="${TELLA_PROJECTS}${proj_dir}"$'\n'
                     TELLA_AVAILABLE=true
                 else
@@ -476,20 +475,37 @@ test_single_file() {
             fi
             local args="$base_args $ast_arg"
 
+            # Check for cached Rust sexp from rewatch --dump-typed-sexp --rust
+            local stem="${full_file_path##*/}"
+            stem="${stem%.*}"
+            local cached_rust_sexp=""
+            if [[ -f "$project_root/lib/ocaml/${stem}.sexp" ]]; then
+                cached_rust_sexp="$project_root/lib/ocaml/${stem}.sexp"
+            else
+                # Try namespaced: stem-*.sexp (for packages with namespace)
+                local ns_match=$(ls "$project_root/lib/ocaml/${stem}"-*.sexp 2>/dev/null | head -1)
+                if [[ -n "$ns_match" ]]; then
+                    cached_rust_sexp="$ns_match"
+                fi
+            fi
+
             cd "$project_root/lib/bs"
             if [[ "$ocaml_cached" != "true" ]]; then
-                if [[ "$RUST_AVAILABLE" == "true" ]]; then
-                    # Run OCaml and Rust in parallel
-                    timeout "$TIMEOUT_SECONDS" "$OCAML_BSC" $SEXP_FLAG $args 2> "$file_temp/ocaml.sexp" 1>/dev/null &
-                    local ocaml_pid=$!
+                # Run OCaml bsc
+                timeout "$TIMEOUT_SECONDS" "$OCAML_BSC" $SEXP_FLAG $args 2> "$file_temp/ocaml.sexp" 1>/dev/null &
+                local ocaml_pid=$!
+                # Use cached Rust sexp if available, otherwise fall back to per-file Rust bsc
+                if [[ -n "$cached_rust_sexp" ]]; then
+                    cp "$cached_rust_sexp" "$file_temp/rust.sexp"
+                elif [[ "$RUST_AVAILABLE" == "true" ]]; then
                     timeout "$TIMEOUT_SECONDS" "$RUST_BSC" $SEXP_FLAG $args 2> "$file_temp/rust.sexp" 1>/dev/null || true
-                    wait $ocaml_pid 2>/dev/null || true
-                else
-                    timeout "$TIMEOUT_SECONDS" "$OCAML_BSC" $SEXP_FLAG $args 2> "$file_temp/ocaml.sexp" 1>/dev/null || true
                 fi
+                wait $ocaml_pid 2>/dev/null || true
             else
-                # OCaml cached, only run Rust
-                if [[ "$RUST_AVAILABLE" == "true" ]]; then
+                # OCaml cached, only need Rust
+                if [[ -n "$cached_rust_sexp" ]]; then
+                    cp "$cached_rust_sexp" "$file_temp/rust.sexp"
+                elif [[ "$RUST_AVAILABLE" == "true" ]]; then
                     timeout "$TIMEOUT_SECONDS" "$RUST_BSC" $SEXP_FLAG $args 2> "$file_temp/rust.sexp" 1>/dev/null || true
                 fi
             fi
