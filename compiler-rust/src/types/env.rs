@@ -833,7 +833,15 @@ pub fn initial_env(ctx: &TypeContext<'_>) -> Env {
     add_type_with_constrs(&mut env, "bigint", decl_abstr(0, false), ctx);
     add_type_with_constrs(&mut env, "string", decl_abstr(0, false), ctx);
     add_type_with_constrs(&mut env, "extension_constructor", decl_abstr(0, false), ctx);
-    add_type_with_constrs(&mut env, "array", decl_abstr(1, false), ctx);
+    add_type_with_constrs(
+        &mut env,
+        "array",
+        TypeDeclaration {
+            type_variance: vec![crate::types::variance::Variance::full()],
+            ..decl_abstr(1, false)
+        },
+        ctx,
+    );
     add_type_with_constrs(
         &mut env,
         "promise",
@@ -842,6 +850,7 @@ pub fn initial_env(ctx: &TypeContext<'_>) -> Env {
             TypeDeclaration {
                 type_params: vec![tvar],
                 type_arity: 1,
+                type_variance: vec![crate::types::variance::Variance::covariant()],
                 ..decl_abstr(1, false)
             }
         },
@@ -983,6 +992,7 @@ pub fn initial_env(ctx: &TypeContext<'_>) -> Env {
                     cstr("None", vec![]),
                     cstr("Some", vec![tvar]),
                 ]),
+                type_variance: vec![crate::types::variance::Variance::covariant()],
                 ..decl_abstr(1, false)
             },
             ctx,
@@ -1062,6 +1072,10 @@ pub fn initial_env(ctx: &TypeContext<'_>) -> Env {
                     cstr("Ok", vec![tvar1]),
                     cstr("Error", vec![tvar2]),
                 ]),
+                type_variance: vec![
+                    crate::types::variance::Variance::covariant(),
+                    crate::types::variance::Variance::covariant(),
+                ],
                 ..decl_abstr(2, false)
             },
             ctx,
@@ -1083,6 +1097,7 @@ pub fn initial_env(ctx: &TypeContext<'_>) -> Env {
                     cstr("[]", vec![]),
                     cstr("::", vec![tvar, list_ty]),
                 ]),
+                type_variance: vec![crate::types::variance::Variance::covariant()],
                 ..decl_abstr(1, false)
             },
             ctx,
