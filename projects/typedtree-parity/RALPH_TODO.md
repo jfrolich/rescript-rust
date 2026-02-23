@@ -31,24 +31,49 @@ The Rust type checker **WILL hang/infinite loop** on many inputs.
 ## How to Test
 
 ```bash
-# Build
+# Build Rust compiler
 cargo build --manifest-path compiler-rust/Cargo.toml --release
 
-# Full parity suite
-timeout 300 ./scripts/test_typedtree_parity.sh --with-locs --no-build --parallel 1
+# Full parity check (~30s, builds OCaml + Rust sexp via rewatch, raw comparison)
+./scripts/test_typedtree_parity.sh
 
-# Single file
-timeout 10 ./scripts/test_typedtree_parity.sh --with-locs --no-build tests/tests/src/a.res
+# Reuse cached sexp from previous full run (instant)
+./scripts/test_typedtree_parity.sh --no-build
 
-# Quick mode (stop on first failure)
-timeout 300 ./scripts/test_typedtree_parity.sh --with-locs --no-build --quick
+# Single file (regenerates via rewatch --filter, ~1s)
+./scripts/test_typedtree_parity.sh async_inline
+
+# Single file with cache (instant, shows diff inline on failure)
+./scripts/test_typedtree_parity.sh --no-build async_inline
+
+# Glob pattern
+./scripts/test_typedtree_parity.sh --no-build "belt_*"
+
+# File path (extracts module name)
+./scripts/test_typedtree_parity.sh --no-build tests/tests/src/a.res
+
+# Manual diff of cached sexp
+diff .parity-cache/tests/ocaml/MODULE.sexp .parity-cache/tests/rust/MODULE.sexp
 ```
+
+**Important:** The comparison is raw byte-for-byte (`cmp -s`). No post-processing. Both compilers must produce identical output.
 
 ---
 
 ## Current Status
 
-**613/657 (44 failures)**
+**478/657 (72%) — raw byte-for-byte comparison**
+
+### Why the drop from 613 to 478
+
+The parity script was rewritten to use **raw byte-for-byte comparison** with zero post-processing. Previously, sexp output was stripped/trimmed/normalized before comparison, which masked real differences. The new script (`test_typedtree_parity.sh`) compares OCaml and Rust sexp output exactly as produced — no stripping of non-printable characters, no trimming whitespace, no normalizing newlines.
+
+The ~135 extra failures are files where the sexp content is structurally similar but differs in:
+- Trailing newlines (OCaml vs Rust)
+- Non-printable characters in OCaml bsc stderr output
+- Whitespace differences
+
+**These are real differences that must be fixed in the Rust output to match OCaml exactly.** Do NOT add post-processing to the comparison — instead, make the Rust compiler produce byte-identical sexp output.
 
 ---
 
