@@ -2584,6 +2584,214 @@ pub fn copy_type(ctx: &TypeContext<'_>, ty: TypeExprRef) -> TypeExprRef {
     copy_type_cached(ctx, ty, &mut cache)
 }
 
+/// Full structural copy of a type, copying ALL nodes regardless of level.
+/// Matches OCaml's `Subst.type_expr Subst.identity` which creates fresh
+/// nodes for everything except Tvars/Tunivar.
+/// Used in type_newtype to ensure replace_newtype_path doesn't corrupt
+/// shared pattern types.
+pub fn subst_identity_copy(ctx: &TypeContext<'_>, ty: TypeExprRef) -> TypeExprRef {
+    let mut seen = std::collections::HashMap::new();
+    subst_identity_copy_rec(ctx, ty, &mut seen)
+}
+
+fn subst_identity_copy_rec(
+    ctx: &TypeContext<'_>,
+    ty: TypeExprRef,
+    seen: &mut std::collections::HashMap<TypeExprRef, TypeExprRef>,
+) -> TypeExprRef {
+    let ty = ctx.repr(ty);
+
+    if let Some(&cached) = seen.get(&ty) {
+        return cached;
+    }
+
+    let desc = ctx.get_desc(ty);
+    match &*desc {
+        // OCaml Subst.typexp returns identity for Tvar/Tunivar
+        // (when not for_saving and id >= 0)
+        TypeDesc::Tvar(_) | TypeDesc::Tunivar(_) | TypeDesc::Tnil => {
+            drop(desc);
+            ty
+        }
+        _ => {
+            drop(desc);
+            // Create placeholder for cycle handling
+            let placeholder = ctx.new_var(None);
+            let level = ctx.get_level(ty);
+            if level != GENERIC_LEVEL {
+                ctx.set_level(placeholder, level);
+            }
+            seen.insert(ty, placeholder);
+
+            let desc = ctx.get_desc(ty);
+            let new_desc = match &*desc {
+                TypeDesc::Tvar(_) | TypeDesc::Tunivar(_) | TypeDesc::Tnil => unreachable!(),
+                TypeDesc::Tlink(target) | TypeDesc::Tsubst(target) => {
+                    let target = *target;
+                    drop(desc);
+                    return subst_identity_copy_rec(ctx, target, seen);
+                }
+                TypeDesc::Tarrow { arg, ret, arity, .. } => {
+                    let arg_typ = arg.typ;
+                    let arg_lbl = arg.lbl.clone();
+                    let ret = *ret;
+                    let arity = *arity;
+                    drop(desc);
+                    let arg_copy = subst_identity_copy_rec(ctx, arg_typ, seen);
+                    let ret_copy = subst_identity_copy_rec(ctx, ret, seen);
+                    TypeDesc::Tarrow {
+                        arg: crate::types::type_expr::TypeArg {
+                            lbl: arg_lbl,
+                            typ: arg_copy,
+                        },
+                        ret: ret_copy,
+                        commutable: crate::types::type_expr::Commutable::Cok,
+                        arity,
+                    }
+                }
+                TypeDesc::Ttuple(types) => {
+                    let types = types.clone();
+                    drop(desc);
+                    let types_copy: Vec<_> = types
+                        .iter()
+                        .map(|t| subst_identity_copy_rec(ctx, *t, seen))
+                        .collect();
+                    TypeDesc::Ttuple(types_copy)
+                }
+                TypeDesc::Tconstr { path, args, .. } => {
+                    let path = path.clone();
+                    let args = args.clone();
+                    drop(desc);
+                    let args_copy: Vec<_> = args
+                        .iter()
+                        .map(|t| subst_identity_copy_rec(ctx, *t, seen))
+                        .collect();
+                    TypeDesc::Tconstr {
+                        path,
+                        args: args_copy,
+                        abbrev: ctx.alloc_abbrev_nil(),
+                    }
+                }
+                TypeDesc::Tobject { fields, name } => {
+                    let fields = *fields;
+                    let name = name.clone();
+                    drop(desc);
+                    let fields_copy = subst_identity_copy_rec(ctx, fields, seen);
+                    let name_copy = name.map(|(path, args)| {
+                        (
+                            path,
+                            args.iter()
+                                .map(|t| subst_identity_copy_rec(ctx, *t, seen))
+                                .collect(),
+                        )
+                    });
+                    TypeDesc::Tobject {
+                        fields: fields_copy,
+                        name: name_copy,
+                    }
+                }
+                TypeDesc::Tfield { name, kind, typ, rest } => {
+                    let name = name.clone();
+                    let kind = kind.clone();
+                    let typ = *typ;
+                    let rest = *rest;
+                    drop(desc);
+                    let typ_copy = subst_identity_copy_rec(ctx, typ, seen);
+                    let rest_copy = subst_identity_copy_rec(ctx, rest, seen);
+                    TypeDesc::Tfield {
+                        name,
+                        kind,
+                        typ: typ_copy,
+                        rest: rest_copy,
+                    }
+                }
+                TypeDesc::Tpoly { body, vars } => {
+                    let body = *body;
+                    let vars = vars.clone();
+                    drop(desc);
+                    let body_copy = subst_identity_copy_rec(ctx, body, seen);
+                    let vars_copy: Vec<_> = vars
+                        .iter()
+                        .map(|t| subst_identity_copy_rec(ctx, *t, seen))
+                        .collect();
+                    TypeDesc::Tpoly {
+                        body: body_copy,
+                        vars: vars_copy,
+                    }
+                }
+                TypeDesc::Tvariant(row) => {
+                    let row = row.clone();
+                    drop(desc);
+                    let fields_copy: Vec<_> = row
+                        .row_fields
+                        .iter()
+                        .map(|(name, field)| {
+                            let field_copy = match field {
+                                crate::types::type_expr::RowField::Rpresent(ty) => {
+                                    crate::types::type_expr::RowField::Rpresent(
+                                        ty.map(|t| subst_identity_copy_rec(ctx, t, seen)),
+                                    )
+                                }
+                                crate::types::type_expr::RowField::Reither {
+                                    constant,
+                                    types,
+                                    matched,
+                                    link,
+                                } => crate::types::type_expr::RowField::Reither {
+                                    constant: *constant,
+                                    types: types
+                                        .iter()
+                                        .map(|t| subst_identity_copy_rec(ctx, *t, seen))
+                                        .collect(),
+                                    matched: *matched,
+                                    link: *link,
+                                },
+                                crate::types::type_expr::RowField::Rabsent => {
+                                    crate::types::type_expr::RowField::Rabsent
+                                }
+                            };
+                            (name.clone(), field_copy)
+                        })
+                        .collect();
+                    let more_copy = subst_identity_copy_rec(ctx, row.row_more, seen);
+                    let name_copy = row.row_name.map(|(path, args)| {
+                        (
+                            path,
+                            args.iter()
+                                .map(|t| subst_identity_copy_rec(ctx, *t, seen))
+                                .collect(),
+                        )
+                    });
+                    TypeDesc::Tvariant(RowDesc {
+                        row_fields: fields_copy,
+                        row_more: more_copy,
+                        row_closed: row.row_closed,
+                        row_fixed: row.row_fixed,
+                        row_name: name_copy,
+                    })
+                }
+                TypeDesc::Tpackage { path, lids, args } => {
+                    let path = path.clone();
+                    let lids = lids.clone();
+                    let args = args.clone();
+                    drop(desc);
+                    let args_copy: Vec<_> = args
+                        .iter()
+                        .map(|t| subst_identity_copy_rec(ctx, *t, seen))
+                        .collect();
+                    TypeDesc::Tpackage {
+                        path,
+                        lids,
+                        args: args_copy,
+                    }
+                }
+            };
+            ctx.set_desc(placeholder, new_desc);
+            placeholder
+        }
+    }
+}
+
 /// Copy a type for instantiation.
 ///
 /// OCaml `Ctype.copy` only duplicates nodes at `generic_level` and returns

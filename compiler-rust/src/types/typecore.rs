@@ -7796,8 +7796,11 @@ fn type_newtype(
         let body_ty = ctx.new_var(None);
         let typed_body = type_expect(tctx, &new_env, body, body_ty, None)?;
 
-        // Subst.type_expr Subst.identity in OCaml: copy before rewriting.
-        let rewritten_ty = crate::types::copy_type(ctx, typed_body.exp_type);
+        // Subst.type_expr Subst.identity in OCaml: full structural copy
+        // (copies ALL nodes regardless of level, unlike copy_type which
+        // returns identity for non-generic nodes). This ensures
+        // replace_newtype_path only modifies the copy, not shared originals.
+        let rewritten_ty = crate::types::ctype::subst_identity_copy(ctx, typed_body.exp_type);
 
         fn replace_newtype_path(
             ctx: &TypeContext<'_>,
