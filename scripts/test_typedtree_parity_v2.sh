@@ -98,7 +98,7 @@ PROJECT_ROOT=$(cd "$scriptDir/.."; pwd -P)
 DUNE_BIN_DIR="$PROJECT_ROOT/_build/install/default/bin"
 OCAML_BSC="$DUNE_BIN_DIR/bsc"
 RUST_BSC="$PROJECT_ROOT/compiler-rust/target/release/bsc"
-RESCRIPT_CLI="$PROJECT_ROOT/packages/@rescript/darwin-arm64/bin/rescript.exe"
+RESCRIPT_CLI="$PROJECT_ROOT/rewatch/target/release/rescript"
 TEST_PROJECT="$PROJECT_ROOT/tests/tests"
 GENERATED_OUTPUT_SCOPE="tests/tests/src"
 
@@ -210,12 +210,17 @@ echo ""
 if [[ "$SKIP_BUILD" != "true" ]]; then
     echo -e "${BOLD}Step 1: Building test projects with rewatch...${RESET}"
 
-    # Build tests/tests (with --dump-typed-sexp --rust to pre-generate Rust sexp files in-process)
-    echo "  Building tests/tests (with Rust sexp generation)..."
+    # Build tests/tests: first normal build (produces .cmi/.cmj for cross-module deps),
+    # then --dump-typed-sexp --rust (typechecks in-process, writes .sexp)
+    echo "  Building tests/tests (normal build for .cmi/.cmj)..."
     cd "$TEST_PROJECT"
     RESCRIPT_BSC_EXE="$OCAML_BSC" "$RESCRIPT_CLI" clean 2>/dev/null || true
-    if ! RESCRIPT_BSC_EXE="$OCAML_BSC" "$RESCRIPT_CLI" build --dump-typed-sexp --rust 2>&1 | tail -5; then
+    if ! RESCRIPT_BSC_EXE="$OCAML_BSC" "$RESCRIPT_CLI" build 2>&1 | tail -5; then
         echo -e "${YELLOW}Warning: Some test files may have failed to build${RESET}"
+    fi
+    echo "  Building tests/tests (Rust sexp generation)..."
+    if ! RESCRIPT_BSC_EXE="$OCAML_BSC" "$RESCRIPT_CLI" build --dump-typed-sexp --rust 2>&1 | tail -5; then
+        echo -e "${YELLOW}Warning: Some files may have failed sexp generation${RESET}"
     fi
     cd "$PROJECT_ROOT"
 
@@ -229,8 +234,10 @@ if [[ "$SKIP_BUILD" != "true" ]]; then
             proj_dir=$(dirname "$cfg")
             has_sources=$(jq -r 'if (.sources | length) > 0 then "1" else "0" end' "$cfg" 2>/dev/null) || has_sources=0
             if [[ "$has_sources" == "1" ]]; then
-                echo "    Building $proj_dir (with Rust sexp generation)..."
+                echo "    Building $proj_dir (normal + Rust sexp)..."
                 cd "$proj_dir"
+                # Normal build first for .cmi/.cmj, then sexp generation
+                timeout 300 env RESCRIPT_BSC_EXE="$OCAML_BSC" "$RESCRIPT_CLI" build 2>&1 | tail -3 || true
                 if timeout 300 env RESCRIPT_BSC_EXE="$OCAML_BSC" "$RESCRIPT_CLI" build --dump-typed-sexp --rust 2>&1 | tail -3; then
                     TELLA_PROJECTS="${TELLA_PROJECTS}${proj_dir}"$'\n'
                     TELLA_AVAILABLE=true
