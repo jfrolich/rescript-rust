@@ -2904,31 +2904,17 @@ fn copy_type_cached(
                 // Non-generic Tobject: return identity to prevent stack overflow
                 // on self-referential object types (e.g. `type x = {"y": 'self => int} as 'self`).
                 TypeDesc::Tobject { .. } => CopyAction::ReturnSelf,
-                TypeDesc::Tarrow {
-                    arg, ret, arity, ..
-                } => CopyAction::Arrow {
-                    arg_lbl: arg.lbl.clone(),
-                    arg_typ: arg.typ,
-                    ret: *ret,
-                    arity: *arity,
-                },
+                // Non-generic Tarrow/Tfield/Tnil: return identity to match OCaml's
+                // copy() which returns the original node for ALL non-generic types.
+                // This preserves sharing fidelity for permanent-marked cycle detection.
+                TypeDesc::Tarrow { .. } => CopyAction::ReturnSelf,
+                TypeDesc::Tfield { .. } => CopyAction::ReturnSelf,
+                TypeDesc::Tnil => CopyAction::ReturnSelf,
                 TypeDesc::Ttuple(types) => CopyAction::Tuple(types.clone()),
                 TypeDesc::Tconstr { path, args, .. } => CopyAction::Constr {
                     path: path.clone(),
                     args: args.clone(),
                 },
-                TypeDesc::Tfield {
-                    name,
-                    kind,
-                    typ,
-                    rest,
-                } => CopyAction::Field {
-                    name: name.clone(),
-                    kind: kind.clone(),
-                    typ: *typ,
-                    rest: *rest,
-                },
-                TypeDesc::Tnil => CopyAction::Nil,
                 TypeDesc::Tpoly { body, vars } => CopyAction::Poly {
                     body: *body,
                     vars: vars.clone(),
