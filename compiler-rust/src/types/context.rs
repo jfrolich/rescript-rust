@@ -480,11 +480,31 @@ impl<'a> TypeContext<'a> {
     // ========================================================================
 
     /// Allocate a row field reference.
-    fn alloc_row_field(&self, field: Option<RowField>) -> RowFieldRef {
+    pub fn alloc_row_field(&self, field: Option<RowField>) -> RowFieldRef {
         let mut row_fields = self.row_fields.borrow_mut();
         let idx = row_fields.len();
         row_fields.push(RefCell::new(field));
         RowFieldRef(idx)
+    }
+
+    /// Get the value stored in a row field reference.
+    pub fn get_row_field(&self, rf: RowFieldRef) -> Option<RowField> {
+        if rf.is_null() {
+            return None;
+        }
+        let row_fields = self.row_fields.borrow();
+        row_fields.get(rf.0).and_then(|cell| cell.borrow().clone())
+    }
+
+    /// Set the value of a row field reference (like OCaml's set_row_field).
+    pub fn set_row_field(&self, rf: RowFieldRef, field: RowField) {
+        if rf.is_null() {
+            return;
+        }
+        let row_fields = self.row_fields.borrow();
+        if let Some(cell) = row_fields.get(rf.0) {
+            *cell.borrow_mut() = Some(field);
+        }
     }
 
     // ========================================================================

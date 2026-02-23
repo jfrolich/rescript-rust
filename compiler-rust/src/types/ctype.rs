@@ -22,7 +22,7 @@
 //! Type errors are represented as `TypeError` with detailed information
 //! about what went wrong during unification or other operations.
 
-use super::btype::{iter_type_expr, row_more, row_repr};
+use super::btype::{iter_type_expr, row_fixed, row_more, row_repr};
 use super::context::TypeContext;
 use super::env::Env;
 use super::path::Path;
@@ -1833,11 +1833,14 @@ fn unify_rows<'a>(
         }
     };
 
+    let fixed1 = row_fixed(ctx, &row1);
+    let fixed2 = row_fixed(ctx, &row2);
+
     // Unify the fields
     for (label, field1) in &row1.row_fields {
         // Find matching field in row2
         if let Some((_, field2)) = row2.row_fields.iter().find(|(l, _)| l == label) {
-            unify_row_field(ctx, state, field1, field2)?;
+            unify_row_field(ctx, state, fixed1, fixed2, field1, field2)?;
             if let Some((_, merged_field)) = merged_fields.iter_mut().find(|(l, _)| l == label) {
                 *merged_field = prefer_field(field1, field2);
             }
@@ -1880,13 +1883,21 @@ fn unify_rows<'a>(
 }
 
 /// Unify two row fields.
+/// Infrastructure for row field links (alloc_row_field, set_row_field, row_field_repr
+/// link following) is in place but link-setting is disabled — enabling causes
+/// regressions because Rust's row_fixed diverges from OCaml's.
 fn unify_row_field<'a>(
     ctx: &'a TypeContext<'a>,
     state: &mut UnifyState,
+    _fixed1: bool,
+    _fixed2: bool,
     field1: &RowField,
     field2: &RowField,
 ) -> TypeResult<()> {
-    match (field1, field2) {
+    // Follow links before matching, like OCaml does
+    let f1 = super::btype::row_field_repr(ctx, field1);
+    let f2 = super::btype::row_field_repr(ctx, field2);
+    match (&f1, &f2) {
         (RowField::Rpresent(Some(t1)), RowField::Rpresent(Some(t2))) => unify(ctx, state, *t1, *t2),
         (RowField::Rpresent(None), RowField::Rpresent(None)) => Ok(()),
         (RowField::Rabsent, RowField::Rabsent) => Ok(()),
@@ -1924,6 +1935,10 @@ fn unify_row_field<'a>(
             for (t1, t2) in types1.iter().zip(types2.iter()) {
                 unify(ctx, state, *t1, *t2)?;
             }
+            Ok(())
+        }
+        // Reither + Rabsent
+        (RowField::Reither { .. }, RowField::Rabsent) | (RowField::Rabsent, RowField::Reither { .. }) => {
             Ok(())
         }
         _ => Err(TypeError::Unify(vec![])),

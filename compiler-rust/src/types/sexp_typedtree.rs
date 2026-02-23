@@ -590,16 +590,14 @@ fn sexp_row_desc_aux(arena: &ParseArena, ctx: &TypeContext<'_>, row: &RowDesc, v
 }
 
 fn sexp_row_field_aux(arena: &ParseArena, ctx: &TypeContext<'_>, rf: &RowField, visited: &mut HashSet<TypeExprRef>) -> Sexp {
-    let rf = btype::row_field_repr(rf);
+    let rf = btype::row_field_repr(ctx, rf);
     match rf {
         RowField::Rpresent(None) => Sexp::atom("Rpresent_none"),
         RowField::Rpresent(Some(ty)) => {
             Sexp::list(vec![Sexp::atom("Rpresent"), sexp_type_expr_aux(arena, ctx, ty, visited)])
         }
         RowField::Reither { constant, types, .. } => {
-            // Print Reither faithfully. OCaml's sexp printer calls row_field_repr
-            // which follows Reither ref links - but since we don't implement mutable
-            // row field links, we print Reither as-is.
+            // Print Reither faithfully after row_field_repr followed any links.
             Sexp::list(vec![
                 Sexp::atom("Reither"),
                 Sexp::atom(if constant { "const" } else { "non_const" }),

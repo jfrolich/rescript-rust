@@ -387,7 +387,12 @@ pub struct RowFieldRef(pub usize);
 impl RowFieldRef {
     /// Create a null reference.
     pub fn null() -> Self {
-        RowFieldRef(0)
+        RowFieldRef(usize::MAX)
+    }
+
+    /// Check if this is a null reference.
+    pub fn is_null(&self) -> bool {
+        self.0 == usize::MAX
     }
 }
 

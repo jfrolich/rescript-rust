@@ -1602,7 +1602,7 @@ fn transl_type_inner(
                                 constant: *constant,
                                 types: arg_types,
                                 matched: false,
-                                link: crate::types::type_expr::RowFieldRef::null(),
+                                link: ctx.alloc_row_field(None),
                             }
                         } else {
                             match typed_args.first() {
@@ -1675,7 +1675,7 @@ fn transl_type_inner(
                                                 constant: false,
                                                 types: vec![ty],
                                                 matched: false,
-                                                link: crate::types::type_expr::RowFieldRef::null(),
+                                                link: ctx.alloc_row_field(None),
                                             }
                                         }
                                         crate::types::type_expr::RowField::Rpresent(None) => {
@@ -1683,7 +1683,7 @@ fn transl_type_inner(
                                                 constant: true,
                                                 types: vec![],
                                                 matched: false,
-                                                link: crate::types::type_expr::RowFieldRef::null(),
+                                                link: ctx.alloc_row_field(None),
                                             }
                                         }
                                         _ => inherited_field,
@@ -1896,7 +1896,7 @@ fn build_or_pat(
     let mut fields: Vec<(String, RowField)> = Vec::new();
 
     for (label, field) in &row0.row_fields {
-        match crate::types::btype::row_field_repr(field) {
+        match crate::types::btype::row_field_repr(ctx, field) {
             RowField::Rpresent(None) => {
                 pats.push((label.clone(), None));
                 fields.push((
@@ -1905,7 +1905,7 @@ fn build_or_pat(
                         constant: true,
                         types: vec![],
                         matched: true,
-                        link: RowFieldRef::null(),
+                        link: ctx.alloc_row_field(None),
                     },
                 ));
             }
@@ -1924,7 +1924,7 @@ fn build_or_pat(
                         constant: false,
                         types: vec![ty],
                         matched: true,
-                        link: RowFieldRef::null(),
+                        link: ctx.alloc_row_field(None),
                     },
                 ));
             }
@@ -3086,7 +3086,7 @@ fn type_pattern_variant(
                 constant: arg.is_none(),
                 types: row_arg_types,
                 matched: true,
-                link: crate::types::type_expr::RowFieldRef::null(),
+                link: ctx.alloc_row_field(None),
             },
         )],
         row_more: ctx.new_var(None),
@@ -3551,7 +3551,7 @@ pub fn type_expect<'a>(
                             TypeDesc::Tvariant(row) => {
                                 let row = crate::types::btype::row_repr(ctx, row);
                                 let const_only = row.row_fields.iter().all(|(_, field)| {
-                                    match crate::types::btype::row_field_repr(field) {
+                                    match crate::types::btype::row_field_repr(ctx, field) {
                                         crate::types::type_expr::RowField::Rpresent(None) => true,
                                         crate::types::type_expr::RowField::Reither {
                                             constant: true,
@@ -5748,7 +5748,7 @@ fn finalize_variant_in_pattern(
                 let mut row = crate::types::btype::row_repr(ctx, row);
                 if let Some(field_index) = row.row_fields.iter().position(|(label, _)| label == tag) {
                     let field = row.row_fields[field_index].1.clone();
-                    let field_repr = crate::types::btype::row_field_repr(&field);
+                    let field_repr = crate::types::btype::row_field_repr(ctx, &field);
                     let mut replacement: Option<crate::types::type_expr::RowField> = None;
                     match field_repr {
                         crate::types::type_expr::RowField::Rabsent => {}
@@ -5952,7 +5952,7 @@ fn finalize_variant_rpresent_only(
                 let mut row = crate::types::btype::row_repr(ctx, row);
                 if let Some(field_index) = row.row_fields.iter().position(|(label, _)| label == tag) {
                     let field = row.row_fields[field_index].1.clone();
-                    let field_repr = crate::types::btype::row_field_repr(&field);
+                    let field_repr = crate::types::btype::row_field_repr(ctx, &field);
                     let mut replacement: Option<crate::types::type_expr::RowField> = None;
                     match field_repr {
                         crate::types::type_expr::RowField::Rabsent => {}
@@ -6963,12 +6963,12 @@ fn type_variant(
                         .row_fields
                         .iter()
                         .find(|(l, _)| l == label)
-                        .map(|(_, rf)| crate::types::btype::row_field_repr(rf));
+                        .map(|(_, rf)| crate::types::btype::row_field_repr(ctx, rf));
                     let field0 = row0
                         .row_fields
                         .iter()
                         .find(|(l, _)| l == label)
-                        .map(|(_, rf)| crate::types::btype::row_field_repr(rf));
+                        .map(|(_, rf)| crate::types::btype::row_field_repr(ctx, rf));
                     match (field, field0) {
                         (
                             Some(crate::types::type_expr::RowField::Rpresent(Some(ty))),
@@ -7045,12 +7045,12 @@ fn type_variant(
                     .row_fields
                     .iter()
                     .find(|(l, _)| l == label)
-                    .map(|(_, rf)| crate::types::btype::row_field_repr(rf));
+                    .map(|(_, rf)| crate::types::btype::row_field_repr(ctx, rf));
                 let field0 = row0
                     .row_fields
                     .iter()
                     .find(|(l, _)| l == label)
-                    .map(|(_, rf)| crate::types::btype::row_field_repr(rf));
+                    .map(|(_, rf)| crate::types::btype::row_field_repr(ctx, rf));
                 matches!(
                     (field, field0),
                     (

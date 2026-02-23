@@ -62,11 +62,11 @@ pub fn is_tconstr(ctx: &TypeContext<'_>, t: TypeExprRef) -> bool {
 /// Get the representative of a row field.
 ///
 /// This follows the `link` chain in `Reither` fields.
-pub fn row_field_repr(field: &RowField) -> RowField {
-    row_field_repr_aux(&[], field)
+pub fn row_field_repr(ctx: &TypeContext<'_>, field: &RowField) -> RowField {
+    row_field_repr_aux(ctx, &[], field)
 }
 
-fn row_field_repr_aux(tl: &[TypeExprRef], field: &RowField) -> RowField {
+fn row_field_repr_aux(ctx: &TypeContext<'_>, tl: &[TypeExprRef], field: &RowField) -> RowField {
     match field {
         RowField::Reither {
             constant,
@@ -74,8 +74,12 @@ fn row_field_repr_aux(tl: &[TypeExprRef], field: &RowField) -> RowField {
             matched,
             link,
         } => {
-            // In OCaml this follows the link - for now we just return the field
-            // TODO: Implement proper link following when we have mutable row field refs
+            // Follow link if set (like OCaml's {contents = Some fi} pattern)
+            if let Some(linked) = ctx.get_row_field(*link) {
+                let mut combined = tl.to_vec();
+                combined.extend(types.iter().copied());
+                return row_field_repr_aux(ctx, &combined, &linked);
+            }
             let mut combined_types = tl.to_vec();
             combined_types.extend(types.iter().copied());
             RowField::Reither {
@@ -150,7 +154,7 @@ pub fn row_field(ctx: &TypeContext<'_>, tag: &str, row: &RowDesc) -> RowField {
     // First check the current row's fields
     for (field_tag, field) in &row.row_fields {
         if field_tag == tag {
-            return row_field_repr(field);
+            return row_field_repr(ctx, field);
         }
     }
 
@@ -184,7 +188,7 @@ pub fn static_row(ctx: &TypeContext<'_>, row: &RowDesc) -> bool {
         && row
             .row_fields
             .iter()
-            .all(|(_, f)| !matches!(row_field_repr(f), RowField::Reither { .. }))
+            .all(|(_, f)| !matches!(row_field_repr(ctx, f), RowField::Reither { .. }))
 }
 
 // ============================================================================
@@ -197,7 +201,7 @@ where
     F: FnMut(TypeExprRef),
 {
     for (_, field) in &row.row_fields {
-        match row_field_repr(field) {
+        match row_field_repr(ctx, field) {
             RowField::Rpresent(Some(ty)) => f(ty),
             RowField::Reither { types, .. } => {
                 for ty in types {
