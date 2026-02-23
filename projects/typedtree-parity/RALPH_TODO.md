@@ -165,6 +165,12 @@ The old parity script post-processed sexp output (stripping non-printable chars,
   - Next Rust refs: parser/binary-ast longident plumbing for record fields, `type_pattern_record` and `type_record` call sites, and `TypeCheckContext::resolve_lid`.
 - [ ] **9. Shallow-copy pattern variable types** — Shallow Tconstr copies for pattern vars with non-empty args. (631→634, +3 tests)
 - [ ] **10. Protect scrutinee type from pattern unification** — Shallow copy when instance() returns identity. (636→637, test: option_repr_test.res)
+  - 2026-02-24 attempt: added a `type_case_impl` scrutinee guard that `instance`s the case scrutinee type and shallow-copies identity-return `Tconstr` nodes before `type_pattern`. Deterministic full parity stayed **478/657 → 478/657** (179 failures). Reverted.
+  - OCaml refs read: `typecore.ml` `type_cases` (`instance ?partial env ty_arg`, pattern/body phasing around lines ~3906-4050) and `add_pattern_variables` (~1742).
+- [ ] **10A. Reproduce scrutinee contamination in batch case-typing flow (NEW)** — The per-case guard above was parity-neutral, which suggests drift is in Rust’s per-case typing architecture vs OCaml’s batch `type_cases` propagation/generalization pipeline rather than a single scrutinee instance site.
+  - Evidence (2026-02-24): full parity remained **478/657** with **179** failures after the scrutinee-guard patch; `variantsMatching` still shows repeated `<cycle> -> Tconstr(Pident \"t\", <cycle>)` drift in `.parity-cache/tests/diffs/variantsMatching.diff`.
+  - Next OCaml refs: `typecore.ml` `type_cases` propagation section (`unify_pats`, `iter_pattern ... generalize`, `instance env ty_res'` in case bodies).
+  - Next Rust refs: `typecore.rs` `type_case_impl` and surrounding match/case typing control flow to align with OCaml’s batch pattern-first then body-typing order.
 - [ ] **11. Shallow copy nullary pattern var types** — Prevent scrutinee contamination via body unification. (645→646, test: reasonReactRouter.res)
 - [ ] **12. Force-generalize module sig value types** — Walk sig types to GENERIC_LEVEL (exclude nullary Tconstr). (637→638, net +1)
 - [ ] **13. GADT equation support** — gadt_equations, with_gadt_mode, add_gadt_equation, is_newtype_path. Complex. (650→651, test: js_json_test.res)
