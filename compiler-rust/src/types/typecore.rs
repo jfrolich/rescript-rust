@@ -1120,25 +1120,12 @@ fn transl_type_inner(
 
         CTD::Ptyp_var(name) => {
             // Type variable: 'a
+            // Ptyp_var is ONLY for type variables (e.g., 'a in ReScript).
+            // Locally abstract types (type a) are handled by Ptyp_constr,
+            // not Ptyp_var. OCaml's typetexp only looks up type variables
+            // (used_variables/TyVarEnv), not the type environment, for Ptyp_var.
             let name_str = name.to_string();
-            // OCaml treats locally abstract type binders (`(type t, ...)`) as
-            // abstract type constructors in env rather than ordinary variables.
-            // When such a type is in scope, resolve `t` to `Tconstr(Pident t,[])`.
-            let ty = if let Ok((id, decl)) = env.find_type_with_id(&name_str) {
-                if decl.type_newtype_level.is_some() {
-                    let path = decl
-                        .type_path
-                        .clone()
-                        .unwrap_or_else(|| Path::pident(id.clone()));
-                    ctx.new_constr(path, vec![])
-                } else if let Some(&existing) = tctx.used_variables.get(&name_str) {
-                    crate::types::instance(ctx, existing)
-                } else {
-                    let v = ctx.new_var(Some(name_str.clone()));
-                    tctx.used_variables.insert(name_str.clone(), v);
-                    v
-                }
-            } else if let Some(&existing) = tctx.used_variables.get(&name_str) {
+            let ty = if let Some(&existing) = tctx.used_variables.get(&name_str) {
                 crate::types::instance(ctx, existing)
             } else {
                 let v = ctx.new_var(Some(name_str.clone()));
