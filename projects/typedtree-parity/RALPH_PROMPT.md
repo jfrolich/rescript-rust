@@ -67,17 +67,42 @@ If there are no unchecked tasks, create new unchecked tasks from the current fai
 # Build Rust compiler
 timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release
 
-# Deterministic typedtree parity baseline
-timeout 300 ./scripts/test_typedtree_parity.sh --with-locs --no-build --parallel 1
+# Full parity check (builds OCaml + Rust sexp via rewatch, compares raw output)
+./scripts/test_typedtree_parity.sh
 
-# Quick single-file probe
-timeout 60 ./scripts/test_typedtree_parity.sh --with-locs --no-build --parallel 1 --quick tests/tests/src/<file>.res
+# Reuse cached sexp from previous full run (instant comparison)
+./scripts/test_typedtree_parity.sh --no-build
+
+# Single file (regenerates sexp for just that file via rewatch --filter, ~1s)
+./scripts/test_typedtree_parity.sh async_inline
+
+# Single file with cached sexp (instant)
+./scripts/test_typedtree_parity.sh --no-build async_inline
+
+# Glob pattern
+./scripts/test_typedtree_parity.sh "belt_*"
+
+# File path (extracts module name automatically)
+./scripts/test_typedtree_parity.sh tests/tests/src/a.res
 
 # Parser/binary guard (must stay green)
 timeout 300 ./scripts/test_parser_ast_parity.sh 2>&1 | tail -40
 ```
 
 Never run Rust compiler/test commands without timeout.
+
+### How the parity script works
+
+Both OCaml and Rust sexp are generated via **rewatch** (single command each):
+1. `rescript build` — normal build (produces .cmi/.cmj)
+2. `rescript build --dump-typed-sexp` — OCaml bsc generates sexp to `lib/ocaml/*.sexp`
+3. `rescript build --dump-typed-sexp --rust` — Rust in-process generates sexp to `lib/ocaml/*.sexp`
+
+The script saves OCaml sexp files before Rust overwrites them, then does **raw byte-for-byte comparison** (`cmp -s`). Results are cached in `.parity-cache/` for `--no-build` reuse.
+
+### Raw comparison — no post-processing
+
+The comparison is **raw, byte-for-byte** with zero post-processing. No stripping of non-printable characters, no trimming whitespace, no normalizing newlines. Both compilers must produce **identical output**. If there are differences in whitespace, trailing newlines, or non-printable characters, fix the Rust output to match OCaml exactly — do NOT add post-processing to the comparison script.
 
 ## Failure-Driven Workflow
 
@@ -125,8 +150,6 @@ RALPH_COMPLETE
 ```
 
 Only when all are true:
-- `timeout 300 ./scripts/test_typedtree_parity.sh --with-locs --no-build --parallel 1`
-  - reports `Rust bsc: 657 passed, 0 failed`
-  - reports `Parity: 657 passed, 0 failed`
+- `./scripts/test_typedtree_parity.sh` reports `SUCCESS: Full parity across all modules!`
 - parser/binary parity guard remains fully green
 - `RALPH_TODO.md` has no unchecked tasks remaining

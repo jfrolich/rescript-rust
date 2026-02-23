@@ -265,16 +265,26 @@ Generalize the `update_level_expand` Pdot guard from specific `.t`/`.cmp` patter
 ## Diagnostic Recipes
 
 ```bash
-# Quick single-file comparison
-cd tests/tests/lib/bs
-args=$(cd ../.. && timeout 10 ../../packages/@rescript/darwin-arm64/bin/rescript.exe compiler-args "src/FILE.res")
-timeout 10 ../../../../packages/@rescript/darwin-arm64/bin/bsc.exe $args -dtyped-sexp-locs "../../src/FILE.res" > /tmp/ocaml.sexp 2>&1
-timeout 10 ../../../../compiler-rust/target/release/bsc $args -dtyped-sexp-locs "../../src/FILE.res" > /tmp/rust.sexp 2>&1
-diff /tmp/ocaml.sexp /tmp/rust.sexp | head -80
+# Quick single-file parity check (regenerates sexp via rewatch --filter, ~1s)
+./scripts/test_typedtree_parity.sh FILE_MODULE
+# e.g.: ./scripts/test_typedtree_parity.sh async_inline
+
+# Instant re-compare using cached sexp from previous full run
+./scripts/test_typedtree_parity.sh --no-build FILE_MODULE
+
+# Glob pattern (e.g. all belt tests)
+./scripts/test_typedtree_parity.sh --no-build "belt_*"
+
+# Full parity run (all modules, ~30s)
+./scripts/test_typedtree_parity.sh
+
+# When filter matches a failing file, the diff is shown inline.
+# For manual inspection of cached sexp:
+diff .parity-cache/tests/ocaml/FILE_MODULE.sexp .parity-cache/tests/rust/FILE_MODULE.sexp | head -80
 
 # Count diff hunks
-diff /tmp/ocaml.sexp /tmp/rust.sexp | grep "^[0-9]" | wc -l
+diff .parity-cache/tests/ocaml/FILE_MODULE.sexp .parity-cache/tests/rust/FILE_MODULE.sexp | grep "^[0-9]" | wc -l
 
 # Check if failure is cycle-related
-diff /tmp/ocaml.sexp /tmp/rust.sexp | grep -c "cycle"
+diff .parity-cache/tests/ocaml/FILE_MODULE.sexp .parity-cache/tests/rust/FILE_MODULE.sexp | grep -c "cycle"
 ```
