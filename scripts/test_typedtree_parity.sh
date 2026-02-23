@@ -78,8 +78,9 @@ if [[ ! -x "$RESCRIPT_CLI" ]]; then
     exit 1
 fi
 
-TEMP_DIR=$(mktemp -d)
-trap "rm -rf $TEMP_DIR" EXIT
+CACHE_DIR="$PROJECT_ROOT/.parity-cache"
+mkdir -p "$CACHE_DIR"
+TEMP_DIR="$CACHE_DIR"
 
 echo -e "${BOLD}Typed Tree Parity Test${RESET}"
 echo "============================================"
@@ -241,21 +242,6 @@ compare_project_sexp() {
     echo "$ocaml_only_files" > "$TEMP_DIR/$label/ocaml_only.txt"
     echo "$rust_only_files" > "$TEMP_DIR/$label/rust_only.txt"
 
-    # Cache results to .parity-cache for LLM agents to inspect
-    local cache_dir="$PROJECT_ROOT/.parity-cache/$label"
-    rm -rf "$cache_dir"
-    mkdir -p "$cache_dir/diffs" "$cache_dir/ocaml" "$cache_dir/rust"
-    cp "$TEMP_DIR/$label/summary.txt" "$cache_dir/"
-    echo -e "$parity_failures" > "$cache_dir/failures.txt"
-    echo -e "$ocaml_only_files" > "$cache_dir/ocaml_only.txt"
-    echo -e "$rust_only_files" > "$cache_dir/rust_only.txt"
-    if [[ -d "$diff_dir" ]]; then
-        cp "$diff_dir"/*.diff "$cache_dir/diffs/" 2>/dev/null || true
-    fi
-    # Save raw sexp files so agents can inspect them
-    cp "$ocaml_dir"/*.sexp "$cache_dir/ocaml/" 2>/dev/null || true
-    cp "$rust_dir"/*.sexp "$cache_dir/rust/" 2>/dev/null || true
-
     # Show parity failure list
     if [[ "$parity_fail" -gt 0 && "$parity_fail" -le 100 ]]; then
         echo -e "  ${YELLOW}Parity failure modules:${RESET}"
@@ -380,6 +366,7 @@ if [[ "$OVERALL_TOTAL" -gt 0 ]]; then
     if [[ "$OVERALL_PARITY_PASS" -eq "$OVERALL_TOTAL" ]]; then
         echo -e "${GREEN}${BOLD}SUCCESS: Full parity across all modules!${RESET}"
     fi
+    echo "Results saved in: $CACHE_DIR/"
 else
     echo "No sexp files found to compare."
 fi
