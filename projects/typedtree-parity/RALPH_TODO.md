@@ -48,7 +48,7 @@ timeout 300 ./scripts/test_typedtree_parity.sh --with-locs --no-build --quick
 
 ## Current Status
 
-**~610/657 (47 failures)**
+**611/657 (46 failures)**
 
 ---
 
@@ -62,8 +62,13 @@ This repo was reconstructed after accidental deletion. The base comes from a `/t
 
 ### Fixes Applied Between 611/657 → 654/657 (may need re-applying)
 
-#### In `ctype.rs` (overlaid from Feb 21 — should have most fixes)
-- **`copy_type_cached` selective non-generic identity**: Return `ReturnSelf` for Tvar, Tunivar, predef Tconstr (nullary + concrete args), Ttuple, Tarrow, Tobject, Tfield, Tnil. Do NOT return identity for all Tconstr, Tvariant, or Tpackage.
+**⚠️ CRITICAL CORRECTION (Feb 23):** Many claims in this section were WRONG. Verified against `origin/typed-ast-parity` branch using `git show`. Key corrections:
+- **Stack-based cycle detection NEVER existed on typed-ast-parity** — it uses permanent marking (same as current branch)
+- **`apply_interface_constraints`, `propagate_sig_types`, `force_generalize` do NOT exist on typed-ast-parity** — these were invented in recovery docs
+- **Tarrow/Tfield/Tnil should be COPIED, not ReturnSelf** — typed-ast-parity copies them (less sharing = fewer false cycles)
+
+#### In `ctype.rs` (overlaid from Feb 21 — PARTIALLY CORRECT)
+- **`copy_type_cached` selective non-generic identity**: Return `ReturnSelf` for Tvar, Tunivar, predef Tconstr (nullary + concrete args), Ttuple, Tobject. **COPY (not ReturnSelf) Tarrow, Tfield, Tnil** — verified on typed-ast-parity. Do NOT return identity for all Tconstr, Tvariant, or Tpackage.
 - **`update_level_expand` path preservation guards**: Skip expansion for nullary Pident local types and nullary Pdot paths with local roots.
 - **`try_expand_head` split**: Into `try_expand_head` (with normalization) and `try_expand_head_inner` (without) for level updates.
 - **Shared RowFieldRef linking**: Reither/Reither unification creates shared refs (OCaml ctype.ml:2700-2704).
@@ -77,24 +82,24 @@ This repo was reconstructed after accidental deletion. The base comes from a `/t
 - **`close_variant_row_for_pat_type` rewrite**: Match OCaml parmatch.ml:808-832.
 - **Label disambiguation `lookup_from_type`**: Add before leaf-name fallback.
 
-#### In `typemod.rs` (MAY NEED RE-APPLYING — at Feb 18 state)
+#### In `typemod.rs` (at Feb 18 state)
 - **`init_def(current_time())` synchronization**: Before each structure item in `type_structure`, before each signature item in `transl_signature`, in functor body, and in rec module. (OCaml typemod.ml lines ~1598, ~750, ~1291, ~950)
 - **`transl_signature` environment threading**: Thread env through open statements.
-- **`force_generalize` skip for `Pmod_structure`**: Preserve non-generic levels from value restriction.
+- ~~**`force_generalize` skip for `Pmod_structure`**~~ — **DOES NOT EXIST on typed-ast-parity.** May have been on current branch's typecore.rs overlay.
 
-#### In `sexp_typedtree.rs` (MAY NEED RE-APPLYING — at Feb 18 state)
-- **Stack-based cycle detection**: Change from permanent to temporary marking (mark on entry, remove on exit). This was the +87 file improvement.
-- **Evaluation order**: Tarrow, Tfield, Tpoly → left-to-right child evaluation.
-- **Reither faithful printing**: Use `row_field_repr_ctx` instead of `row_field_repr`.
+#### In `sexp_typedtree.rs` — DO NOT CHANGE CYCLE DETECTION
+- ~~**Stack-based cycle detection**~~ — **WRONG. Typed-ast-parity uses PERMANENT marking (same as current branch).** Stack-based was tried and causes 610→220 regression. The 654/657 achievement was NOT from changing cycle detection.
+- **Evaluation order** (MAY NEED RE-APPLYING): Tarrow, Tfield, Tpoly → left-to-right child evaluation.
+- **Reither faithful printing** (MAY NEED RE-APPLYING): Use `row_field_repr_ctx` instead of `row_field_repr`.
 
 #### In `context.rs` (MAY NEED RE-APPLYING — at Feb 18 state)
 - **`current_stamp()` accessor**: Rust equivalent of OCaml's `Ident.current_time()`.
 - **`new_row_field_ref` public method**: For shared RowFieldRef linking.
 
-#### In `driver.rs` (MAY NEED RE-APPLYING — at Feb 18 state)
-- **`apply_interface_constraints`**: Read CMI, walk impl/sig types in parallel, link non-generic Tvars.
-- **`propagate_sig_types`**: Walk module signatures recursively.
-- **`try_alias_param_propagation`**: Handle parametric type aliases with different arities.
+#### In `driver.rs` (at Feb 18 state)
+- ~~**`apply_interface_constraints`**~~ — **DOES NOT EXIST on typed-ast-parity.** May have been on current branch's overlay.
+- ~~**`propagate_sig_types`**~~ — **DOES NOT EXIST on typed-ast-parity.**
+- ~~**`try_alias_param_propagation`**~~ — **DOES NOT EXIST on typed-ast-parity.**
 
 #### In `btype.rs` (MAY NEED RE-APPLYING)
 - **`row_field_repr_ctx` / `row_field_repr_ctx_aux`**: Follow RowFieldRef links through TypeContext.
@@ -104,14 +109,15 @@ This repo was reconstructed after accidental deletion. The base comes from a `/t
 
 ---
 
-## Re-apply Tasks (610 → ~654)
+## Re-apply Tasks (611 → ~654)
 
-- [ ] **1A. Stack-based cycle detection in sexp_typedtree.rs (~38 tests)** — Change from permanent to stack-based marking. Also fix eval order (Tarrow/Tfield/Tpoly left-to-right) and use `row_field_repr_ctx` for Reither. WARNING: Do NOT try leaf-node exemption or ancestor-path tracking.
-- [ ] **1B. Non-generic Tarrow/Tobject/Tfield/Tnil identity in ctype.rs (~6 tests)** — Return `ReturnSelf` for non-generic Tarrow, Tobject, Tfield, Tnil. WARNING: Do NOT extend to Tvariant or ALL types.
+- [x] **1A. ~~Stack-based cycle detection~~ INVALID** — Typed-ast-parity uses permanent marking. Stack-based causes 610→220 regression. DO NOT ATTEMPT.
+- [x] **1B. Non-generic Tarrow/Tfield/Tnil: COPY not identity** — Verified typed-ast-parity COPIES these types. Reverted from ReturnSelf to copy. Result: 610→611 (gained bal_set_mini.res). Tobject stays ReturnSelf for stack overflow safety.
 - [ ] **1C. begin_def/generalize/instance in typecore.rs type_function (~3 tests)** — Add begin_def before pattern typing, end_def after, generalize pattern types, instance() for body env. Also extend update_level_expand guard to skip ALL local Pident types.
-- [ ] **1D. force_generalize skip for Pmod_structure in typemod.rs** — Skip force_generalize in Pmod_structure to preserve non-generic levels from value restriction.
-- [ ] **1E. Interface constraint propagation in driver.rs (~3 tests)** — Add `apply_interface_constraints`, `propagate_sig_types`, `try_alias_param_propagation`.
+- [ ] **1D. ~~force_generalize skip for Pmod_structure~~ NEEDS VERIFICATION** — Does NOT exist on typed-ast-parity branch. May have been added independently.
+- [ ] **1E. ~~Interface constraint propagation in driver.rs~~ NEEDS VERIFICATION** — `apply_interface_constraints`, `propagate_sig_types`, `try_alias_param_propagation` do NOT exist on typed-ast-parity branch.
 - [ ] **1F. Supporting infrastructure in context.rs, btype.rs, persistent_env.rs, typemod.rs** — `current_stamp()`, `new_row_field_ref`, `row_field_repr_ctx`, recursive module prefix rewriting, `init_def(current_time())` synchronization, `transl_signature` env threading.
+- [ ] **NEW: Apply remaining fixes from RALPH_GUIDANCE.md** — Fix 18 (predef variances), Fix 19 (depth-restricted prefix rewriting), Fix 3 (coercion subtype), Fix 13 (deep-copy Tvariant), Fix 9 (expand before structural match), Fix 14 (build_as_type), Fix 17 (label type param sharing), Fix 5 (shallow-copy pattern vars), Fix 7 (scrutinee type protection), Fix 16 (shallow copy nullary pattern vars), Fix 8 (force-generalize module sig), Fix 21 (GADT equations), Fix 15 (per-case generalization), Fix 24 (begin_def in type_function), Fix 4 (qualified label lookup), Fix 20 (local Pdot expansion guard).
 
 ---
 
@@ -161,6 +167,9 @@ Rust eagerly resolves type variables through unification links while OCaml prese
 | Removing `arg_expr_is_apply` gate in adjacent-argument linking | Over-shared further | |
 | Skipping SigValue path substitution in persistent_env | Rust bsc 622/657, Parity 431/622 | |
 | Broad Ctype.copy non-generic identity (all nodes) | Rust bsc 651/657, Parity 585/651 | |
+| Stack-based cycle detection on current branch | 610→220 | OCaml also uses permanent marking; typed-ast-parity confirmed |
+| Nullary Tconstr cycle detection exemption | 1→4 hunks on update_record_test | Creates new false under-detections |
+| ReturnSelf for non-generic Tarrow/Tfield/Tnil | 610 (neutral→worse) | More sharing = more false cycles; typed-ast-parity COPIES them |
 
 ---
 
@@ -170,7 +179,7 @@ Rust eagerly resolves type variables through unification links while OCaml prese
 - **OCaml `Pexp_record` `unify_kept`** creates TWO label instances per field to connect base_type ↔ label1 ↔ label2 ↔ expected_type.
 - **OCaml `instance()` returns identity for ALL non-generic types** in `copy`. Rust can only do this selectively.
 - **CMI value-type path substitution is load-bearing** — can't remove without fixing type identity system.
-- **Sexp cycle detection must use permanent marking** — stack-based marking and leaf-skip both cause massive regressions.
+- **Sexp cycle detection must use permanent marking** — verified on typed-ast-parity (654/657). Stack-based (610→220), leaf-skip, ancestor-path all cause massive regressions. The path to fixing cycle parity is through reducing type sharing in the type checker (fewer shared nodes = fewer false cycles).
 - **Record pattern fields must be sorted by `lbl_pos`** (OCaml invariant).
 - **OCaml Reither has mutable `ref option` link** — `set_row_field` sets it during unification, `row_field_repr` follows links. Rust's `RowFieldRef` link is allocated but NEVER set.
 
