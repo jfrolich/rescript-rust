@@ -224,6 +224,13 @@ pub struct RustParserArg {
     pub rust: bool,
 }
 
+#[derive(Args, Debug, Clone, Copy)]
+pub struct DumpTypedSexpArg {
+    /// Dump typed tree as sexp to .sexp files in lib/ocaml/ during compilation.
+    #[arg(long, default_value_t = false, num_args = 0..=1)]
+    pub dump_typed_sexp: bool,
+}
+
 #[derive(Args, Debug, Clone)]
 pub struct BuildArgs {
     #[command(flatten)]
@@ -246,6 +253,9 @@ pub struct BuildArgs {
 
     #[command(flatten)]
     pub rust: RustParserArg,
+
+    #[command(flatten)]
+    pub dump_typed_sexp: DumpTypedSexpArg,
 
     /// Disable output timing
     #[arg(short, long, default_value_t = false, num_args = 0..=1)]
@@ -436,6 +446,9 @@ pub struct WatchArgs {
 
     #[command(flatten)]
     pub rust: RustParserArg,
+
+    #[command(flatten)]
+    pub dump_typed_sexp: DumpTypedSexpArg,
 }
 
 impl From<BuildArgs> for WatchArgs {
@@ -448,6 +461,7 @@ impl From<BuildArgs> for WatchArgs {
             dev: build_args.dev,
             warn_error: build_args.warn_error,
             rust: build_args.rust,
+            dump_typed_sexp: build_args.dump_typed_sexp,
         }
     }
 }
@@ -549,5 +563,13 @@ impl Deref for RustParserArg {
 
     fn deref(&self) -> &Self::Target {
         &self.rust
+    }
+}
+
+impl Deref for DumpTypedSexpArg {
+    type Target = bool;
+
+    fn deref(&self) -> &Self::Target {
+        &self.dump_typed_sexp
     }
 }

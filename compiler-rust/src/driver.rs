@@ -689,3 +689,95 @@ fn load_pervasives<'a>(pers_env: &mut PersistentEnv, env: &mut Env, ctx: &'a Typ
 }
 
 use crate::types::env::Env;
+
+/// Type-check a ReScript source file and write the typed tree as sexp to a writer.
+/// This reuses the parse -> ppx -> typecheck pipeline but skips codegen.
+/// For structure files (.res), writes `(structure ...)`.
+/// For signature files (.resi), writes `(signature ...)`.
+pub fn typecheck_and_dump_sexp<W: std::io::Write>(
+    source: &str,
+    filename: &str,
+    options: &CompilerOptions,
+    writer: &mut W,
+) -> Result<()> {
+    let is_interface = filename.ends_with(".resi");
+
+    if is_interface {
+        // Parse as signature
+        let mut parser = Parser::new(filename, source);
+        let signature = module::parse_signature(&mut parser);
+        if parser.has_errors() {
+            return Err(anyhow!(
+                "Parse failed with {} error(s)",
+                parser.diagnostics().len()
+            ));
+        }
+
+        // Type check
+        let id_gen = IdGenerator::new();
+        let type_ctx = TypeContext::new(&id_gen);
+        let mut tctx = TypeCheckContext::new(&type_ctx, parser.arena());
+        let mut env = initial_env(&type_ctx);
+
+        let mut pers_env = PersistentEnv::new();
+        let load_path = build_load_path(options);
+        type_ctx.set_load_paths(load_path.clone());
+        pers_env.set_load_path(load_path);
+        load_pervasives(&mut pers_env, &mut env, &type_ctx);
+        tctx.set_persistent_env(pers_env);
+
+        let typed_signature = transl_signature(&mut tctx, &env, parser.arena(), &signature)
+            .map_err(|e| anyhow!("Type checking failed: {e:?}"))?;
+
+        print_typed_signature_with_locs(parser.arena(), &type_ctx, &typed_signature, writer)
+            .map_err(|e| anyhow!("Failed to write sexp: {e}"))?;
+    } else {
+        // Parse as structure
+        let mut parser = Parser::new(filename, source);
+        let structure = module::parse_structure(&mut parser);
+        if parser.has_errors() {
+            return Err(anyhow!(
+                "Parse failed with {} error(s)",
+                parser.diagnostics().len()
+            ));
+        }
+
+        let jsx_enabled = structure_has_config_string(&structure, "-bs-jsx", parser.arena());
+        let has_async_component = structure_has_async_component(&structure, parser.arena());
+        let structure = if jsx_enabled
+            && !has_async_component
+            && structure_needs_jsx_rewrite(&structure, parser.arena())
+        {
+            jsx_ppx::transform_structure(structure, 4, parser.arena_mut())
+        } else {
+            structure
+        };
+
+        let structure = spice_ppx::expand_structure(&structure, parser.arena_mut())
+            .map_err(|e| anyhow!("Spice PPX expansion failed: {e}"))?;
+        let structure = ppx::expand_extensions(&structure, parser.arena_mut());
+        let structure = ppx::rewrite_structure(&structure, parser.arena_mut())
+            .map_err(|e| anyhow!("PPX rewrite failed: {e}"))?;
+
+        // Type check
+        let id_gen = IdGenerator::new();
+        let type_ctx = TypeContext::new(&id_gen);
+        let mut tctx = TypeCheckContext::new(&type_ctx, parser.arena());
+        let mut env = initial_env(&type_ctx);
+
+        let mut pers_env = PersistentEnv::new();
+        let load_path = build_load_path(options);
+        type_ctx.set_load_paths(load_path.clone());
+        pers_env.set_load_path(load_path);
+        load_pervasives(&mut pers_env, &mut env, &type_ctx);
+        tctx.set_persistent_env(pers_env);
+
+        let (typed_structure, _env) = type_structure(&mut tctx, &env, parser.arena(), &structure)
+            .map_err(|e| anyhow!("Type checking failed: {e:?}"))?;
+
+        print_typed_structure_with_locs(parser.arena(), &type_ctx, &typed_structure, writer)
+            .map_err(|e| anyhow!("Failed to write sexp: {e}"))?;
+    }
+
+    Ok(())
+}

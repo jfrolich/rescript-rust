@@ -48,6 +48,22 @@ fn execute_post_build_command(cmd: &str, js_file_path: &Path) -> Result<()> {
     }
 }
 
+/// Extract sexp output from bsc stderr.
+/// When -dtyped-sexp-locs is passed, bsc writes the sexp to stderr.
+/// The sexp starts with "(structure" or "(signature" and continues to the end.
+/// Everything before that is warnings.
+/// Returns (warnings, Option<sexp>).
+fn extract_sexp_from_stderr(stderr: &str) -> (String, Option<String>) {
+    // Find the start of the sexp - it begins with "(structure" or "(signature"
+    if let Some(pos) = stderr.find("(structure").or_else(|| stderr.find("(signature")) {
+        let warnings = stderr[..pos].to_string();
+        let sexp = stderr[pos..].to_string();
+        (warnings, Some(sexp))
+    } else {
+        (stderr.to_string(), None)
+    }
+}
+
 pub fn compile(
     build_state: &mut BuildCommandState,
     show_progress: bool,
@@ -194,6 +210,8 @@ pub fn compile(
                                         true,
                                         build_state,
                                         build_state.get_warn_error_override(),
+                                        build_state.dump_typed_sexp,
+                                        build_state.use_rust_parser,
                                     );
                                     Some(result)
                                 }
@@ -206,6 +224,8 @@ pub fn compile(
                                 false,
                                 build_state,
                                 build_state.get_warn_error_override(),
+                                build_state.dump_typed_sexp,
+                                build_state.use_rust_parser,
                             );
                             let cmi_digest_after = helpers::compute_file_hash(Path::new(&cmi_path));
 
@@ -671,6 +691,8 @@ fn compile_file(
     is_interface: bool,
     build_state: &BuildState,
     warn_error_override: Option<String>,
+    dump_typed_sexp: bool,
+    use_rust_parser: bool,
 ) -> Result<Option<String>> {
     let BuildState {
         packages,
@@ -694,7 +716,7 @@ fn compile_file(
         helpers::file_path_to_compiler_asset_basename(implementation_file_path, &package.namespace);
     let has_interface = module.get_interface().is_some();
     let is_type_dev = module.is_type_dev;
-    let to_mjs_args = compiler_args(
+    let mut to_mjs_args = compiler_args(
         &package.config,
         ast_path,
         implementation_file_path,
@@ -706,6 +728,32 @@ fn compile_file(
         package.is_local_dep,
         warn_error_override,
     )?;
+
+    if dump_typed_sexp && !use_rust_parser {
+        to_mjs_args.push("-dtyped-sexp-locs".to_string());
+    }
+
+    // Pre-extract include paths and runtime path from compiler args for Rust in-process sexp dump.
+    // Must happen before to_mjs_args is moved into Command::args().
+    let rust_sexp_paths = if dump_typed_sexp && use_rust_parser {
+        let mut include_paths: Vec<PathBuf> = Vec::new();
+        let mut runtime_path: Option<PathBuf> = None;
+        let mut i = 0;
+        while i < to_mjs_args.len() {
+            if to_mjs_args[i] == "-I" && i + 1 < to_mjs_args.len() {
+                include_paths.push(PathBuf::from(&to_mjs_args[i + 1]));
+                i += 2;
+            } else if to_mjs_args[i] == "-runtime-path" && i + 1 < to_mjs_args.len() {
+                runtime_path = Some(PathBuf::from(&to_mjs_args[i + 1]));
+                i += 2;
+            } else {
+                i += 1;
+            }
+        }
+        Some((include_paths, runtime_path))
+    } else {
+        None
+    };
 
     let to_mjs = Command::new(&compiler_info.bsc_path)
         .current_dir(
@@ -728,9 +776,58 @@ fn compile_file(
             "Could not compile file. Error: {e}. Path to AST: {ast_path:?}"
         )),
         Ok(x) => {
-            let err = std::str::from_utf8(&x.stderr)
-                .expect("stdout should be non-null")
+            let raw_stderr = std::str::from_utf8(&x.stderr)
+                .expect("stderr should be valid utf8")
                 .to_string();
+
+            // If dump_typed_sexp is enabled, generate .sexp files.
+            // OCaml path: extract sexp from bsc's stderr (bsc was invoked with -dtyped-sexp-locs).
+            // Rust path: typecheck in-process and write sexp directly.
+            let err = if dump_typed_sexp && !use_rust_parser {
+                let (warnings, sexp) = extract_sexp_from_stderr(&raw_stderr);
+                if let Some(sexp_content) = sexp {
+                    let sexp_path = ocaml_build_path_abs.join(format!("{basename}.sexp"));
+                    let _ = std::fs::write(&sexp_path, sexp_content);
+                }
+                warnings
+            } else if dump_typed_sexp && use_rust_parser {
+                // Rust in-process path: read source and typecheck directly
+                let source_file_path = match &module.source_type {
+                    SourceType::SourceFile(sf) => {
+                        if is_interface {
+                            sf.interface.as_ref().map(|i| &i.path).unwrap_or(&sf.implementation.path)
+                        } else {
+                            &sf.implementation.path
+                        }
+                    }
+                    _ => implementation_file_path,
+                };
+                let abs_source_path = Path::new(&package.path).join(source_file_path);
+                if let Ok(source_bytes) = std::fs::read(&abs_source_path) {
+                    let source: String = source_bytes.iter().map(|&b| b as char).collect();
+                    let filename = abs_source_path.to_string_lossy().to_string();
+
+                    // Use pre-extracted include paths and runtime path from compiler args.
+                    let (include_paths, runtime_path) = rust_sexp_paths.clone().unwrap();
+
+                    let opts = rescript_compiler::driver::CompilerOptions {
+                        dump_typed_sexp_locs: true,
+                        include_paths,
+                        runtime_path,
+                        ..Default::default()
+                    };
+
+                    let sexp_path = ocaml_build_path_abs.join(format!("{basename}.sexp"));
+                    if let Ok(mut file) = std::fs::File::create(&sexp_path) {
+                        let _ = rescript_compiler::driver::typecheck_and_dump_sexp(
+                            &source, &filename, &opts, &mut file,
+                        );
+                    }
+                }
+                raw_stderr
+            } else {
+                raw_stderr
+            };
 
             let dir = Path::new(implementation_file_path).parent().unwrap();
 

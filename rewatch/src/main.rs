@@ -74,6 +74,7 @@ fn main() -> Result<()> {
                 plain_output,
                 (*build_args.warn_error).clone(),
                 *build_args.rust,
+                *build_args.dump_typed_sexp,
             ) {
                 Err(e) => {
                     eprintln!("{:#}", e);
@@ -111,6 +112,7 @@ fn main() -> Result<()> {
                 plain_output,
                 (*watch_args.warn_error).clone(),
                 *watch_args.rust,
+                *watch_args.dump_typed_sexp,
             ) {
                 Err(e) => {
                     eprintln!("{:#}", e);

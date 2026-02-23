@@ -119,6 +119,8 @@ pub struct BuildCommandState {
     pub warn_error_override: Option<String>,
     // Command-line --rust flag: parse in-process with Rust parser.
     pub use_rust_parser: bool,
+    // Command-line --dump-typed-sexp flag: dump typed tree sexp to .sexp files.
+    pub dump_typed_sexp: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -170,11 +172,13 @@ impl BuildCommandState {
         compiler: CompilerInfo,
         warn_error_override: Option<String>,
         use_rust_parser: bool,
+        dump_typed_sexp: bool,
     ) -> Self {
         Self {
             build_state: BuildState::new(project_context, packages, compiler),
             warn_error_override,
             use_rust_parser,
+            dump_typed_sexp,
         }
     }
 
@@ -184,6 +188,10 @@ impl BuildCommandState {
 
     pub fn use_rust_parser(&self) -> bool {
         self.use_rust_parser
+    }
+
+    pub fn dump_typed_sexp(&self) -> bool {
+        self.dump_typed_sexp
     }
 
     pub fn module_name_package_pairs(&self) -> Vec<(String, String)> {
