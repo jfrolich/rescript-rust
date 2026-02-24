@@ -723,6 +723,12 @@ Primary blockers are currently (1) cycle/sharing typedtree rendering drift and (
   - Next OCaml refs: `compiler/ml/mtype.ml` (`lower_nongen`), `compiler/ml/typemod.ml` module declaration insertion points (`Pstr_module`, `Pstr_recmodule`).
   - Next Rust refs: `compiler-rust/src/types/typemod.rs` module env insertion paths and `compiler-rust/src/types/context.rs` level APIs (`current_level`, `nongen_level`, `init_def`).
 - [ ] **13. GADT equation support** — gadt_equations, with_gadt_mode, add_gadt_equation, is_newtype_path. Complex. (650→651, test: js_json_test.res)
+- [ ] **13A. Validate `copy_case_type` local-abstract `Tconstr` materialization before adding GADT equations (NEW)** — guidance says this path must keep locally abstract/newtype constructors as `Tconstr` (not fresh `Tvar`), but the isolated port was parity-neutral on the current snapshot.
+  - 2026-02-24 attempt: in `compiler-rust/src/types/typecore.rs::copy_case_type`, removed the local-abstract/unresolved-nullary branch that rewrites `TypeDesc::Tconstr` to fresh `Tvar`, keeping all constructors as copied `Tconstr` nodes.
+  - OCaml refs read: `compiler/ml/typecore.ml` (`type_cases` branch-local pattern typing flow), `compiler/ml/ctype.ml` (`unify`/`expand_head` expectations around constructor identity), and `compiler/ml/typetexp.ml` locally-abstract type handling notes from guidance.
+  - Targeted check: `timeout 300 ./scripts/test_typedtree_parity.sh set_gen` stayed **0/1** with unchanged hunk count (**82**).
+  - Deterministic full parity delta: **589/657 → 589/657** (parity failures **61 → 61**, Rust compile coverage **650/657 → 650/657**). Reverted.
+  - Next step: implement the missing ctype-side GADT equation plumbing (`UnifyState` equation store + equation-aware unification mode) before retrying this constructor-materialization change in isolation.
 - [x] **14. Per-case pattern generalization in type_case_impl** — begin_def/end_def/generalize around pattern typing. Replaces fix 9. (644→645)
   - 2026-02-24 fix: updated `compiler-rust/src/types/typecore.rs::type_case_impl` to align with OCaml `type_cases` pattern phase:
     - instantiate scrutinee type per case before `type_pattern`,
