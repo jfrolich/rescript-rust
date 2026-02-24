@@ -693,6 +693,17 @@ Primary blockers are currently (1) cycle/sharing typedtree rendering drift and (
   - Next OCaml refs: `typecore.ml` `type_cases` propagation section (`unify_pats`, `iter_pattern ... generalize`, `instance env ty_res'` in case bodies).
   - Next Rust refs: `typecore.rs` `type_case_impl` and surrounding match/case typing control flow to align with OCaml’s batch pattern-first then body-typing order.
 - [ ] **11. Shallow copy nullary pattern var types** — Prevent scrutinee contamination via body unification. (645→646, test: reasonReactRouter.res)
+  - 2026-02-24 attempt (reverted): in `compiler-rust/src/types/typecore.rs`, enabled nullary-`Tconstr` shallow copies for case-bound vars (`type_case_impl`) and added non-simple-parameter shallow-copying in `type_function` body env via `shallow_copy_pattern_binding_type(..., copy_nullary=true)`.
+  - OCaml refs read: `compiler/ml/typecore.ml` (`type_cases`, `add_pattern_variables`) and `compiler/ml/ctype.ml` (`instance` identity behavior for non-generic constructors).
+  - Targeted checks:
+    - `timeout 300 ./scripts/test_typedtree_parity.sh rbset` stayed **0/1** (hunk mismatches: 6)
+    - `timeout 300 ./scripts/test_typedtree_parity.sh set_gen` stayed **0/1** (hunk mismatches: 82)
+    - `timeout 300 ./scripts/test_typedtree_parity.sh topsort_test` stayed **0/1** (hunk mismatches: 98)
+  - Deterministic full parity stayed **589/657 → 589/657** (parity failures **61 → 61**, Rust compile coverage **650/657**). Reverted.
+- [ ] **11A. Trace nullary-pattern contamination before body-env insertion (NEW)** — task-11 nullary shallow copies at body-env insertion were parity-neutral, so the `<cycle> ↔ Tconstr/Tvar` drift likely happens earlier (pattern typing/instance timing) or at recursive-let handoff.
+  - Evidence (2026-02-24): nullary-copy patch in `type_case_impl` + non-simple `type_function` body-env copy produced no delta on `rbset`, `set_gen`, `topsort_test`, or deterministic full parity (**589/657** unchanged).
+  - Next OCaml refs: `compiler/ml/typecore.ml` `type_cases` pattern pass (`instance env ty_arg`, `unify_pats`, `iter_pattern ... generalize`) and recursive-let flow in `type_let`.
+  - Next Rust refs: `compiler-rust/src/types/typecore.rs` (`type_case_impl`, `type_function`, `type_let_bindings`) and `compiler-rust/src/types/ctype.rs::instance`.
 - [ ] **12. Force-generalize module sig value types** — Walk sig types to GENERIC_LEVEL (exclude nullary Tconstr). (637→638, net +1)
   - 2026-02-24 attempt: added `force_generalize_module_sig_values` in `compiler-rust/src/types/ctype.rs` and threaded it through `compiler-rust/src/types/typemod.rs` module env insertion sites:
     - `Pstr_module`: force-generalize extracted module signatures before `Env.add_module`.
