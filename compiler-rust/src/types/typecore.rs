@@ -5570,6 +5570,16 @@ fn type_match(
     // expression types) to match OCaml's in-place mutation semantics, then
     // close_multi_label_variant_rows_in_cases copies and closes for pattern types.
     pressure_and_finalize_variant_rows(tctx, env, &mut typed_val_cases);
+
+    // Propagate variant row closures across case pattern types.
+    // In OCaml, all cases share the same ty_arg, so closing a variant row in
+    // any pattern (via pressure_variants) propagates to all cases. In Rust,
+    // each case gets a fresh instance, so variant rows closed in one case
+    // (e.g. Error(#InvalidString)) don't propagate to other cases (e.g. Ok(x)).
+    // We explicitly close open variant rows in each case's pattern type when
+    // they are fully covered by the matched tags across all cases.
+    close_variant_rows_across_case_pattern_types(tctx, env, &typed_val_cases);
+
     close_multi_label_variant_rows_in_cases(tctx, env, &mut typed_val_cases);
 
     // Also finalize on the copies (for fields in rows that stayed open after copy+close).
@@ -5893,6 +5903,217 @@ fn close_variant_row_for_pat_type(
     if !row.row_closed {
         row.row_closed = true;
         ctx.set_desc(repr, TypeDesc::Tvariant(row));
+    }
+}
+
+/// Propagate variant row closures across all case pattern types.
+/// In OCaml, all cases share ty_arg directly, so closing a variant row in any
+/// case (via pressure_variants) propagates to all cases. In Rust, each case
+/// gets a fresh instance, so we must explicitly walk each case pattern type
+/// and close open variant rows that are fully covered by tags matched across
+/// all cases.
+fn close_variant_rows_across_case_pattern_types(
+    tctx: &mut TypeCheckContext<'_>,
+    env: &Env,
+    cases: &[crate::types::typedtree::Case],
+) {
+    // Collect all variant tags matched across all patterns, and detect wildcards
+    // at variant-typed positions.
+    let mut matched_tags: HashSet<String> = HashSet::new();
+    let mut variant_wildcard_rows: HashSet<usize> = HashSet::new();
+    for case in cases {
+        collect_all_variant_tags_in_pattern(&case.c_lhs, &mut matched_tags);
+        collect_rows_with_wildcard_coverage(tctx, env, &case.c_lhs, &mut variant_wildcard_rows);
+    }
+
+    if matched_tags.is_empty() {
+        return;
+    }
+
+    // Walk each case's pattern type tree and close open variant rows
+    for case in cases {
+        let mut visited = HashSet::new();
+        close_open_variants_in_pattern_types(
+            tctx.type_ctx,
+            env,
+            &case.c_lhs,
+            &matched_tags,
+            &variant_wildcard_rows,
+            &mut visited,
+        );
+    }
+}
+
+/// Walk a pattern's type expression tree (recursively through the pattern and
+/// its type), closing open variant rows whose fields are all covered.
+fn close_open_variants_in_pattern_types(
+    ctx: &TypeContext<'_>,
+    env: &Env,
+    pat: &Pattern,
+    matched_tags: &HashSet<String>,
+    wildcard_rows: &HashSet<usize>,
+    visited: &mut HashSet<usize>,
+) {
+    // Close open variant rows in this pattern's type
+    close_open_variants_in_type(ctx, env, pat.pat_type, matched_tags, wildcard_rows, visited);
+
+    // Recurse into sub-patterns
+    match &pat.pat_desc {
+        PatternDesc::Tpat_variant(_, arg, _) => {
+            if let Some(arg_pat) = arg {
+                close_open_variants_in_pattern_types(
+                    ctx, env, arg_pat, matched_tags, wildcard_rows, visited,
+                );
+            }
+        }
+        PatternDesc::Tpat_alias(inner, _, _) => {
+            close_open_variants_in_pattern_types(
+                ctx, env, inner, matched_tags, wildcard_rows, visited,
+            );
+        }
+        PatternDesc::Tpat_or(left, right, _) => {
+            close_open_variants_in_pattern_types(
+                ctx, env, left, matched_tags, wildcard_rows, visited,
+            );
+            close_open_variants_in_pattern_types(
+                ctx, env, right, matched_tags, wildcard_rows, visited,
+            );
+        }
+        PatternDesc::Tpat_tuple(items) | PatternDesc::Tpat_array(items) => {
+            for item in items {
+                close_open_variants_in_pattern_types(
+                    ctx, env, item, matched_tags, wildcard_rows, visited,
+                );
+            }
+        }
+        PatternDesc::Tpat_construct(_, _, args) => {
+            for arg in args {
+                close_open_variants_in_pattern_types(
+                    ctx, env, arg, matched_tags, wildcard_rows, visited,
+                );
+            }
+        }
+        PatternDesc::Tpat_record(fields, _) => {
+            for (_, _, field_pat, _) in fields {
+                close_open_variants_in_pattern_types(
+                    ctx, env, field_pat, matched_tags, wildcard_rows, visited,
+                );
+            }
+        }
+        PatternDesc::Tpat_any | PatternDesc::Tpat_var(_, _) | PatternDesc::Tpat_constant(_) => {}
+    }
+}
+
+/// Collect ALL variant tag names from a pattern tree (recursively).
+fn collect_all_variant_tags_in_pattern(
+    pat: &Pattern,
+    tags: &mut HashSet<String>,
+) {
+    match &pat.pat_desc {
+        PatternDesc::Tpat_variant(label, arg, _) => {
+            tags.insert(label.clone());
+            if let Some(arg_pat) = arg {
+                collect_all_variant_tags_in_pattern(arg_pat, tags);
+            }
+        }
+        PatternDesc::Tpat_alias(inner, _, _) => {
+            collect_all_variant_tags_in_pattern(inner, tags);
+        }
+        PatternDesc::Tpat_or(left, right, _) => {
+            collect_all_variant_tags_in_pattern(left, tags);
+            collect_all_variant_tags_in_pattern(right, tags);
+        }
+        PatternDesc::Tpat_tuple(items) | PatternDesc::Tpat_array(items) => {
+            for item in items {
+                collect_all_variant_tags_in_pattern(item, tags);
+            }
+        }
+        PatternDesc::Tpat_construct(_, _, args) => {
+            for arg in args {
+                collect_all_variant_tags_in_pattern(arg, tags);
+            }
+        }
+        PatternDesc::Tpat_record(fields, _) => {
+            for (_, _, field_pat, _) in fields {
+                collect_all_variant_tags_in_pattern(field_pat, tags);
+            }
+        }
+        PatternDesc::Tpat_any | PatternDesc::Tpat_var(_, _) | PatternDesc::Tpat_constant(_) => {}
+    }
+}
+
+/// Walk a type expression recursively and close open variant rows whose fields
+/// are ALL covered by the given matched tags.
+fn close_open_variants_in_type(
+    ctx: &TypeContext<'_>,
+    env: &Env,
+    ty: TypeExprRef,
+    matched_tags: &HashSet<String>,
+    wildcard_rows: &HashSet<usize>,
+    visited: &mut HashSet<usize>,
+) {
+    let expanded = crate::types::ctype::expand_head(ctx, env, ty);
+    let repr = ctx.repr(expanded);
+    if !visited.insert(repr.0) {
+        return;
+    }
+    let desc = ctx.get_desc(repr);
+    match &*desc {
+        TypeDesc::Tvariant(row) => {
+            let row_data = crate::types::btype::row_repr(ctx, row);
+            if !row_data.row_closed && !row_data.row_fields.is_empty() && !wildcard_rows.contains(&repr.0) {
+                // Check if ALL row fields are covered by matched tags
+                let all_covered = row_data
+                    .row_fields
+                    .iter()
+                    .all(|(tag, _)| matched_tags.contains(tag));
+                if all_covered {
+                    let mut closed_row = row_data;
+                    closed_row.row_closed = true;
+                    drop(desc);
+                    ctx.set_desc(repr, TypeDesc::Tvariant(closed_row));
+                    return;
+                }
+            }
+            // Recurse into row field types and row_more
+            let more = row_data.row_more;
+            let field_types: Vec<TypeExprRef> = row_data
+                .row_fields
+                .iter()
+                .flat_map(|(_, field)| match field {
+                    crate::types::type_expr::RowField::Rpresent(Some(t)) => vec![*t],
+                    crate::types::type_expr::RowField::Reither { types, .. } => types.clone(),
+                    _ => vec![],
+                })
+                .collect();
+            drop(desc);
+            close_open_variants_in_type(ctx, env, more, matched_tags, wildcard_rows, visited);
+            for t in field_types {
+                close_open_variants_in_type(ctx, env, t, matched_tags, wildcard_rows, visited);
+            }
+        }
+        TypeDesc::Tconstr { args, .. } => {
+            let args = args.clone();
+            drop(desc);
+            for arg in args {
+                close_open_variants_in_type(ctx, env, arg, matched_tags, wildcard_rows, visited);
+            }
+        }
+        TypeDesc::Tarrow { arg, ret, .. } => {
+            let arg_ty = arg.typ;
+            let ret_ty = *ret;
+            drop(desc);
+            close_open_variants_in_type(ctx, env, arg_ty, matched_tags, wildcard_rows, visited);
+            close_open_variants_in_type(ctx, env, ret_ty, matched_tags, wildcard_rows, visited);
+        }
+        TypeDesc::Ttuple(items) => {
+            let items = items.clone();
+            drop(desc);
+            for item in items {
+                close_open_variants_in_type(ctx, env, item, matched_tags, wildcard_rows, visited);
+            }
+        }
+        _ => {}
     }
 }
 
