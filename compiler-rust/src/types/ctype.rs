@@ -2566,14 +2566,29 @@ pub fn copy_type_deep(
             result
         }
         TypeDesc::Tfield { name, kind, typ, rest } => {
-            let new_typ = copy_type_deep(ctx, *typ, cache);
-            let new_rest = copy_type_deep(ctx, *rest, cache);
+            // Match OCaml Subst.typexp: Fabsent fields are collapsed to a link
+            // to the rest type during copying.
+            let placeholder = ctx.new_var(None);
+            cache.insert(ty, placeholder);
+            let rest = *rest;
+            if matches!(kind, crate::types::type_expr::FieldKind::Fabsent) {
+                let new_rest = copy_type_deep(ctx, rest, cache);
+                ctx.set_desc(placeholder, TypeDesc::Tlink(new_rest));
+                cache.insert(ty, new_rest);
+                return new_rest;
+            }
+            let typ = *typ;
+            let name = name.clone();
+            let kind = kind.clone();
+            let new_typ = copy_type_deep(ctx, typ, cache);
+            let new_rest = copy_type_deep(ctx, rest, cache);
             let result = ctx.new_type(TypeDesc::Tfield {
-                name: name.clone(),
-                kind: kind.clone(),
+                name,
+                kind,
                 typ: new_typ,
                 rest: new_rest,
             });
+            ctx.set_desc(placeholder, TypeDesc::Tlink(result));
             cache.insert(ty, result);
             result
         }
@@ -2849,18 +2864,23 @@ fn subst_identity_copy_rec(
                     }
                 }
                 TypeDesc::Tfield { name, kind, typ, rest } => {
+                    let is_absent = matches!(kind, crate::types::type_expr::FieldKind::Fabsent);
                     let name = name.clone();
                     let kind = kind.clone();
                     let typ = *typ;
                     let rest = *rest;
                     drop(desc);
-                    let typ_copy = subst_identity_copy_rec(ctx, typ, seen);
                     let rest_copy = subst_identity_copy_rec(ctx, rest, seen);
-                    TypeDesc::Tfield {
-                        name,
-                        kind,
-                        typ: typ_copy,
-                        rest: rest_copy,
+                    if is_absent {
+                        TypeDesc::Tlink(rest_copy)
+                    } else {
+                        let typ_copy = subst_identity_copy_rec(ctx, typ, seen);
+                        TypeDesc::Tfield {
+                            name,
+                            kind,
+                            typ: typ_copy,
+                            rest: rest_copy,
+                        }
                     }
                 }
                 TypeDesc::Tpoly { body, vars } => {
@@ -3077,12 +3097,18 @@ fn copy_type_cached(
                     kind,
                     typ,
                     rest,
-                } => CopyAction::Field {
-                    name: name.clone(),
-                    kind: kind.clone(),
-                    typ: *typ,
-                    rest: *rest,
-                },
+                } => {
+                    if matches!(kind, crate::types::type_expr::FieldKind::Fabsent) {
+                        CopyAction::Link(*rest)
+                    } else {
+                        CopyAction::Field {
+                            name: name.clone(),
+                            kind: kind.clone(),
+                            typ: *typ,
+                            rest: *rest,
+                        }
+                    }
+                }
                 TypeDesc::Tnil => CopyAction::Nil,
                 TypeDesc::Ttuple(types) => CopyAction::Tuple(types.clone()),
                 TypeDesc::Tconstr { path, args, .. } => CopyAction::Constr {
@@ -3127,12 +3153,18 @@ fn copy_type_cached(
                     kind,
                     typ,
                     rest,
-                } => CopyAction::Field {
-                    name: name.clone(),
-                    kind: kind.clone(),
-                    typ: *typ,
-                    rest: *rest,
-                },
+                } => {
+                    if matches!(kind, crate::types::type_expr::FieldKind::Fabsent) {
+                        CopyAction::Link(*rest)
+                    } else {
+                        CopyAction::Field {
+                            name: name.clone(),
+                            kind: kind.clone(),
+                            typ: *typ,
+                            rest: *rest,
+                        }
+                    }
+                }
                 TypeDesc::Tnil => CopyAction::Nil,
                 TypeDesc::Tpoly { body, vars } => CopyAction::Poly {
                     body: *body,
