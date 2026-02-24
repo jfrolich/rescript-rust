@@ -791,36 +791,48 @@ fn compile_file(
             ..Default::default()
         };
 
+        // Run typed-sexp generation on a large-stack worker to avoid overflowing
+        // rayon worker stacks on deeply nested typed trees.
+        let worker_name = format!("rust-typed-sexp-{module_name}");
+        let worker = std::thread::Builder::new()
+            .name(worker_name)
+            .stack_size(512 * 1024 * 1024)
+            .spawn(move || {
+                let mut sexp_bytes = Vec::new();
+                if let Some(stored_ast) = stored {
+                    let result = match stored_ast {
+                        super::build_types::StoredAst::Structure(arena, structure) => {
+                            rescript_compiler::driver::typecheck_stored_structure_and_dump_sexp(
+                                arena,
+                                structure,
+                                &opts,
+                                &mut sexp_bytes,
+                            )
+                        }
+                        super::build_types::StoredAst::Signature(arena, signature) => {
+                            rescript_compiler::driver::typecheck_stored_signature_and_dump_sexp(
+                                arena,
+                                signature,
+                                &opts,
+                                &mut sexp_bytes,
+                            )
+                        }
+                    };
+                    let _ = result;
+                }
+                sexp_bytes
+            })
+            .map_err(|err| anyhow!("Failed to spawn rust typed-sexp worker: {err}"))?;
+
+        let sexp_bytes = worker
+            .join()
+            .map_err(|_| anyhow!("Rust typed-sexp worker panicked"))?;
+
         let sexp_path = ocaml_build_path_abs.join(format!("{basename}.sexp"));
-        if let Some(stored_ast) = stored {
-            let mut sexp_bytes = Vec::new();
-            let result = match stored_ast {
-                super::build_types::StoredAst::Structure(arena, structure) => {
-                    rescript_compiler::driver::typecheck_stored_structure_and_dump_sexp(
-                        arena,
-                        structure,
-                        &opts,
-                        &mut sexp_bytes,
-                    )
-                }
-                super::build_types::StoredAst::Signature(arena, signature) => {
-                    rescript_compiler::driver::typecheck_stored_signature_and_dump_sexp(
-                        arena,
-                        signature,
-                        &opts,
-                        &mut sexp_bytes,
-                    )
-                }
-            };
-            let _ = result;
-            // Keep Rust parity output on the same UTF-8-lossy path as OCaml
-            // stderr extraction in this script.
-            let lossy = String::from_utf8_lossy(&sexp_bytes);
-            let _ = std::fs::write(&sexp_path, lossy.as_ref());
-        } else {
-            // No stored AST — create empty sexp file so downstream knows it was attempted
-            let _ = std::fs::File::create(&sexp_path);
-        }
+        // Keep Rust parity output on the same UTF-8-lossy path as OCaml
+        // stderr extraction in this script.
+        let lossy = String::from_utf8_lossy(&sexp_bytes);
+        let _ = std::fs::write(&sexp_path, lossy.as_ref());
 
         return Ok(None);
     }

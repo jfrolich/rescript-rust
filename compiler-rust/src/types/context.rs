@@ -642,35 +642,47 @@ impl<'a> TypeContext<'a> {
     /// to point directly to the representative, improving
     /// subsequent lookup performance.
     pub fn repr(&self, t: TypeExprRef) -> TypeExprRef {
-        // Check the desc and extract the next reference if it's a link
-        let next = {
-            let desc = self.get_desc(t);
-            match &*desc {
-                TypeDesc::Tlink(t2) => Some(*t2),
-                TypeDesc::Tfield {
-                    kind: FieldKind::Fabsent,
-                    rest,
-                    ..
-                } => Some(*rest),
-                _ => None,
+        // Iterative traversal avoids recursive stack growth on long link chains
+        // and protects against accidental cycles in malformed link graphs.
+        let mut current = t;
+        let mut chain: Vec<TypeExprRef> = Vec::new();
+        let mut seen: std::collections::HashSet<TypeExprRef> = std::collections::HashSet::new();
+
+        loop {
+            if !seen.insert(current) {
+                break;
             }
-        };
 
-        match next {
-            Some(next_ref) => {
-                // Recursively find the representative
-                let rep = self.repr(next_ref);
-
-                // Path compression: if we traversed more than one link,
-                // update this link to point directly to the representative
-                if rep != next_ref {
-                    self.set_desc(t, TypeDesc::Tlink(rep));
+            let next = {
+                let desc = self.get_desc(current);
+                match &*desc {
+                    TypeDesc::Tlink(next) => Some(*next),
+                    TypeDesc::Tfield {
+                        kind: FieldKind::Fabsent,
+                        rest,
+                        ..
+                    } => Some(*rest),
+                    _ => None,
                 }
+            };
 
-                rep
+            match next {
+                Some(next_ref) => {
+                    chain.push(current);
+                    current = next_ref;
+                }
+                None => break,
             }
-            None => t,
         }
+
+        // Path compression for every traversed node.
+        for node in chain {
+            if node != current {
+                self.set_desc(node, TypeDesc::Tlink(current));
+            }
+        }
+
+        current
     }
 }
 

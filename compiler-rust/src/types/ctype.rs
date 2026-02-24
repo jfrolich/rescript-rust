@@ -121,6 +121,9 @@ pub struct UnifyState {
     /// Store an owned clone to avoid dangling pointers when nested typing
     /// temporarily switches environments.
     env: Option<Env>,
+
+    /// Current recursive call depth in `unify`.
+    recursion_depth: usize,
 }
 
 impl UnifyState {
@@ -132,6 +135,7 @@ impl UnifyState {
             generate_equations: false,
             assume_injective: false,
             env: None,
+            recursion_depth: 0,
         }
     }
 
@@ -143,6 +147,7 @@ impl UnifyState {
             generate_equations: true,
             assume_injective: false,
             env: None,
+            recursion_depth: 0,
         }
     }
 
@@ -192,55 +197,81 @@ impl Default for UnifyState {
 /// This is the occurs check that prevents infinite types.
 /// Returns `true` if `needle` occurs in `haystack`.
 pub fn occurs(ctx: &TypeContext<'_>, needle: TypeExprRef, haystack: TypeExprRef) -> bool {
-    let needle = ctx.repr(needle);
-    let haystack = ctx.repr(haystack);
-
-    if needle == haystack {
-        return true;
-    }
-
-    // OCaml ctype.ml occur_rec does not recurse into object/variant nodes
-    // for regular expression-mode occurs checks.
-    let should_recurse = {
-        let desc = ctx.get_desc(haystack);
-        !matches!(&*desc, TypeDesc::Tobject { .. } | TypeDesc::Tvariant(_))
-    };
-    if !should_recurse {
-        return false;
-    }
-
-    let mut found = false;
-    iter_type_expr(ctx, haystack, |child| {
-        if !found && occurs(ctx, needle, child) {
-            found = true;
+    fn occurs_rec(
+        ctx: &TypeContext<'_>,
+        needle: TypeExprRef,
+        haystack: TypeExprRef,
+        visited: &mut HashSet<TypeExprRef>,
+    ) -> bool {
+        let haystack = ctx.repr(haystack);
+        if needle == haystack {
+            return true;
         }
-    });
-    found
+        if !visited.insert(haystack) {
+            return false;
+        }
+
+        // OCaml ctype.ml occur_rec does not recurse into object/variant nodes
+        // for regular expression-mode occurs checks.
+        let should_recurse = {
+            let desc = ctx.get_desc(haystack);
+            !matches!(&*desc, TypeDesc::Tobject { .. } | TypeDesc::Tvariant(_))
+        };
+        if !should_recurse {
+            return false;
+        }
+
+        let mut found = false;
+        iter_type_expr(ctx, haystack, |child| {
+            if !found && occurs_rec(ctx, needle, child, visited) {
+                found = true;
+            }
+        });
+        found
+    }
+
+    let needle = ctx.repr(needle);
+    let mut visited = HashSet::new();
+    occurs_rec(ctx, needle, haystack, &mut visited)
 }
 
 /// Deep occur check - follows type constructors.
 pub fn deep_occur(ctx: &TypeContext<'_>, needle: TypeExprRef, haystack: TypeExprRef) -> bool {
-    let needle = ctx.repr(needle);
-    let haystack = ctx.repr(haystack);
+    fn deep_occur_rec(
+        ctx: &TypeContext<'_>,
+        needle: TypeExprRef,
+        haystack: TypeExprRef,
+        visited: &mut HashSet<TypeExprRef>,
+    ) -> bool {
+        let haystack = ctx.repr(haystack);
+        if needle == haystack {
+            return true;
+        }
+        if !visited.insert(haystack) {
+            return false;
+        }
 
-    if needle == haystack {
-        return true;
-    }
-
-    let desc = ctx.get_desc(haystack);
-    match &*desc {
-        TypeDesc::Tconstr { args, .. } => args.iter().any(|arg| deep_occur(ctx, needle, *arg)),
-        _ => {
-            drop(desc);
-            let mut found = false;
-            iter_type_expr(ctx, haystack, |child| {
-                if !found && deep_occur(ctx, needle, child) {
-                    found = true;
-                }
-            });
-            found
+        let desc = ctx.get_desc(haystack);
+        match &*desc {
+            TypeDesc::Tconstr { args, .. } => args
+                .iter()
+                .any(|arg| deep_occur_rec(ctx, needle, *arg, visited)),
+            _ => {
+                drop(desc);
+                let mut found = false;
+                iter_type_expr(ctx, haystack, |child| {
+                    if !found && deep_occur_rec(ctx, needle, child, visited) {
+                        found = true;
+                    }
+                });
+                found
+            }
         }
     }
+
+    let needle = ctx.repr(needle);
+    let mut visited = HashSet::new();
+    deep_occur_rec(ctx, needle, haystack, &mut visited)
 }
 
 // ============================================================================
@@ -1201,16 +1232,27 @@ pub fn unify<'a>(
     t1: TypeExprRef,
     t2: TypeExprRef,
 ) -> TypeResult<()> {
+    // Guard against non-terminating row-unification recursion. Without this,
+    // pathological cycles can overflow the stack before producing a type error.
+    const MAX_UNIFY_RECURSION_DEPTH: usize = 2048;
+    state.recursion_depth += 1;
+    if state.recursion_depth > MAX_UNIFY_RECURSION_DEPTH {
+        state.recursion_depth -= 1;
+        return Err(TypeError::Unify(vec![]));
+    }
+
     // Fast path: same reference
     let t1 = ctx.repr(t1);
     let t2 = ctx.repr(t2);
 
     if t1 == t2 {
+        state.recursion_depth -= 1;
         return Ok(());
     }
 
     // Check if already unified (for cycles)
     if state.already_unified(t1, t2) {
+        state.recursion_depth -= 1;
         return Ok(());
     }
 
@@ -1220,13 +1262,16 @@ pub fn unify<'a>(
     // Get descriptors
     let result = unify_types(ctx, state, t1, t2);
 
-    if let Err(TypeError::Unify(trace)) = &result {
+    let result = if let Err(TypeError::Unify(trace)) = &result {
         // Add this pair to the trace
         let mut new_trace = vec![(t1, t2)];
         new_trace.extend(trace.iter().cloned());
-        return Err(TypeError::Unify(new_trace));
-    }
+        Err(TypeError::Unify(new_trace))
+    } else {
+        result
+    };
 
+    state.recursion_depth -= 1;
     result
 }
 
