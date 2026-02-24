@@ -2388,30 +2388,68 @@ pub fn remap_label_type_to_params(
     type_params: &[TypeExprRef],
 ) -> TypeExprRef {
     let label_ty = ctx.repr(label_ty);
-    let var_name = {
-        let desc = ctx.get_desc(label_ty);
-        match &*desc {
-            TypeDesc::Tvar(Some(name)) | TypeDesc::Tunivar(Some(name)) => Some(name.clone()),
-            _ => None,
-        }
-    };
-
-    let Some(var_name) = var_name else {
-        return label_ty;
-    };
-
-    for &param in type_params {
-        let param = ctx.repr(param);
-        let desc = ctx.get_desc(param);
-        match &*desc {
-            TypeDesc::Tvar(Some(name)) | TypeDesc::Tunivar(Some(name)) if *name == var_name => {
-                return param;
+    let desc = ctx.get_desc(label_ty);
+    match &*desc {
+        TypeDesc::Tvar(Some(name)) | TypeDesc::Tunivar(Some(name)) => {
+            for &param in type_params {
+                let param = ctx.repr(param);
+                let param_desc = ctx.get_desc(param);
+                match &*param_desc {
+                    TypeDesc::Tvar(Some(param_name)) | TypeDesc::Tunivar(Some(param_name))
+                        if param_name == name =>
+                    {
+                        return param;
+                    }
+                    _ => {}
+                }
             }
-            _ => {}
+            label_ty
         }
-    }
+        TypeDesc::Tpoly { body, vars } => {
+            let body = ctx.repr(*body);
+            let vars = vars.clone();
+            drop(desc);
 
-    label_ty
+            if vars.iter().any(|v| ctx.repr(*v) == body) {
+                return label_ty;
+            }
+
+            let body_desc = ctx.get_desc(body);
+            let body_name = match &*body_desc {
+                TypeDesc::Tvar(Some(name)) | TypeDesc::Tunivar(Some(name)) => Some(name.clone()),
+                _ => None,
+            };
+            drop(body_desc);
+
+            let Some(body_name) = body_name else {
+                return label_ty;
+            };
+
+            for &param in type_params {
+                let param = ctx.repr(param);
+                let param_desc = ctx.get_desc(param);
+                match &*param_desc {
+                    TypeDesc::Tvar(Some(param_name)) | TypeDesc::Tunivar(Some(param_name))
+                        if *param_name == body_name =>
+                    {
+                        if param == body {
+                            return label_ty;
+                        }
+                        let remapped = ctx.new_poly(param, vars);
+                        let level = ctx.get_level(label_ty);
+                        if ctx.get_level(remapped) != level {
+                            ctx.set_level(remapped, level);
+                        }
+                        return remapped;
+                    }
+                    _ => {}
+                }
+            }
+
+            label_ty
+        }
+        _ => label_ty,
+    }
 }
 
 /// Instantiate a label description, creating fresh type variables for its

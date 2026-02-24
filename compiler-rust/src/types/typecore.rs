@@ -3179,19 +3179,31 @@ fn type_pattern_record(
     // Type check each field pattern
     let mut typed_fields = Vec::new();
     for (idx, field) in fields.iter().enumerate() {
-        let field_name = tctx.longident_last_name(tctx.resolve_lid(field.lid.txt));
+        let resolved_lid = tctx.resolve_lid(field.lid.txt).clone();
+        let field_name = tctx.longident_last_name(&resolved_lid);
 
         // Create fresh type variable for the field
         let field_ty = ctx.new_var(None);
 
         // Try to look up the label from the environment for type info
-        let label_desc = if let Some(env_label) = disambiguate_label(
-            &field_name,
-            record_ty,
+        let disambiguated = lookup_label_by_lid(
+            &resolved_lid,
+            tctx.arena,
             env,
             &mut tctx.persistent_env,
             ctx,
-        ) {
+        )
+        .or_else(|| {
+            disambiguate_label(
+                &field_name,
+                record_ty,
+                env,
+                &mut tctx.persistent_env,
+                ctx,
+            )
+        });
+
+        let label_desc = if let Some(env_label) = disambiguated {
                 let (_poly_vars, ty_arg, ty_res) = crate::types::ctype::instance_label(ctx, &env_label);
                 // Best-effort unification to propagate type info
                 let _ = crate::types::unify(ctx, &mut tctx.unify_state, ty_res, record_ty);
@@ -7334,14 +7346,24 @@ fn type_record(
 
     // Type check explicitly written fields.
     for (idx, field) in fields.iter().enumerate() {
-        let field_name = tctx.longident_last_name(tctx.resolve_lid(field.lid.txt));
-        let disambiguated = disambiguate_label(
-            &field_name,
-            disambiguation_ty,
+        let resolved_lid = tctx.resolve_lid(field.lid.txt).clone();
+        let field_name = tctx.longident_last_name(&resolved_lid);
+        let disambiguated = lookup_label_by_lid(
+            &resolved_lid,
+            tctx.arena,
             env,
             &mut tctx.persistent_env,
             ctx,
-        );
+        )
+        .or_else(|| {
+            disambiguate_label(
+                &field_name,
+                disambiguation_ty,
+                env,
+                &mut tctx.persistent_env,
+                ctx,
+            )
+        });
         if first_disambiguated_label.is_none() {
             first_disambiguated_label = disambiguated.clone();
         }
@@ -7742,7 +7764,8 @@ fn type_field(
 ) -> TypeCoreResult<Expression> {
     let ctx = tctx.type_ctx;
 
-    let field_name = tctx.longident_last_name(tctx.resolve_lid(field_lid.txt));
+    let resolved_lid = tctx.resolve_lid(field_lid.txt).clone();
+    let field_name = tctx.longident_last_name(&resolved_lid);
 
     // Following OCaml's type_label_access pattern:
     // 1. Type the record expression first (with unconstrained type)
@@ -7752,13 +7775,22 @@ fn type_field(
     let ty_exp = typed_record.exp_type;
 
     // Disambiguate label: use the record expression's type to find the right label
-    let env_label = disambiguate_label(
-        &field_name,
-        ty_exp,
+    let env_label = lookup_label_by_lid(
+        &resolved_lid,
+        tctx.arena,
         env,
         &mut tctx.persistent_env,
         ctx,
-    );
+    )
+    .or_else(|| {
+        disambiguate_label(
+            &field_name,
+            ty_exp,
+            env,
+            &mut tctx.persistent_env,
+            ctx,
+        )
+    });
 
     let (label_desc, field_ty) = if let Some(env_label) = env_label {
         let (_poly_vars, ty_arg, ty_res) = crate::types::ctype::instance_label(ctx, &env_label);
@@ -7812,20 +7844,30 @@ fn type_setfield(
 ) -> TypeCoreResult<Expression> {
     let ctx = tctx.type_ctx;
     let unit_ty = env.type_unit(ctx);
-    let field_name = tctx.longident_last_name(tctx.resolve_lid(field_lid.txt));
+    let resolved_lid = tctx.resolve_lid(field_lid.txt).clone();
+    let field_name = tctx.longident_last_name(&resolved_lid);
     // Match field-access disambiguation: type the record expression first,
     // then pick the label based on the resolved record type.
     let record_ty = ctx.new_var(None);
     let typed_record = type_expect(tctx, env, record_expr, record_ty, None)?;
     let ty_exp = typed_record.exp_type;
 
-    let env_label = disambiguate_label(
-        &field_name,
-        ty_exp,
+    let env_label = lookup_label_by_lid(
+        &resolved_lid,
+        tctx.arena,
         env,
         &mut tctx.persistent_env,
         ctx,
-    );
+    )
+    .or_else(|| {
+        disambiguate_label(
+            &field_name,
+            ty_exp,
+            env,
+            &mut tctx.persistent_env,
+            ctx,
+        )
+    });
     let (label_desc, field_ty) = if let Some(env_label) = env_label {
         let (_poly_vars, ty_arg, ty_res) = crate::types::ctype::instance_label(ctx, &env_label);
         unify_expression_types(tctx, loc, ty_res, record_ty, None)?;
@@ -11393,6 +11435,60 @@ fn disambiguate_constructor<'a>(
 /// OCaml's `Label.disambiguate` can still resolve labels using `opath` even
 /// when `find_all_labels` is empty. Mirror that by inspecting the expected
 /// record type declaration directly.
+fn lookup_label_by_lid<'a>(
+    lid: &Longident,
+    arena: &ParseArena,
+    env: &Env,
+    pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
+    ctx: &'a crate::types::context::TypeContext<'a>,
+) -> Option<crate::types::LabelDescription> {
+    use crate::types::decl::SignatureItem;
+
+    let Longident::Ldot(module_lid, label_idx) = lid else {
+        return None;
+    };
+
+    let label_name = arena.get_string(*label_idx);
+    let (module_path, signature) = env.resolve_module_lid(module_lid, arena, pers_env, ctx)?;
+    let mut selected = None;
+
+    for sig_item in &signature {
+        if let SignatureItem::SigType(type_id, type_decl, _) = sig_item {
+            let (labels, repr) = match &type_decl.type_kind {
+                crate::types::TypeKind::TypeRecord(labels, repr) => (labels, repr),
+                _ => continue,
+            };
+
+            let type_path = Path::pdot(module_path.clone(), type_id.name().to_string());
+            let res_ty = ctx.new_generic_constr(type_path, type_decl.type_params.clone());
+
+            for (pos, ld) in labels.iter().enumerate() {
+                if ld.ld_id.name() == label_name {
+                    selected = Some(crate::types::LabelDescription {
+                        lbl_name: ld.ld_id.name().to_string(),
+                        lbl_res: res_ty,
+                        lbl_arg: crate::types::ctype::remap_label_type_to_params(
+                            ctx,
+                            ld.ld_type,
+                            &type_decl.type_params,
+                        ),
+                        lbl_mut: ld.ld_mutable,
+                        lbl_optional: ld.ld_optional,
+                        lbl_pos: pos as i32,
+                        lbl_all: crate::types::LabelArrayRef(0),
+                        lbl_repres: repr.clone(),
+                        lbl_private: type_decl.type_private,
+                        lbl_loc: ld.ld_loc.clone(),
+                        lbl_attributes: ld.ld_attributes.clone(),
+                    });
+                }
+            }
+        }
+    }
+
+    selected
+}
+
 fn lookup_label_by_expected_type<'a>(
     label_name: &str,
     record_ty: TypeExprRef,

@@ -455,7 +455,17 @@ Most byte-format drift is now resolved. Remaining work is primarily in type-chec
 - [ ] **16. Stack-based cycle detection — TRY LAST** — On old branch: +16 (613→629). Current branch: 610→220 REGRESSION. Only after all above fixes.
 
 **Partial fixes:**
-- [ ] **P1. Qualified label lookup last-defined** — Return last match for ambiguous labels. (630→631, test: Stdlib_Intl_DateTimeFormatTest.res)
+- [x] **P1. Qualified label lookup last-defined** — Return last match for ambiguous labels. (630→631, test: Stdlib_Intl_DateTimeFormatTest.res)
+  - 2026-02-24 fix: added module-qualified label lookup (`lookup_label_by_lid`) in `compiler-rust/src/types/typecore.rs` and threaded it through:
+    - `type_pattern_record`
+    - `type_record` explicit field disambiguation
+    - `type_field`
+    - `type_setfield`
+  - 2026-02-24 follow-up: extended `compiler-rust/src/types/ctype.rs::remap_label_type_to_params` to remap `Tpoly` body vars to declaration `type_params` when labels come from module signatures (so `instance_label` shares `lbl_arg`/`lbl_res` params in this path).
+  - OCaml refs read: `compiler/ml/typecore.ml` (`NameChoice.disambiguate`, `disambiguate_record_elem_list`, `type_record_elem_list`, `type_label_access`, `type_label_exp`).
+  - Deterministic full parity: **630/657 → 653/657** (parity failures **27 → 4**), compile parity stayed **657/657**.
+  - Deterministic remaining failure modules: `fun_pattern_match`, `gpr_4274_test`, `miss_colon_test`, `test_bs_this`.
+  - Parser/binary guard: `timeout 300 ./scripts/test_parser_ast_parity.sh 2>&1 | tail -40` ended with `SUCCESS: All 3532 files have full parity!`.
 - [ ] **P2. Generalize local Pdot expansion guard** — Extend from `.t`/`.cmp` to ALL nullary Pdot with local roots. (649→650, test: topsort_test.res)
   - 2026-02-24 attempt: generalized `update_level_expand` guard in `ctype.rs` to preserve all nullary local `Pdot` aliases before expansion. Deterministic full parity stayed **478/657 → 478/657** (179 failures); targeted `topsort_test` remained **0/1**. Reverted.
 
