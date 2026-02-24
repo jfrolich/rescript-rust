@@ -501,6 +501,13 @@ Most byte-format drift is now resolved. Remaining work is primarily in type-chec
   - Parser/binary guard: `timeout 300 ./scripts/test_parser_ast_parity.sh 2>&1 | tail -40` ended with `SUCCESS: All 3532 files have full parity!`.
 - [ ] **P2. Generalize local Pdot expansion guard** — Extend from `.t`/`.cmp` to ALL nullary Pdot with local roots. (649→650, test: topsort_test.res)
   - 2026-02-24 attempt: generalized `update_level_expand` guard in `ctype.rs` to preserve all nullary local `Pdot` aliases before expansion. Deterministic full parity stayed **478/657 → 478/657** (179 failures); targeted `topsort_test` remained **0/1**. Reverted.
+  - 2026-02-24 retry: broadened `update_level_expand` preservation from local `.t`/`.cmp` only to any local nullary `Pdot` alias in `compiler-rust/src/types/ctype.rs` (OCaml refs: `compiler/ml/ctype.ml` `update_level` around lines ~652-706, `get_level`/`Path.binding_time` flow). Reverted after no targeted improvement.
+  - Targeted parity after patch: `timeout 300 ./scripts/test_typedtree_parity.sh topsort_test` stayed **0/1** and `timeout 300 ./scripts/test_typedtree_parity.sh variant` stayed **0/1** with unchanged path drift (`String_set.value -> string`, `M.t -> Path.t`).
+  - Full parity runs in this snapshot are currently non-deterministic due recurring Rust sexp stack-overflow during `rescript build --dump-typed-sexp --rust` (observed outputs span **636/657**, **633/657**, **641/657**, and false **657/657** in overflowed runs). Treat overflowed runs as invalid for parity deltas.
+- [ ] **P2A. Verify local-root detection for `update_level_expand` guard uses OCaml-equivalent binding-time semantics (NEW)** — The broadened nullary-`Pdot` guard was parity-neutral, so local-root classification (`is_local_path` stamp-based) may be missing aliases like `String_set.value`/`M.t`.
+  - Evidence (2026-02-24): generalized guard patch in `ctype.rs` produced no change in `topsort_test` or `variant`; both diffs still show alias expansion to concrete paths.
+  - Next OCaml refs: `compiler/ml/ctype.ml` `get_level`, `Path.binding_time`, `update_level` abbreviation expansion branch.
+  - Next Rust refs: `compiler-rust/src/types/ctype.rs` `is_local_path`, `path_binding_time`, `update_level_expand`, and local alias stamping in `typemod`/`typecore` path construction.
 
 ---
 
