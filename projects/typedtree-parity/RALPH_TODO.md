@@ -755,8 +755,23 @@ Primary blockers are currently (1) cycle/sharing typedtree rendering drift and (
   - Parser/binary guard after patch: `timeout 300 ./scripts/test_parser_ast_parity.sh 2>&1 | tail -40` ended with `SUCCESS: All 3532 files have full parity!`.
 - [ ] **12A. Port OCaml `Mtype.lower_nongen` semantics for module declarations (NEW)** — task-12 force-generalization was parity-neutral, so the remaining drift is likely in level lowering timing/scope, not a blanket promotion pass.
   - Evidence (2026-02-24): even with recursive module-signature value-type promotion (and nullary-`Tconstr` guard), full parity remained **588/657** with unchanged `set_gen` / `LetUnwrap` failures.
+  - 2026-02-24 attempt (reverted): implemented OCaml-shaped `lower_nongen_module_type` traversal in `compiler-rust/src/types/ctype.rs` (lower only `Tvar` levels where `nglev < level < GENERIC_LEVEL` across full module-type contents: `SigValue`, `SigType`, `SigTypext`, nested modules/modtypes/functors) and wired `compiler-rust/src/types/typemod.rs::Pstr_module` to call it with `mod_id.binding_time() - 1` before `Env.add_module` (replacing `force_generalize_module_sig_values` for this path).
+  - OCaml refs read:
+    - `compiler/ml/mtype.ml` (`lower_nongen`, iterator-based module-type walk lowering only `Tvar` levels)
+    - `compiler/ml/typemod.ml` (`Pstr_module` calls `Mtype.lower_nongen (Ident.binding_time id - 1) md.md_type` before env insertion)
+  - Targeted checks:
+    - `timeout 300 ./scripts/test_typedtree_parity.sh LetUnwrap` stayed **0/1** (hunk mismatches: 11)
+    - `timeout 300 ./scripts/test_typedtree_parity.sh set_gen` stayed **0/1** (hunk mismatches: 82)
+    - `timeout 300 ./scripts/test_typedtree_parity.sh inline_map2_test` stayed **0/1** (OCaml-only pass)
+  - Deterministic full parity stayed **589/657 → 589/657** (parity failures **61 → 61**, Rust compile coverage **650/657 → 650/657**).
+  - Parser/binary guard after revert: `timeout 300 ./scripts/test_parser_ast_parity.sh 2>&1 | tail -40` ended with `SUCCESS: All 3532 files have full parity!`.
+  - Outcome: parity-neutral on this snapshot; patch reverted and task remains open.
   - Next OCaml refs: `compiler/ml/mtype.ml` (`lower_nongen`), `compiler/ml/typemod.ml` module declaration insertion points (`Pstr_module`, `Pstr_recmodule`).
   - Next Rust refs: `compiler-rust/src/types/typemod.rs` module env insertion paths and `compiler-rust/src/types/context.rs` level APIs (`current_level`, `nongen_level`, `init_def`).
+- [ ] **12B. Verify `Ident.binding_time` scale alignment before `lower_nongen` in module typing (NEW)** — OCaml compares `Ident.binding_time` and type levels on the same timeline (`init_def (Ident.current_time())`), but Rust currently uses `Ident::create_local` stamps in `Pstr_module` while type levels are managed by `TypeContext`, so `mod_id.binding_time() - 1` may be on a different scale and produce a no-op.
+  - Evidence (2026-02-24): direct `lower_nongen` port in `Pstr_module` was parity-neutral at **589/657**, despite targeting the exact OCaml call site.
+  - Next OCaml refs: `compiler/ml/typemod.ml` (`type_struct` `Ctype.init_def (Ident.current_time ())` and `Pstr_module`), `compiler/ml/ident.ml` (`binding_time`/stamp semantics), `compiler/ml/mtype.ml` (`lower_nongen`).
+  - Next Rust refs: `compiler-rust/src/types/typemod.rs` item loop and module-id creation, `compiler-rust/src/types/context.rs` level/init APIs, `compiler-rust/src/ident.rs` stamp generation.
 - [ ] **13. GADT equation support** — gadt_equations, with_gadt_mode, add_gadt_equation, is_newtype_path. Complex. (650→651, test: js_json_test.res)
 - [ ] **13A. Validate `copy_case_type` local-abstract `Tconstr` materialization before adding GADT equations (NEW)** — guidance says this path must keep locally abstract/newtype constructors as `Tconstr` (not fresh `Tvar`), but the isolated port was parity-neutral on the current snapshot.
   - 2026-02-24 attempt: in `compiler-rust/src/types/typecore.rs::copy_case_type`, removed the local-abstract/unresolved-nullary branch that rewrites `TypeDesc::Tconstr` to fresh `Tvar`, keeping all constructors as copied `Tconstr` nodes.
