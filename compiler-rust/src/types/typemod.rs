@@ -4478,7 +4478,11 @@ fn type_structure_item<'a>(
                     let core_type = arena.get_core_type(*core_type);
                     let (typed_core_type, type_ref) = match &*core_type.ptyp_desc {
                         crate::parser::ast::CoreTypeDesc::Ptyp_any => {
-                            let type_ref = ctx.new_global_var(Some("_".to_string()));
+                            // Use new_var (current_level) instead of new_global_var so
+                            // type params are at the elevated level from begin_def and
+                            // get properly generalized by end_def + generalize.
+                            // OCaml creates type params with newvar() at !current_level.
+                            let type_ref = ctx.new_var(Some("_".to_string()));
                             (
                                 TypedCoreType {
                                     ctyp_desc: TypedCoreTypeDesc::Ttyp_var(None),
@@ -4491,7 +4495,7 @@ fn type_structure_item<'a>(
                             )
                         }
                         crate::parser::ast::CoreTypeDesc::Ptyp_var(name) => {
-                            let type_ref = ctx.new_global_var(Some(name.to_string()));
+                            let type_ref = ctx.new_var(Some(name.to_string()));
                             (
                                 TypedCoreType {
                                     ctyp_desc: TypedCoreTypeDesc::Ttyp_var(Some(name.to_string())),
