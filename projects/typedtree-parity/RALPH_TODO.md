@@ -237,10 +237,21 @@ Most byte-format drift is now resolved. Remaining work is primarily in type-chec
     - `.parity-cache/tests/diffs/set_gen.diff`: recursive `t<'a>` positions drift between `<cycle>` and `Tvar None`, plus arrow-arg cycle placement drift.
   - OCaml refs for this mapping: `compiler/ml/subst.ml` (`typexp`, `Tvariant` recursion marker, `copy_row`) and `compiler/ml/ctype.ml` (`copy` recursion/keep semantics).
   - Rust refs for this mapping: `compiler-rust/src/types/ctype.rs` (`copy_type_deep`, `subst_identity_copy_rec`, `copy_type_cached`) and typedtree output in `.parity-cache/tests/diffs/{rbset,set_gen}.diff`.
-- [ ] **5A1. Trace task-5 divergence at the first shared-node creation site for `rbset`/`set_gen` (NEW)** — establish whether the `<cycle>`/`Tconstr` and `<cycle>`/`Tvar` drift originates in `copy_type_deep`, `subst_identity_copy_rec`, or later instantiation in `typecore`.
+- [x] **5A1. Trace task-5 divergence at the first shared-node creation site for `rbset`/`set_gen` (NEW)** — establish whether the `<cycle>`/`Tconstr` and `<cycle>`/`Tvar` drift originates in `copy_type_deep`, `subst_identity_copy_rec`, or later instantiation in `typecore`.
   - Evidence (2026-02-24): `rbset` and `set_gen` are stable task-5 failures across noisy full runs, while prior `jsxv4_newtype`-targeted experiments were not attached to active failures.
-  - Next OCaml refs: `compiler/ml/subst.ml` `typexp` stub/marker lifetime and `compiler/ml/ctype.ml` `copy` variant/object recursion behavior.
-  - Next Rust refs: `compiler-rust/src/types/ctype.rs` copy call graph plus `compiler-rust/src/types/typecore.rs` call sites that feed copied types into typedtree nodes for these modules.
+  - 2026-02-24 trace update:
+    - `timeout 300 ./scripts/test_typedtree_parity.sh rbset` and `... set_gen` both stayed **0/1** with the same first diffs (`rbset`: `Tarrow` arg `<cycle>` vs `Tconstr(Pident "t")`; `set_gen`: `Tconstr(Pident "t", <cycle>)` vs `Tconstr(Pident "t", Tvar None)`).
+    - Experiment A (reverted): removed the Rust-only `id.name() == "t"` guard in `compiler-rust/src/types/ctype.rs::is_recursive_local_nullary_type_for_identity`; targeted parity stayed unchanged on both modules.
+    - Experiment B (reverted): widened the Rust-only local `t -> t` link gate in `compiler-rust/src/types/typecore.rs` apply typing path; targeted parity stayed unchanged on both modules.
+    - The first `rbset` divergence is in a non-application function binding (`blackify` `Tstr_value`), so the apply-path link heuristics are not the creation site for this cluster.
+    - Timed full runs remained stack-overflow-noisy (`621/657`, `631/657`, `630/657` observed), with no deterministic attributable delta from the reverted experiments.
+    - Parser/binary guard after reverting experiments: `timeout 300 ./scripts/test_parser_ast_parity.sh 2>&1 | tail -40` ended with `SUCCESS: All 3532 files have full parity!`.
+  - Conclusion: current `rbset`/`set_gen` drift is introduced later in `typecore` non-application function typing/instantiation flow, not by `copy_type_deep`/`subst_identity_copy_rec` row-copy branches.
+  - OCaml refs read: `compiler/ml/typecore.ml` (`type_function`, `type_cases`), `compiler/ml/ctype.ml` (`copy`), `compiler/ml/subst.ml` (`typexp`).
+- [ ] **5A2. Trace non-application `type_function` sharing for local recursive `t` (NEW)** — identify where Rust loses OCaml node sharing in function parameter/result types before typedtree emission for `rbset`/`set_gen`.
+  - Scope: `type_function` / `type_cases` expected-arrow filtering, `instance` timing, and pattern/body env binding copies.
+  - Next OCaml refs: `compiler/ml/typecore.ml` (`type_function` ~3262-3338, `type_cases` ~3906+), `compiler/ml/ctype.ml` (`instance`, `copy`).
+  - Next Rust refs: `compiler-rust/src/types/typecore.rs` (`type_function`, `type_case_impl`, `shallow_copy_pattern_binding_type`) and `compiler-rust/src/types/ctype.rs` (`instance` / `copy_type_cached`).
 - [ ] **5B. Preserve compile parity when porting `Subst.typexp` variant `more'` flow (NEW)** — direct conditional `row_more` reuse currently causes Rust type-check regressions on full build.
   - Evidence (2026-02-24): first-pass OCaml-style `dup`/`more'` port in `copy_type_deep` + `subst_identity_copy_rec` changed full run from **478/657** to **539/657** with Rust compile parity drop **657/657 → 648/657** (9 OCaml-only passes). Reverted.
   - Required guardrail: maintain compile parity **657/657** and avoid introducing new Rust-reject files while aligning variant row-copy behavior.
