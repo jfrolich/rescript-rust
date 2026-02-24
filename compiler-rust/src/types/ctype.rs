@@ -28,7 +28,7 @@ use super::env::Env;
 use super::path::Path;
 use super::type_expr::{FieldKind, GENERIC_LEVEL, RowDesc, RowField, TypeDesc, TypeExprRef};
 use super::variance::{Variance, VarianceFlag};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 // ============================================================================
 // Type Errors
@@ -2480,6 +2480,542 @@ pub fn instance_parameterized_type(
         .collect();
     let fresh_body = copy_type_cached(ctx, body, &mut cache);
     (fresh_params, fresh_body)
+}
+
+fn diff_bound_list(bound: &[TypeExprRef], bound_t: &[TypeExprRef]) -> Vec<TypeExprRef> {
+    if bound == bound_t {
+        return vec![];
+    }
+
+    if bound.len() >= bound_t.len() {
+        let split = bound.len() - bound_t.len();
+        if bound[split..] == *bound_t {
+            return bound[..split].to_vec();
+        }
+    }
+
+    debug_assert!(
+        false,
+        "invalid bound-list relation in instance_poly copy_sep"
+    );
+    vec![]
+}
+
+fn bound_conflicts(
+    ctx: &TypeContext<'_>,
+    free_univars: &HashSet<TypeExprRef>,
+    bound: &[TypeExprRef],
+) -> bool {
+    bound.iter().any(|ty| free_univars.contains(&ctx.repr(*ty)))
+}
+
+fn build_inverse_type_graph(
+    ctx: &TypeContext<'_>,
+    parent: Option<TypeExprRef>,
+    ty: TypeExprRef,
+    inverted: &mut HashMap<TypeExprRef, Vec<TypeExprRef>>,
+) {
+    let ty = ctx.repr(ty);
+
+    if let Some(parents) = inverted.get_mut(&ty) {
+        if let Some(parent) = parent {
+            parents.push(parent);
+        }
+        return;
+    }
+
+    let mut parents = Vec::new();
+    if let Some(parent) = parent {
+        parents.push(parent);
+    }
+    inverted.insert(ty, parents);
+
+    let mut children = Vec::new();
+    iter_type_expr(ctx, ty, |child| children.push(child));
+    for child in children {
+        build_inverse_type_graph(ctx, Some(ty), child, inverted);
+    }
+}
+
+fn add_univar_to_parents(
+    ctx: &TypeContext<'_>,
+    univar: TypeExprRef,
+    node: TypeExprRef,
+    inverted: &HashMap<TypeExprRef, Vec<TypeExprRef>>,
+    node_univars: &mut HashMap<TypeExprRef, HashSet<TypeExprRef>>,
+) {
+    let node = ctx.repr(node);
+    let univar = ctx.repr(univar);
+
+    let desc = ctx.get_desc(node);
+    let is_locally_bound = match &*desc {
+        TypeDesc::Tpoly { vars, .. } => vars.iter().any(|var| ctx.repr(*var) == univar),
+        _ => false,
+    };
+    drop(desc);
+
+    if is_locally_bound {
+        return;
+    }
+
+    let inserted = node_univars.entry(node).or_default().insert(univar);
+    if !inserted {
+        return;
+    }
+
+    if let Some(parents) = inverted.get(&node) {
+        for parent in parents {
+            add_univar_to_parents(ctx, univar, *parent, inverted, node_univars);
+        }
+    }
+}
+
+fn compute_univars_per_node(
+    ctx: &TypeContext<'_>,
+    ty: TypeExprRef,
+) -> HashMap<TypeExprRef, HashSet<TypeExprRef>> {
+    let mut inverted: HashMap<TypeExprRef, Vec<TypeExprRef>> = HashMap::new();
+    build_inverse_type_graph(ctx, None, ty, &mut inverted);
+
+    let mut node_univars: HashMap<TypeExprRef, HashSet<TypeExprRef>> = HashMap::new();
+    let nodes: Vec<TypeExprRef> = inverted.keys().copied().collect();
+    for node in nodes {
+        let node = ctx.repr(node);
+        let desc = ctx.get_desc(node);
+        let is_univar = matches!(&*desc, TypeDesc::Tunivar(_));
+        drop(desc);
+        if is_univar {
+            add_univar_to_parents(ctx, node, node, &inverted, &mut node_univars);
+        }
+    }
+    node_univars
+}
+
+#[derive(Clone)]
+struct CopySepVisitedEntry {
+    ty: TypeExprRef,
+    copied: TypeExprRef,
+    bound: Vec<TypeExprRef>,
+}
+
+fn copy_sep_row(
+    ctx: &TypeContext<'_>,
+    row: &RowDesc,
+    fixed: bool,
+    keep: bool,
+    more: TypeExprRef,
+    free_univars: &HashMap<TypeExprRef, HashSet<TypeExprRef>>,
+    bound: &[TypeExprRef],
+    visited: &[CopySepVisitedEntry],
+    delayed_copy: &mut Vec<(TypeExprRef, TypeExprRef)>,
+) -> RowDesc {
+    RowDesc {
+        row_fields: row
+            .row_fields
+            .iter()
+            .map(|(label, field)| {
+                let field = super::btype::row_field_repr(ctx, field);
+                let copied = match field {
+                    RowField::Rpresent(Some(ty)) => RowField::Rpresent(Some(copy_sep_inner(
+                        ctx,
+                        ty,
+                        fixed,
+                        free_univars,
+                        bound,
+                        visited,
+                        delayed_copy,
+                    ))),
+                    RowField::Reither {
+                        constant,
+                        types,
+                        matched,
+                        link,
+                    } => RowField::Reither {
+                        constant,
+                        types: types
+                            .iter()
+                            .map(|t| {
+                                copy_sep_inner(
+                                    ctx,
+                                    *t,
+                                    fixed,
+                                    free_univars,
+                                    bound,
+                                    visited,
+                                    delayed_copy,
+                                )
+                            })
+                            .collect(),
+                        matched: if row.row_fixed { fixed } else { matched },
+                        link: if keep { link } else { ctx.alloc_row_field(None) },
+                    },
+                    _ => field,
+                };
+                (label.clone(), copied)
+            })
+            .collect(),
+        row_more: more,
+        row_closed: row.row_closed,
+        row_fixed: row.row_fixed && fixed,
+        row_name: row.row_name.as_ref().map(|(path, types)| {
+            (
+                path.clone(),
+                types
+                    .iter()
+                    .map(|t| {
+                        copy_sep_inner(ctx, *t, fixed, free_univars, bound, visited, delayed_copy)
+                    })
+                    .collect(),
+            )
+        }),
+    }
+}
+
+fn copy_sep_inner(
+    ctx: &TypeContext<'_>,
+    ty: TypeExprRef,
+    fixed: bool,
+    free_univars: &HashMap<TypeExprRef, HashSet<TypeExprRef>>,
+    bound: &[TypeExprRef],
+    visited: &[CopySepVisitedEntry],
+    delayed_copy: &mut Vec<(TypeExprRef, TypeExprRef)>,
+) -> TypeExprRef {
+    let ty = ctx.repr(ty);
+    let desc = ctx.get_desc(ty).clone();
+
+    if let TypeDesc::Tsubst(target) = desc {
+        return copy_sep_inner(
+            ctx,
+            target,
+            fixed,
+            free_univars,
+            bound,
+            visited,
+            delayed_copy,
+        );
+    }
+
+    let node_univars = free_univars.get(&ty).cloned().unwrap_or_default();
+    if node_univars.is_empty() {
+        if ctx.get_level(ty) != GENERIC_LEVEL {
+            return ty;
+        }
+        let fresh = ctx.new_var(None);
+        delayed_copy.push((fresh, ty));
+        return fresh;
+    }
+
+    let ty_is_tunivar = matches!(desc, TypeDesc::Tunivar(_));
+    for entry in visited {
+        if entry.ty == ty {
+            let dl = if ty_is_tunivar {
+                vec![]
+            } else {
+                diff_bound_list(bound, &entry.bound)
+            };
+            if dl.is_empty() || !bound_conflicts(ctx, &node_univars, &dl) {
+                return entry.copied;
+            }
+        }
+    }
+
+    let fresh = ctx.new_var(None);
+    let mut visited_for_children = visited.to_vec();
+    if matches!(
+        desc,
+        TypeDesc::Tarrow { .. }
+            | TypeDesc::Ttuple(_)
+            | TypeDesc::Tvariant(_)
+            | TypeDesc::Tconstr { .. }
+            | TypeDesc::Tobject { .. }
+            | TypeDesc::Tpackage { .. }
+    ) {
+        visited_for_children.insert(
+            0,
+            CopySepVisitedEntry {
+                ty,
+                copied: fresh,
+                bound: bound.to_vec(),
+            },
+        );
+    }
+
+    let copied_desc = match desc {
+        TypeDesc::Tvar(_) => TypeDesc::Tvar(None),
+        TypeDesc::Tarrow { arg, ret, arity, .. } => TypeDesc::Tarrow {
+            arg: super::type_expr::TypeArg {
+                lbl: arg.lbl,
+                typ: copy_sep_inner(
+                    ctx,
+                    arg.typ,
+                    fixed,
+                    free_univars,
+                    bound,
+                    &visited_for_children,
+                    delayed_copy,
+                ),
+            },
+            ret: copy_sep_inner(
+                ctx,
+                ret,
+                fixed,
+                free_univars,
+                bound,
+                &visited_for_children,
+                delayed_copy,
+            ),
+            commutable: super::type_expr::Commutable::Cok,
+            arity,
+        },
+        TypeDesc::Ttuple(types) => TypeDesc::Ttuple(
+            types
+                .iter()
+                .map(|t| {
+                    copy_sep_inner(
+                        ctx,
+                        *t,
+                        fixed,
+                        free_univars,
+                        bound,
+                        &visited_for_children,
+                        delayed_copy,
+                    )
+                })
+                .collect(),
+        ),
+        TypeDesc::Tconstr { path, args, .. } => TypeDesc::Tconstr {
+            path,
+            args: args
+                .iter()
+                .map(|t| {
+                    copy_sep_inner(
+                        ctx,
+                        *t,
+                        fixed,
+                        free_univars,
+                        bound,
+                        &visited_for_children,
+                        delayed_copy,
+                    )
+                })
+                .collect(),
+            abbrev: ctx.alloc_abbrev_nil(),
+        },
+        TypeDesc::Tobject { fields, name } => TypeDesc::Tobject {
+            fields: copy_sep_inner(
+                ctx,
+                fields,
+                fixed,
+                free_univars,
+                bound,
+                &visited_for_children,
+                delayed_copy,
+            ),
+            name: name.map(|(path, types)| {
+                (
+                    path,
+                    types
+                        .iter()
+                        .map(|t| {
+                            copy_sep_inner(
+                                ctx,
+                                *t,
+                                fixed,
+                                free_univars,
+                                bound,
+                                &visited_for_children,
+                                delayed_copy,
+                            )
+                        })
+                        .collect(),
+                )
+            }),
+        },
+        TypeDesc::Tfield {
+            name,
+            kind,
+            typ,
+            rest,
+        } => TypeDesc::Tfield {
+            name,
+            kind,
+            typ: copy_sep_inner(
+                ctx,
+                typ,
+                fixed,
+                free_univars,
+                bound,
+                &visited_for_children,
+                delayed_copy,
+            ),
+            rest: copy_sep_inner(
+                ctx,
+                rest,
+                fixed,
+                free_univars,
+                bound,
+                &visited_for_children,
+                delayed_copy,
+            ),
+        },
+        TypeDesc::Tnil => TypeDesc::Tnil,
+        TypeDesc::Tlink(target) | TypeDesc::Tsubst(target) => {
+            return copy_sep_inner(
+                ctx,
+                target,
+                fixed,
+                free_univars,
+                bound,
+                &visited_for_children,
+                delayed_copy,
+            );
+        }
+        TypeDesc::Tunivar(name) => TypeDesc::Tunivar(name),
+        TypeDesc::Tvariant(row0) => {
+            let row = row_repr(ctx, &row0);
+            let more = ctx.repr(row.row_more);
+            let keep = super::btype::is_tvar(ctx, more) && ctx.get_level(more) != GENERIC_LEVEL;
+            let more_copy = copy_sep_inner(
+                ctx,
+                more,
+                fixed,
+                free_univars,
+                bound,
+                &visited_for_children,
+                delayed_copy,
+            );
+            let fixed_prime = fixed && super::btype::is_tvar(ctx, ctx.repr(more_copy));
+            TypeDesc::Tvariant(copy_sep_row(
+                ctx,
+                &row,
+                fixed_prime,
+                keep,
+                more_copy,
+                free_univars,
+                bound,
+                &visited_for_children,
+                delayed_copy,
+            ))
+        }
+        TypeDesc::Tpoly { body, vars } => {
+            let vars: Vec<_> = vars.into_iter().map(|v| ctx.repr(v)).collect();
+            let fresh_vars: Vec<_> = vars
+                .iter()
+                .map(|v| {
+                    let copied = ctx.get_desc(*v).clone();
+                    ctx.new_type(copied)
+                })
+                .collect();
+
+            let mut bound_prime = vars.clone();
+            bound_prime.extend_from_slice(bound);
+
+            let mut visited_poly: Vec<_> = vars
+                .iter()
+                .zip(fresh_vars.iter())
+                .map(|(src, copied)| CopySepVisitedEntry {
+                    ty: *src,
+                    copied: *copied,
+                    bound: bound_prime.clone(),
+                })
+                .collect();
+            visited_poly.extend(visited_for_children);
+
+            TypeDesc::Tpoly {
+                body: copy_sep_inner(
+                    ctx,
+                    body,
+                    fixed,
+                    free_univars,
+                    &bound_prime,
+                    &visited_poly,
+                    delayed_copy,
+                ),
+                vars: fresh_vars,
+            }
+        }
+        TypeDesc::Tpackage { path, lids, args } => TypeDesc::Tpackage {
+            path,
+            lids,
+            args: args
+                .iter()
+                .map(|t| {
+                    copy_sep_inner(
+                        ctx,
+                        *t,
+                        fixed,
+                        free_univars,
+                        bound,
+                        &visited_for_children,
+                        delayed_copy,
+                    )
+                })
+                .collect(),
+        },
+    };
+
+    ctx.set_desc(fresh, copied_desc);
+    fresh
+}
+
+/// Instantiate a polymorphic type with free universal variables.
+/// Matches OCaml's `instance_poly` / `copy_sep` behavior.
+pub fn instance_poly(
+    ctx: &TypeContext<'_>,
+    keep_names: bool,
+    fixed: bool,
+    univars: &[TypeExprRef],
+    sch: TypeExprRef,
+) -> (Vec<TypeExprRef>, TypeExprRef) {
+    let univars: Vec<_> = univars.iter().map(|u| ctx.repr(*u)).collect();
+    let vars: Vec<TypeExprRef> = univars
+        .iter()
+        .map(|u| {
+            let desc = ctx.get_desc(*u);
+            match &*desc {
+                TypeDesc::Tunivar(name) => {
+                    if keep_names {
+                        ctx.new_type(TypeDesc::Tvar(name.clone()))
+                    } else {
+                        ctx.new_var(None)
+                    }
+                }
+                _ => {
+                    debug_assert!(false, "instance_poly expects Tunivar inputs");
+                    ctx.new_var(None)
+                }
+            }
+        })
+        .collect();
+
+    let free_univars = compute_univars_per_node(ctx, sch);
+    let mut delayed_copy = Vec::new();
+    let visited_pairs: Vec<_> = univars
+        .iter()
+        .zip(vars.iter())
+        .map(|(u, v)| CopySepVisitedEntry {
+            ty: *u,
+            copied: *v,
+            bound: vec![],
+        })
+        .collect();
+
+    let instantiated = copy_sep_inner(
+        ctx,
+        sch,
+        fixed,
+        &free_univars,
+        &[],
+        &visited_pairs,
+        &mut delayed_copy,
+    );
+
+    for (stub, source) in delayed_copy {
+        let copied = copy_type(ctx, source);
+        ctx.set_desc(stub, TypeDesc::Tlink(copied));
+    }
+
+    (vars, instantiated)
 }
 
 /// Instantiate a constructor description, creating fresh type variables for its

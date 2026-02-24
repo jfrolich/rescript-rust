@@ -9846,7 +9846,24 @@ fn type_let_bindings(
             for (typed_pat, binding) in typed_patterns.iter().zip(bindings.iter()) {
                 let approx_ty =
                     type_approx_for_rec_let(tctx, env, tctx.arena.get_expr(binding.pvb_expr))?;
-                unify_pattern_types(tctx, typed_pat.pat_loc, typed_pat.pat_type, approx_ty)?;
+                let pat_ty_for_unify = {
+                    let pat_ty = typed_pat.pat_type;
+                    let pat_repr = ctx.repr(pat_ty);
+                    let desc = ctx.get_desc(pat_repr);
+                    match &*desc {
+                        TypeDesc::Tpoly { body, vars } => {
+                            let body = *body;
+                            let vars = vars.clone();
+                            drop(desc);
+                            let (_, instantiated) = crate::types::ctype::instance_poly(
+                                ctx, true, false, &vars, body,
+                            );
+                            instantiated
+                        }
+                        _ => pat_ty,
+                    }
+                };
+                unify_pattern_types(tctx, typed_pat.pat_loc, pat_ty_for_unify, approx_ty)?;
             }
         }
 

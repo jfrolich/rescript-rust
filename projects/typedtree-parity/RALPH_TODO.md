@@ -461,7 +461,18 @@ Primary blockers are currently (1) cycle/sharing typedtree rendering drift and (
     - `timeout 300 ./scripts/test_typedtree_parity.sh set_gen` stayed **0/1** (`hunk mismatches: 82`).
     - `timeout 600 ./scripts/test_typedtree_parity.sh` stayed **589/657** with Rust compile coverage **650/657** (OCaml-only pass **7**, parity failures **61**).
   - Parser/binary guard: `timeout 300 ./scripts/test_parser_ast_parity.sh 2>&1 | tail -40` ended with `SUCCESS: All 3532 files have full parity!`.
-  - Next step: implement an OCaml-aligned `instance_poly` path (including `copy_sep` conflict checks and delayed copy semantics) for recursive-let pre-unification instead of local ad-hoc copying.
+  - 2026-02-24 attempt (kept): implemented OCaml-shaped `instance_poly` in `compiler-rust/src/types/ctype.rs` (`compute_univars` inverse-parent propagation, `copy_sep`, `diff_list`, `conflicts`, delayed-copy linking) and wired `compiler-rust/src/types/typecore.rs::type_let_bindings` recursive pre-unification to call it for `Tpoly` patterns (`keep_names=true`, `fixed=false`) before `unify_pattern_types`.
+  - OCaml refs read for kept attempt:
+    - `compiler/ml/typecore.ml` (`type_let` recursive branch using `snd (instance_poly ~keep_names:true false tl ty)`)
+    - `compiler/ml/ctype.ml` (`compute_univars`, `copy_sep`, `instance_poly`, `diff_list`, `conflicts`)
+    - `compiler/ml/btype.ml` (`copy_type_desc` shape used by `copy_sep` non-`Tvariant`/`Tpoly` branches)
+  - Build/test commands for kept attempt:
+    - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release` (success).
+    - `timeout 300 ./scripts/test_typedtree_parity.sh rbset` stayed **0/1** (`hunk mismatches: 6`).
+    - `timeout 300 ./scripts/test_typedtree_parity.sh set_gen` stayed **0/1** (`hunk mismatches: 82`).
+    - `timeout 600 ./scripts/test_typedtree_parity.sh` stayed **589/657 → 589/657** with Rust compile coverage **650/657** (OCaml-only pass **7**, parity failures **61**).
+    - `timeout 300 ./scripts/test_parser_ast_parity.sh 2>&1 | tail -40` stayed green (`SUCCESS: All 3532 files have full parity!`).
+  - Next step: trace recursive-let sharing drift before/after `instance_poly` output in `type_let_bindings` (`typed_pat.pat_type`/`approx_ty`/post-unify nodes for `rbset` + `set_gen`) since OCaml-equivalent `instance_poly` alone is parity-neutral on this snapshot.
 - [ ] **5B. Preserve compile parity when porting `Subst.typexp` variant `more'` flow (NEW)** — direct conditional `row_more` reuse currently causes Rust type-check regressions on full build.
   - Evidence (2026-02-24): first-pass OCaml-style `dup`/`more'` port in `copy_type_deep` + `subst_identity_copy_rec` changed full run from **478/657** to **539/657** with Rust compile parity drop **657/657 → 648/657** (9 OCaml-only passes). Reverted.
   - Required guardrail: maintain compile parity **657/657** and avoid introducing new Rust-reject files while aligning variant row-copy behavior.
