@@ -819,6 +819,17 @@ Primary blockers are currently (1) cycle/sharing typedtree rendering drift and (
     - Parser/binary guard: `timeout 300 ./scripts/test_parser_ast_parity.sh 2>&1 | tail -40` ended with `SUCCESS: All 3532 files have full parity!`.
   - Next step:
     - Trace where these aliases collapse before sexp emission by instrumenting `expand_head`/`try_expand_head` callers and path-rewrite entry points (`substitute_type_paths_in_sig`, declaration remap) for `topsort_test`/`string_set`, then map first mutation site against OCaml flow.
+- [ ] **P2C. Validate pre-expansion nullary local-`Pdot` skip in `update_level_expand` is sufficient (NEW)** — an OCaml-shaped early skip for all local nullary `Pdot` aliases was parity-neutral, so `String_set.value -> string` likely collapses in a later expansion/rewrite path.
+  - 2026-02-24 attempt (reverted): patched `compiler-rust/src/types/ctype.rs::update_level_expand` to skip `try_expand_head` for all `Tconstr(Path::Pdot(local_root, _, _), args=[])` and removed the older `.t`/`.cmp` post-expansion special-case guard.
+  - OCaml refs read:
+    - `compiler/ml/ctype.ml` (`get_level`, `update_level`, especially the `Tconstr` expansion branches around lines ~652-706).
+  - Evidence:
+    - `timeout 300 ./scripts/test_typedtree_parity.sh topsort_test` stayed **0/1** with unchanged `String_set.value -> string` drift (`98` hunks).
+    - Deterministic full parity stayed **589/657 → 589/657** (parity failures **61 → 61**, compile parity **650/657 → 650/657**).
+    - Filtered `string_set` remains non-actionable in this harness (`Set_gen` gets filtered out, module-not-found), so `topsort_test` remains the stable probe.
+    - Parser/binary guard stayed green: `timeout 300 ./scripts/test_parser_ast_parity.sh` ended with `SUCCESS: All 3532 files have full parity!`.
+  - Next step:
+    - Trace first mutation site for `String_set.value`/`String_set.t` outside `update_level_expand` by instrumenting `expand_head`/`try_expand_head` callers and path substitution paths (`substitute_type_paths_in_sig`, declaration remap), then match against OCaml `update_level` call flow.
 
 ---
 
