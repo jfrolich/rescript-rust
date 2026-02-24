@@ -272,6 +272,22 @@ Most byte-format drift is now resolved. Remaining work is primarily in type-chec
   - Parser/binary guard after revert: `timeout 300 ./scripts/test_parser_ast_parity.sh 2>&1 | tail -40` ended with `SUCCESS: All 3532 files have full parity!`.
   - Next OCaml refs: `compiler/ml/typecore.ml` (`type_function` ~3262-3338, `type_cases` ~3906+), `compiler/ml/ctype.ml` (`instance`, `copy`).
   - Next Rust refs: `compiler-rust/src/types/typecore.rs` (`type_function`, `type_case_impl`, `shallow_copy_pattern_binding_type`) and `compiler-rust/src/types/ctype.rs` (`instance` / `copy_type_cached`).
+  - 2026-02-24 attempt D (reverted): in `compiler-rust/src/types/typecore.rs::type_function`, only call `instance` for `param_pat_ty` when `param_ty` is generic and bind body vars with `pv.ty` identity (no extra `instance`) before optional shallow-copy.
+    - OCaml refs read: `compiler/ml/typecore.ml` (`type_function`, `type_cases`, `add_pattern_variables`) and `compiler/ml/ctype.ml` (`copy` non-generic fast path).
+    - Targeted checks: `timeout 300 ./scripts/test_typedtree_parity.sh rbset` and `... set_gen` both stayed **0/1** with unchanged first diffs (`rbset`: `<cycle> -> Tconstr(Pident "t")`; `set_gen`: `Tconstr(Pident "t", <cycle>) -> Tconstr(Pident "t", Tvar None)`).
+    - Reverted after parity-neutral outcome.
+  - 2026-02-24 attempt E (reverted): in `type_function`, gated `begin_def/end_def/generalize` with `type_cases`-style propagation conditions (`generic ty_arg` OR non-simple pattern OR generalized constructor pattern).
+    - OCaml refs read: `compiler/ml/typecore.ml` (`type_cases` propagate branch) and `compiler/ml/ctype.ml` (`instance`).
+    - Targeted checks: `timeout 300 ./scripts/test_typedtree_parity.sh rbset` and `... set_gen` both remained **0/1** with unchanged first diffs.
+    - Reverted after parity-neutral outcome.
+  - 2026-02-24 attempt F (reverted): in `compiler-rust/src/types/ctype.rs::copy_type_cached`, removed the `args are all Tvar/Tunivar` gate for non-generic recursive local `Tconstr` identity to test OCaml `copy` non-generic behavior.
+    - OCaml refs read: `compiler/ml/ctype.ml` (`copy` early return for non-generic when `partial=None`).
+    - Targeted checks: `timeout 300 ./scripts/test_typedtree_parity.sh rbset` and `... set_gen` both remained **0/1** with unchanged first diffs.
+    - Reverted after parity-neutral outcome.
+  - Deterministic full baseline after all reverts (current workspace snapshot):
+    - `timeout 300 ./scripts/test_typedtree_parity.sh` reports **588/657** parity with **7** OCaml-only pass files and **62** parity failures.
+    - Re-run confirmed stable **588/657** (**588 -> 588**).
+  - Parser/binary guard on this snapshot: `timeout 300 ./scripts/test_parser_ast_parity.sh 2>&1 | tail -40` ended with `SUCCESS: All 3532 files have full parity!`.
 - [ ] **5A2A. Port OCaml `type_cases` ext_env/body binding flow into `type_function` (NEW)** — Rust hand-builds function body env (`state.pattern_variables` + ad-hoc instancing/copying), while OCaml reuses `type_pattern`’s `ext_env` directly; two local attempts in Rust `type_function` regressed full parity without touching the `set_gen` first diff.
   - Evidence: attempt A (`type_cases`-style propagation gating) regressed to **616/657** with 9 Rust rejects; attempt B (simple-var identity body binding) regressed to **621/657** with 1 Rust reject; both reverted, `set_gen` remained **0/1**.
   - Next OCaml refs: `compiler/ml/typecore.ml` (`type_cases` `pat_env_list` creation and body typing `type_expect ext_env`), `compiler/ml/typecore.ml` variable binding flow in `type_pattern`.
@@ -279,6 +295,9 @@ Most byte-format drift is now resolved. Remaining work is primarily in type-chec
 - [ ] **5A2B. Isolate `type_function` regression source across env-instancing, re-anchoring, and propagate gating (NEW)** — C1/C2/C3 combined regressed full parity to **589/657**, but targeted `rbset`/`set_gen` stayed unchanged, so at least one change is globally load-bearing while not touching the local recursive-`t` first diff.
   - Required next step: run single-change full parity for C1, C2, C3 independently (no combination) and record exact compile/parity deltas to identify which behavior is required for global stability vs which remains a viable parity-fix path.
   - Evidence files: `.parity-cache/tests/diffs/rbset.diff`, `.parity-cache/tests/diffs/set_gen.diff`, `/tmp/full_parity_after3.log`, `/tmp/full_parity_revert.log`.
+- [ ] **5A2C. Trace pre-`type_function` creation site for decoupled recursive local-`t` args (NEW)** — type_function-local and `copy_type_cached` experiments D/E/F were parity-neutral, so the `t(<cycle>) -> t(Tvar None)` drift likely starts before `type_function` body-env reconstruction.
+  - Required next step: instrument let-rec typing around `type_let_bindings` / expected-arrow setup to compare the first `param_ty` node IDs for `elements_aux` and `blackify` against OCaml `type_let` + `type_function` flow.
+  - Evidence: after reverting D/E/F, `timeout 300 ./scripts/test_typedtree_parity.sh rbset` and `... set_gen` remain **0/1** with unchanged first diff; deterministic full parity remains **588/657**.
 - [ ] **5B. Preserve compile parity when porting `Subst.typexp` variant `more'` flow (NEW)** — direct conditional `row_more` reuse currently causes Rust type-check regressions on full build.
   - Evidence (2026-02-24): first-pass OCaml-style `dup`/`more'` port in `copy_type_deep` + `subst_identity_copy_rec` changed full run from **478/657** to **539/657** with Rust compile parity drop **657/657 → 648/657** (9 OCaml-only passes). Reverted.
   - Required guardrail: maintain compile parity **657/657** and avoid introducing new Rust-reject files while aligning variant row-copy behavior.
