@@ -239,6 +239,14 @@ The old parity script post-processed sexp output (stripping non-printable chars,
   - Next Rust refs: `typecore.rs` `disambiguate_label`, `lookup_label_by_expected_type`, `extract_type_path_from_expected_with_persistent_env`, and `instance_label` call sites in `type_record`/`type_pattern_record`.
 - [ ] **9. Shallow-copy pattern variable types** — Shallow Tconstr copies for pattern vars with non-empty args. (631→634, +3 tests)
   - 2026-02-24 attempt: added shallow non-empty `Tconstr` copies for pattern-bound values in both `type_case_impl` (always) and `type_function` (non-simple param patterns only), matching the task description; deterministic full parity stayed **478/657 → 478/657** (179 failures), filtered `unboxed_use_case` remained **0/1**. Reverted.
+  - 2026-02-24 follow-up: reintroduced task-9 shallow copies via a shared helper in `compiler-rust/src/types/typecore.rs`:
+    - `type_case_impl`: always shallow-copy pattern-bound `Tconstr` values (non-empty args) before inserting into case env.
+    - `type_function`: shallow-copy those bindings only for non-simple parameter patterns (`_`, `x`, and alias-to-variable stay direct).
+    - module unpack env threading now uses the copied binding type in both paths.
+  - OCaml refs read: `compiler/ml/typecore.ml` `add_pattern_variables` (~1742), `type_function` (~3262), `type_cases` pattern/body flow (~3906-4050), `is_var` helper in `type_cases`.
+  - Targeted checks: `timeout 300 ./scripts/test_typedtree_parity.sh unboxed_use_case` stayed **0/1**; filtered `timeout 300 ./scripts/test_typedtree_parity.sh "belt_*"` remained unstable in this repo snapshot (Rust **2/9**, OCaml-only pass **7** in filtered mode).
+  - Deterministic full parity remained **478/657 → 478/657** (179 failures), compile parity stayed **657/657**.
+  - Parser/binary guard stayed green: `timeout 300 ./scripts/test_parser_ast_parity.sh 2>&1 | tail -40` ended with `SUCCESS: All 3532 files have full parity!`.
   - OCaml refs read: `compiler/ml/typecore.ml` `add_pattern_variables` (~1742), `type_function` (~3262), `type_cases` (~3906-4050).
 - [ ] **9A. Identify pre-env concretization site for pattern vars (NEW)** — task-9 env insertion copies were parity-neutral, so non-empty `Tconstr` concretization likely happens earlier (during pattern typing / per-case propagation) or later via shared-case flow.
   - Evidence (2026-02-24): task-9 port in Rust (`type_case_impl` + `type_function` env insertion shallow copies) produced no deterministic parity delta (**478/657 → 478/657**) and did not change `unboxed_use_case` drift.

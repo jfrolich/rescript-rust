@@ -6329,6 +6329,38 @@ fn type_case(
     }
 }
 
+fn shallow_copy_pattern_binding_type(
+    ctx: &TypeContext<'_>,
+    ty: TypeExprRef,
+    copy_nullary: bool,
+) -> TypeExprRef {
+    let repr = ctx.repr(ty);
+    let desc = ctx.get_desc(repr);
+    let (path, args) = match &*desc {
+        TypeDesc::Tconstr { path, args, .. } if !args.is_empty() || copy_nullary => {
+            (path.clone(), args.clone())
+        }
+        _ => return ty,
+    };
+    let level = ctx.get_level(repr);
+    drop(desc);
+    let copied = ctx.new_constr(path, args);
+    ctx.set_level(copied, level);
+    copied
+}
+
+fn is_simple_variable_pattern(arena: &ParseArena, pat: &ParsedPattern) -> bool {
+    match &*pat.ppat_desc {
+        crate::parser::ast::PatternDesc::Ppat_any | crate::parser::ast::PatternDesc::Ppat_var(_) => {
+            true
+        }
+        crate::parser::ast::PatternDesc::Ppat_alias(inner, _) => {
+            is_simple_variable_pattern(arena, arena.get_pat(*inner))
+        }
+        _ => false,
+    }
+}
+
 fn type_case_impl(
     tctx: &mut TypeCheckContext<'_>,
     env: &Env,
@@ -6379,8 +6411,9 @@ fn type_case_impl(
     // Extend environment with pattern bindings
     let mut unpacks: Vec<PatternVariable> = Vec::new();
     for pv in &state.pattern_variables {
+        let binding_ty = shallow_copy_pattern_binding_type(tctx.type_ctx, pv.ty, false);
         let desc = ValueDescription {
-            val_type: pv.ty,
+            val_type: binding_ty,
             val_kind: crate::types::ValueKind::ValReg,
             val_loc: pv.loc.clone(),
             val_attributes: vec![],
@@ -6388,7 +6421,7 @@ fn type_case_impl(
         };
         case_env.add_value(pv.id.clone(), desc);
         if pv.is_module {
-            let module_type = module_type_from_package_binding(tctx, &case_env, pv.ty);
+            let module_type = module_type_from_package_binding(tctx, &case_env, binding_ty);
             case_env.add_module(
                 pv.id.clone(),
                 crate::types::decl::ModuleDeclaration {
@@ -6596,9 +6629,15 @@ fn type_function(
     // Extend environment with parameter binding
     let mut body_env = env.clone();
     let mut unpacks: Vec<PatternVariable> = Vec::new();
+    let should_copy_pattern_bindings = !is_simple_variable_pattern(tctx.arena, param);
     for pv in &state.pattern_variables {
+        let binding_ty = if should_copy_pattern_bindings {
+            shallow_copy_pattern_binding_type(ctx, pv.ty, false)
+        } else {
+            pv.ty
+        };
         let desc = ValueDescription {
-            val_type: pv.ty,
+            val_type: binding_ty,
             val_kind: crate::types::ValueKind::ValReg,
             val_loc: pv.loc.clone(),
             val_attributes: vec![],
@@ -6607,7 +6646,7 @@ fn type_function(
         body_env.add_value(pv.id.clone(), desc);
 
         if pv.is_module {
-            let module_type = module_type_from_package_binding(tctx, &body_env, pv.ty);
+            let module_type = module_type_from_package_binding(tctx, &body_env, binding_ty);
             body_env.add_module(
                 pv.id.clone(),
                 crate::types::decl::ModuleDeclaration {
