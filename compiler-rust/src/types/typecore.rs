@@ -5962,12 +5962,43 @@ fn merge_variant_row_fields_into_scrutinee(
         return; // No new fields to add
     }
 
-    // Build sorted field list and set on scrutinee
-    let mut merged_row = scrutinee_row_data;
-    merged_row.row_fields = all_fields.into_iter().collect();
-    merged_row.row_fields.sort_by(|(a, _), (b, _)| a.cmp(b));
+    // Build sorted field list
+    let mut merged_fields: Vec<_> = all_fields.into_iter().collect();
+    merged_fields.sort_by(|(a, _), (b, _)| a.cmp(b));
 
+    // Set on scrutinee
+    let mut merged_row = scrutinee_row_data;
+    merged_row.row_fields = merged_fields.clone();
     ctx.set_desc(scrutinee_repr, TypeDesc::Tvariant(merged_row));
+
+    // Also propagate all merged fields into each case's pattern type.
+    // In OCaml, all cases share ty_arg through unification, so all pattern
+    // types accumulate all variant tags. In Rust, each case has a separate
+    // instance, so we must explicitly propagate.
+    for case in cases {
+        let pat_repr = ctx.repr(case.c_lhs.pat_type);
+        if pat_repr == scrutinee_repr {
+            continue;
+        }
+        let pat_desc = ctx.get_desc(pat_repr);
+        if let TypeDesc::Tvariant(row) = &*pat_desc {
+            let pat_row_data = row_repr(ctx, row);
+            if pat_row_data.row_fields.len() < merged_fields.len() {
+                let mut pat_fields: HashMap<String, crate::types::type_expr::RowField> = HashMap::new();
+                for (tag, field) in &pat_row_data.row_fields {
+                    pat_fields.insert(tag.clone(), field.clone());
+                }
+                for (tag, field) in &merged_fields {
+                    pat_fields.entry(tag.clone()).or_insert_with(|| field.clone());
+                }
+                let mut updated_row = pat_row_data;
+                updated_row.row_fields = pat_fields.into_iter().collect();
+                updated_row.row_fields.sort_by(|(a, _), (b, _)| a.cmp(b));
+                drop(pat_desc);
+                ctx.set_desc(pat_repr, TypeDesc::Tvariant(updated_row));
+            }
+        }
+    }
 }
 
 /// Propagate variant row closures across all case pattern types.
