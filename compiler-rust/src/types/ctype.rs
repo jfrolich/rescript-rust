@@ -3373,7 +3373,61 @@ fn copy_type_cached(
                     }
                 }
                 CopyAction::Variant(row) => {
-                    let row_copy = copy_row_cached(ctx, &row, cache);
+                    // OCaml Ctype.copy uses copy_row with keep/fixed semantics
+                    // derived from row_more, not a plain structural field copy.
+                    let row = row_repr(ctx, &row);
+                    let more = ctx.repr(row.row_more);
+                    let more_level = ctx.get_level(more);
+                    let keep = super::btype::is_tvar(ctx, more) && more_level != GENERIC_LEVEL;
+                    let more_copy = match ctx.get_desc(more).clone() {
+                        TypeDesc::Tconstr { .. } | TypeDesc::Tnil => {
+                            copy_type_cached(ctx, more, cache)
+                        }
+                        TypeDesc::Tvar(name) => {
+                            if keep {
+                                more
+                            } else {
+                                let fresh = ctx.new_var(name);
+                                if more_level != GENERIC_LEVEL {
+                                    ctx.set_level(fresh, more_level);
+                                }
+                                fresh
+                            }
+                        }
+                        TypeDesc::Tunivar(name) => {
+                            if keep {
+                                more
+                            } else {
+                                let fresh = ctx.new_univar(name);
+                                if more_level != GENERIC_LEVEL {
+                                    ctx.set_level(fresh, more_level);
+                                }
+                                fresh
+                            }
+                        }
+                        TypeDesc::Tsubst(target) | TypeDesc::Tlink(target) => {
+                            copy_type_cached(ctx, target, cache)
+                        }
+                        _ => copy_type_cached(ctx, more, cache),
+                    };
+                    let fixed = super::btype::is_tvar(ctx, ctx.repr(more_copy));
+                    let mut row_copy = copy_row_cached(ctx, &row, fixed, keep, more_copy, cache);
+
+                    // OCaml ctype.ml PR#6163: promote copied rows to fixed when
+                    // copied row_more is a constructor.
+                    if !row_copy.row_fixed {
+                        let more_desc = ctx.get_desc(ctx.repr(more_copy));
+                        let more_is_constr = matches!(&*more_desc, TypeDesc::Tconstr { .. });
+                        drop(more_desc);
+                        if more_is_constr {
+                            row_copy.row_fixed = true;
+                            for (_, field) in row_copy.row_fields.iter_mut() {
+                                if let RowField::Reither { matched, .. } = field {
+                                    *matched = true;
+                                }
+                            }
+                        }
+                    }
                     TypeDesc::Tvariant(row_copy)
                 }
                 CopyAction::Package { path, lids, args } => {
@@ -3402,17 +3456,43 @@ fn copy_type_cached(
 fn copy_row_cached(
     ctx: &TypeContext<'_>,
     row: &RowDesc,
+    fixed: bool,
+    keep: bool,
+    more: TypeExprRef,
     cache: &mut CopyCache,
 ) -> RowDesc {
     RowDesc {
         row_fields: row
             .row_fields
             .iter()
-            .map(|(label, field)| (label.clone(), copy_row_field_cached(ctx, field, cache)))
+            .map(|(label, field)| {
+                let field = super::btype::row_field_repr(ctx, field);
+                let copied = match field {
+                    RowField::Rpresent(Some(ty)) => {
+                        RowField::Rpresent(Some(copy_type_cached(ctx, ty, cache)))
+                    }
+                    RowField::Reither {
+                        constant,
+                        types,
+                        matched,
+                        link,
+                    } => RowField::Reither {
+                        constant,
+                        types: types
+                            .iter()
+                            .map(|t| copy_type_cached(ctx, *t, cache))
+                            .collect(),
+                        matched: if row.row_fixed { fixed } else { matched },
+                        link: if keep { link } else { ctx.alloc_row_field(None) },
+                    },
+                    _ => field,
+                };
+                (label.clone(), copied)
+            })
             .collect(),
-        row_more: copy_type_cached(ctx, row.row_more, cache),
+        row_more: more,
         row_closed: row.row_closed,
-        row_fixed: row.row_fixed,
+        row_fixed: row.row_fixed && fixed,
         row_name: row.row_name.as_ref().map(|(path, types)| {
             (
                 path.clone(),
@@ -3422,33 +3502,6 @@ fn copy_row_cached(
                     .collect(),
             )
         }),
-    }
-}
-
-/// Copy a row field.
-fn copy_row_field_cached(
-    ctx: &TypeContext<'_>,
-    field: &RowField,
-    cache: &mut CopyCache,
-) -> RowField {
-    match field {
-        RowField::Rpresent(Some(ty)) => RowField::Rpresent(Some(copy_type_cached(ctx, *ty, cache))),
-        RowField::Rpresent(None) => RowField::Rpresent(None),
-        RowField::Rabsent => RowField::Rabsent,
-        RowField::Reither {
-            constant,
-            types,
-            matched,
-            link,
-        } => RowField::Reither {
-            constant: *constant,
-            types: types
-                .iter()
-                .map(|t| copy_type_cached(ctx, *t, cache))
-                .collect(),
-            matched: *matched,
-            link: *link,
-        },
     }
 }
 
