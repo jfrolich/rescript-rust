@@ -441,6 +441,15 @@ Primary blockers are currently (1) cycle/sharing typedtree rendering drift and (
     - `type_expect` return for each recursive function binding,
     - post-`end_def` generalization.
   - OCaml refs to mirror during trace: `compiler/ml/typecore.ml` (`type_let`, `type_approx`) and `compiler/ml/ctype.ml` (`instance`, `copy`).
+- [ ] **5A2J. Validate whether OCaml-style batched `type_cases` flow in `type_match` affects the recursive-local-`t` cluster (NEW)** — a first-pass non-GADT batch rewrite of Rust `type_match` (type all patterns first, shared `ty_arg'` unify, then RHS typing with per-case env) did not move `rbset`/`set_gen` or full parity, so the active drift likely survives beyond simple `type_cases` ordering.
+  - 2026-02-24 attempt (reverted): patched `compiler-rust/src/types/typecore.rs` to batch value-case typing in `type_match` via a new helper (`type_match_cases_batch`) and fallback to legacy per-case flow when generalized constructors are present.
+  - OCaml refs read: `compiler/ml/typecore.ml` (`type_cases` pattern pass + delayed `unify_pats` + RHS typing order) and `compiler/ml/typecore.ml` (`Pexp_match` path passing `arg.exp_type` into `type_cases`).
+  - Build/test commands:
+    - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release` (success).
+    - `timeout 300 ./scripts/test_typedtree_parity.sh rbset` stayed **0/1** (`hunk mismatches: 6`).
+    - `timeout 300 ./scripts/test_typedtree_parity.sh set_gen` stayed **0/1** (`hunk mismatches: 82`).
+    - `timeout 600 ./scripts/test_typedtree_parity.sh` stayed **589/657** with Rust compile coverage **650/657** (OCaml-only pass **7**, parity failures **61**).
+  - Outcome: parity-neutral; patch reverted. Next step is to trace node identity across recursive-let approximation/unification boundaries (`type_let_bindings`) instead of case-ordering alone.
 - [ ] **5B. Preserve compile parity when porting `Subst.typexp` variant `more'` flow (NEW)** — direct conditional `row_more` reuse currently causes Rust type-check regressions on full build.
   - Evidence (2026-02-24): first-pass OCaml-style `dup`/`more'` port in `copy_type_deep` + `subst_identity_copy_rec` changed full run from **478/657** to **539/657** with Rust compile parity drop **657/657 → 648/657** (9 OCaml-only passes). Reverted.
   - Required guardrail: maintain compile parity **657/657** and avoid introducing new Rust-reject files while aligning variant row-copy behavior.
