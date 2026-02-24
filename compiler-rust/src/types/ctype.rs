@@ -2576,31 +2576,10 @@ pub fn copy_type_deep(
             result
         }
         TypeDesc::Tvariant(row) => {
-            // Deep copy polymorphic variant row description
             let placeholder = ctx.new_var(None);
             cache.insert(ty, placeholder);
             let row = row_repr(ctx, row);
-            let more = ctx.repr(row.row_more);
-            let more_desc = ctx.get_desc(more);
-            let more_is_constr = matches!(&*more_desc, TypeDesc::Tconstr { .. });
-            let dup = ctx.get_level(more) == GENERIC_LEVEL
-                || super::btype::static_row(ctx, &row)
-                || more_is_constr;
-            let new_row_more = match &*more_desc {
-                TypeDesc::Tsubst(target) => *target,
-                TypeDesc::Tconstr { .. } | TypeDesc::Tnil => copy_type_deep(ctx, row.row_more, cache),
-                TypeDesc::Tunivar(_) => more,
-                TypeDesc::Tvar(_) => {
-                    if dup {
-                        copy_type_deep(ctx, row.row_more, cache)
-                    } else {
-                        more
-                    }
-                }
-                _ => copy_type_deep(ctx, row.row_more, cache),
-            };
-            drop(more_desc);
-            let keep_reither_link = !dup;
+            let new_row_more = copy_type_deep(ctx, row.row_more, cache);
             let new_row_fields: Vec<_> = row
                 .row_fields
                 .iter()
@@ -2619,19 +2598,15 @@ pub fn copy_type_deep(
                             constant,
                             types,
                             matched,
-                            link,
+                            ..
                         } => crate::types::type_expr::RowField::Reither {
                             constant,
                             types: types
                                 .iter()
                                 .map(|t| copy_type_deep(ctx, *t, cache))
                                 .collect(),
-                            matched: if row.row_fixed { true } else { matched },
-                            link: if keep_reither_link {
-                                link
-                            } else {
-                                ctx.alloc_row_field(None)
-                            },
+                            matched,
+                            link: ctx.alloc_row_field(None),
                         },
                         crate::types::type_expr::RowField::Rabsent => {
                             crate::types::type_expr::RowField::Rabsent
@@ -2675,21 +2650,12 @@ pub fn copy_type_deep(
             result
         }
         TypeDesc::Tfield { name, kind, typ, rest } => {
-            // Match OCaml Subst.typexp: Fabsent fields are collapsed to a link
-            // to the rest type during copying.
             let placeholder = ctx.new_var(None);
             cache.insert(ty, placeholder);
-            let rest = *rest;
-            if matches!(kind, crate::types::type_expr::FieldKind::Fabsent) {
-                let new_rest = copy_type_deep(ctx, rest, cache);
-                ctx.set_desc(placeholder, TypeDesc::Tlink(new_rest));
-                return placeholder;
-            }
-            let typ = *typ;
             let name = name.clone();
             let kind = kind.clone();
-            let new_typ = copy_type_deep(ctx, typ, cache);
-            let new_rest = copy_type_deep(ctx, rest, cache);
+            let new_typ = copy_type_deep(ctx, *typ, cache);
+            let new_rest = copy_type_deep(ctx, *rest, cache);
             let result = ctx.new_type(TypeDesc::Tfield {
                 name,
                 kind,

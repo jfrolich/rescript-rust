@@ -55,7 +55,17 @@ Results persist in `.parity-cache/` — inspect diffs at `.parity-cache/tests/di
 
 ## Current Status
 
-**652/657 (99%) — raw byte-for-byte comparison**
+**644/657 (98%) — raw byte-for-byte comparison**
+
+### 2026-02-24 Task 5 Deep-Copy: 637 → 644
+
+- Updated `compiler-rust/src/types/ctype.rs::copy_type_deep` to do strict deep copies for `Tvariant`/`Tobject`/`Tfield` without reusing `row_more` or `Reither.link` identity from source nodes.
+- OCaml refs read:
+  - `compiler/ml/subst.ml` (`typexp`, especially `Tvariant`/`Tobject`/`Tfield` branches and stub-first recursion shape)
+  - `compiler/ml/ctype.ml` (`copy` and `instance_label` row/object copy behavior for comparison)
+- Targeted checks (with timeout): `set_gen`, `rbset`, and `fun_pattern_match` remained `0/1` parity in filtered mode.
+- Deterministic full parity delta: **637/657 → 644/657** (parity failures **20 → 13**), compile parity stayed **657/657**.
+- Parser/binary guard after patch: `timeout 300 ./scripts/test_parser_ast_parity.sh 2>&1 | tail -40` ended with `SUCCESS: All 3532 files have full parity!`.
 
 ### 2026-02-24 Type Function Parity: 628 → 652
 
@@ -158,7 +168,15 @@ Most byte-format drift is now resolved. Remaining work is primarily in type-chec
   - Deterministic full parity: **478/657 → 632/657** (179 → 25 parity failures), compile parity stayed **657/657**.
   - Targeted checks: `timeout 300 ./scripts/test_typedtree_parity.sh AsInUncurriedExternals` and `... ExternalArity` both moved to **1/1 parity**.
   - Parser/binary guard: `timeout 300 ./scripts/test_parser_ast_parity.sh 2>&1 | tail -40` ended with `SUCCESS: All 3532 files have full parity!`.
-- [ ] **5. Deep-copy Tvariant/Tobject/Tfield in copy_type_deep** — `copy_type_deep_inner` catch-all returns original, needs deep copy. (642→643, test: jsxv4_newtype.res)
+- [x] **5. Deep-copy Tvariant/Tobject/Tfield in copy_type_deep** — `copy_type_deep_inner` catch-all returns original, needs deep copy. (642→643, test: jsxv4_newtype.res)
+  - 2026-02-24 fix: updated `compiler-rust/src/types/ctype.rs::copy_type_deep` to force strict structural copy for `Tvariant`/`Tobject`/`Tfield`:
+    - always deep-copy `row_more`, `row_fields`, and `row_name` arguments for variants,
+    - always allocate fresh `Reither.link` refs during row-field copy,
+    - always rebuild `Tfield` nodes from copied components (no direct source-link reuse).
+  - OCaml refs read: `compiler/ml/subst.ml` (`typexp` `Tvariant`/`Tobject`/`Tfield`) and `compiler/ml/ctype.ml` (`copy`, `instance_label`).
+  - Targeted checks: `timeout 300 ./scripts/test_typedtree_parity.sh set_gen`, `... rbset`, and `... fun_pattern_match` remained **0/1**.
+  - Deterministic full parity: **637/657 → 644/657** (parity failures **20 → 13**), compile parity stayed **657/657**.
+  - Parser/binary guard: `timeout 300 ./scripts/test_parser_ast_parity.sh 2>&1 | tail -40` ended with `SUCCESS: All 3532 files have full parity!`.
   - 2026-02-24 attempt: aligned `compiler-rust/src/types/ctype.rs::copy_type_deep` `TypeDesc::Tvariant` with OCaml `Subst.typexp` row handling by:
     - removing `Ctype.copy`-only PR#6163 row-fixed promotion from this path,
     - computing `dup` from `row_more` (`generic_level` / `static_row` / `Tconstr`) and using OCaml-style `more'` reuse rules (`Tunivar` and non-dup `Tvar` keep identity),
