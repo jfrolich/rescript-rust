@@ -794,6 +794,19 @@ Primary blockers are currently (1) cycle/sharing typedtree rendering drift and (
   - Evidence (2026-02-24): generalized guard patch in `ctype.rs` produced no change in `topsort_test` or `variant`; both diffs still show alias expansion to concrete paths.
   - Next OCaml refs: `compiler/ml/ctype.ml` `get_level`, `Path.binding_time`, `update_level` abbreviation expansion branch.
   - Next Rust refs: `compiler-rust/src/types/ctype.rs` `is_local_path`, `path_binding_time`, `update_level_expand`, and local alias stamping in `typemod`/`typecore` path construction.
+- [ ] **P2B. Prove whether `String_set.value -> string` collapse happens outside `update_level_expand` (NEW)** — two new `update_level_expand` guard variants were parity-neutral on the current deterministic baseline, so the path collapse likely occurs in a different expansion/rewrite path.
+  - 2026-02-24 attempts (reverted):
+    - Guard variant 1: preserve all nullary local `Pdot` aliases using `Path.binding_time > 0`.
+    - Guard variant 2: env-aware local-root fallback (`Env.find_module_with_id`) plus preserve all nullary `Pdot`.
+  - OCaml refs read for this iteration:
+    - `compiler/ml/ctype.ml` (`get_level`, `update_level`, especially `Tconstr` expansion branch around lines ~652-706).
+    - `compiler/ml/path.ml` / `Path.binding_time` behavior (mirrored by Rust `Path::binding_time`).
+  - Evidence:
+    - `timeout 300 ./scripts/test_typedtree_parity.sh topsort_test` stayed `0/1` with unchanged `String_set.value -> string` and `String_set.t -> <cycle>` drift (`98` hunks).
+    - Deterministic full parity stayed **589/657 → 589/657** (failures **61 → 61**, compile parity **650/657 → 650/657**).
+    - Parser/binary guard: `timeout 300 ./scripts/test_parser_ast_parity.sh 2>&1 | tail -40` ended with `SUCCESS: All 3532 files have full parity!`.
+  - Next step:
+    - Trace where these aliases collapse before sexp emission by instrumenting `expand_head`/`try_expand_head` callers and path-rewrite entry points (`substitute_type_paths_in_sig`, declaration remap) for `topsort_test`/`string_set`, then map first mutation site against OCaml flow.
 
 ---
 
