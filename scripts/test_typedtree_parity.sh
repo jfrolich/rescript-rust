@@ -161,6 +161,7 @@ compare_project_sexp() {
     mkdir -p "$diff_dir"
 
     local total=0 ocaml_pass=0 rust_pass=0 parity_pass=0 parity_fail=0
+    local parity_hunks=0 binary_diffs=0
     local ocaml_only=0 rust_only=0 both_fail=0
     local parity_failures="" ocaml_only_files="" rust_only_files=""
 
@@ -200,7 +201,20 @@ compare_project_sexp() {
             else
                 parity_fail=$((parity_fail + 1))
                 parity_failures="${parity_failures}  ${module}\n"
-                diff -u "$ocaml_file" "$rust_file" > "$diff_dir/${module}.diff" 2>&1 || true
+                local diff_file="$diff_dir/${module}.diff"
+                diff -u "$ocaml_file" "$rust_file" > "$diff_file" 2>&1 || true
+
+                # Hunk-level mismatch tracking:
+                # - text diffs: number of unified-diff hunks
+                # - binary-only diffs: count as one mismatch unit
+                local module_hunks=0
+                module_hunks=$(grep -c '^@@' "$diff_file" 2>/dev/null || true)
+                if [[ "$module_hunks" -gt 0 ]]; then
+                    parity_hunks=$((parity_hunks + module_hunks))
+                elif grep -q '^Binary files ' "$diff_file"; then
+                    binary_diffs=$((binary_diffs + 1))
+                    parity_hunks=$((parity_hunks + 1))
+                fi
             fi
         elif $ocaml_ok && ! $rust_ok; then
             ocaml_only=$((ocaml_only + 1))
@@ -225,6 +239,7 @@ compare_project_sexp() {
     echo -e "  Typecheck parity: ${GREEN}$parity_pass${RESET}/$total (${parity_pct}%)"
     if [[ "$parity_fail" -gt 0 ]]; then
         echo -e "  Parity failures:  ${RED}$parity_fail${RESET}"
+        echo -e "  Hunk mismatches: ${RED}$parity_hunks${RESET} (binary-only diffs: $binary_diffs)"
     fi
     if [[ "$rust_only" -gt 0 ]]; then
         echo -e "  ${YELLOW}Rust-only pass (OCaml rejects): $rust_only${RESET}"
@@ -237,7 +252,7 @@ compare_project_sexp() {
     fi
 
     # Store results for overall summary
-    echo "total=$total ocaml_pass=$ocaml_pass rust_pass=$rust_pass parity_pass=$parity_pass parity_fail=$parity_fail ocaml_only=$ocaml_only rust_only=$rust_only both_fail=$both_fail" > "$TEMP_DIR/$label/summary.txt"
+    echo "total=$total ocaml_pass=$ocaml_pass rust_pass=$rust_pass parity_pass=$parity_pass parity_fail=$parity_fail parity_hunks=$parity_hunks binary_diffs=$binary_diffs ocaml_only=$ocaml_only rust_only=$rust_only both_fail=$both_fail" > "$TEMP_DIR/$label/summary.txt"
     echo "$parity_failures" > "$TEMP_DIR/$label/parity_failures.txt"
     echo "$ocaml_only_files" > "$TEMP_DIR/$label/ocaml_only.txt"
     echo "$rust_only_files" > "$TEMP_DIR/$label/rust_only.txt"
@@ -308,6 +323,8 @@ OVERALL_OCAML_PASS=0
 OVERALL_RUST_PASS=0
 OVERALL_PARITY_PASS=0
 OVERALL_PARITY_FAIL=0
+OVERALL_PARITY_HUNKS=0
+OVERALL_BINARY_DIFFS=0
 OVERALL_OCAML_ONLY=0
 OVERALL_RUST_ONLY=0
 OVERALL_BOTH_FAIL=0
@@ -317,7 +334,7 @@ accumulate_results() {
     local summary_file="$TEMP_DIR/$label/summary.txt"
     [[ -f "$summary_file" ]] || return
 
-    local total ocaml_pass rust_pass parity_pass parity_fail ocaml_only rust_only both_fail
+    local total ocaml_pass rust_pass parity_pass parity_fail parity_hunks binary_diffs ocaml_only rust_only both_fail
     eval "$(cat "$summary_file")"
 
     OVERALL_TOTAL=$((OVERALL_TOTAL + total))
@@ -325,6 +342,8 @@ accumulate_results() {
     OVERALL_RUST_PASS=$((OVERALL_RUST_PASS + rust_pass))
     OVERALL_PARITY_PASS=$((OVERALL_PARITY_PASS + parity_pass))
     OVERALL_PARITY_FAIL=$((OVERALL_PARITY_FAIL + parity_fail))
+    OVERALL_PARITY_HUNKS=$((OVERALL_PARITY_HUNKS + parity_hunks))
+    OVERALL_BINARY_DIFFS=$((OVERALL_BINARY_DIFFS + binary_diffs))
     OVERALL_OCAML_ONLY=$((OVERALL_OCAML_ONLY + ocaml_only))
     OVERALL_RUST_ONLY=$((OVERALL_RUST_ONLY + rust_only))
     OVERALL_BOTH_FAIL=$((OVERALL_BOTH_FAIL + both_fail))
@@ -355,6 +374,7 @@ if [[ "$OVERALL_TOTAL" -gt 0 ]]; then
     echo -e "  Typecheck parity: ${GREEN}$OVERALL_PARITY_PASS${RESET}/$OVERALL_TOTAL (${OVERALL_PCT}%)"
     if [[ "$OVERALL_PARITY_FAIL" -gt 0 ]]; then
         echo -e "  Parity failures:  ${RED}$OVERALL_PARITY_FAIL${RESET}"
+        echo -e "  Hunk mismatches: ${RED}$OVERALL_PARITY_HUNKS${RESET} (binary-only diffs: $OVERALL_BINARY_DIFFS)"
     fi
     if [[ "$OVERALL_RUST_ONLY" -gt 0 ]]; then
         echo -e "  ${YELLOW}Rust-only pass: $OVERALL_RUST_ONLY${RESET}"
