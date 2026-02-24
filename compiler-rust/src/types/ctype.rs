@@ -2520,6 +2520,17 @@ pub fn copy_type_deep(
                     || more_is_constr;
                 !dup
             };
+            // OCaml ctype.copy (PR#6163): if copied row_more becomes Tconstr,
+            // treat the row as fixed in the copied descriptor.
+            let new_row_more = copy_type_deep(ctx, row.row_more, cache);
+            let effective_row_fixed = if row.row_fixed {
+                true
+            } else {
+                let more_desc = ctx.get_desc(ctx.repr(new_row_more));
+                let is_constr = matches!(&*more_desc, TypeDesc::Tconstr { .. });
+                drop(more_desc);
+                is_constr
+            };
             let new_row_fields: Vec<_> = row
                 .row_fields
                 .iter()
@@ -2545,7 +2556,7 @@ pub fn copy_type_deep(
                                 .iter()
                                 .map(|t| copy_type_deep(ctx, *t, cache))
                                 .collect(),
-                            matched: if row.row_fixed { true } else { matched },
+                            matched: if effective_row_fixed { true } else { matched },
                             link: if keep_reither_link {
                                 link
                             } else {
@@ -2559,7 +2570,6 @@ pub fn copy_type_deep(
                     (label.clone(), new_field)
                 })
                 .collect();
-            let new_row_more = copy_type_deep(ctx, row.row_more, cache);
             let new_row_name = row.row_name.as_ref().map(|(path, args)| {
                 let new_args: Vec<_> = args
                     .iter()
@@ -2571,7 +2581,7 @@ pub fn copy_type_deep(
                 row_fields: new_row_fields,
                 row_more: new_row_more,
                 row_closed: row.row_closed,
-                row_fixed: row.row_fixed,
+                row_fixed: effective_row_fixed,
                 row_name: new_row_name,
             };
             let result = ctx.new_variant(new_row);
@@ -2942,6 +2952,17 @@ fn subst_identity_copy_rec(
                             || more_is_constr;
                         !dup
                     };
+                    // OCaml ctype.copy (PR#6163): if copied row_more becomes Tconstr,
+                    // copied row should be fixed.
+                    let more_copy = subst_identity_copy_rec(ctx, row.row_more, seen);
+                    let effective_row_fixed = if row.row_fixed {
+                        true
+                    } else {
+                        let more_desc = ctx.get_desc(ctx.repr(more_copy));
+                        let is_constr = matches!(&*more_desc, TypeDesc::Tconstr { .. });
+                        drop(more_desc);
+                        is_constr
+                    };
                     let fields_copy: Vec<_> = row
                         .row_fields
                         .iter()
@@ -2967,7 +2988,7 @@ fn subst_identity_copy_rec(
                                         .iter()
                                         .map(|t| subst_identity_copy_rec(ctx, *t, seen))
                                         .collect(),
-                                    matched: if row.row_fixed { true } else { matched },
+                                    matched: if effective_row_fixed { true } else { matched },
                                     link: if keep_reither_link {
                                         link
                                     } else {
@@ -2981,7 +3002,6 @@ fn subst_identity_copy_rec(
                             (name.clone(), field_copy)
                         })
                         .collect();
-                    let more_copy = subst_identity_copy_rec(ctx, row.row_more, seen);
                     let name_copy = row.row_name.map(|(path, args)| {
                         (
                             path,
@@ -2994,7 +3014,7 @@ fn subst_identity_copy_rec(
                         row_fields: fields_copy,
                         row_more: more_copy,
                         row_closed: row.row_closed,
-                        row_fixed: row.row_fixed,
+                        row_fixed: effective_row_fixed,
                         row_name: name_copy,
                     })
                 }

@@ -177,6 +177,14 @@ The old parity script post-processed sexp output (stripping non-printable chars,
   - Targeted checks: `timeout 300 ./scripts/test_typedtree_parity.sh set_gen`, `... more_poly_variant_test`, and `... gpr_4274_test` all stayed **0/1** parity.
   - Deterministic full parity: **478/657 → 478/657** (179 parity failures, compile parity stayed **657/657**); parser/binary guard stayed green (`SUCCESS: All 3532 files have full parity!`).
   - Reverted the code change; keep task unchecked.
+  - 2026-02-24 attempt: ported OCaml `copy` row-fixed propagation (PR#6163 path) into Rust variant deep-copy code in `compiler-rust/src/types/ctype.rs`, in both `copy_type_deep` and `subst_identity_copy_rec`:
+    - copy `row_more` first,
+    - set copied row `row_fixed=true` when copied `row_more` is `Tconstr`,
+    - force `Reither.matched=true` based on the effective copied `row_fixed`.
+  - OCaml refs read: `compiler/ml/ctype.ml` (`copy` `Tvariant` branch, `PR#6163` `row_fixed` promotion when `repr more'` is `Tconstr`) and `compiler/ml/subst.ml` (`typexp` `Tvariant` copy flow for row recursion shape).
+  - Targeted checks: `timeout 300 ./scripts/test_typedtree_parity.sh set_gen` and `... gpr_4274_test` both stayed **0/1** parity.
+  - Deterministic full parity: **478/657 → 478/657** (179 parity failures, compile parity stayed **657/657**).
+  - Parser/binary guard: `timeout 300 ./scripts/test_parser_ast_parity.sh 2>&1 | tail -40` stayed green (`SUCCESS: All 3532 files have full parity!`).
 - [ ] **5A. Map task-5 deep-copy validation to an active failing module (NEW)** — `jsxv4_newtype` is not present in the current deterministic failure manifest at **478/657**, so further task-5 work must target a real failing module that exercises row/object deep-copy behavior.
   - Evidence (2026-02-24): deterministic full run after task-5 hypothesis remained **478/657** with **179** parity failures; `.parity-cache/tests/failures.txt` does not contain `jsxv4_newtype`.
   - Next OCaml refs: `compiler/ml/subst.ml` (`typexp`/`copy_row` recursion and `keep` behavior) plus `compiler/ml/typecore.ml` call sites that use `instance_label`.
