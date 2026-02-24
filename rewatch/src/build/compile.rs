@@ -799,6 +799,7 @@ fn compile_file(
             .stack_size(512 * 1024 * 1024)
             .spawn(move || {
                 let mut sexp_bytes = Vec::new();
+                let mut typed_error: Option<String> = None;
                 if let Some(stored_ast) = stored {
                     let result = match stored_ast {
                         super::build_types::StoredAst::Structure(arena, structure) => {
@@ -818,21 +819,40 @@ fn compile_file(
                             )
                         }
                     };
-                    let _ = result;
+                    if let Err(err) = result {
+                        typed_error = Some(format!("{err:#}"));
+                    }
                 }
-                sexp_bytes
+                (sexp_bytes, typed_error)
             })
             .map_err(|err| anyhow!("Failed to spawn rust typed-sexp worker: {err}"))?;
 
-        let sexp_bytes = worker
+        let (sexp_bytes, typed_error) = worker
             .join()
             .map_err(|_| anyhow!("Rust typed-sexp worker panicked"))?;
 
         let sexp_path = ocaml_build_path_abs.join(format!("{basename}.sexp"));
+        let sexp_error_path = ocaml_build_path_abs.join(format!("{basename}.sexp.error"));
         // Keep Rust parity output on the same UTF-8-lossy path as OCaml
         // stderr extraction in this script.
         let lossy = String::from_utf8_lossy(&sexp_bytes);
         let _ = std::fs::write(&sexp_path, lossy.as_ref());
+        if let Some(err) = typed_error {
+            let header = format!(
+                "Rust typed-sexp typecheck failed for module `{}` ({})",
+                module_name,
+                if is_interface {
+                    "interface"
+                } else {
+                    "implementation"
+                }
+            );
+            let full = format!("{header}\n{err}\n");
+            let _ = std::fs::write(&sexp_error_path, &full);
+            return Ok(Some(full));
+        } else {
+            let _ = std::fs::remove_file(&sexp_error_path);
+        }
 
         return Ok(None);
     }
