@@ -6398,15 +6398,23 @@ fn type_case_impl(
         scrutinee_ty
     };
 
-    // Type check the pattern
-    let typed_pat = type_pattern(
+    // Match OCaml type_cases: instance the scrutinee type per-case, then
+    // generalize pattern types after typing (begin_def/end_def scope).
+    let case_scrutinee_ty = crate::types::instance(tctx.type_ctx, case_scrutinee_ty);
+    tctx.type_ctx.begin_def();
+    let typed_pat_result = type_pattern(
         tctx,
         &case_env,
         tctx.arena.get_pat(case.pc_lhs),
         case_scrutinee_ty,
         PatternMode::Normal,
         &mut state,
-    )?;
+    );
+    tctx.type_ctx.end_def();
+    let typed_pat = typed_pat_result?;
+    iter_typed_pattern(&typed_pat, &mut |pat| {
+        crate::types::generalize(tctx.type_ctx, pat.pat_type);
+    });
 
     // Extend environment with pattern bindings
     let mut unpacks: Vec<PatternVariable> = Vec::new();
