@@ -2484,12 +2484,20 @@ pub fn copy_type_deep(
                             opt_ty.map(|t| copy_type_deep(ctx, t, cache))
                         )
                     }
-                    crate::types::type_expr::RowField::Reither { constant, types, matched, link } => {
+                    crate::types::type_expr::RowField::Reither {
+                        constant,
+                        types,
+                        matched,
+                        link: _,
+                    } => {
                         crate::types::type_expr::RowField::Reither {
                             constant: *constant,
                             types: types.iter().map(|t| copy_type_deep(ctx, *t, cache)).collect(),
                             matched: *matched,
-                            link: *link,
+                            // Subst.copy_row allocates fresh link refs when it does
+                            // not preserve row sharing; deep copy should not keep
+                            // mutable row-link aliases with the source type graph.
+                            link: ctx.alloc_row_field(None),
                         }
                     }
                     crate::types::type_expr::RowField::Rabsent => crate::types::type_expr::RowField::Rabsent,
@@ -2857,7 +2865,7 @@ fn subst_identity_copy_rec(
                                     constant,
                                     types,
                                     matched,
-                                    link,
+                                    link: _,
                                 } => crate::types::type_expr::RowField::Reither {
                                     constant: *constant,
                                     types: types
@@ -2865,7 +2873,9 @@ fn subst_identity_copy_rec(
                                         .map(|t| subst_identity_copy_rec(ctx, *t, seen))
                                         .collect(),
                                     matched: *matched,
-                                    link: *link,
+                                    // Match OCaml's Subst.copy_row behavior for fresh
+                                    // structural copies: do not share mutable row links.
+                                    link: ctx.alloc_row_field(None),
                                 },
                                 crate::types::type_expr::RowField::Rabsent => {
                                     crate::types::type_expr::RowField::Rabsent
