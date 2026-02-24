@@ -360,6 +360,13 @@ The old parity script post-processed sexp output (stripping non-printable chars,
   - Evidence (2026-02-24): a full remap pass over declaration-backed labels (all major construction sites) left `gpr_4274_test` unchanged (`0/1`) and full parity unchanged (**478/657**, 179 failures); the same `N.t`/`Foo.record` fields still collapse to `Tvar None`.
   - Next OCaml refs: `compiler/ml/typecore.ml` `type_label_access`, `type_label_exp`, and `NameChoice.disambiguate` call path for qualified labels.
   - Next Rust refs: `typecore.rs` `disambiguate_label`, `lookup_label_by_expected_type`, `extract_type_path_from_expected_with_persistent_env`, and `instance_label` call sites in `type_record`/`type_pattern_record`.
+- [ ] **8D. Verify declaration type params expose stable names at label-construction sites (NEW)** — a name-based remap pass across declaration-backed `LabelDescription` builders was parity-neutral, suggesting parameter names may already be erased (`Tvar None`) before remap or the `gpr_4274_test` drift is upstream of label construction.
+  - 2026-02-24 attempt: added `remap_label_type_to_params` in `compiler-rust/src/types/ctype.rs` and threaded it into declaration-backed label builders in `compiler-rust/src/types/env.rs`, `compiler-rust/src/types/typemod.rs`, `compiler-rust/src/cmi/persistent_env.rs`, and type-directed label synthesis in `compiler-rust/src/types/typecore.rs`.
+  - OCaml refs read: `compiler/ml/datarepr.ml` (`label_descrs`) and `compiler/ml/types.ml` (`label_description`).
+  - Targeted check: `timeout 300 ./scripts/test_typedtree_parity.sh gpr_4274_test` stayed **0/1** with unchanged `N.t`/`Foo.record -> Tvar None` drift.
+  - Deterministic full parity stayed **478/657 → 478/657** (179 parity failures), compile parity stayed **657/657**.
+  - Parser/binary guard stayed green: `timeout 300 ./scripts/test_parser_ast_parity.sh 2>&1 | tail -40` ended with `SUCCESS: All 3532 files have full parity!`.
+  - Reverted after parity-neutral result; keep this task unchecked.
 - [ ] **9. Shallow-copy pattern variable types** — Shallow Tconstr copies for pattern vars with non-empty args. (631→634, +3 tests)
   - 2026-02-24 attempt: added shallow non-empty `Tconstr` copies for pattern-bound values in both `type_case_impl` (always) and `type_function` (non-simple param patterns only), matching the task description; deterministic full parity stayed **478/657 → 478/657** (179 failures), filtered `unboxed_use_case` remained **0/1**. Reverted.
   - 2026-02-24 follow-up: reintroduced task-9 shallow copies via a shared helper in `compiler-rust/src/types/typecore.rs`:
