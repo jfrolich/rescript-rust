@@ -473,6 +473,18 @@ Primary blockers are currently (1) cycle/sharing typedtree rendering drift and (
     - `timeout 600 ./scripts/test_typedtree_parity.sh` stayed **589/657 → 589/657** with Rust compile coverage **650/657** (OCaml-only pass **7**, parity failures **61**).
     - `timeout 300 ./scripts/test_parser_ast_parity.sh 2>&1 | tail -40` stayed green (`SUCCESS: All 3532 files have full parity!`).
   - Next step: trace recursive-let sharing drift before/after `instance_poly` output in `type_let_bindings` (`typed_pat.pat_type`/`approx_ty`/post-unify nodes for `rbset` + `set_gen`) since OCaml-equivalent `instance_poly` alone is parity-neutral on this snapshot.
+- [ ] **5A2L. Validate `type_cases` RHS re-instantiation (`exp_type = instance env ty_res'`) in Rust case emission (NEW)** — directly porting this OCaml case-construction step in `type_case_impl` was parity-neutral on the active recursive-local-`t` cluster.
+  - 2026-02-24 attempt (reverted): patched `compiler-rust/src/types/typecore.rs::type_case_impl` so each case body expression overwrote `exp_type` with `instance(ctx, body_ty)` after `type_expect`, matching OCaml `type_cases` case output shape.
+  - OCaml refs read:
+    - `compiler/ml/typecore.ml` (`type_cases` case construction: `c_rhs = {exp with exp_type = instance env ty_res'}`)
+    - `compiler/ml/typecore.ml` (`Pexp_match` routing through `type_cases`)
+  - Build/test commands:
+    - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release` (success).
+    - `timeout 300 ./scripts/test_typedtree_parity.sh rbset` stayed **0/1** (`hunk mismatches: 6`).
+    - `timeout 300 ./scripts/test_typedtree_parity.sh set_gen` stayed **0/1** (`hunk mismatches: 82`).
+    - `timeout 600 ./scripts/test_typedtree_parity.sh` stayed **589/657 → 589/657** (Rust compile coverage **650/657**, OCaml-only pass **7**, parity failures **61**).
+    - `timeout 300 ./scripts/test_parser_ast_parity.sh 2>&1 | tail -40` stayed green (`SUCCESS: All 3532 files have full parity!`).
+  - Outcome: parity-neutral; patch reverted. Next step is to trace where `ty_res` sharing diverges before case emission (likely at recursive-let approximation/unification or pattern/body coupling), not at final case-RHS type overwrite.
 - [ ] **5B. Preserve compile parity when porting `Subst.typexp` variant `more'` flow (NEW)** — direct conditional `row_more` reuse currently causes Rust type-check regressions on full build.
   - Evidence (2026-02-24): first-pass OCaml-style `dup`/`more'` port in `copy_type_deep` + `subst_identity_copy_rec` changed full run from **478/657** to **539/657** with Rust compile parity drop **657/657 → 648/657** (9 OCaml-only passes). Reverted.
   - Required guardrail: maintain compile parity **657/657** and avoid introducing new Rust-reject files while aligning variant row-copy behavior.
