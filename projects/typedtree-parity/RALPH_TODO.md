@@ -347,6 +347,16 @@ Primary blockers are currently (1) cycle/sharing typedtree rendering drift and (
     - Deterministic full parity stayed **589/657 → 589/657** (parity failures **61**, Rust compile coverage **650/657**, OCaml-only pass **7**).
     - Parser/binary guard after revert: `timeout 300 ./scripts/test_parser_ast_parity.sh 2>&1 | tail -40` ended with `SUCCESS: All 3532 files have full parity!`.
     - Reverted immediately after parity-neutral outcome.
+  - 2026-02-24 attempt N (reverted): in `compiler-rust/src/types/ctype.rs::copy_type_cached`, tested OCaml-`copy`-style identity for non-generic `Tarrow`/`Tfield`/`Tnil` (keeping existing `Tobject` identity) to reduce recursive function type re-materialization in `type_function` outputs.
+    - OCaml refs read: `compiler/ml/ctype.ml` (`copy`, early non-generic identity path `if ty.level <> generic_level && partial = None then ty`) and `instance`.
+    - Targeted checks: `timeout 300 ./scripts/test_typedtree_parity.sh rbset` and `... set_gen` both stayed **0/1**, with unchanged first diffs (`rbset`: leading `Tarrow` arg `<cycle> -> Tconstr(Pident "t")`; `set_gen`: `t(<cycle>) -> t(Tvar None)`).
+    - Deterministic full parity stayed **589/657 → 589/657** (Rust compile coverage **650/657**, OCaml-only pass **7**).
+    - Reverted after parity-neutral outcome.
+  - 2026-02-24 attempt O (reverted): in `compiler-rust/src/types/typecore.rs::type_function`, removed Rust-only final-arrow re-anchoring and switched final `exp_type` arrow input back to OCaml `ty_arg` (`param_ty`) rather than `typed_param.pat_type`.
+    - OCaml refs read: `compiler/ml/typecore.ml` (`type_function` final `exp_type = instance env (newgenty (Tarrow ... ty_arg ...))`) and `compiler/ml/ctype.ml` (`instance` copy behavior).
+    - Targeted checks: `timeout 300 ./scripts/test_typedtree_parity.sh rbset` and `... set_gen` both stayed **0/1** with unchanged first diffs.
+    - Deterministic full parity stayed **589/657 → 589/657** (Rust compile coverage **650/657**, OCaml-only pass **7**).
+    - Reverted after parity-neutral outcome.
   - Deterministic full baseline after all reverts (current workspace snapshot):
     - `timeout 300 ./scripts/test_typedtree_parity.sh` reports **589/657** parity with **7** OCaml-only pass files and **61** parity failures.
     - Re-run confirmed stable **589/657** (**589 -> 589**).
@@ -386,6 +396,12 @@ Primary blockers are currently (1) cycle/sharing typedtree rendering drift and (
   - Required next step: instrument `compiler-rust/src/types/typecore.rs::type_let_bindings` around recursive pre-unification and post-expression typing to log node identity for each binding (`typed_pat.pat_type`, `typed_expr.exp_type`) for `blackify`/`elements_aux` before `end_def`, after generalization, and in final typedtree emission.
   - Compare against OCaml `compiler/ml/typecore.ml` `type_let` ordering (`unify_pat env pat (type_approx ...)`, then `type_expect exp_env ... pat.pat_type`, then `generalize`) to find where Rust stops sharing the same node edge.
   - Evidence: with attempt M reverted, `timeout 300 ./scripts/test_typedtree_parity.sh` remained **589/657** and `rbset`/`set_gen` remained **0/1** with unchanged first diffs.
+- [ ] **5A2I. Trace `instance(copy)` effects on recursive function types at `type_let` boundary (NEW)** — attempts N/O show that changing `type_function` final-arrow wiring or widening non-generic identity inside `copy_type_cached` in isolation is parity-neutral, so the first `<cycle> -> Tconstr/Tvar` drift likely occurs when recursive approximation types and function result types are unified/instantiated across `type_let_bindings`.
+  - Required next step: instrument `compiler-rust/src/types/typecore.rs::type_let_bindings` and `compiler-rust/src/types/ctype.rs::{instance, copy_type_cached}` to capture node IDs for `binding_types[i]`, `typed_pat.pat_type`, `typed_expr.exp_type`, and `type_approx_for_rec_let(...)` around:
+    - recursive pre-unification (`unify_pattern_types`),
+    - `type_expect` return for each recursive function binding,
+    - post-`end_def` generalization.
+  - OCaml refs to mirror during trace: `compiler/ml/typecore.ml` (`type_let`, `type_approx`) and `compiler/ml/ctype.ml` (`instance`, `copy`).
 - [ ] **5B. Preserve compile parity when porting `Subst.typexp` variant `more'` flow (NEW)** — direct conditional `row_more` reuse currently causes Rust type-check regressions on full build.
   - Evidence (2026-02-24): first-pass OCaml-style `dup`/`more'` port in `copy_type_deep` + `subst_identity_copy_rec` changed full run from **478/657** to **539/657** with Rust compile parity drop **657/657 → 648/657** (9 OCaml-only passes). Reverted.
   - Required guardrail: maintain compile parity **657/657** and avoid introducing new Rust-reject files while aligning variant row-copy behavior.
