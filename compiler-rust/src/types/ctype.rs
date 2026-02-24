@@ -109,13 +109,13 @@ pub struct UnifyState {
     unified_pairs: HashSet<(usize, usize)>,
 
     /// Current unification mode.
-    mode: UnifyMode,
+    pub mode: UnifyMode,
 
     /// Whether we're generating equations (for GADTs).
-    generate_equations: bool,
+    pub generate_equations: bool,
 
     /// Whether to assume type constructors are injective.
-    assume_injective: bool,
+    pub assume_injective: bool,
 
     /// Environment snapshot for type alias expansion during unification.
     /// Store an owned clone to avoid dangling pointers when nested typing
@@ -157,8 +157,13 @@ impl UnifyState {
     }
 
     /// Get the environment reference, if set.
-    fn env(&self) -> Option<&Env> {
+    pub fn env(&self) -> Option<&Env> {
         self.env.as_ref()
+    }
+
+    /// Get a mutable reference to the environment, if set.
+    pub fn env_mut(&mut self) -> Option<&mut Env> {
+        self.env.as_mut()
     }
 
     /// Check if two types have already been unified.
@@ -186,6 +191,79 @@ impl Default for UnifyState {
     fn default() -> Self {
         Self::new()
     }
+}
+
+// ============================================================================
+// GADT Equation Support
+// ============================================================================
+
+/// Check if a type path points to an instantiable newtype (abstract type with
+/// newtype_level set). Matches OCaml's `is_instantiable` in ctype.ml.
+fn is_instantiable(env: &Env, path: &Path) -> bool {
+    // Check local constraints first (GADT equations may have been added)
+    if let Some(decl) = env.find_local_constraint(path) {
+        return matches!(decl.type_kind, super::TypeKind::TypeAbstract)
+            && decl.type_manifest.is_none()
+            && decl.type_newtype_level.is_some();
+    }
+    // Then check normal type table by name
+    let name = path.head_name();
+    if let Ok(decl) = env.find_type(name) {
+        matches!(decl.type_kind, super::TypeKind::TypeAbstract)
+            && decl.type_manifest.is_none()
+            && decl.type_newtype_level.is_some()
+    } else {
+        false
+    }
+}
+
+/// Add a GADT equation: source_path = destination type.
+/// Creates a local constraint with a manifest type declaration.
+/// Matches OCaml's `add_gadt_equation` in ctype.ml.
+fn add_gadt_equation(
+    ctx: &TypeContext<'_>,
+    env: &mut Env,
+    source_path: &Path,
+    destination: TypeExprRef,
+) {
+    // local_non_recursive_abbrev check: destination must not reference source
+    let dest_repr = ctx.repr(destination);
+    let is_recursive = matches!(
+        &*ctx.get_desc(dest_repr),
+        TypeDesc::Tconstr { path, .. } if path.same(source_path)
+    );
+    if is_recursive {
+        return;
+    }
+
+    // duplicate_type: structural copy of destination
+    let destination_copy = subst_identity_copy(ctx, destination);
+
+    // Find the newtype level from the source declaration
+    let source_lev = env
+        .find_local_constraint(source_path)
+        .or_else(|| env.find_type(source_path.head_name()).ok())
+        .and_then(|decl| decl.type_newtype_level);
+
+    // Create a new declaration with manifest = destination_copy
+    let decl = super::TypeDeclaration {
+        type_params: vec![],
+        type_arity: 0,
+        type_kind: super::TypeKind::TypeAbstract,
+        type_private: super::PrivateFlag::Public,
+        type_manifest: Some(destination_copy),
+        type_variance: vec![],
+        type_newtype_level: source_lev,
+        type_loc: crate::location::Location::none(),
+        type_attributes: vec![],
+        type_immediate: false,
+        type_unboxed: super::UnboxedStatus::FALSE_FALSE,
+        type_inlined_types: vec![],
+        type_path: None,
+    };
+
+    // Add as a local constraint
+    env.add_local_constraint(source_path.clone(), decl);
 }
 
 // ============================================================================
@@ -824,6 +902,22 @@ fn try_expand_head<'a>(
             };
 
             drop(desc);
+
+            // 0. Check local constraints first (GADT equations)
+            if let Some(constraint_decl) = env.find_local_constraint(&path) {
+                if let Some(manifest) = constraint_decl.type_manifest {
+                    let params = &constraint_decl.type_params;
+                    if params.is_empty() {
+                        memorize_simple_abbrev();
+                        return Some(instance(ctx, manifest));
+                    } else if params.len() == args.len() {
+                        let (fresh_params, fresh_body) =
+                            instance_parameterized_type(ctx, params, manifest);
+                        memorize_simple_abbrev();
+                        return Some(subst_type(ctx, &fresh_params, &args, fresh_body));
+                    }
+                }
+            }
 
             // 1. Prefer environment lookup for simple identifiers.
             // OCaml expand_head is path-based (Env.find_type_expansion path env):
@@ -1533,6 +1627,9 @@ fn unify_types<'a>(
                 } else {
                     None
                 };
+                // Extract paths for potential GADT equation handling (nullary Tconstr only)
+                let gadt_path1 = if args1.is_empty() { Some(path1.clone()) } else { None };
+                let gadt_path2 = if args2.is_empty() { Some(path2.clone()) } else { None };
                 let pairs: Vec<_> = if same_name_fallback {
                     args1.iter()
                         .zip(args2.iter())
@@ -1574,6 +1671,51 @@ fn unify_types<'a>(
                         unify(ctx, state, a, b)?;
                     }
                     return Ok(());
+                }
+
+                // GADT equation handling for Tconstr with different paths
+                if state.generate_equations {
+                    if let Some(ref p1) = gadt_path1 {
+                        if let Some(ref p2) = gadt_path2 {
+                            if let Some(env) = state.env_mut() {
+                                let inst1 = is_instantiable(env, p1);
+                                let inst2 = is_instantiable(env, p2);
+                                if inst1 && inst2 {
+                                    let lev1 = env.find_local_constraint(p1)
+                                        .or_else(|| env.find_type(p1.head_name()).ok())
+                                        .and_then(|d| d.type_newtype_level);
+                                    let lev2 = env.find_local_constraint(p2)
+                                        .or_else(|| env.find_type(p2.head_name()).ok())
+                                        .and_then(|d| d.type_newtype_level);
+                                    let (source, dest) = if lev1 > lev2 {
+                                        (p1.clone(), t2)
+                                    } else {
+                                        (p2.clone(), t1)
+                                    };
+                                    add_gadt_equation(ctx, env, &source, dest);
+                                    return Ok(());
+                                } else if inst1 {
+                                    add_gadt_equation(ctx, env, p1, t2);
+                                    return Ok(());
+                                } else if inst2 {
+                                    add_gadt_equation(ctx, env, p2, t1);
+                                    return Ok(());
+                                }
+                            }
+                        } else if let Some(env) = state.env_mut() {
+                            if is_instantiable(env, p1) {
+                                add_gadt_equation(ctx, env, p1, t2);
+                                return Ok(());
+                            }
+                        }
+                    } else if let Some(ref p2) = gadt_path2 {
+                        if let Some(env) = state.env_mut() {
+                            if is_instantiable(env, p2) {
+                                add_gadt_equation(ctx, env, p2, t1);
+                                return Ok(());
+                            }
+                        }
+                    }
                 }
 
                 return Err(TypeError::Unify(vec![(t1, t2)]));
@@ -1845,10 +1987,19 @@ fn unify_types<'a>(
         _ => {
             let is_constr1 = matches!(&*desc1, TypeDesc::Tconstr { .. });
             let is_constr2 = matches!(&*desc2, TypeDesc::Tconstr { .. });
+            // Extract paths for GADT equation checks (nullary Tconstr only)
+            let path1_for_gadt = match &*desc1 {
+                TypeDesc::Tconstr { path, args, .. } if args.is_empty() => Some(path.clone()),
+                _ => None,
+            };
+            let path2_for_gadt = match &*desc2 {
+                TypeDesc::Tconstr { path, args, .. } if args.is_empty() => Some(path.clone()),
+                _ => None,
+            };
             drop(desc1);
             drop(desc2);
 
-            if (is_constr1 || is_constr2) {
+            if is_constr1 || is_constr2 {
                 if let Some(env) = state.env() {
                     // Fully expand both sides through all aliases
                     let exp1 = if is_constr1 {
@@ -1864,6 +2015,59 @@ fn unify_types<'a>(
                     // Only retry if at least one side actually changed
                     if exp1 != t1 || exp2 != t2 {
                         return unify_after_expansion(ctx, state, t1, exp1, t2, exp2);
+                    }
+                }
+            }
+
+            // GADT equation handling (OCaml ctype.ml:2385-2408)
+            // When generate_equations is true and one/both sides are instantiable
+            // newtypes, add a type equation instead of failing.
+            if state.generate_equations {
+                if let Some(ref p1) = path1_for_gadt {
+                    if let Some(ref p2) = path2_for_gadt {
+                        // Both are nullary Tconstr
+                        if let Some(env) = state.env_mut() {
+                            let inst1 = is_instantiable(env, p1);
+                            let inst2 = is_instantiable(env, p2);
+                            if inst1 && inst2 {
+                                // Both instantiable: equation from higher to lower newtype level
+                                let lev1 = env.find_local_constraint(p1)
+                                    .or_else(|| env.find_type(p1.head_name()).ok())
+                                    .and_then(|d| d.type_newtype_level);
+                                let lev2 = env.find_local_constraint(p2)
+                                    .or_else(|| env.find_type(p2.head_name()).ok())
+                                    .and_then(|d| d.type_newtype_level);
+                                let (source, dest) = if lev1 > lev2 {
+                                    (p1.clone(), t2)
+                                } else {
+                                    (p2.clone(), t1)
+                                };
+                                add_gadt_equation(ctx, env, &source, dest);
+                                return Ok(());
+                            } else if inst1 {
+                                add_gadt_equation(ctx, env, p1, t2);
+                                return Ok(());
+                            } else if inst2 {
+                                add_gadt_equation(ctx, env, p2, t1);
+                                return Ok(());
+                            }
+                        }
+                    } else {
+                        // Only left is nullary Tconstr
+                        if let Some(env) = state.env_mut() {
+                            if is_instantiable(env, p1) {
+                                add_gadt_equation(ctx, env, p1, t2);
+                                return Ok(());
+                            }
+                        }
+                    }
+                } else if let Some(ref p2) = path2_for_gadt {
+                    // Only right is nullary Tconstr
+                    if let Some(env) = state.env_mut() {
+                        if is_instantiable(env, p2) {
+                            add_gadt_equation(ctx, env, p2, t1);
+                            return Ok(());
+                        }
                     }
                 }
             }

@@ -2484,6 +2484,41 @@ fn unify_pattern_types(
     }
 }
 
+/// GADT-mode pattern unification: enables generate_equations and assume_injective
+/// so that abstract newtypes can receive type equations. Matches OCaml's
+/// unify_pat_types_gadt which calls unify_gadt.
+fn unify_pattern_types_gadt(
+    tctx: &mut TypeCheckContext<'_>,
+    _loc: LocIdx,
+    ty1: TypeExprRef,
+    ty2: TypeExprRef,
+) -> TypeCoreResult<()> {
+    use crate::types::unify;
+
+    // Save old state
+    let old_generate = tctx.unify_state.generate_equations;
+    let old_injective = tctx.unify_state.assume_injective;
+    let old_mode = tctx.unify_state.mode;
+
+    // Set GADT mode
+    tctx.unify_state.generate_equations = true;
+    tctx.unify_state.assume_injective = true;
+    tctx.unify_state.mode = crate::types::UnifyMode::Pattern;
+
+    let result = unify(tctx.type_ctx, &mut tctx.unify_state, ty1, ty2);
+
+    // Restore old state
+    tctx.unify_state.generate_equations = old_generate;
+    tctx.unify_state.assume_injective = old_injective;
+    tctx.unify_state.mode = old_mode;
+
+    match result {
+        Ok(()) => Ok(()),
+        Err(TypeError::Unify(_)) => Err(TypeCoreError::PatternTypeClash(vec![(ty1, ty2)])),
+        Err(_) => Err(TypeCoreError::PatternTypeClash(vec![(ty1, ty2)])),
+    }
+}
+
 fn row_field_contains_tunivar(
     ctx: &TypeContext<'_>,
     env: &Env,
@@ -3038,7 +3073,13 @@ fn type_pattern_construct(
     } else {
         crate::types::instance_constructor(ctx, &cstr_desc)
     };
-    unify_pattern_types(tctx, loc, result_ty, expected_ty)?;
+    // PR#7214: use GADT unification only for generalized constructors
+    // (not for toplevel lets or inside 'or' patterns)
+    if cstr_desc.cstr_generalized && mode != PatternMode::SplittingOr {
+        unify_pattern_types_gadt(tctx, loc, result_ty, expected_ty)?;
+    } else {
+        unify_pattern_types(tctx, loc, result_ty, expected_ty)?;
+    }
 
     // Type check the argument pattern(s)
     let typed_args = match (inst_arg_types.as_slice(), arg) {
