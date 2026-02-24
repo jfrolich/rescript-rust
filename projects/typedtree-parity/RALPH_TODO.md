@@ -297,6 +297,16 @@ Most byte-format drift is now resolved. Remaining work is primarily in type-chec
     - Targeted checks: `timeout 300 ./scripts/test_typedtree_parity.sh rbset` and `... set_gen` both remained **0/1** with unchanged first diffs.
     - Re-run deterministic full parity stayed **588/657 → 588/657** (Rust compile coverage **650/657**, OCaml-only pass **7**).
     - Reverted after parity-neutral outcome.
+  - 2026-02-24 attempt I (reverted): in `compiler-rust/src/types/typecore.rs::type_function`, used OCaml-style simple-parameter body binding identity (`pv.ty`) instead of `instance(ctx, pv.ty)`, while keeping existing non-simple pattern shallow-copy behavior.
+    - OCaml refs read: `compiler/ml/typecore.ml` (`type_cases` `pat_env_list` + body typing via `type_expect ext_env`) and `compiler/ml/ctype.ml` (`instance`).
+    - Targeted checks: `timeout 300 ./scripts/test_typedtree_parity.sh rbset` and `... set_gen` both stayed **0/1**.
+    - Deterministic full parity stayed **588/657 → 588/657** (Rust compile coverage **650/657**, OCaml-only pass **7**).
+    - Reverted after parity-neutral outcome.
+  - 2026-02-24 attempt J (reverted): in `compiler-rust/src/types/typecore.rs::type_function`, set function `exp_type` arrow input to `param_ty` (OCaml `ty_arg`) instead of `typed_param.pat_type`.
+    - OCaml refs read: `compiler/ml/typecore.ml` (`type_function` final `exp_type = instance env (newgenty (Tarrow ... ty_arg ...))`) and `compiler/ml/ctype.ml` (`instance`).
+    - Targeted checks: `timeout 300 ./scripts/test_typedtree_parity.sh rbset` and `... set_gen` both stayed **0/1**.
+    - Deterministic full parity stayed **588/657 → 588/657** (Rust compile coverage **650/657**, OCaml-only pass **7**).
+    - Reverted after parity-neutral outcome.
   - Deterministic full baseline after all reverts (current workspace snapshot):
     - `timeout 300 ./scripts/test_typedtree_parity.sh` reports **588/657** parity with **7** OCaml-only pass files and **62** parity failures.
     - Re-run confirmed stable **588/657** (**588 -> 588**).
@@ -314,6 +324,14 @@ Most byte-format drift is now resolved. Remaining work is primarily in type-chec
 - [ ] **5A2D. Trace `type_match` scrutinee instantiation identity for local recursive `t` (NEW)** — attempts G/H kept `rbset`/`set_gen` unchanged, so the break may be in case-typing instantiation (`cases_scrutinee_ty = instance(...)`) rather than function-body env assembly.
   - Required next step: instrument `compiler-rust/src/types/typecore.rs` (`type_match`, `type_case_impl`) and `compiler-rust/src/types/ctype.rs::copy_type_cached` to capture pre/post `instance` node IDs for `Pident "t"` and `t<'a>` in `blackify`/`elements_aux`, then compare against OCaml `type_cases` behavior.
   - Evidence: with all G/H edits reverted, `timeout 300 ./scripts/test_typedtree_parity.sh rbset` and `... set_gen` are still **0/1**, and deterministic full parity remains **588/657**.
+- [ ] **5A2E. Instrument `type_function` node identity split (`param_ty` vs `pv.ty` vs `typed_param.pat_type`) (NEW)** — attempts I/J show that toggling simple-param body binding identity and `exp_type` arrow-input selection individually is parity-neutral, so the first identity drift for local recursive `t` must occur earlier (expected-arrow extraction or pattern typing) or later (case/match instantiation).
+  - Required next step: add scoped debug tracing (node IDs + `repr` IDs + desc tags) in `type_function` for `blackify` and `elements_aux` at these points:
+    - after `filter_arrow`-equivalent extraction (`param_ty`, `return_ty`),
+    - after `param_pat_ty = instance(param_ty)`,
+    - after `type_pattern` (`typed_param.pat_type`, each `state.pattern_variables[i].ty`),
+    - before/after `type_expect` body typing,
+    - before final `exp_type` construction.
+  - Compare the Rust trace against OCaml control flow expectations from `type_function` + `type_cases` to find the first non-OCaml copy/instance site.
 - [ ] **5B. Preserve compile parity when porting `Subst.typexp` variant `more'` flow (NEW)** — direct conditional `row_more` reuse currently causes Rust type-check regressions on full build.
   - Evidence (2026-02-24): first-pass OCaml-style `dup`/`more'` port in `copy_type_deep` + `subst_identity_copy_rec` changed full run from **478/657** to **539/657** with Rust compile parity drop **657/657 → 648/657** (9 OCaml-only passes). Reverted.
   - Required guardrail: maintain compile parity **657/657** and avoid introducing new Rust-reject files while aligning variant row-copy behavior.
