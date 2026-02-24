@@ -2653,10 +2653,10 @@ fn translate_module_type_to_decl<'a>(
                                 let param_ty = arena.get_core_type(*param_ty_idx);
                                 let param_ref = match &*param_ty.ptyp_desc {
                                     crate::parser::ast::CoreTypeDesc::Ptyp_any => {
-                                        tctx.type_ctx.new_global_var(Some("_".to_string()))
+                                        tctx.type_ctx.new_var(Some("_".to_string()))
                                     }
                                     crate::parser::ast::CoreTypeDesc::Ptyp_var(name) => {
-                                        tctx.type_ctx.new_global_var(Some(name.to_string()))
+                                        tctx.type_ctx.new_var(Some(name.to_string()))
                                     }
                                     _ => {
                                         let (_typed_param, param_ref) =
@@ -6596,7 +6596,7 @@ fn transl_sig_type_declarations<'a>(
             let core_type = arena.get_core_type(*core_type_idx);
             let (typed_core_type, type_ref) = match &*core_type.ptyp_desc {
                 crate::parser::ast::CoreTypeDesc::Ptyp_any => {
-                    let type_ref = ctx.new_global_var(Some("_".to_string()));
+                    let type_ref = ctx.new_var(Some("_".to_string()));
                     (
                         TypedCoreType {
                             ctyp_desc: TypedCoreTypeDesc::Ttyp_var(None),
@@ -6609,7 +6609,7 @@ fn transl_sig_type_declarations<'a>(
                     )
                 }
                 crate::parser::ast::CoreTypeDesc::Ptyp_var(name) => {
-                    let type_ref = ctx.new_global_var(Some(name.to_string()));
+                    let type_ref = ctx.new_var(Some(name.to_string()));
                     (
                         TypedCoreType {
                             ctyp_desc: TypedCoreTypeDesc::Ttyp_var(Some(name.to_string())),
