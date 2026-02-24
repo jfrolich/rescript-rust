@@ -260,6 +260,14 @@ Most byte-format drift is now resolved. Remaining work is primarily in type-chec
     - Targeted checks: `timeout 300 ./scripts/test_typedtree_parity.sh set_gen` stayed **0/1** with the same `<cycle> -> Tvar None` drift in `t` arguments.
     - Full parity with patch: **621/657**, Rust compile coverage **656/657** (OCaml-only pass **1**), stack overflow still present.
     - Reverted immediately.
+  - 2026-02-24 attempt C (reverted): tested three OCaml-alignment hypotheses in `compiler-rust/src/types/typecore.rs::type_function`:
+    - C1: stop re-instancing all pattern-bound body vars (use `pv.ty` directly),
+    - C2: remove Rust-only exp_type arrow re-anchoring after `instance(new_generic_arrow(...))`,
+    - C3: gate `begin_def/end_def/generalize` with `type_cases`-style propagate logic.
+    - OCaml refs read: `compiler/ml/typecore.ml` (`type_function`, `type_cases`, `add_pattern_variables`/`type_pattern` ext_env flow) and `compiler/ml/ctype.ml` (`instance`).
+    - Targeted checks after each change: `timeout 300 ./scripts/test_typedtree_parity.sh rbset` and `... set_gen` both remained **0/1**, with unchanged first diffs (`rbset` `<cycle> -> Tconstr(Pident "t")`, `set_gen` `<cycle> -> Tvar None`).
+    - Full parity with combined C1+C2+C3 patch set regressed hard: **620/657 → 589/657**, Rust compile coverage **656/657 → 650/657** (OCaml-only pass **1 → 7**).
+    - Reverted the full patch set.
   - Post-revert baseline (clean code): `timeout 600 ./scripts/test_typedtree_parity.sh` reports **620/657**, Rust compile coverage **656/657** (OCaml-only pass **1**, parity failures **36**), with stack overflow still reported in `More_poly_variant_test`.
   - Parser/binary guard after revert: `timeout 300 ./scripts/test_parser_ast_parity.sh 2>&1 | tail -40` ended with `SUCCESS: All 3532 files have full parity!`.
   - Next OCaml refs: `compiler/ml/typecore.ml` (`type_function` ~3262-3338, `type_cases` ~3906+), `compiler/ml/ctype.ml` (`instance`, `copy`).
@@ -268,6 +276,9 @@ Most byte-format drift is now resolved. Remaining work is primarily in type-chec
   - Evidence: attempt A (`type_cases`-style propagation gating) regressed to **616/657** with 9 Rust rejects; attempt B (simple-var identity body binding) regressed to **621/657** with 1 Rust reject; both reverted, `set_gen` remained **0/1**.
   - Next OCaml refs: `compiler/ml/typecore.ml` (`type_cases` `pat_env_list` creation and body typing `type_expect ext_env`), `compiler/ml/typecore.ml` variable binding flow in `type_pattern`.
   - Next Rust refs: `compiler-rust/src/types/typecore.rs` (`type_pattern`, `PatternState`, `type_function` body-env construction) to replace ad-hoc env reconstruction with OCaml-equivalent ext_env threading.
+- [ ] **5A2B. Isolate `type_function` regression source across env-instancing, re-anchoring, and propagate gating (NEW)** — C1/C2/C3 combined regressed full parity to **589/657**, but targeted `rbset`/`set_gen` stayed unchanged, so at least one change is globally load-bearing while not touching the local recursive-`t` first diff.
+  - Required next step: run single-change full parity for C1, C2, C3 independently (no combination) and record exact compile/parity deltas to identify which behavior is required for global stability vs which remains a viable parity-fix path.
+  - Evidence files: `.parity-cache/tests/diffs/rbset.diff`, `.parity-cache/tests/diffs/set_gen.diff`, `/tmp/full_parity_after3.log`, `/tmp/full_parity_revert.log`.
 - [ ] **5B. Preserve compile parity when porting `Subst.typexp` variant `more'` flow (NEW)** — direct conditional `row_more` reuse currently causes Rust type-check regressions on full build.
   - Evidence (2026-02-24): first-pass OCaml-style `dup`/`more'` port in `copy_type_deep` + `subst_identity_copy_rec` changed full run from **478/657** to **539/657** with Rust compile parity drop **657/657 → 648/657** (9 OCaml-only passes). Reverted.
   - Required guardrail: maintain compile parity **657/657** and avoid introducing new Rust-reject files while aligning variant row-copy behavior.
