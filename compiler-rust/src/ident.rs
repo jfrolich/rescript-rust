@@ -30,6 +30,9 @@ use serde::{Deserialize, Serialize};
 use smol_str::SmolStr;
 use std::fmt;
 use std::hash::{Hash, Hasher};
+use std::sync::atomic::{AtomicI32, Ordering};
+
+static LOCAL_IDENT_COUNTER: AtomicI32 = AtomicI32::new(1);
 
 /// Flags for identifier properties.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -136,13 +139,17 @@ impl Ident {
     /// thread isolation isn't required.
     #[inline]
     pub fn create_local(name: impl Into<SmolStr>) -> Self {
-        use std::sync::atomic::{AtomicI32, Ordering};
-        static COUNTER: AtomicI32 = AtomicI32::new(1);
         Self {
             name: name.into(),
-            stamp: COUNTER.fetch_add(1, Ordering::Relaxed),
+            stamp: LOCAL_IDENT_COUNTER.fetch_add(1, Ordering::Relaxed),
             flags: IdentFlags::NONE,
         }
+    }
+
+    /// Get the current stamp used by [`Ident::create_local`].
+    #[inline]
+    pub fn current_local_stamp() -> i32 {
+        LOCAL_IDENT_COUNTER.load(Ordering::Relaxed)
     }
 
     /// Get the name of this identifier.

@@ -25,6 +25,7 @@ use super::type_expr::{
     RowDesc, RowField, RowFieldRef, TypeArg, TypeDesc, TypeExpr, TypeExprRef,
 };
 use crate::context::IdGenerator;
+use crate::ident::Ident;
 use crate::intern::StrIdx;
 use std::cell::{Cell, RefCell};
 use std::ops::Deref;
@@ -552,7 +553,7 @@ impl<'a> TypeContext<'a> {
 
     /// Get the current ident stamp value (equivalent of OCaml's `Ident.current_time()`).
     pub fn current_stamp(&self) -> i32 {
-        self.id_gen.current_stamp()
+        std::cmp::max(self.id_gen.current_stamp(), Ident::current_local_stamp())
     }
 
     /// Initialize definition level (equivalent of OCaml's `Ctype.init_def`).

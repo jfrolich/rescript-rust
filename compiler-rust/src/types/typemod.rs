@@ -3727,6 +3727,11 @@ fn type_module_expr_with_alias<'a>(
                 }
             }
 
+            // OCaml typemod.ml calls Ctype.init_def(Ident.current_time()) before
+            // typing functor bodies.
+            let ctx = tctx.type_ctx;
+            ctx.init_def(ctx.current_stamp());
+
             // Type check the functor body with the extended environment
             let body = arena.get_mod_expr(*body_idx);
             let typed_body = type_module_expr_with_alias(tctx, &functor_env, arena, body, false)?;
@@ -3941,6 +3946,8 @@ fn transl_modtype<'a>(
                 Some(pt) => Some(Box::new(transl_modtype(tctx, env, arena, arena.get_mod_type(*pt))?)),
                 None => None,
             };
+            let ctx = tctx.type_ctx;
+            ctx.init_def(ctx.current_stamp());
             let result_type = arena.get_mod_type(*result_type_idx);
             let typed_result = transl_modtype(tctx, env, arena, result_type)?;
             TMtyDesc::Tmty_functor(
@@ -4002,6 +4009,8 @@ pub fn transl_signature<'a>(
     let mut typed_items = Vec::new();
 
     for item in items {
+        let ctx = tctx.type_ctx;
+        ctx.init_def(ctx.current_stamp());
         let loc = item.psig_loc;
         let desc = match &*item.psig_desc {
             PSigDesc::Psig_value(vd) => {
@@ -4190,6 +4199,8 @@ pub fn type_structure<'a>(
     let mut current_env = env.clone();
 
     for item in items {
+        let ctx = tctx.type_ctx;
+        ctx.init_def(ctx.current_stamp());
         tctx.set_unify_env(&current_env);
         let (typed_item, new_env) = type_structure_item(tctx, &current_env, arena, item)?;
         typed_items.push(typed_item);
@@ -4220,6 +4231,8 @@ fn type_structure_no_export<'a>(
     let mut current_env = env.clone();
 
     for item in items {
+        let ctx = tctx.type_ctx;
+        ctx.init_def(ctx.current_stamp());
         tctx.set_unify_env(&current_env);
         let (typed_item, new_env) = type_structure_item(tctx, &current_env, arena, item)?;
         typed_items.push(typed_item);
@@ -6114,6 +6127,8 @@ fn type_structure_item<'a>(
 
         ParsedStructureItemDesc::Pstr_recmodule(mbs) => {
             // Recursive modules: module rec M = ...
+            let ctx = tctx.type_ctx;
+            ctx.init_def(ctx.current_stamp());
             // First pass: extract module types from constraints and add to env
             let mut rec_env = env.clone();
             let mut mod_ids = Vec::new();
