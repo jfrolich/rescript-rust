@@ -47,7 +47,7 @@ Primary Rust implementation files:
 ## Your Task Each Iteration
 
 1. Open `RALPH_TODO.md`.
-2. Pick the next unchecked task.
+2. Pick the highest-impact unchecked task that is not tagged `PARKED`/`DEEMPHASIZED`.
 3. Read the OCaml reference functions for that task.
 4. Implement the Rust port.
 5. Run targeted tests with timeouts.
@@ -60,6 +60,7 @@ Primary Rust implementation files:
 9. Stop (one task per session).
 
 If there are no unchecked tasks, create new unchecked tasks from the current failure list first, then continue.
+Tasks explicitly tagged `PARKED`/`DEEMPHASIZED` are deferred backlog and should not be auto-selected as the next iteration task.
 
 ## Required Commands (Always with Timeout)
 

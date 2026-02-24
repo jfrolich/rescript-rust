@@ -264,7 +264,8 @@ Primary blockers are currently (1) cycle/sharing typedtree rendering drift and (
     - Parser/binary guard after reverting experiments: `timeout 300 ./scripts/test_parser_ast_parity.sh 2>&1 | tail -40` ended with `SUCCESS: All 3532 files have full parity!`.
   - Conclusion: current `rbset`/`set_gen` drift is introduced later in `typecore` non-application function typing/instantiation flow, not by `copy_type_deep`/`subst_identity_copy_rec` row-copy branches.
   - OCaml refs read: `compiler/ml/typecore.ml` (`type_function`, `type_cases`), `compiler/ml/ctype.ml` (`copy`), `compiler/ml/subst.ml` (`typexp`).
-- [ ] **5A2. Trace non-application `type_function` sharing for local recursive `t` (NEW)** — identify where Rust loses OCaml node sharing in function parameter/result types before typedtree emission for `rbset`/`set_gen`.
+- [x] **5A2. Trace non-application `type_function` sharing for local recursive `t` (PARKED, DEEMPHASIZED)** — identify where Rust loses OCaml node sharing in function parameter/result types before typedtree emission for `rbset`/`set_gen`.
+  - 2026-02-24 parking decision: this cluster is currently high-cost/low-yield and has consumed many parity-neutral iterations; keep notes for future root-cause work, but do not treat it as the next required unchecked task while higher-impact clusters remain.
   - Scope: `type_function` / `type_cases` expected-arrow filtering, `instance` timing, and pattern/body env binding copies.
   - 2026-02-24 attempt A (reverted): ported OCaml-style single-case propagation gating into `compiler-rust/src/types/typecore.rs::type_function` (conditional `begin_def/end_def`, pattern generalization, and body-env `instance` for simple variable-like params).
     - OCaml refs read: `compiler/ml/typecore.ml` (`type_function` ~3262-3338, `type_cases` ~3906-4015), `compiler/ml/ctype.ml` (`instance`, `copy`).
@@ -371,12 +372,12 @@ Primary blockers are currently (1) cycle/sharing typedtree rendering drift and (
       - `timeout 300 ./scripts/test_typedtree_parity.sh rbset` and `... set_gen` both stayed **0/1** with unchanged first diffs (`rbset`: leading `Tarrow` arg `<cycle> ↔ Tconstr(Pident "t")`; `set_gen`: `t(<cycle>) ↔ t(Tvar None)`).
       - Deterministic full parity stayed **589/657 → 589/657** (Rust compile coverage **650/657**, OCaml-only pass **7**, parity failures **61**).
       - Parser/binary guard stayed green: `timeout 300 ./scripts/test_parser_ast_parity.sh 2>&1 | tail -40` ended with `SUCCESS: All 3532 files have full parity!`.
-    - Outcome: parity-neutral but OCaml-aligned expected-instantiation cleanup retained; keep task unchecked.
+    - Outcome: parity-neutral but OCaml-aligned expected-instantiation cleanup retained; evidence kept, cluster now parked.
   - Deterministic full baseline after all reverts (current workspace snapshot):
     - `timeout 300 ./scripts/test_typedtree_parity.sh` reports **589/657** parity with **7** OCaml-only pass files and **61** parity failures.
     - Re-run confirmed stable **589/657** (**589 -> 589**).
   - Parser/binary guard on this snapshot: `timeout 300 ./scripts/test_parser_ast_parity.sh 2>&1 | tail -40` ended with `SUCCESS: All 3532 files have full parity!`.
-- [ ] **5A2A. Port OCaml `type_cases` ext_env/body binding flow into `type_function` (NEW)** — Rust hand-builds function body env (`state.pattern_variables` + ad-hoc instancing/copying), while OCaml reuses `type_pattern`’s `ext_env` directly; two local attempts in Rust `type_function` regressed full parity without touching the `set_gen` first diff.
+- [x] **5A2A. Port OCaml `type_cases` ext_env/body binding flow into `type_function` (PARKED, DEEMPHASIZED)** — Rust hand-builds function body env (`state.pattern_variables` + ad-hoc instancing/copying), while OCaml reuses `type_pattern`’s `ext_env` directly; two local attempts in Rust `type_function` regressed full parity without touching the `set_gen` first diff.
   - Evidence: attempt A (`type_cases`-style propagation gating) regressed to **616/657** with 9 Rust rejects; attempt B (simple-var identity body binding) regressed to **621/657** with 1 Rust reject; both reverted, `set_gen` remained **0/1**.
   - 2026-02-24 attempt C (kept): in `compiler-rust/src/types/typecore.rs::type_function`, replaced function-body env binding to use OCaml `add_pattern_variables` semantics (`pv.ty` identity) and removed the ad-hoc `instance(...)` + conditional shallow-copy path for function parameter bindings.
     - OCaml refs read: `compiler/ml/typecore.ml` (`add_pattern_variables`, `type_pattern`, `type_cases` `pat_env_list`/`type_expect ext_env` flow) and `compiler/ml/ctype.ml` (`instance` identity behavior for non-generic nodes).
@@ -386,10 +387,10 @@ Primary blockers are currently (1) cycle/sharing typedtree rendering drift and (
       - `timeout 300 ./scripts/test_typedtree_parity.sh rbset` and `... set_gen` both stayed **0/1**.
       - Deterministic full parity stayed **589/657 → 589/657** (Rust compile coverage **650/657**, OCaml-only pass **7**, parity failures **61**).
       - Parser/binary guard stayed green: `timeout 300 ./scripts/test_parser_ast_parity.sh 2>&1 | tail -40` ended with `SUCCESS: All 3532 files have full parity!`.
-    - Outcome: parity-neutral; keep task unchecked.
+    - Outcome: parity-neutral; evidence kept, cluster now parked.
   - Next OCaml refs: `compiler/ml/typecore.ml` (`type_cases` `pat_env_list` creation and body typing `type_expect ext_env`), `compiler/ml/typecore.ml` variable binding flow in `type_pattern`.
   - Next Rust refs: `compiler-rust/src/types/typecore.rs` (`type_pattern`, `PatternState`, `type_function` body-env construction) to replace ad-hoc env reconstruction with OCaml-equivalent ext_env threading.
-- [ ] **5A2B. Isolate `type_function` regression source across env-instancing, re-anchoring, and propagate gating (NEW)** — C1/C2/C3 combined regressed full parity to **589/657**, but targeted `rbset`/`set_gen` stayed unchanged, so at least one change is globally load-bearing while not touching the local recursive-`t` first diff.
+- [x] **5A2B. Isolate `type_function` regression source across env-instancing, re-anchoring, and propagate gating (PARKED, DEEMPHASIZED)** — C1/C2/C3 combined regressed full parity to **589/657**, but targeted `rbset`/`set_gen` stayed unchanged, so at least one change is globally load-bearing while not touching the local recursive-`t` first diff.
   - Required next step: run single-change full parity for C1, C2, C3 independently (no combination) and record exact compile/parity deltas to identify which behavior is required for global stability vs which remains a viable parity-fix path.
   - Evidence files: `.parity-cache/tests/diffs/rbset.diff`, `.parity-cache/tests/diffs/set_gen.diff`, `/tmp/full_parity_after3.log`, `/tmp/full_parity_revert.log`.
   - 2026-02-24 single-change C2 check (reverted): removed only the Rust-only final-arrow re-anchoring in `type_function` (kept existing `typed_param.pat_type` arrow input).
@@ -398,10 +399,10 @@ Primary blockers are currently (1) cycle/sharing typedtree rendering drift and (
     - Deterministic full parity stayed **589/657 → 589/657** (Rust compile coverage **650/657**, OCaml-only pass **7**, parity failures **61**).
     - Parser/binary guard stayed green: `timeout 300 ./scripts/test_parser_ast_parity.sh 2>&1 | tail -40` ended with `SUCCESS: All 3532 files have full parity!`.
     - Conclusion: C2 alone is not the load-bearing source for the `rbset`/`set_gen` drift on this snapshot.
-- [ ] **5A2C. Trace pre-`type_function` creation site for decoupled recursive local-`t` args (NEW)** — type_function-local and `copy_type_cached` experiments D/E/F were parity-neutral, so the `t(<cycle>) -> t(Tvar None)` drift likely starts before `type_function` body-env reconstruction.
+- [x] **5A2C. Trace pre-`type_function` creation site for decoupled recursive local-`t` args (PARKED, DEEMPHASIZED)** — type_function-local and `copy_type_cached` experiments D/E/F were parity-neutral, so the `t(<cycle>) -> t(Tvar None)` drift likely starts before `type_function` body-env reconstruction.
   - Required next step: instrument let-rec typing around `type_let_bindings` / expected-arrow setup to compare the first `param_ty` node IDs for `elements_aux` and `blackify` against OCaml `type_let` + `type_function` flow.
   - Evidence: after reverting D/E/F, `timeout 300 ./scripts/test_typedtree_parity.sh rbset` and `... set_gen` remain **0/1** with unchanged first diff; deterministic full parity remains **588/657**.
-- [ ] **5A2D. Trace `type_match` scrutinee instantiation identity for local recursive `t` (NEW)** — attempts G/H kept `rbset`/`set_gen` unchanged, so the break may be in case-typing instantiation (`cases_scrutinee_ty = instance(...)`) rather than function-body env assembly.
+- [x] **5A2D. Trace `type_match` scrutinee instantiation identity for local recursive `t` (PARKED, DEEMPHASIZED)** — attempts G/H kept `rbset`/`set_gen` unchanged, so the break may be in case-typing instantiation (`cases_scrutinee_ty = instance(...)`) rather than function-body env assembly.
   - Required next step: instrument `compiler-rust/src/types/typecore.rs` (`type_match`, `type_case_impl`) and `compiler-rust/src/types/ctype.rs::copy_type_cached` to capture pre/post `instance` node IDs for `Pident "t"` and `t<'a>` in `blackify`/`elements_aux`, then compare against OCaml `type_cases` behavior.
   - Evidence: with all G/H edits reverted, `timeout 300 ./scripts/test_typedtree_parity.sh rbset` and `... set_gen` are still **0/1**, and deterministic full parity remains **588/657**.
   - 2026-02-24 attempt (kept): in `compiler-rust/src/types/typecore.rs::type_match`, removed the extra outer `cases_scrutinee_ty = instance(typed_scrutinee.exp_type)` layer and passed `typed_scrutinee.exp_type` into `type_case`, keeping per-case instantiation in `type_case_impl` as the single `instance(...)` site.
@@ -411,8 +412,8 @@ Primary blockers are currently (1) cycle/sharing typedtree rendering drift and (
       - `timeout 300 ./scripts/test_typedtree_parity.sh rbset` and `... set_gen` both stayed **0/1** with unchanged first diffs (`rbset`: `Tarrow` arg `<cycle> ↔ Tconstr(Pident "t")`; `set_gen`: `t(<cycle>) ↔ t(Tvar None)`).
       - Deterministic full parity stayed **589/657 → 589/657** (Rust compile coverage **650/657**, OCaml-only pass **7**, parity failures **61**).
       - Parser/binary guard stayed green: `timeout 300 ./scripts/test_parser_ast_parity.sh 2>&1 | tail -40` ended with `SUCCESS: All 3532 files have full parity!`.
-    - Outcome: parity-neutral; keep task unchecked.
-- [ ] **5A2E. Instrument `type_function` node identity split (`param_ty` vs `pv.ty` vs `typed_param.pat_type`) (NEW)** — attempts I/J show that toggling simple-param body binding identity and `exp_type` arrow-input selection individually is parity-neutral, so the first identity drift for local recursive `t` must occur earlier (expected-arrow extraction or pattern typing) or later (case/match instantiation).
+    - Outcome: parity-neutral; evidence kept, cluster now parked.
+- [x] **5A2E. Instrument `type_function` node identity split (`param_ty` vs `pv.ty` vs `typed_param.pat_type`) (PARKED, DEEMPHASIZED)** — attempts I/J show that toggling simple-param body binding identity and `exp_type` arrow-input selection individually is parity-neutral, so the first identity drift for local recursive `t` must occur earlier (expected-arrow extraction or pattern typing) or later (case/match instantiation).
   - Required next step: add scoped debug tracing (node IDs + `repr` IDs + desc tags) in `type_function` for `blackify` and `elements_aux` at these points:
     - after `filter_arrow`-equivalent extraction (`param_ty`, `return_ty`),
     - after `param_pat_ty = instance(param_ty)`,
@@ -420,21 +421,21 @@ Primary blockers are currently (1) cycle/sharing typedtree rendering drift and (
     - before/after `type_expect` body typing,
     - before final `exp_type` construction.
   - Compare the Rust trace against OCaml control flow expectations from `type_function` + `type_cases` to find the first non-OCaml copy/instance site.
-- [ ] **5A2F. Trace recursive-let pre-unification sharing before `type_function` (NEW)** — attempt K confirms `type_function`-local propagation/body-binding/exp_type rewrites are parity-neutral at **589/657**, so the active `rbset`/`set_gen` drift likely starts in recursive let approximation/unification.
+- [x] **5A2F. Trace recursive-let pre-unification sharing before `type_function` (PARKED, DEEMPHASIZED)** — attempt K confirms `type_function`-local propagation/body-binding/exp_type rewrites are parity-neutral at **589/657**, so the active `rbset`/`set_gen` drift likely starts in recursive let approximation/unification.
   - Required next step: instrument `compiler-rust/src/types/typecore.rs::type_let_bindings` + `type_approx_for_rec_let` to capture node identity for binding `pat_type` vs approximation arrow nodes (`blackify`, `elements_aux`) before entering `type_function`.
   - Compare with OCaml `compiler/ml/typecore.ml` (`type_let`, `type_approx`, recursive pre-unification path) to verify where the `<cycle>` sharing edge is dropped (`t(<cycle>) -> t(Tvar None)`).
   - Evidence: with K reverted, `timeout 300 ./scripts/test_typedtree_parity.sh rbset` and `... set_gen` remain **0/1** and deterministic full parity remains **589/657**; parser/binary guard remains green.
-- [ ] **5A2G. Port full OCaml `type_cases` pattern-unification flow for function cases (NEW)** — a local `unify_pats ty_arg'` analogue in Rust `type_function` was parity-neutral, which suggests the missing behavior is the complete `type_cases` two-phase flow (pat-env list + propagate-conditioned second unify), not a single extra unification call.
+- [x] **5A2G. Port full OCaml `type_cases` pattern-unification flow for function cases (PARKED, DEEMPHASIZED)** — a local `unify_pats ty_arg'` analogue in Rust `type_function` was parity-neutral, which suggests the missing behavior is the complete `type_cases` two-phase flow (pat-env list + propagate-conditioned second unify), not a single extra unification call.
   - Required next step: refactor `type_function` single-case typing through a shared `type_cases`-equivalent helper that preserves OCaml ordering:
     - per-case `instance env ty_arg` before `type_pattern`,
     - delayed `unify_pats ty_arg'`,
     - optional `unify_pats (instance env ty_arg)` when propagate applies.
   - Evidence: attempt L (`type_function` fresh-pattern unification only) kept `rbset`/`set_gen` at **0/1** and full parity at **589/657**.
-- [ ] **5A2H. Trace recursive-let handoff between `vb_pat.pat_type` and `vb_expr.exp_type` (NEW)** — attempt M aligned `type_function` single-case ordering and stayed parity-neutral, so the `<cycle> -> Tconstr/Tvar` drift likely survives `type_function` and is introduced (or preserved) at recursive let binding unification/generalization boundaries.
+- [x] **5A2H. Trace recursive-let handoff between `vb_pat.pat_type` and `vb_expr.exp_type` (PARKED, DEEMPHASIZED)** — attempt M aligned `type_function` single-case ordering and stayed parity-neutral, so the `<cycle> -> Tconstr/Tvar` drift likely survives `type_function` and is introduced (or preserved) at recursive let binding unification/generalization boundaries.
   - Required next step: instrument `compiler-rust/src/types/typecore.rs::type_let_bindings` around recursive pre-unification and post-expression typing to log node identity for each binding (`typed_pat.pat_type`, `typed_expr.exp_type`) for `blackify`/`elements_aux` before `end_def`, after generalization, and in final typedtree emission.
   - Compare against OCaml `compiler/ml/typecore.ml` `type_let` ordering (`unify_pat env pat (type_approx ...)`, then `type_expect exp_env ... pat.pat_type`, then `generalize`) to find where Rust stops sharing the same node edge.
   - Evidence: with attempt M reverted, `timeout 300 ./scripts/test_typedtree_parity.sh` remained **589/657** and `rbset`/`set_gen` remained **0/1** with unchanged first diffs.
-- [ ] **5A2I. Trace `instance(copy)` effects on recursive function types at `type_let` boundary (NEW)** — attempts N/O show that changing `type_function` final-arrow wiring or widening non-generic identity inside `copy_type_cached` in isolation is parity-neutral, so the first `<cycle> -> Tconstr/Tvar` drift likely occurs when recursive approximation types and function result types are unified/instantiated across `type_let_bindings`.
+- [x] **5A2I. Trace `instance(copy)` effects on recursive function types at `type_let` boundary (PARKED, DEEMPHASIZED)** — attempts N/O show that changing `type_function` final-arrow wiring or widening non-generic identity inside `copy_type_cached` in isolation is parity-neutral, so the first `<cycle> -> Tconstr/Tvar` drift likely occurs when recursive approximation types and function result types are unified/instantiated across `type_let_bindings`.
   - Required next step: instrument `compiler-rust/src/types/typecore.rs::type_let_bindings` and `compiler-rust/src/types/ctype.rs::{instance, copy_type_cached}` to capture node IDs for `binding_types[i]`, `typed_pat.pat_type`, `typed_expr.exp_type`, and `type_approx_for_rec_let(...)` around:
     - recursive pre-unification (`unify_pattern_types`),
     - `type_expect` return for each recursive function binding,
