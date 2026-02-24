@@ -2168,9 +2168,16 @@ fn transform_inline_sig_value(
 
     match &*expr.pexp_desc {
         ExpressionDesc::Pexp_constant(c) => match &**c {
-            // @inline("string") let x: t
+            // @inline("string") or @inline(`template`) let x: t
             Constant::String(s, delim) => {
-                let prim = inline_string_primitive(s, delim.as_deref(), arena);
+                // OCaml's PPX transforms template literal delimiters ("js" → "bq")
+                // before extracting @inline payloads. We must match that behavior here
+                // since the payload expression isn't run through rewrite_expression.
+                let effective_delim = match delim.as_deref() {
+                    Some("js") if has_template_attr(&expr, arena) => Some("bq"),
+                    other => other,
+                };
+                let prim = inline_string_primitive(s, effective_delim, arena);
                 Some(ValueDescription {
                     pval_name: vd.pval_name.clone(),
                     pval_type: vd.pval_type.clone(),
