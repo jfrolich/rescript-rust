@@ -55,7 +55,23 @@ Results persist in `.parity-cache/` — inspect diffs at `.parity-cache/tests/di
 
 ## Current Status
 
-**644/657 (98%) — raw byte-for-byte comparison**
+**589/657 (89%) — raw byte-for-byte comparison**
+
+**Latest deterministic snapshot (2026-02-24):**
+- Typecheck parity: `589/657`
+- Rust type-check: `650/657` (7 OCaml-only passes)
+- Parity failures: `61`
+- OCaml-only modules: `bb`, `gpr_4280_test`, `gpr_5218_test`, `hash_collision_test`, `int_poly_var`, `more_poly_variant_test`, `poly_variant_test`
+- Rust typed-sexp worker now emits explicit module-level errors and writes `lib/ocaml/*.sexp.error` sidecars for failed modules.
+
+**Failure buckets (high-level):**
+- Type sharing / cycle rendering drift (`<cycle>` vs concrete nodes): largest cluster
+- Path normalization drift (`Pdot`/`Pident`, alias path names)
+- Row variant representation drift (`open/closed`, `Reither`/`Rpresent`)
+- Local-name numbering drift (`local_1` vs `local_2`)
+- Byte/encoding drift in string literals (`�` replacement chars)
+
+**Important:** historical entries below include older baselines and recovered branch notes; do not treat them as the current scorecard.
 
 ### 2026-02-24 Task 5 Deep-Copy: 637 → 644
 
@@ -145,9 +161,9 @@ This repo was reconstructed after accidental deletion. The base comes from a `/t
 
 ---
 
-## Immediate Priority: 653 → 657 (Remaining Structural Parity)
+## Immediate Priority: 588 → 657
 
-Most byte-format drift is now resolved. Remaining work is primarily in type-checker/type-expression parity across the 4 failing modules listed by the latest deterministic run.
+Primary blockers are currently (1) cycle/sharing typedtree rendering drift and (2) Rust typed-sexp typecheck failures for the 7 OCaml-only modules. Keep work anchored to the latest deterministic snapshot above.
 
 ---
 

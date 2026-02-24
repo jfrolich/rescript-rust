@@ -1,10 +1,12 @@
-# Ralph Guidance: 607 → 657 (100% Parity)
+# Ralph Guidance: 589 → 657 (100% Parity)
 
-**Last Updated:** 2026-02-23
-**Current:** 607/657 (50 failures) on `typed-tree-parity-2`
+**Last Updated:** 2026-02-24
+**Current:** 589/657 (61 parity failures, 7 OCaml-only passes) on `typed-tree-parity-2`
 **Previous Best:** 654/657 on `typed-ast-parity` (lost in repo reconstruction)
 
 This document lists the **exact fixes** from the `typed-ast-parity` branch (612→654 range), verified against Claude session logs. Each fix has its original parity delta and description. We've verified which are present vs missing on the current branch.
+
+Historical note: many sections below describe recovery-era experiments and intermediate baselines; use `projects/typedtree-parity/RALPH_TODO.md` current-status section as the live source of truth.
 
 ---
 
