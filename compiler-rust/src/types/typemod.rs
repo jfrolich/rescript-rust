@@ -5450,7 +5450,11 @@ fn type_structure_item<'a>(
                                 let lbl_desc = crate::types::LabelDescription {
                                     lbl_name: ld.ld_id.name().to_string(),
                                     lbl_res: ty_res,
-                                    lbl_arg: ld.ld_type,
+                                    lbl_arg: crate::types::ctype::remap_label_type_to_params(
+                                        ctx,
+                                        ld.ld_type,
+                                        &inlined_decl.type_params,
+                                    ),
                                     lbl_mut: ld.ld_mutable.clone(),
                                     lbl_optional: ld.ld_optional,
                                     lbl_pos: pos as i32,
@@ -5478,7 +5482,11 @@ fn type_structure_item<'a>(
                         let lbl_desc = crate::types::LabelDescription {
                             lbl_name: ld.ld_id.name().to_string(),
                             lbl_res: ty_res,
-                            lbl_arg: ld.ld_type,
+                            lbl_arg: crate::types::ctype::remap_label_type_to_params(
+                                ctx,
+                                ld.ld_type,
+                                &internal_decl.type_params,
+                            ),
                             lbl_mut: ld.ld_mutable.clone(),
                             lbl_optional: ld.ld_optional,
                             lbl_pos: pos as i32,
@@ -5714,7 +5722,11 @@ fn type_structure_item<'a>(
                             let lbl_desc = crate::types::LabelDescription {
                                 lbl_name: ld.ld_id.name().to_string(),
                                 lbl_res: ty_res,
-                                lbl_arg: ld.ld_type,
+                                lbl_arg: crate::types::ctype::remap_label_type_to_params(
+                                    ctx,
+                                    ld.ld_type,
+                                    &inlined_decl.type_params,
+                                ),
                                 lbl_mut: ld.ld_mutable,
                                 lbl_optional: ld.ld_optional,
                                 lbl_pos: pos as i32,
@@ -5931,7 +5943,11 @@ fn type_structure_item<'a>(
                         let lbl_desc = crate::types::LabelDescription {
                             lbl_name: ld.ld_id.name().to_string(),
                             lbl_res: ty_res,
-                            lbl_arg: ld.ld_type,
+                            lbl_arg: crate::types::ctype::remap_label_type_to_params(
+                                ctx,
+                                ld.ld_type,
+                                &inlined_decl.type_params,
+                            ),
                             lbl_mut: ld.ld_mutable,
                             lbl_optional: ld.ld_optional,
                             lbl_pos: pos as i32,

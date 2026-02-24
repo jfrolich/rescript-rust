@@ -55,7 +55,7 @@ Results persist in `.parity-cache/` — inspect diffs at `.parity-cache/tests/di
 
 ## Current Status
 
-**632/657 (96%) — raw byte-for-byte comparison**
+**653/657 (99%) — raw byte-for-byte comparison**
 
 ### 2026-02-24 Recovery: 478 → 632
 
@@ -125,9 +125,9 @@ This repo was reconstructed after accidental deletion. The base comes from a `/t
 
 ---
 
-## Immediate Priority: 632 → 657 (Remaining Structural Parity)
+## Immediate Priority: 653 → 657 (Remaining Structural Parity)
 
-Most byte-format drift is now resolved. Remaining work is primarily in type-checker/type-expression parity across the 25 failing modules listed by the latest deterministic run.
+Most byte-format drift is now resolved. Remaining work is primarily in type-checker/type-expression parity across the 4 failing modules listed by the latest deterministic run.
 
 ---
 
@@ -358,26 +358,40 @@ Most byte-format drift is now resolved. Remaining work is primarily in type-chec
   - Parity-neutral experiment (reverted): attempted isolating record-label field typing from expected-record unification in `compiler-rust/src/types/typecore.rs::type_record` by copying label arg/res before/after unify. Filtered `timeout 300 ./scripts/test_typedtree_parity.sh unboxed_use_case` remained **0/1** and deterministic full parity stayed **478/657** with compile parity **657/657**.
   - OCaml refs read: `compiler/ml/typecore.ml` (`Pexp_variant`, `type_label_exp`, `type_argument`) and `compiler/ml/ctype.ml` (`instance_label`, `unify2`, `unify3`).
   - Next Rust refs: `compiler-rust/src/types/typecore.rs` (`type_variant` fast path and record field typing around `instance_label`) plus constructor/label instantiation flow that introduces `t3_aux<'a,'b>` unifications before `t3` row expansion stabilizes.
-- [ ] **7. build_as_type for Tpat_variant and Tpat_or** — Add Tpat_variant (open row+Rpresent) and Tpat_or (open row). (643→644, test: more_poly_variant_test.res)
-- [ ] **8. Label type param sharing** — Add `remap_label_type_to_params` so lbl_arg/lbl_res share Tvar nodes. (646→647, test: gpr_4274_test.res)
+- [x] **7. build_as_type for Tpat_variant and Tpat_or** — Add Tpat_variant (open row+Rpresent) and Tpat_or (open row). (643→644, test: more_poly_variant_test.res)
+  - Verified 2026-02-24: Rust `build_as_type` already has explicit `Tpat_variant` and `Tpat_or` branches in `compiler-rust/src/types/typecore.rs`; deterministic full run at **653/657** does not include `more_poly_variant_test` in failures.
+- [x] **8. Label type param sharing** — Add `remap_label_type_to_params` so lbl_arg/lbl_res share Tvar nodes. (646→647, test: gpr_4274_test.res)
+  - 2026-02-24 fix: implemented `remap_label_type_to_params` in `compiler-rust/src/types/ctype.rs` (OCaml-aligned direct named-parameter remap for label args) and threaded it through declaration-backed `LabelDescription` construction in:
+    - `compiler-rust/src/types/env.rs`
+    - `compiler-rust/src/cmi/persistent_env.rs`
+    - `compiler-rust/src/types/typemod.rs`
+    - `compiler-rust/src/types/typecore.rs`
+  - OCaml refs read: `compiler/ml/datarepr.ml` (`label_descrs`), `compiler/ml/types.ml` (`label_description`), `compiler/ml/ctype.ml` (`instance_label`), `compiler/ml/typecore.ml` (label typing flow around `type_label_exp`/`extract_label`).
+  - Deterministic full parity: **639/657 → 653/657** (failures **18 → 4**), compile parity stayed **657/657**.
+  - Remaining failing modules after this fix: `defunctor_make_test`, `ext_array_test`, `flexible_array_test`, `functor_ffi`.
+  - Parser/binary guard: `timeout 300 ./scripts/test_parser_ast_parity.sh 2>&1 | tail -40` ended with `SUCCESS: All 3532 files have full parity!`.
   - 2026-02-23 attempt: implemented/remapped `lbl_arg` at label construction sites (`typemod.rs`, `typecore.rs`, `env.rs`, `persistent_env.rs`) and ran deterministic full parity. Result stayed **478/657 → 478/657** (179 failures). `gpr_4274_test` diff unchanged. Reverted experiment; keep this task unchecked.
   - 2026-02-24 attempt: re-implemented `remap_label_type_to_params` as a cycle-safe in-place remap in `ctype.rs` and threaded it through all declaration-backed label construction sites (`env.rs`, `persistent_env.rs`, `typemod.rs`, `typecore.rs`). Deterministic full parity stayed **478/657 → 478/657** (179 failures), filtered `timeout 300 ./scripts/test_typedtree_parity.sh gpr_4274_test` stayed **0/1** with identical `Tconstr(...) -> Tvar None` drift, parser/binary guard stayed green (`SUCCESS: All 3532 files have full parity!`). Reverted.
   - OCaml refs read: `compiler/ml/datarepr.ml` (`label_descrs`), `compiler/ml/types.ml` (`label_description`), `compiler/ml/typecore.ml` (label disambiguation flow around `type_label_exp`/`extract_label`).
-- [ ] **8A. Qualified label disambiguation for module-scoped records (NEW)** — `gpr_4274_test` still resolves `X.i` / `Foo.foo` through fresh `Tvar None` instead of concrete record paths (`N.t`, `Foo.record`), indicating label lookup/disambiguation fallback is selecting or synthesizing unconstrained labels.
+- [x] **8A. Qualified label disambiguation for module-scoped records (NEW)** — `gpr_4274_test` still resolves `X.i` / `Foo.foo` through fresh `Tvar None` instead of concrete record paths (`N.t`, `Foo.record`), indicating label lookup/disambiguation fallback is selecting or synthesizing unconstrained labels.
+  - Resolution (2026-02-24): resolved by the Task 8 label-param remap fix; `gpr_4274_test` dropped out of the deterministic failure list at **653/657**.
   - Evidence: deterministic filtered diff on 2026-02-23 shows repeated `Tconstr(Pdot(Pident \"N\"), \"t\") -> Tvar None` and `Tconstr(Pdot(Pident \"Foo\"), \"record\") -> Tvar None`.
   - Session confirmation (2026-02-23): `timeout 300 ./scripts/test_typedtree_parity.sh` remained **478/657** with **179** parity failures; `timeout 300 ./scripts/test_typedtree_parity.sh gpr_4274_test` remained **0/1** with the same drift.
   - Next OCaml refs: `typecore.ml` label disambiguation path (`NameChoice`/`extract_label`) and module-qualified label lookup behavior.
   - Next Rust refs: `typecore.rs` `disambiguate_label`, `lookup_label_by_expected_type`, and module-signature path resolution helpers.
-- [ ] **8B. Verify longident preservation for record labels before disambiguation (NEW)** — determine whether module qualifiers (`X.i`, `Foo.foo`) are preserved in `ExpressionRecordField.lid` / `PatternRecordField.lid` by the time `typecore` runs.
+- [x] **8B. Verify longident preservation for record labels before disambiguation (NEW)** — determine whether module qualifiers (`X.i`, `Foo.foo`) are preserved in `ExpressionRecordField.lid` / `PatternRecordField.lid` by the time `typecore` runs.
+  - Resolution (2026-02-24): resolved by the Task 8 label-param remap fix; `gpr_4274_test` dropped out of the deterministic failure list at **653/657**.
   - Evidence (2026-02-24): added `disambiguate_label_by_lid` + module-signature label lookup (`resolve_module_lid`, last-defined `SigType` record-label selection) and threaded through record/pattern/field access. Deterministic full parity stayed **478/657 → 478/657** (179 failures); filtered `gpr_4274_test` remained **0/1** with unchanged `Tconstr(Pdot(Pident \"N\"), \"t\") -> Tvar None` and `Tconstr(Pdot(Pident \"Foo\"), \"record\") -> Tvar None` drift. Reverted.
   - Hypothesis: record-field longidents may already be de-qualified (or normalized to non-module paths) before label disambiguation, so module-aware lookup is never exercised.
   - Next OCaml refs: `typecore.ml` record-field typing paths (`type_label_exp`, record/pattern label lookup) and `NameChoice` handling of qualified labels.
   - Next Rust refs: parser/binary-ast longident plumbing for record fields, `type_pattern_record` and `type_record` call sites, and `TypeCheckContext::resolve_lid`.
-- [ ] **8C. Confirm `instance_label` input is already unconstrained in `gpr_4274_test` (NEW)** — both remap-label experiments were parity-neutral, so the `Tvar None` drift likely occurs before or during label disambiguation/expected-type extraction, not when constructing declaration labels.
+- [x] **8C. Confirm `instance_label` input is already unconstrained in `gpr_4274_test` (NEW)** — both remap-label experiments were parity-neutral, so the `Tvar None` drift likely occurs before or during label disambiguation/expected-type extraction, not when constructing declaration labels.
+  - Resolution (2026-02-24): resolved by the Task 8 label-param remap fix; `gpr_4274_test` dropped out of the deterministic failure list at **653/657**.
   - Evidence (2026-02-24): a full remap pass over declaration-backed labels (all major construction sites) left `gpr_4274_test` unchanged (`0/1`) and full parity unchanged (**478/657**, 179 failures); the same `N.t`/`Foo.record` fields still collapse to `Tvar None`.
   - Next OCaml refs: `compiler/ml/typecore.ml` `type_label_access`, `type_label_exp`, and `NameChoice.disambiguate` call path for qualified labels.
   - Next Rust refs: `typecore.rs` `disambiguate_label`, `lookup_label_by_expected_type`, `extract_type_path_from_expected_with_persistent_env`, and `instance_label` call sites in `type_record`/`type_pattern_record`.
-- [ ] **8D. Verify declaration type params expose stable names at label-construction sites (NEW)** — a name-based remap pass across declaration-backed `LabelDescription` builders was parity-neutral, suggesting parameter names may already be erased (`Tvar None`) before remap or the `gpr_4274_test` drift is upstream of label construction.
+- [x] **8D. Verify declaration type params expose stable names at label-construction sites (NEW)** — a name-based remap pass across declaration-backed `LabelDescription` builders was parity-neutral, suggesting parameter names may already be erased (`Tvar None`) before remap or the `gpr_4274_test` drift is upstream of label construction.
+  - Resolution (2026-02-24): resolved by the Task 8 label-param remap fix; `gpr_4274_test` dropped out of the deterministic failure list at **653/657**.
   - 2026-02-24 attempt: added `remap_label_type_to_params` in `compiler-rust/src/types/ctype.rs` and threaded it into declaration-backed label builders in `compiler-rust/src/types/env.rs`, `compiler-rust/src/types/typemod.rs`, `compiler-rust/src/cmi/persistent_env.rs`, and type-directed label synthesis in `compiler-rust/src/types/typecore.rs`.
   - OCaml refs read: `compiler/ml/datarepr.ml` (`label_descrs`) and `compiler/ml/types.ml` (`label_description`).
   - Targeted check: `timeout 300 ./scripts/test_typedtree_parity.sh gpr_4274_test` stayed **0/1** with unchanged `N.t`/`Foo.record -> Tvar None` drift.

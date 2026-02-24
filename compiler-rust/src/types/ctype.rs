@@ -2379,6 +2379,41 @@ pub fn instance_constructor(
     (ty_args, ty_res)
 }
 
+/// Remap named type variables in a label type to the declaration's canonical
+/// type parameter nodes. This keeps `lbl_arg` and `lbl_res` sharing the same
+/// type parameter identities when labels are rebuilt from declarations.
+pub fn remap_label_type_to_params(
+    ctx: &TypeContext<'_>,
+    label_ty: TypeExprRef,
+    type_params: &[TypeExprRef],
+) -> TypeExprRef {
+    let label_ty = ctx.repr(label_ty);
+    let var_name = {
+        let desc = ctx.get_desc(label_ty);
+        match &*desc {
+            TypeDesc::Tvar(Some(name)) | TypeDesc::Tunivar(Some(name)) => Some(name.clone()),
+            _ => None,
+        }
+    };
+
+    let Some(var_name) = var_name else {
+        return label_ty;
+    };
+
+    for &param in type_params {
+        let param = ctx.repr(param);
+        let desc = ctx.get_desc(param);
+        match &*desc {
+            TypeDesc::Tvar(Some(name)) | TypeDesc::Tunivar(Some(name)) if *name == var_name => {
+                return param;
+            }
+            _ => {}
+        }
+    }
+
+    label_ty
+}
+
 /// Instantiate a label description, creating fresh type variables for its
 /// result type (record type) and argument type (field type) while sharing
 /// the same variable substitutions between them.

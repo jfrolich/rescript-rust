@@ -1709,7 +1709,11 @@ pub fn add_signature_to_env(
                             let label_desc = LabelDescription {
                                 lbl_name: ld.ld_id.name().to_string(),
                                 lbl_res: res_ty,
-                                lbl_arg: ld.ld_type,
+                                lbl_arg: crate::types::ctype::remap_label_type_to_params(
+                                    ctx,
+                                    ld.ld_type,
+                                    &decl.type_params,
+                                ),
                                 lbl_mut: ld.ld_mutable,
                                 lbl_optional: ld.ld_optional,
                                 lbl_pos: pos as i32,
