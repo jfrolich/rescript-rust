@@ -5542,26 +5542,22 @@ fn type_match(
         }
     }
 
-    // Type check value cases against the scrutinee type
+    // Match OCaml type_cases: create a separate ty_arg by instancing the
+    // scrutinee type. This separates the case-typing type from the scrutinee
+    // expression type, matching OCaml's `ty_arg = instance env exp_type`.
+    // Each case further instances ty_arg per-case inside type_case_impl.
+    // After all cases, we merge variant row fields into ty_arg (not the
+    // original expression type) to replicate OCaml's shared ty_arg.
+    let ty_arg = crate::types::instance(tctx.type_ctx, typed_scrutinee.exp_type);
     let mut typed_val_cases = Vec::new();
-    // OCaml `type_cases` instances the scrutinee type once per case; avoid
-    // double-instancing by passing the original scrutinee type into
-    // `type_case_impl`, which performs the per-case `instance(...)`.
-    let cases_scrutinee_ty = typed_scrutinee.exp_type;
     for case in &val_caselist {
-        let typed_case = type_case(tctx, env, case, cases_scrutinee_ty, expected_ty)?;
+        let typed_case = type_case(tctx, env, case, ty_arg, expected_ty)?;
         typed_val_cases.push(typed_case);
     }
 
-    // Match OCaml type_cases: after typing ALL patterns, merge variant row
-    // fields from all case patterns back into the scrutinee type. In OCaml,
-    // all cases share the same ty_arg, so variant tags added by any pattern
-    // (e.g. #A, #B) are visible in all other patterns and the scrutinee.
-    // In Rust's per-case instancing, each case has a separate variant row.
-    // We merge them back by collecting all row fields and setting them on
-    // the scrutinee's variant row.
+    // Merge variant row fields from all case patterns into ty_arg.
     if typed_val_cases.len() > 1 {
-        merge_variant_row_fields_into_scrutinee(tctx.type_ctx, &typed_val_cases, cases_scrutinee_ty);
+        merge_variant_row_fields_into_scrutinee(tctx.type_ctx, &typed_val_cases, ty_arg);
     }
 
     // Type check exception cases against exn type
@@ -5917,12 +5913,14 @@ fn close_variant_row_for_pat_type(
     }
 }
 
-/// Merge variant row fields from all case patterns back into the scrutinee type.
+/// Merge variant row fields from all case patterns into the scrutinee type.
 /// In OCaml's type_cases, all patterns share the same ty_arg. When case `| #A`
 /// adds tag "A" to the variant row and case `| #B` adds tag "B", both tags end
-/// up in the shared row. In Rust's per-case instancing, each case has its own
-/// variant row copy. This function collects all row fields from all case
-/// patterns and merges them into the scrutinee type's variant row.
+/// up in the shared ty_arg visible to the scrutinee expression.
+/// In Rust's per-case instancing, each case has its own variant row copy.
+/// This function collects row fields from all case patterns and merges
+/// them into the SCRUTINEE type only (not into individual case pattern types,
+/// which should keep their per-case field sets).
 fn merge_variant_row_fields_into_scrutinee(
     ctx: &TypeContext<'_>,
     cases: &[crate::types::typedtree::Case],
@@ -5941,81 +5939,35 @@ fn merge_variant_row_fields_into_scrutinee(
     drop(scrutinee_desc);
 
     let scrutinee_row_data = row_repr(ctx, &scrutinee_row);
-    let existing_tags: std::collections::HashSet<String> = scrutinee_row_data
-        .row_fields
-        .iter()
-        .map(|(tag, _)| tag.clone())
-        .collect();
 
-    // Collect new fields from all case patterns
-    let mut new_fields: HashMap<String, crate::types::type_expr::RowField> = HashMap::new();
+    // Collect ALL variant row fields: start with scrutinee's, add from patterns.
+    let mut all_fields: HashMap<String, crate::types::type_expr::RowField> = HashMap::new();
+    for (tag, field) in &scrutinee_row_data.row_fields {
+        all_fields.insert(tag.clone(), field.clone());
+    }
+
+    // Collect new fields from all case pattern TOP-LEVEL variant types only
     for case in cases {
-        collect_variant_fields_from_pattern(ctx, &case.c_lhs, &existing_tags, &mut new_fields);
+        let repr = ctx.repr(case.c_lhs.pat_type);
+        let desc = ctx.get_desc(repr);
+        if let TypeDesc::Tvariant(row) = &*desc {
+            let row_data = row_repr(ctx, row);
+            for (tag, field) in &row_data.row_fields {
+                all_fields.entry(tag.clone()).or_insert_with(|| field.clone());
+            }
+        }
     }
 
-    if new_fields.is_empty() {
-        return;
+    if all_fields.len() <= scrutinee_row_data.row_fields.len() {
+        return; // No new fields to add
     }
 
-    // Merge new fields into the scrutinee's variant row
+    // Build sorted field list and set on scrutinee
     let mut merged_row = scrutinee_row_data;
-    for (tag, field) in new_fields {
-        merged_row.row_fields.push((tag, field));
-    }
-    // Sort fields alphabetically to match OCaml's sorted order
+    merged_row.row_fields = all_fields.into_iter().collect();
     merged_row.row_fields.sort_by(|(a, _), (b, _)| a.cmp(b));
 
     ctx.set_desc(scrutinee_repr, TypeDesc::Tvariant(merged_row));
-}
-
-/// Collect variant row fields from a pattern's type, excluding already-known tags.
-fn collect_variant_fields_from_pattern(
-    ctx: &TypeContext<'_>,
-    pat: &crate::types::typedtree::Pattern,
-    existing_tags: &std::collections::HashSet<String>,
-    new_fields: &mut std::collections::HashMap<String, crate::types::type_expr::RowField>,
-) {
-    let repr = ctx.repr(pat.pat_type);
-    let desc = ctx.get_desc(repr);
-    if let TypeDesc::Tvariant(row) = &*desc {
-        let row_data = crate::types::btype::row_repr(ctx, row);
-        for (tag, field) in &row_data.row_fields {
-            if !existing_tags.contains(tag) && !new_fields.contains_key(tag) {
-                new_fields.insert(tag.clone(), field.clone());
-            }
-        }
-    }
-    drop(desc);
-
-    // Recurse into sub-patterns
-    match &pat.pat_desc {
-        crate::types::typedtree::PatternDesc::Tpat_construct(_, _, pats) => {
-            for p in pats {
-                collect_variant_fields_from_pattern(ctx, p, existing_tags, new_fields);
-            }
-        }
-        crate::types::typedtree::PatternDesc::Tpat_tuple(pats) => {
-            for p in pats {
-                collect_variant_fields_from_pattern(ctx, p, existing_tags, new_fields);
-            }
-        }
-        crate::types::typedtree::PatternDesc::Tpat_variant(_, Some(p), _) => {
-            collect_variant_fields_from_pattern(ctx, p, existing_tags, new_fields);
-        }
-        crate::types::typedtree::PatternDesc::Tpat_record(fields, _) => {
-            for (_, _, p, _) in fields {
-                collect_variant_fields_from_pattern(ctx, p, existing_tags, new_fields);
-            }
-        }
-        crate::types::typedtree::PatternDesc::Tpat_or(p1, p2, _) => {
-            collect_variant_fields_from_pattern(ctx, p1, existing_tags, new_fields);
-            collect_variant_fields_from_pattern(ctx, p2, existing_tags, new_fields);
-        }
-        crate::types::typedtree::PatternDesc::Tpat_alias(p, _, _) => {
-            collect_variant_fields_from_pattern(ctx, p, existing_tags, new_fields);
-        }
-        _ => {}
-    }
 }
 
 /// Propagate variant row closures across all case pattern types.
