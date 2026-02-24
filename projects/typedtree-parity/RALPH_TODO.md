@@ -337,6 +337,16 @@ Primary blockers are currently (1) cycle/sharing typedtree rendering drift and (
     - Targeted checks: `timeout 300 ./scripts/test_typedtree_parity.sh rbset` and `... set_gen` both remained **0/1** with unchanged first diffs (`rbset` `<cycle> ↔ Tconstr(Pident "t")`, `set_gen` `t(<cycle>) ↔ t(Tvar None)`).
     - Deterministic full parity stayed **589/657 → 589/657** (parity failures **61**, Rust compile coverage **650/657**, OCaml-only pass **7**).
     - Reverted immediately after parity-neutral outcome.
+  - 2026-02-24 attempt M (reverted): in `compiler-rust/src/types/typecore.rs::type_function`, tested an OCaml-ordered single-case flow bundle:
+    - propagate-gated `begin_def/end_def/generalize` around parameter pattern typing,
+    - body-env bindings by identity (`pv.ty`, no extra `instance`) while keeping existing shallow-copy gate,
+    - case-RHS typed expression forced to `instance(return_ty)` (OCaml `type_cases` `c_rhs.exp_type` shape),
+    - final function `exp_type` arrow input switched to `param_ty` (`ty_arg`) instead of `typed_param.pat_type`.
+    - OCaml refs read: `compiler/ml/typecore.ml` (`type_function` + `type_cases` single-case flow, `c_rhs = {exp with exp_type = instance env ty_res'}`) and `compiler/ml/ctype.ml` (`instance`).
+    - Targeted checks: `timeout 300 ./scripts/test_typedtree_parity.sh rbset` and `... set_gen` both stayed **0/1** with unchanged first diffs.
+    - Deterministic full parity stayed **589/657 → 589/657** (parity failures **61**, Rust compile coverage **650/657**, OCaml-only pass **7**).
+    - Parser/binary guard after revert: `timeout 300 ./scripts/test_parser_ast_parity.sh 2>&1 | tail -40` ended with `SUCCESS: All 3532 files have full parity!`.
+    - Reverted immediately after parity-neutral outcome.
   - Deterministic full baseline after all reverts (current workspace snapshot):
     - `timeout 300 ./scripts/test_typedtree_parity.sh` reports **589/657** parity with **7** OCaml-only pass files and **61** parity failures.
     - Re-run confirmed stable **589/657** (**589 -> 589**).
@@ -372,6 +382,10 @@ Primary blockers are currently (1) cycle/sharing typedtree rendering drift and (
     - delayed `unify_pats ty_arg'`,
     - optional `unify_pats (instance env ty_arg)` when propagate applies.
   - Evidence: attempt L (`type_function` fresh-pattern unification only) kept `rbset`/`set_gen` at **0/1** and full parity at **589/657**.
+- [ ] **5A2H. Trace recursive-let handoff between `vb_pat.pat_type` and `vb_expr.exp_type` (NEW)** — attempt M aligned `type_function` single-case ordering and stayed parity-neutral, so the `<cycle> -> Tconstr/Tvar` drift likely survives `type_function` and is introduced (or preserved) at recursive let binding unification/generalization boundaries.
+  - Required next step: instrument `compiler-rust/src/types/typecore.rs::type_let_bindings` around recursive pre-unification and post-expression typing to log node identity for each binding (`typed_pat.pat_type`, `typed_expr.exp_type`) for `blackify`/`elements_aux` before `end_def`, after generalization, and in final typedtree emission.
+  - Compare against OCaml `compiler/ml/typecore.ml` `type_let` ordering (`unify_pat env pat (type_approx ...)`, then `type_expect exp_env ... pat.pat_type`, then `generalize`) to find where Rust stops sharing the same node edge.
+  - Evidence: with attempt M reverted, `timeout 300 ./scripts/test_typedtree_parity.sh` remained **589/657** and `rbset`/`set_gen` remained **0/1** with unchanged first diffs.
 - [ ] **5B. Preserve compile parity when porting `Subst.typexp` variant `more'` flow (NEW)** — direct conditional `row_more` reuse currently causes Rust type-check regressions on full build.
   - Evidence (2026-02-24): first-pass OCaml-style `dup`/`more'` port in `copy_type_deep` + `subst_identity_copy_rec` changed full run from **478/657** to **539/657** with Rust compile parity drop **657/657 → 648/657** (9 OCaml-only passes). Reverted.
   - Required guardrail: maintain compile parity **657/657** and avoid introducing new Rust-reject files while aligning variant row-copy behavior.
