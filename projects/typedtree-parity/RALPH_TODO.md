@@ -184,6 +184,11 @@ The old parity script post-processed sexp output (stripping non-printable chars,
   - Follow-up refs:
     - OCaml: `compiler/ml/ctype.ml` `unify3` same-path `Tconstr` handling + call sites that instantiate constructor/label types for this path.
     - Rust: `compiler-rust/src/types/ctype.rs::unify_types` (same-path `Tconstr` branch), plus `typecore.rs` constructor/record-label instantiation paths feeding those `t3_aux` unifications.
+- [ ] **6F. Validate `unify_after_expansion` wiring for same-path parameterized aliases (NEW)** — forcing same-path `Tconstr` branch to call `unify_after_expansion` whenever `expand_head` changed either side was parity-neutral on this snapshot.
+  - Evidence (2026-02-24): patched `compiler-rust/src/types/ctype.rs::unify_types` to replace the `expand_head_once`+`exp_is_constr` gate with `expand_head` and `unify_after_expansion` for same-path non-empty args.
+  - Deterministic parity stayed **478/657 → 478/657** (179 parity failures), filtered `timeout 300 ./scripts/test_typedtree_parity.sh unboxed_use_case` stayed **0/1**, and filtered `timeout 300 ./scripts/test_typedtree_parity.sh ExternalArity` stayed **0/1**.
+  - Parser/binary guard remained green: `timeout 300 ./scripts/test_parser_ast_parity.sh 2>&1 | tail -40` ended with `SUCCESS: All 3532 files have full parity!`.
+  - Reverted the code change; keep this as evidence that same-path expansion routing alone does not remove `t3<_> -> t3<int,string>` concretization.
 - [ ] **7. build_as_type for Tpat_variant and Tpat_or** — Add Tpat_variant (open row+Rpresent) and Tpat_or (open row). (643→644, test: more_poly_variant_test.res)
 - [ ] **8. Label type param sharing** — Add `remap_label_type_to_params` so lbl_arg/lbl_res share Tvar nodes. (646→647, test: gpr_4274_test.res)
   - 2026-02-23 attempt: implemented/remapped `lbl_arg` at label construction sites (`typemod.rs`, `typecore.rs`, `env.rs`, `persistent_env.rs`) and ran deterministic full parity. Result stayed **478/657 → 478/657** (179 failures). `gpr_4274_test` diff unchanged. Reverted experiment; keep this task unchecked.
