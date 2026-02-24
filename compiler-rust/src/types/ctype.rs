@@ -1540,13 +1540,42 @@ fn unify_types<'a>(
                 return Err(TypeError::Unify(vec![(t1, t2)]));
             }
 
+            let args1 = args1.clone();
+            let args2 = args2.clone();
+            drop(desc1);
+            drop(desc2);
+
+            // OCaml ctype.ml unify2/unify3: for same-path parameterized aliases,
+            // expand heads first and unify expanded forms when they become
+            // structural (e.g. polyvariant aliases). This avoids forcing
+            // phantom parameters by direct argument unification.
+            if !args1.is_empty() {
+                if let Some(env) = state.env() {
+                    let exp1 = expand_head_once(ctx, env, t1).unwrap_or(t1);
+                    let exp2 = expand_head_once(ctx, env, t2).unwrap_or(t2);
+                    let exp1 = ctx.repr(exp1);
+                    let exp2 = ctx.repr(exp2);
+
+                    let exp1_is_constr = {
+                        let desc = ctx.get_desc(exp1);
+                        matches!(&*desc, TypeDesc::Tconstr { .. })
+                    };
+                    let exp2_is_constr = {
+                        let desc = ctx.get_desc(exp2);
+                        matches!(&*desc, TypeDesc::Tconstr { .. })
+                    };
+
+                    if !exp1_is_constr || !exp2_is_constr {
+                        return unify(ctx, state, exp1, exp2);
+                    }
+                }
+            }
+
             let pairs: Vec<_> = args1
                 .iter()
                 .zip(args2.iter())
                 .map(|(&a, &b)| (a, b))
                 .collect();
-            drop(desc1);
-            drop(desc2);
 
             // OCaml links t1'→t2 BEFORE recursing into children
             link_type(ctx, t1, t2);
