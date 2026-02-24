@@ -159,6 +159,15 @@ Most byte-format drift is now resolved. Remaining work is primarily in type-chec
   - Targeted checks: `timeout 300 ./scripts/test_typedtree_parity.sh AsInUncurriedExternals` and `... ExternalArity` both moved to **1/1 parity**.
   - Parser/binary guard: `timeout 300 ./scripts/test_parser_ast_parity.sh 2>&1 | tail -40` ended with `SUCCESS: All 3532 files have full parity!`.
 - [ ] **5. Deep-copy Tvariant/Tobject/Tfield in copy_type_deep** — `copy_type_deep_inner` catch-all returns original, needs deep copy. (642→643, test: jsxv4_newtype.res)
+  - 2026-02-24 attempt: aligned `compiler-rust/src/types/ctype.rs::copy_type_deep` `TypeDesc::Tvariant` with OCaml `Subst.typexp` row handling by:
+    - removing `Ctype.copy`-only PR#6163 row-fixed promotion from this path,
+    - computing `dup` from `row_more` (`generic_level` / `static_row` / `Tconstr`) and using OCaml-style `more'` reuse rules (`Tunivar` and non-dup `Tvar` keep identity),
+    - keeping `Reither.link` only when `not dup`, and forcing `matched=true` only when original `row.row_fixed` is true.
+  - OCaml refs read: `compiler/ml/subst.ml` (`typexp` `Tvariant` `dup`/`more'` flow) and `compiler/ml/btype.ml` (`copy_row` keep/matched semantics).
+  - Targeted checks: `timeout 300 ./scripts/test_typedtree_parity.sh set_gen` stayed **0/1**; `timeout 300 ./scripts/test_typedtree_parity.sh jsxv4_newtype` stayed **0/1** (OCaml-only pass in filtered mode).
+  - Full parity delta for this iteration: **630/657 → 638/657** (parity failures **27 → 19**), compile parity stayed **657/657**.
+  - Repeated full runs are currently unstable due recurring Rust sexp-generation stack overflow (`653/657`, `637/657`, `638/657` observed); keep task unchecked until this branch is deterministic.
+  - Parser/binary guard after patch: `timeout 300 ./scripts/test_parser_ast_parity.sh 2>&1 | tail -40` ended with `SUCCESS: All 3532 files have full parity!`.
   - 2026-02-24 attempt: updated `compiler-rust/src/types/ctype.rs` to allocate fresh `RowFieldRef`s for `Reither` links when deep-copying `Tvariant` rows in both `copy_type_deep` and `subst_identity_copy_rec` (to avoid mutable link aliasing between source and copy graphs).
   - OCaml refs read: `compiler/ml/subst.ml` (`typexp`, `Tvariant` copy path) and `compiler/ml/btype.ml` (`copy_row`, `if keep then e else ref None` link handling).
   - Deterministic parity: **478/657 → 478/657** (179 parity failures, compile parity stayed 657/657).

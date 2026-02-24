@@ -2581,29 +2581,26 @@ pub fn copy_type_deep(
             cache.insert(ty, placeholder);
             let row = row_repr(ctx, row);
             let more = ctx.repr(row.row_more);
-            let keep_reither_link = {
-                let more_is_constr = {
-                    let more_desc = ctx.get_desc(more);
-                    let is_constr = matches!(&*more_desc, TypeDesc::Tconstr { .. });
-                    drop(more_desc);
-                    is_constr
-                };
-                let dup = ctx.get_level(more) == GENERIC_LEVEL
-                    || super::btype::static_row(ctx, &row)
-                    || more_is_constr;
-                !dup
+            let more_desc = ctx.get_desc(more);
+            let more_is_constr = matches!(&*more_desc, TypeDesc::Tconstr { .. });
+            let dup = ctx.get_level(more) == GENERIC_LEVEL
+                || super::btype::static_row(ctx, &row)
+                || more_is_constr;
+            let new_row_more = match &*more_desc {
+                TypeDesc::Tsubst(target) => *target,
+                TypeDesc::Tconstr { .. } | TypeDesc::Tnil => copy_type_deep(ctx, row.row_more, cache),
+                TypeDesc::Tunivar(_) => more,
+                TypeDesc::Tvar(_) => {
+                    if dup {
+                        copy_type_deep(ctx, row.row_more, cache)
+                    } else {
+                        more
+                    }
+                }
+                _ => copy_type_deep(ctx, row.row_more, cache),
             };
-            // OCaml ctype.copy (PR#6163): if copied row_more becomes Tconstr,
-            // treat the row as fixed in the copied descriptor.
-            let new_row_more = copy_type_deep(ctx, row.row_more, cache);
-            let effective_row_fixed = if row.row_fixed {
-                true
-            } else {
-                let more_desc = ctx.get_desc(ctx.repr(new_row_more));
-                let is_constr = matches!(&*more_desc, TypeDesc::Tconstr { .. });
-                drop(more_desc);
-                is_constr
-            };
+            drop(more_desc);
+            let keep_reither_link = !dup;
             let new_row_fields: Vec<_> = row
                 .row_fields
                 .iter()
@@ -2629,7 +2626,7 @@ pub fn copy_type_deep(
                                 .iter()
                                 .map(|t| copy_type_deep(ctx, *t, cache))
                                 .collect(),
-                            matched: if effective_row_fixed { true } else { matched },
+                            matched: if row.row_fixed { true } else { matched },
                             link: if keep_reither_link {
                                 link
                             } else {
@@ -2654,7 +2651,7 @@ pub fn copy_type_deep(
                 row_fields: new_row_fields,
                 row_more: new_row_more,
                 row_closed: row.row_closed,
-                row_fixed: effective_row_fixed,
+                row_fixed: row.row_fixed,
                 row_name: new_row_name,
             };
             let result = ctx.new_variant(new_row);
