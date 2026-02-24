@@ -262,6 +262,18 @@ The old parity script post-processed sexp output (stripping non-printable chars,
   - Evidence (2026-02-24): `copy_type_deep` marker port (`dup`-gated `row_more` + temporary `more.desc <- Tsubst(Ttuple [more'; ty'])`) produced no deterministic delta (**478/657 → 478/657**, compile parity **657/657**), and filtered `set_gen`/`gpr_4274_test`/`more_poly_variant_test` all stayed **0/1**. Reverted.
   - Next OCaml refs: `compiler/ml/subst.ml` (`typexp` save/cleanup ordering around row-marker writes) and `compiler/ml/btype.ml` (`cleanup_types` effect on temporary `Tsubst` nodes).
   - Next Rust refs: `compiler-rust/src/types/ctype.rs` (`copy_type_deep`, `subst_identity_copy_rec`) and potential scoped temp-substitution support in `TypeContext` needed to mirror OCaml marker lifetime.
+- [ ] **5K. Confirm `Ctype.copy` row-more keep/newty level semantics are not the remaining Task-5 blocker (NEW)** — porting `copy_type_deep` `Tvariant` toward OCaml `Ctype.copy` (`keep = more.level <> generic_level`, keep-rowvar identity, `Reither.link` keep policy, PR#6163 row-fixed promotion) was parity-neutral.
+  - 2026-02-24 attempt: patched `compiler-rust/src/types/ctype.rs::copy_type_deep` `TypeDesc::Tvariant` branch to:
+    - compute `keep` from `row_more` genericity (`more.level <> generic_level`),
+    - preserve non-generic `Tvar`/`Tunivar` `row_more` by identity, otherwise allocate fresh `Tvar`/`Tunivar` via current-level `new_type` (OCaml `newty`-style),
+    - reuse `Reither.link` only when `keep`, otherwise allocate a fresh row-field ref,
+    - keep PR#6163 promotion (`row_fixed=true` when copied `row_more` is `Tconstr`).
+  - OCaml refs read: `compiler/ml/ctype.ml` (`copy` `Tvariant` branch, lines ~913-979), `compiler/ml/btype.ml` (`copy_row`, lines ~384-410), `compiler/ml/subst.ml` (`typexp` `Tvariant` flow, lines ~191-225).
+  - Targeted checks: `timeout 300 ./scripts/test_typedtree_parity.sh set_gen`, `... gpr_4274_test`, `... more_poly_variant_test` all stayed **0/1** parity.
+  - Deterministic full parity stayed **478/657 → 478/657** (179 parity failures), compile parity stayed **657/657**.
+  - Parser/binary guard stayed green: `timeout 300 ./scripts/test_parser_ast_parity.sh 2>&1 | tail -40` ended with `SUCCESS: All 3532 files have full parity!`.
+  - Reverted after parity-neutral outcome; keep task unchecked.
+  - Next check: trace which Task-5 failures actually flow through `copy_type_deep` `Tvariant` (vs `copy_type_cached` or pre-`instance_label` label typing) before further row-copy tuning.
 - [ ] **6. Expand abbreviations before structural match for same-path Tconstr** — When same path + n_args>0, expand both, unify expanded. (638→639, tests: unboxed_use_case.res, ExternalArity.res)
   - 2026-02-24 attempt: added same-path expansion branch in `ctype.rs` (`unify` Tconstr/Tconstr path-equal case) with direct `unify(exp1, exp2)` when expansion leaves `Tconstr` and no pre-link of `t1 -> t2`. Deterministic full parity stayed **478/657 → 478/657** (179 failures). Targeted `unboxed_use_case` and `ExternalArity` remained **0/1**. Reverted.
   - 2026-02-24 attempt: re-tried the same-path path-equal branch with OCaml `unify2`/`unify3` ordering (`expand_head` first, structural unify only when both sides remain `Tconstr`). OCaml refs read: `compiler/ml/ctype.ml` (`unify2`, `unify3`, same-path `Tconstr` case). Deterministic parity stayed **478/657 → 478/657** (179 failures), targeted `timeout 300 ./scripts/test_typedtree_parity.sh unboxed_use_case` and `... ExternalArity` stayed **0/1**, parser/binary guard stayed green (`SUCCESS: All 3532 files have full parity!`). Reverted.
