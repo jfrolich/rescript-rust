@@ -182,6 +182,12 @@ The old parity script post-processed sexp output (stripping non-printable chars,
   - Next OCaml refs: `typecore.ml` record-field typing paths (`type_label_exp`, record/pattern label lookup) and `NameChoice` handling of qualified labels.
   - Next Rust refs: parser/binary-ast longident plumbing for record fields, `type_pattern_record` and `type_record` call sites, and `TypeCheckContext::resolve_lid`.
 - [ ] **9. Shallow-copy pattern variable types** — Shallow Tconstr copies for pattern vars with non-empty args. (631→634, +3 tests)
+  - 2026-02-24 attempt: added shallow non-empty `Tconstr` copies for pattern-bound values in both `type_case_impl` (always) and `type_function` (non-simple param patterns only), matching the task description; deterministic full parity stayed **478/657 → 478/657** (179 failures), filtered `unboxed_use_case` remained **0/1**. Reverted.
+  - OCaml refs read: `compiler/ml/typecore.ml` `add_pattern_variables` (~1742), `type_function` (~3262), `type_cases` (~3906-4050).
+- [ ] **9A. Identify pre-env concretization site for pattern vars (NEW)** — task-9 env insertion copies were parity-neutral, so non-empty `Tconstr` concretization likely happens earlier (during pattern typing / per-case propagation) or later via shared-case flow.
+  - Evidence (2026-02-24): task-9 port in Rust (`type_case_impl` + `type_function` env insertion shallow copies) produced no deterministic parity delta (**478/657 → 478/657**) and did not change `unboxed_use_case` drift.
+  - Next OCaml refs: `typecore.ml` `type_pattern` and `type_cases` propagation/generalization ordering (`unify_pats`, `iter_pattern ... generalize`, body typing).
+  - Next Rust refs: `typecore.rs` `type_pattern`, `type_case_impl`, and any pre-body pattern-variable plumbing that can still share original scrutinee/type nodes.
 - [ ] **10. Protect scrutinee type from pattern unification** — Shallow copy when instance() returns identity. (636→637, test: option_repr_test.res)
   - 2026-02-24 attempt: added a `type_case_impl` scrutinee guard that `instance`s the case scrutinee type and shallow-copies identity-return `Tconstr` nodes before `type_pattern`. Deterministic full parity stayed **478/657 → 478/657** (179 failures). Reverted.
   - OCaml refs read: `typecore.ml` `type_cases` (`instance ?partial env ty_arg`, pattern/body phasing around lines ~3906-4050) and `add_pattern_variables` (~1742).
