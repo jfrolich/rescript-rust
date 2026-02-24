@@ -2506,36 +2506,65 @@ pub fn copy_type_deep(
             // Deep copy polymorphic variant row description
             let placeholder = ctx.new_var(None);
             cache.insert(ty, placeholder);
-            let new_row_fields: Vec<_> = row.row_fields.iter().map(|(label, field)| {
-                let new_field = match field {
-                    crate::types::type_expr::RowField::Rpresent(opt_ty) => {
-                        crate::types::type_expr::RowField::Rpresent(
-                            opt_ty.map(|t| copy_type_deep(ctx, t, cache))
-                        )
-                    }
-                    crate::types::type_expr::RowField::Reither {
-                        constant,
-                        types,
-                        matched,
-                        link: _,
-                    } => {
-                        crate::types::type_expr::RowField::Reither {
-                            constant: *constant,
-                            types: types.iter().map(|t| copy_type_deep(ctx, *t, cache)).collect(),
-                            matched: *matched,
-                            // Subst.copy_row allocates fresh link refs when it does
-                            // not preserve row sharing; deep copy should not keep
-                            // mutable row-link aliases with the source type graph.
-                            link: ctx.alloc_row_field(None),
-                        }
-                    }
-                    crate::types::type_expr::RowField::Rabsent => crate::types::type_expr::RowField::Rabsent,
+            let row = row_repr(ctx, row);
+            let more = ctx.repr(row.row_more);
+            let keep_reither_link = {
+                let more_is_constr = {
+                    let more_desc = ctx.get_desc(more);
+                    let is_constr = matches!(&*more_desc, TypeDesc::Tconstr { .. });
+                    drop(more_desc);
+                    is_constr
                 };
-                (label.clone(), new_field)
-            }).collect();
+                let dup = ctx.get_level(more) == GENERIC_LEVEL
+                    || super::btype::static_row(ctx, &row)
+                    || more_is_constr;
+                !dup
+            };
+            let new_row_fields: Vec<_> = row
+                .row_fields
+                .iter()
+                .map(|(label, field)| {
+                    let repr_field = super::btype::row_field_repr(ctx, field);
+                    let new_field = match repr_field {
+                        crate::types::type_expr::RowField::Rpresent(Some(ty)) => {
+                            crate::types::type_expr::RowField::Rpresent(Some(copy_type_deep(
+                                ctx, ty, cache,
+                            )))
+                        }
+                        crate::types::type_expr::RowField::Rpresent(None) => {
+                            crate::types::type_expr::RowField::Rpresent(None)
+                        }
+                        crate::types::type_expr::RowField::Reither {
+                            constant,
+                            types,
+                            matched,
+                            link,
+                        } => crate::types::type_expr::RowField::Reither {
+                            constant,
+                            types: types
+                                .iter()
+                                .map(|t| copy_type_deep(ctx, *t, cache))
+                                .collect(),
+                            matched: if row.row_fixed { true } else { matched },
+                            link: if keep_reither_link {
+                                link
+                            } else {
+                                ctx.alloc_row_field(None)
+                            },
+                        },
+                        crate::types::type_expr::RowField::Rabsent => {
+                            crate::types::type_expr::RowField::Rabsent
+                        }
+                    };
+                    (label.clone(), new_field)
+                })
+                .collect();
             let new_row_more = copy_type_deep(ctx, row.row_more, cache);
             let new_row_name = row.row_name.as_ref().map(|(path, args)| {
-                let new_args: Vec<_> = args.iter().map(|t| copy_type_deep(ctx, *t, cache)).collect();
+                let new_args: Vec<_> = args
+                    .iter()
+                    .map(|t| copy_type_deep(ctx, *t, cache))
+                    .collect();
                 (path.clone(), new_args)
             });
             let new_row = crate::types::type_expr::RowDesc {
@@ -2574,8 +2603,7 @@ pub fn copy_type_deep(
             if matches!(kind, crate::types::type_expr::FieldKind::Fabsent) {
                 let new_rest = copy_type_deep(ctx, rest, cache);
                 ctx.set_desc(placeholder, TypeDesc::Tlink(new_rest));
-                cache.insert(ty, new_rest);
-                return new_rest;
+                return placeholder;
             }
             let typ = *typ;
             let name = name.clone();
@@ -2900,31 +2928,51 @@ fn subst_identity_copy_rec(
                 TypeDesc::Tvariant(row) => {
                     let row = row.clone();
                     drop(desc);
+                    let row = row_repr(ctx, &row);
+                    let more = ctx.repr(row.row_more);
+                    let keep_reither_link = {
+                        let more_is_constr = {
+                            let more_desc = ctx.get_desc(more);
+                            let is_constr = matches!(&*more_desc, TypeDesc::Tconstr { .. });
+                            drop(more_desc);
+                            is_constr
+                        };
+                        let dup = ctx.get_level(more) == GENERIC_LEVEL
+                            || super::btype::static_row(ctx, &row)
+                            || more_is_constr;
+                        !dup
+                    };
                     let fields_copy: Vec<_> = row
                         .row_fields
                         .iter()
                         .map(|(name, field)| {
-                            let field_copy = match field {
-                                crate::types::type_expr::RowField::Rpresent(ty) => {
+                            let repr_field = super::btype::row_field_repr(ctx, field);
+                            let field_copy = match repr_field {
+                                crate::types::type_expr::RowField::Rpresent(Some(ty)) => {
                                     crate::types::type_expr::RowField::Rpresent(
-                                        ty.map(|t| subst_identity_copy_rec(ctx, t, seen)),
+                                        Some(subst_identity_copy_rec(ctx, ty, seen)),
                                     )
+                                }
+                                crate::types::type_expr::RowField::Rpresent(None) => {
+                                    crate::types::type_expr::RowField::Rpresent(None)
                                 }
                                 crate::types::type_expr::RowField::Reither {
                                     constant,
                                     types,
                                     matched,
-                                    link: _,
+                                    link,
                                 } => crate::types::type_expr::RowField::Reither {
-                                    constant: *constant,
+                                    constant,
                                     types: types
                                         .iter()
                                         .map(|t| subst_identity_copy_rec(ctx, *t, seen))
                                         .collect(),
-                                    matched: *matched,
-                                    // Match OCaml's Subst.copy_row behavior for fresh
-                                    // structural copies: do not share mutable row links.
-                                    link: ctx.alloc_row_field(None),
+                                    matched: if row.row_fixed { true } else { matched },
+                                    link: if keep_reither_link {
+                                        link
+                                    } else {
+                                        ctx.alloc_row_field(None)
+                                    },
                                 },
                                 crate::types::type_expr::RowField::Rabsent => {
                                     crate::types::type_expr::RowField::Rabsent
