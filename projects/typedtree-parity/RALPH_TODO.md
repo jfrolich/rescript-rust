@@ -383,6 +383,14 @@ Primary blockers are currently (1) cycle/sharing typedtree rendering drift and (
 - [ ] **5A2D. Trace `type_match` scrutinee instantiation identity for local recursive `t` (NEW)** — attempts G/H kept `rbset`/`set_gen` unchanged, so the break may be in case-typing instantiation (`cases_scrutinee_ty = instance(...)`) rather than function-body env assembly.
   - Required next step: instrument `compiler-rust/src/types/typecore.rs` (`type_match`, `type_case_impl`) and `compiler-rust/src/types/ctype.rs::copy_type_cached` to capture pre/post `instance` node IDs for `Pident "t"` and `t<'a>` in `blackify`/`elements_aux`, then compare against OCaml `type_cases` behavior.
   - Evidence: with all G/H edits reverted, `timeout 300 ./scripts/test_typedtree_parity.sh rbset` and `... set_gen` are still **0/1**, and deterministic full parity remains **588/657**.
+  - 2026-02-24 attempt (kept): in `compiler-rust/src/types/typecore.rs::type_match`, removed the extra outer `cases_scrutinee_ty = instance(typed_scrutinee.exp_type)` layer and passed `typed_scrutinee.exp_type` into `type_case`, keeping per-case instantiation in `type_case_impl` as the single `instance(...)` site.
+    - OCaml refs read: `compiler/ml/typecore.ml` (`Pexp_match` calls `type_cases` with `arg.exp_type`; `type_cases` then instances `ty_arg` per case in `pat_env_list`).
+    - Build/test commands:
+      - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release` (success).
+      - `timeout 300 ./scripts/test_typedtree_parity.sh rbset` and `... set_gen` both stayed **0/1** with unchanged first diffs (`rbset`: `Tarrow` arg `<cycle> ↔ Tconstr(Pident "t")`; `set_gen`: `t(<cycle>) ↔ t(Tvar None)`).
+      - Deterministic full parity stayed **589/657 → 589/657** (Rust compile coverage **650/657**, OCaml-only pass **7**, parity failures **61**).
+      - Parser/binary guard stayed green: `timeout 300 ./scripts/test_parser_ast_parity.sh 2>&1 | tail -40` ended with `SUCCESS: All 3532 files have full parity!`.
+    - Outcome: parity-neutral; keep task unchecked.
 - [ ] **5A2E. Instrument `type_function` node identity split (`param_ty` vs `pv.ty` vs `typed_param.pat_type`) (NEW)** — attempts I/J show that toggling simple-param body binding identity and `exp_type` arrow-input selection individually is parity-neutral, so the first identity drift for local recursive `t` must occur earlier (expected-arrow extraction or pattern typing) or later (case/match instantiation).
   - Required next step: add scoped debug tracing (node IDs + `repr` IDs + desc tags) in `type_function` for `blackify` and `elements_aux` at these points:
     - after `filter_arrow`-equivalent extraction (`param_ty`, `return_ty`),

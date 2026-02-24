@@ -5554,7 +5554,10 @@ fn type_match(
 
     // Type check value cases against the scrutinee type
     let mut typed_val_cases = Vec::new();
-    let cases_scrutinee_ty = crate::types::instance(ctx, typed_scrutinee.exp_type);
+    // OCaml `type_cases` instances the scrutinee type once per case; avoid
+    // double-instancing by passing the original scrutinee type into
+    // `type_case_impl`, which performs the per-case `instance(...)`.
+    let cases_scrutinee_ty = typed_scrutinee.exp_type;
     for case in &val_caselist {
         let typed_case = type_case(tctx, env, case, cases_scrutinee_ty, expected_ty)?;
         typed_val_cases.push(typed_case);
