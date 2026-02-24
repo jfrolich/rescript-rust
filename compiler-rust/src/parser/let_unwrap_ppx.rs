@@ -612,6 +612,9 @@ fn make_let_unwrap_early_case(
 
     let ctor_pat = make_ctor_pattern(ctor_name, needs_payload, loc, arena);
     let ctor_pat_idx = arena.push_pat(ctor_pat);
+    // OCaml's Ast_helper.Pat.alias (without ~loc) defaults to Location.none
+    // The inner Ppat_construct keeps the source loc, but the alias wrapper uses none
+    let none_loc = crate::parse_arena::LocIdx::none();
     let alias_pat = Pattern {
         ppat_desc: Box::new(PatternDesc::Ppat_alias(
             ctor_pat_idx,
@@ -620,7 +623,7 @@ fn make_let_unwrap_early_case(
                 loc,
             },
         )),
-        ppat_loc: loc,
+        ppat_loc: none_loc,
         ppat_attributes: Attributes::new(),
     };
     let alias_pat_idx = arena.push_pat(alias_pat);

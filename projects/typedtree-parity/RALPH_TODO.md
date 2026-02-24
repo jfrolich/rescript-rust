@@ -55,16 +55,18 @@ Results persist in `.parity-cache/` — inspect diffs at `.parity-cache/tests/di
 
 ## Current Status
 
-**591/657 (90%) — raw byte-for-byte comparison** (excluding non-deterministic stack overflows)
+**592/657 (90%) — raw byte-for-byte comparison** (excluding non-deterministic stack overflows)
 
 **Latest snapshot (2026-02-24):**
-- Typecheck parity: `584/657` (raw), `591/657` adjusted for 7 non-deterministic stack overflows
+- Typecheck parity: `585/657` (raw), `592/657` adjusted for 7 non-deterministic stack overflows
 - Rust type-check: `645/657` (12 OCaml-only passes, 7 are stable stack overflows, 5 are transient)
-- Parity failures: `61` (core structural diffs)
+- Parity failures: `60` (core structural diffs)
 - Stable OCaml-only modules (stack overflows): `bb`, `bs_ignore_test`, `defunctor_make_test`, `gpr_4280_test`, `gpr_5218_test`, `hash_collision_test`, `int_poly_var`
 - Transient stack overflows (vary per run): `js_json_test`, `more_poly_variant_test`, `option_repr_test`, `poly_variant_test`, `tramp_fib`
 
 **Recent fixes:**
+- ~~`inline_const` prim encoding drift~~ — Fixed template literal delimiter in `@inline` sig payloads: `transform_inline_sig_value` now checks `has_template_attr` and remaps `"js"` → `"bq"` before calling `inline_string_primitive` (commit 474dfb3bd). Fixed `inline_const`.
+- ~~`LetUnwrap` synthesized pattern locations~~ — Fixed `make_let_unwrap_early_case` to use `LocIdx::none()` for `Ppat_alias` wrapper loc, matching OCaml's `Ast_helper.Pat.alias` default `Location.none`. 10 of 11 hunks fixed; remaining 1 hunk is `closed` vs `open` row variant (known `set_more` gap).
 - ~~Local-name numbering drift~~ — Fixed by resetting `local_module_counter` before typecheck PPX (commit d3b1ba0ca). Fixed `hello_res`, `internal_unused_test`.
 - ~~Byte/encoding drift in string literals~~ — Fixed by removing `latin1_to_utf8` from sexp `string()` (commit f83438bbf). Fixed `Stdlib_Intl_CollatorTest`, `tagged_template_test`.
 
