@@ -5517,7 +5517,8 @@ fn type_match(
         }
     };
     ctx.end_def();
-    if !is_nonexpansive_expression(tctx, &typed_scrutinee) {
+    let is_expansive = !is_nonexpansive_expression(tctx, &typed_scrutinee);
+    if is_expansive {
         crate::types::ctype::generalize_expansive(ctx, env, typed_scrutinee.exp_type);
     }
     crate::types::ctype::generalize(ctx, typed_scrutinee.exp_type);
@@ -9212,6 +9213,11 @@ fn type_letmodule(
             md_path: None,
         };
         body_env.add_module(mod_id.clone(), md_decl);
+
+        // Match OCaml `Ctype.init_def(Ident.current_time())` after module typing
+        // and before body typing. type_structure calls init_def per-item which
+        // trashes the current_level from our begin_def. Restore it here.
+        ctx.init_def(ctx.current_stamp());
 
         // Type check the body in the extended environment. Match OCaml let-module
         // scoping by abstracting local module-rooted type paths out of the exposed
