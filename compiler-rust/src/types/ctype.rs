@@ -2934,13 +2934,9 @@ pub(crate) fn is_recursive_local_type_for_identity(ctx: &TypeContext<'_>, path: 
 }
 
 fn is_recursive_local_nullary_type_for_identity(ctx: &TypeContext<'_>, path: &Path) -> bool {
-    let Path::Pident(id) = path else {
+    let Path::Pident(_) = path else {
         return false;
     };
-
-    if id.name() == "t" {
-        return false;
-    }
 
     is_recursive_local_type_for_identity(ctx, path)
 }

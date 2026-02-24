@@ -357,6 +357,12 @@ Primary blockers are currently (1) cycle/sharing typedtree rendering drift and (
     - Targeted checks: `timeout 300 ./scripts/test_typedtree_parity.sh rbset` and `... set_gen` both stayed **0/1** with unchanged first diffs.
     - Deterministic full parity stayed **589/657 → 589/657** (Rust compile coverage **650/657**, OCaml-only pass **7**).
     - Reverted after parity-neutral outcome.
+  - 2026-02-24 attempt P (kept): removed the Rust-only nullary-`t` exclusion in `compiler-rust/src/types/ctype.rs::is_recursive_local_nullary_type_for_identity` so recursive local nullary `Pident` types follow the same non-generic identity path as other local recursive types.
+    - OCaml refs read: `compiler/ml/ctype.ml` (`copy`, non-generic `partial=None` identity behavior) and `compiler/ml/typecore.ml` (`type_function`/`type_cases` `instance env ty_arg` flow for function parameters).
+    - Targeted checks: `timeout 300 ./scripts/test_typedtree_parity.sh rbset` and `... set_gen` both stayed **0/1** with unchanged first diffs (`rbset`: `Tarrow` arg `<cycle>` vs `Tconstr(Pident "t")`; `set_gen`: `t(<cycle>)` vs `t(Tvar None)`).
+    - Deterministic full parity stayed **589/657 → 589/657** (Rust compile coverage **650/657**, OCaml-only pass **7**, parity failures **61**).
+    - Parser/binary guard stayed green: `timeout 300 ./scripts/test_parser_ast_parity.sh 2>&1 | tail -40` ended with `SUCCESS: All 3532 files have full parity!`.
+    - Outcome: parity-neutral but OCaml-aligned cleanup retained for follow-up tracing in this cluster.
   - Deterministic full baseline after all reverts (current workspace snapshot):
     - `timeout 300 ./scripts/test_typedtree_parity.sh` reports **589/657** parity with **7** OCaml-only pass files and **61** parity failures.
     - Re-run confirmed stable **589/657** (**589 -> 589**).
@@ -377,6 +383,12 @@ Primary blockers are currently (1) cycle/sharing typedtree rendering drift and (
 - [ ] **5A2B. Isolate `type_function` regression source across env-instancing, re-anchoring, and propagate gating (NEW)** — C1/C2/C3 combined regressed full parity to **589/657**, but targeted `rbset`/`set_gen` stayed unchanged, so at least one change is globally load-bearing while not touching the local recursive-`t` first diff.
   - Required next step: run single-change full parity for C1, C2, C3 independently (no combination) and record exact compile/parity deltas to identify which behavior is required for global stability vs which remains a viable parity-fix path.
   - Evidence files: `.parity-cache/tests/diffs/rbset.diff`, `.parity-cache/tests/diffs/set_gen.diff`, `/tmp/full_parity_after3.log`, `/tmp/full_parity_revert.log`.
+  - 2026-02-24 single-change C2 check (reverted): removed only the Rust-only final-arrow re-anchoring in `type_function` (kept existing `typed_param.pat_type` arrow input).
+    - OCaml refs read: `compiler/ml/typecore.ml` (`type_function` final `exp_type = instance env (newgenty (Tarrow ...))`) and `compiler/ml/ctype.ml` (`instance`).
+    - Targeted checks: `timeout 300 ./scripts/test_typedtree_parity.sh rbset` and `... set_gen` both stayed **0/1** with unchanged first diffs.
+    - Deterministic full parity stayed **589/657 → 589/657** (Rust compile coverage **650/657**, OCaml-only pass **7**, parity failures **61**).
+    - Parser/binary guard stayed green: `timeout 300 ./scripts/test_parser_ast_parity.sh 2>&1 | tail -40` ended with `SUCCESS: All 3532 files have full parity!`.
+    - Conclusion: C2 alone is not the load-bearing source for the `rbset`/`set_gen` drift on this snapshot.
 - [ ] **5A2C. Trace pre-`type_function` creation site for decoupled recursive local-`t` args (NEW)** — type_function-local and `copy_type_cached` experiments D/E/F were parity-neutral, so the `t(<cycle>) -> t(Tvar None)` drift likely starts before `type_function` body-env reconstruction.
   - Required next step: instrument let-rec typing around `type_let_bindings` / expected-arrow setup to compare the first `param_ty` node IDs for `elements_aux` and `blackify` against OCaml `type_let` + `type_function` flow.
   - Evidence: after reverting D/E/F, `timeout 300 ./scripts/test_typedtree_parity.sh rbset` and `... set_gen` remain **0/1** with unchanged first diff; deterministic full parity remains **588/657**.
