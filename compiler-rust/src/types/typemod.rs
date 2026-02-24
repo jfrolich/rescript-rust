@@ -4894,12 +4894,13 @@ fn type_structure_item<'a>(
                                         };
                                     let sc_desc_res = source_cstr.cd_res.unwrap_or(res_ty);
 
+                                    let sc_existentials = crate::types::env::constructor_existentials(ctx, &sc_desc_args, source_cstr.cd_res);
                                     cstr_descs.push((
                                         sc_id,
                                         crate::types::ConstructorDescription {
                                             cstr_name: sc_name,
                                             cstr_res: sc_desc_res,
-                                            cstr_existentials: vec![],
+                                            cstr_existentials: sc_existentials,
                                             cstr_args: sc_desc_args,
                                             cstr_arity: sc_desc_arity,
                                             cstr_tag: sc_tag,
@@ -5221,12 +5222,13 @@ fn type_structure_item<'a>(
                             let cstr_desc_res = internal_cd_res.unwrap_or_else(|| {
                                 ctx.new_constr(type_path.clone(), internal_type_params.clone())
                             });
+                            let cstr_existentials = crate::types::env::constructor_existentials(ctx, &cstr_args, internal_cd_res);
                             cstr_descs.push((
                                 cstr_id,
                                 crate::types::ConstructorDescription {
                                     cstr_name: cstr_name_str.to_string(),
                                     cstr_res: cstr_desc_res,
-                                    cstr_existentials: vec![],
+                                    cstr_existentials,
                                     cstr_args,
                                     cstr_arity,
                                     cstr_tag: tag,

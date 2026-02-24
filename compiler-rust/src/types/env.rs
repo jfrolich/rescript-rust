@@ -24,11 +24,73 @@ use super::decl::{
     TypeKind, ValueDescription, ValueKind,
 };
 use super::path::Path;
-use super::type_expr::TypeExprRef;
+use super::type_expr::{TypeDesc, TypeExprRef};
 use crate::ident::Ident;
 use crate::location::Location;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
+
+/// Collect free type variables (Tvar nodes) from a type expression.
+/// Matches OCaml's Datarepr.free_vars.
+fn free_vars(ctx: &TypeContext<'_>, ty: TypeExprRef) -> HashSet<TypeExprRef> {
+    let mut result = HashSet::new();
+    let mut visited = HashSet::new();
+    free_vars_rec(ctx, ty, &mut result, &mut visited);
+    result
+}
+
+fn free_vars_rec(
+    ctx: &TypeContext<'_>,
+    ty: TypeExprRef,
+    result: &mut HashSet<TypeExprRef>,
+    visited: &mut HashSet<TypeExprRef>,
+) {
+    let ty = ctx.repr(ty);
+    if !visited.insert(ty) {
+        return;
+    }
+    let desc = ctx.get_desc(ty);
+    match &*desc {
+        TypeDesc::Tvar(_) => {
+            result.insert(ty);
+        }
+        _ => {
+            drop(desc);
+            super::btype::iter_type_expr(ctx, ty, |child| {
+                free_vars_rec(ctx, child, result, visited);
+            });
+        }
+    }
+}
+
+/// Compute existential type variables for a GADT constructor.
+/// Existentials are type variables that appear in the args but not in the result type.
+/// Matches OCaml's Datarepr.constructor_existentials.
+pub fn constructor_existentials(
+    ctx: &TypeContext<'_>,
+    cstr_args: &[TypeExprRef],
+    cd_res: Option<TypeExprRef>,
+) -> Vec<TypeExprRef> {
+    match cd_res {
+        None => vec![],
+        Some(res_ty) => {
+            // Collect free vars from all args (via a Ttuple wrapper like OCaml)
+            let mut arg_vars = HashSet::new();
+            for &arg in cstr_args {
+                for v in free_vars(ctx, arg) {
+                    arg_vars.insert(v);
+                }
+            }
+            // Collect free vars from the result type
+            let res_vars = free_vars(ctx, res_ty);
+            // Existentials = args vars - result vars
+            arg_vars
+                .difference(&res_vars)
+                .copied()
+                .collect()
+        }
+    }
+}
 
 // ============================================================================
 // Environment Errors
@@ -783,10 +845,12 @@ pub fn initial_env(ctx: &TypeContext<'_>) -> Env {
                         ctx.new_generic_constr(type_path.clone(), decl.type_params.clone())
                     };
 
+                    let cstr_existentials = constructor_existentials(ctx, &cstr_args, cd.cd_res);
+
                     let cstr_desc = ConstructorDescription {
                         cstr_name: cd.cd_id.name().to_string(),
                         cstr_res,
-                        cstr_existentials: vec![],
+                        cstr_existentials,
                         cstr_args,
                         cstr_arity,
                         cstr_tag,

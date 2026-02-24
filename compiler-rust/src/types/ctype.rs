@@ -3035,6 +3035,73 @@ pub fn instance_constructor(
     (ty_args, ty_res)
 }
 
+/// Instantiate a constructor description in a pattern context, processing GADT
+/// existential type variables. For each existential, creates an abstract type
+/// `$ConstructorName_'varname` and links the copied existential to it.
+/// Matches OCaml's Ctype.instance_constructor ~in_pattern:(env, newtype_lev).
+pub fn instance_constructor_in_pattern(
+    ctx: &TypeContext<'_>,
+    env: &mut super::env::Env,
+    newtype_lev: i32,
+    cstr: &super::ConstructorDescription,
+) -> (Vec<TypeExprRef>, TypeExprRef) {
+    let mut cache = CopyCache::new();
+
+    // Process existential type variables before copying cstr_res/cstr_args.
+    // This ensures the copy cache maps existential Tvars to abstract Tconstr nodes.
+    for &existential in &cstr.cstr_existentials {
+        let existential_repr = ctx.repr(existential);
+        let name = {
+            let desc = ctx.get_desc(existential_repr);
+            match &*desc {
+                super::type_expr::TypeDesc::Tvar(Some(name)) => {
+                    format!("${}_'{}", cstr.cstr_name, name)
+                }
+                _ => format!("${}", cstr.cstr_name),
+            }
+        };
+
+        // Create abstract type declaration
+        let decl = super::TypeDeclaration {
+            type_params: vec![],
+            type_arity: 0,
+            type_kind: super::TypeKind::TypeAbstract,
+            type_private: super::asttypes::PrivateFlag::Public,
+            type_manifest: None,
+            type_variance: vec![],
+            type_newtype_level: Some((newtype_lev, newtype_lev)),
+            type_loc: crate::location::Location::none(),
+            type_attributes: vec![],
+            type_immediate: false,
+            type_unboxed: super::decl::UnboxedStatus {
+                unboxed: false,
+                default: false,
+            },
+            type_inlined_types: vec![],
+            type_path: None,
+        };
+
+        // Create path and add to environment
+        let path = super::path::Path::pident(crate::ident::Ident::create_local(&name));
+        env.add_local_constraint(path.clone(), decl);
+
+        // Create Tconstr pointing to the abstract type
+        let to_unify = ctx.new_constr(path, vec![]);
+
+        // Copy the existential (adds it to cache), then link the copy to the Tconstr
+        let tv = copy_type_cached(ctx, existential, &mut cache);
+        link_type(ctx, tv, to_unify);
+    }
+
+    let ty_res = copy_type_cached(ctx, cstr.cstr_res, &mut cache);
+    let ty_args: Vec<TypeExprRef> = cstr
+        .cstr_args
+        .iter()
+        .map(|&arg| copy_type_cached(ctx, arg, &mut cache))
+        .collect();
+    (ty_args, ty_res)
+}
+
 /// Remap named type variables in a label type to the declaration's canonical
 /// type parameter nodes. This keeps `lbl_arg` and `lbl_res` sharing the same
 /// type parameter identities when labels are rebuilt from declarations.

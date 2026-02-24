@@ -2133,7 +2133,12 @@ pub fn type_pattern(
     mode: PatternMode,
     state: &mut PatternState,
 ) -> TypeCoreResult<Pattern> {
-    type_pattern_inner(tctx, env, pat, expected_ty, mode, state, 0)
+    // Match OCaml's type_pat: set newtype_level for GADT existential support
+    let old_newtype_level = tctx.newtype_level;
+    tctx.newtype_level = Some(tctx.type_ctx.current_level());
+    let result = type_pattern_inner(tctx, env, pat, expected_ty, mode, state, 0);
+    tctx.newtype_level = old_newtype_level;
+    result
 }
 
 /// Inner pattern type checking with explode level.
@@ -3015,8 +3020,24 @@ fn type_pattern_construct(
     };
 
     // Instantiate constructor: creates fresh type variables shared between
-    // cstr_res and cstr_args, matching OCaml's Ctype.instance_constructor
-    let (inst_arg_types, result_ty) = crate::types::instance_constructor(ctx, &cstr_desc);
+    // cstr_res and cstr_args, matching OCaml's Ctype.instance_constructor.
+    // For GADT constructors with existentials, process them in pattern context.
+    let (inst_arg_types, result_ty) = if !cstr_desc.cstr_existentials.is_empty() {
+        if let Some(newtype_lev) = tctx.newtype_level {
+            let mut env_mut = env.clone();
+            let result = crate::types::instance_constructor_in_pattern(
+                ctx, &mut env_mut, newtype_lev, &cstr_desc,
+            );
+            // Note: env_mut has the new abstract types added, but since env is
+            // immutable here, the abstract types are only visible through the
+            // local_constraints (for GADT equation checking).
+            result
+        } else {
+            crate::types::instance_constructor(ctx, &cstr_desc)
+        }
+    } else {
+        crate::types::instance_constructor(ctx, &cstr_desc)
+    };
     unify_pattern_types(tctx, loc, result_ty, expected_ty)?;
 
     // Type check the argument pattern(s)
