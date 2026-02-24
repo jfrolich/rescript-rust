@@ -904,6 +904,12 @@ pub fn typecheck_stored_structure_and_dump_sexp<W: std::io::Write>(
     options: &CompilerOptions,
     writer: &mut W,
 ) -> Result<()> {
+    // Reset counter: the arena was already used during binary AST writing
+    // (write_structure_ast_current_with_extra_deps → rewrite_structure), which
+    // expanded %%private items and incremented local_module_counter.
+    // OCaml starts fresh for each bsc invocation, so we reset to match.
+    arena.reset_local_module_counter();
+
     let jsx_enabled = structure_has_config_string(&structure, "-bs-jsx", &arena);
     let has_async_component = structure_has_async_component(&structure, &arena);
     let structure = if jsx_enabled

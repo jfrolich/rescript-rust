@@ -1855,6 +1855,14 @@ impl ParseArena {
         self.push_string(format!("local_{}", self.local_module_counter))
     }
 
+    /// Reset the local module counter to 0.
+    /// Called before typecheck PPX passes when the arena was already used during
+    /// binary AST writing (which also expands %%private and increments the counter).
+    /// OCaml starts fresh for each bsc invocation, so we must reset to match.
+    pub fn reset_local_module_counter(&mut self) {
+        self.local_module_counter = 0;
+    }
+
     /// Mark an expression location as rewritten by the generic PPX mapper path.
     pub fn mark_rewritten_expr_loc(&mut self, loc: LocIdx) {
         self.rewritten_expr_locs.insert(loc);
