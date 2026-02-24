@@ -274,6 +274,17 @@ The old parity script post-processed sexp output (stripping non-printable chars,
   - Parser/binary guard stayed green: `timeout 300 ./scripts/test_parser_ast_parity.sh 2>&1 | tail -40` ended with `SUCCESS: All 3532 files have full parity!`.
   - Reverted after parity-neutral outcome; keep task unchecked.
   - Next check: trace which Task-5 failures actually flow through `copy_type_deep` `Tvariant` (vs `copy_type_cached` or pre-`instance_label` label typing) before further row-copy tuning.
+- [ ] **5L. Validate `Subst.typexp` fixed-row proxy rewrite placement (NEW)** — adding the `has_fixed_row` (`row_of_type` + `is_constr_row ~allow_ident:false`) branch directly to `copy_type_deep` was parity-neutral and appears to shift cycle-vs-constr diffs across modules, so this behavior may belong to a narrower call path.
+  - 2026-02-24 attempt: patched `compiler-rust/src/types/ctype.rs::copy_type_deep` to mirror OCaml `Subst.typexp` fixed-row logic:
+    - compute `tm = row_of_type ty`,
+    - gate on `not is_Tconstr ty && is_constr_row ~allow_ident:false tm`,
+    - synthesize `Tconstr` from `Pdot(..., name#row)` by stripping `#row` (`name[..len-4]`) before returning the copy.
+  - OCaml refs read: `compiler/ml/subst.ml` (`typexp` `tm`/`has_fixed_row` branch and `Pdot(..., i#row)` rewrite) and `compiler/ml/btype.ml` (`row_of_type`, `is_constr_row`).
+  - Targeted checks: `timeout 300 ./scripts/test_typedtree_parity.sh set_gen`, `... gpr_4274_test`, and `... fun_pattern_match` all stayed **0/1** parity.
+  - Deterministic full parity stayed **478/657 → 478/657** (179 parity failures), compile parity stayed **657/657 → 657/657**.
+  - Parser/binary guard stayed green: `timeout 300 ./scripts/test_parser_ast_parity.sh 2>&1 | tail -40` ended with `SUCCESS: All 3532 files have full parity!`.
+  - Reverted after parity-neutral outcome; keep task unchecked.
+  - Next check: trace whether active Task-5 failures reach OCaml’s fixed-row proxy path through `copy_type_deep` call sites (`instance_label`, `typemod` deep copies) before re-applying this rewrite globally.
 - [ ] **6. Expand abbreviations before structural match for same-path Tconstr** — When same path + n_args>0, expand both, unify expanded. (638→639, tests: unboxed_use_case.res, ExternalArity.res)
   - 2026-02-24 attempt: added same-path expansion branch in `ctype.rs` (`unify` Tconstr/Tconstr path-equal case) with direct `unify(exp1, exp2)` when expansion leaves `Tconstr` and no pre-link of `t1 -> t2`. Deterministic full parity stayed **478/657 → 478/657** (179 failures). Targeted `unboxed_use_case` and `ExternalArity` remained **0/1**. Reverted.
   - 2026-02-24 attempt: re-tried the same-path path-equal branch with OCaml `unify2`/`unify3` ordering (`expand_head` first, structural unify only when both sides remain `Tconstr`). OCaml refs read: `compiler/ml/ctype.ml` (`unify2`, `unify3`, same-path `Tconstr` case). Deterministic parity stayed **478/657 → 478/657** (179 failures), targeted `timeout 300 ./scripts/test_typedtree_parity.sh unboxed_use_case` and `... ExternalArity` stayed **0/1**, parser/binary guard stayed green (`SUCCESS: All 3532 files have full parity!`). Reverted.
