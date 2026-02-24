@@ -2705,16 +2705,6 @@ fn copy_case_type(
             placeholder
         }
         TypeDesc::Tconstr { path, args, .. } => {
-            let is_unresolved_local_ident = args.is_empty()
-                && matches!(path, Path::Pident(_))
-                && env.lookup_type(path).is_err();
-            if args.is_empty()
-                && (is_local_abstract_type_path(ctx, env, path) || is_unresolved_local_ident)
-            {
-                let fresh = ctx.new_var(Some(path.head_name().to_string()));
-                cache.insert(ty, fresh);
-                return fresh;
-            }
             let placeholder = ctx.new_var(None);
             cache.insert(ty, placeholder);
             let copied_args = args
