@@ -229,10 +229,18 @@ Most byte-format drift is now resolved. Remaining work is primarily in type-chec
   - Deterministic full parity stayed **478/657 → 478/657** (179 parity failures), compile parity stayed **657/657 → 657/657**.
   - Parser/binary guard stayed green: `timeout 300 ./scripts/test_parser_ast_parity.sh` ended with `SUCCESS: All 3532 files have full parity!`.
   - Reverted the code change after parity-neutral outcome.
-- [ ] **5A. Map task-5 deep-copy validation to an active failing module (NEW)** — `jsxv4_newtype` is not present in the current deterministic failure manifest at **478/657**, so further task-5 work must target a real failing module that exercises row/object deep-copy behavior.
-  - Evidence (2026-02-24): deterministic full run after task-5 hypothesis remained **478/657** with **179** parity failures; `.parity-cache/tests/failures.txt` does not contain `jsxv4_newtype`.
-  - Next OCaml refs: `compiler/ml/subst.ml` (`typexp`/`copy_row` recursion and `keep` behavior) plus `compiler/ml/typecore.ml` call sites that use `instance_label`.
-  - Next Rust refs: `compiler-rust/src/types/ctype.rs` (`copy_type_deep`, `subst_identity_copy_rec`) and `compiler-rust/src/types/typecore.rs` label/newtype instantiation paths.
+- [x] **5A. Map task-5 deep-copy validation to an active failing module (NEW)** — `jsxv4_newtype` is not in the active failure set; task-5 work is now anchored to modules that still fail in current full runs.
+  - Resolution (2026-02-24): mapped active task-5 targets to **`rbset`** and **`set_gen`** from current full manifests (stack-overflow runs still consistently include these modules while `jsxv4_newtype` remains absent).
+  - Evidence:
+    - `timeout 300 ./scripts/test_typedtree_parity.sh` produced unstable totals (`623/657`, `636/657`, `627/657`) with Rust sexp stack overflow, but parity-failure intersections include `rbset` and `set_gen`.
+    - `.parity-cache/tests/diffs/rbset.diff`: first divergence is recursive function type sharing (`Tarrow` arg `<cycle>` vs `Tconstr(Pident "t")`).
+    - `.parity-cache/tests/diffs/set_gen.diff`: recursive `t<'a>` positions drift between `<cycle>` and `Tvar None`, plus arrow-arg cycle placement drift.
+  - OCaml refs for this mapping: `compiler/ml/subst.ml` (`typexp`, `Tvariant` recursion marker, `copy_row`) and `compiler/ml/ctype.ml` (`copy` recursion/keep semantics).
+  - Rust refs for this mapping: `compiler-rust/src/types/ctype.rs` (`copy_type_deep`, `subst_identity_copy_rec`, `copy_type_cached`) and typedtree output in `.parity-cache/tests/diffs/{rbset,set_gen}.diff`.
+- [ ] **5A1. Trace task-5 divergence at the first shared-node creation site for `rbset`/`set_gen` (NEW)** — establish whether the `<cycle>`/`Tconstr` and `<cycle>`/`Tvar` drift originates in `copy_type_deep`, `subst_identity_copy_rec`, or later instantiation in `typecore`.
+  - Evidence (2026-02-24): `rbset` and `set_gen` are stable task-5 failures across noisy full runs, while prior `jsxv4_newtype`-targeted experiments were not attached to active failures.
+  - Next OCaml refs: `compiler/ml/subst.ml` `typexp` stub/marker lifetime and `compiler/ml/ctype.ml` `copy` variant/object recursion behavior.
+  - Next Rust refs: `compiler-rust/src/types/ctype.rs` copy call graph plus `compiler-rust/src/types/typecore.rs` call sites that feed copied types into typedtree nodes for these modules.
 - [ ] **5B. Preserve compile parity when porting `Subst.typexp` variant `more'` flow (NEW)** — direct conditional `row_more` reuse currently causes Rust type-check regressions on full build.
   - Evidence (2026-02-24): first-pass OCaml-style `dup`/`more'` port in `copy_type_deep` + `subst_identity_copy_rec` changed full run from **478/657** to **539/657** with Rust compile parity drop **657/657 → 648/657** (9 OCaml-only passes). Reverted.
   - Required guardrail: maintain compile parity **657/657** and avoid introducing new Rust-reject files while aligning variant row-copy behavior.
