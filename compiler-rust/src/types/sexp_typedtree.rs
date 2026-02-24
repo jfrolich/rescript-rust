@@ -111,7 +111,7 @@ fn write_latin1_line<W: Write>(out: &mut W, s: &str) -> std::io::Result<()> {
 }
 
 fn string(txt: &str) -> Sexp {
-    Sexp::atom(&format!("\"{}\"", latin1_to_utf8(txt)))
+    Sexp::atom(&format!("\"{}\"", txt))
 }
 
 fn opt_string(opt: &Option<String>) -> Sexp {
