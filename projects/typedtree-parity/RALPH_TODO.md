@@ -185,6 +185,12 @@ The old parity script post-processed sexp output (stripping non-printable chars,
   - Targeted checks: `timeout 300 ./scripts/test_typedtree_parity.sh set_gen` and `... gpr_4274_test` both stayed **0/1** parity.
   - Deterministic full parity: **478/657 → 478/657** (179 parity failures, compile parity stayed **657/657**).
   - Parser/binary guard: `timeout 300 ./scripts/test_parser_ast_parity.sh 2>&1 | tail -40` stayed green (`SUCCESS: All 3532 files have full parity!`).
+  - 2026-02-24 attempt: ported OCaml `Subst.typexp` `Tvariant` recursion-marker flow in `compiler-rust/src/types/ctype.rs::copy_type_deep` (`dup`-gated `row_more` handling + temporary `more.desc <- Tsubst(Ttuple [more'; ty'])` registration while copying row fields).
+  - OCaml refs read: `compiler/ml/subst.ml` (`typexp` `Tvariant` branch, including `Tsubst (Ttuple [_; ty2])` fast-path + `more.desc <- Tsubst (...)`) and `compiler/ml/btype.ml` (`copy_row`).
+  - Targeted checks: `timeout 300 ./scripts/test_typedtree_parity.sh set_gen`, `... gpr_4274_test`, and `... more_poly_variant_test` all stayed **0/1** parity.
+  - Deterministic full parity stayed **478/657 → 478/657** (179 parity failures), compile parity stayed **657/657 → 657/657**.
+  - Parser/binary guard stayed green: `timeout 300 ./scripts/test_parser_ast_parity.sh` ended with `SUCCESS: All 3532 files have full parity!`.
+  - Reverted the code change after parity-neutral outcome.
 - [ ] **5A. Map task-5 deep-copy validation to an active failing module (NEW)** — `jsxv4_newtype` is not present in the current deterministic failure manifest at **478/657**, so further task-5 work must target a real failing module that exercises row/object deep-copy behavior.
   - Evidence (2026-02-24): deterministic full run after task-5 hypothesis remained **478/657** with **179** parity failures; `.parity-cache/tests/failures.txt` does not contain `jsxv4_newtype`.
   - Next OCaml refs: `compiler/ml/subst.ml` (`typexp`/`copy_row` recursion and `keep` behavior) plus `compiler/ml/typecore.ml` call sites that use `instance_label`.
@@ -252,6 +258,10 @@ The old parity script post-processed sexp output (stripping non-printable chars,
   - Reverted the code change after parity-neutral outcome; keep this task unchecked until call-site ownership of row-copy policy is mapped.
   - Next OCaml refs: trace which call sites use `Subst.typexp` semantics vs `Ctype.copy` semantics around label/newtype/module instantiation.
   - Next Rust refs: `compiler-rust/src/types/ctype.rs` call graph for `copy_type_deep`, `subst_identity_copy`, `copy_type_cached`, plus `typecore.rs`/`typemod.rs` entry points feeding active failing modules.
+- [ ] **5J. Validate `Subst.typexp` `Tsubst(Ttuple ...)` marker lifetime in Rust `copy_type_deep` (NEW)** — a direct port of the marker flow in `copy_type_deep` was parity-neutral, so the missing behavior may be marker lifetime/call-window coupling (OCaml cleanup-driven) rather than marker shape alone.
+  - Evidence (2026-02-24): `copy_type_deep` marker port (`dup`-gated `row_more` + temporary `more.desc <- Tsubst(Ttuple [more'; ty'])`) produced no deterministic delta (**478/657 → 478/657**, compile parity **657/657**), and filtered `set_gen`/`gpr_4274_test`/`more_poly_variant_test` all stayed **0/1**. Reverted.
+  - Next OCaml refs: `compiler/ml/subst.ml` (`typexp` save/cleanup ordering around row-marker writes) and `compiler/ml/btype.ml` (`cleanup_types` effect on temporary `Tsubst` nodes).
+  - Next Rust refs: `compiler-rust/src/types/ctype.rs` (`copy_type_deep`, `subst_identity_copy_rec`) and potential scoped temp-substitution support in `TypeContext` needed to mirror OCaml marker lifetime.
 - [ ] **6. Expand abbreviations before structural match for same-path Tconstr** — When same path + n_args>0, expand both, unify expanded. (638→639, tests: unboxed_use_case.res, ExternalArity.res)
   - 2026-02-24 attempt: added same-path expansion branch in `ctype.rs` (`unify` Tconstr/Tconstr path-equal case) with direct `unify(exp1, exp2)` when expansion leaves `Tconstr` and no pre-link of `t1 -> t2`. Deterministic full parity stayed **478/657 → 478/657** (179 failures). Targeted `unboxed_use_case` and `ExternalArity` remained **0/1**. Reverted.
   - 2026-02-24 attempt: re-tried the same-path path-equal branch with OCaml `unify2`/`unify3` ordering (`expand_head` first, structural unify only when both sides remain `Tconstr`). OCaml refs read: `compiler/ml/ctype.ml` (`unify2`, `unify3`, same-path `Tconstr` case). Deterministic parity stayed **478/657 → 478/657** (179 failures), targeted `timeout 300 ./scripts/test_typedtree_parity.sh unboxed_use_case` and `... ExternalArity` stayed **0/1**, parser/binary guard stayed green (`SUCCESS: All 3532 files have full parity!`). Reverted.
