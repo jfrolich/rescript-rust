@@ -166,9 +166,50 @@ This repo was reconstructed after accidental deletion. The base comes from a `/t
 
 ---
 
-## Immediate Priority: 588 → 657
+## Immediate Priority
 
-Primary blockers are currently (1) cycle/sharing typedtree rendering drift and (2) Rust typed-sexp typecheck failures for the 7 OCaml-only modules. Keep work anchored to the latest deterministic snapshot above.
+### P0: Fix Rust Compiler Crashes (5 errors)
+
+These files compile successfully under OCaml but crash/error in the Rust compiler. Fixing these is the **highest priority** — a compiler crash is worse than a parity diff because it means the compiler is fundamentally broken for that input.
+
+| Module | Error Type | Notes |
+|--------|-----------|-------|
+| `bs_ignore_test` | GADT PatternTypeClash | Stack overflow / GADT equation handling |
+| `gpr_4280_test` | UndefinedMethod | Method resolution failure |
+| `js_json_test` | GADT PatternTypeClash | Stack overflow / GADT equation handling |
+| `more_poly_variant_test` | ExprTypeClash (variant spread) | Polymorphic variant spread type error |
+| `tramp_fib` | Unknown | Crash during type checking |
+
+**Approach:** For each crash, run the file under the Rust compiler directly, capture the error, trace back to the root cause in the type checker, and fix. GADT-related crashes (bs_ignore_test, js_json_test) likely share a common root cause. Always use `timeout` — these may infinite loop.
+
+**How to run bsc on a single file:**
+
+```bash
+# 1. Get the correct compiler flags for a source file
+cd tests/tests
+../../packages/@rescript/darwin-arm64/bin/rescript.exe compiler-args src/bs_ignore_test.res
+
+# 2. Run from the build directory with those flags (Rust compiler)
+cd tests/tests/lib/bs
+timeout 10 ../../../../compiler-rust/target/release/bsc <flags from step 1> -dtyped-sexp-locs
+
+# 3. Compare with OCaml compiler
+timeout 10 ../../../../packages/@rescript/darwin-arm64/bin/bsc.exe <flags from step 1> -dtyped-sexp-locs
+
+# Example (typical flags look like):
+timeout 10 ../../../../compiler-rust/target/release/bsc -I ../../../node_modules -I . -w -3-49-111 -dtyped-sexp-locs ../../src/bs_ignore_test.res
+```
+
+**Important notes:**
+- Must run bsc from `tests/tests/lib/bs` — relative `-I` paths resolve from there
+- Use `-dtyped-sexp-locs` (NOT `-dtypedtree`) for sexp output
+- OCaml bsc is `bsc.exe`, Rust bsc is `bsc` (no `.exe`)
+- The `compiler-args` output includes the source file path; copy the flags but you may need to adjust the source path
+- Use `diff -a` when comparing outputs — sexp files may contain binary characters
+
+### P1: Fix Parity Diffs (~54 remaining failures)
+
+Secondary priority. Primary blockers are (1) cycle/sharing typedtree rendering drift and (2) path normalization drift. Keep work anchored to the latest deterministic snapshot above.
 
 ---
 
