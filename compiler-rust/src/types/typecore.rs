@@ -6560,11 +6560,7 @@ fn type_function(
     // arrow with matching label, reuse its argument/result types directly.
     // Otherwise introduce a fresh arrow and unify against expected type.
     let ctx_label = convert_arg_label_for_ctx(arg_label, tctx.arena);
-    let expected_inst = if ctx.get_level(ctx.repr(expected_ty)) == crate::types::GENERIC_LEVEL {
-        crate::types::instance(ctx, expected_ty)
-    } else {
-        expected_ty
-    };
+    let expected_inst = crate::types::instance(ctx, expected_ty);
     let expanded_expected = crate::types::ctype::expand_head(ctx, env, expected_inst);
     let expanded_desc = ctx.get_desc(expanded_expected);
     let mut expected_arrow = match &*expanded_desc {

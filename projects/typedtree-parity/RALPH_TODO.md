@@ -363,6 +363,15 @@ Primary blockers are currently (1) cycle/sharing typedtree rendering drift and (
     - Deterministic full parity stayed **589/657 → 589/657** (Rust compile coverage **650/657**, OCaml-only pass **7**, parity failures **61**).
     - Parser/binary guard stayed green: `timeout 300 ./scripts/test_parser_ast_parity.sh 2>&1 | tail -40` ended with `SUCCESS: All 3532 files have full parity!`.
     - Outcome: parity-neutral but OCaml-aligned cleanup retained for follow-up tracing in this cluster.
+  - 2026-02-24 attempt Q (kept): in `compiler-rust/src/types/typecore.rs::type_function`, always call `instance(ctx, expected_ty)` before expected-arrow extraction/`expand_head`, matching OCaml `type_function` (`filter_arrow ~env ~arity (instance env ty_expected)`).
+    - OCaml refs read: `compiler/ml/typecore.ml` (`type_function` expected-arrow flow around `filter_arrow` + `instance env ty_expected`) and `compiler/ml/ctype.ml` (`instance`, `copy`).
+    - Rust refs touched: `compiler-rust/src/types/typecore.rs` (`type_function` expected-instantiation path before `expand_head`).
+    - Build/test commands:
+      - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release` (success).
+      - `timeout 300 ./scripts/test_typedtree_parity.sh rbset` and `... set_gen` both stayed **0/1** with unchanged first diffs (`rbset`: leading `Tarrow` arg `<cycle> ↔ Tconstr(Pident "t")`; `set_gen`: `t(<cycle>) ↔ t(Tvar None)`).
+      - Deterministic full parity stayed **589/657 → 589/657** (Rust compile coverage **650/657**, OCaml-only pass **7**, parity failures **61**).
+      - Parser/binary guard stayed green: `timeout 300 ./scripts/test_parser_ast_parity.sh 2>&1 | tail -40` ended with `SUCCESS: All 3532 files have full parity!`.
+    - Outcome: parity-neutral but OCaml-aligned expected-instantiation cleanup retained; keep task unchecked.
   - Deterministic full baseline after all reverts (current workspace snapshot):
     - `timeout 300 ./scripts/test_typedtree_parity.sh` reports **589/657** parity with **7** OCaml-only pass files and **61** parity failures.
     - Re-run confirmed stable **589/657** (**589 -> 589**).
