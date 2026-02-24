@@ -55,7 +55,17 @@ Results persist in `.parity-cache/` — inspect diffs at `.parity-cache/tests/di
 
 ## Current Status
 
-**648/657 (98%) — raw byte-for-byte comparison**
+**652/657 (99%) — raw byte-for-byte comparison**
+
+### 2026-02-24 Type Function Parity: 628 → 652
+
+- Implemented OCaml-aligned `type_function` pattern/body flow in Rust:
+  - `instance()` argument type before parameter pattern typing,
+  - `begin_def()` / `end_def()` around parameter pattern typing,
+  - `generalize()` over typed parameter subpatterns,
+  - `instance()` on pattern-bound value types before extending body env.
+- Deterministic full parity delta: **628/657 → 652/657** (parity failures **29 → 5**), compile parity remained **657/657**.
+- Remaining deterministic failures: `LetUnwrap`, `fun_pattern_match`, `miss_colon_test`, `polymorphism_test`, `rbset`.
 
 ### 2026-02-24 Recovery: 478 → 632
 
@@ -432,7 +442,16 @@ Most byte-format drift is now resolved. Remaining work is primarily in type-chec
   - Deterministic full parity: **643/657 → 648/657** (parity failures **14 → 9**), compile parity stayed **657/657**.
   - Remaining failing modules after this fix: `bs_ignore_test`, `defunctor_make_test`, `flexible_array_test`, `fun_pattern_match`, `rbset`, `test_set`, `ticker`, `topsort_test`, `unboxed_use_case`.
   - Parser/binary guard: `timeout 300 ./scripts/test_parser_ast_parity.sh 2>&1 | tail -40` ended with `SUCCESS: All 3532 files have full parity!`.
-- [ ] **15. begin_def/generalize/instance in type_function** — Same as 14 for type_function. Needs update_level_expand Pident guard (committed). (653→654, test: ticker.res)
+- [x] **15. begin_def/generalize/instance in type_function** — Same as 14 for type_function. Needs update_level_expand Pident guard (committed). (653→654, test: ticker.res)
+  - 2026-02-24 fix: updated `compiler-rust/src/types/typecore.rs::type_function` to mirror OCaml `type_cases`-style parameter flow:
+    - `instance()` on `param_ty` before `type_pattern`,
+    - `begin_def()` / `end_def()` around `type_pattern`,
+    - `iter_typed_pattern(... generalize)` on the typed parameter,
+    - `instance()` for pattern-bound value types before inserting into `body_env`.
+  - OCaml refs read: `compiler/ml/typecore.ml` `type_function` (~3262-3321), `type_cases` (~3906-4065), and `add_pattern_variables` (~1742-1767).
+  - Deterministic full parity: **628/657 → 652/657** (parity failures **29 → 5**), compile parity stayed **657/657**.
+  - Deterministic remaining failure modules: `LetUnwrap`, `fun_pattern_match`, `miss_colon_test`, `polymorphism_test`, `rbset`.
+  - Parser/binary guard: `timeout 300 ./scripts/test_parser_ast_parity.sh 2>&1 | tail -40` ended with `SUCCESS: All 3532 files have full parity!`.
 - [ ] **16. Stack-based cycle detection — TRY LAST** — On old branch: +16 (613→629). Current branch: 610→220 REGRESSION. Only after all above fixes.
 
 **Partial fixes:**

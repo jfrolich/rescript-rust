@@ -6616,10 +6616,19 @@ fn type_function(
         param_ty = option_ty;
     }
 
-    // Type check parameter pattern
+    // Match OCaml type_cases flow for function params:
+    // instance argument type for pattern typing, then generalize typed patterns.
     let mut state = PatternState::new();
     state.reset(true);
-    let typed_param = type_pattern(tctx, env, param, param_ty, PatternMode::Normal, &mut state)?;
+    let param_pat_ty = crate::types::instance(ctx, param_ty);
+    ctx.begin_def();
+    let typed_param_result =
+        type_pattern(tctx, env, param, param_pat_ty, PatternMode::Normal, &mut state);
+    ctx.end_def();
+    let typed_param = typed_param_result?;
+    iter_typed_pattern(&typed_param, &mut |pat| {
+        crate::types::generalize(ctx, pat.pat_type);
+    });
 
     // Type check default expression if present
     let typed_default = if let Some(default_expr) = default {
@@ -6639,10 +6648,11 @@ fn type_function(
     let mut unpacks: Vec<PatternVariable> = Vec::new();
     let should_copy_pattern_bindings = !is_simple_variable_pattern(tctx.arena, param);
     for pv in &state.pattern_variables {
+        let body_binding_ty = crate::types::instance(ctx, pv.ty);
         let binding_ty = if should_copy_pattern_bindings {
-            shallow_copy_pattern_binding_type(ctx, pv.ty, false)
+            shallow_copy_pattern_binding_type(ctx, body_binding_ty, false)
         } else {
-            pv.ty
+            body_binding_ty
         };
         let desc = ValueDescription {
             val_type: binding_ty,
