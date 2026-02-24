@@ -2187,6 +2187,81 @@ pub fn generalize(ctx: &TypeContext<'_>, ty: TypeExprRef) {
     generalize_rec(ctx, ty);
 }
 
+fn force_generalize_sig_type_rec(
+    ctx: &TypeContext<'_>,
+    ty: TypeExprRef,
+    seen: &mut HashSet<TypeExprRef>,
+) {
+    let ty = ctx.repr(ty);
+    if !seen.insert(ty) {
+        return;
+    }
+
+    // Keep nullary constructors at their original level so alias identity is
+    // preserved (avoids LetUnwrap/find_simple_abbrev regressions).
+    let preserve_level = {
+        let desc = ctx.get_desc(ty);
+        matches!(&*desc, TypeDesc::Tconstr { args, .. } if args.is_empty())
+    };
+    if !preserve_level && ctx.get_level(ty) != GENERIC_LEVEL {
+        ctx.set_level(ty, GENERIC_LEVEL);
+    }
+
+    let mut children = Vec::new();
+    iter_type_expr(ctx, ty, |child| children.push(child));
+    for child in children {
+        force_generalize_sig_type_rec(ctx, child, seen);
+    }
+}
+
+fn force_generalize_module_type_rec(
+    ctx: &TypeContext<'_>,
+    mty: &crate::types::decl::ModuleType,
+    seen: &mut HashSet<TypeExprRef>,
+) {
+    use crate::types::decl::ModuleType;
+    use crate::types::decl::SignatureItem;
+
+    match mty {
+        ModuleType::MtyIdent(_) | ModuleType::MtyAlias(_, _) => {}
+        ModuleType::MtySignature(sig_items) => {
+            for item in sig_items {
+                match item {
+                    SignatureItem::SigValue(_, vd) => {
+                        force_generalize_sig_type_rec(ctx, vd.val_type, seen);
+                    }
+                    SignatureItem::SigModule(_, md, _) => {
+                        force_generalize_module_type_rec(ctx, &md.md_type, seen);
+                    }
+                    SignatureItem::SigModtype(_, mtd) => {
+                        if let Some(inner) = &mtd.mtd_type {
+                            force_generalize_module_type_rec(ctx, inner, seen);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        ModuleType::MtyFunctor {
+            param_type, result, ..
+        } => {
+            if let Some(param_mty) = param_type.as_deref() {
+                force_generalize_module_type_rec(ctx, param_mty, seen);
+            }
+            force_generalize_module_type_rec(ctx, result, seen);
+        }
+    }
+}
+
+pub fn force_generalize_module_sig_values(
+    ctx: &TypeContext<'_>,
+    mty: &crate::types::decl::ModuleType,
+) {
+    ctx.clear_simple_abbrevs();
+    let mut seen = HashSet::new();
+    force_generalize_module_type_rec(ctx, mty, &mut seen);
+}
+
 /// Generalize the structure of a type at a given level.
 fn generalize_structure_rec(ctx: &TypeContext<'_>, var_level: i32, ty: TypeExprRef) {
     let ty = ctx.repr(ty);

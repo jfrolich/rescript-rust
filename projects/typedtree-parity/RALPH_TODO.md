@@ -564,6 +564,23 @@ Most byte-format drift is now resolved. Remaining work is primarily in type-chec
   - Next Rust refs: `typecore.rs` `type_case_impl` and surrounding match/case typing control flow to align with OCaml’s batch pattern-first then body-typing order.
 - [ ] **11. Shallow copy nullary pattern var types** — Prevent scrutinee contamination via body unification. (645→646, test: reasonReactRouter.res)
 - [ ] **12. Force-generalize module sig value types** — Walk sig types to GENERIC_LEVEL (exclude nullary Tconstr). (637→638, net +1)
+  - 2026-02-24 attempt: added `force_generalize_module_sig_values` in `compiler-rust/src/types/ctype.rs` and threaded it through `compiler-rust/src/types/typemod.rs` module env insertion sites:
+    - `Pstr_module`: force-generalize extracted module signatures before `Env.add_module`.
+    - `Pstr_recmodule`: force-generalize both initial constrained signatures and final extracted module signatures before `Env.add_module`.
+  - Rust behavior added: recursively walk module-type signatures/functors, promote reachable `SigValue` type nodes to `GENERIC_LEVEL`, but skip nullary `Tconstr` roots to avoid the known `find_simple_abbrev` / `LetUnwrap` remap regression.
+  - OCaml refs read:
+    - `compiler/ml/typemod.ml` (`type_structure` `Sig_module` construction + `Mtype.lower_nongen` on module declarations, lines ~1451-1486)
+    - `compiler/ml/ctype.ml` (`generalize`, `generalize_structure`, level-promotion behavior)
+  - Targeted checks:
+    - `timeout 300 ./scripts/test_typedtree_parity.sh set_gen` → `0/1` parity (still failing)
+    - `timeout 300 ./scripts/test_typedtree_parity.sh LetUnwrap` → `0/1` parity (still failing)
+    - `timeout 300 ./scripts/test_typedtree_parity.sh inline_map2_test` → both-fail in filtered mode (`0/1`)
+  - Deterministic full parity delta: **588/657 → 588/657** (parity failures **62 → 62**), Rust compile coverage stayed **650/657**.
+  - Parser/binary guard after patch: `timeout 300 ./scripts/test_parser_ast_parity.sh 2>&1 | tail -40` ended with `SUCCESS: All 3532 files have full parity!`.
+- [ ] **12A. Port OCaml `Mtype.lower_nongen` semantics for module declarations (NEW)** — task-12 force-generalization was parity-neutral, so the remaining drift is likely in level lowering timing/scope, not a blanket promotion pass.
+  - Evidence (2026-02-24): even with recursive module-signature value-type promotion (and nullary-`Tconstr` guard), full parity remained **588/657** with unchanged `set_gen` / `LetUnwrap` failures.
+  - Next OCaml refs: `compiler/ml/mtype.ml` (`lower_nongen`), `compiler/ml/typemod.ml` module declaration insertion points (`Pstr_module`, `Pstr_recmodule`).
+  - Next Rust refs: `compiler-rust/src/types/typemod.rs` module env insertion paths and `compiler-rust/src/types/context.rs` level APIs (`current_level`, `nongen_level`, `init_def`).
 - [ ] **13. GADT equation support** — gadt_equations, with_gadt_mode, add_gadt_equation, is_newtype_path. Complex. (650→651, test: js_json_test.res)
 - [x] **14. Per-case pattern generalization in type_case_impl** — begin_def/end_def/generalize around pattern typing. Replaces fix 9. (644→645)
   - 2026-02-24 fix: updated `compiler-rust/src/types/typecore.rs::type_case_impl` to align with OCaml `type_cases` pattern phase:

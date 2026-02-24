@@ -6077,6 +6077,10 @@ fn type_structure_item<'a>(
                         );
                     }
                 }
+                crate::types::ctype::force_generalize_module_sig_values(
+                    tctx.type_ctx,
+                    &decl_mod_type,
+                );
                 new_env.add_module(
                     mod_id.clone(),
                     crate::types::decl::ModuleDeclaration {
@@ -6125,6 +6129,7 @@ fn type_structure_item<'a>(
                     _ => None,
                 }
                 .unwrap_or(crate::types::decl::ModuleType::MtySignature(vec![]));
+                crate::types::ctype::force_generalize_module_sig_values(tctx.type_ctx, &init_mod_type);
                 rec_env.add_module(
                     mod_id.clone(),
                     crate::types::decl::ModuleDeclaration {
@@ -6221,6 +6226,7 @@ fn type_structure_item<'a>(
                     None => fallback_mod_type.clone(),
                 }
                 .unwrap_or(crate::types::decl::ModuleType::MtySignature(vec![]));
+                crate::types::ctype::force_generalize_module_sig_values(tctx.type_ctx, &mod_type);
                 new_env.add_module(
                     mod_id.clone(),
                     crate::types::decl::ModuleDeclaration {
