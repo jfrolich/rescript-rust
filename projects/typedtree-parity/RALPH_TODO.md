@@ -363,6 +363,15 @@ Primary blockers are currently (1) cycle/sharing typedtree rendering drift and (
   - Parser/binary guard on this snapshot: `timeout 300 ./scripts/test_parser_ast_parity.sh 2>&1 | tail -40` ended with `SUCCESS: All 3532 files have full parity!`.
 - [ ] **5A2A. Port OCaml `type_cases` ext_env/body binding flow into `type_function` (NEW)** — Rust hand-builds function body env (`state.pattern_variables` + ad-hoc instancing/copying), while OCaml reuses `type_pattern`’s `ext_env` directly; two local attempts in Rust `type_function` regressed full parity without touching the `set_gen` first diff.
   - Evidence: attempt A (`type_cases`-style propagation gating) regressed to **616/657** with 9 Rust rejects; attempt B (simple-var identity body binding) regressed to **621/657** with 1 Rust reject; both reverted, `set_gen` remained **0/1**.
+  - 2026-02-24 attempt C (kept): in `compiler-rust/src/types/typecore.rs::type_function`, replaced function-body env binding to use OCaml `add_pattern_variables` semantics (`pv.ty` identity) and removed the ad-hoc `instance(...)` + conditional shallow-copy path for function parameter bindings.
+    - OCaml refs read: `compiler/ml/typecore.ml` (`add_pattern_variables`, `type_pattern`, `type_cases` `pat_env_list`/`type_expect ext_env` flow) and `compiler/ml/ctype.ml` (`instance` identity behavior for non-generic nodes).
+    - Rust refs touched: `compiler-rust/src/types/typecore.rs` (`type_function` body-env construction).
+    - Build/test commands:
+      - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release` (success).
+      - `timeout 300 ./scripts/test_typedtree_parity.sh rbset` and `... set_gen` both stayed **0/1**.
+      - Deterministic full parity stayed **589/657 → 589/657** (Rust compile coverage **650/657**, OCaml-only pass **7**, parity failures **61**).
+      - Parser/binary guard stayed green: `timeout 300 ./scripts/test_parser_ast_parity.sh 2>&1 | tail -40` ended with `SUCCESS: All 3532 files have full parity!`.
+    - Outcome: parity-neutral; keep task unchecked.
   - Next OCaml refs: `compiler/ml/typecore.ml` (`type_cases` `pat_env_list` creation and body typing `type_expect ext_env`), `compiler/ml/typecore.ml` variable binding flow in `type_pattern`.
   - Next Rust refs: `compiler-rust/src/types/typecore.rs` (`type_pattern`, `PatternState`, `type_function` body-env construction) to replace ad-hoc env reconstruction with OCaml-equivalent ext_env threading.
 - [ ] **5A2B. Isolate `type_function` regression source across env-instancing, re-anchoring, and propagate gating (NEW)** — C1/C2/C3 combined regressed full parity to **589/657**, but targeted `rbset`/`set_gen` stayed unchanged, so at least one change is globally load-bearing while not touching the local recursive-`t` first diff.

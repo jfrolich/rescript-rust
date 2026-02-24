@@ -6655,17 +6655,12 @@ fn type_function(
         None
     };
 
-    // Extend environment with parameter binding
+    // Match OCaml add_pattern_variables/type_cases: extend with pattern-bound
+    // values using the types from type_pattern directly.
     let mut body_env = env.clone();
     let mut unpacks: Vec<PatternVariable> = Vec::new();
-    let should_copy_pattern_bindings = !is_simple_variable_pattern(tctx.arena, param);
     for pv in &state.pattern_variables {
-        let body_binding_ty = crate::types::instance(ctx, pv.ty);
-        let binding_ty = if should_copy_pattern_bindings {
-            shallow_copy_pattern_binding_type(ctx, body_binding_ty, false)
-        } else {
-            body_binding_ty
-        };
+        let binding_ty = pv.ty;
         let desc = ValueDescription {
             val_type: binding_ty,
             val_kind: crate::types::ValueKind::ValReg,
