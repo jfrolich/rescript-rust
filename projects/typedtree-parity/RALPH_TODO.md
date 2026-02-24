@@ -332,6 +332,11 @@ Primary blockers are currently (1) cycle/sharing typedtree rendering drift and (
     - Targeted checks: `timeout 300 ./scripts/test_typedtree_parity.sh rbset` and `... set_gen` both stayed **0/1** with unchanged first diffs.
     - Deterministic full parity stayed **589/657 → 589/657** (Rust compile coverage **650/657**, OCaml-only pass **7**, parity failures **61**).
     - Parser/binary guard after revert: `timeout 300 ./scripts/test_parser_ast_parity.sh 2>&1 | tail -40` ended with `SUCCESS: All 3532 files have full parity!`.
+  - 2026-02-24 attempt L (reverted): in `compiler-rust/src/types/typecore.rs::type_function`, added an OCaml-`type_cases`-style fresh-pattern unification step (`unify_pats ty_arg'` analogue) by unifying typed parameter pattern type against a fresh `new_var`.
+    - OCaml refs read: `compiler/ml/typecore.ml` (`type_cases` `unify_pats ty_arg'` and propagate path around lines ~3981-4003), `compiler/ml/typecore.ml` (`type_function` delegation to `type_cases` around lines ~3314-3320).
+    - Targeted checks: `timeout 300 ./scripts/test_typedtree_parity.sh rbset` and `... set_gen` both remained **0/1** with unchanged first diffs (`rbset` `<cycle> ↔ Tconstr(Pident "t")`, `set_gen` `t(<cycle>) ↔ t(Tvar None)`).
+    - Deterministic full parity stayed **589/657 → 589/657** (parity failures **61**, Rust compile coverage **650/657**, OCaml-only pass **7**).
+    - Reverted immediately after parity-neutral outcome.
   - Deterministic full baseline after all reverts (current workspace snapshot):
     - `timeout 300 ./scripts/test_typedtree_parity.sh` reports **589/657** parity with **7** OCaml-only pass files and **61** parity failures.
     - Re-run confirmed stable **589/657** (**589 -> 589**).
@@ -361,6 +366,12 @@ Primary blockers are currently (1) cycle/sharing typedtree rendering drift and (
   - Required next step: instrument `compiler-rust/src/types/typecore.rs::type_let_bindings` + `type_approx_for_rec_let` to capture node identity for binding `pat_type` vs approximation arrow nodes (`blackify`, `elements_aux`) before entering `type_function`.
   - Compare with OCaml `compiler/ml/typecore.ml` (`type_let`, `type_approx`, recursive pre-unification path) to verify where the `<cycle>` sharing edge is dropped (`t(<cycle>) -> t(Tvar None)`).
   - Evidence: with K reverted, `timeout 300 ./scripts/test_typedtree_parity.sh rbset` and `... set_gen` remain **0/1** and deterministic full parity remains **589/657**; parser/binary guard remains green.
+- [ ] **5A2G. Port full OCaml `type_cases` pattern-unification flow for function cases (NEW)** — a local `unify_pats ty_arg'` analogue in Rust `type_function` was parity-neutral, which suggests the missing behavior is the complete `type_cases` two-phase flow (pat-env list + propagate-conditioned second unify), not a single extra unification call.
+  - Required next step: refactor `type_function` single-case typing through a shared `type_cases`-equivalent helper that preserves OCaml ordering:
+    - per-case `instance env ty_arg` before `type_pattern`,
+    - delayed `unify_pats ty_arg'`,
+    - optional `unify_pats (instance env ty_arg)` when propagate applies.
+  - Evidence: attempt L (`type_function` fresh-pattern unification only) kept `rbset`/`set_gen` at **0/1** and full parity at **589/657**.
 - [ ] **5B. Preserve compile parity when porting `Subst.typexp` variant `more'` flow (NEW)** — direct conditional `row_more` reuse currently causes Rust type-check regressions on full build.
   - Evidence (2026-02-24): first-pass OCaml-style `dup`/`more'` port in `copy_type_deep` + `subst_identity_copy_rec` changed full run from **478/657** to **539/657** with Rust compile parity drop **657/657 → 648/657** (9 OCaml-only passes). Reverted.
   - Required guardrail: maintain compile parity **657/657** and avoid introducing new Rust-reject files while aligning variant row-copy behavior.
