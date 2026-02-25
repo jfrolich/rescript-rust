@@ -6210,6 +6210,29 @@ fn close_open_variants_in_type(
     wildcard_rows: &HashSet<usize>,
     visited: &mut HashSet<usize>,
 ) {
+    close_open_variants_in_type_inner(ctx, env, ty, matched_tags, wildcard_rows, visited, &mut HashSet::new());
+}
+
+fn close_open_variants_in_type_inner(
+    ctx: &TypeContext<'_>,
+    env: &Env,
+    ty: TypeExprRef,
+    matched_tags: &HashSet<String>,
+    wildcard_rows: &HashSet<usize>,
+    visited: &mut HashSet<usize>,
+    expansion_guard: &mut HashSet<usize>,
+) {
+    // Track the original (pre-expansion) node in a SEPARATE set to prevent
+    // infinite recursion on recursive type aliases like
+    // `type rec vlist<'a> = [#Nil | #Cons('a, vlist<'a>)]`.
+    // expand_head creates fresh nodes for each expansion, so the main `visited`
+    // set (which tracks expanded nodes) never catches the cycle.
+    // Using a separate set avoids polluting `visited` and prematurely skipping
+    // nodes that should still be processed.
+    let orig_repr = ctx.repr(ty);
+    if !expansion_guard.insert(orig_repr.0) {
+        return;
+    }
     let expanded = crate::types::ctype::expand_head(ctx, env, ty);
     let repr = ctx.repr(expanded);
     if !visited.insert(repr.0) {
@@ -6245,30 +6268,30 @@ fn close_open_variants_in_type(
                 })
                 .collect();
             drop(desc);
-            close_open_variants_in_type(ctx, env, more, matched_tags, wildcard_rows, visited);
+            close_open_variants_in_type_inner(ctx, env, more, matched_tags, wildcard_rows, visited, expansion_guard);
             for t in field_types {
-                close_open_variants_in_type(ctx, env, t, matched_tags, wildcard_rows, visited);
+                close_open_variants_in_type_inner(ctx, env, t, matched_tags, wildcard_rows, visited, expansion_guard);
             }
         }
         TypeDesc::Tconstr { args, .. } => {
             let args = args.clone();
             drop(desc);
             for arg in args {
-                close_open_variants_in_type(ctx, env, arg, matched_tags, wildcard_rows, visited);
+                close_open_variants_in_type_inner(ctx, env, arg, matched_tags, wildcard_rows, visited, expansion_guard);
             }
         }
         TypeDesc::Tarrow { arg, ret, .. } => {
             let arg_ty = arg.typ;
             let ret_ty = *ret;
             drop(desc);
-            close_open_variants_in_type(ctx, env, arg_ty, matched_tags, wildcard_rows, visited);
-            close_open_variants_in_type(ctx, env, ret_ty, matched_tags, wildcard_rows, visited);
+            close_open_variants_in_type_inner(ctx, env, arg_ty, matched_tags, wildcard_rows, visited, expansion_guard);
+            close_open_variants_in_type_inner(ctx, env, ret_ty, matched_tags, wildcard_rows, visited, expansion_guard);
         }
         TypeDesc::Ttuple(items) => {
             let items = items.clone();
             drop(desc);
             for item in items {
-                close_open_variants_in_type(ctx, env, item, matched_tags, wildcard_rows, visited);
+                close_open_variants_in_type_inner(ctx, env, item, matched_tags, wildcard_rows, visited, expansion_guard);
             }
         }
         _ => {}
