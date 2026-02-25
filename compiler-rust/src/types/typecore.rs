@@ -6239,10 +6239,15 @@ fn close_variant_rows_across_case_pattern_types(
     // at variant-typed positions.
     let mut matched_tags: HashSet<String> = HashSet::new();
     let mut variant_wildcard_rows: HashSet<usize> = HashSet::new();
+    let mut labels_by_row: HashMap<usize, Vec<String>> = HashMap::new();
     for case in cases {
         collect_all_variant_tags_in_pattern(&case.c_lhs, &mut matched_tags);
         collect_rows_with_wildcard_coverage(tctx, env, &case.c_lhs, &mut variant_wildcard_rows);
+        collect_variant_row_labels_in_pattern(tctx, env, &case.c_lhs, &mut labels_by_row);
     }
+
+    // Normalize wildcard coverage across per-case instances
+    normalize_wildcard_coverage_by_labels(tctx, &labels_by_row, &mut variant_wildcard_rows);
 
     if matched_tags.is_empty() {
         return;
@@ -6686,6 +6691,55 @@ fn collect_rows_with_wildcard_coverage(
     }
 }
 
+/// Normalize wildcard coverage across per-case instances.
+/// Since instance() creates separate Tvariant nodes for each case, a wildcard
+/// in case N has a different node ID from the variant patterns in other cases.
+/// This function extracts the row_fields labels from each wildcard row's type,
+/// then marks any labeled row with the same label set as also having wildcard coverage.
+fn normalize_wildcard_coverage_by_labels(
+    tctx: &mut TypeCheckContext<'_>,
+    labels_by_row: &HashMap<usize, Vec<String>>,
+    rows_with_wildcards: &mut HashSet<usize>,
+) {
+    // For each wildcard row, get its variant labels from the type's row_fields
+    let mut wildcard_label_sets: Vec<Vec<String>> = Vec::new();
+    for &wildcard_key in rows_with_wildcards.iter() {
+        let ctx = tctx.type_ctx;
+        let ty = TypeExprRef(wildcard_key);
+        let desc = ctx.get_desc(ty);
+        if let TypeDesc::Tvariant(row) = &*desc {
+            let mut labels: Vec<String> = row.row_fields.iter().map(|(l, _)| l.clone()).collect();
+            labels.sort();
+            wildcard_label_sets.push(labels);
+        }
+    }
+
+    // For each labeled row, check if its row_fields labels match any wildcard row's labels
+    let mut new_wildcards: Vec<usize> = Vec::new();
+    for (&row_key, _) in labels_by_row.iter() {
+        if rows_with_wildcards.contains(&row_key) {
+            continue;
+        }
+        let ctx = tctx.type_ctx;
+        let ty = TypeExprRef(row_key);
+        let desc = ctx.get_desc(ty);
+        if let TypeDesc::Tvariant(row) = &*desc {
+            let mut labels: Vec<String> = row.row_fields.iter().map(|(l, _)| l.clone()).collect();
+            labels.sort();
+            for wildcard_labels in &wildcard_label_sets {
+                if labels == *wildcard_labels {
+                    new_wildcards.push(row_key);
+                    break;
+                }
+            }
+        }
+    }
+
+    for key in new_wildcards {
+        rows_with_wildcards.insert(key);
+    }
+}
+
 /// Match OCaml's pressure_variants + finalize_variant on ORIGINAL types.
 /// 1. Close variant rows without wildcard coverage (like OCaml's pressure_variants)
 /// 2. Convert Reither→Rpresent in still-open rows (like OCaml's finalize_variant)
@@ -6706,6 +6760,14 @@ fn pressure_and_finalize_variant_rows(
         collect_variant_row_labels_in_pattern(tctx, env, &case.c_lhs, &mut labels_by_row);
         collect_rows_with_wildcard_coverage(tctx, env, &case.c_lhs, &mut rows_with_wildcards);
     }
+
+    // Normalize wildcard coverage across per-case instances:
+    // instance() creates separate Tvariant nodes for each case, so a wildcard in
+    // case N has a different node ID from the variant pattern in case M, even though
+    // they represent the same type. Propagate wildcard coverage by matching variant
+    // label sets: if a wildcard row has the same labels as a labeled row, they came
+    // from the same scrutinee type and the labeled row should be protected too.
+    normalize_wildcard_coverage_by_labels(tctx, &labels_by_row, &mut rows_with_wildcards);
 
     // Step 2: Determine which rows to close (has labels, no wildcard coverage)
     // OCaml's pressure_variants closes any variant row without wildcard coverage,
@@ -6752,6 +6814,9 @@ fn close_multi_label_variant_rows_in_cases(
         // Also detect nested wildcard patterns at variant-typed positions
         collect_rows_with_wildcard_coverage(tctx, env, &case.c_lhs, &mut rows_with_wildcards);
     }
+
+    // Normalize wildcard coverage across per-case instances
+    normalize_wildcard_coverage_by_labels(tctx, &labels_by_row, &mut rows_with_wildcards);
 
     let row_label_orders: HashMap<usize, Vec<String>> = labels_by_row
         .into_iter()
