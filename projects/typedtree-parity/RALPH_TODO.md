@@ -552,6 +552,21 @@ Secondary priority. Primary blockers are (1) cycle/sharing typedtree rendering d
     - `timeout 600 ./scripts/test_typedtree_parity.sh` stayed **589/657 → 589/657** (Rust compile coverage **650/657**, OCaml-only pass **7**, parity failures **61**).
     - `timeout 300 ./scripts/test_parser_ast_parity.sh 2>&1 | tail -40` stayed green (`SUCCESS: All 3532 files have full parity!`).
   - Outcome: parity-neutral; patch reverted. Next step is to trace where `ty_res` sharing diverges before case emission (likely at recursive-let approximation/unification or pattern/body coupling), not at final case-RHS type overwrite.
+- [ ] **5A2M. Validate OCaml `type_cases` propagate `unify_var` + RHS `exp_type` shaping in batched non-GADT match flow (NEW)** — adding both missing OCaml steps in Rust `type_match_cases_batch_non_gadt` (plus sequential `type_case_impl` RHS shaping for consistency) was parity-neutral on the deterministic 619 baseline.
+  - 2026-02-25 attempt (reverted): patched `compiler-rust/src/types/typecore.rs` to:
+    - run `iter_typed_pattern ... unify_pattern_types(pat_type, new_var())` in the propagate branch before `end_def/generalize`, mirroring `type_cases` `unify_var env t (newvar ())`,
+    - overwrite case RHS `exp_type` with `instance(body_ty)` in both batched non-GADT case emission and `type_case_impl`.
+  - OCaml refs read:
+    - `compiler/ml/typecore.ml` (`type_cases`: propagate branch `iter_pattern ... unify_var env t (newvar ())`)
+    - `compiler/ml/typecore.ml` (`type_cases`: case construction `c_rhs = {exp with exp_type = instance env ty_res'}`)
+    - `compiler/ml/ctype.ml` (`unify_var`)
+  - Targeted checks:
+    - `timeout 300 ./scripts/test_typedtree_parity.sh set_gen` stayed **0/1** (hunk mismatches: **19**).
+    - `timeout 300 ./scripts/test_typedtree_parity.sh variantsMatching` stayed **0/1** (hunk mismatches: **29**).
+    - `timeout 300 ./scripts/test_typedtree_parity.sh fun_pattern_match` stayed **0/1** (hunk mismatches: **16**).
+  - Deterministic full parity stayed **619/657 → 619/657** (parity failures **37 → 37**, hunk mismatches **255 → 255**, Rust compile coverage **656/657 → 656/657**; Rust-only reject remains `Js_json_test`).
+  - Parser/binary guard after revert: `timeout 320 sh -lc './scripts/test_parser_ast_parity.sh > /tmp/parser_guard_ralph.log 2>&1; code=$?; tail -40 /tmp/parser_guard_ralph.log; exit $code'` ended with `SUCCESS: All 3532 files have full parity!`.
+  - Outcome: one parity-neutral hypothesis consumed; next task should isolate whether missing behavior is env threading (`unify_pat ext_env`) rather than `unify_var`/RHS-shape steps in isolation.
 - [ ] **5B. Preserve compile parity when porting `Subst.typexp` variant `more'` flow (NEW)** — direct conditional `row_more` reuse currently causes Rust type-check regressions on full build.
   - Evidence (2026-02-24): first-pass OCaml-style `dup`/`more'` port in `copy_type_deep` + `subst_identity_copy_rec` changed full run from **478/657** to **539/657** with Rust compile parity drop **657/657 → 648/657** (9 OCaml-only passes). Reverted.
   - Required guardrail: maintain compile parity **657/657** and avoid introducing new Rust-reject files while aligning variant row-copy behavior.
