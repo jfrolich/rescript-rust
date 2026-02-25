@@ -785,6 +785,20 @@ Secondary priority. Primary blockers are (1) cycle/sharing typedtree rendering d
   - Evidence (2026-02-25): deterministic full parity stayed **619/657 → 619/657** (parity failures **37**, hunk mismatches **255**, compile parity **656/657**) and targeted checks stayed unchanged (`set_gen` **0/1** with 19 hunks, `fun_pattern_match` **0/1** with 16 hunks).
   - Next OCaml refs: `compiler/ml/typecore.ml` `type_cases` propagation path (`unify_pats`, `iter_pattern ... generalize`, `c_rhs.exp_type = instance env ty_res'`) plus recursive-let handoff near `type_let`.
   - Next Rust refs: `compiler-rust/src/types/typecore.rs` (`type_function` expected-arrow extraction and `param_pat_ty` instance timing, `type_case_impl` RHS type rewrite) and `type_let_bindings` unification between approximations and inferred function types.
+- [ ] **9D. Validate `type_function` `exp_type` arg source (`ty_arg`) without Rust re-anchoring (NEW)** — OCaml builds function `exp_type` from `ty_arg` (`Tarrow (... typ = ty_arg ...)`) and does not run a post-`instance` re-anchor pass; a direct Rust alignment attempt was parity-neutral on the active set/variant cluster.
+  - Evidence (2026-02-25): temporary patch in `compiler-rust/src/types/typecore.rs::type_function`:
+    - used `param_ty` (OCaml `ty_arg`) instead of `typed_param.pat_type` when building the final `new_generic_arrow`,
+    - removed Rust-only top-level arrow arg/ret re-anchoring after `instance`,
+    - reintroduced non-simple-pattern body-env shallow copies (`shallow_copy_pattern_binding_type(..., copy_nullary=false)`).
+  - OCaml refs read:
+    - `compiler/ml/typecore.ml` `type_function` (~3262-3321), especially `exp_type = instance env (newgenty (Tarrow ({lbl = l; typ = ty_arg}, ...)))`
+    - `compiler/ml/typecore.ml` `type_cases` body typing flow (`c_rhs = {exp with exp_type = instance env ty_res'}`) for comparison of case/result instantiation shape.
+  - Targeted checks:
+    - `timeout 300 ./scripts/test_typedtree_parity.sh set_gen` stayed **0/1** (hunk mismatches **19**).
+    - `timeout 300 ./scripts/test_typedtree_parity.sh variantsMatching` stayed **0/1** (hunk mismatches **29**).
+  - Deterministic full parity stayed **619/657 → 619/657** (parity failures **37**, hunk mismatches **255**, compile parity **656/657**), with unchanged Rust-only reject: `Js_json_test` (`CoreError(ExprTypeClash ... context: Some(FunctionCall))`).
+  - Outcome: reverted after parity-neutral result; keep task unchecked.
+  - Next step: trace where `ty_arg` shape diverges before final function emission (expected-arrow extraction / recursive-let unification handoff), not at final arrow materialization.
 - [ ] **10. Protect scrutinee type from pattern unification** — Shallow copy when instance() returns identity. (636→637, test: option_repr_test.res)
   - 2026-02-24 attempt: added a `type_case_impl` scrutinee guard that `instance`s the case scrutinee type and shallow-copies identity-return `Tconstr` nodes before `type_pattern`. Deterministic full parity stayed **478/657 → 478/657** (179 failures). Reverted.
   - OCaml refs read: `typecore.ml` `type_cases` (`instance ?partial env ty_arg`, pattern/body phasing around lines ~3906-4050) and `add_pattern_variables` (~1742).
