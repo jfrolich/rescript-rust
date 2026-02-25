@@ -745,6 +745,16 @@ Secondary priority. Primary blockers are (1) cycle/sharing typedtree rendering d
   - Parser/binary guard stayed green: `timeout 300 ./scripts/test_parser_ast_parity.sh 2>&1 | tail -40` ended with `SUCCESS: All 3532 files have full parity!`.
   - Reverted after parity-neutral result; keep this task unchecked.
 - [ ] **9. Shallow-copy pattern variable types** — Shallow Tconstr copies for pattern vars with non-empty args. (631→634, +3 tests)
+  - 2026-02-25 attempt (reverted): isolated Task-9 `type_function` body-env insertion copy for non-simple parameter patterns only:
+    - added `is_simple_variable_pattern(...)` gating and used `shallow_copy_pattern_binding_type(..., copy_nullary=false)` only when the function parameter pattern is not variable-like.
+    - left `type_case_impl` behavior unchanged.
+  - OCaml refs read: `compiler/ml/typecore.ml` (`add_pattern_variables` ~1742, `type_function` ~3262, `type_cases` `is_var`/propagation flow ~3906-4050).
+  - Targeted checks:
+    - `timeout 300 ./scripts/test_typedtree_parity.sh rbset` moved/stayed **1/1** (already green in current baseline).
+    - `timeout 300 ./scripts/test_typedtree_parity.sh set_gen` stayed **0/1** (hunk mismatches: **19**).
+    - `timeout 300 ./scripts/test_typedtree_parity.sh fun_pattern_match` stayed **0/1** (hunk mismatches: **16**).
+  - Deterministic full parity stayed **619/657 → 619/657** (parity failures **37 → 37**), compile parity stayed **656/657** (Rust-only error remains `Js_json_test`), hunk mismatches stayed **255**.
+  - Parser/binary guard after revert stayed green: `timeout 300 ./scripts/test_parser_ast_parity.sh 2>&1 | tail -40` ended with `SUCCESS: All 3532 files have full parity!`.
   - 2026-02-24 attempt: patched `compiler-rust/src/types/typecore.rs::type_function` to shallow-copy non-empty `Tconstr` pattern bindings for non-simple parameter patterns before inserting values into the body env (`type_case_impl` already does this), then reverted after neutral results.
   - OCaml refs read: `compiler/ml/typecore.ml` (`type_function`, `type_cases`, `add_pattern_variables`).
   - Targeted checks:
@@ -771,6 +781,10 @@ Secondary priority. Primary blockers are (1) cycle/sharing typedtree rendering d
   - Evidence (2026-02-24): deterministic full parity remained **589/657** with unchanged failure set after the isolated `type_function` shallow-copy patch; targeted `rbset`/`set_gen` stayed **0/1**.
   - Next OCaml refs: `compiler/ml/typecore.ml` `type_function` + `type_cases` (`filter_arrow`, per-case `instance env ty_arg`, `unify_pats` propagation) and recursive-let handoff in `type_let`.
   - Next Rust refs: `compiler-rust/src/types/typecore.rs` (`type_function` expected-arrow extraction / `param_ty` flow, `type_pattern`) and `type_let`/`type_let_bindings` boundaries where function result types are unified with approximation nodes.
+- [ ] **9C. Trace Task-9 drift in active failures after non-simple `type_function` copy confirms no effect (NEW)** — with current deterministic baseline (**619/657**), isolating the non-simple-parameter shallow copy in `type_function` is parity-neutral and does not move active Task-9 failures (`set_gen`, `fun_pattern_match`), so the remaining concretization drift is likely before body-env insertion or in case-result instantiation.
+  - Evidence (2026-02-25): deterministic full parity stayed **619/657 → 619/657** (parity failures **37**, hunk mismatches **255**, compile parity **656/657**) and targeted checks stayed unchanged (`set_gen` **0/1** with 19 hunks, `fun_pattern_match` **0/1** with 16 hunks).
+  - Next OCaml refs: `compiler/ml/typecore.ml` `type_cases` propagation path (`unify_pats`, `iter_pattern ... generalize`, `c_rhs.exp_type = instance env ty_res'`) plus recursive-let handoff near `type_let`.
+  - Next Rust refs: `compiler-rust/src/types/typecore.rs` (`type_function` expected-arrow extraction and `param_pat_ty` instance timing, `type_case_impl` RHS type rewrite) and `type_let_bindings` unification between approximations and inferred function types.
 - [ ] **10. Protect scrutinee type from pattern unification** — Shallow copy when instance() returns identity. (636→637, test: option_repr_test.res)
   - 2026-02-24 attempt: added a `type_case_impl` scrutinee guard that `instance`s the case scrutinee type and shallow-copies identity-return `Tconstr` nodes before `type_pattern`. Deterministic full parity stayed **478/657 → 478/657** (179 failures). Reverted.
   - OCaml refs read: `typecore.ml` `type_cases` (`instance ?partial env ty_arg`, pattern/body phasing around lines ~3906-4050) and `add_pattern_variables` (~1742).
