@@ -4420,6 +4420,9 @@ fn type_structure_item<'a>(
             let mut new_env = env.clone();
             let mut typed_tree_decls: Vec<TypedTypeDeclaration> = Vec::new();
             let mut internal_decls_for_generalize: Vec<crate::types::TypeDeclaration> = Vec::new();
+            // Collect env-description TypeExprRefs (cstr_res, label ty_res) that
+            // are separate from the TypeKind and need explicit generalization.
+            let mut env_desc_types_for_generalize: Vec<crate::types::TypeExprRef> = Vec::new();
 
             // OCaml: Ctype.begin_def() before translating type declarations
             ctx.begin_def();
@@ -5222,6 +5225,7 @@ fn type_structure_item<'a>(
                             let cstr_desc_res = internal_cd_res.unwrap_or_else(|| {
                                 ctx.new_constr(type_path.clone(), internal_type_params.clone())
                             });
+                            env_desc_types_for_generalize.push(cstr_desc_res);
                             let cstr_existentials = crate::types::env::constructor_existentials(ctx, &cstr_args, internal_cd_res);
                             cstr_descs.push((
                                 cstr_id,
@@ -5465,6 +5469,7 @@ fn type_structure_item<'a>(
                                 Path::pdot(type_path.clone(), cstr_desc.cstr_name.clone());
                             let ty_res =
                                 ctx.new_constr(inline_path, inlined_decl.type_params.clone());
+                            env_desc_types_for_generalize.push(ty_res);
                             for (pos, ld) in labels.iter().enumerate() {
                                 let lbl_desc = crate::types::LabelDescription {
                                     lbl_name: ld.ld_id.name().to_string(),
@@ -5497,6 +5502,7 @@ fn type_structure_item<'a>(
                     // Create the record type reference: Tconstr(type_path, type_params)
                     let ty_res =
                         ctx.new_constr(type_path.clone(), internal_decl.type_params.clone());
+                    env_desc_types_for_generalize.push(ty_res);
                     for (pos, ld) in labels.iter().enumerate() {
                         let lbl_desc = crate::types::LabelDescription {
                             lbl_name: ld.ld_id.name().to_string(),
@@ -5565,6 +5571,17 @@ fn type_structure_item<'a>(
                 if let Some(manifest) = decl.type_manifest {
                     crate::types::ctype::generalize(ctx, manifest);
                 }
+            }
+            // Generalize env-description types (cstr_res, label ty_res) that are
+            // separate from the TypeKind and won't be reached by iter_type_expr_kind.
+            // In OCaml these are created by datarepr.ml constructors_of_type/labels_of_type
+            // inside Env.add_type, sharing the same type_params which get generalized
+            // by generalize_decl. The Tconstr wrapper nodes themselves stay non-generic
+            // in OCaml (copy returns identity for them). In Rust, copy_type_cached creates
+            // new copies of non-generic Tconstr preserving their level, which contaminates
+            // pattern type variables via update_level_expand during unification.
+            for ty in &env_desc_types_for_generalize {
+                crate::types::ctype::generalize(ctx, *ty);
             }
 
             let desc = StructureItemDesc::Tstr_type(*rec_flag, typed_tree_decls);

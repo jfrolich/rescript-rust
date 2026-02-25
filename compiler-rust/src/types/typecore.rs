@@ -10242,19 +10242,52 @@ fn type_let_bindings(
         }
 
         // Type check expressions after recursive approximation unification.
+        // OCaml typecore.ml type_let lines 4189-4211
         let mut typed_bindings = Vec::new();
         for ((binding, typed_pat), ty) in bindings
             .iter()
             .zip(typed_patterns.into_iter())
             .zip(binding_types.iter())
         {
-            let typed_expr = type_expect(
-                tctx,
-                &typing_env,
-                tctx.arena.get_expr(binding.pvb_expr),
-                *ty,
-                None,
-            )?;
+            // OCaml typecore.ml lines 4196-4209: Tpoly pattern types get special handling
+            let pat_ty = typed_pat.pat_type;
+            let pat_repr = ctx.repr(pat_ty);
+            let pat_desc = ctx.get_desc(pat_repr);
+            let typed_expr = match &*pat_desc {
+                TypeDesc::Tpoly { body, vars } if !vars.is_empty() => {
+                    let body = *body;
+                    let vars = vars.clone();
+                    drop(pat_desc);
+                    // OCaml: begin_def(); let vars, ty' = instance_poly ~keep_names:true true tl ty
+                    ctx.begin_def();
+                    let (inst_vars, inst_ty) =
+                        crate::types::ctype::instance_poly(ctx, true, true, &vars, body);
+                    let exp = type_expect(
+                        tctx,
+                        &typing_env,
+                        tctx.arena.get_expr(binding.pvb_expr),
+                        inst_ty,
+                        None,
+                    )?;
+                    ctx.end_def();
+                    // OCaml: check_univars env true "definition" exp pat.pat_type vars
+                    crate::types::ctype::check_univars(ctx, &inst_vars);
+                    // OCaml: {exp with exp_type = instance env exp.exp_type}
+                    let new_exp_type = crate::types::ctype::instance(ctx, exp.exp_type);
+                    Expression { exp_type: new_exp_type, ..exp }
+                }
+                _ => {
+                    drop(pat_desc);
+                    // OCaml: type_expect ~context exp_env sexp pat.pat_type
+                    type_expect(
+                        tctx,
+                        &typing_env,
+                        tctx.arena.get_expr(binding.pvb_expr),
+                        *ty,
+                        None,
+                    )?
+                }
+            };
             typed_bindings.push(ValueBinding::new(
                 typed_pat,
                 typed_expr,
@@ -10268,8 +10301,9 @@ fn type_let_bindings(
 
         // Match OCaml typecore.ml `type_let`: generalize over every typed
         // subpattern (not just root binding types) using iter_pattern.
-        for binding in &typed_bindings {
-            if !is_nonexpansive_expression(tctx, &binding.vb_expr) {
+        for binding in typed_bindings.iter() {
+            let is_nonexp = is_nonexpansive_expression(tctx, &binding.vb_expr);
+            if !is_nonexp {
                 iter_typed_pattern(&binding.vb_pat, &mut |pat| {
                     crate::types::ctype::generalize_expansive(ctx, env, pat.pat_type);
                 });
