@@ -4481,10 +4481,12 @@ fn unify_expression_types(
 
     match unify(tctx.type_ctx, &mut tctx.unify_state, ty1, ty2) {
         Ok(()) => Ok(()),
-        Err(_e) => Err(TypeCoreError::ExprTypeClash {
-            trace: vec![(ty1, ty2)],
-            context,
-        }),
+        Err(_e) => {
+            Err(TypeCoreError::ExprTypeClash {
+                trace: vec![(ty1, ty2)],
+                context,
+            })
+        }
     }
 }
 
@@ -5641,13 +5643,6 @@ fn type_match(
     // close_multi_label_variant_rows_in_cases copies and closes for pattern types.
     pressure_and_finalize_variant_rows(tctx, env, &mut typed_val_cases);
 
-    // Propagate variant row closures across case pattern types.
-    // In OCaml, all cases share the same ty_arg, so closing a variant row in
-    // any pattern (via pressure_variants) propagates to all cases. In Rust,
-    // each case gets a fresh instance, so variant rows closed in one case
-    // (e.g. Error(#InvalidString)) don't propagate to other cases (e.g. Ok(x)).
-    // We explicitly close open variant rows in each case's pattern type when
-    // they are fully covered by the matched tags across all cases.
     close_variant_rows_across_case_pattern_types(tctx, env, &typed_val_cases);
 
     close_multi_label_variant_rows_in_cases(tctx, env, &mut typed_val_cases);
@@ -5656,6 +5651,12 @@ fn type_match(
     for case in typed_val_cases.iter_mut() {
         finalize_variant_in_pattern(tctx, env, &mut case.c_lhs);
     }
+
+    // Reopen variant rows AFTER all closing steps. The closing logic operates
+    // on per-case pattern types, but case 0 may share variant nodes with ty_arg
+    // (identity instance). Closing case 0's pattern closes ty_arg too. Reopen
+    // any ty_arg variant rows that have wildcard coverage in any case.
+    reopen_wildcard_covered_rows_in_scrutinee(tctx, env, &typed_val_cases, ty_arg);
 
     // Match OCaml type_cases `unify_pats (instance env ty_arg)` propagation:
     // for identifier scrutinees, push the finalized pattern type back to the
@@ -5698,6 +5699,127 @@ fn type_match(
         EnvRef(0),
         attributes.to_vec().into(),
     ))
+}
+
+/// Reopen variant rows in the scrutinee type that were closed by
+/// pressure_and_finalize but have wildcard coverage in some case pattern.
+fn reopen_wildcard_covered_rows_in_scrutinee(
+    tctx: &mut TypeCheckContext<'_>,
+    env: &Env,
+    cases: &[crate::types::typedtree::Case],
+    scrutinee_ty: TypeExprRef,
+) {
+    let ctx = tctx.type_ctx;
+
+    // For direct variant scrutinee
+    let scrutinee_repr = ctx.repr(scrutinee_ty);
+    let scrutinee_desc = ctx.get_desc(scrutinee_repr);
+    match &*scrutinee_desc {
+        TypeDesc::Tvariant(_) => {
+            drop(scrutinee_desc);
+            // Check if any case has a wildcard at this position
+            let mut has_wildcard = false;
+            for case in cases {
+                if matches!(case.c_lhs.pat_desc, PatternDesc::Tpat_any | PatternDesc::Tpat_var(..)) {
+                    has_wildcard = true;
+                    break;
+                }
+                // Also check inside or-patterns
+                if has_wildcard_in_or_pattern(&case.c_lhs) {
+                    has_wildcard = true;
+                    break;
+                }
+            }
+            if has_wildcard {
+                reopen_variant_row(ctx, scrutinee_repr);
+            }
+        }
+        TypeDesc::Ttuple(tys) => {
+            let elem_tys: Vec<TypeExprRef> = tys.clone();
+            drop(scrutinee_desc);
+            // For each tuple position, check if any case has a wildcard there
+            for (i, elem_ty) in elem_tys.iter().enumerate() {
+                let elem_repr = ctx.repr(*elem_ty);
+                let elem_desc = ctx.get_desc(elem_repr);
+                let is_closed_variant = if let TypeDesc::Tvariant(row) = &*elem_desc {
+                    let rd = crate::types::btype::row_repr(ctx, row);
+                    rd.row_closed
+                } else {
+                    false
+                };
+                drop(elem_desc);
+                if !is_closed_variant {
+                    continue;
+                }
+                // Check if any case has a wildcard at tuple position i
+                let mut has_wildcard = false;
+                for case in cases {
+                    if tuple_element_has_wildcard(&case.c_lhs, i) {
+                        has_wildcard = true;
+                        break;
+                    }
+                }
+                if has_wildcard {
+                    reopen_variant_row(ctx, elem_repr);
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+fn reopen_variant_row(ctx: &TypeContext<'_>, repr: TypeExprRef) {
+    let desc = ctx.get_desc(repr);
+    if let TypeDesc::Tvariant(row) = &*desc {
+        let row_data = crate::types::btype::row_repr(ctx, row);
+        if row_data.row_closed {
+            drop(desc);
+            let mut reopened = row_data;
+            reopened.row_closed = false;
+            ctx.set_desc(repr, TypeDesc::Tvariant(reopened));
+        }
+    }
+}
+
+/// Check if a pattern at a specific tuple element position is a wildcard
+fn tuple_element_has_wildcard(pat: &Pattern, pos: usize) -> bool {
+    match &pat.pat_desc {
+        PatternDesc::Tpat_tuple(items) => {
+            if pos < items.len() {
+                pattern_is_wildcard(&items[pos])
+            } else {
+                false
+            }
+        }
+        PatternDesc::Tpat_or(left, right, _) => {
+            tuple_element_has_wildcard(left, pos) || tuple_element_has_wildcard(right, pos)
+        }
+        PatternDesc::Tpat_alias(inner, _, _) => {
+            tuple_element_has_wildcard(inner, pos)
+        }
+        // If the entire pattern is a wildcard, all positions are wildcards
+        PatternDesc::Tpat_any | PatternDesc::Tpat_var(_, _) => true,
+        _ => false,
+    }
+}
+
+fn pattern_is_wildcard(pat: &Pattern) -> bool {
+    match &pat.pat_desc {
+        PatternDesc::Tpat_any | PatternDesc::Tpat_var(_, _) => true,
+        PatternDesc::Tpat_alias(inner, _, _) => pattern_is_wildcard(inner),
+        _ => false,
+    }
+}
+
+fn has_wildcard_in_or_pattern(pat: &Pattern) -> bool {
+    match &pat.pat_desc {
+        PatternDesc::Tpat_any | PatternDesc::Tpat_var(_, _) => true,
+        PatternDesc::Tpat_or(left, right, _) => {
+            has_wildcard_in_or_pattern(left) || has_wildcard_in_or_pattern(right)
+        }
+        PatternDesc::Tpat_alias(inner, _, _) => has_wildcard_in_or_pattern(inner),
+        _ => false,
+    }
 }
 
 fn variant_row_key_for_pat_type(
@@ -5989,29 +6111,69 @@ fn merge_variant_row_fields_into_scrutinee(
     cases: &[crate::types::typedtree::Case],
     scrutinee_ty: TypeExprRef,
 ) {
+    let scrutinee_repr = ctx.repr(scrutinee_ty);
+    let scrutinee_desc = ctx.get_desc(scrutinee_repr);
+    match &*scrutinee_desc {
+        TypeDesc::Tvariant(_) => {
+            drop(scrutinee_desc);
+            merge_variant_row_fields_single(ctx, cases, scrutinee_repr, |case| case.c_lhs.pat_type);
+        }
+        TypeDesc::Ttuple(tys) => {
+            let elem_tys: Vec<TypeExprRef> = tys.clone();
+            drop(scrutinee_desc);
+            for (i, elem_ty) in elem_tys.iter().enumerate() {
+                let elem_repr = ctx.repr(*elem_ty);
+                let elem_desc = ctx.get_desc(elem_repr);
+                let is_variant = matches!(&*elem_desc, TypeDesc::Tvariant(_));
+                drop(elem_desc);
+                if is_variant {
+                    merge_variant_row_fields_single(ctx, cases, elem_repr, |case| {
+                        let pat_repr = ctx.repr(case.c_lhs.pat_type);
+                        let pat_desc = ctx.get_desc(pat_repr);
+                        if let TypeDesc::Ttuple(pat_tys) = &*pat_desc {
+                            if i < pat_tys.len() {
+                                return pat_tys[i];
+                            }
+                        }
+                        case.c_lhs.pat_type
+                    });
+                }
+            }
+        }
+        _ => return,
+    }
+}
+
+/// Merge variant row fields from all case patterns into a single variant type node.
+/// `get_pat_variant_ty` extracts the relevant variant type from each case's pattern.
+fn merge_variant_row_fields_single(
+    ctx: &TypeContext<'_>,
+    cases: &[crate::types::typedtree::Case],
+    variant_repr: TypeExprRef,
+    get_pat_variant_ty: impl Fn(&crate::types::typedtree::Case) -> TypeExprRef,
+) {
     use std::collections::HashMap;
     use crate::types::btype::row_repr;
 
-    // Check if scrutinee type is a variant
-    let scrutinee_repr = ctx.repr(scrutinee_ty);
-    let scrutinee_desc = ctx.get_desc(scrutinee_repr);
-    let scrutinee_row = match &*scrutinee_desc {
+    let desc = ctx.get_desc(variant_repr);
+    let variant_row = match &*desc {
         TypeDesc::Tvariant(row) => row.clone(),
         _ => return,
     };
-    drop(scrutinee_desc);
+    drop(desc);
 
-    let scrutinee_row_data = row_repr(ctx, &scrutinee_row);
+    let variant_row_data = row_repr(ctx, &variant_row);
 
     // Collect ALL variant row fields: start with scrutinee's, add from patterns.
     let mut all_fields: HashMap<String, crate::types::type_expr::RowField> = HashMap::new();
-    for (tag, field) in &scrutinee_row_data.row_fields {
+    for (tag, field) in &variant_row_data.row_fields {
         all_fields.insert(tag.clone(), field.clone());
     }
 
-    // Collect new fields from all case pattern TOP-LEVEL variant types only
+    // Collect new fields from all case pattern variant types
     for case in cases {
-        let repr = ctx.repr(case.c_lhs.pat_type);
+        let pat_ty = get_pat_variant_ty(case);
+        let repr = ctx.repr(pat_ty);
         let desc = ctx.get_desc(repr);
         if let TypeDesc::Tvariant(row) = &*desc {
             let row_data = row_repr(ctx, row);
@@ -6021,7 +6183,7 @@ fn merge_variant_row_fields_into_scrutinee(
         }
     }
 
-    if all_fields.len() <= scrutinee_row_data.row_fields.len() {
+    if all_fields.len() <= variant_row_data.row_fields.len() {
         return; // No new fields to add
     }
 
@@ -6029,18 +6191,16 @@ fn merge_variant_row_fields_into_scrutinee(
     let mut merged_fields: Vec<_> = all_fields.into_iter().collect();
     merged_fields.sort_by(|(a, _), (b, _)| a.cmp(b));
 
-    // Set on scrutinee
-    let mut merged_row = scrutinee_row_data;
+    // Set on scrutinee element
+    let mut merged_row = variant_row_data;
     merged_row.row_fields = merged_fields.clone();
-    ctx.set_desc(scrutinee_repr, TypeDesc::Tvariant(merged_row));
+    ctx.set_desc(variant_repr, TypeDesc::Tvariant(merged_row));
 
     // Also propagate all merged fields into each case's pattern type.
-    // In OCaml, all cases share ty_arg through unification, so all pattern
-    // types accumulate all variant tags. In Rust, each case has a separate
-    // instance, so we must explicitly propagate.
     for case in cases {
-        let pat_repr = ctx.repr(case.c_lhs.pat_type);
-        if pat_repr == scrutinee_repr {
+        let pat_ty = get_pat_variant_ty(case);
+        let pat_repr = ctx.repr(pat_ty);
+        if pat_repr == variant_repr {
             continue;
         }
         let pat_desc = ctx.get_desc(pat_repr);
