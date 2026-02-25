@@ -4145,7 +4145,10 @@ fn copy_type_cached(
                     body: *body,
                     vars: vars.clone(),
                 },
-                TypeDesc::Tvariant(row) => CopyAction::Variant(row.clone()),
+                // Non-generic Tvariant: return identity to increase type sharing,
+                // matching OCaml where all non-generic types return identity in copy.
+                // More sharing = more cycle detection matches with OCaml.
+                TypeDesc::Tvariant(_) => CopyAction::ReturnSelf,
                 TypeDesc::Tpackage { path, lids, args } => CopyAction::Package {
                     path: path.clone(),
                     lids: lids.clone(),
