@@ -55,17 +55,20 @@ Results persist in `.parity-cache/` — inspect diffs at `.parity-cache/tests/di
 
 ## Current Status
 
-**614/657 (93%) — raw byte-for-byte comparison**
+**619/657 (94%) — raw byte-for-byte comparison**
 
 **Latest snapshot (2026-02-25, clean-cache + clean-rebuild verified):**
-- Typecheck parity: `614/657`
+- Typecheck parity: `619/657`
 - Rust type-check: `656/657` (1 Rust-only error: `js_json_test`)
-- Parity failures: `42`
-- Hunk mismatches: `385` (binary-only diffs: 18)
-- Remaining parity failures: `bal_set_mini`, `belt_internal_test`, `bs_mutable_set_test`, `bs_poly_map_test`, `bs_poly_set_test`, `bs_queue_test`, `bs_set_int_test`, `bs_stack_test`, `defunctor_make_test`, `exception_raise_test`, `ext_array_test`, `ffi_splice_test`, `flexible_array_test`, `fun_pattern_match`, `functor_ffi`, `gpr_1701_test`, `gpr_4280_test`, `inline_map_test`, `inline_map2_test`, `js_string_test`, `jsx_preserve_test`, `mario_game`, `option_repr_test`, `pipe_send_readline`, `reasonReact`, `reasonReactRouter`, `set_gen`, `splice_test`, `Stdlib_Intl_DateTimeFormatTest`, `Stdlib_IteratorTests`, `Stdlib_ObjectTests`, `string_set`, `test_bs_this`, `test_list`, `test_seq`, `test_set`, `ticker`, `topsort_test`, `unboxed_use_case`, `unsafe_ppx_test`, `UntaggedVariants`, `variantsMatching`
+- Parity failures: `37`
+- Hunk mismatches: `255` (binary-only diffs: 15)
+- Remaining parity failures: `bal_set_mini`, `bs_mutable_set_test`, `bs_poly_map_test`, `bs_poly_set_test`, `bs_queue_test`, `bs_set_int_test`, `bs_stack_test`, `defunctor_make_test`, `exception_raise_test`, `ext_array_test`, `ffi_splice_test`, `flexible_array_test`, `fun_pattern_match`, `functor_ffi`, `inline_map_test`, `inline_map2_test`, `js_string_test`, `jsx_preserve_test`, `LetUnwrap`, `mario_game`, `pipe_send_readline`, `reasonReact`, `reasonReactRouter`, `set_gen`, `Stdlib_Intl_DateTimeFormatTest`, `Stdlib_IteratorTests`, `Stdlib_ObjectTests`, `string_set`, `test_bs_this`, `test_list`, `test_set`, `ticker`, `topsort_test`, `unboxed_use_case`, `unsafe_ppx_test`, `UntaggedVariants`, `variantsMatching`
 - NOTE: Previous "636/657" was inflated by stale OCaml sexp files being counted as Rust output. The parity script now clears sexp files between OCaml and Rust runs.
 
 **Recent fixes:**
+- ~~Non-generic Tvariant identity~~ — Return identity for non-generic Tvariant in copy_type_cached, matching OCaml behavior. Increases type sharing → more cycle detection matches. -33 hunks (288→255).
+- ~~Predef Tconstr identity~~ — Return identity for predef Tconstr (list, option, etc.) without Tvariant args. Preserves abbreviation relinks. +5 parity (belt_internal_test, gpr_1701_test, option_repr_test, splice_test, test_seq).
+- ~~finalize_variant_in_scrutinee_type~~ — After finalize_variant on case patterns, propagate Reither→Rpresent to ty_arg. -16 hunks in gpr_4280_test. Subset matching for wildcard coverage normalization.
 - ~~Recursive poly variant infinite expansion~~ — Removed same-path parameterized Tconstr expansion that caused infinite recursion for `type rec vlist<'a> = [#Nil | #Cons('a, vlist<'a>)]`. OCaml's unify3 just unifies args; expansion in unify2 uses abbreviation memoization Rust doesn't have. Fixed `more_poly_variant_test` and `js_json_test` (+22 parity, -2 errors, -110 hunks).
 - ~~`inline_const` prim encoding drift~~ — Fixed template literal delimiter in `@inline` sig payloads. Fixed `inline_const`.
 - ~~`LetUnwrap` synthesized pattern locations~~ — Fixed `make_let_unwrap_early_case` to use `LocIdx::none()`.
