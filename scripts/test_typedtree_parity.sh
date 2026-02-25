@@ -136,6 +136,10 @@ build_project_sexp() {
     done
     echo "  [$label] Saved $count OCaml sexp files"
 
+    # Clear sexp files before Rust generation to prevent stale OCaml output
+    # from being mistaken for Rust output when Rust crashes/stack-overflows
+    rm -f lib/ocaml/*.sexp
+
     echo "  [$label] Rust sexp generation..."
     timeout 120 env "${env_vars[@]}" RESCRIPT_BSC_EXE="$OCAML_BSC" "$RESCRIPT_CLI" build --dump-typed-sexp --rust "${filter_args[@]}" 2>&1 | tail -3 || true
 

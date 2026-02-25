@@ -55,14 +55,15 @@ Results persist in `.parity-cache/` — inspect diffs at `.parity-cache/tests/di
 
 ## Current Status
 
-**636/657 (96%) — raw byte-for-byte comparison**
+**632/657 (96%) — raw byte-for-byte comparison**
 
-**Latest snapshot (2026-02-25):**
-- Typecheck parity: `636/657`
-- Rust type-check: `657/657` (0 Rust-only errors)
-- Parity failures: `21`
-- Hunk mismatches: `276` (binary-only diffs: 6)
-- Remaining failures: `bal_set_mini`, `belt_internal_test`, `defunctor_make_test`, `ext_array_test`, `flexible_array_test`, `fun_pattern_match`, `functor_ffi`, `gpr_1701_test`, `mario_game`, `pipe_send_readline`, `set_gen`, `Stdlib_Intl_DateTimeFormatTest`, `test_bs_this`, `test_list`, `test_seq`, `test_set`, `ticker`, `topsort_test`, `unboxed_use_case`, `UntaggedVariants`, `variantsMatching`
+**Latest snapshot (2026-02-25, clean-cache verified):**
+- Typecheck parity: `632/657`
+- Rust type-check: `651/657` (6 Rust-only errors)
+- Parity failures: `19`
+- Hunk mismatches: `246` (binary-only diffs: 5)
+- OCaml-only pass (Rust errors): `derive_projector_test`, `offset`, `PartialApplicationNoRuntimeCurry`, `Stdlib_Intl_ListFormatTest`, `test_regex`, `variantsMatching`
+- Remaining parity failures: `bal_set_mini`, `belt_internal_test`, `defunctor_make_test`, `ext_array_test`, `flexible_array_test`, `fun_pattern_match`, `functor_ffi`, `gpr_1701_test`, `mario_game`, `pipe_send_readline`, `set_gen`, `Stdlib_Intl_DateTimeFormatTest`, `test_bs_this`, `test_list`, `test_seq`, `test_set`, `ticker`, `topsort_test`, `unboxed_use_case`
 
 **Recent fixes:**
 - ~~Recursive poly variant infinite expansion~~ — Removed same-path parameterized Tconstr expansion that caused infinite recursion for `type rec vlist<'a> = [#Nil | #Cons('a, vlist<'a>)]`. OCaml's unify3 just unifies args; expansion in unify2 uses abbreviation memoization Rust doesn't have. Fixed `more_poly_variant_test` and `js_json_test` (+22 parity, -2 errors, -110 hunks).
