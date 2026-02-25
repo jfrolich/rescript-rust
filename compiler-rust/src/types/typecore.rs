@@ -11613,7 +11613,23 @@ impl Env {
                         // to the access path. This handles both:
                         // - opened modules: Console from Stdlib → Pdot(Pident("Stdlib"), "Console")
                         // - local aliases: module N = Belt.List → Pident("N")
-                        let sig = if apply_subst {
+                        //
+                        // Skip deep copy when the signature has no type/module
+                        // definitions that need path substitution. This preserves
+                        // type node sharing for local module opens (e.g., %%private)
+                        // so that value-restriction Tvars remain shared between
+                        // pattern types and env types.
+                        let has_type_or_module_defs = sig.iter().any(|item| {
+                            matches!(
+                                item,
+                                crate::types::decl::SignatureItem::SigType(..)
+                                    | crate::types::decl::SignatureItem::SigModule(..)
+                                    | crate::types::decl::SignatureItem::SigModtype(..)
+                            )
+                        });
+                        let needs_copy = apply_subst
+                            && (has_type_or_module_defs || resolved_name.is_some());
+                        let sig = if needs_copy {
                             copy_lookup_signature_for_subst(&sig, ctx)
                         } else {
                             sig
@@ -11624,9 +11640,11 @@ impl Env {
                                     &sig, old_name, &path, ctx,
                                 );
                             }
-                            crate::cmi::persistent_env::substitute_type_paths_in_sig(
-                                &sig, &path, ctx,
-                            );
+                            if has_type_or_module_defs {
+                                crate::cmi::persistent_env::substitute_type_paths_in_sig(
+                                    &sig, &path, ctx,
+                                );
+                            }
                         }
                         return Some((path, sig));
                     }
