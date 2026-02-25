@@ -5560,6 +5560,176 @@ fn check_bool_coverage(pat: &Pattern, has_true: &mut bool, has_false: &mut bool)
     }
 }
 
+fn type_match_cases_sequential(
+    tctx: &mut TypeCheckContext<'_>,
+    env: &Env,
+    cases: &[&crate::parser::ast::Case],
+    scrutinee_ty: TypeExprRef,
+    body_ty: TypeExprRef,
+) -> TypeCoreResult<Vec<crate::types::typedtree::Case>> {
+    let mut typed_cases = Vec::with_capacity(cases.len());
+    for case in cases {
+        typed_cases.push(type_case(tctx, env, case, scrutinee_ty, body_ty)?);
+    }
+    Ok(typed_cases)
+}
+
+struct PendingMatchCase<'a> {
+    parsed_case: &'a crate::parser::ast::Case,
+    typed_pat: Pattern,
+    case_env: Env,
+    unpacks: Vec<PatternVariable>,
+}
+
+fn type_match_cases_batch_non_gadt<'a>(
+    tctx: &mut TypeCheckContext<'_>,
+    env: &Env,
+    cases: &[&'a crate::parser::ast::Case],
+    ty_arg: TypeExprRef,
+    body_ty: TypeExprRef,
+) -> TypeCoreResult<Vec<crate::types::typedtree::Case>> {
+    if cases.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let ctx = tctx.type_ctx;
+    let single_var_case = matches!(
+        cases,
+        [case] if is_simple_variable_pattern(tctx.arena, tctx.arena.get_pat(case.pc_lhs))
+    );
+    let propagate = ctx.get_level(ctx.repr(ty_arg)) == crate::types::GENERIC_LEVEL
+        || !single_var_case;
+
+    let mut scope_open = false;
+    let batch_result = (|| -> TypeCoreResult<Vec<crate::types::typedtree::Case>> {
+        if propagate {
+            ctx.begin_def();
+            scope_open = true;
+        }
+
+        let mut pending_cases: Vec<PendingMatchCase<'a>> = Vec::with_capacity(cases.len());
+        for case in cases {
+            let case_scrutinee_ty = crate::types::instance(ctx, ty_arg);
+            let mut state = PatternState::new();
+            let typed_pat = type_pattern(
+                tctx,
+                env,
+                tctx.arena.get_pat(case.pc_lhs),
+                case_scrutinee_ty,
+                PatternMode::Normal,
+                &mut state,
+            )?;
+
+            let mut case_env = env.clone();
+            let mut unpacks: Vec<PatternVariable> = Vec::new();
+            for pv in &state.pattern_variables {
+                let binding_ty = shallow_copy_pattern_binding_type(ctx, pv.ty, false);
+                let desc = ValueDescription {
+                    val_type: binding_ty,
+                    val_kind: crate::types::ValueKind::ValReg,
+                    val_loc: pv.loc.clone(),
+                    val_attributes: vec![],
+                    val_path: None,
+                };
+                case_env.add_value(pv.id.clone(), desc);
+                if pv.is_module {
+                    let module_type = module_type_from_package_binding(tctx, &case_env, binding_ty);
+                    case_env.add_module(
+                        pv.id.clone(),
+                        crate::types::decl::ModuleDeclaration {
+                            md_type: module_type,
+                            md_attributes: vec![],
+                            md_loc: crate::location::Location::none(),
+                            md_path: None,
+                        },
+                    );
+                    // Match OCaml order in wrap_unpacks (`x :: module_variables`).
+                    unpacks.insert(0, pv.clone());
+                }
+            }
+
+            pending_cases.push(PendingMatchCase {
+                parsed_case: case,
+                typed_pat,
+                case_env,
+                unpacks,
+            });
+        }
+
+        // Match OCaml type_cases delayed unification (`unify_pats ty_arg'`).
+        let ty_arg_prime = ctx.new_var(None);
+        for pending in &pending_cases {
+            unify_pattern_types(
+                tctx,
+                pending.typed_pat.pat_loc,
+                pending.typed_pat.pat_type,
+                ty_arg_prime,
+            )?;
+        }
+
+        if propagate {
+            let propagated_ty = crate::types::instance(ctx, ty_arg);
+            for pending in &pending_cases {
+                let _ = unify_pattern_types(
+                    tctx,
+                    pending.typed_pat.pat_loc,
+                    pending.typed_pat.pat_type,
+                    propagated_ty,
+                );
+            }
+            ctx.end_def();
+            scope_open = false;
+            for pending in &pending_cases {
+                iter_typed_pattern(&pending.typed_pat, &mut |pat| {
+                    crate::types::generalize(tctx.type_ctx, pat.pat_type);
+                });
+            }
+        }
+
+        let mut typed_cases = Vec::with_capacity(pending_cases.len());
+        for pending in pending_cases {
+            let typed_guard = if let Some(guard) = &pending.parsed_case.pc_guard {
+                let bool_ty = env.type_bool(ctx);
+                let guard_expr = tctx.arena.get_expr(*guard);
+                let typed_guard =
+                    type_expect(tctx, &pending.case_env, guard_expr, bool_ty, None)?;
+                Some(wrap_module_unpacks_in_expression(
+                    tctx,
+                    &pending.case_env,
+                    typed_guard,
+                    &pending.unpacks,
+                    guard_expr.pexp_loc,
+                ))
+            } else {
+                None
+            };
+
+            let body_expr = tctx.arena.get_expr(pending.parsed_case.pc_rhs);
+            let typed_body = type_expect(tctx, &pending.case_env, body_expr, body_ty, None)?;
+            let typed_body = wrap_module_unpacks_in_expression(
+                tctx,
+                &pending.case_env,
+                typed_body,
+                &pending.unpacks,
+                body_expr.pexp_loc,
+            );
+
+            typed_cases.push(crate::types::typedtree::Case {
+                c_lhs: pending.typed_pat,
+                c_guard: typed_guard,
+                c_rhs: typed_body,
+            });
+        }
+        Ok(typed_cases)
+    })();
+
+    if scope_open {
+        ctx.end_def();
+    }
+
+    batch_result
+}
+
 /// Type check match expression.
 fn type_match(
     tctx: &mut TypeCheckContext<'_>,
@@ -5618,11 +5788,21 @@ fn type_match(
     // After all cases, we merge variant row fields into ty_arg (not the
     // original expression type) to replicate OCaml's shared ty_arg.
     let ty_arg = crate::types::instance(tctx.type_ctx, typed_scrutinee.exp_type);
-    let mut typed_val_cases = Vec::new();
-    for case in &val_caselist {
-        let typed_case = type_case(tctx, env, case, ty_arg, expected_ty)?;
-        typed_val_cases.push(typed_case);
-    }
+    let has_generalized_value_patterns = val_caselist.iter().any(|case| {
+        pattern_contains_generalized_constructor(tctx, env, tctx.arena.get_pat(case.pc_lhs))
+    });
+    let mut typed_val_cases = if has_generalized_value_patterns {
+        type_match_cases_sequential(tctx, env, &val_caselist, ty_arg, expected_ty)?
+    } else {
+        match type_match_cases_batch_non_gadt(tctx, env, &val_caselist, ty_arg, expected_ty) {
+            Ok(cases) => cases,
+            // Preserve existing recovery behavior for non-GADT patterns.
+            Err(TypeCoreError::PatternTypeClash(_)) => {
+                type_match_cases_sequential(tctx, env, &val_caselist, ty_arg, expected_ty)?
+            }
+            Err(err) => return Err(err),
+        }
+    };
 
     // Merge variant row fields from all case patterns into ty_arg.
     if typed_val_cases.len() > 1 {

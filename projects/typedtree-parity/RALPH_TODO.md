@@ -493,6 +493,22 @@ Secondary priority. Primary blockers are (1) cycle/sharing typedtree rendering d
     - post-`end_def` generalization.
   - OCaml refs to mirror during trace: `compiler/ml/typecore.ml` (`type_let`, `type_approx`) and `compiler/ml/ctype.ml` (`instance`, `copy`).
 - [ ] **5A2J. Validate whether OCaml-style batched `type_cases` flow in `type_match` affects the recursive-local-`t` cluster (NEW)** — a first-pass non-GADT batch rewrite of Rust `type_match` (type all patterns first, shared `ty_arg'` unify, then RHS typing with per-case env) did not move `rbset`/`set_gen` or full parity, so the active drift likely survives beyond simple `type_cases` ordering.
+  - 2026-02-25 attempt (kept): rewired `compiler-rust/src/types/typecore.rs::type_match` non-GADT value cases to run through a new batched path (`type_match_cases_batch_non_gadt`) with OCaml-shaped ordering:
+    - type all case patterns first from `instance(ty_arg)`,
+    - delayed shared unification (`unify_pats ty_arg'` analog),
+    - propagate-gated second unification against `instance(ty_arg)`,
+    - type guards/RHS only after pattern phase using per-case env + module-unpack wrappers.
+    - Kept fallback to sequential `type_case` flow for generalized-constructor cases or `PatternTypeClash`.
+  - OCaml refs read:
+    - `compiler/ml/typecore.ml` (`Pexp_match` routing into `type_cases`)
+    - `compiler/ml/typecore.ml` (`type_cases` pattern-first pass, delayed `unify_pats`, propagate branch, RHS typing order)
+  - Build/test commands:
+    - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release` (success).
+    - `timeout 300 ./scripts/test_typedtree_parity.sh set_gen` stayed **0/1** (`hunk mismatches: 19`).
+    - `timeout 300 ./scripts/test_typedtree_parity.sh variantsMatching` stayed **0/1** (`hunk mismatches: 29`).
+    - `timeout 600 ./scripts/test_typedtree_parity.sh` stayed **619/657 → 619/657** (Rust compile coverage **656/657 → 656/657**, parity failures **37 → 37**, hunk mismatches **255 → 255**).
+    - `timeout 300 ./scripts/test_parser_ast_parity.sh 2>&1 | tail -40` ended with `SUCCESS: All 3532 files have full parity!`.
+  - Outcome: parity-neutral on the deterministic 619 baseline; keep task unchecked.
   - 2026-02-24 attempt (reverted): patched `compiler-rust/src/types/typecore.rs` to batch value-case typing in `type_match` via a new helper (`type_match_cases_batch`) and fallback to legacy per-case flow when generalized constructors are present.
   - OCaml refs read: `compiler/ml/typecore.ml` (`type_cases` pattern pass + delayed `unify_pats` + RHS typing order) and `compiler/ml/typecore.ml` (`Pexp_match` path passing `arg.exp_type` into `type_cases`).
   - Build/test commands:
