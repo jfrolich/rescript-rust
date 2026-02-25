@@ -55,15 +55,15 @@ Results persist in `.parity-cache/` — inspect diffs at `.parity-cache/tests/di
 
 ## Current Status
 
-**632/657 (96%) — raw byte-for-byte comparison**
+**614/657 (93%) — raw byte-for-byte comparison**
 
-**Latest snapshot (2026-02-25, clean-cache verified):**
-- Typecheck parity: `632/657`
-- Rust type-check: `651/657` (6 Rust-only errors)
-- Parity failures: `19`
-- Hunk mismatches: `246` (binary-only diffs: 5)
-- OCaml-only pass (Rust errors): `derive_projector_test`, `offset`, `PartialApplicationNoRuntimeCurry`, `Stdlib_Intl_ListFormatTest`, `test_regex`, `variantsMatching`
-- Remaining parity failures: `bal_set_mini`, `belt_internal_test`, `defunctor_make_test`, `ext_array_test`, `flexible_array_test`, `fun_pattern_match`, `functor_ffi`, `gpr_1701_test`, `mario_game`, `pipe_send_readline`, `set_gen`, `Stdlib_Intl_DateTimeFormatTest`, `test_bs_this`, `test_list`, `test_seq`, `test_set`, `ticker`, `topsort_test`, `unboxed_use_case`
+**Latest snapshot (2026-02-25, clean-cache + clean-rebuild verified):**
+- Typecheck parity: `614/657`
+- Rust type-check: `656/657` (1 Rust-only error: `js_json_test`)
+- Parity failures: `42`
+- Hunk mismatches: `385` (binary-only diffs: 18)
+- Remaining parity failures: `bal_set_mini`, `belt_internal_test`, `bs_mutable_set_test`, `bs_poly_map_test`, `bs_poly_set_test`, `bs_queue_test`, `bs_set_int_test`, `bs_stack_test`, `defunctor_make_test`, `exception_raise_test`, `ext_array_test`, `ffi_splice_test`, `flexible_array_test`, `fun_pattern_match`, `functor_ffi`, `gpr_1701_test`, `gpr_4280_test`, `inline_map_test`, `inline_map2_test`, `js_string_test`, `jsx_preserve_test`, `mario_game`, `option_repr_test`, `pipe_send_readline`, `reasonReact`, `reasonReactRouter`, `set_gen`, `splice_test`, `Stdlib_Intl_DateTimeFormatTest`, `Stdlib_IteratorTests`, `Stdlib_ObjectTests`, `string_set`, `test_bs_this`, `test_list`, `test_seq`, `test_set`, `ticker`, `topsort_test`, `unboxed_use_case`, `unsafe_ppx_test`, `UntaggedVariants`, `variantsMatching`
+- NOTE: Previous "636/657" was inflated by stale OCaml sexp files being counted as Rust output. The parity script now clears sexp files between OCaml and Rust runs.
 
 **Recent fixes:**
 - ~~Recursive poly variant infinite expansion~~ — Removed same-path parameterized Tconstr expansion that caused infinite recursion for `type rec vlist<'a> = [#Nil | #Cons('a, vlist<'a>)]`. OCaml's unify3 just unifies args; expansion in unify2 uses abbreviation memoization Rust doesn't have. Fixed `more_poly_variant_test` and `js_json_test` (+22 parity, -2 errors, -110 hunks).

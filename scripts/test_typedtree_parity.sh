@@ -145,12 +145,19 @@ build_project_sexp() {
 
     # Save Rust sexp files
     count=0
+    local rust_empty=0
     for f in lib/ocaml/*.sexp; do
         [[ -f "$f" ]] || continue
+        if [[ ! -s "$f" ]]; then
+            rust_empty=$((rust_empty + 1))
+        fi
         cp "$f" "$rust_dir/"
         count=$((count + 1))
     done
     echo "  [$label] Saved $count Rust sexp files"
+    if [[ "$rust_empty" -gt 0 ]]; then
+        echo -e "  ${YELLOW}[$label] WARNING: $rust_empty Rust sexp files are empty (crash/stack overflow?)${RESET}"
+    fi
 
     cd "$PROJECT_ROOT"
 }
