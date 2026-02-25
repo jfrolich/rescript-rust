@@ -4074,12 +4074,26 @@ fn copy_type_cached(
                 {
                     CopyAction::ReturnSelf
                 }
-                // Preserve identity for non-generic predef constructors that OCaml keeps
-                // shared through `Ctype.copy`:
-                // - nullary predefs (int, string, bool, ...)
-                // - predef dict<'a>, which is represented as a one-arg constructor
-                //   and must remain shared so dict-pattern inference can be refined
-                //   back to Js.Dict.t in surrounding bindings.
+                // Return identity for predef Tconstr (list, option, etc.)
+                // when args don't contain variant types. This preserves
+                // abbreviation-preserving relinks in unify_after_expansion:
+                // when acc has type list<string> and is unified with
+                // Belt.List.t<'a>, the relink must fire on the ORIGINAL
+                // node (not a copy). Exclude args with Tvariant to prevent
+                // over-sharing (e.g. result<string, [#InvalidString]>).
+                TypeDesc::Tconstr { path, args, .. }
+                    if is_predef_type_name(path.head_name())
+                        && args.iter().copied().all(|arg| {
+                            !matches!(
+                                &*ctx.get_desc(ctx.repr(arg)),
+                                TypeDesc::Tvariant(_)
+                            )
+                        }) =>
+                {
+                    CopyAction::ReturnSelf
+                }
+                // Preserve identity for recursive local types matching OCaml's
+                // Ctype.copy identity behavior for non-generic types.
                 TypeDesc::Tconstr { path, args, .. }
                     if (args.is_empty() && is_recursive_local_nullary_type_for_identity(ctx, path))
                         || (!args.is_empty()
@@ -4089,18 +4103,7 @@ fn copy_type_cached(
                                     &*ctx.get_desc(ctx.repr(arg)),
                                     TypeDesc::Tvar(None) | TypeDesc::Tunivar(None)
                                 )
-                            })
-                        || (args.is_empty() && is_predef_type_name(path.head_name()))
-                        || (path.head_name() == "list"
-                            && matches!(
-                                args.as_slice(),
-                                [elem]
-                                    if matches!(
-                                        &*ctx.get_desc(ctx.repr(*elem)),
-                                        TypeDesc::Tvar(None) | TypeDesc::Tunivar(None)
-                                    )
-                            ))
-                        || path.head_name() == "dict" =>
+                            }) =>
                 {
                     CopyAction::ReturnSelf
                 }
