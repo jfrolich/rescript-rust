@@ -2387,6 +2387,170 @@ pub fn generalize(ctx: &TypeContext<'_>, ty: TypeExprRef) {
     generalize_rec(ctx, ty);
 }
 
+fn lower_nongen_type_expr_rec(
+    ctx: &TypeContext<'_>,
+    nglev: i32,
+    ty: TypeExprRef,
+    seen: &mut HashSet<TypeExprRef>,
+) {
+    let ty = ctx.repr(ty);
+    if !seen.insert(ty) {
+        return;
+    }
+
+    let level = ctx.get_level(ty);
+    let is_tvar = {
+        let desc = ctx.get_desc(ty);
+        matches!(&*desc, TypeDesc::Tvar(_))
+    };
+    if is_tvar && level < GENERIC_LEVEL && level > nglev {
+        ctx.set_level(ty, nglev);
+    }
+
+    let mut children = Vec::new();
+    iter_type_expr(ctx, ty, |child| children.push(child));
+    for child in children {
+        lower_nongen_type_expr_rec(ctx, nglev, child, seen);
+    }
+}
+
+fn lower_nongen_type_decl_rec(
+    ctx: &TypeContext<'_>,
+    nglev: i32,
+    decl: &crate::types::decl::TypeDeclaration,
+    seen: &mut HashSet<TypeExprRef>,
+) {
+    use crate::types::decl::ConstructorArguments;
+    use crate::types::decl::TypeInlinedType;
+    use crate::types::decl::TypeKind;
+
+    for &param in &decl.type_params {
+        lower_nongen_type_expr_rec(ctx, nglev, param, seen);
+    }
+    if let Some(manifest) = decl.type_manifest {
+        lower_nongen_type_expr_rec(ctx, nglev, manifest, seen);
+    }
+    match &decl.type_kind {
+        TypeKind::TypeRecord(labels, _) => {
+            for label in labels {
+                lower_nongen_type_expr_rec(ctx, nglev, label.ld_type, seen);
+            }
+        }
+        TypeKind::TypeVariant(constructors) => {
+            for cstr in constructors {
+                match &cstr.cd_args {
+                    ConstructorArguments::CstrTuple(args) => {
+                        for &arg in args {
+                            lower_nongen_type_expr_rec(ctx, nglev, arg, seen);
+                        }
+                    }
+                    ConstructorArguments::CstrRecord(labels) => {
+                        for label in labels {
+                            lower_nongen_type_expr_rec(ctx, nglev, label.ld_type, seen);
+                        }
+                    }
+                }
+                if let Some(ret) = cstr.cd_res {
+                    lower_nongen_type_expr_rec(ctx, nglev, ret, seen);
+                }
+            }
+        }
+        TypeKind::TypeAbstract | TypeKind::TypeOpen => {}
+    }
+    for inlined in &decl.type_inlined_types {
+        match inlined {
+            TypeInlinedType::Record { labels, .. } => {
+                for label in labels {
+                    lower_nongen_type_expr_rec(ctx, nglev, label.ld_type, seen);
+                }
+            }
+        }
+    }
+}
+
+fn lower_nongen_extension_constructor_rec(
+    ctx: &TypeContext<'_>,
+    nglev: i32,
+    ext: &crate::types::decl::ExtensionConstructor,
+    seen: &mut HashSet<TypeExprRef>,
+) {
+    use crate::types::decl::ConstructorArguments;
+
+    for &param in &ext.ext_type_params {
+        lower_nongen_type_expr_rec(ctx, nglev, param, seen);
+    }
+    match &ext.ext_args {
+        ConstructorArguments::CstrTuple(args) => {
+            for &arg in args {
+                lower_nongen_type_expr_rec(ctx, nglev, arg, seen);
+            }
+        }
+        ConstructorArguments::CstrRecord(labels) => {
+            for label in labels {
+                lower_nongen_type_expr_rec(ctx, nglev, label.ld_type, seen);
+            }
+        }
+    }
+    if let Some(ret) = ext.ext_ret_type {
+        lower_nongen_type_expr_rec(ctx, nglev, ret, seen);
+    }
+}
+
+fn lower_nongen_module_type_rec(
+    ctx: &TypeContext<'_>,
+    nglev: i32,
+    mty: &crate::types::decl::ModuleType,
+    seen: &mut HashSet<TypeExprRef>,
+) {
+    use crate::types::decl::ModuleType;
+    use crate::types::decl::SignatureItem;
+
+    match mty {
+        ModuleType::MtyIdent(_) | ModuleType::MtyAlias(_, _) => {}
+        ModuleType::MtySignature(sig_items) => {
+            for item in sig_items {
+                match item {
+                    SignatureItem::SigValue(_, vd) => {
+                        lower_nongen_type_expr_rec(ctx, nglev, vd.val_type, seen);
+                    }
+                    SignatureItem::SigType(_, decl, _) => {
+                        lower_nongen_type_decl_rec(ctx, nglev, decl, seen);
+                    }
+                    SignatureItem::SigTypext(_, ext, _) => {
+                        lower_nongen_extension_constructor_rec(ctx, nglev, ext, seen);
+                    }
+                    SignatureItem::SigModule(_, md, _) => {
+                        lower_nongen_module_type_rec(ctx, nglev, &md.md_type, seen);
+                    }
+                    SignatureItem::SigModtype(_, mtd) => {
+                        if let Some(inner) = &mtd.mtd_type {
+                            lower_nongen_module_type_rec(ctx, nglev, inner, seen);
+                        }
+                    }
+                    SignatureItem::SigClass | SignatureItem::SigClassType => {}
+                }
+            }
+        }
+        ModuleType::MtyFunctor {
+            param_type, result, ..
+        } => {
+            if let Some(param_mty) = param_type.as_deref() {
+                lower_nongen_module_type_rec(ctx, nglev, param_mty, seen);
+            }
+            lower_nongen_module_type_rec(ctx, nglev, result, seen);
+        }
+    }
+}
+
+pub fn lower_nongen_module_type(
+    ctx: &TypeContext<'_>,
+    nglev: i32,
+    mty: &crate::types::decl::ModuleType,
+) {
+    let mut seen = HashSet::new();
+    lower_nongen_module_type_rec(ctx, nglev, mty, &mut seen);
+}
+
 fn force_generalize_sig_type_rec(
     ctx: &TypeContext<'_>,
     ty: TypeExprRef,

@@ -872,8 +872,24 @@ Secondary priority. Primary blockers are (1) cycle/sharing typedtree rendering d
   - Next Rust refs: `compiler-rust/src/types/typemod.rs` item loop and module-id creation, `compiler-rust/src/types/context.rs` level/init APIs, `compiler-rust/src/ident.rs` stamp generation.
 - [ ] **12C. Apply `Mtype.lower_nongen` at module insertion after stamp/init_def alignment (NEW)** — with `init_def/current_stamp` now OCaml-aligned and still parity-neutral at **589/657**, module declaration paths still use `force_generalize_module_sig_values` instead of `lower_nongen (binding_time id - 1)` and likely miss OCaml’s selective non-generic lowering behavior.
   - Evidence (2026-02-24): after keeping the 12B timeline-alignment patch, `LetUnwrap` remained **0/1** and full deterministic parity remained **589/657**, so timing alignment alone does not move module-signature drift.
+  - 2026-02-25 attempt (kept): ported OCaml `Mtype.lower_nongen` flow for `Pstr_module` insertion.
+    - Added `compiler-rust/src/types/ctype.rs::lower_nongen_module_type` with recursive module-type traversal that lowers only `Tvar` levels where `nglev < level < GENERIC_LEVEL`, mirroring `compiler/ml/mtype.ml` `lower_nongen`.
+    - Updated `compiler-rust/src/types/typemod.rs::Pstr_module` to call `lower_nongen_module_type(tctx.type_ctx, mod_id.binding_time() - 1, &decl_mod_type)` before `Env.add_module`, replacing the previous `force_generalize_module_sig_values` call at this site.
+  - OCaml refs read for this attempt:
+    - `compiler/ml/mtype.ml` (`lower_nongen`)
+    - `compiler/ml/typemod.ml` (`Pstr_module` branch with `Mtype.lower_nongen (Ident.binding_time id - 1) md.md_type`)
+  - Targeted checks:
+    - `timeout 300 ./scripts/test_typedtree_parity.sh LetUnwrap` stayed **0/1**.
+    - `timeout 300 ./scripts/test_typedtree_parity.sh set_gen` stayed **0/1**.
+    - `timeout 300 ./scripts/test_typedtree_parity.sh inline_map2_test` stayed filtered-mode Rust reject (`0/1`, OCaml-only pass).
+  - Deterministic full parity stayed **619/657 → 619/657** (parity failures **37 → 37**, hunk mismatches **255 → 255**, Rust compile coverage **656/657 → 656/657**).
+  - Parser/binary guard stayed green: `timeout 300 ./scripts/test_parser_ast_parity.sh 2>&1 | tail -40` ended with `SUCCESS: All 3532 files have full parity!`.
   - Next OCaml refs: `compiler/ml/typemod.ml` (`Pstr_module` `Mtype.lower_nongen (Ident.binding_time id - 1) md.md_type`) and `compiler/ml/mtype.ml` (`lower_nongen` traversal rules).
   - Next Rust refs: `compiler-rust/src/types/typemod.rs` `Pstr_module`/`Pstr_recmodule` module-env insertion points and `compiler-rust/src/types/ctype.rs` current force-generalization path.
+- [ ] **12D. Trace why OCaml-aligned `lower_nongen` in `Pstr_module` is parity-neutral on 619/657 baseline (NEW)** — with direct `lower_nongen` port kept and still no delta, remaining module-signature drift likely originates outside the `Pstr_module` insertion site (e.g., `Pstr_recmodule`/signature substitution path interactions or downstream type sharing).
+  - Evidence (2026-02-25): after replacing `force_generalize_module_sig_values` with `lower_nongen_module_type` in `Pstr_module`, full parity and failure set remained unchanged (**619/657**, **37** failures).
+  - Next OCaml refs: `compiler/ml/typemod.ml` (`Pstr_recmodule`, `transl_recmodule_modtypes`, module env insertion ordering) and `compiler/ml/mtype.ml` (`lower_nongen` scope expectations for nested module types).
+  - Next Rust refs: `compiler-rust/src/types/typemod.rs` `Pstr_recmodule` force-generalization paths, plus `compiler-rust/src/cmi/persistent_env.rs` substitution flow feeding module signatures.
 - [ ] **13. GADT equation support** — gadt_equations, with_gadt_mode, add_gadt_equation, is_newtype_path. Complex. (650→651, test: js_json_test.res)
 - [ ] **13A. Validate `copy_case_type` local-abstract `Tconstr` materialization before adding GADT equations (NEW)** — guidance says this path must keep locally abstract/newtype constructors as `Tconstr` (not fresh `Tvar`), but the isolated port was parity-neutral on the current snapshot.
   - 2026-02-24 attempt: in `compiler-rust/src/types/typecore.rs::copy_case_type`, removed the local-abstract/unresolved-nullary branch that rewrites `TypeDesc::Tconstr` to fresh `Tvar`, keeping all constructors as copied `Tconstr` nodes.

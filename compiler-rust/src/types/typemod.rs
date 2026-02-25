@@ -6113,8 +6113,11 @@ fn type_structure_item<'a>(
                         );
                     }
                 }
-                crate::types::ctype::force_generalize_module_sig_values(
+                // Match OCaml typemod.ml:
+                // Mtype.lower_nongen (Ident.binding_time id - 1) md.md_type
+                crate::types::ctype::lower_nongen_module_type(
                     tctx.type_ctx,
+                    mod_id.binding_time() - 1,
                     &decl_mod_type,
                 );
                 new_env.add_module(
