@@ -713,6 +713,17 @@ Secondary priority. Primary blockers are (1) cycle/sharing typedtree rendering d
   - Deterministic full parity stayed **619/657 → 619/657** (parity failures **37 → 37**, hunk mismatches **255 → 255**, compile parity **656/657 → 656/657**).
   - Parser/binary guard after revert: `timeout 300 ./scripts/test_parser_ast_parity.sh 2>&1 | tail -40` ended with `SUCCESS: All 3532 files have full parity!`.
   - Conclusion: memoing only at `try_expand_head` call sites is insufficient; remaining drift likely depends on OCaml `subst` stub/lifetime behavior (`body0` + `abbreviations` scope) during parameterized abbreviation expansion.
+- [ ] **6I. Prove whether same-path expansion output is being re-concretized after unification (NEW)** — two 2026-02-25 same-path branches in `ctype.rs::unify_types` were parity-neutral on the deterministic 619 baseline, so `t3<_> -> t3<int,string>` likely happens outside the local branch or is overwritten later.
+  - 2026-02-25 attempt A (reverted): for same-path `Tconstr` with non-empty args, expand both heads and call `unify_after_expansion` when either side expands away from `Tconstr`.
+  - 2026-02-25 attempt B (reverted): same as A but unify expanded forms directly (`unify(exp1, exp2)`) to avoid relinking expanded nodes back to original `Tconstr` representatives.
+  - OCaml refs read: `compiler/ml/ctype.ml` (`unify2`, `unify3`, `expand_head_unif`) and `compiler/ml/ctype.ml` head-expansion helpers around `try_expand_head`.
+  - Targeted checks (both attempts):
+    - `timeout 300 ./scripts/test_typedtree_parity.sh unboxed_use_case` stayed **0/1** with the same phantom-arg concretization (`Tvar None -> Tconstr int/string`).
+    - `timeout 300 ./scripts/test_typedtree_parity.sh ExternalArity` stayed **1/1**.
+    - `timeout 300 ./scripts/test_typedtree_parity.sh more_poly_variant_test` stayed **1/1** (no recursion regression).
+  - Deterministic full parity stayed **619/657 → 619/657** (parity failures **37**, hunk mismatches **255**, compile parity **656/657**).
+  - Next OCaml refs: `compiler/ml/typecore.ml` constructor/label instantiation paths feeding `t3_aux` unifications, to locate the first site where `t3<'a,'b>` args become concrete before typedtree emission.
+  - Next Rust refs: `compiler-rust/src/types/typecore.rs` paths that instantiate variant/record payload types for `unboxed_use_case`, especially around expression-mode constructor typing before `ctype::unify_types` same-path handling.
 - [x] **7. build_as_type for Tpat_variant and Tpat_or** — Add Tpat_variant (open row+Rpresent) and Tpat_or (open row). (643→644, test: more_poly_variant_test.res)
   - Verified 2026-02-24: Rust `build_as_type` already has explicit `Tpat_variant` and `Tpat_or` branches in `compiler-rust/src/types/typecore.rs`; deterministic full run at **653/657** does not include `more_poly_variant_test` in failures.
 - [x] **8. Label type param sharing** — Add `remap_label_type_to_params` so lbl_arg/lbl_res share Tvar nodes. (646→647, test: gpr_4274_test.res)
