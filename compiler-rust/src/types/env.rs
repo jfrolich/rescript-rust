@@ -230,8 +230,20 @@ impl<T: Clone> BindingTable<T> {
     }
 
     /// Find a binding by identifier.
+    /// Note: stamp=0 is shared by all persistent idents, so we skip
+    /// by_stamp lookup for stamp=0 and fall through to by_name lookup.
     pub fn find_by_ident(&self, id: &Ident) -> Option<&T> {
-        self.by_stamp.get(&id.stamp())
+        let stamp = id.stamp();
+        if stamp == 0 {
+            // All persistent idents share stamp=0, so by_stamp would
+            // return the last-inserted type. Use by_name instead.
+            self.by_name
+                .get(id.name())
+                .and_then(|entries| entries.last())
+                .map(|(_, v, _)| v)
+        } else {
+            self.by_stamp.get(&stamp)
+        }
     }
 
     /// Get all bindings with a given name.

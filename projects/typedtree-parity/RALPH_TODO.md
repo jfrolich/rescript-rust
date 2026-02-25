@@ -55,14 +55,14 @@ Results persist in `.parity-cache/` — inspect diffs at `.parity-cache/tests/di
 
 ## Current Status
 
-**619/657 (94%) — raw byte-for-byte comparison**
+**620/657 (94%) — raw byte-for-byte comparison**
 
 **Latest snapshot (2026-02-25, clean-cache + clean-rebuild verified):**
-- Typecheck parity: `619/657`
+- Typecheck parity: `620/657`
 - Rust type-check: `656/657` (1 Rust-only error: `js_json_test`)
-- Parity failures: `37`
-- Hunk mismatches: `255` (binary-only diffs: 15)
-- Remaining parity failures: `bal_set_mini`, `bs_mutable_set_test`, `bs_poly_map_test`, `bs_poly_set_test`, `bs_queue_test`, `bs_set_int_test`, `bs_stack_test`, `defunctor_make_test`, `exception_raise_test`, `ext_array_test`, `ffi_splice_test`, `flexible_array_test`, `fun_pattern_match`, `functor_ffi`, `inline_map_test`, `inline_map2_test`, `js_string_test`, `jsx_preserve_test`, `LetUnwrap`, `mario_game`, `pipe_send_readline`, `reasonReact`, `reasonReactRouter`, `set_gen`, `Stdlib_Intl_DateTimeFormatTest`, `Stdlib_IteratorTests`, `Stdlib_ObjectTests`, `string_set`, `test_bs_this`, `test_list`, `test_set`, `ticker`, `topsort_test`, `unboxed_use_case`, `unsafe_ppx_test`, `UntaggedVariants`, `variantsMatching`
+- Parity failures: `36`
+- Hunk mismatches: `268` (binary-only diffs: 14)
+- Remaining parity failures: `bal_set_mini`, `bs_mutable_set_test`, `bs_poly_map_test`, `bs_poly_set_test`, `bs_queue_test`, `bs_set_int_test`, `bs_stack_test`, `defunctor_make_test`, `exception_raise_test`, `ext_array_test`, `ffi_splice_test`, `flexible_array_test`, `fun_pattern_match`, `functor_ffi`, `inline_map_test`, `inline_map2_test`, `js_string_test`, `jsx_preserve_test`, `LetUnwrap`, `mario_game`, `pipe_send_readline`, `reasonReact`, `reasonReactRouter`, `set_gen`, `Stdlib_Intl_DateTimeFormatTest`, `Stdlib_IteratorTests`, `string_set`, `test_bs_this`, `test_list`, `test_set`, `ticker`, `topsort_test`, `unboxed_use_case`, `unsafe_ppx_test`, `UntaggedVariants`, `variantsMatching`
 - NOTE: Previous "636/657" was inflated by stale OCaml sexp files being counted as Rust output. The parity script now clears sexp files between OCaml and Rust runs.
 
 **Recent fixes:**
