@@ -5656,6 +5656,12 @@ fn type_match(
         finalize_variant_in_pattern(tctx, env, &mut case.c_lhs);
     }
 
+    // Propagate Reither→Rpresent conversions to ty_arg.
+    // In OCaml, finalize_variant on case patterns also updates ty_arg because they
+    // share mutable row field refs. In Rust, case patterns have separate copies,
+    // so we run a direct pass on ty_arg to match OCaml's behavior.
+    finalize_variant_in_scrutinee_type(tctx.type_ctx, ty_arg);
+
     // Reopen variant rows AFTER all closing steps. The closing logic operates
     // on per-case pattern types, but case 0 may share variant nodes with ty_arg
     // (identity instance). Closing case 0's pattern closes ty_arg too. Reopen
@@ -6643,6 +6649,82 @@ fn finalize_variant_rpresent_only(
     }
 }
 
+/// Convert Reither→Rpresent in a single variant row (if open).
+/// Returns true if any conversion was made.
+fn finalize_variant_row_rpresent(
+    ctx: &TypeContext<'_>,
+    variant_repr: TypeExprRef,
+) -> bool {
+    let desc = ctx.get_desc(variant_repr);
+    if let TypeDesc::Tvariant(row) = &*desc {
+        let mut row = crate::types::btype::row_repr(ctx, row);
+        if !row.row_closed {
+            let mut changed = false;
+            for (_tag, field) in row.row_fields.iter_mut() {
+                let field_repr = crate::types::btype::row_field_repr(ctx, field);
+                match field_repr {
+                    crate::types::type_expr::RowField::Reither {
+                        constant: true,
+                        types,
+                        ..
+                    } if types.is_empty() => {
+                        *field = crate::types::type_expr::RowField::Rpresent(None);
+                        changed = true;
+                    }
+                    crate::types::type_expr::RowField::Reither {
+                        constant: false,
+                        types,
+                        ..
+                    } if !types.is_empty() => {
+                        let head = types[0];
+                        *field = crate::types::type_expr::RowField::Rpresent(Some(head));
+                        changed = true;
+                    }
+                    _ => {}
+                }
+            }
+            drop(desc);
+            if changed {
+                ctx.set_desc(variant_repr, TypeDesc::Tvariant(row));
+            }
+            return changed;
+        }
+    }
+    false
+}
+
+/// Finalize variant rows in ty_arg after case pattern finalization.
+/// In OCaml, finalize_variant on case patterns also updates ty_arg because
+/// they share mutable row field refs. In Rust, we need an explicit pass.
+/// Only handles direct variants and tuple-of-variants (the common patterns).
+fn finalize_variant_in_scrutinee_type(
+    ctx: &TypeContext<'_>,
+    ty_arg: TypeExprRef,
+) {
+    let repr = ctx.repr(ty_arg);
+    let desc = ctx.get_desc(repr);
+    match &*desc {
+        TypeDesc::Tvariant(_) => {
+            drop(desc);
+            finalize_variant_row_rpresent(ctx, repr);
+        }
+        TypeDesc::Ttuple(tys) => {
+            let tys: Vec<_> = tys.clone();
+            drop(desc);
+            for t in &tys {
+                let elem_repr = ctx.repr(*t);
+                let elem_desc = ctx.get_desc(elem_repr);
+                let is_variant = matches!(&*elem_desc, TypeDesc::Tvariant(_));
+                drop(elem_desc);
+                if is_variant {
+                    finalize_variant_row_rpresent(ctx, elem_repr);
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
 /// Collect variant row keys where any case has a non-variant pattern (wildcard/any/var)
 /// at a position whose type is a variant. These rows have "wildcard coverage" and
 /// should NOT be closed (matching OCaml's pressure_variants behavior).
@@ -6727,7 +6809,14 @@ fn normalize_wildcard_coverage_by_labels(
             let mut labels: Vec<String> = row.row_fields.iter().map(|(l, _)| l.clone()).collect();
             labels.sort();
             for wildcard_labels in &wildcard_label_sets {
-                if labels == *wildcard_labels {
+                // Use subset matching: a wildcard row from an earlier case
+                // may have fewer labels than a labeled row from a later case
+                // (since per-case instances are created before merge adds all
+                // tags). If all wildcard labels appear in the labeled row,
+                // they represent the same variant type position.
+                if !wildcard_labels.is_empty()
+                    && wildcard_labels.iter().all(|l| labels.contains(l))
+                {
                     new_wildcards.push(row_key);
                     break;
                 }
