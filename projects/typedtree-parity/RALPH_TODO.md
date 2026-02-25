@@ -704,6 +704,15 @@ Secondary priority. Primary blockers are (1) cycle/sharing typedtree rendering d
   - Parity-neutral experiment (reverted): attempted isolating record-label field typing from expected-record unification in `compiler-rust/src/types/typecore.rs::type_record` by copying label arg/res before/after unify. Filtered `timeout 300 ./scripts/test_typedtree_parity.sh unboxed_use_case` remained **0/1** and deterministic full parity stayed **478/657** with compile parity **657/657**.
   - OCaml refs read: `compiler/ml/typecore.ml` (`Pexp_variant`, `type_label_exp`, `type_argument`) and `compiler/ml/ctype.ml` (`instance_label`, `unify2`, `unify3`).
   - Next Rust refs: `compiler-rust/src/types/typecore.rs` (`type_variant` fast path and record field typing around `instance_label`) plus constructor/label instantiation flow that introduces `t3_aux<'a,'b>` unifications before `t3` row expansion stabilizes.
+- [ ] **6H. Validate OCaml `find_expans`/`memorize_abbrev` memo scope for same-path alias expansion (NEW)** — a direct memo-chain port in `try_expand_head` plus same-path expansion retry was parity-neutral on the current deterministic baseline.
+  - 2026-02-25 attempt (reverted): patched `compiler-rust/src/types/ctype.rs::try_expand_head` to read/write `Tconstr.abbrev` chains (`find_expans`/`memorize_abbrev`-style) and cleared those memos in `check_abbrev_env`, then re-enabled the task-6 same-path expansion-first branch (`expand_head_once` before arg unification, no `t1 -> t2` link on expansion path).
+  - OCaml refs read: `compiler/ml/btype.ml` (`find_expans`, `memorize_abbrev`, `cleanup_abbrev`) and `compiler/ml/ctype.ml` (`proper_abbrevs`, `expand_abbrev_gen`, `unify2`, `unify3`).
+  - Targeted checks:
+    - `timeout 300 ./scripts/test_typedtree_parity.sh unboxed_use_case` stayed **0/1** with unchanged `t3<_> -> t3<int,string>` concretization.
+    - `timeout 300 ./scripts/test_typedtree_parity.sh more_poly_variant_test` stayed **1/1** (no recursive-alias stack-overflow regression in filtered mode).
+  - Deterministic full parity stayed **619/657 → 619/657** (parity failures **37 → 37**, hunk mismatches **255 → 255**, compile parity **656/657 → 656/657**).
+  - Parser/binary guard after revert: `timeout 300 ./scripts/test_parser_ast_parity.sh 2>&1 | tail -40` ended with `SUCCESS: All 3532 files have full parity!`.
+  - Conclusion: memoing only at `try_expand_head` call sites is insufficient; remaining drift likely depends on OCaml `subst` stub/lifetime behavior (`body0` + `abbreviations` scope) during parameterized abbreviation expansion.
 - [x] **7. build_as_type for Tpat_variant and Tpat_or** — Add Tpat_variant (open row+Rpresent) and Tpat_or (open row). (643→644, test: more_poly_variant_test.res)
   - Verified 2026-02-24: Rust `build_as_type` already has explicit `Tpat_variant` and `Tpat_or` branches in `compiler-rust/src/types/typecore.rs`; deterministic full run at **653/657** does not include `more_poly_variant_test` in failures.
 - [x] **8. Label type param sharing** — Add `remap_label_type_to_params` so lbl_arg/lbl_res share Tvar nodes. (646→647, test: gpr_4274_test.res)
