@@ -1732,32 +1732,19 @@ fn unify_types<'a>(
             drop(desc1);
             drop(desc2);
 
-            // OCaml ctype.ml unify2/unify3: for same-path parameterized aliases,
-            // expand heads first and unify expanded forms when they become
-            // structural (e.g. polyvariant aliases). This avoids forcing
-            // phantom parameters by direct argument unification.
-            if !args1.is_empty() {
-                if let Some(env) = state.env() {
-                    let exp1 = expand_head_once(ctx, env, t1).unwrap_or(t1);
-                    let exp2 = expand_head_once(ctx, env, t2).unwrap_or(t2);
-                    let exp1 = ctx.repr(exp1);
-                    let exp2 = ctx.repr(exp2);
-
-                    let exp1_is_constr = {
-                        let desc = ctx.get_desc(exp1);
-                        matches!(&*desc, TypeDesc::Tconstr { .. })
-                    };
-                    let exp2_is_constr = {
-                        let desc = ctx.get_desc(exp2);
-                        matches!(&*desc, TypeDesc::Tconstr { .. })
-                    };
-
-                    if !exp1_is_constr || !exp2_is_constr {
-                        return unify(ctx, state, exp1, exp2);
-                    }
-                }
-            }
-
+            // OCaml ctype.ml unify3: for same-path Tconstr, just unify args.
+            // OCaml's unify2 expands abbreviations BEFORE unify3, but the
+            // same-path case in unify3 simply does `unify_list env tl1 tl2`.
+            // We cannot expand here because recursive type aliases like
+            // `type rec vlist<'a> = [#Nil | #Cons('a, vlist<'a>)]` would
+            // infinite-loop: each expansion creates fresh Tconstr nodes that
+            // get expanded again without termination. OCaml avoids this via
+            // abbreviation memoization (expand_abbrev + proper_abbrevs) that
+            // Rust doesn't have.
+            //
+            // For non-recursive polyvariant aliases with phantom parameters,
+            // the catch-all expansion in the _ => branch handles the case
+            // when one side is Tconstr and the other is a different type.
             let pairs: Vec<_> = args1
                 .iter()
                 .zip(args2.iter())
