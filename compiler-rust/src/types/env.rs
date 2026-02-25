@@ -713,6 +713,11 @@ impl Env {
         self.local_constraints.get(path).map(|d| d.as_ref())
     }
 
+    /// Iterate over all local constraints.
+    pub fn iter_local_constraints(&self) -> impl Iterator<Item = (&Path, &TypeDeclaration)> {
+        self.local_constraints.iter().map(|(p, d)| (p, d.as_ref()))
+    }
+
     /// Add a GADT instance level.
     pub fn add_gadt_instance_level(&mut self, level: i32, types: Vec<TypeExprRef>) {
         self.bump_id();

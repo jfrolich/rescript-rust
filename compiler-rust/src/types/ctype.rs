@@ -1394,15 +1394,24 @@ fn unify_after_expansion<'a>(
     // to the original non-expanded side, preserving alias-path identity.
     // We only do this when the expanded side is a Tconstr (type alias) to avoid
     // creating cycles with structural types.
+    //
+    // CRITICAL: OCaml's unify3 fallthrough (| _ ->) does:
+    //   Expression mode: link_type t1' t2 (link expanded to original)
+    //   Pattern mode:    add_type_equality t1' t2' (no linking, just record)
+    // In Pattern mode (GADT unification), linking must be skipped to avoid
+    // creating cycles between locally abstract types and their equation targets
+    // (e.g., linking bool → a when a has GADT equation a = bool).
+    let is_pattern_mode = state.mode == crate::types::UnifyMode::Pattern;
+
     let (from_expanded, to_original) = if t2_changed {
         (t1_expanded, t2)
     } else {
         (t2_expanded, t1)
     };
-    // Check if the changed (expanded) side was a Tconstr — only relink for
-    // type alias expansions (Tconstr→other), not structural type matches.
     let changed_ty = if t2_changed { t2 } else { t1 };
-    let should_relink = {
+    let should_relink = if is_pattern_mode {
+        false // OCaml: add_type_equality, not link_type
+    } else {
         let desc = ctx.get_desc(changed_ty);
         matches!(&*desc, TypeDesc::Tconstr { .. })
     };

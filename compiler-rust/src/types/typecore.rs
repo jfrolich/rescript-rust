@@ -2479,7 +2479,9 @@ fn unify_pattern_types(
 
     match unify(tctx.type_ctx, &mut tctx.unify_state, ty1, ty2) {
         Ok(()) => Ok(()),
-        Err(TypeError::Unify(_)) => Err(TypeCoreError::PatternTypeClash(vec![(ty1, ty2)])),
+        Err(TypeError::Unify(_)) => {
+            Err(TypeCoreError::PatternTypeClash(vec![(ty1, ty2)]))
+        },
         Err(_) => Err(TypeCoreError::PatternTypeClash(vec![(ty1, ty2)])),
     }
 }
@@ -2514,7 +2516,9 @@ fn unify_pattern_types_gadt(
 
     match result {
         Ok(()) => Ok(()),
-        Err(TypeError::Unify(_)) => Err(TypeCoreError::PatternTypeClash(vec![(ty1, ty2)])),
+        Err(TypeError::Unify(_)) => {
+            Err(TypeCoreError::PatternTypeClash(vec![(ty1, ty2)]))
+        },
         Err(_) => Err(TypeCoreError::PatternTypeClash(vec![(ty1, ty2)])),
     }
 }
@@ -7029,6 +7033,17 @@ fn type_case_impl(
     // Match OCaml type_cases: instance the scrutinee type per-case, then
     // generalize pattern types after typing (begin_def/end_def scope).
     let case_scrutinee_ty = crate::types::instance(tctx.type_ctx, case_scrutinee_ty);
+    // For GADT cases, set the unify state env to a fresh clone of case_env.
+    // OCaml passes a per-case `env ref` to unify_gadt; in Rust, we must
+    // reset the shared unify_state env so equations from prior cases don't leak.
+    // Save old env to restore after propagation.
+    let saved_unify_env = if needs_case_local_constraints {
+        let saved = tctx.unify_state.env().cloned();
+        tctx.unify_state.set_env(&case_env);
+        saved
+    } else {
+        None
+    };
     tctx.type_ctx.begin_def();
     let typed_pat_result = type_pattern(
         tctx,
@@ -7043,6 +7058,26 @@ fn type_case_impl(
     iter_typed_pattern(&typed_pat, &mut |pat| {
         crate::types::generalize(tctx.type_ctx, pat.pat_type);
     });
+
+    // Propagate GADT equations from unify state env back to case env,
+    // then restore the original unify state env.
+    if needs_case_local_constraints {
+        if let Some(unify_env) = tctx.unify_state.env() {
+            let constraints: Vec<_> = unify_env
+                .iter_local_constraints()
+                .map(|(p, d)| (p.clone(), d.clone()))
+                .collect();
+            for (path, decl) in constraints {
+                if case_env.find_local_constraint(&path).is_none() {
+                    case_env.add_local_constraint(path, decl);
+                }
+            }
+        }
+        // Restore the original unify state env
+        if let Some(old_env) = saved_unify_env {
+            tctx.unify_state.set_env(&old_env);
+        }
+    }
 
     // Extend environment with pattern bindings
     let mut unpacks: Vec<PatternVariable> = Vec::new();
@@ -11624,12 +11659,32 @@ fn lookup_constructor_in_module<'b>(
                                         )
                                     }
                                 };
-                                let cstr_res = cd.cd_res.unwrap_or_else(|| {
+                                let cstr_res = if let Some(res_ty) = cd.cd_res {
+                                    // GADT constructor: cd_res has specialized type args
+                                    // (e.g., Boolean: t<bool>). Extract args from the
+                                    // CMI's cd_res and create a new Tconstr using
+                                    // type_path (the alias-resolved path) instead of
+                                    // the CMI's canonical path. This matches OCaml's
+                                    // Subst.type_declaration which substitutes paths
+                                    // in cd_res during module component building.
+                                    let desc = ctx.get_desc(res_ty);
+                                    match &*desc {
+                                        crate::types::TypeDesc::Tconstr { args, .. } => {
+                                            let args = args.clone();
+                                            drop(desc);
+                                            ctx.new_generic_constr(type_path.clone(), args)
+                                        }
+                                        _ => {
+                                            drop(desc);
+                                            res_ty
+                                        }
+                                    }
+                                } else {
                                     ctx.new_generic_constr(
                                         type_path.clone(),
                                         type_decl.type_params.clone(),
                                     )
-                                });
+                                };
                                 let desc = crate::types::decl::ConstructorDescription {
                                     cstr_name: cstr_name.to_string(),
                                     cstr_res,
