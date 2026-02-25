@@ -55,20 +55,21 @@ Results persist in `.parity-cache/` — inspect diffs at `.parity-cache/tests/di
 
 ## Current Status
 
-**592/657 (90%) — raw byte-for-byte comparison** (excluding non-deterministic stack overflows)
+**636/657 (96%) — raw byte-for-byte comparison**
 
-**Latest snapshot (2026-02-24):**
-- Typecheck parity: `585/657` (raw), `592/657` adjusted for 7 non-deterministic stack overflows
-- Rust type-check: `645/657` (12 OCaml-only passes, 7 are stable stack overflows, 5 are transient)
-- Parity failures: `60` (core structural diffs)
-- Stable OCaml-only modules (stack overflows): `bb`, `bs_ignore_test`, `defunctor_make_test`, `gpr_4280_test`, `gpr_5218_test`, `hash_collision_test`, `int_poly_var`
-- Transient stack overflows (vary per run): `js_json_test`, `more_poly_variant_test`, `option_repr_test`, `poly_variant_test`, `tramp_fib`
+**Latest snapshot (2026-02-25):**
+- Typecheck parity: `636/657`
+- Rust type-check: `657/657` (0 Rust-only errors)
+- Parity failures: `21`
+- Hunk mismatches: `276` (binary-only diffs: 6)
+- Remaining failures: `bal_set_mini`, `belt_internal_test`, `defunctor_make_test`, `ext_array_test`, `flexible_array_test`, `fun_pattern_match`, `functor_ffi`, `gpr_1701_test`, `mario_game`, `pipe_send_readline`, `set_gen`, `Stdlib_Intl_DateTimeFormatTest`, `test_bs_this`, `test_list`, `test_seq`, `test_set`, `ticker`, `topsort_test`, `unboxed_use_case`, `UntaggedVariants`, `variantsMatching`
 
 **Recent fixes:**
-- ~~`inline_const` prim encoding drift~~ — Fixed template literal delimiter in `@inline` sig payloads: `transform_inline_sig_value` now checks `has_template_attr` and remaps `"js"` → `"bq"` before calling `inline_string_primitive` (commit 474dfb3bd). Fixed `inline_const`.
-- ~~`LetUnwrap` synthesized pattern locations~~ — Fixed `make_let_unwrap_early_case` to use `LocIdx::none()` for `Ppat_alias` wrapper loc, matching OCaml's `Ast_helper.Pat.alias` default `Location.none`. 10 of 11 hunks fixed; remaining 1 hunk is `closed` vs `open` row variant (known `set_more` gap).
-- ~~Local-name numbering drift~~ — Fixed by resetting `local_module_counter` before typecheck PPX (commit d3b1ba0ca). Fixed `hello_res`, `internal_unused_test`.
-- ~~Byte/encoding drift in string literals~~ — Fixed by removing `latin1_to_utf8` from sexp `string()` (commit f83438bbf). Fixed `Stdlib_Intl_CollatorTest`, `tagged_template_test`.
+- ~~Recursive poly variant infinite expansion~~ — Removed same-path parameterized Tconstr expansion that caused infinite recursion for `type rec vlist<'a> = [#Nil | #Cons('a, vlist<'a>)]`. OCaml's unify3 just unifies args; expansion in unify2 uses abbreviation memoization Rust doesn't have. Fixed `more_poly_variant_test` and `js_json_test` (+22 parity, -2 errors, -110 hunks).
+- ~~`inline_const` prim encoding drift~~ — Fixed template literal delimiter in `@inline` sig payloads. Fixed `inline_const`.
+- ~~`LetUnwrap` synthesized pattern locations~~ — Fixed `make_let_unwrap_early_case` to use `LocIdx::none()`.
+- ~~Local-name numbering drift~~ — Fixed by resetting `local_module_counter`. Fixed `hello_res`, `internal_unused_test`.
+- ~~Byte/encoding drift in string literals~~ — Fixed by removing `latin1_to_utf8`. Fixed `Stdlib_Intl_CollatorTest`, `tagged_template_test`.
 
 **Remaining failure buckets (high-level):**
 - Type sharing / cycle rendering drift (`<cycle>` vs concrete nodes): largest cluster (~30 tests)
