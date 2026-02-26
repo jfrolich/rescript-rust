@@ -8,6 +8,14 @@ This document lists the **exact fixes** from the `typed-ast-parity` branch (612�
 
 Historical note: many sections below describe recovery-era experiments and intermediate baselines; use `projects/typedtree-parity/RALPH_TODO.md` current-status section as the live source of truth.
 
+### Key Principle: Correctness Over Local Parity Score
+
+The remaining parity gap is dominated by type sharing and cycle detection — systemic issues where correct OCaml-aligned changes can cause temporary regressions. **If a change is verified to match OCaml's behavior exactly, KEEP IT even if parity drops.** Do not revert correct changes to chase local parity scores. Instead, fix the regressions with additional correct changes. Multiple correct changes in combination lead to breakthroughs that reverting would prevent. The "Fix Patterns That DON'T Work" section below contains many entries that were reverted after causing regressions — some of those may have been correct changes that needed companion fixes to show improvement.
+
+### You Have Time — No Shortcuts
+
+If OCaml does something fundamentally different (different algorithm, different data sharing, different control flow), implement the OCaml approach even if it means rewriting a large subsystem over multiple sessions. Do not invent heuristics or workarounds. We are a 1:1 rewrite of the OCaml reference compiler in idiomatic Rust — nothing more, nothing less. A multi-session refactor that aligns with OCaml is always better than a quick hack that papers over the difference.
+
 ---
 
 ## CRITICAL: Stack-Based Cycle Detection

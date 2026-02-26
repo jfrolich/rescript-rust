@@ -15,6 +15,8 @@ Achieve 100% parity on `-dtyped-sexp-locs` output between OCaml and Rust compile
 7. **Ignore generated JS output files** — `*.js`, `*.mjs`, `*.cjs` are not part of this work.
 8. **No docs-only revalidation loops** — don't create commits that only re-run baselines.
 9. **Cite OCaml sources for every fix.**
+10. **NEVER revert verified OCaml-aligned changes just because they cause a parity regression.** If you've confirmed a change matches OCaml's behavior exactly, KEEP IT. Temporary regressions from correct changes are expected — the remaining parity gap requires multiple correct changes working together. Fix regressions by making MORE correct changes, not by reverting correct ones. Aim for the global optimum, not the local one.
+11. **You have time — do large refactors when OCaml differs fundamentally.** If OCaml uses a different algorithm, data sharing model, or control flow, implement the OCaml approach even if it means rewriting a large subsystem over multiple sessions. No heuristics, no workarounds, no shortcuts. We are a 1:1 rewrite in idiomatic Rust — nothing invented, nothing skipped.
 
 ---
 
@@ -55,14 +57,14 @@ Results persist in `.parity-cache/` — inspect diffs at `.parity-cache/tests/di
 
 ## Current Status
 
-**620/657 (94%) — raw byte-for-byte comparison**
+**629/657 (95%) — raw byte-for-byte comparison**
 
 **Latest snapshot (2026-02-26, clean-cache + clean-rebuild verified):**
-- Typecheck parity: `626/657`
+- Typecheck parity: `629/657`
 - Rust type-check: `657/657` (0 Rust-only errors)
-- Parity failures: `31`
-- Hunk mismatches: `752` (mario_game now compiles with 283 hunks)
-- Remaining parity failures: `bal_set_mini`, `belt_hashset_int_test`, `bs_mutable_set_test`, `bs_poly_map_test`, `bs_poly_set_test`, `bs_queue_test`, `bs_set_int_test`, `bs_stack_test`, `defunctor_make_test`, `exception_raise_test`, `ext_array_test`, `functor_ffi`, `inline_map_test`, `inline_map2_test`, `js_json_test`, `jsx_preserve_test`, `mario_game`, `reasonReact`, `set_gen`, `Stdlib_Intl_DateTimeFormatTest`, `Stdlib_Intl_LocaleTest`, `Stdlib_IteratorTests`, `string_set`, `test_bs_this`, `test_list`, `ticker`, `topsort_test`, `unboxed_use_case`, `unsafe_ppx_test`, `UntaggedVariants`, `variantsMatching`
+- Parity failures: `28`
+- Hunk mismatches: `686`
+- Remaining parity failures: `bal_set_mini`, `belt_hashset_int_test`, `bs_mutable_set_test`, `bs_poly_map_test`, `bs_poly_set_test`, `bs_queue_test`, `bs_set_int_test`, `bs_stack_test`, `defunctor_make_test`, `ext_array_test`, `functor_ffi`, `inline_map_test`, `inline_map2_test`, `js_json_test`, `jsx_preserve_test`, `mario_game`, `reasonReact`, `set_gen`, `Stdlib_Intl_DateTimeFormatTest`, `Stdlib_Intl_LocaleTest`, `Stdlib_IteratorTests`, `string_set`, `test_bs_this`, `test_list`, `ticker`, `unboxed_use_case`, `unsafe_ppx_test`, `variantsMatching`
 
 **Recent fixes:**
 - ~~Manifest corruption in try_expand_head~~ — `instance()` returns original manifest for non-generic types. Subsequent unification links the manifest node, creating self-referential expansion loop. Added `instance_for_expansion()` that creates shallow copy when instance returns identity. Fixed mario_game and js_json_test compiler errors (-2 errors).
@@ -1060,6 +1062,9 @@ Rust eagerly resolves type variables through unification links while OCaml prese
 | Stack-based cycle detection on current branch | 610→220 | OCaml also uses permanent marking; typed-ast-parity confirmed |
 | Nullary Tconstr cycle detection exemption | 1→4 hunks on update_record_test | Creates new false under-detections |
 | ReturnSelf for non-generic Tarrow/Tfield/Tnil | 610 (neutral→worse) | More sharing = more false cycles; typed-ast-parity COPIES them |
+| Parameterized recursive Pident Tconstr identity (remove arg check) | inline_map_test crash, bal_set_mini 8→15 | Infinite expansion loops without abbreviation memoization |
+| Parameterized recursive Pident Tconstr identity (Tvar(_) relaxation) | inline_map_test crash, bal_set_mini unchanged | Args already concrete by copy time (unified through unification) |
+| unify_after_expansion relink direction swap | ext_array_test 8→64 | Collapses ALL module aliases; OCaml's behavior is context-dependent |
 
 ---
 

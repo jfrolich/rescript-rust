@@ -22,6 +22,18 @@ You are working on achieving **100% typedtree parity** between the Rust compiler
 - **No shortcuts, no heuristic hacks, no local special-casing by filename.**
 - Use idiomatic Rust only as a translation of OCaml behavior.
 
+### Correctness First — Never Revert Verified OCaml-Aligned Changes
+
+The remaining parity gap is dominated by type sharing and cycle detection differences. These are systemic issues where the correct fix requires multiple changes working together. A single correct change can cause a temporary parity regression because it changes sharing patterns that the cycle detector depends on, but reverting it prevents reaching the global optimum.
+
+**The rule:** If you have verified (by reading OCaml source) that a change makes Rust match OCaml's behavior exactly, **KEEP IT** even if parity drops. Then investigate and fix the regressions by making MORE correct OCaml-aligned changes. Do not chase the local parity score by reverting correct work.
+
+This is the opposite of the previous approach where regressions were immediately reverted. That approach got stuck at a local optimum. The path to 100% parity requires accepting temporary regressions from correct changes, then solving the downstream effects.
+
+### You Have Time — Do the Real Work
+
+If the OCaml implementation does something fundamentally different from the current Rust code — a different algorithm, a different data sharing model, a different control flow — do NOT invent workarounds or heuristics. Start implementing the OCaml approach NOW, even if it means rewriting a large subsystem over multiple sessions. We are building a 1:1 rewrite of the OCaml reference compiler in idiomatic Rust. Nothing more, nothing less. There is no deadline pressure that justifies papering over fundamental differences. A multi-session refactor that aligns with OCaml is always better than a quick hack. Take as many sessions as needed.
+
 Primary OCaml references:
 - `compiler/ml/typecore.ml`
 - `compiler/ml/ctype.ml`
@@ -110,7 +122,7 @@ The comparison is **raw, byte-for-byte** with zero post-processing. No stripping
 2. Group failures by shared root cause (first divergent typedtree node path).
 3. Prioritize by cluster size and risk.
 4. Solve one cluster at a time with OCaml-aligned changes.
-5. Require parity delta after each successful fix.
+5. Track parity delta after each fix, but **do not revert verified-correct changes that cause regressions** — fix the regressions with additional correct changes instead.
 
 **IMPORTANT: Follow the task list in RALPH_TODO.md (tasks 2-16). Key order:**
 1. **Predef variances, prefix rewriting, coercion subtype** — small, independent fixes
