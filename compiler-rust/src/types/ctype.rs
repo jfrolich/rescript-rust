@@ -3908,6 +3908,23 @@ fn is_recursive_local_nullary_type_for_identity(ctx: &TypeContext<'_>, path: &Pa
     is_recursive_local_type_for_identity(ctx, path)
 }
 
+/// Check if a type is a local TypeAbstract Pident. These are safe to return
+/// identity for in copy because they have no structural content (no variant
+/// constructors, no record fields). Includes both opaque types (`type t`) and
+/// type aliases (`type t = int`).
+fn is_local_abstract_type(ctx: &TypeContext<'_>, path: &Path) -> bool {
+    let Path::Pident(id) = path else {
+        return false;
+    };
+    if id.is_persistent() || id.stamp() == 0 {
+        return false;
+    }
+    let Some(decl) = ctx.find_type_decl_by_stamp(id.stamp()) else {
+        return false;
+    };
+    matches!(decl.type_kind, super::decl::TypeKind::TypeAbstract)
+}
+
 /// Copy a type, creating fresh type variables for generic ones.
 pub fn copy_type(ctx: &TypeContext<'_>, ty: TypeExprRef) -> TypeExprRef {
     let mut cache = CopyCache::new();
@@ -4256,10 +4273,13 @@ fn copy_type_cached(
                 {
                     CopyAction::ReturnSelf
                 }
-                // Preserve identity for recursive local types matching OCaml's
+                // Preserve identity for local types matching OCaml's
                 // Ctype.copy identity behavior for non-generic types.
+                // Nullary: recursive locals + abstract types (TypeAbstract).
+                // Abstract types (opaque or aliases) are safe because they
+                // have no structural content (no variant/record fields).
                 TypeDesc::Tconstr { path, args, .. }
-                    if (args.is_empty() && is_recursive_local_nullary_type_for_identity(ctx, path))
+                    if (args.is_empty() && (is_recursive_local_nullary_type_for_identity(ctx, path) || is_local_abstract_type(ctx, path)))
                         || (!args.is_empty()
                             && is_recursive_local_type_for_identity(ctx, path))
                             && args.iter().copied().all(|arg| {
