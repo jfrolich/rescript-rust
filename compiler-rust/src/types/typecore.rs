@@ -7990,30 +7990,18 @@ fn type_variant(
 
         let arg_ty = ctx.new_var(None);
         let typed_arg = type_expect(tctx, env, arg_expr, arg_ty, None)?;
-        let use_recursive_payload_fallback = if tctx.recursive_let_depth == 0 {
-            false
-        } else if let crate::parser::ast::ExpressionDesc::Pexp_ident(lid) = &*arg_expr.pexp_desc {
-            is_active_recursive_value_ident(tctx, env, lid)
-        } else {
-            false
-        };
-        let variant_ty = if use_recursive_payload_fallback {
-            // Preserve the old fallback for recursive payload variants like #A(r).
-            ctx.new_var(None)
-        } else {
-            // OCaml (typecore.ml:2600) uses Rpresent for variant expression types,
-            // not Reither. Reither is only used in patterns.
-            ctx.new_variant(crate::types::type_expr::RowDesc {
-                row_fields: vec![(
-                    label.to_string(),
-                    crate::types::type_expr::RowField::Rpresent(Some(typed_arg.exp_type)),
-                )],
-                row_more: ctx.new_var(None),
-                row_closed: false,
-                row_fixed: false,
-                row_name: None,
-            })
-        };
+        // OCaml (typecore.ml:2596-2605) always creates a proper Tvariant with
+        // Rpresent for variant expression types, including recursive payloads.
+        let variant_ty = ctx.new_variant(crate::types::type_expr::RowDesc {
+            row_fields: vec![(
+                label.to_string(),
+                crate::types::type_expr::RowField::Rpresent(Some(typed_arg.exp_type)),
+            )],
+            row_more: ctx.new_var(None),
+            row_closed: false,
+            row_fixed: false,
+            row_name: None,
+        });
         unify_expression_types(tctx, loc, variant_ty, expected_ty, None)?;
         return Ok(Expression::new(
             ExpressionDesc::Texp_variant(label.to_string(), Some(Box::new(typed_arg))),
