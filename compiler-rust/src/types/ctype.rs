@@ -4252,13 +4252,9 @@ fn copy_type_cached(
                 TypeDesc::Tarrow { .. } => CopyAction::ReturnSelf,
                 TypeDesc::Tfield { .. } => CopyAction::ReturnSelf,
                 TypeDesc::Tnil => CopyAction::ReturnSelf,
-                // Tconstr: selective identity for parameterized predef types
-                // (list, option, array, etc.) to preserve abbreviation relinks.
-                // Nullary predef (int, string, bool, etc.) must be COPIED to avoid
-                // false cycle markers when the same type appears in tuples.
+                // Tconstr: selective identity to avoid functor/variant crashes
                 TypeDesc::Tconstr { path, args, .. }
-                    if !args.is_empty()
-                        && is_predef_type_name(path.head_name())
+                    if is_predef_type_name(path.head_name())
                         && args.iter().copied().all(|arg| {
                             !matches!(
                                 &*ctx.get_desc(ctx.repr(arg)),
