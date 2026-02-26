@@ -5839,6 +5839,12 @@ fn type_structure_item<'a>(
             let name_str = arena.get_string(ext_constr.pext_name.txt).to_string();
             let id = Ident::create_local(&name_str);
 
+            // OCaml typedecl.ml:1839-1846: begin_def/end_def/generalize around
+            // exception constructor type translation. This ensures arg types are
+            // at GENERIC_LEVEL so instance() creates fresh copies, preventing
+            // declaration types from being linked to use-site aliases.
+            ctx.begin_def();
+
             // Translate constructor arguments and collect type refs for env registration
             let (typed_args, _ext_ret, ext_args, cstr_args, cstr_inlined) = match &ext_constr
                 .pext_kind
@@ -5947,6 +5953,12 @@ fn type_structure_item<'a>(
                     None,
                 ),
             };
+
+            // OCaml typedecl.ml:1843-1846: end_def and generalize args
+            ctx.end_def();
+            for ty_ref in &cstr_args {
+                crate::types::generalize(ctx, *ty_ref);
+            }
 
             // Register the exception constructor in the environment
             let exn_ty = tctx
