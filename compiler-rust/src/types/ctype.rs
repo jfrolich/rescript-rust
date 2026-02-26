@@ -4249,9 +4249,34 @@ fn copy_type_cached(
                 TypeDesc::Tvariant(_) => CopyAction::ReturnSelf,
                 TypeDesc::Tpoly { .. } => CopyAction::ReturnSelf,
                 TypeDesc::Tpackage { .. } => CopyAction::ReturnSelf,
-                TypeDesc::Tarrow { .. } => CopyAction::ReturnSelf,
-                TypeDesc::Tfield { .. } => CopyAction::ReturnSelf,
-                TypeDesc::Tnil => CopyAction::ReturnSelf,
+                // Copy Tarrow/Tfield/Tnil (not identity) — reduces sharing to
+                // prevent false cycle markers. Matches typed-ast-parity branch.
+                TypeDesc::Tarrow {
+                    arg, ret, arity, ..
+                } => CopyAction::Arrow {
+                    arg_lbl: arg.lbl.clone(),
+                    arg_typ: arg.typ,
+                    ret: *ret,
+                    arity: *arity,
+                },
+                TypeDesc::Tfield {
+                    name,
+                    kind,
+                    typ,
+                    rest,
+                } => {
+                    if matches!(kind, crate::types::type_expr::FieldKind::Fabsent) {
+                        CopyAction::Link(*rest)
+                    } else {
+                        CopyAction::Field {
+                            name: name.clone(),
+                            kind: kind.clone(),
+                            typ: *typ,
+                            rest: *rest,
+                        }
+                    }
+                }
+                TypeDesc::Tnil => CopyAction::Nil,
                 // Tconstr: selective identity to avoid functor/variant crashes
                 TypeDesc::Tconstr { path, args, .. }
                     if is_predef_type_name(path.head_name())
