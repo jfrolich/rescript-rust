@@ -4046,6 +4046,18 @@ pub fn transl_signature<'a>(
             PSigDesc::Psig_type(inner) => {
                 let (ref rec_flag, ref decls) = **inner;
                 let typed_decls = transl_sig_type_declarations(tctx, &sig_env, arena, decls)?;
+                // Add types to sig_env so subsequent items see them.
+                // This ensures locally-defined types shadow opened types
+                // (e.g., type xy in Sprite shadows Actors.xy from open).
+                // Only add non-abstract types (those with manifests or type_kind)
+                // to avoid interfering with functor signature types.
+                for td in &typed_decls {
+                    if td.typ_type.type_manifest.is_some()
+                        || !matches!(td.typ_type.type_kind, crate::types::TypeKind::TypeAbstract)
+                    {
+                        sig_env.add_type(td.typ_id.clone(), td.typ_type.clone());
+                    }
+                }
                 TSigDesc::Tsig_type(*rec_flag, typed_decls)
             }
             PSigDesc::Psig_module(md) => {
