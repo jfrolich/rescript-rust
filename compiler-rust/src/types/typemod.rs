@@ -4007,6 +4007,9 @@ pub fn transl_signature<'a>(
     };
 
     let mut typed_items = Vec::new();
+    // Thread environment through the loop so Psig_open extends it
+    // for subsequent items (matching OCaml's transl_signature behavior).
+    let mut sig_env = env.clone();
 
     for item in items {
         let ctx = tctx.type_ctx;
@@ -4019,7 +4022,7 @@ pub fn transl_signature<'a>(
                 // Use transl_type_scheme pattern: begin_def/end_def/generalize
                 let ctx = tctx.type_ctx;
                 ctx.begin_def();
-                let (typed_ctype, val_ty) = transl_type(tctx, env, arena.get_core_type(vd.pval_type))?;
+                let (typed_ctype, val_ty) = transl_type(tctx, &sig_env, arena.get_core_type(vd.pval_type))?;
                 ctx.end_def();
                 crate::types::ctype::generalize(ctx, val_ty);
                 // For primitives, we need the pval_prim as Vec<String> for the typed tree
@@ -4042,13 +4045,13 @@ pub fn transl_signature<'a>(
             }
             PSigDesc::Psig_type(inner) => {
                 let (ref rec_flag, ref decls) = **inner;
-                let typed_decls = transl_sig_type_declarations(tctx, env, arena, decls)?;
+                let typed_decls = transl_sig_type_declarations(tctx, &sig_env, arena, decls)?;
                 TSigDesc::Tsig_type(*rec_flag, typed_decls)
             }
             PSigDesc::Psig_module(md) => {
                 let name_str = arena.get_string(md.pmd_name.txt).to_string();
                 let id = Ident::create_local(&name_str);
-                let typed_mty = transl_modtype(tctx, env, arena, arena.get_mod_type(md.pmd_type))?;
+                let typed_mty = transl_modtype(tctx, &sig_env, arena, arena.get_mod_type(md.pmd_type))?;
                 TSigDesc::Tsig_module(TypedModuleDeclaration {
                     md_id: id,
                     md_name: Located {
@@ -4064,7 +4067,7 @@ pub fn transl_signature<'a>(
                 let name_str = arena.get_string(mtd.pmtd_name.txt).to_string();
                 let id = Ident::create_local(&name_str);
                 let typed_mty = match &mtd.pmtd_type {
-                    Some(mt) => Some(transl_modtype(tctx, env, arena, arena.get_mod_type(*mt))?),
+                    Some(mt) => Some(transl_modtype(tctx, &sig_env, arena, arena.get_mod_type(*mt))?),
                     None => None,
                 };
                 TSigDesc::Tsig_modtype(crate::types::typedtree::ModuleTypeDeclaration {
@@ -4080,14 +4083,30 @@ pub fn transl_signature<'a>(
             }
             PSigDesc::Psig_open(od) => {
                 let longident = tctx.resolve_lid(od.popen_lid.txt).clone();
-                let path = lookup_module_path_by_lid(
-                    &longident,
-                    arena,
-                    env,
-                    &mut tctx.persistent_env,
-                    tctx.type_ctx,
-                )
-                .unwrap_or_else(|| path_from_longident(&longident, |idx| arena.get_string(idx)));
+                let open_lid = arena.get_longident(od.popen_lid.txt);
+                // Resolve the module and extend the environment with opened bindings.
+                // This matches OCaml's transl_signature which calls type_open/Env.open_signature.
+                let path = if let Some((resolved_path, sig_items)) =
+                    sig_env.resolve_module_lid(open_lid, arena, &mut tctx.persistent_env, tctx.type_ctx)
+                {
+                    crate::cmi::persistent_env::add_signature_to_env(
+                        &sig_items,
+                        &resolved_path,
+                        &mut sig_env,
+                        tctx.type_ctx,
+                        true, // as_opened
+                    );
+                    resolved_path
+                } else {
+                    lookup_module_path_by_lid(
+                        &longident,
+                        arena,
+                        &sig_env,
+                        &mut tctx.persistent_env,
+                        tctx.type_ctx,
+                    )
+                    .unwrap_or_else(|| path_from_longident(&longident, |idx| arena.get_string(idx)))
+                };
                 TSigDesc::Tsig_open(crate::types::typedtree::OpenDeclaration {
                     open_path: path,
                     open_txt: od.popen_lid.clone(),
