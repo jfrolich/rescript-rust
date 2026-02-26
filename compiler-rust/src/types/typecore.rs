@@ -12768,10 +12768,14 @@ fn lookup_constructor_by_expected_type<'b>(
                                 copied
                             })
                             .collect();
+                        // Use ORIGINAL labels for param detection (deep_occur
+                        // needs physical identity between params and label types).
+                        // Then deep-copy the detected params using the same cache
+                        // so they match the copied labels.
                         let inline_params = inline_record_type_params(
                             ctx,
                             &concrete_type_decl.type_params,
-                            &copied_labels,
+                            labels,
                         )
                         .into_iter()
                         .map(|param| {
