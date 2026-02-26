@@ -57,15 +57,15 @@ Results persist in `.parity-cache/` — inspect diffs at `.parity-cache/tests/di
 
 **620/657 (94%) — raw byte-for-byte comparison**
 
-**Latest snapshot (2026-02-25, clean-cache + clean-rebuild verified):**
-- Typecheck parity: `620/657`
-- Rust type-check: `656/657` (1 Rust-only error: `js_json_test`)
-- Parity failures: `36`
-- Hunk mismatches: `268` (binary-only diffs: 14)
-- Remaining parity failures: `bal_set_mini`, `bs_mutable_set_test`, `bs_poly_map_test`, `bs_poly_set_test`, `bs_queue_test`, `bs_set_int_test`, `bs_stack_test`, `defunctor_make_test`, `exception_raise_test`, `ext_array_test`, `ffi_splice_test`, `flexible_array_test`, `fun_pattern_match`, `functor_ffi`, `inline_map_test`, `inline_map2_test`, `js_string_test`, `jsx_preserve_test`, `LetUnwrap`, `mario_game`, `pipe_send_readline`, `reasonReact`, `reasonReactRouter`, `set_gen`, `Stdlib_Intl_DateTimeFormatTest`, `Stdlib_IteratorTests`, `string_set`, `test_bs_this`, `test_list`, `test_set`, `ticker`, `topsort_test`, `unboxed_use_case`, `unsafe_ppx_test`, `UntaggedVariants`, `variantsMatching`
-- NOTE: Previous "636/657" was inflated by stale OCaml sexp files being counted as Rust output. The parity script now clears sexp files between OCaml and Rust runs.
+**Latest snapshot (2026-02-26, clean-cache + clean-rebuild verified):**
+- Typecheck parity: `626/657`
+- Rust type-check: `657/657` (0 Rust-only errors)
+- Parity failures: `31`
+- Hunk mismatches: `752` (mario_game now compiles with 283 hunks)
+- Remaining parity failures: `bal_set_mini`, `belt_hashset_int_test`, `bs_mutable_set_test`, `bs_poly_map_test`, `bs_poly_set_test`, `bs_queue_test`, `bs_set_int_test`, `bs_stack_test`, `defunctor_make_test`, `exception_raise_test`, `ext_array_test`, `functor_ffi`, `inline_map_test`, `inline_map2_test`, `js_json_test`, `jsx_preserve_test`, `mario_game`, `reasonReact`, `set_gen`, `Stdlib_Intl_DateTimeFormatTest`, `Stdlib_Intl_LocaleTest`, `Stdlib_IteratorTests`, `string_set`, `test_bs_this`, `test_list`, `ticker`, `topsort_test`, `unboxed_use_case`, `unsafe_ppx_test`, `UntaggedVariants`, `variantsMatching`
 
 **Recent fixes:**
+- ~~Manifest corruption in try_expand_head~~ — `instance()` returns original manifest for non-generic types. Subsequent unification links the manifest node, creating self-referential expansion loop. Added `instance_for_expansion()` that creates shallow copy when instance returns identity. Fixed mario_game and js_json_test compiler errors (-2 errors).
 - ~~Non-generic Tvariant identity~~ — Return identity for non-generic Tvariant in copy_type_cached, matching OCaml behavior. Increases type sharing → more cycle detection matches. -33 hunks (288→255).
 - ~~Predef Tconstr identity~~ — Return identity for predef Tconstr (list, option, etc.) without Tvariant args. Preserves abbreviation relinks. +5 parity (belt_internal_test, gpr_1701_test, option_repr_test, splice_test, test_seq).
 - ~~finalize_variant_in_scrutinee_type~~ — After finalize_variant on case patterns, propagate Reither→Rpresent to ty_arg. -16 hunks in gpr_4280_test. Subset matching for wildcard coverage normalization.
@@ -179,11 +179,14 @@ These files compile successfully under OCaml but crash/error in the Rust compile
 
 | Module | Error Type | Notes |
 |--------|-----------|-------|
-| `bs_ignore_test` | GADT PatternTypeClash | Stack overflow / GADT equation handling |
-| `gpr_4280_test` | UndefinedMethod | Method resolution failure |
-| `js_json_test` | GADT PatternTypeClash | Stack overflow / GADT equation handling |
-| `more_poly_variant_test` | ExprTypeClash (variant spread) | Polymorphic variant spread type error |
-| `tramp_fib` | Unknown | Crash during type checking |
+| ~~`bs_ignore_test`~~ | ~~GADT PatternTypeClash~~ | ~~Fixed: GADT equation support~~ |
+| ~~`gpr_4280_test`~~ | ~~UndefinedMethod~~ | ~~Fixed: tuple-of-variant row merge~~ |
+| ~~`js_json_test`~~ | ~~GADT PatternTypeClash~~ | ~~Fixed: manifest corruption in try_expand_head~~ |
+| ~~`mario_game`~~ | ~~ExprTypeClash infinite loop~~ | ~~Fixed: manifest corruption in try_expand_head~~ |
+| ~~`more_poly_variant_test`~~ | ~~ExprTypeClash (variant spread)~~ | ~~Fixed: recursive poly variant expansion~~ |
+| ~~`tramp_fib`~~ | ~~Unknown~~ | ~~Fixed: env desc type generalization~~ |
+
+**All P0 crashes are now fixed! 657/657 Rust type-check success.**
 
 **Approach:** For each crash, run the file under the Rust compiler directly, capture the error, trace back to the root cause in the type checker, and fix. GADT-related crashes (bs_ignore_test, js_json_test) likely share a common root cause. Always use `timeout` — these may infinite loop.
 
