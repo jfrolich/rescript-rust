@@ -4241,27 +4241,18 @@ fn copy_type_cached(
 
         if level != GENERIC_LEVEL {
             match &*desc {
+                // Identity for all non-Tconstr types — matches OCaml's copy
+                // which returns identity for ALL non-generic types.
                 TypeDesc::Tvar(_) | TypeDesc::Tunivar(_) => CopyAction::ReturnSelf,
-                // Match OCaml Ctype.copy identity for non-generic tuple nodes
-                // whose elements are anonymous vars: keep the tuple node shared
-                // instead of rebuilding a structurally identical tuple.
-                TypeDesc::Ttuple(types)
-                    if types.iter().copied().all(|elem| {
-                        matches!(
-                            &*ctx.get_desc(ctx.repr(elem)),
-                            TypeDesc::Tvar(None) | TypeDesc::Tunivar(None)
-                        )
-                    }) =>
-                {
-                    CopyAction::ReturnSelf
-                }
-                // Return identity for predef Tconstr (list, option, etc.)
-                // when args don't contain variant types. This preserves
-                // abbreviation-preserving relinks in unify_after_expansion:
-                // when acc has type list<string> and is unified with
-                // Belt.List.t<'a>, the relink must fire on the ORIGINAL
-                // node (not a copy). Exclude args with Tvariant to prevent
-                // over-sharing (e.g. result<string, [#InvalidString]>).
+                TypeDesc::Ttuple(_) => CopyAction::ReturnSelf,
+                TypeDesc::Tobject { .. } => CopyAction::ReturnSelf,
+                TypeDesc::Tvariant(_) => CopyAction::ReturnSelf,
+                TypeDesc::Tpoly { .. } => CopyAction::ReturnSelf,
+                TypeDesc::Tpackage { .. } => CopyAction::ReturnSelf,
+                TypeDesc::Tarrow { .. } => CopyAction::ReturnSelf,
+                TypeDesc::Tfield { .. } => CopyAction::ReturnSelf,
+                TypeDesc::Tnil => CopyAction::ReturnSelf,
+                // Tconstr: selective identity to avoid functor/variant crashes
                 TypeDesc::Tconstr { path, args, .. }
                     if is_predef_type_name(path.head_name())
                         && args.iter().copied().all(|arg| {
@@ -4273,11 +4264,6 @@ fn copy_type_cached(
                 {
                     CopyAction::ReturnSelf
                 }
-                // Preserve identity for local types matching OCaml's
-                // Ctype.copy identity behavior for non-generic types.
-                // Nullary: recursive locals + abstract types (TypeAbstract).
-                // Abstract types (opaque or aliases) are safe because they
-                // have no structural content (no variant/record fields).
                 TypeDesc::Tconstr { path, args, .. }
                     if (args.is_empty() && (is_recursive_local_nullary_type_for_identity(ctx, path) || is_local_abstract_type(ctx, path)))
                         || (!args.is_empty()
@@ -4291,51 +4277,8 @@ fn copy_type_cached(
                 {
                     CopyAction::ReturnSelf
                 }
-                // Non-generic Tobject: return identity to prevent stack overflow
-                // on self-referential object types (e.g. `type x = {"y": 'self => int} as 'self`).
-                TypeDesc::Tobject { .. } => CopyAction::ReturnSelf,
-                TypeDesc::Tarrow {
-                    arg, ret, arity, ..
-                } => CopyAction::Arrow {
-                    arg_lbl: arg.lbl.clone(),
-                    arg_typ: arg.typ,
-                    ret: *ret,
-                    arity: *arity,
-                },
-                TypeDesc::Tfield {
-                    name,
-                    kind,
-                    typ,
-                    rest,
-                } => {
-                    if matches!(kind, crate::types::type_expr::FieldKind::Fabsent) {
-                        CopyAction::Link(*rest)
-                    } else {
-                        CopyAction::Field {
-                            name: name.clone(),
-                            kind: kind.clone(),
-                            typ: *typ,
-                            rest: *rest,
-                        }
-                    }
-                }
-                TypeDesc::Tnil => CopyAction::Nil,
-                TypeDesc::Ttuple(types) => CopyAction::Tuple(types.clone()),
                 TypeDesc::Tconstr { path, args, .. } => CopyAction::Constr {
                     path: path.clone(),
-                    args: args.clone(),
-                },
-                TypeDesc::Tpoly { body, vars } => CopyAction::Poly {
-                    body: *body,
-                    vars: vars.clone(),
-                },
-                // Non-generic Tvariant: return identity to increase type sharing,
-                // matching OCaml where all non-generic types return identity in copy.
-                // More sharing = more cycle detection matches with OCaml.
-                TypeDesc::Tvariant(_) => CopyAction::ReturnSelf,
-                TypeDesc::Tpackage { path, lids, args } => CopyAction::Package {
-                    path: path.clone(),
-                    lids: lids.clone(),
                     args: args.clone(),
                 },
                 TypeDesc::Tlink(target) | TypeDesc::Tsubst(target) => CopyAction::Link(*target),

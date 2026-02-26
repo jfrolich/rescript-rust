@@ -3082,7 +3082,9 @@ fn type_pattern_construct(
                     tctx.type_ctx,
                 ) {
                     Some((path, desc)) => (desc, path),
-                    None => return Err(TypeCoreError::NotAVariantType(lid_txt.clone())),
+                    None => {
+                        return Err(TypeCoreError::NotAVariantType(lid_txt.clone()));
+                    }
                 }
             }
         }
@@ -12221,13 +12223,19 @@ fn extract_variant_type_path_from_expected_with_persistent_env<'a>(
                     return Some(current);
                 }
                 crate::types::TypeKind::TypeAbstract => {
-                    let manifest = decl.type_manifest?;
-                    let manifest_desc = ctx.get_desc(ctx.repr(manifest));
+                    let manifest = decl.type_manifest;
+                    if manifest.is_none() {
+                        return None;
+                    }
+                    let manifest = manifest.unwrap();
+                    let manifest_repr = ctx.repr(manifest);
+                    let manifest_desc = ctx.get_desc(manifest_repr);
                     let next_path = match &*manifest_desc {
                         TypeDesc::Tconstr { path, .. } => path.clone(),
                         _ => return None,
                     };
                     if next_path.same(&current) {
+                        // Self-manifest cycle: try normalize_path as fallback
                         let normalized = env.normalize_path(&current);
                         if normalized.same(&current) {
                             return None;
@@ -12237,7 +12245,9 @@ fn extract_variant_type_path_from_expected_with_persistent_env<'a>(
                     }
                     current = next_path;
                 }
-                _ => return None,
+                _ => {
+                    return None;
+                }
             }
         }
     }
