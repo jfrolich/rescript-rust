@@ -4179,7 +4179,7 @@ fn copy_type_cached(
     // Enum to hold what action to take, avoiding borrow issues.
     enum CopyAction {
         ReturnSelf,
-        NewVar,
+        NewVar(Option<String>),
         NewUnivar(Option<String>),
         Arrow {
             arg_lbl: super::asttypes::ArgLabel,
@@ -4322,7 +4322,7 @@ fn copy_type_cached(
             }
         } else {
             match &*desc {
-                TypeDesc::Tvar(_) => CopyAction::NewVar,
+                TypeDesc::Tvar(_) => CopyAction::NewVar(None),
                 TypeDesc::Tunivar(name) => CopyAction::NewUnivar(name.clone()),
                 TypeDesc::Tarrow {
                     arg, ret, arity, ..
@@ -4378,9 +4378,9 @@ fn copy_type_cached(
     match action {
         CopyAction::ReturnSelf => ty,
         CopyAction::Link(target) => copy_type_cached(ctx, target, cache),
-        CopyAction::NewVar => {
-            // OCaml creates anonymous copies of generic Tvar nodes.
-            let fresh = ctx.new_var(None);
+        CopyAction::NewVar(name) => {
+            // OCaml preserves Tvar names in copy: newvar2 ~name:(match ty.desc with Tvar name -> name | _ -> None)
+            let fresh = ctx.new_var(name);
             cache.nodes.insert(ty, fresh);
             fresh
         }
@@ -4567,7 +4567,7 @@ fn copy_type_cached(
                     }
                 }
                 CopyAction::ReturnSelf
-                | CopyAction::NewVar
+                | CopyAction::NewVar(_)
                 | CopyAction::NewUnivar(_)
                 | CopyAction::Link(_) => unreachable!(),
             };

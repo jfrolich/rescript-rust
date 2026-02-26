@@ -2404,19 +2404,24 @@ fn type_pattern_inner(
 
         PD::Ppat_constraint(inner) => {
             let (ref inner_pat_idx, ref core_type) = **inner;
-            // Type constraint pattern: (x : int)
             let inner_pat = tctx.arena.get_pat(*inner_pat_idx);
-            type_pattern_constraint(
-                tctx,
-                env,
-                loc,
-                inner_pat,
-                tctx.arena.get_core_type(*core_type),
-                expected_ty,
-                mode,
-                state,
-                pat,
-            )
+            let core_ty = tctx.arena.get_core_type(*core_type);
+
+            // OCaml typecore.ml:1249-1274: Special case for Ppat_constraint(Ppat_var, Ptyp_poly)
+            // Uses instance_poly ~keep_names:true to preserve type variable names.
+            if let (
+                PD::Ppat_var(name),
+                crate::parser::ast::CoreTypeDesc::Ptyp_poly(_),
+            ) = (&*inner_pat.ppat_desc, &*core_ty.ptyp_desc)
+            {
+                type_pattern_constraint_poly_var(
+                    tctx, env, loc, inner_pat, *name, core_ty, expected_ty, mode, state, pat,
+                )
+            } else {
+                type_pattern_constraint(
+                    tctx, env, loc, inner_pat, core_ty, expected_ty, mode, state, pat,
+                )
+            }
         }
 
         PD::Ppat_interval(inner) => {
@@ -3456,6 +3461,79 @@ fn type_pattern_constraint(
     };
 
     Ok(typed_inner)
+}
+
+/// Type check constraint pattern: Ppat_constraint(Ppat_var, Ptyp_poly).
+/// OCaml typecore.ml:1249-1274: explicitly polymorphic type annotation.
+/// Uses instance_poly ~keep_names:true to preserve type variable names.
+#[allow(clippy::too_many_arguments)]
+fn type_pattern_constraint_poly_var(
+    tctx: &mut TypeCheckContext<'_>,
+    env: &Env,
+    loc: LocIdx,
+    inner_pat: &ParsedPattern,
+    name: crate::parser::ast::StringLoc,
+    core_type: &crate::parser::ast::CoreType,
+    expected_ty: TypeExprRef,
+    _mode: PatternMode,
+    state: &mut PatternState,
+    pat: &ParsedPattern,
+) -> TypeCoreResult<Pattern> {
+    let ctx = tctx.type_ctx;
+
+    // OCaml: lloc = inner_pat.ppat_loc (used for unify and enter_variable)
+    let lloc = inner_pat.ppat_loc;
+
+    // OCaml: let cty, force = Typetexp.transl_simple_type_delayed !env sty in
+    let (typed_ctype, ctype_ty) = transl_type(tctx, env, core_type)?;
+
+    // OCaml: unify_pat_types lloc !env ty expected_ty
+    unify_pattern_types(tctx, lloc, ctype_ty, expected_ty)?;
+
+    // OCaml: match ty.desc with Tpoly(body, tyl) -> ...
+    let ctype_repr = ctx.repr(ctype_ty);
+    let ctype_desc = ctx.get_desc(ctype_repr);
+    match &*ctype_desc {
+        TypeDesc::Tpoly { body, vars } => {
+            let body = *body;
+            let vars: Vec<TypeExprRef> = vars.clone();
+            drop(ctype_desc);
+
+            // OCaml: begin_def (); let _, ty' = instance_poly ~keep_names:true false tyl body in end_def (); generalize ty'
+            ctx.begin_def();
+            let (_inst_vars, ty_prime) =
+                crate::types::ctype::instance_poly(ctx, true, false, &vars, body);
+            ctx.end_def();
+            crate::types::ctype::generalize(ctx, ty_prime);
+
+            // OCaml: let id = enter_variable lloc name ty' in
+            let id = state.enter_variable(lloc, &name, ty_prime, false, false, tctx.arena)?;
+
+            // OCaml: pat_desc = Tpat_var(id, name); pat_type = ty (the Tpoly type)
+            // pat_extra = [(Tpat_constraint cty, loc, sp.ppat_attributes)]
+            let constraint_extra = (
+                crate::types::typedtree::PatExtra::Tpat_constraint(typed_ctype),
+                loc.clone(),
+                pat.ppat_attributes.clone(),
+            );
+
+            Ok(Pattern {
+                pat_desc: PatternDesc::Tpat_var(id, convert_located_stridx(&name, tctx.arena)),
+                pat_loc: lloc,
+                pat_type: ctype_ty,
+                pat_env: EnvRef(0),
+                pat_attributes: Attributes::new(),
+                pat_extra: vec![constraint_extra],
+            })
+        }
+        _ => {
+            drop(ctype_desc);
+            // Fallback: shouldn't happen for Ptyp_poly but be safe
+            type_pattern_constraint(
+                tctx, env, loc, inner_pat, core_type, expected_ty, _mode, state, pat,
+            )
+        }
+    }
 }
 
 /// Type check interval pattern.
