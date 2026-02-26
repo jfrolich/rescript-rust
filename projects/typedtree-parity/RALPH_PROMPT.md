@@ -50,11 +50,11 @@ Primary Rust implementation files:
 
 ## Hard-Task Mandate (No Shortcut Policy)
 
-1. **Tackle the hardest remaining root-cause cluster first** (largest failing group), not easy one-off files.
+1. **Tackle the hardest remaining root-cause cluster first** (largest failing group), not easy one-off files. Do NOT start by scanning for “smallest diffs” or “simple fixes” — there are none left. Every remaining failure has been investigated and requires deep work.
 2. **No docs-only revalidation commits.** A commit must include meaningful code changes that advance parity/compile coverage, or add new unchecked root-cause tasks with concrete evidence.
 3. **If all TODO tasks are checked but parity < 657/657, create new unchecked tasks immediately** from the current failing-file manifest before coding.
-4. **At most one parity-neutral experiment per hypothesis.** Revert and move to a new hypothesis quickly; do not loop.
-5. **No “fundamental limitation” claims** without OCaml source proof and a concrete follow-up plan.
+4. **Spend hours reading OCaml source if needed.** Reading OCaml for an hour before writing a single line of Rust is expected and encouraged. Understanding the OCaml implementation deeply IS the work — the Rust changes that follow should be straightforward once you understand what OCaml does.
+5. **No “fundamental limitation” claims** without OCaml source proof and a concrete follow-up plan. If OCaml does it, we can do it too.
 
 ## Your Task Each Iteration
 

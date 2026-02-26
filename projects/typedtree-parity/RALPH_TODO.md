@@ -17,6 +17,7 @@ Achieve 100% parity on `-dtyped-sexp-locs` output between OCaml and Rust compile
 9. **Cite OCaml sources for every fix.**
 10. **NEVER revert verified OCaml-aligned changes just because they cause a parity regression.** If you've confirmed a change matches OCaml's behavior exactly, KEEP IT. Temporary regressions from correct changes are expected — the remaining parity gap requires multiple correct changes working together. Fix regressions by making MORE correct changes, not by reverting correct ones. Aim for the global optimum, not the local one.
 11. **You have time — do large refactors when OCaml differs fundamentally.** If OCaml uses a different algorithm, data sharing model, or control flow, implement the OCaml approach even if it means rewriting a large subsystem over multiple sessions. No heuristics, no workarounds, no shortcuts. We are a 1:1 rewrite in idiomatic Rust — nothing invented, nothing skipped.
+12. **Stop looking for easy wins — all remaining issues are hard.** Do NOT start by scanning for "smallest diffs" or "simple fixes." Every remaining failure has been investigated. Pick the highest-impact root cause and dig in. Spend hours reading OCaml source before writing Rust if needed — understanding IS the work.
 
 ---
 
