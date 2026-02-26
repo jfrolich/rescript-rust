@@ -4283,13 +4283,13 @@ fn copy_type_cached(
                 TypeDesc::Tconstr { path, args, .. }
                     if (args.is_empty() && (is_recursive_local_nullary_type_for_identity(ctx, path) || is_local_abstract_type(ctx, path)))
                         || (!args.is_empty()
-                            && is_recursive_local_type_for_identity(ctx, path))
+                            && is_recursive_local_type_for_identity(ctx, path)
                             && args.iter().copied().all(|arg| {
                                 matches!(
                                     &*ctx.get_desc(ctx.repr(arg)),
                                     TypeDesc::Tvar(None) | TypeDesc::Tunivar(None)
                                 )
-                            }) =>
+                            })) =>
                 {
                     CopyAction::ReturnSelf
                 }
