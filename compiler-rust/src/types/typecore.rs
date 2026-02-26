@@ -7512,7 +7512,10 @@ fn type_function(
     use crate::types::typedtree::{Case, FunctionParam, FunctionParamPattern, Partial};
 
     let ctx = tctx.type_ctx;
-    let saved_type_variables = std::mem::take(&mut tctx.type_variables);
+    // Clone (not take) type_variables so inner functions can SEE outer scope
+    // variables (enabling cross-scope sharing like 'self in @this callbacks)
+    // but additions inside the function don't leak back to the outer scope.
+    let saved_type_variables = tctx.type_variables.clone();
     let result = (|| -> TypeCoreResult<Expression> {
 
     // Convert arity to Option<i32> for the arrow type
