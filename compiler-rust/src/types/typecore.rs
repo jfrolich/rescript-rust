@@ -978,6 +978,20 @@ pub fn transl_type(
     env: &Env,
     styp: &crate::parser::ast::CoreType,
 ) -> TypeCoreResult<(crate::types::typedtree::TypedCoreType, TypeExprRef)> {
+    transl_type_delayed(tctx, env, styp, false)
+}
+
+/// Translate a type with delayed globalization (matching OCaml's
+/// transl_simple_type_delayed). When `globalize` is true, used type
+/// variables are lowered to global_level via new_global_var unification,
+/// which prevents them from being generalized by the caller's
+/// end_def/generalize_structure.
+pub fn transl_type_delayed(
+    tctx: &mut TypeCheckContext<'_>,
+    env: &Env,
+    styp: &crate::parser::ast::CoreType,
+    globalize: bool,
+) -> TypeCoreResult<(crate::types::typedtree::TypedCoreType, TypeExprRef)> {
     // Reset used_variables for each top-level type translation (matches OCaml's transl_simple_type)
     tctx.used_variables.clear();
     let translated = transl_type_inner(tctx, env, styp)?;
@@ -992,15 +1006,26 @@ pub fn transl_type(
             .map(|(name, ty)| (name.clone(), *ty))
             .collect();
         for (name, used_ty) in used_vars {
+            let ctx = tctx.type_ctx;
+            // When globalize=true, create new_global_var and unify to lower
+            // the used type's level from current_level to global_level.
+            // This matches OCaml globalize_used_variables behavior.
+            let effective_ty = if globalize {
+                let v = ctx.new_global_var(None);
+                let _ = crate::types::unify(ctx, &mut tctx.unify_state, v, used_ty);
+                v
+            } else {
+                used_ty
+            };
             if let Some(bound_ty) = tctx.type_variables.get(&name).copied() {
                 let _ = crate::types::unify(
-                    tctx.type_ctx,
+                    ctx,
                     &mut tctx.unify_state,
-                    used_ty,
+                    effective_ty,
                     bound_ty,
                 );
             } else {
-                tctx.type_variables.insert(name, used_ty);
+                tctx.type_variables.insert(name, effective_ty);
             }
         }
     }
@@ -5565,11 +5590,12 @@ fn type_match_cases_sequential(
     env: &Env,
     cases: &[&crate::parser::ast::Case],
     scrutinee_ty: TypeExprRef,
+    generic_scrutinee_ty: TypeExprRef,
     body_ty: TypeExprRef,
 ) -> TypeCoreResult<Vec<crate::types::typedtree::Case>> {
     let mut typed_cases = Vec::with_capacity(cases.len());
     for case in cases {
-        typed_cases.push(type_case(tctx, env, case, scrutinee_ty, body_ty)?);
+        typed_cases.push(type_case(tctx, env, case, scrutinee_ty, generic_scrutinee_ty, body_ty)?);
     }
     Ok(typed_cases)
 }
@@ -5586,6 +5612,7 @@ fn type_match_cases_batch_non_gadt<'a>(
     env: &Env,
     cases: &[&'a crate::parser::ast::Case],
     ty_arg: TypeExprRef,
+    generic_scrutinee_ty: TypeExprRef,
     body_ty: TypeExprRef,
 ) -> TypeCoreResult<Vec<crate::types::typedtree::Case>> {
     if cases.is_empty() {
@@ -5597,7 +5624,9 @@ fn type_match_cases_batch_non_gadt<'a>(
         cases,
         [case] if is_simple_variable_pattern(tctx.arena, tctx.arena.get_pat(case.pc_lhs))
     );
-    let propagate = ctx.get_level(ctx.repr(ty_arg)) == crate::types::GENERIC_LEVEL
+    // Match OCaml: ty_arg is always generic for Pexp_match (generalized by caller),
+    // so propagate is always true. Use generic_scrutinee_ty for the level check.
+    let propagate = ctx.get_level(ctx.repr(generic_scrutinee_ty)) == crate::types::GENERIC_LEVEL
         || !single_var_case;
 
     let mut scope_open = false;
@@ -5609,7 +5638,15 @@ fn type_match_cases_batch_non_gadt<'a>(
 
         let mut pending_cases: Vec<PendingMatchCase<'a>> = Vec::with_capacity(cases.len());
         for case in cases {
-            let case_scrutinee_ty = crate::types::instance(ctx, ty_arg);
+            // Match OCaml type_cases: instance the GENERIC scrutinee type inside
+            // begin_def. This creates fresh copies at the elevated level (L+1).
+            // After end_def + generalize, pattern types become GENERIC, preventing
+            // body unification from contaminating pattern types.
+            let case_scrutinee_ty = if propagate {
+                crate::types::instance(ctx, generic_scrutinee_ty)
+            } else {
+                crate::types::instance(ctx, ty_arg)
+            };
             let mut state = PatternState::new();
             let typed_pat = type_pattern(
                 tctx,
@@ -5668,7 +5705,9 @@ fn type_match_cases_batch_non_gadt<'a>(
         }
 
         if propagate {
-            let propagated_ty = crate::types::instance(ctx, ty_arg);
+            // Match OCaml: propagation uses instance of the generic scrutinee type
+            // (at elevated level L+1), preserving pattern types at L+1 for generalization.
+            let propagated_ty = crate::types::instance(ctx, generic_scrutinee_ty);
             for pending in &pending_cases {
                 let _ = unify_pattern_types(
                     tctx,
@@ -5788,17 +5827,20 @@ fn type_match(
     // After all cases, we merge variant row fields into ty_arg (not the
     // original expression type) to replicate OCaml's shared ty_arg.
     let ty_arg = crate::types::instance(tctx.type_ctx, typed_scrutinee.exp_type);
+    // Pass the GENERIC scrutinee type so instance() inside begin_def creates
+    // fresh copies at the elevated level, matching OCaml's type_cases flow.
+    let generic_scrutinee_ty = typed_scrutinee.exp_type;
     let has_generalized_value_patterns = val_caselist.iter().any(|case| {
         pattern_contains_generalized_constructor(tctx, env, tctx.arena.get_pat(case.pc_lhs))
     });
     let mut typed_val_cases = if has_generalized_value_patterns {
-        type_match_cases_sequential(tctx, env, &val_caselist, ty_arg, expected_ty)?
+        type_match_cases_sequential(tctx, env, &val_caselist, ty_arg, generic_scrutinee_ty, expected_ty)?
     } else {
-        match type_match_cases_batch_non_gadt(tctx, env, &val_caselist, ty_arg, expected_ty) {
+        match type_match_cases_batch_non_gadt(tctx, env, &val_caselist, ty_arg, generic_scrutinee_ty, expected_ty) {
             Ok(cases) => cases,
             // Preserve existing recovery behavior for non-GADT patterns.
             Err(TypeCoreError::PatternTypeClash(_)) => {
-                type_match_cases_sequential(tctx, env, &val_caselist, ty_arg, expected_ty)?
+                type_match_cases_sequential(tctx, env, &val_caselist, ty_arg, generic_scrutinee_ty, expected_ty)?
             }
             Err(err) => return Err(err),
         }
@@ -5815,7 +5857,7 @@ fn type_match(
         let ctx = tctx.type_ctx;
         let exn_ty = ctx.new_constr(Path::pident(Ident::create_persistent("exn")), vec![]);
         for case in &exn_caselist {
-            let typed_case = type_case(tctx, env, case, exn_ty, expected_ty)?;
+            let typed_case = type_case(tctx, env, case, exn_ty, exn_ty, expected_ty)?;
             typed_exn_cases.push(typed_case);
         }
     }
@@ -7219,12 +7261,13 @@ fn type_case(
     env: &Env,
     case: &crate::parser::ast::Case,
     scrutinee_ty: TypeExprRef,
+    generic_scrutinee_ty: TypeExprRef,
     body_ty: TypeExprRef,
 ) -> TypeCoreResult<crate::types::typedtree::Case> {
-    match type_case_impl(tctx, env, case, scrutinee_ty, body_ty, false) {
+    match type_case_impl(tctx, env, case, scrutinee_ty, generic_scrutinee_ty, body_ty, false) {
         Ok(case) => Ok(case),
         Err(TypeCoreError::PatternTypeClash(_)) => {
-            type_case_impl(tctx, env, case, scrutinee_ty, body_ty, true)
+            type_case_impl(tctx, env, case, scrutinee_ty, generic_scrutinee_ty, body_ty, true)
         }
         Err(err) => Err(err),
     }
@@ -7267,6 +7310,7 @@ fn type_case_impl(
     env: &Env,
     case: &crate::parser::ast::Case,
     scrutinee_ty: TypeExprRef,
+    generic_scrutinee_ty: TypeExprRef,
     body_ty: TypeExprRef,
     force_case_local_constraints: bool,
 ) -> TypeCoreResult<crate::types::typedtree::Case> {
@@ -7299,9 +7343,6 @@ fn type_case_impl(
         scrutinee_ty
     };
 
-    // Match OCaml type_cases: instance the scrutinee type per-case, then
-    // generalize pattern types after typing (begin_def/end_def scope).
-    let case_scrutinee_ty = crate::types::instance(tctx.type_ctx, case_scrutinee_ty);
     // For GADT cases, set the unify state env to a fresh clone of case_env.
     // OCaml passes a per-case `env ref` to unify_gadt; in Rust, we must
     // reset the shared unify_state env so equations from prior cases don't leak.
@@ -7314,6 +7355,11 @@ fn type_case_impl(
         None
     };
     tctx.type_ctx.begin_def();
+    // Match OCaml type_cases: instance the GENERIC scrutinee type inside begin_def.
+    // This creates fresh copies at the elevated level (L+1). After end_def +
+    // generalize, pattern types become GENERIC, preventing body unification
+    // from contaminating pattern types (e.g., string → Js.String.t).
+    let case_scrutinee_ty = crate::types::instance(tctx.type_ctx, generic_scrutinee_ty);
     let typed_pat_result = type_pattern(
         tctx,
         &case_env,
@@ -7432,7 +7478,7 @@ fn type_try(
 
     let mut typed_handlers = Vec::new();
     for handler in handlers {
-        let typed_case = type_case(tctx, env, handler, exn_ty, expected_ty)?;
+        let typed_case = type_case(tctx, env, handler, exn_ty, exn_ty, expected_ty)?;
         typed_handlers.push(typed_case);
     }
 
