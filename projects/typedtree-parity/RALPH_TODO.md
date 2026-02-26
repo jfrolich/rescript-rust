@@ -1030,10 +1030,13 @@ Rust prematurely resolves `Reither` to `Rpresent`. OCaml keeps `Reither` until f
 Rust eagerly resolves type variables through unification links while OCaml preserves unresolved `Tvar None` in certain scoping contexts. Fix requires more precise generalization level tracking.
 
 ### 5. Specific hard files
-- **mario_game.res**: Path normalization Pident→Pdot(Actors) (246 hunks) + type alias `xy` expansion
+- **mario_game.res** (251 hunks): 198 path hunks (Pdot(Actors/Particle/Sprite/Object) vs Pident — needs `components_of_module_maker`), 70 cycle hunks (xy type sharing), 2 alias expansion (xy→Ttuple)
 - **reasonReact.res**: Over-resolution, locations, under-resolution in WrapProps, alias, paths
-- **defunctor_make_test.res**: Functor application substitution missing (Pmod_apply)
+- **defunctor_make_test.res** (18 hunks): Functor application substitution missing (Pmod_apply) + cycle
 - **async_jsx.res**: JSX async desugaring produces fundamentally different tree structure
+
+### 6. Path differences from local modules (Pmod_structure)
+The 198 path hunks in mario_game come from types defined in local modules (Actors, Sprite, Particle, Object) that lack qualified Pdot paths when used outside the module. OCaml's `Env.components_of_module_maker` lazily applies `prefix_idents` + `Subst.type_declaration` to rewrite ALL paths when module components are accessed. This creates labels/constructors with `Pdot(module, name)` paths. Rust lacks this infrastructure — labels/constructors keep their original `Pident` paths from when they were created during module body type checking. The `substitute_type_paths_in_sig` function only modifies TYPE EXPRESSION nodes in the signature, not the LabelDescription/ConstructorDescription objects stored in the environment or created during `add_signature_to_env`. Even when called during `open Module`, the record type itself has an unqualified path, so `disambiguate_label` path-matching fails to select the qualified-path labels.
 
 ---
 
@@ -1065,6 +1068,7 @@ Rust eagerly resolves type variables through unification links while OCaml prese
 | Parameterized recursive Pident Tconstr identity (remove arg check) | inline_map_test crash, bal_set_mini 8→15 | Infinite expansion loops without abbreviation memoization |
 | Parameterized recursive Pident Tconstr identity (Tvar(_) relaxation) | inline_map_test crash, bal_set_mini unchanged | Args already concrete by copy time (unified through unification) |
 | unify_after_expansion relink direction swap | ext_array_test 8→64 | Collapses ALL module aliases; OCaml's behavior is context-dependent |
+| Pmod_structure path substitution (`substitute_type_paths_in_sig`) | 629/657 (neutral) | Substitution rewrites signature type expressions but NOT the typed tree expression types. Labels used for field access come from type checking with Pident paths. Needs OCaml `components_of_module_maker` + full `Subst.type_declaration` infrastructure to rewrite ALL paths (including labels, constructors, value types) when a module's components are accessed from outside |
 
 ---
 
