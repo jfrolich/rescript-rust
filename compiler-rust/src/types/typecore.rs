@@ -4590,12 +4590,10 @@ fn unify_expression_types(
 
     match unify(tctx.type_ctx, &mut tctx.unify_state, ty1, ty2) {
         Ok(()) => Ok(()),
-        Err(_e) => {
-            Err(TypeCoreError::ExprTypeClash {
-                trace: vec![(ty1, ty2)],
-                context,
-            })
-        }
+        Err(_) => Err(TypeCoreError::ExprTypeClash {
+            trace: vec![(ty1, ty2)],
+            context,
+        }),
     }
 }
 

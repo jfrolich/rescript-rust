@@ -909,7 +909,7 @@ fn try_expand_head<'a>(
                     let params = &constraint_decl.type_params;
                     if params.is_empty() {
                         memorize_simple_abbrev();
-                        return Some(instance(ctx, manifest));
+                        return Some(instance_for_expansion(ctx, manifest));
                     } else if params.len() == args.len() {
                         let (fresh_params, fresh_body) =
                             instance_parameterized_type(ctx, params, manifest);
@@ -929,7 +929,7 @@ fn try_expand_head<'a>(
                         let params = &env_decl.type_params;
                         if params.is_empty() {
                             memorize_simple_abbrev();
-                            return Some(instance(ctx, manifest));
+                            return Some(instance_for_expansion(ctx, manifest));
                         } else if params.len() == args.len() {
                             // Use instance_parameterized_type to create a full fresh copy
                             // of both params and body (sharing the copy cache). This matches
@@ -954,11 +954,8 @@ fn try_expand_head<'a>(
                     if let Some(manifest) = store_decl.type_manifest {
                         let params = &store_decl.type_params;
                         if params.is_empty() {
-                            // Must copy the manifest to avoid corrupting the original
-                            // type declaration during unification (OCaml uses
-                            // instance_parameterized_type which always copies)
                             memorize_simple_abbrev();
-                            return Some(instance(ctx, manifest));
+                            return Some(instance_for_expansion(ctx, manifest));
                         } else if params.len() == args.len() {
                             let (fresh_params, fresh_body) =
                                 instance_parameterized_type(ctx, params, manifest);
@@ -977,7 +974,7 @@ fn try_expand_head<'a>(
                         let params = &store_decl.type_params;
                         if params.is_empty() {
                             memorize_simple_abbrev();
-                            return Some(instance(ctx, manifest));
+                            return Some(instance_for_expansion(ctx, manifest));
                         } else if params.len() == args.len() {
                             let (fresh_params, fresh_body) =
                                 instance_parameterized_type(ctx, params, manifest);
@@ -993,7 +990,7 @@ fn try_expand_head<'a>(
                         let params = &resolved_decl.type_params;
                         if params.is_empty() {
                             memorize_simple_abbrev();
-                            return Some(instance(ctx, manifest));
+                            return Some(instance_for_expansion(ctx, manifest));
                         } else if params.len() == args.len() {
                             let (fresh_params, fresh_body) =
                                 instance_parameterized_type(ctx, params, manifest);
@@ -1011,7 +1008,7 @@ fn try_expand_head<'a>(
                         let params = &decl.type_params;
                         if params.is_empty() {
                             memorize_simple_abbrev();
-                            return Some(instance(ctx, manifest));
+                            return Some(instance_for_expansion(ctx, manifest));
                         } else if params.len() == args.len() {
                             let (fresh_params, fresh_body) =
                                 instance_parameterized_type(ctx, params, manifest);
@@ -2813,6 +2810,25 @@ pub fn lower_args<'a>(ctx: &'a TypeContext<'a>, env: &Env, ty: TypeExprRef) {
 pub fn instance(ctx: &TypeContext<'_>, ty: TypeExprRef) -> TypeExprRef {
     let mut cache = CopyCache::new();
     copy_type_cached(ctx, ty, &mut cache)
+}
+
+/// Like instance(), but guarantees a fresh top-level node is returned.
+/// Used in try_expand_head to prevent manifest corruption: when instance()
+/// returns identity (same node) for non-generic types, subsequent unification
+/// can link the original manifest node, creating self-referential expansion
+/// loops. This creates a shallow copy of the top-level node when identity
+/// is returned, protecting the original declaration's manifest.
+fn instance_for_expansion(ctx: &TypeContext<'_>, ty: TypeExprRef) -> TypeExprRef {
+    let result = instance(ctx, ty);
+    let result_repr = ctx.repr(result);
+    let ty_repr = ctx.repr(ty);
+    if result_repr == ty_repr {
+        // instance returned identity — create a shallow copy to protect the original
+        let desc = ctx.get_desc(result_repr);
+        ctx.new_type((*desc).clone())
+    } else {
+        result
+    }
 }
 
 /// Instantiate a list of types, sharing variable substitutions across all of them.
