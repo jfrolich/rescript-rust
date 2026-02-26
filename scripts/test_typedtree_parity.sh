@@ -213,7 +213,7 @@ compare_project_sexp() {
                 parity_fail=$((parity_fail + 1))
                 parity_failures="${parity_failures}  ${module}\n"
                 local diff_file="$diff_dir/${module}.diff"
-                diff -u "$ocaml_file" "$rust_file" > "$diff_file" 2>&1 || true
+                diff -ua "$ocaml_file" "$rust_file" > "$diff_file" 2>&1 || true
 
                 # Hunk-level mismatch tracking:
                 # - text diffs: number of unified-diff hunks
