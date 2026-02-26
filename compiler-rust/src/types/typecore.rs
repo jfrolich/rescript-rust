@@ -8578,35 +8578,86 @@ fn type_record(
         typed_fields = explicit_overrides_in_order;
     }
 
-    // Match OCaml's unify_kept: unify base expression type with the record
-    // type through a SEPARATE instance_label call. This creates a distinct
-    // proto Tconstr node for the base expression's type chain, keeping it
-    // separate from expected_ty's proto (which was established during label
-    // processing). This preserves OCaml's type identity structure.
+    // Match OCaml's unify_kept (typecore.ml:2755-2770):
+    // For each label in the record type, create two instance_label calls.
+    // Instance 1 connects to the base expression type.
+    // For non-overridden labels, instance 2 connects to the expected type,
+    // with ty_arg1 = ty_arg2 bridging them. This propagates type constraints
+    // from the expected type (e.g., component<stateless, noRetainedProps, _>)
+    // through to the base expression's type params.
     if let Some(ref typed_base_expr) = typed_base {
-        let base_exp_ty = typed_base_expr.exp_type;
-        // Find a label to use for unify_kept-style unification
-        let label_for_unify = typed_fields.iter().find_map(|(_, lbl, _, _)| {
-            disambiguate_label(
-                &lbl.lbl_name,
-                expected_ty,
-                env,
-                &mut tctx.persistent_env,
-                ctx,
-            )
-        });
-        if let Some(env_label) = label_for_unify {
-            let (_poly_vars, _ty_arg, ty_res) = crate::types::ctype::instance_label(ctx, &env_label);
-            let _ = crate::types::unify(ctx, &mut tctx.unify_state, base_exp_ty, ty_res);
+        // OCaml: let ty_exp = instance env exp.exp_type
+        let ty_exp = crate::types::instance(ctx, typed_base_expr.exp_type);
+
+        // Collect the set of overridden label positions
+        let overridden_positions: std::collections::HashSet<i32> = typed_fields
+            .iter()
+            .filter_map(|(_, lbl, defn, _)| {
+                if matches!(defn, RecordLabelDefinition::Overridden(..)) {
+                    Some(lbl.lbl_pos)
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        // Get all labels for this record type to iterate over
+        let all_labels_for_unify = get_record_labels(ctx, env, &mut tctx.persistent_env, expected_ty)
+            .or_else(|| get_record_labels(ctx, env, &mut tctx.persistent_env, ty_exp));
+
+        if let Some(labels) = all_labels_for_unify {
+            for (idx, label_decl) in labels.iter().enumerate() {
+                let label_name = label_decl.ld_id.name().to_string();
+                let env_label = disambiguate_label(
+                    &label_name,
+                    expected_ty,
+                    env,
+                    &mut tctx.persistent_env,
+                    ctx,
+                );
+                if let Some(env_label) = env_label {
+                    // Instance 1: connect to base expression
+                    let (_poly1, ty_arg1, ty_res1) = crate::types::ctype::instance_label(ctx, &env_label);
+                    let _ = crate::types::unify(ctx, &mut tctx.unify_state, ty_exp, ty_res1);
+
+                    let is_overridden = overridden_positions.contains(&(idx as i32))
+                        || overridden_positions.contains(&env_label.lbl_pos);
+
+                    if !is_overridden {
+                        // Instance 2: connect to expected type
+                        let (_poly2, ty_arg2, ty_res2) = crate::types::ctype::instance_label(ctx, &env_label);
+                        // Bridge the two instances through their arg types
+                        let _ = crate::types::unify(ctx, &mut tctx.unify_state, ty_arg1, ty_arg2);
+                        // Connect instance 2 to expected type
+                        let expected_inst = crate::types::instance(ctx, expected_ty);
+                        let _ = crate::types::unify(ctx, &mut tctx.unify_state, expected_inst, ty_res2);
+                    }
+                }
+            }
         } else {
-            // Fallback: direct unification
-            unify_expression_types(
-                tctx,
-                loc,
-                base_exp_ty,
-                expected_ty,
-                Some(TypeClashContext::RecordSpread),
-            )?;
+            // Fallback: find any label for single-instance unification
+            let label_for_unify = typed_fields.iter().find_map(|(_, lbl, _, _)| {
+                disambiguate_label(
+                    &lbl.lbl_name,
+                    expected_ty,
+                    env,
+                    &mut tctx.persistent_env,
+                    ctx,
+                )
+            });
+            if let Some(env_label) = label_for_unify {
+                let (_poly_vars, _ty_arg, ty_res) = crate::types::ctype::instance_label(ctx, &env_label);
+                let _ = crate::types::unify(ctx, &mut tctx.unify_state, ty_exp, ty_res);
+            } else {
+                // Final fallback: direct unification
+                unify_expression_types(
+                    tctx,
+                    loc,
+                    ty_exp,
+                    expected_ty,
+                    Some(TypeClashContext::RecordSpread),
+                )?;
+            }
         }
     }
 
