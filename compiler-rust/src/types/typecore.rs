@@ -6259,6 +6259,79 @@ fn close_variant_row_for_pat_type(
     }
 }
 
+/// Close variant rows in let binding patterns, matching OCaml's
+/// `Parmatch.pressure_variants env [pat]` call in type_let (typecore.ml:4120).
+/// For let bindings, variant patterns have no wildcard alternative at the same
+/// position, so all non-fixed variant rows on Tpat_variant nodes are closed.
+/// This matches OCaml's close_variant: sets unmatched Reither fields to Rabsent
+/// and marks the row as closed.
+fn pressure_variant_rows_in_let_pattern(
+    tctx: &mut TypeCheckContext<'_>,
+    env: &Env,
+    pat: &mut Pattern,
+) {
+    match &pat.pat_desc {
+        PatternDesc::Tpat_variant(_, _, _) => {
+            let ctx = tctx.type_ctx;
+            let expanded = crate::types::ctype::expand_head(ctx, env, pat.pat_type);
+            let repr = ctx.repr(expanded);
+            let desc = ctx.get_desc(repr);
+            if let TypeDesc::Tvariant(row) = &*desc {
+                let mut row = crate::types::btype::row_repr(ctx, row);
+                if !row.row_closed && !row.row_fixed {
+                    // Match OCaml's close_variant (parmatch.ml:808-832):
+                    // Set unmatched Reither(_, _, false, _) fields to Rabsent
+                    for (_tag, field) in row.row_fields.iter_mut() {
+                        let field_repr = crate::types::btype::row_field_repr(ctx, field);
+                        if let crate::types::type_expr::RowField::Reither {
+                            matched: false, ..
+                        } = field_repr
+                        {
+                            *field = crate::types::type_expr::RowField::Rabsent;
+                        }
+                    }
+                    row.row_closed = true;
+                    drop(desc);
+                    ctx.set_desc(repr, TypeDesc::Tvariant(row));
+                }
+            }
+        }
+        _ => {}
+    }
+
+    // Recurse into sub-patterns
+    match &mut pat.pat_desc {
+        PatternDesc::Tpat_variant(_, arg, _) => {
+            if let Some(arg_pat) = arg {
+                pressure_variant_rows_in_let_pattern(tctx, env, arg_pat);
+            }
+        }
+        PatternDesc::Tpat_alias(inner, _, _) => {
+            pressure_variant_rows_in_let_pattern(tctx, env, inner);
+        }
+        PatternDesc::Tpat_or(left, right, _) => {
+            pressure_variant_rows_in_let_pattern(tctx, env, left);
+            pressure_variant_rows_in_let_pattern(tctx, env, right);
+        }
+        PatternDesc::Tpat_tuple(items) | PatternDesc::Tpat_array(items) => {
+            for item in items {
+                pressure_variant_rows_in_let_pattern(tctx, env, item);
+            }
+        }
+        PatternDesc::Tpat_construct(_, _, args) => {
+            for arg in args {
+                pressure_variant_rows_in_let_pattern(tctx, env, arg);
+            }
+        }
+        PatternDesc::Tpat_record(fields, _) => {
+            for (_, _, field_pat, _) in fields {
+                pressure_variant_rows_in_let_pattern(tctx, env, field_pat);
+            }
+        }
+        PatternDesc::Tpat_any | PatternDesc::Tpat_var(_, _) | PatternDesc::Tpat_constant(_) => {}
+    }
+}
+
 /// Merge variant row fields from all case patterns into the scrutinee type.
 /// In OCaml's type_cases, all patterns share the same ty_arg. When case `| #A`
 /// adds tag "A" to the variant row and case `| #B` adds tag "B", both tags end
@@ -10828,6 +10901,11 @@ fn type_let_bindings(
         }
 
         // Finalize variant patterns in let bindings (matches OCaml typecore.ml:4117-4121)
+        // First, pressure_variants to close variant rows (OCaml: Parmatch.pressure_variants env [pat])
+        for binding in typed_bindings.iter_mut() {
+            pressure_variant_rows_in_let_pattern(tctx, env, &mut binding.vb_pat);
+        }
+        // Then, finalize Reither→Rpresent in still-open rows (OCaml: iter_pattern finalize_variant pat)
         for binding in typed_bindings.iter_mut() {
             finalize_variant_in_pattern(tctx, env, &mut binding.vb_pat);
         }
