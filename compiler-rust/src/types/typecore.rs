@@ -1076,7 +1076,9 @@ fn resolve_type_constructor_path(
                     };
                     (path, Some(decl.clone()))
                 }
-                Err(_) => (Path::pident(Ident::create_persistent(name)), None),
+                Err(_) => {
+                    (Path::pident(Ident::create_persistent(name)), None)
+                }
             }
         }
         Longident::Ldot(prefix, name_idx) => {

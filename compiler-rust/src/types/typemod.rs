@@ -2972,6 +2972,160 @@ pub fn extract_module_type_from_mod_expr_pub(
 
 /// Extract a `decl::ModuleType` from a typed module expression.
 /// For structure modules, builds a signature from the structure items.
+/// Convert a typed tree ModuleType to a decl ModuleType.
+/// Used both in extract_module_type_from_mod_expr and in transl_signature
+/// to add modules to sig_env for subsequent items.
+fn decl_module_type_from_typed(
+    mty: &ModuleType,
+) -> Option<crate::types::decl::ModuleType> {
+    use crate::types::decl::AliasPresence;
+    use crate::types::decl::ExtStatus;
+    use crate::types::decl::ModtypeDeclaration;
+    use crate::types::decl::ModuleDeclaration;
+    use crate::types::decl::RecStatus;
+    use crate::types::decl::SignatureItem as SigItem;
+    use crate::types::decl::ValueKind;
+    use crate::types::decl::ModuleType as DeclMty;
+    use crate::types::decl::ValueDescription;
+    use crate::types::typedtree::ModuleTypeDesc;
+    use crate::types::typedtree::TypedSignatureItemDesc;
+
+    fn rec_status_for_index(rec_flag: RecFlag, index: usize) -> RecStatus {
+        match rec_flag {
+            RecFlag::Recursive => {
+                if index == 0 {
+                    RecStatus::TrecFirst
+                } else {
+                    RecStatus::TrecNext
+                }
+            }
+            RecFlag::Nonrecursive => RecStatus::TrecNot,
+        }
+    }
+
+    fn ext_status_for_index(index: usize) -> ExtStatus {
+        if index == 0 {
+            ExtStatus::TextFirst
+        } else {
+            ExtStatus::TextNext
+        }
+    }
+
+    match &mty.mty_desc {
+        ModuleTypeDesc::Tmty_ident(path, _) => Some(DeclMty::MtyIdent(path.clone())),
+        ModuleTypeDesc::Tmty_alias(path, _) => {
+            Some(DeclMty::MtyAlias(AliasPresence::MtaAbsent, path.clone()))
+        }
+        ModuleTypeDesc::Tmty_signature(sig) => {
+            let mut out = Vec::new();
+            for item in &sig.sig_items {
+                match &item.sig_desc {
+                    TypedSignatureItemDesc::Tsig_value(vd) => {
+                        out.push(SigItem::SigValue(
+                            vd.val_id.clone(),
+                            ValueDescription {
+                                val_type: vd.val_desc.ctyp_type,
+                                val_kind: ValueKind::ValReg,
+                                val_loc: crate::location::Location::none(),
+                                val_attributes: vec![],
+                                val_path: None,
+                            },
+                        ));
+                    }
+                    TypedSignatureItemDesc::Tsig_type(rec_flag, decls) => {
+                        for (i, decl) in decls.iter().enumerate() {
+                            out.push(SigItem::SigType(
+                                decl.typ_id.clone(),
+                                decl.typ_type.clone(),
+                                rec_status_for_index(*rec_flag, i),
+                            ));
+                        }
+                    }
+                    TypedSignatureItemDesc::Tsig_typext(ext) => {
+                        for (i, ext_cstr) in ext.tyext_constructors.iter().enumerate() {
+                            out.push(SigItem::SigTypext(
+                                ext_cstr.ext_id.clone(),
+                                ext_cstr.ext_type.clone(),
+                                ext_status_for_index(i),
+                            ));
+                        }
+                    }
+                    TypedSignatureItemDesc::Tsig_exception(ext) => {
+                        out.push(SigItem::SigTypext(
+                            ext.ext_id.clone(),
+                            ext.ext_type.clone(),
+                            ExtStatus::TextException,
+                        ));
+                    }
+                    TypedSignatureItemDesc::Tsig_module(md) => {
+                        let decl_mty = decl_module_type_from_typed(&md.md_type)
+                            .unwrap_or(DeclMty::MtySignature(vec![]));
+                        out.push(SigItem::SigModule(
+                            md.md_id.clone(),
+                            ModuleDeclaration {
+                                md_type: decl_mty,
+                                md_attributes: vec![],
+                                md_loc: crate::location::Location::none(),
+                                md_path: None,
+                            },
+                            RecStatus::TrecNot,
+                        ));
+                    }
+                    TypedSignatureItemDesc::Tsig_recmodule(decls) => {
+                        for (i, md) in decls.iter().enumerate() {
+                            let decl_mty = decl_module_type_from_typed(&md.md_type)
+                                .unwrap_or(DeclMty::MtySignature(vec![]));
+                            out.push(SigItem::SigModule(
+                                md.md_id.clone(),
+                                ModuleDeclaration {
+                                    md_type: decl_mty,
+                                    md_attributes: vec![],
+                                    md_loc: crate::location::Location::none(),
+                                    md_path: None,
+                                },
+                                rec_status_for_index(RecFlag::Recursive, i),
+                            ));
+                        }
+                    }
+                    TypedSignatureItemDesc::Tsig_modtype(mtd) => {
+                        out.push(SigItem::SigModtype(
+                            mtd.mtd_id.clone(),
+                            ModtypeDeclaration {
+                                mtd_type: mtd
+                                    .mtd_type
+                                    .as_ref()
+                                    .and_then(decl_module_type_from_typed),
+                                mtd_attributes: vec![],
+                                mtd_loc: crate::location::Location::none(),
+                            },
+                        ));
+                    }
+                    TypedSignatureItemDesc::Tsig_include(_incl) => {}
+                    TypedSignatureItemDesc::Tsig_open(_)
+                    | TypedSignatureItemDesc::Tsig_attribute(_) => {}
+                }
+            }
+            Some(DeclMty::MtySignature(out))
+        }
+        ModuleTypeDesc::Tmty_functor(param, _name, param_mty, result_mty) => {
+            let decl_param_mty = param_mty
+                .as_ref()
+                .and_then(|inner| decl_module_type_from_typed(inner))
+                .map(Box::new);
+            let decl_result = decl_module_type_from_typed(result_mty)?;
+            Some(DeclMty::MtyFunctor {
+                param: param.clone(),
+                param_type: decl_param_mty,
+                result: Box::new(decl_result),
+            })
+        }
+        ModuleTypeDesc::Tmty_with(body, _constraints) => {
+            decl_module_type_from_typed(body)
+        }
+        ModuleTypeDesc::Tmty_typeof(_) | ModuleTypeDesc::Tmty_placeholder => None,
+    }
+}
+
 fn extract_module_type_from_mod_expr(
     mod_expr: &ModuleExpr,
     env: Option<&Env>,
@@ -3064,149 +3218,7 @@ where
     fn decl_module_type_from_typed_module_type(
         mty: &ModuleType,
     ) -> Option<crate::types::decl::ModuleType> {
-        use crate::types::decl::AliasPresence;
-        use crate::types::decl::ExtStatus;
-        use crate::types::decl::ModtypeDeclaration;
-        use crate::types::decl::ModuleDeclaration;
-        use crate::types::decl::RecStatus;
-        use crate::types::decl::ValueKind;
-        use crate::types::typedtree::ModuleTypeDesc;
-        use crate::types::typedtree::TypedSignatureItemDesc;
-
-        fn rec_status_for_index(rec_flag: RecFlag, index: usize) -> RecStatus {
-            match rec_flag {
-                RecFlag::Recursive => {
-                    if index == 0 {
-                        RecStatus::TrecFirst
-                    } else {
-                        RecStatus::TrecNext
-                    }
-                }
-                RecFlag::Nonrecursive => RecStatus::TrecNot,
-            }
-        }
-
-        fn ext_status_for_index(index: usize) -> ExtStatus {
-            if index == 0 {
-                ExtStatus::TextFirst
-            } else {
-                ExtStatus::TextNext
-            }
-        }
-
-        match &mty.mty_desc {
-            ModuleTypeDesc::Tmty_ident(path, _) => Some(DeclMty::MtyIdent(path.clone())),
-            ModuleTypeDesc::Tmty_alias(path, _) => {
-                Some(DeclMty::MtyAlias(AliasPresence::MtaAbsent, path.clone()))
-            }
-            ModuleTypeDesc::Tmty_signature(sig) => {
-                let mut out = Vec::new();
-                for item in &sig.sig_items {
-                    match &item.sig_desc {
-                        TypedSignatureItemDesc::Tsig_value(vd) => {
-                            out.push(SigItem::SigValue(
-                                vd.val_id.clone(),
-                                ValueDescription {
-                                    val_type: vd.val_desc.ctyp_type,
-                                    val_kind: ValueKind::ValReg,
-                                    val_loc: crate::location::Location::none(),
-                                    val_attributes: vec![],
-                                    val_path: None,
-                                },
-                            ));
-                        }
-                        TypedSignatureItemDesc::Tsig_type(rec_flag, decls) => {
-                            for (i, decl) in decls.iter().enumerate() {
-                                out.push(SigItem::SigType(
-                                    decl.typ_id.clone(),
-                                    decl.typ_type.clone(),
-                                    rec_status_for_index(*rec_flag, i),
-                                ));
-                            }
-                        }
-                        TypedSignatureItemDesc::Tsig_typext(ext) => {
-                            for (i, ext_cstr) in ext.tyext_constructors.iter().enumerate() {
-                                out.push(SigItem::SigTypext(
-                                    ext_cstr.ext_id.clone(),
-                                    ext_cstr.ext_type.clone(),
-                                    ext_status_for_index(i),
-                                ));
-                            }
-                        }
-                        TypedSignatureItemDesc::Tsig_exception(ext) => {
-                            out.push(SigItem::SigTypext(
-                                ext.ext_id.clone(),
-                                ext.ext_type.clone(),
-                                ExtStatus::TextException,
-                            ));
-                        }
-                        TypedSignatureItemDesc::Tsig_module(md) => {
-                            let decl_mty = decl_module_type_from_typed_module_type(&md.md_type)
-                                .unwrap_or(DeclMty::MtySignature(vec![]));
-                            out.push(SigItem::SigModule(
-                                md.md_id.clone(),
-                                ModuleDeclaration {
-                                    md_type: decl_mty,
-                                    md_attributes: vec![],
-                                    md_loc: crate::location::Location::none(),
-                                    md_path: None,
-                                },
-                                RecStatus::TrecNot,
-                            ));
-                        }
-                        TypedSignatureItemDesc::Tsig_recmodule(decls) => {
-                            for (i, md) in decls.iter().enumerate() {
-                                let decl_mty = decl_module_type_from_typed_module_type(&md.md_type)
-                                    .unwrap_or(DeclMty::MtySignature(vec![]));
-                                out.push(SigItem::SigModule(
-                                    md.md_id.clone(),
-                                    ModuleDeclaration {
-                                        md_type: decl_mty,
-                                        md_attributes: vec![],
-                                        md_loc: crate::location::Location::none(),
-                                        md_path: None,
-                                    },
-                                    rec_status_for_index(RecFlag::Recursive, i),
-                                ));
-                            }
-                        }
-                        TypedSignatureItemDesc::Tsig_modtype(mtd) => {
-                            out.push(SigItem::SigModtype(
-                                mtd.mtd_id.clone(),
-                                ModtypeDeclaration {
-                                    mtd_type: mtd
-                                        .mtd_type
-                                        .as_ref()
-                                        .and_then(decl_module_type_from_typed_module_type),
-                                    mtd_attributes: vec![],
-                                    mtd_loc: crate::location::Location::none(),
-                                },
-                            ));
-                        }
-                        TypedSignatureItemDesc::Tsig_include(_incl) => {}
-                        TypedSignatureItemDesc::Tsig_open(_)
-                        | TypedSignatureItemDesc::Tsig_attribute(_) => {}
-                    }
-                }
-                Some(DeclMty::MtySignature(out))
-            }
-            ModuleTypeDesc::Tmty_functor(param, _name, param_mty, result_mty) => {
-                let decl_param_mty = param_mty
-                    .as_ref()
-                    .and_then(|inner| decl_module_type_from_typed_module_type(inner))
-                    .map(Box::new);
-                let decl_result = decl_module_type_from_typed_module_type(result_mty)?;
-                Some(DeclMty::MtyFunctor {
-                    param: param.clone(),
-                    param_type: decl_param_mty,
-                    result: Box::new(decl_result),
-                })
-            }
-            ModuleTypeDesc::Tmty_with(body, _constraints) => {
-                decl_module_type_from_typed_module_type(body)
-            }
-            ModuleTypeDesc::Tmty_typeof(_) | ModuleTypeDesc::Tmty_placeholder => None,
-        }
+        decl_module_type_from_typed(mty)
     }
 
     match &mod_expr.mod_desc {
@@ -4064,6 +4076,19 @@ pub fn transl_signature<'a>(
                 let name_str = arena.get_string(md.pmd_name.txt).to_string();
                 let id = Ident::create_local(&name_str);
                 let typed_mty = transl_modtype(tctx, &sig_env, arena, arena.get_mod_type(md.pmd_type))?;
+                // Add module to sig_env so subsequent items (Psig_open etc.) can find it.
+                // This matches OCaml's transl_sig: `let newenv = Env.enter_module_declaration id md env`.
+                let decl_mty = decl_module_type_from_typed(&typed_mty)
+                    .unwrap_or(crate::types::decl::ModuleType::MtySignature(vec![]));
+                sig_env.add_module(
+                    id.clone(),
+                    crate::types::decl::ModuleDeclaration {
+                        md_type: decl_mty,
+                        md_attributes: vec![],
+                        md_loc: crate::location::Location::none(),
+                        md_path: None,
+                    },
+                );
                 TSigDesc::Tsig_module(TypedModuleDeclaration {
                     md_id: id,
                     md_name: Located {
