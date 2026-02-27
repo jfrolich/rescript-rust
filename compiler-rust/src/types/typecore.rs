@@ -5589,7 +5589,7 @@ fn type_match_cases_batch_non_gadt<'a>(
             let mut case_env = env.clone();
             let mut unpacks: Vec<PatternVariable> = Vec::new();
             for pv in &state.pattern_variables {
-                let binding_ty = shallow_copy_pattern_binding_type(ctx, pv.ty, false);
+                let binding_ty = pv.ty;
                 let desc = ValueDescription {
                     val_type: binding_ty,
                     val_kind: crate::types::ValueKind::ValReg,
@@ -5624,20 +5624,27 @@ fn type_match_cases_batch_non_gadt<'a>(
 
         // Match OCaml type_cases delayed unification (`unify_pats ty_arg'`).
         let ty_arg_prime = ctx.new_var(None);
-        for pending in &pending_cases {
-            unify_pattern_types(
-                tctx,
-                pending.typed_pat.pat_loc,
-                pending.typed_pat.pat_type,
-                ty_arg_prime,
-            )?;
-        }
+        let unify_pats_result = (|| -> TypeCoreResult<()> {
+            for pending in &pending_cases {
+                // OCaml uses `unify_pat ext_env ...` where each pattern is
+                // unified under its own extended environment.
+                tctx.unify_state.set_env(&pending.case_env);
+                unify_pattern_types(
+                    tctx,
+                    pending.typed_pat.pat_loc,
+                    pending.typed_pat.pat_type,
+                    ty_arg_prime,
+                )?;
+            }
+            Ok(())
+        })();
+        tctx.unify_state.set_env(env);
+        unify_pats_result?;
 
         if propagate {
-            // Match OCaml: propagation uses instance of the generic scrutinee type
-            // (at elevated level L+1), preserving pattern types at L+1 for generalization.
             let propagated_ty = crate::types::instance(ctx, generic_scrutinee_ty);
             for pending in &pending_cases {
+                tctx.unify_state.set_env(&pending.case_env);
                 let _ = unify_pattern_types(
                     tctx,
                     pending.typed_pat.pat_loc,
@@ -5645,6 +5652,7 @@ fn type_match_cases_batch_non_gadt<'a>(
                     propagated_ty,
                 );
             }
+            tctx.unify_state.set_env(env);
             ctx.end_def();
             scope_open = false;
             for pending in &pending_cases {
@@ -5681,6 +5689,11 @@ fn type_match_cases_batch_non_gadt<'a>(
                 &pending.unpacks,
                 body_expr.pexp_loc,
             );
+            let typed_body = Expression {
+                exp_type: crate::types::instance(ctx, body_ty),
+                ..typed_body
+            };
+
             typed_cases.push(crate::types::typedtree::Case {
                 c_lhs: pending.typed_pat,
                 c_guard: typed_guard,
@@ -5749,11 +5762,8 @@ fn type_match(
     }
 
     // Match OCaml type_cases: create a separate ty_arg by instancing the
-    // scrutinee type. This separates the case-typing type from the scrutinee
-    // expression type, matching OCaml's `ty_arg = instance env exp_type`.
-    // Each case further instances ty_arg per-case inside type_case_impl.
-    // After all cases, we merge variant row fields into ty_arg (not the
-    // original expression type) to replicate OCaml's shared ty_arg.
+    // scrutinee type. This separates variant row field merging from the
+    // scrutinee expression's own type node.
     let ty_arg = crate::types::instance(tctx.type_ctx, typed_scrutinee.exp_type);
     // Pass the GENERIC scrutinee type so instance() inside begin_def creates
     // fresh copies at the elevated level, matching OCaml's type_cases flow.
@@ -7454,6 +7464,11 @@ fn type_case_impl(
         &unpacks,
         body_expr.pexp_loc,
     );
+    let typed_body = Expression {
+        exp_type: crate::types::instance(tctx.type_ctx, body_ty),
+        ..typed_body
+    };
+
     Ok(crate::types::typedtree::Case {
         c_lhs: typed_pat,
         c_guard: typed_guard,
@@ -7628,8 +7643,13 @@ fn type_function(
     // values using the types from type_pattern directly.
     let mut body_env = env.clone();
     let mut unpacks: Vec<PatternVariable> = Vec::new();
+    let should_copy_pattern_bindings = !is_simple_variable_pattern(tctx.arena, param);
     for pv in &state.pattern_variables {
-        let binding_ty = pv.ty;
+        let binding_ty = if should_copy_pattern_bindings {
+            shallow_copy_pattern_binding_type(ctx, pv.ty, false)
+        } else {
+            pv.ty
+        };
         let desc = ValueDescription {
             val_type: binding_ty,
             val_kind: crate::types::ValueKind::ValReg,
@@ -7665,6 +7685,11 @@ fn type_function(
         &unpacks,
         body.pexp_loc,
     );
+    let typed_body = Expression {
+        exp_type: crate::types::instance(ctx, return_ty),
+        ..typed_body
+    };
+
     // Build function parameter
     let fp = FunctionParam {
         label: arg_label.clone(),
@@ -8381,6 +8406,10 @@ fn type_record(
             field_input_ty,
             None,
         )?;
+        // OCaml `type_argument`: after typing against `ty_expected'`, unify with
+        // a fresh `instance` of that type to preserve sharing behavior.
+        let field_input_ty_inst = crate::types::ctype::instance(ctx, field_input_ty);
+        unify_expression_types(tctx, loc, typed_expr.exp_type, field_input_ty_inst, None)?;
 
         // OCaml check_univars: convert fresh Tvars back to Tunivar for poly fields
         if !poly_vars.is_empty() {
@@ -8405,6 +8434,14 @@ fn type_record(
         } else {
             typed_expr
         };
+        // OCaml `type_label_exp` returns `{arg with exp_type = instance env arg.exp_type}`.
+        let final_expr = Expression::new(
+            final_expr.exp_desc.clone(),
+            final_expr.exp_loc,
+            crate::types::ctype::instance(ctx, final_expr.exp_type),
+            final_expr.exp_env,
+            final_expr.exp_attributes.clone(),
+        );
 
         let entry = (
             field.lid.clone(),
