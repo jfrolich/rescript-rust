@@ -4398,6 +4398,14 @@ fn copy_type_cached(
                 {
                     CopyAction::ReturnSelf
                 }
+                // Nullary Pdot: functor parameter types (N.t, Q.t) and module
+                // access types (Stdlib.Date.t, etc). OCaml's copy returns identity
+                // for all non-generic types.
+                TypeDesc::Tconstr { path: Path::Pdot(..), args, .. }
+                    if args.is_empty() =>
+                {
+                    CopyAction::ReturnSelf
+                }
                 TypeDesc::Tconstr { path, args, .. } => CopyAction::Constr {
                     path: path.clone(),
                     args: args.clone(),
