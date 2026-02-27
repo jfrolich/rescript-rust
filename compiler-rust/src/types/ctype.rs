@@ -352,6 +352,21 @@ pub fn deep_occur(ctx: &TypeContext<'_>, needle: TypeExprRef, haystack: TypeExpr
     deep_occur_rec(ctx, needle, haystack, &mut visited)
 }
 
+/// Check if a type contains any Tvariant node (shallow check of Tconstr args).
+/// Used to prevent identity sharing of types whose variant args would be
+/// contaminated across branches (e.g. result<string, [#InvalidString]>).
+pub fn type_contains_variant(ctx: &TypeContext<'_>, ty: TypeExprRef) -> bool {
+    let ty = ctx.repr(ty);
+    let desc = ctx.get_desc(ty);
+    match &*desc {
+        TypeDesc::Tvariant(_) => true,
+        TypeDesc::Tconstr { args, .. } => args.iter().copied().any(|arg| {
+            matches!(&*ctx.get_desc(ctx.repr(arg)), TypeDesc::Tvariant(_))
+        }),
+        _ => false,
+    }
+}
+
 // ============================================================================
 // Link Types
 // ============================================================================

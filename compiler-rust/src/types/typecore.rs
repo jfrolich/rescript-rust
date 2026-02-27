@@ -3744,8 +3744,15 @@ pub fn type_expect<'a>(
                                 let should_freshen_path = should_freshen_float
                                     || should_freshen_unknown
                                     || keep_alias_path;
+                                // OCaml instance() returns identity for ALL non-generic types.
+                                // Allow parameterized Tconstr identity when args don't contain
+                                // Tvariant (which would cause row field contamination across
+                                // branches, e.g. LetUnwrap result<string, [#InvalidString]>).
+                                let args_safe_for_identity = args.is_empty() || args.iter().copied().all(|arg| {
+                                    !crate::types::ctype::type_contains_variant(ctx, arg)
+                                });
                                 (
-                                    args.is_empty() && !should_freshen_path,
+                                    args_safe_for_identity && !should_freshen_path,
                                     if should_freshen_path {
                                         Some(source_path.clone())
                                     } else {
