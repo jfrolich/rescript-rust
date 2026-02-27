@@ -7619,19 +7619,33 @@ fn type_function(
         param_ty = option_ty;
     }
 
-    // Match OCaml type_cases flow for function params:
-    // instance argument type for pattern typing, then generalize typed patterns.
+    // Match OCaml type_cases propagation logic (typecore.ml:3947-3999):
+    // propagate = has_gadts || ty_arg at GENERIC_LEVEL || !is_var
+    // For type_function (single case), propagate only if pattern is complex
+    // or ty_arg is generic. Simple variable patterns skip begin_def/generalize,
+    // preserving non-generic identity for body lookups via Pexp_ident.
+    let is_simple_param = is_simple_variable_pattern(tctx.arena, param);
+    let param_ty_repr = ctx.repr(param_ty);
+    let param_ty_is_generic = ctx.get_level(param_ty_repr) == crate::types::GENERIC_LEVEL;
+    let propagate = param_ty_is_generic || !is_simple_param;
+
     let mut state = PatternState::new();
     state.reset(true);
     let param_pat_ty = crate::types::instance(ctx, param_ty);
-    ctx.begin_def();
+    if propagate {
+        ctx.begin_def();
+    }
     let typed_param_result =
         type_pattern(tctx, env, param, param_pat_ty, PatternMode::Normal, &mut state);
-    ctx.end_def();
+    if propagate {
+        ctx.end_def();
+    }
     let typed_param = typed_param_result?;
-    iter_typed_pattern(&typed_param, &mut |pat| {
-        crate::types::generalize(ctx, pat.pat_type);
-    });
+    if propagate {
+        iter_typed_pattern(&typed_param, &mut |pat| {
+            crate::types::generalize(ctx, pat.pat_type);
+        });
+    }
 
     // Type check default expression if present
     let typed_default = if let Some(default_expr) = default {
