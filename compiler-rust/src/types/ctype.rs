@@ -1746,7 +1746,7 @@ fn unify_types<'a>(
             // infinite-loop: each expansion creates fresh Tconstr nodes that
             // get expanded again without termination. OCaml avoids this via
             // abbreviation memoization (expand_abbrev + proper_abbrevs) that
-            // Rust doesn't have.
+            // Rust doesn't fully have yet.
             //
             // For non-recursive polyvariant aliases with phantom parameters,
             // the catch-all expansion in the _ => branch handles the case
@@ -3390,8 +3390,12 @@ pub fn instance_poly(
         &mut delayed_copy,
     );
 
-    for (stub, source) in delayed_copy {
-        let copied = copy_type(ctx, source);
+    // OCaml pushes delayed copies onto a list head (`::`) and forces them in
+    // list order, so materialization runs in reverse discovery order under one
+    // shared copy window.
+    let mut delayed_cache = CopyCache::new();
+    for (stub, source) in delayed_copy.into_iter().rev() {
+        let copied = copy_type_cached(ctx, source, &mut delayed_cache);
         ctx.set_desc(stub, TypeDesc::Tlink(copied));
     }
 
@@ -3563,6 +3567,9 @@ pub fn instance_label(
     ctx: &TypeContext<'_>,
     lbl: &super::LabelDescription,
 ) -> (Vec<TypeExprRef>, TypeExprRef, TypeExprRef) {
+    // OCaml ctype.ml instance_label: `copy lbl.lbl_res` sets Tsubst markers
+    // that persist when copying lbl.lbl_arg. Shared nodes get the SAME copy
+    // target. We model this with a shared HashMap cache.
     let mut cache = std::collections::HashMap::new();
     let ty_res = copy_type_deep(ctx, lbl.lbl_res, &mut cache);
     // OCaml's instance_label unwraps Tpoly before copying the field type.
@@ -3793,14 +3800,26 @@ struct CopyCache {
     /// Node identity cache: maps original TypeExprRef → copied TypeExprRef.
     /// Ensures that if the same node is visited twice, we reuse the copy.
     nodes: std::collections::HashMap<TypeExprRef, TypeExprRef>,
+
+    /// Scoped marker table for OCaml Ctype.copy variant recursion handling.
+    /// Mirrors `more.desc <- Tsubst(Ttuple [more'; t])` without mutating
+    /// shared type descriptors in-place.
+    row_more_markers: std::collections::HashMap<TypeExprRef, CopyRowMoreMarker>,
 }
 
 impl CopyCache {
     fn new() -> Self {
         CopyCache {
             nodes: std::collections::HashMap::new(),
+            row_more_markers: std::collections::HashMap::new(),
         }
     }
+}
+
+#[derive(Clone, Copy)]
+struct CopyRowMoreMarker {
+    tuple: TypeExprRef,
+    variant: TypeExprRef,
 }
 
 fn type_expr_contains_ident_stamp(
@@ -3954,15 +3973,32 @@ pub fn copy_type(ctx: &TypeContext<'_>, ty: TypeExprRef) -> TypeExprRef {
 /// shared pattern types.
 pub fn subst_identity_copy(ctx: &TypeContext<'_>, ty: TypeExprRef) -> TypeExprRef {
     let mut seen = std::collections::HashMap::new();
-    subst_identity_copy_rec(ctx, ty, &mut seen)
+    // OCaml Subst.typexp uses a temporary `row_more.desc <- Tsubst(Ttuple [...])`
+    // marker window to preserve recursive row sharing while copying.
+    // Keep the same lifetime semantics in a scoped side table.
+    let mut row_more_markers = std::collections::HashMap::new();
+    subst_identity_copy_rec(ctx, ty, &mut seen, &mut row_more_markers)
+}
+
+#[derive(Clone, Copy)]
+struct SubstRowMoreMarker {
+    tuple: TypeExprRef,
+    variant: TypeExprRef,
 }
 
 fn subst_identity_copy_rec(
     ctx: &TypeContext<'_>,
     ty: TypeExprRef,
     seen: &mut std::collections::HashMap<TypeExprRef, TypeExprRef>,
+    row_more_markers: &mut std::collections::HashMap<TypeExprRef, SubstRowMoreMarker>,
 ) -> TypeExprRef {
     let ty = ctx.repr(ty);
+
+    // OCaml Subst.typexp temporarily sets `more.desc <- Tsubst(Ttuple [more'; ty'])`.
+    // During that scoped marker window, copying `more` returns the tuple target.
+    if let Some(marker) = row_more_markers.get(&ty).copied() {
+        return marker.tuple;
+    }
 
     if let Some(&cached) = seen.get(&ty) {
         return cached;
@@ -3992,7 +4028,7 @@ fn subst_identity_copy_rec(
                 TypeDesc::Tlink(target) | TypeDesc::Tsubst(target) => {
                     let target = *target;
                     drop(desc);
-                    return subst_identity_copy_rec(ctx, target, seen);
+                    return subst_identity_copy_rec(ctx, target, seen, row_more_markers);
                 }
                 TypeDesc::Tarrow { arg, ret, arity, .. } => {
                     let arg_typ = arg.typ;
@@ -4000,8 +4036,8 @@ fn subst_identity_copy_rec(
                     let ret = *ret;
                     let arity = *arity;
                     drop(desc);
-                    let arg_copy = subst_identity_copy_rec(ctx, arg_typ, seen);
-                    let ret_copy = subst_identity_copy_rec(ctx, ret, seen);
+                    let arg_copy = subst_identity_copy_rec(ctx, arg_typ, seen, row_more_markers);
+                    let ret_copy = subst_identity_copy_rec(ctx, ret, seen, row_more_markers);
                     TypeDesc::Tarrow {
                         arg: crate::types::type_expr::TypeArg {
                             lbl: arg_lbl,
@@ -4017,7 +4053,7 @@ fn subst_identity_copy_rec(
                     drop(desc);
                     let types_copy: Vec<_> = types
                         .iter()
-                        .map(|t| subst_identity_copy_rec(ctx, *t, seen))
+                        .map(|t| subst_identity_copy_rec(ctx, *t, seen, row_more_markers))
                         .collect();
                     TypeDesc::Ttuple(types_copy)
                 }
@@ -4027,7 +4063,7 @@ fn subst_identity_copy_rec(
                     drop(desc);
                     let args_copy: Vec<_> = args
                         .iter()
-                        .map(|t| subst_identity_copy_rec(ctx, *t, seen))
+                        .map(|t| subst_identity_copy_rec(ctx, *t, seen, row_more_markers))
                         .collect();
                     TypeDesc::Tconstr {
                         path,
@@ -4039,12 +4075,14 @@ fn subst_identity_copy_rec(
                     let fields = *fields;
                     let name = name.clone();
                     drop(desc);
-                    let fields_copy = subst_identity_copy_rec(ctx, fields, seen);
+                    let fields_copy = subst_identity_copy_rec(ctx, fields, seen, row_more_markers);
                     let name_copy = name.map(|(path, args)| {
                         (
                             path,
                             args.iter()
-                                .map(|t| subst_identity_copy_rec(ctx, *t, seen))
+                                .map(|t| {
+                                    subst_identity_copy_rec(ctx, *t, seen, row_more_markers)
+                                })
                                 .collect(),
                         )
                     });
@@ -4060,11 +4098,11 @@ fn subst_identity_copy_rec(
                     let typ = *typ;
                     let rest = *rest;
                     drop(desc);
-                    let rest_copy = subst_identity_copy_rec(ctx, rest, seen);
+                    let rest_copy = subst_identity_copy_rec(ctx, rest, seen, row_more_markers);
                     if is_absent {
                         TypeDesc::Tlink(rest_copy)
                     } else {
-                        let typ_copy = subst_identity_copy_rec(ctx, typ, seen);
+                        let typ_copy = subst_identity_copy_rec(ctx, typ, seen, row_more_markers);
                         TypeDesc::Tfield {
                             name,
                             kind,
@@ -4077,10 +4115,10 @@ fn subst_identity_copy_rec(
                     let body = *body;
                     let vars = vars.clone();
                     drop(desc);
-                    let body_copy = subst_identity_copy_rec(ctx, body, seen);
+                    let body_copy = subst_identity_copy_rec(ctx, body, seen, row_more_markers);
                     let vars_copy: Vec<_> = vars
                         .iter()
-                        .map(|t| subst_identity_copy_rec(ctx, *t, seen))
+                        .map(|t| subst_identity_copy_rec(ctx, *t, seen, row_more_markers))
                         .collect();
                     TypeDesc::Tpoly {
                         body: body_copy,
@@ -4092,29 +4130,54 @@ fn subst_identity_copy_rec(
                     drop(desc);
                     let row = row_repr(ctx, &row);
                     let more = ctx.repr(row.row_more);
-                    let keep_reither_link = {
-                        let more_is_constr = {
-                            let more_desc = ctx.get_desc(more);
-                            let is_constr = matches!(&*more_desc, TypeDesc::Tconstr { .. });
-                            drop(more_desc);
-                            is_constr
-                        };
+                    if let Some(marker) = row_more_markers.get(&more).copied() {
+                        // OCaml Subst.typexp fast-path:
+                        // more.desc = Tsubst(Ttuple [more'; ty']) => reuse ty'
+                        // and remap future visits of this source node to ty'
+                        // within the same copy window.
+                        seen.insert(ty, marker.variant);
+                        TypeDesc::Tlink(marker.variant)
+                    } else {
+                    let (dup, more_copy) = {
+                        let more_desc = ctx.get_desc(more).clone();
+                        let more_is_constr = matches!(&more_desc, TypeDesc::Tconstr { .. });
                         let dup = ctx.get_level(more) == GENERIC_LEVEL
                             || super::btype::static_row(ctx, &row)
                             || more_is_constr;
-                        !dup
+                        let more_copy = match more_desc {
+                            TypeDesc::Tsubst(target) => target,
+                            TypeDesc::Tconstr { .. } | TypeDesc::Tnil => {
+                                subst_identity_copy_rec(ctx, more, seen, row_more_markers)
+                            }
+                            TypeDesc::Tunivar(_) => more,
+                            TypeDesc::Tvar(name) => {
+                                if dup {
+                                    ctx.new_generic_type(TypeDesc::Tvar(name))
+                                } else {
+                                    more
+                                }
+                            }
+                            TypeDesc::Tlink(target) => {
+                                subst_identity_copy_rec(ctx, target, seen, row_more_markers)
+                            }
+                            _ => panic!("unexpected row_more in subst_identity_copy_rec"),
+                        };
+                        (dup, more_copy)
                     };
-                    // OCaml ctype.copy (PR#6163): if copied row_more becomes Tconstr,
-                    // copied row should be fixed.
-                    let more_copy = subst_identity_copy_rec(ctx, row.row_more, seen);
-                    let effective_row_fixed = if row.row_fixed {
-                        true
-                    } else {
-                        let more_desc = ctx.get_desc(ctx.repr(more_copy));
-                        let is_constr = matches!(&*more_desc, TypeDesc::Tconstr { .. });
-                        drop(more_desc);
-                        is_constr
-                    };
+                    let marker_tuple =
+                        ctx.new_generic_type(TypeDesc::Ttuple(vec![more_copy, placeholder]));
+                    // OCaml Subst.typexp keeps `more.desc <- Tsubst(Ttuple [...])`
+                    // alive until the outer cleanup window, not just this
+                    // single variant-copy branch. Keep the marker for the
+                    // entire subst_identity_copy traversal.
+                    row_more_markers.insert(
+                        more,
+                        SubstRowMoreMarker {
+                            tuple: marker_tuple,
+                            variant: placeholder,
+                        },
+                    );
+                    let keep_reither_link = !dup;
                     let fields_copy: Vec<_> = row
                         .row_fields
                         .iter()
@@ -4123,7 +4186,12 @@ fn subst_identity_copy_rec(
                             let field_copy = match repr_field {
                                 crate::types::type_expr::RowField::Rpresent(Some(ty)) => {
                                     crate::types::type_expr::RowField::Rpresent(
-                                        Some(subst_identity_copy_rec(ctx, ty, seen)),
+                                        Some(subst_identity_copy_rec(
+                                            ctx,
+                                            ty,
+                                            seen,
+                                            row_more_markers,
+                                        )),
                                     )
                                 }
                                 crate::types::type_expr::RowField::Rpresent(None) => {
@@ -4138,9 +4206,16 @@ fn subst_identity_copy_rec(
                                     constant,
                                     types: types
                                         .iter()
-                                        .map(|t| subst_identity_copy_rec(ctx, *t, seen))
+                                        .map(|t| {
+                                            subst_identity_copy_rec(
+                                                ctx,
+                                                *t,
+                                                seen,
+                                                row_more_markers,
+                                            )
+                                        })
                                         .collect(),
-                                    matched: if effective_row_fixed { true } else { matched },
+                                    matched: if row.row_fixed { true } else { matched },
                                     link: if keep_reither_link {
                                         link
                                     } else {
@@ -4158,17 +4233,26 @@ fn subst_identity_copy_rec(
                         (
                             path,
                             args.iter()
-                                .map(|t| subst_identity_copy_rec(ctx, *t, seen))
+                                .map(|t| {
+                                    subst_identity_copy_rec(
+                                        ctx,
+                                        *t,
+                                        seen,
+                                        row_more_markers,
+                                    )
+                                })
                                 .collect(),
                         )
                     });
-                    TypeDesc::Tvariant(RowDesc {
+                    let row_copy = TypeDesc::Tvariant(RowDesc {
                         row_fields: fields_copy,
                         row_more: more_copy,
                         row_closed: row.row_closed,
-                        row_fixed: effective_row_fixed,
+                        row_fixed: row.row_fixed,
                         row_name: name_copy,
-                    })
+                    });
+                    row_copy
+                    }
                 }
                 TypeDesc::Tpackage { path, lids, args } => {
                     let path = path.clone();
@@ -4177,7 +4261,7 @@ fn subst_identity_copy_rec(
                     drop(desc);
                     let args_copy: Vec<_> = args
                         .iter()
-                        .map(|t| subst_identity_copy_rec(ctx, *t, seen))
+                        .map(|t| subst_identity_copy_rec(ctx, *t, seen, row_more_markers))
                         .collect();
                     TypeDesc::Tpackage {
                         path,
@@ -4204,9 +4288,30 @@ fn copy_type_cached(
 ) -> TypeExprRef {
     let ty = ctx.repr(ty);
 
+    // OCaml Ctype.copy marker precedence:
+    // if `more.desc` is temporarily `Tsubst(Ttuple [more'; t])`,
+    // copying `more` itself must yield the tuple target.
+    if let Some(marker) = cache.row_more_markers.get(&ty).copied() {
+        return marker.tuple;
+    }
+
     // Preserve sharing for already-copied nodes (OCaml Tsubst behavior).
     if let Some(&cached) = cache.nodes.get(&ty) {
         return cached;
+    }
+
+    // OCaml ctype.ml copy fast-path for recursive variants:
+    // if row_more currently carries a temporary marker, reuse the
+    // already-registered variant copy directly.
+    if ctx.get_level(ty) == GENERIC_LEVEL {
+        if let TypeDesc::Tvariant(row0) = &*ctx.get_desc(ty) {
+            let row = row_repr(ctx, row0);
+            let more = ctx.repr(row.row_more);
+            if let Some(marker) = cache.row_more_markers.get(&more).copied() {
+                cache.nodes.insert(ty, marker.variant);
+                return marker.variant;
+            }
+        }
     }
 
     // Enum to hold what action to take, avoiding borrow issues.
@@ -4514,8 +4619,25 @@ fn copy_type_cached(
                         }
                         _ => copy_type_cached(ctx, more, cache),
                     };
+                    let marker_tuple =
+                        ctx.new_generic_type(TypeDesc::Ttuple(vec![more_copy, placeholder]));
+                    let prev_marker = cache.row_more_markers.insert(
+                        more,
+                        CopyRowMoreMarker {
+                            tuple: marker_tuple,
+                            variant: placeholder,
+                        },
+                    );
                     let fixed = super::btype::is_tvar(ctx, ctx.repr(more_copy));
                     let mut row_copy = copy_row_cached(ctx, &row, fixed, keep, more_copy, cache);
+                    match prev_marker {
+                        Some(prev) => {
+                            cache.row_more_markers.insert(more, prev);
+                        }
+                        None => {
+                            cache.row_more_markers.remove(&more);
+                        }
+                    }
 
                     // OCaml ctype.ml PR#6163: promote copied rows to fixed when
                     // copied row_more is a constructor.

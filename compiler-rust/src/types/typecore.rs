@@ -5681,7 +5681,6 @@ fn type_match_cases_batch_non_gadt<'a>(
                 &pending.unpacks,
                 body_expr.pexp_loc,
             );
-
             typed_cases.push(crate::types::typedtree::Case {
                 c_lhs: pending.typed_pat,
                 c_guard: typed_guard,
@@ -7283,13 +7282,14 @@ fn shallow_copy_pattern_binding_type(
     let repr = ctx.repr(ty);
     let desc = ctx.get_desc(repr);
     let (path, args) = match &*desc {
-        TypeDesc::Tconstr { path, args, .. } if !args.is_empty() || copy_nullary => {
+        TypeDesc::Tconstr { path, args, .. } if copy_nullary || !args.is_empty() => {
             (path.clone(), args.clone())
         }
         _ => return ty,
     };
     let level = ctx.get_level(repr);
     drop(desc);
+
     let copied = ctx.new_constr(path, args);
     ctx.set_level(copied, level);
     copied
@@ -7399,6 +7399,9 @@ fn type_case_impl(
     // Extend environment with pattern bindings
     let mut unpacks: Vec<PatternVariable> = Vec::new();
     for pv in &state.pattern_variables {
+        // Match the task-9 OCaml parity fix: give case-body bindings their
+        // own shallow Tconstr node so body unification can't mutate the
+        // exact node shared with the typed pattern.
         let binding_ty = shallow_copy_pattern_binding_type(tctx.type_ctx, pv.ty, false);
         let desc = ValueDescription {
             val_type: binding_ty,
@@ -7451,7 +7454,6 @@ fn type_case_impl(
         &unpacks,
         body_expr.pexp_loc,
     );
-
     Ok(crate::types::typedtree::Case {
         c_lhs: typed_pat,
         c_guard: typed_guard,
@@ -7663,7 +7665,6 @@ fn type_function(
         &unpacks,
         body.pexp_loc,
     );
-
     // Build function parameter
     let fp = FunctionParam {
         label: arg_label.clone(),

@@ -18,7 +18,7 @@
 //! However, multiple `TypeContext` instances can exist concurrently,
 //! one per compilation unit.
 
-use super::asttypes::ArgLabel;
+use super::asttypes::{ArgLabel, PrivateFlag};
 use super::path::{Path, NOPOS};
 use super::type_expr::{
     AbbrevMemo, AbbrevMemoRef, Commutable, CommutableRef, FieldKind, FieldKindRef, GENERIC_LEVEL,
@@ -164,7 +164,9 @@ impl<'a> TypeContext<'a> {
             simple_abbrevs: RefCell::new(std::collections::HashMap::new()),
             previous_env_id: Cell::new(0),
             types: RefCell::new(Vec::new()),
-            abbrevs: RefCell::new(Vec::new()),
+            // Index 0 is reserved as the canonical Mnil sentinel so
+            // AbbrevMemoRef::nil() is never a mutable per-node cache.
+            abbrevs: RefCell::new(vec![RefCell::new(AbbrevMemo::Mnil)]),
             row_fields: RefCell::new(Vec::new()),
             commutables: RefCell::new(Vec::new()),
             field_kinds: RefCell::new(Vec::new()),
@@ -434,6 +436,7 @@ impl<'a> TypeContext<'a> {
         let env_id = env.id();
         if env_id != self.previous_env_id.get() {
             self.clear_simple_abbrevs();
+            self.clear_abbrev_memos();
             self.previous_env_id.set(env_id);
         }
     }
@@ -457,6 +460,89 @@ impl<'a> TypeContext<'a> {
     /// Clear simple abbreviations. Called during generalize/generalize_structure.
     pub fn clear_simple_abbrevs(&self) {
         self.simple_abbrevs.borrow_mut().clear();
+    }
+
+    /// Clear all per-node abbreviation memo chains (OCaml cleanup_abbrev).
+    pub fn clear_abbrev_memos(&self) {
+        let abbrevs = self.abbrevs.borrow();
+        for cell in abbrevs.iter() {
+            *cell.borrow_mut() = AbbrevMemo::Mnil;
+        }
+    }
+
+    /// Find a cached expansion for `(priv,path)` in an abbreviation memo chain.
+    pub fn find_abbrev_expansion(
+        &self,
+        memo: AbbrevMemoRef,
+        private_flag: PrivateFlag,
+        path: &Path,
+    ) -> Option<TypeExprRef> {
+        let mut current = memo;
+        for _ in 0..128 {
+            let node = {
+                let abbrevs = self.abbrevs.borrow();
+                abbrevs
+                    .get(current.0)
+                    .map(|cell| cell.borrow().clone())
+                    .unwrap_or(AbbrevMemo::Mnil)
+            };
+            match node {
+                AbbrevMemo::Mnil => return None,
+                AbbrevMemo::Mcons {
+                    private_flag: cached_private,
+                    path: cached_path,
+                    expansion,
+                    next,
+                    ..
+                } => {
+                    if private_flag <= cached_private && path.same(&cached_path) {
+                        return Some(expansion);
+                    }
+                    current = next;
+                }
+                AbbrevMemo::Mlink(next) => {
+                    current = next;
+                }
+            }
+        }
+        None
+    }
+
+    /// Prepend a cached abbreviation expansion to a node-local memo chain.
+    pub fn memorize_abbrev_expansion(
+        &self,
+        memo: AbbrevMemoRef,
+        private_flag: PrivateFlag,
+        path: Path,
+        abbrev: TypeExprRef,
+        expansion: TypeExprRef,
+    ) {
+        // Nil is a shared sentinel and must not be mutated.
+        if memo == AbbrevMemoRef::nil() {
+            return;
+        }
+
+        let mut abbrevs = self.abbrevs.borrow_mut();
+        if memo.0 >= abbrevs.len() {
+            return;
+        }
+
+        let previous = abbrevs[memo.0].borrow().clone();
+        let next = if matches!(previous, AbbrevMemo::Mnil) {
+            AbbrevMemoRef::nil()
+        } else {
+            let idx = abbrevs.len();
+            abbrevs.push(RefCell::new(previous));
+            AbbrevMemoRef(idx)
+        };
+
+        *abbrevs[memo.0].borrow_mut() = AbbrevMemo::Mcons {
+            private_flag,
+            path,
+            abbrev,
+            expansion,
+            next,
+        };
     }
 
     // ========================================================================
