@@ -2,402 +2,521 @@
 
 # Typed Tree Parity Test Suite: Compare typed tree output between OCaml and Rust compilers
 #
-# Both OCaml and Rust sexp are generated via rewatch (single command each):
-#   1. `rescript build --dump-typed-sexp`        → OCaml sexp in lib/ocaml/*.sexp
-#   2. `rescript build --dump-typed-sexp --rust`  → Rust sexp in lib/ocaml/*.sexp
-# Then we compare the two sets of .sexp files.
+# Tests performed:
+# 1. typed-sexp parity - Typed tree structure matches between OCaml and Rust (without locations)
+#
+# Uses rewatch to build dependencies first, then compares typed tree output file by file.
 #
 # USAGE:
-#   ./scripts/test_typedtree_parity.sh [OPTIONS] [FILTER]
+#   ./scripts/test_typedtree_parity.sh [OPTIONS] [FILE|PATTERN]
 #
 # OPTIONS:
+#   -q, --quick       Stop on first failure (useful for quick iteration)
+#   -j, --parallel N  Run N tests in parallel (default: 16)
+#   -v, --verbose     Show progress for each file
+#   --no-build        Skip the initial rewatch build (assume already built)
+#   --tella           Test against tella-fusion project (default: ~/dev/tella-fusion)
 #   -h, --help        Show this help message
 #
-# FILTER:
-#   Optional file path or module name pattern to test a single file.
-#   When filtering, skips clean/full-build (assumes prior build exists)
-#   and passes --filter to rewatch for fast ~1s single-file sexp generation.
-#   Examples:
-#     ./scripts/test_typedtree_parity.sh tests/tests/src/a.res
-#     ./scripts/test_typedtree_parity.sh a
-#     ./scripts/test_typedtree_parity.sh "Core_*"
+# EXAMPLES:
+#   # Test a single file (fastest for iteration):
+#   ./scripts/test_typedtree_parity.sh tests/tests/src/a.res
+#
+#   # Test files matching a pattern:
+#   ./scripts/test_typedtree_parity.sh "Core_Array"
+#
+#   # Run all tests, stop on first failure:
+#   ./scripts/test_typedtree_parity.sh --quick
+#
+#   # Run all tests in parallel (default 16 jobs):
+#   ./scripts/test_typedtree_parity.sh
+#
+#   # Test tella-fusion project:
+#   ./scripts/test_typedtree_parity.sh --tella
 
 set -e
 
-FILTER=""
+# Parse command line arguments
+QUICK_MODE=false
+PARALLEL_JOBS=16
+VERBOSE=false
+FILE_ARG=""
+SKIP_BUILD=false
+TELLA_MODE=false
 
 while [[ $# -gt 0 ]]; do
     case $1 in
+        -q|--quick)
+            QUICK_MODE=true
+            PARALLEL_JOBS=1  # Quick mode forces sequential for clean output
+            shift
+            ;;
+        -j|--parallel)
+            PARALLEL_JOBS="$2"
+            shift 2
+            ;;
+        -j*)
+            PARALLEL_JOBS="${1#-j}"
+            shift
+            ;;
+        -v|--verbose)
+            VERBOSE=true
+            shift
+            ;;
+        --no-build)
+            SKIP_BUILD=true
+            shift
+            ;;
+        --tella)
+            TELLA_MODE=true
+            shift
+            ;;
         -h|--help)
-            head -22 "$0" | tail -19
+            head -38 "$0" | tail -33
             exit 0
             ;;
-        -*)
-            echo "Unknown option: $1"
-            exit 1
-            ;;
         *)
-            FILTER="$1"
+            FILE_ARG="$1"
             shift
             ;;
     esac
 done
 
-# Normalize filter: if it's a file path, extract module name
-FILTER_MODULE=""
-if [[ -n "$FILTER" ]]; then
-    # Strip directory and extension (e.g. tests/tests/src/a.res -> a)
-    FILTER_MODULE=$(basename "$FILTER" | sed 's/\.\(res\|resi\|ml\|mli\)$//')
-fi
-
 scriptDir=$(dirname "$0")
 PROJECT_ROOT=$(cd "$scriptDir/.."; pwd -P)
 DUNE_BIN_DIR="$PROJECT_ROOT/_build/install/default/bin"
 OCAML_BSC="$DUNE_BIN_DIR/bsc"
-RESCRIPT_CLI="$PROJECT_ROOT/rewatch/target/release/rescript"
+RUST_BSC="$PROJECT_ROOT/compiler-rust/target/release/bsc"
+RESCRIPT_CLI="$PROJECT_ROOT/packages/@rescript/darwin-arm64/bin/rescript.exe"
 TEST_PROJECT="$PROJECT_ROOT/tests/tests"
+BUILD_DIR="$TEST_PROJECT"
 
-# External corpus (disabled for now — tella builds hang)
-# TELLA_DIR="${TELLA_DIR:-$HOME/dev/tella-fusion}"
-TELLA_DIR=""
+# Tella mode configuration
+TELLA_DIR="${TELLA_DIR:-$HOME/dev/tella-fusion}"
+if [[ "$TELLA_MODE" == "true" ]]; then
+    if [[ ! -d "$TELLA_DIR" ]]; then
+        echo -e "Error: tella-fusion not found at $TELLA_DIR"
+        echo "Set TELLA_DIR environment variable to the tella-fusion directory."
+        exit 1
+    fi
+    BUILD_DIR="$TELLA_DIR"
+    TEST_PROJECT="$TELLA_DIR/packages/core/webapp"
+    if [[ ! -f "$TEST_PROJECT/rescript.json" ]]; then
+        echo -e "Error: rescript.json not found at $TEST_PROJECT"
+        exit 1
+    fi
+fi
 
-# Colors
+# Colors for output
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[0;33m'
 BOLD='\033[1m'
 RESET='\033[0m'
 
-# Check compilers
+# Configuration
+if [[ "$TELLA_MODE" == "true" ]]; then
+    TIMEOUT_SECONDS=30
+else
+    TIMEOUT_SECONDS=10
+fi
+
+# Check if compilers exist
 if [[ ! -x "$OCAML_BSC" ]]; then
     echo -e "${RED}Error: OCaml bsc not found at $OCAML_BSC${RESET}"
+    echo "Run 'make' first to build the OCaml compiler."
     exit 1
 fi
+
+if [[ ! -x "$RUST_BSC" ]]; then
+    echo -e "${YELLOW}Warning: Rust bsc not found at $RUST_BSC${RESET}"
+    echo "Run 'cargo build --manifest-path compiler-rust/Cargo.toml --release' to build the Rust compiler."
+    echo "For now, testing OCaml compiler only."
+    RUST_AVAILABLE=false
+else
+    RUST_AVAILABLE=true
+fi
+
 if [[ ! -x "$RESCRIPT_CLI" ]]; then
     echo -e "${RED}Error: rescript CLI not found at $RESCRIPT_CLI${RESET}"
+    echo "Run 'make' first to build the toolchain."
     exit 1
 fi
 
-CACHE_DIR="$PROJECT_ROOT/.parity-cache"
-mkdir -p "$CACHE_DIR"
-TEMP_DIR="$CACHE_DIR"
+# Create temp directory
+TEMP_DIR=$(mktemp -d)
+trap "rm -rf $TEMP_DIR" EXIT
 
-echo -e "${BOLD}Typed Tree Parity Test${RESET}"
+if [[ "$TELLA_MODE" == "true" ]]; then
+    echo -e "${BOLD}Typed Tree Parity Test (tella-fusion)${RESET}"
+else
+    echo -e "${BOLD}Typed Tree Parity Test${RESET}"
+fi
 echo "============================================"
-echo "OCaml bsc:    $OCAML_BSC"
-echo "Rescript CLI: $RESCRIPT_CLI"
-if [[ -n "$FILTER_MODULE" ]]; then
-    echo "Filter:       $FILTER_MODULE"
+echo "OCaml bsc: $OCAML_BSC"
+if [[ "$RUST_AVAILABLE" == "true" ]]; then
+    echo "Rust bsc:  $RUST_BSC"
+else
+    echo "Rust bsc:  (not available)"
 fi
+if [[ "$TELLA_MODE" == "true" ]]; then
+    echo "Tella dir: $TELLA_DIR"
+fi
+echo "Timeout: ${TIMEOUT_SECONDS}s"
+echo "Parallel jobs: $PARALLEL_JOBS"
+echo ""
 
-# Build and generate sexp for a project
-# Args: project_dir label [extra_env...]
-build_project_sexp() {
-    local project_dir="$1"
-    local label="$2"
-    shift 2
-    local env_vars=("$@")
-
-    local ocaml_dir="$TEMP_DIR/$label/ocaml"
-    local rust_dir="$TEMP_DIR/$label/rust"
-    mkdir -p "$ocaml_dir" "$rust_dir"
-
-    cd "$project_dir"
-
-    # Build filter args for rewatch --filter
-    local filter_args=()
-    if [[ -n "$FILTER_MODULE" ]]; then
-        # Convert glob pattern to regex: * -> .*, escape dots
-        local regex="${FILTER_MODULE//./\\.}"
-        regex="${regex//\*/.*}"
-        filter_args=(--filter "^${regex}\\.")
-    fi
-
-    if [[ ${#filter_args[@]} -eq 0 ]]; then
-        echo "  [$label] Cleaning..."
-        env "${env_vars[@]}" RESCRIPT_BSC_EXE="$OCAML_BSC" "$RESCRIPT_CLI" clean 2>/dev/null || true
-
-        echo "  [$label] Normal build (produces .cmi/.cmj)..."
-        timeout 120 env "${env_vars[@]}" RESCRIPT_BSC_EXE="$OCAML_BSC" "$RESCRIPT_CLI" build 2>&1 | tail -3 || true
-    elif [[ ! -d "$project_dir/lib/ocaml" ]]; then
-        echo "  [$label] Normal build (produces .cmi/.cmj, needed for filtered sexp)..."
-        timeout 120 env "${env_vars[@]}" RESCRIPT_BSC_EXE="$OCAML_BSC" "$RESCRIPT_CLI" build 2>&1 | tail -3 || true
-    fi
-
-    echo "  [$label] OCaml sexp generation..."
-    timeout 120 env "${env_vars[@]}" RESCRIPT_BSC_EXE="$OCAML_BSC" "$RESCRIPT_CLI" build --dump-typed-sexp "${filter_args[@]}" 2>&1 | tail -3 || true
-
-    # Save OCaml sexp files
-    local count=0
-    for f in lib/ocaml/*.sexp; do
-        [[ -f "$f" ]] || continue
-        cp "$f" "$ocaml_dir/"
-        count=$((count + 1))
-    done
-    echo "  [$label] Saved $count OCaml sexp files"
-
-    # Clear sexp files before Rust generation to prevent stale OCaml output
-    # from being mistaken for Rust output when Rust crashes/stack-overflows
-    rm -f lib/ocaml/*.sexp
-
-    echo "  [$label] Rust sexp generation..."
-    timeout 120 env "${env_vars[@]}" RESCRIPT_BSC_EXE="$OCAML_BSC" "$RESCRIPT_CLI" build --dump-typed-sexp --rust "${filter_args[@]}" 2>&1 | tail -3 || true
-
-    # Save Rust sexp files
-    count=0
-    local rust_empty=0
-    for f in lib/ocaml/*.sexp; do
-        [[ -f "$f" ]] || continue
-        if [[ ! -s "$f" ]]; then
-            rust_empty=$((rust_empty + 1))
+# Step 1: Build with rewatch to ensure all dependencies are compiled
+if [[ "$SKIP_BUILD" != "true" ]]; then
+    echo -e "${BOLD}Step 1: Building project with rewatch...${RESET}"
+    cd "$BUILD_DIR"
+    if [[ "$TELLA_MODE" == "true" ]]; then
+        # Build with --bsc to generate Rust sexp via rewatch subprocess (with timeout)
+        echo "Building with --bsc $RUST_BSC (rewatch handles parallelism + 30s timeout per module)..."
+        if ! RESCRIPT_BSC_EXE="$OCAML_BSC" "$RESCRIPT_CLI" build --bsc "$RUST_BSC" 2>&1 | tail -5; then
+            echo -e "${YELLOW}Warning: Some files may have failed to build${RESET}"
         fi
-        cp "$f" "$rust_dir/"
-        count=$((count + 1))
-    done
-    echo "  [$label] Saved $count Rust sexp files"
-    if [[ "$rust_empty" -gt 0 ]]; then
-        echo -e "  ${YELLOW}[$label] WARNING: $rust_empty Rust sexp files are empty (crash/stack overflow?)${RESET}"
+    else
+        # Use the standard OCaml bsc for the initial build
+        RESCRIPT_BSC_EXE="$OCAML_BSC" "$RESCRIPT_CLI" clean 2>/dev/null || true
+        if ! RESCRIPT_BSC_EXE="$OCAML_BSC" "$RESCRIPT_CLI" build 2>&1 | tail -5; then
+            echo -e "${YELLOW}Warning: Some files may have failed to build${RESET}"
+        fi
     fi
-
     cd "$PROJECT_ROOT"
-}
+    echo ""
+fi
 
-# Compare sexp files for a project and output results
-# Args: label
-compare_project_sexp() {
-    local label="$1"
-    local ocaml_dir="$TEMP_DIR/$label/ocaml"
-    local rust_dir="$TEMP_DIR/$label/rust"
-    local diff_dir="$TEMP_DIR/$label/diffs"
-    mkdir -p "$diff_dir"
+# Find test files based on arguments
+cd "$PROJECT_ROOT"
 
-    local total=0 ocaml_pass=0 rust_pass=0 parity_pass=0 parity_fail=0
-    local parity_hunks=0 binary_diffs=0
-    local ocaml_only=0 rust_only=0 both_fail=0
-    local parity_failures="" ocaml_only_files="" rust_only_files=""
-
-    # Collect all unique sexp filenames from both dirs
-    local all_modules="$TEMP_DIR/$label/modules.txt"
-    { ls "$ocaml_dir" 2>/dev/null; ls "$rust_dir" 2>/dev/null; } | sort -u > "$all_modules"
-
-    while IFS= read -r sexp_file; do
-        [[ -n "$sexp_file" ]] || continue
-        local module="${sexp_file%.sexp}"
-
-        # Apply filter if set
-        if [[ -n "$FILTER_MODULE" ]]; then
-            # shellcheck disable=SC2254
-            case "$module" in
-                $FILTER_MODULE) ;;  # exact or glob match
-                *) continue ;;
-            esac
-        fi
-
-        total=$((total + 1))
-
-        local ocaml_file="$ocaml_dir/$sexp_file"
-        local rust_file="$rust_dir/$sexp_file"
-
-        local ocaml_ok=false rust_ok=false
-        [[ -s "$ocaml_file" ]] && ocaml_ok=true
-        [[ -s "$rust_file" ]] && rust_ok=true
-
-        if $ocaml_ok; then ocaml_pass=$((ocaml_pass + 1)); fi
-        if $rust_ok; then rust_pass=$((rust_pass + 1)); fi
-
-        if $ocaml_ok && $rust_ok; then
-            # Both produced sexp — compare
-            if cmp -s "$ocaml_file" "$rust_file"; then
-                parity_pass=$((parity_pass + 1))
-            else
-                parity_fail=$((parity_fail + 1))
-                parity_failures="${parity_failures}  ${module}\n"
-                local diff_file="$diff_dir/${module}.diff"
-                diff -ua "$ocaml_file" "$rust_file" > "$diff_file" 2>&1 || true
-
-                # Hunk-level mismatch tracking:
-                # - text diffs: number of unified-diff hunks
-                # - binary-only diffs: count as one mismatch unit
-                local module_hunks=0
-                module_hunks=$(grep -c '^@@' "$diff_file" 2>/dev/null || true)
-                if [[ "$module_hunks" -gt 0 ]]; then
-                    parity_hunks=$((parity_hunks + module_hunks))
-                elif grep -q '^Binary files ' "$diff_file"; then
-                    binary_diffs=$((binary_diffs + 1))
-                    parity_hunks=$((parity_hunks + 1))
-                fi
-            fi
-        elif $ocaml_ok && ! $rust_ok; then
-            ocaml_only=$((ocaml_only + 1))
-            ocaml_only_files="${ocaml_only_files}  ${module}\n"
-        elif ! $ocaml_ok && $rust_ok; then
-            rust_only=$((rust_only + 1))
-            rust_only_files="${rust_only_files}  ${module}\n"
+if [[ -n "$FILE_ARG" ]]; then
+    # Check if it's an absolute or relative path to a single file
+    if [[ -f "$FILE_ARG" ]]; then
+        echo "$FILE_ARG" > "$TEMP_DIR/files.txt"
+    elif [[ -f "$PROJECT_ROOT/$FILE_ARG" ]]; then
+        echo "$FILE_ARG" > "$TEMP_DIR/files.txt"
+    else
+        # Treat as a pattern
+        if [[ "$TELLA_MODE" == "true" ]]; then
+            find "$TEST_PROJECT/src" "$TEST_PROJECT/lambda/src" "$TEST_PROJECT/chrome/src" "$TEST_PROJECT/scripts" \
+                -name "*.res" -type f 2>/dev/null | grep -E "$FILE_ARG" | sort > "$TEMP_DIR/files.txt" || true
         else
-            both_fail=$((both_fail + 1))
+            find tests/tests/src -name "*.res" 2>/dev/null | grep -E "$FILE_ARG" | sort > "$TEMP_DIR/files.txt" || true
         fi
-    done < "$all_modules"
+        if [[ ! -s "$TEMP_DIR/files.txt" ]]; then
+            echo -e "${RED}Error: No files found matching '$FILE_ARG'${RESET}"
+            echo "Hint: Try a pattern like 'Core_Array' or a full path"
+            exit 1
+        fi
+    fi
+elif [[ "$TELLA_MODE" == "true" ]]; then
+    # Find all .res files in tella webapp source directories
+    find "$TEST_PROJECT/src" "$TEST_PROJECT/lambda/src" "$TEST_PROJECT/chrome/src" "$TEST_PROJECT/scripts" \
+        -name "*.res" -type f 2>/dev/null | sort > "$TEMP_DIR/files.txt"
+else
+    # Find all .res files in tests/tests/src
+    find tests/tests/src -name "*.res" -type f 2>/dev/null | sort > "$TEMP_DIR/files.txt"
+fi
 
-    # Print results
-    local parity_pct="-"
-    if [[ "$total" -gt 0 ]]; then
-        parity_pct=$((100 * parity_pass / total))
-    fi
+TOTAL_FILES=$(wc -l < "$TEMP_DIR/files.txt" | tr -d ' ')
 
-    echo -e "${BOLD}$label ($total modules):${RESET}"
-    echo -e "  OCaml type-check: ${GREEN}$ocaml_pass${RESET}   OCaml error: ${RED}$((total - ocaml_pass))${RESET}"
-    echo -e "  Rust  type-check: ${GREEN}$rust_pass${RESET}   Rust  error: ${RED}$((total - rust_pass))${RESET}"
-    echo -e "  Typecheck parity: ${GREEN}$parity_pass${RESET}/$total (${parity_pct}%)"
-    if [[ "$parity_fail" -gt 0 ]]; then
-        echo -e "  Parity failures:  ${RED}$parity_fail${RESET}"
-        echo -e "  Hunk mismatches: ${RED}$parity_hunks${RESET} (binary-only diffs: $binary_diffs)"
-    fi
-    if [[ "$rust_only" -gt 0 ]]; then
-        echo -e "  ${YELLOW}Rust-only pass (OCaml rejects): $rust_only${RESET}"
-    fi
-    if [[ "$ocaml_only" -gt 0 ]]; then
-        echo -e "  ${YELLOW}OCaml-only pass (Rust rejects): $ocaml_only${RESET}"
-    fi
-    if [[ "$both_fail" -gt 0 ]]; then
-        echo -e "  Both fail: $both_fail"
-    fi
-
-    # Store results for overall summary
-    echo "total=$total ocaml_pass=$ocaml_pass rust_pass=$rust_pass parity_pass=$parity_pass parity_fail=$parity_fail parity_hunks=$parity_hunks binary_diffs=$binary_diffs ocaml_only=$ocaml_only rust_only=$rust_only both_fail=$both_fail" > "$TEMP_DIR/$label/summary.txt"
-    echo "$parity_failures" > "$TEMP_DIR/$label/parity_failures.txt"
-    echo "$ocaml_only_files" > "$TEMP_DIR/$label/ocaml_only.txt"
-    echo "$rust_only_files" > "$TEMP_DIR/$label/rust_only.txt"
-
-    # Show parity failure list
-    if [[ "$parity_fail" -gt 0 && "$parity_fail" -le 100 ]]; then
-        echo -e "  ${YELLOW}Parity failure modules:${RESET}"
-        echo -e "$parity_failures"
-    fi
-
-    # In single-file mode, show diffs inline
-    if [[ -n "$FILTER_MODULE" && "$parity_fail" -gt 0 ]]; then
-        for df in "$diff_dir"/*.diff; do
-            [[ -f "$df" ]] || continue
-            echo -e "${BOLD}--- Diff: $(basename "$df" .diff) ---${RESET}"
-            cat "$df"
-            echo ""
-        done
-    fi
-}
-
-# Step 1: Build projects and generate sexp
+if [[ "$TOTAL_FILES" -eq 1 ]]; then
+    echo -e "Testing ${BOLD}1${RESET} file: $(cat "$TEMP_DIR/files.txt")"
+else
+    echo -e "Found ${BOLD}$TOTAL_FILES${RESET} test files"
+fi
 echo ""
-echo -e "${BOLD}Step 1: Building and generating sexp...${RESET}"
 
-build_project_sexp "$TEST_PROJECT" "tests"
+# Create results directory
+RESULTS_DIR="$TEMP_DIR/results"
+mkdir -p "$RESULTS_DIR"
+mkdir -p "$TEMP_DIR/diffs"
 
-# Build tella-fusion if present
-if [[ -n "$TELLA_DIR" && -d "$TELLA_DIR" ]]; then
-    # Find rescript.json files with sources (skip empty root, skip node_modules)
-    tella_candidates=()
-    while IFS= read -r cfg; do
-        proj_dir=$(dirname "$cfg")
-        has_sources=$(jq -r 'if (.sources | length) > 0 then "1" else "0" end' "$cfg" 2>/dev/null) || has_sources=0
-        if [[ "$has_sources" == "1" ]]; then
-            tella_candidates+=("$proj_dir")
+# Export variables for parallel execution
+export OCAML_BSC RUST_BSC RESCRIPT_CLI TIMEOUT_SECONDS TEMP_DIR QUICK_MODE VERBOSE RUST_AVAILABLE PROJECT_ROOT RESULTS_DIR TEST_PROJECT TELLA_MODE
+
+# Function to test a single file - writes results to a file
+test_single_file() {
+    local file="$1"
+    local safe_name=$(echo "$file" | tr '/' '_')
+    local result_file="$RESULTS_DIR/$safe_name.result"
+
+    # Initialize result
+    local ocaml_pass=0 rust_pass=0 parity_pass=0
+    local ocaml_fail=0 rust_fail=0 parity_fail=0
+    local rust_timeout=0 rust_crash=0
+
+    # Create per-file temp directory for parallel safety
+    local file_temp="$TEMP_DIR/work/$safe_name"
+    mkdir -p "$file_temp"
+
+    # Determine full file path (handle both absolute and relative paths)
+    local full_file_path
+    if [[ "$file" = /* ]]; then
+        full_file_path="$file"
+    else
+        full_file_path="$PROJECT_ROOT/$file"
+    fi
+
+    # Get relative path from test project
+    local rel_path="${full_file_path#$TEST_PROJECT/}"
+
+    # Helper: run Rust bsc and classify exit code
+    run_rust_bsc() {
+        local rust_exit=0
+        timeout "$TIMEOUT_SECONDS" "$RUST_BSC" "$@" || rust_exit=$?
+        if [[ "$rust_exit" -eq 0 ]]; then
+            rust_pass=1
+        elif [[ "$rust_exit" -eq 124 ]]; then
+            rust_timeout=1
+            rust_fail=1
+        else
+            rust_crash=1
+            rust_fail=1
         fi
-    done < <(find "$TELLA_DIR" -name "rescript.json" -not -path "*/node_modules/*" 2>/dev/null | sort)
+    }
 
-    # Only build top-level projects (skip nested sub-packages)
-    for proj_dir in "${tella_candidates[@]}"; do
-        is_nested=false
-        for other in "${tella_candidates[@]}"; do
-            if [[ "$proj_dir" != "$other" && "$proj_dir" == "$other/packages/"* ]]; then
-                is_nested=true
-                break
+    # Get compiler arguments from rewatch
+    local compiler_args_json
+    compiler_args_json=$(cd "$TEST_PROJECT" && "$RESCRIPT_CLI" compiler-args "$rel_path" 2>/dev/null) || true
+
+    if [[ -z "$compiler_args_json" ]]; then
+        # If compiler-args fails, try direct compilation
+        # Run OCaml compiler directly
+        if timeout "$TIMEOUT_SECONDS" "$OCAML_BSC" -dtyped-sexp "$full_file_path" 2> "$file_temp/ocaml.sexp" 1>/dev/null; then
+            ocaml_pass=1
+        else
+            ocaml_fail=1
+        fi
+
+        if [[ "$RUST_AVAILABLE" == "true" && "$TELLA_MODE" != "true" ]]; then
+            run_rust_bsc -dtyped-sexp "$full_file_path" 2> "$file_temp/rust.sexp" 1>/dev/null
+        fi
+    else
+        # Extract compiler args from JSON and build command
+        # Parse the compiler_args array from JSON
+        local args
+        args=$(echo "$compiler_args_json" | python3 -c "import sys, json; d=json.load(sys.stdin); print(' '.join(d.get('compiler_args', [])))" 2>/dev/null) || args=""
+
+        if [[ -n "$args" ]]; then
+            # Run OCaml compiler with the args + -dtyped-sexp
+            cd "$TEST_PROJECT/lib/bs"
+            if timeout "$TIMEOUT_SECONDS" "$OCAML_BSC" -dtyped-sexp $args 2> "$file_temp/ocaml.sexp" 1>/dev/null; then
+                ocaml_pass=1
+            else
+                ocaml_fail=1
             fi
-        done
-        if [[ "$is_nested" == "true" ]]; then
-            echo "  Skipping $proj_dir (nested, built as dependency)"
-            continue
+
+            if [[ "$TELLA_MODE" == "true" ]]; then
+                # In tella mode, Rust sexp was already generated by rewatch --bsc
+                # Find it in lib/ocaml/ by extracting the .ast basename from args
+                local ast_file=$(echo "$args" | tr ' ' '\n' | grep '\.ast$' | head -1)
+                if [[ -n "$ast_file" ]]; then
+                    local ast_basename=$(basename "$ast_file" .ast)
+                    local rust_sexp_path="$TEST_PROJECT/lib/ocaml/${ast_basename}.sexp"
+                    if [[ -f "$rust_sexp_path" && -s "$rust_sexp_path" ]]; then
+                        cp "$rust_sexp_path" "$file_temp/rust.sexp"
+                        rust_pass=1
+                    elif [[ -f "$rust_sexp_path" && ! -s "$rust_sexp_path" ]]; then
+                        # Empty sexp = timeout during rewatch build
+                        rust_timeout=1
+                        rust_fail=1
+                    else
+                        # No sexp file = crash during rewatch build
+                        rust_crash=1
+                        rust_fail=1
+                    fi
+                else
+                    rust_fail=1
+                fi
+            elif [[ "$RUST_AVAILABLE" == "true" ]]; then
+                # Run Rust compiler per-file
+                run_rust_bsc -dtyped-sexp $args 2> "$file_temp/rust.sexp" 1>/dev/null
+            fi
+            cd "$PROJECT_ROOT"
+        else
+            ocaml_fail=1
+            rust_fail=1
         fi
+    fi
 
-        # Use a safe label derived from the project path
-        safe_label=$(echo "${proj_dir#$TELLA_DIR/}" | tr '/' '_')
-        build_project_sexp "$proj_dir" "tella_$safe_label" \
-            "RESCRIPT_RUNTIME=$TELLA_DIR/node_modules/@rescript/runtime"
-    done
-fi
-echo ""
+    # Compare if both succeeded
+    if [[ "$RUST_AVAILABLE" == "true" && "$ocaml_pass" -eq 1 && "$rust_pass" -eq 1 ]]; then
+        if diff -q "$file_temp/ocaml.sexp" "$file_temp/rust.sexp" > /dev/null 2>&1; then
+            parity_pass=1
+        else
+            parity_fail=1
+            # Save diff for inspection
+            diff -u "$file_temp/ocaml.sexp" "$file_temp/rust.sexp" > "$TEMP_DIR/diffs/$safe_name.diff" 2>&1 || true
+        fi
+    fi
 
-# Step 2: Compare sexp files
-echo -e "${BOLD}Step 2: Comparing sexp files...${RESET}"
-echo ""
+    # Write result
+    echo "$file:ocaml_pass=$ocaml_pass:ocaml_fail=$ocaml_fail:rust_pass=$rust_pass:rust_fail=$rust_fail:rust_timeout=$rust_timeout:rust_crash=$rust_crash:parity_pass=$parity_pass:parity_fail=$parity_fail" > "$result_file"
 
-OVERALL_TOTAL=0
-OVERALL_OCAML_PASS=0
-OVERALL_RUST_PASS=0
-OVERALL_PARITY_PASS=0
-OVERALL_PARITY_FAIL=0
-OVERALL_PARITY_HUNKS=0
-OVERALL_BINARY_DIFFS=0
-OVERALL_OCAML_ONLY=0
-OVERALL_RUST_ONLY=0
-OVERALL_BOTH_FAIL=0
+    # Verbose output
+    if [[ "$VERBOSE" == "true" ]]; then
+        if [[ "$ocaml_pass" -eq 1 ]]; then
+            echo -e "${GREEN}PASS${RESET} [OCaml] $file"
+        else
+            echo -e "${RED}FAIL${RESET} [OCaml] $file"
+        fi
+        if [[ "$RUST_AVAILABLE" == "true" ]]; then
+            if [[ "$rust_pass" -eq 1 ]]; then
+                echo -e "${GREEN}PASS${RESET} [Rust] $file"
+            elif [[ "$rust_timeout" -eq 1 ]]; then
+                echo -e "${YELLOW}TIMEOUT${RESET} [Rust] $file"
+            elif [[ "$rust_crash" -eq 1 ]]; then
+                echo -e "${RED}CRASH${RESET} [Rust] $file"
+            fi
+            if [[ "$parity_pass" -eq 1 ]]; then
+                echo -e "${GREEN}PASS${RESET} [Parity] $file"
+            elif [[ "$parity_fail" -eq 1 ]]; then
+                echo -e "${RED}FAIL${RESET} [Parity] $file"
+            fi
+        fi
+    fi
 
-accumulate_results() {
-    local label="$1"
-    local summary_file="$TEMP_DIR/$label/summary.txt"
-    [[ -f "$summary_file" ]] || return
-
-    local total ocaml_pass rust_pass parity_pass parity_fail parity_hunks binary_diffs ocaml_only rust_only both_fail
-    eval "$(cat "$summary_file")"
-
-    OVERALL_TOTAL=$((OVERALL_TOTAL + total))
-    OVERALL_OCAML_PASS=$((OVERALL_OCAML_PASS + ocaml_pass))
-    OVERALL_RUST_PASS=$((OVERALL_RUST_PASS + rust_pass))
-    OVERALL_PARITY_PASS=$((OVERALL_PARITY_PASS + parity_pass))
-    OVERALL_PARITY_FAIL=$((OVERALL_PARITY_FAIL + parity_fail))
-    OVERALL_PARITY_HUNKS=$((OVERALL_PARITY_HUNKS + parity_hunks))
-    OVERALL_BINARY_DIFFS=$((OVERALL_BINARY_DIFFS + binary_diffs))
-    OVERALL_OCAML_ONLY=$((OVERALL_OCAML_ONLY + ocaml_only))
-    OVERALL_RUST_ONLY=$((OVERALL_RUST_ONLY + rust_only))
-    OVERALL_BOTH_FAIL=$((OVERALL_BOTH_FAIL + both_fail))
+    # Quick mode - exit on failure
+    if [[ "$QUICK_MODE" == "true" && ("$ocaml_fail" -eq 1 || "$parity_fail" -eq 1) ]]; then
+        echo -e "${RED}Quick mode: stopping on first failure${RESET}"
+        if [[ -f "$TEMP_DIR/diffs/$safe_name.diff" ]]; then
+            echo -e "\nParity diff:"
+            head -50 "$TEMP_DIR/diffs/$safe_name.diff"
+        fi
+        exit 1
+    fi
 }
 
-# Compare tests/tests
-if [[ -d "$TEMP_DIR/tests/ocaml" ]]; then
-    compare_project_sexp "tests"
-    accumulate_results "tests"
+export -f test_single_file
+
+# Run tests
+echo -e "${BOLD}Step 2: Running typed tree parity tests...${RESET}"
+echo ""
+if [[ "$PARALLEL_JOBS" -eq 1 ]]; then
+    while IFS= read -r file; do
+        test_single_file "$file"
+    done < "$TEMP_DIR/files.txt"
+else
+    cat "$TEMP_DIR/files.txt" | xargs -P "$PARALLEL_JOBS" -I {} bash -c 'test_single_file "$@"' _ {}
 fi
 
-# Compare tella sub-projects
-for label_dir in "$TEMP_DIR"/tella_*/; do
-    [[ -d "$label_dir/ocaml" ]] || continue
-    label=$(basename "$label_dir")
-    compare_project_sexp "$label"
-    accumulate_results "$label"
+# Aggregate results
+echo ""
+echo -e "${BOLD}Results${RESET}"
+echo "========"
+
+# Count results
+OCAML_PASS=0 OCAML_FAIL=0
+RUST_PASS=0 RUST_FAIL=0 RUST_TIMEOUTS=0 RUST_CRASHES=0
+PARITY_PASS=0 PARITY_FAIL=0
+OCAML_FAILURES=""
+RUST_FAILURES=""
+RUST_TIMEOUT_LIST=""
+RUST_CRASH_LIST=""
+PARITY_FAILURES=""
+
+for result_file in "$RESULTS_DIR"/*.result; do
+    [[ -f "$result_file" ]] || continue
+    result=$(cat "$result_file")
+    file=$(echo "$result" | cut -d: -f1)
+
+    if echo "$result" | grep -q "ocaml_pass=1"; then
+        OCAML_PASS=$((OCAML_PASS + 1))
+    elif echo "$result" | grep -q "ocaml_fail=1"; then
+        OCAML_FAIL=$((OCAML_FAIL + 1))
+        OCAML_FAILURES="$OCAML_FAILURES  $file\n"
+    fi
+
+    if [[ "$RUST_AVAILABLE" == "true" ]]; then
+        if echo "$result" | grep -q "rust_pass=1"; then
+            RUST_PASS=$((RUST_PASS + 1))
+        elif echo "$result" | grep -q "rust_fail=1"; then
+            RUST_FAIL=$((RUST_FAIL + 1))
+            if echo "$result" | grep -q "rust_timeout=1"; then
+                RUST_TIMEOUTS=$((RUST_TIMEOUTS + 1))
+                RUST_TIMEOUT_LIST="$RUST_TIMEOUT_LIST  $file\n"
+            elif echo "$result" | grep -q "rust_crash=1"; then
+                RUST_CRASHES=$((RUST_CRASHES + 1))
+                RUST_CRASH_LIST="$RUST_CRASH_LIST  $file\n"
+            else
+                RUST_FAILURES="$RUST_FAILURES  $file\n"
+            fi
+        fi
+
+        if echo "$result" | grep -q "parity_pass=1"; then
+            PARITY_PASS=$((PARITY_PASS + 1))
+        elif echo "$result" | grep -q "parity_fail=1"; then
+            PARITY_FAIL=$((PARITY_FAIL + 1))
+            PARITY_FAILURES="$PARITY_FAILURES  $file\n"
+        fi
+    fi
 done
 
-# Overall summary
-echo ""
-echo "============================================"
-if [[ "$OVERALL_TOTAL" -gt 0 ]]; then
-    OVERALL_PCT=$((100 * OVERALL_PARITY_PASS / OVERALL_TOTAL))
-    echo -e "${BOLD}Overall ($OVERALL_TOTAL modules):${RESET}"
-    echo -e "  OCaml type-check: ${GREEN}$OVERALL_OCAML_PASS${RESET}   OCaml error: ${RED}$((OVERALL_TOTAL - OVERALL_OCAML_PASS))${RESET}"
-    echo -e "  Rust  type-check: ${GREEN}$OVERALL_RUST_PASS${RESET}   Rust  error: ${RED}$((OVERALL_TOTAL - OVERALL_RUST_PASS))${RESET}"
-    echo -e "  Typecheck parity: ${GREEN}$OVERALL_PARITY_PASS${RESET}/$OVERALL_TOTAL (${OVERALL_PCT}%)"
-    if [[ "$OVERALL_PARITY_FAIL" -gt 0 ]]; then
-        echo -e "  Parity failures:  ${RED}$OVERALL_PARITY_FAIL${RESET}"
-        echo -e "  Hunk mismatches: ${RED}$OVERALL_PARITY_HUNKS${RESET} (binary-only diffs: $OVERALL_BINARY_DIFFS)"
+echo -e "OCaml bsc:    ${GREEN}$OCAML_PASS passed${RESET}, ${RED}$OCAML_FAIL failed${RESET}"
+if [[ "$RUST_AVAILABLE" == "true" ]]; then
+    RUST_DETAIL="${GREEN}$RUST_PASS passed${RESET}, ${RED}$RUST_FAIL failed${RESET}"
+    if [[ "$RUST_TIMEOUTS" -gt 0 ]]; then
+        RUST_DETAIL="$RUST_DETAIL (${YELLOW}$RUST_TIMEOUTS timed out${RESET})"
     fi
-    if [[ "$OVERALL_RUST_ONLY" -gt 0 ]]; then
-        echo -e "  ${YELLOW}Rust-only pass: $OVERALL_RUST_ONLY${RESET}"
+    if [[ "$RUST_CRASHES" -gt 0 ]]; then
+        RUST_DETAIL="$RUST_DETAIL (${RED}$RUST_CRASHES crashed${RESET})"
     fi
-    if [[ "$OVERALL_OCAML_ONLY" -gt 0 ]]; then
-        echo -e "  ${YELLOW}OCaml-only pass: $OVERALL_OCAML_ONLY${RESET}"
+    echo -e "Rust bsc:     $RUST_DETAIL"
+    echo -e "Parity:       ${GREEN}$PARITY_PASS passed${RESET}, ${RED}$PARITY_FAIL failed${RESET}"
+fi
+
+# Show failures
+if [[ -n "$OCAML_FAILURES" && "$OCAML_FAIL" -gt 0 && "$OCAML_FAIL" -le 50 ]]; then
+    echo ""
+    echo -e "${YELLOW}OCaml failures:${RESET}"
+    echo -e "$OCAML_FAILURES"
+fi
+
+if [[ "$RUST_AVAILABLE" == "true" && "$RUST_TIMEOUTS" -gt 0 ]]; then
+    echo ""
+    echo -e "${YELLOW}Rust timeouts (>${TIMEOUT_SECONDS}s):${RESET}"
+    echo -e "$RUST_TIMEOUT_LIST"
+fi
+
+if [[ "$RUST_AVAILABLE" == "true" && "$RUST_CRASHES" -gt 0 ]]; then
+    echo ""
+    echo -e "${RED}Rust crashes ($RUST_CRASHES):${RESET}"
+    echo -e "$RUST_CRASH_LIST"
+fi
+
+if [[ "$RUST_AVAILABLE" == "true" && -n "$RUST_FAILURES" && "$RUST_FAIL" -gt "$((RUST_TIMEOUTS + RUST_CRASHES))" ]]; then
+    RUST_OTHER=$((RUST_FAIL - RUST_TIMEOUTS - RUST_CRASHES))
+    if [[ "$RUST_OTHER" -le 50 ]]; then
+        echo ""
+        echo -e "${YELLOW}Rust other failures:${RESET}"
+        echo -e "$RUST_FAILURES"
     fi
-    echo "============================================"
-    if [[ "$OVERALL_PARITY_PASS" -eq "$OVERALL_TOTAL" ]]; then
-        echo -e "${GREEN}${BOLD}SUCCESS: Full parity across all modules!${RESET}"
+fi
+
+if [[ "$RUST_AVAILABLE" == "true" && -n "$PARITY_FAILURES" && "$PARITY_FAIL" -gt 0 ]]; then
+    echo ""
+    if [[ "$PARITY_FAIL" -le 200 ]]; then
+        echo -e "${YELLOW}Parity failures (diffs saved in $TEMP_DIR/diffs/):${RESET}"
+        echo -e "$PARITY_FAILURES"
+    else
+        echo -e "${YELLOW}Parity failures: $PARITY_FAIL files (too many to list)${RESET}"
     fi
-    echo "Results saved in: $CACHE_DIR/"
-else
-    echo "No sexp files found to compare."
+fi
+
+# Calculate and display parity percentage
+if [[ "$RUST_AVAILABLE" == "true" ]]; then
+    # Only count files where both compilers succeeded
+    BOTH_SUCCEEDED=$((PARITY_PASS + PARITY_FAIL))
+    if [[ "$BOTH_SUCCEEDED" -gt 0 ]]; then
+        PARITY_PCT=$((100 * PARITY_PASS / BOTH_SUCCEEDED))
+        echo ""
+        echo "============================================"
+        if [[ "$PARITY_FAIL" -eq 0 ]]; then
+            echo -e "${GREEN}${BOLD}SUCCESS: All $PARITY_PASS files have matching typed trees!${RESET}"
+        else
+            echo -e "${YELLOW}${BOLD}Parity: $PARITY_PASS/$BOTH_SUCCEEDED files match ($PARITY_PCT%)${RESET}"
+        fi
+    fi
 fi
