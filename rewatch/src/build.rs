@@ -136,6 +136,7 @@ pub fn initialize_build(
     use_rust_parser: bool,
     dump_typed_sexp: bool,
     rust_bsc_path: Option<PathBuf>,
+    dump_typed_sexp: bool,
 ) -> Result<BuildCommandState> {
     let project_context = ProjectContext::new(path)?;
     let compiler = get_compiler_info(&project_context)?;
@@ -526,6 +527,7 @@ pub fn build(
     use_rust_parser: bool,
     dump_typed_sexp: bool,
     rust_bsc_path: Option<PathBuf>,
+    dump_typed_sexp: bool,
 ) -> Result<BuildCommandState> {
     let default_timing: Option<std::time::Duration> = if no_timing {
         Some(std::time::Duration::new(0.0 as u64, 0.0 as u32))
@@ -543,6 +545,7 @@ pub fn build(
         use_rust_parser,
         dump_typed_sexp,
         rust_bsc_path,
+        dump_typed_sexp,
     )
     .with_context(|| "Could not initialize build")?;
 

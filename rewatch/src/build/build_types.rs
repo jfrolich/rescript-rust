@@ -195,6 +195,7 @@ impl BuildCommandState {
         use_rust_parser: bool,
         dump_typed_sexp: bool,
         rust_bsc_path: Option<PathBuf>,
+        dump_typed_sexp: bool,
     ) -> Self {
         Self {
             build_state: BuildState::new(project_context, packages, compiler),

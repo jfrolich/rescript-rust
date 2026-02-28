@@ -77,6 +77,7 @@ fn main() -> Result<()> {
                 *build_args.rust,
                 *build_args.dump_typed_sexp,
                 rust_bsc_path,
+                build_args.dump_typed_sexp_arg.dump_typed_sexp,
             ) {
                 Err(e) => {
                     eprintln!("{:#}", e);
@@ -117,6 +118,7 @@ fn main() -> Result<()> {
                 *watch_args.rust,
                 *watch_args.dump_typed_sexp,
                 rust_bsc_path,
+                watch_args.dump_typed_sexp_arg.dump_typed_sexp,
             ) {
                 Err(e) => {
                     eprintln!("{:#}", e);
