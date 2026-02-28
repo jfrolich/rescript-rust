@@ -92,6 +92,11 @@ pub struct TypeContext<'a> {
     /// Previous env ID for check_abbrev_env (OCaml ctype.ml:1272)
     previous_env_id: Cell<u64>,
 
+    /// Current abbreviation context during subst (OCaml: abbreviations = ref (ref Mnil)).
+    /// Set during subst_with_memo so copy_type_cached can use find_repr to detect
+    /// previously-expanded types and create Tlink sharing.
+    current_abbreviations: Cell<AbbrevMemoRef>,
+
     /// Type expression storage (for indexed access).
     /// Boxed values keep stable addresses as the vector grows.
     types: RefCell<Vec<Box<TypeExpr>>>,
@@ -163,6 +168,7 @@ impl<'a> TypeContext<'a> {
             trace_gadt_instances: Cell::new(false),
             simple_abbrevs: RefCell::new(std::collections::HashMap::new()),
             previous_env_id: Cell::new(0),
+            current_abbreviations: Cell::new(AbbrevMemoRef::nil()),
             types: RefCell::new(Vec::new()),
             // Index 0 is reserved as the canonical Mnil sentinel so
             // AbbrevMemoRef::nil() is never a mutable per-node cache.
@@ -468,6 +474,17 @@ impl<'a> TypeContext<'a> {
         for cell in abbrevs.iter() {
             *cell.borrow_mut() = AbbrevMemo::Mnil;
         }
+        self.current_abbreviations.set(AbbrevMemoRef::nil());
+    }
+
+    /// Get the current abbreviation context (set during subst_with_memo).
+    pub fn current_abbreviations(&self) -> AbbrevMemoRef {
+        self.current_abbreviations.get()
+    }
+
+    /// Set the current abbreviation context.
+    pub fn set_current_abbreviations(&self, abbrev: AbbrevMemoRef) {
+        self.current_abbreviations.set(abbrev);
     }
 
     /// Find a cached expansion for `(priv,path)` in an abbreviation memo chain.
@@ -497,6 +514,40 @@ impl<'a> TypeContext<'a> {
                 } => {
                     if private_flag <= cached_private && path.same(&cached_path) {
                         return Some(expansion);
+                    }
+                    current = next;
+                }
+                AbbrevMemo::Mlink(next) => {
+                    current = next;
+                }
+            }
+        }
+        None
+    }
+
+    /// Find the original type (abbrev field) for a path in a memo chain.
+    /// This is OCaml's `find_repr` — returns the ORIGINAL type node that was
+    /// memoized, creating Tlink sharing in copy_type_cached.
+    pub fn find_abbrev_repr(&self, memo: AbbrevMemoRef, path: &Path) -> Option<TypeExprRef> {
+        let mut current = memo;
+        for _ in 0..128 {
+            let node = {
+                let abbrevs = self.abbrevs.borrow();
+                abbrevs
+                    .get(current.0)
+                    .map(|cell| cell.borrow().clone())
+                    .unwrap_or(AbbrevMemo::Mnil)
+            };
+            match node {
+                AbbrevMemo::Mnil => return None,
+                AbbrevMemo::Mcons {
+                    path: cached_path,
+                    abbrev,
+                    next,
+                    ..
+                } => {
+                    if path.same(&cached_path) {
+                        return Some(abbrev);
                     }
                     current = next;
                 }
@@ -555,7 +606,7 @@ impl<'a> TypeContext<'a> {
     }
 
     /// Allocate an abbreviation memo.
-    fn alloc_abbrev(&self, memo: AbbrevMemo) -> AbbrevMemoRef {
+    pub fn alloc_abbrev(&self, memo: AbbrevMemo) -> AbbrevMemoRef {
         let mut abbrevs = self.abbrevs.borrow_mut();
         let idx = abbrevs.len();
         abbrevs.push(RefCell::new(memo));

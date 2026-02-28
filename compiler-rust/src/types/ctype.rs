@@ -26,7 +26,7 @@ use super::btype::{iter_type_expr, row_fixed, row_more, row_repr};
 use super::context::TypeContext;
 use super::env::Env;
 use super::path::Path;
-use super::type_expr::{FieldKind, GENERIC_LEVEL, RowDesc, RowField, TypeDesc, TypeExprRef};
+use super::type_expr::{AbbrevMemo, AbbrevMemoRef, FieldKind, GENERIC_LEVEL, RowDesc, RowField, TypeDesc, TypeExprRef};
 use super::variance::{Variance, VarianceFlag};
 use std::collections::{HashMap, HashSet};
 
@@ -904,6 +904,15 @@ fn try_expand_head<'a>(
                 }
             };
 
+            // Extract abbrev ref for use in subst_with_memo + memo lookup
+            let abbrev = match &*ctx.get_desc(ty) {
+                TypeDesc::Tconstr { abbrev, .. } => *abbrev,
+                _ => AbbrevMemoRef::nil(),
+            };
+
+            // Memo lookup: disabled since find_repr in copy_type_cached is the
+            // main sharing mechanism (memo storage is for find_repr, not find_expans)
+
             // Try stamp-based lookup first (most precise, handles CMI-loaded types)
             let stamp = match &path {
                 Path::Pident(id) if id.stamp() != 0 => Some(id.stamp()),
@@ -946,15 +955,8 @@ fn try_expand_head<'a>(
                             memorize_simple_abbrev();
                             return Some(instance_for_expansion(ctx, manifest));
                         } else if params.len() == args.len() {
-                            // Use instance_parameterized_type to create a full fresh copy
-                            // of both params and body (sharing the copy cache). This matches
-                            // OCaml's expand_abbrev which uses instance_parameterized_type
-                            // to ensure the expansion is independent of any prior unification
-                            // linkings on the manifest.
-                            let (fresh_params, fresh_body) =
-                                instance_parameterized_type(ctx, params, manifest);
                             memorize_simple_abbrev();
-                            return Some(subst_type(ctx, &fresh_params, &args, fresh_body));
+                            return Some(subst_with_memo(ctx, env, ty, abbrev, params, &args, manifest));
                         }
                         return None;
                     }
@@ -972,10 +974,8 @@ fn try_expand_head<'a>(
                             memorize_simple_abbrev();
                             return Some(instance_for_expansion(ctx, manifest));
                         } else if params.len() == args.len() {
-                            let (fresh_params, fresh_body) =
-                                instance_parameterized_type(ctx, params, manifest);
                             memorize_simple_abbrev();
-                            return Some(subst_type(ctx, &fresh_params, &args, fresh_body));
+                            return Some(subst_with_memo(ctx, env, ty, abbrev, params, &args, manifest));
                         }
                     }
                 }
@@ -991,10 +991,8 @@ fn try_expand_head<'a>(
                             memorize_simple_abbrev();
                             return Some(instance_for_expansion(ctx, manifest));
                         } else if params.len() == args.len() {
-                            let (fresh_params, fresh_body) =
-                                instance_parameterized_type(ctx, params, manifest);
                             memorize_simple_abbrev();
-                            return Some(subst_type(ctx, &fresh_params, &args, fresh_body));
+                            return Some(subst_with_memo(ctx, env, ty, abbrev, params, &args, manifest));
                         }
                     }
                 }
@@ -1007,10 +1005,8 @@ fn try_expand_head<'a>(
                             memorize_simple_abbrev();
                             return Some(instance_for_expansion(ctx, manifest));
                         } else if params.len() == args.len() {
-                            let (fresh_params, fresh_body) =
-                                instance_parameterized_type(ctx, params, manifest);
                             memorize_simple_abbrev();
-                            return Some(subst_type(ctx, &fresh_params, &args, fresh_body));
+                            return Some(subst_with_memo(ctx, env, ty, abbrev, params, &args, manifest));
                         }
                     }
                 }
@@ -1025,10 +1021,8 @@ fn try_expand_head<'a>(
                             memorize_simple_abbrev();
                             return Some(instance_for_expansion(ctx, manifest));
                         } else if params.len() == args.len() {
-                            let (fresh_params, fresh_body) =
-                                instance_parameterized_type(ctx, params, manifest);
                             memorize_simple_abbrev();
-                            return Some(subst_type(ctx, &fresh_params, &args, fresh_body));
+                            return Some(subst_with_memo(ctx, env, ty, abbrev, params, &args, manifest));
                         }
                     }
                 }
@@ -1318,6 +1312,68 @@ fn subst_type(
             ty
         }
     }
+}
+
+/// OCaml's `subst` with abbreviation memoization.
+///
+/// Matches OCaml ctype.ml:1218 `subst`:
+/// 1. Create stub variable (body0)
+/// 2. Memorize the original type in the Tconstr's abbrev chain BEFORE instantiation
+/// 3. Set current_abbreviations so copy_type_cached can use find_repr
+/// 4. Call instance_parameterized_type (copy will check abbreviations)
+/// 5. Clear current_abbreviations
+/// 6. Unify stub with fresh body
+/// 7. Substitute fresh params with actual args
+fn subst_with_memo(
+    ctx: &TypeContext<'_>,
+    env: &Env,
+    ty: TypeExprRef,           // original Tconstr being expanded
+    abbrev: AbbrevMemoRef,     // from the Tconstr's abbrev field
+    params: &[TypeExprRef],    // type declaration params
+    args: &[TypeExprRef],      // actual type arguments
+    body: TypeExprRef,         // manifest
+) -> TypeExprRef {
+    // 1. Create stub variable (OCaml: body0 = newvar())
+    let body0 = ctx.new_var(None);
+
+    // 2. Memorize BEFORE instantiation (OCaml: memorize_abbrev abbrev priv path ty body0)
+    if !args.is_empty() && abbrev != AbbrevMemoRef::nil() {
+        if let TypeDesc::Tconstr { path, .. } = &*ctx.get_desc(ctx.repr(ty)) {
+            let path = path.clone();
+            ctx.memorize_abbrev_expansion(
+                abbrev,
+                super::asttypes::PrivateFlag::Public,
+                path,
+                ty,      // abbrev: original type (returned by find_repr)
+                body0,   // expansion: stub (returned by find_expans)
+            );
+        }
+    }
+
+    // 3. Set global abbreviations context so copy_type_cached can use find_repr
+    let old_abbrevs = ctx.current_abbreviations();
+    if abbrev != AbbrevMemoRef::nil() {
+        ctx.set_current_abbreviations(abbrev);
+    }
+
+    // 4. instance_parameterized_type (copy will now check abbreviations via find_repr)
+    let (fresh_params, fresh_body) = instance_parameterized_type(ctx, params, body);
+
+    // 5. Clear global abbreviations context
+    ctx.set_current_abbreviations(old_abbrevs);
+
+    // 6. Unify stub with body (OCaml: !unify' env body0 body')
+    link_type(ctx, body0, fresh_body);
+
+    // 7. Link params to args (OCaml uses unify, but link_type avoids
+    // expansion side effects that can cause infinite recursion in functors).
+    // This mutates fresh_body IN PLACE through the param→body sharing from
+    // instance_parameterized_type's shared copy cache.
+    for (p, a) in fresh_params.iter().zip(args.iter()) {
+        link_type(ctx, *p, *a);
+    }
+
+    fresh_body
 }
 
 // ============================================================================
@@ -4551,6 +4607,22 @@ fn copy_type_cached(
                             }
                         }
                     } else {
+                        // OCaml find_repr: check current abbreviation context for
+                        // previously-memoized expansions during subst_with_memo.
+                        // When copy encounters a Tconstr with the same path as the
+                        // type being expanded, create a Tlink back to the original —
+                        // this creates physical node sharing.
+                        let abbrevs = ctx.current_abbreviations();
+                        if abbrevs != AbbrevMemoRef::nil() && level == GENERIC_LEVEL {
+                            if let Some(found_ty) = ctx.find_abbrev_repr(abbrevs, &path) {
+                                let found_repr = ctx.repr(found_ty);
+                                if found_repr != ty && found_repr != placeholder {
+                                    cache.nodes.insert(ty, found_repr);
+                                    ctx.set_desc(placeholder, TypeDesc::Tlink(found_repr));
+                                    return found_repr;
+                                }
+                            }
+                        }
                         let args_copy: Vec<_> = args
                             .iter()
                             .map(|t| copy_type_cached(ctx, *t, cache))
