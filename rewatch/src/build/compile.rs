@@ -1110,16 +1110,96 @@ fn compile_file(
                 }
             }
 
-            if helpers::contains_ascii_characters(&err) {
+            // After normal compilation succeeds, optionally run --bsc subprocess for sexp generation
+            let mut warnings = if helpers::contains_ascii_characters(&err) {
                 if package.is_local_dep {
-                    // suppress warnings of external deps
-                    Ok(Some(err))
+                    Some(err)
                 } else {
-                    Ok(None)
+                    None
                 }
             } else {
-                Ok(None)
+                None
+            };
+
+            if let (Some(bsc_path), Some(sexp_args_base)) = (rust_bsc_path, to_mjs_args_for_bsc) {
+                let module_name =
+                    helpers::file_path_to_module_name(implementation_file_path, &package.namespace);
+                let cwd = build_path_abs
+                    .canonicalize()
+                    .map(StrippedVerbatimPath::to_stripped_verbatim_path)
+                    .ok()
+                    .unwrap();
+
+                let mut sexp_args = sexp_args_base;
+                sexp_args.push("-dtyped-sexp-locs".to_string());
+
+                match Command::new(bsc_path)
+                    .current_dir(&cwd)
+                    .args(&sexp_args)
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::piped())
+                    .spawn()
+                {
+                    Ok(mut child) => {
+                        let stderr_pipe = child.stderr.take();
+                        let stderr_thread = std::thread::spawn(move || -> String {
+                            let mut buf = String::new();
+                            if let Some(mut pipe) = stderr_pipe {
+                                use std::io::Read;
+                                let _ = pipe.read_to_string(&mut buf);
+                            }
+                            buf
+                        });
+
+                        let timeout = std::time::Duration::from_secs(30);
+                        let start = std::time::Instant::now();
+                        let mut timed_out = false;
+                        let mut exit_status = None;
+                        loop {
+                            match child.try_wait() {
+                                Ok(Some(status)) => {
+                                    exit_status = Some(status);
+                                    break;
+                                }
+                                Ok(None) if start.elapsed() > timeout => {
+                                    let _ = child.kill();
+                                    let _ = child.wait();
+                                    timed_out = true;
+                                    break;
+                                }
+                                Ok(None) => {
+                                    std::thread::sleep(std::time::Duration::from_millis(50))
+                                }
+                                Err(_) => break,
+                            }
+                        }
+
+                        let stderr_output = stderr_thread.join().unwrap_or_default();
+                        let sexp_path = ocaml_build_path_abs.join(format!("{basename}.sexp"));
+
+                        if timed_out {
+                            let _ = std::fs::write(&sexp_path, "");
+                            let msg = format!("Timeout (30s) generating sexp for `{module_name}`");
+                            log::warn!("{}", msg);
+                            warnings = Some(
+                                warnings.map_or(msg.clone(), |w| format!("{w}\n{msg}")),
+                            );
+                        } else if exit_status.is_some_and(|s| s.success()) {
+                            let _ = std::fs::write(&sexp_path, &stderr_output);
+                        } else {
+                            // Rust bsc crashed — don't write invalid sexp
+                            log::warn!(
+                                "bsc subprocess crashed for `{module_name}`"
+                            );
+                        }
+                    }
+                    Err(e) => {
+                        log::warn!("Failed to spawn bsc subprocess for sexp: {e}");
+                    }
+                }
             }
+
+            Ok(warnings)
         }
     }
 }
