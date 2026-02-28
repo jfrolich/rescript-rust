@@ -947,16 +947,15 @@ fn compile_file(
     }
 
 
-    let needs_sexp = dump_typed_sexp || rust_bsc_path.is_some();
-
-    // When --dump-typed-sexp or --bsc is set, add -dtyped-sexp to OCaml bsc
-    if needs_sexp {
+    // --dump-typed-sexp: add -dtyped-sexp to OCaml bsc and save output.
+    // --bsc: only runs Rust subprocess (does NOT affect OCaml bsc).
+    if dump_typed_sexp {
         to_mjs_args.push("-dtyped-sexp".to_string());
     }
 
-    // When generating sexp, redirect stderr directly to file to avoid buffering
+    // When generating OCaml sexp, redirect stderr directly to file to avoid buffering
     // huge output in memory (e.g., Icon.res produces 882MB of sexp).
-    let ocaml_sexp_file = if needs_sexp {
+    let ocaml_sexp_file = if dump_typed_sexp {
         let path = ocaml_build_path_abs.join(format!("{basename}.ocaml-sexp"));
         // Ensure the output directory exists (it may not on clean builds)
         if let Some(parent) = path.parent() {
@@ -984,7 +983,7 @@ fn compile_file(
 
     match to_mjs {
         Ok(x) if !x.status.success() => {
-            let stderr = if needs_sexp {
+            let stderr = if dump_typed_sexp {
                 // stderr was redirected to file — read error from there
                 let sexp_path = ocaml_build_path_abs.join(format!("{basename}.ocaml-sexp"));
                 std::fs::read_to_string(&sexp_path).unwrap_or_default()
