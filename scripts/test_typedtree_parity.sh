@@ -87,7 +87,13 @@ PROJECT_ROOT=$(cd "$scriptDir/.."; pwd -P)
 DUNE_BIN_DIR="$PROJECT_ROOT/_build/install/default/bin"
 OCAML_BSC="$DUNE_BIN_DIR/bsc"
 RUST_BSC="$PROJECT_ROOT/compiler-rust/target/release/bsc"
-RESCRIPT_CLI="$PROJECT_ROOT/packages/@rescript/darwin-arm64/bin/rescript.exe"
+# Prefer freshly built rewatch binary (has --bsc support) over installed rescript.exe
+REWATCH_BUILT="$PROJECT_ROOT/rewatch/target/release/rescript"
+if [[ -x "$REWATCH_BUILT" ]]; then
+    RESCRIPT_CLI="$REWATCH_BUILT"
+else
+    RESCRIPT_CLI="$PROJECT_ROOT/packages/@rescript/darwin-arm64/bin/rescript.exe"
+fi
 TEST_PROJECT="$PROJECT_ROOT/tests/tests"
 BUILD_DIR="$TEST_PROJECT"
 
