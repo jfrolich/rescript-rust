@@ -1365,10 +1365,7 @@ fn subst_with_memo(
     // 6. Unify stub with body (OCaml: !unify' env body0 body')
     link_type(ctx, body0, fresh_body);
 
-    // 7. Link params to args (OCaml uses unify, but link_type avoids
-    // expansion side effects that can cause infinite recursion in functors).
-    // This mutates fresh_body IN PLACE through the param→body sharing from
-    // instance_parameterized_type's shared copy cache.
+    // 7. Bind params to args (OCaml: List.iter2 (!unify' env) params' args)
     for (p, a) in fresh_params.iter().zip(args.iter()) {
         link_type(ctx, *p, *a);
     }
@@ -3876,6 +3873,7 @@ struct CopyCache {
     /// Mirrors `more.desc <- Tsubst(Ttuple [more'; t])` without mutating
     /// shared type descriptors in-place.
     row_more_markers: std::collections::HashMap<TypeExprRef, CopyRowMoreMarker>,
+
 }
 
 impl CopyCache {
