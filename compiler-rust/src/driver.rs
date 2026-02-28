@@ -338,66 +338,7 @@ fn structure_has_config_string(
     })
 }
 
-fn is_async_component_expr(expr: &Expression, arena: &crate::parse_arena::ParseArena) -> bool {
-    use crate::parser::ast::ExpressionDesc as ED;
 
-    match &*expr.pexp_desc {
-        ED::Pexp_fun(inner) => inner.is_async,
-        ED::Pexp_constraint(inner) => {
-            let (expr, _) = &**inner;
-            is_async_component_expr(arena.get_expr(*expr), arena)
-        }
-        ED::Pexp_apply(inner) => inner
-            .args
-            .iter()
-            .any(|(_, arg)| is_async_component_expr(arena.get_expr(*arg), arena)),
-        ED::Pexp_sequence(_, inner) => is_async_component_expr(arena.get_expr(*inner), arena),
-        _ => false,
-    }
-}
-
-fn module_expr_has_async_component(
-    module_expr: &ModuleExpr,
-    arena: &crate::parse_arena::ParseArena,
-) -> bool {
-    match &*module_expr.pmod_desc {
-        ModuleExprDesc::Pmod_structure(structure) => structure_has_async_component(structure, arena),
-        ModuleExprDesc::Pmod_functor(inner) => {
-            let (_, _, body) = &**inner;
-            module_expr_has_async_component(arena.get_mod_expr(*body), arena)
-        }
-        ModuleExprDesc::Pmod_apply(lhs, rhs) => {
-            module_expr_has_async_component(arena.get_mod_expr(*lhs), arena)
-                || module_expr_has_async_component(arena.get_mod_expr(*rhs), arena)
-        }
-        ModuleExprDesc::Pmod_constraint(inner, _) => {
-            module_expr_has_async_component(arena.get_mod_expr(*inner), arena)
-        }
-        _ => false,
-    }
-}
-
-fn structure_has_async_component(
-    structure: &Structure,
-    arena: &crate::parse_arena::ParseArena,
-) -> bool {
-    structure.iter().any(|item| match &*item.pstr_desc {
-        StructureItemDesc::Pstr_value(inner) => { let (_, bindings) = &**inner; bindings.iter().any(|vb| {
-            has_react_component_attr(&vb.pvb_attributes, arena)
-                && is_async_component_expr(arena.get_expr(vb.pvb_expr), arena)
-        })},
-        StructureItemDesc::Pstr_module(mb) => {
-            module_expr_has_async_component(arena.get_mod_expr(mb.pmb_expr), arena)
-        }
-        StructureItemDesc::Pstr_recmodule(mbs) => mbs.iter().any(|mb| {
-            module_expr_has_async_component(arena.get_mod_expr(mb.pmb_expr), arena)
-        }),
-        StructureItemDesc::Pstr_include(incl) => {
-            module_expr_has_async_component(arena.get_mod_expr(incl.pincl_mod), arena)
-        }
-        _ => false,
-    })
-}
 
 fn module_expr_needs_jsx_rewrite(
     module_expr: &ModuleExpr,
@@ -484,12 +425,9 @@ pub fn compile_source_to_js_with_options(
             parser.diagnostics().len()
         ));
     }
-    // Source fallback path: only run JSX rewrite when the file enables `-bs-jsx`,
-    // and skip known-unstable async component lowering in this path.
+    // Source fallback path: only run JSX rewrite when the file enables `-bs-jsx`.
     let jsx_enabled = structure_has_config_string(&structure, "-bs-jsx", parser.arena());
-    let has_async_component = structure_has_async_component(&structure, parser.arena());
     let structure = if jsx_enabled
-        && !has_async_component
         && structure_needs_jsx_rewrite(&structure, parser.arena())
     {
         jsx_ppx::transform_structure(structure, 4, parser.arena_mut())
@@ -743,9 +681,7 @@ pub fn typecheck_and_dump_sexp<W: std::io::Write>(
         }
 
         let jsx_enabled = structure_has_config_string(&structure, "-bs-jsx", parser.arena());
-        let has_async_component = structure_has_async_component(&structure, parser.arena());
         let structure = if jsx_enabled
-            && !has_async_component
             && structure_needs_jsx_rewrite(&structure, parser.arena())
         {
             jsx_ppx::transform_structure(structure, 4, parser.arena_mut())
@@ -911,9 +847,7 @@ pub fn typecheck_stored_structure_and_dump_sexp<W: std::io::Write>(
     arena.reset_local_module_counter();
 
     let jsx_enabled = structure_has_config_string(&structure, "-bs-jsx", &arena);
-    let has_async_component = structure_has_async_component(&structure, &arena);
     let structure = if jsx_enabled
-        && !has_async_component
         && structure_needs_jsx_rewrite(&structure, &arena)
     {
         jsx_ppx::transform_structure(structure, 4, &mut arena)
