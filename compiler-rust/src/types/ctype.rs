@@ -1803,6 +1803,7 @@ fn unify_types<'a>(
 
             let args1 = args1.clone();
             let args2 = args2.clone();
+            let path_name = path1.head_name().to_string();
             drop(desc1);
             drop(desc2);
 
@@ -1816,20 +1817,56 @@ fn unify_types<'a>(
             // abbreviation memoization (expand_abbrev + proper_abbrevs) that
             // Rust doesn't fully have yet.
             //
-            // For non-recursive polyvariant aliases with phantom parameters,
-            // the catch-all expansion in the _ => branch handles the case
-            // when one side is Tconstr and the other is a different type.
+            // OCaml's unify2 expands both sides, so phantom type parameters
+            // (non-injective variance) vanish in the expansion and are never
+            // unified. We approximate this by checking type declaration
+            // variance: only unify args for injective params, skip phantom.
+            // OCaml's unify2 expands both Tconstr sides before unify3.
+            // For types with phantom params (params not appearing in the
+            // manifest body), the expansion hides those params, so they're
+            // never unified. We detect phantom params by checking if the
+            // type param appears in the manifest via deep_occur.
+            let phantom_mask: Vec<bool> = if !args1.is_empty() {
+                state.env().and_then(|env| {
+                    env.find_type(&path_name).ok().and_then(|decl| {
+                        let manifest = decl.type_manifest?;
+                        let params = &decl.type_params;
+                        if params.len() != args1.len() {
+                            return None;
+                        }
+                        Some(params.iter().map(|p| {
+                            // Phantom = param NOT appearing in manifest
+                            !deep_occur(ctx, *p, manifest)
+                        }).collect())
+                    })
+                }).unwrap_or_else(|| vec![false; args1.len()])
+            } else {
+                vec![]
+            };
+
+            let all_phantom = !phantom_mask.is_empty() && phantom_mask.iter().all(|&p| p);
+
             let pairs: Vec<_> = args1
                 .iter()
                 .zip(args2.iter())
-                .map(|(&a, &b)| (a, b))
+                .enumerate()
+                .map(|(i, (&a, &b))| (i, a, b))
                 .collect();
 
-            // OCaml links t1'→t2 BEFORE recursing into children
-            link_type(ctx, t1, t2);
+            // OCaml links t1'→t2 BEFORE recursing into children.
+            // But for types where ALL params are phantom, OCaml's unify2
+            // expands both sides first, so unify3 links the EXPANSIONS
+            // (not the originals). The original Tconstr nodes are never
+            // linked. We match this by skipping link_type for all-phantom.
+            if !all_phantom {
+                link_type(ctx, t1, t2);
+            }
 
-            for (a, b) in pairs {
-                unify(ctx, state, a, b)?;
+            for (i, a, b) in pairs {
+                // Skip phantom params — OCaml's expansion hides them.
+                if !phantom_mask.get(i).copied().unwrap_or(false) {
+                    unify(ctx, state, a, b)?;
+                }
             }
 
             Ok(())
