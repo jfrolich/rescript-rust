@@ -943,6 +943,11 @@ fn compile_file(
     }
 
 
+    // When --bsc is set, also add -dtyped-sexp to OCaml bsc for parity comparison
+    if rust_bsc_path.is_some() {
+        to_mjs_args.push("-dtyped-sexp".to_string());
+    }
+
     let to_mjs = Command::new(&compiler_info.bsc_path)
         .current_dir(
             build_path_abs
@@ -1110,6 +1115,12 @@ fn compile_file(
                 }
             }
 
+            // When --bsc is set, save OCaml sexp output for parity comparison
+            if rust_bsc_path.is_some() {
+                let ocaml_sexp_path = ocaml_build_path_abs.join(format!("{basename}.ocaml-sexp"));
+                let _ = std::fs::write(&ocaml_sexp_path, &err);
+            }
+
             // After normal compilation succeeds, optionally run --bsc subprocess for sexp generation
             let mut warnings = if helpers::contains_ascii_characters(&err) {
                 if package.is_local_dep {
@@ -1131,7 +1142,7 @@ fn compile_file(
                     .unwrap();
 
                 let mut sexp_args = sexp_args_base;
-                sexp_args.push("-dtyped-sexp-locs".to_string());
+                sexp_args.push("-dtyped-sexp".to_string());
 
                 match Command::new(bsc_path)
                     .current_dir(&cwd)
@@ -1151,7 +1162,7 @@ fn compile_file(
                             buf
                         });
 
-                        let timeout = std::time::Duration::from_secs(30);
+                        let timeout = std::time::Duration::from_millis(100);
                         let start = std::time::Instant::now();
                         let mut timed_out = false;
                         let mut exit_status = None;
@@ -1179,7 +1190,7 @@ fn compile_file(
 
                         if timed_out {
                             let _ = std::fs::write(&sexp_path, "");
-                            let msg = format!("Timeout (30s) generating sexp for `{module_name}`");
+                            let msg = format!("Timeout ({:.1}s) generating sexp for `{module_name}`", timeout.as_secs_f64());
                             log::warn!("{}", msg);
                             warnings = Some(
                                 warnings.map_or(msg.clone(), |w| format!("{w}\n{msg}")),

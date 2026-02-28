@@ -195,6 +195,76 @@ if [[ "$SKIP_BUILD" != "true" ]]; then
     echo ""
 fi
 
+# ============================================================
+# TELLA MODE: Compare .sexp and .ocaml-sexp files from lib/ocaml/
+# Both are generated during `rescript build --bsc` — no per-file bsc needed
+# ============================================================
+if [[ "$TELLA_MODE" == "true" ]]; then
+    OCAML_SEXP_DIR="$TEST_PROJECT/lib/ocaml"
+    echo -e "${BOLD}Step 2: Comparing sexp files from $OCAML_SEXP_DIR ...${RESET}"
+    echo ""
+
+    mkdir -p "$TEMP_DIR/diffs"
+
+    OCAML_PASS=0 OCAML_FAIL=0
+    RUST_PASS=0 RUST_FAIL=0 RUST_TIMEOUTS=0 RUST_CRASHES=0
+    PARITY_PASS=0 PARITY_FAIL=0
+    OCAML_FAILURES=""
+    RUST_FAILURES=""
+    RUST_TIMEOUT_LIST=""
+    RUST_CRASH_LIST=""
+    PARITY_FAILURES=""
+
+    # Iterate over all .ocaml-sexp files (one per successfully compiled module)
+    for ocaml_sexp in "$OCAML_SEXP_DIR"/*.ocaml-sexp; do
+        [[ -f "$ocaml_sexp" ]] || continue
+        basename_no_ext=$(basename "$ocaml_sexp" .ocaml-sexp)
+        rust_sexp="$OCAML_SEXP_DIR/${basename_no_ext}.sexp"
+
+        # OCaml sexp exists (file was compiled)
+        if [[ -s "$ocaml_sexp" ]]; then
+            OCAML_PASS=$((OCAML_PASS + 1))
+        else
+            OCAML_FAIL=$((OCAML_FAIL + 1))
+            OCAML_FAILURES="$OCAML_FAILURES  $basename_no_ext\n"
+            continue
+        fi
+
+        # Check Rust sexp
+        if [[ -f "$rust_sexp" && -s "$rust_sexp" ]]; then
+            RUST_PASS=$((RUST_PASS + 1))
+
+            # Compare
+            if diff -a -q "$ocaml_sexp" "$rust_sexp" > /dev/null 2>&1; then
+                PARITY_PASS=$((PARITY_PASS + 1))
+            else
+                PARITY_FAIL=$((PARITY_FAIL + 1))
+                PARITY_FAILURES="$PARITY_FAILURES  $basename_no_ext\n"
+                diff -a -u "$ocaml_sexp" "$rust_sexp" > "$TEMP_DIR/diffs/${basename_no_ext}.diff" 2>&1 || true
+            fi
+        elif [[ -f "$rust_sexp" && ! -s "$rust_sexp" ]]; then
+            # Empty = timeout
+            RUST_FAIL=$((RUST_FAIL + 1))
+            RUST_TIMEOUTS=$((RUST_TIMEOUTS + 1))
+            RUST_TIMEOUT_LIST="$RUST_TIMEOUT_LIST  $basename_no_ext\n"
+        else
+            # Missing = crash
+            RUST_FAIL=$((RUST_FAIL + 1))
+            RUST_CRASHES=$((RUST_CRASHES + 1))
+            RUST_CRASH_LIST="$RUST_CRASH_LIST  $basename_no_ext\n"
+        fi
+    done
+
+    # Also count modules that have .sexp but no .ocaml-sexp (shouldn't happen, but just in case)
+    TOTAL_OCAML=$((OCAML_PASS + OCAML_FAIL))
+    echo -e "Found ${BOLD}$TOTAL_OCAML${RESET} modules with OCaml sexp"
+    echo ""
+
+else
+# ============================================================
+# NORMAL MODE: Per-file bsc invocation
+# ============================================================
+
 # Find test files based on arguments
 cd "$PROJECT_ROOT"
 
@@ -205,23 +275,13 @@ if [[ -n "$FILE_ARG" ]]; then
     elif [[ -f "$PROJECT_ROOT/$FILE_ARG" ]]; then
         echo "$FILE_ARG" > "$TEMP_DIR/files.txt"
     else
-        # Treat as a pattern
-        if [[ "$TELLA_MODE" == "true" ]]; then
-            find "$TEST_PROJECT/src" "$TEST_PROJECT/lambda/src" "$TEST_PROJECT/chrome/src" "$TEST_PROJECT/scripts" \
-                -name "*.res" -type f 2>/dev/null | grep -E "$FILE_ARG" | sort > "$TEMP_DIR/files.txt" || true
-        else
-            find tests/tests/src -name "*.res" 2>/dev/null | grep -E "$FILE_ARG" | sort > "$TEMP_DIR/files.txt" || true
-        fi
+        find tests/tests/src -name "*.res" 2>/dev/null | grep -E "$FILE_ARG" | sort > "$TEMP_DIR/files.txt" || true
         if [[ ! -s "$TEMP_DIR/files.txt" ]]; then
             echo -e "${RED}Error: No files found matching '$FILE_ARG'${RESET}"
             echo "Hint: Try a pattern like 'Core_Array' or a full path"
             exit 1
         fi
     fi
-elif [[ "$TELLA_MODE" == "true" ]]; then
-    # Find all .res files in tella webapp source directories
-    find "$TEST_PROJECT/src" "$TEST_PROJECT/lambda/src" "$TEST_PROJECT/chrome/src" "$TEST_PROJECT/scripts" \
-        -name "*.res" -type f 2>/dev/null | sort > "$TEMP_DIR/files.txt"
 else
     # Find all .res files in tests/tests/src
     find tests/tests/src -name "*.res" -type f 2>/dev/null | sort > "$TEMP_DIR/files.txt"
@@ -242,7 +302,7 @@ mkdir -p "$RESULTS_DIR"
 mkdir -p "$TEMP_DIR/diffs"
 
 # Export variables for parallel execution
-export OCAML_BSC RUST_BSC RESCRIPT_CLI TIMEOUT_SECONDS TEMP_DIR QUICK_MODE VERBOSE RUST_AVAILABLE PROJECT_ROOT RESULTS_DIR TEST_PROJECT TELLA_MODE
+export OCAML_BSC RUST_BSC RESCRIPT_CLI TIMEOUT_SECONDS TEMP_DIR QUICK_MODE VERBOSE RUST_AVAILABLE PROJECT_ROOT RESULTS_DIR TEST_PROJECT
 
 # Function to test a single file - writes results to a file
 test_single_file() {
@@ -291,24 +351,21 @@ test_single_file() {
 
     if [[ -z "$compiler_args_json" ]]; then
         # If compiler-args fails, try direct compilation
-        # Run OCaml compiler directly
         if timeout "$TIMEOUT_SECONDS" "$OCAML_BSC" -dtyped-sexp "$full_file_path" 2> "$file_temp/ocaml.sexp" 1>/dev/null; then
             ocaml_pass=1
         else
             ocaml_fail=1
         fi
 
-        if [[ "$RUST_AVAILABLE" == "true" && "$TELLA_MODE" != "true" ]]; then
+        if [[ "$RUST_AVAILABLE" == "true" ]]; then
             run_rust_bsc -dtyped-sexp "$full_file_path" 2> "$file_temp/rust.sexp" 1>/dev/null
         fi
     else
-        # Extract compiler args from JSON and build command
         # Parse the compiler_args array from JSON
         local args
         args=$(echo "$compiler_args_json" | python3 -c "import sys, json; d=json.load(sys.stdin); print(' '.join(d.get('compiler_args', [])))" 2>/dev/null) || args=""
 
         if [[ -n "$args" ]]; then
-            # Run OCaml compiler with the args + -dtyped-sexp
             cd "$TEST_PROJECT/lib/bs"
             if timeout "$TIMEOUT_SECONDS" "$OCAML_BSC" -dtyped-sexp $args 2> "$file_temp/ocaml.sexp" 1>/dev/null; then
                 ocaml_pass=1
@@ -316,30 +373,7 @@ test_single_file() {
                 ocaml_fail=1
             fi
 
-            if [[ "$TELLA_MODE" == "true" ]]; then
-                # In tella mode, Rust sexp was already generated by rewatch --bsc
-                # Find it in lib/ocaml/ by extracting the .ast basename from args
-                local ast_file=$(echo "$args" | tr ' ' '\n' | grep '\.ast$' | head -1)
-                if [[ -n "$ast_file" ]]; then
-                    local ast_basename=$(basename "$ast_file" .ast)
-                    local rust_sexp_path="$TEST_PROJECT/lib/ocaml/${ast_basename}.sexp"
-                    if [[ -f "$rust_sexp_path" && -s "$rust_sexp_path" ]]; then
-                        cp "$rust_sexp_path" "$file_temp/rust.sexp"
-                        rust_pass=1
-                    elif [[ -f "$rust_sexp_path" && ! -s "$rust_sexp_path" ]]; then
-                        # Empty sexp = timeout during rewatch build
-                        rust_timeout=1
-                        rust_fail=1
-                    else
-                        # No sexp file = crash during rewatch build
-                        rust_crash=1
-                        rust_fail=1
-                    fi
-                else
-                    rust_fail=1
-                fi
-            elif [[ "$RUST_AVAILABLE" == "true" ]]; then
-                # Run Rust compiler per-file
+            if [[ "$RUST_AVAILABLE" == "true" ]]; then
                 run_rust_bsc -dtyped-sexp $args 2> "$file_temp/rust.sexp" 1>/dev/null
             fi
             cd "$PROJECT_ROOT"
@@ -414,11 +448,6 @@ else
 fi
 
 # Aggregate results
-echo ""
-echo -e "${BOLD}Results${RESET}"
-echo "========"
-
-# Count results
 OCAML_PASS=0 OCAML_FAIL=0
 RUST_PASS=0 RUST_FAIL=0 RUST_TIMEOUTS=0 RUST_CRASHES=0
 PARITY_PASS=0 PARITY_FAIL=0
@@ -464,6 +493,8 @@ for result_file in "$RESULTS_DIR"/*.result; do
         fi
     fi
 done
+
+fi # end normal mode
 
 echo -e "OCaml bsc:    ${GREEN}$OCAML_PASS passed${RESET}, ${RED}$OCAML_FAIL failed${RESET}"
 if [[ "$RUST_AVAILABLE" == "true" ]]; then
