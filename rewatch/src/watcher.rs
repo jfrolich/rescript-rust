@@ -68,6 +68,7 @@ struct AsyncWatchArgs<'a> {
     warn_error: Option<String>,
     use_rust_parser: bool,
     dump_typed_sexp: bool,
+    rust_bsc_path: Option<std::path::PathBuf>,
 }
 
 async fn async_watch(
@@ -82,6 +83,7 @@ async fn async_watch(
         warn_error,
         use_rust_parser,
         dump_typed_sexp,
+        rust_bsc_path,
     }: AsyncWatchArgs<'_>,
 ) -> Result<()> {
     let mut build_state: build::build_types::BuildCommandState = build::initialize_build(
@@ -93,6 +95,7 @@ async fn async_watch(
         warn_error,
         use_rust_parser,
         dump_typed_sexp,
+        rust_bsc_path.clone(),
     )
     .with_context(|| "Could not initialize build")?;
     let mut needs_compile_type = CompileType::Incremental;
@@ -292,6 +295,7 @@ async fn async_watch(
                     build_state.get_warn_error_override(),
                     build_state.use_rust_parser(),
                     build_state.dump_typed_sexp(),
+                    build_state.rust_bsc_path().cloned(),
                 )
                 .expect("Could not initialize build");
                 let _ = build::incremental_build(
@@ -341,6 +345,7 @@ pub fn start(
     warn_error: Option<String>,
     use_rust_parser: bool,
     dump_typed_sexp: bool,
+    rust_bsc_path: Option<std::path::PathBuf>,
 ) -> Result<()> {
     futures::executor::block_on(async {
         let queue = Arc::new(FifoQueue::<Result<Event, Error>>::new());
@@ -369,6 +374,7 @@ pub fn start(
             warn_error: warn_error.clone(),
             use_rust_parser,
             dump_typed_sexp,
+            rust_bsc_path,
         })
         .await
     })

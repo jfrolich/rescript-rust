@@ -232,6 +232,13 @@ pub struct DumpTypedSexpArg {
 }
 
 #[derive(Args, Debug, Clone)]
+pub struct BscArg {
+    /// Path to bsc binary for typed-sexp compilation (subprocess with timeout instead of in-process).
+    #[arg(long)]
+    pub bsc: Option<String>,
+}
+
+#[derive(Args, Debug, Clone)]
 pub struct BuildArgs {
     #[command(flatten)]
     pub folder: FolderArg,
@@ -256,6 +263,9 @@ pub struct BuildArgs {
 
     #[command(flatten)]
     pub dump_typed_sexp: DumpTypedSexpArg,
+
+    #[command(flatten)]
+    pub bsc_arg: BscArg,
 
     /// Disable output timing
     #[arg(short, long, default_value_t = false, num_args = 0..=1)]
@@ -449,6 +459,9 @@ pub struct WatchArgs {
 
     #[command(flatten)]
     pub dump_typed_sexp: DumpTypedSexpArg,
+
+    #[command(flatten)]
+    pub bsc_arg: BscArg,
 }
 
 impl From<BuildArgs> for WatchArgs {
@@ -462,6 +475,7 @@ impl From<BuildArgs> for WatchArgs {
             warn_error: build_args.warn_error,
             rust: build_args.rust,
             dump_typed_sexp: build_args.dump_typed_sexp,
+            bsc_arg: build_args.bsc_arg,
         }
     }
 }

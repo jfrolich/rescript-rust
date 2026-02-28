@@ -65,6 +65,7 @@ fn main() -> Result<()> {
                 );
             }
 
+            let rust_bsc_path = build_args.bsc_arg.bsc.as_ref().map(std::path::PathBuf::from);
             match build::build(
                 &build_args.filter,
                 Path::new(&build_args.folder as &str),
@@ -75,6 +76,7 @@ fn main() -> Result<()> {
                 (*build_args.warn_error).clone(),
                 *build_args.rust,
                 *build_args.dump_typed_sexp,
+                rust_bsc_path,
             ) {
                 Err(e) => {
                     eprintln!("{:#}", e);
@@ -103,6 +105,7 @@ fn main() -> Result<()> {
                 );
             }
 
+            let rust_bsc_path = watch_args.bsc_arg.bsc.as_ref().map(std::path::PathBuf::from);
             match watcher::start(
                 &watch_args.filter,
                 show_progress,
@@ -113,6 +116,7 @@ fn main() -> Result<()> {
                 (*watch_args.warn_error).clone(),
                 *watch_args.rust,
                 *watch_args.dump_typed_sexp,
+                rust_bsc_path,
             ) {
                 Err(e) => {
                     eprintln!("{:#}", e);
