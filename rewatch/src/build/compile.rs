@@ -958,6 +958,10 @@ fn compile_file(
     // huge output in memory (e.g., Icon.res produces 882MB of sexp).
     let ocaml_sexp_file = if needs_sexp {
         let path = ocaml_build_path_abs.join(format!("{basename}.ocaml-sexp"));
+        // Ensure the output directory exists (it may not on clean builds)
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
         Some(std::fs::File::create(&path).map_err(|e| anyhow!("Failed to create sexp file: {e}"))?)
     } else {
         None
