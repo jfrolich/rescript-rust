@@ -145,7 +145,9 @@ fi
 
 # Create temp directory
 TEMP_DIR=$(mktemp -d)
-trap "rm -rf $TEMP_DIR" EXIT
+CACHE_DIR=".parity-cache"
+mkdir -p "$CACHE_DIR/tests/diffs" "$CACHE_DIR/tests/ocaml" "$CACHE_DIR/tests/rust"
+trap "cp -r $TEMP_DIR/diffs/* $CACHE_DIR/tests/diffs/ 2>/dev/null; rm -rf $TEMP_DIR" EXIT
 
 if [[ "$TELLA_MODE" == "true" ]]; then
     echo -e "${BOLD}Typed Tree Parity Test (tella-fusion)${RESET}"
@@ -348,7 +350,10 @@ test_single_file() {
         else
             parity_fail=1
             # Save diff for inspection
-            diff -u "$file_temp/ocaml.sexp" "$file_temp/rust.sexp" > "$TEMP_DIR/diffs/$safe_name.diff" 2>&1 || true
+            diff -ua "$file_temp/ocaml.sexp" "$file_temp/rust.sexp" > "$TEMP_DIR/diffs/$safe_name.diff" 2>&1 || true
+            # Save sexp files to persistent cache
+            cp "$file_temp/ocaml.sexp" "$CACHE_DIR/tests/ocaml/$safe_name.sexp" 2>/dev/null || true
+            cp "$file_temp/rust.sexp" "$CACHE_DIR/tests/rust/$safe_name.sexp" 2>/dev/null || true
         fi
     fi
 
@@ -516,7 +521,15 @@ if [[ "$RUST_AVAILABLE" == "true" ]]; then
         if [[ "$PARITY_FAIL" -eq 0 ]]; then
             echo -e "${GREEN}${BOLD}SUCCESS: All $PARITY_PASS files have matching typed trees!${RESET}"
         else
-            echo -e "${YELLOW}${BOLD}Parity: $PARITY_PASS/$BOTH_SUCCEEDED files match ($PARITY_PCT%)${RESET}"
+            # Count total hunks across all diff files
+            TOTAL_HUNKS=0
+            for diff_file in "$TEMP_DIR"/diffs/*.diff; do
+                if [[ -f "$diff_file" ]]; then
+                    file_hunks=$(grep -c '^@@' "$diff_file" 2>/dev/null || echo 0)
+                    TOTAL_HUNKS=$((TOTAL_HUNKS + file_hunks))
+                fi
+            done
+            echo -e "${YELLOW}${BOLD}Parity: $PARITY_PASS/$BOTH_SUCCEEDED files match ($PARITY_PCT%), $TOTAL_HUNKS hunk mismatches${RESET}"
         fi
     fi
 fi
