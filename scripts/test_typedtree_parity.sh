@@ -485,7 +485,7 @@ if [[ "$RUST_AVAILABLE" == "true" && "$RUST_TIMEOUTS" -gt 0 ]]; then
     echo -e "$RUST_TIMEOUT_LIST"
 fi
 
-if [[ "$RUST_AVAILABLE" == "true" && "$RUST_CRASHES" -gt 0 ]]; then
+if [[ "$RUST_AVAILABLE" == "true" && "$RUST_CRASHES" -gt 0 && "$RUST_CRASHES" -le 50 ]]; then
     echo ""
     echo -e "${RED}Rust crashes ($RUST_CRASHES):${RESET}"
     echo -e "$RUST_CRASH_LIST"
