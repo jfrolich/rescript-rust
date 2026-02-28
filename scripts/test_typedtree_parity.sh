@@ -179,10 +179,23 @@ if [[ "$SKIP_BUILD" != "true" ]]; then
     echo -e "${BOLD}Step 1: Building project with rewatch...${RESET}"
     cd "$BUILD_DIR"
     if [[ "$TELLA_MODE" == "true" ]]; then
-        # Build with --bsc to generate Rust sexp via rewatch subprocess (with timeout)
-        echo "Building with --bsc $RUST_BSC (rewatch handles parallelism + 30s timeout per module)..."
-        if ! RESCRIPT_BSC_EXE="$OCAML_BSC" "$RESCRIPT_CLI" build --bsc "$RUST_BSC" 2>&1 | tail -5; then
-            echo -e "${YELLOW}Warning: Some files may have failed to build${RESET}"
+        OCAML_SEXP_DIR="$TEST_PROJECT/lib/ocaml"
+        OCAML_SEXP_COUNT=$(find "$OCAML_SEXP_DIR" -name "*.ocaml-sexp" 2>/dev/null | wc -l | tr -d ' ')
+
+        if [[ "$OCAML_SEXP_COUNT" -gt 0 ]]; then
+            # OCaml sexp cached from a previous run — just run Rust subprocess (fast, ~52s)
+            echo "Using $OCAML_SEXP_COUNT cached OCaml sexp files"
+            echo "Generating Rust sexp with --bsc $RUST_BSC ..."
+            if ! RESCRIPT_BSC_EXE="$OCAML_BSC" "$RESCRIPT_CLI" build --bsc "$RUST_BSC" "$TELLA_DIR" 2>&1 | tail -5; then
+                echo -e "${YELLOW}Warning: Some files may have failed to build${RESET}"
+            fi
+        else
+            # First run — generate both OCaml + Rust sexp in one pass (slow, ~10min)
+            echo "No cached OCaml sexp found. Generating both OCaml + Rust sexp..."
+            echo "(This is a one-time operation. Subsequent runs will be fast.)"
+            if ! RESCRIPT_BSC_EXE="$OCAML_BSC" "$RESCRIPT_CLI" build --dump-typed-sexp --bsc "$RUST_BSC" "$TELLA_DIR" 2>&1 | tail -5; then
+                echo -e "${YELLOW}Warning: Some files may have failed to build${RESET}"
+            fi
         fi
     else
         # Use the standard OCaml bsc for the initial build
