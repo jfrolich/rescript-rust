@@ -115,3 +115,4 @@ tmp_diffs
 
 # Parity test cache (generated diffs/summaries, inspected by LLM agents)
 .parity-cache/
+.claude
