@@ -222,6 +222,7 @@ pub fn compile(
                                 .expect("Package not found");
 
                             let rust_bsc = build_state.rust_bsc_path.as_deref();
+                            let dump_typed_sexp = build_state.dump_typed_sexp;
                             let interface_result = match source_file.interface.to_owned() {
                                 Some(Interface { path, .. }) => {
                                     let result = compile_file(
@@ -236,6 +237,7 @@ pub fn compile(
                                         build_state.use_rust_parser,
                                         stored_asts_ref,
                                         rust_bsc,
+                                        dump_typed_sexp,
                                     );
                                     Some(result)
                                 }
@@ -253,6 +255,7 @@ pub fn compile(
                                 build_state.use_rust_parser,
                                 stored_asts_ref,
                                 rust_bsc,
+                                dump_typed_sexp,
                             );
                             let cmi_digest_after = helpers::compute_file_hash(Path::new(&cmi_path));
 
@@ -723,6 +726,7 @@ fn compile_file(
     use_rust_parser: bool,
     stored_asts: Option<&std::sync::Mutex<ahash::AHashMap<String, super::build_types::StoredAst>>>,
     rust_bsc_path: Option<&Path>,
+    dump_typed_sexp: bool,
 ) -> Result<Option<String>> {
     let BuildState {
         packages,
@@ -943,10 +947,21 @@ fn compile_file(
     }
 
 
-    // When --bsc is set, also add -dtyped-sexp to OCaml bsc for parity comparison
-    if rust_bsc_path.is_some() {
+    let needs_sexp = dump_typed_sexp || rust_bsc_path.is_some();
+
+    // When --dump-typed-sexp or --bsc is set, add -dtyped-sexp to OCaml bsc
+    if needs_sexp {
         to_mjs_args.push("-dtyped-sexp".to_string());
     }
+
+    // When generating sexp, redirect stderr directly to file to avoid buffering
+    // huge output in memory (e.g., Icon.res produces 882MB of sexp).
+    let ocaml_sexp_file = if needs_sexp {
+        let path = ocaml_build_path_abs.join(format!("{basename}.ocaml-sexp"));
+        Some(std::fs::File::create(&path).map_err(|e| anyhow!("Failed to create sexp file: {e}"))?)
+    } else {
+        None
+    };
 
     let to_mjs = Command::new(&compiler_info.bsc_path)
         .current_dir(
@@ -957,13 +972,23 @@ fn compile_file(
                 .unwrap(),
         )
         .args(to_mjs_args)
+        .stderr(match ocaml_sexp_file {
+            Some(f) => std::process::Stdio::from(f),
+            None => std::process::Stdio::piped(),
+        })
         .output();
 
     match to_mjs {
         Ok(x) if !x.status.success() => {
-            let stderr = String::from_utf8_lossy(&x.stderr);
+            let stderr = if needs_sexp {
+                // stderr was redirected to file — read error from there
+                let sexp_path = ocaml_build_path_abs.join(format!("{basename}.ocaml-sexp"));
+                std::fs::read_to_string(&sexp_path).unwrap_or_default()
+            } else {
+                String::from_utf8_lossy(&x.stderr).to_string()
+            };
             let stdout = String::from_utf8_lossy(&x.stdout);
-            Err(anyhow!(stderr.to_string() + &stdout))
+            Err(anyhow!(stderr + &stdout))
         }
         Err(e) => Err(anyhow!(
             "Could not compile file. Error: {e}. Path to AST: {ast_path:?}"
@@ -1113,12 +1138,6 @@ fn compile_file(
                         execute_post_build_command(&js_post_build.cmd, &js_file)?;
                     }
                 }
-            }
-
-            // When --bsc is set, save OCaml sexp output for parity comparison
-            if rust_bsc_path.is_some() {
-                let ocaml_sexp_path = ocaml_build_path_abs.join(format!("{basename}.ocaml-sexp"));
-                let _ = std::fs::write(&ocaml_sexp_path, &err);
             }
 
             // After normal compilation succeeds, optionally run --bsc subprocess for sexp generation

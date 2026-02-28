@@ -238,6 +238,13 @@ pub struct BscArg {
     pub bsc: Option<String>,
 }
 
+#[derive(Args, Debug, Clone, Copy)]
+pub struct DumpTypedSexpArg {
+    /// Dump typed tree as sexp to .ocaml-sexp files in lib/ocaml/ during compilation.
+    #[arg(long)]
+    pub dump_typed_sexp: bool,
+}
+
 #[derive(Args, Debug, Clone)]
 pub struct BuildArgs {
     #[command(flatten)]
@@ -266,6 +273,9 @@ pub struct BuildArgs {
 
     #[command(flatten)]
     pub bsc_arg: BscArg,
+
+    #[command(flatten)]
+    pub dump_typed_sexp_arg: DumpTypedSexpArg,
 
     /// Disable output timing
     #[arg(short, long, default_value_t = false, num_args = 0..=1)]
@@ -462,6 +472,9 @@ pub struct WatchArgs {
 
     #[command(flatten)]
     pub bsc_arg: BscArg,
+
+    #[command(flatten)]
+    pub dump_typed_sexp_arg: DumpTypedSexpArg,
 }
 
 impl From<BuildArgs> for WatchArgs {
@@ -476,6 +489,7 @@ impl From<BuildArgs> for WatchArgs {
             rust: build_args.rust,
             dump_typed_sexp: build_args.dump_typed_sexp,
             bsc_arg: build_args.bsc_arg,
+            dump_typed_sexp_arg: build_args.dump_typed_sexp_arg,
         }
     }
 }
