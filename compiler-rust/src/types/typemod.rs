@@ -6129,10 +6129,14 @@ fn type_structure_item<'a>(
                 ),
             };
 
-            let typed_mod =
-                type_module_expr_with_alias(tctx, env, arena, arena.get_mod_expr(mb.pmb_expr), true)?;
+            // Create module ident BEFORE typing body (matches OCaml typemod.ml:1454)
+            // This ensures binding_time < all internal idents, so
+            // lower_nongen(binding_time - 1) can reach internal non-generic Tvars.
             let mod_name_str = arena.get_string(mb.pmb_name.txt);
             let mod_id = Ident::create_local(mod_name_str);
+
+            let typed_mod =
+                type_module_expr_with_alias(tctx, env, arena, arena.get_mod_expr(mb.pmb_expr), true)?;
 
             // Extend environment with the new module
             // Use semantic_mod_type from Pmod_ident, or extract from typed structure

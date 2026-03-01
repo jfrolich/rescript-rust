@@ -2480,8 +2480,6 @@ fn generalize_rec(ctx: &TypeContext<'_>, ty: TypeExprRef) {
     if level > current && level != GENERIC_LEVEL {
         // Mark as generic
         ctx.set_level(ty, GENERIC_LEVEL);
-        // Recursively generalize children only when this node is promoted,
-        // matching OCaml's recursive generalize implementation.
         iter_type_expr(ctx, ty, |child| {
             generalize_rec(ctx, child);
         });
@@ -4629,7 +4627,7 @@ fn copy_type_cached(
                 }
                 CopyAction::Constr { path, args } => {
                     if args.is_empty() && level == GENERIC_LEVEL {
-                        // Check simple_abbrevs (cross-instance sharing from lower_args)
+                        // Check simple_abbrevs (cross-instance sharing from expansion)
                         if let Some(abbrev_ty) = ctx.find_simple_abbrev(&path) {
                             if ctx.repr(abbrev_ty) != placeholder {
                                 // Hit: creates sharing via Tlink to memo node

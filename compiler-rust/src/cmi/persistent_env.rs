@@ -72,6 +72,11 @@ impl PersistentEnv {
         }
     }
 
+    /// Check if a directory is already in the load path.
+    pub fn load_path_contains(&self, path: &PathBuf) -> bool {
+        self.load_path.contains(path)
+    }
+
     /// Find and load a module by name.
     /// Returns the cached signature, or None if the module cannot be found.
     pub fn find_pers_struct<'a>(

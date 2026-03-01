@@ -469,6 +469,12 @@ pub fn compile_source_to_js_with_options(
     let (typed_structure, _final_env) = type_structure(&mut tctx, &env, parser.arena(), &structure)
         .map_err(|e| anyhow!("Type checking failed: {e:?}"))?;
 
+    // Apply interface constraints: moregen linking for non-generic Tvars.
+    // OCaml's Includemod.compunit -> moregeneral -> moregen links weak (non-generic)
+    // type variables from value-restricted expressions to the corresponding types
+    // from the .resi interface. This happens BEFORE sexp serialization.
+    apply_moregen_constraints(&mut tctx, &type_ctx, &typed_structure, options);
+
     // Print typed tree if requested
     if options.dump_typed_sexp {
         let mut stderr = std::io::stderr();
@@ -715,6 +721,8 @@ pub fn typecheck_and_dump_sexp<W: std::io::Write>(
         let (typed_structure, _final_env) = type_structure(&mut tctx, &env, parser.arena(), &structure)
             .map_err(|e| anyhow!("Type checking failed: {e:?}"))?;
 
+        apply_moregen_constraints(&mut tctx, &type_ctx, &typed_structure, options);
+
         print_typed_structure_with_locs(parser.arena(), &type_ctx, &typed_structure, writer)
             .map_err(|e| anyhow!("Failed to write sexp: {e}"))?;
     }
@@ -722,19 +730,331 @@ pub fn typecheck_and_dump_sexp<W: std::io::Write>(
     Ok(())
 }
 
-// NOTE: Interface constraint propagation (apply_interface_constraints) was
-// investigated and found unviable at the current stage. The approach of
-// unifying impl types with .resi CMI types after type_structure causes:
-// 1. Crashes on auto-generated CMIs (fixed by .resi check)
-// 2. Regressions on other tests (-2 parity, +40 hunks) due to unwanted
-//    type modifications through shared non-generic nodes
-// 3. Doesn't reach the target (reasonReact's actionless) because all
-//    types in Rust are fully generalized (Tvar at GENERIC_LEVEL),
-//    so instance() creates copies that don't propagate back
-// Root cause: Rust's level management differs from OCaml's — module-internal
-// Tvars get generalized to GENERIC_LEVEL when they shouldn't.
-// OCaml's generalize_structure/value_restriction keeps them at var_level,
-// and the link direction from unify preserves the low level through Tlink chains.
+/// Apply moregen-like interface constraints: link non-generic Tvars in the
+/// implementation to corresponding types from the .resi interface.
+///
+/// This matches OCaml's Includemod.compunit -> moregeneral -> moregen mechanism.
+/// OCaml runs this after type_structure but before sexp serialization. The key
+/// insight is that value-restricted expressions (like `basicComponent("interop")`)
+/// produce non-generic Tvars that `instance()` returns by identity. When moregen
+/// links these shared Tvars to interface types, ALL references update.
+fn apply_moregen_constraints(
+    tctx: &mut TypeCheckContext<'_>,
+    type_ctx: &TypeContext<'_>,
+    typed_structure: &crate::types::typedtree::Structure,
+    options: &CompilerOptions,
+) {
+    use crate::types::type_expr::TypeExprRef;
+    use crate::types::decl::SignatureItem;
+
+    let source_file = match &options.source_filename {
+        Some(f) => f,
+        None => return,
+    };
+
+    // Only apply when a .resi file exists
+    if !source_file.ends_with(".res") {
+        return;
+    }
+    let resi_file = format!("{}i", source_file);
+    if !std::path::Path::new(&resi_file).exists() {
+        return;
+    }
+
+    // Extract module name from source filename
+    let module_name = std::path::Path::new(source_file)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .map(|s| s.to_string());
+    let module_name = match module_name {
+        Some(n) => n,
+        None => return,
+    };
+
+    // Load the interface signature from CMI.
+    // Add the source directory to the load path (matching -bs-read-cmi behavior)
+    // so that find_pers_struct can locate the CMI from the same directory.
+    let iface_sig = {
+        let pers = match &mut tctx.persistent_env {
+            Some(p) => p,
+            None => return,
+        };
+        // Temporarily add source dir to load path
+        let source_dir = std::path::Path::new(source_file).parent()
+            .map(|d| d.to_path_buf())
+            .unwrap_or_else(|| PathBuf::from("."));
+        let already_in_path = pers.load_path_contains(&source_dir);
+        if !already_in_path {
+            pers.add_load_path(source_dir.clone());
+        }
+        let result = pers.find_pers_struct(&module_name, type_ctx)
+            .map(|ps| ps.ps_sig.clone());
+        match result {
+            Some(sig) => sig,
+            None => return,
+        }
+    };
+
+    // Build a map from value name -> interface type
+    let mut iface_val_types: std::collections::HashMap<String, TypeExprRef> =
+        std::collections::HashMap::new();
+    for item in &iface_sig {
+        if let SignatureItem::SigValue(id, vd) = item {
+            iface_val_types.insert(id.name().to_string(), vd.val_type);
+        }
+    }
+
+    // Walk top-level implementation structure items and match with interface.
+    // Also recurse into modules to find inner non-generic Tvars.
+    let mut debug = Vec::new();
+
+    // Debug: dump all top-level binding names and types
+    debug.push(format!("TOTAL TOP-LEVEL ITEMS: {}", typed_structure.str_items.len()));
+    for item in &typed_structure.str_items {
+        match &item.str_desc {
+            crate::types::typedtree::StructureItemDesc::Tstr_value(_, bindings) => {
+                for binding in bindings {
+                    let name = extract_pat_name(&binding.vb_pat);
+                    debug.push(format!("TOP-LEVEL VALUE: {:?}", name));
+                    if name.as_deref() == Some("wrapJsForReason") {
+                        debug.push(format!("=== wrapJsForReason pat_type={:?} level={}",
+                            binding.vb_pat.pat_type, type_ctx.get_level(type_ctx.repr(binding.vb_pat.pat_type))));
+                        dump_all_tvars(type_ctx, binding.vb_pat.pat_type, &mut debug, &mut std::collections::HashSet::new(), 0);
+                    }
+                }
+            }
+            crate::types::typedtree::StructureItemDesc::Tstr_module(mb) => {
+                debug.push(format!("TOP-LEVEL MODULE: {}", mb.mb_name.txt));
+            }
+            _ => {
+                debug.push(format!("TOP-LEVEL OTHER"));
+            }
+        }
+    }
+
+    moregen_link_structure(type_ctx, typed_structure, &iface_val_types, &mut debug);
+    if !debug.is_empty() {
+        use std::io::Write;
+        let debug_file = format!("/tmp/moregen_debug_{}.txt", module_name);
+        let mut f = std::fs::File::create(&debug_file).unwrap();
+        for line in &debug {
+            writeln!(f, "{}", line).unwrap();
+        }
+    }
+}
+
+fn moregen_link_structure(
+    type_ctx: &TypeContext<'_>,
+    structure: &crate::types::typedtree::Structure,
+    iface_val_types: &std::collections::HashMap<String, crate::types::type_expr::TypeExprRef>,
+    debug: &mut Vec<String>,
+) {
+    for item in &structure.str_items {
+        match &item.str_desc {
+            crate::types::typedtree::StructureItemDesc::Tstr_value(_, bindings) => {
+                for binding in bindings {
+                    let name = extract_pat_name(&binding.vb_pat);
+                    if let Some(ref name) = name {
+                        if let Some(&iface_ty) = iface_val_types.get(name) {
+                            debug.push(format!("moregen_link: {} impl={:?} iface={:?}",
+                                name, binding.vb_pat.pat_type, iface_ty));
+                            let iface_inst = crate::types::ctype::instance(type_ctx, iface_ty);
+                            moregen_link(type_ctx, binding.vb_pat.pat_type, iface_inst,
+                                &mut std::collections::HashSet::new(), debug);
+                        } else {
+                            debug.push(format!("no iface match: {}", name));
+                        }
+                    }
+                }
+            }
+            crate::types::typedtree::StructureItemDesc::Tstr_module(mb) => {
+                moregen_link_mod_expr(type_ctx, &mb.mb_expr, iface_val_types, debug);
+            }
+            _ => {}
+        }
+    }
+}
+
+fn moregen_link_mod_expr(
+    type_ctx: &TypeContext<'_>,
+    mod_expr: &crate::types::typedtree::ModuleExpr,
+    iface_val_types: &std::collections::HashMap<String, crate::types::type_expr::TypeExprRef>,
+    debug: &mut Vec<String>,
+) {
+    match &mod_expr.mod_desc {
+        crate::types::typedtree::ModuleExprDesc::Tmod_structure(s) => {
+            moregen_link_structure(type_ctx, s, iface_val_types, debug);
+        }
+        crate::types::typedtree::ModuleExprDesc::Tmod_constraint(inner, _, _, _) => {
+            moregen_link_mod_expr(type_ctx, inner, iface_val_types, debug);
+        }
+        _ => {}
+    }
+}
+
+fn dump_all_tvars(
+    ctx: &TypeContext<'_>,
+    ty: crate::types::type_expr::TypeExprRef,
+    debug: &mut Vec<String>,
+    seen: &mut std::collections::HashSet<crate::types::type_expr::TypeExprRef>,
+    depth: usize,
+) {
+    use crate::types::type_expr::{TypeDesc, GENERIC_LEVEL};
+    let ty = ctx.repr(ty);
+    if !seen.insert(ty) {
+        return;
+    }
+    let level = ctx.get_level(ty);
+    let desc = ctx.get_desc(ty);
+    let indent = "  ".repeat(depth);
+    match &*desc {
+        TypeDesc::Tvar(name) => {
+            let generic_str = if level == GENERIC_LEVEL { "GENERIC" } else { "NON-GENERIC" };
+            debug.push(format!("{}Tvar({:?}) {:?} {} level={}", indent, name, ty, generic_str, level));
+        }
+        TypeDesc::Tconstr { path, args, .. } => {
+            debug.push(format!("{}Tconstr({:?}) {:?} level={} args={}", indent, path, ty, level, args.len()));
+            let args = args.clone();
+            drop(desc);
+            for arg in &args {
+                dump_all_tvars(ctx, *arg, debug, seen, depth + 1);
+            }
+            return;
+        }
+        TypeDesc::Tarrow { arg, ret, .. } => {
+            let (at, r) = (arg.typ, *ret);
+            drop(desc);
+            dump_all_tvars(ctx, at, debug, seen, depth + 1);
+            dump_all_tvars(ctx, r, debug, seen, depth + 1);
+            return;
+        }
+        _ => {}
+    }
+    drop(desc);
+}
+
+fn extract_pat_name(
+    pat: &crate::types::typedtree::Pattern,
+) -> Option<String> {
+    match &pat.pat_desc {
+        crate::types::typedtree::PatternDesc::Tpat_var(id, _) => {
+            Some(id.name().to_string())
+        }
+        crate::types::typedtree::PatternDesc::Tpat_alias(_, id, _) => {
+            Some(id.name().to_string())
+        }
+        _ => None,
+    }
+}
+
+/// Check if two paths are compatible for moregen linking.
+/// OCaml's moregen uses path equality because both impl and iface have
+/// the same qualified paths (due to Subst.type_declaration). In Rust,
+/// impl has local Pident while iface has qualified Pdot, so we compare
+/// the leaf name instead.
+fn moregen_paths_compatible(p1: &crate::types::Path, p2: &crate::types::Path) -> bool {
+    use crate::types::Path;
+    if p1.same(p2) {
+        return true;
+    }
+    let leaf1 = match p1 {
+        Path::Pident(id) => id.name(),
+        Path::Pdot(_, name, _) => name.as_str(),
+        _ => return false,
+    };
+    let leaf2 = match p2 {
+        Path::Pident(id) => id.name(),
+        Path::Pdot(_, name, _) => name.as_str(),
+        _ => return false,
+    };
+    leaf1 == leaf2
+}
+
+/// Walk two types structurally and link non-generic Tvars in the impl
+/// to the corresponding interface types. Matches OCaml's moregen.
+fn moregen_link(
+    ctx: &TypeContext<'_>,
+    impl_ty: crate::types::type_expr::TypeExprRef,
+    iface_ty: crate::types::type_expr::TypeExprRef,
+    visited: &mut std::collections::HashSet<(crate::types::type_expr::TypeExprRef, crate::types::type_expr::TypeExprRef)>,
+    debug: &mut Vec<String>,
+) {
+    use crate::types::type_expr::{TypeDesc, GENERIC_LEVEL};
+
+    let impl_ty = ctx.repr(impl_ty);
+    let iface_ty = ctx.repr(iface_ty);
+    if impl_ty == iface_ty {
+        return;
+    }
+    if !visited.insert((impl_ty, iface_ty)) {
+        return;
+    }
+
+    let impl_desc = ctx.get_desc(impl_ty);
+    let iface_desc = ctx.get_desc(iface_ty);
+
+    match (&*impl_desc, &*iface_desc) {
+        (TypeDesc::Tvar(name), _) if ctx.get_level(impl_ty) != GENERIC_LEVEL => {
+            // Non-generic impl Tvar: link to interface type
+            let iface_summary = match &*iface_desc {
+                TypeDesc::Tvar(n) => format!("Tvar({:?})", n),
+                TypeDesc::Tconstr { path, .. } => format!("Tconstr({:?})", path),
+                _ => "other".to_string(),
+            };
+            debug.push(format!("  LINK {:?} Tvar({:?}) level={} -> {}",
+                impl_ty, name, ctx.get_level(impl_ty), iface_summary));
+            drop(impl_desc);
+            drop(iface_desc);
+            crate::types::ctype::link_type(ctx, impl_ty, iface_ty);
+        }
+        (TypeDesc::Tvar(name), _) => {
+            debug.push(format!("  SKIP generic {:?} Tvar({:?}) level={}",
+                impl_ty, name, ctx.get_level(impl_ty)));
+        }
+        (TypeDesc::Tconstr { path: p1, args: a1, .. },
+         TypeDesc::Tconstr { path: p2, args: a2, .. })
+            if moregen_paths_compatible(p1, p2) && a1.len() == a2.len() =>
+        {
+            debug.push(format!("  Tconstr match: {:?} ~ {:?} args={}", p1, p2, a1.len()));
+            let a1 = a1.clone();
+            let a2 = a2.clone();
+            drop(impl_desc);
+            drop(iface_desc);
+            for (a, b) in a1.iter().zip(a2.iter()) {
+                moregen_link(ctx, *a, *b, visited, debug);
+            }
+        }
+        (TypeDesc::Tarrow { arg: a1, ret: r1, .. },
+         TypeDesc::Tarrow { arg: a2, ret: r2, .. }) =>
+        {
+            debug.push(format!("  Tarrow match"));
+            let (a1t, r1) = (a1.typ, *r1);
+            let (a2t, r2) = (a2.typ, *r2);
+            drop(impl_desc);
+            drop(iface_desc);
+            moregen_link(ctx, a1t, a2t, visited, debug);
+            moregen_link(ctx, r1, r2, visited, debug);
+        }
+        (TypeDesc::Ttuple(t1), TypeDesc::Ttuple(t2)) if t1.len() == t2.len() => {
+            let t1 = t1.clone();
+            let t2 = t2.clone();
+            drop(impl_desc);
+            drop(iface_desc);
+            for (a, b) in t1.iter().zip(t2.iter()) {
+                moregen_link(ctx, *a, *b, visited, debug);
+            }
+        }
+        (TypeDesc::Tconstr { path: p1, args: a1, .. },
+         TypeDesc::Tconstr { path: p2, args: a2, .. }) =>
+        {
+            debug.push(format!("  Tconstr MISMATCH: impl={:?}({}) iface={:?}({})",
+                p1, a1.len(), p2, a2.len()));
+        }
+        _ => {
+            debug.push(format!("  NO match"));
+        }
+    }
+}
 
 /// Per-file configuration overrides extracted from `@@config({flags: [...]})`.
 #[derive(Debug, Default)]
