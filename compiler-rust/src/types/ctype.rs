@@ -940,10 +940,8 @@ fn try_expand_head<'a>(
                         memorize_simple_abbrev();
                         return Some(instance_for_expansion(ctx, manifest));
                     } else if params.len() == args.len() {
-                        let (fresh_params, fresh_body) =
-                            instance_parameterized_type(ctx, params, manifest);
                         memorize_simple_abbrev();
-                        return Some(subst_type(ctx, &fresh_params, &args, fresh_body));
+                        return Some(subst_with_memo(ctx, env, ty, abbrev, params, &args, manifest));
                     }
                 }
             }
