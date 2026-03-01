@@ -7612,12 +7612,32 @@ fn type_function(
         }
     };
 
-    if arg_label.is_optional() && default.is_none() {
+    // OCaml typecore.ml:3297-3302: ALWAYS wrap optional params in option.
+    // For optional params with defaults, the pattern and default are typed
+    // against the INNER type (before option wrapping), while the Tarrow arg
+    // gets the option-wrapped type.
+    let inner_ty = if arg_label.is_optional() {
         let tv = ctx.new_var(None);
         let option_ty = env.type_option(ctx, tv);
         unify_expression_types(tctx, loc, param_ty, option_ty, None)?;
         param_ty = option_ty;
-    }
+        tv
+    } else {
+        param_ty
+    };
+
+    // Type check default expression if present (against inner type, before option)
+    let typed_default = if let Some(default_expr) = default {
+        Some(Box::new(type_expect(
+            tctx,
+            env,
+            default_expr,
+            inner_ty,
+            None,
+        )?))
+    } else {
+        None
+    };
 
     // Match OCaml type_cases propagation logic (typecore.ml:3947-3999):
     // propagate = has_gadts || ty_arg at GENERIC_LEVEL || !is_var
@@ -7625,13 +7645,19 @@ fn type_function(
     // or ty_arg is generic. Simple variable patterns skip begin_def/generalize,
     // preserving non-generic identity for body lookups via Pexp_ident.
     let is_simple_param = is_simple_variable_pattern(tctx.arena, param);
-    let param_ty_repr = ctx.repr(param_ty);
+    // For optional params with defaults, the pattern sees the inner type
+    let pattern_ty = if default.is_some() && arg_label.is_optional() {
+        inner_ty
+    } else {
+        param_ty
+    };
+    let param_ty_repr = ctx.repr(pattern_ty);
     let param_ty_is_generic = ctx.get_level(param_ty_repr) == crate::types::GENERIC_LEVEL;
     let propagate = param_ty_is_generic || !is_simple_param;
 
     let mut state = PatternState::new();
     state.reset(true);
-    let param_pat_ty = crate::types::instance(ctx, param_ty);
+    let param_pat_ty = crate::types::instance(ctx, pattern_ty);
     if propagate {
         ctx.begin_def();
     }
@@ -7646,19 +7672,6 @@ fn type_function(
             crate::types::generalize(ctx, pat.pat_type);
         });
     }
-
-    // Type check default expression if present
-    let typed_default = if let Some(default_expr) = default {
-        Some(Box::new(type_expect(
-            tctx,
-            env,
-            default_expr,
-            param_ty,
-            None,
-        )?))
-    } else {
-        None
-    };
 
     // Match OCaml add_pattern_variables/type_cases: extend with pattern-bound
     // values using the types from type_pattern directly.
