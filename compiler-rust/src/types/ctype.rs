@@ -898,11 +898,10 @@ fn try_expand_head<'a>(
             let path = path.clone();
             let is_nullary = args.is_empty() && !path.head_name().starts_with('#');
 
-            // NOTE: simple_abbrevs linking was investigated and found unviable.
-            // The env changes between different Tconstr nodes of the same type,
-            // so check_abbrev_env clears the cache before the second node arrives.
-            // OCaml's sharing comes from Subst/components_of_module_maker creating
-            // physically shared source nodes, not from expansion-time linking.
+            // NOTE: simple_abbrevs linking creates cross-expansion sharing for
+            // nullary types within the same env. check_abbrev_env clears the cache
+            // when env changes, but multiple expansions of the same path within
+            // one env (e.g. record fields) share the same expansion node.
 
             let memorize_simple_abbrev = || {
                 // OCaml ctype.ml proper_abbrevs routes nullary non-object aliases
@@ -1487,20 +1486,24 @@ fn unify_after_expansion<'a>(
     let t1_expanded = ctx.repr(t1_expanded);
     let t2_expanded = ctx.repr(t2_expanded);
     if t1_expanded == t2_expanded {
-        if should_relink {
-            let from_ty = ctx.repr(from_expanded);
-            let to_ty = ctx.repr(to_original);
-            if from_ty != to_ty && !deep_occur(ctx, from_ty, to_ty) {
-                link_type(ctx, from_ty, to_ty);
-            }
-        }
+        // Both sides expanded to the same node. In OCaml, this is a
+        // complete no-op (link_type(same, same) is a no-op). Skip relink
+        // to avoid corrupting shared expansion nodes (e.g., from the
+        // nullary expansion cache).
         return Ok(());
     }
 
     unify(ctx, state, t1_expanded, t2_expanded)?;
 
     if should_relink {
-        let from_ty = ctx.repr(from_expanded);
+        // Use from_expanded directly (NOT ctx.repr) to avoid following
+        // link chains created by unify above. OCaml's unify3 links
+        // t1'→t2 BEFORE structural unification (where t1'=non-expanded repr,
+        // t2=expanded result). In Rust, structural unify may link
+        // from_expanded→expansion, so ctx.repr(from_expanded) would reach
+        // the expansion node. Using from_expanded directly preserves the
+        // expansion node and only modifies the non-expanded side.
+        let from_ty = from_expanded;
         let to_ty = ctx.repr(to_original);
         if from_ty != to_ty && !deep_occur(ctx, from_ty, to_ty) {
             link_type(ctx, from_ty, to_ty);

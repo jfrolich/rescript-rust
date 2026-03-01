@@ -92,6 +92,12 @@ pub struct TypeContext<'a> {
     /// Previous env ID for check_abbrev_env (OCaml ctype.ml:1272)
     previous_env_id: Cell<u64>,
 
+    /// Nullary expansion cache: maps nullary Tconstr paths to cached expansion
+    /// results. This matches OCaml's `find_expans` on `simple_abbrevs` which
+    /// returns `body0` — a stub unified with the expansion — so subsequent
+    /// expansions of the same path share the same node.
+    nullary_expansion_cache: RefCell<std::collections::HashMap<Path, TypeExprRef>>,
+
     /// Current abbreviation context during subst (OCaml: abbreviations = ref (ref Mnil)).
     /// Set during subst_with_memo so copy_type_cached can use find_repr to detect
     /// previously-expanded types and create Tlink sharing.
@@ -168,6 +174,7 @@ impl<'a> TypeContext<'a> {
             trace_gadt_instances: Cell::new(false),
             simple_abbrevs: RefCell::new(std::collections::HashMap::new()),
             previous_env_id: Cell::new(0),
+            nullary_expansion_cache: RefCell::new(std::collections::HashMap::new()),
             current_abbreviations: Cell::new(AbbrevMemoRef::nil()),
             types: RefCell::new(Vec::new()),
             // Index 0 is reserved as the canonical Mnil sentinel so
@@ -466,6 +473,21 @@ impl<'a> TypeContext<'a> {
     /// Clear simple abbreviations. Called during generalize/generalize_structure.
     pub fn clear_simple_abbrevs(&self) {
         self.simple_abbrevs.borrow_mut().clear();
+        self.nullary_expansion_cache.borrow_mut().clear();
+    }
+
+    /// Cache a nullary expansion result for cross-expansion sharing.
+    /// Matches OCaml's memorize_abbrev storing body0 in simple_abbrevs.
+    pub fn cache_nullary_expansion(&self, path: Path, expansion: TypeExprRef) {
+        let path = Self::canonicalize_simple_abbrev_path(&path);
+        self.nullary_expansion_cache.borrow_mut().insert(path, expansion);
+    }
+
+    /// Look up a cached nullary expansion.
+    /// Matches OCaml's find_expans on simple_abbrevs returning body0.
+    pub fn find_nullary_expansion(&self, path: &Path) -> Option<TypeExprRef> {
+        let path = Self::canonicalize_simple_abbrev_path(path);
+        self.nullary_expansion_cache.borrow().get(&path).copied()
     }
 
     /// Clear all per-node abbreviation memo chains (OCaml cleanup_abbrev).
