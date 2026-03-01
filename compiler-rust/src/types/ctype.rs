@@ -896,10 +896,11 @@ fn try_expand_head<'a>(
         TypeDesc::Tconstr { path, args, .. } => {
             let args = args.clone();
             let path = path.clone();
+            let is_nullary = args.is_empty() && !path.head_name().starts_with('#');
             let memorize_simple_abbrev = || {
                 // OCaml ctype.ml proper_abbrevs routes nullary non-object aliases
                 // through simple_abbrevs during abbreviation expansion (subst).
-                if args.is_empty() && !path.head_name().starts_with('#') {
+                if is_nullary {
                     ctx.memorize_simple_abbrev(path.clone(), ty);
                 }
             };
@@ -909,9 +910,6 @@ fn try_expand_head<'a>(
                 TypeDesc::Tconstr { abbrev, .. } => *abbrev,
                 _ => AbbrevMemoRef::nil(),
             };
-
-            // Memo lookup: disabled since find_repr in copy_type_cached is the
-            // main sharing mechanism (memo storage is for find_repr, not find_expans)
 
             // Try stamp-based lookup first (most precise, handles CMI-loaded types)
             let stamp = match &path {
@@ -2936,6 +2934,7 @@ fn instance_for_expansion(ctx: &TypeContext<'_>, ty: TypeExprRef) -> TypeExprRef
     }
 }
 
+/// Like instance_for_expansion, but also caches the result in simple_expansion_cache
 /// Instantiate a list of types, sharing variable substitutions across all of them.
 /// Matches OCaml's Ctype.instance_list.
 pub fn instance_list(ctx: &TypeContext<'_>, types: &[TypeExprRef]) -> Vec<TypeExprRef> {
@@ -4626,6 +4625,7 @@ fn copy_type_cached(
                         // Check simple_abbrevs (cross-instance sharing from lower_args)
                         if let Some(abbrev_ty) = ctx.find_simple_abbrev(&path) {
                             if ctx.repr(abbrev_ty) != placeholder {
+                                // Hit: creates sharing via Tlink to memo node
                                 TypeDesc::Tlink(abbrev_ty)
                             } else {
                                 TypeDesc::Tconstr {

@@ -416,12 +416,6 @@ fn sexp_type_expr(arena: &ParseArena, ctx: &TypeContext<'_>, te: TypeExprRef) ->
 fn sexp_type_expr_aux(arena: &ParseArena, ctx: &TypeContext<'_>, te: TypeExprRef, visited: &mut HashSet<TypeExprRef>) -> Sexp {
     let te = ctx.repr(te); // Follow Tlink chains
     // Cycle detection: permanently mark visited nodes to prevent infinite recursion.
-    // OCaml uses permanent marking with physical identity (Obj.repr). In Rust, arena
-    // indices mean shared nodes have the same TypeExprRef. The permanent marking matches
-    // OCaml's behavior for nodes that OCaml also shares (via Ctype.copy identity
-    // preservation). Where Rust over-shares relative to OCaml, this produces false
-    // "<cycle>" markers — those are fixed by improving sharing fidelity in the type
-    // checker (ctype.rs/typecore.rs), not in the serializer.
     if !visited.insert(te) {
         return Sexp::atom("<cycle>");
     }
