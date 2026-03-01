@@ -7982,20 +7982,32 @@ fn type_construct(
     };
 
     // Instantiate constructor: creates fresh type variables shared between
-    // cstr_res and cstr_args, matching OCaml's Ctype.instance_constructor
+    // cstr_res and cstr_args, matching OCaml's Ctype.instance_constructor.
+    // OCaml creates TWO instances (typecore.ml:3822+3856):
+    //   1. (ty_args, ty_res) = instance_constructor — used as ty_expected' in type_argument
+    //   2. (ty_args0, ty_res0) = instance_list(ty_res :: ty_args) — used as ty_expected in type_argument
+    // The second instance's ty_res0 is unified with the caller's expected_ty, resolving
+    // ty_args0 to concrete types (e.g., Tconstr(obj_coord)). Then type_argument calls
+    // unify_exp(result, ty_args0[i]) which links the expression's type to the alias.
     let (inst_arg_types, result_ty) = crate::types::instance_constructor(ctx, &cstr_desc);
-    unify_expression_types(tctx, loc, result_ty, expected_ty, None)?;
+
+    // Create second instance (OCaml's instance_list(ty_res :: ty_args))
+    let mut all_types = vec![result_ty];
+    all_types.extend_from_slice(&inst_arg_types);
+    let inst2 = crate::types::ctype::instance_list(ctx, &all_types);
+    let result_ty0 = inst2[0];
+    let inst_arg_types0 = &inst2[1..];
+
+    // Unify second instance's result with expected_ty (resolves inst_arg_types0)
+    unify_expression_types(tctx, loc, result_ty0, expected_ty, None)?;
 
     // Type check arguments
     let typed_args = match (inst_arg_types.as_slice(), arg) {
         (arg_types, Some(arg_expr)) if arg_types.len() == 1 => {
-            // Single argument
+            // Single argument: type_argument(e, ty_args[0], ty_args0[0])
             let typed_arg = type_expect(tctx, env, arg_expr, arg_types[0], None)?;
-            // Match OCaml `type_argument`: after typing against the primary
-            // expected arg type, unify the typed argument expression type with
-            // the constructor argument type so aliases can become the
-            // representative where appropriate.
-            unify_expression_types(tctx, loc, typed_arg.exp_type, arg_types[0], None)?;
+            // OCaml's type_argument: unify_exp with second instance (already resolved to alias)
+            unify_expression_types(tctx, loc, typed_arg.exp_type, inst_arg_types0[0], None)?;
             vec![typed_arg]
         }
         (arg_types, Some(arg_expr)) if arg_types.len() > 1 => {
@@ -8003,10 +8015,17 @@ fn type_construct(
             let tuple_ty = ctx.new_tuple(arg_types.to_vec());
             let typed_tuple = type_expect(tctx, env, arg_expr, tuple_ty, None)?;
             // Extract tuple elements
-            match &typed_tuple.exp_desc {
+            let elements = match &typed_tuple.exp_desc {
                 ExpressionDesc::Texp_tuple(elements) => elements.clone(),
                 _ => vec![typed_tuple], // Fallback if not a tuple
+            };
+            // OCaml's type_argument: unify each element's exp_type with second instance
+            // arg type (already resolved to alias like Tconstr(obj_coord)).
+            // This link_type in unify3's fallthrough preserves the type alias.
+            for (elem, arg_ty0) in elements.iter().zip(inst_arg_types0.iter()) {
+                let _ = unify_expression_types(tctx, loc, elem.exp_type, *arg_ty0, None);
             }
+            elements
         }
         (arg_types, None) if arg_types.is_empty() => {
             // Constant constructor with no arguments

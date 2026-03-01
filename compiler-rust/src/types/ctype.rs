@@ -1879,13 +1879,58 @@ fn unify_types<'a>(
                 .map(|(i, (&a, &b))| (i, a, b))
                 .collect();
 
-            // OCaml links t1'→t2 BEFORE recursing into children.
-            // But for types where ALL params are phantom, OCaml's unify2
-            // expands both sides first, so unify3 links the EXPANSIONS
-            // (not the originals). The original Tconstr nodes are never
-            // linked. We match this by skipping link_type for all-phantom.
+            // OCaml's unify2 expands abbreviations (expand_head_unif) on
+            // both sides BEFORE calling unify3. unify3's catch-all does
+            // `link_type t1' t2` where t1' is the EXPANDED form.
+            // When expansion produces a DIFFERENT node (e.g. path
+            // normalization: Ticker_map.t → Belt_MapString.t), the
+            // expansion node (t1') gets linked to the other ORIGINAL (t2),
+            // leaving BOTH originals (t1, t2) un-linked and thus separate.
+            // This is critical for cycle detection: if we link t1→t2
+            // directly, both positions resolve to the same repr node,
+            // causing false <cycle> markers in the sexp serializer.
+            //
+            // For types where ALL params are phantom, OCaml's expansion
+            // hides those params entirely, so neither original is linked.
             if !all_phantom {
-                link_type(ctx, t1, t2);
+                // Try path normalization on t1 to match OCaml's
+                // unify2→unify3 flow. OCaml's unify2 calls
+                // expand_head_unif which may normalize module alias
+                // paths (e.g. Ticker_map.t → Belt_MapString.t),
+                // creating a NEW Tconstr node (t1'). unify3 then does
+                // `link_type t1' t2`, linking the normalized node to
+                // the other ORIGINAL. This leaves both originals
+                // un-linked and separate, preventing false cycle
+                // markers in the sexp serializer.
+                //
+                // We only do path normalization (not full expansion)
+                // to avoid changing type-checking behavior for functor
+                // types where manifest expansion would create
+                // structural forms.
+                let link_source = if !args1.is_empty() {
+                    if let Some(env) = state.env() {
+                        let desc = ctx.get_desc(t1);
+                        if let TypeDesc::Tconstr { path, args, abbrev } = &*desc {
+                            let path_norm = normalize_path_full(ctx, env, path);
+                            if path_norm != *path {
+                                let new_node = ctx.new_constr(path_norm, args.clone());
+                                drop(desc);
+                                new_node
+                            } else {
+                                drop(desc);
+                                t1
+                            }
+                        } else {
+                            drop(desc);
+                            t1
+                        }
+                    } else {
+                        t1
+                    }
+                } else {
+                    t1
+                };
+                link_type(ctx, link_source, t2);
             }
 
             for (i, a, b) in pairs {
