@@ -11793,8 +11793,27 @@ impl Env {
                                     | crate::types::decl::SignatureItem::SigModtype(..)
                             )
                         });
+                        // Extract module alias target for path prefix rewriting.
+                        // E.g., module J = Js.Json: target = Pdot(Pident("Js"), "Json")
+                        // Extract module alias target for path prefix rewriting.
+                        // Only for Pdot targets (nested modules like Js.Json).
+                        // Pident targets (like Stdlib_Date) are handled by existing substitution.
+                        let alias_target = if apply_subst {
+                            match &md.md_type {
+                                crate::types::decl::ModuleType::MtyAlias(_, target) => {
+                                    if matches!(target, Path::Pdot(..)) && !target.same(&path) {
+                                        Some(target.clone())
+                                    } else {
+                                        None
+                                    }
+                                }
+                                _ => None,
+                            }
+                        } else {
+                            None
+                        };
                         let needs_copy = apply_subst
-                            && (has_type_or_module_defs || resolved_name.is_some());
+                            && (has_type_or_module_defs || resolved_name.is_some() || alias_target.is_some());
                         let sig = if needs_copy {
                             copy_lookup_signature_for_subst(&sig, ctx)
                         } else {
@@ -11809,6 +11828,14 @@ impl Env {
                             if has_type_or_module_defs {
                                 crate::cmi::persistent_env::substitute_type_paths_in_sig(
                                     &sig, &path, ctx,
+                                );
+                            }
+                            // Rewrite paths for module aliases: replace the canonical
+                            // module path prefix with the alias path in all types.
+                            // E.g., module J = Js.Json: rewrite Js.Json.Kind.t → J.Kind.t
+                            if let Some(ref target) = alias_target {
+                                crate::cmi::persistent_env::rewrite_sig_by_path_prefix(
+                                    &sig, target, &path, ctx,
                                 );
                             }
                         }
@@ -13008,6 +13035,17 @@ fn resolve_module_signature_for_path<'a>(
                         &access_path,
                         ctx,
                     );
+                }
+                // Apply alias prefix rewriting for module aliases to nested modules
+                // (e.g., module J = Js.Json where target is Pdot).
+                // Skip for Pident targets (e.g., Date -> Stdlib_Date) — those are
+                // handled by existing substitution mechanisms.
+                if let crate::types::decl::ModuleType::MtyAlias(_, ref target) = md.md_type {
+                    if matches!(target, Path::Pdot(..)) && !target.same(&access_path) {
+                        crate::cmi::persistent_env::rewrite_sig_by_path_prefix(
+                            &sig, target, &access_path, ctx,
+                        );
+                    }
                 }
                 crate::cmi::persistent_env::substitute_type_paths_in_sig(&sig, &access_path, ctx);
                 return Some((access_path, sig));

@@ -1325,6 +1325,193 @@ pub fn rewrite_module_prefix_in_sig(
     }
 }
 
+/// Rewrite a path by replacing an old path prefix with a new one.
+/// E.g., with old_prefix=Pdot(Pident("Js"),"Json") and new_prefix=Pident("J"):
+///   Pdot(Pdot(Pident("Js"),"Json"),"Kind") → Pdot(Pident("J"),"Kind")
+///   Pdot(Pdot(Pdot(Pident("Js"),"Json"),"Kind"),"t") → Pdot(Pdot(Pident("J"),"Kind"),"t")
+fn rewrite_path_by_path_prefix(path: &Path, old_prefix: &Path, new_prefix: &Path) -> Option<Path> {
+    if path.same(old_prefix) {
+        return Some(new_prefix.clone());
+    }
+    match path {
+        Path::Pdot(inner, name, pos) => {
+            if inner.same(old_prefix) {
+                return Some(Path::Pdot(Box::new(new_prefix.clone()), name.clone(), *pos));
+            }
+            rewrite_path_by_path_prefix(inner, old_prefix, new_prefix)
+                .map(|new_inner| Path::Pdot(Box::new(new_inner), name.clone(), *pos))
+        }
+        _ => None,
+    }
+}
+
+/// Walk a type expression tree and rewrite all Tconstr/Tpackage paths
+/// that have `old_prefix` as a path prefix, replacing it with `new_prefix`.
+/// Used for module alias resolution: `module J = Js.Json` rewrites
+/// `Js.Json.Kind.t` → `J.Kind.t` in all types.
+fn rewrite_type_expr_by_path_prefix(
+    ty_ref: TypeExprRef,
+    old_prefix: &Path,
+    new_prefix: &Path,
+    ctx: &TypeContext<'_>,
+    visited: &mut HashSet<usize>,
+) {
+    if !visited.insert(ty_ref.0) {
+        return;
+    }
+
+    let desc = ctx.get_desc(ty_ref);
+    match &*desc {
+        TypeDesc::Tconstr { path, args, .. } => {
+            if let Some(new_path) = rewrite_path_by_path_prefix(path, old_prefix, new_prefix) {
+                let mut new_desc = (*desc).clone();
+                if let TypeDesc::Tconstr { ref mut path, .. } = new_desc {
+                    *path = new_path;
+                }
+                ctx.set_desc(ty_ref, new_desc);
+            }
+            for &arg in args {
+                rewrite_type_expr_by_path_prefix(arg, old_prefix, new_prefix, ctx, visited);
+            }
+        }
+        TypeDesc::Tarrow { arg, ret, .. } => {
+            rewrite_type_expr_by_path_prefix(arg.typ, old_prefix, new_prefix, ctx, visited);
+            rewrite_type_expr_by_path_prefix(*ret, old_prefix, new_prefix, ctx, visited);
+        }
+        TypeDesc::Ttuple(types) => {
+            for &t in types {
+                rewrite_type_expr_by_path_prefix(t, old_prefix, new_prefix, ctx, visited);
+            }
+        }
+        TypeDesc::Tlink(t) => {
+            rewrite_type_expr_by_path_prefix(*t, old_prefix, new_prefix, ctx, visited);
+        }
+        TypeDesc::Tsubst(t) => {
+            rewrite_type_expr_by_path_prefix(*t, old_prefix, new_prefix, ctx, visited);
+        }
+        TypeDesc::Tpoly { body, vars } => {
+            rewrite_type_expr_by_path_prefix(*body, old_prefix, new_prefix, ctx, visited);
+            for &v in vars {
+                rewrite_type_expr_by_path_prefix(v, old_prefix, new_prefix, ctx, visited);
+            }
+        }
+        TypeDesc::Tobject { fields, .. } => {
+            rewrite_type_expr_by_path_prefix(*fields, old_prefix, new_prefix, ctx, visited);
+        }
+        TypeDesc::Tfield { typ, rest, .. } => {
+            rewrite_type_expr_by_path_prefix(*typ, old_prefix, new_prefix, ctx, visited);
+            rewrite_type_expr_by_path_prefix(*rest, old_prefix, new_prefix, ctx, visited);
+        }
+        TypeDesc::Tvariant(row) => {
+            rewrite_type_expr_by_path_prefix(row.row_more, old_prefix, new_prefix, ctx, visited);
+            for field in &row.row_fields {
+                match &field.1 {
+                    crate::types::type_expr::RowField::Rpresent(Some(t)) => {
+                        rewrite_type_expr_by_path_prefix(*t, old_prefix, new_prefix, ctx, visited);
+                    }
+                    crate::types::type_expr::RowField::Reither { types, .. } => {
+                        for &t in types {
+                            rewrite_type_expr_by_path_prefix(
+                                t, old_prefix, new_prefix, ctx, visited,
+                            );
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        TypeDesc::Tpackage { path, args, .. } => {
+            if let Some(new_path) = rewrite_path_by_path_prefix(path, old_prefix, new_prefix) {
+                let mut new_desc = (*desc).clone();
+                if let TypeDesc::Tpackage { ref mut path, .. } = new_desc {
+                    *path = new_path;
+                }
+                ctx.set_desc(ty_ref, new_desc);
+            }
+            for &arg in args {
+                rewrite_type_expr_by_path_prefix(arg, old_prefix, new_prefix, ctx, visited);
+            }
+        }
+        TypeDesc::Tvar(_) | TypeDesc::Tunivar(_) | TypeDesc::Tnil => {}
+    }
+}
+
+/// Rewrite all type paths in a signature by replacing path prefix `old_prefix`
+/// with `new_prefix`. Used when resolving module aliases like `module J = Js.Json`:
+/// rewrites `Pdot(Pdot(Pident("Js"), "Json"), "Kind")` → `Pdot(Pident("J"), "Kind")`.
+pub fn rewrite_sig_by_path_prefix(
+    sig_items: &[SignatureItem],
+    old_prefix: &Path,
+    new_prefix: &Path,
+    ctx: &TypeContext<'_>,
+) {
+    let mut visited = HashSet::new();
+
+    for item in sig_items {
+        match item {
+            SignatureItem::SigValue(_id, desc) => {
+                rewrite_type_expr_by_path_prefix(
+                    desc.val_type, old_prefix, new_prefix, ctx, &mut visited,
+                );
+            }
+            SignatureItem::SigType(_id, decl, _) => {
+                for &param in &decl.type_params {
+                    rewrite_type_expr_by_path_prefix(
+                        param, old_prefix, new_prefix, ctx, &mut visited,
+                    );
+                }
+                if let Some(manifest) = decl.type_manifest {
+                    rewrite_type_expr_by_path_prefix(
+                        manifest, old_prefix, new_prefix, ctx, &mut visited,
+                    );
+                }
+                match &decl.type_kind {
+                    TypeKind::TypeVariant(constrs) => {
+                        for cd in constrs {
+                            match &cd.cd_args {
+                                crate::types::decl::ConstructorArguments::CstrTuple(args) => {
+                                    for &arg in args {
+                                        rewrite_type_expr_by_path_prefix(
+                                            arg, old_prefix, new_prefix, ctx, &mut visited,
+                                        );
+                                    }
+                                }
+                                crate::types::decl::ConstructorArguments::CstrRecord(labels) => {
+                                    for lbl in labels {
+                                        rewrite_type_expr_by_path_prefix(
+                                            lbl.ld_type, old_prefix, new_prefix, ctx,
+                                            &mut visited,
+                                        );
+                                    }
+                                }
+                            }
+                            if let Some(res) = cd.cd_res {
+                                rewrite_type_expr_by_path_prefix(
+                                    res, old_prefix, new_prefix, ctx, &mut visited,
+                                );
+                            }
+                        }
+                    }
+                    TypeKind::TypeRecord(labels, _) => {
+                        for lbl in labels {
+                            rewrite_type_expr_by_path_prefix(
+                                lbl.ld_type, old_prefix, new_prefix, ctx, &mut visited,
+                            );
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            SignatureItem::SigModule(_id, md, _) => {
+                if let ModuleType::MtySignature(sub_sig) = &md.md_type {
+                    rewrite_sig_by_path_prefix(sub_sig, old_prefix, new_prefix, ctx);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
 /// Recursively substitute type paths in sub-module signatures.
 /// For a module like Belt with sub-modules Array, Map, etc.,
 /// the types in Belt.Array should have paths like Pdot(Pdot(Pident "Belt") "Array") "t"

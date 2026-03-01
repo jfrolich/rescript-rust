@@ -78,6 +78,16 @@ impl Path {
         Path::Pdot(Box::new(prefix), name.into(), NOPOS)
     }
 
+    /// Get the parent module path (strip the last component).
+    /// For `Pdot(parent, name, _)`, returns `Some(parent)`.
+    /// For `Pident(_)` and `Papply(..)`, returns `None`.
+    pub fn parent(&self) -> Option<Path> {
+        match self {
+            Path::Pdot(parent, _, _) => Some((**parent).clone()),
+            _ => None,
+        }
+    }
+
     /// Create a dotted path with position.
     #[inline]
     pub fn pdot_pos(prefix: Path, name: impl Into<String>, pos: i32) -> Self {
