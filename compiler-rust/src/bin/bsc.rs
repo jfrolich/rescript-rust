@@ -218,6 +218,7 @@ fn run() -> Result<()> {
         dump_lambda_sexp_locs: opts.dump_lambda_sexp_locs,
         include_paths: opts.include_paths.clone(),
         runtime_path,
+        source_filename: Some(source_path.to_string_lossy().into_owned()),
     };
 
     if is_interface {

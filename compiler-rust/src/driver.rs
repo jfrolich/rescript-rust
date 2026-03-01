@@ -403,6 +403,10 @@ pub struct CompilerOptions {
     /// Runtime package path (from -runtime-path flag)
     /// Used to locate stdlib CMIs at {runtime_path}/lib/ocaml/
     pub runtime_path: Option<PathBuf>,
+    /// Source filename for interface constraint propagation.
+    /// When set, after type_structure, checks for a matching .cmi and
+    /// unifies implementation value types with interface types.
+    pub source_filename: Option<String>,
 }
 
 /// Compile ReScript source to JavaScript.
@@ -462,7 +466,7 @@ pub fn compile_source_to_js_with_options(
     // Store persistent env in the type check context for module resolution
     tctx.set_persistent_env(pers_env);
 
-    let (typed_structure, _env) = type_structure(&mut tctx, &env, parser.arena(), &structure)
+    let (typed_structure, _final_env) = type_structure(&mut tctx, &env, parser.arena(), &structure)
         .map_err(|e| anyhow!("Type checking failed: {e:?}"))?;
 
     // Print typed tree if requested
@@ -708,7 +712,7 @@ pub fn typecheck_and_dump_sexp<W: std::io::Write>(
         load_pervasives(&mut pers_env, &mut env, &type_ctx);
         tctx.set_persistent_env(pers_env);
 
-        let (typed_structure, _env) = type_structure(&mut tctx, &env, parser.arena(), &structure)
+        let (typed_structure, _final_env) = type_structure(&mut tctx, &env, parser.arena(), &structure)
             .map_err(|e| anyhow!("Type checking failed: {e:?}"))?;
 
         print_typed_structure_with_locs(parser.arena(), &type_ctx, &typed_structure, writer)
@@ -717,6 +721,20 @@ pub fn typecheck_and_dump_sexp<W: std::io::Write>(
 
     Ok(())
 }
+
+// NOTE: Interface constraint propagation (apply_interface_constraints) was
+// investigated and found unviable at the current stage. The approach of
+// unifying impl types with .resi CMI types after type_structure causes:
+// 1. Crashes on auto-generated CMIs (fixed by .resi check)
+// 2. Regressions on other tests (-2 parity, +40 hunks) due to unwanted
+//    type modifications through shared non-generic nodes
+// 3. Doesn't reach the target (reasonReact's actionless) because all
+//    types in Rust are fully generalized (Tvar at GENERIC_LEVEL),
+//    so instance() creates copies that don't propagate back
+// Root cause: Rust's level management differs from OCaml's — module-internal
+// Tvars get generalized to GENERIC_LEVEL when they shouldn't.
+// OCaml's generalize_structure/value_restriction keeps them at var_level,
+// and the link direction from unify preserves the low level through Tlink chains.
 
 /// Per-file configuration overrides extracted from `@@config({flags: [...]})`.
 #[derive(Debug, Default)]
@@ -873,7 +891,7 @@ pub fn typecheck_stored_structure_and_dump_sexp<W: std::io::Write>(
     load_pervasives(&mut pers_env, &mut env, &type_ctx);
     tctx.set_persistent_env(pers_env);
 
-    let (typed_structure, _env) = type_structure(&mut tctx, &env, &arena, &structure)
+    let (typed_structure, _final_env) = type_structure(&mut tctx, &env, &arena, &structure)
         .map_err(|e| anyhow!("Type checking failed: {e:?}"))?;
 
     print_typed_structure_with_locs(&arena, &type_ctx, &typed_structure, writer)

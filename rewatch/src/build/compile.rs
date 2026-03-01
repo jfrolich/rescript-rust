@@ -784,10 +784,12 @@ fn compile_file(
         let ast_key = format!("{}:{}", module_name, if is_interface { "intf" } else { "impl" });
         let stored = stored_asts.and_then(|m| m.lock().unwrap().remove(&ast_key));
 
+        let source_filename = implementation_file_path.to_string_lossy().into_owned();
         let opts = rescript_compiler::driver::CompilerOptions {
             dump_typed_sexp_locs: true,
             include_paths,
             runtime_path,
+            source_filename: Some(source_filename),
             ..Default::default()
         };
 
