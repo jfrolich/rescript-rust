@@ -157,6 +157,19 @@ impl PersistentEnv {
         })
     }
 
+    /// Read a module's signature from CMI without applying path substitution.
+    /// Used for interface constraint propagation (moregen) where we need raw
+    /// Pident paths that match the implementation's local paths.
+    /// In OCaml, ps_sig retains raw Pident paths; path substitution happens
+    /// lazily in components_of_module_maker, not on ps_sig.
+    pub fn read_raw_sig<'a>(&self, name: &str, ctx: &'a TypeContext<'a>) -> Option<Signature> {
+        let cmi_filename = format!("{}.cmi", name);
+        let full_path = self.find_in_path_uncap(&cmi_filename)?;
+        let cmi = cmi_format::read_cmi(&full_path).ok()?;
+        let mut sig_ctx = SigReadContext::new(ctx);
+        Some(sig_ctx.read_signature(&cmi.cmi_sign))
+    }
+
     /// Search the load path for a file (case-insensitive on first char).
     /// Returns the full path if found.
     fn find_in_path_uncap(&self, filename: &str) -> Option<String> {

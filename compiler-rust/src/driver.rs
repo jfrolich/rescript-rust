@@ -771,9 +771,11 @@ fn apply_moregen_constraints(
         None => return,
     };
 
-    // Load the interface signature from CMI.
-    // Add the source directory to the load path (matching -bs-read-cmi behavior)
-    // so that find_pers_struct can locate the CMI from the same directory.
+    // Load the RAW interface signature from CMI (without path substitution).
+    // OCaml's ps_sig retains raw Pident paths; path substitution happens lazily
+    // in components_of_module_maker, not on the sig used for moregen.
+    // Using raw paths ensures moregen_link propagates Pident (local) paths
+    // instead of Pdot (module-qualified) paths to the implementation.
     let iface_sig = {
         let pers = match &mut tctx.persistent_env {
             Some(p) => p,
@@ -787,8 +789,10 @@ fn apply_moregen_constraints(
         if !already_in_path {
             pers.add_load_path(source_dir.clone());
         }
-        let result = pers.find_pers_struct(&module_name, type_ctx)
-            .map(|ps| ps.ps_sig.clone());
+        // Ensure the module is loaded first (for side effects like registering types)
+        let _ = pers.find_pers_struct(&module_name, type_ctx);
+        // Then read raw sig without path substitution for moregen
+        let result = pers.read_raw_sig(&module_name, type_ctx);
         match result {
             Some(sig) => sig,
             None => return,
