@@ -897,6 +897,13 @@ fn try_expand_head<'a>(
             let args = args.clone();
             let path = path.clone();
             let is_nullary = args.is_empty() && !path.head_name().starts_with('#');
+
+            // NOTE: simple_abbrevs linking was investigated and found unviable.
+            // The env changes between different Tconstr nodes of the same type,
+            // so check_abbrev_env clears the cache before the second node arrives.
+            // OCaml's sharing comes from Subst/components_of_module_maker creating
+            // physically shared source nodes, not from expansion-time linking.
+
             let memorize_simple_abbrev = || {
                 // OCaml ctype.ml proper_abbrevs routes nullary non-object aliases
                 // through simple_abbrevs during abbreviation expansion (subst).
