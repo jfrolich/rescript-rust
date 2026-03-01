@@ -931,6 +931,14 @@ fn try_expand_head<'a>(
 
             drop(desc);
 
+            // NOTE: Nullary expansion caching (OCaml's simple_abbrevs find_expans)
+            // was extensively tested but causes crashes because cached expansion nodes
+            // get corrupted by link_type during unification. All types (Tconstr, Ttuple,
+            // Tarrow) are linked during unify_types, making the cached ref a mutation target.
+            // OCaml avoids this because its mutable ref-based unify3 does link_type t1' t2
+            // BEFORE structural matching, and the expansion node is protected by the
+            // body0→body' indirection. Rust's architecture doesn't support this pattern.
+
             // 0. Check local constraints first (GADT equations)
             if let Some(constraint_decl) = env.find_local_constraint(&path) {
                 if let Some(manifest) = constraint_decl.type_manifest {
@@ -1488,8 +1496,7 @@ fn unify_after_expansion<'a>(
     if t1_expanded == t2_expanded {
         // Both sides expanded to the same node. In OCaml, this is a
         // complete no-op (link_type(same, same) is a no-op). Skip relink
-        // to avoid corrupting shared expansion nodes (e.g., from the
-        // nullary expansion cache).
+        // to avoid corrupting shared expansion nodes.
         return Ok(());
     }
 
@@ -1497,12 +1504,7 @@ fn unify_after_expansion<'a>(
 
     if should_relink {
         // Use from_expanded directly (NOT ctx.repr) to avoid following
-        // link chains created by unify above. OCaml's unify3 links
-        // t1'→t2 BEFORE structural unification (where t1'=non-expanded repr,
-        // t2=expanded result). In Rust, structural unify may link
-        // from_expanded→expansion, so ctx.repr(from_expanded) would reach
-        // the expansion node. Using from_expanded directly preserves the
-        // expansion node and only modifies the non-expanded side.
+        // link chains created by unify above.
         let from_ty = from_expanded;
         let to_ty = ctx.repr(to_original);
         if from_ty != to_ty && !deep_occur(ctx, from_ty, to_ty) {
