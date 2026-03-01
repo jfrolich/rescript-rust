@@ -4156,8 +4156,7 @@ pub fn type_expect<'a>(
             //     body
             if arg_label.is_optional() {
                 let lhs_pat = tctx.arena.get_pat(*lhs);
-                if let (Some(default_idx), crate::parser::ast::PatternDesc::Ppat_var(_)) =
-                    (default.as_ref(), &*lhs_pat.ppat_desc)
+                if let Some(default_idx) = default.as_ref()
                 {
                     let default_expr = tctx.arena.get_expr(*default_idx);
                     let default_loc = default_expr.pexp_loc;
