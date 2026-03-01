@@ -93,10 +93,10 @@ pub struct TypeContext<'a> {
     previous_env_id: Cell<u64>,
 
     /// Nullary expansion cache: maps nullary Tconstr paths to cached expansion
-    /// results. This matches OCaml's `find_expans` on `simple_abbrevs` which
-    /// returns `body0` — a stub unified with the expansion — so subsequent
-    /// expansions of the same path share the same node.
-    nullary_expansion_cache: RefCell<std::collections::HashMap<Path, TypeExprRef>>,
+    /// DESCRIPTIONS. On cache hit, a fresh TypeExprRef is created with the cached
+    /// description. This avoids corruption from link_type while still sharing
+    /// child TypeExprRefs (e.g., the float nodes inside a tuple expansion).
+    nullary_expansion_cache: RefCell<std::collections::HashMap<Path, TypeDesc>>,
 
     /// Current abbreviation context during subst (OCaml: abbreviations = ref (ref Mnil)).
     /// Set during subst_with_memo so copy_type_cached can use find_repr to detect
@@ -476,18 +476,18 @@ impl<'a> TypeContext<'a> {
         self.nullary_expansion_cache.borrow_mut().clear();
     }
 
-    /// Cache a nullary expansion result for cross-expansion sharing.
-    /// Matches OCaml's memorize_abbrev storing body0 in simple_abbrevs.
-    pub fn cache_nullary_expansion(&self, path: Path, expansion: TypeExprRef) {
+    /// Cache a nullary expansion DESCRIPTION for cross-expansion sharing.
+    /// Stores the TypeDesc so cache hits create fresh nodes with shared children.
+    pub fn cache_nullary_expansion(&self, path: Path, desc: TypeDesc) {
         let path = Self::canonicalize_simple_abbrev_path(&path);
-        self.nullary_expansion_cache.borrow_mut().insert(path, expansion);
+        self.nullary_expansion_cache.borrow_mut().insert(path, desc);
     }
 
-    /// Look up a cached nullary expansion.
-    /// Matches OCaml's find_expans on simple_abbrevs returning body0.
-    pub fn find_nullary_expansion(&self, path: &Path) -> Option<TypeExprRef> {
+    /// Look up a cached nullary expansion description.
+    /// Returns a clone of the cached TypeDesc (caller creates a fresh node with it).
+    pub fn find_nullary_expansion(&self, path: &Path) -> Option<TypeDesc> {
         let path = Self::canonicalize_simple_abbrev_path(path);
-        self.nullary_expansion_cache.borrow().get(&path).copied()
+        self.nullary_expansion_cache.borrow().get(&path).cloned()
     }
 
     /// Clear all per-node abbreviation memo chains (OCaml cleanup_abbrev).

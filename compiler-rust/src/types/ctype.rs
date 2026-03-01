@@ -931,13 +931,31 @@ fn try_expand_head<'a>(
 
             drop(desc);
 
-            // NOTE: Nullary expansion caching (OCaml's simple_abbrevs find_expans)
-            // was extensively tested but causes crashes because cached expansion nodes
-            // get corrupted by link_type during unification. All types (Tconstr, Ttuple,
-            // Tarrow) are linked during unify_types, making the cached ref a mutation target.
-            // OCaml avoids this because its mutable ref-based unify3 does link_type t1' t2
-            // BEFORE structural matching, and the expansion node is protected by the
-            // body0→body' indirection. Rust's architecture doesn't support this pattern.
+            // Check nullary expansion cache. The cache stores TypeDesc (not TypeExprRef)
+            // to avoid corruption from link_type. On hit, create a fresh node with the
+            // cached desc — the child TypeExprRefs inside (e.g., float nodes in a tuple)
+            // are shared across expansions, enabling the sexp serializer to detect cycles.
+            if is_nullary {
+                if let Some(cached_desc) = ctx.find_nullary_expansion(&path) {
+                    let fresh = ctx.new_type(cached_desc);
+                    memorize_simple_abbrev();
+                    return Some(fresh);
+                }
+            }
+
+            // Helper: expand and cache non-Tconstr nullary expansion DESCRIPTIONS.
+            let expand_nullary = |manifest: TypeExprRef| -> TypeExprRef {
+                let expansion = instance_for_expansion(ctx, manifest);
+                if is_nullary {
+                    let desc = ctx.get_desc(expansion);
+                    let is_cacheable = !matches!(&*desc, TypeDesc::Tconstr { .. } | TypeDesc::Tvar(_));
+                    if is_cacheable {
+                        ctx.cache_nullary_expansion(path.clone(), (*desc).clone());
+                    }
+                    drop(desc);
+                }
+                expansion
+            };
 
             // 0. Check local constraints first (GADT equations)
             if let Some(constraint_decl) = env.find_local_constraint(&path) {
@@ -945,7 +963,7 @@ fn try_expand_head<'a>(
                     let params = &constraint_decl.type_params;
                     if params.is_empty() {
                         memorize_simple_abbrev();
-                        return Some(instance_for_expansion(ctx, manifest));
+                        return Some(expand_nullary(manifest));
                     } else if params.len() == args.len() {
                         memorize_simple_abbrev();
                         return Some(subst_with_memo(ctx, env, ty, abbrev, params, &args, manifest));
@@ -963,7 +981,7 @@ fn try_expand_head<'a>(
                         let params = &env_decl.type_params;
                         if params.is_empty() {
                             memorize_simple_abbrev();
-                            return Some(instance_for_expansion(ctx, manifest));
+                            return Some(expand_nullary(manifest));
                         } else if params.len() == args.len() {
                             memorize_simple_abbrev();
                             return Some(subst_with_memo(ctx, env, ty, abbrev, params, &args, manifest));
@@ -982,7 +1000,7 @@ fn try_expand_head<'a>(
                         let params = &store_decl.type_params;
                         if params.is_empty() {
                             memorize_simple_abbrev();
-                            return Some(instance_for_expansion(ctx, manifest));
+                            return Some(expand_nullary(manifest));
                         } else if params.len() == args.len() {
                             memorize_simple_abbrev();
                             return Some(subst_with_memo(ctx, env, ty, abbrev, params, &args, manifest));
@@ -999,7 +1017,7 @@ fn try_expand_head<'a>(
                         let params = &store_decl.type_params;
                         if params.is_empty() {
                             memorize_simple_abbrev();
-                            return Some(instance_for_expansion(ctx, manifest));
+                            return Some(expand_nullary(manifest));
                         } else if params.len() == args.len() {
                             memorize_simple_abbrev();
                             return Some(subst_with_memo(ctx, env, ty, abbrev, params, &args, manifest));
@@ -1013,7 +1031,7 @@ fn try_expand_head<'a>(
                         let params = &resolved_decl.type_params;
                         if params.is_empty() {
                             memorize_simple_abbrev();
-                            return Some(instance_for_expansion(ctx, manifest));
+                            return Some(expand_nullary(manifest));
                         } else if params.len() == args.len() {
                             memorize_simple_abbrev();
                             return Some(subst_with_memo(ctx, env, ty, abbrev, params, &args, manifest));
@@ -1029,7 +1047,7 @@ fn try_expand_head<'a>(
                         let params = &decl.type_params;
                         if params.is_empty() {
                             memorize_simple_abbrev();
-                            return Some(instance_for_expansion(ctx, manifest));
+                            return Some(expand_nullary(manifest));
                         } else if params.len() == args.len() {
                             memorize_simple_abbrev();
                             return Some(subst_with_memo(ctx, env, ty, abbrev, params, &args, manifest));
