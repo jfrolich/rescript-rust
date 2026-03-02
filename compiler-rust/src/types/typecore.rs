@@ -8003,10 +8003,18 @@ fn type_construct(
             let tuple_ty = ctx.new_tuple(arg_types.to_vec());
             let typed_tuple = type_expect(tctx, env, arg_expr, tuple_ty, None)?;
             // Extract tuple elements
-            match &typed_tuple.exp_desc {
+            let elements = match &typed_tuple.exp_desc {
                 ExpressionDesc::Texp_tuple(elements) => elements.clone(),
                 _ => vec![typed_tuple], // Fallback if not a tuple
+            };
+            // Match OCaml `type_argument`: after typing against the primary
+            // expected arg type, unify each element's exp_type with the
+            // constructor arg type so aliases (e.g. obj_coord) become the
+            // representative through link_type in unify_after_expansion.
+            for (elem, arg_ty) in elements.iter().zip(arg_types.iter()) {
+                let _ = unify_expression_types(tctx, loc, elem.exp_type, *arg_ty, None);
             }
+            elements
         }
         (arg_types, None) if arg_types.is_empty() => {
             // Constant constructor with no arguments
