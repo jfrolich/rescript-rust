@@ -3269,9 +3269,14 @@ where
                     StructureItemDesc::Tstr_value(_, bindings) => {
                         for vb in bindings {
                             // Extract identifier from pattern
+                            // Use pat_type (generalized) instead of exp_type
+                            // (ungeneralized). OCaml's type_structure uses the
+                            // pattern type for signature extraction. The pattern
+                            // type preserves type aliases (e.g., actionless →
+                            // Tconstr) while exp_type may be Tvar(None).
                             extract_sig_values_from_pattern(
                                 &vb.vb_pat,
-                                vb.vb_expr.exp_type,
+                                vb.vb_pat.pat_type,
                                 &mut sig_items,
                             );
                         }
