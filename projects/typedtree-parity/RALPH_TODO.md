@@ -58,14 +58,23 @@ Results persist in `.parity-cache/` — inspect diffs at `.parity-cache/tests/di
 
 ## Current Status
 
-**629/657 (95%) — raw byte-for-byte comparison**
+**648/657 (98.6%) — raw byte-for-byte comparison**
 
-**Latest snapshot (2026-02-26, clean-cache + clean-rebuild verified):**
-- Typecheck parity: `629/657`
+**Latest snapshot (2026-03-02, clean-cache + clean-rebuild verified):**
+- Typecheck parity: `648/657`
 - Rust type-check: `657/657` (0 Rust-only errors)
-- Parity failures: `28`
-- Hunk mismatches: `686`
-- Remaining parity failures: `bal_set_mini`, `belt_hashset_int_test`, `bs_mutable_set_test`, `bs_poly_map_test`, `bs_poly_set_test`, `bs_queue_test`, `bs_set_int_test`, `bs_stack_test`, `defunctor_make_test`, `ext_array_test`, `functor_ffi`, `inline_map_test`, `inline_map2_test`, `js_json_test`, `jsx_preserve_test`, `mario_game`, `reasonReact`, `set_gen`, `Stdlib_Intl_DateTimeFormatTest`, `Stdlib_Intl_LocaleTest`, `Stdlib_IteratorTests`, `string_set`, `test_bs_this`, `test_list`, `ticker`, `unboxed_use_case`, `unsafe_ppx_test`, `variantsMatching`
+- Parity failures: `9`
+- Hunk mismatches: `100`
+- Remaining parity failures: `bs_set_int_test` (5), `defunctor_make_test` (16), `functor_ffi` (4), `jsx_preserve_test` (1), `mario_game` (39), `reasonReact` (8), `string_set` (2), `ticker` (23), `unsafe_ppx_test` (2)
+
+**Hard floor analysis (2026-03-02):** All 100 remaining hunks are from fundamental architectural differences between OCaml's physical node sharing and Rust's separate node allocation:
+- Cycle under-detection (~46 hunks): OCaml shows `<cycle>` where Rust shows full content because OCaml physically shares type nodes while Rust creates separate TypeExprRefs. Affects mario_game (xy), ticker (Js.String2.t), functor_ffi (int), jsx_preserve_test (React.element), bs_set_int_test (1 hunk).
+- Cycle over-detection (~16 hunks): Rust shows `<cycle>` where OCaml shows full content because Rust's unification creates type sharing that OCaml's parallel nodes don't have. Affects mario_game (float), ticker (ticker), bs_set_int_test (4 hunks).
+- Cycle position swaps (~10 hunks): Both detect cycles but at different positions because of different physical sharing. Affects reasonReact (8 hunks), string_set (2 hunks).
+- Functor path substitution (~16 hunks): Rust resolves V0.key→int, V0.id→string instead of preserving qualified paths. Also has arg ordering differences. Needs `Subst.type_declaration` infrastructure. Affects defunctor_make_test.
+- Tvar naming (2 hunks): unsafe_ppx_test needs deep type_variables alignment.
+
+**Previous snapshot (2026-02-26): 629/657, 686 hunks**
 
 **Recent fixes:**
 - ~~Manifest corruption in try_expand_head~~ — `instance()` returns original manifest for non-generic types. Subsequent unification links the manifest node, creating self-referential expansion loop. Added `instance_for_expansion()` that creates shallow copy when instance returns identity. Fixed mario_game and js_json_test compiler errors (-2 errors).
