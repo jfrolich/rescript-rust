@@ -3974,6 +3974,14 @@ struct CopyCache {
     /// Mirrors `more.desc <- Tsubst(Ttuple [more'; t])` without mutating
     /// shared type descriptors in-place.
     row_more_markers: std::collections::HashMap<TypeExprRef, CopyRowMoreMarker>,
+
+    /// Per-copy path sharing for nullary generic Tconstr nodes.
+    /// When copy encounters a nullary alias Tconstr (verified via
+    /// nullary_expansion_cache) that isn't in simple_abbrevs, the first
+    /// encounter stores its placeholder here. Subsequent encounters of
+    /// DIFFERENT physical nodes with the same path create Tlink to it,
+    /// matching OCaml's mid-copy expansion interleaving.
+    nullary_constr_copies: std::collections::HashMap<Path, TypeExprRef>,
 }
 
 impl CopyCache {
@@ -3981,6 +3989,7 @@ impl CopyCache {
         CopyCache {
             nodes: std::collections::HashMap::new(),
             row_more_markers: std::collections::HashMap::new(),
+            nullary_constr_copies: std::collections::HashMap::new(),
         }
     }
 }
@@ -4692,6 +4701,22 @@ fn copy_type_cached(
                                 // Hit: creates sharing via Tlink to memo node
                                 TypeDesc::Tlink(abbrev_ty)
                             } else {
+                                TypeDesc::Tconstr {
+                                    path,
+                                    args: vec![],
+                                    abbrev: ctx.alloc_abbrev_nil(),
+                                }
+                            }
+                        } else if ctx.has_safe_nullary_expansion(&path) {
+                            // simple_abbrevs cleared by generalize, but the type is a
+                            // known simple alias (Ttuple expansion). Use per-copy sharing
+                            // for within-copy node sharing, matching OCaml's mid-copy
+                            // interleaving. Excludes Tvariant expansions to avoid
+                            // over-sharing that creates false cycle markers.
+                            if let Some(&cached_placeholder) = cache.nullary_constr_copies.get(&path) {
+                                TypeDesc::Tlink(cached_placeholder)
+                            } else {
+                                cache.nullary_constr_copies.insert(path.clone(), placeholder);
                                 TypeDesc::Tconstr {
                                     path,
                                     args: vec![],

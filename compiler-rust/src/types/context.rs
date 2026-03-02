@@ -98,6 +98,11 @@ pub struct TypeContext<'a> {
     /// child TypeExprRefs (e.g., the float nodes inside a tuple expansion).
     nullary_expansion_cache: RefCell<std::collections::HashMap<Path, TypeDesc>>,
 
+    /// Set of paths with "safe" expansions (Ttuple or Tconstr, not Tvariant).
+    /// Persists across generalize, only cleared on env change.
+    /// Used by copy_type_cached for per-copy sharing of simple alias types.
+    safe_expansion_paths: RefCell<std::collections::HashSet<Path>>,
+
     /// Current abbreviation context during subst (OCaml: abbreviations = ref (ref Mnil)).
     /// Set during subst_with_memo so copy_type_cached can use find_repr to detect
     /// previously-expanded types and create Tlink sharing.
@@ -175,6 +180,7 @@ impl<'a> TypeContext<'a> {
             simple_abbrevs: RefCell::new(std::collections::HashMap::new()),
             previous_env_id: Cell::new(0),
             nullary_expansion_cache: RefCell::new(std::collections::HashMap::new()),
+            safe_expansion_paths: RefCell::new(std::collections::HashSet::new()),
             current_abbreviations: Cell::new(AbbrevMemoRef::nil()),
             types: RefCell::new(Vec::new()),
             // Index 0 is reserved as the canonical Mnil sentinel so
@@ -450,6 +456,7 @@ impl<'a> TypeContext<'a> {
         if env_id != self.previous_env_id.get() {
             self.clear_simple_abbrevs();
             self.clear_abbrev_memos();
+            self.safe_expansion_paths.borrow_mut().clear();
             self.previous_env_id.set(env_id);
         }
     }
@@ -476,10 +483,23 @@ impl<'a> TypeContext<'a> {
         self.nullary_expansion_cache.borrow_mut().clear();
     }
 
+    /// Check if a path has a "safe" expansion (Ttuple or Tconstr, not Tvariant).
+    /// This persists across generalize (only cleared on env change), enabling
+    /// per-copy sharing in copy_type_cached for known simple alias types.
+    pub fn has_safe_nullary_expansion(&self, path: &Path) -> bool {
+        let path = Self::canonicalize_simple_abbrev_path(path);
+        self.safe_expansion_paths.borrow().contains(&path)
+    }
+
     /// Cache a nullary expansion DESCRIPTION for cross-expansion sharing.
     /// Stores the TypeDesc so cache hits create fresh nodes with shared children.
     pub fn cache_nullary_expansion(&self, path: Path, desc: TypeDesc) {
         let path = Self::canonicalize_simple_abbrev_path(&path);
+        // Record Ttuple expansions as "safe" for per-copy sharing.
+        // Tconstr/Tvariant expansions can cause false cycle markers from over-sharing.
+        if matches!(&desc, TypeDesc::Ttuple(_)) {
+            self.safe_expansion_paths.borrow_mut().insert(path.clone());
+        }
         self.nullary_expansion_cache.borrow_mut().insert(path, desc);
     }
 
