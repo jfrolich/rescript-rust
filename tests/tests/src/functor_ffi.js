@@ -1,0 +1,1 @@
+let f = v => [Int_arr.unsafe_get(0, v), Int_arr.opt_get(1, v)];

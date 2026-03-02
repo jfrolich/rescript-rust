@@ -943,12 +943,15 @@ fn try_expand_head<'a>(
                 }
             }
 
-            // Helper: expand and cache non-Tconstr nullary expansion DESCRIPTIONS.
+            // Helper: expand and cache nullary expansion DESCRIPTIONS.
+            // For Tconstr expansions (e.g., t → option<node>), caching the desc
+            // shares the child TypeExprRefs (like `node`) across multiple expansions,
+            // matching OCaml's abbreviation memoization (expand_abbrev + proper_abbrevs).
             let expand_nullary = |manifest: TypeExprRef| -> TypeExprRef {
                 let expansion = instance_for_expansion(ctx, manifest);
                 if is_nullary {
                     let desc = ctx.get_desc(expansion);
-                    let is_cacheable = !matches!(&*desc, TypeDesc::Tconstr { .. } | TypeDesc::Tvar(_));
+                    let is_cacheable = !matches!(&*desc, TypeDesc::Tvar(_));
                     if is_cacheable {
                         ctx.cache_nullary_expansion(path.clone(), (*desc).clone());
                     }
@@ -3971,7 +3974,6 @@ struct CopyCache {
     /// Mirrors `more.desc <- Tsubst(Ttuple [more'; t])` without mutating
     /// shared type descriptors in-place.
     row_more_markers: std::collections::HashMap<TypeExprRef, CopyRowMoreMarker>,
-
 }
 
 impl CopyCache {
