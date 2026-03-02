@@ -146,37 +146,27 @@ fn run() -> Result<()> {
                         opts.input = Some(PathBuf::from(val));
                     }
                 }
-                "-I" => {
-                    if let Some(val) = args.next() {
-                        opts.include_paths.push(PathBuf::from(val));
-                    }
-                }
-                "-runtime-path" => {
-                    if let Some(val) = args.next() {
-                        opts.runtime_path = Some(PathBuf::from(val));
-                    }
-                }
-                "-open"
+                // Value flags: consume the next argument
+                "-I"
+                | "-open"
                 | "-w"
                 | "-warn-error"
                 | "-color"
                 | "-bs-package-name"
                 | "-pp"
                 | "-ppx"
-                | "-ppxopt" => {
-                    // Consume the next argument if present (value flags).
+                | "-ppxopt"
+                | "-runtime-path" => {
                     let _ = args.next();
                 }
+                // Boolean flags: no argument to consume
                 "-absname"
-                | "-bs-read-cmi"
                 | "-no-alias-deps"
                 | "-bs-no-implicit-stdlib"
                 | "-unsafe"
                 | "-bs-super-errors"
                 | "-bs-stop-after-cmj"
-                | "-bs-no-check-cmi" => {
-                    // Boolean flags - no argument to consume
-                }
+                | "-bs-no-check-cmi" => {}
                 _ => {
                     // Unknown flag: ignore, but if it looks like a value flag, try to skip.
                 }
@@ -190,6 +180,11 @@ fn run() -> Result<()> {
         .input
         .clone()
         .ok_or_else(|| anyhow!("Missing input file"))?;
+
+    // mlmap files are namespace maps — skip them (only OCaml bsc handles these)
+    if input.extension().and_then(|s| s.to_str()) == Some("mlmap") {
+        return Ok(());
+    }
 
     if opts.bs_ast {
         return generate_ast(&input, opts.output, opts.dump_parsetree_sexp_locs);
