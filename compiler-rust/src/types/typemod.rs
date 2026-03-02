@@ -2883,6 +2883,23 @@ fn translate_module_type_to_decl<'a>(
                         sig_env.add_modtype(modtype_id.clone(), mtd.clone());
                         items.push(SigItem::SigModtype(modtype_id, mtd));
                     }
+                    crate::parser::ast::SignatureItemDesc::Psig_open(od) => {
+                        // Process open declarations to extend sig_env with
+                        // opened module's types, matching transl_signature behavior.
+                        let longident = tctx.resolve_lid(od.popen_lid.txt).clone();
+                        let open_lid = arena.get_longident(od.popen_lid.txt);
+                        if let Some((resolved_path, sig_items)) =
+                            sig_env.resolve_module_lid(open_lid, arena, &mut tctx.persistent_env, tctx.type_ctx)
+                        {
+                            crate::cmi::persistent_env::add_signature_to_env(
+                                &sig_items,
+                                &resolved_path,
+                                &mut sig_env,
+                                tctx.type_ctx,
+                                true, // as_opened
+                            );
+                        }
+                    }
                     _ => {}
                 }
             }
