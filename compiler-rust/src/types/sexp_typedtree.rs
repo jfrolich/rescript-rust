@@ -2,7 +2,7 @@
 
 use crate::ident::Ident;
 use crate::location::Location;
-use crate::parse_arena::{LocIdx, ParseArena};
+use crate::parse_arena::{LidentIdx, LocIdx, ParseArena};
 use crate::parser::ast::{
     ArgLabel, Arity, Attribute, ClosedFlag, DirectionFlag, MutableFlag, OverrideFlag, Payload,
     PrivateFlag, RecFlag,
@@ -627,7 +627,7 @@ fn sexp_row_field(
     dedup: &mut TypeDedupTable,
     rf: &RowField,
 ) -> Sexp {
-    let rf = btype::row_field_repr(rf);
+    let rf = btype::row_field_repr(ctx, rf);
     match rf {
         RowField::Rpresent(None) => Sexp::atom("Rpresent_none"),
         RowField::Rpresent(Some(ty)) => {
@@ -863,11 +863,8 @@ fn sexp_exp_extra(
             items.push(attrs_sexp);
             Sexp::list(items)
         }
-        ExpExtra::Texp_coerce(ct1, ct2) => {
-            let ct1_sexp = match ct1 {
-                None => Sexp::atom("None"),
-                Some(c) => Sexp::list(vec![Sexp::atom("Some"), sexp_core_type(arena, ctx, with_locs, dedup, c)]),
-            };
+        ExpExtra::Texp_coerce(ct2) => {
+            let ct1_sexp = Sexp::atom("None");
             let mut items = vec![
                 Sexp::atom("Texp_coerce"),
                 ct1_sexp,
@@ -987,12 +984,16 @@ fn sexp_expression_desc(
             let funct_sexp = sexp_expression(arena, ctx, with_locs, dedup, funct);
             let mut arg_items = Vec::new();
             for arg in args.iter() {
-                arg_items.push(Sexp::list(vec![
-                    sexp_arg_label(arena, &arg.label),
-                    Sexp::list(vec![
+                let expr_sexp = match &arg.expression {
+                    Some(e) => Sexp::list(vec![
                         Sexp::atom("Some"),
-                        sexp_expression(arena, ctx, with_locs, dedup, &arg.expression),
+                        sexp_expression(arena, ctx, with_locs, dedup, e),
                     ]),
+                    None => Sexp::atom("None"),
+                };
+                arg_items.push(Sexp::list(vec![
+                    sexp_type_arg_label(&arg.label),
+                    expr_sexp,
                 ]));
             }
             Sexp::list(vec![
@@ -1067,7 +1068,7 @@ fn sexp_expression_desc(
             extended_expression,
         } => {
             let mut field_items = Vec::new();
-            for (_li, ld, def) in fields.iter() {
+            for (_li, ld, def, _opt) in fields.iter() {
                 let def_sexp = match def {
                     RecordLabelDefinition::Kept(ty) => Sexp::list(vec![
                         Sexp::atom("Kept"),
@@ -1147,7 +1148,7 @@ fn sexp_expression_desc(
             sexp_direction_flag(flag),
             sexp_expression(arena, ctx, with_locs, dedup, e3),
         ]),
-        ExpressionDesc::Texp_send(e, meth) => {
+        ExpressionDesc::Texp_send(e, meth, _) => {
             use crate::types::typedtree::MethKind;
             let meth_sexp = match meth {
                 MethKind::Tmeth_name(name) => string(name),
@@ -1177,6 +1178,11 @@ fn sexp_expression_desc(
         ExpressionDesc::Texp_pack(me) => Sexp::list(vec![
             Sexp::atom("Texp_pack"),
             sexp_module_expr(arena, ctx, with_locs, dedup, me),
+        ]),
+        ExpressionDesc::Texp_extension_constructor(lid, path) => Sexp::list(vec![
+            Sexp::atom("Texp_extension_constructor"),
+            sexp_longident_idx(arena, ctx, lid.txt),
+            sexp_path(path),
         ]),
     }
 }
@@ -1256,7 +1262,7 @@ fn sexp_core_type_desc(
         },
         TypedCoreTypeDesc::Ttyp_arrow(arg, ret, arity) => Sexp::list(vec![
             Sexp::atom("Ttyp_arrow"),
-            sexp_arg_label(arena, &arg.lbl),
+            sexp_type_arg_label(&arg.lbl),
             sexp_attributes(arena, with_locs, &arg.attrs),
             sexp_core_type(arena, ctx, with_locs, dedup, &*arg.typ),
             sexp_core_type(arena, ctx, with_locs, dedup, ret),
@@ -1884,18 +1890,14 @@ fn sexp_extension_constructor(
     };
     let kind = match &ec.ext_kind {
         ExtensionConstructorKind::Text_decl(args, ret) => {
-            // args is Vec<ConstructorArgument> - print each argument
-            let mut arg_items = Vec::new();
-            for arg in args.iter() {
-                arg_items.push(sexp_constructor_argument(arena, ctx, with_locs, dedup, arg));
-            }
+            let args_sexp = sexp_constructor_argument(arena, ctx, with_locs, dedup, args);
             let ret_sexp = match ret {
                 None => Sexp::atom("None"),
                 Some(ct) => Sexp::list(vec![Sexp::atom("Some"), sexp_core_type(arena, ctx, with_locs, dedup, ct)]),
             };
             Sexp::list(vec![
                 Sexp::atom("Text_decl"),
-                Sexp::list(arg_items),
+                args_sexp,
                 ret_sexp,
             ])
         }
@@ -2120,9 +2122,12 @@ fn sexp_open_declaration(
     } else {
         vec![]
     };
-    let mut items = vec![Sexp::atom("open_declaration")];
+    let mut items = vec![
+        Sexp::atom("open_description"),
+        sexp_path(&od.open_path),
+        sexp_longident_idx(arena, ctx, od.open_txt.txt),
+    ];
     items.extend(loc_sexp);
-    items.push(sexp_module_expr(arena, ctx, with_locs, dedup, &od.open_expr));
     items.push(sexp_override_flag(&od.open_override));
     items.push(sexp_attributes(arena, with_locs, &od.open_attributes));
     Sexp::list(items)

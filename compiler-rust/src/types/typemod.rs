@@ -2487,7 +2487,7 @@ fn lookup_module_type_from_unpack_expr<'a>(
     // derive the semantic module type from its package path + constraints.
     // OCaml does this from the typed package expression, not by peeking at
     // the packed parsed module expression.
-    let typed_expr = type_expression(tctx, env, expr).ok()?;
+    let typed_expr = type_expression(tctx.type_ctx, tctx.arena, env, expr).ok()?;
     let expanded = crate::types::ctype::expand_head(tctx.type_ctx, env, typed_expr.exp_type);
     let package_info = {
         let desc = tctx.type_ctx.get_desc(tctx.type_ctx.repr(expanded));
@@ -2889,7 +2889,7 @@ fn translate_module_type_to_decl<'a>(
                         let longident = tctx.resolve_lid(od.popen_lid.txt).clone();
                         let open_lid = arena.get_longident(od.popen_lid.txt);
                         if let Some((resolved_path, sig_items)) =
-                            sig_env.resolve_module_lid(open_lid, arena, &mut tctx.persistent_env, tctx.type_ctx)
+                            sig_env.resolve_module_lid(open_lid, arena, tctx.type_ctx)
                         {
                             crate::cmi::persistent_env::add_signature_to_env(
                                 &sig_items,
@@ -3832,7 +3832,7 @@ fn type_module_expr_with_alias<'a>(
         ParsedModuleExprDesc::Pmod_unpack(expr_idx) => {
             // Unpack: unpack(E)
             let expr = arena.get_expr(*expr_idx);
-            let typed_expr = type_expression(tctx, env, expr)?;
+            let typed_expr = type_expression(tctx.type_ctx, tctx.arena, env, expr)?;
             let expanded =
                 crate::types::ctype::expand_head(tctx.type_ctx, env, typed_expr.exp_type);
             let unpack_mty = match &*tctx.type_ctx.get_desc(tctx.type_ctx.repr(expanded)) {
@@ -4146,7 +4146,7 @@ pub fn transl_signature<'a>(
                 // Resolve the module and extend the environment with opened bindings.
                 // This matches OCaml's transl_signature which calls type_open/Env.open_signature.
                 let path = if let Some((resolved_path, sig_items)) =
-                    sig_env.resolve_module_lid(open_lid, arena, &mut tctx.persistent_env, tctx.type_ctx)
+                    sig_env.resolve_module_lid(open_lid, arena, tctx.type_ctx)
                 {
                     crate::cmi::persistent_env::add_signature_to_env(
                         &sig_items,
@@ -4408,7 +4408,7 @@ fn type_structure_item<'a>(
         ParsedStructureItemDesc::Pstr_eval(inner) => {
             let (ref expr, ref attrs) = **inner;
             // Evaluated expression: E
-            let typed_expr = type_expression(tctx, env, arena.get_expr(*expr))?;
+            let typed_expr = type_expression(tctx.type_ctx, tctx.arena, env, arena.get_expr(*expr))?;
 
             let desc = StructureItemDesc::Tstr_eval(typed_expr, attrs.clone());
             Ok((
@@ -6476,7 +6476,7 @@ fn type_structure_item<'a>(
             let open_lid = arena.get_longident(open_desc.popen_lid.txt);
             let mut new_env = env.clone();
             let path = if let Some((resolved_path, sig_items)) =
-                env.resolve_module_lid(open_lid, arena, &mut tctx.persistent_env, tctx.type_ctx)
+                env.resolve_module_lid(open_lid, arena, tctx.type_ctx)
             {
                 crate::cmi::persistent_env::add_signature_to_env(
                     &sig_items,
@@ -6694,7 +6694,7 @@ fn type_value_bindings<'a>(
 ) -> TypeModResult<(Vec<ValueBinding>, Env)> {
     // Match OCaml typemod.ml Pstr_value:
     // use the environment returned by type_binding directly.
-    let (typed_bindings, new_env) = type_binding(tctx, env, rec_flag, bindings)?;
+    let (typed_bindings, new_env) = type_binding(tctx.type_ctx, tctx.arena, env, rec_flag, bindings)?;
     Ok((typed_bindings, new_env))
 }
 

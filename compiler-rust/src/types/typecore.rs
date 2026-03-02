@@ -426,6 +426,26 @@ pub struct TypeCheckContext<'a> {
     pub newtype_level: Option<i32>,
     /// Collected diagnostics.
     pub diagnostics: Vec<TypeCoreDiagnostic>,
+    /// Used type variables within the current type expression (for sharing).
+    /// Maps type variable names to their TypeExprRef, matching OCaml's used_variables.
+    pub used_variables: std::collections::HashMap<String, TypeExprRef>,
+    /// Bound type variables from the surrounding declaration context.
+    /// This matches OCaml's typetexp `type_variables` table used by
+    /// `globalize_used_variables` to link per-type-expression variables
+    /// back to declaration-level parameters.
+    pub type_variables: std::collections::HashMap<String, TypeExprRef>,
+    /// Persistent environment for loading external modules from .cmi files.
+    pub persistent_env: Option<crate::cmi::persistent_env::PersistentEnv>,
+    /// Recursion depth for currently-typed `let rec` groups.
+    /// Used for recursive polymorphic-variant payload fallback.
+    pub recursive_let_depth: usize,
+    /// Active recursive value bindings currently in scope.
+    /// Used to restrict recursive polymorphic-variant payload fallback to
+    /// identifiers that actually resolve to recursive bindings.
+    pub active_recursive_value_ids: Vec<Ident>,
+    /// Scoped toggle used by type_application for OCaml-aligned local-float
+    /// instantiation in repeated argument sites.
+    pub force_fresh_local_float: bool,
 }
 
 /// A diagnostic from type checking.
@@ -446,7 +466,23 @@ impl<'a> TypeCheckContext<'a> {
             unify_state: UnifyState::new(),
             newtype_level: None,
             diagnostics: Vec::new(),
+            used_variables: std::collections::HashMap::new(),
+            type_variables: std::collections::HashMap::new(),
+            persistent_env: None,
+            recursive_let_depth: 0,
+            active_recursive_value_ids: Vec::new(),
+            force_fresh_local_float: false,
         }
+    }
+
+    /// Set the environment for type alias expansion during unification.
+    pub fn set_unify_env(&mut self, env: &Env) {
+        self.unify_state.set_env(env);
+    }
+
+    /// Set the persistent environment for module loading.
+    pub fn set_persistent_env(&mut self, env: crate::cmi::persistent_env::PersistentEnv) {
+        self.persistent_env = Some(env);
     }
 
     /// Report an error.
@@ -497,7 +533,7 @@ pub fn convert_constant(cst: &crate::parser::ast::Constant) -> TypeCoreResult<Co
         ParsedConstant::Integer(s, None) => {
             // Try to parse as i32
             match s.parse::<i32>() {
-                Ok(n) => Ok(Constant::Int(n)),
+                Ok(n) => Ok(Constant::Int(n.into())),
                 Err(_) => Err(TypeCoreError::LiteralOverflow("int".to_string())),
             }
         }
@@ -616,7 +652,7 @@ fn transl_type_inner(
             // Create ArrowArg structure matching OCaml's
             let arrow_arg = ArrowArg {
                 attrs: arg.attrs.clone(),
-                lbl: arg.lbl.clone(),
+                lbl: convert_arg_label_for_ctx(&arg.lbl, tctx.arena),
                 typ: Box::new(arg_ctyp),
             };
 
@@ -2229,8 +2265,8 @@ fn type_application(
             Some(TypeClashContext::FunctionCall),
         )?;
         typed_args.push(ApplyArg {
-            label: label.clone(),
-            expression: typed_arg,
+            label: convert_arg_label_for_ctx(label, tctx.arena),
+            expression: Some(typed_arg),
         });
 
         // Move to return type for next argument
@@ -2730,6 +2766,7 @@ fn type_record(
             field.lid.clone(),
             label_desc,
             RecordLabelDefinition::Overridden(field.lid.clone(), typed_expr),
+            field.opt,
         ));
     }
 
@@ -2917,7 +2954,7 @@ fn type_coerce(
 
     // Return the inner expression with the coercion as exp_extra
     Ok(typed_inner.with_exp_extra(
-        crate::types::typedtree::ExpExtra::Texp_coerce(opt_from_typed, to_typed_ctype),
+        crate::types::typedtree::ExpExtra::Texp_coerce(to_typed_ctype),
         loc.clone(),
         attributes.to_vec().into(),
     ))
@@ -3041,6 +3078,7 @@ fn type_send(
         ExpressionDesc::Texp_send(
             Box::new(typed_obj),
             crate::types::typedtree::MethKind::Tmeth_name(method.txt.to_string()),
+            None,
         ),
         loc.clone(),
         expected_ty,
@@ -3262,6 +3300,7 @@ fn type_let_bindings(
             typed_pat,
             typed_expr,
             binding.pvb_loc.clone(),
+            binding.pvb_attributes.clone(),
         ));
     }
 
@@ -4023,6 +4062,7 @@ fn copy_lookup_type_decl(
             .iter()
             .map(|inlined| copy_lookup_type_inlined(inlined, ctx, cache))
             .collect(),
+        type_path: decl.type_path.clone(),
     }
 }
 
@@ -4121,6 +4161,7 @@ fn copy_lookup_signature(
                         md_type: copy_lookup_module_type(&md.md_type, ctx, cache),
                         md_attributes: md.md_attributes.clone(),
                         md_loc: md.md_loc.clone(),
+                        md_path: md.md_path.clone(),
                     },
                     *rec_status,
                 )
