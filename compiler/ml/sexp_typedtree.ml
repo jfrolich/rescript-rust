@@ -122,104 +122,117 @@ let partial = function
   | Partial -> Sexp.atom "Partial"
   | Total -> Sexp.atom "Total"
 
-(* Type expression printer - follows Tlink chains via Btype.repr *)
-(* Uses a visited set to prevent infinite recursion on cyclic types *)
-let type_expr te =
-  (* Use a hash table with physical identity for cycle detection *)
-  let visited = Hashtbl.create 16 in
-  let rec aux te =
-    let te = Btype.repr te in  (* Follow Tlink chains *)
-    (* Check if we've already visited this type (cycle detection) *)
-    if Hashtbl.mem visited (Obj.repr te) then
-      Sexp.atom "<cycle>"
-    else begin
-      Hashtbl.add visited (Obj.repr te) ();
-      match te.Types.desc with
-      | Tvar name -> Sexp.list [Sexp.atom "Tvar"; opt_string name]
-      | Tarrow (arg, ret, _, arity) ->
-        Sexp.list [
-          Sexp.atom "Tarrow";
-          sexp_arg_label arg.Types.lbl;
-          aux arg.Types.typ;
-          aux ret;
-          opt (fun a -> Sexp.atom (string_of_int a)) arity;
-        ]
-      | Ttuple l -> Sexp.list (Sexp.atom "Ttuple" :: List.map aux l)
-      | Tconstr (p, args, _) ->
-        Sexp.list [Sexp.atom "Tconstr"; path p; Sexp.list (List.map aux args)]
-      | Tobject (ty, _) ->
-        (* Sort object fields by name to normalize ordering for parity *)
-        Sexp.list [Sexp.atom "Tobject"; aux_object_fields_sorted ty]
-      | Tfield (name, kind, ty1, ty2) ->
-        (* Standalone Tfield (not via Tobject) *)
-        let kind_str = match Btype.field_kind_repr kind with
-          | Fpresent -> "Fpresent"
-          | Fabsent -> "Fabsent"
-          | Fvar _ -> "Fvar"
-        in
-        Sexp.list [Sexp.atom "Tfield"; string name; Sexp.atom kind_str; aux ty1; aux ty2]
-      | Tnil -> Sexp.atom "Tnil"
-      | Tlink _ -> Sexp.atom "Tlink"  (* Should not happen after Btype.repr *)
-      | Tsubst ty -> Sexp.list [Sexp.atom "Tsubst"; aux ty]
-      | Tvariant row -> row_desc_aux row
-      | Tunivar name -> Sexp.list [Sexp.atom "Tunivar"; opt_string name]
-      | Tpoly (ty, tyl) ->
-        Sexp.list [Sexp.atom "Tpoly"; aux ty; Sexp.list (List.map aux tyl)]
-      | Tpackage (p, lids, tyl) ->
-        Sexp.list [
-          Sexp.atom "Tpackage";
-          path p;
-          Sexp.list (List.map (fun l -> longident l) lids);
-          Sexp.list (List.map aux tyl);
-        ]
-    end
-  and aux_object_fields_sorted ty =
-    (* Collect all Tfield entries from the chain, sort by name, rebuild *)
-    let rec collect_fields ty acc =
-      let ty = Btype.repr ty in
-      match ty.Types.desc with
-      | Tfield (name, kind, field_ty, rest) ->
-        let kind_str = match Btype.field_kind_repr kind with
-          | Fpresent -> "Fpresent"
-          | Fabsent -> "Fabsent"
-          | Fvar _ -> "Fvar"
-        in
-        collect_fields rest ((name, kind_str, field_ty) :: acc)
-      | _ -> (List.rev acc, ty)
-    in
-    let (fields, tail) = collect_fields ty [] in
-    let sorted_fields = List.sort (fun (n1, _, _) (n2, _, _) -> String.compare n1 n2) fields in
-    (* Rebuild nested Tfield structure *)
-    let tail_sexp = aux tail in
-    List.fold_right (fun (name, kind_str, field_ty) rest_sexp ->
-      Sexp.list [Sexp.atom "Tfield"; string name; Sexp.atom kind_str; aux field_ty; rest_sexp]
-    ) sorted_fields tail_sexp
-  and row_desc_aux row =
-    let row = Btype.row_repr row in
-    (* Sort row_fields by label to normalize ordering for parity.
-       The internal field order may differ due to unification traversal order. *)
-    let sorted_fields = List.sort (fun (l1, _) (l2, _) -> String.compare l1 l2) row.Types.row_fields in
+(* Type expression dedup - each unique type is serialized once, referenced by #N *)
+(* Uses type_expr.id (after repr) as physical identity key *)
+let dedup_tbl : (int, int) Hashtbl.t = Hashtbl.create 256
+let dedup_types : Sexp.t list ref = ref []
+let dedup_next_idx : int ref = ref 0
+
+let reset_dedup () =
+  Hashtbl.clear dedup_tbl;
+  dedup_types := [];
+  dedup_next_idx := 0
+
+let build_types_preamble () =
+  Sexp.list (Sexp.atom "types" :: List.rev !dedup_types)
+
+let rec type_expr te =
+  let te = Btype.repr te in  (* Follow Tlink chains *)
+  let key = te.Types.id in
+  match Hashtbl.find_opt dedup_tbl key with
+  | Some idx -> Sexp.atom (Printf.sprintf "#%d" idx)
+  | None ->
+    let idx = !dedup_next_idx in
+    incr dedup_next_idx;
+    Hashtbl.add dedup_tbl key idx;
+    let sexp = type_expr_body te in
+    dedup_types := Sexp.list [Sexp.atom (string_of_int idx); sexp] :: !dedup_types;
+    Sexp.atom (Printf.sprintf "#%d" idx)
+
+and type_expr_body te =
+  match te.Types.desc with
+  | Tvar name -> Sexp.list [Sexp.atom "Tvar"; opt_string name]
+  | Tarrow (arg, ret, _, arity) ->
     Sexp.list [
-      Sexp.atom "Tvariant";
-      Sexp.list (List.map (fun (l, rf) ->
-        Sexp.list [string l; row_field_aux rf]
-      ) sorted_fields);
-      Sexp.atom (if row.Types.row_closed then "closed" else "open");
-      Sexp.atom (if row.Types.row_fixed then "fixed" else "not_fixed");
+      Sexp.atom "Tarrow";
+      sexp_arg_label arg.Types.lbl;
+      type_expr arg.Types.typ;
+      type_expr ret;
+      opt (fun a -> Sexp.atom (string_of_int a)) arity;
     ]
-  and row_field_aux rf =
-    match Btype.row_field_repr rf with
-    | Rpresent None -> Sexp.atom "Rpresent_none"
-    | Rpresent (Some ty) -> Sexp.list [Sexp.atom "Rpresent"; aux ty]
-    | Reither (c, tyl, _, _) ->
-      Sexp.list [
-        Sexp.atom "Reither";
-        Sexp.atom (if c then "const" else "non_const");
-        Sexp.list (List.map aux tyl);
-      ]
-    | Rabsent -> Sexp.atom "Rabsent"
+  | Ttuple l -> Sexp.list (Sexp.atom "Ttuple" :: List.map type_expr l)
+  | Tconstr (p, args, _) ->
+    Sexp.list [Sexp.atom "Tconstr"; path p; Sexp.list (List.map type_expr args)]
+  | Tobject (ty, _) ->
+    (* Sort object fields by name to normalize ordering for parity *)
+    Sexp.list [Sexp.atom "Tobject"; object_fields_sorted ty]
+  | Tfield (name, kind, ty1, ty2) ->
+    let kind_str = match Btype.field_kind_repr kind with
+      | Fpresent -> "Fpresent"
+      | Fabsent -> "Fabsent"
+      | Fvar _ -> "Fvar"
+    in
+    Sexp.list [Sexp.atom "Tfield"; string name; Sexp.atom kind_str; type_expr ty1; type_expr ty2]
+  | Tnil -> Sexp.atom "Tnil"
+  | Tlink _ -> Sexp.atom "Tlink"  (* Should not happen after Btype.repr *)
+  | Tsubst ty -> Sexp.list [Sexp.atom "Tsubst"; type_expr ty]
+  | Tvariant row -> row_desc_sexp row
+  | Tunivar name -> Sexp.list [Sexp.atom "Tunivar"; opt_string name]
+  | Tpoly (ty, tyl) ->
+    Sexp.list [Sexp.atom "Tpoly"; type_expr ty; Sexp.list (List.map type_expr tyl)]
+  | Tpackage (p, lids, tyl) ->
+    Sexp.list [
+      Sexp.atom "Tpackage";
+      path p;
+      Sexp.list (List.map (fun l -> longident l) lids);
+      Sexp.list (List.map type_expr tyl);
+    ]
+
+and object_fields_sorted ty =
+  (* Collect all Tfield entries from the chain, sort by name, rebuild *)
+  let rec collect_fields ty acc =
+    let ty = Btype.repr ty in
+    match ty.Types.desc with
+    | Tfield (name, kind, field_ty, rest) ->
+      let kind_str = match Btype.field_kind_repr kind with
+        | Fpresent -> "Fpresent"
+        | Fabsent -> "Fabsent"
+        | Fvar _ -> "Fvar"
+      in
+      collect_fields rest ((name, kind_str, field_ty) :: acc)
+    | _ -> (List.rev acc, ty)
   in
-  aux te
+  let (fields, tail) = collect_fields ty [] in
+  let sorted_fields = List.sort (fun (n1, _, _) (n2, _, _) -> String.compare n1 n2) fields in
+  let tail_sexp = type_expr tail in
+  List.fold_right (fun (name, kind_str, field_ty) rest_sexp ->
+    Sexp.list [Sexp.atom "Tfield"; string name; Sexp.atom kind_str; type_expr field_ty; rest_sexp]
+  ) sorted_fields tail_sexp
+
+and row_desc_sexp row =
+  let row = Btype.row_repr row in
+  (* Sort row_fields by label to normalize ordering for parity *)
+  let sorted_fields = List.sort (fun (l1, _) (l2, _) -> String.compare l1 l2) row.Types.row_fields in
+  Sexp.list [
+    Sexp.atom "Tvariant";
+    Sexp.list (List.map (fun (l, rf) ->
+      Sexp.list [string l; row_field_sexp rf]
+    ) sorted_fields);
+    Sexp.atom (if row.Types.row_closed then "closed" else "open");
+    Sexp.atom (if row.Types.row_fixed then "fixed" else "not_fixed");
+  ]
+
+and row_field_sexp rf =
+  match Btype.row_field_repr rf with
+  | Rpresent None -> Sexp.atom "Rpresent_none"
+  | Rpresent (Some ty) -> Sexp.list [Sexp.atom "Rpresent"; type_expr ty]
+  | Reither (c, tyl, _, _) ->
+    Sexp.list [
+      Sexp.atom "Reither";
+      Sexp.atom (if c then "const" else "non_const");
+      Sexp.list (List.map type_expr tyl);
+    ]
+  | Rabsent -> Sexp.atom "Rabsent"
 
 (* Pattern *)
 let rec pattern ~with_locs p =
@@ -773,17 +786,25 @@ and include_declaration ~with_locs incl =
 
 (* Public API *)
 let print_typed_structure ppf str =
-  let sexp = structure ~with_locs:false str in
-  Format.fprintf ppf "%s" (Sexp.to_string sexp)
+  reset_dedup ();
+  let body = structure ~with_locs:false str in
+  let preamble = build_types_preamble () in
+  Format.fprintf ppf "%s\n%s" (Sexp.to_string preamble) (Sexp.to_string body)
 
 let print_typed_structure_with_locs ppf str =
-  let sexp = structure ~with_locs:true str in
-  Format.fprintf ppf "%s" (Sexp.to_string sexp)
+  reset_dedup ();
+  let body = structure ~with_locs:true str in
+  let preamble = build_types_preamble () in
+  Format.fprintf ppf "%s\n%s" (Sexp.to_string preamble) (Sexp.to_string body)
 
 let print_typed_signature ppf sg =
-  let sexp = signature ~with_locs:false sg in
-  Format.fprintf ppf "%s" (Sexp.to_string sexp)
+  reset_dedup ();
+  let body = signature ~with_locs:false sg in
+  let preamble = build_types_preamble () in
+  Format.fprintf ppf "%s\n%s" (Sexp.to_string preamble) (Sexp.to_string body)
 
 let print_typed_signature_with_locs ppf sg =
-  let sexp = signature ~with_locs:true sg in
-  Format.fprintf ppf "%s" (Sexp.to_string sexp)
+  reset_dedup ();
+  let body = signature ~with_locs:true sg in
+  let preamble = build_types_preamble () in
+  Format.fprintf ppf "%s\n%s" (Sexp.to_string preamble) (Sexp.to_string body)
