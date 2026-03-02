@@ -3891,15 +3891,6 @@ pub fn type_expect<'a>(
             // (matches OCaml: exp_type = newty (Ttuple (List.map (fun e -> e.exp_type) expl)))
             let result_ty =
                 ctx.new_tuple(typed_exprs.iter().map(|e| e.exp_type).collect());
-
-            // OCaml's type_argument (called by type_construct for constructor args)
-            // does an extra unify(exp.exp_type, ty_expected) after type_expect returns.
-            // This links the fresh result Ttuple to the type alias (e.g., obj_coord)
-            // when the expected type is a Tconstr alias for a tuple.
-            // We do this here in Pexp_tuple so that ALL tuple expressions (not just
-            // constructor args) preserve the alias link through result_ty.
-            let _ = crate::types::unify(ctx, &mut tctx.unify_state, result_ty, expected_ty);
-
             Ok(Expression::new(
                 ExpressionDesc::Texp_tuple(typed_exprs),
                 loc,
