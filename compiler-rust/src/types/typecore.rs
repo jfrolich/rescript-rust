@@ -668,7 +668,8 @@ fn transl_type_inner(
             // Create path from longident
             // Full implementation would look up the type and use its actual path
             let longident = tctx.arena.get_longident(lid.txt);
-            let path = Path::pident(Ident::create_persistent(longident.to_string()));
+            let name = tctx.arena.get_string(longident.last_idx());
+            let path = Path::pident(Ident::create_persistent(name));
 
             let constr_ty = ctx.new_constr(path.clone(), arg_refs);
 
@@ -1270,10 +1271,11 @@ fn type_pattern_construct(
 
     // Look up constructor
     let lid_txt = tctx.arena.get_longident(lid.txt);
-    let (cstr_desc, _cstr_path) = match env.find_constructor(&lid_txt.to_string()) {
+    let cstr_name = tctx.arena.get_string(lid_txt.last_idx());
+    let (cstr_desc, _cstr_path) = match env.find_constructor(cstr_name) {
         Ok(desc) => (
             desc.clone(),
-            Path::pident(Ident::create_persistent(lid_txt.to_string())),
+            Path::pident(Ident::create_persistent(cstr_name)),
         ),
         Err(_) => {
             return Err(TypeCoreError::NotAVariantType(lid_txt.clone()));
@@ -1571,7 +1573,8 @@ fn type_pattern_open(
 
     // Create the open pattern
     let mod_lid_txt = tctx.arena.get_longident(mod_lid.txt);
-    let _mod_path = Path::pident(Ident::create_persistent(mod_lid_txt.to_string()));
+    let mod_name = tctx.arena.get_string(mod_lid_txt.last_idx());
+    let _mod_path = Path::pident(Ident::create_persistent(mod_name));
 
     Ok(Pattern::new(
         PatternDesc::Tpat_or(Box::new(typed_inner.clone()), Box::new(typed_inner), None),
@@ -2567,9 +2570,10 @@ fn type_construct(
     let longident = tctx.resolve_lid(lid.txt);
 
     // Look up constructor
-    let (_cstr_path, cstr_desc) = match env.find_constructor(&longident.to_string()) {
+    let cstr_name = tctx.arena.get_string(longident.last_idx());
+    let (_cstr_path, cstr_desc) = match env.find_constructor(cstr_name) {
         Ok(desc) => (
-            Path::pident(Ident::create_persistent(longident.to_string())),
+            Path::pident(Ident::create_persistent(cstr_name)),
             desc.clone(),
         ),
         Err(_) => {
