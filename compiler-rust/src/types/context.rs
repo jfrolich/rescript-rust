@@ -496,9 +496,12 @@ impl<'a> TypeContext<'a> {
     /// Stores the TypeDesc so cache hits create fresh nodes with shared children.
     pub fn cache_nullary_expansion(&self, path: Path, desc: TypeDesc) {
         let path = Self::canonicalize_simple_abbrev_path(&path);
-        // Record Ttuple expansions as "safe" for per-copy sharing.
-        // Tconstr/Tvariant expansions can cause false cycle markers from over-sharing.
-        if matches!(&desc, TypeDesc::Ttuple(_)) {
+        // Record safe expansion paths for per-copy sharing within copy():
+        // Only Ttuple expansions are safe — structural types with no identity risks.
+        // Nullary Tconstr (even predef like int, string) cause over-sharing regressions
+        // (js_string_test, reasonReactRouter, unit_undefined_test).
+        let is_safe = matches!(&desc, TypeDesc::Ttuple(_));
+        if is_safe {
             self.safe_expansion_paths.borrow_mut().insert(path.clone());
         }
         self.nullary_expansion_cache.borrow_mut().insert(path, desc);
