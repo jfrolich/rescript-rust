@@ -225,22 +225,15 @@ pub struct RustParserArg {
 }
 
 #[derive(Args, Debug, Clone, Copy)]
-pub struct DumpTypedSexpArg {
-    /// Dump typed tree as sexp to .sexp files in lib/ocaml/ during compilation.
-    #[arg(long, default_value_t = false, num_args = 0..=1)]
-    pub dump_typed_sexp: bool,
-}
-
-#[derive(Args, Debug, Clone)]
-pub struct BscArg {
-    /// Path to bsc binary for typed-sexp compilation (subprocess with timeout instead of in-process).
+pub struct SubprocessArg {
+    /// Run bsc as a subprocess with timeout (use with --rust). Default is in-process.
     #[arg(long)]
-    pub bsc: Option<String>,
+    pub subprocess: bool,
 }
 
 #[derive(Args, Debug, Clone, Copy)]
 pub struct DumpTypedSexpArg {
-    /// Dump typed tree as sexp to .ocaml-sexp files in lib/ocaml/ during compilation.
+    /// Dump typed tree as sexp to .sexp files in lib/ocaml/ during compilation.
     #[arg(long)]
     pub dump_typed_sexp: bool,
 }
@@ -269,10 +262,7 @@ pub struct BuildArgs {
     pub rust: RustParserArg,
 
     #[command(flatten)]
-    pub dump_typed_sexp: DumpTypedSexpArg,
-
-    #[command(flatten)]
-    pub bsc_arg: BscArg,
+    pub subprocess: SubprocessArg,
 
     #[command(flatten)]
     pub dump_typed_sexp_arg: DumpTypedSexpArg,
@@ -468,10 +458,7 @@ pub struct WatchArgs {
     pub rust: RustParserArg,
 
     #[command(flatten)]
-    pub dump_typed_sexp: DumpTypedSexpArg,
-
-    #[command(flatten)]
-    pub bsc_arg: BscArg,
+    pub subprocess: SubprocessArg,
 
     #[command(flatten)]
     pub dump_typed_sexp_arg: DumpTypedSexpArg,
@@ -487,8 +474,7 @@ impl From<BuildArgs> for WatchArgs {
             dev: build_args.dev,
             warn_error: build_args.warn_error,
             rust: build_args.rust,
-            dump_typed_sexp: build_args.dump_typed_sexp,
-            bsc_arg: build_args.bsc_arg,
+            subprocess: build_args.subprocess,
             dump_typed_sexp_arg: build_args.dump_typed_sexp_arg,
         }
     }

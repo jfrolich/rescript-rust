@@ -134,8 +134,7 @@ pub fn initialize_build(
     plain_output: bool,
     warn_error: Option<String>,
     use_rust_parser: bool,
-    dump_typed_sexp: bool,
-    rust_bsc_path: Option<PathBuf>,
+    subprocess: bool,
     dump_typed_sexp: bool,
 ) -> Result<BuildCommandState> {
     let project_context = ProjectContext::new(path)?;
@@ -151,7 +150,7 @@ pub fn initialize_build(
     }
 
     let mut build_state =
-        BuildCommandState::new(project_context, packages, compiler, warn_error, use_rust_parser, dump_typed_sexp, rust_bsc_path);
+        BuildCommandState::new(project_context, packages, compiler, warn_error, use_rust_parser, subprocess, dump_typed_sexp);
     packages::parse_packages(&mut build_state)?;
 
     let compile_assets_state = read_compile_state::read(&mut build_state)?;
@@ -525,8 +524,7 @@ pub fn build(
     plain_output: bool,
     warn_error: Option<String>,
     use_rust_parser: bool,
-    dump_typed_sexp: bool,
-    rust_bsc_path: Option<PathBuf>,
+    subprocess: bool,
     dump_typed_sexp: bool,
 ) -> Result<BuildCommandState> {
     let default_timing: Option<std::time::Duration> = if no_timing {
@@ -543,8 +541,7 @@ pub fn build(
         plain_output,
         warn_error,
         use_rust_parser,
-        dump_typed_sexp,
-        rust_bsc_path,
+        subprocess,
         dump_typed_sexp,
     )
     .with_context(|| "Could not initialize build")?;

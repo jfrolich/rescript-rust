@@ -154,15 +154,6 @@ pub fn compile(
         .map(|module_name| module_name.to_string())
         .collect::<AHashSet<String>>();
 
-    // Extract stored_asts reference for use in par_iter (avoids borrow conflict with build_state)
-    let stored_asts_ref: Option<&std::sync::Mutex<ahash::AHashMap<String, super::build_types::StoredAst>>> =
-        if build_state.dump_typed_sexp() && build_state.use_rust_parser() {
-            let ptr = &build_state.stored_asts as *const std::sync::Mutex<ahash::AHashMap<String, super::build_types::StoredAst>>;
-            Some(unsafe { &*ptr })
-        } else {
-            None
-        };
-
     loop {
         files_current_loop_count = 0;
         loop_count += 1;
@@ -221,7 +212,7 @@ pub fn compile(
                                 .get_package(&module.package_name)
                                 .expect("Package not found");
 
-                            let rust_bsc = build_state.rust_bsc_path.as_deref();
+                            let subprocess = build_state.subprocess;
                             let dump_typed_sexp = build_state.dump_typed_sexp;
                             let interface_result = match source_file.interface.to_owned() {
                                 Some(Interface { path, .. }) => {
@@ -233,10 +224,7 @@ pub fn compile(
                                         true,
                                         build_state,
                                         build_state.get_warn_error_override(),
-                                        build_state.dump_typed_sexp,
-                                        build_state.use_rust_parser,
-                                        stored_asts_ref,
-                                        rust_bsc,
+                                        subprocess,
                                         dump_typed_sexp,
                                     );
                                     Some(result)
@@ -251,10 +239,7 @@ pub fn compile(
                                 false,
                                 build_state,
                                 build_state.get_warn_error_override(),
-                                build_state.dump_typed_sexp,
-                                build_state.use_rust_parser,
-                                stored_asts_ref,
-                                rust_bsc,
+                                subprocess,
                                 dump_typed_sexp,
                             );
                             let cmi_digest_after = helpers::compute_file_hash(Path::new(&cmi_path));
@@ -722,10 +707,7 @@ fn compile_file(
     is_interface: bool,
     build_state: &BuildState,
     warn_error_override: Option<String>,
-    dump_typed_sexp: bool,
-    use_rust_parser: bool,
-    stored_asts: Option<&std::sync::Mutex<ahash::AHashMap<String, super::build_types::StoredAst>>>,
-    rust_bsc_path: Option<&Path>,
+    subprocess: bool,
     dump_typed_sexp: bool,
 ) -> Result<Option<String>> {
     let BuildState {
@@ -763,201 +745,93 @@ fn compile_file(
         warn_error_override,
     )?;
 
-    // When dump_typed_sexp with Rust parser: skip OCaml bsc entirely,
-    // just typecheck in-process and write sexp.
-    if dump_typed_sexp && use_rust_parser {
-        // Resolve include paths relative to build_path_abs (lib/bs), since compiler args
-        // use relative paths like "../ocaml" that are meant to be resolved from lib/bs.
-        let mut include_paths: Vec<PathBuf> = Vec::new();
-        let mut runtime_path: Option<PathBuf> = None;
-        let mut i = 0;
-        while i < to_mjs_args.len() {
-            if to_mjs_args[i] == "-I" && i + 1 < to_mjs_args.len() {
-                let p = PathBuf::from(&to_mjs_args[i + 1]);
-                let resolved = if p.is_relative() {
-                    build_path_abs.join(&p)
-                } else {
-                    p
-                };
-                include_paths.push(resolved);
-                i += 2;
-            } else if to_mjs_args[i] == "-runtime-path" && i + 1 < to_mjs_args.len() {
-                runtime_path = Some(PathBuf::from(&to_mjs_args[i + 1]));
-                i += 2;
-            } else {
-                i += 1;
-            }
-        }
-
-        let ast_key = format!("{}:{}", module_name, if is_interface { "intf" } else { "impl" });
-        let stored = stored_asts.and_then(|m| m.lock().unwrap().remove(&ast_key));
-
-        let source_filename = implementation_file_path.to_string_lossy().into_owned();
-        let opts = rescript_compiler::driver::CompilerOptions {
-            dump_typed_sexp_locs: true,
-            include_paths,
-            runtime_path,
-            source_filename: Some(source_filename),
-            ..Default::default()
-        };
-
-        // Run typed-sexp generation on a large-stack worker to avoid overflowing
-        // rayon worker stacks on deeply nested typed trees.
-        let worker_name = format!("rust-typed-sexp-{module_name}");
-        let worker = std::thread::Builder::new()
-            .name(worker_name)
-            .stack_size(512 * 1024 * 1024)
-            .spawn(move || {
-                let mut sexp_bytes = Vec::new();
-                let mut typed_error: Option<String> = None;
-                if let Some(stored_ast) = stored {
-                    let result = match stored_ast {
-                        super::build_types::StoredAst::Structure(arena, structure) => {
-                            rescript_compiler::driver::typecheck_stored_structure_and_dump_sexp(
-                                arena,
-                                structure,
-                                &opts,
-                                &mut sexp_bytes,
-                            )
-                        }
-                        super::build_types::StoredAst::Signature(arena, signature) => {
-                            rescript_compiler::driver::typecheck_stored_signature_and_dump_sexp(
-                                arena,
-                                signature,
-                                &opts,
-                                &mut sexp_bytes,
-                            )
-                        }
-                    };
-                    if let Err(err) = result {
-                        typed_error = Some(format!("{err:#}"));
-                    }
-                }
-                (sexp_bytes, typed_error)
-            })
-            .map_err(|err| anyhow!("Failed to spawn rust typed-sexp worker: {err}"))?;
-
-        let (sexp_bytes, typed_error) = worker
-            .join()
-            .map_err(|_| anyhow!("Rust typed-sexp worker panicked"))?;
-
-        let sexp_path = ocaml_build_path_abs.join(format!("{basename}.sexp"));
-        let sexp_error_path = ocaml_build_path_abs.join(format!("{basename}.sexp.error"));
-        // Keep Rust parity output on the same UTF-8-lossy path as OCaml
-        // stderr extraction in this script.
-        let lossy = String::from_utf8_lossy(&sexp_bytes);
-        let _ = std::fs::write(&sexp_path, lossy.as_ref());
-        if let Some(err) = typed_error {
-            let header = format!(
-                "Rust typed-sexp typecheck failed for module `{}` ({})",
-                module_name,
-                if is_interface {
-                    "interface"
-                } else {
-                    "implementation"
-                }
-            );
-            let full = format!("{header}\n{err}\n");
-            let _ = std::fs::write(&sexp_error_path, &full);
-            return Ok(Some(full));
-        } else {
-            let _ = std::fs::remove_file(&sexp_error_path);
-        }
-
-        return Ok(None);
-    }
-
-    // When --bsc is provided, use that binary with -dtyped-sexp-locs and a timeout
-    if let Some(bsc_path) = rust_bsc_path {
-        let mut sexp_args = to_mjs_args.clone();
-        sexp_args.push("-dtyped-sexp-locs".to_string());
-
-        let module_name =
-            helpers::file_path_to_module_name(implementation_file_path, &package.namespace);
-        let cwd = build_path_abs
-            .canonicalize()
-            .map(StrippedVerbatimPath::to_stripped_verbatim_path)
-            .ok()
-            .unwrap();
-
-        let mut child = Command::new(bsc_path)
-            .current_dir(&cwd)
-            .args(&sexp_args)
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::piped())
-            .spawn()
-            .map_err(|e| anyhow!("Failed to spawn bsc subprocess: {e}"))?;
-
-        let stderr_pipe = child.stderr.take();
-        let stderr_thread = std::thread::spawn(move || -> String {
-            let mut buf = String::new();
-            if let Some(mut pipe) = stderr_pipe {
-                use std::io::Read;
-                let _ = pipe.read_to_string(&mut buf);
-            }
-            buf
-        });
-
-        let timeout = std::time::Duration::from_secs(30);
-        let start = std::time::Instant::now();
-        let mut timed_out = false;
-        let mut exit_status = None;
-        loop {
-            match child.try_wait() {
-                Ok(Some(status)) => {
-                    exit_status = Some(status);
-                    break;
-                }
-                Ok(None) if start.elapsed() > timeout => {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    timed_out = true;
-                    break;
-                }
-                Ok(None) => std::thread::sleep(std::time::Duration::from_millis(50)),
-                Err(e) => return Err(anyhow!("Error waiting for bsc subprocess: {e}")),
-            }
-        }
-
-        let stderr_output = stderr_thread.join().unwrap_or_default();
-
-        if timed_out {
-            // Write empty sexp file so downstream doesn't see stale data
-            let sexp_path = ocaml_build_path_abs.join(format!("{basename}.sexp"));
-            let _ = std::fs::write(&sexp_path, "");
-            return Ok(Some(format!("Timeout (30s) compiling `{module_name}`")));
-        }
-
-        // Check exit status for compilation errors
-        if let Some(status) = exit_status {
-            if !status.success() {
-                return Err(anyhow!(stderr_output));
-            }
-        }
-
-        // Write sexp file from stderr output
-        let sexp_path = ocaml_build_path_abs.join(format!("{basename}.sexp"));
-        let _ = std::fs::write(&sexp_path, &stderr_output);
-
-        return Ok(None);
-    }
-
-    if dump_typed_sexp {
-        to_mjs_args.push("-dtyped-sexp-locs".to_string());
-    }
-
-
-    // --dump-typed-sexp: add -dtyped-sexp to OCaml bsc and save output.
-    // --bsc: only runs Rust subprocess (does NOT affect OCaml bsc).
+    // --dump-typed-sexp: add -dtyped-sexp to bsc invocation
     if dump_typed_sexp {
         to_mjs_args.push("-dtyped-sexp".to_string());
     }
 
-    // When generating OCaml sexp, redirect stderr directly to file to avoid buffering
+    let cwd = build_path_abs
+        .canonicalize()
+        .map(StrippedVerbatimPath::to_stripped_verbatim_path)
+        .ok()
+        .unwrap();
+
+    // --subprocess: run bsc as subprocess with timeout (non-fatal on crash/timeout).
+    // This REPLACES the normal bsc call — only one bsc runs per compile_file.
+    if subprocess {
+        let module_name =
+            helpers::file_path_to_module_name(implementation_file_path, &package.namespace);
+
+        // Redirect stderr to sexp file when dump_typed_sexp is set
+        let sexp_file = if dump_typed_sexp {
+            let path = ocaml_build_path_abs.join(format!("{basename}.sexp"));
+            if let Some(parent) = path.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            Some(std::fs::File::create(&path).map_err(|e| anyhow!("Failed to create sexp file: {e}"))?)
+        } else {
+            None
+        };
+
+        match Command::new(&compiler_info.bsc_path)
+            .current_dir(&cwd)
+            .args(&to_mjs_args)
+            .stdout(std::process::Stdio::null())
+            .stderr(match sexp_file {
+                Some(f) => std::process::Stdio::from(f),
+                None => std::process::Stdio::piped(),
+            })
+            .spawn()
+        {
+            Ok(mut child) => {
+                let timeout = std::time::Duration::from_secs(30);
+                let start = std::time::Instant::now();
+                let mut timed_out = false;
+                let mut exit_status = None;
+                loop {
+                    match child.try_wait() {
+                        Ok(Some(status)) => {
+                            exit_status = Some(status);
+                            break;
+                        }
+                        Ok(None) if start.elapsed() > timeout => {
+                            let _ = child.kill();
+                            let _ = child.wait();
+                            timed_out = true;
+                            break;
+                        }
+                        Ok(None) => {
+                            std::thread::sleep(std::time::Duration::from_millis(50))
+                        }
+                        Err(_) => break,
+                    }
+                }
+
+                if timed_out {
+                    if dump_typed_sexp {
+                        // Truncate the sexp file (partial output is invalid)
+                        let sexp_path = ocaml_build_path_abs.join(format!("{basename}.sexp"));
+                        let _ = std::fs::write(&sexp_path, "");
+                    }
+                    let msg = format!("Timeout ({:.0}s) compiling `{module_name}`", timeout.as_secs_f64());
+                    log::warn!("{}", msg);
+                    return Ok(Some(msg));
+                } else if exit_status.is_some_and(|s| !s.success()) {
+                    log::warn!("bsc subprocess crashed for `{module_name}`");
+                }
+            }
+            Err(e) => {
+                log::warn!("Failed to spawn bsc subprocess: {e}");
+            }
+        }
+        return Ok(None);
+    }
+
+    // Normal mode: run bsc via Command::output()
+    // When generating sexp, redirect stderr directly to file to avoid buffering
     // huge output in memory (e.g., Icon.res produces 882MB of sexp).
-    let ocaml_sexp_file = if dump_typed_sexp {
-        let path = ocaml_build_path_abs.join(format!("{basename}.ocaml-sexp"));
-        // Ensure the output directory exists (it may not on clean builds)
+    let sexp_file = if dump_typed_sexp {
+        let path = ocaml_build_path_abs.join(format!("{basename}.sexp"));
         if let Some(parent) = path.parent() {
             let _ = std::fs::create_dir_all(parent);
         }
@@ -967,15 +841,9 @@ fn compile_file(
     };
 
     let to_mjs = Command::new(&compiler_info.bsc_path)
-        .current_dir(
-            build_path_abs
-                .canonicalize()
-                .map(StrippedVerbatimPath::to_stripped_verbatim_path)
-                .ok()
-                .unwrap(),
-        )
+        .current_dir(&cwd)
         .args(to_mjs_args)
-        .stderr(match ocaml_sexp_file {
+        .stderr(match sexp_file {
             Some(f) => std::process::Stdio::from(f),
             None => std::process::Stdio::piped(),
         })
@@ -985,7 +853,7 @@ fn compile_file(
         Ok(x) if !x.status.success() => {
             let stderr = if dump_typed_sexp {
                 // stderr was redirected to file — read error from there
-                let sexp_path = ocaml_build_path_abs.join(format!("{basename}.ocaml-sexp"));
+                let sexp_path = ocaml_build_path_abs.join(format!("{basename}.sexp"));
                 std::fs::read_to_string(&sexp_path).unwrap_or_default()
             } else {
                 String::from_utf8_lossy(&x.stderr).to_string()
@@ -1057,9 +925,6 @@ fn compile_file(
                 ..
             }) = &module.source_type
             {
-                // we need to copy the source file to the build directory.
-                // editor tools expects the source file in lib/bs for finding the current package
-                // and in lib/ocaml when referencing modules in other packages
                 let _ = std::fs::copy(
                     Path::new(&package.path).join(path),
                     package.get_build_path().join(path),
@@ -1079,9 +944,6 @@ fn compile_file(
                 ..
             }) = &module.source_type
             {
-                // we need to copy the source file to the build directory.
-                // editor tools expects the source file in lib/bs for finding the current package
-                // and in lib/ocaml when referencing modules in other packages
                 let _ = std::fs::copy(
                     Path::new(&package.path).join(path),
                     package.get_build_path().join(path),
@@ -1143,8 +1005,7 @@ fn compile_file(
                 }
             }
 
-            // After normal compilation succeeds, optionally run --bsc subprocess for sexp generation
-            let mut warnings = if helpers::contains_ascii_characters(&err) {
+            let warnings = if helpers::contains_ascii_characters(&err) {
                 if package.is_local_dep {
                     Some(err)
                 } else {
@@ -1153,84 +1014,6 @@ fn compile_file(
             } else {
                 None
             };
-
-            if let (Some(bsc_path), Some(sexp_args_base)) = (rust_bsc_path, to_mjs_args_for_bsc) {
-                let module_name =
-                    helpers::file_path_to_module_name(implementation_file_path, &package.namespace);
-                let cwd = build_path_abs
-                    .canonicalize()
-                    .map(StrippedVerbatimPath::to_stripped_verbatim_path)
-                    .ok()
-                    .unwrap();
-
-                let mut sexp_args = sexp_args_base;
-                sexp_args.push("-dtyped-sexp".to_string());
-
-                match Command::new(bsc_path)
-                    .current_dir(&cwd)
-                    .args(&sexp_args)
-                    .stdout(std::process::Stdio::null())
-                    .stderr(std::process::Stdio::piped())
-                    .spawn()
-                {
-                    Ok(mut child) => {
-                        let stderr_pipe = child.stderr.take();
-                        let stderr_thread = std::thread::spawn(move || -> String {
-                            let mut buf = String::new();
-                            if let Some(mut pipe) = stderr_pipe {
-                                use std::io::Read;
-                                let _ = pipe.read_to_string(&mut buf);
-                            }
-                            buf
-                        });
-
-                        let timeout = std::time::Duration::from_millis(100);
-                        let start = std::time::Instant::now();
-                        let mut timed_out = false;
-                        let mut exit_status = None;
-                        loop {
-                            match child.try_wait() {
-                                Ok(Some(status)) => {
-                                    exit_status = Some(status);
-                                    break;
-                                }
-                                Ok(None) if start.elapsed() > timeout => {
-                                    let _ = child.kill();
-                                    let _ = child.wait();
-                                    timed_out = true;
-                                    break;
-                                }
-                                Ok(None) => {
-                                    std::thread::sleep(std::time::Duration::from_millis(50))
-                                }
-                                Err(_) => break,
-                            }
-                        }
-
-                        let stderr_output = stderr_thread.join().unwrap_or_default();
-                        let sexp_path = ocaml_build_path_abs.join(format!("{basename}.sexp"));
-
-                        if timed_out {
-                            let _ = std::fs::write(&sexp_path, "");
-                            let msg = format!("Timeout ({:.1}s) generating sexp for `{module_name}`", timeout.as_secs_f64());
-                            log::warn!("{}", msg);
-                            warnings = Some(
-                                warnings.map_or(msg.clone(), |w| format!("{w}\n{msg}")),
-                            );
-                        } else if exit_status.is_some_and(|s| s.success()) {
-                            let _ = std::fs::write(&sexp_path, &stderr_output);
-                        } else {
-                            // Rust bsc crashed — don't write invalid sexp
-                            log::warn!(
-                                "bsc subprocess crashed for `{module_name}`"
-                            );
-                        }
-                    }
-                    Err(e) => {
-                        log::warn!("Failed to spawn bsc subprocess for sexp: {e}");
-                    }
-                }
-            }
 
             Ok(warnings)
         }

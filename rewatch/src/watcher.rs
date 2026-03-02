@@ -67,8 +67,7 @@ struct AsyncWatchArgs<'a> {
     plain_output: bool,
     warn_error: Option<String>,
     use_rust_parser: bool,
-    dump_typed_sexp: bool,
-    rust_bsc_path: Option<std::path::PathBuf>,
+    subprocess: bool,
     dump_typed_sexp: bool,
 }
 
@@ -83,8 +82,7 @@ async fn async_watch(
         plain_output,
         warn_error,
         use_rust_parser,
-        dump_typed_sexp,
-        rust_bsc_path,
+        subprocess,
         dump_typed_sexp,
     }: AsyncWatchArgs<'_>,
 ) -> Result<()> {
@@ -96,8 +94,7 @@ async fn async_watch(
         plain_output,
         warn_error,
         use_rust_parser,
-        dump_typed_sexp,
-        rust_bsc_path.clone(),
+        subprocess,
         dump_typed_sexp,
     )
     .with_context(|| "Could not initialize build")?;
@@ -297,8 +294,7 @@ async fn async_watch(
                     plain_output,
                     build_state.get_warn_error_override(),
                     build_state.use_rust_parser(),
-                    build_state.dump_typed_sexp(),
-                    build_state.rust_bsc_path().cloned(),
+                    build_state.subprocess(),
                     build_state.dump_typed_sexp,
                 )
                 .expect("Could not initialize build");
@@ -348,8 +344,7 @@ pub fn start(
     plain_output: bool,
     warn_error: Option<String>,
     use_rust_parser: bool,
-    dump_typed_sexp: bool,
-    rust_bsc_path: Option<std::path::PathBuf>,
+    subprocess: bool,
     dump_typed_sexp: bool,
 ) -> Result<()> {
     futures::executor::block_on(async {
@@ -378,8 +373,7 @@ pub fn start(
             plain_output,
             warn_error: warn_error.clone(),
             use_rust_parser,
-            dump_typed_sexp,
-            rust_bsc_path,
+            subprocess,
             dump_typed_sexp,
         })
         .await

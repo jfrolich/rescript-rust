@@ -136,10 +136,10 @@ pub struct BuildCommandState {
     pub warn_error_override: Option<String>,
     // Command-line --rust flag: parse in-process with Rust parser.
     pub use_rust_parser: bool,
-    // Command-line --dump-typed-sexp flag: dump typed tree sexp to .sexp files.
+    // Command-line --subprocess flag: run bsc as subprocess with timeout (instead of in-process).
+    pub subprocess: bool,
+    // Command-line --dump-typed-sexp flag: add -dtyped-sexp to bsc invocations.
     pub dump_typed_sexp: bool,
-    // Command-line --bsc flag: path to bsc binary for typed-sexp compilation with timeout.
-    pub rust_bsc_path: Option<PathBuf>,
     // Stored ASTs from parse phase, keyed by "{module_name}:impl" or "{module_name}:intf"
     pub stored_asts: Mutex<AHashMap<String, StoredAst>>,
 }
@@ -193,16 +193,15 @@ impl BuildCommandState {
         compiler: CompilerInfo,
         warn_error_override: Option<String>,
         use_rust_parser: bool,
-        dump_typed_sexp: bool,
-        rust_bsc_path: Option<PathBuf>,
+        subprocess: bool,
         dump_typed_sexp: bool,
     ) -> Self {
         Self {
             build_state: BuildState::new(project_context, packages, compiler),
             warn_error_override,
             use_rust_parser,
+            subprocess,
             dump_typed_sexp,
-            rust_bsc_path,
             stored_asts: Mutex::new(AHashMap::new()),
         }
     }
@@ -215,12 +214,12 @@ impl BuildCommandState {
         self.use_rust_parser
     }
 
-    pub fn dump_typed_sexp(&self) -> bool {
-        self.dump_typed_sexp
+    pub fn subprocess(&self) -> bool {
+        self.subprocess
     }
 
-    pub fn rust_bsc_path(&self) -> Option<&PathBuf> {
-        self.rust_bsc_path.as_ref()
+    pub fn dump_typed_sexp(&self) -> bool {
+        self.dump_typed_sexp
     }
 
     pub fn module_name_package_pairs(&self) -> Vec<(String, String)> {

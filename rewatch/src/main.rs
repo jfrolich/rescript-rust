@@ -65,7 +65,6 @@ fn main() -> Result<()> {
                 );
             }
 
-            let rust_bsc_path = build_args.bsc_arg.bsc.as_ref().map(std::path::PathBuf::from);
             match build::build(
                 &build_args.filter,
                 Path::new(&build_args.folder as &str),
@@ -75,8 +74,7 @@ fn main() -> Result<()> {
                 plain_output,
                 (*build_args.warn_error).clone(),
                 *build_args.rust,
-                *build_args.dump_typed_sexp,
-                rust_bsc_path,
+                build_args.subprocess.subprocess,
                 build_args.dump_typed_sexp_arg.dump_typed_sexp,
             ) {
                 Err(e) => {
@@ -106,7 +104,6 @@ fn main() -> Result<()> {
                 );
             }
 
-            let rust_bsc_path = watch_args.bsc_arg.bsc.as_ref().map(std::path::PathBuf::from);
             match watcher::start(
                 &watch_args.filter,
                 show_progress,
@@ -116,8 +113,7 @@ fn main() -> Result<()> {
                 plain_output,
                 (*watch_args.warn_error).clone(),
                 *watch_args.rust,
-                *watch_args.dump_typed_sexp,
-                rust_bsc_path,
+                watch_args.subprocess.subprocess,
                 watch_args.dump_typed_sexp_arg.dump_typed_sexp,
             ) {
                 Err(e) => {
