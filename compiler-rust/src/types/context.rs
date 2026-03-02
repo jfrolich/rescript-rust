@@ -456,7 +456,8 @@ impl<'a> TypeContext<'a> {
         if env_id != self.previous_env_id.get() {
             self.clear_simple_abbrevs();
             self.clear_abbrev_memos();
-            self.safe_expansion_paths.borrow_mut().clear();
+            // Don't clear safe_expansion_paths: Ttuple expansion status is a stable
+            // property of the type declaration, independent of environment context.
             self.previous_env_id.set(env_id);
         }
     }
