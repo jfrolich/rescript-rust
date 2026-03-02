@@ -1066,6 +1066,14 @@ fn try_expand_head<'a>(
             // attempt can find the type declaration.
             let path_norm = normalize_path_full(ctx, env, &path);
             if path_norm != path {
+                // OCaml's module system "strengthens" abstract types accessed
+                // through module aliases by adding manifests (e.g., N.t →
+                // Belt_SetInt.t). This makes them expandable through subst →
+                // memorize_abbrev → simple_abbrevs. We achieve the equivalent
+                // by memorizing the original ty before returning the normalized
+                // expansion, so that copy/instance() can find_repr on
+                // simple_abbrevs and create Tlink sharing across instances.
+                memorize_simple_abbrev();
                 Some(ctx.new_constr(path_norm, args.clone()))
             } else {
                 None
