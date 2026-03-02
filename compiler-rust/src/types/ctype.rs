@@ -1375,12 +1375,22 @@ fn subst_with_memo(
     // 1. Create stub variable (OCaml: body0 = newvar())
     let body0 = ctx.new_var(None);
 
+    // OCaml's Tconstr carries `ref (ref Mnil)` — each node gets its own
+    // mutable inner ref. Rust's alloc_abbrev_nil() returns a shared sentinel
+    // (index 0) that memorize_abbrev_expansion refuses to mutate. Allocate a
+    // fresh, mutable Mnil cell when the Tconstr's abbrev is the nil sentinel.
+    let memo_ref = if abbrev == AbbrevMemoRef::nil() {
+        ctx.alloc_abbrev(AbbrevMemo::Mnil)
+    } else {
+        abbrev
+    };
+
     // 2. Memorize BEFORE instantiation (OCaml: memorize_abbrev abbrev priv path ty body0)
-    if !args.is_empty() && abbrev != AbbrevMemoRef::nil() {
+    if !args.is_empty() {
         if let TypeDesc::Tconstr { path, .. } = &*ctx.get_desc(ctx.repr(ty)) {
             let path = path.clone();
             ctx.memorize_abbrev_expansion(
-                abbrev,
+                memo_ref,
                 super::asttypes::PrivateFlag::Public,
                 path,
                 ty,      // abbrev: original type (returned by find_repr)
@@ -1391,9 +1401,7 @@ fn subst_with_memo(
 
     // 3. Set global abbreviations context so copy_type_cached can use find_repr
     let old_abbrevs = ctx.current_abbreviations();
-    if abbrev != AbbrevMemoRef::nil() {
-        ctx.set_current_abbreviations(abbrev);
-    }
+    ctx.set_current_abbreviations(memo_ref);
 
     // 4. instance_parameterized_type (copy will now check abbreviations via find_repr)
     let (fresh_params, fresh_body) = instance_parameterized_type(ctx, params, body);
