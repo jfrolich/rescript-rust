@@ -608,7 +608,7 @@ impl Env {
             .ok_or_else(|| EnvError::ModuleNotFound(name.to_string()))
     }
 
-    /// Find a module by name, returning both the identifier and declaration.
+    /// Find a module by name, returning both the identifier and the declaration.
     pub fn find_module_with_id(&self, name: &str) -> EnvResult<(&Ident, &ModuleDeclaration)> {
         self.modules
             .find_by_name_with_id(name)
