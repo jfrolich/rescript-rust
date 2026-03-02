@@ -5504,7 +5504,7 @@ fn type_structure_item<'a>(
                 };
 
                 // Create internal type declaration for the environment
-                let internal_decl = crate::types::TypeDeclaration {
+                let mut internal_decl = crate::types::TypeDeclaration {
                     type_params: internal_type_params,
                     type_arity,
                     type_kind: internal_type_kind,
@@ -5519,6 +5519,14 @@ fn type_structure_item<'a>(
                     type_inlined_types: vec![],
                     type_path: None,
                 };
+
+                // Compute actual variance from the type body (OCaml: compute_variance_decl)
+                let computed_variance = crate::types::ctype::compute_variance_decl(
+                    ctx, &new_env, &internal_decl,
+                );
+                if !computed_variance.is_empty() {
+                    internal_decl.type_variance = computed_variance;
+                }
 
                 // Save for generalization after the loop
                 internal_decls_for_generalize.push(internal_decl.clone());

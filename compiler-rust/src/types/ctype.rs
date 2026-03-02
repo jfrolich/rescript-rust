@@ -2946,6 +2946,235 @@ pub fn generalize_expansive(ctx: &TypeContext<'_>, env: &Env, ty: TypeExprRef) {
     generalize_expansive_rec(ctx, env, ctx.nongen_level(), &mut visited, ty);
 }
 
+/// Compute actual variance for each type parameter of a type declaration.
+/// This matches OCaml's compute_variance_decl in typedecl.ml.
+///
+/// Without this, unannotated type params default to FULL (all flags including MayWeak),
+/// causing generalize_expansive to prevent generalization of covariant params.
+/// OCaml infers actual variance from the type body.
+pub fn compute_variance_decl(
+    ctx: &TypeContext<'_>,
+    env: &Env,
+    decl: &super::decl::TypeDeclaration,
+) -> Vec<Variance> {
+    let params = &decl.type_params;
+    if params.is_empty() {
+        return vec![];
+    }
+
+    // Abstract types with no manifest: keep declared variance
+    if matches!(decl.type_kind, super::TypeKind::TypeAbstract | super::TypeKind::TypeOpen)
+        && decl.type_manifest.is_none()
+    {
+        return decl.type_variance.clone();
+    }
+
+    // Map from TypeExprRef (repr of param) to accumulated variance
+    let mut visited: HashMap<TypeExprRef, Variance> = HashMap::new();
+    let param_reprs: Vec<TypeExprRef> = params.iter().map(|p| ctx.repr(*p)).collect();
+
+    // Collect (is_mutable, type) pairs from the type body
+    let mut fields: Vec<(bool, TypeExprRef)> = Vec::new();
+
+    // From manifest
+    if let Some(manifest) = decl.type_manifest {
+        fields.push((false, manifest));
+    }
+
+    // From type kind
+    match &decl.type_kind {
+        super::TypeKind::TypeRecord(labels, _) => {
+            for label in labels {
+                fields.push((
+                    label.ld_mutable == super::asttypes::MutableFlag::Mutable,
+                    label.ld_type,
+                ));
+            }
+        }
+        super::TypeKind::TypeVariant(constructors) => {
+            for cstr in constructors {
+                // Skip GADT constructors (cd_res != None) — their variance is more complex
+                if cstr.cd_res.is_some() {
+                    continue;
+                }
+                match &cstr.cd_args {
+                    super::decl::ConstructorArguments::CstrTuple(tys) => {
+                        for ty in tys {
+                            fields.push((false, *ty));
+                        }
+                    }
+                    super::decl::ConstructorArguments::CstrRecord(labels) => {
+                        for label in labels {
+                            fields.push((
+                                label.ld_mutable == super::asttypes::MutableFlag::Mutable,
+                                label.ld_type,
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+        _ => {}
+    }
+
+    // Compute variance for each field
+    for (is_mutable, ty) in &fields {
+        let initial_variance = if *is_mutable {
+            Variance::FULL
+        } else {
+            Variance::covariant()
+        };
+        compute_variance_rec(ctx, env, &mut visited, initial_variance, *ty, 0);
+    }
+
+    // Extract variance for each param
+    param_reprs
+        .iter()
+        .map(|p| visited.get(p).copied().unwrap_or(Variance::NULL))
+        .collect()
+}
+
+fn compute_variance_rec(
+    ctx: &TypeContext<'_>,
+    env: &Env,
+    visited: &mut HashMap<TypeExprRef, Variance>,
+    vari: Variance,
+    ty: TypeExprRef,
+    depth: u32,
+) {
+    if depth > 100 {
+        return; // prevent infinite recursion
+    }
+
+    let ty = ctx.repr(ty);
+    let current = visited.get(&ty).copied().unwrap_or(Variance::NULL);
+    if vari.subset(&current) {
+        return; // already fully computed
+    }
+
+    let vari = vari.union(&current);
+    visited.insert(ty, vari);
+
+    let desc = ctx.get_desc(ty);
+    match &*desc {
+        TypeDesc::Tarrow { arg, ret, .. } => {
+            let v = vari.conjugate();
+            let v1 = if v.mem(VarianceFlag::MayPos) || v.mem(VarianceFlag::MayNeg) {
+                v.set(VarianceFlag::MayWeak, true)
+            } else {
+                v
+            };
+            let arg_ty = arg.typ;
+            let ret_ty = *ret;
+            drop(desc);
+            compute_variance_rec(ctx, env, visited, v1, arg_ty, depth + 1);
+            compute_variance_rec(ctx, env, visited, vari, ret_ty, depth + 1);
+        }
+        TypeDesc::Ttuple(tl) => {
+            let tl = tl.clone();
+            drop(desc);
+            for t in &tl {
+                compute_variance_rec(ctx, env, visited, vari, *t, depth + 1);
+            }
+        }
+        TypeDesc::Tconstr { path, args, .. } => {
+            if !args.is_empty() {
+                let path = path.clone();
+                let args = args.clone();
+                drop(desc);
+                let variances = env
+                    .lookup_type(&path)
+                    .map(|d| d.type_variance.clone())
+                    .unwrap_or_else(|_| vec![Variance::MAY_INV; args.len()]);
+                for (i, arg) in args.iter().enumerate() {
+                    let var = variances.get(i).copied().unwrap_or(Variance::MAY_INV);
+                    let cv = |f: VarianceFlag| var.mem(f);
+                    let cvari = |f: VarianceFlag| vari.mem(f);
+                    let strict = (cvari(VarianceFlag::Inv) && cv(VarianceFlag::Inj))
+                        || ((cvari(VarianceFlag::Pos) || cvari(VarianceFlag::Neg))
+                            && cv(VarianceFlag::Inv));
+                    if strict {
+                        compute_variance_rec(ctx, env, visited, Variance::FULL, *arg, depth + 1);
+                    } else {
+                        let p1 = var.inter(&vari);
+                        let n1 = var.inter(&vari.conjugate());
+                        let cov = Variance::covariant();
+                        let neg_cov = cov.conjugate();
+                        let v1 = cov
+                            .inter(&p1.union(&p1.conjugate()))
+                            .union(&neg_cov.inter(&n1.union(&n1.conjugate())));
+                        let weak = (cvari(VarianceFlag::MayWeak)
+                            && (cv(VarianceFlag::MayPos) || cv(VarianceFlag::MayNeg)))
+                            || ((cvari(VarianceFlag::MayPos) || cvari(VarianceFlag::MayNeg))
+                                && cv(VarianceFlag::MayWeak));
+                        let v2 = v1.set(VarianceFlag::MayWeak, weak);
+                        compute_variance_rec(ctx, env, visited, v2, *arg, depth + 1);
+                    }
+                }
+            } else {
+                drop(desc);
+            }
+        }
+        TypeDesc::Tpackage { args, .. } => {
+            let v = if vari.mem(VarianceFlag::Pos) || vari.mem(VarianceFlag::Neg) {
+                Variance::FULL
+            } else {
+                Variance::MAY_INV
+            };
+            let args: Vec<TypeExprRef> = args.clone();
+            drop(desc);
+            for t in &args {
+                compute_variance_rec(ctx, env, visited, v, *t, depth + 1);
+            }
+        }
+        TypeDesc::Tpoly { body, .. } => {
+            let body = *body;
+            drop(desc);
+            compute_variance_rec(ctx, env, visited, vari, body, depth + 1);
+        }
+        TypeDesc::Tobject { fields, .. } => {
+            let fields = *fields;
+            drop(desc);
+            compute_variance_rec(ctx, env, visited, vari, fields, depth + 1);
+        }
+        TypeDesc::Tfield { typ, rest, .. } => {
+            let typ = *typ;
+            let rest = *rest;
+            drop(desc);
+            compute_variance_rec(ctx, env, visited, vari, typ, depth + 1);
+            compute_variance_rec(ctx, env, visited, vari, rest, depth + 1);
+        }
+        TypeDesc::Tvariant(row) => {
+            let row_fields = row.row_fields.clone();
+            let row_more = row.row_more;
+            drop(desc);
+            for (_, field) in &row_fields {
+                match field {
+                    RowField::Rpresent(Some(ty)) => {
+                        compute_variance_rec(ctx, env, visited, vari, *ty, depth + 1);
+                    }
+                    RowField::Reither { types, .. } => {
+                        let upper = Variance::NULL
+                            .set(VarianceFlag::MayPos, true)
+                            .set(VarianceFlag::MayNeg, true)
+                            .set(VarianceFlag::MayWeak, true);
+                        let v = vari.inter(&upper);
+                        for t in types {
+                            compute_variance_rec(ctx, env, visited, v, *t, depth + 1);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            compute_variance_rec(ctx, env, visited, vari, row_more, depth + 1);
+        }
+        // Tvar, Tnil, Tlink, Tunivar, Tsubst: no children to recurse into
+        _ => {
+            drop(desc);
+        }
+    }
+}
+
 /// OCaml's lower_args: walk an arrow type, expanding each component with
 /// expand_head. This triggers type alias expansion for function argument/return
 /// types, matching OCaml's behavior during Pexp_apply processing.
