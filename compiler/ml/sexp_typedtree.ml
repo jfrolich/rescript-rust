@@ -236,18 +236,21 @@ and object_fields_sorted ty =
   let sorted_fields = List.sort (fun (n1, _, _) (n2, _, _) -> String.compare n1 n2) fields in
   let tail_sexp = type_expr tail in
   List.fold_right (fun (name, kind_str, field_ty) rest_sexp ->
-    Sexp.list [Sexp.atom "Tfield"; string name; Sexp.atom kind_str; type_expr field_ty; rest_sexp]
+    let field_ty_sexp = type_expr field_ty in
+    Sexp.list [Sexp.atom "Tfield"; string name; Sexp.atom kind_str; field_ty_sexp; rest_sexp]
   ) sorted_fields tail_sexp
 
 and row_desc_sexp row =
   let row = Btype.row_repr row in
   (* Sort row_fields by label to normalize ordering for parity *)
   let sorted_fields = List.sort (fun (l1, _) (l2, _) -> String.compare l1 l2) row.Types.row_fields in
+  let fields_sexp = Sexp.list (List.map (fun (l, rf) ->
+    let rf_sexp = row_field_sexp rf in
+    Sexp.list [string l; rf_sexp]
+  ) sorted_fields) in
   Sexp.list [
     Sexp.atom "Tvariant";
-    Sexp.list (List.map (fun (l, rf) ->
-      Sexp.list [string l; row_field_sexp rf]
-    ) sorted_fields);
+    fields_sexp;
     Sexp.atom (if row.Types.row_closed then "closed" else "open");
     Sexp.atom (if row.Types.row_fixed then "fixed" else "not_fixed");
   ]
@@ -255,12 +258,15 @@ and row_desc_sexp row =
 and row_field_sexp rf =
   match Btype.row_field_repr rf with
   | Rpresent None -> Sexp.atom "Rpresent_none"
-  | Rpresent (Some ty) -> Sexp.list [Sexp.atom "Rpresent"; type_expr ty]
+  | Rpresent (Some ty) ->
+    let ty_sexp = type_expr ty in
+    Sexp.list [Sexp.atom "Rpresent"; ty_sexp]
   | Reither (c, tyl, _, _) ->
+    let tyl_sexp = Sexp.list (List.map type_expr tyl) in
     Sexp.list [
       Sexp.atom "Reither";
       Sexp.atom (if c then "const" else "non_const");
-      Sexp.list (List.map type_expr tyl);
+      tyl_sexp;
     ]
   | Rabsent -> Sexp.atom "Rabsent"
 
@@ -279,7 +285,8 @@ and pat_extra ~with_locs extra loc attrs =
   let attrs_sexp = attributes ~with_locs attrs in
   match extra with
   | Tpat_constraint ct ->
-    Sexp.list ([Sexp.atom "Tpat_constraint"; core_type ~with_locs ct] @ loc_sexp @ [attrs_sexp])
+    let ct_sexp = core_type ~with_locs ct in
+    Sexp.list ([Sexp.atom "Tpat_constraint"; ct_sexp] @ loc_sexp @ [attrs_sexp])
   | Tpat_type (p, _) ->
     Sexp.list ([Sexp.atom "Tpat_type"; path p] @ loc_sexp @ [attrs_sexp])
   | Tpat_open (p, _, _) ->
@@ -292,30 +299,39 @@ and pattern_desc ~with_locs desc =
   | Tpat_any -> Sexp.atom "Tpat_any"
   | Tpat_var (id, _) -> Sexp.list [Sexp.atom "Tpat_var"; ident id]
   | Tpat_alias (p, id, _) ->
-    Sexp.list [Sexp.atom "Tpat_alias"; pattern ~with_locs p; ident id]
+    let p_sexp = pattern ~with_locs p in
+    Sexp.list [Sexp.atom "Tpat_alias"; p_sexp; ident id]
   | Tpat_constant c -> Sexp.list [Sexp.atom "Tpat_constant"; constant c]
   | Tpat_tuple l ->
-    Sexp.list (Sexp.atom "Tpat_tuple" :: List.map (pattern ~with_locs) l)
+    let items = List.map (pattern ~with_locs) l in
+    Sexp.list (Sexp.atom "Tpat_tuple" :: items)
   | Tpat_construct (li, _, args) ->
+    let args_sexp = Sexp.list (List.map (pattern ~with_locs) args) in
     Sexp.list [
       Sexp.atom "Tpat_construct";
       longident_loc li;
-      Sexp.list (List.map (pattern ~with_locs) args);
+      args_sexp;
     ]
   | Tpat_variant (label, arg, _) ->
-    Sexp.list [Sexp.atom "Tpat_variant"; string label; opt (pattern ~with_locs) arg]
+    let arg_sexp = opt (pattern ~with_locs) arg in
+    Sexp.list [Sexp.atom "Tpat_variant"; string label; arg_sexp]
   | Tpat_record (fields, flag) ->
+    let fields_sexp = Sexp.list (List.map (fun (li, _, p, opt_flag) ->
+      let p_sexp = pattern ~with_locs p in
+      Sexp.list [longident_loc li; p_sexp; Sexp.atom (if opt_flag then "optional" else "required")]
+    ) fields) in
     Sexp.list [
       Sexp.atom "Tpat_record";
-      Sexp.list (List.map (fun (li, _, p, opt) ->
-        Sexp.list [longident_loc li; pattern ~with_locs p; Sexp.atom (if opt then "optional" else "required")]
-      ) fields);
+      fields_sexp;
       closed_flag flag;
     ]
   | Tpat_array l ->
-    Sexp.list (Sexp.atom "Tpat_array" :: List.map (pattern ~with_locs) l)
+    let items = List.map (pattern ~with_locs) l in
+    Sexp.list (Sexp.atom "Tpat_array" :: items)
   | Tpat_or (p1, p2, _) ->
-    Sexp.list [Sexp.atom "Tpat_or"; pattern ~with_locs p1; pattern ~with_locs p2]
+    let p1_sexp = pattern ~with_locs p1 in
+    let p2_sexp = pattern ~with_locs p2 in
+    Sexp.list [Sexp.atom "Tpat_or"; p1_sexp; p2_sexp]
 
 (* Expression *)
 and expression ~with_locs e =
@@ -333,9 +349,11 @@ and exp_extra ~with_locs extra loc attrs =
   let attrs_sexp = attributes ~with_locs attrs in
   match extra with
   | Texp_constraint ct ->
-    Sexp.list ([Sexp.atom "Texp_constraint"; core_type ~with_locs ct] @ loc_sexp @ [attrs_sexp])
+    let ct_sexp = core_type ~with_locs ct in
+    Sexp.list ([Sexp.atom "Texp_constraint"; ct_sexp] @ loc_sexp @ [attrs_sexp])
   | Texp_coerce ct ->
-    Sexp.list ([Sexp.atom "Texp_coerce"; core_type ~with_locs ct] @ loc_sexp @ [attrs_sexp])
+    let ct_sexp = core_type ~with_locs ct in
+    Sexp.list ([Sexp.atom "Texp_coerce"; ct_sexp] @ loc_sexp @ [attrs_sexp])
   | Texp_open (flag, p, _, _) ->
     Sexp.list ([Sexp.atom "Texp_open"; override_flag flag; path p] @ loc_sexp @ [attrs_sexp])
   | Texp_newtype s ->
@@ -347,112 +365,159 @@ and expression_desc ~with_locs desc =
     Sexp.list [Sexp.atom "Texp_ident"; path p; longident_loc li]
   | Texp_constant c -> Sexp.list [Sexp.atom "Texp_constant"; constant c]
   | Texp_let (flag, vbs, e) ->
+    let vbs_sexp = Sexp.list (List.map (value_binding ~with_locs) vbs) in
+    let e_sexp = expression ~with_locs e in
     Sexp.list [
       Sexp.atom "Texp_let";
       rec_flag flag;
-      Sexp.list (List.map (value_binding ~with_locs) vbs);
-      expression ~with_locs e;
+      vbs_sexp;
+      e_sexp;
     ]
   | Texp_function { arg_label; arity; param; case = c; partial = p; async } ->
+    let c_sexp = case ~with_locs c in
     Sexp.list [
       Sexp.atom "Texp_function";
       sexp_arg_label arg_label;
       opt (fun a -> Sexp.atom (string_of_int a)) arity;
       ident param;
-      case ~with_locs c;
+      c_sexp;
       partial p;
       Sexp.atom (if async then "async" else "sync");
     ]
   | Texp_apply { funct; args; partial = p; transformed_jsx } ->
+    let funct_sexp = expression ~with_locs funct in
+    let args_sexp = Sexp.list (List.map (fun (lbl, arg) ->
+      let arg_sexp = opt (expression ~with_locs) arg in
+      Sexp.list [sexp_arg_label lbl; arg_sexp]
+    ) args) in
     Sexp.list [
       Sexp.atom "Texp_apply";
-      expression ~with_locs funct;
-      Sexp.list (List.map (fun (lbl, arg) ->
-        Sexp.list [sexp_arg_label lbl; opt (expression ~with_locs) arg]
-      ) args);
+      funct_sexp;
+      args_sexp;
       Sexp.atom (if p then "partial" else "total");
       Sexp.atom (if transformed_jsx then "jsx" else "not_jsx");
     ]
   | Texp_match (e, cases, exn_cases, p) ->
+    let e_sexp = expression ~with_locs e in
+    let cases_sexp = Sexp.list (List.map (case ~with_locs) cases) in
+    let exn_cases_sexp = Sexp.list (List.map (case ~with_locs) exn_cases) in
     Sexp.list [
       Sexp.atom "Texp_match";
-      expression ~with_locs e;
-      Sexp.list (List.map (case ~with_locs) cases);
-      Sexp.list (List.map (case ~with_locs) exn_cases);
+      e_sexp;
+      cases_sexp;
+      exn_cases_sexp;
       partial p;
     ]
   | Texp_try (e, cases) ->
+    let e_sexp = expression ~with_locs e in
+    let cases_sexp = Sexp.list (List.map (case ~with_locs) cases) in
     Sexp.list [
       Sexp.atom "Texp_try";
-      expression ~with_locs e;
-      Sexp.list (List.map (case ~with_locs) cases);
+      e_sexp;
+      cases_sexp;
     ]
   | Texp_tuple l ->
-    Sexp.list (Sexp.atom "Texp_tuple" :: List.map (expression ~with_locs) l)
+    let items = List.map (expression ~with_locs) l in
+    Sexp.list (Sexp.atom "Texp_tuple" :: items)
   | Texp_construct (li, _, args) ->
+    let args_sexp = Sexp.list (List.map (expression ~with_locs) args) in
     Sexp.list [
       Sexp.atom "Texp_construct";
       longident_loc li;
-      Sexp.list (List.map (expression ~with_locs) args);
+      args_sexp;
     ]
   | Texp_variant (label, arg) ->
-    Sexp.list [Sexp.atom "Texp_variant"; string label; opt (expression ~with_locs) arg]
+    let arg_sexp = opt (expression ~with_locs) arg in
+    Sexp.list [Sexp.atom "Texp_variant"; string label; arg_sexp]
   | Texp_record { fields; representation = _; extended_expression } ->
+    let fields_sexp = Sexp.list (Array.to_list (Array.map (fun (ld, def, opt_flag) ->
+      let def_sexp = match def with
+        | Kept ty ->
+          let ty_sexp = type_expr ty in
+          Sexp.list [Sexp.atom "Kept"; ty_sexp]
+        | Overridden (li, e) ->
+          let e_sexp = expression ~with_locs e in
+          Sexp.list [Sexp.atom "Overridden"; longident_loc li; e_sexp]
+      in
+      Sexp.list [string ld.Types.lbl_name; def_sexp; Sexp.atom (if opt_flag then "optional" else "required")]
+    ) fields)) in
+    let ext_sexp = opt (expression ~with_locs) extended_expression in
     Sexp.list [
       Sexp.atom "Texp_record";
-      Sexp.list (Array.to_list (Array.map (fun (ld, def, opt) ->
-        let def_sexp = match def with
-          | Kept ty -> Sexp.list [Sexp.atom "Kept"; type_expr ty]
-          | Overridden (li, e) ->
-            Sexp.list [Sexp.atom "Overridden"; longident_loc li; expression ~with_locs e]
-        in
-        Sexp.list [string ld.Types.lbl_name; def_sexp; Sexp.atom (if opt then "optional" else "required")]
-      ) fields));
-      opt (expression ~with_locs) extended_expression;
+      fields_sexp;
+      ext_sexp;
     ]
   | Texp_field (e, li, _) ->
-    Sexp.list [Sexp.atom "Texp_field"; expression ~with_locs e; longident_loc li]
+    let e_sexp = expression ~with_locs e in
+    Sexp.list [Sexp.atom "Texp_field"; e_sexp; longident_loc li]
   | Texp_setfield (e1, li, _, e2) ->
-    Sexp.list [Sexp.atom "Texp_setfield"; expression ~with_locs e1; longident_loc li; expression ~with_locs e2]
+    let e1_sexp = expression ~with_locs e1 in
+    let e2_sexp = expression ~with_locs e2 in
+    Sexp.list [Sexp.atom "Texp_setfield"; e1_sexp; longident_loc li; e2_sexp]
   | Texp_array l ->
-    Sexp.list (Sexp.atom "Texp_array" :: List.map (expression ~with_locs) l)
+    let items = List.map (expression ~with_locs) l in
+    Sexp.list (Sexp.atom "Texp_array" :: items)
   | Texp_ifthenelse (e1, e2, e3) ->
-    Sexp.list [Sexp.atom "Texp_ifthenelse"; expression ~with_locs e1; expression ~with_locs e2; opt (expression ~with_locs) e3]
+    let e1_sexp = expression ~with_locs e1 in
+    let e2_sexp = expression ~with_locs e2 in
+    let e3_sexp = opt (expression ~with_locs) e3 in
+    Sexp.list [Sexp.atom "Texp_ifthenelse"; e1_sexp; e2_sexp; e3_sexp]
   | Texp_sequence (e1, e2) ->
-    Sexp.list [Sexp.atom "Texp_sequence"; expression ~with_locs e1; expression ~with_locs e2]
+    let e1_sexp = expression ~with_locs e1 in
+    let e2_sexp = expression ~with_locs e2 in
+    Sexp.list [Sexp.atom "Texp_sequence"; e1_sexp; e2_sexp]
   | Texp_while (e1, e2) ->
-    Sexp.list [Sexp.atom "Texp_while"; expression ~with_locs e1; expression ~with_locs e2]
+    let e1_sexp = expression ~with_locs e1 in
+    let e2_sexp = expression ~with_locs e2 in
+    Sexp.list [Sexp.atom "Texp_while"; e1_sexp; e2_sexp]
   | Texp_for (id, _, e1, e2, flag, e3) ->
-    Sexp.list [Sexp.atom "Texp_for"; ident id; expression ~with_locs e1; expression ~with_locs e2; direction_flag flag; expression ~with_locs e3]
+    let e1_sexp = expression ~with_locs e1 in
+    let e2_sexp = expression ~with_locs e2 in
+    let e3_sexp = expression ~with_locs e3 in
+    Sexp.list [Sexp.atom "Texp_for"; ident id; e1_sexp; e2_sexp; direction_flag flag; e3_sexp]
   | Texp_send (e, Tmeth_name name, arg) ->
-    Sexp.list [Sexp.atom "Texp_send"; expression ~with_locs e; string name; opt (expression ~with_locs) arg]
+    let e_sexp = expression ~with_locs e in
+    let arg_sexp = opt (expression ~with_locs) arg in
+    Sexp.list [Sexp.atom "Texp_send"; e_sexp; string name; arg_sexp]
   | Texp_letmodule (id, _, me, e) ->
-    Sexp.list [Sexp.atom "Texp_letmodule"; ident id; module_expr ~with_locs me; expression ~with_locs e]
+    let me_sexp = module_expr ~with_locs me in
+    let e_sexp = expression ~with_locs e in
+    Sexp.list [Sexp.atom "Texp_letmodule"; ident id; me_sexp; e_sexp]
   | Texp_letexception (ec, e) ->
-    Sexp.list [Sexp.atom "Texp_letexception"; extension_constructor ~with_locs ec; expression ~with_locs e]
+    let ec_sexp = extension_constructor ~with_locs ec in
+    let e_sexp = expression ~with_locs e in
+    Sexp.list [Sexp.atom "Texp_letexception"; ec_sexp; e_sexp]
   | Texp_assert e ->
-    Sexp.list [Sexp.atom "Texp_assert"; expression ~with_locs e]
+    let e_sexp = expression ~with_locs e in
+    Sexp.list [Sexp.atom "Texp_assert"; e_sexp]
   | Texp_pack me ->
-    Sexp.list [Sexp.atom "Texp_pack"; module_expr ~with_locs me]
+    let me_sexp = module_expr ~with_locs me in
+    Sexp.list [Sexp.atom "Texp_pack"; me_sexp]
   | Texp_extension_constructor (li, p) ->
     Sexp.list [Sexp.atom "Texp_extension_constructor"; longident_loc li; path p]
 
 and case ~with_locs c =
+  let lhs_sexp = pattern ~with_locs c.c_lhs in
+  let guard_sexp = opt (expression ~with_locs) c.c_guard in
+  let rhs_sexp = expression ~with_locs c.c_rhs in
   Sexp.list [
     Sexp.atom "case";
-    pattern ~with_locs c.c_lhs;
-    opt (expression ~with_locs) c.c_guard;
-    expression ~with_locs c.c_rhs;
+    lhs_sexp;
+    guard_sexp;
+    rhs_sexp;
   ]
 
 and value_binding ~with_locs vb =
   let loc = if with_locs then [location ~with_locs vb.vb_loc] else [] in
+  let pat_sexp = pattern ~with_locs vb.vb_pat in
+  let expr_sexp = expression ~with_locs vb.vb_expr in
+  let attrs_sexp = attributes ~with_locs vb.vb_attributes in
   Sexp.list ([
     Sexp.atom "value_binding";
   ] @ loc @ [
-    pattern ~with_locs vb.vb_pat;
-    expression ~with_locs vb.vb_expr;
-    attributes ~with_locs vb.vb_attributes;
+    pat_sexp;
+    expr_sexp;
+    attrs_sexp;
   ])
 
 (* Core type *)
@@ -468,63 +533,80 @@ and core_type_desc ~with_locs desc =
   | Ttyp_any -> Sexp.atom "Ttyp_any"
   | Ttyp_var s -> Sexp.list [Sexp.atom "Ttyp_var"; string s]
   | Ttyp_arrow (arg, ret, arity) ->
+    let arg_attrs_sexp = attributes ~with_locs arg.attrs in
+    let arg_ct_sexp = core_type ~with_locs arg.typ in
+    let ret_sexp = core_type ~with_locs ret in
     Sexp.list [
       Sexp.atom "Ttyp_arrow";
       sexp_arg_label arg.lbl;
-      attributes ~with_locs arg.attrs;
-      core_type ~with_locs arg.typ;
-      core_type ~with_locs ret;
+      arg_attrs_sexp;
+      arg_ct_sexp;
+      ret_sexp;
       opt (fun a -> Sexp.atom (string_of_int a)) arity;
     ]
   | Ttyp_tuple l ->
-    Sexp.list (Sexp.atom "Ttyp_tuple" :: List.map (core_type ~with_locs) l)
+    let items = List.map (core_type ~with_locs) l in
+    Sexp.list (Sexp.atom "Ttyp_tuple" :: items)
   | Ttyp_constr (p, _, args) ->
-    Sexp.list [Sexp.atom "Ttyp_constr"; path p; Sexp.list (List.map (core_type ~with_locs) args)]
+    let args_sexp = Sexp.list (List.map (core_type ~with_locs) args) in
+    Sexp.list [Sexp.atom "Ttyp_constr"; path p; args_sexp]
   | Ttyp_object (fields, flag) ->
+    let fields_sexp = Sexp.list (List.map (object_field ~with_locs) fields) in
     Sexp.list [
       Sexp.atom "Ttyp_object";
-      Sexp.list (List.map (object_field ~with_locs) fields);
+      fields_sexp;
       closed_flag flag;
     ]
   | Ttyp_alias (ct, s) ->
-    Sexp.list [Sexp.atom "Ttyp_alias"; core_type ~with_locs ct; string s]
+    let ct_sexp = core_type ~with_locs ct in
+    Sexp.list [Sexp.atom "Ttyp_alias"; ct_sexp; string s]
   | Ttyp_variant (fields, flag, labels) ->
+    let fields_sexp = Sexp.list (List.map (row_field_decl ~with_locs) fields) in
     Sexp.list [
       Sexp.atom "Ttyp_variant";
-      Sexp.list (List.map (row_field_decl ~with_locs) fields);
+      fields_sexp;
       closed_flag flag;
       opt (fun l -> Sexp.list (List.map string l)) labels;
     ]
   | Ttyp_poly (vars, ct) ->
-    Sexp.list [Sexp.atom "Ttyp_poly"; Sexp.list (List.map string vars); core_type ~with_locs ct]
+    let ct_sexp = core_type ~with_locs ct in
+    Sexp.list [Sexp.atom "Ttyp_poly"; Sexp.list (List.map string vars); ct_sexp]
   | Ttyp_package pkg ->
+    let fields_sexp = Sexp.list (List.map (fun (li, ct) ->
+      let ct_sexp = core_type ~with_locs ct in
+      Sexp.list [longident_loc li; ct_sexp]
+    ) pkg.pack_fields) in
     Sexp.list [
       Sexp.atom "Ttyp_package";
       path pkg.pack_path;
-      Sexp.list (List.map (fun (li, ct) ->
-        Sexp.list [longident_loc li; core_type ~with_locs ct]
-      ) pkg.pack_fields);
+      fields_sexp;
     ]
 
 and object_field ~with_locs field =
   match field with
   | OTtag (name, attrs, ct) ->
-    Sexp.list [Sexp.atom "OTtag"; string name.txt; attributes ~with_locs attrs; core_type ~with_locs ct]
+    let attrs_sexp = attributes ~with_locs attrs in
+    let ct_sexp = core_type ~with_locs ct in
+    Sexp.list [Sexp.atom "OTtag"; string name.txt; attrs_sexp; ct_sexp]
   | OTinherit ct ->
-    Sexp.list [Sexp.atom "OTinherit"; core_type ~with_locs ct]
+    let ct_sexp = core_type ~with_locs ct in
+    Sexp.list [Sexp.atom "OTinherit"; ct_sexp]
 
 and row_field_decl ~with_locs field =
   match field with
   | Ttag (name, attrs, const, args) ->
+    let attrs_sexp = attributes ~with_locs attrs in
+    let args_sexp = Sexp.list (List.map (core_type ~with_locs) args) in
     Sexp.list [
       Sexp.atom "Ttag";
       string name.txt;
-      attributes ~with_locs attrs;
+      attrs_sexp;
       Sexp.atom (if const then "const" else "non_const");
-      Sexp.list (List.map (core_type ~with_locs) args);
+      args_sexp;
     ]
   | Tinherit ct ->
-    Sexp.list [Sexp.atom "Tinherit"; core_type ~with_locs ct]
+    let ct_sexp = core_type ~with_locs ct in
+    Sexp.list [Sexp.atom "Tinherit"; ct_sexp]
 
 (* Attributes *)
 and attribute ~with_locs (name, payload) =
@@ -543,53 +625,70 @@ and payload_sexp ~with_locs:_ p =
 (* Type declarations *)
 and type_declaration ~with_locs td =
   let loc = if with_locs then [location ~with_locs td.typ_loc] else [] in
+  let params_sexp = Sexp.list [Sexp.atom "params"; Sexp.list (List.map (fun (ct, v) ->
+    let ct_sexp = core_type ~with_locs ct in
+    Sexp.list [ct_sexp; variance v]
+  ) td.typ_params)] in
+  let cstrs_sexp = Sexp.list [Sexp.atom "cstrs"; Sexp.list (List.map (fun (ct1, ct2, _loc) ->
+    let ct1_sexp = core_type ~with_locs ct1 in
+    let ct2_sexp = core_type ~with_locs ct2 in
+    Sexp.list [ct1_sexp; ct2_sexp]
+  ) td.typ_cstrs)] in
+  let kind_sexp = Sexp.list [Sexp.atom "kind"; type_kind ~with_locs td.typ_kind] in
+  let manifest_sexp = Sexp.list [Sexp.atom "manifest"; opt (core_type ~with_locs) td.typ_manifest] in
+  let attrs_sexp = attributes ~with_locs td.typ_attributes in
   Sexp.list ([
     Sexp.atom "type_declaration";
     ident td.typ_id;
     string td.typ_name.txt;
   ] @ loc @ [
-    Sexp.list [Sexp.atom "params"; Sexp.list (List.map (fun (ct, v) ->
-      Sexp.list [core_type ~with_locs ct; variance v]
-    ) td.typ_params)];
-    Sexp.list [Sexp.atom "cstrs"; Sexp.list (List.map (fun (ct1, ct2, _loc) ->
-      Sexp.list [core_type ~with_locs ct1; core_type ~with_locs ct2]
-    ) td.typ_cstrs)];
-    Sexp.list [Sexp.atom "kind"; type_kind ~with_locs td.typ_kind];
+    params_sexp;
+    cstrs_sexp;
+    kind_sexp;
     Sexp.list [Sexp.atom "private"; private_flag td.typ_private];
-    Sexp.list [Sexp.atom "manifest"; opt (core_type ~with_locs) td.typ_manifest];
-    attributes ~with_locs td.typ_attributes;
+    manifest_sexp;
+    attrs_sexp;
   ])
 
 and type_kind ~with_locs kind =
   match kind with
   | Ttype_abstract -> Sexp.atom "Ttype_abstract"
   | Ttype_variant cds ->
-    Sexp.list (Sexp.atom "Ttype_variant" :: List.map (constructor_declaration ~with_locs) cds)
+    let items = List.map (constructor_declaration ~with_locs) cds in
+    Sexp.list (Sexp.atom "Ttype_variant" :: items)
   | Ttype_record lds ->
-    Sexp.list (Sexp.atom "Ttype_record" :: List.map (label_declaration ~with_locs) lds)
+    let items = List.map (label_declaration ~with_locs) lds in
+    Sexp.list (Sexp.atom "Ttype_record" :: items)
   | Ttype_open -> Sexp.atom "Ttype_open"
 
 and constructor_declaration ~with_locs cd =
   let loc = if with_locs then [location ~with_locs cd.cd_loc] else [] in
+  let args_sexp = constructor_arguments ~with_locs cd.cd_args in
+  let res_sexp = opt (core_type ~with_locs) cd.cd_res in
+  let attrs_sexp = attributes ~with_locs cd.cd_attributes in
   Sexp.list ([
     Sexp.atom "constructor_declaration";
     ident cd.cd_id;
     string cd.cd_name.txt;
   ] @ loc @ [
-    constructor_arguments ~with_locs cd.cd_args;
-    opt (core_type ~with_locs) cd.cd_res;
-    attributes ~with_locs cd.cd_attributes;
+    args_sexp;
+    res_sexp;
+    attrs_sexp;
   ])
 
 and constructor_arguments ~with_locs args =
   match args with
   | Cstr_tuple cts ->
-    Sexp.list (Sexp.atom "Cstr_tuple" :: List.map (core_type ~with_locs) cts)
+    let items = List.map (core_type ~with_locs) cts in
+    Sexp.list (Sexp.atom "Cstr_tuple" :: items)
   | Cstr_record lds ->
-    Sexp.list (Sexp.atom "Cstr_record" :: List.map (label_declaration ~with_locs) lds)
+    let items = List.map (label_declaration ~with_locs) lds in
+    Sexp.list (Sexp.atom "Cstr_record" :: items)
 
 and label_declaration ~with_locs ld =
   let loc = if with_locs then [location ~with_locs ld.ld_loc] else [] in
+  let ct_sexp = core_type ~with_locs ld.ld_type in
+  let attrs_sexp = attributes ~with_locs ld.ld_attributes in
   Sexp.list ([
     Sexp.atom "label_declaration";
     ident ld.ld_id;
@@ -597,53 +696,63 @@ and label_declaration ~with_locs ld =
   ] @ loc @ [
     mutable_flag ld.ld_mutable;
     Sexp.atom (if ld.ld_optional then "optional" else "required");
-    core_type ~with_locs ld.ld_type;
-    attributes ~with_locs ld.ld_attributes;
+    ct_sexp;
+    attrs_sexp;
   ])
 
 (* Type extension *)
 and type_extension ~with_locs te =
+  let params_sexp = Sexp.list [Sexp.atom "params"; Sexp.list (List.map (fun (ct, v) ->
+    let ct_sexp = core_type ~with_locs ct in
+    Sexp.list [ct_sexp; variance v]
+  ) te.tyext_params)] in
+  let constructors_sexp = Sexp.list [Sexp.atom "constructors"; Sexp.list (List.map (extension_constructor ~with_locs) te.tyext_constructors)] in
+  let attrs_sexp = attributes ~with_locs te.tyext_attributes in
   Sexp.list [
     Sexp.atom "type_extension";
     path te.tyext_path;
     longident_loc te.tyext_txt;
-    Sexp.list [Sexp.atom "params"; Sexp.list (List.map (fun (ct, v) ->
-      Sexp.list [core_type ~with_locs ct; variance v]
-    ) te.tyext_params)];
-    Sexp.list [Sexp.atom "constructors"; Sexp.list (List.map (extension_constructor ~with_locs) te.tyext_constructors)];
+    params_sexp;
+    constructors_sexp;
     private_flag te.tyext_private;
-    attributes ~with_locs te.tyext_attributes;
+    attrs_sexp;
   ]
 
 and extension_constructor ~with_locs ec =
   let loc = if with_locs then [location ~with_locs ec.ext_loc] else [] in
+  let kind_sexp = extension_constructor_kind ~with_locs ec.ext_kind in
+  let attrs_sexp = attributes ~with_locs ec.ext_attributes in
   Sexp.list ([
     Sexp.atom "extension_constructor";
     ident ec.ext_id;
     string ec.ext_name.txt;
   ] @ loc @ [
-    extension_constructor_kind ~with_locs ec.ext_kind;
-    attributes ~with_locs ec.ext_attributes;
+    kind_sexp;
+    attrs_sexp;
   ])
 
 and extension_constructor_kind ~with_locs kind =
   match kind with
   | Text_decl (args, ret) ->
-    Sexp.list [Sexp.atom "Text_decl"; constructor_arguments ~with_locs args; opt (core_type ~with_locs) ret]
+    let args_sexp = constructor_arguments ~with_locs args in
+    let ret_sexp = opt (core_type ~with_locs) ret in
+    Sexp.list [Sexp.atom "Text_decl"; args_sexp; ret_sexp]
   | Text_rebind (p, _) ->
     Sexp.list [Sexp.atom "Text_rebind"; path p]
 
 (* Value description *)
 and value_description ~with_locs vd =
   let loc = if with_locs then [location ~with_locs vd.val_loc] else [] in
+  let ct_sexp = core_type ~with_locs vd.val_desc in
+  let attrs_sexp = attributes ~with_locs vd.val_attributes in
   Sexp.list ([
     Sexp.atom "value_description";
     ident vd.val_id;
     string vd.val_name.txt;
   ] @ loc @ [
-    core_type ~with_locs vd.val_desc;
+    ct_sexp;
     Sexp.list (Sexp.atom "prim" :: List.map string vd.val_prim);
-    attributes ~with_locs vd.val_attributes;
+    attrs_sexp;
   ])
 
 (* Module types *)
@@ -656,30 +765,44 @@ and module_type ~with_locs mt =
 and module_type_desc ~with_locs desc =
   match desc with
   | Tmty_ident (p, _) -> Sexp.list [Sexp.atom "Tmty_ident"; path p]
-  | Tmty_signature sg -> Sexp.list [Sexp.atom "Tmty_signature"; signature ~with_locs sg]
+  | Tmty_signature sg ->
+    let sg_sexp = signature ~with_locs sg in
+    Sexp.list [Sexp.atom "Tmty_signature"; sg_sexp]
   | Tmty_functor (id, _, mt_arg, mt_res) ->
-    Sexp.list [Sexp.atom "Tmty_functor"; ident id; opt (module_type ~with_locs) mt_arg; module_type ~with_locs mt_res]
+    let mt_arg_sexp = opt (module_type ~with_locs) mt_arg in
+    let mt_res_sexp = module_type ~with_locs mt_res in
+    Sexp.list [Sexp.atom "Tmty_functor"; ident id; mt_arg_sexp; mt_res_sexp]
   | Tmty_with (mt, constraints) ->
+    let mt_sexp = module_type ~with_locs mt in
+    let constraints_sexp = Sexp.list (List.map (fun (p, _, wc) ->
+      let wc_sexp = with_constraint ~with_locs wc in
+      Sexp.list [path p; wc_sexp]
+    ) constraints) in
     Sexp.list [
       Sexp.atom "Tmty_with";
-      module_type ~with_locs mt;
-      Sexp.list (List.map (fun (p, _, wc) ->
-        Sexp.list [path p; with_constraint ~with_locs wc]
-      ) constraints);
+      mt_sexp;
+      constraints_sexp;
     ]
-  | Tmty_typeof me -> Sexp.list [Sexp.atom "Tmty_typeof"; module_expr ~with_locs me]
+  | Tmty_typeof me ->
+    let me_sexp = module_expr ~with_locs me in
+    Sexp.list [Sexp.atom "Tmty_typeof"; me_sexp]
   | Tmty_alias (p, _) -> Sexp.list [Sexp.atom "Tmty_alias"; path p]
 
 and with_constraint ~with_locs wc =
   match wc with
-  | Twith_type td -> Sexp.list [Sexp.atom "Twith_type"; type_declaration ~with_locs td]
+  | Twith_type td ->
+    let td_sexp = type_declaration ~with_locs td in
+    Sexp.list [Sexp.atom "Twith_type"; td_sexp]
   | Twith_module (p, _) -> Sexp.list [Sexp.atom "Twith_module"; path p]
-  | Twith_typesubst td -> Sexp.list [Sexp.atom "Twith_typesubst"; type_declaration ~with_locs td]
+  | Twith_typesubst td ->
+    let td_sexp = type_declaration ~with_locs td in
+    Sexp.list [Sexp.atom "Twith_typesubst"; td_sexp]
   | Twith_modsubst (p, _) -> Sexp.list [Sexp.atom "Twith_modsubst"; path p]
 
 (* Signature *)
 and signature ~with_locs sg =
-  Sexp.list (Sexp.atom "signature" :: List.map (signature_item ~with_locs) sg.sig_items)
+  let items = List.map (signature_item ~with_locs) sg.sig_items in
+  Sexp.list (Sexp.atom "signature" :: items)
 
 and signature_item ~with_locs si =
   let loc = if with_locs then [location ~with_locs si.sig_loc] else [] in
@@ -688,59 +811,82 @@ and signature_item ~with_locs si =
 
 and signature_item_desc ~with_locs desc =
   match desc with
-  | Tsig_value vd -> Sexp.list [Sexp.atom "Tsig_value"; value_description ~with_locs vd]
+  | Tsig_value vd ->
+    let vd_sexp = value_description ~with_locs vd in
+    Sexp.list [Sexp.atom "Tsig_value"; vd_sexp]
   | Tsig_type (flag, tds) ->
-    Sexp.list [Sexp.atom "Tsig_type"; rec_flag flag; Sexp.list (List.map (type_declaration ~with_locs) tds)]
-  | Tsig_typext te -> Sexp.list [Sexp.atom "Tsig_typext"; type_extension ~with_locs te]
-  | Tsig_exception ec -> Sexp.list [Sexp.atom "Tsig_exception"; extension_constructor ~with_locs ec]
-  | Tsig_module md -> Sexp.list [Sexp.atom "Tsig_module"; module_declaration ~with_locs md]
+    let tds_sexp = Sexp.list (List.map (type_declaration ~with_locs) tds) in
+    Sexp.list [Sexp.atom "Tsig_type"; rec_flag flag; tds_sexp]
+  | Tsig_typext te ->
+    let te_sexp = type_extension ~with_locs te in
+    Sexp.list [Sexp.atom "Tsig_typext"; te_sexp]
+  | Tsig_exception ec ->
+    let ec_sexp = extension_constructor ~with_locs ec in
+    Sexp.list [Sexp.atom "Tsig_exception"; ec_sexp]
+  | Tsig_module md ->
+    let md_sexp = module_declaration ~with_locs md in
+    Sexp.list [Sexp.atom "Tsig_module"; md_sexp]
   | Tsig_recmodule mds ->
-    Sexp.list [Sexp.atom "Tsig_recmodule"; Sexp.list (List.map (module_declaration ~with_locs) mds)]
-  | Tsig_modtype mtd -> Sexp.list [Sexp.atom "Tsig_modtype"; module_type_declaration ~with_locs mtd]
-  | Tsig_open od -> Sexp.list [Sexp.atom "Tsig_open"; open_description ~with_locs od]
-  | Tsig_include incl -> Sexp.list [Sexp.atom "Tsig_include"; include_description ~with_locs incl]
+    let mds_sexp = Sexp.list (List.map (module_declaration ~with_locs) mds) in
+    Sexp.list [Sexp.atom "Tsig_recmodule"; mds_sexp]
+  | Tsig_modtype mtd ->
+    let mtd_sexp = module_type_declaration ~with_locs mtd in
+    Sexp.list [Sexp.atom "Tsig_modtype"; mtd_sexp]
+  | Tsig_open od ->
+    let od_sexp = open_description ~with_locs od in
+    Sexp.list [Sexp.atom "Tsig_open"; od_sexp]
+  | Tsig_include incl ->
+    let incl_sexp = include_description ~with_locs incl in
+    Sexp.list [Sexp.atom "Tsig_include"; incl_sexp]
   | Tsig_attribute attr -> Sexp.list [Sexp.atom "Tsig_attribute"; attribute ~with_locs attr]
 
 and module_declaration ~with_locs md =
   let loc = if with_locs then [location ~with_locs md.md_loc] else [] in
+  let mt_sexp = module_type ~with_locs md.md_type in
+  let attrs_sexp = attributes ~with_locs md.md_attributes in
   Sexp.list ([
     Sexp.atom "module_declaration";
     ident md.md_id;
     string md.md_name.txt;
   ] @ loc @ [
-    module_type ~with_locs md.md_type;
-    attributes ~with_locs md.md_attributes;
+    mt_sexp;
+    attrs_sexp;
   ])
 
 and module_type_declaration ~with_locs mtd =
   let loc = if with_locs then [location ~with_locs mtd.mtd_loc] else [] in
+  let mt_sexp = opt (module_type ~with_locs) mtd.mtd_type in
+  let attrs_sexp = attributes ~with_locs mtd.mtd_attributes in
   Sexp.list ([
     Sexp.atom "module_type_declaration";
     ident mtd.mtd_id;
     string mtd.mtd_name.txt;
   ] @ loc @ [
-    opt (module_type ~with_locs) mtd.mtd_type;
-    attributes ~with_locs mtd.mtd_attributes;
+    mt_sexp;
+    attrs_sexp;
   ])
 
 and open_description ~with_locs od =
   let loc = if with_locs then [location ~with_locs od.open_loc] else [] in
+  let attrs_sexp = attributes ~with_locs od.open_attributes in
   Sexp.list ([
     Sexp.atom "open_description";
     path od.open_path;
     longident_loc od.open_txt;
   ] @ loc @ [
     override_flag od.open_override;
-    attributes ~with_locs od.open_attributes;
+    attrs_sexp;
   ])
 
 and include_description ~with_locs incl =
   let loc = if with_locs then [location ~with_locs incl.incl_loc] else [] in
+  let mt_sexp = module_type ~with_locs incl.incl_mod in
+  let attrs_sexp = attributes ~with_locs incl.incl_attributes in
   Sexp.list ([
     Sexp.atom "include_description";
   ] @ loc @ [
-    module_type ~with_locs incl.incl_mod;
-    attributes ~with_locs incl.incl_attributes;
+    mt_sexp;
+    attrs_sexp;
   ])
 
 (* Module expression *)
@@ -753,22 +899,34 @@ and module_expr ~with_locs me =
 and module_expr_desc ~with_locs desc =
   match desc with
   | Tmod_ident (p, _) -> Sexp.list [Sexp.atom "Tmod_ident"; path p]
-  | Tmod_structure str -> Sexp.list [Sexp.atom "Tmod_structure"; structure ~with_locs str]
+  | Tmod_structure str ->
+    let str_sexp = structure ~with_locs str in
+    Sexp.list [Sexp.atom "Tmod_structure"; str_sexp]
   | Tmod_functor (id, _, mt_arg, me) ->
-    Sexp.list [Sexp.atom "Tmod_functor"; ident id; opt (module_type ~with_locs) mt_arg; module_expr ~with_locs me]
+    let mt_arg_sexp = opt (module_type ~with_locs) mt_arg in
+    let me_sexp = module_expr ~with_locs me in
+    Sexp.list [Sexp.atom "Tmod_functor"; ident id; mt_arg_sexp; me_sexp]
   | Tmod_apply (me1, me2, _) ->
-    Sexp.list [Sexp.atom "Tmod_apply"; module_expr ~with_locs me1; module_expr ~with_locs me2]
+    let me1_sexp = module_expr ~with_locs me1 in
+    let me2_sexp = module_expr ~with_locs me2 in
+    Sexp.list [Sexp.atom "Tmod_apply"; me1_sexp; me2_sexp]
   | Tmod_constraint (me, _, constraint_, _) ->
+    let me_sexp = module_expr ~with_locs me in
     let constraint_sexp = match constraint_ with
       | Tmodtype_implicit -> Sexp.atom "implicit"
-      | Tmodtype_explicit mt -> Sexp.list [Sexp.atom "explicit"; module_type ~with_locs mt]
+      | Tmodtype_explicit mt ->
+        let mt_sexp = module_type ~with_locs mt in
+        Sexp.list [Sexp.atom "explicit"; mt_sexp]
     in
-    Sexp.list [Sexp.atom "Tmod_constraint"; module_expr ~with_locs me; constraint_sexp]
-  | Tmod_unpack (e, _) -> Sexp.list [Sexp.atom "Tmod_unpack"; expression ~with_locs e]
+    Sexp.list [Sexp.atom "Tmod_constraint"; me_sexp; constraint_sexp]
+  | Tmod_unpack (e, _) ->
+    let e_sexp = expression ~with_locs e in
+    Sexp.list [Sexp.atom "Tmod_unpack"; e_sexp]
 
 (* Structure *)
 and structure ~with_locs str =
-  Sexp.list (Sexp.atom "structure" :: List.map (structure_item ~with_locs) str.str_items)
+  let items = List.map (structure_item ~with_locs) str.str_items in
+  Sexp.list (Sexp.atom "structure" :: items)
 
 and structure_item ~with_locs si =
   let loc = if with_locs then [location ~with_locs si.str_loc] else [] in
@@ -778,40 +936,63 @@ and structure_item ~with_locs si =
 and structure_item_desc ~with_locs desc =
   match desc with
   | Tstr_eval (e, attrs) ->
-    Sexp.list [Sexp.atom "Tstr_eval"; expression ~with_locs e; attributes ~with_locs attrs]
+    let e_sexp = expression ~with_locs e in
+    let attrs_sexp = attributes ~with_locs attrs in
+    Sexp.list [Sexp.atom "Tstr_eval"; e_sexp; attrs_sexp]
   | Tstr_value (flag, vbs) ->
-    Sexp.list [Sexp.atom "Tstr_value"; rec_flag flag; Sexp.list (List.map (value_binding ~with_locs) vbs)]
-  | Tstr_primitive vd -> Sexp.list [Sexp.atom "Tstr_primitive"; value_description ~with_locs vd]
+    let vbs_sexp = Sexp.list (List.map (value_binding ~with_locs) vbs) in
+    Sexp.list [Sexp.atom "Tstr_value"; rec_flag flag; vbs_sexp]
+  | Tstr_primitive vd ->
+    let vd_sexp = value_description ~with_locs vd in
+    Sexp.list [Sexp.atom "Tstr_primitive"; vd_sexp]
   | Tstr_type (flag, tds) ->
-    Sexp.list [Sexp.atom "Tstr_type"; rec_flag flag; Sexp.list (List.map (type_declaration ~with_locs) tds)]
-  | Tstr_typext te -> Sexp.list [Sexp.atom "Tstr_typext"; type_extension ~with_locs te]
-  | Tstr_exception ec -> Sexp.list [Sexp.atom "Tstr_exception"; extension_constructor ~with_locs ec]
-  | Tstr_module mb -> Sexp.list [Sexp.atom "Tstr_module"; module_binding ~with_locs mb]
+    let tds_sexp = Sexp.list (List.map (type_declaration ~with_locs) tds) in
+    Sexp.list [Sexp.atom "Tstr_type"; rec_flag flag; tds_sexp]
+  | Tstr_typext te ->
+    let te_sexp = type_extension ~with_locs te in
+    Sexp.list [Sexp.atom "Tstr_typext"; te_sexp]
+  | Tstr_exception ec ->
+    let ec_sexp = extension_constructor ~with_locs ec in
+    Sexp.list [Sexp.atom "Tstr_exception"; ec_sexp]
+  | Tstr_module mb ->
+    let mb_sexp = module_binding ~with_locs mb in
+    Sexp.list [Sexp.atom "Tstr_module"; mb_sexp]
   | Tstr_recmodule mbs ->
-    Sexp.list [Sexp.atom "Tstr_recmodule"; Sexp.list (List.map (module_binding ~with_locs) mbs)]
-  | Tstr_modtype mtd -> Sexp.list [Sexp.atom "Tstr_modtype"; module_type_declaration ~with_locs mtd]
-  | Tstr_open od -> Sexp.list [Sexp.atom "Tstr_open"; open_description ~with_locs od]
-  | Tstr_include incl -> Sexp.list [Sexp.atom "Tstr_include"; include_declaration ~with_locs incl]
+    let mbs_sexp = Sexp.list (List.map (module_binding ~with_locs) mbs) in
+    Sexp.list [Sexp.atom "Tstr_recmodule"; mbs_sexp]
+  | Tstr_modtype mtd ->
+    let mtd_sexp = module_type_declaration ~with_locs mtd in
+    Sexp.list [Sexp.atom "Tstr_modtype"; mtd_sexp]
+  | Tstr_open od ->
+    let od_sexp = open_description ~with_locs od in
+    Sexp.list [Sexp.atom "Tstr_open"; od_sexp]
+  | Tstr_include incl ->
+    let incl_sexp = include_declaration ~with_locs incl in
+    Sexp.list [Sexp.atom "Tstr_include"; incl_sexp]
   | Tstr_attribute attr -> Sexp.list [Sexp.atom "Tstr_attribute"; attribute ~with_locs attr]
 
 and module_binding ~with_locs mb =
   let loc = if with_locs then [location ~with_locs mb.mb_loc] else [] in
+  let me_sexp = module_expr ~with_locs mb.mb_expr in
+  let attrs_sexp = attributes ~with_locs mb.mb_attributes in
   Sexp.list ([
     Sexp.atom "module_binding";
     ident mb.mb_id;
     string mb.mb_name.txt;
   ] @ loc @ [
-    module_expr ~with_locs mb.mb_expr;
-    attributes ~with_locs mb.mb_attributes;
+    me_sexp;
+    attrs_sexp;
   ])
 
 and include_declaration ~with_locs incl =
   let loc = if with_locs then [location ~with_locs incl.incl_loc] else [] in
+  let me_sexp = module_expr ~with_locs incl.incl_mod in
+  let attrs_sexp = attributes ~with_locs incl.incl_attributes in
   Sexp.list ([
     Sexp.atom "include_declaration";
   ] @ loc @ [
-    module_expr ~with_locs incl.incl_mod;
-    attributes ~with_locs incl.incl_attributes;
+    me_sexp;
+    attrs_sexp;
   ])
 
 (* Public API *)
