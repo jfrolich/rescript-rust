@@ -4829,10 +4829,12 @@ fn copy_type_cached(
                 {
                     CopyAction::ReturnSelf
                 }
-                TypeDesc::Tconstr { path, args, .. } => CopyAction::Constr {
-                    path: path.clone(),
-                    args: args.clone(),
-                },
+                TypeDesc::Tconstr { path, args, .. } => {
+                    CopyAction::Constr {
+                        path: path.clone(),
+                        args: args.clone(),
+                    }
+                }
                 TypeDesc::Tlink(target) | TypeDesc::Tsubst(target) => CopyAction::Link(*target),
             }
         } else {
