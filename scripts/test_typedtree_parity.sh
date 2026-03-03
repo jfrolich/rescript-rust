@@ -440,17 +440,18 @@ test_single_file() {
 
     # Compare if both succeeded
     if [[ "$RUST_AVAILABLE" == "true" && "$ocaml_pass" -eq 1 && "$rust_pass" -eq 1 ]]; then
-        # Expand #N type references to inline types before comparison
-        # (OCaml and Rust assign different indices to the same types)
-        python3 "$PROJECT_ROOT/scripts/expand_sexp_types.py" "$file_temp/ocaml.sexp" > "$file_temp/ocaml_expanded.sexp" 2>/dev/null || cp "$file_temp/ocaml.sexp" "$file_temp/ocaml_expanded.sexp"
-        python3 "$PROJECT_ROOT/scripts/expand_sexp_types.py" "$file_temp/rust.sexp" > "$file_temp/rust_expanded.sexp" 2>/dev/null || cp "$file_temp/rust.sexp" "$file_temp/rust_expanded.sexp"
+        # Expand #N type references to inline types before comparison.
+        # Structural dedup indices can differ between OCaml and Rust when types
+        # are encountered in different order. Expansion normalizes this.
+        python3 "$PROJECT_ROOT/scripts/expand_sexp_types.py" "$file_temp/ocaml.sexp" > "$file_temp/ocaml_cmp.sexp" 2>/dev/null || cp "$file_temp/ocaml.sexp" "$file_temp/ocaml_cmp.sexp"
+        python3 "$PROJECT_ROOT/scripts/expand_sexp_types.py" "$file_temp/rust.sexp" > "$file_temp/rust_cmp.sexp" 2>/dev/null || cp "$file_temp/rust.sexp" "$file_temp/rust_cmp.sexp"
 
-        if diff -a -q "$file_temp/ocaml_expanded.sexp" "$file_temp/rust_expanded.sexp" > /dev/null 2>&1; then
+        if diff -a -q "$file_temp/ocaml_cmp.sexp" "$file_temp/rust_cmp.sexp" > /dev/null 2>&1; then
             parity_pass=1
         else
             parity_fail=1
-            # Save diff for inspection
-            diff -ua "$file_temp/ocaml_expanded.sexp" "$file_temp/rust_expanded.sexp" > "$TEMP_DIR/diffs/$safe_name.diff" 2>&1 || true
+            # Save diff for inspection (expanded form for meaningful diffs)
+            diff -ua "$file_temp/ocaml_cmp.sexp" "$file_temp/rust_cmp.sexp" > "$TEMP_DIR/diffs/$safe_name.diff" 2>&1 || true
             # Save sexp files to persistent cache
             cp "$file_temp/ocaml.sexp" "$CACHE_DIR/tests/ocaml/$safe_name.sexp" 2>/dev/null || true
             cp "$file_temp/rust.sexp" "$CACHE_DIR/tests/rust/$safe_name.sexp" 2>/dev/null || true
