@@ -7832,12 +7832,15 @@ fn type_for(
     attributes: &[crate::parser::ast::Attribute],
 ) -> TypeCoreResult<Expression> {
     let ctx = tctx.type_ctx;
-    let bounds_int_ty = env.type_int(ctx);
-    let unit_ty = env.type_unit(ctx);
+    // OCaml passes Predef.type_int (generic singleton) to type_expect for each bound.
+    // Inside type_expect, `rue` calls instance(ty_expected) — creating a FRESH copy
+    // for each expression. Match this by creating separate int types per bound.
+    let start_int_ty = env.type_int(ctx);
+    let end_int_ty = env.type_int(ctx);
 
-    // Type check bounds
-    let typed_start = type_expect(tctx, env, start_expr, bounds_int_ty, None)?;
-    let typed_end = type_expect(tctx, env, end_expr, bounds_int_ty, None)?;
+    // Type check bounds with separate expected types
+    let typed_start = type_expect(tctx, env, start_expr, start_int_ty, None)?;
+    let typed_end = type_expect(tctx, env, end_expr, end_int_ty, None)?;
 
     // OCaml only accepts `_` or a variable for `for` loop indices.
     if !matches!(&*pat.ppat_desc, crate::parser::ast::PatternDesc::Ppat_any
@@ -7892,11 +7895,15 @@ fn type_for(
         body_env.add_value(pv.id.clone(), desc);
     }
 
-    // Type check body (should be unit)
-    let typed_body = type_expect(tctx, &body_env, body, unit_ty, None)?;
+    // OCaml uses Predef.type_unit for body via type_statement, and
+    // instance_def(Predef.type_unit) for the for loop result. Each `rue`
+    // creates fresh instances, keeping body and result as separate type nodes.
+    let body_unit_ty = env.type_unit(ctx);
+    let typed_body = type_expect(tctx, &body_env, body, body_unit_ty, None)?;
 
-    // For loop has type unit
-    unify_expression_types(tctx, loc, expected_ty, unit_ty, context)?;
+    // For loop result: separate unit type (OCaml: instance_def Predef.type_unit)
+    let result_unit_ty = env.type_unit(ctx);
+    unify_expression_types(tctx, loc, expected_ty, result_unit_ty, context)?;
 
     Ok(Expression::new(
         ExpressionDesc::Texp_for(
@@ -7908,7 +7915,7 @@ fn type_for(
             Box::new(typed_body),
         ),
         loc.clone(),
-        unit_ty,
+        result_unit_ty,
         EnvRef(0),
         attributes.to_vec().into(),
     ))
