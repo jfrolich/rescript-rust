@@ -285,13 +285,17 @@ if [[ "$TELLA_MODE" == "true" ]]; then
         if [[ -f "$rust_sexp" && -s "$rust_sexp" ]]; then
             RUST_PASS=$((RUST_PASS + 1))
 
+            # Expand #N type references before comparison
+            python3 "$PROJECT_ROOT/scripts/expand_sexp_types.py" "$ocaml_sexp" > "$TEMP_DIR/ocaml_exp.sexp" 2>/dev/null || cp "$ocaml_sexp" "$TEMP_DIR/ocaml_exp.sexp"
+            python3 "$PROJECT_ROOT/scripts/expand_sexp_types.py" "$rust_sexp" > "$TEMP_DIR/rust_exp.sexp" 2>/dev/null || cp "$rust_sexp" "$TEMP_DIR/rust_exp.sexp"
+
             # Compare
-            if diff -a -q "$ocaml_sexp" "$rust_sexp" > /dev/null 2>&1; then
+            if diff -a -q "$TEMP_DIR/ocaml_exp.sexp" "$TEMP_DIR/rust_exp.sexp" > /dev/null 2>&1; then
                 PARITY_PASS=$((PARITY_PASS + 1))
             else
                 PARITY_FAIL=$((PARITY_FAIL + 1))
                 PARITY_FAILURES="$PARITY_FAILURES  $basename_no_ext\n"
-                diff -a -u "$ocaml_sexp" "$rust_sexp" > "$TEMP_DIR/diffs/${basename_no_ext}.diff" 2>&1 || true
+                diff -a -u "$TEMP_DIR/ocaml_exp.sexp" "$TEMP_DIR/rust_exp.sexp" > "$TEMP_DIR/diffs/${basename_no_ext}.diff" 2>&1 || true
             fi
         elif [[ -f "$rust_sexp" && ! -s "$rust_sexp" ]]; then
             # Empty = timeout
@@ -436,12 +440,17 @@ test_single_file() {
 
     # Compare if both succeeded
     if [[ "$RUST_AVAILABLE" == "true" && "$ocaml_pass" -eq 1 && "$rust_pass" -eq 1 ]]; then
-        if diff -q "$file_temp/ocaml.sexp" "$file_temp/rust.sexp" > /dev/null 2>&1; then
+        # Expand #N type references to inline types before comparison
+        # (OCaml and Rust assign different indices to the same types)
+        python3 "$PROJECT_ROOT/scripts/expand_sexp_types.py" "$file_temp/ocaml.sexp" > "$file_temp/ocaml_expanded.sexp" 2>/dev/null || cp "$file_temp/ocaml.sexp" "$file_temp/ocaml_expanded.sexp"
+        python3 "$PROJECT_ROOT/scripts/expand_sexp_types.py" "$file_temp/rust.sexp" > "$file_temp/rust_expanded.sexp" 2>/dev/null || cp "$file_temp/rust.sexp" "$file_temp/rust_expanded.sexp"
+
+        if diff -a -q "$file_temp/ocaml_expanded.sexp" "$file_temp/rust_expanded.sexp" > /dev/null 2>&1; then
             parity_pass=1
         else
             parity_fail=1
             # Save diff for inspection
-            diff -ua "$file_temp/ocaml.sexp" "$file_temp/rust.sexp" > "$TEMP_DIR/diffs/$safe_name.diff" 2>&1 || true
+            diff -ua "$file_temp/ocaml_expanded.sexp" "$file_temp/rust_expanded.sexp" > "$TEMP_DIR/diffs/$safe_name.diff" 2>&1 || true
             # Save sexp files to persistent cache
             cp "$file_temp/ocaml.sexp" "$CACHE_DIR/tests/ocaml/$safe_name.sexp" 2>/dev/null || true
             cp "$file_temp/rust.sexp" "$CACHE_DIR/tests/rust/$safe_name.sexp" 2>/dev/null || true

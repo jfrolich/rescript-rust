@@ -393,26 +393,31 @@ fn sexp_partial(p: &Partial) -> Sexp {
 
 // ============================================================================
 // Type Expression Dedup - each unique type is serialized once, referenced by #N
-// Uses TypeExprRef (after repr) as physical identity key
-// The table is created per-file in the public API functions (not global state)
+// Uses structural identity: types with identical serialized content share an index.
+// Physical identity (TypeExprRef) is only used for cycle detection during serialization.
+// The table is created per-file in the public API functions (not global state).
 // ============================================================================
 
 struct TypeDedupTable {
-    map: HashMap<TypeExprRef, usize>,
-    types: Vec<Sexp>,
+    structural: HashMap<String, usize>,
+    visited: HashSet<TypeExprRef>,
+    types: Vec<(usize, Sexp)>,
+    next_idx: usize,
 }
 
 impl TypeDedupTable {
     fn new() -> Self {
         TypeDedupTable {
-            map: HashMap::new(),
+            structural: HashMap::new(),
+            visited: HashSet::new(),
             types: Vec::new(),
+            next_idx: 0,
         }
     }
 
     fn build_preamble(&self) -> Sexp {
         let mut items = vec![Sexp::atom("types")];
-        for (idx, sexp) in self.types.iter().enumerate() {
+        for (idx, sexp) in self.types.iter() {
             items.push(Sexp::list(vec![
                 Sexp::atom(&idx.to_string()),
                 sexp.clone(),
@@ -430,15 +435,11 @@ fn sexp_type_expr(
 ) -> Sexp {
     let te = ctx.repr(te); // Follow Tlink chains
 
-    // Check dedup table
-    if let Some(&idx) = dedup.map.get(&te) {
-        return Sexp::atom(&format!("#{idx}"));
+    // Cycle detection via physical identity
+    if dedup.visited.contains(&te) {
+        return Sexp::atom("<cycle>");
     }
-
-    // Reserve slot before recursion (handles cycles automatically)
-    let idx = dedup.types.len();
-    dedup.map.insert(te, idx);
-    dedup.types.push(Sexp::atom("_")); // placeholder
+    dedup.visited.insert(te);
 
     // Serialize the type body
     let desc = ctx.get_desc(te);
@@ -447,17 +448,14 @@ fn sexp_type_expr(
         TypeDesc::Tarrow {
             arg, ret, arity, ..
         } => {
-            // Visit children in right-to-left order to match OCaml's list literal evaluation order.
-            let arity_sexp = opt(|a: &i32| Sexp::atom(&a.to_string()), arity);
-            let ret_sexp = sexp_type_expr(arena, ctx, dedup, *ret);
             let arg_sexp = sexp_type_expr(arena, ctx, dedup, arg.typ);
-            let label_sexp = sexp_type_arg_label(&arg.lbl);
+            let ret_sexp = sexp_type_expr(arena, ctx, dedup, *ret);
             Sexp::list(vec![
                 Sexp::atom("Tarrow"),
-                label_sexp,
+                sexp_type_arg_label(&arg.lbl),
                 arg_sexp,
                 ret_sexp,
-                arity_sexp,
+                opt(|a: &i32| Sexp::atom(&a.to_string()), arity),
             ])
         }
         TypeDesc::Ttuple(types) => {
@@ -493,9 +491,8 @@ fn sexp_type_expr(
                 FieldKind::Fabsent => "Fabsent",
                 FieldKind::Fvar(_) => "Fvar",
             };
-            // Visit in right-to-left order to match OCaml list literal evaluation
-            let rest_sexp = sexp_type_expr(arena, ctx, dedup, *rest);
             let typ_sexp = sexp_type_expr(arena, ctx, dedup, *typ);
+            let rest_sexp = sexp_type_expr(arena, ctx, dedup, *rest);
             Sexp::list(vec![
                 Sexp::atom("Tfield"),
                 string(name),
@@ -513,12 +510,11 @@ fn sexp_type_expr(
         TypeDesc::Tvariant(row) => sexp_row_desc(arena, ctx, dedup, row),
         TypeDesc::Tunivar(name) => Sexp::list(vec![Sexp::atom("Tunivar"), opt_string(name)]),
         TypeDesc::Tpoly { body, vars } => {
-            // Visit in right-to-left order to match OCaml list literal evaluation
+            let body_sexp = sexp_type_expr(arena, ctx, dedup, *body);
             let mut var_sexps = Vec::new();
             for t in vars.iter() {
                 var_sexps.push(sexp_type_expr(arena, ctx, dedup, *t));
             }
-            let body_sexp = sexp_type_expr(arena, ctx, dedup, *body);
             Sexp::list(vec![
                 Sexp::atom("Tpoly"),
                 body_sexp,
@@ -539,8 +535,18 @@ fn sexp_type_expr(
         }
     };
 
-    // Store result in dedup table
-    dedup.types[idx] = sexp;
+    // Remove from visited set (cycle detection is per-serialization-path)
+    dedup.visited.remove(&te);
+
+    // Structural dedup: use serialized content as key
+    let content_key = sexp.to_string();
+    if let Some(&existing_idx) = dedup.structural.get(&content_key) {
+        return Sexp::atom(&format!("#{existing_idx}"));
+    }
+    let idx = dedup.next_idx;
+    dedup.next_idx += 1;
+    dedup.structural.insert(content_key, idx);
+    dedup.types.push((idx, sexp));
 
     Sexp::atom(&format!("#{idx}"))
 }
