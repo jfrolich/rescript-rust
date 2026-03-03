@@ -393,31 +393,26 @@ fn sexp_partial(p: &Partial) -> Sexp {
 
 // ============================================================================
 // Type Expression Dedup - each unique type is serialized once, referenced by #N
-// Uses structural identity: types with identical serialized content share an index.
-// Physical identity (TypeExprRef) is only used for cycle detection during serialization.
+// Uses physical identity (TypeExprRef after repr) as the dedup key.
 // The table is created per-file in the public API functions (not global state).
 // ============================================================================
 
 struct TypeDedupTable {
-    structural: HashMap<String, usize>,
-    visited: HashSet<TypeExprRef>,
-    types: Vec<(usize, Sexp)>,
-    next_idx: usize,
+    map: HashMap<TypeExprRef, usize>,
+    types: Vec<Sexp>,
 }
 
 impl TypeDedupTable {
     fn new() -> Self {
         TypeDedupTable {
-            structural: HashMap::new(),
-            visited: HashSet::new(),
+            map: HashMap::new(),
             types: Vec::new(),
-            next_idx: 0,
         }
     }
 
     fn build_preamble(&self) -> Sexp {
         let mut items = vec![Sexp::atom("types")];
-        for (idx, sexp) in self.types.iter() {
+        for (idx, sexp) in self.types.iter().enumerate() {
             items.push(Sexp::list(vec![
                 Sexp::atom(&idx.to_string()),
                 sexp.clone(),
@@ -435,11 +430,15 @@ fn sexp_type_expr(
 ) -> Sexp {
     let te = ctx.repr(te); // Follow Tlink chains
 
-    // Cycle detection via physical identity
-    if dedup.visited.contains(&te) {
-        return Sexp::atom("<cycle>");
+    // Physical identity dedup
+    if let Some(&idx) = dedup.map.get(&te) {
+        return Sexp::atom(&format!("#{idx}"));
     }
-    dedup.visited.insert(te);
+
+    // Reserve slot before recursion (handles cycles automatically)
+    let idx = dedup.types.len();
+    dedup.map.insert(te, idx);
+    dedup.types.push(Sexp::atom("_")); // placeholder
 
     // Serialize the type body
     let desc = ctx.get_desc(te);
@@ -535,18 +534,8 @@ fn sexp_type_expr(
         }
     };
 
-    // Remove from visited set (cycle detection is per-serialization-path)
-    dedup.visited.remove(&te);
-
-    // Structural dedup: use serialized content as key
-    let content_key = sexp.to_string();
-    if let Some(&existing_idx) = dedup.structural.get(&content_key) {
-        return Sexp::atom(&format!("#{existing_idx}"));
-    }
-    let idx = dedup.next_idx;
-    dedup.next_idx += 1;
-    dedup.structural.insert(content_key, idx);
-    dedup.types.push((idx, sexp));
+    // Store result in dedup table
+    dedup.types[idx] = sexp;
 
     Sexp::atom(&format!("#{idx}"))
 }

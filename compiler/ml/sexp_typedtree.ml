@@ -123,46 +123,46 @@ let partial = function
   | Total -> Sexp.atom "Total"
 
 (* Type expression dedup - each unique type is serialized once, referenced by #N *)
-(* Uses structural identity: types with identical serialized content share an index. *)
-(* Physical identity (type_expr.id) is only used for cycle detection during serialization. *)
-let structural_tbl : (string, int) Hashtbl.t = Hashtbl.create 256
-let visited : (int, unit) Hashtbl.t = Hashtbl.create 256
-let dedup_types : (int * Sexp.t) list ref = ref []
+(* Uses physical identity (type_expr.id after repr) as the dedup key. *)
+let dedup_tbl : (int, int) Hashtbl.t = Hashtbl.create 256
+let dedup_arr : Sexp.t array ref = ref (Array.make 1024 (Sexp.atom "_"))
 let dedup_next_idx : int ref = ref 0
 
 let reset_dedup () =
-  Hashtbl.clear structural_tbl;
-  Hashtbl.clear visited;
-  dedup_types := [];
+  Hashtbl.clear dedup_tbl;
+  dedup_arr := Array.make 1024 (Sexp.atom "_");
   dedup_next_idx := 0
 
 let build_types_preamble () =
-  let items = List.rev_map (fun (i, sexp) ->
-    Sexp.list [Sexp.atom (string_of_int i); sexp]
-  ) !dedup_types in
-  Sexp.list (Sexp.atom "types" :: items)
+  let n = !dedup_next_idx in
+  let items = ref [] in
+  for i = n - 1 downto 0 do
+    items := Sexp.list [Sexp.atom (string_of_int i); (!dedup_arr).(i)] :: !items
+  done;
+  Sexp.list (Sexp.atom "types" :: !items)
+
+let ensure_dedup_capacity idx =
+  let arr = !dedup_arr in
+  if idx >= Array.length arr then begin
+    let new_len = max (Array.length arr * 2) (idx + 1) in
+    let new_arr = Array.make new_len (Sexp.atom "_") in
+    Array.blit arr 0 new_arr 0 (Array.length arr);
+    dedup_arr := new_arr
+  end
 
 let rec type_expr te =
   let te = Btype.repr te in  (* Follow Tlink chains *)
-  let phys_key = te.Types.id in
-  (* Cycle detection via physical identity *)
-  if Hashtbl.mem visited phys_key then
-    Sexp.atom "<cycle>"
-  else begin
-    Hashtbl.add visited phys_key ();
+  let key = te.Types.id in
+  match Hashtbl.find_opt dedup_tbl key with
+  | Some idx -> Sexp.atom (Printf.sprintf "#%d" idx)
+  | None ->
+    let idx = !dedup_next_idx in
+    incr dedup_next_idx;
+    Hashtbl.add dedup_tbl key idx;
+    ensure_dedup_capacity idx;
     let sexp = type_expr_body te in
-    Hashtbl.remove visited phys_key;
-    (* Structural dedup: use serialized content as key *)
-    let content_key = Sexp.to_string sexp in
-    match Hashtbl.find_opt structural_tbl content_key with
-    | Some idx -> Sexp.atom (Printf.sprintf "#%d" idx)
-    | None ->
-      let idx = !dedup_next_idx in
-      incr dedup_next_idx;
-      Hashtbl.add structural_tbl content_key idx;
-      dedup_types := (idx, sexp) :: !dedup_types;
-      Sexp.atom (Printf.sprintf "#%d" idx)
-  end
+    (!dedup_arr).(idx) <- sexp;
+    Sexp.atom (Printf.sprintf "#%d" idx)
 
 and type_expr_body te =
   (* All type_expr calls use let-bindings to ensure deterministic left-to-right
