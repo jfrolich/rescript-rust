@@ -4507,7 +4507,8 @@ fn type_structure_item<'a>(
             // are separate from the TypeKind and need explicit generalization.
             let mut env_desc_types_for_generalize: Vec<crate::types::TypeExprRef> = Vec::new();
 
-            // OCaml: Ctype.begin_def() before translating type declarations
+            // OCaml: reset_type_variables() + Ctype.begin_def() before translating type declarations
+            tctx.type_variables.clear();
             ctx.begin_def();
 
             // Predeclare type names in the environment so recursive references
@@ -5931,6 +5932,8 @@ fn type_structure_item<'a>(
             // exception constructor type translation. This ensures arg types are
             // at GENERIC_LEVEL so instance() creates fresh copies, preventing
             // declaration types from being linked to use-site aliases.
+            // OCaml: reset_type_variables() at start of transl_exception
+            tctx.type_variables.clear();
             ctx.begin_def();
 
             // Translate constructor arguments and collect type refs for env registration

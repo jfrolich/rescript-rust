@@ -3892,6 +3892,8 @@ pub fn type_expect<'a>(
         ED::Pexp_let(inner) => {
             let (ref rec_flag, ref bindings, ref body_idx) = **inner;
             // Let expression
+            // OCaml typecore.ml:4278: reset_type_variables() at start of type_let
+            tctx.type_variables.clear();
             let (typed_bindings, new_env, unpacks) =
                 type_let_bindings(tctx, env, *rec_flag, bindings)?;
 
