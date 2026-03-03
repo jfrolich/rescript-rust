@@ -165,19 +165,27 @@ let rec type_expr te =
   end
 
 and type_expr_body te =
+  (* All type_expr calls use let-bindings to ensure deterministic left-to-right
+     evaluation order. OCaml's ocamlopt uses unspecified order for list literal
+     elements, so inlining type_expr in [...] would give inconsistent ordering. *)
   match te.Types.desc with
   | Tvar name -> Sexp.list [Sexp.atom "Tvar"; opt_string name]
   | Tarrow (arg, ret, _, arity) ->
+    let arg_sexp = type_expr arg.Types.typ in
+    let ret_sexp = type_expr ret in
     Sexp.list [
       Sexp.atom "Tarrow";
       sexp_arg_label arg.Types.lbl;
-      type_expr arg.Types.typ;
-      type_expr ret;
+      arg_sexp;
+      ret_sexp;
       opt (fun a -> Sexp.atom (string_of_int a)) arity;
     ]
-  | Ttuple l -> Sexp.list (Sexp.atom "Ttuple" :: List.map type_expr l)
+  | Ttuple l ->
+    let items = List.map type_expr l in
+    Sexp.list (Sexp.atom "Ttuple" :: items)
   | Tconstr (p, args, _) ->
-    Sexp.list [Sexp.atom "Tconstr"; path p; Sexp.list (List.map type_expr args)]
+    let arg_sexps = List.map type_expr args in
+    Sexp.list [Sexp.atom "Tconstr"; path p; Sexp.list arg_sexps]
   | Tobject (ty, _) ->
     (* Sort object fields by name to normalize ordering for parity *)
     Sexp.list [Sexp.atom "Tobject"; object_fields_sorted ty]
@@ -187,20 +195,27 @@ and type_expr_body te =
       | Fabsent -> "Fabsent"
       | Fvar _ -> "Fvar"
     in
-    Sexp.list [Sexp.atom "Tfield"; string name; Sexp.atom kind_str; type_expr ty1; type_expr ty2]
+    let ty1_sexp = type_expr ty1 in
+    let ty2_sexp = type_expr ty2 in
+    Sexp.list [Sexp.atom "Tfield"; string name; Sexp.atom kind_str; ty1_sexp; ty2_sexp]
   | Tnil -> Sexp.atom "Tnil"
   | Tlink _ -> Sexp.atom "Tlink"  (* Should not happen after Btype.repr *)
-  | Tsubst ty -> Sexp.list [Sexp.atom "Tsubst"; type_expr ty]
+  | Tsubst ty ->
+    let ty_sexp = type_expr ty in
+    Sexp.list [Sexp.atom "Tsubst"; ty_sexp]
   | Tvariant row -> row_desc_sexp row
   | Tunivar name -> Sexp.list [Sexp.atom "Tunivar"; opt_string name]
   | Tpoly (ty, tyl) ->
-    Sexp.list [Sexp.atom "Tpoly"; type_expr ty; Sexp.list (List.map type_expr tyl)]
+    let ty_sexp = type_expr ty in
+    let tyl_sexps = List.map type_expr tyl in
+    Sexp.list [Sexp.atom "Tpoly"; ty_sexp; Sexp.list tyl_sexps]
   | Tpackage (p, lids, tyl) ->
+    let tyl_sexps = List.map type_expr tyl in
     Sexp.list [
       Sexp.atom "Tpackage";
       path p;
       Sexp.list (List.map (fun l -> longident l) lids);
-      Sexp.list (List.map type_expr tyl);
+      Sexp.list tyl_sexps;
     ]
 
 and object_fields_sorted ty =
