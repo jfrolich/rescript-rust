@@ -43,6 +43,7 @@ VERBOSE=false
 FILE_ARG=""
 SKIP_BUILD=false
 TELLA_MODE=false
+TELLA_JSX_MODE=false
 
 while [[ $# -gt 0 ]]; do
     case $1 in
@@ -69,6 +70,11 @@ while [[ $# -gt 0 ]]; do
             ;;
         --tella)
             TELLA_MODE=true
+            shift
+            ;;
+        --tella-jsx)
+            TELLA_MODE=true
+            TELLA_JSX_MODE=true
             shift
             ;;
         -h|--help)
@@ -155,8 +161,10 @@ CACHE_DIR=".parity-cache"
 mkdir -p "$CACHE_DIR/tests/diffs" "$CACHE_DIR/tests/ocaml" "$CACHE_DIR/tests/rust"
 trap "cp -r $TEMP_DIR/diffs/* $CACHE_DIR/tests/diffs/ 2>/dev/null; rm -rf $TEMP_DIR" EXIT
 
-if [[ "$TELLA_MODE" == "true" ]]; then
-    echo -e "${BOLD}Typed Tree Parity Test (tella-fusion)${RESET}"
+if [[ "$TELLA_JSX_MODE" == "true" ]]; then
+    echo -e "${BOLD}Typed Tree Parity Test (tella-fusion, JSX-heavy files only)${RESET}"
+elif [[ "$TELLA_MODE" == "true" ]]; then
+    echo -e "${BOLD}Typed Tree Parity Test (tella-fusion, excluding JSX-heavy files)${RESET}"
 else
     echo -e "${BOLD}Typed Tree Parity Test${RESET}"
 fi
@@ -174,14 +182,17 @@ echo "Timeout: ${TIMEOUT_SECONDS}s"
 echo "Parallel jobs: $PARALLEL_JOBS"
 echo ""
 
+# Tella cache paths (set regardless of --no-build)
+if [[ "$TELLA_MODE" == "true" ]]; then
+    PARITY_CACHE="$TELLA_DIR/.parity-cache"
+    OCAML_SEXP_CACHE="$PARITY_CACHE/ocaml-sexp"
+fi
+
 # Step 1: Build with rewatch to ensure all dependencies are compiled
 if [[ "$SKIP_BUILD" != "true" ]]; then
     echo -e "${BOLD}Step 1: Building project with rewatch...${RESET}"
     cd "$BUILD_DIR"
     if [[ "$TELLA_MODE" == "true" ]]; then
-        # Cache dir for OCaml sexp (outside lib/ so rewatch clean doesn't delete them)
-        PARITY_CACHE="$TELLA_DIR/.parity-cache"
-        OCAML_SEXP_CACHE="$PARITY_CACHE/ocaml-sexp"
         OCAML_SEXP_COUNT=$(find "$OCAML_SEXP_CACHE" -name "*.sexp" 2>/dev/null | wc -l | tr -d ' ')
 
         # Step 1a: Generate OCaml sexp (skip if cached)
@@ -238,10 +249,27 @@ if [[ "$TELLA_MODE" == "true" ]]; then
     RUST_CRASH_LIST=""
     PARITY_FAILURES=""
 
+    # Tella large files list (>5MB sexp output, mostly JSX-heavy components)
+    # --tella: skips these files, --tella-jsx: only runs these files
+    TELLA_LARGE_FILES_PATH="$PROJECT_ROOT/scripts/tella_large_sexp_files.txt"
+
+    is_tella_large_file() {
+        grep -qxF "$1" "$TELLA_LARGE_FILES_PATH" 2>/dev/null
+    }
+
     # Iterate over cached OCaml sexp files
     for ocaml_sexp in "$OCAML_SEXP_CACHE"/*.sexp; do
         [[ -f "$ocaml_sexp" ]] || continue
         basename_no_ext=$(basename "$ocaml_sexp" .sexp)
+
+        # Filter based on --tella vs --tella-jsx
+        if [[ "$TELLA_JSX_MODE" == "true" ]]; then
+            # --tella-jsx: only large files
+            is_tella_large_file "$basename_no_ext" || continue
+        else
+            # --tella: skip large files
+            is_tella_large_file "$basename_no_ext" && continue
+        fi
         rust_sexp="$RUST_SEXP_DIR/${basename_no_ext}.sexp"
 
         # OCaml sexp exists (file was compiled)
