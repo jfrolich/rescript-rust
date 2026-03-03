@@ -1153,16 +1153,22 @@ fn sexp_expression_desc(
             sexp_direction_flag(flag),
             sexp_expression(arena, ctx, with_locs, dedup, e3),
         ]),
-        ExpressionDesc::Texp_send(e, meth, _) => {
+        ExpressionDesc::Texp_send(e, meth, opt_arg) => {
             use crate::types::typedtree::MethKind;
+            let e_sexp = sexp_expression(arena, ctx, with_locs, dedup, e);
             let meth_sexp = match meth {
                 MethKind::Tmeth_name(name) => string(name),
                 MethKind::Tmeth_val(id) => sexp_ident(id),
             };
+            let arg_sexp = match opt_arg {
+                None => Sexp::atom("None"),
+                Some(a) => Sexp::list(vec![Sexp::atom("Some"), sexp_expression(arena, ctx, with_locs, dedup, a)]),
+            };
             Sexp::list(vec![
                 Sexp::atom("Texp_send"),
-                sexp_expression(arena, ctx, with_locs, dedup, e),
+                e_sexp,
                 meth_sexp,
+                arg_sexp,
             ])
         }
         ExpressionDesc::Texp_letmodule(id, _, me, e) => Sexp::list(vec![
