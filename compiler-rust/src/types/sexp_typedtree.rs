@@ -580,11 +580,8 @@ fn sexp_object_fields_sorted(arena: &ParseArena, ctx: &TypeContext<'_>, dedup: &
                 });
                 current = ctx.repr(*rest);
             }
-            TypeDesc::Tnil => {
-                tail_sexp = Some(Sexp::atom("Tnil"));
-                break;
-            }
             _ => {
+                // Route Tnil and other types through dedup table (matches OCaml)
                 tail_sexp = Some(sexp_type_expr(arena, ctx, dedup, current));
                 break;
             }
@@ -614,8 +611,11 @@ fn sexp_row_desc(
     row: &RowDesc,
 ) -> Sexp {
     let row = btype::row_repr(ctx, row);
+    // Sort row_fields by label to normalize ordering for parity (matches OCaml)
+    let mut sorted_fields: Vec<_> = row.row_fields.iter().collect();
+    sorted_fields.sort_by(|(a, _), (b, _)| a.cmp(b));
     let mut field_sexps = Vec::new();
-    for (l, rf) in row.row_fields.iter() {
+    for (l, rf) in sorted_fields {
         let rf_sexp = sexp_row_field(arena, ctx, dedup, rf);
         field_sexps.push(Sexp::list(vec![string(l), rf_sexp]));
     }
@@ -870,11 +870,10 @@ fn sexp_exp_extra(
             Sexp::list(items)
         }
         ExpExtra::Texp_coerce(ct2) => {
-            let ct1_sexp = Sexp::atom("None");
+            let ct2_sexp = sexp_core_type(arena, ctx, with_locs, dedup, ct2);
             let mut items = vec![
                 Sexp::atom("Texp_coerce"),
-                ct1_sexp,
-                sexp_core_type(arena, ctx, with_locs, dedup, ct2),
+                ct2_sexp,
             ];
             items.extend(loc_sexp);
             items.push(attrs_sexp);
@@ -2034,11 +2033,11 @@ fn sexp_structure_item_desc(
                 Sexp::list(vb_items),
             ])
         }
-        StructureItemDesc::Tstr_primitive(_vd) => {
-            // Simplified - would need full value_description handling
+        StructureItemDesc::Tstr_primitive(vd) => {
+            let vd_sexp = sexp_value_description(arena, ctx, with_locs, dedup, vd);
             Sexp::list(vec![
                 Sexp::atom("Tstr_primitive"),
-                Sexp::atom("<value_description>"),
+                vd_sexp,
             ])
         }
         StructureItemDesc::Tstr_type(flag, tds) => {
