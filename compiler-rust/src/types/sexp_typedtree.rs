@@ -1465,12 +1465,17 @@ fn sexp_module_expr_desc(
             Sexp::atom("Tmod_structure"),
             sexp_structure(arena, ctx, with_locs, dedup, str),
         ]),
-        ModuleExprDesc::Tmod_functor(id, _, _mt_arg, me) => {
+        ModuleExprDesc::Tmod_functor(id, _, mt_arg, me) => {
+            let mt_arg_sexp = match mt_arg {
+                None => Sexp::atom("None"),
+                Some(mt) => Sexp::list(vec![Sexp::atom("Some"), sexp_module_type(arena, ctx, with_locs, dedup, mt)]),
+            };
+            let me_sexp = sexp_module_expr(arena, ctx, with_locs, dedup, me);
             Sexp::list(vec![
                 Sexp::atom("Tmod_functor"),
                 sexp_ident(id),
-                Sexp::atom("<module_type>"), // Simplified
-                sexp_module_expr(arena, ctx, with_locs, dedup, me),
+                mt_arg_sexp,
+                me_sexp,
             ])
         }
         ModuleExprDesc::Tmod_apply(me1, me2, _) => Sexp::list(vec![
@@ -1481,8 +1486,9 @@ fn sexp_module_expr_desc(
         ModuleExprDesc::Tmod_constraint(me, _, constraint_, _) => {
             let constraint_sexp = match constraint_ {
                 ModuleTypeConstraint::Tmodtype_implicit => Sexp::atom("implicit"),
-                ModuleTypeConstraint::Tmodtype_explicit(_) => {
-                    Sexp::list(vec![Sexp::atom("explicit"), Sexp::atom("<module_type>")])
+                ModuleTypeConstraint::Tmodtype_explicit(mt) => {
+                    let mt_sexp = sexp_module_type(arena, ctx, with_locs, dedup, mt);
+                    Sexp::list(vec![Sexp::atom("explicit"), mt_sexp])
                 }
             };
             Sexp::list(vec![
@@ -2073,10 +2079,13 @@ fn sexp_structure_item_desc(
                 Sexp::list(mb_items),
             ])
         }
-        StructureItemDesc::Tstr_modtype(_mtd) => Sexp::list(vec![
-            Sexp::atom("Tstr_modtype"),
-            Sexp::atom("<module_type_declaration>"),
-        ]),
+        StructureItemDesc::Tstr_modtype(mtd) => {
+            let mtd_sexp = sexp_module_type_declaration(arena, ctx, with_locs, dedup, mtd);
+            Sexp::list(vec![
+                Sexp::atom("Tstr_modtype"),
+                mtd_sexp,
+            ])
+        }
         StructureItemDesc::Tstr_open(od) => Sexp::list(vec![
             Sexp::atom("Tstr_open"),
             sexp_open_declaration(arena, ctx, with_locs, dedup, od),
