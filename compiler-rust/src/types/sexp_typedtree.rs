@@ -1113,14 +1113,17 @@ fn sexp_expression_desc(
             Sexp::list(items)
         }
         ExpressionDesc::Texp_ifthenelse(e1, e2, e3) => {
+            // Match OCaml eval order: e1, e2, e3
+            let e1_sexp = sexp_expression(arena, ctx, with_locs, dedup, e1);
+            let e2_sexp = sexp_expression(arena, ctx, with_locs, dedup, e2);
             let e3_sexp = match e3 {
                 None => Sexp::atom("None"),
                 Some(e) => Sexp::list(vec![Sexp::atom("Some"), sexp_expression(arena, ctx, with_locs, dedup, e)]),
             };
             Sexp::list(vec![
                 Sexp::atom("Texp_ifthenelse"),
-                sexp_expression(arena, ctx, with_locs, dedup, e1),
-                sexp_expression(arena, ctx, with_locs, dedup, e2),
+                e1_sexp,
+                e2_sexp,
                 e3_sexp,
             ])
         }
@@ -1188,15 +1191,18 @@ fn sexp_expression_desc(
 }
 
 fn sexp_case(arena: &ParseArena, ctx: &TypeContext<'_>, with_locs: bool, dedup: &mut TypeDedupTable, c: &Case) -> Sexp {
+    // Match OCaml eval order: lhs first, then guard, then rhs
+    let lhs_sexp = sexp_pattern(arena, ctx, with_locs, dedup, &c.c_lhs);
     let guard_sexp = match &c.c_guard {
         None => Sexp::atom("None"),
         Some(e) => Sexp::list(vec![Sexp::atom("Some"), sexp_expression(arena, ctx, with_locs, dedup, e)]),
     };
+    let rhs_sexp = sexp_expression(arena, ctx, with_locs, dedup, &c.c_rhs);
     Sexp::list(vec![
         Sexp::atom("case"),
-        sexp_pattern(arena, ctx, with_locs, dedup, &c.c_lhs),
+        lhs_sexp,
         guard_sexp,
-        sexp_expression(arena, ctx, with_locs, dedup, &c.c_rhs),
+        rhs_sexp,
     ])
 }
 
@@ -1479,6 +1485,8 @@ fn sexp_module_expr_desc(
             sexp_module_expr(arena, ctx, with_locs, dedup, me2),
         ]),
         ModuleExprDesc::Tmod_constraint(me, _, constraint_, _) => {
+            // Match OCaml eval order: module_expr first, then constraint
+            let me_sexp = sexp_module_expr(arena, ctx, with_locs, dedup, me);
             let constraint_sexp = match constraint_ {
                 ModuleTypeConstraint::Tmodtype_implicit => Sexp::atom("implicit"),
                 ModuleTypeConstraint::Tmodtype_explicit(mt) => {
@@ -1488,7 +1496,7 @@ fn sexp_module_expr_desc(
             };
             Sexp::list(vec![
                 Sexp::atom("Tmod_constraint"),
-                sexp_module_expr(arena, ctx, with_locs, dedup, me),
+                me_sexp,
                 constraint_sexp,
             ])
         }
