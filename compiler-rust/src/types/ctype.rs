@@ -4796,43 +4796,9 @@ fn copy_type_cached(
                 TypeDesc::Tarrow { .. } => CopyAction::ReturnSelf,
                 TypeDesc::Tfield { .. } => CopyAction::ReturnSelf,
                 TypeDesc::Tnil => CopyAction::ReturnSelf,
-                // Tconstr: selective identity to avoid functor/variant crashes
-                TypeDesc::Tconstr { path, args, .. }
-                    if is_predef_type_name(path.head_name())
-                        && args.iter().copied().all(|arg| {
-                            !matches!(
-                                &*ctx.get_desc(ctx.repr(arg)),
-                                TypeDesc::Tvariant(_)
-                            )
-                        }) =>
-                {
-                    CopyAction::ReturnSelf
-                }
-                TypeDesc::Tconstr { path, args, .. }
-                    if (args.is_empty() && (is_recursive_local_nullary_type_for_identity(ctx, path) || is_local_abstract_type(ctx, path)))
-                        || (!args.is_empty()
-                            && is_recursive_local_type_for_identity(ctx, path)
-                            && args.iter().copied().all(|arg| {
-                                matches!(
-                                    &*ctx.get_desc(ctx.repr(arg)),
-                                    TypeDesc::Tvar(None) | TypeDesc::Tunivar(None)
-                                )
-                            })) =>
-                {
-                    CopyAction::ReturnSelf
-                }
-                // Nullary Pdot: functor parameter types (N.t, Q.t) and module
-                // access types (Stdlib.Date.t, etc). OCaml's copy returns identity
-                // for all non-generic types.
-                TypeDesc::Tconstr { path: Path::Pdot(..), args, .. }
-                    if args.is_empty() =>
-                {
-                    CopyAction::ReturnSelf
-                }
-                TypeDesc::Tconstr { path, args, .. } => CopyAction::Constr {
-                    path: path.clone(),
-                    args: args.clone(),
-                },
+                // Tconstr: OCaml's copy returns identity for ALL non-generic types.
+                // Match that behavior: return self for all non-generic Tconstr.
+                TypeDesc::Tconstr { .. } => CopyAction::ReturnSelf,
                 TypeDesc::Tlink(target) | TypeDesc::Tsubst(target) => CopyAction::Link(*target),
             }
         } else {
