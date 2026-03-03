@@ -2573,7 +2573,8 @@ fn translate_module_type_to_decl<'a>(
                         let val_name = arena.get_string(vd.pval_name.txt);
                         let val_id = Ident::create_persistent(val_name);
                         // Use transl_type_scheme pattern: begin_def/end_def/generalize
-                        // so that type variables become generic and instance() strips their names
+                        // OCaml: reset_type_variables() for each val declaration
+                        tctx.type_variables.clear();
                         let ctx = tctx.type_ctx;
                         ctx.begin_def();
                         let (_typed_ct, val_type) = transl_type(tctx, &sig_env, arena.get_core_type(vd.pval_type))?;
@@ -4054,6 +4055,8 @@ pub fn transl_signature<'a>(
                 let name_str = arena.get_string(vd.pval_name.txt).to_string();
                 let id = Ident::create_local(&name_str);
                 // Use transl_type_scheme pattern: begin_def/end_def/generalize
+                // OCaml: reset_type_variables() for each val declaration
+                tctx.type_variables.clear();
                 let ctx = tctx.type_ctx;
                 ctx.begin_def();
                 let (typed_ctype, val_ty) = transl_type(tctx, &sig_env, arena.get_core_type(vd.pval_type))?;
@@ -4443,7 +4446,9 @@ fn type_structure_item<'a>(
             let id = Ident::create_local(&name_str);
 
             // Translate the type annotation using transl_type_scheme pattern:
-            // begin_def/end_def/generalize to keep Ttyp_any type vars as Tvar None
+            // OCaml: reset_type_variables() clears type var map so each declaration
+            // gets fresh Tvars (e.g., 'a in log and 'a in log2 are separate nodes).
+            tctx.type_variables.clear();
             let ctx = tctx.type_ctx;
             ctx.begin_def();
             let (typed_ctype, val_ty) = transl_type(tctx, env, arena.get_core_type(vd.pval_type))?;
