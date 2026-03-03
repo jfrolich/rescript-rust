@@ -3419,27 +3419,16 @@ fn type_pattern_constraint(
     );
 
     // OCaml converts Tpat_var to Tpat_alias(Tpat_any, id, name) and replaces extras.
+    // OCaml: {p with pat_desc = Tpat_any; pat_attributes = []} — keeps p.pat_type
+    // which is expected_ty' (the second instance of the constraint type).
     let typed_inner = match typed_inner.pat_desc.clone() {
         crate::types::typedtree::PatternDesc::Tpat_var(id, name) => {
-            let any_pat_type = {
-                let constraint_repr = ctx.repr(constraint_ty);
-                let constraint_desc = ctx.get_desc(constraint_repr);
-                let use_constraint_instance = matches!(
-                    &*constraint_desc,
-                    TypeDesc::Tconstr { path, args, .. }
-                        if args.is_empty() && path.head_name() == "string"
-                );
-                drop(constraint_desc);
-                if use_constraint_instance {
-                    crate::types::instance(ctx, constraint_ty)
-                } else {
-                    typed_inner.pat_type
-                }
-            };
+            // Use typed_inner.pat_type (= inner_expected_ty, instance 2)
+            // to match OCaml's {p with pat_desc = Tpat_any} behavior.
             let any_pat = Pattern {
                 pat_desc: crate::types::typedtree::PatternDesc::Tpat_any,
                 pat_attributes: Attributes::new(),
-                pat_type: any_pat_type,
+                pat_type: typed_inner.pat_type,
                 ..typed_inner.clone()
             };
             Pattern {
