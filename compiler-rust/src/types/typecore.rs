@@ -4010,21 +4010,24 @@ pub fn type_expect<'a>(
 
         ED::Pexp_while(cond_idx, body_idx) => {
             // While loop
+            // OCaml passes Predef.type_bool/unit to type_expect; rue instances each.
+            // Use separate unit types for body and result (matching OCaml's rue pattern).
             let bool_ty = env.type_bool(ctx);
-            let unit_ty = env.type_unit(ctx);
+            let body_unit_ty = env.type_unit(ctx);
 
             let cond = tctx.arena.get_expr(*cond_idx);
             let typed_cond = type_expect(tctx, env, cond, bool_ty, None)?;
             let body = tctx.arena.get_expr(*body_idx);
-            let typed_body = type_expect(tctx, env, body, unit_ty, None)?;
+            let typed_body = type_expect(tctx, env, body, body_unit_ty, None)?;
 
-            // While loop has type unit
-            unify_expression_types(tctx, loc, expected_ty, unit_ty, context)?;
+            // While loop result: separate unit (OCaml: instance_def Predef.type_unit)
+            let result_unit_ty = env.type_unit(ctx);
+            unify_expression_types(tctx, loc, expected_ty, result_unit_ty, context)?;
 
             Ok(Expression::new(
                 ExpressionDesc::Texp_while(Box::new(typed_cond), Box::new(typed_body)),
                 loc,
-                unit_ty,
+                result_unit_ty,
                 EnvRef(0),
                 expr.pexp_attributes.clone(),
             ))
