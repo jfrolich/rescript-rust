@@ -148,6 +148,18 @@ pub struct TypeContext<'a> {
 
     /// Next synthetic StrIdx raw value for CMI longident strings.
     next_cmi_longident_idx: Cell<u32>,
+
+    /// Cached predef type singletons at generic_level.
+    /// Matches OCaml's Predef.type_int etc. which are module-level singletons
+    /// created via newgenty at generic_level. Lazily initialized on first use.
+    predef_int: Cell<Option<TypeExprRef>>,
+    predef_char: Cell<Option<TypeExprRef>>,
+    predef_string: Cell<Option<TypeExprRef>>,
+    predef_float: Cell<Option<TypeExprRef>>,
+    predef_bool: Cell<Option<TypeExprRef>>,
+    predef_unit: Cell<Option<TypeExprRef>>,
+    predef_exn: Cell<Option<TypeExprRef>>,
+    predef_bigint: Cell<Option<TypeExprRef>>,
 }
 
 impl<'a> TypeContext<'a> {
@@ -195,6 +207,14 @@ impl<'a> TypeContext<'a> {
             load_paths: RefCell::new(Vec::new()),
             cmi_longident_names: RefCell::new(std::collections::HashMap::new()),
             next_cmi_longident_idx: Cell::new(0xF000_0000),
+            predef_int: Cell::new(None),
+            predef_char: Cell::new(None),
+            predef_string: Cell::new(None),
+            predef_float: Cell::new(None),
+            predef_bool: Cell::new(None),
+            predef_unit: Cell::new(None),
+            predef_exn: Cell::new(None),
+            predef_bigint: Cell::new(None),
         }
     }
 
@@ -371,6 +391,57 @@ impl<'a> TypeContext<'a> {
     pub fn new_generic_constr(&self, path: Path, args: Vec<TypeExprRef>) -> TypeExprRef {
         let abbrev = self.alloc_abbrev(AbbrevMemo::Mnil);
         self.new_generic_type(TypeDesc::Tconstr { path, args, abbrev })
+    }
+
+    /// Get or create a cached predef singleton helper.
+    fn get_or_create_predef(
+        &self,
+        cache: &Cell<Option<TypeExprRef>>,
+        name: &str,
+    ) -> TypeExprRef {
+        if let Some(ty) = cache.get() {
+            ty
+        } else {
+            let ty = self.new_generic_constr(
+                Path::pident(Ident::create_persistent(name)),
+                vec![],
+            );
+            cache.set(Some(ty));
+            ty
+        }
+    }
+
+    /// Get the predef int singleton (generic_level).
+    pub fn predef_int(&self) -> TypeExprRef {
+        self.get_or_create_predef(&self.predef_int, "int")
+    }
+    /// Get the predef char singleton (generic_level).
+    pub fn predef_char(&self) -> TypeExprRef {
+        self.get_or_create_predef(&self.predef_char, "char")
+    }
+    /// Get the predef string singleton (generic_level).
+    pub fn predef_string(&self) -> TypeExprRef {
+        self.get_or_create_predef(&self.predef_string, "string")
+    }
+    /// Get the predef float singleton (generic_level).
+    pub fn predef_float(&self) -> TypeExprRef {
+        self.get_or_create_predef(&self.predef_float, "float")
+    }
+    /// Get the predef bool singleton (generic_level).
+    pub fn predef_bool(&self) -> TypeExprRef {
+        self.get_or_create_predef(&self.predef_bool, "bool")
+    }
+    /// Get the predef unit singleton (generic_level).
+    pub fn predef_unit(&self) -> TypeExprRef {
+        self.get_or_create_predef(&self.predef_unit, "unit")
+    }
+    /// Get the predef exn singleton (generic_level).
+    pub fn predef_exn(&self) -> TypeExprRef {
+        self.get_or_create_predef(&self.predef_exn, "exn")
+    }
+    /// Get the predef bigint singleton (generic_level).
+    pub fn predef_bigint(&self) -> TypeExprRef {
+        self.get_or_create_predef(&self.predef_bigint, "bigint")
     }
 
     /// Create an arrow type at generic level (for type schemes).

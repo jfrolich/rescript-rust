@@ -3628,7 +3628,7 @@ fn type_pattern_exception(
     let ctx = tctx.type_ctx;
 
     // Exception patterns match the exn type
-    let exn_ty = ctx.new_constr(Path::pident(Ident::create_persistent("exn")), vec![]);
+    let exn_ty = crate::types::ctype::instance(ctx, ctx.predef_exn());
 
     // Type check the inner pattern against exn
     let typed_inner = type_pattern_inner(tctx, env, inner_pat, exn_ty, mode, state, 0)?;
@@ -5799,7 +5799,7 @@ fn type_match(
     let mut typed_exn_cases = Vec::new();
     if !exn_caselist.is_empty() {
         let ctx = tctx.type_ctx;
-        let exn_ty = ctx.new_constr(Path::pident(Ident::create_persistent("exn")), vec![]);
+        let exn_ty = crate::types::ctype::instance(ctx, ctx.predef_exn());
         for case in &exn_caselist {
             let typed_case = type_case(tctx, env, case, exn_ty, exn_ty, expected_ty)?;
             typed_exn_cases.push(typed_case);
@@ -7499,7 +7499,7 @@ fn type_try(
 
     // Type check each handler
     // Exception type (exn)
-    let exn_ty = ctx.new_constr(Path::pident(Ident::create_persistent("exn")), vec![]);
+    let exn_ty = crate::types::ctype::instance(ctx, ctx.predef_exn());
 
     let mut typed_handlers = Vec::new();
     for handler in handlers {
@@ -11589,40 +11589,41 @@ fn copy_lookup_signature_for_subst(
 // ============================================================================
 
 impl Env {
-    /// Get the int type.
+    /// Get a fresh int type instance.
+    /// Uses cached generic singleton + instance(), matching OCaml's
+    /// `instance_def Predef.type_int` pattern.
     pub fn type_int(&self, ctx: &TypeContext<'_>) -> TypeExprRef {
-        // In a real implementation, this would look up the predef type
-        ctx.new_constr(Path::pident(Ident::create_persistent("int")), vec![])
+        crate::types::ctype::instance(ctx, ctx.predef_int())
     }
 
-    /// Get the char type.
+    /// Get a fresh char type instance.
     pub fn type_char(&self, ctx: &TypeContext<'_>) -> TypeExprRef {
-        ctx.new_constr(Path::pident(Ident::create_persistent("char")), vec![])
+        crate::types::ctype::instance(ctx, ctx.predef_char())
     }
 
-    /// Get the string type.
+    /// Get a fresh string type instance.
     pub fn type_string(&self, ctx: &TypeContext<'_>) -> TypeExprRef {
-        ctx.new_constr(Path::pident(Ident::create_persistent("string")), vec![])
+        crate::types::ctype::instance(ctx, ctx.predef_string())
     }
 
-    /// Get the float type.
+    /// Get a fresh float type instance.
     pub fn type_float(&self, ctx: &TypeContext<'_>) -> TypeExprRef {
-        ctx.new_constr(Path::pident(Ident::create_persistent("float")), vec![])
+        crate::types::ctype::instance(ctx, ctx.predef_float())
     }
 
-    /// Get the bigint type.
+    /// Get a fresh bigint type instance.
     pub fn type_bigint(&self, ctx: &TypeContext<'_>) -> TypeExprRef {
-        ctx.new_constr(Path::pident(Ident::create_persistent("bigint")), vec![])
+        crate::types::ctype::instance(ctx, ctx.predef_bigint())
     }
 
-    /// Get the unit type.
+    /// Get a fresh unit type instance.
     pub fn type_unit(&self, ctx: &TypeContext<'_>) -> TypeExprRef {
-        ctx.new_constr(Path::pident(Ident::create_persistent("unit")), vec![])
+        crate::types::ctype::instance(ctx, ctx.predef_unit())
     }
 
-    /// Get the bool type.
+    /// Get a fresh bool type instance.
     pub fn type_bool(&self, ctx: &TypeContext<'_>) -> TypeExprRef {
-        ctx.new_constr(Path::pident(Ident::create_persistent("bool")), vec![])
+        crate::types::ctype::instance(ctx, ctx.predef_bool())
     }
 
     /// Get the array type.
