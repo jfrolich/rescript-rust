@@ -10517,10 +10517,13 @@ fn wrap_module_unpacks_in_expression(
                 val_path: None,
             });
 
+        // OCaml's wrap_unpacks types the unpack as Pexp_ident through type_expect,
+        // which calls instance() on the looked-up type. Match that by instancing here.
+        let unpack_inst_ty = crate::types::instance(tctx.type_ctx, unpack.ty);
         let unpack_expr = Expression::new(
             ExpressionDesc::Texp_ident(Path::pident(unpack.id.clone()), located_lid, value_desc),
             unpack.loc_idx,
-            unpack.ty,
+            unpack_inst_ty,
             EnvRef(0),
             Attributes::new(),
         );
