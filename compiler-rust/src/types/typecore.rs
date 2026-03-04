@@ -13465,14 +13465,14 @@ mod tests {
 
     #[test]
     fn test_convert_constant_bigint_removes_underscores() {
-        let cst = crate::parser::ast::Constant::Integer("01_000_000".to_string(), Some('n'));
+        let cst = crate::parser::ast::Constant::Integer(Cow::Owned("01_000_000".to_string()), Some('n'));
         let result = convert_constant(&cst).unwrap();
         assert!(matches!(result, Constant::BigInt(true, d) if d == "1000000"));
     }
 
     #[test]
     fn test_convert_constant_bigint_preserves_non_decimal_heads() {
-        let cst = crate::parser::ast::Constant::Integer("00x1_000_000".to_string(), Some('n'));
+        let cst = crate::parser::ast::Constant::Integer(Cow::Owned("00x1_000_000".to_string()), Some('n'));
         let result = convert_constant(&cst).unwrap();
         assert!(matches!(result, Constant::BigInt(true, d) if d == "00x1000000"));
     }
@@ -13580,6 +13580,27 @@ mod tests {
                 "_top".to_string(),
                 "_self".to_string(),
                 "_blank".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn test_ocaml_hashtbl_fold_order_pair_int_string() {
+        // bs_unwrap_test: [#Pair(string, int) | #Int(int) | #String(string)]
+        // OCaml output order: Pair, String, Int
+        let labels = vec![
+            "Pair".to_string(),
+            "Int".to_string(),
+            "String".to_string(),
+        ];
+        let result = ocaml_hashtbl_fold_order(&labels);
+        eprintln!("Pair/Int/String fold order: {:?}", result);
+        assert_eq!(
+            result,
+            vec![
+                "Pair".to_string(),
+                "String".to_string(),
+                "Int".to_string(),
             ]
         );
     }

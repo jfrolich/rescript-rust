@@ -5457,19 +5457,22 @@ fn normalize_type_rec(ctx: &TypeContext<'_>, visited: &mut HashSet<TypeExprRef>,
     }
     visited.insert(ty);
 
-    // Normalize Tvariant (sort row fields) and Tobject (sort field chains) alphabetically.
+    // Normalize Tvariant (resolve row field reprs, filter Rabsent) and Tobject (sort field chains).
+    // NOTE: We do NOT sort Tvariant row fields alphabetically. OCaml doesn't call
+    // normalize_signature when -bs-read-cmi is used (which parity tests always use).
+    // Variant field order is determined during type checking (hash-fold order for Ptyp_variant,
+    // or whatever order unification/pattern matching produces).
     let desc = ctx.get_desc(ty);
     match &*desc {
         TypeDesc::Tvariant(row) => {
             let row = row_repr(ctx, row);
-            let mut fields: Vec<(String, RowField)> = row.row_fields.iter()
+            let fields: Vec<(String, RowField)> = row.row_fields.iter()
                 .map(|(label, field)| {
                     let resolved = btype::row_field_repr(ctx, field);
                     (label.clone(), resolved)
                 })
                 .filter(|(_, field)| !matches!(field, RowField::Rabsent))
                 .collect();
-            fields.sort_by(|(a, _), (b, _)| a.cmp(b));
             drop(desc);
             ctx.set_desc(ty, TypeDesc::Tvariant(RowDesc {
                 row_fields: fields,
