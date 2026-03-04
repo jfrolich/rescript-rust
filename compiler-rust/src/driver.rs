@@ -466,7 +466,7 @@ pub fn compile_source_to_js_with_options(
     // Store persistent env in the type check context for module resolution
     tctx.set_persistent_env(pers_env);
 
-    let (typed_structure, _final_env) = type_structure(&mut tctx, &env, parser.arena(), &structure)
+    let (typed_structure, final_env) = type_structure(&mut tctx, &env, parser.arena(), &structure)
         .map_err(|e| anyhow!("Type checking failed: {e:?}"))?;
 
     // Apply interface constraints: moregen linking for non-generic Tvars.
@@ -482,7 +482,7 @@ pub fn compile_source_to_js_with_options(
         f.ends_with(".res") && std::path::Path::new(&format!("{}i", f)).exists()
     });
     if !has_resi {
-        normalize_signature_types(&type_ctx, &typed_structure);
+        normalize_signature_types(&type_ctx, &typed_structure, &final_env);
     }
 
     // Print typed tree if requested
@@ -1266,22 +1266,62 @@ pub fn typecheck_stored_signature_and_dump_sexp<W: std::io::Write>(
 /// OCaml calls normalize_type on each Sig_value's val_type in the top-level
 /// inferred signature. normalize_type is recursive (walks all children via
 /// iter_type_expr), so all types reachable from a top-level val_type are normalized.
-/// We match this by normalizing the pat_type of each top-level value binding
-/// (which corresponds to the signature's val_type) and the ctyp_type of primitives.
+///
+/// Key: OCaml's val_type comes from `enter_variable` during pattern typing, which
+/// uses `build_as_type(inner)` for alias patterns. For `Tpat_alias(Tpat_any, "v")`,
+/// val_type = Tpat_any's pat_type, NOT the outer pattern's pat_type. We look up
+/// val_type from the env to match this behavior exactly.
 fn normalize_signature_types(
     type_ctx: &TypeContext<'_>,
     typed_structure: &crate::types::typedtree::Structure,
+    final_env: &crate::types::env::Env,
 ) {
     use crate::types::ctype::normalize_type;
-    use crate::types::typedtree::{StructureItemDesc, ModuleExprDesc};
+    use crate::types::typedtree::{StructureItemDesc, ModuleExprDesc, PatternDesc};
 
-    fn norm_structure(ctx: &TypeContext<'_>, s: &crate::types::typedtree::Structure) {
+    /// Collect bound variable names from a pattern.
+    fn collect_bound_names(pat: &crate::types::typedtree::Pattern, names: &mut Vec<String>) {
+        match &pat.pat_desc {
+            PatternDesc::Tpat_var(id, _) => {
+                names.push(id.name().to_string());
+            }
+            PatternDesc::Tpat_alias(inner, id, _) => {
+                collect_bound_names(inner, names);
+                names.push(id.name().to_string());
+            }
+            PatternDesc::Tpat_tuple(pats)
+            | PatternDesc::Tpat_construct(_, _, pats)
+            | PatternDesc::Tpat_array(pats) => {
+                for p in pats { collect_bound_names(p, names); }
+            }
+            PatternDesc::Tpat_record(fields, _) => {
+                for (_, _, p, _) in fields { collect_bound_names(p, names); }
+            }
+            PatternDesc::Tpat_variant(_, Some(inner), _) => collect_bound_names(inner, names),
+            PatternDesc::Tpat_or(left, _, _) => collect_bound_names(left, names),
+            _ => {}
+        }
+    }
+
+    fn norm_structure(ctx: &TypeContext<'_>, env: &crate::types::env::Env, s: &crate::types::typedtree::Structure) {
         for item in &s.str_items {
             match &item.str_desc {
                 StructureItemDesc::Tstr_value(_, bindings) => {
                     for b in bindings {
-                        // Normalize the binding's pattern type (= signature val_type)
-                        normalize_type(ctx, b.vb_pat.pat_type);
+                        // Look up val_type from env for each bound variable,
+                        // matching OCaml's normalize_signature_item(Sig_value).
+                        let mut names = Vec::new();
+                        collect_bound_names(&b.vb_pat, &mut names);
+                        for name in &names {
+                            if let Ok(vd) = env.find_value(name) {
+                                normalize_type(ctx, vd.val_type);
+                            }
+                        }
+                        // Fallback: if no bound names found (shouldn't happen),
+                        // normalize the pattern type directly.
+                        if names.is_empty() {
+                            normalize_type(ctx, b.vb_pat.pat_type);
+                        }
                     }
                 }
                 StructureItemDesc::Tstr_primitive(vd) => {
@@ -1289,22 +1329,22 @@ fn normalize_signature_types(
                     normalize_type(ctx, vd.val_desc.ctyp_type);
                 }
                 StructureItemDesc::Tstr_module(mb) => {
-                    norm_modexpr(ctx, &mb.mb_expr);
+                    norm_modexpr(ctx, env, &mb.mb_expr);
                 }
                 _ => {}
             }
         }
     }
 
-    fn norm_modexpr(ctx: &TypeContext<'_>, me: &crate::types::typedtree::ModuleExpr) {
+    fn norm_modexpr(ctx: &TypeContext<'_>, env: &crate::types::env::Env, me: &crate::types::typedtree::ModuleExpr) {
         match &me.mod_desc {
-            ModuleExprDesc::Tmod_structure(s) => { norm_structure(ctx, s); }
-            ModuleExprDesc::Tmod_constraint(me, _, _, _) => { norm_modexpr(ctx, me); }
-            ModuleExprDesc::Tmod_functor(_, _, _, me) => { norm_modexpr(ctx, me); }
-            ModuleExprDesc::Tmod_apply(me1, me2, _) => { norm_modexpr(ctx, me1); norm_modexpr(ctx, me2); }
+            ModuleExprDesc::Tmod_structure(s) => { norm_structure(ctx, env, s); }
+            ModuleExprDesc::Tmod_constraint(me, _, _, _) => { norm_modexpr(ctx, env, me); }
+            ModuleExprDesc::Tmod_functor(_, _, _, me) => { norm_modexpr(ctx, env, me); }
+            ModuleExprDesc::Tmod_apply(me1, me2, _) => { norm_modexpr(ctx, env, me1); norm_modexpr(ctx, env, me2); }
             _ => {}
         }
     }
 
-    norm_structure(type_ctx, typed_structure);
+    norm_structure(type_ctx, final_env, typed_structure);
 }
