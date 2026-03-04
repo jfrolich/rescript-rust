@@ -2260,7 +2260,89 @@ fn unify_types<'a>(
 // Row Unification
 // ============================================================================
 
+/// Sort row fields alphabetically by label, matching OCaml's `sort_row_fields`.
+fn sort_row_fields(fields: &[(String, RowField)]) -> Vec<(String, RowField)> {
+    let mut sorted = fields.to_vec();
+    sorted.sort_by(|(a, _), (b, _)| a.cmp(b));
+    sorted
+}
+
+/// Merge two sorted row field lists, matching OCaml's `merge_rf`.
+/// Returns (r1, r2, pairs) where:
+/// - r1: fields only in fi1 (sorted)
+/// - r2: fields only in fi2 (sorted)
+/// - pairs: matched fields from both sides
+fn merge_rf(
+    fi1: &[(String, RowField)],
+    fi2: &[(String, RowField)],
+) -> (
+    Vec<(String, RowField)>,
+    Vec<(String, RowField)>,
+    Vec<(String, RowField, RowField)>,
+) {
+    let mut r1: Vec<(String, RowField)> = Vec::new();
+    let mut r2: Vec<(String, RowField)> = Vec::new();
+    let mut pairs: Vec<(String, RowField, RowField)> = Vec::new();
+
+    let mut i1 = 0;
+    let mut i2 = 0;
+
+    while i1 < fi1.len() && i2 < fi2.len() {
+        let (l1, f1) = &fi1[i1];
+        let (l2, f2) = &fi2[i2];
+        if l1 == l2 {
+            pairs.push((l1.clone(), f1.clone(), f2.clone()));
+            i1 += 1;
+            i2 += 1;
+        } else if l1 < l2 {
+            r1.push((l1.clone(), f1.clone()));
+            i1 += 1;
+        } else {
+            r2.push((l2.clone(), f2.clone()));
+            i2 += 1;
+        }
+    }
+    // Remaining elements
+    while i1 < fi1.len() {
+        r1.push(fi1[i1].clone());
+        i1 += 1;
+    }
+    while i2 < fi2.len() {
+        r2.push(fi2[i2].clone());
+        i2 += 1;
+    }
+
+    (r1, r2, pairs)
+}
+
+/// Merge row fields matching OCaml's `merge_row_fields`.
+/// Sorts both inputs, then uses sorted merge to partition into
+/// (r1_only, r2_only, pairs).
+fn merge_row_fields(
+    fi1: &[(String, RowField)],
+    fi2: &[(String, RowField)],
+) -> (
+    Vec<(String, RowField)>,
+    Vec<(String, RowField)>,
+    Vec<(String, RowField, RowField)>,
+) {
+    // Match OCaml's fast paths
+    if fi1.is_empty() || fi2.is_empty() {
+        return (fi1.to_vec(), fi2.to_vec(), Vec::new());
+    }
+    if fi1.len() == 1 && fi2.iter().all(|(l, _)| l != &fi1[0].0) {
+        return (fi1.to_vec(), fi2.to_vec(), Vec::new());
+    }
+    if fi2.len() == 1 && fi1.iter().all(|(l, _)| l != &fi2[0].0) {
+        return (fi1.to_vec(), fi2.to_vec(), Vec::new());
+    }
+    merge_rf(&sort_row_fields(fi1), &sort_row_fields(fi2))
+}
+
 /// Unify two row types (for polymorphic variants).
+/// Matches OCaml's `unify_row` (ctype.ml:2538): uses `merge_row_fields` to sort
+/// and partition fields, then unifies pairs. The result has fields in alphabetical
+/// order, matching OCaml's `row_repr` which flattens the sorted chain.
 fn unify_rows<'a>(
     ctx: &'a TypeContext<'a>,
     state: &mut UnifyState,
@@ -2270,53 +2352,55 @@ fn unify_rows<'a>(
     let row1 = row_repr(ctx, row1);
     let row2 = row_repr(ctx, row2);
 
-    // Preserve left-row label order: OCaml `unify_row` updates row-more links and
-    // `row_repr` exposes fields in a left-biased order, not lexicographic order.
-    let mut merged_fields = row1.row_fields.clone();
-    // OCaml's unify_row_field keeps Reither as Reither during unification
-    // (see ctype.ml:2701-2704). We must NOT convert Reither to Rpresent here.
-    let prefer_field = |left: &RowField, right: &RowField| -> RowField {
-        match (left, right) {
-            // Keep present fields when available (mirrors OCaml row-field linking where
-            // Reither can be rewritten to Rpresent during unification).
-            (RowField::Rpresent(_), _) => left.clone(),
-            (_, RowField::Rpresent(_)) => right.clone(),
-            // For Reither/Reither, keep the representative-side field (right).
-            // OCaml links t1 -> t2 before row unification and row-field refs preserve
-            // side-specific residual type lists; selecting left here drops right-side
-            // payload lists and produces `Reither ... ()` drift in typedtree output.
-            (RowField::Reither { .. }, RowField::Reither { .. }) => right.clone(),
-            _ => left.clone(),
-        }
-    };
+    let (r1, r2, pairs) = merge_row_fields(&row1.row_fields, &row2.row_fields);
 
     let fixed1 = row_fixed(ctx, &row1);
     let fixed2 = row_fixed(ctx, &row2);
 
-    // Unify the fields
-    for (label, field1) in &row1.row_fields {
-        // Find matching field in row2
-        if let Some((_, field2)) = row2.row_fields.iter().find(|(l, _)| l == label) {
-            unify_row_field(ctx, state, fixed1, fixed2, field1, field2)?;
-            if let Some((_, merged_field)) = merged_fields.iter_mut().find(|(l, _)| l == label) {
-                *merged_field = prefer_field(field1, field2);
-            }
-        } else if row2.row_closed {
-            // Field not found and row is closed - error
-            return Err(TypeError::Unify(vec![]));
-        } else {
-            merged_fields.push((label.clone(), field1.clone()));
-        }
-        // If row is open, the field might be added later through row-more.
-    }
+    let closed = row1.row_closed || row2.row_closed;
 
-    // Check the reverse
-    for (label, field2) in &row2.row_fields {
-        if !row1.row_fields.iter().any(|(l, _)| l == label) {
-            if row1.row_closed {
+    // Check for invalid field presence (matching OCaml's set_more error checks)
+    if closed {
+        // If both are closed and one side has fields the other doesn't, error
+        let empty = |fields: &[(String, RowField)]| {
+            fields.iter().all(|(_, f)| matches!(super::btype::row_field_repr(ctx, f), RowField::Rabsent))
+        };
+        if (empty(&r1) || row2.row_closed) && (empty(&r2) || row1.row_closed) {
+            let all_absent = pairs.iter().all(|(_, f1, f2)| {
+                matches!(super::btype::row_field_repr(ctx, f1), RowField::Rabsent)
+                    || matches!(super::btype::row_field_repr(ctx, f2), RowField::Rabsent)
+            });
+            if all_absent {
                 return Err(TypeError::Unify(vec![]));
             }
-            merged_fields.push((label.clone(), field2.clone()));
+        }
+    }
+
+    // Check that non-empty r1/r2 are valid (matching OCaml's set_more checks)
+    if row2.row_closed {
+        let non_absent_r1: Vec<_> = if closed {
+            r1.iter().filter(|(_, f)| {
+                let fr = super::btype::row_field_repr(ctx, f);
+                !matches!(fr, RowField::Rabsent)
+            }).collect()
+        } else {
+            r1.iter().collect()
+        };
+        if !non_absent_r1.is_empty() && (row2.row_closed || row_fixed(ctx, &row2)) {
+            return Err(TypeError::Unify(vec![]));
+        }
+    }
+    if row1.row_closed {
+        let non_absent_r2: Vec<_> = if closed {
+            r2.iter().filter(|(_, f)| {
+                let fr = super::btype::row_field_repr(ctx, f);
+                !matches!(fr, RowField::Rabsent)
+            }).collect()
+        } else {
+            r2.iter().collect()
+        };
+        if !non_absent_r2.is_empty() && (row1.row_closed || row_fixed(ctx, &row1)) {
+            return Err(TypeError::Unify(vec![]));
         }
     }
 
@@ -2325,17 +2409,62 @@ fn unify_rows<'a>(
     let more2 = row_more(ctx, &row2);
     unify(ctx, state, more1, more2)?;
 
-    // `row_repr` may produce duplicate labels through nested row flattening.
-    // Keep first occurrence to match OCaml lookup semantics.
+    // Unify paired fields
+    for (l, f1, f2) in &pairs {
+        match unify_row_field(ctx, state, fixed1, fixed2, f1, f2) {
+            Ok(()) => {}
+            Err(_e) => {
+                return Err(TypeError::Unify(vec![]));
+            }
+        }
+    }
+
+    // Determine the row_name (matching OCaml logic at ctype.ml:2572-2583)
+    let empty = |fields: &[(String, RowField)]| {
+        fields.iter().all(|(_, f)| matches!(super::btype::row_field_repr(ctx, f), RowField::Rabsent))
+    };
+    let name = if row1.row_name.is_some() && (row1.row_closed || empty(&r2)) {
+        row1.row_name.clone()
+    } else if row2.row_name.is_some() && (row2.row_closed || empty(&r1)) {
+        row2.row_name.clone()
+    } else {
+        None
+    };
+
+    // Build merged fields in sorted order (matching OCaml's merge_row_fields sort).
+    // OCaml's unify_row links row_more to variants with the other side's fields,
+    // and row_repr flattens the chain. The effective result is all fields sorted.
+    // We must also select the right field version for pairs.
+    let prefer_field = |f1: &RowField, f2: &RowField| -> RowField {
+        match (f1, f2) {
+            (RowField::Rpresent(_), _) => f1.clone(),
+            (_, RowField::Rpresent(_)) => f2.clone(),
+            // For Reither/Reither, keep the representative-side field (right/row2).
+            (RowField::Reither { .. }, RowField::Reither { .. }) => f2.clone(),
+            _ => f1.clone(),
+        }
+    };
+
+    let mut merged_fields: Vec<(String, RowField)> = Vec::new();
+    // Collect all fields: pairs (with preferred field), r1-only, r2-only
+    for (l, f1, f2) in &pairs {
+        merged_fields.push((l.clone(), prefer_field(f1, f2)));
+    }
+    merged_fields.extend(r1.into_iter());
+    merged_fields.extend(r2.into_iter());
+    // Sort the final result alphabetically (matching OCaml's sort+chain behavior)
+    merged_fields.sort_by(|(a, _), (b, _)| a.cmp(b));
+
+    // Deduplicate (keep first occurrence)
     let mut seen = HashSet::new();
     merged_fields.retain(|(label, _)| seen.insert(label.clone()));
 
     Ok(RowDesc {
         row_fields: merged_fields,
         row_more: ctx.repr(more2),
-        row_closed: row1.row_closed || row2.row_closed,
+        row_closed: closed,
         row_fixed: row1.row_fixed || row2.row_fixed,
-        row_name: row2.row_name.clone().or_else(|| row1.row_name.clone()),
+        row_name: name,
     })
 }
 

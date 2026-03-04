@@ -1735,11 +1735,10 @@ fn transl_type_inner(
                 }
             }
 
-            let ordered_labels = if styp.ptyp_attributes.is_empty() {
-                ocaml_hashtbl_fold_order(&row_field_insertions)
-            } else {
-                row_field_insertions
-            };
+            // OCaml's Ptyp_variant uses Hashtbl.fold to collect fields,
+            // which produces a hash-determined order. Match this always
+            // (OCaml does not condition on attributes).
+            let ordered_labels = ocaml_hashtbl_fold_order(&row_field_insertions);
             let row_fields = ordered_labels
                 .into_iter()
                 .filter_map(|label| row_field_map.remove(&label).map(|field| (label, field)))
