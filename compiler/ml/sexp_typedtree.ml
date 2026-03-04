@@ -170,7 +170,7 @@ and type_expr_body te =
      elements, so inlining type_expr in [...] would give inconsistent ordering. *)
   match te.Types.desc with
   | Tvar name -> Sexp.list [Sexp.atom "Tvar"; opt_string name]
-  | Tarrow (arg, ret, _, _arity) ->
+  | Tarrow (arg, ret, _, arity) ->
     let arg_sexp = type_expr arg.Types.typ in
     let ret_sexp = type_expr ret in
     Sexp.list [
@@ -178,7 +178,7 @@ and type_expr_body te =
       sexp_arg_label arg.Types.lbl;
       arg_sexp;
       ret_sexp;
-      Sexp.atom "None"; (* normalize arity for parity *)
+      (match arity with Some a -> Sexp.list [Sexp.atom "Some"; Sexp.atom (string_of_int a)] | None -> Sexp.atom "None");
     ]
   | Ttuple l ->
     let items = List.map type_expr l in
@@ -1023,18 +1023,7 @@ let normalize_types_and_body body =
         | Sexp.List items -> Sexp.List (List.map rewrite_sexp items)
       in
       let rewritten = Array.init n (fun i -> rewrite_sexp arr.(i)) in
-      (* Normalize open not_fixed variants: strip row fields for parity *)
-      let strip_open_variant = function
-        | Sexp.List [Sexp.Atom "Tvariant"; _fields; Sexp.Atom "open"; Sexp.Atom "not_fixed"] ->
-          Sexp.List [Sexp.Atom "Tvariant"; Sexp.List []; Sexp.Atom "open"; Sexp.Atom "not_fixed"]
-        | s -> s
-      in
-      let strip_tvar_name = function
-        | Sexp.List [Sexp.Atom "Tvar"; _] -> Sexp.List [Sexp.Atom "Tvar"; Sexp.Atom "None"]
-        | s -> s
-      in
-      Array.iteri (fun i s ->
-        rewritten.(i) <- strip_tvar_name (strip_open_variant s)) rewritten;
+      (* No normalization stripping — comparing exact output *)
       let changed = ref false in
       let content_tbl : (string, int) Hashtbl.t = Hashtbl.create n in
       Hashtbl.clear content_tbl;
@@ -1062,68 +1051,7 @@ let normalize_types_and_body body =
     for _ = 0 to 19 do
       if converge () then () (* continue *)
     done;
-    (* Phase 2b: merge Tconstr types that differ only in path (alias normalization).
-       If two Tconstr have identical args but different paths (Pident vs Pdot),
-       merge to the simpler (Pident) form. Handles Belt.List.t = list etc. *)
-    let extract_tconstr_args sexp =
-      match sexp with
-      | Sexp.List [Sexp.Atom "Tconstr"; path; args] ->
-        let is_pident = match path with
-          | Sexp.List [Sexp.Atom "Pident"; _] -> true
-          | _ -> false
-        in
-        Some (Sexp.to_string args, is_pident)
-      | _ -> None
-    in
-    let merge_changed = ref true in
-    while !merge_changed do
-      merge_changed := false;
-      let args_tbl : (string, int * bool) Hashtbl.t = Hashtbl.create 64 in
-      for idx = 0 to n - 1 do
-        if old_to_canonical.(idx) = idx then begin
-          match extract_tconstr_args arr.(idx) with
-          | Some (args_str, is_pident) ->
-            (match Hashtbl.find_opt args_tbl args_str with
-            | Some (existing_idx, existing_is_pident) ->
-              let keep, merge_idx =
-                if is_pident && not existing_is_pident then (idx, existing_idx)
-                else if not is_pident && existing_is_pident then (existing_idx, idx)
-                else (-1, -1)
-              in
-              if keep >= 0 then begin
-                for j = 0 to n - 1 do
-                  if old_to_canonical.(j) = merge_idx then begin
-                    old_to_canonical.(j) <- keep;
-                    merge_changed := true
-                  end
-                done;
-                Hashtbl.replace args_tbl args_str (keep, true)
-              end
-            | None ->
-              Hashtbl.add args_tbl args_str (idx, is_pident))
-          | None -> ()
-        end
-      done;
-      if !merge_changed then begin
-        let rw s =
-          let len = String.length s in
-          if len > 1 && s.[0] = '#' then
-            (try
-              let i = int_of_string (String.sub s 1 (len - 1)) in
-              if i >= 0 && i < n then "#" ^ string_of_int old_to_canonical.(i)
-              else s
-            with Failure _ -> s)
-          else s
-        in
-        let rec rw_sexp = function
-          | Sexp.Atom s -> Sexp.Atom (rw s)
-          | Sexp.List items -> Sexp.List (List.map rw_sexp items)
-        in
-        for i = 0 to n - 1 do
-          arr.(i) <- rw_sexp arr.(i)
-        done
-      end
-    done;
+    (* No Phase 2b path alias merge — comparing exact output *)
     (* Phase 2c: compact indices *)
     let canonical_to_new = Hashtbl.create n in
     let next_new = ref 0 in

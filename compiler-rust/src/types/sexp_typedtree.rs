@@ -445,12 +445,7 @@ impl TypeDedupTable {
             let mut changed = false;
             // Rewrite all type entries using current remapping
             let mut rewritten: Vec<Sexp> = self.types.iter().map(|s| rewrite_refs(s, &old_to_canonical)).collect();
-            // Normalize open not_fixed variants: strip row fields for parity
-            for entry in rewritten.iter_mut() {
-                *entry = strip_open_variant(entry);
-                // Normalize Tvar names: strip to Tvar(None) for parity
-                *entry = strip_tvar_name(entry);
-            }
+            // (No normalization stripping — comparing exact output)
             // Re-check for merges
             content_to_canonical.clear();
             for idx in 0..n {
@@ -480,52 +475,7 @@ impl TypeDedupTable {
             self.types = rewritten;
         }
 
-        // Phase 2b: merge Tconstr types that differ only in path (alias normalization).
-        // If two Tconstr have identical args but different paths (Pident vs Pdot),
-        // merge them to the simpler (Pident) form. This handles type aliases like
-        // Belt.List.t = list where unification link direction causes different paths.
-        {
-            let mut changed = true;
-            while changed {
-                changed = false;
-                // Build map: args_string -> (canonical_idx, is_pident)
-                let mut args_map: HashMap<String, (usize, bool)> = HashMap::new();
-                for idx in 0..n {
-                    if old_to_canonical[idx] != idx {
-                        continue; // skip non-canonical
-                    }
-                    if let Some((args_str, is_pident)) = extract_tconstr_args(&self.types[idx]) {
-                        match args_map.get(&args_str) {
-                            Some(&(existing_idx, existing_is_pident)) => {
-                                // Merge: prefer Pident over Pdot
-                                let (keep, merge) = if is_pident && !existing_is_pident {
-                                    (idx, existing_idx)
-                                } else if !is_pident && existing_is_pident {
-                                    (existing_idx, idx)
-                                } else {
-                                    continue; // both same path type, skip
-                                };
-                                // Merge: all entries pointing to `merge` now point to `keep`
-                                for j in 0..n {
-                                    if old_to_canonical[j] == merge {
-                                        old_to_canonical[j] = keep;
-                                        changed = true;
-                                    }
-                                }
-                                args_map.insert(args_str, (keep, true));
-                            }
-                            None => {
-                                args_map.insert(args_str, (idx, is_pident));
-                            }
-                        }
-                    }
-                }
-                if changed {
-                    // Rewrite types with updated canonicals
-                    self.types = self.types.iter().map(|s| rewrite_refs(s, &old_to_canonical)).collect();
-                }
-            }
-        }
+        // (No Phase 2b path alias merge — comparing exact output)
 
         // Phase 3: build compacted index mapping (remove gaps)
         let mut canonical_to_new: HashMap<usize, usize> = HashMap::new();
@@ -759,7 +709,10 @@ fn sexp_type_expr(
                 sexp_type_arg_label(&arg.lbl),
                 arg_sexp,
                 ret_sexp,
-                Sexp::atom("None"), // normalize arity for parity
+                match arity {
+                    Some(n) => Sexp::list(vec![Sexp::atom("Some"), Sexp::atom(&n.to_string())]),
+                    None => Sexp::atom("None"),
+                },
             ])
         }
         TypeDesc::Ttuple(types) => {
