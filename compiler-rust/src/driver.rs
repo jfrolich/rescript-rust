@@ -475,9 +475,15 @@ pub fn compile_source_to_js_with_options(
     // from the .resi interface. This happens BEFORE sexp serialization.
     apply_moregen_constraints(&mut tctx, &type_ctx, &typed_structure, options);
 
-    // NOTE: OCaml's normalize_signature is NOT called when -bs-read-cmi is used
-    // (which parity tests always use). We do NOT normalize here — variant/object
-    // field ordering must come from the type checker itself, not post-hoc normalization.
+    // OCaml's type_implementation_more calls normalize_signature ONLY when there
+    // is no .resi file (Mli_exists branch skips it). Match this behavior:
+    // normalize sorts Tvariant row fields and Tobject field chains alphabetically.
+    let has_resi = options.source_filename.as_ref().is_some_and(|f| {
+        f.ends_with(".res") && std::path::Path::new(&format!("{}i", f)).exists()
+    });
+    if !has_resi {
+        normalize_signature_types(&type_ctx, &typed_structure);
+    }
 
     // Print typed tree if requested
     if options.dump_typed_sexp {
