@@ -475,8 +475,11 @@ pub fn compile_source_to_js_with_options(
     // from the .resi interface. This happens BEFORE sexp serialization.
     apply_moregen_constraints(&mut tctx, &type_ctx, &typed_structure, options);
 
-    // Normalize types before printing (matches OCaml's normalize_signature).
-    // Sorts variant row fields and object field chains alphabetically.
+    // Normalize variant row fields and object field chains to match OCaml output.
+    // OCaml sorts object fields during type checking (flatten_fields/unify_fields).
+    // OCaml's normalize_signature (which sorts Tvariant fields) is technically not
+    // called with -bs-read-cmi, but sorting variants from top-level entry points
+    // pragmatically matches OCaml's hash-fold order for most cases.
     normalize_signature_types(&type_ctx, &typed_structure);
 
     // Print typed tree if requested

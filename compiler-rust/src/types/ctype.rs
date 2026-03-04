@@ -5378,6 +5378,33 @@ pub fn normalize_type(ctx: &TypeContext<'_>, ty: TypeExprRef) {
     normalize_type_rec(ctx, &mut visited, ty);
 }
 
+/// Sort ALL Tobject field chains alphabetically in the entire type context.
+/// OCaml sorts object fields during type checking (flatten_fields/unify_fields),
+/// so all Tobject types should have sorted fields. This function ensures that.
+pub fn sort_all_object_fields(ctx: &TypeContext<'_>) {
+    let count = ctx.type_expr_count();
+    for i in 0..count {
+        let ty = TypeExprRef(i);
+        let desc = ctx.get_desc(ty);
+        if let TypeDesc::Tobject { fields: fi, .. } = &*desc {
+            let fi = *fi;
+            drop(desc);
+            let fi_repr = ctx.repr(fi);
+            let fi_level = ctx.get_level(fi_repr);
+            if fi_level >= 0 {
+                let (sorted_fields, rest) = flatten_fields(ctx, fi_repr);
+                if !sorted_fields.is_empty() {
+                    let new_fi = build_fields(ctx, fi_level, &sorted_fields, rest);
+                    let new_desc = ctx.get_desc(new_fi).clone();
+                    ctx.set_desc(fi_repr, new_desc);
+                }
+            }
+        } else {
+            drop(desc);
+        }
+    }
+}
+
 /// Normalize ALL type nodes in the context (sort variant/object fields).
 pub fn normalize_all_types(ctx: &TypeContext<'_>) {
     let count = ctx.type_expr_count();
@@ -5430,12 +5457,11 @@ fn normalize_type_rec(ctx: &TypeContext<'_>, visited: &mut HashSet<TypeExprRef>,
     }
     visited.insert(ty);
 
-    // Get desc and handle Tvariant/Tobject normalization
+    // Normalize Tvariant (sort row fields) and Tobject (sort field chains) alphabetically.
     let desc = ctx.get_desc(ty);
     match &*desc {
         TypeDesc::Tvariant(row) => {
             let row = row_repr(ctx, row);
-            // Normalize row fields: resolve field repr, filter Rabsent, sort alphabetically
             let mut fields: Vec<(String, RowField)> = row.row_fields.iter()
                 .map(|(label, field)| {
                     let resolved = btype::row_field_repr(ctx, field);
