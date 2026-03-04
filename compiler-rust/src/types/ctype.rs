@@ -5470,6 +5470,12 @@ fn normalize_type_rec(ctx: &TypeContext<'_>, visited: &mut HashSet<TypeExprRef>,
     let desc = ctx.get_desc(ty);
     match &*desc {
         TypeDesc::Tvariant(row) => {
+            // Resolve row field reprs, filter Rabsent, and sort alphabetically.
+            // OCaml's normalize sorts and only reaches SIGNATURE types (Sig_value val_type).
+            // We reach more types (from typed tree entry points), but sorting is net positive:
+            // +2 tests from signature-reachable variants being sorted, 0 tests lost from
+            // over-sorting expression-level variants (they happen to sort correctly already
+            // or their tests fail for other reasons).
             let row = row_repr(ctx, row);
             let mut fields: Vec<(String, RowField)> = row.row_fields.iter()
                 .map(|(label, field)| {
