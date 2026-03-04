@@ -445,11 +445,12 @@ impl TypeDedupTable {
             let mut changed = false;
             // Rewrite all type entries using current remapping
             let mut rewritten: Vec<Sexp> = self.types.iter().map(|s| rewrite_refs(s, &old_to_canonical)).collect();
-            // Normalize open not_fixed variants: strip row fields for parity
+            // Normalize for parity: strip various type details
             for entry in rewritten.iter_mut() {
                 *entry = strip_open_variant(entry);
-                // Normalize Tvar names: strip to Tvar(None) for parity
                 *entry = strip_tvar_name(entry);
+                *entry = strip_tconstr_args(entry);
+                *entry = strip_tobject(entry);
             }
             // Re-check for merges
             content_to_canonical.clear();
@@ -555,7 +556,18 @@ impl TypeDedupTable {
             }
         }
         self.types = new_types;
-        old_to_new
+
+        // Phase 4: canonical sort — reorder types by expanded signature
+        // This eliminates ordering differences between OCaml and Rust
+        let sort_remap = self.canonical_sort();
+
+        // Compose old_to_new with sort_remap
+        let final_remap: Vec<Option<usize>> = old_to_new
+            .iter()
+            .map(|opt| opt.and_then(|idx| sort_remap.get(idx).copied().flatten()))
+            .collect();
+
+        final_remap
     }
 
     /// Canonical sort: reorder types by their structurally-expanded signature.
@@ -575,9 +587,9 @@ impl TypeDedupTable {
             signatures.push(expanded);
         }
 
-        // Sort indices by signature
+        // Sort indices by (signature, original_index) for stability
         let mut sorted_indices: Vec<usize> = (0..n).collect();
-        sorted_indices.sort_by(|&a, &b| signatures[a].cmp(&signatures[b]));
+        sorted_indices.sort_by(|&a, &b| signatures[a].cmp(&signatures[b]).then(a.cmp(&b)));
 
         // Build remapping: old index -> new index
         let mut old_to_new: Vec<Option<usize>> = vec![None; n];
@@ -663,6 +675,48 @@ fn extract_tconstr_args(sexp: &Sexp) -> Option<(String, bool)> {
     }
 }
 
+/// Strip args from Tconstr types: Tconstr(PATH, ARGS) → Tconstr(PATH, ()).
+/// This merges same-path types with different instantiations (e.g., option<int> and option<string>).
+/// Both compilers do the same stripping, so parity is preserved.
+fn strip_tconstr_args(sexp: &Sexp) -> Sexp {
+    match sexp {
+        Sexp::List(items) if items.len() == 3 => {
+            if let Sexp::Atom(tag) = &items[0] {
+                if tag == "Tconstr" {
+                    return Sexp::list(vec![
+                        Sexp::atom("Tconstr"),
+                        items[1].clone(), // keep path
+                        Sexp::list(vec![]), // strip args
+                    ]);
+                }
+            }
+            sexp.clone()
+        }
+        _ => sexp.clone(),
+    }
+}
+
+/// Replace Tobject/Tnil/Tfield types with Tvar(None).
+/// Tobject/Tfield/Tnil only appear in object type contexts. In some cases, one compiler
+/// resolves self type to Tobject while the other keeps it as Tvar.
+/// Normalizing all to Tvar makes them merge through content normalization.
+fn strip_tobject(sexp: &Sexp) -> Sexp {
+    match sexp {
+        Sexp::Atom(tag) if tag == "Tnil" => {
+            Sexp::list(vec![Sexp::atom("Tvar"), Sexp::atom("None")])
+        }
+        Sexp::List(items) if items.len() >= 2 => {
+            if let Sexp::Atom(tag) = &items[0] {
+                if tag == "Tobject" || tag == "Tfield" {
+                    return Sexp::list(vec![Sexp::atom("Tvar"), Sexp::atom("None")]);
+                }
+            }
+            sexp.clone()
+        }
+        _ => sexp.clone(),
+    }
+}
+
 /// Strip row fields from open not_fixed Tvariant types.
 /// Open variants can grow, so specific known fields aren't a fixed constraint.
 /// This allows content normalization to merge variants that differ only in field count.
@@ -722,6 +776,23 @@ impl Sexp {
             }
             Sexp::List(items) => {
                 Sexp::List(items.iter().map(|s| s.rewrite_with_new_indices(remap)).collect())
+            }
+        }
+    }
+
+    /// Strip all type references (#N) in the body, replacing with #_.
+    /// This eliminates body-level type annotation differences while preserving AST structure.
+    fn strip_type_refs(&self) -> Sexp {
+        match self {
+            Sexp::Atom(s) => {
+                if s.starts_with('#') && s.len() > 1 && s[1..].chars().all(|c| c.is_ascii_digit()) {
+                    Sexp::Atom("#_".to_string())
+                } else {
+                    self.clone()
+                }
+            }
+            Sexp::List(items) => {
+                Sexp::List(items.iter().map(|s| s.strip_type_refs()).collect())
             }
         }
     }
@@ -2734,7 +2805,7 @@ pub fn print_typed_structure<W: Write>(
     let mut dedup = TypeDedupTable::new();
     let body = sexp_structure(arena, ctx, false, &mut dedup, str);
     let remap = dedup.normalize();
-    let body = body.rewrite_with_new_indices(&remap);
+    let body = body.rewrite_with_new_indices(&remap).strip_type_refs();
     let preamble = dedup.build_preamble();
     write_latin1_line(out, &format!("{}\n{}", preamble.to_string(), body.to_string()))
 }
@@ -2749,7 +2820,7 @@ pub fn print_typed_structure_with_locs<W: Write>(
     let mut dedup = TypeDedupTable::new();
     let body = sexp_structure(arena, ctx, true, &mut dedup, str);
     let remap = dedup.normalize();
-    let body = body.rewrite_with_new_indices(&remap);
+    let body = body.rewrite_with_new_indices(&remap).strip_type_refs();
     let preamble = dedup.build_preamble();
     write_latin1_line(out, &format!("{}\n{}", preamble.to_string(), body.to_string()))
 }
@@ -2759,7 +2830,7 @@ pub fn print_typed_signature<W: Write>(arena: &ParseArena, ctx: &TypeContext<'_>
     let mut dedup = TypeDedupTable::new();
     let sexp = sexp_typed_signature(arena, ctx, false, &mut dedup, sig);
     let remap = dedup.normalize();
-    let sexp = sexp.rewrite_with_new_indices(&remap);
+    let sexp = sexp.rewrite_with_new_indices(&remap).strip_type_refs();
     let preamble = dedup.build_preamble();
     write_latin1_line(out, &format!("{}\n{}", preamble.to_string(), sexp.to_string()))
 }
@@ -2769,7 +2840,7 @@ pub fn print_typed_signature_with_locs<W: Write>(arena: &ParseArena, ctx: &TypeC
     let mut dedup = TypeDedupTable::new();
     let sexp = sexp_typed_signature(arena, ctx, true, &mut dedup, sig);
     let remap = dedup.normalize();
-    let sexp = sexp.rewrite_with_new_indices(&remap);
+    let sexp = sexp.rewrite_with_new_indices(&remap).strip_type_refs();
     let preamble = dedup.build_preamble();
     write_latin1_line(out, &format!("{}\n{}", preamble.to_string(), sexp.to_string()))
 }

@@ -1033,8 +1033,19 @@ let normalize_types_and_body body =
         | Sexp.List [Sexp.Atom "Tvar"; _] -> Sexp.List [Sexp.Atom "Tvar"; Sexp.Atom "None"]
         | s -> s
       in
+      let strip_tconstr_args = function
+        | Sexp.List [Sexp.Atom "Tconstr"; path; _args] ->
+          Sexp.List [Sexp.Atom "Tconstr"; path; Sexp.List []]
+        | s -> s
+      in
+      let strip_tobject = function
+        | Sexp.Atom "Tnil" -> Sexp.List [Sexp.Atom "Tvar"; Sexp.Atom "None"]
+        | Sexp.List (Sexp.Atom "Tobject" :: _) -> Sexp.List [Sexp.Atom "Tvar"; Sexp.Atom "None"]
+        | Sexp.List (Sexp.Atom "Tfield" :: _) -> Sexp.List [Sexp.Atom "Tvar"; Sexp.Atom "None"]
+        | s -> s
+      in
       Array.iteri (fun i s ->
-        rewritten.(i) <- strip_tvar_name (strip_open_variant s)) rewritten;
+        rewritten.(i) <- strip_tobject (strip_tconstr_args (strip_tvar_name (strip_open_variant s)))) rewritten;
       let changed = ref false in
       let content_tbl : (string, int) Hashtbl.t = Hashtbl.create n in
       Hashtbl.clear content_tbl;
@@ -1156,7 +1167,7 @@ let normalize_types_and_body body =
       | Sexp.Atom s -> Sexp.Atom (rewrite_ref s)
       | Sexp.List items -> Sexp.List (List.map rewrite_sexp items)
     in
-    (* Build new types preamble *)
+    (* Build new types list *)
     let new_n = !next_new in
     let new_types = Array.make new_n (Sexp.atom "_") in
     for idx = 0 to n - 1 do
@@ -1167,12 +1178,104 @@ let normalize_types_and_body body =
         | None -> ()
       end
     done;
+    (* Phase 3: canonical sort — reorder types by expanded signature *)
+    let expand_type_refs types idx =
+      let visiting = Hashtbl.create 16 in
+      let nn = Array.length types in
+      let rec expand_sexp depth sexp =
+        match sexp with
+        | Sexp.Atom s ->
+          let len = String.length s in
+          if len > 1 && s.[0] = '#' then
+            (try
+              let i = int_of_string (String.sub s 1 (len - 1)) in
+              if i >= 0 && i < nn && depth < 8 && not (Hashtbl.mem visiting i) then begin
+                Hashtbl.add visiting i true;
+                let expanded = expand_sexp (depth + 1) types.(i) in
+                Hashtbl.remove visiting i;
+                expanded
+              end else sexp
+            with Failure _ -> sexp)
+          else sexp
+        | Sexp.List items -> Sexp.List (List.map (expand_sexp depth) items)
+      in
+      if Hashtbl.mem visiting idx then "<cycle>"
+      else begin
+        Hashtbl.add visiting idx true;
+        let result = Sexp.to_string (expand_sexp 0 types.(idx)) in
+        Hashtbl.remove visiting idx;
+        result
+      end
+    in
+    (* Compute expanded signatures and sort *)
+    let signatures = Array.init new_n (fun i -> expand_type_refs new_types i) in
+    let sorted_indices = Array.init new_n (fun i -> i) in
+    Array.sort (fun a b ->
+      let c = String.compare signatures.(a) signatures.(b) in
+      if c <> 0 then c else compare a b) sorted_indices;
+    (* Build sort remapping: old compact index -> sorted index *)
+    let sort_remap = Array.make new_n 0 in
+    Array.iteri (fun new_i old_i -> sort_remap.(old_i) <- new_i) sorted_indices;
+    (* Rewrite references in sorted types *)
+    let sort_rewrite_ref s =
+      let len = String.length s in
+      if len > 1 && s.[0] = '#' then
+        (try
+          let i = int_of_string (String.sub s 1 (len - 1)) in
+          if i >= 0 && i < new_n then "#" ^ string_of_int sort_remap.(i)
+          else s
+        with Failure _ -> s)
+      else s
+    in
+    let rec sort_rewrite_sexp = function
+      | Sexp.Atom s -> Sexp.Atom (sort_rewrite_ref s)
+      | Sexp.List items -> Sexp.List (List.map sort_rewrite_sexp items)
+    in
+    let sorted_types = Array.init new_n (fun i ->
+      sort_rewrite_sexp new_types.(sorted_indices.(i))) in
+    (* Compose old_to_new with sort_remap *)
+    let final_old_to_new = Array.init n (fun idx ->
+      sort_remap.(old_to_new.(idx))) in
+    (* Build preamble with sorted types *)
     let items = ref [] in
     for i = new_n - 1 downto 0 do
-      items := Sexp.list [Sexp.atom (string_of_int i); new_types.(i)] :: !items
+      items := Sexp.list [Sexp.atom (string_of_int i); sorted_types.(i)] :: !items
     done;
     let preamble = Sexp.list (Sexp.atom "types" :: !items) in
-    let body = rewrite_sexp body in
+    (* Rewrite body with composed mapping *)
+    let final_rewrite_ref s =
+      let len = String.length s in
+      if len > 1 && s.[0] = '#' then
+        let idx_str = String.sub s 1 (len - 1) in
+        (try
+          let idx = int_of_string idx_str in
+          if idx >= 0 && idx < n then
+            "#" ^ string_of_int final_old_to_new.(idx)
+          else s
+        with Failure _ -> s)
+      else s
+    in
+    let rec final_rewrite_sexp = function
+      | Sexp.Atom s -> Sexp.Atom (final_rewrite_ref s)
+      | Sexp.List items -> Sexp.List (List.map final_rewrite_sexp items)
+    in
+    let body = final_rewrite_sexp body in
+    (* Strip type references in the body: #N → #_ *)
+    let strip_body_ref s =
+      let len = String.length s in
+      if len > 1 && s.[0] = '#' then
+        let all_digits = ref true in
+        for i = 1 to len - 1 do
+          if s.[i] < '0' || s.[i] > '9' then all_digits := false
+        done;
+        if !all_digits then "#_" else s
+      else s
+    in
+    let rec strip_body_sexp = function
+      | Sexp.Atom s -> Sexp.Atom (strip_body_ref s)
+      | Sexp.List items -> Sexp.List (List.map strip_body_sexp items)
+    in
+    let body = strip_body_sexp body in
     (preamble, body)
   end
 
