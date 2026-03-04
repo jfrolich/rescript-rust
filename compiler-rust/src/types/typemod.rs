@@ -5268,8 +5268,10 @@ fn type_structure_item<'a>(
                                         type_path: None,
                                     };
                                     // cstr_args: single Tconstr pointing to the inline record path
+                                    // OCaml's datarepr.ml creates this via newgenconstr (generic_level)
+                                    // so instance_constructor's copy creates fresh nodes each time.
                                     let inline_constr =
-                                        ctx.new_constr(inline_path, inline_params.clone());
+                                        ctx.new_generic_constr(inline_path, inline_params.clone());
                                     (vec![inline_constr], Some(Box::new(inline_decl)))
                                 } else {
                                     (cstr_args, None)
