@@ -5796,16 +5796,22 @@ fn type_match(
         merge_variant_row_fields_into_scrutinee(tctx.type_ctx, &typed_val_cases, ty_arg);
     }
 
-    // Type check exception cases against exn type
-    let mut typed_exn_cases = Vec::new();
-    if !exn_caselist.is_empty() {
+    // Type check exception cases against exn type.
+    // OCaml routes exception cases through type_cases with Predef.type_exn,
+    // which includes the propagation cycle (begin_def/end_def/generalize on
+    // all pattern types). This ensures as-bound variables get generalized types
+    // so instance() creates fresh copies at use sites.
+    let typed_exn_cases = if !exn_caselist.is_empty() {
         let ctx = tctx.type_ctx;
         let exn_ty = crate::types::ctype::instance(ctx, ctx.predef_exn());
-        for case in &exn_caselist {
-            let typed_case = type_case(tctx, env, case, exn_ty, exn_ty, expected_ty)?;
-            typed_exn_cases.push(typed_case);
-        }
-    }
+        let generic_exn_ty = ctx.predef_exn();
+        let exn_case_refs: Vec<&crate::parser::ast::Case> = exn_caselist.iter().collect();
+        type_match_cases_batch_non_gadt(
+            tctx, env, &exn_case_refs, exn_ty, generic_exn_ty, expected_ty,
+        )?
+    } else {
+        Vec::new()
+    };
 
     // Match OCaml typecore/parmatch: pressure_variants closes rows without
     // wildcard coverage, then finalize_variant converts Reither→Rpresent
@@ -7498,15 +7504,17 @@ fn type_try(
     // Type check the body with expected type
     let typed_body = type_expect(tctx, env, body, expected_ty, None)?;
 
-    // Type check each handler
-    // Exception type (exn)
+    // Type check each handler against exn type.
+    // OCaml routes try-catch handlers through type_cases with Predef.type_exn,
+    // which includes the propagation cycle (begin_def/end_def/generalize on
+    // all pattern types). This ensures as-bound variables (e.g. `| exn as e`)
+    // get generalized types so instance() creates fresh copies at use sites.
     let exn_ty = crate::types::ctype::instance(ctx, ctx.predef_exn());
-
-    let mut typed_handlers = Vec::new();
-    for handler in handlers {
-        let typed_case = type_case(tctx, env, handler, exn_ty, exn_ty, expected_ty)?;
-        typed_handlers.push(typed_case);
-    }
+    let generic_exn_ty = ctx.predef_exn();
+    let handler_refs: Vec<&crate::parser::ast::Case> = handlers.iter().collect();
+    let typed_handlers = type_match_cases_batch_non_gadt(
+        tctx, env, &handler_refs, exn_ty, generic_exn_ty, expected_ty,
+    )?;
 
     // Keep sharing: use typed_body.exp_type instead of expected_ty
     // (matches OCaml: exp_type = body.exp_type)
