@@ -4455,6 +4455,14 @@ fn type_structure_item<'a>(
             ctx.end_def();
             crate::types::ctype::generalize(ctx, val_ty);
 
+            // OCaml's transl_value_decl calls parse_arity -> get_arity ->
+            // expand_head AFTER generalize. The expand_head side effect
+            // populates simple_abbrevs with the nullary Tconstr expansion.
+            // When instance() is later called for Pexp_ident, copy() finds
+            // this entry via find_simple_abbrev and returns Tlink to the
+            // original instead of a fresh copy — creating node sharing.
+            crate::types::ctype::expand_head(ctx, env, val_ty);
+
             // PPX has already encoded the FFI attributes into pval_prim,
             // so just resolve StrIdx -> String for the typed tree
             let val_prim: Vec<String> = vd
