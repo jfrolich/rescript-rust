@@ -5322,24 +5322,20 @@ fn type_application(
     // OCaml update_uncurried_arity: preserve remaining uncurried arity on
     // partially applied results.
     // OCaml uses `{new_t with desc = Tarrow(arg, ret, c, Some newarity)}` which
-    // creates a new record sharing the same `id` as the original. The sexp serializer
-    // uses type_expr.id as dedup key, so the arity-updated node "shadows" the original.
-    // In Rust, we achieve the same effect by modifying the existing node's desc in place.
+    // creates a new record sharing the same `id` as the original. In Rust we
+    // create a separate new arrow and record an arity alias so the sexp
+    // serializer deduplicates them (matching OCaml's id-based dedup).
     if let Some(arity) = function_arity {
         let applied_args = args.len() as i32 + consumed_optional_count as i32;
         let remaining_arity = arity - applied_args;
         if remaining_arity > 0 {
             let result_repr = ctx.repr(result_ty);
-            let desc = ctx.get_desc(result_repr);
-            if let TypeDesc::Tarrow { arg, ret, commutable, .. } = &*desc {
-                let new_desc = TypeDesc::Tarrow {
-                    arg: arg.clone(),
-                    ret: *ret,
-                    commutable: commutable.clone(),
-                    arity: Some(remaining_arity),
-                };
-                drop(desc);
-                ctx.set_desc(result_repr, new_desc);
+            if let TypeDesc::Tarrow { arg, ret, .. } = &*ctx.get_desc(result_repr) {
+                let new_arrow = ctx.new_arrow(arg.lbl.clone(), arg.typ, *ret, Some(remaining_arity));
+                // Record alias: new_arrow is the arity-updated version of result_repr.
+                // Sexp serializer will use result_repr's dedup key for both.
+                ctx.set_arity_alias(new_arrow, result_repr);
+                result_ty = new_arrow;
             }
         }
     }

@@ -160,6 +160,13 @@ pub struct TypeContext<'a> {
     predef_unit: Cell<Option<TypeExprRef>>,
     predef_exn: Cell<Option<TypeExprRef>>,
     predef_bigint: Cell<Option<TypeExprRef>>,
+
+    /// Arity update aliases: maps arity-updated TypeExprRef → original TypeExprRef.
+    /// OCaml's `{t with desc = Tarrow(..., Some newarity)}` creates a new record
+    /// sharing `t.id`, so the sexp serializer deduplicates them. In Rust, we create
+    /// separate TypeExprRef nodes but record the alias here so the sexp serializer
+    /// can use the original's dedup key.
+    arity_aliases: RefCell<std::collections::HashMap<TypeExprRef, TypeExprRef>>,
 }
 
 impl<'a> TypeContext<'a> {
@@ -215,6 +222,7 @@ impl<'a> TypeContext<'a> {
             predef_unit: Cell::new(None),
             predef_exn: Cell::new(None),
             predef_bigint: Cell::new(None),
+            arity_aliases: RefCell::new(std::collections::HashMap::new()),
         }
     }
 
@@ -514,6 +522,21 @@ impl<'a> TypeContext<'a> {
     /// Set the descriptor of a type.
     pub fn set_desc(&self, r: TypeExprRef, desc: TypeDesc) {
         self.with_type(r, |ty| ty.set_desc(desc));
+    }
+
+    // ========================================================================
+    // Arity Aliases (sexp dedup for update_uncurried_arity)
+    // ========================================================================
+
+    /// Record that `new_ref` is an arity-updated version of `original_ref`.
+    /// The sexp serializer will use `original_ref` as the dedup key for both.
+    pub fn set_arity_alias(&self, new_ref: TypeExprRef, original_ref: TypeExprRef) {
+        self.arity_aliases.borrow_mut().insert(new_ref, original_ref);
+    }
+
+    /// Get the arity alias for a TypeExprRef, if any.
+    pub fn get_arity_alias(&self, te: TypeExprRef) -> Option<TypeExprRef> {
+        self.arity_aliases.borrow().get(&te).copied()
     }
 
     // ========================================================================

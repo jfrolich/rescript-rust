@@ -685,14 +685,26 @@ fn sexp_type_expr(
 ) -> Sexp {
     let te = ctx.repr(te); // Follow Tlink chains
 
-    // Physical identity dedup
-    if let Some(&idx) = dedup.map.get(&te) {
+    // Arity alias dedup: OCaml's update_uncurried_arity creates {t with desc=...}
+    // sharing the same type_expr.id. We match this by resolving arity aliases
+    // to the original's dedup key.
+    let dedup_key = ctx.get_arity_alias(te).map(|orig| ctx.repr(orig)).unwrap_or(te);
+
+    // Physical identity dedup (using alias-resolved key)
+    if let Some(&idx) = dedup.map.get(&dedup_key) {
+        // Also register te directly so future direct references dedup too
+        if dedup_key != te {
+            dedup.map.insert(te, idx);
+        }
         return Sexp::atom(&format!("#{idx}"));
     }
 
     // Reserve slot before recursion (handles cycles automatically)
     let idx = dedup.types.len();
-    dedup.map.insert(te, idx);
+    dedup.map.insert(dedup_key, idx);
+    if dedup_key != te {
+        dedup.map.insert(te, idx);
+    }
     dedup.types.push(Sexp::atom("_")); // placeholder
 
     // Serialize the type body
