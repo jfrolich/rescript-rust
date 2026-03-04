@@ -1976,6 +1976,11 @@ fn sexp_label_declaration(
     ];
     items.extend(loc_sexp);
     items.push(sexp_mutable_flag(&ld.ld_mutable));
+    items.push(Sexp::atom(if ld.ld_optional {
+        "optional"
+    } else {
+        "required"
+    }));
     items.push(sexp_core_type(arena, ctx, with_locs, dedup, &ld.ld_type));
     items.push(sexp_attributes(arena, with_locs, &ld.ld_attributes));
     Sexp::list(items)
