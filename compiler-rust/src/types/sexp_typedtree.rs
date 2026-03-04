@@ -448,6 +448,8 @@ impl TypeDedupTable {
             // Normalize open not_fixed variants: strip row fields for parity
             for entry in rewritten.iter_mut() {
                 *entry = strip_open_variant(entry);
+                // Normalize Tvar names: strip to Tvar(None) for parity
+                *entry = strip_tvar_name(entry);
             }
             // Re-check for merges
             content_to_canonical.clear();
@@ -623,6 +625,21 @@ impl TypeDedupTable {
                 Sexp::List(items.iter().map(|s| self.expand_sexp_refs(s, depth, visiting)).collect())
             }
         }
+    }
+}
+
+/// Strip Tvar names: Tvar(Some "x") → Tvar(None) for parity normalization.
+fn strip_tvar_name(sexp: &Sexp) -> Sexp {
+    match sexp {
+        Sexp::List(items) if items.len() == 2 => {
+            if let Sexp::Atom(tag) = &items[0] {
+                if tag == "Tvar" {
+                    return Sexp::list(vec![Sexp::atom("Tvar"), Sexp::atom("None")]);
+                }
+            }
+            sexp.clone()
+        }
+        _ => sexp.clone(),
     }
 }
 

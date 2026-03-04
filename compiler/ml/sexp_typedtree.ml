@@ -1029,7 +1029,12 @@ let normalize_types_and_body body =
           Sexp.List [Sexp.Atom "Tvariant"; Sexp.List []; Sexp.Atom "open"; Sexp.Atom "not_fixed"]
         | s -> s
       in
-      Array.iteri (fun i s -> rewritten.(i) <- strip_open_variant s) rewritten;
+      let strip_tvar_name = function
+        | Sexp.List [Sexp.Atom "Tvar"; _] -> Sexp.List [Sexp.Atom "Tvar"; Sexp.Atom "None"]
+        | s -> s
+      in
+      Array.iteri (fun i s ->
+        rewritten.(i) <- strip_tvar_name (strip_open_variant s)) rewritten;
       let changed = ref false in
       let content_tbl : (string, int) Hashtbl.t = Hashtbl.create n in
       Hashtbl.clear content_tbl;
