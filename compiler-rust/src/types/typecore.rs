@@ -2272,11 +2272,20 @@ fn type_pattern_inner(
             let typed_inner =
                 type_pattern_inner(tctx, env, inner_pat, expected_ty, mode, state, 0)?;
 
-            // Build the as-type
+            // Build the as-type.
+            // OCaml wraps in begin_def/end_def/generalize (typecore.ml:1288-1295).
+            // For non-private constructors, build_as_type creates fresh types at
+            // the elevated level, which then get generalized. For private constructors,
+            // build_as_type returns pat.pat_type which is at the caller's level —
+            // the actual generalization comes from type_cases' propagation cycle.
+            let ctx = tctx.type_ctx;
+            ctx.begin_def();
             let ty_var = match override_type_from_variant_spread {
                 Some(ty) => ty,
                 None => build_as_type(tctx, env, &typed_inner)?,
             };
+            ctx.end_def();
+            crate::types::ctype::generalize(ctx, ty_var);
 
             // Enter the variable with the as-type
             let id = state.enter_variable(loc, name, ty_var, true, false, tctx.arena)?;
@@ -4734,18 +4743,12 @@ fn translate_unified_ops(
             if let Err(e) = unify_expression_types(tctx, loc, lhs.exp_type, lhs_concrete, None) {
                 return Some(Err(e));
             }
-            // Re-type RHS with a fresh concrete type (matching OCaml which calls type_expect)
+            // Unify RHS with a fresh concrete type (instead of re-typing which creates
+            // duplicate type nodes that don't share with the first typing's nodes)
             let rhs_concrete = make_concrete();
-            let rhs = match type_expect(
-                tctx,
-                env,
-                tctx.arena.get_expr(args[1].1),
-                rhs_concrete,
-                None,
-            ) {
-                Ok(e) => e,
-                Err(e) => return Some(Err(e)),
-            };
+            if let Err(e) = unify_expression_types(tctx, loc, rhs.exp_type, rhs_concrete, None) {
+                return Some(Err(e));
+            }
 
             // Result type is a fresh concrete type
             let result_ty = make_concrete();
