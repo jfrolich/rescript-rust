@@ -2431,10 +2431,11 @@ fn unify_rows<'a>(
         None
     };
 
-    // Build merged fields in sorted order (matching OCaml's merge_row_fields sort).
-    // OCaml's unify_row links row_more to variants with the other side's fields,
-    // and row_repr flattens the chain. The effective result is all fields sorted.
-    // We must also select the right field version for pairs.
+    // Build merged fields preserving row2's original field order, then appending
+    // row1's surplus. This matches OCaml's unify_row behavior:
+    // - unify(body_type, expected_type) → row1=body(new), row2=accumulated
+    // - OCaml's set_more row2 r1 appends r1 to row2's chain
+    // - row_repr produces: row2's accumulated fields (definition order), then r1
     let prefer_field = |f1: &RowField, f2: &RowField| -> RowField {
         match (f1, f2) {
             (RowField::Rpresent(_), _) => f1.clone(),
@@ -2445,19 +2446,33 @@ fn unify_rows<'a>(
         }
     };
 
-    let mut merged_fields: Vec<(String, RowField)> = Vec::new();
-    // Collect all fields: pairs (with preferred field), r1-only, r2-only
-    for (l, f1, f2) in &pairs {
-        merged_fields.push((l.clone(), prefer_field(f1, f2)));
-    }
-    merged_fields.extend(r1.into_iter());
-    merged_fields.extend(r2.into_iter());
-    // Sort the final result alphabetically (matching OCaml's sort+chain behavior)
-    merged_fields.sort_by(|(a, _), (b, _)| a.cmp(b));
+    // Build a lookup of paired fields (label → (f1, f2))
+    let pair_map: HashMap<&str, (&RowField, &RowField)> = pairs.iter()
+        .map(|(l, f1, f2)| (l.as_str(), (f1, f2)))
+        .collect();
 
-    // Deduplicate (keep first occurrence)
+    // Walk row2's fields in their original order (accumulated/expected side),
+    // resolving pairs in-place
+    let mut merged_fields: Vec<(String, RowField)> = Vec::new();
     let mut seen = HashSet::new();
-    merged_fields.retain(|(label, _)| seen.insert(label.clone()));
+    for (l, f2) in &row2.row_fields {
+        if seen.insert(l.clone()) {
+            if let Some((pf1, pf2)) = pair_map.get(l.as_str()) {
+                merged_fields.push((l.clone(), prefer_field(pf1, pf2)));
+            } else {
+                merged_fields.push((l.clone(), f2.clone()));
+            }
+        }
+    }
+
+    // Append surplus from row1 in their original order (matching OCaml's
+    // set_more row2 r1 which appends r1 fields to row2's chain)
+    let row1_surplus: HashSet<&str> = r1.iter().map(|(l, _)| l.as_str()).collect();
+    for (l, f) in &row1.row_fields {
+        if row1_surplus.contains(l.as_str()) && seen.insert(l.clone()) {
+            merged_fields.push((l.clone(), f.clone()));
+        }
+    }
 
     Ok(RowDesc {
         row_fields: merged_fields,
