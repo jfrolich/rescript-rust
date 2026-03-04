@@ -8636,10 +8636,17 @@ fn type_record(
                 );
                 let mut synthesized_desc = label_desc;
                 synthesized_desc.lbl_optional = false;
+                // OCaml uses {loc; txt = Lident lbl.lbl_name} for synthesized optional fields
+                let label_lid_idx = find_existing_lident_idx(tctx.arena, &label_name)
+                    .unwrap_or_else(|| {
+                        let arena_ptr = tctx.arena as *const ParseArena as *mut ParseArena;
+                        unsafe { (*arena_ptr).push_lident(&label_name) }
+                    });
+                let label_lid = Located { txt: label_lid_idx, loc };
                 typed_fields.push((
-                    placeholder_lid.clone(),
+                    label_lid.clone(),
                     synthesized_desc,
-                    RecordLabelDefinition::Overridden(placeholder_lid.clone(), none_expr),
+                    RecordLabelDefinition::Overridden(label_lid, none_expr),
                     false,
                 ));
             } else {
