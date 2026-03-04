@@ -4866,6 +4866,9 @@ fn type_application(
             expected_ty: TypeExprRef,
             unify_ty: TypeExprRef,
             enforce_optional: bool,
+            /// OCaml's type_unknown_args only calls type_expect, with no
+            /// subsequent unify_exp. Skip the post-typing unify for this path.
+            skip_post_unify: bool,
         },
         SynthOptionalNone {
             label: crate::types::ArgLabel,
@@ -5080,6 +5083,7 @@ fn type_application(
                     expected_ty: effective_arg_ty,
                     unify_ty: effective_arg_ty0,
                     enforce_optional: fn_label.is_optional() && !call_is_optional,
+                    skip_post_unify: false,
                 });
                 current_ty = ret_ty;
                 current_ty0 = ret_ty0;
@@ -5143,6 +5147,7 @@ fn type_application(
             expected_ty: arg_ty,
             unify_ty: arg_ty,
             enforce_optional: label.is_optional(),
+            skip_post_unify: true,
         });
         current_ty = ret_ty;
         current_ty0 = ret_ty;
@@ -5227,6 +5232,7 @@ fn type_application(
                 expected_ty,
                 unify_ty,
                 enforce_optional,
+                skip_post_unify,
             } => {
                 let arg_expected_ty = expected_ty;
                 let force_fresh_local_float =
@@ -5252,13 +5258,18 @@ fn type_application(
                 tctx.force_fresh_local_float = previous_force_fresh_local_float;
 
                 let typed_arg = typed_arg_result?;
-                unify_expression_types(
-                    tctx,
-                    typed_arg.exp_loc,
-                    typed_arg.exp_type,
-                    unify_ty,
-                    Some(TypeClashContext::FunctionCall),
-                )?;
+                // OCaml's type_unknown_args only calls type_expect (no
+                // subsequent unify_exp). Skip the post-unify for that path
+                // to preserve separate physical nodes in the typed tree.
+                if !skip_post_unify {
+                    unify_expression_types(
+                        tctx,
+                        typed_arg.exp_loc,
+                        typed_arg.exp_type,
+                        unify_ty,
+                        Some(TypeClashContext::FunctionCall),
+                    )?;
+                }
                 let typed_arg = if enforce_optional {
                     let wrapped_loc = typed_arg.exp_loc;
                     let wrapped_env = typed_arg.exp_env;
