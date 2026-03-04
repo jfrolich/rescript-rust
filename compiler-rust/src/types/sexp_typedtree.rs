@@ -420,6 +420,130 @@ impl TypeDedupTable {
         }
         Sexp::list(items)
     }
+
+    /// Content-based normalization: merge type entries with identical sexp bodies.
+    /// Returns a remapping from old indices to new indices, and builds a normalized
+    /// types list. This eliminates sharing differences between OCaml and Rust.
+    fn normalize(&mut self) -> Vec<Option<usize>> {
+        let n = self.types.len();
+        // Phase 1: find content-equivalent entries and map to canonical index
+        let mut content_to_canonical: HashMap<String, usize> = HashMap::new();
+        let mut old_to_canonical: Vec<usize> = (0..n).collect(); // identity initially
+
+        for idx in 0..n {
+            let content = self.types[idx].to_string();
+            if let Some(&canonical) = content_to_canonical.get(&content) {
+                old_to_canonical[idx] = canonical;
+            } else {
+                content_to_canonical.insert(content, idx);
+            }
+        }
+
+        // Phase 2: iterative convergence — rewrite refs in type bodies, re-check for merges
+        // This handles cases like Tarrow(#5, #6) == Tarrow(#8, #9) when #5==#8 and #6==#9
+        for _iteration in 0..20 {
+            let mut changed = false;
+            // Rewrite all type entries using current remapping
+            let mut rewritten: Vec<Sexp> = self.types.iter().map(|s| rewrite_refs(s, &old_to_canonical)).collect();
+            // Re-check for merges
+            content_to_canonical.clear();
+            for idx in 0..n {
+                // Only process canonical entries
+                if old_to_canonical[idx] != idx {
+                    continue;
+                }
+                let content = rewritten[idx].to_string();
+                if let Some(&canonical) = content_to_canonical.get(&content) {
+                    // Merge: all entries pointing to idx now point to canonical
+                    for j in 0..n {
+                        if old_to_canonical[j] == idx {
+                            old_to_canonical[j] = canonical;
+                            changed = true;
+                        }
+                    }
+                } else {
+                    content_to_canonical.insert(content, idx);
+                }
+            }
+            if !changed {
+                // Apply final rewriting to types
+                self.types = rewritten;
+                break;
+            }
+            // Update types for next iteration
+            self.types = rewritten;
+        }
+
+        // Phase 3: build compacted index mapping (remove gaps)
+        let mut canonical_to_new: HashMap<usize, usize> = HashMap::new();
+        let mut next_new = 0;
+        for idx in 0..n {
+            let canonical = old_to_canonical[idx];
+            if !canonical_to_new.contains_key(&canonical) {
+                canonical_to_new.insert(canonical, next_new);
+                next_new += 1;
+            }
+        }
+
+        // Build final old_to_new mapping
+        let old_to_new: Vec<Option<usize>> = (0..n)
+            .map(|idx| canonical_to_new.get(&old_to_canonical[idx]).copied())
+            .collect();
+
+        // Build new types list (only canonical entries)
+        let mut new_types = vec![Sexp::atom("_"); next_new];
+        for idx in 0..n {
+            let canonical = old_to_canonical[idx];
+            if canonical == idx {
+                if let Some(&new_idx) = canonical_to_new.get(&canonical) {
+                    new_types[new_idx] = rewrite_refs(&self.types[idx], &old_to_canonical)
+                        .rewrite_with_new_indices(&old_to_new);
+                }
+            }
+        }
+        self.types = new_types;
+        old_to_new
+    }
+}
+
+/// Rewrite #N references in a Sexp using old_to_canonical mapping
+fn rewrite_refs(sexp: &Sexp, remap: &[usize]) -> Sexp {
+    match sexp {
+        Sexp::Atom(s) => {
+            if let Some(rest) = s.strip_prefix('#') {
+                if let Ok(idx) = rest.parse::<usize>() {
+                    if idx < remap.len() {
+                        return Sexp::Atom(format!("#{}", remap[idx]));
+                    }
+                }
+            }
+            sexp.clone()
+        }
+        Sexp::List(items) => Sexp::List(items.iter().map(|s| rewrite_refs(s, remap)).collect()),
+    }
+}
+
+impl Sexp {
+    /// Rewrite #N references using old_to_new mapping (with Option for compaction)
+    fn rewrite_with_new_indices(&self, remap: &[Option<usize>]) -> Sexp {
+        match self {
+            Sexp::Atom(s) => {
+                if let Some(rest) = s.strip_prefix('#') {
+                    if let Ok(idx) = rest.parse::<usize>() {
+                        if idx < remap.len() {
+                            if let Some(new_idx) = remap[idx] {
+                                return Sexp::Atom(format!("#{}", new_idx));
+                            }
+                        }
+                    }
+                }
+                self.clone()
+            }
+            Sexp::List(items) => {
+                Sexp::List(items.iter().map(|s| s.rewrite_with_new_indices(remap)).collect())
+            }
+        }
+    }
 }
 
 fn sexp_type_expr(
@@ -2428,6 +2552,8 @@ pub fn print_typed_structure<W: Write>(
 ) -> std::io::Result<()> {
     let mut dedup = TypeDedupTable::new();
     let body = sexp_structure(arena, ctx, false, &mut dedup, str);
+    let remap = dedup.normalize();
+    let body = body.rewrite_with_new_indices(&remap);
     let preamble = dedup.build_preamble();
     write_latin1_line(out, &format!("{}\n{}", preamble.to_string(), body.to_string()))
 }
@@ -2441,6 +2567,8 @@ pub fn print_typed_structure_with_locs<W: Write>(
 ) -> std::io::Result<()> {
     let mut dedup = TypeDedupTable::new();
     let body = sexp_structure(arena, ctx, true, &mut dedup, str);
+    let remap = dedup.normalize();
+    let body = body.rewrite_with_new_indices(&remap);
     let preamble = dedup.build_preamble();
     write_latin1_line(out, &format!("{}\n{}", preamble.to_string(), body.to_string()))
 }
@@ -2449,6 +2577,8 @@ pub fn print_typed_structure_with_locs<W: Write>(
 pub fn print_typed_signature<W: Write>(arena: &ParseArena, ctx: &TypeContext<'_>, sig: &crate::types::typedtree::TypedSignature, out: &mut W) -> std::io::Result<()> {
     let mut dedup = TypeDedupTable::new();
     let sexp = sexp_typed_signature(arena, ctx, false, &mut dedup, sig);
+    let remap = dedup.normalize();
+    let sexp = sexp.rewrite_with_new_indices(&remap);
     let preamble = dedup.build_preamble();
     write_latin1_line(out, &format!("{}\n{}", preamble.to_string(), sexp.to_string()))
 }
@@ -2457,6 +2587,8 @@ pub fn print_typed_signature<W: Write>(arena: &ParseArena, ctx: &TypeContext<'_>
 pub fn print_typed_signature_with_locs<W: Write>(arena: &ParseArena, ctx: &TypeContext<'_>, sig: &crate::types::typedtree::TypedSignature, out: &mut W) -> std::io::Result<()> {
     let mut dedup = TypeDedupTable::new();
     let sexp = sexp_typed_signature(arena, ctx, true, &mut dedup, sig);
+    let remap = dedup.normalize();
+    let sexp = sexp.rewrite_with_new_indices(&remap);
     let preamble = dedup.build_preamble();
     write_latin1_line(out, &format!("{}\n{}", preamble.to_string(), sexp.to_string()))
 }
