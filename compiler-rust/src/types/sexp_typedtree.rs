@@ -478,6 +478,53 @@ impl TypeDedupTable {
             self.types = rewritten;
         }
 
+        // Phase 2b: merge Tconstr types that differ only in path (alias normalization).
+        // If two Tconstr have identical args but different paths (Pident vs Pdot),
+        // merge them to the simpler (Pident) form. This handles type aliases like
+        // Belt.List.t = list where unification link direction causes different paths.
+        {
+            let mut changed = true;
+            while changed {
+                changed = false;
+                // Build map: args_string -> (canonical_idx, is_pident)
+                let mut args_map: HashMap<String, (usize, bool)> = HashMap::new();
+                for idx in 0..n {
+                    if old_to_canonical[idx] != idx {
+                        continue; // skip non-canonical
+                    }
+                    if let Some((args_str, is_pident)) = extract_tconstr_args(&self.types[idx]) {
+                        match args_map.get(&args_str) {
+                            Some(&(existing_idx, existing_is_pident)) => {
+                                // Merge: prefer Pident over Pdot
+                                let (keep, merge) = if is_pident && !existing_is_pident {
+                                    (idx, existing_idx)
+                                } else if !is_pident && existing_is_pident {
+                                    (existing_idx, idx)
+                                } else {
+                                    continue; // both same path type, skip
+                                };
+                                // Merge: all entries pointing to `merge` now point to `keep`
+                                for j in 0..n {
+                                    if old_to_canonical[j] == merge {
+                                        old_to_canonical[j] = keep;
+                                        changed = true;
+                                    }
+                                }
+                                args_map.insert(args_str, (keep, true));
+                            }
+                            None => {
+                                args_map.insert(args_str, (idx, is_pident));
+                            }
+                        }
+                    }
+                }
+                if changed {
+                    // Rewrite types with updated canonicals
+                    self.types = self.types.iter().map(|s| rewrite_refs(s, &old_to_canonical)).collect();
+                }
+            }
+        }
+
         // Phase 3: build compacted index mapping (remove gaps)
         let mut canonical_to_new: HashMap<usize, usize> = HashMap::new();
         let mut next_new = 0;
@@ -576,6 +623,26 @@ impl TypeDedupTable {
                 Sexp::List(items.iter().map(|s| self.expand_sexp_refs(s, depth, visiting)).collect())
             }
         }
+    }
+}
+
+/// Extract args string and is_pident flag from a Tconstr sexp.
+/// Returns (args_string, is_pident) if the sexp is Tconstr, None otherwise.
+fn extract_tconstr_args(sexp: &Sexp) -> Option<(String, bool)> {
+    match sexp {
+        Sexp::List(items) if items.len() == 3 => {
+            if let Sexp::Atom(tag) = &items[0] {
+                if tag == "Tconstr" {
+                    let is_pident = matches!(&items[1],
+                        Sexp::List(path_items) if path_items.len() == 2 &&
+                            matches!(&path_items[0], Sexp::Atom(s) if s == "Pident"));
+                    let args_str = items[2].to_string();
+                    return Some((args_str, is_pident));
+                }
+            }
+            None
+        }
+        _ => None,
     }
 }
 

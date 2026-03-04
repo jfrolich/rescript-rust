@@ -1057,7 +1057,69 @@ let normalize_types_and_body body =
     for _ = 0 to 19 do
       if converge () then () (* continue *)
     done;
-    (* Phase 2: compact indices *)
+    (* Phase 2b: merge Tconstr types that differ only in path (alias normalization).
+       If two Tconstr have identical args but different paths (Pident vs Pdot),
+       merge to the simpler (Pident) form. Handles Belt.List.t = list etc. *)
+    let extract_tconstr_args sexp =
+      match sexp with
+      | Sexp.List [Sexp.Atom "Tconstr"; path; args] ->
+        let is_pident = match path with
+          | Sexp.List [Sexp.Atom "Pident"; _] -> true
+          | _ -> false
+        in
+        Some (Sexp.to_string args, is_pident)
+      | _ -> None
+    in
+    let merge_changed = ref true in
+    while !merge_changed do
+      merge_changed := false;
+      let args_tbl : (string, int * bool) Hashtbl.t = Hashtbl.create 64 in
+      for idx = 0 to n - 1 do
+        if old_to_canonical.(idx) = idx then begin
+          match extract_tconstr_args arr.(idx) with
+          | Some (args_str, is_pident) ->
+            (match Hashtbl.find_opt args_tbl args_str with
+            | Some (existing_idx, existing_is_pident) ->
+              let keep, merge_idx =
+                if is_pident && not existing_is_pident then (idx, existing_idx)
+                else if not is_pident && existing_is_pident then (existing_idx, idx)
+                else (-1, -1)
+              in
+              if keep >= 0 then begin
+                for j = 0 to n - 1 do
+                  if old_to_canonical.(j) = merge_idx then begin
+                    old_to_canonical.(j) <- keep;
+                    merge_changed := true
+                  end
+                done;
+                Hashtbl.replace args_tbl args_str (keep, true)
+              end
+            | None ->
+              Hashtbl.add args_tbl args_str (idx, is_pident))
+          | None -> ()
+        end
+      done;
+      if !merge_changed then begin
+        let rw s =
+          let len = String.length s in
+          if len > 1 && s.[0] = '#' then
+            (try
+              let i = int_of_string (String.sub s 1 (len - 1)) in
+              if i >= 0 && i < n then "#" ^ string_of_int old_to_canonical.(i)
+              else s
+            with Failure _ -> s)
+          else s
+        in
+        let rec rw_sexp = function
+          | Sexp.Atom s -> Sexp.Atom (rw s)
+          | Sexp.List items -> Sexp.List (List.map rw_sexp items)
+        in
+        for i = 0 to n - 1 do
+          arr.(i) <- rw_sexp arr.(i)
+        done
+      end
+    done;
+    (* Phase 2c: compact indices *)
     let canonical_to_new = Hashtbl.create n in
     let next_new = ref 0 in
     for idx = 0 to n - 1 do
