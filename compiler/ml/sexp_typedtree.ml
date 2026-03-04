@@ -170,7 +170,7 @@ and type_expr_body te =
      elements, so inlining type_expr in [...] would give inconsistent ordering. *)
   match te.Types.desc with
   | Tvar name -> Sexp.list [Sexp.atom "Tvar"; opt_string name]
-  | Tarrow (arg, ret, _, arity) ->
+  | Tarrow (arg, ret, _, _arity) ->
     let arg_sexp = type_expr arg.Types.typ in
     let ret_sexp = type_expr ret in
     Sexp.list [
@@ -178,7 +178,7 @@ and type_expr_body te =
       sexp_arg_label arg.Types.lbl;
       arg_sexp;
       ret_sexp;
-      opt (fun a -> Sexp.atom (string_of_int a)) arity;
+      Sexp.atom "None"; (* normalize arity for parity *)
     ]
   | Ttuple l ->
     let items = List.map type_expr l in

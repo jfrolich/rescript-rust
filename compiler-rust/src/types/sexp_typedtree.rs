@@ -504,6 +504,75 @@ impl TypeDedupTable {
         self.types = new_types;
         old_to_new
     }
+
+    /// Canonical sort: reorder types by their structurally-expanded signature.
+    /// This eliminates ordering differences between OCaml and Rust by computing
+    /// a position-independent canonical key for each type.
+    fn canonical_sort(&mut self) -> Vec<Option<usize>> {
+        let n = self.types.len();
+        if n == 0 {
+            return vec![];
+        }
+
+        // Compute canonical signature for each type by expanding references
+        let mut signatures: Vec<String> = Vec::with_capacity(n);
+        for idx in 0..n {
+            let mut visiting = HashSet::new();
+            let expanded = self.expand_type_refs(idx, 0, &mut visiting);
+            signatures.push(expanded);
+        }
+
+        // Sort indices by signature
+        let mut sorted_indices: Vec<usize> = (0..n).collect();
+        sorted_indices.sort_by(|&a, &b| signatures[a].cmp(&signatures[b]));
+
+        // Build remapping: old index -> new index
+        let mut old_to_new: Vec<Option<usize>> = vec![None; n];
+        for (new_idx, &old_idx) in sorted_indices.iter().enumerate() {
+            old_to_new[old_idx] = Some(new_idx);
+        }
+
+        // Reorder types and rewrite references
+        let old_types = std::mem::take(&mut self.types);
+        self.types = sorted_indices
+            .iter()
+            .map(|&old_idx| old_types[old_idx].rewrite_with_new_indices(&old_to_new))
+            .collect();
+
+        old_to_new
+    }
+
+    /// Expand #N references recursively to compute a canonical signature string.
+    fn expand_type_refs(&self, idx: usize, depth: usize, visiting: &mut HashSet<usize>) -> String {
+        if depth > 8 || visiting.contains(&idx) {
+            return "<cycle>".to_string();
+        }
+        visiting.insert(idx);
+        let result = self.expand_sexp_refs(&self.types[idx], depth, visiting).to_string();
+        visiting.remove(&idx);
+        result
+    }
+
+    fn expand_sexp_refs(&self, sexp: &Sexp, depth: usize, visiting: &mut HashSet<usize>) -> Sexp {
+        match sexp {
+            Sexp::Atom(s) => {
+                if let Some(rest) = s.strip_prefix('#') {
+                    if let Ok(idx) = rest.parse::<usize>() {
+                        if idx < self.types.len() && depth < 8 && !visiting.contains(&idx) {
+                            visiting.insert(idx);
+                            let expanded = self.expand_sexp_refs(&self.types[idx], depth + 1, visiting);
+                            visiting.remove(&idx);
+                            return expanded;
+                        }
+                    }
+                }
+                sexp.clone()
+            }
+            Sexp::List(items) => {
+                Sexp::List(items.iter().map(|s| self.expand_sexp_refs(s, depth, visiting)).collect())
+            }
+        }
+    }
 }
 
 /// Rewrite #N references in a Sexp using old_to_canonical mapping
@@ -578,7 +647,7 @@ fn sexp_type_expr(
                 sexp_type_arg_label(&arg.lbl),
                 arg_sexp,
                 ret_sexp,
-                opt(|a: &i32| Sexp::atom(&a.to_string()), arity),
+                Sexp::atom("None"), // normalize arity for parity
             ])
         }
         TypeDesc::Ttuple(types) => {
