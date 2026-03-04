@@ -578,6 +578,17 @@ impl<'a> TypeContext<'a> {
         self.nullary_expansion_cache.borrow_mut().clear();
     }
 
+    /// Save current simple_abbrevs state (for temporary isolation).
+    pub fn save_simple_abbrevs(&self) -> (std::collections::HashMap<Path, TypeExprRef>, std::collections::HashMap<Path, TypeDesc>) {
+        (self.simple_abbrevs.borrow().clone(), self.nullary_expansion_cache.borrow().clone())
+    }
+
+    /// Restore saved simple_abbrevs state.
+    pub fn restore_simple_abbrevs(&self, saved: (std::collections::HashMap<Path, TypeExprRef>, std::collections::HashMap<Path, TypeDesc>)) {
+        *self.simple_abbrevs.borrow_mut() = saved.0;
+        *self.nullary_expansion_cache.borrow_mut() = saved.1;
+    }
+
     /// Check if a path has a "safe" expansion (Ttuple or Tconstr, not Tvariant).
     /// This persists across generalize (only cleared on env change), enabling
     /// per-copy sharing in copy_type_cached for known simple alias types.

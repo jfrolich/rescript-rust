@@ -9125,15 +9125,15 @@ fn type_constraint(
 
     // OCaml evaluates tuple elements right-to-left, so both instance() calls
     // in `(type_argument env sarg ty (instance env ty), instance env ty)` happen
-    // BEFORE type_argument runs. type_argument (and its inner type_application →
-    // lower_args → expand_head) populates simple_abbrevs with expansion memos.
-    // In Rust, instance calls are sequential, so the result_ty instance would
-    // see stale simple_abbrevs entries from type_expect above, creating false
-    // sharing between the constraint result and the application return type.
-    // Clear simple_abbrevs to match OCaml's evaluation-order semantics.
+    // BEFORE type_argument runs. type_argument populates simple_abbrevs with
+    // expansion memos. In Rust, the result_ty instance runs AFTER type_expect,
+    // so it would see those memos and create false sharing. Save/restore
+    // simple_abbrevs around the instance call: result_ty sees pre-type_expect
+    // state, but memos from type_expect persist after type_constraint returns.
+    let saved_abbrevs = ctx.save_simple_abbrevs();
     ctx.clear_simple_abbrevs();
-
     let result_ty = crate::types::instance(ctx, ctype_ty);
+    ctx.restore_simple_abbrevs(saved_abbrevs);
     unify_expression_types(tctx, loc, result_ty, expected_ty, None)?;
 
     let mut result = typed_inner;
