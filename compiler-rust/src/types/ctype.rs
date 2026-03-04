@@ -5457,9 +5457,16 @@ fn normalize_type_rec(ctx: &TypeContext<'_>, visited: &mut HashSet<TypeExprRef>,
     }
     visited.insert(ty);
 
-    // Normalize Tvariant (sort row fields alphabetically, resolve reprs, filter Rabsent)
+    // Normalize Tvariant (resolve row field reprs, filter Rabsent, sort alphabetically)
     // and Tobject (sort field chains alphabetically via flatten_fields/build_fields).
     // Matches OCaml's normalize_type_rec in ctype.ml lines 4144-4217.
+    //
+    // NOTE: OCaml's normalize only reaches types in the SIGNATURE (Sig_value val_type),
+    // not the expression-level types from instance() copies. So only declaration-level
+    // variants get sorted; expression-level variants retain their original order
+    // (hash-fold from Ptyp_variant). Since we don't have a separate signature,
+    // we normalize from typed tree entry points (pat_type, ctyp_type), which
+    // has a similar but not identical reach.
     let desc = ctx.get_desc(ty);
     match &*desc {
         TypeDesc::Tvariant(row) => {
