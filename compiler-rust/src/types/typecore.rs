@@ -9105,21 +9105,13 @@ fn type_constraint(
     let var_level = ctx.current_level();
     crate::types::generalize_structure(ctx, var_level, ctype_ty);
 
-    // OCaml evaluates tuple `(type_argument env sarg ty (instance env ty),
-    // instance env ty)` right-to-left, so both `instance env ty` calls happen
-    // BEFORE `type_argument` runs. Match this order: create all instances
-    // BEFORE typing the inner expression. This prevents type_expect from
-    // populating simple_abbrevs entries that would create false sharing in
-    // result_ty, while preserving simple_abbrevs entries that the inner
-    // expression legitimately populates (e.g., object type expansions) for
-    // use by subsequent code.
-    //
     // OCaml's type_argument passes the generalized `ty` to type_expect, but
     // inside type_expect_, `rue` wraps every unification with `instance env
     // ty_expected`, so the generalized type is never directly unified. Since
-    // Rust's type_expect/type_application unifies expected_ty directly, pass
-    // fresh instances here to avoid mutating the generalized ctype_ty.
-    let result_ty = crate::types::instance(ctx, ctype_ty);
+    // Rust's type_expect/type_application unifies expected_ty directly, pass a
+    // fresh instance here to avoid mutating the generalized ctype_ty, which
+    // would cause later `instance(ctx, ctype_ty)` calls to see the linked
+    // (non-generic) representative instead of the original generic type.
     let arg_expected_ty = crate::types::instance(ctx, ctype_ty);
     let arg_unify_ty = crate::types::instance(ctx, ctype_ty);
 
@@ -9131,6 +9123,17 @@ fn type_constraint(
     tctx.generic_constraint_body_ty = prev_generic_constraint;
     unify_expression_types(tctx, loc, typed_inner.exp_type, arg_unify_ty, None)?;
 
+    // OCaml evaluates tuple elements right-to-left, so both instance() calls
+    // in `(type_argument env sarg ty (instance env ty), instance env ty)` happen
+    // BEFORE type_argument runs. type_argument (and its inner type_application →
+    // lower_args → expand_head) populates simple_abbrevs with expansion memos.
+    // In Rust, instance calls are sequential, so the result_ty instance would
+    // see stale simple_abbrevs entries from type_expect above, creating false
+    // sharing between the constraint result and the application return type.
+    // Clear simple_abbrevs to match OCaml's evaluation-order semantics.
+    ctx.clear_simple_abbrevs();
+
+    let result_ty = crate::types::instance(ctx, ctype_ty);
     unify_expression_types(tctx, loc, result_ty, expected_ty, None)?;
 
     let mut result = typed_inner;
