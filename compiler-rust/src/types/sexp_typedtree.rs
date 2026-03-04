@@ -1062,7 +1062,7 @@ fn sexp_expression_desc(
             extended_expression,
         } => {
             let mut field_items = Vec::new();
-            for (_li, ld, def, _opt) in fields.iter() {
+            for (_li, ld, def, opt_flag) in fields.iter() {
                 let def_sexp = match def {
                     RecordLabelDefinition::Kept(ty) => Sexp::list(vec![
                         Sexp::atom("Kept"),
@@ -1077,7 +1077,7 @@ fn sexp_expression_desc(
                 field_items.push(Sexp::list(vec![
                     string(&ld.lbl_name),
                     def_sexp,
-                    Sexp::atom(if ld.lbl_optional {
+                    Sexp::atom(if *opt_flag {
                         "optional"
                     } else {
                         "required"
