@@ -7624,10 +7624,17 @@ fn type_function(
     // For optional params with defaults, the pattern and default are typed
     // against the INNER type (before option wrapping), while the Tarrow arg
     // gets the option-wrapped type.
+    // NOTE: OCaml calls type_option(tv) TWICE — once for unification (linked
+    // to the existing ty_arg Tvar) and once for the returned ty_arg. This
+    // creates two physically distinct option nodes: the first gets generalized
+    // through the pattern type chain, the second stays non-generic for the
+    // function body. Matching this behavior avoids over-sharing in sexp output.
     let inner_ty = if arg_label.is_optional() {
         let tv = ctx.new_var(None);
+        let option_ty_for_unify = env.type_option(ctx, tv);
+        unify_expression_types(tctx, loc, param_ty, option_ty_for_unify, None)?;
+        // Create a SECOND option node (matching OCaml's second type_option call)
         let option_ty = env.type_option(ctx, tv);
-        unify_expression_types(tctx, loc, param_ty, option_ty, None)?;
         param_ty = option_ty;
         tv
     } else {
