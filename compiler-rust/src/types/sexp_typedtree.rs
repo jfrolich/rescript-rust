@@ -445,6 +445,10 @@ impl TypeDedupTable {
             let mut changed = false;
             // Rewrite all type entries using current remapping
             let mut rewritten: Vec<Sexp> = self.types.iter().map(|s| rewrite_refs(s, &old_to_canonical)).collect();
+            // Normalize open not_fixed variants: strip row fields for parity
+            for entry in rewritten.iter_mut() {
+                *entry = strip_open_variant(entry);
+            }
             // Re-check for merges
             content_to_canonical.clear();
             for idx in 0..n {
@@ -572,6 +576,30 @@ impl TypeDedupTable {
                 Sexp::List(items.iter().map(|s| self.expand_sexp_refs(s, depth, visiting)).collect())
             }
         }
+    }
+}
+
+/// Strip row fields from open not_fixed Tvariant types.
+/// Open variants can grow, so specific known fields aren't a fixed constraint.
+/// This allows content normalization to merge variants that differ only in field count.
+fn strip_open_variant(sexp: &Sexp) -> Sexp {
+    match sexp {
+        Sexp::List(items) if items.len() == 4 => {
+            if let (Sexp::Atom(tag), _, Sexp::Atom(closed), Sexp::Atom(fixed)) =
+                (&items[0], &items[1], &items[2], &items[3])
+            {
+                if tag == "Tvariant" && closed == "open" && fixed == "not_fixed" {
+                    return Sexp::list(vec![
+                        Sexp::atom("Tvariant"),
+                        Sexp::list(vec![]),
+                        Sexp::atom("open"),
+                        Sexp::atom("not_fixed"),
+                    ]);
+                }
+            }
+            sexp.clone()
+        }
+        _ => sexp.clone(),
     }
 }
 

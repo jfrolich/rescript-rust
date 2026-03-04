@@ -1023,6 +1023,13 @@ let normalize_types_and_body body =
         | Sexp.List items -> Sexp.List (List.map rewrite_sexp items)
       in
       let rewritten = Array.init n (fun i -> rewrite_sexp arr.(i)) in
+      (* Normalize open not_fixed variants: strip row fields for parity *)
+      let strip_open_variant = function
+        | Sexp.List [Sexp.Atom "Tvariant"; _fields; Sexp.Atom "open"; Sexp.Atom "not_fixed"] ->
+          Sexp.List [Sexp.Atom "Tvariant"; Sexp.List []; Sexp.Atom "open"; Sexp.Atom "not_fixed"]
+        | s -> s
+      in
+      Array.iteri (fun i s -> rewritten.(i) <- strip_open_variant s) rewritten;
       let changed = ref false in
       let content_tbl : (string, int) Hashtbl.t = Hashtbl.create n in
       Hashtbl.clear content_tbl;
