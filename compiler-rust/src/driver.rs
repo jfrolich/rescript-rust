@@ -475,6 +475,10 @@ pub fn compile_source_to_js_with_options(
     // from the .resi interface. This happens BEFORE sexp serialization.
     apply_moregen_constraints(&mut tctx, &type_ctx, &typed_structure, options);
 
+    // Normalize types before printing (matches OCaml's normalize_signature).
+    // Sorts variant row fields and object field chains alphabetically.
+    normalize_signature_types(&type_ctx, &typed_structure);
+
     // Print typed tree if requested
     if options.dump_typed_sexp {
         let mut stderr = std::io::stderr();
@@ -1250,4 +1254,51 @@ pub fn typecheck_stored_signature_and_dump_sexp<W: std::io::Write>(
         .map_err(|e| anyhow!("Failed to write sexp: {e}"))?;
 
     Ok(())
+}
+
+/// Normalize types to match OCaml's normalize_signature.
+/// OCaml calls normalize_type on each Sig_value's val_type in the top-level
+/// inferred signature. normalize_type is recursive (walks all children via
+/// iter_type_expr), so all types reachable from a top-level val_type are normalized.
+/// We match this by normalizing the pat_type of each top-level value binding
+/// (which corresponds to the signature's val_type) and the ctyp_type of primitives.
+fn normalize_signature_types(
+    type_ctx: &TypeContext<'_>,
+    typed_structure: &crate::types::typedtree::Structure,
+) {
+    use crate::types::ctype::normalize_type;
+    use crate::types::typedtree::{StructureItemDesc, ModuleExprDesc};
+
+    fn norm_structure(ctx: &TypeContext<'_>, s: &crate::types::typedtree::Structure) {
+        for item in &s.str_items {
+            match &item.str_desc {
+                StructureItemDesc::Tstr_value(_, bindings) => {
+                    for b in bindings {
+                        // Normalize the binding's pattern type (= signature val_type)
+                        normalize_type(ctx, b.vb_pat.pat_type);
+                    }
+                }
+                StructureItemDesc::Tstr_primitive(vd) => {
+                    // Normalize the primitive's top-level type
+                    normalize_type(ctx, vd.val_desc.ctyp_type);
+                }
+                StructureItemDesc::Tstr_module(mb) => {
+                    norm_modexpr(ctx, &mb.mb_expr);
+                }
+                _ => {}
+            }
+        }
+    }
+
+    fn norm_modexpr(ctx: &TypeContext<'_>, me: &crate::types::typedtree::ModuleExpr) {
+        match &me.mod_desc {
+            ModuleExprDesc::Tmod_structure(s) => { norm_structure(ctx, s); }
+            ModuleExprDesc::Tmod_constraint(me, _, _, _) => { norm_modexpr(ctx, me); }
+            ModuleExprDesc::Tmod_functor(_, _, _, me) => { norm_modexpr(ctx, me); }
+            ModuleExprDesc::Tmod_apply(me1, me2, _) => { norm_modexpr(ctx, me1); norm_modexpr(ctx, me2); }
+            _ => {}
+        }
+    }
+
+    norm_structure(type_ctx, typed_structure);
 }

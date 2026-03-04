@@ -22,7 +22,7 @@
 //! Type errors are represented as `TypeError` with detailed information
 //! about what went wrong during unification or other operations.
 
-use super::btype::{iter_type_expr, row_fixed, row_more, row_repr};
+use super::btype::{self, iter_type_expr, row_fixed, row_more, row_repr};
 use super::context::TypeContext;
 use super::env::Env;
 use super::path::Path;
@@ -5362,6 +5362,122 @@ pub fn tuple_elements(ctx: &TypeContext<'_>, ty: TypeExprRef) -> Option<Vec<Type
         TypeDesc::Ttuple(types) => Some(types.clone()),
         _ => None,
     }
+}
+
+// ============================================================================
+// Type Normalization (before printing/saving)
+// ============================================================================
+
+/// Normalize a type before printing/saving, matching OCaml's `normalize_type_rec`.
+///
+/// For Tvariant: flattens row, filters Rabsent fields, sorts alphabetically, mutates desc.
+/// For Tobject: flattens fields (sorts alphabetically), rebuilds chain, mutates desc.
+/// Recursively visits all sub-types.
+pub fn normalize_type(ctx: &TypeContext<'_>, ty: TypeExprRef) {
+    let mut visited = HashSet::new();
+    normalize_type_rec(ctx, &mut visited, ty);
+}
+
+/// Normalize ALL type nodes in the context (sort variant/object fields).
+pub fn normalize_all_types(ctx: &TypeContext<'_>) {
+    let count = ctx.type_expr_count();
+    for i in 0..count {
+        let ty = TypeExprRef(i);
+        let desc = ctx.get_desc(ty);
+        match &*desc {
+            TypeDesc::Tvariant(row) => {
+                let row = row_repr(ctx, row);
+                let mut fields: Vec<(String, RowField)> = row.row_fields.iter()
+                    .map(|(label, field)| {
+                        let resolved = btype::row_field_repr(ctx, field);
+                        (label.clone(), resolved)
+                    })
+                    .filter(|(_, field)| !matches!(field, RowField::Rabsent))
+                    .collect();
+                fields.sort_by(|(a, _), (b, _)| a.cmp(b));
+                drop(desc);
+                ctx.set_desc(ty, TypeDesc::Tvariant(RowDesc {
+                    row_fields: fields,
+                    row_more: row.row_more,
+                    row_closed: row.row_closed,
+                    row_fixed: row.row_fixed,
+                    row_name: row.row_name.clone(),
+                }));
+            }
+            TypeDesc::Tobject { fields: fi, .. } => {
+                let fi = *fi;
+                drop(desc);
+                let fi_repr = ctx.repr(fi);
+                let fi_level = ctx.get_level(fi_repr);
+                if fi_level >= 0 {
+                    let (sorted_fields, rest) = flatten_fields(ctx, fi_repr);
+                    if !sorted_fields.is_empty() {
+                        let new_fi = build_fields(ctx, fi_level, &sorted_fields, rest);
+                        let new_desc = ctx.get_desc(new_fi).clone();
+                        ctx.set_desc(fi_repr, new_desc);
+                    }
+                }
+            }
+            _ => { drop(desc); }
+        }
+    }
+}
+
+fn normalize_type_rec(ctx: &TypeContext<'_>, visited: &mut HashSet<TypeExprRef>, ty: TypeExprRef) {
+    let ty = ctx.repr(ty);
+    if visited.contains(&ty) {
+        return;
+    }
+    visited.insert(ty);
+
+    // Get desc and handle Tvariant/Tobject normalization
+    let desc = ctx.get_desc(ty);
+    match &*desc {
+        TypeDesc::Tvariant(row) => {
+            let row = row_repr(ctx, row);
+            // Normalize row fields: resolve field repr, filter Rabsent, sort alphabetically
+            let mut fields: Vec<(String, RowField)> = row.row_fields.iter()
+                .map(|(label, field)| {
+                    let resolved = btype::row_field_repr(ctx, field);
+                    (label.clone(), resolved)
+                })
+                .filter(|(_, field)| !matches!(field, RowField::Rabsent))
+                .collect();
+            fields.sort_by(|(a, _), (b, _)| a.cmp(b));
+            drop(desc);
+            ctx.set_desc(ty, TypeDesc::Tvariant(RowDesc {
+                row_fields: fields,
+                row_more: row.row_more,
+                row_closed: row.row_closed,
+                row_fixed: row.row_fixed,
+                row_name: row.row_name.clone(),
+            }));
+        }
+        TypeDesc::Tobject { fields: fi, .. } => {
+            let fi = *fi;
+            drop(desc);
+            let fi_repr = ctx.repr(fi);
+            let fi_level = ctx.get_level(fi_repr);
+            if fi_level >= 0 {
+                // flatten_fields sorts alphabetically, build_fields reconstructs
+                let (sorted_fields, rest) = flatten_fields(ctx, fi_repr);
+                if !sorted_fields.is_empty() {
+                    let new_fi = build_fields(ctx, fi_level, &sorted_fields, rest);
+                    // Mutate the fields pointer's desc to the sorted chain's desc
+                    let new_desc = ctx.get_desc(new_fi).clone();
+                    ctx.set_desc(fi_repr, new_desc);
+                }
+            }
+        }
+        _ => {
+            drop(desc);
+        }
+    }
+
+    // Recurse on all children
+    iter_type_expr(ctx, ty, |child| {
+        normalize_type_rec(ctx, visited, child);
+    });
 }
 
 #[cfg(test)]
