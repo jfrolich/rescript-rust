@@ -653,6 +653,10 @@ pub struct TypeCheckContext<'a> {
     /// Scoped toggle used by type_application for OCaml-aligned local-float
     /// instantiation in repeated argument sites.
     pub force_fresh_local_float: bool,
+    /// When inside Pexp_constraint, the GENERIC constraint type. Used by
+    /// type_match_cases_batch_non_gadt to create fresh instances per case
+    /// body, matching OCaml's behavior where ty_res is generic.
+    pub generic_constraint_body_ty: Option<TypeExprRef>,
 }
 
 /// A diagnostic from type checking.
@@ -679,6 +683,7 @@ impl<'a> TypeCheckContext<'a> {
             active_recursive_value_ids: Vec::new(),
             persistent_env: None,
             force_fresh_local_float: false,
+            generic_constraint_body_ty: None,
         }
     }
 
@@ -5710,8 +5715,16 @@ fn type_match_cases_batch_non_gadt<'a>(
                 &pending.unpacks,
                 body_expr.pexp_loc,
             );
+            // OCaml: `exp_type = instance env ty_res'`. When ty_res is GENERIC
+            // (from Pexp_constraint), instance creates fresh copies per case.
+            // Use the generic constraint type when available for this purpose.
+            let case_exp_ty = if let Some(generic_ty) = tctx.generic_constraint_body_ty {
+                crate::types::instance(ctx, generic_ty)
+            } else {
+                crate::types::instance(ctx, body_ty)
+            };
             let typed_body = Expression {
-                exp_type: crate::types::instance(ctx, body_ty),
+                exp_type: case_exp_ty,
                 ..typed_body
             };
 
@@ -7491,8 +7504,13 @@ fn type_case_impl(
         &unpacks,
         body_expr.pexp_loc,
     );
+    let case_exp_ty = if let Some(generic_ty) = tctx.generic_constraint_body_ty {
+        crate::types::instance(tctx.type_ctx, generic_ty)
+    } else {
+        crate::types::instance(tctx.type_ctx, body_ty)
+    };
     let typed_body = Expression {
-        exp_type: crate::types::instance(tctx.type_ctx, body_ty),
+        exp_type: case_exp_ty,
         ..typed_body
     };
 
@@ -9097,7 +9115,12 @@ fn type_constraint(
     let arg_expected_ty = crate::types::instance(ctx, ctype_ty);
     let arg_unify_ty = crate::types::instance(ctx, ctype_ty);
 
+    // Pass the GENERIC constraint type so match cases can create fresh
+    // instances per case body (matching OCaml where ty_res is generic).
+    let prev_generic_constraint = tctx.generic_constraint_body_ty;
+    tctx.generic_constraint_body_ty = Some(ctype_ty);
     let typed_inner = type_expect(tctx, env, inner_expr, arg_expected_ty, None)?;
+    tctx.generic_constraint_body_ty = prev_generic_constraint;
     unify_expression_types(tctx, loc, typed_inner.exp_type, arg_unify_ty, None)?;
 
     // OCaml evaluates tuple elements right-to-left, so both instance() calls
