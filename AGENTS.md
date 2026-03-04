@@ -108,6 +108,46 @@ The Makefile’s targets build on each other in this order:
 
 - **One task per session** - Only take on ONE task at a time. When you complete a task, STOP. Do not pick up another task from the TODO list. Each new task should start with a fresh context window. This ensures you have full context capacity for each task and prevents context exhaustion from accumulating state across multiple tasks.
 
+## ⚠️ CRITICAL: Typedtree Sexp Parity — No Cheating
+
+The typedtree sexp parity test (`./scripts/test_typedtree_parity.sh`) compares the sexp serialization of the typed AST between the OCaml and Rust compilers. The goal is **identical output** achieved by making the Rust **type checker implementation** functionally equivalent to OCaml's — NOT by adding normalizations, sorting, or content-based tricks to the sexp serializer.
+
+### Absolute Rules
+
+1. **NO content-based normalization in the serializer.** Do not merge, deduplicate, or rewrite type nodes based on their content/structure. OCaml's sexp dedup is based on **physical identity** (`type_expr.id`), not structural equality. The Rust serializer must use **physical identity** (`TypeExprRef`) for dedup — nothing else.
+
+2. **NO sorting.** Do not sort record fields, variant row fields, object fields, or any other list by name/label/position. Serialize everything in the **natural order** the type checker produces. If the order differs from OCaml, the type checker is building the data structure differently — fix the type checker, not the serializer.
+
+3. **NO stripping or rewriting.** Do not strip `Tvar` names, remove `Tlink` nodes, convert `Reither` to `Rpresent`, rewrite paths, or transform type descriptions in the serializer. The serializer must faithfully emit what the type checker produced.
+
+4. **NO special-case hacks.** Do not add "if this specific test file / this specific type / this specific pattern, then do X" logic. Every fix must be a general improvement to the type checker that makes it behave more like OCaml.
+
+5. **The only legitimate serializer-level dedup is physical identity** — same `TypeExprRef` maps to same index. The one exception is the arity alias dedup, which exists because OCaml's `{t with desc = Tarrow(...)}` creates a new record sharing the same `type_expr.id` — this is matching OCaml's physical identity semantics, not adding a content-based hack.
+
+### How to Fix Parity Issues
+
+When the Rust sexp output differs from OCaml:
+
+1. **Read the OCaml source** to understand WHY OCaml produces that output. The answer is always in the type checker (`ctype.ml`, `typecore.ml`, `typemod.ml`, `typetexp.ml`), not in the serializer.
+
+2. **Understand the data sharing model.** OCaml's type checker creates specific sharing patterns through `instance()`, `copy`, `link_type`, `unify`, `generalize`, and `Subst`. These determine which type nodes are physically identical. The Rust type checker must create the **same sharing patterns**.
+
+3. **Understand traversal order.** OCaml processes data structures in specific orders (e.g., `List.fold_left` vs `List.fold_right`, batch pattern typing before body typing). The Rust type checker must process things in the **same order**.
+
+4. **Fix the type checker**, not the serializer. If Rust has more/fewer type nodes, different sharing, or different order — the fix is in `ctype.rs`, `typecore.rs`, `typemod.rs`, `context.rs`, etc.
+
+5. **Use introspection.** You have full access to the OCaml reference source (`compiler/ml/`), debug flags (`-dtyped-sexp-locs`), and can add temporary `eprintln!` tracing to understand exactly what the type checker does differently.
+
+### What "Parity" Means
+
+Parity means the Rust type checker produces a typed AST with:
+- The **same type nodes** (same structure and content)
+- The **same physical sharing** (same nodes deduplicated by identity)
+- The **same traversal order** (nodes encountered in the same DFS order)
+- The **same number of instances** (no extra copies from over-generalization, no missing copies from wrong identity returns)
+
+This is achieved ONLY by making the Rust type checker implementation equivalent to OCaml's. There are no shortcuts.
+
 ## Compiler Architecture
 
 ### Compilation Pipeline
