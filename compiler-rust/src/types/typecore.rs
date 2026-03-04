@@ -8559,58 +8559,65 @@ fn type_record(
 
         for (lbl_idx, label_decl) in all_labels.iter().enumerate() {
             let label_name = label_decl.ld_id.name().to_string();
-                let disambiguated = disambiguate_label(
-                    &label_name,
-                    disambiguation_ty,
-                    env,
-                    &mut tctx.persistent_env,
-                    ctx,
-                );
 
-            let label_desc = if let Some(env_label) = disambiguated {
-                let (_poly_vars, ty_arg, ty_res) = crate::types::ctype::instance_label(ctx, &env_label);
-                let _ = crate::types::unify(ctx, &mut tctx.unify_state, ty_res, expected_ty);
-                crate::types::LabelDescription {
-                    lbl_name: env_label.lbl_name.clone(),
-                    lbl_res: expected_ty,
-                    lbl_arg: ty_arg,
-                    lbl_mut: env_label.lbl_mut.clone(),
-                    lbl_optional: env_label.lbl_optional,
-                    lbl_pos: env_label.lbl_pos,
-                    lbl_all: env_label.lbl_all,
-                    lbl_repres: env_label.lbl_repres.clone(),
-                    lbl_private: env_label.lbl_private.clone(),
-                    lbl_loc: env_label.lbl_loc.clone(),
-                    lbl_attributes: env_label.lbl_attributes.clone(),
-                }
-            } else {
-                crate::types::LabelDescription {
-                    lbl_name: label_name.clone(),
-                    lbl_res: expected_ty,
-                    lbl_arg: crate::types::instance(ctx, label_decl.ld_type),
-                    lbl_mut: label_decl.ld_mutable.clone(),
-                    lbl_optional: label_decl.ld_optional,
-                    lbl_pos: lbl_idx as i32,
-                    lbl_all: crate::types::LabelArrayRef(0),
-                    lbl_repres: crate::types::RecordRepresentation::RecordRegular,
-                    lbl_private: crate::types::PrivateFlag::Public,
-                    lbl_loc: label_decl.ld_loc.clone(),
-                    lbl_attributes: label_decl.ld_attributes.clone(),
-                }
-            };
-
-            let key = label_desc.lbl_pos;
-            if let Some(explicit) = explicit_overrides.remove(&key) {
-                explicit_overrides_by_name.remove(&label_desc.lbl_name);
+            let key_pos = lbl_idx as i32;
+            // Check if this label has an explicit override BEFORE doing instance_label.
+            // OCaml only calls instance_label for explicit fields (in type_label_exp),
+            // not for missing optional fields (which use lbl.lbl_arg directly).
+            if let Some(explicit) = explicit_overrides.remove(&key_pos) {
+                explicit_overrides_by_name.remove(&label_name);
                 typed_fields.push(explicit);
                 continue;
             }
-            if let Some(explicit) = explicit_overrides_by_name.remove(&label_desc.lbl_name) {
+            if let Some(explicit) = explicit_overrides_by_name.remove(&label_name) {
                 typed_fields.push(explicit);
                 continue;
             }
 
+            // For missing fields, try to get label desc without instance_label
+            // OCaml uses label_descriptions (lbl_all) directly — no fresh instance
+            let disambiguated = disambiguate_label(
+                &label_name,
+                disambiguation_ty,
+                env,
+                &mut tctx.persistent_env,
+                ctx,
+            );
+
+            // For kept fields (base expression), we still need instance_label
+            // for type resolution. For optional None fields, use lbl_arg directly.
             if typed_base.is_some() {
+                let label_desc = if let Some(env_label) = disambiguated {
+                    let (_poly_vars, ty_arg, ty_res) = crate::types::ctype::instance_label(ctx, &env_label);
+                    let _ = crate::types::unify(ctx, &mut tctx.unify_state, ty_res, expected_ty);
+                    crate::types::LabelDescription {
+                        lbl_name: env_label.lbl_name.clone(),
+                        lbl_res: expected_ty,
+                        lbl_arg: ty_arg,
+                        lbl_mut: env_label.lbl_mut.clone(),
+                        lbl_optional: env_label.lbl_optional,
+                        lbl_pos: env_label.lbl_pos,
+                        lbl_all: env_label.lbl_all,
+                        lbl_repres: env_label.lbl_repres.clone(),
+                        lbl_private: env_label.lbl_private.clone(),
+                        lbl_loc: env_label.lbl_loc.clone(),
+                        lbl_attributes: env_label.lbl_attributes.clone(),
+                    }
+                } else {
+                    crate::types::LabelDescription {
+                        lbl_name: label_name.clone(),
+                        lbl_res: expected_ty,
+                        lbl_arg: crate::types::instance(ctx, label_decl.ld_type),
+                        lbl_mut: label_decl.ld_mutable.clone(),
+                        lbl_optional: label_decl.ld_optional,
+                        lbl_pos: lbl_idx as i32,
+                        lbl_all: crate::types::LabelArrayRef(0),
+                        lbl_repres: crate::types::RecordRepresentation::RecordRegular,
+                        lbl_private: crate::types::PrivateFlag::Public,
+                        lbl_loc: label_decl.ld_loc.clone(),
+                        lbl_attributes: label_decl.ld_attributes.clone(),
+                    }
+                };
                 typed_fields.push((
                     placeholder_lid.clone(),
                     label_desc.clone(),
@@ -8620,8 +8627,13 @@ fn type_record(
                 continue;
             }
 
-            if label_desc.lbl_optional {
-                let option_ty = label_desc.lbl_arg;
+            // For missing optional fields: use lbl_arg directly (no instance_label),
+            // matching OCaml's option_none(lbl.lbl_arg, loc) pattern
+            let is_optional = disambiguated.as_ref().map_or(label_decl.ld_optional, |l| l.lbl_optional);
+            if is_optional {
+                // Get the option type from the raw label, not from instance_label
+                let option_ty = disambiguated.as_ref()
+                    .map_or_else(|| label_decl.ld_type, |l| l.lbl_arg);
                 let none_cstr = make_none_constructor(ctx, option_ty);
                 let none_lid = Located {
                     txt: tctx.arena.none_lid(),
@@ -8634,8 +8646,26 @@ fn type_record(
                     EnvRef(0),
                     Attributes::new(),
                 );
-                let mut synthesized_desc = label_desc;
-                synthesized_desc.lbl_optional = false;
+                // Build label desc using the raw label's lbl_arg (not instanced)
+                let label_desc = if let Some(env_label) = disambiguated {
+                    let mut desc = env_label.clone();
+                    desc.lbl_optional = false;
+                    desc
+                } else {
+                    crate::types::LabelDescription {
+                        lbl_name: label_name.clone(),
+                        lbl_res: expected_ty,
+                        lbl_arg: option_ty,
+                        lbl_mut: label_decl.ld_mutable.clone(),
+                        lbl_optional: false,
+                        lbl_pos: lbl_idx as i32,
+                        lbl_all: crate::types::LabelArrayRef(0),
+                        lbl_repres: crate::types::RecordRepresentation::RecordRegular,
+                        lbl_private: crate::types::PrivateFlag::Public,
+                        lbl_loc: label_decl.ld_loc.clone(),
+                        lbl_attributes: label_decl.ld_attributes.clone(),
+                    }
+                };
                 // OCaml uses {loc; txt = Lident lbl.lbl_name} for synthesized optional fields
                 let label_lid_idx = find_existing_lident_idx(tctx.arena, &label_name)
                     .unwrap_or_else(|| {
@@ -8645,7 +8675,7 @@ fn type_record(
                 let label_lid = Located { txt: label_lid_idx, loc };
                 typed_fields.push((
                     label_lid.clone(),
-                    synthesized_desc,
+                    label_desc,
                     RecordLabelDefinition::Overridden(label_lid, none_expr),
                     false,
                 ));
