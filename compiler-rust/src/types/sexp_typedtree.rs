@@ -28,7 +28,6 @@ use crate::types::typedtree::{
 };
 use crate::types::variance::Variance;
 use std::collections::HashMap;
-use std::collections::HashSet;
 use std::io::Write;
 
 // ============================================================================
@@ -421,260 +420,6 @@ impl TypeDedupTable {
         Sexp::list(items)
     }
 
-    /// Content-based normalization: merge type entries with identical sexp bodies.
-    /// Returns a remapping from old indices to new indices, and builds a normalized
-    /// types list. This eliminates sharing differences between OCaml and Rust.
-    fn normalize(&mut self) -> Vec<Option<usize>> {
-        let n = self.types.len();
-        // Phase 1: find content-equivalent entries and map to canonical index
-        let mut content_to_canonical: HashMap<String, usize> = HashMap::new();
-        let mut old_to_canonical: Vec<usize> = (0..n).collect(); // identity initially
-
-        for idx in 0..n {
-            let content = self.types[idx].to_string();
-            if let Some(&canonical) = content_to_canonical.get(&content) {
-                old_to_canonical[idx] = canonical;
-            } else {
-                content_to_canonical.insert(content, idx);
-            }
-        }
-
-        // Phase 2: iterative convergence — rewrite refs in type bodies, re-check for merges
-        // This handles cases like Tarrow(#5, #6) == Tarrow(#8, #9) when #5==#8 and #6==#9
-        for _iteration in 0..20 {
-            let mut changed = false;
-            // Rewrite all type entries using current remapping
-            let mut rewritten: Vec<Sexp> = self.types.iter().map(|s| rewrite_refs(s, &old_to_canonical)).collect();
-            // (No normalization stripping — comparing exact output)
-            // Re-check for merges
-            content_to_canonical.clear();
-            for idx in 0..n {
-                // Only process canonical entries
-                if old_to_canonical[idx] != idx {
-                    continue;
-                }
-                let content = rewritten[idx].to_string();
-                if let Some(&canonical) = content_to_canonical.get(&content) {
-                    // Merge: all entries pointing to idx now point to canonical
-                    for j in 0..n {
-                        if old_to_canonical[j] == idx {
-                            old_to_canonical[j] = canonical;
-                            changed = true;
-                        }
-                    }
-                } else {
-                    content_to_canonical.insert(content, idx);
-                }
-            }
-            if !changed {
-                // Apply final rewriting to types
-                self.types = rewritten;
-                break;
-            }
-            // Update types for next iteration
-            self.types = rewritten;
-        }
-
-        // (No Phase 2b path alias merge — comparing exact output)
-
-        // Phase 3: build compacted index mapping (remove gaps)
-        let mut canonical_to_new: HashMap<usize, usize> = HashMap::new();
-        let mut next_new = 0;
-        for idx in 0..n {
-            let canonical = old_to_canonical[idx];
-            if !canonical_to_new.contains_key(&canonical) {
-                canonical_to_new.insert(canonical, next_new);
-                next_new += 1;
-            }
-        }
-
-        // Build final old_to_new mapping
-        let old_to_new: Vec<Option<usize>> = (0..n)
-            .map(|idx| canonical_to_new.get(&old_to_canonical[idx]).copied())
-            .collect();
-
-        // Build new types list (only canonical entries)
-        let mut new_types = vec![Sexp::atom("_"); next_new];
-        for idx in 0..n {
-            let canonical = old_to_canonical[idx];
-            if canonical == idx {
-                if let Some(&new_idx) = canonical_to_new.get(&canonical) {
-                    new_types[new_idx] = rewrite_refs(&self.types[idx], &old_to_canonical)
-                        .rewrite_with_new_indices(&old_to_new);
-                }
-            }
-        }
-        self.types = new_types;
-        old_to_new
-    }
-
-    /// Canonical sort: reorder types by their structurally-expanded signature.
-    /// This eliminates ordering differences between OCaml and Rust by computing
-    /// a position-independent canonical key for each type.
-    fn canonical_sort(&mut self) -> Vec<Option<usize>> {
-        let n = self.types.len();
-        if n == 0 {
-            return vec![];
-        }
-
-        // Compute canonical signature for each type by expanding references
-        let mut signatures: Vec<String> = Vec::with_capacity(n);
-        for idx in 0..n {
-            let mut visiting = HashSet::new();
-            let expanded = self.expand_type_refs(idx, 0, &mut visiting);
-            signatures.push(expanded);
-        }
-
-        // Sort indices by signature
-        let mut sorted_indices: Vec<usize> = (0..n).collect();
-        sorted_indices.sort_by(|&a, &b| signatures[a].cmp(&signatures[b]));
-
-        // Build remapping: old index -> new index
-        let mut old_to_new: Vec<Option<usize>> = vec![None; n];
-        for (new_idx, &old_idx) in sorted_indices.iter().enumerate() {
-            old_to_new[old_idx] = Some(new_idx);
-        }
-
-        // Reorder types and rewrite references
-        let old_types = std::mem::take(&mut self.types);
-        self.types = sorted_indices
-            .iter()
-            .map(|&old_idx| old_types[old_idx].rewrite_with_new_indices(&old_to_new))
-            .collect();
-
-        old_to_new
-    }
-
-    /// Expand #N references recursively to compute a canonical signature string.
-    fn expand_type_refs(&self, idx: usize, depth: usize, visiting: &mut HashSet<usize>) -> String {
-        if depth > 8 || visiting.contains(&idx) {
-            return "<cycle>".to_string();
-        }
-        visiting.insert(idx);
-        let result = self.expand_sexp_refs(&self.types[idx], depth, visiting).to_string();
-        visiting.remove(&idx);
-        result
-    }
-
-    fn expand_sexp_refs(&self, sexp: &Sexp, depth: usize, visiting: &mut HashSet<usize>) -> Sexp {
-        match sexp {
-            Sexp::Atom(s) => {
-                if let Some(rest) = s.strip_prefix('#') {
-                    if let Ok(idx) = rest.parse::<usize>() {
-                        if idx < self.types.len() && depth < 8 && !visiting.contains(&idx) {
-                            visiting.insert(idx);
-                            let expanded = self.expand_sexp_refs(&self.types[idx], depth + 1, visiting);
-                            visiting.remove(&idx);
-                            return expanded;
-                        }
-                    }
-                }
-                sexp.clone()
-            }
-            Sexp::List(items) => {
-                Sexp::List(items.iter().map(|s| self.expand_sexp_refs(s, depth, visiting)).collect())
-            }
-        }
-    }
-}
-
-/// Strip Tvar names: Tvar(Some "x") → Tvar(None) for parity normalization.
-fn strip_tvar_name(sexp: &Sexp) -> Sexp {
-    match sexp {
-        Sexp::List(items) if items.len() == 2 => {
-            if let Sexp::Atom(tag) = &items[0] {
-                if tag == "Tvar" {
-                    return Sexp::list(vec![Sexp::atom("Tvar"), Sexp::atom("None")]);
-                }
-            }
-            sexp.clone()
-        }
-        _ => sexp.clone(),
-    }
-}
-
-/// Extract args string and is_pident flag from a Tconstr sexp.
-/// Returns (args_string, is_pident) if the sexp is Tconstr, None otherwise.
-fn extract_tconstr_args(sexp: &Sexp) -> Option<(String, bool)> {
-    match sexp {
-        Sexp::List(items) if items.len() == 3 => {
-            if let Sexp::Atom(tag) = &items[0] {
-                if tag == "Tconstr" {
-                    let is_pident = matches!(&items[1],
-                        Sexp::List(path_items) if path_items.len() == 2 &&
-                            matches!(&path_items[0], Sexp::Atom(s) if s == "Pident"));
-                    let args_str = items[2].to_string();
-                    return Some((args_str, is_pident));
-                }
-            }
-            None
-        }
-        _ => None,
-    }
-}
-
-/// Strip row fields from open not_fixed Tvariant types.
-/// Open variants can grow, so specific known fields aren't a fixed constraint.
-/// This allows content normalization to merge variants that differ only in field count.
-fn strip_open_variant(sexp: &Sexp) -> Sexp {
-    match sexp {
-        Sexp::List(items) if items.len() == 4 => {
-            if let (Sexp::Atom(tag), _, Sexp::Atom(closed), Sexp::Atom(fixed)) =
-                (&items[0], &items[1], &items[2], &items[3])
-            {
-                if tag == "Tvariant" && closed == "open" && fixed == "not_fixed" {
-                    return Sexp::list(vec![
-                        Sexp::atom("Tvariant"),
-                        Sexp::list(vec![]),
-                        Sexp::atom("open"),
-                        Sexp::atom("not_fixed"),
-                    ]);
-                }
-            }
-            sexp.clone()
-        }
-        _ => sexp.clone(),
-    }
-}
-
-/// Rewrite #N references in a Sexp using old_to_canonical mapping
-fn rewrite_refs(sexp: &Sexp, remap: &[usize]) -> Sexp {
-    match sexp {
-        Sexp::Atom(s) => {
-            if let Some(rest) = s.strip_prefix('#') {
-                if let Ok(idx) = rest.parse::<usize>() {
-                    if idx < remap.len() {
-                        return Sexp::Atom(format!("#{}", remap[idx]));
-                    }
-                }
-            }
-            sexp.clone()
-        }
-        Sexp::List(items) => Sexp::List(items.iter().map(|s| rewrite_refs(s, remap)).collect()),
-    }
-}
-
-impl Sexp {
-    /// Rewrite #N references using old_to_new mapping (with Option for compaction)
-    fn rewrite_with_new_indices(&self, remap: &[Option<usize>]) -> Sexp {
-        match self {
-            Sexp::Atom(s) => {
-                if let Some(rest) = s.strip_prefix('#') {
-                    if let Ok(idx) = rest.parse::<usize>() {
-                        if idx < remap.len() {
-                            if let Some(new_idx) = remap[idx] {
-                                return Sexp::Atom(format!("#{}", new_idx));
-                            }
-                        }
-                    }
-                }
-                self.clone()
-            }
-            Sexp::List(items) => {
-                Sexp::List(items.iter().map(|s| s.rewrite_with_new_indices(remap)).collect())
-            }
-        }
-    }
 }
 
 fn sexp_type_expr(
@@ -746,7 +491,8 @@ fn sexp_type_expr(
             ])
         }
         TypeDesc::Tobject { fields, .. } => {
-            Sexp::list(vec![Sexp::atom("Tobject"), sexp_object_fields_sorted(arena, ctx, dedup, *fields)])
+            let fields_sexp = sexp_type_expr(arena, ctx, dedup, *fields);
+            Sexp::list(vec![Sexp::atom("Tobject"), fields_sexp])
         }
         TypeDesc::Tfield {
             name,
@@ -810,59 +556,6 @@ fn sexp_type_expr(
     Sexp::atom(&format!("#{idx}"))
 }
 
-/// Collect all Tfield entries from an object type's fields chain, sort them by name,
-/// and rebuild the nested Tfield/Tnil sexp structure.
-fn sexp_object_fields_sorted(arena: &ParseArena, ctx: &TypeContext<'_>, dedup: &mut TypeDedupTable, fields_ty: TypeExprRef) -> Sexp {
-    struct FieldEntry {
-        name: String,
-        kind: String,
-        typ: TypeExprRef,
-    }
-
-    let mut entries = Vec::new();
-    let mut current = ctx.repr(fields_ty);
-    let mut tail_sexp = None;
-
-    loop {
-        let desc = ctx.get_desc(current);
-        match &*desc {
-            TypeDesc::Tfield { name, kind, typ, rest } => {
-                let kind_str = match kind {
-                    FieldKind::Fpresent => "Fpresent",
-                    FieldKind::Fabsent => "Fabsent",
-                    FieldKind::Fvar(_) => "Fvar",
-                };
-                entries.push(FieldEntry {
-                    name: name.clone(),
-                    kind: kind_str.to_string(),
-                    typ: *typ,
-                });
-                current = ctx.repr(*rest);
-            }
-            _ => {
-                // Route Tnil and other types through dedup table (matches OCaml)
-                tail_sexp = Some(sexp_type_expr(arena, ctx, dedup, current));
-                break;
-            }
-        }
-    }
-
-    entries.sort_by(|a, b| a.name.cmp(&b.name));
-
-    let mut result = tail_sexp.unwrap_or_else(|| Sexp::atom("Tnil"));
-    for entry in entries.iter().rev() {
-        let typ_sexp = sexp_type_expr(arena, ctx, dedup, entry.typ);
-        result = Sexp::list(vec![
-            Sexp::atom("Tfield"),
-            string(&entry.name),
-            Sexp::atom(&entry.kind),
-            typ_sexp,
-            result,
-        ]);
-    }
-    result
-}
-
 fn sexp_row_desc(
     arena: &ParseArena,
     ctx: &TypeContext<'_>,
@@ -870,11 +563,8 @@ fn sexp_row_desc(
     row: &RowDesc,
 ) -> Sexp {
     let row = btype::row_repr(ctx, row);
-    // Sort row_fields by label to normalize ordering for parity (matches OCaml)
-    let mut sorted_fields: Vec<_> = row.row_fields.iter().collect();
-    sorted_fields.sort_by(|(a, _), (b, _)| a.cmp(b));
     let mut field_sexps = Vec::new();
-    for (l, rf) in sorted_fields {
+    for (l, rf) in row.row_fields.iter() {
         let rf_sexp = sexp_row_field(arena, ctx, dedup, rf);
         field_sexps.push(Sexp::list(vec![string(l), rf_sexp]));
     }
@@ -2698,8 +2388,6 @@ pub fn print_typed_structure<W: Write>(
 ) -> std::io::Result<()> {
     let mut dedup = TypeDedupTable::new();
     let body = sexp_structure(arena, ctx, false, &mut dedup, str);
-    let remap = dedup.normalize();
-    let body = body.rewrite_with_new_indices(&remap);
     let preamble = dedup.build_preamble();
     write_latin1_line(out, &format!("{}\n{}", preamble.to_string(), body.to_string()))
 }
@@ -2713,8 +2401,6 @@ pub fn print_typed_structure_with_locs<W: Write>(
 ) -> std::io::Result<()> {
     let mut dedup = TypeDedupTable::new();
     let body = sexp_structure(arena, ctx, true, &mut dedup, str);
-    let remap = dedup.normalize();
-    let body = body.rewrite_with_new_indices(&remap);
     let preamble = dedup.build_preamble();
     write_latin1_line(out, &format!("{}\n{}", preamble.to_string(), body.to_string()))
 }
@@ -2723,8 +2409,6 @@ pub fn print_typed_structure_with_locs<W: Write>(
 pub fn print_typed_signature<W: Write>(arena: &ParseArena, ctx: &TypeContext<'_>, sig: &crate::types::typedtree::TypedSignature, out: &mut W) -> std::io::Result<()> {
     let mut dedup = TypeDedupTable::new();
     let sexp = sexp_typed_signature(arena, ctx, false, &mut dedup, sig);
-    let remap = dedup.normalize();
-    let sexp = sexp.rewrite_with_new_indices(&remap);
     let preamble = dedup.build_preamble();
     write_latin1_line(out, &format!("{}\n{}", preamble.to_string(), sexp.to_string()))
 }
@@ -2733,8 +2417,6 @@ pub fn print_typed_signature<W: Write>(arena: &ParseArena, ctx: &TypeContext<'_>
 pub fn print_typed_signature_with_locs<W: Write>(arena: &ParseArena, ctx: &TypeContext<'_>, sig: &crate::types::typedtree::TypedSignature, out: &mut W) -> std::io::Result<()> {
     let mut dedup = TypeDedupTable::new();
     let sexp = sexp_typed_signature(arena, ctx, true, &mut dedup, sig);
-    let remap = dedup.normalize();
-    let sexp = sexp.rewrite_with_new_indices(&remap);
     let preamble = dedup.build_preamble();
     write_latin1_line(out, &format!("{}\n{}", preamble.to_string(), sexp.to_string()))
 }

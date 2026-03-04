@@ -187,8 +187,8 @@ and type_expr_body te =
     let arg_sexps = List.map type_expr args in
     Sexp.list [Sexp.atom "Tconstr"; path p; Sexp.list arg_sexps]
   | Tobject (ty, _) ->
-    (* Sort object fields by name to normalize ordering for parity *)
-    Sexp.list [Sexp.atom "Tobject"; object_fields_sorted ty]
+    let ty_sexp = type_expr ty in
+    Sexp.list [Sexp.atom "Tobject"; ty_sexp]
   | Tfield (name, kind, ty1, ty2) ->
     let kind_str = match Btype.field_kind_repr kind with
       | Fpresent -> "Fpresent"
@@ -218,36 +218,12 @@ and type_expr_body te =
       Sexp.list tyl_sexps;
     ]
 
-and object_fields_sorted ty =
-  (* Collect all Tfield entries from the chain, sort by name, rebuild *)
-  let rec collect_fields ty acc =
-    let ty = Btype.repr ty in
-    match ty.Types.desc with
-    | Tfield (name, kind, field_ty, rest) ->
-      let kind_str = match Btype.field_kind_repr kind with
-        | Fpresent -> "Fpresent"
-        | Fabsent -> "Fabsent"
-        | Fvar _ -> "Fvar"
-      in
-      collect_fields rest ((name, kind_str, field_ty) :: acc)
-    | _ -> (List.rev acc, ty)
-  in
-  let (fields, tail) = collect_fields ty [] in
-  let sorted_fields = List.sort (fun (n1, _, _) (n2, _, _) -> String.compare n1 n2) fields in
-  let tail_sexp = type_expr tail in
-  List.fold_right (fun (name, kind_str, field_ty) rest_sexp ->
-    let field_ty_sexp = type_expr field_ty in
-    Sexp.list [Sexp.atom "Tfield"; string name; Sexp.atom kind_str; field_ty_sexp; rest_sexp]
-  ) sorted_fields tail_sexp
-
 and row_desc_sexp row =
   let row = Btype.row_repr row in
-  (* Sort row_fields by label to normalize ordering for parity *)
-  let sorted_fields = List.sort (fun (l1, _) (l2, _) -> String.compare l1 l2) row.Types.row_fields in
   let fields_sexp = Sexp.list (List.map (fun (l, rf) ->
     let rf_sexp = row_field_sexp rf in
     Sexp.list [string l; rf_sexp]
-  ) sorted_fields) in
+  ) row.Types.row_fields) in
   Sexp.list [
     Sexp.atom "Tvariant";
     fields_sexp;
@@ -997,133 +973,26 @@ and include_declaration ~with_locs incl =
 
 (* Public API *)
 (* Content-based type normalization: merge duplicate type entries *)
-let normalize_types_and_body body =
-  let n = !dedup_next_idx in
-  let arr = !dedup_arr in
-  if n = 0 then (build_types_preamble (), body)
-  else begin
-    (* Phase 1: find content-equivalent entries *)
-    let old_to_canonical = Array.init n (fun i -> i) in
-    let converge () =
-      (* Rewrite refs in type entries using current mapping *)
-      let rewrite_ref s =
-        let len = String.length s in
-        if len > 1 && s.[0] = '#' then
-          let idx_str = String.sub s 1 (len - 1) in
-          (try
-            let idx = int_of_string idx_str in
-            if idx >= 0 && idx < n then
-              "#" ^ string_of_int old_to_canonical.(idx)
-            else s
-          with Failure _ -> s)
-        else s
-      in
-      let rec rewrite_sexp = function
-        | Sexp.Atom s -> Sexp.Atom (rewrite_ref s)
-        | Sexp.List items -> Sexp.List (List.map rewrite_sexp items)
-      in
-      let rewritten = Array.init n (fun i -> rewrite_sexp arr.(i)) in
-      (* No normalization stripping — comparing exact output *)
-      let changed = ref false in
-      let content_tbl : (string, int) Hashtbl.t = Hashtbl.create n in
-      Hashtbl.clear content_tbl;
-      for idx = 0 to n - 1 do
-        if old_to_canonical.(idx) = idx then begin
-          let content = Sexp.to_string rewritten.(idx) in
-          match Hashtbl.find_opt content_tbl content with
-          | Some canonical ->
-            (* Merge: all entries pointing to idx now point to canonical *)
-            for j = 0 to n - 1 do
-              if old_to_canonical.(j) = idx then begin
-                old_to_canonical.(j) <- canonical;
-                changed := true
-              end
-            done
-          | None ->
-            Hashtbl.add content_tbl content idx
-        end
-      done;
-      (* Update arr with rewritten versions *)
-      Array.blit rewritten 0 arr 0 n;
-      !changed
-    in
-    (* Iterate until stable *)
-    for _ = 0 to 19 do
-      if converge () then () (* continue *)
-    done;
-    (* No Phase 2b path alias merge — comparing exact output *)
-    (* Phase 2c: compact indices *)
-    let canonical_to_new = Hashtbl.create n in
-    let next_new = ref 0 in
-    for idx = 0 to n - 1 do
-      let canonical = old_to_canonical.(idx) in
-      if not (Hashtbl.mem canonical_to_new canonical) then begin
-        Hashtbl.add canonical_to_new canonical !next_new;
-        incr next_new
-      end
-    done;
-    let old_to_new = Array.init n (fun idx ->
-      match Hashtbl.find_opt canonical_to_new old_to_canonical.(idx) with
-      | Some new_idx -> new_idx
-      | None -> idx)
-    in
-    (* Rewrite all refs *)
-    let rewrite_ref s =
-      let len = String.length s in
-      if len > 1 && s.[0] = '#' then
-        let idx_str = String.sub s 1 (len - 1) in
-        (try
-          let idx = int_of_string idx_str in
-          if idx >= 0 && idx < n then
-            "#" ^ string_of_int old_to_new.(idx)
-          else s
-        with Failure _ -> s)
-      else s
-    in
-    let rec rewrite_sexp = function
-      | Sexp.Atom s -> Sexp.Atom (rewrite_ref s)
-      | Sexp.List items -> Sexp.List (List.map rewrite_sexp items)
-    in
-    (* Build new types preamble *)
-    let new_n = !next_new in
-    let new_types = Array.make new_n (Sexp.atom "_") in
-    for idx = 0 to n - 1 do
-      let canonical = old_to_canonical.(idx) in
-      if canonical = idx then begin
-        match Hashtbl.find_opt canonical_to_new canonical with
-        | Some new_idx -> new_types.(new_idx) <- rewrite_sexp arr.(idx)
-        | None -> ()
-      end
-    done;
-    let items = ref [] in
-    for i = new_n - 1 downto 0 do
-      items := Sexp.list [Sexp.atom (string_of_int i); new_types.(i)] :: !items
-    done;
-    let preamble = Sexp.list (Sexp.atom "types" :: !items) in
-    let body = rewrite_sexp body in
-    (preamble, body)
-  end
-
 let print_typed_structure ppf str =
   reset_dedup ();
   let body = structure ~with_locs:false str in
-  let (preamble, body) = normalize_types_and_body body in
+  let preamble = build_types_preamble () in
   Format.fprintf ppf "%s\n%s" (Sexp.to_string preamble) (Sexp.to_string body)
 
 let print_typed_structure_with_locs ppf str =
   reset_dedup ();
   let body = structure ~with_locs:true str in
-  let (preamble, body) = normalize_types_and_body body in
+  let preamble = build_types_preamble () in
   Format.fprintf ppf "%s\n%s" (Sexp.to_string preamble) (Sexp.to_string body)
 
 let print_typed_signature ppf sg =
   reset_dedup ();
   let body = signature ~with_locs:false sg in
-  let (preamble, body) = normalize_types_and_body body in
+  let preamble = build_types_preamble () in
   Format.fprintf ppf "%s\n%s" (Sexp.to_string preamble) (Sexp.to_string body)
 
 let print_typed_signature_with_locs ppf sg =
   reset_dedup ();
   let body = signature ~with_locs:true sg in
-  let (preamble, body) = normalize_types_and_body body in
+  let preamble = build_types_preamble () in
   Format.fprintf ppf "%s\n%s" (Sexp.to_string preamble) (Sexp.to_string body)
