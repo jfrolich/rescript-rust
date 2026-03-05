@@ -3933,10 +3933,12 @@ pub fn type_expect<'a>(
 
         ED::Pexp_sequence(e1_idx, e2_idx) => {
             // Sequence expression: e1; e2
-            // e1 should have type unit
+            // e1 should have type unit (OCaml's type_statement wraps in begin_def/end_def)
             let unit_ty = env.type_unit(ctx);
             let e1 = tctx.arena.get_expr(*e1_idx);
+            ctx.begin_def();
             let typed_e1 = type_expect(tctx, env, e1, unit_ty, None)?;
+            ctx.end_def();
 
             // e2 has the expected type
             let e2 = tctx.arena.get_expr(*e2_idx);
