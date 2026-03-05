@@ -5712,8 +5712,15 @@ fn type_structure_item<'a>(
             // The result type for the extension constructors
             let ext_res_ty = tctx.type_ctx.new_generic_constr(path.clone(), vec![]);
 
+            // OCaml typedecl.ml: begin_def/end_def/generalize around type extension
+            // constructor translation, matching Pstr_exception treatment. This ensures
+            // arg types are at GENERIC_LEVEL so instance() creates fresh copies.
+            tctx.type_variables.clear();
+            ctx.begin_def();
+
             // Translate constructors and register them in the environment
             let mut typed_constructors = Vec::new();
+            let mut all_cstr_args: Vec<TypeExprRef> = Vec::new();
             let mut new_env = env.clone();
             for ec in &ext.ptyext_constructors {
                 let name_str = arena.get_string(ec.pext_name.txt).to_string();
@@ -5875,6 +5882,7 @@ fn type_structure_item<'a>(
                         }
                     }
                 }
+                all_cstr_args.extend(cstr_args.iter());
                 new_env.add_constructor(id.clone(), cstr_desc);
 
                 typed_constructors.push(crate::types::typedtree::ExtensionConstructor {
@@ -5899,6 +5907,12 @@ fn type_structure_item<'a>(
                     ext_loc: ec.pext_loc,
                     ext_attributes: ec.pext_attributes.clone(),
                 });
+            }
+
+            // OCaml typedecl.ml: end_def and generalize constructor arg types
+            ctx.end_def();
+            for ty_ref in &all_cstr_args {
+                crate::types::generalize(ctx, *ty_ref);
             }
 
             // Translate params
