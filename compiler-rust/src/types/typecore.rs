@@ -10139,7 +10139,11 @@ fn type_letmodule(
                 &mut seen,
             );
         }
-        unify_expression_types(tctx, loc, rewritten_ty, expected_ty, None)?;
+        // NOTE: OCaml does NOT unify body.exp_type with ty_expected here.
+        // type_expect already connected them internally. Unifying here would
+        // merge the Pexp_tuple's result_ty with the filter_arrow's return_ty,
+        // collapsing two distinct Ttuple nodes that OCaml keeps separate.
+        // OCaml only does unify_var(ty, body.exp_type) after end_def (below).
         Ok((typed_mod, body_env, typed_body, rewritten_ty))
     })();
     ctx.end_def();
