@@ -4023,8 +4023,11 @@ pub fn type_expect<'a>(
 
             let cond = tctx.arena.get_expr(*cond_idx);
             let typed_cond = type_expect(tctx, env, cond, bool_ty, None)?;
+            // OCaml uses type_statement for body (wraps in begin_def/end_def)
             let body = tctx.arena.get_expr(*body_idx);
+            ctx.begin_def();
             let typed_body = type_expect(tctx, env, body, body_unit_ty, None)?;
+            ctx.end_def();
 
             // While loop result: separate unit (OCaml: instance_def Predef.type_unit)
             let result_unit_ty = env.type_unit(ctx);
@@ -7954,11 +7957,13 @@ fn type_for(
         body_env.add_value(pv.id.clone(), desc);
     }
 
-    // OCaml uses Predef.type_unit for body via type_statement, and
+    // OCaml uses type_statement for body (wraps in begin_def/end_def), and
     // instance_def(Predef.type_unit) for the for loop result. Each `rue`
     // creates fresh instances, keeping body and result as separate type nodes.
     let body_unit_ty = env.type_unit(ctx);
+    ctx.begin_def();
     let typed_body = type_expect(tctx, &body_env, body, body_unit_ty, None)?;
+    ctx.end_def();
 
     // For loop result: separate unit type (OCaml: instance_def Predef.type_unit)
     let result_unit_ty = env.type_unit(ctx);
