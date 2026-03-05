@@ -4658,7 +4658,9 @@ fn type_structure_item<'a>(
                         // Collect spread source type info for variant spread expansion.
                         // Maps from spread index to the source type's constructor declarations.
                         // Uses transl_type to resolve the spread source type (handles qualified paths like S.x).
-                        let spread_sources: Vec<Option<Vec<crate::types::ConstructorDeclaration>>> = {
+                        // (constructors, is_pdot) - is_pdot=true means source is from a sub-module,
+                        // where OCaml's Subst.type_declaration creates fresh type copies
+                        let spread_sources: Vec<Option<(Vec<crate::types::ConstructorDeclaration>, bool)>> = {
                             let mut sources = Vec::new();
                             for cstr in cstrs.iter() {
                                 let cstr_name_str = arena.get_string(cstr.pcd_name.txt);
@@ -4668,6 +4670,7 @@ fn type_structure_item<'a>(
                                 }
                                 // Type-check the spread source type to resolve qualified paths
                                 let mut found = None;
+                                let mut is_pdot = false;
                                 if let crate::parser::ast::ConstructorArguments::Pcstr_tuple(
                                     ref args,
                                 ) = cstr.pcd_args
@@ -4683,6 +4686,7 @@ fn type_structure_item<'a>(
                                                 ..
                                             } = *ctx.get_desc(repr)
                                             {
+                                                is_pdot = matches!(path, Path::Pdot(..));
                                                 // Try looking up by path in env
                                                 if let Ok(source_decl) = temp_env.lookup_type(path) {
                                                     if let crate::types::TypeKind::TypeVariant(
@@ -4736,7 +4740,7 @@ fn type_structure_item<'a>(
                                         }
                                     }
                                 }
-                                sources.push(found);
+                                sources.push(found.map(|cstrs| (cstrs, is_pdot)));
                             }
                             sources
                         };
@@ -4750,7 +4754,7 @@ fn type_structure_item<'a>(
                             let mut nc = 0i32;
                             let mut nnc = 0i32;
                             for (idx, cstr) in cstrs.iter().enumerate() {
-                                if let Some(ref source_cstrs) = spread_sources[idx] {
+                                if let Some((ref source_cstrs, _)) = spread_sources[idx] {
                                     // Count only the expanded source constructors (not the spread marker)
                                     for sc in source_cstrs {
                                         match &sc.cd_args {
@@ -4777,7 +4781,7 @@ fn type_structure_item<'a>(
                             // Handle variant spread expansion
                             // Like OCaml's typedecl.ml: spread markers return None (filtered out)
                             // and expanded constructors get real types from the source type
-                            if let Some(ref source_cstrs) = spread_sources[cstr_idx] {
+                            if let Some((ref source_cstrs, is_pdot_source)) = spread_sources[cstr_idx] {
                                 // Expand the source type's constructors into this type
                                 // The spread marker itself is NOT included in any output
                                 for source_cstr in source_cstrs {
@@ -4814,7 +4818,16 @@ fn type_structure_item<'a>(
                                         match &source_cstr.cd_args {
                                             crate::types::ConstructorArguments::CstrTuple(args) => {
                                                 // Use the actual types from the source, not fresh vars
-                                                let typed_tree_args: Vec<TypedCoreType> = args
+                                                // For Pdot sources (sub-module types), create fresh shallow copies
+                                                // to match OCaml's Subst.type_declaration behavior
+                                                let copied_args: Vec<TypeExprRef> = if is_pdot_source {
+                                                    args.iter().map(|&texpr| {
+                                                        ctx.new_type(ctx.get_desc(texpr).clone())
+                                                    }).collect()
+                                                } else {
+                                                    args.clone()
+                                                };
+                                                let typed_tree_args: Vec<TypedCoreType> = copied_args
                                                     .iter()
                                                     .map(|&texpr| TypedCoreType {
                                                         ctyp_desc: TypedCoreTypeDesc::Ttyp_var(
@@ -4826,9 +4839,14 @@ fn type_structure_item<'a>(
                                                         ctyp_attributes: Attributes::new(),
                                                     })
                                                     .collect();
+                                                let internal_cd_args = if is_pdot_source {
+                                                    crate::types::ConstructorArguments::CstrTuple(copied_args.clone())
+                                                } else {
+                                                    source_cstr.cd_args.clone()
+                                                };
                                                 (
-                                                    args.clone(),
-                                                    source_cstr.cd_args.clone(),
+                                                    copied_args,
+                                                    internal_cd_args,
                                                     TypedConstructorArguments::Cstr_tuple(
                                                         typed_tree_args,
                                                     ),
@@ -4840,12 +4858,18 @@ fn type_structure_item<'a>(
                                             ) => {
                                                 // OCaml strips top-level Tpoly wrappers from
                                                 // internal spread label types (transl_labels lbls').
+                                                // For Pdot sources, create fresh type copies to match
+                                                // OCaml's Subst.type_declaration behavior.
                                                 let normalized_lbls = lbls
                                                     .iter()
                                                     .map(|l| {
                                                         let mut normalized = l.clone();
-                                                        normalized.ld_type =
-                                                            unwrap_poly_type(ctx, l.ld_type);
+                                                        let unwrapped = unwrap_poly_type(ctx, l.ld_type);
+                                                        normalized.ld_type = if is_pdot_source {
+                                                            ctx.new_type(ctx.get_desc(unwrapped).clone())
+                                                        } else {
+                                                            unwrapped
+                                                        };
                                                         normalized
                                                     })
                                                     .collect::<Vec<_>>();
@@ -4891,9 +4915,14 @@ fn type_structure_item<'a>(
                                                     .iter()
                                                     .map(|l| l.ld_type)
                                                     .collect::<Vec<_>>();
+                                                let internal_cd_args = if is_pdot_source {
+                                                    crate::types::ConstructorArguments::CstrRecord(normalized_lbls.clone())
+                                                } else {
+                                                    source_cstr.cd_args.clone()
+                                                };
                                                 (
                                                     args_vec,
-                                                    source_cstr.cd_args.clone(),
+                                                    internal_cd_args,
                                                     TypedConstructorArguments::Cstr_record(
                                                         typed_lbls,
                                                     ),
