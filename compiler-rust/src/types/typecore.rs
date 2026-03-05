@@ -11007,7 +11007,7 @@ fn type_let_bindings(
 
         // For recursive bindings, extend environment first
         let mut recursive_binding_ids = Vec::new();
-        let typing_env = if rec_flag == RecFlag::Recursive {
+        let mut typing_env = if rec_flag == RecFlag::Recursive {
             let mut new_env = env.clone();
             for (binding, ty) in bindings.iter().zip(binding_types.iter()) {
                 if let Some(name) =
@@ -11055,6 +11055,26 @@ fn type_let_bindings(
 
             // Save pattern variables from this binding
             all_pattern_vars.push(state.pattern_variables.clone());
+        }
+
+        // Match OCaml: update recursive env with pattern variable types.
+        // OCaml's type_pattern_list returns new_env with pattern variables
+        // (from enter_variable/build_as_type), used as exp_env for body typing.
+        // Without this, binding_type Tvars (linked to outer constraint_ty)
+        // are used instead of inner pattern types from enter_variable.
+        if rec_flag == RecFlag::Recursive {
+            for pvars in &all_pattern_vars {
+                for pv in pvars {
+                    let desc = ValueDescription {
+                        val_type: pv.ty,
+                        val_kind: crate::types::ValueKind::ValReg,
+                        val_loc: pv.loc.clone(),
+                        val_attributes: vec![],
+                        val_path: None,
+                    };
+                    typing_env.add_value(pv.id.clone(), desc);
+                }
+            }
         }
 
         if rec_flag == RecFlag::Recursive {
