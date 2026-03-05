@@ -6736,6 +6736,9 @@ fn transl_sig_type_declarations<'a>(
         let type_name_str = arena.get_string(type_name);
         let type_id = Ident::create_local(type_name_str);
 
+        // OCaml: reset_type_variables() before each type declaration
+        tctx.type_variables.clear();
+
         // Convert type parameters
         let mut typ_params: Vec<(TypedCoreType, TypesVariance)> = Vec::new();
         let mut internal_type_params: Vec<TypeExprRef> = Vec::new();
@@ -6771,6 +6774,12 @@ fn transl_sig_type_declarations<'a>(
                 _ => transl_type(tctx, env, core_type)?,
             };
             internal_type_params.push(type_ref);
+            // Insert type params into type_variables so record field/manifest
+            // translation can find them and share the same Tvar node.
+            // Matches OCaml's transl_type_param which inserts into type_variables.
+            if let crate::parser::ast::CoreTypeDesc::Ptyp_var(name) = &*core_type.ptyp_desc {
+                tctx.type_variables.insert(name.to_string(), type_ref);
+            }
             let types_var = match parser_var {
                 ParserVariance::Covariant => TypesVariance::covariant(),
                 ParserVariance::Contravariant => TypesVariance::contravariant(),
