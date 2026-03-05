@@ -4932,6 +4932,10 @@ fn type_structure_item<'a>(
                                         };
 
                                     let res_ty = ctx.new_constr(type_path.clone(), internal_type_params.clone());
+                                    // Spread constructor cstr_res must be generalized
+                                    // (like non-spread constructors at line 5348) so that
+                                    // instance_constructor creates fresh copies.
+                                    env_desc_types_for_generalize.push(res_ty);
                                     let sc_arity = sc_args.len() as i32;
 
                                     internal_cstrs.push(crate::types::ConstructorDeclaration {
