@@ -2148,18 +2148,25 @@ fn unify_types<'a>(
             unify(ctx, state, t1, link2)
         }
 
-        // Tpoly with empty vars: unwrap and retry
+        // Tpoly with empty vars: unwrap and retry, then link the Tpoly node.
+        // OCaml's unify3 catch-all does `link_type t1' t2` which links the
+        // Tpoly node itself. Without the link, the Tpoly remains visible in
+        // sexp output instead of being resolved to the unified body type.
         (TypeDesc::Tpoly { body, vars }, _) if vars.is_empty() => {
             let body = *body;
             drop(desc1);
             drop(desc2);
-            unify(ctx, state, body, t2)
+            unify(ctx, state, body, t2)?;
+            link_type(ctx, t1, t2);
+            Ok(())
         }
         (_, TypeDesc::Tpoly { body, vars }) if vars.is_empty() => {
             let body = *body;
             drop(desc1);
             drop(desc2);
-            unify(ctx, state, t1, body)
+            unify(ctx, state, t1, body)?;
+            link_type(ctx, t2, t1);
+            Ok(())
         }
 
         // Types don't match — try fully expanding type aliases as last resort
