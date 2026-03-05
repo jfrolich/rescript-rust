@@ -2648,6 +2648,10 @@ fn translate_module_type_to_decl<'a>(
 
                         for (decl_idx, decl) in decls.iter().enumerate() {
                             let type_id = declared_type_ids[decl_idx].clone();
+                            // Match OCaml transl_type_decl: begin_def so params/manifest
+                            // are created at elevated level, then end_def + generalize
+                            // marks them as generic (needed for instance_parameterized_type).
+                            tctx.type_ctx.begin_def();
                             let mut type_params = Vec::with_capacity(decl.ptype_params.len());
                             let mut type_variance = Vec::with_capacity(decl.ptype_params.len());
                             for (param_ty_idx, variance) in &decl.ptype_params {
@@ -2810,6 +2814,15 @@ fn translate_module_type_to_decl<'a>(
                                     )
                                 }
                             };
+
+                            // end_def + generalize: mark params/manifest as generic
+                            tctx.type_ctx.end_def();
+                            for &p in &type_params {
+                                crate::types::ctype::generalize(tctx.type_ctx, p);
+                            }
+                            if let Some(m) = type_manifest {
+                                crate::types::ctype::generalize(tctx.type_ctx, m);
+                            }
 
                             let type_decl = crate::types::TypeDeclaration {
                                 type_params,
