@@ -1912,23 +1912,38 @@ fn unify_types<'a>(
             // For types where ALL params are phantom, OCaml's expansion
             // hides those params entirely, so neither original is linked.
             if !all_phantom {
-                // Try path normalization on t1 to match OCaml's
-                // unify2->unify3 flow. Only path normalization (not full
-                // expand_head) to avoid changing type-checking behavior
-                // for functor types where manifest expansion would create
-                // structural forms (defunctor_make_test crash).
+                // OCaml's unify2 expands both sides via expand_head_unif
+                // BEFORE calling unify3. unify3 does `link_type t1' t2`
+                // where t1' is the EXPANDED form. For expandable types
+                // (with manifest), t1' is a DIFFERENT node from t1, so
+                // the original t1 stays unlinked. For abstract types,
+                // t1' == t1, so t1 IS linked to t2.
+                //
+                // Match this by trying to expand t1 for parameterized
+                // types: if expansion succeeds, link the expansion node
+                // (not the original) to t2. For nullary types, link
+                // t1 directly (OCaml fast-path in unify).
                 let link_source = if !args1.is_empty() {
                     if let Some(env) = state.env() {
                         let desc = ctx.get_desc(t1);
                         if let TypeDesc::Tconstr { path, args, abbrev: _ } = &*desc {
                             let path_norm = normalize_path_full(ctx, env, path);
                             if path_norm != *path {
+                                // Path changed: create normalized node
                                 let new_node = ctx.new_constr(path_norm, args.clone());
                                 drop(desc);
                                 new_node
                             } else {
                                 drop(desc);
-                                t1
+                                // Same path: try expanding t1 like OCaml's
+                                // expand_head_unif. If expansion succeeds,
+                                // the expanded node serves as t1' (different
+                                // from t1), so link_type links the expansion
+                                // to t2, leaving original t1 unlinked.
+                                match try_expand_head(ctx, env, t1) {
+                                    Some(expanded) if ctx.repr(expanded) != t1 => expanded,
+                                    _ => t1, // Abstract: link original
+                                }
                             }
                         } else {
                             drop(desc);
