@@ -5046,6 +5046,15 @@ fn type_application(
     let max_arity = function_arity.unwrap_or(i32::MAX);
     let mut top_arity: Option<i32> = function_arity;
 
+    // OCaml special case for ignore: skip post-unify (type_argument's unify_exp)
+    // so that Pexp_tuple/etc. result types stay as fresh nodes.
+    // OCaml typecore.ml:3756 handles ignore via type_expect only (no type_argument).
+    let is_ignore_fn = matches!(
+        &typed_funct.exp_desc,
+        ExpressionDesc::Texp_ident(_, _, desc)
+            if matches!(&desc.val_kind, crate::types::ValueKind::ValPrim(prim) if prim.prim_name == "%ignore")
+    );
+
     // Match labels by name (OCaml's extract_label) instead of consuming call args strictly
     // left-to-right.
     let mut remaining_args: Vec<(ArgLabel, crate::parse_arena::ExprIdx)> = args
@@ -5088,7 +5097,7 @@ fn type_application(
                     expected_ty: effective_arg_ty,
                     unify_ty: effective_arg_ty0,
                     enforce_optional: fn_label.is_optional() && !call_is_optional,
-                    skip_post_unify: false,
+                    skip_post_unify: is_ignore_fn,
                 });
                 current_ty = ret_ty;
                 current_ty0 = ret_ty0;
