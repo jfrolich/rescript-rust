@@ -2156,13 +2156,16 @@ fn sexp_module_type_desc(arena: &ParseArena, ctx: &TypeContext<'_>, with_locs: b
             ])
         }
         ModuleTypeDesc::Tmty_with(mt, constraints) => {
+            // OCaml evaluates mt_sexp BEFORE constraints (via let binding).
+            // Must match to get identical DFS encounter order for type nodes.
+            let mt_sexp = sexp_module_type(arena, ctx, with_locs, dedup, mt);
             let mut constraint_sexps = Vec::new();
             for (p, _, wc) in constraints.iter() {
                 constraint_sexps.push(Sexp::list(vec![sexp_path(p), sexp_with_constraint(arena, ctx, with_locs, dedup, wc)]));
             }
             Sexp::list(vec![
                 Sexp::atom("Tmty_with"),
-                sexp_module_type(arena, ctx, with_locs, dedup, mt),
+                mt_sexp,
                 Sexp::list(constraint_sexps),
             ])
         }
