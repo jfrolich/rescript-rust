@@ -148,6 +148,100 @@ Parity means the Rust type checker produces a typed AST with:
 
 This is achieved ONLY by making the Rust type checker implementation equivalent to OCaml's. There are no shortcuts.
 
+### Running Typedtree Sexp Parity Tests
+
+**IMPORTANT: Always run from the project root directory.** The parity script uses relative paths and will fail from subdirectories.
+
+```bash
+# Full parity test (all 657 files, takes a few minutes)
+./scripts/test_typedtree_parity.sh
+
+# Single file by pattern (fastest for iteration)
+./scripts/test_typedtree_parity.sh lazy_test
+./scripts/test_typedtree_parity.sh DictPatternMatchingOptimization
+
+# Single file by full path
+./scripts/test_typedtree_parity.sh tests/tests/src/lazy_test.res
+
+# Stop on first failure
+./scripts/test_typedtree_parity.sh --quick
+
+# Skip the rewatch build step (when you only changed the Rust compiler, not test files)
+./scripts/test_typedtree_parity.sh --no-build lazy_test
+```
+
+**CRITICAL: Build BOTH compiler and rewatch before parity tests:**
+```bash
+cargo build --release --manifest-path compiler-rust/Cargo.toml
+cargo build --release --manifest-path rewatch/Cargo.toml
+```
+The parity script uses the rewatch binary, NOT bsc directly. A stale rewatch binary gives WRONG results!
+
+**CRITICAL: Clear parity cache before authoritative runs:**
+```bash
+rm -rf .parity-cache/
+```
+Stale cached diff files cause inflated parity numbers.
+
+### Reading Parity Diffs
+
+After running parity tests, diffs for failing files are cached:
+```bash
+# List all failing test diffs
+ls .parity-cache/tests/diffs/
+
+# Read a specific diff (file names use underscores for path separators)
+cat .parity-cache/tests/diffs/tests_tests_src_lazy_test.res.diff
+
+# Sort diffs by size to find smallest failures
+wc -l .parity-cache/tests/diffs/*.diff | sort -n | head -20
+
+# Count actual hunks in a diff
+grep -c '^@@' .parity-cache/tests/diffs/tests_tests_src_lazy_test.res.diff
+```
+
+### Manually Generating Sexp Output
+
+When you need to examine the raw sexp output (not just the diff), generate it manually:
+
+```bash
+# Step 1: Get compiler args (run from project root)
+cd tests/tests
+ARGS=$(../../packages/@rescript/darwin-arm64/bin/rescript.exe compiler-args src/lazy_test.res 2>/dev/null | python3 -c "import sys, json; d=json.load(sys.stdin); print(' '.join(d.get('compiler_args', [])))")
+echo "$ARGS"
+
+# Step 2: Run compilers from lib/bs directory (IMPORTANT: must cd here)
+cd lib/bs
+
+# OCaml sexp (uses dune-built bsc, NOT the released one)
+../../../../_build/install/default/bin/bsc -dtyped-sexp $ARGS 2> /tmp/ocaml.sexp
+
+# Rust sexp
+timeout 10 ../../../../compiler-rust/target/release/bsc -dtyped-sexp $ARGS 2> /tmp/rust.sexp
+
+# Step 3: Compare
+diff -ua /tmp/ocaml.sexp /tmp/rust.sexp | head -100
+
+# Return to project root when done
+cd ../../../..
+```
+
+**Common mistakes to avoid:**
+- Do NOT run bsc from the project root — it can't find Pervasives.cmi
+- Do NOT use `-dtyped-sexp-locs` (that includes locations, parity tests use `-dtyped-sexp` without locs)
+- Do NOT use the released `bsc.exe` for OCaml sexp — it outputs a different format. Use the dune-built one at `_build/install/default/bin/bsc`
+- Always use `timeout` with the Rust compiler (infinite loops are possible)
+- The sexp output goes to **stderr** (redirect with `2>`, not `>`)
+- Always use `diff -a` flag (sexp files may contain binary characters)
+
+### Rebuilding the OCaml bsc
+
+If you modify OCaml source files (e.g., `compiler/ml/sexp_typedtree.ml`), rebuild with:
+```bash
+eval $(opam env) && dune clean --root . && dune build --root .
+```
+This is worktree-specific — other worktrees have their own dune build.
+
 ## Compiler Architecture
 
 ### Compilation Pipeline
