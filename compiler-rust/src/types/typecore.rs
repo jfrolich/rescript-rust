@@ -3878,10 +3878,9 @@ pub fn type_expect<'a>(
             // Create fresh type variables for each element
             let elem_types: Vec<TypeExprRef> = exprs.iter().map(|_| ctx.new_var(None)).collect();
 
-            // Create tuple type and unify (instance generic expected_ty to avoid corruption)
+            // Create tuple type and unify directly with expected_ty (matches OCaml's non-rue behavior)
             let tuple_ty = ctx.new_tuple(elem_types.clone());
-            let eff_expected = instance_if_generic(ctx, expected_ty);
-            unify_expression_types(tctx, loc, tuple_ty, eff_expected, context.clone())?;
+            unify_expression_types(tctx, loc, tuple_ty, expected_ty, context.clone())?;
 
             // Type check each element
             let mut typed_exprs = Vec::new();
@@ -4088,9 +4087,8 @@ pub fn type_expect<'a>(
             let elem_ty = ctx.new_var(None);
             let array_ty = env.type_array(ctx, elem_ty);
 
-            // Instance generic expected_ty to avoid corruption
-            let eff_expected = instance_if_generic(ctx, expected_ty);
-            unify_expression_types(tctx, loc, array_ty, eff_expected, context)?;
+            // Unify directly with expected_ty (matches OCaml's non-rue behavior)
+            unify_expression_types(tctx, loc, array_ty, expected_ty, context)?;
 
             let mut typed_exprs = Vec::new();
             for e in exprs.iter() {
@@ -8100,9 +8098,8 @@ fn type_construct(
     // Instantiate constructor: creates fresh type variables shared between
     // cstr_res and cstr_args, matching OCaml's Ctype.instance_constructor
     let (inst_arg_types, result_ty) = crate::types::instance_constructor(ctx, &cstr_desc);
-    // Instance generic expected_ty to avoid corruption
-    let eff_expected = instance_if_generic(ctx, expected_ty);
-    unify_expression_types(tctx, loc, result_ty, eff_expected, None)?;
+    // Unify directly with expected_ty (matches OCaml's non-rue behavior)
+    unify_expression_types(tctx, loc, result_ty, expected_ty, None)?;
 
     // Type check arguments
     let typed_args = match (inst_arg_types.as_slice(), arg) {
@@ -9191,9 +9188,10 @@ fn type_constraint(
 
     // Pass the GENERIC constraint type to type_expect (matches OCaml).
     // Rue handlers create per-expression instances via rue_unify.
-    // Non-rue handlers (tuple, array, construct) use instance_if_generic
-    // to avoid corrupting the generic type. Set generic_constraint_body_ty
-    // so match cases can create fresh instances per case body.
+    // Non-rue handlers (tuple, array, construct) unify directly with the
+    // generic type, which links it to the concrete type. Set
+    // generic_constraint_body_ty so match cases can create fresh instances
+    // per case body (instance follows the Tlink to copy the concrete type).
     let prev_generic_constraint = tctx.generic_constraint_body_ty;
     tctx.generic_constraint_body_ty = Some(ctype_ty);
     let typed_inner = type_expect(tctx, env, inner_expr, ctype_ty, None)?;
