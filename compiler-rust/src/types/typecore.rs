@@ -10048,6 +10048,48 @@ fn type_letmodule(
                 };
                 (md, crate::types::decl::ModuleType::MtySignature(sig_items))
             }
+            crate::parser::ast::ModuleExprDesc::Pmod_ident(lid) => {
+                let md = crate::types::typemod::type_module_expr_with_alias_mode(
+                    tctx,
+                    env,
+                    arena,
+                    module_expr,
+                    true,
+                )
+                .map_err(|e| TypeCoreError::Other(format!("letmodule: {e:?}")))?;
+                // Match OCaml Pexp_letmodule: store MtyAlias for module aliases.
+                // OCaml's Env.enter_module stores Mty_alias(Mta_absent, path) for
+                // Pmod_ident, which enables normalize_path_full to follow the alias
+                // and memorize_simple_abbrev to create type sharing.
+                let longident = arena.get_longident(lid.txt);
+                let alias_path = crate::types::typemod::lookup_module_path_by_lid(
+                    longident,
+                    arena,
+                    env,
+                    &mut tctx.persistent_env,
+                    tctx.type_ctx,
+                );
+                let mod_sig = if let Some(path) = alias_path {
+                    crate::types::decl::ModuleType::MtyAlias(
+                        crate::types::decl::AliasPresence::MtaAbsent,
+                        path,
+                    )
+                } else if let Some(sig) = crate::types::typemod::lookup_module_type_from_parsed_module_expr(
+                    tctx,
+                    env,
+                    arena,
+                    module_expr,
+                ) {
+                    sig
+                } else if let Some(sig) =
+                    crate::types::typemod::extract_module_type_from_mod_expr_pub(&md)
+                {
+                    sig
+                } else {
+                    crate::types::decl::ModuleType::MtySignature(vec![])
+                };
+                (md, mod_sig)
+            }
             _ => {
                 let md = crate::types::typemod::type_module_expr_with_alias_mode(
                     tctx,
