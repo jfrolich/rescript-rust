@@ -1403,10 +1403,21 @@ fn subst_with_memo(
     let old_abbrevs = ctx.current_abbreviations();
     ctx.set_current_abbreviations(memo_ref);
 
-    // 4. instance_parameterized_type (copy will now check abbreviations via find_repr)
+    // 4. Match OCaml's `current_level := level` before instance_parameterized_type.
+    // OCaml sets current_level to the Tconstr's level so that fresh copies
+    // of the type parameters are created at the same level as the original.
+    // Without this, when the Tconstr is at generic_level but current_level
+    // is lower (after end_def), the fresh params would be at current_level
+    // and link_type would destructively lower the args' levels from
+    // generic_level to current_level, corrupting the original type.
+    let tconstr_level = ctx.get_level(ctx.repr(ty));
+    let old_level = ctx.current_level();
+    ctx.set_current_level(tconstr_level);
+
     let (fresh_params, fresh_body) = instance_parameterized_type(ctx, params, body);
 
-    // 5. Clear global abbreviations context
+    // 5. Restore global abbreviations and level
+    ctx.set_current_level(old_level);
     ctx.set_current_abbreviations(old_abbrevs);
 
     // 6. Unify stub with body (OCaml: !unify' env body0 body')

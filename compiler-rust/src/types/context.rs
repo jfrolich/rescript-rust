@@ -829,6 +829,13 @@ impl<'a> TypeContext<'a> {
         self.current_level.get()
     }
 
+    /// Temporarily set the current level. Used by subst_with_memo to match
+    /// OCaml's `current_level := level` which ensures fresh copies during
+    /// instance_parameterized_type are created at the Tconstr's level.
+    pub fn set_current_level(&self, level: i32) {
+        self.current_level.set(level);
+    }
+
     /// Get the non-generalizable level.
     pub fn nongen_level(&self) -> i32 {
         self.nongen_level.get()
