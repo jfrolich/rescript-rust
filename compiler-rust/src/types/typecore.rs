@@ -3859,8 +3859,8 @@ pub fn type_expect<'a>(
             let constant = convert_constant(cst)?;
             let ty = type_constant(ctx, env, &constant);
 
-            // Unify with expected type
-            unify_expression_types(tctx, loc, ty, expected_ty, context)?;
+            // OCaml: rue { ... exp_type = type_constant cst; ... }
+            rue_unify(tctx, loc, ty, expected_ty, context)?;
 
             Ok(Expression::new(
                 ExpressionDesc::Texp_constant(constant),
@@ -3878,9 +3878,10 @@ pub fn type_expect<'a>(
             // Create fresh type variables for each element
             let elem_types: Vec<TypeExprRef> = exprs.iter().map(|_| ctx.new_var(None)).collect();
 
-            // Create tuple type and unify
+            // Create tuple type and unify (instance generic expected_ty to avoid corruption)
             let tuple_ty = ctx.new_tuple(elem_types.clone());
-            unify_expression_types(tctx, loc, tuple_ty, expected_ty, context.clone())?;
+            let eff_expected = instance_if_generic(ctx, expected_ty);
+            unify_expression_types(tctx, loc, tuple_ty, eff_expected, context.clone())?;
 
             // Type check each element
             let mut typed_exprs = Vec::new();
@@ -4000,12 +4001,11 @@ pub fn type_expect<'a>(
                     ))
                 }
                 None => {
-                    // OCaml uses rue here: type then-branch as unit, then unify
-                    // the whole if-expression with the expected type.
+                    // OCaml: rue { ... exp_type = ifso.exp_type; ... }
                     let unit_ty = env.type_unit(ctx);
                     let typed_then = type_expect(tctx, env, then_branch, unit_ty, None)?;
                     let then_exp_type = typed_then.exp_type;
-                    unify_expression_types(tctx, loc, then_exp_type, expected_ty, context)?;
+                    rue_unify(tctx, loc, then_exp_type, expected_ty, context)?;
 
                     Ok(Expression::new(
                         ExpressionDesc::Texp_ifthenelse(
@@ -4039,9 +4039,11 @@ pub fn type_expect<'a>(
             // OCaml's type_statement calls expand_head after end_def (see Pexp_sequence).
             ctx.check_abbrev_env(env);
 
-            // While loop result: separate unit (OCaml: instance_def Predef.type_unit)
+            // OCaml: rue { ... exp_type = instance_def Predef.type_unit; ... }
+            // Keep original argument order to preserve Tlink direction.
             let result_unit_ty = env.type_unit(ctx);
-            unify_expression_types(tctx, loc, expected_ty, result_unit_ty, context)?;
+            let inst_expected = instance_if_generic(ctx, expected_ty);
+            unify_expression_types(tctx, loc, inst_expected, result_unit_ty, context)?;
 
             Ok(Expression::new(
                 ExpressionDesc::Texp_while(Box::new(typed_cond), Box::new(typed_body)),
@@ -4063,8 +4065,11 @@ pub fn type_expect<'a>(
             let exp_type = match &typed_e.exp_desc {
                 ExpressionDesc::Texp_construct(_, cd, _) if cd.cstr_name == "false" => expected_ty,
                 _ => {
+                    // OCaml: rue { ... exp_type = instance_def Predef.type_unit; ... }
+                    // Keep original argument order to preserve Tlink direction.
                     let unit_ty = env.type_unit(ctx);
-                    unify_expression_types(tctx, loc, expected_ty, unit_ty, context)?;
+                    let inst_expected = instance_if_generic(ctx, expected_ty);
+                    unify_expression_types(tctx, loc, inst_expected, unit_ty, context)?;
                     unit_ty
                 }
             };
@@ -4083,7 +4088,9 @@ pub fn type_expect<'a>(
             let elem_ty = ctx.new_var(None);
             let array_ty = env.type_array(ctx, elem_ty);
 
-            unify_expression_types(tctx, loc, array_ty, expected_ty, context)?;
+            // Instance generic expected_ty to avoid corruption
+            let eff_expected = instance_if_generic(ctx, expected_ty);
+            unify_expression_types(tctx, loc, array_ty, eff_expected, context)?;
 
             let mut typed_exprs = Vec::new();
             for e in exprs.iter() {
@@ -4419,7 +4426,8 @@ pub fn type_expect<'a>(
                 field_lid,
                 &expr.pexp_attributes,
             )?;
-            unify_expression_types(tctx, loc, typed_field.exp_type, expected_ty, context)?;
+            // OCaml: rue { ... exp_type = ty_arg; ... }
+            rue_unify(tctx, loc, typed_field.exp_type, expected_ty, context)?;
             Ok(typed_field)
         }
 
@@ -4627,6 +4635,31 @@ fn unify_expression_types(
     }
 }
 
+/// Instance a type if it's at GENERIC_LEVEL, otherwise return it unchanged.
+/// Used to protect generic expected types from corruption by non-rue handlers.
+fn instance_if_generic(ctx: &TypeContext<'_>, ty: TypeExprRef) -> TypeExprRef {
+    if ctx.get_level(ctx.repr(ty)) == crate::types::type_expr::GENERIC_LEVEL {
+        crate::types::instance(ctx, ty)
+    } else {
+        ty
+    }
+}
+
+/// OCaml's `rue` mechanism: instance the expected type if generic before unifying.
+/// When expected_ty is generic (from type_constraint/type_argument), `instance` goes
+/// through `copy` which checks `simple_abbrevs` for nullary Tconstr sharing, creating
+/// Tlink nodes that produce physical sharing in the typed tree.
+fn rue_unify(
+    tctx: &mut TypeCheckContext<'_>,
+    loc: LocIdx,
+    exp_ty: TypeExprRef,
+    expected_ty: TypeExprRef,
+    context: Option<TypeClashContext>,
+) -> TypeCoreResult<()> {
+    let inst = instance_if_generic(tctx.type_ctx, expected_ty);
+    unify_expression_types(tctx, loc, exp_ty, inst, context)
+}
+
 // ============================================================================
 // Expression Type Checking Helpers
 // ============================================================================
@@ -4773,8 +4806,8 @@ fn translate_unified_ops(
             // Result type is a fresh concrete type
             let result_ty = make_concrete();
 
-            // Unify result with expected type
-            if let Err(e) = unify_expression_types(tctx, loc, result_ty, expected_ty, context) {
+            // OCaml: rue { ... exp_type = ty_res; ... } (unified ops are Pexp_apply)
+            if let Err(e) = rue_unify(tctx, loc, result_ty, expected_ty, context) {
                 return Some(Err(e));
             }
 
@@ -4839,7 +4872,8 @@ fn translate_unified_ops(
                 vec![],
             );
 
-            if let Err(e) = unify_expression_types(tctx, loc, result_ty, expected_ty, context) {
+            // OCaml: rue { ... exp_type = ty_res; ... } (unified ops are Pexp_apply)
+            if let Err(e) = rue_unify(tctx, loc, result_ty, expected_ty, context) {
                 return Some(Err(e));
             }
 
@@ -5387,8 +5421,8 @@ fn type_application(
     // Keep this before unifying the application result with expected_ty.
     unify_expression_types(tctx, loc, ctx.new_var(None), typed_funct.exp_type, None)?;
 
-    // Unify result with expected type
-    unify_expression_types(tctx, loc, result_ty, expected_ty, context)?;
+    // OCaml: rue { ... exp_type = ty_res; ... }
+    rue_unify(tctx, loc, result_ty, expected_ty, context)?;
 
     Ok(Expression::new(
         ExpressionDesc::Texp_apply {
@@ -7570,6 +7604,10 @@ fn type_function(
     use crate::types::typedtree::{Case, FunctionParam, FunctionParamPattern, Partial};
 
     let ctx = tctx.type_ctx;
+    // Instance generic expected_ty to avoid corruption (OCaml instances via
+    // `let ty = instance env ty_expected` before filter_arrow in Pexp_fun)
+    let expected_ty = instance_if_generic(ctx, expected_ty);
+
     // Clone (not take) type_variables so inner functions can SEE outer scope
     // variables (enabling cross-scope sharing like 'self in @this callbacks)
     // but additions inside the function don't leak back to the outer scope.
@@ -7946,9 +7984,11 @@ fn type_for(
     // For Pexp_for, type_statement is called with new_env (body_env).
     ctx.check_abbrev_env(&body_env);
 
-    // For loop result: separate unit type (OCaml: instance_def Predef.type_unit)
+    // OCaml: rue { ... exp_type = instance_def Predef.type_unit; ... }
+    // Keep original argument order to preserve Tlink direction.
     let result_unit_ty = env.type_unit(ctx);
-    unify_expression_types(tctx, loc, expected_ty, result_unit_ty, context)?;
+    let inst_expected = instance_if_generic(ctx, expected_ty);
+    unify_expression_types(tctx, loc, inst_expected, result_unit_ty, context)?;
 
     Ok(Expression::new(
         ExpressionDesc::Texp_for(
@@ -8036,7 +8076,9 @@ fn type_construct(
     // Instantiate constructor: creates fresh type variables shared between
     // cstr_res and cstr_args, matching OCaml's Ctype.instance_constructor
     let (inst_arg_types, result_ty) = crate::types::instance_constructor(ctx, &cstr_desc);
-    unify_expression_types(tctx, loc, result_ty, expected_ty, None)?;
+    // Instance generic expected_ty to avoid corruption
+    let eff_expected = instance_if_generic(ctx, expected_ty);
+    unify_expression_types(tctx, loc, result_ty, eff_expected, None)?;
 
     // Type check arguments
     let typed_args = match (inst_arg_types.as_slice(), arg) {
@@ -8197,7 +8239,8 @@ fn type_variant(
             row_fixed: false,
             row_name: None,
         });
-        unify_expression_types(tctx, loc, variant_ty, expected_ty, None)?;
+        // OCaml: rue { ... exp_type = variant_row; ... }
+        rue_unify(tctx, loc, variant_ty, expected_ty, None)?;
         return Ok(Expression::new(
             ExpressionDesc::Texp_variant(label.to_string(), Some(Box::new(typed_arg))),
             loc.clone(),
@@ -8261,7 +8304,8 @@ fn type_variant(
         row_fixed: false,
         row_name: None,
     });
-    unify_expression_types(tctx, loc, variant_ty, expected_ty, None)?;
+    // OCaml: rue { ... exp_type = variant_row; ... }
+    rue_unify(tctx, loc, variant_ty, expected_ty, None)?;
 
     Ok(Expression::new(
         ExpressionDesc::Texp_variant(label.to_string(), None),
@@ -8354,6 +8398,9 @@ fn type_record(
     use crate::types::typedtree::RecordLabelDefinition;
 
     let ctx = tctx.type_ctx;
+    // Instance generic expected_ty to avoid corruption (type_record uses
+    // expected_ty for disambiguation, label unification, and as exp_type)
+    let expected_ty = instance_if_generic(ctx, expected_ty);
     let placeholder_lid = tctx.arena.placeholder_located(loc);
 
     // Type check base expression if present.
@@ -9064,8 +9111,10 @@ fn type_setfield(
     // Type check the new value with the proper field type
     let typed_value = type_expect(tctx, env, new_value, field_ty, None)?;
 
-    // setfield has type unit
-    unify_expression_types(tctx, loc, expected_ty, unit_ty, context)?;
+    // OCaml: rue { ... exp_type = instance_def Predef.type_unit; ... }
+    // Keep original argument order to preserve Tlink direction.
+    let inst_expected = instance_if_generic(tctx.type_ctx, expected_ty);
+    unify_expression_types(tctx, loc, inst_expected, unit_ty, context)?;
 
     Ok(Expression::new(
         ExpressionDesc::Texp_setfield(
@@ -9102,18 +9151,22 @@ fn type_constraint(
     let var_level = ctx.current_level();
     crate::types::generalize_structure(ctx, var_level, ctype_ty);
 
-    // OCaml's type_argument passes the generalized `ty` to type_expect, but
-    // inside type_expect_, `rue` wraps every unification with `instance env
-    // ty_expected`, so the generalized type is never directly unified. Since
-    // Rust's type_expect/type_application unifies expected_ty directly, pass a
-    // fresh instance here to avoid mutating the generalized ctype_ty, which
-    // would cause later `instance(ctx, ctype_ty)` calls to see the linked
-    // (non-generic) representative instead of the original generic type.
+    // OCaml's type_argument passes the GENERIC `ty` to type_expect. Inside
+    // type_expect_, each leaf handler wraps unification with `rue` which calls
+    // `instance env ty_expected` — when ty_expected is generic, this goes
+    // through `copy` which checks `simple_abbrevs` for nullary Tconstr sharing.
+    // Non-rue handlers (tuple, array, construct, function) use
+    // `instance_if_generic` to avoid corrupting the generic type.
+    //
+    // Pre-create instances from ctype_ty before type_expect, matching OCaml's
+    // type_argument which creates `instance env ty` for post-unify.
     let arg_expected_ty = crate::types::instance(ctx, ctype_ty);
     let arg_unify_ty = crate::types::instance(ctx, ctype_ty);
 
     // Pass the GENERIC constraint type so match cases can create fresh
     // instances per case body (matching OCaml where ty_res is generic).
+    // NOTE: We pass non-generic arg_expected_ty to type_expect; the rue/instance_if_generic
+    // guards in handlers are no-ops for non-generic types (handlers-only step).
     let prev_generic_constraint = tctx.generic_constraint_body_ty;
     tctx.generic_constraint_body_ty = Some(ctype_ty);
     let typed_inner = type_expect(tctx, env, inner_expr, arg_expected_ty, None)?;
@@ -9128,7 +9181,7 @@ fn type_constraint(
     let result_ty = crate::types::instance(ctx, ctype_ty);
     ctx.restore_simple_abbrevs(saved_abbrevs);
 
-    unify_expression_types(tctx, loc, result_ty, expected_ty, None)?;
+    rue_unify(tctx, loc, result_ty, expected_ty, None)?;
 
     let mut result = typed_inner;
     result.exp_type = result_ty;
@@ -9173,10 +9226,12 @@ fn type_coerce(
     // Translate the target type
     let (to_typed_ctype, to_ty) = transl_type(tctx, env, to_type)?;
 
-    // Unify the target type with the expected type
-    if crate::types::unify(tctx.type_ctx, &mut tctx.unify_state, expected_ty, to_ty).is_err() {
+    // OCaml: rue { ... exp_type = ty'; ... } — unify coercion target with expected
+    // Keep original argument order to preserve Tlink direction.
+    let inst_expected = instance_if_generic(tctx.type_ctx, expected_ty);
+    if crate::types::unify(tctx.type_ctx, &mut tctx.unify_state, inst_expected, to_ty).is_err() {
         return Err(TypeCoreError::ExprTypeClash {
-            trace: vec![(expected_ty, to_ty)],
+            trace: vec![(inst_expected, to_ty)],
             context: None,
         });
     }
@@ -9354,7 +9409,8 @@ fn type_newtype(
         let mut seen = HashSet::new();
         replace_newtype_path(ctx, rewritten_ty, &newtype_id, replacement_ty, &mut seen);
 
-        unify_expression_types(tctx, loc, rewritten_ty, expected_ty, None)?;
+        // OCaml: rue { ... exp_type = ety; ... }
+        rue_unify(tctx, loc, rewritten_ty, expected_ty, None)?;
 
         let mut result = prepend_exp_extra(
             typed_body,
@@ -9568,7 +9624,8 @@ fn type_send(
             }
     };
 
-    if unify_expression_types(tctx, loc, method_result_ty, expected_ty, None).is_err() {
+    // OCaml: rue { ... exp_type = method_result_ty; ... }
+    if rue_unify(tctx, loc, method_result_ty, expected_ty, None).is_err() {
         return Ok(Expression::new(
             ExpressionDesc::Texp_send(
                 Box::new(typed_obj),
@@ -10480,10 +10537,8 @@ fn type_pack(
         lids: pack_lids,
         args: pack_args,
     });
-    // Match OCaml `rue` behavior at Pexp_pack sites: the produced package type
-    // is still unified against the expected expression type. When that succeeds,
-    // emit the unified expected representative to preserve alias paths in output.
-    let pack_unified = unify_expression_types(tctx, loc, packed_type, expected_ty, context).is_ok();
+    // OCaml: rue { ... exp_type = Tpackage(...); ... }
+    let pack_unified = rue_unify(tctx, loc, packed_type, expected_ty, context).is_ok();
     let exp_type = if pack_unified {
         ctx.repr(expected_ty)
     } else {
