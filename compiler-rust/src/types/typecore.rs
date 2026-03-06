@@ -9167,8 +9167,9 @@ fn type_constraint(
 
     // Pass the GENERIC constraint type to type_expect (matches OCaml).
     // Rue handlers create per-expression instances via rue_unify.
-    // Non-rue handlers (tuple, array, construct) directly unify with the
-    // generic type, consuming it — this matches OCaml's behavior.
+    // Non-rue handlers (tuple, array, construct) use instance_if_generic
+    // to avoid corrupting the generic type. Set generic_constraint_body_ty
+    // so match cases can create fresh instances per case body.
     let prev_generic_constraint = tctx.generic_constraint_body_ty;
     tctx.generic_constraint_body_ty = Some(ctype_ty);
     let typed_inner = type_expect(tctx, env, inner_expr, ctype_ty, None)?;
