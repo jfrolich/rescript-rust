@@ -13339,6 +13339,15 @@ fn lookup_type_decl_for_path<'a>(
     if let Path::Pdot(parent, type_name, _) = type_path {
         let mut deferred_self_manifest_decl: Option<crate::types::decl::TypeDeclaration> = None;
 
+        // Check resolved-sig cache first to avoid re-creating fresh type copies.
+        // This approximates OCaml's components_of_module_maker lazy caching.
+        // Uses a separate cache from type_decl_by_path to avoid conflicts with
+        // expand_head_once entries which have unqualified paths.
+        let path_name = type_path.name();
+        if let Some(decl) = ctx.find_resolved_pdot_type(&path_name) {
+            return Some(decl);
+        }
+
         // Inline-record constructor paths are type paths whose parent is also a type path:
         // `<type_path>.<Constructor>`. Rebuild the synthetic record declaration from
         // the parent variant declaration so label disambiguation can recover field types.
@@ -13458,6 +13467,10 @@ fn lookup_type_decl_for_path<'a>(
                             break;
                         }
 
+                        // Cache the resolved decl so subsequent lookups for the same
+                        // Pdot path reuse the same type nodes (matching OCaml's
+                        // components_of_module_maker lazy caching).
+                        ctx.register_resolved_pdot_type(&path_name, decl.clone());
                         return Some(decl.clone());
                     }
                 }
@@ -13508,7 +13521,6 @@ fn lookup_type_decl_for_path<'a>(
         // OCaml's Env.components_of_module applies Subst.type_declaration before
         // exposing Sig_type entries; preferring substituted signatures first avoids
         // returning stale unqualified recursive paths (e.g. JSON.t self refs as Pident "t").
-        let path_name = type_path.name();
         if let Some(decl) = ctx.find_type_decl_by_path(&path_name) {
             return Some(decl.clone());
         }

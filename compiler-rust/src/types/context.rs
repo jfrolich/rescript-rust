@@ -138,6 +138,12 @@ pub struct TypeContext<'a> {
     /// Used for looking up types via Pdot paths (e.g., "Js.Promise.t").
     type_decl_by_path: RefCell<std::collections::HashMap<String, super::decl::TypeDeclaration>>,
 
+    /// Cache for type declarations resolved through module signatures (Pdot paths).
+    /// Separate from type_decl_by_path to avoid conflicts with expand_head_once
+    /// entries which have unqualified paths. This approximates OCaml's
+    /// components_of_module_maker lazy caching.
+    resolved_pdot_type_cache: RefCell<std::collections::HashMap<String, super::decl::TypeDeclaration>>,
+
     /// Load paths for resolving CMI files during type alias expansion.
     load_paths: RefCell<Vec<std::path::PathBuf>>,
 
@@ -211,6 +217,7 @@ impl<'a> TypeContext<'a> {
             type_decl_store: RefCell::new(std::collections::HashMap::new()),
             type_decl_by_stamp: RefCell::new(std::collections::HashMap::new()),
             type_decl_by_path: RefCell::new(std::collections::HashMap::new()),
+            resolved_pdot_type_cache: RefCell::new(std::collections::HashMap::new()),
             load_paths: RefCell::new(Vec::new()),
             cmi_longident_names: RefCell::new(std::collections::HashMap::new()),
             next_cmi_longident_idx: Cell::new(0xF000_0000),
@@ -294,6 +301,18 @@ impl<'a> TypeContext<'a> {
         self.type_decl_by_path
             .borrow_mut()
             .insert(path.to_string(), decl);
+    }
+
+    /// Cache a type declaration resolved through module signatures (Pdot paths).
+    pub fn register_resolved_pdot_type(&self, path: &str, decl: super::decl::TypeDeclaration) {
+        self.resolved_pdot_type_cache
+            .borrow_mut()
+            .insert(path.to_string(), decl);
+    }
+
+    /// Look up a cached resolved Pdot type declaration.
+    pub fn find_resolved_pdot_type(&self, path: &str) -> Option<super::decl::TypeDeclaration> {
+        self.resolved_pdot_type_cache.borrow().get(path).cloned()
     }
 
     /// Set load paths for resolving CMI files.
