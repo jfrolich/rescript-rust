@@ -9120,30 +9120,17 @@ fn type_constraint(
     tctx.generic_constraint_body_ty = prev_generic_constraint;
     unify_expression_types(tctx, loc, typed_inner.exp_type, arg_unify_ty, None)?;
 
-    // OCaml evaluates tuple elements right-to-left, so the result_ty instance
-    // runs BEFORE type_argument (with empty simple_abbrevs). Create result_ty
-    // the same way: save/clear/restore so it doesn't see type_expect's memos.
+    // OCaml evaluates tuple elements right-to-left, so both instance() calls
+    // in `(type_argument env sarg ty (instance env ty), instance env ty)` happen
+    // BEFORE type_argument runs. type_argument populates simple_abbrevs with
+    // expansion memos. In Rust, the result_ty instance runs AFTER type_expect,
+    // so it would see those memos and create false sharing. Save/restore
+    // simple_abbrevs around the instance call: result_ty sees pre-type_expect
+    // state, but memos from type_expect persist after type_constraint returns.
     let saved_abbrevs = ctx.save_simple_abbrevs();
     ctx.clear_simple_abbrevs();
     let result_ty = crate::types::instance(ctx, ctype_ty);
     ctx.restore_simple_abbrevs(saved_abbrevs);
-
-    // OCaml's `rue` inside type_expect_ does `unify_exp (re exp) (instance env ty_expected)`
-    // where ty_expected is the GENERIC constraint type passed to type_expect. The `instance`
-    // call goes through `copy` which checks `simple_abbrevs` for previously-expanded
-    // abbreviations, creating `Tlink` sharing (e.g., React.element nodes sharing a single
-    // physical node via the abbreviation memo). In Rust, type_expect receives a non-generic
-    // expected_ty, so no `copy` happens, and the sharing is lost.
-    //
-    // To recover this sharing: create an additional instance of the generic type AFTER
-    // type_expect has populated simple_abbrevs through expansion. This instance's `copy`
-    // finds the memo and creates Tlink. Unifying it with result_ty links result_ty to the
-    // shared memo node, matching OCaml's `rue` behavior.
-    let rue_sharing_ty = crate::types::instance(ctx, ctype_ty);
-    // Silently unify - failure is expected when the constraint type doesn't match
-    // the memo'd type's structure (shouldn't happen for same-path Tconstr).
-    let _ = crate::types::unify(ctx, &mut tctx.unify_state, result_ty, rue_sharing_ty);
-
     unify_expression_types(tctx, loc, result_ty, expected_ty, None)?;
 
     let mut result = typed_inner;
