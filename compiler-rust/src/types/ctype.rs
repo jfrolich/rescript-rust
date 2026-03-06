@@ -4272,6 +4272,21 @@ pub fn copy_type_deep(
             result
         }
         TypeDesc::Tconstr { path, args, .. } => {
+            // Check simple_abbrevs for nullary Tconstr (matching OCaml's
+            // copy + find_repr). When a nullary type alias has been expanded
+            // previously, simple_abbrevs records the expansion. Reusing it
+            // via Tlink creates cross-instance sharing, reducing extra nodes.
+            if args.is_empty() {
+                if let Some(abbrev_ty) = ctx.find_simple_abbrev(path) {
+                    let abbrev_repr = ctx.repr(abbrev_ty);
+                    // Only share if the abbrev target isn't ourselves (avoid self-link)
+                    if abbrev_repr != ty {
+                        let result = ctx.new_type(TypeDesc::Tlink(abbrev_repr));
+                        cache.insert(ty, result);
+                        return result;
+                    }
+                }
+            }
             let new_args: Vec<_> = args
                 .iter()
                 .map(|t| copy_type_deep(ctx, *t, cache))
