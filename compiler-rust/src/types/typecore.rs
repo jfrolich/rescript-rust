@@ -3939,6 +3939,14 @@ pub fn type_expect<'a>(
             ctx.begin_def();
             let typed_e1 = type_expect(tctx, env, e1, unit_ty, None)?;
             ctx.end_def();
+            // OCaml's type_statement calls expand_head env exp.exp_type after
+            // end_def. The important side-effect is check_abbrev_env(env), which
+            // clears simple_abbrevs when the env changed during e1 typing (e.g.
+            // a for-loop body creates a new env with the loop variable). Without
+            // this, simple_abbrevs entries from e1's sub-env leak into e2.
+            // We call check_abbrev_env directly rather than expand_head to avoid
+            // creating extra type nodes from expansion side-effects.
+            ctx.check_abbrev_env(env);
 
             // e2 has the expected type
             let e2 = tctx.arena.get_expr(*e2_idx);
@@ -4028,6 +4036,8 @@ pub fn type_expect<'a>(
             ctx.begin_def();
             let typed_body = type_expect(tctx, env, body, body_unit_ty, None)?;
             ctx.end_def();
+            // OCaml's type_statement calls expand_head after end_def (see Pexp_sequence).
+            ctx.check_abbrev_env(env);
 
             // While loop result: separate unit (OCaml: instance_def Predef.type_unit)
             let result_unit_ty = env.type_unit(ctx);
@@ -7225,38 +7235,11 @@ fn close_multi_label_variant_rows_in_cases(
         reorder_multi_label_variant_rows_in_pattern(tctx, env, &mut case.c_lhs, &row_label_orders);
     }
 
-    let mut copy_cache = HashMap::new();
-    for case in cases.iter_mut() {
-        copy_pattern_types(tctx, env, &mut case.c_lhs, &mut copy_cache);
-    }
-
-    let mut copied_labels_by_row: HashMap<usize, Vec<String>> = HashMap::new();
-    let mut copied_row_has_non_variant_case: HashSet<usize> = HashSet::new();
-    let mut copied_rows_with_wildcards: HashSet<usize> = HashSet::new();
-    for case in cases.iter() {
-        if let Some(row_key) = variant_row_key_for_pat_type(tctx, env, case.c_lhs.pat_type) {
-            let mut tags = HashSet::new();
-            let mut all_variant = true;
-            collect_variant_tags(&case.c_lhs, &mut tags, &mut all_variant);
-            if !all_variant {
-                copied_row_has_non_variant_case.insert(row_key);
-            }
-        }
-        collect_variant_row_labels_in_pattern(tctx, env, &case.c_lhs, &mut copied_labels_by_row);
-        collect_rows_with_wildcard_coverage(tctx, env, &case.c_lhs, &mut copied_rows_with_wildcards);
-    }
-    let rows_to_close: HashSet<usize> = copied_labels_by_row
-        .into_iter()
-        .filter_map(|(row_key, labels)| {
-            (!labels.is_empty()
-                && !copied_row_has_non_variant_case.contains(&row_key)
-                && !copied_rows_with_wildcards.contains(&row_key))
-                .then_some(row_key)
-        })
-        .collect();
-    if rows_to_close.is_empty() {
-        return;
-    }
+    // Match OCaml: close variant rows in-place on the ORIGINAL types (no copy).
+    // OCaml's pressure_variants and finalize_variant modify shared mutable refs,
+    // so closing affects both pattern and expression types. Copying pattern types
+    // here would create extra type nodes that break sexp parity.
+    let rows_to_close: HashSet<usize> = row_label_orders.keys().copied().collect();
 
     for case in cases.iter_mut() {
         close_multi_label_variant_rows_in_pattern(tctx, env, &mut case.c_lhs, &rows_to_close);
@@ -7978,6 +7961,9 @@ fn type_for(
     ctx.begin_def();
     let typed_body = type_expect(tctx, &body_env, body, body_unit_ty, None)?;
     ctx.end_def();
+    // OCaml's type_statement calls expand_head after end_def (see Pexp_sequence).
+    // For Pexp_for, type_statement is called with new_env (body_env).
+    ctx.check_abbrev_env(&body_env);
 
     // For loop result: separate unit type (OCaml: instance_def Predef.type_unit)
     let result_unit_ty = env.type_unit(ctx);
