@@ -227,39 +227,15 @@ python3 scripts/parity_analyzer.py divergence chn_test
 
 **Sexp files:** The `summary` command works with diffs only. Other commands need sexp files — the tool will tell you how to generate them if missing. The parity script saves sexp files to `.parity-cache/tests/{ocaml,rust}/` for failing tests.
 
-### Manually Generating Sexp Output
+### Running bsc Directly
 
-When you need to examine the raw sexp output (not just the diff), generate it manually:
+Normally use the parity script, but if you need to run bsc manually:
 
-```bash
-# Step 1: Get compiler args (run from project root)
-cd tests/tests
-ARGS=$(../../packages/@rescript/darwin-arm64/bin/rescript.exe compiler-args src/lazy_test.res 2>/dev/null | python3 -c "import sys, json; d=json.load(sys.stdin); print(' '.join(d.get('compiler_args', [])))")
-echo "$ARGS"
-
-# Step 2: Run compilers from lib/bs directory (IMPORTANT: must cd here)
-cd lib/bs
-
-# OCaml sexp (uses dune-built bsc, NOT the released one)
-../../../../_build/install/default/bin/bsc -dtyped-sexp $ARGS 2> /tmp/ocaml.sexp
-
-# Rust sexp
-timeout 10 ../../../../compiler-rust/target/release/bsc -dtyped-sexp $ARGS 2> /tmp/rust.sexp
-
-# Step 3: Compare
-diff -ua /tmp/ocaml.sexp /tmp/rust.sexp | head -100
-
-# Return to project root when done
-cd ../../../..
-```
-
-**Common mistakes to avoid:**
-- Do NOT run bsc from the project root — it can't find Pervasives.cmi
-- Do NOT use `-dtyped-sexp-locs` (that includes locations, parity tests use `-dtyped-sexp` without locs)
-- Do NOT use the released `bsc.exe` for OCaml sexp — it outputs a different format. Use the dune-built one at `_build/install/default/bin/bsc`
+- Run bsc from `tests/tests/lib/bs` — it can't find Pervasives.cmi from the project root
+- Use `-dtyped-sexp` (not `-dtyped-sexp-locs` which includes locations)
+- Use the dune-built bsc (`_build/install/default/bin/bsc`), not the released `bsc.exe`
 - Always use `timeout` with the Rust compiler (infinite loops are possible)
-- The sexp output goes to **stderr** (redirect with `2>`, not `>`)
-- Always use `diff -a` flag (sexp files may contain binary characters)
+- Sexp output goes to **stderr** (redirect with `2>`, not `>`)
 
 ### Rebuilding the OCaml bsc
 
