@@ -13507,6 +13507,8 @@ fn lookup_type_decl_for_path<'a>(
                         for item in &sig {
                             if let crate::types::decl::SignatureItem::SigType(id, decl, _) = item {
                                 if id.name() == type_name.as_str() {
+                                    // Cache for reuse (same as Pdot branch caching)
+                                    ctx.register_resolved_pdot_type(&path_name, decl.clone());
                                     return Some(decl.clone());
                                 }
                             }
