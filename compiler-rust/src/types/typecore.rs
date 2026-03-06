@@ -7604,9 +7604,6 @@ fn type_function(
     use crate::types::typedtree::{Case, FunctionParam, FunctionParamPattern, Partial};
 
     let ctx = tctx.type_ctx;
-    // Instance generic expected_ty to avoid corruption (OCaml instances via
-    // `let ty = instance env ty_expected` before filter_arrow in Pexp_fun)
-    let expected_ty = instance_if_generic(ctx, expected_ty);
 
     // Clone (not take) type_variables so inner functions can SEE outer scope
     // variables (enabling cross-scope sharing like 'self in @this callbacks)
@@ -7618,10 +7615,37 @@ fn type_function(
     // Arity is now ArityIdx, look up from arena
     let arity_opt = tctx.arena.get_arity(arity);
 
+    let ctx_label = convert_arg_label_for_ctx(arg_label, tctx.arena);
+
+    // Match OCaml's type_function arity handling (typecore.ml:3270-3288).
+    // When arity is Some, OCaml creates a MINIMAL fresh arrow with Tvars
+    // and unifies with ty_expected_, consuming the generic type through
+    // unification (linking Tvars to components without copying). This avoids
+    // creating a full instance of the generic type, matching OCaml's node
+    // allocation pattern. When arity is None, OCaml instances ty_expected.
+    let expected_ty = match arity_opt {
+        Some(_) => {
+            // OCaml: let fun_t = newty (Tarrow({lbl=l; typ=newvar()}, newvar(), Cok, Some arity))
+            //        unify_exp_types loc env fun_t ty_expected_
+            //        fun_t
+            let fun_t = ctx.new_arrow(
+                ctx_label.clone(),
+                ctx.new_var(None),
+                ctx.new_var(None),
+                arity_opt,
+            );
+            unify_expression_types(tctx, loc, fun_t, expected_ty, None)?;
+            fun_t
+        }
+        None => {
+            // OCaml: ty_expected = ty_expected_ (unchanged), then instance later
+            instance_if_generic(ctx, expected_ty)
+        }
+    };
+
     // Match OCaml's filter_arrow path: if expected type already expands to an
     // arrow with matching label, reuse its argument/result types directly.
     // Otherwise introduce a fresh arrow and unify against expected type.
-    let ctx_label = convert_arg_label_for_ctx(arg_label, tctx.arena);
     let expected_inst = crate::types::instance(ctx, expected_ty);
     let expanded_expected = crate::types::ctype::expand_head(ctx, env, expected_inst);
     let expanded_desc = ctx.get_desc(expanded_expected);
