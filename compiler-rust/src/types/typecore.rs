@@ -9120,17 +9120,14 @@ fn type_constraint(
     tctx.generic_constraint_body_ty = prev_generic_constraint;
     unify_expression_types(tctx, loc, typed_inner.exp_type, arg_unify_ty, None)?;
 
-    // OCaml evaluates tuple elements right-to-left, so both instance() calls
-    // in `(type_argument env sarg ty (instance env ty), instance env ty)` happen
-    // BEFORE type_argument runs. type_argument populates simple_abbrevs with
-    // expansion memos. In Rust, the result_ty instance runs AFTER type_expect,
-    // so it would see those memos and create false sharing. Save/restore
-    // simple_abbrevs around the instance call: result_ty sees pre-type_expect
-    // state, but memos from type_expect persist after type_constraint returns.
+    // OCaml evaluates tuple elements right-to-left, so the result_ty instance
+    // runs BEFORE type_argument (with empty simple_abbrevs). Create result_ty
+    // the same way: save/clear/restore so it doesn't see type_expect's memos.
     let saved_abbrevs = ctx.save_simple_abbrevs();
     ctx.clear_simple_abbrevs();
     let result_ty = crate::types::instance(ctx, ctype_ty);
     ctx.restore_simple_abbrevs(saved_abbrevs);
+
     unify_expression_types(tctx, loc, result_ty, expected_ty, None)?;
 
     let mut result = typed_inner;
