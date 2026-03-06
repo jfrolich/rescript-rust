@@ -5832,6 +5832,20 @@ fn type_match(
         }
     };
 
+    // Match OCaml's `unify_pats ty_arg'` step from type_cases.
+    // OCaml unifies all pattern types through a shared node inside a single
+    // begin_def scope. The sequential path misses this, causing each case's
+    // pattern type to be an independent node. Post-hoc unification establishes
+    // the same physical node-sharing (e.g., both GADT case patterns resolve
+    // to the same Tconstr(kind, [Tconstr(t)]) node).
+    if has_generalized_value_patterns && typed_val_cases.len() > 1 {
+        let ctx = tctx.type_ctx;
+        let ty_arg_prime = ctx.new_var(None);
+        for typed_case in &typed_val_cases {
+            let _ = crate::types::unify(ctx, &mut tctx.unify_state, typed_case.c_lhs.pat_type, ty_arg_prime);
+        }
+    }
+
     // Merge variant row fields from all case patterns into ty_arg.
     if typed_val_cases.len() > 1 {
         merge_variant_row_fields_into_scrutinee(tctx.type_ctx, &typed_val_cases, ty_arg);
