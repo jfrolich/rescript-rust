@@ -9151,35 +9151,29 @@ fn type_constraint(
     let var_level = ctx.current_level();
     crate::types::generalize_structure(ctx, var_level, ctype_ty);
 
-    // OCaml's type_argument passes the GENERIC `ty` to type_expect. Inside
-    // type_expect_, each leaf handler wraps unification with `rue` which calls
-    // `instance env ty_expected` — when ty_expected is generic, this goes
-    // through `copy` which checks `simple_abbrevs` for nullary Tconstr sharing.
-    // Non-rue handlers (tuple, array, construct, function) use
-    // `instance_if_generic` to avoid corrupting the generic type.
+    // Match OCaml's right-to-left tuple evaluation order in Pexp_constraint:
+    //   (type_argument env sarg ty (instance env ty), instance env ty)
+    // evaluates as:
+    //   1. result_ty = instance env ty     (second element first)
+    //   2. arg_unify_ty = instance env ty  (arg to type_argument)
+    //   3. type_expect env sarg ty         (inside type_argument)
+    //   4. unify_exp env texp arg_unify_ty (type_argument's post-unify)
+    //   5. rue { exp_type = result_ty }    (outer rue)
     //
-    // Pre-create instances from ctype_ty before type_expect, matching OCaml's
-    // type_argument which creates `instance env ty` for post-unify.
-    let arg_expected_ty = crate::types::instance(ctx, ctype_ty);
+    // Both instances are created BEFORE type_expect runs, so they see the
+    // GENERIC ctype_ty before any handler can consume it via unification.
+    let result_ty = crate::types::instance(ctx, ctype_ty);
     let arg_unify_ty = crate::types::instance(ctx, ctype_ty);
 
-    // Pass the GENERIC constraint type so match cases can create fresh
-    // instances per case body (matching OCaml where ty_res is generic).
-    // NOTE: We pass non-generic arg_expected_ty to type_expect; the rue/instance_if_generic
-    // guards in handlers are no-ops for non-generic types (handlers-only step).
+    // Pass the GENERIC constraint type to type_expect (matches OCaml).
+    // Rue handlers create per-expression instances via rue_unify.
+    // Non-rue handlers (tuple, array, construct) directly unify with the
+    // generic type, consuming it — this matches OCaml's behavior.
     let prev_generic_constraint = tctx.generic_constraint_body_ty;
     tctx.generic_constraint_body_ty = Some(ctype_ty);
-    let typed_inner = type_expect(tctx, env, inner_expr, arg_expected_ty, None)?;
+    let typed_inner = type_expect(tctx, env, inner_expr, ctype_ty, None)?;
     tctx.generic_constraint_body_ty = prev_generic_constraint;
     unify_expression_types(tctx, loc, typed_inner.exp_type, arg_unify_ty, None)?;
-
-    // OCaml evaluates tuple elements right-to-left, so the result_ty instance
-    // runs BEFORE type_argument (with empty simple_abbrevs). Create result_ty
-    // the same way: save/clear/restore so it doesn't see type_expect's memos.
-    let saved_abbrevs = ctx.save_simple_abbrevs();
-    ctx.clear_simple_abbrevs();
-    let result_ty = crate::types::instance(ctx, ctype_ty);
-    ctx.restore_simple_abbrevs(saved_abbrevs);
 
     rue_unify(tctx, loc, result_ty, expected_ty, None)?;
 
