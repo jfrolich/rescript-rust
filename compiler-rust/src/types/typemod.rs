@@ -1025,11 +1025,14 @@ fn expand_record_spread_label(
         if let crate::types::TypeKind::TypeRecord(inner_fields, _) = &source_decl.type_kind {
             let source_params = source_decl.type_params.clone();
             let mut expanded = Vec::new();
+            // Share the substitution cache across all fields so that shared type
+            // nodes (e.g., the same type parameter used in multiple fields) get
+            // the same substituted result, matching OCaml's node sharing.
+            let mut cache = HashMap::new();
             for inner_field in inner_fields {
                 let resolved_inner = expand_record_spread_label(ctx, env, inner_field, visited)?;
                 for mut field in resolved_inner {
                     if source_params.len() == spread_args.len() && !source_params.is_empty() {
-                        let mut cache = HashMap::new();
                         field.ld_type = substitute_type_params(
                             ctx,
                             field.ld_type,

@@ -145,7 +145,7 @@ fi
 
 # Create temp directory
 TEMP_DIR=$(mktemp -d)
-CACHE_DIR=".parity-cache"
+CACHE_DIR="$PROJECT_ROOT/.parity-cache"
 mkdir -p "$CACHE_DIR/tests/diffs" "$CACHE_DIR/tests/ocaml" "$CACHE_DIR/tests/rust"
 trap "cp -r $TEMP_DIR/diffs/* $CACHE_DIR/tests/diffs/ 2>/dev/null; rm -rf $TEMP_DIR" EXIT
 
@@ -236,7 +236,7 @@ mkdir -p "$RESULTS_DIR"
 mkdir -p "$TEMP_DIR/diffs"
 
 # Export variables for parallel execution
-export OCAML_BSC RUST_BSC RESCRIPT_CLI TIMEOUT_SECONDS TEMP_DIR QUICK_MODE VERBOSE RUST_AVAILABLE PROJECT_ROOT RESULTS_DIR TEST_PROJECT TELLA_MODE
+export OCAML_BSC RUST_BSC RESCRIPT_CLI TIMEOUT_SECONDS TEMP_DIR QUICK_MODE VERBOSE RUST_AVAILABLE PROJECT_ROOT RESULTS_DIR TEST_PROJECT TELLA_MODE CACHE_DIR
 
 # Function to test a single file - writes results to a file
 test_single_file() {
