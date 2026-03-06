@@ -144,6 +144,11 @@ pub struct TypeContext<'a> {
     /// components_of_module_maker lazy caching.
     resolved_pdot_type_cache: RefCell<std::collections::HashMap<String, super::decl::TypeDeclaration>>,
 
+    /// Cache for resolved module signatures. Keyed by module path name.
+    /// Prevents repeated calls to resolve_module_signature_for_path from
+    /// creating fresh type copies via copy_lookup_signature_for_subst.
+    resolved_module_sig_cache: RefCell<std::collections::HashMap<String, (Path, super::decl::Signature)>>,
+
     /// Load paths for resolving CMI files during type alias expansion.
     load_paths: RefCell<Vec<std::path::PathBuf>>,
 
@@ -218,6 +223,7 @@ impl<'a> TypeContext<'a> {
             type_decl_by_stamp: RefCell::new(std::collections::HashMap::new()),
             type_decl_by_path: RefCell::new(std::collections::HashMap::new()),
             resolved_pdot_type_cache: RefCell::new(std::collections::HashMap::new()),
+            resolved_module_sig_cache: RefCell::new(std::collections::HashMap::new()),
             load_paths: RefCell::new(Vec::new()),
             cmi_longident_names: RefCell::new(std::collections::HashMap::new()),
             next_cmi_longident_idx: Cell::new(0xF000_0000),
@@ -313,6 +319,18 @@ impl<'a> TypeContext<'a> {
     /// Look up a cached resolved Pdot type declaration.
     pub fn find_resolved_pdot_type(&self, path: &str) -> Option<super::decl::TypeDeclaration> {
         self.resolved_pdot_type_cache.borrow().get(path).cloned()
+    }
+
+    /// Cache a resolved module signature.
+    pub fn register_resolved_module_sig(&self, path: &str, access_path: Path, sig: super::decl::Signature) {
+        self.resolved_module_sig_cache
+            .borrow_mut()
+            .insert(path.to_string(), (access_path, sig));
+    }
+
+    /// Look up a cached resolved module signature.
+    pub fn find_resolved_module_sig(&self, path: &str) -> Option<(Path, super::decl::Signature)> {
+        self.resolved_module_sig_cache.borrow().get(path).cloned()
     }
 
     /// Set load paths for resolving CMI files.

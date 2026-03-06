@@ -13235,6 +13235,12 @@ fn resolve_module_signature_for_path<'a>(
 ) -> Option<(Path, crate::types::decl::Signature)> {
     use crate::types::decl::SignatureItem;
 
+    // Check module signature cache first
+    let module_key = module_path.name();
+    if let Some(cached) = ctx.find_resolved_module_sig(&module_key) {
+        return Some(cached);
+    }
+
     match module_path {
         Path::Pident(id) => {
             if let Ok(md) = env.find_module(id.name()) {
@@ -13264,6 +13270,7 @@ fn resolve_module_signature_for_path<'a>(
                     }
                 }
                 crate::cmi::persistent_env::substitute_type_paths_in_sig(&sig, &access_path, ctx);
+                ctx.register_resolved_module_sig(&module_key, access_path.clone(), sig.clone());
                 return Some((access_path, sig));
             }
             if let Some(pers) = pers_env.as_mut() {
@@ -13299,6 +13306,7 @@ fn resolve_module_signature_for_path<'a>(
                             &access_path,
                             ctx,
                         );
+                        ctx.register_resolved_module_sig(&module_key, access_path.clone(), sig.clone());
                         return Some((access_path, sig));
                     }
                 }
