@@ -1,0 +1,1156 @@
+#!/usr/bin/env python3
+"""Parity analyzer for ReScript Rust compiler typed tree output.
+
+Analyzes differences between OCaml and Rust compiler sexp output to help
+reach 100% parity. Works with files in .parity-cache/tests/.
+
+Commands:
+    summary              Overview of all failures
+    preamble <file>      Aligned type preamble comparison
+    trace <file> <id>    Trace a type through both compilers
+    extra <file>         Find extra/missing type nodes
+    divergence <file>    First divergence analysis
+"""
+
+import argparse
+import os
+import re
+import sys
+from dataclasses import dataclass, field
+from typing import Dict, List, Optional, Tuple, Union
+
+# ─── Colors ───────────────────────────────────────────────────────────────────
+
+USE_COLOR = True
+
+def _c(code: str, text: str) -> str:
+    if not USE_COLOR:
+        return text
+    return f"\033[{code}m{text}\033[0m"
+
+def green(t: str) -> str: return _c("32", t)
+def red(t: str) -> str: return _c("31", t)
+def yellow(t: str) -> str: return _c("33", t)
+def cyan(t: str) -> str: return _c("36", t)
+def bold(t: str) -> str: return _c("1", t)
+def dim(t: str) -> str: return _c("2", t)
+
+# ─── Sexp Parser ──────────────────────────────────────────────────────────────
+
+@dataclass
+class SexpAtom:
+    value: str
+
+    def __repr__(self):
+        return self.value
+
+    def pretty(self, indent=0):
+        return self.value
+
+@dataclass
+class SexpList:
+    children: list
+
+    def __repr__(self):
+        inner = " ".join(repr(c) for c in self.children)
+        return f"({inner})"
+
+    def pretty(self, indent=0):
+        if not self.children:
+            return "()"
+        if len(self.children) <= 3 and all(isinstance(c, SexpAtom) for c in self.children):
+            return "(" + " ".join(c.value for c in self.children) + ")"
+        lines = ["("]
+        for c in self.children:
+            lines.append("  " + c.pretty(indent + 2))
+        lines.append(")")
+        return ("\n" + " " * indent).join(lines)
+
+
+SexpNode = Union[SexpAtom, SexpList]
+
+
+def tokenize_sexp(text: str) -> list[str]:
+    """Tokenize sexp text into tokens: (, ), quoted strings, bare atoms."""
+    tokens = []
+    i = 0
+    n = len(text)
+    while i < n:
+        c = text[i]
+        if c in ' \t\n\r':
+            i += 1
+        elif c == '(':
+            tokens.append('(')
+            i += 1
+        elif c == ')':
+            tokens.append(')')
+            i += 1
+        elif c == '"':
+            j = i + 1
+            while j < n:
+                if text[j] == '\\':
+                    j += 2
+                elif text[j] == '"':
+                    j += 1
+                    break
+                else:
+                    j += 1
+            tokens.append(text[i:j])
+            i = j
+        else:
+            j = i
+            while j < n and text[j] not in ' \t\n\r()':
+                j += 1
+            tokens.append(text[i:j])
+            i = j
+    return tokens
+
+
+def parse_sexp_file(text: str) -> List[SexpNode]:
+    """Parse all top-level sexp forms from text using an iterative stack-based parser."""
+    tokens = tokenize_sexp(text)
+    # Iterative parser to avoid Python recursion overhead
+    stack = [[]]  # stack of children lists; stack[0] = top-level results
+    for tok in tokens:
+        if tok == '(':
+            stack.append([])
+        elif tok == ')':
+            children = stack.pop()
+            stack[-1].append(SexpList(children))
+        else:
+            stack[-1].append(SexpAtom(tok))
+    return stack[0]
+
+
+# ─── SexpFile ─────────────────────────────────────────────────────────────────
+
+@dataclass
+class SexpFile:
+    """Parsed sexp file with types preamble and structure."""
+    types: dict[int, SexpNode]  # type_id -> type definition
+    structure: Optional[SexpNode]
+    raw_nodes: list[SexpNode]
+
+    @staticmethod
+    def parse(text: str) -> 'SexpFile':
+        nodes = parse_sexp_file(text)
+        types = {}
+        structure = None
+
+        for node in nodes:
+            if isinstance(node, SexpList) and node.children:
+                head = node.children[0]
+                if isinstance(head, SexpAtom) and head.value == "types":
+                    # Parse type entries: (id (Tvar ...))
+                    for child in node.children[1:]:
+                        if isinstance(child, SexpList) and len(child.children) >= 2:
+                            id_node = child.children[0]
+                            if isinstance(id_node, SexpAtom):
+                                try:
+                                    tid = int(id_node.value)
+                                    type_body = child.children[1] if len(child.children) == 2 else SexpList(child.children[1:])
+                                    types[tid] = type_body
+                                except ValueError:
+                                    pass
+                elif isinstance(head, SexpAtom) and head.value == "structure":
+                    structure = node
+
+        return SexpFile(types=types, structure=structure, raw_nodes=nodes)
+
+
+# ─── Content-Based Type Matching ──────────────────────────────────────────────
+
+def sexp_to_str(node: SexpNode) -> str:
+    """Convert sexp node to compact string form."""
+    if isinstance(node, SexpAtom):
+        return node.value
+    return "(" + " ".join(sexp_to_str(c) for c in node.children) + ")"
+
+
+def content_key(type_id: int, types: Dict[int, SexpNode], depth: int = 0,
+                memo: Optional[dict] = None) -> str:
+    """Recursively expand #N refs to structural content, depth-limited."""
+    if memo is None:
+        memo = {}
+    if type_id in memo:
+        return memo[type_id]
+    if depth > 3:
+        memo[type_id] = f"#{type_id}"
+        return f"#{type_id}"
+    if type_id not in types:
+        memo[type_id] = f"#{type_id}"
+        return f"#{type_id}"
+
+    # Mark as in-progress to prevent infinite recursion
+    memo[type_id] = f"<cycle:{type_id}>"
+
+    node = types[type_id]
+    result = _expand_refs(node, types, depth, memo)
+    memo[type_id] = result
+    return result
+
+
+def _expand_refs(node: SexpNode, types: Dict[int, SexpNode], depth: int,
+                 memo: dict) -> str:
+    """Expand all #N references in a node."""
+    if isinstance(node, SexpAtom):
+        m = re.match(r'^#(\d+)$', node.value)
+        if m:
+            ref_id = int(m.group(1))
+            return content_key(ref_id, types, depth + 1, memo)
+        return node.value
+    parts = []
+    for c in node.children:
+        parts.append(_expand_refs(c, types, depth, memo))
+    return "(" + " ".join(parts) + ")"
+
+
+def type_summary(node: SexpNode) -> str:
+    """One-line summary of a type node."""
+    if isinstance(node, SexpAtom):
+        return node.value
+    if not node.children:
+        return "()"
+    head = node.children[0]
+    if isinstance(head, SexpAtom):
+        tag = head.value
+        if tag == "Tvar":
+            if len(node.children) > 1:
+                arg = node.children[1]
+                if isinstance(arg, SexpList) and arg.children:
+                    inner = arg.children[0] if isinstance(arg.children[0], SexpAtom) else arg.children[0]
+                    return f"Tvar({sexp_to_str(inner)})"
+                return f"Tvar({sexp_to_str(arg)})"
+            return "Tvar"
+        elif tag == "Tconstr":
+            if len(node.children) > 1:
+                path = sexp_to_str(node.children[1])
+                args = ""
+                if len(node.children) > 2:
+                    args = " " + sexp_to_str(node.children[2])
+                return f"Tconstr({path}{args})"
+            return "Tconstr"
+        elif tag == "Tarrow":
+            return "Tarrow"
+        elif tag == "Ttuple":
+            refs = [sexp_to_str(c) for c in node.children[1:]]
+            return f"Ttuple({', '.join(refs)})"
+        elif tag == "Tvariant":
+            return "Tvariant"
+        elif tag == "Tpoly":
+            return "Tpoly"
+        elif tag == "Tobject":
+            return "Tobject"
+        elif tag == "Tpackage":
+            return "Tpackage"
+        elif tag == "Tfield":
+            return "Tfield"
+        elif tag == "Tnil":
+            return "Tnil"
+        else:
+            return tag
+    return sexp_to_str(node)[:60]
+
+
+def match_types(ocaml_types: dict[int, SexpNode],
+                rust_types: dict[int, SexpNode]) -> list[tuple]:
+    """Match types between compilers by content key.
+
+    Returns list of (ocaml_id, rust_id, status) tuples where status is
+    MATCH, SHIFTED, EXTRA_OCAML, or EXTRA_RUST.
+    """
+    # Build content keys
+    ocaml_memo: dict = {}
+    rust_memo: dict = {}
+    ocaml_keys = {}
+    rust_keys = {}
+
+    for tid in ocaml_types:
+        ocaml_keys[tid] = content_key(tid, ocaml_types, memo=ocaml_memo)
+    for tid in rust_types:
+        rust_keys[tid] = content_key(tid, rust_types, memo=rust_memo)
+
+    # Group by content key
+    ocaml_by_key: dict[str, list[int]] = {}
+    rust_by_key: dict[str, list[int]] = {}
+
+    for tid, key in ocaml_keys.items():
+        ocaml_by_key.setdefault(key, []).append(tid)
+    for tid, key in rust_keys.items():
+        rust_by_key.setdefault(key, []).append(tid)
+
+    # Match: prefer same ID, then closest ID
+    matched_ocaml = set()
+    matched_rust = set()
+    matches = []  # (ocaml_id, rust_id, status)
+
+    # First pass: exact ID matches
+    all_ids = sorted(set(ocaml_types.keys()) | set(rust_types.keys()))
+    for tid in all_ids:
+        if tid in ocaml_keys and tid in rust_keys:
+            if ocaml_keys[tid] == rust_keys[tid]:
+                matches.append((tid, tid, "MATCH"))
+                matched_ocaml.add(tid)
+                matched_rust.add(tid)
+
+    # Second pass: shifted matches (same content, different ID)
+    for key, o_ids in ocaml_by_key.items():
+        r_ids = rust_by_key.get(key, [])
+        unmatched_o = [i for i in o_ids if i not in matched_ocaml]
+        unmatched_r = [i for i in r_ids if i not in matched_rust]
+
+        # Match by proximity
+        for oid in unmatched_o:
+            if not unmatched_r:
+                break
+            # Find closest rust ID
+            best_r = min(unmatched_r, key=lambda r: abs(r - oid))
+            matches.append((oid, best_r, "SHIFTED"))
+            matched_ocaml.add(oid)
+            matched_rust.add(best_r)
+            unmatched_r.remove(best_r)
+
+    # Remaining unmatched
+    for tid in sorted(ocaml_types.keys()):
+        if tid not in matched_ocaml:
+            matches.append((tid, None, "EXTRA_OCAML"))
+
+    for tid in sorted(rust_types.keys()):
+        if tid not in matched_rust:
+            matches.append((None, tid, "EXTRA_RUST"))
+
+    # Sort by ocaml_id, then rust_id
+    matches.sort(key=lambda m: (m[0] if m[0] is not None else 99999,
+                                 m[1] if m[1] is not None else 99999))
+    return matches
+
+
+# ─── File Resolution ──────────────────────────────────────────────────────────
+
+def find_project_root() -> str:
+    """Find the project root by looking for .parity-cache."""
+    d = os.getcwd()
+    while d != '/':
+        if os.path.isdir(os.path.join(d, '.parity-cache')):
+            return d
+        d = os.path.dirname(d)
+    # Fallback: try common locations
+    for candidate in [os.getcwd(), os.path.dirname(os.path.dirname(os.path.abspath(__file__)))]:
+        if os.path.isdir(os.path.join(candidate, '.parity-cache')):
+            return candidate
+    return os.getcwd()
+
+
+def resolve_file(name: str, root: str) -> str:
+    """Resolve a short name like 'ticker' to 'tests_tests_src_ticker.res'.
+
+    Returns the base name without extension, matching cache file naming.
+    """
+    cache_dir = os.path.join(root, '.parity-cache', 'tests')
+    diff_dir = os.path.join(cache_dir, 'diffs')
+
+    if not os.path.isdir(diff_dir):
+        return name
+
+    # Try exact match first
+    for ext in ['.diff', '.sexp']:
+        if os.path.exists(os.path.join(diff_dir, name + ext)):
+            return name
+
+    # Try with tests_tests_src_ prefix
+    prefixed = f"tests_tests_src_{name}.res"
+    if os.path.exists(os.path.join(diff_dir, prefixed + '.diff')):
+        return prefixed
+
+    # Try stdlib_intl prefix
+    prefixed2 = f"tests_tests_src_stdlib_intl_{name}.res"
+    if os.path.exists(os.path.join(diff_dir, prefixed2 + '.diff')):
+        return prefixed2
+
+    # Fuzzy match: find files containing the name
+    matches = []
+    for f in os.listdir(diff_dir):
+        if f.endswith('.diff'):
+            base = f[:-5]  # remove .diff
+            if name.lower() in base.lower():
+                matches.append(base)
+
+    if len(matches) == 1:
+        return matches[0]
+    elif len(matches) > 1:
+        print(f"Ambiguous name '{name}', matches:")
+        for m in sorted(matches):
+            print(f"  {m}")
+        sys.exit(1)
+
+    return prefixed  # best guess
+
+
+def get_diff_path(name: str, root: str) -> str:
+    return os.path.join(root, '.parity-cache', 'tests', 'diffs', name + '.diff')
+
+
+def get_sexp_path(compiler: str, name: str, root: str) -> str:
+    return os.path.join(root, '.parity-cache', 'tests', compiler, name + '.sexp')
+
+
+def load_sexp(compiler: str, name: str, root: str) -> Optional[SexpFile]:
+    path = get_sexp_path(compiler, name, root)
+    if not os.path.exists(path):
+        return None
+    with open(path) as f:
+        return SexpFile.parse(f.read())
+
+
+def require_sexp_files(name: str, root: str) -> tuple[SexpFile, SexpFile]:
+    """Load both sexp files, or print error and exit."""
+    ocaml = load_sexp('ocaml', name, root)
+    rust = load_sexp('rust', name, root)
+    missing = []
+    if ocaml is None:
+        missing.append(get_sexp_path('ocaml', name, root))
+    if rust is None:
+        missing.append(get_sexp_path('rust', name, root))
+    if missing:
+        print(red("Missing sexp files:"))
+        for m in missing:
+            print(f"  {m}")
+        print()
+        print("Generate them by running the parity test:")
+        # Extract short name for the command
+        short = name.replace("tests_tests_src_", "").replace(".res", "")
+        print(f"  ./scripts/test_typedtree_parity.sh {short}")
+        sys.exit(1)
+    return ocaml, rust
+
+
+# ─── Diff Analysis Helpers ────────────────────────────────────────────────────
+
+def count_hunks(diff_text: str) -> int:
+    return diff_text.count('\n@@')
+
+
+def analyze_diff(diff_text: str) -> dict:
+    """Analyze a diff file for summary info."""
+    hunks = count_hunks(diff_text)
+    lines = diff_text.split('\n')
+
+    # Check if diff is in preamble (types section) or structure
+    in_types = False
+    preamble_hunks = 0
+    structure_hunks = 0
+    current_in_types = True
+
+    for line in lines:
+        if line.startswith('@@'):
+            if current_in_types:
+                preamble_hunks += 1
+            else:
+                structure_hunks += 1
+        # Track if we've passed the (structure line
+        stripped = line.lstrip('+-').lstrip()
+        if stripped.startswith('(structure'):
+            current_in_types = False
+
+    # Find first actual difference
+    first_diff = ""
+    for line in lines:
+        if line.startswith('-') and not line.startswith('---'):
+            first_diff = line[1:].strip()[:60]
+            break
+
+    # Categorize
+    category = categorize_diff(diff_text)
+
+    return {
+        'hunks': hunks,
+        'preamble_hunks': preamble_hunks,
+        'structure_hunks': structure_hunks,
+        'first_diff': first_diff,
+        'category': category,
+    }
+
+
+def categorize_diff(diff_text: str) -> str:
+    """Categorize the type of difference."""
+    lines = diff_text.split('\n')
+
+    has_path_diff = False
+    has_id_diff = False
+    has_structural = False
+
+    for line in lines:
+        if not (line.startswith('+') or line.startswith('-')):
+            continue
+        if line.startswith('+++') or line.startswith('---'):
+            continue
+        stripped = line[1:].strip()
+
+        # Check for #N reference diffs
+        if re.match(r'^#\d+\)?$', stripped):
+            has_id_diff = True
+        # Check for path diffs (Pdot, Pident)
+        elif 'Pdot' in stripped or 'Pident' in stripped:
+            has_path_diff = True
+        elif stripped.startswith('(') or stripped.endswith(')'):
+            # Could be structural or just reindented
+            if any(tag in stripped for tag in ['Tvar', 'Tconstr', 'Tarrow', 'Ttuple', 'Tvariant']):
+                has_structural = True
+            else:
+                has_id_diff = True
+
+    if has_path_diff and has_id_diff:
+        return "path+id"
+    elif has_path_diff:
+        return "path"
+    elif has_structural:
+        return "structural"
+    else:
+        return "id-only"
+
+
+def count_preamble_types(diff_text: str) -> tuple[int, int]:
+    """Count types mentioned in OCaml (-) and Rust (+) sides of preamble."""
+    ocaml_ids = set()
+    rust_ids = set()
+    in_preamble = True
+
+    for line in diff_text.split('\n'):
+        stripped = line.lstrip('+-').lstrip()
+        if stripped.startswith('(structure'):
+            in_preamble = False
+            continue
+        if not in_preamble:
+            continue
+
+        # Look for type ID definitions: lines that are just a number
+        if line.startswith('-') and not line.startswith('---'):
+            content = line[1:].strip()
+            if re.match(r'^\d+$', content):
+                ocaml_ids.add(int(content))
+        elif line.startswith('+') and not line.startswith('+++'):
+            content = line[1:].strip()
+            if re.match(r'^\d+$', content):
+                rust_ids.add(int(content))
+
+    return len(ocaml_ids), len(rust_ids)
+
+
+# ─── Structure Reference Finder ──────────────────────────────────────────────
+
+def find_refs_in_structure(structure: SexpNode, target_id: int,
+                           path: Optional[List[str]] = None) -> List[str]:
+    """Find all references to #<target_id> in the structure tree.
+
+    Returns list of path descriptions.
+    """
+    if path is None:
+        path = []
+    results = []
+
+    if isinstance(structure, SexpAtom):
+        if structure.value == f"#{target_id}":
+            results.append(" > ".join(path) if path else "(root)")
+        return results
+
+    # Build context from this node
+    context = ""
+    if structure.children:
+        head = structure.children[0]
+        if isinstance(head, SexpAtom):
+            context = head.value
+
+    # Check for (type #N) pattern
+    if (len(structure.children) == 2 and
+        isinstance(structure.children[0], SexpAtom) and
+        structure.children[0].value == "type" and
+        isinstance(structure.children[1], SexpAtom) and
+        structure.children[1].value == f"#{target_id}"):
+        results.append(" > ".join(path + ["type"]) if path else "type")
+        return results
+
+    new_path = path + [context] if context else path
+    for child in structure.children:
+        results.extend(find_refs_in_structure(child, target_id, new_path))
+
+    return results
+
+
+# ─── Commands ─────────────────────────────────────────────────────────────────
+
+def cmd_summary(args, root: str):
+    """Show overview of all failures."""
+    diff_dir = os.path.join(root, '.parity-cache', 'tests', 'diffs')
+    if not os.path.isdir(diff_dir):
+        print(red("No diffs directory found. Run the parity test first:"))
+        print("  ./scripts/test_typedtree_parity.sh")
+        return
+
+    diff_files = sorted(f for f in os.listdir(diff_dir) if f.endswith('.diff'))
+    if not diff_files:
+        print(green("No failures! All tests pass."))
+        return
+
+    entries = []
+    total_hunks = 0
+
+    for f in diff_files:
+        path = os.path.join(diff_dir, f)
+        with open(path) as fh:
+            diff_text = fh.read()
+
+        info = analyze_diff(diff_text)
+        base = f.replace('.diff', '').replace('tests_tests_src_', '')
+        entries.append((base, info))
+        total_hunks += info['hunks']
+
+    # Sort by hunk count descending
+    entries.sort(key=lambda e: e[1]['hunks'], reverse=True)
+
+    # Print header
+    print(bold(f"Parity Failures: {len(entries)} files, {total_hunks} total hunks"))
+    print()
+    print(f"  {'File':<45} {'Hunks':>6}  {'Pre/Str':>8}  {'Category':<12} {'First diff'}")
+    print(f"  {'─'*45} {'─'*6}  {'─'*8}  {'─'*12} {'─'*40}")
+
+    for name, info in entries:
+        hunks_str = str(info['hunks'])
+        pre_str = f"{info['preamble_hunks']}/{info['structure_hunks']}"
+
+        cat = info['category']
+        if cat == "id-only":
+            cat_str = green(cat)
+        elif cat == "path":
+            cat_str = yellow(cat)
+        elif cat == "path+id":
+            cat_str = red(cat)
+        else:
+            cat_str = cat
+
+        first = info['first_diff'][:40]
+        print(f"  {name:<45} {hunks_str:>6}  {pre_str:>8}  {cat:<12} {dim(first)}")
+
+    print()
+    print(f"  Total: {bold(str(total_hunks))} hunks across {bold(str(len(entries)))} files")
+
+
+def cmd_preamble(args, root: str):
+    """Show aligned type preamble comparison."""
+    name = resolve_file(args.file, root)
+    ocaml_sf, rust_sf = require_sexp_files(name, root)
+
+    matches = match_types(ocaml_sf.types, rust_sf.types)
+
+    # Stats
+    n_match = sum(1 for m in matches if m[2] == "MATCH")
+    n_shifted = sum(1 for m in matches if m[2] == "SHIFTED")
+    n_extra_o = sum(1 for m in matches if m[2] == "EXTRA_OCAML")
+    n_extra_r = sum(1 for m in matches if m[2] == "EXTRA_RUST")
+    total = len(ocaml_sf.types)
+
+    short_name = name.replace("tests_tests_src_", "")
+    print(bold(f"Type Preamble: {short_name}"))
+    print(f"  OCaml: {len(ocaml_sf.types)} types, Rust: {len(rust_sf.types)} types")
+    print(f"  {green(f'{n_match} match')}  {yellow(f'{n_shifted} shifted')}  "
+          f"{red(f'{n_extra_o} extra-ocaml')}  {red(f'{n_extra_r} extra-rust')}")
+    print()
+
+    # Table header
+    print(f"  {'OCaml':>6} {'Rust':>6}  {'Status':<12} {'OCaml Type':<35} {'Rust Type'}")
+    print(f"  {'─'*6} {'─'*6}  {'─'*12} {'─'*35} {'─'*35}")
+
+    only_diff = hasattr(args, 'diff') and args.diff
+
+    for o_id, r_id, status in matches:
+        if only_diff and status == "MATCH":
+            continue
+
+        o_str = str(o_id) if o_id is not None else ""
+        r_str = str(r_id) if r_id is not None else ""
+
+        o_type = type_summary(ocaml_sf.types[o_id]) if o_id is not None else ""
+        r_type = type_summary(rust_sf.types[r_id]) if r_id is not None else ""
+
+        if status == "MATCH":
+            stat = green("MATCH")
+            o_type_c = o_type
+            r_type_c = r_type
+        elif status == "SHIFTED":
+            stat = yellow("SHIFTED")
+            o_type_c = yellow(o_type)
+            r_type_c = yellow(r_type)
+        elif status == "EXTRA_OCAML":
+            stat = red("EXTRA_OCaml")
+            o_type_c = red(o_type)
+            r_type_c = ""
+        else:
+            stat = red("EXTRA_Rust")
+            o_type_c = ""
+            r_type_c = red(r_type)
+
+        # Highlight #N refs
+        o_type_c = re.sub(r'(#\d+)', lambda m: cyan(m.group(1)), o_type_c)
+        r_type_c = re.sub(r'(#\d+)', lambda m: cyan(m.group(1)), r_type_c)
+
+        print(f"  {o_str:>6} {r_str:>6}  {stat:<12} {o_type_c:<35} {r_type_c}")
+
+
+def cmd_trace(args, root: str):
+    """Trace a type through both compilers."""
+    name = resolve_file(args.file, root)
+    target_id = args.id
+    compiler = args.compiler
+
+    ocaml_sf, rust_sf = require_sexp_files(name, root)
+
+    short_name = name.replace("tests_tests_src_", "")
+    print(bold(f"Type Trace: #{target_id} in {compiler} ({short_name})"))
+    print()
+
+    # Primary compiler
+    if compiler == "ocaml":
+        primary_sf = ocaml_sf
+        other_sf = rust_sf
+        other_name = "rust"
+    else:
+        primary_sf = rust_sf
+        other_sf = ocaml_sf
+        other_name = "ocaml"
+
+    if target_id not in primary_sf.types:
+        print(red(f"Type #{target_id} not found in {compiler} (max: {max(primary_sf.types.keys())})"))
+        return
+
+    # Show type definition
+    print(bold(f"  {compiler.upper()} #{target_id}:"))
+    print(f"    {sexp_to_str(primary_sf.types[target_id])}")
+    print(f"    Summary: {type_summary(primary_sf.types[target_id])}")
+    print()
+
+    # Find content match in other compiler
+    primary_memo: dict = {}
+    other_memo: dict = {}
+    target_key = content_key(target_id, primary_sf.types, memo=primary_memo)
+
+    matched_ids = []
+    for tid in sorted(other_sf.types.keys()):
+        k = content_key(tid, other_sf.types, memo=other_memo)
+        if k == target_key:
+            matched_ids.append(tid)
+
+    if matched_ids:
+        print(bold(f"  Content matches in {other_name}:"))
+        for mid in matched_ids:
+            marker = green("= same ID") if mid == target_id else yellow(f"shifted from #{target_id}")
+            print(f"    #{mid} {marker}")
+            print(f"      {sexp_to_str(other_sf.types[mid])}")
+        print()
+    else:
+        print(red(f"  No content match found in {other_name}!"))
+        # Show expanded content key for debugging
+        print(f"  Content key: {target_key[:120]}...")
+        print()
+
+    # Find structural references
+    print(bold(f"  References in {compiler} structure:"))
+    if primary_sf.structure:
+        refs = find_refs_in_structure(primary_sf.structure, target_id)
+        if refs:
+            for r in refs[:20]:  # Limit output
+                print(f"    {cyan(f'#{target_id}')} at {r}")
+            if len(refs) > 20:
+                print(f"    ... and {len(refs) - 20} more")
+        else:
+            print(dim("    (no references found)"))
+    print()
+
+    # Find refs in other compiler
+    if matched_ids:
+        print(bold(f"  References in {other_name} structure:"))
+        if other_sf.structure:
+            for mid in matched_ids:
+                refs = find_refs_in_structure(other_sf.structure, mid)
+                if refs:
+                    for r in refs[:20]:
+                        print(f"    {cyan(f'#{mid}')} at {r}")
+                    if len(refs) > 20:
+                        print(f"    ... and {len(refs) - 20} more")
+                else:
+                    print(dim(f"    #{mid}: (no references found)"))
+        print()
+
+    # Show what references this type
+    print(bold(f"  Types referencing #{target_id} in {compiler}:"))
+    referencing = []
+    for tid, node in sorted(primary_sf.types.items()):
+        s = sexp_to_str(node)
+        if f"#{target_id}" in s and tid != target_id:
+            referencing.append(tid)
+    if referencing:
+        for tid in referencing[:15]:
+            print(f"    #{tid}: {type_summary(primary_sf.types[tid])}")
+        if len(referencing) > 15:
+            print(f"    ... and {len(referencing) - 15} more")
+    else:
+        print(dim("    (none)"))
+
+
+def cmd_extra(args, root: str):
+    """Find extra/missing type nodes between compilers."""
+    name = resolve_file(args.file, root)
+    ocaml_sf, rust_sf = require_sexp_files(name, root)
+
+    short_name = name.replace("tests_tests_src_", "")
+    print(bold(f"Extra/Missing Types: {short_name}"))
+    print()
+
+    # Build content keys
+    ocaml_memo: dict = {}
+    rust_memo: dict = {}
+    ocaml_keys: dict[int, str] = {}
+    rust_keys: dict[int, str] = {}
+
+    for tid in ocaml_sf.types:
+        ocaml_keys[tid] = content_key(tid, ocaml_sf.types, memo=ocaml_memo)
+    for tid in rust_sf.types:
+        rust_keys[tid] = content_key(tid, rust_sf.types, memo=rust_memo)
+
+    # Count each content key
+    ocaml_counts: dict[str, list[int]] = {}
+    rust_counts: dict[str, list[int]] = {}
+
+    for tid, key in ocaml_keys.items():
+        ocaml_counts.setdefault(key, []).append(tid)
+    for tid, key in rust_keys.items():
+        rust_counts.setdefault(key, []).append(tid)
+
+    all_keys = sorted(set(ocaml_counts.keys()) | set(rust_counts.keys()),
+                       key=lambda k: min(ocaml_counts.get(k, [9999])[0],
+                                          rust_counts.get(k, [9999])[0]))
+
+    # Find differences
+    extra_ocaml = []  # (key, ocaml_ids, rust_ids)
+    extra_rust = []
+    duplicated_ocaml = []
+    duplicated_rust = []
+
+    for key in all_keys:
+        o_ids = ocaml_counts.get(key, [])
+        r_ids = rust_counts.get(key, [])
+        o_count = len(o_ids)
+        r_count = len(r_ids)
+
+        if o_count > 0 and r_count == 0:
+            extra_ocaml.append((key, o_ids, r_ids))
+        elif r_count > 0 and o_count == 0:
+            extra_rust.append((key, o_ids, r_ids))
+        elif o_count > r_count:
+            duplicated_ocaml.append((key, o_ids, r_ids))
+        elif r_count > o_count:
+            duplicated_rust.append((key, o_ids, r_ids))
+
+    # Report
+    if extra_ocaml:
+        print(red(bold(f"  Types only in OCaml ({len(extra_ocaml)}):")))
+        for key, o_ids, _ in extra_ocaml:
+            ids_str = ", ".join(f"#{i}" for i in sorted(o_ids))
+            summary = _key_to_summary(key)
+            print(f"    {cyan(ids_str):>20}  {summary}")
+        print()
+
+    if extra_rust:
+        print(red(bold(f"  Types only in Rust ({len(extra_rust)}):")))
+        for key, _, r_ids in extra_rust:
+            ids_str = ", ".join(f"#{i}" for i in sorted(r_ids))
+            summary = _key_to_summary(key)
+            print(f"    {cyan(ids_str):>20}  {summary}")
+        print()
+
+    if duplicated_ocaml:
+        print(yellow(bold(f"  More copies in OCaml ({len(duplicated_ocaml)}):")))
+        for key, o_ids, r_ids in duplicated_ocaml:
+            o_str = ", ".join(f"#{i}" for i in sorted(o_ids))
+            r_str = ", ".join(f"#{i}" for i in sorted(r_ids))
+            summary = _key_to_summary(key)
+            print(f"    OCaml: {cyan(o_str)}  Rust: {cyan(r_str)}")
+            print(f"    {dim(summary)}")
+        print()
+
+    if duplicated_rust:
+        print(yellow(bold(f"  More copies in Rust ({len(duplicated_rust)}):")))
+        for key, o_ids, r_ids in duplicated_rust:
+            o_str = ", ".join(f"#{i}" for i in sorted(o_ids))
+            r_str = ", ".join(f"#{i}" for i in sorted(r_ids))
+            summary = _key_to_summary(key)
+            print(f"    OCaml: {cyan(o_str)}  Rust: {cyan(r_str)}")
+            print(f"    {dim(summary)}")
+        print()
+
+    if not (extra_ocaml or extra_rust or duplicated_ocaml or duplicated_rust):
+        print(green("  No extra or missing types! Differences are in ID assignment only."))
+    else:
+        total_diff = len(extra_ocaml) + len(extra_rust) + len(duplicated_ocaml) + len(duplicated_rust)
+        print(f"  Total content differences: {bold(str(total_diff))}")
+
+
+def _key_to_summary(key: str) -> str:
+    """Convert a content key to a short summary."""
+    # Parse the key as sexp to get the outer tag
+    key = key.strip()
+    if key.startswith('('):
+        # Find the first atom
+        m = re.match(r'\((\w+)', key)
+        if m:
+            tag = m.group(1)
+            return f"{tag} ..." if len(key) > 60 else key
+    return key[:60]
+
+
+def cmd_divergence(args, root: str):
+    """Find first divergence point between preambles."""
+    name = resolve_file(args.file, root)
+    ocaml_sf, rust_sf = require_sexp_files(name, root)
+
+    short_name = name.replace("tests_tests_src_", "")
+    print(bold(f"First Divergence: {short_name}"))
+    print()
+
+    ocaml_ids = sorted(ocaml_sf.types.keys())
+    rust_ids = sorted(rust_sf.types.keys())
+
+    print(f"  OCaml: {len(ocaml_ids)} types (#{ocaml_ids[0]}..#{ocaml_ids[-1]})")
+    print(f"  Rust:  {len(rust_ids)} types (#{rust_ids[0]}..#{rust_ids[-1]})")
+    print()
+
+    # Walk in parallel and find first content mismatch
+    ocaml_memo: dict = {}
+    rust_memo: dict = {}
+
+    max_len = max(len(ocaml_ids), len(rust_ids))
+    first_diverge = None
+    matching_prefix = 0
+
+    for i in range(max_len):
+        o_id = ocaml_ids[i] if i < len(ocaml_ids) else None
+        r_id = rust_ids[i] if i < len(rust_ids) else None
+
+        if o_id is None or r_id is None:
+            first_diverge = i
+            break
+
+        if o_id != r_id:
+            first_diverge = i
+            break
+
+        # Same ID - check content
+        o_key = content_key(o_id, ocaml_sf.types, memo=ocaml_memo)
+        r_key = content_key(r_id, rust_sf.types, memo=rust_memo)
+
+        if o_key != r_key:
+            first_diverge = i
+            break
+
+        matching_prefix += 1
+
+    if first_diverge is None:
+        print(green("  No divergence found! All types match."))
+        return
+
+    print(f"  {green(f'First {matching_prefix} types match perfectly.')}")
+    print()
+    print(bold(f"  First divergence at position {first_diverge}:"))
+
+    o_id = ocaml_ids[first_diverge] if first_diverge < len(ocaml_ids) else None
+    r_id = rust_ids[first_diverge] if first_diverge < len(rust_ids) else None
+
+    if o_id is not None and r_id is not None:
+        if o_id == r_id:
+            # Same ID but different content
+            print(f"    ID #{o_id} exists in both but differs:")
+            print(f"    OCaml: {type_summary(ocaml_sf.types[o_id])}")
+            print(f"    Rust:  {type_summary(rust_sf.types[r_id])}")
+            print()
+            print(f"    OCaml full: {sexp_to_str(ocaml_sf.types[o_id])[:120]}")
+            print(f"    Rust  full: {sexp_to_str(rust_sf.types[r_id])[:120]}")
+
+            # Check if it's a ref difference
+            o_str = sexp_to_str(ocaml_sf.types[o_id])
+            r_str = sexp_to_str(rust_sf.types[r_id])
+            _show_string_diff(o_str, r_str)
+        else:
+            # Different IDs at same position
+            print(f"    OCaml has #{o_id}, Rust has #{r_id}")
+            if o_id in rust_sf.types:
+                print(f"    OCaml #{o_id} also exists in Rust")
+            else:
+                print(f"    OCaml #{o_id} does NOT exist in Rust")
+            if r_id in ocaml_sf.types:
+                print(f"    Rust #{r_id} also exists in OCaml")
+            else:
+                print(f"    Rust #{r_id} does NOT exist in OCaml")
+    elif o_id is None:
+        print(f"    OCaml ran out of types, Rust has extra #{r_id}: {type_summary(rust_sf.types[r_id])}")
+    else:
+        print(f"    Rust ran out of types, OCaml has extra #{o_id}: {type_summary(ocaml_sf.types[o_id])}")
+
+    print()
+
+    # Show context: few types around the divergence
+    print(bold("  Context around divergence:"))
+    start = max(0, first_diverge - 2)
+    end = min(max_len, first_diverge + 5)
+
+    for i in range(start, end):
+        o_id = ocaml_ids[i] if i < len(ocaml_ids) else None
+        r_id = rust_ids[i] if i < len(rust_ids) else None
+
+        marker = " >> " if i == first_diverge else "    "
+
+        o_info = f"#{o_id} {type_summary(ocaml_sf.types[o_id])}" if o_id is not None else "(none)"
+        r_info = f"#{r_id} {type_summary(rust_sf.types[r_id])}" if r_id is not None else "(none)"
+
+        if i == first_diverge:
+            o_info = red(o_info)
+            r_info = red(r_info)
+
+        print(f"  {marker}[{i:>4}] OCaml: {o_info}")
+        print(f"  {marker}       Rust:  {r_info}")
+
+    # Analyze the cascade
+    print()
+    _analyze_cascade(ocaml_sf, rust_sf, ocaml_ids, rust_ids, first_diverge, ocaml_memo, rust_memo)
+
+
+def _show_string_diff(a: str, b: str):
+    """Show where two strings first differ."""
+    for i in range(min(len(a), len(b))):
+        if a[i] != b[i]:
+            ctx_start = max(0, i - 20)
+            print(f"    First char diff at position {i}:")
+            print(f"      OCaml: ...{a[ctx_start:i]}{red(a[i:i+10])}...")
+            print(f"      Rust:  ...{b[ctx_start:i]}{red(b[i:i+10])}...")
+            return
+
+
+def _analyze_cascade(ocaml_sf, rust_sf, ocaml_ids, rust_ids, first_diverge, ocaml_memo, rust_memo):
+    """Analyze whether the divergence is an insertion, deletion, or reordering."""
+    if first_diverge >= len(ocaml_ids) or first_diverge >= len(rust_ids):
+        return
+
+    o_id = ocaml_ids[first_diverge]
+    r_id = rust_ids[first_diverge]
+
+    o_key = content_key(o_id, ocaml_sf.types, memo=ocaml_memo)
+    r_key = content_key(r_id, rust_sf.types, memo=rust_memo)
+
+    # Check if ocaml's type at divergence exists later in rust
+    if o_id == r_id:
+        # Same ID, different content. Check if either content exists elsewhere
+        # See if OCaml's content for this ID matches a different Rust ID
+        for j, rid in enumerate(rust_ids):
+            if j <= first_diverge:
+                continue
+            rk = content_key(rid, rust_sf.types, memo=rust_memo)
+            if rk == o_key:
+                print(bold("  Cascade analysis:"))
+                print(f"    OCaml #{o_id} content matches Rust #{rid} (position {j})")
+                print(f"    This suggests Rust inserted {j - first_diverge} extra type(s) before #{o_id}")
+                return
+
+        for j, oid in enumerate(ocaml_ids):
+            if j <= first_diverge:
+                continue
+            ok = content_key(oid, ocaml_sf.types, memo=ocaml_memo)
+            if ok == r_key:
+                print(bold("  Cascade analysis:"))
+                print(f"    Rust #{r_id} content matches OCaml #{oid} (position {j})")
+                print(f"    This suggests OCaml inserted {j - first_diverge} extra type(s) before #{r_id}")
+                return
+
+    # Check for simple shift
+    remaining_ocaml = set(ocaml_ids[first_diverge:])
+    remaining_rust = set(rust_ids[first_diverge:])
+    only_ocaml = remaining_ocaml - remaining_rust
+    only_rust = remaining_rust - remaining_ocaml
+
+    if only_ocaml or only_rust:
+        print(bold("  ID analysis after divergence:"))
+        if only_ocaml:
+            print(f"    IDs only in OCaml: {', '.join(f'#{i}' for i in sorted(only_ocaml)[:10])}")
+        if only_rust:
+            print(f"    IDs only in Rust:  {', '.join(f'#{i}' for i in sorted(only_rust)[:10])}")
+        if len(only_ocaml) == len(only_rust):
+            print(f"    Equal count ({len(only_ocaml)}) — likely shifted allocation")
+        elif len(only_rust) > len(only_ocaml):
+            print(f"    Rust has {len(only_rust) - len(only_ocaml)} extra type node(s)")
+        else:
+            print(f"    OCaml has {len(only_ocaml) - len(only_rust)} extra type node(s)")
+
+
+# ─── Main ─────────────────────────────────────────────────────────────────────
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="Analyze parity differences between OCaml and Rust compiler output.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  %(prog)s summary
+  %(prog)s preamble ticker
+  %(prog)s trace ticker 11
+  %(prog)s extra more_poly_variant_test
+  %(prog)s divergence bs_set_int_test
+        """)
+
+    parser.add_argument('--no-color', action='store_true', help='Disable colored output')
+
+    subparsers = parser.add_subparsers(dest='command', help='Command to run')
+
+    # summary
+    sub_summary = subparsers.add_parser('summary', help='Overview of all failures')
+
+    # preamble
+    sub_preamble = subparsers.add_parser('preamble', help='Aligned type preamble comparison')
+    sub_preamble.add_argument('file', help='File name or short name (e.g., "ticker")')
+    sub_preamble.add_argument('--diff', action='store_true', help='Only show non-matching types')
+
+    # trace
+    sub_trace = subparsers.add_parser('trace', help='Trace a type through both compilers')
+    sub_trace.add_argument('file', help='File name or short name')
+    sub_trace.add_argument('id', type=int, help='Type ID to trace')
+    sub_trace.add_argument('--compiler', choices=['ocaml', 'rust'], default='ocaml',
+                          help='Which compiler\'s ID to trace (default: ocaml)')
+
+    # extra
+    sub_extra = subparsers.add_parser('extra', help='Find extra/missing type nodes')
+    sub_extra.add_argument('file', help='File name or short name')
+
+    # divergence
+    sub_divergence = subparsers.add_parser('divergence', help='First divergence analysis')
+    sub_divergence.add_argument('file', help='File name or short name')
+
+    args = parser.parse_args()
+
+    global USE_COLOR
+    if args.no_color or not sys.stdout.isatty():
+        USE_COLOR = False
+
+    if not args.command:
+        parser.print_help()
+        sys.exit(1)
+
+    root = find_project_root()
+
+    commands = {
+        'summary': cmd_summary,
+        'preamble': cmd_preamble,
+        'trace': cmd_trace,
+        'extra': cmd_extra,
+        'divergence': cmd_divergence,
+    }
+
+    commands[args.command](args, root)
+
+
+if __name__ == '__main__':
+    main()
