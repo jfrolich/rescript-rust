@@ -5906,30 +5906,11 @@ fn type_match(
     // any ty_arg variant rows that have wildcard coverage in any case.
     reopen_wildcard_covered_rows_in_scrutinee(tctx, env, &typed_val_cases, ty_arg);
 
-    // Match OCaml type_cases `unify_pats (instance env ty_arg)` propagation:
-    // for identifier scrutinees, push the finalized pattern type back to the
-    // scrutinee-side type so row closure on cases is reflected on the bound
-    // identifier/function parameter type.
-    if matches!(
-        &*scrutinee.pexp_desc,
-        crate::parser::ast::ExpressionDesc::Pexp_ident(_)
-    ) {
-        let scrutinee_variant_row =
-            variant_row_key_for_pat_type(tctx, env, typed_scrutinee.exp_type).is_some();
-        if scrutinee_variant_row {
-            for case in &typed_val_cases {
-                let pat_variant_row = variant_row_key_for_pat_type(tctx, env, case.c_lhs.pat_type);
-                if pat_variant_row.is_some() {
-                    let _ = unify_pattern_types(
-                        tctx,
-                        case.c_lhs.pat_loc,
-                        case.c_lhs.pat_type,
-                        typed_scrutinee.exp_type,
-                    );
-                }
-            }
-        }
-    }
+    // OCaml type_cases: `unify_pats (instance env ty_arg)` propagation happens
+    // INSIDE begin_def scope (line 3993), already handled by lines 5711-5720 in
+    // type_match_cases_batch_non_gadt. Do NOT directly unify pattern types with
+    // typed_scrutinee.exp_type — that creates false node sharing between scrutinee
+    // and pattern types (OCaml keeps them separate via fresh instances).
 
     let partial = check_partial_simple(ctx, env, &typed_val_cases);
 
@@ -9139,17 +9120,30 @@ fn type_constraint(
     tctx.generic_constraint_body_ty = prev_generic_constraint;
     unify_expression_types(tctx, loc, typed_inner.exp_type, arg_unify_ty, None)?;
 
-    // OCaml evaluates tuple elements right-to-left, so both instance() calls
-    // in `(type_argument env sarg ty (instance env ty), instance env ty)` happen
-    // BEFORE type_argument runs. type_argument populates simple_abbrevs with
-    // expansion memos. In Rust, the result_ty instance runs AFTER type_expect,
-    // so it would see those memos and create false sharing. Save/restore
-    // simple_abbrevs around the instance call: result_ty sees pre-type_expect
-    // state, but memos from type_expect persist after type_constraint returns.
+    // OCaml evaluates tuple elements right-to-left, so the result_ty instance
+    // runs BEFORE type_argument (with empty simple_abbrevs). Create result_ty
+    // the same way: save/clear/restore so it doesn't see type_expect's memos.
     let saved_abbrevs = ctx.save_simple_abbrevs();
     ctx.clear_simple_abbrevs();
     let result_ty = crate::types::instance(ctx, ctype_ty);
     ctx.restore_simple_abbrevs(saved_abbrevs);
+
+    // OCaml's `rue` inside type_expect_ does `unify_exp (re exp) (instance env ty_expected)`
+    // where ty_expected is the GENERIC constraint type passed to type_expect. The `instance`
+    // call goes through `copy` which checks `simple_abbrevs` for previously-expanded
+    // abbreviations, creating `Tlink` sharing (e.g., React.element nodes sharing a single
+    // physical node via the abbreviation memo). In Rust, type_expect receives a non-generic
+    // expected_ty, so no `copy` happens, and the sharing is lost.
+    //
+    // To recover this sharing: create an additional instance of the generic type AFTER
+    // type_expect has populated simple_abbrevs through expansion. This instance's `copy`
+    // finds the memo and creates Tlink. Unifying it with result_ty links result_ty to the
+    // shared memo node, matching OCaml's `rue` behavior.
+    let rue_sharing_ty = crate::types::instance(ctx, ctype_ty);
+    // Silently unify - failure is expected when the constraint type doesn't match
+    // the memo'd type's structure (shouldn't happen for same-path Tconstr).
+    let _ = crate::types::unify(ctx, &mut tctx.unify_state, result_ty, rue_sharing_ty);
+
     unify_expression_types(tctx, loc, result_ty, expected_ty, None)?;
 
     let mut result = typed_inner;
@@ -13764,7 +13758,6 @@ mod tests {
             "String".to_string(),
         ];
         let result = ocaml_hashtbl_fold_order(&labels);
-        eprintln!("Pair/Int/String fold order: {:?}", result);
         assert_eq!(
             result,
             vec![
