@@ -791,7 +791,9 @@ fn expand_record_spread_label(
                 if new_target == *target {
                     ty
                 } else {
-                    ctx.new_type(crate::types::TypeDesc::Tlink(new_target))
+                    let new_node = ctx.new_type(crate::types::TypeDesc::Tlink(new_target));
+                    ctx.set_arity_alias(new_node, ty);
+                    new_node
                 }
             }
             crate::types::TypeDesc::Tsubst(target) => {
@@ -799,7 +801,9 @@ fn expand_record_spread_label(
                 if new_target == *target {
                     ty
                 } else {
-                    ctx.new_type(crate::types::TypeDesc::Tsubst(new_target))
+                    let new_node = ctx.new_type(crate::types::TypeDesc::Tsubst(new_target));
+                    ctx.set_arity_alias(new_node, ty);
+                    new_node
                 }
             }
             crate::types::TypeDesc::Tconstr {
@@ -814,7 +818,12 @@ fn expand_record_spread_label(
                 if new_args == *inner_args {
                     ty
                 } else {
-                    ctx.new_constr(path.clone(), new_args)
+                    let new_node = ctx.new_constr(path.clone(), new_args);
+                    // Match OCaml's {t with desc = ...} which preserves type_expr.id:
+                    // register the new node as an alias of the original so the sexp
+                    // serializer deduplicates them to the same entry.
+                    ctx.set_arity_alias(new_node, ty);
+                    new_node
                 }
             }
             crate::types::TypeDesc::Tarrow {
@@ -825,7 +834,9 @@ fn expand_record_spread_label(
                 if new_arg == arg.typ && new_ret == *ret {
                     ty
                 } else {
-                    ctx.new_arrow(arg.lbl.clone(), new_arg, new_ret, *arity)
+                    let new_node = ctx.new_arrow(arg.lbl.clone(), new_arg, new_ret, *arity);
+                    ctx.set_arity_alias(new_node, ty);
+                    new_node
                 }
             }
             crate::types::TypeDesc::Ttuple(items) => {
@@ -836,7 +847,9 @@ fn expand_record_spread_label(
                 if new_items == *items {
                     ty
                 } else {
-                    ctx.new_tuple(new_items)
+                    let new_node = ctx.new_tuple(new_items);
+                    ctx.set_arity_alias(new_node, ty);
+                    new_node
                 }
             }
             crate::types::TypeDesc::Tobject { fields, name } => {
@@ -853,10 +866,12 @@ fn expand_record_spread_label(
                 if new_fields == *fields && new_name == *name {
                     ty
                 } else {
-                    ctx.new_type(crate::types::TypeDesc::Tobject {
+                    let new_node = ctx.new_type(crate::types::TypeDesc::Tobject {
                         fields: new_fields,
                         name: new_name,
-                    })
+                    });
+                    ctx.set_arity_alias(new_node, ty);
+                    new_node
                 }
             }
             crate::types::TypeDesc::Tfield {
@@ -870,12 +885,14 @@ fn expand_record_spread_label(
                 if new_typ == *typ && new_rest == *rest {
                     ty
                 } else {
-                    ctx.new_type(crate::types::TypeDesc::Tfield {
+                    let new_node = ctx.new_type(crate::types::TypeDesc::Tfield {
                         name: name.clone(),
                         kind: kind.clone(),
                         typ: new_typ,
                         rest: new_rest,
-                    })
+                    });
+                    ctx.set_arity_alias(new_node, ty);
+                    new_node
                 }
             }
             crate::types::TypeDesc::Tvariant(row) => {
@@ -936,13 +953,15 @@ fn expand_record_spread_label(
                 if !changed {
                     ty
                 } else {
-                    ctx.new_variant(crate::types::RowDesc {
+                    let new_node = ctx.new_variant(crate::types::RowDesc {
                         row_fields: new_fields,
                         row_more: new_more,
                         row_closed: row.row_closed,
                         row_fixed: row.row_fixed,
                         row_name: new_name,
-                    })
+                    });
+                    ctx.set_arity_alias(new_node, ty);
+                    new_node
                 }
             }
             crate::types::TypeDesc::Tpoly { body, vars } => {
@@ -957,7 +976,9 @@ fn expand_record_spread_label(
                     if new_body == *body && new_vars == *vars {
                         ty
                     } else {
-                        ctx.new_poly(new_body, new_vars)
+                        let new_node = ctx.new_poly(new_body, new_vars);
+                        ctx.set_arity_alias(new_node, ty);
+                        new_node
                     }
                 }
             }
@@ -973,11 +994,13 @@ fn expand_record_spread_label(
                 if new_args == *pkg_args {
                     ty
                 } else {
-                    ctx.new_type(crate::types::TypeDesc::Tpackage {
+                    let new_node = ctx.new_type(crate::types::TypeDesc::Tpackage {
                         path: path.clone(),
                         lids: lids.clone(),
                         args: new_args,
-                    })
+                    });
+                    ctx.set_arity_alias(new_node, ty);
+                    new_node
                 }
             }
         };
