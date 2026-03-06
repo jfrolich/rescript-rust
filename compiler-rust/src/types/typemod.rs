@@ -1839,6 +1839,7 @@ fn rewrite_functor_param_type_paths_in_type(
     manifests: &HashMap<String, TypeExprRef>,
     ctx: &crate::types::context::TypeContext<'_>,
     visited: &mut HashSet<TypeExprRef>,
+    manifest_subst_cache: &mut HashMap<String, TypeExprRef>,
 ) {
     use crate::types::type_expr::{RowField, TypeDesc};
 
@@ -1852,27 +1853,37 @@ fn rewrite_functor_param_type_paths_in_type(
         TypeDesc::Tconstr { path, args, .. } => {
             let has_args = !args.is_empty();
             for arg in args {
-                rewrite_functor_param_type_paths_in_type(arg, param_name, manifests, ctx, visited);
+                rewrite_functor_param_type_paths_in_type(arg, param_name, manifests, ctx, visited, manifest_subst_cache);
             }
 
             if let Path::Pdot(prefix, type_name, _) = path {
                 if let Path::Pident(id) = prefix.as_ref() {
                     if id.name() == param_name && !has_args {
                         if let Some(manifest_ty) = manifests.get(type_name.as_str()) {
-                            let mut manifest_copy_cache = HashMap::new();
-                            let manifest_copy = crate::types::ctype::copy_type_deep(
-                                ctx,
-                                *manifest_ty,
-                                &mut manifest_copy_cache,
-                            );
-                            let mut manifest_visited = HashSet::new();
-                            rewrite_functor_param_type_paths_in_type(
-                                manifest_copy,
-                                param_name,
-                                manifests,
-                                ctx,
-                                &mut manifest_visited,
-                            );
+                            // Cache manifest substitution results so all occurrences of
+                            // the same functor parameter type (e.g. S.elt) map to the
+                            // SAME substituted node, matching OCaml's Subst.typexp sharing.
+                            let manifest_copy = if let Some(&cached) = manifest_subst_cache.get(type_name.as_str()) {
+                                cached
+                            } else {
+                                let mut manifest_copy_cache = HashMap::new();
+                                let copy = crate::types::ctype::copy_type_deep(
+                                    ctx,
+                                    *manifest_ty,
+                                    &mut manifest_copy_cache,
+                                );
+                                let mut manifest_visited = HashSet::new();
+                                rewrite_functor_param_type_paths_in_type(
+                                    copy,
+                                    param_name,
+                                    manifests,
+                                    ctx,
+                                    &mut manifest_visited,
+                                    manifest_subst_cache,
+                                );
+                                manifest_subst_cache.insert(type_name.clone(), copy);
+                                copy
+                            };
                             ctx.set_desc(ty, TypeDesc::Tlink(manifest_copy));
                         }
                     }
@@ -1880,22 +1891,22 @@ fn rewrite_functor_param_type_paths_in_type(
             }
         }
         TypeDesc::Tarrow { arg, ret, .. } => {
-            rewrite_functor_param_type_paths_in_type(arg.typ, param_name, manifests, ctx, visited);
-            rewrite_functor_param_type_paths_in_type(ret, param_name, manifests, ctx, visited);
+            rewrite_functor_param_type_paths_in_type(arg.typ, param_name, manifests, ctx, visited, manifest_subst_cache);
+            rewrite_functor_param_type_paths_in_type(ret, param_name, manifests, ctx, visited, manifest_subst_cache);
         }
         TypeDesc::Ttuple(types) => {
             for inner in types {
                 rewrite_functor_param_type_paths_in_type(
-                    inner, param_name, manifests, ctx, visited,
+                    inner, param_name, manifests, ctx, visited, manifest_subst_cache,
                 );
             }
         }
         TypeDesc::Tobject { fields, .. } => {
-            rewrite_functor_param_type_paths_in_type(fields, param_name, manifests, ctx, visited);
+            rewrite_functor_param_type_paths_in_type(fields, param_name, manifests, ctx, visited, manifest_subst_cache);
         }
         TypeDesc::Tfield { typ, rest, .. } => {
-            rewrite_functor_param_type_paths_in_type(typ, param_name, manifests, ctx, visited);
-            rewrite_functor_param_type_paths_in_type(rest, param_name, manifests, ctx, visited);
+            rewrite_functor_param_type_paths_in_type(typ, param_name, manifests, ctx, visited, manifest_subst_cache);
+            rewrite_functor_param_type_paths_in_type(rest, param_name, manifests, ctx, visited, manifest_subst_cache);
         }
         TypeDesc::Tvariant(row) => {
             rewrite_functor_param_type_paths_in_type(
@@ -1904,11 +1915,12 @@ fn rewrite_functor_param_type_paths_in_type(
                 manifests,
                 ctx,
                 visited,
+                manifest_subst_cache,
             );
             if let Some((_path, row_types)) = row.row_name {
                 for row_ty in row_types {
                     rewrite_functor_param_type_paths_in_type(
-                        row_ty, param_name, manifests, ctx, visited,
+                        row_ty, param_name, manifests, ctx, visited, manifest_subst_cache,
                     );
                 }
             }
@@ -1916,13 +1928,13 @@ fn rewrite_functor_param_type_paths_in_type(
                 match row_field {
                     RowField::Rpresent(Some(row_ty)) => {
                         rewrite_functor_param_type_paths_in_type(
-                            row_ty, param_name, manifests, ctx, visited,
+                            row_ty, param_name, manifests, ctx, visited, manifest_subst_cache,
                         );
                     }
                     RowField::Reither { types, .. } => {
                         for row_ty in types {
                             rewrite_functor_param_type_paths_in_type(
-                                row_ty, param_name, manifests, ctx, visited,
+                                row_ty, param_name, manifests, ctx, visited, manifest_subst_cache,
                             );
                         }
                     }
@@ -1931,18 +1943,18 @@ fn rewrite_functor_param_type_paths_in_type(
             }
         }
         TypeDesc::Tpoly { body, vars } => {
-            rewrite_functor_param_type_paths_in_type(body, param_name, manifests, ctx, visited);
+            rewrite_functor_param_type_paths_in_type(body, param_name, manifests, ctx, visited, manifest_subst_cache);
             for var in vars {
-                rewrite_functor_param_type_paths_in_type(var, param_name, manifests, ctx, visited);
+                rewrite_functor_param_type_paths_in_type(var, param_name, manifests, ctx, visited, manifest_subst_cache);
             }
         }
         TypeDesc::Tpackage { args, .. } => {
             for arg in args {
-                rewrite_functor_param_type_paths_in_type(arg, param_name, manifests, ctx, visited);
+                rewrite_functor_param_type_paths_in_type(arg, param_name, manifests, ctx, visited, manifest_subst_cache);
             }
         }
         TypeDesc::Tlink(target) | TypeDesc::Tsubst(target) => {
-            rewrite_functor_param_type_paths_in_type(target, param_name, manifests, ctx, visited);
+            rewrite_functor_param_type_paths_in_type(target, param_name, manifests, ctx, visited, manifest_subst_cache);
         }
         TypeDesc::Tvar(_) | TypeDesc::Tunivar(_) | TypeDesc::Tnil => {}
     }
@@ -1954,10 +1966,11 @@ fn copy_and_specialize_functor_arg_type(
     manifests: &HashMap<String, TypeExprRef>,
     ctx: &crate::types::context::TypeContext<'_>,
     copy_cache: &mut HashMap<TypeExprRef, TypeExprRef>,
+    manifest_subst_cache: &mut HashMap<String, TypeExprRef>,
 ) -> TypeExprRef {
     let copied = crate::types::ctype::copy_type_deep(ctx, ty, copy_cache);
     let mut visited = HashSet::new();
-    rewrite_functor_param_type_paths_in_type(copied, param_name, manifests, ctx, &mut visited);
+    rewrite_functor_param_type_paths_in_type(copied, param_name, manifests, ctx, &mut visited, manifest_subst_cache);
     copied
 }
 
@@ -1973,6 +1986,7 @@ fn specialize_functor_result_value_types(
         manifests: &HashMap<String, TypeExprRef>,
         ctx: &crate::types::context::TypeContext<'_>,
         copy_cache: &mut HashMap<TypeExprRef, TypeExprRef>,
+        manifest_subst_cache: &mut HashMap<String, TypeExprRef>,
     ) -> crate::types::decl::LabelDeclaration {
         let mut specialized = label.clone();
         specialized.ld_type = copy_and_specialize_functor_arg_type(
@@ -1981,6 +1995,7 @@ fn specialize_functor_result_value_types(
             manifests,
             ctx,
             copy_cache,
+            manifest_subst_cache,
         );
         specialized
     }
@@ -1991,6 +2006,7 @@ fn specialize_functor_result_value_types(
         manifests: &HashMap<String, TypeExprRef>,
         ctx: &crate::types::context::TypeContext<'_>,
         copy_cache: &mut HashMap<TypeExprRef, TypeExprRef>,
+        manifest_subst_cache: &mut HashMap<String, TypeExprRef>,
     ) -> crate::types::decl::ConstructorArguments {
         match args {
             crate::types::decl::ConstructorArguments::CstrTuple(types) => {
@@ -1999,7 +2015,7 @@ fn specialize_functor_result_value_types(
                         .iter()
                         .map(|ty| {
                             copy_and_specialize_functor_arg_type(
-                                *ty, param_name, manifests, ctx, copy_cache,
+                                *ty, param_name, manifests, ctx, copy_cache, manifest_subst_cache,
                             )
                         })
                         .collect(),
@@ -2010,7 +2026,7 @@ fn specialize_functor_result_value_types(
                     labels
                         .iter()
                         .map(|label| {
-                            specialize_label_decl(label, param_name, manifests, ctx, copy_cache)
+                            specialize_label_decl(label, param_name, manifests, ctx, copy_cache, manifest_subst_cache)
                         })
                         .collect(),
                 )
@@ -2024,6 +2040,7 @@ fn specialize_functor_result_value_types(
         manifests: &HashMap<String, TypeExprRef>,
         ctx: &crate::types::context::TypeContext<'_>,
         copy_cache: &mut HashMap<TypeExprRef, TypeExprRef>,
+        manifest_subst_cache: &mut HashMap<String, TypeExprRef>,
     ) -> crate::types::decl::TypeKind {
         match kind {
             crate::types::decl::TypeKind::TypeAbstract => {
@@ -2035,7 +2052,7 @@ fn specialize_functor_result_value_types(
                     labels
                         .iter()
                         .map(|label| {
-                            specialize_label_decl(label, param_name, manifests, ctx, copy_cache)
+                            specialize_label_decl(label, param_name, manifests, ctx, copy_cache, manifest_subst_cache)
                         })
                         .collect(),
                     repre.clone(),
@@ -2053,10 +2070,11 @@ fn specialize_functor_result_value_types(
                                 manifests,
                                 ctx,
                                 copy_cache,
+                                manifest_subst_cache,
                             );
                             specialized.cd_res = constructor.cd_res.map(|ty| {
                                 copy_and_specialize_functor_arg_type(
-                                    ty, param_name, manifests, ctx, copy_cache,
+                                    ty, param_name, manifests, ctx, copy_cache, manifest_subst_cache,
                                 )
                             });
                             specialized
@@ -2073,6 +2091,7 @@ fn specialize_functor_result_value_types(
         manifests: &HashMap<String, TypeExprRef>,
         ctx: &crate::types::context::TypeContext<'_>,
         copy_cache: &mut HashMap<TypeExprRef, TypeExprRef>,
+        manifest_subst_cache: &mut HashMap<String, TypeExprRef>,
     ) -> crate::types::decl::TypeInlinedType {
         match inlined {
             crate::types::decl::TypeInlinedType::Record { type_name, labels } => {
@@ -2081,7 +2100,7 @@ fn specialize_functor_result_value_types(
                     labels: labels
                         .iter()
                         .map(|label| {
-                            specialize_label_decl(label, param_name, manifests, ctx, copy_cache)
+                            specialize_label_decl(label, param_name, manifests, ctx, copy_cache, manifest_subst_cache)
                         })
                         .collect(),
                 }
@@ -2095,6 +2114,7 @@ fn specialize_functor_result_value_types(
         manifests: &HashMap<String, TypeExprRef>,
         ctx: &crate::types::context::TypeContext<'_>,
         copy_cache: &mut HashMap<TypeExprRef, TypeExprRef>,
+        manifest_subst_cache: &mut HashMap<String, TypeExprRef>,
     ) -> crate::types::decl::ModuleType {
         use crate::types::decl::{ModuleType as DeclMty, SignatureItem};
 
@@ -2111,6 +2131,7 @@ fn specialize_functor_result_value_types(
                                 manifests,
                                 ctx,
                                 copy_cache,
+                                manifest_subst_cache,
                             );
                             SignatureItem::SigValue(id.clone(), specialized_vd)
                         }
@@ -2127,6 +2148,7 @@ fn specialize_functor_result_value_types(
                                         manifests,
                                         ctx,
                                         &mut local_copy_cache,
+                                        manifest_subst_cache,
                                     )
                                 })
                                 .collect();
@@ -2136,6 +2158,7 @@ fn specialize_functor_result_value_types(
                                 manifests,
                                 ctx,
                                 &mut local_copy_cache,
+                                manifest_subst_cache,
                             );
                             specialized_decl.type_manifest = decl.type_manifest.map(|ty| {
                                 copy_and_specialize_functor_arg_type(
@@ -2144,6 +2167,7 @@ fn specialize_functor_result_value_types(
                                     manifests,
                                     ctx,
                                     &mut local_copy_cache,
+                                    manifest_subst_cache,
                                 )
                             });
                             specialized_decl.type_inlined_types = decl
@@ -2156,6 +2180,7 @@ fn specialize_functor_result_value_types(
                                         manifests,
                                         ctx,
                                         &mut local_copy_cache,
+                                        manifest_subst_cache,
                                     )
                                 })
                                 .collect();
@@ -2174,6 +2199,7 @@ fn specialize_functor_result_value_types(
                                         manifests,
                                         ctx,
                                         &mut local_copy_cache,
+                                        manifest_subst_cache,
                                     )
                                 })
                                 .collect();
@@ -2183,6 +2209,7 @@ fn specialize_functor_result_value_types(
                                 manifests,
                                 ctx,
                                 &mut local_copy_cache,
+                                manifest_subst_cache,
                             );
                             specialized_ext.ext_ret_type = ext.ext_ret_type.map(|ty| {
                                 copy_and_specialize_functor_arg_type(
@@ -2191,6 +2218,7 @@ fn specialize_functor_result_value_types(
                                     manifests,
                                     ctx,
                                     &mut local_copy_cache,
+                                    manifest_subst_cache,
                                 )
                             });
                             SignatureItem::SigTypext(id.clone(), specialized_ext, *ext_status)
@@ -2203,13 +2231,14 @@ fn specialize_functor_result_value_types(
                                 manifests,
                                 ctx,
                                 copy_cache,
+                                manifest_subst_cache,
                             );
                             SignatureItem::SigModule(id.clone(), specialized_md, *rec_status)
                         }
                         SignatureItem::SigModtype(id, mtd) => {
                             let mut specialized_mtd = mtd.clone();
                             specialized_mtd.mtd_type = mtd.mtd_type.as_ref().map(|inner| {
-                                specialize_inner(inner, param_name, manifests, ctx, copy_cache)
+                                specialize_inner(inner, param_name, manifests, ctx, copy_cache, manifest_subst_cache)
                             });
                             SignatureItem::SigModtype(id.clone(), specialized_mtd)
                         }
@@ -2225,7 +2254,7 @@ fn specialize_functor_result_value_types(
             } => {
                 let specialized_param_type = param_type.as_ref().map(|inner| {
                     Box::new(specialize_inner(
-                        inner, param_name, manifests, ctx, copy_cache,
+                        inner, param_name, manifests, ctx, copy_cache, manifest_subst_cache,
                     ))
                 });
                 if param.name() == param_name {
@@ -2239,7 +2268,7 @@ fn specialize_functor_result_value_types(
                         param: param.clone(),
                         param_type: specialized_param_type,
                         result: Box::new(specialize_inner(
-                            result, param_name, manifests, ctx, copy_cache,
+                            result, param_name, manifests, ctx, copy_cache, manifest_subst_cache,
                         )),
                     }
                 }
@@ -2253,7 +2282,8 @@ fn specialize_functor_result_value_types(
     }
 
     let mut copy_cache = HashMap::new();
-    specialize_inner(mty, param_name, manifests, ctx, &mut copy_cache)
+    let mut manifest_subst_cache = HashMap::new();
+    specialize_inner(mty, param_name, manifests, ctx, &mut copy_cache, &mut manifest_subst_cache)
 }
 
 /// Mirror OCaml `Env.scrape_alias` enough for functor-application typing:
