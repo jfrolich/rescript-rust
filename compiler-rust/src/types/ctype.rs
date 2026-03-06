@@ -3082,7 +3082,19 @@ fn generalize_expansive_rec(
             let variances = env
                 .lookup_type(&path)
                 .map(|decl| decl.type_variance.clone())
-                .unwrap_or_else(|_| vec![Variance::MAY_INV; args.len()]);
+                .unwrap_or_else(|_| {
+                    // Fall back to TypeContext caches for module-qualified types
+                    // (e.g., Stdlib.Lazy.t) that aren't directly in the flat env.
+                    // This matches OCaml's Env.find_type which resolves Pdot paths
+                    // through module hierarchies.
+                    if let Path::Pdot(..) = &path {
+                        let path_name = path.name();
+                        if let Some(decl_ref) = ctx.find_type_decl_by_path(&path_name) {
+                            return decl_ref.type_variance.clone();
+                        }
+                    }
+                    vec![Variance::MAY_INV; args.len()]
+                });
             for (index, arg) in args.iter().enumerate() {
                 let variance = variances.get(index).copied().unwrap_or(Variance::MAY_INV);
                 if variance.mem(VarianceFlag::MayWeak) {
@@ -3255,7 +3267,16 @@ fn compute_variance_rec(
                 let variances = env
                     .lookup_type(&path)
                     .map(|d| d.type_variance.clone())
-                    .unwrap_or_else(|_| vec![Variance::MAY_INV; args.len()]);
+                    .unwrap_or_else(|_| {
+                        // Fall back to TypeContext caches for module-qualified types
+                        if let Path::Pdot(..) = &path {
+                            let path_name = path.name();
+                            if let Some(decl_ref) = ctx.find_type_decl_by_path(&path_name) {
+                                return decl_ref.type_variance.clone();
+                            }
+                        }
+                        vec![Variance::MAY_INV; args.len()]
+                    });
                 for (i, arg) in args.iter().enumerate() {
                     let var = variances.get(i).copied().unwrap_or(Variance::MAY_INV);
                     let cv = |f: VarianceFlag| var.mem(f);
