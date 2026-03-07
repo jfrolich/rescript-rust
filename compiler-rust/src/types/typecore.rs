@@ -3796,13 +3796,17 @@ pub fn type_expect<'a>(
                     ctx.new_constr(fresh_path, vec![])
                 } else if reuse_local_ground {
                     source_ty
+                } else if matches!(path, Path::Pdot(..) | Path::Papply(..))
+                    && ctx.get_level(source_ty) != crate::types::type_expr::GENERIC_LEVEL
+                {
+                    // Module-qualified non-generic value types must not alias the
+                    // declaration graph in-place. Copy before unification so typing
+                    // local code cannot mutate module signature manifests.
+                    // (Rust CMI loading shares type nodes across lookups, unlike
+                    // OCaml's Subst.value_description which copies per lookup.)
+                    let mut copy_cache = HashMap::new();
+                    crate::types::ctype::copy_type_deep(ctx, source_ty, &mut copy_cache)
                 } else {
-                    // OCaml: instance env desc.val_type
-                    // For non-generic types, instance returns identity (same node).
-                    // OCaml doesn't deep-copy Pdot value types; link_type during
-                    // unification safely sets desc to Tlink without corrupting the
-                    // module signature because the env already holds a separate copy
-                    // from module typing. Match OCaml's behavior exactly.
                     crate::types::instance(ctx, desc.val_type)
                 }
             };
