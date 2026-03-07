@@ -9688,6 +9688,9 @@ fn type_letexception(
     let name_str = arena.get_string(ext_constr.pext_name.txt).to_string();
     let id = Ident::create_local(&name_str);
 
+    // Match OCaml's transl_exception: begin_def before creating arg types,
+    // end_def + generalize after, so instance_constructor creates fresh copies.
+    ctx.begin_def();
     let (typed_args, typed_ret, ext_args, cstr_args, cstr_inlined, ext_ret_ty) =
         match &ext_constr.pext_kind {
             crate::parser::ast::ExtensionConstructorKind::Pext_decl(args, ret) => {
@@ -9755,7 +9758,8 @@ fn type_letexception(
                             });
                         }
                         let inline_path = Path::pident(id.clone());
-                        let inline_ty = ctx.new_constr(inline_path.clone(), vec![]);
+                        // Match OCaml's newgenconstr: create at generic_level
+                        let inline_ty = ctx.new_generic_constr(inline_path.clone(), vec![]);
                         let inline_decl = crate::types::TypeDeclaration {
                             type_params: vec![],
                             type_arity: 0,
@@ -9807,6 +9811,24 @@ fn type_letexception(
                 None,
             ),
         };
+    ctx.end_def();
+
+    // Generalize constructor arg types (matching OCaml's iter_type_expr_cstr_args generalize)
+    match &ext_args {
+        crate::types::ConstructorArguments::CstrTuple(types) => {
+            for ty in types {
+                crate::types::generalize(ctx, *ty);
+            }
+        }
+        crate::types::ConstructorArguments::CstrRecord(labels) => {
+            for label in labels {
+                crate::types::generalize(ctx, label.ld_type);
+            }
+        }
+    }
+    if let Some(ret_ty) = ext_ret_ty {
+        crate::types::generalize(ctx, ret_ty);
+    }
 
     let exn_ty = ctx.new_generic_constr(Path::pident(Ident::create_persistent("exn")), vec![]);
     let exn_path = Path::pident(id.clone());
