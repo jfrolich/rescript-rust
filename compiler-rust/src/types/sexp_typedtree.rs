@@ -428,7 +428,20 @@ fn sexp_type_expr(
     dedup: &mut TypeDedupTable,
     te: TypeExprRef,
 ) -> Sexp {
+    // Debug: trace specific TypeExprRefs
+    let orig_te = te;
     let te = ctx.repr(te); // Follow Tlink chains
+    if orig_te.0 >= 327 && orig_te.0 <= 355 {
+        let desc = ctx.get_desc(te);
+        let desc_str = match &*desc {
+            TypeDesc::Tconstr { path, args, .. } => format!("Tconstr({}, {:?})", path.name(), args),
+            TypeDesc::Tvar(name) => format!("Tvar({:?})", name),
+            TypeDesc::Tlink(target) => format!("Tlink({:?})", target),
+            _ => format!("{:?}", std::mem::discriminant(&*desc)),
+        };
+        drop(desc);
+        eprintln!("[SEXP_TRACE] input={:?} repr={:?} desc={}", orig_te, te, desc_str);
+    }
 
     // Arity alias dedup: OCaml's update_uncurried_arity creates {t with desc=...}
     // sharing the same type_expr.id. We match this by resolving arity aliases
@@ -454,6 +467,30 @@ fn sexp_type_expr(
 
     // Serialize the type body
     let desc = ctx.get_desc(te);
+    // Debug: log type nodes for result/variant and their args
+    match &*desc {
+        TypeDesc::Tconstr { path, args, .. } => {
+            let name = path.name();
+            if (name == "result" || name == "int" || name == "string") && args.is_empty() {
+                eprintln!("[SEXP_NEW] #{} {} te={:?} dedup={:?} level={}", idx, name, te, dedup_key, ctx.get_level(te));
+            }
+            if name == "result" {
+                eprintln!("[SEXP_NEW] #{} result te={:?} args={:?}", idx, te, args.iter().map(|a| format!("{:?}(repr={:?})", a, ctx.repr(*a))).collect::<Vec<_>>());
+            }
+        }
+        TypeDesc::Tvariant(row) => {
+            let field_types: Vec<_> = row.row_fields.iter().filter_map(|(name, field)| {
+                match field {
+                    crate::types::type_expr::RowField::Rpresent(Some(t)) => Some(format!("{}={:?}(repr={:?})", name, t, ctx.repr(*t))),
+                    _ => None,
+                }
+            }).collect();
+            if !field_types.is_empty() {
+                eprintln!("[SEXP_NEW] #{} variant te={:?} fields={:?}", idx, te, field_types);
+            }
+        }
+        _ => {}
+    }
     let sexp = match &*desc {
         TypeDesc::Tvar(name) => Sexp::list(vec![Sexp::atom("Tvar"), opt_string(name)]),
         TypeDesc::Tarrow {

@@ -778,6 +778,7 @@ fn expand_record_spread_label(
         }
         for (idx, param) in params.iter().enumerate() {
             if ctx.repr(*param) == ty {
+                eprintln!("[SUBST] param match: ty={:?} -> arg={:?} (repr={:?})", ty, args[idx], ctx.repr(args[idx]));
                 return args[idx];
             }
         }
@@ -1004,6 +1005,9 @@ fn expand_record_spread_label(
                 }
             }
         };
+        if substituted != ty {
+            eprintln!("[SUBST] structural: ty={:?} -> result={:?}", ty, substituted);
+        }
         cache.insert(ty, substituted);
         substituted
     }
@@ -1014,7 +1018,10 @@ fn expand_record_spread_label(
 
     let spread_ty = unwrap_poly_type(ctx, label.ld_type);
     let (spread_path, spread_args) = match &*ctx.get_desc(spread_ty) {
-        crate::types::TypeDesc::Tconstr { path, args, .. } => (path.clone(), args.clone()),
+        crate::types::TypeDesc::Tconstr { path, args, .. } => {
+            eprintln!("[SPREAD] label ld_type={:?} spread_ty={:?} path={} args={:?}", label.ld_type, spread_ty, path.name(), args.iter().map(|a| format!("{:?}(repr={:?})", a, ctx.repr(*a))).collect::<Vec<_>>());
+            (path.clone(), args.clone())
+        },
         _ => return None,
     };
     let path_name = spread_path.name();
@@ -1081,6 +1088,15 @@ fn make_typed_spread_label(
     }
 
     let actual_field_type = unwrap_poly_type(ctx, field.ld_type);
+    eprintln!("[MAKE_SPREAD] field={} field.ld_type={:?} actual_field_type={:?} template.ld_type.ctyp_type={:?}", field.ld_id.name(), field.ld_type, actual_field_type, template.ld_type.ctyp_type);
+    // Also dump the template's inner ctyp args' ctyp_types
+    if let TypedCoreTypeDesc::Ttyp_poly(_, inner) = &template.ld_type.ctyp_desc {
+        if let TypedCoreTypeDesc::Ttyp_constr(_, _, args) = &inner.ctyp_desc {
+            for (i, arg) in args.iter().enumerate() {
+                eprintln!("[MAKE_SPREAD]   template arg[{}] ctyp_type={:?} (repr={:?})", i, arg.ctyp_type, ctx.repr(arg.ctyp_type));
+            }
+        }
+    }
     let typed_ld_type = match &template.ld_type.ctyp_desc {
         TypedCoreTypeDesc::Ttyp_poly(vars, inner_ctyp) => TypedCoreType {
             ctyp_desc: TypedCoreTypeDesc::Ttyp_poly(vars.clone(), inner_ctyp.clone()),

@@ -4184,6 +4184,13 @@ pub fn instance_label(
     let (poly_vars, ty_arg) = {
         let desc = ctx.get_desc(arg_repr);
         match &*desc {
+            super::TypeDesc::Tpoly { body, vars } if vars.is_empty() => {
+                // OCaml: instance_poly ~fixed [] body returns ([], body) directly.
+                // No copying needed when there are no universally quantified variables.
+                let body = *body;
+                drop(desc);
+                (vec![], body)
+            }
             super::TypeDesc::Tpoly { body, vars } => {
                 let body = *body;
                 let vars = vars.clone();
