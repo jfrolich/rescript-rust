@@ -4184,13 +4184,6 @@ pub fn instance_label(
     let (poly_vars, ty_arg) = {
         let desc = ctx.get_desc(arg_repr);
         match &*desc {
-            super::TypeDesc::Tpoly { body, vars } if vars.is_empty() => {
-                // OCaml: instance_poly ~fixed [] body returns ([], body) directly.
-                // No copying needed when there are no universally quantified variables.
-                let body = *body;
-                drop(desc);
-                (vec![], body)
-            }
             super::TypeDesc::Tpoly { body, vars } => {
                 let body = *body;
                 let vars = vars.clone();
@@ -4231,9 +4224,12 @@ pub fn check_univars(ctx: &TypeContext<'_>, vars: &[TypeExprRef]) {
     }
 }
 
-/// Deep copy a type, matching OCaml's `copy` in ctype.ml.
-/// Only copies types at GENERIC_LEVEL; returns non-generic types directly.
-/// Used for label instantiation (instance_label) and type instantiation.
+/// Deep copy a type, creating fresh type variables regardless of level.
+/// Used for label instantiation where types may not be at GENERIC_LEVEL
+/// but still need fresh copies to avoid sharing across different uses.
+/// NOTE: OCaml's `copy` checks `t.level <> generic_level` and returns
+/// non-generic types directly. Adding that check here regresses parity
+/// because other parts of the system are calibrated for copy-everything.
 pub fn copy_type_deep(
     ctx: &TypeContext<'_>,
     ty: TypeExprRef,
@@ -4243,12 +4239,6 @@ pub fn copy_type_deep(
 
     if let Some(&cached) = cache.get(&ty) {
         return cached;
-    }
-
-    // OCaml's copy returns non-generic types directly without copying.
-    // This preserves sharing for types that are not part of a type scheme.
-    if ctx.get_level(ty) != super::type_expr::GENERIC_LEVEL {
-        return ty;
     }
 
     let desc = ctx.get_desc(ty);
