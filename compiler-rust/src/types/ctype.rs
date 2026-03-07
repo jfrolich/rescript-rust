@@ -4238,15 +4238,6 @@ pub fn copy_type_deep(
         return cached;
     }
 
-    // OCaml's copy returns the original node for non-generic types (line 863 ctype.ml):
-    //   if ty.level <> generic_level && partial = None then ty
-    // copy_type_deep is always called without partial, so we can use this fast-path.
-    let level = ctx.get_level(ty);
-    if level != GENERIC_LEVEL {
-        cache.insert(ty, ty);
-        return ty;
-    }
-
     let desc = ctx.get_desc(ty);
     match &*desc {
         TypeDesc::Tvar(_name) => {
