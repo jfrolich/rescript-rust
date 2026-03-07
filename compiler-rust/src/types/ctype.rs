@@ -4231,9 +4231,9 @@ pub fn check_univars(ctx: &TypeContext<'_>, vars: &[TypeExprRef]) {
     }
 }
 
-/// Deep copy a type, creating fresh type variables regardless of level.
-/// Used for label instantiation where types may not be at GENERIC_LEVEL
-/// but still need fresh copies to avoid sharing across different uses.
+/// Deep copy a type, matching OCaml's `copy` in ctype.ml.
+/// Only copies types at GENERIC_LEVEL; returns non-generic types directly.
+/// Used for label instantiation (instance_label) and type instantiation.
 pub fn copy_type_deep(
     ctx: &TypeContext<'_>,
     ty: TypeExprRef,
@@ -4243,6 +4243,12 @@ pub fn copy_type_deep(
 
     if let Some(&cached) = cache.get(&ty) {
         return cached;
+    }
+
+    // OCaml's copy returns non-generic types directly without copying.
+    // This preserves sharing for types that are not part of a type scheme.
+    if ctx.get_level(ty) != super::type_expr::GENERIC_LEVEL {
+        return ty;
     }
 
     let desc = ctx.get_desc(ty);

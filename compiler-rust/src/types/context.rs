@@ -367,16 +367,6 @@ impl<'a> TypeContext<'a> {
         let id = self.id_gen.next_type_id();
         let mut types = self.types.borrow_mut();
         let idx = types.len();
-        // Debug: trace allocation of specific TypeExprRefs
-        match &desc {
-            TypeDesc::Tconstr { path, args, .. } if args.is_empty() => {
-                let name = path.name();
-                if (name == "int" || name == "string") && (idx >= 330 && idx <= 360) {
-                    eprintln!("[ALLOC] TypeExprRef({}) = {} at level={} current_level={}", idx, name, level, self.current_level.get());
-                }
-            }
-            _ => {}
-        }
         types.push(Box::new(TypeExpr::new(desc, level, id)));
         TypeExprRef(idx)
     }
