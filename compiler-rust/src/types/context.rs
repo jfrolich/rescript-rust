@@ -85,10 +85,12 @@ pub struct TypeContext<'a> {
     /// GADT instance tracking flag
     trace_gadt_instances: Cell<bool>,
 
-    /// Simple abbreviations memo: maps nullary Tconstr paths (identity-aware)
-    /// to previously-expanded Tconstr nodes. This matches OCaml's
-    /// `Path.same`-based lookup in `simple_abbrevs`.
-    simple_abbrevs: RefCell<std::collections::HashMap<Path, TypeExprRef>>,
+    /// Simple abbreviations memo: nullary Tconstr paths → expansion nodes.
+    /// Uses Vec (like OCaml's Mcons stack): new entries are pushed, lookup
+    /// searches from back to front (most recent first). If a path already
+    /// exists, memorize_simple_abbrev preserves the first entry (matching
+    /// OCaml's find_repr check before Mcons prepend).
+    simple_abbrevs: RefCell<Vec<(Path, TypeExprRef)>>,
     /// Previous env ID for check_abbrev_env (OCaml ctype.ml:1272)
     previous_env_id: Cell<u64>,
 
@@ -207,7 +209,7 @@ impl<'a> TypeContext<'a> {
             global_level: Cell::new(1),
             saved_levels: RefCell::new(Vec::new()),
             trace_gadt_instances: Cell::new(false),
-            simple_abbrevs: RefCell::new(std::collections::HashMap::new()),
+            simple_abbrevs: RefCell::new(Vec::new()),
             previous_env_id: Cell::new(0),
             nullary_expansion_cache: RefCell::new(std::collections::HashMap::new()),
             safe_expansion_paths: RefCell::new(std::collections::HashSet::new()),
@@ -600,17 +602,19 @@ impl<'a> TypeContext<'a> {
     /// Record a nullary Tconstr expansion for cross-instance sharing.
     /// Matches OCaml's memorize_abbrev into simple_abbrevs.
     pub fn memorize_simple_abbrev(&self, path: Path, ty: TypeExprRef) {
-        // OCaml stores abbreviations as an Mcons stack; later entries shadow
-        // earlier ones for the same path during find_repr.
+        // OCaml's memorize_abbrev unconditionally prepends to the Mcons stack.
+        // Multiple entries for the same path can coexist; find returns the most
+        // recent (search from back). Push = prepend in our reversed semantics.
         let path = Self::canonicalize_simple_abbrev_path(&path);
-        self.simple_abbrevs.borrow_mut().insert(path, ty);
+        self.simple_abbrevs.borrow_mut().push((path, ty));
     }
 
     /// Look up a previously-expanded nullary Tconstr by path identity.
     /// Matches OCaml's find_repr on simple_abbrevs.
     pub fn find_simple_abbrev(&self, path: &Path) -> Option<TypeExprRef> {
-        let path = Self::canonicalize_simple_abbrev_path(path);
-        self.simple_abbrevs.borrow().get(&path).copied()
+        let path = Self::canonicalize_simple_abbrev_path(&path);
+        // Search from back to front (most recently added first, like OCaml's Mcons)
+        self.simple_abbrevs.borrow().iter().rev().find(|(p, _)| *p == path).map(|(_, ty)| *ty)
     }
 
     /// Clear simple abbreviations. Called during generalize/generalize_structure.
@@ -619,13 +623,20 @@ impl<'a> TypeContext<'a> {
         self.nullary_expansion_cache.borrow_mut().clear();
     }
 
+    /// Clear only the nullary expansion cache, preserving simple_abbrevs.
+    /// Used in check_abbrev_env to match OCaml's behavior where simple_abbrevs
+    /// persists across env changes but expansion caches are refreshed.
+    pub fn clear_nullary_expansion_cache(&self) {
+        self.nullary_expansion_cache.borrow_mut().clear();
+    }
+
     /// Save current simple_abbrevs state (for temporary isolation).
-    pub fn save_simple_abbrevs(&self) -> (std::collections::HashMap<Path, TypeExprRef>, std::collections::HashMap<Path, TypeDesc>) {
+    pub fn save_simple_abbrevs(&self) -> (Vec<(Path, TypeExprRef)>, std::collections::HashMap<Path, TypeDesc>) {
         (self.simple_abbrevs.borrow().clone(), self.nullary_expansion_cache.borrow().clone())
     }
 
     /// Restore saved simple_abbrevs state.
-    pub fn restore_simple_abbrevs(&self, saved: (std::collections::HashMap<Path, TypeExprRef>, std::collections::HashMap<Path, TypeDesc>)) {
+    pub fn restore_simple_abbrevs(&self, saved: (Vec<(Path, TypeExprRef)>, std::collections::HashMap<Path, TypeDesc>)) {
         *self.simple_abbrevs.borrow_mut() = saved.0;
         *self.nullary_expansion_cache.borrow_mut() = saved.1;
     }
