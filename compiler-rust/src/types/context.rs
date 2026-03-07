@@ -19,7 +19,7 @@
 //! one per compilation unit.
 
 use super::asttypes::{ArgLabel, PrivateFlag};
-use super::path::{Path, NOPOS};
+use super::path::Path;
 use super::type_expr::{
     AbbrevMemo, AbbrevMemoRef, Commutable, CommutableRef, FieldKind, FieldKindRef, GENERIC_LEVEL,
     RowDesc, RowField, RowFieldRef, TypeArg, TypeDesc, TypeExpr, TypeExprRef,
@@ -85,25 +85,11 @@ pub struct TypeContext<'a> {
     /// GADT instance tracking flag
     trace_gadt_instances: Cell<bool>,
 
-    /// Simple abbreviations memo: nullary Tconstr paths → expansion nodes.
-    /// Uses Vec (like OCaml's Mcons stack): new entries are pushed, lookup
-    /// searches from back to front (most recent first). If a path already
-    /// exists, memorize_simple_abbrev preserves the first entry (matching
-    /// OCaml's find_repr check before Mcons prepend).
-    simple_abbrevs: RefCell<Vec<(Path, TypeExprRef)>>,
+    /// Dedicated memo ref for OCaml's simple_abbrevs (nullary, non-object
+    /// abbreviations). This points to a mutable AbbrevMemo cell.
+    simple_abbrevs: Cell<AbbrevMemoRef>,
     /// Previous env ID for check_abbrev_env (OCaml ctype.ml:1272)
     previous_env_id: Cell<u64>,
-
-    /// Nullary expansion cache: maps nullary Tconstr paths to cached expansion
-    /// DESCRIPTIONS. On cache hit, a fresh TypeExprRef is created with the cached
-    /// description. This avoids corruption from link_type while still sharing
-    /// child TypeExprRefs (e.g., the float nodes inside a tuple expansion).
-    nullary_expansion_cache: RefCell<std::collections::HashMap<Path, TypeDesc>>,
-
-    /// Set of paths with "safe" expansions (Ttuple or Tconstr, not Tvariant).
-    /// Persists across generalize, only cleared on env change.
-    /// Used by copy_type_cached for per-copy sharing of simple alias types.
-    safe_expansion_paths: RefCell<std::collections::HashSet<Path>>,
 
     /// Current abbreviation context during subst (OCaml: abbreviations = ref (ref Mnil)).
     /// Set during subst_with_memo so copy_type_cached can use find_repr to detect
@@ -183,23 +169,6 @@ pub struct TypeContext<'a> {
 }
 
 impl<'a> TypeContext<'a> {
-    /// Canonicalize path keys for simple_abbrevs to match OCaml Path.same:
-    /// ignore Pdot position hints when comparing paths.
-    fn canonicalize_simple_abbrev_path(path: &Path) -> Path {
-        match path {
-            Path::Pident(id) => Path::Pident(id.clone()),
-            Path::Pdot(prefix, name, _) => Path::Pdot(
-                Box::new(Self::canonicalize_simple_abbrev_path(prefix)),
-                name.clone(),
-                NOPOS,
-            ),
-            Path::Papply(functor, arg) => Path::Papply(
-                Box::new(Self::canonicalize_simple_abbrev_path(functor)),
-                Box::new(Self::canonicalize_simple_abbrev_path(arg)),
-            ),
-        }
-    }
-
     /// Create a new type context.
     pub fn new(id_gen: &'a IdGenerator) -> Self {
         TypeContext {
@@ -209,15 +178,16 @@ impl<'a> TypeContext<'a> {
             global_level: Cell::new(1),
             saved_levels: RefCell::new(Vec::new()),
             trace_gadt_instances: Cell::new(false),
-            simple_abbrevs: RefCell::new(Vec::new()),
+            simple_abbrevs: Cell::new(AbbrevMemoRef(1)),
             previous_env_id: Cell::new(0),
-            nullary_expansion_cache: RefCell::new(std::collections::HashMap::new()),
-            safe_expansion_paths: RefCell::new(std::collections::HashSet::new()),
             current_abbreviations: Cell::new(AbbrevMemoRef::nil()),
             types: RefCell::new(Vec::new()),
-            // Index 0 is reserved as the canonical Mnil sentinel so
-            // AbbrevMemoRef::nil() is never a mutable per-node cache.
-            abbrevs: RefCell::new(vec![RefCell::new(AbbrevMemo::Mnil)]),
+            // Index 0 is reserved as canonical Mnil; index 1 is the dedicated
+            // simple_abbrevs memo ref.
+            abbrevs: RefCell::new(vec![
+                RefCell::new(AbbrevMemo::Mnil),
+                RefCell::new(AbbrevMemo::Mnil),
+            ]),
             row_fields: RefCell::new(Vec::new()),
             commutables: RefCell::new(Vec::new()),
             field_kinds: RefCell::new(Vec::new()),
@@ -584,90 +554,28 @@ impl<'a> TypeContext<'a> {
 
     /// OCaml's check_abbrev_env: clear abbreviation cache when environment changes.
     /// OCaml calls cleanup_abbrev() which clears ALL registered memo refs including
-    /// simple_abbrevs (memorize_abbrev registers simple_abbrevs in the memo list).
+    /// simple_abbrevs when it has memoized entries.
     /// OCaml uses physical env inequality (!=); Rust uses env ID comparison.
-    /// The different env identity check frequency may cause different clearing patterns.
     pub fn check_abbrev_env(&self, env: &crate::types::env::Env) {
         let env_id = env.id();
         if env_id != self.previous_env_id.get() {
-            self.clear_simple_abbrevs();
             self.clear_abbrev_memos();
-            // Don't clear safe_expansion_paths: Ttuple expansion status is a stable
-            // property of the type declaration, independent of environment context.
             self.previous_env_id.set(env_id);
         }
     }
 
-    /// Record a nullary Tconstr expansion for cross-instance sharing.
-    /// Matches OCaml's memorize_abbrev into simple_abbrevs.
-    pub fn memorize_simple_abbrev(&self, path: Path, ty: TypeExprRef) {
-        // OCaml's memorize_abbrev unconditionally prepends to the Mcons stack.
-        // Multiple entries for the same path can coexist; find returns the most
-        // recent (search from back). Push = prepend in our reversed semantics.
-        let path = Self::canonicalize_simple_abbrev_path(&path);
-        self.simple_abbrevs.borrow_mut().push((path, ty));
+    /// Access the dedicated simple_abbrevs memo reference.
+    pub fn simple_abbrevs_memo(&self) -> AbbrevMemoRef {
+        self.simple_abbrevs.get()
     }
 
-    /// Look up a previously-expanded nullary Tconstr by path identity.
-    /// Matches OCaml's find_repr on simple_abbrevs.
-    pub fn find_simple_abbrev(&self, path: &Path) -> Option<TypeExprRef> {
-        let path = Self::canonicalize_simple_abbrev_path(&path);
-        // Search from back to front (most recently added first, like OCaml's Mcons)
-        self.simple_abbrevs.borrow().iter().rev().find(|(p, _)| *p == path).map(|(_, ty)| *ty)
-    }
-
-    /// Clear simple abbreviations. Called during generalize/generalize_structure.
+    /// Clear simple abbreviations. Called during generalize/generalize_structure,
+    /// matching OCaml's `simple_abbrevs := Mnil`.
     pub fn clear_simple_abbrevs(&self) {
-        self.simple_abbrevs.borrow_mut().clear();
-        self.nullary_expansion_cache.borrow_mut().clear();
-    }
-
-    /// Clear only the nullary expansion cache, preserving simple_abbrevs.
-    /// Used in check_abbrev_env to match OCaml's behavior where simple_abbrevs
-    /// persists across env changes but expansion caches are refreshed.
-    pub fn clear_nullary_expansion_cache(&self) {
-        self.nullary_expansion_cache.borrow_mut().clear();
-    }
-
-    /// Save current simple_abbrevs state (for temporary isolation).
-    pub fn save_simple_abbrevs(&self) -> (Vec<(Path, TypeExprRef)>, std::collections::HashMap<Path, TypeDesc>) {
-        (self.simple_abbrevs.borrow().clone(), self.nullary_expansion_cache.borrow().clone())
-    }
-
-    /// Restore saved simple_abbrevs state.
-    pub fn restore_simple_abbrevs(&self, saved: (Vec<(Path, TypeExprRef)>, std::collections::HashMap<Path, TypeDesc>)) {
-        *self.simple_abbrevs.borrow_mut() = saved.0;
-        *self.nullary_expansion_cache.borrow_mut() = saved.1;
-    }
-
-    /// Check if a path has a "safe" expansion (Ttuple or Tconstr, not Tvariant).
-    /// This persists across generalize (only cleared on env change), enabling
-    /// per-copy sharing in copy_type_cached for known simple alias types.
-    pub fn has_safe_nullary_expansion(&self, path: &Path) -> bool {
-        let path = Self::canonicalize_simple_abbrev_path(path);
-        self.safe_expansion_paths.borrow().contains(&path)
-    }
-
-    /// Cache a nullary expansion DESCRIPTION for cross-expansion sharing.
-    /// Stores the TypeDesc so cache hits create fresh nodes with shared children.
-    pub fn cache_nullary_expansion(&self, path: Path, desc: TypeDesc) {
-        let path = Self::canonicalize_simple_abbrev_path(&path);
-        // Record safe expansion paths for per-copy sharing within copy():
-        // Only Ttuple expansions are safe — structural types with no identity risks.
-        // Nullary Tconstr (even predef like int, string) cause over-sharing regressions
-        // (js_string_test, reasonReactRouter, unit_undefined_test).
-        let is_safe = matches!(&desc, TypeDesc::Ttuple(_));
-        if is_safe {
-            self.safe_expansion_paths.borrow_mut().insert(path.clone());
+        let simple = self.simple_abbrevs.get();
+        if simple != AbbrevMemoRef::nil() {
+            self.clear_abbrev_memo(simple);
         }
-        self.nullary_expansion_cache.borrow_mut().insert(path, desc);
-    }
-
-    /// Look up a cached nullary expansion description.
-    /// Returns a clone of the cached TypeDesc (caller creates a fresh node with it).
-    pub fn find_nullary_expansion(&self, path: &Path) -> Option<TypeDesc> {
-        let path = Self::canonicalize_simple_abbrev_path(path);
-        self.nullary_expansion_cache.borrow().get(&path).cloned()
     }
 
     /// Clear all per-node abbreviation memo chains (OCaml cleanup_abbrev).
@@ -759,6 +667,26 @@ impl<'a> TypeContext<'a> {
             }
         }
         None
+    }
+
+    /// Snapshot an abbreviation memo node.
+    pub fn get_abbrev_memo(&self, memo: AbbrevMemoRef) -> AbbrevMemo {
+        let abbrevs = self.abbrevs.borrow();
+        abbrevs
+            .get(memo.0)
+            .map(|cell| cell.borrow().clone())
+            .unwrap_or(AbbrevMemo::Mnil)
+    }
+
+    /// Reset a per-node abbreviation memo chain to Mnil.
+    pub fn clear_abbrev_memo(&self, memo: AbbrevMemoRef) {
+        if memo == AbbrevMemoRef::nil() {
+            return;
+        }
+        let abbrevs = self.abbrevs.borrow();
+        if let Some(cell) = abbrevs.get(memo.0) {
+            *cell.borrow_mut() = AbbrevMemo::Mnil;
+        }
     }
 
     /// Prepend a cached abbreviation expansion to a node-local memo chain.
@@ -977,6 +905,11 @@ impl<'a> TypeContext<'a> {
         if was_set {
             self.trace_gadt_instances.set(false);
         }
+    }
+
+    /// Is GADT instance tracing currently enabled?
+    pub fn trace_gadt_instances(&self) -> bool {
+        self.trace_gadt_instances.get()
     }
 
     // ========================================================================

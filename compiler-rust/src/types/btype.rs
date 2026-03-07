@@ -15,8 +15,8 @@ use super::context::TypeContext;
 use super::decl::{ConstructorArguments, TypeKind};
 use super::path::Path;
 use super::type_expr::{
-    AbbrevMemoRef, GENERIC_LEVEL, LOWEST_LEVEL, PIVOT_LEVEL, RowDesc, RowField, TypeDesc,
-    TypeExprRef,
+    AbbrevMemo, AbbrevMemoRef, GENERIC_LEVEL, LOWEST_LEVEL, PIVOT_LEVEL, RowDesc, RowField,
+    TypeDesc, TypeExprRef,
 };
 
 // ============================================================================
@@ -311,8 +311,26 @@ pub fn iter_abbrev<F>(ctx: &TypeContext<'_>, memo: AbbrevMemoRef, f: F)
 where
     F: FnMut(TypeExprRef),
 {
-    // TODO: Implement when we have access to the abbrev arena
-    let _ = (ctx, memo, f);
+    let mut current = memo;
+    let mut f = f;
+    for _ in 0..256 {
+        match ctx.get_abbrev_memo(current) {
+            AbbrevMemo::Mnil => return,
+            AbbrevMemo::Mcons {
+                abbrev,
+                expansion,
+                next,
+                ..
+            } => {
+                f(abbrev);
+                f(expansion);
+                current = next;
+            }
+            AbbrevMemo::Mlink(next) => {
+                current = next;
+            }
+        }
+    }
 }
 
 // ============================================================================

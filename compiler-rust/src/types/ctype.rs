@@ -26,6 +26,7 @@ use super::btype::{self, iter_type_expr, row_fixed, row_more, row_repr};
 use super::context::TypeContext;
 use super::env::Env;
 use super::path::Path;
+use super::asttypes::PrivateFlag;
 use super::type_expr::{AbbrevMemo, AbbrevMemoRef, FieldKind, GENERIC_LEVEL, RowDesc, RowField, TypeDesc, TypeExprRef};
 use super::variance::{Variance, VarianceFlag};
 use std::collections::{HashMap, HashSet};
@@ -881,6 +882,19 @@ fn normalize_path_full_inner<'a>(
 /// the type parameters with the given arguments.
 ///
 /// Returns `Some(expanded)` if expansion was possible, `None` otherwise.
+fn proper_abbrevs(
+    ctx: &TypeContext<'_>,
+    path: &Path,
+    args: &[TypeExprRef],
+    abbrev: AbbrevMemoRef,
+) -> AbbrevMemoRef {
+    if !args.is_empty() || ctx.trace_gadt_instances() || path.head_name().starts_with('#') {
+        abbrev
+    } else {
+        ctx.simple_abbrevs_memo()
+    }
+}
+
 fn try_expand_head<'a>(
     ctx: &'a TypeContext<'a>,
     env: &Env,
@@ -893,29 +907,10 @@ fn try_expand_head<'a>(
     let ty = ctx.repr(ty);
     let desc = ctx.get_desc(ty);
     match &*desc {
-        TypeDesc::Tconstr { path, args, .. } => {
+        TypeDesc::Tconstr { path, args, abbrev } => {
             let args = args.clone();
             let path = path.clone();
-            let is_nullary = args.is_empty() && !path.head_name().starts_with('#');
-
-            // NOTE: simple_abbrevs linking creates cross-expansion sharing for
-            // nullary types within the same env. check_abbrev_env clears the cache
-            // when env changes, but multiple expansions of the same path within
-            // one env (e.g. record fields) share the same expansion node.
-
-            let memorize_simple_abbrev = || {
-                // OCaml ctype.ml proper_abbrevs routes nullary non-object aliases
-                // through simple_abbrevs during abbreviation expansion (subst).
-                if is_nullary {
-                    ctx.memorize_simple_abbrev(path.clone(), ty);
-                }
-            };
-
-            // Extract abbrev ref for use in subst_with_memo + memo lookup
-            let abbrev = match &*ctx.get_desc(ty) {
-                TypeDesc::Tconstr { abbrev, .. } => *abbrev,
-                _ => AbbrevMemoRef::nil(),
-            };
+            let lookup_abbrev = proper_abbrevs(ctx, &path, &args, *abbrev);
 
             // Try stamp-based lookup first (most precise, handles CMI-loaded types)
             let stamp = match &path {
@@ -931,45 +926,39 @@ fn try_expand_head<'a>(
 
             drop(desc);
 
-            // Check nullary expansion cache. The cache stores TypeDesc (not TypeExprRef)
-            // to avoid corruption from link_type. On hit, create a fresh node with the
-            // cached desc — the child TypeExprRefs inside (e.g., float nodes in a tuple)
-            // are shared across expansions, enabling the sexp serializer to detect cycles.
-            if is_nullary {
-                if let Some(cached_desc) = ctx.find_nullary_expansion(&path) {
-                    let fresh = ctx.new_type(cached_desc);
-                    memorize_simple_abbrev();
-                    return Some(fresh);
+            // OCaml ctype.ml expand_abbrev_gen: check memoized expansions first.
+            if let Some(cached) =
+                ctx.find_abbrev_expansion(lookup_abbrev, PrivateFlag::Public, &path)
+            {
+                let cached_repr = ctx.repr(cached);
+                let stale_same_path = {
+                    let desc = ctx.get_desc(cached_repr);
+                    matches!(
+                        &*desc,
+                        TypeDesc::Tconstr {
+                            path: cached_path, ..
+                        } if cached_path.same(&path)
+                    )
+                };
+                if !(cached_repr == ty || stale_same_path) {
+                    let level = ctx.get_level(ty);
+                    if level != GENERIC_LEVEL {
+                        update_level(ctx, level, cached);
+                    }
+                    return Some(cached_repr);
                 }
             }
 
-            // Helper: expand and cache nullary expansion DESCRIPTIONS.
-            // For Tconstr expansions (e.g., t → option<node>), caching the desc
-            // shares the child TypeExprRefs (like `node`) across multiple expansions,
-            // matching OCaml's abbreviation memoization (expand_abbrev + proper_abbrevs).
-            let expand_nullary = |manifest: TypeExprRef| -> TypeExprRef {
-                let expansion = instance_for_expansion(ctx, manifest);
-                if is_nullary {
-                    let desc = ctx.get_desc(expansion);
-                    let is_cacheable = !matches!(&*desc, TypeDesc::Tvar(_));
-                    if is_cacheable {
-                        ctx.cache_nullary_expansion(path.clone(), (*desc).clone());
-                    }
-                    drop(desc);
-                }
-                expansion
+            let expand_with_subst = |params: &[TypeExprRef], manifest: TypeExprRef| -> TypeExprRef {
+                subst_with_memo(ctx, env, ty, lookup_abbrev, params, &args, manifest)
             };
 
             // 0. Check local constraints first (GADT equations)
             if let Some(constraint_decl) = env.find_local_constraint(&path) {
                 if let Some(manifest) = constraint_decl.type_manifest {
                     let params = &constraint_decl.type_params;
-                    if params.is_empty() {
-                        memorize_simple_abbrev();
-                        return Some(expand_nullary(manifest));
-                    } else if params.len() == args.len() {
-                        memorize_simple_abbrev();
-                        return Some(subst_with_memo(ctx, env, ty, abbrev, params, &args, manifest));
+                    if params.len() == args.len() {
+                        return Some(expand_with_subst(params, manifest));
                     }
                 }
             }
@@ -982,12 +971,8 @@ fn try_expand_head<'a>(
                 if let Ok(env_decl) = env.lookup_type(&path) {
                     if let Some(manifest) = env_decl.type_manifest {
                         let params = &env_decl.type_params;
-                        if params.is_empty() {
-                            memorize_simple_abbrev();
-                            return Some(expand_nullary(manifest));
-                        } else if params.len() == args.len() {
-                            memorize_simple_abbrev();
-                            return Some(subst_with_memo(ctx, env, ty, abbrev, params, &args, manifest));
+                        if params.len() == args.len() {
+                            return Some(expand_with_subst(params, manifest));
                         }
                         return None;
                     }
@@ -1001,12 +986,8 @@ fn try_expand_head<'a>(
                 if let Some(store_decl) = ctx.find_type_decl_by_stamp(stamp) {
                     if let Some(manifest) = store_decl.type_manifest {
                         let params = &store_decl.type_params;
-                        if params.is_empty() {
-                            memorize_simple_abbrev();
-                            return Some(expand_nullary(manifest));
-                        } else if params.len() == args.len() {
-                            memorize_simple_abbrev();
-                            return Some(subst_with_memo(ctx, env, ty, abbrev, params, &args, manifest));
+                        if params.len() == args.len() {
+                            return Some(expand_with_subst(params, manifest));
                         }
                     }
                 }
@@ -1018,12 +999,8 @@ fn try_expand_head<'a>(
                 if let Some(store_decl) = ctx.find_type_decl_by_path(_path_name) {
                     if let Some(manifest) = store_decl.type_manifest {
                         let params = &store_decl.type_params;
-                        if params.is_empty() {
-                            memorize_simple_abbrev();
-                            return Some(expand_nullary(manifest));
-                        } else if params.len() == args.len() {
-                            memorize_simple_abbrev();
-                            return Some(subst_with_memo(ctx, env, ty, abbrev, params, &args, manifest));
+                        if params.len() == args.len() {
+                            return Some(expand_with_subst(params, manifest));
                         }
                     }
                 }
@@ -1032,12 +1009,8 @@ fn try_expand_head<'a>(
                 if let Some(resolved_decl) = resolve_type_through_modules(ctx, &path) {
                     if let Some(manifest) = resolved_decl.type_manifest {
                         let params = &resolved_decl.type_params;
-                        if params.is_empty() {
-                            memorize_simple_abbrev();
-                            return Some(expand_nullary(manifest));
-                        } else if params.len() == args.len() {
-                            memorize_simple_abbrev();
-                            return Some(subst_with_memo(ctx, env, ty, abbrev, params, &args, manifest));
+                        if params.len() == args.len() {
+                            return Some(expand_with_subst(params, manifest));
                         }
                     }
                 }
@@ -1048,12 +1021,8 @@ fn try_expand_head<'a>(
                 if let Some(decl) = resolve_type_through_env(ctx, env, &path) {
                     if let Some(manifest) = decl.type_manifest {
                         let params = &decl.type_params;
-                        if params.is_empty() {
-                            memorize_simple_abbrev();
-                            return Some(expand_nullary(manifest));
-                        } else if params.len() == args.len() {
-                            memorize_simple_abbrev();
-                            return Some(subst_with_memo(ctx, env, ty, abbrev, params, &args, manifest));
+                        if params.len() == args.len() {
+                            return Some(expand_with_subst(params, manifest));
                         }
                     }
                 }
@@ -1066,14 +1035,6 @@ fn try_expand_head<'a>(
             // attempt can find the type declaration.
             let path_norm = normalize_path_full(ctx, env, &path);
             if path_norm != path {
-                // OCaml's module system "strengthens" abstract types accessed
-                // through module aliases by adding manifests (e.g., N.t →
-                // Belt_SetInt.t). This makes them expandable through subst →
-                // memorize_abbrev → simple_abbrevs. We achieve the equivalent
-                // by memorizing the original ty before returning the normalized
-                // expansion, so that copy/instance() can find_repr on
-                // simple_abbrevs and create Tlink sharing across instances.
-                memorize_simple_abbrev();
                 Some(ctx.new_constr(path_norm, args.clone()))
             } else {
                 None
@@ -1365,9 +1326,9 @@ fn subst_type(
 /// 7. Substitute fresh params with actual args
 fn subst_with_memo(
     ctx: &TypeContext<'_>,
-    env: &Env,
+    _env: &Env,
     ty: TypeExprRef,           // original Tconstr being expanded
-    abbrev: AbbrevMemoRef,     // from the Tconstr's abbrev field
+    lookup_abbrev: AbbrevMemoRef, // proper_abbrevs target memo
     params: &[TypeExprRef],    // type declaration params
     args: &[TypeExprRef],      // actual type arguments
     body: TypeExprRef,         // manifest
@@ -1379,24 +1340,22 @@ fn subst_with_memo(
     // mutable inner ref. Rust's alloc_abbrev_nil() returns a shared sentinel
     // (index 0) that memorize_abbrev_expansion refuses to mutate. Allocate a
     // fresh, mutable Mnil cell when the Tconstr's abbrev is the nil sentinel.
-    let memo_ref = if abbrev == AbbrevMemoRef::nil() {
+    let memo_ref = if lookup_abbrev == AbbrevMemoRef::nil() {
         ctx.alloc_abbrev(AbbrevMemo::Mnil)
     } else {
-        abbrev
+        lookup_abbrev
     };
 
     // 2. Memorize BEFORE instantiation (OCaml: memorize_abbrev abbrev priv path ty body0)
-    if !args.is_empty() {
-        if let TypeDesc::Tconstr { path, .. } = &*ctx.get_desc(ctx.repr(ty)) {
-            let path = path.clone();
-            ctx.memorize_abbrev_expansion(
-                memo_ref,
-                super::asttypes::PrivateFlag::Public,
-                path,
-                ty,      // abbrev: original type (returned by find_repr)
-                body0,   // expansion: stub (returned by find_expans)
-            );
-        }
+    if let TypeDesc::Tconstr { path, .. } = &*ctx.get_desc(ctx.repr(ty)) {
+        let path = path.clone();
+        ctx.memorize_abbrev_expansion(
+            memo_ref,
+            PrivateFlag::Public,
+            path,
+            ty,      // abbrev: original type (returned by find_repr)
+            body0,   // expansion: stub (returned by find_expans)
+        );
     }
 
     // 3. Set global abbreviations context so copy_type_cached can use find_repr
@@ -1421,11 +1380,18 @@ fn subst_with_memo(
     ctx.set_current_abbreviations(old_abbrevs);
 
     // 6. Unify stub with body (OCaml: !unify' env body0 body')
-    link_type(ctx, body0, fresh_body);
+    let mut unify_state = UnifyState::new();
+    unify_state.set_env(_env);
+    if unify(ctx, &mut unify_state, body0, fresh_body).is_err() {
+        // Preserve previous behavior if full unification fails.
+        link_type(ctx, body0, fresh_body);
+    }
 
     // 7. Bind params to args (OCaml: List.iter2 (!unify' env) params' args)
     for (p, a) in fresh_params.iter().zip(args.iter()) {
-        link_type(ctx, *p, *a);
+        if unify(ctx, &mut unify_state, *p, *a).is_err() {
+            link_type(ctx, *p, *a);
+        }
     }
 
     fresh_body
@@ -1550,7 +1516,35 @@ fn unify_after_expansion<'a>(
 
     unify(ctx, state, t1_expanded, t2_expanded)?;
 
-    if should_relink {
+    let skip_local_alias_relink = {
+        let to_repr = ctx.repr(to_original);
+        let to_local_alias_path = {
+            let desc = ctx.get_desc(to_repr);
+            match &*desc {
+                TypeDesc::Tconstr { path, args, .. }
+                    if args.is_empty()
+                        && matches!(path, Path::Pident(id) if id.stamp() != 0) =>
+                {
+                    Some(path.clone())
+                }
+                _ => None,
+            }
+        };
+
+        if let Some(to_path) = to_local_alias_path {
+            let from_repr = ctx.repr(from_expanded);
+            let from_desc = ctx.get_desc(from_repr);
+            matches!(
+                &*from_desc,
+                TypeDesc::Tconstr { path, .. }
+                    if !path.same(&to_path) && path.head().is_persistent()
+            )
+        } else {
+            false
+        }
+    };
+
+    if should_relink && !skip_local_alias_relink {
         // Use from_expanded directly (NOT ctx.repr) to avoid following
         // link chains created by unify above.
         let from_ty = from_expanded;
@@ -1561,6 +1555,28 @@ fn unify_after_expansion<'a>(
     }
 
     Ok(())
+}
+
+fn has_cached_expansion(ctx: &TypeContext<'_>, path: &Path, mut memo: AbbrevMemoRef) -> bool {
+    for _ in 0..128 {
+        match ctx.get_abbrev_memo(memo) {
+            AbbrevMemo::Mnil => return false,
+            AbbrevMemo::Mcons {
+                path: cached_path,
+                next,
+                ..
+            } => {
+                if path.same(&cached_path) {
+                    return true;
+                }
+                memo = next;
+            }
+            AbbrevMemo::Mlink(next) => {
+                memo = next;
+            }
+        }
+    }
+    false
 }
 
 /// Internal unification logic.
@@ -1731,19 +1747,19 @@ fn unify_types<'a>(
             TypeDesc::Tconstr {
                 path: path1,
                 args: args1,
-                ..
+                abbrev: abbrev1,
             },
             TypeDesc::Tconstr {
                 path: path2,
                 args: args2,
-                ..
+                abbrev: abbrev2,
             },
         ) => {
             if !path1.same(path2) {
                 // Paths differ. Match OCaml flow by attempting alias expansion
                 // before any same-name fallback.
-                let name1 = path1.head_name();
-                let name2 = path2.head_name();
+                let name1 = path1.head_name().to_string();
+                let name2 = path2.head_name().to_string();
                 let same_name_fallback = name1 == name2 && args1.len() == args2.len();
                 let local_t_alias_fallback = same_name_fallback
                     && name1 == "t"
@@ -1860,6 +1876,9 @@ fn unify_types<'a>(
             let args1 = args1.clone();
             let args2 = args2.clone();
             let path_name = path1.head_name().to_string();
+            let skip_nullary_fast_link = args1.is_empty()
+                && (has_cached_expansion(ctx, path1, *abbrev1)
+                    || has_cached_expansion(ctx, path2, *abbrev2));
             drop(desc1);
             drop(desc2);
 
@@ -1922,7 +1941,7 @@ fn unify_types<'a>(
             //
             // For types where ALL params are phantom, OCaml's expansion
             // hides those params entirely, so neither original is linked.
-            if !all_phantom {
+            if !all_phantom && !(args1.is_empty() && skip_nullary_fast_link) {
                 // OCaml's unify2 expands both sides via expand_head_unif
                 // BEFORE calling unify3. unify3 does `link_type t1' t2`
                 // where t1' is the EXPANDED form. For expandable types
@@ -2726,6 +2745,11 @@ fn generalize_rec(ctx: &TypeContext<'_>, ty: TypeExprRef) {
     if level > current && level != GENERIC_LEVEL {
         // Mark as generic
         ctx.set_level(ty, GENERIC_LEVEL);
+        if let TypeDesc::Tconstr { abbrev, .. } = &*ctx.get_desc(ty) {
+            btype::iter_abbrev(ctx, *abbrev, |memo_ty| {
+                generalize_rec(ctx, memo_ty);
+            });
+        }
         iter_type_expr(ctx, ty, |child| {
             generalize_rec(ctx, child);
         });
@@ -2988,7 +3012,10 @@ fn generalize_structure_rec(ctx: &TypeContext<'_>, var_level: i32, ty: TypeExprR
 
     enum Action {
         LowerVar,
-        PromoteAndRecurse(Vec<TypeExprRef>),
+        PromoteAndRecurse {
+            children: Vec<TypeExprRef>,
+            clear_abbrev: Option<AbbrevMemoRef>,
+        },
         Noop,
     }
 
@@ -3003,10 +3030,21 @@ fn generalize_structure_rec(ctx: &TypeContext<'_>, var_level: i32, ty: TypeExprR
                 TypeDesc::Tconstr { path, .. } if path.head_name().starts_with('#') => {
                     Action::Noop
                 }
+                TypeDesc::Tconstr { abbrev, .. } => {
+                    let mut children = Vec::new();
+                    iter_type_expr(ctx, ty, |child| children.push(child));
+                    Action::PromoteAndRecurse {
+                        children,
+                        clear_abbrev: Some(*abbrev),
+                    }
+                }
                 _ => {
                     let mut children = Vec::new();
                     iter_type_expr(ctx, ty, |child| children.push(child));
-                    Action::PromoteAndRecurse(children)
+                    Action::PromoteAndRecurse {
+                        children,
+                        clear_abbrev: None,
+                    }
                 }
             }
         } else {
@@ -3018,7 +3056,13 @@ fn generalize_structure_rec(ctx: &TypeContext<'_>, var_level: i32, ty: TypeExprR
         Action::LowerVar => {
             ctx.set_level(ty, var_level);
         }
-        Action::PromoteAndRecurse(children) => {
+        Action::PromoteAndRecurse {
+            children,
+            clear_abbrev,
+        } => {
+            if let Some(abbrev) = clear_abbrev {
+                ctx.clear_abbrev_memo(abbrev);
+            }
             ctx.set_level(ty, GENERIC_LEVEL);
             for child in children {
                 generalize_structure_rec(ctx, var_level, child);
@@ -4275,21 +4319,6 @@ pub fn copy_type_deep(
             result
         }
         TypeDesc::Tconstr { path, args, .. } => {
-            // Check simple_abbrevs for nullary Tconstr (matching OCaml's
-            // copy + find_repr). When a nullary type alias has been expanded
-            // previously, simple_abbrevs records the expansion. Reusing it
-            // via Tlink creates cross-instance sharing, reducing extra nodes.
-            if args.is_empty() {
-                if let Some(abbrev_ty) = ctx.find_simple_abbrev(path) {
-                    let abbrev_repr = ctx.repr(abbrev_ty);
-                    // Only share if the abbrev target isn't ourselves (avoid self-link)
-                    if abbrev_repr != ty {
-                        let result = ctx.new_type(TypeDesc::Tlink(abbrev_repr));
-                        cache.insert(ty, result);
-                        return result;
-                    }
-                }
-            }
             let new_args: Vec<_> = args
                 .iter()
                 .map(|t| copy_type_deep(ctx, *t, cache))
@@ -4428,14 +4457,6 @@ struct CopyCache {
     /// Mirrors `more.desc <- Tsubst(Ttuple [more'; t])` without mutating
     /// shared type descriptors in-place.
     row_more_markers: std::collections::HashMap<TypeExprRef, CopyRowMoreMarker>,
-
-    /// Per-copy path sharing for nullary generic Tconstr nodes.
-    /// When copy encounters a nullary alias Tconstr (verified via
-    /// nullary_expansion_cache) that isn't in simple_abbrevs, the first
-    /// encounter stores its placeholder here. Subsequent encounters of
-    /// DIFFERENT physical nodes with the same path create Tlink to it,
-    /// matching OCaml's mid-copy expansion interleaving.
-    nullary_constr_copies: std::collections::HashMap<Path, TypeExprRef>,
 }
 
 impl CopyCache {
@@ -4443,7 +4464,6 @@ impl CopyCache {
         CopyCache {
             nodes: std::collections::HashMap::new(),
             row_more_markers: std::collections::HashMap::new(),
-            nullary_constr_copies: std::collections::HashMap::new(),
         }
     }
 }
@@ -5114,68 +5134,32 @@ fn copy_type_cached(
                     TypeDesc::Ttuple(types_copy)
                 }
                 CopyAction::Constr { path, args } => {
-                    if args.is_empty() && level == GENERIC_LEVEL {
-                        // Check simple_abbrevs (cross-instance sharing from expansion)
-                        if let Some(abbrev_ty) = ctx.find_simple_abbrev(&path) {
-                            if ctx.repr(abbrev_ty) != placeholder {
-                                // Hit: creates sharing via Tlink to memo node
-                                TypeDesc::Tlink(abbrev_ty)
-                            } else {
-                                TypeDesc::Tconstr {
-                                    path,
-                                    args: vec![],
-                                    abbrev: ctx.alloc_abbrev_nil(),
-                                }
-                            }
-                        } else if ctx.has_safe_nullary_expansion(&path) {
-                            // simple_abbrevs cleared by generalize, but the type is a
-                            // known simple alias (Ttuple expansion). Use per-copy sharing
-                            // for within-copy node sharing, matching OCaml's mid-copy
-                            // interleaving. Excludes Tvariant expansions to avoid
-                            // over-sharing that creates false cycle markers.
-                            if let Some(&cached_placeholder) = cache.nullary_constr_copies.get(&path) {
-                                TypeDesc::Tlink(cached_placeholder)
-                            } else {
-                                cache.nullary_constr_copies.insert(path.clone(), placeholder);
-                                TypeDesc::Tconstr {
-                                    path,
-                                    args: vec![],
-                                    abbrev: ctx.alloc_abbrev_nil(),
-                                }
-                            }
-                        } else {
-                            TypeDesc::Tconstr {
-                                path,
-                                args: vec![],
-                                abbrev: ctx.alloc_abbrev_nil(),
-                            }
+                    let abbrevs = ctx.current_abbreviations();
+                    let lookup_abbrevs = proper_abbrevs(ctx, &path, &args, abbrevs);
+
+                    if let Some(found_ty) = ctx.find_abbrev_repr(lookup_abbrevs, &path) {
+                        let found_repr = ctx.repr(found_ty);
+                        if found_repr != ty && found_repr != placeholder {
+                            cache.nodes.insert(ty, found_repr);
+                            ctx.set_desc(placeholder, TypeDesc::Tlink(found_repr));
+                            return found_repr;
                         }
-                    } else {
-                        // OCaml find_repr: check current abbreviation context for
-                        // previously-memoized expansions during subst_with_memo.
-                        // When copy encounters a Tconstr with the same path as the
-                        // type being expanded, create a Tlink back to the original —
-                        // this creates physical node sharing.
-                        let abbrevs = ctx.current_abbreviations();
-                        if abbrevs != AbbrevMemoRef::nil() && level == GENERIC_LEVEL {
-                            if let Some(found_ty) = ctx.find_abbrev_repr(abbrevs, &path) {
-                                let found_repr = ctx.repr(found_ty);
-                                if found_repr != ty && found_repr != placeholder {
-                                    cache.nodes.insert(ty, found_repr);
-                                    ctx.set_desc(placeholder, TypeDesc::Tlink(found_repr));
-                                    return found_repr;
-                                }
-                            }
-                        }
-                        let args_copy: Vec<_> = args
-                            .iter()
-                            .map(|t| copy_type_cached(ctx, *t, cache))
-                            .collect();
-                        TypeDesc::Tconstr {
-                            path,
-                            args: args_copy,
-                            abbrev: ctx.alloc_abbrev_nil(),
-                        }
+                    }
+
+                    let args_copy: Vec<_> = args
+                        .iter()
+                        .map(|t| copy_type_cached(ctx, *t, cache))
+                        .collect();
+
+                    let copied_abbrev = match ctx.get_abbrev_memo(abbrevs) {
+                        AbbrevMemo::Mcons { .. } => ctx.alloc_abbrev(AbbrevMemo::Mlink(abbrevs)),
+                        memo => ctx.alloc_abbrev(memo),
+                    };
+
+                    TypeDesc::Tconstr {
+                        path,
+                        args: args_copy,
+                        abbrev: copied_abbrev,
                     }
                 }
                 CopyAction::Object { fields, name } => {
