@@ -7813,8 +7813,16 @@ fn type_function(
         }
     }
 
-    // Type check body
+    // Type check body.
+    // Clear generic_constraint_body_ty: when the outer constraint was an arrow
+    // type, type_function has decomposed it into param_ty and return_ty.
+    // Match case bodies inside this function should use return_ty (passed as
+    // body_ty), not the full arrow. Leaving the arrow as generic_constraint
+    // causes case bodies to get instance(arrow_type) instead of instance(return_ty).
+    let saved_generic_constraint = tctx.generic_constraint_body_ty;
+    tctx.generic_constraint_body_ty = None;
     let typed_body = type_expect(tctx, &body_env, body, return_ty, None)?;
+    tctx.generic_constraint_body_ty = saved_generic_constraint;
     let typed_body = wrap_module_unpacks_in_expression(
         tctx,
         &body_env,
