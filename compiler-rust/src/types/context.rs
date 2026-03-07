@@ -583,11 +583,10 @@ impl<'a> TypeContext<'a> {
     // ========================================================================
 
     /// OCaml's check_abbrev_env: clear abbreviation cache when environment changes.
-    /// This prevents stale abbreviations from causing incorrect cross-instance sharing.
-    /// Note: OCaml only clears per-declaration memos (cleanup_abbrev), not simple_abbrevs.
-    /// But removing clear_simple_abbrevs here causes massive regressions (over-sharing)
-    /// because Rust's simple_abbrevs HashMap overwrites entries while OCaml's Mcons stack
-    /// preserves scope ordering. Keeping both clears is necessary for correctness.
+    /// OCaml calls cleanup_abbrev() which clears ALL registered memo refs including
+    /// simple_abbrevs (memorize_abbrev registers simple_abbrevs in the memo list).
+    /// OCaml uses physical env inequality (!=); Rust uses env ID comparison.
+    /// The different env identity check frequency may cause different clearing patterns.
     pub fn check_abbrev_env(&self, env: &crate::types::env::Env) {
         let env_id = env.id();
         if env_id != self.previous_env_id.get() {
