@@ -1680,8 +1680,8 @@ fn rewrite_deep_prefix_expr(
     match &*desc {
         TypeDesc::Tconstr { path, args, .. } => {
             // Only rewrite if the path has depth >= 2 for the old_name prefix.
-            // Pdot(Pident("old_name"), "t") → depth 1, don't rewrite
-            // Pdot(Pdot(Pident("old_name"), "Sub"), "t") → depth 2, rewrite
+            // Pdot(Pident("old_name"), "t") -> depth 1, don't rewrite
+            // Pdot(Pdot(Pident("old_name"), "Sub"), "t") -> depth 2, rewrite
             if let Some(new_path) = rewrite_path_deep(path, old_name, new_prefix) {
 
                 let mut new_desc = (*desc).clone();
@@ -1755,17 +1755,17 @@ fn rewrite_deep_prefix_expr(
 }
 
 /// Rewrite a path only when old_name appears at depth >= 2.
-/// Pdot(Pident("old"), "t") → None (depth 1, don't rewrite)
-/// Pdot(Pdot(Pident("old"), "Sub"), "t") → Some(Pdot(Pdot(new_prefix, "Sub"), "t"))
+/// Pdot(Pident("old"), "t") -> None (depth 1, don't rewrite)
+/// Pdot(Pdot(Pident("old"), "Sub"), "t") -> Some(Pdot(Pdot(new_prefix, "Sub"), "t"))
 fn rewrite_path_deep(path: &Path, old_name: &str, new_prefix: &Path) -> Option<Path> {
     match path {
-        // Pident("old_name") → depth 0 as type path: don't rewrite
+        // Pident("old_name") -> depth 0 as type path: don't rewrite
         Path::Pident(_) => None,
         Path::Pdot(inner, name, pos) => {
             match inner.as_ref() {
-                // Pdot(Pident("old_name"), "t") → depth 1: don't rewrite
+                // Pdot(Pident("old_name"), "t") -> depth 1: don't rewrite
                 Path::Pident(id) if id.name() == old_name => None,
-                // Pdot(Pdot(...), name) → check if inner has a rewritable prefix
+                // Pdot(Pdot(...), name) -> check if inner has a rewritable prefix
                 _ => {
                     let rewritten_inner = rewrite_inner_prefix(inner, old_name, new_prefix)?;
                     Some(Path::Pdot(Box::new(rewritten_inner), name.clone(), *pos))
@@ -1874,10 +1874,18 @@ pub fn add_signature_to_env(
                                     (args, arity)
                                 }
                             };
+                            // Signature items may carry constructor argument nodes at
+                            // non-generic levels. Rebuild a generic-level scheme so
+                            // instance_constructor can instantiate per-use copies
+                            // like OCaml's Env.add_signature/Datarepr flow.
+                            let cstr_args: Vec<TypeExprRef> = cstr_args
+                                .into_iter()
+                                .map(|arg| crate::types::ctype::subst_identity_copy(ctx, arg))
+                                .collect();
 
                             // Create result type (the variant type itself)
                             let cstr_res = if let Some(res_ty) = cd.cd_res {
-                                res_ty
+                                crate::types::ctype::subst_identity_copy(ctx, res_ty)
                             } else {
                                 // Default: the type constructor with its params
                                 ctx.new_generic_constr(type_path.clone(), decl.type_params.clone())

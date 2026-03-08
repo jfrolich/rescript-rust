@@ -422,7 +422,12 @@ fn copy_and_rewrite_module_prefix_type(
     ctx: &crate::types::context::TypeContext<'_>,
     copy_cache: &mut HashMap<TypeExprRef, TypeExprRef>,
 ) -> TypeExprRef {
+    // Functor-result substitution is a module-type operation; copied nodes should
+    // live at signature (generic) level, independent of the ambient typing level.
+    let old_level = ctx.current_level();
+    ctx.set_current_level(crate::types::type_expr::GENERIC_LEVEL);
     let copied = crate::types::ctype::copy_type_deep(ctx, ty_ref, copy_cache);
+    ctx.set_current_level(old_level);
     let mut visited = HashSet::new();
     rewrite_module_prefix_in_type(copied, old_param, new_prefix, ctx, &mut visited);
     copied
@@ -1583,7 +1588,7 @@ fn apply_package_constraints_to_module_type<'b>(
     env: &Env,
     mty: &crate::types::decl::ModuleType,
     constraints: &[PackageConstraint],
-    package_parent_path: Option<&Path>,
+    _package_parent_path: Option<&Path>,
     pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
     ctx: &'b crate::types::context::TypeContext<'b>,
 ) -> Option<crate::types::decl::ModuleType> {
@@ -1594,31 +1599,23 @@ fn apply_package_constraints_to_module_type<'b>(
         return Some(mty.clone());
     }
 
+    // Match OCaml Typemod.package_constraints:
+    // - extract signature for the module type
+    // - only rewrite constrained Sig_type manifests
+    // - recurse into Sig_module with nested constraints
     let sig = resolve_mod_type_to_sig(mty, Some(env), pers_env, ctx)?;
     let mut rewritten_sig = Vec::with_capacity(sig.len());
-    let mut constrained_local_type_ids: HashMap<String, Ident> = HashMap::new();
-    let mut local_type_ids: HashMap<String, Ident> = HashMap::new();
-    let mut type_copy_cache: HashMap<TypeExprRef, TypeExprRef> = HashMap::new();
 
     for item in sig {
         match item {
-            SignatureItem::SigValue(id, mut vd) => {
-                vd.val_type = crate::types::ctype::copy_type_deep(
-                    ctx,
-                    vd.val_type,
-                    &mut type_copy_cache,
-                );
-                rewritten_sig.push(SignatureItem::SigValue(id, vd));
-            }
+            SignatureItem::SigValue(_, _) => rewritten_sig.push(item),
             SignatureItem::SigType(id, mut td, rec_status) => {
-                local_type_ids.insert(id.name().to_string(), id.clone());
                 if td.type_params.is_empty() {
                     if let Some((_, manifest_ty)) = constraints
                         .iter()
                         .find(|(path, _)| path.len() == 1 && path[0] == id.name())
                     {
                         td.type_manifest = Some(*manifest_ty);
-                        constrained_local_type_ids.insert(id.name().to_string(), id.clone());
                     }
                 }
                 rewritten_sig.push(SignatureItem::SigType(id, td, rec_status));
@@ -1630,7 +1627,7 @@ fn apply_package_constraints_to_module_type<'b>(
                         env,
                         &md.md_type,
                         &nested,
-                        package_parent_path,
+                        None,
                         pers_env,
                         ctx,
                     )?;
@@ -1638,37 +1635,6 @@ fn apply_package_constraints_to_module_type<'b>(
                 rewritten_sig.push(SignatureItem::SigModule(id, md, rec_status));
             }
             other => rewritten_sig.push(other),
-        }
-    }
-
-    if let Some(parent_path) = package_parent_path {
-        if !local_type_ids.is_empty() {
-            for item in &mut rewritten_sig {
-                if let SignatureItem::SigValue(_, vd) = item {
-                    let mut seen = HashSet::new();
-                    rewrite_parent_scoped_type_paths(
-                        ctx,
-                        vd.val_type,
-                        &local_type_ids,
-                        parent_path,
-                        &mut seen,
-                    );
-                }
-            }
-        }
-    }
-
-    if !constrained_local_type_ids.is_empty() {
-        for item in &mut rewritten_sig {
-            if let SignatureItem::SigValue(_, vd) = item {
-                let mut seen = HashSet::new();
-                rewrite_constrained_local_type_paths(
-                    ctx,
-                    vd.val_type,
-                    &constrained_local_type_ids,
-                    &mut seen,
-                );
-            }
         }
     }
 
@@ -1893,11 +1859,14 @@ fn rewrite_functor_param_type_paths_in_type(
                                 cached
                             } else {
                                 let mut manifest_copy_cache = HashMap::new();
+                                let old_level = ctx.current_level();
+                                ctx.set_current_level(crate::types::type_expr::GENERIC_LEVEL);
                                 let copy = crate::types::ctype::copy_type_deep(
                                     ctx,
                                     *manifest_ty,
                                     &mut manifest_copy_cache,
                                 );
+                                ctx.set_current_level(old_level);
                                 let mut manifest_visited = HashSet::new();
                                 rewrite_functor_param_type_paths_in_type(
                                     copy,
@@ -1994,7 +1963,12 @@ fn copy_and_specialize_functor_arg_type(
     copy_cache: &mut HashMap<TypeExprRef, TypeExprRef>,
     manifest_subst_cache: &mut HashMap<String, TypeExprRef>,
 ) -> TypeExprRef {
+    // Same rationale as copy_and_rewrite_module_prefix_type: result-signature
+    // specialization must not capture ambient non-generic levels.
+    let old_level = ctx.current_level();
+    ctx.set_current_level(crate::types::type_expr::GENERIC_LEVEL);
     let copied = crate::types::ctype::copy_type_deep(ctx, ty, copy_cache);
+    ctx.set_current_level(old_level);
     let mut visited = HashSet::new();
     rewrite_functor_param_type_paths_in_type(copied, param_name, manifests, ctx, &mut visited, manifest_subst_cache);
     copied
@@ -2678,7 +2652,10 @@ fn translate_module_type_to_decl<'a>(
                                 type_kind: crate::types::TypeKind::TypeAbstract,
                                 type_private: crate::types::PrivateFlag::Public,
                                 type_manifest: None,
-                                type_variance: vec![],
+                                type_variance: vec![
+                                    crate::types::variance::Variance::null();
+                                    decl.ptype_params.len()
+                                ],
                                 type_newtype_level: None,
                                 type_loc: crate::location::Location::none(),
                                 type_attributes: vec![],
@@ -2704,6 +2681,7 @@ fn translate_module_type_to_decl<'a>(
 
                         for (decl_idx, decl) in decls.iter().enumerate() {
                             let type_id = declared_type_ids[decl_idx].clone();
+                            let saved_type_variables = std::mem::take(&mut tctx.type_variables);
                             // Match OCaml transl_type_decl: begin_def so params/manifest
                             // are created at elevated level, then end_def + generalize
                             // marks them as generic (needed for instance_parameterized_type).
@@ -2726,6 +2704,11 @@ fn translate_module_type_to_decl<'a>(
                                     }
                                 };
                                 type_params.push(param_ref);
+                                if let crate::parser::ast::CoreTypeDesc::Ptyp_var(name) =
+                                    &*param_ty.ptyp_desc
+                                {
+                                    tctx.type_variables.insert(name.to_string(), param_ref);
+                                }
                                 type_variance.push(match variance {
                                     crate::parser::ast::Variance::Covariant => {
                                         crate::types::variance::Variance::covariant()
@@ -2734,7 +2717,7 @@ fn translate_module_type_to_decl<'a>(
                                         crate::types::variance::Variance::contravariant()
                                     }
                                     crate::parser::ast::Variance::Invariant => {
-                                        crate::types::variance::Variance::invariant()
+                                        crate::types::variance::Variance::null()
                                     }
                                 });
                             }
@@ -2876,6 +2859,9 @@ fn translate_module_type_to_decl<'a>(
                             for &p in &type_params {
                                 crate::types::ctype::generalize(tctx.type_ctx, p);
                             }
+                            crate::types::btype::iter_type_expr_kind(&type_kind, |ty| {
+                                crate::types::ctype::generalize(tctx.type_ctx, ty);
+                            });
                             if let Some(m) = type_manifest {
                                 crate::types::ctype::generalize(tctx.type_ctx, m);
                             }
@@ -2908,6 +2894,7 @@ fn translate_module_type_to_decl<'a>(
                                 type_decl,
                                 rec_status_for_index(decl_idx),
                             ));
+                            tctx.type_variables = saved_type_variables;
                         }
                     }
                     crate::parser::ast::SignatureItemDesc::Psig_module(md) => {
@@ -4524,6 +4511,53 @@ fn type_structure_item<'a>(
             ctx.end_def();
             crate::types::ctype::generalize(ctx, val_ty);
 
+            if std::env::var_os("RUST_DEBUG_PRIM_LEVELS").is_some() {
+                let repr_ty = ctx.repr(val_ty);
+                let desc = ctx.get_desc(repr_ty);
+                let desc_kind = match &*desc {
+                    crate::types::TypeDesc::Tconstr { path, .. } => {
+                        format!("Tconstr({})", path.name())
+                    }
+                    crate::types::TypeDesc::Tarrow { .. } => "Tarrow".to_string(),
+                    crate::types::TypeDesc::Tvar(_) => "Tvar".to_string(),
+                    crate::types::TypeDesc::Tunivar(_) => "Tunivar".to_string(),
+                    crate::types::TypeDesc::Tlink(t) => format!("Tlink({})", ctx.repr(*t).0),
+                    crate::types::TypeDesc::Tsubst(t) => format!("Tsubst({})", ctx.repr(*t).0),
+                    crate::types::TypeDesc::Ttuple(ts) => format!("Ttuple({})", ts.len()),
+                    crate::types::TypeDesc::Tobject { .. } => "Tobject".to_string(),
+                    crate::types::TypeDesc::Tfield { .. } => "Tfield".to_string(),
+                    crate::types::TypeDesc::Tnil => "Tnil".to_string(),
+                    crate::types::TypeDesc::Tvariant(_) => "Tvariant".to_string(),
+                    crate::types::TypeDesc::Tpoly { .. } => "Tpoly".to_string(),
+                    crate::types::TypeDesc::Tpackage { .. } => "Tpackage".to_string(),
+                };
+                let arg_levels = match &*desc {
+                    crate::types::TypeDesc::Tconstr { args, .. } => Some(
+                        args.iter()
+                            .map(|arg| {
+                                let r = ctx.repr(*arg);
+                                format!("{}@{}", r.0, ctx.get_level(r))
+                            })
+                            .collect::<Vec<_>>()
+                            .join(","),
+                    ),
+                    _ => None,
+                };
+                eprintln!(
+                    "[prim-levels] stage=post_generalize name={} ty_id={} level={} desc={}",
+                    name_str,
+                    repr_ty.0,
+                    ctx.get_level(repr_ty),
+                    desc_kind
+                );
+                if let Some(arg_levels) = arg_levels {
+                    eprintln!(
+                        "[prim-levels] stage=post_generalize name={} args={}",
+                        name_str, arg_levels
+                    );
+                }
+            }
+
             // OCaml's transl_value_decl calls parse_arity -> get_arity ->
             // expand_head AFTER generalize. The expand_head side effect
             // populates simple_abbrevs with the nullary Tconstr expansion.
@@ -4531,6 +4565,53 @@ fn type_structure_item<'a>(
             // this entry via find_simple_abbrev and returns Tlink to the
             // original instead of a fresh copy — creating node sharing.
             crate::types::ctype::expand_head(ctx, env, val_ty);
+
+            if std::env::var_os("RUST_DEBUG_PRIM_LEVELS").is_some() {
+                let repr_ty = ctx.repr(val_ty);
+                let desc = ctx.get_desc(repr_ty);
+                let desc_kind = match &*desc {
+                    crate::types::TypeDesc::Tconstr { path, .. } => {
+                        format!("Tconstr({})", path.name())
+                    }
+                    crate::types::TypeDesc::Tarrow { .. } => "Tarrow".to_string(),
+                    crate::types::TypeDesc::Tvar(_) => "Tvar".to_string(),
+                    crate::types::TypeDesc::Tunivar(_) => "Tunivar".to_string(),
+                    crate::types::TypeDesc::Tlink(t) => format!("Tlink({})", ctx.repr(*t).0),
+                    crate::types::TypeDesc::Tsubst(t) => format!("Tsubst({})", ctx.repr(*t).0),
+                    crate::types::TypeDesc::Ttuple(ts) => format!("Ttuple({})", ts.len()),
+                    crate::types::TypeDesc::Tobject { .. } => "Tobject".to_string(),
+                    crate::types::TypeDesc::Tfield { .. } => "Tfield".to_string(),
+                    crate::types::TypeDesc::Tnil => "Tnil".to_string(),
+                    crate::types::TypeDesc::Tvariant(_) => "Tvariant".to_string(),
+                    crate::types::TypeDesc::Tpoly { .. } => "Tpoly".to_string(),
+                    crate::types::TypeDesc::Tpackage { .. } => "Tpackage".to_string(),
+                };
+                let arg_levels = match &*desc {
+                    crate::types::TypeDesc::Tconstr { args, .. } => Some(
+                        args.iter()
+                            .map(|arg| {
+                                let r = ctx.repr(*arg);
+                                format!("{}@{}", r.0, ctx.get_level(r))
+                            })
+                            .collect::<Vec<_>>()
+                            .join(","),
+                    ),
+                    _ => None,
+                };
+                eprintln!(
+                    "[prim-levels] stage=post_expand_head name={} ty_id={} level={} desc={}",
+                    name_str,
+                    repr_ty.0,
+                    ctx.get_level(repr_ty),
+                    desc_kind
+                );
+                if let Some(arg_levels) = arg_levels {
+                    eprintln!(
+                        "[prim-levels] stage=post_expand_head name={} args={}",
+                        name_str, arg_levels
+                    );
+                }
+            }
 
             // PPX has already encoded the FFI attributes into pval_prim,
             // so just resolve StrIdx -> String for the typed tree
@@ -4605,7 +4686,10 @@ fn type_structure_item<'a>(
                         type_kind: crate::types::TypeKind::TypeAbstract,
                         type_private: crate::types::PrivateFlag::Public,
                         type_manifest: None,
-                        type_variance: vec![],
+                        type_variance: vec![
+                            crate::types::variance::Variance::null();
+                            decl.ptype_params.len()
+                        ],
                         type_newtype_level: None,
                         type_loc: arena.to_location(decl.ptype_loc),
                         type_attributes: vec![],
@@ -4676,11 +4760,19 @@ fn type_structure_item<'a>(
                     internal_type_params.push(type_ref);
                     if let crate::parser::ast::CoreTypeDesc::Ptyp_var(name) = &*core_type.ptyp_desc {
                         tctx.type_variables.insert(name.to_string(), type_ref);
+                        if std::env::var_os("RUST_DEBUG_COMPARE_DECL").is_some()
+                            && type_name_str == "compare"
+                        {
+                            eprintln!(
+                                "[compare-decl] insert type_var name={name} ty={}",
+                                tctx.type_ctx.repr(type_ref).0
+                            );
+                        }
                     }
                     let types_var = match parser_var {
                         ParserVariance::Covariant => TypesVariance::covariant(),
                         ParserVariance::Contravariant => TypesVariance::contravariant(),
-                        ParserVariance::Invariant => TypesVariance::invariant(),
+                        ParserVariance::Invariant => TypesVariance::null(),
                     };
                     typ_params.push((typed_core_type, types_var));
                 }
@@ -4699,6 +4791,28 @@ fn type_structure_item<'a>(
                     Some(manifest) => {
                         let manifest_ct = arena.get_core_type(*manifest);
                         let (typed_manifest, type_ref) = transl_type(tctx, &temp_env, manifest_ct)?;
+                        if std::env::var_os("RUST_DEBUG_COMPARE_DECL").is_some()
+                            && type_name_str == "compare"
+                        {
+                            let m = tctx.type_ctx.repr(type_ref);
+                            let d = tctx.type_ctx.get_desc(m);
+                            if let crate::types::type_expr::TypeDesc::Tpackage { args, .. } = &*d {
+                                let parts: Vec<String> = args
+                                    .iter()
+                                    .map(|a| {
+                                        let r = tctx.type_ctx.repr(*a);
+                                        format!("raw{}->repr{}", a.0, r.0)
+                                    })
+                                    .collect();
+                                eprintln!(
+                                    "[compare-decl] manifest type={} args={}",
+                                    m.0,
+                                    parts.join(",")
+                                );
+                            } else {
+                                eprintln!("[compare-decl] manifest type={} non-package", m.0);
+                            }
+                        }
                         (Some(typed_manifest), Some(type_ref))
                     }
                     None => (None, None),
@@ -5419,6 +5533,12 @@ fn type_structure_item<'a>(
                                 ctx.new_constr(type_path.clone(), internal_type_params.clone())
                             });
                             env_desc_types_for_generalize.push(cstr_desc_res);
+                            // Constructor description argument types are stored
+                            // separately from `TypeKind` in `ConstructorDescription`.
+                            // Ensure they are generalized with the declaration
+                            // group so later `instance_constructor` calls can
+                            // instantiate fresh per-use copies like OCaml.
+                            env_desc_types_for_generalize.extend(cstr_args.iter().copied());
                             let cstr_existentials = crate::types::env::constructor_existentials(ctx, &cstr_args, internal_cd_res);
                             cstr_descs.push((
                                 cstr_id,
@@ -5645,6 +5765,36 @@ fn type_structure_item<'a>(
                 if !computed_variance.is_empty() {
                     internal_decl.type_variance = computed_variance;
                 }
+                if std::env::var_os("RUST_DEBUG_TYPE_VARIANCE").is_some()
+                    && (type_name_str == "t" || type_name_str == "t1")
+                {
+                    use crate::types::variance::VarianceFlag;
+                    let vars = internal_decl
+                        .type_variance
+                        .iter()
+                        .enumerate()
+                        .map(|(i, v)| {
+                            format!(
+                                "{}:(mp={},mn={},mw={},inj={},p={},n={},inv={})",
+                                i,
+                                v.mem(VarianceFlag::MayPos),
+                                v.mem(VarianceFlag::MayNeg),
+                                v.mem(VarianceFlag::MayWeak),
+                                v.mem(VarianceFlag::Inj),
+                                v.mem(VarianceFlag::Pos),
+                                v.mem(VarianceFlag::Neg),
+                                v.mem(VarianceFlag::Inv)
+                            )
+                        })
+                        .collect::<Vec<_>>()
+                        .join(",");
+                    eprintln!(
+                        "[rust-type-variance] name={} params={} variance={}",
+                        type_name_str,
+                        internal_decl.type_params.len(),
+                        vars
+                    );
+                }
 
                 // Save for generalization after the loop
                 internal_decls_for_generalize.push(internal_decl.clone());
@@ -5782,7 +5932,45 @@ fn type_structure_item<'a>(
             // new copies of non-generic Tconstr preserving their level, which contaminates
             // pattern type variables via update_level_expand during unification.
             for ty in &env_desc_types_for_generalize {
+                if std::env::var_os("RUST_DEBUG_GENERALIZE_CSTR_ARGS").is_some() {
+                    let repr = ctx.repr(*ty);
+                    let desc = ctx.get_desc(repr);
+                    if let crate::types::type_expr::TypeDesc::Tconstr { path, .. } = &*desc {
+                        if path.last() == "spawn_typ"
+                            || path.last() == "pl_typ"
+                            || path.last() == "player_typ"
+                            || path.last() == "enemy_typ"
+                        {
+                            eprintln!(
+                                "[generalize-cstr-args] before path={} ty={} level={} current={}",
+                                path.name(),
+                                repr.0,
+                                ctx.get_level(repr),
+                                ctx.current_level()
+                            );
+                        }
+                    }
+                }
                 crate::types::ctype::generalize(ctx, *ty);
+                if std::env::var_os("RUST_DEBUG_GENERALIZE_CSTR_ARGS").is_some() {
+                    let repr = ctx.repr(*ty);
+                    let desc = ctx.get_desc(repr);
+                    if let crate::types::type_expr::TypeDesc::Tconstr { path, .. } = &*desc {
+                        if path.last() == "spawn_typ"
+                            || path.last() == "pl_typ"
+                            || path.last() == "player_typ"
+                            || path.last() == "enemy_typ"
+                        {
+                            eprintln!(
+                                "[generalize-cstr-args] after path={} ty={} level={} current={}",
+                                path.name(),
+                                repr.0,
+                                ctx.get_level(repr),
+                                ctx.current_level()
+                            );
+                        }
+                    }
+                }
             }
 
             let desc = StructureItemDesc::Tstr_type(*rec_flag, typed_tree_decls);
@@ -6846,7 +7034,12 @@ fn transl_sig_type_declarations<'a>(
 ) -> TypeModResult<Vec<TypedTypeDeclaration>> {
     let ctx = tctx.type_ctx;
     let mut typed_tree_decls = Vec::new();
+    let mut internal_decls_for_generalize: Vec<crate::types::TypeDeclaration> = Vec::new();
 
+    // Match OCaml Typedecl.transl_type_decl flow for signatures:
+    // translate inside begin_def/end_def, then generalize declarations.
+    ctx.begin_def();
+    let loop_result: TypeModResult<()> = (|| {
     for decl in decls {
         let type_name = decl.ptype_name.txt;
         let type_name_str = arena.get_string(type_name);
@@ -6899,7 +7092,7 @@ fn transl_sig_type_declarations<'a>(
             let types_var = match parser_var {
                 ParserVariance::Covariant => TypesVariance::covariant(),
                 ParserVariance::Contravariant => TypesVariance::contravariant(),
-                ParserVariance::Invariant => TypesVariance::invariant(),
+                ParserVariance::Invariant => TypesVariance::null(),
             };
             typ_params.push((typed_core_type, types_var));
         }
@@ -7120,6 +7313,7 @@ fn transl_sig_type_declarations<'a>(
             type_inlined_types: vec![],
             type_path: Some(Path::pident(type_id.clone())),
         };
+        internal_decls_for_generalize.push(internal_decl.clone());
 
         typed_tree_decls.push(TypedTypeDeclaration {
             typ_id: type_id,
@@ -7136,6 +7330,22 @@ fn transl_sig_type_declarations<'a>(
             typ_loc: decl.ptype_loc,
             typ_attributes: decl.ptype_attributes.clone(),
         });
+    }
+    Ok(())
+    })();
+    ctx.end_def();
+    loop_result?;
+
+    for decl in &internal_decls_for_generalize {
+        for &param in &decl.type_params {
+            crate::types::ctype::generalize(ctx, param);
+        }
+        crate::types::btype::iter_type_expr_kind(&decl.type_kind, |ty| {
+            crate::types::ctype::generalize(ctx, ty);
+        });
+        if let Some(manifest) = decl.type_manifest {
+            crate::types::ctype::generalize(ctx, manifest);
+        }
     }
 
     Ok(typed_tree_decls)
