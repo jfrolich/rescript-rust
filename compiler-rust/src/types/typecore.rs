@@ -1178,7 +1178,7 @@ fn resolve_type_constructor_path(
                 }
             }
 
-            if let Some((mod_path, sig)) = env.resolve_module_lid_raw(
+            if let Some((mod_path, sig)) = env.resolve_module_lid(
                 prefix,
                 tctx.arena,
                 &mut tctx.persistent_env,
@@ -2676,7 +2676,7 @@ fn type_pattern_inner(
 /// Unify pattern types, raising PatternTypeClash on error.
 fn unify_pattern_types(
     tctx: &mut TypeCheckContext<'_>,
-    _loc: LocIdx,
+    loc: LocIdx,
     ty1: TypeExprRef,
     ty2: TypeExprRef,
 ) -> TypeCoreResult<()> {
@@ -2685,6 +2685,37 @@ fn unify_pattern_types(
     match unify(tctx.type_ctx, &mut tctx.unify_state, ty1, ty2) {
         Ok(()) => Ok(()),
         Err(TypeError::Unify(_)) => {
+            if std::env::var_os("RUST_DEBUG_PATTERN_UNIFY").is_some() {
+                let summarize = |ty: TypeExprRef| {
+                    let repr = tctx.type_ctx.repr(ty);
+                    let desc = tctx.type_ctx.get_desc(repr);
+                    match &*desc {
+                        TypeDesc::Tconstr { path, args, .. } => {
+                            format!("{}#{}(args={})", path.name(), repr.0, args.len())
+                        }
+                        TypeDesc::Tarrow { .. } => format!("Tarrow#{}", repr.0),
+                        TypeDesc::Tvar(_) => format!("Tvar#{}", repr.0),
+                        TypeDesc::Tunivar(_) => format!("Tunivar#{}", repr.0),
+                        TypeDesc::Tlink(t) => format!("Tlink#{}->{}", repr.0, tctx.type_ctx.repr(*t).0),
+                        TypeDesc::Tsubst(t) => format!("Tsubst#{}->{}", repr.0, tctx.type_ctx.repr(*t).0),
+                        TypeDesc::Ttuple(ts) => format!("Ttuple#{}({})", repr.0, ts.len()),
+                        TypeDesc::Tobject { .. } => format!("Tobject#{}", repr.0),
+                        TypeDesc::Tfield { .. } => format!("Tfield#{}", repr.0),
+                        TypeDesc::Tnil => format!("Tnil#{}", repr.0),
+                        TypeDesc::Tvariant(_) => format!("Tvariant#{}", repr.0),
+                        TypeDesc::Tpoly { .. } => format!("Tpoly#{}", repr.0),
+                        TypeDesc::Tpackage { .. } => format!("Tpackage#{}", repr.0),
+                    }
+                };
+                let full_loc = tctx.arena.to_location(loc);
+                eprintln!(
+                    "[pattern-unify-fail] loc={}:{} ty1={} ty2={}",
+                    full_loc.loc_start.line,
+                    full_loc.loc_start.column(),
+                    summarize(ty1),
+                    summarize(ty2)
+                );
+            }
             Err(TypeCoreError::PatternTypeClash(vec![(ty1, ty2)]))
         },
         Err(_) => Err(TypeCoreError::PatternTypeClash(vec![(ty1, ty2)])),
@@ -3925,6 +3956,8 @@ pub fn type_expect<'a>(
                     || path_name == "Js.String2.substrAtMost"
                     || path_name == "Js.String2.lastIndexOfFrom"
                     || path_name == "basicComponent"
+                    || path_name == "React.jsx"
+                    || path_name == "ComponentWithOptionalProps.make"
                 {
                     let val_ty = ctx.repr(desc.val_type);
                     let inst_ty = ctx.repr(ty);
@@ -4172,6 +4205,8 @@ pub fn type_expect<'a>(
                     || path_name == "X.forEach"
                     || path_name == "X.i"
                     || path_name == "basicComponent"
+                    || path_name == "React.jsx"
+                    || path_name == "ComponentWithOptionalProps.make"
                 {
                     let val_ty = ctx.repr(desc.val_type);
                     let inst_ty = ctx.repr(ty);
@@ -5936,15 +5971,19 @@ fn type_application(
         ExpressionDesc::Texp_ident(path, _, _) => Some(path.name()),
         _ => None,
     };
-    let debug_apply_eq = std::env::var_os("RUST_DEBUG_APPLY_TRACE").is_some()
-        && {
-            let full_loc = tctx.arena.to_location(loc);
-            full_loc.loc_start.line == 35
-                || matches!(
-                    debug_apply_name.as_deref(),
-                    Some("N.eq") | Some("basicComponent")
-                )
-        };
+    let debug_apply_eq = if std::env::var_os("RUST_DEBUG_APPLY_TRACE_ALL").is_some() {
+        true
+    } else {
+        std::env::var_os("RUST_DEBUG_APPLY_TRACE").is_some()
+            && {
+                let full_loc = tctx.arena.to_location(loc);
+                full_loc.loc_start.line == 35
+                    || matches!(
+                        debug_apply_name.as_deref(),
+                        Some("N.eq") | Some("basicComponent")
+                    )
+            }
+    };
 
     let mut typed_args = Vec::with_capacity(pending_args.len());
     for (arg_index, pending_arg) in pending_args.into_iter().enumerate() {
@@ -9673,9 +9712,17 @@ fn type_record(
     use crate::types::typedtree::RecordLabelDefinition;
 
     let ctx = tctx.type_ctx;
-    // Instance generic expected_ty to avoid corruption (type_record uses
-    // expected_ty for disambiguation, label unification, and as exp_type)
-    let expected_ty = instance_if_generic(ctx, expected_ty);
+    // Most callers should protect generic expected types from record typing
+    // side effects, but constraint bodies must type against the shared generic
+    // node so unification side effects match OCaml.
+    let expected_ty = if tctx
+        .generic_constraint_body_ty
+        .is_some_and(|constraint_ty| ctx.repr(constraint_ty) == ctx.repr(expected_ty))
+    {
+        expected_ty
+    } else {
+        instance_if_generic(ctx, expected_ty)
+    };
     let placeholder_lid = tctx.arena.placeholder_located(loc);
 
     // Type check base expression if present.
@@ -9711,6 +9758,36 @@ fn type_record(
             .map(|expr| expr.exp_type)
             .unwrap_or(expected_ty)
     });
+    if std::env::var_os("RUST_DEBUG_RECORD_PATH").is_some()
+        && field_names
+            .iter()
+            .any(|name| matches!(name.as_str(), "currency" | "useGrouping"))
+    {
+        let expected_path = extract_type_path_from_expected_with_persistent_env(
+            expected_ty,
+            env,
+            &mut tctx.persistent_env,
+            ctx,
+        )
+        .map(|p| p.name())
+        .unwrap_or_else(|| "<none>".to_string());
+        let disamb_path = extract_type_path_from_expected_with_persistent_env(
+            disambiguation_ty,
+            env,
+            &mut tctx.persistent_env,
+            ctx,
+        )
+        .map(|p| p.name())
+        .unwrap_or_else(|| "<none>".to_string());
+        eprintln!(
+            "[record-path] loc={}:{} fields={:?} expected={} disambiguation={}",
+            tctx.arena.to_location(loc).loc_start.line,
+            tctx.arena.to_location(loc).loc_start.column(),
+            field_names,
+            expected_path,
+            disamb_path
+        );
+    }
 
     // OCaml builds record definitions by label position over the full label set.
     // Keep explicit overrides keyed by lbl_pos so we can reconstruct full fields.
@@ -10395,6 +10472,42 @@ fn get_record_labels<'a>(
     if let crate::types::TypeDesc::Tconstr { ref path, .. } = *desc {
         if let Some(type_decl) = lookup_type_decl_for_path(path, env, pers_env, ctx) {
             if let crate::types::TypeKind::TypeRecord(ref labels, _) = type_decl.type_kind {
+                if std::env::var_os("RUST_DEBUG_RECORD_LABELS").is_some()
+                    && path.last() == "options"
+                {
+                    for lbl in labels {
+                        if matches!(
+                            lbl.ld_id.name(),
+                            "compactDisplay" | "currency" | "useGrouping"
+                        ) {
+                            let ty = ctx.repr(lbl.ld_type);
+                            let d = ctx.get_desc(ty);
+                            let head = match &*d {
+                                TypeDesc::Tconstr { path, args, .. } => {
+                                    if path.name() == "option" && args.len() == 1 {
+                                        let a = ctx.repr(args[0]);
+                                        let ad = ctx.get_desc(a);
+                                        match &*ad {
+                                            TypeDesc::Tconstr { path, .. } => {
+                                                format!("option<{}>", path.name())
+                                            }
+                                            _ => format!("option<ty#{}>", a.0),
+                                        }
+                                    } else {
+                                        path.name()
+                                    }
+                                }
+                                _ => format!("ty#{}", ty.0),
+                            };
+                            eprintln!(
+                                "[record-labels] path={} field={} type={}",
+                                path.name(),
+                                lbl.ld_id.name(),
+                                head
+                            );
+                        }
+                    }
+                }
                 return Some(labels.clone());
             }
         }
@@ -11111,19 +11224,12 @@ fn type_send(
     let mut typed_obj = type_expect(tctx, env, obj_expr, obj_ty, None)?;
     if let ExpressionDesc::Texp_ident(_, _, desc) = &typed_obj.exp_desc {
         if let crate::types::ValueKind::ValPrim(prim) = &desc.val_kind {
-            let plain_prim_name = prim
-                .prim_name
-                .chars()
-                .next()
-                .map(|c| c != '#' && c != '%')
-                .unwrap_or(true);
             let val_ty = ctx.repr(desc.val_type);
             let val_desc = ctx.get_desc(val_ty);
-            if plain_prim_name
+            if method_name_is_plain_ident(&prim.prim_name)
+                && method_name_is_plain_ident(method.txt.as_ref())
                 && matches!(&*val_desc, TypeDesc::Tconstr { args, .. } if args.is_empty())
             {
-                // Match OCaml send typing: method sends on nullary primitive aliases
-                // keep the declaration type node sharing on the object expression.
                 typed_obj.exp_type = desc.val_type;
             }
         }
@@ -13930,6 +14036,39 @@ impl Env {
                     for sig_item in sig.iter().rev() {
                         if let crate::types::decl::SignatureItem::SigValue(id, vd) = sig_item {
                             if id.name() == value_name {
+                                if std::env::var_os("RUST_DEBUG_INTL_GROUPING").is_some()
+                                    && value_name == "fromBool"
+                                {
+                                    let ty = ctx.repr(vd.val_type);
+                                    let desc = ctx.get_desc(ty);
+                                    let summary = match &*desc {
+                                        TypeDesc::Tarrow { arg, ret, .. } => {
+                                            let arg = ctx.repr(arg.typ);
+                                            let ret = ctx.repr(*ret);
+                                            let ret_desc = ctx.get_desc(ret);
+                                            let ret_head = match &*ret_desc {
+                                                TypeDesc::Tconstr { path, .. } => path.name(),
+                                                _ => format!("ty#{}", ret.0),
+                                            };
+                                            format!(
+                                                "Tarrow(arg={} ret={} ret_head={})",
+                                                arg.0, ret.0, ret_head
+                                            )
+                                        }
+                                        TypeDesc::Tconstr { path, .. } => {
+                                            format!("Tconstr({})", path.name())
+                                        }
+                                        _ => format!("{:?}", *desc),
+                                    };
+                                    eprintln!(
+                                        "[intl-grouping] prefix={} mod_path={} value={} ty={} {}",
+                                        prefix_str,
+                                        mod_path.name(),
+                                        value_name,
+                                        ty.0,
+                                        summary
+                                    );
+                                }
                                 if std::env::var_os("RUST_DEBUG_LOOKUP_MMCMP").is_some()
                                     && prefix_str == "Mm"
                                     && value_name == "cmp"
@@ -14149,6 +14288,55 @@ impl Env {
                                 }
                             }
                         }
+                        if std::env::var_os("RUST_DEBUG_NUMBERFORMAT_SIG").is_some()
+                            && path.name().ends_with("NumberFormat")
+                        {
+                            for item in &sig {
+                                if let crate::types::decl::SignatureItem::SigType(id, decl, _) = item
+                                {
+                                    if id.name() == "options" {
+                                        if let crate::types::TypeKind::TypeRecord(labels, _) =
+                                            &decl.type_kind
+                                        {
+                                            for lbl in labels {
+                                                if matches!(
+                                                    lbl.ld_id.name(),
+                                                    "useGrouping" | "compactDisplay" | "currency"
+                                                ) {
+                                                    let ty = ctx.repr(lbl.ld_type);
+                                                    let desc = ctx.get_desc(ty);
+                                                    let head = match &*desc {
+                                                        TypeDesc::Tconstr { path, args, .. } => {
+                                                            if path.name() == "option"
+                                                                && args.len() == 1
+                                                            {
+                                                                let arg = ctx.repr(args[0]);
+                                                                let arg_desc = ctx.get_desc(arg);
+                                                                match &*arg_desc {
+                                                                    TypeDesc::Tconstr { path, .. } => {
+                                                                        format!("option<{}>", path.name())
+                                                                    }
+                                                                    _ => format!("option<ty#{}>", arg.0),
+                                                                }
+                                                            } else {
+                                                                path.name()
+                                                            }
+                                                        }
+                                                        _ => format!("ty#{}", ty.0),
+                                                    };
+                                                    eprintln!(
+                                                        "[numberformat-sig] path={} options.useGrouping ty={} head={}",
+                                                        path.name(),
+                                                        ty.0,
+                                                        head
+                                                    );
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
                         return Some((path, sig));
                     }
                 }
@@ -14323,6 +14511,63 @@ impl Env {
                                                         decl.type_manifest.is_some(),
                                                         decl.type_params.len()
                                                     );
+                                                }
+                                            }
+                                        }
+                                    }
+                                    if std::env::var_os("RUST_DEBUG_NUMBERFORMAT_SIG").is_some()
+                                        && sub_path.name().ends_with("NumberFormat")
+                                    {
+                                        for item in &sig {
+                                            if let crate::types::decl::SignatureItem::SigType(
+                                                id,
+                                                decl,
+                                                _,
+                                            ) = item
+                                            {
+                                                if id.name() == "options" {
+                                                    if let crate::types::TypeKind::TypeRecord(
+                                                        labels,
+                                                        _,
+                                                    ) = &decl.type_kind
+                                                    {
+                                                        for lbl in labels {
+                                                            if matches!(
+                                                                lbl.ld_id.name(),
+                                                                "useGrouping"
+                                                                    | "compactDisplay"
+                                                                    | "currency"
+                                                            ) {
+                                                                let ty = ctx.repr(lbl.ld_type);
+                                                                let desc = ctx.get_desc(ty);
+                                                                let head = match &*desc {
+                                                                    TypeDesc::Tconstr { path, args, .. } => {
+                                                                        if path.name() == "option"
+                                                                            && args.len() == 1
+                                                                        {
+                                                                            let arg = ctx.repr(args[0]);
+                                                                            let arg_desc = ctx.get_desc(arg);
+                                                                            match &*arg_desc {
+                                                                                TypeDesc::Tconstr { path, .. } => {
+                                                                                    format!("option<{}>", path.name())
+                                                                                }
+                                                                                _ => format!("option<ty#{}>", arg.0),
+                                                                            }
+                                                                        } else {
+                                                                            path.name()
+                                                                        }
+                                                                    }
+                                                                    _ => format!("ty#{}", ty.0),
+                                                                };
+                                                                eprintln!(
+                                                                    "[numberformat-sig] path={} options.useGrouping ty={} head={}",
+                                                                    sub_path.name(),
+                                                                    ty.0,
+                                                                    head
+                                                                );
+                                                            }
+                                                        }
+                                                    }
                                                 }
                                             }
                                         }
@@ -14673,10 +14918,13 @@ fn lookup_constructor_in_module<'b>(
                                 )
                             }
                         };
-                        let cstr_res = ctx.new_generic_constr(
-                            ext.ext_type_path.clone(),
-                            ext.ext_type_params.clone(),
+                        let ext_type_path = crate::cmi::persistent_env::substitute_sig_path(
+                            &ext.ext_type_path,
+                            &sig,
+                            &mod_path,
                         );
+                        let cstr_res =
+                            ctx.new_generic_constr(ext_type_path, ext.ext_type_params.clone());
                         let desc = crate::types::decl::ConstructorDescription {
                             cstr_name: cstr_name.to_string(),
                             cstr_res,
@@ -15341,6 +15589,47 @@ fn disambiguate_label<'a>(
         }
     }
 
+    if std::env::var_os("RUST_DEBUG_LABEL_INTL").is_some()
+        && matches!(label_name, "compactDisplay" | "currency" | "useGrouping")
+    {
+        let target = opath.as_ref().map(|p| p.name()).unwrap_or_else(|| "<none>".to_string());
+        if let Some(label) = selected.as_ref() {
+            let lbl_res = ctx.repr(label.lbl_res);
+            let lbl_arg = ctx.repr(label.lbl_arg);
+            let lbl_res_path = {
+                let d = ctx.get_desc(lbl_res);
+                match &*d {
+                    TypeDesc::Tconstr { path, .. } => path.name(),
+                    _ => format!("ty#{}", lbl_res.0),
+                }
+            };
+            let lbl_arg_path = {
+                let d = ctx.get_desc(lbl_arg);
+                match &*d {
+                    TypeDesc::Tconstr { path, args, .. } => {
+                        if path.name() == "option" && args.len() == 1 {
+                            let a = ctx.repr(args[0]);
+                            let ad = ctx.get_desc(a);
+                            match &*ad {
+                                TypeDesc::Tconstr { path, .. } => format!("option<{}>", path.name()),
+                                _ => format!("option<ty#{}>", a.0),
+                            }
+                        } else {
+                            path.name()
+                        }
+                    }
+                    _ => format!("ty#{}", lbl_arg.0),
+                }
+            };
+            eprintln!(
+                "[label-intl] name={} target={} lbl_res={} lbl_arg={}",
+                label_name, target, lbl_res_path, lbl_arg_path
+            );
+        } else {
+            eprintln!("[label-intl] name={} target={} selected=<none>", label_name, target);
+        }
+    }
+
     selected
 }
 
@@ -15359,6 +15648,78 @@ fn qualify_module_local_type_paths_in_place<'a>(
     visited: &mut HashSet<TypeExprRef>,
 ) {
     use crate::types::type_expr::RowField;
+    use crate::types::ModuleType;
+
+    fn rewrite_path_prefix(path: &Path, old_prefix: &Path, new_prefix: &Path) -> Option<Path> {
+        if path.same(old_prefix) {
+            return Some(new_prefix.clone());
+        }
+        match path {
+            Path::Pdot(prefix, name, pos) => rewrite_path_prefix(prefix, old_prefix, new_prefix)
+                .map(|rewritten_prefix| Path::Pdot(Box::new(rewritten_prefix), name.clone(), *pos)),
+            _ => None,
+        }
+    }
+
+    fn rewrite_flattened_head_prefix(path: &Path, flat_head: &str, new_prefix: &Path) -> Option<Path> {
+        match path {
+            Path::Pident(id) if id.name() == flat_head => Some(new_prefix.clone()),
+            Path::Pdot(prefix, name, pos) => rewrite_flattened_head_prefix(prefix, flat_head, new_prefix)
+                .map(|rewritten_prefix| Path::Pdot(Box::new(rewritten_prefix), name.clone(), *pos)),
+            _ => None,
+        }
+    }
+
+    fn flatten_alias_head(path: &Path) -> Option<String> {
+        let Ok((head, components)) = path.flatten() else {
+            return None;
+        };
+        if components.is_empty() {
+            return None;
+        }
+
+        let mut flat = head.name().to_string();
+        for component in components {
+            flat.push('_');
+            flat.push_str(component);
+        }
+        Some(flat)
+    }
+
+    fn flattened_alias_heads_from_persistent(
+        pers_env: &Option<crate::cmi::persistent_env::PersistentEnv>,
+        qualified_path: &Path,
+    ) -> Vec<String> {
+        let Some(pers) = pers_env.as_ref() else {
+            return Vec::new();
+        };
+        pers.flattened_alias_heads_for_path(qualified_path)
+    }
+
+    fn rewrite_with_flattened_heads(
+        path: &Path,
+        alias_path: &Path,
+        module_access_path: &Path,
+        pers_env: &Option<crate::cmi::persistent_env::PersistentEnv>,
+    ) -> Option<Path> {
+        let mut flat_heads = Vec::new();
+        if let Some(flat) = flatten_alias_head(alias_path) {
+            flat_heads.push(flat);
+        }
+        for flat in flattened_alias_heads_from_persistent(pers_env, alias_path) {
+            if !flat_heads.iter().any(|existing| existing == &flat) {
+                flat_heads.push(flat);
+            }
+        }
+
+        for flat_head in flat_heads {
+            let rewritten = rewrite_flattened_head_prefix(path, &flat_head, module_access_path);
+            if rewritten.is_some() {
+                return rewritten;
+            }
+        }
+        None
+    }
 
     let repr = ctx.repr(ty);
     if !visited.insert(repr) {
@@ -15378,28 +15739,61 @@ fn qualify_module_local_type_paths_in_place<'a>(
                     visited,
                 );
             }
-            if let Path::Pident(id) = &path {
-                let candidate = Path::pdot(module_access_path.clone(), id.name());
-                let found = lookup_type_decl_for_path(&candidate, env, pers_env, ctx).is_some();
-                if std::env::var_os("RUST_DEBUG_LOOKUP_CSTR_PATH").is_some() && id.name() == "t" {
+            let mut rewritten_path: Option<Path> = None;
+
+            if let Path::Pident(module_id) = module_access_path {
+                if let Ok(md) = env.find_module(module_id.name()) {
+                    if let ModuleType::MtyAlias(_, alias_target) = &md.md_type {
+                        let normalized_alias_target = env.normalize_path(alias_target);
+                        rewritten_path = rewrite_path_prefix(&path, alias_target, module_access_path);
+                        if rewritten_path.is_none() {
+                            rewritten_path = rewrite_with_flattened_heads(
+                                &path,
+                                alias_target,
+                                module_access_path,
+                                pers_env,
+                            );
+                        }
+                        if rewritten_path.is_none() && !normalized_alias_target.same(alias_target) {
+                            rewritten_path = rewrite_with_flattened_heads(
+                                &path,
+                                &normalized_alias_target,
+                                module_access_path,
+                                pers_env,
+                            );
+                        }
+                    }
+                }
+            }
+
+            if rewritten_path.is_none() {
+                if let Path::Pident(id) = &path {
+                    let candidate = Path::pdot(module_access_path.clone(), id.name());
+                    if lookup_type_decl_for_path(&candidate, env, pers_env, ctx).is_some() {
+                        rewritten_path = Some(candidate);
+                    }
+                }
+            }
+
+            if let Some(rewritten) = rewritten_path {
+                if std::env::var_os("RUST_DEBUG_LOOKUP_CSTR_PATH").is_some()
+                    && (path.last() == "t" || rewritten.last() == "t")
+                {
                     eprintln!(
-                        "[qualify-path] from={} module={} candidate={} found={}",
+                        "[qualify-path] from={} module={} rewritten={}",
                         path.name(),
                         module_access_path.name(),
-                        candidate.name(),
-                        found
+                        rewritten.name()
                     );
                 }
-                if found {
-                    ctx.set_desc(
-                        repr,
-                        TypeDesc::Tconstr {
-                            path: candidate,
-                            args,
-                            abbrev,
-                        },
-                    );
-                }
+                ctx.set_desc(
+                    repr,
+                    TypeDesc::Tconstr {
+                        path: rewritten,
+                        args,
+                        abbrev,
+                    },
+                );
             }
         }
         TypeDesc::Tarrow { arg, ret, .. } => {
@@ -15635,6 +16029,26 @@ fn lookup_constructor_by_expected_type<'b>(
                         for arg in args {
                             let copied =
                                 crate::types::ctype::copy_type_deep(ctx, *arg, &mut inst_cache);
+                            if std::env::var_os("RUST_DEBUG_LOOKUP_CSTR_PATH").is_some()
+                                && (cstr_name == "JSONObject" || cstr_name == "JSONArray")
+                            {
+                                let copied_repr = ctx.repr(copied);
+                                let copied_desc = ctx.get_desc(copied_repr);
+                                let copied_head = match &*copied_desc {
+                                    TypeDesc::Tconstr { path, .. } => path.name(),
+                                    _ => format!("ty#{}", copied_repr.0),
+                                };
+                                eprintln!(
+                                    "[lookup-cstr-arg] stage=before cstr={} module={} arg={} head={}",
+                                    cstr_name,
+                                    module_access_path
+                                        .as_ref()
+                                        .map(|p| p.name())
+                                        .unwrap_or_else(|| "<none>".to_string()),
+                                    copied_repr.0,
+                                    copied_head
+                                );
+                            }
                             if let Some(module_path) = module_access_path.as_ref() {
                                 let mut visited = HashSet::new();
                                 qualify_module_local_type_paths_in_place(
@@ -15644,6 +16058,26 @@ fn lookup_constructor_by_expected_type<'b>(
                                     copied,
                                     module_path,
                                     &mut visited,
+                                );
+                            }
+                            if std::env::var_os("RUST_DEBUG_LOOKUP_CSTR_PATH").is_some()
+                                && (cstr_name == "JSONObject" || cstr_name == "JSONArray")
+                            {
+                                let copied_repr = ctx.repr(copied);
+                                let copied_desc = ctx.get_desc(copied_repr);
+                                let copied_head = match &*copied_desc {
+                                    TypeDesc::Tconstr { path, .. } => path.name(),
+                                    _ => format!("ty#{}", copied_repr.0),
+                                };
+                                eprintln!(
+                                    "[lookup-cstr-arg] stage=after cstr={} module={} arg={} head={}",
+                                    cstr_name,
+                                    module_access_path
+                                        .as_ref()
+                                        .map(|p| p.name())
+                                        .unwrap_or_else(|| "<none>".to_string()),
+                                    copied_repr.0,
+                                    copied_head
                                 );
                             }
                             copied_args.push(copied);
@@ -15946,6 +16380,16 @@ fn resolve_module_signature_for_path<'a>(
                 }
                 crate::cmi::persistent_env::substitute_type_paths_in_sig(&sig, &access_path, ctx);
                 ctx.register_resolved_module_sig(&module_key, access_path.clone(), sig.clone());
+                if std::env::var_os("RUST_DEBUG_RESOLVE_MODSIG").is_some()
+                    && (module_path.name().contains("NumberFormat")
+                        || access_path.name().contains("NumberFormat"))
+                {
+                    eprintln!(
+                        "[resolve-modsig] input={} access={}",
+                        module_path.name(),
+                        access_path.name()
+                    );
+                }
                 return Some((access_path, sig));
             }
             if let Some(pers) = pers_env.as_mut() {
@@ -15989,6 +16433,16 @@ fn resolve_module_signature_for_path<'a>(
                             ctx,
                         );
                         ctx.register_resolved_module_sig(&module_key, access_path.clone(), sig.clone());
+                        if std::env::var_os("RUST_DEBUG_RESOLVE_MODSIG").is_some()
+                            && (module_path.name().contains("NumberFormat")
+                                || access_path.name().contains("NumberFormat"))
+                        {
+                            eprintln!(
+                                "[resolve-modsig] input={} access={}",
+                                module_path.name(),
+                                access_path.name()
+                            );
+                        }
                         return Some((access_path, sig));
                     }
                 }
@@ -16007,6 +16461,8 @@ fn lookup_type_decl_for_path<'a>(
     pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
     ctx: &'a crate::types::context::TypeContext<'a>,
 ) -> Option<crate::types::decl::TypeDeclaration> {
+    let debug_lookup_options = std::env::var_os("RUST_DEBUG_LOOKUP_OPTIONS").is_some()
+        && matches!(type_path.last(), "options" | "compactDisplay" | "currency");
     // Only use env.lookup_type directly for simple identifiers. For qualified
     // paths, env.lookup_type currently resolves by leaf name and can return an
     // unrelated declaration with the same type name.
@@ -16035,6 +16491,9 @@ fn lookup_type_decl_for_path<'a>(
         // expand_head_once entries which have unqualified paths.
         let path_name = type_path.name();
         if let Some(decl) = ctx.find_resolved_pdot_type(&path_name) {
+            if debug_lookup_options {
+                eprintln!("[lookup-options] path={} source=resolved_pdot_cache", path_name);
+            }
             return Some(decl);
         }
 
@@ -16110,6 +16569,23 @@ fn lookup_type_decl_for_path<'a>(
         if let Some((_resolved_parent_path, parent_sig)) =
             resolve_module_signature_for_path(parent, env, pers_env, ctx)
         {
+            if debug_lookup_options {
+                let names = parent_sig
+                    .iter()
+                    .filter_map(|item| {
+                        if let crate::types::decl::SignatureItem::SigType(id, _, _) = item {
+                            Some(id.name().to_string())
+                        } else {
+                            None
+                        }
+                    })
+                    .collect::<Vec<_>>()
+                    .join(",");
+                eprintln!(
+                    "[lookup-options] path={} parent_sig_types=[{}]",
+                    path_name, names
+                );
+            }
             for item in &parent_sig {
                 if let crate::types::decl::SignatureItem::SigType(id, decl, _) = item {
                     if id.name() == type_name.as_str() {
@@ -16161,6 +16637,9 @@ fn lookup_type_decl_for_path<'a>(
                         // Pdot path reuse the same type nodes (matching OCaml's
                         // components_of_module_maker lazy caching).
                         ctx.register_resolved_pdot_type(&path_name, decl.clone());
+                        if debug_lookup_options {
+                            eprintln!("[lookup-options] path={} source=resolved_parent_sig", path_name);
+                        }
                         return Some(decl.clone());
                     }
                 }
@@ -16209,11 +16688,23 @@ fn lookup_type_decl_for_path<'a>(
             }
         }
 
+        // Prefer the substituted declaration we just resolved from the parent
+        // signature over global path caches when we hit a self-manifest type.
+        if let Some(decl) = deferred_self_manifest_decl.take() {
+            if debug_lookup_options {
+                eprintln!("[lookup-options] path={} source=deferred_self_manifest", path_name);
+            }
+            return Some(decl);
+        }
+
         // Fall back to direct path lookup only after module-signature resolution.
         // OCaml's Env.components_of_module applies Subst.type_declaration before
         // exposing Sig_type entries; preferring substituted signatures first avoids
         // returning stale unqualified recursive paths (e.g. JSON.t self refs as Pident "t").
         if let Some(decl) = ctx.find_type_decl_by_path(&path_name) {
+            if debug_lookup_options {
+                eprintln!("[lookup-options] path={} source=type_decl_by_path", path_name);
+            }
             return Some(decl.clone());
         }
 

@@ -77,6 +77,22 @@ impl PersistentEnv {
         self.load_path.contains(path)
     }
 
+    /// Return flattened module heads that are known aliases for `qualified_path`.
+    /// Example: if cache has `"Stdlib_JSON" -> Stdlib.JSON`, returns `["Stdlib_JSON"]`
+    /// when queried with `Stdlib.JSON`.
+    pub fn flattened_alias_heads_for_path(&self, qualified_path: &Path) -> Vec<String> {
+        self.alias_prefix_rewrites
+            .iter()
+            .filter_map(|(flat_head, qualified)| {
+                if qualified.same(qualified_path) {
+                    Some(flat_head.clone())
+                } else {
+                    None
+                }
+            })
+            .collect()
+    }
+
     /// Find and load a module by name.
     /// Returns the cached signature, or None if the module cannot be found.
     pub fn find_pers_struct<'a>(
@@ -114,9 +130,7 @@ impl PersistentEnv {
         let mut sig_ctx = SigReadContext::new(ctx);
         let signature = sig_ctx.read_signature(&cmi.cmi_sign);
 
-        // Register all type declarations in the global store for alias expansion
         let module_path = Path::Pident(Ident::create_persistent(name));
-        register_sig_types_recursive(&signature, &module_path, ctx, &self.load_path);
 
         // Apply path substitution: rewrite Tconstr paths from internal
         // (e.g., Pident "ref") to qualified (e.g., Pdot(Pident "Pervasives") "ref").
@@ -149,6 +163,11 @@ impl PersistentEnv {
         let effective_module_path = self.alias_prefix_rewrites.get(name).cloned()
             .unwrap_or_else(|| module_path.clone());
         collect_alias_rewrites(&signature, &effective_module_path, &mut self.alias_prefix_rewrites);
+
+        // Register type declarations after all signature rewrites so cached
+        // declarations (especially record/variant field types) use the same
+        // qualified paths seen during lookup from this signature.
+        register_sig_types_recursive(&signature, &effective_module_path, ctx, &self.load_path);
 
         Some(PersStruct {
             ps_name: cmi.cmi_name,
@@ -409,6 +428,40 @@ fn build_subst_maps(sig_items: &[SignatureItem], module_path: &Path) -> SubstMap
     maps
 }
 
+fn build_subst_maps_for_module(sig_items: &[SignatureItem], module_path: &Path) -> SubstMaps {
+    let mut maps = build_subst_maps(sig_items, module_path);
+
+    // Nested persistent modules are often materialized in CMIs with flattened
+    // names (for example `Stdlib.JSON` appears as `Stdlib_JSON`). Add an
+    // explicit mapping from that flattened head name back to the qualified
+    // module access path so substitution can normalize those references.
+    if let Ok((head, components)) = module_path.flatten() {
+        if !components.is_empty() {
+            let mut flat_name = head.name().to_string();
+            for component in components {
+                flat_name.push('_');
+                flat_name.push_str(component);
+            }
+            maps.module_name_map
+                .entry(flat_name)
+                .or_insert_with(|| module_path.clone());
+        }
+    }
+
+    maps
+}
+
+pub fn substitute_sig_path(path: &Path, sig_items: &[SignatureItem], module_path: &Path) -> Path {
+    let maps = build_subst_maps_for_module(sig_items, module_path);
+    substitute_type_path(
+        path,
+        &maps.type_stamp_map,
+        &maps.type_name_map,
+        &maps.module_stamp_map,
+        &maps.module_name_map,
+    )
+}
+
 fn substitute_type_paths_in_sig_with_maps(
     sig_items: &[SignatureItem],
     maps: &SubstMaps,
@@ -580,56 +633,11 @@ pub fn substitute_type_paths_in_sig(
     module_path: &Path,
     ctx: &TypeContext<'_>,
 ) {
-    // Build substitution maps:
-    // type stamp/name -> qualified type path
-    // module stamp/name -> qualified module path
-    let mut type_stamp_map: HashMap<i32, Path> = HashMap::new();
-    let mut type_name_map: HashMap<String, Path> = HashMap::new();
-    let mut module_stamp_map: HashMap<i32, Path> = HashMap::new();
-    let mut module_name_map: HashMap<String, Path> = HashMap::new();
-
-    for item in sig_items {
-        match item {
-            SignatureItem::SigType(id, _, _) | SignatureItem::SigModtype(id, _) => {
-                let qualified_path = Path::pdot(module_path.clone(), id.name());
-                if id.stamp() != 0 {
-                    // OCaml Subst uses identifier identity for non-persistent ids.
-                    // Only rewrite by stamp in this case.
-                    type_stamp_map.insert(id.stamp(), qualified_path);
-                } else {
-                    // Persistent ids (stamp=0) compare by name.
-                    type_name_map.insert(id.name().to_string(), qualified_path);
-                }
-            }
-            SignatureItem::SigModule(id, _, _) => {
-                let qualified_path = Path::pdot(module_path.clone(), id.name());
-                if id.stamp() != 0 {
-                    // OCaml Subst uses identifier identity for non-persistent ids.
-                    // Only rewrite by stamp in this case.
-                    module_stamp_map.insert(id.stamp(), qualified_path);
-                } else {
-                    // Persistent ids (stamp=0) compare by name.
-                    module_name_map.insert(id.name().to_string(), qualified_path);
-                }
-            }
-            _ => {}
-        }
-    }
-
-    // Nested persistent modules are often materialized in CMIs with flattened
-    // names (for example `Stdlib.JSON` appears as `Stdlib_JSON`). Add an
-    // explicit mapping from that flattened head name back to the qualified
-    // module access path so substitution can normalize those references.
-    if let Ok((head, components)) = module_path.flatten() {
-        if !components.is_empty() {
-            let mut flat_name = head.name().to_string();
-            for component in components {
-                flat_name.push('_');
-                flat_name.push_str(component);
-            }
-            module_name_map.entry(flat_name).or_insert_with(|| module_path.clone());
-        }
-    }
+    let maps = build_subst_maps_for_module(sig_items, module_path);
+    let type_stamp_map = &maps.type_stamp_map;
+    let type_name_map = &maps.type_name_map;
+    let module_stamp_map = &maps.module_stamp_map;
+    let module_name_map = &maps.module_name_map;
 
     if type_stamp_map.is_empty()
         && type_name_map.is_empty()
@@ -1039,6 +1047,15 @@ fn substitute_type_path(
                 type_stamp_map
                     .get(&ident.stamp())
                     .cloned()
+                    .or_else(|| {
+                        // Flattened CMI heads like Stdlib_JSON often carry
+                        // non-zero stamps but still need name-based rewriting.
+                        ident
+                            .name()
+                            .contains('_')
+                            .then(|| type_name_map.get(ident.name()).cloned())
+                            .flatten()
+                    })
                     .unwrap_or_else(|| path.clone())
             } else {
                 type_name_map
@@ -1074,10 +1091,31 @@ fn substitute_module_path(
 ) -> Path {
     match path {
         Path::Pident(ident) => {
+            let debug_subst = std::env::var_os("RUST_DEBUG_SUBST_STDLIB_INTL").is_some()
+                && (ident.name().contains("Stdlib_Intl") || ident.name().contains("NumberFormat"));
+            if debug_subst {
+                eprintln!(
+                    "[subst-module] ident={} stamp={} has_stamp={} has_name={}",
+                    ident.name(),
+                    ident.stamp(),
+                    module_stamp_map.contains_key(&ident.stamp()),
+                    module_name_map.contains_key(ident.name())
+                );
+            }
             if ident.stamp() != 0 {
                 module_stamp_map
                     .get(&ident.stamp())
                     .cloned()
+                    .or_else(|| {
+                        // Flattened module names (Stdlib_JSON, Stdlib_Intl_*)
+                        // may appear with non-zero stamps; allow a targeted
+                        // name fallback for those heads only.
+                        ident
+                            .name()
+                            .contains('_')
+                            .then(|| module_name_map.get(ident.name()).cloned())
+                            .flatten()
+                    })
                     .unwrap_or_else(|| path.clone())
             } else {
                 module_name_map
@@ -1969,11 +2007,11 @@ pub fn add_signature_to_env(
                 }
             }
             SignatureItem::SigTypext(id, ext, _status) => {
+                let ext_type_path = substitute_sig_path(&ext.ext_type_path, sig_items, module_path);
                 // Add extension constructor
                 let cstr_desc = ConstructorDescription {
                     cstr_name: id.name().to_string(),
-                    cstr_res: ctx
-                        .new_generic_constr(ext.ext_type_path.clone(), ext.ext_type_params.clone()),
+                    cstr_res: ctx.new_generic_constr(ext_type_path, ext.ext_type_params.clone()),
                     cstr_existentials: vec![],
                     cstr_args: match &ext.ext_args {
                         crate::types::decl::ConstructorArguments::CstrTuple(args) => args.clone(),
