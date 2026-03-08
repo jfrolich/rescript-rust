@@ -1146,6 +1146,78 @@ impl From<TypeCoreError> for TypeModError {
     }
 }
 
+fn union_variance_rows(lhs: &[TypesVariance], rhs: &[TypesVariance]) -> Vec<TypesVariance> {
+    let len = lhs.len().max(rhs.len());
+    (0..len)
+        .map(|idx| {
+            let left = lhs.get(idx).copied().unwrap_or_else(TypesVariance::null);
+            let right = rhs.get(idx).copied().unwrap_or_else(TypesVariance::null);
+            left.union(&right)
+        })
+        .collect()
+}
+
+fn compute_type_variance_fixpoint(
+    ctx: &crate::types::context::TypeContext<'_>,
+    env: &Env,
+    type_ids: &[Ident],
+) -> Vec<Vec<TypesVariance>> {
+    let paths: Vec<Path> = type_ids
+        .iter()
+        .map(|id| Path::pident(id.clone()))
+        .collect();
+
+    let templates: Vec<_> = paths
+        .iter()
+        .filter_map(|path| env.lookup_type(path).ok().cloned())
+        .collect();
+    if templates.len() != type_ids.len() {
+        return vec![];
+    }
+
+    // OCaml typedecl.ml compute_properties_fixpoint:
+    // start from null variances and monotonically grow via union.
+    let mut variances: Vec<Vec<TypesVariance>> = templates
+        .iter()
+        .map(|decl| vec![TypesVariance::null(); decl.type_params.len()])
+        .collect();
+
+    for _ in 0..32 {
+        let mut iter_env = env.clone();
+        for ((type_id, template), variance) in type_ids
+            .iter()
+            .zip(templates.iter())
+            .zip(variances.iter())
+        {
+            let mut decl = template.clone();
+            decl.type_variance = variance.clone();
+            iter_env.add_type(type_id.clone(), decl);
+        }
+
+        let computed: Vec<Vec<TypesVariance>> = paths
+            .iter()
+            .filter_map(|path| iter_env.lookup_type(path).ok())
+            .map(|decl| crate::types::ctype::compute_variance_decl(ctx, &iter_env, &decl))
+            .collect();
+        if computed.len() != variances.len() {
+            break;
+        }
+
+        let next_variances: Vec<Vec<TypesVariance>> = variances
+            .iter()
+            .zip(computed.iter())
+            .map(|(old, new)| union_variance_rows(old, new))
+            .collect();
+
+        if next_variances == variances {
+            break;
+        }
+        variances = next_variances;
+    }
+
+    variances
+}
+
 // ============================================================================
 // Signature Simplification
 // ============================================================================
@@ -1508,45 +1580,19 @@ fn nested_package_constraints(
         .collect()
 }
 
-fn rewrite_constrained_local_type_paths<'b>(
-    ctx: &'b crate::types::context::TypeContext<'b>,
-    ty: TypeExprRef,
-    local_type_ids: &HashMap<String, Ident>,
-    seen: &mut HashSet<TypeExprRef>,
-) {
-    let ty = ctx.repr(ty);
-    if !seen.insert(ty) {
-        return;
-    }
-
-    let desc = ctx.get_desc(ty).clone();
-    if let crate::types::type_expr::TypeDesc::Tconstr { path, args, abbrev } = &desc {
-        for arg in args {
-            rewrite_constrained_local_type_paths(ctx, *arg, local_type_ids, seen);
-        }
-        if args.is_empty() {
-            if let Path::Pdot(_, name, _) = path {
-                if let Some(local_id) = local_type_ids.get(name.as_str()) {
-                    ctx.set_desc(
-                        ty,
-                        crate::types::type_expr::TypeDesc::Tconstr {
-                            path: Path::pident(local_id.clone()),
-                            args: vec![],
-                            abbrev: *abbrev,
-                        },
-                    );
-                }
-            }
-        }
-        return;
-    }
-
-    crate::types::iter_type_expr(ctx, ty, |child| {
-        rewrite_constrained_local_type_paths(ctx, child, local_type_ids, seen);
-    });
+fn copy_signature_for_package_constraints(
+    sig_items: &[crate::types::decl::SignatureItem],
+    ctx: &crate::types::context::TypeContext<'_>,
+) -> crate::types::decl::Signature {
+    // package_constraints mutates type nodes through later env substitutions.
+    // Copy the signature graph first so each package instantiation has isolated
+    // type nodes, matching OCaml's per-instantiation Subst behavior.
+    let dummy_param = Ident::create_local("__pkg_copy_param__");
+    let dummy_path = Path::pident(Ident::create_local("__pkg_copy_path__"));
+    substitute_functor_param_in_signature(sig_items, &dummy_param, &dummy_path, ctx)
 }
 
-fn rewrite_parent_scoped_type_paths<'b>(
+fn rewrite_parent_scoped_type_paths_for_package<'b>(
     ctx: &'b crate::types::context::TypeContext<'b>,
     ty: TypeExprRef,
     local_type_ids: &HashMap<String, Ident>,
@@ -1561,15 +1607,20 @@ fn rewrite_parent_scoped_type_paths<'b>(
     let desc = ctx.get_desc(ty).clone();
     if let crate::types::type_expr::TypeDesc::Tconstr { path, args, abbrev } = &desc {
         for arg in args {
-            rewrite_parent_scoped_type_paths(ctx, *arg, local_type_ids, parent_path, seen);
+            rewrite_parent_scoped_type_paths_for_package(
+                ctx,
+                *arg,
+                local_type_ids,
+                parent_path,
+                seen,
+            );
         }
-
         if let Path::Pident(id) = path {
             if !id.is_persistent() && !local_type_ids.contains_key(id.name()) {
                 ctx.set_desc(
                     ty,
                     crate::types::type_expr::TypeDesc::Tconstr {
-                        path: Path::pdot(parent_path.clone(), id.name().to_string()),
+                        path: Path::pdot(parent_path.clone(), id.name()),
                         args: args.clone(),
                         abbrev: *abbrev,
                     },
@@ -1580,7 +1631,7 @@ fn rewrite_parent_scoped_type_paths<'b>(
     }
 
     crate::types::iter_type_expr(ctx, ty, |child| {
-        rewrite_parent_scoped_type_paths(ctx, child, local_type_ids, parent_path, seen);
+        rewrite_parent_scoped_type_paths_for_package(ctx, child, local_type_ids, parent_path, seen);
     });
 }
 
@@ -1588,7 +1639,7 @@ fn apply_package_constraints_to_module_type<'b>(
     env: &Env,
     mty: &crate::types::decl::ModuleType,
     constraints: &[PackageConstraint],
-    _package_parent_path: Option<&Path>,
+    package_parent_path: Option<&Path>,
     pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
     ctx: &'b crate::types::context::TypeContext<'b>,
 ) -> Option<crate::types::decl::ModuleType> {
@@ -1604,11 +1655,31 @@ fn apply_package_constraints_to_module_type<'b>(
     // - only rewrite constrained Sig_type manifests
     // - recurse into Sig_module with nested constraints
     let sig = resolve_mod_type_to_sig(mty, Some(env), pers_env, ctx)?;
+    let sig = copy_signature_for_package_constraints(&sig, ctx);
     let mut rewritten_sig = Vec::with_capacity(sig.len());
+    let local_type_ids: HashMap<String, Ident> = sig
+        .iter()
+        .filter_map(|item| match item {
+            SignatureItem::SigType(id, _, _) => Some((id.name().to_string(), id.clone())),
+            _ => None,
+        })
+        .collect();
 
     for item in sig {
         match item {
-            SignatureItem::SigValue(_, _) => rewritten_sig.push(item),
+            SignatureItem::SigValue(id, mut vd) => {
+                if let Some(parent_path) = package_parent_path {
+                    let mut seen = HashSet::new();
+                    rewrite_parent_scoped_type_paths_for_package(
+                        ctx,
+                        vd.val_type,
+                        &local_type_ids,
+                        parent_path,
+                        &mut seen,
+                    );
+                }
+                rewritten_sig.push(SignatureItem::SigValue(id, vd));
+            }
             SignatureItem::SigType(id, mut td, rec_status) => {
                 if td.type_params.is_empty() {
                     if let Some((_, manifest_ty)) = constraints
@@ -1623,11 +1694,13 @@ fn apply_package_constraints_to_module_type<'b>(
             SignatureItem::SigModule(id, mut md, rec_status) => {
                 let nested = nested_package_constraints(id.name(), constraints);
                 if !nested.is_empty() {
+                    let nested_parent_path =
+                        package_parent_path.map(|p| Path::pdot(p.clone(), id.name()));
                     md.md_type = apply_package_constraints_to_module_type(
                         env,
                         &md.md_type,
                         &nested,
-                        None,
+                        nested_parent_path.as_ref(),
                         pers_env,
                         ctx,
                     )?;
@@ -4625,7 +4698,14 @@ fn type_structure_item<'a>(
             let mut new_env = env.clone();
             let val_desc_for_env = crate::types::ValueDescription {
                 val_type: val_ty,
-                val_kind: crate::types::ValueKind::ValReg,
+                val_kind: crate::types::ValueKind::ValPrim(
+                    crate::types::PrimitiveDescription {
+                        prim_name: val_prim.first().cloned().unwrap_or_default(),
+                        prim_arity: 1,
+                        prim_native_name: String::new(),
+                        prim_native_float: false,
+                    },
+                ),
                 val_loc: arena.to_location(loc),
                 val_attributes: vec![],
                 val_path: None,
@@ -5758,44 +5838,6 @@ fn type_structure_item<'a>(
                     type_path: None,
                 };
 
-                // Compute actual variance from the type body (OCaml: compute_variance_decl)
-                let computed_variance = crate::types::ctype::compute_variance_decl(
-                    ctx, &new_env, &internal_decl,
-                );
-                if !computed_variance.is_empty() {
-                    internal_decl.type_variance = computed_variance;
-                }
-                if std::env::var_os("RUST_DEBUG_TYPE_VARIANCE").is_some()
-                    && (type_name_str == "t" || type_name_str == "t1")
-                {
-                    use crate::types::variance::VarianceFlag;
-                    let vars = internal_decl
-                        .type_variance
-                        .iter()
-                        .enumerate()
-                        .map(|(i, v)| {
-                            format!(
-                                "{}:(mp={},mn={},mw={},inj={},p={},n={},inv={})",
-                                i,
-                                v.mem(VarianceFlag::MayPos),
-                                v.mem(VarianceFlag::MayNeg),
-                                v.mem(VarianceFlag::MayWeak),
-                                v.mem(VarianceFlag::Inj),
-                                v.mem(VarianceFlag::Pos),
-                                v.mem(VarianceFlag::Neg),
-                                v.mem(VarianceFlag::Inv)
-                            )
-                        })
-                        .collect::<Vec<_>>()
-                        .join(",");
-                    eprintln!(
-                        "[rust-type-variance] name={} params={} variance={}",
-                        type_name_str,
-                        internal_decl.type_params.len(),
-                        vars
-                    );
-                }
-
                 // Save for generalization after the loop
                 internal_decls_for_generalize.push(internal_decl.clone());
 
@@ -5973,6 +6015,38 @@ fn type_structure_item<'a>(
                 }
             }
 
+            // OCaml typedecl.ml compute_properties_fixpoint:
+            // recompute variances for the whole declaration group as a fixpoint.
+            let resolved_variances =
+                compute_type_variance_fixpoint(ctx, &new_env, &declared_type_ids);
+            if resolved_variances.len() == declared_type_ids.len() {
+                for (idx, type_id) in declared_type_ids.iter().enumerate() {
+                    let Some(variance_row) = resolved_variances.get(idx) else {
+                        continue;
+                    };
+                    let path = Path::pident(type_id.clone());
+                    let Ok(updated_decl_ref) = new_env.lookup_type(&path) else {
+                        continue;
+                    };
+                    let mut updated_decl = updated_decl_ref.clone();
+                    updated_decl.type_variance = variance_row.clone();
+                    new_env.add_type(type_id.clone(), updated_decl.clone());
+
+                    if let Some(typed_decl) = typed_tree_decls.get_mut(idx) {
+                        typed_decl.typ_type.type_variance = variance_row.clone();
+                    }
+                    if let Some(internal_decl) = internal_decls_for_generalize.get_mut(idx) {
+                        internal_decl.type_variance = variance_row.clone();
+                    }
+
+                    let type_name = arena.get_string(decls[idx].ptype_name.txt);
+                    ctx.register_type_decl(type_name, updated_decl.clone());
+                    if type_id.stamp() != 0 {
+                        ctx.register_type_decl_by_stamp(type_id.stamp(), updated_decl.clone());
+                    }
+                }
+            }
+
             let desc = StructureItemDesc::Tstr_type(*rec_flag, typed_tree_decls);
             Ok((
                 StructureItem {
@@ -6010,13 +6084,13 @@ fn type_structure_item<'a>(
 
             // Translate constructors and register them in the environment
             let mut typed_constructors = Vec::new();
-            let mut all_cstr_args: Vec<TypeExprRef> = Vec::new();
+            let mut ext_types_to_generalize: Vec<TypeExprRef> = Vec::new();
             let mut new_env = env.clone();
             for ec in &ext.ptyext_constructors {
                 let name_str = arena.get_string(ec.pext_name.txt).to_string();
                 let id = Ident::create_local(&name_str);
 
-                let (typed_args, typed_ret, ext_args, cstr_args, cstr_inlined) = match &ec.pext_kind
+                let (typed_args, typed_ret, ext_args, cstr_args, cstr_inlined, ext_ret_ty) = match &ec.pext_kind
                 {
                     crate::parser::ast::ExtensionConstructorKind::Pext_decl(args, ret) => {
                         let mut arg_ty_refs = Vec::new();
@@ -6080,7 +6154,7 @@ fn type_structure_item<'a>(
                                     });
                                 }
                                 let inline_path = Path::pident(id.clone());
-                                let inline_ty = ctx.new_constr(inline_path.clone(), vec![]);
+                                let inline_ty = ctx.new_generic_constr(inline_path.clone(), vec![]);
                                 let inline_decl = crate::types::TypeDeclaration {
                                     type_params: vec![],
                                     type_arity: 0,
@@ -6109,14 +6183,22 @@ fn type_structure_item<'a>(
                                 )
                             }
                         };
-                        let typed_ret = match ret {
+                        let (typed_ret, ext_ret_ty) = match ret {
                             Some(ct) => {
-                                let (typed_ct, _) = transl_type(tctx, env, arena.get_core_type(*ct))?;
-                                Some(typed_ct)
+                                let (typed_ct, ty_ref) =
+                                    transl_type(tctx, env, arena.get_core_type(*ct))?;
+                                (Some(typed_ct), Some(ty_ref))
                             }
-                            None => None,
+                            None => (None, None),
                         };
-                        (typed_args, typed_ret, ext_args, cstr_args, cstr_inlined)
+                        (
+                            typed_args,
+                            typed_ret,
+                            ext_args,
+                            cstr_args,
+                            cstr_inlined,
+                            ext_ret_ty,
+                        )
                     }
                     crate::parser::ast::ExtensionConstructorKind::Pext_rebind(_lid) => (
                         crate::types::typedtree::ConstructorArgument::Cstr_tuple(vec![]),
@@ -6124,8 +6206,16 @@ fn type_structure_item<'a>(
                         crate::types::ConstructorArguments::CstrTuple(vec![]),
                         vec![],
                         None,
+                        None,
                     ),
                 };
+
+                crate::types::btype::iter_type_expr_cstr_args(&ext_args, |ty| {
+                    ext_types_to_generalize.push(ty);
+                });
+                if let Some(ret_ty) = ext_ret_ty {
+                    ext_types_to_generalize.push(ret_ty);
+                }
 
                 // Register the extension constructor in the environment
                 let ext_path = Path::pident(id.clone());
@@ -6149,7 +6239,10 @@ fn type_structure_item<'a>(
                         inlined_decl.type_kind
                     {
                         let ty_res = ctx
-                            .new_constr(Path::pident(id.clone()), inlined_decl.type_params.clone());
+                            .new_generic_constr(
+                                Path::pident(id.clone()),
+                                inlined_decl.type_params.clone(),
+                            );
                         for (pos, ld) in labels.iter().enumerate() {
                             let lbl_desc = crate::types::LabelDescription {
                                 lbl_name: ld.ld_id.name().to_string(),
@@ -6172,7 +6265,6 @@ fn type_structure_item<'a>(
                         }
                     }
                 }
-                all_cstr_args.extend(cstr_args.iter());
                 new_env.add_constructor(id.clone(), cstr_desc);
 
                 typed_constructors.push(crate::types::typedtree::ExtensionConstructor {
@@ -6201,7 +6293,7 @@ fn type_structure_item<'a>(
 
             // OCaml typedecl.ml: end_def and generalize constructor arg types
             ctx.end_def();
-            for ty_ref in &all_cstr_args {
+            for ty_ref in &ext_types_to_generalize {
                 crate::types::generalize(ctx, *ty_ref);
             }
 
@@ -6251,7 +6343,7 @@ fn type_structure_item<'a>(
             ctx.begin_def();
 
             // Translate constructor arguments and collect type refs for env registration
-            let (typed_args, _ext_ret, ext_args, cstr_args, cstr_inlined) = match &ext_constr
+            let (typed_args, _ext_ret, ext_args, cstr_args, cstr_inlined, ext_ret_ty) = match &ext_constr
                 .pext_kind
             {
                 crate::parser::ast::ExtensionConstructorKind::Pext_decl(args, ret) => {
@@ -6312,7 +6404,7 @@ fn type_structure_item<'a>(
                                 });
                             }
                             let inline_path = Path::pident(id.clone());
-                            let inline_ty = ctx.new_constr(inline_path.clone(), vec![]);
+                            let inline_ty = ctx.new_generic_constr(inline_path.clone(), vec![]);
                             let inline_decl = crate::types::TypeDeclaration {
                                 type_params: vec![],
                                 type_arity: 0,
@@ -6341,14 +6433,22 @@ fn type_structure_item<'a>(
                             )
                         }
                     };
-                    let typed_ret = match ret {
+                    let (typed_ret, ext_ret_ty) = match ret {
                         Some(ct) => {
-                            let (typed_ct, _) = transl_type(tctx, env, arena.get_core_type(*ct))?;
-                            Some(typed_ct)
+                            let (typed_ct, ty_ref) =
+                                transl_type(tctx, env, arena.get_core_type(*ct))?;
+                            (Some(typed_ct), Some(ty_ref))
                         }
-                        None => None,
+                        None => (None, None),
                     };
-                    (typed_args, typed_ret, ext_args, cstr_args, cstr_inlined)
+                    (
+                        typed_args,
+                        typed_ret,
+                        ext_args,
+                        cstr_args,
+                        cstr_inlined,
+                        ext_ret_ty,
+                    )
                 }
                 crate::parser::ast::ExtensionConstructorKind::Pext_rebind(_lid) => (
                     crate::types::typedtree::ConstructorArgument::Cstr_tuple(vec![]),
@@ -6356,12 +6456,20 @@ fn type_structure_item<'a>(
                     crate::types::ConstructorArguments::CstrTuple(vec![]),
                     vec![],
                     None,
+                    None,
                 ),
             };
 
             // OCaml typedecl.ml:1843-1846: end_def and generalize args
             ctx.end_def();
-            for ty_ref in &cstr_args {
+            let mut ext_types_to_generalize = Vec::new();
+            crate::types::btype::iter_type_expr_cstr_args(&ext_args, |ty| {
+                ext_types_to_generalize.push(ty);
+            });
+            if let Some(ret_ty) = ext_ret_ty {
+                ext_types_to_generalize.push(ret_ty);
+            }
+            for ty_ref in &ext_types_to_generalize {
                 crate::types::generalize(ctx, *ty_ref);
             }
 
@@ -6390,8 +6498,10 @@ fn type_structure_item<'a>(
                 if let crate::types::TypeKind::TypeRecord(ref labels, ref repres) =
                     inlined_decl.type_kind
                 {
-                    let ty_res =
-                        ctx.new_constr(Path::pident(id.clone()), inlined_decl.type_params.clone());
+                    let ty_res = ctx.new_generic_constr(
+                        Path::pident(id.clone()),
+                        inlined_decl.type_params.clone(),
+                    );
                     for (pos, ld) in labels.iter().enumerate() {
                         let lbl_desc = crate::types::LabelDescription {
                             lbl_name: ld.ld_id.name().to_string(),
