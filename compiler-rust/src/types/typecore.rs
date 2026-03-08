@@ -3682,6 +3682,37 @@ fn type_pattern_open(
 // Expression Type Checking
 // ============================================================================
 
+fn type_exp<'a>(
+    tctx: &mut TypeCheckContext<'a>,
+    env: &Env,
+    expr: &ParsedExpression,
+    context: Option<TypeClashContext>,
+) -> TypeCoreResult<Expression> {
+    let expected_ty = tctx.type_ctx.new_var(None);
+    type_expect(tctx, env, expr, expected_ty, context)
+}
+
+/// Match OCaml `type_statement`:
+/// begin_def; type_exp; end_def; expand_head(exp_type); unify with unit.
+fn type_statement<'a>(
+    tctx: &mut TypeCheckContext<'a>,
+    env: &Env,
+    expr: &ParsedExpression,
+) -> TypeCoreResult<Expression> {
+    let ctx = tctx.type_ctx;
+    ctx.begin_def();
+    let typed = type_exp(tctx, env, expr, None)?;
+    ctx.end_def();
+
+    // Keep OCaml side effects from `expand_head env exp.exp_type`:
+    // this drives abbreviation memo/env synchronization in statement typing.
+    let _ = crate::types::ctype::expand_head(ctx, env, typed.exp_type);
+
+    let expected_ty = env.type_unit(ctx);
+    unify_expression_types(tctx, typed.exp_loc, typed.exp_type, expected_ty, None)?;
+    Ok(typed)
+}
+
 /// Type check an expression against an expected type.
 pub fn type_expect<'a>(
     tctx: &mut TypeCheckContext<'a>,
@@ -3710,147 +3741,63 @@ pub fn type_expect<'a>(
                 tctx.type_ctx,
             )?;
 
-            // Keep selected local monomorphic ground constructors by identity
-            // so repeated uses can share through unification, but avoid cases
-            // where OCaml keeps pattern-bound identifiers distinct after
-            // instantiation (for example `JsExn(err)` payload `unknown`).
-            let ty = {
-                let source_ty = ctx.repr(desc.val_type);
-                let force_fresh_local_float = tctx.force_fresh_local_float;
-                let (reuse_local_ground, fresh_local_ground_path) = match &path {
-                    Path::Pident(id)
-                        if !id.is_persistent()
-                            && ctx.get_level(source_ty) != crate::types::GENERIC_LEVEL =>
-                    {
-                        let desc = ctx.get_desc(source_ty);
-                        match &*desc {
-                            TypeDesc::Tconstr {
-                                path: source_path,
-                                args,
-                                ..
-                            } => {
-                                let keep_alias_path = matches!(
-                                    source_path,
-                                    Path::Pdot(parent, leaf, _)
-                                        if leaf == "t"
-                                            && matches!(
-                                                parent.as_ref(),
-                                                Path::Pident(id) if id.name() == "Stdlib_RegExp"
-                                            )
-                                );
-                                let should_freshen_float = force_fresh_local_float
-                                    && args.is_empty()
-                                    && source_path.head_name() == "float";
-                                let should_freshen_unknown = args.is_empty()
-                                    && source_path.head_name() == "unknown";
-                                let should_freshen_path = should_freshen_float
-                                    || should_freshen_unknown
-                                    || keep_alias_path;
-                                // OCaml instance() returns identity for ALL non-generic types.
-                                // Allow parameterized Tconstr identity when args don't contain
-                                // Tvariant (which would cause row field contamination across
-                                // branches, e.g. LetUnwrap result<string, [#InvalidString]>).
-                                let args_safe_for_identity = args.is_empty() || args.iter().copied().all(|arg| {
-                                    !crate::types::ctype::type_contains_variant(ctx, arg)
-                                });
-                                (
-                                    args_safe_for_identity && !should_freshen_path,
-                                    if should_freshen_path {
-                                        Some(source_path.clone())
-                                    } else {
-                                        None
-                                    },
-                                )
-                            }
-                            // Match OCaml instance() for local monomorphic types:
-                            // non-generic arrows are returned by identity.
-                            TypeDesc::Tarrow { .. } => (true, None),
-                            // Keep identity only for local non-generic rows that are
-                            // constant-tag-only polyvariants (no payload types), which
-                            // matches OCaml row-closing behavior in switches like
-                            // `#a/#b/#c` while avoiding over-sharing payload rows.
-                            TypeDesc::Tvariant(row) => {
-                                let row = crate::types::btype::row_repr(ctx, row);
-                                let const_only = row.row_fields.iter().all(|(_, field)| {
-                                    match crate::types::btype::row_field_repr(ctx, field) {
-                                        crate::types::type_expr::RowField::Rpresent(None) => true,
-                                        crate::types::type_expr::RowField::Reither {
-                                            constant: true,
-                                            types,
-                                            ..
-                                        } => types.is_empty(),
-                                        _ => false,
-                                    }
-                                });
-                                (
-                                    tctx.recursive_let_depth == 0 && const_only,
-                                    None,
-                                )
-                            }
-                            _ => (false, None),
-                        }
-                    }
-                    _ => (false, None),
-                };
-                if let Some(fresh_path) = fresh_local_ground_path {
-                    ctx.new_constr(fresh_path, vec![])
-                } else if reuse_local_ground {
-                    source_ty
-                } else if matches!(path, Path::Pdot(..) | Path::Papply(..))
-                    && ctx.get_level(source_ty) != crate::types::type_expr::GENERIC_LEVEL
+            let ty = crate::types::instance(ctx, desc.val_type);
+            if std::env::var_os("RUST_DEBUG_IDENT_LEVELS").is_some() {
+                let path_name = path.name();
+                if path_name == "N.minimum"
+                    || path_name == "N.maximum"
+                    || path_name == "v"
+                    || path_name == "N.fromArray"
+                    || path_name == "N.eq"
+                    || path_name == "A.makeBy"
+                    || path_name == "dd"
                 {
-                    // Module-qualified non-generic value types must not alias the
-                    // declaration graph in-place. Copy before unification so typing
-                    // local code cannot mutate module signature manifests.
-                    // (Rust CMI loading shares type nodes across lookups, unlike
-                    // OCaml's Subst.value_description which copies per lookup.)
-                    let mut copy_cache = HashMap::new();
-                    crate::types::ctype::copy_type_deep(ctx, source_ty, &mut copy_cache)
-                } else {
-                    crate::types::instance(ctx, desc.val_type)
+                    let val_ty = ctx.repr(desc.val_type);
+                    let inst_ty = ctx.repr(ty);
+                    eprintln!(
+                        "[ident-level] path={} val_id={} val_level={} inst_id={} inst_level={}",
+                        path_name,
+                        val_ty.0,
+                        ctx.get_level(val_ty),
+                        inst_ty.0,
+                        ctx.get_level(inst_ty),
+                    );
                 }
-            };
-
-            // Match OCaml `rue` + `Ctype.instance`: non-generic expected types
-            // keep identity through `instance`, so unification can propagate
-            // branch constraints back into the shared expected node.
-            let expected_inst = if ctx.get_level(ctx.repr(expected_ty))
-                == crate::types::type_expr::GENERIC_LEVEL
-            {
-                crate::types::instance(ctx, expected_ty)
-            } else {
-                expected_ty
-            };
-            let pre_unify_copy = crate::types::copy_type(ctx, ty);
-            unify_expression_types(tctx, loc, ty, expected_inst, context)?;
-            let output_ty = {
-                let before = ctx.repr(pre_unify_copy);
-                let after = ctx.repr(ty);
-                let before_desc = ctx.get_desc(before);
-                let after_desc = ctx.get_desc(after);
-                let keep_pre_unify = matches!(
-                    (&*before_desc, &*after_desc),
-                    (
-                        TypeDesc::Tconstr { path: before_path, .. },
-                        TypeDesc::Tconstr { path: after_path, .. }
-                    ) if !before_path.same(after_path)
-                        && (before_path.head().is_persistent() || before_path.head().is_global())
-                        && !after_path.head().is_persistent()
-                );
-                drop(before_desc);
-                drop(after_desc);
-
-                if keep_pre_unify {
-                    pre_unify_copy
-                } else {
-                    ty
+            }
+            if std::env::var_os("RUST_DEBUG_IDENT_TRACE").is_some() {
+                let path_name = path.name();
+                if path_name == "N.fromArray"
+                    || path_name == "A.makeBy"
+                    || path_name == "N.eq"
+                    || path_name == "dd"
+                    || path_name == "Ord.compare"
+                    || path_name == "x"
+                    || path_name == "v"
+                {
+                    let val_ty = ctx.repr(desc.val_type);
+                    let inst_ty = ctx.repr(ty);
+                    let expected_repr = ctx.repr(expected_ty);
+                    let full_loc = tctx.arena.to_location(loc);
+                    let simple_memo = ctx.get_abbrev_memo(ctx.simple_abbrevs_memo());
+                    eprintln!(
+                        "[ident-trace] path={} loc={}:{} env_id={} val_ty={} inst_ty={} expected_ty={} simple={:?}",
+                        path_name,
+                        full_loc.loc_start.line,
+                        full_loc.loc_start.column(),
+                        env.id(),
+                        val_ty.0,
+                        inst_ty.0,
+                        expected_repr.0,
+                        simple_memo
+                    );
                 }
-            };
+            }
+            rue_unify(tctx, loc, ty, expected_ty, context)?;
 
             Ok(Expression::new(
                 ExpressionDesc::Texp_ident(path, lid.clone(), desc),
                 loc,
-                output_ty,
+                ty,
                 EnvRef(0),
                 expr.pexp_attributes.clone(),
             ))
@@ -3936,20 +3883,8 @@ pub fn type_expect<'a>(
 
         ED::Pexp_sequence(e1_idx, e2_idx) => {
             // Sequence expression: e1; e2
-            // e1 should have type unit (OCaml's type_statement wraps in begin_def/end_def)
-            let unit_ty = env.type_unit(ctx);
             let e1 = tctx.arena.get_expr(*e1_idx);
-            ctx.begin_def();
-            let typed_e1 = type_expect(tctx, env, e1, unit_ty, None)?;
-            ctx.end_def();
-            // OCaml's type_statement calls expand_head env exp.exp_type after
-            // end_def. The important side-effect is check_abbrev_env(env), which
-            // clears simple_abbrevs when the env changed during e1 typing (e.g.
-            // a for-loop body creates a new env with the loop variable). Without
-            // this, simple_abbrevs entries from e1's sub-env leak into e2.
-            // We call check_abbrev_env directly rather than expand_head to avoid
-            // creating extra type nodes from expansion side-effects.
-            ctx.check_abbrev_env(env);
+            let typed_e1 = type_statement(tctx, env, e1)?;
 
             // e2 has the expected type
             let e2 = tctx.arena.get_expr(*e2_idx);
@@ -4029,17 +3964,11 @@ pub fn type_expect<'a>(
             // OCaml passes Predef.type_bool/unit to type_expect; rue instances each.
             // Use separate unit types for body and result (matching OCaml's rue pattern).
             let bool_ty = env.type_bool(ctx);
-            let body_unit_ty = env.type_unit(ctx);
 
             let cond = tctx.arena.get_expr(*cond_idx);
             let typed_cond = type_expect(tctx, env, cond, bool_ty, None)?;
-            // OCaml uses type_statement for body (wraps in begin_def/end_def)
             let body = tctx.arena.get_expr(*body_idx);
-            ctx.begin_def();
-            let typed_body = type_expect(tctx, env, body, body_unit_ty, None)?;
-            ctx.end_def();
-            // OCaml's type_statement calls expand_head after end_def (see Pexp_sequence).
-            ctx.check_abbrev_env(env);
+            let typed_body = type_statement(tctx, env, body)?;
 
             // OCaml: rue { ... exp_type = instance_def Predef.type_unit; ... }
             // Keep original argument order to preserve Tlink direction.
@@ -4621,7 +4550,7 @@ pub fn type_expect<'a>(
 /// Unify expression types, raising ExprTypeClash on error.
 fn unify_expression_types(
     tctx: &mut TypeCheckContext<'_>,
-    _loc: LocIdx,
+    loc: LocIdx,
     ty1: TypeExprRef,
     ty2: TypeExprRef,
     context: Option<TypeClashContext>,
@@ -4630,10 +4559,46 @@ fn unify_expression_types(
 
     match unify(tctx.type_ctx, &mut tctx.unify_state, ty1, ty2) {
         Ok(()) => Ok(()),
-        Err(_) => Err(TypeCoreError::ExprTypeClash {
-            trace: vec![(ty1, ty2)],
-            context,
-        }),
+        Err(_) => {
+            if std::env::var_os("RUST_DEBUG_UNIFY_FAIL").is_some() {
+                let summarize = |ty: TypeExprRef| {
+                    let repr = tctx.type_ctx.repr(ty);
+                    let desc = tctx.type_ctx.get_desc(repr);
+                    match &*desc {
+                        TypeDesc::Tconstr { path, args, .. } => {
+                            format!("Tconstr({},args={})", path.name(), args.len())
+                        }
+                        TypeDesc::Tarrow { .. } => "Tarrow".to_string(),
+                        TypeDesc::Tvar(_) => "Tvar".to_string(),
+                        TypeDesc::Tunivar(_) => "Tunivar".to_string(),
+                        TypeDesc::Tlink(t) => format!("Tlink({})", tctx.type_ctx.repr(*t).0),
+                        TypeDesc::Tsubst(t) => format!("Tsubst({})", tctx.type_ctx.repr(*t).0),
+                        TypeDesc::Ttuple(ts) => format!("Ttuple({})", ts.len()),
+                        TypeDesc::Tobject { .. } => "Tobject".to_string(),
+                        TypeDesc::Tfield { .. } => "Tfield".to_string(),
+                        TypeDesc::Tnil => "Tnil".to_string(),
+                        TypeDesc::Tvariant(_) => "Tvariant".to_string(),
+                        TypeDesc::Tpoly { .. } => "Tpoly".to_string(),
+                        TypeDesc::Tpackage { .. } => "Tpackage".to_string(),
+                    }
+                };
+                let full_loc = tctx.arena.to_location(loc);
+                eprintln!(
+                    "[unify-fail] loc={}:{} ty1={}({}) ty2={}({}) ctx={:?}",
+                    full_loc.loc_start.line,
+                    full_loc.loc_start.column(),
+                    tctx.type_ctx.repr(ty1).0,
+                    summarize(ty1),
+                    tctx.type_ctx.repr(ty2).0,
+                    summarize(ty2),
+                    context
+                );
+            }
+            Err(TypeCoreError::ExprTypeClash {
+                trace: vec![(ty1, ty2)],
+                context,
+            })
+        }
     }
 }
 
@@ -5288,8 +5253,23 @@ fn type_application(
         }
     }
 
+    let debug_apply_eq = if std::env::var_os("RUST_DEBUG_APPLY_TRACE").is_some() {
+        match &typed_funct.exp_desc {
+            ExpressionDesc::Texp_ident(path, _, _) => {
+                let name = path.name();
+                name == "N.eq"
+                    || name == "N.fromArray"
+                    || name == "A.makeBy"
+                    || name == "Ord.compare"
+            }
+            _ => false,
+        }
+    } else {
+        false
+    };
+
     let mut typed_args = Vec::with_capacity(pending_args.len());
-    for pending_arg in pending_args {
+    for (arg_index, pending_arg) in pending_args.into_iter().enumerate() {
         match pending_arg {
             PendingApplyArg::Provided {
                 label,
@@ -5299,6 +5279,21 @@ fn type_application(
                 enforce_optional,
                 skip_post_unify,
             } => {
+                if debug_apply_eq {
+                    let full_loc = tctx.arena.to_location(loc);
+                    let simple_memo = ctx.get_abbrev_memo(ctx.simple_abbrevs_memo());
+                    eprintln!(
+                        "[apply-trace] fn=N.eq loc={}:{} arg_index={} kind=provided label={:?} expected_ty={} unify_ty={} skip_post_unify={} simple={:?}",
+                        full_loc.loc_start.line,
+                        full_loc.loc_start.column(),
+                        arg_index,
+                        label,
+                        ctx.repr(expected_ty).0,
+                        ctx.repr(unify_ty).0,
+                        skip_post_unify,
+                        simple_memo
+                    );
+                }
                 let arg_expected_ty = expected_ty;
                 let force_fresh_local_float =
                     if let crate::parser::ast::ExpressionDesc::Pexp_ident(lid) = &*expr.pexp_desc {
@@ -5323,6 +5318,10 @@ fn type_application(
                 tctx.force_fresh_local_float = previous_force_fresh_local_float;
 
                 let typed_arg = typed_arg_result?;
+                // `type_expect` may type nested functions and temporarily switch
+                // unify_state to an inner body env. Post-argument unification in
+                // OCaml happens in the application env.
+                tctx.set_unify_env(env);
                 // OCaml's type_unknown_args only calls type_expect (no
                 // subsequent unify_exp). Skip the post-unify for that path
                 // to preserve separate physical nodes in the typed tree.
@@ -5362,6 +5361,19 @@ fn type_application(
                 });
             }
             PendingApplyArg::SynthOptionalNone { label, option_ty } => {
+                if debug_apply_eq {
+                    let full_loc = tctx.arena.to_location(loc);
+                    let simple_memo = ctx.get_abbrev_memo(ctx.simple_abbrevs_memo());
+                    eprintln!(
+                        "[apply-trace] fn=N.eq loc={}:{} arg_index={} kind=none label={:?} option_ty={} simple={:?}",
+                        full_loc.loc_start.line,
+                        full_loc.loc_start.column(),
+                        arg_index,
+                        label,
+                        ctx.repr(option_ty).0,
+                        simple_memo
+                    );
+                }
                 let none_loc = tctx.arena.none_loc();
                 let none_expr = Expression::new(
                     ExpressionDesc::Texp_construct(
@@ -5383,6 +5395,18 @@ fn type_application(
                 });
             }
             PendingApplyArg::Omitted { label } => {
+                if debug_apply_eq {
+                    let full_loc = tctx.arena.to_location(loc);
+                    let simple_memo = ctx.get_abbrev_memo(ctx.simple_abbrevs_memo());
+                    eprintln!(
+                        "[apply-trace] fn=N.eq loc={}:{} arg_index={} kind=omitted label={:?} simple={:?}",
+                        full_loc.loc_start.line,
+                        full_loc.loc_start.column(),
+                        arg_index,
+                        label,
+                        simple_memo
+                    );
+                }
                 typed_args.push(ApplyArg {
                     label,
                     expression: None,
@@ -5390,6 +5414,10 @@ fn type_application(
             }
         }
     }
+
+    // Ensure the post-application unifications below run in the current
+    // application env, not a nested env left by the last typed argument.
+    tctx.set_unify_env(env);
 
     // Re-wrap omitted parameters for partial/labeled applications.
     let mut result_ty = current_ty0;
@@ -7694,19 +7722,33 @@ fn type_function(
             }
         }
     }
-    let (mut param_ty, return_ty, _func_ty) = match expected_arrow {
-        Some((param_ty, return_ty)) => {
-            let func_ty = ctx.new_arrow(ctx_label.clone(), param_ty, return_ty, arity_opt);
-            (param_ty, return_ty, func_ty)
-        }
+    let (mut param_ty, return_ty) = match expected_arrow {
+        Some((param_ty, return_ty)) => (param_ty, return_ty),
         _ => {
             let param_ty = ctx.new_var(None);
             let return_ty = ctx.new_var(None);
             let func_ty = ctx.new_arrow(ctx_label.clone(), param_ty, return_ty, arity_opt);
             unify_expression_types(tctx, loc, func_ty, expected_ty, None)?;
-            (param_ty, return_ty, func_ty)
+            (param_ty, return_ty)
         }
     };
+    if std::env::var_os("RUST_DEBUG_TYPE_FUNCTION").is_some() {
+        let full_loc = tctx.arena.to_location(loc);
+        if full_loc.loc_start.line == 254
+            || full_loc.loc_start.line == 255
+            || full_loc.loc_start.line == 269
+        {
+            eprintln!(
+                "[rust-type-function] loc={}:{} label={:?} ty_expected={} ty_arg={} ty_res={}",
+                full_loc.loc_start.line,
+                full_loc.loc_start.column(),
+                ctx_label,
+                ctx.repr(expected_ty).0,
+                ctx.repr(param_ty).0,
+                ctx.repr(return_ty).0
+            );
+        }
+    }
 
     // OCaml typecore.ml:3297-3302: ALWAYS wrap optional params in option.
     // For optional params with defaults, the pattern and default are typed
@@ -7821,8 +7863,42 @@ fn type_function(
     // causes case bodies to get instance(arrow_type) instead of instance(return_ty).
     let saved_generic_constraint = tctx.generic_constraint_body_ty;
     tctx.generic_constraint_body_ty = None;
+    if std::env::var_os("RUST_DEBUG_TYPE_FUNCTION").is_some() {
+        let full_loc = tctx.arena.to_location(loc);
+        if full_loc.loc_start.line == 254
+            || full_loc.loc_start.line == 255
+            || full_loc.loc_start.line == 269
+        {
+            let return_repr = ctx.repr(return_ty);
+            let return_kind = {
+                let desc = ctx.get_desc(return_repr);
+                match &*desc {
+                    TypeDesc::Tconstr { path, .. } => format!("Tconstr({})", path.name()),
+                    TypeDesc::Tarrow { .. } => "Tarrow".to_string(),
+                    TypeDesc::Tvar(_) => "Tvar".to_string(),
+                    TypeDesc::Tlink(t) => format!("Tlink({})", ctx.repr(*t).0),
+                    _ => "other".to_string(),
+                }
+            };
+            eprintln!(
+                "[rust-type-function-body] loc={}:{} body_env_id={} return_ty={} kind={}",
+                full_loc.loc_start.line,
+                full_loc.loc_start.column(),
+                body_env.id(),
+                return_repr.0,
+                return_kind
+            );
+        }
+    }
     let typed_body = type_expect(tctx, &body_env, body, return_ty, None)?;
     tctx.generic_constraint_body_ty = saved_generic_constraint;
+    // Preserve OCaml side effects from body-type expansion under the function
+    // body environment (notably check_abbrev_env env transitions). Avoid this
+    // in active `let rec` groups where eager expansion can over-constrain the
+    // recursive approximation.
+    if tctx.recursive_let_depth == 0 {
+        let _ = crate::types::ctype::expand_head(ctx, &body_env, typed_body.exp_type);
+    }
     let typed_body = wrap_module_unpacks_in_expression(
         tctx,
         &body_env,
@@ -8007,16 +8083,9 @@ fn type_for(
         body_env.add_value(pv.id.clone(), desc);
     }
 
-    // OCaml uses type_statement for body (wraps in begin_def/end_def), and
-    // instance_def(Predef.type_unit) for the for loop result. Each `rue`
-    // creates fresh instances, keeping body and result as separate type nodes.
-    let body_unit_ty = env.type_unit(ctx);
-    ctx.begin_def();
-    let typed_body = type_expect(tctx, &body_env, body, body_unit_ty, None)?;
-    ctx.end_def();
-    // OCaml's type_statement calls expand_head after end_def (see Pexp_sequence).
-    // For Pexp_for, type_statement is called with new_env (body_env).
-    ctx.check_abbrev_env(&body_env);
+    // OCaml uses type_statement for for-loop bodies and instance_def(type_unit)
+    // for the loop expression result.
+    let typed_body = type_statement(tctx, &body_env, body)?;
 
     // OCaml: rue { ... exp_type = instance_def Predef.type_unit; ... }
     // Keep original argument order to preserve Tlink direction.
@@ -11278,11 +11347,29 @@ fn type_let_bindings(
                         tctx,
                         &typing_env,
                         tctx.arena.get_expr(binding.pvb_expr),
-                        *ty,
+                        pat_ty,
                         None,
                     )?
                 }
             };
+            if std::env::var_os("RUST_DEBUG_VAR_LEVELS").is_some() {
+                if let crate::types::typedtree::PatternDesc::Tpat_var(id, _) = &typed_pat.pat_desc {
+                    if matches!(id.name(), "v" | "u") {
+                        let pat_ty = tctx.type_ctx.repr(typed_pat.pat_type);
+                        let pat_level = tctx.type_ctx.get_level(pat_ty);
+                        let exp_ty = tctx.type_ctx.repr(typed_expr.exp_type);
+                        let exp_level = tctx.type_ctx.get_level(exp_ty);
+                        eprintln!(
+                            "[var-level-pre-gen] binding={} pat_ty={} pat_level={} exp_ty={} exp_level={}",
+                            id.name(),
+                            pat_ty.0,
+                            pat_level,
+                            exp_ty.0,
+                            exp_level
+                        );
+                    }
+                }
+            }
             typed_bindings.push(ValueBinding::new(
                 typed_pat,
                 typed_expr,
@@ -11328,6 +11415,21 @@ fn type_let_bindings(
         let mut unpacks: Vec<PatternVariable> = Vec::new();
         for pvars in all_pattern_vars.iter() {
             for pv in pvars {
+                if std::env::var_os("RUST_DEBUG_VAR_LEVELS").is_some()
+                    && matches!(pv.id.name(), "v" | "u")
+                {
+                    let ty = tctx.type_ctx.repr(pv.ty);
+                    let level = tctx.type_ctx.get_level(ty);
+                    let desc = tctx.type_ctx.get_desc(ty);
+                    eprintln!(
+                        "[var-level] binding={} ty_id={} repr={} level={} desc={:?}",
+                        pv.id.name(),
+                        pv.ty.0,
+                        ty.0,
+                        level,
+                        &*desc
+                    );
+                }
                 let desc = ValueDescription {
                     val_type: pv.ty,
                     val_kind: crate::types::ValueKind::ValReg,
@@ -11951,8 +12053,43 @@ impl Env {
 
                 // Resolve the module prefix to get a signature and path.
                 let lid_str = Self::longident_to_string(lid, arena);
-                if let Some((mod_path, sig)) = self.resolve_module_lid(prefix, arena, pers_env, ctx)
-                {
+                let prefix_str = Self::longident_to_string(prefix, arena);
+                let prefix_cache_fragment = match &**prefix {
+                    Longident::Lident(mod_idx) => {
+                        let mod_name = arena.get_string(*mod_idx);
+                        match self.find_module_with_id(mod_name) {
+                            Ok((mod_id, _)) => format!("{}#{}", mod_id.name(), mod_id.stamp()),
+                            Err(_) => mod_name.to_string(),
+                        }
+                    }
+                    _ => prefix_str.clone(),
+                };
+                let module_cache_key = format!("module::{}", prefix_cache_fragment);
+
+                let cached_module = ctx.find_resolved_module_sig(&module_cache_key);
+                let cache_hit = cached_module.is_some();
+                let resolved_module = cached_module.or_else(|| {
+                    let resolved = self.resolve_module_lid(prefix, arena, pers_env, ctx);
+                    if let Some((mod_path, sig)) = &resolved {
+                        ctx.register_resolved_module_sig(
+                            &module_cache_key,
+                            mod_path.clone(),
+                            sig.clone(),
+                        );
+                    }
+                    resolved
+                });
+                if std::env::var_os("RUST_DEBUG_MODULE_CACHE").is_some() && prefix_str == "N" {
+                    eprintln!(
+                        "[module-cache] prefix={} key={} hit={} resolved={}",
+                        prefix_str,
+                        module_cache_key,
+                        cache_hit,
+                        resolved_module.is_some()
+                    );
+                }
+
+                if let Some((mod_path, sig)) = resolved_module {
                     // Search for the value in the signature
                     // Signature lookup must respect shadowing order:
                     // later items in a structure/signature shadow earlier ones.
@@ -12101,11 +12238,18 @@ impl Env {
                         };
                         let needs_copy = apply_subst
                             && (has_type_or_module_defs || resolved_name.is_some() || alias_target.is_some());
-                        let sig = if needs_copy {
+                        let mut sig = if needs_copy {
                             copy_lookup_signature_for_subst(&sig, ctx)
                         } else {
                             sig
                         };
+                        if matches!(
+                            &md.md_type,
+                            crate::types::decl::ModuleType::MtyAlias(..)
+                                | crate::types::decl::ModuleType::MtyIdent(..)
+                        ) {
+                            sig = strengthen_signature_for_module_access_path(ctx, &path, &sig);
+                        }
                         if apply_subst {
                             if let Some(ref old_name) = resolved_name {
                                 crate::cmi::persistent_env::rewrite_module_prefix_in_sig(
@@ -12124,6 +12268,21 @@ impl Env {
                                 crate::cmi::persistent_env::rewrite_sig_by_path_prefix(
                                     &sig, target, &path, ctx,
                                 );
+                            }
+                        }
+                        if std::env::var_os("RUST_DEBUG_SIG_N_T").is_some() && path.name() == "N" {
+                            for item in &sig {
+                                if let crate::types::decl::SignatureItem::SigType(id, decl, _) = item
+                                {
+                                    if id.name() == "t" {
+                                        eprintln!(
+                                            "[sig-n-t] path={} manifest={} params={}",
+                                            path.name(),
+                                            decl.type_manifest.is_some(),
+                                            decl.type_params.len()
+                                        );
+                                    }
+                                }
                             }
                         }
                         return Some((path, sig));
@@ -12158,11 +12317,20 @@ impl Env {
                                     // resolved module name to the access path.
                                     // E.g., Belt.Array aliases Belt_Array, so rewrite
                                     // Pdot(Pident("Belt_Array"), X) → Pdot(sub_path, X)
-                                    let sig = if apply_subst {
+                                    let mut sig = if apply_subst {
                                         copy_lookup_signature_for_subst(&sig, ctx)
                                     } else {
                                         sig
                                     };
+                                    if matches!(
+                                        &sub_md.md_type,
+                                        crate::types::decl::ModuleType::MtyAlias(..)
+                                            | crate::types::decl::ModuleType::MtyIdent(..)
+                                    ) {
+                                        sig = strengthen_signature_for_module_access_path(
+                                            ctx, &sub_path, &sig,
+                                        );
+                                    }
                                     if apply_subst {
                                         if let Some(ref old_name) = resolved_name {
                                             crate::cmi::persistent_env::rewrite_module_prefix_in_sig(
@@ -12172,6 +12340,27 @@ impl Env {
                                         crate::cmi::persistent_env::substitute_type_paths_in_sig(
                                             &sig, &sub_path, ctx,
                                         );
+                                    }
+                                    if std::env::var_os("RUST_DEBUG_SIG_N_T").is_some()
+                                        && sub_path.name() == "N"
+                                    {
+                                        for item in &sig {
+                                            if let crate::types::decl::SignatureItem::SigType(
+                                                id,
+                                                decl,
+                                                _,
+                                            ) = item
+                                            {
+                                                if id.name() == "t" {
+                                                    eprintln!(
+                                                        "[sig-n-t] path={} manifest={} params={}",
+                                                        sub_path.name(),
+                                                        decl.type_manifest.is_some(),
+                                                        decl.type_params.len()
+                                                    );
+                                                }
+                                            }
+                                        }
                                     }
                                     return Some((sub_path, sig));
                                 }
@@ -13298,6 +13487,59 @@ fn lookup_constructor_by_expected_type<'b>(
     None
 }
 
+fn strengthen_type_decl_for_module_access_path<'a>(
+    ctx: &'a crate::types::context::TypeContext<'a>,
+    module_access_path: &Path,
+    id: &Ident,
+    decl: &crate::types::decl::TypeDeclaration,
+) -> crate::types::decl::TypeDeclaration {
+    // Match OCaml mtype.ml strengthen_sig:
+    // keep existing manifests for public types and private record/variant
+    // types; otherwise attach a self-manifest alias for this access path.
+    let keep_manifest = matches!(
+        (&decl.type_manifest, decl.type_private, &decl.type_kind),
+        (Some(_), crate::types::PrivateFlag::Public, _)
+            | (
+                Some(_),
+                crate::types::PrivateFlag::Private,
+                crate::types::TypeKind::TypeRecord(..) | crate::types::TypeKind::TypeVariant(..),
+            )
+    );
+
+    if keep_manifest {
+        return decl.clone();
+    }
+
+    let mut strengthened = decl.clone();
+    let manifest_path = Path::pdot(module_access_path.clone(), id.name());
+    let manifest = ctx.new_generic_constr(manifest_path, decl.type_params.clone());
+    strengthened.type_manifest = Some(manifest);
+    if matches!(decl.type_kind, crate::types::TypeKind::TypeAbstract) {
+        strengthened.type_private = crate::types::PrivateFlag::Public;
+    }
+    strengthened
+}
+
+fn strengthen_signature_for_module_access_path<'a>(
+    ctx: &'a crate::types::context::TypeContext<'a>,
+    module_access_path: &Path,
+    sig_items: &[crate::types::decl::SignatureItem],
+) -> crate::types::decl::Signature {
+    sig_items
+        .iter()
+        .map(|item| match item {
+            crate::types::decl::SignatureItem::SigType(id, decl, rec_status) => {
+                crate::types::decl::SignatureItem::SigType(
+                    id.clone(),
+                    strengthen_type_decl_for_module_access_path(ctx, module_access_path, id, decl),
+                    *rec_status,
+                )
+            }
+            _ => item.clone(),
+        })
+        .collect()
+}
+
 fn resolve_module_signature_for_path<'a>(
     module_path: &Path,
     env: &Env,
@@ -13320,7 +13562,14 @@ fn resolve_module_signature_for_path<'a>(
                     .md_path
                     .clone()
                     .unwrap_or_else(|| Path::pident(id.clone()));
-                let sig = copy_lookup_signature_for_subst(&sig, ctx);
+                let mut sig = copy_lookup_signature_for_subst(&sig, ctx);
+                if matches!(
+                    &md.md_type,
+                    crate::types::decl::ModuleType::MtyAlias(..)
+                        | crate::types::decl::ModuleType::MtyIdent(..)
+                ) {
+                    sig = strengthen_signature_for_module_access_path(ctx, &access_path, &sig);
+                }
                 if let Some(old_name) = resolved_name {
                     crate::cmi::persistent_env::rewrite_module_prefix_in_sig(
                         &sig,
@@ -13363,7 +13612,15 @@ fn resolve_module_signature_for_path<'a>(
                         let access_path = md.md_path.clone().unwrap_or_else(|| {
                             Path::pdot(resolved_parent_path.clone(), submodule_name.as_str())
                         });
-                        let sig = copy_lookup_signature_for_subst(&sig, ctx);
+                        let mut sig = copy_lookup_signature_for_subst(&sig, ctx);
+                        if matches!(
+                            &md.md_type,
+                            crate::types::decl::ModuleType::MtyAlias(..)
+                                | crate::types::decl::ModuleType::MtyIdent(..)
+                        ) {
+                            sig =
+                                strengthen_signature_for_module_access_path(ctx, &access_path, &sig);
+                        }
                         if let Some(old_name) = resolved_name {
                             crate::cmi::persistent_env::rewrite_module_prefix_in_sig(
                                 &sig,
