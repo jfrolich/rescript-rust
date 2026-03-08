@@ -223,16 +223,22 @@ fn lookup_type_decl_for_path(
     env: &Env,
     path: &Path,
 ) -> Option<super::decl::TypeDeclaration> {
+    let debug_lookup_target = std::env::var("RUST_DEBUG_LOOKUP_TYPE").ok();
+    let debug_lookup_target_match = debug_lookup_target
+        .as_deref()
+        .is_some_and(|target| path.name() == target);
     let debug_lookup = std::env::var_os("RUST_DEBUG_LOOKUP_KEY").is_some()
         && (path.last() == "key"
             || path.last() == "id"
             || path.name() == "Ord.t"
             || path.last() == "compactDisplay"
             || path.last() == "currency"
-            || path.last() == "style");
+            || path.last() == "style")
+        || debug_lookup_target_match;
     let path_name = if debug_lookup { Some(path.name()) } else { None };
     let describe_decl = |decl: &super::decl::TypeDeclaration| {
-        decl.type_manifest
+        let manifest = decl
+            .type_manifest
             .map(|manifest| {
                 let m = ctx.repr(manifest);
                 let d = ctx.get_desc(m);
@@ -252,7 +258,27 @@ fn lookup_type_decl_for_path(
                     TypeDesc::Tpackage { .. } => "manifest=Tpackage".to_string(),
                 }
             })
-            .unwrap_or_else(|| "manifest=None".to_string())
+            .unwrap_or_else(|| "manifest=None".to_string());
+        let variance = decl
+            .type_variance
+            .iter()
+            .enumerate()
+            .map(|(i, v)| {
+                format!(
+                    "{}:(mp={},mn={},mw={},inj={},p={},n={},inv={})",
+                    i,
+                    v.mem(VarianceFlag::MayPos),
+                    v.mem(VarianceFlag::MayNeg),
+                    v.mem(VarianceFlag::MayWeak),
+                    v.mem(VarianceFlag::Inj),
+                    v.mem(VarianceFlag::Pos),
+                    v.mem(VarianceFlag::Neg),
+                    v.mem(VarianceFlag::Inv)
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(",");
+        format!("{manifest} variance=[{variance}]")
     };
 
     if let Some(decl) = env.find_local_constraint(path) {
@@ -4175,14 +4201,10 @@ fn generalize_expansive_rec(
 
     match action {
         Action::Constr { path, args } => {
-            let variances = env
+            let mut variances = env
                 .lookup_type(&path)
                 .map(|decl| decl.type_variance.clone())
                 .unwrap_or_else(|_| {
-                    // Fall back to TypeContext caches for module-qualified types
-                    // (e.g., Stdlib.Lazy.t) that aren't directly in the flat env.
-                    // This matches OCaml's Env.find_type which resolves Pdot paths
-                    // through module hierarchies.
                     if let Path::Pdot(..) = &path {
                         let path_name = path.name();
                         if let Some(decl_ref) = ctx.find_type_decl_by_path(&path_name) {
@@ -4191,6 +4213,55 @@ fn generalize_expansive_rec(
                     }
                     vec![Variance::MAY_INV; args.len()]
                 });
+            if !args.is_empty() && variances.iter().all(|v| *v == Variance::NULL) {
+                if std::env::var_os("RUST_DEBUG_NULL_VARIANCE_FALLBACK").is_some() {
+                    eprintln!(
+                        "[null-variance-fallback] path={} phase=generalize_expansive args={}",
+                        path.name(),
+                        args.len()
+                    );
+                }
+                variances = vec![Variance::MAY_INV; args.len()];
+            }
+            if let Some(target) = std::env::var("RUST_DEBUG_GENERALIZE_PATH").ok() {
+                if path.name() == target {
+                    let arg_levels_before = args
+                        .iter()
+                        .map(|arg| {
+                            let r = ctx.repr(*arg);
+                            format!("{}@{}", r.0, ctx.get_level(r))
+                        })
+                        .collect::<Vec<_>>()
+                        .join(",");
+                    let vars = variances
+                        .iter()
+                        .enumerate()
+                        .map(|(i, v)| {
+                            format!(
+                                "{}:(mp={},mn={},mw={},inj={},p={},n={},inv={})",
+                                i,
+                                v.mem(VarianceFlag::MayPos),
+                                v.mem(VarianceFlag::MayNeg),
+                                v.mem(VarianceFlag::MayWeak),
+                                v.mem(VarianceFlag::Inj),
+                                v.mem(VarianceFlag::Pos),
+                                v.mem(VarianceFlag::Neg),
+                                v.mem(VarianceFlag::Inv)
+                            )
+                        })
+                        .collect::<Vec<_>>()
+                        .join(",");
+                    eprintln!(
+                        "[generalize-path] path={} args={} variances={} var_level={} current_level={} before={}",
+                        path.name(),
+                        args.len(),
+                        vars,
+                        var_level,
+                        ctx.current_level(),
+                        arg_levels_before
+                    );
+                }
+            }
             if std::env::var_os("RUST_DEBUG_GENERALIZE_T1").is_some() && path.head_name() == "t1" {
                 let arg_levels_before = args
                     .iter()
@@ -4452,7 +4523,6 @@ fn compute_variance_rec(
                     .lookup_type(&path)
                     .map(|d| d.type_variance.clone())
                     .unwrap_or_else(|_| {
-                        // Fall back to TypeContext caches for module-qualified types
                         if let Path::Pdot(..) = &path {
                             let path_name = path.name();
                             if let Some(decl_ref) = ctx.find_type_decl_by_path(&path_name) {
@@ -5237,7 +5307,11 @@ pub fn instance_constructor(
         && (cstr.cstr_name == "Node"
             || cstr.cstr_name == "Empty"
             || cstr.cstr_name == "SPlayer"
-            || cstr.cstr_name == "SEnemy")
+            || cstr.cstr_name == "SEnemy"
+            || cstr.cstr_name == "Some"
+            || cstr.cstr_name == "One"
+            || cstr.cstr_name == "Two"
+            || cstr.cstr_name == "Three")
     {
         let res_repr = ctx.repr(ty_res);
         let args = ty_args
@@ -5246,8 +5320,28 @@ pub fn instance_constructor(
                 let r = ctx.repr(*arg);
                 let desc = ctx.get_desc(r);
                 match &*desc {
-                    TypeDesc::Tconstr { path, .. } => {
-                        format!("{}:{}@{}", path.name(), r.0, ctx.get_level(r))
+                    TypeDesc::Tconstr { path, args, .. } => {
+                        let arg_dump = args
+                            .iter()
+                            .map(|a| {
+                                let ar = ctx.repr(*a);
+                                let ad = ctx.get_desc(ar);
+                                match &*ad {
+                                    TypeDesc::Tconstr { path, .. } => {
+                                        format!("{}:{}@{}", path.name(), ar.0, ctx.get_level(ar))
+                                    }
+                                    TypeDesc::Tvar(_) => {
+                                        format!("Tvar:{}@{}", ar.0, ctx.get_level(ar))
+                                    }
+                                    TypeDesc::Tunivar(_) => {
+                                        format!("Tunivar:{}@{}", ar.0, ctx.get_level(ar))
+                                    }
+                                    _ => format!("{}@{}", ar.0, ctx.get_level(ar)),
+                                }
+                            })
+                            .collect::<Vec<_>>()
+                            .join(",");
+                        format!("{}:{}@{}<{}>", path.name(), r.0, ctx.get_level(r), arg_dump)
                     }
                     TypeDesc::Tvar(_) => format!("Tvar:{}@{}", r.0, ctx.get_level(r)),
                     TypeDesc::Tunivar(_) => format!("Tunivar:{}@{}", r.0, ctx.get_level(r)),
@@ -5263,8 +5357,28 @@ pub fn instance_constructor(
                 let r = ctx.repr(*arg);
                 let desc = ctx.get_desc(r);
                 match &*desc {
-                    TypeDesc::Tconstr { path, .. } => {
-                        format!("{}:{}@{}", path.name(), r.0, ctx.get_level(r))
+                    TypeDesc::Tconstr { path, args, .. } => {
+                        let arg_dump = args
+                            .iter()
+                            .map(|a| {
+                                let ar = ctx.repr(*a);
+                                let ad = ctx.get_desc(ar);
+                                match &*ad {
+                                    TypeDesc::Tconstr { path, .. } => {
+                                        format!("{}:{}@{}", path.name(), ar.0, ctx.get_level(ar))
+                                    }
+                                    TypeDesc::Tvar(_) => {
+                                        format!("Tvar:{}@{}", ar.0, ctx.get_level(ar))
+                                    }
+                                    TypeDesc::Tunivar(_) => {
+                                        format!("Tunivar:{}@{}", ar.0, ctx.get_level(ar))
+                                    }
+                                    _ => format!("{}@{}", ar.0, ctx.get_level(ar)),
+                                }
+                            })
+                            .collect::<Vec<_>>()
+                            .join(",");
+                        format!("{}:{}@{}<{}>", path.name(), r.0, ctx.get_level(r), arg_dump)
                     }
                     TypeDesc::Tvar(_) => format!("Tvar:{}@{}", r.0, ctx.get_level(r)),
                     TypeDesc::Tunivar(_) => format!("Tunivar:{}@{}", r.0, ctx.get_level(r)),
@@ -6183,6 +6297,7 @@ fn copy_type_cached(
     cache: &mut CopyCache,
 ) -> TypeExprRef {
     let ty = ctx.repr(ty);
+    let debug_copy_constr = std::env::var_os("RUST_DEBUG_COPY_CONSTR").is_some();
 
     // OCaml Ctype.copy marker precedence:
     // if `more.desc` is temporarily `Tsubst(Ttuple [more'; t])`,
@@ -6255,6 +6370,24 @@ fn copy_type_cached(
     // Determine action based on type level and descriptor.
     let action = {
         let desc = ctx.get_desc(ty);
+        if debug_copy_constr {
+            if let TypeDesc::Tconstr { path, .. } = &*desc {
+                let name = path.name();
+                if name == "ticker"
+                    || name == "Ticker_map.t"
+                    || name == "Belt.List.t"
+                    || name == "list"
+                    || name == "int"
+                {
+                    eprintln!(
+                        "[rust-copy-constr] inspect ty={} level={} name={}",
+                        ty.0,
+                        ctx.get_level(ty),
+                        name
+                    );
+                }
+            }
+        }
 
         if level != GENERIC_LEVEL {
             match &*desc {
@@ -6271,7 +6404,25 @@ fn copy_type_cached(
                 TypeDesc::Tnil => CopyAction::ReturnSelf,
                 // Tconstr: OCaml's copy returns identity for ALL non-generic types.
                 // Match that behavior: return self for all non-generic Tconstr.
-                TypeDesc::Tconstr { .. } => CopyAction::ReturnSelf,
+                TypeDesc::Tconstr { path, .. } => {
+                    if debug_copy_constr {
+                        let name = path.name();
+                        if name == "ticker"
+                            || name == "Ticker_map.t"
+                            || name == "Belt.List.t"
+                            || name == "list"
+                            || name == "int"
+                        {
+                            eprintln!(
+                                "[rust-copy-constr] return-self ty={} level={} name={}",
+                                ty.0,
+                                ctx.get_level(ty),
+                                name
+                            );
+                        }
+                    }
+                    CopyAction::ReturnSelf
+                }
                 TypeDesc::Tlink(target) | TypeDesc::Tsubst(target) => CopyAction::Link(*target),
             }
         } else {
@@ -6287,10 +6438,28 @@ fn copy_type_cached(
                     arity: *arity,
                 },
                 TypeDesc::Ttuple(types) => CopyAction::Tuple(types.clone()),
-                TypeDesc::Tconstr { path, args, .. } => CopyAction::Constr {
-                    path: path.clone(),
-                    args: args.clone(),
-                },
+                TypeDesc::Tconstr { path, args, .. } => {
+                    if debug_copy_constr {
+                        let name = path.name();
+                        if name == "ticker"
+                            || name == "Ticker_map.t"
+                            || name == "Belt.List.t"
+                            || name == "list"
+                            || name == "int"
+                        {
+                            eprintln!(
+                                "[rust-copy-constr] copy-constr ty={} level={} name={}",
+                                ty.0,
+                                ctx.get_level(ty),
+                                name
+                            );
+                        }
+                    }
+                    CopyAction::Constr {
+                        path: path.clone(),
+                        args: args.clone(),
+                    }
+                }
                 TypeDesc::Tobject { fields, name } => CopyAction::Object {
                     fields: *fields,
                     name: name.clone(),
@@ -6399,7 +6568,8 @@ fn copy_type_cached(
                             || path.last() == "component"
                             || full_path_name.as_deref() == Some("Ord.t")
                             || full_path_name.as_deref() == Some("Js_string2.t")
-                            || full_path_name.as_deref() == Some("Js.String2.t"))
+                            || full_path_name.as_deref() == Some("Js.String2.t")
+                            || full_path_name.as_deref() == Some("int"))
                     {
                         full_path_name.clone()
                     } else {

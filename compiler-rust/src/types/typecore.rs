@@ -1046,10 +1046,9 @@ pub fn transl_type(
 }
 
 /// Translate a type with delayed globalization (matching OCaml's
-/// transl_simple_type_delayed). When `globalize` is true, used type
-/// variables are lowered to global_level via new_global_var unification,
-/// which prevents them from being generalized by the caller's
-/// end_def/generalize_structure.
+/// transl_simple_type_delayed). When `globalize` is true, we route used
+/// variables through fresh global variables before linking them in
+/// `type_variables`; this matches typetexp's delayed force path.
 pub fn transl_type_delayed(
     tctx: &mut TypeCheckContext<'_>,
     env: &Env,
@@ -1071,44 +1070,66 @@ pub fn transl_type_delayed(
             .collect();
         for (name, used_ty) in used_vars {
             let ctx = tctx.type_ctx;
-            // When globalize=true, create new_global_var and unify to lower
-            // the used type's level from current_level to global_level.
-            // This matches OCaml globalize_used_variables behavior.
-            let effective_ty = if globalize {
-                let v = ctx.new_global_var(None);
-                let _ = crate::types::unify(ctx, &mut tctx.unify_state, v, used_ty);
-                v
-            } else {
-                used_ty
-            };
-            if let Some(bound_ty) = tctx.type_variables.get(&name).copied() {
+            if globalize {
+                // OCaml typetexp.ml globalize_used_variables:
+                //   v = new_global_var (); unify v used_ty;
+                // and then unify v with either an existing table binding or a
+                // fresh table entry (v2 = new_global_var ()).
+                let lowered_ty = {
+                    let v = ctx.new_global_var(None);
+                    let _ = crate::types::unify(ctx, &mut tctx.unify_state, v, used_ty);
+                    v
+                };
+                if let Some(bound_ty) = tctx.type_variables.get(&name).copied() {
+                    if std::env::var_os("RUST_DEBUG_TYPE_VAR_GLOBALIZE").is_some()
+                        && (name == "key" || name == "id" || name == "self" || name == "a")
+                    {
+                        let used_repr = ctx.repr(lowered_ty);
+                        let bound_repr = ctx.repr(bound_ty);
+                        eprintln!(
+                            "[type-var-globalize] name={} used={} bound={} globalize={}",
+                            name, used_repr.0, bound_repr.0, globalize
+                        );
+                    }
+                    let _ = crate::types::unify(ctx, &mut tctx.unify_state, lowered_ty, bound_ty);
+                } else {
+                    let bound_ty = ctx.new_global_var(None);
+                    if std::env::var_os("RUST_DEBUG_TYPE_VAR_GLOBALIZE").is_some()
+                        && (name == "key" || name == "id" || name == "self" || name == "a")
+                    {
+                        let used_repr = ctx.repr(lowered_ty);
+                        let bound_repr = ctx.repr(bound_ty);
+                        eprintln!(
+                            "[type-var-globalize] name={} used={} bound={} globalize={}",
+                            name, used_repr.0, bound_repr.0, globalize
+                        );
+                    }
+                    let _ = crate::types::unify(ctx, &mut tctx.unify_state, lowered_ty, bound_ty);
+                    tctx.type_variables.insert(name, bound_ty);
+                }
+            } else if let Some(bound_ty) = tctx.type_variables.get(&name).copied() {
                 if std::env::var_os("RUST_DEBUG_TYPE_VAR_GLOBALIZE").is_some()
-                    && (name == "key" || name == "id")
+                    && (name == "key" || name == "id" || name == "self" || name == "a")
                 {
-                    let used_repr = ctx.repr(effective_ty);
+                    let used_repr = ctx.repr(used_ty);
                     let bound_repr = ctx.repr(bound_ty);
                     eprintln!(
                         "[type-var-globalize] name={} used={} bound={} globalize={}",
                         name, used_repr.0, bound_repr.0, globalize
                     );
                 }
-                let _ = crate::types::unify(
-                    ctx,
-                    &mut tctx.unify_state,
-                    effective_ty,
-                    bound_ty,
-                );
+                let _ = crate::types::unify(ctx, &mut tctx.unify_state, used_ty, bound_ty);
             } else {
                 if std::env::var_os("RUST_DEBUG_TYPE_VAR_GLOBALIZE").is_some()
-                    && (name == "key" || name == "id")
+                    && (name == "key" || name == "id" || name == "self" || name == "a")
                 {
-                    let used_repr = ctx.repr(effective_ty);
+                    let used_repr = ctx.repr(used_ty);
                     eprintln!(
                         "[type-var-globalize] name={} used={} bound=<none> globalize={}",
                         name, used_repr.0, globalize
                     );
                 }
-                tctx.type_variables.insert(name, effective_ty);
+                tctx.type_variables.insert(name, used_ty);
             }
         }
     }
@@ -3096,6 +3117,38 @@ fn copy_case_type(
     }
 }
 
+fn refine_record_as_type_label(
+    tctx: &mut TypeCheckContext<'_>,
+    env: &Env,
+    whole_pat: &Pattern,
+    record_ty: TypeExprRef,
+    label_desc: &crate::types::LabelDescription,
+    field_pat: Option<&Pattern>,
+) -> TypeCoreResult<()> {
+    let ctx = tctx.type_ctx;
+    let (_poly_vars, ty_arg, ty_res) = crate::types::ctype::instance_label(ctx, false, label_desc);
+    unify_pattern_types(tctx, whole_pat.pat_loc, record_ty, ty_res)?;
+
+    let lbl_arg_repr = ctx.repr(label_desc.lbl_arg);
+    let lbl_arg_desc = ctx.get_desc(lbl_arg_repr);
+    let arg_is_poly = matches!(&*lbl_arg_desc, TypeDesc::Tpoly { .. });
+    drop(lbl_arg_desc);
+
+    let refinable = label_desc.lbl_mut == crate::types::asttypes::MutableFlag::Immutable
+        && field_pat.is_some()
+        && !arg_is_poly;
+    if refinable {
+        let field_pat = field_pat.unwrap();
+        let field_as_ty = build_as_type(tctx, env, field_pat)?;
+        unify_pattern_types(tctx, field_pat.pat_loc, field_as_ty, ty_arg)?;
+    } else {
+        let (_poly_vars2, ty_arg2, ty_res2) = crate::types::ctype::instance_label(ctx, false, label_desc);
+        unify_pattern_types(tctx, whole_pat.pat_loc, ty_arg, ty_arg2)?;
+        unify_pattern_types(tctx, whole_pat.pat_loc, record_ty, ty_res2)?;
+    }
+    Ok(())
+}
+
 /// Build the type for an as-pattern.
 fn build_as_type(
     tctx: &mut TypeCheckContext<'_>,
@@ -3129,6 +3182,84 @@ fn build_as_type(
                     unify_pattern_types(tctx, arg_pat.pat_loc, *arg_as_ty, *inst_arg_ty)?;
                 }
                 Ok(ty_res)
+            }
+        }
+        PatternDesc::Tpat_record(fields, _closed) => {
+            let first_label = fields.first().map(|(_, lbl, _, _)| lbl);
+            if first_label
+                .is_some_and(|lbl| lbl.lbl_private == crate::types::PrivateFlag::Private)
+            {
+                Ok(pat.pat_type)
+            } else {
+                // OCaml build_as_type for records creates a fresh record type variable,
+                // then refines it through each label's instantiated arg/res types.
+                let ty = ctx.new_var(None);
+                let present_fields_by_pos: std::collections::HashMap<i32, &Pattern> = fields
+                    .iter()
+                    .map(|(_lid, label_desc, field_pat, _optional)| (label_desc.lbl_pos, field_pat))
+                    .collect();
+                let present_labels_by_name: std::collections::HashMap<String, &crate::types::LabelDescription> =
+                    fields
+                        .iter()
+                        .map(|(_lid, label_desc, _field_pat, _optional)| {
+                            (label_desc.lbl_name.clone(), label_desc)
+                        })
+                        .collect();
+
+                let all_labels = get_record_labels(ctx, env, &mut tctx.persistent_env, pat.pat_type)
+                    .or_else(|| {
+                        first_label.and_then(|lbl| {
+                            get_record_labels(ctx, env, &mut tctx.persistent_env, lbl.lbl_res)
+                        })
+                    });
+
+                if let Some(label_decls) = all_labels {
+                    for (idx, label_decl) in label_decls.iter().enumerate() {
+                        let label_name = label_decl.ld_id.name().to_string();
+                        let env_label = disambiguate_label(
+                            &label_name,
+                            ty,
+                            env,
+                            &mut tctx.persistent_env,
+                            ctx,
+                        )
+                        .or_else(|| present_labels_by_name.get(&label_name).map(|lbl| (*lbl).clone()));
+
+                        if let Some(env_label) = env_label {
+                            let field_pat = present_fields_by_pos.get(&env_label.lbl_pos).copied();
+                            refine_record_as_type_label(tctx, env, pat, ty, &env_label, field_pat)?;
+                        } else if let Some(field_pat) = present_fields_by_pos.get(&(idx as i32)).copied() {
+                            // Fallback to declaration types when full label env lookup is unavailable.
+                            let fallback_label = crate::types::LabelDescription {
+                                lbl_name: label_name,
+                                lbl_res: ty,
+                                lbl_arg: crate::types::instance(ctx, label_decl.ld_type),
+                                lbl_mut: label_decl.ld_mutable.clone(),
+                                lbl_optional: label_decl.ld_optional,
+                                lbl_pos: idx as i32,
+                                lbl_all: crate::types::LabelArrayRef(0),
+                                lbl_repres: crate::types::RecordRepresentation::RecordRegular,
+                                lbl_private: crate::types::PrivateFlag::Public,
+                                lbl_loc: label_decl.ld_loc.clone(),
+                                lbl_attributes: label_decl.ld_attributes.clone(),
+                            };
+                            refine_record_as_type_label(
+                                tctx,
+                                env,
+                                pat,
+                                ty,
+                                &fallback_label,
+                                Some(field_pat),
+                            )?;
+                        }
+                    }
+                } else {
+                    for (_lid, label_desc, _field_pat, _optional) in fields.iter() {
+                        let field_pat = present_fields_by_pos.get(&label_desc.lbl_pos).copied();
+                        refine_record_as_type_label(tctx, env, pat, ty, label_desc, field_pat)?;
+                    }
+                }
+                Ok(ty)
             }
         }
         PatternDesc::Tpat_variant(label, opt_arg, _) => {
@@ -3592,19 +3723,7 @@ fn type_pattern_constraint(
     // begin_def; transl_simple_type_delayed; end_def; generalize_structure;
     // then use two independent instances (constraint ty and inner-pattern ty).
     ctx.begin_def();
-    let (typed_ctype, ctype_ty) = transl_type(tctx, env, core_type)?;
-    // Match OCaml Typetexp.globalize_used_variables effect for delayed pattern
-    // constraints: names introduced in the constrained pattern should be
-    // available to later constraints in the same function body.
-    let mut pattern_type_vars = HashMap::new();
-    collect_named_type_vars_from_core_type(&typed_ctype, &mut pattern_type_vars);
-    for (name, ty) in pattern_type_vars {
-        if let Some(existing) = tctx.type_variables.get(&name).copied() {
-            let _ = crate::types::unify(ctx, &mut tctx.unify_state, ty, existing);
-        } else {
-            tctx.type_variables.insert(name, ty);
-        }
-    }
+    let (typed_ctype, ctype_ty) = transl_type_delayed(tctx, env, core_type, true)?;
     ctx.end_def();
     let var_level = ctx.current_level();
     crate::types::generalize_structure(ctx, var_level, ctype_ty);
@@ -3683,7 +3802,7 @@ fn type_pattern_constraint_poly_var(
     let lloc = inner_pat.ppat_loc;
 
     // OCaml: let cty, force = Typetexp.transl_simple_type_delayed !env sty in
-    let (typed_ctype, ctype_ty) = transl_type(tctx, env, core_type)?;
+    let (typed_ctype, ctype_ty) = transl_type_delayed(tctx, env, core_type, true)?;
 
     // OCaml: unify_pat_types lloc !env ty expected_ty
     unify_pattern_types(tctx, lloc, ctype_ty, expected_ty)?;
@@ -3952,6 +4071,8 @@ pub fn type_expect<'a>(
                     || path_name == "img"
                     || path_name == "empty"
                     || path_name == "Js.Undefined.empty"
+                    || path_name == "f"
+                    || path_name == "v"
                     || path_name == "add"
                     || path_name == "Js.String2.substrAtMost"
                     || path_name == "Js.String2.lastIndexOfFrom"
@@ -4035,6 +4156,7 @@ pub fn type_expect<'a>(
                         );
                         if path_name == "Js.String2.substrAtMost"
                             || path_name == "Js.String2.lastIndexOfFrom"
+                            || path_name == "f"
                         {
                             let mut chain = vec![format!("arg:{}@{}", arg_r.0, ctx.get_level(arg_r))];
                             let mut cursor = ret_r;
@@ -4108,6 +4230,7 @@ pub fn type_expect<'a>(
                         );
                         if path_name == "Js.String2.substrAtMost"
                             || path_name == "Js.String2.lastIndexOfFrom"
+                            || path_name == "f"
                         {
                             let mut chain = vec![format!("arg:{}@{}", arg_r.0, ctx.get_level(arg_r))];
                             let mut cursor = ret_r;
@@ -5589,47 +5712,18 @@ fn type_application(
     let ctx = tctx.type_ctx;
     let total_app = !partial;
 
-    // Type check the function
+    // Match OCaml Pexp_apply staging:
+    //   begin_def (); type_exp funct; let ty = instance funct.exp_type; end_def ();
+    //   lower_args env [] ty;
+    //   begin_def (); ... type_application/translate_unified_ops ...; end_def ();
+    ctx.begin_def();
     let funct_ty = ctx.new_var(None);
     let typed_funct = type_expect(tctx, env, funct, funct_ty, None)?;
-    let has_local_recursive_second_arg = {
-        let funct_ty_repr = ctx.repr(typed_funct.exp_type);
-        if let Some((first_label, first_arg_ty, first_ret_ty)) =
-            crate::types::ctype::split_arrow_with_label(ctx, funct_ty_repr)
-        {
-            if !matches!(first_label, crate::types::ArgLabel::Nolabel) {
-                false
-            } else if let Some((second_label, second_arg_ty, _)) =
-                crate::types::ctype::split_arrow_with_label(ctx, ctx.repr(first_ret_ty))
-            {
-                if !matches!(second_label, crate::types::ArgLabel::Nolabel) {
-                    false
-                } else {
-                    let first_arg_ty_repr = ctx.repr(first_arg_ty);
-                    match &*ctx.get_desc(ctx.repr(second_arg_ty)) {
-                        TypeDesc::Tconstr { path, args, .. } => {
-                            matches!(path, Path::Pident(id) if !id.is_persistent())
-                                && args.iter().any(|arg| ctx.repr(*arg) == first_arg_ty_repr)
-                        }
-                        _ => false,
-                    }
-                }
-            } else {
-                false
-            }
-        } else {
-            false
-        }
-    };
-    let force_instance_for_generic_local_ident = match &typed_funct.exp_desc {
-        ExpressionDesc::Texp_ident(path, _, desc) => {
-            matches!(path, Path::Pident(id) if !id.is_persistent())
-                && ctx.get_level(ctx.repr(desc.val_type)) == crate::types::GENERIC_LEVEL
-                && ctx.get_level(ctx.repr(typed_funct.exp_type)) != crate::types::GENERIC_LEVEL
-                && has_local_recursive_second_arg
-        }
-        _ => false,
-    };
+    let lowered_ty = crate::types::instance(ctx, typed_funct.exp_type);
+    ctx.end_def();
+    crate::types::ctype::lower_args(ctx, env, lowered_ty);
+
+    ctx.begin_def();
 
     // Try unified ops dispatch first (matching OCaml's translate_unified_ops)
     if let Some(result) = translate_unified_ops(
@@ -5643,41 +5737,15 @@ fn type_application(
         context.clone(),
         attributes,
     ) {
+        ctx.end_def();
         return result;
     }
 
     // Match OCaml's use of expand_head when deciding application behavior.
     let mut current_ty = typed_funct.exp_type;
-    // OCaml runs lower_args on `instance env funct.exp_type` in the Pexp_apply
-    // caller before `type_application`. Since OCaml instance() is identity for
-    // non-generic roots, mirror that here so lower_args side effects apply to
-    // the same graph in non-generic cases.
-    let lowered_ty = if force_instance_for_generic_local_ident {
-        crate::types::instance(ctx, typed_funct.exp_type)
-    } else {
-        let funct_ty_repr = ctx.repr(typed_funct.exp_type);
-        if ctx.get_level(funct_ty_repr) != crate::types::GENERIC_LEVEL {
-            typed_funct.exp_type
-        } else {
-            crate::types::instance(ctx, typed_funct.exp_type)
-        }
-    };
-    crate::types::ctype::lower_args(ctx, env, lowered_ty);
     // OCaml typecore.ml:
     //   type_args ... ~ty_fun:funct.exp_type (instance env funct.exp_type)
-    // The `instance` call above is evaluated after `lower_args` in Pexp_apply,
-    // so keep that ordering here to preserve abbreviation-sharing side effects.
-    // Ctype.instance returns the original node for non-generic roots.
-    let mut current_ty0 = if force_instance_for_generic_local_ident {
-        crate::types::instance(ctx, typed_funct.exp_type)
-    } else {
-        let funct_ty_repr = ctx.repr(typed_funct.exp_type);
-        if ctx.get_level(funct_ty_repr) != crate::types::GENERIC_LEVEL {
-            typed_funct.exp_type
-        } else {
-            crate::types::instance(ctx, typed_funct.exp_type)
-        }
-    };
+    let mut current_ty0 = crate::types::instance(ctx, typed_funct.exp_type);
     let expanded_funct_ty = crate::types::ctype::expand_head(ctx, env, current_ty);
 
     // force_tvar only applies to total applications in OCaml.
@@ -5924,49 +5992,6 @@ fn type_application(
         }
     }
 
-    // OCaml parity: when a repeated local identifier is already linked to a
-    // non-generic float before argument typing begins, each occurrence should
-    // instantiate to a fresh float node at this application site.
-    let mut repeated_local_ident_counts: HashMap<String, usize> = HashMap::new();
-    for pending_arg in &pending_args {
-        if let PendingApplyArg::Provided { expr, .. } = pending_arg {
-            if let crate::parser::ast::ExpressionDesc::Pexp_ident(lid) = &*expr.pexp_desc {
-                if let Longident::Lident(idx) = tctx.arena.get_longident(lid.txt) {
-                    let name = tctx.arena.get_string(*idx).to_string();
-                    *repeated_local_ident_counts.entry(name).or_insert(0) += 1;
-                }
-            }
-        }
-    }
-    let mut fresh_local_float_idents: HashSet<String> = HashSet::new();
-    for (name, count) in repeated_local_ident_counts {
-        if count <= 1 {
-            continue;
-        }
-        if let Ok((_id, desc)) = env.find_value_with_id(&name) {
-            let raw_ty = desc.val_type;
-            let raw_is_link = {
-                let raw_desc = ctx.get_desc(raw_ty);
-                matches!(&*raw_desc, TypeDesc::Tlink(_) | TypeDesc::Tsubst(_))
-            };
-            if !raw_is_link {
-                continue;
-            }
-
-            let source_ty = ctx.repr(raw_ty);
-            let source_desc = ctx.get_desc(source_ty);
-            if matches!(
-                &*source_desc,
-                TypeDesc::Tconstr { path, args, .. }
-                    if args.is_empty()
-                        && path.head_name() == "float"
-                        && ctx.get_level(source_ty) != crate::types::GENERIC_LEVEL
-            ) {
-                fresh_local_float_idents.insert(name.clone());
-            }
-        }
-    }
-
     let debug_apply_name = match &typed_funct.exp_desc {
         ExpressionDesc::Texp_ident(path, _, _) => Some(path.name()),
         _ => None,
@@ -5984,6 +6009,32 @@ fn type_application(
                     )
             }
     };
+    let summarize_apply_ty = |ty: TypeExprRef| -> String {
+        let ty = ctx.repr(ty);
+        let level = ctx.get_level(ty);
+        let desc = ctx.get_desc(ty);
+        match &*desc {
+            TypeDesc::Tarrow { arg, ret, .. } => format!(
+                "arrow#{}@{}({}->{})",
+                ty.0,
+                level,
+                ctx.repr(arg.typ).0,
+                ctx.repr(*ret).0
+            ),
+            TypeDesc::Tconstr { path, args, .. } => {
+                let args = args
+                    .iter()
+                    .map(|a| ctx.repr(*a).0.to_string())
+                    .collect::<Vec<_>>()
+                    .join(",");
+                format!("{}#{}@{}({})", path.name(), ty.0, level, args)
+            }
+            TypeDesc::Tvar(_) => format!("tvar#{}@{}", ty.0, level),
+            TypeDesc::Tlink(t) => format!("tlink#{}@{}->{}", ty.0, level, ctx.repr(*t).0),
+            TypeDesc::Tsubst(t) => format!("tsubst#{}@{}->{}", ty.0, level, ctx.repr(*t).0),
+            _ => format!("other#{}@{}", ty.0, level),
+        }
+    };
 
     let mut typed_args = Vec::with_capacity(pending_args.len());
     for (arg_index, pending_arg) in pending_args.into_iter().enumerate() {
@@ -6000,7 +6051,7 @@ fn type_application(
                     let full_loc = tctx.arena.to_location(loc);
                     let simple_memo = ctx.get_abbrev_memo(ctx.simple_abbrevs_memo());
                     eprintln!(
-                        "[apply-trace] fn={} loc={}:{} arg_index={} kind=provided label={:?} expected_ty={} expected_repr={} unify_ty={} unify_repr={} skip_post_unify={} has_local_constraints={} unify_env_has_local_constraints={} simple={:?}",
+                        "[apply-trace] fn={} loc={}:{} arg_index={} kind=provided label={:?} expected_ty={} expected_repr={} unify_ty={} unify_repr={} expected_desc={} unify_desc={} skip_post_unify={} has_local_constraints={} unify_env_has_local_constraints={} simple={:?}",
                         debug_apply_name.as_deref().unwrap_or("<non-ident>"),
                         full_loc.loc_start.line,
                         full_loc.loc_start.column(),
@@ -6010,6 +6061,8 @@ fn type_application(
                         ctx.repr(expected_ty).0,
                         unify_ty.0,
                         ctx.repr(unify_ty).0,
+                        summarize_apply_ty(expected_ty),
+                        summarize_apply_ty(unify_ty),
                         skip_post_unify,
                         env.has_local_constraints(),
                         tctx.unify_state
@@ -6019,17 +6072,7 @@ fn type_application(
                     );
                 }
                 let arg_expected_ty = expected_ty;
-                let force_fresh_local_float =
-                    if let crate::parser::ast::ExpressionDesc::Pexp_ident(lid) = &*expr.pexp_desc {
-                        if let Longident::Lident(idx) = tctx.arena.get_longident(lid.txt) {
-                            fresh_local_float_idents
-                                .contains(tctx.arena.get_string(*idx))
-                        } else {
-                            false
-                        }
-                    } else {
-                        false
-                    };
+                let force_fresh_local_float = false;
                 let previous_force_fresh_local_float = tctx.force_fresh_local_float;
                 tctx.force_fresh_local_float = force_fresh_local_float;
                 let saved_unify_env = tctx.unify_state.env().cloned();
@@ -6258,6 +6301,7 @@ fn type_application(
             dump_constr("expected", expected_ty);
         }
     }
+    ctx.end_def();
     unify_expression_types(tctx, loc, ctx.new_var(None), typed_funct.exp_type, None)?;
 
     // OCaml: rue { ... exp_type = ty_res; ... }
@@ -6444,10 +6488,19 @@ fn type_match_cases_sequential(
     scrutinee_ty: TypeExprRef,
     generic_scrutinee_ty: TypeExprRef,
     body_ty: TypeExprRef,
+    erase_either: bool,
 ) -> TypeCoreResult<Vec<crate::types::typedtree::Case>> {
     let mut typed_cases = Vec::with_capacity(cases.len());
     for case in cases {
-        typed_cases.push(type_case(tctx, env, case, scrutinee_ty, generic_scrutinee_ty, body_ty)?);
+        typed_cases.push(type_case(
+            tctx,
+            env,
+            case,
+            scrutinee_ty,
+            generic_scrutinee_ty,
+            body_ty,
+            erase_either,
+        )?);
     }
     Ok(typed_cases)
 }
@@ -6466,12 +6519,14 @@ fn type_match_cases_batch_non_gadt<'a>(
     ty_arg: TypeExprRef,
     generic_scrutinee_ty: TypeExprRef,
     body_ty: TypeExprRef,
+    erase_either: bool,
 ) -> TypeCoreResult<Vec<crate::types::typedtree::Case>> {
     if cases.is_empty() {
         return Ok(Vec::new());
     }
 
     let ctx = tctx.type_ctx;
+    let debug_case_496 = std::env::var_os("RUST_DEBUG_CASE_496").is_some();
     let single_var_case = matches!(
         cases,
         [case] if is_simple_variable_pattern(tctx.arena, tctx.arena.get_pat(case.pc_lhs))
@@ -6494,7 +6549,9 @@ fn type_match_cases_batch_non_gadt<'a>(
             // begin_def. This creates fresh copies at the elevated level (L+1).
             // After end_def + generalize, pattern types become GENERIC, preventing
             // body unification from contaminating pattern types.
-            let case_scrutinee_ty = if propagate {
+            let case_scrutinee_ty = if erase_either {
+                instance_for_erase_either_patterns(ctx, ty_arg)
+            } else if propagate {
                 crate::types::instance(ctx, generic_scrutinee_ty)
             } else {
                 crate::types::instance(ctx, ty_arg)
@@ -6508,6 +6565,23 @@ fn type_match_cases_batch_non_gadt<'a>(
                 PatternMode::Normal,
                 &mut state,
             )?;
+            if debug_case_496 {
+                if let PatternDesc::Tpat_variant(tag, arg, _) = &typed_pat.pat_desc {
+                    let pat_line = tctx.arena.to_location(typed_pat.pat_loc).loc_start.line;
+                    if pat_line == 496 && tag == "V" {
+                        let arg_ty = arg
+                            .as_ref()
+                            .map(|arg_pat| ctx.repr(arg_pat.pat_type).0)
+                            .unwrap_or(usize::MAX);
+                        eprintln!(
+                            "[case496 initial] pat=#{} arg=#{} scrutinee=#{}",
+                            ctx.repr(typed_pat.pat_type).0,
+                            arg_ty,
+                            ctx.repr(case_scrutinee_ty).0
+                        );
+                    }
+                }
+            }
 
             let mut case_env = env.clone();
             let mut unpacks: Vec<PatternVariable> = Vec::new();
@@ -6552,28 +6626,88 @@ fn type_match_cases_batch_non_gadt<'a>(
                 // OCaml uses `unify_pat ext_env ...` where each pattern is
                 // unified under its own extended environment.
                 tctx.unify_state.set_env(&pending.case_env);
-                unify_pattern_types(
-                    tctx,
-                    pending.typed_pat.pat_loc,
-                    pending.typed_pat.pat_type,
-                    ty_arg_prime,
-                )?;
+                if erase_either {
+                    unify_pattern_types(
+                        tctx,
+                        pending.typed_pat.pat_loc,
+                        ty_arg_prime,
+                        pending.typed_pat.pat_type,
+                    )?;
+                } else {
+                    unify_pattern_types(
+                        tctx,
+                        pending.typed_pat.pat_loc,
+                        pending.typed_pat.pat_type,
+                        ty_arg_prime,
+                    )?;
+                }
             }
             Ok(())
         })();
         tctx.unify_state.set_env(env);
         unify_pats_result?;
+        if debug_case_496 {
+            for pending in &pending_cases {
+                if let PatternDesc::Tpat_variant(tag, arg, _) = &pending.typed_pat.pat_desc {
+                    let pat_line = tctx.arena.to_location(pending.typed_pat.pat_loc).loc_start.line;
+                    if pat_line == 496 && tag == "V" {
+                        let arg_ty = arg
+                            .as_ref()
+                            .map(|arg_pat| ctx.repr(arg_pat.pat_type).0)
+                            .unwrap_or(usize::MAX);
+                        eprintln!(
+                            "[case496 after-ty_arg-prime] pat=#{} arg=#{} ty_arg_prime=#{}",
+                            ctx.repr(pending.typed_pat.pat_type).0,
+                            arg_ty,
+                            ctx.repr(ty_arg_prime).0
+                        );
+                    }
+                }
+            }
+        }
 
-        if propagate {
-            let propagated_ty = crate::types::instance(ctx, generic_scrutinee_ty);
+        if propagate || erase_either {
+            let propagated_ty = if erase_either {
+                crate::types::instance(ctx, ty_arg)
+            } else {
+                crate::types::instance(ctx, generic_scrutinee_ty)
+            };
             for pending in &pending_cases {
                 tctx.unify_state.set_env(&pending.case_env);
-                let _ = unify_pattern_types(
-                    tctx,
-                    pending.typed_pat.pat_loc,
-                    pending.typed_pat.pat_type,
-                    propagated_ty,
-                );
+                let _ = if erase_either {
+                    unify_pattern_types(
+                        tctx,
+                        pending.typed_pat.pat_loc,
+                        propagated_ty,
+                        pending.typed_pat.pat_type,
+                    )
+                } else {
+                    unify_pattern_types(
+                        tctx,
+                        pending.typed_pat.pat_loc,
+                        pending.typed_pat.pat_type,
+                        propagated_ty,
+                    )
+                };
+            }
+            if debug_case_496 {
+                for pending in &pending_cases {
+                    if let PatternDesc::Tpat_variant(tag, arg, _) = &pending.typed_pat.pat_desc {
+                        let pat_line = tctx.arena.to_location(pending.typed_pat.pat_loc).loc_start.line;
+                        if pat_line == 496 && tag == "V" {
+                            let arg_ty = arg
+                                .as_ref()
+                                .map(|arg_pat| ctx.repr(arg_pat.pat_type).0)
+                                .unwrap_or(usize::MAX);
+                            eprintln!(
+                                "[case496 after-propagate] pat=#{} arg=#{} propagated=#{}",
+                                ctx.repr(pending.typed_pat.pat_type).0,
+                                arg_ty,
+                                ctx.repr(propagated_ty).0
+                            );
+                        }
+                    }
+                }
             }
             tctx.unify_state.set_env(env);
             ctx.end_def();
@@ -6716,16 +6850,29 @@ fn type_match(
         }
     }
 
-    // Match OCaml type_cases: create a separate ty_arg by instancing the
-    // scrutinee type. This separates variant row field merging from the
-    // scrutinee expression's own type node.
-    let ty_arg = crate::types::instance(tctx.type_ctx, typed_scrutinee.exp_type);
-    // Pass the GENERIC scrutinee type so instance() inside begin_def creates
-    // fresh copies at the elevated level, matching OCaml's type_cases flow.
-    let generic_scrutinee_ty = typed_scrutinee.exp_type;
     let has_generalized_value_patterns = val_caselist.iter().any(|case| {
         pattern_contains_generalized_constructor(tctx, env, tctx.arena.get_pat(case.pc_lhs))
     });
+    // Match OCaml type_cases: pass the generalized scrutinee type directly.
+    // OCaml applies correct_levels/instance inside type_cases.
+    let ty_arg = typed_scrutinee.exp_type;
+    // Pass the GENERIC scrutinee type so instance() inside begin_def creates
+    // fresh copies at the elevated level, matching OCaml's type_cases flow.
+    let generic_scrutinee_ty = typed_scrutinee.exp_type;
+    let contains_polyvars = val_caselist.iter().any(|case| {
+        parsed_pattern_contains_polymorphic_variant(tctx.arena, tctx.arena.get_pat(case.pc_lhs))
+    });
+    let erase_either = contains_polyvars && type_contains_variant_either(ctx, ty_arg);
+    let ty_arg = if has_generalized_value_patterns || erase_either {
+        crate::types::ctype::subst_identity_copy(ctx, ty_arg)
+    } else {
+        ty_arg
+    };
+    let ty_res = if has_generalized_value_patterns {
+        crate::types::ctype::subst_identity_copy(ctx, expected_ty)
+    } else {
+        expected_ty
+    };
     let mut duplicated_case_env = None;
     let val_case_env = if has_generalized_value_patterns {
         duplicated_case_env = Some(duplicate_ident_types_for_gadt_cases(tctx, env, &val_caselist));
@@ -6740,7 +6887,8 @@ fn type_match(
             &val_caselist,
             ty_arg,
             generic_scrutinee_ty,
-            expected_ty,
+            ty_res,
+            erase_either,
         )?
     } else {
         match type_match_cases_batch_non_gadt(
@@ -6749,7 +6897,8 @@ fn type_match(
             &val_caselist,
             ty_arg,
             generic_scrutinee_ty,
-            expected_ty,
+            ty_res,
+            erase_either,
         ) {
             Ok(cases) => cases,
             // Preserve existing recovery behavior for non-GADT patterns.
@@ -6760,7 +6909,8 @@ fn type_match(
                     &val_caselist,
                     ty_arg,
                     generic_scrutinee_ty,
-                    expected_ty,
+                    ty_res,
+                    erase_either,
                 )?
             }
             Err(err) => return Err(err),
@@ -6781,11 +6931,6 @@ fn type_match(
         }
     }
 
-    // Merge variant row fields from all case patterns into ty_arg.
-    if typed_val_cases.len() > 1 {
-        merge_variant_row_fields_into_scrutinee(tctx.type_ctx, &typed_val_cases, ty_arg);
-    }
-
     // Type check exception cases against exn type.
     // OCaml routes exception cases through type_cases with Predef.type_exn,
     // which includes the propagation cycle (begin_def/end_def/generalize on
@@ -6797,7 +6942,7 @@ fn type_match(
         let generic_exn_ty = ctx.predef_exn();
         let exn_case_refs: Vec<&crate::parser::ast::Case> = exn_caselist.iter().collect();
         type_match_cases_batch_non_gadt(
-            tctx, env, &exn_case_refs, exn_ty, generic_exn_ty, expected_ty,
+            tctx, env, &exn_case_refs, exn_ty, generic_exn_ty, expected_ty, false,
         )?
     } else {
         Vec::new()
@@ -6834,7 +6979,7 @@ fn type_match(
 
     // Also finalize on the copies (for fields in rows that stayed open after copy+close).
     for case in typed_val_cases.iter_mut() {
-        finalize_variant_in_pattern(tctx, env, &mut case.c_lhs);
+        finalize_variant_in_pattern(tctx, env, &mut case.c_lhs, erase_either);
     }
 
     // Propagate Reither→Rpresent conversions to ty_arg.
@@ -7156,7 +7301,9 @@ fn finalize_variant_in_pattern(
     tctx: &mut TypeCheckContext<'_>,
     env: &Env,
     pat: &mut Pattern,
+    convert_closed_reither: bool,
 ) {
+    let debug_finalize = std::env::var_os("RUST_DEBUG_FINALIZE_VARIANT").is_some();
     match &pat.pat_desc {
         PatternDesc::Tpat_variant(tag, arg, _) => {
             let ctx = tctx.type_ctx;
@@ -7175,25 +7322,62 @@ fn finalize_variant_in_pattern(
                             constant: true,
                             types,
                             ..
-                        } if !row.row_closed && types.is_empty() => {
+                        } if (!row.row_closed || convert_closed_reither) && types.is_empty() => {
                             replacement = Some(crate::types::type_expr::RowField::Rpresent(None));
                         }
                         crate::types::type_expr::RowField::Reither {
                             constant: false,
                             types,
                             ..
-                        } if !row.row_closed && !types.is_empty() => {
+                        } if (!row.row_closed || convert_closed_reither) && !types.is_empty() => {
+                            if debug_finalize && tag == "V" {
+                                let line = tctx.arena.to_location(pat.pat_loc).loc_start.line;
+                                let arg_repr: isize = arg
+                                    .as_ref()
+                                    .map(|arg_pat| ctx.repr(arg_pat.pat_type).0 as isize)
+                                    .unwrap_or(-1);
+                                let type_ids: Vec<usize> =
+                                    types.iter().map(|ty| ctx.repr(*ty).0).collect();
+                                eprintln!(
+                                    "[finalize-variant] line={} row_closed={} convert_closed={} pat_type=#{} arg_type=#{} types={:?}",
+                                    line,
+                                    row.row_closed,
+                                    convert_closed_reither,
+                                    ctx.repr(pat.pat_type).0,
+                                    arg_repr,
+                                    type_ids
+                                );
+                            }
                             let head = types[0];
                             replacement =
                                 Some(crate::types::type_expr::RowField::Rpresent(Some(head)));
-                            if let Some(arg_pat) = arg.as_ref() {
-                                for ty in types {
-                                    let _ = unify_pattern_types(
-                                        tctx,
-                                        arg_pat.pat_loc,
-                                        arg_pat.pat_type,
-                                        ty,
-                                    );
+                            // OCaml finalize_variant only unifies payload pattern types
+                            // for open rows. For closed-row conversion under erase_either,
+                            // keep payload node identity as produced during pattern typing.
+                            if !row.row_closed {
+                                if let Some(arg_pat) = arg.as_ref() {
+                                    for ty in types {
+                                        if debug_finalize && tag == "V" {
+                                            eprintln!(
+                                                "[finalize-variant-unify] before arg=#{} ty=#{}",
+                                                ctx.repr(arg_pat.pat_type).0,
+                                                ctx.repr(ty).0
+                                            );
+                                        }
+                                        let _ = unify_pattern_types(
+                                            tctx,
+                                            arg_pat.pat_loc,
+                                            arg_pat.pat_type,
+                                            ty,
+                                        );
+                                        if debug_finalize && tag == "V" {
+                                            eprintln!(
+                                                "[finalize-variant-unify] after arg=#{} ty=#{}",
+                                                ctx.repr(arg_pat.pat_type).0,
+                                                ctx.repr(ty).0
+                                            );
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -7219,29 +7403,29 @@ fn finalize_variant_in_pattern(
     match &mut pat.pat_desc {
         PatternDesc::Tpat_variant(_, arg, _) => {
             if let Some(arg_pat) = arg {
-                finalize_variant_in_pattern(tctx, env, arg_pat);
+                finalize_variant_in_pattern(tctx, env, arg_pat, convert_closed_reither);
             }
         }
         PatternDesc::Tpat_alias(inner, _, _) => {
-            finalize_variant_in_pattern(tctx, env, inner);
+            finalize_variant_in_pattern(tctx, env, inner, convert_closed_reither);
         }
         PatternDesc::Tpat_or(left, right, _) => {
-            finalize_variant_in_pattern(tctx, env, left);
-            finalize_variant_in_pattern(tctx, env, right);
+            finalize_variant_in_pattern(tctx, env, left, convert_closed_reither);
+            finalize_variant_in_pattern(tctx, env, right, convert_closed_reither);
         }
         PatternDesc::Tpat_tuple(items) | PatternDesc::Tpat_array(items) => {
             for item in items {
-                finalize_variant_in_pattern(tctx, env, item);
+                finalize_variant_in_pattern(tctx, env, item, convert_closed_reither);
             }
         }
         PatternDesc::Tpat_construct(_, _, args) => {
             for arg in args {
-                finalize_variant_in_pattern(tctx, env, arg);
+                finalize_variant_in_pattern(tctx, env, arg, convert_closed_reither);
             }
         }
         PatternDesc::Tpat_record(fields, _) => {
             for (_, _, field_pat, _) in fields {
-                finalize_variant_in_pattern(tctx, env, field_pat);
+                finalize_variant_in_pattern(tctx, env, field_pat, convert_closed_reither);
             }
         }
         PatternDesc::Tpat_any | PatternDesc::Tpat_var(_, _) | PatternDesc::Tpat_constant(_) => {}
@@ -7795,6 +7979,7 @@ fn finalize_variant_rpresent_only(
     env: &Env,
     pat: &mut Pattern,
 ) {
+    let debug_finalize_original = std::env::var_os("RUST_DEBUG_FINALIZE_ORIGINAL").is_some();
     match &pat.pat_desc {
         PatternDesc::Tpat_variant(tag, arg, _) => {
             let ctx = tctx.type_ctx;
@@ -7821,17 +8006,48 @@ fn finalize_variant_rpresent_only(
                             types,
                             ..
                         } if !row.row_closed && !types.is_empty() => {
+                            if debug_finalize_original && tag == "V" {
+                                let line = tctx.arena.to_location(pat.pat_loc).loc_start.line;
+                                let arg_repr: isize = arg
+                                    .as_ref()
+                                    .map(|arg_pat| ctx.repr(arg_pat.pat_type).0 as isize)
+                                    .unwrap_or(-1);
+                                let type_ids: Vec<usize> =
+                                    types.iter().map(|ty| ctx.repr(*ty).0).collect();
+                                eprintln!(
+                                    "[finalize-original] line={} row_closed={} pat_type=#{} arg_type=#{} types={:?}",
+                                    line,
+                                    row.row_closed,
+                                    ctx.repr(pat.pat_type).0,
+                                    arg_repr,
+                                    type_ids
+                                );
+                            }
                             let head = types[0];
                             replacement =
                                 Some(crate::types::type_expr::RowField::Rpresent(Some(head)));
                             if let Some(arg_pat) = arg.as_ref() {
                                 for ty in types {
+                                    if debug_finalize_original && tag == "V" {
+                                        eprintln!(
+                                            "[finalize-original-unify] before arg=#{} ty=#{}",
+                                            ctx.repr(arg_pat.pat_type).0,
+                                            ctx.repr(ty).0
+                                        );
+                                    }
                                     let _ = unify_pattern_types(
                                         tctx,
                                         arg_pat.pat_loc,
                                         arg_pat.pat_type,
                                         ty,
                                     );
+                                    if debug_finalize_original && tag == "V" {
+                                        eprintln!(
+                                            "[finalize-original-unify] after arg=#{} ty=#{}",
+                                            ctx.repr(arg_pat.pat_type).0,
+                                            ctx.repr(ty).0
+                                        );
+                                    }
                                 }
                             }
                         }
@@ -8153,10 +8369,6 @@ fn close_multi_label_variant_rows_in_cases(
         .collect();
     if row_label_orders.is_empty() {
         return;
-    }
-
-    for case in cases.iter_mut() {
-        reorder_multi_label_variant_rows_in_pattern(tctx, env, &mut case.c_lhs, &row_label_orders);
     }
 
     // Match OCaml: close variant rows in-place on the ORIGINAL types (no copy).
@@ -8518,11 +8730,30 @@ fn type_case(
     scrutinee_ty: TypeExprRef,
     generic_scrutinee_ty: TypeExprRef,
     body_ty: TypeExprRef,
+    erase_either: bool,
 ) -> TypeCoreResult<crate::types::typedtree::Case> {
-    match type_case_impl(tctx, env, case, scrutinee_ty, generic_scrutinee_ty, body_ty, false) {
+    match type_case_impl(
+        tctx,
+        env,
+        case,
+        scrutinee_ty,
+        generic_scrutinee_ty,
+        body_ty,
+        erase_either,
+        false,
+    ) {
         Ok(case) => Ok(case),
         Err(TypeCoreError::PatternTypeClash(_)) => {
-            type_case_impl(tctx, env, case, scrutinee_ty, generic_scrutinee_ty, body_ty, true)
+            type_case_impl(
+                tctx,
+                env,
+                case,
+                scrutinee_ty,
+                generic_scrutinee_ty,
+                body_ty,
+                erase_either,
+                true,
+            )
         }
         Err(err) => Err(err),
     }
@@ -8561,13 +8792,138 @@ fn is_simple_variable_pattern(arena: &ParseArena, pat: &ParsedPattern) -> bool {
     }
 }
 
+fn parsed_pattern_contains_polymorphic_variant(arena: &ParseArena, pat: &ParsedPattern) -> bool {
+    match &*pat.ppat_desc {
+        crate::parser::ast::PatternDesc::Ppat_variant(_)
+        | crate::parser::ast::PatternDesc::Ppat_type(_) => true,
+        crate::parser::ast::PatternDesc::Ppat_array(pats)
+        | crate::parser::ast::PatternDesc::Ppat_tuple(pats) => pats
+            .iter()
+            .any(|pat_idx| parsed_pattern_contains_polymorphic_variant(arena, arena.get_pat(*pat_idx))),
+        crate::parser::ast::PatternDesc::Ppat_or(p1, p2) => {
+            parsed_pattern_contains_polymorphic_variant(arena, arena.get_pat(*p1))
+                || parsed_pattern_contains_polymorphic_variant(arena, arena.get_pat(*p2))
+        }
+        crate::parser::ast::PatternDesc::Ppat_construct(_, arg) => arg
+            .as_ref()
+            .is_some_and(|pat_idx| {
+                parsed_pattern_contains_polymorphic_variant(arena, arena.get_pat(*pat_idx))
+            }),
+        crate::parser::ast::PatternDesc::Ppat_record(inner) => inner.0.iter().any(|field| {
+            parsed_pattern_contains_polymorphic_variant(arena, arena.get_pat(field.pat))
+        }),
+        crate::parser::ast::PatternDesc::Ppat_exception(inner)
+        | crate::parser::ast::PatternDesc::Ppat_alias(inner, _)
+        | crate::parser::ast::PatternDesc::Ppat_open(_, inner) => {
+            parsed_pattern_contains_polymorphic_variant(arena, arena.get_pat(*inner))
+        }
+        crate::parser::ast::PatternDesc::Ppat_constraint(inner) => {
+            parsed_pattern_contains_polymorphic_variant(arena, arena.get_pat(inner.0))
+        }
+        crate::parser::ast::PatternDesc::Ppat_any
+        | crate::parser::ast::PatternDesc::Ppat_var(_)
+        | crate::parser::ast::PatternDesc::Ppat_constant(_)
+        | crate::parser::ast::PatternDesc::Ppat_interval(_)
+        | crate::parser::ast::PatternDesc::Ppat_unpack(_)
+        | crate::parser::ast::PatternDesc::Ppat_extension(_) => false,
+    }
+}
+
+fn type_contains_variant_either(ctx: &TypeContext<'_>, ty: TypeExprRef) -> bool {
+    let mut worklist = vec![ctx.repr(ty)];
+    let mut visited = HashSet::new();
+    while let Some(current) = worklist.pop() {
+        let current = ctx.repr(current);
+        if !visited.insert(current) {
+            continue;
+        }
+        if ctx.get_level(current) < crate::types::LOWEST_LEVEL {
+            continue;
+        }
+        let mut children = Vec::new();
+        let desc = ctx.get_desc(current);
+        if let TypeDesc::Tvariant(row) = &*desc {
+            let row = crate::types::btype::row_repr(ctx, row);
+            if !row.row_fixed {
+                for (_, field) in &row.row_fields {
+                    if matches!(
+                        crate::types::btype::row_field_repr(ctx, field),
+                        crate::types::type_expr::RowField::Reither { .. }
+                    ) {
+                        return true;
+                    }
+                }
+            }
+        }
+        drop(desc);
+        crate::types::iter_type_expr(ctx, current, |child| {
+            children.push(child);
+        });
+        worklist.extend(children);
+    }
+    false
+}
+
+/// Match OCaml `instance ~partial:false` behavior in `type_cases` for
+/// polymorphic variant pattern instantiation (`erase_either`): when a copied
+/// variant row is closed, non-fixed, and still has `Reither` fields, reopen
+/// the row and drop those `Reither` fields.
+fn instance_for_erase_either_patterns(ctx: &TypeContext<'_>, ty: TypeExprRef) -> TypeExprRef {
+    let inst = crate::types::instance(ctx, ty);
+    let mut stack = vec![ctx.repr(inst)];
+    let mut visited: HashSet<usize> = HashSet::new();
+
+    while let Some(current) = stack.pop() {
+        let current = ctx.repr(current);
+        if !visited.insert(current.0) {
+            continue;
+        }
+
+        let mut replacement: Option<crate::types::type_expr::RowDesc> = None;
+        let desc = ctx.get_desc(current);
+        if let TypeDesc::Tvariant(row) = &*desc {
+            let mut row = crate::types::btype::row_repr(ctx, row);
+            let has_reither = row.row_fields.iter().any(|(_, field)| {
+                matches!(
+                    crate::types::btype::row_field_repr(ctx, field),
+                    crate::types::type_expr::RowField::Reither { .. }
+                )
+            });
+            if row.row_closed && !row.row_fixed && has_reither {
+                row.row_fields.retain(|(_, field)| {
+                    !matches!(
+                        crate::types::btype::row_field_repr(ctx, field),
+                        crate::types::type_expr::RowField::Reither { .. }
+                    )
+                });
+                row.row_closed = false;
+                row.row_fixed = false;
+                row.row_name = None;
+                replacement = Some(row);
+            }
+        }
+        drop(desc);
+
+        if let Some(row) = replacement {
+            ctx.set_desc(current, TypeDesc::Tvariant(row));
+        }
+
+        crate::types::iter_type_expr(ctx, current, |child| {
+            stack.push(child);
+        });
+    }
+
+    inst
+}
+
 fn type_case_impl(
     tctx: &mut TypeCheckContext<'_>,
     env: &Env,
     case: &crate::parser::ast::Case,
-    _scrutinee_ty: TypeExprRef,
+    scrutinee_ty: TypeExprRef,
     generic_scrutinee_ty: TypeExprRef,
     body_ty: TypeExprRef,
+    erase_either: bool,
     force_case_local_constraints: bool,
 ) -> TypeCoreResult<crate::types::typedtree::Case> {
     let mut case_env = env.clone();
@@ -8603,7 +8959,11 @@ fn type_case_impl(
     // This creates fresh copies at the elevated level (L+1). After end_def +
     // generalize, pattern types become GENERIC, preventing body unification
     // from contaminating pattern types (e.g., string → Js.String.t).
-    let case_scrutinee_ty = crate::types::instance(tctx.type_ctx, generic_scrutinee_ty);
+    let case_scrutinee_ty = if erase_either {
+        instance_for_erase_either_patterns(tctx.type_ctx, scrutinee_ty)
+    } else {
+        crate::types::instance(tctx.type_ctx, generic_scrutinee_ty)
+    };
     let typed_pat_result = type_pattern(
         tctx,
         &case_env,
@@ -8748,7 +9108,7 @@ fn type_try(
     let generic_exn_ty = ctx.predef_exn();
     let handler_refs: Vec<&crate::parser::ast::Case> = handlers.iter().collect();
     let typed_handlers = type_match_cases_batch_non_gadt(
-        tctx, env, &handler_refs, exn_ty, generic_exn_ty, expected_ty,
+        tctx, env, &handler_refs, exn_ty, generic_exn_ty, expected_ty, false,
     )?;
 
     // Keep sharing: use typed_body.exp_type instead of expected_ty
@@ -8831,44 +9191,6 @@ fn type_function(
         _ => None,
     };
     drop(expanded_desc);
-    if expected_arrow.is_none() {
-        let expected_repr = ctx.repr(expected_ty);
-        let expected_desc = ctx.get_desc(expected_repr);
-        let expected_path = match &*expected_desc {
-            TypeDesc::Tconstr { path, .. } => Some(path.clone()),
-            _ => None,
-        };
-        drop(expected_desc);
-        if let Some(path) = expected_path {
-            let mut manifest = env
-                .lookup_type(&path)
-                .ok()
-                .and_then(|decl| decl.type_manifest);
-            if manifest.is_none() {
-                if let Path::Pident(id) = &path {
-                    manifest = ctx
-                        .find_type_decl_by_stamp(id.stamp())
-                        .and_then(|decl| decl.type_manifest);
-                }
-            }
-            if manifest.is_none() {
-                manifest = ctx
-                    .find_type_decl(path.head_name())
-                    .and_then(|decl| decl.type_manifest);
-            }
-            if let Some(manifest) = manifest {
-                let manifest_inst = crate::types::instance(ctx, manifest);
-                let expanded_manifest = crate::types::ctype::expand_head(ctx, env, manifest_inst);
-                let manifest_desc = ctx.get_desc(expanded_manifest);
-                expected_arrow = match &*manifest_desc {
-                    TypeDesc::Tarrow { arg, ret, .. } if arg.lbl == ctx_label => {
-                        Some((arg.typ, *ret))
-                    }
-                    _ => None,
-                };
-            }
-        }
-    }
     let (mut param_ty, return_ty) = match expected_arrow {
         Some((param_ty, return_ty)) => (param_ty, return_ty),
         _ => {
@@ -9103,55 +9425,6 @@ fn type_function(
         ctx,
         ctx.new_generic_arrow(ctx_label, exp_param_ty, return_ty, arity_opt),
     );
-    // OCaml `instance` keeps non-generic children by identity. Our broader
-    // instantiation path may structurally copy them, so re-anchor top-level
-    // function arg/ret nodes when they are non-generic to preserve sharing.
-    let exp_type_repr = ctx.repr(exp_type);
-    let mut anchored_arrow: Option<(
-        crate::types::asttypes::ArgLabel,
-        TypeExprRef,
-        TypeExprRef,
-        crate::types::type_expr::Commutable,
-        Option<i32>,
-    )> = None;
-    {
-        let exp_type_desc = ctx.get_desc(exp_type_repr);
-        if let TypeDesc::Tarrow {
-            arg,
-            ret,
-            commutable,
-            arity,
-        } = &*exp_type_desc
-        {
-            let arg_ty = if ctx.get_level(ctx.repr(exp_param_ty)) != crate::types::GENERIC_LEVEL {
-                exp_param_ty
-            } else {
-                arg.typ
-            };
-            let ret_ty = if ctx.get_level(ctx.repr(return_ty)) != crate::types::GENERIC_LEVEL {
-                return_ty
-            } else {
-                *ret
-            };
-            if arg_ty != arg.typ || ret_ty != *ret {
-                anchored_arrow = Some((arg.lbl.clone(), arg_ty, ret_ty, commutable.clone(), *arity));
-            }
-        }
-    }
-    if let Some((arg_lbl, arg_ty, ret_ty, commutable, arity)) = anchored_arrow {
-        ctx.set_desc(
-            exp_type_repr,
-            TypeDesc::Tarrow {
-                arg: crate::types::type_expr::TypeArg {
-                    lbl: arg_lbl,
-                    typ: arg_ty,
-                },
-                ret: ret_ty,
-                commutable,
-                arity,
-            },
-        );
-    }
     if debug_type_function
         && (debug_loc.loc_start.line <= 220
             || debug_loc.loc_start.line == 254
@@ -9331,7 +9604,6 @@ fn type_construct(
 ) -> TypeCoreResult<Expression> {
     let ctx = tctx.type_ctx;
     let longident = tctx.resolve_lid(lid.txt).clone();
-
     // Look up constructor with disambiguation following OCaml's approach:
     // 1. For module-qualified constructors (Ldot), use direct module lookup
     // 2. For unqualified constructors (Lident), use disambiguation considering expected type
@@ -9386,27 +9658,57 @@ fn type_construct(
         }
     };
 
-    // Instantiate constructor: creates fresh type variables shared between
-    // cstr_res and cstr_args, matching OCaml's Ctype.instance_constructor
-    let (inst_arg_types, result_ty) = crate::types::instance_constructor(ctx, &cstr_desc);
-    // OCaml: unify_exp ~context env texp (instance env ty_expected)
-    // Construct handler instances ty_expected before unifying (unlike tuple/array)
-    let eff_expected = instance_if_generic(ctx, expected_ty);
-    unify_expression_types(tctx, loc, result_ty, eff_expected, None)?;
+    // Match OCaml type_construct:
+    // - optional separate begin_def/generalization around constructor instance
+    // - second instance_list pass producing (ty_res, ty_args0)
+    // - type arguments against ty_args, then unify against ty_args0
+    let separate = env.has_local_constraints();
+    if separate {
+        ctx.begin_def();
+        ctx.begin_def();
+    }
+
+    let (inst_arg_types, result_ty_raw) = crate::types::instance_constructor(ctx, &cstr_desc);
+    let mut result_ty = result_ty_raw;
+    let mut arg_types_for_expect = inst_arg_types;
+
+    if separate {
+        ctx.end_def();
+        let var_level = ctx.current_level();
+        crate::types::generalize_structure(ctx, var_level, result_ty);
+        let result_ty_inst = crate::types::ctype::instance(ctx, result_ty);
+        let expected_inst = crate::types::ctype::instance(ctx, expected_ty);
+        unify_expression_types(tctx, loc, result_ty_inst, expected_inst, None)?;
+        ctx.end_def();
+
+        let var_level = ctx.current_level();
+        for arg_ty in &arg_types_for_expect {
+            crate::types::generalize_structure(ctx, var_level, *arg_ty);
+        }
+        crate::types::generalize_structure(ctx, var_level, result_ty);
+    }
+
+    let mut inst_list = Vec::with_capacity(1 + arg_types_for_expect.len());
+    inst_list.push(result_ty);
+    inst_list.extend(arg_types_for_expect.iter().copied());
+    let mut instanced = crate::types::ctype::instance_list(ctx, &inst_list);
+    result_ty = instanced.remove(0);
+    let arg_types_for_unify = instanced;
+
+    if !separate {
+        let expected_inst = crate::types::ctype::instance(ctx, expected_ty);
+        unify_expression_types(tctx, loc, result_ty, expected_inst, None)?;
+    }
 
     // Type check arguments
-    let typed_args = match (inst_arg_types.as_slice(), arg) {
-        (arg_types, Some(arg_expr)) if arg_types.len() == 1 => {
+    let typed_args = match (arg_types_for_expect.as_slice(), arg_types_for_unify.as_slice(), arg) {
+        (arg_types, unify_types, Some(arg_expr)) if arg_types.len() == 1 && unify_types.len() == 1 => {
             // Single argument
             let typed_arg = type_expect(tctx, env, arg_expr, arg_types[0], None)?;
-            // Match OCaml `type_argument`: after typing against the primary
-            // expected arg type, unify the typed argument expression type with
-            // the constructor argument type so aliases can become the
-            // representative where appropriate.
-            unify_expression_types(tctx, loc, typed_arg.exp_type, arg_types[0], None)?;
+            unify_expression_types(tctx, loc, typed_arg.exp_type, unify_types[0], None)?;
             vec![typed_arg]
         }
-        (arg_types, Some(arg_expr)) if arg_types.len() > 1 => {
+        (arg_types, unify_types, Some(arg_expr)) if arg_types.len() > 1 && arg_types.len() == unify_types.len() => {
             // Multiple arguments - the parser wraps them in a tuple
             let tuple_ty = ctx.new_tuple(arg_types.to_vec());
             let typed_tuple = type_expect(tctx, env, arg_expr, tuple_ty, None)?;
@@ -9415,20 +9717,16 @@ fn type_construct(
                 ExpressionDesc::Texp_tuple(elements) => elements.clone(),
                 _ => vec![typed_tuple], // Fallback if not a tuple
             };
-            // Match OCaml `type_argument`: after typing against the primary
-            // expected arg type, unify each element's exp_type with the
-            // constructor arg type so aliases (e.g. obj_coord) become the
-            // representative through link_type in unify_after_expansion.
-            for (elem, arg_ty) in elements.iter().zip(arg_types.iter()) {
+            for (elem, arg_ty) in elements.iter().zip(unify_types.iter()) {
                 let _ = unify_expression_types(tctx, loc, elem.exp_type, *arg_ty, None);
             }
             elements
         }
-        (arg_types, None) if arg_types.is_empty() => {
+        (arg_types, _unify_types, None) if arg_types.is_empty() => {
             // Constant constructor with no arguments
             vec![]
         }
-        (arg_types, None) => {
+        (arg_types, _unify_types, None) => {
             // Constructor needs arguments but none provided
             let longident = tctx.resolve_lid(lid.txt);
             return Err(TypeCoreError::ConstructorArityMismatch {
@@ -9437,7 +9735,7 @@ fn type_construct(
                 provided: 0,
             });
         }
-        (_, Some(arg_expr)) => {
+        (_arg_types, _unify_types, Some(arg_expr)) => {
             // Inlined record - type check the expression
             let typed_arg = type_expect(tctx, env, arg_expr, ctx.new_var(None), None)?;
             vec![typed_arg]
@@ -9712,6 +10010,25 @@ fn type_record(
     use crate::types::typedtree::RecordLabelDefinition;
 
     let ctx = tctx.type_ctx;
+    let debug_record_c = std::env::var_os("RUST_DEBUG_RECORD_C").is_some();
+    let summarize_ty = |ty: TypeExprRef| -> String {
+        let r = ctx.repr(ty);
+        let desc = ctx.get_desc(r);
+        let head = match &*desc {
+            TypeDesc::Tconstr { path, args, .. } => {
+                let args = args
+                    .iter()
+                    .map(|a| ctx.repr(*a).0.to_string())
+                    .collect::<Vec<_>>()
+                    .join(",");
+                format!("{}({})", path.name(), args)
+            }
+            TypeDesc::Tvar(_) => "Tvar".to_string(),
+            TypeDesc::Tunivar(_) => "Tunivar".to_string(),
+            _ => "other".to_string(),
+        };
+        format!("{}@{}:{}", r.0, ctx.get_level(r), head)
+    };
     // Most callers should protect generic expected types from record typing
     // side effects, but constraint bodies must type against the shared generic
     // node so unification side effects match OCaml.
@@ -9864,6 +10181,19 @@ fn type_record(
             }
             let (poly_vars, ty_arg, ty_res) =
                 crate::types::ctype::instance_label(ctx, true, &env_label);
+            if debug_record_c && env_label.lbl_name == "c" {
+                let full_loc = tctx.arena.to_location(tctx.arena.get_expr(field.expr).pexp_loc);
+                eprintln!(
+                    "[record-c] stage=instance_label loc={}:{} expected={} src_arg={} src_res={} ty_arg={} ty_res={}",
+                    full_loc.loc_start.line,
+                    full_loc.loc_start.column(),
+                    summarize_ty(expected_ty),
+                    summarize_ty(env_label.lbl_arg),
+                    summarize_ty(env_label.lbl_res),
+                    summarize_ty(ty_arg),
+                    summarize_ty(ty_res)
+                );
+            }
             if std::env::var_os("RUST_DEBUG_GPR_4274").is_some()
                 && env_label.lbl_name == "i"
             {
@@ -9909,6 +10239,15 @@ fn type_record(
                 }
             }
             let unify_res = crate::types::unify(ctx, &mut tctx.unify_state, ty_res, expected_ty);
+            if debug_record_c && env_label.lbl_name == "c" {
+                eprintln!(
+                    "[record-c] stage=after-label-unify ok={} expected={} ty_arg={} ty_res={}",
+                    unify_res.is_ok(),
+                    summarize_ty(expected_ty),
+                    summarize_ty(ty_arg),
+                    summarize_ty(ty_res)
+                );
+            }
             if std::env::var_os("RUST_DEBUG_GPR_4274").is_some()
                 && env_label.lbl_name == "i"
             {
@@ -9932,6 +10271,14 @@ fn type_record(
             } else {
                 ty_arg
             };
+            if debug_record_c && env_label.lbl_name == "c" {
+                eprintln!(
+                    "[record-c] stage=field-input expected={} input_ty={} lbl_arg={}",
+                    summarize_ty(expected_ty),
+                    summarize_ty(input_ty),
+                    summarize_ty(ty_arg)
+                );
+            }
 
             (
                 crate::types::LabelDescription {
@@ -9984,6 +10331,13 @@ fn type_record(
             field_input_ty,
             None,
         )?;
+        if debug_record_c && label_desc.lbl_name == "c" {
+            eprintln!(
+                "[record-c] stage=after-type-expect field_input={} typed_expr={}",
+                summarize_ty(field_input_ty),
+                summarize_ty(typed_expr.exp_type)
+            );
+        }
         if std::env::var_os("RUST_DEBUG_GPR_4274").is_some()
             && label_desc.lbl_name == "i"
         {
@@ -10000,7 +10354,23 @@ fn type_record(
         // OCaml `type_argument`: after typing against `ty_expected'`, unify with
         // a fresh `instance` of that type to preserve sharing behavior.
         let field_input_ty_inst = crate::types::ctype::instance(ctx, field_input_ty);
+        if debug_record_c && label_desc.lbl_name == "c" {
+            eprintln!(
+                "[record-c] stage=before-post-unify field_input={} field_input_inst={} typed_expr={}",
+                summarize_ty(field_input_ty),
+                summarize_ty(field_input_ty_inst),
+                summarize_ty(typed_expr.exp_type)
+            );
+        }
         unify_expression_types(tctx, loc, typed_expr.exp_type, field_input_ty_inst, None)?;
+        if debug_record_c && label_desc.lbl_name == "c" {
+            eprintln!(
+                "[record-c] stage=after-post-unify field_input={} field_input_inst={} typed_expr={}",
+                summarize_ty(field_input_ty),
+                summarize_ty(field_input_ty_inst),
+                summarize_ty(typed_expr.exp_type)
+            );
+        }
         if std::env::var_os("RUST_DEBUG_GPR_4274").is_some()
             && label_desc.lbl_name == "i"
         {
@@ -10744,14 +11114,17 @@ fn type_constraint(
 ) -> TypeCoreResult<Expression> {
     let ctx = tctx.type_ctx;
     let debug_constraint_trace = std::env::var_os("RUST_DEBUG_CONSTRAINT_TRACE").is_some();
+    let debug_constraint_trace_all =
+        std::env::var_os("RUST_DEBUG_CONSTRAINT_TRACE_ALL").is_some();
     let debug_loc = if debug_constraint_trace {
         Some(tctx.arena.to_location(loc))
     } else {
         None
     };
-    let should_debug_loc = debug_loc.as_ref().is_some_and(|full_loc| {
-        matches!(full_loc.loc_start.line, 207 | 215 | 223 | 231 | 271 | 301)
-    });
+    let should_debug_loc = debug_constraint_trace_all
+        || debug_loc.as_ref().is_some_and(|full_loc| {
+            matches!(full_loc.loc_start.line, 207 | 215 | 223 | 231 | 271 | 301)
+        });
     let summarize = |ty: TypeExprRef| -> String {
         let ty = ctx.repr(ty);
         let desc = ctx.get_desc(ty);
@@ -11805,7 +12178,12 @@ fn type_letmodule(
     let letmodule_ty = ctx.new_var(None);
 
     // Match OCaml `Pexp_letmodule` level scoping (`begin_def`/`end_def`).
+    // Mirror Typetexp.narrow()/widen() so module typing does not clobber
+    // outer expression type variables (e.g. `'self` in @this callbacks).
+    let narrow_global_level = ctx.increase_global_level();
+    let saved_type_variables = tctx.type_variables.clone();
     ctx.begin_def();
+    let letmodule_def_level = ctx.current_level();
     let scoped_result = (|| -> TypeCoreResult<(
         crate::types::typedtree::ModuleExpr,
         Env,
@@ -12019,10 +12397,35 @@ fn type_letmodule(
         };
         body_env.add_module(mod_id.clone(), md_decl);
 
-        // Match OCaml `Ctype.init_def(Ident.current_time())` after module typing
+        // Match OCaml `Ctype.init_def(Ident.current_time())` + Typetexp.widen()
+        // after module typing
         // and before body typing. type_structure calls init_def per-item which
         // trashes the current_level from our begin_def. Restore it here.
-        ctx.init_def(ctx.current_stamp());
+        if std::env::var_os("RUST_DEBUG_LETMODULE_LEVELS").is_some() {
+            eprintln!(
+                "[letmodule-level] name={} before_init current={} nongen={} stamp={}",
+                mod_name_str,
+                ctx.current_level(),
+                ctx.nongen_level(),
+                ctx.current_stamp()
+            );
+        }
+        // OCaml uses init_def(Ident.current_time()) here, and current_time is
+        // monotonic/increasing. Rust stamp tracking can lag behind nested
+        // begin_def scopes, so never restore below the surrounding letmodule
+        // definition level.
+        let restored_level = std::cmp::max(ctx.current_stamp(), letmodule_def_level);
+        ctx.init_def(restored_level);
+        ctx.restore_global_level(narrow_global_level);
+        tctx.type_variables = saved_type_variables.clone();
+        if std::env::var_os("RUST_DEBUG_LETMODULE_LEVELS").is_some() {
+            eprintln!(
+                "[letmodule-level] name={} after_init current={} nongen={}",
+                mod_name_str,
+                ctx.current_level(),
+                ctx.nongen_level()
+            );
+        }
 
         // Type check the body in the extended environment. Match OCaml let-module
         // scoping by abstracting local module-rooted type paths out of the exposed
@@ -12064,6 +12467,10 @@ fn type_letmodule(
         // OCaml only does unify_var(ty, body.exp_type) after end_def (below).
         Ok((typed_mod, body_env, typed_body, rewritten_ty))
     })();
+    if scoped_result.is_err() {
+        ctx.restore_global_level(narrow_global_level);
+        tctx.type_variables = saved_type_variables;
+    }
     ctx.end_def();
 
     let (typed_mod, body_env, typed_body, rewritten_ty) = scoped_result?;
@@ -13276,7 +13683,10 @@ fn type_let_bindings(
             };
             if std::env::var_os("RUST_DEBUG_VAR_LEVELS").is_some() {
                 if let crate::types::typedtree::PatternDesc::Tpat_var(id, _) = &typed_pat.pat_desc {
-                    if matches!(id.name(), "v" | "u" | "v0" | "v1" | "v3") {
+                    if matches!(
+                        id.name(),
+                        "f" | "v" | "u" | "v0" | "v1" | "v3" | "res" | "initY"
+                    ) {
                         let pat_ty = tctx.type_ctx.repr(typed_pat.pat_type);
                         let pat_level = tctx.type_ctx.get_level(pat_ty);
                         let exp_ty = tctx.type_ctx.repr(typed_expr.exp_type);
@@ -13289,6 +13699,21 @@ fn type_let_bindings(
                             exp_ty.0,
                             exp_level
                         );
+                        let pat_desc = tctx.type_ctx.get_desc(pat_ty);
+                        if let TypeDesc::Ttuple(items) = &*pat_desc {
+                            let parts: Vec<String> = items
+                                .iter()
+                                .map(|item| {
+                                    let r = tctx.type_ctx.repr(*item);
+                                    format!("{}@{}", r.0, tctx.type_ctx.get_level(r))
+                                })
+                                .collect();
+                            eprintln!(
+                                "[var-level-pre-gen] binding={} tuple_items={}",
+                                id.name(),
+                                parts.join(",")
+                            );
+                        }
                     }
                 }
             }
@@ -13327,7 +13752,7 @@ fn type_let_bindings(
         }
         // Then, finalize Reither→Rpresent in still-open rows (OCaml: iter_pattern finalize_variant pat)
         for binding in typed_bindings.iter_mut() {
-            finalize_variant_in_pattern(tctx, env, &mut binding.vb_pat);
+            finalize_variant_in_pattern(tctx, env, &mut binding.vb_pat, false);
         }
 
         // Build final environment from all collected pattern variables.
@@ -13338,7 +13763,10 @@ fn type_let_bindings(
         for pvars in all_pattern_vars.iter() {
             for pv in pvars {
                 if std::env::var_os("RUST_DEBUG_VAR_LEVELS").is_some()
-                    && matches!(pv.id.name(), "v" | "u" | "v0" | "v1" | "v3")
+                    && matches!(
+                        pv.id.name(),
+                        "f" | "v" | "u" | "v0" | "v1" | "v3" | "res" | "initY"
+                    )
                 {
                     let ty = tctx.type_ctx.repr(pv.ty);
                     let level = tctx.type_ctx.get_level(ty);
@@ -13351,23 +13779,63 @@ fn type_let_bindings(
                         level,
                         &*desc
                     );
-                    if let TypeDesc::Tconstr { path, args, .. } = &*desc {
-                        if path.last() == "t1" {
-                            let parts: Vec<String> = args
+                    if let TypeDesc::Ttuple(items) = &*desc {
+                        let parts: Vec<String> = items
+                            .iter()
+                            .map(|item| {
+                                let r = tctx.type_ctx.repr(*item);
+                                format!("{}@{}", r.0, tctx.type_ctx.get_level(r))
+                            })
+                            .collect();
+                        eprintln!(
+                            "[var-level] binding={} tuple_items={}",
+                            pv.id.name(),
+                            parts.join(",")
+                        );
+                    }
+                    if let TypeDesc::Tarrow { arg, ret, .. } = &*desc {
+                        let arg_r = tctx.type_ctx.repr(arg.typ);
+                        let ret_r = tctx.type_ctx.repr(*ret);
+                        eprintln!(
+                            "[var-level] binding={} arrow_arg={}@{} arrow_ret={}@{}",
+                            pv.id.name(),
+                            arg_r.0,
+                            tctx.type_ctx.get_level(arg_r),
+                            ret_r.0,
+                            tctx.type_ctx.get_level(ret_r)
+                        );
+                        let ret_desc = tctx.type_ctx.get_desc(ret_r);
+                        if let TypeDesc::Ttuple(items) = &*ret_desc {
+                            let parts: Vec<String> = items
                                 .iter()
-                                .map(|arg| {
-                                    let arg = tctx.type_ctx.repr(*arg);
-                                    let arg_level = tctx.type_ctx.get_level(arg);
-                                    let arg_desc = tctx.type_ctx.get_desc(arg);
-                                    format!("{}@{}:{:?}", arg.0, arg_level, &*arg_desc)
+                                .map(|item| {
+                                    let r = tctx.type_ctx.repr(*item);
+                                    format!("{}@{}", r.0, tctx.type_ctx.get_level(r))
                                 })
                                 .collect();
                             eprintln!(
-                                "[var-level] binding={} t1_args={}",
+                                "[var-level] binding={} arrow_ret_tuple_items={}",
                                 pv.id.name(),
-                                parts.join(" | ")
+                                parts.join(",")
                             );
                         }
+                    }
+                    if let TypeDesc::Tconstr { path, args, .. } = &*desc {
+                        let parts: Vec<String> = args
+                            .iter()
+                            .map(|arg| {
+                                let arg = tctx.type_ctx.repr(*arg);
+                                let arg_level = tctx.type_ctx.get_level(arg);
+                                let arg_desc = tctx.type_ctx.get_desc(arg);
+                                format!("{}@{}:{:?}", arg.0, arg_level, &*arg_desc)
+                            })
+                            .collect();
+                        eprintln!(
+                            "[var-level] binding={} constr_path={} args={}",
+                            pv.id.name(),
+                            path.name(),
+                            parts.join(" | ")
+                        );
                     }
                 }
                 let desc = ValueDescription {
