@@ -118,6 +118,7 @@ pub struct UnifyState {
     /// Whether to assume type constructors are injective.
     pub assume_injective: bool,
 
+
     /// Environment snapshot for type alias expansion during unification.
     /// Store an owned clone to avoid dangling pointers when nested typing
     /// temporarily switches environments.
@@ -3533,8 +3534,9 @@ fn unify_rows<'a>(
     unify(ctx, state, more1, more2)?;
 
     // Unify paired fields
-    for (l, f1, f2) in &pairs {
-        match unify_row_field(ctx, state, fixed1, fixed2, f1, f2) {
+    let unified_more = ctx.repr(more2);
+    for (_l, f1, f2) in &pairs {
+        match unify_row_field(ctx, state, fixed1, fixed2, unified_more, f1, f2) {
             Ok(()) => {}
             Err(_e) => {
                 return Err(TypeError::Unify(vec![]));
@@ -3607,14 +3609,13 @@ fn unify_rows<'a>(
 }
 
 /// Unify two row fields.
-/// Infrastructure for row field links (alloc_row_field, set_row_field, row_field_repr
-/// link following) is in place but link-setting is disabled — enabling causes
-/// regressions because Rust's row_fixed diverges from OCaml's.
+/// Matches OCaml's `unify_row_field` behavior, including Reither link updates.
 fn unify_row_field<'a>(
     ctx: &'a TypeContext<'a>,
     state: &mut UnifyState,
-    _fixed1: bool,
-    _fixed2: bool,
+    fixed1: bool,
+    fixed2: bool,
+    more: TypeExprRef,
     field1: &RowField,
     field2: &RowField,
 ) -> TypeResult<()> {
@@ -3625,44 +3626,170 @@ fn unify_row_field<'a>(
         (RowField::Rpresent(Some(t1)), RowField::Rpresent(Some(t2))) => unify(ctx, state, *t1, *t2),
         (RowField::Rpresent(None), RowField::Rpresent(None)) => Ok(()),
         (RowField::Rabsent, RowField::Rabsent) => Ok(()),
-        (RowField::Reither { types: types1, .. }, RowField::Rpresent(t2_opt)) => {
-            if let Some(t2) = t2_opt {
-                for t1 in types1 {
-                    unify(ctx, state, *t1, *t2)?;
-                }
-            }
-            Ok(())
-        }
-        (RowField::Rpresent(t1_opt), RowField::Reither { types: types2, .. }) => {
-            if let Some(t1) = t1_opt {
-                for t2 in types2 {
-                    unify(ctx, state, *t1, *t2)?;
-                }
-            }
-            Ok(())
-        }
         (
             RowField::Reither {
                 constant: c1,
                 types: types1,
+                matched: m1,
+                link: e1,
                 ..
             },
             RowField::Reither {
                 constant: c2,
                 types: types2,
+                matched: m2,
+                link: e2,
                 ..
             },
         ) => {
-            if c1 != c2 {
-                return Err(TypeError::Unify(vec![]));
+            if e1 == e2 {
+                return Ok(());
             }
-            for (t1, t2) in types1.iter().zip(types2.iter()) {
-                unify(ctx, state, *t1, *t2)?;
+
+            if (fixed1 || fixed2) && !(*c1 || *c2) && types1.len() == types2.len() {
+                // OCaml fixed-row fast path (PR#7496): collapse both to a shared
+                // Reither and unify payloads pairwise.
+                let shared = RowField::Reither {
+                    constant: *c1 || *c2,
+                    types: vec![],
+                    matched: *m1 || *m2,
+                    link: ctx.alloc_row_field(None),
+                };
+                ctx.set_row_field(*e1, shared.clone());
+                ctx.set_row_field(*e2, shared);
+                for (t1, t2) in types1.iter().zip(types2.iter()) {
+                    unify(ctx, state, *t1, *t2)?;
+                }
+                return Ok(());
             }
+
+            // OCaml redo branch: when fields are active/fixed/singleton and an
+            // existing link is already present, retry on the linked representatives.
+            // Match OCaml when rigid variants are enabled for this path:
+            // singleton payload arity alone should not force the redo path.
+            let active = *m1 || *m2 || fixed1 || fixed2;
+            if active {
+                let mut all_types: Vec<TypeExprRef> = Vec::with_capacity(types1.len() + types2.len());
+                all_types.extend(types1.iter().copied());
+                all_types.extend(types2.iter().copied());
+                if !all_types.is_empty() {
+                    if *c1 || *c2 {
+                        return Err(TypeError::Unify(vec![]));
+                    }
+                    let head = all_types[0];
+                    for ty in all_types.iter().skip(1) {
+                        unify(ctx, state, head, *ty)?;
+                    }
+                    let has_existing_link =
+                        ctx.get_row_field(*e1).is_some() || ctx.get_row_field(*e2).is_some();
+                    if has_existing_link {
+                        return unify_row_field(ctx, state, fixed1, fixed2, more, &f1, &f2);
+                    }
+                }
+            }
+
+            let tl1: Vec<TypeExprRef> = types1.iter().map(|ty| ctx.repr(*ty)).collect();
+            let tl2: Vec<TypeExprRef> = types2.iter().map(|ty| ctx.repr(*ty)).collect();
+
+            // OCaml `remq`: remove physical duplicates by identity.
+            let remq = |remove: &[TypeExprRef], src: &[TypeExprRef]| -> Vec<TypeExprRef> {
+                src.iter()
+                    .copied()
+                    .filter(|ty| !remove.iter().any(|x| x == ty))
+                    .collect()
+            };
+            let tl2_prime = remq(&tl2, &tl1);
+            let tl1_prime = remq(&tl1, &tl2);
+
+            let more_level = ctx.get_level(ctx.repr(more));
+            for ty in tl1_prime.iter().chain(tl2_prime.iter()) {
+                update_level(ctx, more_level, *ty);
+            }
+
+            let shared_link = ctx.alloc_row_field(None);
+            let f1_prime = RowField::Reither {
+                constant: *c1 || *c2,
+                types: tl1_prime,
+                matched: *m1 || *m2,
+                link: shared_link,
+            };
+            let f2_prime = RowField::Reither {
+                constant: *c1 || *c2,
+                types: tl2_prime,
+                matched: *m1 || *m2,
+                link: shared_link,
+            };
+            ctx.set_row_field(*e1, f1_prime);
+            ctx.set_row_field(*e2, f2_prime);
             Ok(())
         }
-        // Reither + Rabsent
-        (RowField::Reither { .. }, RowField::Rabsent) | (RowField::Rabsent, RowField::Reither { .. }) => {
+
+        (RowField::Reither { matched: false, link: e1, .. }, RowField::Rabsent) if !fixed1 => {
+            ctx.set_row_field(*e1, f2.clone());
+            Ok(())
+        }
+        (RowField::Rabsent, RowField::Reither { matched: false, link: e2, .. }) if !fixed2 => {
+            ctx.set_row_field(*e2, f1.clone());
+            Ok(())
+        }
+
+        (
+            RowField::Reither {
+                constant: false,
+                types,
+                link: e1,
+                ..
+            },
+            RowField::Rpresent(Some(t2)),
+        ) if !fixed1 => {
+            let more_level = ctx.get_level(ctx.repr(more));
+            update_level(ctx, more_level, *t2);
+            for t1 in types {
+                unify(ctx, state, *t1, *t2)?;
+            }
+            ctx.set_row_field(*e1, f2.clone());
+            Ok(())
+        }
+        (
+            RowField::Rpresent(Some(t1)),
+            RowField::Reither {
+                constant: false,
+                types,
+                link: e2,
+                ..
+            },
+        ) if !fixed2 => {
+            let more_level = ctx.get_level(ctx.repr(more));
+            update_level(ctx, more_level, *t1);
+            for t2 in types {
+                unify(ctx, state, *t1, *t2)?;
+            }
+            ctx.set_row_field(*e2, f1.clone());
+            Ok(())
+        }
+
+        (
+            RowField::Reither {
+                constant: true,
+                types,
+                link: e1,
+                ..
+            },
+            RowField::Rpresent(None),
+        ) if !fixed1 && types.is_empty() => {
+            ctx.set_row_field(*e1, f2.clone());
+            Ok(())
+        }
+        (
+            RowField::Rpresent(None),
+            RowField::Reither {
+                constant: true,
+                types,
+                link: e2,
+                ..
+            },
+        ) if !fixed2 && types.is_empty() => {
+            ctx.set_row_field(*e2, f1.clone());
             Ok(())
         }
         _ => Err(TypeError::Unify(vec![])),
@@ -6378,6 +6505,8 @@ fn copy_type_cached(
                     || name == "Belt.List.t"
                     || name == "list"
                     || name == "int"
+                    || name == "string"
+                    || name == "option"
                 {
                     eprintln!(
                         "[rust-copy-constr] inspect ty={} level={} name={}",
@@ -6412,6 +6541,8 @@ fn copy_type_cached(
                             || name == "Belt.List.t"
                             || name == "list"
                             || name == "int"
+                            || name == "string"
+                            || name == "option"
                         {
                             eprintln!(
                                 "[rust-copy-constr] return-self ty={} level={} name={}",
@@ -6446,6 +6577,8 @@ fn copy_type_cached(
                             || name == "Belt.List.t"
                             || name == "list"
                             || name == "int"
+                            || name == "string"
+                            || name == "option"
                         {
                             eprintln!(
                                 "[rust-copy-constr] copy-constr ty={} level={} name={}",
@@ -6569,7 +6702,9 @@ fn copy_type_cached(
                             || full_path_name.as_deref() == Some("Ord.t")
                             || full_path_name.as_deref() == Some("Js_string2.t")
                             || full_path_name.as_deref() == Some("Js.String2.t")
-                            || full_path_name.as_deref() == Some("int"))
+                            || full_path_name.as_deref() == Some("int")
+                            || full_path_name.as_deref() == Some("string")
+                            || full_path_name.as_deref() == Some("option"))
                     {
                         full_path_name.clone()
                     } else {
