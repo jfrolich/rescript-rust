@@ -88,6 +88,7 @@ struct Options {
     input: Option<PathBuf>,
     include_paths: Vec<PathBuf>,
     runtime_path: Option<PathBuf>,
+    jsx_version: Option<i32>,
 }
 
 fn main() {
@@ -156,6 +157,17 @@ fn run() -> Result<()> {
                         opts.runtime_path = Some(PathBuf::from(val));
                     }
                 }
+                "-bs-jsx" => {
+                    if let Some(val) = args.next() {
+                        if let Ok(v) = val.parse::<i32>() {
+                            opts.jsx_version = Some(v);
+                        }
+                    }
+                }
+                "-bs-jsx-mode" | "-enable-experimental" => {
+                    // Value flags - consume the next argument.
+                    let _ = args.next();
+                }
                 "-open"
                 | "-w"
                 | "-warn-error"
@@ -218,6 +230,7 @@ fn run() -> Result<()> {
         dump_lambda_sexp_locs: opts.dump_lambda_sexp_locs,
         include_paths: opts.include_paths.clone(),
         runtime_path,
+        jsx_version: opts.jsx_version,
         source_filename: Some(source_path.to_string_lossy().into_owned()),
     };
 

@@ -403,10 +403,30 @@ pub struct CompilerOptions {
     /// Runtime package path (from -runtime-path flag)
     /// Used to locate stdlib CMIs at {runtime_path}/lib/ocaml/
     pub runtime_path: Option<PathBuf>,
+    /// JSX transform version (from -bs-jsx). When set, enables JSX rewrite
+    /// even if no @@config flag is present in the source.
+    pub jsx_version: Option<i32>,
     /// Source filename for interface constraint propagation.
     /// When set, after type_structure, checks for a matching .cmi and
     /// unifies implementation value types with interface types.
     pub source_filename: Option<String>,
+}
+
+fn resolve_jsx_version(
+    structure: &Structure,
+    arena: &crate::parse_arena::ParseArena,
+    options: &CompilerOptions,
+) -> Option<i32> {
+    if let Some(v) = options.jsx_version {
+        return Some(v);
+    }
+    if let Some(v) = extract_file_config_from_structure(structure, arena).jsx_version {
+        return Some(v);
+    }
+    if structure_has_config_string(structure, "-bs-jsx", arena) {
+        return Some(4);
+    }
+    None
 }
 
 /// Compile ReScript source to JavaScript.
@@ -429,12 +449,14 @@ pub fn compile_source_to_js_with_options(
             parser.diagnostics().len()
         ));
     }
-    // Source fallback path: only run JSX rewrite when the file enables `-bs-jsx`.
-    let jsx_enabled = structure_has_config_string(&structure, "-bs-jsx", parser.arena());
-    let structure = if jsx_enabled
-        && structure_needs_jsx_rewrite(&structure, parser.arena())
-    {
-        jsx_ppx::transform_structure(structure, 4, parser.arena_mut())
+    // Match OCaml behavior: -bs-jsx from CLI (or @@config flags) enables JSX rewrite.
+    let jsx_version = resolve_jsx_version(&structure, parser.arena(), options);
+    let structure = if let Some(version) = jsx_version {
+        if structure_needs_jsx_rewrite(&structure, parser.arena()) {
+            jsx_ppx::transform_structure(structure, version, parser.arena_mut())
+        } else {
+            structure
+        }
     } else {
         structure
     };
@@ -700,11 +722,13 @@ pub fn typecheck_and_dump_sexp<W: std::io::Write>(
             ));
         }
 
-        let jsx_enabled = structure_has_config_string(&structure, "-bs-jsx", parser.arena());
-        let structure = if jsx_enabled
-            && structure_needs_jsx_rewrite(&structure, parser.arena())
-        {
-            jsx_ppx::transform_structure(structure, 4, parser.arena_mut())
+        let jsx_version = resolve_jsx_version(&structure, parser.arena(), options);
+        let structure = if let Some(version) = jsx_version {
+            if structure_needs_jsx_rewrite(&structure, parser.arena()) {
+                jsx_ppx::transform_structure(structure, version, parser.arena_mut())
+            } else {
+                structure
+            }
         } else {
             structure
         };
@@ -1198,11 +1222,13 @@ pub fn typecheck_stored_structure_and_dump_sexp<W: std::io::Write>(
     // OCaml starts fresh for each bsc invocation, so we reset to match.
     arena.reset_local_module_counter();
 
-    let jsx_enabled = structure_has_config_string(&structure, "-bs-jsx", &arena);
-    let structure = if jsx_enabled
-        && structure_needs_jsx_rewrite(&structure, &arena)
-    {
-        jsx_ppx::transform_structure(structure, 4, &mut arena)
+    let jsx_version = resolve_jsx_version(&structure, &arena, options);
+    let structure = if let Some(version) = jsx_version {
+        if structure_needs_jsx_rewrite(&structure, &arena) {
+            jsx_ppx::transform_structure(structure, version, &mut arena)
+        } else {
+            structure
+        }
     } else {
         structure
     };

@@ -419,6 +419,35 @@ impl Env {
             .ok_or_else(|| EnvError::ValueNotFound(name.to_string()))
     }
 
+    /// Update the type of the most recent value binding with this name.
+    pub fn update_value_type_by_name(
+        &mut self,
+        name: &str,
+        new_ty: TypeExprRef,
+    ) -> EnvResult<()> {
+        let entries = self
+            .values
+            .by_name
+            .get_mut(name)
+            .ok_or_else(|| EnvError::ValueNotFound(name.to_string()))?;
+        let (id, value, _) = entries
+            .last_mut()
+            .ok_or_else(|| EnvError::ValueNotFound(name.to_string()))?;
+
+        let mut updated = value.as_ref().clone();
+        updated.val_type = new_ty;
+        let updated = Arc::new(updated);
+        *value = updated.clone();
+
+        // stamp=0 is shared by persistent idents, so by-ident lookup for those
+        // uses name lookup and does not rely on the stamp table.
+        if id.stamp() != 0 {
+            self.values.by_stamp.insert(id.stamp(), updated);
+        }
+        self.bump_id();
+        Ok(())
+    }
+
     /// Iterate over visible value bindings.
     pub fn iter_values(&self) -> impl Iterator<Item = (&Ident, &ValueDescription)> {
         self.values.iter().map(|(id, v)| (id, v.as_ref()))

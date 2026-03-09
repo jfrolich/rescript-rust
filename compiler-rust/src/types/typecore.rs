@@ -4662,7 +4662,9 @@ pub fn type_expect<'a>(
                 }
                 None => {
                     // OCaml: rue { ... exp_type = ifso.exp_type; ... }
-                    let unit_ty = env.type_unit(ctx);
+                    // Match OCaml typecore.ml: type the `then` branch against
+                    // Predef.type_unit (generic singleton), not instance_def.
+                    let unit_ty = ctx.predef_unit();
                     let typed_then = type_expect(tctx, env, then_branch, unit_ty, None)?;
                     let then_exp_type = typed_then.exp_type;
                     rue_unify(tctx, loc, then_exp_type, expected_ty, context)?;
@@ -6674,20 +6676,20 @@ fn type_match_cases_batch_non_gadt<'a>(
             };
             for pending in &pending_cases {
                 tctx.unify_state.set_env(&pending.case_env);
-                let _ = if erase_either {
+                if erase_either {
                     unify_pattern_types(
                         tctx,
                         pending.typed_pat.pat_loc,
                         propagated_ty,
                         pending.typed_pat.pat_type,
-                    )
+                    )?
                 } else {
                     unify_pattern_types(
                         tctx,
                         pending.typed_pat.pat_loc,
                         pending.typed_pat.pat_type,
                         propagated_ty,
-                    )
+                    )?
                 };
             }
             if debug_case_496 {
@@ -6966,6 +6968,10 @@ fn type_match(
         }
     }
 
+    // OCaml shares row-field links between `instance` copies; Rust does not.
+    // Merge case-discovered tags back into the scrutinee row before finalization.
+    merge_variant_row_fields_into_scrutinee(ctx, &typed_val_cases, ty_arg);
+
     // Match OCaml typecore/parmatch: pressure_variants closes rows without
     // wildcard coverage, then finalize_variant converts Reither→Rpresent
     // in still-open rows. Both operate on ORIGINAL types first (shared with
@@ -6987,6 +6993,7 @@ fn type_match(
     // share mutable row field refs. In Rust, case patterns have separate copies,
     // so we run a direct pass on ty_arg to match OCaml's behavior.
     finalize_variant_in_scrutinee_type(tctx.type_ctx, ty_arg);
+    close_variant_rows_in_scrutinee_by_cases(tctx, val_case_env, &typed_val_cases, ty_arg);
 
     // Reopen variant rows AFTER all closing steps. The closing logic operates
     // on per-case pattern types, but case 0 may share variant nodes with ty_arg
@@ -7083,6 +7090,35 @@ fn reopen_wildcard_covered_rows_in_scrutinee(
         }
         _ => {}
     }
+}
+
+fn close_variant_rows_in_scrutinee_by_cases(
+    tctx: &mut TypeCheckContext<'_>,
+    env: &Env,
+    cases: &[crate::types::typedtree::Case],
+    scrutinee_ty: TypeExprRef,
+) {
+    let mut matched_tags: HashSet<String> = HashSet::new();
+    let mut variant_wildcard_rows: HashSet<usize> = HashSet::new();
+    let mut labels_by_row: HashMap<usize, Vec<String>> = HashMap::new();
+
+    for case in cases {
+        collect_all_variant_tags_in_pattern(&case.c_lhs, &mut matched_tags);
+        collect_rows_with_wildcard_coverage(tctx, env, &case.c_lhs, &mut variant_wildcard_rows);
+        collect_variant_row_labels_in_pattern(tctx, env, &case.c_lhs, &mut labels_by_row);
+    }
+
+    normalize_wildcard_coverage_by_labels(tctx, &labels_by_row, &mut variant_wildcard_rows);
+
+    let mut visited: HashSet<usize> = HashSet::new();
+    close_open_variants_in_type(
+        tctx.type_ctx,
+        env,
+        scrutinee_ty,
+        &matched_tags,
+        &variant_wildcard_rows,
+        &mut visited,
+    );
 }
 
 fn reopen_variant_row(ctx: &TypeContext<'_>, repr: TypeExprRef) {
@@ -7998,14 +8034,14 @@ fn finalize_variant_rpresent_only(
                             constant: true,
                             types,
                             ..
-                        } if !row.row_closed && types.is_empty() => {
+                        } if types.is_empty() => {
                             replacement = Some(crate::types::type_expr::RowField::Rpresent(None));
                         }
                         crate::types::type_expr::RowField::Reither {
                             constant: false,
                             types,
                             ..
-                        } if !row.row_closed && !types.is_empty() => {
+                        } if !types.is_empty() => {
                             if debug_finalize_original && tag == "V" {
                                 let line = tctx.arena.to_location(pat.pat_loc).loc_start.line;
                                 let arg_repr: isize = arg
