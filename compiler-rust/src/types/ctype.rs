@@ -832,7 +832,7 @@ fn should_preserve_local_t_alias_during_level_update(
     matches!(&*desc, TypeDesc::Tconstr { path, .. } if {
         if is_local_t_path {
             let head = path.head_name();
-            head == "array" || head == "int"
+            head == "array" || head == "int" || head == "option"
         } else {
             path.last() == "cmp"
         }
@@ -1125,6 +1125,343 @@ fn strengthen_type_decl_for_module_access_path<'a>(
     strengthened
 }
 
+fn rewrite_type_expr_paths_for_module_access<'a>(
+    ctx: &'a TypeContext<'a>,
+    ty: TypeExprRef,
+    module_sig: &[super::decl::SignatureItem],
+    module_access_path: &Path,
+    visited: &mut HashSet<TypeExprRef>,
+) {
+    let ty = ctx.repr(ty);
+    if !visited.insert(ty) {
+        return;
+    }
+    let desc = ctx.get_desc(ty);
+    match &*desc {
+        TypeDesc::Tconstr { path, args, .. } => {
+            let rewritten = crate::cmi::persistent_env::substitute_sig_path(
+                path,
+                module_sig,
+                module_access_path,
+            );
+            if rewritten != *path {
+                let mut new_desc = (*desc).clone();
+                if let TypeDesc::Tconstr { path, .. } = &mut new_desc {
+                    *path = rewritten;
+                }
+                ctx.set_desc(ty, new_desc);
+            }
+            for arg in args {
+                rewrite_type_expr_paths_for_module_access(
+                    ctx,
+                    *arg,
+                    module_sig,
+                    module_access_path,
+                    visited,
+                );
+            }
+        }
+        TypeDesc::Tarrow { arg, ret, .. } => {
+            rewrite_type_expr_paths_for_module_access(
+                ctx,
+                arg.typ,
+                module_sig,
+                module_access_path,
+                visited,
+            );
+            rewrite_type_expr_paths_for_module_access(
+                ctx,
+                *ret,
+                module_sig,
+                module_access_path,
+                visited,
+            );
+        }
+        TypeDesc::Ttuple(types) => {
+            for ty in types {
+                rewrite_type_expr_paths_for_module_access(
+                    ctx,
+                    *ty,
+                    module_sig,
+                    module_access_path,
+                    visited,
+                );
+            }
+        }
+        TypeDesc::Tlink(ty) | TypeDesc::Tsubst(ty) => {
+            rewrite_type_expr_paths_for_module_access(
+                ctx,
+                *ty,
+                module_sig,
+                module_access_path,
+                visited,
+            );
+        }
+        TypeDesc::Tobject { fields, name } => {
+            rewrite_type_expr_paths_for_module_access(
+                ctx,
+                *fields,
+                module_sig,
+                module_access_path,
+                visited,
+            );
+            if let Some((path, args)) = name {
+                let rewritten = crate::cmi::persistent_env::substitute_sig_path(
+                    path,
+                    module_sig,
+                    module_access_path,
+                );
+                if rewritten != *path {
+                    let mut new_desc = (*desc).clone();
+                    if let TypeDesc::Tobject { name, .. } = &mut new_desc {
+                        if let Some((path, _)) = name {
+                            *path = rewritten;
+                        }
+                    }
+                    ctx.set_desc(ty, new_desc);
+                }
+                for arg in args {
+                    rewrite_type_expr_paths_for_module_access(
+                        ctx,
+                        *arg,
+                        module_sig,
+                        module_access_path,
+                        visited,
+                    );
+                }
+            }
+        }
+        TypeDesc::Tfield { typ, rest, .. } => {
+            rewrite_type_expr_paths_for_module_access(
+                ctx,
+                *typ,
+                module_sig,
+                module_access_path,
+                visited,
+            );
+            rewrite_type_expr_paths_for_module_access(
+                ctx,
+                *rest,
+                module_sig,
+                module_access_path,
+                visited,
+            );
+        }
+        TypeDesc::Tvariant(row) => {
+            for (_, field) in &row.row_fields {
+                match field {
+                    RowField::Rpresent(Some(ty)) => {
+                        rewrite_type_expr_paths_for_module_access(
+                            ctx,
+                            *ty,
+                            module_sig,
+                            module_access_path,
+                            visited,
+                        );
+                    }
+                    RowField::Reither { types, .. } => {
+                        for ty in types {
+                            rewrite_type_expr_paths_for_module_access(
+                                ctx,
+                                *ty,
+                                module_sig,
+                                module_access_path,
+                                visited,
+                            );
+                        }
+                    }
+                    RowField::Rpresent(None) | RowField::Rabsent => {}
+                }
+            }
+            if let Some((path, args)) = &row.row_name {
+                let rewritten = crate::cmi::persistent_env::substitute_sig_path(
+                    path,
+                    module_sig,
+                    module_access_path,
+                );
+                if rewritten != *path {
+                    let mut new_desc = (*desc).clone();
+                    if let TypeDesc::Tvariant(row) = &mut new_desc {
+                        if let Some((path, _)) = &mut row.row_name {
+                            *path = rewritten;
+                        }
+                    }
+                    ctx.set_desc(ty, new_desc);
+                }
+                for arg in args {
+                    rewrite_type_expr_paths_for_module_access(
+                        ctx,
+                        *arg,
+                        module_sig,
+                        module_access_path,
+                        visited,
+                    );
+                }
+            }
+        }
+        TypeDesc::Tpoly { body, vars } => {
+            rewrite_type_expr_paths_for_module_access(
+                ctx,
+                *body,
+                module_sig,
+                module_access_path,
+                visited,
+            );
+            for ty in vars {
+                rewrite_type_expr_paths_for_module_access(
+                    ctx,
+                    *ty,
+                    module_sig,
+                    module_access_path,
+                    visited,
+                );
+            }
+        }
+        TypeDesc::Tpackage { path, args, .. } => {
+            let rewritten = crate::cmi::persistent_env::substitute_sig_path(
+                path,
+                module_sig,
+                module_access_path,
+            );
+            if rewritten != *path {
+                let mut new_desc = (*desc).clone();
+                if let TypeDesc::Tpackage { path, .. } = &mut new_desc {
+                    *path = rewritten;
+                }
+                ctx.set_desc(ty, new_desc);
+            }
+            for ty in args {
+                rewrite_type_expr_paths_for_module_access(
+                    ctx,
+                    *ty,
+                    module_sig,
+                    module_access_path,
+                    visited,
+                );
+            }
+        }
+        TypeDesc::Tvar(_) | TypeDesc::Tunivar(_) | TypeDesc::Tnil => {}
+    }
+}
+fn rewrite_type_decl_for_module_access_path<'a>(
+    ctx: &'a TypeContext<'a>,
+    decl: &super::decl::TypeDeclaration,
+    module_sig: &[super::decl::SignatureItem],
+    module_access_path: &Path,
+) -> super::decl::TypeDeclaration {
+    let mut rewritten_decl = decl.clone();
+
+    rewritten_decl.type_params = rewritten_decl
+        .type_params
+        .iter()
+        .map(|ty| subst_identity_copy(ctx, *ty))
+        .collect();
+    rewritten_decl.type_manifest = rewritten_decl
+        .type_manifest
+        .map(|ty| subst_identity_copy(ctx, ty));
+
+    match &mut rewritten_decl.type_kind {
+        crate::types::TypeKind::TypeVariant(constructors) => {
+            for cd in constructors {
+                match &mut cd.cd_args {
+                    crate::types::decl::ConstructorArguments::CstrTuple(args) => {
+                        for ty in args {
+                            *ty = subst_identity_copy(ctx, *ty);
+                        }
+                    }
+                    crate::types::decl::ConstructorArguments::CstrRecord(labels) => {
+                        for lbl in labels {
+                            lbl.ld_type = subst_identity_copy(ctx, lbl.ld_type);
+                        }
+                    }
+                }
+                if let Some(res) = cd.cd_res {
+                    cd.cd_res = Some(subst_identity_copy(ctx, res));
+                }
+            }
+        }
+        crate::types::TypeKind::TypeRecord(labels, _) => {
+            for lbl in labels {
+                lbl.ld_type = subst_identity_copy(ctx, lbl.ld_type);
+            }
+        }
+        _ => {}
+    }
+
+    let mut visited = HashSet::new();
+    for ty in &rewritten_decl.type_params {
+        rewrite_type_expr_paths_for_module_access(
+            ctx,
+            *ty,
+            module_sig,
+            module_access_path,
+            &mut visited,
+        );
+    }
+    if let Some(manifest) = rewritten_decl.type_manifest {
+        rewrite_type_expr_paths_for_module_access(
+            ctx,
+            manifest,
+            module_sig,
+            module_access_path,
+            &mut visited,
+        );
+    }
+    match &rewritten_decl.type_kind {
+        crate::types::TypeKind::TypeVariant(constructors) => {
+            for cd in constructors {
+                match &cd.cd_args {
+                    crate::types::decl::ConstructorArguments::CstrTuple(args) => {
+                        for ty in args {
+                            rewrite_type_expr_paths_for_module_access(
+                                ctx,
+                                *ty,
+                                module_sig,
+                                module_access_path,
+                                &mut visited,
+                            );
+                        }
+                    }
+                    crate::types::decl::ConstructorArguments::CstrRecord(labels) => {
+                        for lbl in labels {
+                            rewrite_type_expr_paths_for_module_access(
+                                ctx,
+                                lbl.ld_type,
+                                module_sig,
+                                module_access_path,
+                                &mut visited,
+                            );
+                        }
+                    }
+                }
+                if let Some(res) = cd.cd_res {
+                    rewrite_type_expr_paths_for_module_access(
+                        ctx,
+                        res,
+                        module_sig,
+                        module_access_path,
+                        &mut visited,
+                    );
+                }
+            }
+        }
+        crate::types::TypeKind::TypeRecord(labels, _) => {
+            for lbl in labels {
+                rewrite_type_expr_paths_for_module_access(
+                    ctx,
+                    lbl.ld_type,
+                    module_sig,
+                    module_access_path,
+                    &mut visited,
+                );
+            }
+        }
+        _ => {}
+    }
+
+    rewritten_decl
+}
+
 /// Resolve a type through local environment modules.
 /// For paths like Pdot(Pident(Ord), "t"), look up module Ord in env,
 /// follow aliases (MtyAlias/MtyIdent), and then find type t in its signature.
@@ -1159,15 +1496,17 @@ fn resolve_type_through_env<'a>(
     for item in &module_sig {
         if let SignatureItem::SigType(id, decl, _) = item {
             if id.name() == type_name {
+                let rewritten_decl =
+                    rewrite_type_decl_for_module_access_path(ctx, decl, &module_sig, module_path);
                 if let Some(target_path) = alias_target_for_strengthening.as_ref() {
                     return Some(strengthen_type_decl_for_module_access_path(
                         ctx,
                         target_path,
                         id,
-                        decl,
+                        &rewritten_decl,
                     ));
                 }
-                return Some(decl.clone());
+                return Some(rewritten_decl);
             }
         }
     }
@@ -1750,27 +2089,6 @@ fn try_expand_head<'a>(
                                 .map(|p| p.name())
                                 .unwrap_or_else(|| "<none>".to_string())
                         );
-                    }
-                    if store_decl.type_manifest.is_none() {
-                        if let Some(type_path) = store_decl.type_path.as_ref() {
-                            if !type_path.same(&path) {
-                                if debug_expand {
-                                    eprintln!(
-                                        "[expand] path={} stamp-normalize -> {}",
-                                        path_name,
-                                        type_path.name()
-                                    );
-                                }
-                                let level = ctx.get_level(ty);
-                                let normalized = ctx.new_type(TypeDesc::Tconstr {
-                                    path: type_path.clone(),
-                                    args: args.clone(),
-                                    abbrev: orig_abbrev,
-                                });
-                                ctx.set_level(normalized, level);
-                                return Some(normalized);
-                            }
-                        }
                     }
                     if let Some(manifest) = store_decl.type_manifest {
                         let params = &store_decl.type_params;
