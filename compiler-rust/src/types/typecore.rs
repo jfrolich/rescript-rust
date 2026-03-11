@@ -3827,16 +3827,35 @@ fn type_pattern_record(
     } else {
         expected_ty
     };
-    let disambiguation_ty = select_record_type_for_fields(
-        ctx,
-        env,
-        &mut tctx.persistent_env,
-        &field_names,
-        record_ty,
-        None,
-        match_record_fields_strictly,
-    )
-    .unwrap_or(record_ty);
+    let disambiguation_ty = if has_dict_pattern_attr {
+        // Dict patterns should not be steered by regular record label
+        // disambiguation (`id`, `name`, ...). Field patterns are typed against
+        // the dict payload itself.
+        record_ty
+    } else {
+        select_record_type_for_fields(
+            ctx,
+            env,
+            &mut tctx.persistent_env,
+            &field_names,
+            record_ty,
+            None,
+            match_record_fields_strictly,
+        )
+        .unwrap_or(record_ty)
+    };
+    let dict_field_ty = if has_dict_pattern_attr {
+        let repr = ctx.repr(record_ty);
+        let desc = ctx.get_desc(repr);
+        match &*desc {
+            TypeDesc::Tconstr { path, args, .. } if is_dict_type_path(path) && args.len() == 1 => {
+                Some(args[0])
+            }
+            _ => Some(ctx.new_var(None)),
+        }
+    } else {
+        None
+    };
     if debug_pattern_record {
         let full_loc = tctx.arena.to_location(loc);
         eprintln!(
@@ -3858,27 +3877,36 @@ fn type_pattern_record(
         let field_name = tctx.longident_last_name(&resolved_lid);
 
         // Create fresh type variable for the field
-        let field_ty = ctx.new_var(None);
+        let base_field_ty = dict_field_ty.unwrap_or_else(|| ctx.new_var(None));
+        let field_ty = if has_dict_pattern_attr && field.opt {
+            env.type_option(ctx, base_field_ty)
+        } else {
+            base_field_ty
+        };
 
         // Try to look up the label from the environment for type info
-        let disambiguated = disambiguate_label_for_record_fields(
-            &field_name,
-            disambiguation_ty,
-            &field_names,
-            match_record_fields_strictly,
-            env,
-            &mut tctx.persistent_env,
-            ctx,
-        )
-        .or_else(|| {
-            lookup_label_by_lid(
-                &resolved_lid,
-                tctx.arena,
+        let disambiguated = if has_dict_pattern_attr {
+            None
+        } else {
+            disambiguate_label_for_record_fields(
+                &field_name,
+                disambiguation_ty,
+                &field_names,
+                match_record_fields_strictly,
                 env,
                 &mut tctx.persistent_env,
                 ctx,
             )
-        });
+            .or_else(|| {
+                lookup_label_by_lid(
+                    &resolved_lid,
+                    tctx.arena,
+                    env,
+                    &mut tctx.persistent_env,
+                    ctx,
+                )
+            })
+        };
         if debug_pattern_record {
             let full_loc = tctx.arena.to_location(field.lid.loc);
             let chosen = disambiguated
@@ -16476,10 +16504,12 @@ impl Env {
                 Path::Pident(id) => {
                     let mod_name = id.name();
                     if let Ok(md) = env.lookup_module(path) {
-                        let result =
-                            resolve_module_type_inner(env, &md.md_type, pers_env, ctx, visiting);
-                        visiting.remove(path);
-                        return result;
+                        if let Some(result) =
+                            resolve_module_type_inner(env, &md.md_type, pers_env, ctx, visiting)
+                        {
+                            visiting.remove(path);
+                            return Some(result);
+                        }
                     }
                     if id.stamp() == 0 {
                         if let Some(pers) = pers_env.as_mut() {
