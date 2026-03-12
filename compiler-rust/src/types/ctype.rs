@@ -29,7 +29,6 @@ use super::path::Path;
 use super::asttypes::PrivateFlag;
 use super::type_expr::{AbbrevMemo, AbbrevMemoRef, FieldKind, GENERIC_LEVEL, RowDesc, RowField, TypeDesc, TypeExprRef};
 use super::variance::{Variance, VarianceFlag};
-use crate::ident::Ident;
 use std::collections::{HashMap, HashSet};
 
 // ============================================================================
@@ -832,7 +831,7 @@ fn should_preserve_local_t_alias_during_level_update(
     matches!(&*desc, TypeDesc::Tconstr { path, .. } if {
         if is_local_t_path {
             let head = path.head_name();
-            head == "array" || head == "int" || head == "option"
+            head == "array" || head == "int"
         } else {
             path.last() == "cmp"
         }
@@ -881,38 +880,6 @@ fn resolve_module_signature_through_cmi<'a>(
     use crate::cmi::{cmi_format, sig_reader::SigReadContext};
     use crate::types::decl::{ModuleType, SignatureItem};
 
-    fn register_types_by_stamp_from_signature(
-        ctx: &TypeContext<'_>,
-        sig: &crate::types::decl::Signature,
-        module_access_path: &Path,
-    ) {
-        use crate::types::decl::{ModuleType, SignatureItem};
-        for item in sig {
-            match item {
-                SignatureItem::SigType(id, decl, _) => {
-                    if id.stamp() != 0 {
-                        let mut decl = decl.clone();
-                        if decl.type_path.is_none() {
-                            decl.type_path =
-                                Some(Path::pdot(module_access_path.clone(), id.name()));
-                        }
-                        ctx.register_type_decl_by_stamp(id.stamp(), decl);
-                    }
-                }
-                SignatureItem::SigModule(id, md, _) => {
-                    if let ModuleType::MtySignature(sub_sig) = &md.md_type {
-                        let submodule_path = Path::pdot(module_access_path.clone(), id.name());
-                        if id.stamp() != 0 {
-                            ctx.register_module_path_by_stamp(id.stamp(), submodule_path.clone());
-                        }
-                        register_types_by_stamp_from_signature(ctx, sub_sig, &submodule_path);
-                    }
-                }
-                _ => {}
-            }
-        }
-    }
-
     // Keep visited module paths for the full resolution walk. Removing entries
     // re-opens alias cycles (`A -> B -> A`) and can recurse until stack overflow.
     if !visiting.insert(module_path.clone()) {
@@ -924,20 +891,15 @@ fn resolve_module_signature_through_cmi<'a>(
             let full_path = find_cmi_file(load_paths, id.name())?;
             let cmi = cmi_format::read_cmi(&full_path).ok()?;
             let mut sig_ctx = SigReadContext::new(ctx);
-            let signature = sig_ctx.read_signature(&cmi.cmi_sign);
-            register_types_by_stamp_from_signature(ctx, &signature, module_path);
-            Some(signature)
+            Some(sig_ctx.read_signature(&cmi.cmi_sign))
         }
         Path::Pdot(parent, module_name, _) => {
             let parent_sig =
                 resolve_module_signature_through_cmi(ctx, load_paths, parent, visiting)?;
-            parent_sig.into_iter().rev().find_map(|item| match item {
+            parent_sig.into_iter().find_map(|item| match item {
                 SignatureItem::SigModule(id, md, _) if id.name() == module_name => match md.md_type
                 {
-                    ModuleType::MtySignature(sig) => {
-                        register_types_by_stamp_from_signature(ctx, &sig, module_path);
-                        Some(sig)
-                    }
+                    ModuleType::MtySignature(sig) => Some(sig),
                     ModuleType::MtyAlias(_, alias_path) | ModuleType::MtyIdent(alias_path) => {
                         resolve_module_signature_through_cmi(ctx, load_paths, &alias_path, visiting)
                     }
@@ -983,10 +945,6 @@ pub fn resolve_type_through_modules<'a>(
     let mut result = None;
     for item in &current_sig {
         if let SignatureItem::SigType(id, decl, _) = item {
-            let mut decl = decl.clone();
-            if decl.type_path.is_none() {
-                decl.type_path = Some(Path::pdot(module_path.clone(), id.name()));
-            }
             // Register every type by stamp
             if id.stamp() != 0 {
                 ctx.register_type_decl_by_stamp(id.stamp(), decl.clone());
@@ -1024,36 +982,20 @@ fn resolve_module_type_through_env_path<'a>(
     let result = match path {
         Path::Pident(id) => {
             let name = id.name();
-            if let Ok(md) = env.lookup_module(path) {
+            if let Ok(md) = env.find_module(name) {
                 Some(md.md_type.clone())
-            } else if let Ok(md) = env.find_module(name) {
-                // For local/stamped module ids, the path's stamp can differ
-                // from the env binding stamp. Fall back to name lookup to
-                // resolve aliases through in-scope module bindings.
-                Some(md.md_type.clone())
-            } else if let Ok(mtd) = env.lookup_modtype(path) {
-                mtd.mtd_type.clone()
             } else if let Ok(mtd) = env.find_modtype(name) {
-                Some(mtd.mtd_type.clone()).flatten()
+                mtd.mtd_type.clone()
             } else {
-                if id.stamp() == 0 {
-                    let load_paths = ctx.load_paths();
-                    if load_paths.is_empty() {
-                        None
-                    } else {
-                        // Mirror OCaml's persistent-module lookup in Env.find_module:
-                        // if not found in local env, consult .cmi signatures.
-                        let mut cmi_visiting = HashSet::new();
-                        resolve_module_signature_through_cmi(
-                            ctx,
-                            &load_paths,
-                            path,
-                            &mut cmi_visiting,
-                        )
-                        .map(super::decl::ModuleType::MtySignature)
-                    }
-                } else {
+                let load_paths = ctx.load_paths();
+                if load_paths.is_empty() {
                     None
+                } else {
+                    // Mirror OCaml's persistent-module lookup in Env.find_module:
+                    // if not found in local env, consult .cmi signatures.
+                    let mut cmi_visiting = HashSet::new();
+                    resolve_module_signature_through_cmi(ctx, &load_paths, path, &mut cmi_visiting)
+                        .map(super::decl::ModuleType::MtySignature)
                 }
             }
         }
@@ -1061,7 +1003,7 @@ fn resolve_module_type_through_env_path<'a>(
             let parent_mty = resolve_module_type_through_env_path(ctx, env, parent, visiting)?;
             let parent_sig =
                 resolve_signature_through_env_module_type(ctx, env, &parent_mty, visiting)?;
-            parent_sig.into_iter().rev().find_map(|item| match item {
+            parent_sig.into_iter().find_map(|item| match item {
                 SignatureItem::SigModule(id, md, _) if id.name() == name => Some(md.md_type),
                 SignatureItem::SigModtype(id, mtd) if id.name() == name => mtd.mtd_type,
                 _ => None,
@@ -1125,343 +1067,6 @@ fn strengthen_type_decl_for_module_access_path<'a>(
     strengthened
 }
 
-fn rewrite_type_expr_paths_for_module_access<'a>(
-    ctx: &'a TypeContext<'a>,
-    ty: TypeExprRef,
-    module_sig: &[super::decl::SignatureItem],
-    module_access_path: &Path,
-    visited: &mut HashSet<TypeExprRef>,
-) {
-    let ty = ctx.repr(ty);
-    if !visited.insert(ty) {
-        return;
-    }
-    let desc = ctx.get_desc(ty);
-    match &*desc {
-        TypeDesc::Tconstr { path, args, .. } => {
-            let rewritten = crate::cmi::persistent_env::substitute_sig_path(
-                path,
-                module_sig,
-                module_access_path,
-            );
-            if rewritten != *path {
-                let mut new_desc = (*desc).clone();
-                if let TypeDesc::Tconstr { path, .. } = &mut new_desc {
-                    *path = rewritten;
-                }
-                ctx.set_desc(ty, new_desc);
-            }
-            for arg in args {
-                rewrite_type_expr_paths_for_module_access(
-                    ctx,
-                    *arg,
-                    module_sig,
-                    module_access_path,
-                    visited,
-                );
-            }
-        }
-        TypeDesc::Tarrow { arg, ret, .. } => {
-            rewrite_type_expr_paths_for_module_access(
-                ctx,
-                arg.typ,
-                module_sig,
-                module_access_path,
-                visited,
-            );
-            rewrite_type_expr_paths_for_module_access(
-                ctx,
-                *ret,
-                module_sig,
-                module_access_path,
-                visited,
-            );
-        }
-        TypeDesc::Ttuple(types) => {
-            for ty in types {
-                rewrite_type_expr_paths_for_module_access(
-                    ctx,
-                    *ty,
-                    module_sig,
-                    module_access_path,
-                    visited,
-                );
-            }
-        }
-        TypeDesc::Tlink(ty) | TypeDesc::Tsubst(ty) => {
-            rewrite_type_expr_paths_for_module_access(
-                ctx,
-                *ty,
-                module_sig,
-                module_access_path,
-                visited,
-            );
-        }
-        TypeDesc::Tobject { fields, name } => {
-            rewrite_type_expr_paths_for_module_access(
-                ctx,
-                *fields,
-                module_sig,
-                module_access_path,
-                visited,
-            );
-            if let Some((path, args)) = name {
-                let rewritten = crate::cmi::persistent_env::substitute_sig_path(
-                    path,
-                    module_sig,
-                    module_access_path,
-                );
-                if rewritten != *path {
-                    let mut new_desc = (*desc).clone();
-                    if let TypeDesc::Tobject { name, .. } = &mut new_desc {
-                        if let Some((path, _)) = name {
-                            *path = rewritten;
-                        }
-                    }
-                    ctx.set_desc(ty, new_desc);
-                }
-                for arg in args {
-                    rewrite_type_expr_paths_for_module_access(
-                        ctx,
-                        *arg,
-                        module_sig,
-                        module_access_path,
-                        visited,
-                    );
-                }
-            }
-        }
-        TypeDesc::Tfield { typ, rest, .. } => {
-            rewrite_type_expr_paths_for_module_access(
-                ctx,
-                *typ,
-                module_sig,
-                module_access_path,
-                visited,
-            );
-            rewrite_type_expr_paths_for_module_access(
-                ctx,
-                *rest,
-                module_sig,
-                module_access_path,
-                visited,
-            );
-        }
-        TypeDesc::Tvariant(row) => {
-            for (_, field) in &row.row_fields {
-                match field {
-                    RowField::Rpresent(Some(ty)) => {
-                        rewrite_type_expr_paths_for_module_access(
-                            ctx,
-                            *ty,
-                            module_sig,
-                            module_access_path,
-                            visited,
-                        );
-                    }
-                    RowField::Reither { types, .. } => {
-                        for ty in types {
-                            rewrite_type_expr_paths_for_module_access(
-                                ctx,
-                                *ty,
-                                module_sig,
-                                module_access_path,
-                                visited,
-                            );
-                        }
-                    }
-                    RowField::Rpresent(None) | RowField::Rabsent => {}
-                }
-            }
-            if let Some((path, args)) = &row.row_name {
-                let rewritten = crate::cmi::persistent_env::substitute_sig_path(
-                    path,
-                    module_sig,
-                    module_access_path,
-                );
-                if rewritten != *path {
-                    let mut new_desc = (*desc).clone();
-                    if let TypeDesc::Tvariant(row) = &mut new_desc {
-                        if let Some((path, _)) = &mut row.row_name {
-                            *path = rewritten;
-                        }
-                    }
-                    ctx.set_desc(ty, new_desc);
-                }
-                for arg in args {
-                    rewrite_type_expr_paths_for_module_access(
-                        ctx,
-                        *arg,
-                        module_sig,
-                        module_access_path,
-                        visited,
-                    );
-                }
-            }
-        }
-        TypeDesc::Tpoly { body, vars } => {
-            rewrite_type_expr_paths_for_module_access(
-                ctx,
-                *body,
-                module_sig,
-                module_access_path,
-                visited,
-            );
-            for ty in vars {
-                rewrite_type_expr_paths_for_module_access(
-                    ctx,
-                    *ty,
-                    module_sig,
-                    module_access_path,
-                    visited,
-                );
-            }
-        }
-        TypeDesc::Tpackage { path, args, .. } => {
-            let rewritten = crate::cmi::persistent_env::substitute_sig_path(
-                path,
-                module_sig,
-                module_access_path,
-            );
-            if rewritten != *path {
-                let mut new_desc = (*desc).clone();
-                if let TypeDesc::Tpackage { path, .. } = &mut new_desc {
-                    *path = rewritten;
-                }
-                ctx.set_desc(ty, new_desc);
-            }
-            for ty in args {
-                rewrite_type_expr_paths_for_module_access(
-                    ctx,
-                    *ty,
-                    module_sig,
-                    module_access_path,
-                    visited,
-                );
-            }
-        }
-        TypeDesc::Tvar(_) | TypeDesc::Tunivar(_) | TypeDesc::Tnil => {}
-    }
-}
-fn rewrite_type_decl_for_module_access_path<'a>(
-    ctx: &'a TypeContext<'a>,
-    decl: &super::decl::TypeDeclaration,
-    module_sig: &[super::decl::SignatureItem],
-    module_access_path: &Path,
-) -> super::decl::TypeDeclaration {
-    let mut rewritten_decl = decl.clone();
-
-    rewritten_decl.type_params = rewritten_decl
-        .type_params
-        .iter()
-        .map(|ty| subst_identity_copy(ctx, *ty))
-        .collect();
-    rewritten_decl.type_manifest = rewritten_decl
-        .type_manifest
-        .map(|ty| subst_identity_copy(ctx, ty));
-
-    match &mut rewritten_decl.type_kind {
-        crate::types::TypeKind::TypeVariant(constructors) => {
-            for cd in constructors {
-                match &mut cd.cd_args {
-                    crate::types::decl::ConstructorArguments::CstrTuple(args) => {
-                        for ty in args {
-                            *ty = subst_identity_copy(ctx, *ty);
-                        }
-                    }
-                    crate::types::decl::ConstructorArguments::CstrRecord(labels) => {
-                        for lbl in labels {
-                            lbl.ld_type = subst_identity_copy(ctx, lbl.ld_type);
-                        }
-                    }
-                }
-                if let Some(res) = cd.cd_res {
-                    cd.cd_res = Some(subst_identity_copy(ctx, res));
-                }
-            }
-        }
-        crate::types::TypeKind::TypeRecord(labels, _) => {
-            for lbl in labels {
-                lbl.ld_type = subst_identity_copy(ctx, lbl.ld_type);
-            }
-        }
-        _ => {}
-    }
-
-    let mut visited = HashSet::new();
-    for ty in &rewritten_decl.type_params {
-        rewrite_type_expr_paths_for_module_access(
-            ctx,
-            *ty,
-            module_sig,
-            module_access_path,
-            &mut visited,
-        );
-    }
-    if let Some(manifest) = rewritten_decl.type_manifest {
-        rewrite_type_expr_paths_for_module_access(
-            ctx,
-            manifest,
-            module_sig,
-            module_access_path,
-            &mut visited,
-        );
-    }
-    match &rewritten_decl.type_kind {
-        crate::types::TypeKind::TypeVariant(constructors) => {
-            for cd in constructors {
-                match &cd.cd_args {
-                    crate::types::decl::ConstructorArguments::CstrTuple(args) => {
-                        for ty in args {
-                            rewrite_type_expr_paths_for_module_access(
-                                ctx,
-                                *ty,
-                                module_sig,
-                                module_access_path,
-                                &mut visited,
-                            );
-                        }
-                    }
-                    crate::types::decl::ConstructorArguments::CstrRecord(labels) => {
-                        for lbl in labels {
-                            rewrite_type_expr_paths_for_module_access(
-                                ctx,
-                                lbl.ld_type,
-                                module_sig,
-                                module_access_path,
-                                &mut visited,
-                            );
-                        }
-                    }
-                }
-                if let Some(res) = cd.cd_res {
-                    rewrite_type_expr_paths_for_module_access(
-                        ctx,
-                        res,
-                        module_sig,
-                        module_access_path,
-                        &mut visited,
-                    );
-                }
-            }
-        }
-        crate::types::TypeKind::TypeRecord(labels, _) => {
-            for lbl in labels {
-                rewrite_type_expr_paths_for_module_access(
-                    ctx,
-                    lbl.ld_type,
-                    module_sig,
-                    module_access_path,
-                    &mut visited,
-                );
-            }
-        }
-        _ => {}
-    }
-
-    rewritten_decl
-}
-
 /// Resolve a type through local environment modules.
 /// For paths like Pdot(Pident(Ord), "t"), look up module Ord in env,
 /// follow aliases (MtyAlias/MtyIdent), and then find type t in its signature.
@@ -1496,17 +1101,15 @@ fn resolve_type_through_env<'a>(
     for item in &module_sig {
         if let SignatureItem::SigType(id, decl, _) = item {
             if id.name() == type_name {
-                let rewritten_decl =
-                    rewrite_type_decl_for_module_access_path(ctx, decl, &module_sig, module_path);
                 if let Some(target_path) = alias_target_for_strengthening.as_ref() {
                     return Some(strengthen_type_decl_for_module_access_path(
                         ctx,
                         target_path,
                         id,
-                        &rewritten_decl,
+                        decl,
                     ));
                 }
-                return Some(rewritten_decl);
+                return Some(decl.clone());
             }
         }
     }
@@ -1564,17 +1167,19 @@ fn normalize_path_full_inner<'a>(
         }
     }
 
-    // Fall back to full module resolution machinery (env modules + CMI files)
-    // to catch aliases that simple path lookup misses (including stamped
-    // local Pident paths that need name-based resolution).
-    if !visiting.insert(path.clone()) {
-        return path;
-    }
-    let mut resolve_visiting = HashSet::new();
-    if let Some(mty) = resolve_module_type_through_env_path(ctx, env, &path, &mut resolve_visiting)
-    {
-        if let super::decl::ModuleType::MtyAlias(_, alias_path) = &mty {
-            return normalize_path_full_inner(ctx, env, alias_path, depth + 1, visiting);
+    // For Pdot paths not found in env, use the full module resolution machinery
+    // (navigates module signatures from env modules and CMI files).
+    if matches!(path, Path::Pdot(..)) {
+        if !visiting.insert(path.clone()) {
+            return path;
+        }
+        let mut resolve_visiting = HashSet::new();
+        if let Some(mty) =
+            resolve_module_type_through_env_path(ctx, env, &path, &mut resolve_visiting)
+        {
+            if let super::decl::ModuleType::MtyAlias(_, alias_path) = &mty {
+                return normalize_path_full_inner(ctx, env, alias_path, depth + 1, visiting);
+            }
         }
     }
 
@@ -1604,37 +1209,9 @@ fn try_expand_head<'a>(
     ty: TypeExprRef,
 ) -> Option<TypeExprRef> {
     let debug_image_alias = std::env::var_os("RUST_DEBUG_IMAGE_ALIAS").is_some();
-    let debug_abbrev_env = std::env::var_os("RUST_DEBUG_ABBREV_ENV").is_some();
     // OCaml ctype.ml: expand_abbrev_gen starts with check_abbrev_env env.
     // This keeps simple_abbrevs scoped to the current env identity.
     ctx.check_abbrev_env(env);
-    if debug_abbrev_env {
-        let ty_repr = ctx.repr(ty);
-        let head = {
-            let desc = ctx.get_desc(ty_repr);
-            match &*desc {
-                TypeDesc::Tconstr { path, .. } => format!("Tconstr({})", path.name()),
-                TypeDesc::Tarrow { .. } => "Tarrow".to_string(),
-                TypeDesc::Tvar(_) => "Tvar".to_string(),
-                TypeDesc::Tunivar(_) => "Tunivar".to_string(),
-                TypeDesc::Tlink(t) => format!("Tlink({})", ctx.repr(*t).0),
-                TypeDesc::Tsubst(t) => format!("Tsubst({})", ctx.repr(*t).0),
-                TypeDesc::Ttuple(ts) => format!("Ttuple({})", ts.len()),
-                TypeDesc::Tobject { .. } => "Tobject".to_string(),
-                TypeDesc::Tfield { .. } => "Tfield".to_string(),
-                TypeDesc::Tnil => "Tnil".to_string(),
-                TypeDesc::Tvariant(_) => "Tvariant".to_string(),
-                TypeDesc::Tpoly { .. } => "Tpoly".to_string(),
-                TypeDesc::Tpackage { .. } => "Tpackage".to_string(),
-            }
-        };
-        eprintln!(
-            "[abbrev-expand] env={} ty={} head={}",
-            env.id(),
-            ty_repr.0,
-            head
-        );
-    }
 
     let ty = ctx.repr(ty);
     let desc = ctx.get_desc(ty);
@@ -1645,7 +1222,6 @@ fn try_expand_head<'a>(
             let orig_abbrev = *abbrev;
             let lookup_abbrev = proper_abbrevs(ctx, &path, &args, *abbrev);
             let path_name = path.name();
-            let debug_expand_target = std::env::var("RUST_DEBUG_EXPAND_TYPE").ok();
             if debug_image_alias && path.head_name() == "imageElement" {
                 eprintln!(
                     "[image-alias][try-expand-enter] ty={} path={} args={}",
@@ -1684,18 +1260,7 @@ fn try_expand_head<'a>(
                         || path_name == "element"
                         || path_name.ends_with(".element")
                         || path_name == "componentLike"
-                        || path_name.ends_with(".componentLike")))
-                || (std::env::var_os("RUST_DEBUG_EXPAND_EVENT").is_some()
-                    && (path_name == "ReactEvent.Form.t"
-                        || path_name == "JsxEvent.Form.t"
-                        || path_name == "ReactEvent.Form.tag"
-                        || path_name == "JsxEvent.Form.tag"
-                        || path_name == "ReactEvent.synthetic"
-                        || path_name == "JsxEvent.synthetic"
-                        || path_name == "synthetic"))
-                || debug_expand_target
-                    .as_deref()
-                    .is_some_and(|target| target == path_name);
+                        || path_name.ends_with(".componentLike")));
             if debug_expand {
                 eprintln!(
                     "[expand] path={} enter ty={} level={} env_id={} stamp={} lookup={:?} memo={:?}",
@@ -2226,15 +1791,6 @@ fn try_expand_head<'a>(
                             }
                             return Some(expanded);
                         }
-                    } else if debug_expand {
-                        eprintln!(
-                            "[expand] path={} resolve_type_through_env no-manifest type_path={}",
-                            path_name,
-                            decl.type_path
-                                .as_ref()
-                                .map(|p| p.name())
-                                .unwrap_or_else(|| "<none>".to_string())
-                        );
                     } else if debug_image_alias && path.head_name() == "imageElement" {
                         eprintln!(
                             "[image-alias][try-expand-info] reason=resolve-env-no-manifest ty={} path={}",
@@ -2250,33 +1806,6 @@ fn try_expand_head<'a>(
             // following module aliases. If the normalized path differs, create
             // a new Tconstr with the normalized path so the next expansion
             // attempt can find the type declaration.
-            if let Path::Pdot(parent, last, pos) = &path {
-                if let Path::Pident(id) = parent.as_ref() {
-                    if id.stamp() != 0 {
-                        if let Some(mapped_prefix) = ctx.find_module_path_by_stamp(id.stamp()) {
-                            let normalized_path =
-                                Path::Pdot(Box::new(mapped_prefix.clone()), last.clone(), *pos);
-                            if normalized_path != path {
-                                if debug_expand {
-                                    eprintln!(
-                                        "[expand] path={} module-stamp-normalize -> {}",
-                                        path_name,
-                                        normalized_path.name()
-                                    );
-                                }
-                                let level = ctx.get_level(ty);
-                                let normalized = ctx.new_type(TypeDesc::Tconstr {
-                                    path: normalized_path,
-                                    args: args.clone(),
-                                    abbrev: orig_abbrev,
-                                });
-                                ctx.set_level(normalized, level);
-                                return Some(normalized);
-                            }
-                        }
-                    }
-                }
-            }
             let path_norm = normalize_path_full(ctx, env, &path);
             if path_norm != path {
                 if debug_image_alias && path.head_name() == "imageElement" {
@@ -2809,18 +2338,6 @@ pub fn unify<'a>(
     const MAX_UNIFY_RECURSION_DEPTH: usize = 2048;
     state.recursion_depth += 1;
     if state.recursion_depth > MAX_UNIFY_RECURSION_DEPTH {
-        if std::env::var_os("RUST_DEBUG_UNIFY_DEPTH").is_some() {
-            let r1 = ctx.repr(t1);
-            let r2 = ctx.repr(t2);
-            eprintln!(
-                "[unify-depth-limit] depth={} t1=#{} repr1=#{} t2=#{} repr2=#{}",
-                state.recursion_depth,
-                t1.0,
-                r1.0,
-                t2.0,
-                r2.0
-            );
-        }
         state.recursion_depth -= 1;
         return Err(TypeError::Unify(vec![]));
     }
@@ -3200,36 +2717,7 @@ fn unify_types<'a>(
             },
         ) => {
             let debug_image_alias = std::env::var_os("RUST_DEBUG_IMAGE_ALIAS").is_some();
-            let debug_unify_event = std::env::var_os("RUST_DEBUG_UNIFY_EVENT").is_some();
             let debug_v0 = std::env::var_os("RUST_DEBUG_UNIFY_V0").is_some();
-            if std::env::var_os("RUST_DEBUG_UNIFY_TPATH").is_some()
-                && (path1.name() == "t" || path2.name() == "t")
-            {
-                eprintln!(
-                    "[unify-tpath] t1=#{} path1={:?} args1={:?} t2=#{} path2={:?} args2={:?} same={}",
-                    t1.0,
-                    path1,
-                    args1.iter().map(|a| ctx.repr(*a).0).collect::<Vec<_>>(),
-                    t2.0,
-                    path2,
-                    args2.iter().map(|a| ctx.repr(*a).0).collect::<Vec<_>>(),
-                    path1.same(path2)
-                );
-            }
-            let debug_event_pair = if debug_unify_event {
-                let p1 = path1.name();
-                let p2 = path2.name();
-                (p1 == "JsxEvent.Form.t"
-                    || p1 == "ReactEvent.Form.t"
-                    || p1 == "JsxEvent.Form.tag"
-                    || p1 == "ReactEvent.Form.tag")
-                    || (p2 == "JsxEvent.Form.t"
-                        || p2 == "ReactEvent.Form.t"
-                        || p2 == "JsxEvent.Form.tag"
-                        || p2 == "ReactEvent.Form.tag")
-            } else {
-                false
-            };
             if debug_v0 {
                 let p1 = path1.name();
                 let p2 = path2.name();
@@ -3253,152 +2741,9 @@ fn unify_types<'a>(
                     );
                 }
             }
-            fn prefix_path_with_head(path: &Path, head: &Ident) -> Option<Path> {
-                match path {
-                    Path::Pident(id) => Some(Path::pdot(
-                        Path::pident(head.clone()),
-                        id.name().to_string(),
-                    )),
-                    Path::Pdot(parent, name, pos) => {
-                        let prefixed_parent = prefix_path_with_head(parent, head)?;
-                        Some(Path::Pdot(Box::new(prefixed_parent), name.clone(), *pos))
-                    }
-                    Path::Papply(_, _) => None,
-                }
-            }
-
-            let paths_equivalent = if path1.same(path2) {
-                true
-            } else {
-                if let Some(env) = state.env() {
-                    {
-                        let norm1 = env.normalize_path(path1);
-                        let norm2 = env.normalize_path(path2);
-                        let same_arity = args1.len() == args2.len();
-                        let mut equivalent = same_arity && norm1.same(&norm2);
-                        if !equivalent
-                            && path1.name() == path2.name()
-                            && path1.head().stamp() != 0
-                            && path2.head().stamp() != 0
-                            && path1.head().name() == path2.head().name()
-                            && same_arity
-                        {
-                            equivalent = true;
-                            if std::env::var_os("RUST_DEBUG_UNIFY_TPATH").is_some() {
-                                eprintln!(
-                                    "[unify-tpath-name-eq] left={}#{} right={}#{}",
-                                    path1.head().name(),
-                                    path1.head().stamp(),
-                                    path2.head().name(),
-                                    path2.head().stamp()
-                                );
-                            }
-                        }
-                        if !equivalent && same_arity {
-                            let leaf_local_match = match (path1, path2) {
-                                (Path::Pident(id1), Path::Pdot(_, _, _))
-                                    if id1.stamp() != 0
-                                        && path1.head_name() == path2.head_name() =>
-                                {
-                                    true
-                                }
-                                (Path::Pdot(_, _, _), Path::Pident(id2))
-                                    if id2.stamp() != 0
-                                        && path1.head_name() == path2.head_name() =>
-                                {
-                                    true
-                                }
-                                _ => false,
-                            };
-                            if leaf_local_match {
-                                equivalent = true;
-                                if std::env::var_os("RUST_DEBUG_UNIFY_TPATH").is_some() {
-                                    eprintln!(
-                                        "[unify-tpath-leaf-eq] left={} right={}",
-                                        path1.name(),
-                                        path2.name()
-                                    );
-                                }
-                            }
-                        }
-                        if !equivalent && same_arity && path2.head().stamp() != 0 {
-                            if let Some(prefixed_path2) =
-                                prefix_path_with_head(path2, path1.head())
-                            {
-                                let prefixed_norm2 = env.normalize_path(&prefixed_path2);
-                                if prefixed_norm2.same(&norm1) {
-                                    equivalent = true;
-                                    if std::env::var_os("RUST_DEBUG_UNIFY_TPATH").is_some() {
-                                        eprintln!(
-                                            "[unify-tpath-prefixed] base={} relative={} prefixed={} normalized={}",
-                                            path1.name(),
-                                            path2.name(),
-                                            prefixed_path2.name(),
-                                            prefixed_norm2.name()
-                                        );
-                                    }
-                                }
-                            }
-                        }
-                        if !equivalent && same_arity && path1.head().stamp() != 0 {
-                            if let Some(prefixed_path1) =
-                                prefix_path_with_head(path1, path2.head())
-                            {
-                                let prefixed_norm1 = env.normalize_path(&prefixed_path1);
-                                if prefixed_norm1.same(&norm2) {
-                                    equivalent = true;
-                                    if std::env::var_os("RUST_DEBUG_UNIFY_TPATH").is_some() {
-                                        eprintln!(
-                                            "[unify-tpath-prefixed] base={} relative={} prefixed={} normalized={}",
-                                            path2.name(),
-                                            path1.name(),
-                                            prefixed_path1.name(),
-                                            prefixed_norm1.name()
-                                        );
-                                    }
-                                }
-                            }
-                        }
-                        if equivalent && std::env::var_os("RUST_DEBUG_UNIFY_TPATH").is_some() {
-                            eprintln!(
-                                "[unify-tpath-normalized] left={} right={} norm_left={} norm_right={}",
-                                path1.name(),
-                                path2.name(),
-                                norm1.name(),
-                                norm2.name()
-                            );
-                        }
-                        equivalent
-                    }
-                } else {
-                    path1.name() == path2.name()
-                        && path1.head().stamp() != 0
-                        && path2.head().stamp() != 0
-                        && path1.head().name() == path2.head().name()
-                        && args1.len() == args2.len()
-                }
-            };
-
-            if !paths_equivalent {
+            if !path1.same(path2) {
                 let p1 = path1.name();
                 let p2 = path2.name();
-                if std::env::var_os("RUST_DEBUG_UNIFY_TPATH").is_some() {
-                    eprintln!(
-                        "[unify-tpath-mismatch] left={} head={}#{} right={} head={}#{}",
-                        p1,
-                        path1.head().name(),
-                        path1.head().stamp(),
-                        p2,
-                        path2.head().name(),
-                        path2.head().stamp()
-                    );
-                }
-                if debug_event_pair {
-                    eprintln!(
-                        "[unify-event][mismatch] t1={} {} t2={} {}",
-                        t1.0, p1, t2.0, p2
-                    );
-                }
                 let debug_image_alias_pair = debug_image_alias
                     && ((p1 == "Html.imageElement"
                         || p1 == "Dom_html.imageElement"
@@ -3453,55 +2798,6 @@ fn unify_types<'a>(
                 if let Some(env) = state.env() {
                     let exp1 = expand_head(ctx, env, t1);
                     let exp2 = expand_head(ctx, env, t2);
-                    if debug_event_pair {
-                        let summarize = |ty: TypeExprRef| -> String {
-                            let r = ctx.repr(ty);
-                            let d = ctx.get_desc(r);
-                            match &*d {
-                                TypeDesc::Tconstr { path, args, .. } => format!(
-                                    "{}#{}({})",
-                                    path.name(),
-                                    r.0,
-                                    args.iter()
-                                        .map(|a| {
-                                            let ar = ctx.repr(*a);
-                                            let ad = ctx.get_desc(ar);
-                                            match &*ad {
-                                                TypeDesc::Tconstr { path, .. } => {
-                                                    format!("{}#{}", path.name(), ar.0)
-                                                }
-                                                TypeDesc::Tvar(_) => format!("Tvar#{}", ar.0),
-                                                TypeDesc::Tunivar(_) => format!("Tunivar#{}", ar.0),
-                                                TypeDesc::Tarrow { .. } => format!("Tarrow#{}", ar.0),
-                                                TypeDesc::Tlink(link) => {
-                                                    format!("Tlink#{}->{}", ar.0, ctx.repr(*link).0)
-                                                }
-                                                _ => format!("other#{}", ar.0),
-                                            }
-                                        })
-                                        .collect::<Vec<_>>()
-                                        .join(",")
-                                ),
-                                TypeDesc::Tvar(_) => format!("Tvar#{}", r.0),
-                                TypeDesc::Tunivar(_) => format!("Tunivar#{}", r.0),
-                                TypeDesc::Tarrow { arg, ret, .. } => format!(
-                                    "Tarrow#{}({}->{})",
-                                    r.0,
-                                    ctx.repr(arg.typ).0,
-                                    ctx.repr(*ret).0
-                                ),
-                                TypeDesc::Tlink(link) => {
-                                    format!("Tlink#{}->{}", r.0, ctx.repr(*link).0)
-                                }
-                                _ => format!("other#{}", r.0),
-                            }
-                        };
-                        eprintln!(
-                            "[unify-event][expand] exp1={} exp2={}",
-                            summarize(exp1),
-                            summarize(exp2)
-                        );
-                    }
                     if debug_image_alias_pair {
                         let exp1_repr = ctx.repr(exp1);
                         let exp2_repr = ctx.repr(exp2);
@@ -3525,16 +2821,7 @@ fn unify_types<'a>(
                         );
                     }
                     if exp1 != t1 || exp2 != t2 {
-                        let result = unify_after_expansion(ctx, state, t1, exp1, t2, exp2);
-                        if debug_event_pair {
-                            eprintln!(
-                                "[unify-event][after-expand] ok={} t1={} t2={}",
-                                result.is_ok(),
-                                ctx.repr(t1).0,
-                                ctx.repr(t2).0
-                            );
-                        }
-                        return result;
+                        return unify_after_expansion(ctx, state, t1, exp1, t2, exp2);
                     }
                 }
 
@@ -3596,15 +2883,6 @@ fn unify_types<'a>(
             let args2 = args2.clone();
             let path_name = path1.head_name().to_string();
             let path_full = path1.name();
-            let debug_event_same_path = std::env::var_os("RUST_DEBUG_UNIFY_EVENT").is_some()
-                && matches!(
-                    path_full.as_str(),
-                    "JsxEvent.synthetic"
-                        | "ReactEvent.synthetic"
-                        | "synthetic"
-                        | "JsxEvent.Form.tag"
-                        | "ReactEvent.Form.tag"
-                );
             let skip_nullary_fast_link = args1.is_empty()
                 && (has_cached_expansion(ctx, path1, *abbrev1)
                     || has_cached_expansion(ctx, path2, *abbrev2));
@@ -3627,49 +2905,6 @@ fn unify_types<'a>(
             }
             drop(desc1);
             drop(desc2);
-
-            // Match OCaml unify3 expression-mode same-path Tconstr:
-            // link_type t1' t2; unify_list tl1 tl2.
-            // Do not run Rust-only expansion/phantom shortcuts in this path.
-            if state.mode == crate::types::UnifyMode::Expression {
-                link_type(ctx, t1, t2);
-                for (&a, &b) in args1.iter().zip(args2.iter()) {
-                    let res = unify(ctx, state, a, b);
-                    if res.is_err() && std::env::var_os("RUST_DEBUG_UNIFY_TPATH").is_some() {
-                        let summarize = |ty: TypeExprRef| {
-                            let r = ctx.repr(ty);
-                            let d = ctx.get_desc(r);
-                            match &*d {
-                                TypeDesc::Tvar(name) => format!("Tvar({:?})#{}@{}", name, r.0, ctx.get_level(r)),
-                                TypeDesc::Tunivar(name) => format!("Tunivar({:?})#{}@{}", name, r.0, ctx.get_level(r)),
-                                TypeDesc::Tconstr { path, args, .. } => format!(
-                                    "Tconstr({},{:?})#{}@{}",
-                                    path.name(),
-                                    args.iter().map(|a| ctx.repr(*a).0).collect::<Vec<_>>(),
-                                    r.0,
-                                    ctx.get_level(r)
-                                ),
-                                TypeDesc::Ttuple(ts) => format!(
-                                    "Ttuple({:?})#{}@{}",
-                                    ts.iter().map(|t| ctx.repr(*t).0).collect::<Vec<_>>(),
-                                    r.0,
-                                    ctx.get_level(r)
-                                ),
-                                TypeDesc::Tlink(t) => format!("Tlink({})#{}@{}", ctx.repr(*t).0, r.0, ctx.get_level(r)),
-                                _ => format!("other#{}@{}", r.0, ctx.get_level(r)),
-                            }
-                        };
-                        eprintln!(
-                            "[unify-tpath-arg-fail] path={} a={} b={}",
-                            path_full,
-                            summarize(a),
-                            summarize(b)
-                        );
-                    }
-                    res?;
-                }
-                return Ok(());
-            }
 
             // OCaml ctype.ml unify3: for same-path Tconstr, just unify args.
             // OCaml's unify2 expands abbreviations BEFORE unify3, but the
@@ -3716,22 +2951,6 @@ fn unify_types<'a>(
                 .enumerate()
                 .map(|(i, (&a, &b))| (i, a, b))
                 .collect();
-            if debug_event_same_path {
-                let arg_dump = pairs
-                    .iter()
-                    .map(|(i, a, b)| format!("{i}:{}~{}", ctx.repr(*a).0, ctx.repr(*b).0))
-                    .collect::<Vec<_>>()
-                    .join(",");
-                eprintln!(
-                    "[unify-event][same-path] path={} t1={} t2={} all_phantom={} phantom_mask={:?} pairs=[{}]",
-                    path_full,
-                    t1.0,
-                    t2.0,
-                    all_phantom,
-                    phantom_mask,
-                    arg_dump
-                );
-            }
 
             // OCaml's unify2 expands abbreviations (expand_head_unif) on
             // both sides BEFORE calling unify3. unify3's catch-all does
@@ -3796,25 +3015,7 @@ fn unify_types<'a>(
             for (i, a, b) in pairs {
                 // Skip phantom params — OCaml's expansion hides them.
                 if !phantom_mask.get(i).copied().unwrap_or(false) {
-                    if debug_event_same_path {
-                        eprintln!(
-                            "[unify-event][same-path-arg] path={} i={} a={} b={}",
-                            path_full,
-                            i,
-                            ctx.repr(a).0,
-                            ctx.repr(b).0
-                        );
-                    }
-                    let res = unify(ctx, state, a, b);
-                    if debug_event_same_path {
-                        eprintln!(
-                            "[unify-event][same-path-arg] path={} i={} ok={}",
-                            path_full,
-                            i,
-                            res.is_ok()
-                        );
-                    }
-                    res?;
+                    unify(ctx, state, a, b)?;
                 }
             }
 
@@ -3880,7 +3081,11 @@ fn unify_types<'a>(
             // OCaml links t1'→t2 BEFORE recursing into children
             link_type(ctx, t1, t2);
 
-            unify_rows(ctx, state, &row1, &row2)?;
+            let merged_row = unify_rows(ctx, state, &row1, &row2)?;
+            // Keep the unified representative row shape (OCaml `unify_row` merges
+            // disjoint labels through row-more links, so the resulting repr exposes
+            // the union of labels rather than whichever side happened to be linked).
+            ctx.set_desc(t2, TypeDesc::Tvariant(merged_row));
             Ok(())
         }
 
@@ -4182,7 +3387,7 @@ fn unify_types<'a>(
 /// Sort row fields alphabetically by label, matching OCaml's `sort_row_fields`.
 fn sort_row_fields(fields: &[(String, RowField)]) -> Vec<(String, RowField)> {
     let mut sorted = fields.to_vec();
-    sorted.sort_by(|(a_label, _), (b_label, _)| a_label.cmp(b_label));
+    sorted.sort_by(|(a, _), (b, _)| a.cmp(b));
     sorted
 }
 
@@ -4231,11 +3436,6 @@ fn merge_rf(
         i2 += 1;
     }
 
-    // OCaml's merge_rf builds `pairs` by consing to the list head and does not
-    // reverse at the end, so the resulting pair traversal order is the reverse
-    // of sorted encounter order. Preserve that order because unify_row_field
-    // side effects on links depend on it.
-    pairs.reverse();
     (r1, r2, pairs)
 }
 
@@ -4273,303 +3473,139 @@ fn unify_rows<'a>(
     row1: &RowDesc,
     row2: &RowDesc,
 ) -> TypeResult<RowDesc> {
-    let debug_rows = std::env::var_os("RUST_DEBUG_UNIFY_ROWS").is_some();
-    // Match OCaml ctype.ml unify_row: normalize both rows with row_repr before
-    // any merging/unification so nested row-more chains are flattened into the
-    // current row_fields traversal.
-    let row1 = super::btype::row_repr(ctx, row1);
-    let row2 = super::btype::row_repr(ctx, row2);
-    let rm1 = row_more(ctx, &row1);
-    let rm2 = row_more(ctx, &row2);
-
-    if ctx.repr(rm1) == ctx.repr(rm2) {
-        return Ok(row2);
-    }
+    let row1 = row_repr(ctx, row1);
+    let row2 = row_repr(ctx, row2);
 
     let (r1, r2, pairs) = merge_row_fields(&row1.row_fields, &row2.row_fields);
 
     let fixed1 = row_fixed(ctx, &row1);
     let fixed2 = row_fixed(ctx, &row2);
-    let more = if fixed1 {
-        rm1
-    } else if fixed2 {
-        rm2
-    } else {
-        let m = ctx.new_var(None);
-        let min_level = std::cmp::min(ctx.get_level(ctx.repr(rm1)), ctx.get_level(ctx.repr(rm2)));
-        ctx.set_level(m, min_level);
-        m
-    };
-    let fixed = fixed1 || fixed2;
-    let closed = row1.row_closed || row2.row_closed;
-    let empty = |fields: &[(String, RowField)]| {
-        fields
-            .iter()
-            .all(|(_, f)| matches!(super::btype::row_field_repr(ctx, f), RowField::Rabsent))
-    };
-    let debug_row_case = debug_rows
-        && (row1
-            .row_fields
-            .iter()
-            .any(|(l, _)| {
-                l == "TopLeft"
-                    || l == "BottomLeft"
-                    || l == "Landscape"
-                    || l == "Portrait"
-                    || l == "Square"
-                    || l == "S"
-                    || l == "M"
-                    || l == "L"
-                    || l == "CameraMic"
-                    || l == "Mic"
-                    || l == "None"
-                    || l == "VIEWPORT"
-                    || l == "TIMELINE"
-                    || l == "RECORDING"
-                    || l == "TRIMMING"
-                    || l == "X"
-                    || l == "Y"
-            })
-            || row2
-                .row_fields
-                .iter()
-                .any(|(l, _)| {
-                    l == "TopLeft"
-                        || l == "BottomLeft"
-                        || l == "Landscape"
-                        || l == "Portrait"
-                        || l == "Square"
-                        || l == "S"
-                        || l == "M"
-                        || l == "L"
-                        || l == "CameraMic"
-                        || l == "Mic"
-                        || l == "None"
-                        || l == "VIEWPORT"
-                        || l == "TIMELINE"
-                        || l == "RECORDING"
-                        || l == "TRIMMING"
-                        || l == "X"
-                        || l == "Y"
-                }));
-    let describe_field = |field: &RowField| -> String {
-        match super::btype::row_field_repr(ctx, field) {
-            RowField::Rabsent => "Rabsent".to_string(),
-            RowField::Rpresent(None) => "Rpresent(None)".to_string(),
-            RowField::Rpresent(Some(t)) => format!("Rpresent(Some(#{}))", ctx.repr(t).0),
-            RowField::Reither {
-                constant,
-                types,
-                matched,
-                link,
-            } => {
-                let mut ty_ids = String::new();
-                for (i, ty) in types.iter().enumerate() {
-                    if i > 0 {
-                        ty_ids.push(',');
-                    }
-                    ty_ids.push_str(&ctx.repr(*ty).0.to_string());
-                }
-                format!(
-                    "Reither(c={},m={},types=[{}],link={})",
-                    constant, matched, ty_ids, link.0
-                )
-            }
-        }
-    };
-    if debug_row_case {
-        let labels = |fields: &[(String, RowField)]| {
-            fields
-                .iter()
-                .map(|(l, _)| l.as_str())
-                .take(16)
-                .collect::<Vec<_>>()
-                .join(",")
-        };
-        let dump_fields = |fields: &[(String, RowField)]| {
-            fields
-                .iter()
-                .map(|(l, f)| format!("{}={}", l, describe_field(f)))
-                .collect::<Vec<_>>()
-                .join(";")
-        };
-        eprintln!(
-            "[unify-rows] start rm1={} rm2={} fixed1={} fixed2={} closed1={} closed2={} labels1=[{}] labels2=[{}]",
-            ctx.repr(rm1).0,
-            ctx.repr(rm2).0,
-            fixed1,
-            fixed2,
-            row1.row_closed,
-            row2.row_closed,
-            labels(&row1.row_fields),
-            labels(&row2.row_fields)
-        );
-        eprintln!("[unify-rows] fields1 {}", dump_fields(&row1.row_fields));
-        eprintln!("[unify-rows] fields2 {}", dump_fields(&row2.row_fields));
-    }
 
-    // Check whether we are going to build an empty type (OCaml unify_row).
+    let closed = row1.row_closed || row2.row_closed;
+
+    // Check for invalid field presence (matching OCaml's set_more error checks)
     if closed {
+        // If both are closed and one side has fields the other doesn't, error
+        let empty = |fields: &[(String, RowField)]| {
+            fields.iter().all(|(_, f)| matches!(super::btype::row_field_repr(ctx, f), RowField::Rabsent))
+        };
         if (empty(&r1) || row2.row_closed) && (empty(&r2) || row1.row_closed) {
             let all_absent = pairs.iter().all(|(_, f1, f2)| {
                 matches!(super::btype::row_field_repr(ctx, f1), RowField::Rabsent)
                     || matches!(super::btype::row_field_repr(ctx, f2), RowField::Rabsent)
             });
             if all_absent {
-                if debug_row_case {
-                    eprintln!("[unify-rows] error=all-absent-closed");
-                }
                 return Err(TypeError::Unify(vec![]));
             }
         }
     }
 
-    let keep12 = pairs.iter().all(|(_, f1, f2)| {
-        matches!(super::btype::row_field_repr(ctx, f1), RowField::Rabsent)
-            || !matches!(super::btype::row_field_repr(ctx, f2), RowField::Rabsent)
-    });
-    let keep21 = pairs.iter().all(|(_, f1, f2)| {
-        matches!(super::btype::row_field_repr(ctx, f2), RowField::Rabsent)
-            || !matches!(super::btype::row_field_repr(ctx, f1), RowField::Rabsent)
-    });
-    let name = if row1.row_name.is_some()
-        && (row1.row_closed || empty(&r2))
-        && (!row2.row_closed || (keep12 && empty(&r1)))
-    {
+    // Check that non-empty r1/r2 are valid (matching OCaml's set_more checks)
+    if row2.row_closed {
+        let non_absent_r1: Vec<_> = if closed {
+            r1.iter().filter(|(_, f)| {
+                let fr = super::btype::row_field_repr(ctx, f);
+                !matches!(fr, RowField::Rabsent)
+            }).collect()
+        } else {
+            r1.iter().collect()
+        };
+        if !non_absent_r1.is_empty() && (row2.row_closed || row_fixed(ctx, &row2)) {
+            return Err(TypeError::Unify(vec![]));
+        }
+    }
+    if row1.row_closed {
+        let non_absent_r2: Vec<_> = if closed {
+            r2.iter().filter(|(_, f)| {
+                let fr = super::btype::row_field_repr(ctx, f);
+                !matches!(fr, RowField::Rabsent)
+            }).collect()
+        } else {
+            r2.iter().collect()
+        };
+        if !non_absent_r2.is_empty() && (row1.row_closed || row_fixed(ctx, &row1)) {
+            return Err(TypeError::Unify(vec![]));
+        }
+    }
+
+    // Unify the "more" types
+    let more1 = row_more(ctx, &row1);
+    let more2 = row_more(ctx, &row2);
+    unify(ctx, state, more1, more2)?;
+
+    // Unify paired fields
+    let unified_more = ctx.repr(more2);
+    for (_l, f1, f2) in &pairs {
+        match unify_row_field(ctx, state, fixed1, fixed2, unified_more, f1, f2) {
+            Ok(()) => {}
+            Err(_e) => {
+                return Err(TypeError::Unify(vec![]));
+            }
+        }
+    }
+
+    // Determine the row_name (matching OCaml logic at ctype.ml:2572-2583)
+    let empty = |fields: &[(String, RowField)]| {
+        fields.iter().all(|(_, f)| matches!(super::btype::row_field_repr(ctx, f), RowField::Rabsent))
+    };
+    let name = if row1.row_name.is_some() && (row1.row_closed || empty(&r2)) {
         row1.row_name.clone()
-    } else if row2.row_name.is_some()
-        && (row2.row_closed || empty(&r1))
-        && (!row1.row_closed || (keep21 && empty(&r2)))
-    {
+    } else if row2.row_name.is_some() && (row2.row_closed || empty(&r1)) {
         row2.row_name.clone()
     } else {
         None
     };
 
-    let filter_row_fields = |erase: bool, fields: &[(String, RowField)]| -> Vec<(String, RowField)> {
-        let mut filtered = Vec::new();
-        for (label, field) in fields {
-            match super::btype::row_field_repr(ctx, field) {
-                RowField::Rabsent => {}
-                RowField::Reither {
-                    matched: false,
-                    link,
-                    ..
-                } if erase => {
-                    ctx.set_row_field(link, RowField::Rabsent);
-                }
-                repr => filtered.push((label.clone(), repr)),
-            }
+    // Build merged fields preserving row2's original field order, then appending
+    // row1's surplus. This matches OCaml's unify_row behavior:
+    // - unify(body_type, expected_type) → row1=body(new), row2=accumulated
+    // - OCaml's set_more row2 r1 appends r1 to row2's chain
+    // - row_repr produces: row2's accumulated fields (definition order), then r1
+    let prefer_field = |f1: &RowField, f2: &RowField| -> RowField {
+        match (f1, f2) {
+            (RowField::Rpresent(_), _) => f1.clone(),
+            (_, RowField::Rpresent(_)) => f2.clone(),
+            // For Reither/Reither, keep the representative-side field (right/row2).
+            (RowField::Reither { .. }, RowField::Reither { .. }) => f2.clone(),
+            _ => f1.clone(),
         }
-        filtered
     };
 
-    let mut set_more = |state: &mut UnifyState,
-                        row: &RowDesc,
-                        rest: &[(String, RowField)]|
-     -> TypeResult<()> {
-        let rest = if closed {
-            filter_row_fields(row.row_closed, rest)
-        } else {
-            rest.to_vec()
-        };
+    // Build a lookup of paired fields (label → (f1, f2))
+    let pair_map: HashMap<&str, (&RowField, &RowField)> = pairs.iter()
+        .map(|(l, f1, f2)| (l.as_str(), (f1, f2)))
+        .collect();
 
-        let row_is_fixed = row_fixed(ctx, row);
-        if (!rest.is_empty() && (row.row_closed || row_is_fixed))
-            || (closed && row_is_fixed && !row.row_closed)
-        {
-            return Err(TypeError::Unify(vec![]));
-        }
-
-        let rm = row_more(ctx, row);
-        if row_is_fixed {
-            if ctx.repr(more) == ctx.repr(rm) {
-                return Ok(());
+    // Walk row2's fields in their original order (accumulated/expected side),
+    // resolving pairs in-place
+    let mut merged_fields: Vec<(String, RowField)> = Vec::new();
+    let mut seen = HashSet::new();
+    for (l, f2) in &row2.row_fields {
+        if seen.insert(l.clone()) {
+            if let Some((pf1, pf2)) = pair_map.get(l.as_str()) {
+                merged_fields.push((l.clone(), prefer_field(pf1, pf2)));
+            } else {
+                merged_fields.push((l.clone(), f2.clone()));
             }
-            if super::btype::is_tvar(ctx, rm) {
-                link_type(ctx, rm, more);
-                return Ok(());
-            }
-            return unify(ctx, state, rm, more);
-        }
-
-        let ty = ctx.new_variant(RowDesc {
-            row_fields: rest,
-            row_more: more,
-            row_closed: closed,
-            row_fixed: fixed,
-            row_name: name.clone(),
-        });
-        let rm_level = ctx.get_level(ctx.repr(rm));
-        update_level(ctx, rm_level, ty);
-        link_type(ctx, rm, ty);
-        Ok(())
-    };
-    // OCaml `unify_row` snapshots row_more descriptors and restores them if
-    // any row operation fails (`set_more` or `unify_row_field`), because row
-    // unification mutates links speculatively.
-    let md1 = (*ctx.get_desc(rm1)).clone();
-    let md2 = (*ctx.get_desc(rm2)).clone();
-    let result: TypeResult<()> = (|| {
-        set_more(state, &row2, &r1)?;
-        set_more(state, &row1, &r2)?;
-
-        for (label, f1, f2) in &pairs {
-            if debug_row_case {
-                eprintln!(
-                    "[unify-rows] pair label={} f1={} f2={}",
-                    label,
-                    describe_field(f1),
-                    describe_field(f2)
-                );
-            }
-            match unify_row_field(ctx, state, fixed1, fixed2, more, f1, f2) {
-                Ok(()) => {}
-                Err(_e) => {
-                    if debug_row_case {
-                        eprintln!(
-                            "[unify-rows] error=unify-row-field label={} f1={} f2={}",
-                            label,
-                            describe_field(f1),
-                            describe_field(f2)
-                        );
-                    }
-                    return Err(TypeError::Unify(vec![]));
-                }
-            }
-        }
-
-        if super::btype::static_row(ctx, &row1) {
-            let rm = row_more(ctx, &row1);
-            if super::btype::is_tvar(ctx, rm) {
-                let tnil = ctx.new_type(TypeDesc::Tnil);
-                let rm_level = ctx.get_level(ctx.repr(rm));
-                ctx.set_level(tnil, rm_level);
-                link_type(ctx, rm, tnil);
-            }
-        }
-
-        Ok(())
-    })();
-
-    match result {
-        Ok(()) => {
-            if debug_row_case {
-                eprintln!(
-                    "[unify-rows] ok more={} fixed={} closed={}",
-                    ctx.repr(more).0,
-                    fixed,
-                    closed
-                );
-            }
-            Ok(row2)
-        }
-        Err(err) => {
-            ctx.set_desc(rm1, md1);
-            ctx.set_desc(rm2, md2);
-            Err(err)
         }
     }
+
+    // Append surplus from row1 in their original order (matching OCaml's
+    // set_more row2 r1 which appends r1 fields to row2's chain)
+    let row1_surplus: HashSet<&str> = r1.iter().map(|(l, _)| l.as_str()).collect();
+    for (l, f) in &row1.row_fields {
+        if row1_surplus.contains(l.as_str()) && seen.insert(l.clone()) {
+            merged_fields.push((l.clone(), f.clone()));
+        }
+    }
+
+    Ok(RowDesc {
+        row_fields: merged_fields,
+        row_more: ctx.repr(more2),
+        row_closed: closed,
+        row_fixed: row1.row_fixed || row2.row_fixed,
+        row_name: name,
+    })
 }
 
 /// Unify two row fields.
@@ -5718,33 +4754,7 @@ pub fn lower_args<'a>(ctx: &'a TypeContext<'a>, env: &Env, ty: TypeExprRef) {
     let mut seen = Vec::new();
     let mut current = ty;
     loop {
-        if std::env::var_os("RUST_DEBUG_LOWER_ARGS_DOMREF").is_some() {
-            let current_repr = ctx.repr(current);
-            let current_desc = ctx.get_desc(current_repr);
-            if let TypeDesc::Tconstr { path, .. } = &*current_desc {
-                if path.name() == "ReactDOM.domRef" {
-                    eprintln!(
-                        "[rust-lower-args-domref] stage=pre-expand level={} current_level={}",
-                        ctx.get_level(current_repr),
-                        ctx.current_level()
-                    );
-                }
-            }
-        }
         let expanded = expand_head(ctx, env, current);
-        if std::env::var_os("RUST_DEBUG_LOWER_ARGS_DOMREF").is_some() {
-            let expanded_repr = ctx.repr(expanded);
-            let expanded_desc = ctx.get_desc(expanded_repr);
-            if let TypeDesc::Tconstr { path, .. } = &*expanded_desc {
-                if path.name() == "ReactDOM.domRef" {
-                    eprintln!(
-                        "[rust-lower-args-domref] stage=post-expand level={} current_level={}",
-                        ctx.get_level(expanded_repr),
-                        ctx.current_level()
-                    );
-                }
-            }
-        }
         if seen.iter().any(|&s| s == expanded) {
             return;
         }
@@ -6258,7 +5268,7 @@ fn copy_sep_inner(
         TypeDesc::Tvariant(row0) => {
             let row = row_repr(ctx, &row0);
             let more = ctx.repr(row.row_more);
-            let keep = ctx.get_level(more) != GENERIC_LEVEL;
+            let keep = super::btype::is_tvar(ctx, more) && ctx.get_level(more) != GENERIC_LEVEL;
             let more_copy = copy_sep_inner(
                 ctx,
                 more,
@@ -6425,10 +5435,6 @@ pub fn instance_constructor(
             || cstr.cstr_name == "Empty"
             || cstr.cstr_name == "SPlayer"
             || cstr.cstr_name == "SEnemy"
-            || cstr.cstr_name == "Success"
-            || cstr.cstr_name == "Failure"
-            || cstr.cstr_name == "Initial"
-            || cstr.cstr_name == "Loading"
             || cstr.cstr_name == "Some"
             || cstr.cstr_name == "One"
             || cstr.cstr_name == "Two"
@@ -7676,30 +6682,9 @@ fn copy_type_cached(
                 CopyAction::Constr { path, args } => {
                     let abbrevs = ctx.current_abbreviations();
                     let lookup_abbrevs = proper_abbrevs(ctx, &path, &args, abbrevs);
-                    let uses_simple_abbrevs = lookup_abbrevs == ctx.simple_abbrevs_memo();
-                    let is_local_nonpersistent =
-                        !matches!(&path, Path::Papply(_, _)) && !path.head().is_persistent();
-                    let path_name = path.name();
-                    let debug_copy_domref = std::env::var_os("RUST_DEBUG_COPY_DOMREF").is_some()
-                        && path_name == "ReactDOM.domRef";
-                    let allow_cross_instance_share =
-                        uses_simple_abbrevs
-                            && !is_local_nonpersistent
-                            && (path_name == "Stdlib.JSON.t" || path_name == "Stdlib_JSON.t");
-                    if debug_copy_domref {
-                        eprintln!(
-                            "[rust-copy-domref] enter ty={} level={} current_level={} lookup={:?} memo={:?} simple={:?}",
-                            ty.0,
-                            level,
-                            ctx.current_level(),
-                            lookup_abbrevs,
-                            ctx.get_abbrev_memo(lookup_abbrevs),
-                            ctx.get_abbrev_memo(ctx.simple_abbrevs_memo())
-                        );
-                    }
                     let debug_copy_constr = std::env::var_os("RUST_DEBUG_COPY_CONSTR").is_some();
                     let full_path_name = if debug_copy_constr {
-                        Some(path_name.clone())
+                        Some(path.name())
                     } else {
                         None
                     };
@@ -7719,23 +6704,12 @@ fn copy_type_cached(
                             || full_path_name.as_deref() == Some("Js.String2.t")
                             || full_path_name.as_deref() == Some("int")
                             || full_path_name.as_deref() == Some("string")
-                            || full_path_name.as_deref() == Some("option")
-                            || full_path_name.as_deref() == Some("t"))
+                            || full_path_name.as_deref() == Some("option"))
                     {
                         full_path_name.clone()
                     } else {
                         None
                     };
-
-                    if allow_cross_instance_share {
-                        if let Some(found_repr) = ctx.find_simple_abbrev_repr(&path) {
-                            if found_repr != placeholder {
-                                cache.nodes.insert(ty, found_repr);
-                                ctx.set_desc(placeholder, TypeDesc::Tlink(found_repr));
-                                return found_repr;
-                            }
-                        }
-                    }
 
                     if let Some(found_ty) = ctx.find_abbrev_repr(lookup_abbrevs, &path) {
                         let found_source = ctx.repr(found_ty);
@@ -7746,17 +6720,11 @@ fn copy_type_cached(
                         // representative.
                         let found_cached = cache.nodes.get(&found_source).copied();
                         let found_repr = found_cached.unwrap_or(found_source);
-                        let stale_local_generic_hit = is_local_nonpersistent && found_cached.is_none()
+                        let stale_local_generic_hit = matches!(
+                            &path,
+                            Path::Pident(id) if !id.is_persistent()
+                        ) && found_cached.is_none()
                             && ctx.get_level(found_source) == GENERIC_LEVEL;
-                        if debug_copy_domref {
-                            eprintln!(
-                                "[rust-copy-domref] hit found_source={} found_cached={:?} found_repr={} stale_local_generic_hit={}",
-                                found_source.0,
-                                found_cached.map(|t| t.0),
-                                found_repr.0,
-                                stale_local_generic_hit
-                            );
-                        }
                         if let Some(path_name) = &debug_path_name {
                             eprintln!(
                                 "[copy-constr] hit path={} ty={} level={} head_stamp={} lookup={:?} found_source={} found_repr={} stale_local_generic_hit={}",
@@ -7786,8 +6754,6 @@ fn copy_type_cached(
                             lookup_abbrevs,
                             memo_state
                         );
-                    } else if debug_copy_domref {
-                        eprintln!("[rust-copy-domref] miss");
                     }
 
                     let args_copy: Vec<_> = args
@@ -7799,10 +6765,6 @@ fn copy_type_cached(
                         AbbrevMemo::Mcons { .. } => ctx.alloc_abbrev(AbbrevMemo::Mlink(abbrevs)),
                         memo => ctx.alloc_abbrev(memo),
                     };
-
-                    if allow_cross_instance_share {
-                        ctx.memorize_simple_abbrev_repr(path.clone(), placeholder);
-                    }
 
                     TypeDesc::Tconstr {
                         path,
@@ -7858,7 +6820,7 @@ fn copy_type_cached(
                     let row = row_repr(ctx, &row);
                     let more = ctx.repr(row.row_more);
                     let more_level = ctx.get_level(more);
-                    let keep = more_level != GENERIC_LEVEL;
+                    let keep = super::btype::is_tvar(ctx, more) && more_level != GENERIC_LEVEL;
                     let more_copy = match ctx.get_desc(more).clone() {
                         TypeDesc::Tconstr { .. } | TypeDesc::Tnil => {
                             copy_type_cached(ctx, more, cache)

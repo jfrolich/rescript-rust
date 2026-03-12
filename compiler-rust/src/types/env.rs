@@ -20,8 +20,8 @@ use super::asttypes::{MutableFlag, PrivateFlag};
 use super::context::TypeContext;
 use super::decl::{
     ConstructorArguments, ConstructorDeclaration, ConstructorDescription, ConstructorTag,
-    LabelDescription, ModtypeDeclaration, ModuleDeclaration, ModuleType, PrimitiveDescription,
-    SignatureItem, TypeDeclaration, TypeKind, ValueDescription, ValueKind,
+    LabelDescription, ModtypeDeclaration, ModuleDeclaration, PrimitiveDescription, TypeDeclaration,
+    TypeKind, ValueDescription, ValueKind,
 };
 use super::path::Path;
 use super::type_expr::{TypeDesc, TypeExprRef};
@@ -236,17 +236,11 @@ impl<T: Clone> BindingTable<T> {
         let stamp = id.stamp();
         if stamp == 0 {
             // All persistent idents share stamp=0, so by_stamp would
-            // return the last-inserted entry. Match by Ident::same instead
-            // to avoid local shadowing hijacking a persistent path lookup.
+            // return the last-inserted type. Use by_name instead.
             self.by_name
                 .get(id.name())
-                .and_then(|entries| {
-                    entries
-                        .iter()
-                        .rev()
-                        .find(|(candidate, _, _)| candidate.same(id))
-                        .map(|(_, v, _)| v)
-                })
+                .and_then(|entries| entries.last())
+                .map(|(_, v, _)| v)
         } else {
             self.by_stamp.get(&stamp)
         }
@@ -389,126 +383,6 @@ impl Env {
         self.id = NEXT_ENV_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }
 
-    fn lookup_module_ref_by_path<'a>(
-        &'a self,
-        path: &Path,
-        depth: usize,
-    ) -> Option<&'a ModuleDeclaration> {
-        if depth > 40 {
-            return None;
-        }
-        match path {
-            Path::Pident(id) => self
-                .modules
-                .find_by_ident(id)
-                .or_else(|| {
-                    // For persistent paths (stamp=0), require exact ident
-                    // matching. Falling back to by-name can hijack a
-                    // persistent path to an opened local alias with the same
-                    // name, which diverges from OCaml IdTbl.find_same.
-                    if id.stamp() == 0 {
-                        None
-                    } else {
-                        self.modules.find_by_name(id.name())
-                    }
-                })
-                .map(|m| m.as_ref()),
-            Path::Pdot(parent, name, _) => {
-                let parent_decl = self.lookup_module_ref_by_path(parent, depth + 1)?;
-                self.lookup_module_in_mty(&parent_decl.md_type, name, depth + 1)
-            }
-            Path::Papply(_, _) => None,
-        }
-    }
-
-    fn lookup_module_in_mty<'a>(
-        &'a self,
-        mty: &'a ModuleType,
-        name: &str,
-        depth: usize,
-    ) -> Option<&'a ModuleDeclaration> {
-        if depth > 40 {
-            return None;
-        }
-        match mty {
-            ModuleType::MtySignature(sig) => sig.iter().rev().find_map(|item| match item {
-                SignatureItem::SigModule(id, md, _) if id.name() == name => Some(md),
-                _ => None,
-            }),
-            ModuleType::MtyAlias(_, alias_path) | ModuleType::MtyIdent(alias_path) => {
-                let alias_decl = self.lookup_module_ref_by_path(alias_path, depth + 1)?;
-                self.lookup_module_in_mty(&alias_decl.md_type, name, depth + 1)
-            }
-            _ => None,
-        }
-    }
-
-    fn lookup_value_in_mty<'a>(
-        &'a self,
-        mty: &'a ModuleType,
-        name: &str,
-        depth: usize,
-    ) -> Option<&'a ValueDescription> {
-        if depth > 40 {
-            return None;
-        }
-        match mty {
-            ModuleType::MtySignature(sig) => sig.iter().rev().find_map(|item| match item {
-                SignatureItem::SigValue(id, vd) if id.name() == name => Some(vd),
-                _ => None,
-            }),
-            ModuleType::MtyAlias(_, alias_path) | ModuleType::MtyIdent(alias_path) => {
-                let alias_decl = self.lookup_module_ref_by_path(alias_path, depth + 1)?;
-                self.lookup_value_in_mty(&alias_decl.md_type, name, depth + 1)
-            }
-            _ => None,
-        }
-    }
-
-    fn lookup_type_in_mty<'a>(
-        &'a self,
-        mty: &'a ModuleType,
-        name: &str,
-        depth: usize,
-    ) -> Option<&'a TypeDeclaration> {
-        if depth > 40 {
-            return None;
-        }
-        match mty {
-            ModuleType::MtySignature(sig) => sig.iter().rev().find_map(|item| match item {
-                SignatureItem::SigType(id, td, _) if id.name() == name => Some(td),
-                _ => None,
-            }),
-            ModuleType::MtyAlias(_, alias_path) | ModuleType::MtyIdent(alias_path) => {
-                let alias_decl = self.lookup_module_ref_by_path(alias_path, depth + 1)?;
-                self.lookup_type_in_mty(&alias_decl.md_type, name, depth + 1)
-            }
-            _ => None,
-        }
-    }
-
-    fn lookup_modtype_in_mty<'a>(
-        &'a self,
-        mty: &'a ModuleType,
-        name: &str,
-        depth: usize,
-    ) -> Option<&'a ModtypeDeclaration> {
-        if depth > 40 {
-            return None;
-        }
-        match mty {
-            ModuleType::MtySignature(sig) => sig.iter().rev().find_map(|item| match item {
-                SignatureItem::SigModtype(id, mtd) if id.name() == name => Some(mtd),
-                _ => None,
-            }),
-            ModuleType::MtyAlias(_, alias_path) | ModuleType::MtyIdent(alias_path) => {
-                let alias_decl = self.lookup_module_ref_by_path(alias_path, depth + 1)?;
-                self.lookup_modtype_in_mty(&alias_decl.md_type, name, depth + 1)
-            }
-            _ => None,
-        }
-    }
-
     // ========================================================================
     // Value Bindings
     // ========================================================================
@@ -545,38 +419,34 @@ impl Env {
             .ok_or_else(|| EnvError::ValueNotFound(name.to_string()))
     }
 
-    /// Update the type of the most recent value binding with this name.
-    pub fn update_value_type_by_name(
-        &mut self,
-        name: &str,
-        new_ty: TypeExprRef,
-    ) -> EnvResult<()> {
-        let entries = self
-            .values
-            .by_name
-            .get_mut(name)
-            .ok_or_else(|| EnvError::ValueNotFound(name.to_string()))?;
-        let (id, value, _) = entries
-            .last_mut()
-            .ok_or_else(|| EnvError::ValueNotFound(name.to_string()))?;
-
-        let mut updated = value.as_ref().clone();
-        updated.val_type = new_ty;
-        let updated = Arc::new(updated);
-        *value = updated.clone();
-
-        // stamp=0 is shared by persistent idents, so by-ident lookup for those
-        // uses name lookup and does not rely on the stamp table.
-        if id.stamp() != 0 {
-            self.values.by_stamp.insert(id.stamp(), updated);
-        }
-        self.bump_id();
-        Ok(())
-    }
-
     /// Iterate over visible value bindings.
     pub fn iter_values(&self) -> impl Iterator<Item = (&Ident, &ValueDescription)> {
         self.values.iter().map(|(id, v)| (id, v.as_ref()))
+    }
+
+    /// Update the visible value binding for `name` with a replacement type.
+    /// This replaces the current binding in-place rather than adding a shadowing entry.
+    pub fn update_value_type_by_name(&mut self, name: &str, new_type: TypeExprRef) -> bool {
+        let Some(entries) = self.values.by_name.get_mut(name) else {
+            return false;
+        };
+        let Some((id, desc, _is_local)) = entries.last_mut() else {
+            return false;
+        };
+
+        let mut updated = (**desc).clone();
+        updated.val_type = new_type;
+        let updated = Arc::new(updated);
+        *desc = updated.clone();
+
+        // Persistent idents share stamp=0, and lookup for those already goes
+        // through by_name. Keep by_stamp untouched for stamp=0.
+        if id.stamp() != 0 {
+            self.values.by_stamp.insert(id.stamp(), updated);
+        }
+
+        self.bump_id();
+        true
     }
 
     /// Count how many value bindings exist for a given name.
@@ -592,14 +462,7 @@ impl Env {
                 .find_by_ident(id)
                 .map(|v| v.as_ref())
                 .ok_or_else(|| EnvError::ValueNotFound(id.name().to_string())),
-            Path::Pdot(parent, name, _) => {
-                if let Some(parent_decl) = self.lookup_module_ref_by_path(parent, 0) {
-                    if let Some(desc) = self.lookup_value_in_mty(&parent_decl.md_type, name, 0) {
-                        return Ok(desc);
-                    }
-                }
-                self.find_value(name)
-            }
+            Path::Pdot(_, name, _) => self.find_value(name),
             Path::Papply(_, _) => Err(EnvError::ValueNotFound("(functor application)".to_string())),
         }
     }
@@ -667,26 +530,9 @@ impl Env {
                 .or_else(|| self.types.find_by_name(id.name()))
                 .map(|t| t.as_ref())
                 .ok_or_else(|| EnvError::TypeNotFound(id.name().to_string())),
-            Path::Pdot(parent, name, _) => {
-                if let Some(parent_decl) = self.lookup_module_ref_by_path(parent, 0) {
-                    if let Some(decl) = self.lookup_type_in_mty(&parent_decl.md_type, name, 0) {
-                        return Ok(decl);
-                    }
-                }
-                self.find_type(name)
-            }
+            Path::Pdot(_, name, _) => self.find_type(name),
             Path::Papply(_, _) => Err(EnvError::TypeNotFound("(functor application)".to_string())),
         }
-    }
-
-    /// Find a type by ident without name-based fallback.
-    /// This mirrors OCaml IdTbl.find_same: for stamped local identifiers we
-    /// should only accept an exact ident match.
-    pub fn lookup_type_by_ident_strict(&self, id: &Ident) -> EnvResult<&TypeDeclaration> {
-        self.types
-            .find_by_ident(id)
-            .map(|t| t.as_ref())
-            .ok_or_else(|| EnvError::TypeNotFound(id.name().to_string()))
     }
 
     // ========================================================================
@@ -799,11 +645,11 @@ impl Env {
     pub fn lookup_module(&self, path: &Path) -> EnvResult<&ModuleDeclaration> {
         match path {
             Path::Pident(id) => self
-                .lookup_module_ref_by_path(path, 0)
+                .modules
+                .find_by_ident(id)
+                .map(|m| m.as_ref())
                 .ok_or_else(|| EnvError::ModuleNotFound(id.name().to_string())),
-            Path::Pdot(_, name, _) => self
-                .lookup_module_ref_by_path(path, 0)
-                .ok_or_else(|| EnvError::ModuleNotFound(name.clone())),
+            Path::Pdot(_, name, _) => self.find_module(name),
             Path::Papply(_, _) => {
                 // For functor application, would need to evaluate the application
                 Err(EnvError::ModuleNotFound(
@@ -819,139 +665,29 @@ impl Env {
     /// if the resulting module is an alias and follows it.
     /// For `Pident(id)`, checks if it's a module alias and follows it.
     pub fn normalize_path(&self, path: &Path) -> Path {
-        let normalized = self.normalize_path_inner(path, 0);
-        if let Ok(filter) = std::env::var("RUST_DEBUG_NORMALIZE_PATH") {
-            let before = path.name();
-            let after = normalized.name();
-            if filter == "*"
-                || before.contains(filter.as_str())
-                || after.contains(filter.as_str())
-            {
-                eprintln!(
-                    "[normalize-path] input={} output={}",
-                    before,
-                    after
-                );
-            }
-        }
-        normalized
-    }
-
-    fn resolve_module_decl_for_normalize(
-        &self,
-        path: &Path,
-        depth: usize,
-    ) -> Option<ModuleDeclaration> {
-        if depth > 20 {
-            return None;
-        }
-
-        match path {
-            Path::Pident(id) => self
-                .modules
-                .find_by_ident(id)
-                .or_else(|| self.modules.find_by_name(id.name()))
-                .map(|md| md.as_ref().clone()),
-            Path::Pdot(parent, name, _) => {
-                let parent_decl = self.resolve_module_decl_for_normalize(parent, depth + 1)?;
-                self.resolve_submodule_decl_from_mty_for_normalize(
-                    &parent_decl.md_type,
-                    name,
-                    depth + 1,
-                )
-            }
-            Path::Papply(_, _) => None,
-        }
-    }
-
-    fn resolve_submodule_decl_from_mty_for_normalize(
-        &self,
-        mty: &ModuleType,
-        submodule_name: &str,
-        depth: usize,
-    ) -> Option<ModuleDeclaration> {
-        if depth > 20 {
-            return None;
-        }
-
-        match mty {
-            ModuleType::MtySignature(sig) => sig.iter().rev().find_map(|item| match item {
-                SignatureItem::SigModule(id, md, _) if id.name() == submodule_name => {
-                    Some(md.clone())
-                }
-                _ => None,
-            }),
-            ModuleType::MtyAlias(_, alias_path) | ModuleType::MtyIdent(alias_path) => {
-                let alias_decl = self.resolve_module_decl_for_normalize(alias_path, depth + 1)?;
-                self.resolve_submodule_decl_from_mty_for_normalize(
-                    &alias_decl.md_type,
-                    submodule_name,
-                    depth + 1,
-                )
-            }
-            _ => None,
-        }
+        self.normalize_path_inner(path, 0)
     }
 
     fn normalize_path_inner(&self, path: &Path, depth: usize) -> Path {
         if depth > 20 {
             return path.clone(); // Prevent infinite loops
         }
-        // Normalize type idents through their declared qualified path when
-        // available (opened/imported types can carry a canonical Pdot path).
-        if let Path::Pident(id) = path {
-            if let Ok(decl) = self.lookup_type_by_ident_strict(id) {
-                if let Some(type_path) = &decl.type_path {
-                    if !type_path.same(path) {
-                        return self.normalize_path_inner(type_path, depth + 1);
-                    }
-                }
-            } else if id.stamp() != 0 {
-                if let Ok(decl) = self.find_type(id.name()) {
-                    if let Some(type_path) = &decl.type_path {
-                        if !type_path.same(path) {
-                            return self.normalize_path_inner(type_path, depth + 1);
-                        }
-                    }
-                }
-            }
-        }
         // First, recursively normalize the prefix for Pdot paths
         let path = match path {
             Path::Pdot(p, s, pos) => {
                 let p_norm = self.normalize_path_inner(p, depth + 1);
-                let candidate = if p_norm == **p {
+                if p_norm == **p {
                     path.clone()
                 } else {
                     Path::Pdot(Box::new(p_norm), s.clone(), *pos)
-                };
-
-                // Resolve nested module paths through parent signatures so
-                // module aliases inside modules normalize correctly.
-                if let Some(md) = self.resolve_module_decl_for_normalize(&candidate, depth + 1) {
-                    if let Some(md_path) = md.md_path.as_ref() {
-                        if !md_path.same(&candidate) {
-                            return self.normalize_path_inner(md_path, depth + 1);
-                        }
-                    }
-                    if let ModuleType::MtyAlias(_, alias_path) = &md.md_type {
-                        return self.normalize_path_inner(alias_path, depth + 1);
-                    }
                 }
-
-                candidate
             }
             _ => path.clone(),
         };
 
-        // Then check if the path itself is a module alias/module-path redirect.
-        if let Some(md) = self.resolve_module_decl_for_normalize(&path, depth + 1) {
-            if let Some(md_path) = md.md_path.as_ref() {
-                if !md_path.same(&path) {
-                    return self.normalize_path_inner(md_path, depth + 1);
-                }
-            }
-            if let ModuleType::MtyAlias(_, alias_path) = &md.md_type {
+        // Then check if the path itself is a module alias
+        if let Ok(md) = self.lookup_module(&path) {
+            if let super::decl::ModuleType::MtyAlias(_, alias_path) = &md.md_type {
                 return self.normalize_path_inner(alias_path, depth + 1);
             }
         }
@@ -992,39 +728,6 @@ impl Env {
             .find_by_name_with_id(name)
             .map(|(id, decl)| (id, decl.as_ref()))
             .ok_or_else(|| EnvError::ModuleNotFound(name.to_string()))
-    }
-
-    /// Find a module type by path.
-    pub fn lookup_modtype(&self, path: &Path) -> EnvResult<&ModtypeDeclaration> {
-        match path {
-            Path::Pident(id) => self
-                .modtypes
-                .find_by_ident(id)
-                .or_else(|| {
-                    // Keep behavior consistent with module lookup:
-                    // non-persistent copied idents may lose stamp identity
-                    // across signatures, so fall back to by-name lookup.
-                    if id.stamp() == 0 {
-                        None
-                    } else {
-                        self.modtypes.find_by_name(id.name())
-                    }
-                })
-                .map(|m| m.as_ref())
-                .ok_or_else(|| EnvError::ModuleNotFound(id.name().to_string())),
-            Path::Pdot(parent, name, _) => {
-                if let Some(parent_decl) = self.lookup_module_ref_by_path(parent, 0) {
-                    if let Some(decl) = self.lookup_modtype_in_mty(&parent_decl.md_type, name, 0)
-                    {
-                        return Ok(decl);
-                    }
-                }
-                self.find_modtype(name)
-            }
-            Path::Papply(_, _) => Err(EnvError::ModuleNotFound(
-                "(functor application)".to_string(),
-            )),
-        }
     }
 
     // ========================================================================

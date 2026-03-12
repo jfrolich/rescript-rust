@@ -770,6 +770,20 @@ fn expand_record_spread_label(
     label: &crate::types::LabelDeclaration,
     visited: &mut HashSet<String>,
 ) -> Option<Vec<crate::types::LabelDeclaration>> {
+    fn alias_with_original_level(
+        ctx: &crate::types::context::TypeContext<'_>,
+        original: TypeExprRef,
+        rebuilt: TypeExprRef,
+    ) -> TypeExprRef {
+        let original = ctx.repr(original);
+        ctx.set_arity_alias(rebuilt, original);
+        let level = ctx.get_level(original);
+        if ctx.get_level(rebuilt) != level {
+            ctx.set_level(rebuilt, level);
+        }
+        rebuilt
+    }
+
     fn substitute_type_params(
         ctx: &crate::types::context::TypeContext<'_>,
         ty: TypeExprRef,
@@ -777,39 +791,49 @@ fn expand_record_spread_label(
         args: &[TypeExprRef],
         cache: &mut HashMap<TypeExprRef, TypeExprRef>,
     ) -> TypeExprRef {
-        let ty = ctx.repr(ty);
         if let Some(substituted) = cache.get(&ty) {
             return *substituted;
         }
-        for (idx, param) in params.iter().enumerate() {
-            if ctx.repr(*param) == ty {
-                return args[idx];
+        let find_substitution = |name: &str| -> Option<TypeExprRef> {
+            for (idx, param) in params.iter().enumerate() {
+                let param_desc = ctx.get_desc(*param);
+                match &*param_desc {
+                    crate::types::TypeDesc::Tvar(Some(param_name))
+                    | crate::types::TypeDesc::Tunivar(Some(param_name))
+                        if param_name == name =>
+                    {
+                        return Some(args[idx]);
+                    }
+                    _ => {}
+                }
             }
-        }
+            None
+        };
+
         let desc = ctx.get_desc(ty);
         let substituted = match &*desc {
-            crate::types::TypeDesc::Tvar(_)
-            | crate::types::TypeDesc::Tunivar(_)
+            crate::types::TypeDesc::Tvar(Some(name))
+            | crate::types::TypeDesc::Tunivar(Some(name)) => {
+                find_substitution(name).unwrap_or(ty)
+            }
+            crate::types::TypeDesc::Tvar(None)
+            | crate::types::TypeDesc::Tunivar(None)
             | crate::types::TypeDesc::Tnil => ty,
             crate::types::TypeDesc::Tlink(target) => {
                 let new_target = substitute_type_params(ctx, *target, params, args, cache);
-                if new_target == *target {
-                    ty
-                } else {
-                    let new_node = ctx.new_type(crate::types::TypeDesc::Tlink(new_target));
-                    ctx.set_arity_alias(new_node, ty);
-                    new_node
-                }
+                alias_with_original_level(
+                    ctx,
+                    ty,
+                    ctx.new_type(crate::types::TypeDesc::Tlink(new_target)),
+                )
             }
             crate::types::TypeDesc::Tsubst(target) => {
                 let new_target = substitute_type_params(ctx, *target, params, args, cache);
-                if new_target == *target {
-                    ty
-                } else {
-                    let new_node = ctx.new_type(crate::types::TypeDesc::Tsubst(new_target));
-                    ctx.set_arity_alias(new_node, ty);
-                    new_node
-                }
+                alias_with_original_level(
+                    ctx,
+                    ty,
+                    ctx.new_type(crate::types::TypeDesc::Tsubst(new_target)),
+                )
             }
             crate::types::TypeDesc::Tconstr {
                 path,
@@ -820,42 +844,25 @@ fn expand_record_spread_label(
                     .iter()
                     .map(|arg| substitute_type_params(ctx, *arg, params, args, cache))
                     .collect();
-                if new_args == *inner_args {
-                    ty
-                } else {
-                    let new_node = ctx.new_constr(path.clone(), new_args);
-                    // Match OCaml's {t with desc = ...} which preserves type_expr.id:
-                    // register the new node as an alias of the original so the sexp
-                    // serializer deduplicates them to the same entry.
-                    ctx.set_arity_alias(new_node, ty);
-                    new_node
-                }
+                alias_with_original_level(ctx, ty, ctx.new_constr(path.clone(), new_args))
             }
             crate::types::TypeDesc::Tarrow {
                 arg, ret, arity, ..
             } => {
                 let new_arg = substitute_type_params(ctx, arg.typ, params, args, cache);
                 let new_ret = substitute_type_params(ctx, *ret, params, args, cache);
-                if new_arg == arg.typ && new_ret == *ret {
-                    ty
-                } else {
-                    let new_node = ctx.new_arrow(arg.lbl.clone(), new_arg, new_ret, *arity);
-                    ctx.set_arity_alias(new_node, ty);
-                    new_node
-                }
+                alias_with_original_level(
+                    ctx,
+                    ty,
+                    ctx.new_arrow(arg.lbl.clone(), new_arg, new_ret, *arity),
+                )
             }
             crate::types::TypeDesc::Ttuple(items) => {
                 let new_items: Vec<_> = items
                     .iter()
                     .map(|item| substitute_type_params(ctx, *item, params, args, cache))
                     .collect();
-                if new_items == *items {
-                    ty
-                } else {
-                    let new_node = ctx.new_tuple(new_items);
-                    ctx.set_arity_alias(new_node, ty);
-                    new_node
-                }
+                alias_with_original_level(ctx, ty, ctx.new_tuple(new_items))
             }
             crate::types::TypeDesc::Tobject { fields, name } => {
                 let new_fields = substitute_type_params(ctx, *fields, params, args, cache);
@@ -868,16 +875,14 @@ fn expand_record_spread_label(
                             .collect::<Vec<_>>(),
                     )
                 });
-                if new_fields == *fields && new_name == *name {
-                    ty
-                } else {
-                    let new_node = ctx.new_type(crate::types::TypeDesc::Tobject {
+                alias_with_original_level(
+                    ctx,
+                    ty,
+                    ctx.new_type(crate::types::TypeDesc::Tobject {
                         fields: new_fields,
                         name: new_name,
-                    });
-                    ctx.set_arity_alias(new_node, ty);
-                    new_node
-                }
+                    }),
+                )
             }
             crate::types::TypeDesc::Tfield {
                 name,
@@ -887,21 +892,18 @@ fn expand_record_spread_label(
             } => {
                 let new_typ = substitute_type_params(ctx, *typ, params, args, cache);
                 let new_rest = substitute_type_params(ctx, *rest, params, args, cache);
-                if new_typ == *typ && new_rest == *rest {
-                    ty
-                } else {
-                    let new_node = ctx.new_type(crate::types::TypeDesc::Tfield {
+                alias_with_original_level(
+                    ctx,
+                    ty,
+                    ctx.new_type(crate::types::TypeDesc::Tfield {
                         name: name.clone(),
                         kind: kind.clone(),
                         typ: new_typ,
                         rest: new_rest,
-                    });
-                    ctx.set_arity_alias(new_node, ty);
-                    new_node
-                }
+                    }),
+                )
             }
             crate::types::TypeDesc::Tvariant(row) => {
-                let mut changed = false;
                 let new_fields: Vec<_> = row
                     .row_fields
                     .iter()
@@ -909,9 +911,6 @@ fn expand_record_spread_label(
                         let new_field = match field {
                             crate::types::RowField::Rpresent(Some(t)) => {
                                 let new_t = substitute_type_params(ctx, *t, params, args, cache);
-                                if new_t != *t {
-                                    changed = true;
-                                }
                                 crate::types::RowField::Rpresent(Some(new_t))
                             }
                             crate::types::RowField::Reither {
@@ -924,9 +923,6 @@ fn expand_record_spread_label(
                                     .iter()
                                     .map(|t| substitute_type_params(ctx, *t, params, args, cache))
                                     .collect();
-                                if new_types != *types {
-                                    changed = true;
-                                }
                                 crate::types::RowField::Reither {
                                     constant: *constant,
                                     types: new_types,
@@ -940,9 +936,6 @@ fn expand_record_spread_label(
                     })
                     .collect();
                 let new_more = substitute_type_params(ctx, row.row_more, params, args, cache);
-                if new_more != row.row_more {
-                    changed = true;
-                }
                 let new_name = row.row_name.as_ref().map(|(path, row_args)| {
                     (
                         path.clone(),
@@ -952,22 +945,17 @@ fn expand_record_spread_label(
                             .collect::<Vec<_>>(),
                     )
                 });
-                if new_name != row.row_name {
-                    changed = true;
-                }
-                if !changed {
-                    ty
-                } else {
-                    let new_node = ctx.new_variant(crate::types::RowDesc {
+                alias_with_original_level(
+                    ctx,
+                    ty,
+                    ctx.new_variant(crate::types::RowDesc {
                         row_fields: new_fields,
                         row_more: new_more,
                         row_closed: row.row_closed,
                         row_fixed: row.row_fixed,
                         row_name: new_name,
-                    });
-                    ctx.set_arity_alias(new_node, ty);
-                    new_node
-                }
+                    }),
+                )
             }
             crate::types::TypeDesc::Tpoly { body, vars } => {
                 if vars.is_empty() {
@@ -978,13 +966,7 @@ fn expand_record_spread_label(
                         .iter()
                         .map(|var| substitute_type_params(ctx, *var, params, args, cache))
                         .collect();
-                    if new_body == *body && new_vars == *vars {
-                        ty
-                    } else {
-                        let new_node = ctx.new_poly(new_body, new_vars);
-                        ctx.set_arity_alias(new_node, ty);
-                        new_node
-                    }
+                    alias_with_original_level(ctx, ty, ctx.new_poly(new_body, new_vars))
                 }
             }
             crate::types::TypeDesc::Tpackage {
@@ -996,17 +978,15 @@ fn expand_record_spread_label(
                     .iter()
                     .map(|arg| substitute_type_params(ctx, *arg, params, args, cache))
                     .collect();
-                if new_args == *pkg_args {
-                    ty
-                } else {
-                    let new_node = ctx.new_type(crate::types::TypeDesc::Tpackage {
+                alias_with_original_level(
+                    ctx,
+                    ty,
+                    ctx.new_type(crate::types::TypeDesc::Tpackage {
                         path: path.clone(),
                         lids: lids.clone(),
                         args: new_args,
-                    });
-                    ctx.set_arity_alias(new_node, ty);
-                    new_node
-                }
+                    }),
+                )
             }
         };
         cache.insert(ty, substituted);
