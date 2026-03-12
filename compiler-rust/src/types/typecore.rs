@@ -7532,10 +7532,8 @@ fn type_match(
     if used_batch_non_gadt {
         // The batch non-GADT path now runs pressure/finalize on patterns in
         // OCaml order inside type_match_cases_batch_non_gadt (before body typing).
-        // Keep only scrutinee-side propagation here.
-        close_variant_rows_in_scrutinee_by_cases(tctx, val_case_env, &typed_val_cases, ty_arg);
-        reopen_wildcard_covered_rows_in_scrutinee(tctx, val_case_env, &typed_val_cases, ty_arg);
-        finalize_variant_in_scrutinee_type(tctx.type_ctx, ty_arg);
+        // OCaml does not run an additional scrutinee-row close/reopen pass in
+        // type_cases; keep row mutation on pattern types only.
     } else {
         // OCaml shares row-field links between `instance` copies; Rust does not.
         // Merge case-discovered tags back into the scrutinee row before finalization.
@@ -7558,20 +7556,6 @@ fn type_match(
         for case in typed_val_cases.iter_mut() {
             finalize_variant_in_pattern(tctx, env, &mut case.c_lhs, erase_either);
         }
-
-        close_variant_rows_in_scrutinee_by_cases(tctx, val_case_env, &typed_val_cases, ty_arg);
-
-        // Reopen variant rows AFTER all closing steps. The closing logic operates
-        // on per-case pattern types, but case 0 may share variant nodes with ty_arg
-        // (identity instance). Closing case 0's pattern closes ty_arg too. Reopen
-        // any ty_arg variant rows that have wildcard coverage in any case.
-        reopen_wildcard_covered_rows_in_scrutinee(tctx, val_case_env, &typed_val_cases, ty_arg);
-
-        // Propagate Reither→Rpresent conversions to ty_arg only after close/reopen.
-        // This matches OCaml's pressure_variants -> finalize_variant sequencing:
-        // rows closed by pressure must stay Reither-based, while rows that remain
-        // open (wildcard coverage) are finalized to Rpresent.
-        finalize_variant_in_scrutinee_type(tctx.type_ctx, ty_arg);
     }
 
     // OCaml type_cases: `unify_pats (instance env ty_arg)` propagation happens
