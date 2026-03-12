@@ -403,30 +403,12 @@ pub struct CompilerOptions {
     /// Runtime package path (from -runtime-path flag)
     /// Used to locate stdlib CMIs at {runtime_path}/lib/ocaml/
     pub runtime_path: Option<PathBuf>,
-    /// JSX transform version (from -bs-jsx). When set, enables JSX rewrite
-    /// even if no @@config flag is present in the source.
-    pub jsx_version: Option<i32>,
+    /// Additional modules opened implicitly from `-open` flags.
+    pub open_modules: Vec<String>,
     /// Source filename for interface constraint propagation.
     /// When set, after type_structure, checks for a matching .cmi and
     /// unifies implementation value types with interface types.
     pub source_filename: Option<String>,
-}
-
-fn resolve_jsx_version(
-    structure: &Structure,
-    arena: &crate::parse_arena::ParseArena,
-    options: &CompilerOptions,
-) -> Option<i32> {
-    if let Some(v) = options.jsx_version {
-        return Some(v);
-    }
-    if let Some(v) = extract_file_config_from_structure(structure, arena).jsx_version {
-        return Some(v);
-    }
-    if structure_has_config_string(structure, "-bs-jsx", arena) {
-        return Some(4);
-    }
-    None
 }
 
 /// Compile ReScript source to JavaScript.
@@ -449,14 +431,12 @@ pub fn compile_source_to_js_with_options(
             parser.diagnostics().len()
         ));
     }
-    // Match OCaml behavior: -bs-jsx from CLI (or @@config flags) enables JSX rewrite.
-    let jsx_version = resolve_jsx_version(&structure, parser.arena(), options);
-    let structure = if let Some(version) = jsx_version {
-        if structure_needs_jsx_rewrite(&structure, parser.arena()) {
-            jsx_ppx::transform_structure(structure, version, parser.arena_mut())
-        } else {
-            structure
-        }
+    // Source fallback path: only run JSX rewrite when the file enables `-bs-jsx`.
+    let jsx_enabled = structure_has_config_string(&structure, "-bs-jsx", parser.arena());
+    let structure = if jsx_enabled
+        && structure_needs_jsx_rewrite(&structure, parser.arena())
+    {
+        jsx_ppx::transform_structure(structure, 4, parser.arena_mut())
     } else {
         structure
     };
@@ -483,7 +463,7 @@ pub fn compile_source_to_js_with_options(
     let load_path = build_load_path(options);
     type_ctx.set_load_paths(load_path.clone());
     pers_env.set_load_path(load_path);
-    load_pervasives(&mut pers_env, &mut env, &type_ctx);
+    load_pervasives(&mut pers_env, &mut env, &type_ctx, &options.open_modules);
 
     // Store persistent env in the type check context for module resolution
     tctx.set_persistent_env(pers_env);
@@ -578,7 +558,7 @@ pub fn typecheck_interface_source(
     let load_path = build_load_path(options);
     type_ctx.set_load_paths(load_path.clone());
     pers_env.set_load_path(load_path);
-    load_pervasives(&mut pers_env, &mut env, &type_ctx);
+    load_pervasives(&mut pers_env, &mut env, &type_ctx, &options.open_modules);
 
     tctx.set_persistent_env(pers_env);
 
@@ -649,7 +629,12 @@ fn build_load_path(options: &CompilerOptions) -> Vec<PathBuf> {
 ///
 /// This is equivalent to OCaml's `res_compmisc.ml:initial_env()` which loads
 /// Pervasives.cmi and Stdlib.cmi and opens them into the environment.
-fn load_pervasives<'a>(pers_env: &mut PersistentEnv, env: &mut Env, ctx: &'a TypeContext<'a>) {
+fn load_pervasives<'a>(
+    pers_env: &mut PersistentEnv,
+    env: &mut Env,
+    ctx: &'a TypeContext<'a>,
+    open_modules: &[String],
+) {
     use crate::ident::Ident;
 
     // Try to load and open Pervasives (matches OCaml: open_implicit_module "Pervasives")
@@ -664,6 +649,15 @@ fn load_pervasives<'a>(pers_env: &mut PersistentEnv, env: &mut Env, ctx: &'a Typ
     if pers_env.open_module("Stdlib", env, ctx) {
         if let Some(md) = pers_env.get_module_declaration("Stdlib", ctx) {
             env.add_module(Ident::create_persistent("Stdlib"), md);
+        }
+    }
+
+    // Apply explicit `-open` modules in argument order.
+    for module_name in open_modules {
+        if pers_env.open_module(module_name, env, ctx) {
+            if let Some(md) = pers_env.get_module_declaration(module_name, ctx) {
+                env.add_module(Ident::create_persistent(module_name), md);
+            }
         }
     }
 }
@@ -703,7 +697,7 @@ pub fn typecheck_and_dump_sexp<W: std::io::Write>(
         let load_path = build_load_path(options);
         type_ctx.set_load_paths(load_path.clone());
         pers_env.set_load_path(load_path);
-        load_pervasives(&mut pers_env, &mut env, &type_ctx);
+        load_pervasives(&mut pers_env, &mut env, &type_ctx, &options.open_modules);
         tctx.set_persistent_env(pers_env);
 
         let typed_signature = transl_signature(&mut tctx, &env, parser.arena(), &signature)
@@ -722,13 +716,11 @@ pub fn typecheck_and_dump_sexp<W: std::io::Write>(
             ));
         }
 
-        let jsx_version = resolve_jsx_version(&structure, parser.arena(), options);
-        let structure = if let Some(version) = jsx_version {
-            if structure_needs_jsx_rewrite(&structure, parser.arena()) {
-                jsx_ppx::transform_structure(structure, version, parser.arena_mut())
-            } else {
-                structure
-            }
+        let jsx_enabled = structure_has_config_string(&structure, "-bs-jsx", parser.arena());
+        let structure = if jsx_enabled
+            && structure_needs_jsx_rewrite(&structure, parser.arena())
+        {
+            jsx_ppx::transform_structure(structure, 4, parser.arena_mut())
         } else {
             structure
         };
@@ -749,7 +741,7 @@ pub fn typecheck_and_dump_sexp<W: std::io::Write>(
         let load_path = build_load_path(options);
         type_ctx.set_load_paths(load_path.clone());
         pers_env.set_load_path(load_path);
-        load_pervasives(&mut pers_env, &mut env, &type_ctx);
+        load_pervasives(&mut pers_env, &mut env, &type_ctx, &options.open_modules);
         tctx.set_persistent_env(pers_env);
 
         let (typed_structure, _final_env) = type_structure(&mut tctx, &env, parser.arena(), &structure)
@@ -1222,13 +1214,11 @@ pub fn typecheck_stored_structure_and_dump_sexp<W: std::io::Write>(
     // OCaml starts fresh for each bsc invocation, so we reset to match.
     arena.reset_local_module_counter();
 
-    let jsx_version = resolve_jsx_version(&structure, &arena, options);
-    let structure = if let Some(version) = jsx_version {
-        if structure_needs_jsx_rewrite(&structure, &arena) {
-            jsx_ppx::transform_structure(structure, version, &mut arena)
-        } else {
-            structure
-        }
+    let jsx_enabled = structure_has_config_string(&structure, "-bs-jsx", &arena);
+    let structure = if jsx_enabled
+        && structure_needs_jsx_rewrite(&structure, &arena)
+    {
+        jsx_ppx::transform_structure(structure, 4, &mut arena)
     } else {
         structure
     };
@@ -1248,7 +1238,7 @@ pub fn typecheck_stored_structure_and_dump_sexp<W: std::io::Write>(
     let load_path = build_load_path(options);
     type_ctx.set_load_paths(load_path.clone());
     pers_env.set_load_path(load_path);
-    load_pervasives(&mut pers_env, &mut env, &type_ctx);
+    load_pervasives(&mut pers_env, &mut env, &type_ctx, &options.open_modules);
     tctx.set_persistent_env(pers_env);
 
     let (typed_structure, _final_env) = type_structure(&mut tctx, &env, &arena, &structure)
@@ -1276,7 +1266,7 @@ pub fn typecheck_stored_signature_and_dump_sexp<W: std::io::Write>(
     let load_path = build_load_path(options);
     type_ctx.set_load_paths(load_path.clone());
     pers_env.set_load_path(load_path);
-    load_pervasives(&mut pers_env, &mut env, &type_ctx);
+    load_pervasives(&mut pers_env, &mut env, &type_ctx, &options.open_modules);
     tctx.set_persistent_env(pers_env);
 
     let typed_signature = transl_signature(&mut tctx, &env, &arena, &signature)
