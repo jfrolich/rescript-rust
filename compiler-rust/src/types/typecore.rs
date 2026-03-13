@@ -3201,17 +3201,11 @@ fn build_as_type(
                 // OCaml build_as_type for records creates a fresh record type variable,
                 // then refines it through each label's instantiated arg/res types.
                 let ty = ctx.new_var(None);
+                let record_res = first_label.map(|lbl| lbl.lbl_res).unwrap_or(pat.pat_type);
                 let present_fields_by_pos: std::collections::HashMap<i32, &Pattern> = fields
                     .iter()
                     .map(|(_lid, label_desc, field_pat, _optional)| (label_desc.lbl_pos, field_pat))
                     .collect();
-                let present_labels_by_name: std::collections::HashMap<String, &crate::types::LabelDescription> =
-                    fields
-                        .iter()
-                        .map(|(_lid, label_desc, _field_pat, _optional)| {
-                            (label_desc.lbl_name.clone(), label_desc)
-                        })
-                        .collect();
 
                 let all_labels = get_record_labels(ctx, env, &mut tctx.persistent_env, pat.pat_type)
                     .or_else(|| {
@@ -3223,42 +3217,29 @@ fn build_as_type(
                 if let Some(label_decls) = all_labels {
                     for (idx, label_decl) in label_decls.iter().enumerate() {
                         let label_name = label_decl.ld_id.name().to_string();
-                        let env_label = disambiguate_label(
-                            &label_name,
-                            ty,
-                            env,
-                            &mut tctx.persistent_env,
-                            ctx,
-                        )
-                        .or_else(|| present_labels_by_name.get(&label_name).map(|lbl| (*lbl).clone()));
-
-                        if let Some(env_label) = env_label {
-                            let field_pat = present_fields_by_pos.get(&env_label.lbl_pos).copied();
-                            refine_record_as_type_label(tctx, env, pat, ty, &env_label, field_pat)?;
-                        } else if let Some(field_pat) = present_fields_by_pos.get(&(idx as i32)).copied() {
-                            // Fallback to declaration types when full label env lookup is unavailable.
-                            let fallback_label = crate::types::LabelDescription {
-                                lbl_name: label_name,
-                                lbl_res: ty,
-                                lbl_arg: crate::types::instance(ctx, label_decl.ld_type),
-                                lbl_mut: label_decl.ld_mutable.clone(),
-                                lbl_optional: label_decl.ld_optional,
-                                lbl_pos: idx as i32,
-                                lbl_all: crate::types::LabelArrayRef(0),
-                                lbl_repres: crate::types::RecordRepresentation::RecordRegular,
-                                lbl_private: crate::types::PrivateFlag::Public,
-                                lbl_loc: label_decl.ld_loc.clone(),
-                                lbl_attributes: label_decl.ld_attributes.clone(),
-                            };
-                            refine_record_as_type_label(
-                                tctx,
-                                env,
-                                pat,
-                                ty,
-                                &fallback_label,
-                                Some(field_pat),
-                            )?;
-                        }
+                        let resolved_label = crate::types::LabelDescription {
+                            lbl_name: label_decl.ld_id.name().to_string(),
+                            // Keep OCaml's build_as_type constraint: each label
+                            // result type must point to the concrete record type.
+                            lbl_res: record_res,
+                            lbl_arg: crate::types::instance(ctx, label_decl.ld_type),
+                            lbl_mut: label_decl.ld_mutable.clone(),
+                            lbl_optional: label_decl.ld_optional,
+                            lbl_pos: idx as i32,
+                            lbl_all: crate::types::LabelArrayRef(0),
+                            lbl_repres: crate::types::RecordRepresentation::RecordRegular,
+                            lbl_private: crate::types::PrivateFlag::Public,
+                            lbl_loc: label_decl.ld_loc.clone(),
+                            lbl_attributes: label_decl.ld_attributes.clone(),
+                        };
+                        let env_label =
+                            disambiguate_label(&label_name, record_res, env, &mut tctx.persistent_env, ctx)
+                                .unwrap_or(resolved_label);
+                        let field_pat = present_fields_by_pos
+                            .get(&env_label.lbl_pos)
+                            .copied()
+                            .or_else(|| present_fields_by_pos.get(&(idx as i32)).copied());
+                        refine_record_as_type_label(tctx, env, pat, ty, &env_label, field_pat)?;
                     }
                 } else {
                     for (_lid, label_desc, _field_pat, _optional) in fields.iter() {
@@ -4103,7 +4084,32 @@ pub fn type_expect<'a>(
                         TypeDesc::Tconstr { path, args, .. } => {
                             format!("Tconstr({},args={})", path.name(), args.len())
                         }
-                        TypeDesc::Tarrow { .. } => "Tarrow".to_string(),
+                        TypeDesc::Tarrow { arg, ret, .. } => {
+                            let arg_repr = tctx.type_ctx.repr(arg.typ);
+                            let ret_repr = tctx.type_ctx.repr(*ret);
+                            let arg_head = match &*tctx.type_ctx.get_desc(arg_repr) {
+                                TypeDesc::Tconstr { path, .. } => path.name(),
+                                TypeDesc::Tvar(_) => "Tvar".to_string(),
+                                TypeDesc::Tunivar(_) => "Tunivar".to_string(),
+                                TypeDesc::Tlink(t) => {
+                                    format!("Tlink->{}", tctx.type_ctx.repr(*t).0)
+                                }
+                                _ => format!("ty#{}", arg_repr.0),
+                            };
+                            let ret_head = match &*tctx.type_ctx.get_desc(ret_repr) {
+                                TypeDesc::Tconstr { path, .. } => path.name(),
+                                TypeDesc::Tvar(_) => "Tvar".to_string(),
+                                TypeDesc::Tunivar(_) => "Tunivar".to_string(),
+                                TypeDesc::Tlink(t) => {
+                                    format!("Tlink->{}", tctx.type_ctx.repr(*t).0)
+                                }
+                                _ => format!("ty#{}", ret_repr.0),
+                            };
+                            format!(
+                                "Tarrow({:?},arg={}:{},ret={}:{})",
+                                arg.lbl, arg_repr.0, arg_head, ret_repr.0, ret_head
+                            )
+                        }
                         TypeDesc::Tvar(_) => "Tvar".to_string(),
                         TypeDesc::Tunivar(_) => "Tunivar".to_string(),
                         TypeDesc::Tlink(t) => format!("Tlink({})", ctx.repr(*t).0),
@@ -5293,7 +5299,7 @@ fn unify_expression_types(
 
     match unify(tctx.type_ctx, &mut tctx.unify_state, ty1, ty2) {
         Ok(()) => Ok(()),
-        Err(_) => {
+        Err(err) => {
             if std::env::var_os("RUST_DEBUG_UNIFY_FAIL").is_some() {
                 let summarize = |ty: TypeExprRef| {
                     let repr = tctx.type_ctx.repr(ty);
@@ -5336,15 +5342,30 @@ fn unify_expression_types(
                 };
                 let full_loc = tctx.arena.to_location(loc);
                 eprintln!(
-                    "[unify-fail] loc={}:{} ty1={}({}) ty2={}({}) ctx={:?}",
+                    "[unify-fail] loc={}:{} ty1={}({}) ty2={}({}) ctx={:?} env_present={}",
                     full_loc.loc_start.line,
                     full_loc.loc_start.column(),
                     tctx.type_ctx.repr(ty1).0,
                     summarize(ty1),
                     tctx.type_ctx.repr(ty2).0,
                     summarize(ty2),
-                    context
+                    context,
+                    tctx.unify_state.env().is_some()
                 );
+                if let crate::types::TypeError::Unify(trace) = &err {
+                    for (idx, (lhs, rhs)) in trace.iter().take(12).enumerate() {
+                        eprintln!(
+                            "[unify-fail-trace:{}] lhs_raw={} lhs_repr={}({}) rhs_raw={} rhs_repr={}({})",
+                            idx,
+                            lhs.0,
+                            tctx.type_ctx.repr(*lhs).0,
+                            summarize(*lhs),
+                            rhs.0,
+                            tctx.type_ctx.repr(*rhs).0,
+                            summarize(*rhs)
+                        );
+                    }
+                }
             }
             Err(TypeCoreError::ExprTypeClash {
                 trace: vec![(ty1, ty2)],
