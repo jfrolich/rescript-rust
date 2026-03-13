@@ -947,7 +947,19 @@ pub fn resolve_type_through_modules<'a>(
         if let SignatureItem::SigType(id, decl, _) = item {
             // Register every type by stamp
             if id.stamp() != 0 {
-                ctx.register_type_decl_by_stamp(id.stamp(), decl.clone());
+                let should_register = {
+                    let existing = ctx.find_type_decl_by_stamp(id.stamp());
+                    existing.as_ref().is_none_or(|d| {
+                        d.type_path.is_none() && module_path.head().is_persistent()
+                    })
+                };
+                if should_register {
+                    let mut decl_for_stamp = decl.clone();
+                    if decl_for_stamp.type_path.is_none() && module_path.head().is_persistent() {
+                        decl_for_stamp.type_path = Some(Path::pdot(module_path.clone(), id.name()));
+                    }
+                    ctx.register_type_decl_by_stamp(id.stamp(), decl_for_stamp);
+                }
             }
             if id.name() == type_name {
                 // Cache the target type in the path store
@@ -1677,6 +1689,29 @@ fn try_expand_head<'a>(
                                 );
                             }
                             return Some(expanded);
+                        }
+                    }
+                    if let Some(type_path) = store_decl.type_path.as_ref() {
+                        let persistent_head = type_path.head().is_persistent();
+                        if persistent_head
+                            && store_decl.type_params.len() == args.len()
+                            && !type_path.same(&path)
+                        {
+                            if debug_expand {
+                                eprintln!(
+                                    "[expand] path={} stamp-decl type_path rewrite -> {}",
+                                    path_name,
+                                    type_path.name()
+                                );
+                            }
+                            let level = ctx.get_level(ty);
+                            let rewritten = ctx.new_type(TypeDesc::Tconstr {
+                                path: type_path.clone(),
+                                args: args.clone(),
+                                abbrev: orig_abbrev,
+                            });
+                            ctx.set_level(rewritten, level);
+                            return Some(rewritten);
                         }
                     }
                 }
