@@ -409,6 +409,18 @@ pub struct CompilerOptions {
     /// When set, after type_structure, checks for a matching .cmi and
     /// unifies implementation value types with interface types.
     pub source_filename: Option<String>,
+    /// JSX version from CLI `-bs-jsx` (e.g. 4). When set, enables JSX PPX rewrite.
+    pub jsx_version: Option<i32>,
+}
+
+fn jsx_version_for_structure(
+    structure: &Structure,
+    options: &CompilerOptions,
+    arena: &crate::parse_arena::ParseArena,
+) -> Option<i32> {
+    options
+        .jsx_version
+        .or_else(|| structure_has_config_string(structure, "-bs-jsx", arena).then_some(4))
 }
 
 /// Compile ReScript source to JavaScript.
@@ -432,11 +444,13 @@ pub fn compile_source_to_js_with_options(
         ));
     }
     // Source fallback path: only run JSX rewrite when the file enables `-bs-jsx`.
-    let jsx_enabled = structure_has_config_string(&structure, "-bs-jsx", parser.arena());
-    let structure = if jsx_enabled
-        && structure_needs_jsx_rewrite(&structure, parser.arena())
-    {
-        jsx_ppx::transform_structure(structure, 4, parser.arena_mut())
+    let jsx_version = jsx_version_for_structure(&structure, options, parser.arena());
+    let structure = if let Some(jsx_version) = jsx_version {
+        if structure_needs_jsx_rewrite(&structure, parser.arena()) {
+            jsx_ppx::transform_structure(structure, jsx_version, parser.arena_mut())
+        } else {
+            structure
+        }
     } else {
         structure
     };
@@ -716,11 +730,13 @@ pub fn typecheck_and_dump_sexp<W: std::io::Write>(
             ));
         }
 
-        let jsx_enabled = structure_has_config_string(&structure, "-bs-jsx", parser.arena());
-        let structure = if jsx_enabled
-            && structure_needs_jsx_rewrite(&structure, parser.arena())
-        {
-            jsx_ppx::transform_structure(structure, 4, parser.arena_mut())
+        let jsx_version = jsx_version_for_structure(&structure, options, parser.arena());
+        let structure = if let Some(jsx_version) = jsx_version {
+            if structure_needs_jsx_rewrite(&structure, parser.arena()) {
+                jsx_ppx::transform_structure(structure, jsx_version, parser.arena_mut())
+            } else {
+                structure
+            }
         } else {
             structure
         };
@@ -1214,11 +1230,13 @@ pub fn typecheck_stored_structure_and_dump_sexp<W: std::io::Write>(
     // OCaml starts fresh for each bsc invocation, so we reset to match.
     arena.reset_local_module_counter();
 
-    let jsx_enabled = structure_has_config_string(&structure, "-bs-jsx", &arena);
-    let structure = if jsx_enabled
-        && structure_needs_jsx_rewrite(&structure, &arena)
-    {
-        jsx_ppx::transform_structure(structure, 4, &mut arena)
+    let jsx_version = jsx_version_for_structure(&structure, options, &arena);
+    let structure = if let Some(jsx_version) = jsx_version {
+        if structure_needs_jsx_rewrite(&structure, &arena) {
+            jsx_ppx::transform_structure(structure, jsx_version, &mut arena)
+        } else {
+            structure
+        }
     } else {
         structure
     };

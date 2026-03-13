@@ -89,6 +89,7 @@ struct Options {
     include_paths: Vec<PathBuf>,
     runtime_path: Option<PathBuf>,
     open_modules: Vec<String>,
+    jsx_version: Option<i32>,
 }
 
 fn main() {
@@ -163,10 +164,16 @@ fn run() -> Result<()> {
                         opts.open_modules.push(val);
                     }
                 }
+                "-bs-jsx" => {
+                    if let Some(val) = args.next() {
+                        opts.jsx_version = val.parse::<i32>().ok();
+                    }
+                }
                 "-w"
                 | "-warn-error"
                 | "-color"
                 | "-bs-package-name"
+                | "-bs-jsx-mode"
                 | "-pp"
                 | "-ppx"
                 | "-ppxopt" => {
@@ -226,6 +233,7 @@ fn run() -> Result<()> {
         runtime_path,
         open_modules: opts.open_modules.clone(),
         source_filename: Some(source_path.to_string_lossy().into_owned()),
+        jsx_version: opts.jsx_version,
     };
 
     if is_interface {
