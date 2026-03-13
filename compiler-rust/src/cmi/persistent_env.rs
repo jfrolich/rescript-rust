@@ -628,6 +628,21 @@ fn substitute_type_paths_in_sig_with_maps(
     }
 }
 
+/// Apply parent-scope substitutions to a child signature.
+///
+/// This matches the first step performed by `substitute_submodule_paths`:
+/// when entering a submodule, references to parent-defined types/modules
+/// should be rewritten to qualified paths rooted at `parent_module_path`.
+pub fn substitute_type_paths_in_child_sig(
+    child_sig: &[SignatureItem],
+    parent_sig: &[SignatureItem],
+    parent_module_path: &Path,
+    ctx: &TypeContext<'_>,
+) {
+    let parent_maps = build_subst_maps(parent_sig, parent_module_path);
+    substitute_type_paths_in_sig_with_maps(child_sig, &parent_maps, ctx);
+}
+
 pub fn substitute_type_paths_in_sig(
     sig_items: &[SignatureItem],
     module_path: &Path,

@@ -896,17 +896,38 @@ fn resolve_module_signature_through_cmi<'a>(
         Path::Pdot(parent, module_name, _) => {
             let parent_sig =
                 resolve_module_signature_through_cmi(ctx, load_paths, parent, visiting)?;
-            parent_sig.into_iter().find_map(|item| match item {
-                SignatureItem::SigModule(id, md, _) if id.name() == module_name => match md.md_type
-                {
-                    ModuleType::MtySignature(sig) => Some(sig),
-                    ModuleType::MtyAlias(_, alias_path) | ModuleType::MtyIdent(alias_path) => {
-                        resolve_module_signature_through_cmi(ctx, load_paths, &alias_path, visiting)
+            let mut resolved = None;
+            for item in &parent_sig {
+                if let SignatureItem::SigModule(id, md, _) = item {
+                    if id.name() == module_name {
+                        resolved = match &md.md_type {
+                            ModuleType::MtySignature(sig) => {
+                                // Mirror OCaml Subst behavior when descending into
+                                // submodules: keep parent substitutions visible.
+                                crate::cmi::persistent_env::substitute_type_paths_in_child_sig(
+                                    sig,
+                                    &parent_sig,
+                                    parent,
+                                    ctx,
+                                );
+                                Some(sig.clone())
+                            }
+                            ModuleType::MtyAlias(_, alias_path)
+                            | ModuleType::MtyIdent(alias_path) => {
+                                resolve_module_signature_through_cmi(
+                                    ctx,
+                                    load_paths,
+                                    alias_path,
+                                    visiting,
+                                )
+                            }
+                            _ => None,
+                        };
+                        break;
                     }
-                    _ => None,
-                },
-                _ => None,
-            })
+                }
+            }
+            resolved
         }
         Path::Papply(_, _) => None,
     };
@@ -919,6 +940,7 @@ pub fn resolve_type_through_modules<'a>(
     path: &Path,
 ) -> Option<super::decl::TypeDeclaration> {
     use crate::types::decl::SignatureItem;
+    use crate::types::type_expr::TypeDesc;
 
     let (module_path, type_name) = match path {
         Path::Pdot(parent, name, _) => (parent.as_ref(), name.as_str()),
@@ -933,6 +955,15 @@ pub fn resolve_type_through_modules<'a>(
     let mut visiting = HashSet::new();
     let current_sig =
         resolve_module_signature_through_cmi(ctx, &load_paths, module_path, &mut visiting)?;
+    let debug_event =
+        std::env::var_os("RUST_DEBUG_EXPAND_EVENT").is_some() && path.name().contains("Event.");
+    if debug_event {
+        eprintln!(
+            "[resolve-type] requested={} module_path={}",
+            path.name(),
+            module_path.name()
+        );
+    }
     // Match OCaml Subst/Mtype behavior for module signatures loaded from cmi:
     // rewrite intra-signature type/module references to qualified access paths
     // (e.g. `componentLike` -> `Jsx.componentLike`, `element` -> `Jsx.element`).
@@ -964,6 +995,40 @@ pub fn resolve_type_through_modules<'a>(
             if id.name() == type_name {
                 // Cache the target type in the path store
                 let path_name = path.name();
+                if debug_event {
+                    let manifest_summary = decl
+                        .type_manifest
+                        .map(|m| {
+                            let r = ctx.repr(m);
+                            let d = ctx.get_desc(r);
+                            match &*d {
+                                TypeDesc::Tconstr { path, args, .. } => {
+                                    format!(
+                                        "Tconstr {} args={} head_stamp={} head_persistent={}",
+                                        path.name(),
+                                        args.len(),
+                                        path.head().stamp(),
+                                        path.head().is_persistent()
+                                    )
+                                }
+                                TypeDesc::Tvariant(_) => "Tvariant".to_string(),
+                                TypeDesc::Tarrow { .. } => "Tarrow".to_string(),
+                                TypeDesc::Tvar(_) => "Tvar".to_string(),
+                                _ => format!("{:?}", &*d),
+                            }
+                        })
+                        .unwrap_or_else(|| "<none>".to_string());
+                    eprintln!(
+                        "[resolve-type] match type={} stamp={} type_path={} manifest={}",
+                        id.name(),
+                        id.stamp(),
+                        decl.type_path
+                            .as_ref()
+                            .map(|p| p.name())
+                            .unwrap_or_else(|| "<none>".to_string()),
+                        manifest_summary
+                    );
+                }
                 ctx.register_type_decl_by_path(&path_name, decl.clone());
                 result = Some(decl.clone());
             }
@@ -1272,7 +1337,14 @@ fn try_expand_head<'a>(
                         || path_name == "element"
                         || path_name.ends_with(".element")
                         || path_name == "componentLike"
-                        || path_name.ends_with(".componentLike")));
+                        || path_name.ends_with(".componentLike")))
+                || (std::env::var_os("RUST_DEBUG_EXPAND_EVENT").is_some()
+                    && (path_name.contains("JsxEvent")
+                        || path_name.contains("ReactEvent")
+                        || path_name == "tag"
+                        || path_name.ends_with(".tag")
+                        || path_name.ends_with("Event.Mouse.t")
+                        || path_name.ends_with("Event.Mouse.tag")));
             if debug_expand {
                 eprintln!(
                     "[expand] path={} enter ty={} level={} env_id={} stamp={} lookup={:?} memo={:?}",
