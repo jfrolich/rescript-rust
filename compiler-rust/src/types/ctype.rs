@@ -2869,6 +2869,68 @@ fn unify_types<'a>(
                         p2
                     );
                 }
+
+                // Narrow fallback for local submodule-path aliases where one side
+                // is exactly one segment longer than the other:
+                // `Plain.ComponentInput.t` vs `ComponentInput.t`.
+                // Only accept when the short path is explicitly manifest-aliased
+                // to the long path in the current environment.
+                let seg1: Vec<&str> = p1.split('.').collect();
+                let seg2: Vec<&str> = p2.split('.').collect();
+                let alias_candidate = if seg1.len() == seg2.len() + 1 {
+                    Some((path1, path2, seg1.as_slice(), seg2.as_slice()))
+                } else if seg2.len() == seg1.len() + 1 {
+                    Some((path2, path1, seg2.as_slice(), seg1.as_slice()))
+                } else {
+                    None
+                };
+                if let Some((long_path, short_path, long_segs, short_segs)) = alias_candidate {
+                    if short_segs.len() >= 2
+                        && long_segs[1..] == *short_segs
+                        && !short_path.head().is_persistent()
+                        && args1.len() == args2.len()
+                    {
+                        let alias_matches = if let Some(env) = state.env() {
+                            let long_decl = lookup_type_decl_for_path(ctx, env, long_path);
+                            let short_decl = lookup_type_decl_for_path(ctx, env, short_path);
+                            if short_decl.is_none() {
+                                long_decl.is_some()
+                            } else {
+                                short_decl
+                                    .and_then(|decl| decl.type_manifest)
+                                    .is_some_and(|manifest| {
+                                        let manifest = ctx.repr(manifest);
+                                        let manifest_desc = ctx.get_desc(manifest);
+                                        match &*manifest_desc {
+                                            TypeDesc::Tconstr { path, args, .. } => {
+                                                args.len() == args1.len()
+                                                    && (path.same(long_path)
+                                                        || path.name() == long_path.name())
+                                            }
+                                            _ => false,
+                                        }
+                                    })
+                            }
+                        } else {
+                            false
+                        };
+                        if alias_matches {
+                            let pairs: Vec<_> = args1
+                                .iter()
+                                .zip(args2.iter())
+                                .map(|(&a, &b)| (a, b))
+                                .collect();
+                            drop(desc1);
+                            drop(desc2);
+                            link_type(ctx, t1, t2);
+                            for (a, b) in pairs {
+                                unify(ctx, state, a, b)?;
+                            }
+                            return Ok(());
+                        }
+                    }
+                }
+
                 // Paths differ. Match OCaml flow by attempting alias expansion
                 // before any equation generation.
                 // Extract paths for potential GADT equation handling (nullary Tconstr only)
