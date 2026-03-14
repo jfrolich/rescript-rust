@@ -978,7 +978,7 @@ fn transform_react_component_binding(
                     ppat_attributes: Attributes::new(),
                 }),
                 pvb_expr: arena.push_expr(func_expr),
-                pvb_attributes: filtered_attrs,
+                pvb_attributes: filtered_attrs.clone(),
                 pvb_loc: empty_loc(),
             };
 
@@ -995,7 +995,7 @@ fn transform_react_component_binding(
                         ppat_attributes: Attributes::new(),
                     }),
                     pvb_expr: arena.push_expr(final_full_expression),
-                    pvb_attributes: Attributes::new(),
+                    pvb_attributes: filtered_attrs.clone(),
                     pvb_loc: pstr_loc.clone(),
                 })
             } else {
