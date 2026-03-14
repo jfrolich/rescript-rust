@@ -5826,6 +5826,39 @@ fn type_application(
             crate::types::ctype::split_arrow_with_label(ctx, expanded_current_ty0),
         )
         {
+            // OCaml special case for optional-only applications:
+            // after consuming omitted optional labels, a trailing `()` in call
+            // position is just the optional-arg sentinel and must not be
+            // consumed by the next positional parameter.
+            if consumed_optional_count > 0
+                && omitted.is_empty()
+                && remaining_args.len() == 1
+                && pending_args.len() == synthesized_optional_count
+                && matches!(fn_label, crate::types::ArgLabel::Nolabel)
+            {
+                let param_is_unit = {
+                    let arg_repr = ctx.repr(arg_ty0);
+                    let arg_desc = ctx.get_desc(arg_repr);
+                    matches!(
+                        &*arg_desc,
+                        TypeDesc::Tconstr { path, args, .. }
+                            if path.name() == "unit" && args.is_empty()
+                    )
+                };
+                if !param_is_unit {
+                    if let (ArgLabel::Nolabel, arg_expr_idx) = &remaining_args[0] {
+                        let arg_expr = tctx.arena.get_expr(*arg_expr_idx);
+                        if let crate::parser::ast::ExpressionDesc::Pexp_construct(lid, None) =
+                            &*arg_expr.pexp_desc
+                        {
+                            if tctx.arena.is_lident(lid.txt, "()") {
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+
             let fn_label_name = fn_label.label_name().unwrap_or("");
             if let Some(match_idx) = extract_label_index(&remaining_args, fn_label_name, tctx.arena)
             {
@@ -9723,7 +9756,9 @@ fn type_construct(
                     Path::pident(Ident::create_persistent(lid_name)),
                     desc.clone(),
                 ),
-                Err(_) => return Err(TypeCoreError::NotAVariantType(longident)),
+                Err(_) => {
+                    return Err(TypeCoreError::NotAVariantType(longident));
+                }
             },
         }
         }
@@ -9746,7 +9781,9 @@ fn type_construct(
                     tctx.type_ctx,
                 ) {
                     Some((path, desc)) => (path, desc),
-                    None => return Err(TypeCoreError::NotAVariantType(longident)),
+                    None => {
+                        return Err(TypeCoreError::NotAVariantType(longident));
+                    }
                 }
             }
         }
@@ -15908,6 +15945,153 @@ fn compare_type_paths_for_disambiguation<'a>(
     left_expanded.same(&right_expanded)
 }
 
+fn path_root_module(path: &Path) -> Path {
+    match path {
+        Path::Pident(id) => Path::pident(id.clone()),
+        Path::Pdot(prefix, _, _) => path_root_module(prefix),
+        Path::Papply(_, _) => path.clone(),
+    }
+}
+
+fn type_contains_unresolved_local_path<'a>(
+    ctx: &'a crate::types::context::TypeContext<'a>,
+    env: &Env,
+    pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
+    ty: TypeExprRef,
+    visited: &mut HashSet<TypeExprRef>,
+) -> bool {
+    use crate::types::type_expr::RowField;
+
+    let repr = ctx.repr(ty);
+    if !visited.insert(repr) {
+        return false;
+    }
+
+    let desc = ctx.get_desc(repr);
+    match &*desc {
+        TypeDesc::Tconstr { path, args, .. } => {
+            let has_local_head = match path {
+                Path::Pident(_) => true,
+                Path::Pdot(prefix, _, _) => matches!(&**prefix, Path::Pident(_)),
+                Path::Papply(_, _) => false,
+            };
+            if has_local_head && lookup_type_decl_for_path(path, env, pers_env, ctx).is_none() {
+                return true;
+            }
+            args.iter()
+                .any(|arg| type_contains_unresolved_local_path(ctx, env, pers_env, *arg, visited))
+        }
+        TypeDesc::Tarrow { arg, ret, .. } => {
+            type_contains_unresolved_local_path(ctx, env, pers_env, arg.typ, visited)
+                || type_contains_unresolved_local_path(ctx, env, pers_env, *ret, visited)
+        }
+        TypeDesc::Ttuple(items) => items
+            .iter()
+            .any(|item| type_contains_unresolved_local_path(ctx, env, pers_env, *item, visited)),
+        TypeDesc::Tlink(target) | TypeDesc::Tsubst(target) => {
+            type_contains_unresolved_local_path(ctx, env, pers_env, *target, visited)
+        }
+        TypeDesc::Tobject { fields, name } => {
+            if type_contains_unresolved_local_path(ctx, env, pers_env, *fields, visited) {
+                return true;
+            }
+            if let Some((_, args)) = name {
+                return args.iter().any(|arg| {
+                    type_contains_unresolved_local_path(ctx, env, pers_env, *arg, visited)
+                });
+            }
+            false
+        }
+        TypeDesc::Tfield { typ, rest, .. } => {
+            type_contains_unresolved_local_path(ctx, env, pers_env, *typ, visited)
+                || type_contains_unresolved_local_path(ctx, env, pers_env, *rest, visited)
+        }
+        TypeDesc::Tvariant(row) => {
+            for (_, field) in &row.row_fields {
+                match field {
+                    RowField::Rpresent(Some(ty)) => {
+                        if type_contains_unresolved_local_path(ctx, env, pers_env, *ty, visited) {
+                            return true;
+                        }
+                    }
+                    RowField::Reither { types, .. } => {
+                        if types.iter().any(|ty| {
+                            type_contains_unresolved_local_path(ctx, env, pers_env, *ty, visited)
+                        }) {
+                            return true;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            if type_contains_unresolved_local_path(ctx, env, pers_env, row.row_more, visited) {
+                return true;
+            }
+            if let Some((_, args)) = &row.row_name {
+                return args.iter().any(|arg| {
+                    type_contains_unresolved_local_path(ctx, env, pers_env, *arg, visited)
+                });
+            }
+            false
+        }
+        TypeDesc::Tpoly { body, vars } => {
+            if type_contains_unresolved_local_path(ctx, env, pers_env, *body, visited) {
+                return true;
+            }
+            vars.iter().any(|var| {
+                type_contains_unresolved_local_path(ctx, env, pers_env, *var, visited)
+            })
+        }
+        TypeDesc::Tpackage { args, .. } => args.iter().any(|arg| {
+            type_contains_unresolved_local_path(ctx, env, pers_env, *arg, visited)
+        }),
+        TypeDesc::Tvar(_) | TypeDesc::Tunivar(_) | TypeDesc::Tnil => false,
+    }
+}
+
+fn qualify_label_description_paths<'a>(
+    label: &mut crate::types::LabelDescription,
+    env: &Env,
+    pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
+    ctx: &'a crate::types::context::TypeContext<'a>,
+) {
+    let res_repr = ctx.repr(label.lbl_res);
+    let res_desc = ctx.get_desc(res_repr);
+    let TypeDesc::Tconstr { path: res_path, .. } = &*res_desc else {
+        return;
+    };
+    if !matches!(res_path, Path::Pdot(_, _, _)) {
+        return;
+    }
+    let mut probe_visited = HashSet::new();
+    if !type_contains_unresolved_local_path(ctx, env, pers_env, label.lbl_arg, &mut probe_visited)
+    {
+        return;
+    }
+
+    let mut module_access_paths = Vec::new();
+    if let Some(parent) = res_path.parent() {
+        module_access_paths.push(parent);
+    }
+    let root = path_root_module(res_path);
+    if !module_access_paths.iter().any(|p| p.same(&root)) {
+        module_access_paths.push(root);
+    }
+    drop(res_desc);
+
+    for module_access_path in module_access_paths {
+        let mut visited = HashSet::new();
+        qualify_module_local_type_paths_in_place(
+            ctx,
+            env,
+            pers_env,
+            label.lbl_arg,
+            &module_access_path,
+            &mut visited,
+        );
+    }
+}
+
 /// Disambiguate a constructor by name, considering both the environment and
 /// the expected type. Follows OCaml's disambiguate pattern:
 /// 1. Try to extract the concrete variant type from expected_ty
@@ -16113,7 +16297,9 @@ fn lookup_label_by_lid<'a>(
                 let cand_desc = ctx.get_desc(cand_ty);
                 if let TypeDesc::Tconstr { path, .. } = &*cand_desc {
                     if path.same(&target_path) {
-                        return Some(candidate.clone());
+                        let mut label = candidate.clone();
+                        qualify_label_description_paths(&mut label, env, pers_env, ctx);
+                        return Some(label);
                     }
                 }
             }
@@ -16124,7 +16310,9 @@ fn lookup_label_by_lid<'a>(
                 let cand_desc = ctx.get_desc(cand_ty);
                 if let TypeDesc::Tconstr { path, .. } = &*cand_desc {
                     if path.name() == target_name {
-                        return Some(candidate.clone());
+                        let mut label = candidate.clone();
+                        qualify_label_description_paths(&mut label, env, pers_env, ctx);
+                        return Some(label);
                     }
                 }
             }
@@ -16135,14 +16323,18 @@ fn lookup_label_by_lid<'a>(
                 let cand_desc = ctx.get_desc(cand_ty);
                 if let TypeDesc::Tconstr { path, .. } = &*cand_desc {
                     if path.last().trim_end_matches('!') == target_leaf {
-                        return Some(candidate.clone());
+                        let mut label = candidate.clone();
+                        qualify_label_description_paths(&mut label, env, pers_env, ctx);
+                        return Some(label);
                     }
                 }
             }
         }
     }
 
-    candidates.pop()
+    let mut selected = candidates.pop()?;
+    qualify_label_description_paths(&mut selected, env, pers_env, ctx);
+    Some(selected)
 }
 
 fn lookup_label_by_expected_type<'a>(
@@ -16162,7 +16354,7 @@ fn lookup_label_by_expected_type<'a>(
     let res_ty = ctx.new_generic_constr(type_path, type_decl.type_params.clone());
     for (pos, ld) in labels.iter().enumerate() {
         if ld.ld_id.name() == label_name {
-            return Some(crate::types::LabelDescription {
+            let mut label = crate::types::LabelDescription {
                 lbl_name: ld.ld_id.name().to_string(),
                 lbl_res: res_ty,
                 lbl_arg: crate::types::ctype::remap_label_type_to_params(
@@ -16178,7 +16370,9 @@ fn lookup_label_by_expected_type<'a>(
                 lbl_private: type_decl.type_private,
                 lbl_loc: ld.ld_loc.clone(),
                 lbl_attributes: ld.ld_attributes.clone(),
-            });
+            };
+            qualify_label_description_paths(&mut label, env, pers_env, ctx);
+            return Some(label);
         }
     }
     None
@@ -16282,9 +16476,32 @@ fn disambiguate_label<'a>(
         }
     }
 
-    // Fall back to the most recent label (last in the list)
+    // Keep expected-type fallback before defaulting to lexical shadowing order.
     if selected.is_none() {
         selected = lookup_label_by_expected_type(lookup_name, record_ty, env, pers_env, ctx);
+    }
+
+    // In React component bodies, generated `props` labels can leak into the
+    // global label scope and overshadow local record labels when no concrete
+    // record type is known yet. Prefer a non-`props` candidate in that
+    // unresolved case, then fall back to normal scope order.
+    if selected.is_none() && opath.is_none() {
+        let mut has_props = false;
+        let mut non_props: Vec<&crate::types::LabelDescription> = Vec::new();
+        for label in &all_labels {
+            let lbl_ty = ctx.repr(label.lbl_res);
+            let lbl_desc = ctx.get_desc(lbl_ty);
+            match &*lbl_desc {
+                TypeDesc::Tconstr { path, .. } if path.last().trim_end_matches('!') == "props" => {
+                    has_props = true;
+                }
+                _ => non_props.push(label),
+            }
+        }
+
+        if has_props {
+            selected = non_props.last().map(|label| (*label).clone());
+        }
     }
 
     if selected.is_none() {
@@ -16429,6 +16646,15 @@ fn qualify_module_local_type_paths_in_place<'a>(
         None
     }
 
+    fn prepend_module_prefix(path: &Path, prefix: &Path) -> Option<Path> {
+        match path {
+            Path::Pident(id) => Some(Path::pdot(prefix.clone(), id.name())),
+            Path::Pdot(parent, name, pos) => prepend_module_prefix(parent, prefix)
+                .map(|rewritten_parent| Path::Pdot(Box::new(rewritten_parent), name.clone(), *pos)),
+            Path::Papply(_, _) => None,
+        }
+    }
+
     let repr = ctx.repr(ty);
     if !visited.insert(repr) {
         return;
@@ -16478,6 +16704,16 @@ fn qualify_module_local_type_paths_in_place<'a>(
                 if let Path::Pident(id) = &path {
                     let candidate = Path::pdot(module_access_path.clone(), id.name());
                     if lookup_type_decl_for_path(&candidate, env, pers_env, ctx).is_some() {
+                        rewritten_path = Some(candidate);
+                    }
+                }
+            }
+
+            if rewritten_path.is_none() {
+                if let Some(candidate) = prepend_module_prefix(&path, module_access_path) {
+                    if !candidate.same(&path)
+                        && lookup_type_decl_for_path(&candidate, env, pers_env, ctx).is_some()
+                    {
                         rewritten_path = Some(candidate);
                     }
                 }
