@@ -2878,13 +2878,15 @@ fn unify_types<'a>(
                 let seg1: Vec<&str> = p1.split('.').collect();
                 let seg2: Vec<&str> = p2.split('.').collect();
                 let alias_candidate = if seg1.len() == seg2.len() + 1 {
-                    Some((path1, path2, seg1.as_slice(), seg2.as_slice()))
+                    Some((t1, t2, path1, path2, seg1.as_slice(), seg2.as_slice()))
                 } else if seg2.len() == seg1.len() + 1 {
-                    Some((path2, path1, seg2.as_slice(), seg1.as_slice()))
+                    Some((t2, t1, path2, path1, seg2.as_slice(), seg1.as_slice()))
                 } else {
                     None
                 };
-                if let Some((long_path, short_path, long_segs, short_segs)) = alias_candidate {
+                if let Some((long_ty, short_ty, long_path, short_path, long_segs, short_segs)) =
+                    alias_candidate
+                {
                     if short_segs.len() >= 2
                         && long_segs[1..] == *short_segs
                         && !short_path.head().is_persistent()
@@ -2922,7 +2924,8 @@ fn unify_types<'a>(
                                 .collect();
                             drop(desc1);
                             drop(desc2);
-                            link_type(ctx, t1, t2);
+                            // Keep the longer qualified path as the representative.
+                            link_type(ctx, short_ty, long_ty);
                             for (a, b) in pairs {
                                 unify(ctx, state, a, b)?;
                             }
