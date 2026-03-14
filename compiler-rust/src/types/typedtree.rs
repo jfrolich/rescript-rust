@@ -597,7 +597,7 @@ pub struct TypedModuleDeclaration {
 #[derive(Debug, Clone)]
 pub struct IncludeDescription {
     pub incl_mod: ModuleType,
-    pub incl_type: Vec<SignatureItem>,
+    pub incl_type: Vec<crate::types::decl::SignatureItem>,
     pub incl_attributes: Attributes,
     pub incl_loc: LocIdx,
 }
@@ -853,7 +853,7 @@ pub struct IncludeDeclaration {
     /// Included module expression.
     pub incl_mod: ModuleExpr,
     /// Included module type.
-    pub incl_type: Vec<SignatureItem>,
+    pub incl_type: Vec<crate::types::decl::SignatureItem>,
     /// Attributes.
     pub incl_attributes: Attributes,
     /// Location.
