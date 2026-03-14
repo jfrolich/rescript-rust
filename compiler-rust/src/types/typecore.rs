@@ -10142,6 +10142,43 @@ fn select_record_type_from_qualified_fields<'a>(
     }
 }
 
+fn find_record_qual(
+    arena: &ParseArena,
+    fields: &[crate::parser::ast::ExpressionRecordField],
+) -> Option<Longident> {
+    for field in fields {
+        if let Longident::Ldot(module_lid, _) = arena.get_longident(field.lid.txt) {
+            return Some((**module_lid).clone());
+        }
+    }
+    None
+}
+
+fn qualify_unqualified_record_fields(
+    tctx: &mut TypeCheckContext<'_>,
+    fields: &[crate::parser::ast::ExpressionRecordField],
+) -> Vec<crate::parser::ast::ExpressionRecordField> {
+    let Some(module_qualifier) = find_record_qual(tctx.arena, fields) else {
+        return fields.to_vec();
+    };
+
+    let arena_ptr = tctx.arena as *const ParseArena as *mut ParseArena;
+    let mut rewritten = Vec::with_capacity(fields.len());
+    for field in fields {
+        let mut field = field.clone();
+        if let Longident::Lident(field_name) = tctx.arena.get_longident(field.lid.txt) {
+            let qualified = Longident::Ldot(Box::new(module_qualifier.clone()), *field_name);
+            let qualified_idx = unsafe { (*arena_ptr).push_longident(qualified) };
+            field.lid = Located {
+                txt: qualified_idx,
+                loc: field.lid.loc,
+            };
+        }
+        rewritten.push(field);
+    }
+    rewritten
+}
+
 /// Type check record expression.
 fn type_record(
     tctx: &mut TypeCheckContext<'_>,
@@ -10200,6 +10237,8 @@ fn type_record(
         None
     };
 
+    let fields = qualify_unqualified_record_fields(tctx, fields);
+
     let field_names: Vec<String> = fields
         .iter()
         .map(|field| tctx.longident_last_name(tctx.resolve_lid(field.lid.txt)))
@@ -10220,7 +10259,7 @@ fn type_record(
             tctx.arena,
             env,
             &mut tctx.persistent_env,
-            fields,
+            &fields,
             &field_names,
             closed_record,
         )
