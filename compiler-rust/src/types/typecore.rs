@@ -3605,6 +3605,7 @@ fn type_pattern_record(
             env,
             &mut tctx.persistent_env,
             ctx,
+            Some(record_ty),
         )
         .or_else(|| {
             disambiguate_label(
@@ -10090,6 +10091,57 @@ fn select_record_type_for_fields<'a>(
     }
 }
 
+fn select_record_type_from_qualified_fields<'a>(
+    ctx: &'a TypeContext<'a>,
+    arena: &ParseArena,
+    env: &Env,
+    pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
+    fields: &[crate::parser::ast::ExpressionRecordField],
+    field_names: &[String],
+    closed_record: bool,
+) -> Option<TypeExprRef> {
+    use crate::types::decl::SignatureItem;
+
+    let first_field = fields.first()?;
+    let first_lid = arena.get_longident(first_field.lid.txt);
+    let Longident::Ldot(module_lid, _) = first_lid else {
+        return None;
+    };
+
+    let (module_path, signature) =
+        env.resolve_module_lid(module_lid.as_ref(), arena, pers_env, ctx)?;
+    let mut matches: Vec<TypeExprRef> = Vec::new();
+
+    for sig_item in &signature {
+        let SignatureItem::SigType(type_id, type_decl, _) = sig_item else {
+            continue;
+        };
+        let labels = match &type_decl.type_kind {
+            crate::types::TypeKind::TypeRecord(labels, _) => labels,
+            _ => continue,
+        };
+        if !record_labels_match_ids(labels, field_names, closed_record) {
+            continue;
+        }
+
+        let type_path = Path::pdot(module_path.clone(), type_id.name().to_string());
+        let candidate = ctx.new_generic_constr(type_path, type_decl.type_params.clone());
+        if matches
+            .iter()
+            .any(|existing| ctx.repr(*existing) == ctx.repr(candidate))
+        {
+            continue;
+        }
+        matches.push(candidate);
+    }
+
+    if matches.len() == 1 {
+        matches.into_iter().next()
+    } else {
+        None
+    }
+}
+
 /// Type check record expression.
 fn type_record(
     tctx: &mut TypeCheckContext<'_>,
@@ -10162,6 +10214,17 @@ fn type_record(
         typed_base.as_ref().map(|expr| expr.exp_type),
         closed_record,
     )
+    .or_else(|| {
+        select_record_type_from_qualified_fields(
+            ctx,
+            tctx.arena,
+            env,
+            &mut tctx.persistent_env,
+            fields,
+            &field_names,
+            closed_record,
+        )
+    })
     .unwrap_or_else(|| {
         typed_base
             .as_ref()
@@ -10232,6 +10295,7 @@ fn type_record(
             env,
             &mut tctx.persistent_env,
             ctx,
+            Some(disambiguation_ty),
         )
         .or_else(|| {
             disambiguate_label(
@@ -11017,6 +11081,7 @@ fn type_field(
         env,
         &mut tctx.persistent_env,
         tctx.type_ctx,
+        Some(ty_exp),
     )
     .or_else(|| {
         disambiguate_label(
@@ -11138,6 +11203,7 @@ fn type_setfield(
         env,
         &mut tctx.persistent_env,
         ctx,
+        Some(ty_exp),
     )
     .or_else(|| {
         disambiguate_label(
@@ -15949,6 +16015,7 @@ fn lookup_label_by_lid<'a>(
     env: &Env,
     pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
     ctx: &'a crate::types::context::TypeContext<'a>,
+    expected_record_ty: Option<TypeExprRef>,
 ) -> Option<crate::types::LabelDescription> {
     use crate::types::decl::SignatureItem;
 
@@ -15958,7 +16025,7 @@ fn lookup_label_by_lid<'a>(
 
     let label_name = arena.get_string(*label_idx);
     let (module_path, signature) = env.resolve_module_lid(module_lid, arena, pers_env, ctx)?;
-    let mut selected = None;
+    let mut candidates = Vec::new();
 
     for sig_item in &signature {
         if let SignatureItem::SigType(type_id, type_decl, _) = sig_item {
@@ -15972,7 +16039,7 @@ fn lookup_label_by_lid<'a>(
 
             for (pos, ld) in labels.iter().enumerate() {
                 if ld.ld_id.name() == label_name {
-                    selected = Some(crate::types::LabelDescription {
+                    candidates.push(crate::types::LabelDescription {
                         lbl_name: ld.ld_id.name().to_string(),
                         lbl_res: res_ty,
                         lbl_arg: crate::types::ctype::remap_label_type_to_params(
@@ -15994,7 +16061,49 @@ fn lookup_label_by_lid<'a>(
         }
     }
 
-    selected
+    if candidates.is_empty() {
+        return None;
+    }
+
+    if let Some(record_ty) = expected_record_ty {
+        if let Some(target_path) =
+            extract_type_path_from_expected_with_persistent_env(record_ty, env, pers_env, ctx)
+        {
+            for candidate in candidates.iter().rev() {
+                let cand_ty = ctx.repr(candidate.lbl_res);
+                let cand_desc = ctx.get_desc(cand_ty);
+                if let TypeDesc::Tconstr { path, .. } = &*cand_desc {
+                    if path.same(&target_path) {
+                        return Some(candidate.clone());
+                    }
+                }
+            }
+
+            let target_name = target_path.name();
+            for candidate in candidates.iter().rev() {
+                let cand_ty = ctx.repr(candidate.lbl_res);
+                let cand_desc = ctx.get_desc(cand_ty);
+                if let TypeDesc::Tconstr { path, .. } = &*cand_desc {
+                    if path.name() == target_name {
+                        return Some(candidate.clone());
+                    }
+                }
+            }
+
+            let target_leaf = target_path.last().trim_end_matches('!');
+            for candidate in candidates.iter().rev() {
+                let cand_ty = ctx.repr(candidate.lbl_res);
+                let cand_desc = ctx.get_desc(cand_ty);
+                if let TypeDesc::Tconstr { path, .. } = &*cand_desc {
+                    if path.last().trim_end_matches('!') == target_leaf {
+                        return Some(candidate.clone());
+                    }
+                }
+            }
+        }
+    }
+
+    candidates.pop()
 }
 
 fn lookup_label_by_expected_type<'a>(
