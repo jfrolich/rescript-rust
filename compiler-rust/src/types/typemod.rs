@@ -5598,13 +5598,50 @@ fn type_structure_item<'a>(
                                             } = *ctx.get_desc(repr)
                                             {
                                                 is_pdot = matches!(path, Path::Pdot(..));
-                                                // Try looking up by path in env
-                                                if let Ok(source_decl) = temp_env.lookup_type(path) {
-                                                    if let crate::types::TypeKind::TypeVariant(
-                                                        ref source_cstrs,
-                                                    ) = source_decl.type_kind
-                                                    {
-                                                        found = Some(source_cstrs.clone());
+                                                // Try path-accurate lookup in the current env first.
+                                                // `Env.lookup_type` on Pdot falls back to leaf-name lookup,
+                                                // which can pick an unrelated `t` from opened modules.
+                                                // For spread (`...M.t`) we must resolve the parent module
+                                                // signature and then select the exact type item.
+                                                match path {
+                                                    Path::Pdot(parent, type_name, _) => {
+                                                        let mut visiting = HashSet::new();
+                                                        if let Some(parent_sig) = resolve_path_to_sig_impl(
+                                                            parent,
+                                                            Some(&temp_env),
+                                                            &mut tctx.persistent_env,
+                                                            tctx.type_ctx,
+                                                            &mut visiting,
+                                                        ) {
+                                                            for item in &parent_sig {
+                                                                if let crate::types::decl::SignatureItem::SigType(
+                                                                    id,
+                                                                    decl,
+                                                                    _,
+                                                                ) = item
+                                                                {
+                                                                    if id.name() == type_name.as_str() {
+                                                                        if let crate::types::TypeKind::TypeVariant(
+                                                                            ref source_cstrs,
+                                                                        ) = decl.type_kind
+                                                                        {
+                                                                            found = Some(source_cstrs.clone());
+                                                                        }
+                                                                        break;
+                                                                    }
+                                                                }
+                                                            }
+                                                        }
+                                                    }
+                                                    _ => {
+                                                        if let Ok(source_decl) = temp_env.lookup_type(path) {
+                                                            if let crate::types::TypeKind::TypeVariant(
+                                                                ref source_cstrs,
+                                                            ) = source_decl.type_kind
+                                                            {
+                                                                found = Some(source_cstrs.clone());
+                                                            }
+                                                        }
                                                     }
                                                 }
                                                 // Try global type store by stamp (for Pident paths)

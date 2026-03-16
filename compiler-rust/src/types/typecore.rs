@@ -3377,6 +3377,7 @@ fn type_pattern_construct(
             env,
             &mut tctx.persistent_env,
             tctx.type_ctx,
+            Some(expected_ty),
         ) {
             Some((path, desc)) => (desc, path),
             None => match env.find_constructor(&lid_name) {
@@ -3405,6 +3406,7 @@ fn type_pattern_construct(
                     env,
                     &mut tctx.persistent_env,
                     tctx.type_ctx,
+                    Some(expected_ty),
                 ) {
                     Some((path, desc)) => (desc, path),
                     None => {
@@ -8499,6 +8501,7 @@ fn pattern_contains_generalized_constructor(
                             env,
                             &mut tctx.persistent_env,
                             tctx.type_ctx,
+                            None,
                         )
                         .map(|(_, desc)| desc.cstr_generalized)
                     })
@@ -9749,11 +9752,12 @@ fn type_construct(
             env,
             &mut tctx.persistent_env,
             tctx.type_ctx,
+            Some(expected_ty),
         ) {
             Some((path, desc)) => (path, desc),
             None => match env.find_constructor(&lid_name) {
                 Ok(desc) => (
-                    Path::pident(Ident::create_persistent(lid_name)),
+                    Path::pident(Ident::create_persistent(lid_name.clone())),
                     desc.clone(),
                 ),
                 Err(_) => {
@@ -9779,6 +9783,7 @@ fn type_construct(
                     env,
                     &mut tctx.persistent_env,
                     tctx.type_ctx,
+                    Some(expected_ty),
                 ) {
                     Some((path, desc)) => (path, desc),
                     None => {
@@ -15449,6 +15454,7 @@ fn lookup_constructor_in_module<'b>(
     env: &Env,
     pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
     ctx: &'b crate::types::context::TypeContext<'b>,
+    expected_ty: Option<TypeExprRef>,
 ) -> Option<(Path, crate::types::decl::ConstructorDescription)> {
     use crate::parser::longident::Longident;
     use crate::types::decl::SignatureItem;
@@ -15457,6 +15463,7 @@ fn lookup_constructor_in_module<'b>(
             let cstr_name = arena.get_string(*cstr_idx);
             // Resolve the module prefix to get its signature
             let (mod_path, sig) = env.resolve_module_lid(module_lid, arena, pers_env, ctx)?;
+            let mut candidates: Vec<(Path, crate::types::decl::ConstructorDescription)> = Vec::new();
             // Search the signature for type declarations that contain the constructor
             for sig_item in &sig {
                 if let SignatureItem::SigType(_id, type_decl, _rec) = sig_item {
@@ -15569,7 +15576,7 @@ fn lookup_constructor_in_module<'b>(
                                     cstr_inlined,
                                 };
                                 let path = Path::pident(Ident::create_persistent(cstr_name));
-                                return Some((path, desc));
+                                candidates.push((path, desc));
                             }
                             if is_constant {
                                 const_idx += 1;
@@ -15644,11 +15651,44 @@ fn lookup_constructor_in_module<'b>(
                             cstr_attributes: ext.ext_attributes.clone(),
                             cstr_inlined,
                         };
-                        return Some((ext_path, desc));
+                        candidates.push((ext_path, desc));
                     }
                 }
             }
-            None
+            if candidates.is_empty() {
+                return None;
+            }
+
+            if let Some(expected_ty) = expected_ty {
+                if let Some(target_path) = extract_variant_type_path_from_expected_with_persistent_env(
+                    expected_ty,
+                    env,
+                    pers_env,
+                    ctx,
+                ) {
+                    for (path, desc) in &candidates {
+                        let res_repr = ctx.repr(desc.cstr_res);
+                        let res_desc = ctx.get_desc(res_repr);
+                        if let TypeDesc::Tconstr { path: cstr_path, .. } = &*res_desc {
+                            if cstr_path.same(&target_path)
+                                || compare_type_paths_for_disambiguation(
+                                    cstr_path,
+                                    &target_path,
+                                    env,
+                                    pers_env,
+                                    ctx,
+                                )
+                            {
+                                return Some((path.clone(), desc.clone()));
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Fallback to the most recently introduced constructor, matching
+            // OCaml's scope-order disambiguation for ambiguous constructor names.
+            candidates.into_iter().last()
         }
         _ => None,
     }
