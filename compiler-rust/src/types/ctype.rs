@@ -293,19 +293,20 @@ fn lookup_type_decl_for_path(
         return Some(decl.clone());
     }
 
-    // Prefer the environment's direct path lookup first. This mirrors OCaml's
-    // Env.find_type behavior for in-scope Pdot paths (for example V0.key) and
-    // avoids over-resolving through module signatures when an abstract path
-    // binding already exists in the environment.
-    if let Ok(decl) = env.lookup_type(path) {
-        if let Some(path_name) = &path_name {
-            eprintln!(
-                "[lookup-type] path={} source=env.lookup_type {}",
-                path_name,
-                describe_decl(decl)
-            );
+    // Direct env lookup is reliable for simple identifiers. For qualified
+    // paths, Env.lookup_type currently falls back to leaf-name lookup and can
+    // return an unrelated declaration with the same type name.
+    if let Path::Pident(_) = path {
+        if let Ok(decl) = env.lookup_type(path) {
+            if let Some(path_name) = &path_name {
+                eprintln!(
+                    "[lookup-type] path={} source=env.lookup_type {}",
+                    path_name,
+                    describe_decl(decl)
+                );
+            }
+            return Some(decl.clone());
         }
-        return Some(decl.clone());
     }
 
     if let Some(decl) = resolve_type_through_modules(ctx, path) {
@@ -4328,6 +4329,12 @@ fn force_generalize_sig_type_rec(
     for child in children {
         force_generalize_sig_type_rec(ctx, child, seen);
     }
+}
+
+pub fn force_generalize_sig_type(ctx: &TypeContext<'_>, ty: TypeExprRef) {
+    ctx.clear_simple_abbrevs();
+    let mut seen = HashSet::new();
+    force_generalize_sig_type_rec(ctx, ty, &mut seen);
 }
 
 fn force_generalize_module_type_rec(
