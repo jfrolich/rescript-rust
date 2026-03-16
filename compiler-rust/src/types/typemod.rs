@@ -1267,8 +1267,13 @@ fn find_type_decl_for_path(
     ctx: &crate::types::context::TypeContext<'_>,
     path: &Path,
 ) -> Option<crate::types::TypeDeclaration> {
-    if let Ok(type_decl) = env.lookup_type(path) {
-        return Some((*type_decl).clone());
+    // `Env.lookup_type` on qualified paths currently falls back to leaf-name
+    // lookup, which can select an unrelated declaration with the same type
+    // name. Keep direct env lookup for simple identifiers only.
+    if let Path::Pident(_) = path {
+        if let Ok(type_decl) = env.lookup_type(path) {
+            return Some((*type_decl).clone());
+        }
     }
     if let Path::Pident(id) = path {
         if let Some(type_decl) = ctx.find_type_decl_by_stamp(id.stamp()) {
