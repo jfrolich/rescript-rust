@@ -7789,6 +7789,108 @@ fn type_structure_item<'a>(
                                 eprintln!("[include-labels] sigtype {} kind={}", id.name(), kind);
                             }
                             new_env.add_type(id.clone(), decl.clone());
+                            if let crate::types::TypeKind::TypeVariant(constructors) =
+                                &decl.type_kind
+                            {
+                                // Include should expose constructors from included variant types
+                                // in the current scope, matching OCaml's Env.add_signature.
+                                let ty_res = tctx.type_ctx.new_constr(
+                                    crate::types::path::Path::Pident(id.clone()),
+                                    decl.type_params.clone(),
+                                );
+                                crate::types::ctype::force_generalize_sig_type(
+                                    tctx.type_ctx,
+                                    ty_res,
+                                );
+
+                                let num_consts = constructors
+                                    .iter()
+                                    .filter(|c| {
+                                        matches!(
+                                            c.cd_args,
+                                            crate::types::decl::ConstructorArguments::CstrTuple(
+                                                ref args
+                                            ) if args.is_empty()
+                                        ) && c.cd_res.is_none()
+                                    })
+                                    .count() as i32;
+                                let num_nonconsts = constructors.len() as i32 - num_consts;
+                                let mut const_idx = 0i32;
+                                let mut nonconst_idx = 0i32;
+
+                                for cd in constructors {
+                                    let is_constant = matches!(
+                                        cd.cd_args,
+                                        crate::types::decl::ConstructorArguments::CstrTuple(
+                                            ref args
+                                        ) if args.is_empty()
+                                    ) && cd.cd_res.is_none();
+
+                                    let cstr_tag = if is_constant {
+                                        let tag =
+                                            crate::types::decl::ConstructorTag::CstrConstant(const_idx);
+                                        const_idx += 1;
+                                        tag
+                                    } else {
+                                        let tag =
+                                            crate::types::decl::ConstructorTag::CstrBlock(nonconst_idx);
+                                        nonconst_idx += 1;
+                                        tag
+                                    };
+
+                                    let (cstr_args, cstr_arity) = match &cd.cd_args {
+                                        crate::types::decl::ConstructorArguments::CstrTuple(args) => {
+                                            (args.clone(), args.len() as i32)
+                                        }
+                                        crate::types::decl::ConstructorArguments::CstrRecord(
+                                            labels,
+                                        ) => {
+                                            let args: Vec<crate::types::TypeExprRef> =
+                                                labels.iter().map(|l| l.ld_type).collect();
+                                            (args.clone(), args.len() as i32)
+                                        }
+                                    };
+                                    for arg in &cstr_args {
+                                        crate::types::ctype::force_generalize_sig_type(
+                                            tctx.type_ctx,
+                                            *arg,
+                                        );
+                                    }
+
+                                    let cstr_res = if let Some(res_ty) = cd.cd_res {
+                                        crate::types::ctype::force_generalize_sig_type(
+                                            tctx.type_ctx,
+                                            res_ty,
+                                        );
+                                        res_ty
+                                    } else {
+                                        ty_res
+                                    };
+
+                                    let cstr_existentials =
+                                        crate::types::env::constructor_existentials(
+                                            tctx.type_ctx,
+                                            &cstr_args,
+                                            cd.cd_res,
+                                        );
+                                    let cstr_desc = crate::types::ConstructorDescription {
+                                        cstr_name: cd.cd_id.name().to_string(),
+                                        cstr_res,
+                                        cstr_existentials,
+                                        cstr_args,
+                                        cstr_arity,
+                                        cstr_tag,
+                                        cstr_consts: num_consts,
+                                        cstr_nonconsts: num_nonconsts,
+                                        cstr_generalized: cd.cd_res.is_some(),
+                                        cstr_private: decl.type_private,
+                                        cstr_loc: cd.cd_loc,
+                                        cstr_attributes: cd.cd_attributes.clone(),
+                                        cstr_inlined: None,
+                                    };
+                                    new_env.add_constructor(cd.cd_id.clone(), cstr_desc);
+                                }
+                            }
                             if let crate::types::TypeKind::TypeRecord(labels, repres) =
                                 &decl.type_kind
                             {
@@ -7801,32 +7903,23 @@ fn type_structure_item<'a>(
                                 }
                                 // Include should expose record labels from included types
                                 // in the current scope, matching OCaml's Env.add_signature.
-                                let original_ty_res = tctx.type_ctx.new_constr(
+                                let ty_res = tctx.type_ctx.new_constr(
                                     crate::types::path::Path::Pident(id.clone()),
                                     decl.type_params.clone(),
                                 );
-                                // Include signatures can carry non-generic vars.
-                                // Rebuild a generic scheme for label env entries so
-                                // instance_label creates fresh per-use copies.
-                                let old_level = tctx.type_ctx.current_level();
-                                tctx.type_ctx
-                                    .set_current_level(crate::types::type_expr::GENERIC_LEVEL);
-                                let mut label_copy_cache = HashMap::new();
-                                let ty_res = crate::types::ctype::copy_type_deep(
-                                    tctx.type_ctx,
-                                    original_ty_res,
-                                    &mut label_copy_cache,
-                                );
+                                // Include signatures can carry non-generic nodes in Rust.
+                                // Promote the shared label scheme to generic-level so
+                                // instance_label can instantiate fresh per-use copies.
+                                crate::types::ctype::force_generalize_sig_type(tctx.type_ctx, ty_res);
                                 for (pos, ld) in labels.iter().enumerate() {
-                                    let remapped_ld_type = crate::types::ctype::remap_label_type_to_params(
+                                    let lbl_arg = crate::types::ctype::remap_label_type_to_params(
                                         tctx.type_ctx,
                                         ld.ld_type,
                                         &decl.type_params,
                                     );
-                                    let lbl_arg = crate::types::ctype::copy_type_deep(
+                                    crate::types::ctype::force_generalize_sig_type(
                                         tctx.type_ctx,
-                                        remapped_ld_type,
-                                        &mut label_copy_cache,
+                                        lbl_arg,
                                     );
                                     let lbl_desc = crate::types::LabelDescription {
                                         lbl_name: ld.ld_id.name().to_string(),
@@ -7850,7 +7943,6 @@ fn type_structure_item<'a>(
                                     }
                                     new_env.add_label(ld.ld_id.clone(), lbl_desc);
                                 }
-                                tctx.type_ctx.set_current_level(old_level);
                             }
                         }
                         crate::types::decl::SignatureItem::SigModule(id, md, _) => {
