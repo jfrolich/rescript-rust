@@ -15,7 +15,8 @@
 #   -j, --parallel N  Run N tests in parallel (default: 16)
 #   -v, --verbose     Show progress for each file
 #   --no-build        Skip the initial rewatch build (assume already built)
-#   --tella           Test against tella-fusion project (default: ~/dev/tella-fusion)
+#   --tella           Test tella-fusion, skipping large JSX-heavy files
+#   --tella-jsx       Test only large JSX-heavy tella files
 #   -h, --help        Show this help message
 #
 # EXAMPLES:
@@ -33,6 +34,9 @@
 #
 #   # Test tella-fusion project:
 #   ./scripts/test_typedtree_parity.sh --tella
+#
+#   # Test only large JSX-heavy tella files:
+#   ./scripts/test_typedtree_parity.sh --tella-jsx
 
 set -e
 
@@ -43,6 +47,7 @@ VERBOSE=false
 FILE_ARG=""
 SKIP_BUILD=false
 TELLA_MODE=false
+TELLA_JSX_MODE=false
 
 while [[ $# -gt 0 ]]; do
     case $1 in
@@ -69,6 +74,11 @@ while [[ $# -gt 0 ]]; do
             ;;
         --tella)
             TELLA_MODE=true
+            shift
+            ;;
+        --tella-jsx)
+            TELLA_MODE=true
+            TELLA_JSX_MODE=true
             shift
             ;;
         -h|--help)
@@ -163,6 +173,11 @@ else
 fi
 if [[ "$TELLA_MODE" == "true" ]]; then
     echo "Tella dir: $TELLA_DIR"
+    if [[ "$TELLA_JSX_MODE" == "true" ]]; then
+        echo "Tella set: large JSX-heavy files only"
+    else
+        echo "Tella set: excluding large JSX-heavy files"
+    fi
 fi
 echo "Timeout: ${TIMEOUT_SECONDS}s"
 echo "Parallel jobs: $PARALLEL_JOBS"
@@ -223,6 +238,36 @@ else
     find tests/tests/src -name "*.res" -type f 2>/dev/null | sort > "$TEMP_DIR/files.txt"
 fi
 
+# In tella mode, split files by precomputed large-sexp module list.
+# --tella: exclude large files, --tella-jsx: include only large files.
+if [[ "$TELLA_MODE" == "true" ]]; then
+    TELLA_LARGE_FILES_PATH="$PROJECT_ROOT/scripts/tella_large_sexp_files.txt"
+    if [[ -f "$TELLA_LARGE_FILES_PATH" ]]; then
+        FILTERED_FILES="$TEMP_DIR/files.filtered.txt"
+        : > "$FILTERED_FILES"
+
+        while IFS= read -r file; do
+            [[ -n "$file" ]] || continue
+            basename_no_ext=$(basename "$file" .res)
+            if grep -qxF "$basename_no_ext" "$TELLA_LARGE_FILES_PATH"; then
+                is_large=1
+            else
+                is_large=0
+            fi
+
+            if [[ "$TELLA_JSX_MODE" == "true" ]]; then
+                [[ "$is_large" -eq 1 ]] && echo "$file" >> "$FILTERED_FILES"
+            else
+                [[ "$is_large" -eq 0 ]] && echo "$file" >> "$FILTERED_FILES"
+            fi
+        done < "$TEMP_DIR/files.txt"
+
+        mv "$FILTERED_FILES" "$TEMP_DIR/files.txt"
+    else
+        echo -e "${YELLOW}Warning: $TELLA_LARGE_FILES_PATH not found; using all tella files${RESET}"
+    fi
+fi
+
 TOTAL_FILES=$(wc -l < "$TEMP_DIR/files.txt" | tr -d ' ')
 
 if [[ "$TOTAL_FILES" -eq 1 ]]; then
@@ -269,7 +314,7 @@ test_single_file() {
     # Helper: run Rust bsc and classify exit code
     run_rust_bsc() {
         local rust_exit=0
-        timeout "$TIMEOUT_SECONDS" "$RUST_BSC" "$@" || rust_exit=$?
+        RUST_TYPEDTREE_ONLY=1 timeout "$TIMEOUT_SECONDS" "$RUST_BSC" "$@" || rust_exit=$?
         if [[ "$rust_exit" -eq 0 ]]; then
             rust_pass=1
         elif [[ "$rust_exit" -eq 124 ]]; then
