@@ -17,6 +17,9 @@
 #   --no-build        Skip the initial rewatch build (assume already built)
 #   --tella           Test tella-fusion, skipping large JSX-heavy files
 #   --tella-jsx       Test only large JSX-heavy tella files
+#   --tella-fast      Extra-fast tella mode (also skip files > 5000 bytes)
+#   --tella-max-source-bytes N
+#                     In tella mode, skip source files larger than N bytes
 #   -h, --help        Show this help message
 #
 # EXAMPLES:
@@ -37,6 +40,9 @@
 #
 #   # Test only large JSX-heavy tella files:
 #   ./scripts/test_typedtree_parity.sh --tella-jsx
+#
+#   # Extra-fast tella run:
+#   ./scripts/test_typedtree_parity.sh --tella-fast
 
 set -e
 
@@ -48,6 +54,7 @@ FILE_ARG=""
 SKIP_BUILD=false
 TELLA_MODE=false
 TELLA_JSX_MODE=false
+TELLA_MAX_SOURCE_BYTES=0
 
 while [[ $# -gt 0 ]]; do
     case $1 in
@@ -81,6 +88,16 @@ while [[ $# -gt 0 ]]; do
             TELLA_JSX_MODE=true
             shift
             ;;
+        --tella-fast)
+            TELLA_MODE=true
+            TELLA_MAX_SOURCE_BYTES=5000
+            shift
+            ;;
+        --tella-max-source-bytes)
+            TELLA_MODE=true
+            TELLA_MAX_SOURCE_BYTES="$2"
+            shift 2
+            ;;
         -h|--help)
             head -38 "$0" | tail -33
             exit 0
@@ -91,6 +108,11 @@ while [[ $# -gt 0 ]]; do
             ;;
     esac
 done
+
+if ! [[ "$TELLA_MAX_SOURCE_BYTES" =~ ^[0-9]+$ ]]; then
+    echo -e "Error: --tella-max-source-bytes expects a non-negative integer"
+    exit 1
+fi
 
 scriptDir=$(dirname "$0")
 PROJECT_ROOT=$(cd "$scriptDir/.."; pwd -P)
@@ -178,6 +200,9 @@ if [[ "$TELLA_MODE" == "true" ]]; then
     else
         echo "Tella set: excluding large JSX-heavy files"
     fi
+    if [[ "$TELLA_MAX_SOURCE_BYTES" -gt 0 ]]; then
+        echo "Tella source-size cap: <= ${TELLA_MAX_SOURCE_BYTES} bytes"
+    fi
 fi
 echo "Timeout: ${TIMEOUT_SECONDS}s"
 echo "Parallel jobs: $PARALLEL_JOBS"
@@ -245,6 +270,9 @@ if [[ "$TELLA_MODE" == "true" ]]; then
     if [[ -f "$TELLA_LARGE_FILES_PATH" ]]; then
         FILTERED_FILES="$TEMP_DIR/files.filtered.txt"
         : > "$FILTERED_FILES"
+        skipped_large=0
+        skipped_size=0
+        kept=0
 
         while IFS= read -r file; do
             [[ -n "$file" ]] || continue
@@ -255,14 +283,35 @@ if [[ "$TELLA_MODE" == "true" ]]; then
                 is_large=0
             fi
 
+            keep_file=1
             if [[ "$TELLA_JSX_MODE" == "true" ]]; then
-                [[ "$is_large" -eq 1 ]] && echo "$file" >> "$FILTERED_FILES"
+                if [[ "$is_large" -eq 0 ]]; then
+                    keep_file=0
+                    skipped_large=$((skipped_large + 1))
+                fi
             else
-                [[ "$is_large" -eq 0 ]] && echo "$file" >> "$FILTERED_FILES"
+                if [[ "$is_large" -eq 1 ]]; then
+                    keep_file=0
+                    skipped_large=$((skipped_large + 1))
+                fi
+            fi
+
+            if [[ "$keep_file" -eq 1 && "$TELLA_MAX_SOURCE_BYTES" -gt 0 ]]; then
+                source_size=$(wc -c < "$file" | tr -d ' ')
+                if [[ "$source_size" -gt "$TELLA_MAX_SOURCE_BYTES" ]]; then
+                    keep_file=0
+                    skipped_size=$((skipped_size + 1))
+                fi
+            fi
+
+            if [[ "$keep_file" -eq 1 ]]; then
+                echo "$file" >> "$FILTERED_FILES"
+                kept=$((kept + 1))
             fi
         done < "$TEMP_DIR/files.txt"
 
         mv "$FILTERED_FILES" "$TEMP_DIR/files.txt"
+        echo "Tella filter kept $kept files (skipped $skipped_large by large-file list, $skipped_size by source-size cap)"
     else
         echo -e "${YELLOW}Warning: $TELLA_LARGE_FILES_PATH not found; using all tella files${RESET}"
     fi
