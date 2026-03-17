@@ -11531,6 +11531,33 @@ fn type_constraint(
     tctx.generic_constraint_body_ty = prev_generic_constraint;
     unify_expression_types(tctx, loc, typed_inner.exp_type, arg_unify_ty, None)?;
 
+    // OCaml can lower generic local polyvariant aliases during constrained
+    // match/variant typing through copy-side effects. Rust copy keeps source
+    // nodes immutable, so emulate that narrowing only for those expression
+    // shapes to avoid broad non-tella regressions.
+    let should_try_local_variant_lowering = matches!(
+        &*inner_expr.pexp_desc,
+        crate::parser::ast::ExpressionDesc::Pexp_match(_)
+            | crate::parser::ast::ExpressionDesc::Pexp_variant(_)
+    );
+    if should_try_local_variant_lowering {
+        let cty_repr = ctx.repr(ctype_ty);
+        if ctx.get_level(cty_repr) == crate::types::GENERIC_LEVEL {
+            let is_local_alias = {
+                let cty_desc = ctx.get_desc(cty_repr);
+                matches!(&*cty_desc, TypeDesc::Tconstr { path, .. } if matches!(path, Path::Pident(id) if !id.is_persistent()))
+            };
+            if is_local_alias {
+                let expanded = crate::types::ctype::expand_head(ctx, env, ctype_ty);
+                let is_variant_head =
+                    matches!(&*ctx.get_desc(ctx.repr(expanded)), TypeDesc::Tvariant(_));
+                if is_variant_head {
+                    let _ = unify_expression_types(tctx, loc, ctype_ty, arg_unify_ty, None);
+                }
+            }
+        }
+    }
+
     if should_debug_loc {
         let full_loc = debug_loc.as_ref().unwrap();
         eprintln!(
