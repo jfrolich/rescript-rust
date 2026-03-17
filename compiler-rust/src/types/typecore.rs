@@ -15226,7 +15226,8 @@ impl Env {
                             sig_item
                         {
                             if id.name() == submod_name {
-                                let sub_path = Path::pdot(parent_path, submod_name.to_string());
+                                let sub_path =
+                                    Path::pdot(parent_path.clone(), submod_name.to_string());
                                 let result =
                                     self.resolve_module_type(&sub_md.md_type, pers_env, ctx);
                                 if let Some((sig, resolved_name)) = result {
@@ -15350,6 +15351,15 @@ impl Env {
                                         );
                                     }
                                     if apply_subst {
+                                        // Match OCaml Subst behavior for nested module access:
+                                        // when resolving A.B, first substitute parent-scope
+                                        // type/module references inside B using A's signature.
+                                        crate::cmi::persistent_env::substitute_type_paths_in_child_sig(
+                                            &sig,
+                                            &parent_sig,
+                                            &parent_path,
+                                            ctx,
+                                        );
                                         if let Some(ref old_name) = resolved_name {
                                             crate::cmi::persistent_env::rewrite_module_prefix_in_sig(
                                                 &sig, old_name, &sub_path, ctx,

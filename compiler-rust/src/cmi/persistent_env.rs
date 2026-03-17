@@ -623,6 +623,11 @@ fn substitute_type_paths_in_sig_with_maps(
                     );
                 }
             }
+            SignatureItem::SigModule(_id, md, _) => {
+                if let ModuleType::MtySignature(sub_sig) = &md.md_type {
+                    substitute_type_paths_in_sig_with_maps(sub_sig, maps, ctx);
+                }
+            }
             _ => {}
         }
     }
@@ -639,7 +644,39 @@ pub fn substitute_type_paths_in_child_sig(
     parent_module_path: &Path,
     ctx: &TypeContext<'_>,
 ) {
-    let parent_maps = build_subst_maps(parent_sig, parent_module_path);
+    fn should_add_parent_type_name_fallback(name: &str) -> bool {
+        !matches!(
+            name,
+            "t"
+                | "int"
+                | "string"
+                | "float"
+                | "bool"
+                | "unit"
+                | "char"
+                | "array"
+                | "list"
+                | "option"
+                | "result"
+                | "promise"
+                | "lazy_t"
+                | "exn"
+        )
+    }
+
+    let mut parent_maps = build_subst_maps(parent_sig, parent_module_path);
+    // Child signatures can carry parent type idents with erased stamps.
+    // Add a conservative name fallback for non-persistent parent-defined types.
+    for item in parent_sig {
+        if let SignatureItem::SigType(id, _, _) | SignatureItem::SigModtype(id, _) = item {
+            if id.stamp() != 0 && should_add_parent_type_name_fallback(id.name()) {
+                parent_maps
+                    .type_name_map
+                    .entry(id.name().to_string())
+                    .or_insert_with(|| Path::pdot(parent_module_path.clone(), id.name()));
+            }
+        }
+    }
     substitute_type_paths_in_sig_with_maps(child_sig, &parent_maps, ctx);
 }
 
