@@ -9539,8 +9539,8 @@ fn type_function(
     } else {
         param_ty
     };
-    let param_ty_repr = ctx.repr(pattern_ty);
-    let param_ty_is_generic = ctx.get_level(param_ty_repr) == crate::types::GENERIC_LEVEL;
+    let param_ty_is_generic =
+        ctx.get_level(ctx.repr(pattern_ty)) == crate::types::GENERIC_LEVEL;
     let propagate = param_ty_is_generic || !is_simple_param;
 
     let mut state = PatternState::new();
@@ -9565,13 +9565,8 @@ fn type_function(
     // values using the types from type_pattern directly.
     let mut body_env = env.clone();
     let mut unpacks: Vec<PatternVariable> = Vec::new();
-    let should_copy_pattern_bindings = !is_simple_variable_pattern(tctx.arena, param);
     for pv in &state.pattern_variables {
-        let binding_ty = if should_copy_pattern_bindings {
-            shallow_copy_pattern_binding_type(ctx, pv.ty, false)
-        } else {
-            pv.ty
-        };
+        let binding_ty = pv.ty;
         let desc = ValueDescription {
             val_type: binding_ty,
             val_kind: crate::types::ValueKind::ValReg,
