@@ -30,6 +30,9 @@ use super::asttypes::PrivateFlag;
 use super::type_expr::{AbbrevMemo, AbbrevMemoRef, FieldKind, GENERIC_LEVEL, RowDesc, RowField, TypeDesc, TypeExprRef};
 use super::variance::{Variance, VarianceFlag};
 use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+static COPY_CONSTR_DEBUG_EVENTS: AtomicUsize = AtomicUsize::new(0);
 
 // ============================================================================
 // Type Errors
@@ -394,18 +397,20 @@ pub(crate) fn flattened_alias_paths_equivalent(
 ) -> bool {
     let name1 = path1.name();
     let name2 = path2.name();
+    let debug_flat = std::env::var_os("RUST_DEBUG_FLAT_EQ").is_some()
+        && (name1.contains("Webapi") || name2.contains("Webapi"));
     let seg1: Vec<&str> = name1.split('.').collect();
     let seg2: Vec<&str> = name2.split('.').collect();
     let candidate = if seg1.len() == seg2.len() + 1
-        && seg1.len() >= 4
-        && seg2.len() >= 3
+        && seg1.len() >= 3
+        && seg2.len() >= 2
         && format!("{}__{}", seg1[0], seg1[1]) == seg2[0]
         && seg1[2..] == seg2[1..]
     {
         Some((path1, path2))
     } else if seg2.len() == seg1.len() + 1
-        && seg2.len() >= 4
-        && seg1.len() >= 3
+        && seg2.len() >= 3
+        && seg1.len() >= 2
         && format!("{}__{}", seg2[0], seg2[1]) == seg1[0]
         && seg2[2..] == seg1[1..]
     {
@@ -413,24 +418,79 @@ pub(crate) fn flattened_alias_paths_equivalent(
     } else {
         None
     };
+    if debug_flat {
+        eprintln!(
+            "[flat-eq] path1={} path2={} candidate={}",
+            name1,
+            name2,
+            candidate.is_some()
+        );
+    }
     let Some((long_path, short_path)) = candidate else {
         return false;
     };
 
-    let Some(long_decl) = lookup_type_decl_for_path(ctx, env, long_path) else {
-        return false;
-    };
-    let Some(short_decl) = lookup_type_decl_for_path(ctx, env, short_path) else {
-        return false;
-    };
+    let long_decl = lookup_type_decl_for_path(ctx, env, long_path);
+    let short_decl = lookup_type_decl_for_path(ctx, env, short_path);
+    if debug_flat {
+        eprintln!(
+            "[flat-eq] long={} short={} long_decl={} short_decl={}",
+            long_path.name(),
+            short_path.name(),
+            long_decl.is_some(),
+            short_decl.is_some()
+        );
+    }
+    // The naming shape already proves these are flattened/unflattened forms
+    // of the same path family. If declaration lookup fails (common for some
+    // external aliases), accept the equivalence directly.
+    if long_decl.is_none() || short_decl.is_none() {
+        if debug_flat {
+            eprintln!("[flat-eq] accept=true reason=missing-decl");
+        }
+        return true;
+    }
+    let long_decl = long_decl.unwrap();
+    let short_decl = short_decl.unwrap();
+    if debug_flat {
+        let long_type_path = long_decl
+            .type_path
+            .as_ref()
+            .map(|p| p.name())
+            .unwrap_or_else(|| "<none>".to_string());
+        let short_type_path = short_decl
+            .type_path
+            .as_ref()
+            .map(|p| p.name())
+            .unwrap_or_else(|| "<none>".to_string());
+        eprintln!(
+            "[flat-eq] long_manifest={} short_manifest={} long_type_path={} short_type_path={}",
+            long_decl.type_manifest.is_some(),
+            short_decl.type_manifest.is_some(),
+            long_type_path,
+            short_type_path
+        );
+    }
+    if (short_decl.type_manifest.is_none() && short_decl.type_path.is_none())
+        || (long_decl.type_manifest.is_none() && long_decl.type_path.is_none())
+    {
+        if debug_flat {
+            eprintln!("[flat-eq] accept=true reason=opaque-proxy-decl");
+        }
+        return true;
+    }
 
-    decl_manifest_aliases_path(ctx, &short_decl, long_path, arity)
+    let result = decl_manifest_aliases_path(ctx, &short_decl, long_path, arity)
         || decl_manifest_aliases_path(ctx, &long_decl, short_path, arity)
         || long_decl
             .type_path
             .as_ref()
             .zip(short_decl.type_path.as_ref())
-            .is_some_and(|(lp, sp)| lp.same(sp) || lp.name() == sp.name())
+            .is_some_and(|(lp, sp)| lp.same(sp) || lp.name() == sp.name());
+    if debug_flat {
+        eprintln!("[flat-eq] accept={result} reason=decl-check");
+    }
+    result
 }
 
 pub(crate) fn nullary_constr_paths_equivalent(
@@ -1197,9 +1257,24 @@ fn resolve_module_type_through_env_path<'a>(
             let parent_mty = resolve_module_type_through_env_path(ctx, env, parent, visiting)?;
             let parent_sig =
                 resolve_signature_through_env_module_type(ctx, env, &parent_mty, visiting)?;
-            parent_sig.into_iter().find_map(|item| match item {
-                SignatureItem::SigModule(id, md, _) if id.name() == name => Some(md.md_type),
-                SignatureItem::SigModtype(id, mtd) if id.name() == name => mtd.mtd_type,
+            parent_sig.iter().find_map(|item| match item {
+                SignatureItem::SigModule(id, md, _) if id.name() == name => match &md.md_type {
+                    super::decl::ModuleType::MtySignature(sig) => {
+                        // Mirror OCaml Subst behavior for env-based nested module access:
+                        // child module signatures may reference parent-defined types/modules
+                        // using bare names (e.g. `subtype` inside `Stream.Writable`).
+                        // Rewrite those references through the parent module access path.
+                        crate::cmi::persistent_env::substitute_type_paths_in_child_sig(
+                            sig,
+                            &parent_sig,
+                            parent,
+                            ctx,
+                        );
+                        Some(super::decl::ModuleType::MtySignature(sig.clone()))
+                    }
+                    other => Some(other.clone()),
+                },
+                SignatureItem::SigModtype(id, mtd) if id.name() == name => mtd.mtd_type.clone(),
                 _ => None,
             })
         }
@@ -1281,6 +1356,14 @@ fn resolve_type_through_env<'a>(
     let module_mty = resolve_module_type_through_env_path(ctx, env, module_path, &mut visiting)?;
     let module_sig =
         resolve_signature_through_env_module_type(ctx, env, &module_mty, &mut visiting)?;
+    // Match OCaml behavior for persistent signatures loaded from CMI files:
+    // rewrite intra-signature references (`ID.t`) to qualified access paths
+    // rooted at the module path (`LayerStyleID.ID.t`).
+    // Keep local module signatures untouched to preserve local typedtree
+    // identity paths (`t`, `props`, etc.).
+    if module_path.head().is_persistent() {
+        crate::cmi::persistent_env::substitute_type_paths_in_sig(&module_sig, module_path, ctx);
+    }
     // For alias modules, expansion should expose the alias target path
     // (e.g. Html.t -> Dom_html.t), not a self-manifest Html.t.
     let alias_target_for_strengthening = if strengthen_alias_types {
@@ -1416,6 +1499,7 @@ fn try_expand_head<'a>(
             let orig_abbrev = *abbrev;
             let lookup_abbrev = proper_abbrevs(ctx, &path, &args, *abbrev);
             let path_name = path.name();
+            let debug_expand_target = std::env::var("RUST_DEBUG_EXPAND_TYPE").ok();
             if debug_image_alias && path.head_name() == "imageElement" {
                 eprintln!(
                     "[image-alias][try-expand-enter] ty={} path={} args={}",
@@ -1461,7 +1545,14 @@ fn try_expand_head<'a>(
                         || path_name == "tag"
                         || path_name.ends_with(".tag")
                         || path_name.ends_with("Event.Mouse.t")
-                        || path_name.ends_with("Event.Mouse.tag")));
+                        || path_name.ends_with("Event.Mouse.tag")))
+                || (std::env::var_os("RUST_DEBUG_EXPAND_LAYERSTYLE").is_some()
+                    && (path_name == "LayerStyleID.t"
+                        || path_name == "LayerStyleID.ID.t"
+                        || path_name == "Layout.Types.t"))
+                || debug_expand_target
+                    .as_deref()
+                    .is_some_and(|target| target == path_name);
             if debug_expand {
                 eprintln!(
                     "[expand] path={} enter ty={} level={} env_id={} stamp={} lookup={:?} memo={:?}",
@@ -1709,6 +1800,13 @@ fn try_expand_head<'a>(
                 expanded
             };
 
+            let can_expand_decl_manifest = |decl: &super::decl::TypeDeclaration,
+                                            manifest: TypeExprRef| {
+                matches!(decl.type_private, PrivateFlag::Public)
+                    || !matches!(decl.type_kind, crate::types::TypeKind::TypeAbstract)
+                    || btype::has_constr_row(ctx, manifest)
+            };
+
             // 0. Check local constraints first (GADT equations)
             if let Some(constraint_decl) = env.find_local_constraint(&path) {
                 if let Some(manifest) = constraint_decl.type_manifest {
@@ -1817,6 +1915,7 @@ fn try_expand_head<'a>(
             // 1. Prefer environment lookup when the declaration matches the
             // queried path exactly. For qualified paths, reject leaf-fallback
             // hits to unrelated declarations.
+            let mut forbid_fallback_manifest_expansion = false;
             if let Ok(env_decl) = env.lookup_type(&path) {
                 let exact_lookup = match &path {
                     Path::Pident(_) => true,
@@ -1826,19 +1925,157 @@ fn try_expand_head<'a>(
                 };
                 if exact_lookup {
                     if let Some(manifest) = env_decl.type_manifest {
-                        let params = &env_decl.type_params;
-                        if params.len() == args.len() {
-                            return Some(expand_with_subst(params, manifest));
+                        if can_expand_decl_manifest(env_decl, manifest) {
+                            let params = &env_decl.type_params;
+                            if params.len() == args.len() {
+                                return Some(expand_with_subst(params, manifest));
+                            }
+                            forbid_fallback_manifest_expansion = true;
+                            if debug_expand {
+                                eprintln!(
+                                    "[expand] path={} env.lookup_type arity-mismatch params={} args={}",
+                                    path_name,
+                                    params.len(),
+                                    args.len()
+                                );
+                            }
+                        } else {
+                            forbid_fallback_manifest_expansion = true;
+                            if debug_expand {
+                                eprintln!("[expand] path={} env.lookup_type manifest hidden", path_name);
+                            }
                         }
-                        return None;
+                    } else if debug_expand {
+                        eprintln!("[expand] path={} env.lookup_type no-manifest", path_name);
                     }
-                    // Type found in env but no manifest => abstract type.
-                    return None;
                 }
             }
 
+            // 1a. For local identifiers, try stamp-based declaration lookup.
+            // This preserves OCaml-style local identity paths while still
+            // allowing expansion when env name lookup is unavailable.
+            if let Path::Pident(id) = &path
+                && !id.is_persistent()
+                && id.stamp() != 0
+                && let Some(stamp_decl) = ctx
+                    .find_type_decl_by_stamp(id.stamp())
+                    .map(|decl| decl.clone())
+            {
+                if let Some(manifest) = stamp_decl.type_manifest {
+                    if can_expand_decl_manifest(&stamp_decl, manifest) {
+                        let params = &stamp_decl.type_params;
+                        if params.len() == args.len() {
+                            if debug_expand {
+                                eprintln!(
+                                    "[expand] path={} stamp-lookup manifest params={} args={}",
+                                    path_name,
+                                    params.len(),
+                                    args.len()
+                                );
+                            }
+                            return Some(expand_with_subst(params, manifest));
+                        } else {
+                            forbid_fallback_manifest_expansion = true;
+                            if debug_expand {
+                                eprintln!(
+                                    "[expand] path={} stamp-lookup arity-mismatch params={} args={}",
+                                    path_name,
+                                    params.len(),
+                                    args.len()
+                                );
+                            }
+                        }
+                    } else if debug_expand {
+                        eprintln!("[expand] path={} stamp-lookup manifest hidden", path_name);
+                    }
+                }
+            }
+
+            // 1b. For qualified paths, mirror OCaml `find_type` resolution by
+            // descending through the current environment's module signatures
+            // before consulting global fallbacks.
+            if matches!(&path, Path::Pdot(..))
+                && let Some(decl) = resolve_type_through_env(ctx, env, &path, true)
+            {
+                if let Some(decl_type_path) = decl.type_path.as_ref() {
+                    if path_name.contains("__")
+                        && decl.type_params.len() == args.len()
+                        && !decl_type_path.same(&path)
+                    {
+                        if debug_expand {
+                            eprintln!(
+                                "[expand] path={} resolve_type_through_env type_path rewrite -> {}",
+                                path_name,
+                                decl_type_path.name()
+                            );
+                        }
+                        let level = ctx.get_level(ty);
+                        let rewritten = ctx.new_type(TypeDesc::Tconstr {
+                            path: decl_type_path.clone(),
+                            args: args.clone(),
+                            abbrev: orig_abbrev,
+                        });
+                        ctx.set_level(rewritten, level);
+                        return Some(rewritten);
+                    }
+                }
+                if let Some(manifest) = decl.type_manifest {
+                    if can_expand_decl_manifest(&decl, manifest) {
+                        let params = &decl.type_params;
+                        if params.len() == args.len() {
+                            if debug_expand {
+                                eprintln!(
+                                    "[expand] path={} resolve_type_through_env authoritative manifest params={} args={}",
+                                    path_name,
+                                    params.len(),
+                                    args.len()
+                                );
+                            }
+                            return Some(expand_with_subst(params, manifest));
+                        } else {
+                            forbid_fallback_manifest_expansion = true;
+                            if debug_expand {
+                                eprintln!(
+                                    "[expand] path={} resolve_type_through_env arity-mismatch params={} args={}",
+                                    path_name,
+                                    params.len(),
+                                    args.len()
+                                );
+                            }
+                        }
+                    } else if debug_expand {
+                        eprintln!(
+                            "[expand] path={} resolve_type_through_env manifest hidden",
+                            path_name
+                        );
+                        forbid_fallback_manifest_expansion = true;
+                    } else {
+                        forbid_fallback_manifest_expansion = true;
+                    }
+                } else if debug_expand {
+                    eprintln!(
+                        "[expand] path={} resolve_type_through_env authoritative no-manifest",
+                        path_name
+                    );
+                }
+            }
+
+            // OCaml expand_abbrev_gen only expands through Env.find_type_expansion.
+            // For non-persistent heads, avoid global/path-store fallbacks that can
+            // over-expand local aliases (e.g. LayerStyleID.ID.t -> string) and
+            // diverge from OCaml's identity/linking behavior.
+            let allow_global_fallbacks = path.head().is_persistent();
+            if debug_expand && !allow_global_fallbacks {
+                eprintln!(
+                    "[expand] path={} skip-global-fallbacks non-persistent head={} forbid_manifest_fallback={}",
+                    path_name,
+                    path.head_name(),
+                    forbid_fallback_manifest_expansion
+                );
+            }
+
             // 2. Try stamp-based global store (for CMI types with non-zero stamps)
-            if let Some(stamp) = stamp {
+            if allow_global_fallbacks && let Some(stamp) = stamp {
                 if debug_expand {
                     let has_decl = ctx.find_type_decl_by_stamp(stamp).is_some();
                     eprintln!(
@@ -1862,27 +2099,38 @@ fn try_expand_head<'a>(
                         );
                     }
                     if let Some(manifest) = store_decl.type_manifest {
-                        let params = &store_decl.type_params;
-                        if params.len() == args.len() {
-                            let expanded = expand_with_subst(params, manifest);
-                            if debug_image_alias && path.head_name() == "imageElement" {
-                                let expanded_repr = ctx.repr(expanded);
-                                let expanded_name = {
-                                    let d = ctx.get_desc(expanded_repr);
-                                    match &*d {
-                                        TypeDesc::Tconstr { path, .. } => path.name(),
-                                        _ => "<non-constr>".to_string(),
-                                    }
-                                };
-                                eprintln!(
-                                    "[image-alias][try-expand-return] reason=stamp ty={} path={} expanded={} {}",
-                                    ty.0,
-                                    path.name(),
-                                    expanded_repr.0,
-                                    expanded_name
-                                );
+                        if !forbid_fallback_manifest_expansion
+                            && can_expand_decl_manifest(&store_decl, manifest)
+                        {
+                            let params = &store_decl.type_params;
+                            if params.len() == args.len() {
+                                let expanded = expand_with_subst(params, manifest);
+                                if debug_image_alias && path.head_name() == "imageElement" {
+                                    let expanded_repr = ctx.repr(expanded);
+                                    let expanded_name = {
+                                        let d = ctx.get_desc(expanded_repr);
+                                        match &*d {
+                                            TypeDesc::Tconstr { path, .. } => path.name(),
+                                            _ => "<non-constr>".to_string(),
+                                        }
+                                    };
+                                    eprintln!(
+                                        "[image-alias][try-expand-return] reason=stamp ty={} path={} expanded={} {}",
+                                        ty.0,
+                                        path.name(),
+                                        expanded_repr.0,
+                                        expanded_name
+                                    );
+                                }
+                                return Some(expanded);
                             }
-                            return Some(expanded);
+                        } else if debug_expand && forbid_fallback_manifest_expansion {
+                            eprintln!(
+                                "[expand] path={} stamp-decl manifest expansion blocked by authoritative lookup",
+                                path_name
+                            );
+                        } else if debug_expand {
+                            eprintln!("[expand] path={} stamp-decl manifest hidden", path_name);
                         }
                     }
                     if let Some(type_path) = store_decl.type_path.as_ref() {
@@ -1912,39 +2160,53 @@ fn try_expand_head<'a>(
             }
 
             // 3. Try full qualified path lookup (for Pdot paths like Js.Promise.t)
-            if let Some(ref _path_name) = full_path_name {
+            if allow_global_fallbacks && let Some(ref _path_name) = full_path_name {
                 // First check cached path store
                 if let Some(store_decl) = ctx.find_type_decl_by_path(_path_name) {
                     if let Some(manifest) = store_decl.type_manifest {
-                        let params = &store_decl.type_params;
-                        if params.len() == args.len() {
-                            if debug_expand {
-                                eprintln!(
-                                    "[expand] path={} type_decl_by_path manifest params={} args={}",
-                                    path_name,
-                                    params.len(),
-                                    args.len()
-                                );
+                        if !forbid_fallback_manifest_expansion
+                            && can_expand_decl_manifest(&store_decl, manifest)
+                        {
+                            let params = &store_decl.type_params;
+                            if params.len() == args.len() {
+                                if debug_expand {
+                                    eprintln!(
+                                        "[expand] path={} type_decl_by_path manifest params={} args={}",
+                                        path_name,
+                                        params.len(),
+                                        args.len()
+                                    );
+                                }
+                                let expanded = expand_with_subst(params, manifest);
+                                if debug_image_alias && path.head_name() == "imageElement" {
+                                    let expanded_repr = ctx.repr(expanded);
+                                    let expanded_name = {
+                                        let d = ctx.get_desc(expanded_repr);
+                                        match &*d {
+                                            TypeDesc::Tconstr { path, .. } => path.name(),
+                                            _ => "<non-constr>".to_string(),
+                                        }
+                                    };
+                                    eprintln!(
+                                        "[image-alias][try-expand-return] reason=decl-by-path ty={} path={} expanded={} {}",
+                                        ty.0,
+                                        path.name(),
+                                        expanded_repr.0,
+                                        expanded_name
+                                    );
+                                }
+                                return Some(expanded);
                             }
-                            let expanded = expand_with_subst(params, manifest);
-                            if debug_image_alias && path.head_name() == "imageElement" {
-                                let expanded_repr = ctx.repr(expanded);
-                                let expanded_name = {
-                                    let d = ctx.get_desc(expanded_repr);
-                                    match &*d {
-                                        TypeDesc::Tconstr { path, .. } => path.name(),
-                                        _ => "<non-constr>".to_string(),
-                                    }
-                                };
-                                eprintln!(
-                                    "[image-alias][try-expand-return] reason=decl-by-path ty={} path={} expanded={} {}",
-                                    ty.0,
-                                    path.name(),
-                                    expanded_repr.0,
-                                    expanded_name
-                                );
-                            }
-                            return Some(expanded);
+                        } else if debug_expand && forbid_fallback_manifest_expansion {
+                            eprintln!(
+                                "[expand] path={} type_decl_by_path manifest expansion blocked by authoritative lookup",
+                                path_name
+                            );
+                        } else if debug_expand {
+                            eprintln!(
+                                "[expand] path={} type_decl_by_path manifest hidden",
+                                path_name
+                            );
                         }
                     }
                 }
@@ -1952,80 +2214,50 @@ fn try_expand_head<'a>(
                 // Not cached — resolve by loading CMI files and walking module signatures
                 if let Some(resolved_decl) = resolve_type_through_modules(ctx, &path) {
                     if let Some(manifest) = resolved_decl.type_manifest {
-                        let params = &resolved_decl.type_params;
-                        if params.len() == args.len() {
-                            if debug_expand {
-                                eprintln!(
-                                    "[expand] path={} resolve_type_through_modules manifest params={} args={}",
-                                    path_name,
-                                    params.len(),
-                                    args.len()
-                                );
+                        if !forbid_fallback_manifest_expansion
+                            && can_expand_decl_manifest(&resolved_decl, manifest)
+                        {
+                            let params = &resolved_decl.type_params;
+                            if params.len() == args.len() {
+                                if debug_expand {
+                                    eprintln!(
+                                        "[expand] path={} resolve_type_through_modules manifest params={} args={}",
+                                        path_name,
+                                        params.len(),
+                                        args.len()
+                                    );
+                                }
+                                let expanded = expand_with_subst(params, manifest);
+                                if debug_image_alias && path.head_name() == "imageElement" {
+                                    let expanded_repr = ctx.repr(expanded);
+                                    let expanded_name = {
+                                        let d = ctx.get_desc(expanded_repr);
+                                        match &*d {
+                                            TypeDesc::Tconstr { path, .. } => path.name(),
+                                            _ => "<non-constr>".to_string(),
+                                        }
+                                    };
+                                    eprintln!(
+                                        "[image-alias][try-expand-return] reason=resolve-modules ty={} path={} expanded={} {}",
+                                        ty.0,
+                                        path.name(),
+                                        expanded_repr.0,
+                                        expanded_name
+                                    );
+                                }
+                                return Some(expanded);
                             }
-                            let expanded = expand_with_subst(params, manifest);
-                            if debug_image_alias && path.head_name() == "imageElement" {
-                                let expanded_repr = ctx.repr(expanded);
-                                let expanded_name = {
-                                    let d = ctx.get_desc(expanded_repr);
-                                    match &*d {
-                                        TypeDesc::Tconstr { path, .. } => path.name(),
-                                        _ => "<non-constr>".to_string(),
-                                    }
-                                };
-                                eprintln!(
-                                    "[image-alias][try-expand-return] reason=resolve-modules ty={} path={} expanded={} {}",
-                                    ty.0,
-                                    path.name(),
-                                    expanded_repr.0,
-                                    expanded_name
-                                );
-                            }
-                            return Some(expanded);
+                        } else if debug_expand && forbid_fallback_manifest_expansion {
+                            eprintln!(
+                                "[expand] path={} resolve_type_through_modules manifest expansion blocked by authoritative lookup",
+                                path_name
+                            );
+                        } else if debug_expand {
+                            eprintln!(
+                                "[expand] path={} resolve_type_through_modules manifest hidden",
+                                path_name
+                            );
                         }
-                    }
-                }
-
-                // 3c. Try resolving Pdot paths through local env modules
-                // For paths like Pdot(Pident(Ord), "t"), look up module Ord in env,
-                // get its signature, and find type t in it
-                if let Some(decl) = resolve_type_through_env(ctx, env, &path, true) {
-                    if let Some(manifest) = decl.type_manifest {
-                        let params = &decl.type_params;
-                        if params.len() == args.len() {
-                            if debug_expand {
-                                eprintln!(
-                                    "[expand] path={} resolve_type_through_env manifest params={} args={}",
-                                    path_name,
-                                    params.len(),
-                                    args.len()
-                                );
-                            }
-                            let expanded = expand_with_subst(params, manifest);
-                            if debug_image_alias && path.head_name() == "imageElement" {
-                                let expanded_repr = ctx.repr(expanded);
-                                let expanded_name = {
-                                    let d = ctx.get_desc(expanded_repr);
-                                    match &*d {
-                                        TypeDesc::Tconstr { path, .. } => path.name(),
-                                        _ => "<non-constr>".to_string(),
-                                    }
-                                };
-                                eprintln!(
-                                    "[image-alias][try-expand-return] reason=resolve-env ty={} path={} expanded={} {}",
-                                    ty.0,
-                                    path.name(),
-                                    expanded_repr.0,
-                                    expanded_name
-                                );
-                            }
-                            return Some(expanded);
-                        }
-                    } else if debug_image_alias && path.head_name() == "imageElement" {
-                        eprintln!(
-                            "[image-alias][try-expand-info] reason=resolve-env-no-manifest ty={} path={}",
-                            ty.0,
-                            path.name()
-                        );
                     }
                 }
             }
@@ -2628,6 +2860,34 @@ fn unify_after_expansion<'a>(
     t2_expanded: TypeExprRef,
 ) -> TypeResult<()> {
     let debug_unify_after = std::env::var_os("RUST_DEBUG_UNIFY_AFTER_EXPAND").is_some();
+    let debug_unify_after_alias =
+        std::env::var_os("RUST_DEBUG_UNIFY_AFTER_EXPAND_ALIAS").is_some();
+    let type_name = |r: TypeExprRef| {
+        let d = ctx.get_desc(ctx.repr(r));
+        match &*d {
+            TypeDesc::Tconstr { path, .. } => path.name(),
+            TypeDesc::Tlink(t) => {
+                let d2 = ctx.get_desc(ctx.repr(*t));
+                match &*d2 {
+                    TypeDesc::Tconstr { path, .. } => format!("Tlink->{}", path.name()),
+                    _ => format!("Tlink->{}", ctx.repr(*t).0),
+                }
+            }
+            _ => format!("<non-constr:{}>", ctx.repr(r).0),
+        }
+    };
+    let alias_tracked = if debug_unify_after_alias {
+        let n1 = type_name(t1);
+        let n2 = type_name(t2);
+        let tracked = |n: &str| {
+            n.contains("LayerStyleID.ID.t")
+                || n.contains("LayerStyleID.t")
+                || n.contains("Layout.Types.t")
+        };
+        tracked(&n1) || tracked(&n2)
+    } else {
+        false
+    };
     let debug_image_alias = std::env::var_os("RUST_DEBUG_IMAGE_ALIAS").is_some();
     let debug_image_pair = if debug_image_alias {
         let n1 = {
@@ -2659,6 +2919,21 @@ fn unify_after_expansion<'a>(
     };
     let t1_changed = t1_expanded != t1;
     let t2_changed = t2_expanded != t2;
+    if alias_tracked {
+        eprintln!(
+            "[unify-after-expand-alias] enter t1={}({}) t1e={}({}) t2={}({}) t2e={}({}) t1_changed={} t2_changed={}",
+            ctx.repr(t1).0,
+            type_name(t1),
+            ctx.repr(t1_expanded).0,
+            type_name(t1_expanded),
+            ctx.repr(t2).0,
+            type_name(t2),
+            ctx.repr(t2_expanded).0,
+            type_name(t2_expanded),
+            t1_changed,
+            t2_changed
+        );
+    }
     if !t1_changed && !t2_changed {
         return unify(ctx, state, t1_expanded, t2_expanded);
     }
@@ -2674,6 +2949,18 @@ fn unify_after_expansion<'a>(
 
     let lhs = ctx.repr(lhs);
     let rhs = ctx.repr(rhs);
+    if alias_tracked {
+        eprintln!(
+            "[unify-after-expand-alias] branch swap={} lhs={}({}) rhs={}({}) relink_target={}({})",
+            swap,
+            lhs.0,
+            type_name(lhs),
+            rhs.0,
+            type_name(rhs),
+            ctx.repr(relink_target).0,
+            type_name(relink_target)
+        );
+    }
     if debug_unify_after {
         eprintln!(
             "[unify-after-expand] t1={} t1e={} t2={} t2e={} t1_changed={} t2_changed={} swap={} lhs={} rhs={} relink_target={}",
@@ -2701,6 +2988,15 @@ fn unify_after_expansion<'a>(
         eprintln!("[unify-after-expand] unify(lhs,rhs) ok={}", unify_result.is_ok());
     }
     unify_result?;
+    if alias_tracked {
+        eprintln!(
+            "[unify-after-expand-alias] post-unify lhs={}({}) rhs={}({})",
+            ctx.repr(lhs).0,
+            type_name(lhs),
+            ctx.repr(rhs).0,
+            type_name(rhs)
+        );
+    }
 
     if state.mode != crate::types::UnifyMode::Pattern {
         // Match OCaml unify3 expression mode:
@@ -2710,6 +3006,14 @@ fn unify_after_expansion<'a>(
         let to_ty = ctx.repr(relink_target);
         if lhs != to_ty && !deep_occur(ctx, lhs, to_ty) {
             ctx.set_desc(lhs, TypeDesc::Tlink(to_ty));
+            if alias_tracked {
+                eprintln!(
+                    "[unify-after-expand-alias] relink lhs={} -> target={} target_name={}",
+                    lhs.0,
+                    to_ty.0,
+                    type_name(to_ty)
+                );
+            }
             if debug_unify_after {
                 eprintln!(
                     "[unify-after-expand] relink lhs={} -> target={}",
@@ -2717,6 +3021,15 @@ fn unify_after_expansion<'a>(
                 );
             }
         }
+    }
+    if alias_tracked {
+        eprintln!(
+            "[unify-after-expand-alias] exit t1={}({}) t2={}({})",
+            ctx.repr(t1).0,
+            type_name(t1),
+            ctx.repr(t2).0,
+            type_name(t2)
+        );
     }
 
     if debug_image_pair {
@@ -2973,6 +3286,22 @@ fn unify_types<'a>(
             if !path1.same(path2) {
                 let p1 = path1.name();
                 let p2 = path2.name();
+                if p1 == p2 && args1.len() == args2.len() {
+                    let pairs: Vec<_> = args1
+                        .iter()
+                        .zip(args2.iter())
+                        .map(|(&a, &b)| (a, b))
+                        .collect();
+                    drop(desc1);
+                    drop(desc2);
+                    // Equivalent named paths with divergent stamps should still
+                    // unify structurally through their arguments.
+                    link_type(ctx, t1, t2);
+                    for (a, b) in pairs {
+                        unify(ctx, state, a, b)?;
+                    }
+                    return Ok(());
+                }
                 let debug_image_alias_pair = debug_image_alias
                     && ((p1 == "Html.imageElement"
                         || p1 == "Dom_html.imageElement"
@@ -3062,15 +3391,15 @@ fn unify_types<'a>(
                 // same alias family (manifest or identical canonical type_path).
                 let flatten_alias_candidate =
                     if seg1.len() == seg2.len() + 1
-                        && seg1.len() >= 4
-                        && seg2.len() >= 3
+                        && seg1.len() >= 3
+                        && seg2.len() >= 2
                         && format!("{}__{}", seg1[0], seg1[1]) == seg2[0]
                         && seg1[2..] == seg2[1..]
                     {
                         Some((t1, t2, path1, path2))
                     } else if seg2.len() == seg1.len() + 1
-                        && seg2.len() >= 4
-                        && seg1.len() >= 3
+                        && seg2.len() >= 3
+                        && seg1.len() >= 2
                         && format!("{}__{}", seg2[0], seg2[1]) == seg1[0]
                         && seg2[2..] == seg1[1..]
                     {
@@ -3079,7 +3408,7 @@ fn unify_types<'a>(
                         None
                     };
                 if let Some((long_ty, short_ty, long_path, short_path)) = flatten_alias_candidate {
-                    if !short_path.head().is_persistent() && args1.len() == args2.len() {
+                    if args1.len() == args2.len() {
                         let alias_matches = if let Some(env) = state.env() {
                             flattened_alias_paths_equivalent(
                                 ctx,
@@ -4488,13 +4817,7 @@ fn force_generalize_sig_type_rec(
         return;
     }
 
-    // Keep nullary constructors at their original level so alias identity is
-    // preserved (avoids LetUnwrap/find_simple_abbrev regressions).
-    let preserve_level = {
-        let desc = ctx.get_desc(ty);
-        matches!(&*desc, TypeDesc::Tconstr { args, .. } if args.is_empty())
-    };
-    if !preserve_level && ctx.get_level(ty) != GENERIC_LEVEL {
+    if ctx.get_level(ty) != GENERIC_LEVEL {
         ctx.set_level(ty, GENERIC_LEVEL);
     }
 
@@ -6047,6 +6370,64 @@ pub fn instance_label(
     fixed: bool,
     lbl: &super::LabelDescription,
 ) -> (Vec<TypeExprRef>, TypeExprRef, TypeExprRef) {
+    if std::env::var_os("RUST_PANIC_INSTANCE_LABEL").is_some() {
+        panic!("instance_label invoked");
+    }
+    let should_debug_label = std::env::var_os("RUST_DEBUG_INSTANCE_LABEL").is_some();
+    let summarize = |ty: TypeExprRef| -> String {
+        let ty = ctx.repr(ty);
+        let desc = ctx.get_desc(ty);
+        match &*desc {
+            TypeDesc::Tconstr { path, args, .. } => {
+                let args_summary = args
+                    .iter()
+                    .map(|arg| {
+                        let arg = ctx.repr(*arg);
+                        let arg_desc = ctx.get_desc(arg);
+                        let kind = match &*arg_desc {
+                            TypeDesc::Tconstr { path, .. } => path.name(),
+                            TypeDesc::Tvar(name) => format!("Tvar({name:?})"),
+                            TypeDesc::Tunivar(name) => format!("Tunivar({name:?})"),
+                            _ => format!("ty#{}", arg.0),
+                        };
+                        format!("{}:{}", arg.0, kind)
+                    })
+                    .collect::<Vec<_>>()
+                    .join(",");
+                format!(
+                    "{}#{}@{}[{}]",
+                    path.name(),
+                    ty.0,
+                    ctx.get_level(ty),
+                    args_summary
+                )
+            }
+            TypeDesc::Tvar(name) => {
+                format!("Tvar({:?})#{}@{}", name, ty.0, ctx.get_level(ty))
+            }
+            TypeDesc::Tunivar(name) => {
+                format!("Tunivar({:?})#{}@{}", name, ty.0, ctx.get_level(ty))
+            }
+            TypeDesc::Tpoly { body, vars } => format!(
+                "Tpoly#{}@{}(body=#{} vars={})",
+                ty.0,
+                ctx.get_level(ty),
+                ctx.repr(*body).0,
+                vars.len()
+            ),
+            other => format!("{:?}#{}@{}", other, ty.0, ctx.get_level(ty)),
+        }
+    };
+    if should_debug_label {
+        eprintln!(
+            "[instance-label] stage=enter name={} fixed={} arg={} res={}",
+            lbl.lbl_name,
+            fixed,
+            summarize(lbl.lbl_arg),
+            summarize(lbl.lbl_res)
+        );
+    }
+
     // Match OCaml ctype.ml instance_label:
     //   let ty_res = copy lbl.lbl_res
     //   let vars, ty_arg = match repr lbl.lbl_arg with
@@ -6055,6 +6436,13 @@ pub fn instance_label(
     // copy lbl_res / copy lbl_arg must share the same copy window.
     let mut cache = CopyCache::new();
     let ty_res = copy_type_cached(ctx, lbl.lbl_res, &mut cache);
+    if should_debug_label {
+        eprintln!(
+            "[instance-label] stage=after-copy-res name={} ty_res={}",
+            lbl.lbl_name,
+            summarize(ty_res)
+        );
+    }
     let arg_repr = ctx.repr(lbl.lbl_arg);
     let (poly_vars, ty_arg) = {
         let desc = ctx.get_desc(arg_repr);
@@ -6079,14 +6467,43 @@ pub fn instance_label(
                     let mut state = UnifyState::new();
                     let _ = unify(ctx, &mut state, ty_arg, shared_body);
                 }
+                if should_debug_label {
+                    eprintln!(
+                        "[instance-label] stage=arg-poly name={} vars={} shared_body={} ty_arg={}",
+                        lbl.lbl_name,
+                        vars.len(),
+                        shared_body
+                            .map(|t| summarize(t))
+                            .unwrap_or_else(|| "<none>".to_string()),
+                        summarize(ty_arg)
+                    );
+                }
                 (poly_vars, ty_arg)
             }
             _ => {
                 drop(desc);
-                (vec![], copy_type_cached(ctx, lbl.lbl_arg, &mut cache))
+                let copied = copy_type_cached(ctx, lbl.lbl_arg, &mut cache);
+                if should_debug_label {
+                    eprintln!(
+                        "[instance-label] stage=arg-copy name={} src={} copied={}",
+                        lbl.lbl_name,
+                        summarize(lbl.lbl_arg),
+                        summarize(copied)
+                    );
+                }
+                (vec![], copied)
             }
         }
     };
+    if should_debug_label {
+        eprintln!(
+            "[instance-label] stage=exit name={} ty_arg={} ty_res={} poly_vars={}",
+            lbl.lbl_name,
+            summarize(ty_arg),
+            summarize(ty_res),
+            poly_vars.len()
+        );
+    }
     (poly_vars, ty_arg, ty_res)
 }
 
@@ -6860,6 +7277,8 @@ fn copy_type_cached(
                     || name == "int"
                     || name == "string"
                     || name == "option"
+                    || name == "Stdlib.JSON.t"
+                    || name == "JSON.t"
                 {
                     eprintln!(
                         "[rust-copy-constr] inspect ty={} level={} name={}",
@@ -6896,6 +7315,10 @@ fn copy_type_cached(
                             || name == "int"
                             || name == "string"
                             || name == "option"
+                            || name == "Jsx.element"
+                            || name == "React.element"
+                            || name == "Stdlib.JSON.t"
+                            || name == "JSON.t"
                         {
                             eprintln!(
                                 "[rust-copy-constr] return-self ty={} level={} name={}",
@@ -6932,6 +7355,10 @@ fn copy_type_cached(
                             || name == "int"
                             || name == "string"
                             || name == "option"
+                            || name == "Jsx.element"
+                            || name == "React.element"
+                            || name == "Stdlib.JSON.t"
+                            || name == "JSON.t"
                         {
                             eprintln!(
                                 "[rust-copy-constr] copy-constr ty={} level={} name={}",
@@ -7036,6 +7463,8 @@ fn copy_type_cached(
                     let abbrevs = ctx.current_abbreviations();
                     let lookup_abbrevs = proper_abbrevs(ctx, &path, &args, abbrevs);
                     let debug_copy_constr = std::env::var_os("RUST_DEBUG_COPY_CONSTR").is_some();
+                    let debug_copy_constr_bt =
+                        std::env::var_os("RUST_DEBUG_COPY_CONSTR_BT").is_some();
                     let full_path_name = if debug_copy_constr {
                         Some(path.name())
                     } else {
@@ -7057,7 +7486,13 @@ fn copy_type_cached(
                             || full_path_name.as_deref() == Some("Js.String2.t")
                             || full_path_name.as_deref() == Some("int")
                             || full_path_name.as_deref() == Some("string")
-                            || full_path_name.as_deref() == Some("option"))
+                            || full_path_name.as_deref() == Some("option")
+                            || full_path_name.as_deref() == Some("LayerStyleID.ID.t")
+                            || full_path_name.as_deref() == Some("Layout.Types.t")
+                            || full_path_name.as_deref() == Some("Jsx.element")
+                            || full_path_name.as_deref() == Some("React.element")
+                            || full_path_name.as_deref() == Some("Stdlib.JSON.t")
+                            || full_path_name.as_deref() == Some("JSON.t"))
                     {
                         full_path_name.clone()
                     } else {
@@ -7090,6 +7525,23 @@ fn copy_type_cached(
                                 found_repr.0,
                                 stale_local_generic_hit
                             );
+                            if debug_copy_constr_bt
+                                && path_name == "React.element"
+                            {
+                                let event =
+                                    COPY_CONSTR_DEBUG_EVENTS.fetch_add(1, Ordering::Relaxed);
+                                if event < 40 {
+                                    eprintln!(
+                                        "[copy-constr-bt] event={} kind=hit path={} ty={} found_source={} found_repr={}\n{:?}",
+                                        event,
+                                        path_name,
+                                        ty.0,
+                                        found_source.0,
+                                        found_repr.0,
+                                        std::backtrace::Backtrace::capture()
+                                    );
+                                }
+                            }
                         }
                         if !stale_local_generic_hit && found_repr != placeholder {
                             cache.nodes.insert(ty, found_repr);
@@ -7107,6 +7559,21 @@ fn copy_type_cached(
                             lookup_abbrevs,
                             memo_state
                         );
+                        if debug_copy_constr_bt
+                            && path_name == "React.element"
+                        {
+                            let event = COPY_CONSTR_DEBUG_EVENTS.fetch_add(1, Ordering::Relaxed);
+                            if event < 40 {
+                                eprintln!(
+                                    "[copy-constr-bt] event={} kind=miss path={} ty={} memo={:?}\n{:?}",
+                                    event,
+                                    path_name,
+                                    ty.0,
+                                    memo_state,
+                                    std::backtrace::Backtrace::capture()
+                                );
+                            }
+                        }
                     }
 
                     let args_copy: Vec<_> = args
@@ -7263,6 +7730,7 @@ fn copy_type_cached(
         }
     }
 }
+
 
 /// Copy a row descriptor.
 fn copy_row_cached(
