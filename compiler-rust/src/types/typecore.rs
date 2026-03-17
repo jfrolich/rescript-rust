@@ -10135,49 +10135,6 @@ fn type_variant(
         ));
     }
 
-    // OCaml fast path for constant polyvariants: if expected type is already a
-    // variant row containing this constant tag, keep `exp_type = instance expected_ty`.
-    let expected_inst = crate::types::ctype::instance(ctx, expected_ty);
-    let expanded_expected = crate::types::ctype::expand_head(ctx, env, expected_ty);
-    let expanded_expected_inst = crate::types::ctype::expand_head(ctx, env, expected_inst);
-    let expected_constant_tag = {
-        let expected_desc = ctx.get_desc(ctx.repr(expanded_expected));
-        let expected_inst_desc = ctx.get_desc(ctx.repr(expanded_expected_inst));
-        match (&*expected_desc, &*expected_inst_desc) {
-            (TypeDesc::Tvariant(row), TypeDesc::Tvariant(row0)) => {
-                let row = crate::types::btype::row_repr(ctx, row);
-                let row0 = crate::types::btype::row_repr(ctx, row0);
-                let field = row
-                    .row_fields
-                    .iter()
-                    .find(|(l, _)| l == label)
-                    .map(|(_, rf)| crate::types::btype::row_field_repr(ctx, rf));
-                let field0 = row0
-                    .row_fields
-                    .iter()
-                    .find(|(l, _)| l == label)
-                    .map(|(_, rf)| crate::types::btype::row_field_repr(ctx, rf));
-                matches!(
-                    (field, field0),
-                    (
-                        Some(crate::types::type_expr::RowField::Rpresent(None)),
-                        Some(crate::types::type_expr::RowField::Rpresent(None))
-                    )
-                )
-            }
-            _ => false,
-        }
-    };
-    if expected_constant_tag {
-        return Ok(Expression::new(
-            ExpressionDesc::Texp_variant(label.to_string(), None),
-            loc.clone(),
-            expected_inst,
-            EnvRef(0),
-            attributes.to_vec().into(),
-        ));
-    }
-
     // Constant polymorphic variants (`#Tag`) use an explicit one-field open row.
     let variant_ty = ctx.new_variant(crate::types::type_expr::RowDesc {
         row_fields: vec![(
