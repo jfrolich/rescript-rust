@@ -279,7 +279,12 @@ fn lookup_type_decl_for_path(
             })
             .collect::<Vec<_>>()
             .join(",");
-        format!("{manifest} variance=[{variance}]")
+        let type_path = decl
+            .type_path
+            .as_ref()
+            .map(|p| p.name())
+            .unwrap_or_else(|| "<none>".to_string());
+        format!("{manifest} type_path={type_path} variance=[{variance}]")
     };
 
     if let Some(decl) = env.find_local_constraint(path) {
@@ -293,11 +298,18 @@ fn lookup_type_decl_for_path(
         return Some(decl.clone());
     }
 
-    // Direct env lookup is reliable for simple identifiers. For qualified
-    // paths, Env.lookup_type currently falls back to leaf-name lookup and can
-    // return an unrelated declaration with the same type name.
-    if let Path::Pident(_) = path {
-        if let Ok(decl) = env.lookup_type(path) {
+    // Try direct env lookup. For qualified paths, only accept exact matches:
+    // Env.lookup_type may fall back to a same-leaf declaration from another
+    // scope, so require decl.type_path to match the queried path.
+    if let Ok(decl) = env.lookup_type(path) {
+        let exact_lookup = match path {
+            Path::Pident(_) => true,
+            _ => decl
+                .type_path
+                .as_ref()
+                .is_some_and(|decl_path| decl_path.same(path) || decl_path.name() == path.name()),
+        };
+        if exact_lookup {
             if let Some(path_name) = &path_name {
                 eprintln!(
                     "[lookup-type] path={} source=env.lookup_type {}",
@@ -353,6 +365,108 @@ fn find_newtype_level_for_path(ctx: &TypeContext<'_>, env: &Env, path: &Path) ->
             let lev = path.head().binding_time();
             (lev, lev)
         })
+}
+
+fn decl_manifest_aliases_path(
+    ctx: &TypeContext<'_>,
+    decl: &super::decl::TypeDeclaration,
+    target: &Path,
+    arity: usize,
+) -> bool {
+    decl.type_manifest.is_some_and(|manifest| {
+        let manifest = ctx.repr(manifest);
+        let manifest_desc = ctx.get_desc(manifest);
+        match &*manifest_desc {
+            TypeDesc::Tconstr { path, args, .. } => {
+                args.len() == arity && (path.same(target) || path.name() == target.name())
+            }
+            _ => false,
+        }
+    })
+}
+
+pub(crate) fn flattened_alias_paths_equivalent(
+    ctx: &TypeContext<'_>,
+    env: &Env,
+    path1: &Path,
+    path2: &Path,
+    arity: usize,
+) -> bool {
+    let name1 = path1.name();
+    let name2 = path2.name();
+    let seg1: Vec<&str> = name1.split('.').collect();
+    let seg2: Vec<&str> = name2.split('.').collect();
+    let candidate = if seg1.len() == seg2.len() + 1
+        && seg1.len() >= 4
+        && seg2.len() >= 3
+        && format!("{}__{}", seg1[0], seg1[1]) == seg2[0]
+        && seg1[2..] == seg2[1..]
+    {
+        Some((path1, path2))
+    } else if seg2.len() == seg1.len() + 1
+        && seg2.len() >= 4
+        && seg1.len() >= 3
+        && format!("{}__{}", seg2[0], seg2[1]) == seg1[0]
+        && seg2[2..] == seg1[1..]
+    {
+        Some((path2, path1))
+    } else {
+        None
+    };
+    let Some((long_path, short_path)) = candidate else {
+        return false;
+    };
+
+    let Some(long_decl) = lookup_type_decl_for_path(ctx, env, long_path) else {
+        return false;
+    };
+    let Some(short_decl) = lookup_type_decl_for_path(ctx, env, short_path) else {
+        return false;
+    };
+
+    decl_manifest_aliases_path(ctx, &short_decl, long_path, arity)
+        || decl_manifest_aliases_path(ctx, &long_decl, short_path, arity)
+        || long_decl
+            .type_path
+            .as_ref()
+            .zip(short_decl.type_path.as_ref())
+            .is_some_and(|(lp, sp)| lp.same(sp) || lp.name() == sp.name())
+}
+
+pub(crate) fn nullary_constr_paths_equivalent(
+    ctx: &TypeContext<'_>,
+    env: &Env,
+    path1: &Path,
+    path2: &Path,
+) -> bool {
+    if path1.same(path2) || path1.name() == path2.name() {
+        return true;
+    }
+
+    let decl1 = lookup_type_decl_for_path(ctx, env, path1)
+        .or_else(|| env.lookup_type(path1).ok().cloned());
+    let decl2 = lookup_type_decl_for_path(ctx, env, path2)
+        .or_else(|| env.lookup_type(path2).ok().cloned());
+    let (Some(decl1), Some(decl2)) = (decl1, decl2) else {
+        return false;
+    };
+
+    let same_type_path = decl1
+        .type_path
+        .as_ref()
+        .zip(decl2.type_path.as_ref())
+        .is_some_and(|(p1, p2)| p1.same(p2) || p1.name() == p2.name());
+    if same_type_path {
+        return true;
+    }
+
+    if decl_manifest_aliases_path(ctx, &decl1, path2, 0)
+        || decl_manifest_aliases_path(ctx, &decl2, path1, 0)
+    {
+        return true;
+    }
+
+    flattened_alias_paths_equivalent(ctx, env, path1, path2, 0)
 }
 
 /// Add a GADT equation: source_path = destination type.
@@ -1698,12 +1812,17 @@ fn try_expand_head<'a>(
                 }
             }
 
-            // 1. Prefer environment lookup for simple identifiers.
-            // OCaml expand_head is path-based (Env.find_type_expansion path env):
-            // for qualified paths, leaf-name lookup can pick an unrelated local
-            // declaration (e.g. local `type t` instead of `Belt.Array.t`).
-            if let Path::Pident(_) = &path {
-                if let Ok(env_decl) = env.lookup_type(&path) {
+            // 1. Prefer environment lookup when the declaration matches the
+            // queried path exactly. For qualified paths, reject leaf-fallback
+            // hits to unrelated declarations.
+            if let Ok(env_decl) = env.lookup_type(&path) {
+                let exact_lookup = match &path {
+                    Path::Pident(_) => true,
+                    _ => env_decl.type_path.as_ref().is_some_and(|decl_path| {
+                        decl_path.same(&path) || decl_path.name() == path_name
+                    }),
+                };
+                if exact_lookup {
                     if let Some(manifest) = env_decl.type_manifest {
                         let params = &env_decl.type_params;
                         if params.len() == args.len() {
@@ -2914,6 +3033,59 @@ fn unify_types<'a>(
                                         }
                                     })
                             }
+                        } else {
+                            false
+                        };
+                        if alias_matches {
+                            let pairs: Vec<_> = args1
+                                .iter()
+                                .zip(args2.iter())
+                                .map(|(&a, &b)| (a, b))
+                                .collect();
+                            drop(desc1);
+                            drop(desc2);
+                            // Keep the longer qualified path as the representative.
+                            link_type(ctx, short_ty, long_ty);
+                            for (a, b) in pairs {
+                                unify(ctx, state, a, b)?;
+                            }
+                            return Ok(());
+                        }
+                    }
+                }
+
+                // Narrow fallback for flattened nested-module aliases:
+                // `A.B.X.t` vs `A__B.X.t`.
+                // Only accept when env declarations prove they refer to the
+                // same alias family (manifest or identical canonical type_path).
+                let flatten_alias_candidate =
+                    if seg1.len() == seg2.len() + 1
+                        && seg1.len() >= 4
+                        && seg2.len() >= 3
+                        && format!("{}__{}", seg1[0], seg1[1]) == seg2[0]
+                        && seg1[2..] == seg2[1..]
+                    {
+                        Some((t1, t2, path1, path2))
+                    } else if seg2.len() == seg1.len() + 1
+                        && seg2.len() >= 4
+                        && seg1.len() >= 3
+                        && format!("{}__{}", seg2[0], seg2[1]) == seg1[0]
+                        && seg2[2..] == seg1[1..]
+                    {
+                        Some((t2, t1, path2, path1))
+                    } else {
+                        None
+                    };
+                if let Some((long_ty, short_ty, long_path, short_path)) = flatten_alias_candidate {
+                    if !short_path.head().is_persistent() && args1.len() == args2.len() {
+                        let alias_matches = if let Some(env) = state.env() {
+                            flattened_alias_paths_equivalent(
+                                ctx,
+                                env,
+                                long_path,
+                                short_path,
+                                args1.len(),
+                            )
                         } else {
                             false
                         };

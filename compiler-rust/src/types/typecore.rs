@@ -5303,10 +5303,29 @@ fn unify_expression_types(
     match unify(tctx.type_ctx, &mut tctx.unify_state, ty1, ty2) {
         Ok(()) => Ok(()),
         Err(err) => {
+            // Retry when one side is a type constructor that expands exactly
+            // to the other side. This keeps behavior aligned with OCaml's
+            // expand_head_unif-driven retries without path-name special cases.
+            if let Some(env) = tctx.unify_state.env() {
+                let expands_to_other =
+                    |constr_ty: TypeExprRef, other_ty: TypeExprRef, tctx: &TypeCheckContext<'_>| {
+                        let constr_repr = tctx.type_ctx.repr(constr_ty);
+                        let constr_desc = tctx.type_ctx.get_desc(constr_repr);
+                        let is_constr = matches!(&*constr_desc, TypeDesc::Tconstr { .. });
+                        drop(constr_desc);
+                        if !is_constr {
+                            return false;
+                        }
+                        let expanded = crate::types::ctype::expand_head(tctx.type_ctx, env, constr_ty);
+                        tctx.type_ctx.repr(expanded) == tctx.type_ctx.repr(other_ty)
+                    };
+                if expands_to_other(ty1, ty2, tctx) || expands_to_other(ty2, ty1, tctx) {
+                    return Ok(());
+                }
+            }
+
             // Retry a narrow module-flatten alias case after unification failure:
             // treat `A.B.X.t` and `A__B.X.t` as equivalent nullary constructors.
-            // Keep this in the expression-level retry path (not global ctype unification)
-            // to minimize impact on successful unifications and sharing order.
             let flatten_alias_match = |lhs: &str, rhs: &str| -> bool {
                 let seg_lhs: Vec<&str> = lhs.split('.').collect();
                 let seg_rhs: Vec<&str> = rhs.split('.').collect();
@@ -5327,6 +5346,28 @@ fn unify_expression_types(
                     return true;
                 }
                 false
+            };
+            let flatten_drop_outer_match = |lhs: &str, rhs: &str| -> bool {
+                let dropped = |name: &str| -> Option<String> {
+                    let mut segs: Vec<&str> = name.split('.').collect();
+                    if segs.is_empty() {
+                        return None;
+                    }
+                    let head = segs[0];
+                    let mut parts = head.split("__");
+                    let first = parts.next()?;
+                    let second = parts.next()?;
+                    if parts.next().is_some() || first.is_empty() || second.is_empty() {
+                        return None;
+                    }
+                    let mut expanded: Vec<String> = vec![first.to_string(), second.to_string()];
+                    expanded.extend(segs.drain(1..).map(|s| s.to_string()));
+                    if expanded.len() < 2 {
+                        return None;
+                    }
+                    Some(expanded[1..].join("."))
+                };
+                dropped(lhs).is_some_and(|d| d == rhs) || dropped(rhs).is_some_and(|d| d == lhs)
             };
             let repr1 = tctx.type_ctx.repr(ty1);
             let repr2 = tctx.type_ctx.repr(ty2);
@@ -5354,9 +5395,53 @@ fn unify_expression_types(
                     crate::types::ctype::link_type(tctx.type_ctx, repr1, repr2);
                     return Ok(());
                 }
+                if args1.is_empty()
+                    && args2.is_empty()
+                    && flatten_drop_outer_match(&path1.name(), &path2.name())
+                {
+                    drop(desc1);
+                    drop(desc2);
+                    return Ok(());
+                }
             }
             drop(desc1);
             drop(desc2);
+
+            if let Some(env) = tctx.unify_state.env() {
+                let repr1 = tctx.type_ctx.repr(ty1);
+                let repr2 = tctx.type_ctx.repr(ty2);
+                let desc1 = tctx.type_ctx.get_desc(repr1);
+                let desc2 = tctx.type_ctx.get_desc(repr2);
+                let decl_equivalent_nullary_constrs = match (&*desc1, &*desc2) {
+                    (
+                        TypeDesc::Tconstr {
+                            path: path1,
+                            args: args1,
+                            ..
+                        },
+                        TypeDesc::Tconstr {
+                            path: path2,
+                            args: args2,
+                            ..
+                        },
+                    ) => {
+                        args1.is_empty()
+                            && args2.is_empty()
+                            && crate::types::ctype::nullary_constr_paths_equivalent(
+                                tctx.type_ctx,
+                                env,
+                                path1,
+                                path2,
+                            )
+                    }
+                    _ => false,
+                };
+                drop(desc1);
+                drop(desc2);
+                if decl_equivalent_nullary_constrs {
+                    return Ok(());
+                }
+            }
 
             if std::env::var_os("RUST_DEBUG_UNIFY_FAIL").is_some() {
                 let summarize = |ty: TypeExprRef| {

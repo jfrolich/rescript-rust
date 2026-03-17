@@ -4520,7 +4520,8 @@ fn type_module_expr_with_alias<'a>(
         ParsedModuleExprDesc::Pmod_functor(inner) => {
             let (ref name, ref param_type, ref body_idx) = **inner;
             // Functor: (X: S) => ME
-            let param_id = Ident::create_local(arena.get_string(name.txt));
+            let param_name = arena.get_string(name.txt).to_string();
+            let param_id = Ident::create_local(&param_name);
 
             // Translate parameter type and extend environment with the functor parameter
             let typed_param_type = match param_type {
@@ -4557,7 +4558,7 @@ fn type_module_expr_with_alias<'a>(
                 mod_desc: ModuleExprDesc::Tmod_functor(
                     param_id,
                     Located {
-                        txt: arena.get_string(name.txt).to_string(),
+                        txt: param_name,
                         loc: name.loc,
                     },
                     typed_param_type,
