@@ -10,7 +10,6 @@ use anyhow::{anyhow, Context, Result};
 use crate::binary_ast::ppx;
 use crate::cmi::persistent_env::PersistentEnv;
 use crate::context::IdGenerator;
-use crate::binary_ast::spice_ppx;
 use crate::js_ir::printer::print_program;
 use crate::lambda::compile::LambdaCompiler;
 use crate::lambda::convert::LambdaConverter;
@@ -455,14 +454,12 @@ pub fn compile_source_to_js_with_options(
         structure
     };
 
-    let structure = spice_ppx::expand_structure(&structure, parser.arena_mut())
-        .map_err(|e| anyhow!("Spice PPX expansion failed: {e}"))?;
-
     // Expand extension points (%%raw, %raw, %re, %%private) without touching externals
     let structure = ppx::expand_extensions(&structure, parser.arena_mut());
 
     // Rewrite expressions: desugar pipe (->), setter (#=), property access (##),
-    // await, tagged templates, and encode externals. This matches OCaml's bs_builtin_ppx.
+    // await, tagged templates, encode externals, and apply spice mapper rewrites.
+    // spice is handled here, so avoid running a second top-level spice expansion pass.
     let structure = ppx::rewrite_structure(&structure, parser.arena_mut())
         .map_err(|e| anyhow!("PPX rewrite failed: {e}"))?;
 
@@ -741,8 +738,6 @@ pub fn typecheck_and_dump_sexp<W: std::io::Write>(
             structure
         };
 
-        let structure = spice_ppx::expand_structure(&structure, parser.arena_mut())
-            .map_err(|e| anyhow!("Spice PPX expansion failed: {e}"))?;
         let structure = ppx::expand_extensions(&structure, parser.arena_mut());
         let structure = ppx::rewrite_structure(&structure, parser.arena_mut())
             .map_err(|e| anyhow!("PPX rewrite failed: {e}"))?;
@@ -1217,7 +1212,7 @@ pub fn extract_file_config_from_signature(
 }
 
 /// Typecheck a stored structure AST (from parse phase) and dump sexp.
-/// Applies remaining PPX passes (spice, expand_extensions, rewrite_structure) before typechecking.
+/// Applies remaining PPX passes (expand_extensions, rewrite_structure) before typechecking.
 pub fn typecheck_stored_structure_and_dump_sexp<W: std::io::Write>(
     mut arena: crate::parse_arena::ParseArena,
     structure: Structure,
@@ -1241,8 +1236,6 @@ pub fn typecheck_stored_structure_and_dump_sexp<W: std::io::Write>(
         structure
     };
 
-    let structure = spice_ppx::expand_structure(&structure, &mut arena)
-        .map_err(|e| anyhow!("Spice PPX expansion failed: {e}"))?;
     let structure = ppx::expand_extensions(&structure, &mut arena);
     let structure = ppx::rewrite_structure(&structure, &mut arena)
         .map_err(|e| anyhow!("PPX rewrite failed: {e}"))?;
