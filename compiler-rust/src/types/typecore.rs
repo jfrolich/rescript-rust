@@ -5303,6 +5303,61 @@ fn unify_expression_types(
     match unify(tctx.type_ctx, &mut tctx.unify_state, ty1, ty2) {
         Ok(()) => Ok(()),
         Err(err) => {
+            // Retry a narrow module-flatten alias case after unification failure:
+            // treat `A.B.X.t` and `A__B.X.t` as equivalent nullary constructors.
+            // Keep this in the expression-level retry path (not global ctype unification)
+            // to minimize impact on successful unifications and sharing order.
+            let flatten_alias_match = |lhs: &str, rhs: &str| -> bool {
+                let seg_lhs: Vec<&str> = lhs.split('.').collect();
+                let seg_rhs: Vec<&str> = rhs.split('.').collect();
+                if seg_lhs.len() == seg_rhs.len() + 1
+                    && seg_lhs.len() >= 4
+                    && seg_rhs.len() >= 3
+                    && format!("{}__{}", seg_lhs[0], seg_lhs[1]) == seg_rhs[0]
+                    && seg_lhs[2..] == seg_rhs[1..]
+                {
+                    return true;
+                }
+                if seg_rhs.len() == seg_lhs.len() + 1
+                    && seg_rhs.len() >= 4
+                    && seg_lhs.len() >= 3
+                    && format!("{}__{}", seg_rhs[0], seg_rhs[1]) == seg_lhs[0]
+                    && seg_rhs[2..] == seg_lhs[1..]
+                {
+                    return true;
+                }
+                false
+            };
+            let repr1 = tctx.type_ctx.repr(ty1);
+            let repr2 = tctx.type_ctx.repr(ty2);
+            let desc1 = tctx.type_ctx.get_desc(repr1);
+            let desc2 = tctx.type_ctx.get_desc(repr2);
+            if let (
+                TypeDesc::Tconstr {
+                    path: path1,
+                    args: args1,
+                    ..
+                },
+                TypeDesc::Tconstr {
+                    path: path2,
+                    args: args2,
+                    ..
+                },
+            ) = (&*desc1, &*desc2)
+            {
+                if args1.is_empty()
+                    && args2.is_empty()
+                    && flatten_alias_match(&path1.name(), &path2.name())
+                {
+                    drop(desc1);
+                    drop(desc2);
+                    crate::types::ctype::link_type(tctx.type_ctx, repr1, repr2);
+                    return Ok(());
+                }
+            }
+            drop(desc1);
+            drop(desc2);
+
             if std::env::var_os("RUST_DEBUG_UNIFY_FAIL").is_some() {
                 let summarize = |ty: TypeExprRef| {
                     let repr = tctx.type_ctx.repr(ty);
