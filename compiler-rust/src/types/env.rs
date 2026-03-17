@@ -641,6 +641,18 @@ impl Env {
             .ok_or_else(|| EnvError::ModuleNotFound(name.to_string()))
     }
 
+    /// Find a module by name, returning the identifier, declaration, and
+    /// whether the binding is local (from `add_module`) vs opened.
+    pub fn find_module_with_origin(
+        &self,
+        name: &str,
+    ) -> EnvResult<(&Ident, &ModuleDeclaration, bool)> {
+        self.modules
+            .find_by_name_with_origin(name)
+            .map(|(id, decl, is_local)| (id, decl.as_ref(), is_local))
+            .ok_or_else(|| EnvError::ModuleNotFound(name.to_string()))
+    }
+
     /// Find a module by path.
     pub fn lookup_module(&self, path: &Path) -> EnvResult<&ModuleDeclaration> {
         match path {

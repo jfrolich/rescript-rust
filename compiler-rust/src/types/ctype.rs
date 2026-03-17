@@ -1174,7 +1174,9 @@ fn resolve_module_type_through_env_path<'a>(
     let result = match path {
         Path::Pident(id) => {
             let name = id.name();
-            if let Ok(md) = env.find_module(name) {
+            if let Ok(md) = env.lookup_module(path) {
+                Some(md.md_type.clone())
+            } else if let Ok(md) = env.find_module(name) {
                 Some(md.md_type.clone())
             } else if let Ok(mtd) = env.find_modtype(name) {
                 mtd.mtd_type.clone()
@@ -3502,7 +3504,7 @@ fn unify_types<'a>(
                 ..
             },
         ) => {
-            if !path1.same(path2) {
+            if !path1.same(path2) && path1.name() != path2.name() {
                 drop(desc1);
                 drop(desc2);
                 return Err(TypeError::Unify(vec![(t1, t2)]));

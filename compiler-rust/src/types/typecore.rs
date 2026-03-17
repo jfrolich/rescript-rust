@@ -4123,7 +4123,9 @@ pub fn type_expect<'a>(
                         TypeDesc::Tnil => "Tnil".to_string(),
                         TypeDesc::Tvariant(_) => "Tvariant".to_string(),
                         TypeDesc::Tpoly { .. } => "Tpoly".to_string(),
-                        TypeDesc::Tpackage { .. } => "Tpackage".to_string(),
+                        TypeDesc::Tpackage { path, args, .. } => {
+                            format!("Tpackage({},args={})", path.name(), args.len())
+                        }
                     };
                     eprintln!(
                         "[ident-level] path={} val_id={} val_level={} val_desc={} inst_id={} inst_level={} inst_desc={}",
@@ -10239,10 +10241,6 @@ fn select_record_type_for_fields<'a>(
     base_ty: Option<TypeExprRef>,
     closed_record: bool,
 ) -> Option<TypeExprRef> {
-    if field_names.len() <= 2 {
-        return None;
-    }
-
     for candidate_ty in [Some(expected_ty), base_ty].into_iter().flatten() {
         if let Some(labels) = get_record_labels(ctx, env, pers_env, candidate_ty) {
             if record_labels_match_ids(&labels, field_names, closed_record) {
@@ -15037,12 +15035,15 @@ impl Env {
             Longident::Lident(mod_idx) => {
                 let mod_name = arena.get_string(*mod_idx);
                 // First try local environment
-                if let Ok((mod_id, md)) = self.find_module_with_id(mod_name) {
+                if let Ok((mod_id, md, is_local)) = self.find_module_with_origin(mod_name) {
                     let result = self.resolve_module_type(&md.md_type, pers_env, ctx);
                     if let Some((sig, resolved_name)) = result {
-                        // Use md_path if available (e.g., Pdot(Pident("Stdlib"), "Console")
-                        // for Console from opened Stdlib), otherwise fall back to Pident.
-                        let path = if let Some(ref qualified_path) = md.md_path {
+                        // Match OCaml IdTbl path selection:
+                        // - Local module bindings keep their local identifier path (Pident)
+                        // - Opened module bindings use their qualified md_path (Pdot), if any.
+                        let path = if is_local {
+                            Path::pident(mod_id.clone())
+                        } else if let Some(ref qualified_path) = md.md_path {
                             qualified_path.clone()
                         } else {
                             Path::pident(mod_id.clone())
@@ -15066,27 +15067,31 @@ impl Env {
                                     | crate::types::decl::SignatureItem::SigModtype(..)
                             )
                         });
-                        // Extract module alias target for path prefix rewriting.
-                        // E.g., module J = Js.Json: target = Pdot(Pident("Js"), "Json")
-                        // Extract module alias target for path prefix rewriting.
-                        // Only for Pdot targets (nested modules like Js.Json).
-                        // Pident targets (like Stdlib_Date) are handled by existing substitution.
-                        let alias_target = if apply_subst {
+                        // Extract module alias targets for path-prefix rewriting.
+                        // - Pdot aliases (e.g. Js.Json) can be rewritten directly.
+                        // - Pident aliases (e.g. Types = Mistakes__Types) should only
+                        //   rewrite nested module prefixes (e.g. Mistakes__Types.Id -> Types.Id).
+                        let (alias_target_pdot, alias_target_pident) = if apply_subst {
                             match &md.md_type {
-                                crate::types::decl::ModuleType::MtyAlias(_, target) => {
-                                    if matches!(target, Path::Pdot(..)) && !target.same(&path) {
-                                        Some(target.clone())
-                                    } else {
-                                        None
+                                crate::types::decl::ModuleType::MtyAlias(_, target)
+                                    if !target.same(&path) =>
+                                {
+                                    match target {
+                                        Path::Pdot(..) => (Some(target.clone()), None),
+                                        Path::Pident(..) => (None, Some(target.clone())),
+                                        Path::Papply(..) => (None, None),
                                     }
                                 }
-                                _ => None,
+                                _ => (None, None),
                             }
                         } else {
-                            None
+                            (None, None)
                         };
                         let needs_copy = apply_subst
-                            && (has_type_or_module_defs || resolved_name.is_some() || alias_target.is_some());
+                            && (has_type_or_module_defs
+                                || resolved_name.is_some()
+                                || alias_target_pdot.is_some()
+                                || alias_target_pident.is_some());
                         let mut sig = if needs_copy {
                             copy_lookup_signature_for_subst(&sig, ctx)
                         } else {
@@ -15114,10 +15119,28 @@ impl Env {
                             // Rewrite paths for module aliases: replace the canonical
                             // module path prefix with the alias path in all types.
                             // E.g., module J = Js.Json: rewrite Js.Json.Kind.t → J.Kind.t
-                            if let Some(ref target) = alias_target {
+                            if let Some(ref target) = alias_target_pdot {
                                 crate::cmi::persistent_env::rewrite_sig_by_path_prefix(
                                     &sig, target, &path, ctx,
                                 );
+                            }
+                            if let Some(ref target) = alias_target_pident {
+                                for item in &sig {
+                                    if let crate::types::decl::SignatureItem::SigModule(id, _, _) =
+                                        item
+                                    {
+                                        let old_prefix =
+                                            Path::pdot(target.clone(), id.name().to_string());
+                                        let new_prefix =
+                                            Path::pdot(path.clone(), id.name().to_string());
+                                        crate::cmi::persistent_env::rewrite_sig_by_path_prefix(
+                                            &sig,
+                                            &old_prefix,
+                                            &new_prefix,
+                                            ctx,
+                                        );
+                                    }
+                                }
                             }
                         }
                         if std::env::var_os("RUST_DEBUG_SIG_N_T").is_some() && path.name() == "N" {
@@ -17454,6 +17477,11 @@ fn strengthen_signature_for_module_access_path<'a>(
         .collect()
 }
 
+fn path_cache_safe(path: &Path) -> bool {
+    let head = path.head();
+    head.is_persistent() || head.stamp() == 0
+}
+
 fn resolve_module_signature_for_path<'a>(
     module_path: &Path,
     env: &Env,
@@ -17464,13 +17492,19 @@ fn resolve_module_signature_for_path<'a>(
 
     // Check module signature cache first
     let module_key = module_path.name();
-    if let Some(cached) = ctx.find_resolved_module_sig(&module_key) {
-        return Some(cached);
+    let cache_safe = path_cache_safe(module_path);
+    if cache_safe {
+        if let Some(cached) = ctx.find_resolved_module_sig(&module_key) {
+            return Some(cached);
+        }
     }
 
     match module_path {
         Path::Pident(id) => {
-            if let Ok(md) = env.find_module(id.name()) {
+            if let Ok(md) = env
+                .lookup_module(module_path)
+                .or_else(|_| env.find_module(id.name()))
+            {
                 let (sig, resolved_name) = env.resolve_module_type(&md.md_type, pers_env, ctx)?;
                 let access_path = md
                     .md_path
@@ -17503,7 +17537,9 @@ fn resolve_module_signature_for_path<'a>(
                     }
                 }
                 crate::cmi::persistent_env::substitute_type_paths_in_sig(&sig, &access_path, ctx);
-                ctx.register_resolved_module_sig(&module_key, access_path.clone(), sig.clone());
+                if cache_safe {
+                    ctx.register_resolved_module_sig(&module_key, access_path.clone(), sig.clone());
+                }
                 if std::env::var_os("RUST_DEBUG_RESOLVE_MODSIG").is_some()
                     && (module_path.name().contains("NumberFormat")
                         || access_path.name().contains("NumberFormat"))
@@ -17556,7 +17592,13 @@ fn resolve_module_signature_for_path<'a>(
                             &access_path,
                             ctx,
                         );
-                        ctx.register_resolved_module_sig(&module_key, access_path.clone(), sig.clone());
+                        if cache_safe {
+                            ctx.register_resolved_module_sig(
+                                &module_key,
+                                access_path.clone(),
+                                sig.clone(),
+                            );
+                        }
                         if std::env::var_os("RUST_DEBUG_RESOLVE_MODSIG").is_some()
                             && (module_path.name().contains("NumberFormat")
                                 || access_path.name().contains("NumberFormat"))
@@ -17608,17 +17650,20 @@ fn lookup_type_decl_for_path<'a>(
     // Try path-based lookup for Pdot paths
     if let Path::Pdot(parent, type_name, _) = type_path {
         let mut deferred_self_manifest_decl: Option<crate::types::decl::TypeDeclaration> = None;
+        let cache_safe = path_cache_safe(type_path);
 
         // Check resolved-sig cache first to avoid re-creating fresh type copies.
         // This approximates OCaml's components_of_module_maker lazy caching.
         // Uses a separate cache from type_decl_by_path to avoid conflicts with
         // expand_head_once entries which have unqualified paths.
         let path_name = type_path.name();
-        if let Some(decl) = ctx.find_resolved_pdot_type(&path_name) {
-            if debug_lookup_options {
-                eprintln!("[lookup-options] path={} source=resolved_pdot_cache", path_name);
+        if cache_safe {
+            if let Some(decl) = ctx.find_resolved_pdot_type(&path_name) {
+                if debug_lookup_options {
+                    eprintln!("[lookup-options] path={} source=resolved_pdot_cache", path_name);
+                }
+                return Some(decl);
             }
-            return Some(decl);
         }
 
         // Inline-record constructor paths are type paths whose parent is also a type path:
@@ -17730,7 +17775,10 @@ fn lookup_type_decl_for_path<'a>(
                         // remain visible to variant disambiguation.
                         if self_manifest {
                             if let Path::Pident(parent_id) = parent.as_ref() {
-                                if let Ok(md) = env.find_module(parent_id.name()) {
+                                if let Ok(md) = env
+                                    .lookup_module(parent.as_ref())
+                                    .or_else(|_| env.find_module(parent_id.name()))
+                                {
                                     if let crate::types::decl::ModuleType::MtySignature(raw_sig) =
                                         &md.md_type
                                     {
@@ -17760,7 +17808,9 @@ fn lookup_type_decl_for_path<'a>(
                         // Cache the resolved decl so subsequent lookups for the same
                         // Pdot path reuse the same type nodes (matching OCaml's
                         // components_of_module_maker lazy caching).
-                        ctx.register_resolved_pdot_type(&path_name, decl.clone());
+                        if cache_safe {
+                            ctx.register_resolved_pdot_type(&path_name, decl.clone());
+                        }
                         if debug_lookup_options {
                             eprintln!("[lookup-options] path={} source=resolved_parent_sig", path_name);
                         }
@@ -17774,8 +17824,10 @@ fn lookup_type_decl_for_path<'a>(
         // -> look up "Nullable" module in env -> if it's MtyAlias(Stdlib_Nullable)
         // -> look up "Stdlib_Nullable.t" in the path store or try CMI resolution
         if let Path::Pident(parent_id) = parent.as_ref() {
-            // Use name-based lookup since stamp in type path may differ from env
-            if let Ok(md) = env.find_module(parent_id.name()) {
+            if let Ok(md) = env
+                .lookup_module(parent.as_ref())
+                .or_else(|_| env.find_module(parent_id.name()))
+            {
                 use crate::types::decl::ModuleType;
                 match &md.md_type {
                     ModuleType::MtyAlias(_, alias_path) | ModuleType::MtyIdent(alias_path) => {
@@ -17801,7 +17853,9 @@ fn lookup_type_decl_for_path<'a>(
                             if let crate::types::decl::SignatureItem::SigType(id, decl, _) = item {
                                 if id.name() == type_name.as_str() {
                                     // Cache for reuse (same as Pdot branch caching)
-                                    ctx.register_resolved_pdot_type(&path_name, decl.clone());
+                                    if cache_safe {
+                                        ctx.register_resolved_pdot_type(&path_name, decl.clone());
+                                    }
                                     return Some(decl.clone());
                                 }
                             }
@@ -17825,11 +17879,13 @@ fn lookup_type_decl_for_path<'a>(
         // OCaml's Env.components_of_module applies Subst.type_declaration before
         // exposing Sig_type entries; preferring substituted signatures first avoids
         // returning stale unqualified recursive paths (e.g. JSON.t self refs as Pident "t").
-        if let Some(decl) = ctx.find_type_decl_by_path(&path_name) {
-            if debug_lookup_options {
-                eprintln!("[lookup-options] path={} source=type_decl_by_path", path_name);
+        if cache_safe {
+            if let Some(decl) = ctx.find_type_decl_by_path(&path_name) {
+                if debug_lookup_options {
+                    eprintln!("[lookup-options] path={} source=type_decl_by_path", path_name);
+                }
+                return Some(decl.clone());
             }
-            return Some(decl.clone());
         }
 
         // Try resolving through modules (loading CMI files on demand)
