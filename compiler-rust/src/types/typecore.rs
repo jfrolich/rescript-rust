@@ -14844,7 +14844,11 @@ impl Env {
                     }
                     _ => prefix_str.clone(),
                 };
-                let module_cache_key = format!("module::{}", prefix_cache_fragment);
+                // Module resolution depends on the current environment snapshot
+                // (opened/local shadowing can differ per scope), so keep cache
+                // entries env-scoped to avoid cross-scope path pollution.
+                let module_cache_key =
+                    format!("module::{}::env{}", prefix_cache_fragment, self.id());
 
                 let cached_module = ctx.find_resolved_module_sig(&module_cache_key);
                 let cache_hit = cached_module.is_some();
@@ -14938,7 +14942,23 @@ impl Env {
                                         );
                                     }
                                 }
-                                let path = Path::pdot(mod_path.clone(), value_name.to_string());
+                                let effective_mod_path = if let Longident::Lident(mod_idx) = &**prefix
+                                {
+                                    let mod_name = arena.get_string(*mod_idx);
+                                    let matches_prefix = mod_path.last() == mod_name
+                                        || mod_path.last().trim_end_matches('!') == mod_name;
+                                    if matches_prefix {
+                                        self.find_module_with_origin(mod_name)
+                                            .ok()
+                                            .and_then(|(_, md, _)| md.md_path.clone())
+                                            .unwrap_or_else(|| mod_path.clone())
+                                    } else {
+                                        mod_path.clone()
+                                    }
+                                } else {
+                                    mod_path.clone()
+                                };
+                                let path = Path::pdot(effective_mod_path, value_name.to_string());
                                 return Ok((path, vd.clone()));
                             }
                         }
@@ -14953,10 +14973,40 @@ impl Env {
                 // Fallback: try looking up as a flattened value in the local env.
                 match self.find_value_with_id(value_name) {
                     Ok((id, desc)) => {
-                        let path = desc
-                            .val_path
-                            .clone()
-                            .unwrap_or_else(|| Path::pident(id.clone()));
+                        let path = if let Longident::Lident(mod_idx) = &**prefix {
+                            let mod_name = arena.get_string(*mod_idx);
+                            let module_access_path = self
+                                .find_module_with_origin(mod_name)
+                                .ok()
+                                .and_then(|(_, md, _)| md.md_path.clone());
+                            if let (Some(mod_path), Some(existing_path)) =
+                                (module_access_path, desc.val_path.clone())
+                            {
+                                let can_requalify = match &existing_path {
+                                    Path::Pdot(parent, leaf, _)
+                                        if leaf == value_name
+                                            && (parent.last() == mod_name
+                                                || parent.last().trim_end_matches('!') == mod_name) =>
+                                    {
+                                        true
+                                    }
+                                    _ => false,
+                                };
+                                if can_requalify {
+                                    Path::pdot(mod_path, value_name.to_string())
+                                } else {
+                                    existing_path
+                                }
+                            } else {
+                                desc.val_path
+                                    .clone()
+                                    .unwrap_or_else(|| Path::pident(id.clone()))
+                            }
+                        } else {
+                            desc.val_path
+                                .clone()
+                                .unwrap_or_else(|| Path::pident(id.clone()))
+                        };
                         Ok((path, desc.clone()))
                     }
                     Err(_) => Err(TypeCoreError::UndefinedMethod {
@@ -15032,6 +15082,22 @@ impl Env {
                 // First try local environment
                 if let Ok((mod_id, md, is_local)) = self.find_module_with_origin(mod_name) {
                     let result = self.resolve_module_type(&md.md_type, pers_env, ctx);
+                    // Some opened submodules carry alias module types with hidden
+                    // local idents (e.g. ArrayExt!) that are not directly
+                    // resolvable via resolve_module_type. Fall back to resolving
+                    // through the declaration's qualified access path.
+                    if result.is_none() && apply_subst {
+                        if let Some(access_path) = md.md_path.as_ref() {
+                            if let Some((resolved_path, sig)) = resolve_module_signature_for_path(
+                                access_path,
+                                self,
+                                pers_env,
+                                ctx,
+                            ) {
+                                return Some((resolved_path, sig));
+                            }
+                        }
+                    }
                     if let Some((sig, resolved_name)) = result {
                         // Match OCaml IdTbl path selection:
                         // - Local module bindings keep their local identifier path (Pident)

@@ -2041,7 +2041,49 @@ pub fn add_signature_to_env(
                 // Set the qualified path so that when this module is accessed
                 // via Lident (e.g. "Console" from opened Stdlib), we produce
                 // the correct Pdot path (e.g. Pdot(Pident("Stdlib"), "Console"))
-                md.md_path = Some(Path::pdot(module_path.clone(), id.name()));
+                let access_path = Path::pdot(module_path.clone(), id.name());
+                md.md_path = Some(access_path.clone());
+                // Rewrite module-type paths against the opened signature.
+                // Some CMI signatures use hidden self-alias heads (e.g. `ArrayExt!`)
+                // that are not directly resolvable from the current environment.
+                // Normalize those to the qualified access path.
+                let normalize_hidden_alias_path = |path: Path| -> Path {
+                    fn go(path: Path, module_path: &Path, module_name: &str, access_path: &Path) -> Path {
+                        match path {
+                            Path::Pident(alias_id) => {
+                                let clean = alias_id.name().trim_end_matches('!');
+                                if clean == module_name {
+                                    access_path.clone()
+                                } else if clean == module_path.last() {
+                                    module_path.clone()
+                                } else {
+                                    Path::Pident(alias_id)
+                                }
+                            }
+                            Path::Pdot(prefix, name, pos) => Path::Pdot(
+                                Box::new(go(*prefix, module_path, module_name, access_path)),
+                                name,
+                                pos,
+                            ),
+                            Path::Papply(functor, arg) => Path::Papply(
+                                Box::new(go(*functor, module_path, module_name, access_path)),
+                                Box::new(go(*arg, module_path, module_name, access_path)),
+                            ),
+                        }
+                    }
+                    go(path, module_path, id.name(), &access_path)
+                };
+                md.md_type = match md.md_type {
+                    ModuleType::MtyAlias(alias_presence, alias_path) => {
+                        let rewritten = substitute_sig_path(&alias_path, sig_items, module_path);
+                        ModuleType::MtyAlias(alias_presence, normalize_hidden_alias_path(rewritten))
+                    }
+                    ModuleType::MtyIdent(path) => {
+                        let rewritten = substitute_sig_path(&path, sig_items, module_path);
+                        ModuleType::MtyIdent(normalize_hidden_alias_path(rewritten))
+                    }
+                    other => other,
+                };
                 if as_opened {
                     env.add_opened_module(id.clone(), md.clone());
                 } else {
