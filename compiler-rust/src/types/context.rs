@@ -559,6 +559,17 @@ impl<'a> TypeContext<'a> {
     pub fn check_abbrev_env(&self, env: &crate::types::env::Env) {
         let env_id = env.id();
         if env_id != self.previous_env_id.get() {
+            let value_after_type_env_change = matches!(
+                env.summary(),
+                crate::types::env::EnvSummary::Value(parent, _, _)
+                    if matches!(parent.as_ref(), crate::types::env::EnvSummary::Type(_, _, _))
+            );
+            if value_after_type_env_change {
+                // Rust's typing pipeline temporarily wraps a type-declaration env
+                // with synthetic value bindings. Treat that as the same abbrev
+                // cache scope and keep previous_env_id unchanged.
+                return;
+            }
             self.clear_abbrev_memos();
             self.previous_env_id.set(env_id);
         }
