@@ -219,6 +219,10 @@ python3 scripts/parity_analyzer.py motifs ticker --top 20 --transitions 20 --pat
 python3 scripts/parity_analyzer.py insertion
 python3 scripts/parity_analyzer.py insertion ticker --lookahead 300 --min-run 6 --top 20
 
+# Aggregate first-divergence + insertion signatures across all failures
+python3 scripts/parity_analyzer.py divergence-summary
+python3 scripts/parity_analyzer.py divergence-summary --lookahead 300 --min-run 6 --top 25 --types 25
+
 # Aligned type preamble comparison (requires sexp files)
 python3 scripts/parity_analyzer.py preamble ticker
 python3 scripts/parity_analyzer.py preamble ticker --diff   # only show non-matching types
@@ -266,6 +270,7 @@ find .parity-cache/tests/rust -type f -delete
 
 # 4) Inspect clusters and first divergence
 python3 scripts/parity_analyzer.py summary
+python3 scripts/parity_analyzer.py divergence-summary
 python3 scripts/parity_analyzer.py divergence <file-key>
 python3 scripts/parity_analyzer.py extra <file-key>
 python3 scripts/parity_analyzer.py trace <file-key> <type-id>
@@ -310,6 +315,27 @@ Normally use the parity script, but if you need to run bsc manually:
 - Use the dune-built bsc (`_build/install/default/bin/bsc`), not the released `bsc.exe`
 - Always use `timeout` with the Rust compiler (infinite loops are possible)
 - Sexp output goes to **stderr** (redirect with `2>`, not `>`)
+
+Exact per-file repro workflow (scripts tooling):
+```bash
+# 1) Fetch exact compiler args for the source file
+cd tests/tests
+../../packages/@rescript/darwin-arm64/bin/rescript.exe compiler-args src/set_gen.res
+
+# 2) Run Rust bsc with those args from tests/tests/lib/bs
+cd lib/bs
+timeout 10 /absolute/path/to/compiler-rust/target/release/bsc -dtyped-sexp <compiler-args...> 2> /tmp/rust.sexp 1>/dev/null
+
+# 3) Optional: run OCaml bsc with same args for side-by-side diffs
+timeout 10 /absolute/path/to/_build/install/default/bin/bsc -dtyped-sexp <compiler-args...> 2> /tmp/ocaml.sexp 1>/dev/null
+diff -u /tmp/ocaml.sexp /tmp/rust.sexp | sed -n '1,200p'
+```
+
+Use env-gated debug tracing with direct bsc repro (example):
+```bash
+RUST_DEBUG_FINALIZE_VARIANT=1 timeout 10 /absolute/path/to/compiler-rust/target/release/bsc -dtyped-sexp <compiler-args...> 2> /tmp/rust-debug.sexp 1>/dev/null
+rg "\[finalize-" /tmp/rust-debug.sexp
+```
 
 ### Rebuilding the OCaml bsc
 
