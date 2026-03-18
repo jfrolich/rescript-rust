@@ -1284,6 +1284,47 @@ fn find_type_decl_for_path(
     if let Some(type_decl) = ctx.find_type_decl_by_path(&path_str) {
         return Some((*type_decl).clone());
     }
+
+    if let Some(type_decl) = crate::types::ctype::resolve_type_through_modules(ctx, path) {
+        return Some(type_decl);
+    }
+
+    // Try resolving through module aliases visible in the local env.
+    if let Path::Pdot(parent, type_name, _) = path {
+        if let Path::Pident(parent_id) = parent.as_ref() {
+            if let Ok(module_desc) = env
+                .lookup_module(parent.as_ref())
+                .or_else(|_| env.find_module(parent_id.name()))
+            {
+                use crate::types::decl::ModuleType;
+                use crate::types::decl::SignatureItem;
+                match &module_desc.md_type {
+                    ModuleType::MtyAlias(_, alias_path) | ModuleType::MtyIdent(alias_path) => {
+                        let resolved_path = Path::pdot(alias_path.clone(), type_name.as_str());
+                        if let Some(type_decl) = ctx.find_type_decl_by_path(&resolved_path.name()) {
+                            return Some((*type_decl).clone());
+                        }
+                        if let Some(type_decl) =
+                            crate::types::ctype::resolve_type_through_modules(ctx, &resolved_path)
+                        {
+                            return Some(type_decl);
+                        }
+                    }
+                    ModuleType::MtySignature(sig_items) => {
+                        for item in sig_items {
+                            if let SignatureItem::SigType(id, decl, _) = item {
+                                if id.name() == type_name.as_str() {
+                                    return Some(decl.clone());
+                                }
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+
     let short_name = path.head_name();
     ctx.find_type_decl(short_name).map(|decl| (*decl).clone())
 }
@@ -1623,7 +1664,12 @@ fn expand_record_spread_label(
         return Some(vec![label.clone()]);
     }
 
+    // Match OCaml record_type_spread.extract + Ctype.extract_concrete_typedecl:
+    // unwrap top-level Tpoly([], ..), then expand type aliases to the concrete
+    // head before reading the spread path/type args.
     let spread_ty = unwrap_poly_type(ctx, label.ld_type);
+    let spread_ty = crate::types::ctype::expand_head(ctx, env, spread_ty);
+    let spread_ty = unwrap_poly_type(ctx, spread_ty);
     let (spread_path, spread_args) = match &*ctx.get_desc(spread_ty) {
         crate::types::TypeDesc::Tconstr { path, args, .. } => (path.clone(), args.clone()),
         _ => return None,
