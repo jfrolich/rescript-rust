@@ -165,6 +165,8 @@ pub struct TypeContext<'a> {
     predef_unit: Cell<Option<TypeExprRef>>,
     predef_exn: Cell<Option<TypeExprRef>>,
     predef_bigint: Cell<Option<TypeExprRef>>,
+    predef_option_inner: Cell<Option<TypeExprRef>>,
+    predef_option_type: Cell<Option<TypeExprRef>>,
 
     /// Arity update aliases: maps arity-updated TypeExprRef → original TypeExprRef.
     /// OCaml's `{t with desc = Tarrow(..., Some newarity)}` creates a new record
@@ -214,6 +216,8 @@ impl<'a> TypeContext<'a> {
             predef_unit: Cell::new(None),
             predef_exn: Cell::new(None),
             predef_bigint: Cell::new(None),
+            predef_option_inner: Cell::new(None),
+            predef_option_type: Cell::new(None),
             arity_aliases: RefCell::new(std::collections::HashMap::new()),
         }
     }
@@ -466,6 +470,24 @@ impl<'a> TypeContext<'a> {
     /// Get the predef bigint singleton (generic_level).
     pub fn predef_bigint(&self) -> TypeExprRef {
         self.get_or_create_predef(&self.predef_bigint, "bigint")
+    }
+
+    /// Get the cached generic option constructor scheme types.
+    /// Returns (`'a`, `option('a)`), both allocated once at generic level.
+    pub fn predef_option_scheme(&self) -> (TypeExprRef, TypeExprRef) {
+        match (self.predef_option_inner.get(), self.predef_option_type.get()) {
+            (Some(inner), Some(option_ty)) => (inner, option_ty),
+            _ => {
+                let inner = self.new_generic_var(None);
+                let option_ty = self.new_generic_constr(
+                    Path::pident(Ident::create_persistent("option")),
+                    vec![inner],
+                );
+                self.predef_option_inner.set(Some(inner));
+                self.predef_option_type.set(Some(option_ty));
+                (inner, option_ty)
+            }
+        }
     }
 
     /// Create an arrow type at generic level (for type schemes).

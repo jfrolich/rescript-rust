@@ -3762,7 +3762,7 @@ fn type_pattern_record(
             let typed_inner = type_pattern_inner(tctx, env, parsed_pat, inner_ty, mode, state, 0)?;
             // Wrap in Tpat_construct("Some", [typed_inner]) with type option<T>
             let some_lid = Located { txt: tctx.arena.some_lid(), loc: parsed_pat.ppat_loc };
-            let some_cstr = make_some_constructor(ctx, field_ty);
+            let some_cstr = make_some_constructor(ctx);
             Pattern::new(
                 PatternDesc::Tpat_construct(some_lid, some_cstr, vec![typed_inner]),
                 parsed_pat.ppat_loc,
@@ -5937,6 +5937,34 @@ fn type_application(
         },
     }
 
+    #[derive(Clone)]
+    struct OmittedArrow {
+        label: crate::types::ArgLabel,
+        arg_ty: TypeExprRef,
+        level: i32,
+    }
+
+    fn new_arrow_with_level(
+        ctx: &TypeContext<'_>,
+        label: crate::types::ArgLabel,
+        arg_ty: TypeExprRef,
+        ret_ty: TypeExprRef,
+        level: i32,
+        arity: Option<i32>,
+    ) -> TypeExprRef {
+        // Match OCaml result_type/newty2 behavior for omitted labels:
+        // preserve the original arrow level and use a direct Cok commutable.
+        ctx.alloc_type_at_level(
+            TypeDesc::Tarrow {
+                arg: crate::types::TypeArg::new(label, arg_ty),
+                ret: ret_ty,
+                commutable: crate::types::Commutable::Cok,
+                arity,
+            },
+            level,
+        )
+    }
+
     fn parser_arg_label_name<'a>(label: &ArgLabel, arena: &'a ParseArena) -> &'a str {
         match label {
             ArgLabel::Nolabel => "",
@@ -6060,7 +6088,7 @@ fn type_application(
         .map(|(label, expr_idx)| (label.clone(), *expr_idx))
         .collect();
     let mut pending_args: Vec<PendingApplyArg<'_>> = Vec::new();
-    let mut omitted: Vec<(crate::types::ArgLabel, TypeExprRef)> = Vec::new();
+    let mut omitted: Vec<OmittedArrow> = Vec::new();
     let mut consumed_optional_count = 0usize;
     let mut synthesized_optional_count = 0usize;
 
@@ -6200,7 +6228,11 @@ fn type_application(
             pending_args.push(PendingApplyArg::Omitted {
                 label: fn_label.clone(),
             });
-            omitted.push((fn_label, arg_ty));
+            omitted.push(OmittedArrow {
+                label: fn_label,
+                arg_ty,
+                level: ctx.get_level(ctx.repr(expanded_current_ty)),
+            });
             current_ty = ret_ty;
             current_ty0 = ret_ty0;
             continue;
@@ -6441,7 +6473,7 @@ fn type_application(
                                 txt: tctx.arena.plain_some_lid(),
                                 loc: wrapped_loc,
                             },
-                            make_some_constructor(ctx, option_ty),
+                            make_some_constructor(ctx),
                             vec![typed_arg],
                         ),
                         wrapped_loc,
@@ -6479,7 +6511,7 @@ fn type_application(
                             txt: tctx.arena.none_lid(),
                             loc: none_loc,
                         },
-                        make_none_constructor(ctx, option_ty),
+                        make_none_constructor(ctx),
                         vec![],
                     ),
                     none_loc,
@@ -6516,8 +6548,15 @@ fn type_application(
 
     // Re-wrap omitted parameters for partial/labeled applications.
     let mut result_ty = current_ty0;
-    for (label, arg_ty) in omitted.iter().rev() {
-        result_ty = ctx.new_arrow(label.clone(), *arg_ty, result_ty, None);
+    for omitted_arrow in omitted.iter().rev() {
+        result_ty = new_arrow_with_level(
+            ctx,
+            omitted_arrow.label.clone(),
+            omitted_arrow.arg_ty,
+            result_ty,
+            omitted_arrow.level,
+            None,
+        );
     }
 
     // OCaml update_uncurried_arity: preserve remaining uncurried arity on
@@ -6532,7 +6571,22 @@ fn type_application(
         if remaining_arity > 0 {
             let result_repr = ctx.repr(result_ty);
             if let TypeDesc::Tarrow { arg, ret, .. } = &*ctx.get_desc(result_repr) {
-                let new_arrow = ctx.new_arrow(arg.lbl.clone(), arg.typ, *ret, Some(remaining_arity));
+                // OCaml updates the arity on the existing arrow descriptor while
+                // preserving level/commutable fields. Mirror that shape here.
+                let level = ctx.get_level(result_repr);
+                let commutable = match &*ctx.get_desc(result_repr) {
+                    TypeDesc::Tarrow { commutable, .. } => commutable.clone(),
+                    _ => crate::types::Commutable::Cok,
+                };
+                let new_arrow = ctx.alloc_type_at_level(
+                    TypeDesc::Tarrow {
+                        arg: arg.clone(),
+                        ret: *ret,
+                        commutable,
+                        arity: Some(remaining_arity),
+                    },
+                    level,
+                );
                 // Record alias: new_arrow is the arity-updated version of result_repr.
                 // Sexp serializer will use result_repr's dedup key for both.
                 ctx.set_arity_alias(new_arrow, result_repr);
@@ -11072,7 +11126,7 @@ fn type_record(
         // process_optional_label: wrap optional fields in Some(...) only when the
         // user did not write the `?` form.
         let final_expr = if label_desc.lbl_optional && !field.opt {
-            let some_cstr = make_some_constructor(ctx, label_desc.lbl_arg);
+            let some_cstr = make_some_constructor(ctx);
             let some_lid = Located::mknoloc(tctx.arena.some_lid());
             let wrapped_loc = typed_expr.exp_loc;
             let wrapped_env = typed_expr.exp_env;
@@ -11250,7 +11304,7 @@ fn type_record(
                 // Get the option type from the raw label, not from instance_label
                 let option_ty = disambiguated.as_ref()
                     .map_or_else(|| label_decl.ld_type, |l| l.lbl_arg);
-                let none_cstr = make_none_constructor(ctx, option_ty);
+                let none_cstr = make_none_constructor(ctx);
                 let none_lid = Located {
                     txt: tctx.arena.none_lid(),
                     loc,
@@ -11518,13 +11572,13 @@ fn type_record(
 /// Create a ConstructorDescription for the `Some` constructor.
 fn make_some_constructor(
     ctx: &TypeContext<'_>,
-    option_ty: TypeExprRef,
 ) -> crate::types::ConstructorDescription {
+    let (inner_ty, option_ty) = ctx.predef_option_scheme();
     crate::types::ConstructorDescription {
         cstr_name: "Some".to_string(),
         cstr_res: option_ty,
         cstr_existentials: vec![],
-        cstr_args: vec![ctx.new_var(None)], // The inner type
+        cstr_args: vec![inner_ty],
         cstr_arity: 1,
         cstr_tag: crate::types::ConstructorTag::CstrBlock(0),
         cstr_consts: 1,
@@ -11539,9 +11593,9 @@ fn make_some_constructor(
 
 /// Create a ConstructorDescription for the `None` constructor.
 fn make_none_constructor(
-    _ctx: &TypeContext<'_>,
-    option_ty: TypeExprRef,
+    ctx: &TypeContext<'_>,
 ) -> crate::types::ConstructorDescription {
+    let (_, option_ty) = ctx.predef_option_scheme();
     crate::types::ConstructorDescription {
         cstr_name: "None".to_string(),
         cstr_res: option_ty,
@@ -16555,7 +16609,7 @@ fn lookup_constructor_in_module<'b>(
 fn lookup_predef_option_constructor<'b>(
     lid: &Longident,
     arena: &ParseArena,
-    env: &Env,
+    _env: &Env,
     ctx: &'b crate::types::context::TypeContext<'b>,
 ) -> Option<(Path, crate::types::decl::ConstructorDescription)> {
     let (prefix, cstr_idx) = match lid {
@@ -16571,8 +16625,7 @@ fn lookup_predef_option_constructor<'b>(
     }
 
     let cstr_name = arena.get_string(*cstr_idx);
-    let inner_ty = ctx.new_var(None);
-    let option_ty = env.type_option(ctx, inner_ty);
+    let (inner_ty, option_ty) = ctx.predef_option_scheme();
     let (arity, args, tag) = match cstr_name {
         "Some" => (
             1,
