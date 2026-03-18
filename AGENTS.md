@@ -177,11 +177,14 @@ cargo build --release --manifest-path rewatch/Cargo.toml
 ```
 The parity script uses the rewatch binary, NOT bsc directly. A stale rewatch binary gives WRONG results!
 
-**CRITICAL: Clear parity cache before authoritative runs:**
+**CRITICAL: Clear parity cache files before authoritative runs:**
 ```bash
-rm -rf .parity-cache/
+# Keep directories; remove cached artifacts only
+find .parity-cache/tests/diffs -type f -delete
+find .parity-cache/tests/ocaml -type f -delete
+find .parity-cache/tests/rust -type f -delete
 ```
-Stale cached diff files cause inflated parity numbers.
+Stale cached files cause inflated parity numbers and stale analyzer output.
 
 ### Reading Parity Diffs
 
@@ -238,6 +241,42 @@ python3 scripts/parity_analyzer.py divergence chn_test
 **Sexp files:** The `summary` command works with diffs only. Other commands need sexp files — the tool will tell you how to generate them if missing. The parity script saves sexp files to `.parity-cache/tests/{ocaml,rust}/` for failing tests.
 
 **Malformed cache files:** The analyzer reads cached sexp/diff files with tolerant decoding (`errors='replace'`) so one bad byte does not crash analysis.
+
+### Scripts Tooling Workflow (Required)
+
+Use this workflow for every parity session so results are reproducible and analyzable:
+
+```bash
+# 1) Build compiler binaries used by parity
+cargo build --release --manifest-path compiler-rust/Cargo.toml
+cargo build --release --manifest-path rewatch/Cargo.toml
+
+# 2) Clear cached parity artifacts (files only)
+find .parity-cache/tests/diffs -type f -delete
+find .parity-cache/tests/ocaml -type f -delete
+find .parity-cache/tests/rust -type f -delete
+
+# 3) Run full baseline (tests or tella)
+./scripts/test_typedtree_parity.sh --no-build
+./scripts/test_typedtree_parity.sh --tella --no-build
+
+# 4) Inspect clusters and first divergence
+python3 scripts/parity_analyzer.py summary
+python3 scripts/parity_analyzer.py divergence <file-key>
+python3 scripts/parity_analyzer.py extra <file-key>
+python3 scripts/parity_analyzer.py trace <file-key> <type-id>
+# 5) Inspect copy-sharing imbalances for path+id drift
+python3 scripts/parity_analyzer.py sharing <file-key>
+python3 scripts/parity_analyzer.py sharing <file-key> --contains <type-or-path>
+```
+
+Iteration loop after each candidate fix:
+1. Rebuild `compiler-rust` (and `rewatch` if touched)
+2. Re-run a focused parity slice (`./scripts/test_typedtree_parity.sh --no-build <pattern>` or `--tella --no-build <pattern>`)
+3. Re-run full parity baseline
+4. Re-run analyzer summary/divergence on updated cache
+
+Do not trust analyzer totals unless the cache was cleared before the baseline run.
 
 ### Running bsc Directly
 

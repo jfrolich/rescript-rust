@@ -10,6 +10,7 @@ Commands:
     preamble <file>      Aligned type preamble comparison
     trace <file> <id>    Trace a type through both compilers
     extra <file>         Find extra/missing type nodes
+    sharing <file>       Copy-sharing imbalance analysis
     divergence <file>    First divergence analysis
     insertion [file]     First insertion/resync analysis
 """
@@ -1438,6 +1439,104 @@ def cmd_extra(args, root: str):
         print(f"  Total content differences: {bold(str(total_diff))}")
 
 
+def _format_id_list(ids: List[int], limit: int) -> str:
+    shown = ids[:limit]
+    txt = ", ".join(f"#{i}" for i in shown)
+    if len(ids) > limit:
+        txt += f", ... (+{len(ids) - limit})"
+    return txt
+
+
+def cmd_sharing(args, root: str):
+    """Analyze copy-sharing imbalances for a specific file."""
+    name = resolve_file(args.file, root)
+    ocaml_sf, rust_sf = require_sexp_files(name, root)
+
+    short_name = name.replace("tests_tests_src_", "")
+    print(bold(f"Sharing Imbalance: {short_name}"))
+    print()
+
+    # Build content keys
+    ocaml_memo: dict = {}
+    rust_memo: dict = {}
+    ocaml_keys: dict[int, str] = {}
+    rust_keys: dict[int, str] = {}
+    for tid in ocaml_sf.types:
+        ocaml_keys[tid] = content_key(tid, ocaml_sf.types, memo=ocaml_memo)
+    for tid in rust_sf.types:
+        rust_keys[tid] = content_key(tid, rust_sf.types, memo=rust_memo)
+
+    # Group ids by content key
+    ocaml_counts: dict[str, list[int]] = {}
+    rust_counts: dict[str, list[int]] = {}
+    for tid, key in ocaml_keys.items():
+        ocaml_counts.setdefault(key, []).append(tid)
+    for tid, key in rust_keys.items():
+        rust_counts.setdefault(key, []).append(tid)
+
+    # Keep only keys present in both compilers with different multiplicity
+    entries = []
+    for key in set(ocaml_counts.keys()) & set(rust_counts.keys()):
+        o_ids = sorted(ocaml_counts[key])
+        r_ids = sorted(rust_counts[key])
+        if len(o_ids) == len(r_ids):
+            continue
+        summary = _key_to_summary(key)
+        if args.contains:
+            needle = args.contains.lower()
+            if needle not in summary.lower() and needle not in key.lower():
+                continue
+        diff = len(r_ids) - len(o_ids)
+        refs_score = 0
+        if ocaml_sf.structure and rust_sf.structure:
+            for tid in o_ids[:3]:
+                refs_score += len(find_refs_in_structure(ocaml_sf.structure, tid))
+            for tid in r_ids[:3]:
+                refs_score += len(find_refs_in_structure(rust_sf.structure, tid))
+        entries.append((abs(diff), refs_score, diff, summary, o_ids, r_ids))
+
+    if not entries:
+        if args.contains:
+            print(green(f'  No sharing imbalance keys matched "{args.contains}".'))
+        else:
+            print(green("  No sharing imbalances found (content multiplicities match)."))
+        return
+
+    entries.sort(key=lambda e: (-e[0], -e[1], e[3]))
+    shown = entries[:args.top]
+
+    print(f"  Found {bold(str(len(entries)))} imbalanced keys; showing top {bold(str(len(shown)))}.")
+    print()
+
+    for idx, (_abs_diff, _refs_score, diff, summary, o_ids, r_ids) in enumerate(shown, 1):
+        side = f"Rust +{diff}" if diff > 0 else f"OCaml +{-diff}"
+        side_colored = yellow(side) if diff != 0 else side
+        print(bold(f"  {idx:>2}. {summary}"))
+        print(f"      Count: OCaml={len(o_ids)} Rust={len(r_ids)} ({side_colored})")
+        print(f"      OCaml ids: {cyan(_format_id_list(o_ids, args.ids))}")
+        print(f"      Rust  ids: {cyan(_format_id_list(r_ids, args.ids))}")
+
+        if ocaml_sf.structure:
+            for tid in o_ids[:min(args.ids, len(o_ids))]:
+                refs = find_refs_in_structure(ocaml_sf.structure, tid)
+                if refs:
+                    refs_text = " | ".join(refs[:args.refs])
+                    extra = f" (+{len(refs) - args.refs})" if len(refs) > args.refs else ""
+                    print(f"      OCaml #{tid} refs: {dim(refs_text + extra)}")
+                else:
+                    print(f"      OCaml #{tid} refs: {dim('(no structure refs)')}")
+        if rust_sf.structure:
+            for tid in r_ids[:min(args.ids, len(r_ids))]:
+                refs = find_refs_in_structure(rust_sf.structure, tid)
+                if refs:
+                    refs_text = " | ".join(refs[:args.refs])
+                    extra = f" (+{len(refs) - args.refs})" if len(refs) > args.refs else ""
+                    print(f"      Rust  #{tid} refs: {dim(refs_text + extra)}")
+                else:
+                    print(f"      Rust  #{tid} refs: {dim('(no structure refs)')}")
+        print()
+
+
 def _key_to_summary(key: str) -> str:
     """Convert a content key to a short summary."""
     # Parse the key as sexp to get the outer tag
@@ -1646,6 +1745,7 @@ Examples:
   %(prog)s preamble ticker
   %(prog)s trace ticker 11
   %(prog)s extra more_poly_variant_test
+  %(prog)s sharing Service__PublicVideo --contains transcriptStatus
   %(prog)s divergence bs_set_int_test
   %(prog)s insertion
   %(prog)s insertion ticker
@@ -1683,6 +1783,18 @@ Examples:
     sub_extra = subparsers.add_parser('extra', help='Find extra/missing type nodes')
     sub_extra.add_argument('file', help='File name or short name')
 
+    # sharing
+    sub_sharing = subparsers.add_parser('sharing', help='Copy-sharing imbalance analysis')
+    sub_sharing.add_argument('file', help='File name or short name')
+    sub_sharing.add_argument('--top', type=int, default=15,
+                             help='How many imbalance entries to show (default: 15)')
+    sub_sharing.add_argument('--ids', type=int, default=4,
+                             help='Max ids per compiler for each entry (default: 4)')
+    sub_sharing.add_argument('--refs', type=int, default=2,
+                             help='Max structure reference paths per id (default: 2)')
+    sub_sharing.add_argument('--contains', type=str, default=None,
+                             help='Only show entries containing this text')
+
     # divergence
     sub_divergence = subparsers.add_parser('divergence', help='First divergence analysis')
     sub_divergence.add_argument('file', help='File name or short name')
@@ -1715,6 +1827,7 @@ Examples:
         'preamble': cmd_preamble,
         'trace': cmd_trace,
         'extra': cmd_extra,
+        'sharing': cmd_sharing,
         'divergence': cmd_divergence,
         'insertion': cmd_insertion,
     }
