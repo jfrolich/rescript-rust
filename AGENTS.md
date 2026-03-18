@@ -268,6 +268,9 @@ python3 scripts/parity_analyzer.py trace <file-key> <type-id>
 # 5) Inspect copy-sharing imbalances for path+id drift
 python3 scripts/parity_analyzer.py sharing <file-key>
 python3 scripts/parity_analyzer.py sharing <file-key> --contains <type-or-path>
+# 6) Aggregate copy-sharing motifs across all current failures
+python3 scripts/parity_analyzer.py sharing-summary --top 20
+python3 scripts/parity_analyzer.py sharing-summary --contains <type-or-path>
 ```
 
 Iteration loop after each candidate fix:

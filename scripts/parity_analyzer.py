@@ -11,6 +11,7 @@ Commands:
     trace <file> <id>    Trace a type through both compilers
     extra <file>         Find extra/missing type nodes
     sharing <file>       Copy-sharing imbalance analysis
+    sharing-summary      Aggregate sharing imbalances across failing files
     divergence <file>    First divergence analysis
     insertion [file]     First insertion/resync analysis
 """
@@ -1537,17 +1538,123 @@ def cmd_sharing(args, root: str):
         print()
 
 
+def cmd_sharing_summary(args, root: str):
+    """Aggregate sharing imbalances across all failing files."""
+    diff_dir = os.path.join(root, '.parity-cache', 'tests', 'diffs')
+    if not os.path.isdir(diff_dir):
+        print(red("No diffs directory found. Run the parity test first:"))
+        print("  ./scripts/test_typedtree_parity.sh")
+        return
+
+    diff_files = sorted(f for f in os.listdir(diff_dir) if f.endswith('.diff'))
+    if not diff_files:
+        print(green("No failures! All tests pass."))
+        return
+
+    grouped: Dict[Tuple[str, str], Dict[str, Union[int, List[str]]]] = {}
+    scanned = 0
+    skipped = 0
+
+    for diff_file in diff_files:
+        name = diff_file.replace('.diff', '')
+        ocaml_sf = load_sexp('ocaml', name, root)
+        rust_sf = load_sexp('rust', name, root)
+        if ocaml_sf is None or rust_sf is None:
+            skipped += 1
+            continue
+
+        scanned += 1
+        ocaml_memo: dict = {}
+        rust_memo: dict = {}
+        ocaml_counts: dict[str, list[int]] = {}
+        rust_counts: dict[str, list[int]] = {}
+
+        for tid in ocaml_sf.types:
+            key = content_key(tid, ocaml_sf.types, memo=ocaml_memo)
+            ocaml_counts.setdefault(key, []).append(tid)
+        for tid in rust_sf.types:
+            key = content_key(tid, rust_sf.types, memo=rust_memo)
+            rust_counts.setdefault(key, []).append(tid)
+
+        for key in set(ocaml_counts.keys()) & set(rust_counts.keys()):
+            o_count = len(ocaml_counts[key])
+            r_count = len(rust_counts[key])
+            diff = r_count - o_count
+            if diff == 0:
+                continue
+            summary = _key_to_summary(key)
+            if args.contains:
+                needle = args.contains.lower()
+                if needle not in summary.lower() and needle not in key.lower():
+                    continue
+            side = "Rust" if diff > 0 else "OCaml"
+            bucket = (side, summary)
+            entry = grouped.setdefault(bucket, {"files": 0, "copies": 0, "examples": []})
+            entry["files"] = int(entry["files"]) + 1
+            entry["copies"] = int(entry["copies"]) + abs(diff)
+            examples = entry["examples"]
+            if isinstance(examples, list) and len(examples) < args.examples:
+                examples.append(name)
+
+    if not grouped:
+        if args.contains:
+            print(green(f'No aggregate sharing imbalances matched "{args.contains}".'))
+        else:
+            print(green("No aggregate sharing imbalances found."))
+        return
+
+    rows = []
+    for (side, summary), info in grouped.items():
+        rows.append((
+            int(info["files"]),
+            int(info["copies"]),
+            side,
+            summary,
+            info["examples"] if isinstance(info["examples"], list) else [],
+        ))
+
+    rows.sort(key=lambda r: (-r[0], -r[1], r[2], r[3]))
+    shown = rows[:args.top]
+
+    print(bold("Sharing Imbalance Summary"))
+    print()
+    print(f"  Scanned files with sexp cache: {bold(str(scanned))}  (skipped: {skipped})")
+    print(f"  Distinct imbalance motifs: {bold(str(len(rows)))}")
+    print()
+    print(f"  {'Side':<6} {'Files':>5} {'Copies':>6}  {'Type Summary'}")
+    print(f"  {'─'*6} {'─'*5} {'─'*6}  {'─'*60}")
+
+    for files_count, copies, side, summary, examples in shown:
+        side_colored = yellow(side)
+        print(f"  {side_colored:<6} {files_count:>5} {copies:>6}  {summary}")
+        if examples:
+            ex = ", ".join(str(e).replace('tests_tests_src_', '') for e in examples[:args.examples])
+            print(f"          {dim('examples: ' + ex)}")
+
+    if len(rows) > len(shown):
+        print()
+        print(dim(f"  ... {len(rows) - len(shown)} more motifs (increase --top to see more)"))
+
+
 def _key_to_summary(key: str) -> str:
     """Convert a content key to a short summary."""
-    # Parse the key as sexp to get the outer tag
     key = key.strip()
+    if not key:
+        return key
+
+    # Best effort: parse as sexp and reuse type_summary for more informative labels.
     if key.startswith('('):
-        # Find the first atom
-        m = re.match(r'\((\w+)', key)
-        if m:
-            tag = m.group(1)
-            return f"{tag} ..." if len(key) > 60 else key
-    return key[:60]
+        try:
+            parsed = parse_sexp_file(key)
+            if parsed:
+                summary = type_summary(parsed[0])
+                if len(summary) > 120:
+                    return summary[:117] + "..."
+                return summary
+        except Exception:
+            pass
+
+    return key[:120] + ("..." if len(key) > 120 else "")
 
 
 def cmd_divergence(args, root: str):
@@ -1746,6 +1853,7 @@ Examples:
   %(prog)s trace ticker 11
   %(prog)s extra more_poly_variant_test
   %(prog)s sharing Service__PublicVideo --contains transcriptStatus
+  %(prog)s sharing-summary --top 20
   %(prog)s divergence bs_set_int_test
   %(prog)s insertion
   %(prog)s insertion ticker
@@ -1795,6 +1903,17 @@ Examples:
     sub_sharing.add_argument('--contains', type=str, default=None,
                              help='Only show entries containing this text')
 
+    # sharing-summary
+    sub_sharing_summary = subparsers.add_parser(
+        'sharing-summary', help='Aggregate sharing imbalances across failing files'
+    )
+    sub_sharing_summary.add_argument('--top', type=int, default=20,
+                                     help='How many motifs to show (default: 20)')
+    sub_sharing_summary.add_argument('--examples', type=int, default=3,
+                                     help='How many example files per motif (default: 3)')
+    sub_sharing_summary.add_argument('--contains', type=str, default=None,
+                                     help='Only include motifs containing this text')
+
     # divergence
     sub_divergence = subparsers.add_parser('divergence', help='First divergence analysis')
     sub_divergence.add_argument('file', help='File name or short name')
@@ -1828,6 +1947,7 @@ Examples:
         'trace': cmd_trace,
         'extra': cmd_extra,
         'sharing': cmd_sharing,
+        'sharing-summary': cmd_sharing_summary,
         'divergence': cmd_divergence,
         'insertion': cmd_insertion,
     }
