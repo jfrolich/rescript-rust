@@ -1678,23 +1678,50 @@ fn expand_record_spread_label(
     if !visited.insert(path_name.clone()) {
         return None;
     }
-    let result = if let Some(source_decl) = find_type_decl_for_path(env, ctx, &spread_path) {
-        if let crate::types::TypeKind::TypeRecord(inner_fields, _) = &source_decl.type_kind {
-            let source_params = source_decl.type_params.clone();
+    let result = if let Some(mut source_decl) = find_type_decl_for_path(env, ctx, &spread_path) {
+        // Follow manifest aliases until we reach a concrete record declaration,
+        // matching OCaml Ctype.extract_concrete_typedecl behavior.
+        let mut source_args = spread_args.clone();
+        let mut resolution_seen = HashSet::new();
+        resolution_seen.insert(path_name.clone());
+        let source_record = loop {
+            if let crate::types::TypeKind::TypeRecord(inner_fields, _) = &source_decl.type_kind {
+                break Some((inner_fields.clone(), source_decl.type_params.clone(), source_args.clone()));
+            }
+            let manifest = match source_decl.type_manifest {
+                Some(manifest) => manifest,
+                None => break None,
+            };
+            let manifest = unwrap_poly_type(ctx, crate::types::ctype::expand_head(ctx, env, manifest));
+            let (next_path, next_args) = match &*ctx.get_desc(manifest) {
+                crate::types::TypeDesc::Tconstr { path, args, .. } => (path.clone(), args.clone()),
+                _ => break None,
+            };
+            let next_name = next_path.name();
+            if !resolution_seen.insert(next_name) {
+                break None;
+            }
+            source_decl = match find_type_decl_for_path(env, ctx, &next_path) {
+                Some(decl) => decl,
+                None => break None,
+            };
+            source_args = next_args;
+        };
+        if let Some((inner_fields, source_params, source_args)) = source_record {
             let mut expanded = Vec::new();
             // Share the substitution cache across all fields so that shared type
             // nodes (e.g., the same type parameter used in multiple fields) get
             // the same substituted result, matching OCaml's node sharing.
             let mut cache = HashMap::new();
-            for inner_field in inner_fields {
+            for inner_field in &inner_fields {
                 let resolved_inner = expand_record_spread_label(ctx, env, inner_field, visited)?;
                 for mut field in resolved_inner {
-                    if source_params.len() == spread_args.len() && !source_params.is_empty() {
+                    if source_params.len() == source_args.len() && !source_params.is_empty() {
                         field.ld_type = substitute_type_params(
                             ctx,
                             field.ld_type,
                             &source_params,
-                            &spread_args,
+                            &source_args,
                             &mut cache,
                         );
                     }
